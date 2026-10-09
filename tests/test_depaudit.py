@@ -5,11 +5,13 @@
 import ast
 import contextlib
 import errno
+import grp
 import inspect
 import io
 import json
 import os
 import pathlib
+import pwd
 import shutil
 import subprocess
 import sys
@@ -639,12 +641,14 @@ class UnavailableTest(unittest.TestCase):
         self.assertTrue(why.startswith("no range; "), why)
         self.assertNotRegex(why, r"\d+-\d+")
         self.assertIn("--add-subuids START-END --add-subgids START-END", why)
-        self.assertIn("overlaps no line in /etc/subuid or /etc/subgid", why)
+        self.assertIn("overlaps no other owner's line in /etc/subuid or /etc/subgid", why)
         self.assertIn("D13", why)
         # Security re-sign on #568 point 1: START=0 or a login uid would map the scenario onto
-        # root or that user, so the text sets a floor and excludes every passwd/group id.
-        self.assertIn("START at least 100000 or SUB_UID_MIN/SUB_GID_MIN from /etc/login.defs", why)
-        self.assertIn("above every uid in /etc/passwd and gid in /etc/group", why)
+        # root or that user, so the text sets a floor and excludes every account. DEP-8e: it
+        # states what the code checks, and the code checks overlap, not "above".
+        self.assertRegex(why, r"START at least \d+ \(max\(100000, SUB_UID_MIN\)")
+        self.assertIn("getent passwd", why)
+        self.assertNotIn("above every", why)
 
     def test_inner_refuses_through_mask_or_refuse(self):
         # L3 on #568 point 2: _inner must not call _mask_host_sockets bare, or the traceback is back.
@@ -725,16 +729,27 @@ class IdMapTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
+        self.uid_path = os.path.join(self.dir.name, "subuid")
+        self.gid_path = os.path.join(self.dir.name, "subgid")
+        # DEP-8: the account sources and login.defs are patched, so no case depends on the
+        # host's accounts; self.host.close() undoes it for the cases that use the real ones.
+        self.real_lookup = getattr(depaudit, "_nss_lookup", None)
+        self.host = contextlib.ExitStack()
+        self.addCleanup(self.host.close)
+        self.host.enter_context(mock.patch.object(depaudit, "LOGIN_DEFS", os.path.join(self.dir.name, "login.defs"),
+                                                  create=True))
+        self.host.enter_context(mock.patch("pwd.getpwall", return_value=[]))
+        self.host.enter_context(mock.patch("grp.getgrall", return_value=[]))
+        self.host.enter_context(mock.patch.object(depaudit, "_nss_lookup", return_value=(0, False), create=True))
 
     def ranges(self, text, gid_text=None):
         """One file for both, or with gid_text a SUBGID file of its own (DEP-7e)."""
-        path = os.path.join(self.dir.name, "sub")
-        pathlib.Path(path).write_text(text)
-        gid_path = path
+        pathlib.Path(self.uid_path).write_text(text)
+        gid_path = self.uid_path
         if gid_text is not None:
-            gid_path = os.path.join(self.dir.name, "subgid")
+            gid_path = self.gid_path
             pathlib.Path(gid_path).write_text(gid_text)
-        return mock.patch.multiple(depaudit, SUBUID=path, SUBGID=gid_path)
+        return mock.patch.multiple(depaudit, SUBUID=self.uid_path, SUBGID=gid_path)
 
     def available(self, env=None):
         saved = depaudit._SANDBOX
@@ -790,6 +805,171 @@ class IdMapTest(unittest.TestCase):
             stub.write_text("#!/bin/sh\necho 'newuidmap: stub refuses' >&2\nexit 1\n")
             stub.chmod(0o755)
         self.assertFalse(self.available({"PATH": self.dir.name + os.pathsep + os.environ["PATH"]}))
+
+    # DEP-8a-e (briefs/DEP-8.md; local IDs with no SPEC row, so no REQ marker; A9 through
+    # DEP-3a): a range that maps the scenario onto an id someone else owns is no usable range.
+    def mine(self, start, count=65536):
+        return "%d:%d:%d\n" % (os.geteuid(), start, count)
+
+    def defs(self, text):
+        pathlib.Path(depaudit.LOGIN_DEFS).write_text(text)
+
+    def refused(self, uid_text, gid_text=None, *needles):
+        with self.ranges(uid_text, gid_text), self.assertRaises(OSError) as cm:
+            depaudit._id_maps()
+        why = str(cm.exception)
+        for needle in needles:
+            self.assertIn(needle, why)
+        return why
+
+    def refused_gid_side(self, gid_text, *needles):
+        """Refused for the gid range in SUBGID, with SUBUID clean."""
+        why = self.refused(self.mine(300000), gid_text, self.gid_path, *needles)
+        self.assertNotIn(self.uid_path + " ", why)
+        return why
+
+    def maps(self, uid_text, gid_text=None):
+        with self.ranges(uid_text, gid_text):
+            return depaudit._id_maps()
+
+    def test_8a_a_start_below_the_floor_is_refused(self):
+        for start in (0, 1000, 99999):
+            with self.subTest(start=start):
+                self.refused(self.mine(start), None, "start %d is below the floor 100000" % start, "SUB_UID_MIN")
+
+    def test_8a_a_start_at_the_floor_maps(self):
+        uid_map, gid_map = self.maps(self.mine(100000))
+        self.assertEqual(uid_map[1], (depaudit.SCENARIO_ID, 100000, 1))
+        self.assertEqual(gid_map[1], (depaudit.SCENARIO_ID, 100000, 1))
+
+    def test_8a_login_defs_raises_the_floor(self):
+        self.defs("# comment\nSUB_UID_MIN\t\t 524288\n")
+        self.refused(self.mine(200000), None, "below the floor 524288 (SUB_UID_MIN)")
+
+    def test_8a_login_defs_cannot_lower_the_floor(self):
+        self.defs("SUB_UID_MIN 65536\nSUB_GID_MIN 65536\n")
+        self.refused(self.mine(99999), None, "below the floor 100000")
+
+    def test_8a_the_gid_floor_is_sub_gid_min(self):
+        self.defs("SUB_GID_MIN 300000\n")
+        self.refused(self.mine(200000), self.mine(200000), self.gid_path, "below the floor 300000 (SUB_GID_MIN)")
+
+    def test_8a_an_unparsable_login_defs_value_is_a_reason(self):
+        self.defs("SUB_UID_MIN abc\n")
+        self.refused(self.mine(200000), None, depaudit.LOGIN_DEFS, "SUB_UID_MIN")
+
+    def test_8b_an_enumerated_account_in_the_range_is_refused(self):
+        alice = pwd.struct_passwd(("alice", "x", 150000, 150000, "", "/", "/bin/sh"))
+        with mock.patch("pwd.getpwall", return_value=[alice]):
+            self.refused(self.mine(100000), None, "uid 150000 (alice)")
+
+    def test_8b_an_account_outside_the_range_does_not_block(self):
+        far = pwd.struct_passwd(("far", "x", 4294967294, 4294967294, "", "/", "/bin/sh"))
+        with mock.patch("pwd.getpwall", return_value=[far]):
+            self.assertEqual(self.maps(self.mine(100000))[0][1], (depaudit.SCENARIO_ID, 100000, 1))
+
+    def test_8b_the_runners_own_euid_is_refused_with_no_entry(self):
+        with mock.patch("os.geteuid", return_value=120000):
+            self.refused(self.mine(100000), None, "uid 120000 (the runner)")
+
+    def test_8b_the_runners_own_egid_is_refused_with_no_entry(self):
+        with mock.patch("os.getegid", return_value=120000):
+            self.refused_gid_side(self.mine(100000), "gid 120000 (the runner)")
+
+    def test_8b_an_enumerated_group_in_the_range_is_refused(self):
+        staff = grp.struct_group(("staff", "x", 150000, []))
+        with mock.patch("grp.getgrall", return_value=[staff]):
+            self.refused_gid_side(self.mine(100000), "gid 150000 (staff)")
+
+    def test_8b_an_unenumerated_account_found_by_id_is_refused(self):
+        # SSSD or LDAP with enumerate = false: getpwall() is silent, a lookup by id finds it.
+        found = lambda call, ident: (0, call == "getpwuid_r" and ident == 200000)  # noqa: E731
+        with mock.patch.object(depaudit, "_nss_lookup", side_effect=found, create=True):
+            self.refused(self.mine(200000), None, "uid 200000", "getpwuid_r")
+
+    def test_8b_an_unenumerated_group_found_by_id_is_refused(self):
+        found = lambda call, ident: (0, call == "getgrgid_r" and ident == 200000)  # noqa: E731
+        with mock.patch.object(depaudit, "_nss_lookup", side_effect=found, create=True):
+            self.refused_gid_side(self.mine(200000), "gid 200000", "getgrgid_r")
+
+    def test_8b_a_failed_lookup_by_id_is_refused_never_free(self):
+        for call, side in (("getpwuid_r", None), ("getgrgid_r", "gid")):
+            for err in (errno.EIO, errno.EAGAIN):
+                fail = lambda c, ident, call=call, err=err: (err, False) if c == call else (0, False)  # noqa: E731
+                with self.subTest(call=call, err=errno.errorcode[err]), \
+                        mock.patch.object(depaudit, "_nss_lookup", side_effect=fail, create=True):
+                    needles = ("%s(200000) failed with %s" % (call, errno.errorcode[err]),)
+                    if side:
+                        self.refused_gid_side(self.mine(200000), *needles)
+                    else:
+                        self.refused(self.mine(200000), None, *needles)
+
+    def test_8b_the_lookup_by_id_follows_the_glibc_contract(self):
+        # Unpatched, against the host's real NSS: a free id is (0, False), the runner's own (0, True).
+        self.assertIsNotNone(self.real_lookup, "no _nss_lookup")
+        self.assertEqual(self.real_lookup("getpwuid_r", os.geteuid()), (0, True))
+        self.assertEqual(self.real_lookup("getpwuid_r", 4294967200), (0, False))
+        self.assertEqual(self.real_lookup("getgrgid_r", os.getegid()), (0, True))
+        self.assertEqual(self.real_lookup("getgrgid_r", 4294967200), (0, False))
+
+    def test_8b_the_range_ends_at_or_below_4294967294(self):
+        self.assertEqual(self.maps(self.mine(4294967200, 95))[0][1], (depaudit.SCENARIO_ID, 4294967200, 1))
+        self.refused(self.mine(4294967200, 96), None, "4294967295")
+
+    def test_8b_smoke_the_real_runners_own_id_as_the_start_is_refused(self):
+        # Unpatched host. On CI (euid 1001) the floor refuses it first (LATER DEP-8 l1).
+        self.host.close()
+        with self.ranges(self.mine(os.geteuid(), 1)), self.assertRaises(OSError):
+            depaudit._id_maps()
+
+    def test_8c_an_overlap_with_another_owner_is_refused(self):
+        for other in ("alice:150000:65536", "alice:165535:1", "alice:99999:2"):
+            with self.subTest(other):
+                self.refused(other + "\n" + self.mine(100000), None, "overlaps " + other)
+
+    def test_8c_a_range_that_only_touches_another_maps(self):
+        for other in ("alice:165536:65536", "alice:99999:1"):
+            with self.subTest(other):
+                self.assertEqual(self.maps(other + "\n" + self.mine(100000))[0][1],
+                                 (depaudit.SCENARIO_ID, 100000, 1))
+
+    def test_8c_an_overlap_in_subgid_is_refused(self):
+        self.refused_gid_side("alice:150000:65536\n" + self.mine(100000), "overlaps alice:150000:65536")
+
+    def test_8c_a_line_that_does_not_parse_strictly_is_refused(self):
+        for bad in ("alice: 150000:65536", "alice:0x24000:65536", "alice:0303240:65536", "alice:0x186a0:65536",
+                    "alice:150000:065536", "alice:150000:6553\u00b2", "alice:+150000:65536", " alice:150000:1"):
+            with self.subTest(bad):
+                self.refused(bad + "\n" + self.mine(100000), None, self.uid_path, repr(bad), "does not parse")
+
+    def test_8d_a_bad_first_line_is_the_result(self):
+        self.refused(self.mine(0) + self.mine(300000), None, "range 0:65536 for %d" % os.geteuid())
+
+    def test_8e_an_unusable_range_names_the_rule_and_the_remedy(self):
+        self.defs("SUB_UID_MIN 524288\nSUB_GID_MIN 300000\n")
+        with self.ranges(self.mine(0)), mock.patch.object(depaudit, "_has_mount_setattr", return_value=True), \
+                mock.patch.object(depaudit.shutil, "which", return_value="/bin/x"):
+            self.assertFalse(self.available())
+        why = depaudit.SANDBOX_WHY
+        self.assertIn("range 0:65536 for %d in %s is not usable: start 0 is below the floor 524288" % (
+            os.geteuid(), self.uid_path), why)
+        self.assert_remedy(why, "replace it")
+        self.assertNotIn("add one", why)
+
+    def test_8e_a_missing_range_says_add_one_with_the_same_rules(self):
+        self.defs("SUB_UID_MIN 524288\nSUB_GID_MIN 300000\n")
+        with self.ranges("someone:5000:10\n"), mock.patch.object(depaudit, "_has_mount_setattr", return_value=True), \
+                mock.patch.object(depaudit.shutil, "which", return_value="/bin/x"):
+            self.assertFalse(self.available())
+        self.assertIn("no subordinate uid and gid range", depaudit.SANDBOX_WHY)
+        self.assert_remedy(depaudit.SANDBOX_WHY, "add one")
+
+    def assert_remedy(self, why, verb):
+        self.assertIn("; %s: " % verb, why)
+        for needle in ("524288 (SUB_UID_MIN", "300000 (SUB_GID_MIN", "getent passwd", "getent group",
+                       "a lookup by id", "the runner's own", "/etc/subuid or /etc/subgid", "D13"):
+            self.assertIn(needle, why)
+        self.assertNotIn("above every", why)
 
 
 class ReadOnlyRefusalTest(unittest.TestCase):
