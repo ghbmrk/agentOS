@@ -303,6 +303,9 @@ type Record struct {
 	// Regression is the minimized test added to the suite for a reported
 	// finding.
 	Regression []byte `json:"regression,omitempty"`
+	// Replay is the passing replay that closed a fuzz or probe finding
+	// (Resolve).
+	Replay *Replay `json:"replay,omitempty"`
 	// Told marks a reported finding's owner text as sent, so a resume
 	// after a crash sends a text not yet sent, and only that (P3-4b-1b
 	// item 3).
@@ -1298,6 +1301,10 @@ func findingText(f Finding) string {
 		return "Credential " + sub + " " + safeName(f.Detail) + ". Replace it on my Wi-Fi page."
 	case CheckSeeded:
 		return "Security test " + sub + " fails on my current setup."
+	case CheckFuzz:
+		return "Fuzz test " + sub + " crashes on my current setup. I take the fix when an update has it."
+	case CheckProbe:
+		return "Socket probe " + sub + " fails on my current setup. I take the fix when an update has it."
 	case CheckCanary:
 		return "A leak test found a planted test secret where " + sub + " could reach it."
 	case CheckCorpus:
