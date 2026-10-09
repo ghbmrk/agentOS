@@ -5,6 +5,7 @@ package loops
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -338,6 +339,7 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 	if identifierIn("Reply PAUSE G7 to pause it, or STOP. My Wi-Fi page.") != "" {
 		t.Fatal("the scan flags plain words")
 	}
+	g := newReportRig(t, nil).g
 	for _, f := range findings {
 		f.Severity = High
 		for _, state := range []string{"none", "paused", "failed", "capped"} {
@@ -367,8 +369,42 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 				if !urgentText(rec) && namesAStep(line) {
 					t.Errorf("%s/%s: names a step but is not urgent: %q", f.Check, state, line)
 				}
+				// P3-4b-4c-dedupe 3: the counted form batch sends keeps
+				// the step and adds no identifier.
+				text := g.batch([]string{line, line, line})
+				loop7 := f.Check == CheckFuzz || f.Check == CheckProbe || f.Check == CheckCanary || f.Check == CheckCorpus
+				if bad := identifierIn(text); bad != "" && loop7 {
+					t.Errorf("%s/%s: counted %q shows %q", f.Check, state, text, bad)
+				}
+				if !strings.Contains(text, " (3 times)") || namesAStep(text) != urgentText(rec) {
+					t.Errorf("%s/%s: counted %q lost its count or its step", f.Check, state, text)
+				}
 			}
 		}
+	}
+	// The digest's counted form: hostile corpus misses on many items and a
+	// paused leak, the owner's step kept and no item named.
+	r := newReportRig(t, nil)
+	for i := range 4 {
+		f := hostile(CheckCorpus)
+		f.Subject += fmt.Sprintf("-%d", i)
+		r.report(t, f)
+	}
+	r.report(t, leak("guest-socket-vault-egress", "G7"))
+	counted := 0
+	for _, l := range r.g.Digest() {
+		if bad := identifierIn(l); bad != "" {
+			t.Errorf("digest %q shows %q", l, bad)
+		}
+		if strings.Contains(l, " (4 times)") {
+			counted++
+		}
+		if strings.Contains(l, "Paused") && !namesAStep(l) {
+			t.Errorf("digest %q lost its step", l)
+		}
+	}
+	if counted != 1 {
+		t.Errorf("%d counted digest lines, want 1: %q", counted, r.g.Digest())
 	}
 }
 
