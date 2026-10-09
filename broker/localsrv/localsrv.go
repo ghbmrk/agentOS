@@ -325,7 +325,8 @@ const SIMAdopted = "Done. I'll use that SIM for my number. Texts with you start 
 func (s *Server) adoptSIM(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var in localapi.AdoptSIM
 	err := decode(args, &in)
-	if !s.valid(in.Token) {
+	ses, ok := s.live(in.Token)
+	if !ok {
 		return nil, errUnauthorized
 	}
 	if err != nil || !lowerHex(in.SIM, localapi.SIMLen) || len(in.Code) > localapi.MaxCode || strings.HasPrefix(in.Code, owner.UnlockProofPrefix) {
@@ -340,7 +341,7 @@ func (s *Server) adoptSIM(_ context.Context, _ sockets.Peer, args json.RawMessag
 	if !s.takeTry() {
 		return nil, errLimited
 	}
-	_, err = s.cfg.Owner.LocalSignIn(in.Code)
+	_, locks, err := s.cfg.Owner.LocalSignIn(in.Code)
 	s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
 	switch {
 	case errors.Is(err, owner.ErrWrongCode), errors.Is(err, owner.ErrTooMany):
@@ -348,6 +349,11 @@ func (s *Server) adoptSIM(_ context.Context, _ sockets.Peer, args json.RawMessag
 		return localapi.Answered{Refusal: r, Text: t}, nil
 	case err != nil:
 		return nil, errFailed
+	case locks != ses.locks:
+		// As in RESUME: a lock between the token check and the code
+		// kills the session, and the code alone does not revive it (SR3-1).
+		s.drop(in.Token)
+		return nil, errUnauthorized
 	}
 	s.refresh(in.Token)
 	switch err := s.cfg.AdoptSIM(in.SIM); {
