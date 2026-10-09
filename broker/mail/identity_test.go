@@ -214,6 +214,10 @@ func TestQueuedActionAfterRestartAcrossAReset(t *testing.T) {
 	}
 	x.alertUntouched(t, "INBOX")
 	x.news(0) // the newsletter, redelivered into the new epoch as UID 2
+	// The second attempt passes its own dispatch recheck (SR3-5-f1a).
+	if _, err := restarted.Escalate(ctx, in); err != nil {
+		t.Fatal(err)
+	}
 	out := restarted.Execute(ctx, in, 2)
 	c := change(t, out)
 	if c.Record != id || c.From != "INBOX" || c.Validity != 101 || c.UID != 2 {
