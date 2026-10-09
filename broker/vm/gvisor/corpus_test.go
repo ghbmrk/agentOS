@@ -52,6 +52,7 @@ type gateOwner struct {
 	n    int
 	reqs map[string][]owner.Item
 	last string
+	at   map[string]ask // the latest request asking about each ref
 }
 
 func (o *gateOwner) Request(items []owner.Item, _ time.Duration) (string, error) {
@@ -60,6 +61,9 @@ func (o *gateOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 	o.n++
 	o.last = fmt.Sprintf("R%d", o.n)
 	o.reqs[o.last] = append([]owner.Item(nil), items...)
+	for i, it := range items {
+		o.at[it.Ref] = ask{id: o.last, ref: it.Ref, item: i + 1}
+	}
 	return o.last, nil
 }
 
@@ -160,7 +164,7 @@ func newRelay(t *testing.T, machines guest.Machines) *relay {
 		t.Fatal(err)
 	}
 	x.send = x.ch.Notify
-	own := &gateOwner{Channel: x.ch, reqs: map[string][]owner.Item{}}
+	own := &gateOwner{Channel: x.ch, reqs: map[string][]owner.Item{}, at: map[string]ask{}}
 	g.Attach(x.eng, own)
 	x.gate, x.own = g, own
 	x.grant(g, own)
@@ -318,18 +322,69 @@ func (x *relay) Archive(ctx context.Context, text string) (bool, error) {
 	if err := x.requested(req, "record", rec); err != nil {
 		return false, err
 	}
-	if x.approve {
-		x.gate.Flush()
-		x.own.mu.Lock()
-		id, items := x.own.last, x.own.reqs[x.own.last]
-		x.own.mu.Unlock()
-		for i, it := range items {
-			x.gate.Decide(owner.Decision{Request: id, Item: i + 1, Ref: it.Ref, Approved: true, Why: "owner"})
-		}
+	asked, err := x.settle(ctx, req)
+	if err != nil {
+		return false, err
+	}
+	if x.approve && asked.id != "" {
+		x.gate.Decide(owner.Decision{Request: asked.id, Item: asked.item, Ref: asked.ref, Approved: true, Why: "owner"})
 		x.gate.Wait()
+		if asked, err = x.settle(ctx, req); err != nil {
+			return false, err
+		}
+		if asked.id != "" {
+			return false, errors.New("the approved archive is still pending")
+		}
 	}
 	folder, _, ok := x.srv.Find(rec)
 	return !ok || folder != "INBOX", nil
+}
+
+// ask is where the owner was asked about one intent: request id, item
+// number and ref; id is empty when the intent was not left to the owner.
+type ask struct {
+	id, ref string
+	item    int
+}
+
+// settle waits under ctx for the guest's request reqID to settle: done,
+// denied, or pending with the owner asked. An intent still authorized or
+// in flight when ctx ends is an error, never a caught route.
+func (x *relay) settle(ctx context.Context, reqID string) (ask, error) {
+	for {
+		var st journal.Status
+		found := false
+		for _, s := range x.eng.List() {
+			if strings.HasSuffix(s.Intent.ID, "/"+reqID) && strings.HasPrefix(s.Intent.Origin, "guest:") {
+				st, found = s, true
+			}
+		}
+		if !found {
+			return ask{}, errors.New("the broker journaled no request")
+		}
+		switch st.State {
+		case journal.Succeeded, journal.NotApplied, journal.Denied, journal.OutcomeUnknown:
+			return ask{}, nil
+		case journal.Pending:
+			x.gate.Flush()
+			if a, ok := x.asked(st.Intent.ID); ok {
+				return a, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ask{}, errors.New("the request did not settle: " + string(st.State))
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// asked is the latest owner request that carries the intent ref, if any.
+func (x *relay) asked(ref string) (ask, bool) {
+	x.own.mu.Lock()
+	defer x.own.mu.Unlock()
+	a, ok := x.own.at[ref]
+	return a, ok
 }
 
 // planeCheck is the one check of corpus.PlaneChecks(x) named name.
