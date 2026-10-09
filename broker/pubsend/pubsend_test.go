@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -397,4 +398,55 @@ func TestOSS6sA9OwnerLogRequired(t *testing.T) {
 	if _, err := New(Config{Path: filepath.Join(t.TempDir(), "l.json"), Transport: &wire{}}); err == nil {
 		t.Fatal("a sender without the owner log")
 	}
+}
+
+// OSS-6s-a-f1 (L3 f1 on #411): New reads no more than maxLedgerBytes of
+// the ledger. The file here is a valid empty ledger padded with zero bytes
+// to one byte over the cap, sparse so the test writes almost nothing.
+func TestOSS6sAf1OversizeLedgerRefused(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "ledger.json")
+	must(t, os.WriteFile(p, []byte(`{"waiting":[],"confirmed":[]}`), 0o600))
+	must(t, os.Truncate(p, maxLedgerBytes+1))
+	_, err := New(Config{Path: p, Transport: &wire{}, Log: func(string) {}})
+	if err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("an oversize ledger: %v", err)
+	}
+}
+
+// OSS-6s-a-f1: the cap holds the largest valid ledger, MaxWaiting frames'
+// worth of batches (base64 in JSON) and maxConfirmed keys.
+func TestOSS6sAf1CapHoldsTheLargestLedger(t *testing.T) {
+	h := strings.Repeat("a", 64)
+	var l ledger
+	for range MaxWaiting {
+		l.Waiting = append(l.Waiting, entry{Day: "2026-01-08", Hash: h,
+			Batch: bytes.Repeat([]byte{0xff}, FrameSize), Seed: make([]byte, seedSize)})
+	}
+	for range maxConfirmed {
+		l.Confirmed = append(l.Confirmed, entry{Day: "2026-01-08", Hash: h})
+	}
+	b, err := json.Marshal(l)
+	must(t, err)
+	if len(b) > maxLedgerBytes {
+		t.Fatalf("largest ledger is %d bytes, cap %d", len(b), maxLedgerBytes)
+	}
+}
+
+// OSS-6s-a-f1 and S3 (strict load): anything but whitespace after the
+// ledger's JSON value is refused, so trailing bytes are never ignored.
+func TestOSS6sAf1TrailingBytesRefused(t *testing.T) {
+	for _, tail := range []string{"\x00", "{}", "x"} {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "ledger.json")
+		must(t, os.WriteFile(p, []byte(`{"waiting":[],"confirmed":[]}`+tail), 0o600))
+		if _, err := New(Config{Path: p, Transport: &wire{}, Log: func(string) {}}); err == nil {
+			t.Fatalf("ledger with trailing %q loaded", tail)
+		}
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "ledger.json")
+	must(t, os.WriteFile(p, []byte("{\"waiting\":[],\"confirmed\":[]}\n"), 0o600))
+	_, err := New(Config{Path: p, Transport: &wire{}, Log: func(string) {}})
+	must(t, err)
 }
