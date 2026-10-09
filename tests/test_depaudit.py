@@ -646,7 +646,7 @@ class UnavailableTest(unittest.TestCase):
         # Security re-sign on #568 point 1: START=0 or a login uid would map the scenario onto
         # root or that user, so the text sets a floor and excludes every account. DEP-8e: it
         # states what the code checks, and the code checks overlap, not "above".
-        self.assertRegex(why, r"START at least \d+ \(max\(100000, SUB_UID_MIN\)")
+        self.assertRegex(why, r"START at least \d+ \(SUB_UID_MIN in /etc/login.defs, never below 100000\)")
         self.assertIn("getent passwd", why)
         self.assertNotIn("above every", why)
 
@@ -736,11 +736,10 @@ class IdMapTest(unittest.TestCase):
         self.real_lookup = getattr(depaudit, "_nss_lookup", None)
         self.host = contextlib.ExitStack()
         self.addCleanup(self.host.close)
-        self.host.enter_context(mock.patch.object(depaudit, "LOGIN_DEFS", os.path.join(self.dir.name, "login.defs"),
-                                                  create=True))
+        self.host.enter_context(mock.patch.object(depaudit, "LOGIN_DEFS", os.path.join(self.dir.name, "login.defs")))
         self.host.enter_context(mock.patch("pwd.getpwall", return_value=[]))
         self.host.enter_context(mock.patch("grp.getgrall", return_value=[]))
-        self.host.enter_context(mock.patch.object(depaudit, "_nss_lookup", return_value=(0, False), create=True))
+        self.host.enter_context(mock.patch.object(depaudit, "_nss_lookup", return_value=(0, False)))
 
     def ranges(self, text, gid_text=None):
         """One file for both, or with gid_text a SUBGID file of its own (DEP-7e)."""
@@ -884,12 +883,12 @@ class IdMapTest(unittest.TestCase):
     def test_8b_an_unenumerated_account_found_by_id_is_refused(self):
         # SSSD or LDAP with enumerate = false: getpwall() is silent, a lookup by id finds it.
         found = lambda call, ident: (0, call == "getpwuid_r" and ident == 200000)  # noqa: E731
-        with mock.patch.object(depaudit, "_nss_lookup", side_effect=found, create=True):
+        with mock.patch.object(depaudit, "_nss_lookup", side_effect=found):
             self.refused(self.mine(200000), None, "uid 200000", "getpwuid_r")
 
     def test_8b_an_unenumerated_group_found_by_id_is_refused(self):
         found = lambda call, ident: (0, call == "getgrgid_r" and ident == 200000)  # noqa: E731
-        with mock.patch.object(depaudit, "_nss_lookup", side_effect=found, create=True):
+        with mock.patch.object(depaudit, "_nss_lookup", side_effect=found):
             self.refused_gid_side(self.mine(200000), "gid 200000", "getgrgid_r")
 
     def test_8b_a_failed_lookup_by_id_is_refused_never_free(self):
@@ -897,7 +896,7 @@ class IdMapTest(unittest.TestCase):
             for err in (errno.EIO, errno.EAGAIN):
                 fail = lambda c, ident, call=call, err=err: (err, False) if c == call else (0, False)  # noqa: E731
                 with self.subTest(call=call, err=errno.errorcode[err]), \
-                        mock.patch.object(depaudit, "_nss_lookup", side_effect=fail, create=True):
+                        mock.patch.object(depaudit, "_nss_lookup", side_effect=fail):
                     needles = ("%s(200000) failed with %s" % (call, errno.errorcode[err]),)
                     if side:
                         self.refused_gid_side(self.mine(200000), *needles)
@@ -1088,12 +1087,13 @@ SUBMOUNT_HELPER = textwrap.dedent("""\
     sys.path.insert(0, %r)
     import depaudit
     keep, rw = sys.argv[1], sys.argv[2]
-    # This namespace maps only 0 (the runner) and SCENARIO_ID, so newuidmap here may give the
-    # sandbox only those: a private /etc/subuid and /etc/subgid say so (DEP-3).
-    ranges = os.path.join(rw, "subids")
-    with open(ranges, "w") as f:
-        f.write("root:{0}:1\\n0:{0}:1\\n".format(depaudit.SCENARIO_ID))
-    for path in (depaudit.SUBUID, depaudit.SUBGID):
+    # This namespace maps only 0 (the runner) and the host's own S and G, so newuidmap here may
+    # give the sandbox only those: a private /etc/subuid and /etc/subgid say so (DEP-3). S and G
+    # are the real range starts, so they pass DEP-8's floor and account checks here too.
+    for path, start in ((depaudit.SUBUID, sys.argv[4]), (depaudit.SUBGID, sys.argv[5])):
+        ranges = os.path.join(rw, os.path.basename(path))
+        with open(ranges, "w") as f:
+            f.write("root:{0}:1\\n0:{0}:1\\n".format(start))
         subprocess.run(["mount", "--bind", ranges, path], check=True)
     sub = os.path.join(keep, "sub")
     subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=0755", "tmpfs", sub], check=True)
@@ -1119,13 +1119,15 @@ class SubmountTest(unittest.TestCase):
             os.chmod(keep, 0o755)
             os.chmod(rw, 0o755)
             os.mkdir(os.path.join(keep, "sub"))
-            # The outer namespace carries the sandbox's own two ids, so the sandbox can map them again.
-            uids, gids = depaudit._id_maps()
-            outer = ["--map-user=0", "--map-group=0", "--map-users=%d:%d:%d" % uids[1],
-                     "--map-groups=%d:%d:%d" % gids[1]]
+            # The outer namespace maps the range starts S and G to themselves (DEP-8: a private
+            # range at 1000 would fail the floor), so the sandbox can map 1000 to them again.
+            (_, s, _), (_, g, _) = (m[1] for m in depaudit._id_maps())
+            outer = ["--map-user=0", "--map-group=0", "--map-users=%d:%d:1" % (s, s),
+                     "--map-groups=%d:%d:1" % (g, g)]
             os.chmod(rw, 0o777)
             p = subprocess.run(["unshare"] + outer + ["-m", "--", sys.executable, "-c", SUBMOUNT_HELPER,
-                                keep, rw, json.dumps(MANIFEST)], capture_output=True, text=True, timeout=300)
+                                keep, rw, json.dumps(MANIFEST), str(s), str(g)],
+                               capture_output=True, text=True, timeout=300)
             self.assertEqual(p.returncode, 0, p.stderr[-2000:])
             out = json.loads(p.stdout.splitlines()[-1])
         write = out["write"]
