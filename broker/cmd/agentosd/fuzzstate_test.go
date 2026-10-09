@@ -186,11 +186,13 @@ func TestAFuzzChildReachesOnlyItsOwnBoundedTree(t *testing.T) {
 	}
 	// The fuzz step tries each reach and writes what it got in its own
 	// directory; what it measured is written after the fill is removed.
+	// The fill bypasses the page cache, whose dirty pages the leaf's
+	// 1 GiB memory.max would otherwise OOM-kill it for before the quota.
 	probe := `case "$2" in -test.fuzz=*)
 r=$PWD/reach
 cat ` + roles + ` >/dev/null 2>&1 && echo "roles read" > $r || echo "roles denied" > $r
 chattr -p 0 . >/dev/null 2>&1 && echo "retag done" >> $r || echo "retag $(chattr -p 0 . 2>&1 | grep -o 'Invalid argument' | head -n 1)" >> $r
-f=$(dd if=/dev/zero of=big bs=1M count=1536 2>&1 >/dev/null | grep -o 'Disk quota exceeded\|No space left on device' | head -n 1)
+f=$(dd if=/dev/zero of=big bs=1M count=1536 oflag=direct 2>&1 >/dev/null | grep -o 'Disk quota exceeded\|No space left on device' | head -n 1)
 s=$(stat -c %s big)
 rm -f big
 echo "fill $f" >> $r
