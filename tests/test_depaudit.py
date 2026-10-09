@@ -841,13 +841,14 @@ class HandBackTest(unittest.TestCase):
         inner = ast.parse(textwrap.dedent(inspect.getsource(depaudit._inner))).body[0]
         top = [s.value for s in inner.body if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)]
         self.assertEqual(len(self.calls(inner, "_hand_back")), 1, "_inner calls _hand_back once")
-        self.assertIn(self.calls(inner, "_hand_back")[0], top, "_hand_back is not conditional in _inner")
+        self.assertTrue(any(c is self.calls(inner, "_hand_back")[0] for c in top),
+                        "_inner calls _hand_back only under a condition")
         self.assertEqual(self.calls(inner, "_end_namespace"), [], "_inner ends the namespace only in _hand_back")
         module = ast.parse(pathlib.Path(depaudit.__file__).read_text())
         back = [c for f in ast.walk(module) if isinstance(f, ast.FunctionDef) and f.name != "_hand_back"
                 for c in self.calls(f, "_chown_tree")
                 if not (isinstance(c.args[1], ast.Name) and c.args[1].id == "SCENARIO_ID")]
-        self.assertEqual(back, [], "a chown back to uid 0 outside _hand_back, at lines %s" % [c.lineno for c in back])
+        self.assertEqual([c.lineno for c in back], [], "lines of depaudit.py that chown back outside _hand_back")
 
 
 class TracerChannelTest(unittest.TestCase):
