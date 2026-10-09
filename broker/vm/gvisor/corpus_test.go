@@ -522,10 +522,12 @@ const rawExecTail = 2048
 // replay always has, and answers its stdout. It does not go through
 // Runtime.Exec, whose --cwd, --user and --pass-fd differ (a release row
 // of its own). It adds only a --log file of its own, in dir, and keeps
-// runsc's stderr: when runsc fails, the error carries the exit code and
-// the last rawExecTail bytes of each, since an exit 128 is runsc's own
-// fatal and its reason is only there (P1-4-flake-exit128). The text is
-// runsc's from synthetic corpus runs, printed only in a test failure.
+// the process's stderr: when the exec fails, the error carries the exit
+// code and the last rawExecTail bytes of each, since an exit 128 is
+// runsc's own fatal and its reason is only there (P1-4-flake-exit128).
+// With no --pass-fd, that stderr is runsc's merged with the guest's, and
+// its label says so; the --log file is runsc's alone. The text is from
+// synthetic corpus runs, printed only in a test failure.
 func rawExec(ctx context.Context, r *Runtime, dir, id string, argv ...string) (string, error) {
 	f, err := os.CreateTemp(dir, "exec-*.log")
 	if err != nil {
@@ -539,7 +541,7 @@ func rawExec(ctx context.Context, r *Runtime, dir, id string, argv ...string) (s
 	out, err := c.Output()
 	if exit, ok := err.(*exec.ExitError); ok {
 		log, _ := os.ReadFile(f.Name())
-		err = fmt.Errorf("%w (exit %d)\nrunsc stderr: %q\nrunsc log: %q", exit, exit.ExitCode(), tail(stderr.Bytes(), rawExecTail), tail(log, rawExecTail))
+		err = fmt.Errorf("%w (exit %d)\nrunsc and guest stderr: %q\nrunsc log: %q", exit, exit.ExitCode(), tail(stderr.Bytes(), rawExecTail), tail(log, rawExecTail))
 	}
 	return string(out), err
 }
@@ -561,7 +563,7 @@ func TestRawExecErrorCarriesRunscText(t *testing.T) {
 		t.Fatalf("error %v, want runsc's exit 128", err)
 	}
 	msg := err.Error()
-	for _, want := range []string{"exit 128", "runsc stderr: ", "runsc log: "} {
+	for _, want := range []string{"exit 128", "runsc and guest stderr: ", "runsc log: "} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error lacks %q: %s", want, msg)
 		}

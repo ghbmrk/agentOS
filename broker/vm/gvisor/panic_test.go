@@ -294,13 +294,14 @@ func TestGuestNonZeroExitWithoutRunscTextIsAResult(t *testing.T) {
 
 // runsc's util.Fatalf exits 128 with a --log line and its message on
 // stderr (P1-4-flake-exit128): runsc's failure, not the guest's exit 128.
-// Pinning: true at main through Exec; the corpus replay's raw exec is
-// what lost the message.
+// runsc's exec calls Fatalf only before the pid write, so Exec answers
+// ErrExecNotStarted (notRun), not ErrExecFailed. Pinning: true at main
+// through Exec; the corpus replay's raw exec is what lost the message.
 func TestRunscFatalExit128AnswersNoOutput(t *testing.T) {
 	r := fakeRunsc(t)
 	res, err := r.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"fatal128"}, MaxOutput: 4096})
-	if err != vm.ErrExecFailed {
-		t.Fatalf("error %v, want %v; result %+v", err, vm.ErrExecFailed, res)
+	if err != vm.ErrExecNotStarted {
+		t.Fatalf("error %v, want %v; result %+v", err, vm.ErrExecNotStarted, res)
 	}
 	if len(res.Stdout) > 0 || len(res.Stderr) > 0 || res.ExitCode != 0 {
 		t.Fatalf("runsc's fatal answered output: %+v", res)
