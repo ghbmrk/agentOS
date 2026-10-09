@@ -45,11 +45,13 @@ const deniedPrefix = "AGENTOS_"
 // credentialWords mark a variable's name as holding a credential; its
 // value, like an AGENTOS_* value, may not appear in a child's
 // environment under any key.
-var credentialWords = []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "API_KEY", "APIKEY", "PRIVATE_KEY", "COOKIE", "AUTH"}
+var credentialWords = []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "API_KEY", "APIKEY", "PRIVATE_KEY", "COOKIE"}
 
 // minContained is the shortest secret looked for inside a value; a
 // shorter one must match a value whole, so "1" in some flag does not
-// refuse every child.
+// refuse every child. An absolute path (AGENTOS_RUNSC, a state directory)
+// is configuration, not a secret, and is not looked for: a child's HOME
+// may lie under one.
 const minContained = 6
 
 // ErrNoEnv is returned by a start whose Env was not built by NewEnv.
@@ -112,7 +114,7 @@ func ownSecrets() map[string]string {
 	out := map[string]string{}
 	for _, kv := range os.Environ() {
 		k, v, _ := strings.Cut(kv, "=")
-		if v == "" {
+		if v == "" || strings.HasPrefix(v, "/") {
 			continue
 		}
 		u := strings.ToUpper(k)

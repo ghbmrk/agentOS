@@ -286,6 +286,18 @@ func own(keys ...string) []string {
 	return out
 }
 
+// A configured path is not a secret: a child's HOME may lie under one.
+func TestAConfiguredPathIsNotASecret(t *testing.T) {
+	t.Setenv("AGENTOS_STATE_DIR", "/var/lib/agentos-test")
+	t.Setenv("AGENTOS_MODEM_UID", "1001")
+	if err := NewEnv("HOME=/var/lib/agentos-test/fuzz/run1", "PATH=/usr/bin:/bin", "GOFLAGS=-p=1001x").check(); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewEnv("GOFLAGS=1001").check(); err == nil {
+		t.Fatal("a short secret matched whole was not refused")
+	}
+}
+
 func TestNilContextPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {

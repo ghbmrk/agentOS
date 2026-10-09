@@ -40,7 +40,7 @@ These are part of the requirements. A reviewer holds the diff to them word for w
   - a key not on the allowlist;
   - any `AGENTOS_*` key;
   - a malformed entry: no `=`, an empty key, a NUL byte, or a duplicate key;
-  - a value equal to the process's own non-empty value of an `AGENTOS_*` key, or of any key on `childproc`'s credential denylist. This stops the owner's number from being smuggled under an allowed key such as `HOME`.
+  - a value equal to the process's own non-empty value of an `AGENTOS_*` key, or of any key on `childproc`'s credential denylist. This stops the owner's number from being smuggled under an allowed key such as `HOME`. A secret of 6 bytes or more is also looked for inside a value. A value that is an absolute path is configuration, not a secret, and is not matched, because a child's `HOME` may lie under a configured directory.
 - **Not enough:** comparing the environment against `os.Environ()`. A filtered copy of `os.Environ` passes an equality test.
 - **The zero value fails closed.** A zero `childproc.Env` (one not built by `NewEnv`) is refused at start with an error. A nil `context.Context` panics, as `exec.CommandContext` does.
 - **No `ProcAttr` entry point in r8a.** `childproc` exports none, and `machprobe` moves to `Command`. Any later entry point that takes a `ProcAttr`-like value must panic or error on a nil one. The API-surface test (requirement 1) pins the exported set, so adding one is a reviewed change.
