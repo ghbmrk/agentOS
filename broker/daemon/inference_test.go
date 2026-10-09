@@ -634,6 +634,12 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //     multi-value call;
 //   - order and flow: an Env set after the child starts, or only on some
 //     paths (under a condition), counts as set;
+//   - a nil Env the check does not trace: from a method, a func literal,
+//     a slice or append of a nil value, or a conversion to a type of
+//     another file; a slice declared nil and appended to only on some
+//     paths; a nil Env set on a value not held as a command (a copy, a
+//     parameter, a promoted field); and a command copied by dereference
+//     (d := *c);
 //   - a command whose Env is set in another function (except for a
 //     package-level declaration), or reached through a pointer the check
 //     does not follow;
@@ -665,9 +671,11 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //     A command held in no variable (a call chained on the constructor, a
 //     return, an argument) is flagged, as is any reference to a launcher
 //     that is not a call (exec.Command as a function value), since the
-//     call it makes cannot be followed.
+//     call it makes cannot be followed. A parenthesised launcher,
+//     (exec.Command)("x"), is the same call.
 //   - An Env that is nil at run time counts as none and fails its command:
-//     a literal nil; a typed-nil conversion ([]string(nil)); a local var
+//     a literal nil; a nil converted to a slice type or a type of this
+//     file ([]string(nil), E(nil)); a local var
 //     declared without a value, or with a nil one, and not assigned (or
 //     its address taken) before the Env takes it; a package-level var of
 //     this file declared so and assigned nowhere in the file; a call to a
@@ -706,7 +714,9 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	is := func(e ast.Expr, pkg string, sels ...string) bool {
 		name := names[pkg]
 		sel := ""
-		switch e := e.(type) {
+		// Unparen: (exec.Command)("x") is the same call (#621 delta
+		// Security 4a point 1).
+		switch e := ast.Unparen(e).(type) {
 		case *ast.SelectorExpr:
 			if id, ok := e.X.(*ast.Ident); !ok || name == "" || id.Name != name {
 				return false
@@ -760,8 +770,15 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	isNil := func(e ast.Expr) bool {
 		e = ast.Unparen(e)
 		if c, ok := e.(*ast.CallExpr); ok && len(c.Args) == 1 {
-			if _, ok := ast.Unparen(c.Fun).(*ast.ArrayType); ok {
+			// A conversion: to a slice type, or to a type of this file
+			// (E(nil); #621 delta Security 4a point 3).
+			switch fn := ast.Unparen(c.Fun).(type) {
+			case *ast.ArrayType:
 				e = ast.Unparen(c.Args[0])
+			case *ast.Ident:
+				if fn.Obj != nil && fn.Obj.Kind == ast.Typ {
+					e = ast.Unparen(c.Args[0])
+				}
 			}
 		}
 		id, ok := e.(*ast.Ident)
@@ -1115,7 +1132,16 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 			case *ast.StarExpr:
 				typeOK[ast.Unparen(n.X)] = true
 			case *ast.CallExpr:
-				calls[ast.Unparen(n.Fun)] = true
+				// Every paren level of the callee is the call, not a
+				// function value.
+				for fn := n.Fun; ; {
+					calls[fn] = true
+					p, ok := fn.(*ast.ParenExpr)
+					if !ok {
+						break
+					}
+					fn = p.X
+				}
 				if fn, ok := ast.Unparen(n.Fun).(*ast.Ident); command(n.Fun) || ok && fn.Name == "new" && fn.Obj == nil && len(n.Args) == 1 && cmdType(n.Args[0]) {
 					if len(n.Args) == 1 {
 						typeOK[ast.Unparen(n.Args[0])] = true
@@ -1600,6 +1626,16 @@ func TestEnvCheckCatchesTheShapesItPassed(t *testing.T) {
 		{src(`"os/exec"`, `func env() (e []string) { return }; func f() { c := exec.Command("x"); c.Env = env(); c.Run() }`)},
 		{src(`"os/exec"`, `func f() { var r struct{ exec.Cmd }; r.Path = "/x"; r.Run() }`)},
 		{src(`"os/exec"`, `type C = exec.Cmd; func f() { (&C{Path: "/x"}).Run() }`)},
+		// #621 delta Security 4a point 1: a parenthesised launcher, and
+		// L3 point 1: the span ends at the variable's next store.
+		{src(`"os/exec"`, `func f() { c := (exec.Command)("x"); c.Run() }`)},
+		{src(`"os/exec"`, `func f() { (exec.Command)("x").Run() }`)},
+		{src(`"os"`, `func f() { (os.StartProcess)("/x", nil, nil) }`)},
+		{src(`"syscall"`, `func f() { (syscall.ForkExec)("/x", nil, nil) }`)},
+		{src(`"os/exec"`, `func f() { ((exec.CommandContext))(nil, "x").Run() }`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("a"); c.Run(); c = exec.Command("b"); c.Env = []string{}; c.Run() }`)},
+		// #621 delta Security 4a point 3: a conversion to a named type.
+		{src(`"os/exec"`, `type E []string; func f() { c := exec.Command("x"); c.Env = E(nil); c.Run() }`)},
 	} {
 		if noEnv, _ := check(c...); len(noEnv) == 0 {
 			t.Errorf("missed:\n%s", strings.Join(c, "\n"))
@@ -1621,6 +1657,7 @@ func TestEnvCheckCatchesTheShapesItPassed(t *testing.T) {
 		{src(`"os"; "os/exec"`, `var base []string; func init() { base = os.Environ() }; func f() { c := exec.Command("a"); c.Env = base; c.Run() }`)},
 		{src(`"os"; "os/exec"`, `var base = os.Environ(); func env() []string { return base }; func f() { c := exec.Command("a"); c.Env = env(); c.Run() }`)},
 		{src(`"os"; "os/exec"`, `type cfg struct{ env []string }; var conf = cfg{env: os.Environ()}; func f() { c := exec.Command("a"); c.Env = conf.env; c.Run() }`)},
+		{src(`"os"; "syscall"`, `func env() []string { return os.Environ() }; func f() { (syscall.Exec)("/x", nil, env()) }`)},
 	} {
 		if _, inherits := check(c...); len(inherits) == 0 {
 			t.Errorf("os.Environ() missed:\n%s", strings.Join(c, "\n"))
@@ -1658,7 +1695,10 @@ var pc2 = exec.Command("x")
 func init() { pc2.Env = []string{} }
 var loopA = loopB
 var loopB = loopA
-func e8() { c := exec.Command("x"); c.Env = loopA; c.Run() }`), src(``, `func fixed2() []string { return []string{"PATH=/bin"} }`)}
+func e8() { c := exec.Command("x"); c.Env = loopA; c.Run() }
+func e9() { c := (exec.Command)("x"); c.Env = []string{}; c.Run() }
+func e10() { c := exec.Command("x"); c.Env = build(nil); c.Run() }
+func build(extra []string) []string { return append([]string{"PATH=/bin"}, extra...) }`), src(``, `func fixed2() []string { return []string{"PATH=/bin"} }`)}
 	if noEnv, inherits := check(ok...); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v", noEnv, inherits)
 	}
