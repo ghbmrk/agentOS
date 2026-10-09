@@ -47,7 +47,9 @@ func (r UndoReport) Text() string {
 // moves are not organize effects and are skipped, as is evidence from a
 // reconciliation, which holds no prior state. The check and the restore
 // are separate IMAP commands (no CONDSTORE), so a change landing between
-// them is overwritten (ASSUMPTIONS M9).
+// them is overwritten (ASSUMPTIONS M9); each restore acts only under the
+// UID validity the check read, so a mailbox rebuilt between them never
+// has its reused UID restored (SR3-5).
 func (a *Adapter) Undo(ctx context.Context, changes []Change) UndoReport {
 	var r UndoReport
 	for _, c := range changes {
@@ -73,6 +75,12 @@ func (a *Adapter) undoOne(ctx context.Context, c Change) bool {
 		return false
 	}
 	m := ms[0]
+	// A flag change names the message it found; under another UID
+	// validity the folder was rebuilt since, and a same-ID message there
+	// is not shown to be the one the agent changed (SR3-5).
+	if c.To == "" && c.Validity != 0 && m.Ref() != (Ref{Folder: c.From, Validity: c.Validity, UID: c.UID}) {
+		return false
+	}
 	for _, f := range c.Added {
 		if !has(m.Flags, f) {
 			return false
@@ -84,12 +92,12 @@ func (a *Adapter) undoOne(ctx context.Context, c Change) bool {
 		}
 	}
 	if len(c.Added)+len(c.Removed) > 0 {
-		if a.cfg.Store.SetFlags(ctx, at, m.UID, c.Removed, c.Added) != nil {
+		if a.cfg.Store.SetFlags(ctx, m.Ref(), c.Removed, c.Added) != nil {
 			return false
 		}
 	}
 	if c.To != "" && c.To != c.From {
-		if a.cfg.Store.Move(ctx, c.To, m.UID, c.From) != nil {
+		if a.cfg.Store.Move(ctx, m.Ref(), c.From) != nil {
 			return false
 		}
 	}

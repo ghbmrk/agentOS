@@ -193,6 +193,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1 f4 | Security on #409 L2: `readRestoredForgets` trusts `forget-log.json` without authentication at every start; low risk, only agentosd's uid can write it |
 | W3-forget-b1 f5 | Security on #409 L3: the test "copy holds its key" looks for the key's hex but JSON stores `[]byte` as base64, and the copy has no key field, so the assertion is vacuous |
 | W3-forget-b1 f6 | UX on #409 U4 and P4: the taken-back text reaches 161 chars at 100+ things undone; and the BOARD row should say "not live until b1-5/6/7" |
+| SR3-5 f1 | Builder on SR3-5: between the gate's recheck and Execute, Execute re-resolves by Message-ID and reruns only target guards, not alert escalation; reaching an alert needs the alert to carry the recorded message's Message-ID after a reset. Also: SetFlags+Move in one checked session, and CONDSTORE for the M9 flag race |
+| SR3-5 l2 | L3 on #424 point 2: undo skips the identity check when `Change.Validity` is 0 (evidence written before SR3-5); none exists while mail is unwired, so refuse instead once it is wired |
 | CRED-5f l1 | Combined lens on #420: a withdrawn route's decline says "not granted" (403 `no_route`); CAP-9 wants the reason. The owner already learns it from the withdrawal notice, so only the agent-facing text is vague |
 | CRED-5f l2 | Combined lens on #420 (L3 later point): `CredentialRejected`'s 24 h re-notice compares wall-clock times, so a clock step back can delay it; the new withdrawal notice is once per withdrawal and is unaffected |
 | CRED-5f l3 | Combined lens on #420: if CRED-5w's owner pause reuses `Config.Withdrawn`, the owner gets a withdrawal notice for their own pause; give the pause its own reason |
