@@ -20,6 +20,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | S5 | A5, A13 | CRED-4 action protocol; live run blocked on network policy |
 | S8-W1 | A14, CRED-5 | Blocks every worker-held route; credential invariant |
 | S8-live | A3 (CAP-11) | Needs Mark's Claude and ChatGPT plans |
+| S8-W1-tunnel | A3, A14 (CRED-5 W4) | CONNECT-only tunnel with broker-resolved host and SNI binding; precondition of any worker-held route; no CONNECT handler in `broker/egress` at 256b7cc (from S8-W1a, #543). Promote to a BOARD row with a brief when S8-W1 is scheduled |
+| S8-W1-volume | A14 (CRED-5 W2) | Per-provider login volume (schema check, writable login file only) and its exclusion from snapshots, recall, journal and results; no code at 256b7cc (from S8-W1a, #543). Promote with S8-W1 |
 | S8-codex-terms | A3, CRED-5 (unsure) | Decides Codex custody; a Claude plan route may already satisfy A3 |
 | CRED-5f | A3 (CAP-9), CRED-5 | Plan route withdrawn with no API key granted must still route or tell the owner |
 | CRED-5t | CRED-1 invariant | Unswappable refresh response must fail closed; stop retrying on account restriction |

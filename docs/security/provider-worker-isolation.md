@@ -19,10 +19,10 @@ inherit that authority, and every external effect still goes through the broker.
 | Plugins, MCP, hooks | Not disabled | S8-W1: managed policy; observation per pinned CLI |
 | WebFetch, WebSearch, remote sessions | Server-side tools not disabled | S8-W1 managed policy; tunnel part below |
 | Parent ptrace, memory, fd | Same-UID read | S8-W1: separate UID plus PID namespace |
-| Provider inference tunnel | No CONNECT/SNI tunnel built | Needs a release row or LATER line (decision for the coordinator); live check in S8-live |
-| Credential login volume | No volume, schema check or mount rule | S8-W1 image fix; W2 qualification in S8-live |
+| Provider inference tunnel | No CONNECT/SNI tunnel built | Release, LATER.md `S8-W1-tunnel` (blocks S8-live); live check in S8-live |
+| Credential login volume | No volume, schema check or mount rule | Release, LATER.md `S8-W1-volume` (build); W2 qualification in S8-live |
 | Cross-job persistence | Destroy/clear handles untested for a login volume | S8-W1 containment test |
-| Snapshot, recall, journal, result | Volume exclusion unbuilt; scanning is a tripwire only | S8-W1 proof; scan coverage already in `tools/canary.py` |
+| Snapshot, recall, journal, result | Volume exclusion unbuilt; scanning is a tripwire only | Build: LATER.md `S8-W1-volume`; S8-W1 proves it; scan coverage already in `tools/canary.py` |
 | Quota refresh label | Real-account behaviour unmeasured | S8-live |
 
 ## Adversarial cases S8-W1 should cover
