@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,16 +14,29 @@ import (
 
 type sent struct {
 	day   string
-	batch [][]byte
+	batch [][]byte // the signed items
+	raw   []byte   // the sealed batch
+	key   ed25519.PublicKey
 }
 
+// fakeSender opens each batch it is handed. got holds those with items;
+// all holds every send, cover batches included (OSS-6s-a2).
 type fakeSender struct {
 	got  []sent
+	all  []sent
 	fail error
 }
 
-func (f *fakeSender) Publish(day string, batch [][]byte) error {
-	f.got = append(f.got, sent{day, append([][]byte(nil), batch...)})
+func (f *fakeSender) Publish(day string, batch []byte) error {
+	b, err := OpenBatch(batch)
+	if err != nil || b.Day != day || b.Len != len(batch) {
+		panic(fmt.Sprintf("bad batch for %s: %v", day, err))
+	}
+	s := sent{day, b.Items, append([]byte(nil), batch...), b.Key}
+	f.all = append(f.all, s)
+	if len(b.Items) > 0 {
+		f.got = append(f.got, s)
+	}
 	return f.fail
 }
 

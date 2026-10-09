@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -106,6 +107,10 @@ type learnPaths struct {
 // configuration: the gate's Changes and Loops policies, their executors,
 // and the owner's settings texts.
 func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning, error) {
+	restored, err := readRestoredForgets(p.Dir)
+	if err != nil {
+		return nil, err
+	}
 	l := &learning{}
 	l.eval.sleep = &l.sleep
 	spare, err := meter.Open(meter.Config{
@@ -162,6 +167,13 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}
 	if l.forgotten, err = openForgotten(change.FileStore{Path: filepath.Join(p.Dir, "forgotten.json")}, time.Now); err != nil {
 		return nil, err
+	}
+	for _, e := range restored {
+		if !l.forgotten.has(e.Goal) {
+			if err := l.forgotten.add(e.Goal); err != nil {
+				return nil, err
+			}
+		}
 	}
 	l.mining = lateReader{&l.eng, l.forgotten}
 	if l.builder, err = skillBuilder(l.mining, l.values, l.pipe); err != nil {
@@ -227,7 +239,28 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.BrokerExecutors[change.Executor] = l.pipe
 	cfg.BrokerExecutors[loops.Executor] = l.sched
 	l.forgetOwner = &ownerForget{tasks: l.tasks, learned: l.pipe.LearnedFrom, forget: l.forgetTask, forgotten: l.forgotten.has,
-		inform: func(s string) { l.notify.send(s, false) }, now: time.Now, loc: time.Local, sleep: sleepCtx}
+		inform: func(s string) { l.notify.send(s, false) }, tell: l.notify.try, now: time.Now, loc: time.Local, sleep: sleepCtx}
+	// The done texts the last boot owed (W3-forget-b3): the replay above
+	// has finished each tombstoned one, and attach texts them once the
+	// owner channel is up. An owed file that does not read is started
+	// afresh; its texts are lost, not its forgets.
+	owedStore := change.FileStore{Path: filepath.Join(p.Dir, "forget-owed.json")}
+	owed, err := openForgetOwed(owedStore)
+	if err != nil {
+		// Kept aside, not read again, and the owner told (L3 B2 on #425).
+		if rerr := os.Rename(owedStore.Path, owedStore.Path+".bad"); rerr != nil {
+			log.Printf("forget: unreadable owed file not kept aside: %v", rerr)
+		}
+		log.Printf("forget: owed done texts lost, kept aside as %s.bad: %v", owedStore.Path, err)
+		owed = lostForgetOwed(owedStore)
+	}
+	l.forgetOwner.owed = owed
+	l.forgetOwner.owedAtStart = owed.goals()
+	for _, e := range restored {
+		if e.Agent {
+			l.forgetOwner.restored = append(l.forgetOwner.restored, e.Since)
+		}
+	}
 	cfg.BrokerExecutors[grants.ForgetExecutor] = l.forgetOwner
 	cfg.Grants.ForgetItem = l.forgetOwner.Item
 	cfg.Grants.ForgetAgentItem = l.forgetOwner.AgentItem
@@ -411,6 +444,69 @@ func (l *learning) replayForgotten() error {
 	return errors.Join(errs...)
 }
 
+// forgetLogFile is the restored copy of the forget log in the learning
+// plane's directory, which broker/recovery writes once the log's check
+// passes (Layout.ForgetLog); its PendingSuffix marker says the check held
+// the restore (W3-forget-b1; security C3).
+const forgetLogFile = "forget-log.json"
+
+// restoredForget is the part of a forget log entry the replay needs; the
+// log was authenticated by the restore, which holds the vault key.
+type restoredForget struct {
+	Goal  string    `json:"goal"`
+	Since time.Time `json:"since"`
+	Agent bool      `json:"agent"`
+}
+
+// restoreHold refuses agentosd's start while dir holds the marker of a
+// restore the forget log's check held: its error carries the owner's
+// notice (recovery.PendingNotice, the marker's second line) and the
+// reason. A marker that does not read holds the start too.
+func restoreHold(dir string) error {
+	b, err := os.ReadFile(filepath.Join(dir, forgetLogFile+".pending"))
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("agentosd: restore on hold: %v", err)
+	}
+	reason, notice, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+	if notice == "" {
+		notice = "Restore on hold."
+	}
+	return fmt.Errorf("agentosd: not starting: %s (%s)", strings.TrimSpace(notice), strings.TrimSpace(reason))
+}
+
+// readRestoredForgets reads the restored forget log in dir, if any. A
+// restore the log's check held, or a copy that does not read, keeps the
+// learning plane closed (CAP-3 across a restore); restoreHold keeps
+// agentosd from starting at all on the held one.
+func readRestoredForgets(dir string) ([]restoredForget, error) {
+	path := filepath.Join(dir, forgetLogFile)
+	if b, err := os.ReadFile(path + ".pending"); err == nil {
+		return nil, fmt.Errorf("learning: restore pending: %s", strings.TrimSpace(string(b)))
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("learning: restore pending: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("learning: forget log: %v", err)
+	}
+	var fl struct {
+		Entries []restoredForget `json:"entries"`
+	}
+	if err := json.Unmarshal(b, &fl); err != nil {
+		return nil, fmt.Errorf("learning: forget log: %v", err)
+	}
+	for _, e := range fl.Entries {
+		if e.Goal == "" {
+			return nil, errors.New("learning: forget log: an entry has no goal")
+		}
+	}
+	return fl.Entries, nil
+}
+
 // ForgetTasks is recall's deletion reach into the learning plane
 // (recalltool Cases; CAP-3, change C19): for intents it erases, the
 // harvester's tombstone first, so none is harvested again and none counts
@@ -444,6 +540,7 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 		}
 	}
 	l.notify.ch.Store(d.Owner())
+	l.forgetOwner.finishOwed(ctx)
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())
 	if l.routing != nil {
