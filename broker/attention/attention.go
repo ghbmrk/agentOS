@@ -348,7 +348,7 @@ type Suggestion struct {
 func evidence(c *class) string {
 	since := c.Since.UTC().Format("Jan 2")
 	if c.Reply {
-		return fmt.Sprintf("You approved %d of the agent's replies on %s unedited since %s.", c.Run, c.Account, since)
+		return fmt.Sprintf("You approved %d of my replies on %s unedited since %s.", c.Run, c.Account, since)
 	}
 	return fmt.Sprintf("You approved %s on %s %d times in a row since %s, never changed.", c.Action, c.Account, c.Run, since)
 }
@@ -360,7 +360,7 @@ const MaxText = 3 * 153
 func summary(spec grants.Spec) string {
 	r := spec.Rule
 	if r.Reply {
-		return fmt.Sprintf("let the agent reply in existing threads on %s without asking, up to %d a day.", spec.Account, r.PerDay)
+		return fmt.Sprintf("let me reply in existing threads on %s without asking, up to %d a day.", spec.Account, r.PerDay)
 	}
 	money := "no money"
 	if r.AmountCap > 0 {
@@ -411,7 +411,7 @@ func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 		spec := grants.Spec{Account: c.Account, Rule: r}
 		out[len(out)-1] = Suggestion{
 			Short: c.Short, Spec: spec, Approved: c.Run, Since: c.Since,
-			Text: evidence(c) + fmt.Sprintf(" Suggestion: %s To set it up, open the box's Wi-Fi page. Reply NO %s to stop suggesting it.",
+			Text: evidence(c) + fmt.Sprintf(" Suggestion: %s To set it up, open my Wi-Fi page. Reply NO %s to stop suggesting it.",
 				summary(spec), c.Short),
 			Detail: grants.Describe(spec),
 		}

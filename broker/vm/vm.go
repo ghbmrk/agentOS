@@ -35,6 +35,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/cgroup"
+	"github.com/ghbmrk/agentos/broker/quota"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
 
@@ -85,18 +86,59 @@ type Spec struct {
 	Label Label
 }
 
+// Machines are siblings in the pool's cgroup, weighed by admission class
+// for CPU and I/O (cpu.weight, io.weight; RES-1, RES-2): foreground first,
+// accepted work next, experiments least. The pool as a whole weighs less
+// than the broker (budget.BrokerWeight).
+const (
+	ForegroundWeight = 1000
+	AcceptedWeight   = 100
+	ExperimentWeight = 1
+)
+
+// MachinePids caps one machine's tasks, threads included (pids.max). A
+// gVisor sandbox's host tasks are the sentry's threads and, under
+// systrap, stub threads for the guest's, so this bounds a fork bomb well
+// below memory.max while leaving room for a parallel build in a worker
+// (vm V29, unmeasured).
+const MachinePids = 4096
+
+// MachineLimits is machine id's cgroup limits: its declared memory budget,
+// its class's weights and the process cap. Every machine kind gets them,
+// workers included; a worker never weighs more than accepted work, so a
+// foreground agent's builds cannot crowd out the agent itself. An unknown
+// class weighs least.
+func MachineLimits(id string, s Spec) cgroup.Limits {
+	w := ExperimentWeight
+	switch s.Class {
+	case admission.Foreground:
+		w = ForegroundWeight
+	case admission.Accepted:
+		w = AcceptedWeight
+	}
+	if strings.HasPrefix(id, WorkerPrefix) {
+		w = min(w, AcceptedWeight)
+	}
+	return cgroup.Limits{MaxBytes: s.MemMB << 20, CPUWeight: w, IOWeight: w, Pids: MachinePids}
+}
+
 // Machine is a copy of a machine's record.
 type Machine struct {
 	ID       string
 	Spec     Spec
 	Label    Label
 	State    State
-	ForkBase string // snapshot this machine was forked from, if any
+	ForkBase string // snapshot this machine was forked from, if any; written under m.mu too (ForkSiblings)
 	// Lineage names the creation this machine descends from by fork: the
 	// root machine's ID plus a nonce drawn when it was created. Forks share their source's memory, so the broker treats a
 	// lineage as one requester for idempotency (OP-1).
 	Lineage string
 	Last    string // newest snapshot of this machine
+	// Starts counts the machine's starts (every startFrom), so a sleep
+	// checkpoint taken at one start is refused after another (PE7).
+	Starts uint64 `json:",omitempty"`
+	// Project is the machine's disk quota project (RES-4); 0: none.
+	Project uint32 `json:",omitempty"`
 }
 
 // Snapshot is a broker-held snapshot's record.
@@ -107,15 +149,29 @@ type Snapshot struct {
 	Label   Label // the machine's label when taken
 	Image   string
 	Taken   time.Time
+	// Lineage is the machine's lineage when taken, so a snapshot outlives
+	// its machine's destroy still traceable (ForgetSince). Empty on
+	// snapshots taken before it was recorded.
+	Lineage string `json:",omitempty"`
+	// Sleep marks CheckpointAndStop's checkpoint, the only kind
+	// ResumeFromCheckpoint restores (PE7). Starts is the machine's start
+	// count when it was taken, and Hash the SHA-256 over its files and
+	// memory image (treeHash), checked before the restore.
+	Sleep  bool   `json:",omitempty"`
+	Starts uint64 `json:",omitempty"`
+	Hash   string `json:",omitempty"`
 }
 
 // Launch is what a Runtime needs to run a machine.
 type Launch struct {
-	ID     string // machine ID
-	Dir    string // broker-held machine directory, for runtime files
-	Lower  string // image root, read only
-	Upper  string // writable layer
-	Work   string // overlayfs work directory
+	ID    string // machine ID
+	Dir   string // broker-held machine directory, for runtime files
+	Lower string // image root, read only
+	// Upper (the writable layer) and Work (overlayfs's work directory) lie
+	// under the machine's disk quota (RES-4). A runtime mounts them inside
+	// quota.Enforced, so the guest's writes through the mount stop at it.
+	Upper  string
+	Work   string
 	Root   string // where the merged root is mounted
 	Cgroup string // cgroup v2 directory to start the machine in; "" if none
 	// Services is a broker-held host directory holding only this machine's
@@ -125,6 +181,23 @@ type Launch struct {
 	Services string
 	Argv     []string
 	Env      []string
+}
+
+// ConsoleMaxBytes bounds the console output a Runtime keeps for one
+// machine in Launch.Dir, old and current logs together (RES-4). It is
+// outside the machine's quota, so the disk admission counts it for every
+// running machine.
+const ConsoleMaxBytes = 8 << 20
+
+// Quota sets per-machine hard disk quotas (quota.FS). Limit tags the
+// directory dir with project, so all later created beneath it counts
+// against the project, and sets the project's hard limits. Tag tags every
+// directory and file already in the tree at root with project.
+type Quota interface {
+	Limit(dir string, project uint32, bytes, inodes int64) error
+	Tag(root string, project uint32) error
+	Usage(project uint32) (quota.Usage, error)
+	Clear(project uint32) error
 }
 
 // ServicesMount is where a machine sees its Launch.Services directory.
@@ -178,11 +251,31 @@ type Config struct {
 	// if copying the layer leaves the reserve free, as memory admission
 	// leaves its headroom (RES-2). Zero means 2 GiB.
 	DiskReserveBytes int64
-	// MaxLayerBytes optionally caps one machine's layer on top of that
-	// (zero: no fixed cap). MaxLayerInodes caps its inodes (zero: 200,000).
+	// Quota gives every machine (workers, builders and replay machines
+	// too) a hard disk quota of its own on what its guest writes, from
+	// MachineDiskBytes and MaxLayerInodes (RES-4). What running guests may
+	// still write under their quotas is held back from the disk above the
+	// reserve: a machine starts, and a copy is admitted, only if it fits
+	// beside that. Nil is allowed only with NoQuota, for tests and for a
+	// state file system without project quotas, where guests can fill it.
+	Quota   Quota
+	NoQuota bool
+	// MachineDiskBytes is each machine's declared disk budget: its quota,
+	// and the default MaxLayerBytes. Zero means 8 GiB.
+	MachineDiskBytes int64
+	// MaxLayerBytes caps one machine's layer at a snapshot (zero:
+	// MachineDiskBytes). MaxLayerInodes caps its inodes (zero: 200,000).
 	MaxLayerBytes, MaxLayerInodes int64
+	// WorkerLayerBytes caps one worker's layer (zero: MaxLayerBytes
+	// alone). A worker over it takes no snapshot and no command until
+	// files are deleted or it is rolled back (security R3 on #146).
+	WorkerLayerBytes int64
 	// FreeBytes reports the state disk's free space; nil measures it.
 	FreeBytes func(path string) (int64, error)
+	// Contained reports a lineage that holds a record the owner deleted
+	// and has not been rolled back yet (recall W10): its machines are not
+	// forked or merged, so what it holds spreads no further. Nil: none is.
+	Contained func(lineage string) bool
 }
 
 var (
@@ -193,15 +286,34 @@ var (
 	ErrConflict = errors.New("vm: merge conflict")
 	ErrImage    = errors.New("vm: snapshots are of different images")
 	ErrRevoked  = errors.New("vm: admission was withdrawn before the machine started")
+	// ErrExecNotStarted and ErrExecFailed are a command the runtime
+	// failed to run: before it started, or after, so it may have run.
+	// Neither names a path; the runtime's messages are in its own log
+	// (SR2-3j).
+	ErrExecNotStarted = errors.New("vm: the command did not start")
+	ErrExecFailed     = errors.New("vm: the runtime failed after the command started; it may have run")
 	// ErrPreempted: the machine was preempted while an operation held it,
 	// and what it was writing is discarded.
 	ErrPreempted = errors.New("vm: machine was preempted during the operation")
 	ErrQuota     = errors.New("vm: disk budget exceeded: snapshot refused; free space in the machine (delete files) or roll back, then retry")
+	// ErrTooDeep is a layer nested too deep to measure or copy
+	// (overlay.ErrTooDeep), for callers outside the machine plane.
+	ErrTooDeep = overlay.ErrTooDeep
+	// ErrDiskFull refuses to start a machine when the state disk above
+	// the reserve cannot hold what it and the running machines may write
+	// under their quotas (RES-4).
+	ErrDiskFull = errors.New("vm: not enough disk above the reserve for this machine's disk budget; stop or destroy a machine, or free space, then retry")
 	// ErrSeedLabel refuses a seed for a machine not labelled private: seeds
 	// are derived from owner data until their files carry a public mark
 	// (REV-5, compile K7).
 	ErrSeedLabel = errors.New("vm: a seeded machine must be labelled private")
+	// ErrContained refuses a fork or merge of a lineage that holds a
+	// record the owner deleted (Config.Contained).
+	ErrContained = errors.New("vm: this agent holds a record the owner deleted; no fork or merge until that is settled")
 )
+
+// maxIDLen is the longest machine ID idRE allows.
+const maxIDLen = 40
 
 var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
@@ -217,6 +329,24 @@ type machine struct {
 	// preempting is set, without the lock, while a preemption is under way
 	// (see Preempt); startFrom refuses to start the machine meanwhile.
 	preempting atomic.Bool
+	// execCancel ends a worker's command in flight (Exec), so erasure,
+	// rollback and destroy never wait behind it for the lock.
+	execCancel atomic.Pointer[context.CancelFunc]
+	// label is Label as last saved, read without the lock. Labels only
+	// rise, so it is never above Label: a check that refuses on it would
+	// refuse under the lock too (DeleteFiles, L3 SHOULD-2 on #166).
+	label atomic.Uint32
+}
+
+// lockEndingExec takes mc's lock, ending any worker command that holds or
+// takes it meanwhile, so the caller never waits behind one.
+func (mc *machine) lockEndingExec() {
+	for !mc.mu.TryLock() {
+		if c := mc.execCancel.Load(); c != nil {
+			(*c)()
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // Manager is safe for concurrent use.
@@ -230,6 +360,12 @@ type Manager struct {
 
 	diskMu   sync.Mutex // serializes disk reservations
 	diskHeld int64      // bytes reserved for copies in progress
+	// live holds the quota project of each guest that may write (started,
+	// and not known dead), under diskMu. It is keyed by project, unique to
+	// one machine's life, so a guest whose kill failed stays counted even
+	// after its ID is taken again.
+	live    map[uint32]int64 // project -> its disk budget
+	project uint32           // highest quota project given out, under mu
 
 	now func() time.Time // nil: time.Now (tests age snapshots for Prune)
 }
@@ -243,6 +379,15 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 	}
 	if cfg.Cgroups == nil && !cfg.NoCgroups {
 		return nil, errors.New("vm: a cgroup parent is required to enforce budgets (RES-2)")
+	}
+	if cfg.Quota == nil && !cfg.NoQuota {
+		return nil, errors.New("vm: a disk quota is required so no guest can fill the state disk (RES-4)")
+	}
+	if cfg.MachineDiskBytes == 0 {
+		cfg.MachineDiskBytes = 8 << 30
+	}
+	if cfg.MaxLayerBytes == 0 {
+		cfg.MaxLayerBytes = cfg.MachineDiskBytes
 	}
 	if cfg.KillTimeout == 0 {
 		cfg.KillTimeout = 10 * time.Second
@@ -264,7 +409,7 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 			return nil, err
 		}
 	}
-	m := &Manager{cfg: cfg, machines: map[string]*machine{}, snaps: map[string]Snapshot{}}
+	m := &Manager{cfg: cfg, machines: map[string]*machine{}, snaps: map[string]Snapshot{}, live: map[uint32]int64{}}
 	if err := m.load(ctx); err != nil {
 		return nil, err
 	}
@@ -274,12 +419,21 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 func (m *Manager) machineDir(id string) string { return filepath.Join(m.cfg.StateDir, "machines", id) }
 func (m *Manager) snapDir(id string) string    { return filepath.Join(m.cfg.StateDir, "snapshots", id) }
 
+// diskDir holds everything machine id's guest writes, under its quota; the
+// machine's record and runtime files stay outside it, so a full quota
+// cannot stop the broker recording the machine.
+func (m *Manager) diskDir(id string) string { return filepath.Join(m.machineDir(id), "disk") }
+
+// projectBase starts the quota projects the manager gives machines, clear
+// of small IDs an administrator may use.
+const projectBase = 0x41470000
+
 func (m *Manager) launch(mc *machine) Launch {
 	d := m.machineDir(mc.ID)
 	l := Launch{
 		ID: mc.ID, Dir: d,
 		Lower: m.cfg.Images[mc.Spec.Image],
-		Upper: filepath.Join(d, "upper"), Work: filepath.Join(d, "work"), Root: filepath.Join(d, "root"),
+		Upper: filepath.Join(m.diskDir(mc.ID), "upper"), Work: filepath.Join(m.diskDir(mc.ID), "work"), Root: filepath.Join(d, "root"),
 		Argv: mc.Spec.Argv, Env: mc.Spec.Env,
 	}
 	if m.cfg.Cgroups != nil {
@@ -293,7 +447,10 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 	if strings.HasPrefix(id, EvalPrefix) {
 		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
 	}
-	return m.create(ctx, id, s, nil)
+	if strings.HasPrefix(id, WorkerPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for workers", WorkerPrefix)
+	}
+	return m.create(ctx, id, s, nil, "")
 }
 
 // EvalPrefix starts the IDs of replay machines (LOOP-5), whose guest
@@ -332,17 +489,20 @@ func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[
 	if m.cfg.MaxLayerBytes > 0 && size > m.cfg.MaxLayerBytes {
 		return Machine{}, fmt.Errorf("%w (seed %d bytes, cap %d)", ErrQuota, size, m.cfg.MaxLayerBytes)
 	}
-	return m.create(ctx, id, s, seed)
+	if strings.HasPrefix(id, WorkerPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for workers", WorkerPrefix)
+	}
+	return m.create(ctx, id, s, seed, "")
 }
 
-func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string][]byte, lineage string) (Machine, error) {
 	if !idRE.MatchString(id) {
 		return Machine{}, fmt.Errorf("vm: bad machine id %q", id)
 	}
 	if _, ok := m.cfg.Images[s.Image]; !ok {
 		return Machine{}, fmt.Errorf("%w: image %q", ErrUnknown, s.Image)
 	}
-	mc, err := m.reserve(id, s, s.Label, "", "")
+	mc, err := m.reserve(id, s, s.Label, "", lineage)
 	if err != nil {
 		return Machine{}, err
 	}
@@ -416,8 +576,22 @@ func (m *Manager) reserve(id string, s Spec, l Label, forkBase, lineage string) 
 		lineage = id + "." + hex.EncodeToString(b[:])
 	}
 	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage}}
+	mc.label.Store(uint32(l))
+	if m.cfg.Quota != nil {
+		mc.Project = m.nextProjectLocked()
+	}
 	m.machines[id] = mc
 	return mc, nil
+}
+
+// nextProjectLocked gives out a quota project no machine holds. Called
+// with m.mu held.
+func (m *Manager) nextProjectLocked() uint32 {
+	if m.project < projectBase {
+		m.project = projectBase
+	}
+	m.project++
+	return m.project
 }
 
 func (m *Manager) unreserve(id string) {
@@ -444,26 +618,17 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 	if keep {
 		s = nil
 	}
-	for _, p := range []string{l.Upper, l.Work} {
-		if keep && p == l.Upper {
-			continue
-		}
-		if err := os.RemoveAll(p); err != nil {
-			return err
-		}
+	if err := m.limitDisk(mc, keep); err != nil {
+		return err
 	}
 	if keep {
+		if err := os.RemoveAll(l.Work); err != nil {
+			return err
+		}
 		if fi, err := os.Lstat(l.Upper); err != nil || !fi.IsDir() {
 			return fmt.Errorf("vm: %s has no layer to resume on", mc.ID)
 		}
-	} else if s == nil {
-		if err := os.Mkdir(l.Upper, 0o755); err != nil {
-			return err
-		}
-		if err := writeSeed(l.Upper, mc.seed); err != nil {
-			return err
-		}
-	} else if err := overlay.Copy(filepath.Join(m.snapDir(s.ID), "fs"), l.Upper); err != nil {
+	} else if err := m.writeLayer(l, mc, s); err != nil {
 		return err
 	}
 	if err := os.Mkdir(l.Work, 0o700); err != nil {
@@ -473,14 +638,19 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		return err
 	}
 	if m.cfg.Cgroups != nil {
-		if _, err := m.cfg.Cgroups.Child(mc.ID, cgroup.Limits{MaxBytes: mc.Spec.MemMB << 20}); err != nil {
+		if _, err := m.cfg.Cgroups.Child(mc.ID, MachineLimits(mc.ID, mc.Spec)); err != nil {
 			return err
 		}
 	}
 	if mc.preempting.Load() {
 		return fmt.Errorf("%w: %s", ErrRevoked, mc.ID)
 	}
-	if m.cfg.Services != nil {
+	if err := m.commitDisk(mc); err != nil {
+		return err
+	}
+	// Workers run no agent: no broker socket, so no tools, owner channel
+	// or model egress (CAP-8).
+	if m.cfg.Services != nil && !strings.HasPrefix(mc.ID, WorkerPrefix) {
 		dir, err := m.cfg.Services.Open(mc.ID)
 		if err != nil {
 			return err
@@ -501,7 +671,123 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		return fmt.Errorf("%w: %s", ErrRevoked, mc.ID)
 	}
 	mc.State = Running
+	mc.Starts++
 	return m.saveMachine(mc)
+}
+
+// limitDisk makes mc's quota directory and sets its quota there, before
+// any layer is written into it: files made beneath it count against mc's
+// project. When mc resumes on the layer it has (keep), every file of it is
+// tagged again first: a layer copied, restored, or written with quotas off
+// is untagged, and its directories would pass project 0, which no limit
+// covers, to what the guest writes in them. A machine recorded without a
+// project gets one.
+func (m *Manager) limitDisk(mc *machine, keep bool) error {
+	dir := m.diskDir(mc.ID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if m.cfg.Quota == nil {
+		return nil
+	}
+	if mc.Project == 0 {
+		m.mu.Lock()
+		mc.Project = m.nextProjectLocked()
+		m.mu.Unlock()
+	}
+	if err := m.cfg.Quota.Limit(dir, mc.Project, m.diskBudget(mc.ID), m.cfg.MaxLayerInodes); err != nil {
+		return err
+	}
+	if keep {
+		return m.cfg.Quota.Tag(dir, mc.Project)
+	}
+	return nil
+}
+
+// diskBudget is machine id's disk quota: MachineDiskBytes, or a worker's
+// smaller layer cap.
+func (m *Manager) diskBudget(id string) int64 {
+	if strings.HasPrefix(id, WorkerPrefix) && m.cfg.WorkerLayerBytes > 0 {
+		return min(m.cfg.MachineDiskBytes, m.cfg.WorkerLayerBytes)
+	}
+	return m.cfg.MachineDiskBytes
+}
+
+// commitDisk admits mc's guest to write: the disk above the reserve and
+// every hold must cover what it may still write under its quota (and its
+// console) beside what every other running guest may. Until it stops, the
+// same counts against every copy and start (grow). A no-op without quotas.
+func (m *Manager) commitDisk(mc *machine) error {
+	if m.cfg.Quota == nil {
+		return nil
+	}
+	m.diskMu.Lock()
+	defer m.diskMu.Unlock()
+	room, err := m.roomLocked()
+	if err != nil {
+		return err
+	}
+	need, err := m.unusedLocked(mc.Project, m.diskBudget(mc.ID))
+	if err != nil {
+		return err
+	}
+	if need > room {
+		return fmt.Errorf("%w (%s may write %d bytes; %d free above the reserve and running machines)", ErrDiskFull, mc.ID, need, room)
+	}
+	m.live[mc.Project] = m.diskBudget(mc.ID)
+	return nil
+}
+
+// uncommitDisk: mc's guest no longer runs, so it writes nothing more.
+func (m *Manager) uncommitDisk(mc *machine) {
+	m.diskMu.Lock()
+	delete(m.live, mc.Project)
+	m.diskMu.Unlock()
+}
+
+// unusedLocked is what a running guest of project p may still write: its
+// budget less its use, plus its console. Called with diskMu held.
+func (m *Manager) unusedLocked(p uint32, budget int64) (int64, error) {
+	u, err := m.cfg.Quota.Usage(p)
+	if err != nil {
+		return 0, fmt.Errorf("vm: disk use of project %d: %w", p, err)
+	}
+	return max(0, budget-u.Bytes) + ConsoleMaxBytes, nil
+}
+
+// roomLocked is the state disk's free space less the reserve, every hold,
+// and what running guests may still write. Called with diskMu held.
+func (m *Manager) roomLocked() (int64, error) {
+	free, err := m.cfg.FreeBytes(m.cfg.StateDir)
+	if err != nil {
+		return 0, err
+	}
+	room := free - m.cfg.DiskReserveBytes - m.diskHeld
+	for p, budget := range m.live {
+		n, err := m.unusedLocked(p, budget)
+		if err != nil {
+			return 0, err
+		}
+		room -= n
+	}
+	return room, nil
+}
+
+// writeLayer replaces mc's layer with snapshot s's file system, or with a
+// fresh one holding mc's seed when s is nil. The work directory goes too.
+func (m *Manager) writeLayer(l Launch, mc *machine, s *Snapshot) error {
+	for _, p := range []string{l.Upper, l.Work} {
+		if err := os.RemoveAll(p); err != nil {
+			return err
+		}
+	}
+	if s != nil {
+		return overlay.Copy(filepath.Join(m.snapDir(s.ID), "fs"), l.Upper)
+	}
+	if err := os.Mkdir(l.Upper, 0o755); err != nil {
+		return err
+	}
+	return writeSeed(l.Upper, mc.seed)
 }
 
 // reserveSeed reserves the disk for writing mc's seed into a fresh layer,
@@ -561,6 +847,10 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 				err = rerr
 			}
 		}
+	}
+	if err == nil {
+		// Only a guest known dead stops counting against the reserve.
+		m.uncommitDisk(mc)
 	}
 	if mc.State == Running {
 		mc.State = Stopped
@@ -676,24 +966,61 @@ func (m *Manager) take(ctx context.Context, id string, t Tier) (Snapshot, error)
 }
 
 // takeLocked pauses the machine so the layer copy is consistent with memory,
-// copies it, checkpoints memory for Full, and resumes.
-func (m *Manager) takeLocked(ctx context.Context, mc *machine, t Tier) (s Snapshot, err error) {
+// copies it, checkpoints memory for Full, and resumes. A snapshot is
+// published only when the whole operation succeeds: if the resume fails
+// (a preemption that killed the sandbox after the image was whole, or any
+// other cause), the snapshot just taken is withdrawn, so an error never
+// leaves one behind (Security R2 on #124).
+func (m *Manager) takeLocked(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
 	if err := m.cfg.Runtime.Pause(ctx, mc.ID); err != nil {
 		return Snapshot{}, err
 	}
-	defer func() {
-		// Resume even if the caller gave up, or the guest stays paused while
-		// recorded as running.
-		if rerr := m.cfg.Runtime.Resume(context.WithoutCancel(ctx), mc.ID); rerr != nil && err == nil {
-			err = rerr
+	prev := mc.Last
+	s, err := m.capture(ctx, mc, t)
+	// Resume even if the caller gave up, or the guest stays paused while
+	// recorded as running.
+	rerr := m.cfg.Runtime.Resume(context.WithoutCancel(ctx), mc.ID)
+	if err != nil {
+		if s.ID != "" {
+			// Published, then the machine record failed to save (L3 on #137).
+			m.withdrawLocked(mc, s.ID, prev)
 		}
-	}()
-	return m.capture(ctx, mc, t)
+		return Snapshot{}, err
+	}
+	if rerr != nil {
+		m.withdrawLocked(mc, s.ID, prev)
+		return Snapshot{}, rerr
+	}
+	return s, nil
+}
+
+// withdrawLocked unpublishes snapshot id, just taken of mc, and deletes it;
+// mc.mu is held. Like a prune, the record goes first, then meta.json, so a
+// crash or a failed delete leaves a directory that load drops.
+func (m *Manager) withdrawLocked(mc *machine, id, prev string) {
+	if err := m.unpublishSnapshot(id); err != nil {
+		log.Printf("vm: %s: withdrawing snapshot %s: %v", mc.ID, id, err)
+	}
+	if err := os.RemoveAll(m.snapDir(id)); err != nil {
+		log.Printf("vm: %s: deleting withdrawn snapshot %s: %v", mc.ID, id, err)
+	}
+	if mc.Last == id {
+		mc.Last = prev
+		if err := m.saveMachine(mc); err != nil {
+			log.Printf("vm: %s: %v", mc.ID, err)
+		}
+	}
 }
 
 // capture writes a snapshot of a paused (or stopped) machine.
 func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
-	u, err := m.checkCaps(m.launch(mc).Upper)
+	return m.captureAs(ctx, mc, t, false)
+}
+
+// captureAs is capture; sleep marks a sleep checkpoint, with the
+// machine's start count and the hash of what was written.
+func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool) (Snapshot, error) {
+	u, err := m.checkCaps(mc.ID, m.launch(mc).Upper)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
 	}
@@ -707,7 +1034,7 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
 	}
 	defer h.release()
-	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Taken: time.Now().UTC()}
+	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Lineage: mc.Lineage}
 	dir := m.snapDir(s.ID)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return Snapshot{}, err
@@ -737,6 +1064,17 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 	if mc.preempting.Load() {
 		return fail(fmt.Errorf("%w: %s: snapshot discarded", ErrPreempted, mc.ID))
 	}
+	// Stamped once the capture is complete: a record handed to the machine
+	// while it was being copied may be in it, so the snapshot must not
+	// read as taken before that (CAP-3 restore points, V26).
+	s.Taken = time.Now().UTC()
+	if sleep {
+		h, err := treeHash(dir)
+		if err != nil {
+			return fail(err)
+		}
+		s.Sleep, s.Starts, s.Hash = true, mc.Starts, h
+	}
 	if err := writeJSON(filepath.Join(dir, "meta.json"), s); err != nil {
 		return fail(err)
 	}
@@ -747,15 +1085,33 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 	return s, m.saveMachine(mc)
 }
 
+// measure is overlay.Measure, with a layer too deep or with paths too long
+// for the broker to copy over the cap (security R4 on #166, L3 MUST-1 on
+// #174): refused as a disk budget the guest can act on, never taken as no
+// use. Every copy of a layer is measured against the longest root any copy
+// of it can have, so a layer one step accepts no later restore or fork
+// refuses (L3 MUST-A on #174).
+func (m *Manager) measure(dir string) (overlay.Usage, error) {
+	longest := max(len(filepath.Join(m.diskDir(strings.Repeat("x", maxIDLen)), "upper")),
+		len(filepath.Join(m.snapDir(snapName(0)), "fs")))
+	u, err := overlay.MeasureUnder(dir, longest)
+	if errors.Is(err, overlay.ErrTooDeep) {
+		err = fmt.Errorf("%w (%w)", ErrQuota, err)
+	}
+	return u, err
+}
+
 // checkCaps measures a layer about to be snapshotted and refuses it if it
 // is over the per-layer caps. Copies keep holes and hardlinks, so a copy
 // costs no more than this measure.
-func (m *Manager) checkCaps(upper string) (overlay.Usage, error) {
-	u, err := overlay.Measure(upper)
+func (m *Manager) checkCaps(id, upper string) (overlay.Usage, error) {
+	u, err := m.measure(upper)
 	if err != nil {
 		return u, err
 	}
 	switch {
+	case strings.HasPrefix(id, WorkerPrefix) && m.cfg.WorkerLayerBytes > 0 && u.Bytes > m.cfg.WorkerLayerBytes:
+		return u, &WorkerFull{ID: id, Bytes: u.Bytes, Cap: m.cfg.WorkerLayerBytes}
 	case m.cfg.MaxLayerBytes > 0 && u.Bytes > m.cfg.MaxLayerBytes:
 		return u, fmt.Errorf("%w (layer %d bytes, cap %d)", ErrQuota, u.Bytes, m.cfg.MaxLayerBytes)
 	case u.Inodes > m.cfg.MaxLayerInodes:
@@ -787,7 +1143,7 @@ func (m *Manager) reserveDisk(need int64) (*diskHold, error) {
 
 // reserveRestore reserves the disk for n copies of snapshot id's layer.
 func (m *Manager) reserveRestore(n int64, id string) (*diskHold, error) {
-	u, err := overlay.Measure(filepath.Join(m.snapDir(id), "fs"))
+	u, err := m.measure(filepath.Join(m.snapDir(id), "fs"))
 	if err != nil {
 		return nil, err
 	}
@@ -802,12 +1158,12 @@ func (h *diskHold) grow(need int64) error {
 	m := h.m
 	m.diskMu.Lock()
 	defer m.diskMu.Unlock()
-	free, err := m.cfg.FreeBytes(m.cfg.StateDir)
+	room, err := m.roomLocked()
 	if err != nil {
 		return err
 	}
-	if need > free-m.cfg.DiskReserveBytes-m.diskHeld {
-		return fmt.Errorf("%w (need %d bytes; %d free, %d reserved, %d held)", ErrQuota, need, free, m.cfg.DiskReserveBytes, m.diskHeld)
+	if need > room {
+		return fmt.Errorf("%w (need %d bytes; %d free above the reserve, holds and running machines)", ErrQuota, need, room)
 	}
 	m.diskHeld += need
 	h.n += need
@@ -827,9 +1183,12 @@ func (m *Manager) nextSnapID() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.seq++
-	// Fixed width, so IDs sort by age and none is a prefix of another (S3).
-	return fmt.Sprintf("s%010d", m.seq)
+	return snapName(m.seq)
 }
+
+// snapName is snapshot seq's ID: fixed width, so IDs sort by age and none
+// is a prefix of another (S3).
+func snapName(seq int) string { return fmt.Sprintf("s%010d", seq) }
 
 // inLineage reports whether machine mc may use snapshot s: its own, or the
 // one it was forked from.
@@ -853,7 +1212,7 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	if err != nil {
 		return err
 	}
-	mc.mu.Lock()
+	mc.lockEndingExec()
 	if !inLineage(mc, s) {
 		mc.mu.Unlock()
 		return fmt.Errorf("%w: %s, %s", ErrLineage, id, snapID)
@@ -965,7 +1324,17 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	if strings.HasPrefix(id, BuilderPrefix) {
 		return Snapshot{}, fmt.Errorf("vm: builder machine %s cannot be forked", id)
 	}
+	if m.contained(src) {
+		return Snapshot{}, fmt.Errorf("%w (%s)", ErrContained, id)
+	}
+	worker := strings.HasPrefix(id, WorkerPrefix)
 	for _, f := range ids {
+		// A worker forks into workers only, and nothing else forks into
+		// one: a worker's memory never runs with an agent's services, and
+		// an agent's never runs without them (CAP-8).
+		if strings.HasPrefix(f, WorkerPrefix) != worker {
+			return Snapshot{}, fmt.Errorf("vm: a worker forks into workers only, and only a worker into ids starting %q", WorkerPrefix)
+		}
 		if strings.HasPrefix(f, EvalPrefix) {
 			return Snapshot{}, fmt.Errorf("vm: machine ids starting %q are kept for replay", EvalPrefix)
 		}
@@ -1008,7 +1377,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	// Reserve the disk for every fork's copy before checkpointing anything,
 	// held until all have started, so a disk too small for n forks refuses
 	// the fork outright instead of failing part-way.
-	u, err := overlay.Measure(m.launch(src).Upper)
+	u, err := m.measure(m.launch(src).Upper)
 	if err != nil {
 		undo()
 		return Snapshot{}, err
@@ -1029,7 +1398,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		return Snapshot{}, err
 	}
 	// The guest ran until it was paused; cover any growth since.
-	v, err := overlay.Measure(filepath.Join(m.snapDir(s.ID), "fs"))
+	v, err := m.measure(filepath.Join(m.snapDir(s.ID), "fs"))
 	if err == nil {
 		err = h.grow(n*v.Bytes - h.n)
 	}
@@ -1042,7 +1411,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	}
 	for i, mc := range reserved {
 		mc.mu.Lock()
-		mc.ForkBase = s.ID
+		m.setForkBase(mc, s.ID)
 		mc.Label = maxLabel(mc.Label, s.Label)
 		err := claimLocked(mc)
 		if err == nil {
@@ -1128,9 +1497,15 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 	if strings.HasPrefix(dst, BuilderPrefix) || strings.HasPrefix(src, BuilderPrefix) {
 		return Snapshot{}, errors.New("vm: builder machines are not merged")
 	}
+	if strings.HasPrefix(dst, WorkerPrefix) || strings.HasPrefix(src, WorkerPrefix) {
+		return Snapshot{}, errors.New("vm: worker machines are not merged")
+	}
 	sm, err := m.get(src)
 	if err != nil {
 		return Snapshot{}, err
+	}
+	if m.contained(sm) {
+		return Snapshot{}, fmt.Errorf("%w (%s)", ErrContained, src)
 	}
 	sm.mu.Lock()
 	baseID := sm.ForkBase
@@ -1166,11 +1541,11 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	// Reserve the disk for the merged layer (at most dst's layer plus the
 	// fork's) and for restarting dst on it, before touching dst.
 	cost := func(dstUpper string) (int64, error) {
-		d, err := overlay.Measure(dstUpper)
+		d, err := m.measure(dstUpper)
 		if err != nil {
 			return 0, err
 		}
-		f, err := overlay.Measure(m.view(ss).Upper)
+		f, err := m.measure(m.view(ss).Upper)
 		return 2 * (d.Bytes + f.Bytes), err
 	}
 	need, err := cost(m.launch(dm).Upper)
@@ -1321,10 +1696,13 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	mc.mu.Lock()
+	mc.lockEndingExec()
 	err = m.stopRuntime(ctx, mc)
 	if err == nil {
 		err = os.RemoveAll(m.machineDir(id))
+	}
+	if err == nil && m.cfg.Quota != nil && mc.Project != 0 {
+		err = m.cfg.Quota.Clear(mc.Project)
 	}
 	mc.mu.Unlock()
 	if err != nil {
@@ -1360,7 +1738,11 @@ func (m *Manager) Preempt(id string) error {
 	}
 	// The completion is scheduled even if the kill fails: once the holding
 	// operation lets go, the machine is stopped under its lock and
-	// recorded preempted, and preempting is cleared (L3 on #124).
+	// recorded preempted, and preempting is cleared (L3 on #124). A
+	// worker's command in flight is ended with it.
+	if c := mc.execCancel.Load(); c != nil {
+		(*c)()
+	}
 	kerr := m.kill(mc)
 	go func() {
 		mc.mu.Lock()
@@ -1423,6 +1805,7 @@ func (m *Manager) Machines() []string {
 }
 
 func (m *Manager) saveMachine(mc *machine) error {
+	mc.label.Store(uint32(mc.Label))
 	return writeJSON(filepath.Join(m.machineDir(mc.ID), "meta.json"), mc.Machine)
 }
 
@@ -1448,6 +1831,13 @@ func (m *Manager) load(ctx context.Context) error {
 		return err
 	}
 	for _, e := range ms {
+		if m.cfg.Quota != nil {
+			// A directory left by a creation cut short still holds files
+			// of its project: no new machine is given that project.
+			if p, err := quota.Project(m.diskDir(e.Name())); err == nil {
+				m.project = max(m.project, p)
+			}
+		}
 		mc := &machine{}
 		if err := readJSON(filepath.Join(m.machineDir(e.Name()), "meta.json"), &mc.Machine); err != nil || mc.ID != e.Name() {
 			continue
@@ -1458,7 +1848,11 @@ func (m *Manager) load(ctx context.Context) error {
 		if mc.Lineage == "" {
 			mc.Lineage = mc.ID
 		}
-		m.stopRuntime(ctx, mc)
+		m.project = max(m.project, mc.Project)
+		if err := m.stopRuntime(ctx, mc); err != nil && m.cfg.Quota != nil && mc.Project != 0 {
+			// Its guest may outlive the broker: it stays counted.
+			m.live[mc.Project] = m.diskBudget(mc.ID)
+		}
 		m.machines[mc.ID] = mc
 		if err := m.saveMachine(mc); err != nil {
 			return err

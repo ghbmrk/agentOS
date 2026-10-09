@@ -69,7 +69,7 @@ func TestLearningPlaneRunsInAgentosd(t *testing.T) {
 	}
 	cases := &fakeHarvest{}
 	lp.cases = cases
-	lp.attach(ctx, d)
+	attachForTest(t, lp, ctx, cancel, d)
 	if lp.busy() || lp.stopped() {
 		t.Fatal("an idle box reads busy or stopped")
 	}
@@ -160,6 +160,10 @@ func TestLearningOffIsSaid(t *testing.T) {
 	}
 	if _, ok := cfg.Settings(context.Background(), "book a table", true); ok || cfg.Narrows("book a table") {
 		t.Fatal("task chat taken as a setting")
+	}
+	// W3-forget: FORGET is never task chat, plane or not.
+	if got, ok := cfg.Settings(context.Background(), "FORGET LAST", true); !ok || got != forgetOffText {
+		t.Fatalf("FORGET with the plane off: %q %v", got, ok)
 	}
 	// W3-off (UX R1 on #92): STATUS says so too, without a loop text.
 	if len(cfg.Notes) != 1 || cfg.Notes[0]() != learningOffNote {
@@ -459,3 +463,37 @@ func TestLoop1BuildsCompiledSkillsOnly(t *testing.T) {
 		t.Fatal("the daemon's redaction mark is not read as redacted")
 	}
 }
+
+// PE5: the scheduler reads admission's BusyCause; before the daemon
+// attaches, the box is busy under pressure, so nothing is the owner's.
+func TestLearningBusyCause(t *testing.T) {
+	var l learning
+	if b, o, p := l.busyCause(); !b || o || !p {
+		t.Fatalf("unattached: %v %v %v", b, o, p)
+	}
+	if l.revokedForOwner("eval-1") {
+		t.Fatal("unattached: a revoke read as the owner's")
+	}
+	c, err := admission.New(admission.Config{CapacityMB: 4000, HeadroomMB: 500}, yield{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.adm.Store(c)
+	if b, o, p := l.busyCause(); b || o || p {
+		t.Fatalf("idle: %v %v %v", b, o, p)
+	}
+	if _, err := c.Admit(admission.Request{ID: "eval-1", Class: admission.Experiment, MemMB: 3000}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Admit(admission.Request{ID: "agent", Class: admission.Foreground, MemMB: 3000}); err != nil {
+		t.Fatal(err)
+	}
+	if !l.revokedForOwner("eval-1") {
+		t.Fatal("a revoke for the owner's agent not read as the owner's")
+	}
+}
+
+// yield is an admission.Preempter whose machines always yield.
+type yield struct{}
+
+func (yield) Preempt(string) error { return nil }

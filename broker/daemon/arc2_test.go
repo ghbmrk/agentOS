@@ -29,15 +29,25 @@ var controlPath = map[string][]string{
 	"accel":     {"admission"},           // RES-3 discovery from sysfs (P2-5)
 	"owner":     {"control", "journal", "modem"},
 	"modem":     {},
+	// The modem bridge's contract and agentosd's end of it (P2-3w): types
+	// and an in-process queue; the bridge's client is bridgeclient.
+	"bridgeproto": {},
+	"modemlink":   {"bridgeproto", "modem", "sockets"},
+	// The local UI's contract and agentosd's end of it (P2-2w): agentosd
+	// serves the page's ops on the owner channel; the local UI, which
+	// decodes untrusted photos, stays in its own process (L15).
+	"localapi": {"owner"},
+	"localsrv": {"localapi", "owner", "sockets"},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
-	// Verifier interface.
-	"grants": {"journal", "owner", "reversible", "verb"},
+	// Verifier interface. Its refusals' guest text is guesterr's (SR2-3j),
+	// which imports nothing beyond the standard library.
+	"grants": {"guesterr", "journal", "owner", "reversible", "verb"},
 	"verb":   {},
 	// Reversible forms (REV-3) are declarations the gate validates: pure
 	// data, held to the control path's rules.
 	"reversible": {"journal", "verb"},
-	"daemon":     {"journal", "control", "admission", "sockets", "owner", "modem", "grants"},
+	"daemon":     {"journal", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
@@ -58,7 +68,17 @@ var controlPath = map[string][]string{
 	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
 	// below, whose rules refuse third-party imports; TestAgentosdLinks-
 	// NoInference holds it instead, through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild"},
+	// It opens recall (recalltool) once the vault process hands over the
+	// identity key, and serves the recall tools on the guest plane.
+	// It serves the worker-machine tools (workers, CAP-8) on the live guest
+	// plane. It opens the machines' disk quotas (quota, RES-4); quota
+	// imports golang.org/x/sys/unix, so like clock it is held by
+	// TestAgentosdLinksNoInference through netOK. It hands the modem
+	// link's state to the page's socket as a localapi.Line (P2-2w d2a).
+	// It changes where updates come from (follow, OSS-10): the follow
+	// executor over the update store, already linked through change, and
+	// the page's root summary (localapi) the daemon serves.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -74,9 +94,9 @@ var machinePlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"vm":         {[]string{"admission", "cgroup", "vm/overlay"}, forbiddenStd},
+	"vm":         {[]string{"admission", "cgroup", "vm/overlay", "quota"}, forbiddenStd},
 	"vm/overlay": {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
-	"vm/gvisor":  {[]string{"vm", "vm/overlay"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
+	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
 }
 
 // The guest plane serves each machine's ARC-6 socket (P1-7). STOP,
@@ -88,7 +108,7 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"guest": {[]string{"guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// modelroute forwards to the vault process over its Unix socket and
 	// reports usage to the meter; never the vault or the proxy. It
@@ -102,13 +122,26 @@ var guestPlane = map[string]struct {
 	// Replay (LOOP-5) serves replay machines through a guest plane of its
 	// own: no journal writes, no executors, no network clients.
 	"replay": {[]string{"admission", "change", "guest", "journal", "meter", "vm"}, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
+	// guests as tools: no network clients, no processes, no inference
+	// beyond the in-process hashing embedder (DEP-1).
+	"recall":     {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"events":     {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"recalltool": {[]string{"recall", "events", "journal", "guesterr"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	// Loop 1's model-backed builder (W3-builder) serves each builder
 	// machine its own socket, as replay does: the brief, one candidate,
 	// and the metered model route; no executors, no network clients.
 	"loopbuild": {[]string{"admission", "change", "journal", "loops", "meter", "vm"}, []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
+	// Worker machines (CAP-8): served to guests as tools over the machine
+	// manager; no journal, no executors, no network clients, no processes
+	// (commands run through vm/gvisor's runsc exec).
+	"workers": {[]string{"admission", "vm", "vm/overlay", "guesterr"}, forbiddenStd},
 	// Agents' questions to the owner (P3-8, W9): served to guests and
 	// answered from the owner channel, through hooks the wiring passes.
-	"question": {nil, forbiddenStd},
+	"question": {[]string{"guesterr"}, forbiddenStd},
+	// The one filter on what a tool's error shows the guest (SR2-3g):
+	// fixed text passes, anything else is a ref and a broker-log line.
+	"guesterr": {nil, forbiddenStd},
 }
 
 // The learning plane (W3; arbitrator, adopting potency PW1 on #56): the

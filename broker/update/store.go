@@ -155,6 +155,19 @@ type Installed struct {
 	// manifest bytes, recorded at Commit.
 	ManifestPath   string `json:"manifest_path,omitempty"`
 	ManifestSHA256 string `json:"manifest_sha256,omitempty"`
+	// UsrRootHash is the installed release's /usr root hash, recorded at
+	// Commit and CommitRelease.
+	UsrRootHash string `json:"usr_root_hash,omitempty"`
+}
+
+// Ref names one release exactly: its version, its /usr root hash and the
+// digest of its signed manifest. Settling an apply is keyed by it, so a
+// different release that reuses a version is never taken for this one
+// (SR3-4).
+type Ref struct {
+	Version        int64  `json:"version"`
+	UsrRootHash    string `json:"usr_root_hash"`
+	ManifestSHA256 string `json:"manifest_sha256"`
 }
 
 // InitStore bootstraps a box from the root shipped in its image and the
@@ -226,6 +239,19 @@ type Verified struct {
 	// security fix is among those it supersedes (Result.SecurityFix).
 	coversFix bool
 	security  bool // set only by WithAttestations
+	// The store that checked it, and the root and targets versions it
+	// trusted then: Stage refuses it once either moved (L3 on #133).
+	storeDir       string
+	rootVersion    int64
+	targetsVersion int64
+	// rootSHA256 is the trusted root's digest: after a switch to a fork
+	// whose versions match, the version alone would not tell them apart.
+	rootSHA256 string
+	// policy is the store's attestor policy digest at the check: the
+	// allow-list, the interim keys and the sticky outside record. Its
+	// attestation authority holds only while the store's is the same
+	// (SR3-6).
+	policy string
 }
 
 // ErrNotChecked: a Verified that Store.Check did not make.
@@ -241,6 +267,15 @@ func (v *Verified) Manifest() (Manifest, error) {
 	r := v.release
 	r.Files = append([]string(nil), r.Files...)
 	return r, nil
+}
+
+// Ref names the release exactly; the zero Ref when v was not made by
+// Store.Check.
+func (v *Verified) Ref() Ref {
+	if !v.ok() {
+		return Ref{}
+	}
+	return Ref{Version: v.release.Version, UsrRootHash: v.release.UsrRootHash, ManifestSHA256: v.manifest.SHA256}
 }
 
 // OK reports whether v was made by Store.Check (a zero value or nil was not).
@@ -270,7 +305,20 @@ func (v *Verified) Images() map[string]string {
 // Security is true only for a security fix whose independent attestation
 // WithAttestations has checked (UPD-8, D6). It is never the manifest flag
 // alone.
-func (v *Verified) Security() bool { return v.ok() && v.security }
+// It is also false once the box's attestor policy changed since the check
+// (SR3-6): a narrower allow-list, or the interim rule's end, retires it.
+func (v *Verified) Security() bool { return v.ok() && v.security && v.policyCurrent() == nil }
+
+// policyCurrent reports ErrPolicyMoved unless the checking store's
+// attestor policy is still the one v was checked under. A store that
+// cannot be read fails closed.
+func (v *Verified) policyCurrent() error {
+	cur, err := (&Store{Dir: v.storeDir}).policy()
+	if err != nil || cur != v.policy {
+		return ErrPolicyMoved
+	}
+	return nil
+}
 
 // WithAttestations returns a copy whose Security reflects
 // SecurityAutoStage(atts, own). An unsealed v gives nil.
@@ -432,6 +480,9 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		return Result{}, err
 	}
 	defer unlock()
+	if err := s.settle(); err != nil {
+		return Result{}, err
+	}
 	// Record an outside attestor first, so a check that fails later still
 	// ends the interim rule.
 	var proto Verified
@@ -587,6 +638,8 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 	proto.maintainers, proto.operated = seen, attestors
 
 	var versions []int64
+	proto.storeDir, proto.rootVersion, proto.targetsVersion = s.Dir, tm.Root.Signed.Version, targets.Signed.Version
+	proto.rootSHA256 = Digest(rootBytes)
 	for p := range targets.Signed.Targets {
 		if n, ok := releaseVersion(p); ok && n > installed.Version {
 			versions = append(versions, n)
@@ -665,7 +718,8 @@ func (s *Store) seenKeys() (map[string]bool, error) {
 }
 
 // outsideFile records that an outside attestor was once allow-listed on
-// this box. It is never removed: the interim rule ends for good.
+// this box, or that the box once followed another root (FollowRoot). It is
+// never removed: the interim rule ends for good.
 const outsideFile = "outside_attestor_listed"
 
 // NoteAttestors records the allow-list as the owner changes it, so an
@@ -702,16 +756,66 @@ func (s *Store) noteAttestors(allow, interim []ed25519.PublicKey, v *Verified) (
 		if err := writeAtomic(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
 			return false, err
 		}
-		return false, nil
 	}
-	_, err = os.Stat(s.p(outsideFile))
-	if err == nil {
-		return false, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
+	if err := s.writeAllowList(v.allowed, v.pinned); err != nil {
 		return false, err
 	}
-	return len(v.allowed) > 0, nil
+	listed, err := s.outsideListed()
+	if err != nil {
+		return false, err
+	}
+	if v.policy, err = s.policy(); err != nil {
+		return false, err
+	}
+	return !listed && len(v.allowed) > 0, nil
+}
+
+// allowListFile holds the digest of the allow-list and interim keys last
+// noted, so a release checked under another list is told apart (SR3-6).
+const allowListFile = "attestor_policy"
+
+func (s *Store) writeAllowList(allowed, pinned map[string]bool) error {
+	h := sha256.New()
+	for _, set := range []map[string]bool{allowed, pinned} {
+		list := make([]string, 0, len(set))
+		for k := range set {
+			list = append(list, k)
+		}
+		sort.Strings(list)
+		fmt.Fprintf(h, "%d:%s\n", len(list), strings.Join(list, ","))
+	}
+	d := hex.EncodeToString(h.Sum(nil)) + "\n"
+	if b, err := os.ReadFile(s.p(allowListFile)); err == nil && string(b) == d {
+		return nil
+	}
+	return writeAtomic(s.p(allowListFile), []byte(d), 0o600)
+}
+
+func (s *Store) outsideListed() (bool, error) {
+	_, err := os.Stat(s.p(outsideFile))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// policy is the store's attestor policy digest: the noted allow-list and
+// whether an outside attestor was ever listed (or a fork followed). The
+// sticky record is part of it, so no later list brings back a policy the
+// interim rule held under.
+func (s *Store) policy() (string, error) {
+	b, err := os.ReadFile(s.p(allowListFile))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	listed, err := s.outsideListed()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s|outside=%t", strings.TrimSpace(string(b)), listed), nil
 }
 
 func keySet(keys []ed25519.PublicKey) (map[string]bool, error) {
@@ -856,5 +960,208 @@ func (s *Store) Commit(v *Verified) error {
 		return fmt.Errorf("%w: release %d is not newer than installed %d", ErrRollback, v.release.Version, in.Version)
 	}
 	return s.writeInstalled(Installed{Version: v.release.Version, UnconfirmedFreshness: !v.fresh,
-		ManifestPath: v.manifest.Path, ManifestSHA256: v.manifest.SHA256})
+		ManifestPath: v.manifest.Path, ManifestSHA256: v.manifest.SHA256, UsrRootHash: v.release.UsrRootHash})
+}
+
+// Staged is a release handed to the A/B activator and not yet committed:
+// what the box needs after the restart to commit it once the new slot
+// passed its health check, or to drop it when the boot fell back (UPD-1).
+type Staged struct {
+	Version        int64  `json:"version"`
+	UsrRootHash    string `json:"usr_root_hash"`
+	ManifestPath   string `json:"manifest_path"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	Fresh          bool   `json:"fresh"`
+}
+
+// Stage records v as the release being activated. Only a release newer
+// than the installed one is staged; a later Stage replaces an earlier
+// one.
+func (s *Store) Stage(v *Verified) error {
+	if !v.ok() {
+		return ErrNotChecked
+	}
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if v.storeDir != s.Dir {
+		return ErrForeignStore
+	}
+	if err := s.trustUnchanged(v); err != nil {
+		return err
+	}
+	// The commit point for attestation authority: under the lock that
+	// NoteAttestors takes, so a narrowing it returned from is seen here.
+	if v.security {
+		if err := v.policyCurrent(); err != nil {
+			return err
+		}
+	}
+	in, err := s.Installed()
+	if err != nil {
+		return err
+	}
+	if v.release.Version <= in.Version {
+		return fmt.Errorf("%w: release %d is not newer than installed %d", ErrRollback, v.release.Version, in.Version)
+	}
+	b, _ := json.Marshal(Staged{Version: v.release.Version, UsrRootHash: v.release.UsrRootHash,
+		ManifestPath: v.manifest.Path, ManifestSHA256: v.manifest.SHA256, Fresh: v.fresh})
+	return writeAtomic(s.p("staged.json"), b, 0o600)
+}
+
+// Staged reads the staged release; ok is false when none is staged.
+func (s *Store) Staged() (Staged, bool, error) {
+	var st Staged
+	b, err := os.ReadFile(s.p("staged.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return st, false, nil
+	}
+	if err != nil {
+		return st, false, err
+	}
+	return st, true, json.Unmarshal(b, &st)
+}
+
+// CommitStaged records the staged release as installed once the box booted
+// it and its health check passed (UPD-1), as Commit does for a *Verified.
+// version must be the staged one and newer than the installed one.
+func (s *Store) CommitStaged(version int64) error {
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.settle(); err != nil {
+		return err
+	}
+	st, ok, err := s.Staged()
+	if err != nil {
+		return err
+	}
+	if !ok || st.Version != version {
+		return fmt.Errorf("update: release %d is not staged", version)
+	}
+	in, err := s.Installed()
+	if err != nil {
+		return err
+	}
+	if st.Version <= in.Version {
+		return fmt.Errorf("%w: release %d is not newer than installed %d", ErrRollback, st.Version, in.Version)
+	}
+	if err := s.writeInstalled(Installed{Version: st.Version, UnconfirmedFreshness: !st.Fresh,
+		ManifestPath: st.ManifestPath, ManifestSHA256: st.ManifestSHA256}); err != nil {
+		return err
+	}
+	return os.Remove(s.p("staged.json"))
+}
+
+// CommitRelease is CommitStaged for exactly the release r, and safe to
+// call again until its caller has recorded that it returned nil: when r is
+// already the installed release it only finishes removing staged.json, if
+// a crash left it, and returns nil. Any other release, staged or not, is
+// refused, whatever its version (SR3-4).
+func (s *Store) CommitRelease(r Ref) error {
+	if r.Version <= 0 || r.UsrRootHash == "" || r.ManifestSHA256 == "" {
+		return errors.New("update: incomplete release reference")
+	}
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.settle(); err != nil {
+		return err
+	}
+	st, staged, err := s.Staged()
+	if err != nil {
+		return err
+	}
+	staged = staged && st.Version == r.Version && st.UsrRootHash == r.UsrRootHash && st.ManifestSHA256 == r.ManifestSHA256
+	in, err := s.Installed()
+	if err != nil {
+		return err
+	}
+	if in.Version == r.Version && in.UsrRootHash == r.UsrRootHash && in.ManifestSHA256 == r.ManifestSHA256 {
+		if staged {
+			return s.removeStaged()
+		}
+		return nil
+	}
+	if !staged {
+		return fmt.Errorf("update: release %d (%s) is not staged", r.Version, r.ManifestSHA256)
+	}
+	if st.Version <= in.Version {
+		return fmt.Errorf("%w: release %d is not newer than installed %d", ErrRollback, st.Version, in.Version)
+	}
+	if err := s.writeInstalled(Installed{Version: st.Version, UnconfirmedFreshness: !st.Fresh,
+		ManifestPath: st.ManifestPath, ManifestSHA256: st.ManifestSHA256, UsrRootHash: st.UsrRootHash}); err != nil {
+		return err
+	}
+	return s.removeStaged()
+}
+
+// removeStaged removes staged.json durably; a missing file is no error.
+func (s *Store) removeStaged() error {
+	if err := os.Remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncDir(s.Dir)
+}
+
+// DropStaged forgets the staged release after a fallback. Nothing else in
+// the store changes: the installed release, root metadata and seen keys
+// live outside the image, so a fallback never rewinds them (UPD-1).
+func (s *Store) DropStaged() error {
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := os.Remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// ErrForeignStore: the release was checked by another store; this store
+// stages only what it checked itself.
+var ErrForeignStore = errors.New("update: release was checked by another store")
+
+// ErrTrustMoved: the store's trusted root or targets changed since the
+// release was checked; check again before staging it.
+var ErrTrustMoved = errors.New("update: trusted metadata changed since the release was checked")
+
+// ErrPolicyMoved: the box's attestor policy (allow-list, interim keys or
+// the sticky outside-attestor record) changed since the release was
+// checked, so the attestation authority it carried no longer holds; check
+// again (SR3-6).
+var ErrPolicyMoved = errors.New("update: attestor policy changed since the release was checked")
+
+// trustUnchanged refuses v when the store's root or targets version moved
+// since its check: a key rotation or revocation, or newer targets, may no
+// longer vouch for it (L3 on #133).
+func (s *Store) trustUnchanged(v *Verified) error {
+	rb, err := os.ReadFile(s.p("root.json"))
+	if err != nil {
+		return err
+	}
+	root, err := metadata.Root().FromBytes(rb)
+	if err != nil {
+		return classify(err)
+	}
+	sb, err := os.ReadFile(s.p("snapshot.json"))
+	if err != nil {
+		return err
+	}
+	snap, err := metadata.Snapshot().FromBytes(sb)
+	if err != nil {
+		return classify(err)
+	}
+	tm, ok := snap.Signed.Meta["targets.json"]
+	if !ok || root.Signed.Version != v.rootVersion || tm.Version != v.targetsVersion || Digest(rb) != v.rootSHA256 {
+		return ErrTrustMoved
+	}
+	return nil
 }

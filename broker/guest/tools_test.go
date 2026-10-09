@@ -1,6 +1,6 @@
 package guest
 
-// REQ: ARC-6
+// REQ: ARC-6, CAP-3
 
 import (
 	"context"

@@ -13,6 +13,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/question"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -28,6 +29,20 @@ type questions struct {
 	// run is the guard's and the book's loops, which write state files
 	// until ctx is done; wait waits for them.
 	run sync.WaitGroup
+}
+
+// pending reports a question held or waiting for the owner (PE7).
+func (q *questions) pending() bool {
+	b := q.b.Load()
+	return b != nil && b.Open()
+}
+
+// restricted reports whether the box clock check restricts time-sensitive
+// checks (TIM-1): the sleeper's hours and its longest sleep read the box
+// clock, so the agent does not sleep then (security R1 on #149).
+func (q *questions) restricted() bool {
+	g := q.g.Load()
+	return g != nil && g.Status().Restricted()
 }
 
 // wait returns once the loops open started have stopped (cancel their
@@ -76,7 +91,7 @@ func (q *questions) Call(ctx context.Context, machine, lineage, name string, arg
 	b := q.b.Load()
 	if b == nil {
 		if name == question.ToolAsk || name == question.ToolStatus {
-			return "", true, errors.New("the broker cannot text the owner now")
+			return "", true, guesterr.New("the broker cannot text the owner now")
 		}
 		return "", false, nil
 	}
@@ -105,7 +120,9 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 	// Questions keep going out through a restriction, their waits on the
 	// monotonic clock (question Q15).
 	guard, err := clock.New(clock.Config{
-		Synced:    clock.Synced,
+		Sync:      clock.Sync,
+		RTC:       clock.RTC, // learns the hardware clock's offset (HW-8, agentos-clock-boot)
+		HostID:    clock.HostID,
 		StatePath: cfg.ClockPath,
 		Logf:      log.Printf,
 	})

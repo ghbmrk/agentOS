@@ -4,8 +4,9 @@
 Sources, all re-read in full on every run so METRICS.md is regenerated, never appended:
   git, first-parent history of --ref   TRACE.md covered count; BOARD.md package states
   LEDGER.md                            usage readings (weekly %, all models and Fable only); phase table
-  GitHub API                           PRs: L3 verdicts in reviews, `Defect: <ID>` lines in bodies;
-                                       Actions runs and their attempts (CI flakes)
+  GitHub API                           PRs: L3 verdicts in collaborators' reviews, `Defect: <ID>`
+                                       lines in bodies; this repository's own Actions runs and
+                                       their attempts (CI flakes)
 GitHub drops Actions runs after its retention window; a value already in METRICS.md is kept
 when the source no longer has data for that week.
 
@@ -53,9 +54,33 @@ def verdict(body):
     return m.group(1).lower() if m else None
 
 
+CAUSES = ("spec-gap", "brief-gap", "defect", "scope")
+CAUSE_LINE = re.compile(r"^\W*cause\W{0,4}(" + "|".join(CAUSES) + r")\b", re.I | re.M)
+
+
+def cause(body):
+    """The rework cause a non-accept L3 verdict names on its `Cause: X` line (OPERATING §4)."""
+    m = CAUSE_LINE.search(body or "")
+    return m.group(1).lower() if m else None
+
+
 def is_l3(body):
     """Only L3 reviews carry the verdict; lens, correction or bot reviews do not count."""
     return bool(body) and re.search(r"\bL3\b", body) is not None
+
+
+# Security review 2, finding 8: the repository is public, so anyone can post a review or
+# run a fork's CI. Only collaborators' reviews and this repository's own runs count.
+TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
+
+
+def trusted_review(r):
+    return r.get("author_association") in TRUSTED
+
+
+def own_run(r, repo):
+    head = r.get("head_repository") or {}
+    return (head.get("full_name") or "").lower() == repo.lower()
 
 
 def defects(body):
@@ -185,13 +210,17 @@ def collect_github(repo, token, since=None):
     the call count inside GITHUB_TOKEN's hourly limit as history grows."""
     pulls = []
     for p in _pages(repo, "pulls?state=all", token):
-        verdicts = None
+        verdicts = causes = None
         if p.get("merged_at") and (since is None or p["merged_at"] >= since):
             reviews = list(_pages(repo, f"pulls/{p['number']}/reviews", token))
             reviews.sort(key=lambda r: r.get("submitted_at") or "")
-            verdicts = [v for v in (verdict(r.get("body")) for r in reviews if is_l3(r.get("body"))) if v]
+            l3 = [r.get("body") for r in reviews if trusted_review(r) and is_l3(r.get("body"))]
+            verdicts = [v for v in map(verdict, l3) if v]
+            # A non-accept verdict without a Cause line counts as "none" so the gap shows.
+            causes = [cause(b) or "none" for b in l3 if verdict(b) in ("fix-list", "reject")]
         pulls.append({"number": p["number"], "merged_at": p.get("merged_at"),
-                      "body": p.get("body") or "", "verdicts": verdicts})
+                      "body": p.get("body") or "", "verdicts": verdicts,
+                      "causes": causes})
     runs = []
     # No query filter: GitHub caps any filtered runs listing (status, created, ...) at 1,000
     # results, which this repo passes in days. The listing is newest first, so paging stops
@@ -199,7 +228,7 @@ def collect_github(repo, token, since=None):
     for r in _pages(repo, "actions/runs", token, "workflow_runs"):
         if since is not None and r["created_at"] < since:
             break
-        if r.get("status") != "completed":
+        if r.get("status") != "completed" or not own_run(r, repo):
             continue
         conclusions = [r["conclusion"]]
         for n in range(1, r.get("run_attempt", 1)):
@@ -283,6 +312,9 @@ def compute(raw):
             "usage_per_req": usage_all / reqs if usage_all is not None and reqs > 0 else None,
             "first_pass_ok": sum(p["verdicts"][0] == "accept" for p in judged),
             "first_pass_n": len(judged),
+            "rounds": sum(len(p["verdicts"]) for p in judged),
+            # Pulls collected before causes were parsed have no "causes" key.
+            "causes": sorted(c for p in judged for c in (p.get("causes") or [])),
             "no_verdict": [p["number"] for p in merged if p["verdicts"] == []],
             "merged": len(merged),
             "escalated": len(ever_esc),
@@ -298,10 +330,11 @@ def compute(raw):
 
 # Columns sourced from the GitHub API: frozen once a closed week has been recorded, so
 # later edits, deleted reviews or expired runs cannot rewrite a finished week.
-FROZEN = (5, 7, 8)
+FROZEN = (5, 7, 8, 9, 11)
 COLUMNS = [
     "Week starting", "Usage all / Fable", "On-pace mark", "Reqs newly covered", "Usage per req",
     "First-pass L3 accept", "Escalation rate (cum.)", "Defects after merge", "CI flake rate",
+    "L3 rounds per merged PR", "Usage per merged PR", "L3 causes",
 ]
 
 
@@ -320,6 +353,10 @@ def _cells(w):
         _ratio(w["escalated"], w["reviewed"]),
         f"{len(w['defects'])} ({', '.join(w['defects'])})" if w["defects"] else ("0" if w["merged"] else NONE),
         _ratio(w["flaky"], w["runs"]),
+        f"{w['rounds'] / w['first_pass_n']:.1f}" if w["first_pass_n"] else NONE,
+        f"{w['usage_all'] / w['merged']:.2f} pts" if w["usage_all"] is not None and w["merged"] else NONE,
+        ", ".join(f"{c} {w['causes'].count(c)}" for c in sorted(set(w["causes"]))) if w["causes"]
+        else ("0" if w["first_pass_n"] else NONE),
     ]
 
 
@@ -346,6 +383,8 @@ def render(weeks, raw, previous_md=None):
     for w in weeks:
         cells = _cells(w)
         prev = old.get(w["week"])
+        if prev and len(prev) < len(cells):
+            prev = prev + [NONE] * (len(cells) - len(prev))  # recorded before later columns were appended
         if prev and len(prev) == len(cells):
             closed = not w["current"] and "(to date)" not in prev[0]
             cells = [o if (c == NONE and o != NONE) or (closed and i in FROZEN) else c
@@ -372,6 +411,13 @@ def render(weeks, raw, previous_md=None):
         "(a fix to code already merged; see the PR template).",
         "- **CI flake rate**: commits that, within one workflow, had both a failed and a passed run or "
         "attempt, over commits with any finished run; counted in the week of the first run.",
+        "- **L3 rounds per merged PR**: L3 reviews with a verdict, averaged over the PRs merged that week "
+        "that had one. 1.0 means every PR was accepted on its first review (COST-1: rework is the main cost).",
+        "- **Usage per merged PR**: weekly-limit points per PR merged that week; the cost-per-package "
+        "figure the operating model steers by (docs/OPERATING.md §6).",
+        "- **L3 causes**: the `Cause:` lines of fix-list and reject L3 reviews on PRs merged that week, "
+        "by code (spec-gap, brief-gap, defect, scope; docs/OPERATING.md §4). `none` is a non-accept "
+        "verdict without a Cause line.",
         "- **Closed weeks**: once a finished week is recorded, its L3, defect and flake cells are kept as "
         "recorded; the other columns are recomputed from git and LEDGER.md each run.",
         "",

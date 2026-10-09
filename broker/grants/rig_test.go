@@ -9,25 +9,29 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // fakeOwner stands in for owner.Channel: it records requests and replies
 // and leaves deciding to the test.
 type fakeOwner struct {
-	mu       sync.Mutex
-	limits   owner.Limits
-	now      func() time.Time
-	reqs     map[string][]owner.Item
-	order    []string
-	queued   []owner.AutoReply
-	due      []owner.Queued
-	notes    []string
-	commit   bool            // QueueAutoReply turns replies into requests
-	down     bool            // Request fails
-	active   bool            // the owner is texting
-	each     []string        // requests opened by RequestEach
-	lateUndo map[string]bool // UndoneAfterRelease
+	mu         sync.Mutex
+	limits     owner.Limits
+	now        func() time.Time
+	reqs       map[string][]owner.Item
+	order      []string
+	queued     []owner.AutoReply
+	due        []owner.Queued
+	notes      []string
+	commit     bool     // QueueAutoReply turns replies into requests
+	down       bool     // Request fails
+	lineDown   bool     // Request fails: the owner's line is down
+	active     bool     // the owner is texting
+	each       []string // requests opened by RequestEach
+	local      []string // requests opened by RequestLocalEach
+	localCalls int
+	lateUndo   map[string]bool // UndoneAfterRelease
 }
 
 func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error) {
@@ -36,10 +40,40 @@ func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 	if f.down {
 		return "", fmt.Errorf("owner: no modem")
 	}
+	if f.lineDown {
+		return "", modem.ErrDown
+	}
+	for _, it := range items {
+		if !owner.SMSApprovable(it) {
+			return "", owner.ErrLocalOnly // as the channel refuses it
+		}
+	}
 	id := fmt.Sprintf("R%d", len(f.order)+1)
 	f.reqs[id] = append([]owner.Item(nil), items...)
 	f.order = append(f.order, id)
 	return id, nil
+}
+
+// RequestLocalEach records requests asked on the local page (P2-2a),
+// one call per flush (Potency R2).
+func (f *fakeOwner) RequestLocalEach(items []owner.Item, _ []time.Duration) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.localCalls++
+	ids := make([]string, len(items))
+	if f.down {
+		return ids, fmt.Errorf("owner: no modem")
+	}
+	if f.lineDown {
+		return ids, modem.ErrDown
+	}
+	for i, it := range items {
+		ids[i] = fmt.Sprintf("R%d", len(f.order)+1)
+		f.reqs[ids[i]] = []owner.Item{it}
+		f.order = append(f.order, ids[i])
+		f.local = append(f.local, ids[i])
+	}
+	return ids, nil
 }
 
 // RequestEach records one request per item, as the channel opens them.
@@ -200,12 +234,14 @@ type rig struct {
 	store *journal.MemStore
 	cfg   Config
 	eng   *journal.Engine
-	g     *Gate
-	own   *fakeOwner
-	exec  *fakeExec
-	ver   *fakeVerifier
-	clock time.Time
-	cmu   sync.Mutex
+	// redact is the journal's redactor; nil keeps text as it is.
+	redact journal.Redactor
+	g      *Gate
+	own    *fakeOwner
+	exec   *fakeExec
+	ver    *fakeVerifier
+	clock  time.Time
+	cmu    sync.Mutex
 	// boot is what the next open's owner channel hands back as carried
 	// over a restart (owner Boot calling Reissue).
 	boot []owner.Carried
@@ -236,6 +272,7 @@ func newRigExecs(t *testing.T, edit func(*Config), execs map[string]journal.Exec
 		edit(&r.cfg)
 	}
 	r.open()
+	t.Cleanup(func() { r.checkGuestReasons(t) })
 	return r
 }
 
@@ -258,7 +295,11 @@ func (r *rig) openWith(mk func() Owner) {
 	for k, x := range r.execs {
 		execs[k] = x
 	}
-	eng, err := journal.Open(r.store, r.g, execs, func(s string) string { return s }, journal.WithClock(r.now))
+	red := r.redact
+	if red == nil {
+		red = func(s string) string { return s }
+	}
+	eng, err := journal.Open(r.store, r.g, execs, red, journal.WithClock(r.now))
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -309,6 +350,28 @@ func (r *rig) decide(approved bool, why string) {
 	r.g.Wait()
 }
 
+// pageDecide approves the last page request as the page does: a fresh code,
+// and the sum of each item as shown (sum, when set, stands in for it).
+func (r *rig) pageDecide(sum string) {
+	r.t.Helper()
+	r.own.mu.Lock()
+	if len(r.own.local) == 0 {
+		r.own.mu.Unlock()
+		r.t.Fatal("nothing was asked on the page")
+	}
+	req := r.own.local[len(r.own.local)-1]
+	items := r.own.reqs[req]
+	r.own.mu.Unlock()
+	for i, it := range items {
+		s := owner.ItemSum(it)
+		if sum != "" {
+			s = sum
+		}
+		r.g.Decide(owner.Decision{Request: req, Item: i + 1, Ref: it.Ref, Approved: true, Why: "owner", Page: true, Sum: s})
+	}
+	r.g.Wait()
+}
+
 func specParams(s Spec) map[string]any {
 	b, _ := json.Marshal(s)
 	var m map[string]any
@@ -316,7 +379,7 @@ func specParams(s Spec) map[string]any {
 	return map[string]any{"grant": m}
 }
 
-// grant creates a grant the way the owner does: code, then local page.
+// grant creates a grant the way the owner does: one code on the local page.
 func (r *rig) grant(s Spec) string {
 	r.t.Helper()
 	id := fmt.Sprintf("local/grant/%d", len(r.eng.List()))
@@ -326,11 +389,7 @@ func (r *rig) grant(s Spec) string {
 		r.t.Fatalf("grant %s: %s %q", id, st.State, st.Permission.Reason)
 	}
 	r.g.Flush()
-	r.decide(true, "owner")
-	if err := r.g.ConfirmLocal(id); err != nil {
-		r.t.Fatal(err)
-	}
-	r.g.Wait()
+	r.pageDecide("")
 	st = r.state(id)
 	if st.State != journal.Succeeded {
 		r.t.Fatalf("grant %s: %s %q", id, st.State, st.Permission.Reason)

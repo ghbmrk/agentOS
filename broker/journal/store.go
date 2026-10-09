@@ -21,12 +21,16 @@ type Store interface {
 	// Truncate drops everything from byte n on. Replay uses it to remove a
 	// torn final line before appending.
 	Truncate(n int64) error
+	// Rewrite atomically replaces the whole journal. Only Erase uses it,
+	// to remove a deleted source's content from records already written.
+	Rewrite(data []byte) error
 }
 
 // FileStore is a Store backed by one append-only file.
 type FileStore struct {
-	mu sync.Mutex
-	f  *os.File
+	mu   sync.Mutex
+	f    *os.File
+	path string
 }
 
 // OpenFile opens or creates the journal file at path, readable by its owner
@@ -46,7 +50,7 @@ func OpenFile(path string) (*FileStore, error) {
 		f.Close()
 		return nil, err
 	}
-	return &FileStore{f: f}, nil
+	return &FileStore{f: f, path: path}, nil
 }
 
 // syncDir fsyncs a directory. A variable so tests can observe it.
@@ -71,7 +75,7 @@ func (s *FileStore) Append(line []byte) error {
 func (s *FileStore) ReadAll() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return os.ReadFile(s.f.Name())
+	return os.ReadFile(s.path)
 }
 
 func (s *FileStore) Truncate(n int64) error {
@@ -81,6 +85,40 @@ func (s *FileStore) Truncate(n int64) error {
 		return err
 	}
 	return s.f.Sync()
+}
+
+// Rewrite writes data to a sibling file, fsyncs and locks it, renames it
+// over the journal, and fsyncs the directory. The lock moves with the new
+// file, so no second engine can open the journal in between.
+func (s *FileStore) Rewrite(data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := s.path
+	tmp := path + ".tmp"
+	t, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		t.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := syscall.Flock(int(t.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fail(err)
+	}
+	if _, err := t.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := t.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fail(err)
+	}
+	s.f.Close()
+	s.f = t
+	return syncDir(filepath.Dir(path))
 }
 
 func (s *FileStore) Close() error { return s.f.Close() }
@@ -102,6 +140,13 @@ func (s *MemStore) ReadAll() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return bytes.Clone(s.data), nil
+}
+
+func (s *MemStore) Rewrite(data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = bytes.Clone(data)
+	return nil
 }
 
 func (s *MemStore) Truncate(n int64) error {
@@ -128,6 +173,7 @@ const (
 	RecStop          RecordType = "stop"
 	RecResume        RecordType = "resume"
 	RecEgress        RecordType = "egress" // an egress decision, not an intent
+	RecErased        RecordType = "erased" // a deleted source's content removed (CAP-3)
 )
 
 // recordVersion is the journal schema version. Replay refuses newer records
@@ -148,9 +194,15 @@ type Record struct {
 	Source   string      `json:"source,omitempty"`
 	Evidence string      `json:"evidence,omitempty"`
 	Reason   string      `json:"reason,omitempty"`
+	Guest    string      `json:"guest,omitempty"`
 	Accepted bool        `json:"accepted,omitempty"`
 	Verdict  Verdict     `json:"verdict,omitempty"`
 	Egress   *EgressNote `json:"egress,omitempty"`
+	Sleep    *SleepNote  `json:"sleep,omitempty"`
+	// FP and EFP carry an erased intent's fingerprints, so OP-1 still
+	// recognises a resubmission once its parameters are gone.
+	FP  string `json:"fp,omitempty"`
+	EFP string `json:"efp,omitempty"`
 }
 
 // encodeRecord renders a record as one line: 8 hex digits of CRC-32 over the

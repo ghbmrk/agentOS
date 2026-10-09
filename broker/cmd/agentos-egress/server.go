@@ -468,6 +468,7 @@ func unlockHandler(c *custody) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	secondLineRoutes(mux, c, read, reply, fail)
+	smsRoutes(mux, c, read, reply, fail)
 	return mux
 }
 
@@ -475,10 +476,59 @@ func unlockHandler(c *custody) http.Handler {
 // a high-tier code here (K7). It is a socket of its own, not a path on the
 // model socket, because the model socket forwards whatever path a guest
 // asks for. The answer is a step and a yes or no, never the seed.
+//
+// POST /recall-key hands agentosd the recall index's identity key (recall
+// K5), only while the vault is open. GET /second-line says whether the
+// second line waits on the owner (egress K13), and GET /second-line/texts
+// whether its texting account's polls are failing (K16), and nothing
+// else.
 func verifyHandler(c *custody) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/recall-key" {
+			key, err := c.recallKey()
+			switch {
+			case err == errLocked:
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			case err != nil:
+				http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+			default:
+				w.Header().Set("Content-Type", "application/octet-stream")
+				w.Write(key)
+			}
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/second-line" {
+			st, err := c.secondLineState()
+			switch {
+			case err == errLocked:
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			case err != nil:
+				http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+			default:
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]modelroute.SecondLineState{"state": st})
+			}
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/second-line/texts" {
+			st, err := c.textsState()
+			switch {
+			case err == errLocked:
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			case err != nil:
+				http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+			default:
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]modelroute.TextsState{"texts": st})
+			}
+			return
+		}
+		if r.Method == http.MethodPost && (r.URL.Path == "/enroll" || r.URL.Path == "/enroll/confirm" || r.URL.Path == "/enroll/seal") {
+			enrollHandler(c, w, r)
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm or /enroll/seal, or GET /second-line or /second-line/texts, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest
@@ -504,6 +554,52 @@ func verifyHandler(c *custody) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(modelroute.VerifyResult{OK: ok, Step: step})
 	})
+}
+
+// enrollHandler serves setup's enrollment (enroll.go) to agentosd: POST
+// /enroll answers the new seed's link once, POST /enroll/confirm only
+// whether the code matched, POST /enroll/seal nothing.
+func enrollHandler(c *custody, w http.ResponseWriter, r *http.Request) {
+	var res any
+	var err error
+	switch r.URL.Path {
+	case "/enroll":
+		var uri string
+		uri, err = c.enroll()
+		res = modelroute.EnrollResult{URI: uri}
+	case "/enroll/seal":
+		err = c.sealEnroll()
+		res = struct{}{}
+	default:
+		var req modelroute.EnrollConfirmRequest
+		if derr := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); derr != nil {
+			http.Error(w, "malformed request", http.StatusBadRequest)
+			return
+		}
+		var ok bool
+		ok, err = c.confirmEnroll(req.Code)
+		res = modelroute.VerifyResult{OK: ok}
+	}
+	var paused *pausedError
+	switch {
+	case err == nil:
+	case err == errLocked:
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	case err == errEnrolled, err == errNoEnrollment, err == errNotConfirmed:
+		http.Error(w, err.Error(), err.(*unlockErr).status)
+		return
+	case errors.As(err, &paused):
+		w.Header().Set(modelroute.HeaderPausedUntil, paused.until.UTC().Format(time.RFC3339))
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	default:
+		http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(res)
 }
 
 // peerListener accepts only connections from one uid (SO_PEERCRED); every

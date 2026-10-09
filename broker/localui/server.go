@@ -12,7 +12,6 @@
 package localui
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,25 +21,14 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
-
-// Owner is the owner channel as the local UI uses it (*owner.Channel).
-type Owner interface {
-	LocalStatus() owner.LocalStatus
-	LocalGridCell() string
-	LocalSignIn(code string) (time.Time, error)
-	LocalStop(ctx context.Context) error
-	LocalResume() (string, error)
-	// UnlockPeriod is CH-14's N: how long a sign-in is remembered.
-	UnlockPeriod() time.Duration
-}
 
 // Config configures a Server.
 type Config struct {
@@ -64,8 +52,12 @@ type Config struct {
 	// P2-4e) is then served at /unlock/vault, open without sign-in like
 	// /unlock.
 	Vault Vault
-	Now   func() time.Time
-	Rand  io.Reader
+	// SecondLine, when set, is the second line's routes on the same
+	// socket (egress K13); its page is served at /second-line/ behind
+	// sign-in (ADP-12, P2-3c). It needs Vault.
+	SecondLine SecondLine
+	Now        func() time.Time
+	Rand       io.Reader
 }
 
 // Server is the local UI.
@@ -75,12 +67,18 @@ type Server struct {
 	mux  *http.ServeMux
 	// pages carry this box's address in their footer.
 	pages *template.Template
+	// formKey binds Approvals forms to a phone and a request; pageWrong
+	// lists each phone's recent wrong approval codes (PageWrongPerMinute),
+	// and its tries in flight: each holds a slot until known not to be
+	// wrong, so a right code sent while the phone has 4 wrong ones and
+	// another try in flight is refused too (L3 nit on #171).
+	formKey   []byte
+	pageWrong map[string][]time.Time
 
-	mu       sync.Mutex
-	owner    Owner
-	sessions map[string]session // by SHA-256 of the cookie token
-	mounts   []mount
-	setup    *setup
+	mu     sync.Mutex
+	owner  Owner
+	mounts []mount
+	setup  *setup
 	// vaultPend is the pending vault unlock this UI started, bound to the
 	// phone that sent the passphrase.
 	vaultPend *vaultPending
@@ -100,7 +98,8 @@ type Server struct {
 
 type mount struct{ Path, Title string }
 
-// MaxSessions bounds remembered devices; the oldest is forgotten first.
+// MaxSessions bounds remembered devices, as agentosd does
+// (localsrv.MaxSessions).
 const MaxSessions = 16
 
 const cookieName = "agentos_session"
@@ -108,11 +107,18 @@ const cookieName = "agentos_session"
 // New returns a Server. It refuses an access point configuration that
 // could expose the UI beyond the box's Wi-Fi (CH-9).
 func New(cfg Config) (*Server, error) {
-	if err := cfg.AP.Validate(); err != nil {
+	validate := cfg.AP.Validate
+	if cfg.Hooks == nil {
+		validate = cfg.AP.ValidateServe
+	}
+	if err := validate(); err != nil {
 		return nil, err
 	}
-	if cfg.Hooks == nil || cfg.Store == nil {
-		return nil, errors.New("localui: hooks and store are required")
+	if (cfg.Hooks == nil) != (cfg.Store == nil) {
+		return nil, errors.New("localui: hooks and store go together")
+	}
+	if cfg.SecondLine != nil && cfg.Vault == nil {
+		return nil, errors.New("localui: the second line needs the vault socket")
 	}
 	if cfg.Port == 0 {
 		cfg.Port = UIPort
@@ -127,18 +133,25 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Port != 80 {
 		host = net.JoinHostPort(host, strconv.Itoa(cfg.Port))
 	}
-	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), sessions: map[string]session{}, pages: pagesFor(host), scanning: make(chan struct{}, 1)}
-	st, err := cfg.Store.Load()
-	if err != nil {
+	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), pages: pagesFor(host), scanning: make(chan struct{}, 1)}
+	s.formKey = make([]byte, 32)
+	if _, err := io.ReadFull(cfg.Rand, s.formKey); err != nil {
 		return nil, err
 	}
-	s.setup = newSetup(s, st)
-	s.setup.adopt()
+	if cfg.Hooks != nil {
+		st, err := cfg.Store.Load()
+		if err != nil {
+			return nil, err
+		}
+		s.setup = newSetup(s, st)
+		s.setup.adopt()
+	}
 	s.routes()
 	return s, nil
 }
 
-// SetOwner attaches the owner channel once setup has made one.
+// SetOwner attaches agentosd's localui.sock once setup has made the owner
+// channel.
 func (s *Server) SetOwner(o Owner) {
 	s.mu.Lock()
 	s.owner = o
@@ -173,7 +186,50 @@ func (s *Server) routes() {
 	if s.cfg.Vault != nil {
 		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
 	}
-	s.setup.routes(s.mux)
+	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
+	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))
+	s.Mount("/paused", "Paused", http.HandlerFunc(s.paused))
+	if s.cfg.SecondLine != nil {
+		s.Mount("/second-line", "Second line", http.HandlerFunc(s.secondLine))
+	}
+	if s.setup != nil {
+		s.setup.routes(s.mux)
+	} else {
+		// No setup hooks (agentos-localui until setup moves into agentosd,
+		// Security L6 on the P2-2w plan): every setup route is refused.
+		s.mux.HandleFunc("/setup", s.notReady)
+		s.mux.HandleFunc("/setup/", s.notReady)
+	}
+}
+
+// notReady is the fixed page for a box this page cannot set up.
+func (s *Server) notReady(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusServiceUnavailable)
+	s.render(w, "notready", nil)
+}
+
+// setupDone says setup is done. Without setup hooks it is done when
+// agentosd answers: the page then has an owner channel to serve.
+func (s *Server) setupDone(r *http.Request) bool {
+	if s.setup == nil {
+		_, ok := s.ownerStatus(r.Context())
+		return ok
+	}
+	return s.setup.done()
+}
+
+// progress is the box's boot progress (ONB-4); without setup hooks it is
+// ready once agentosd answers.
+func (s *Server) progress(r *http.Request) Progress {
+	// Setup's hooks answer only until setup is done (agentosd refuses
+	// them after finish); then progress is the owner channel's.
+	if s.cfg.Hooks != nil && s.setup != nil && !s.setup.done() {
+		return s.cfg.Hooks.Progress()
+	}
+	if _, ok := s.ownerStatus(r.Context()); ok {
+		return Progress{Phase: "ready", Updated: true, Online: true}
+	}
+	return Progress{Phase: "booting"}
 }
 
 // pageCSP allows no script, no framing and no outside source (L6). The
@@ -250,65 +306,31 @@ func (s *Server) signedIn(h http.Handler) http.Handler {
 }
 
 func (s *Server) isSignedIn(r *http.Request) bool {
-	c, err := r.Cookie(cookieName)
-	if err != nil {
+	tok := cookieToken(r)
+	if tok == "" {
 		return false
 	}
-	k := tokenKey(c.Value)
-	now := s.cfg.Now()
-	// A device is signed out when the session locks (wrong codes, an
-	// unknown-host boot), even if a later unlock by text follows: its
-	// sign-in must come after the last lock.
-	var locks uint64
-	o := s.getOwner()
-	if o != nil {
-		locks = o.LocalStatus().Locks
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ss, ok := s.sessions[k]
-	if ok && (!now.Before(ss.exp) || (o != nil && ss.locks != locks)) {
-		delete(s.sessions, k)
-		ok = false
-	}
-	return ok
+	// agentosd decides: it ends a session at its time, on sign-out and on
+	// a session lock (wrong codes, an unknown-host boot), even if a later
+	// unlock by text follows.
+	var ses localapi.Session
+	return s.call(r.Context(), localapi.OpSession, localapi.Auth{Token: tok}, &ses) == nil
 }
 
-// session is a signed-in device: until when, and the owner channel's lock
-// count when it signed in.
-type session struct {
-	exp   time.Time
-	locks uint64
+// cookieToken is the phone's session token, "" if it has none of the
+// form agentosd mints.
+func cookieToken(r *http.Request) string {
+	c, err := r.Cookie(cookieName)
+	if err != nil || len(c.Value) != 2*localapi.TokenBytes {
+		return ""
+	}
+	return c.Value
 }
 
-// remember signs the device in until until (CH-7: the CH-3 unlock period),
-// under lock count locks.
-func (s *Server) remember(w http.ResponseWriter, until time.Time, locks uint64) error {
-	b := make([]byte, 32)
-	if _, err := io.ReadFull(s.cfg.Rand, b); err != nil {
-		return err
-	}
-	tok := hex.EncodeToString(b)
-	now := s.cfg.Now()
-	s.mu.Lock()
-	for k, ss := range s.sessions {
-		if !now.Before(ss.exp) {
-			delete(s.sessions, k)
-		}
-	}
-	for len(s.sessions) >= MaxSessions {
-		keys := make([]string, 0, len(s.sessions))
-		for k := range s.sessions {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool { return s.sessions[keys[i]].exp.Before(s.sessions[keys[j]].exp) })
-		delete(s.sessions, keys[0])
-	}
-	s.sessions[tokenKey(tok)] = session{exp: until, locks: locks}
-	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: tok, Path: "/", Expires: until,
-		MaxAge: int(until.Sub(now) / time.Second), HttpOnly: true, SameSite: http.SameSiteStrictMode})
-	return nil
+// remember sets the phone's cookie to the session agentosd minted.
+func (s *Server) remember(w http.ResponseWriter, ses localapi.Session) {
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: ses.Token, Path: "/", Expires: ses.Until,
+		MaxAge: int(ses.Until.Sub(s.cfg.Now()) / time.Second), HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 
 func tokenKey(tok string) string {
@@ -329,7 +351,11 @@ func (s *Server) root(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if !s.setup.done() {
+	if !s.setupDone(r) {
+		if s.setup == nil {
+			s.notReady(w, r)
+			return
+		}
 		http.Redirect(w, r, "/setup", http.StatusSeeOther)
 		return
 	}
@@ -343,24 +369,29 @@ func (s *Server) root(w http.ResponseWriter, r *http.Request) {
 type statusView struct {
 	Progress Progress
 	HasOwner bool
-	Owner    owner.LocalStatus
+	Owner    localapi.Status
 	SignedIn bool
 	Done     bool
 	Msg      string
 	// Refresh reloads the page while the box is starting (ONB-4).
 	Refresh string
+	// AskCode: the RESUME form asks a signed-in phone for a code, as
+	// agentosd needs one for an old sign-in.
+	AskCode bool
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) { s.statusPage(w, r, msgText(r)) }
 
 func (s *Server) statusPage(w http.ResponseWriter, r *http.Request, msg string) {
-	v := statusView{Progress: s.cfg.Hooks.Progress(), SignedIn: s.isSignedIn(r), Done: s.setup.done(), Msg: msg}
+	s.statusPageWith(w, r, msg, false)
+}
+
+func (s *Server) statusPageWith(w http.ResponseWriter, r *http.Request, msg string, askCode bool) {
+	v := statusView{Progress: s.progress(r), SignedIn: s.isSignedIn(r), Done: s.setupDone(r), Msg: msg, AskCode: askCode}
 	if v.Progress.Phase != "ready" {
 		v.Refresh = "10"
 	}
-	if o := s.getOwner(); o != nil {
-		v.HasOwner, v.Owner = true, o.LocalStatus()
-	}
+	v.Owner, v.HasOwner = s.ownerStatus(r.Context())
 	s.render(w, "status", v)
 }
 
@@ -375,19 +406,15 @@ type unlockView struct {
 }
 
 func (s *Server) unlock(w http.ResponseWriter, r *http.Request) {
-	o := s.getOwner()
-	v := unlockView{HasOwner: o != nil, Next: safeNext(r.FormValue("next")), Vault: s.cfg.Vault != nil}
-	if o != nil {
-		v.Days = int(o.UnlockPeriod() / (24 * time.Hour))
-	}
+	v := unlockView{Next: safeNext(r.FormValue("next")), Vault: s.cfg.Vault != nil}
 	if r.Method == http.MethodPost {
 		if !s.sameOrigin(r) {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-		if o != nil {
-			if err := s.signIn(w, o, r.PostFormValue("code")); err != nil {
+		if s.getOwner() != nil {
+			if _, err := s.signIn(w, r, r.PostFormValue("code")); err != nil {
 				v.Err = err.Error()
 			} else {
 				http.Redirect(w, r, v.Next, http.StatusSeeOther)
@@ -395,94 +422,150 @@ func (s *Server) unlock(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if o != nil {
-		v.Challenged = o.LocalStatus().Challenged
-		v.Cell = o.LocalGridCell()
+	s.renderUnlock(w, r, v)
+}
+
+// renderUnlock fills the sign-in page's challenge from agentosd.
+func (s *Server) renderUnlock(w http.ResponseWriter, r *http.Request, v unlockView) {
+	if st, ok := s.ownerStatus(r.Context()); ok {
+		v.HasOwner, v.Challenged, v.Days = true, st.Challenged, st.UnlockDays
+		var cell localapi.Text
+		if s.call(r.Context(), localapi.OpGridCell, struct{}{}, &cell) == nil {
+			v.Cell = cell.Text
+		}
 	}
 	s.render(w, "unlock", v)
 }
 
-// signIn checks a code with the owner channel; on success the device is
-// remembered. The returned error is owner-facing text.
-func (s *Server) signIn(w http.ResponseWriter, o Owner, code string) error {
+// signIn checks a code with agentosd; on success the phone gets the
+// session it minted. The returned error is owner-facing text.
+func (s *Server) signIn(w http.ResponseWriter, r *http.Request, code string) (string, error) {
 	code = strings.TrimSpace(code)
 	if strings.HasPrefix(code, owner.UnlockProofPrefix) {
 		// Typed codes are never the vault unlock's sign-in proof, which
 		// only vaultCode presents (proofSignIn).
-		return errors.New("That code did not work. Each code works once; wait for the next one.")
+		return "", errors.New(wrongCodeText)
 	}
-	return s.checkSignIn(w, o, code)
+	return s.checkSignIn(w, r, code)
 }
 
 // proofSignIn signs in the phone that just unlocked the box, with the
 // vault process's one-time proof for that unlock (P2-4f).
-func (s *Server) proofSignIn(w http.ResponseWriter, o Owner, ticket string) error {
-	return s.checkSignIn(w, o, owner.UnlockProofPrefix+ticket)
+func (s *Server) proofSignIn(w http.ResponseWriter, r *http.Request, ticket string) error {
+	_, err := s.checkSignIn(w, r, owner.UnlockProofPrefix+ticket)
+	return err
 }
 
-func (s *Server) checkSignIn(w http.ResponseWriter, o Owner, code string) error {
-	// The lock count is read first, so a lock racing the sign-in can only
-	// sign the device out, never leave it signed in.
-	locks := o.LocalStatus().Locks
-	until, err := o.LocalSignIn(code)
+const (
+	wrongCodeText = "That code didn't work. Try the next code from your code generator." // UX-2wb-2
+	limitedText   = "Too many wrong codes were tried on this Wi-Fi. Wait a minute, then try again."
+	lockedText    = "No more codes can be tried for now. Use your recovery key, or try again later."
+)
+
+// refusalText is the page's line for a refused code: what is left of the
+// day's tries comes from agentosd, in a signed-in response to this code
+// only; before sign-in the lockout line is fixed (Security D1).
+func refusalText(refusal, left string) string {
 	switch {
-	case errors.Is(err, owner.ErrTooMany):
-		return errors.New("Too many tries on the box's Wi-Fi in the last day, so sign-in here is paused for up to 24 hours. Your phone still works: text a code to the box.")
-	case errors.Is(err, owner.ErrWrongCode):
-		return errors.New("That code did not work. Each code works once; wait for the next one.")
+	case refusal == localapi.RefusedTooMany && left != "":
+		return left
+	case refusal == localapi.RefusedTooMany:
+		return lockedText
+	}
+	return strings.TrimSpace(wrongCodeText + " " + left)
+}
+
+// checkSignIn returns the new session's token.
+func (s *Server) checkSignIn(w http.ResponseWriter, r *http.Request, code string) (string, error) {
+	if code == "" || len(code) > localapi.MaxCode {
+		return "", errors.New(wrongCodeText)
+	}
+	var ses localapi.Session
+	err := s.call(r.Context(), localapi.OpSignIn, localapi.SignIn{Code: code}, &ses)
+	switch {
+	case err == nil && ses.Refusal != "":
+		return "", errors.New(refusalText(ses.Refusal, ""))
+	case refused(err, localapi.ErrLimited):
+		return "", errors.New(limitedText)
 	case err != nil:
-		return errors.New("Could not check the code. Try again.")
+		return "", errors.New("Could not check the code. Try again.")
 	}
-	if err := s.remember(w, until, locks); err != nil {
-		return errors.New("Could not remember this device. Try again.")
-	}
-	return nil
+	s.remember(w, ses)
+	return ses.Token, nil
 }
 
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
-	o := s.getOwner()
-	if o == nil {
+	if s.getOwner() == nil {
 		http.Redirect(w, r, "/status", http.StatusSeeOther)
 		return
 	}
 	msg := "stopped"
-	if err := o.LocalStop(r.Context()); err != nil {
+	if err := s.call(r.Context(), localapi.OpStop, struct{}{}, nil); err != nil {
 		msg = "stopfailed"
 	}
 	http.Redirect(w, r, "/status?m="+msg, http.StatusSeeOther)
 }
 
 // resume is RESUME on the local UI (P1-5 carry-forward): for a signed-in
-// device, or with a code that signs this device in first.
+// device, or with a code that signs this device in first. agentosd asks
+// for a code once the sign-in is localapi.FreshFor old (Security S2 on
+// P2-2w a); the form then asks for one, on the same page.
 func (s *Server) resume(w http.ResponseWriter, r *http.Request) {
-	o := s.getOwner()
-	if o == nil {
+	if s.getOwner() == nil {
 		http.Redirect(w, r, "/status", http.StatusSeeOther)
 		return
 	}
+	code, tok := strings.TrimSpace(r.PostFormValue("code")), cookieToken(r)
 	if !s.isSignedIn(r) {
-		if err := s.signIn(w, o, r.PostFormValue("code")); err != nil {
-			s.render(w, "unlock", unlockView{HasOwner: true, Next: "/status", Err: err.Error(), Cell: o.LocalGridCell(),
-				Days:       int(o.UnlockPeriod() / (24 * time.Hour)),
-				Challenged: o.LocalStatus().Challenged, Vault: s.cfg.Vault != nil})
+		// The code signs this phone in, and the fresh sign-in resumes:
+		// it is not spent twice.
+		var err error
+		if tok, err = s.signIn(w, r, code); err != nil {
+			s.renderUnlock(w, r, unlockView{Next: "/status", Err: err.Error(), Vault: s.cfg.Vault != nil})
 			return
 		}
+		code = ""
 	}
-	text, err := o.LocalResume()
-	if err != nil {
+	if strings.HasPrefix(code, owner.UnlockProofPrefix) || len(code) > localapi.MaxCode {
+		s.statusPageResume(w, r, wrongCodeText)
+		return
+	}
+	var a localapi.Answered
+	err := s.call(r.Context(), localapi.OpResume, localapi.Resume{Token: tok, Code: code}, &a)
+	switch {
+	case refused(err, localapi.ErrLimited):
+		s.statusPageResume(w, r, limitedText)
+		return
+	case err != nil:
 		http.Redirect(w, r, "/status?m=resumefailed", http.StatusSeeOther)
+		return
+	}
+	switch a.Refusal {
+	case "":
+	case localapi.RefusedCodeNeeded:
+		s.statusPageResume(w, r, resumeCodeText)
+		return
+	default:
+		s.statusPageResume(w, r, refusalText(a.Refusal, a.Text))
 		return
 	}
 	// The owner channel's text names each held action's new time and UNDO
 	// ID (CH-16), so the page shows it rather than a fixed line (L3 on #76).
-	s.statusPage(w, r, text)
+	s.statusPage(w, r, a.Text)
+}
+
+// resumeCodeText asks for a code when the sign-in is old (UX on S2).
+const resumeCodeText = "To resume, enter a code from your code generator (not the one I texted)."
+
+// statusPageResume shows the status page with the RESUME form asking for
+// a code.
+func (s *Server) statusPageResume(w http.ResponseWriter, r *http.Request, msg string) {
+	s.statusPageWith(w, r, msg, true)
 }
 
 func (s *Server) signout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(cookieName); err == nil {
-		s.mu.Lock()
-		delete(s.sessions, tokenKey(c.Value))
-		s.mu.Unlock()
+	if tok := cookieToken(r); tok != "" {
+		_ = s.call(r.Context(), localapi.OpSignOut, localapi.Auth{Token: tok}, nil)
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/status", http.StatusSeeOther)
@@ -492,12 +575,31 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	ms := append([]mount(nil), s.mounts...)
 	s.mu.Unlock()
-	s.render(w, "home", ms)
+	v := struct {
+		Mounts    []mount
+		Waiting   int
+		LineNote  string
+		LineTexts []string
+	}{Mounts: ms}
+	auth := localapi.Auth{Token: cookieToken(r)}
+	var rq localapi.Requests
+	if s.call(r.Context(), localapi.OpRequests, auth, &rq) == nil {
+		v.Waiting = len(rq.Requests)
+	}
+	// The owner line's counts come only over the tokened op (Security D1).
+	var line localapi.Line
+	if s.call(r.Context(), localapi.OpLine, auth, &line) == nil {
+		v.LineNote, v.LineTexts = line.Note, lineTexts(line, time.Local)
+	}
+	s.render(w, "home", v)
 }
 
 // contact serves the box's number as a contact card (§8.1 step 5).
 func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
-	n := s.cfg.Hooks.BoxNumber()
+	n := ""
+	if s.cfg.Hooks != nil {
+		n = s.cfg.Hooks.BoxNumber()
+	}
 	if !phoneRe.MatchString(n) {
 		http.NotFound(w, r)
 		return

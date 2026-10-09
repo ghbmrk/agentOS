@@ -2,7 +2,6 @@ package localui
 
 import (
 	"crypto/subtle"
-	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,12 +18,13 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
-	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // Progress is the box's boot state for the status and setup pages (ONB-4).
 type Progress struct {
-	// Phase is "booting", "updating" or "ready".
+	// Phase is "booting", "updating", "offline" or "ready". "offline"
+	// means a first boot with no uplink: the box runs the image it
+	// shipped with and updates when next online (UPD-3).
 	Phase string
 	// Updated is true once the first-boot update (UPD-3) has finished or
 	// was not needed. Only AI and account connection wait for it.
@@ -61,8 +61,16 @@ type Hooks interface {
 	HostInfo() string
 	// Send texts from the box's number (broker templates only).
 	Send(to, text string) error
-	// SaveCodeSeed puts the code generator's seed in the vault (CRED-8).
-	SaveCodeSeed(seed []byte) error
+	// EnrollCode asks the vault process for a new code-generator seed and
+	// returns its otpauth link (CRED-8; egress K17). Each call makes a new
+	// seed, which only the newest link confirms; the page shows it once
+	// and keeps nothing. ErrCodesEnrolled: the vault already holds a
+	// sealed seed, so setup shows none.
+	EnrollCode() (link string, err error)
+	// ConfirmCode checks one code from the newest seed; true seals it in
+	// the vault. ErrNoCodeEnrollment: no seed waits; ErrCodesLimited: too
+	// many wrong codes for now.
+	ConfirmCode(code string) (bool, error)
 	// TrustHost makes this PC a trusted host, or not (§8.1, CRED-9).
 	TrustHost(trusted bool) error
 	Providers() []Provider
@@ -92,7 +100,7 @@ type Hooks interface {
 }
 
 // SetupState is setup's durable progress. It holds no secret: the code
-// seed goes to the vault through Hooks.SaveCodeSeed.
+// seed is made in the vault process (Hooks.EnrollCode).
 type SetupState struct {
 	Network bool   `json:"network"`
 	Owner   string `json:"owner,omitempty"`
@@ -189,6 +197,13 @@ var (
 
 // errElsewhere refuses a setup step from a phone other than the one that
 // paired.
+// The vault process's refusals of code enrollment, as Hooks report them.
+var (
+	ErrCodesEnrolled    = errors.New("code generator already set up")
+	ErrNoCodeEnrollment = errors.New("no code-generator enrollment waiting")
+	ErrCodesLimited     = errors.New("code-generator enrollment paused")
+)
+
 var errElsewhere = errors.New("Setup is continuing on the phone that texted the box.")
 
 // setup is the §8.1 step 5 and 6 sequence. Until the owner's number is
@@ -205,11 +220,15 @@ type setup struct {
 	pair map[string]string
 	// pairOrder lists pair's keys oldest first, for eviction.
 	pairOrder []string
-	seed      []byte // code-generator seed being enrolled; never stored here
-	// seedGen counts seeds made or wiped, so an enrollment checked
-	// against one seed never saves after a restart replaced it.
-	seedGen uint64
-	wrong   []time.Time
+	// gen counts setup restarts, so an enrollment confirmed for the
+	// pairing before a restart never counts for the one after it.
+	gen   uint64
+	wrong []time.Time
+	// shown: a code-generator link was shown for pairing gen shownGen, so
+	// later views ask only for its code; a typo then needs no new scan.
+	// Neither holds the seed.
+	shown    bool
+	shownGen uint64
 	// number fallback (ONB-6): a code texted to a typed number, accepted
 	// only from the phone that asked for it.
 	numTo      string
@@ -373,9 +392,15 @@ type setupView struct {
 	OTPLink   template.URL
 	OTPQR     template.HTML
 	OTPSecret string
-	Defaults  string
-	Providers []Provider
-	Device    map[string][2]string
+	// CodesEnrolled: the vault already holds a sealed seed, so the codes
+	// step shows none and only continues.
+	CodesEnrolled bool
+	// CodesShown: the link was shown already; the step asks for its code
+	// and offers a new one.
+	CodesShown bool
+	Defaults   string
+	Providers  []Provider
+	Device     map[string][2]string
 	// Refresh reloads the page only while it waits on the box and has
 	// nothing to type into (ONB-4).
 	Refresh string
@@ -423,7 +448,6 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 	if key == u.numDevice {
 		v.NumTo = u.numTo
 	}
-	var seed []byte
 	switch v.Step {
 	case "number":
 		if u.pair[key] == "" {
@@ -438,15 +462,9 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		}
 		v.PairCode = u.pair[key]
 	case "codes":
-		if u.seed == nil {
-			u.seed = make([]byte, 20)
-			u.seedGen++
-			if _, err = io.ReadFull(u.s.cfg.Rand, u.seed); err != nil {
-				u.seed = nil
-			}
-		}
-		seed = append([]byte(nil), u.seed...)
+		v.CodesShown = u.shown && u.shownGen == u.gen
 	}
+	gen := u.gen
 	u.mu.Unlock()
 	if err != nil {
 		http.Error(w, "Setup could not start this step. Reload the page.", http.StatusInternalServerError)
@@ -459,14 +477,36 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		v.BoxNumber = u.s.cfg.Hooks.BoxNumber()
 		v.SMSLink = smsLink(v.BoxNumber, "PAIR "+v.PairCode)
 	case "codes":
-		if seed != nil {
-			v.OTPSecret = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(seed)
-			link := otpLink(u.s.cfg.AP.SSID, v.OTPSecret)
-			v.OTPLink = template.URL(link)
+		if v.CodesShown {
+			break
+		}
+		// Only the phone that paired gets here (mayLocked). The seed is
+		// made in the vault process, a new one each time a link is shown.
+		link, err := u.s.cfg.Hooks.EnrollCode()
+		switch {
+		case errors.Is(err, ErrCodesEnrolled):
+			v.CodesEnrolled = true
+		case errors.Is(err, ErrCodesLimited):
+			v.Err = "Too many new codes in a minute. Wait a minute, then reload this page."
+		case err != nil:
+			http.Error(w, "Setup could not start this step. Reload the page.", http.StatusInternalServerError)
+			return
+		default:
+			secret, ok := otpSecret(link)
+			if !ok {
+				http.Error(w, "Setup could not start this step. Reload the page.", http.StatusInternalServerError)
+				return
+			}
+			v.OTPSecret, v.OTPLink = secret, template.URL(link)
 			if v.OTPQR, err = card.QRSVG(link); err != nil {
 				http.Error(w, "Setup could not start this step. Reload the page.", http.StatusInternalServerError)
 				return
 			}
+			u.mu.Lock()
+			if u.gen == gen {
+				u.shown, u.shownGen = true, gen
+			}
+			u.mu.Unlock()
 		}
 	case "ai":
 		v.Providers = u.s.cfg.Hooks.Providers()
@@ -501,12 +541,26 @@ func smsLink(number, body string) template.URL {
 	return template.URL("sms:" + number + "?&body=" + url.PathEscape(body))
 }
 
-// otpLink is the standard key-URI for code generators (ONB-6): RFC 6238
-// defaults, which owner.Channel checks.
-func otpLink(label, secret string) string {
-	l := url.PathEscape("AgentOS:" + label)
-	return "otpauth://totp/" + l + "?secret=" + secret + "&issuer=AgentOS&algorithm=SHA1&digits=6&period=30"
+// otpSecret checks an enrollment link from the vault process and returns
+// its base32 secret, for typing by hand. The link goes into an href as
+// is, so anything but an otpauth TOTP link with a well-formed secret is
+// refused.
+func otpSecret(link string) (string, bool) {
+	if len(link) > 512 || !strings.HasPrefix(link, "otpauth://totp/") {
+		return "", false
+	}
+	u, err := url.Parse(link)
+	if err != nil {
+		return "", false
+	}
+	secret := u.Query().Get("secret")
+	if !otpSecretRe.MatchString(secret) {
+		return "", false
+	}
+	return secret, true
 }
+
+var otpSecretRe = regexp.MustCompile(`^[A-Z2-7]{16,64}$`)
 
 func (u *setup) network(r *http.Request, _ string) error {
 	ssid, pw := r.PostFormValue("ssid"), r.PostFormValue("password")
@@ -749,11 +803,7 @@ func (u *setup) restart(r *http.Request, key string) error {
 			return errors.New("That reset secret did not match. It is on your card's recovery sheet.")
 		}
 	}
-	for i := range u.seed {
-		u.seed[i] = 0
-	}
-	u.seed = nil
-	u.seedGen++
+	u.gen++
 	u.pair, u.pairOrder = map[string]string{}, nil
 	u.claimCode, u.numCode, u.numTo, u.numDevice = "", "", "", ""
 	u.device = map[string][2]string{}
@@ -762,53 +812,55 @@ func (u *setup) restart(r *http.Request, key string) error {
 	})
 }
 
-// codes confirms code-generator enrollment with one entered code (ONB-3),
-// then hands the seed to the vault and forgets it.
+// codes confirms code-generator enrollment with one entered code (ONB-3)
+// from the newest seed the vault process made. "enrolled" continues past
+// a vault that already holds a sealed seed, which the vault itself
+// reports again.
 func (u *setup) codes(r *http.Request, _ string) error {
 	got := strings.TrimSpace(r.PostFormValue("code"))
-	now := u.s.cfg.Now()
 	u.mu.Lock()
-	if u.st.Owner == "" || u.seed == nil {
-		u.mu.Unlock()
+	paired, gen := u.st.Owner != "", u.gen
+	u.mu.Unlock()
+	if !paired {
 		return errors.New("Start this step again.")
 	}
-	seed, gen := append([]byte(nil), u.seed...), u.seedGen
-	u.mu.Unlock()
-	ok := false
-	// The phone's clock may be a step either side of the box's.
-	for _, d := range []time.Duration{-30 * time.Second, 0, 30 * time.Second} {
-		if subtle.ConstantTimeCompare([]byte(got), []byte(owner.TOTP(seed, now.Add(d)))) == 1 {
-			ok = true
+	var ok bool
+	var err error
+	if r.PostFormValue("new") == "1" {
+		u.mu.Lock()
+		u.shown = false
+		u.mu.Unlock()
+		return nil
+	}
+	if r.PostFormValue("enrolled") == "1" {
+		if _, err = u.s.cfg.Hooks.EnrollCode(); err == nil {
+			return errors.New("Start this step again.")
 		}
-	}
-	if !ok {
+	} else if got == "" || len(got) > 64 {
 		return errors.New("That code did not match. Type the code your phone shows now.")
+	} else {
+		ok, err = u.s.cfg.Hooks.ConfirmCode(got)
 	}
-	// Setup may have started over while the code was checked.
-	stale := func() bool { return u.seedGen != gen || u.seed == nil || u.st.Owner == "" }
-	u.mu.Lock()
-	if stale() {
+	switch {
+	case errors.Is(err, ErrCodesEnrolled):
+	case errors.Is(err, ErrNoCodeEnrollment):
+		u.mu.Lock()
+		u.shown = false
 		u.mu.Unlock()
-		return errors.New("Start this step again.")
-	}
-	u.mu.Unlock()
-	if err := u.s.cfg.Hooks.SaveCodeSeed(seed); err != nil {
-		return errors.New("Could not save. Try again.")
-	}
-	for i := range seed {
-		seed[i] = 0
+		return errors.New("That key is no longer waiting. Add the new one below.")
+	case errors.Is(err, ErrCodesLimited):
+		return errors.New("Too many wrong codes. Wait a few minutes, then try again.")
+	case err != nil:
+		return errors.New("Could not check the code. Try again.")
+	case !ok:
+		return errors.New("That code did not match. Type the code your phone shows now.")
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if stale() {
-		// A restart replaced this seed; the next enrollment overwrites
-		// the one just saved.
+	if u.gen != gen || u.st.Owner == "" {
+		// Setup started over while the code was checked.
 		return errors.New("Start this step again.")
 	}
-	for i := range u.seed {
-		u.seed[i] = 0
-	}
-	u.seed = nil
 	return u.save(func(s *SetupState) { s.Codes = true })
 }
 
@@ -849,7 +901,10 @@ func (u *setup) aiReady() error {
 	if !ready {
 		return errors.New("Finish the earlier steps first.")
 	}
-	if !u.s.cfg.Hooks.Progress().Updated {
+	if p := u.s.cfg.Hooks.Progress(); !p.Updated {
+		if p.Phase == "offline" {
+			return errors.New("The box is offline and has not updated yet. AI can be connected once it is online and updated.")
+		}
 		return errors.New("The box is still updating. AI can be connected when it finishes.")
 	}
 	return nil

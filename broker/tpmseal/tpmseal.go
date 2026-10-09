@@ -32,6 +32,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
@@ -670,6 +672,91 @@ const (
 	LockoutRecoverySec = 24 * 60 * 60
 )
 
+// PINDA is the dictionary-attack settings a PIN slot sets.
+var PINDA = DAParams{MaxTries: PINMaxTries, Interval: PINRecoverySeconds, Recovery: LockoutRecoverySec}
+
+// DAParams are a TPM's dictionary-attack settings (TPM_PT_MAX_AUTH_FAIL,
+// TPM_PT_LOCKOUT_INTERVAL, TPM_PT_LOCKOUT_RECOVERY). A PIN slot sets its
+// own; the PC's originals are read first so that turning the PIN off can
+// put them back exactly (HOST-1f, HW-8).
+type DAParams struct{ MaxTries, Interval, Recovery uint32 }
+
+// String is the stored form: three decimal numbers, comma-separated.
+func (p DAParams) String() string {
+	return fmt.Sprintf("%d,%d,%d", p.MaxTries, p.Interval, p.Recovery)
+}
+
+// ParseDA reads String's form and nothing else: exactly three decimal
+// uint32 values, no sign, space or leading zero (Security H4 on HOST-1f),
+// so a damaged entry is refused rather than written to a TPM.
+func ParseDA(s string) (DAParams, error) {
+	f := strings.Split(s, ",")
+	if len(f) != 3 {
+		return DAParams{}, errBadDA
+	}
+	var v [3]uint32
+	for i, x := range f {
+		n, err := strconv.ParseUint(x, 10, 32)
+		if err != nil || strconv.FormatUint(n, 10) != x {
+			return DAParams{}, errBadDA
+		}
+		v[i] = uint32(n)
+	}
+	return DAParams{v[0], v[1], v[2]}, nil
+}
+
+var errBadDA = errors.New("tpmseal: malformed dictionary-attack settings")
+
+// ErrLockoutSet: the TPM's lockout authorization is set, so settings that
+// need it are not sent.
+var ErrLockoutSet = errors.New("tpmseal: the TPM's lockout authorization is set")
+
+// ReadDA reads the TPM's dictionary-attack settings. They are public: no
+// authorization is used.
+func ReadDA(t transport.TPM) (DAParams, error) {
+	rsp, err := tpm2.GetCapability{
+		Capability:    tpm2.TPMCapTPMProperties,
+		Property:      uint32(tpm2.TPMPTMaxAuthFail),
+		PropertyCount: 3,
+	}.Execute(t)
+	if err != nil {
+		return DAParams{}, err
+	}
+	props, err := rsp.CapabilityData.Data.TPMProperties()
+	if err != nil || len(props.TPMProperty) < 3 {
+		return DAParams{}, errors.New("tpmseal: cannot read the TPM's dictionary-attack settings")
+	}
+	var v [3]uint32
+	for i, want := range []tpm2.TPMPT{tpm2.TPMPTMaxAuthFail, tpm2.TPMPTLockoutInterval, tpm2.TPMPTLockoutRecovery} {
+		if props.TPMProperty[i].Property != want {
+			return DAParams{}, errors.New("tpmseal: cannot read the TPM's dictionary-attack settings")
+		}
+		v[i] = props.TPMProperty[i].Value
+	}
+	return DAParams{v[0], v[1], v[2]}, nil
+}
+
+// LockoutAuthSet reports whether the TPM's lockout authorization is set,
+// from TPMA_PERMANENT, without using it.
+func LockoutAuthSet(t transport.TPM) (bool, error) { return lockoutAuthSet(t) }
+
+// RestoreDA writes p, exactly, as the TPM's dictionary-attack settings.
+// It first reads whether the lockout authorization is set and, if so,
+// sends nothing: ErrLockoutSet. With it empty, the command carries an
+// empty password and nothing secret crosses the bus; a probe with a wrong
+// authorization would lock the PC's lockout hierarchy for its recovery
+// time (Security H1 on HOST-1f).
+func RestoreDA(t transport.TPM, p DAParams) error {
+	set, err := lockoutAuthSet(t)
+	if err != nil {
+		return err
+	}
+	if set {
+		return ErrLockoutSet
+	}
+	return daParameters(t, p)
+}
+
 // ErrLockoutOwned: something other than this box set the TPM's lockout
 // authorization, so the box cannot vouch for the PIN's guess limit.
 var ErrLockoutOwned = errors.New("tpmseal: the TPM's lockout authorization is held by someone else")
@@ -723,7 +810,7 @@ func TakeLockout(t transport.TPM, auth []byte, held bool) error {
 		return ErrLockoutOwned
 	}
 	if !set {
-		if err := daParameters(t); err != nil {
+		if err := daParameters(t, PINDA); err != nil {
 			return fmt.Errorf("tpmseal: dictionary-attack parameters: %w", err)
 		}
 	}
@@ -776,7 +863,7 @@ func TakeLockout(t transport.TPM, auth []byte, held bool) error {
 // lockout authorization. go-tpm v0.9.8 has no type for this command, so
 // it is marshalled here: header, TPM_RH_LOCKOUT, a password session with
 // an empty password, and the three parameters.
-func daParameters(t transport.TPM) error {
+func daParameters(t transport.TPM, p DAParams) error {
 	cmd := binary.BigEndian.AppendUint16(nil, uint16(tpm2.TPMSTSessions))
 	cmd = binary.BigEndian.AppendUint32(cmd, 0) // size, set below
 	cmd = binary.BigEndian.AppendUint32(cmd, uint32(tpm2.TPMCCDictionaryAttackParameters))
@@ -784,9 +871,9 @@ func daParameters(t transport.TPM) error {
 	cmd = binary.BigEndian.AppendUint32(cmd, 9) // authorization area size
 	cmd = binary.BigEndian.AppendUint32(cmd, uint32(tpm2.TPMRSPW))
 	cmd = append(cmd, 0, 0, 0, 0, 0) // nonce, attributes, password: empty
-	cmd = binary.BigEndian.AppendUint32(cmd, PINMaxTries)
-	cmd = binary.BigEndian.AppendUint32(cmd, PINRecoverySeconds)
-	cmd = binary.BigEndian.AppendUint32(cmd, LockoutRecoverySec)
+	cmd = binary.BigEndian.AppendUint32(cmd, p.MaxTries)
+	cmd = binary.BigEndian.AppendUint32(cmd, p.Interval)
+	cmd = binary.BigEndian.AppendUint32(cmd, p.Recovery)
 	binary.BigEndian.PutUint32(cmd[2:6], uint32(len(cmd)))
 	rsp, err := t.Send(cmd)
 	if err != nil {

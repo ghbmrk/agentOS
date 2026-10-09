@@ -17,18 +17,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
+	"github.com/ghbmrk/agentos/broker/quota"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
 
-// maxConsoleLog is the size at which a machine's console log is rotated.
-const maxConsoleLog = 4 << 20
+// maxConsoleLog is the size at which a machine's console log is rotated:
+// it and the one old log kept stay within vm.ConsoleMaxBytes (RES-4).
+const maxConsoleLog = vm.ConsoleMaxBytes / 2
 
 // guestCaps is the capability set of root inside the sandbox: the usual
 // container default, enough to install packages and run services (REV-1).
@@ -44,6 +51,8 @@ type Runtime struct {
 	Bin      string // runsc binary
 	StateDir string // runsc --root; broker-held
 	Platform string // "systrap" (no KVM needed) or "kvm"
+
+	logMu sync.Mutex // the exec log's appends and rotation
 }
 
 var _ vm.Runtime = (*Runtime)(nil)
@@ -99,8 +108,14 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 	// mounts under it out of other mount namespaces; the mount itself still
 	// reaches peers of a shared parent, so agentosd runs in its own mount
 	// namespace (ASSUMPTIONS V18).
+	//
+	// The mount is made without CAP_SYS_RESOURCE: overlayfs writes to the
+	// upper layer with its mounter's credentials, and ext4 lets that
+	// capability past the machine's disk quota (RES-4).
 	opts := overlay.MountOptions(l.Lower, l.Upper, l.Work)
-	if err := syscall.Mount("overlay", l.Root, "overlay", syscall.MS_NOSUID|syscall.MS_NODEV, opts); err != nil {
+	if err := quota.Enforced(func() error {
+		return syscall.Mount("overlay", l.Root, "overlay", syscall.MS_NOSUID|syscall.MS_NODEV, opts)
+	}); err != nil {
 		return fmt.Errorf("mount %s: %w", l.Root, err)
 	}
 	if err := syscall.Mount("", l.Root, "", syscall.MS_PRIVATE, ""); err != nil {
@@ -108,17 +123,17 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 		return fmt.Errorf("mount %s private: %w", l.Root, err)
 	}
 	c := r.cmd(ctx, args...)
-	logPath := filepath.Join(l.Dir, "console.log")
-	if fi, err := os.Stat(logPath); err == nil && fi.Size() > maxConsoleLog {
-		os.Rename(logPath, logPath+".1") // keep one old log; bounded disk use
-	}
-	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	// The guest's console reaches the log through the broker, which caps
+	// it: given the file itself, a guest printing without end would fill
+	// the disk (RES-4).
+	pr, pw, err := os.Pipe()
 	if err != nil {
 		syscall.Unmount(l.Root, syscall.MNT_DETACH)
 		return err
 	}
-	defer log.Close()
-	c.Stdout, c.Stderr = log, log
+	go keepConsole(pr, filepath.Join(l.Dir, "console.log"), maxConsoleLog)
+	defer pw.Close() // the sandbox holds its own copy
+	c.Stdout, c.Stderr = pw, pw
 	if l.Cgroup != "" {
 		fd, err := syscall.Open(l.Cgroup, syscall.O_DIRECTORY|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		if err != nil {
@@ -137,6 +152,59 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 	return nil
 }
 
+// keepConsole copies a machine's console from r to the log at path until
+// r ends, keeping each log within limit bytes: when the log is full it
+// becomes path.1, replacing the older one, and a new log starts.
+func keepConsole(r io.ReadCloser, path string, limit int64) {
+	defer r.Close()
+	var f *os.File
+	var size int64
+	open := func() bool {
+		var err error
+		if f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err != nil {
+			return false
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return false
+		}
+		size = fi.Size()
+		return true
+	}
+	if !open() {
+		io.Copy(io.Discard, r) // never block the guest on its console
+		return
+	}
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(buf)
+		for b := buf[:n]; len(b) > 0; {
+			if size >= limit {
+				f.Close()
+				os.Rename(path, path+".1")
+				if !open() {
+					io.Copy(io.Discard, r)
+					return
+				}
+				if size >= limit { // could not be rotated away
+					f.Close()
+					io.Copy(io.Discard, r)
+					return
+				}
+			}
+			k := min(int64(len(b)), limit-size)
+			f.Write(b[:k])
+			size += k
+			b = b[k:]
+		}
+		if err != nil {
+			f.Close()
+			return
+		}
+	}
+}
+
 // Pause stops every task in the sandbox.
 func (r *Runtime) Pause(ctx context.Context, id string) error { return r.run(ctx, "pause", cid(id)) }
 
@@ -148,6 +216,248 @@ func (r *Runtime) Resume(ctx context.Context, id string) error { return r.run(ct
 func (r *Runtime) Checkpoint(ctx context.Context, id, image string) error {
 	return r.run(ctx, "checkpoint", "--leave-running", "--image-path="+image, cid(id))
 }
+
+// ExecWaitDelay bounds how long Exec waits, once its context ends, for the
+// command's output to close: a command inside the sandbox can outlive the
+// host's runsc exec and hold its stdio open (L3 MUST-1 on #146).
+const ExecWaitDelay = 3 * time.Second
+
+// Exec runs a command in a running sandbox, as root in the guest from its
+// root directory, with c.Stdin as input (CAP-8). The command's arguments
+// follow the container ID, past runsc's own flags, so none is read as a
+// flag. A non-zero exit is a result; each output stream is capped.
+//
+// When ctx ends, the host runsc exec is killed and so is the command inside
+// the sandbox (runsc kill by the pid runsc wrote); a failed kill is only
+// logged. Exec returns within ExecWaitDelay of ctx ending whatever the
+// command does: what it started may run on inside the worker until the
+// worker is rolled back, parked or destroyed.
+func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecResult, error) {
+	if err := os.MkdirAll(r.StateDir, 0o700); err != nil {
+		return vm.ExecResult{}, err
+	}
+	pf, err := os.CreateTemp(r.StateDir, "exec-*.pid")
+	if err != nil {
+		return vm.ExecResult{}, err
+	}
+	pidFile := pf.Name()
+	pf.Close()
+	defer os.Remove(pidFile)
+	// runsc's own messages: its errors, as JSON lines, and its info lines,
+	// each to a file of this exec's (0600, from CreateTemp).
+	var logs [2]string
+	for i, pattern := range []string{"exec-*.err", "exec-*.debug"} {
+		f, err := os.CreateTemp(r.StateDir, pattern)
+		if err != nil {
+			return vm.ExecResult{}, err
+		}
+		logs[i] = f.Name()
+		f.Close()
+		defer os.Remove(logs[i])
+	}
+	cmd := r.cmd(ctx, append([]string{"--log=" + logs[0], "--debug-log=" + logs[1], "exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, cid(id)}, c.Argv...)...)
+	cmd.Stdin = bytes.NewReader(c.Stdin)
+	stdout, stderr := &capped{max: c.MaxOutput}, &capped{max: c.MaxOutput}
+	// The watch sees each write before the cap does, and all of them.
+	watch := &panicWatch{}
+	cmd.Stdout, cmd.Stderr = stdout, io.MultiWriter(watch, stderr)
+	cmd.WaitDelay = ExecWaitDelay
+	cmd.Cancel = func() error {
+		// Read the pid now: the deferred Remove may run before the kill.
+		b, _ := os.ReadFile(pidFile)
+		go r.killExec(id, strings.TrimSpace(string(b)))
+		return cmd.Process.Kill()
+	}
+	err = cmd.Run()
+	// runsc writes each of its errors to stderr as well as to its log, and
+	// stderr is the guest command's too. So when runsc reports an error, or
+	// the command never started (runsc writes the pid once it has), nothing
+	// on either stream is known to be the guest's: Exec answers no output,
+	// and runsc's messages go only to the broker's exec log (SR2-3h). A Go
+	// runtime panic in runsc after the command started writes no --log
+	// line, only its trace to stderr, and exits 2 (SR2-3m), whether or not
+	// the context has since ended (Security S1 on #391). The error is a
+	// bare vm sentinel, naming no path (SR2-3j): a panic after the command
+	// started is ErrExecFailed, since the command may have run.
+	var exit *exec.ExitError
+	panicked := errors.As(err, &exit) && exit.ExitCode() == 2 && watch.found()
+	pid, _ := os.ReadFile(pidFile)
+	if started := len(bytes.TrimSpace(pid)) > 0; !started || size(logs[0]) > 0 || panicked {
+		msgs := stderr.bytes()
+		if panicked {
+			msgs = watch.trailer()
+		}
+		r.logExec(id, err, logs, msgs)
+		if ctx.Err() != nil {
+			return vm.ExecResult{}, err
+		}
+		if !started {
+			return vm.ExecResult{}, vm.ErrExecNotStarted
+		}
+		return vm.ExecResult{}, vm.ErrExecFailed
+	}
+	res := vm.ExecResult{Stdout: stdout.bytes(), Stderr: stderr.bytes(), Truncated: stdout.truncated() || stderr.truncated()}
+	if errors.As(err, &exit) && ctx.Err() == nil {
+		res.ExitCode = exit.ExitCode()
+		return res, nil
+	}
+	return res, err
+}
+
+// execLogMax is the size at which the broker's exec log is rotated: it and
+// the one old log kept stay within twice this (RES-4). A var so tests can
+// shorten it.
+var execLogMax int64 = 1 << 20
+
+// runscMsgMax bounds each of runsc's messages a failed exec adds to the log.
+const runscMsgMax = 16 << 10
+
+func (r *Runtime) execLog() string { return filepath.Join(r.StateDir, "exec.log") }
+
+// logExec appends a failed exec's runsc messages, its error log, debug
+// log and stderr, each clipped to runscMsgMax, to the exec log: 0600 in
+// the broker-held state directory, which no machine can read.
+func (r *Runtime) logExec(id string, err error, logs [2]string, stderr []byte) {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "%s %s: runsc exec failed (%v)\n", time.Now().UTC().Format(time.RFC3339), id, err)
+	for i, part := range [][]byte{clipped(logs[0]), clipped(logs[1]), stderr[:min(len(stderr), runscMsgMax)]} {
+		fmt.Fprintf(&b, "-- %s\n%s\n", [...]string{"error log", "debug log", "stderr"}[i], bytes.TrimSpace(part))
+	}
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
+	keepConsole(io.NopCloser(&b), r.execLog(), execLogMax)
+}
+
+// clipped is the first runscMsgMax bytes of the file at path.
+func clipped(path string) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, runscMsgMax))
+	return b
+}
+
+func size(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+// killExec kills the command an Exec started inside the sandbox, by the
+// in-sandbox pid runsc wrote. Best effort and bounded: it runs off the
+// caller's path, and a failure is logged.
+func (r *Runtime) killExec(id, pid string) {
+	if pid == "" {
+		log.Printf("gvisor: %s: no pid to kill for a cancelled command", id)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.run(ctx, "kill", "--pid", pid, cid(id), "KILL"); err != nil {
+		log.Printf("gvisor: %s: killing cancelled command %s: %v", id, pid, err)
+	}
+}
+
+// panicWatch watches all of an exec's stderr, past its cap, for the trace
+// a Go runtime panic or fatal error writes: a "panic: " or "fatal error: "
+// marker and, after it, a goroutine header (SR2-3m). Neither need start a
+// line, since the guest shares the stream and may leave a partial line
+// before runsc's trace. It keeps the trace from the first marker, clipped
+// to runscMsgMax, for the exec log. A guest that writes the same and
+// exits 2 loses only its own output.
+type panicWatch struct {
+	mu    sync.Mutex
+	carry []byte // the end of what was searched: a match may span writes
+	text  []byte // from the first marker on, clipped
+	hdr   bool
+}
+
+var (
+	panicMarker = regexp.MustCompile(`panic: |fatal error: `)
+	// "goroutine 1 [running]:", or Go 1.23's at traceback system and
+	// above (runsc's default): "goroutine 1 gp=0xc0... m=0 mp=0x... [".
+	goroutineHeader = regexp.MustCompile(`goroutine [0-9]+ [^\[\n]{0,96}\[`)
+)
+
+// watchCarry exceeds the longest marker or header.
+const watchCarry = 256
+
+func (w *panicWatch) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.text != nil {
+		w.text = append(w.text, p[:min(len(p), runscMsgMax-len(w.text))]...)
+	}
+	if w.hdr {
+		return len(p), nil
+	}
+	buf := append(w.carry, p...)
+	if w.text == nil {
+		loc := panicMarker.FindIndex(buf)
+		if loc == nil {
+			w.carry = bytes.Clone(buf[max(len(buf)-watchCarry, 0):])
+			return len(p), nil
+		}
+		buf = buf[loc[0]:]
+		w.text = bytes.Clone(buf[:min(len(buf), runscMsgMax)])
+	}
+	w.hdr = goroutineHeader.Match(buf)
+	w.carry = bytes.Clone(buf[max(len(buf)-watchCarry, 0):])
+	return len(p), nil
+}
+
+func (w *panicWatch) found() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.hdr
+}
+
+func (w *panicWatch) trailer() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return bytes.Clone(w.text)
+}
+
+// capped keeps the first max bytes written (all of them when max is 0).
+// It is safe for concurrent use: after ExecWaitDelay, Exec reads it while
+// the copy may still be finishing.
+type capped struct {
+	mu   sync.Mutex
+	b    bytes.Buffer
+	max  int
+	over bool
+}
+
+func (c *capped) bytes() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return bytes.Clone(c.b.Bytes())
+}
+
+func (c *capped) truncated() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.over
+}
+
+func (c *capped) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.max > 0 {
+		if room := c.max - c.b.Len(); len(p) > room {
+			c.b.Write(p[:max(room, 0)])
+			c.over = true
+			return len(p), nil
+		}
+	}
+	return c.b.Write(p)
+}
+
+var _ vm.Execer = (*Runtime)(nil)
 
 // Kill stops the sandbox, deletes runsc's record of it, and unmounts the
 // machine's root. It is idempotent.

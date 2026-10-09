@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,5 +199,85 @@ func TestRES1CheckpointCutShortByPreemptionPublishesNoSnapshot(t *testing.T) {
 	e.open()
 	if got := e.m.Snapshots("exp"); len(got) != before {
 		t.Fatalf("after restart: %v", ids(got))
+	}
+}
+
+// resumeFailsRuntime takes whole checkpoints but fails the resume after
+// them, as runsc does when a preemption kills the sandbox just after the
+// image is written ("connection reset by peer", #134 CI).
+type resumeFailsRuntime struct {
+	*fakeRuntime
+	fail bool
+}
+
+func (r *resumeFailsRuntime) Resume(ctx context.Context, id string) error {
+	if r.fail {
+		return errors.New("runsc resume: connection reset by peer")
+	}
+	return r.fakeRuntime.Resume(ctx, id)
+}
+
+// A snapshot whose operation fails at the resume step is withdrawn: an
+// error never leaves a published snapshot (Security R2 on #124).
+func TestRES1SnapshotFailingAtResumePublishesNothing(t *testing.T) {
+	e := newEnv(t, 2000)
+	rt := &resumeFailsRuntime{fakeRuntime: e.rt}
+	e.cfg.Runtime = rt
+	e.open()
+	e.create("exp", admission.Experiment, 1500)
+	keep, err := e.m.Checkpoint(bg, "exp")
+	must(t, err)
+	rt.fail = true
+	for _, take := range []func(context.Context, string) (Snapshot, error){e.m.Checkpoint, e.m.Step} {
+		if _, err := take(bg, "exp"); err == nil || !strings.Contains(err.Error(), "resume") {
+			t.Fatalf("snapshot with a failed resume: %v, want the resume error", err)
+		}
+	}
+	rt.fail = false
+	if got := e.m.Snapshots("exp"); len(got) != 1 || got[0].ID != keep.ID {
+		t.Fatalf("snapshots %v, want only %s", ids(got), keep.ID)
+	}
+	entries, err := os.ReadDir(filepath.Join(e.cfg.StateDir, "snapshots"))
+	must(t, err)
+	if len(entries) != 1 {
+		t.Fatalf("%d snapshot directories on disk, want 1", len(entries))
+	}
+	mc, err := e.m.Get("exp")
+	must(t, err)
+	if mc.Last != keep.ID {
+		t.Fatalf("Last = %s, want %s", mc.Last, keep.ID)
+	}
+	e.open()
+	if got := e.m.Snapshots("exp"); len(got) != 1 {
+		t.Fatalf("after restart: %v", ids(got))
+	}
+}
+
+// A snapshot published just before its machine record fails to save is
+// withdrawn too: the error leaves nothing published (L3 on #137).
+func TestRES1SnapshotFailingToSaveTheMachinePublishesNothing(t *testing.T) {
+	e := newEnv(t, 2000)
+	e.create("exp", admission.Experiment, 1500)
+	keep, err := e.m.Checkpoint(bg, "exp")
+	must(t, err)
+	// A directory where the record's temporary file goes makes the save fail.
+	block := filepath.Join(e.cfg.StateDir, "machines", "exp", "meta.json.tmp")
+	must(t, os.MkdirAll(filepath.Join(block, "x"), 0o700))
+	if _, err := e.m.Checkpoint(bg, "exp"); err == nil {
+		t.Fatal("snapshot whose machine record failed to save reported success")
+	}
+	must(t, os.RemoveAll(block))
+	if got := e.m.Snapshots("exp"); len(got) != 1 || got[0].ID != keep.ID {
+		t.Fatalf("snapshots %v, want only %s", ids(got), keep.ID)
+	}
+	entries, err := os.ReadDir(filepath.Join(e.cfg.StateDir, "snapshots"))
+	must(t, err)
+	if len(entries) != 1 {
+		t.Fatalf("%d snapshot directories on disk, want 1", len(entries))
+	}
+	mc, err := e.m.Get("exp")
+	must(t, err)
+	if mc.Last != keep.ID {
+		t.Fatalf("Last = %s, want %s", mc.Last, keep.ID)
 	}
 }

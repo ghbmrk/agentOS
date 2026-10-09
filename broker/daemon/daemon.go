@@ -10,6 +10,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modem"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -44,6 +48,10 @@ type Config struct {
 	// ModemUID is the only uid allowed on the owner socket: the modem
 	// bridge, which runs as its own user (SO_PEERCRED, B8).
 	ModemUID int
+	// ModemGID, if set, is the bridge's group: the owner socket is given
+	// it, mode 0660, so the bridge can connect as its own user (security
+	// R3 on #170). Unset, the socket is 0600 (same-uid tests only).
+	ModemGID *int
 	// Machines gets one guest socket each. IDs are [a-z0-9-], unique.
 	Machines []string
 	// Auth overrides the default, which knows the owner's number and keeps
@@ -73,6 +81,16 @@ type Config struct {
 	// Modem, when set, is served by the owner channel as well as the owner
 	// socket, and carries its outbound texts.
 	Modem modem.Modem
+	// OwnerOps are more ops on the owner socket: the modem bridge's
+	// (modemlink.Link.Ops, P2-3w). They cannot replace "message". Each
+	// runs with a context that ends if the bridge hangs up first, so the
+	// outbox's long poll hands no text to a dead bridge.
+	OwnerOps map[string]sockets.Handler
+	// BridgeOnly drops "message" from the owner socket, leaving OwnerOps:
+	// with the modem bridge on, owner texts arrive only through its
+	// checked "inbound" op (security F1 on #170). "message" stays for
+	// simulator and test builds.
+	BridgeOnly bool
 	// Agent receives the owner's task chat: the guest plane's owner inbox
 	// for the agent's machine (ARC-6 (c)). Nil: no agent running.
 	Agent control.Agent
@@ -87,6 +105,10 @@ type Config struct {
 	// Executors are the adapters' executors, by name; each needs its
 	// declaration in Grants.Declared. None exist before P2-6/P2-7.
 	Executors map[string]journal.Executor
+	// Recall runs the broker's recall rollback intents (grants
+	// RecallExecutor, recalltool W10) once the owner approves them. Nil:
+	// none can run.
+	Recall journal.Executor
 	// BrokerExecutors are the broker's own setting executors (the change
 	// pipeline and the loop scheduler, W3). They declare no operations: no
 	// grant can name them, and only the intents the gate's Changes and
@@ -101,13 +123,48 @@ type Config struct {
 	// Answer takes the owner's replies to agents' questions before they
 	// reach the agent (question.Book.Answer, W9). Nil: none.
 	Answer func(ctx context.Context, msg string) (reply string, ok bool)
-	// Notes are STATUS's exception lines (control.Handler.Notes).
+	// Notes are STATUS's exception lines (control.Handler.Notes); recall
+	// adds one while an agent holds a record the owner deleted (W10).
 	Notes []func() string
+	// PageSocket, when set, serves localui.sock: the box's Wi-Fi page's ops
+	// on the owner channel (localapi, P2-2w). It needs OwnerState.
+	PageSocket *PageSocket
 	// Redactor scrubs journaled free text. Nil journals none at all until
 	// the vault's redactor (CRED-7 values plus CH-19 patterns) is wired
 	// with the vault unlock (P2-4).
 	Redactor journal.Redactor
 }
+
+// PageSocket is the local UI's socket. The local UI runs as its own user and
+// decodes untrusted input, so it is treated as compromised: agentosd
+// mints and checks its session tokens and counts its wrong codes
+// (localsrv; Security L1, L2 on the P2-2w plan).
+type PageSocket struct {
+	// UID is the only uid allowed on the socket (SO_PEERCRED).
+	UID int
+	// GID, if set, is the local UI's group: the socket is given it, mode
+	// 0660. Unset, the socket is 0600 (same-uid tests only).
+	GID *int
+	// Line is the owner line's note, last outage and counts (from the
+	// modem link); nil without the modem bridge.
+	Line func() localapi.Line
+	// DescribeRoot, when set, serves changing where updates come from on
+	// the page (OSS-10, follow.Executor.Describe): the page's request is
+	// then submitted to the gate as a follow intent, which the broker
+	// executor named grants.FollowExecutor must run. Nil refuses both ops.
+	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
+}
+
+// The page's fixed replies to a follow request: the gate's reason is not
+// shown (L3 SHOULD 3 on #148).
+const (
+	FollowAsked   = "Asked. Approve it on the Approvals page with a code from your code generator; nothing changes until you do."
+	FollowRefused = "Not asked: I refused this request."
+)
+
+// FollowRefusedName is the reply to a name the gate does not admit.
+var FollowRefusedName = fmt.Sprintf("Not asked: use a name of at most %d characters and %d digits, with no spaces at either end, that doesn't start %q.",
+	grants.MaxFollowName, grants.MaxFollowDigits, grants.ReservedFollowName)
 
 // Daemon is a running broker.
 type Daemon struct {
@@ -156,6 +213,9 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	if cfg.Auth == nil {
 		cfg.Auth = ownerOnly{cfg.OwnerNumber}
 	}
+	if cfg.PageSocket != nil && cfg.PageSocket.DescribeRoot != nil && cfg.BrokerExecutors[grants.FollowExecutor] == nil {
+		return nil, fmt.Errorf("daemon: following a root on the page needs the broker executor %q", grants.FollowExecutor)
+	}
 	seen := map[string]bool{}
 	for _, id := range cfg.Machines {
 		if !validID(id) || seen[id] {
@@ -180,9 +240,13 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	// effect is refused, and every irreversible effect a grant allows is
 	// asked of the owner unless a pre-allowance covers it.
 	gcfg := cfg.Grants
+	// The gate asks on the box's Wi-Fi page exactly when agentosd serves
+	// it (P2-2w): asked there with no page, a change could never be
+	// answered, so it is refused with the reason that says so.
+	gcfg.LocalUI = cfg.PageSocket != nil
 	execs := map[string]journal.Executor{}
 	for name, ex := range cfg.Executors {
-		if name == grants.ExecutorName {
+		if name == grants.ExecutorName || name == grants.RecallExecutor {
 			store.Close()
 			return nil, fmt.Errorf("daemon: executor name %q is reserved", name)
 		}
@@ -194,7 +258,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	}
 	for name, ex := range cfg.BrokerExecutors {
 		switch {
-		case name == grants.ExecutorName:
+		case name == grants.ExecutorName, name == grants.RecallExecutor:
 			store.Close()
 			return nil, fmt.Errorf("daemon: executor name %q is reserved", name)
 		case execs[name] != nil:
@@ -205,6 +269,9 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	}
 	gate := grants.New(gcfg)
 	execs[grants.ExecutorName] = gate
+	if cfg.Recall != nil {
+		execs[grants.RecallExecutor] = cfg.Recall
+	}
 	red := cfg.Redactor
 	if red == nil {
 		red = redactAll
@@ -248,11 +315,15 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		gate.Attach(eng, nil)
 	}
 
-	modem := cfg.ModemUID
+	var modemUID *int
+	if cfg.ModemUID >= 0 {
+		modemUID = &cfg.ModemUID
+	}
 	eps := []sockets.Endpoint{{
 		Name:        OwnerSocket,
 		Peer:        sockets.Peer{Kind: "owner"},
-		PeerUID:     &modem,
+		PeerUID:     modemUID,
+		PeerGID:     cfg.ModemGID,
 		MaxConns:    8,
 		IdleTimeout: ownerIdle,
 		Ops: map[string]sockets.Handler{
@@ -265,6 +336,18 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			},
 		},
 	}}
+	if cfg.BridgeOnly {
+		delete(eps[0].Ops, "message")
+	}
+	for op, h := range cfg.OwnerOps {
+		if _, taken := eps[0].Ops[op]; !taken && op != "message" {
+			eps[0].Ops[op] = h
+			if eps[0].HangupOps == nil {
+				eps[0].HangupOps = map[string]bool{}
+			}
+			eps[0].HangupOps[op] = true
+		}
+	}
 	for _, id := range cfg.Machines {
 		eps = append(eps, sockets.Endpoint{
 			Name:        GuestSocket(id),
@@ -274,6 +357,30 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			Ops: map[string]sockets.Handler{
 				"whoami": func(_ context.Context, p sockets.Peer, _ json.RawMessage) (any, error) { return p, nil },
 			},
+		})
+	}
+	if cfg.PageSocket != nil {
+		if ch == nil {
+			store.Close()
+			return nil, errors.New("daemon: the local UI's socket needs the owner channel (OwnerState)")
+		}
+		lcfg := localsrv.Config{Owner: ch, Line: cfg.PageSocket.Line,
+			Paused: func() []localapi.PausedGrant { return pausedGrants(gate) }, AskResume: func(ctx context.Context, id, pause string) (string, error) {
+				return askResume(ctx, gate, id, pause)
+			}}
+		if cfg.PageSocket.DescribeRoot != nil {
+			lcfg.DescribeRoot, lcfg.Follow = cfg.PageSocket.DescribeRoot, pageFollow(gate)
+		}
+		ui := localsrv.New(lcfg)
+		uid := cfg.PageSocket.UID
+		eps = append(eps, sockets.Endpoint{
+			Name:        localapi.Socket,
+			Peer:        sockets.Peer{Kind: "localui"},
+			PeerUID:     &uid,
+			PeerGID:     cfg.PageSocket.GID,
+			MaxConns:    8,
+			IdleTimeout: 30 * time.Second,
+			Ops:         ui.Ops(),
 		})
 	}
 	srv := &sockets.Server{Dir: cfg.SocketDir}
@@ -342,3 +449,57 @@ func (d *Daemon) Admission() *admission.Controller { return d.adm }
 
 // Wait returns after ctx is done and every socket and the journal are closed.
 func (d *Daemon) Wait() { <-d.done }
+
+// pausedGrants are the gate's paused grants as the page shows them
+// (W5a-resume).
+func pausedGrants(g *grants.Gate) []localapi.PausedGrant {
+	var out []localapi.PausedGrant
+	for _, p := range g.Paused() {
+		out = append(out, localapi.PausedGrant{ID: p.ID, What: p.What, By: p.By, Pause: p.Pause})
+	}
+	return out
+}
+
+// askResume asks to resume a paused grant from the page and says where the
+// owner approves it. A grant no longer paused as the page showed it is
+// told in fixed words; any other failure stays the socket's fixed code.
+func askResume(ctx context.Context, g *grants.Gate, id, pause string) (string, error) {
+	if _, err := g.AskResume(ctx, id, pause); errors.Is(err, grants.ErrPauseChanged) {
+		return "That grant is no longer paused as this page showed it. Reload the page.", nil
+	} else if err != nil {
+		return "", err
+	}
+	return "Asked to resume " + id + ". It shows under Approvals shortly; approve it there with a code from your code generator.", nil
+}
+
+// pageFollow submits the page's request to follow a held root: a follow
+// intent under a fresh nonce, which the gate asks of the owner on the page
+// at the high tier (GR26).
+func pageFollow(g *grants.Gate) func(ctx context.Context, name, digest string) (string, error) {
+	return func(ctx context.Context, name, digest string) (string, error) {
+		in := grants.FollowIntent(followNonce(), name, digest)
+		st, err := g.Submit(in)
+		if err == nil && st.State == journal.Pending {
+			st, err = g.Authorize(ctx, in.ID)
+		}
+		switch {
+		case err != nil:
+			return "", err
+		case st.State == journal.Pending:
+			return FollowAsked, nil
+		case st.State == journal.Denied && name != "" && !grants.FollowNameOK(name):
+			return FollowRefusedName, nil
+		case st.State == journal.Denied:
+			return FollowRefused, nil
+		}
+		return "", errors.New("daemon: follow request " + string(st.State))
+	}
+}
+
+// followNonce is 16 random bytes in lower-case hex, the form
+// grants.FollowID admits (OSS-10w L3).
+func followNonce() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b) // crypto/rand.Read never fails (Go 1.24)
+	return hex.EncodeToString(b)
+}

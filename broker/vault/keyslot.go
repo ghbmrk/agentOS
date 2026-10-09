@@ -44,6 +44,12 @@ const KindPCRPolicyKey = "pcr_policy_key"
 // it lives only in the vault.
 const KindTPMLockoutAuth = "tpm_lockout_auth"
 
+// KindTPMDAOriginal keeps a trusted PC's own TPM dictionary-attack
+// settings while a boot PIN slot has replaced them, so turning the PIN off
+// puts them back (HOST-1f, HW-8). Not secret, but kept in the vault for
+// its integrity: a forged entry could weaken the PC's guess limit.
+const KindTPMDAOriginal = "tpm_da_original"
+
 // MinPassphraseLen is the shortest normalized passphrase enrolled. The
 // Owner Card's generated passphrase carries at least 80 bits (§8.1); this
 // floor only stops an obviously weak replacement.

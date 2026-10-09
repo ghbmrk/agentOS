@@ -24,13 +24,20 @@ const frameSamples = 160
 // call is one outbound call. Only one runs at a time.
 type call struct {
 	l      *Line
-	dlg    *sipgo.DialogClientSession
+	dlg    *sipgo.DialogClientSession // an outbound call
+	sdlg   *sipgo.DialogServerSession // or a call to the line (NoCallsClip)
 	conn   *net.UDPConn
 	ctx    context.Context // ends the INVITE; cancelling it before an answer sends CANCEL
 	cancel context.CancelFunc
 	active chan struct{}
 	ended  chan struct{}
 	endMu  sync.Once
+
+	// A call to the line plays its clip only after both of these (F1).
+	acked     chan struct{} // the caller acknowledged the line's 200
+	latched   chan struct{} // the caller's audio authenticated from its offered address
+	ackOnce   sync.Once
+	latchOnce sync.Once
 
 	say  sync.Mutex // serializes Say and owns seq and ts
 	seq  uint16
@@ -41,6 +48,7 @@ type call struct {
 	id  string     // dialog ID once answered
 	ans answer
 	tx  *srtp.Context
+	rx  *srtp.Context // the caller's key, for a call to the line
 	ss  uint32
 	err error
 }
@@ -90,13 +98,8 @@ func (l *Line) Dial(ctx context.Context, number string) (secondline.Call, error)
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	req.SetBody([]byte(off.String()))
 
-	cctx, cancel := context.WithCancel(context.Background())
-	c := &call{l: l, conn: conn, ctx: cctx, cancel: cancel, active: make(chan struct{}), ended: make(chan struct{})}
-	var b [10]byte
-	_, _ = rand.Read(b[:])
-	c.ss = binary.BigEndian.Uint32(b[:])
-	c.seq = binary.BigEndian.Uint16(b[4:]) // RFC 3550: random first sequence number and timestamp
-	c.ts = binary.BigEndian.Uint32(b[6:])
+	c := newCall(l, conn)
+	cancel := c.cancel
 	ua := &sipgo.DialogUA{Client: l.cli, ContactHDR: contact, RewriteContact: true}
 	if c.dlg, err = ua.WriteInvite(ctx, req); err != nil {
 		cancel()
@@ -106,6 +109,19 @@ func (l *Line) Dial(ctx context.Context, number string) (secondline.Call, error)
 	l.call = c
 	go c.run(off)
 	return c, nil
+}
+
+// newCall starts a call's state on its audio socket.
+func newCall(l *Line, conn *net.UDPConn) *call {
+	cctx, cancel := context.WithCancel(context.Background())
+	c := &call{l: l, conn: conn, ctx: cctx, cancel: cancel, active: make(chan struct{}), ended: make(chan struct{}),
+		acked: make(chan struct{}), latched: make(chan struct{})}
+	var b [10]byte
+	_, _ = rand.Read(b[:])
+	c.ss = binary.BigEndian.Uint32(b[:])
+	c.seq = binary.BigEndian.Uint16(b[4:]) // RFC 3550: random first sequence number and timestamp
+	c.ts = binary.BigEndian.Uint32(b[6:])
+	return c
 }
 
 func (c *call) run(off offer) {
@@ -123,6 +139,11 @@ func (c *call) run(off offer) {
 			if err == nil {
 				continue
 			}
+		}
+		if errors.As(err, &de) {
+			// Refused, busy or unanswered: calls are not retried.
+			c.end(fmt.Errorf("%w: %d", ErrCallFailed, de.Res.StatusCode))
+			return
 		}
 		if err != nil {
 			c.end(err)
@@ -144,6 +165,8 @@ func (c *call) run(off offer) {
 	if err == nil {
 		tx, err = Context(off.key)
 	}
+	clear(off.key)
+	clear(ans.key) // the far end's audio is drained unread
 	if err != nil {
 		// Answered without SRTP (or unusably): hang up before a word.
 		if bye := d.Bye(ackCtx); bye != nil {
@@ -165,12 +188,26 @@ func (c *call) run(off offer) {
 }
 
 // drain reads and drops the far end's audio, so it never backs up; the
-// line only speaks (speech recognition is a later package, at M13).
+// line only speaks (speech recognition is a later package, at M13). On a
+// call to the line it latches on the first packet from the caller's
+// offered address that authenticates under the caller's key.
 func (c *call) drain() {
+	c.mu.Lock()
+	rx, want := c.rx, c.ans.addr
+	c.mu.Unlock()
 	buf := make([]byte, 1500)
 	for {
-		if _, _, err := c.conn.ReadFromUDP(buf); err != nil {
+		n, from, err := c.conn.ReadFromUDP(buf)
+		if err != nil {
 			return
+		}
+		if rx == nil || want == nil || !from.IP.Equal(want.IP) || from.Port != want.Port {
+			continue
+		}
+		var h rtp.Header
+		if _, err := rx.DecryptRTP(nil, buf[:n], &h); err == nil {
+			c.latchOnce.Do(func() { close(c.latched) })
+			rx = nil // latched; the rest is dropped unread
 		}
 	}
 }
@@ -265,7 +302,12 @@ func (c *call) Hangup(ctx context.Context) error {
 	}
 	select {
 	case <-c.active:
-		err := c.dlg.Bye(ctx)
+		var err error
+		if c.sdlg != nil {
+			err = c.sdlg.Bye(ctx)
+		} else {
+			err = c.dlg.Bye(ctx)
+		}
 		c.end(nil)
 		return err
 	default:

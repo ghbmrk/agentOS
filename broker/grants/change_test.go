@@ -173,6 +173,40 @@ func TestUnansweredChangeIsNotADecline(t *testing.T) {
 	}
 }
 
+// UPD-5 (P2-2a f3; L3 on #423): a release whose request expired is
+// reported to Loop 3 as lapsed, so the next update check offers it again;
+// one left out of a partial YES ("not chosen") is not re-offered, and like
+// any omission it is no decline (CH-13, arbitrator Q3 on #48).
+func TestOmittedReleaseIsNotReoffered(t *testing.T) {
+	// REQ: UPD-5
+	r, p := changeRig(t)
+	ctx := context.Background()
+	for _, c := range []struct {
+		v      int64
+		why    string
+		lapsed bool
+	}{{40, "expired", true}, {41, "not chosen", false}} {
+		rep, err := p.ProposeRelease(ctx, signed(t, c.v, map[string][]byte{"host-image/release": {byte(c.v)}}))
+		if err != nil || rep.State != change.StateAwaitingOwner {
+			t.Fatalf("%+v %v", rep, err)
+		}
+		r.g.Flush()
+		r.decide(false, c.why)
+		if st := r.state("chg:" + rep.ID + ":adopt"); st.State != journal.Denied {
+			t.Fatalf("%s: %s", c.why, st.State)
+		}
+		if got := p.Lapsed(rep.ID); got != c.lapsed {
+			t.Errorf("%s: lapsed %v, want %v", c.why, got, c.lapsed)
+		}
+		if p.Waiting(rep.ID) {
+			t.Errorf("%s: the proposal was kept", c.why)
+		}
+	}
+	if d := p.Digest(); len(d) != 0 {
+		t.Fatalf("an unanswered or omitted release reads as a decline: %q", d)
+	}
+}
+
 // CHG-4, CHG-5 (security lens R1 on #48): turning sharing on changes what
 // leaves the box, so like a grant it needs the local page as well as the
 // owner's code; without that page it is refused at once. Other settings
@@ -200,7 +234,7 @@ func TestSharingOnNeedsTheLocalPage(t *testing.T) {
 
 	noUI, q := changeRig(t)
 	noUI.g.cfg.LocalUI = false
-	if err := q.SetSharing(ctx, true); err == nil || !strings.Contains(err.Error(), "local page") {
+	if err := q.SetSharing(ctx, true); err == nil || !strings.Contains(err.Error(), NoPageSharing) {
 		t.Fatalf("sharing on without a local page: %v", err)
 	}
 	// A setting that only needs the code cannot be confirmed locally.
@@ -265,7 +299,7 @@ func TestReleaseNeedsTheLocalPage(t *testing.T) {
 	id := "chg:" + rep.ID + ":adopt"
 	r.g.Flush()
 	r.decide(true, "owner")
-	if st := r.state(id); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") {
+	if st := r.state(id); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "Wi-Fi page") {
 		t.Fatalf("release installed on the code alone: %s %q", st.State, st.Permission.Reason)
 	}
 	if err := r.g.ConfirmLocal(id); err != nil {
@@ -287,10 +321,10 @@ func TestReleaseNeedsTheLocalPage(t *testing.T) {
 	if noUI.own.count() != n {
 		t.Fatal("texted a code that cannot complete without the local page")
 	}
-	if notes := noUI.own.notes; len(notes) != 1 || notes[0] != "Waiting for your confirmation on the box's local page, or your recovery key." {
+	if notes := noUI.own.notes; len(notes) != 1 || notes[0] != "Waiting for your confirmation on the box's Wi-Fi page, or your recovery key." {
 		t.Fatalf("%q", notes)
 	}
-	if st := noUI.state("chg:" + rep.ID + ":adopt"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") {
+	if st := noUI.state("chg:" + rep.ID + ":adopt"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "Wi-Fi page") {
 		t.Fatalf("%s %q", st.State, st.Permission.Reason)
 	}
 }
@@ -326,7 +360,7 @@ func (f fakeChanges) Check(context.Context, journal.Phase, journal.Intent) error
 func (fakeChanges) Line(journal.Intent) (owner.Item, error) {
 	return owner.Item{Object: "x", Facts: owner.Facts{Verb: "adopt"}}, nil
 }
-func (fakeChanges) Decided(context.Context, journal.Intent, bool) {}
+func (fakeChanges) Decided(context.Context, journal.Intent, string) {}
 
 // L3 R2 on #48: only ErrNeedsOwner itself asks; an error that merely wraps
 // or joins it with a refusal denies.

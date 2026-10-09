@@ -41,11 +41,15 @@ import (
 
 // ChannelPinned is UPD-4's pinned channel: no automatic updates, security
 // notices only. Stable and fast are update.ChannelStable and ChannelFast.
-const ChannelPinned = "pinned"
+const ChannelPinned = loops.ChannelPinned
 
 // Proposer is the part of the change pipeline Loop 3 uses.
 type Proposer interface {
 	ProposeRelease(ctx context.Context, v *update.Verified) (change.Report, error)
+	// Lapsed reports, once, that proposal id was dropped because the
+	// owner's request closed unanswered (change.Pipeline.Lapsed). It must
+	// not call into Loop 3: it is called under Loop 3's lock.
+	Lapsed(id string) bool
 }
 
 // Config configures New.
@@ -58,9 +62,6 @@ type Config struct {
 	// Online reports network access. No mirror is contacted while it is
 	// false, and the box is never reported current. Required.
 	Online func() bool
-	// Channel is the owner's update channel: update.ChannelStable (the
-	// default), update.ChannelFast, or ChannelPinned (UPD-4).
-	Channel func() string
 	// Attestations fetches attestations for a release manifest path (for
 	// example releases/12.json). They arrive from anyone and are checked
 	// by update. Nil: none are known.
@@ -83,8 +84,9 @@ type Config struct {
 	// independent. Nil: none.
 	OwnKey ed25519.PublicKey
 	// Settings reads the owner's loop settings (the scheduler's
-	// Settings), so the status can say when update checks are off. Nil:
-	// every loop on.
+	// Settings): whether update checks are on, and the owner's update
+	// channel and cadence (UPD-4, UPD-5; loops.UpdateSettings), read at
+	// each check. Nil: every loop on, and the spec defaults.
 	Settings func() loops.Settings
 	// Pipeline is the change pipeline (§11).
 	Pipeline Proposer
@@ -95,9 +97,6 @@ type Config struct {
 	// Retry is how soon to look again after a failed check, or for a
 	// security fix waiting for its attestation. Default 1 hour.
 	Retry time.Duration
-	// Soak is how long a stable box waits after first seeing an ordinary
-	// stable release before proposing it (UPD-5). Default 7 days.
-	Soak time.Duration
 	// MinPasses is how many independent passing fast-channel attestations
 	// an ordinary stable release needs (UPD-5's "sufficient"). Default 1.
 	MinPasses int
@@ -160,6 +159,9 @@ type state struct {
 	Seen       map[string]time.Time   `json:"seen,omitempty"`
 	Proposed   map[int64]change.State `json:"proposed,omitempty"`
 	ProposedAt map[int64]time.Time    `json:"proposed_at,omitempty"`
+	// ProposalID is the pipeline's proposal ID per proposed version, so a
+	// check can ask whether one awaiting the owner lapsed (M8).
+	ProposalID map[int64]string `json:"proposal_id,omitempty"`
 	// DigestCurrent: the last digest already said the box is up to date,
 	// so the next stays quiet while it still is.
 	DigestCurrent bool `json:"digest_current,omitempty"`
@@ -176,6 +178,16 @@ type state struct {
 	// stage on its own: testedProject (D6 interim, the project's own test
 	// box) or testedIndependent; absent when the owner approves it.
 	TestedBy map[int64]string `json:"tested_by,omitempty"`
+	// Evidence is, per proposed version, how many listed independent
+	// attestors and maintainer-operated ones passed it when it was asked
+	// (OSS-9: evidence for the owner's text, never authority).
+	Evidence map[int64][2]int `json:"evidence,omitempty"`
+	// Source is the root digest of the fork the last check ran on, empty
+	// for the project's own chain; a change forgets the old chain's
+	// releases.
+	Source string `json:"source,omitempty"`
+	// SaidSource is the source the digest last announced (OSS-10).
+	SaidSource string `json:"said_source,omitempty"`
 }
 
 // Loop3 is the maintenance loop's scheduler source.
@@ -202,9 +214,6 @@ func New(cfg Config) (*Loop3, error) {
 	if cfg.Mirrors == nil {
 		cfg.Mirrors = func() []update.Source { return nil }
 	}
-	if cfg.Channel == nil {
-		cfg.Channel = func() string { return update.ChannelStable }
-	}
 	if cfg.Settings == nil {
 		cfg.Settings = func() loops.Settings { return loops.Settings{} }
 	}
@@ -213,9 +222,6 @@ func New(cfg Config) (*Loop3, error) {
 	}
 	if cfg.Retry <= 0 {
 		cfg.Retry = time.Hour
-	}
-	if cfg.Soak <= 0 {
-		cfg.Soak = 7 * 24 * time.Hour
 	}
 	if cfg.AttestWait <= 0 {
 		cfg.AttestWait = 24 * time.Hour
@@ -238,9 +244,7 @@ func New(cfg Config) (*Loop3, error) {
 	}
 	for v, s := range l.st.Proposed {
 		if s == change.StateAwaitingOwner {
-			delete(l.st.Proposed, v)
-			delete(l.st.ProposedAt, v)
-			delete(l.st.TestedBy, v)
+			l.unproposeLocked(v)
 			l.st.Next = time.Time{}
 		}
 	}
@@ -295,6 +299,16 @@ func (l *Loop3) Next(_ context.Context, _ bool) (loops.Job, bool) {
 	return loops.Job{Name: "update-check", Run: l.check}, true
 }
 
+// unproposeLocked forgets what Loop 3 recorded for proposed version v, so
+// a check proposes it again.
+func (l *Loop3) unproposeLocked(v int64) {
+	delete(l.st.Proposed, v)
+	delete(l.st.ProposedAt, v)
+	delete(l.st.ProposalID, v)
+	delete(l.st.TestedBy, v)
+	delete(l.st.Evidence, v)
+}
+
 func (l *Loop3) noteOfflineLocked() {
 	if l.st.OfflineSince.IsZero() {
 		l.st.OfflineSince = l.cfg.Now()
@@ -317,7 +331,8 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if err := ctx.Err(); err != nil {
 		return loops.Result{Err: err}
 	}
-	channel := l.cfg.Channel()
+	set := l.cfg.Settings().Updates
+	channel := set.ChannelName()
 	opts := update.Options{Channel: channel, Now: l.cfg.Now, Attestors: l.cfg.Attestors, InterimAttestors: l.cfg.InterimAttestors}
 	if channel == ChannelPinned {
 		// Checked as stable, for security notices only (UPD-4).
@@ -341,6 +356,10 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	installed, ierr := l.cfg.Store.Installed()
 	if failure == "" && ierr != nil {
 		failure, err = failState, ierr
+	}
+	src, ferr := l.cfg.Store.Following()
+	if failure == "" && ferr != nil {
+		failure, err = failState, ferr
 	}
 	var (
 		rel *update.Verified
@@ -370,6 +389,14 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: errors.Join(err, serr)}
 	}
 	l.st.LastOnline, l.st.Failure = now, ""
+	if src.RootSHA256 != l.st.Source {
+		// Another chain (OSS-10): its version numbers say nothing of the
+		// old chain's, so what was proposed or seen there is forgotten.
+		// A request the old chain left with the owner cannot stage: the
+		// store refuses a release checked under another root.
+		l.st.Source = src.RootSHA256
+		l.st.Proposed, l.st.ProposedAt, l.st.TestedBy, l.st.Evidence, l.st.ProposalID = nil, nil, nil, nil, nil
+	}
 	l.st.FreshFailed = res.FreshnessFailed
 	if res.RootRotatedTo > 0 {
 		l.st.RootRotatedTo = res.RootRotatedTo
@@ -392,9 +419,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	}
 	for v := range l.st.Proposed {
 		if v <= installed.Version {
-			delete(l.st.Proposed, v)
-			delete(l.st.ProposedAt, v)
-			delete(l.st.TestedBy, v)
+			l.unproposeLocked(v)
 		}
 	}
 	l.st.Newest, l.st.NewestSecurity, l.st.Pending = 0, false, nil
@@ -413,6 +438,11 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		l.st.Seen[key] = now
 	}
 	seen := l.st.Seen[key]
+	if l.st.Proposed[v] == change.StateAwaitingOwner && l.st.ProposalID[v] != "" && l.cfg.Pipeline.Lapsed(l.st.ProposalID[v]) {
+		// The owner's request closed unanswered and the pipeline dropped
+		// the proposal (change.Decided): offer it again now.
+		l.unproposeLocked(v)
+	}
 	_, proposed := l.st.Proposed[v]
 	if channel == ChannelPinned {
 		l.st.Pending = &pending{Version: v, Security: security, Why: waitPinned}
@@ -425,7 +455,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		return loops.Result{Err: serr}
 	}
 
-	o := l.decide(ctx, rel, m, security, channel, seen, now)
+	o := l.decide(ctx, rel, m, security, set, seen, now)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -442,6 +472,14 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 			l.st.ProposedAt = map[int64]time.Time{}
 		}
 		l.st.ProposedAt[v] = now
+		if l.st.ProposalID == nil {
+			l.st.ProposalID = map[int64]string{}
+		}
+		l.st.ProposalID[v] = o.id
+		if l.st.Evidence == nil {
+			l.st.Evidence = map[int64][2]int{}
+		}
+		l.st.Evidence[v] = o.evidence
 		if o.tested != "" {
 			if l.st.TestedBy == nil {
 				l.st.TestedBy = map[int64]string{}
@@ -541,7 +579,9 @@ const (
 // pipeline's state), is waiting (wait), or was preempted (neither).
 type outcome struct {
 	proposed change.State
+	id       string // the pipeline's proposal ID
 	tested   string
+	evidence [2]int // listed independent and maintainer-operated passes
 	wait     *pending
 	value    float64
 	err      error
@@ -549,14 +589,18 @@ type outcome struct {
 
 // decide applies UPD-8 and UPD-5 to a verified release newer than the
 // installed one and proposes it when they allow.
-func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manifest, security bool, channel string, seen, now time.Time) outcome {
+func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manifest, security bool, set loops.UpdateSettings, seen, now time.Time) outcome {
 	mf, err := rel.ManifestFile()
 	if err != nil {
 		return outcome{wait: &pending{Version: m.Version, Security: security, Why: waitPropose}, err: err}
 	}
 	// update counts only reports from the allow-list (Options.Attestors).
 	atts, aerr := l.attestations(ctx, mf.Path)
-	if security {
+	if security && set.SecurityAsk {
+		// SECURITY UPDATES ASK: every security fix goes to the owner at
+		// once, never staged on its own (UPD-5).
+		atts = nil
+	} else if security {
 		// UPD-8, D6: a security fix auto-stages only with a passing report
 		// from a listed attestor. Without one it waits a day for one, then
 		// goes to the owner (CH-3); with no attestor listed it goes to the
@@ -568,11 +612,11 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 			len(l.cfg.Attestors) > 0 && now.Before(seen.Add(l.cfg.AttestWait)) {
 			return outcome{wait: &pending{Version: m.Version, Security: true, Why: waitAttestation}, err: aerr}
 		}
-	} else if channel != update.ChannelFast {
+	} else if set.ChannelName() != update.ChannelFast {
 		// UPD-5: an ordinary stable release soaks, and needs passing
 		// reports from listed attestors when any exist, before it is
 		// offered.
-		until := seen.Add(l.cfg.Soak)
+		until := seen.Add(time.Duration(set.Soak()) * 24 * time.Hour)
 		if now.Before(until) || (len(l.cfg.Attestors) > 0 && rel.IndependentPasses(atts, l.cfg.OwnKey) < l.cfg.MinPasses) {
 			return outcome{wait: &pending{Version: m.Version, Why: waitSoak, Until: until}, err: aerr}
 		}
@@ -587,7 +631,8 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 		}
 		return outcome{wait: &pending{Version: m.Version, Security: security, Why: waitPropose}, err: err}
 	}
-	o := outcome{proposed: rep.State}
+	ev := rel.Evidence(atts, l.cfg.OwnKey)
+	o := outcome{proposed: rep.State, id: rep.ID, evidence: [2]int{ev.Independent, ev.Maintainer}}
 	if security && rel.SecurityAutoStage(atts, l.cfg.OwnKey) == nil {
 		o.tested = testedIndependent
 		if rel.InterimAttestation() {
@@ -625,12 +670,12 @@ type Status struct {
 const when = "Mon 2 Jan 15:04"
 
 var failText = map[string]string{
-	failExpired:   "the update source's data has expired, or this box's clock is wrong, so newer updates may be hidden",
+	failExpired:   "the update source's data has expired, or my clock is wrong, so newer updates may be hidden",
 	failSigned:    "the update data was not properly signed",
-	failRollback:  "the update source offered older data than this box already has",
+	failRollback:  "the update source offered older data than I already have",
 	failReach:     "the update source could not be reached",
 	failNoMirrors: "no update source is set up",
-	failState:     "this box's update record could not be read",
+	failState:     "my update record could not be read",
 	failRelease:   "the newest release could not be read",
 }
 
@@ -638,12 +683,31 @@ var failText = map[string]string{
 func (l *Loop3) Status() Status {
 	online, set := l.cfg.Online(), l.cfg.Settings()
 	installed, ierr := l.cfg.Store.Installed()
+	src, serr := l.cfg.Store.Following()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.statusLocked(online, set, installed, ierr)
+	return l.statusLocked(online, set, installed, src, errors.Join(ierr, serr))
 }
 
-func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installed, ierr error) Status {
+// statusLocked is the status line; on a fork it also names the fork
+// (Security C7) and, with no attestor listed, says each security fix is
+// the owner's to approve (potency C1).
+func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installed, src update.Followed, ierr error) Status {
+	st := l.baseStatusLocked(online, set, in, src, ierr)
+	if src.Name == "" {
+		return st
+	}
+	st.Line += fmt.Sprintf(" Following: %s (%s).", src.Name, src.Fingerprint[:min(8, len(src.Fingerprint))])
+	if len(l.cfg.Attestors) == 0 {
+		st.Line += " " + forkAsks
+	}
+	return st
+}
+
+// forkAsks is potency C1's STATUS line on a fork with no attestor listed.
+const forkAsks = "Security fixes: you approve each one, since no attestor is listed for the fork you follow."
+
+func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Installed, src update.Followed, ierr error) Status {
 	now := l.cfg.Now()
 	st := l.st
 	last := "never"
@@ -656,11 +720,11 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 	}
 	switch {
 	case ierr != nil:
-		return Status{Line: "Updates: could not read this box's update state."}
+		return Status{Line: "Updates: I could not read my update state."}
 	case !online && st.LastOnline.IsZero():
-		return Status{Line: "Updates: not checked yet, because the box is offline." + drive}
+		return Status{Line: "Updates: not checked yet, because I am offline." + drive}
 	case !online:
-		return Status{Line: fmt.Sprintf("Updates: not checked since %s, because the box is offline.", last) + drive}
+		return Status{Line: fmt.Sprintf("Updates: not checked since %s, because I am offline.", last) + drive}
 	case set.Off:
 		return Status{Line: fmt.Sprintf("Updates: last checked %s, but update checks are off. Reply LOOPS ON to restart them.", last) + drive}
 	case !set.On(loops.Maintain):
@@ -670,7 +734,7 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 	case st.LastOnline.IsZero():
 		return Status{Line: "Updates: not checked yet." + drive}
 	case now.Before(st.LastOnline):
-		return Status{Line: fmt.Sprintf("Updates: this box's clock is behind its last check (%s), so it will check again.", last)}
+		return Status{Line: fmt.Sprintf("Updates: my clock is behind my last check (%s), so I will check again.", last)}
 	case in.UnconfirmedFreshness && st.FreshFailed:
 		return Status{Line: update.NotConfirmedNotice}
 	case in.UnconfirmedFreshness:
@@ -678,7 +742,7 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 	case now.Sub(st.LastOnline) > 2*l.cfg.Interval:
 		// Loop 3 runs only in spare time (LOOP-1), and makes no model
 		// calls, so a busy box is the only other reason.
-		return Status{Line: fmt.Sprintf("Updates: last checked %s. The box has been busy and will check again soon.", last)}
+		return Status{Line: fmt.Sprintf("Updates: last checked %s. I have been busy and will check again soon.", last)}
 	}
 	if p := st.Pending; p != nil {
 		return Status{Line: pendingLine(p)}
@@ -686,7 +750,7 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 	if st.Newest > in.Version {
 		switch st.Proposed[st.Newest] {
 		case change.StateRejected:
-			return Status{Line: fmt.Sprintf("Update %d did worse on this box's tests and was not installed.", st.Newest)}
+			return Status{Line: fmt.Sprintf("Update %d did worse on my tests and was not installed.", st.Newest)}
 		case change.StateAdopted:
 			ready := fmt.Sprintf("update %d is ready and installs at the next quiet time.", st.Newest)
 			switch {
@@ -700,13 +764,24 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity && st.TestedBy[st.Newest] != "" {
 			return Status{Line: fmt.Sprintf("Security update %d has been waiting for your approval since %s.", st.Newest, at.Format("Mon 2 Jan"))}
 		}
+		// On a fork, a request waiting for the owner also says who checked
+		// the release (OSS-9, UX Q-C).
+		evidence := ""
+		if ev := st.Evidence[st.Newest]; src.Name != "" {
+			evidence = " " + EvidenceLine(src.Name, ev[0], ev[1], false)
+		}
 		if at, ok := st.ProposedAt[st.Newest]; ok && st.NewestSecurity {
-			return Status{Line: fmt.Sprintf("Security update %d needs your approval: no trusted independent test report yet. Asked %s.", st.Newest, at.Format("Mon 2 Jan"))}
+			return Status{Line: fmt.Sprintf("Security update %d needs your approval: no trusted independent test report yet. Asked %s.", st.Newest, at.Format("Mon 2 Jan")) + evidence}
 		}
 		if at, ok := st.ProposedAt[st.Newest]; ok {
-			return Status{Line: fmt.Sprintf("Update %d has been waiting for your approval since %s.", st.Newest, at.Format("Mon 2 Jan"))}
+			return Status{Line: fmt.Sprintf("Update %d has been waiting for your approval since %s.", st.Newest, at.Format("Mon 2 Jan")) + evidence}
 		}
 		return Status{Line: fmt.Sprintf("Update %d is waiting for your approval.", st.Newest)}
+	}
+	if src.Name != "" {
+		// UPD-8 holds on a fork: nothing older than the installed release
+		// is taken, so a fork behind it has nothing to offer (Security C5).
+		return Status{Current: true, Line: fmt.Sprintf("Updates: %s has no release newer than yours yet (checked %s).", src.Name, last)}
 	}
 	return Status{Current: true, Line: fmt.Sprintf("Updates: up to date (checked %s).", last)}
 }
@@ -714,17 +789,17 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, in update.Installe
 func pendingLine(p *pending) string {
 	switch {
 	case p.Why == waitPinned && p.Security:
-		return fmt.Sprintf("Security update %d is out, but this box is pinned, so it will not install it on its own.", p.Version)
+		return fmt.Sprintf("Security update %d is out. I am pinned, so I won't install it. Reply UPDATES STABLE to take it and later tested releases.", p.Version)
 	case p.Why == waitPinned:
-		return "Updates: this box is pinned, so it does not install updates on its own."
+		return "Updates: I am pinned, so I do not install updates on my own. Reply UPDATES STABLE to take them and later tested releases."
 	case p.Why == waitAttestation:
 		return fmt.Sprintf("Security update %d is waiting for an independent test report before it installs.", p.Version)
 	case p.Why == waitSoak:
-		return fmt.Sprintf("Update %d is out. The box will offer it after %s, once other boxes have tested it.", p.Version, p.Until.Format("Mon 2 Jan"))
+		return fmt.Sprintf("Update %d is out. I will offer it after %s, once other boxes have tested it.", p.Version, p.Until.Format("Mon 2 Jan"))
 	case p.Why == waitPreempted:
-		return fmt.Sprintf("Update %d was found. The box will look at it again soon.", p.Version)
+		return fmt.Sprintf("Update %d was found. I will look at it again soon.", p.Version)
 	case p.Security:
-		return fmt.Sprintf("Security update %d was found but could not be tested yet. The box will try again within the hour.", p.Version)
+		return fmt.Sprintf("Security update %d was found but could not be tested yet. I will try again within the hour.", p.Version)
 	}
 	return fmt.Sprintf("Update %d was found but could not be tested yet.", p.Version)
 }
@@ -735,10 +810,21 @@ func pendingLine(p *pending) string {
 func (l *Loop3) Digest() []string {
 	online, set := l.cfg.Online(), l.cfg.Settings()
 	installed, ierr := l.cfg.Store.Installed()
+	src, serr := l.cfg.Store.Following()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	st := l.statusLocked(online, set, installed, ierr)
+	st := l.statusLocked(online, set, installed, src, errors.Join(ierr, serr))
 	var out []string
+	if serr == nil && src.RootSHA256 != l.st.SaidSource {
+		// Once per switch (Security C7, UX Q-C).
+		if src.Name != "" {
+			out = append(out, fmt.Sprintf("Updates now come from %s, chosen by you on %s. You can switch back on my Wi-Fi page.", src.Name, src.Since.Format("Mon 2 Jan")))
+		} else {
+			out = append(out, "Updates now come from the AgentOS project again, chosen by you.")
+		}
+		l.st.SaidSource = src.RootSHA256
+		l.saveLocked()
+	}
 	if !st.Current || !l.st.DigestCurrent {
 		out = append(out, st.Line)
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 )
@@ -21,6 +22,9 @@ const (
 	// WhySettings: the owner's own configuration replaced the adopted
 	// state outside the pipeline (Superseded); never an intent ID.
 	WhySettings = "settings"
+	// WhyForgotten: the owner forgot a task it was learned from
+	// (ForgetGoal, C23); never an intent ID.
+	WhyForgotten = "forgotten"
 )
 
 // Check is the policy for meta.change intents (OP-3), run at authorize and
@@ -201,6 +205,7 @@ func (p *Pipeline) reloadLocked() error {
 		st.Applied = map[string]bool{}
 	}
 	p.st = st
+	p.dropOldBasesLocked(p.st.Active.Hash())
 	for ns, tg := range p.cfg.Targets {
 		if err := tg.Apply(p.st.Active.under(ns)); err != nil {
 			return err
@@ -229,6 +234,7 @@ func (p *Pipeline) adoptLocked(id, basis string) error {
 		staged = staged || c == ClassGuestImage || c == ClassHostImage
 	}
 	p.st.Active = pr.next
+	p.dropOldBasesLocked(pr.next.Hash())
 	if pr.cand.Source == Upstream {
 		// A later release supersedes declined ones in the namespaces it
 		// installs.
@@ -242,7 +248,7 @@ func (p *Pipeline) adoptLocked(id, basis string) error {
 	}
 	p.st.Adoptions = append(p.st.Adoptions, &Adoption{ID: id, Short: short, Source: pr.cand.Source,
 		Classes: pr.classes, Basis: basis, Edits: pr.edits, Score: pr.report.Score, Public: pr.cand.Public,
-		Staged: staged, Origin: pr.cand.Origin, At: p.cfg.Now()})
+		Staged: staged, Origin: pr.cand.Origin, Goals: pr.cand.Goals, At: p.cfg.Now()})
 	return nil
 }
 
@@ -325,6 +331,9 @@ func (p *Pipeline) revertLocked(id, why string) error {
 	if a == nil || a.Reverted != "" {
 		return errors.New("no active adoption " + id)
 	}
+	if err := unsettled(a, why); err != nil {
+		return err
+	}
 	next, err := p.undoTreeLocked(a)
 	if err != nil {
 		return err
@@ -336,6 +345,7 @@ func (p *Pipeline) revertLocked(id, why string) error {
 		return err
 	}
 	p.st.Active = next
+	p.dropOldBasesLocked(next.Hash())
 	a.Reverted = why
 	return nil
 }
@@ -360,6 +370,10 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		return fmt.Errorf("change: %s is not an active adoption", ref)
 	}
 	id := a.ID
+	if err := unsettled(a, why); err != nil {
+		p.mu.Unlock()
+		return err
+	}
 	if _, err := p.undoTreeLocked(a); err != nil {
 		p.mu.Unlock()
 		return err
@@ -378,23 +392,73 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		Params: map[string]any{"adoption": id, "why": why}})
 }
 
-// ConfirmStaged records that a staged image booted and passed its health
-// check (UPD-1); the update code calls it.
-func (p *Pipeline) ConfirmStaged(ref string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	a := p.adoptionLocked(ref)
-	if a == nil || !a.Staged || a.Reverted != "" {
-		return fmt.Errorf("change: %s is not a staged adoption", ref)
+// unsettled refuses to undo a staged image for any reason but its own
+// fallback: until the update code settles it, the image may already be
+// installed, and an adoption undone under it could never be confirmed, so
+// the applier would wait forever (SR3-4). The owner can undo it once it
+// has started.
+func unsettled(a *Adoption, why string) error {
+	if !a.Staged || why == WhyFallback {
+		return nil
 	}
-	a.Staged = false
-	a.Listed = false // the digest says it is now installed
-	return p.saveLocked()
+	return errors.New("Update " + safe(strings.TrimPrefix(a.Origin, "update:")) + " starts at the next restart; undo it after.")
 }
 
-// StageFailed reverts a staged image that fell back by boot counting.
-func (p *Pipeline) StageFailed(ctx context.Context, ref string) error {
-	return p.revert(ctx, ref, OriginPipeline, WhyFallback)
+// ConfirmStaged records that a staged image booted and passed its health
+// check (UPD-1); the update code calls it with the adoption's exact ID,
+// since an owner-facing ID can be reused. Confirming it again is a
+// success that changes nothing, so the update code can retry until it
+// has recorded the answer (SR3-4). A failed save changes nothing either.
+func (p *Pipeline) ConfirmStaged(id string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.adoptionByIDLocked(id)
+	switch {
+	case a != nil && a.Confirmed:
+		return nil
+	case a == nil || !a.Staged || a.Reverted != "":
+		return fmt.Errorf("change: %s is not a staged adoption", id)
+	}
+	listed := a.Listed
+	a.Staged, a.Confirmed = false, true
+	a.Listed = false // the digest says it is now installed
+	if err := p.saveLocked(); err != nil {
+		a.Staged, a.Confirmed, a.Listed = true, false, listed
+		return err
+	}
+	return nil
+}
+
+// StageFailed reverts a staged image that fell back by boot counting, by
+// the adoption's exact ID. One already undone, by a fallback or by the
+// owner, is a success that changes nothing, so the update code can retry
+// (SR3-4); a confirmed image never fell back.
+func (p *Pipeline) StageFailed(ctx context.Context, id string) error {
+	p.mu.Lock()
+	a := p.adoptionByIDLocked(id)
+	var err error
+	switch {
+	case a == nil || a.Confirmed || (!a.Staged && a.Reverted == ""):
+		err = fmt.Errorf("change: %s is not a staged adoption", id)
+	case a.Reverted != "":
+		p.mu.Unlock()
+		return nil
+	}
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return p.revert(ctx, id, OriginPipeline, WhyFallback)
+}
+
+// adoptionByIDLocked finds an adoption by its exact ID only.
+func (p *Pipeline) adoptionByIDLocked(id string) *Adoption {
+	for _, a := range p.st.Adoptions {
+		if a.ID == id {
+			return a
+		}
+	}
+	return nil
 }
 
 // SetAutoAdopt turns the CHG-6 standing grant off (the owner's text is
@@ -554,6 +618,12 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 			continue
 		}
 		p.mu.Lock()
+		// a was read before the evaluation; a forget meanwhile replaces
+		// the history with copies (C23), so read it again.
+		if a = p.adoptionLocked(id); a == nil || a.Reverted != "" {
+			p.mu.Unlock()
+			continue
+		}
 		protected := a.protected()
 		if protected && a.Concern == "" {
 			a.Concern, a.ConcernScore = why, s

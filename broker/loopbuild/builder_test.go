@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -510,4 +512,183 @@ func TestABuilderHoldsFewConnections(t *testing.T) {
 	if <-served {
 		t.Fatalf("connection %d was served", maxConns+1)
 	}
+}
+
+// W3-builder-image: a builder that has nothing to submit says so on
+// /done, and the job ends at once with no result, instead of holding the
+// one builder slot until its time runs out. /done takes no candidate.
+func TestABuilderCanGiveUp(t *testing.T) {
+	f := &machines{}
+	codes := make(chan int, 2)
+	f.guest = func(id, dir string) {
+		c := guestClient(dir)
+		code, _ := call(c, "GET", "/done", nil)
+		codes <- code
+		code, _ = call(c, "POST", "/done", nil)
+		codes <- code
+	}
+	b := newBuilder(t, f, func(c *Config) { c.Timeout = time.Minute })
+	start := time.Now()
+	if _, err := b.Build(context.Background(), brief(change.ClassProcedure)); !errors.Is(err, ErrNoResult) {
+		t.Fatalf("gave up: %v", err)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("the job waited out its time after the builder gave up")
+	}
+	if a, p := <-codes, <-codes; a != http.StatusMethodNotAllowed || p != 200 {
+		t.Fatalf("/done answered %d, %d", a, p)
+	}
+}
+
+// L3 on #131: a job ends once. After /done or an accepted candidate,
+// another /done or /candidate gets 409 and changes nothing (closing the
+// job twice would panic the broker); a body past twice the candidate
+// limit gets 413 before it is decoded.
+func TestAJobEndsOnce(t *testing.T) {
+	post := func(s *session, h http.HandlerFunc, body string) int {
+		w := httptest.NewRecorder()
+		h(w, httptest.NewRequest("POST", "/", strings.NewReader(body)))
+		return w.Code
+	}
+	cand := `{"files":{"procedures/mail":"v"}}`
+
+	s := &session{ns: "procedures", done: make(chan struct{})}
+	if c := post(s, s.giveUp, ""); c != 200 {
+		t.Fatalf("/done: %d", c)
+	}
+	if c1, c2 := post(s, s.giveUp, ""), post(s, s.candidate, cand); c1 != http.StatusConflict || c2 != http.StatusConflict {
+		t.Fatalf("after /done: /done %d, /candidate %d", c1, c2)
+	}
+	if s.end() != nil {
+		t.Fatal("a candidate after /done was kept")
+	}
+
+	s = &session{ns: "procedures", done: make(chan struct{})}
+	if c := post(s, s.candidate, cand); c != 200 {
+		t.Fatalf("/candidate: %d", c)
+	}
+	if c1, c2 := post(s, s.giveUp, ""), post(s, s.candidate, `{"files":{"procedures/mail":"v2"}}`); c1 != http.StatusConflict || c2 != http.StatusConflict {
+		t.Fatalf("after a candidate: /done %d, /candidate %d", c1, c2)
+	}
+	if got := s.end(); string(got["procedures/mail"]) != "v" {
+		t.Fatalf("kept %v", got)
+	}
+
+	s = &session{ns: "procedures", done: make(chan struct{})}
+	if c := post(s, s.candidate, strings.Repeat(" ", 2*MaxCandidateBytes+1)); c != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body: %d", c)
+	}
+}
+
+// L3 on #131: a request that does not finish arriving within the read
+// timeout is cut off, so a builder cannot hold a connection by trickling
+// a body.
+func TestASlowRequestIsCutOff(t *testing.T) {
+	was := readTimeout
+	readTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { readTimeout = was })
+	f := &machines{}
+	cut := make(chan error, 1)
+	f.guest = func(id, dir string) {
+		c, err := net.Dial("unix", filepath.Join(dir, Socket))
+		if err != nil {
+			cut <- err
+			return
+		}
+		defer c.Close()
+		io.WriteString(c, "POST /candidate HTTP/1.1\r\nHost: b\r\nContent-Length: 100\r\n\r\n{")
+		c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err = io.ReadAll(c)
+		cut <- err
+		call(guestClient(dir), "POST", "/done", nil)
+	}
+	b := newBuilder(t, f, nil)
+	b.Build(context.Background(), brief(change.ClassProcedure))
+	if err := <-cut; err != nil {
+		t.Fatalf("the slow request was not cut off: %v", err)
+	}
+}
+
+// Potency R1 on #126 (BOARD W3-builder-tune): every job leaves one
+// count-only log line, its outcome, tokens and time, so the first jobs'
+// numbers can retune the token cap and the timeout. It names no brief or
+// candidate content.
+func TestEveryJobLogsItsNumbers(t *testing.T) {
+	var mu sync.Mutex
+	var lines []string
+	logf := func(f string, a ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(f, a...))
+	}
+	jobs := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []string
+		for _, l := range lines {
+			if strings.Contains(l, " job ") {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	f := &machines{}
+	f.guest = func(id, dir string) {
+		call(guestClient(dir), "POST", "/candidate", Submission{Files: map[string]string{"procedures/mail": "CANARY-content"}})
+	}
+	b := newBuilder(t, f, func(c *Config) { c.Logf = logf })
+	if _, err := b.Build(context.Background(), brief(change.ClassProcedure)); err != nil {
+		t.Fatal(err)
+	}
+	f.guest = func(id, dir string) { call(guestClient(dir), "POST", "/done", nil) }
+	b.Build(context.Background(), brief(change.ClassProcedure))
+	got := jobs()
+	if len(got) != 2 || !strings.Contains(got[0], "outcome candidate") || !strings.Contains(got[1], "outcome no candidate") ||
+		!strings.Contains(got[0], "tokens 0") || !strings.Contains(got[0], "correction") {
+		t.Fatalf("job lines %q", got)
+	}
+	for _, l := range got {
+		if strings.Contains(l, "CANARY") || strings.Contains(l, "subject") {
+			t.Fatalf("a job line holds content: %q", l)
+		}
+	}
+}
+
+// L3 on #134: a job that ends without a candidate after reaching its
+// token cap says so in its count line.
+func TestAJobAtItsTokenCapSaysSo(t *testing.T) {
+	mtr, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var lines []string
+	f := &machines{}
+	f.guest = func(id, dir string) {
+		c := guestClient(dir)
+		call(c, "POST", "/model/v1/chat/completions", map[string]any{"max_tokens": 10})
+		call(c, "POST", "/done", nil)
+	}
+	b := newBuilder(t, f, func(c *Config) {
+		c.Meter, c.JobTokens = mtr, 50
+		c.Logf = func(f string, a ...any) { mu.Lock(); lines = append(lines, fmt.Sprintf(f, a...)); mu.Unlock() }
+		c.Model = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, `{"usage":{"prompt_tokens":100,"completion_tokens":10}}`)
+			})
+		}
+	})
+	b.Build(context.Background(), brief(change.ClassProcedure))
+	mu.Lock()
+	defer mu.Unlock()
+	for _, l := range lines {
+		if strings.Contains(l, " job ") {
+			if !strings.Contains(l, "outcome no candidate (token cap), tokens 110") {
+				t.Fatalf("job line %q", l)
+			}
+			return
+		}
+	}
+	t.Fatalf("no job line in %q", lines)
 }

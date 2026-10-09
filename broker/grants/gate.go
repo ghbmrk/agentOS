@@ -11,7 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/reversible"
@@ -48,6 +50,10 @@ const (
 type Owner interface {
 	Request(items []owner.Item, ttl time.Duration) (string, error)
 	RequestEach(items []owner.Item, ttls []time.Duration) ([]string, error)
+	// RequestLocalEach asks items on the local page, one request each,
+	// when their recipients cannot be shown in a text
+	// (owner.SMSApprovable; P2-2a), their notices texted together.
+	RequestLocalEach(items []owner.Item, ttls []time.Duration) ([]string, error)
 	Tier(owner.Facts) owner.Tier
 	Active(within time.Duration) bool
 	QueueAutoReply(owner.AutoReply) (owner.QueueResult, error)
@@ -74,9 +80,10 @@ type Changes interface {
 	// adoption of a release, which also needs the local page (CH-3).
 	Line(in journal.Intent) (owner.Item, error)
 	// Decided is called once the owner's request for a change intent has
-	// closed, answered or not (change C7); declined is true only when the
-	// owner said NO.
-	Decided(ctx context.Context, in journal.Intent, declined bool)
+	// closed, answered or not (change C7). why is the denial's cause:
+	// "owner" for the owner's NO, "not chosen" for an item left out of a
+	// partial YES, "" when approved or closed for any other reason.
+	Decided(ctx context.Context, in journal.Intent, why string)
 }
 
 // Loops is the loop scheduler (loops.Scheduler) as the gate uses it: the
@@ -164,15 +171,20 @@ type Config struct {
 	// gets unverified approval items, which are always high risk, and no
 	// pre-allowance can match on it.
 	Verifiers map[string]Verifier
-	// LocalUI says a local confirmation page exists (P2-2). New or wider
-	// grants need it (CH-3); without it they are refused outright rather
-	// than asking the owner for a code that could not complete them.
+	// LocalUI says the box's Wi-Fi page is served (P2-2; agentosd sets it
+	// when it serves localui.sock, P2-2w). New or wider grants need it
+	// (CH-3); without it they are refused outright rather than asking the
+	// owner for a code that could not complete them.
 	LocalUI bool
 	// Isolated reports whether machine is a reply-composer machine built
 	// as ADP-11 requires (fresh, thread messages only, no recall, no
 	// egress). It is keyed by machine, not lineage, so a fork of a
 	// composer is not one. Nil: none is, so reply rules never match.
 	Isolated func(machine string) bool
+	// Contained reports an agent lineage that still holds a record the
+	// owner deleted (recalltool W10); its intents get no pre-allowance.
+	// Nil: none is.
+	Contained func(lineage string) bool
 	// Forms maps an executor's irreversible operations to their
 	// reversible forms (REV-3), from the adapter's own declaration next to
 	// Declared. An effect the owner approves under one is held for its
@@ -197,6 +209,34 @@ type Config struct {
 	// must not block, and a panic in it is logged and changes nothing
 	// (security V1 on W3-values). Nil: none.
 	Observe func(journal.Intent)
+	// ForgetItem gives the approval line for the owner's forget of a
+	// task (W3-forget): the task as the owner may see it and what the
+	// forget undoes, by goal ID, so the journal never holds the task's
+	// text. ok false: no such task, and the forget is denied. Nil: every
+	// forget is denied.
+	ForgetItem func(goal string) (object, detail string, ok bool)
+	// ForgetAgentItem gives the line for item 2 of a forget request
+	// (W3-forget-b2b), by item 2's ID: the agent's work since the task,
+	// taken back; its detail is from the intent's "actions" param
+	// (ForgetAgentActions), fixed when asked, not this one. By ID, not
+	// goal, so the line stands after item 1 forgot the task. ok false:
+	// nothing to take back, and item 2 is denied. Nil: every item 2 is
+	// denied.
+	ForgetAgentItem func(id string) (object, detail string, ok bool)
+	// Unpaused is told the ID of a grant whose pause the owner ended by
+	// resuming or revoking it, so Loop 2 stops listing it as paused (loops
+	// S4, W5a). Called outside the gate's lock, never on replay; it must
+	// not block, and a panic in it is logged. Nil: none.
+	Unpaused func(grantID string)
+	// Delivery names, per adapter executor, the one declared share
+	// operation that delivers to the owner's evidence destination (CH-20;
+	// mail.OpDeliver). Only OriginEvidence submits it, and it runs
+	// without asking only to that destination; from any other origin it
+	// is denied. Destination reports whether addr may be the destination,
+	// as one of a connected account's own addresses, and names that
+	// account. Nil: no destination can be set.
+	Delivery    map[string]string
+	Destination func(addr string) (account string, ok bool)
 	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
 	// (CH-15); zero takes the defaults. Urgent marks owner-defined urgent
 	// items, sent at once and in quiet hours. Quiet reports the owner's
@@ -217,15 +257,19 @@ type Config struct {
 type Gate struct {
 	cfg Config
 
-	mu      sync.Mutex
-	eng     *journal.Engine
-	own     Owner
-	grants  map[string]*Grant
-	waiting map[string]*wait
-	batch   []string
-	first   time.Time // when the batch's first item arrived
-	last    time.Time // when its latest item arrived
-	sent    []time.Time
+	mu     sync.Mutex
+	eng    *journal.Engine
+	own    Owner
+	grants map[string]*Grant
+	// resumes is the page's latest resume ask per grant (AskResume).
+	resumes map[string]resumeAsk
+	// evidence is the owner's evidence destination, if set (CH-20).
+	evidence destination
+	waiting  map[string]*wait
+	batch    []string
+	first    time.Time // when the batch's first item arrived
+	last     time.Time // when its latest item arrived
+	sent     []time.Time
 	// asked are owner-question texts reserved on the same budget
 	// (Reserve, W9).
 	asked []time.Time
@@ -284,7 +328,7 @@ type heldImplicit struct {
 type wait struct {
 	item    owner.Item
 	local   bool   // also needs local confirmation
-	onlyUI  bool   // approvable only on the local page (owner.SMSApprovable)
+	onlyUI  bool   // waits for the local page (a hold); never texted
 	request string // owner request ID, "" while batched
 	reply   string // queued auto-reply ID
 	sendAt  time.Time
@@ -302,7 +346,10 @@ type afterRef struct {
 // decision is the owner's answer on one intent.
 type decision struct {
 	approved bool
-	why      string
+	// why is the owner's reason or a broker code ("owner", "undo"); guest,
+	// when set, is a fixed reason the guest may see (SR2-3j).
+	why   string
+	guest guesterr.Literal
 	// asked is set when the decision answered a waiting request, and
 	// implicit when it released an auto-reply the owner never answered.
 	asked, implicit bool
@@ -482,11 +529,40 @@ func (g *Gate) reissueDue() {
 	}
 }
 
+// RecipientsNotTextable is the reason an action is refused when its
+// recipients cannot be shown in an approval text (owner.SMSApprovable).
+const RecipientsNotTextable = "can't be approved by text: each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all; ask again with a new request_id"
+
+// WaitingOnThePage is the reason an agent sees while an action waits for
+// the owner on the Wi-Fi page; it says how to ask by text instead
+// (Potency R1 on P2-2a).
+const WaitingOnThePage = "waiting for the owner's approval on the box's Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id"
+
+// NoPage* are the gate's reasons for a change that needs the owner's
+// confirmation on the box's Wi-Fi page while agentosd does not serve it
+// (LocalUI off): asked there, it could never be answered. They name the
+// page as the owner does (CH-12). No caller matches them: the journal
+// redacts reasons, so a caller decides from its own page flag (P2-2w d).
+const (
+	NoPageGrant    = "a new or wider grant needs confirmation on the box's Wi-Fi page, which is not running (CH-3)"
+	NoPageEvidence = "changing where private replies go needs confirmation on the box's Wi-Fi page, which is not running (CH-20)"
+	NoPageFollow   = "changing where updates come from needs confirmation on the box's Wi-Fi page, which is not running (OSS-10)"
+	NoPageSharing  = "turning sharing on needs confirmation on the box's Wi-Fi page, which is not running (CHG-4)"
+)
+
+// onPage reports whether a waiting intent is asked on the local page:
+// its recipients cannot be texted, or it needs the owner's confirmation
+// there (CH-3), which the page's one answer gives (Security Q1 on P2-2a
+// part 2).
+func (g *Gate) onPage(w *wait) bool {
+	return g.cfg.LocalUI && (w.local || !owner.SMSApprovable(w.item))
+}
+
 // closeIntent denies a pending intent with a fixed reason.
-func (g *Gate) closeIntent(id, why string) {
+func (g *Gate) closeIntent(id string, why guesterr.Literal) {
 	g.mu.Lock()
 	delete(g.waiting, id)
-	g.decided[id] = decision{why: why, at: g.cfg.Now()}
+	g.decided[id] = decision{why: string(why), guest: why, at: g.cfg.Now()}
 	eng := g.eng
 	g.mu.Unlock()
 	if _, err := eng.Authorize(context.Background(), id); err != nil {
@@ -545,13 +621,33 @@ const (
 
 // verdict is what an intent needs now.
 type verdict struct {
-	kind  kind
-	why   string
+	kind kind
+	// why is a denial's fixed text, which the guest sees; cause, when
+	// set, is the error behind it, which only the owner and the log see.
+	why   guesterr.Literal
+	cause error
 	item  owner.Item
 	local bool
 	hold  bool // waits for the local page without texting the owner
 	reply *owner.AutoReply
 }
+
+// refusal is the gate's answer to an intent it refuses (SR2-3j): Error is
+// the owner's text, journaled as the reason, which may echo a parse error,
+// a pipeline's refusal or the owner's own words; GuestText, fixed words
+// only, is all the guest is shown.
+type refusal struct {
+	why   string
+	guest guesterr.Literal
+}
+
+func (r refusal) Error() string { return r.why }
+
+// GuestText is the refusal's text for the guest.
+func (r refusal) GuestText() string { return string(r.guest) }
+
+// refuse is a refusal whose text is the same for owner and guest.
+func refuse(why guesterr.Literal) refusal { return refusal{string(why), why} }
 
 // evaluate decides what in needs. Only structural faults deny: no grant,
 // an undeclared operation, a malformed grant, or narrowing from anyone
@@ -571,6 +667,9 @@ func (g *Gate) evaluate(ctx context.Context, phase journal.Phase, in journal.Int
 func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
 	if in.Account == journal.BrokerAccount {
 		return g.evaluateBroker(ctx, phase, in)
+	}
+	if op, ok := g.cfg.Delivery[in.Executor]; (ok && in.Action == op) || in.Origin == OriginEvidence {
+		return g.evaluateDelivery(phase, in)
 	}
 	// Reasons are fixed wording: a guest reads them back through
 	// effect_status, so they never echo what a guest wrote (REV-5).
@@ -654,10 +753,10 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 	if esc.Reason != "" {
 		item.Detail = esc.Reason
 	}
-	if cls == verb.Irreversible && verified {
+	if cls == verb.Irreversible && verified && !g.contained(in.Origin) {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
 		for _, r := range rules {
-			if g.matches(*r.Spec.Rule, in, ver) != nil {
+			if g.matches(phase, *r.Spec.Rule, in, ver) != nil {
 				continue
 			}
 			if r.Spec.Rule.Reply {
@@ -669,6 +768,14 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 		}
 	}
 	return verdict{kind: ask, item: item}
+}
+
+// contained reports a guest lineage that still holds a record the owner
+// deleted (recalltool W10): no pre-allowance acts for it, so each of its
+// irreversible effects is asked.
+func (g *Gate) contained(origin string) bool {
+	l, ok := strings.CutPrefix(origin, "guest:")
+	return ok && g.cfg.Contained != nil && g.cfg.Contained(l)
 }
 
 // approvalItem is the line the owner approves (CH-12): source fields when
@@ -693,7 +800,7 @@ func approvalItem(in journal.Intent, v string, cls verb.Class, ver Verified, ver
 }
 
 // matches tests one pre-allowance (ADP-9) and returns why it fails.
-func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
+func (g *Gate) matches(phase journal.Phase, r Rule, in journal.Intent, v Verified) error {
 	want := len(r.Params) + 1
 	if r.Reply {
 		want++
@@ -735,10 +842,7 @@ func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
 		}
 	}
 	day, perRec := 0, 0
-	for _, x := range g.eng.AuthorizedSince(in.Account, in.Action, now.Add(-window)) {
-		if x.ID == in.ID {
-			continue
-		}
+	for _, x := range g.inUse(phase, in, now) {
 		day++
 		if s, _ := x.Params[ParamRecord].(string); s == rec {
 			perRec++
@@ -748,6 +852,24 @@ func (g *Gate) matches(r Rule, in journal.Intent, v Verified) error {
 		return errors.New("scope bound reached")
 	}
 	return nil
+}
+
+// inUse returns the other intents that hold a place under in's scope
+// bounds now (SR3-2). Authorizing counts queued intents too, so a queue
+// held by STOP cannot grow past the bound. The recheck before dispatch
+// counts only effects that started in the window or are unresolved: in
+// is one of the queued, and the engine commits its dispatch only if
+// nothing was journaled since this count, so two dispatches cannot both
+// take the last place (OP-3).
+func (g *Gate) inUse(phase journal.Phase, in journal.Intent, now time.Time) []journal.Intent {
+	var out []journal.Intent
+	for _, u := range g.eng.InUse(in.Account, in.Action, now.Add(-window)) {
+		if u.Intent.ID == in.ID || (phase == journal.PhaseDispatch && !u.Started) {
+			continue
+		}
+		out = append(out, u.Intent)
+	}
+	return out
 }
 
 // evaluateDerived decides a stage or inverse intent (REV-3). It is
@@ -804,21 +926,81 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 	case journal.ActionGrantChange:
 		s, err := parseSpec(in)
 		if err != nil {
-			return verdict{kind: deny, why: err.Error()}
+			return verdict{kind: deny, why: "the grant change is malformed", cause: err}
 		}
 		if !g.cfg.LocalUI {
-			return verdict{kind: deny, why: "a new or wider grant needs confirmation on the box's local page, which this build does not have yet (CH-3)"}
+			return verdict{kind: deny, why: NoPageGrant}
+		}
+		if s.Resume != "" && (in.Origin != originLocal || s.Pause == "") {
+			// W5a-resume: only the page resumes, naming the pause it
+			// showed (Security R2 on #169).
+			return verdict{kind: deny, why: "a paused grant is resumed only on the box's Wi-Fi page"}
 		}
 		g.mu.Lock()
 		err = g.validateLocked(s)
+		detail := ""
+		if err == nil && s.Resume != "" {
+			// The page shows what resuming lets run and which pause it
+			// ends; the item's sum covers both, so the page code is bound
+			// to this grant and this pause (owner.ItemSum).
+			gr := g.grants[s.Resume]
+			detail = fmt.Sprintf("%s Paused by %s (%s).", Describe(gr.Spec), pausedBy(gr.PausedBy), gr.Pause)
+		}
 		g.mu.Unlock()
 		if err != nil {
-			return verdict{kind: deny, why: err.Error()}
+			return verdict{kind: deny, why: "the grant change is not valid", cause: err}
 		}
-		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s),
+		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s), Detail: detail,
 			Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}}
+	case journal.ActionRecallRollback:
+		// Recall's deletion reach asks before taking back agent work
+		// (recalltool W10). Only the broker submits it; its line is the
+		// broker's own text.
+		obj, _ := in.Params["object"].(string)
+		detail, _ := in.Params["detail"].(string)
+		if in.Origin != OriginRecall || in.Executor != RecallExecutor || obj == "" {
+			return verdict{kind: deny, why: "a recall rollback comes only from the broker's recall"}
+		}
+		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
+			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "forget", NoRecipient: true}}}
+	case journal.ActionLearnForget:
+		// The owner's forget of a task (W3-forget): only the broker
+		// submits it, on the owner's FORGET; the line is the box's own,
+		// from the goal, and the owner's YES with the request's code is
+		// what runs it (security C1).
+		// Item 2 of the same request, the agent's work since the task
+		// taken back (W3-forget-b2b), is asked the same way with its own
+		// line from ForgetAgentItem.
+		goal, key, lookup, agent := ForgetGoal(in.ID), ForgetGoal(in.ID), g.cfg.ForgetItem, false
+		if goal == "" {
+			goal, key, lookup, agent = ForgetAgentGoal(in.ID), in.ID, g.cfg.ForgetAgentItem, true
+		}
+		if in.Origin != OriginForget || in.Executor != ForgetExecutor || goal == "" {
+			return verdict{kind: deny, why: "a forget comes only from the owner's FORGET"}
+		}
+		if lookup == nil {
+			return verdict{kind: deny, why: "forgetting is not available"}
+		}
+		obj, detail, ok := lookup(key)
+		if !ok || obj == "" {
+			return verdict{kind: deny, why: "no such task"}
+		}
+		if agent {
+			// The work so far, fixed when asked, so a re-issue asks what
+			// was asked (OP-3; #327 L3 B-1).
+			detail = ForgetAgentActions(in.Params)
+		}
+		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
+			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "forget", NoRecipient: true}}}
+	case journal.ActionEvidence:
+		return g.evaluateEvidence(in)
+	case journal.ActionUpdateFollow:
+		return g.evaluateFollow(in)
 	case journal.ActionGrantPause, journal.ActionGrantRevoke:
-		if in.Origin != OriginOwner {
+		// Loop 2 may pause on a finding (loops K-S2): pausing only
+		// narrows, and revoking stays the owner's.
+		loop2Pause := in.Origin == OriginLoop2 && in.Action == journal.ActionGrantPause
+		if in.Origin != OriginOwner && !loop2Pause {
 			return verdict{kind: deny, why: "only the owner pauses or revokes a grant"}
 		}
 		g.mu.Lock()
@@ -830,6 +1012,207 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		return verdict{kind: allow}
 	}
 	return verdict{kind: deny, why: "this broker action is not handled here"}
+}
+
+// evaluateEvidence decides a change to the evidence destination (CH-20).
+// It is the owner's alone. Setting it chooses where private content goes,
+// so it is high risk (CH-10) and, like a grant, needs the code and the
+// local page: a SIM swapper holding the phone cannot move it. Clearing it
+// needs neither.
+func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
+	if in.Origin != OriginOwner && in.Origin != originLocal {
+		return verdict{kind: deny, why: "only the owner sets where private replies go"}
+	}
+	d, err := parseDestination(in)
+	if err != nil {
+		return verdict{kind: deny, why: "malformed request to change where private replies go", cause: err}
+	}
+	if d.Address == "" {
+		// Clearing needs no code (security C3 on #148): the broker tells
+		// the old destination, so the owner sees it if it wasn't them.
+		return verdict{kind: allow}
+	}
+	if !g.cfg.LocalUI {
+		return verdict{kind: deny, why: NoPageEvidence}
+	}
+	if g.cfg.Destination == nil {
+		return verdict{kind: deny, why: "no connected account can deliver private replies"}
+	}
+	if acct, ok := g.cfg.Destination(d.Address); !ok || acct != d.Account {
+		return verdict{kind: deny, why: "the destination must be the connected mail account's own address (CH-20)"}
+	}
+	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: "send private replies to " + d.Address,
+		Facts: owner.Facts{Kind: owner.GrantChange, Verb: "share", NoRecipient: true}}}
+}
+
+// evaluateFollow decides a switch of the box's update source (OSS-10). It
+// changes who decides what software the box installs, so it is a tier-4
+// act: the owner's code-generator code plus confirmation on the local
+// page, and it comes only from that page (Security C6). The request names
+// the owner's own name for the source, and the card the root's short
+// fingerprint; the page shows the keys,
+// thresholds and expiry the digest binds. One intent runs once, so one
+// approval buys one switch.
+func (g *Gate) evaluateFollow(in journal.Intent) verdict {
+	if in.Origin != originLocal {
+		return verdict{kind: deny, why: "only the owner, on the box's Wi-Fi page, changes where updates come from"}
+	}
+	digest, name, ok := FollowOf(in.ID)
+	if !ok || len(in.Params) != 0 || in.Executor != FollowExecutor || !hexDigest(digest) || (name != "" && !followName(name)) {
+		return verdict{kind: deny, why: "malformed request to change where updates come from"}
+	}
+	object := "get updates from " + name
+	if name == "" {
+		// Switching back: the updater admits it only for the project's
+		// own root keys (WF1).
+		object = "get updates from " + ReservedFollowName + " again"
+	}
+	if !g.cfg.LocalUI {
+		return verdict{kind: deny, why: NoPageFollow}
+	}
+	// The card names the root as the page showed it, so two roots never
+	// make the same card (security 323-1).
+	return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: object,
+		Detail: "root fingerprint " + FollowPrint(digest),
+		Facts:  owner.Facts{Kind: owner.GrantChange, Verb: "follow", NoRecipient: true}}}
+}
+
+// FollowPrint is the root's short fingerprint as the card and the page
+// show it: the digest's first 8 hex characters in two groups of 4, so
+// the card never carries a run of digits that reads as a code, however
+// the digest falls (security R1 on #180; codes are 6 digits).
+func FollowPrint(digest string) string {
+	if len(digest) < 8 {
+		return ""
+	}
+	return digest[:4] + "-" + digest[4:8]
+}
+
+// hexDigest is 64 lower-case hex characters.
+func hexDigest(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// FollowNameOK reports whether the gate admits name for a follow request,
+// so the page can say why one was not asked.
+func FollowNameOK(name string) bool { return followName(name) }
+
+// ReservedFollowName starts the switch-back's line; no name may.
+const ReservedFollowName = "the AgentOS project"
+
+// followName is the owner's name for a source: 1 to MaxFollowName
+// printable characters on one line (no control or bidi formatting
+// characters), with no leading or trailing space, and at most
+// MaxFollowDigits digits in all. The name reaches the owner in
+// broker-voiced texts, so it must never carry a code, even spaced out
+// (security R1 on #180; codes are 6 digits). Nor may it start like the
+// project's own line (ReservedFollowName, any case), so a named follow
+// never reads as switching back (security 323-1).
+func followName(s string) bool {
+	if strings.HasPrefix(strings.ToLower(s), strings.ToLower(ReservedFollowName)) {
+		return false
+	}
+	n, digits := 0, 0
+	for _, c := range s {
+		if !unicode.IsPrint(c) {
+			return false
+		}
+		if unicode.IsDigit(c) {
+			digits++
+		}
+		n++
+	}
+	return n > 0 && n <= MaxFollowName && digits <= MaxFollowDigits && strings.TrimSpace(s) == s
+}
+
+// evaluateDelivery decides a delivery to the evidence destination: a
+// pre-allowed share to the owner only (CH-20). Every part of it is fixed
+// by the broker, so anything else is denied, never asked.
+func (g *Gate) evaluateDelivery(phase journal.Phase, in journal.Intent) verdict {
+	if in.Origin != OriginEvidence {
+		return verdict{kind: deny, why: "only the broker delivers to the owner's destination (CH-20)"}
+	}
+	g.mu.Lock()
+	d, ag := g.evidence, g.adapterLocked(in.Account)
+	g.mu.Unlock()
+	op, ok := g.cfg.Delivery[in.Executor]
+	switch {
+	case !ok || in.Action != op:
+		return verdict{kind: deny, why: "the broker's evidence route only delivers"}
+	case ag == nil || ag.Spec.Executor != in.Executor || in.Account != d.Account:
+		return verdict{kind: deny, why: "no grant connects the destination's account"}
+	case ag.Spec.Ops[in.Action] != verb.Share || g.cfg.Declared[in.Executor][in.Action] != verb.Share:
+		return verdict{kind: deny, why: "delivery is not granted for the account"}
+	case len(in.Recipients) != 1 || in.Recipients[0] != d.Address:
+		return verdict{kind: deny, why: "delivery goes only to the owner's destination"}
+	}
+	b, _ := in.Params[ParamBody].(string)
+	from, _ := in.Params[ParamFrom].(string)
+	if b == "" || (from != DeliverFromAgent && from != DeliverFromBox) || len(in.Params) != 2 {
+		return verdict{kind: deny, why: "a delivery carries only its body and author"}
+	}
+	n := 0
+	for _, x := range g.inUse(phase, in, g.cfg.Now()) {
+		if x.Origin == OriginEvidence {
+			n++
+		}
+	}
+	if n >= DeliveryCap {
+		return verdict{kind: deny, why: DeliveryCapReason}
+	}
+	if g.cfg.Destination == nil {
+		return verdict{kind: deny, why: "the destination is no longer the account's own address"}
+	}
+	if acct, ok := g.cfg.Destination(d.Address); !ok || acct != d.Account {
+		return verdict{kind: deny, why: "the destination is no longer the account's own address"}
+	}
+	return verdict{kind: allow}
+}
+
+// destination is the evidence destination: an address and the account
+// whose own address it is.
+type destination struct{ Address, Account string }
+
+func parseDestination(in journal.Intent) (destination, error) {
+	a, ok1 := in.Params[ParamEvidenceAddress].(string)
+	c, ok2 := in.Params[ParamEvidenceAccount].(string)
+	if !ok1 || !ok2 || len(in.Params) != 2 {
+		return destination{}, errors.New("malformed evidence destination")
+	}
+	if a == "" {
+		if c != "" {
+			return destination{}, errors.New("malformed evidence destination")
+		}
+		return destination{}, nil
+	}
+	if !bareAddress(a) || c == "" {
+		return destination{}, errors.New("the destination must be one bare, lower-case address")
+	}
+	return destination{Address: a, Account: c}, nil
+}
+
+// bareAddress is a lower-case local@domain with nothing around it. Whether
+// it is the owner's is Config.Destination's to say.
+func bareAddress(a string) bool {
+	local, domain, ok := strings.Cut(a, "@")
+	return ok && local != "" && domain != "" && !strings.ContainsAny(a, " \t\r\n<>,;\"()[]:") &&
+		!strings.Contains(domain, "@") && strings.ToLower(a) == a
+}
+
+// Evidence returns the evidence destination and its account; empty when
+// none is set (CH-20).
+func (g *Gate) Evidence() (address, account string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.evidence.Address, g.evidence.Account
 }
 
 // evaluateChange delegates a meta.change.* intent to the change pipeline
@@ -850,15 +1233,15 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	case err == nil:
 		return verdict{kind: allow}
 	case !ok || !no.NeedsOwner():
-		return verdict{kind: deny, why: err.Error()}
+		return verdict{kind: deny, why: "the change pipeline refused it", cause: err}
 	}
 	l, err := g.cfg.Changes.Line(in)
 	if err != nil {
-		return verdict{kind: deny, why: err.Error()}
+		return verdict{kind: deny, why: "the change pipeline refused it", cause: err}
 	}
 	local := sharingOn(in)
 	if local && !g.cfg.LocalUI {
-		return verdict{kind: deny, why: "turning sharing on needs confirmation on the box's local page, which this build does not have yet (CHG-4)"}
+		return verdict{kind: deny, why: NoPageSharing}
 	}
 	hold := false
 	if l.Facts.Verb == "install" {
@@ -890,11 +1273,11 @@ func (g *Gate) evaluateLoops(ctx context.Context, phase journal.Phase, in journa
 	case err == nil:
 		return verdict{kind: allow}
 	case !ok || !no.NeedsOwner():
-		return verdict{kind: deny, why: err.Error()}
+		return verdict{kind: deny, why: "the loop scheduler refused it", cause: err}
 	}
 	l, err := g.cfg.Loops.Line(in)
 	if err != nil {
-		return verdict{kind: deny, why: err.Error()}
+		return verdict{kind: deny, why: "the loop scheduler refused it", cause: err}
 	}
 	return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
 		Facts: owner.Facts{Kind: l.Facts.Kind, Verb: l.Facts.Verb, NoRecipient: true}}}
@@ -941,29 +1324,36 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 	ready := g.eng != nil
 	g.mu.Unlock()
 	if !ready {
-		return errors.New("grants are not loaded")
+		return refuse("grants are not loaded")
 	}
 	if decided && !d.approved {
-		return errors.New("not approved: " + d.why)
+		var guest guesterr.Literal = "not approved by the owner"
+		if d.guest != "" {
+			guest = "not approved: " + d.guest
+		}
+		return refusal{"not approved: " + d.why, guest}
 	}
 	v := g.evaluate(ctx, phase, in)
 	switch v.kind {
 	case deny:
-		return errors.New(v.why)
+		if v.cause != nil {
+			return refusal{v.cause.Error(), v.why}
+		}
+		return refuse(v.why)
 	case allow:
 		return nil
 	}
 	if !decided {
-		return errors.New("needs the owner's approval")
+		return refuse("needs the owner's approval")
 	}
 	if v.local && !g.isConfirmed(in.ID) {
-		return errors.New("needs confirmation on the box's local page")
+		return refuse("needs confirmation on the box's Wi-Fi page")
 	}
 	if !sameItem(d.item, v.item) {
-		return errors.New("the details changed after the owner approved; ask again")
+		return refuse("the details changed after the owner approved; ask again")
 	}
 	if phase == journal.PhaseDispatch && g.cfg.Now().Sub(d.at) > g.cfg.Fresh {
-		return fmt.Errorf("the approval is older than %s; ask again", g.cfg.Fresh)
+		return refusal{fmt.Sprintf("the approval is older than %s; ask again", g.cfg.Fresh), "the approval is too old; ask again"}
 	}
 	// The engine commits the dispatch only if nothing was journaled since
 	// this check, so an attempt started by a concurrent Dispatch, before
@@ -971,10 +1361,10 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 	if phase == journal.PhaseDispatch {
 		n, err := g.tries(in.ID)
 		if err != nil {
-			return fmt.Errorf("cannot read the intent's attempts: %w", err)
+			return refusal{"cannot read the intent's attempts: " + err.Error(), "the broker could not check the approval; ask again"}
 		}
 		if n != d.tries {
-			return errors.New("the owner's approval was used by an earlier attempt; ask again")
+			return refuse("the owner's approval was used by an earlier attempt; ask again")
 		}
 	}
 	return nil
@@ -1079,6 +1469,34 @@ func (g *Gate) endHeld(ids ...string) {
 	}
 }
 
+// Withdraw closes a recall rollback question still waiting for the owner,
+// as superseded by an earlier one for the same agent (recalltool W10): it
+// is denied with "not approved: superseded" and an answer to it later
+// does nothing. Only the broker's recall rollbacks can be withdrawn.
+func (g *Gate) Withdraw(id string) error {
+	st, err := g.eng.Get(id)
+	if err != nil {
+		return err
+	}
+	if st.Intent.Origin != OriginRecall || st.Intent.Action != journal.ActionRecallRollback {
+		return errors.New("grants: only a recall rollback can be withdrawn")
+	}
+	if st.State != journal.Pending {
+		return nil
+	}
+	g.closeIntent(id, "superseded")
+	return nil
+}
+
+// List returns every intent the journal holds, in submission order.
+func (g *Gate) List() []journal.Status {
+	out := g.eng.List()
+	for i := range out {
+		g.annotate(&out[i])
+	}
+	return out
+}
+
 func (g *Gate) Get(id string) (journal.Status, error) {
 	st, err := g.eng.Get(id)
 	if err == nil {
@@ -1113,7 +1531,15 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 	case deny, allow:
 		return g.eng.Authorize(ctx, id)
 	case ask:
-		onlyUI := !owner.SMSApprovable(v.item) || v.hold
+		if !v.hold && !owner.SMSApprovable(v.item) && !g.cfg.LocalUI {
+			// Recipients that cannot be shown in an approval text are never
+			// approved by text (CH-10, CH-12). Without the local approvals
+			// page to wait for, the agent is told what to change
+			// (UX-144-2); with it, flush asks there (P2-2a).
+			g.closeIntent(id, RecipientsNotTextable)
+			return g.eng.Get(id)
+		}
+		onlyUI := v.hold
 		g.mu.Lock()
 		fresh := g.waiting[id] == nil
 		if fresh {
@@ -1133,13 +1559,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
 			// Arbitrator Q1 on #48: one fixed line, no code.
-			_ = own.Inform("Waiting for your confirmation on the box's local page, or your recovery key.")
-		}
-		if fresh && onlyUI && !v.hold && own != nil {
-			// Recipients that cannot be shown in full are never approved
-			// by text (CH-10, CH-12).
-			n := len(strings.Split(v.item.Recipient, ","))
-			_ = own.Inform(fmt.Sprintf("An action for %d recipients needs your approval on the box's Wi-Fi page.", n))
+			_ = own.Inform("Waiting for your confirmation on the box's Wi-Fi page, or your recovery key.")
 		}
 	case autoReply:
 		g.queueReply(id, v)
@@ -1170,20 +1590,46 @@ func (g *Gate) annotate(st *journal.Status) {
 	if g.carried[id] || g.reissuing(id) {
 		st.Permission.Reason = "the box restarted; the owner will be asked again"
 	} else if d, ok := g.decided[id]; ok && d.approved && d.local && !g.confirmed[id] {
-		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's local page"
+		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's Wi-Fi page"
 	} else if w := g.waiting[id]; w != nil && w.onlyUI {
-		st.Permission.Reason = "waiting for the owner's approval on the box's local page"
+		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
 	} else if w != nil && w.held {
 		st.Permission.Reason = "approved; held for the owner's undo window until " + w.sendAt.UTC().Format("15:04") + " UTC"
 	} else if w != nil && w.reply != "" {
 		st.Permission.Reason = "auto-reply queued; it sends at " + w.sendAt.UTC().Format("15:04") + " UTC unless the owner cancels it"
+	} else if w != nil && g.cfg.LocalUI && w.local {
+		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
+	} else if w != nil && g.cfg.LocalUI && !owner.SMSApprovable(w.item) {
+		// After held and reply: an approved page item is held, not
+		// waiting (L3 S1 on #165).
+		st.Permission.Reason = WaitingOnThePage
 	} else if w != nil {
 		st.Permission.Reason = "waiting for the owner's approval"
 	} else if r := g.retry[id]; r != "" {
 		st.Permission.Reason = r
-	} else if f := g.failed[id]; f != "" {
+	} else if f := g.failed[id]; f == LineDown {
+		st.Permission.Reason = LineDown
+	} else if f != "" {
 		st.Permission.Reason = "could not ask the owner (" + f + "); retry later"
+		// The channel's error is the owner's (SR2-3j).
+		st.Permission.GuestReason = "could not ask the owner; retry later"
 	}
+	if st.Permission.GuestReason == "" {
+		st.Permission.GuestReason = st.Permission.Reason
+	}
+}
+
+// LineDown is the agent's reason for an ask that could not be texted
+// because the owner's phone line was down: the request was dropped, and
+// asking again once the line is back reaches the owner (UX on #170; the
+// recovery text tells the owner the agent can ask again).
+const LineDown = "not sent: the owner's phone line is down; ask again later"
+
+func failReason(err error) string {
+	if owner.LineDown(err) {
+		return LineDown
+	}
+	return err.Error()
 }
 
 func (g *Gate) queueReply(id string, v verdict) {
@@ -1207,7 +1653,7 @@ func (g *Gate) queueReply(id string, v verdict) {
 	case w == nil:
 	case err != nil:
 		delete(g.waiting, id)
-		g.failed[id] = err.Error()
+		g.failed[id] = failReason(err)
 	case res.Queued != nil:
 		w.reply, w.sendAt = res.Queued.ID, res.Queued.SendAt
 	default:
@@ -1345,8 +1791,8 @@ func (g *Gate) flush(paced bool) {
 	ids, own := g.batch, g.own
 	stopped := g.eng != nil && g.eng.Stopped()
 	g.batch = nil
-	var low, high, again []owner.Item
-	var ttls []time.Duration
+	var low, high, again, page []owner.Item
+	var ttls, pageTTLs []time.Duration
 	var lapsed []string
 	for _, id := range ids {
 		w := g.waiting[id]
@@ -1361,10 +1807,21 @@ func (g *Gate) flush(paced bool) {
 				lapsed = append(lapsed, id)
 			case stopped:
 				g.batch = append(g.batch, id)
+			case g.onPage(w):
+				page = append(page, w.item)
+				pageTTLs = append(pageTTLs, w.expires.Sub(now))
 			default:
 				again = append(again, w.item)
 				ttls = append(ttls, w.expires.Sub(now))
 			}
+			continue
+		}
+		if g.onPage(w) {
+			// Its recipients cannot be texted, or it needs the owner's
+			// confirmation: asked alone on the local page (P2-2a), never
+			// in a texted batch, and never YES by text (Security Q1).
+			page = append(page, w.item)
+			pageTTLs = append(pageTTLs, 0)
 			continue
 		}
 		if own != nil && own.Tier(w.item.Facts) == owner.Low {
@@ -1398,12 +1855,61 @@ func (g *Gate) flush(paced bool) {
 				if err == nil {
 					err = errors.New("not sent")
 				}
-				g.failed[it.Ref] = err.Error()
+				g.failed[it.Ref] = failReason(err)
+			}
+		}
+		g.mu.Unlock()
+	}
+	var ask []owner.Item
+	var askTTLs []time.Duration
+	for i, it := range page {
+		// Each counts like a request; re-issued ones always go, as above.
+		// Their notices share texts (Potency R2).
+		if pageTTLs[i] == 0 && g.take(paced, 1) == 0 {
+			g.requeue([]owner.Item{it})
+			continue
+		}
+		if pageTTLs[i] != 0 {
+			g.take(false, 1)
+		}
+		ask, askTTLs = append(ask, it), append(askTTLs, pageTTLs[i])
+	}
+	if len(ask) > 0 {
+		reqs := make([]string, len(ask))
+		err := errors.New("no owner channel")
+		if own != nil {
+			reqs, err = own.RequestLocalEach(ask, askTTLs)
+		}
+		g.mu.Lock()
+		for i, it := range ask {
+			if w := g.waiting[it.Ref]; w != nil {
+				if i >= len(reqs) || reqs[i] == "" {
+					delete(g.waiting, it.Ref)
+					why := "owner: not asked"
+					if err != nil {
+						why = failReason(err)
+					}
+					g.failed[it.Ref] = why
+				} else {
+					w.request = reqs[i]
+				}
 			}
 		}
 		g.mu.Unlock()
 	}
 	for _, items := range [][]owner.Item{low, high} {
+		// An item that cannot be texted (one carried over a restart from
+		// an earlier build's rules) fails alone, not with its batch
+		// (UX-144-1).
+		textable := items[:0:0]
+		for _, it := range items {
+			if owner.SMSApprovable(it) {
+				textable = append(textable, it)
+			} else {
+				g.closeIntent(it.Ref, RecipientsNotTextable)
+			}
+		}
+		items = textable
 		for len(items) > 0 {
 			if g.take(paced, 1) == 0 {
 				g.requeue(items)
@@ -1426,7 +1932,7 @@ func (g *Gate) flush(paced bool) {
 				if err != nil {
 					// Retrying the request_id asks again.
 					delete(g.waiting, it.Ref)
-					g.failed[it.Ref] = err.Error()
+					g.failed[it.Ref] = failReason(err)
 				} else {
 					w.request = req
 				}
@@ -1480,6 +1986,30 @@ func (g *Gate) Decide(d owner.Decision) {
 	if why == "" {
 		why = "owner"
 	}
+	changed := false
+	var guest guesterr.Literal
+	if !d.Approved {
+		// Denials the owner did not give name their own cause (release
+		// item 1, lens on #396); "owner" and "not chosen" keep the default.
+		switch d.Why {
+		case "expired":
+			guest = "the owner did not answer in time"
+		case "void":
+			guest = "a wrong code was given too many times"
+		case "restart":
+			guest = "the broker restarted before the owner answered"
+		}
+	}
+	if d.Approved && local && d.Page {
+		// Approved on the page with a fresh code: that answer confirms
+		// it, if the item is the one the page showed (Security P1).
+		if d.Sum == owner.ItemSum(item) {
+			g.confirmed[d.Ref] = true
+		} else {
+			d.Approved, why, changed = false, "it changed since the page showed it", true
+			guest = "it changed since the page showed it"
+		}
+	}
 	hold, attempt := "", 0
 	if w != nil {
 		attempt = w.attempt
@@ -1493,18 +2023,42 @@ func (g *Gate) Decide(d owner.Decision) {
 			// Released without its staged copy: the owner approved it as
 			// staged, so it is not sent (arbitrator on #76).
 			d.Approved, why = false, "its staged copy could not be made"
+			guest = "its staged copy could not be made"
 		}
 	}
 	unheld := d.Approved && (w == nil || !w.held)
 	implicit := unheld && d.Why == whyReleased
 	late := unheld && d.Why == whyReleasedLate
-	g.decided[d.Ref] = decision{approved: d.Approved, why: why, asked: w != nil, implicit: implicit, late: late,
+	g.decided[d.Ref] = decision{approved: d.Approved, why: why, guest: guest, asked: w != nil, implicit: implicit, late: late,
 		req: d.Request, at: g.cfg.Now(), item: item, local: local, hold: hold, attempt: attempt, tries: tries}
 	wait := d.Approved && local && !g.confirmed[d.Ref]
-	own := g.own
+	own, eng := g.own, g.eng
 	g.mu.Unlock()
 	if unstaged && hold != "" && own != nil {
 		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", clip(hold)))
+	}
+	if changed && own != nil {
+		// The page has already said "Approved" (L3 SHOULD on #178, CH-12).
+		// Agent and guest origins never get a page-confirmed item: only
+		// broker actions set it, and evaluateBroker denies them every
+		// broker action (UX lens and L3 on #329). Their other actions can
+		// still be asked on the page (onPage), but are not page-confirmed,
+		// so the step names no agent.
+		//
+		// A release adoption the pipeline proposed (Origin change, the
+		// pipeline's own origin) is page-confirmed too, but the owner made
+		// no request. The change is no decline (Decided is told so): the
+		// proposal drops and the next update check offers that version
+		// again (change C25). The notice promises no new offer: nothing is
+		// needed (P2-2a f2; L3 on #363); whether to say the offer comes
+		// back is the UX lens's call (GR27). The
+		// literal "change" is change.OriginPipeline, pinned by
+		// TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded.
+		step := "Make the request again if still needed."
+		if st, err := eng.Get(d.Ref); err == nil && changeAction(st.Intent.Action) && st.Intent.Origin == "change" {
+			step = "Nothing is needed."
+		}
+		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. %s", clip(d.Request), step))
 	}
 	if !wait {
 		g.settle(d.Ref)
@@ -1777,7 +2331,7 @@ func (g *Gate) lapse(d owner.Decision) {
 	eng := g.eng
 	g.mu.Unlock()
 	if st, err := eng.Get(d.Ref); err == nil && g.cfg.Changes != nil && changeAction(st.Intent.Action) {
-		g.cfg.Changes.Decided(context.Background(), st.Intent, false)
+		g.cfg.Changes.Decided(context.Background(), st.Intent, d.Why)
 	}
 	g.closeIntent(d.Ref, lapsed)
 }
@@ -1795,7 +2349,8 @@ func (g *Gate) ConfirmLocal(id string) error {
 		return err
 	}
 	if st.State != journal.Pending || st.Intent.Account != journal.BrokerAccount ||
-		(st.Intent.Action != journal.ActionGrantChange && !(changeAction(st.Intent.Action) &&
+		(st.Intent.Action != journal.ActionGrantChange && st.Intent.Action != journal.ActionEvidence &&
+			st.Intent.Action != journal.ActionUpdateFollow && !(changeAction(st.Intent.Action) &&
 			g.evaluate(context.Background(), journal.PhaseAuthorize, st.Intent).local)) {
 		return errors.New("grants: nothing to confirm for " + clip(id))
 	}
@@ -1856,8 +2411,13 @@ func (g *Gate) settle(id string) {
 		if g.cfg.Changes != nil && changeAction(st.Intent.Action) && st.Intent.Account == journal.BrokerAccount &&
 			(st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied) {
 			// Only the owner's NO is a decline; a refusal at the recheck
-			// (stale approval, changed state) is not (change C7).
-			g.cfg.Changes.Decided(ctx, st.Intent, !d.approved && d.why == "owner")
+			// (stale approval, changed state) is not (change C7), and an
+			// item left out of a partial YES is neither (change C25).
+			why := ""
+			if !d.approved {
+				why = d.why
+			}
+			g.cfg.Changes.Decided(ctx, st.Intent, why)
 		}
 		switch v := (pending{ownerVerdict(d, st), d.req}); {
 		case v.v == "" || g.cfg.Outcome == nil:
@@ -1876,7 +2436,11 @@ func (g *Gate) settle(id string) {
 		}
 		if st.State == journal.Succeeded && st.Intent.Executor == ExecutorName && own != nil && len(st.Attempts) > 0 {
 			if gid := st.Attempts[len(st.Attempts)-1].Evidence; gid != "" {
-				_ = own.Inform(fmt.Sprintf("Added %s. Text PAUSE %s or REVOKE %s to stop it.", gid, gid, gid))
+				done := "Added"
+				if sp, err := parseSpec(st.Intent); err == nil && sp.Resume != "" {
+					done = "Resumed"
+				}
+				_ = own.Inform(fmt.Sprintf("%s %s. Text PAUSE %s or REVOKE %s to stop it.", done, gid, gid, gid))
 			}
 		}
 	}()
@@ -2069,6 +2633,49 @@ func (g *Gate) Run(ctx context.Context, every time.Duration) {
 // Wait returns when no decision is being settled.
 func (g *Gate) Wait() { g.wg.Wait() }
 
+// Holding reports an effect the agent asked for (origin "guest:") that
+// the gate holds: batched or waiting on the owner, approved but waiting
+// for the local page, held for its undo window, carried over a restart,
+// or released but kept from running by STOP. The sleeper does not stop
+// the agent then (PE7 condition 2).
+func (g *Gate) Holding() bool {
+	g.mu.Lock()
+	var ids []string
+	for id := range g.waiting {
+		ids = append(ids, id)
+	}
+	ids = append(ids, g.batch...)
+	for id := range g.carried {
+		ids = append(ids, id)
+	}
+	for _, c := range g.reissue {
+		ids = append(ids, c.Ref)
+	}
+	for id := range g.after {
+		ids = append(ids, id)
+	}
+	for id := range g.sending {
+		ids = append(ids, id)
+	}
+	for id, d := range g.decided {
+		if d.approved && d.local && !g.confirmed[id] {
+			ids = append(ids, id)
+		}
+	}
+	eng := g.eng
+	g.mu.Unlock()
+	if eng == nil {
+		return false
+	}
+	for _, id := range ids {
+		// The engine is read without g.mu: its policy calls take g.mu.
+		if st, err := eng.Get(id); err == nil && strings.HasPrefix(st.Intent.Origin, "guest:") {
+			return true
+		}
+	}
+	return false
+}
+
 // Narrow pauses or revokes a grant on the owner's text (owner.Config
 // Narrow; ADP-9: only the owner's number, like STOP). Narrowing intents
 // are exempt from STOP holds and restart fences (journal A9).
@@ -2108,12 +2715,55 @@ func (g *Gate) Narrow(word, id string) string {
 // Execute runs a grant intent: it is the engine executor for ExecutorName.
 func (g *Gate) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	before := make([]string, 0, len(g.grants))
+	for k := range g.grants {
+		before = append(before, k)
+	}
 	id, err := g.applyLocked(in)
+	// Every grant the intent ended: the one named, and the pre-allowances
+	// a revoked connection takes with it (L3 S1 on #169).
+	var ended []string
+	if err == nil && unpauses(in) {
+		ended = append(ended, id)
+		for _, k := range before {
+			if _, live := g.grants[k]; !live && k != id {
+				ended = append(ended, k)
+			}
+		}
+		sort.Strings(ended[1:])
+	}
+	g.mu.Unlock()
 	if err != nil {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 	}
+	for _, k := range ended {
+		g.unpaused(k)
+	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: id}
+}
+
+// unpauses reports an intent that ends a grant's pause: the owner resumed
+// or revoked it.
+func unpauses(in journal.Intent) bool {
+	if in.Action == journal.ActionGrantRevoke {
+		return true
+	}
+	s, err := parseSpec(in)
+	return in.Action == journal.ActionGrantChange && err == nil && s.Resume != ""
+}
+
+// unpaused calls Config.Unpaused outside the gate's lock; a panic in it is
+// logged and changes nothing.
+func (g *Gate) unpaused(id string) {
+	if g.cfg.Unpaused == nil {
+		return
+	}
+	defer func() {
+		if recover() != nil && g.cfg.Logf != nil {
+			g.cfg.Logf("grants: unpause hook failed")
+		}
+	}()
+	g.cfg.Unpaused(id)
 }
 
 // Reconcile: grant state is rebuilt only from succeeded records, so an
@@ -2135,7 +2785,8 @@ func (g *Gate) applyLocked(in journal.Intent) (string, error) {
 			return "", err
 		}
 		if s.Resume != "" {
-			g.grants[s.Resume].Paused = false
+			gr := g.grants[s.Resume]
+			gr.Paused, gr.Pause, gr.PausedBy = false, "", ""
 			return s.Resume, nil
 		}
 		id := g.grantIDLocked(in.ID)
@@ -2147,7 +2798,9 @@ func (g *Gate) applyLocked(in journal.Intent) (string, error) {
 			return "", errors.New("no grant " + clip(in.GrantRef))
 		}
 		if in.Action == journal.ActionGrantPause {
-			gr.Paused = true
+			// A second pause replaces the first: a resume asked before
+			// it no longer applies (W5a-resume).
+			gr.Paused, gr.Pause, gr.PausedBy = true, in.ID, in.Origin
 			return gr.ID, nil
 		}
 		delete(g.grants, gr.ID)
@@ -2161,6 +2814,13 @@ func (g *Gate) applyLocked(in journal.Intent) (string, error) {
 			}
 		}
 		return gr.ID, nil
+	case journal.ActionEvidence:
+		d, err := parseDestination(in)
+		if err != nil {
+			return "", err
+		}
+		g.evidence = d
+		return "evidence", nil
 	}
 	return "", errors.New("not a grant action")
 }

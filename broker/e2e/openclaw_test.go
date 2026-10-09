@@ -285,7 +285,7 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 		// The guest names provider "openai"; the plane strips /model.
 		Model:      func(string) http.Handler { return http.StripPrefix("/openai", model) },
 		Meter:      mtr,
-		OwnerReply: func(_, _, text string) { replies <- text },
+		OwnerReply: func(_ string, rep guest.Reply) { replies <- rep.Text },
 		Logf:       t.Logf,
 	})
 	if err != nil {
@@ -304,6 +304,7 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 		Runtime:   &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(dir, "runsc")},
 		Admit:     adm,
 		NoCgroups: true,
+		NoQuota:   true,
 		Services:  plane,
 	})
 	if err != nil {

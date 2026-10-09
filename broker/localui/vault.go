@@ -523,8 +523,8 @@ func (s *Server) vaultCode(w http.ResponseWriter, r *http.Request, code string, 
 	// text, once, through the owner channel, which checks it with the
 	// vault process (P2-4f): no second code, and no codeless sign-in here.
 	// If it fails, the open page offers sign-in with the next code.
-	if o := s.getOwner(); o != nil {
-		s.proofSignIn(w, o, ticket)
+	if s.getOwner() != nil {
+		s.proofSignIn(w, r, ticket)
 	}
 	http.Redirect(w, r, "/unlock/vault", http.StatusSeeOther)
 }

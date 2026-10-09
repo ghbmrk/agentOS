@@ -237,7 +237,7 @@ func (b *Builder) open(id string) (string, error) {
 	s.srv = &http.Server{
 		Handler:           s.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
+		ReadTimeout:       readTimeout,
 		IdleTimeout:       15 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return context.Background() },
 	}
@@ -280,6 +280,7 @@ func (s *session) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/brief", s.serveBrief)
 	mux.HandleFunc("/candidate", s.candidate)
+	mux.HandleFunc("/done", s.giveUp)
 	mux.Handle("/model/", http.StripPrefix("/model", s.model()))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -377,6 +378,29 @@ func (s *session) candidate(w http.ResponseWriter, r *http.Request) {
 	close(s.done)
 }
 
+// giveUp ends the job with no candidate: the builder has nothing to
+// submit, so the one builder slot is freed at once (W3-builder-image).
+func (s *session) giveUp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	if s.finished {
+		s.mu.Unlock()
+		http.Error(w, "this job is finished", http.StatusConflict)
+		return
+	}
+	s.finished = true
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	io.WriteString(w, `{"done":true}`)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	close(s.done)
+}
+
 // admit clips a submission (C-3c-4): 1 to MaxFiles files, each valid
 // UTF-8 text of at most MaxFileBytes with no NUL, MaxCandidateBytes in all,
 // each under ns at a clean relative path.
@@ -404,6 +428,10 @@ func admit(sub Submission, ns string) (map[string][]byte, error) {
 	}
 	return out, nil
 }
+
+// readTimeout bounds reading one request, body included (L3 MUST 2 on
+// #126). A variable so a test can shorten it.
+var readTimeout = 30 * time.Second
 
 // limitListener accepts at most n open connections; past that, Accept
 // waits until one closes, so connections beyond the cap wait in the

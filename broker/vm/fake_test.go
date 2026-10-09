@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 )
@@ -25,7 +27,9 @@ type fakeRuntime struct {
 	launches []Launch
 	kills    int
 	failNext error
+	failKill error           // Kill's error, after it kills
 	onPause  func(id string) // runs as the guest is paused
+	onCkpt   func(id string) // runs during a memory checkpoint
 }
 
 func newFake() *fakeRuntime {
@@ -38,7 +42,11 @@ func (f *fakeRuntime) take() error {
 	return err
 }
 
-func (f *fakeRuntime) Start(_ context.Context, l Launch) error {
+func (f *fakeRuntime) Start(ctx context.Context, l Launch) error {
+	// As runsc would, a start on a spent context fails.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.take(); err != nil {
@@ -94,6 +102,9 @@ func (f *fakeRuntime) Checkpoint(_ context.Context, id, image string) error {
 	if !f.paused[id] {
 		return errors.New("fake: checkpoint of a machine that is not paused")
 	}
+	if f.onCkpt != nil {
+		f.onCkpt(id)
+	}
 	return os.WriteFile(filepath.Join(image, "mem"), []byte(strconv.Itoa(f.mem[id])), 0o600)
 }
 
@@ -106,7 +117,7 @@ func (f *fakeRuntime) Kill(_ context.Context, l Launch) error {
 	delete(f.running, l.ID)
 	delete(f.paused, l.ID)
 	delete(f.mem, l.ID)
-	return nil
+	return f.failKill
 }
 
 // work simulates guest computation: it changes the machine's memory.
@@ -152,6 +163,8 @@ func newEnv(t *testing.T, capacityMB int64) *env {
 		Runtime:   e.rt,
 		Admit:     e.adm,
 		NoCgroups: true,
+		// Disk quota tests set Quota (diskquota_test.go).
+		NoQuota: true,
 		// Unit tests don't depend on the host's disk; RES-4 tests set this.
 		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
 	}
@@ -180,13 +193,13 @@ func (e *env) create(id string, c admission.Class, mb int64) Machine {
 // guestWrite is a guest writing a file in its root.
 func (e *env) guestWrite(id, rel, s string) {
 	e.t.Helper()
-	write(e.t, filepath.Join(e.cfg.StateDir, "machines", id, "upper"), rel, s)
+	write(e.t, filepath.Join(e.cfg.StateDir, "machines", id, "disk", "upper"), rel, s)
 }
 
 // guestRead returns what the guest sees at rel ("" if absent).
 func (e *env) guestRead(id, rel string) string {
 	e.t.Helper()
-	for _, root := range []string{filepath.Join(e.cfg.StateDir, "machines", id, "upper"), e.img} {
+	for _, root := range []string{filepath.Join(e.cfg.StateDir, "machines", id, "disk", "upper"), e.img} {
 		if b, err := os.ReadFile(filepath.Join(root, rel)); err == nil {
 			return string(b)
 		}
@@ -214,5 +227,55 @@ func must(t *testing.T, err error) {
 
 // upper is a path in machine id's layer, for a guest's deletions.
 func (e *env) upper(id, rel string) string {
-	return filepath.Join(e.cfg.StateDir, "machines", id, "upper", rel)
+	return filepath.Join(e.cfg.StateDir, "machines", id, "disk", "upper", rel)
+}
+
+// Exec runs a few commands against the machine's upper layer: "echo"
+// prints its arguments, "write PATH" stores stdin, "cat PATH" prints the
+// file, "sleep" waits for the context, "hang" ignores it for a second, "killed" exits 137 once it ends, and
+// "exit N" exits N.
+func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResult, error) {
+	f.mu.Lock()
+	l, ok := f.running[id]
+	f.mu.Unlock()
+	if !ok {
+		return ExecResult{}, fmt.Errorf("fake: exec %s: not running", id)
+	}
+	out := func(b []byte) ExecResult {
+		r := ExecResult{Stdout: b}
+		if c.MaxOutput > 0 && len(b) > c.MaxOutput {
+			r.Stdout, r.Truncated = b[:c.MaxOutput], true
+		}
+		return r
+	}
+	switch a := c.Argv; a[0] {
+	case "echo":
+		return out([]byte(strings.Join(a[1:], " ") + "\n")), nil
+	case "write":
+		p := filepath.Join(l.Upper, a[1])
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return ExecResult{}, err
+		}
+		return ExecResult{}, os.WriteFile(p, c.Stdin, 0o644)
+	case "cat":
+		for _, root := range []string{l.Upper, l.Lower} {
+			if b, err := os.ReadFile(filepath.Join(root, a[1])); err == nil {
+				return out(b), nil
+			}
+		}
+		return ExecResult{ExitCode: 1, Stderr: []byte("no such file\n")}, nil
+	case "sleep":
+		<-ctx.Done()
+		return ExecResult{ExitCode: -1}, ctx.Err()
+	case "killed": // a runtime that reports a kill as an exit code
+		<-ctx.Done()
+		return ExecResult{ExitCode: 137}, nil
+	case "hang": // a runtime that ignores cancellation
+		time.Sleep(time.Second)
+		return ExecResult{}, ctx.Err()
+	case "exit":
+		n, _ := strconv.Atoi(a[1])
+		return ExecResult{ExitCode: n}, nil
+	}
+	return ExecResult{ExitCode: 127, Stderr: []byte("not found\n")}, nil
 }

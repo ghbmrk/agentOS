@@ -75,6 +75,10 @@ type Layout struct {
 	// symlinks, and whiteouts restored; elsewhere a symlink must stay
 	// inside its own root.
 	Layers []string
+	// ForgetLog is the state dir's copy of the forget log, which a restore
+	// replaces with the checked log, or with a marker beside it
+	// (PendingSuffix) while the log is unchecked. Empty: none.
+	ForgetLog string
 }
 
 func (l Layout) vaultRoot() (string, error) {
@@ -298,6 +302,11 @@ type Report struct {
 	Created time.Time
 	// Source is "backup" or "drive".
 	Source string
+	// Pending says why the forget log could not be checked (Pending*):
+	// the state dir's marker then keeps agentosd from starting until the
+	// owner confirms it (PendingNotice). Empty when the log was checked
+	// and carried on.
+	Pending string
 }
 
 // Options tune a restore.
@@ -307,6 +316,18 @@ type Options struct {
 	// gives the vault root to the vault's user. Off, files belong to the
 	// restoring user and no setuid or setgid bit is restored.
 	KeepOwners bool
+	// ForgetLogs are the forget log copies read from the backup
+	// destinations at hand (ExportForgetLog). The restored state dir's own
+	// copy is read too.
+	ForgetLogs [][]byte
+	// Counter is this PC's counter store (its TPM), which anchors the
+	// forget log; nil when the PC has none. Without it the restore stays
+	// pending (Report.Pending).
+	Counter vault.Counter
+	// Newer are the backups the restore command found at the destinations
+	// at hand; a held restore offers the owner the newest verified one
+	// made after the restored backup (Question.Newer).
+	Newer []BackupEntry
 }
 
 // Restore reads a backup with the recovery key into dst, a path that must
@@ -411,9 +432,13 @@ func restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, n
 		err = x.verify(b.V, drive)
 	}
 	if err == nil {
+		// Forgets are for good, across restores too (CAP-3).
+		rep.Pending, err = settleForgetLog(b.V, rk, tmp, lay, opt, rep.Created, now)
+	}
+	if err == nil {
 		// Declines are for good, across restores too.
 		prev := LoadState(b.V)
-		err = saveState(b.V, State{Restricted: true, RestoredAt: now.UTC(), Source: rep.Source, Unverified: drive, Declined: prev.Declined})
+		err = saveState(b.V, State{Restricted: true, RestoredAt: now.UTC(), Source: rep.Source, Unverified: drive, Declined: prev.Declined, Pending: rep.Pending})
 	}
 	b.V.Close()
 	if err != nil {
@@ -578,7 +603,9 @@ func opaque(p string) (string, bool) {
 // be a directory this restore created, and files are created exclusively
 // without following links, so no entry (a symlink first, a path beneath
 // it next) can write outside dst. Outside the machine layers no owner,
-// setuid or setgid bit, whiteout, or symlink leaving its root is restored;
+// setuid or setgid bit, whiteout, or symlink leaving its root (staysIn:
+// absolute, a ".." element, a target in or above a machine layer, or one
+// that runs through another restored link) is restored;
 // the vault root is forced to the vault's user, 0600 files and 0700
 // directories; top-level directories are 0700. It digests what it
 // restores for the MAC check.
@@ -597,6 +624,7 @@ func (x *extractor) run(tr *tar.Reader) error {
 		return err
 	}
 	dirs := map[string]bool{".": true}
+	var links linkSet // symlinks restored outside the layers so far
 	type dirMode struct {
 		p    string
 		mode os.FileMode
@@ -690,7 +718,7 @@ func (x *extractor) run(tr *tar.Reader) error {
 				return err
 			}
 		case tar.TypeSymlink:
-			if !layer && !staysIn(top, clean, hd.Linkname) {
+			if !layer && !links.staysIn(x.lay, top, clean, hd.Linkname) {
 				return fmt.Errorf("recovery: symlink %q leaves its root", clean)
 			}
 			if err := os.Symlink(hd.Linkname, p); err != nil {
@@ -739,14 +767,61 @@ func (x *extractor) run(tr *tar.Reader) error {
 	return syncDir(x.dst)
 }
 
-// staysIn reports whether a symlink at clean pointing to link resolves,
-// lexically, inside the root top.
-func staysIn(top, clean, link string) bool {
+// linkSet is the symlinks a restore has accepted outside the machine
+// layers: their names and their joined targets.
+type linkSet struct {
+	names   map[string]bool
+	targets []string
+}
+
+// staysIn reports whether a symlink at clean pointing to link stays inside
+// the root top, and if so records it. Checked one link at a time, a
+// lexical test is not enough: a chain such as a -> ., b -> a/.., c -> b/..
+// resolves outside on disk (security review 2, finding 2). So the link
+// must be relative with no ".." element; its target must not be in a
+// machine layer or above one, since layer links are the guest's and may
+// point anywhere on the host (L3 MUST-1 on #151); and no accepted link's
+// target may pass through another accepted link, whichever was restored
+// first, since a drive restore's order follows names an attacker picks
+// (L3 MUST-2). A link may still point at another link itself: with no
+// "..", each resolves at or below its own directory.
+func (ls *linkSet) staysIn(lay Layout, top, clean, link string) bool {
 	if link == "" || path.IsAbs(link) {
 		return false
 	}
+	for _, e := range strings.Split(link, "/") {
+		if e == ".." {
+			return false
+		}
+	}
 	t := path.Join(path.Dir(clean), link)
-	return t == top || strings.HasPrefix(t, top+"/")
+	if t != top && !strings.HasPrefix(t, top+"/") {
+		return false
+	}
+	if lay.inLayer(t) {
+		return false
+	}
+	for _, d := range lay.Layers {
+		if strings.HasPrefix(path.Clean(d), t+"/") {
+			return false
+		}
+	}
+	for p := path.Dir(t); p != "." && p != "/"; p = path.Dir(p) {
+		if ls.names[p] {
+			return false
+		}
+	}
+	for _, o := range ls.targets {
+		if strings.HasPrefix(o, clean+"/") {
+			return false
+		}
+	}
+	if ls.names == nil {
+		ls.names = map[string]bool{}
+	}
+	ls.names[clean] = true
+	ls.targets = append(ls.targets, t)
+	return true
 }
 
 // verify checks the archive's MAC under the restored vault's MAC key. A

@@ -7,6 +7,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/sipsign"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -38,8 +39,8 @@ var (
 
 // Owner notices when the account changes (S2 on #116).
 const (
-	noteSIPReplaced = "The second line's calling account was replaced on the local page."
-	noteSIPRemoved  = "The second line's calling account was removed on the local page."
+	noteSIPReplaced = "The second line's calling account was replaced on the box's Wi-Fi page."
+	noteSIPRemoved  = "The second line's calling account was removed on the box's Wi-Fi page."
 )
 
 // sipFieldErr maps a sipsign refusal to its owner wording.
@@ -77,6 +78,9 @@ type sipStatus struct {
 	Realm                  string           `json:"realm,omitempty"`
 	RealmConfirmed         bool             `json:"realm_confirmed"`
 	WaitingForRegistration bool             `json:"waiting_for_registration"`
+	// SetAt is when setup ran (Unix seconds), so the page can say what to
+	// check while the first registration is slow (UX-139-2).
+	SetAt int64 `json:"set_at"`
 }
 
 // sipPassword is a provider-generated password: printable, and long
@@ -217,7 +221,27 @@ func (c *custody) sipStatus() (sipStatus, error) {
 		return sipStatus{}, nil
 	}
 	return sipStatus{Set: true, Settings: rec.Settings, RealmRecorded: rec.Realm != "", Realm: rec.Realm, RealmConfirmed: rec.Confirmed,
-		WaitingForRegistration: c.learning(rec)}, nil
+		WaitingForRegistration: c.learning(rec), SetAt: rec.SetAt}, nil
+}
+
+// secondLineState is the second line's state for agentosd's STATUS and
+// digest lines (potency R1 on #139): a recorded realm the owner has not
+// confirmed, or no registration within RealmWindow of setup.
+func (c *custody) secondLineState() (modelroute.SecondLineState, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	rec, _, err := c.sipAccount()
+	switch {
+	case errors.Is(err, sipsign.ErrLocked):
+		return modelroute.SecondLineOK, errLocked
+	case err != nil, rec.Confirmed:
+		return modelroute.SecondLineOK, nil
+	case rec.Realm != "":
+		return modelroute.SecondLineConfirm, nil
+	case !c.learning(rec):
+		return modelroute.SecondLineUnreached, nil
+	}
+	return modelroute.SecondLineOK, nil
 }
 
 // signStore is the custody as sign.sock serves it (sipsign.Store).

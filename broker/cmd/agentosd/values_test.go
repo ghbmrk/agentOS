@@ -340,7 +340,7 @@ func TestTaskValuesReachOnlyTheCompiler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lp.attach(ctx, d)
+	attachForTest(t, lp, ctx, cancel, d)
 	if got := d.Owner().Handle(ctx, ownerNum, "LEARNING OFF"); len(got) != 1 || lp.sched.Settings().On(loops.Improve) {
 		t.Fatalf("LEARNING OFF: %q", got)
 	}
@@ -497,7 +497,7 @@ func TestLearningForgetsATask(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	lp.tasks.put("owner:f1", "pay the CANARY-forget invoice", false)
+	lp.tasks.put("owner:f1", "pay the CANARY-forget invoice", false, viaSMS)
 	lp.values.observe(journal.Intent{ID: "agent/1", GoalID: "owner:f1", Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
 	lp.values.mu.Lock()
 	_, had := lp.values.st["owner:f1"]
@@ -618,7 +618,7 @@ func TestForgetReportsAFailedSave(t *testing.T) {
 	}
 	for _, broken := range []string{"tasks", "values"} {
 		goal := "owner:" + broken
-		lp.tasks.put(goal, "pay the CANARY-forget invoice", false)
+		lp.tasks.put(goal, "pay the CANARY-forget invoice", false, viaSMS)
 		lp.values.observe(journal.Intent{ID: "agent/1", GoalID: goal, Origin: "guest:agent", Params: map[string]any{"to": "ann@example.test"}})
 		tasks, values := lp.tasks.store, lp.values.store
 		if broken == "tasks" {
@@ -676,6 +676,68 @@ func TestMixedRunsCompileThroughTheHash(t *testing.T) {
 	for _, f := range cand.Files {
 		if !strings.Contains(string(f), "Weekly report") || !strings.Contains(string(f), "ann@example.test") {
 			t.Fatalf("constants became inputs: %s", f)
+		}
+	}
+}
+
+// Recall's deletion reach into the learning plane (security F1 on #59,
+// change C19): for each erased intent, the harvested case and its
+// evidence go, the values kept from its params go, and one still in
+// flight is never harvested once it settles.
+func TestRecallReachForgetsWhatLearningKept(t *testing.T) {
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{"task": succeeds{}}, func(string) string { return daemon.Redacted })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp.pipe.Attach(eng)
+	lp.eng.Store(eng)
+	for _, id := range []string{"agent/r1", "agent/r2"} {
+		if _, err := eng.Submit(journal.Intent{ID: id, GoalID: "owner:" + id[6:], Origin: "guest:agent", Account: "mail", Action: "draft", Executor: "task"}); err != nil {
+			t.Fatal(err)
+		}
+		lp.tasks.put("owner:"+id[6:], "answer the hall mail", false, viaSMS)
+		lp.values.observe(journal.Intent{ID: id, GoalID: "owner:" + id[6:], Origin: "guest:agent", Params: map[string]any{"body": "meet at the oak table " + id[6:]}})
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, "values.json")); err != nil || !bytes.Contains(raw, []byte("oak table r2")) {
+		t.Fatalf("nothing kept to forget: %v", err)
+	}
+	if err := lp.harvest.Harvest(loops.Outcome{Intent: "agent/r1", Action: loops.Approved, Input: []byte("answer the hall mail"), Output: []byte("done")}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // idempotent
+		if _, err := lp.ForgetTasks("agent/r1", "agent/r2"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// agent/r2 was still queued for observe when the forget ran (security
+	// F2 on #59): drained now, it is not kept.
+	lp.observeIntent(journal.Intent{ID: "agent/r2", GoalID: "owner:r2", Origin: "guest:agent", Params: map[string]any{"body": "meet at the oak table r2"}})
+	// agent/r2 settles after the reset and the owner says YES.
+	in, err := eng.Get("agent/r2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp.record(grants.OwnerOutcome{Intent: in.Intent, Verdict: grants.OwnerAccepted})
+	ev, err := lp.harvest.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.HeldOut != 0 || len(ev.Dev) != 0 {
+		t.Fatalf("erased intents still count: %d held, %d dev", ev.HeldOut, len(ev.Dev))
+	}
+	for _, f := range []string{"values.json"} {
+		if raw, err := os.ReadFile(filepath.Join(dir, f)); err != nil || bytes.Contains(raw, []byte("oak table")) {
+			t.Fatalf("%s still holds an erased intent's params: %v", f, err)
 		}
 	}
 }

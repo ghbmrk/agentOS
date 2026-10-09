@@ -177,7 +177,7 @@ func TestStableReleaseSoaksBeforeProposal(t *testing.T) {
 
 func TestFastChannelTakesFastReleasesWithoutSoak(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.tick()
 	got := r.p.proposed()
@@ -197,7 +197,7 @@ func TestStableBoxIgnoresFastRelease(t *testing.T) {
 
 func TestPinnedBoxGetsSecurityNoticeOnly(t *testing.T) {
 	r := newRig(t)
-	r.channel = ChannelPinned
+	r.settings.Updates.Channel = ChannelPinned
 	r.release(2, func(m *update.Manifest) { m.Security = true })
 	r.attest()
 	r.tick()
@@ -215,7 +215,7 @@ func TestPinnedBoxGetsSecurityNoticeOnly(t *testing.T) {
 
 func TestPinnedBoxSaysNothingOfOrdinaryReleases(t *testing.T) {
 	r := newRig(t)
-	r.channel = ChannelPinned
+	r.settings.Updates.Channel = ChannelPinned
 	r.release(2, nil)
 	r.tick()
 	if d := r.digest(); strings.Contains(d, "Update 2") {
@@ -228,7 +228,7 @@ func TestPinnedBoxSaysNothingOfOrdinaryReleases(t *testing.T) {
 
 func TestReleaseProposedOnce(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.p.state = change.StateRejected
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.tick()
@@ -252,7 +252,7 @@ func TestAwaitingOwnerReproposedAfterRestart(t *testing.T) {
 	// The pipeline keeps proposals waiting for the owner in memory only
 	// (change C9), so after a restart Loop 3 proposes again.
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.tick()
 	r.l = r.newLoop()
@@ -261,6 +261,44 @@ func TestAwaitingOwnerReproposedAfterRestart(t *testing.T) {
 	}
 	if n := len(r.p.proposed()); n != 2 {
 		t.Fatalf("proposed %d times", n)
+	}
+}
+
+// The real pipeline is what Loop 3 asks.
+var _ Proposer = (*change.Pipeline)(nil)
+
+// REQ: UPD-5
+// A release the pipeline dropped because the owner's request closed
+// unanswered (change.Decided) is offered again at the next check, without
+// a restart (P2-2a f3, L3 on #363). One still waiting, or answered, is not.
+func TestDroppedAwaitingOwnerReofferedAtNextCheck(t *testing.T) {
+	r := newRig(t)
+	r.settings.Updates.Channel = update.ChannelFast
+	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
+	r.tick()
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if n := len(r.p.proposed()); n != 1 {
+		t.Fatalf("still waiting, proposed %d times", n)
+	}
+	r.p.lapse("c1") // the request expired; the pipeline dropped c1
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if n := len(r.p.proposed()); n != 2 {
+		t.Fatalf("dropped release proposed %d times", n)
+	}
+	if st := r.l.Status(); !strings.Contains(st.Line, "Update 2 has been waiting for your approval since "+r.clk.now().Format("Mon 2 Jan")) {
+		t.Fatalf("status after the new offer: %+v", st)
+	}
+	// The new offer is c2; a stale report for c1 changes nothing.
+	r.p.lapse("c1")
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if n := len(r.p.proposed()); n != 2 {
+		t.Fatalf("a stale lapse re-offered: proposed %d times", n)
 	}
 }
 
@@ -287,7 +325,7 @@ func TestOfflineInstallNotCurrentUntilCheckedOnline(t *testing.T) {
 
 func TestPreemptedCheckDoesNothing(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	job, ok := r.l.Next(context.Background(), true)
 	if !ok {
@@ -306,7 +344,7 @@ func TestPreemptedCheckDoesNothing(t *testing.T) {
 
 func TestRunsUnderScheduler(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	spare, err := meter.Open(meter.Config{
 		Path:       filepath.Join(t.TempDir(), "spare.json"),
@@ -389,7 +427,7 @@ func TestDigestQuietWhileCurrent(t *testing.T) {
 
 func TestApprovalLineSaysWhenAsked(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.tick()
 	if st := r.l.Status(); !strings.Contains(st.Line, "waiting for your approval since Mon 5 Oct") {
@@ -456,7 +494,7 @@ func TestDriveConfirmedOnlyWhenNothingNewer(t *testing.T) {
 
 func TestPreemptedProposalNotShownAsAwaitingApproval(t *testing.T) {
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.p.err = context.Canceled
 	ctx, cancel := context.WithCancel(context.Background())
@@ -603,7 +641,7 @@ func TestFailedChecksNotParkedByScheduler(t *testing.T) {
 	// LOOP-3 parks a loop after 3 runs without value; a failed check
 	// retried hourly must not be parked for a day (arbitrator ruling).
 	r := newRig(t)
-	r.channel = update.ChannelFast
+	r.settings.Updates.Channel = update.ChannelFast
 	r.release(2, func(m *update.Manifest) { m.Channel = update.ChannelFast })
 	r.mirrors = []update.Source{failSource{}}
 	spare, err := meter.Open(meter.Config{
@@ -800,5 +838,35 @@ func TestBackOnlineStaysDueUntilACheckRuns(t *testing.T) {
 	r.tick()
 	if _, ok := r.l.Next(context.Background(), true); ok {
 		t.Fatal("still due after the check ran")
+	}
+}
+
+// REQ: OSS-9
+// Reports from keys the box does not list never end a soak, however many
+// there are (OSS-9: evidence, never authority).
+func TestOSS9UnlistedReportsNeverEndASoak(t *testing.T) {
+	r := newRig(t)
+	r.release(2, nil)
+	for i := 0; i < 8; i++ {
+		r.tick()
+		r.clk.add(24 * time.Hour)
+		r.refresh()
+	}
+	for i := 0; i < 50; i++ {
+		_, k, err := ed25519.GenerateKey(nil)
+		r.must(err)
+		r.attestWith(k)
+	}
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	if ran, _ := r.tick(); !ran || len(r.p.proposed()) != 0 {
+		t.Fatal("unlisted reports ended the soak")
+	}
+	r.attest()
+	r.clk.add(24 * time.Hour)
+	r.refresh()
+	r.tick()
+	if len(r.p.proposed()) != 1 {
+		t.Fatal("not proposed once a listed attestor passed it")
 	}
 }

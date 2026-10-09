@@ -27,6 +27,7 @@ button.plain { background: none; color: var(--accent); padding: .4em 0; }
 .qr { width: 220px; height: 220px; display: block; margin: .6em 0; }
 .mono { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
 form { margin: .6em 0 1.2em; }
+.card { border-top: 1px solid var(--line); padding-top: .4em; }
 </style></head><body>{{end}}
 {{define "foot"}}<p class="muted">Box page: <span class="mono">http://{{boxhost}}/</span></p></body></html>{{end}}
 
@@ -38,7 +39,7 @@ form { margin: .6em 0 1.2em; }
 <p>Actions: <b>{{if .Owner.Stopped}}stopped{{else}}running{{end}}</b></p>
 {{if or .Owner.Challenged .Owner.LowLocked}}<p>Approvals by text are paused after wrong codes. Sign in here to turn them back on.</p>{{end}}
 {{if .Owner.Stopped}}
-<form method="post" action="/resume">{{if not .SignedIn}}<label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>{{end}}<button>RESUME</button></form>
+<form method="post" action="/resume">{{if or (not .SignedIn) .AskCode}}<label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>{{end}}<button>RESUME</button></form>
 {{else}}
 <form method="post" action="/stop"><button class="stop">STOP all actions</button></form>
 {{end}}
@@ -108,9 +109,128 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">Next, the box asks for a code from your code generator. The passphrase alone does not unlock it.</p>
 <script>{{shrinkjs}}</script>{{end}}
 
+{{define "secondline"}}{{template "head" .Refresh}}
+<h1>Second line</h1>
+{{if .Down}}<p>The box is still starting. This page reloads by itself.</p>
+{{else if .Locked}}<p>The box is locked, so it can't read or change the second line. <a href="/unlock/vault">Unlock the box</a>, then come back here.</p>
+{{else}}
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{if and .Removing .St.Set}}<p>Remove the second line? Texts and calls from {{.St.Settings.Number}} stop, and you'll need the provider's password to add it again.</p>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><input type="hidden" name="confirm" value="1"><button class="stop">Remove</button></form>
+<p><a href="/second-line/">Cancel</a></p>
+{{else if .St.Set}}
+{{if .St.RealmConfirmed}}<p class="ok">The second line is ready: {{.St.Settings.Number}} through {{.St.Settings.Domain}}.</p>
+{{else if .St.RealmRecorded}}<p>The box signed in to your provider, which calls itself <b class="mono">{{.Realm}}</b>.
+{{if .Matches}}This matches the domain you entered.{{else}}This differs from the domain you entered ({{.St.Settings.Domain}}). Some providers use another name here; check it on your provider's setup page.{{end}}</p>
+<p>Texts and calls start once you confirm it is your provider.</p>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="confirm"><input type="hidden" name="realm" value="{{.RealmExact}}"><button>It is my provider</button></form>
+<p class="muted">If it is not, remove the second line below and check the server name with your provider.</p>
+{{else if .St.WaitingForRegistration}}<p>Waiting for the box to sign in to your provider. This page reloads by itself.</p>
+{{if .Slow}}<p>Still trying. If this doesn't change in a few minutes, check the server name, port and password with your provider.</p>{{end}}
+{{else}}<p class="err">The box didn't reach your provider within 30 minutes of setup. Check the server name and password with your provider, then save the account again.</p>{{end}}
+<p class="muted">{{.St.Settings.User}} at {{.St.Settings.Server}}, number {{.St.Settings.Number}}.</p>
+<details{{if and (not .St.RealmRecorded) (not .St.WaitingForRegistration)}} open{{end}}><summary>Change the account</summary>{{template "lineform" .Form}}</details>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><button class="stop">Remove the second line</button></form>
+<p class="muted">The box texts you when the account is changed or removed.</p>
+{{else}}
+<p>A second line lets the box text and call businesses for you from its own number, a calling (SIP) account you hold with a provider. Your own number stays private.</p>
+<p>First, in your provider's settings: turn on encrypted calls (SRTP), and turn off voicemail on this number, so callers hear the box's message asking them to text instead.</p>
+{{template "lineform" .Form}}
+{{end}}
+<h2>Texts over your provider's web API</h2>
+{{if and .SMSRemoving .SMS.Set}}<p>Remove the texting account? Texts from {{.SMS.Settings.Number}} stop until you add it again with the provider's auth token.</p>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="sms-remove"><input type="hidden" name="confirm" value="1"><button class="stop">Remove</button></form>
+<p><a href="/second-line/">Cancel</a></p>
+{{else if .SMS.Set}}<p class="ok">Texts go through {{.SMS.ProviderName}} from {{.SMS.Settings.Number}}.</p>
+<details><summary>Change the texting account</summary>{{template "smsform" .SMSForm}}</details>
+<form method="post" action="/second-line/"><input type="hidden" name="step" value="sms-remove"><button class="stop">Remove the texting account</button></form>
+{{else}}<p>Some providers' calling accounts can't send texts. If yours is Twilio or SignalWire, the box can text through the provider's web API instead, from the same number.</p>
+<p class="muted">For a US number, register it for A2P 10DLC (business texting) in your provider's console first, or carriers block the texts.</p>
+<details{{if .SMSForm.Provider}} open{{end}}><summary>Set up texting</summary>{{template "smsform" .SMSForm}}</details>
+{{end}}{{end}}
+<p><a href="/home">More</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
+{{define "lineform"}}<form method="post" action="/second-line/"><input type="hidden" name="step" value="set">
+<label>Server and port<input type="text" name="server" value="{{.Server}}" placeholder="sip.example.net:5061" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>SIP domain<input type="text" name="domain" value="{{.Domain}}" placeholder="example.net" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>SIP user name<input type="text" name="user" value="{{.User}}" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>The account's phone number<input type="tel" name="number" value="{{.Number}}" placeholder="+44 7700 900123" required></label>
+<label><input type="checkbox" name="no_plus" value="1"{{if .NoPlus}} checked{{end}}> My provider dials numbers without the + sign</label><br>
+<label>SIP password your provider generated<input type="password" name="password" autocomplete="off" required></label>
+<button>Save</button></form>{{end}}
+
+{{define "smsform"}}<form method="post" action="/second-line/"><input type="hidden" name="step" value="sms-set">
+<label>Provider<select name="provider"><option value="twilio"{{if eq .Provider "twilio"}} selected{{end}}>Twilio</option><option value="signalwire"{{if eq .Provider "signalwire"}} selected{{end}}>SignalWire</option></select></label>
+<label>SignalWire space (leave empty for Twilio)<input type="text" name="space" value="{{.Space}}" placeholder="your-space" autocapitalize="none" autocorrect="off" spellcheck="false"></label>
+<label>Account SID (Twilio) or Project ID (SignalWire)<input type="text" name="account" value="{{.Account}}" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+<label>The number texts come from<input type="tel" name="number" value="{{.Number}}" placeholder="+1 555 010 0000" required></label>
+<label>Auth token from the provider's console<input type="password" name="token" autocomplete="off" required></label>
+<button>Save</button></form>{{end}}
+
+{{define "approvals"}}{{template "head" ""}}
+<h1>Approvals</h1>
+{{with .Msg}}<p class="ok">{{.}}</p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{range .Requests}}<section class="card"><h2>{{.ID}}{{with .Expires}} <span class="muted">Answer before {{.}}</span>{{end}}</h2>
+{{if .Local}}<p class="muted">Can't be shown in a text, so it is asked only here.</p>{{end}}
+{{range .Items}}<p>{{if .Unverified}}<b>Unverified:</b> the box could not read these details from the source. {{end}}<b>{{.Verb}}</b> {{.Object}}{{with .Detail}}, {{.}}{{end}}{{with .Amount}}, <b>{{.}}</b>{{end}}</p>
+{{with .Recipients}}<p>To {{len .}} recipient{{if ne (len .) 1}}s{{end}}, exactly as the action uses them:</p><ul>{{range .}}<li class="mono">{{.}}</li>{{end}}</ul>{{end}}
+{{if .Odd}}<p class="err">Has an unusual character, shown as [U+…]. Letters from other alphabets can look like plain ones; deny if you didn't expect it.</p>{{end}}
+<p class="muted">{{.Undo}}</p>{{end}}
+<form method="post" action="/approvals/"><input type="hidden" name="id" value="{{.ID}}"><input type="hidden" name="tok" value="{{.Tok}}"><input type="hidden" name="sum" value="{{.Sum}}">
+{{with .Lets}}<p>Approving lets your agent {{.}}.</p>{{end}}
+<label>Code from your code generator (not the one I texted), to approve<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
+<button name="answer" value="approve">Approve</button> <button name="answer" value="deny" class="stop">Deny</button></form></section>
+{{else}}<p>Nothing is waiting for you.</p>{{end}}
+<p class="muted">Each answer here is texted to you.</p>
+<p><a href="/home">More</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
+{{define "follow"}}{{template "head" ""}}
+<h1>Update source</h1>
+{{with .Msg}}<p class="ok">{{.}}</p><p><a class="button" href="/approvals/">Go to Approvals</a></p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{with .Sum}}<section class="card"><h2>What following this source means</h2>
+<p>Its root file is version {{.Version}}{{with .Expires}}, good until {{.}} by this box's clock{{end}}.</p>
+<ul>{{range .Roles}}<li>{{.Does}}: {{.Need}} of {{.Have}} keys must agree.</li>{{end}}</ul>
+<details><summary>Its root keys</summary><ul>{{range .RootIDs}}<li class="mono">{{.}}</li>{{end}}</ul></details>
+{{if .Odd}}<p class="err">A key has an unusual character, shown as [U+…]. Don't follow a source you didn't expect this from.</p>{{end}}
+<p>Fingerprint: <span class="mono">{{.Print}}</span>, the same as on the approval.<br><span class="muted">In full: <span class="mono">{{.Digest}}</span>. Check it matches the one the source publishes.</span></p>
+{{if .Project}}<p>These are the AgentOS project's own keys, as this box shipped with them.</p>
+<form method="post" action="/follow/"><input type="hidden" name="digest" value="{{.Digest}}"><input type="hidden" name="tok" value="{{$.Tok}}"><input type="hidden" name="project" value="1">
+<button name="step" value="ask">Switch back to the AgentOS project</button></form></section>
+{{else}}<p class="err">Whoever holds these keys can change any software on this box. Follow only a source you trust.</p>
+<form method="post" action="/follow/"><input type="hidden" name="digest" value="{{.Digest}}"><input type="hidden" name="tok" value="{{$.Tok}}">
+<label>Your name for this source<input type="text" name="name" maxlength="{{$.MaxName}}" autocomplete="off" spellcheck="false" required></label>
+<button name="step" value="ask">Ask to follow it</button></form></section>{{end}}
+{{else}}{{if not $.Msg}}<p>This box gets its software updates from the AgentOS project. To get them from another source you trust, such as a fork, choose that source's root file (root.json). Nothing changes until you approve it with a code.</p>
+<form method="post" action="/follow/" enctype="multipart/form-data"><label>Root file<br><input type="file" name="root" accept=".json,application/json" required></label><br>
+<button name="step" value="show">Show what it means</button></form>{{end}}{{end}}
+<p><a href="/home">More</a> · <a href="/approvals/">Approvals</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
+{{define "paused"}}{{template "head" ""}}
+<h1>Paused</h1>
+{{with .Msg}}<p class="ok">{{.}}</p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{range .Grants}}<section class="card"><h2>{{.ID}}</h2>
+<p>Resuming lets this run again: {{.What}}</p><p class="muted">Paused by {{.By}}.</p>
+{{if .Odd}}<p class="err">Has an unusual character, shown as [U+…]. Don't resume it if you didn't expect it.</p>{{end}}
+<form method="post" action="/paused/"><input type="hidden" name="grant" value="{{.ID}}"><input type="hidden" name="pause" value="{{.Pause}}"><input type="hidden" name="tok" value="{{.Tok}}">
+<button>Ask to resume</button></form></section>
+{{else}}<p>Nothing is paused.</p>{{end}}
+<p class="muted">Asking puts the resume under Approvals; you approve it there with a code from your code generator. Each answer is texted to you.</p>
+<p><a href="/approvals/">Approvals</a> · <a href="/home">More</a> · <a href="/status">Status</a></p>
+{{template "foot"}}{{end}}
+
+{{define "notready"}}{{template "head" "30"}}
+<h1>AgentOS</h1>
+<p>This box isn't ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.</p>
+{{template "foot"}}{{end}}
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
-<ul>{{range .}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
+{{with .Waiting}}<p class="ok"><a href="/approvals/">{{.}} waiting for you</a></p>{{end}}
+{{with .LineNote}}<p class="err">{{.}}</p>{{end}}
+{{with .LineTexts}}<h2>Texts with you</h2><ul>{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
+<ul>{{range .Mounts}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
 <p><a href="/status">Status, STOP and RESUME</a></p>
 {{template "foot"}}{{end}}
 
@@ -160,12 +280,16 @@ form { margin: .6em 0 1.2em; }
 {{else if eq .Step "codes"}}
 <p class="muted">Paired with your number {{.Paired}}.</p>{{template "restart" false}}
 <h2>3. Add approval codes</h2>
-<p><a class="button" href="{{.OTPLink}}">Add approval codes</a></p>
-<p class="muted">Your phone's code generator opens (on iPhone, the Passwords app). If it does not, scan this with another device, or type the key.</p>
+{{if .CodesEnrolled}}<p>Approval codes are already set up for this box. If you no longer have the code generator, replace it with your recovery key after setup.</p>
+<form method="post" action="/setup/codes"><input type="hidden" name="enrolled" value="1"><button>Continue</button></form>
+{{else if .CodesShown}}<form method="post" action="/setup/codes"><label>Type the 6-digit code your code generator shows for AgentOS<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Confirm</button></form>
+<form method="post" action="/setup/codes"><input type="hidden" name="new" value="1"><button>Show a new key</button></form>
+{{else if .OTPLink}}<p><a class="button" href="{{.OTPLink}}">Add approval codes</a></p>
+<p class="muted">Your phone's code generator opens (on iPhone, the Passwords app). If it does not, scan this with another device, or type the key. Only the newest key works.</p>
 {{.OTPQR}}
 <p class="mono">{{.OTPSecret}}</p>
 <form method="post" action="/setup/codes"><label>Type the 6-digit code it shows<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Confirm</button></form>
-
+{{end}}
 {{else if eq .Step "recovery"}}
 <h2>4. Recovery sheet</h2>
 <p>Tear the recovery key sheet off your card and store it somewhere safe, apart from the drive. You will rarely need it.</p>
@@ -179,7 +303,8 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "ai"}}
 <h2>6. Connect AI</h2>
-{{if not .Progress.Updated}}<p>The box is still updating. This step opens when it finishes.</p>
+{{if not .Progress.Updated}}{{if eq .Progress.Phase "offline"}}<p>The box is offline, so it is running the version it shipped with. It updates when it is next online, and this step opens after that.</p>
+{{else}}<p>The box is updating to the latest version first. This step opens when it finishes.</p>{{end}}
 {{else}}<p class="muted">One is enough. You can add more later.</p>
 {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>
 {{if not .Connected}}
@@ -196,6 +321,8 @@ func phaseText(p string) string {
 		return "ready"
 	case "updating":
 		return "updating (setup can continue)"
+	case "offline":
+		return "offline (setup can continue)"
 	}
 	return "starting"
 }

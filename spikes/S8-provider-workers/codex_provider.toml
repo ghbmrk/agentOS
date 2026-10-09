@@ -1,0 +1,9 @@
+# Codex model provider pointing at the broker (here: the stub) while keeping
+# ChatGPT sign-in, so the Responses call goes to the base URL rather than to
+# chatgpt.com's workspace routing (which insists on an HTTPS origin).
+model_provider = "s8"
+[model_providers.s8]
+name = "s8 broker"
+base_url = "http://127.0.0.1:18432/backend-api/codex"
+wire_api = "responses"
+requires_openai_auth = true

@@ -29,7 +29,11 @@ type preempting struct {
 	// evaluator interruption (admission refused or preempted its
 	// machine) while the context stays live.
 	refuse func(Tree, Probe) bool
-	done   map[string]int // case -> sides completed before the cancel (bit 1 base, bit 2 candidate)
+	// cause is what a cut cancels the context with (PE5); refuseErr, if
+	// set, is the refusal's error in place of errAdmission.
+	cause     error
+	refuseErr error
+	done      map[string]int // case -> sides completed before the cancel (bit 1 base, bit 2 candidate)
 }
 
 func (p *preempting) Run(ctx context.Context, t Tree, pr Probe) ([]byte, error) {
@@ -47,8 +51,15 @@ func (p *preempting) Run(ctx context.Context, t Tree, pr Probe) ([]byte, error) 
 	if refuse {
 		p.mu.Lock()
 		p.calls++
+		err := p.refuseErr
+		if p.cause != nil && p.cancel != nil {
+			p.cancel() // the context is cut too, with its own cause
+		}
 		p.mu.Unlock()
-		return nil, fmt.Errorf("start: %w", errAdmission)
+		if err == nil {
+			err = errAdmission
+		}
+		return nil, fmt.Errorf("start: %w", err)
 	}
 	out, err := p.e.Run(ctx, t, pr)
 	p.mu.Lock()
@@ -87,9 +98,12 @@ func (p *preempting) sides() int {
 }
 
 func (p *preempting) arm(at int) context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancelCause := context.WithCancelCause(context.Background())
+	// Called with p.mu held, so it reads the cause set at the time.
+	cancel := func() { cancelCause(p.cause) }
 	p.mu.Lock()
 	p.at, p.calls, p.cancel, p.done, p.cut, p.refuse = at, 0, cancel, map[string]int{}, nil, nil
+	p.cause, p.refuseErr = nil, nil
 	p.mu.Unlock()
 	return ctx
 }

@@ -217,3 +217,114 @@ func writeFileT(t *testing.T, p string, b []byte) {
 		t.Fatal(err)
 	}
 }
+
+// REQ: ADP-12, CRED-1
+
+// TestSecondLinePageClientAgainstVaultProcess holds the local UI's second
+// line client (P2-3c part 3) to the real unlock socket: setup stores the
+// account, status never carries the password, a refused field arrives
+// with its fixed reason, the realm the first registration recorded is
+// confirmed only as recorded, and removal clears the account.
+func TestSecondLinePageClientAgainstVaultProcess(t *testing.T) {
+	r := openRig(t)
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	})
+	ctx := context.Background()
+	u := localui.NewUnlockClient(filepath.Join(run, UnlockSocket))
+	if st, err := u.SecondLineStatus(ctx); err != nil || st.Set {
+		t.Fatalf("status before setup: %+v %v", st, err)
+	}
+	pw := synthetic(t, "canary-sip-")
+	var ve *localui.VaultError
+	bad := sipSettings
+	bad.Number = "5550000300"
+	if err := u.SetSecondLine(ctx, bad, pw); !errors.As(err, &ve) || ve.Status != http.StatusBadRequest || ve.Msg != errSIPNumber.msg {
+		t.Fatalf("bad number: %v", err)
+	}
+	if err := u.SetSecondLine(ctx, sipSettings, pw); err != nil {
+		t.Fatal(err)
+	}
+	st, err := u.SecondLineStatus(ctx)
+	if err != nil || !st.Set || st.Settings != sipSettings || !st.WaitingForRegistration || st.RealmRecorded || st.SetAt != r.c.now().Unix() {
+		t.Fatalf("status after setup: %+v %v", st, err)
+	}
+	if _, err := (signStore{r.c}).LearnRealm(sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := u.SecondLineStatus(ctx); st.Realm != sipRealm || st.RealmConfirmed || st.WaitingForRegistration {
+		t.Fatalf("status after registration: %+v", st)
+	}
+	if err := u.ConfirmRealm(ctx, "other realm"); !errors.As(err, &ve) || ve.Msg != errSIPRealm.msg {
+		t.Fatalf("other realm: %v", err)
+	}
+	if err := u.ConfirmRealm(ctx, sipRealm); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := u.SecondLineStatus(ctx); !st.RealmConfirmed {
+		t.Fatalf("not confirmed: %+v", st)
+	}
+	if err := u.RemoveSecondLine(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := u.SecondLineStatus(ctx); st.Set {
+		t.Fatalf("set after removal: %+v", st)
+	}
+	r.c.lock()
+	if _, err := u.SecondLineStatus(ctx); !errors.As(err, &ve) || ve.Status != http.StatusConflict {
+		t.Fatalf("status while locked: %v", err)
+	}
+}
+
+// TestTextingAccountClientAgainstVaultProcess holds the local UI's texting
+// account client (P2-3c part 5) to the real unlock socket: setup stores
+// it, status never carries the token, a refused field arrives with its
+// fixed reason, and removal clears it.
+func TestTextingAccountClientAgainstVaultProcess(t *testing.T) {
+	r := openRig(t)
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	})
+	ctx := context.Background()
+	u := localui.NewUnlockClient(filepath.Join(run, UnlockSocket))
+	if st, err := u.SMSStatus(ctx); err != nil || st.Set {
+		t.Fatalf("status before setup: %+v %v", st, err)
+	}
+	tok := synthetic(t, "canary-sms-")
+	var ve *localui.VaultError
+	bad := smsSettings
+	bad.Account = "AC1"
+	if err := u.SetSMS(ctx, bad, tok); !errors.As(err, &ve) || ve.Status != http.StatusBadRequest || ve.Msg != errSMSAccount.msg {
+		t.Fatalf("bad account: %v", err)
+	}
+	if err := u.SetSMS(ctx, smsSettings, tok); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := u.SMSStatus(ctx); err != nil || !st.Set || st.Settings != smsSettings {
+		t.Fatalf("status after setup: %+v %v", st, err)
+	}
+	if err := u.RemoveSMS(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := u.SMSStatus(ctx); st.Set {
+		t.Fatalf("set after removal: %+v", st)
+	}
+	r.c.lock()
+	if _, err := u.SMSStatus(ctx); !errors.As(err, &ve) || ve.Status != http.StatusConflict {
+		t.Fatalf("status while locked: %v", err)
+	}
+}

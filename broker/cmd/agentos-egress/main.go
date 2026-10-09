@@ -44,6 +44,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -267,7 +268,8 @@ func serveCmd(args []string) error {
 	run := fs.String("run", defaultRun, "socket directory (created 0711)")
 	brokerUID := fs.Int("broker-uid", -1, "uid of agentosd, the only peer on the model socket")
 	unlockUID := fs.Int("unlock-uid", -1, "uid of the local UI, the only peer on the unlock socket")
-	modemUID := fs.Int("modem-uid", -1, "uid of the modem bridge, the only peer on the sign socket (a SIP second line); -1 serves no sign socket")
+	modemUID := fs.Int("modem-uid", -1, "uid of the modem bridge, the only peer on the sign and sms sockets (the second line); -1 serves neither")
+	ownerNumber := fs.String("owner-number", "", "the owner's number (E.164), which the second line never texts or calls; required with -modem-uid")
 	ttl := fs.Duration("code-ttl", owner.DefaultCodeTTL, "how long a decrypted vault waits for its approval code")
 	g := grants{}
 	fs.Var(g, "grant", "machine=adapter[,adapter] (repeatable)")
@@ -324,6 +326,9 @@ func serveCmd(args []string) error {
 	if *modemUID >= 0 && (*modemUID == self || *modemUID == *brokerUID || *modemUID == *unlockUID) {
 		return errors.New("-modem-uid must name the modem bridge's own uid, distinct from this process's, agentosd's and the local UI's")
 	}
+	if *modemUID >= 0 && smsapi.CheckRecipient(*ownerNumber, "", "") != nil {
+		return errors.New("-owner-number must be the owner's number with its country code, like +447700900123, when -modem-uid is set")
+	}
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
 	}
@@ -341,6 +346,7 @@ func serveCmd(args []string) error {
 		notify:    func(s string) { log.Print(s) },
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
+		owner:     *ownerNumber,
 	})
 	if err != nil {
 		return err
@@ -365,6 +371,14 @@ func serveCmd(args []string) error {
 			return err
 		}
 		srvs = append(srvs, sign)
+		sms, err := serveSMS(*run, c, *modemUID)
+		if err != nil {
+			for _, s := range srvs {
+				s.Close()
+			}
+			return err
+		}
+		srvs = append(srvs, sms)
 	}
 	c.bootTrusted()
 	ph, _ := c.status()
@@ -429,6 +443,7 @@ func initCmd(args []string, out io.Writer) error {
 	vaultPath := fs.String("vault", defaultVault, "sealed vault file to create")
 	keysPath := fs.String("keys", defaultKeys, "key slots file to create")
 	statePath := fs.String("state", "", "unlock state to create; default unlock.json beside the keys")
+	setup := fs.Bool("setup", false, "setup mode: open code-generator enrollment once and leave the seed hand-out to setup (image boxes)")
 	fs.Parse(args)
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
@@ -452,11 +467,15 @@ func initCmd(args []string, out io.Writer) error {
 	if err := writeFileAtomic(*statePath, []byte("{}")); err != nil {
 		return err
 	}
-	if err := sealNew(*vaultPath, *keysPath, pass, seed); err != nil {
+	if err := sealNew(*vaultPath, *keysPath, pass, seed, *setup); err != nil {
 		return err
 	}
-	secret := b32().EncodeToString(seed)
 	fmt.Fprintf(out, "Vault passphrase: %s\n", pass)
+	if *setup {
+		fmt.Fprintln(out, "Setup shows the code generator. Keep the passphrase offline. It is shown once.")
+		return nil
+	}
+	secret := b32().EncodeToString(seed)
 	fmt.Fprintf(out, "Code generator:   otpauth://totp/AgentOS?secret=%s&issuer=AgentOS\n", secret)
 	fmt.Fprintln(out, "Keep both offline. They are shown once.")
 	return nil
@@ -467,12 +486,13 @@ func statePathFor(keysPath string) string {
 	return filepath.Join(filepath.Dir(keysPath), "unlock.json")
 }
 
-// sealNew builds the vault and keys under temporary names, stores the seed,
+// sealNew builds the vault and keys under temporary names, stores the seed
+// (and, in setup mode, the entry that opens enrollment once, K17),
 // and only then renames them into place, keys last: the keys file is what
 // makes a vault openable, so a crash leaves either nothing usable or a
 // complete vault. A vault file without its keys file can never be opened,
 // so init reports it for removal rather than leaving the owner stuck.
-func sealNew(vaultPath, keysPath, pass string, seed []byte) error {
+func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
 	if _, err := os.Lstat(keysPath); err == nil {
 		return fmt.Errorf("%s already exists; this box already has a vault", keysPath)
 	}
@@ -487,6 +507,12 @@ func sealNew(vaultPath, keysPath, pass string, seed []byte) error {
 		return err
 	}
 	err = v.Put(SeedName, vault.KindTOTPSeed, seed)
+	if err == nil && setup {
+		open := make([]byte, 16)
+		if _, err = rand.Read(open); err == nil {
+			err = v.Put(SetupOpenName, KindSetupOpen, open)
+		}
+	}
 	v.Close()
 	if err == nil {
 		err = os.Rename(vt, vaultPath)

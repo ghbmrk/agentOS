@@ -87,6 +87,16 @@ type Config struct {
 	// Busy reports that foreground or accepted work needs the box (RES-1,
 	// from admission). No loop work starts while it is true. Nil: never.
 	Busy func() bool
+	// BusyCause, if set, reads Busy together with whether the busy work is
+	// the owner's and whether memory pressure is over its limit, in one
+	// call, so a preemption's cause is consistent (PE5). The job's context
+	// is cancelled with change.ErrOwnerStop for STOP, change.ErrOwnerWork
+	// for the owner's work without pressure, neither of which counts
+	// against a candidate, and with change.ErrPressurePreempt under
+	// pressure, which wins over both. Busy work that is not the owner's
+	// gives no cause, which counts. Nil: every busy preemption counts.
+	// Busy, if nil, is read from it.
+	BusyCause func() (busy, owner, pressure bool)
 	// Stopped reports that STOP is in force; loops pause with everything
 	// else. Nil: never.
 	Stopped func() bool
@@ -132,7 +142,7 @@ type Scheduler struct {
 	mu          sync.Mutex
 	st          state
 	loops       map[Loop]*measure
-	cancel      context.CancelFunc
+	cancel      context.CancelCauseFunc
 	runningLoop Loop
 	done        chan struct{}
 	preempted   bool
@@ -149,6 +159,9 @@ type measure struct {
 	spent  float64 // decayed recent cost
 	dry    int
 	parked time.Time // offered no work until then
+	// parkedEval: the loop's last unit was a parked candidate
+	// (change.ErrParked); it is ordered last until a unit of it runs.
+	parkedEval bool
 }
 
 const ewma = 0.3
@@ -192,7 +205,11 @@ func New(cfg Config) (*Scheduler, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	if cfg.Busy == nil {
+	switch {
+	case cfg.Busy == nil && cfg.BusyCause != nil:
+		bc := cfg.BusyCause
+		cfg.Busy = func() bool { b, _, _ := bc(); return b }
+	case cfg.Busy == nil:
 		cfg.Busy = func() bool { return false }
 	}
 	if cfg.Stopped == nil {
@@ -270,7 +287,7 @@ func (s *Scheduler) Preempt() error {
 	done := s.done
 	if done != nil {
 		s.preempted = true
-		s.cancelLocked()
+		s.cancelLocked(s.cause())
 	}
 	s.mu.Unlock()
 	if done == nil {
@@ -286,9 +303,32 @@ func (s *Scheduler) Preempt() error {
 	}
 }
 
-func (s *Scheduler) cancelLocked() {
+// cause is why work is being preempted now (PE5): the owner's only for
+// STOP (change.ErrOwnerStop) or the owner's work while memory pressure is
+// within its limit (change.ErrOwnerWork), as BusyCause reads them in one
+// call; pressure when it holds; nil, which counts, otherwise.
+func (s *Scheduler) cause() error {
+	if s.cfg.BusyCause == nil {
+		if s.cfg.Stopped() && !s.cfg.Busy() {
+			return change.ErrOwnerStop
+		}
+		return nil
+	}
+	busy, owner, pressure := s.cfg.BusyCause()
+	switch {
+	case pressure:
+		return change.ErrPressurePreempt
+	case s.cfg.Stopped():
+		return change.ErrOwnerStop
+	case busy && owner:
+		return change.ErrOwnerWork
+	}
+	return nil
+}
+
+func (s *Scheduler) cancelLocked(cause error) {
 	if s.cancel != nil {
-		s.cancel()
+		s.cancel(cause)
 	}
 }
 
@@ -314,6 +354,12 @@ func (s *Scheduler) Run(ctx context.Context) {
 // Tick runs at most one unit of loop work. It returns whether work ran
 // and, when none did, how long to wait before looking again.
 func (s *Scheduler) Tick(ctx context.Context) (bool, time.Duration) {
+	return s.tick(ctx, false)
+}
+
+// tick is Tick; idle marks the pass offered only once nothing but parked
+// work wanted the evaluator.
+func (s *Scheduler) tick(ctx context.Context, idle bool) (bool, time.Duration) {
 	if s.cfg.Stopped() || s.cfg.Busy() {
 		return false, s.cfg.Retry
 	}
@@ -323,6 +369,7 @@ func (s *Scheduler) Tick(ctx context.Context) (bool, time.Duration) {
 	}
 	used, limit := s.cfg.Spare.Overall()
 	modelOK := set.SpareCalls > 0 && used.Calls < limit.Calls && used.Tokens < limit.Tokens
+	parkedSeen := false
 	for _, src := range s.order(set) {
 		job, ok := src.Next(ctx, modelOK)
 		if !ok {
@@ -335,13 +382,25 @@ func (s *Scheduler) Tick(ctx context.Context) (bool, time.Duration) {
 		if s.cfg.Busy() || s.cfg.Stopped() {
 			return false, s.cfg.Retry // the box got busy while the source looked
 		}
-		if s.run(ctx, src.Loop(), job) {
+		interrupted, parked := s.run(ctx, src.Loop(), job)
+		if parked {
+			// A parked candidate yields the evaluator: other work first
+			// (security P4 on PE5).
+			parkedSeen = true
+			continue
+		}
+		if interrupted {
 			// Admission refused or preempted an evaluation machine: the
 			// box is busy in a way Busy may not show (no room rather
 			// than pressure), so look again later, not at once (PE3).
 			return true, s.cfg.Retry
 		}
 		return true, 0
+	}
+	if parkedSeen && !idle {
+		// Nothing but parked work wanted the evaluator: it is idle, so
+		// a parked candidate may run.
+		return s.tick(change.WithIdle(ctx), true)
 	}
 	// Nothing worthwhile remains: sleep (LOOP-3).
 	return false, s.cfg.Idle
@@ -383,6 +442,9 @@ func (s *Scheduler) order(set Settings) []Source {
 		cs = append(cs, cand{src, share / (1 + m.spent), l.number()})
 	}
 	sort.SliceStable(cs, func(i, j int) bool {
+		if pi, pj := s.loops[cs[i].src.Loop()].parkedEval, s.loops[cs[j].src.Loop()].parkedEval; pi != pj {
+			return pj // a loop whose candidate is parked goes last (PE5)
+		}
 		if cs[i].prio != cs[j].prio {
 			return cs[i].prio > cs[j].prio
 		}
@@ -411,9 +473,10 @@ func (s *Scheduler) decayLocked(now time.Time) {
 
 // run runs job and reports whether it ended interrupted by the evaluator
 // (change.ErrInterrupted with ctx still live): such a unit is treated as
-// preempted, offered again and not measured (PE3).
-func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted bool) {
-	jctx, cancel := context.WithCancel(ctx)
+// preempted, offered again and not measured (PE3). parked reports a
+// parked candidate (change.ErrParked), which ran nothing.
+func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted, parked bool) {
+	jctx, cancel := context.WithCancelCause(ctx)
 	done := make(chan struct{})
 	s.mu.Lock()
 	s.cancel, s.runningLoop, s.done, s.preempted = cancel, l, done, false
@@ -433,7 +496,7 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted bool)
 				if s.cfg.Busy() || s.cfg.Stopped() {
 					s.mu.Lock()
 					s.preempted = true
-					s.cancelLocked()
+					s.cancelLocked(s.cause())
 					s.mu.Unlock()
 					return
 				}
@@ -449,11 +512,15 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted bool)
 	secs := s.cfg.Now().Sub(start).Seconds()
 	cost := float64(max(after.Tokens-before.Tokens, 0)) + math.Max(secs, 0)*s.cfg.ComputeTokens
 	interrupted = errors.Is(res.Err, change.ErrInterrupted)
+	parked = errors.Is(res.Err, change.ErrParked)
+	// A requeued unit is offered again at once, unmeasured (W3-forget-b2).
+	requeued := errors.Is(res.Err, ErrRequeued)
 	s.mu.Lock()
-	preempted := s.preempted || interrupted
+	preempted := s.preempted || interrupted || requeued
 	s.cancel, s.runningLoop, s.done = nil, "", nil
 	m := s.loops[l]
 	m.spent += cost
+	m.parkedEval = parked
 	if !preempted {
 		// A preempted unit is offered again; it is not measured.
 		v := math.Max(res.Value, 0)
@@ -472,12 +539,12 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted bool)
 		}
 	}
 	s.mu.Unlock()
-	cancel()
+	cancel(nil)
 	close(done)
-	if res.Err != nil {
+	if res.Err != nil && !parked && !requeued {
 		s.cfg.Logf("loops: %s %s: %v", l, job.Name, res.Err)
 	}
-	return interrupted
+	return interrupted, parked
 }
 
 func (s *Scheduler) safeRun(ctx context.Context, job Job) (res Result) {

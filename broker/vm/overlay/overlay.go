@@ -299,32 +299,115 @@ func FreeBytes(path string) (int64, error) {
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
 
-// Measure returns a layer's usage without following symlinks.
-func Measure(root string) (Usage, error) {
-	var u Usage
-	seen := map[[2]uint64]bool{}
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
+// ErrTooDeep is a layer nested deeper than MaxTreeDepth, or holding a path
+// too long for the broker to copy it (L3 MUST-1 on #174): Copy and Scan
+// walk by host path. Callers treat it as over the layer's cap, never as no
+// use. Its text names no path.
+var ErrTooDeep = fmt.Errorf("directories nest more than %d deep, or a path is too long; flatten them", MaxTreeDepth)
+
+// errOtherFS is an entry on another file system than the layer's root: a
+// mount inside the layer, which a guest cannot make, so the layer is not
+// measured (L3 S1 on #174).
+var errOtherFS = errors.New("a mount inside the layer")
+
+// Measure returns a layer's usage without following symlinks or crossing
+// into another file system. It may run on a live layer: files that vanish
+// mid-walk are skipped. It walks by directory handles, so it holds one
+// open directory per level and never fails on a host path's length
+// (security R4 on #166); a layer nested deeper than MaxTreeDepth, or with
+// a path too long to copy under root, is ErrTooDeep.
+func Measure(root string) (Usage, error) { return MeasureUnder(root, len(root)) }
+
+// MeasureUnder is Measure for a layer copied under roots up to longest
+// bytes long: a path the copy could not open under the longest of them is
+// ErrTooDeep, wherever this copy of the layer is (L3 MUST-A on #174).
+func MeasureUnder(root string, longest int) (Usage, error) {
+	// root, then "/" and a relative path (plen counts both), stays under
+	// the host's limit, which counts the terminating NUL.
+	w := measurer{seen: map[[2]uint64]bool{}, room: maxPathLen - 1 - longest}
+	// Errors name no host path: they can reach a guest's text (security
+	// N2 on #174).
+	fd, err := syscall.Open(root, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return w.u, fmt.Errorf("overlay: measure: %w", err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+		syscall.Close(fd)
+		if err == nil {
+			err = syscall.ENOTDIR // a layer is a directory, never a link to one
+		}
+		return w.u, fmt.Errorf("overlay: measure: %w", err)
+	}
+	w.dev = st.Dev
+	if err = w.handle(fd, 0, 0); err != nil && !errors.Is(err, ErrTooDeep) {
+		err = fmt.Errorf("overlay: measure: %w", err)
+	}
+	return w.u, err
+}
+
+type measurer struct {
+	u    Usage
+	seen map[[2]uint64]bool
+	dev  uint64 // the root's file system
+	room int    // the longest "/"-led relative path a copy can take
+}
+
+// handle counts the entry O_PATH handle fd names, depth levels and plen
+// bytes of relative path below the root, and what it holds if it is a
+// directory; it closes fd.
+func (w *measurer) handle(fd, depth, plen int) error {
+	var st syscall.Stat_t
+	err := syscall.Fstat(fd, &st)
+	if err == nil && uint64(st.Dev) != w.dev {
+		err = errOtherFS
+	}
+	key := [2]uint64{uint64(st.Dev), st.Ino}
+	dir := err == nil && st.Mode&syscall.S_IFMT == syscall.S_IFDIR && !w.seen[key]
+	if err == nil && !w.seen[key] {
+		w.seen[key] = true
+		w.u.Inodes++
+		w.u.Bytes += st.Blocks * 512
+	}
+	if err == nil && (plen > w.room || dir && depth > MaxTreeDepth) {
+		err = ErrTooDeep
+	}
+	if !dir || err != nil {
+		syscall.Close(fd)
+		return err
+	}
+	// "." through the handle is the directory just stat'd, whatever its
+	// name now points at. One handle per level stays open below here.
+	dfd, err := syscall.Openat(fd, ".", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	syscall.Close(fd)
+	if err != nil {
+		return err
+	}
+	f := os.NewFile(uintptr(dfd), "")
+	defer f.Close()
+	for {
+		ents, err := f.ReadDir(256)
+		for _, e := range ents {
+			cfd, err := syscall.Openat(dfd, e.Name(), oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+			if errors.Is(err, syscall.ENOENT) {
+				continue // removed since its directory was read
+			}
+			if err != nil {
+				return err
+			}
+			if err := w.handle(cfd, depth+1, plen+1+len(e.Name())); err != nil {
+				return err
+			}
+		}
+		switch {
+		case err == io.EOF:
+			return nil
+		case depth > 0 && errors.Is(err, syscall.ENOENT):
+			return nil // removed while it was read
+		case err != nil:
 			return err
 		}
-		fi, err := d.Info()
-		if err != nil {
-			return err
-		}
-		st, ok := fi.Sys().(*syscall.Stat_t)
-		if !ok {
-			return nil
-		}
-		key := [2]uint64{uint64(st.Dev), st.Ino}
-		if seen[key] {
-			return nil
-		}
-		seen[key] = true
-		u.Inodes++
-		u.Bytes += st.Blocks * 512
-		return nil
-	})
-	return u, err
+	}
 }
 
 // View is what a guest sees: an upper layer over a lower one.

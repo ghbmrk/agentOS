@@ -1,13 +1,21 @@
 package clock
 
-// REQ: TIM-1
+// REQ: TIM-1, HW-8
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
-func TestTIM1SyncedReadsKernel(t *testing.T) {
-	// The answer depends on the host; the read itself must work unprivileged.
-	if _, err := Synced(); err != nil {
-		t.Fatalf("Synced: %v", err)
+func TestHW8RTCReadsSysfs(t *testing.T) {
+	// The answer depends on the host; a host with a hardware clock gives a
+	// time after 2000, read without privilege.
+	if _, err := os.Stat("/sys/class/rtc/rtc0/since_epoch"); err != nil {
+		t.Skip("no hardware clock here")
+	}
+	rtc, err := RTC()
+	if err != nil || rtc.Year() < 2000 {
+		t.Fatalf("RTC = %v, %v", rtc, err)
 	}
 }
 

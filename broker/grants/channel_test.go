@@ -52,26 +52,23 @@ func TestOwnerChannelEndToEnd(t *testing.T) {
 	say := func(msg string) string { return strings.Join(ch.Handle(ctx, ownerNum, msg), " | ") }
 	idRE := regexp.MustCompile(`^([A-Z][0-9]{1,2}):`)
 
-	// 1. A grant: code-generator code, then the local page.
+	// 1. A grant: asked on the local page only, where one
+	// code-generator code approves and confirms it (Security Q1).
 	r.submit(journal.Intent{ID: "local/g1", Origin: "local", Account: journal.BrokerAccount,
 		Action: journal.ActionGrantChange, Params: specParams(mailGrant()), Executor: ExecutorName})
 	r.g.Flush()
 	req := text()
-	if !strings.Contains(req, "grant connect mail, 3 acting ops") || !strings.Contains(req, "code generator") {
+	if !strings.Contains(req, "grant \"connect mail, 3 acting ops") || !strings.Contains(req, "Wi-Fi page") || strings.Contains(req, "YES") {
 		t.Fatalf("grant request %q", req)
 	}
 	id := idRE.FindStringSubmatch(req)[1]
-	if got := say(fmt.Sprintf("YES %s %s", id, totp(seed, r.now()))); !strings.HasPrefix(got, "Approved") {
-		t.Fatalf("grant approval: %q", got)
+	if got := say(fmt.Sprintf("YES %s %s", id, totp(seed, r.now()))); strings.HasPrefix(got, "Approved") {
+		t.Fatalf("grant approved by text: %q", got)
 	}
+	r.advance(30 * time.Second)
+	pageApprove(t, ch, id, totp(seed, r.now()))
 	r.g.Wait()
-	if err := r.g.ConfirmLocal("local/g1"); err != nil {
-		t.Fatal(err)
-	}
-	r.g.Wait()
-	if note := text(); !strings.Contains(note, "Added G1") {
-		t.Fatalf("grant notice %q", note)
-	}
+	pageTexts(text, "Added G1", true)
 
 	// 2. A low-risk send: the texted code from the request.
 	r.ver.set("inv-1042", sam())
@@ -91,7 +88,7 @@ func TestOwnerChannelEndToEnd(t *testing.T) {
 	}
 
 	// 3. An auto-reply the owner undoes.
-	r.grant2(ch, text, say, seed, Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 3, PerDay: 10, Reply: true}})
+	r.grant2(ch, text, say, seed, Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 3, PerDay: 10, Reply: true}}, false)
 	r.ver.set("thr-1", Verified{Item: owner.Item{Object: "reply", Recipient: "sam@example.com",
 		Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
 		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true})
@@ -166,7 +163,7 @@ func TestRestartReissuesThroughTheChannel(t *testing.T) {
 		return ""
 	}
 	say := func(msg string) string { return strings.Join(ch.Handle(ctx, ownerNum, msg), " | ") }
-	r.grant2(ch, text, say, seed, mailGrant())
+	r.grant2(ch, text, say, seed, mailGrant(), true)
 
 	for _, rec := range []string{"inv-1", "inv-2"} {
 		x := sam()
@@ -212,7 +209,9 @@ func TestRestartReissuesThroughTheChannel(t *testing.T) {
 }
 
 // grant2 creates a grant through the real channel.
-func (r *rig) grant2(ch *owner.Channel, text func() string, say func(string) string, seed []byte, s Spec) {
+// note: the page's own note on it is texted now, not coalesced into a
+// later one.
+func (r *rig) grant2(ch *owner.Channel, text func() string, say func(string) string, seed []byte, s Spec, note bool) {
 	r.t.Helper()
 	id := fmt.Sprintf("local/grant/%d", len(r.eng.List()))
 	r.submit(journal.Intent{ID: id, Origin: "local", Account: journal.BrokerAccount,
@@ -222,15 +221,34 @@ func (r *rig) grant2(ch *owner.Channel, text func() string, say func(string) str
 	rid := regexp.MustCompile(`^([A-Z][0-9]{1,2}):`).FindStringSubmatch(req)[1]
 	// Codes work once per step: move to the next one.
 	r.advance(30 * time.Second)
-	if got := say(fmt.Sprintf("YES %s %s", rid, totp(seed, r.now()))); !strings.HasPrefix(got, "Approved") {
-		r.t.Fatalf("grant approval: %q", got)
-	}
+	pageApprove(r.t, ch, rid, totp(seed, r.now()))
 	r.g.Wait()
-	if err := r.g.ConfirmLocal(id); err != nil {
-		r.t.Fatal(err)
+	pageTexts(text, "Added G", note)
+}
+
+// pageTexts reads the texts a page approval of a grant sends, in either
+// order: the grant's notice and, when note, the page's own note.
+func pageTexts(text func() string, notice string, note bool) {
+	gotNotice, gotNote := false, !note
+	for !gotNotice || !gotNote {
+		m := text()
+		gotNotice = gotNotice || strings.Contains(m, notice)
+		gotNote = gotNote || strings.Contains(m, "on my Wi-Fi page at")
 	}
-	r.g.Wait()
-	text() // the notice
+}
+
+// pageApprove approves request id on the local page with code.
+func pageApprove(t *testing.T, ch *owner.Channel, id, code string) {
+	t.Helper()
+	for _, rq := range ch.LocalRequests() {
+		if rq.ID == id {
+			if got, err := ch.LocalAnswer(id, rq.Sum, true, code); err != nil || !strings.HasPrefix(got, "Approved") {
+				t.Fatalf("page approval: %q %v", got, err)
+			}
+			return
+		}
+	}
+	t.Fatalf("%s is not on the page", id)
 }
 
 // totp is RFC 6238 (SHA-1, 30 s, 6 digits), as a code generator shows it.

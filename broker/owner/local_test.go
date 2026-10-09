@@ -20,7 +20,7 @@ func TestLocalSignInClearsChallengeModeAndUnlocks(t *testing.T) {
 	if !r.ch.codes.st.LowLocked || r.ch.SessionUnlocked(r.clock()) {
 		t.Fatal("setup: expected low tier locked and session locked")
 	}
-	until, err := r.ch.LocalSignIn(r.totp())
+	until, _, err := r.ch.LocalSignIn(r.totp())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,16 +44,16 @@ func TestLocalSignInAcceptsTheAskedGridCellOnly(t *testing.T) {
 	if cell == other {
 		other = "B1"
 	}
-	if _, err := r.ch.LocalSignIn(GridCell(testSecrets.GridSeed, other)); err != ErrWrongCode {
+	if _, _, err := r.ch.LocalSignIn(GridCell(testSecrets.GridSeed, other)); err != ErrWrongCode {
 		t.Fatalf("unasked cell: %v", err)
 	}
 	cell = r.ch.LocalGridCell()
-	if _, err := r.ch.LocalSignIn(GridCell(testSecrets.GridSeed, cell)); err != nil {
+	if _, _, err := r.ch.LocalSignIn(GridCell(testSecrets.GridSeed, cell)); err != nil {
 		t.Fatalf("asked cell: %v", err)
 	}
 	// Single use (CH-18).
 	r.ch.codes.challenge = cell
-	if _, err := r.ch.LocalSignIn(GridCell(testSecrets.GridSeed, cell)); err != ErrWrongCode {
+	if _, _, err := r.ch.LocalSignIn(GridCell(testSecrets.GridSeed, cell)); err != ErrWrongCode {
 		t.Fatalf("spent cell reused: %v", err)
 	}
 }
@@ -65,7 +65,7 @@ func TestLocalWrongCodesCountAndAlertTheOwner(t *testing.T) {
 	r.unlock()
 	r.advance(time.Second)
 	for i := 0; i < WrongToLock; i++ {
-		if _, err := r.ch.LocalSignIn(wrongCode(i)); err != ErrWrongCode {
+		if _, _, err := r.ch.LocalSignIn(wrongCode(i)); err != ErrWrongCode {
 			t.Fatalf("wrong %d: %v", i, err)
 		}
 	}
@@ -84,21 +84,21 @@ func TestLocalAttemptsAreBounded(t *testing.T) {
 	r := newRig(t, nil)
 	enterChallenge(t, r)
 	for i := 0; i < LocalBound; i++ {
-		if _, err := r.ch.LocalSignIn(wrongCode(i)); err != ErrWrongCode {
+		if _, _, err := r.ch.LocalSignIn(wrongCode(i)); err != ErrWrongCode {
 			t.Fatalf("attempt %d: %v", i, err)
 		}
 		r.advance(time.Minute)
 	}
-	if _, err := r.ch.LocalSignIn(r.totp()); err != ErrTooMany {
+	if _, _, err := r.ch.LocalSignIn(r.totp()); err != ErrTooMany {
 		t.Fatalf("over the bound, even a right code: %v", err)
 	}
 	// The bound survives a restart.
 	r.ch = r.open()
-	if _, err := r.ch.LocalSignIn(r.totp()); err != ErrTooMany {
+	if _, _, err := r.ch.LocalSignIn(r.totp()); err != ErrTooMany {
 		t.Fatalf("bound forgotten on restart: %v", err)
 	}
 	r.advance(WrongWindow)
-	if _, err := r.ch.LocalSignIn(r.totp()); err != nil {
+	if _, _, err := r.ch.LocalSignIn(r.totp()); err != nil {
 		t.Fatalf("next window: %v", err)
 	}
 }
@@ -107,7 +107,7 @@ func TestLocalAttemptsAreBounded(t *testing.T) {
 // stronger proof than CH-11's texted code, so no further code is asked.
 func TestLocalStopAndResume(t *testing.T) {
 	r := newRig(t, nil)
-	if msg, err := r.ch.LocalResume(); err != nil || msg != "Not stopped. Nothing to resume." {
+	if msg, err := r.ch.LocalResume(r.ch.LocalStatus().Locks); err != nil || msg != "Not stopped. Nothing to resume." {
 		t.Fatalf("resume while running: %q %v", msg, err)
 	}
 	if err := r.ch.LocalStop(context.Background()); err != nil {
@@ -118,7 +118,7 @@ func TestLocalStopAndResume(t *testing.T) {
 	}
 	// A texted RESUME code issued before is void after a local resume.
 	r.say("RESUME")
-	msg, err := r.ch.LocalResume()
+	msg, err := r.ch.LocalResume(r.ch.LocalStatus().Locks)
 	if err != nil || !strings.HasPrefix(msg, "Resumed.") || r.eng.Stopped() {
 		t.Fatalf("local resume: %q %v", msg, err)
 	}
@@ -130,7 +130,7 @@ func TestLocalStopAndResume(t *testing.T) {
 func TestTOTPMatchesTheChannelsCheck(t *testing.T) {
 	r := newRig(t, nil)
 	r.advance(30 * time.Second)
-	if _, err := r.ch.LocalSignIn(TOTP(testSecrets.TOTPSeed, r.clock())); err != nil {
+	if _, _, err := r.ch.LocalSignIn(TOTP(testSecrets.TOTPSeed, r.clock())); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -140,11 +140,11 @@ func TestTOTPMatchesTheChannelsCheck(t *testing.T) {
 // of a bound window and when the bound runs out, and listed in the digest.
 func TestLocalSignInAlertsAreCoalesced(t *testing.T) {
 	r := newRig(t, nil)
-	if _, err := r.ch.LocalSignIn(r.totp()); err != nil {
+	if _, _, err := r.ch.LocalSignIn(r.totp()); err != nil {
 		t.Fatal(err)
 	}
 	first := r.clock().Format("15:04")
-	if got := r.inbox(); got != "A phone signed in on the box's Wi-Fi at "+first+". Not you? Text STOP." {
+	if got := r.inbox(); got != "A phone signed in on my Wi-Fi at "+first+". Not you? Text STOP." {
 		t.Fatalf("sign-in alert: %q", got)
 	}
 	r.advance(10 * time.Minute)
@@ -161,7 +161,7 @@ func TestLocalSignInAlertsAreCoalesced(t *testing.T) {
 	}
 	r.advance(SignInAlertEvery)
 	r.ch.Tick()
-	if got := r.inbox(); got != "Phones signed in on the box's Wi-Fi at "+second+", "+third+". Not you? Text STOP." {
+	if got := r.inbox(); got != "Phones signed in on my Wi-Fi at "+second+", "+third+". Not you? Text STOP." {
 		t.Fatalf("coalesced alert: %q", got)
 	}
 
@@ -207,7 +207,7 @@ func TestLocalSignInAlertsSurviveRestartAndFailedSend(t *testing.T) {
 	}
 	r.ch = r.open()
 	r.ch.Tick()
-	if got := r.inbox(); got != "A phone signed in on the box's Wi-Fi at "+held+". Not you? Text STOP." {
+	if got := r.inbox(); got != "A phone signed in on my Wi-Fi at "+held+". Not you? Text STOP." {
 		t.Fatalf("held sign-in after restart and failed send: %q", got)
 	}
 	// Sent once only.
@@ -231,13 +231,13 @@ func TestSignInDuringSendIsKept(t *testing.T) {
 			s.LocalSignIns = append(s.LocalSignIns, now.Add(time.Duration(i-maxSignIns)*time.Minute))
 		}
 	})
-	text, n := r.ch.signInTextLocked(now)
+	text, n, m := r.ch.signInTextLocked(now)
 	r.ch.mu.Unlock()
 	// One more signs in mid-send; the cap pushes out the oldest.
-	if _, err := r.ch.LocalSignIn(r.totp()); err != nil {
+	if _, _, err := r.ch.LocalSignIn(r.totp()); err != nil {
 		t.Fatal(err)
 	}
-	r.ch.sendSignIns(text, n, now)
+	r.ch.sendSignIns(text, n, m, now)
 	if got := r.ch.codes.st.LocalSignIns; len(got) != 1 {
 		t.Fatalf("left after send: %v", got)
 	}

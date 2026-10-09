@@ -15,7 +15,7 @@ import (
 // request's source (Server.ServeHTTP) and the firewall drops it first
 // (NftRules).
 func Listen(ctx context.Context, c APConfig, port int) (net.Listener, error) {
-	if err := c.Validate(); err != nil {
+	if err := c.ValidateServe(); err != nil {
 		return nil, err
 	}
 	return listenOn(ctx, c.Iface, net.JoinHostPort(c.Addr.Addr().String(), strconv.Itoa(port)))

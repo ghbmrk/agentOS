@@ -253,8 +253,90 @@ func TestPassiveChecks(t *testing.T) {
 	if _, err := g.Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if d := strings.Join(g.Digest(), " "); !strings.Contains(d, "not run: file hashes, known vulnerabilities, settings, credential expiry") {
+	if d := strings.Join(g.Digest(), " "); !strings.Contains(d, "Loop 2: partial (not run: file hashes; known vulnerabilities; settings; credential expiry).") {
 		t.Errorf("unwired checks: %s", d)
+	}
+}
+
+// Security L5, UX W2 and potency C2 on W5a: STATUS always says what did
+// not run and why; the digest says it once, again when the set changes,
+// and whenever a pass is overdue. Nothing ever reads as clean or passed.
+func TestNotRunIsSaidAndNothingReadsPassed(t *testing.T) {
+	now := t0
+	b := cleanBox()
+	box := b.Box()
+	box.Expiries = nil
+	g, err := NewGuard(GuardConfig{Box: box, Pipeline: newPipe(t), Store: &change.MemStore{}, Now: func() time.Time { return now },
+		NotRun: map[Check]string{CheckExpiry: "needs the vault's expiry list"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var said []string
+	look := func() (status, digest string) {
+		status, digest = g.Status(), strings.Join(g.Digest(), " ")
+		said = append(said, status, digest)
+		return
+	}
+	if st, _ := look(); st != "Loop 2: not run yet." {
+		t.Fatalf("before a pass: %q", st)
+	}
+	g.Pass(context.Background())
+	want := "Loop 2: partial (not run: credential expiry, needs the vault's expiry list)."
+	if st, d := look(); st != want || d != want {
+		t.Fatalf("first pass: STATUS %q, digest %q", st, d)
+	}
+	if st, d := look(); st != want || strings.Contains(d, "Loop 2") {
+		t.Fatalf("second look: STATUS %q, digest %q", st, d)
+	}
+	// Every check wired: STATUS has nothing to say, and says nothing.
+	g.cfg.Box.Expiries = b.Box().Expiries
+	now = now.Add(6 * time.Hour)
+	g.Pass(context.Background())
+	if st, d := look(); st != "" || strings.Contains(d, "Loop 2") {
+		t.Fatalf("all wired: STATUS %q, digest %q", st, d)
+	}
+	// Overdue: said in both, every time.
+	now = now.Add(12 * time.Hour)
+	for range 2 {
+		if st, d := look(); !strings.HasPrefix(st, "Loop 2: checks haven't run since") || !strings.Contains(d, st) {
+			t.Fatalf("overdue: STATUS %q, digest %q", st, d)
+		}
+	}
+	for _, s := range said {
+		l := strings.ToLower(s)
+		for _, w := range []string{"passed", "clean", "all checks", "no problems", "ok"} {
+			if strings.Contains(l, w) {
+				t.Fatalf("%q reads as passed (%q)", s, w)
+			}
+		}
+	}
+}
+
+// REQ: LOOP-8. Potency C2 on W5a: a check whose input exists but errored
+// is said as failed, in STATUS and in every digest while it fails, not
+// only once like a check that is not wired yet.
+func TestAFailedCheckIsSaidEveryDigest(t *testing.T) {
+	now := t0
+	box := cleanBox().Box()
+	box.Expiries = func() ([]Expiry, error) { return nil, errors.New("vault unreachable") }
+	g, err := NewGuard(GuardConfig{Box: box, Pipeline: newPipe(t), Store: &change.MemStore{}, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Pass(context.Background())
+	want := "Loop 2: partial (not run: credential expiry, failed)."
+	for i := range 2 {
+		if st, d := g.Status(), strings.Join(g.Digest(), " "); st != want || d != want {
+			t.Fatalf("digest %d: STATUS %q, digest %q", i, st, d)
+		}
+	}
+	// Fixed: nothing to say, and nothing reads as passed.
+	box.Expiries = func() ([]Expiry, error) { return nil, nil }
+	g.cfg.Box = box
+	now = now.Add(6 * time.Hour)
+	g.Pass(context.Background())
+	if st, d := g.Status(), strings.Join(g.Digest(), " "); st != "" || d != "" {
+		t.Fatalf("recovered: STATUS %q, digest %q", st, d)
 	}
 }
 
@@ -296,7 +378,7 @@ func TestFindingHandling(t *testing.T) {
 	// Only the High finding is texted; the Low one is in the digest.
 	if len(r.texts) != 1 || !r.urgent[0] ||
 		!strings.Contains(r.texts[0], "Known vulnerability in openssl (ADV-1), fixed in 3.0.14.") ||
-		!strings.Contains(r.texts[0], "Paused the network gateway. It stays paused until you turn it back on.") ||
+		!strings.Contains(r.texts[0], "Paused the network gateway. It stays paused until you resume it on my Wi-Fi page.") ||
 		strings.Contains(r.texts[0], "executor") || strings.Contains(r.texts[0], "grant") {
 		t.Fatalf("texts %q", r.texts)
 	}
@@ -314,7 +396,7 @@ func TestFindingHandling(t *testing.T) {
 	// and that the pause stays.
 	b.pkgs[0].Version = "3.0.14"
 	r.pass(t)
-	if len(r.texts) != 2 || !strings.Contains(r.texts[1], "Cleared: openssl. The network gateway is still paused; ask your agent to turn it back on.") {
+	if len(r.texts) != 2 || !strings.Contains(r.texts[1], "Cleared: openssl. The network gateway stays paused until you resume it on my Wi-Fi page.") {
 		t.Fatalf("cleared text %q", r.texts)
 	}
 	// Back within a day: handled again (contained, evidence), but not
@@ -370,9 +452,81 @@ func TestPauseCap(t *testing.T) {
 	if len(r.c.got) != 3 {
 		t.Fatalf("paused %d, want 3", len(r.c.got))
 	}
-	capped := strings.Count(strings.Join(r.texts, " "), "Not paused (too many findings at once)")
-	if capped != 2 || len(r.texts) != 1 { // one text for the pass
-		t.Fatalf("texts %q", r.texts)
+	// One text for the pass, the rest on MORE: each pause is told at once,
+	// though the advisories are Low (security L2 on W5a).
+	all := strings.Join(append(r.texts, r.g.More()...), " ")
+	if len(r.texts) != 1 || strings.Count(all, "Not paused (too many findings at once)") != 2 || strings.Count(all, "Paused the affected tool") != 3 {
+		t.Fatalf("texts %q, all %q", r.texts, all)
+	}
+}
+
+// L3 S1 on #169: a pause that ended while the guard could not hear it (a
+// cascade revoke before the hook covered it, or a crash between the
+// journal's resume and the guard's save) is dropped by Reconcile, so the
+// digest does not list it and a new pause of the target is texted (L2).
+func TestReconcileDropsPausesTheGateNoLongerHolds(t *testing.T) {
+	b := cleanBox()
+	b.pkgs = []Package{{Name: "a", Version: "1.0", Contain: &Target{Kind: "grant", Name: "G2"}},
+		{Name: "b", Version: "1.0", Contain: &Target{Kind: "grant", Name: "G3"}}}
+	b.snap.Advisories = []Advisory{{ID: "ADV-a", Package: "a", Fixed: "1.1", Severity: "low"},
+		{ID: "ADV-b", Package: "b", Fixed: "1.1", Severity: "low"}}
+	r := newGuardRig(t, b)
+	r.pass(t)
+	if len(r.c.got) != 2 || len(r.texts) != 1 {
+		t.Fatalf("paused %v, texts %q", r.c.got, r.texts)
+	}
+	// Both clear; the owner ends G2's pause, but the guard never hears it.
+	b.snap.Advisories = nil
+	r.now = r.now.Add(6 * time.Hour)
+	r.pass(t)
+	r.reopen(t)
+	if err := r.g.Reconcile(func(t Target) bool { return t.Name == "G3" }); err != nil {
+		t.Fatal(err)
+	}
+	r.reopen(t) // Reconcile saved
+	if d := strings.Join(r.g.Digest(), " "); strings.Contains(d, "Cleared: a.") || !strings.Contains(d, "Cleared: b.") {
+		t.Fatalf("digest after Reconcile: %q", d)
+	}
+	b.snap.Advisories = []Advisory{{ID: "ADV-a", Package: "a", Fixed: "1.1", Severity: "low"},
+		{ID: "ADV-b", Package: "b", Fixed: "1.1", Severity: "low"}}
+	r.now = r.now.Add(7 * 24 * time.Hour)
+	r.texts = nil
+	r.pass(t)
+	all := strings.Join(append(r.texts, r.g.More()...), " ")
+	if strings.Count(all, "Paused the affected tool") != 1 {
+		t.Fatalf("only G2's new pause is texted; G3 is still paused: %q", all)
+	}
+}
+
+// Security L2 on W5a: automatic pauses are also capped per day, so a feed
+// that drips findings across passes cannot pause a grant set either.
+func TestPauseCapPerDay(t *testing.T) {
+	b := cleanBox()
+	b.pkgs, b.snap.Advisories = nil, nil
+	r := newGuardRig(t, b)
+	paused := 0
+	for i := range 6 {
+		n := fmt.Sprint("p", i)
+		for j := range 2 {
+			m := fmt.Sprint(n, j)
+			b.pkgs = append(b.pkgs, Package{Name: m, Version: "1.0", Contain: &Target{Kind: "grant", Name: "g-" + m}})
+			b.snap.Advisories = append(b.snap.Advisories, Advisory{ID: "ADV-" + m, Package: m, Fixed: "1.1", Severity: "high"})
+		}
+		r.now = r.now.Add(time.Hour)
+		r.reopen(t)
+		r.pass(t)
+		paused = len(r.c.got)
+	}
+	if paused != 10 {
+		t.Fatalf("paused %d in a day, want 10", paused)
+	}
+	r.now = r.now.Add(24 * time.Hour)
+	b.pkgs = append(b.pkgs, Package{Name: "next", Version: "1.0", Contain: &Target{Kind: "grant", Name: "g-next"}})
+	b.snap.Advisories = append(b.snap.Advisories, Advisory{ID: "ADV-next", Package: "next", Fixed: "1.1", Severity: "high"})
+	r.reopen(t)
+	r.pass(t)
+	if len(r.c.got) != 11 {
+		t.Fatalf("the next day paused %d in all", len(r.c.got))
 	}
 }
 
@@ -426,7 +580,7 @@ func TestPausedAndFlapping(t *testing.T) {
 	b.pkgs[0].Version = "3.0.14"
 	r.pass(t)
 	d := strings.Join(r.g.Digest(), "\n")
-	if !strings.Contains(d, "Cleared: openssl. The network gateway is still paused; ask your agent to turn it back on.") {
+	if !strings.Contains(d, "Cleared: openssl. The network gateway stays paused until you resume it on my Wi-Fi page.") {
 		t.Fatalf("digest: %s", d)
 	}
 	must(t, r.g.Resumed(Target{Kind: "executor", Name: "egress", Label: "the network gateway"}))
@@ -486,7 +640,7 @@ func TestOwnerText(t *testing.T) {
 	b2.pkgs[0].Version = "3.0.15" // no advisory
 	r2 := newGuardRig(t, b2)
 	r2.pass(t)
-	if len(r2.texts) != 1 || r2.urgent[0] || !strings.Contains(r2.texts[0], "Credential old-token has expired. Replace it on the box page.") {
+	if len(r2.texts) != 1 || r2.urgent[0] || !strings.Contains(r2.texts[0], "Credential old-token has expired. Replace it on my Wi-Fi page.") {
 		t.Fatalf("expiry text %q urgent %v", r2.texts, r2.urgent)
 	}
 
@@ -512,7 +666,7 @@ func TestUncomparedAndWording(t *testing.T) {
 	if len(ev) != 1 || ev[0].Contained != "none" || ev[0].Fixture != "" || ev[0].Finding.Severity != Low || len(r.c.got) != 0 || len(r.texts) != 0 {
 		t.Fatalf("uncompared: %+v paused %d texts %q", ev, len(r.c.got), r.texts)
 	}
-	want := "Security check: Could not check openssl version build-42 against known vulnerabilities. Check it on the box page."
+	want := "Security check: Could not check openssl version build-42 against known vulnerabilities. Check it on my Wi-Fi page."
 	if d := r.g.Digest(); len(d) != 1 || d[0] != want {
 		t.Fatalf("digest %q\nwant %q", d, want)
 	}
@@ -536,9 +690,9 @@ func TestUncomparedAndWording(t *testing.T) {
 	}{
 		{Finding{Check: CheckHash, Subject: "guest-image/openclaw", Detail: "differs from the signed release"}, "File guest-image/openclaw does not match the signed release."},
 		{Finding{Check: CheckHash, Subject: "dep/libfoo", Detail: "could not be measured"}, "File dep/libfoo could not be checked."},
-		{Finding{Check: CheckDrift, Subject: "config/quiet.json", Detail: "changed outside the change pipeline"}, "Setting file config/quiet.json changed outside the box's change process."},
-		{Finding{Check: CheckExpiry, Subject: "cal-cert", Detail: "expires 2026-10-08"}, "Credential cal-cert expires 2026-10-08. Replace it on the box page."},
-		{Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "ADV-1", Fixed: "3.0.14"}, "Known vulnerability in openssl (ADV-1), fixed in 3.0.14. The box takes the fix when an update has it."},
+		{Finding{Check: CheckDrift, Subject: "config/quiet.json", Detail: "changed outside the change pipeline"}, "Setting file config/quiet.json changed outside my change process."},
+		{Finding{Check: CheckExpiry, Subject: "cal-cert", Detail: "expires 2026-10-08"}, "Credential cal-cert expires 2026-10-08. Replace it on my Wi-Fi page."},
+		{Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "ADV-1", Fixed: "3.0.14"}, "Known vulnerability in openssl (ADV-1), fixed in 3.0.14. I take the fix when an update has it."},
 	} {
 		if got := findingText(c.f); got != c.want {
 			t.Errorf("got  %q\nwant %q", got, c.want)
@@ -599,7 +753,7 @@ func TestSeverityOrder(t *testing.T) {
 	}
 
 	f := Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "DSA-1", Fixed: "1:3.0.14-1~deb12u1+b1"}
-	if got, want := findingText(f), "Known vulnerability in openssl (DSA-1), fixed in 1:3.0.14-1~deb12u1+b1. The box takes the fix when an update has it."; got != want {
+	if got, want := findingText(f), "Known vulnerability in openssl (DSA-1), fixed in 1:3.0.14-1~deb12u1+b1. I take the fix when an update has it."; got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
 
@@ -607,7 +761,7 @@ func TestSeverityOrder(t *testing.T) {
 	b3.snap.Advisories[0].Fixed = "not-a-version!"
 	r3 := newGuardRig(t, b3)
 	r3.pass(t)
-	want := "Security check: Could not read the fixed version in advisory ADV-1 for openssl. Check it on the box page."
+	want := "Security check: Could not read the fixed version in advisory ADV-1 for openssl. Check it on my Wi-Fi page."
 	if d := r3.g.Digest(); len(d) != 1 || d[0] != want || len(r3.c.got) != 0 {
 		t.Fatalf("digest %q\nwant %q", d, want)
 	}
@@ -652,7 +806,6 @@ func TestFixesCannotWeaken(t *testing.T) {
 		{"disables a check", change.Tree{"checks/advisory.json": []byte(`{"off":true}`)}, "LOOP-10"},
 		{"widens authority", change.Tree{"grants/mail.json": []byte(`{"send":"any"}`)}, "LOOP-10"},
 		{"edits the suite", change.Tree{"security/loop2.json": []byte(`[]`)}, "CHG-2"},
-		{"fails the new fixture", change.Tree{"config/facts.json": facts("3.0.12")}, "security suite"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newGuardRig(t, b)
@@ -674,12 +827,22 @@ func TestFixesCannotWeaken(t *testing.T) {
 		})
 	}
 
-	// The fixture outlives the fix: a later candidate that brings the
-	// vulnerable version back is rejected by the pipeline itself.
+	// While the finding is open, the fixture only must not regress (PS1):
+	// the box already fails it, so a candidate that leaves it failing is
+	// not failed by it. The fixture outlives the fix: once the fix is
+	// adopted, a later candidate that brings the vulnerable version back
+	// is rejected by the pipeline itself.
 	r := newGuardRig(t, b)
 	r.pass(t)
-	rep, err := r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Files: change.Tree{"config/facts.json": facts("3.0.1")}})
-	if err != nil || rep.State != change.StateRejected || rep.SecurityPassed == rep.Security {
+	rep, err := r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Files: change.Tree{"config/facts.json": facts("3.0.12")}})
+	if err != nil || rep.Reason == "fails the security suite" {
+		t.Fatalf("a candidate leaving the open finding: %+v %v", rep, err)
+	}
+	if rep, err := r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Files: change.Tree{"config/facts.json": facts("3.0.14")}}); err != nil || rep.State != change.StateAdopted {
+		t.Fatalf("the fix: %+v %v", rep, err)
+	}
+	rep, err = r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Files: change.Tree{"config/facts.json": facts("3.0.1")}})
+	if err != nil || rep.State != change.StateRejected || rep.Reason != "fails the security suite" {
 		t.Fatalf("regressing candidate: %+v %v", rep, err)
 	}
 	// A duplicate fixture (the same finding after restart with a lost
@@ -717,5 +880,33 @@ func TestGuardInScheduler(t *testing.T) {
 	}
 	if sh := r.s.Share()[Secure]; sh != 1 {
 		t.Fatalf("share %v", sh)
+	}
+}
+
+// W5a, potency follow-up on #54 (S3): the passive pass makes no model
+// calls, so three clean passes do not hold it past its 6 h cadence: while
+// a pass is due the guard is Urgent, and the scheduler offers it even
+// though L5 parked Loop 2.
+func TestThePassiveCadenceOutlivesParking(t *testing.T) {
+	r := newRig(t)
+	g, err := NewGuard(GuardConfig{Box: cleanBox().Box(), Pipeline: newPipe(t), Store: &change.MemStore{}, Now: r.clk.now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.restart(g)
+	for i := 0; i < 3; i++ {
+		if !g.Urgent() {
+			t.Fatalf("pass %d not due", i)
+		}
+		if ran, _ := r.s.Tick(context.Background()); !ran {
+			t.Fatalf("pass %d did not run", i)
+		}
+		if g.Urgent() {
+			t.Fatal("still urgent right after a pass")
+		}
+		r.clk.add(6 * time.Hour)
+	}
+	if ran, _ := r.s.Tick(context.Background()); !ran {
+		t.Fatal("the passive pass waited out the park")
 	}
 }

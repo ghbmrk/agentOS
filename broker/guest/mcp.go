@@ -5,13 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/journal"
 )
 
@@ -140,15 +140,15 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 		if call.Name != "effect_request" && call.Name != "effect_status" && p.cfg.Tools != nil {
 			lineage, err := p.cfg.Machines.Lineage(m.id)
 			if err != nil {
-				writeRPC(w, req.ID, toolResult("broker: unknown machine", true), nil)
+				writeRPC(w, req.ID, m.result("broker: unknown machine", true), nil)
 				return
 			}
 			text, handled, err := p.cfg.Tools.Call(r.Context(), m.id, lineage, call.Name, call.Arguments)
 			if handled {
 				if err != nil {
-					writeRPC(w, req.ID, toolResult(err.Error(), true), nil)
+					writeRPC(w, req.ID, m.result(guesterr.Filter(m.id, call.Name, err).Error(), true), nil)
 				} else {
-					writeRPC(w, req.ID, toolResult(text, false), nil)
+					writeRPC(w, req.ID, m.result(text, false), nil)
 				}
 				return
 			}
@@ -158,14 +158,25 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 			p.step(m) // REV-1: after every effect request the journal took
 		}
 		if err != nil {
-			writeRPC(w, req.ID, toolResult(err.Error(), true), nil)
+			writeRPC(w, req.ID, m.result(guesterr.Filter(m.id, call.Name, err).Error(), true), nil)
 			return
 		}
 		b, _ := json.Marshal(res)
-		writeRPC(w, req.ID, toolResult(string(b), false), nil)
+		writeRPC(w, req.ID, m.result(string(b), false), nil)
 	default:
 		writeRPC(w, req.ID, nil, &rpcError{-32601, "method not found"})
 	}
+}
+
+// result is a tool result for machine m, carrying after it any untold
+// note about a failed step snapshot as its own content item, so a JSON
+// result stays whole (SR2-3s).
+func (m *machine) result(text string, isErr bool) map[string]any {
+	res := toolResult(text, isErr)
+	if n := m.takeNote(); n != "" {
+		res["content"] = append(res["content"].([]map[string]string), map[string]string{"type": "text", "text": n})
+	}
+	return res
 }
 
 func toolResult(text string, isErr bool) map[string]any {
@@ -219,7 +230,7 @@ const (
 func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.RawMessage) (effectState, bool, error) {
 	lineage := p.lineageOf(m)
 	if lineage == "" {
-		return effectState{}, false, errors.New("broker: unknown machine")
+		return effectState{}, false, guesterr.New("broker: unknown machine")
 	}
 	switch name {
 	case "effect_request":
@@ -227,23 +238,23 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
 		if err := dec.Decode(&a); err != nil {
-			return effectState{}, false, errors.New("arguments must be an object")
+			return effectState{}, false, guesterr.New("arguments must be an object")
 		}
 		if !requestIDRE.MatchString(a.RequestID) || a.Account == "" || a.Action == "" {
-			return effectState{}, false, errors.New("request_id (letters, digits, . _ -; at most 64), account, and action are required")
+			return effectState{}, false, guesterr.New("request_id (letters, digits, . _ -; at most 64), account, and action are required")
 		}
 		if !nameRE.MatchString(a.Account) || !nameRE.MatchString(a.Action) {
-			return effectState{}, false, errors.New("account and action must be lowercase names (a-z, 0-9, . _ -; at most 64)")
+			return effectState{}, false, guesterr.New("account and action must be lowercase names (a-z, 0-9, . _ -; at most 64)")
 		}
 		if params, _ := json.Marshal(a.Params); len(params) > maxParamsBytes {
-			return effectState{}, false, fmt.Errorf("params are larger than %d bytes", maxParamsBytes)
+			return effectState{}, false, guesterr.Newf("params are larger than %d bytes", guesterr.Num(maxParamsBytes))
 		}
 		if len(a.Recipients) > maxRecipients {
-			return effectState{}, false, fmt.Errorf("more than %d recipients", maxRecipients)
+			return effectState{}, false, guesterr.Newf("more than %d recipients", guesterr.Num(maxRecipients))
 		}
 		for _, r := range a.Recipients {
 			if len(r) > maxRecipient {
-				return effectState{}, false, fmt.Errorf("a recipient is longer than %d bytes", maxRecipient)
+				return effectState{}, false, guesterr.Newf("a recipient is longer than %d bytes", guesterr.Num(maxRecipient))
 			}
 		}
 		// Broker-state intents (budgets, grants, the broker's own
@@ -253,7 +264,7 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 			return effectState{RequestID: a.RequestID, State: "refused", Reason: "broker-state changes are the owner's; a guest cannot request them"}, false, nil
 		}
 		if !m.rate.take(p.cfg.SubmitBurst, p.cfg.SubmitEvery) {
-			return effectState{}, false, errors.New("too many effect requests from this machine; wait and retry with the same request_id")
+			return effectState{}, false, guesterr.New("too many effect requests from this machine; wait and retry with the same request_id")
 		}
 		exec, ok := p.cfg.Route(a.Account)
 		if !ok {
@@ -284,22 +295,22 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 		}
 		if err != nil {
 			if errors.Is(err, journal.ErrConflict) {
-				return effectState{}, false, fmt.Errorf("request_id %s was already used with different arguments", a.RequestID)
+				return effectState{}, false, guesterr.Newf("request_id %s was already used with different arguments", guesterr.Guest(a.RequestID))
 			}
 			p.cfg.Logf("guest %s: submit %s: %v", m.id, id, err)
-			return effectState{}, false, errors.New("broker refused the request")
+			return effectState{}, false, guesterr.New("broker refused the request")
 		}
 		if readOnly {
 			// A private machine repeating a request its lineage made while
 			// public sees it but does not drive it, so nothing a private
 			// machine does changes what a public one can observe (REV-5).
-			return state(a.RequestID, st), false, nil
+			return state(m.id, name, a.RequestID, st), false, nil
 		}
 		if st.State == journal.Pending {
 			s2, err := p.cfg.Effects.Authorize(ctx, id)
 			if s2.Intent.ID == "" {
 				p.cfg.Logf("guest %s: authorize %s: %v", m.id, id, err)
-				return effectState{}, true, errors.New("broker could not decide; retry with the same request_id")
+				return effectState{}, true, guesterr.New("broker could not decide; retry with the same request_id")
 			}
 			st = s2
 		}
@@ -314,7 +325,7 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 			}
 			held = err
 		}
-		out := state(a.RequestID, st)
+		out := state(m.id, name, a.RequestID, st)
 		if held != nil && out.Reason == "" {
 			p.cfg.Logf("guest %s: dispatch %s: %v", m.id, id, held)
 			out.Reason = "held by the broker; ask again later with effect_status"
@@ -325,7 +336,7 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 			RequestID string `json:"request_id"`
 		}
 		if err := json.Unmarshal(raw, &a); err != nil || !requestIDRE.MatchString(a.RequestID) {
-			return effectState{}, false, errors.New("request_id is required")
+			return effectState{}, false, guesterr.New("request_id is required")
 		}
 		var st journal.Status
 		err := journal.ErrNotFound
@@ -336,11 +347,11 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 			st, err = p.cfg.Effects.Get(lineage + "/" + a.RequestID)
 		}
 		if err != nil {
-			return effectState{}, false, fmt.Errorf("no request %s", a.RequestID)
+			return effectState{}, false, guesterr.Newf("no request %s", guesterr.Guest(a.RequestID))
 		}
-		return state(a.RequestID, st), false, nil
+		return state(m.id, name, a.RequestID, st), false, nil
 	}
-	return effectState{}, false, fmt.Errorf("no tool %q", clip(name, 64))
+	return effectState{}, false, guesterr.Newf("no tool %q", guesterr.Guest(clip(name, 64)))
 }
 
 // label is the machine's data label for the journal, failing closed.
@@ -380,6 +391,13 @@ func (p *Plane) intentID(lineage, reqID, label string) (id string, readOnly bool
 
 func privateID(lineage, reqID string) string { return lineage + "/private/" + reqID }
 
-func state(reqID string, st journal.Status) effectState {
-	return effectState{RequestID: reqID, State: string(st.State), Reason: st.Permission.Reason}
+// state is what the guest sees of st. A reason reaches it only as the
+// policy's guest text (SR2-3j); any other, which may name host paths or
+// internal IDs, is a ref, its detail only in the broker's log.
+func state(machine, tool, reqID string, st journal.Status) effectState {
+	why := st.Permission.GuestReason
+	if why == "" && st.Permission.Reason != "" {
+		why = tool + " " + guesterr.Logged("guest", machine, tool, errors.New(st.Permission.Reason))
+	}
+	return effectState{RequestID: reqID, State: string(st.State), Reason: why}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,6 +40,9 @@ type entry struct {
 	attempts   []Attempt
 	quality    Quality
 	authorized time.Time // when RecAuthorized was journaled
+	dispatched time.Time // when the latest RecDispatched was journaled
+	submitted  time.Time // when RecSubmitted was journaled
+	erased     bool      // RecErased: params and evidence removed
 }
 
 // Option configures Open.
@@ -95,6 +99,12 @@ func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor
 		n := en.attempts[len(en.attempts)-1].N
 		if err := e.commit(Record{Type: RecObserved, ID: id, Attempt: n, Result: ResultUnknown,
 			Source: "restart", Evidence: "in flight when the broker stopped"}); err != nil {
+			return nil, err
+		}
+	}
+	// An erase a crash cut off before its rewrite is finished now.
+	if e.unerased() {
+		if err := e.rewriteErased(); err != nil {
 			return nil, err
 		}
 	}
@@ -169,12 +179,24 @@ func (e *Engine) Authorize(ctx context.Context, id string) (Status, error) {
 	}
 	r := Record{Type: RecAuthorized, ID: id}
 	if perr != nil {
-		r = Record{Type: RecDenied, ID: id, Reason: perr.Error()}
+		r = Record{Type: RecDenied, ID: id, Reason: perr.Error(), Guest: guestText(perr)}
 	}
 	if err := e.commit(r); err != nil {
 		return Status{}, err
 	}
 	return en.status(), nil
+}
+
+// guestText is a refusal's text for the guest: GuestText when err is
+// guesterr.Safe by its own method set, so a Safe error wrapped with other
+// text is not; otherwise none, and the guest is given a ref (SR2-3j). The
+// interface is matched structurally, keeping journal free of broker
+// imports (ARC-2); guesterr's allowlist test bounds which types have it.
+func guestText(err error) string {
+	if s, ok := err.(interface{ GuestText() string }); ok {
+		return s.GuestText()
+	}
+	return ""
 }
 
 // Dispatch runs one attempt of an authorized intent, or a new attempt of one
@@ -218,7 +240,7 @@ func (e *Engine) Dispatch(ctx context.Context, id string) (Status, error) {
 			continue
 		}
 		if perr != nil {
-			err := e.commit(Record{Type: RecRecheckFailed, ID: id, Reason: perr.Error()})
+			err := e.commit(Record{Type: RecRecheckFailed, ID: id, Reason: perr.Error(), Guest: guestText(perr)})
 			st := en.status()
 			e.mu.Unlock()
 			if err != nil {
@@ -511,6 +533,21 @@ func (e *Engine) Resume() error {
 	return e.commit(Record{Type: RecResume})
 }
 
+// GuestActive reports an intent the agent submitted (origin "guest:")
+// that is authorized but not yet dispatched, or in flight: work the agent
+// has in hand, so the sleeper does not stop it (PE7 condition 2).
+func (e *Engine) GuestActive() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, id := range e.order {
+		en := e.intents[id]
+		if strings.HasPrefix(en.intent.Origin, "guest:") && (en.state == Authorized || en.state == InFlight) {
+			return true
+		}
+	}
+	return false
+}
+
 // Stopped reports whether STOP is in force.
 func (e *Engine) Stopped() bool {
 	e.mu.Lock()
@@ -576,6 +613,50 @@ func (e *Engine) AuthorizedSince(account, action string, since time.Time) []Inte
 		}
 		if !en.authorized.Before(since) {
 			out = append(out, en.intent)
+		}
+	}
+	return out
+}
+
+// Use is one intent's place under a pre-allowance scope bound (ADP-9).
+type Use struct {
+	Intent Intent
+	// Started: an attempt has been dispatched and was not shown to have
+	// done nothing. Otherwise the intent is authorized and waiting.
+	Started bool
+}
+
+// InUse returns the intents on account with action that hold a place
+// under a scope bound counted from since, oldest first (SR3-2). A place is
+// charged when an effect may start, not when it was authorized, so an
+// intent queued past its authorization's day cannot run outside the bound:
+//   - authorized and not yet dispatched: reserved, whatever its age, until
+//     it is dispatched or refused at the recheck;
+//   - its latest attempt in flight or outcome_unknown: held until evidence
+//     resolves it (OP-2), whatever its age;
+//   - its latest attempt succeeded: charged to the window it was
+//     dispatched in, so counted while that is at or after since.
+//
+// An attempt that did not apply releases its place; a retry takes one
+// again when it is dispatched.
+func (e *Engine) InUse(account, action string, since time.Time) []Use {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []Use
+	for _, id := range e.order {
+		en := e.intents[id]
+		if en.intent.Account != account || en.intent.Action != action {
+			continue
+		}
+		switch en.state {
+		case Authorized:
+			out = append(out, Use{Intent: en.intent})
+		case InFlight, OutcomeUnknown:
+			out = append(out, Use{Intent: en.intent, Started: true})
+		case Succeeded:
+			if !en.dispatched.Before(since) {
+				out = append(out, Use{Intent: en.intent, Started: true})
+			}
 		}
 	}
 	return out
@@ -660,6 +741,12 @@ func (e *Engine) validate(r Record) error {
 		}
 		return nil
 	}
+	if r.Type == RecSleep {
+		if r.Sleep == nil || !r.Sleep.valid() || r.ID != "" {
+			return fmt.Errorf("sleep record without a valid note")
+		}
+		return nil
+	}
 	if r.Type == RecResume {
 		if !e.stopped {
 			return fmt.Errorf("resume while not stopped")
@@ -723,6 +810,10 @@ func (e *Engine) validate(r Record) error {
 		if r.Verdict != VerdictGood && r.Verdict != VerdictWrong {
 			return fmt.Errorf("%s: verdict %q", r.ID, r.Verdict)
 		}
+	case RecErased:
+		if en.state != Succeeded && en.state != Denied {
+			return fmt.Errorf("%s: erased from %s", r.ID, en.state)
+		}
 	default:
 		return fmt.Errorf("unknown record type %q", r.Type)
 	}
@@ -740,11 +831,11 @@ func (e *Engine) apply(r Record) {
 	case RecResume:
 		e.stopped = false
 		return
-	case RecEgress:
+	case RecEgress, RecSleep:
 		return
 	case RecSubmitted:
 		in := *r.Intent
-		e.intents[r.ID] = &entry{intent: in, fp: fingerprint(in), efp: effectFingerprint(in), state: Pending}
+		e.intents[r.ID] = &entry{intent: in, fp: fingerprint(in), efp: effectFingerprint(in), state: Pending, submitted: r.At}
 		e.order = append(e.order, r.ID)
 		return
 	}
@@ -756,12 +847,13 @@ func (e *Engine) apply(r Record) {
 		en.permission = Permission{Decision: "allowed", Phase: PhaseAuthorize}
 	case RecDenied:
 		en.state = Denied
-		en.permission = Permission{Decision: "denied", Phase: PhaseAuthorize, Reason: r.Reason}
+		en.permission = Permission{Decision: "denied", Phase: PhaseAuthorize, Reason: r.Reason, GuestReason: r.Guest}
 	case RecRecheckFailed:
 		en.state = Denied
-		en.permission = Permission{Decision: "denied", Phase: PhaseDispatch, Reason: r.Reason}
+		en.permission = Permission{Decision: "denied", Phase: PhaseDispatch, Reason: r.Reason, GuestReason: r.Guest}
 	case RecDispatched:
 		en.state = InFlight
+		en.dispatched = r.At
 		en.attempts = append(en.attempts, Attempt{N: r.Attempt, Result: ResultInFlight})
 	case RecObserved:
 		a := en.attempt(r.Attempt)
@@ -779,6 +871,18 @@ func (e *Engine) apply(r Record) {
 		a.Cancels = append(a.Cancels, Cancel{Accepted: r.Accepted, Detail: r.Evidence})
 	case RecQuality:
 		en.quality = Quality{Verdict: r.Verdict, Source: r.Source, Note: r.Evidence}
+	case RecErased:
+		en.erased = true
+		en.intent.Params, en.intent.Preconditions = nil, nil
+		for i := range en.attempts {
+			en.attempts[i].Evidence = ""
+			for j := range en.attempts[i].Cancels {
+				en.attempts[i].Cancels[j].Detail = ""
+			}
+		}
+		if r.FP != "" {
+			en.fp, en.efp = r.FP, r.EFP
+		}
 	}
 }
 

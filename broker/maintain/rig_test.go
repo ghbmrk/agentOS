@@ -39,6 +39,26 @@ type proposer struct {
 	got   []*update.Verified
 	state change.State
 	err   error
+	// lapsed holds proposal IDs the pipeline dropped unanswered; Lapsed
+	// reports each once, as change.Pipeline does.
+	lapsed map[string]bool
+}
+
+func (p *proposer) Lapsed(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ok := p.lapsed[id]
+	delete(p.lapsed, id)
+	return ok
+}
+
+func (p *proposer) lapse(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.lapsed == nil {
+		p.lapsed = map[string]bool{}
+	}
+	p.lapsed[id] = true
 }
 
 func (p *proposer) ProposeRelease(_ context.Context, v *update.Verified) (change.Report, error) {
@@ -81,7 +101,6 @@ type rig struct {
 	state    *change.MemStore
 	p        *proposer
 	online   bool
-	channel  string
 	atts     [][]byte
 	attestor ed25519.PrivateKey
 	allow    []ed25519.PublicKey
@@ -116,7 +135,7 @@ func newRig(t *testing.T) *rig {
 	kdir := filepath.Join(dir, "keys")
 	os.Mkdir(kdir, 0o700)
 	r := &rig{t: t, dir: dir, clk: &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)},
-		state: &change.MemStore{}, p: &proposer{}, online: true, channel: update.ChannelStable}
+		state: &change.MemStore{}, p: &proposer{}, online: true}
 	root, rp := keys(t, kdir, "root", 3)
 	r.root = root
 	var tp, sp, tsp []ed25519.PublicKey
@@ -159,7 +178,6 @@ func (r *rig) newLoop() *Loop3 {
 		Store:   r.store,
 		Mirrors: func() []update.Source { return r.mirrors },
 		Online:  func() bool { return r.online },
-		Channel: func() string { return r.channel },
 		Attestations: func(context.Context, string) ([][]byte, error) {
 			return r.atts, nil
 		},

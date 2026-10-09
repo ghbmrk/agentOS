@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"html"
 	"image"
 	"image/color"
 	"image/draw"
@@ -769,7 +770,7 @@ func (r *rig) channelWith(v owner.Verifier) {
 		r.t.Fatal(err)
 	}
 	r.ch = ch
-	r.srv.SetOwner(ch)
+	r.srv.SetOwner(r.page(ch))
 }
 
 // UX-50-1, P2-4f: the code that unlocks the box also signs the phone in
@@ -917,7 +918,7 @@ func TestTypedCodeIsNeverAnUnlockProof(t *testing.T) {
 	if len(pv.proofs) != 0 {
 		t.Fatalf("typed proof reached the owner channel: %q", pv.proofs)
 	}
-	if !strings.Contains(w.Body.String(), "That code did not work.") {
+	if !strings.Contains(w.Body.String(), html.EscapeString(wrongCodeText)) {
 		t.Fatalf("typed proof:\n%s", w.Body)
 	}
 }
