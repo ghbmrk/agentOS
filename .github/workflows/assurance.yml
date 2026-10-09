@@ -1,5 +1,6 @@
 name: assurance
-# Permanent gates for SPEC.md A5 (canary test) and A9 (dependency audit).
+# Permanent gates for SPEC.md A5 (canary test), A9 (dependency audit) and
+# A11's loop 2 clause (qualification harness, in the canary job).
 # Each job runs deliberate-leak controls beside the real targets: a clean scan
 # counts only because the same scan, in the same run, caught every planted leak.
 on:
@@ -50,6 +51,20 @@ jobs:
         with:
           name: canary-report
           path: canary-report.json
+          if-no-files-found: ignore
+      # A11 loop 2 qualification (P3-4b-2): every seed, then one picked at
+      # random; each run also runs its mutation controls.
+      - name: Loop 2 qualification (A11), every seed
+        if: always()
+        run: python3 assurance/loop2/run.py --catalog assurance/loop2-seeds --all --report loop2-all.json
+      - name: Loop 2 qualification (A11), one seed picked at random
+        if: always()
+        run: python3 assurance/loop2/run.py --catalog assurance/loop2-seeds --pick --report loop2-pick.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: loop2-qualification-report
+          path: loop2-*.json
           if-no-files-found: ignore
   dependency-audit:
     runs-on: ubuntu-latest
