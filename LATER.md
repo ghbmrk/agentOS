@@ -698,6 +698,15 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W5-Dc-r1b l5 | #652 L3 3 (6087271656): grants reads `allowance(now)` before taking `g.mu`, so a grants flush racing an owner `Post` can go one text over the hour's budget (bounded, nothing lost) |
 | W5-Dc-r1b l6 | #652 L3 delta (6087655573): `main()` still passes `attach` its arguments untested (`nil` for `dg` would build and pass); testing `main()` itself is out of scope |
 | SR3-mail-w1 l8 | #654 UX, L3 1, Security 1 (6087870595, 6087872442, 6087873796): `TestNoMailAccountByDefault` counts the `not_connected` frames but does not assert that nothing else crossed the socket (its doc comment says "the socket says nothing more"); compare each connection's full reply after it closes to exactly `{"error":"not_connected"}\n` |
+| UPD-1 l-213 | L3 on #213 (comment 6089950443): the rollback-point and handover save paths, whose `os` errors are the likeliest to carry the state file path, are redacted by `noted` but have no path-canary test; a later edit could swap one back to `err.Error()` unnoticed. |
+| P3-4b-3r-env-r8b l-659 | #659 (recheck): the guest bridge and launchers build with cgo or assembly files that the `childproc` gate may not scan; confirm the gate covers `.s` and cgo-preprocessed sources. |
+| TRACE-marker l-632 | #632: the `REQ:` marker spelling the builder wrote differs from what `tools/trace.py` parses, and the scope of `tools/ASSUMPTIONS.md` is unclear; align one spelling and state the scope. |
+| UPD-1 l-216 | #216 (recheck): an EOF or timeout loses its reason, so the owner-facing text cannot say which one happened. |
+| CH-l-211 | #211 (recheck): parse a trailing `}` in the command text; the copy, paste and hand-off verbs belong to CRED-11. |
+| TOOLS-risk-tier l1 | `tools/risk_tier.py` prints a false tier A on shallow clones, stale bases and update-branch merges, because it diffs all of main instead of the merge base. Tooling finding. |
+| CH-21b l-665 | #665: no test that a NAME without a code still routes in challenge mode; code detection is split across `splitCode`, `parseName` and `parseReply` (use a shared helper or a lint); add a table test for every code-bearing form. |
+| REV-5 l-203 | #203: a full inbox reads as "not stored" or "agent not running" (wrong cause); `RaiseLabel` errors may name a path; the REV-5 TRACE row does not match its test. |
+| l-206 | #206: the substring flag match should be an exact match. |
 
 ## Reuse candidates
 | ID | Component | Why |

@@ -362,6 +362,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | OSS-6m | [Measure the daily publication batch constant](briefs/OSS-6m.md) | OSS-6s-a | queued (optional, non-blocking) |
 | OSS-6j | [Spec: what the repository's pull job is](briefs/OSS-6j.md) | #330 | queued (L1 spec diff) |
 | OSS-6i | [Fresh Tor circuit per batch and signing key](briefs/OSS-6i.md) | #330 | queued (L1 clause, then test in OSS-6s) |
+| OSS-A12 | Connect publication producers (clean-room results, attestations) to the publication outbox: no package does, so A12's publish, reproduce and attest round trip cannot run (release; source #675 Potency lens; acceptance A12; failure path: a clean-room result is produced and never reaches the outbox) | OSS-6s-a, P4-2, P4-4 | queued (brief needed) |
 | OSS-6p | [Relay count, delivery rule, queue bound, relay list source](briefs/OSS-6p.md) | #330 | queued |
 | OSS-6a | [Spec: where ask-each-time prompts appear](briefs/OSS-6a.md) | #330 | queued (L1 spec diff) |
 | OSS-7c | Publication off by default: one local-UI opt-in with live examples, re-ask on schema change (D-088; release, likely tier A; failure path: an upgraded box publishes without consent) | #633 | queued (brief after #633 merges; may supersede OSS-6a) |
