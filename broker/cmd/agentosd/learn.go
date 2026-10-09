@@ -125,12 +125,17 @@ const (
 )
 
 // fuzzTargets are the release's fuzz targets, or none when it ships none.
+// A release directory with no targets is logged: an image always ships a
+// manifest (L7-4), so only a dev build, with no directory, is quiet.
 func fuzzTargets(p learnPaths) []loop7.Target {
 	if p.Fuzz == "" || p.Loop7 == "" {
 		return nil
 	}
 	ts, err := loop7.Load(p.Fuzz, p.Loop7)
 	if errors.Is(err, os.ErrNotExist) {
+		if fi, serr := os.Stat(p.Fuzz); serr == nil && fi.IsDir() {
+			log.Printf("loop7: no fuzz rounds: %v", err)
+		}
 		return nil
 	} else if err != nil {
 		log.Printf("loop7: no fuzz rounds: %v", err)

@@ -57,9 +57,8 @@ func TestRunscPanicAfterStartAnswersNoOutput(t *testing.T) {
 // 100ms deadline raced runsc's exit on a slow CI runner).
 func execAtMark(t *testing.T, mode string) (*Runtime, vm.ExecResult, error) {
 	t.Helper()
-	r := fakeRunsc(t)
 	mark := filepath.Join(t.TempDir(), "mark")
-	t.Setenv("FAKE_RUNSC_MARK", mark)
+	r := fakeRunsc(t, "FAKE_RUNSC_MARK="+mark)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	seen := make(chan bool, 1)
@@ -244,9 +243,8 @@ func TestRunscTextOnAnyFailedExitAnswersNoOutput(t *testing.T) {
 // a failed exec too. The same exit 0 and text with nothing holding the
 // pipes is err == nil and reads as a result; the code keeps both rows.
 func TestRunscTextPastWaitDelayAnswersNoOutput(t *testing.T) {
-	r := fakeRunsc(t)
 	mark := filepath.Join(t.TempDir(), "mark")
-	t.Setenv("FAKE_RUNSC_MARK", mark)
+	r := fakeRunsc(t, "FAKE_RUNSC_MARK="+mark)
 	defer os.Remove(mark)
 	res, err := r.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"waitdelaytext"}, MaxOutput: 4096})
 	if _, serr := os.Stat(mark); serr != nil {
