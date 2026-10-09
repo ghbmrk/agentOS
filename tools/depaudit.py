@@ -284,7 +284,10 @@ def _unshare_flags():
     # A PID namespace: when its first process exits or is killed, the kernel kills every
     # process in it, including one that left the process group (setsid) or strace let go of.
     pid = ["--pid", "--fork", "--kill-child", "--mount-proc"]
-    return (["-n", "-m"] if os.geteuid() == 0 else ["-r", "-n", "-m"]) + pid
+    # A user namespace even as root: the capabilities setpriv keeps then act only inside it.
+    # Without one, real root keeps CAP_DAC_READ_SEARCH (open_by_handle_at), CAP_SYS_MODULE and
+    # others on the host, each a way past a read-only bind (B2, Security re-sign 2 on #437).
+    return ["-r", "-n", "-m"] + pid
 
 
 _SANDBOX = None
@@ -672,7 +675,9 @@ def _control(mode):
                        tries to clear read-only with the untraced mount_setattr and
                        open_tree_attr (a mount(2) remount is traced: a violation by itself)
       ptrace-ancestors exits nonzero unless a ptrace attach to the sandbox's PID 1 (_inner)
-                       and to its strace parent is denied: either still holds CAP_SYS_ADMIN"""
+                       and to its strace parent is denied: either still holds CAP_SYS_ADMIN
+      own-user-namespace exits nonzero if the scenario's uid_map is the initial namespace's
+                       identity map: its kept capabilities would then act on the host"""
     if mode == "tamper-evidence":
         with contextlib.suppress(OSError):
             socket.create_connection(("192.0.2.10", 443), timeout=2).close()
@@ -689,6 +694,13 @@ def _control(mode):
             s.sendto(b"x", ("127.0.0.1", 9))
         if wrong:
             sys.exit("; ".join(wrong))
+        return 0
+    if mode == "own-user-namespace":
+        uid_map = pathlib.Path("/proc/self/uid_map").read_text().split()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.sendto(b"x", ("127.0.0.1", 9))
+        if not uid_map or uid_map == ["0", "0", "4294967295"]:
+            sys.exit("uid_map is %r: the scenario runs in the initial user namespace" % " ".join(uid_map))
         return 0
     if mode != "write-kept":
         raise ValueError(mode)
@@ -761,6 +773,8 @@ def control_targets(masked_probe, visible_probe, writable_dir):
          "writes": [writable_dir], "env": {"DEPAUDIT_KEEP_RO": keep[0], "DEPAUDIT_KEEP_RW": writable_dir},
          "must_log": [("inet", "127.0.0.1")]},
         {"name": "control-no-ptrace-ancestors", "cmd": own + ["ptrace-ancestors"], "expect": "pass",
+         "must_log": [("inet", "127.0.0.1")]},
+        {"name": "control-own-user-namespace", "cmd": own + ["own-user-namespace"], "expect": "pass",
          "must_log": [("inet", "127.0.0.1")]},
     ]
 

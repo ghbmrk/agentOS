@@ -471,9 +471,18 @@ class EvidenceTest(unittest.TestCase):
                                   depaudit.load_manifest(MANIFEST))
         self.assertEqual(res["outcome"], "pass", res)
 
+    # DEP-2b (local ID, no REQ marker). Run as real root without a user namespace, the
+    # scenario's kept caps (CAP_DAC_READ_SEARCH's open_by_handle_at, CAP_SYS_MODULE, ...)
+    # act on the host and can reach kept paths (B2, Security re-sign 2 on #437).
+    def test_the_scenario_runs_in_its_own_user_namespace(self):
+        res = depaudit.run_target({"name": "userns", "cmd": HARNESS_CONTROLS + ["own-user-namespace"]},
+                                  depaudit.load_manifest(MANIFEST))
+        self.assertEqual(res["outcome"], "pass", res)
+
     def test_the_built_in_controls_include_the_evidence_and_write_controls(self):
         names = {t["name"] for t in depaudit.control_targets("/tmp/a/p", "/tmp/b/p", "/tmp/c")}
-        self.assertLessEqual({"control-evidence-tamper", "control-kept-read-only", "control-no-ptrace-ancestors"},
+        self.assertLessEqual({"control-evidence-tamper", "control-kept-read-only", "control-no-ptrace-ancestors",
+                              "control-own-user-namespace"},
                              names)
 
 
