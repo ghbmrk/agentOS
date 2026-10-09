@@ -273,7 +273,7 @@ func (s *failOnly) Append(line []byte) error {
 	return s.MemStore.Append(line)
 }
 
-// REQ: RCH-1
+// W3-forget-reach RCH-1 (brief IDs; CAP-3 is marked at the top).
 // A take-back's state from its time, on any lineage: not recorded, owed
 // (recorded, or the machines back with the reset's reach unfinished), done
 // (machines back, reset recorded and finished), and not known before
@@ -335,7 +335,7 @@ func TestRCH1TakeBackStateIsDoneOnlyOnceItsReachIsFinished(t *testing.T) {
 	}
 }
 
-// REQ: RCH-1
+// W3-forget-reach RCH-1 (brief IDs; CAP-3 is marked at the top).
 // A take-back not approved (no work to lose) is done only once its reach
 // is: its state is what agentBackWithoutAsking's done text reads (RCH-5).
 func TestRCH1AnUnaskedTakeBackIsDoneOnlyOnceFinished(t *testing.T) {
@@ -364,7 +364,7 @@ func TestRCH1AnUnaskedTakeBackIsDoneOnlyOnceFinished(t *testing.T) {
 	}
 }
 
-// REQ: RCH-1, RCH-2
+// W3-forget-reach RCH-1, RCH-2 (brief IDs; CAP-3 is marked at the top).
 // Machines back but the reset not recorded (errUnrecorded): owed, not
 // done; a later Retry records the reset and finishes its reach without
 // resetting the machines again (#327 L3 1), in this run or after a
@@ -422,7 +422,7 @@ func TestRCH2AnUnrecordedResetIsCarriedToDoneWithoutARepeat(t *testing.T) {
 	}
 }
 
-// REQ: RCH-3
+// W3-forget-reach RCH-3 (brief IDs; CAP-3 is marked at the top).
 // The caller can own the done text: with OnTakenBack set, Retry reports a
 // take-back it finished to it and tells the owner nothing; unset, it
 // tells TakenBack. Either way one per take-back, across TakeBack (which
@@ -477,5 +477,35 @@ func TestRCH3RetryReportsAFinishedTakeBackToTheCallerOnce(t *testing.T) {
 		if len(x.told) != texts || hook && len(reps) != 1 {
 			t.Fatalf("hook %v: a take-back TakeBack finished was reported: told %v reported %v", hook, x.told, reps)
 		}
+	}
+}
+
+// W3-forget-reach RCH-2 (brief IDs; CAP-3 is marked at the top).
+// An unrecorded reset kept by MarkBack survives a compaction and a
+// reopen, so Retry still finishes it.
+func TestRCH2AnUnrecordedResetSurvivesACompaction(t *testing.T) {
+	st := &recall.MemStore{}
+	p, err := OpenProvenance(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	rs := Reset{Since: t0, At: t0.Add(2 * time.Minute), Until: t0.Add(150 * time.Second)}
+	if err := p.MarkBack("l", rs); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.compact(); err != nil {
+		t.Fatal(err)
+	}
+	p2, err := OpenProvenance(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs := p2.Backs()
+	if len(bs) != 1 || bs[0].Lineage != "l" || !bs[0].Since.Equal(t0) || !bs[0].At.Equal(rs.At) || !bs[0].Until.Equal(rs.Until) {
+		t.Fatalf("backs after reopen: %+v", bs)
+	}
+	if s := p2.TakeBackOf(t0); s != TakeBackOwed {
+		t.Fatalf("state after reopen: %v", s)
 	}
 }
