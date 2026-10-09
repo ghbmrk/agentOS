@@ -20,6 +20,10 @@ import (
 // CheckSeeded names a finding handed in as a failing tree-rule test.
 const CheckSeeded Check = "seeded"
 
+// OriginalSuffix ends the ID of a reported finding's original,
+// unminimized test, linked beside its regression `loop2/<id>`.
+const OriginalSuffix = "/original"
+
 // ErrFinding: Report refused a finding it cannot act on. Nothing was
 // paused, saved or added for it.
 var ErrFinding = errors.New("loops: finding refused")
@@ -127,11 +131,15 @@ const (
 	waitFailed    = "building one failed; I try again at the next check"
 	waitRejected  = "the last one did not qualify; I try again at the next check"
 	waitForAFixOf = "waits for a fix: "
+	waitNoTest    = "its test could not be added to my security checks, so no fix can qualify yet"
 )
 
 // waitingLocked is why an open reported record waits, "" if it does not.
 func (s *Guard) waitingLocked(r Record) string {
-	if !r.Reported || r.Fix == "" || r.Fix == string(change.StateAdopted) {
+	if r.Reported && r.Fix == "" {
+		return waitNoTest
+	}
+	if !r.Reported || r.Fix == string(change.StateAdopted) {
 		return ""
 	}
 	switch {

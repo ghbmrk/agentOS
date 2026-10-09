@@ -40,10 +40,14 @@ func TestAFixMustPassEveryCaseLinkedToItsFinding(t *testing.T) {
 }
 
 // Other candidates, and fixes for other findings, keep PS1 for the cases
-// linked to F1: they must not regress, and need not pass.
+// linked to F1: they must not regress, and need not pass. F2 has its own
+// linked case, which the fix passes; with none it fails closed (below).
 func TestCasesLinkedToAnotherFindingKeepPS1(t *testing.T) {
 	for _, finding := range []string{"", "F2"} {
 		e := linkEnv(t)
+		if err := e.p.AddSecurityCase(Case{ID: "loop2/F2", Class: ClassSkill, Input: []byte("skills/greet"), Expect: []byte("hello"), Finding: "F2"}); err != nil {
+			t.Fatal(err)
+		}
 		r := e.propose(Candidate{Source: Local, Finding: finding, Files: Tree{"skills/greet": []byte("hello")}})
 		if r.State != StateAdopted {
 			t.Fatalf("finding %q: %+v", finding, r)
@@ -88,5 +92,15 @@ func TestACandidateCannotTouchItsFindingsCases(t *testing.T) {
 				t.Fatalf("%s linked to %q", c.ID, c.Finding)
 			}
 		}
+	}
+}
+
+// L3 on #464: a fix for a finding no case is linked to cannot pass every
+// linked case vacuously; it is rejected, whatever else it passes.
+func TestAFixForAFindingWithNoLinkedCaseIsRejected(t *testing.T) {
+	e := linkEnv(t)
+	r := e.propose(Candidate{Source: Local, Finding: "F9", Files: Tree{"skills/greet": []byte("hello")}})
+	if r.State != StateRejected || r.Reason != ReasonUnlinked || r.Linked != 0 {
+		t.Fatalf("%+v", r)
 	}
 }

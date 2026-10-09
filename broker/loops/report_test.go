@@ -1,6 +1,6 @@
 package loops
 
-// REQ: LOOP-9, LOOP-10, CHG-2, A11
+// REQ: LOOP-3, LOOP-9, LOOP-10, CHG-2, A11
 
 import (
 	"context"
@@ -94,11 +94,15 @@ func (s *logStore) Save(b []byte) error {
 
 type logPipe struct {
 	*change.Pipeline
-	ev *event
+	ev     *event
+	refuse *func(change.Case) bool // the pipeline refuses these new security cases
 }
 
 func (p logPipe) AddSecurityCase(c change.Case) error {
 	p.ev.add("case")
+	if p.refuse != nil && *p.refuse != nil && (*p.refuse)(c) {
+		return errors.New("suite store unavailable")
+	}
 	return p.Pipeline.AddSecurityCase(c)
 }
 
@@ -164,6 +168,10 @@ type reportRig struct {
 	texts  []string
 	urgent []bool
 	g      *Guard
+	// liveFor replaces the daemon's FixturesLiveFor when set; refuse
+	// makes the pipeline refuse the new security cases it matches.
+	liveFor map[Check]bool
+	refuse  func(change.Case) bool
 }
 
 func seedPipe(t *testing.T) *change.Pipeline {
@@ -200,8 +208,12 @@ func newReportRig(t *testing.T, fx *scriptFixer) *reportRig {
 
 func (r *reportRig) reopen(t *testing.T) {
 	t.Helper()
-	cfg := GuardConfig{Box: cleanBox().Box(), Pipeline: logPipe{r.p, r.ev}, Store: r.store, Contain: r.c,
-		FixturesLiveFor: map[Check]bool{CheckSeeded: true},
+	live := map[Check]bool{CheckSeeded: true}
+	if r.liveFor != nil {
+		live = r.liveFor
+	}
+	cfg := GuardConfig{Box: cleanBox().Box(), Pipeline: logPipe{r.p, r.ev, &r.refuse}, Store: r.store, Contain: r.c,
+		FixturesLiveFor: live,
 		Notify: func(s string, u bool) {
 			r.ev.add("notify")
 			r.texts, r.urgent = append(r.texts, s), append(r.urgent, u)
@@ -279,8 +291,9 @@ func TestReportRunsTheChainInOrder(t *testing.T) {
 		t.Fatalf("saved evidence %+v (%v)", st.Evidence, err)
 	}
 	// (3) the regression: in the suite, linked, 1-minimal, failing on
-	// the defective tree and passing on the fixed one.
-	if r.p.SecurityCount() != before+1 || rec.Fixture != change.Loop2Fixture+f.ID {
+	// the defective tree and passing on the fixed one; the original test
+	// is linked beside it.
+	if r.p.SecurityCount() != before+2 || rec.Fixture != change.Loop2Fixture+f.ID {
 		t.Fatalf("suite %d (was %d), fixture %q", r.p.SecurityCount(), before, rec.Fixture)
 	}
 	min, ok, err := change.ParseTreeRule(rec.Regression)
@@ -553,5 +566,77 @@ func TestLoop2IsUnmeasuredUntilItContainsAFinding(t *testing.T) {
 	r.restart(rr.g)
 	if sh := r.s.Shares()[Secure]; sh != "unmeasured" {
 		t.Fatalf("after a restart: %q", sh)
+	}
+}
+
+// LOOP-10, L3 on #464: a reported finding whose regression is not in the
+// suite, because adding it failed or seeded fixtures are not live, never
+// gets a fix proposed. It stays open and contained, and STATUS says why.
+func TestAFindingWithoutItsRegressionNeverQualifiesAFix(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*reportRig)
+	}{
+		{"the case add failed", func(r *reportRig) { r.refuse = func(change.Case) bool { return true } }},
+		{"only the original case add failed", func(r *reportRig) {
+			r.refuse = func(c change.Case) bool { return strings.HasSuffix(c.ID, OriginalSuffix) }
+		}},
+		{"seeded fixtures are not live", func(r *reportRig) { r.liveFor = map[Check]bool{} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := &scriptFixer{cands: []change.Candidate{fixCand(gamed), fixCand(gamed)}}
+			r := newReportRig(t, fx)
+			tc.set(r)
+			r.reopen(t)
+			id, _ := r.g.Report(context.Background(), seedFinding()) // the add error is returned
+			for i := 0; i < 2; i++ {
+				r.g.Trigger()
+				r.g.Pass(context.Background())
+			}
+			rec, open := r.open(id.Finding.ID)
+			if !open || rec.Fix == string(change.StateAdopted) || fx.calls() != 0 {
+				t.Fatalf("open %v, %+v, fixer called %d times", open, rec, fx.calls())
+			}
+			if len(r.c.got) != 1 || rec.Contained != "paused" {
+				t.Fatalf("contained %+v as %q", r.c.got, rec.Contained)
+			}
+			if got := r.p.Files("config")[seedPath]; string(got) != defective {
+				t.Fatalf("tree changed: %s", got)
+			}
+			if s := r.g.Status(); !strings.Contains(s, "Loop 2: 1 finding waits for a fix: "+waitNoTest+".") {
+				t.Fatalf("status %q", s)
+			}
+		})
+	}
+}
+
+// LOOP-10, Security 4a on #464: minimizing drops failing clauses, so the
+// original unminimized test stays linked beside the regression. A fix
+// that repairs only the clause the regression kept does not qualify.
+func TestAFixMustPassTheOriginalUnminimizedTest(t *testing.T) {
+	two := change.TreeRule{Clauses: []change.Clause{
+		{Path: seedPath, Pointer: "/private", Op: change.OpSubset, Value: []byte(`["local"]`)},
+		{Path: seedPath, Pointer: "/fallback", Op: change.OpAbsent},
+	}}
+	partial := `{"private":["local","cloud"],"name":"r"}` // repairs /fallback only
+	fx := &scriptFixer{cands: []change.Candidate{fixCand(partial), fixCand(partial)}}
+	r := newReportRig(t, fx)
+	f := seedFinding()
+	f.Rule = two.Encode()
+	rec := r.report(t, f)
+	min, _, _ := change.ParseTreeRule(rec.Regression)
+	if len(min.Clauses) != 1 || !min.Holds(change.Tree{seedPath: []byte(partial)}) {
+		t.Fatalf("the regression should keep only the clause the partial fix repairs: %s", rec.Regression)
+	}
+	for i := 0; i < 2; i++ {
+		r.g.Trigger()
+		r.g.Pass(context.Background())
+	}
+	got, open := r.open(rec.Finding.ID)
+	if !open || got.Fix != string(change.StateRejected) || fx.calls() == 0 {
+		t.Fatalf("open %v, %+v, fixer called %d times", open, got, fx.calls())
+	}
+	if b := r.p.Files("config")[seedPath]; string(b) != defective {
+		t.Fatalf("tree changed: %s", b)
 	}
 }

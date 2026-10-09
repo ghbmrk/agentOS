@@ -630,6 +630,9 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	images := cl.imagesOnly()
 	regressed := rep.Regressions > 0 || rep.Passed < rep.BaselinePassed
 	switch {
+	case c.Finding != "" && rep.Linked == 0:
+		rep.State, rep.Reason = StateRejected, ReasonUnlinked
+		return rep, nil
 	case rep.LinkedPassed < rep.Linked:
 		rep.State, rep.Reason = StateRejected, ReasonLinked
 		return rep, nil
@@ -1155,6 +1158,10 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 // ReasonLinked rejects a fix that fails a case linked to its finding: the
 // visible regression or a held-back one (P3-4b, LOOP-10 6(g)).
 const ReasonLinked = "fails a security case linked to the finding it fixes"
+
+// ReasonUnlinked rejects a fix for a finding no security case is linked
+// to: with nothing to grade it, it fails closed (P3-4b, LOOP-10).
+const ReasonUnlinked = "names a finding no security case is linked to"
 
 // OutageAlert is how many failed Recheck passes in a row the digest
 // reports.

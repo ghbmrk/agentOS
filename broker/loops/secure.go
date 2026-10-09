@@ -573,24 +573,41 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Re
 	if err != nil {
 		errs = append(errs, err)
 	}
+	linked := false // every case for f is in the suite
 	if f.Rule != nil && !s.cfg.FixturesLive && !s.cfg.FixturesLiveFor[f.Check] {
 		rec.Fixture = "deferred"
 	} else if f.Rule != nil {
 		c := change.Case{ID: change.Loop2Fixture + f.ID, Class: change.ClassConfig, Input: f.Rule, Expect: []byte(FixtureOK)}
+		cases := []change.Case{c}
 		if reported {
 			// The minimized test, linked to its finding: a fix for it must
-			// pass every case linked to it (LOOP-10).
+			// pass every case linked to it (LOOP-10). Minimizing drops
+			// failing clauses, so the original test is linked beside it.
 			rec.Regression = s.regression(f)
-			c.Input, c.Expect, c.Finding = rec.Regression, []byte(change.TreeRuleOK), f.ID
+			cases[0].Input, cases[0].Expect, cases[0].Finding = rec.Regression, []byte(change.TreeRuleOK), f.ID
+			orig := cases[0]
+			orig.ID, orig.Input = c.ID+OriginalSuffix, f.Rule
+			cases = append(cases, orig)
 		}
-		switch err := s.cfg.Pipeline.AddSecurityCase(c); {
-		case err == nil, errors.Is(err, change.ErrDuplicate):
+		linked = true
+		for _, c := range cases {
+			switch err := s.cfg.Pipeline.AddSecurityCase(c); {
+			case err == nil, errors.Is(err, change.ErrDuplicate):
+			default:
+				linked = false
+				errs = append(errs, fmt.Errorf("fixture %s: %w", c.ID, err))
+			}
+		}
+		if linked {
 			rec.Fixture = c.ID
-		default:
-			errs = append(errs, fmt.Errorf("fixture %s: %w", f.ID, err))
 		}
 	}
-	if (s.cfg.Fixer != nil || reported) && f.Rule != nil {
+	switch {
+	case reported && f.Rule != nil && !linked:
+		// Fail closed: with no linked regression in the suite nothing
+		// could grade a fix, so none is requested and the finding stays
+		// open and contained (STATUS says why).
+	case (s.cfg.Fixer != nil || reported) && f.Rule != nil:
 		// Pass proposes it once every finding is contained. A reported
 		// finding's request is recorded even with no fixer, so STATUS and
 		// the digest can say it waits and why.
@@ -631,7 +648,11 @@ func (s *Guard) fix(ctx context.Context, rec *Record) error {
 			return fmt.Errorf("fix %s: %w", f.ID, err)
 		}
 		// Loop 2 sets these, never the fixer.
-		cand.Source, cand.Origin, cand.Public, cand.Finding = change.Local, "loop2", false, f.ID
+		cand.Source, cand.Origin, cand.Public, cand.Finding = change.Local, "loop2", false, ""
+		if rec.Reported {
+			// Only a reported finding has linked cases to grade the fix.
+			cand.Finding = f.ID
+		}
 		base = s.bases(cand)
 	}
 	rep, err := s.cfg.Pipeline.Propose(ctx, cand)
