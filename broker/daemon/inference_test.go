@@ -630,7 +630,8 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 // unix.Environ, (*exec.Cmd).Environ) anywhere inside an Env value (a .Env
 // assignment or an Env key of any literal), or anywhere in a function
 // that starts a child, which catches one passed through a local
-// variable. It has no exemption.
+// variable; syscall.Exec and unix.Exec count as starting a child. It
+// has no exemption.
 func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -719,6 +720,12 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 			case *ast.CallExpr:
 				starts = starts || is(n.Fun, "os/exec", "Command", "CommandContext")
 				launches = launches || is(n.Fun, "os", "StartProcess") || is(n.Fun, "syscall", "ForkExec", "StartProcess")
+				// syscall.Exec and unix.Exec run a new program with the
+				// environment in their third argument (Security 4a on #587).
+				if (is(n.Fun, "syscall", "Exec") || is(n.Fun, "golang.org/x/sys/unix", "Exec")) && len(n.Args) == 3 {
+					launches = true
+					inherit = inherit || environ(n.Args[2])
+				}
 				if (is(n.Fun, "os", "StartProcess") || is(n.Fun, "syscall", "ForkExec", "StartProcess")) && len(n.Args) == 3 {
 					a := ast.Unparen(n.Args[2])
 					if u, ok := a.(*ast.UnaryExpr); ok && u.Op == token.AND {
@@ -914,6 +921,9 @@ func TestEnvCheckCatchesAnInheritedEnvironment(t *testing.T) {
 		// (*exec.Cmd).Environ, the os/exec docs' way to add a variable,
 		// returns the process's environment while Env is nil (L3 on #587).
 		src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = append(c.Environ(), "A=1"); c.Run() }`),
+		// Exec replaces the process with the environment it is given.
+		src(`"os"; "syscall"`, `func f() { syscall.Exec("/x", nil, os.Environ()) }`),
+		src(`"os"; u "golang.org/x/sys/unix"`, `func f() { e := append(os.Environ(), "A=1"); u.Exec("/x", nil, e) }`),
 	} {
 		if _, inherits := check(c); len(inherits) == 0 {
 			t.Errorf("os.Environ() missed:\n%s", c)
@@ -924,7 +934,8 @@ func g() { (&exec.Cmd{Path: "/x", Env: []string{}}).Run() }
 func h() { os.StartProcess("/x", nil, &os.ProcAttr{Env: []string{}}) }
 func i() { var a syscall.ProcAttr; a.Env = []string{"PATH=/bin"}; syscall.ForkExec("/x", nil, &a) }
 func j() { _ = os.Environ() }
-func k() { a := &os.ProcAttr{Env: []string{}}; os.StartProcess("/x", nil, a) }`)
+func k() { a := &os.ProcAttr{Env: []string{}}; os.StartProcess("/x", nil, a) }
+func l() { syscall.Exec("/x", nil, []string{"PATH=/bin"}) }`)
 	if noEnv, inherits := check(ok); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v", noEnv, inherits)
 	}
