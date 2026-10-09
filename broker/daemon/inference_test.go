@@ -641,7 +641,8 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //     parameter, a promoted field); and a command copied by dereference
 //     (d := *c);
 //   - a command constructed by a generic with an inferred type argument
-//     (var z T or new(T) where T is inferred as *exec.Cmd);
+//     (var z T or new(T) where T is inferred as *exec.Cmd), including one
+//     inferred from its context (var mk func() *exec.Cmd = fresh);
 //   - a *exec.Cmd held where the check does not look for a constructor:
 //     a parameter, a function result, a type assertion (the deny-by-
 //     default rule covers exec.Cmd by value; P3-4b-3r-env-r8);
