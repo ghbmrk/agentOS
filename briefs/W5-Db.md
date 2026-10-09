@@ -78,6 +78,17 @@ W5-Db first, then W5-Dc. DIG-1 needs W5-Db only (the contract and `Source`); its
 
 **Threat check (L3/4a):** a second send path that skips `Begin`; an unknown send resent; text rendered from anything but the begun batch; a forgotten reference sent after `Forget` returned; a `NotSent` classified without proof.
 
+## Reuse (codex drafts, cut before #555)
+
+Every `pkg/w5-d*-codex-*` branch carries its own pre-#555 `digestqueue` (no `Held`, `Late` or per-snapshot `Forget`), so nothing merges; lift by adapting to main's API. They stack: d62 contains d9 to d55.
+- **DB-2:** `pkg/w5-d9-digest-attempt-codex-20261007`, `broker/digestqueue/bridgeattempt/attempt.go`: the Begin, render, one transport call, Finish flow. Drop its `Gate` seam and source allowlist. Lift its tests `TestExpiredOrUnacknowledgedDoesNotInvokeTransport`, `TestBeginSaveFailureDoesNotCallTransport`, `TestCancelledAndNilContextsDoNotBegin`, `TestAmbiguousTransportErrorsCannotRetry`, `TestAcceptedButFinishSaveFailureStaysQuarantined`, `TestCallbacksCannotMutateTransportPayloadOrPrivateQueueState`.
+- **DB-3:** same branch, `broker/modemlink/modemlink.go`: the per-item `handed` channel read under `mu` and `SendCanceledError{Handed}` give the not-sent proof. Add what it lacks: separate refused-before-queue and timeout-before-hand from after-hand, and the item ID on `CodeOK`. Lift `TestOnlyAffirmativeBeforeHandoffCancellationPermitsRetry` and `TestWrappedOrMalformedCancellationDoesNotEstablishNonDelivery`.
+- **DB-2/DC-2 test idea:** d11 `bridgeattempt/crash_test.go` (`TestAssembledDigestRecoveryAcrossEveryDurableBoundary`): cut at every durable boundary; a cut after `Begin` must end Unknown, never resent.
+- **DC-2/DC-4 reference:** d32 `daily/workflow_test.go` (due-minute step, STOP mid-step), d33 `dailyhost/host.go` (`Run` single ticker with no catch-up backlog; `Status.Line()` without backend detail), d41 `dailypolicy/policy.go` (STOP and quiet check rechecked before the transport call). Patterns only: their registries and pacing stores are out of scope.
+- **DC-3 test idea:** d30 `heartbeat/source_test.go` day-rollback and DST cases; its MAC'd state file is heavier than the `day` source needs.
+- **Not reusable:** d4, d13, d24, d26 and `pkg/w5-sl-second-line-digest-draft` are source-side (DIG-1 or `owner` scope, older `Pipeline.Notice` path); d12 is owner-notice provenance; d55 and d62 are pacing-store recovery.
+- **Write fresh:** `Late`, per-snapshot `Forget`, expired re-offer, `recover` skipping `Expired`, and the DC-6 `go/ast` gate test; no draft has them.
+
 ## Spec gaps (record in the PR; do not invent SPEC text)
 
 - **SG-1:** SPEC has no owner wording for a digest whose delivery is unknown, exhausted or held, for the late header, or for the "nothing happened" line CH-15 requires. W5-Dc keeps the strings in one table, marked provisional, until an L1 spec-diff PR words them; the builder proposes wording in its PR.
