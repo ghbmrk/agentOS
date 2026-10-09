@@ -12,6 +12,8 @@ A recurring review of the owner-facing experience (onboarding and everyday use) 
 
 Tier A PRs get a UX pass in the lens screen; tier B PRs get UX as part of the combined pass. Each run applies the scope below to the PR's diff. Verdicts go to `reviews/ux/YYYY-MM-DD-pr<N>.md` (combined passes to `reviews/combined/`), in the L3 format of docs/OPERATING.md §4.
 
+Not on assurance tooling: a tier-A diff confined to `tools/depaudit*`, `tools/canary*`, `assurance/`, `tools/risk_tier*` and their tests gets no UX pass. Those tools' operators are CI and builders, and their messages are `later` (OPERATING §2, D-086). If one of them gains a human operator on the box, restore the pass with one line here.
+
 Before raising a finding on text shown to the guest, check that a guest can reach it: trace the path from a guest tool call to the text, through the MCP guard and the gate. #461 (SR2-3o) was built for refusals that no guest could reach.
 
 ## Checks that replaced findings
