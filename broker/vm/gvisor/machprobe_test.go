@@ -216,12 +216,20 @@ func (r *rig) pressFor(hold time.Duration, brief ...string) func(context.Context
 // press to just before the preemption, the window the probe reads, so
 // CI shows the margin over the probe's minimums.
 func (r *rig) logRise(t *testing.T, q *quota.FS, p *loops.ExhaustProbe, name string) {
-	read := func(id string) (cpu, mem, disk int64) {
+	read := func(id string) (cpu, mem, disk int64, stat map[string]int64) {
+		stat = map[string]int64{}
 		cg := filepath.Join(r.cfg.Cgroups.Path, id)
 		if b, err := os.ReadFile(filepath.Join(cg, "cpu.stat")); err == nil {
 			for line := range strings.Lines(string(b)) {
 				if v, ok := strings.CutPrefix(line, "usage_usec "); ok {
 					cpu, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+				}
+			}
+		}
+		if b, err := os.ReadFile(filepath.Join(cg, "memory.stat")); err == nil {
+			for line := range strings.Lines(string(b)) {
+				if k, v, ok := strings.Cut(strings.TrimSpace(line), " "); ok && slices.Contains([]string{"anon", "file", "shmem", "file_dirty", "file_writeback"}, k) {
+					stat[k], _ = strconv.ParseInt(v, 10, 64)
 				}
 			}
 		}
@@ -235,14 +243,19 @@ func (r *rig) logRise(t *testing.T, q *quota.FS, p *loops.ExhaustProbe, name str
 		return
 	}
 	var c0, m0, d0 int64
+	var s0 map[string]int64
 	press, preempt := p.Press, p.Preempt
 	p.Press = func(ctx context.Context, id string, kinds []string) error {
-		c0, m0, d0 = read(id)
+		c0, m0, d0, s0 = read(id)
 		return press(ctx, id, kinds)
 	}
 	p.Preempt = func(id string) error {
 		if c0 != 0 {
-			c1, m1, d1 := read(id)
+			c1, m1, d1, s1 := read(id)
+			// Which part of memory.current each press moves (diagnosis for
+			// B1 on #599: the disk press's file cache counts as memory).
+			t.Logf("%s: memory.stat rose anon %d, file %d, shmem %d, file_dirty %d, file_writeback %d", name,
+				s1["anon"]-s0["anon"], s1["file"]-s0["file"], s1["shmem"]-s0["shmem"], s1["file_dirty"]-s0["file_dirty"], s1["file_writeback"]-s0["file_writeback"])
 			t.Logf("%s: over the hold (%v; host CPUs %d) cpu rose %d us (minimum hold x CPUs / 2), memory %d (minimum %d), disk %d (minimum %d)",
 				name, p.Hold, runtime.NumCPU(), c1-c0, m1-m0, p.Script.MemoryBytes/2, d1-d0, p.Script.DiskBytes/2)
 			c0 = 0
