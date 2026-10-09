@@ -20,6 +20,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | S5 | A5, A13 | CRED-4 action protocol; live run blocked on network policy |
 | S8-W1 | A14, CRED-5 | Blocks every worker-held route; credential invariant |
 | S8-live | A3 (CAP-11) | Needs Mark's Claude and ChatGPT plans |
+| S8-W1-tunnel | A3, A14 (CRED-5 W4) | CONNECT-only tunnel with broker-resolved host and SNI binding; precondition of any worker-held route; no CONNECT handler in `broker/egress` at 256b7cc (from S8-W1a, #543). Promote to a BOARD row with a brief when S8-W1 is scheduled |
+| S8-W1-volume | A14 (CRED-5 W2) | Per-provider login volume (schema check, writable login file only) and its exclusion from snapshots, recall, journal and results; no code at 256b7cc (from S8-W1a, #543). Promote with S8-W1 |
 | S8-codex-terms | A3, CRED-5 (unsure) | Decides Codex custody; a Claude plan route may already satisfy A3 |
 | CRED-5f | A3 (CAP-9), CRED-5 | Plan route withdrawn with no API key granted must still route or tell the owner |
 | CRED-5t | CRED-1 invariant | Unswappable refresh response must fail closed; stop retrying on account restriction |
@@ -73,7 +75,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
 | DEP-3 | A9 (DEP-2a evidence integrity) | Every tracee shares `_inner`'s uid and can drain the evidence pipes via `/proc/1/fd` or ptrace `_inner`, or break the next trace line by writing a partial line through `/proc/1/fd/<trace_w>` (L3 and Security on #437, ASSUMPTIONS D9) |
 | DEP-4 | A9 (DEP-2b) | Writable rbind submounts under kept paths; tier-A security, so not later (L3 on #437, ASSUMPTIONS D10) |
-| DEP-5 | A9 | An strace lacking a `?`-prefixed `TRACED` name skips it silently, so that syscall goes unseen; tier-A security, so not later (Security on #437 point 2) |
+| DEP-5 | A9 | An strace lacking a `?`-prefixed `TRACED` name skips it silently, so that syscall goes unseen; tier-A security, so not later (Security on #437 point 2); built in DEP-4 as DEP-4b |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
@@ -292,6 +294,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b3r l2 | L3 accept on #481, point 1: the `forget.go` comment at :224 cites CH-21 for the unlock rule; the cite is CH-3 (CH-21 is "Name and voice"). Fix it when a build touches that file |
 | W3-forget-b3r l3 | L3 accept on #481, point 2: the BOARD `W3-forget-b3` row says "in review (#425)" although #425 is merged; the coordinator corrects it |
 | DEP-2-join | depaudit `_inner` snapshots the trace after `join(10)`/`join(2)` without checking `is_alive()`; a live reader should make the attempt `error` (fail-closed). strace has exited by then, so a truncated trace is unlikely (L3 on #437 point 4) |
+| DEP-2-otattr | depaudit: `open_tree_attr` (syscall 467) needs Linux 6.15+; on an older kernel it returns ENOSYS, so only the `mount_setattr` half of `control-kept-read-only` bites there. `setpriv`'s CAP_SYS_ADMIN drop still covers both (Security re-sign on #437, L1) |
+| DEP-2-nestns | depaudit: no test covers D8's claim that a nested user namespace cannot clear the read-only flag because copied mounts are locked (MNT_LOCK_READONLY) (Security re-sign on #437, L2) |
 | W3-forget-b3r-lockedtext | UX on #522: the locked text ("Your session is locked ... Unlock it with a code first.", on the page and as `forgetPageLocked`) names a step with no path to it; the Second line page says "I am locked ... Unlock me" with a link to `/unlock/vault`, and the owner's own word is "locked", not "session". Reuse that wording and link, paired with a test of the `TestHeldOwnerTextsNameOnlyStepsThatWork` kind in the next package that touches owner page texts |
 | W3-forget-b3r-askedtask | UX on #522: the reply to "Ask to forget" does not name which task was asked, and the list comes back unchanged with the same button, so a second press files a second request and a second text to the owner (a texted `FORGET n` repeated does the same); the effect is a duplicate approval, not data loss. Name the label in the reply, or mark a task as asked until the request resolves; it changes owner wording, so it belongs to a later owner-text package (Security 4a on #522, point 2, says the same: harmless, since each request needs a code; a later page package could show "already asked" for a goal with a Pending forget) |
 | W3-forget-b3r-deeper | Potency on #522: the page lists `recent(forgetList)`, five tasks, as the brief requires, so an older task still cannot be forgotten from the page or by text (R2 says "older tasks"); lifting it means a deeper `recent(n)` and a paged list, with the ask check (P2) and the texted `FORGET n` list kept equal. Security cost: a longer label list on shared Wi-Fi after sign-in |
@@ -309,6 +313,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-3 l7 | Potency 7 on #523 (P3-4b-4): the probe sends four fixed frames per socket and tests no connection limits, rapid reconnects or half-open frames; promoting good fuzz inputs to seeds is a later choice |
 | P3-4b-3 l8 | UX 4 on #523: a fuzz finding whose corpus file is removed can never resolve, yet STATUS says it is rechecked; add a line to `broker/loop7/ASSUMPTIONS.md` when the source is wired |
 | P3-4b-3 l9 | UX 5 on #523: a probe finding's ID derives from its `Detail`, so a different failure set next round is a second High text for one machine; cap or fold per subject when the probe text is reworded |
+| P1-4-flake l1 | L3 1 on #547: the `ci.yml` comment and loop7 F8 say "about what 20s ran" (measured: 600000x took 6-20 s per target), and loop7 F6 still says "runs 20 s per CI run"; reword when the counts change (P1-4-flake-counts) |
+| P1-4-flake l2 | L3 2 on #547: the fuzz deadline race is not specific to Go 1.26 (`stop` against `fuzzCtx.Err()` is long-standing); reword "Go 1.26's coordinator" in ci.yml and the brief. The "toolchain with the coordinator fixed" condition stays right |
+| P1-4-flake l3 | L3 3 on #547: a count-bound fuzz run is capped only by `go test`'s default 10 m `-timeout`; an explicit per-step `-timeout` is the fix, and P1-4-flake-counts covers it, so this line closes with that row |
+| P1-4-flake l4 | L3 4 and Security 4a 3 on #547 (pre-existing, since #391): a runsc crash at the deadline reaches callers as `TimedOut` with no output, not `ErrExecFailed`; the failure is visible only in `exec.log` |
 
 ## Reuse candidates
 | ID | Component | Why |
