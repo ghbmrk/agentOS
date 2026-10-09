@@ -244,6 +244,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W3-forget-reach l5 | L3 L2 on #569: mutant N12 (`judgeAgent` keeps None entries) leaves only a stale owed entry; the test is carried by W3-forget-reach-r3 |
 | W3-forget-reach l6 | L3 L3 on #569: `broker/recalltool/service.go` was outside the brief's scope but needed for the pass-throughs; brief-gap: a brief that adds a `Reach` hook lists `service.go` |
 | SR3-2 l1 | UX/Potency on #428 (L3 later point): an authorized intent that never dispatches (held, no executor, fenced) holds its bound place with no age-out; note it in GR31 and let STATUS show it |
+| CH-21b l1 | Builder on CH-21b: `boxname.Check` allows any Unicode letter, so a mixed-script look-alike (Cyrillic а in "Аgent OS") passes the reserved-word check; fold look-alikes as CH-10 does (same gap as OSS-10w2 f4) |
+| CH-21b l2 | Builder on CH-21b: a name with non-GSM-7 letters or U+2019 forces UCS-2 on every owner text that quotes it, halving the CH-12 length budget; count it when CH-12 budgets are next touched |
+| CH-21b l3 | Builder on CH-21b: renames are not journaled; the owner sees only the reply. Journal `name changed` when the journal next gains owner-channel events |
 | SR3-2 l2 | Security on #428, point 2: GR7 ("under a bound of 1 the second is asked") overstates, since concurrent `Authorize` calls are not seq-checked and both can be authorized, the second being refused at the dispatch recheck. Safe. Next time GR7 changes, add "or, if both are authorized at once, refused at the recheck" |
 | P2-2a f3 l1 | UX on #423, point 2: an owner who never answers is asked again at every check; after a few lapses the ask could move to the daily digest only (UPD-5) |
 | P2-2a f3 l2 | Potency on #423, point 1: the lapse record is in memory only; persist it with proposals (C9, potency PM4). No release is stranded meanwhile, since Loop 3 re-asks after a restart |
@@ -693,12 +696,16 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W5-Dc-r1b l3 | #652 Security 2 (6087278910): `Gate.allowance` in grants uses `-1` from `Allowance` as an in-band "unset"; a future hook returning another negative value silently returns grants to its own count, a second budget; treat any negative value from a set hook as 0 |
 | W5-Dc-r1b l4 | #652 L3 2 (6087271656), Security 3: held-restore mode (`held.go:162`, `held.go:187`) texts the owner through `modemlink` with no pacer, before the owner channel exists; the texts are security class or replies anyway; note it in agentosd ASSUMPTIONS when that file is next touched |
 | W5-Dc-r1b l5 | #652 L3 3 (6087271656): grants reads `allowance(now)` before taking `g.mu`, so a grants flush racing an owner `Post` can go one text over the hour's budget (bounded, nothing lost) |
+| HOST-1f-666 l1 | #666 UX 2: `daForgetFailed` says "security chip limits" where `warnDA` and the `ErrLockoutSet` text say "limit on wrong guesses"; one name per setting, in the next owner-text pass on `trusted.go` (HOST-1f-r1) |
+| HOST-1f-666 l2 | #666 Potency 2: with production `notify` = `log.Print`, `sayErr` logs each failure twice (sentence with error, then sentence alone); harmless until notify reaches the owner channel |
 | W5-Dc-r1b l6 | #652 L3 delta (6087655573): `main()` still passes `attach` its arguments untested (`nil` for `dg` would build and pass); testing `main()` itself is out of scope |
 | SR3-mail-w1 l8 | #654 UX, L3 1, Security 1 (6087870595, 6087872442, 6087873796): `TestNoMailAccountByDefault` counts the `not_connected` frames but does not assert that nothing else crossed the socket (its doc comment says "the socket says nothing more"); compare each connection's full reply after it closes to exactly `{"error":"not_connected"}\n` |
 | ARC-6-fold l1 | #670 L3 4 (6090864635), Security 4 (6090880853): if `crypto/rand` fails, `newID` returns `""` and `fold.Store.Hand` still returns a stand-in `Read` can never satisfy; return the body unchanged. Not reachable on Go 1.24+ |
 | ARC-6-fold l2 | #670 Potency 3 (6090861948), `recheck`: `result_read` has no offset/length, so reading a fold back re-spends the context the stand-in saved |
 | ARC-6-fold l3 | #670 UX (6090861948): the stand-in names no next step (call `result_read` with its `id`), and `no such result` does not say the original is gone for good |
 | ARC-6-fold l4 | #670 L3 5 (6090864635), `recheck`: error results (`isErr`) are never folded, so a large error passes inline at full size; a result over the per-machine bound (4 MiB) now also passes inline whole rather than as an unreadable stand-in |
+| HOST-1f-215 l1 | #215 Security 4a later 1 (6090325350), `recheck`: `follow/follow.go:247` appends a `setUnsent` error (an `os` error naming the pending-alert file path) to journal Evidence; establish whether that Evidence reaches the owner (MORE, local UI) and keep the path out if it does (CH-12) |
+| HOST-1f-215 l2 | #215 Security 4a later 2 (6090325350): nothing stops a future `h.say("…" + err.Error())`; a lint or grep check banning `err.Error()` or a formatted error in arguments to `say`/`notify` would. Becomes that check if the same kind of finding appears on a second PR |
 
 ## Reuse candidates
 | ID | Component | Why |

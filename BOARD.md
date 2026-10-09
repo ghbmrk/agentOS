@@ -127,7 +127,7 @@ Primary lane; from an external review's points 2 to 6, checked against main at 9
 | S7 | [Host foundation](briefs/S7.md) | Cloud only | merged (result, systemd image stack on Debian 13; HW-5a decided) |
 | S3 | [Agent machines at 8 GB](briefs/S3.md) | Cloud first, then N95 | merged (cloud part; Firecracker + N95 timings wait on hardware) |
 | S4 | [OpenClaw unmodified as a guest via broker tools; record any…](briefs/S4.md) | Cloud only | merged |
-| S5 | [Credentialed browser](briefs/S5.md) | see brief | building (fixture suite passes (interim result); live run blocked on network policy) |
+| S5 | [Credentialed browser](briefs/S5.md) | see brief | in review (fixture suite and live run on 5 real sites pass; see RESULT.md) |
 | S6 | [Consumer AI CLIs in no-tools relay mode](briefs/S6.md) | Mark's accounts | dropped (superseded by S8 (CRED-5 now covers full provider agents)) |
 | S8 | [Provider agents as workers](briefs/S8.md) | Cloud first (stubs), then Mark's accounts | merged (03641d1; #186 cloud part and spec diff) |
 | S8-W1 | [Image fix for worker-held custody](briefs/S8-W1.md) | S8, #186 | queued (blocked: needs a supervised session with prompts on, D-064; the design hand-off is a bwrap prefix for agentos-toolsh, managed-settings denies and a containment test) |
@@ -429,9 +429,10 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | SR2-9 | [ci.yml pins actions by SHA](briefs/SR2-9.md) | — | merged (64220e9; #162) |
 | CH-21 | [Name and first-person voice](briefs/CH-21.md) | CH-12 strings; P2-3 | queued (split into CH-21a to CH-21e) |
 | CH-21a | [First-person voice: lint test and tier-B sweep](briefs/CH-21a.md) | CH-12s | building (primary lane) |
-| CH-21b | [Box name: setup suggestion and `NAME`](briefs/CH-21b.md) | CH-21a | queued (tier A) |
+| CH-21b | [Box name: setup suggestion and `NAME`](briefs/CH-21b.md) | CH-21a | in review (#467) (`NAME` and the name check; setup suggestion split to CH-21f) |
+| CH-21f | [Box name at setup: suggested name, owner-name field, contact card](briefs/CH-21b.md) | CH-21b | queued (tier A; the setup half of the CH-21b brief) |
 | CH-21c | [First-person voice: owner-page and recovery texts](briefs/CH-21c.md) | CH-21a | in review (all 13 packages swept; `owner` stays pending for CH-21e's `Agent: ` prefix) |
-| CH-21d | [First-person voice: daemon and egress texts](briefs/CH-21d.md) | CH-21a | queued (tier A) |
+| CH-21d | [First-person voice: daemon and egress texts](briefs/CH-21d.md) | CH-21a | in review (#457; tier A) |
 | CH-21e | [Agent text asking for a code is withheld; welcome-text code line](briefs/CH-21e.md) | CH-21b | queued (tier A; security first) |
 | CH-12s | ["Local page" rename in owner texts](briefs/CH-12s.md) | CH-12 | merged (a390f03; #185) |
 | ADP-13 | [The box's own mailbox](briefs/ADP-13.md) | CRED-4b; P2-6m; CH-21 | queued |
@@ -444,6 +445,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | HOST-1f | [Give the TPM's dictionary-attack settings back as they were](briefs/HOST-1f.md) | P2-4b (tpmseal, boot PIN #42) | merged (de01c80; #188) |
 | CI-SOAK | [Unattended soak workflow](briefs/CI-SOAK.md) | — | merged (8bab3fe; #187) |
 | OSS-10w2 r1 | Follow names: the reserved-name check (`grants.followName`, localui `askFollow`) also refuses look-alikes of "the AgentOS project" (folded as `owner.fold` does for CH-10, or a confusable skeleton), so a named follow never reads as switching back (release, security lens 370-1 on #370; supersedes LATER OSS-10w2 f4) | OSS-10w2 | queued (needs brief) (A) |
+| HOST-1f-r2 | Owned lockout, failed forget: on `giveBack`'s `ErrLockoutOwned` branch a failed `v.Delete` leaves the stale lockout entry, so each unattended start sends it again and fails a lockout authorization on the PC's TPM (comment at `trusted.go:953`: retrying "would only re-arm the TPM's lockout"); keep an "owned" mark outside the vault so later starts retry only the `Delete`, and send the "dropped my copy" text after the `Delete` succeeds (release, `recheck`, Security to confirm; HW-8, A1; UX 1 and Potency 1 on #666, [record](reviews/ux/2026-10-09-pr666.md)) | HOST-1f, #666 | queued (release) (A) |
 
 ## Integration: wiring merged packages into the box
 

@@ -607,6 +607,21 @@ func TestG5OwnerMessagesSurviveABrokerRestart(t *testing.T) {
 	}
 }
 
+// A failed inbox store must not hand the caller the path.
+func TestAFailedInboxStoreDoesNotNameThePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing", "inbox.json")
+	r := newRig(t, func(c *Config) { c.InboxPath = path })
+	r.client("m1")
+	_, err := r.p.DeliverOwner("m1", "book the dentist", true)
+	if err == nil || strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "missing") || strings.Contains(err.Error(), "/") {
+		t.Fatalf("path leaked: %v", err)
+	}
+	if err.Error() != "guest: the message was not stored" {
+		t.Fatalf("err %v", err)
+	}
+}
+
 // TestREV5StoredOwnerMessagesRaiseTheMachine: the inbox store can outlive
 // the machine record, so a machine created fresh (public) under an ID with
 // stored owner messages is raised to private before the guest reads one,
