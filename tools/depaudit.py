@@ -49,8 +49,15 @@ PROFILES = {"offline": frozenset(), "full": frozenset(CLASSES)}
 _LINKS = ("symlink", "symlinkat", "link", "linkat")
 _MOUNTS = ("mount", "umount2", "open_tree", "move_mount", "fsopen", "fsmount", "pivot_root")
 _ABSENT = {"aarch64": ("symlink", "link")}
-TRACED = ",".join(("?" if n in _ABSENT.get(os.uname().machine, ()) else "") + n
-                  for n in ("connect", "sendto", "sendmsg", "sendmmsg") + _LINKS + _MOUNTS)
+
+
+def _traced(machine):
+    """The strace -e trace= list for machine: '?' on exactly the names _ABSENT lists for it (D12)."""
+    return ",".join(("?" if n in _ABSENT.get(machine, ()) else "") + n
+                    for n in ("connect", "sendto", "sendmsg", "sendmmsg") + _LINKS + _MOUNTS)
+
+
+TRACED = _traced(os.uname().machine)
 
 SHIPPING_DIRS = ("broker", "src")
 CODE_SUFFIXES = {".go", ".py", ".rs", ".c", ".h", ".ts", ".js", ".sh", ".toml", ".json", ".yaml", ".yml", ".conf"}
@@ -342,24 +349,72 @@ def _map_text(triples):
 
 
 _SANDBOX = None
+SANDBOX_WHY = ""  # why sandbox_available() is false, with the remedy (DEP-6d, DEP-6e)
+# Each binary the sandbox runs, and the package that ships it.
+_NEEDS = (("unshare", "util-linux"), ("setpriv", "util-linux"), ("strace", "strace"),
+          ("newuidmap", "uidmap"), ("newgidmap", "uidmap"))
+
+
+def _has_mount_setattr():
+    """Whether the kernel has mount_setattr (Linux 5.12+), asked with no side effect: a NULL
+    attr of size 0 is refused before any lookup, and any errno but ENOSYS means the call
+    exists (DEP-6c). It only predicts: a seccomp filter may answer EPERM for any call, and
+    then _inner's own refusal stays the check (D10)."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    return libc.syscall(_SYS_MOUNT_SETATTR, -1, None, 0, None, 0) == 0 or ctypes.get_errno() != errno.ENOSYS
+
+
+def _tail(stderr, lines=5, chars=500):
+    text = " | ".join(stderr.decode(errors="replace").strip().splitlines()[-lines:])
+    return text[-chars:] or "(no stderr)"
+
+
+def _sandbox_missing():
+    """The first need the sandbox lacks, named with its remedy, or "" if it has them all.
+    Every branch can only find a reason: none makes the sandbox available."""
+    if not _has_mount_setattr():
+        return ("the kernel has no mount_setattr (ENOSYS), which makes each kept path read-only with every "
+                "mount under it (tools/ASSUMPTIONS.md D10); needs Linux 5.12 or later")
+    missing = [n for n, _ in _NEEDS if not shutil.which(n)]
+    if missing:
+        return "missing on PATH: %s; install them (apt-get install %s)" % (
+            ", ".join(missing), " ".join(sorted({pkg for n, pkg in _NEEDS if n in missing})))
+    try:
+        flags = _unshare_flags()
+    except OSError as e:
+        try:
+            user = pwd.getpwuid(os.geteuid()).pw_name
+        except KeyError:
+            user = str(os.geteuid())
+        # No fixed range: one that overlaps another user's would share their ids, and one at 0
+        # or a login uid would map the scenario onto root or that user (D13).
+        return ("%s; add one: sudo usermod --add-subuids START-END --add-subgids START-END %s, with a "
+                "65536-id START-END, START at least 100000 or SUB_UID_MIN/SUB_GID_MIN from /etc/login.defs, "
+                "the range above every uid in /etc/passwd and gid in /etc/group, and that overlaps no "
+                "line in /etc/subuid or /etc/subgid (tools/ASSUMPTIONS.md D13)" % (e, user))
+    try:
+        # The same -e as the run: an strace that cannot name a traced syscall exits
+        # nonzero ("invalid system call") instead of skipping it unseen (DEP-4b).
+        # The same maps and uid drop too: without a subordinate range, newuidmap or
+        # the drop to SCENARIO_ID, the run fails loudly, never with the old map (DEP-3a).
+        p = subprocess.run(["unshare"] + flags + ["--", "strace", "-e", "trace=" + TRACED,
+                                                  "-o", os.devnull] + AS_SCENARIO + ["true"],
+                           capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        return "the sandbox probe did not run: %s" % e
+    if p.returncode == 0:
+        return ""
+    return ("the sandbox probe (unshare, strace, setpriv) exited %s: %s; it needs unprivileged user+network "
+            "namespaces, newuidmap and newgidmap that accept the range, and an strace that names every "
+            "traced syscall (%s)" % (p.returncode, _tail(p.stderr), TRACED))
 
 
 def sandbox_available():
-    global _SANDBOX
+    global _SANDBOX, SANDBOX_WHY
     if _SANDBOX is None:
-        _SANDBOX = False
-        if shutil.which("unshare") and shutil.which("strace") and shutil.which("setpriv"):
-            try:
-                # The same -e as the run: an strace that cannot name a traced syscall exits
-                # nonzero ("invalid system call") instead of skipping it unseen (DEP-4b).
-                # The same maps and uid drop too: without a subordinate range, newuidmap or
-                # the drop to SCENARIO_ID, the run fails loudly, never with the old map (DEP-3a).
-                p = subprocess.run(["unshare"] + _unshare_flags() + ["--", "strace", "-e", "trace=" + TRACED,
-                                                                     "-o", os.devnull] + AS_SCENARIO + ["true"],
-                                   capture_output=True, timeout=30)
-                _SANDBOX = p.returncode == 0
-            except (OSError, subprocess.SubprocessError):
-                pass
+        SANDBOX_WHY = _sandbox_missing()
+        _SANDBOX = not SANDBOX_WHY
     return _SANDBOX
 
 
@@ -403,7 +458,8 @@ def _set_read_only(path):
     attr = (ctypes.c_uint64 * 4)(_MOUNT_ATTR_RDONLY, 0, 0, 0)  # set, clr, propagation, userns_fd
     if libc.syscall(_SYS_MOUNT_SETATTR, -100, path.encode(), _AT_RECURSIVE, attr, ctypes.sizeof(attr)) != 0:
         err = ctypes.get_errno()
-        raise OSError(err, "mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY) on %s: %s" % (path, os.strerror(err)))
+        raise OSError(err, "mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY) failed with %s (%s) on %s" % (
+            errno.errorcode.get(err, err), os.strerror(err), path))
 
 
 def _mask_host_sockets(keep, writable=()):
@@ -430,6 +486,15 @@ def _mask_host_sockets(keep, writable=()):
     elif os.path.exists("/dev/log") and not os.path.isfile("/dev/log"):
         _mount("--bind", "/dev/null", "/dev/log")
     return masked
+
+
+def _mask_or_refuse(keep, writable):
+    """_mask_host_sockets, or one line naming the path and errno and exit 1, before any
+    command runs: a failed mount_setattr is a sandbox error, never a traceback (DEP-6c)."""
+    try:
+        return _mask_host_sockets(keep, writable)
+    except OSError as e:
+        sys.exit("depaudit: sandbox not run, %s" % e)
 
 
 _OCTAL = re.compile(r"\\([0-7]{3})")
@@ -464,6 +529,50 @@ def writable_mounts(mountinfo, read_only, writable, reaches_rw=_reaches_rw):
                 and reaches_rw(mp)):
             wrong.append(mp)
     return wrong
+
+
+def _unescape_field(field):
+    """A /proc/self/mounts field: the kernel writes space, tab, newline and backslash as
+    \\ooo. Anything else after a backslash raises ValueError."""
+    head, *rest = field.split("\\")
+    out = [head]
+    for part in rest:
+        if len(part) < 3 or not all(c in "01234567" for c in part[:3]):
+            raise ValueError(field)
+        out.append(chr(int(part[:3], 8)) + part[3:])
+    return "".join(out)
+
+
+def kept_rw_mounts(mounts, read_only, writable, statvfs=os.statvfs):
+    """control-kept-read-only's own mount check, from a second source (DEP-6b): it shares
+    no code with _inner's check, so one bug cannot blind both. mounts is /proc/self/mounts text (field 4 says ro if the mount or its
+    superblock is read-only). A mount point at or under a declared path is judged by the
+    closest declared path, as D10: under a read-only one, a mount that is rw there and rw
+    by statvfs on its mount point is reported; ENOENT means hidden (D10), any other error
+    counts as writable. An unparsable line is reported too."""
+    declared = [(p, True) for p in read_only] + [(p, False) for p in writable]
+    found = []
+    for line in mounts.splitlines():
+        fields = line.split(" ")
+        try:
+            if len(fields) < 4 or not fields[1].startswith("/"):
+                raise ValueError(line)
+            point = _unescape_field(fields[1])
+        except ValueError:
+            found.append("unparsed /proc/self/mounts line: %r" % line)
+            continue
+        closest = max(((len(p), ro) for p, ro in declared if os.path.commonpath([point, p]) == p), default=None)
+        if closest is None or not closest[1] or "ro" in fields[3].split(",") or point in found:
+            continue
+        try:
+            if statvfs(point).f_flag & os.ST_RDONLY:
+                continue
+        except FileNotFoundError:
+            continue
+        except OSError:
+            pass
+        found.append(point)
+    return found
 
 
 def _place(content, dest, work, masked):
@@ -560,6 +669,15 @@ def _end_namespace():
             os.waitpid(-1, 0)
 
 
+def _hand_back(paths):
+    """Ends the namespace, then gives paths back to uid 0 (the runner outside) so the runner
+    can remove the work directory. In this order only: nothing the scenario started may
+    still write once its files are root's (DEP-3, DEP-7g)."""
+    _end_namespace()
+    for path in paths:
+        _chown_tree(path, 0)
+
+
 def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
     """Runs inside the fresh user, network, and mount namespaces. The evidence
     (strace's trace and its stderr) arrives over pipes this process holds, and the
@@ -576,7 +694,7 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
     writable = {os.path.realpath(work)} | {os.path.realpath(w) for w in writable}
     keep = {str(ROOT), os.path.realpath(sys.prefix), *(os.path.realpath(k) for k in extra_keep),
             os.path.dirname(os.path.realpath(sys.executable))} | writable
-    masked = _mask_host_sockets(sorted(keep), writable)
+    masked = _mask_or_refuse(sorted(keep), writable)
     _place("nameserver 127.0.0.1\n", "/etc/resolv.conf", work, masked)
     if os.path.exists("/etc/nsswitch.conf"):
         lines = [l for l in pathlib.Path("/etc/nsswitch.conf").read_text().splitlines()
@@ -586,7 +704,8 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
     # read-only kept path, or the command never runs (DEP-4a).
     wrong = writable_mounts(pathlib.Path("/proc/self/mountinfo").read_text(), sorted(keep - writable), writable)
     if wrong:
-        sys.exit("depaudit: sandbox not run, rw mount under a read-only kept path: " + ", ".join(wrong))
+        sys.exit("depaudit: sandbox not run, rw mount under a read-only kept path: %s; bind it read-only, "
+                 "or drop the keep entry (tools/ASSUMPTIONS.md D10)" % ", ".join(wrong))
     names = []
     sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sink.bind(("127.0.0.1", 53))
@@ -618,10 +737,7 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
     # A tracee strace let go of may still hold stderr; take what has arrived, then end it.
     trace_t.join(10)
     err_t.join(2)
-    _end_namespace()
-    # Back to uid 0 (the runner outside), so the runner can remove the work directory.
-    for path in scenario_owned:
-        _chown_tree(path, 0)
+    _hand_back(scenario_owned)
     text = b"".join(list(trace)).decode(errors="replace")
     events = parse_strace(text)
     result.write(json.dumps({"rc": rc, "dns": names, "masked": masked, "realpaths": unix_realpaths(events),
@@ -847,12 +963,53 @@ def _evidence_fds():
     return sorted(n for n, l in links.items() if l.startswith("pipe:") and (held[l] > 1 or l == mine))
 
 
+def _tracer_channels(strace):
+    """Through the tracer's own /proc entry, so ptrace_may_access on strace is tried as well
+    as the pipe's DAC: reopen strace's stderr to drain fault lines (DEP-7b), and signal strace
+    and _inner (DEP-7c). Signal 0 runs kill's permission check and delivers nothing, so one
+    that is allowed stops neither. Only a PermissionError is a refusal: a target that is not
+    there was not denied by the uid. Returns each that was not refused."""
+    wrong = []
+    path = "/proc/%d/fd/2" % strace
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except PermissionError:
+        pass
+    except OSError as e:
+        wrong.append("%s (strace's stderr): %s, not denied" % (path, e.strerror))
+    else:
+        with contextlib.suppress(OSError):
+            os.read(fd, 1 << 20)
+        os.close(fd)
+        wrong.append("opened %s (strace's stderr) to read" % path)
+    for who, pid in (("strace", strace), ("_inner", 1)):
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            continue
+        except OSError as e:
+            wrong.append("signal 0 to %s (pid %d): %s, not denied" % (who, pid, e.strerror))
+        else:
+            wrong.append("signalled %s (pid %d)" % (who, pid))
+    return wrong
+
+
 def _evidence_channels():
     """What a tracee sharing _inner's uid could do to the evidence without a traced call
     (D9): drain the trace or stderr pipe's read end, write a partial line into its write end
-    so strace's next line no longer parses, and PTRACE_SEIZE _inner. Returns each that worked."""
+    so strace's next line no longer parses, PTRACE_SEIZE _inner, and reopen strace's stderr
+    or signal strace and _inner (_tracer_channels). Returns each that worked."""
     import ctypes
     wrong = []
+    strace = os.getppid()
+    try:
+        comm = pathlib.Path("/proc/%d/comm" % strace).read_text().strip()
+    except OSError as e:
+        comm = str(e)
+    if comm.startswith("strace"):
+        wrong += _tracer_channels(strace)
+    else:
+        wrong.append("parent pid %d is %s, not strace: its stderr and signals were not tried" % (strace, comm))
     for n in _evidence_fds():
         path = "/proc/1/fd/%d" % n
         try:
@@ -912,10 +1069,12 @@ def _control(mode):
       own-user-namespace exits nonzero unless the scenario's uid_map and gid_map are exactly
                        $DEPAUDIT_UID_MAP and $DEPAUDIT_GID_MAP, the maps the harness sets (DEP-3c)
       distinct-uid     exits nonzero if its uid or gid shares a value with _inner's (PID 1) or
-                       its strace parent's (DEP-3a)
+                       its strace parent's (DEP-3a), or no_new_privs is not set (DEP-7d)
       evidence-channels connects to a documentation address, drains and writes a partial line
                        into _inner's evidence pipes through /proc/1/fd, PTRACE_SEIZEs _inner,
-                       connects again, and exits nonzero if any of that worked (DEP-3b)"""
+                       reopens strace's stderr through /proc/<strace>/fd/2, signals strace and
+                       _inner with signal 0, connects again, and exits nonzero if any of that
+                       worked (DEP-3b, DEP-7b, DEP-7c)"""
     if mode == "tamper-evidence":
         with contextlib.suppress(OSError):
             socket.create_connection(("192.0.2.10", 443), timeout=2).close()
@@ -952,6 +1111,10 @@ def _control(mode):
             sys.exit("parent pid %d is not strace: nothing was compared" % ppid)
         uid, gid = _ids(os.getpid())
         wrong = []
+        # no_new_privs, set by AS_SCENARIO, keeps a setuid or file-capability binary from
+        # handing the scenario capabilities back (DEP-3b, DEP-7d).
+        if "NoNewPrivs:\t1" not in pathlib.Path("/proc/self/status").read_text().splitlines():
+            wrong.append("no_new_privs is not set (no 'NoNewPrivs:\\t1' in /proc/self/status)")
         for who, pid in (("_inner", 1), ("strace", ppid)):
             ouid, ogid = _ids(pid)
             if uid & ouid or gid & ogid:
@@ -983,8 +1146,8 @@ def _control(mode):
             if not _refused_read_only(e, d):
                 wrong.append("%s: %s, not read-only" % (d, e))
     ro_kept = [str(ROOT), os.path.realpath(sys.prefix), os.environ["DEPAUDIT_KEEP_RO"]]
-    wrong += ["rw mount under a read-only kept path: " + m for m in writable_mounts(
-        pathlib.Path("/proc/self/mountinfo").read_text(), ro_kept, [os.environ["DEPAUDIT_KEEP_RW"]])]
+    wrong += ["rw mount under a read-only kept path: " + m for m in kept_rw_mounts(
+        pathlib.Path("/proc/self/mounts").read_text(), ro_kept, [os.environ["DEPAUDIT_KEEP_RW"]])]
     try:
         os.close(os.open(__file__, os.O_WRONLY | os.O_APPEND))
         wrong.append("opened %s for writing" % __file__)
@@ -1109,8 +1272,7 @@ def cmd_static(args):
 
 def cmd_run(args):
     if not sandbox_available():
-        print("FAIL sandbox unavailable: needs unshare, setpriv, unprivileged user+network namespaces, "
-              "newuidmap and newgidmap with a subordinate range in /etc/subuid and /etc/subgid, and an strace that names every traced syscall (%s)" % TRACED, file=sys.stderr)
+        print("FAIL sandbox unavailable: %s" % SANDBOX_WHY, file=sys.stderr)
         return 2
     try:
         product = load_registry(args.targets)

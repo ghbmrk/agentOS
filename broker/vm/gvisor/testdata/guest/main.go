@@ -11,6 +11,12 @@
 //	                 writes the guest's view accepted
 //	guest press KIND MS   apply KIND pressure for MS milliseconds (LOOP-7)
 //	guest idle       sleep until killed (a pressure process)
+//	guest relay SOCK MODE [RECORD REQID]  act on the next owner message
+//	                 from the broker socket SOCK as an agent that obeys
+//	                 its input would (P3-4b-4d): reply answers the owner
+//	                 with its text; label asks to label RECORD with it;
+//	                 archive asks to archive RECORD. It prints the
+//	                 broker's answer, which decides nothing
 //	guest <cmd> ...  send one request to the server and print the answer
 //
 // Requests: token; write PATH TEXT; read PATH; remove PATH; stat PATH;
@@ -20,9 +26,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -72,6 +81,15 @@ func main() {
 			time.Sleep(time.Hour)
 		}
 	}
+	if len(os.Args) > 3 && os.Args[1] == "relay" {
+		out, err := relay(os.Args[2], os.Args[3], os.Args[4:])
+		if err != nil {
+			fmt.Println("ERR", err)
+			os.Exit(1)
+		}
+		fmt.Println(out)
+		return
+	}
 	if len(os.Args) == 4 && os.Args[1] == "svc" {
 		fmt.Println(get(os.Args[2], os.Args[3]))
 		return
@@ -116,6 +134,72 @@ func get(sock, path string) string {
 	_, body, _ := strings.Cut(rest, "\r\n\r\n")
 	_, status, _ = strings.Cut(status, " ") // drop the protocol version
 	return status + " " + strings.TrimSpace(body)
+}
+
+// call sends one HTTP/1.0 request over a Unix socket and returns the
+// status code and body.
+func call(sock, method, path string, body []byte) (int, []byte, error) {
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "%s %s HTTP/1.0\r\nHost: broker\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", method, path, len(body))
+	c.Write(body)
+	b, err := io.ReadAll(c)
+	if err != nil {
+		return 0, nil, err
+	}
+	head, rest, _ := bytes.Cut(b, []byte("\r\n\r\n"))
+	var code int
+	fmt.Sscanf(string(head), "HTTP/%s %d", new(string), &code)
+	return code, rest, nil
+}
+
+// relay is an agent that does what its input says (P3-4b-4d).
+func relay(sock, mode string, args []string) (string, error) {
+	var msg struct {
+		ID   string `json:"id"`
+		Text string `json:"text"`
+	}
+	if mode != "archive" {
+		code, body, err := call(sock, "GET", "/owner/next", nil)
+		if err != nil || code != 200 {
+			return "", fmt.Errorf("owner/next: %d %v", code, err)
+		}
+		if err := json.Unmarshal(body, &msg); err != nil {
+			return "", err
+		}
+	}
+	out, answer := "replied", msg.Text
+	switch mode {
+	case "reply":
+	case "label", "archive":
+		if len(args) != 2 {
+			return "", errors.New("need RECORD REQID")
+		}
+		action, params := "mail.archive", map[string]any{"record": args[0]}
+		if mode == "label" {
+			action, params["label"], answer = "mail.label", msg.Text, "done"
+		}
+		req, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+			"params": map[string]any{"name": "effect_request", "arguments": map[string]any{
+				"request_id": args[1], "account": "mail", "action": action, "params": params}}})
+		code, body, err := call(sock, "POST", "/mcp", req)
+		if err != nil || code != 200 {
+			return "", fmt.Errorf("mcp: %d %v", code, err)
+		}
+		out = strings.TrimSpace(string(body))
+	default:
+		return "", fmt.Errorf("no mode %q", mode)
+	}
+	if mode != "archive" {
+		rep, _ := json.Marshal(map[string]string{"id": msg.ID, "text": answer})
+		if code, _, err := call(sock, "POST", "/owner/reply", rep); err != nil || code != 204 {
+			return "", fmt.Errorf("owner/reply: %d %v", code, err)
+		}
+	}
+	return out, nil
 }
 
 func fill(path string, mb int) string {
