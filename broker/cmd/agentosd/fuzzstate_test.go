@@ -187,7 +187,7 @@ func TestAFuzzChildReachesOnlyItsOwnBoundedTree(t *testing.T) {
 	// The fuzz step tries each reach and writes what it got in its own
 	// directory; what it measured is written after the fill is removed.
 	// The fill bypasses the page cache, whose dirty pages the leaf's
-	// 1 GiB memory.max would otherwise OOM-kill it for before the quota.
+	// memory.max would otherwise OOM-kill it for before the quota.
 	probe := `case "$2" in -test.fuzz=*)
 r=$PWD/reach
 cat ` + roles + ` >/dev/null 2>&1 && echo "roles read" > $r || echo "roles denied" > $r

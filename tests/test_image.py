@@ -594,6 +594,12 @@ class ConfigTest(unittest.TestCase):
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("enable agentosd.path", preset)
 
+    def test_broker_and_its_children_cannot_gain_privileges(self):
+        # P3-4b-3r-confine-r3 (LOOP-7, #588 Security R1): no child agentosd starts gains privileges
+        # through a setuid or file-capability binary; the audit is agentosd ASSUMPTIONS L7-6.
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
+        self.assertEqual(u["Service"]["NoNewPrivileges"], "yes")
+
     def test_broker_waits_for_onboarding(self):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Unit"]["ConditionPathExists"], "/etc/agentos/agentosd.env")

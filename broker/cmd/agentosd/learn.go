@@ -165,14 +165,15 @@ const (
 // milliseconds, and a weakened check is found within a day.
 const corpusEvery = 24 * time.Hour
 
-// fuzzLimits are the fuzz children's cgroup leaf (L7-6): 1 GiB and 256
-// tasks, checked against the HW-4 floor in ASSUMPTIONS, and the lowest
-// CPU and I/O weight in use (budget's browser and pool), below the
+// fuzzLimits are the fuzz children's cgroup leaf (L7-6): 512 MiB, from
+// the targets' measured peaks (the largest 314 MiB, within the 384 MiB a
+// quarter's headroom allows; P3-4b-3r-confine-r1), 256 tasks, and the
+// lowest CPU and I/O weight in use (budget's browser and pool), below the
 // broker's. memory.high is the hard limit, so a runaway input is
 // OOM-killed rather than throttled into a hang, and memory.oom.group
 // stays off (Component, not Child): the kernel kills the fuzz worker that
 // grew, and the engine around it lives to store the input that did it.
-var fuzzLimits = cgroup.Limits{MaxBytes: 1 << 30, HighBytes: 1 << 30, Pids: 256, CPUWeight: budget.PoolWeight, IOWeight: budget.PoolWeight}
+var fuzzLimits = cgroup.Limits{MaxBytes: 512 << 20, HighBytes: 512 << 20, Pids: 256, CPUWeight: budget.PoolWeight, IOWeight: budget.PoolWeight}
 
 // fuzzJail confines fuzz children (L7-6): their own leaf under p.Cgroup,
 // p.FuzzUser, no network, and p.Loop7 given to that user under a disk
