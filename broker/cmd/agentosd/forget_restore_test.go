@@ -73,10 +73,24 @@ const restoreCanary = "pay the gas bill CANARY-f3"
 
 // F3-1: on the retry path the entry is in the log at the moment retry
 // starts (its first wait) and at the moment forgetNotSaved is sent; it
-// holds the goal and times only, never the task's words.
+// holds the goal and times only, never the task's words. If the early
+// append fails, retry's first pass appends it before that pass's forget,
+// so it is still in the log when forgetNotSaved is sent.
 func TestForgetRetryingIsLoggedBeforeAnyText(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		logFail int // failed appends before one holds
+	}{
+		{name: "early append holds"},
+		{name: "early append failed", logFail: 1},
+	} {
+		t.Run(c.name, func(t *testing.T) { retryingIsLogged(t, c.logFail) })
+	}
+}
+
+func retryingIsLogged(t *testing.T, logFail int) {
 	r := newForgetRig(t)
-	fl := &lockedForgetLog{}
+	fl := &lockedForgetLog{fail: logFail}
 	r.f.forgetLog = fl
 	r.task("owner:a", restoreCanary, r.now.Add(-time.Hour), viaSMS)
 	r.fail = 7 // the tombstone holds, then seven failed passes past forgetNotYet
@@ -105,7 +119,11 @@ func TestForgetRetryingIsLoggedBeforeAnyText(t *testing.T) {
 		t.Fatalf("%+v", out)
 	}
 	within(t, done)
-	for name, got := range map[string][]loggedForget{"retry start": atStart, "not saved yet": atNotSaved} {
+	checks := map[string][]loggedForget{"not saved yet": atNotSaved}
+	if logFail == 0 {
+		checks["retry start"] = atStart
+	}
+	for name, got := range checks {
 		if len(got) != 1 || got[0].goal != "owner:a" || got[0].agent || !got[0].since.IsZero() || got[0].at.IsZero() {
 			t.Fatalf("at %s: logged %+v", name, got)
 		}
