@@ -615,6 +615,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-6f4 l4 | #620 lens 6083863804 pt 1 (UPD-5, CH-12 kind): between `AttestorsChanged` and the next check the line reads "Update 2 is waiting for your approval.", which drops "Security", and it was not verified that an approval request is open at that moment. The window is short because the check is now urgent; if it recurs, give that gap a line of its own |
 | SR3-6f4 l5 | #620 lens 6083863804 pt 2 (SR3-6-f4b): the f4b test asserts only that the independent-pass sentence is gone and `TestedBy` is empty, not the replacement sentence the owner reads; a later test could assert the "needs your approval: no trusted independent test report yet" wording |
 | P3-4b-4c-advisory-high | In `Digest`'s advisory-package group, `high = high || r.Finding.Severity == High` is not pinned by any test: assigning `= r.Finding.Severity == High` passes all of `./loops` (Potency delta on #634, point 2). Pin it with two advisories on one package, the High one not last. Not part of LOOP-9 dedupe. |
+| ARB-rev2 | reviews/arbitration/README.md's hard constraints list "STOP-able journaled intent" as a REV-2 gate; journaling is REV-2's record, the gate is a code (CH-10) or pre-allowance (ADP-9). Reword with the next arbitration README change (#653 L3). |
 
 ## Reuse candidates
 | ID | Component | Why |
