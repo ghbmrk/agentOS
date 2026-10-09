@@ -242,6 +242,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-1-envkey | `broker/change/env_test.go`: `newEnv`'s pinned key is a single `bytes.Reader`, so a second fresh-state pipeline opened with the same cfg would hit EOF. No test does this today (Potency on #491) |
 | P3-4b-2b-held | Fix-input audit (Security #500 1): a held array/object value leaked alone in non-canonical layout passes the audit; H-4's wording needs updating |
 | P3-4b-2b-ctrl | A11 leaking-adapter control (Security #500 2): accepts any audit hit, not only a `held/` hit |
+| P3-4b-4a corpora | Only PromptInject (10 items) is vendored: the larger published injection sets on Hugging Face are unreachable from the build environment (403); vendor one when a session can fetch it |
 
 ## Reuse candidates
 | ID | Component | Why |

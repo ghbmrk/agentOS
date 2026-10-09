@@ -129,6 +129,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-4b-3 | [LOOP-7 off-the-shelf: socket and action-protocol fuzz targets, in-guest socket probe](briefs/P3-4b.md#p3-4b-3-loop-7-fuzzing-and-socket-probes) | P3-4b-1b | queued (tier A declared) |
 | P3-4b-4a | [LOOP-7 off-the-shelf: probe findings through `Report`, continuous canary rounds, published injection corpora](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-1b | building (tier A declared) |
 | P3-4b-4b | [LOOP-7 off-the-shelf: tamper and exhaustion probes](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-4a | queued (tier A declared) |
+| P3-4b-4c | [LOOP-7 probes wired in `agentosd`: canary rounds and corpus replay on the box, once the drive carries the harness and corpora (loops S28)](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-4a | queued (tier A declared) |
 | P3-5 | [Loop 3, maintenance, as a scheduler Source](briefs/P3-5.md) | P3-2, P4-3 | merged (4672fe8; broker/maintain) |
 | P3-3 | [Recall index and event bus](briefs/P3-3.md) | P1-1, P1-2 | merged (5980098; broker/recall) |
 | P3-7 | [Goal IDs on guest intents](briefs/P3-7.md) | P1-7 | merged (847ea23; broker/guest goal.go) |
