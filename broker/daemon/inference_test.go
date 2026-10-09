@@ -624,11 +624,13 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 // function; or through os.StartProcess, syscall.ForkExec or
 // syscall.StartProcess, whose ProcAttr may not be nil, must have an Env
 // key when it is a literal, and otherwise needs a .Env assignment in the
-// same function. inherits is an os.Environ, syscall.Environ or
-// unix.Environ reference anywhere inside an Env value (a .Env assignment
-// or an Env key of any literal), or anywhere in a function that starts a
-// child, which catches one passed through a local variable. It has no
-// exemption.
+// same function. A literal nil Env counts as none, and fails a function
+// that starts a child however else it sets Env. inherits is a reference
+// to any selector named Environ (os.Environ, syscall.Environ,
+// unix.Environ, (*exec.Cmd).Environ) anywhere inside an Env value (a .Env
+// assignment or an Env key of any literal), or anywhere in a function
+// that starts a child, which catches one passed through a local
+// variable. It has no exemption.
 func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -675,6 +677,12 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	environ := func(e ast.Node) bool {
 		found := false
 		ast.Inspect(e, func(n ast.Node) bool {
+			// Any selector named Environ: os.Environ and its kin, and
+			// (*exec.Cmd).Environ, which returns the process's
+			// environment while Env is nil (L3 on #587).
+			if se, ok := n.(*ast.SelectorExpr); ok && se.Sel.Name == "Environ" {
+				found = true
+			}
 			if x, ok := n.(ast.Expr); ok && (is(x, "os", "Environ") || is(x, "syscall", "Environ") || is(x, "golang.org/x/sys/unix", "Environ")) {
 				found = true
 			}
@@ -682,10 +690,16 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		})
 		return found
 	}
+	// isNil: a literal nil Env, which exec.Cmd and os.StartProcess read
+	// as "inherit" (L3 on #587).
+	isNil := func(e ast.Expr) bool {
+		id, ok := ast.Unparen(e).(*ast.Ident)
+		return ok && id.Name == "nil"
+	}
 	hasEnv := func(lit *ast.CompositeLit) bool {
 		for _, e := range lit.Elts {
 			if kv, ok := e.(*ast.KeyValueExpr); ok {
-				if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Env" {
+				if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Env" && !isNil(kv.Value) {
 					return true
 				}
 			}
@@ -699,7 +713,7 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		}
 		// bare: a ProcAttr that is nil or a literal without Env, which no
 		// later assignment can fix.
-		starts, setsEnv, bare, inherit, launches := false, false, false, false, false
+		starts, setsEnv, bare, inherit, launches, nilEnv := false, false, false, false, false, false
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.CallExpr:
@@ -729,8 +743,9 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				}
 				for _, e := range n.Elts {
 					if kv, ok := e.(*ast.KeyValueExpr); ok {
-						if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Env" && environ(kv.Value) {
-							inherit = true
+						if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Env" {
+							inherit = inherit || environ(kv.Value)
+							nilEnv = nilEnv || isNil(kv.Value)
 						}
 					}
 				}
@@ -740,11 +755,12 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 					if !ok || se.Sel.Name != "Env" {
 						continue
 					}
-					setsEnv = true
-					rhs := n.Rhs
+					rhs, isNilHere := n.Rhs, false
 					if len(n.Rhs) == len(n.Lhs) {
-						rhs = n.Rhs[i : i+1]
+						rhs, isNilHere = n.Rhs[i:i+1], isNil(n.Rhs[i])
 					}
+					setsEnv = setsEnv || !isNilHere
+					nilEnv = nilEnv || isNilHere
 					for _, r := range rhs {
 						inherit = inherit || environ(r)
 					}
@@ -753,7 +769,7 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 			return true
 		})
 		inherit = inherit || (starts || launches) && environ(fn.Body)
-		if bare || starts && !setsEnv {
+		if bare || starts && !setsEnv || nilEnv && (starts || launches) {
 			noEnv = append(noEnv, fn.Name.Name)
 		}
 		if inherit {
@@ -801,11 +817,11 @@ func TestEveryChildGetsAnExplicitEnvironment(t *testing.T) {
 	}
 	if len(bad) > 0 {
 		sort.Strings(bad)
-		t.Errorf("child started without Env (it inherits the broker's environment):\n%s", strings.Join(bad, "\n"))
+		t.Errorf("child started without Env (it inherits the broker's environment); set Env to an explicit list (cmd/agentosd ASSUMPTIONS L7-2):\n%s", strings.Join(bad, "\n"))
 	}
 	if len(inherit) > 0 {
 		sort.Strings(inherit)
-		t.Errorf("os.Environ() in a child's Env (it inherits the broker's environment):\n%s", strings.Join(inherit, "\n"))
+		t.Errorf("os.Environ() in a child's Env (it inherits the broker's environment); name each variable the child needs instead (cmd/agentosd ASSUMPTIONS L7-2):\n%s", strings.Join(inherit, "\n"))
 	}
 	for k := range envExempt {
 		if !seen[k] {
@@ -872,6 +888,11 @@ func TestEnvCheckCatchesAnInheritedEnvironment(t *testing.T) {
 		src(`s "syscall"`, `func f() { s.StartProcess("/x", nil, &s.ProcAttr{Dir: "/"}) }`),
 		src(`. "os"`, `func f() { StartProcess("/x", nil, (nil)) }`),
 		src(`"os"`, `func f() { a := &os.ProcAttr{}; a.Env = []string{}; os.StartProcess("/x", nil, &os.ProcAttr{Dir: "/"}) }`),
+		// An explicit nil Env is inheritance: exec.Cmd and os.StartProcess
+		// give the child the process's environment (L3 on #587).
+		src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = nil; c.Run() }`),
+		src(`"os/exec"`, `func f() { (&exec.Cmd{Path: "/x", Env: nil}).Run() }`),
+		src(`"os"`, `func f() { os.StartProcess("/x", nil, &os.ProcAttr{Env: (nil)}) }`),
 	} {
 		if noEnv, _ := check(c); len(noEnv) == 0 {
 			t.Errorf("missed:\n%s", c)
@@ -890,6 +911,9 @@ func TestEnvCheckCatchesAnInheritedEnvironment(t *testing.T) {
 		src(`u "golang.org/x/sys/unix"`, `func f(l *struct{ Env []string }) { l.Env = u.Environ() }`),
 		src(`"os"; "os/exec"`, `func f() { env := append(os.Environ(), "A=1"); c := exec.Command("x"); c.Env = env; c.Run() }`),
 		src(`"os"`, `func f() { e := os.Environ(); os.StartProcess("/x", nil, &os.ProcAttr{Env: e}) }`),
+		// (*exec.Cmd).Environ, the os/exec docs' way to add a variable,
+		// returns the process's environment while Env is nil (L3 on #587).
+		src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = append(c.Environ(), "A=1"); c.Run() }`),
 	} {
 		if _, inherits := check(c); len(inherits) == 0 {
 			t.Errorf("os.Environ() missed:\n%s", c)
@@ -899,7 +923,8 @@ func TestEnvCheckCatchesAnInheritedEnvironment(t *testing.T) {
 func g() { (&exec.Cmd{Path: "/x", Env: []string{}}).Run() }
 func h() { os.StartProcess("/x", nil, &os.ProcAttr{Env: []string{}}) }
 func i() { var a syscall.ProcAttr; a.Env = []string{"PATH=/bin"}; syscall.ForkExec("/x", nil, &a) }
-func j() { _ = os.Environ() }`)
+func j() { _ = os.Environ() }
+func k() { a := &os.ProcAttr{Env: []string{}}; os.StartProcess("/x", nil, a) }`)
 	if noEnv, inherits := check(ok); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v", noEnv, inherits)
 	}
