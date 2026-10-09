@@ -58,3 +58,4 @@ Release findings from Security 4a on #432 (SR3-8), S1 and S2 (`reviews/security/
 - **Order of work:** tests first. Run `python3 tools/risk_tier.py --git origin/main HEAD` before opening the PR.
 - **Review:** L3 on the strongest model with the threat check above, then the Potency lens (it raised the mutant class) and a Security section (OPERATING §3–4).
 - **Estimate and checkpoint:** about 80k tokens. This is a checkpoint, not a ceiling (OPERATING §5).
+- **Delivery notes (#578):** Identity is checked in `get` (an `ID` mismatch returns `errDamaged`), so `settle` also quarantines a mismatched artifact at completion. `openStore` and `list` skip names that fail `validID`, so a stray non-segment directory is now ignored rather than quarantined. Builder and intake syncs go through the seam with a nil hook, so existing fault traces are unchanged. `TestSyncsOnlyThroughSeam` pins the routing in the source.

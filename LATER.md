@@ -223,6 +223,12 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-5 p1 | Potency on #424 point 1: undo skips flag changes recorded under an older UID validity even when the Message-ID matches, so a provider rebuild makes a digest's label changes un-undoable; the watcher's identity digest (M12) could re-identify the message |
 | W3-forget-b2c l1 | UX on #427: with no agent, "when it runs again" means the next boot (the agent machine opens only at boot); STATUS's agent line should name that step |
 | W3-forget-b2c l2 | UX on #427: an owed take-back is journaled `succeeded` with evidence `owed: …`; once the digest renders journal outcomes it must not read as done |
+| W3-forget-reach l1 | Lens U1 on #569: `forgetAgentNotYet` ("not back to before that task yet") is also sent when the machines are already back and only recall's bookkeeping is unfinished, so it says less than is true; the wait has no bound and STATUS shows nothing, both scoped to W3-forget-b2c-f1 |
+| W3-forget-reach l2 | Lens U2 on #569: `agentBack` logs a failed owe and still sends `forgetAgentNotYet`, so after a restart the promise has no entry behind it; add to W3-forget-b2c-f1's bound-the-silence scope: show a failed owe on STATUS |
+| W3-forget-reach l3 | Lens L1 on #569: mutant P7 (`judgeAgent` drops an entry when recall is not known) is equivalent while `judgeAgent` runs only on recall's open; no test pins "two lineages, one `since`, one hook call" (reports are keyed by `since`) |
+| W3-forget-reach l4 | L3 L1 on #569: the no-hook `TakenBack` from `Retry` departs from a strict reading of RCH-3's "as today"; no product path reaches it, since `main.go` always sets the hook; carried by W3-forget-reach-r4 |
+| W3-forget-reach l5 | L3 L2 on #569: mutant N12 (`judgeAgent` keeps None entries) leaves only a stale owed entry; the test is carried by W3-forget-reach-r3 |
+| W3-forget-reach l6 | L3 L3 on #569: `broker/recalltool/service.go` was outside the brief's scope but needed for the pass-throughs; brief-gap: a brief that adds a `Reach` hook lists `service.go` |
 | SR3-2 l1 | UX/Potency on #428 (L3 later point): an authorized intent that never dispatches (held, no executor, fenced) holds its bound place with no age-out; note it in GR31 and let STATUS show it |
 | SR3-2 l2 | Security on #428, point 2: GR7 ("under a bound of 1 the second is asked") overstates, since concurrent `Authorize` calls are not seq-checked and both can be authorized, the second being refused at the dispatch recheck. Safe. Next time GR7 changes, add "or, if both are authorized at once, refused at the recheck" |
 | P2-2a f3 l1 | UX on #423, point 2: an owner who never answers is asked again at every check; after a few lapses the ask could move to the daily digest only (UPD-5) |
@@ -234,6 +240,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-4 l6 | UX on #434: name the ID the owner sent (`UNDO <short ID>`), or both, in the refusal text instead of only the release version. The signed UX and Potency records for #434 keep IDs A9, C25 and U16 (head 215deae); they were renumbered A10, C27 and U17 on merge |
 | SR3-6 l1 | Potency on #430, W5b wiring: a pending security fix dropped by a policy change and scheduled again by Loop 3 should keep its first-scheduled time for A7's 24-hour "no free moment" ask, so a policy change does not reset the clock |
 | SR3-7 l1 | L3 on #429: nested keys still last-win; an `n` check in `anthropic.go` is unreachable |
+| SR3-7-f1 l1 | Lens on #582 (comment 6079162578), point 4: the latest-first refund of unused attempt holds across buckets is unpinned; a mutation that refunds in another order survives |
+| SR3-7-f1 l2 | Lens on #582 (comment 6079162578), point 5: a failed stream's partial `OutputChars` charge (R14 applied to a failed attempt) is unpinned |
+| SR3-7-f1 l3 | Lens on #582 (comment 6079162578), point 7: the audit reason "the call's meter cannot cover another attempt" is shown for any refusal by the attempt hook, including non-meter causes |
+| SR3-7-f1 l4 | Lens on #582 (comment 6079162578), point 8: the owner is not told when the meter bound suppresses a failover |
 | SR3-8 l5 | UX on #432: repeated "lost its output N times; not built again" points at failing storage; if a box-health line ever reads disk faults, this log is one input |
 | W3-forget-b3 rr8 | UX on #425, point 1 (CAP-3, F3): a crash after the owner's YES and before the tombstone saves ends silently; reconcile marks the intent not applied and the owed entry is dropped untold. The owed file holds the date, so "Your task from <date> was not forgotten. Send FORGET to try again." would close it. Pre-existing, narrow window |
 | W3-forget-b3 rr9 | UX on #425, point 2: several owed texts after one restart go as separate texts; if forgets are ever owed in bulk, send one text listing the dates |
@@ -242,6 +252,11 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-8 l1 | L3 re-review on #432, point 1: once `CR-quarantine-prune` is on main, add to it that any pruning of `.quarantine` must keep the per-artifact loss count (e.g. a count file), since C14's `maxRepairs` bound is counted from the copies; fold this line into that row |
 | SR3-8 l2 | L3 re-review on #432, point 2: a job stopped by the repair bound is logged `failed: no result within the allowed attempts`; only the log line says its output was lost repeatedly. Text only |
 | SR3-8 l3 | L3 re-review on #432, point 3: no test pins the `<id>-<12 hex>` name check in `Store.losses`; a bare prefix match passes every test. Unreachable today (fixed-length broker-written IDs) |
+| SR3-8-f l1 | L3 3 on #578: `New`'s `errBadID` branch is unreachable and untested (kept as defence in depth); in `park` a new `parked/` is not synced into `cfg.Dir`, and source-directory sync errors in `finish`/`park` are ignored. Both predate #578 |
+| SR3-8-f l2 | L3 4 on #578: `Get` follows a symlinked name inside the store; exploiting it needs store write access. Likewise `quarantine` follows an in-root symlink: with `.quarantine -> b` (another artifact directory) the rename lands in `b/`; same precondition (L3 6079915313) |
+| SR3-8-f l3 | Security 4 on #578: the seam's source check matches only `Sync`; add `syscall.Fsync`, `unix.Fsync` and `Fdatasync` to `allowed` if the package ever imports them |
+| SR3-8-f l4 | L3 6079535268 point 3 on #578: `syncHit` matches only a literal op string, so a const op or a direct `s.fault` call slips past the AST check; the recorder tests carry the guarantee |
+| SR3-8-f l5 | L3 6079915313 on #578: after the rename, `dirSync(q)` opens `.quarantine` by path, not through the root; durability only, the rename itself stays confined |
 | W3-forget-b1-4 l1 | L3 on #436: `broker/change` TestRouterCandidateAdoptsThroughPipeline flakes (~2/10k; random split key); fix is a seeded Rand, proposed on #436 |
 | W3-forget-b1-4 l2 | #436: decoy dates may fall before box setup or enrolment |
 | W3-forget-b1-4 l3 | #436: "Never" wording for owners whose forgets predate the log |
@@ -377,7 +392,13 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P1-4-flake l4 | L3 4 and Security 4a 3 on #547 (pre-existing, since #391): a runsc crash at the deadline reaches callers as `TimedOut` with no output, not `ErrExecFailed`; the failure is visible only in `exec.log` |
 | P1-4-flake l5 | Potency 3 on #547 classed the soak row (P1-4-flake-soak) `later`; it rides P1-4-flake-counts in one package (coordinator, 2026-10-09), so the "don't start later rows" audit reads clean (#580 L3 8) |
 | P1-4-flake-ci l1 | #593 L3 2: `tools/fuzzrun.py` prints no `fuzzrun <pkg>:<target> chunk <k>` line when go's own `-timeout` fires; print one line for any non-zero exit |
+| P1-4-flake-soakcap l1 | #598 L3 1 (6080190167): `test_chunk_is_capped_at_four_times_the_previous`'s `n3 <= 4.5 * n2` assertion is vacuous (a 1 s budget limits chunk 3, not the cap); use a longer budget with a short `--chunk` so it bites |
+| P1-4-flake-soakcap l2 | #598 L3 2 (6080190167): the 4x cap also applies to ci.yml's 20 s budget (chunk 2 held to ~1.6 s after a ~0.4 s calibration, one or two extra chunks each with a warm build); watch the logged `over N chunks` and rates, and if it matters apply the cap only when the uncapped span exceeds a floor (e.g. 10 s) |
+| P1-4-flake-soakcap l3 | #598 L3 3 (6080190167): `tools/fuzzrun.py` docstring line 8 is 134 characters; reflow to the surrounding <=100-character lines (no lint enforces it) |
 | P1-4-flake-crashed l1 | #580 L3 6: `panic_test.go` and V32/V34 cite RES-4 (storage reserve, per-machine quota), which links to them only through `exec.log`'s rotation bound; re-cite these tests the next time they are touched |
+| P1-4-flake-crashed l2 | [#591 L3](https://github.com/ghbmrk/agentOS/pull/591#issuecomment-6079765306): the brief's `go test ./vm/gvisor -race -count=50` exceeds `go test`'s default 10 m `-timeout` (the package takes about 20 s a pass, so about 17 min), on main too; name `-timeout 60m` wherever that command is prescribed |
+| P1-4-flake-crashed l3 | [#591 UX/Potency L-a](https://github.com/ghbmrk/agentOS/pull/591#issuecomment-6079780946): if stray runsc stderr lines on a normal exec turn out common at a pinned-runsc bump (P1-4-flake-runsc-recheck), give "finished, output withheld" a sentinel of its own rather than `ErrExecFailed` |
+| P1-4-flake-crashed l4 | [#591 UX/Potency L-b](https://github.com/ghbmrk/agentOS/pull/591#issuecomment-6079780946): add `ctx.Err()` and whether the pid was written (started) to `logExec`'s header line, in the next package that touches `logExec` |
 | W5-Da l1 | M11 on #555: `Finish` accepts `TransportAccepted` without an evidence reference; require one when the sender exists |
 | W5-Da l2 | M3 on #555: the `Attempts >=` check in `Begin` repeats the `MaxAttempts` bound enforced in `Finish`; keep one |
 | W5-Da l3 | #555: `Evidence` is an unauthenticated opaque string, and Forget keeps association hashes in the dedupe state; settle both in the retention policy |
@@ -417,6 +438,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4b l6 | Security 4a and L3 deltas on #548: each round leaves one more `.agentos-tamper-<nonce>` marker file in a directory target that stays writable; bounded by rounds x targets while a High finding is open; cleanup is the owner's remediation |
 | P3-4b-4b l7 | L3 delta on #548: `loops.tamperNonce` (regexp) in `machine.go` is used only by tests; move it to the test file or use it to check `newTamperNonce`'s output |
 | P3-4b-4b l8 | Security 4a delta 1 on #548 (predates the fix; covered by release row P3-4b-4c-fresh): a probe guest that skips its scripted writes still closes an open tamper finding; if the probe image is ever shared with agent code, closing must need a broker-side write check (a canary the broker plants and verifies through the same mount) |
+| P3-4b-4c-tamper l1 | UX 1 on #584: a failed probe round reads "tamper tests, failed" with no cause (control unchanged, reused machine, quiesce); give `NotRun`/`ProbeFailed` a plain cause string as `cfg.NotRun` has |
+| P3-4b-4c-tamper l2 | UX 2 on #584: STATUS lines are third person ("Loop 2: ...") across loops; existing wording |
+| P3-4b-4c-tamper l3 | L3 4 on #584: `removeSiblings` ignores errors and `os.Stat`s through a symlink to choose the directory; log failed removals and use `Lstat` |
+| P3-4b-4c-tamper l4 | L3 5 and Potency 3 on #584: the gVisor test's control is the machine's whole upper layer; P3-4b-4c's wiring test should use a dedicated control mount and pin sibling removal |
 | SR3-5-f1 l1 | Delta L3 on #571 (comment 6078264771): a pin is never cleared for an intent that is denied or never dispatched; pins live in memory, so a restart drops them |
 | P3-4b-3r-pass l1 | L3 point 2 on #585: a check in `NotRun` (its `Box` input nil) still closes its open findings in `Pass` and now texts "Cleared"; not live while `GuardConfig` sets no `Box` (learn.go), one line to add `notes` to `broke` when it does |
 | P3-4b-3r-pass l2 | L3 point 3 on #585: loop7 `stepped` counts a step that only replayed a standing crash or reported an overrun as progress, so a box whose every target has an open finding never shows "have not run"; count only a step where the engine ran (F14) |
@@ -425,6 +450,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-2-f-started-wording | With 1 queued and 1 started under `PerDay: 2` the owner sees `1 earlier send still queued`, not the bound; consider a form such as `1 of 2 today still queued` (UX lens on #581, comment 6078894198) |
 | SR3-2-f-max-rule | The queued count is the maximum over the failed rules, not the rule the owner would widen; differs only with several bound rules on one action (UX lens on #581, comment 6078894198) |
 | SR3-2-f-maxnoted | No test pins the `maxNoted` (1000) boundary where a restart closes the ask as changed; add one with 1001 queued or a lowered constant. A second shown-only fact goes into a separate `owner.Item` field (GR33), not `Detail` (Potency lens on #581, comment 6078894198) |
+| SR3-6f-1 l1 | `TestOwnerNarrowingSurvivesTheNextCheck`'s `r.p.proposed()[1:]` loop may check nothing, because version 2 was already proposed; the `old.Security()` assertion carries the test. Tighten it when the file is next touched (L3 on #595, comment 6080096018, point 3) |
+| SR3-6f-1 l2 | The `attestors` failure line gives the owner no step or time, and it sits above the pending-approval lines in `statusLocked`, so a security fix waiting for approval is not shown while the read fails; unlike a mirror failure it can persist. Revisit when W5b adds the settings page (UX and Potency lens on #595, comment 6080136904, point 3) |
+| SR3-6f-1 l3 | Make "trusted testers" (the `attestors` failure line) and "attestor" (`forkAsks`) match the label the settings page uses once W5b names it; `ownertext_test.go` covers only the finding texts (UX and Potency lens on #595, comment 6080136904, point 4) |
 
 ## Reuse candidates
 | ID | Component | Why |

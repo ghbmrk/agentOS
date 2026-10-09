@@ -127,6 +127,20 @@ class FuzzrunTest(unittest.TestCase):
         self.assertNotIn("timeout", (p.stdout + p.stderr).lower())
         self.assertGreaterEqual(len(f.argv()), 2)
 
+    def test_chunk_is_capped_at_four_times_the_previous(self):
+        # calibration runs 0.1 s; with 1 s of budget and a 5 s chunk limit, chunk 2 is held to
+        # about 4 x 0.1 s = 400 execs (uncapped it would be about 900), re-measuring the rate first
+        f = self.fake(FAKE_RATE=1000)
+        p = f.run(*COMMON, "--budget", "1s", "--chunk", "5s")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        calls = f.argv()
+        self.assertEqual(fuzztime(calls[0]), "100x")
+        n2 = int(fuzztime(calls[1])[:-1])
+        self.assertTrue(300 <= n2 <= 450, n2)
+        self.assertGreaterEqual(len(calls), 3)
+        n3 = int(fuzztime(calls[2])[:-1])
+        self.assertLessEqual(n3, 4.5 * n2)
+
     def test_rate_is_logged(self):
         f = self.fake()
         summary = f.dir / "summary.md"

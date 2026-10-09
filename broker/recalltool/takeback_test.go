@@ -176,7 +176,9 @@ func (s *failAfter) Append(line []byte) error {
 
 // #327 L3 re-review blocker: with provenance writes failing after the owed
 // mark, a take-back whose machines went back is still never repeated, and
-// the owner is not told it again and again.
+// the owner is not told it again and again. Since RCH-2 its unrecorded
+// reset stays owed, and Retry says so, rather than being dropped; it is
+// not told done while it is (RCH-1).
 func TestCAP3ATakeBackIsNotRepeatedWhenItsMarksCannotBeWritten(t *testing.T) {
 	x, read := newReachRig(t)
 	x.r.prov.store = &failAfter{MemStore: x.r.prst, n: 1}
@@ -184,12 +186,12 @@ func TestCAP3ATakeBackIsNotRepeatedWhenItsMarksCannotBeWritten(t *testing.T) {
 		t.Fatalf("take-back: %v machines %v", err, x.vm.calls)
 	}
 	for i := 0; i < 3; i++ {
-		if err := x.reach.Retry(context.Background()); err != nil {
-			t.Fatal(err)
+		if err := x.reach.Retry(context.Background()); !errors.Is(err, errUnrecorded) {
+			t.Fatalf("retry %d: %v", i, err)
 		}
 	}
-	if len(x.vm.calls) != 1 || len(x.told) > 1 || x.reach.Owed() {
-		t.Fatalf("repeated: machines %v told %v owed %v", x.vm.calls, x.told, x.reach.Owed())
+	if st, _ := x.reach.TakeBackOf(read); len(x.vm.calls) != 1 || len(x.told) != 0 || !x.reach.Owed() || st != TakeBackOwed {
+		t.Fatalf("repeated: machines %v told %v owed %v state %v", x.vm.calls, x.told, x.reach.Owed(), st)
 	}
 	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
 		t.Fatalf("again: %v machines %v", err, x.vm.calls)
@@ -252,5 +254,335 @@ func TestCAP3HandledSeesARecordedTakeBack(t *testing.T) {
 	}
 	if handled, ok := l.Handled(read); !ok || !handled {
 		t.Fatalf("done: %v %v", handled, ok)
+	}
+}
+
+// failOnly fails the appends whose 1-based numbers are in fail (a write
+// lost to a transient error), and accepts the rest.
+type failOnly struct {
+	*recall.MemStore
+	n    int
+	fail map[int]bool
+}
+
+func (s *failOnly) Append(line []byte) error {
+	s.n++
+	if s.fail[s.n] {
+		return errors.New("write failed")
+	}
+	return s.MemStore.Append(line)
+}
+
+// W3-forget-reach RCH-1 (brief IDs; CAP-3 is marked at the top).
+// A take-back's state from its time, on any lineage: not recorded, owed
+// (recorded, or the machines back with the reset's reach unfinished), done
+// (machines back, reset recorded and finished), and not known before
+// recall opens (as Handled). Security 4a on #541, P2: an unfinished reset
+// is owed, not done.
+func TestRCH1TakeBackStateIsDoneOnlyOnceItsReachIsFinished(t *testing.T) {
+	x, read := newReachRig(t)
+	var l LateExecutor
+	if _, ok := l.TakeBackOf(read); ok {
+		t.Fatal("known before recall opens")
+	}
+	l.Set(x.reach)
+	if st, ok := l.TakeBackOf(read); !ok || st != TakeBackNone {
+		t.Fatalf("before the take-back: %v %v", st, ok)
+	}
+	// Recorded, machines busy: owed, across a restart.
+	x.vm.fail = errors.New("machine busy")
+	if err := l.TakeBack(context.Background(), "root", read, true); !errors.Is(err, ErrCarried) {
+		t.Fatalf("take-back: %v", err)
+	}
+	again, err := OpenProvenance(x.r.prst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.reach.Prov = again
+	if st, _ := l.TakeBackOf(read); st != TakeBackOwed {
+		t.Fatalf("recorded: %v", st)
+	}
+	// Machines back, reach unfinished (an intent in flight): owed.
+	x.vm.fail = nil
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.j.inFlight["late"] = true
+	if err := x.reach.Retry(context.Background()); err == nil {
+		t.Fatal("an intent in flight must keep the reach unfinished")
+	}
+	if len(x.vm.calls) != 1 {
+		t.Fatalf("machines %v", x.vm.calls)
+	}
+	if st, _ := l.TakeBackOf(read); st != TakeBackOwed {
+		t.Fatalf("an unfinished reset reads %v, not owed", st)
+	}
+	if st, _ := l.TakeBackOf(read.Add(time.Nanosecond)); st != TakeBackNone {
+		t.Fatalf("another task's time: %v", st)
+	}
+	x.j.inFlight["late"] = false
+	if err := x.reach.Retry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := l.TakeBackOf(read); st != TakeBackDone {
+		t.Fatalf("finished: %v", st)
+	}
+	again, err = OpenProvenance(x.r.prst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.reach.Prov = again
+	if st, _ := l.TakeBackOf(read); st != TakeBackDone {
+		t.Fatalf("finished, after a restart: %v", st)
+	}
+}
+
+// W3-forget-reach RCH-1 (brief IDs; CAP-3 is marked at the top).
+// A take-back not approved (no work to lose) is done only once its reach
+// is: its state is what agentBackWithoutAsking's done text reads (RCH-5).
+func TestRCH1AnUnaskedTakeBackIsDoneOnlyOnceFinished(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	x.j.inFlight["late"] = true
+	if err := x.reach.TakeBack(context.Background(), "root", read, false); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := x.reach.TakeBackOf(read); st != TakeBackOwed {
+		t.Fatalf("unfinished: %v", st)
+	}
+	x.j.inFlight["late"] = false
+	if err := x.reach.Retry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := x.reach.TakeBackOf(read); st != TakeBackDone {
+		t.Fatalf("finished: %v", st)
+	}
+	y, read2 := newReachRig(t)
+	if err := y.reach.TakeBack(context.Background(), "root", read2, false); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := y.reach.TakeBackOf(read2); st != TakeBackDone {
+		t.Fatalf("finished at once: %v", st)
+	}
+}
+
+// W3-forget-reach RCH-1, RCH-2 (brief IDs; CAP-3 is marked at the top).
+// Machines back but the reset not recorded (errUnrecorded): owed, not
+// done; a later Retry records the reset and finishes its reach without
+// resetting the machines again (#327 L3 1), in this run or after a
+// restart once the back mark is on disk.
+func TestRCH2AnUnrecordedResetIsCarriedToDoneWithoutARepeat(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		x, read := newReachRig(t)
+		x.j.submitted["late"] = read.Add(time.Second)
+		// Appends: 1 the owed mark, 2 the reset (fails), 3 the back mark.
+		st := &failOnly{MemStore: x.r.prst, fail: map[int]bool{2: true}}
+		x.r.prov.store = st
+		if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil {
+			t.Fatalf("restart %v: machines back: %v", restart, err)
+		}
+		if s, _ := x.reach.TakeBackOf(read); s != TakeBackOwed || !x.reach.Owed() {
+			t.Fatalf("restart %v: unrecorded reset reads %v, owed %v", restart, s, x.reach.Owed())
+		}
+		if x.j.erased["late"] {
+			t.Fatal("reach finished without a recorded reset")
+		}
+		if restart {
+			again, err := OpenProvenance(x.r.prst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again.store = st
+			x.reach.Prov = again
+			if s, _ := x.reach.TakeBackOf(read); s != TakeBackOwed {
+				t.Fatalf("after a restart: %v", s)
+			}
+		}
+		if err := x.reach.Retry(context.Background()); err != nil {
+			t.Fatalf("restart %v: Retry: %v", restart, err)
+		}
+		if len(x.vm.calls) != 1 || !x.j.erased["late"] || x.reach.Owed() {
+			t.Fatalf("restart %v: machines %v erased %v owed %v", restart, x.vm.calls, x.j.erased, x.reach.Owed())
+		}
+		if s, _ := x.reach.TakeBackOf(read); s != TakeBackDone {
+			t.Fatalf("restart %v: recorded and finished: %v", restart, s)
+		}
+		if len(x.told) != 1 || x.told[0] != TakenBack {
+			t.Fatalf("restart %v: told %v", restart, x.told)
+		}
+		again, err := OpenProvenance(x.r.prst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		x.reach.Prov = again
+		if s, _ := x.reach.TakeBackOf(read); s != TakeBackDone {
+			t.Fatalf("restart %v: done lost by a restart: %v", restart, s)
+		}
+		if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
+			t.Fatalf("restart %v: again: %v machines %v", restart, err, x.vm.calls)
+		}
+	}
+}
+
+// W3-forget-reach RCH-3 (brief IDs; CAP-3 is marked at the top).
+// The caller can own the done text: with OnTakenBack set, Retry reports a
+// take-back it finished to it and tells the owner nothing; unset, it
+// tells TakenBack. Either way one per take-back, across TakeBack (which
+// tells nothing) and every Retry, and none for one TakeBack finished.
+func TestRCH3RetryReportsAFinishedTakeBackToTheCallerOnce(t *testing.T) {
+	for _, hook := range []bool{false, true} {
+		x, read := newReachRig(t)
+		type rep struct {
+			lineage string
+			since   time.Time
+		}
+		var reps []rep
+		if hook {
+			x.reach.OnTakenBack = func(l string, s time.Time) {
+				if st, _ := x.reach.TakeBackOf(s); st != TakeBackDone {
+					t.Errorf("reported before done: %v", st)
+				}
+				reps = append(reps, rep{l, s})
+			}
+		}
+		x.j.submitted["late"] = read.Add(time.Second)
+		x.j.inFlight["late"] = true
+		if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil {
+			t.Fatal(err)
+		}
+		_ = x.reach.Retry(context.Background()) // still in flight
+		x.j.inFlight["late"] = false
+		for i := 0; i < 2; i++ {
+			if err := x.reach.Retry(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		texts := len(x.told)
+		if hook {
+			if texts != 0 || len(reps) != 1 || reps[0].lineage != "root" || !reps[0].since.Equal(read) {
+				t.Fatalf("hook: told %v reported %v", x.told, reps)
+			}
+		} else if texts != 1 || x.told[0] != TakenBack {
+			t.Fatalf("no hook: told %v", x.told)
+		}
+		// Finished by TakeBack itself: Retry reports nothing.
+		later := read.Add(time.Minute)
+		if err := x.reach.TakeBack(context.Background(), "root", later, true); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := x.reach.TakeBackOf(later); st != TakeBackDone {
+			t.Fatalf("finished by TakeBack: %v", st)
+		}
+		if err := x.reach.Retry(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if len(x.told) != texts || hook && len(reps) != 1 {
+			t.Fatalf("hook %v: a take-back TakeBack finished was reported: told %v reported %v", hook, x.told, reps)
+		}
+	}
+}
+
+// W3-forget-reach RCH-3 and RCH-4 (brief IDs; CAP-3 is marked at the top).
+// #569 B1 (L3, Security 4a, Lens): a take-back left owed whose reset a
+// deletion's reach finishes, at once or later from Retry's pending
+// deletions, is still reported once, and Retry stays owed until it is.
+// #569 Security R5: with only root holding the deleted item, no other
+// lineage's settle runs first to watch the take-back.
+func TestRCH3ATakeBackADeletionFinishesIsReportedOnce(t *testing.T) {
+	for _, only := range []bool{false, true} {
+		for _, pending := range []bool{false, true} {
+			for _, hook := range []bool{false, true} {
+				x, read := newReachRig(t)
+				var reps []time.Time
+				if hook {
+					x.reach.OnTakenBack = func(_ string, s time.Time) { reps = append(reps, s) }
+				}
+				x.j.submitted["late"] = read.Add(time.Second)
+				x.j.inFlight["late"] = true
+				if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil {
+					t.Fatal(err)
+				}
+				if st, _ := x.reach.TakeBackOf(read); st != TakeBackOwed {
+					t.Fatalf("in flight: %v", st)
+				}
+				var early string
+				for _, id := range x.r.prov.Of("root") {
+					if x.r.prov.Holders(id)["root"].Before(read) {
+						early = id
+					}
+				}
+				if early == "" {
+					t.Fatal("no item given before the read")
+				}
+				if only {
+					early = x.mail
+				}
+				if hs := x.r.prov.Holders(early); len(hs) != 1 && only || len(hs) < 2 && !only {
+					t.Fatalf("only %v: holders %v", only, hs)
+				}
+				if !pending {
+					x.j.inFlight["late"] = false
+				}
+				x.clock = x.clock.Add(time.Minute)
+				if _, err := x.r.ix.Delete(early); (err != nil) != pending || !x.r.ix.Deleted(early) {
+					t.Fatalf("only %v pending %v: delete: %v", only, pending, err)
+				}
+				x.j.inFlight["late"] = false
+				if !pending {
+					if st, _ := x.reach.TakeBackOf(read); st != TakeBackDone {
+						t.Fatalf("deletion did not finish the take-back: %v", st)
+					}
+				}
+				if !x.reach.Owed() {
+					t.Fatalf("only %v pending %v hook %v: report not owed, so Service would not run Retry", only, pending, hook)
+				}
+				for i := 0; i < 3; i++ {
+					_ = x.reach.Retry(context.Background())
+				}
+				if st, _ := x.reach.TakeBackOf(read); st != TakeBackDone {
+					t.Fatalf("not done: %v", st)
+				}
+				n := 0
+				for _, s := range x.told {
+					if s == TakenBack {
+						n++
+					}
+				}
+				if hook && (len(reps) != 1 || !reps[0].Equal(read) || n != 0) || !hook && n != 1 {
+					t.Fatalf("only %v pending %v hook %v: reported %v told %v", only, pending, hook, reps, x.told)
+				}
+				if x.reach.Owed() {
+					t.Fatalf("only %v pending %v hook %v: still owed once reported", only, pending, hook)
+				}
+			}
+		}
+	}
+}
+
+// W3-forget-reach RCH-2 (brief IDs; CAP-3 is marked at the top).
+// An unrecorded reset kept by MarkBack survives a compaction and a
+// reopen, so Retry still finishes it.
+func TestRCH2AnUnrecordedResetSurvivesACompaction(t *testing.T) {
+	st := &recall.MemStore{}
+	p, err := OpenProvenance(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	rs := Reset{Since: t0, At: t0.Add(2 * time.Minute), Until: t0.Add(150 * time.Second)}
+	if err := p.MarkBack("l", rs); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.compact(); err != nil {
+		t.Fatal(err)
+	}
+	p2, err := OpenProvenance(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs := p2.Backs()
+	if len(bs) != 1 || bs[0].Lineage != "l" || !bs[0].Since.Equal(t0) || !bs[0].At.Equal(rs.At) || !bs[0].Until.Equal(rs.Until) {
+		t.Fatalf("backs after reopen: %+v", bs)
+	}
+	if s := p2.TakeBackOf(t0); s != TakeBackOwed {
+		t.Fatalf("state after reopen: %v", s)
 	}
 }

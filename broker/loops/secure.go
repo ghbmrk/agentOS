@@ -348,6 +348,9 @@ type Record struct {
 	// Replay is the passing replay that closed a fuzz or probe finding
 	// (Resolve).
 	Replay *Replay `json:"replay,omitempty"`
+	// Closure is the good fuzz step that closed a hang finding
+	// (CloseTarget), which replayed no stored input.
+	Closure *Closure `json:"closure,omitempty"`
 	// Told marks a reported finding's owner text as sent, so a resume
 	// after a crash sends a text not yet sent, and only that (P3-4b-1b
 	// item 3).
@@ -1478,6 +1481,9 @@ func findingText(f Finding) string {
 	case CheckSeeded:
 		return "Security test " + sub + " fails on my current setup."
 	case CheckFuzz:
+		if hangDetail(f.Detail) {
+			return "My self-test of " + plainSubject(f) + " stopped responding to a test input. The fix comes with an update."
+		}
 		return "My self-test found a crash in " + plainSubject(f) + ". The fix comes with an update."
 	case CheckProbe:
 		return "My self-test of " + plainSubject(f) + " failed. The fix comes with an update."
@@ -1567,11 +1573,25 @@ func ownStep(f Finding) bool {
 // clearedLine tells the owner a texted finding cleared: a pause it caused
 // stays until they resume it; otherwise nothing more is needed.
 func clearedLine(r Record) string {
+	what := clearedWhat(r.Finding)
 	if r.Contained == "paused" {
 		return fmt.Sprintf("Cleared: %s. %s stays paused until you resume it on my Wi-Fi page.",
-			plainSubject(r.Finding), capFirst(label(r.Finding.Contain)))
+			what, capFirst(label(r.Finding.Contain)))
 	}
-	return "Cleared: " + plainSubject(r.Finding) + ". Nothing more is needed from you."
+	return "Cleared: " + what + ". Nothing more is needed from you."
+}
+
+// clearedWhat is what a cleared line says cleared: for a fuzz finding,
+// the crash or the hang, so the line is never ambiguous with another
+// finding on the same plain name still open (L3 on #586 point 1).
+func clearedWhat(f Finding) string {
+	switch {
+	case f.Check == CheckFuzz && hangDetail(f.Detail):
+		return plainSubject(f) + " responds to test inputs again"
+	case f.Check == CheckFuzz:
+		return "the crash in " + plainSubject(f)
+	}
+	return plainSubject(f)
 }
 
 // digestCap is how many open-finding lines the digest shows.
