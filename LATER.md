@@ -321,6 +321,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b2c-f1 l1 | L3 delta on #553: the f1 brief still calls its lint "CH-12-lint" (F1-5, Sources); it should say UX-182-3-lint; reword when f1 next touches its brief |
 | W3-forget-b2c-f3 l3 | UX/Potency 3 on #559: F3-3 hand-builds the restored log line and takes only `goal` and `at` from the fake, so nothing pins that the real appender's output for `logForget(goal, time.Time{}, false)` parses back through `readRestoredForgets`; add the round-trip with the real vault-written log in b1-5, where `forgetLog` stops being nil |
 | W3-forget-b2c-f3 l4 | UX/Potency 4 on #559: no single test runs `retry` to a finished forget and then replays a restored backup; F3-1 and F3-3 each pin one half. Add the end-to-end case when this path is next touched |
+| W3-forget-b2c-f3 l5 | Security 4a L1 on #559 (pre-existing, ASSUMPTIONS R1): on the done path the tombstone-to-append window spans `agentBackWithoutAsking` (a network take-back), not one write; a crash there plus a restore before the next start loses the forget. Append `agent=false` right after the tombstone and let the take-back's `agent=true` entry follow (replay is idempotent) |
 
 ## Reuse candidates
 | ID | Component | Why |
