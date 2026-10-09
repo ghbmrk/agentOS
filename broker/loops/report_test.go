@@ -351,7 +351,8 @@ func TestReportRunsTheChainInOrder(t *testing.T) {
 }
 
 // LOOP-9, per severity: a Low finding that pauses nothing goes only to
-// the digest; a High one is texted once, urgent unless it is an expiry.
+// the digest; a High one is texted once, urgent only when its line names
+// a step (P3-4b-3c): with nothing paused, it says nothing is needed.
 func TestReportNoticeFollowsSeverity(t *testing.T) {
 	r := newReportRig(t, nil)
 	f := seedFinding()
@@ -366,7 +367,7 @@ func TestReportNoticeFollowsSeverity(t *testing.T) {
 	f = seedFinding()
 	f.Subject, f.Contain = "other-route", nil
 	r.report(t, f)
-	if len(r.texts) != 1 || !r.urgent[0] || r.texts[0] != "Security checks: Security test other-route fails on my current setup." {
+	if len(r.texts) != 1 || r.urgent[0] || r.texts[0] != "Security checks: Security test other-route fails on my current setup. Nothing is paused and nothing is needed from you." {
 		t.Fatalf("texts %q urgent %v", r.texts, r.urgent)
 	}
 }
