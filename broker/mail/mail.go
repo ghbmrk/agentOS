@@ -171,12 +171,15 @@ type Config struct {
 	// 200). Past it the owner is asked once; while that ask is open or
 	// after a NO, the rest are held, and a YES lifts the bound for the
 	// day up to DailyCeiling (default 2000), past which each is asked.
-	// Authorized returns the intents on this account with action that the
-	// journal authorized since then (journal.Engine.AuthorizedSince), so
-	// the count survives restarts.
+	// InUse returns the intents with action that hold a place under the
+	// bound counted from since (journal.Engine.InUse for this account):
+	// authorized or in flight whatever their age, and dispatched since
+	// then (SR3-2-f1). The count is the journal's, so it survives restarts
+	// and a queue released long after its authorization. Nil: every
+	// organize effect is asked.
 	DailyLimit   int
 	DailyCeiling int
-	Authorized   func(action string, since time.Time) []journal.Intent
+	InUse        func(action string, since time.Time) []journal.Use
 
 	// Contacts reports whether addr is in the owner's contacts, read from
 	// the source (CH-10's existence rule for ADP-11 thread starters). Nil:
@@ -211,6 +214,20 @@ type Adapter struct {
 	mu       sync.Mutex
 	reserved map[string]time.Time // organize bound places not yet in the journal
 	over     overAsk              // the open "past today's bound" ask
+	pins     map[string][]pin     // by intent: what Escalate judged since the last Execute (SR3-5-f1)
+	judged   map[string]pin       // by intent and attempt: an unknown attempt's pin, for Reconcile
+}
+
+// pin is what Escalate judged of an organize intent: the message it
+// planned on, the folder the plan moves it to, and whether the call
+// escalated hiding an alert (SR3-5-f1a). Execute acts only on that
+// message, only when every judgement since the last Execute agrees on
+// it, and only hides an alert they escalated.
+type pin struct {
+	ref   Ref
+	to    string
+	alert bool
+	at    time.Time
 }
 
 // overAsk is the one intent asked past the day's bound, and when.
@@ -246,7 +263,8 @@ func New(cfg Config) (*Adapter, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true, selfKey(addr): true}, alias: map[string]bool{}, reserved: map[string]time.Time{}}
+	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true, selfKey(addr): true}, alias: map[string]bool{}, reserved: map[string]time.Time{},
+		pins: map[string][]pin{}, judged: map[string]pin{}}
 	for _, x := range cfg.Aliases {
 		if c, ok := canon(x); ok {
 			a.self[c], a.self[selfKey(c)], a.alias[c] = true, true, true

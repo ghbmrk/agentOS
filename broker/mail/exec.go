@@ -16,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/verb"
 )
 
 var _ journal.Executor = (*Adapter)(nil)
@@ -68,10 +69,35 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 	case OpDeliver:
 		return a.deliver(ctx, in, attempt, p)
 	}
+	// An organize acts only when every Escalate since the last Execute
+	// judged the same message and agreed on whether hiding it escalated,
+	// acts only on that message, and hides an alert only if they
+	// escalated it (SR3-5-f1a). The judgements are consumed whatever
+	// happens, so another attempt is judged again by its own recheck.
+	pn, pinned := pin{}, true
+	if o.Verb == verb.Organize {
+		pn, pinned = a.takePin(in.ID)
+	}
 	pl, err := a.planOrganize(ctx, o, p)
 	if err != nil {
 		return notApplied(err)
 	}
+	if o.Verb == verb.Organize && (!pinned || pl.msg.Ref() != pn.ref || pl.hides && pl.alert && !pn.alert) {
+		return notApplied(errChanged)
+	}
+	out := a.organize(ctx, o, pl)
+	if o.Verb == verb.Organize && out.Result == journal.ResultUnknown {
+		a.keepJudged(in.ID, attempt, pn)
+	}
+	return out
+}
+
+// errChanged: the message an organize would act on is not the one its
+// approval judged, or now hides an alert the approval did not escalate.
+var errChanged = errors.New("mail: changed since approval")
+
+// organize performs a planned organize, trash or spam effect.
+func (a *Adapter) organize(ctx context.Context, o Op, pl plan) journal.Outcome {
 	ch := Change{Op: o.Name, Record: pl.msg.MessageID, Sender: pl.msg.From, From: pl.msg.Folder,
 		Validity: pl.msg.Validity, UID: pl.msg.UID, Before: sorted(pl.msg.Flags), Alert: pl.alert && !pl.hides}
 	// Each mutation acts on the message planOrganize read and guarded,
@@ -146,6 +172,21 @@ func (a *Adapter) Reconcile(ctx context.Context, in journal.Intent, attempt int)
 	if err != nil {
 		return unknown(err)
 	}
+	if o.Verb == verb.Organize {
+		// Reconcile judges the message the attempt was pinned to, and
+		// never reports as done hiding an alert that no judgement
+		// escalated: without a pin (a restart) that is unknown, never a
+		// fresh Execute (SR3-5-f1b).
+		pn, pinned := a.takeJudged(in.ID, attempt)
+		if pinned && pl.msg.Ref() != pn.ref {
+			if err := a.movedFrom(ctx, pn, pl.msg); err != nil {
+				return unknown(err)
+			}
+		}
+		if o.Hides && pl.alert && !(pinned && pn.alert) {
+			return unknown(errChanged)
+		}
+	}
 	done := pl.to == "" || pl.to == pl.msg.Folder
 	for _, f := range pl.add {
 		done = done && has(pl.msg.Flags, f)
@@ -158,6 +199,23 @@ func (a *Adapter) Reconcile(ctx context.Context, in journal.Intent, attempt int)
 			Validity: pl.msg.Validity, UID: pl.msg.UID, Reconciled: true})
 	}
 	return notApplied(errors.New("mail: the message is not in the state the effect sets"))
+}
+
+// movedFrom checks that m, found by Message-ID, can be the pinned
+// message after its move: it is in the pinned target, and the pinned Ref
+// no longer holds a message.
+func (a *Adapter) movedFrom(ctx context.Context, pn pin, m Message) error {
+	if pn.to == "" || m.Folder != pn.to {
+		return errChanged
+	}
+	ms, err := a.cfg.Store.Fetch(ctx, pn.ref.Folder, pn.ref.Validity, []uint32{pn.ref.UID})
+	if err != nil {
+		return err
+	}
+	if len(ms) > 0 {
+		return errChanged
+	}
+	return nil
 }
 
 func (a *Adapter) draft(ctx context.Context, in journal.Intent, attempt int, p map[string]string) journal.Outcome {
