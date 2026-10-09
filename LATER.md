@@ -467,6 +467,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4d l5 | Potency on #556: the label route's stall under a permissive `labelClass` is bounded at 30 s but its cause (imapsmtp SetFlags) is undiagnosed |
 | P3-4b-4d l6 | L3 on #556: a production `Relay` should report a route timeout as its own error class, not as a generic route failure; P3-4b-4c |
 | P3-4b-4d l7 | L3 on #556: no test pins the `ok` check in the rig's `requested()` (relaxing it survives, since every replayed want is non-empty); add a guest that omits the key if a test needs it |
+| P3-4b-4e l1 | ADP-11 in the replay rig: a thread started by a contact meeting CH-10 is not reached (the rig's starter is the owner's Sent copy) |
+| P3-4b-4e l2 | ADP-11 in the replay rig: a queued reply's release after its undo window is not reached (the rig cancels each one; no replayed text is released) |
+| P3-4b-4e l3 | The commitment filter's control is a stand-in queue matching nothing, since `owner.Commitments` can only add patterns; a partial weakening (the first line only, say) would report per-item findings, as the code filter's control does |
 | P3-4b-4c-corpus l1 | UX on #589: the corpus finding text ("My self-test of the code filter failed: …Nothing real was exposed.") gives no next step; add the fuzz and probe lines' "The fix comes with an update." |
 | P3-4b-4c-corpus l2 | UX on #589: the `ProbeFailed` STATUS line ("Loop 2: partial (not run: attack-text tests, failed).") says neither why nor what to do; say the tests did not run, nothing is needed, and when they retry, if that is the true behaviour |
 | P3-4b-4c-corpus l3 | UX on #589: only 2 of the 4 closed checks run in agentosd (agentosd LC-2), and a clean day shows nothing, which can read as "all attack-text tests ran"; say what is not run, for example through `cfg.NotRun`, as for the other unwired probes |
