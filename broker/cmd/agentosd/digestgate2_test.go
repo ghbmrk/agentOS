@@ -15,9 +15,10 @@ import (
 )
 
 // bootOrder checks main's source order: `go dg.run` comes after the one
-// `lp.attach`, so the forget owner's replay reaches the digest before its
-// first send (CAP-3, OP-2). Moving the start above the attach compiles and
-// passes every behavior test, so the order is pinned here.
+// `lp.attach`, and the one `wireDigest` comes before both, so the forget
+// owner's replay and the tombstone replay at open reach the digest before
+// its first send (CAP-3, OP-2). Either misorder compiles and passes every
+// behavior test, so the order is pinned here.
 func bootOrder(src string) []string {
 	f, err := parser.ParseFile(token.NewFileSet(), "main.go", src, 0)
 	if err != nil {
@@ -32,12 +33,14 @@ func bootOrder(src string) []string {
 	if mainFn == nil {
 		return []string{"no func main"}
 	}
-	var attaches, runs []token.Pos
+	var attaches, runs, wires []token.Pos
 	ast.Inspect(mainFn.Body, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CallExpr:
 			if s, ok := n.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "attach" && isIdent(s.X, "lp") {
 				attaches = append(attaches, n.Pos())
+			} else if ok && s.Sel.Name == "wireDigest" {
+				wires = append(wires, n.Pos())
 			}
 		case *ast.GoStmt:
 			if s, ok := n.Call.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "run" && isIdent(s.X, "dg") {
@@ -46,13 +49,21 @@ func bootOrder(src string) []string {
 		}
 		return true
 	})
-	if len(attaches) != 1 || len(runs) != 1 {
-		return []string{fmt.Sprintf("main has %d lp.attach and %d go dg.run, want 1 and 1", len(attaches), len(runs))}
+	if len(attaches) != 1 || len(runs) != 1 || len(wires) != 1 {
+		return []string{fmt.Sprintf("main has %d lp.attach, %d go dg.run and %d wireDigest, want 1, 1 and 1",
+			len(attaches), len(runs), len(wires))}
 	}
+	var bad []string
 	if runs[0] < attaches[0] {
-		return []string{"go dg.run starts before lp.attach"}
+		bad = append(bad, "go dg.run starts before lp.attach")
 	}
-	return nil
+	if wires[0] > attaches[0] {
+		bad = append(bad, "wireDigest comes after lp.attach")
+	}
+	if wires[0] > runs[0] {
+		bad = append(bad, "wireDigest comes after go dg.run")
+	}
+	return bad
 }
 
 // REQ: CAP-3, OP-2
@@ -66,17 +77,21 @@ func TestDigestRunStartsAfterTheOwnerAttach(t *testing.T) {
 	}
 	const pre = "package main\nfunc main() {\n"
 	for name, body := range map[string]string{
-		"run above attach":  "go dg.run(ctx)\nlp.attach(ctx, d)\n",
-		"run above fs":      "go dg.run(ctx)\nfs.attach(ctx, d)\nlp.attach(ctx, d)\n",
-		"run dropped":       "lp.attach(ctx, d)\n",
-		"attach dropped":    "go dg.run(ctx)\n",
-		"run started twice": "lp.attach(ctx, d)\ngo dg.run(ctx)\ngo dg.run(ctx)\n",
+		"run above attach":  "lp.forgetOwner.wireDigest(dg, g)\ngo dg.run(ctx)\nlp.attach(ctx, d)\n",
+		"run above fs":      "lp.forgetOwner.wireDigest(dg, g)\ngo dg.run(ctx)\nfs.attach(ctx, d)\nlp.attach(ctx, d)\n",
+		"run dropped":       "lp.forgetOwner.wireDigest(dg, g)\nlp.attach(ctx, d)\n",
+		"attach dropped":    "lp.forgetOwner.wireDigest(dg, g)\ngo dg.run(ctx)\n",
+		"wire after run":    "lp.attach(ctx, d)\ngo dg.run(ctx)\nlp.forgetOwner.wireDigest(dg, g)\n",
+		"wire after attach": "lp.attach(ctx, d)\nlp.forgetOwner.wireDigest(dg, g)\ngo dg.run(ctx)\n",
+		"wire dropped":      "lp.attach(ctx, d)\ngo dg.run(ctx)\n",
+		"wire twice":        "lp.forgetOwner.wireDigest(dg, g)\nlp.forgetOwner.wireDigest(dg, g)\nlp.attach(ctx, d)\ngo dg.run(ctx)\n",
+		"run started twice": "lp.forgetOwner.wireDigest(dg, g)\nlp.attach(ctx, d)\ngo dg.run(ctx)\ngo dg.run(ctx)\n",
 	} {
 		if len(bootOrder(pre+body+"}\n")) == 0 {
 			t.Errorf("%s: not caught", name)
 		}
 	}
-	if bad := bootOrder(pre + "fs.attach(ctx, d)\nlp.attach(ctx, d)\ngo dg.run(ctx)\n}\n"); len(bad) != 0 {
+	if bad := bootOrder(pre + "lp.forgetOwner.wireDigest(dg, g)\nfs.attach(ctx, d)\nlp.attach(ctx, d)\ngo dg.run(ctx)\n}\n"); len(bad) != 0 {
 		t.Errorf("the right order is refused: %q", bad)
 	}
 }
