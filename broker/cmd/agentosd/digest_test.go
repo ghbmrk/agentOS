@@ -850,3 +850,27 @@ func TestDigestLinesAreOwnerWorded(t *testing.T) {
 		}
 	}
 }
+
+// A saved LastDay later than tomorrow is clock skew (the clock was set back,
+// or a skewed save): the digest does not wait for that day, it goes today.
+// REQ: CH-15, OP-9
+func TestDigestSkewedLastDayDoesNotStopTheDigest(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	r.at(0, 8, 0)
+	n := len(r.tr.sent())
+	r.d.mu.Lock()
+	r.d.st.LastDay = r.d.dayOf(r.now) + 400
+	r.d.mu.Unlock()
+	r.at(1, 8, 0)
+	if got := r.tr.sent(); len(got) != n+1 {
+		t.Fatalf("digest stopped by a LastDay far ahead: %q", got)
+	}
+	if want := r.d.dayOf(r.now); r.d.st.LastDay != want {
+		t.Fatalf("LastDay %d, want %d", r.d.st.LastDay, want)
+	}
+	// Tomorrow's LastDay is not skew (a save just after midnight): no resend today.
+	r.at(1, 9, 0)
+	if got := r.tr.sent(); len(got) != n+1 {
+		t.Fatalf("resent the same day: %q", got)
+	}
+}

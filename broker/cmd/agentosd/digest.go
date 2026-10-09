@@ -317,6 +317,12 @@ func (d *digestBox) step(ctx context.Context, now time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	today := d.dayOf(now)
+	if d.st.LastDay > today+1 {
+		// Clock skew (set back, or a skewed save): the day it names is
+		// not coming, so the digest is due as if yesterday had run.
+		d.cfg.Logf("digest: saved day %d is ahead of day %d; treated as clock skew and reset", d.st.LastDay, today)
+		d.st.LastDay = today - 1
+	}
 	switch {
 	case today > d.st.LastDay && !now.Before(d.digestAt(today)) && (!d.owing.Load() || now.Sub(d.lastTry) >= digestRetry):
 		d.lastTry = now
