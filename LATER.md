@@ -721,6 +721,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | FOLD l-670a | #670 Potency lens (record in #682): result read-back (`result_read`) has no offset or length, so a machine must take a whole oversized result back or none. |
 | FOLD l-670b | #670 Potency lens (record in #682): the stand-in for an oversized result names no next step, so the machine is not told how to read it back. |
 | FOLD l-670c | #670 Potency lens (record in #682): `result_read` is not excluded from the provider tool list. |
+| FOLD l-670d | #670 Security 4a and L3: if `crypto/rand` fails, `newID` returns an empty ID and `Hand` still returns a stand-in that `Read` can never satisfy; return the body unfolded instead. Not reachable on Go 1.24 or later. |
+| FOLD l-670e | #670 L3 (`recheck`): error results (`isErr`) are never folded, so a large error passes inline at full size. |
+| FOLD l-670f | #670 L3: `broker/fold/fold_test.go` has no `REQ:` marker, so coverage rests only on `tools_test.go`. |
 
 ## Reuse candidates
 | ID | Component | Why |
