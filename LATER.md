@@ -50,6 +50,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P2-2w | A1, A14 (ARC-2) | Local UI process; sub-rows a, b merged, c and d open |
 | P2-2w c | A1, A14 | Setup into agentosd; Security L6, L7 MUST |
 | P2-2w d | A1, A3, A14 | Turns LocalUI on; unblocks approvals and CH-20p |
+| CH-19a | A14 (CH-19a) | Minimum CH-20p, promoted by D-079: outputs withheld from text are kept 7 days and readable only on the signed-in local page; UX3-7 |
 | SR2-3g | A5, A6 (security) | No host path in agent-visible tool errors |
 | SR2-4i | A2 (RES-2) | Host image enables iocost; blocked on host image |
 | CH-21 | A14 (CH-21) | Name, first-person voice, spoofed NAME refused |
@@ -83,7 +84,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | CR-open-cost | `broker/cleanroom` (L3 on #432, potency note): open re-reads every artifact (at most 8 MiB each), so open time grows linearly with the store |
 | P2-8b | Deferred re-encrypt after trusted-PC removal; slot removal already covers CRED-9 |
 | P3-6d | Digest wording for deleted procedures; no A-test needs it |
-| CH-20p | Page view of kept replies; A15 needs delivery, not this view. Its minimum part, withheld outputs on the signed-in page, is release as CH-19a (D-079, A14); the history view stays here |
+| CH-20p | Page view of kept replies; A15 needs delivery, not this view. Its minimum part moved to Release as CH-19a (D-079); the history view stays here |
 | CH-20a | Attachments conflict with security C4; needs review; not in A15 |
 | CH-20m | MORE command for redirected replies; convenience |
 | CH-11a-rate | `MORE` replies are solicited, so CH-15's rate limit does not bound them; a spoofed number can make the box send many pages (cost, annoyance only). L3 on #480 point 7 |
