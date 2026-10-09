@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -144,10 +145,14 @@ func shuffle(paths []string) error {
 
 // Run holds the broker's writers, digests every target and the control,
 // has a fresh machine's guest try them, and digests again. A changed
-// target is a High finding; an unchanged one is a journaled refusal. An
-// unchanged control, a reused machine, a missing target, a failed attempt
-// or quiesce, or a refusal the journal does not take fails the run, which
-// then closes nothing. The siblings the guest's writes left are removed.
+// target is a High finding; an unchanged one is a journaled refusal. A
+// target or control Path that is a symbolic link is refused before
+// anything runs. An unchanged or missing control, a reused machine, a
+// missing target, a failed attempt or quiesce, a file swapped under the
+// digest, a cancelled ctx, or a refusal the journal does not take fails
+// the run, which then closes nothing; a target that became a link fails
+// it too, though its finding stands. The siblings the guest's writes left
+// are removed.
 func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 	if len(p.Targets) == 0 || p.Attempt == nil || p.Journal == nil || !filepath.IsAbs(p.Control.Path) {
 		return ProbeResult{}, errors.New("tamper probe: not configured")
@@ -157,11 +162,17 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 		if !ownerWord.MatchString(t.Name) || !filepath.IsAbs(t.Path) {
 			return ProbeResult{}, fmt.Errorf("tamper probe: bad target %d", i)
 		}
+		if err := notLinked(t.Path); err != nil {
+			return ProbeResult{}, fmt.Errorf("tamper probe: target %s: %w", t.Name, err)
+		}
 		tp, err := tamperPaths(t)
 		if err != nil {
 			return ProbeResult{}, fmt.Errorf("tamper probe: %s: %w", t.Name, err)
 		}
 		paths = append(paths, tp...)
+	}
+	if err := notLinked(p.Control.Path); err != nil {
+		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
 	}
 	cp, err := tamperPaths(p.Control)
 	if err != nil {
@@ -182,13 +193,13 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 	}
 	before := make([][]byte, len(p.Targets))
 	for i, t := range p.Targets {
-		d, err := targetDigest(t.Path)
+		d, err := targetDigest(ctx, t.Path)
 		if err != nil {
 			return ProbeResult{}, fmt.Errorf("tamper probe: target %s: %w", t.Name, err)
 		}
 		before[i] = d
 	}
-	control, err := targetDigest(p.Control.Path)
+	control, err := targetDigest(ctx, p.Control.Path)
 	if err != nil {
 		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
 	}
@@ -208,37 +219,69 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ProbeResult{}, err
 	}
-	switch d, err := targetDigest(p.Control.Path); {
-	case errors.Is(err, fs.ErrNotExist):
-		// Removed from inside the machine is changed.
+	if err := notLinked(p.Control.Path); err != nil {
+		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
+	}
+	// A missing control fails too: a teardown or a cleaner on the host can
+	// remove it without the guest's writes running (S33).
+	switch d, err := targetDigest(ctx, p.Control.Path); {
 	case err != nil:
 		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
 	case string(d) == string(control):
 		return ProbeResult{}, errors.New("tamper probe: the control did not change: the guest's writes did not run")
 	}
-	after := make([][]byte, len(p.Targets))
+	var res ProbeResult
+	var refused, linked []string
 	for i, t := range p.Targets {
-		d, err := targetDigest(t.Path)
+		d, err := targetDigest(ctx, t.Path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			// Removed from inside the machine is changed.
 		case err != nil:
 			return ProbeResult{}, fmt.Errorf("tamper probe: target %s: %w", t.Name, err)
 		}
-		after[i] = d
-	}
-	var res ProbeResult
-	for i, t := range p.Targets {
-		if after[i] != nil && string(after[i]) == string(before[i]) {
-			if err := p.Journal(machine, t.Name); err != nil {
-				return ProbeResult{}, fmt.Errorf("tamper probe: journal %s: %w", t.Name, err)
-			}
+		// A target that became a link is changed, but the round fails:
+		// what was found stands and nothing closes (runProbe).
+		isLink := notLinked(t.Path) == errLinked
+		if isLink {
+			linked = append(linked, t.Name)
+		}
+		if d != nil && !isLink && string(d) == string(before[i]) {
+			refused = append(refused, t.Name)
 		} else {
 			res.Found = append(res.Found, Finding{Check: CheckTamper, Subject: t.Name, Detail: "writable", Severity: High})
 		}
+	}
+	if len(linked) > 0 {
+		return res, fmt.Errorf("tamper probe: target %s: %w", strings.Join(linked, ", "), errLinked)
+	}
+	for _, name := range refused {
+		if err := p.Journal(machine, name); err != nil {
+			return ProbeResult{}, fmt.Errorf("tamper probe: journal %s: %w", name, err)
+		}
+	}
+	for _, t := range p.Targets {
 		res.Checked = append(res.Checked, t.Name)
 	}
 	return res, nil
+}
+
+// errLinked is a target or control Path that is a symbolic link. The
+// probe refuses one rather than resolve it, so a wiring change that
+// passes a link fails closed (S33).
+var errLinked = errors.New("is a symbolic link")
+
+// notLinked fails if path is a symbolic link, by Lstat, or cannot be
+// read.
+func notLinked(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&fs.ModeSymlink != 0 {
+		return errLinked
+	}
+	return nil
 }
 
 // targetDigest is treeDigest of path and, for anything but a directory,
@@ -247,12 +290,12 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 // (P3-4b-4c-restore). Other names there are left out: the broker may
 // write beside a target it does not hold (#584 L3 1), and a replaced
 // target still changes treeDigest.
-func targetDigest(path string) ([]byte, error) {
-	d, err := treeDigest(path)
+func targetDigest(ctx context.Context, path string) ([]byte, error) {
+	d, err := treeDigest(ctx, path)
 	if err != nil {
 		return nil, err
 	}
-	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+	if fi, err := os.Lstat(path); err == nil && fi.IsDir() {
 		return d, nil
 	}
 	ents, err := os.ReadDir(filepath.Dir(path))
@@ -275,28 +318,44 @@ func targetDigest(path string) ([]byte, error) {
 func tamperSibling(nonce string) string { return ".agentos-tamper-" + nonce }
 
 // removeSiblings removes the files the round's guest writes may have left
-// beside or inside each target and the control. A target the guest
+// beside or inside each target and the control, never through a link: a
+// Path that is one now has nothing removed. A target the guest
 // reached may still need restoring from a broker copy if something other
 // than the fixed script wrote it (loops S33).
 func (p *TamperProbe) removeSiblings(nonce string) {
 	for _, t := range append(slices.Clone(p.Targets), p.Control) {
 		dir := filepath.Dir(t.Path)
-		if fi, err := os.Stat(t.Path); err == nil && fi.IsDir() {
+		fi, err := os.Lstat(t.Path)
+		switch {
+		case err == nil && fi.Mode()&fs.ModeSymlink != 0:
+			continue
+		case err == nil && fi.IsDir():
 			dir = t.Path
 		}
 		os.Remove(filepath.Join(dir, tamperSibling(nonce)))
 	}
 }
 
+// beforeDigestOpen, set only by tests, runs between the walk's Lstat of a
+// regular file and its open: where a guest's swap races the digest.
+var beforeDigestOpen func(path string)
+
+// errSwapped is a file that changed between the walk's Lstat and its
+// open: never a pass, since the digest no longer says what was there.
+var errSwapped = errors.New("a file changed under the digest")
+
 // treeDigest hashes a file or directory tree: names, types, modes and
-// contents, without following symbolic links.
-func treeDigest(root string) ([]byte, error) {
+// contents, without following symbolic links, under ctx.
+func treeDigest(ctx context.Context, root string) ([]byte, error) {
 	if _, err := os.Lstat(root); err != nil {
 		return nil, err
 	}
 	h := sha256.New()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		info, err := d.Info()
@@ -313,17 +372,56 @@ func treeDigest(root string) ([]byte, error) {
 			}
 			fmt.Fprintf(h, "-> %q\n", l)
 		case info.Mode().IsRegular():
-			f, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			_, err = io.Copy(h, f)
-			f.Close()
-			return err
+			return hashFile(ctx, h, path, info)
 		}
 		return nil
 	})
 	return h.Sum(nil), err
+}
+
+// digestChunk is how much hashFile reads between checks of ctx.
+const digestChunk = 64 << 10
+
+// hashFile hashes the regular file the walk found at path as walked,
+// opened without following a link and without blocking, so a guest that
+// swapped it for a link, a FIFO or a device cannot steer or wedge the
+// read; anything but that same regular file is errSwapped. It reads at
+// most walked's size, in chunks, under ctx, so it ends even while a guest
+// still writes the file.
+func hashFile(ctx context.Context, h io.Writer, path string, walked fs.FileInfo) error {
+	if beforeDigestOpen != nil {
+		beforeDigestOpen(path)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if errors.Is(err, syscall.ELOOP) {
+		return errSwapped
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() || !os.SameFile(fi, walked) {
+		return errSwapped
+	}
+	r := io.LimitReader(f, walked.Size())
+	buf := make([]byte, digestChunk)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := r.Read(buf)
+		h.Write(buf[:n])
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // Pressure kinds an exhaustion round applies, and the subjects for the
