@@ -64,8 +64,11 @@ Rejected alternatives:
 - **W1-b (client).**
   - A package agentosd can import provides a client that implements `mail.Store` over that socket. Errors map onto the same sentinels `mailtest` returns, so the adapter's validity checks (M15) behave as they do in tests.
   - Reuse the SMS socket's framing; a new codec needs the one-line reason CLAUDE.md asks for.
-- **W1-c (custody pin).** A test fails if any package agentosd links imports `broker/mail/imapsmtp`. Extend the existing ARC-2/custody import test (M1's note asks for exactly this). `TestAdapterHoldsNoCredential` keeps passing.
-- **W1-d (setup).** The account is set up the way `smsaccount.go` sets up the SMS account: through the local UI, never through an owner text. It is absent by default. While absent, the socket answers every call with a not-connected error, and agentosd treats that as "no mail account" (as on main today).
+- **W1-c (custody pin for the client).** A test in `broker/mail/mailsock/` fails if the package's transitive imports include `broker/mail/imapsmtp`, `crypto/tls`, `net/smtp`, `net/http` or `os/exec`. `mailsock` may import `net` only to dial the vault's unix socket, as `modelroute` does. `TestAdapterHoldsNoCredential` (`broker/mail/custody_test.go:28`) keeps passing. The agentosd-wide pin, that nothing agentosd links reaches `imapsmtp`, belongs to w2 (W2-f), the package that links the client into agentosd.
+- **W1-d (setup).**
+  - The account is set up the way `smsaccount.go` sets up the SMS account: through the local UI, never through an owner text. It is absent by default.
+  - While it is absent, the socket answers every call with a not-connected reply, and the client maps that reply to one sentinel, `mailsock.ErrNotConnected`.
+  - What agentosd does with that sentinel is w2's (W2-a).
 
 ### Failing-test-first
 
@@ -75,13 +78,13 @@ Use synthetic canaries only. The credential in every test is a canary string tha
 |---|---|---|
 | W1-a | Run an egress test server over `mailtest`'s IMAP double. The client calls each of the nine methods and gets the same results as calling `mailtest` directly; the canary appears in no frame. | There is no socket and no handler. |
 | W1-b | The adapter suite's `Ref`/validity case (M15), run through the client: a stale validity is refused. | There is no client. |
-| W1-c | The import test lists agentosd's transitive imports and fails on `imapsmtp`. Mutant: import it from a test-only agentosd file, and the test fails. | The test does not check `imapsmtp`. |
-| W1-d | With no account set up, every method returns the not-connected error, and agentosd starts. | No handler exists. |
+| W1-c | The import test lists `mailsock`'s transitive imports and fails on any of the five. Mutant: import `imapsmtp` from a non-test `mailsock` file, and the test fails. | There is no `mailsock` package. |
+| W1-d | With no account set up, every one of the nine methods, called through the client, returns `mailsock.ErrNotConnected`, and no frame carries more than the not-connected reply. | No handler exists. |
 
 **Controls that must keep passing:** all of `broker/mail/...`, `broker/cmd/agentos-egress`, and `TestAdapterHoldsNoCredential`.
 
 **Threat check:**
-- Can any agentosd code path, including tests linked into its binary, reach `imapsmtp`?
+- Can `mailsock`, or anything it imports, reach `imapsmtp` or a network client?
 - Can a peer other than agentosd's uid connect to the socket?
 - Does any error string from the server (the server's own words after a login error) cross the socket?
 - Can `Submit` over the socket send from an address other than the account's own address?
@@ -89,7 +92,6 @@ Use synthetic canaries only. The credential in every test is a canary string tha
 **Scope:**
 - `broker/cmd/agentos-egress/` (a new `mailaccount.go`, its test, and the listener line in `server.go`).
 - A new client package `broker/mail/mailsock/` with its tests.
-- The custody import test, wherever it lives today (the builder names it in the PR).
 - `broker/mail/ASSUMPTIONS.md` M1 (record that the wiring now exists).
 - `broker/cmd/agentos-egress/ASSUMPTIONS.md`.
 - BOARD row SR3-mail-w1.
@@ -113,21 +115,32 @@ Use synthetic canaries only. The credential in every test is a canary string tha
   - When the w1 socket reports an account, agentosd builds `mail.New` over the w1 client.
   - It registers the adapter as executor `mail.Tool` in `daemon.Config.Executors`, with `mail.Declared()` (`declare.go:120`) under `Grants.Declared[mail.Tool]` and the adapter as `Grants.Verifiers[cfg.Account]`.
   - So `Escalate` runs at authorize and again at every dispatch recheck (`gate.go:736`).
-  - `evidence.go` drops its copied constants and uses `mail.OpDeliver` and `mail.Tool`, and `e.mail` is the adapter.
+  - `evidence.go` drops its copied constants and their ARC-2 comment (`evidence.go:127-131`), uses `mail.OpDeliver` and `mail.Tool`, and `e.mail` is the adapter.
+  - When the client returns `mailsock.ErrNotConnected`, agentosd starts and treats mail as "no account", as on main today: nothing is registered under the account, and CH-20 delivery falls back to text.
 - **W2-b (the hook; M18, Security R2).**
-  - `mail.Config.InUse` is `func(action string, since time.Time) []journal.Use { return eng.InUse(cfg.Account, action, since) }`.
-  - `eng` is bound after `journal.Open` returns, through a late binding like `recalltool.LateExecutor` (`main.go:603`).
-  - Before the binding is set, the hook answers "unknown", never "nothing in use". Choose whichever of these M18 already defines as fail-closed: return the pins as in use, or make `Escalate` ask.
+  - `mail.Config.InUse` is `func(action string, since time.Time) []journal.Use { return eng.InUse(cfg.Account, action, since) }`, where `eng` is the live `*journal.Engine` from `d.Engine()` (`daemon.go:479`).
   - The account is the adapter's own `cfg.Account`, never a parameter the caller passes.
+  - **No adapter exists before the engine does.** `daemon.Config.Executors` and `Grants` are fixed before `daemon.Run` opens the journal, so agentosd registers a late-bound wrapper in `mail.go`, like `recalltool.LateExecutor` (`broker/recalltool/service.go:199`, used at `main.go:603`).
+    - The wrapper is the executor under `mail.Tool` and the Verifier and Escalator under the account.
+    - agentosd calls `mail.New` only after `daemon.Run` returns the engine, with the hook closed over it, and then `Set`s the adapter into the wrapper.
+    - Until then the wrapper's `Escalate` returns an error, and the gate denies (`gate.go:737-740`). Its executor returns `NotApplied` with no effect, and its verifier reports nothing verified.
+    - So the hook is never called against an unbound engine, and no `broker/mail` change is needed: `InUse`'s signature (`func(action string, since time.Time) []journal.Use`) stays as it is.
+  - Rejected: give the hook an `ok` result (`([]journal.Use, bool)`) so it can say "unknown". That changes `broker/mail` and the tests of SR3-5-f1 and SR3-5-f2, to cover a state the wrapper already makes unreachable.
 - **W2-c (one clock; Security R2).**
   - `daemon.Config` gains `Now func() time.Time`, defaulting to `time.Now`.
   - `daemon.Run` passes `journal.WithClock(cfg.Now)` to `journal.Open` (`daemon.go:309`).
   - agentosd sets `mail.Config.Now` to the same function value.
 - **W2-d (digest line and UNDO; ADP-2, CH-11, CH-16, M9).**
   - The digest gains a mail source. It reads the day's Succeeded organize intents for the account from `Engine.Trail()`, parses each one's evidence with `ParseChange`, and adds `Summarize(...).Line(id, day+UndoWindow)`.
-  - `id` is derived from the account and the day, and the derivation is unchanged across restarts.
-  - `UNDO <id>` reaches `Adapter.Undo` with exactly those changes. The routing uses an owner-channel hook consulted after auto-reply undo finds no queued id, so no auto-reply behaviour changes.
+  - `id` is a short opaque token, a keyed hash of the account and the day under a key agentosd already holds. It is the same across restarts, carries no address or other personal data (CH-19), and cannot be guessed for another account or day.
+  - `UNDO <id>` reaches `Adapter.Undo` with exactly those changes (CH-16).
+  - The routing goes through an owner-channel hook that `channel.go` consults only when `undoLocked` reports a miss. `undoLocked` reports the miss with a bool result, not through the text of its reply, so a reply's wording can never decide where an UNDO goes. No auto-reply behaviour changes.
   - Past the window, the reply says the undo has expired. The `UndoReport.Text()` sentence (`undo.go:35`) is the reply.
+- **W2-f (ARC-2 fence; ARC-2, CRED-1, M1).**
+  - `broker/daemon/arc2_test.go:91` adds `mail` and `mail/mailsock` to the packages `cmd/agentosd` may import, with a comment line saying why, like the others.
+  - `mailsock` follows `modelroute`'s precedent: a `netOK` entry in `broker/daemon/inference_test.go:76`, "dials only the vault process's unix socket", allowing `net.Conn` and `net.Dialer`.
+  - `mail` imports `golang.org/x/text`, which the ARC-2 rules refuse. So, like `clock` and `quota`, it has no rules entry and is held by `TestAgentosdLinksNoInference`. If the builder finds a cleaner fit, the PR says why.
+  - The fence gains the agentosd-wide custody pin: the transitive check fails if anything `cmd/agentosd` links reaches `mail/imapsmtp`.
 - **W2-e (record).**
   - agentosd's `ASSUMPTIONS.md` records the hook, the clock and the UNDO derivation.
   - `broker/mail/ASSUMPTIONS.md` M18 notes that the hook is wired.
@@ -142,10 +155,13 @@ Use the `mailtest` double behind the w1 client in a test server, and synthetic a
 | W2-a | Start agentosd's wiring with a test account and submit an organize intent. Authorize calls `Escalate` once. Between authorize and dispatch, move the message in the double: the recheck refuses the dispatch (OP-3). | No executor or Verifier is registered. |
 | W2-b account | Two accounts, A and B, with B holding 200 Succeeded organize places today. A's adapter is not bounded by B's places. A mutant that passes `""` or B's account fails. | No hook is wired. |
 | W2-b bound | The hook is non-nil after wiring. A 25-hour-old pin of an authorized intent survives expiry, and one with no live intent expires. Mutant: a nil hook; the test fails. | The hook is nil, and nothing expires. |
-| W2-b early | `Escalate` before the engine is bound does not report an empty in-use set. | No hook is wired. |
+| W2-b early | An organize submitted before the wrapper is bound is denied at authorize, never reaches `Adapter.Escalate`, and the executor returns `NotApplied`. A spy hook records no call before binding. Mutant: register the adapter itself before `daemon.Run` with a nil engine; the test fails. | No wrapper exists. |
 | W2-c | One fake clock drives the daemon. An organize Succeeds at T. At T+23h59m, the bound still counts it. The record's journal stamp equals the adapter's `Now()` at execute. Mutant: drop `WithClock`; the stamps differ and the count falls short. | The engine uses its own clock. |
 | W2-d | Three organize effects on day D give a digest line with `UNDO <id>`. `UNDO <id>` restores the unchanged ones and reports the changed one as skipped. After a restart, the same id still works. At D+7d+1m, the reply says it has expired. | There is no mail digest line, and UNDO answers "Nothing to undo". |
-| W2-d control | An auto-reply `UNDO <id>` behaves exactly as on main. | Passes on main; quote it. |
+| W2-d id | The id contains neither the account's address nor the date in clear. A different key, account or day gives a different id. | No id exists. |
+| W2-d control | An auto-reply `UNDO <id>` behaves exactly as on main. A mail id whose text matches an auto-reply reply still routes by the bool, not the text. | The first half passes on main; quote it. |
+| W2-a off | With the socket answering `mailsock.ErrNotConnected`, agentosd starts, registers no mail adapter, and CH-20 delivery falls back to text. | No client is wired. |
+| W2-f | With `mail` and `mailsock` linked, `TestARC2ControlPathCannotReachInference`, `TestARC2TransitiveDepsHaveNoNetworkClientOrLauncher` and `TestAgentosdLinksNoInference` pass, and no `crypto/tls`, `net/http` or `net/smtp` is in agentosd's dependencies. Mutant: import `imapsmtp` from a non-test agentosd file; the fence fails. | `mail` is not on the allowed list, so linking it fails the fence. |
 
 **Controls that must keep passing:**
 - all of `broker/mail`, especially the SR3-5-f1 and SR3-5-f2 pin and expiry tests;
@@ -162,7 +178,7 @@ Use the `mailtest` double behind the w1 client in a test server, and synthetic a
   - Can a forged or guessed id undo another account's or another day's changes?
   - Can an UNDO restore an item the owner has since changed (M9)?
   - Does an UNDO go through a journaled intent, or does it act outside the journal? REV-2 does not require it, because organize is reversible, but the reviewer states which path it takes and why.
-- **ARC-2.** No inference is on the path.
+- **ARC-2 and custody.** No inference is on the path. Can any agentosd code path, including tests linked into its binary, reach `imapsmtp` or a network client? Is every dial `mailsock` makes a unix dial?
 
 **Out of scope:**
 - Mail as the CH-20 evidence destination beyond setting `e.mail` (CH-20w).
@@ -173,8 +189,9 @@ Use the `mailtest` double behind the w1 client in a test server, and synthetic a
 
 **Scope:**
 - `broker/daemon/daemon.go` (`Config.Now` and the `Open` call only) and a daemon test.
+- `broker/daemon/arc2_test.go` (the allowed-imports line, its comment, and the `imapsmtp` pin) and `broker/daemon/inference_test.go` (the `mailsock` `netOK` entry) (W2-f).
 - `broker/cmd/agentosd/`: a new `mail.go` and `mail_test.go`, plus `main.go`, `evidence.go` and `digest.go`, each limited to the wiring and the mail source.
-- `broker/owner/channel.go`: one hook field and its call, after `undoLocked` misses, plus an owner test.
+- `broker/owner/channel.go` and `broker/owner/autoreply.go`: one hook field and its call, and `undoLocked`'s miss as a bool result, plus an owner test.
 - `broker/cmd/agentosd/ASSUMPTIONS.md` and `broker/mail/ASSUMPTIONS.md` M18.
 - BOARD row SR3-mail-w2.
 
@@ -183,14 +200,13 @@ Use the `mailtest` double behind the w1 client in a test server, and synthetic a
 **Order against open PRs: build after #622 and #628 merge.**
 - **#622 (W5-Dc-r12).** It edits agentosd `digest.go`, `forget.go`, `main.go` and `ASSUMPTIONS.md`. Start w2 from a main that includes it.
 - **#628.** It edits agentosd `main.go`, `learn.go` and `ASSUMPTIONS.md`. Start after it too.
-- **#626, #629 and #621.** These edit agentosd `ASSUMPTIONS.md` only; #629 and #621 also edit `broker/daemon/inference_test.go`, which this scope does not touch. If any is still open, merge main before review, and the ASSUMPTIONS edit goes last.
+- **#626, #629 and #621.** These edit agentosd `ASSUMPTIONS.md`; #629 and #621 also edit `broker/daemon/inference_test.go`, which W2-f touches (one `netOK` line). If any is still open, merge main before review; the ASSUMPTIONS and `netOK` edits go last.
 - **#617.** It edits agentosd `forget_agent_test.go` and `grants` tests. There is no overlap.
-- **#619.** It edits `digest_capacity_test.go`, a control here. Merge main before review if it lands first.
 - **#614 and #620.** These touch only records. There is no overlap.
 
 ### Delivery (w2)
 
-- **Builder model:** the strongest model. Risk tier **A** (`daemon`, `broker/cmd/agentosd`, `broker/owner`).
+- **Builder model:** the strongest model. Risk tier **A** (`daemon`, `broker/cmd/agentosd`, `broker/owner`, the ARC-2 fence).
 - **Order of work:**
   - Write the tests first, after w1 merges and the PRs above merge.
   - Before opening the PR, run `python3 tools/risk_tier.py --git origin/main HEAD`.
@@ -198,7 +214,7 @@ Use the `mailtest` double behind the w1 client in a test server, and synthetic a
   - L3 on the strongest model with the threat check above.
   - A separate Security section that re-signs R1 and R2 from #579.
   - The UX and Potency lens on the digest line and the UNDO replies.
-- **Estimate and checkpoint:** about 120k tokens. This is a checkpoint, not a ceiling (OPERATING §5).
+- **Estimate and checkpoint:** about 130k tokens, with the W2-f fence work. This is a checkpoint, not a ceiling (OPERATING §5).
 - **Split rule:** if W2-d is still red at the checkpoint, ship W2-a to W2-c and W2-e alone. ADP-2 requires the UNDO, so organize grants stay refused for mail until it lands (the wiring ships, the organize verb is not offered). Move W2-d to a new row, SR3-mail-w3, and mark the row's dependents as waiting on it.
 
 ## Done (each row)
