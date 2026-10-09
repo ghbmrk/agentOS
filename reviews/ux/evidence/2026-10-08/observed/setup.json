@@ -1,0 +1,30 @@
+{
+  "all_set_without_accounts_or_private_route": "All set. Text me a task, for example:\n1. PUBLIC Plan 3 days in Lisbon in May with a rough budget\n2. PUBLIC Draft a polite note asking my landlord to fix the heater\n3. PUBLIC Each morning, text me a 3-line news summary\nHELP for commands.",
+  "initial_provider_challenge": {
+    "empty_provider_code": true,
+    "empty_provider_link": true,
+    "http_status": 200,
+    "start_form_visible": false
+  },
+  "network_after_pairing": {
+    "network_form_visible": false,
+    "page_status": 200,
+    "repair_join_calls": 0,
+    "repair_post_status": 303
+  },
+  "no_cloud_providers": {
+    "finish_calls": 0,
+    "local_only_choice": false,
+    "page_status": 200
+  },
+  "provider_challenge_24h": {
+    "http_status": 200,
+    "same_code_visible": true,
+    "start_calls": 1,
+    "start_form_visible": false
+  },
+  "update_wait": {
+    "generic_update_copy": true,
+    "refresh_10s": true
+  }
+}

@@ -55,7 +55,7 @@ func (s Status) Line() string {
 	case s.SIM == SIMLocked:
 		return "The SIM is PIN-locked. Remove the PIN in a phone, then put it back."
 	case s.SIM == SIMUnknown:
-		return "Can't read the SIM yet. If this stays, restart the box."
+		return "Can't read the SIM yet. If this stays, restart me."
 	case s.Reg == RegDenied:
 		return "The carrier refused the SIM. Check it is activated."
 	case s.Registered() && s.Reg == RegRoaming:
@@ -63,7 +63,7 @@ func (s Status) Line() string {
 	case s.Registered():
 		return fmt.Sprintf("Connected to the mobile network, signal %d of 4.", s.Bars)
 	case s.Bars == 0:
-		return "No mobile signal here. Move the box nearer a window."
+		return "No mobile signal here. Move me nearer a window."
 	default:
 		return "Looking for the mobile network."
 	}
