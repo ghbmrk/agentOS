@@ -1866,6 +1866,16 @@ func TestEnvCheckFlagsANilEnvOnAnyReceiver(t *testing.T) {
 			t.Errorf("nil Env missed:\n%s", c)
 		}
 	}
+	// Environ in an Env, in a file with no launcher import (closes
+	// P3-4b-3r-env-r2; #651 UX 1).
+	noImport := src(``, `type C struct{ Env []string }; func (C) Environ() []string { return nil }; func f(c *C) { c.Env = append(c.Environ(), "A=1") }`)
+	if _, inherits := check(noImport); len(inherits) == 0 {
+		t.Errorf("Environ in an Env missed in a file with no launcher import:\n%s", noImport)
+	}
+	noImportOK := src(``, `type C struct{ Env []string }; func f(c *C) { c.Env = append([]string{"PATH=/bin"}, "A=1") }`)
+	if noEnv, inherits := check(noImportOK); len(noEnv)+len(inherits) != 0 {
+		t.Errorf("flagged %v %v:\n%s", noEnv, inherits, noImportOK)
+	}
 	for _, c := range []string{
 		src(`"os"; "github.com/ghbmrk/agentos/broker/childproc"`, `func f() childproc.Env { return childproc.NewEnv(os.Environ()...) }`),
 		src(`"os"; cp "github.com/ghbmrk/agentos/broker/childproc"`, `func f() cp.Env { return cp.NewEnv(append([]string{"PATH=/bin"}, os.Environ()...)...) }`),

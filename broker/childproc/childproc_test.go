@@ -298,6 +298,17 @@ func TestAConfiguredPathIsNotASecret(t *testing.T) {
 	}
 }
 
+// A malformed entry may be a bare secret passed without its key: the
+// refusal names its index, never its text (#651 UX 3).
+func TestAMalformedEntryIsNotPrinted(t *testing.T) {
+	for _, kv := range []string{tokenCanary, "=" + tokenCanary} {
+		err := NewEnv("PATH=/bin", kv).check()
+		if err == nil || strings.Contains(err.Error(), tokenCanary) || !strings.Contains(err.Error(), "entry 1") {
+			t.Errorf("%q: %v", kv, err)
+		}
+	}
+}
+
 func TestNilContextPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {

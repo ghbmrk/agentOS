@@ -83,11 +83,12 @@ func (e Env) check() error {
 	}
 	secrets := ownSecrets()
 	seen := map[string]bool{}
-	for _, kv := range e.pairs {
+	for i, kv := range e.pairs {
 		k, v, ok := strings.Cut(kv, "=")
 		switch {
 		case !ok || k == "":
-			return fmt.Errorf("childproc: malformed environment entry %q", k)
+			// The index only: an entry with no key may be a bare secret.
+			return fmt.Errorf("childproc: environment entry %d has no KEY= part", i)
 		case strings.ContainsRune(kv, 0):
 			return fmt.Errorf("childproc: environment entry %s holds a NUL", k)
 		case seen[k]:
