@@ -387,10 +387,12 @@ def _sandbox_missing():
             user = pwd.getpwuid(os.geteuid()).pw_name
         except KeyError:
             user = str(os.geteuid())
-        # No fixed range: one that overlaps another user's would share their ids (D13).
+        # No fixed range: one that overlaps another user's would share their ids, and one at 0
+        # or a login uid would map the scenario onto root or that user (D13).
         return ("%s; add one: sudo usermod --add-subuids START-END --add-subgids START-END %s, with a "
-                "65536-id START-END that overlaps no line in /etc/subuid or /etc/subgid "
-                "(tools/ASSUMPTIONS.md D13)" % (e, user))
+                "65536-id START-END, START at least 100000 or SUB_UID_MIN/SUB_GID_MIN from /etc/login.defs, "
+                "the range above every uid in /etc/passwd and gid in /etc/group, and that overlaps no "
+                "line in /etc/subuid or /etc/subgid (tools/ASSUMPTIONS.md D13)" % (e, user))
     try:
         # The same -e as the run: an strace that cannot name a traced syscall exits
         # nonzero ("invalid system call") instead of skipping it unseen (DEP-4b).

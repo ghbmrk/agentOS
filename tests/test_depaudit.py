@@ -632,6 +632,10 @@ class UnavailableTest(unittest.TestCase):
         self.assertIn("--add-subuids START-END --add-subgids START-END", why)
         self.assertIn("overlaps no line in /etc/subuid or /etc/subgid", why)
         self.assertIn("D13", why)
+        # Security re-sign on #568 point 1: START=0 or a login uid would map the scenario onto
+        # root or that user, so the text sets a floor and excludes every passwd/group id.
+        self.assertIn("START at least 100000 or SUB_UID_MIN/SUB_GID_MIN from /etc/login.defs", why)
+        self.assertIn("above every uid in /etc/passwd and gid in /etc/group", why)
 
     def test_inner_refuses_through_mask_or_refuse(self):
         # L3 on #568 point 2: _inner must not call _mask_host_sockets bare, or the traceback is back.
