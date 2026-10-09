@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/loops"
@@ -98,8 +99,13 @@ func TestAFindingWithoutOneFixableNamespaceGetsNoJob(t *testing.T) {
 		if rule == "" {
 			fd.Rule = nil
 		}
-		if _, err := b.Fix(context.Background(), fd); !errors.Is(err, ErrNoNamespace) || !errors.Is(err, loops.ErrNotFixable) {
-			t.Errorf("%s: %v", name, err)
+		// Bounded, so a mutant that runs a job fails here rather than
+		// hanging until the go test timeout (Potency 2 on #575).
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := b.Fix(ctx, fd)
+		cancel()
+		if !errors.Is(err, ErrNoNamespace) || !errors.Is(err, loops.ErrNotFixable) {
+			t.Errorf("%s: got %v, want ErrNoNamespace wrapping loops.ErrNotFixable with no job", name, err)
 		}
 		if len(f.destroyed) != 0 || len(f.ms) != 0 {
 			t.Errorf("%s: a machine was made", name)
