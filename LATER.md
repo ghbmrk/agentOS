@@ -234,6 +234,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-4 l6 | UX on #434: name the ID the owner sent (`UNDO <short ID>`), or both, in the refusal text instead of only the release version. The signed UX and Potency records for #434 keep IDs A9, C25 and U16 (head 215deae); they were renumbered A10, C27 and U17 on merge |
 | SR3-6 l1 | Potency on #430, W5b wiring: a pending security fix dropped by a policy change and scheduled again by Loop 3 should keep its first-scheduled time for A7's 24-hour "no free moment" ask, so a policy change does not reset the clock |
 | SR3-7 l1 | L3 on #429: nested keys still last-win; an `n` check in `anthropic.go` is unreachable |
+| SR3-7-f1 l1 | Lens on #582 (comment 6079162578), point 4: the latest-first refund of unused attempt holds across buckets is unpinned; a mutation that refunds in another order survives |
+| SR3-7-f1 l2 | Lens on #582 (comment 6079162578), point 5: a failed stream's partial `OutputChars` charge (R14 applied to a failed attempt) is unpinned |
+| SR3-7-f1 l3 | Lens on #582 (comment 6079162578), point 7: the audit reason "the call's meter cannot cover another attempt" is shown for any refusal by the attempt hook, including non-meter causes |
+| SR3-7-f1 l4 | Lens on #582 (comment 6079162578), point 8: the owner is not told when the meter bound suppresses a failover |
 | SR3-8 l5 | UX on #432: repeated "lost its output N times; not built again" points at failing storage; if a box-health line ever reads disk faults, this log is one input |
 | W3-forget-b3 rr8 | UX on #425, point 1 (CAP-3, F3): a crash after the owner's YES and before the tombstone saves ends silently; reconcile marks the intent not applied and the owed entry is dropped untold. The owed file holds the date, so "Your task from <date> was not forgotten. Send FORGET to try again." would close it. Pre-existing, narrow window |
 | W3-forget-b3 rr9 | UX on #425, point 2: several owed texts after one restart go as separate texts; if forgets are ever owed in bulk, send one text listing the dates |
