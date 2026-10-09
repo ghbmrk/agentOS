@@ -103,6 +103,14 @@ func (g grants) Set(v string) error {
 	return nil
 }
 
+// withGrants sets c's fields that follow the grants: the proxy it builds
+// over an open vault, and whether a model provider is granted (OP-9 C2).
+func withGrants(c *custody, g grants) *custody {
+	c.build = func(v *vault.Vault) (*egress.Proxy, error) { return newProxy(v, g, nil) }
+	c.granted = modelGranted(g)
+	return c
+}
+
 // modelProviders are the providers the model router serves.
 func modelProviders() []route.Provider { return []route.Provider{route.OpenAI(), route.Anthropic()} }
 
@@ -354,20 +362,18 @@ func serveCmd(args []string) error {
 	if *polPath == "" {
 		*polPath = filepath.Join(filepath.Dir(*keysPath), "vault.pcrpolicy")
 	}
-	c, err := newCustody(&custody{
+	c, err := newCustody(withGrants(&custody{
 		keysPath: *keysPath,
 		open: func(p string) (*vault.Vault, error) {
 			return vault.OpenSealed(*vaultPath, *keysPath, vault.Passphrase(p))
 		},
-		build:     func(v *vault.Vault) (*egress.Proxy, error) { return newProxy(v, g, nil) },
 		ttl:       *ttl,
 		now:       time.Now,
 		notify:    func(s string) { log.Print(s) },
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 		owner:     *ownerNumber,
-		granted:   modelGranted(g),
-	})
+	}, g))
 	if err != nil {
 		return err
 	}

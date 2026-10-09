@@ -110,3 +110,37 @@ func TestModelGranted(t *testing.T) {
 		}
 	}
 }
+
+// The state branch answers GET only (L3 and Security point 3 on #566).
+func TestModelStateIsGetOnly(t *testing.T) {
+	r := newFastRig(t, true)
+	r.c.granted = true
+	req, _ := http.NewRequest(http.MethodPost, "http://agentos-egress/", strings.NewReader("{}"))
+	req.Header.Set(modelroute.HeaderState, "1")
+	resp, err := unixClient(serveState(t, r.c)).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed || strings.Contains(string(body), "granted") {
+		t.Fatalf("POST: %d %q", resp.StatusCode, body)
+	}
+}
+
+// serveCmd builds its custody through withGrants, so the state's granted
+// follows the -grant flags (L3 point 2 on #566).
+func TestWithGrantsSetsTheGrantState(t *testing.T) {
+	for _, c := range []struct {
+		g    grants
+		want bool
+	}{
+		{grants{}, false},
+		{grants{"agent": {"openai"}}, true},
+	} {
+		got := withGrants(&custody{}, c.g)
+		if got.granted != c.want || got.build == nil {
+			t.Errorf("%v: granted %v, build set %v", c.g, got.granted, got.build != nil)
+		}
+	}
+}
