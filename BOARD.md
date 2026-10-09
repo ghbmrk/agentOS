@@ -25,8 +25,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | SR3-2 | [Enforce pre-allowance rate limits at dispatch](briefs/SR3-2.md) | P2-grants, P2-gr8 | in review (#428) |
 | SR3-3 | [Show and bind the complete pre-allowance rule at approval](briefs/SR3-3.md) | P2-grants, P2-2a | in review (#433) |
 | SR3-4 | [Make update finalization durable and idempotent](briefs/SR3-4.md) | UPD-a, P4-3, P3-1 | in review (#434) |
-| SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | queued (P2; release) |
-| SR3-5-f1 | Two release findings from #424 Security 4a, to land before mail is wired into agentosd: (S1) re-resolving by Message-ID at Execute, or undoing a move (`c.To != ""` skips the Ref check), can land on a different message with that Message-ID without rerunning alert escalation; (S2) undo skips the identity check when `c.Validity == 0`, evidence written before SR3-5 (L3 point 2). Neither is introduced by SR3-5. On merge of #424, drop its LATER lines `SR3-5 f1` and `SR3-5 l2`, which this row supersedes | SR3-5 | queued (release; brief to write) |
+| SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | in review (#424) |
 | SR3-6 | [Invalidate verified updates when attestation policy narrows](briefs/SR3-6.md) | P4-3, P3-1 | in review (#430) |
 | SR3-7 | [Use one validated request for model reservation and routing](briefs/SR3-7.md) | P2-7, P1-7 | in review (#429) |
 | SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | in review (#432) |
@@ -44,6 +43,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | SR3-7-f1 | `route.failover` retries on 500/502/503/504/529, but the meter sees only the served route's usage; if a provider bills 5xx attempts, one call can spend attempts times the limit against one reservation. Predates #429 and is unmeasured. First read the provider documentation on 5xx billing; if any is billed, meter every attempt or stop failover after a timeout-class status (release, tier A, Security 4a on #429, [note](reviews/security/2026-10-08-pr429.md) point 1; brief to write) | SR3-7 | queued (needs brief) |
 | SR3-8-f1 | `openStore` and `New` quarantine on the manifest's own `m.ID` instead of the directory name, and nothing validates the ID: with store write access a tampered manifest can quarantine the wrong artifact or rename a directory from outside into the store. Quarantine by directory name and require `m.ID` to equal it (release, tier A, Security 4a on #432, S1, PR #452; brief to write) | SR3-8 | queued (needs brief) |
 | SR3-8-f2 | The durability tests check the fault-hook trace, not the syscalls, so mutants that drop `syncDir` or `f.Sync` survive: pin the syscalls (release, tier A, Security on #432, S2; brief to write) | SR3-8 | queued (needs brief) |
+| SR3-5-f1 | Execute and Reconcile re-plan an organize by Message-ID and never check the result against what the gate approved, so a same-ID alert that replaced the approved message is hidden without the change-account ask: carry the gate's Ref (or alert bit) in the intent and return NotApplied on a mismatch or an unescalated hidden alert; also refuse a flag-only undo whose `Change.Validity` is 0. Before mail is wired (release, tier A, Security 4a on #424, S1-S2, [note](reviews/security/2026-10-09-pr424.md); supersedes LATER `SR3-5 f1` and `SR3-5 l2`; brief to write) | SR3-5 | queued (needs brief; before mail is wired) |
 
 ## Phase 0: harness and risk spikes
 
@@ -208,6 +208,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | P2-2w d2a | [Home page shows the owner line's note, last outage and counts](briefs/P2-2w-d2a.md) | P2-2w d | in review (#378) |
 | P2-2w d2b | [Page control to confirm a SIM swap and set up the owner number](briefs/P2-2w-d2b.md) | P2-2w d2a | queued (A) |
 | P2-1-roles | Host image: agentosd can write the modem roles directory so an adopted SIM takes effect on a real box (until then adopting changes nothing; Potency on #444, release), and `/var/lib/agentos/modem` is not writable by `agentos-modem`, because `recordOwnerSIM` follows a symlink at `roles.json` (Security S1 on #444, release; fold into the P2-1 image) | P2-1 (#41), P2-2w d2b | queued (release; brief to write) |
+| P2-2w-d2b-s2 | Two test gaps from #444 Security 4a (S2, release): no test pins clearing `adopted` after a SIM or state change (mutant M7), and none pins that the bridge sends no serial while the line is ok (mutant M12). Pin both; skip if #444 gains them before it merges | P2-2w d2b | queued (release; tier A; brief to write) |
 | P2-2w c | [Setup moves into agentosd](briefs/P2-2w-c.md) | P2-2w b | building (split into c1-c3, each under one session) |
 | P2-2w c1 | [Code seed made in the vault process and handed out once](briefs/P2-2w-c1.md) | P2-2w b | merged (#320) |
 | P2-2w c2 | [Pairing and finish in agentosd](briefs/P2-2w-c2.md) | P2-2w c1 | in review |
