@@ -15,6 +15,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
+	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/sockets"
 	"github.com/ghbmrk/agentos/broker/sockprobe"
 )
@@ -413,7 +414,7 @@ func runTurn(t *testing.T, s *Source, ctx context.Context) {
 // is not progress.
 func TestStatusSaysWhenFuzzingMakesNoProgress(t *testing.T) {
 	const stalled = "Loop 2: my fuzz self-tests have not run for "
-	const broken = "Loop 2: one of my fuzz self-tests cannot run."
+	const broken = "Loop 2: one of my fuzz self-tests cannot run. The fix comes with an update."
 	start := time.Unix(1_800_000_000, 0)
 	setup := func(t *testing.T, body string) (*Source, *time.Time) {
 		release := t.TempDir()
@@ -444,8 +445,8 @@ func TestStatusSaysWhenFuzzingMakesNoProgress(t *testing.T) {
 			*clock = clock.Add(12 * time.Hour)
 			runTurn(t, s, gone) // offered, preempted at once
 		}
-		if d := strings.Join(s.Digest(), "\n"); d != stalled+"2 days." {
-			t.Fatalf("digest %q, want %q", d, stalled+"2 days.")
+		if d := strings.Join(s.Digest(), "\n"); d != stalled+"2 days. I keep trying." {
+			t.Fatalf("digest %q, want %q", d, stalled+"2 days. I keep trying.")
 		}
 		// A completed step clears it.
 		runTurn(t, s, context.Background())
@@ -484,6 +485,22 @@ func TestStatusSaysWhenFuzzingMakesNoProgress(t *testing.T) {
 		}
 	})
 
+	// P3-4b-3r-text requirement 6 (#585 UX): both lines describe one
+	// stall, so while the cannot-run line shows, the not-run line does not.
+	t.Run("cannot run and not run", func(t *testing.T) {
+		s, clock := setup(t, "exit 0")
+		if err := os.Remove(s.cfg.Targets[0].Binary); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 3; i++ {
+			runTurn(t, s, context.Background())
+			*clock = clock.Add(24 * time.Hour)
+		}
+		if d := strings.Join(s.Digest(), "\n"); d != broken {
+			t.Fatalf("digest %q, want only %q", d, broken)
+		}
+	})
+
 	t.Run("no targets", func(t *testing.T) {
 		clock := start
 		s := newSource(t, newFake(), Config{Every: time.Hour, Now: func() time.Time { return clock }})
@@ -492,4 +509,50 @@ func TestStatusSaysWhenFuzzingMakesNoProgress(t *testing.T) {
 			t.Fatalf("digest %q with no fuzzing configured", d)
 		}
 	})
+}
+
+// P3-4b-3r-text requirement 6: LOOP-7's digest lines keep the owner-text
+// lens rule Guard's lines keep (loops' TestFindingTextsNameNoIdentifiers-
+// AndNeverAlarmWithoutAStep): no identifier, a step only when urgent
+// (never, for a digest line), and three GSM-7 segments at most; and each
+// says what happens next.
+func TestDigestLinesKeepTheOwnerTextRule(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	release := t.TempDir()
+	tg := fakeTarget(t, release, "exit 0")
+	clock := start
+	s := newSource(t, newFake(), Config{Targets: []Target{tg}, Release: release, Every: 12 * time.Hour,
+		Now: func() time.Time { return clock }})
+	runTurn(t, s, context.Background())
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	clock = clock.Add(72 * time.Hour)
+	runTurn(t, s, gone)
+	lines := s.Digest()
+	if err := os.Remove(s.cfg.Targets[0].Binary); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		clock = clock.Add(24 * time.Hour)
+		runTurn(t, s, context.Background())
+	}
+	lines = append(lines, s.Digest()...)
+	if len(lines) != 2 {
+		t.Fatalf("lines %q, want the not-run line then the cannot-run line", lines)
+	}
+	for i, tail := range []string{" I keep trying.", " The fix comes with an update."} {
+		l := lines[i]
+		if !strings.HasSuffix(l, tail) {
+			t.Errorf("%q gives no next step (want %q)", l, tail)
+		}
+		if bad := loops.IdentifierIn(l); bad != "" {
+			t.Errorf("%q shows %q", l, bad)
+		}
+		if loops.NamesAStep(l) {
+			t.Errorf("a digest line names an urgent step: %q", l)
+		}
+		if n, gsm := modem.Segments(l); !gsm || n > 3 {
+			t.Errorf("%q is %d segments, GSM-7 %v", l, n, gsm)
+		}
+	}
 }

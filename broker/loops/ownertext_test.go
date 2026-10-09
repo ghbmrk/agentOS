@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -259,32 +258,11 @@ func TestTheWaitLineSaysTheRealCadence(t *testing.T) {
 	}
 }
 
-var (
-	// innerCap is a word with a capital after a lower-case letter, as in
-	// FuzzRequest or vmName.
-	innerCap   = regexp.MustCompile(`[a-z][A-Z]`)
-	goPrefix   = regexp.MustCompile(`\b(Fuzz|Test)[A-Z0-9_]`)
-	hexRun     = regexp.MustCompile(`[0-9a-fA-F]{8,}`)
-	stepPhrase = regexp.MustCompile(`\bPaused \S|\bReply (STOP|PAUSE)\b|\bSTOP pauses everything\b`)
-)
+// The lens rule's checkers are exported (secure.go) so loop7's digest
+// lines are held to the same rule (P3-4b-3r-text).
+func namesAStep(line string) bool { return NamesAStep(line) }
 
-func namesAStep(line string) bool { return stepPhrase.MatchString(line) }
-
-// identifierIn is the first Go identifier, path or digest in s, or "".
-func identifierIn(s string) string {
-	for _, re := range []*regexp.Regexp{innerCap, goPrefix, hexRun} {
-		if m := re.FindString(s); m != "" {
-			return m
-		}
-	}
-	if strings.Contains(s, "/") {
-		return "/"
-	}
-	if strings.Contains(s, ".go") {
-		return ".go"
-	}
-	return ""
-}
+func identifierIn(s string) string { return IdentifierIn(s) }
 
 // REQ: LOOP-7, RES-1, RES-2
 //
@@ -355,11 +333,22 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 				}
 				line := ownerLine(rec)
 				cleared := clearedLine(rec)
+				// A return after "Cleared" leads "It is back: " and keeps
+				// every rule (P3-4b-3r-text requirement 4).
+				backRec := rec
+				backRec.Back = true
+				back := alertLine(backRec)
+				if back != itIsBack+line || alertLine(rec) != line {
+					t.Errorf("%s/%s: back %q, first %q", f.Check, state, back, alertLine(rec))
+				}
+				if urgentText(rec) != namesAStep(back) {
+					t.Errorf("%s/%s: the led text breaks the step rule: %q", f.Check, state, back)
+				}
 				// A hang is not a crash (P3-4b-3r-fuzz).
 				if hangDetail(f.Detail) && strings.Contains(strings.ToLower(line), "crash") {
 					t.Errorf("%s/%s: a hang reads as a crash: %q", f.Check, state, line)
 				}
-				for _, s := range []string{line, cleared} {
+				for _, s := range []string{line, cleared, back} {
 					loop7 := f.Check == CheckFuzz || f.Check == CheckProbe || f.Check == CheckCanary || f.Check == CheckCorpus
 					if bad := identifierIn(s); bad != "" && loop7 {
 						t.Errorf("%s/%s: %q shows %q", f.Check, state, s, bad)
