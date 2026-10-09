@@ -138,6 +138,9 @@ type Batch struct {
 	Attempts     int        `json:"attempts"`
 	Evidence     string     `json:"evidence,omitempty"`
 	Redacted     bool       `json:"redacted,omitempty"`
+	// Late marks a held batch the caller re-armed once with Late; the render
+	// func sees it and must say the digest is late.
+	Late bool `json:"late,omitempty"`
 }
 type latest struct {
 	Generation uint64 `json:"generation"`
@@ -248,7 +251,15 @@ func validate(st state, limits Limits) error {
 			}
 			prior = s.Source
 			l, ok := st.Latest[s.Source]
-			if !ok || s.Generation > l.Generation || (s.Generation == l.Generation && (s.Hash != l.Hash || b.ID != l.ID)) {
+			if !ok || s.Generation > l.Generation || (s.Generation == l.Generation && s.Hash != l.Hash) {
+				return ErrInvalid
+			}
+			// An expired batch's association may be re-offered in a later batch
+			// (DB-6), so only live batches must own their association uniquely.
+			if b.State == Expired {
+				continue
+			}
+			if s.Generation == l.Generation && b.ID != l.ID {
 				return ErrInvalid
 			}
 			key := fmt.Sprintf("%s/%d", s.Source, s.Generation)
@@ -310,7 +321,7 @@ func (q *Queue) Get(id uint64) (Batch, error) {
 }
 
 // List returns owned copies for recovery/source acknowledgment work, never an
-// owner-visible delivery claim. The caller must not send these without Begin.
+// owner-visible delivery claim. The caller must not send these except through (*Sender).Send.
 func (q *Queue) List() ([]Batch, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -349,7 +360,7 @@ func (q *Queue) Enqueue(snapshots []Snapshot, created, expires time.Time) (Batch
 	}
 	body, _ := json.Marshal(ss)
 	for _, b := range q.st.Batches {
-		if b.Redacted {
+		if b.Redacted || b.State == Expired {
 			continue
 		}
 		old, _ := json.Marshal(b.Snapshots)
@@ -363,8 +374,15 @@ func (q *Queue) Enqueue(snapshots []Snapshot, created, expires time.Time) (Batch
 	for _, s := range ss {
 		if l, ok := q.st.Latest[s.Source]; ok && s.Generation <= l.Generation {
 			if s.Generation == l.Generation && s.Hash == l.Hash {
-				if _, err := find(&q.st, l.ID); err != nil {
+				b, err := find(&q.st, l.ID)
+				if err != nil {
 					return Batch{}, ErrRetired
+				}
+				// An expired batch never reached the owner and its source was
+				// never acknowledged: the source re-offers it as a new intent.
+				// A forgotten snapshot is gone from that batch and stays refused.
+				if b.State == Expired && slices.ContainsFunc(b.Snapshots, func(v Snapshot) bool { return v.Hash == s.Hash }) {
+					continue
 				}
 			}
 			return Batch{}, ErrConflict
@@ -420,9 +438,10 @@ func (q *Queue) Acknowledge(id uint64, source string, generation uint64, hash st
 	return ErrConflict
 }
 
-// Begin persists sending before a transport may be invoked. A crash from here
+// begin persists sending before a transport may be invoked. A crash from here
 // cannot prove no text was sent, so reopening quarantines this attempt as unknown.
-func (q *Queue) Begin(id uint64, now time.Time) (Batch, error) {
+// Only (*Sender).Send calls it (DB-2); a test pins that.
+func (q *Queue) begin(id uint64, now time.Time) (Batch, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.broken {
@@ -459,11 +478,11 @@ func (q *Queue) Begin(id uint64, now time.Time) (Batch, error) {
 	return clone(*b), nil
 }
 
-// Finish records a trusted adapter's observation for the current attempt. A
+// finish records a trusted adapter's observation for the current attempt. A
 // NotSent result permits bounded retry only with affirmative not-sent evidence;
 // timeouts, lost receipts and absence of evidence must be OutcomeUnknown.
 // These references do not authenticate evidence; no guest may call this API.
-func (q *Queue) Finish(id uint64, attempt int, outcome Outcome, evidence string) error {
+func (q *Queue) finish(id uint64, attempt int, outcome Outcome, evidence string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.broken {
@@ -533,8 +552,9 @@ func (q *Queue) Expire(now time.Time) error {
 }
 
 // Held lists unsent batches that are past expiry but whose sources were already
-// acknowledged. Begin refuses them, so they need an owner-visible resolution
-// from the caller; the queue never discards or resends them on its own.
+// acknowledged. begin refuses them, so they need an owner-visible resolution
+// from the caller (Late or Forget); the queue never discards or resends them on
+// its own.
 func (q *Queue) Held(now time.Time) ([]Batch, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -550,9 +570,41 @@ func (q *Queue) Held(now time.Time) ([]Batch, error) {
 	return out, nil
 }
 
-// Forget purges payload/reference text and cancels unsent matching batches. It
-// refuses the entire operation if any matching batch may already have been sent;
-// the caller must contain/reconcile that send before declaring forget complete.
+// Late re-arms a held batch once (DB-4): only a ready batch that Held reports
+// at now, with every source acknowledged and not already late. It sets Late and
+// the new expiry and persists; begin's expiry check is unchanged, so a late batch
+// not sent by its new expiry is held again and cannot be re-armed. The caller
+// then resolves it with Forget or an owner-visible notice.
+func (q *Queue) Late(id uint64, now, expires time.Time) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.broken {
+		return ErrRecovery
+	}
+	if now.IsZero() || !expires.After(now) {
+		return ErrInvalid
+	}
+	next := clone(q.st)
+	b, err := find(&next, id)
+	if err != nil {
+		return err
+	}
+	if b.State != Ready || b.Redacted || b.Late || now.Before(b.Expires) || slices.Contains(b.Acknowledged, false) {
+		return ErrState
+	}
+	b.Late = true
+	b.Expires = expires.UTC()
+	return q.commit(next)
+}
+
+// Forget purges one reference (DB-5). In a ready (held included) or expired
+// batch it removes only the snapshots that carry the reference, with their
+// acknowledgment bits; if none remain, a ready batch is cancelled and an expired
+// one stays expired, both redacted. Accepted, failed and cancelled batches are
+// redacted whole. Any matching sending or unknown batch refuses the whole call
+// before any mutation: the caller must contain/reconcile that send first.
+// The source keeps a duty too: drop the reference and never re-offer it; a
+// forgotten generation re-offered is refused with ErrConflict.
 // Association hashes remain in bounded private dedupe state until an explicitly
 // reviewed reset/migration; they must be covered by private-storage protection.
 func (q *Queue) Forget(reference string) error {
@@ -565,38 +617,52 @@ func (q *Queue) Forget(reference string) error {
 		return ErrInvalid
 	}
 	next := clone(q.st)
-	ids := map[uint64]bool{}
+	matches := func(s Snapshot) bool { return slices.Contains(s.References, reference) }
+	changed := false
 	for _, b := range next.Batches {
-		for _, s := range b.Snapshots {
-			if slices.Contains(s.References, reference) {
-				if b.State == Sending || b.State == Unknown {
-					return ErrInFlight
-				}
-				ids[b.ID] = true
+		if slices.ContainsFunc(b.Snapshots, matches) {
+			if b.State == Sending || b.State == Unknown {
+				return ErrInFlight
 			}
+			changed = true
 		}
 	}
-	if len(ids) == 0 {
+	if !changed {
 		return nil
 	}
 	for i := range next.Batches {
 		b := &next.Batches[i]
-		if ids[b.ID] {
+		if !slices.ContainsFunc(b.Snapshots, matches) {
+			continue
+		}
+		if b.State == Ready || b.State == Expired {
+			var ss []Snapshot
+			var acked []bool
+			for k, s := range b.Snapshots {
+				if !matches(s) {
+					ss, acked = append(ss, s), append(acked, b.Acknowledged[k])
+				}
+			}
+			b.Snapshots, b.Acknowledged = ss, acked
+			if len(ss) > 0 {
+				continue
+			}
 			if b.State == Ready {
 				b.State = Cancelled
 			}
-			b.Snapshots = nil
-			b.Acknowledged = nil
-			b.Redacted = true
 		}
+		b.Snapshots = nil
+		b.Acknowledged = nil
+		b.Redacted = true
 	}
 	return q.commit(next)
 }
 
 // Compact removes terminal payloads but retains per-source high-water identity
 // and the monotonically increasing batch sequence. No unresolved send is removed,
-// nor any batch holding a snapshot its source has not acknowledged: that durable
-// association is the only way to recollect or visibly block on the source.
+// nor any batch holding a snapshot its source has not acknowledged while the
+// ledger still points at it: that association is how a re-offer is admitted or
+// refused. An expired batch no ledger entry points at was superseded (DB-6).
 func (q *Queue) Compact() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -604,8 +670,13 @@ func (q *Queue) Compact() error {
 		return ErrRecovery
 	}
 	next := clone(q.st)
+	pointed := map[uint64]bool{}
+	for _, l := range next.Latest {
+		pointed[l.ID] = true
+	}
 	next.Batches = slices.DeleteFunc(next.Batches, func(b Batch) bool {
-		return (b.State == Accepted || b.State == Expired || b.State == Cancelled || b.State == Failed) && !slices.Contains(b.Acknowledged, false)
+		terminal := b.State == Accepted || b.State == Expired || b.State == Cancelled || b.State == Failed
+		return terminal && (!slices.Contains(b.Acknowledged, false) || (b.State == Expired && !pointed[b.ID]))
 	})
 	if len(next.Batches) == len(q.st.Batches) {
 		return nil

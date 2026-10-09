@@ -159,13 +159,26 @@ const (
 	doneInstalled = "installed"
 	doneFellBack  = "fell_back"
 	doneNotHanded = "not_handed"
+	// doneInstalledOtherRoot: the update store holds the release as
+	// installed, but the box booted the previous root (SR3-4f-1a).
+	doneInstalledOtherRoot = "installed_other_root"
+	// doneUnrecorded: the release reached maxUnrecorded and is refused
+	// until Retry (SR3-4f-1b).
+	doneUnrecorded = "unrecorded"
 )
+
+// maxUnrecorded is how many times Install runs for one release with no
+// recorded outcome; after that the release is refused until the owner
+// retries it (SR3-4f-1b).
+const maxUnrecorded = 2
 
 type last struct {
 	Version int64  `json:"version"`
 	Kind    string `json:"kind"`
 	// Told: the digest carried it (UX-133-1).
 	Told bool `json:"told,omitempty"`
+	// Boot: for doneInstalledOtherRoot, the boot it was settled in.
+	Boot string `json:"boot,omitempty"`
 }
 
 type state struct {
@@ -176,6 +189,29 @@ type state struct {
 	Last     *last           `json:"last,omitempty"`
 	// FellBack: releases whose boot fell back, by decimal version.
 	FellBack map[string]bool `json:"fell_back,omitempty"`
+	// Unrecorded: Install attempts with no recorded outcome, by refKey.
+	// At maxUnrecorded the release is refused until Retry (SR3-4f-1b).
+	Unrecorded map[string]int `json:"unrecorded,omitempty"`
+}
+
+// refKey keys a release exactly in saved state.
+func refKey(r update.Ref) string {
+	return fmt.Sprintf("%d/%s/%s", r.Version, r.UsrRootHash, r.ManifestSHA256)
+}
+
+// counted is m with key set to n, or removed when n is 0 or less; m is
+// not changed.
+func counted(m map[string]int, key string, n int) map[string]int {
+	m = maps.Clone(m)
+	if n > 0 {
+		if m == nil {
+			m = map[string]int{}
+		}
+		m[key] = n
+	} else {
+		delete(m, key)
+	}
+	return m
 }
 
 // Applier applies staged releases.
@@ -260,6 +296,10 @@ var ErrApplying = errors.New("apply: a release is being applied")
 // ErrFellBack: the release already fell back on this box.
 var ErrFellBack = errors.New("apply: this release fell back before")
 
+// ErrRefused: Install ran maxUnrecorded times for this exact release
+// with no recorded outcome; only Retry admits it again (SR3-4f-1b).
+var ErrRefused = errors.New("apply: this release could not be recorded as installed; retry it first")
+
 // ScheduleFirstBoot queues the newest stable release first boot found
 // (UPD-3). It is due at once, with no jitter, and has no change-pipeline
 // adoption: the box has no owner, tasks or held-out cases yet, so after
@@ -305,6 +345,9 @@ func (a *Applier) schedule(v *update.Verified, adoption string, now bool) error 
 	defer a.mu.Unlock()
 	if a.st.Applying != nil {
 		return ErrApplying
+	}
+	if r := v.Ref(); a.st.Unrecorded[refKey(r)] >= maxUnrecorded {
+		return fmt.Errorf("%w: release %d (%s)", ErrRefused, r.Version, r.ManifestSHA256)
 	}
 	if p := a.st.Pending; p != nil && p.Version == m.Version && p.Adoption == adoption {
 		a.rel = v // the same release again: keep its moment
@@ -392,6 +435,13 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 		// The attestor policy narrowed since it was scheduled (SR3-6):
 		// drop the automatic authorization; Loop 3's next check schedules
 		// the release again under the current policy.
+		a.st.Pending, a.rel = nil, nil
+		err := a.saveLocked()
+		a.mu.Unlock()
+		return false, err
+	}
+	if a.st.Unrecorded[refKey(a.rel.Ref())] >= maxUnrecorded {
+		// Refused after its unrecorded installs (SR3-4f-1b).
 		a.st.Pending, a.rel = nil, nil
 		err := a.saveLocked()
 		a.mu.Unlock()
@@ -529,6 +579,9 @@ func (a *Applier) Check(_ context.Context, _ journal.Phase, in journal.Intent) e
 // the slot write. A failed install, or a handover whose record could not
 // be saved, is abandoned and drops the stage, and the release stays
 // pending: Execute succeeds only once the handover is durable (SR3-4).
+// The save before the install counts an unrecorded attempt for the exact
+// release, and the save that records the handover clears it; a release
+// that reached maxUnrecorded is not installed again (SR3-4f-1b).
 func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
 	v, ok := parseID(in.ID)
 	if !ok {
@@ -544,12 +597,18 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 		a.mu.Unlock()
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "no pending release"}
 	}
+	key := refKey(rel.Ref())
+	if a.st.Unrecorded[key] >= maxUnrecorded {
+		a.mu.Unlock()
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: ErrRefused.Error()}
+	}
 	pt, err := a.pointLocked(ctx, in.ID, rel, p.Adoption)
 	if err == nil {
 		pt.TalkUntil = a.talkUntil(p)
-		a.st.Applying = pt
+		prev := a.st.Unrecorded
+		a.st.Applying, a.st.Unrecorded = pt, counted(prev, key, prev[key]+1)
 		if err = a.saveLocked(); err != nil {
-			a.st.Applying = nil
+			a.st.Applying, a.st.Unrecorded = nil, prev
 		}
 	}
 	if err != nil {
@@ -571,7 +630,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 		if errors.Is(err, update.ErrPolicyMoved) && a.st.Pending == p {
 			a.st.Pending, a.rel = nil, nil // as in Tick (SR3-6)
 		}
-		a.abandonLocked(ctx)
+		a.abandonLocked(ctx, key, false)
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
 	}
 	next := a.st
@@ -582,10 +641,11 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 		next.Pending = nil
 	}
 	next.Applied = map[string]bool{in.ID: true} // only the latest is ever reconciled
+	next.Unrecorded = counted(a.st.Unrecorded, key, 0)
 	if err := a.save(next); err != nil {
 		// Unrecorded, the handover is undone, so the activation is never
 		// called done while a restart in this boot would abandon it.
-		a.abandonLocked(ctx)
+		a.abandonLocked(ctx, key, true)
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "handover not saved: " + err.Error()}
 	}
 	a.st = next
@@ -598,12 +658,28 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 // abandonLocked undoes a handover that did not complete; the release
 // stays pending. If the activator or the update store fails, the rollback
 // point stays, unrecorded as installed, for Resume to abandon (SR3-4).
-func (a *Applier) abandonLocked(ctx context.Context) {
+// took: Install returned nil, so the attempt stays counted against key;
+// otherwise the slot write failed and the count goes back (SR3-4f-1b).
+func (a *Applier) abandonLocked(ctx context.Context, key string, took bool) {
 	if a.cfg.Activator.Abandon(ctx) != nil || a.cfg.Store.DropStaged() != nil {
 		return
 	}
+	if took {
+		a.st.Last = unrecordedLast(a.st, a.st.Applying.To, key, a.st.Last)
+	} else {
+		a.st.Unrecorded = counted(a.st.Unrecorded, key, a.st.Unrecorded[key]-1)
+	}
 	a.st.Applying = nil
 	_ = a.saveLocked()
+}
+
+// unrecordedLast is the outcome of an abandoned attempt with no recorded
+// outcome: doneUnrecorded once the release reached maxUnrecorded, else l.
+func unrecordedLast(st state, version int64, key string, l *last) *last {
+	if st.Unrecorded[key] >= maxUnrecorded {
+		return &last{Version: version, Kind: doneUnrecorded}
+	}
+	return l
 }
 
 // pointLocked is the rollback point for handing rel over now.
@@ -654,6 +730,14 @@ func (a *Applier) Reconcile(_ context.Context, in journal.Intent, _ int) journal
 //	installed   CommitRelease(exact release)  ConfirmStaged(id)  Applying cleared
 //	fell back   DropStaged                    StageFailed(id)    FellBack set, Applying cleared
 //	not handed  Abandon, DropStaged           -                  Applying cleared
+//	other root  CommitRelease(exact release)  ConfirmStaged(id)  Applying cleared
+//
+// Other root: the box booted the previous root after the handover, but
+// the update store already holds the exact release as installed, so a
+// blessed boot of it was being committed when the broker stopped. That
+// is not a fallback: the commit is finished, never reverted (SR3-4f-1a).
+// A not-handed release that reached maxUnrecorded is settled as
+// unrecorded and refused until Retry (SR3-4f-1b).
 //
 // Each step is idempotent for the exact release and adoption, and the
 // in-flight record goes last, from memory only once it is saved, so a cut
@@ -682,7 +766,8 @@ func (a *Applier) Resume(ctx context.Context) error {
 		if err := a.cfg.Store.DropStaged(); err != nil {
 			return err
 		}
-		next.Last = &last{Version: pt.To, Kind: doneNotHanded}
+		next.Last = unrecordedLast(a.st, pt.To, refKey(update.Ref{Version: pt.To, UsrRootHash: pt.ToUsr, ManifestSHA256: pt.ToManifest}),
+			&last{Version: pt.To, Kind: doneNotHanded})
 	case b.UsrRootHash == pt.ToUsr && !b.Blessed:
 		return nil // the health check has not passed yet
 	case b.UsrRootHash == pt.ToUsr:
@@ -700,6 +785,22 @@ func (a *Applier) Resume(ctx context.Context) error {
 		}
 		next.Last = &last{Version: pt.To, Kind: doneInstalled}
 	default:
+		ref, committed, err := a.committedLocked(pt)
+		if err != nil {
+			return err // never taken for a fallback (SR3-4f-1a)
+		}
+		if committed {
+			if err := a.cfg.Store.CommitRelease(ref); err != nil {
+				return err // removes a staged record left behind
+			}
+			if pt.Adoption != "" {
+				if err := a.cfg.Pipeline.ConfirmStaged(pt.Adoption); err != nil {
+					return err
+				}
+			}
+			next.Last = &last{Version: pt.To, Kind: doneInstalledOtherRoot, Boot: b.ID}
+			break
+		}
 		if err := a.cfg.Store.DropStaged(); err != nil {
 			return err
 		}
@@ -714,6 +815,49 @@ func (a *Applier) Resume(ctx context.Context) error {
 		}
 		next.FellBack[strconv.FormatInt(pt.To, 10)] = true
 		next.Last = &last{Version: pt.To, Kind: doneFellBack}
+	}
+	if err := a.save(next); err != nil {
+		return err
+	}
+	a.st = next
+	return nil
+}
+
+// committedLocked: the handover was recorded and the update store holds
+// its exact release as installed (SR3-4f-1a). A read error is returned,
+// never taken for "not installed", so Resume retries it. Only a legacy
+// point whose digest is gone with its staged record cannot be matched,
+// and is judged as a fallback.
+func (a *Applier) committedLocked(pt *point) (update.Ref, bool, error) {
+	if !pt.Installed {
+		return update.Ref{}, false, nil
+	}
+	ref, err := a.refLocked(pt)
+	if err != nil || ref.ManifestSHA256 == "" {
+		return ref, false, err
+	}
+	in, err := a.cfg.Store.Installed()
+	if err != nil {
+		return ref, false, err
+	}
+	return ref, in.Version == ref.Version && in.UsrRootHash == ref.UsrRootHash &&
+		in.ManifestSHA256 == ref.ManifestSHA256, nil
+}
+
+// Retry admits again a release refused after maxUnrecorded unrecorded
+// installs; it is the owner's path back (SR3-4f-1b). The cleared count is
+// saved before it takes effect.
+func (a *Applier) Retry(ref update.Ref) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.st.Applying != nil || a.executing {
+		return ErrApplying
+	}
+	key := refKey(ref)
+	next := a.st
+	next.Unrecorded = counted(a.st.Unrecorded, key, 0)
+	if l := a.st.Last; l != nil && l.Kind == doneUnrecorded && l.Version == ref.Version {
+		next.Last = nil
 	}
 	if err := a.save(next); err != nil {
 		return err
@@ -759,6 +903,13 @@ func (a *Applier) Status() string {
 		return ""
 	case a.st.Last.Kind == doneFellBack:
 		return fellBackLine(a.st.Last.Version)
+	case a.st.Last.Kind == doneUnrecorded:
+		return unrecordedText(a.st.Last.Version)
+	case a.st.Last.Kind == doneInstalledOtherRoot:
+		if b, err := a.cfg.Activator.Booted(context.Background()); err == nil && b.ID == a.st.Last.Boot {
+			return otherRootText(a.st.Last.Version)
+		}
+		return "" // a later boot may run it
 	}
 	return fmt.Sprintf("Update %d was not installed; I will try again.", a.st.Last.Version)
 }
@@ -769,15 +920,37 @@ func (a *Applier) Digest() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	l := a.st.Last
-	if l == nil || l.Told || (l.Kind != doneInstalled && l.Kind != doneFellBack) {
+	if l == nil || l.Told || l.Kind == doneNotHanded {
 		return nil
 	}
 	l.Told = true
 	_ = a.saveLocked()
-	if l.Kind == doneInstalled {
+	switch l.Kind {
+	case doneInstalled:
+		return []string{fmt.Sprintf("Update %d is installed.", l.Version)}
+	case doneUnrecorded:
+		return []string{unrecordedText(l.Version)}
+	case doneInstalledOtherRoot:
+		if b, err := a.cfg.Activator.Booted(context.Background()); err == nil && b.ID == l.Boot {
+			return []string{otherRootText(l.Version)}
+		}
 		return []string{fmt.Sprintf("Update %d is installed.", l.Version)}
 	}
 	return []string{fellBackLine(l.Version)}
+}
+
+// otherRootText: the release is installed, but this boot runs the
+// previous root (SR3-4f-1a).
+func otherRootText(v int64) string {
+	return fmt.Sprintf("Update %d is installed, but I started the previous version this time. "+
+		"I will start update %d at my next restart. Nothing is needed from you.", v, v)
+}
+
+// unrecordedText: the release reached maxUnrecorded and waits for the
+// owner's retry (SR3-4f-1b).
+func unrecordedText(v int64) string {
+	return fmt.Sprintf("I could not record update %d as installed, twice, so I will not try it again on my own. "+
+		"You can retry it on my Wi-Fi page.", v)
 }
 
 // fellBackLine: Loop 3 never proposes a release again once it was adopted

@@ -5,6 +5,7 @@ package workers
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -34,8 +35,13 @@ func TestRunscMessagesNeverReachTheGuest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FAKE_RUNSC_CANARY", canary)
-	rt := runscExec{&runtime{running: map[string]vm.Launch{}}, &gvisor.Runtime{Bin: bin, StateDir: filepath.Join(t.TempDir(), "runsc")}}
+	// runsc inherits no environment (P3-4b-3r-env): a wrapper sets the
+	// fake's canary.
+	wrap := filepath.Join(t.TempDir(), "runsc")
+	if err := os.WriteFile(wrap, []byte("#!/bin/sh\nexport FAKE_RUNSC_CANARY='"+canary+"'\nexec '"+bin+"' \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rt := runscExec{&runtime{running: map[string]vm.Launch{}}, &gvisor.Runtime{Bin: wrap, StateDir: filepath.Join(t.TempDir(), "runsc")}}
 	r := newRigOn(t, 8000, 0, rt)
 	r.agent("agent", vm.Public)
 	r.must("agent", toolCreate, m{"name": "w", "mem_mb": 256}, nil)

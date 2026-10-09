@@ -22,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localsrv"
@@ -349,6 +350,7 @@ func main() {
 	var builderImage, builderLaunch, keptPath, setupRecord string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
+	var digestDir string
 	localUIUID := -1
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
@@ -389,8 +391,9 @@ func main() {
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
+	flag.StringVar(&digestDir, "digest", "/var/lib/agentos/digest", "the daily digest's queue and state (created 0700); empty sends no digest")
 	flag.StringVar(&learn.Loop7, "loop7", "/var/lib/agentos/loop7", "LOOP-7's fuzz corpora, with crash inputs found on this box, and the fuzz cache (P3-4b-3a)")
-	learn.Fuzz = fuzzRelease
+	learn.Fuzz, learn.FuzzUser = fuzzRelease, fuzzUser
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
 	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
 	flag.StringVar(&builderImage, "builder-image", defaultBuilderImage, "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty, or the default not registered, runs no model-backed builder")
@@ -534,6 +537,9 @@ func main() {
 			}
 		} else {
 			cg, psiPath = g, filepath.Join(g.Path, "memory.pressure")
+			// The machines group sits in the delegated root, where the
+			// fuzz children's leaf goes too (loop7 Jail, L7-6).
+			learn.Cgroup = filepath.Dir(g.Path)
 		}
 	}
 	if read, ok := cgroup.PressureSource(psiPath); ok {
@@ -557,6 +563,19 @@ func main() {
 	caps := newCapState(egressSocket)
 	caps.machinesUnset(runsc, agentOff)
 	capLines := newCapLines(caps)
+	// The daily digest (CH-15, W5-Dc) goes by the modem bridge; its STATUS
+	// lines are wired with the rest. Its queue opens when it runs.
+	var dg *digestBox
+	if modemBridge && digestDir != "" {
+		var queue, state change.Store = change.FileStore{Path: filepath.Join(digestDir, "queue.json")},
+			change.FileStore{Path: filepath.Join(digestDir, "digest-sources.json")}
+		if err := prepareDigestDir(digestDir); err != nil {
+			log.Printf("digest: %v", err)
+			queue, state = downStore{err}, downStore{err}
+		}
+		dg = newDigestBox(digestConfig{Queue: queue, State: state})
+		dg.register(capLines)
+	}
 	capLines.wire(&cfg)
 	// No update-check loop (Loop 3, W5b) is built yet: caps.updateChecks
 	// is never called, and STATUS says update checks are not running.
@@ -605,6 +624,9 @@ func main() {
 			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
 		}
 		cfg.BridgeOnly = !ownerMessage
+		if dg != nil {
+			dg.cfg.Transport = newDigestTransport(link, cfg.OwnerNumber)
+		}
 	}
 
 	// The learning plane failing must not take the owner channel down
@@ -625,6 +647,9 @@ func main() {
 		learningOff(&cfg)
 	} else {
 		lp.forgetOwner.wirePage(&cfg)
+		if dg != nil {
+			lp.forgetOwner.digest = dg.forget // CAP-3
+		}
 		caps.learning(lp) // routing held while learning is on (C12)
 	}
 	// Evidence delivery (CH-20): with a destination set, private replies
@@ -644,6 +669,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// The model routes hold only the attempts the owner's rule can spend,
+	// read from the routing socket off the request path (SR3-7-f2); with
+	// no routing socket they hold MaxRetries.
+	var retries func() int
+	if egressSocket != "" && learn.Routing != "" {
+		spare := &modelroute.Spare{}
+		go spare.Run(ctx, modelroute.NewRouting(learn.Routing).State, 30*time.Second)
+		retries = spare.Retries
+	}
 	steps := newStepNotes(&cfg.Notes)
 	if lp != nil && recallDir != "" && verifier != nil {
 		// An approved item 2 that finds recall not open yet waits for it
@@ -675,6 +709,15 @@ func main() {
 	recallCfg.Cases = fan
 	if lp != nil {
 		lp.attach(ctx, d)
+	}
+	// The digest runs once the forget owner's start-up replay has asked
+	// it again (security B2' on #592); its own saved forgets hold their
+	// batches either way.
+	if dg != nil {
+		if o := d.Owner(); o != nil {
+			dg.cfg.Inform = o.Inform
+		}
+		go dg.run(ctx)
 	}
 	// The owner channel failing to take questions must not take it down:
 	// the tools are then not offered and replies are task chat.
@@ -713,6 +756,9 @@ func main() {
 				// work since a task, taken back by recall's Reach.
 				lp.forgetOwner.agent.Store(&forgetAgent{work: recallExec,
 					lineage: func() (string, error) { return machines{m}.Lineage(agentMachine) }})
+				// Recall's Retry reports a take-back it finished here,
+				// which tells item 2's done text (RCH-3, RCH-4).
+				recallCfg.OnTakenBack = func(_ string, since time.Time) { lp.forgetOwner.agentTakenBack(ctx, since) }
 			}
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
@@ -723,7 +769,7 @@ func main() {
 			if wt != nil {
 				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
 			}
-			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
+			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, retries, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 				caps.agentOff(agentNoMachines)
@@ -769,7 +815,7 @@ func main() {
 						log.Printf("replay evaluation disabled: %v", err)
 					}
 					bc := builderFlags(flag.CommandLine, builderImage, builderLaunch)
-					bc.Dir, bc.AgentImage, bc.MemMB, bc.Egress = filepath.Join(cfg.SocketDir, "build"), namedAgentImage, builderMemMB, egressSocket
+					bc.Dir, bc.AgentImage, bc.MemMB, bc.Egress, bc.Retries = filepath.Join(cfg.SocketDir, "build"), namedAgentImage, builderMemMB, egressSocket, retries
 					lp.startBuilder(m, imgs, services, bc)
 				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
@@ -1043,7 +1089,7 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, tools guest.Tools) (*guest.Plane, error) {
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -1095,10 +1141,11 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 	}
 	if egressSocket != "" {
 		gcfg.Model = modelroute.Forward(modelroute.Config{
-			Socket: egressSocket,
-			Label:  m.DataLabel,
-			Denied: modelroute.Journal(eng, log.Printf),
-			Logf:   log.Printf,
+			Socket:  egressSocket,
+			Label:   m.DataLabel,
+			Denied:  modelroute.Journal(eng, log.Printf),
+			Logf:    log.Printf,
+			Retries: retries,
 		})
 	}
 	return guest.New(gcfg)

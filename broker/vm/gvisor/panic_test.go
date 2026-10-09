@@ -4,9 +4,9 @@ package gvisor
 //
 // SR2-3m: a Go runtime panic in runsc after the guest started writes its
 // trace to runsc's stderr with no --log line and exits 2. The guest's
-// stderr is a stream apart from runsc's (SR2-3n), so when runsc exits 2
-// with anything on its own stderr, Exec treats it as runsc's failure: an
-// error, no output, and the trace only in the broker's exec log.
+// stderr is a stream apart from runsc's (SR2-3n), so when an exec fails
+// with anything on runsc's own stderr, Exec treats it as runsc's failure:
+// an error, no output, and the trace only in the broker's exec log.
 
 import (
 	"context"
@@ -57,9 +57,8 @@ func TestRunscPanicAfterStartAnswersNoOutput(t *testing.T) {
 // 100ms deadline raced runsc's exit on a slow CI runner).
 func execAtMark(t *testing.T, mode string) (*Runtime, vm.ExecResult, error) {
 	t.Helper()
-	r := fakeRunsc(t)
 	mark := filepath.Join(t.TempDir(), "mark")
-	t.Setenv("FAKE_RUNSC_MARK", mark)
+	r := fakeRunsc(t, "FAKE_RUNSC_MARK="+mark)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	seen := make(chan bool, 1)
@@ -199,5 +198,96 @@ func TestGuestPanicTextIsAResult(t *testing.T) {
 	}
 	if res.ExitCode != 2 || string(res.Stdout) != "guest out\n" || !strings.HasPrefix(string(res.Stderr), "panic: boom\n") {
 		t.Fatalf("guest's own panic: %+v", res)
+	}
+}
+
+// runsc's own stderr carries only its text (SR2-3n), so any failed exec
+// with anything on it is runsc's failure, whatever the exit and whether
+// or not the context ended (P1-4-flake-crashed). Each case below writes
+// the pid first, so the command started and only that text decides.
+
+// runsc killed by something other than Exec (a cgroup OOM kill) after
+// writing its trace exits -1 with the context alive.
+func TestRunscKilledFromOutsideAfterTraceAnswersNoOutput(t *testing.T) {
+	r := fakeRunsc(t)
+	res, err := r.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"oompanic"}, MaxOutput: 4096})
+	if err != vm.ErrExecFailed {
+		t.Fatalf("error %v, want %v; result %+v", err, vm.ErrExecFailed, res)
+	}
+	if len(res.Stdout) > 0 || len(res.Stderr) > 0 || res.ExitCode != 0 {
+		t.Fatalf("runsc's trace answered output: %+v", res)
+	}
+	wantPanicLogged(t, r)
+}
+
+func TestRunscTextOnAnyFailedExitAnswersNoOutput(t *testing.T) {
+	r := fakeRunsc(t)
+	res, err := r.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"exit1text"}, MaxOutput: 4096})
+	if err != vm.ErrExecFailed {
+		t.Fatalf("error %v, want %v; result %+v", err, vm.ErrExecFailed, res)
+	}
+	if len(res.Stdout) > 0 || len(res.Stderr) > 0 || res.ExitCode != 0 {
+		t.Fatalf("runsc's text answered output: %+v", res)
+	}
+	b, err := os.ReadFile(filepath.Join(r.StateDir, "exec.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "W runsc: "+runscCanary) {
+		t.Errorf("exec log lacks runsc's line:\n%s", b)
+	}
+}
+
+// runsc exits 0 after a trace, but a process it left holds the pipes past
+// ExecWaitDelay, so the wait fails with ErrWaitDelay, not an exit. That is
+// a failed exec too. The same exit 0 and text with nothing holding the
+// pipes is err == nil and reads as a result; the code keeps both rows.
+func TestRunscTextPastWaitDelayAnswersNoOutput(t *testing.T) {
+	mark := filepath.Join(t.TempDir(), "mark")
+	r := fakeRunsc(t, "FAKE_RUNSC_MARK="+mark)
+	defer os.Remove(mark)
+	res, err := r.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"waitdelaytext"}, MaxOutput: 4096})
+	if _, serr := os.Stat(mark); serr != nil {
+		t.Fatalf("the leftover did not hold the pipes; the case is not exercised: %v", serr)
+	}
+	if err != vm.ErrExecFailed {
+		t.Fatalf("error %v, want %v; result %+v", err, vm.ErrExecFailed, res)
+	}
+	if len(res.Stdout) > 0 || len(res.Stderr) > 0 || res.ExitCode != 0 {
+		t.Fatalf("runsc's trace answered output: %+v", res)
+	}
+	wantPanicLogged(t, r)
+}
+
+// The exit-0 row of the same rule: runsc writes to its stderr but the
+// exec succeeds (err == nil), so it stays a result and nothing is logged.
+// This pins `err != nil` in crashed: without it, this test fails.
+func TestRunscTextOnSuccessIsAResult(t *testing.T) {
+	r := fakeRunsc(t)
+	res, err := r.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"exit0text"}, MaxOutput: 4096})
+	if err != nil {
+		t.Fatalf("a successful exec with runsc text read as a failure: %v", err)
+	}
+	if res.ExitCode != 0 || string(res.Stdout) != "guest out\n" {
+		t.Fatalf("a successful exec with runsc text: %+v", res)
+	}
+	if b, _ := os.ReadFile(filepath.Join(r.StateDir, "exec.log")); len(b) > 0 {
+		t.Fatalf("a successful exec was logged:\n%s", b)
+	}
+}
+
+// A guest's own non-zero exit, with nothing on runsc's stderr, stays a
+// result: only runsc's text withholds output.
+func TestGuestNonZeroExitWithoutRunscTextIsAResult(t *testing.T) {
+	r := fakeRunsc(t)
+	res, err := r.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"quiet"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 3 || string(res.Stdout) != "guest out\n" || string(res.Stderr) != "guest err\n" {
+		t.Fatalf("guest's own exit 3: %+v", res)
+	}
+	if b, _ := os.ReadFile(filepath.Join(r.StateDir, "exec.log")); len(b) > 0 {
+		t.Fatalf("a guest's exit was logged:\n%s", b)
 	}
 }

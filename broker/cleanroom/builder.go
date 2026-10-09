@@ -155,7 +155,10 @@ func New(cfg Config) (*Builder, error) {
 		if err := b.rebuild(m); err != nil {
 			return nil, err
 		}
-		if err := st.quarantine(m.ID); err != nil {
+		if err := st.quarantine(m.ID); errors.Is(err, errBadID) {
+			cfg.Logf("cleanroom: %v; not quarantined", err)
+			continue
+		} else if err != nil {
 			return nil, err
 		}
 		cfg.Logf("cleanroom: %s lost output; quarantined and its job queued again", m.ID)
@@ -194,7 +197,7 @@ func (b *Builder) rebuild(m Manifest) error {
 	if err := b.renew(j); err != nil {
 		return err
 	}
-	return syncDir(b.queueDir())
+	return faultFn(nil).dirSync(b.queueDir())
 }
 
 // renew stores the queue entry of a job whose output was lost, before the
@@ -261,7 +264,7 @@ func (b *Builder) logOutcome(o Outcome) error {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := faultFn(nil).fileSync(f); err != nil {
 		f.Close()
 		return err
 	}
@@ -470,7 +473,7 @@ func (b *Builder) finish(j *job, kind string, o Outcome) error {
 	if err := os.Remove(j.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	syncDir(filepath.Dir(j.path))
+	faultFn(nil).dirSync(filepath.Dir(j.path))
 	return nil
 }
 
@@ -493,8 +496,8 @@ func (b *Builder) park(j *job, kind, reason string) error {
 		err = os.Rename(j.path, filepath.Join(b.parkDir(), filepath.Base(j.path)))
 	}
 	if err == nil {
-		syncDir(filepath.Dir(j.path))
-		err = syncDir(b.parkDir())
+		faultFn(nil).dirSync(filepath.Dir(j.path))
+		err = faultFn(nil).dirSync(b.parkDir())
 	}
 	b.qmu.Unlock()
 	if err != nil {

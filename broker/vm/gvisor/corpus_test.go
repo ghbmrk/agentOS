@@ -420,7 +420,7 @@ func replayAll(t *testing.T, x *relay) {
 	}
 	probe := &loops.CorpusProbe{Interval: 1, Items: items, Checks: corpus.PlaneChecks(x)}
 	res, err := probe.Run(ctx)
-	if err != nil || len(res.Found) != 0 || len(res.Checked) != len(items) {
+	if err != nil || len(res.Found) != 0 || len(res.Checked) != len(items)*len(probe.Checks) {
 		t.Fatalf("clean run: %+v %v", res, err)
 	}
 	// Control: an item that replays to a configured label gets past the

@@ -139,6 +139,19 @@ type Fixer interface {
 	Fix(ctx context.Context, f Finding) (change.Candidate, error)
 }
 
+// ErrNotFixable is what a fixer's error wraps when it can never build a fix
+// for the finding (no namespace it may write, LOOP-10): Loop 2 then holds
+// the request without counting a failed build, and STATUS says so.
+var ErrNotFixable = errors.New("loops: no fix this fixer can build")
+
+// Unready is a Fixer that can tell, without building, that it cannot
+// build now (no builder machines, no model access). Loop 2 then asks it
+// nothing, the request stays open, and STATUS says why: the answer is
+// owner text, in the box's words.
+type Unready interface {
+	Unready() string
+}
+
 // SuitePipeline is the part of the change pipeline Loop 2 uses: it adds
 // fixtures, proposes fixes and reads the active tree they change. It has
 // no way to remove a fixture (LOOP-10): that is an owner-approved intent.
@@ -149,6 +162,9 @@ type SuitePipeline interface {
 	// LinkedHold answers a finding's linked cases from the active tree
 	// (P3-4b-1b item 1).
 	LinkedHold(finding string) (linked int, hold bool)
+	// Digests are the active tree's and the whole suite's digests: what a
+	// rejection was graded against (fixKey, P3-4b-5).
+	Digests() (tree, suite string)
 }
 
 // GuardConfig configures NewSecure.
@@ -249,6 +265,28 @@ const (
 // maxHeldFixes bounds the kept candidates, oldest dropped first.
 const maxHeldFixes = 16
 
+// The retry bound for a fix request (Potency 1 on #464, #493). Each
+// failed or rejected attempt is a builder job with a model fixer. Two
+// rejections in a row for the same reason, with the suite and tree as the
+// last one found them, mean the verdict is deterministic (S22), so the
+// fixer is not asked again until the suite or the tree changes; after fixBurst failures to build
+// one, the next waits fixBackoff; after maxFixTries the box stops asking
+// and STATUS says so. A rejection for a new reason is asked again at the
+// next pass, as the A11 harness's scripted set needs.
+const (
+	fixBurst    = 2
+	maxFixTries = 8
+	fixBackoff  = 24 * time.Hour
+)
+
+// Why a fix request is held back (Record.FixHold).
+const (
+	holdUnchanged = "unchanged"
+	holdLater     = "later"
+	holdStopped   = "stopped"
+	holdUnfixable = "unfixable"
+)
+
 type secureState struct {
 	Last time.Time `json:"last"`
 	// Open are findings still observed, by ID.
@@ -262,6 +300,10 @@ type secureState struct {
 	// Cleared is when each finding last cleared, so a flapping finding is
 	// not texted again unless it stayed clear for ReText.
 	Cleared map[string]time.Time `json:"cleared,omitempty"`
+	// ToldCleared are the findings whose last close in Pass texted the
+	// owner "Cleared", so a return within ReText is texted, not left as a
+	// false all-clear (L3 #585 point 1).
+	ToldCleared map[string]bool `json:"told_cleared,omitempty"`
 	// NotRun are the checks the last pass had no input for, Failed those
 	// whose input errored, and NotRunSaid the set the digest last named
 	// (Digest).
@@ -306,10 +348,25 @@ type Record struct {
 	// Replay is the passing replay that closed a fuzz or probe finding
 	// (Resolve).
 	Replay *Replay `json:"replay,omitempty"`
+	// Closure is the good fuzz step that closed a hang finding
+	// (CloseTarget), which replayed no stored input.
+	Closure *Closure `json:"closure,omitempty"`
 	// Told marks a reported finding's owner text as sent, so a resume
 	// after a crash sends a text not yet sent, and only that (P3-4b-1b
 	// item 3).
 	Told bool `json:"told,omitempty"`
+	// FixTries counts the fix attempts that failed or did not qualify,
+	// FixLast is the latest, FixKey what its rejection was graded against
+	// (fixKey), FixAgain marks a rejection for the same reason as the one
+	// before, FixSeen the rejected candidates' hashes, and FixHold why the
+	// request is held back (holdUnchanged, holdLater, holdStopped): they
+	// bound the retries (Potency 1 on #464, #493; LOOP-2).
+	FixTries int       `json:"fix_tries,omitempty"`
+	FixLast  time.Time `json:"fix_last,omitempty"`
+	FixKey   string    `json:"fix_key,omitempty"`
+	FixAgain bool      `json:"fix_again,omitempty"`
+	FixSeen  []string  `json:"fix_seen,omitempty"`
+	FixHold  string    `json:"fix_hold,omitempty"`
 }
 
 // NewGuard loads Loop 2's state.
@@ -369,6 +426,9 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 	}
 	if s.st.Cleared == nil {
 		s.st.Cleared = map[string]time.Time{}
+	}
+	if s.st.ToldCleared == nil {
+		s.st.ToldCleared = map[string]bool{}
 	}
 	return s, nil
 }
@@ -433,18 +493,32 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	// findings in the text so a new alert is never pushed into MORE.
 	var lines, later []string
 	urgent := false
+	// A check that failed this pass looked at nothing, so none of its
+	// open findings closes, seen or not (P3-4b-3r-pass; #558 Security 4a).
+	broke := map[Check]bool{}
+	for _, c := range failed {
+		broke[Check(c)] = true
+	}
+	var closed []Record
 	for _, id := range sortedKeys(s.st.Open) {
 		rec := s.st.Open[id]
-		if seen[id] || rec.Reported && !clear[id] {
+		if seen[id] || rec.Reported && !clear[id] || broke[rec.Finding.Check] {
 			continue
 		}
 		// No longer observed; its evidence stays. A pause it caused stays
-		// too, and the owner hears it cleared where they heard of it.
+		// too.
 		delete(s.st.Open, id)
 		delete(s.held, id)
 		s.st.Cleared[id] = now
-		if rec.Contained == "paused" && rec.Texted {
-			later = append(later, clearedLine(rec))
+		// A texted return within ReText (Again) clears in the digest
+		// only, so the next return within ReText is not texted. A pause
+		// still hears it cleared: that line says it stays paused, so it
+		// is no all-clear and a return while paused stays untexted.
+		if rec.Texted && (!rec.Again || rec.Contained == "paused") {
+			closed = append(closed, rec)
+			if rec.Contained != "paused" {
+				s.st.ToldCleared[id] = true
+			}
 		}
 	}
 	// A version (installed or fixed) that stays uncomparable for
@@ -498,6 +572,11 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 			urgent = urgent || urgentText(rec)
 		}
 	}
+	// Every texted finding is told it cleared, paused or not, once no
+	// open texted finding shares its plain name, new ones included (S39).
+	s.mu.Lock()
+	later = append(later, s.clearedLinesLocked(closed)...)
+	s.mu.Unlock()
 	text := s.batch(append(lines, later...))
 	s.mu.Lock()
 	err := s.saveLocked()
@@ -693,9 +772,15 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Re
 	if rec.Contained == "paused" {
 		s.contained = true
 	}
+	// Back too soon: the digest says so instead, unless the owner's last
+	// text about it said it cleared; then it is texted once more, and as
+	// Again its own clearing is not (Pass), so a flap ends on "it is back".
+	told := false
 	if t, ok := s.st.Cleared[f.ID]; ok && rec.At.Sub(t) < s.cfg.ReText {
-		rec.Again = true // back too soon: the digest says so instead
+		rec.Again = true
+		told = s.st.ToldCleared[f.ID]
 	}
+	delete(s.st.ToldCleared, f.ID)
 	// Every automatic pause is texted at once (security L2 on W5a),
 	// unless the target was still paused from before: a finding back too
 	// soon then stays in the digest as "again".
@@ -704,7 +789,7 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Re
 		_, still := s.st.Paused[targetKey(*f.Contain)]
 		newPause = !still
 	}
-	rec.Texted = newPause || !rec.Again && (f.Severity == High || rec.Contained == "capped")
+	rec.Texted = newPause || told || !rec.Again && (f.Severity == High || rec.Contained == "capped")
 	// Evidence is saved before anything slower runs.
 	s.st.Open[f.ID] = rec
 	if rec.Contained == "paused" {
@@ -793,26 +878,48 @@ func (s *Guard) link(ctx context.Context, rec *Record) error {
 // a broken fixer is not called on every pass (OP-8).
 func (s *Guard) fix(ctx context.Context, rec *Record) error {
 	f := rec.Finding
+	prev, rejected := rec.FixReason, rec.Fix == string(change.StateRejected)
 	s.mu.Lock()
 	h, ok := s.held[f.ID]
 	delete(s.held, f.ID)
 	s.mu.Unlock()
 	cand, base := h.cand, h.base
 	if !ok || s.cfg.Now().Sub(h.at) > s.resumeFor() || !maps.Equal(base, s.bases(cand)) {
+		// The fixer gets the minimized regression, not the padded test
+		// (P3-4b-5): what a fix must pass, and no more of the suite.
+		in := f
+		if rec.Regression != nil {
+			in.Rule = rec.Regression
+		}
 		var err error
-		if cand, err = s.cfg.Fixer.Fix(ctx, f); err != nil {
+		if cand, err = s.cfg.Fixer.Fix(ctx, in); err != nil {
 			if ctx.Err() != nil {
 				rec.Fix, rec.FixReason = FixPreempted, ""
 				return nil
 			}
 			rec.Fix, rec.FixReason = FixFailed, ""
+			if errors.Is(err, ErrNotFixable) {
+				// Not a failed build: no job ran and none ever can.
+				rec.FixHold = holdUnfixable
+				return nil
+			}
+			s.tried(rec, "", false)
 			return fmt.Errorf("fix %s: %w", f.ID, err)
 		}
-		// Loop 2 sets these, never the fixer.
-		cand.Source, cand.Origin, cand.Public, cand.Finding = change.Local, "loop2", false, ""
+		// Loop 2 sets these, never the fixer; goals a fixer sets would tie
+		// the fix to an owner goal whose forgetting undoes it (Security 4
+		// on #464, CHG-2).
+		cand.Source, cand.Origin, cand.Public, cand.Finding, cand.Goals, cand.Claim = change.Local, "loop2", false, "", nil, ""
 		if rec.Reported {
 			// Only a reported finding has linked cases to grade the fix.
 			cand.Finding = f.ID
+		}
+		if slices.Contains(rec.FixSeen, candHash(cand)) {
+			// Rejected before: the same verdict, without a second
+			// evaluation.
+			rec.Fix = string(change.StateRejected)
+			s.tried(rec, "", rejected)
+			return nil
 		}
 		base = s.bases(cand)
 	}
@@ -823,10 +930,72 @@ func (s *Guard) fix(ctx context.Context, rec *Record) error {
 		return nil
 	}
 	rec.Fix, rec.FixReason = string(rep.State), rep.Reason
+	if rep.State == change.StateRejected {
+		s.tried(rec, candHash(cand), rejected && rep.Reason == prev)
+	}
 	if err != nil {
 		return fmt.Errorf("fix %s: %w", f.ID, err)
 	}
 	return nil
+}
+
+// tried counts a fix attempt that failed or was rejected, with the
+// rejected candidate's hash if any; again marks a rejection for the same
+// reason as the last.
+func (s *Guard) tried(rec *Record, hash string, again bool) {
+	rec.FixTries++
+	rec.FixLast = s.cfg.Now()
+	rec.FixKey, rec.FixAgain = s.fixKey(*rec), again
+	if hash != "" && !slices.Contains(rec.FixSeen, hash) {
+		rec.FixSeen = append(rec.FixSeen, hash)
+	}
+}
+
+// fixKey is what rec's rejection was graded against: its reason and the
+// digests of the active tree and the whole suite (its linked cases
+// included). Equal keys give the same verdict to the same candidate. ""
+// for anything but a rejection. It calls the pipeline: never with s.mu
+// held.
+func (s *Guard) fixKey(rec Record) string {
+	if rec.Fix != string(change.StateRejected) {
+		return ""
+	}
+	tree, suite := s.cfg.Pipeline.Digests()
+	h := sha256.Sum256(fmt.Appendf(nil, "%q\ntree %s\nsuite %s\n", rec.FixReason, tree, suite))
+	return hex.EncodeToString(h[:])
+}
+
+// hold is why rec's fix request is held back now, "" when it is due. It
+// calls the pipeline: never with s.mu held.
+func (s *Guard) hold(rec Record) string {
+	switch {
+	case rec.FixHold == holdUnfixable:
+		return holdUnfixable
+	case rec.FixTries >= maxFixTries:
+		return holdStopped
+	case rec.FixTries < fixBurst:
+		return ""
+	case rec.Fix == string(change.StateRejected):
+		if rec.FixAgain && rec.FixKey == s.fixKey(rec) {
+			return holdUnchanged
+		}
+	case rec.Fix == FixFailed && s.cfg.Now().Before(rec.FixLast.Add(fixBackoff)):
+		return holdLater
+	}
+	return ""
+}
+
+// candHash identifies a candidate's changes.
+func candHash(c change.Candidate) string {
+	h := sha256.New()
+	for _, p := range slices.Sorted(maps.Keys(c.Files)) {
+		fmt.Fprintf(h, "%q %d\n", p, len(c.Files[p]))
+		h.Write(c.Files[p])
+	}
+	for _, p := range slices.Sorted(slices.Values(c.Delete)) {
+		fmt.Fprintf(h, "-%q\n", p)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (s *Guard) resumeFor() time.Duration {
@@ -877,6 +1046,9 @@ func (s *Guard) fixPending(ctx context.Context, fresh []string) error {
 	if s.cfg.Fixer == nil {
 		return nil
 	}
+	if u, ok := s.cfg.Fixer.(Unready); ok && u.Unready() != "" {
+		return nil // the requests stay open; STATUS says why
+	}
 	s.mu.Lock()
 	var ids []string
 	for _, id := range sortedKeys(s.st.Open) {
@@ -896,8 +1068,13 @@ func (s *Guard) fixPending(ctx context.Context, fresh []string) error {
 		if !ok || !retry(rec) {
 			continue
 		}
-		if err := s.fix(ctx, &rec); err != nil {
-			errs = append(errs, err)
+		if rec.FixHold = s.hold(rec); rec.FixHold == "" {
+			if err := s.fix(ctx, &rec); err != nil {
+				errs = append(errs, err)
+			}
+			if rec.FixHold != holdUnfixable {
+				rec.FixHold = s.hold(rec)
+			}
 		}
 		s.mu.Lock()
 		if _, still := s.st.Open[id]; still {
@@ -1265,6 +1442,15 @@ func capFirst(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
+// aboveBudget says what an exhaustion round's "above budget" finding lets
+// an agent machine do, by resource.
+var aboveBudget = map[string]string{
+	"memory":    "use more memory than its budget",
+	"processes": "start more processes than its budget",
+	"disk":      "use more disk space than its budget",
+	"cpu":       "take as large a share of processor time as I get",
+}
+
 // findingText is one finding in plain words, with the next step.
 func findingText(f Finding) string {
 	sub := safeName(f.Subject)
@@ -1304,6 +1490,9 @@ func findingText(f Finding) string {
 	case CheckSeeded:
 		return "Security test " + sub + " fails on my current setup."
 	case CheckFuzz:
+		if hangDetail(f.Detail) {
+			return "My self-test of " + plainSubject(f) + " stopped responding to a test input. The fix comes with an update."
+		}
 		return "My self-test found a crash in " + plainSubject(f) + ". The fix comes with an update."
 	case CheckProbe:
 		return "My self-test of " + plainSubject(f) + " failed. The fix comes with an update."
@@ -1320,7 +1509,10 @@ func findingText(f Finding) string {
 	case CheckExhaust:
 		switch {
 		case f.Detail != "slow":
-			return "A load test found no " + sub + " limit on an agent machine."
+			if over, ok := aboveBudget[f.Subject]; ok {
+				return "A load test found an agent machine can " + over + "."
+			}
+			return "A load test found an agent machine over its budget for " + sub + "."
 		case f.Subject == "preemption":
 			return "Under a load test I stopped an agent machine slower than my target."
 		}
@@ -1393,11 +1585,25 @@ func ownStep(f Finding) bool {
 // clearedLine tells the owner a texted finding cleared: a pause it caused
 // stays until they resume it; otherwise nothing more is needed.
 func clearedLine(r Record) string {
+	what := clearedWhat(r.Finding)
 	if r.Contained == "paused" {
 		return fmt.Sprintf("Cleared: %s. %s stays paused until you resume it on my Wi-Fi page.",
-			plainSubject(r.Finding), capFirst(label(r.Finding.Contain)))
+			what, capFirst(label(r.Finding.Contain)))
 	}
-	return "Cleared: " + plainSubject(r.Finding) + ". Nothing more is needed from you."
+	return "Cleared: " + what + ". Nothing more is needed from you."
+}
+
+// clearedWhat is what a cleared line says cleared: for a fuzz finding,
+// the crash or the hang, so the line is never ambiguous with another
+// finding on the same plain name still open (L3 on #586 point 1).
+func clearedWhat(f Finding) string {
+	switch {
+	case f.Check == CheckFuzz && hangDetail(f.Detail):
+		return plainSubject(f) + " responds to test inputs again"
+	case f.Check == CheckFuzz:
+		return "the crash in " + plainSubject(f)
+	}
+	return plainSubject(f)
 }
 
 // digestCap is how many open-finding lines the digest shows.

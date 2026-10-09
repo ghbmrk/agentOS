@@ -4,6 +4,7 @@ package loops
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -43,8 +44,8 @@ func TestResolveTellsEveryTextedFindingItCleared(t *testing.T) {
 		f       Finding
 		cleared string
 	}{
-		{"unpaused", fuzzFinding(), "Cleared: the check that reads agent requests. Nothing more is needed from you."},
-		{"paused", withContain(fuzzFinding()), "Cleared: the check that reads agent requests. Pre-allowance G7 stays paused until you resume it on my Wi-Fi page."},
+		{"unpaused", fuzzFinding(), "Cleared: the crash in the check that reads agent requests. Nothing more is needed from you."},
+		{"paused", withContain(fuzzFinding()), "Cleared: the crash in the check that reads agent requests. Pre-allowance G7 stays paused until you resume it on my Wi-Fi page."},
 		{"untexted", lowFuzz(), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,8 +83,8 @@ func TestACleanProbeRunTellsEveryTextedFindingItCleared(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &fakeProbe{check: tc.f.Check, every: time.Hour, results: []ProbeResult{
-				{Found: []Finding{tc.f}, Checked: []string{tc.f.Subject}},
-				{Checked: []string{tc.f.Subject}},
+				{Found: []Finding{tc.f}, Checked: []string{checkedKey(tc.f)}},
+				{Checked: []string{checkedKey(tc.f)}},
 			}}
 			r := newReportRig(t, nil)
 			r.probes = []Probe{p}
@@ -284,6 +285,26 @@ func identifierIn(s string) string {
 	return ""
 }
 
+// REQ: LOOP-7, RES-1
+//
+// P3-4b-4c-step (#548 UX 1): a limit above the configured budget says
+// which resource and that the machine is over its budget, not that no
+// limit exists; with no containment (S37) its line says nothing is
+// paused and nothing is needed.
+func TestAnAboveBudgetLimitSaysSoAndThatNothingIsNeeded(t *testing.T) {
+	for subject, want := range map[string]string{
+		"memory":    "A load test found an agent machine can use more memory than its budget.",
+		"processes": "A load test found an agent machine can start more processes than its budget.",
+		"disk":      "A load test found an agent machine can use more disk space than its budget.",
+		"cpu":       "A load test found an agent machine can take as large a share of processor time as I get.",
+	} {
+		f := Finding{Check: CheckExhaust, Subject: subject, Detail: "above budget", Severity: High}
+		if got := ownerLine(Record{Finding: f}); got != want+" "+nothingNeeded {
+			t.Errorf("%s: %q", subject, got)
+		}
+	}
+}
+
 // The lens check (UX, second occurrence on #523 and #515): every check's
 // owner line in each containment state names no identifier, never alarms
 // without a step, and fits three GSM-7 segments.
@@ -295,13 +316,18 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 		{Check: CheckFuzz, Subject: "hostdisk.FuzzProbe", Detail: "x"},
 		{Check: CheckCanary, Subject: "registry-entry-0a1b2c3d4e", Detail: "kinds: api_key"},
 		{Check: CheckTamper, Subject: "evaluator", Detail: "writable"},
-		{Check: CheckExhaust, Subject: "memory", Detail: "no limit"},
+		{Check: CheckExhaust, Subject: "memory", Detail: "above budget"},
+		{Check: CheckExhaust, Subject: "processes", Detail: "above budget"},
+		{Check: CheckExhaust, Subject: "disk", Detail: "above budget"},
+		{Check: CheckExhaust, Subject: "cpu", Detail: "above budget"},
 		{Check: CheckExhaust, Subject: "preemption", Detail: "slow"},
 		{Check: CheckHash, Subject: "agent-image", Detail: "differs from the signed release"},
 		{Check: CheckDrift, Subject: "routes", Detail: "changed"},
 		{Check: CheckAdvisory, Subject: "openssl", Detail: "CVE-2026-1", Fixed: "3.1"},
 		{Check: CheckExpiry, Subject: "mail-login", Detail: "expires in 3 days"},
 		{Check: CheckSeeded, Subject: "private-route", Detail: "x"},
+		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzOverrunDetail},
+		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzStallDetail},
 	}
 	// The scan catches what it must.
 	for _, s := range []string{"sockets.FuzzRequest", "a/b", "x.go", "00112233aa", "vmName", "TestX"} {
@@ -322,6 +348,10 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 				}
 				line := ownerLine(rec)
 				cleared := clearedLine(rec)
+				// A hang is not a crash (P3-4b-3r-fuzz).
+				if hangDetail(f.Detail) && strings.Contains(strings.ToLower(line), "crash") {
+					t.Errorf("%s/%s: a hang reads as a crash: %q", f.Check, state, line)
+				}
 				for _, s := range []string{line, cleared} {
 					loop7 := f.Check == CheckFuzz || f.Check == CheckProbe || f.Check == CheckCanary || f.Check == CheckCorpus
 					if bad := identifierIn(s); bad != "" && loop7 {
@@ -361,7 +391,7 @@ func TestClearedWaitsForEveryFindingSharingItsPlainName(t *testing.T) {
 		if err := r.g.Resolve(idb, Replay{Evidence: b.Detail, Passed: true}); err != nil {
 			t.Fatal(err)
 		}
-		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the check that reads agent requests.") {
+		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the crash in the check that reads agent requests.") {
 			t.Fatalf("texts %q", got)
 		}
 	})
@@ -369,9 +399,9 @@ func TestClearedWaitsForEveryFindingSharingItsPlainName(t *testing.T) {
 		pa, pb := hostile(CheckCorpus), hostile(CheckCorpus)
 		pb.Subject = "other/item"
 		p := &fakeProbe{check: CheckCorpus, every: time.Hour, results: []ProbeResult{
-			{Found: []Finding{pa, pb}, Checked: []string{pa.Subject, pb.Subject}},
-			{Found: []Finding{pb}, Checked: []string{pa.Subject, pb.Subject}},
-			{Checked: []string{pa.Subject, pb.Subject}},
+			{Found: []Finding{pa, pb}, Checked: []string{checkedKey(pa), checkedKey(pb)}},
+			{Found: []Finding{pb}, Checked: []string{checkedKey(pa), checkedKey(pb)}},
+			{Checked: []string{checkedKey(pa), checkedKey(pb)}},
 		}}
 		r := newReportRig(t, nil)
 		r.probes = []Probe{p}
@@ -389,4 +419,206 @@ func TestClearedWaitsForEveryFindingSharingItsPlainName(t *testing.T) {
 			t.Fatalf("texts %q", got)
 		}
 	})
+}
+
+// clearedTexts is the texts since before that say a finding cleared.
+func clearedTexts(texts []string, before int) []string {
+	var out []string
+	for _, t := range texts[before:] {
+		if strings.Contains(t, "Cleared:") {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// P3-4b-3r-pass requirement 1 (#558 Security 4a point 2, L3 point 3): a
+// check that failed to run closes none of its open findings, seen or
+// not, so no "Cleared" is sent for a finding nothing looked at; the next
+// clean run closes it and says so once.
+func TestAFailedCheckClosesNothing(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		break_ func(*box)
+		fail   func(*box, error)
+		fix    func(*box)
+		want   string
+	}{
+		{"paused hash, Signed errors",
+			func(b *box) { b.measured["guest-image/openclaw"] = "tampered" },
+			func(b *box, err error) { b.signedErr = err },
+			func(b *box) { b.measured["guest-image/openclaw"] = "aa" },
+			"Cleared: guest-image/openclaw. The agent machine stays paused until you resume it on my Wi-Fi page."},
+		{"unpaused drift, Live errors",
+			func(b *box) { b.live["config/quiet.json"] = "edited" },
+			func(b *box, err error) { b.liveErr = err },
+			func(b *box) { b.live["config/quiet.json"] = "c1" },
+			"Cleared: config/quiet.json. Nothing more is needed from you."},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := cleanBox()
+			c.break_(b)
+			r := newGuardRig(t, b)
+			if n := r.pass(t); n != 1 || len(r.texts) != 1 {
+				t.Fatalf("findings %d, texts %q", n, r.texts)
+			}
+			c.fix(b) // repaired, but the check cannot look
+			c.fail(b, errors.New("unreadable"))
+			before := len(r.texts)
+			r.now = r.now.Add(6 * time.Hour)
+			r.pass(t)
+			if got := clearedTexts(r.texts, before); len(got) != 0 {
+				t.Fatalf("cleared while its check failed: %q", got)
+			}
+			if len(r.g.Evidence()) != 1 || len(r.g.st.Open) != 1 {
+				t.Fatalf("finding closed while its check failed: %+v", r.g.st.Open)
+			}
+			c.fail(b, nil)
+			r.now = r.now.Add(6 * time.Hour)
+			r.pass(t)
+			if got := clearedTexts(r.texts, before); len(got) != 1 || !strings.Contains(got[0], c.want) {
+				t.Fatalf("cleared texts %q, want one with %q", got, c.want)
+			}
+			if len(r.g.st.Open) != 0 {
+				t.Fatalf("still open: %+v", r.g.st.Open)
+			}
+			r.now = r.now.Add(6 * time.Hour)
+			r.pass(t)
+			if got := clearedTexts(r.texts, before); len(got) != 1 {
+				t.Fatalf("cleared said again: %q", got)
+			}
+		})
+	}
+}
+
+// P3-4b-3r-pass requirement 2 (#558 Potency; S39): Pass texts "Cleared"
+// for every texted finding, paused or not, through the dedupe Resolve
+// and runProbe use, and never urgently; an untexted one clears only in
+// STATUS and the digest.
+func TestPassTellsEveryTextedFindingItCleared(t *testing.T) {
+	cases := []struct {
+		name   string
+		break_ func(*box)
+		fix    func(*box)
+		want   string // "" means no text
+	}{
+		{"texted unpaused",
+			func(b *box) { b.live["config/quiet.json"] = "edited" },
+			func(b *box) { b.live["config/quiet.json"] = "c1" },
+			"Cleared: config/quiet.json. Nothing more is needed from you."},
+		{"texted paused",
+			func(b *box) { b.measured["guest-image/openclaw"] = "tampered" },
+			func(b *box) { b.measured["guest-image/openclaw"] = "aa" },
+			"Cleared: guest-image/openclaw. The agent machine stays paused until you resume it on my Wi-Fi page."},
+		{"untexted",
+			func(b *box) {
+				b.expiries = append(b.expiries, Expiry{Name: "cal-cert", NotAfter: t0.Add(3 * 24 * time.Hour)})
+			},
+			func(b *box) { b.expiries = b.expiries[:1] },
+			""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b := cleanBox()
+			c.break_(b)
+			r := newGuardRig(t, b)
+			if n := r.pass(t); n != 1 {
+				t.Fatalf("findings %d: %+v", n, r.g.Evidence())
+			}
+			c.fix(b)
+			before := len(r.texts)
+			r.now = r.now.Add(6 * time.Hour)
+			r.pass(t)
+			got := r.texts[before:]
+			if c.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("untexted finding texted on clearing: %q", got)
+				}
+				return
+			}
+			if len(got) != 1 || !strings.Contains(got[0], c.want) || strings.Count(got[0], "Cleared:") != 1 {
+				t.Fatalf("texts %q, want one with %q", got, c.want)
+			}
+			if r.urgent[len(r.urgent)-1] {
+				t.Fatalf("cleared text sent urgent: %q", got[0])
+			}
+		})
+	}
+
+	// Two texted findings whose plain names join ("config/a!" and
+	// "config/a" both read config/a) send one line, once both cleared.
+	t.Run("shared plain name", func(t *testing.T) {
+		b := cleanBox()
+		b.live["config/a!"], b.live["config/a"] = "x", "y"
+		r := newGuardRig(t, b)
+		if n := r.pass(t); n != 2 {
+			t.Fatalf("findings %d", n)
+		}
+		before := len(r.texts)
+		delete(b.live, "config/a!")
+		r.now = r.now.Add(6 * time.Hour)
+		r.pass(t)
+		if got := clearedTexts(r.texts, before); len(got) != 0 {
+			t.Fatalf("cleared while another config/a is open: %q", got)
+		}
+		delete(b.live, "config/a")
+		r.now = r.now.Add(6 * time.Hour)
+		r.pass(t)
+		if got := clearedTexts(r.texts, before); len(got) != 1 || strings.Count(got[0], "Cleared: config/a.") != 1 {
+			t.Fatalf("cleared texts %q", got)
+		}
+	})
+	// One clears in the pass where another with its plain name is found:
+	// the new alert goes out, and no "Cleared" for the same name with it.
+	t.Run("shared plain name, found as one clears", func(t *testing.T) {
+		b := cleanBox()
+		b.live["config/a!"] = "x"
+		r := newGuardRig(t, b)
+		r.pass(t)
+		before := len(r.texts)
+		delete(b.live, "config/a!")
+		b.live["config/a"] = "y"
+		r.now = r.now.Add(6 * time.Hour)
+		r.pass(t)
+		if got := clearedTexts(r.texts, before); len(got) != 0 {
+			t.Fatalf("cleared sent with a new config/a: %q", got)
+		}
+	})
+}
+
+// Security 4a point 1 on #585: a finding that moves between two details
+// keeps one plain name open, its return counted Again; "Cleared" for that
+// name is never texted while it is open, Again or not.
+func TestNoClearedWhileAFindingMovesBetweenDetails(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		a, b, back func(*box)
+	}{
+		{"unpaused drift",
+			func(b *box) { b.live["config/quiet.json"] = "edited" },
+			func(b *box) { delete(b.live, "config/quiet.json") },
+			func(b *box) { b.live["config/quiet.json"] = "edited" }},
+		{"paused hash",
+			func(b *box) { b.measured["guest-image/openclaw"] = "tampered" },
+			func(b *box) { delete(b.signed, "guest-image/openclaw") },
+			func(b *box) { b.signed["guest-image/openclaw"] = "aa" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := cleanBox()
+			c.a(b)
+			r := newGuardRig(t, b)
+			r.pass(t)
+			for _, step := range []func(*box){c.b, c.back} {
+				step(b)
+				r.now = r.now.Add(6 * time.Hour)
+				r.pass(t)
+			}
+			if got := clearedTexts(r.texts, 0); len(got) != 0 {
+				t.Fatalf("cleared while a finding on the same name is open: %q", got)
+			}
+			if len(r.g.st.Open) != 1 {
+				t.Fatalf("open %+v", r.g.st.Open)
+			}
+		})
+	}
 }
