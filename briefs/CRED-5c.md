@@ -6,10 +6,11 @@ Source: the #328 combined lens record (`reviews/combined/2026-10-08-pr328.md`, S
 
 - Name the consent ask's channel and tier, and journal the consent record so a pause or withdrawal can cite it. An unconfirmed route is not granted until consent stands, so the ask sits at CH-10's tier for new or wider grants; the low-tier resume code (CRED-5) binds only confirmed routes and refused-login resumes.
 - §8 step 6: show the ask right after an unconfirmed plan's sign-in, outside **Use the defaults** (which never records consent), and correct the "I use your plans first" line for an unconfirmed plan without consent.
+- Name the route resume command (CRED-5, CH-11) in SPEC's control-word list. When a bare RESUME arrives with no halted work while a route is paused, the reply names that command (#421 lens screen, release).
 - Mid-life ask: one digest line naming the plan and the choice, e.g. "ChatGPT plan paused until you say yes; using your other routes meanwhile", and the same state on ONB-9's per-plan line.
 
 An L1 spec-diff (SPEC.md changes need Mark's approval), plus a test that **Use the defaults** never records consent.
 
-**Requirements:** CRED-5, CH-10, ONB-9
+**Requirements:** CRED-5, CH-10, CH-11, ONB-9
 
 **Needs:** #421 merged
