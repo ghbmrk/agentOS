@@ -326,7 +326,7 @@ func seed(r *os.Root, from, to string) error {
 		if !e.Type().IsRegular() {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(from, e.Name()))
+		data, err := readSeed(filepath.Join(from, e.Name()))
 		if err != nil {
 			return err
 		}
@@ -346,6 +346,20 @@ func seed(r *os.Root, from, to string) error {
 		}
 	}
 	return nil
+}
+
+// readSeed reads one of the release's seeds, within inputCap.
+func readSeed(p string) ([]byte, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := capped(f)
+	if err != nil {
+		return nil, fmt.Errorf("loop7: release seed %s: %w", p, err)
+	}
+	return data, nil
 }
 
 // Loop is Loop 2.
@@ -753,28 +767,46 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 	for f := range failing {
 		delete(ran, f)
 	}
-	var errs []error
 	// Each stored input whose own subtest passed in this run: only such a
 	// replay closes a finding. An input that never ran (a panic stops the
 	// binary before later seeds) or was removed keeps its finding open.
-	passed := map[string]bool{}
-	for _, file := range sortedKeys(ran) {
-		if data, err := s.input(t, file); err == nil {
+	// Every input is read before anything is reported: one root cannot
+	// read within the tree (a link out of it, a FIFO) fails the round as
+	// the runner's error, never as a finding or a resolution (F16).
+	passed, crashed := map[string]bool{}, []string{}
+	oversize := false
+	for _, file := range append(sortedKeys(ran), sortedKeys(failing)...) {
+		data, err := s.input(t, file)
+		switch {
+		case errors.Is(err, errTooLarge):
+			oversize = true
+			continue
+		case errors.Is(err, os.ErrNotExist):
+			// An f.Add seed, not a file: a failing one is reported by name.
+			data = []byte(file)
+		case err != nil:
+			return 0, fmt.Errorf("loop7: reading %s's stored input %q: %w", t.subject(), file, err)
+		}
+		if failing[file] {
+			crashed = append(crashed, crashDetail(data))
+		} else if err == nil {
 			passed[crashDetail(data)] = true
 		}
 	}
-	for _, file := range sortedKeys(failing) {
-		data, err := s.input(t, file)
-		if err != nil {
-			// A failing f.Add seed, not a file: report it by name.
-			data = []byte(file)
-		}
-		errs = append(errs, s.report(ctx, t, crashDetail(data)))
+	var errs []error
+	for _, d := range crashed {
+		errs = append(errs, s.report(ctx, t, d))
+	}
+	if oversize {
+		errs = append(errs, s.report(ctx, t, loops.FuzzOversizeDetail))
 	}
 	if noInput {
 		errs = append(errs, s.report(ctx, t, loops.FuzzNoInputDetail))
 	} else if runErr == nil {
 		passed[loops.FuzzNoInputDetail] = true // the whole replay passed
+		if !oversize {
+			passed[loops.FuzzOversizeDetail] = true // and read every input it named
+		}
 	}
 	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
 		if f.Subject == t.subject() && passed[f.Detail] {
@@ -782,9 +814,12 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 			errs = append(errs, s.cfg.Report.Resolve(f.ID, r))
 		}
 	}
-	n := len(failing)
+	n := len(crashed)
 	if noInput {
 		n = 1
+	}
+	if oversize {
+		n++
 	}
 	return n, errors.Join(errs...)
 }
@@ -828,14 +863,50 @@ func (s *Source) eachInput(ctx context.Context, t Target) (failing, ran map[stri
 // corpusDir holds t's stored inputs, crash inputs among them.
 func corpusDir(t Target) string { return filepath.Join(t.Dir, "testdata", "fuzz", t.Name) }
 
-// input reads one of t's stored inputs, through the tree.
+// inputCap bounds one stored input root reads (F16): Go's fuzz inputs are
+// small, and the fuzz user can grow any file in its tree.
+const inputCap = 1 << 20
+
+// errTooLarge is an input past inputCap.
+var errTooLarge = fmt.Errorf("loop7: input larger than %d bytes", inputCap)
+
+// input reads one of t's stored inputs, through the tree. It refuses
+// anything but a regular file within inputCap by its Lstat, before
+// opening it (a FIFO would block the open), and reads at most
+// inputCap+1, so a file grown since the stat is refused too. Nothing can
+// swap the file between the two: no process of the jail's user lives
+// while root reads (run empties the leaf after every child).
 func (s *Source) input(t Target, file string) ([]byte, error) {
 	r, err := s.tree()
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	return r.ReadFile(filepath.Join(s.in(corpusDir(t)), file))
+	p := filepath.Join(s.in(corpusDir(t)), file)
+	fi, err := r.Lstat(p)
+	switch {
+	case err != nil:
+		return nil, err
+	case !fi.Mode().IsRegular():
+		return nil, fmt.Errorf("loop7: %s is not a regular file", p)
+	case fi.Size() > inputCap:
+		return nil, errTooLarge
+	}
+	f, err := r.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return capped(f)
+}
+
+// capped reads r to its end, refusing more than inputCap bytes.
+func capped(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, inputCap+1))
+	if err == nil && len(data) > inputCap {
+		err = errTooLarge
+	}
+	return data, err
 }
 
 // exited reports that a child ran and exited non-zero or was killed: a
@@ -925,7 +996,12 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 	cmd.SysProcAttr = attr
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = waitDelay
-	out, err := cmd.CombinedOutput()
+	// The broker keeps at most outputCap of the output, which the leaf's
+	// memory.max does not bound; the pipe is drained to its end.
+	buf := &capBuffer{}
+	cmd.Stdout, cmd.Stderr = buf, buf
+	err = cmd.Run()
+	out := buf.Bytes()
 	// Whatever left the process group (setsid) dies with the run, before
 	// root removes the scratch directory or prunes the cache. A failure
 	// here is the runner's, never a finding: it is not an ExitError.
@@ -936,6 +1012,55 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 		err = rerr
 	}
 	return out, err
+}
+
+// outputCap bounds the output the broker keeps of one child (F12): its
+// first outputHead bytes, where the fuzz step's baseline line is, and its
+// last bytes, where its last exec count and a failure's reason are. A 30 s
+// step's progress lines are a few KiB.
+const (
+	outputCap  = 1 << 20
+	outputHead = 64 << 10
+)
+
+// capBuffer keeps a child's output within outputCap: the head, then a
+// ring of the tail. Writes never fail, so the child is never blocked.
+type capBuffer struct {
+	head, ring []byte
+	next       int  // where the ring is written next, once full
+	cut        bool // bytes between the head and the ring were dropped
+}
+
+func (b *capBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if k := min(outputHead-len(b.head), len(p)); k > 0 {
+		b.head, p = append(b.head, p[:k]...), p[k:]
+	}
+	const size = outputCap - outputHead - 1 // one byte for Bytes' line end
+	if len(p) >= size {
+		b.cut = b.cut || len(b.ring) > 0 || len(p) > size
+		b.ring, b.next, p = append(b.ring[:0], p[len(p)-size:]...), 0, nil
+	}
+	if k := min(size-len(b.ring), len(p)); k > 0 {
+		b.ring, p = append(b.ring, p[:k]...), p[k:]
+	}
+	for len(p) > 0 {
+		b.cut = true
+		c := copy(b.ring[b.next:], p)
+		p, b.next = p[c:], (b.next+c)%size
+	}
+	return n, nil
+}
+
+// Bytes is the output kept, in order. Where bytes were dropped, the head
+// ends its line, so no line joins the head's end to the tail's start.
+func (b *capBuffer) Bytes() []byte {
+	out := append([]byte{}, b.head...)
+	if b.cut && len(out) > 0 && out[len(out)-1] != '\n' {
+		out = append(out, '\n')
+	}
+	out = append(out, b.ring[b.next:]...)
+	return append(out, b.ring[:b.next]...)
 }
 
 // ownPath gives rel and each directory above it in the tree, up to the
@@ -1122,6 +1247,10 @@ func (j *Jail) Own() error {
 	})
 }
 
+// pruneWalked, when set by a test, runs between prune's walk and its
+// removals, where a child could swap a directory for a link.
+var pruneWalked func()
+
 // cached is one file of the fuzz engine's generated corpus.
 type cached struct {
 	path string
@@ -1167,6 +1296,9 @@ func (s *Source) prune(pkg string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if pruneWalked != nil {
+		pruneWalked()
 	}
 	gone := map[string]bool{}
 	trim := func(cs []cached, limit int64) error {

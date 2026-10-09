@@ -337,6 +337,9 @@ func (p *Pipeline) revertLocked(id, why string) error {
 	if p.unsettledLocked(a, why) {
 		return unsettledErr(a)
 	}
+	if why == WhyDropped && a.WithdrawnFor != "" {
+		why = a.WithdrawnFor // the revert that withdrew it, cut short
+	}
 	next, err := p.undoTreeLocked(a)
 	if err != nil {
 		return err
@@ -386,6 +389,15 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 			err = fmt.Errorf("undoing %s would leave %s with nothing to boot; install another version instead", a.Short, ns)
 		}
 	}
+	prev := a.WithdrawnFor // what a refused withdrawal restores
+	if err == nil && withdraw && a.WithdrawnFor != why {
+		// Saved before the applier is asked: if this revert is cut short
+		// after the withdrawal, the drop that settles it keeps its why.
+		a.WithdrawnFor = why
+		if err = p.saveLocked(); err != nil {
+			a.WithdrawnFor = prev
+		}
+	}
 	v := safe(strings.TrimPrefix(a.Origin, "update:"))
 	p.mu.Unlock()
 	if err != nil {
@@ -395,9 +407,16 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		// Never under p.mu: the applier holds its lock while it calls
 		// StageFailed and StageDropped (lock order applier, then
 		// pipeline).
-		if err := w.Withdraw(id); handover(err) {
-			return errors.New("Update " + v + " is being installed; undo it after it starts.")
-		} else if err != nil {
+		if err := w.Withdraw(id); err != nil {
+			if handover(err) {
+				// The applier changed nothing: the mark goes back to what
+				// it was, a first revert's or none.
+				p.unwithdraw(id, prev)
+				return errors.New("Update " + v + " is being installed; undo it after it starts.")
+			}
+			// Any other error may follow the applier's saved withdrawal
+			// (a store that fails after its rename): the mark stays, so a
+			// drop is never taken for one Loop 3 offers again (C31).
 			return fmt.Errorf("change: withdrawing update %s: %w", v, err)
 		}
 		p.mu.Lock()
@@ -424,6 +443,24 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		return nil
 	}
 	return err
+}
+
+// unwithdraw restores the why saved before a withdrawal the applier
+// refused in its handover window to prev, its value before that revert:
+// a first revert's why stays, and with none a later drop is a drop. If
+// the save fails the newer why stays: the release is then not offered
+// again after a drop, which errs toward the revert the owner or Recheck
+// asked.
+func (p *Pipeline) unwithdraw(id, prev string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.adoptionByIDLocked(id); a != nil && a.Reverted == "" && a.WithdrawnFor != prev {
+		cur := a.WithdrawnFor
+		a.WithdrawnFor = prev
+		if p.saveLocked() != nil {
+			a.WithdrawnFor = cur
+		}
+	}
 }
 
 // revertedByID: adoption id exists and is reverted.
