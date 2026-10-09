@@ -631,7 +631,8 @@ func (x *exhaustRig) bump(up map[string]int64) {
 	}
 	cpu, _ := cgroupCounter(x.cg, "cpu.stat", "usage_usec")
 	x.write("cpu.stat", fmt.Sprintf("usage_usec %d\nuser_usec 0\nsystem_usec 0\n", cpu+up["cpu"]))
-	x.write("memory.current", fmt.Sprintf("%d\n", read("memory.current")+up["memory"]))
+	shmem, _ := cgroupCounter(x.cg, "memory.stat", "shmem")
+	x.write("memory.stat", fmt.Sprintf("anon 4096\nfile %d\nshmem %d\n", shmem+up["memory"], shmem+up["memory"]))
 	x.write("pids.current", fmt.Sprintf("%d\n", read("pids.current")+up["processes"]))
 	x.disk += up["disk"]
 }
@@ -858,7 +859,7 @@ func TestAnExhaustionRoundFailsClosed(t *testing.T) {
 
 // LOOP-7 positive control (P3-4b-4c-fresh, exhaustion half; Security #548
 // 4a 2, and B1 on #599): a guest that does not press, or presses a token
-// amount, so a counter (cpu.stat usage_usec, memory.current, the disk
+// amount, so a counter (cpu.stat usage_usec, memory.stat shmem, the disk
 // quota's usage) rises by less than its minimum over the hold, fails the
 // round; its machine is preempted and an open "slow" finding stays open,
 // where on main such a round closed it.

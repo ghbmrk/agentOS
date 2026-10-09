@@ -510,7 +510,7 @@ func cpuCount(list string) (int, error) {
 }
 
 // usage reads machine m's counters, broker-side: cpu.stat usage_usec,
-// memory.current and the disk quota's usage. Processes have none: under
+// memory.stat shmem and the disk quota's usage. Processes have none: under
 // gVisor a guest process is not a host task, so pids.current does not
 // count them (S35).
 func (p *ExhaustProbe) usage(m PressedMachine) (map[string]int64, error) {
@@ -519,7 +519,10 @@ func (p *ExhaustProbe) usage(m PressedMachine) (map[string]int64, error) {
 	if u["cpu"], err = cgroupCounter(m.Cgroup, "cpu.stat", "usage_usec"); err != nil {
 		return nil, err
 	}
-	if u["memory"], err = cgroupCounter(m.Cgroup, "memory.current", ""); err != nil {
+	// Guest memory only: gVisor backs it with a memfd, which the host
+	// counts as shmem; memory.current would also count the disk press's
+	// file cache (S35).
+	if u["memory"], err = cgroupCounter(m.Cgroup, "memory.stat", "shmem"); err != nil {
 		return nil, err
 	}
 	if m.DiskUsed == nil {
