@@ -8,12 +8,12 @@ import (
 
 // REQ: CH-12
 
-// The two texts giveBack and restoreDA send when the vault can't forget an
-// entry. Both call sites use these constants, so the test checks the
-// shipped wording.
+// The texts giveBack and restoreDA send when the chip's lockout can't be
+// given back yet or the vault can't forget an entry. The call sites use
+// these constants, so the test checks the shipped wording.
 func TestAVaultErrorDoesNotReachTheOwner(t *testing.T) {
 	canary := "/var/lib/agentos/vault/db"
-	for _, sentence := range []string{lockoutForgetFailed, daForgetFailed} {
+	for _, sentence := range []string{lockoutReleaseFailed, lockoutForgetFailed, daForgetFailed} {
 		var got []string
 		h := &tpmHost{notify: func(s string) { got = append(got, s) }}
 		h.sayErr(sentence, errors.New("unlink "+canary+": permission denied"))
