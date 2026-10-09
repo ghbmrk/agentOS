@@ -22,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localsrv"
@@ -349,6 +350,7 @@ func main() {
 	var builderImage, builderLaunch, keptPath, setupRecord string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
+	var digestDir string
 	localUIUID := -1
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
@@ -389,6 +391,7 @@ func main() {
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
+	flag.StringVar(&digestDir, "digest", "/var/lib/agentos/digest", "the daily digest's queue and state (created 0700); empty sends no digest")
 	flag.StringVar(&learn.Loop7, "loop7", "/var/lib/agentos/loop7", "LOOP-7's fuzz corpora, with crash inputs found on this box, and the fuzz cache (P3-4b-3a)")
 	learn.Fuzz = fuzzRelease
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
@@ -557,6 +560,19 @@ func main() {
 	caps := newCapState(egressSocket)
 	caps.machinesUnset(runsc, agentOff)
 	capLines := newCapLines(caps)
+	// The daily digest (CH-15, W5-Dc) goes by the modem bridge; its STATUS
+	// lines are wired with the rest. Its queue opens when it runs.
+	var dg *digestBox
+	if modemBridge && digestDir != "" {
+		var queue, state change.Store = change.FileStore{Path: filepath.Join(digestDir, "queue.json")},
+			change.FileStore{Path: filepath.Join(digestDir, "digest-sources.json")}
+		if err := prepareDigestDir(digestDir); err != nil {
+			log.Printf("digest: %v", err)
+			queue, state = downStore{err}, downStore{err}
+		}
+		dg = newDigestBox(digestConfig{Queue: queue, State: state})
+		dg.register(capLines)
+	}
 	capLines.wire(&cfg)
 	// No update-check loop (Loop 3, W5b) is built yet: caps.updateChecks
 	// is never called, and STATUS says update checks are not running.
@@ -605,6 +621,9 @@ func main() {
 			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
 		}
 		cfg.BridgeOnly = !ownerMessage
+		if dg != nil {
+			dg.cfg.Transport = newDigestTransport(link, cfg.OwnerNumber)
+		}
 	}
 
 	// The learning plane failing must not take the owner channel down
@@ -625,6 +644,9 @@ func main() {
 		learningOff(&cfg)
 	} else {
 		lp.forgetOwner.wirePage(&cfg)
+		if dg != nil {
+			lp.forgetOwner.digest = dg.forget // CAP-3
+		}
 		caps.learning(lp) // routing held while learning is on (C12)
 	}
 	// Evidence delivery (CH-20): with a destination set, private replies
@@ -675,6 +697,15 @@ func main() {
 	recallCfg.Cases = fan
 	if lp != nil {
 		lp.attach(ctx, d)
+	}
+	// The digest runs once the forget owner's start-up replay has asked
+	// it again (security B2' on #592); its own saved forgets hold their
+	// batches either way.
+	if dg != nil {
+		if o := d.Owner(); o != nil {
+			dg.cfg.Inform = o.Inform
+		}
+		go dg.run(ctx)
 	}
 	// The owner channel failing to take questions must not take it down:
 	// the tools are then not offered and replies are task chat.
