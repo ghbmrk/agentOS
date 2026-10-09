@@ -1,6 +1,6 @@
 [Unit]
 Description=AgentOS boot report
-After=systemd-bless-boot.service boot-complete.target
+After=systemd-bless-boot.service boot-complete.target agentos-drive-id.service
 
 [Service]
 Type=oneshot

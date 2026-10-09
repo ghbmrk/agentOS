@@ -12,6 +12,8 @@ EnvironmentFile=/etc/agentos/agentosd.env
 # components beside it (RES-2, #124); -cgroup-root defaults to the broker's own group.
 Slice=agentos.slice
 Delegate=yes
+# Only on the drive this PC booted (drive-id: no other disk carries the boot partition's GUID).
+ExecStartPre=/usr/lib/agentos/drive-id check
 ExecStart=/usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} -modem-uid ${AGENTOS_MODEM_UID} \
         -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw
 Restart=on-failure

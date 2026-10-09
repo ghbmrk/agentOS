@@ -44,9 +44,12 @@ jobs:
       - name: Boot test (Secure Boot on)
         if: matrix.run == 'a'
         run: sudo image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
-      - name: Keep the console log
+      - name: Keep the console logs
         if: always() && matrix.run == 'a'
-        run: sudo cp "$RUNNER_TEMP/boot/console.log" "$RUNNER_TEMP/out/qemu-console.log" || true
+        run: |
+          for l in console console-reboot console-two-drives; do
+            sudo cp "$RUNNER_TEMP/boot/$l.log" "$RUNNER_TEMP/out/qemu-$l.log" || true
+          done
       - name: Release record
         if: always()
         run: |
@@ -67,7 +70,7 @@ jobs:
           name: agentos-image
           path: |
             ${{ runner.temp }}/out/agentos.raw.zst
-            ${{ runner.temp }}/out/qemu-console.log
+            ${{ runner.temp }}/out/qemu-console*.log
           retention-days: 7
           if-no-files-found: warn
   reproduce:

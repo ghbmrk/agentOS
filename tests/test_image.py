@@ -240,6 +240,7 @@ class HealthTest(unittest.TestCase):
                                       ' echo "  status:      verified"; echo "  root hash:   %s"' % H)
         self.findmnt("/dev/mapper/usr", "ro,relatime")
         stub(self.lib, "agentosd", "exit 0")
+        stub(self.lib, "drive-id", "exit 0")
         stub(self.lib, "runsc", 'echo "runsc version release-20260928.0"')
         (self.lib / "images/openclaw/opt/openclaw").mkdir(parents=True)
         write(self.lib, "guest/launch.json", "{}")
@@ -281,6 +282,7 @@ class HealthTest(unittest.TestCase):
             "usr is another release": lambda: write(self.root, "proc/cmdline", "usrhash=%s\n" % ("cd" * 32)),
             "entry names no release": lambda: write(self.root, "proc/cmdline", "rw quiet\n"),
             "launch.json missing": lambda: (self.lib / "guest/launch.json").unlink(),
+            "boot drive ambiguous": lambda: stub(self.lib, "drive-id", "echo 'agentos-drive-id: FAIL'; exit 1"),
             "broker missing": lambda: (self.lib / "agentosd").unlink(),
             "broker broken": lambda: stub(self.lib, "agentosd", "exit 2"),
             "runsc broken": lambda: stub(self.lib, "runsc", "exit 1"),
@@ -296,7 +298,114 @@ class HealthTest(unittest.TestCase):
                 self.assertIn("agentos-health: FAIL", r.stdout)
 
 
+ESP_GUID = "9bb3f5ba-ad2b-4857-929b-cc8ff3ed410c"
+
+
+class DriveIdTest(unittest.TestCase):
+    """HW-1, HW-5 (L3 MUST on #41): every drive starts with the image's partition GUIDs, so boot is
+    bound to the drive only while one partition carries the booted ESP's GUID; each drive then gets
+    its own GUIDs."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.bin, self.root, self.log = t / "bin", t / "root", t / "sfdisk.log"
+        ev = self.root / "sys/firmware/efi/efivars"
+        ev.mkdir(parents=True)
+        (ev / "LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f").write_bytes(
+            b"\x06\x00\x00\x00" + (ESP_GUID.upper() + "\0").encode("utf-16le"))
+        for name, n in (("vda1", 1), ("vda6", 6), ("vdb1", 1), ("vdb6", 6)):
+            write(self.root, "sys/class/block/%s/partition" % name, "%d\n" % n)
+        write(self.root, "proc/sys/kernel/random/uuid", "0f0e0d0c-0b0a-4908-8706-050403020100\n")
+        self.disks(("vda1 vda " + ESP_GUID, "vda2 vda aaaaaaaa-0000-4000-8000-000000000002",
+                    "vda6 vda bbbbbbbb-0000-4000-8000-000000000006"))
+        self.root_on("/dev/vda6")
+        stub(self.bin, "sfdisk", 'echo "$*" >>"%s"' % self.log)
+
+    def disks(self, partitions):
+        lines = ["vda  ", "vdb  "] + list(partitions) + ["usr vda2 ", "usr vda3 "]
+        stub(self.bin, "lsblk", "cat <<'E'\n%s\nE" % "\n".join(lines))
+
+    def root_on(self, dev):
+        stub(self.bin, "findmnt", 'echo "%s"' % dev)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_id(self, mode):
+        env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_HEALTH_ROOT=str(self.root))
+        return subprocess.run(["sh", str(MK / "mkosi.extra/usr/lib/agentos/drive-id"), mode], env=env,
+                              capture_output=True, text=True)
+
+    def sfdisk_calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_check_passes_on_one_drive(self):
+        r = self.run_id("check")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.sfdisk_calls(), [])
+
+    def test_check_fails_when_another_disk_carries_the_esp_guid(self):
+        self.disks(("vda1 vda " + ESP_GUID, "vda6 vda bbbbbbbb-0000-4000-8000-000000000006",
+                    "vdb1 vdb " + ESP_GUID, "vdb6 vdb bbbbbbbb-0000-4000-8000-000000000006"))
+        r = self.run_id("check")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("agentos-drive-id: FAIL 2 partitions", r.stdout)
+
+    def test_check_fails_when_root_is_on_another_disk(self):
+        self.root_on("/dev/vdb6")
+        self.disks(("vda1 vda " + ESP_GUID, "vdb6 vdb bbbbbbbb-0000-4000-8000-000000000006"))
+        r = self.run_id("check")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not on the boot drive", r.stdout)
+
+    def test_check_fails_without_the_loader_variable(self):
+        next((self.root / "sys/firmware/efi/efivars").iterdir()).unlink()
+        self.assertEqual(self.run_id("check").returncode, 1)
+
+    def test_assign_gives_the_drive_its_own_guids(self):
+        r = self.run_id("assign")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        u = "0f0e0d0c-0b0a-4908-8706-050403020100"
+        nr = "--no-reread --no-tell-kernel"
+        self.assertEqual(self.sfdisk_calls(), ["%s --disk-id /dev/vda %s" % (nr, u),
+                                               "%s --part-uuid /dev/vda 1 %s" % (nr, u),
+                                               "%s --part-uuid /dev/vda 6 %s" % (nr, u)])
+        self.assertTrue((self.root / "var/lib/agentos/drive-id").exists())
+
+    def test_assign_writes_nothing_when_the_check_fails(self):
+        self.disks(("vda1 vda " + ESP_GUID, "vda6 vda bbbbbbbb-0000-4000-8000-000000000006",
+                    "vdb1 vdb " + ESP_GUID))
+        r = self.run_id("assign")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.sfdisk_calls(), [])
+        self.assertFalse((self.root / "var/lib/agentos/drive-id").exists())
+
+
 class ConfigTest(unittest.TestCase):
+    def test_drive_gets_its_own_guids_once_after_a_blessed_boot(self):
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-drive-id.service")
+        self.assertIn("boot-complete.target", u["Unit"]["Requires"])
+        self.assertIn("systemd-bless-boot.service", u["Unit"]["After"])
+        self.assertEqual(u["Unit"]["ConditionPathExists"], "!/var/lib/agentos/drive-id")
+        self.assertEqual(u["Service"]["ExecStart"], "/usr/lib/agentos/drive-id assign")
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
+        self.assertIn("enable agentos-drive-id.service", preset)
+        self.assertIn("fdisk", ini(MK / "mkosi.conf")["Content"]["Packages"].split())
+        report = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-boot-report.service")
+        self.assertIn("agentos-drive-id.service", report["Unit"]["After"])
+
+    def test_broker_runs_only_on_the_boot_drive(self):
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
+        self.assertEqual(u["Service"]["ExecStartPre"], "/usr/lib/agentos/drive-id check")
+
+    def test_nothing_writes_the_hardware_clock(self):
+        # L3 SHOULD on #41 (HW-8, HOST-1b): timesyncd's sync turns on the kernel's 11-minute RTC
+        # update. chrony with rtcsync off comes with HOST-1b; until then the image has no time sync.
+        self.assertNotIn("systemd-timesyncd", ini(MK / "mkosi.conf")["Content"]["Packages"].split())
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
+        self.assertNotIn("timesyncd", preset)
+
     def test_secure_boot_chain_is_distribution_signed(self):
         # HW-5: Microsoft-signed shim -> Debian-signed systemd-boot -> Debian-signed kernel.
         c = ini(MK / "mkosi.conf")

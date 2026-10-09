@@ -30,6 +30,8 @@ case ,$(findmnt -no OPTIONS /usr), in
 *,ro,*) ;;
 *) fail "/usr is mounted writable" ;;
 esac
+# Root and the ESP are on the drive this PC booted, and no other disk carries its GUIDs.
+"$L/drive-id" check || fail "boot drive is ambiguous"
 [ -x "$L/agentosd" ] || fail "broker missing"
 "$L/agentosd" -h >/dev/null 2>&1 || fail "broker does not start"
 "$L/runsc" --version >/dev/null 2>&1 || fail "gVisor runsc does not start"

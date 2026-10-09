@@ -2,4 +2,4 @@ enable agentos-health.service
 enable agentos-boot-report.service
 enable agentosd.service
 enable agentosd.path
-enable systemd-timesyncd.service
+enable agentos-drive-id.service

@@ -1,0 +1,38 @@
+#!/bin/sh
+# Per-drive partition GUIDs (HW-1, HW-5; L3 MUST on #41). Every drive is flashed from one image, so
+# it starts with the image's disk, ESP and root GUIDs. gpt-auto mounts root from the disk holding the
+# partition systemd-boot was started from (LoaderDevicePartUUID), and systemd-bless-boot writes to
+# that ESP, so boot is bound to the drive only while no other disk carries the same GUID.
+#   check   exactly one partition carries the booted ESP's GUID, and root is on its disk. The health
+#           check and the broker run it on every boot.
+#   assign  check, then give this drive random disk, ESP and root GUIDs. Run once per drive, after its
+#           first blessed boot. Written to the partition table only (no re-read), so this boot keeps
+#           its devices and the next boot uses the new GUIDs.
+# AGENTOS_HEALTH_ROOT exists for tests/test_image.py.
+set -eu
+R=${AGENTOS_HEALTH_ROOT:-}
+mode=${1:-check}
+fail() { echo "agentos-drive-id: FAIL $*"; exit 1; }
+
+v=$R/sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+[ -r "$v" ] || fail "the boot loader did not name the partition it started from"
+esp=$(tail -c +5 "$v" | tr -d '\000' | tr A-F a-f)
+parts=$(lsblk -rno NAME,PKNAME,PARTUUID)
+hits=$(printf '%s\n' "$parts" | awk -v u="$esp" '$3 == u { print $1 " " $2 }' | sort -u)
+n=$(printf '%s' "$hits" | grep -c . || true)
+[ "$n" -eq 1 ] || fail "$n partitions carry the boot partition's GUID $esp: detach the other AgentOS drive and restart"
+espdev=${hits% *} disk=${hits#* }
+rootdev=$(readlink -f "$(findmnt -no SOURCE /)") rootdev=${rootdev#/dev/}
+rootdisk=$(printf '%s\n' "$parts" | awk -v d="$rootdev" '$1 == d { print $2; exit }')
+[ "$rootdisk" = "$disk" ] || fail "root ($rootdev) is not on the boot drive ($disk)"
+[ "$mode" = assign ] || exit 0
+
+new() { cat "$R/proc/sys/kernel/random/uuid"; }
+espn=$(cat "$R/sys/class/block/$espdev/partition")
+rootn=$(cat "$R/sys/class/block/$rootdev/partition")
+sfdisk --no-reread --no-tell-kernel --disk-id "/dev/$disk" "$(new)"
+sfdisk --no-reread --no-tell-kernel --part-uuid "/dev/$disk" "$espn" "$(new)"
+sfdisk --no-reread --no-tell-kernel --part-uuid "/dev/$disk" "$rootn" "$(new)"
+mkdir -p "$R/var/lib/agentos"
+: >"$R/var/lib/agentos/drive-id"
+echo "agentos-drive-id: assigned new GUIDs on $disk (ESP $espn, root $rootn), used from the next boot"
