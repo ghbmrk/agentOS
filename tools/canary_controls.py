@@ -16,8 +16,14 @@ every pass alongside the real targets.
   leaky-crash   leaks like leaky, then exits nonzero: the leak must still be reported
   env-dump PATH clean, and writes the environment it was given to PATH (outside
                 the surface), so a test can check what a target inherits
+  parent-environ PATH  clean, and writes to PATH its uid and what reading
+                /proc/$PPID/environ gave (EACCES, empty, or a byte count)
+  read-file PATH FILE  clean, and writes to PATH its uid and what reading FILE gave
+  confined      clean, but exits 5 if it shares its parent's uid or can read
+                its parent's environment: the sandbox must hold every round
 """
 import base64
+import errno
 import json
 import os
 import pathlib
@@ -68,12 +74,26 @@ def hold_in_child(payload, surface, max_bytes=canary.DEFAULT_MAX_BYTES):
         child.stdout.close()
 
 
-def main(mode, arg=None):
+def try_read(path):
+    """What reading path gives: an errno name, "empty", or "read N bytes"."""
+    try:
+        data = pathlib.Path(path).read_bytes()
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e.errno))
+    return "read %d bytes" % len(data) if data else "empty"
+
+
+def parent_environ():
+    return "/proc/%d/environ" % os.getppid()
+
+
+def main(mode, arg=None, *more):
     cans = json.loads(pathlib.Path(os.environ["CANARY_PLANT"]).read_text())["canaries"]
     surface = pathlib.Path(os.environ["CANARY_SURFACE_DIR"])
     if mode not in ("no-ack", "partial-ack"):
         ack(cans)
-    if mode in ("clean", "no-ack", "partial-ack", "leaky-log", "crash", "env-dump"):
+    if mode in ("clean", "no-ack", "partial-ack", "leaky-log", "crash", "env-dump", "parent-environ",
+                "read-file", "confined"):
         (surface / "workspace").mkdir()
         (surface / "workspace" / "notes.txt").write_bytes(os.urandom(4096).hex().encode())
     if mode == "clean":
@@ -103,6 +123,12 @@ def main(mode, arg=None):
             sys.exit(4)
     elif mode == "env-dump":
         pathlib.Path(arg).write_text(json.dumps(dict(os.environ)))
+    elif mode in ("parent-environ", "read-file"):
+        path = parent_environ() if mode == "parent-environ" else more[0]
+        pathlib.Path(arg).write_text(json.dumps({"uid": os.getuid(), "result": try_read(path)}))
+    elif mode == "confined":
+        if os.stat("/proc/%d" % os.getppid()).st_uid == os.getuid() or try_read(parent_environ()).startswith("read"):
+            sys.exit(5)
     elif mode == "crash":
         sys.exit(3)
     elif mode not in ("no-ack", "empty-surface"):
@@ -110,4 +136,4 @@ def main(mode, arg=None):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:3])
+    main(*sys.argv[1:])
