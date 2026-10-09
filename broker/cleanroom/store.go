@@ -234,6 +234,12 @@ func (s *Store) quarantine(id string) error {
 	if err := os.MkdirAll(q, 0o700); err != nil {
 		return err
 	}
+	// A symlink in its place would move the artifact out of the store.
+	if fi, err := os.Lstat(q); err != nil {
+		return err
+	} else if !fi.IsDir() {
+		return fmt.Errorf("cleanroom: %s is not a directory; not quarantining %s", q, id)
+	}
 	dst := filepath.Join(q, id+"-"+newID())
 	if err := s.fault.hit("rename", dst); err != nil {
 		return err

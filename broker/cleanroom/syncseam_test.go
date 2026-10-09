@@ -9,6 +9,7 @@ package cleanroom
 // REQ: OSS-2 (SR3-8-f2)
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -117,10 +118,74 @@ func TestCommitMakesRealSyncs(t *testing.T) {
 	}
 }
 
+// since returns the syncs recorded after the first n.
+func (r *syncRec) since(n int) []string { return r.list()[n:] }
+
+// Quarantine syncs the quarantine directory, then the store directory,
+// after the rename that moves the artifact out.
+func TestQuarantineMakesRealSyncs(t *testing.T) {
+	s, _, err := openStore(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.put(Manifest{ID: "a-x", Job: "x", Output: "skill"}, nestedFiles); err != nil {
+		t.Fatal(err)
+	}
+	rec := recordSyncs(t, s.dir)
+	moved := true
+	rec.at = func(string) {
+		if _, err := os.Stat(filepath.Join(s.dir, "a-x")); err == nil {
+			moved = false
+		}
+	}
+	if err := s.quarantine("a-x"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rec.list(), []string{"dir .quarantine", "dir ."}; !slices.Equal(got, want) || !moved {
+		t.Errorf("quarantine syncs %q (after the rename: %v), want %q after it", got, moved, want)
+	}
+}
+
+// Settle syncs the store directory, also when the commit's own sync failed
+// (errCommittedUnsynced): settle is where the commit becomes durable (C14).
+func TestSettleMakesRealSync(t *testing.T) {
+	for name, failCommit := range map[string]bool{"synced": false, "unsynced": true} {
+		t.Run(name, func(t *testing.T) {
+			s, _, err := openStore(filepath.Join(t.TempDir(), "store"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := recordSyncs(t, s.dir)
+			if failCommit {
+				s.fault = func(op, path string) error {
+					if op == "syncdir" && path == s.dir {
+						return errors.New("synthetic sync failure")
+					}
+					return nil
+				}
+			}
+			_, err = s.put(Manifest{ID: "a-x", Job: "x", Output: "skill"}, nestedFiles)
+			if failCommit != errors.Is(err, errCommittedUnsynced) || (!failCommit && err != nil) {
+				t.Fatalf("put: %v", err)
+			}
+			s.fault = nil
+			n := len(rec.list())
+			if err := s.settle("a-x"); err != nil {
+				t.Fatal(err)
+			}
+			if got := rec.since(n); !slices.Equal(got, []string{"dir ."}) {
+				t.Errorf("settle syncs %q, want [dir .]", got)
+			}
+		})
+	}
+}
+
 // The real syncs are made only inside the seam: syncDir (the directory
 // sync) is the only caller of File.Sync, and syncFile and syncDirFn are
 // called only from fileSync and dirSync. A durable write anywhere else
-// would skip the hook, and so the recorder above.
+// would skip the hook, and so the recorder above. The "sync" and "syncdir"
+// hooks are called only there too, so no hook stands in for a sync that
+// is not made.
 func TestSyncsOnlyThroughSeam(t *testing.T) {
 	allowed := map[string]string{"Sync": "syncDir", "syncDir": "", "syncFile": "fileSync", "syncDirFn": "dirSync"}
 	fset := token.NewFileSet()
@@ -142,6 +207,9 @@ func TestSyncsOnlyThroughSeam(t *testing.T) {
 				continue
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if op, ok := syncHit(n); ok && fn.Name.Name != map[string]string{"sync": "fileSync", "syncdir": "dirSync"}[op] {
+					t.Errorf("%s: hit(%q) in %s, outside the sync seam: a hook with no sync behind it", fset.Position(n.Pos()), op, fn.Name.Name)
+				}
 				id, ok := n.(*ast.Ident)
 				if !ok {
 					return true
@@ -153,4 +221,22 @@ func TestSyncsOnlyThroughSeam(t *testing.T) {
 			})
 		}
 	}
+}
+
+// syncHit reports whether n is a hit call whose op is "sync" or "syncdir".
+func syncHit(n ast.Node) (string, bool) {
+	call, ok := n.(*ast.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return "", false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "hit" {
+		return "", false
+	}
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	op := strings.Trim(lit.Value, "`\"")
+	return op, op == "sync" || op == "syncdir"
 }

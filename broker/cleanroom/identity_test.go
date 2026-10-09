@@ -156,3 +156,33 @@ func TestQuarantineRefusesBadID(t *testing.T) {
 		}
 	}
 }
+
+// A symlink in place of the quarantine directory is refused: the artifact
+// stays in the store and nothing reaches the symlink's target.
+func TestQuarantineRefusesSymlinkedDir(t *testing.T) {
+	root := t.TempDir()
+	s, _, err := openStore(filepath.Join(root, "store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.put(Manifest{ID: "a-x", Job: "x", Output: "skill"}, nestedFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(s.dir, ".quarantine")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.quarantine("a-x"); err == nil {
+		t.Error("quarantine through a symlinked .quarantine accepted")
+	}
+	if _, err := os.Stat(a.dir); err != nil {
+		t.Errorf("artifact moved: %v", err)
+	}
+	if got := tree(t, outside); len(got) != 1 {
+		t.Errorf("artifact moved out of the store: %v", got)
+	}
+}
