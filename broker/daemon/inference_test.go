@@ -106,6 +106,10 @@ var netOK = map[string]allowance{
 	// The box clock check (P2-9, W9 links it for question deadlines).
 	"clock": {"read-only adjtimex (is NTP synced) and CLOCK_BOOTTIME; no network client",
 		[]string{"golang.org/x/sys/unix.Adjtimex", "golang.org/x/sys/unix.CLOCK_BOOTTIME", "golang.org/x/sys/unix.ClockGettime", "golang.org/x/sys/unix.STA_UNSYNC", "golang.org/x/sys/unix.TIME_ERROR", "golang.org/x/sys/unix.Timespec", "golang.org/x/sys/unix.Timex"}},
+	// LOOP-7's runners start children in a process group of their own and
+	// kill the group on cancel (#515 Security 1).
+	"loop7":    {"process-group kill of its fuzz children", []string{"syscall.Kill", "syscall.SIGKILL", "syscall.SysProcAttr"}},
+	"probecmd": {"process-group kill of its probe children", []string{"syscall.Kill", "syscall.SIGKILL", "syscall.SysProcAttr"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
 }
@@ -116,6 +120,13 @@ var escapeOK = map[string]map[string]string{
 	"vm/gvisor": {"os/exec": "starts runsc, the only executable (vm/gvisor TestOnlyRunscIsExecuted)"},
 	"clock":     {"os/exec": "runs /usr/bin/chronyc for read-only sync queries, the only executable (clock TestOnlyChronycIsExecuted; HOST-1b)"},
 	"quota":     {"unsafe": "hands the quotactl and fsxattr structs to the kernel"},
+	// LOOP-7's runners (P3-4b-3a, design A in cmd/agentosd ASSUMPTIONS):
+	// each runs only a file directly in its release directory, a constant
+	// in agentosd, never a link and never a path from configuration or
+	// state, with a minimal environment, in a process group a timeout
+	// kills whole.
+	"loop7":    {"os/exec": "runs the release-listed fuzz test binaries in /usr/lib/agentos/fuzz (loop7 TestABinaryOutsideTheReleaseIsRefused, TestALinkInTheReleaseIsNotExecuted)"},
+	"probecmd": {"os/exec": "runs release-listed probe harnesses (probecmd TestACommandOutsideTheReleaseIsRefused); not linked until P3-4b-4c"},
 }
 
 // rawOK are the syscall numbers besides SYS_IOCTL a broker package may
@@ -561,5 +572,190 @@ func g(sock string, cfg config) {
 		if !escapes[e] {
 			t.Fatalf("%s is not an escape", e)
 		}
+	}
+}
+
+// REQ: LOOP-7, LOOP-9
+//
+// P3-4b-3a requirement 1: agentosd links LOOP-7's fuzz runner, and its
+// os/exec is the reviewed escapeOK entry; probecmd has the same entry for
+// when P3-4b-4c links it. No other package of the graph gains one.
+func TestEscapeOKNamesTheLoopRunners(t *testing.T) {
+	for _, p := range []string{"loop7", "probecmd"} {
+		if escapeOK[p]["os/exec"] == "" {
+			t.Errorf("%s has no reviewed os/exec entry", p)
+		}
+	}
+	runners := map[string]bool{"vm/gvisor": true, "clock": true, "loop7": true, "probecmd": true}
+	for p, es := range escapeOK {
+		if es["os/exec"] != "" && !runners[p] {
+			t.Errorf("%s has an os/exec entry no review named", p)
+		}
+	}
+	found := false
+	for _, p := range linkedDeps(t) {
+		found = found || p.path == module+"loop7"
+	}
+	if !found {
+		t.Fatal("agentosd does not link loop7: the fuzz source is not wired")
+	}
+}
+
+// envExempt are the functions in non-test broker code that build an
+// exec.Cmd without assigning its Env, so the child inherits the process's
+// environment, and why each may. None is a LOOP-7 runner; each is a
+// release row (P3-4b-3a findings) to give its child a minimal environment.
+var envExempt = map[string]string{
+	"clock/chrony.go:runChronyc":      "read-only chronyc queries; inherits agentosd's environment (release row)",
+	"vm/gvisor/gvisor.go:cmd":         "runsc; the guest's own environment is set in the OCI spec (release row)",
+	"modem/at/audio.go:Record":        "arecord in agentos-modem, which holds no secret in its environment (release row)",
+	"modem/at/audio.go:Play":          "aplay in agentos-modem (release row)",
+	"tpmseal/swtpm/swtpm.go:start":    "the software TPM, a test fixture outside the image",
+	"quota/quotatest/quotatest.go:On": "mkfs and mount in a test helper, outside the image",
+}
+
+// execWithoutEnv returns the functions in one Go source that build an
+// exec.Cmd (exec.Command, exec.CommandContext, or an exec.Cmd literal)
+// without assigning Env in the same function: a .Env assignment, or an
+// Env key in the literal.
+func execWithoutEnv(t *testing.T, path string) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execName := ""
+	for _, im := range f.Imports {
+		if p, _ := strconv.Unquote(im.Path.Value); p == "os/exec" {
+			execName = "exec"
+			if im.Name != nil {
+				execName = im.Name.Name
+			}
+		}
+	}
+	if execName == "" {
+		return nil
+	}
+	isExec := func(e ast.Expr, names ...string) bool {
+		se, ok := e.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		id, ok := se.X.(*ast.Ident)
+		if !ok || id.Name != execName {
+			return false
+		}
+		for _, n := range names {
+			if se.Sel.Name == n {
+				return true
+			}
+		}
+		return false
+	}
+	var bad []string
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		builds, setsEnv := false, false
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.CallExpr:
+				builds = builds || isExec(n.Fun, "Command", "CommandContext")
+			case *ast.CompositeLit:
+				if isExec(n.Type, "Cmd") {
+					builds = true
+					for _, e := range n.Elts {
+						if kv, ok := e.(*ast.KeyValueExpr); ok {
+							if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Env" {
+								setsEnv = true
+							}
+						}
+					}
+				}
+			case *ast.AssignStmt:
+				for _, l := range n.Lhs {
+					if se, ok := l.(*ast.SelectorExpr); ok && se.Sel.Name == "Env" {
+						setsEnv = true
+					}
+				}
+			}
+			return true
+		})
+		if builds && !setsEnv {
+			bad = append(bad, fn.Name.Name)
+		}
+	}
+	return bad
+}
+
+// P3-4b-3a requirement 2 (#515 Security 2, owed check): every child the
+// broker starts gets an explicit environment, never an inherited one,
+// unless envExempt names it with its reason; an exemption no longer
+// needed fails too, so the list only shrinks.
+func TestEveryChildGetsAnExplicitEnvironment(t *testing.T) {
+	seen := map[string]bool{}
+	var bad []string
+	err := filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == "testdata" || strings.HasPrefix(d.Name(), ".")) && path != ".." {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, _ := filepath.Rel("..", path)
+		for _, fn := range execWithoutEnv(t, path) {
+			key := filepath.ToSlash(rel) + ":" + fn
+			seen[key] = true
+			if envExempt[key] == "" {
+				bad = append(bad, key)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) > 0 {
+		sort.Strings(bad)
+		t.Errorf("exec.Cmd built without Env (the child inherits the broker's environment):\n%s", strings.Join(bad, "\n"))
+	}
+	for k := range envExempt {
+		if !seen[k] {
+			t.Errorf("envExempt names %s, which now sets Env or is gone: drop it", k)
+		}
+	}
+}
+
+// The check catches a planted child without Env, renamed imports and
+// literals included, and passes one that sets it.
+func TestEnvCheckCatchesAnInheritedEnvironment(t *testing.T) {
+	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
+	for _, c := range []string{
+		src(`"os/exec"`, `func f() { exec.Command("x").Run() }`),
+		src(`x "os/exec"`, `func f() { c := x.CommandContext(nil, "x"); c.Run() }`),
+		src(`"os/exec"`, `func f() { c := &exec.Cmd{Path: "/x"}; c.Run() }`),
+		src(`"os/exec"; "os"`, `func f() { c := exec.Command("x"); c.Run() }; func g() { var c exec.Cmd; c.Env = os.Environ() }`),
+	} {
+		path := filepath.Join(t.TempDir(), "p.go")
+		if err := os.WriteFile(path, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if len(execWithoutEnv(t, path)) == 0 {
+			t.Errorf("missed:\n%s", c)
+		}
+	}
+	ok := src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = []string{"PATH=/bin"}; c.Run() }
+func g() { (&exec.Cmd{Path: "/x", Env: []string{}}).Run() }`)
+	path := filepath.Join(t.TempDir(), "ok.go")
+	if err := os.WriteFile(path, []byte(ok), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := execWithoutEnv(t, path); len(got) != 0 {
+		t.Errorf("flagged %v", got)
 	}
 }

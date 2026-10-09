@@ -1,0 +1,21 @@
+{"targets": [
+  {"pkg": "attest", "name": "FuzzParse", "binary": "attest.test"},
+  {"pkg": "browser", "name": "FuzzParse", "binary": "browser.test"},
+  {"pkg": "control", "name": "FuzzParse", "binary": "control.test"},
+  {"pkg": "digestqueue", "name": "FuzzLoadState", "binary": "digestqueue.test"},
+  {"pkg": "guest", "name": "FuzzMCP", "binary": "guest.test"},
+  {"pkg": "hint", "name": "FuzzParse", "binary": "hint.test"},
+  {"pkg": "hostdisk", "name": "FuzzProbe", "binary": "hostdisk.test"},
+  {"pkg": "localui", "name": "FuzzScanPassphrase", "binary": "localui.test"},
+  {"pkg": "loops", "name": "FuzzParseText", "binary": "loops.test"},
+  {"pkg": "mail", "name": "FuzzParse", "binary": "mail.test"},
+  {"pkg": "modem/at", "name": "FuzzDecodeDeliver", "binary": "modem_at.test"},
+  {"pkg": "modem/at", "name": "FuzzTIM1ParseNetworkTime", "binary": "modem_at.test"},
+  {"pkg": "modemlink", "name": "FuzzInbound", "binary": "modemlink.test"},
+  {"pkg": "owner", "name": "FuzzParseReply", "binary": "owner.test"},
+  {"pkg": "recovery", "name": "FuzzParseRecoveryKey", "binary": "recovery.test"},
+  {"pkg": "sockets", "name": "FuzzFrames", "binary": "sockets.test"},
+  {"pkg": "sockets", "name": "FuzzRequest", "binary": "sockets.test"},
+  {"pkg": "tpmseal", "name": "FuzzParse", "binary": "tpmseal.test"},
+  {"pkg": "update", "name": "FuzzParseAttestation", "binary": "update.test"}
+]}
