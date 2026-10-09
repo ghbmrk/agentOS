@@ -8,13 +8,26 @@ import (
 
 // REQ: CH-12, HOST-1f
 
+// The two texts giveBack and restoreDA send when the vault can't forget an
+// entry. Both call sites use these constants, so the test checks the
+// shipped wording.
 func TestAVaultErrorDoesNotReachTheOwner(t *testing.T) {
-	var got []string
-	h := &tpmHost{notify: func(s string) { got = append(got, s) }}
 	canary := "/var/lib/agentos/vault/db"
-	h.sayErr("couldn't remove the box's copy of the TPM lockout from the vault; I'll try again at the next restart",
-		errors.New("unlink "+canary+": permission denied"))
-	if len(got) != 1 || strings.Contains(got[0], canary) || strings.Contains(got[0], "unlink") || strings.Contains(got[0], "/var/") {
-		t.Fatalf("told %q", got)
+	for _, sentence := range []string{lockoutForgetFailed, daForgetFailed} {
+		var got []string
+		h := &tpmHost{notify: func(s string) { got = append(got, s) }}
+		h.sayErr(sentence, errors.New("unlink "+canary+": permission denied"))
+		if len(got) != 1 || got[0] != sentence {
+			t.Fatalf("told %q, want exactly %q", got, sentence)
+		}
+		text := strings.ToLower(got[0])
+		for _, internal := range []string{canary, "unlink", "/var/", "vault", "tpm"} {
+			if strings.Contains(text, internal) {
+				t.Errorf("%q names %q", got[0], internal)
+			}
+		}
+		if !strings.Contains(got[0], "Nothing to do") {
+			t.Errorf("%q doesn't say that nothing is needed", got[0])
+		}
 	}
 }

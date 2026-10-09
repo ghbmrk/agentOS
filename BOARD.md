@@ -423,6 +423,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | HOST-1d | [Internal-disk opt-in](briefs/HOST-1d.md) | HOST-1a, P2-2, P2-4 | queued |
 | HOST-1e | [Host-untouched acceptance check](briefs/HOST-1e.md) | HOST-1a, HOST-1b | merged (part 1, #326); part 2 (HOST-1e2) queued on P2-1 |
 | HOST-1f | [Give the TPM's dictionary-attack settings back as they were](briefs/HOST-1f.md) | P2-4b (tpmseal, boot PIN #42) | merged (de01c80; #188) |
+| HOST-1f-r1 | `giveBack`'s failed-release text "couldn't give the TPM's lockout back to this PC yet; the box will try again at each restart" (`broker/cmd/agentos-egress/trusted.go`) names an internal part and doesn't say whether anything is needed. Reword it in owner vocabulary ("security chip") with "Nothing to do." and add it to `vaultnote_test.go`'s table (release, tier A, L3 on #215 (6090319631), CH-12; failure path: `ReleaseLockout` returns a non-owned error and the owner gets a text that says "TPM") | HOST-1f, #215 | queued (release) |
 | CI-SOAK | [Unattended soak workflow](briefs/CI-SOAK.md) | — | merged (8bab3fe; #187) |
 | OSS-10w2 r1 | Follow names: the reserved-name check (`grants.followName`, localui `askFollow`) also refuses look-alikes of "the AgentOS project" (folded as `owner.fold` does for CH-10, or a confusable skeleton), so a named follow never reads as switching back (release, security lens 370-1 on #370; supersedes LATER OSS-10w2 f4) | OSS-10w2 | queued (needs brief) (A) |
 
