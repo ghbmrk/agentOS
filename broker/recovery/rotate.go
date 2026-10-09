@@ -174,7 +174,7 @@ var ErrWrongPassphrase = errors.New("recovery: that vault passphrase does not op
 
 // LostCardWiFiNote goes beside the Wi-Fi part on a lost-card rotation,
 // which the page ticks in advance but the owner may untick.
-const LostCardWiFiNote = "Whoever finds your card could join the box's Wi-Fi. Your devices will need the new password."
+const LostCardWiFiNote = "Whoever finds your card could join my Wi-Fi. Your devices will need the new password."
 
 // ErrNeedPassphrase is a recovery-key rotation, with the card in hand, on
 // a drive with a passphrase slot but no passphrase given: re-encryption
@@ -680,7 +680,7 @@ func ShowEnrollment(b *Box, rk RecoveryKey, local bool) (Enrollment, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !local {
-		return Enrollment{}, errors.New("recovery: the code generator is shown on the box's Wi-Fi page only")
+		return Enrollment{}, errors.New("recovery: the code generator is shown on the local Wi-Fi page only")
 	}
 	if _, err := readEnroll(b); err != nil {
 		return Enrollment{}, err
@@ -707,7 +707,7 @@ func ConfirmEnrollment(b *Box, code string, local bool, now time.Time) (bool, er
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !local {
-		return false, errors.New("recovery: the code generator is confirmed on the box's Wi-Fi page only")
+		return false, errors.New("recovery: the code generator is confirmed on the local Wi-Fi page only")
 	}
 	m, err := readEnroll(b)
 	if err != nil {
@@ -772,7 +772,7 @@ func DoneNotes(parts []Part, lost bool) []string {
 		case PartPassphrase:
 			out = append(out, "Copies of the drive made before now still open with the old passphrase. Destroy the old card's passphrase sheet.")
 		case PartWiFi:
-			out = append(out, "The box's Wi-Fi password changes now. Rejoin with the new card.")
+			out = append(out, "My Wi-Fi password changes now. Rejoin with the new card.")
 		case PartGrid:
 			out = append(out, "Destroy the old grid. Its cells no longer work.")
 		}
@@ -814,7 +814,7 @@ func RetrustNote(n int, names []string) string {
 	if len(names) > 0 {
 		pcs += " (" + strings.Join(names, ", ") + ")"
 	}
-	return pcs + " must be trusted again: on each, open the box page, unlock, and tick Keep this PC trusted."
+	return pcs + " must be trusted again: on each, open my Wi-Fi page, unlock, and tick Keep this PC trusted."
 }
 
 // The rotation marker: a vault entry that exists while a rotation or
