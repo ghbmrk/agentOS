@@ -25,11 +25,31 @@ const CheckSeeded Check = "seeded"
 // failure. They have no tree rule, so nothing in the suite can grade a
 // Loop 2 fix: the fix comes with an update, and the caller's own
 // regression (the crash input, the probe frame) replays it, calling
-// Resolve once it passes. Detail names the evidence (an input digest).
+// Resolve once it passes. Detail names the evidence: an input digest,
+// or a target detail (FuzzNoInputDetail, or a hang, which CloseTarget
+// closes).
 const (
 	CheckFuzz  Check = "fuzz"
 	CheckProbe Check = "probe"
 )
+
+// Target details: a fuzz finding no stored input can be named for
+// (P3-4b-3r-fuzz). loop7 reports them; loops words and closes them.
+// FuzzNoInputDetail resolves through Resolve once a whole replay passes;
+// the two hang details have no input to replay, and close only through
+// CloseTarget.
+const (
+	FuzzNoInputDetail = "the target failed before any stored input could be named (a seed added in code, or a crash at start)"
+	FuzzOverrunDetail = "the fuzz engine did not stop within its bound"
+	FuzzStallDetail   = "a fuzzed input stopped the fuzz engine making progress"
+)
+
+// hangDetail reports a fuzz finding's detail that names a hang.
+func hangDetail(d string) bool { return d == FuzzOverrunDetail || d == FuzzStallDetail }
+
+// targetDetail reports a fuzz finding's detail that names the target, not
+// one of its stored inputs.
+func targetDetail(d string) bool { return d == FuzzNoInputDetail || hangDetail(d) }
 
 // ruleLess reports a check Report takes without a tree rule.
 func ruleLess(c Check) bool { return c == CheckFuzz || c == CheckProbe }
@@ -246,6 +266,10 @@ func (s *Guard) Resolve(id string, r Replay) error {
 		s.mu.Unlock()
 		return fmt.Errorf("%w: %q is not an open fuzz or probe finding", ErrFinding, id)
 	}
+	if rec.Finding.Check == CheckFuzz && hangDetail(rec.Finding.Detail) {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %q is a hang, with no stored input to replay", ErrFinding, id)
+	}
 	if !r.Passed || r.Evidence != rec.Finding.Detail {
 		s.mu.Unlock()
 		return fmt.Errorf("%w: no passing replay of %q's stored input", ErrFinding, id)
@@ -267,12 +291,86 @@ func (s *Guard) Resolve(id string, r Replay) error {
 	return err
 }
 
+// ClosureStep is the one kind of Closure: a fuzz step that ran.
+const ClosureStep = "step"
+
+// Closure is a source's record of a fuzz step that closes a hang finding
+// (P3-4b-3r-fuzz): the step stopped within its bound and moved its exec
+// count past the baseline, run from Binary (its SHA-256), which differs
+// from Produced, the binary that last produced the finding. Replayed is
+// always false: no stored input was replayed.
+type Closure struct {
+	Kind     string    `json:"kind"`
+	Binary   string    `json:"binary"`
+	Produced string    `json:"produced"`
+	Execs    int       `json:"execs"`
+	Baseline int       `json:"baseline"`
+	Replayed bool      `json:"replayed"`
+	At       time.Time `json:"at"`
+}
+
+// sha256Hex reports a lowercase hex SHA-256.
+func sha256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil && strings.ToLower(s) == s
+}
+
+// CloseTarget closes open reported hang finding id (a fuzz finding whose
+// Detail is a hang detail, never an input digest) as cleared, only on a
+// good step of a different binary: c is a step, from a binary other than
+// the one that produced the finding, whose exec count moved past its
+// baseline. The closure is saved on the finding's evidence, marked as not
+// a replay, and the owner hears it cleared through Resolve's path (S39).
+// Like Resolve, it trusts its in-process caller to build c honestly
+// (S32).
+func (s *Guard) CloseTarget(id string, c Closure) error {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	s.mu.Lock()
+	rec, ok := s.st.Open[id]
+	if !ok || !rec.Reported || rec.Finding.Check != CheckFuzz || rec.Finding.Rule != nil || !hangDetail(rec.Finding.Detail) {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %q is not an open fuzz hang finding", ErrFinding, id)
+	}
+	if c.Kind != ClosureStep || c.Replayed || !sha256Hex(c.Binary) || !sha256Hex(c.Produced) || c.Binary == c.Produced || c.Execs <= c.Baseline {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: no good step of a new binary for %q", ErrFinding, id)
+	}
+	for i := range s.st.Evidence {
+		if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
+			e.Closure = &c
+		}
+	}
+	delete(s.st.Open, id)
+	delete(s.held, id)
+	s.st.Cleared[id] = s.cfg.Now()
+	err := s.saveLocked()
+	lines := s.clearedLinesLocked([]Record{rec})
+	s.mu.Unlock()
+	if text := s.batch(lines); text != "" {
+		s.cfg.Notify(text, false)
+	}
+	return err
+}
+
 // clearedLinesLocked is the cleared text for the texted records just
 // closed: one line per check and plain subject, and none while another
 // open texted finding shares that name, so "Cleared: X" is never said
-// while an X the owner heard of is still open (L3 #558 point 1).
+// while an X the owner heard of is still open (L3 #558 point 1). A fuzz
+// finding naming its target (a hang, no input) is keyed apart from the
+// target's input findings, so an open hang never hides a crash fix's
+// cleared line, nor a crash the hang's (P3-4b-3r-fuzz).
 func (s *Guard) clearedLinesLocked(closed []Record) []string {
-	key := func(r Record) string { return string(r.Finding.Check) + "\x00" + plainSubject(r.Finding) }
+	key := func(r Record) string {
+		k := string(r.Finding.Check) + "\x00" + plainSubject(r.Finding)
+		if r.Finding.Check == CheckFuzz && targetDetail(r.Finding.Detail) {
+			k += "\x00target"
+		}
+		return k
+	}
 	open := map[string]bool{}
 	for _, r := range s.st.Open {
 		if r.Texted {

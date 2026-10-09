@@ -306,6 +306,9 @@ type Record struct {
 	// Replay is the passing replay that closed a fuzz or probe finding
 	// (Resolve).
 	Replay *Replay `json:"replay,omitempty"`
+	// Closure is the good fuzz step that closed a hang finding
+	// (CloseTarget), which replayed no stored input.
+	Closure *Closure `json:"closure,omitempty"`
 	// Told marks a reported finding's owner text as sent, so a resume
 	// after a crash sends a text not yet sent, and only that (P3-4b-1b
 	// item 3).
@@ -1304,6 +1307,9 @@ func findingText(f Finding) string {
 	case CheckSeeded:
 		return "Security test " + sub + " fails on my current setup."
 	case CheckFuzz:
+		if hangDetail(f.Detail) {
+			return "My self-test of " + plainSubject(f) + " stopped responding to a test input. The fix comes with an update."
+		}
 		return "My self-test found a crash in " + plainSubject(f) + ". The fix comes with an update."
 	case CheckProbe:
 		return "My self-test of " + plainSubject(f) + " failed. The fix comes with an update."

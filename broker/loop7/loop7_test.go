@@ -26,6 +26,7 @@ type fakeGuard struct {
 	reported []loops.Finding
 	open     map[string]loops.Finding
 	resolved []string
+	closed   []loops.Closure
 	job      bool
 }
 
@@ -51,6 +52,16 @@ func (g *fakeGuard) Resolve(id string, r loops.Replay) error {
 	}
 	delete(g.open, id)
 	g.resolved = append(g.resolved, id)
+	return nil
+}
+func (g *fakeGuard) CloseTarget(id string, c loops.Closure) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.open[id]; !ok || c.Kind != loops.ClosureStep || c.Replayed || c.Binary == "" || c.Binary == c.Produced || c.Execs <= c.Baseline {
+		return loops.ErrFinding
+	}
+	delete(g.open, id)
+	g.closed = append(g.closed, c)
 	return nil
 }
 func (g *fakeGuard) OpenReported(c loops.Check) []loops.Finding {

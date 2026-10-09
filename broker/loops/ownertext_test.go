@@ -302,6 +302,8 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 		{Check: CheckAdvisory, Subject: "openssl", Detail: "CVE-2026-1", Fixed: "3.1"},
 		{Check: CheckExpiry, Subject: "mail-login", Detail: "expires in 3 days"},
 		{Check: CheckSeeded, Subject: "private-route", Detail: "x"},
+		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzOverrunDetail},
+		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzStallDetail},
 	}
 	// The scan catches what it must.
 	for _, s := range []string{"sockets.FuzzRequest", "a/b", "x.go", "00112233aa", "vmName", "TestX"} {
@@ -322,6 +324,10 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 				}
 				line := ownerLine(rec)
 				cleared := clearedLine(rec)
+				// A hang is not a crash (P3-4b-3r-fuzz).
+				if hangDetail(f.Detail) && strings.Contains(strings.ToLower(line), "crash") {
+					t.Errorf("%s/%s: a hang reads as a crash: %q", f.Check, state, line)
+				}
 				for _, s := range []string{line, cleared} {
 					loop7 := f.Check == CheckFuzz || f.Check == CheckProbe || f.Check == CheckCanary || f.Check == CheckCorpus
 					if bad := identifierIn(s); bad != "" && loop7 {
