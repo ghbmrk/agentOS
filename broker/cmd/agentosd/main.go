@@ -648,7 +648,7 @@ func main() {
 	} else {
 		lp.forgetOwner.wirePage(&cfg)
 		if dg != nil {
-			lp.forgetOwner.digest = dg.forget // CAP-3
+			lp.forgetOwner.wireDigest(dg, lp.forgotten.goals) // CAP-3
 		}
 		caps.learning(lp) // routing held while learning is on (C12)
 	}
