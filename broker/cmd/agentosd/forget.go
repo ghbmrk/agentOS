@@ -177,6 +177,9 @@ type ownerForget struct {
 	learned func(goal string) int
 	// forget is learning.forgetTask: tombstone first, then every store.
 	forget func(goal string) error
+	// digest, if set, purges the goal from the digest queue (CAP-3,
+	// W5-Dc); a send in flight refuses it, so the forget stays owed.
+	digest func(ref string) error
 	// forgotten reports a goal's tombstone (forgotten.has).
 	forgotten func(goal string) bool
 	gate      atomic.Pointer[pauseGateBox]
@@ -535,7 +538,7 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	if owedErr != nil {
 		log.Printf("forget: done text not kept for a restart: %v", owedErr)
 	}
-	err := f.forget(goal)
+	err := f.forgetAll(goal)
 	switch {
 	case err == nil:
 		back := f.agentBackWithoutAsking(ctx, in.ID)
@@ -560,6 +563,20 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	logged := f.logForget(goal, time.Time{}, false)
 	go f.retry(context.WithoutCancel(ctx), goal, since, undone, owedErr == nil, logged)
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgetting; retrying"}
+}
+
+// forgetAll is forget, then the digest queue's purge.
+func (f *ownerForget) forgetAll(goal string) error {
+	if err := f.forget(goal); err != nil {
+		return err
+	}
+	if f.digest == nil {
+		return nil
+	}
+	if err := f.digest(goal); err != nil {
+		return fmt.Errorf("digest: %w", err)
+	}
+	return nil
 }
 
 // retry forgets goal again with backoff until every save holds, saying
@@ -589,7 +606,7 @@ func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, u
 		if !logged {
 			logged = f.logForget(goal, time.Time{}, false)
 		}
-		err := f.forget(goal)
+		err := f.forgetAll(goal)
 		if err == nil {
 			f.done(ctx, goal, forgetDone(undone, false, logged), owedForget{Since: since, Undone: undone, Logged: logged})
 			return
@@ -1353,10 +1370,40 @@ func (f *ownerForget) finishOwed(ctx context.Context) {
 			if !e.Logged {
 				e.Logged = f.logForget(g, time.Time{}, false)
 			}
+			// A restart can come between the forget and the digest
+			// queue's purge, so the purge is asked again before the done
+			// text (security B2 on #592).
+			if f.digest != nil {
+				if err := f.digest(g); err != nil {
+					log.Printf("forget: digest not purged yet: %v", err)
+					go f.purgeLater(ctx, g, e)
+					continue
+				}
+			}
 			f.done(ctx, g, f.doneLater(e.Undone, e.Since, e.Back, e.Logged), e)
 		default:
 			f.paid(g)
 		}
+	}
+}
+
+// purgeLater asks the digest queue to purge an owed forget's goal again
+// with backoff, then texts its done text; until then the forget stays
+// owed, so a shutdown leaves it to the next start-up.
+func (f *ownerForget) purgeLater(ctx context.Context, goal string, e owedForget) {
+	if f.retried != nil {
+		defer f.retried()
+	}
+	for wait := 2 * time.Second; ; wait = min(2*wait, forgetRetryMax) {
+		if !f.sleep(ctx, wait) {
+			return
+		}
+		if err := f.digest(goal); err != nil {
+			log.Printf("forget: digest not purged yet: %v", err)
+			continue
+		}
+		f.done(ctx, goal, f.doneLater(e.Undone, e.Since, e.Back, e.Logged), e)
+		return
 	}
 }
 
