@@ -184,6 +184,27 @@ class ReleaseTest(unittest.TestCase):
                          ["debian/other/initrd", "loader/credentials/agentos.cred",
                           "loader/entries/debian-6.12.conf", "loader/random-seed"])
 
+    def test_build_drops_debian_boot_files_and_seed_from_esp(self):
+        # HW-1: the ESP is built from /efi and /boot (00-esp.conf). Debian's kernel package leaves
+        # vmlinuz-, config- and System.map- in /boot, and bootctl install writes loader/random-seed,
+        # which would ship identical on every drive. mkosi.conf's RemoveFiles drops them; mkosi
+        # v24.3 runs it after copying the kernel to /usr/lib/modules and before the entry is installed.
+        k = "6.12.111+deb13-amd64"
+        pats = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        name, text = finish.counted_entry(ENTRY % H, "7", tries=3)
+        with tempfile.TemporaryDirectory() as t:
+            r = pathlib.Path(t)
+            for f in ("efi/EFI/BOOT/BOOTX64.EFI", "efi/EFI/systemd/systemd-bootx64.efi", "efi/loader/loader.conf",
+                      "efi/loader/entries.srel", "efi/loader/random-seed", "boot/vmlinuz-" + k,
+                      "boot/config-" + k, "boot/System.map-" + k, "usr/lib/modules/%s/vmlinuz" % k):
+                write(r, f, "x")
+            for pat in pats:
+                for f in r.glob(pat.lstrip("/")):
+                    f.unlink()
+            self.assertTrue((r / "usr/lib/modules" / k / "vmlinuz").exists())
+            esp = sorted(str(f.relative_to(r / d)) for d in ("efi", "boot") for f in (r / d).rglob("*") if f.is_file())
+            self.assertEqual(finish.esp_violations(esp, text), [], esp)
+
     def test_verify_usr_fails_when_veritysetup_refuses(self):
         with tempfile.TemporaryDirectory() as t:
             b = pathlib.Path(t)
