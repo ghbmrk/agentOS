@@ -50,6 +50,8 @@ func callRouter(t *testing.T, r *route.Router, n int) {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 			strings.NewReader(`{"model":"chat","messages":[{"role":"user","content":"hi"}]}`))
+		// Fail over freely, as an unmetered caller allows (SR3-7-f1b).
+		req = req.WithContext(route.WithAttempt(req.Context(), func() bool { return true }))
 		r.Handler("m").ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("call %d: %d %s", i, w.Code, w.Body)

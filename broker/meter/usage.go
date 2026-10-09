@@ -24,12 +24,67 @@ import (
 // estimate. Unanswered is for one that reached it and got no answer: a
 // provider may have billed output the broker never saw, so it is charged
 // its full output reservation.
+//
+// Failed are the upstream attempts the handler sent and failed over from
+// before the one that answered, each charged on its own (Attempt.charge).
+// Unserved says no attempt answered: the guest's answer is the handler's
+// copy of the last failed attempt's error, so only Failed is charged.
+// The served call and its failed attempts arrive in one Usage, so Report
+// keeps one slot.
 type Usage struct {
 	Provider                             string
 	Input, Output, CacheRead, CacheWrite int64
 	Reported, Complete                   bool
 	OutputChars                          int64
 	NoResponse, Unanswered               bool
+	Failed                               []Attempt
+	Unserved                             bool
+}
+
+// Attempt is one upstream attempt that reached a provider and failed. A
+// provider may bill it (SR3-7-f1, unmeasured), so it is charged: its
+// input estimate when the provider rejected it at admission (Full false:
+// 401, 429), or that plus the call's full output reservation (Full: a
+// server error, overload, timeout, transport error or broken stream).
+// Usage the provider reported in its error body (Reported) is charged
+// instead, but never below the input estimate. OutputChars a broken stream
+// produced count as for a served call.
+type Attempt struct {
+	Provider    string `json:"provider"`
+	Status      int    `json:"status"`
+	Full        bool   `json:"full,omitempty"`
+	Reported    bool   `json:"reported,omitempty"`
+	Input       int64  `json:"input,omitempty"`
+	Output      int64  `json:"output,omitempty"`
+	CacheRead   int64  `json:"cache_read,omitempty"`
+	CacheWrite  int64  `json:"cache_write,omitempty"`
+	OutputChars int64  `json:"output_chars,omitempty"`
+}
+
+// charge is the attempt's charge for a call with input estimate in and
+// output reservation reserve.
+func (a Attempt) charge(in, reserve int64) int64 {
+	counted := Tokens(max(a.OutputChars, 0))
+	if a.Reported {
+		r, w := cacheWeights(a.Provider)
+		rin := max(a.Input, 0) + int64(math.Ceil(float64(max(a.CacheRead, 0))*r+float64(max(a.CacheWrite, 0))*w))
+		return max(in, rin+max(a.Output, 0, counted))
+	}
+	if a.Full {
+		return in + max(reserve, counted)
+	}
+	return in + counted
+}
+
+// failed is the charge for every failed attempt in rep.
+func failed(in, reserve int64, rep *Usage) int64 {
+	var n int64
+	if rep != nil {
+		for _, a := range rep.Failed {
+			n += a.charge(in, reserve)
+		}
+	}
+	return n
 }
 
 type reportKey struct{}
@@ -37,6 +92,9 @@ type reportKey struct{}
 type reportSlot struct {
 	mu sync.Mutex
 	u  *Usage
+
+	call        *Call
+	in, reserve int64
 }
 
 func (s *reportSlot) get() *Usage {
@@ -58,6 +116,20 @@ func Report(ctx context.Context, u Usage) bool {
 	s.u = &u
 	s.mu.Unlock()
 	return true
+}
+
+// Another asks the metered call running on ctx to cover one more upstream
+// attempt at its worst charge (its input estimate plus its full output
+// reservation; Attempt.charge). The meter holds that much more for the
+// call against every limit it counts against, or refuses if the hold
+// would pass one. A hold is settled with the call (Done), so what was not
+// used is refunded. False when ctx is not a metered call.
+func Another(ctx context.Context) bool {
+	s, ok := ctx.Value(reportKey{}).(*reportSlot)
+	if !ok || s.call == nil {
+		return false
+	}
+	return s.call.m.hold(s.call, s.in+s.reserve) == nil
 }
 
 // cacheWeights are what a provider bills cached input at, relative to
@@ -204,7 +276,19 @@ func (u *usageWriter) line(l []byte) {
 // the response. A call the egress gave no response is charged its input
 // estimate (rep.NoResponse) or that plus its output reservation, reserve
 // (rep.Unanswered); the broker's own error page is never model output.
+//
+// Each failed attempt in rep is charged on top (Attempt.charge); when no
+// attempt served the call (rep.Unserved), only they are.
 func (u *usageWriter) used(in, reserve int64, rep *Usage) int64 {
+	failed := failed(in, reserve, rep)
+	if rep != nil && rep.Unserved {
+		return failed
+	}
+	return u.served(in, reserve, rep) + failed
+}
+
+// served is the charge for the attempt that answered the guest.
+func (u *usageWriter) served(in, reserve int64, rep *Usage) int64 {
 	if rep != nil && rep.Unanswered {
 		return in + reserve
 	}

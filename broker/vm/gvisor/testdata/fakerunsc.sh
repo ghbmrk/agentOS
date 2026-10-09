@@ -33,6 +33,18 @@
 # 16 KiB of filler before runsc's trace. guestpanic is a guest that writes
 # a whole Go panic trace to its stderr and exits 2.
 #
+# The next three fail after the pid write with text on runsc's own
+# stderr and no --log line, at an exit other than 2 and with Exec's
+# context alive (P1-4-flake-crashed). oompanic writes a trace and is
+# killed by something other than Exec (a cgroup OOM kill): it kills
+# itself, so its exit is -1. exit1text writes one line and exits 1.
+# waitdelaytext writes a trace and exits 0, but a process it left holds
+# stdout and stderr past ExecWaitDelay, so Exec's wait ends in
+# ErrWaitDelay; the fake creates $FAKE_RUNSC_MARK first, and the
+# leftover holds the pipes until the test removes it. exit0text writes
+# one line to runsc's stderr and exits 0 with nothing holding the pipes:
+# a successful exec, which stays a result.
+#
 # The rest fail before the pid is written, as runsc's exec does
 # (runsc/cmd/exec.go, runsc/sandbox/sandbox.go, pkg/urpc/urpc.go,
 # pkg/sentry/fsimpl/user/path.go, pkg/sentry/loader/loader.go at that
@@ -143,6 +155,25 @@ guestpanic)
 	echo 7 >"$pid"; echo "guest out"
 	printf 'panic: boom\n\ngoroutine 1 [running]:\nmain.main()\n' >&4
 	exit 2
+	;;
+oompanic)
+	echo 7 >"$pid"
+	echo "guest out"
+	printf 'panic: open %s: permission denied\n\ngoroutine 1 [running]:\nmain.main()\n' "$c" >&2
+	kill -KILL $$
+	;;
+exit1text) echo 7 >"$pid"; echo "guest out"; echo "W runsc: $c" >&2; exit 1 ;;
+exit0text) echo 7 >"$pid"; echo "guest out"; echo "W runsc: $c" >&2; exit 0 ;;
+waitdelaytext)
+	echo 7 >"$pid"
+	echo "guest out"
+	printf 'panic: open %s: permission denied\n\ngoroutine 1 [running]:\nmain.main()\n' "$c" >&2
+	: >"$FAKE_RUNSC_MARK"
+	(
+		i=0
+		while [ -e "$FAKE_RUNSC_MARK" ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i + 1)); done
+	) 3>&- 4>&- &
+	exit 0
 	;;
 exit2) echo 7 >"$pid"; echo "guest out"; echo "goroutine 1 [running]:" >&4; exit 2 ;;
 pidfail) fail "writing internal pid file: open $c: no space left on device" 1 ;;
