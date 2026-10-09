@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1018,7 +1019,7 @@ func TestDigestDedupesBeforeItsCap(t *testing.T) {
 	r.report(t, b)
 	lines, more := security(r.g.Digest())
 	corpus := "Security check: " + ownerLine(r.mustOpenFor(t, corpusMisses(1)[0])) + " (10 times)"
-	if len(lines) != 3 || more != "" || lines[0] != corpus && lines[1] != corpus && lines[2] != corpus {
+	if len(lines) != 3 || more != "" || !slices.Contains(lines, corpus) {
 		t.Fatalf("digest lines %q, more %q; want the counted corpus line and two others", lines, more)
 	}
 	t.Run("the cap applies to distinct lines", func(t *testing.T) {
@@ -1030,6 +1031,33 @@ func TestDigestDedupesBeforeItsCap(t *testing.T) {
 			t.Fatalf("digest lines %q, more %q", lines, more)
 		}
 	})
+}
+
+// REQ: LOOP-9
+//
+// P3-4b-4c-dedupe 2, Potency on #634: a line shared by a Low and a High
+// finding ranks as High, so the cap never drops it behind other Highs
+// when the Low one is seen first.
+func TestADigestLineSharedWithAHighFindingRanksHigh(t *testing.T) {
+	r := newReportRig(t, nil)
+	low, high := corpusMisses(2)[0], corpusMisses(2)[1]
+	low.Severity, low.ID, high.ID = Low, "a-low", "b-high"
+	recs := []Record{{Finding: low, Contained: "none"}, {Finding: high, Contained: "none"}}
+	for i, sub := range []string{"sockets.FuzzRequest", "mail.FuzzParse", "control.FuzzParse"} {
+		f := fuzzFinding()
+		f.Subject, f.ID = sub, fmt.Sprintf("c-high-%d", i)
+		recs = append(recs, Record{Finding: f, Contained: "none"})
+	}
+	r.g.mu.Lock()
+	for _, rec := range recs {
+		r.g.st.Open[rec.Finding.ID] = rec
+	}
+	r.g.mu.Unlock()
+	d := r.g.Digest()
+	shared := "Security check: " + ownerLine(recs[0]) + " (2 times)"
+	if len(d) < 1 || d[0] != shared {
+		t.Fatalf("digest %q: the shared line is not first among the Highs", d)
+	}
 }
 
 // mustOpenFor is the open record Report made for f.
