@@ -135,7 +135,7 @@ func TestAnUnreadyFixerIsNotAsked(t *testing.T) {
 	if rec, open := r.open(id); !open || rec.Fix != FixPending || fx.calls() != 0 {
 		t.Fatalf("open %v, %+v, %d calls", open, rec, fx.calls())
 	}
-	if s := r.g.Status(); !strings.Contains(s, "waits for a fix: I cannot build one yet: this box has no builder machines.") {
+	if s := r.g.Status(); !strings.Contains(s, "waits for a fix: I cannot build one yet, because this box has no builder machines.") {
 		t.Fatalf("status %q", s)
 	}
 	fx.why = ""
@@ -209,6 +209,89 @@ func TestFixRetriesAreBounded(t *testing.T) {
 	}
 	if s := r.g.Status(); !strings.Contains(s, waitStopped) {
 		t.Fatalf("status %q", s)
+	}
+}
+
+// heldTwice is a fixRig whose finding's request is held as unchanged after
+// two rejections for the same reason (L3 1 on #575).
+func heldTwice(t *testing.T) (*reportRig, *scriptFixer, string) {
+	t.Helper()
+	var cands []change.Candidate
+	for i := range 2 * maxFixTries {
+		cands = append(cands, gamedN(i))
+	}
+	fx := &scriptFixer{cands: cands}
+	r, _ := fixRig(t, fx)
+	id := r.report(t, seedFinding()).Finding.ID
+	if err := r.p.AddSecurityCase(heldSeed(id)); err != nil {
+		t.Fatal(err)
+	}
+	r.addProbe(t, 99) // a plain config fixture, so a config change can qualify
+	r.pass(t)
+	r.again(t)
+	r.again(t)
+	if rec, _ := r.open(id); fx.calls() != 2 || rec.FixHold != holdUnchanged {
+		t.Fatalf("%d calls, hold %q", fx.calls(), rec.FixHold)
+	}
+	return r, fx, id
+}
+
+// L3 1 on #575: a change to the active tree in the regression's namespace
+// buys exactly one more ask of a request held as unchanged.
+func TestAHeldRequestIsAskedOnceMoreWhenTheTreeChanges(t *testing.T) {
+	r, fx, _ := heldTwice(t)
+	rep, err := r.p.Propose(context.Background(), change.Candidate{Source: change.Local, Origin: "test",
+		Files: change.Tree{"config/other.json": []byte(`{"v":1}`)}})
+	if err != nil || rep.State != change.StateAdopted {
+		t.Fatalf("tree change: %+v, %v", rep, err)
+	}
+	r.again(t)
+	r.again(t)
+	if fx.calls() != 3 {
+		t.Fatalf("%d calls after a tree change, want 3", fx.calls())
+	}
+}
+
+// L3 1 on #575: a new case linked to the finding buys exactly one more ask
+// of a request held as unchanged.
+func TestAHeldRequestIsAskedOnceMoreWhenALinkedCaseIsAdded(t *testing.T) {
+	r, fx, id := heldTwice(t)
+	c := heldSeed(id)
+	c.ID = "held/" + id + "/v2"
+	if err := r.p.AddSecurityCase(c); err != nil {
+		t.Fatal(err)
+	}
+	r.again(t)
+	r.again(t)
+	if fx.calls() != 3 {
+		t.Fatalf("%d calls after a linked case, want 3", fx.calls())
+	}
+}
+
+// Security release 1, L3 later 3 on #575: a finding no fix can be built
+// for (the fixer says ErrNotFixable) is not a failed build. Loop 2 counts
+// no try, never asks again, and STATUS says it cannot repair it.
+func TestAnUnfixableFindingIsNotAFailedBuild(t *testing.T) {
+	fx := &scriptFixer{cands: []change.Candidate{fixCand(reference)}, err: fmt.Errorf("no namespace: %w", ErrNotFixable)}
+	r, _ := fixRig(t, fx)
+	id := r.report(t, seedFinding()).Finding.ID
+	r.pass(t)
+	for range 3 {
+		r.now = r.now.Add(25 * time.Hour)
+		r.again(t)
+	}
+	if rec, open := r.open(id); !open || fx.calls() != 1 || rec.FixTries != 0 || rec.FixHold != holdUnfixable {
+		t.Fatalf("open %v, %d calls, %+v", open, fx.calls(), rec)
+	}
+	if s := r.g.Status(); !strings.Contains(s, waitUnfixable) {
+		t.Fatalf("status %q", s)
+	}
+}
+
+// UX release 2 on #575: the stopped line names the real cap.
+func TestTheStoppedLineNamesTheCap(t *testing.T) {
+	if !strings.Contains(waitStopped, fmt.Sprintf(" %d ", maxFixTries)) {
+		t.Fatalf("%q does not name %d", waitStopped, maxFixTries)
 	}
 }
 

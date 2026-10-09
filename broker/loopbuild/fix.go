@@ -3,7 +3,7 @@ package loopbuild
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
@@ -28,10 +28,13 @@ var FixNS = map[string]change.Class{
 // ErrNoNamespace: the finding's regression is not a valid tree rule whose
 // clauses all read one namespace in FixNS, so no job could be confined to
 // it and none is run.
-var ErrNoNamespace = errors.New("loopbuild: the finding names no one namespace a fix may write")
+// It wraps loops.ErrNotFixable, so Loop 2 does not count it as a failed
+// build.
+var ErrNoNamespace = fmt.Errorf("loopbuild: the finding names no one namespace a fix may write: %w", loops.ErrNotFixable)
 
-// NoModel is Unready's answer when the builder has no model route.
-const NoModel = "the builder has no model access"
+// NoModel is Unready's answer when the builder has no model route, in
+// owner words: STATUS says "I cannot build one yet, because" before it.
+const NoModel = "building repairs needs AI access I do not have"
 
 var (
 	_ loops.Fixer   = (*Builder)(nil)

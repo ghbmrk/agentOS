@@ -214,7 +214,7 @@ func TestLoop2AsksTheBuilderForItsFixes(t *testing.T) {
 	if _, err := lp.guard.Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if s := lp.guard.Status(); !strings.Contains(s, "waits for a fix: I cannot build one yet: "+loop2NoBuilder+".") {
+	if s := lp.guard.Status(); !strings.Contains(s, "waits for a fix: I cannot build one yet, because "+loop2NoBuilder+".") {
 		t.Fatalf("STATUS %q", s)
 	}
 	if _, err := (lateFix{&lp.build}).Fix(context.Background(), rec.Finding); !errors.Is(err, errNoBuilder) {
@@ -223,7 +223,7 @@ func TestLoop2AsksTheBuilderForItsFixes(t *testing.T) {
 	var s lateServices
 	lp.startBuilder(&fakeBuilderMachines{}, images{"builder": "/img/builder", "openclaw": "/img/openclaw"}, &s,
 		buildConfig{Dir: filepath.Join(t.TempDir(), "build"), Image: "builder", AgentImage: "openclaw"})
-	if s := lp.guard.Status(); !strings.Contains(s, "I cannot build one yet: "+loopbuild.NoModel+".") {
+	if s := lp.guard.Status(); !strings.Contains(s, "I cannot build one yet, because "+loopbuild.NoModel+".") {
 		t.Fatalf("STATUS with no model route %q", s)
 	}
 }

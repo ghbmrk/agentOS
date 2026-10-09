@@ -98,7 +98,7 @@ func TestAFindingWithoutOneFixableNamespaceGetsNoJob(t *testing.T) {
 		if rule == "" {
 			fd.Rule = nil
 		}
-		if _, err := b.Fix(context.Background(), fd); !errors.Is(err, ErrNoNamespace) {
+		if _, err := b.Fix(context.Background(), fd); !errors.Is(err, ErrNoNamespace) || !errors.Is(err, loops.ErrNotFixable) {
 			t.Errorf("%s: %v", name, err)
 		}
 		if len(f.destroyed) != 0 || len(f.ms) != 0 {

@@ -55,8 +55,10 @@ func loop2FixShare() meter.Share {
 }
 
 // loop2NoBuilder is why Loop 2 cannot build a fix on a box without
-// builder machines, for STATUS.
-const loop2NoBuilder = "this box has no builder machines"
+// builder machines, in owner words for STATUS ("I cannot build one yet,
+// because ..."). The owner has no step to take: the box image ships the
+// builder (W3-builder-ship).
+const loop2NoBuilder = "I am not set up to build repairs"
 
 // lateFix answers Loop 2's fix-candidate requests on Loop 1's builder
 // machines (P3-4b-5, LOOP-9) once the machine plane attaches the builder.

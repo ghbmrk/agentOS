@@ -171,9 +171,10 @@ const (
 	waitForAFixOf = "waits for a fix: "
 	waitNoTest    = "its test could not be added to my security checks, so no fix can qualify yet"
 	waitUpdate    = "one comes with an update; I check it again at least twice a day"
-	waitLater     = "building the last ones failed; I try again in a day"
-	waitUnchanged = "the last ones did not qualify; I try again once my security checks or settings change"
-	waitStopped   = "none of the last ones worked, so I stopped trying; one may come with an update"
+	waitLater     = "building one failed twice; I try again in a day"
+	waitUnchanged = "the last fix I built did not pass my security checks; I try again when those checks change"
+	waitStopped   = "I stopped trying after 8 fixes that did not work; anything I paused for it stays paused until you resume it, and an update may bring a fix"
+	waitUnfixable = "it is not something I can repair myself; an update may bring a fix"
 )
 
 // waitingLocked is why an open reported record waits, "" if it does not.
@@ -195,7 +196,9 @@ func (s *Guard) waitingLocked(r Record) string {
 	case s.cfg.Fixer == nil:
 		return waitNoFixer
 	case u != nil && u.Unready() != "":
-		return waitNoFixer + ": " + u.Unready()
+		return waitNoFixer + ", because " + u.Unready()
+	case r.FixHold == holdUnfixable:
+		return waitUnfixable
 	case r.FixHold == holdStopped:
 		return waitStopped
 	case r.FixHold == holdUnchanged:

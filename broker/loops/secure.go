@@ -139,6 +139,11 @@ type Fixer interface {
 	Fix(ctx context.Context, f Finding) (change.Candidate, error)
 }
 
+// ErrNotFixable is what a fixer's error wraps when it can never build a fix
+// for the finding (no namespace it may write, LOOP-10): Loop 2 then holds
+// the request without counting a failed build, and STATUS says so.
+var ErrNotFixable = errors.New("loops: no fix this fixer can build")
+
 // Unready is a Fixer that can tell, without building, that it cannot
 // build now (no builder machines, no model access). Loop 2 then asks it
 // nothing, the request stays open, and STATUS says why: the answer is
@@ -157,6 +162,9 @@ type SuitePipeline interface {
 	// LinkedHold answers a finding's linked cases from the active tree
 	// (P3-4b-1b item 1).
 	LinkedHold(finding string) (linked int, hold bool)
+	// Digests are the active tree's and the whole suite's digests: what a
+	// rejection was graded against (fixKey, P3-4b-5).
+	Digests() (tree, suite string)
 }
 
 // GuardConfig configures NewSecure.
@@ -276,6 +284,7 @@ const (
 	holdUnchanged = "unchanged"
 	holdLater     = "later"
 	holdStopped   = "stopped"
+	holdUnfixable = "unfixable"
 )
 
 type secureState struct {
@@ -854,6 +863,11 @@ func (s *Guard) fix(ctx context.Context, rec *Record) error {
 				return nil
 			}
 			rec.Fix, rec.FixReason = FixFailed, ""
+			if errors.Is(err, ErrNotFixable) {
+				// Not a failed build: no job ran and none ever can.
+				rec.FixHold = holdUnfixable
+				return nil
+			}
 			s.tried(rec, "", false)
 			return fmt.Errorf("fix %s: %w", f.ID, err)
 		}
@@ -902,34 +916,26 @@ func (s *Guard) tried(rec *Record, hash string, again bool) {
 	}
 }
 
-// fixKey is what rec's rejection was graded against: its reason, the
-// active tree of each namespace its regression reads, and the suite's
-// size and the finding's linked cases. Equal keys give the same verdict
-// to the same candidate. "" for anything but a rejection. It calls the
-// pipeline: never with s.mu held.
+// fixKey is what rec's rejection was graded against: its reason and the
+// digests of the active tree and the whole suite (its linked cases
+// included). Equal keys give the same verdict to the same candidate. ""
+// for anything but a rejection. It calls the pipeline: never with s.mu
+// held.
 func (s *Guard) fixKey(rec Record) string {
 	if rec.Fix != string(change.StateRejected) {
 		return ""
 	}
-	h := sha256.New()
-	fmt.Fprintf(h, "%q\n", rec.FixReason)
-	if r, ok, err := change.ParseTreeRule(rec.Regression); ok && err == nil {
-		for _, ns := range r.Namespaces() {
-			fmt.Fprintf(h, "%s %s\n", ns, s.cfg.Pipeline.Files(ns).Hash())
-		}
-	}
-	linked, _ := s.cfg.Pipeline.LinkedHold(rec.Finding.ID)
-	fmt.Fprintf(h, "linked %d\n", linked)
-	if c, ok := s.cfg.Pipeline.(interface{ SecurityCount() int }); ok {
-		fmt.Fprintf(h, "security %d\n", c.SecurityCount())
-	}
-	return hex.EncodeToString(h.Sum(nil))
+	tree, suite := s.cfg.Pipeline.Digests()
+	h := sha256.Sum256(fmt.Appendf(nil, "%q\ntree %s\nsuite %s\n", rec.FixReason, tree, suite))
+	return hex.EncodeToString(h[:])
 }
 
 // hold is why rec's fix request is held back now, "" when it is due. It
 // calls the pipeline: never with s.mu held.
 func (s *Guard) hold(rec Record) string {
 	switch {
+	case rec.FixHold == holdUnfixable:
+		return holdUnfixable
 	case rec.FixTries >= maxFixTries:
 		return holdStopped
 	case rec.FixTries < fixBurst:
@@ -1031,7 +1037,9 @@ func (s *Guard) fixPending(ctx context.Context, fresh []string) error {
 			if err := s.fix(ctx, &rec); err != nil {
 				errs = append(errs, err)
 			}
-			rec.FixHold = s.hold(rec)
+			if rec.FixHold != holdUnfixable {
+				rec.FixHold = s.hold(rec)
+			}
 		}
 		s.mu.Lock()
 		if _, still := s.st.Open[id]; still {
