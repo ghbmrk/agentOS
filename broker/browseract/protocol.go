@@ -178,7 +178,7 @@ func OnDeclaredOrigin(raw string, declared []string) bool {
 
 var (
 	refToken = regexp.MustCompile(`\[ref=((?:f\d+)?e\d+)\]`)
-	roleRE   = regexp.MustCompile(`^- '?[A-Za-z][A-Za-z-]* ?`)
+	roleRE   = regexp.MustCompile(`^[ \t]*- '?[A-Za-z][A-Za-z-]* ?`)
 	attrsRE  = regexp.MustCompile(`^(?: \[[^\]]*\])*`)
 )
 

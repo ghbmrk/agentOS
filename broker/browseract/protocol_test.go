@@ -78,6 +78,9 @@ func TestCRED4PasswordValueOmittedDespiteDecoyRefInName(t *testing.T) {
 		`- textbox "a [ref=e1]: b" [ref=e5]: hunter2`,
 		`- textbox "q \" [ref=e1] " [ref=e5]: hunter2`,
 		`- textbox "foo [ref=e5]" [ref=e6]: ada`,
+		`  - textbox "x [ref=e1]" [ref=e5]: hunter2`,
+		"\t\t- textbox \"x [ref=e1]\" [ref=e5]: hunter2",
+		`    - 'textbox "x [ref=e1]" [ref=e5]: hunter2'`,
 	} {
 		got := OmitValues(in, refs)
 		leaked := strings.Contains(got, "hunter2")
