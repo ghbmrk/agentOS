@@ -192,7 +192,8 @@ func TestAFuzzChildReachesOnlyItsOwnBoundedTree(t *testing.T) {
 r=$PWD/reach
 cat ` + roles + ` >/dev/null 2>&1 && echo "roles read" > $r || echo "roles denied" > $r
 chattr -p 0 . >/dev/null 2>&1 && echo "retag done" >> $r || echo "retag $(chattr -p 0 . 2>&1 | grep -o 'Invalid argument' | head -n 1)" >> $r
-f=$(dd if=/dev/zero of=big bs=1M count=1536 oflag=direct 2>&1 >/dev/null | grep -o 'Disk quota exceeded\|No space left on device' | head -n 1)
+f=$(dd if=/dev/zero of=big bs=1M count=1536 oflag=direct 2>&1 >/dev/null; echo "exit $?")
+f=$(echo "$f" | grep -v 'records\|copied' | tr '\n' ' ')
 s=$(stat -c %s big)
 rm -f big
 echo "fill $f" >> $r
@@ -246,7 +247,9 @@ exit 0`
 	if said["retag"] != "Invalid argument" {
 		t.Errorf("a fuzz child moved its tree out of its quota project: %q", b)
 	}
-	if said["fill"] != "Disk quota exceeded" && said["fill"] != "No space left on device" {
+	// dd reports the write the quota refused and exits non-zero:
+	// EDQUOT on ext4, ENOSPC on XFS.
+	if f := said["fill"]; strings.Contains(f, "exit 0") || !strings.Contains(f, "Disk quota exceeded") && !strings.Contains(f, "No space left on device") {
 		t.Errorf("a fill past the quota was not stopped by it: %q", b)
 	}
 	if n, err := strconv.ParseInt(said["size"], 10, 64); err != nil || n > fuzzDiskBytes {
