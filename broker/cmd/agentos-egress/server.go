@@ -523,6 +523,7 @@ func unlockHandler(c *custody) http.Handler {
 	})
 	secondLineRoutes(mux, c, read, reply, fail)
 	smsRoutes(mux, c, read, reply, fail)
+	mailRoutes(mux, c, read, reply, fail)
 	return mux
 }
 
