@@ -39,10 +39,14 @@ const MaxHeld = 4
 // Store is the part of update.Store the executor uses.
 type Store interface {
 	FollowRoot(root []byte, approved, name string, o update.Options) error
+	// FollowProject switches back, checking under the store's lock that
+	// root is the project's (update.Store.FollowProject).
+	FollowProject(root []byte, links [][]byte, shipped []byte, approved string, o update.Options) error
 	Following() (update.Followed, error)
 	TrustedRoot() ([]byte, error)
-	// ProjectRoot is the project root the box trusted when it last left
-	// the project's chain, nil if it never did.
+	// ProjectRoot is the newest project root the box trusted: the one it
+	// trusts now while on the project chain, else the one it trusted when
+	// it last left it, nil if it never recorded one.
 	ProjectRoot() ([]byte, error)
 }
 
@@ -298,13 +302,19 @@ func (x *Executor) Execute(ctx context.Context, in journal.Intent, _ int) journa
 	}
 	root := h.root
 	now := x.latest(ctx)
+	var err error
 	if name == "" {
-		if err := x.project(h, now); err != nil {
+		// Checked under the store's lock, against the anchor at the
+		// moment of the switch (security 4a on #667).
+		err = x.cfg.Store.FollowProject(root, h.chain, x.cfg.Shipped, digest, x.options(now))
+		if errors.Is(err, update.ErrNotProject) {
 			return journal.Outcome{Result: journal.ResultNotApplied,
 				Evidence: "switching back needs the project's own root: its root keys, or the root files that rotate to it from the last project root I trusted (" + err.Error() + ")"}
 		}
+	} else {
+		err = x.cfg.Store.FollowRoot(root, digest, name, x.options(now))
 	}
-	if err := x.cfg.Store.FollowRoot(root, digest, name, x.options(now)); err != nil {
+	if err != nil {
 		if cur, rerr := x.cfg.Store.TrustedRoot(); rerr != nil || bytes.Equal(cur, root) {
 			// The root may be in place with the switch unfinished:
 			// Reconcile decides.

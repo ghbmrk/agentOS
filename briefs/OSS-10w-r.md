@@ -1,6 +1,6 @@
 # OSS-10w-r: Switching back after a project root-key rotation
 
-Board section: LATER promoted at the coordinator's request (2026-10-09), a deviation from D-048 pending the owner's confirmation.
+Board section: LATER promoted at the coordinator's request (2026-10-09), a D-048 exception Mark confirmed (2026-10-09).
 
 **Requirements:** OSS-10 (installations may follow any fork, and come back), UPD-8 (TUF: "keys rotate and revoke without reinstalling"; reuse a maintained implementation), OSS-9 (a fork's root is never the project's authority).
 

@@ -207,3 +207,80 @@ func (r *rig) refusesRollback(older map[string]string, trusted []byte) {
 		}
 	}
 }
+
+// racingStore runs race once, when the executor first reads the anchor or
+// asks for the switch: a rotation landing between the page's check and
+// the switch.
+type racingStore struct {
+	*update.Store
+	race *func()
+}
+
+func (s racingStore) ProjectRoot() ([]byte, error) {
+	b, err := s.Store.ProjectRoot()
+	s.fire()
+	return b, err
+}
+
+func (s racingStore) FollowProject(root []byte, links [][]byte, shipped []byte, approved string, o update.Options) error {
+	s.fire()
+	return s.Store.FollowProject(root, links, shipped, approved, o)
+}
+
+func (s racingStore) fire() {
+	if f := *s.race; f != nil {
+		*s.race = nil
+		f()
+	}
+}
+
+// Security 4a on #667: a rotation between the switch-back check and the
+// switch never lets the box trust the older root. The check runs under
+// the store's lock, against the anchor at the moment of the write.
+func TestOSS10wrRotationDuringASwitchBackIsRefused(t *testing.T) {
+	t.Run("Check rotates the project chain", func(t *testing.T) {
+		r := newRig(t)
+		v2, _ := rotated(t, r.shipped, r.pk)
+		race := func() {
+			if err := os.WriteFile(filepath.Join(r.store.Dir, "root.json"), v2, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		x := r.with(racingStore{r.store, &race})
+		sum, err := x.Describe(context.Background(), r.shipped)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out := x.Execute(context.Background(), grants.FollowIntent("a1", "", sum.Digest), 1); out.Result != journal.ResultNotApplied || !r.trusts(v2) {
+			t.Fatalf("switched back past a rotation: %+v", out)
+		}
+	})
+	t.Run("another switch back lands first", func(t *testing.T) {
+		r := newRig(t)
+		v2, _ := rotated(t, r.shipped, r.pk)
+		if out := r.run(grants.FollowIntent("a1", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+			t.Fatalf("%+v", out)
+		}
+		var x *Executor
+		race := func() {
+			sum, err := x.Describe(context.Background(), v2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out := x.Execute(context.Background(), grants.FollowIntent("b1", "", sum.Digest), 1); out.Result != journal.ResultSucceeded {
+				t.Fatalf("%+v", out)
+			}
+		}
+		x = r.with(racingStore{r.store, &race})
+		sum, err := x.Describe(context.Background(), r.shipped)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out := x.Execute(context.Background(), grants.FollowIntent("a2", "", sum.Digest), 1); out.Result != journal.ResultNotApplied || !r.trusts(v2) {
+			t.Fatalf("switched back past a newer project root: %+v", out)
+		}
+		if b, err := r.store.ProjectRoot(); err != nil || string(b) != string(v2) {
+			t.Fatalf("anchor lowered: %v", err)
+		}
+	})
+}

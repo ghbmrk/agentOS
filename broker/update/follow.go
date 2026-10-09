@@ -225,7 +225,8 @@ func projectRoot(anchor, target []byte, links [][]byte, o Options) error {
 	}
 	chain := []link{}
 	hasTarget := false
-	for _, b := range append(links, target) {
+	// A fresh slice: links may be a caller's, shared with other walks.
+	for _, b := range append(append([][]byte{}, links...), target) {
 		if bytes.Equal(b, target) {
 			if hasTarget {
 				continue
@@ -307,6 +308,11 @@ func (s *Store) ProjectRoot() ([]byte, error) {
 	if err := s.settle(); err != nil {
 		return nil, err
 	}
+	return s.projectAnchor()
+}
+
+// projectAnchor is ProjectRoot; the caller holds the lock and has settled.
+func (s *Store) projectAnchor() ([]byte, error) {
 	if _, err := os.Stat(s.p(sourceFile)); errors.Is(err, os.ErrNotExist) {
 		return os.ReadFile(s.p("root.json"))
 	} else if err != nil {
@@ -389,12 +395,37 @@ func step(name string) error {
 // followed (OSS-10). Only the owner's tier-4 intent calls it, with the
 // Digest of the summary the owner approved and the owner's name for the
 // fork; an empty name means the root is the project's own (switching
-// back), which the caller knows from the root its image ships. The root must pass verifyRoot.
+// back), which FollowProject checks under the lock. The root must pass verifyRoot.
 // The installed version is kept, so a fork must release above it (UPD-8,
 // Security C5); every key the new root and the current one list, in any
 // role, joins seen_keys and never leaves (C2, C8); and the project's
 // interim test box stops counting for good (C1, B2). The allow-list itself is the caller's and is unchanged.
 func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error {
+	return s.follow(root, approved, name, o, nil)
+}
+
+// FollowProject switches back to the project's own root: FollowRoot with
+// no name, admitted under the store's lock, after settle, against the
+// anchor at the moment of the switch (ProjectRoot's root, else shipped,
+// carried to root by links; ProjectRoot, UPD-8). A rotation Check verifies,
+// or another switch, landing after the page's check can then never let an
+// older project root through (security 4a on #667).
+func (s *Store) FollowProject(root []byte, links [][]byte, shipped []byte, approved string, o Options) error {
+	return s.follow(root, approved, "", o, func() error {
+		anchor, err := s.projectAnchor()
+		if err != nil {
+			return err
+		}
+		if anchor == nil {
+			anchor = shipped
+		}
+		return ProjectRoot(anchor, root, links, o)
+	})
+}
+
+// follow is FollowRoot; admit, if set, runs under the lock after settle
+// and before any write, and refuses the switch by returning an error.
+func (s *Store) follow(root []byte, approved, name string, o Options, admit func() error) error {
 	m, err := verifyRoot(root, o)
 	if err != nil {
 		return err
@@ -413,6 +444,11 @@ func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error 
 	defer unlock()
 	if err := s.settle(); err != nil {
 		return err
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return err
+		}
 	}
 	// Narrowing writes first: a crash after them leaves the old chain
 	// with fewer keys able to attest and no interim rule.
