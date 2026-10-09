@@ -69,6 +69,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5c | A12 | Clean-room builder in the scheduler |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
+| DEP-3 | A9 (DEP-2a evidence integrity) | Every tracee shares `_inner`'s uid and can drain the evidence pipes via `/proc/1/fd` or ptrace `_inner` (L3 on #437, ASSUMPTIONS D9) |
+| DEP-4 | A9 (DEP-2b) | Writable rbind submounts under kept paths; tier-A security, so not later (L3 on #437, ASSUMPTIONS D10) |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
@@ -230,6 +232,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1-4 l8 | L3 on #460 (nit): the appended "Also (#436 …)" clauses in the W3-forget-b1-5, -6 and -7 BOARD cells run on with no separating punctuation; add it when those rows are next edited |
 | SR3-1 f1 | Builder on SR3-1: page deny (`LocalAnswer`), follow and ask-resume check the lock count at the token check only, not where they commit; deny only narrows and the other two only open a request that needs a code, so the race gains no authority |
 | SR3-1 f2 | Builder on SR3-1: a sign-in overlapped by a lock still returns a token, dead on first use; answering with a refusal instead would save the page one round trip |
+| DEP-2-join | depaudit `_inner` snapshots the trace after `join(10)`/`join(2)` without checking `is_alive()`; a live reader should make the attempt `error` (fail-closed). strace has exited by then, so a truncated trace is unlikely (L3 on #437 point 4) |
 
 ## Reuse candidates
 | ID | Component | Why |
