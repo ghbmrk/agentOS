@@ -2,7 +2,8 @@ package main
 
 // The fix-input audit: the fixer is reached only through adapter, which
 // records every byte it hands over. A run fails if the record holds a
-// held-back clause, or a field of one, that the visible test does not.
+// held-back clause (as JSON in any layout), or a field of one, that the
+// visible test does not.
 
 import (
 	"bytes"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/loops"
@@ -163,6 +165,73 @@ func clauseForms(c change.Clause) []string {
 	return []string{marshal(c), sorted}
 }
 
+// clauseFields are c's path, pointer and value, as canonical JSON.
+func clauseFields(c change.Clause) []string {
+	out := []string{marshal(c.Path)}
+	if c.Pointer != "" {
+		out = append(out, marshal(c.Pointer))
+	}
+	if len(c.Value) > 0 {
+		out = append(out, canon(c.Value))
+	}
+	return out
+}
+
+// shares is what the visible test gives away anyway: its whole clauses,
+// in each form clauseForms gives, and each of their fields.
+func shares(visible change.TreeRule) (clauses, fields map[string]bool) {
+	clauses, fields = map[string]bool{}, map[string]bool{}
+	for _, c := range visible.Clauses {
+		for _, f := range clauseForms(c) {
+			clauses[f] = true
+		}
+		for _, f := range clauseFields(c) {
+			fields[f] = true
+		}
+	}
+	return clauses, fields
+}
+
+// fieldless lists the clauses of held that the visible test does not share
+// whole but whose every field it has. The field audit could not tell such
+// a clause from the visible test, so validate refuses it.
+func fieldless(visible, held change.TreeRule) []string {
+	clauses, fields := shares(visible)
+	var out []string
+	for _, c := range held.Clauses {
+		cf := clauseForms(c)
+		if clauses[cf[0]] || clauses[cf[1]] {
+			continue
+		}
+		if !slices.ContainsFunc(clauseFields(c), func(f string) bool { return !fields[f] }) {
+			out = append(out, cf[1])
+		}
+	}
+	return out
+}
+
+// clausesIn is the sorted form (clauseForms) of every JSON object in rec
+// that decodes as a clause, whatever its whitespace and key order, so a
+// raw held file is matched as well as a canonical one.
+func clausesIn(rec []byte) map[string]bool {
+	out := map[string]bool{}
+	for i, b := range rec {
+		if b != '{' {
+			continue
+		}
+		var raw json.RawMessage
+		if json.NewDecoder(bytes.NewReader(rec[i:])).Decode(&raw) != nil {
+			continue
+		}
+		var c change.Clause
+		if json.Unmarshal(raw, &c) != nil || c.Path == "" || c.Op == "" {
+			continue
+		}
+		out[clauseForms(c)[1]] = true
+	}
+	return out
+}
+
 // audit checks the record against every held-back clause the visible test
 // does not share.
 func audit(rec []byte, calls, want int, visible change.TreeRule, held map[string][]byte) auditReport {
@@ -170,18 +239,8 @@ func audit(rec []byte, calls, want int, visible change.TreeRule, held map[string
 	if calls != want {
 		r.Hits = append(r.Hits, fmt.Sprintf("the fixer was called %d times, not %d", calls, want))
 	}
-	shared := map[string]bool{}
-	fields := map[string]bool{}
-	for _, c := range visible.Clauses {
-		for _, f := range clauseForms(c) {
-			shared[f] = true
-		}
-		fields[marshal(c.Path)] = true
-		fields[marshal(c.Pointer)] = true
-		if len(c.Value) > 0 {
-			fields[canon(c.Value)] = true
-		}
-	}
+	shared, fields := shares(visible)
+	inRec := clausesIn(rec)
 	for _, name := range sortedKeys(held) {
 		h, err := parseRule(held[name])
 		if err != nil {
@@ -193,19 +252,10 @@ func audit(rec []byte, calls, want int, visible change.TreeRule, held map[string
 			if shared[cf[0]] || shared[cf[1]] {
 				continue
 			}
-			for _, f := range cf {
-				if bytes.Contains(rec, []byte(f)) {
-					r.Hits = append(r.Hits, fmt.Sprintf("held/%s: whole clause %s", name, f))
-				}
+			if inRec[cf[1]] {
+				r.Hits = append(r.Hits, fmt.Sprintf("held/%s: whole clause %s", name, cf[1]))
 			}
-			check := []string{marshal(c.Path)}
-			if c.Pointer != "" {
-				check = append(check, marshal(c.Pointer))
-			}
-			if len(c.Value) > 0 {
-				check = append(check, canon(c.Value))
-			}
-			for _, f := range check {
+			for _, f := range clauseFields(c) {
 				if fields[f] {
 					continue
 				}

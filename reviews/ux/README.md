@@ -18,7 +18,7 @@ Finding kinds CI now catches; the screen no longer looks for them by hand (OPERA
 
 | Finding kind | Check | Since |
 |---|---|---|
-| — | none recorded yet | — |
+| CH-12 "a problem text names a step that cannot work" (UX run 2, #327, #423; #409 U6), for the held-restore texts only | `TestHeldOwnerTextsNameOnlyStepsThatWork` (broker/cmd/agentosd/held_test.go): each text a held box can send names only steps that work in its state, is GSM-7 within three segments, and lists exactly the replies taken. Other owner texts are still screened by hand. | W3-forget-b1-7 |
 
 ## Spec-wide runs
 
