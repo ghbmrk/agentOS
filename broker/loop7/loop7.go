@@ -1113,14 +1113,31 @@ func runName() (string, error) {
 	return "run-" + hex.EncodeToString(b), nil
 }
 
-// killWait bounds the wait for the leaf to empty.
-const killWait = 5 * time.Second
+// emptyWait bounds empty's whole run, the kill included, so a cancelled
+// job hands the agent the box back within LOOP-1's 2 s: run's last empty
+// follows a killed child by at most waitDelay (F16). It is empty's own
+// bound, not the caller's context, which is cancelled exactly when the
+// leaf must still be emptied.
+const emptyWait = 1500 * time.Millisecond
+
+// freezeWait bounds the freeze within emptyWait, so a freeze that cannot
+// complete still leaves time to kill.
+const freezeWait = 500 * time.Millisecond
+
+// freeze freezes the leaf; a test replaces it with a freeze that cannot
+// complete.
+var freeze = func(ctx context.Context, g *cgroup.Group) error { return g.Freeze(ctx) }
 
 // empty kills every process left in the jail's leaf and waits until the
-// kernel reports it empty. It freezes the leaf, so nothing in it can fork,
-// SIGKILLs each process cgroup.procs lists (a fatal signal reaches a
-// frozen task), thaws it and waits for populated 0. It does not write
-// cgroup.kill: on CI's kernel a child started into a group by
+// kernel reports it empty, all within emptyWait. It freezes the leaf, so
+// nothing in it can fork, SIGKILLs each process cgroup.procs lists (a
+// fatal signal reaches a frozen task), thaws it and waits for populated
+// 0. When the freeze fails or does not complete within freezeWait, it
+// kills all the same, and on every later read of cgroup.procs until the
+// leaf is empty: without the freeze a fork can race a pass, but pids.max
+// bounds the set each pass faces. Only processes still alive at the
+// deadline make it fail, and the error names them (F16). It does not
+// write cgroup.kill: on CI's kernel a child started into a group by
 // CLONE_INTO_CGROUP after a cgroup.kill there is killed at once (on #588
 // every jailed child then died with "signal: killed"). With no jail or no
 // leaf (tests, dev builds) there is nothing to empty: agentosd always sets
@@ -1130,37 +1147,43 @@ func (j *Jail) empty() error {
 	if j == nil || j.Leaf == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), killWait)
-	defer cancel()
+	deadline := time.Now().Add(emptyWait)
 	g := &cgroup.Group{Path: j.Leaf}
-	if err := g.Freeze(ctx); err != nil {
-		g.Thaw()
-		return err
-	}
-	b, err := os.ReadFile(filepath.Join(j.Leaf, "cgroup.procs"))
-	for _, f := range strings.Fields(string(b)) {
-		if pid, perr := strconv.Atoi(f); perr == nil && pid > 0 {
-			syscall.Kill(pid, syscall.SIGKILL)
-		}
-	}
-	if terr := g.Thaw(); err == nil {
-		err = terr
-	}
-	if err != nil {
-		return err
-	}
-	t := time.NewTicker(time.Millisecond)
-	defer t.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), freezeWait)
+	ferr := freeze(ctx, g)
+	cancel()
+	killLeaf(j.Leaf)
+	terr := g.Thaw()
 	for {
-		if p, err := g.Populated(); err != nil || !p {
+		p, err := g.Populated()
+		if err != nil {
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("loop7: fuzz leaf %s did not empty: %w", j.Leaf, ctx.Err())
-		case <-t.C:
+		if !p {
+			return terr
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("loop7: fuzz leaf %s did not empty within %v: pids %v survive (freeze: %v, thaw: %v)", j.Leaf, emptyWait, killLeaf(j.Leaf), ferr, terr)
+		}
+		time.Sleep(time.Millisecond)
+		killLeaf(j.Leaf)
+	}
+}
+
+// killLeaf is one kill pass: it SIGKILLs each process leaf's cgroup.procs
+// lists and returns their pids. A pid is signalled within the pass that
+// read it, far sooner than the kernel hands a freed pid out again (F16).
+// A test wraps it to see what each pass found.
+var killLeaf = func(leaf string) []int {
+	b, _ := os.ReadFile(filepath.Join(leaf, "cgroup.procs"))
+	var pids []int
+	for _, f := range strings.Fields(string(b)) {
+		if pid, err := strconv.Atoi(f); err == nil && pid > 0 {
+			syscall.Kill(pid, syscall.SIGKILL)
+			pids = append(pids, pid)
 		}
 	}
+	return pids
 }
 
 // Jail confines fuzz children (P3-4b-3r-confine; F2, F7): a decoder bug
