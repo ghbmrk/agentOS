@@ -59,7 +59,7 @@ never values), and `errors`; the harness withholds it if it would carry a canary
 value. A target may name what to pause on a leak with
 `"contain": {"kind": "grant"|"executor", "name": "...", "label": "..."}`.
 Exit 0 clean or findings only, 1 with errors, 2 for a bad registry.
-`loops.CommandProbe` runs it and hands each finding to `Guard.Report`.
+`probecmd.CommandProbe` runs it and hands each finding to `Guard.Report`.
 
 ## Injection corpora (`corpora/`, `tools/corpus.py`)
 

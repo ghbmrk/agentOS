@@ -19,8 +19,9 @@ import (
 
 // Loop 2, self-securing (LOOP-8 to LOOP-10). This file holds the passive
 // checks and what happens to a finding. LOOP-7's off-the-shelf probes
-// (canary rounds, published corpora) are in probe.go, command.go and
-// corpus.go; the tamper and exhaustion probes are P3-4b-4b.
+// (canary rounds, published corpora) are in probe.go and corpus.go,
+// with the command runner in ../probecmd; the tamper and exhaustion
+// probes are P3-4b-4b.
 
 // Severity decides how the owner hears about a finding (LOOP-9).
 type Severity string
@@ -985,6 +986,11 @@ func digestOf(f Finding) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
+
+// FindingID is the ID Report gives a finding of check c about subject with
+// detail; a probe outside this package that sets its own IDs uses it, such
+// as probecmd with an empty detail (P3-4b-4a).
+func FindingID(c Check, subject, detail string) string { return findingID(c, subject, detail) }
 
 func findingID(c Check, subject, detail string) string {
 	h := sha256.Sum256([]byte(string(c) + "\x00" + subject + "\x00" + detail))
