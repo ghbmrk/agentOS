@@ -23,6 +23,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/attest"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/update"
+	"github.com/ghbmrk/agentos/broker/update/anchorsock"
 	"github.com/google/go-tpm/tpm2"
 )
 
@@ -87,10 +88,10 @@ func TestUndefinedUpdateCounterFailsClosed(t *testing.T) {
 	if _, _, err := r.c.updateAnchorRead(); !errors.Is(err, errUpdateAnchorMissing) {
 		t.Fatalf("read of an undefined counter = %v, want anchor missing", err)
 	}
-	if code := verifyStatus(r.c, http.MethodGet, update.AnchorPath); code != http.StatusConflict {
+	if code := verifyStatus(r.c, http.MethodGet, anchorsock.AnchorPath); code != http.StatusConflict {
 		t.Fatalf("socket read of an undefined counter: %d, want 409", code)
 	}
-	if code := verifyStatus(r.c, http.MethodPost, update.AnchorRaisePath); code != http.StatusConflict {
+	if code := verifyStatus(r.c, http.MethodPost, anchorsock.AnchorRaisePath); code != http.StatusConflict {
 		t.Fatalf("socket raise of an undefined counter: %d, want 409", code)
 	}
 	if _, err := socketAnchor(r.c).Read(); err == nil || errors.Is(err, update.ErrNoAnchor) {
@@ -153,7 +154,7 @@ func TestFirstTrustLeavesInterimRule(t *testing.T) {
 // exposure, shown in STATUS), and while the vault is locked it is 503.
 func TestUpdateAnchorWithoutTPM(t *testing.T) {
 	r := newFastRig(t, true)
-	if code := verifyStatus(r.c, http.MethodGet, update.AnchorPath); code != http.StatusServiceUnavailable {
+	if code := verifyStatus(r.c, http.MethodGet, anchorsock.AnchorPath); code != http.StatusServiceUnavailable {
 		t.Fatalf("locked vault: %d, want 503", code)
 	}
 	r.c.confirm(r.unlock(t), r.code())
@@ -181,7 +182,7 @@ func TestUpdateAnchorSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeAll(srvs)
-	a := update.NewSocketAnchor(filepath.Join(run, VerifySocket))
+	a := anchorsock.NewSocketAnchor(filepath.Join(run, VerifySocket))
 	if n, err := a.Read(); err != nil || n != 0 {
 		t.Fatalf("socket read = %d, %v", n, err)
 	}
@@ -195,9 +196,9 @@ func TestUpdateAnchorSocket(t *testing.T) {
 	for _, req := range [][2]string{
 		{http.MethodPost, "/update-anchor/lower"},
 		{http.MethodPost, "/update-anchor/reset"},
-		{http.MethodDelete, update.AnchorPath},
-		{http.MethodPut, update.AnchorPath},
-		{http.MethodGet, update.AnchorRaisePath},
+		{http.MethodDelete, anchorsock.AnchorPath},
+		{http.MethodPut, anchorsock.AnchorPath},
+		{http.MethodGet, anchorsock.AnchorRaisePath},
 	} {
 		hr, _ := http.NewRequest(req[0], "http://x"+req[1], nil)
 		resp, err := cl.Do(hr)
@@ -219,10 +220,10 @@ func TestUpdateAnchorSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeAll(srvs2)
-	if _, err := update.NewSocketAnchor(filepath.Join(other, VerifySocket)).Read(); err == nil {
+	if _, err := anchorsock.NewSocketAnchor(filepath.Join(other, VerifySocket)).Read(); err == nil {
 		t.Fatal("another uid read the update counter")
 	}
-	if err := update.NewSocketAnchor(filepath.Join(other, VerifySocket)).Raise(); err == nil {
+	if err := anchorsock.NewSocketAnchor(filepath.Join(other, VerifySocket)).Raise(); err == nil {
 		t.Fatal("another uid raised the update counter")
 	}
 }
@@ -278,8 +279,8 @@ func undefineUpdateCounter(t *testing.T, r *pcRig) {
 
 // socketAnchor is the store's client over the real verify handler, with
 // no socket (the uid check has its own test).
-func socketAnchor(c *custody) *update.SocketAnchor {
-	return update.NewAnchorClient(&http.Client{Transport: handlerTransport{verifyHandler(c)}})
+func socketAnchor(c *custody) *anchorsock.SocketAnchor {
+	return anchorsock.NewAnchorClient(&http.Client{Transport: handlerTransport{verifyHandler(c)}})
 }
 
 type handlerTransport struct{ h http.Handler }

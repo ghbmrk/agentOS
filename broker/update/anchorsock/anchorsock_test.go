@@ -1,14 +1,16 @@
-package update
+package anchorsock
 
 // REQ: SR3-6f-2c
 // The client maps the vault process's answers: a count, no TPM
-// (ErrNoAnchor), and anything else as an error the store fails closed on.
+// (update.ErrNoAnchor), and anything else as an error the store fails closed on.
 
 import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/update"
 )
 
 func TestSocketAnchorAnswers(t *testing.T) {
@@ -17,11 +19,11 @@ func TestSocketAnchorAnswers(t *testing.T) {
 		status int
 		body   string
 		want   uint64
-		err    error // nil: no error; ErrNoAnchor; errAny: some other error
+		err    error // nil: no error; update.ErrNoAnchor; errAny: some other error
 	}{
 		{"count", 200, `{"anchored":true,"count":3}`, 3, nil},
 		{"zero", 200, `{"anchored":true}`, 0, nil},
-		{"no TPM", 200, `{"anchored":false}`, 0, ErrNoAnchor},
+		{"no TPM", 200, `{"anchored":false}`, 0, update.ErrNoAnchor},
 		{"missing", 409, "anchor missing", 0, errAny},
 		{"locked", 503, "the vault is locked", 0, errAny},
 		{"malformed", 200, `{"anchored":`, 0, errAny},
@@ -58,20 +60,20 @@ func TestSocketAnchorAnswers(t *testing.T) {
 
 func TestSocketAnchorDownIsAnError(t *testing.T) {
 	a := NewSocketAnchor(t.TempDir() + "/none.sock")
-	if _, err := a.Read(); err == nil || errors.Is(err, ErrNoAnchor) {
-		t.Fatalf("Read with the vault process down = %v; want an error, not ErrNoAnchor", err)
+	if _, err := a.Read(); err == nil || errors.Is(err, update.ErrNoAnchor) {
+		t.Fatalf("Read with the vault process down = %v; want an error, not update.ErrNoAnchor", err)
 	}
 }
 
-var errAny = errors.New("any error but ErrNoAnchor")
+var errAny = errors.New("any error but update.ErrNoAnchor")
 
 func checkAnchorErr(t *testing.T, op string, got, want error) {
 	t.Helper()
 	switch {
-	case want == nil && got != nil, want == ErrNoAnchor && !errors.Is(got, ErrNoAnchor):
+	case want == nil && got != nil, want == update.ErrNoAnchor && !errors.Is(got, update.ErrNoAnchor):
 		t.Fatalf("%s = %v, want %v", op, got, want)
-	case want == errAny && (got == nil || errors.Is(got, ErrNoAnchor)):
-		t.Fatalf("%s = %v, want an error that is not ErrNoAnchor", op, got)
+	case want == errAny && (got == nil || errors.Is(got, update.ErrNoAnchor)):
+		t.Fatalf("%s = %v, want an error that is not update.ErrNoAnchor", op, got)
 	}
 }
 

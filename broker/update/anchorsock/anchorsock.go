@@ -1,4 +1,7 @@
-package update
+// Package anchorsock is update.Store.Anchor over the vault process's verify
+// socket. It is apart from package update so agentosd links net/http only
+// once W5b wires it (daemon TestAgentosdLinksNoInference).
+package anchorsock
 
 import (
 	"context"
@@ -9,9 +12,11 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/update"
 )
 
-// SocketAnchor is Store.Anchor over the vault process's verify socket
+// SocketAnchor is update.Store.Anchor over the vault process's verify socket
 // (SR3-6f-2c): the TPM counter agentos-egress keeps for the store's
 // outside-attestor record. There is no request that lowers it.
 type SocketAnchor struct {
@@ -25,7 +30,7 @@ const (
 )
 
 // AnchorState is the answer to both requests. Anchored false means this
-// PC has no TPM (ErrNoAnchor); a counter that was defined and is gone is
+// PC has no TPM (update.ErrNoAnchor); a counter that was defined and is gone is
 // an error status, never this.
 type AnchorState struct {
 	Anchored bool   `json:"anchored"`
@@ -59,7 +64,7 @@ func (a *SocketAnchor) Raise() error {
 }
 
 func (a *SocketAnchor) do(method, path string) (AnchorState, error) {
-	req, err := http.NewRequest(method, "http://egress.localhost"+path, nil) // over the Unix socket
+	req, err := http.NewRequest(method, "http://localhost"+path, nil) // over the Unix socket
 	if err != nil {
 		return AnchorState{}, err
 	}
@@ -83,7 +88,7 @@ func (a *SocketAnchor) do(method, path string) (AnchorState, error) {
 		if st.Count != 0 {
 			return AnchorState{}, errors.New("update: anchor: malformed answer: a count without an anchor")
 		}
-		return AnchorState{}, ErrNoAnchor
+		return AnchorState{}, update.ErrNoAnchor
 	}
 	return st, nil
 }
