@@ -354,6 +354,7 @@ func main() {
 	flag.StringVar(&updateStore, "update-store", "", "the box's update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
 	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
 	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
+	modemRoles := flag.String("modem-roles", "/var/lib/agentos/modem/roles.json", "agentos-modem's roles file, where a SIM the owner adopts on the local page is recorded")
 	flag.BoolVar(&ownerMessage, "owner-message", false, "also serve the raw \"message\" op on the owner socket with the bridge on (simulator and test builds only; it skips the bridge's checks)")
 	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most 4500 or one OpenClaw machine per two cores, whichever is more (PE6, RES-2c)")
 	flag.Int64Var(&floor.HeadroomMB, "headroom-mb", floor.HeadroomMB, "memory never admitted into, MB")
@@ -579,10 +580,12 @@ func main() {
 	// reports the owner line, sends fail as down and are counted for the
 	// recovery text. Its note, last outage and counts are for the box's local page (U-B1).
 	if modemBridge {
-		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber})
+		// A SIM the owner adopts on the page, with a code (P2-2w d2b), is
+		// recorded where the bridge reads it at its next open.
+		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles)})
 		cfg.Modem, cfg.OwnerOps = link, link.Ops()
 		if cfg.PageSocket != nil {
-			cfg.PageSocket.Line = pageLine(link)
+			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
 		}
 		cfg.BridgeOnly = !ownerMessage
 	}

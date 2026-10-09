@@ -148,6 +148,10 @@ type PageSocket struct {
 	// Line is the owner line's note, last outage and counts (from the
 	// modem link); nil without the modem bridge.
 	Line func() localapi.Line
+	// AdoptSIM records the SIM the page showed as the owner line's once the
+	// owner's code is checked (modemlink.Link.Adopt, P2-2w d2b); nil
+	// without the modem bridge, which refuses the op.
+	AdoptSIM func(tag string) error
 	// DescribeRoot, when set, serves changing where updates come from on
 	// the page (OSS-10, follow.Executor.Describe): the page's request is
 	// then submitted to the gate as a follow intent, which the broker
@@ -364,7 +368,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			store.Close()
 			return nil, errors.New("daemon: the local UI's socket needs the owner channel (OwnerState)")
 		}
-		lcfg := localsrv.Config{Owner: ch, Line: cfg.PageSocket.Line,
+		lcfg := localsrv.Config{Owner: ch, Line: cfg.PageSocket.Line, AdoptSIM: cfg.PageSocket.AdoptSIM,
 			Paused: func() []localapi.PausedGrant { return pausedGrants(gate) }, AskResume: func(ctx context.Context, id, pause string) (string, error) {
 				return askResume(ctx, gate, id, pause)
 			}}

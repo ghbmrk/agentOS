@@ -219,7 +219,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | P2-2w d | [LocalUI on (part 1)](briefs/P2-2w-d.md) | P2-2w b | merged (#322; split 2026-10-08; part 2 is d2) |
 | P2-2w d2 | [Home page shows `Link.OwnerLineNote` and `Link.LastOutage`](briefs/P2-2w-d2.md) | P2-2w d | building (split into d2a, d2b) |
 | P2-2w d2a | [Home page shows the owner line's note, last outage and counts](briefs/P2-2w-d2a.md) | P2-2w d | in review (#378) |
-| P2-2w d2b | [Page control to confirm a SIM swap and set up the owner number](briefs/P2-2w-d2b.md) | P2-2w d2a | queued (A) |
+| P2-2w d2b | [Page control to confirm a SIM swap and set up the owner number](briefs/P2-2w-d2b.md) | P2-2w d2a | in review (#444) |
 | P2-1-roles | Host image: agentosd can write the modem roles directory so an adopted SIM takes effect on a real box (until then adopting changes nothing; Potency on #444, release), and `/var/lib/agentos/modem` is not writable by `agentos-modem`, because `recordOwnerSIM` follows a symlink at `roles.json` (Security S1 on #444, release; fold into the P2-1 image) | P2-1 (#41), P2-2w d2b | queued (release; brief to write) |
 | P2-2w-d2b-s2 | Two test gaps from #444 Security 4a (S2, release): no test pins clearing `adopted` after a SIM or state change (mutant M7), and none pins that the bridge sends no serial while the line is ok (mutant M12). Pin both; skip if #444 gains them before it merges | P2-2w d2b | queued (release; tier A; brief to write) |
 | P2-2w c | [Setup moves into agentosd](briefs/P2-2w-c.md) | P2-2w b | building (split into c1-c3, each under one session) |
