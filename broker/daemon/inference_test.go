@@ -653,9 +653,12 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //   - A command is an exec.Command or exec.CommandContext call, an exec.Cmd
 //     literal without Env, new(exec.Cmd), or a var declared as exec.Cmd.
 //     exec.Cmd as a type anywhere else (an alias or defined type, a struct
-//     field, an element of a slice, array or map, a parameter) is flagged,
-//     and an elided literal in a slice or map of commands needs its own
-//     Env. A ProcAttr passed to os.StartProcess, syscall.ForkExec or
+//     field, an element of a slice, array or map, a parameter) is flagged.
+//     Deny by default: exec.Cmd or *exec.Cmd anywhere inside a slice,
+//     array, map (key or value) or channel type, at any depth, or as the
+//     definition of a named type or alias, is flagged as a holder the
+//     check cannot follow; so is an Env reached through its address
+//     (&c.Env). A ProcAttr passed to os.StartProcess, syscall.ForkExec or
 //     syscall.StartProcess may not be nil, needs an Env key when it is a
 //     literal, and otherwise counts as a command held in that variable.
 //     The syscall launchers read a nil Env as empty, not inherited; they
@@ -1081,6 +1084,22 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	}
 	// cmdType: exec.Cmd itself, as a type.
 	cmdType := func(e ast.Expr) bool { return is(ast.Unparen(e), "os/exec", "Cmd") }
+	// holdsCmd: a type that is, or holds at any depth through pointers,
+	// slices, arrays, maps and channels, an exec.Cmd.
+	var holdsCmd func(e ast.Expr) bool
+	holdsCmd = func(e ast.Expr) bool {
+		switch t := ast.Unparen(e).(type) {
+		case *ast.StarExpr:
+			return holdsCmd(t.X)
+		case *ast.ArrayType:
+			return holdsCmd(t.Elt)
+		case *ast.MapType:
+			return holdsCmd(t.Key) || holdsCmd(t.Value)
+		case *ast.ChanType:
+			return holdsCmd(t.Value)
+		}
+		return cmdType(e)
+	}
 	type unit struct {
 		name                 string
 		node                 ast.Node
@@ -1125,6 +1144,30 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				skip[n.Name] = true
 			case *ast.TypeSpec:
 				skip[n.Name] = true
+				// Deny by default (#621 delta Security 4a, 6085258468): a
+				// command type in a container or a type's definition is a
+				// holder the check cannot follow.
+				if holdsCmd(n.Type) {
+					u.starts, u.bad = true, true
+				}
+			case *ast.ArrayType:
+				if holdsCmd(n.Elt) {
+					u.starts, u.bad = true, true
+				}
+			case *ast.MapType:
+				if holdsCmd(n.Key) || holdsCmd(n.Value) {
+					u.starts, u.bad = true, true
+				}
+			case *ast.ChanType:
+				if holdsCmd(n.Value) {
+					u.starts, u.bad = true, true
+				}
+			case *ast.UnaryExpr:
+				// An Env reached through its address can be written
+				// unseen: *(&c.Env) = nil, p := &c.Env.
+				if se, ok := ast.Unparen(n.X).(*ast.SelectorExpr); ok && n.Op == token.AND && se.Sel.Name == "Env" {
+					u.bad = true
+				}
 			case *ast.Field:
 				for _, id := range n.Names {
 					skip[id] = true
@@ -1196,29 +1239,6 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				}
 				if b := bind[n]; b.key != "" && hasEnv(n) {
 					envAt[b.key] = append(envAt[b.key], b.at)
-				}
-				// Elided literals in a slice, array or map of commands
-				// (#621 Security 4a point 1).
-				var elt ast.Expr
-				switch t := ast.Unparen(n.Type).(type) {
-				case *ast.ArrayType:
-					elt = t.Elt
-				case *ast.MapType:
-					elt = t.Value
-				}
-				if s, ok := ast.Unparen(elt).(*ast.StarExpr); ok {
-					elt = s.X
-				}
-				if elt != nil && cmdType(elt) {
-					for _, e := range n.Elts {
-						if kv, ok := e.(*ast.KeyValueExpr); ok {
-							e = kv.Value
-						}
-						if lit, ok := e.(*ast.CompositeLit); ok && lit.Type == nil {
-							u.starts = true
-							u.bad = u.bad || !hasEnv(lit)
-						}
-					}
 				}
 			case *ast.ValueSpec:
 				for _, id := range n.Names {
@@ -1645,6 +1665,19 @@ func TestEnvCheckCatchesTheShapesItPassed(t *testing.T) {
 		// The same sweep: a parenthesised element type, and a helper's
 		// local assigned through parens.
 		{src(`"os/exec"`, `func f() { cs := [](*exec.Cmd){{Path: "/x"}}; cs[0].Run() }`)},
+		// #621 delta Security 4a (6085258468): deny by default. A command
+		// type inside a slice, array, map or channel at any depth, or as
+		// a type's definition, is a holder the check cannot follow; and
+		// so is an Env reached through its address.
+		{src(`"os/exec"`, `func f() { m := map[*exec.Cmd]bool{{Path: "/x"}: true}; for c := range m { c.Run() } }`)},
+		{src(`"os/exec"`, `func f() { cs := [][]*exec.Cmd{{{Path: "/x"}}}; cs[0][0].Run() }`)},
+		{src(`"os/exec"`, `func f() { m := map[string][]*exec.Cmd{"a": {{Path: "/x"}}}; m["a"][0].Run() }`)},
+		{src(`"os/exec"`, `type CS []*exec.Cmd; func f() { cs := CS{{Path: "/x"}}; cs[0].Run() }`)},
+		{src(`"os/exec"`, `type P = *exec.Cmd; func f() { ps := []P{{Path: "/x"}}; ps[0].Run() }`)},
+		{src(`"os/exec"`, `func f() { cs := []*exec.Cmd{{Path: "/x", Env: []string{}}}; cs[0].Run() }`)},
+		{src(`"os/exec"`, `func f(ch chan *exec.Cmd) { (<-ch).Run() }`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = []string{}; *(&c.Env) = nil; c.Run() }`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = []string{}; p := &c.Env; *p = nil; c.Run() }`)},
 	} {
 		if noEnv, _ := check(c...); len(noEnv) == 0 {
 			t.Errorf("missed:\n%s", strings.Join(c, "\n"))
@@ -1690,7 +1723,6 @@ func v() { c := exec.Command("x"); c.Env = []string{}; go func() { c.Run() }() }
 func w() { a := exec.Command("a"); b := exec.Command("b"); a.Env, b.Env = []string{}, []string{}; a.Run(); b.Run() }
 func y() { a := os.ProcAttr{Env: []string{}}; os.StartProcess("/x", nil, &a) }
 func z() { c := exec.Command("x"); c.Env = fixed2(); c.Run() }
-func e1() { cs := []*exec.Cmd{{Path: "/x", Env: []string{}}}; cs[0].Run() }
 func e2() { c := exec.Command("a"); c.Env = []string{}; c.Run(); c = exec.Command("b"); c.Env = []string{"A=1"}; c.Run() }
 var initEnv []string
 func init() { initEnv = []string{"PATH=/bin"} }
@@ -1698,7 +1730,6 @@ func e3() { c := exec.Command("x"); c.Env = initEnv; c.Run() }
 func e4() { pcmd.Env = []string{}; pcmd.Run() }
 var pcmd exec.Cmd
 func e5() { e := []string{"A=1"}; e = nil; e = append(e, "B=1"); c := exec.Command("x"); c.Env = e; c.Run() }
-func e6(cs []*exec.Cmd) { for _, c := range cs { c.Run() } }
 func rec() []string { return rec() }
 func e7() { c := exec.Command("x"); c.Env = rec(); c.Run() }
 var pc2 = exec.Command("x")
