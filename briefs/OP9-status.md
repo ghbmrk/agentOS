@@ -12,7 +12,7 @@ A11 also asks: "With learning unable to run (memory too small, no builder, no mo
 
 STATUS is one sink, `control.Handler.status()` (`broker/control/handler.go`). It writes the journal counts, then `Machines()` (agentosd's agent line, `daemon.Config.AgentStatus`), then the first line of each `Notes[i]()`, each clipped to 100 characters (`plainLine`). There is no registry: notes are appended where each feature is wired (`cmd/agentosd/main.go`, `learn.go`, `build.go`, `diskquota.go`, `questions.go`, `follow.go`, `evidence.go`, `secondline.go`; the clock note comes first, `fit_test.go`).
 
-**There is no digest sender.** No production code calls `change.Pipeline.Digest`, `Scheduler.Digest`, `Guard.Digest`, `Loop3.Digest`, `secondLine.Digest`, `evidence.digestLines`, `question.Book.TakeDigest`, `events.Attention.TakeDigest` or `owner.Channel.TakeDigestNotes`. `question/ASSUMPTIONS.md` says so too. `change.Pipeline.Notice(key, line)` queues a line once per key. Only `stepNotes.digest` (SR2-3s, `main.go`) uses it to repeat a line, daily for 7 days and then weekly. It exists only while the learning plane is open (`lp != nil`).
+**There is no digest sender.** No production code calls `change.Pipeline.Digest`, `Scheduler.Digest`, `Guard.Digest`, `Loop3.Digest`, `secondLine.Digest`, `evidence.digestLines`, `question.Book.TakeDigest`, `events.Attention.TakeDigest` or `owner.Channel.TakeDigestNotes`. `question/ASSUMPTIONS.md` says so too. `change.Pipeline.Notice(key, line)` queues a line once per key. `main.go` queues `pe7:sleep-mode` (`sleepDigest`, `sleepwire.go`) through it once. Only `stepNotes.digest` (SR2-3s, `main.go`) uses it to repeat a line, daily for 7 days and then weekly. It exists only while the learning plane is open (`lp != nil`).
 
 Each row below is one capability that can be off. "Line" is what STATUS says today. Rows marked **silent** have no STATUS line, which breaks OP-9 today.
 
@@ -49,12 +49,12 @@ Each row below is one capability that can be off. "Line" is what STATUS says tod
 | Row | What | Needs | Tier | Class | Estimate |
 |---|---|---|---|---|---|
 | OP9-status-a | One capability-line registry for STATUS and the digest; every **silent** row above (C1 paths, C2, C7, C9, C10, C11, C12) gets its line; the A11 learning-cause test | P3-2, P3-4 (merged) | A (`broker/cmd/agentosd`) | release (A11, OP-9) | ~110k |
-| OP9-status-b | Fix clauses for every existing line that lacks one (H1–H4, C3, C4, C5, C6, C8); loop 2 wording (LATER P3-4b-1 l6, l8); owner choices and the loop-shares line (O1, LOOP-3); D3 and O2 wired when W5b's Loop3 lands | OP9-status-a; P3-4b-1b merged (both touch `loops/report.go` wording) | A (`broker/cmd/agentosd`; `broker/loops` is B) | release (OP-9, LOOP-3) | ~90k |
-| DIG-1 | Daily digest sender (CH-15): one daily text that takes every `Digest()` source, the registry's lines included. Not part of this brief: a new BOARD row, brief to write | W5 owner channel | A | release (CH-15, OP-9) | — |
+| OP9-status-b | Fix clauses for every existing line that lacks one (H1–H4, C3, C4, C5, C6, C8); loop 2 wording (LATER P3-4b-1 l6, l8); owner choices and the loop-shares line (O1, LOOP-3); D3 and O2 wired when W5b's Loop3 lands | OP9-status-a, P3-4b-1b, P3-4b-5 (all touch `loop2.go`, `learn.go` or `loops/report.go`; P3-4b-5 changes when C6 occurs) | A (`broker/cmd/agentosd`; `broker/loops` is B) | release (OP-9, LOOP-3) | ~90k |
+| DIG-1 | Daily digest sender (CH-15): one daily text that takes every `Digest()` source, the registry's lines included. Not part of this brief: a new BOARD row, brief to write | W5 owner channel, OP9-status-a (creates `digestSources`) | A | release (CH-15, OP-9) | — |
 
 D4 belongs to CRED-5f ("plan route withdrawn with no API key granted must still route or tell the owner"). When it lands in the vault process, its owner line enters through the registry. CRED-5f's brief should say so; this brief doesn't change it.
 
-Build order: -a, then -b. Run `python3 tools/risk_tier.py --git origin/main HEAD` before opening each PR. Both are A by path (`cmd`), so each runs on the strongest model. The Sonnet pilot's hand-off rule doesn't apply here.
+Build order: -a; then -b once P3-4b-5 has merged; DIG-1 after -a. -a touches `learn.go` for registration only and doesn't wait for P3-4b-5. Whichever of -a and P3-4b-5 merges second merges main first and keeps both sets of tests green. -b waits for P3-4b-5 because P3-4b-5 wires a fixer into `learn.go` and `loop2.go`. After that, C6 ("no fixer") holds only while no builder is set up, so -b words C6 for that case. Run `python3 tools/risk_tier.py --git origin/main HEAD` before opening each PR. Both are A by path (`cmd`), so each runs on the strongest model. The Sonnet pilot's hand-off rule doesn't apply here.
 
 ## Definitions (shared by -a and -b)
 
@@ -72,7 +72,7 @@ Build order: -a, then -b. Run `python3 tools/risk_tier.py --git origin/main HEAD
 
 ## OP9-status-a: registry and the silent cases
 
-**IDs:** OP-9, A11 (OP-9 clause), RES-2 (only as the cause of H1, which moves into the registry unchanged here).
+**IDs:** OP-9, A11 (OP-9 clause). RES-2 is not claimed here: H1 moves into the registry unchanged, and -b carries its test.
 
 **Scope:** `broker/cmd/agentosd/` only: the new registry file and its test, the wiring edits in `main.go`, `learn.go`, `questions.go`, `build.go` (for registration only), `agent.go`, and `ASSUMPTIONS.md` (a new "Capability lines (OP9-status)" section). No change to `broker/control`, `broker/daemon` or `broker/loops`. If one looks necessary, stop and escalate (scope). Run `go test -race ./cmd/agentosd/`.
 
@@ -103,12 +103,12 @@ Build order: -a, then -b. Run `python3 tools/risk_tier.py --git origin/main HEAD
 
 ## OP9-status-b: fix clauses, loop lines and owner choices
 
-**IDs:** OP-9, LOOP-3, RES-2 (H1 wording), A11 (H4 and C4 wording, already tested in -a; keep those tests green).
+**IDs:** OP-9, LOOP-3, RES-2 (H1: the agent is off on a too-small host and STATUS says so, with the fix), A11 (H4 and C4 wording, already tested in -a; keep those tests green).
 
 **Scope:** `broker/cmd/agentosd/` (`learn.go`, `build.go`, `diskquota.go`, `cgroot.go`, `main.go`, `loop2.go`, the registry, tests, ASSUMPTIONS.md); `broker/loops/` for owner text only (`report.go` `waitNoFixer`, the `Guard.Status` join, a `Scheduler` owner-choice listing), with the wording scan (`TestOwnerWordingNeverClaimsDetection`) kept green. Run `go test -race ./cmd/agentosd/ ./loops/`.
 
 **Intended change:**
-1. Give a fix clause, per the definition, to each existing line that lacks one: H1 (name the memory needed), H2, H3 (for example "this box's disk format can't limit each machine; an update may add it"), H4, C3 ("restart the box"), C4 (the unset variant), C5 (say whether anything will make the check run: "a later box version adds the updater"), C8. Move each into the registry.
+1. Give a fix clause, per the definition, to each existing line that lacks one: H1 (name the memory needed), H2, H3 (for example "this box's disk format can't limit each machine; an update may add it"), H4, C3 ("restart the box"), C4 (the unset variant), C5 (say whether anything will make the check run: "a later box version adds the updater"), C8. Move each into the registry. H4's sleep-mode entry replaces the one-time `pe7:sleep-mode` Notice (`main.go`). Remove that Notice so the digest gets the line once, from the registry, every day sleep mode lasts. `sleepDigest`'s text may be the registry's digest wording, because digest lines aren't clipped to 100 characters.
 2. C6 and LATER P3-4b-1 l6: "waits for a fix: I cannot build one yet" becomes "no repair is set up on this box yet; an update may bring one". LATER P3-4b-1 l8: one "Loop 2:" prefix when a partial line and a wait line join. Close both LATER rows in this PR.
 3. O1 and LOOP-3: a STATUS line shows spare-time work by loop from `Scheduler.Shares()`: "off (you turned it off)", "unmeasured", or a share in words. Loop 2 reads "unmeasured" until it has carried a finding to containment (the P3-4b placeholder's owner item). LOOPS OFF and a paused loop are listed in `Digest()` (the scheduler's existing lines) and are never a registry alert entry.
 4. D3 and O2: if W5b has merged `maintain.Loop3` wiring by the time -b starts, register `Loop3`'s pinned and ask lines (UPD-9) in the registry: D3 as a held decision with a fix ("reply UPDATES STABLE to take it"), O2 as an owner choice, listed in the digest only. If not, leave a W5b condition in ASSUMPTIONS (assumption 5) and don't build it here.
@@ -118,6 +118,8 @@ Build order: -a, then -b. Run `python3 tools/risk_tier.py --git origin/main HEAD
 | ID | Criterion |
 |---|---|
 | OP-9 | For each of H1, H2, H3 (each variant), H4 (both no room and sleep mode), C3, C4 (both variants), C5, C6 and C8: with the condition induced, STATUS holds one line ≤100 characters with a fix clause. The existing tests (`TestPE6ABoxTooSmallForTheAgentSaysSo`, `TestQuotasOffIsAStatusLine`, `TestStatusSaysWhenTheBuilderDidNotStart`, `TestStatusSaysWhenNoBuilderIsSetUp`, `TestPE2NoRoomForReplayIsSaid`, the learn and loop2 note tests) are updated to the new text, not deleted. |
+| RES-2 | On a host too small for the agent, STATUS's agent line says the agent is off, names the memory it needs, and gives the fix. `TestPE6ABoxTooSmallForTheAgentSaysSo` gains the `REQ: RES-2` marker and asserts the fix clause. |
+| OP-9 | Sleep mode: the digest holds the sleep-mode line exactly once per `Digest()` call while it lasts, from the registry. `pe7:sleep-mode` is no longer queued through `Notice`. |
 | OP-9 | Each of those lines is in the registry's `Digest()` while it lasts and gone after. |
 | OP-9 | Owner choice: LOOPS OFF, and one loop paused, each give their confirmation reply once and appear in `Digest()` while set. They are never a registry alert entry and never a pushed text. After LOOPS ON, they leave `Digest()`. |
 | LOOP-3 | STATUS's loop line reads "unmeasured" for Loop 2 before its first contained finding and a share after, and "off (you turned it off)" under LOOPS OFF. |
