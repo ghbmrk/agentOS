@@ -877,16 +877,26 @@ func (f *ownerForget) stillHeld(id string) {
 	}
 }
 
-// Note is STATUS's line while any take-back is carried (F1-2); "" when
-// none is.
+// Note is STATUS's line while any take-back is still owed (F1-2): one
+// carryAgent carries, or one owed but not yet known done (Taking), which
+// recall's Retry or a later open of recall finishes; "" when none is.
+// The line stays until the done text goes (U1 on #602).
 func (f *ownerForget) Note() string {
 	f.mu.Lock()
-	n := len(f.carrying)
+	held := make(map[string]bool, len(f.carrying))
+	for id := range f.carrying {
+		held[id] = true
+	}
 	f.mu.Unlock()
-	if n == 0 {
+	for _, g := range f.owed.goals() {
+		if e, ok := f.owed.get(g); ok && e.Agent && e.Taking {
+			held[g] = true
+		}
+	}
+	if len(held) == 0 {
 		return ""
 	}
-	return carryNote(n)
+	return carryNote(len(held))
 }
 
 // agentDone tells the owner an approved item 2 (id) is taken back when

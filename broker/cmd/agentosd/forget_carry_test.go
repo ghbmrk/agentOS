@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/recalltool"
@@ -169,6 +170,63 @@ func TestForgetCarriedTakeBackShowsOnStatus(t *testing.T) {
 	w.mu.Unlock()
 	give(t, step, true)
 	within(t, ended)
+	if got := r.f.Note(); got != "" {
+		t.Fatalf("done: %q", got)
+	}
+}
+
+// F1-2 (U1 on #602): once told to send STATUS, the line stays while the
+// take-back is owed, though carryAgent hands it to recall's Retry
+// (ErrCarried), and goes with the done text.
+func TestForgetStillHeldTakeBackStaysOnStatusUntilDone(t *testing.T) {
+	w := &fakeWork{worked: true, ok: true}
+	r, in := owedRig(t, w)
+	owed, err := openForgetOwed(&change.MemStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.f.owed = owed
+	since, _ := forgetSince(in.ID)
+	var mu sync.Mutex
+	gone := true
+	r.f.agent.Store(&forgetAgent{work: w, lineage: func() (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if gone {
+			return "", errors.New("vm: no machine agent")
+		}
+		return "agent.l1", nil
+	}})
+	ended := make(chan struct{})
+	r.f.sleep = func(context.Context, time.Duration) bool {
+		mu.Lock()
+		gone = false
+		mu.Unlock()
+		w.mu.Lock()
+		w.err = fmt.Errorf("recall: %w", recalltool.ErrCarried)
+		w.mu.Unlock()
+		return true
+	}
+	r.f.retried = func() { close(ended) }
+	r.f.Execute(context.Background(), in, 1)
+	within(t, ended)
+	r.mu.Lock()
+	told := strings.Join(r.texts, "|")
+	r.mu.Unlock()
+	if told != forgetAgentStillHeld {
+		t.Fatalf("told %q", told)
+	}
+	if got := r.f.Note(); got != carryNote(1) {
+		t.Fatalf("left to recall: %q", got)
+	}
+	w.setState(since, recalltool.TakeBackDone)
+	r.f.agentTakenBack(context.Background(), since)
+	r.mu.Lock()
+	told = strings.Join(r.texts, "|")
+	r.mu.Unlock()
+	if told != forgetAgentStillHeld+"|"+forgetAgentDone {
+		t.Fatalf("told %q", told)
+	}
 	if got := r.f.Note(); got != "" {
 		t.Fatalf("done: %q", got)
 	}
