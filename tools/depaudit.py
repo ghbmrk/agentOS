@@ -41,10 +41,15 @@ MANIFEST = ROOT / "assurance" / "dependencies.json"
 CLASSES = ("inherent", "commodity", "optional")
 PROFILES = {"offline": frozenset(), "full": frozenset(CLASSES)}
 # Socket calls, plus every way to make a path inside the work directory lead
-# somewhere else (links, mounts). '?' tolerates names an older strace lacks.
+# somewhere else (links, mounts). Every name must be one strace knows, or the sandbox
+# is unavailable (DEP-4b); '?' marks only the names the architecture has no syscall for
+# (the generic table has symlinkat and linkat but no symlink or link). An architecture
+# not listed gets no '?': if it lacks a name, the run fails loudly until it is listed.
 _LINKS = ("symlink", "symlinkat", "link", "linkat")
 _MOUNTS = ("mount", "umount2", "open_tree", "move_mount", "fsopen", "fsmount", "pivot_root")
-TRACED = ",".join(("connect", "sendto", "sendmsg", "sendmmsg") + tuple("?" + n for n in _LINKS + _MOUNTS))
+_ABSENT = {"aarch64": ("symlink", "link")}
+TRACED = ",".join(("?" if n in _ABSENT.get(os.uname().machine, ()) else "") + n
+                  for n in ("connect", "sendto", "sendmsg", "sendmmsg") + _LINKS + _MOUNTS)
 
 SHIPPING_DIRS = ("broker", "src")
 CODE_SUFFIXES = {".go", ".py", ".rs", ".c", ".h", ".ts", ".js", ".sh", ".toml", ".json", ".yaml", ".yml", ".conf"}
@@ -299,7 +304,10 @@ def sandbox_available():
         _SANDBOX = False
         if shutil.which("unshare") and shutil.which("strace") and shutil.which("setpriv"):
             try:
-                p = subprocess.run(["unshare"] + _unshare_flags() + ["--", "strace", "-o", os.devnull, "true"],
+                # The same -e as the run: an strace that cannot name a traced syscall exits
+                # nonzero ("invalid system call") instead of skipping it unseen (DEP-4b).
+                p = subprocess.run(["unshare"] + _unshare_flags() + ["--", "strace", "-e", "trace=" + TRACED,
+                                                                     "-o", os.devnull, "true"],
                                    capture_output=True, timeout=30)
                 _SANDBOX = p.returncode == 0
             except (OSError, subprocess.SubprocessError):
@@ -332,9 +340,28 @@ def _under(path, base):
     return (os.path.realpath(path) + os.sep).startswith(os.path.realpath(base) + os.sep)
 
 
+# x86_64 and the generic table (arm64) share these numbers.
+_SYS_MOUNT_SETATTR, _SYS_OPEN_TREE_ATTR = 442, 467
+_MOUNT_ATTR_RDONLY, _OPEN_TREE_CLONE, _AT_RECURSIVE = 0x1, 0x1, 0x8000
+
+
+def _set_read_only(path):
+    """Makes the mount at path and every mount under it read-only (mount_setattr with
+    AT_RECURSIVE): `remount,bind,ro` reaches the top mount only, and `ro=recursive` left a
+    submount writable (D10). No fallback: without the call (ENOSYS, Linux < 5.12) the
+    attempt is a sandbox error, never a run with an unchecked submount (DEP-4a)."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    attr = (ctypes.c_uint64 * 4)(_MOUNT_ATTR_RDONLY, 0, 0, 0)  # set, clr, propagation, userns_fd
+    if libc.syscall(_SYS_MOUNT_SETATTR, -100, path.encode(), _AT_RECURSIVE, attr, ctypes.sizeof(attr)) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, "mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY) on %s: %s" % (path, os.strerror(err)))
+
+
 def _mask_host_sockets(keep, writable=()):
     """Masks MASKED_DIRS and binds each kept path back; a kept path not in writable
-    is mounted read-only, so a scenario cannot change what a later run executes."""
+    is mounted read-only with every mount under it, so a scenario cannot change what a
+    later run executes. A writes path inside one is bound after it and stays writable."""
     fds = {k: os.open(k, os.O_PATH | os.O_DIRECTORY) for k in keep}
     masked, ro = [], []
     for d in MASKED_DIRS:
@@ -347,7 +374,7 @@ def _mask_host_sockets(keep, writable=()):
                 os.makedirs(k)
             _mount("--no-canonicalize", "--rbind", "/proc/%d/fd/%d" % (os.getpid(), fds[k]), k)
         if k not in writable:
-            _mount("--no-canonicalize", "-o", "remount,bind,ro", k)
+            _set_read_only(k)
             ro.append(k)
         os.close(fds[k])
     if os.path.lexists("/dev/log") and not os.path.exists("/dev/log"):
@@ -355,6 +382,40 @@ def _mask_host_sockets(keep, writable=()):
     elif os.path.exists("/dev/log") and not os.path.isfile("/dev/log"):
         _mount("--bind", "/dev/null", "/dev/log")
     return masked
+
+
+_OCTAL = re.compile(r"\\([0-7]{3})")
+
+
+def _reaches_rw(path):
+    """Whether path lookup of a mount point lands on a writable mount. A mount point that no
+    longer resolves (ENOENT) is under a mount that hides it; any other error fails closed."""
+    try:
+        return not os.statvfs(path).f_flag & os.ST_RDONLY
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def writable_mounts(mountinfo, read_only, writable, reaches_rw=_reaches_rw):
+    """Mount points in mountinfo text at or under a read-only kept path that are mounted rw,
+    unless a writes path at or under that kept path covers them (DEP-4a). An rw entry the
+    path no longer reaches (overmounted, or under a masking tmpfs) is hidden: the mount the
+    path does reach is judged by its own entry, so reaches_rw (statvfs) settles it."""
+    declared = [(p, True) for p in read_only] + [(p, False) for p in writable]
+    wrong = []
+    for line in mountinfo.splitlines():
+        f = line.split(" ")
+        if len(f) < 6 or not f[4].startswith("/"):
+            wrong.append("unparsed mountinfo line: %r" % line)
+            continue
+        mp = _OCTAL.sub(lambda m: chr(int(m.group(1), 8)), f[4])
+        covering = [(len(p), ro) for p, ro in declared if mp == p or mp.startswith(p.rstrip("/") + "/")]
+        if (covering and max(covering)[1] and "ro" not in f[5].split(",") and mp not in wrong
+                and reaches_rw(mp)):
+            wrong.append(mp)
+    return wrong
 
 
 def _place(content, dest, work, masked):
@@ -435,6 +496,11 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=()):
         lines = [l for l in pathlib.Path("/etc/nsswitch.conf").read_text().splitlines()
                  if not l.startswith("hosts:")]
         _place("\n".join(lines + ["hosts: files dns"]) + "\n", "/etc/nsswitch.conf", work, masked)
+    # Checked last, after every mount the sandbox makes: no rw mount at or under a
+    # read-only kept path, or the command never runs (DEP-4a).
+    wrong = writable_mounts(pathlib.Path("/proc/self/mountinfo").read_text(), sorted(keep - writable), writable)
+    if wrong:
+        sys.exit("depaudit: sandbox not run, rw mount under a read-only kept path: " + ", ".join(wrong))
     names = []
     sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sink.bind(("127.0.0.1", 53))
@@ -600,11 +666,6 @@ def _ipv6_available():
         return False
 
 
-# x86_64 and the generic table (arm64) share these numbers.
-_SYS_MOUNT_SETATTR, _SYS_OPEN_TREE_ATTR = 442, 467
-_MOUNT_ATTR_RDONLY, _OPEN_TREE_CLONE, _AT_RECURSIVE = 0x1, 0x1, 0x8000
-
-
 def _clear_read_only(path):
     """What a scenario holding CAP_SYS_ADMIN over its mount namespace could do to a kept
     path without a traced call: clear MOUNT_ATTR_RDONLY in place (mount_setattr), or on a
@@ -715,6 +776,9 @@ def _control(mode):
         except OSError as e:
             if e.errno != errno.EROFS:
                 wrong.append("%s: %s, not read-only" % (d, e))
+    ro_kept = [str(ROOT), os.path.realpath(sys.prefix), os.environ["DEPAUDIT_KEEP_RO"]]
+    wrong += ["rw mount under a read-only kept path: " + m for m in writable_mounts(
+        pathlib.Path("/proc/self/mountinfo").read_text(), ro_kept, [os.environ["DEPAUDIT_KEEP_RW"]])]
     try:
         os.close(os.open(__file__, os.O_WRONLY | os.O_APPEND))
         wrong.append("opened %s for writing" % __file__)
@@ -823,7 +887,8 @@ def cmd_static(args):
 
 def cmd_run(args):
     if not sandbox_available():
-        print("FAIL sandbox unavailable: needs strace and unprivileged user+network namespaces", file=sys.stderr)
+        print("FAIL sandbox unavailable: needs unshare, setpriv, unprivileged user+network namespaces and "
+              "an strace that names every traced syscall (%s)" % TRACED, file=sys.stderr)
         return 2
     try:
         product = load_registry(args.targets)
