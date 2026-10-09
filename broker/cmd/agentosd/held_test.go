@@ -501,7 +501,7 @@ func TestTheHeldModeComesFirstInTheStart(t *testing.T) {
 	if held < 0 || strings.Index(s, "log.Fatal(err)\n\t}\n\tsleepHours") >= 0 {
 		t.Fatal("main.go does not enter the held mode on the marker")
 	}
-	for _, later := range []string{"setupMode{", "os.MkdirAll(learn.Dir", "daemon.Run(ctx, cfg)", "modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber})"} {
+	for _, later := range []string{"setupMode{", "os.MkdirAll(learn.Dir", "daemon.Run(ctx, cfg)", "modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber"} {
 		if i := strings.Index(s, later); i < 0 || i < held {
 			t.Errorf("%q comes before the held mode (%d < %d)", later, i, held)
 		}

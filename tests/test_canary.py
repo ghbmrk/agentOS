@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import urllib.parse
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -269,6 +270,74 @@ class RunnerTest(unittest.TestCase):
     def test_shipped_registry_passes(self):
         self.assertEqual(canary.main(["run", "--targets", str(ROOT / "assurance" / "canary-targets.json"),
                                       "--rounds", "1"]), 0)
+
+
+# REQ: LOOP-7
+class RoundTest(unittest.TestCase):
+    """P3-4b-4a: the scheduled round Loop 2's canary probe runs. One round
+    per target with fresh canaries; a leak is a High finding, a failed
+    control makes the whole round an error, and no canary value is output."""
+
+    def round(self, targets, controls=None):
+        minted = []
+        real_mint = canary.mint
+
+        def mint(kind):
+            c = real_mint(kind)
+            minted.append(c.value)
+            return c
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.object(canary, "mint", mint), \
+                unittest.mock.patch.object(canary, "control_targets",
+                                           controls or canary.control_targets):
+            reg = pathlib.Path(d, "targets.json")
+            reg.write_text(json.dumps({"targets": targets}))
+            out = pathlib.Path(d, "round.json")
+            rc = canary.main(["round", "--targets", str(reg), "--out", str(out)])
+            text = out.read_text() if out.exists() else ""
+        for v in minted:
+            self.assertNotIn(v, text)
+        return rc, json.loads(text) if text else None
+
+    def test_a_leaking_target_is_a_high_finding(self):
+        contain = {"kind": "grant", "name": "G4", "label": "pre-allowance G4"}
+        rc, out = self.round([{"name": "planted-leak", "cmd": CONTROLS + ["leaky"], "contain": contain}])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["check"], "canary")
+        self.assertEqual(out["checked"], ["planted-leak"])
+        self.assertEqual(out["errors"], [])
+        [f] = out["findings"]
+        self.assertEqual((f["check"], f["subject"], f["severity"], f["contain"]),
+                         ("canary", "planted-leak", "high", contain))
+        self.assertIn("api_key", f["detail"])
+
+    def test_a_clean_round_reports_nothing(self):
+        rc, out = self.round([{"name": "quiet", "cmd": CONTROLS + ["clean"]}])
+        self.assertEqual(rc, 0)
+        self.assertEqual((out["findings"], out["checked"], out["errors"]), ([], ["quiet"], []))
+
+    def test_a_target_error_is_not_checked(self):
+        rc, out = self.round([{"name": "broken", "cmd": CONTROLS + ["crash"]},
+                              {"name": "quiet", "cmd": CONTROLS + ["clean"]}])
+        self.assertEqual(rc, 1)
+        self.assertEqual(out["checked"], ["quiet"])
+        self.assertEqual(out["findings"], [])
+        self.assertEqual(len(out["errors"]), 1)
+        self.assertTrue(out["errors"][0].startswith("broken: "))
+
+    def test_a_failed_control_makes_the_round_an_error(self):
+        blind = [{"name": "control-blind", "cmd": CONTROLS + ["clean"], "expect": "leak",
+                  "kinds": list(canary.KINDS), "forms": None, "why": None, "control": True}]
+        rc, out = self.round([{"name": "planted-leak", "cmd": CONTROLS + ["leaky"]}], controls=lambda: blind)
+        self.assertEqual(rc, 1)
+        self.assertEqual((out["findings"], out["checked"]), ([], []))
+        self.assertTrue(out["errors"][0].startswith("control control-blind: "))
+
+    def test_registry_contain_must_be_well_formed(self):
+        for contain in ({"kind": "machine", "name": "x"}, {"kind": "grant"}, {"kind": "grant", "name": "G1", "x": 1}):
+            rc, out = self.round([{"name": "t", "cmd": CONTROLS + ["clean"], "contain": contain}])
+            self.assertEqual(rc, 2, contain)
+            self.assertIsNone(out)
 
 
 if __name__ == "__main__":

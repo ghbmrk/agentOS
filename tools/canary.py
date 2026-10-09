@@ -19,8 +19,16 @@ the registry holds product targets only, and each must expect "clean".
 Canary values never leave the trusted side and the harness's own memory:
 reports carry fingerprints, kinds, encodings, and locations only.
 
+A round (`canary.py round`) is the scheduled form Loop 2's canary probe runs
+(LOOP-7, P3-4b-4a): every control and product target once, with fresh
+canaries, written as Loop 2 findings JSON. A product target that leaks is a
+High finding about that target, with the grant or executor its registry entry
+names under "contain"; a failed control or a target error is an error, never
+clean.
+
 Usage:
   canary.py run --targets assurance/canary-targets.json [--rounds N] [--report F]
+  canary.py round --targets assurance/canary-targets.json --out F
   canary.py sweep [--root DIR]... [--pid N|all]... --out DIR   (run as root inside a guest)
 """
 import argparse
@@ -442,6 +450,11 @@ def load_registry(path):
     for t in targets:
         if t.get("control") or t.get("expect", "clean") != "clean":
             raise ValueError("%s: product targets must expect clean; controls are built in" % t.get("name"))
+        c = t.get("contain")
+        if c is not None and (not isinstance(c, dict) or c.get("kind") not in ("grant", "executor")
+                              or not isinstance(c.get("name"), str) or not c["name"]
+                              or not isinstance(c.get("label", ""), str) or set(c) - {"kind", "name", "label"}):
+            raise ValueError("%s: contain must be {kind: grant|executor, name, label?}" % t.get("name"))
     return targets
 
 
@@ -483,6 +496,43 @@ def cmd_run(args):
     return 0 if ok_all else 1
 
 
+def cmd_round(args):
+    """One scheduled round as Loop 2 findings (see the module docstring)."""
+    try:
+        product = load_registry(args.targets)
+    except ValueError as e:
+        print("FAIL registry: %s" % e, file=sys.stderr)
+        return 2
+    minted = []
+    out = {"check": "canary", "checked": [], "findings": [], "errors": []}
+    for t in control_targets():
+        res = run_target(t, 1, timeout=args.timeout, minted=minted, max_bytes=args.max_bytes)
+        ok, why = _judge(t, res)
+        if not ok:
+            # A scan that missed a planted leak says nothing about the rest.
+            out["errors"].append("control %s: %s" % (t["name"], why))
+    if not out["errors"]:
+        for t in product:
+            res = run_target(t, 1, timeout=args.timeout, minted=minted, max_bytes=args.max_bytes)
+            if res["outcome"] == "error":
+                out["errors"].append("%s: %s" % (t["name"], "; ".join(res["rounds"][0]["errors"])))
+                continue
+            out["checked"].append(t["name"])
+            if res["outcome"] == "leak":
+                f = {"check": "canary", "subject": t["name"],
+                     "detail": "kinds: " + ", ".join(res["rounds"][0]["kinds_hit"]), "severity": "high"}
+                if t.get("contain"):
+                    f["contain"] = t["contain"]
+                out["findings"].append(f)
+    blob = json.dumps(out, indent=1).encode()
+    if Detector(minted).scan_bytes(blob, "round"):
+        out = {"check": "canary", "checked": [], "findings": [],
+               "errors": ["the round output would contain a canary value; withheld"]}
+        blob = json.dumps(out, indent=1).encode()
+    pathlib.Path(args.out).write_bytes(blob + b"\n")
+    return 1 if out["errors"] else 0
+
+
 def cmd_sweep(args):
     pids = []
     for p in args.pid:
@@ -505,13 +555,18 @@ def main(argv=None):
     r.add_argument("--timeout", type=int, default=600)
     r.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     r.add_argument("--report")
+    o = sub.add_parser("round")
+    o.add_argument("--targets", required=True)
+    o.add_argument("--out", required=True)
+    o.add_argument("--timeout", type=int, default=600)
+    o.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     s = sub.add_parser("sweep")
     s.add_argument("--root", action="append", default=[])
     s.add_argument("--pid", action="append", default=[])
     s.add_argument("--out", required=True)
     s.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     args = ap.parse_args(argv)
-    return cmd_run(args) if args.cmd == "run" else cmd_sweep(args)
+    return {"run": cmd_run, "round": cmd_round, "sweep": cmd_sweep}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,8 @@ func (s *Guard) Report(ctx context.Context, f Finding) (Record, error) {
 	if f.ID == "" && ruleLess(f.Check) {
 		h := sha256.Sum256([]byte(f.Detail))
 		f.ID = findingID(f.Check, f.Subject, hex.EncodeToString(h[:]))
+	} else if f.ID == "" && f.Rule == nil {
+		f.ID = reportID(f)
 	} else if f.ID == "" {
 		h := sha256.Sum256(rule.Encode())
 		f.ID = findingID(f.Check, f.Subject, hex.EncodeToString(h[:]))
@@ -72,12 +74,11 @@ func (s *Guard) Report(ctx context.Context, f Finding) (Record, error) {
 		// Left part done by a crash or a store error (P3-4b-1b item 3).
 		return s.resumeLocked(ctx, f.ID)
 	}
-	if day := now.UTC().Format(time.DateOnly); s.st.PauseDay != day {
-		s.st.PauseDay, s.st.Pauses = day, 0
-	}
+	s.rollDayLocked(now)
 	pause := f.Contain != nil && s.st.Pauses < s.cfg.MaxPausesPerDay
 	if pause {
 		s.st.Pauses++
+		s.countPauseLocked(f.Check)
 	}
 	s.mu.Unlock()
 	rec, err := s.handle(ctx, f, pause, true)
@@ -89,13 +90,18 @@ func (s *Guard) Report(ctx context.Context, f Finding) (Record, error) {
 // severity, a valid tree rule that fails on the active tree, a
 // containment target of a known kind, and an ID that is not another
 // finding's original-test slot: one ending in OriginalSuffix would take
-// that slot, so the other finding could never link (#493 intake).
+// that slot, so the other finding could never link (#493 intake). A
+// probe finding (LOOP-7) may carry no rule, and then needs a subject,
+// which its probe closes it by.
 func (s *Guard) reportable(f Finding) (change.TreeRule, error) {
 	if strings.HasSuffix(f.ID, OriginalSuffix) {
 		return change.TreeRule{}, fmt.Errorf("%w: ID %q ends in %s", ErrFinding, f.ID, OriginalSuffix)
 	}
-	if f.Check != CheckSeeded && !ruleLess(f.Check) {
+	if f.Check != CheckSeeded && !probeChecks[f.Check] && !ruleLess(f.Check) {
 		return change.TreeRule{}, fmt.Errorf("%w: check %q is not reported", ErrFinding, f.Check)
+	}
+	if probeChecks[f.Check] && f.Subject == "" {
+		return change.TreeRule{}, fmt.Errorf("%w: a probe finding needs a subject", ErrFinding)
 	}
 	if f.Severity != Low && f.Severity != High {
 		return change.TreeRule{}, fmt.Errorf("%w: severity %q", ErrFinding, f.Severity)
@@ -110,6 +116,9 @@ func (s *Guard) reportable(f Finding) (change.TreeRule, error) {
 		case f.Detail == "" || f.Subject == "":
 			return change.TreeRule{}, fmt.Errorf("%w: a %s finding needs a subject and its evidence", ErrFinding, f.Check)
 		}
+		return change.TreeRule{}, nil
+	}
+	if f.Rule == nil && probeChecks[f.Check] {
 		return change.TreeRule{}, nil
 	}
 	rule, ok, err := change.ParseTreeRule(f.Rule)
@@ -168,6 +177,9 @@ const (
 func (s *Guard) waitingLocked(r Record) string {
 	if r.Reported && r.Fix == "" && ruleLess(r.Finding.Check) {
 		return waitUpdate
+	}
+	if r.Reported && r.Finding.Rule == nil && probeChecks[r.Finding.Check] {
+		return "" // its probe closes it (P3-4b-4a)
 	}
 	if r.Reported && r.Fix == "" {
 		return waitNoTest
