@@ -173,8 +173,10 @@ func TestLoop7TextsAreInPlainWords(t *testing.T) {
 }
 
 // A1 R3: a finding is urgent only when its line names a pause that
-// happened or a reply that works, or it is a canary leak; any other line
-// says nothing is paused or needed, and Pass and tell share the rule.
+// happened or a reply that works; a leak or tampering (canary, hash,
+// drift, tamper) always offers STOP and so stays urgent unpaused
+// (Security 4a on #558); any other line says nothing is paused or needed,
+// and Pass and tell share the rule.
 func TestUrgentOnlyWithAStep(t *testing.T) {
 	r := newReportRig(t, nil)
 	r.report(t, fuzzFinding())
@@ -201,27 +203,40 @@ func TestUrgentOnlyWithAStep(t *testing.T) {
 			t.Errorf("%s/%s: urgent %v, %q", rec.Finding.Check, rec.Contained, urgentText(rec), ownerLine(rec))
 		}
 	}
-	for _, c := range []Check{CheckHash, CheckDrift, CheckSeeded, CheckProbe, CheckCorpus, CheckTamper, CheckExhaust} {
+	for _, c := range []Check{CheckHash, CheckDrift, CheckTamper, CheckCanary} {
 		rec := Record{Finding: Finding{Check: c, Subject: "x", Detail: "d", Severity: High}, Contained: "none"}
-		if urgentText(rec) || !strings.HasSuffix(ownerLine(rec), nothingNeeded) {
-			t.Errorf("%s none: urgent %v, %q", c, urgentText(rec), ownerLine(rec))
+		if line := ownerLine(rec); !urgentText(rec) || !strings.HasSuffix(line, "Reply STOP to pause everything.") || strings.Contains(line, nothingNeeded) {
+			t.Errorf("%s none: urgent %v, %q", c, urgentText(rec), line)
+		}
+	}
+	for _, c := range []Check{CheckSeeded, CheckFuzz, CheckProbe, CheckCorpus, CheckExhaust, CheckAdvisory} {
+		rec := Record{Finding: Finding{Check: c, Subject: "x", Detail: "d", Severity: High}, Contained: "none"}
+		if line := ownerLine(rec); urgentText(rec) || !strings.HasSuffix(line, nothingNeeded) || namesAStep(line) {
+			t.Errorf("%s none: urgent %v, %q", c, urgentText(rec), line)
 		}
 	}
 }
 
-// A1 R3: Pass's batch is urgent through the same rule: a High hash finding
-// with nothing paused is sent non-urgent, one with a pause urgent.
+// A1 R3: Pass's batch is urgent through the same rule: a hash mismatch is
+// urgent paused or not, offering STOP when nothing was paused; an
+// advisory with nothing paused is not.
 func TestPassBatchUrgencyFollowsTheStepRule(t *testing.T) {
 	for _, tc := range []struct {
 		artifact string
 		urgent   bool
 		says     string
 	}{
-		{"dep/libfoo", false, nothingNeeded},
+		{"dep/libfoo", true, "Reply STOP to pause everything."},
 		{"guest-image/openclaw", true, "Paused the agent machine."},
+		{"advisory", false, nothingNeeded},
 	} {
 		b := cleanBox()
-		b.measured[tc.artifact] = "evil"
+		if tc.artifact == "advisory" {
+			b.pkgs[0].Contain = nil
+			b.snap.Advisories[0].Fixed = "3.0.16"
+		} else {
+			b.measured[tc.artifact] = "evil"
+		}
 		g := newGuardRig(t, b)
 		if _, err := g.g.Pass(context.Background()); err != nil {
 			t.Fatal(err)

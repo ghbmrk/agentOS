@@ -1349,17 +1349,23 @@ func ownerLine(r Record) string {
 			line += " Reply STOP to pause everything."
 		}
 	default:
-		if f.Check != CheckCanary && !ownStep(f) {
+		if !stopChecks[f.Check] && !ownStep(f) {
 			line += " " + nothingNeeded
 		}
 	}
-	// A canary leak always offers STOP (P3-4b-3c requirement 3).
-	// The failed and capped lines offer it already.
-	if f.Check == CheckCanary && r.Contained != "failed" && r.Contained != "capped" {
+	// A leak or a sign of tampering always offers STOP (P3-4b-3c
+	// requirement 3; Security 4a on #558). The failed and capped lines
+	// offer it already.
+	if stopChecks[f.Check] && r.Contained != "failed" && r.Contained != "capped" {
 		line += " Reply STOP to pause everything."
 	}
 	return line
 }
+
+// stopChecks are the checks whose findings always offer STOP, so they
+// stay urgent when nothing was paused: a canary leak, and tampering with
+// a file, a setting or an evaluator (hash, drift, tamper).
+var stopChecks = map[Check]bool{CheckCanary: true, CheckHash: true, CheckDrift: true, CheckTamper: true}
 
 // nothingNeeded ends the line of a finding with no pause and no step.
 const nothingNeeded = "Nothing is paused and nothing is needed from you."
@@ -1370,11 +1376,11 @@ func urgentContained(c string) bool { return c == "paused" || c == "failed" || c
 
 // urgentText is the one urgency rule for a finding's owner text, in tell
 // and in Pass's batch: urgent only when the line names a pause that
-// happened or a reply that works, or the finding is a canary leak (which
-// always offers STOP). Severity decides whether the owner is texted at
-// all, not whether the text interrupts them (P3-4b-3c).
+// happened or a reply that works: a pause, PAUSE or STOP, which every
+// stopChecks finding offers. Severity decides whether the owner is texted
+// at all, not whether the text interrupts them (P3-4b-3c).
 func urgentText(r Record) bool {
-	return urgentContained(r.Contained) || r.Finding.Check == CheckCanary
+	return urgentContained(r.Contained) || stopChecks[r.Finding.Check]
 }
 
 // ownStep reports a finding whose text names a step of its own on my
