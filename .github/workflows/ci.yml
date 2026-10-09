@@ -77,6 +77,16 @@ jobs:
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Software TPM for the trusted-host slot (P2-4b)
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      # loops' canary-round test runs tools/canary.py, whose targets run as the
+      # runner's first subordinate id in a user namespace (tools/ASSUMPTIONS.md D13).
+      - name: Subordinate ids for the canary sandbox
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: Format
         # Vendored third-party code keeps its upstream formatting.
         run: f=$(find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l); test -z "$f" || { echo "$f"; exit 1; }

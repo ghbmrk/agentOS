@@ -1445,10 +1445,15 @@ func capFirst(s string) string {
 // aboveBudget says what an exhaustion round's "above budget" finding lets
 // an agent machine do, by resource.
 var aboveBudget = map[string]string{
-	"memory":    "use more memory than its budget",
+	"memory": "use more memory than its budget",
+	// No round reports "processes" now (S35), but an open record
+	// still reads this way.
 	"processes": "start more processes than its budget",
-	"disk":      "use more disk space than its budget",
-	"cpu":       "take as large a share of processor time as I get",
+	// pids.max bounds the sandbox's host threads, not guest processes
+	// (RES-2, loops S35).
+	sandboxThreads: "run more sandbox threads than its budget",
+	"disk":         "use more disk space than its budget",
+	"cpu":          "take as large a share of processor time as I get",
 }
 
 // findingText is one finding in plain words, with the next step.
@@ -1492,6 +1497,9 @@ func findingText(f Finding) string {
 	case CheckFuzz:
 		if hangDetail(f.Detail) {
 			return "My self-test of " + plainSubject(f) + " stopped responding to a test input. The fix comes with an update."
+		}
+		if f.Detail == FuzzOversizeDetail {
+			return "My self-test of " + plainSubject(f) + " has a stored test input too large to replay, so it is not tested."
 		}
 		return "My self-test found a crash in " + plainSubject(f) + ". The fix comes with an update."
 	case CheckProbe:
@@ -1600,11 +1608,19 @@ func clearedWhat(f Finding) string {
 	switch {
 	case f.Check == CheckFuzz && hangDetail(f.Detail):
 		return plainSubject(f) + " responds to test inputs again"
+	case f.Check == CheckFuzz && f.Detail == FuzzOversizeDetail:
+		return plainSubject(f) + " is tested again"
 	case f.Check == CheckFuzz:
 		return "the crash in " + plainSubject(f)
 	}
 	return plainSubject(f)
 }
+
+// FuzzOversizeDetail is the target finding for a stored input loop7
+// refuses to read, being past its cap (P3-4b-3r-confine-r5). The target
+// is not fuzzed while it stands; a whole replay that reads every input it
+// names resolves it.
+const FuzzOversizeDetail = "a stored test input is too large to replay"
 
 // digestCap is how many open-finding lines the digest shows.
 const digestCap = 3
