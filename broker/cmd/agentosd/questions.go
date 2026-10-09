@@ -13,6 +13,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clock"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/question"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -90,7 +91,7 @@ func (q *questions) Call(ctx context.Context, machine, lineage, name string, arg
 	b := q.b.Load()
 	if b == nil {
 		if name == question.ToolAsk || name == question.ToolStatus {
-			return "", true, errors.New("the broker cannot text the owner now")
+			return "", true, guesterr.New("the broker cannot text the owner now")
 		}
 		return "", false, nil
 	}
@@ -153,6 +154,16 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 	go func() { defer q.run.Done(); guard.Run(ctx) }()
 	go func() { defer q.run.Done(); b.Run(ctx, 30*time.Second) }()
 	return nil
+}
+
+// start is open, logging a failure and recording it for STATUS (OP-9
+// C9): the owner channel failing to take questions must not take the box
+// down; the tools are then not offered and replies are task chat.
+func (q *questions) start(ctx context.Context, d *daemon.Daemon, pre *preempter, cfg questionConfig, caps *capState) {
+	if err := q.open(ctx, d, pre, cfg); err != nil {
+		log.Printf("owner questions disabled: %v", err)
+		caps.questionsOff.Store(true)
+	}
 }
 
 // wire gives the daemon the answer hook and the STATUS clock line; call

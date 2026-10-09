@@ -235,6 +235,9 @@ func (a *Adapter) folderClass(name string, byName map[string]Role) (string, erro
 	return "", ErrTarget
 }
 
+// LabelClass is labelClass, for Loop 2's corpus probe (LOOP-7).
+func (a *Adapter) LabelClass(label string) (string, error) { return a.labelClass(label) }
+
 // labelClass says what adding or removing a label is.
 func (a *Adapter) labelClass(label string) (string, error) {
 	switch {
@@ -382,7 +385,13 @@ func (a *Adapter) isAlert(m Message) bool {
 			return true
 		}
 	}
-	text := m.Subject + "\n" + m.Text
+	return a.AlertWording(m.Subject + "\n" + m.Text)
+}
+
+// AlertWording is isAlert's second net alone: security-alert wording or
+// a code (CH-19), whoever sent the text. Loop 2's corpus probe replays
+// published attack texts through it (LOOP-7).
+func (a *Adapter) AlertWording(text string) bool {
 	if owner.SecretShaped(text) {
 		return true
 	}
@@ -429,13 +438,33 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 	if err != nil {
 		return grants.Escalation{}, err
 	}
-	if o.Verb != verb.Organize {
+	if !pinned(o) {
 		return grants.Escalation{}, nil
 	}
 	pl, err := a.planOrganize(ctx, o, p)
 	if err != nil {
+		// A recheck that cannot plan adds a poisoned judgement rather than
+		// dropping the others, so it can never leave a later judgement as
+		// the only one an attempt already in flight takes (SR3-5-f1a).
+		a.setPin(in.ID, pin{})
 		return grants.Escalation{}, err
 	}
+	if o.Verb == verb.DeleteRemote {
+		// A trash or spam effect is asked for each one (irreversible), so
+		// it is only pinned: Execute acts only on the message judged here
+		// (SR3-5-f2a).
+		a.setPin(in.ID, pin{ref: pl.msg.Ref(), to: pl.to})
+		return grants.Escalation{}, nil
+	}
+	e := a.escalate(in, pl, p)
+	// Each call adds what it judged to the intent's judgements; Execute
+	// acts only when they all agree (SR3-5-f1a).
+	a.setPin(in.ID, pin{ref: pl.msg.Ref(), to: pl.to, alert: e.Verb == verb.ChangeAccount})
+	return e, nil
+}
+
+// escalate is Escalate's judgement of one organize plan.
+func (a *Adapter) escalate(in journal.Intent, pl plan, p map[string]string) grants.Escalation {
 	// Reasons are fixed words over broker-held fields only: an
 	// owner-confirmed target name, the sender's domain, the bound. Never a
 	// subject or body (CH-19). The owner channel caps a detail at
@@ -451,7 +480,7 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 		e.Ask = true
 		why = append(why, fmt.Sprintf("past %d today", a.cfg.DailyCeiling))
 	case held:
-		return grants.Escalation{Held: true, Reason: fmt.Sprintf("held past today's %d", a.cfg.DailyLimit)}, nil
+		return grants.Escalation{Held: true, Reason: fmt.Sprintf("held past today's %d", a.cfg.DailyLimit)}
 	}
 	// Clauses go in order of what the owner must see: the bound, then
 	// the alert, then the share. Each takes the longest of its forms that
@@ -486,7 +515,7 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 		}
 	}
 	e.Reason = clip(strings.Join(why, "; "), maxDetail)
-	return e, nil
+	return e
 }
 
 // maxDetail is the owner channel's cap, in bytes, on an approval line's
@@ -519,9 +548,12 @@ const (
 
 // reserve takes a place under the day's organize bound for id. The count
 // and the reservation happen under one lock, so concurrent checks cannot
-// all see room for the last place. The count is the journal's authorized
-// organize intents in the last day (which survives restarts) together
-// with places reserved here and not yet authorized there.
+// all see room for the last place. The count is the journal's places
+// under the bound (InUse: authorized or in flight whatever their age,
+// dispatched in the last day), which survives restarts and a queue
+// released long after it was authorized (SR3-2-f1), together with places
+// reserved here and not yet authorized there. A reservation the journal
+// reports is dropped here, so past Authorize only the journal counts it.
 //
 // Past the bound the owner is asked once (ADP-2's "asked once, as one
 // batch"): the first effect past it is asked, and the rest are held while
@@ -534,7 +566,7 @@ const (
 // The YES lifts only the count: every effect still meets the target,
 // share and alert guards. Without the journal hook every effect is asked.
 func (a *Adapter) reserve(id string) place {
-	if a.cfg.Authorized == nil {
+	if a.cfg.InUse == nil {
 		return askEach
 	}
 	a.mu.Lock()
@@ -546,9 +578,10 @@ func (a *Adapter) reserve(id string) place {
 		if o.Verb != verb.Organize {
 			continue
 		}
-		for _, x := range a.cfg.Authorized(o.Name, since) {
-			if x.Account == a.cfg.Account {
-				counted[x.ID] = true
+		for _, u := range a.cfg.InUse(o.Name, since) {
+			if u.Intent.Account == a.cfg.Account {
+				counted[u.Intent.ID] = true
+				delete(a.reserved, u.Intent.ID)
 			}
 		}
 	}
@@ -580,6 +613,118 @@ func (a *Adapter) reserve(id string) place {
 		return askOnce
 	}
 	return held
+}
+
+// setPin adds what Escalate judged of intent id to the judgements made
+// since the last Execute consumed them. Every one is kept, not just the
+// last: a concurrent dispatch's recheck that the gate refuses still pins,
+// and Execute acts only when all of them agree (SR3-5-f1a). Judgements
+// older than a day are dropped (expire), except an intent's the journal
+// still holds.
+func (a *Adapter) setPin(id string, p pin) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p.at = a.cfg.Now()
+	a.expire(p.at.Add(-dayWindow))
+	a.pins[id] = append(a.pins[id], p)
+}
+
+// expire drops the judgements and kept pins made before old, except
+// those of an intent the journal lists as in use: authorized, in flight,
+// unknown, or succeeded since old. One of those may still be executed or
+// reconciled, and dropping its judgement could leave a later refused
+// recheck's as the only one its attempt takes (SR3-5-f2b). Without the
+// journal hook no intent is known to be settled, so none expires. The
+// caller holds a.mu.
+func (a *Adapter) expire(old time.Time) {
+	stale := false
+	for _, xs := range a.pins {
+		for _, x := range xs {
+			stale = stale || x.at.Before(old)
+		}
+	}
+	for _, x := range a.judged {
+		stale = stale || x.at.Before(old)
+	}
+	if !stale || a.cfg.InUse == nil {
+		return
+	}
+	live := map[string]bool{}
+	for _, o := range ops {
+		if !pinned(o) {
+			continue
+		}
+		for _, u := range a.cfg.InUse(o.Name, old) {
+			if u.Intent.Account == a.cfg.Account {
+				live[u.Intent.ID] = true
+			}
+		}
+	}
+	for k, xs := range a.pins {
+		if live[k] {
+			continue
+		}
+		kept := xs[:0]
+		for _, x := range xs {
+			if !x.at.Before(old) {
+				kept = append(kept, x)
+			}
+		}
+		if len(kept) == 0 {
+			delete(a.pins, k)
+		} else {
+			a.pins[k] = kept
+		}
+	}
+	for k, x := range a.judged {
+		if !live[k.id] && x.at.Before(old) {
+			delete(a.judged, k)
+		}
+	}
+}
+
+// pinned reports whether o's effects are pinned to the message Escalate
+// judged: organize, trash and spam.
+func pinned(o Op) bool { return o.Verb == verb.Organize || o.Verb == verb.DeleteRemote }
+
+// takePin removes intent id's judgements, so one Execute consumes them,
+// and returns the one they agree on. It reports false when there are
+// none, or when any two differ in the message or in whether they
+// escalated hiding an alert (SR3-5-f1a). A poisoned judgement's zero Ref
+// differs from every message's, and no plan resolves to it.
+func (a *Adapter) takePin(id string) (pin, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	xs := a.pins[id]
+	delete(a.pins, id)
+	if len(xs) == 0 {
+		return pin{}, false
+	}
+	p := xs[len(xs)-1]
+	for _, x := range xs {
+		if x.ref != p.ref || x.alert != p.alert {
+			return pin{}, false
+		}
+	}
+	return p, true
+}
+
+// keepJudged keeps the pin an attempt ran under when its outcome is
+// unknown, for that attempt's Reconcile only.
+func (a *Adapter) keepJudged(id string, attempt int, p pin) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.judged[attemptKey{id, attempt}] = p
+}
+
+// takeJudged returns and removes the pin an attempt ran under.
+func (a *Adapter) takeJudged(id string, attempt int) (pin, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	k := attemptKey{id, attempt}
+	p, ok := a.judged[k]
+	delete(a.judged, k)
+	return p, ok
 }
 
 // intent checks in is for this adapter and returns its operation and

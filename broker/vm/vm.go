@@ -286,6 +286,16 @@ var (
 	ErrConflict = errors.New("vm: merge conflict")
 	ErrImage    = errors.New("vm: snapshots are of different images")
 	ErrRevoked  = errors.New("vm: admission was withdrawn before the machine started")
+	// ErrExecNotStarted, ErrExecNoProgram and ErrExecFailed are a
+	// command the runtime failed to run: before it started (a retry may
+	// work), before it started because its program was not found or
+	// cannot be loaded (a retry fails the same way, SR2-3p), or a failure
+	// the runtime does not show was before the start, so it may have run
+	// (SR2-3q). None names a path; the runtime's messages are in its own
+	// log (SR2-3j).
+	ErrExecNotStarted = errors.New("vm: the command did not start")
+	ErrExecNoProgram  = errors.New("vm: the command did not start: its program was not found or cannot run")
+	ErrExecFailed     = errors.New("vm: the runtime failed after the command started; it may have run")
 	// ErrPreempted: the machine was preempted while an operation held it,
 	// and what it was writing is discarded.
 	ErrPreempted = errors.New("vm: machine was preempted during the operation")

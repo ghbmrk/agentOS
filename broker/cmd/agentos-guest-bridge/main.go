@@ -72,10 +72,7 @@ func main() {
 
 	var child *exec.Cmd
 	if args := flag.Args(); len(args) > 0 {
-		child = exec.Command(args[0], args[1:]...)
-		child.Env = append(os.Environ(), "OPENCLAW_GATEWAY_TOKEN="+token)
-		child.Stdout, child.Stderr = os.Stdout, os.Stderr
-		if err := child.Start(); err != nil {
+		if child, err = startRuntime(args, token); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -93,6 +90,31 @@ func main() {
 		}
 	}()
 	reap(child)
+}
+
+// runtimeVars are the variables the runtime gets from the bridge's own
+// environment, by name: PATH (the OCI spec's) and each one
+// guest/openclaw/launch.json sets. Anything else the bridge was given
+// stays with it (P3-4b-3r-env).
+var runtimeVars = []string{
+	"PATH", "HOME",
+	"OPENCLAW_CONFIG_PATH", "OPENCLAW_CONFIG_READONLY", "OPENCLAW_NO_AUTO_UPDATE",
+	"OPENCLAW_DISABLE_BONJOUR", "OPENCLAW_CLAWHUB_URL", "DO_NOT_TRACK",
+}
+
+// startRuntime starts the guest runtime with runtimeVars and the gateway
+// token as its whole environment.
+func startRuntime(args []string, token string) (*exec.Cmd, error) {
+	env := []string{"OPENCLAW_GATEWAY_TOKEN=" + token}
+	for _, k := range runtimeVars {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	child := exec.Command(args[0], args[1:]...)
+	child.Env = env
+	child.Stdout, child.Stderr = os.Stdout, os.Stderr
+	return child, child.Start()
 }
 
 // routes forwards the guest's requests to the broker and serves the
