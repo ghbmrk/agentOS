@@ -38,7 +38,8 @@ type SetupConfig struct {
 	// Record is setup's durable record (FileRecord).
 	Record RecordStore
 	// Enroll is the vault process's enrollment (modelroute.Verifier),
-	// its refusals mapped to EnrollClosed, EnrollNone and EnrollPaused.
+	// its refusals mapped to EnrollClosed, EnrollNotOpen, EnrollNone and
+	// EnrollPaused.
 	Enroll Enroller
 	// Progress is the box's boot progress for setup's pages.
 	Progress func() localapi.SetupProgress
@@ -59,9 +60,12 @@ type Enroller interface {
 
 // The vault's refusals, as an Enroller reports them.
 var (
-	// EnrollClosed: enrollment is sealed, or was never opened (410).
-	// Setup never counts it as enrolled: only a confirmation it saw does.
+	// EnrollClosed: setup's seal is written (410). Setup counts it as
+	// enrolled only after a confirmation it saw, with no seed since.
 	EnrollClosed = errors.New("enrollment closed")
+	// EnrollNotOpen: init -setup never opened enrollment (412); setup
+	// cannot finish on this vault (P2-2w c2 r1).
+	EnrollNotOpen = errors.New("enrollment not open")
 	// EnrollNone: no seed waits for confirmation (409).
 	EnrollNone = errors.New("no enrollment waiting")
 	// EnrollPaused: too many wrong codes for now (429).
@@ -149,6 +153,7 @@ var (
 	errEnrolled     = sockets.Code(localapi.ErrEnrolled)
 	errNoEnrollment = sockets.Code(localapi.ErrNoEnrollment)
 	errNotEnrolled  = sockets.Code(localapi.ErrNotEnrolled)
+	errUnavailable  = sockets.Code(localapi.ErrEnrollUnavailable)
 )
 
 // NewSetup reads the record; one that cannot be read closes setup.
@@ -223,14 +228,18 @@ func (s *Setup) enroll(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	}
 	s.enrolls = append(s.enrolls, now)
 	s.mu.Unlock()
-	// A new seed is for a pairing that has yet to confirm (L3 on #367):
-	// forget the confirmation before the vault replaces what it covers.
-	if err := s.setEnrolled(false); err != nil {
-		return nil, err
-	}
 	uri, err := s.cfg.Enroll.Enroll()
 	if err != nil {
+		// A refused enroll replaced nothing, so a confirmation recorded
+		// before it still stands (P2-2w c2 r1): it is what lets finish
+		// accept a seal whose record was lost.
 		return nil, s.vaultErr(err)
+	}
+	// A new seed is for a pairing that has yet to confirm (L3 on #367).
+	// The vault decides at the seal: a crash before this save leaves a
+	// pending seed, which the seal refuses.
+	if err := s.setEnrolled(false); err != nil {
+		return nil, err
 	}
 	if len(uri) > localapi.MaxEnrollLink || !strings.HasPrefix(uri, "otpauth://totp/") {
 		return nil, errFailed
@@ -258,11 +267,21 @@ func (s *Setup) confirm(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	return localapi.Confirmed{OK: ok}, nil
 }
 
-// vaultErr maps the vault's refusal to a fixed code.
+// vaultErr maps the vault's refusal to a fixed code. A sealed vault is
+// "enrolled" only when finish would accept it: after a confirmation this
+// Setup saw, with no seed since. Otherwise setup cannot finish here.
 func (s *Setup) vaultErr(err error) error {
 	switch {
 	case errors.Is(err, EnrollClosed):
-		return errEnrolled
+		s.mu.Lock()
+		enrolled := s.rec.Enrolled
+		s.mu.Unlock()
+		if enrolled {
+			return errEnrolled
+		}
+		return errUnavailable
+	case errors.Is(err, EnrollNotOpen):
+		return errUnavailable
 	case errors.Is(err, EnrollNone):
 		return errNoEnrollment
 	case errors.Is(err, EnrollPaused):
@@ -315,6 +334,9 @@ func (s *Setup) finish(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	// Setup's own seal whose record was lost: nothing else seals.
 	switch err := s.cfg.Enroll.SealEnroll(); {
 	case err == nil, errors.Is(err, EnrollClosed):
+	case errors.Is(err, EnrollNotOpen):
+		s.mu.Unlock()
+		return nil, errUnavailable
 	case errors.Is(err, EnrollNone):
 		err := s.setEnrolledLocked(false)
 		s.mu.Unlock()

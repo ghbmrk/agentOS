@@ -111,7 +111,11 @@ func (c *Channel) Boot() {
 	}
 	c.mu.Unlock()
 	if c.cfg.Modem != nil {
-		_ = c.cfg.Modem.Send(c.cfg.Owner, text)
+		// Never paced: it carries the new codes, which a held copy could
+		// outlive, and explains them, so it goes now (CH-12, CH-15). It
+		// still counts toward the hour. A broker template, so not through
+		// Disclose (CH-19).
+		_ = c.sendTemplate(text)
 	}
 	c.decide(decided)
 	if c.cfg.Reissue != nil {

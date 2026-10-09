@@ -146,7 +146,7 @@ func (b *Builder) Send(day string, batch [][]byte) error {
 		if err := os.Rename(tmp, filepath.Join(b.queueDir(), day)); err != nil {
 			return err
 		}
-		if err := syncDir(b.queueDir()); err != nil {
+		if err := faultFn(nil).dirSync(b.queueDir()); err != nil {
 			return err
 		}
 	}
@@ -262,9 +262,28 @@ func writeJSON(path string, v any) error {
 }
 
 // writeFile writes data durably: a synced temporary file renamed into place.
-func writeFile(path string, data []byte) error {
+func writeFile(path string, data []byte) error { return writeFileWith(nil, path, data) }
+
+func writeFileWith(fault faultFn, path string, data []byte) error {
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err := writeSynced(fault, tmp, data); err != nil {
+		return err
+	}
+	if err := fault.hit("rename", path); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return fault.dirSync(filepath.Dir(path))
+}
+
+// writeSynced creates path with data and syncs it.
+func writeSynced(fault faultFn, path string, data []byte) error {
+	if err := fault.hit("write", path); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -272,17 +291,49 @@ func writeFile(path string, data []byte) error {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := fault.fileSync(f); err != nil {
 		f.Close()
 		return err
 	}
-	if err := f.Close(); err != nil {
+	return f.Close()
+}
+
+// faultFn, when set (tests only), is told of each file operation before it
+// runs and may fail it.
+type faultFn func(op, path string) error
+
+func (f faultFn) hit(op, path string) error {
+	if f == nil {
+		return nil
+	}
+	return f(op, path)
+}
+
+// syncFile and syncDirFn make the package's only fsyncs, called only
+// through fileSync and dirSync. Tests replace them with recorders that call
+// the originals, so a test sees the syncs that ran, not only the hook
+// (SR3-8-f2).
+var (
+	syncFile  = (*os.File).Sync
+	syncDirFn = syncDir
+)
+
+// fileSync runs the hook, then syncs file. Every durable file sync goes
+// through here.
+func (f faultFn) fileSync(file *os.File) error {
+	if err := f.hit("sync", file.Name()); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	return syncFile(file)
+}
+
+// dirSync runs the hook, then syncs dir. Every durable directory sync goes
+// through here.
+func (f faultFn) dirSync(dir string) error {
+	if err := f.hit("syncdir", dir); err != nil {
 		return err
 	}
-	return syncDir(filepath.Dir(path))
+	return syncDirFn(dir)
 }
 
 func readJSON(path string, v any) error {
