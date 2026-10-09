@@ -96,6 +96,7 @@ type rig struct {
 	ops     map[string]sockets.Handler
 	follows []string
 	asks    []string
+	adopted []string
 }
 
 func newRig(t *testing.T) *rig {
@@ -121,6 +122,13 @@ func newRig(t *testing.T) *rig {
 				return "", errors.New("grants: /var/lib/x")
 			}
 			return "Asked.", nil
+		},
+		AdoptSIM: func(tag string) error {
+			if tag != simTag {
+				return ErrStaleSIM
+			}
+			r.adopted = append(r.adopted, tag)
+			return nil
 		}})
 	r.ops = r.srv.Ops()
 	return r
@@ -186,6 +194,7 @@ func tokenOps(tok string) map[string]any {
 		localapi.OpFollow:     localapi.Follow{Token: tok, Name: "Acme", Digest: digest},
 		localapi.OpPaused:     localapi.Auth{Token: tok},
 		localapi.OpAskResume:  localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
+		localapi.OpSIM:        localapi.AdoptSIM{Token: tok, SIM: simTag, Code: good},
 	}
 }
 
@@ -215,8 +224,8 @@ func TestEveryOpButTheOpenOnesNeedsAToken(t *testing.T) {
 			t.Errorf("%s with no args: %v", op, err)
 		}
 	}
-	if len(r.own.answers) != 0 || len(r.follows) != 0 {
-		t.Fatalf("reached the channel: %v %v", r.own.answers, r.follows)
+	if len(r.own.answers) != 0 || len(r.follows) != 0 || len(r.adopted) != 0 {
+		t.Fatalf("reached the channel: %v %v %v", r.own.answers, r.follows, r.adopted)
 	}
 	for op := range open {
 		var args any = struct{}{}
