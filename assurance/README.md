@@ -108,7 +108,9 @@ over `path NUL sha256(file) LF` for every file in sorted path order.
 1. Validate the seed (any failure is `invalid seed: …` and fails the run): defect
    and fix only in candidate namespaces; the test fails on the defect and holds on
    the fix; ≥ 2 padding clauses; each held variant fails on the defect and holds
-   on the fix, and at least one fails the gamed fix (g).
+   on the fix, and at least one fails the gamed fix (g); every held clause the
+   test does not share whole has a field (`path`, `pointer` or `value`) the test
+   lacks, so the field audit in step 6 can tell it from the test.
 2. Build `change.Pipeline` with the defective tree as its initial tree, attach a
    journal, add the base security cases.
 3. `loops.Guard.Report` the finding (`CheckSeeded`, rule = `test.json`): the target
@@ -119,17 +121,21 @@ over `path NUL sha256(file) LF` for every file in sorted path order.
 5. Eight passes: the scripted fixer returns (a)–(g) of P3-4b-1 §6, built from the
    reference fix, the visible test and the target, then the reference fix. Each
    bad one must be rejected for its class's exact reason; the reference fix must
-   be adopted and recorded as the finding's fix. The suite may never shrink.
+   be adopted, and the Guard's evidence must hold exactly one record for the
+   finding, with the fix adopted. The suite may never shrink.
 6. Fix-input audit: the fixer sits behind an adapter that records every byte of
    every `Finding` it hands over. A held-back clause the visible test does not
-   share, as canonical JSON, or any of its `path`, `pointer` or `value` (canonical
+   share, as any JSON object in the record that decodes to it (whatever its
+   whitespace or key order), or any of its `path`, `pointer` or `value` (canonical
    JSON, and a string's bare text) that the visible test lacks, fails the run.
 
 **Controls, every invocation.** `invalid-seed` reruns the first seed with its held
 variant replaced by the test's first (padding) clause and must be refused as an
-invalid seed; `leaking-adapter` reruns a valid seed with the adapter appending the
-held files' bytes to `Detail` and must fail the audit. A missed control fails the
-invocation, as in `canary_controls.py`.
+invalid seed; `leaking-adapter` reruns every valid seed with the adapter appending
+its held files' bytes to `Detail`, and each must fail the audit. A missed control
+fails the invocation, as in `canary_controls.py`. `run.py --go-test` runs the
+harness's own unit tests (`harness_test.go`); `tests/test_loop2_harness.py` runs
+them in CI.
 
 ### Assumptions (P3-4b-2)
 
@@ -142,8 +148,9 @@ invocation, as in `canary_controls.py`.
 | H-1 | The pipeline's evaluator answers tree rules only, as `replay.Evaluator`'s first step does; every case in the run is a tree rule. It also fails the run if any evaluated tree holds an `assurance/` or `loop2-seeds` path. | CHG-2 | If a seed needs a non-tree probe, the harness must wire the replay evaluator. |
 | H-2 | The defect is installed as the pipeline's initial tree: the owner-equivalent path, outside any candidate. | A11 | If the owner path gains checks (e.g. an intent per install), apply the defect through that intent instead. |
 | H-3 | The journal policy approves what the pipeline sends to the owner (`ErrNeedsOwner`), standing in for the owner; every other check still runs. Rejections come from `Propose`, before the journal. | CHG-1, CHG-2 | If a class is ever rejected only by the owner, the harness must model the owner's refusal. |
-| H-4 | The audit matches tokens in the recorded bytes: JSON forms by substring, bare scalars only where no letter, digit, `.`, `-` or `+` touches them. It catches verbatim and canonical leaks, not paraphrase or encoding. | CHG-2 | A model-backed fixer (P3-4b-5) needs the audit on its prompt bytes, with the same rules. |
+| H-4 | The audit matches tokens in the recorded bytes: whole clauses as any JSON object that decodes to one, fields' JSON forms by substring, bare scalars only where no letter, digit, `.`, `-` or `+` touches them. It catches verbatim, canonical and re-laid-out JSON leaks, not paraphrase or encoding. | CHG-2 | A model-backed fixer (P3-4b-5) needs the audit on its prompt bytes, with the same rules. |
 | H-5 | Each pass asks the fixer once (`fixPending`), so eight passes give eight proposals; a pass that proposes other than one candidate fails the run. | LOOP-9 | If Loop 2 batches or retries within a pass, count proposals per finding instead. |
+| H-6 | A held clause whose every field the visible test has, in another combination, is refused at validation (P3-4b-2b): a prose leak of such a clause could not be told from the visible test field by field. No committed seed has one. | CHG-2 | If a property can only be held back that way, the audit must match field combinations, and P3-4b-5's prose audit with it. |
 
 ## Known limits
 
