@@ -273,6 +273,9 @@ type Verified struct {
 	// security fix is among those it supersedes (Result.SecurityFix).
 	coversFix bool
 	security  bool // set only by WithAttestations
+	// attested: WithAttestations counted an independent pass, so the
+	// release's admission rested on the attestor policy (SR3-6f-4).
+	attested bool
 	// The store that checked it, and the root and targets versions it
 	// trusted then: Stage refuses it once either moved (L3 on #133).
 	storeDir       string
@@ -356,13 +359,15 @@ func (v *Verified) policyCurrent() error {
 }
 
 // WithAttestations returns a copy whose Security reflects
-// SecurityAutoStage(atts, own). An unsealed v gives nil.
+// SecurityAutoStage(atts, own), and which Stage binds to the attestor
+// policy when any independent pass counted. An unsealed v gives nil.
 func (v *Verified) WithAttestations(atts [][]byte, own ed25519.PublicKey) *Verified {
 	if !v.ok() {
 		return nil
 	}
 	c := *v
 	c.security = v.SecurityAutoStage(atts, own) == nil
+	c.attested = v.IndependentPasses(atts, own) > 0
 	return &c
 }
 
@@ -1073,7 +1078,8 @@ func (s *Store) Stage(v *Verified) error {
 	}
 	// The commit point for attestation authority: under the lock that
 	// NoteAttestors takes, so a narrowing it returned from is seen here.
-	if v.security {
+	// An ordinary release admitted on passes is bound too (SR3-6f-4).
+	if v.security || v.attested {
 		if err := v.policyCurrent(); err != nil {
 			return err
 		}
