@@ -16,6 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/mail"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -36,6 +37,15 @@ type mailbox interface {
 	Main() (addr, account string)
 }
 
+// mailOn reports whether a mail account is connected.
+func (e *evidence) mailOn() bool {
+	if e.mail == nil {
+		return false
+	}
+	addr, _ := e.mail.Main()
+	return addr != ""
+}
+
 // evidenceGate is what the router and the setting use of the gate.
 type evidenceGate interface {
 	Evidence() (address, account string)
@@ -52,13 +62,17 @@ type evidence struct {
 	// notify texts the owner an agent reply (owner.Channel.Notify, which
 	// adds the prefix and runs CH-19's filter).
 	notify func(string) error
-	// mail is the connected mail account; nil while none is, as in this
-	// build: no destination can be set and every reply goes by text.
+	// mail is the mail account (lateMail): with none connected (nil, or
+	// no main address) no destination can be set and every reply goes by
+	// text.
 	mail  mailbox
 	kept  *keptReplies
 	now   func() time.Time
 	sleep func(time.Duration)
 	logf  func(string, ...any)
+	// page says agentosd serves the box's Wi-Fi page (-localui-uid), where
+	// setting a destination is confirmed (CH-20); the gate's LocalUI.
+	page bool
 
 	q chan evidenceJob
 
@@ -91,7 +105,10 @@ const (
 	evidenceNone     = "Private replies already come by text."
 	evidenceStarting = "I'm still starting. Try again in a minute."
 	evidenceFailed   = "I couldn't save that setting. Try again later."
-	evidenceNoPage   = "Not changed: turning this on needs my Wi-Fi page, which this build does not have yet."
+	evidenceNoPage   = "Not changed: turning this on needs my Wi-Fi page, which this box isn't serving. Private replies still come by text."
+	// evidenceNoPageSet is the same refusal while replies already go to
+	// an address (%s, masked).
+	evidenceNoPageSet = "Not changed: this needs my Wi-Fi page, which this box isn't serving. Private replies still go to %s."
 	// offNotice goes to the old destination when it is cleared by text
 	// (security C3 on #148, its wording).
 	offNotice = "Emailing private replies was turned off by text at %s. If that wasn't you, send EMAIL REPLIES ON, then confirm on my Wi-Fi page."
@@ -118,17 +135,11 @@ const (
 // delivery that did not succeed (UX U2): bounded, then the reply is kept.
 var deliverRetries = []time.Duration{10 * time.Second, time.Minute}
 
-// The mail adapter's delivery operation and executor (mail.OpDeliver,
-// mail.Tool): agentosd does not link the adapter (ARC-2).
-const (
-	opDeliver    = "mail.deliver"
-	mailExecutor = "mail"
-)
-
 // newEvidence keeps undelivered replies at keptPath.
-func newEvidence(keptPath string, logf func(string, ...any)) *evidence {
+// page says the box's Wi-Fi page is served.
+func newEvidence(keptPath string, page bool, logf func(string, ...any)) *evidence {
 	return &evidence{kept: &keptReplies{store: change.FileStore{Path: keptPath}, now: time.Now, logf: logf},
-		now: time.Now, sleep: time.Sleep, logf: logf}
+		now: time.Now, sleep: time.Sleep, logf: logf, page: page}
 }
 
 func (e *evidence) g() evidenceGate {
@@ -165,7 +176,7 @@ func (e *evidence) run(ctx context.Context) {
 func (e *evidence) reply(machine string, private bool, text, summary string) {
 	addr, acct := "", ""
 	g := e.g()
-	if g != nil && e.mail != nil {
+	if g != nil && e.mailOn() {
 		addr, acct = g.Evidence()
 	}
 	if !private || addr == "" {
@@ -242,8 +253,8 @@ func (e *evidence) deliverOnce(g evidenceGate, addr, acct, body, from string) er
 	id := "evidence/" + randHex(8)
 	ctx, cancel := context.WithTimeout(context.Background(), deliverTimeout)
 	defer cancel()
-	st, err := g.Submit(journal.Intent{ID: id, Origin: grants.OriginEvidence, Account: acct, Action: opDeliver,
-		Params: map[string]any{grants.ParamBody: body, grants.ParamFrom: from}, Recipients: []string{addr}, Executor: mailExecutor})
+	st, err := g.Submit(journal.Intent{ID: id, Origin: grants.OriginEvidence, Account: acct, Action: mail.OpDeliver,
+		Params: map[string]any{grants.ParamBody: body, grants.ParamFrom: from}, Recipients: []string{addr}, Executor: mail.Tool})
 	if err == nil && st.State == journal.Pending {
 		st, err = g.Authorize(ctx, id)
 	}
@@ -396,7 +407,7 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str
 	if !unlocked {
 		return "", false
 	}
-	if e.mail == nil {
+	if !e.mailOn() {
 		return evidenceNotYet, true
 	}
 	g := e.g()
@@ -406,19 +417,29 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str
 	if !on {
 		return e.off(ctx, g), true
 	}
-	main, mainAcct := e.mail.Main()
-	acct := mainAcct
+	main, acct := e.mail.Main()
+	owned := true
 	if addr == "" {
 		addr = main
-	} else {
-		var ok bool
-		if acct, ok = e.mail.Owns(addr); !ok && alias {
-			// "Email replies to bob@corp.example" is a task for the
-			// agent, not this setting (L3 SHOULD 4 on #148).
-			return "", false
-		} else if !ok {
-			return "Not changed: I can email replies only to your mail account's own address, " + maskAddress(main) + ". Send EMAIL REPLIES ON to use it.", true
+	} else if acct, owned = e.mail.Owns(addr); !owned && alias {
+		// "Email replies to bob@corp.example" is a task for the agent,
+		// not this setting (L3 SHOULD 4 on #148).
+		return "", false
+	}
+	if !e.page {
+		// Known here, not matched in the gate's reason: the journal
+		// redacts reasons, so a matcher on them never fired (P2-2w d).
+		// After the agent's case (UX B1 on #322), before the address
+		// step, which would then fail here (L3 F2 on #322). Set earlier,
+		// replies still go by email: Attach replays it without the page
+		// (L3 F1 on #322).
+		if cur, _ := g.Evidence(); cur != "" {
+			return strings.Replace(evidenceNoPageSet, "%s", maskAddress(cur), 1), true
 		}
+		return evidenceNoPage, true
+	}
+	if !owned {
+		return "Not changed: I can email replies only to your mail account's own address, " + maskAddress(main) + ". Send EMAIL REPLIES ON to use it.", true
 	}
 	id := "owner/evidence/" + randHex(6)
 	st, err := g.Submit(grants.EvidenceIntent(id, grants.OriginOwner, addr, acct))
@@ -429,10 +450,8 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str
 	case err != nil:
 		e.logf("evidence setting: %v", err)
 		return evidenceFailed, true
-	case st.State == journal.Denied && strings.Contains(st.Permission.Reason, "local page"):
-		// Gate reasons are not texted verbatim (L3 SHOULD 3 on #148).
-		return evidenceNoPage, true
 	case st.State == journal.Denied:
+		// Gate reasons are not texted verbatim (L3 SHOULD 3 on #148).
 		e.logf("evidence setting refused: %s", st.Permission.Reason)
 		return evidenceFailed, true
 	}

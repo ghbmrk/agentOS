@@ -29,6 +29,7 @@ package route
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
@@ -147,6 +149,16 @@ type Config struct {
 	// credential (401), at most once per provider a day, so the owner can
 	// be texted once; the call itself fails over silently.
 	CredentialRejected func(provider string)
+	// Withdrawn reports whether a release has withdrawn provider's route
+	// (CRED-5). A withdrawn route is skipped even where granted, and the
+	// call goes on to the next granted route (CAP-9). Nil withdraws none.
+	Withdrawn func(provider string) bool
+	// RouteWithdrawn is told once per withdrawal, on the first call that
+	// skips a withdrawn route it could otherwise have used, with the route
+	// that served that call instead ("" if none did). It feeds the one
+	// STATUS and digest line CRED-5 gives the owner; the release supplies
+	// why. A route seen not withdrawn again is told anew if withdrawn later.
+	RouteWithdrawn func(provider, instead string)
 	// Cooldown is how long an exhausted route is skipped when the provider
 	// gives no Retry-After; zero means DefaultCooldown.
 	Cooldown time.Duration
@@ -177,6 +189,7 @@ type Router struct {
 	rule  Rule
 	until map[string]time.Time // route -> exhausted until
 	told  map[string]time.Time // provider -> last CredentialRejected
+	gone  map[string]bool      // provider -> RouteWithdrawn told
 	stats map[string]*Stats
 }
 
@@ -185,7 +198,7 @@ func New(cfg Config) (*Router, error) {
 	if cfg.Granted == nil || cfg.Upstream == nil || cfg.Audit == nil {
 		return nil, errors.New("route: Granted, Upstream, and Audit are required")
 	}
-	r := &Router{cfg: cfg, providers: map[string]Provider{}, until: map[string]time.Time{}, told: map[string]time.Time{}, stats: map[string]*Stats{}}
+	r := &Router{cfg: cfg, providers: map[string]Provider{}, until: map[string]time.Time{}, told: map[string]time.Time{}, gone: map[string]bool{}, stats: map[string]*Stats{}}
 	for _, p := range cfg.Providers {
 		if _, dup := r.providers[p.Name()]; dup {
 			return nil, fmt.Errorf("route: provider %s declared twice", p.Name())
@@ -350,6 +363,69 @@ func WithUsage(ctx context.Context, f func(provider string, u Usage)) context.Co
 	return context.WithValue(ctx, usageKey{}, f)
 }
 
+type attemptKey struct{}
+
+// WithAttempt returns ctx carrying f, which the router asks before each
+// attempt after the first on ctx whether the call may spend one more
+// (SR3-7-f1b): f holds the worst charge of another attempt or refuses. On
+// a refusal the router stops failing over and answers with the last
+// provider status. Without f the router fails closed: it sends no
+// attempt past the first; every metered path installs one (Routed,
+// agentos-egress).
+func WithAttempt(ctx context.Context, f func() bool) context.Context {
+	return context.WithValue(ctx, attemptKey{}, f)
+}
+
+// report hands u to the WithUsage hook on ctx, if any.
+func report(ctx context.Context, provider string, u Usage) {
+	if f, ok := ctx.Value(usageKey{}).(func(string, Usage)); ok {
+		f(provider, u)
+	}
+}
+
+// failedAttempt is a, which failed over, as the meter charges it
+// (SR3-7-f1a): a provider that rejected the request at admission (401,
+// 429) is charged its input estimate; any other failure may have
+// generated output, so is charged the call's full output reservation.
+// Usage the provider reported in its error body, and output a broken
+// stream produced, count too.
+func failedAttempt(provider string, a *attempt) meter.Attempt {
+	f := meter.Attempt{Provider: provider, Status: a.status}
+	f.Full = a.status != http.StatusUnauthorized && a.status != http.StatusTooManyRequests
+	u := errorUsage(a.body)
+	if a.usage != nil {
+		u.OutputChars = a.usage.OutputChars
+	}
+	f.Reported, f.Input, f.Output, f.CacheRead, f.CacheWrite, f.OutputChars = u.Reported, u.Input, u.Output, u.CacheRead, u.CacheWrite, u.OutputChars
+	return f
+}
+
+// errorUsage is the usage a provider's error body reports at its top
+// level, if any, in either provider's shape.
+func errorUsage(body []byte) Usage {
+	var e struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if json.Unmarshal(body, &e) != nil || len(e.Usage) == 0 {
+		return Usage{}
+	}
+	var probe struct {
+		Completion *int64 `json:"completion_tokens"`
+	}
+	if json.Unmarshal(e.Usage, &probe) == nil && probe.Completion != nil {
+		var u oaUsage
+		if json.Unmarshal(e.Usage, &u) == nil {
+			return u.usage()
+		}
+		return Usage{}
+	}
+	var u aUsage
+	if json.Unmarshal(e.Usage, &u) == nil {
+		return u.usage()
+	}
+	return Usage{}
+}
+
 // paths the router serves: the OpenAI base URL at the root, or under the
 // openai adapter's name, which is where a guest configured for the raw
 // proxy already points.
@@ -435,6 +511,12 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 	}
 	d.Class = chat.Model
 	chat = clamp(chat, r.cfg.MaxOutputTokens)
+	// Several choices could each run to the limit, past what the meter
+	// reserved (OP-8): every provider gets one, whatever reached here.
+	if chat.N != nil && *chat.N != 1 {
+		fail(http.StatusBadRequest, "invalid_request_error", "", "request not accepted: only one choice (n=1) per model call")
+		return
+	}
 	r.mu.Lock()
 	routes := append([]Route(nil), r.rule[chat.Model]...)
 	r.mu.Unlock()
@@ -446,14 +528,33 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 
 	var (
 		eligible, exhausted int
-		soonest             time.Time // earliest end of a cooldown met
-		last                *attempt  // the last failover, if any
+		soonest             time.Time       // earliest end of a cooldown met
+		failed              []meter.Attempt // attempts that failed over, charged (SR3-7-f1a)
+		bounded             bool            // the meter refused another attempt (SR3-7-f1b)
+		last                *attempt        // the last failover, if any
 		unsupportedWhy      string
 	)
 	for _, rt := range routes {
 		p := r.providers[rt.Provider]
 		if !r.cfg.Granted(machine, rt.Provider) || (private && !r.cfg.PrivateOK[rt.Provider]) {
 			continue
+		}
+		if r.cfg.Withdrawn != nil {
+			if r.cfg.Withdrawn(rt.Provider) {
+				if r.withdrawn(rt.Provider) {
+					defer func(p string) {
+						instead := ""
+						if d.Outcome == Served {
+							instead = d.Route
+						}
+						r.cfg.RouteWithdrawn(p, instead)
+					}(rt.Provider)
+				}
+				continue
+			}
+			r.mu.Lock()
+			delete(r.gone, rt.Provider)
+			r.mu.Unlock()
 		}
 		eligible++
 		key := rt.String()
@@ -472,6 +573,14 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 			unsupportedWhy = err.Error()
 			continue
 		}
+		if len(failed) > 0 {
+			// Bound before spending (SR3-7-f1b): another attempt is sent
+			// only if the call can be charged for it.
+			if f, ok := req.Context().Value(attemptKey{}).(func() bool); !ok || !f() {
+				bounded = true
+				break
+			}
+		}
 		d.Route = key
 		a := r.try(req.Context(), c.upstream, w, p, key, chat, out)
 		switch {
@@ -481,6 +590,9 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 			d.Outcome, d.Status, d.Reason = Denied, a.status, "egress denied"
 			r.audit(c, d)
 			r.writeError(w, a.status, a.header, nil, a.body)
+			if len(failed) > 0 {
+				report(req.Context(), "", Usage{Failed: failed})
+			}
 			return
 		case a.failover:
 			tell := false
@@ -501,18 +613,30 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 			d.Outcome, d.Status, d.Reason = Failover, a.status, "route exhausted or unavailable"
 			r.audit(c, d)
 			exhausted++
+			failed = append(failed, failedAttempt(rt.Provider, a))
 			last = a
 			last.provider = p
 			continue
 		}
 		d.Outcome, d.Status, d.Usage = Served, a.status, a.usage
-		r.audit(c, d)
-		if f, ok := req.Context().Value(usageKey{}).(func(string, Usage)); ok && a.usage != nil {
-			f(rt.Provider, *a.usage)
+		switch {
+		case a.usage != nil:
+			a.usage.Failed = failed
+			report(req.Context(), rt.Provider, *a.usage)
+		case len(failed) > 0:
+			// The provider's own error, which the meter charges by its
+			// page as today, after the attempts that failed over.
+			report(req.Context(), "", Usage{Failed: failed})
 		}
+		r.audit(c, d)
 		return
 	}
 	d.Route = ""
+	if len(failed) > 0 {
+		// No route served the call: the guest's answer is the router's
+		// copy of the last failure, so only the attempts are charged.
+		report(req.Context(), "", Usage{Failed: failed, Unserved: true})
+	}
 	if !soonest.IsZero() && (last == nil || last.status == http.StatusTooManyRequests) {
 		if s := int64(soonest.Sub(r.cfg.Now())/time.Second) + 1; s > 0 {
 			w.Header().Set("Retry-After", strconv.FormatInt(s, 10))
@@ -523,6 +647,9 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 		fail(http.StatusForbidden, "permission_error", "no_route", "no route for this class is granted and allowed for this machine's data label")
 	case exhausted > 0 && last != nil:
 		d.Outcome, d.Status, d.Reason = Denied, last.status, "every permitted route is exhausted or unavailable"
+		if bounded {
+			d.Reason = "the call's meter cannot cover another attempt"
+		}
 		r.audit(c, d)
 		r.writeError(w, last.status, nil, last.provider, last.body)
 	case exhausted > 0:
@@ -530,6 +657,21 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 	default:
 		fail(http.StatusBadRequest, "invalid_request_error", "unsupported", fmt.Sprintf("no permitted route can serve this request: %q", unsupportedWhy))
 	}
+}
+
+// withdrawn reports whether RouteWithdrawn is still to be told of
+// provider's withdrawal, and marks it told.
+func (r *Router) withdrawn(provider string) bool {
+	if r.cfg.RouteWithdrawn == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.gone[provider] {
+		return false
+	}
+	r.gone[provider] = true
+	return true
 }
 
 // attempt is the result of sending a call to one route.
@@ -615,6 +757,7 @@ func (r *Router) try(ctx context.Context, upstream http.Handler, w http.Response
 				a.status = 529
 			}
 			a.body = apiError("provider stream failed", "server_error", "")
+			a.usage = &Usage{OutputChars: u.OutputChars}
 			return fail()
 		}
 		// A stream that breaks after it started cannot be retried; the

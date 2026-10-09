@@ -86,8 +86,11 @@ func (p *Pipeline) what(a *Adoption) string {
 	switch {
 	case has[ClassGuestImage] || has[ClassHostImage]:
 		v := safe(strings.TrimPrefix(a.Origin, "update:"))
-		if a.Staged {
-			return "Staged update " + v + "; it starts at the next restart"
+		switch {
+		case a.Staged && a.Reverted != "":
+			return "Staged update " + v // undone before it was installed
+		case a.Staged:
+			return "Staged update " + v + "; I will install it when I am free" // C27
 		}
 		return "Installed update " + v
 	case has[ClassConfig]:
@@ -186,6 +189,12 @@ func (p *Pipeline) Digest() []string {
 	defer p.mu.Unlock()
 	var out []string
 	for _, a := range p.st.Adoptions {
+		if a.Reverted == WhyDropped {
+			// Never installed, so nothing changed: the applier's own
+			// line, or the next release's, says what happens (C27).
+			a.Listed, a.RevertSeen = true, true
+			continue
+		}
 		if !a.Listed {
 			line := p.what(a) + "."
 			line += testedText(a.Score)
@@ -197,6 +206,8 @@ func (p *Pipeline) Digest() []string {
 			}
 			switch {
 			case a.Reverted != "":
+			case a.Staged: // UNDO is offered once it has started (SR3-4)
+				line += fmt.Sprintf(" MORE %s", a.Short)
 			case p.undoableLocked(a):
 				line += fmt.Sprintf(" UNDO %s / MORE %s", a.Short, a.Short)
 			default:
@@ -210,8 +221,8 @@ func (p *Pipeline) Digest() []string {
 				WhyOwner:      " as you asked.",
 				WhyRegression: ": it did worse on newer tasks.",
 				WhySecurity:   ": it failed a security check.",
-				WhyFallback:   ": the update did not start cleanly, so the box kept the previous one.",
-				WhyForgotten:  ": it was learned from a task you asked the box to forget.",
+				WhyFallback:   ": the update did not start cleanly, so I kept the previous one.",
+				WhyForgotten:  ": it was learned from a task you asked me to forget.",
 			}[a.Reverted]
 			out = append(out, "Undid "+a.Short+why)
 			a.RevertSeen = true
@@ -221,11 +232,21 @@ func (p *Pipeline) Digest() []string {
 	for _, d := range p.st.Declined {
 		if !seen[d.Version] {
 			seen[d.Version] = true
-			out = append(out, "You declined security update "+safe(d.Version)+"; the box is still on the previous version until a newer update is installed.")
+			out = append(out, "You declined security update "+safe(d.Version)+"; I am still on the previous version until a newer update is installed.")
 		}
 	}
 	for _, a := range p.st.Adoptions {
-		if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" {
+		if a.Concern == WhySecurity && !a.ConcernSeen && a.Reverted == "" && !a.protected() {
+			// Recheck's revert was refused while it was being installed
+			// (SR3-4f-3b): the applier does not start it, or it may start
+			// first and the pipeline undoes it once it settles (B5).
+			line := " failed a security check while it was being installed; I will not start it. Nothing is needed from you."
+			if a.ConcernStarts {
+				line = " failed a security check while it was being installed; it may start before I can undo it. Nothing is needed from you."
+			}
+			out = append(out, "Update "+safe(strings.TrimPrefix(a.Origin, "update:"))+line)
+			a.ConcernSeen = true
+		} else if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" {
 			s := a.ConcernScore
 			line := p.what(&Adoption{Classes: a.Classes, Origin: a.Origin}) + " now"
 			if a.Concern == WhySecurity {
@@ -236,7 +257,7 @@ func (p *Pipeline) Digest() []string {
 			if p.undoableLocked(a) {
 				line += ". Reply UNDO " + a.Short + " to go back to the previous version, or nothing to keep it."
 			} else {
-				line += ". It is the only version on the box, so it stays until a newer update is installed."
+				line += ". It is the only version I have, so it stays until a newer update is installed."
 			}
 			out = append(out, line)
 			a.ConcernSeen = true
@@ -249,7 +270,7 @@ func (p *Pipeline) Digest() []string {
 		}
 	}
 	if p.st.Outages >= OutageAlert && !p.st.OutageSeen {
-		out = append(out, fmt.Sprintf("The box could not re-test its learned changes the last %d times it tried; they stay as they are until it can.", p.st.Outages))
+		out = append(out, fmt.Sprintf("I could not re-test my learned changes the last %d times I tried; they stay as they are until I can.", p.st.Outages))
 		p.st.OutageSeen = true
 	}
 	if len(out) > 0 {
@@ -433,7 +454,7 @@ func (p *Pipeline) Line(in journal.Intent) (owner.Item, error) {
 	tested := ""
 	switch {
 	case s.HeldOut == 0 && s.NotEvaluated > 0:
-		tested = "not testable on this box"
+		tested = "not testable here"
 	case s.HeldOut == 0:
 		tested = "not tested on past tasks yet"
 	case s.Regressions > 0:
@@ -495,11 +516,11 @@ func (p *Pipeline) Line(in journal.Intent) (owner.Item, error) {
 func testedText(s Score) string {
 	switch {
 	case s.HeldOut == 0 && s.NotEvaluated > 0:
-		return " Not tested on this box."
+		return " Not tested here."
 	case s.HeldOut == 0:
 		return " No past tasks to test it on yet."
 	case s.NotEvaluated > 0:
-		return fmt.Sprintf(" Tested on %d of your past tasks, none worse; %d could not be tested on this box.", s.HeldOut, s.NotEvaluated)
+		return fmt.Sprintf(" Tested on %d of your past tasks, none worse; %d could not be tested here.", s.HeldOut, s.NotEvaluated)
 	}
 	return fmt.Sprintf(" Tested on %d of your past tasks, none worse.", s.HeldOut)
 }

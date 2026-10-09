@@ -584,7 +584,13 @@ func sameTree(t *testing.T, a, b string, keepOwners bool) {
 		return nil
 	}))
 	n := 0
-	filepath.WalkDir(b, func(string, fs.DirEntry, error) error { n++; return nil })
+	filepath.WalkDir(b, func(p string, _ fs.DirEntry, _ error) error {
+		// The restore's own forget log copy or pending marker (forgetlog.go).
+		if !strings.HasPrefix(filepath.Base(p), filepath.Base(lay.ForgetLog)) {
+			n++
+		}
+		return nil
+	})
 	if n != seen {
 		t.Errorf("restored tree has %d entries, original %d", n, seen)
 	}

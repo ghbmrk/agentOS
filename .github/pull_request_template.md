@@ -1,6 +1,12 @@
 ## Package
 <!-- BOARD.md ID and one line on what this does -->
 
+## Risk tier
+<!-- A, B or C from `python3 tools/risk_tier.py --git origin/main HEAD` (docs/OPERATING.md §3); CI also prints it in the step summary -->
+
+## Findings
+<!-- Every finding raised on this package, one line each: blocker (fixed here) / release (new BOARD row ID) / later (added to LATER.md). "None" if none. -->
+
 ## Before / After
 Before:
 
@@ -18,4 +24,5 @@ After:
 <!-- Components reused; for anything new, why reuse didn't fit -->
 
 ## Budget
-<!-- Estimated model usage for this package vs its cap -->
+<!-- Brief's usage estimate; usage at the checkpoint and at ready; if over the estimate, why work continued (CLAUDE.md: the estimate is a checkpoint, not a ceiling) -->
+Builder model: <!-- sonnet-5.5 | strongest -->

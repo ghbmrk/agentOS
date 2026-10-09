@@ -1,15 +1,13 @@
 package workers
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"runtime/debug"
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
@@ -21,6 +19,10 @@ import (
 type said struct{ s string }
 
 func (e said) Error() string { return e.s }
+
+// GuestText lets said through the guest plane's filter (SR2-3g): the
+// workers family's entry on guesterr's allowlist.
+func (e said) GuestText() string { return e.s }
 
 // sayArg is a value say may put in a guest's error text. Only these types
 // implement it, and TestWorkerErrorsAreBuiltOnlyFromSafeText checks that
@@ -65,21 +67,9 @@ func guestErr(machine, tool string, err error) error {
 }
 
 // logged writes err to the broker's log under a fresh ref and says only
-// the ref.
+// the ref (guesterr.Logged, shared with the guest plane's filter).
 func logged(machine, tool string, err error) said {
-	ref := newRef()
-	log.Printf("workers: %s: %s: ref %s: %v", machine, tool, ref, err)
-	return said{"failed (ref " + ref + "); the broker's log has the detail"}
-}
-
-// newRef is a fresh 8-hex reference, used for nothing but tying a guest's
-// error to its log line.
-func newRef() string {
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return "00000000"
-	}
-	return hex.EncodeToString(b)
+	return said{guesterr.Logged("workers", machine, tool, err)}
 }
 
 // panicked is a recovered tool panic; guestErr answers it as a ref
@@ -114,6 +104,12 @@ func sentinel(err error) (said, bool) {
 		return said{"the worker is busy with another command; retry when it returns"}, true
 	case errors.Is(err, vm.ErrHeld):
 		return errStopped, true
+	case errors.Is(err, vm.ErrExecNotStarted):
+		return said{"the command did not start; retry it"}, true
+	case errors.Is(err, vm.ErrExecNoProgram):
+		return said{"the command did not start: its program was not found or cannot run; check its path and that it is executable, since a retry fails the same way"}, true
+	case errors.Is(err, vm.ErrExecFailed):
+		return said{"the runtime failed after the command started, so it may have run; check what it changed before running it again"}, true
 	case errors.Is(err, vm.ErrPreempted):
 		return said{"preempted, retry: the worker was stopped for higher-priority work; roll it back with worker_rollback, or destroy and recreate it"}, true
 	case errors.Is(err, vm.ErrState):
@@ -129,7 +125,7 @@ func sentinel(err error) (said, bool) {
 	case errors.Is(err, vm.ErrContained):
 		return said{"this agent holds a record the owner deleted; no fork until that is settled"}, true
 	case errors.Is(err, vm.ErrNoExec):
-		return said{"this box cannot run commands in workers"}, true
+		return said{"this host cannot run commands in workers"}, true
 	case errors.Is(err, overlay.ErrDeleteFailed):
 		return said{"the deletion could not finish; try again, or roll back or destroy the worker"}, true
 	case errors.Is(err, overlay.ErrUnsafe):

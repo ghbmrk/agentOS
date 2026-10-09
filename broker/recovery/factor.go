@@ -55,6 +55,11 @@ type Box struct {
 	// trusted PCs must be trusted again.
 	Reencrypt func(owner ...vault.Factor) (dropped int, err error)
 
+	// Counter is this PC's counter store (its TPM), set by the vault
+	// process; storing the recovery key anchors the forget log to it.
+	// nil anchors it at the first forget instead.
+	Counter vault.Counter
+
 	// mu serializes this package's read-modify-write operations on the
 	// vault (re-confirmation, rotation, re-enrollment).
 	mu sync.Mutex
@@ -152,7 +157,11 @@ func storeBackupKey(b *Box, rk RecoveryKey) error {
 	if err != nil {
 		return err
 	}
-	return b.V.Put(BackupKeyName, KindBackupKey, enc)
+	if err := b.V.Put(BackupKeyName, KindBackupKey, enc); err != nil {
+		return err
+	}
+	// The forget log's key comes from the recovery key too (CAP-3).
+	return ensureForgetLog(b.V, rk, b.Counter)
 }
 
 // backupKey returns the public key to seal backups to. It fails closed
