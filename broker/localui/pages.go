@@ -281,7 +281,8 @@ form { margin: .6em 0 1.2em; }
 {{else if eq .Step "codes"}}
 <p class="muted">Paired with your number {{.Paired}}.</p>{{template "restart" false}}
 <h2>3. Add approval codes</h2>
-{{if .CodesEnrolled}}<p>Approval codes are already set up for this box. If you no longer have the code generator, replace it with your recovery key after setup.</p>
+{{if .CodesUnavailable}}
+{{else if .CodesEnrolled}}<p>Approval codes are already set up for this box. If you no longer have the code generator, replace it with your recovery key after setup.</p>
 <form method="post" action="/setup/codes"><input type="hidden" name="enrolled" value="1"><button>Continue</button></form>
 {{else if .CodesShown}}<form method="post" action="/setup/codes"><label>Type the 6-digit code your code generator shows for AgentOS<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Confirm</button></form>
 <form method="post" action="/setup/codes"><input type="hidden" name="new" value="1"><button>Show a new key</button></form>
