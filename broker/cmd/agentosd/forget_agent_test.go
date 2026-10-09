@@ -29,13 +29,16 @@ type fakeWork struct {
 	noCount bool          // the count is not known
 	closed  bool          // recall is not open: Handled is not known
 	slow    time.Duration // Handled answers after this long
+	// recorded: recall holds a take-back as owed, not done, so Handled
+	// is true though nothing was taken back.
+	recorded bool
 }
 
 // Handled answers, then waits slow before returning, so runs that overlap
 // all read the answer before any of them takes back.
 func (w *fakeWork) Handled(since time.Time) (bool, bool) {
 	w.mu.Lock()
-	handled, ok, slow := false, !w.closed, w.slow
+	handled, ok, slow := w.recorded, !w.closed, w.slow
 	for _, b := range w.backs {
 		if b.Equal(since) {
 			handled = true
