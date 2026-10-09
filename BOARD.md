@@ -447,6 +447,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | HOST-1f | [Give the TPM's dictionary-attack settings back as they were](briefs/HOST-1f.md) | P2-4b (tpmseal, boot PIN #42) | merged (de01c80; #188) |
 | CI-SOAK | [Unattended soak workflow](briefs/CI-SOAK.md) | — | merged (8bab3fe; #187) |
 | OSS-10w2 r1 | Follow names: the reserved-name check (`grants.followName`, localui `askFollow`) also refuses look-alikes of "the AgentOS project" (folded as `owner.fold` does for CH-10, or a confusable skeleton), so a named follow never reads as switching back (release, security lens 370-1 on #370; supersedes LATER OSS-10w2 f4) | OSS-10w2 | queued (needs brief) (A) |
+| HOST-1f-r2 | Owned lockout, failed forget: on `giveBack`'s `ErrLockoutOwned` branch a failed `v.Delete` leaves the stale lockout entry, so each unattended start sends it again and fails a lockout authorization on the PC's TPM (comment at `trusted.go:953`: retrying "would only re-arm the TPM's lockout"); keep an "owned" mark outside the vault so later starts retry only the `Delete`, and send the "dropped my copy" text after the `Delete` succeeds (release, `recheck`, Security to confirm; HW-8, A1; UX 1 and Potency 1 on #666, [record](reviews/ux/2026-10-09-pr666.md)) | HOST-1f, #666 | queued (release) (A) |
 
 ## Integration: wiring merged packages into the box
 

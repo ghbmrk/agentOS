@@ -699,8 +699,12 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W5-Dc-r1b l3 | #652 Security 2 (6087278910): `Gate.allowance` in grants uses `-1` from `Allowance` as an in-band "unset"; a future hook returning another negative value silently returns grants to its own count, a second budget; treat any negative value from a set hook as 0 |
 | W5-Dc-r1b l4 | #652 L3 2 (6087271656), Security 3: held-restore mode (`held.go:162`, `held.go:187`) texts the owner through `modemlink` with no pacer, before the owner channel exists; the texts are security class or replies anyway; note it in agentosd ASSUMPTIONS when that file is next touched |
 | W5-Dc-r1b l5 | #652 L3 3 (6087271656): grants reads `allowance(now)` before taking `g.mu`, so a grants flush racing an owner `Post` can go one text over the hour's budget (bounded, nothing lost) |
+| HOST-1f-666 l1 | #666 UX 2: `daForgetFailed` says "security chip limits" where `warnDA` and the `ErrLockoutSet` text say "limit on wrong guesses"; one name per setting, in the next owner-text pass on `trusted.go` (HOST-1f-r1) |
+| HOST-1f-666 l2 | #666 Potency 2: with production `notify` = `log.Print`, `sayErr` logs each failure twice (sentence with error, then sentence alone); harmless until notify reaches the owner channel |
 | W5-Dc-r1b l6 | #652 L3 delta (6087655573): `main()` still passes `attach` its arguments untested (`nil` for `dg` would build and pass); testing `main()` itself is out of scope |
 | SR3-mail-w1 l8 | #654 UX, L3 1, Security 1 (6087870595, 6087872442, 6087873796): `TestNoMailAccountByDefault` counts the `not_connected` frames but does not assert that nothing else crossed the socket (its doc comment says "the socket says nothing more"); compare each connection's full reply after it closes to exactly `{"error":"not_connected"}\n` |
+| HOST-1f-215 l1 | #215 Security 4a later 1 (6090325350), `recheck`: `follow/follow.go:247` appends a `setUnsent` error (an `os` error naming the pending-alert file path) to journal Evidence; establish whether that Evidence reaches the owner (MORE, local UI) and keep the path out if it does (CH-12) |
+| HOST-1f-215 l2 | #215 Security 4a later 2 (6090325350): nothing stops a future `h.say("…" + err.Error())`; a lint or grep check banning `err.Error()` or a formatted error in arguments to `say`/`notify` would. Becomes that check if the same kind of finding appears on a second PR |
 
 ## Reuse candidates
 | ID | Component | Why |
