@@ -385,12 +385,14 @@ func (c *Channel) LocalResume(locks uint64) (string, error) {
 	return "Resumed. Stopped actions may now run." + c.rewindowLocked(c.cfg.Now()), nil
 }
 
-// alert texts the owner a broker template, if a modem is attached.
+// alert texts the owner a broker template, if a modem is attached. It is
+// a security text, never held (CH-15).
 func (c *Channel) alert(text string) error {
 	if c.cfg.Modem == nil {
 		return nil
 	}
-	return c.cfg.Modem.Send(c.cfg.Owner, text)
+	// A broker template, so not through Disclose (CH-19).
+	return c.postTemplate(ClassSecurity, text)
 }
 
 // TOTP is the code-generator code for seed at t (RFC 6238, SHA-1, 30 s, 6
