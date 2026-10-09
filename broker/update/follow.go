@@ -481,7 +481,7 @@ func (s *Store) FollowFork(root []byte, links [][]byte, shipped []byte, approved
 		// An anchor the box cannot read as a root fails closed, never as
 		// "not the project's" (L3 on #667).
 		if _, err := projectRoot(anchor, anchor, nil, o); err != nil {
-			return nil, fmt.Errorf("update: the project's root on this box: %w", err)
+			return nil, fmt.Errorf("update: the project's root I last trusted: %w", err)
 		}
 		// Only the files that could chain to root are walked: one newer
 		// than root, or one that is no root at all, would end the walk
