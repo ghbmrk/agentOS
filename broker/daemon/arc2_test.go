@@ -184,6 +184,7 @@ var stdExceptions = map[string][]string{
 	"sockets":      {"net", "syscall"}, // Unix listeners, SO_PEERCRED, flock
 	"cmd/agentosd": {"syscall"},        // signal numbers for shutdown
 	"journal":      {"syscall"},        // flock on the journal file
+	"loops":        {"syscall"},        // O_NOFOLLOW, O_NONBLOCK for the tamper digest (P3-4b-4c-nofollow)
 }
 
 // Never anywhere in the control path's transitive dependencies.
@@ -202,7 +203,7 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
 	for pkg, rule := range learningPlane {
-		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+		checkImports(t, pkg, rule.allowed, rule.forbid, stdExceptions[pkg])
 	}
 }
 

@@ -113,6 +113,10 @@ var netOK = map[string]allowance{
 	"loop7": {"process-group kill of its fuzz children; their jail's user and empty network namespace; owner and link-count checks",
 		[]string{"syscall.CLONE_NEWNET", "syscall.Credential", "syscall.Kill", "syscall.SIGKILL", "syscall.Stat_t", "syscall.SysProcAttr"}},
 	"probecmd": {"process-group kill of its probe children", []string{"syscall.Kill", "syscall.SIGKILL", "syscall.SysProcAttr"}},
+	// The tamper verdict's digest (P3-4b-4c-nofollow): a file a guest can
+	// swap is opened without following a link or blocking on a FIFO.
+	"loops": {"O_NOFOLLOW and O_NONBLOCK to open a guest-writable file safely; no network client",
+		[]string{"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
 }

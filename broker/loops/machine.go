@@ -392,10 +392,8 @@ func hashFile(ctx context.Context, h io.Writer, path string, walked fs.FileInfo)
 	if beforeDigestOpen != nil {
 		beforeDigestOpen(path)
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
-	if errors.Is(err, syscall.ELOOP) {
-		return errSwapped
-	}
+	// os.OpenFile adds O_CLOEXEC; a link fails with ELOOP.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
