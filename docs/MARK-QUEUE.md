@@ -12,7 +12,7 @@ Questions and actions only Mark can take, one line each, answerable in one word,
 
 | # | Action | Unblocks |
 |---|---|---|
-| A1 | Add a usage reading to LEDGER.md today, then daily (none since 2026-10-04) | pacing, CONV-0, PILOT-S judgement |
+| A1 | Add a usage reading to LEDGER.md when you choose (none since 2026-10-04; no daily cadence) | pacing, CONV-0, PILOT-S judgement |
 | A2 | Hardware for S1: three unmodified PCs and the USB4 SSD, plus hands | S1 (A1) |
 | A3 | Two USB LTE modems and a SIM for S2 | S2 (A1, A3) |
 | A4 | Claude and ChatGPT plan logins for the S8 live run | S8-live (A3, CAP-11) |

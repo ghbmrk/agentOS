@@ -148,6 +148,11 @@ type Config struct {
 	// the vault's redactor (CRED-7 values plus CH-19 patterns) is wired
 	// with the vault unlock (P2-4).
 	Redactor journal.Redactor
+	// Now is the clock the journal stamps records with; nil is time.Now
+	// in UTC, the journal's own default.
+	// An adapter that reads the journal's records against its own clock
+	// is given the same function (SR3-mail-w2 W2-c).
+	Now func() time.Time
 }
 
 // PageSocket is the local UI's socket. The local UI runs as its own user and
@@ -306,7 +311,11 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	if red == nil {
 		red = redactAll
 	}
-	eng, err := journal.Open(store, gate, execs, red)
+	now := cfg.Now
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	eng, err := journal.Open(store, gate, execs, red, journal.WithClock(now))
 	if err != nil {
 		store.Close()
 		return nil, err
