@@ -957,11 +957,11 @@ func (h *tpmHost) giveBack(v *vault.Vault, t transport.TPM, id []byte) {
 				v.Delete(daOriginalName(id))
 			}
 		case err != nil:
-			h.say("couldn't give the TPM's lockout back to this PC yet; I will try again at each restart")
+			h.say(lockoutReleaseFailed)
 			return
 		}
 		if err := v.Delete(name); err != nil {
-			h.say("couldn't remove my copy of the TPM lockout from the vault: " + err.Error())
+			h.sayErr(lockoutForgetFailed, err)
 			return
 		}
 	}
@@ -995,7 +995,7 @@ func (h *tpmHost) restoreDA(v *vault.Vault, t transport.TPM, id []byte) {
 		return
 	}
 	if err := v.Delete(name); err != nil {
-		h.say("couldn't remove my copy of this PC's security chip settings from the vault: " + err.Error())
+		h.sayErr(daForgetFailed, err)
 	}
 }
 
@@ -1012,6 +1012,23 @@ func (h *tpmHost) say(s string) {
 	if h.notify != nil {
 		h.notify(s)
 	}
+}
+
+// The texts for a lockout the chip won't take back yet, and for a vault
+// that can't forget an entry after the lockout or the chip's settings were
+// given back. The next unattended start retries, so the owner has nothing
+// to do (CH-12).
+const (
+	lockoutReleaseFailed = "I couldn't give this PC's security chip lockout back to it yet; I'll try again at each restart. Nothing to do."
+	lockoutForgetFailed  = "I couldn't clear my saved copy of this PC's security chip lockout; I'll try again at each restart. Nothing to do."
+	daForgetFailed       = "I couldn't clear my saved copy of this PC's security chip limits; I'll try again at each restart. Nothing to do."
+)
+
+// sayErr tells the owner a fixed sentence. The error can name a vault
+// path, so it goes to the log and not into the text (CH-12).
+func (h *tpmHost) sayErr(sentence string, err error) {
+	log.Printf("custody: %s: %v", sentence, err)
+	h.say(sentence)
 }
 
 func (h *tpmHost) list() ([]hostInfo, error) {
