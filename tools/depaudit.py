@@ -387,8 +387,10 @@ def _sandbox_missing():
             user = pwd.getpwuid(os.geteuid()).pw_name
         except KeyError:
             user = str(os.geteuid())
-        return ("%s; add one: sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 %s "
-                "(as assurance.yml does; tools/ASSUMPTIONS.md D13)" % (e, user))
+        # No fixed range: one that overlaps another user's would share their ids (D13).
+        return ("%s; add one: sudo usermod --add-subuids START-END --add-subgids START-END %s, with a "
+                "65536-id START-END that overlaps no line in /etc/subuid or /etc/subgid "
+                "(tools/ASSUMPTIONS.md D13)" % (e, user))
     try:
         # The same -e as the run: an strace that cannot name a traced syscall exits
         # nonzero ("invalid system call") instead of skipping it unseen (DEP-4b).

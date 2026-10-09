@@ -604,6 +604,10 @@ class UnavailableTest(unittest.TestCase):
         self.assertIn("no subordinate uid and gid range for uid %d" % os.geteuid(), err)
         self.assertIn("usermod --add-subuids", err)
         self.assertIn("D13", err)
+        # Security 4a on #568 point 1: no fixed range, which can overlap another user's.
+        self.assertNotRegex(err, r"--add-sub[ug]ids \d")
+        self.assertIn("/etc/subuid", err)
+        self.assertIn("/etc/subgid", err)
 
     def test_a_failing_mount_setattr_in_the_sandbox_is_one_line(self):
         # DEP-6c: _inner refuses with the path and errno, before any command, not a traceback.
@@ -616,6 +620,24 @@ class UnavailableTest(unittest.TestCase):
                 self.assertRaises(SystemExit) as cm:
             depaudit._mask_or_refuse([k], set())
         self.assertRegex(str(cm.exception.code), r"^depaudit: sandbox not run, .*EPERM.*on %s" % k)
+
+    def test_the_subordinate_range_remedy_names_no_fixed_range(self):
+        # Security 4a on #568 point 1: a fixed range can overlap another user's (D13); unskipped.
+        with mock.patch.object(depaudit, "_has_mount_setattr", return_value=True), \
+                mock.patch.object(depaudit.shutil, "which", return_value="/bin/x"), \
+                mock.patch.object(depaudit, "_unshare_flags", side_effect=OSError("no range")):
+            why = depaudit._sandbox_missing()
+        self.assertTrue(why.startswith("no range; "), why)
+        self.assertNotRegex(why, r"\d+-\d+")
+        self.assertIn("--add-subuids START-END --add-subgids START-END", why)
+        self.assertIn("overlaps no line in /etc/subuid or /etc/subgid", why)
+        self.assertIn("D13", why)
+
+    def test_inner_refuses_through_mask_or_refuse(self):
+        # L3 on #568 point 2: _inner must not call _mask_host_sockets bare, or the traceback is back.
+        src = inspect.getsource(depaudit._inner)
+        self.assertIn("_mask_or_refuse(", src)
+        self.assertNotIn("_mask_host_sockets(", src)
 
 
 class KeptMountsTest(unittest.TestCase):
@@ -673,6 +695,14 @@ class KeptMountsTest(unittest.TestCase):
         src = inspect.getsource(depaudit.kept_rw_mounts)
         for shared in ("writable_mounts", "_reaches_rw", "_OCTAL", "mountinfo"):
             self.assertNotIn(shared, src)
+
+    def test_the_kept_read_only_control_uses_it(self):
+        # L3 point 1 and Security 4a point 2 on #568: the control reads the second source.
+        src = inspect.getsource(depaudit._control)
+        self.assertIn("kept_rw_mounts(", src)
+        self.assertIn("/proc/self/mounts", src)
+        self.assertNotIn("writable_mounts", src)
+        self.assertNotIn("mountinfo", src)
 
 
 class IdMapTest(unittest.TestCase):
