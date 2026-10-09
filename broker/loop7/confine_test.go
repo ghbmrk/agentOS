@@ -372,18 +372,23 @@ func TestEveryFuzzChildHasNoNewPrivs(t *testing.T) {
 }
 
 // LOOP-7: the flag is per thread. The one loop7 sets it on is locked to
-// the starting goroutine and ends with it, so no other thread of the
-// daemon carries it, and a child the daemon starts afterwards from
-// another goroutine, outside loop7, does not. With the unit's
-// NoNewPrivileges=yes every child carries it and this is moot.
+// the starting goroutine and ends with it, so no thread that runs Go
+// code afterwards carries it, and children the daemon starts afterwards
+// from other goroutines, outside loop7, do not. The process's main
+// thread is the one exception the runtime makes: a locked goroutine that
+// exits there wedges it for good (runtime.mexit), and no goroutine runs
+// on it again, so it starts no child; it is left out of the scan. With
+// the unit's NoNewPrivileges=yes every child carries the flag and this is
+// moot.
 func TestNoNewPrivsStaysOffTheDaemonsOtherThreads(t *testing.T) {
-	if noNewPrivs(t, "/proc/self/status") != "0" {
-		t.Skip("the test process already runs with no_new_privs")
+	if noNewPrivs(t, fmt.Sprintf("/proc/%d/status", os.Getppid())) != "0" {
+		t.Skip("the test process was started with no_new_privs")
 	}
 	s, tg := helperSource(t)
 	for range 5 {
 		childSays(t, s, tg)
 	}
+	main := fmt.Sprintf("/proc/self/task/%d/status", os.Getpid())
 	// A flagged thread may still be exiting: wait for it to go.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -393,7 +398,7 @@ func TestNoNewPrivsStaysOffTheDaemonsOtherThreads(t *testing.T) {
 		}
 		var flagged []string
 		for _, st := range tasks {
-			if noNewPrivs(t, st) == "1" {
+			if st != main && noNewPrivs(t, st) == "1" {
 				flagged = append(flagged, st)
 			}
 		}
@@ -405,18 +410,23 @@ func TestNoNewPrivsStaysOffTheDaemonsOtherThreads(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	out := make(chan string, 1)
-	go func() {
-		b, err := exec.Command(tg.Binary, "-test.run=^TestJailedChildHelper$", "-test.v").CombinedOutput()
-		if err != nil {
-			out <- "error: " + err.Error()
-			return
+	// Children from many goroutines, so they start on many threads.
+	const n = 20
+	out := make(chan string, n)
+	for range n {
+		go func() {
+			b, err := exec.Command(tg.Binary, "-test.run=^TestJailedChildHelper$", "-test.v").CombinedOutput()
+			if err != nil {
+				out <- "error: " + err.Error()
+				return
+			}
+			out <- string(b)
+		}()
+	}
+	for range n {
+		if said := <-out; !strings.Contains(said, "NoNewPrivs: 0") {
+			t.Fatalf("a child started outside loop7 says:\n%s\nwant NoNewPrivs: 0", said)
 		}
-		out <- string(b)
-	}()
-	said := <-out
-	if !strings.Contains(said, "NoNewPrivs: 0") {
-		t.Fatalf("a child started outside loop7 says:\n%s\nwant NoNewPrivs: 0", said)
 	}
 }
 

@@ -957,8 +957,10 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 // creating thread" and asks for runtime.LockOSThread. So the start runs
 // on a goroutine locked to its thread, which sets the flag first, and
 // that goroutine exits still locked: the runtime then ends the thread
-// (runtime.LockOSThread), and the flag never reaches the daemon's other
-// threads or children (TestNoNewPrivsStaysOffTheDaemonsOtherThreads).
+// (runtime.LockOSThread), or, if it is the process's main thread, wedges
+// it for good with no goroutine on it (runtime.mexit), so the flag never
+// reaches a thread that starts another child
+// (TestNoNewPrivsStaysOffTheDaemonsOtherThreads).
 func startNoNewPrivs(cmd *exec.Cmd) error {
 	done := make(chan error, 1)
 	go func() {
