@@ -72,6 +72,11 @@ type Config struct {
 	Targets []Target
 	// FuzzTime bounds one fuzz job. Default 30 s.
 	FuzzTime time.Duration
+	// ReplayTime bounds a whole corpus replay, and the fuzz step's run
+	// past FuzzTime. Default 1 m.
+	ReplayTime time.Duration
+	// InputTime bounds one stored input replayed alone. Default 10 s.
+	InputTime time.Duration
 	// Every is the gap between two LOOP-7 jobs. Default 1 h.
 	Every time.Duration
 	// Release is the directory of release-listed fuzz binaries
@@ -128,6 +133,12 @@ func New(cfg Config) (*Source, error) {
 	}
 	if cfg.FuzzTime <= 0 {
 		cfg.FuzzTime = 30 * time.Second
+	}
+	if cfg.ReplayTime <= 0 {
+		cfg.ReplayTime = time.Minute
+	}
+	if cfg.InputTime <= 0 {
+		cfg.InputTime = 10 * time.Second
 	}
 	if cfg.Every <= 0 {
 		cfg.Every = time.Hour
@@ -316,22 +327,42 @@ func (s *Source) Next(ctx context.Context, modelOK bool) (loops.Job, bool) {
 
 // Fuzz is one round for t: replay its corpus, fuzz it for FuzzTime, and
 // replay again if the fuzzing failed. Each failing corpus input is
-// reported; each open finding for t whose input passes is resolved. It
-// returns the number of failing inputs, and returns soon after ctx ends.
+// reported; each open finding for t whose input passes is resolved. A
+// target whose corpus still fails is not fuzzed: the engine stops at a
+// failing seed. Every child has a deadline, and one that runs past it is
+// a finding, never a held slot (LOOP-1). It returns the number of
+// failures, and returns soon after ctx ends.
 func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 	n, err := s.replay(ctx, t)
-	if err != nil || ctx.Err() != nil {
+	if err != nil || n > 0 || ctx.Err() != nil {
 		return n, err
 	}
-	if out, err := s.run(ctx, t, "-test.run=^$", "-test.fuzz=^"+t.Name+"$",
+	fctx, cancel := context.WithTimeout(ctx, s.cfg.FuzzTime+s.cfg.ReplayTime)
+	out, err := s.run(fctx, t, "-test.run=^$", "-test.fuzz=^"+t.Name+"$",
 		"-test.fuzztime="+s.cfg.FuzzTime.String(), "-test.parallel=1",
-		"-test.fuzzcachedir="+s.cfg.CacheDir); err == nil || ctx.Err() != nil {
-		return n, nil
-	} else if !bytes.Contains(out, []byte("Failing input written to")) {
-		return n, fmt.Errorf("loop7: fuzzing %s did not run: %v", t.subject(), err)
+		"-test.fuzzcachedir="+filepath.Join(s.cfg.CacheDir, "fuzz", filepath.FromSlash(t.Pkg)))
+	overran := fctx.Err() != nil
+	cancel()
+	switch {
+	case ctx.Err() != nil:
+		return 0, nil
+	case overran && (err == nil || exited(err)):
+		// The engine's own deadline did not stop it: an input hung a
+		// worker, or the engine did.
+		return 1, s.report(ctx, t, overrunDetail)
+	case err == nil:
+		return 0, s.resolveTarget(t, overrunDetail)
+	case !bytes.Contains(out, []byte("Failing input written to")):
+		return 0, fmt.Errorf("loop7: fuzzing %s did not run: %v", t.subject(), err)
 	}
 	return s.replay(ctx, t)
 }
+
+// Target findings: a failure no stored input can be named for.
+const (
+	noInputDetail = "the target failed before any stored input could be named (a seed added in code, or a crash at start)"
+	overrunDetail = "fuzzing did not stop within its bound (an input hung)"
+)
 
 // failLine and passLine are a seed subtest failing or passing under
 // -test.v.
@@ -341,9 +372,14 @@ var (
 )
 
 // replay runs t's corpus files, reports each failing one and resolves
-// t's open findings whose stored input it replayed and passed.
+// t's open findings whose stored input it replayed and passed. A run that
+// fails with no "--- FAIL" line (a runtime fatal error, out of memory,
+// os.Exit, or a hang past ReplayTime) is replayed input by input to name
+// the failing ones; if none fails alone, the target itself is reported.
 func (s *Source) replay(ctx context.Context, t Target) (int, error) {
-	out, runErr := s.run(ctx, t, "-test.run=^"+t.Name+"$", "-test.v")
+	rctx, cancel := context.WithTimeout(ctx, s.cfg.ReplayTime)
+	out, runErr := s.run(rctx, t, "-test.run=^"+t.Name+"$", "-test.v", "-test.timeout="+s.cfg.ReplayTime.String())
+	cancel()
 	if ctx.Err() != nil {
 		return 0, nil
 	}
@@ -356,8 +392,20 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 			ran[m[2]] = true
 		}
 	}
+	if runErr != nil && !exited(runErr) {
+		return 0, fmt.Errorf("loop7: replaying %s: %w", t.subject(), runErr)
+	}
+	noInput := false
 	if runErr != nil && len(failing) == 0 {
-		return 0, fmt.Errorf("loop7: replaying %s: %v", t.subject(), runErr)
+		if failing, ran, runErr = s.eachInput(ctx, t); runErr != nil || ctx.Err() != nil {
+			return 0, runErr
+		}
+		noInput = len(failing) == 0
+	}
+	// A PASS line for an input that also failed is not a pass (the
+	// decoder's own output can print one).
+	for f := range failing {
+		delete(ran, f)
 	}
 	var errs []error
 	// Each stored input whose own subtest passed in this run: only such a
@@ -375,10 +423,12 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 			// A failing f.Add seed, not a file: report it by name.
 			data = []byte(file)
 		}
-		f := loops.Finding{Check: loops.CheckFuzz, Subject: t.subject(), Severity: loops.High, Detail: crashDetail(data)}
-		if _, err := s.cfg.Report.Report(ctx, f); err != nil {
-			errs = append(errs, err)
-		}
+		errs = append(errs, s.report(ctx, t, crashDetail(data)))
+	}
+	if noInput {
+		errs = append(errs, s.report(ctx, t, noInputDetail))
+	} else if runErr == nil {
+		passed[noInputDetail] = true // the whole replay passed
 	}
 	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
 		if f.Subject == t.subject() && passed[f.Detail] {
@@ -386,7 +436,68 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 			errs = append(errs, s.cfg.Report.Resolve(f.ID, r))
 		}
 	}
-	return len(failing), errors.Join(errs...)
+	n := len(failing)
+	if noInput {
+		n = 1
+	}
+	return n, errors.Join(errs...)
+}
+
+// eachInput replays each stored input of t alone, within InputTime: one
+// that exits non-zero or runs past it fails; one that exits zero passed.
+func (s *Source) eachInput(ctx context.Context, t Target) (failing, ran map[string]bool, err error) {
+	failing, ran = map[string]bool{}, map[string]bool{}
+	es, err := os.ReadDir(filepath.Join(t.Dir, "testdata", "fuzz", t.Name))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, nil, err
+	}
+	for _, e := range es {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		ictx, cancel := context.WithTimeout(ctx, s.cfg.InputTime)
+		_, err := s.run(ictx, t, "-test.run=^"+t.Name+"$/^"+regexp.QuoteMeta(e.Name())+"$", "-test.v",
+			"-test.timeout="+s.cfg.InputTime.String())
+		cancel()
+		if ctx.Err() != nil {
+			return failing, ran, nil
+		}
+		if err != nil && !exited(err) {
+			return nil, nil, fmt.Errorf("loop7: replaying %s: %w", t.subject(), err)
+		}
+		if err != nil {
+			failing[e.Name()] = true
+		} else {
+			ran[e.Name()] = true
+		}
+	}
+	return failing, ran, nil
+}
+
+// exited reports that a child ran and exited non-zero or was killed: a
+// failure of the target. Anything else (refused before exec, could not
+// start) is the runner's error, never a finding.
+func exited(err error) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee)
+}
+
+// report reports a High fuzz finding for t.
+func (s *Source) report(ctx context.Context, t Target, detail string) error {
+	_, err := s.cfg.Report.Report(ctx, loops.Finding{Check: loops.CheckFuzz, Subject: t.subject(), Severity: loops.High, Detail: detail})
+	return err
+}
+
+// resolveTarget resolves t's open finding with detail, which a clean run
+// has just replayed.
+func (s *Source) resolveTarget(t Target, detail string) error {
+	var errs []error
+	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
+		if f.Subject == t.subject() && f.Detail == detail {
+			errs = append(errs, s.cfg.Report.Resolve(f.ID, loops.Replay{Evidence: f.Detail, Passed: true, At: s.cfg.Now()}))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // crashDetail names a crashing input by its digest; the input itself

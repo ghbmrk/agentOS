@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/loops"
 )
 
 // fakeBin writes a shell script standing in for a fuzz test binary into
@@ -282,5 +283,166 @@ func TestTheSourceForwardsTheGuardsDigestAndMeasure(t *testing.T) {
 	s, _ := New(Config{Inner: newFake(), Report: newFake()})
 	if s.Digest() != nil || !s.Measured() {
 		t.Fatal("a plain inner source gained a digest or lost its measure")
+	}
+}
+
+// corpus writes inputs into t's stored corpus and returns each one's
+// finding detail.
+func corpus(t *testing.T, tg Target, inputs map[string]string) map[string]string {
+	t.Helper()
+	dir := filepath.Join(tg.Dir, "testdata", "fuzz", tg.Name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for name, in := range inputs {
+		data := []byte("go test fuzz v1\n[]byte(" + strconv.Quote(in) + ")\n")
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out[name] = crashDetail(data)
+	}
+	return out
+}
+
+// A fake binary whose whole replay dies the way a runtime fatal error
+// does (no "--- FAIL" line, exit 2), and whose run of the stored input
+// "bad" alone fails while "good" passes.
+const fatalReplay = `case "$1" in
+-test.run=^FuzzFake\$) echo "fatal error: stack overflow"; exit 2;;
+-test.run=^FuzzFake\$/^bad\$) echo "fatal error: stack overflow"; exit 2;;
+-test.run=^FuzzFake\$/^good\$) echo "--- PASS: FuzzFake/good (0.00s)"; exit 0;;
+esac
+exit 0`
+
+// LOOP-9 (Security 4a on #560, blocker 1): a crash the binary reports
+// without a "--- FAIL" line (a stack overflow, out of memory, a
+// concurrent map write, os.Exit) is still a finding: each stored input is
+// replayed alone to name it. The target is not stuck on an error.
+func TestACrashWithoutAFailLineIsReported(t *testing.T) {
+	release := t.TempDir()
+	g := newFake()
+	tg := fakeTarget(t, release, fatalReplay)
+	details := corpus(t, tg, map[string]string{"bad": "synthetic crash", "good": "ab"})
+	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release})
+	n, err := s.Fuzz(context.Background(), tg)
+	if err != nil || n != 1 || len(g.reported) != 1 || g.reported[0].Detail != details["bad"] {
+		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+	}
+	// Fixed by an update: the stored input passes alone and in the whole
+	// replay, and the finding resolves.
+	fakeBin(t, release, "fake.test", `case "$1" in -test.run=^FuzzFake\$) echo "--- PASS: FuzzFake/bad (0.00s)"; echo "--- PASS: FuzzFake/good (0.00s)";; esac; exit 0`)
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 0 || len(g.open) != 0 {
+		t.Fatalf("after the fix n=%d err=%v open %v", n, err, g.open)
+	}
+}
+
+// A replay that dies before any stored input can be named (a seed added
+// in code, a crash at start) is a finding for the target, resolved once a
+// whole replay passes.
+func TestACrashNoInputNamesIsATargetFinding(t *testing.T) {
+	release := t.TempDir()
+	g := newFake()
+	tg := fakeTarget(t, release, `case "$1" in -test.run=^FuzzFake*) echo "fatal error: out of memory"; exit 2;; esac; exit 0`)
+	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release})
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 || len(g.open) != 1 || g.reported[0].Detail != noInputDetail {
+		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+	}
+	fakeBin(t, release, "fake.test", "exit 0")
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 0 || len(g.open) != 0 {
+		t.Fatalf("after the fix n=%d err=%v open %v", n, err, g.open)
+	}
+}
+
+// LOOP-9, LOOP-1 (Security 4a on #560, blocker 2): an input that hangs is
+// a finding, and the job is bounded: the replay and each input alone have
+// a deadline, so a hang does not hold the spare slot.
+func TestAHangingInputIsReportedAndBounded(t *testing.T) {
+	release := t.TempDir()
+	g := newFake()
+	tg := fakeTarget(t, release, `case "$1" in
+-test.run=^FuzzFake\$|-test.run=^FuzzFake\$/^bad\$) sleep 300;;
+-test.run=^FuzzFake\$/^good\$) exit 0;;
+esac
+exit 0`)
+	details := corpus(t, tg, map[string]string{"bad": "synthetic hang", "good": "ab"})
+	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release, ReplayTime: 300 * time.Millisecond, InputTime: 300 * time.Millisecond})
+	start := time.Now()
+	n, err := s.Fuzz(context.Background(), tg)
+	if err != nil || n != 1 || len(g.reported) != 1 || g.reported[0].Detail != details["bad"] {
+		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("a hanging input held the job %v", d)
+	}
+}
+
+// A fuzz step that runs past its bound is a target finding, resolved by a
+// later step that stops in time.
+func TestAFuzzStepPastItsBoundIsReported(t *testing.T) {
+	release := t.TempDir()
+	g := newFake()
+	tg := fakeTarget(t, release, `case "$1" in -test.run=^\$) sleep 300;; esac; exit 0`)
+	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release, FuzzTime: 100 * time.Millisecond, ReplayTime: 300 * time.Millisecond})
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 || len(g.open) != 1 || g.reported[0].Detail != overrunDetail {
+		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+	}
+	fakeBin(t, release, "fake.test", "exit 0")
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 0 || len(g.open) != 0 {
+		t.Fatalf("after the fix n=%d err=%v open %v", n, err, g.open)
+	}
+}
+
+// A replay that prints both a FAIL and a PASS line for one input (a
+// forged PASS from the decoder's own output) does not resolve its finding.
+func TestAForgedPassLineResolvesNothing(t *testing.T) {
+	release := t.TempDir()
+	g := newFake()
+	tg := fakeTarget(t, release, `case "$1" in -test.run=^FuzzFake\$) echo "--- PASS: FuzzFake/bad (0.00s)"; echo "--- FAIL: FuzzFake/bad (0.00s)"; exit 1;; esac; exit 0`)
+	details := corpus(t, tg, map[string]string{"bad": "synthetic crash"})
+	open := loops.Finding{Check: loops.CheckFuzz, Subject: tg.subject(), Severity: loops.High, Detail: details["bad"]}
+	if _, err := g.Report(context.Background(), open); err != nil {
+		t.Fatal(err)
+	}
+	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release})
+	if _, err := s.Fuzz(context.Background(), tg); err != nil || len(g.open) != 1 || len(g.resolved) != 0 {
+		t.Fatalf("err=%v open %v resolved %v", err, g.open, g.resolved)
+	}
+}
+
+// Each package's targets get a fuzz cache of their own: six packages name
+// a target FuzzParse, and the engine keys its cache by target name.
+func TestTheFuzzCacheIsPerPackage(t *testing.T) {
+	release, args, cache := t.TempDir(), filepath.Join(t.TempDir(), "args"), t.TempDir()
+	tg := fakeTarget(t, release, `case "$1" in -test.run=^\$) echo "$@" > `+args+`;; esac; exit 0`)
+	tg.Pkg = "modem/at"
+	s := newSource(t, newFake(), Config{Targets: []Target{tg}, Release: release, CacheDir: cache})
+	if _, err := s.Fuzz(context.Background(), tg); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(args)
+	if want := "-test.fuzzcachedir=" + filepath.Join(cache, "fuzz", "modem", "at"); !strings.Contains(string(b), want) {
+		t.Fatalf("args %q lack %q", b, want)
+	}
+}
+
+// The real engine's control for blocker 1: a planted decoder that
+// overflows its stack, a runtime fatal error with no "--- FAIL" line, is
+// found by fuzzing and reported with its stored input.
+func TestAPlantedStackOverflowIsReported(t *testing.T) {
+	g := newFake()
+	tg := target(t, plantedWith(t, `var r func(int) int; r = func(n int) int { return r(n+1) + 1 }; _ = r(0)`))
+	s := newSource(t, g, Config{Targets: []Target{tg}, FuzzTime: 20 * time.Second})
+	n, err := s.Fuzz(context.Background(), tg)
+	if err != nil || n != 1 || len(g.reported) != 1 {
+		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+	}
+	kept, _ := os.ReadDir(filepath.Join(tg.Dir, "testdata", "fuzz", "FuzzPlanted"))
+	if len(kept) != 1 {
+		t.Fatalf("corpus %v", kept)
+	}
+	data, _ := os.ReadFile(filepath.Join(tg.Dir, "testdata", "fuzz", "FuzzPlanted", kept[0].Name()))
+	if g.reported[0].Detail != crashDetail(data) {
+		t.Fatalf("finding %q does not name the kept input", g.reported[0].Detail)
 	}
 }

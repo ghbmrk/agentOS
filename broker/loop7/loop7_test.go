@@ -70,12 +70,22 @@ func (g *fakeGuard) OpenReported(c loops.Check) []loops.Finding {
 // planted-decoder control for the whole source.
 func planted(t *testing.T, crash bool) string {
 	t.Helper()
+	if !crash {
+		return plantedWith(t, "")
+	}
+	return plantedWith(t, `panic("planted decoder crash")`)
+}
+
+// plantedWith builds the planted target whose decoder runs crash on any
+// input longer than three bytes; an empty crash never fails.
+func plantedWith(t *testing.T, crash string) string {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("builds a test binary")
 	}
 	src := t.TempDir()
 	cond := "false"
-	if crash {
+	if crash != "" {
 		cond = "len(b) > 3"
 	}
 	files := map[string]string{
@@ -88,7 +98,7 @@ func FuzzPlanted(f *testing.F) {
 	f.Add([]byte("a"))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		if ` + cond + ` {
-			panic("planted decoder crash")
+			` + crash + `
 		}
 	})
 }
