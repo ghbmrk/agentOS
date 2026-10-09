@@ -240,11 +240,18 @@ func (s *Store) quarantine(id string) error {
 	} else if !fi.IsDir() {
 		return fmt.Errorf("cleanroom: %s is not a directory; not quarantining %s", q, id)
 	}
-	dst := filepath.Join(q, id+"-"+newID())
-	if err := s.fault.hit("rename", dst); err != nil {
+	// The rename resolves inside the store's root, so a symlink put in
+	// place after the check above fails it instead of leading out.
+	r, err := os.OpenRoot(s.dir)
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(filepath.Join(s.dir, id), dst); err != nil {
+	defer r.Close()
+	name := id + "-" + newID()
+	if err := s.fault.hit("rename", filepath.Join(q, name)); err != nil {
+		return err
+	}
+	if err := r.Rename(id, filepath.Join(".quarantine", name)); err != nil {
 		return err
 	}
 	if err := s.fault.dirSync(q); err != nil {
@@ -256,10 +263,20 @@ func (s *Store) quarantine(id string) error {
 // losses counts the quarantined copies of an artifact: how often its output
 // was found damaged, across restarts.
 func (s *Store) losses(id string) (int, error) {
-	ents, err := os.ReadDir(filepath.Join(s.dir, ".quarantine"))
+	r, err := os.OpenRoot(s.dir)
+	if err != nil {
+		return 0, err
+	}
+	defer r.Close()
+	f, err := r.Open(".quarantine")
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	ents, err := f.ReadDir(-1)
 	if err != nil {
 		return 0, err
 	}

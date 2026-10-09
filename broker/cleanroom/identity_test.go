@@ -186,3 +186,41 @@ func TestQuarantineRefusesSymlinkedDir(t *testing.T) {
 		t.Errorf("artifact moved out of the store: %v", got)
 	}
 }
+
+// A .quarantine swapped for a symlink after the check and before the rename
+// (Security and L3 on #578) still cannot move the artifact out of the store:
+// the rename resolves inside the store's root.
+func TestQuarantineRenameStaysInStore(t *testing.T) {
+	root := t.TempDir()
+	s, _, err := openStore(filepath.Join(root, "store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.put(Manifest{ID: "a-x", Job: "x", Output: "skill"}, nestedFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	q := filepath.Join(s.dir, ".quarantine")
+	s.fault = func(op, _ string) error {
+		if op != "rename" {
+			return nil
+		}
+		if err := os.Remove(q); err != nil {
+			return err
+		}
+		return os.Symlink(outside, q)
+	}
+	if err := s.quarantine("a-x"); err == nil {
+		t.Error("quarantine through a .quarantine swapped for a symlink accepted")
+	}
+	if _, err := os.Stat(a.dir); err != nil {
+		t.Errorf("artifact moved: %v", err)
+	}
+	if got := tree(t, outside); len(got) != 1 {
+		t.Errorf("artifact moved out of the store: %v", got)
+	}
+}

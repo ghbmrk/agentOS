@@ -241,6 +241,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-8-f l1 | L3 3 on #578: `New`'s `errBadID` branch is unreachable and untested (kept as defence in depth); in `park` a new `parked/` is not synced into `cfg.Dir`, and source-directory sync errors in `finish`/`park` are ignored. Both predate #578 |
 | SR3-8-f l2 | L3 4 on #578: `Get` follows a symlinked name inside the store; exploiting it needs store write access |
 | SR3-8-f l3 | Security 4 on #578: the seam's source check matches only `Sync`; add `syscall.Fsync`, `unix.Fsync` and `Fdatasync` to `allowed` if the package ever imports them |
+| SR3-8-f l4 | L3 6079535268 point 3 on #578: `syncHit` matches only a literal op string, so a const op or a direct `s.fault` call slips past the AST check; the recorder tests carry the guarantee |
 | W3-forget-b1-4 l1 | L3 on #436: `broker/change` TestRouterCandidateAdoptsThroughPipeline flakes (~2/10k; random split key); fix is a seeded Rand, proposed on #436 |
 | W3-forget-b1-4 l2 | #436: decoy dates may fall before box setup or enrolment |
 | W3-forget-b1-4 l3 | #436: "Never" wording for owners whose forgets predate the log |
