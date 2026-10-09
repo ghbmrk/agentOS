@@ -299,8 +299,11 @@ type Adoption struct {
 	Concern      string `json:"concern,omitempty"`
 	ConcernScore Score  `json:"concern_score,omitempty"`
 	ConcernSeen  bool   `json:"concern_seen,omitempty"`
-	Listed       bool   `json:"listed,omitempty"`
-	RevertSeen   bool   `json:"revert_seen,omitempty"`
+	// ConcernStarts: a security Concern on an unprotected adoption whose
+	// image may start before it is undone (SR3-4f-3 B5).
+	ConcernStarts bool `json:"concern_starts,omitempty"`
+	Listed        bool `json:"listed,omitempty"`
+	RevertSeen    bool `json:"revert_seen,omitempty"`
 	// Goals are the candidate's Goals, IDs only (C23).
 	Goals []string `json:"goals,omitempty"`
 }
