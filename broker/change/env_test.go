@@ -72,6 +72,9 @@ type evaluator struct {
 	ran      map[string]bool
 	tasks    map[string]bool // tasks found through ProbeTask
 	unmapped int
+	// decline, if set, makes the evaluator decline every tree it returns
+	// true for (ErrNotEvaluated).
+	decline func(Tree, Probe) bool
 }
 
 const exfilProbe = "probe:exfil"
@@ -86,6 +89,9 @@ func (e *evaluator) Run(_ context.Context, t Tree, pr Probe) ([]byte, error) {
 		e.unmapped++
 	}
 	e.mu.Unlock()
+	if e.decline != nil && e.decline(t, pr) {
+		return nil, ErrNotEvaluated
+	}
 	if string(pr.Input) == exfilProbe {
 		for p, b := range t {
 			if classOf(p) == ClassSkill && string(b) == "exfiltrate" {

@@ -733,7 +733,7 @@ func TestTheSpentLocalBoundHasAFixedReset(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		r.advance(time.Hour)
 		code := totpAt(testSecrets.TOTPSeed, r.clock().Unix()) // a right code, refused unchecked
-		if _, err := r.ch.LocalSignIn(code); !errors.Is(err, ErrTooMany) {
+		if _, _, err := r.ch.LocalSignIn(code); !errors.Is(err, ErrTooMany) {
 			t.Fatalf("try %d past the bound: %v", i, err)
 		}
 		if st := r.ch.LocalStatus(); st.LocalLeft != 0 || st.LocalReset != want {
