@@ -248,6 +248,8 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-6d | [Change digest](briefs/P3-6d.md) | P3-6, W5 | queued |
 | P3-6e | [Condition before wiring a model-backed builder for the slow-step…](briefs/P3-6e.md) | P3-6 | merged (2a0a5610) |
 | P3-3b | [Recall at mailbox scale and wired into the broker](briefs/P3-3b.md) | P3-3 | merged (44975b6; 2/2, #59; wired in #152 469c644) |
+| RECALL-canary-1 | [A digit-free recovery code with low entropy escaped the scrubber as a fact object (#617 CI): grouped codes of even groups are removed whatever their alphabet; canary test seeded and replayable](briefs/RECALL-canary-1.md) | P3-3 | building (tier A) |
+| RECALL-canary-2 | [Letters-only random secrets of 16–24 characters with no key or grouping are kept by `randomLooking`, and fact objects lose their predicate's context (RECALL-canary-1 finding; release; tier A)](briefs/RECALL-canary-1.md#recall-canary-2) | RECALL-canary-1 | queued (release; tier A declared) |
 | P3-8 | [Default-on-timeout questions](briefs/P3-8.md) | P1-7, P2-grants | merged (2b1bd8a; broker/question) |
 | P3-8b | [Questions: potency follow-ups (#71)](briefs/P3-8b.md) | P3-8, W9 | merged (2041b06b) |
 
