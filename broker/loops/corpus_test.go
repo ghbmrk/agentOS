@@ -4,6 +4,7 @@ package loops
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -109,5 +110,46 @@ func TestACorpusCheckThatMissesItsPayloadIsAnError(t *testing.T) {
 	}
 	if _, err := LoadCorpus("testdata/none.json"); err == nil {
 		t.Fatal("a missing corpus loaded")
+	}
+}
+
+// LOOP-7 (corpus replay through a guest, P3-4b-4d): a check with Deliver
+// is taken through it, not Hit, bare payload first; a miss is a finding
+// naming only the broker-held item ID and check name.
+func TestADeliveredCheckIsTakenThroughItsGuest(t *testing.T) {
+	items := corpusItems(t)
+	var got []string
+	c := ClosedCheck{Name: "code filter", Payload: "code 482913",
+		Hit: func(string) bool { t.Fatal("Hit used for a delivered check"); return false },
+		Deliver: func(_ context.Context, s string) (bool, error) {
+			got = append(got, s)
+			return s == "code 482913", nil // the guest route catches only the bare payload
+		}}
+	res, err := (&CorpusProbe{Interval: 1, Items: items, Checks: []ClosedCheck{c}}).Run(context.Background())
+	if err != nil || len(res.Found) != len(items) || len(got) != len(items)+1 || got[0] != "code 482913" {
+		t.Fatalf("%+v %v (%d deliveries)", res, err, len(got))
+	}
+	for i, f := range res.Found {
+		if f.Check != CheckCorpus || f.Subject != items[i].ID || f.Detail != "code filter" || f.Severity != High || f.Rule != nil {
+			t.Fatalf("finding %+v", f)
+		}
+	}
+}
+
+// LOOP-7: a delivery that fails (the guest did not act, the broker saw
+// nothing) fails the run and reports nothing, bare payload or item.
+func TestAFailedDeliveryFailsTheRun(t *testing.T) {
+	for _, failAt := range []int{1, 3} {
+		n := 0
+		c := ClosedCheck{Name: "label check", Payload: "", Deliver: func(context.Context, string) (bool, error) {
+			if n++; n == failAt {
+				return false, errors.New("no reply reached the owner line")
+			}
+			return false, nil
+		}}
+		res, err := (&CorpusProbe{Interval: 1, Items: corpusItems(t), Checks: []ClosedCheck{c}}).Run(context.Background())
+		if err == nil || len(res.Found) != 0 {
+			t.Fatalf("fail at %d: %+v %v", failAt, res, err)
+		}
 	}
 }
