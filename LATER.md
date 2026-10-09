@@ -707,6 +707,12 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CH-21b l-665 | #665: no test that a NAME without a code still routes in challenge mode; code detection is split across `splitCode`, `parseName` and `parseReply` (use a shared helper or a lint); add a table test for every code-bearing form. |
 | REV-5 l-203 | #203: a full inbox reads as "not stored" or "agent not running" (wrong cause); `RaiseLabel` errors may name a path; the REV-5 TRACE row does not match its test. |
 | l-206 | #206: the substring flag match should be an exact match. |
+| CH-19 l-669 | #669 Security/Potency/UX (comment 6090765509) (recheck): CH-19 bounds withheld results by time but not by size. |
+| CH-13 l-669 | #669 Security/Potency/UX (comment 6090765509) (recheck): a bare `NO` is ambiguous between CH-13 (deny approval) and CH-14 (discard held messages) when both are pending; both outcomes fail safe. |
+| SPEC-D088 l1 | #669 L3 (comment 6090762892): the §16 D-088 row's ID list omits OSS-5 and UPD-4, which the PR now gates; add them so the log matches the hunks. |
+| SPEC-D088 l2 | #669 L3 (comment 6090762892): OSS-7 says the box offers the switch "when it has real candidates to send"; under option (b) logged candidates are never sent, so "real candidates to illustrate" reads truer. |
+| SPEC-D088 l3 | #669 L3 (comment 6090762892) (recheck): the text does not say whether items created while the switch was on but still queued (batched or time-delayed, OSS-6) are dropped or sent after a later on when the owner turns it off. |
+| SPEC-s14 l4 | #669 L3 (comment 6090762892) (recheck): §14 says "a new release requirement needs Mark's explicit promotion; review findings cannot add one", while CLAUDE.md says a release finding makes a BOARD row; say in §14 that "release requirement" means a SPEC requirement. |
 
 ## Reuse candidates
 | ID | Component | Why |
