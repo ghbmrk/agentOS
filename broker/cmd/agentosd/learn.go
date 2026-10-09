@@ -238,6 +238,8 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		NotRun:    loop2NotRun,
 		Notify:    l.notify.send,
 		ResumeFor: p.ResumeFor,
+		// Fix requests go to Loop 1's builder machines (loop2.go).
+		Fixer: lateFix{&l.build},
 		// Seeded findings' fixtures are live (loop2.go).
 		FixturesLiveFor: loop2Live,
 	}); err != nil {
@@ -280,8 +282,9 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}
 	// Evaluation keeps its reserve of the spare budget while Loop 1
 	// evaluates (loops L3); builder machines take at most their Max of it
-	// (C-3c-5). The clean room takes its Max here once it exists.
-	if err := spare.SetShares([]meter.Share{l.sched.EvalShare(), builderShare()}); err != nil {
+	// (C-3c-5), and Loop 2's fix machines theirs (LOOP-2). The clean room
+	// takes its Max here once it exists.
+	if err := spare.SetShares([]meter.Share{l.sched.EvalShare(), builderShare(), loop2FixShare()}); err != nil {
 		return nil, err
 	}
 	cfg.Grants.Changes = l.pipe

@@ -7,9 +7,12 @@ import (
 	"log"
 	"sync/atomic"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/loopbuild"
 	"github.com/ghbmrk/agentos/broker/loops"
+	"github.com/ghbmrk/agentos/broker/meter"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -38,6 +41,49 @@ var loop2NotRun = map[loops.Check]string{
 	loops.CheckAdvisory: "needs a signed advisory feed",
 	loops.CheckDrift:    "needs a check of what the machines hold",
 	loops.CheckExpiry:   "needs the vault's expiry list",
+}
+
+// loop2FixShareMax is the most of the spare budget Loop 2's fix jobs may
+// use (LOOP-2): a share of their own, apart from Loop 1's builder share,
+// so fixes never spend Loop 1's budget nor Loop 1 theirs. It reserves
+// nothing; the retry bound (loops, Potency 1 on #464) keeps it small.
+const loop2FixShareMax = 0.15
+
+// loop2FixShare is the fix machines' share of the spare meter.
+func loop2FixShare() meter.Share {
+	return meter.Share{Prefix: loopbuild.FixPrefix, Max: loop2FixShareMax}
+}
+
+// loop2NoBuilder is why Loop 2 cannot build a fix on a box without
+// builder machines, for STATUS.
+const loop2NoBuilder = "this box has no builder machines"
+
+// lateFix answers Loop 2's fix-candidate requests on Loop 1's builder
+// machines (P3-4b-5, LOOP-9) once the machine plane attaches the builder.
+// Until then, or while the builder has no model route, it is unready:
+// Loop 2 asks it nothing and STATUS says why. Loop 2 stamps what it
+// returns, and the change pipeline decides (§11).
+type lateFix struct{ b *lateBuild }
+
+var (
+	_ loops.Fixer   = lateFix{}
+	_ loops.Unready = lateFix{}
+)
+
+func (l lateFix) Fix(ctx context.Context, f loops.Finding) (change.Candidate, error) {
+	b := l.b.b.Load()
+	if b == nil {
+		return change.Candidate{}, errNoBuilder
+	}
+	return b.Fix(ctx, f)
+}
+
+func (l lateFix) Unready() string {
+	b := l.b.b.Load()
+	if b == nil {
+		return loop2NoBuilder
+	}
+	return b.Unready()
 }
 
 // errNotPaused: the gate refused Loop 2's pause.
