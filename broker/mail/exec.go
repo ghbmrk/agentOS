@@ -386,13 +386,20 @@ func notApplied(err error) journal.Outcome {
 }
 
 // unknownUnless is a mutation's failure: not applied when the store
-// refused a stale identity before anything changed, else unknown.
+// refused a stale identity before anything changed, else unknown. A
+// refusal after flags changed says so, since ErrValidity's own wording
+// claims nothing changed.
 func unknownUnless(err error, changed bool) journal.Outcome {
-	if errors.Is(err, ErrValidity) && !changed {
+	switch {
+	case errors.Is(err, ErrValidity) && !changed:
 		return notApplied(err)
+	case errors.Is(err, ErrValidity):
+		return journal.Outcome{Result: journal.ResultUnknown, Evidence: errValidityAfterFlags}
 	}
 	return unknown(err)
 }
+
+const errValidityAfterFlags = "mail: the folder was rebuilt after the labels were changed; the move did not happen"
 
 func unknown(err error) journal.Outcome {
 	return journal.Outcome{Result: journal.ResultUnknown, Evidence: reason(err)}

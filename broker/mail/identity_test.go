@@ -175,6 +175,10 @@ func TestExecutorNeverMutatesAReplacedUID(t *testing.T) {
 			if out.Result != tc.want || strings.Contains(out.Evidence, id) {
 				t.Fatalf("outcome %s %q", out.Result, out.Evidence)
 			}
+			// The evidence must not claim nothing changed once flags did.
+			if tc.want == journal.ResultUnknown && strings.Contains(out.Evidence, "nothing changed") {
+				t.Fatalf("unknown outcome claims nothing changed: %q", out.Evidence)
+			}
 			x.alertUntouched(t, "INBOX")
 			if tc.want == journal.ResultUnknown {
 				// Reconciliation re-resolves by Message-ID in the new
