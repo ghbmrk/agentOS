@@ -48,6 +48,25 @@ type failStore struct{}
 func (failStore) Load() ([]byte, error) { return nil, errors.New("disk: unreadable") }
 func (failStore) Save([]byte) error     { return errors.New("disk: unreadable") }
 
+// keepRefStore refuses the next refuse saves that would drop ref from bytes
+// holding it, so the queue refuses that many forgets of ref (ErrRecovery)
+// while every other write goes through: a refusal with no batch in flight,
+// now that an unknown batch no longer refuses one (W5-Dc-r7).
+type keepRefStore struct {
+	change.MemStore
+	ref    string
+	refuse int
+}
+
+func (s *keepRefStore) Save(b []byte) error {
+	old, _ := s.MemStore.Load()
+	if s.refuse > 0 && strings.Contains(string(old), s.ref) && !strings.Contains(string(b), s.ref) {
+		s.refuse--
+		return errors.New("disk: refused")
+	}
+	return s.MemStore.Save(b)
+}
+
 // testSource is a DIG-1-shaped source: one pending generation until acked.
 type testSource struct {
 	name     string
@@ -376,15 +395,15 @@ func TestDigestQueueUnavailable(t *testing.T) {
 }
 
 // A forget reaches the queue: a ready batch loses the forgotten snapshot,
-// and one in flight refuses, so the forget stays owed (CAP-3).
-// REQ: CAP-3
+// and an unknown one is redacted whole (W5-Dc-r7), so the forget is done.
+// REQ: CAP-3, CAP-3 (W5-Dc-r7 UF-3)
 func TestDigestForgetReachesTheQueue(t *testing.T) {
 	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
 	r := newDigestRig(t, &change.MemStore{}, map[string]digestqueue.Source{"notes": src})
 	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.OutcomeUnknown, "" }
 	r.at(0, 8, 0)
-	if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
-		t.Fatalf("in flight: %v", err)
+	if err := r.d.forget("owner:a"); err != nil {
+		t.Fatalf("unknown: %v", err)
 	}
 	src.gen, src.refs = 2, []string{"owner:b"}
 	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
@@ -468,8 +487,9 @@ func TestDigestForgetBeforeOpenPurgesOnOpen(t *testing.T) {
 // A forget the queue refused is kept in the digest's own state, so a
 // restart holds its ready batch from the first step, before the forget
 // owner asks again or even when it never does (its owed save failed)
-// (security B2' on #592).
-// REQ: CAP-3, OP-2
+// (security B2' on #592). The queue refuses through its store, once: the
+// open after the restart purges the reference, so the replay is done.
+// REQ: CAP-3, OP-2, CAP-3 (W5-Dc-r7 UF-3)
 func TestDigestRefusedForgetHoldsItsReadyBatchAfterARestart(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -480,13 +500,13 @@ func TestDigestRefusedForgetHoldsItsReadyBatchAfterARestart(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
 			srcs := map[string]digestqueue.Source{"notes": src}
-			r := newDigestRig(t, &change.MemStore{}, srcs)
+			r := newDigestRig(t, &keepRefStore{ref: "owner:a", refuse: 1}, srcs)
 			r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.OutcomeUnknown, "" }
 			r.at(0, 8, 0)
 			src.gen, src.lines = 2, []string{"Notes: task 4 finished; reply MORE 4 for it."}
 			r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
 			r.at(1, 8, 0)
-			if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
+			if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrRecovery) {
 				t.Fatalf("forget: %v", err)
 			}
 			n := len(r.tr.sent())
@@ -494,7 +514,7 @@ func TestDigestRefusedForgetHoldsItsReadyBatchAfterARestart(t *testing.T) {
 			r.boot(srcs)
 			r.at(1, 9, 0)
 			if tc.ask {
-				if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
+				if err := r.d.forget("owner:a"); err != nil {
 					t.Fatalf("forget after restart: %v", err)
 				}
 			}
@@ -535,18 +555,18 @@ func TestDigestForgetBeforeOpenSurvivesARestart(t *testing.T) {
 	}
 }
 
-// A ready batch holding a reference the queue refused to forget (another
-// batch holding it is unknown) is not sent while that forget is owed.
-// REQ: CAP-3, OP-2
+// A ready batch holding a reference the queue refused to forget (its store
+// refused the forget's save) is not sent: the reopen purges it first.
+// REQ: CAP-3, OP-2, CAP-3 (W5-Dc-r7 UF-3)
 func TestDigestRefusedForgetHoldsItsReadyBatch(t *testing.T) {
 	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
-	r := newDigestRig(t, &change.MemStore{}, map[string]digestqueue.Source{"notes": src})
+	r := newDigestRig(t, &keepRefStore{ref: "owner:a", refuse: 1}, map[string]digestqueue.Source{"notes": src})
 	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.OutcomeUnknown, "" }
 	r.at(0, 8, 0)
 	src.gen, src.lines = 2, []string{"Notes: task 4 finished; reply MORE 4 for it."}
 	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
 	r.at(1, 8, 0)
-	if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
+	if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrRecovery) {
 		t.Fatalf("forget: %v", err)
 	}
 	n := len(r.tr.sent())
@@ -555,6 +575,75 @@ func TestDigestRefusedForgetHoldsItsReadyBatch(t *testing.T) {
 	for _, s := range r.tr.sent()[n:] {
 		if strings.Contains(s, src.lines[0]) {
 			t.Fatalf("batch of a refused forget sent: %q", s)
+		}
+	}
+}
+
+// A ready batch holding a reference whose forget is held is not sent. No
+// queue refusal reaches this with the queue open now that an unknown batch
+// no longer refuses (W5-Dc-r7), so the hold is set directly.
+// REQ: CAP-3, OP-2, CAP-3 (W5-Dc-r7 UF-3)
+func TestDigestHeldForgetKeepsItsReadyBatchUnsent(t *testing.T) {
+	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
+	r := newDigestRig(t, &change.MemStore{}, map[string]digestqueue.Source{"notes": src})
+	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
+	r.at(0, 8, 0)
+	r.d.mu.Lock()
+	r.d.hold("owner:a")
+	r.d.mu.Unlock()
+	n := len(r.tr.sent())
+	r.tr.out = nil
+	r.day(0)
+	for _, s := range r.tr.sent()[n:] {
+		if strings.Contains(s, src.lines[0]) {
+			t.Fatalf("batch of a held forget sent: %q", s)
+		}
+	}
+	if r.holding("owner:a") != 1 {
+		t.Fatal("ready batch not kept")
+	}
+}
+
+// A forget of a reference only an unknown batch holds is done: the batch is
+// redacted whole and stays unknown, so STATUS and the next digest still say
+// that day's digest may not have arrived (W5-Dc-r7).
+// REQ: CAP-3 (W5-Dc-r7 UF-3), OP-9, CH-15
+func TestDigestForgetOfAnUnknownDigestCompletes(t *testing.T) {
+	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
+	srcs := map[string]digestqueue.Source{"notes": src}
+	r := newDigestRig(t, &change.MemStore{}, srcs)
+	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.OutcomeUnknown, "" }
+	r.at(0, 8, 0)
+	if err := r.d.forget("owner:a"); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if len(r.d.forgets) != 0 {
+		t.Fatalf("done forget still held: %v", r.d.forgets)
+	}
+	// The source keeps its duty: it drops the reference.
+	src.gen, src.lines, src.refs = 2, []string{"Notes: task 4 finished; reply MORE 4 for it."}, []string{"owner:b"}
+	r.boot(srcs)
+	if len(r.d.st.Forgets) != 0 || len(r.d.forgets) != 0 {
+		t.Fatalf("done forget kept after a reboot: %q", r.d.st.Forgets)
+	}
+	if held := r.holding("owner:a"); held != 0 {
+		t.Fatalf("%d batches hold the forgotten reference", held)
+	}
+	if bs := r.batches(); bs[0].State != digestqueue.Unknown || !bs[0].Redacted || bs[0].Attempts != 1 {
+		t.Fatalf("unknown batch %+v", bs[0])
+	}
+	if r.status() != digestUnknownStatus {
+		t.Fatalf("status %q", r.status())
+	}
+	r.tr.out = nil
+	r.at(1, 8, 0)
+	got := r.tr.sent()
+	if len(got) != 2 || !strings.Contains(got[1], fmt.Sprintf(digestUnknownLine, "Mon 5 Oct")) {
+		t.Fatalf("day 1: %q", got)
+	}
+	for _, s := range got[1:] {
+		if strings.Contains(s, "task 3") {
+			t.Fatalf("forgotten line sent: %q", s)
 		}
 	}
 }
