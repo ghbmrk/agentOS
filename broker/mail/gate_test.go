@@ -94,8 +94,8 @@ func newGated(t *testing.T, edit func(*mail.Config)) *gated {
 	t.Helper()
 	var eng *journal.Engine
 	x := newH(t, func(c *mail.Config) {
-		c.Authorized = func(action string, since time.Time) []journal.Intent {
-			return eng.AuthorizedSince("mail", action, since)
+		c.InUse = func(action string, since time.Time) []journal.Use {
+			return eng.InUse("mail", action, since)
 		}
 		c.Contacts = func(a string) bool { return a == "sam@example.com" || a == "bob@example.com" }
 		if edit != nil {

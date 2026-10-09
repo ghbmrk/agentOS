@@ -75,3 +75,9 @@ Release findings on `broker/mail` from Security on #428 (SR3-2, point 1, [note](
 - **Builder model:** strongest model (risk tier A: `broker/mail` is a mail adapter path). One package per session, tests first. Run `python3 tools/risk_tier.py --git origin/main HEAD` before opening the PR.
 - **Review:** L3 on the strongest model with the threat check above, then the lens stages and a separate Security section (OPERATING §3–4).
 - **Estimate/checkpoint:** about 110k tokens; this is a checkpoint, not a ceiling (OPERATING §5). At the checkpoint, ship whichever row is green if the other is still red (see "Why one package").
+
+### Delivery notes
+
+- `Config.Authorized` is replaced by `Config.InUse` (`journal.Engine.InUse`); `broker/journal` is unchanged. `broker/vm/gvisor/corpus_test.go` is outside the declared scope and changed only to compile against the new field.
+- The test harness's `run` now calls `Escalate` before `Execute`, as the gate's dispatch recheck does; `TestQueuedActionAfterRestartAcrossAReset` gains that recheck for its second attempt.
+- Pins are in memory (ASSUMPTIONS M16); delete and report-spam are not pinned (release finding). Undo of a validity-0 flag change is skipped (M17).
