@@ -295,8 +295,8 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W5-Da | [Digest contract and durable digest queue](briefs/W5-Da.md) | W3 | primary; unclaimed | queued (B; from #263/#266/#267) |
 | UX3-1 | [Visible provider sign-in and bounded retry](briefs/UX3-1.md) | P2-2w c4 | primary; unclaimed | queued (A; from #405) |
 | UX3-6 | [Inspect every approval item over the owner channel](briefs/UX3-6.md) | L1 read-only command grammar | primary; unclaimed | queued (A; from #405) |
-| UX3-7 | [Truthful, bounded withheld-result retrieval](briefs/UX3-7.md) | CH-20p split accepted | primary; unclaimed | queued (A; from #405) |
-| UX4-1 | [Preserve explicit choices on failed setup retries](briefs/UX4-1.md) | P2-2w c4 | primary; unclaimed | queued (A; from #417) |
+| UX3-7 | [Truthful, bounded withheld-result retrieval](briefs/UX3-7.md) | CH-20p minimum split promoted to Release in LATER.md (D-079 spec-diff) | primary; unclaimed | queued (A; from #405) |
+| UX4-1 | [Preserve explicit choices on failed setup retries](briefs/UX4-1.md) | P2-2w c4; UX3-4 (acc. 6 only) | primary; unclaimed | queued (A; from #417) |
 | UX4-2 | [Visible phone fallback and actionable errors](briefs/UX4-2.md) | P2-2w c4 | primary; unclaimed | queued (A; from #417) |
 | W5a | [Loop 2 passive checks](briefs/W5a.md) | #54 merged, W3 | builder B (lenses) | merged (3d2daab; #169) |
 | W5a-resume | [Per-grant resume on the local page](briefs/W5a-resume.md) | W5a, local page | builder (session_014jQE43g7uFA46BsQJD3VGh) | in review (tier A) |

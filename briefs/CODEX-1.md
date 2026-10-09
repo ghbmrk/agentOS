@@ -25,10 +25,10 @@ The UX review documents and synthetic evidence from #405 and #417 are imported a
 | UX3-2..5, UX3-8..12 | #405 | Proposed release; promote one at a time once UX3-1/6/7 land. UX3-4 also gates UX4-1 acceptance 6 |
 | UX4-3..6 | #417 | UX4-3/4 need an L1 design gate; UX4-5 needs UX3-1; UX4-6 is an acceptance extension |
 | ARCH1-1, ARCH1-2 | #447 | Architecture proposals; L1 decides before any brief |
-| POT-P3a, POT-P5, POT-P6 | #387, #390, #388 | Need H6; #387's broker job fails `TestNoThirdPersonSelfReference` (daemon.go:162) |
+| POT-P3a, POT-P5, POT-P6 | #387, #399, #390, #388 | Need H6; #387's broker job fails `TestNoThirdPersonSelfReference` (daemon.go:162) |
 | INT-A | #261 | Needs H6 evidence |
 | W7-A | #264 | Needs H6; W7 is blocked (LATER.md) |
-| W5-Db (digest sources, D4–D8), W5-Dc (owner outbox, D12–D28) | #263→#435 stack | Follow W5-Da; D29–D67 (pacing-lease self-hardening) wait for a defect that needs them |
+| W5-Db (digest sources, D4–D8; attempt-to-transport join D9, crash matrix D10, receipt fuzz D11), W5-Dc (owner outbox, D12–D28) | #263→#435 stack, incl. #274, #276, #277 | Follow W5-Da; D29–D67 (pacing-lease self-hardening) wait for a defect that needs them |
 | SUB-2, SUB-3 | own drafts | Parked on CAP-14 / #328 |
 | S5-R | #259 | claude2's lane (docs/LANES.md); handed to them |
 | H4, H5, H7 | own drafts | Codex workflow tooling; not needed by this repo's lanes |
