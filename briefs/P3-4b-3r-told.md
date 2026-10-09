@@ -1,6 +1,6 @@
 # P3-4b-3r-told: the owner's last text about a finding matches its state
 
-Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md)); SPEC LOOP-9, LOOP-7. Written 2026-10-09 from the #585 (P3-4b-3r-pass) and #586 (P3-4b-3r-fuzz) review records.
+Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md)); SPEC LOOP-9, LOOP-7, CH-15. Written 2026-10-09 from the #585 (P3-4b-3r-pass) and #586 (P3-4b-3r-fuzz) review records.
 
 **Package:** P3-4b-3r-told, carrying P3-4b-3r-text. Both change what the owner is told when a LOOP-7 finding clears and returns. Both edit the same functions: the close paths' cleared lines and `Report`'s return text in `broker/loops`, and loop7's `Digest`. Split, they would conflict line by line.
 
@@ -8,7 +8,7 @@ Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md));
 
 **Dependencies, all merged:** P3-4b-3r-pass (#585, c9f7be1), and P3-4b-3r-fuzz (#586, 982e317), whose `CloseTarget` is one of the close paths.
 
-**Parallel work.** P3-4b-3h-r2 edits `CloseTarget`'s refusal and producer check in `loops/report.go`. This package edits only its cleared-line and `ToldCleared` lines. Whoever merges second rebases.
+**Parallel work.** P3-4b-3h-r2 edits `CloseTarget`'s refusal and producer check in `loops/report.go`, drops or ignores `Closure.Produced`, and adds `Finding`/`Record` fields in `loops/secure.go`. Both packages edit `loops/hang_test.go` (fixtures that set `Produced`) and loops `ASSUMPTIONS.md`. Build after 3h-r2 merges, and write the flap helper's `CloseTarget` adapter against the contract it leaves; if this package goes first, 3h-r2 rebases onto the adapter. P3-4b-4c-dedupe edits `Guard.batch` and `Guard.Digest` in `secure.go` and keys on final line text, which this package's "It is back: " lead changes; whoever merges second reruns both packages' tests. P3-4b-3r-env-r1 edits a different row of `reviews/security/README.md`.
 
 ## Goal
 
@@ -16,7 +16,7 @@ A finding that flaps never leaves the owner on a text that disagrees with its st
 
 ## IDs
 
-LOOP-9 (the owner is told, and told when it ends; plain words with a step). Tests carry `REQ: LOOP-9`.
+LOOP-9 (the owner is told, and told when it ends; plain words with a step) and CH-15 (unsolicited texts are paced and held in quiet hours; requirement 5). Tests carry `REQ: LOOP-9`, and requirement 5's `urgent` test also `CH-15`.
 
 ## Sources
 
@@ -58,7 +58,9 @@ LOOP-9 (the owner is told, and told when it ends; plain words with a step). Test
    - the lens test's no-identifier and step rules still hold for the led text.
 5. **A texted return's clearing is texted once** (3r-text). Today, after a texted return, its own clearing goes to the digest only, so the owner's last text says the finding is open after it closed. Text that clearing once, through the same "Cleared: …" line, and do not set `ToldCleared` for it. A further return within `ReText` is then an untexted `Again`, digest only. A flap therefore costs at most alert, cleared, back, cleared per `ReText`, four texts where today it is three, and the owner's last text is always true.
 
-   Record the new bound in S39. UX offered a digest-only "Cleared again: …" instead. This brief picks the text because the false "open" was UX's finding; Mark may demote it.
+   The extra "Cleared" is an unsolicited non-urgent text, so it goes through CH-15's pacing and quiet-hours path like any other: it goes through `Notify` with `urgent` false, so the owner channel's CH-15 pacing and quiet hours apply to it downstream. Test that the extra "Cleared" is sent with `urgent` false. Check that the sink `agentosd` wires to `Notify` paces non-urgent loops texts; if it does not, that is a finding (a release row against the sink), not a change here.
+
+   Record the new bound in S39. UX offered a digest-only "Cleared again: …" instead. That is an open lens tension, and OPERATING §4 settles it in the batched screen (`reviews/arbitration/README.md`), not here. The builder builds the text route through CH-15's path, notes the tension on the PR's Findings line as open arbitration, and the screen's record decides; if it picks the digest, requirement 5 becomes the digest-only line.
 
    Tests: the full sequence's texts, in order, through the helper for `Pass` and `CloseTarget`; a third return within `ReText` is untexted.
 6. **LOOP-7's digest lines give a step and do not repeat each other** (3r-text). In loop7 F14's `Digest`:

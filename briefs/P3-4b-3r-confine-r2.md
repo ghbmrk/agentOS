@@ -1,6 +1,6 @@
 # P3-4b-3r-confine-r2: the fuzz user's file system reach is its own tree, bounded
 
-Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md)); SPEC LOOP-1, LOOP-7, ARC-2, RES-4. Written 2026-10-09 from the #588 (P3-4b-3r-confine) review records.
+Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md)); SPEC LOOP-1, LOOP-7, RES-4. Written 2026-10-09 from the #588 (P3-4b-3r-confine) review records.
 
 **Package:** P3-4b-3r-confine-r2, carrying P3-4b-3r-confine-r4. Both are about where the fuzz user can write and how much, and both change the image's tmpfiles, `fuzzJail` in agentosd and the jail's start attributes.
 
@@ -8,7 +8,7 @@ Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md));
 
 **Dependencies, all merged:** P3-4b-3r-confine (#588, bba009a).
 
-**Parallel work.** P3-4b-3r-confine-r3 edits `agentosd.service` and `fuzzLimits`, and confine-r5 and -r6 edit other `loop7.go` functions. Shared files: `learn.go`, `loop7.go`, and agentosd and loop7 `ASSUMPTIONS.md`. Whoever merges second rebases.
+**Parallel work.** P3-4b-3r-confine-r3 edits `agentosd.service`, `fuzzLimits` and adds a prctl in the jail's start path; confine-r5 and -r6 edit other `loop7.go` functions, -r5 including `run`'s output collection; 3h-r2 edits `Fuzz`, `hang` and `closeHangs`. Shared across the five loop7 packages (3h-r2, confine-r2, -r3, -r5, -r6): `confine_test.go` (all five); loop7 F16 (3h-r2, confine-r2, -r5, -r6); `Jail.attr` and `run`'s start path in `loop7.go` (confine-r2's `Cloneflags`, -r3's prctl, -r5's output collection); `tests/test_image.py`, the `ci.yml` machines job and agentosd L7-6 (confine-r2 and -r3). Also shared: `learn.go`, and agentosd and loop7 `ASSUMPTIONS.md` (agentosd's also with env-r1, which edits L7-2). Whoever merges second rebases.
 
 ## Goal
 
@@ -16,7 +16,7 @@ A fuzz child can read and write only its own tree, plus what the engine needs. I
 
 ## IDs
 
-ARC-2 (the child holds none of the broker's authority), LOOP-1 (it cannot starve the broker: disk, memory), RES-4 (disk reserve). Tests carry `REQ: ARC-2, LOOP-1`.
+LOOP-7 (a fuzz child runs with no more authority than any guest), LOOP-1 (it cannot starve the broker: disk, memory), RES-4 (disk reserve, enforced by a quota). Tests carry `REQ: LOOP-7, LOOP-1, RES-4`. No SPEC ID covers the confinement beyond LOOP-7's guest bound; if a test checks something LOOP-7 does not state, stop and escalate for an L1 spec-diff rather than tag another ID.
 
 ## Sources
 

@@ -1,6 +1,6 @@
 # P3-4b-3r-confine-r5 and -r6: the jail's defences are tested and its reads, output and kill are bounded
 
-Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md)); SPEC LOOP-1, LOOP-7, ARC-2. Written 2026-10-09 from the #588 (P3-4b-3r-confine) review records.
+Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md)); SPEC LOOP-1, LOOP-7. Written 2026-10-09 from the #588 (P3-4b-3r-confine) review records.
 
 **What this brief covers.** BOARD row P3-4b-3r-confine-r5 lists eight points. They split by function into two packages, each sized for one session:
 
@@ -17,13 +17,13 @@ The `hang.json` parts of points 1 and 4 are not here. P3-4b-3h-r2 removes the fi
 
 **Where the root tests run.** Every new test that needs root or cgroup v2 skips without `AGENTOS_CGROUP_PARENT` and runs in the `machines` job's "Machine tests as root" step. That step already runs `./loop7`, from #588. The PR shows each new root test as RUN then PASS there.
 
-**Parallel work.** The two packages edit different functions of `loop7.go` and can run in parallel; the second to merge rebases. P3-4b-3h-r2 edits `Fuzz`, `hang` and `closeHangs`, and P3-4b-3r-confine-r2 edits `Jail` and `run`'s `SysProcAttr`. A conflict is a rebase, not a redesign.
+**Parallel work.** The two packages edit different functions of `loop7.go` and can run in parallel; the second to merge rebases. P3-4b-3h-r2 edits `Fuzz`, `hang` and `closeHangs`; P3-4b-3r-confine-r2 edits `Jail` and `run`'s `SysProcAttr`, and -r3 adds a prctl in the same start path. Shared across the five loop7 packages (3h-r2, confine-r2, -r3, -r5, -r6): `confine_test.go` (all five); loop7 F16 (3h-r2, confine-r2, -r5, -r6); `Jail.attr` and `run`'s start path in `loop7.go` (confine-r2's `Cloneflags`, -r3's prctl, -r5's output collection); `tests/test_image.py`, the `ci.yml` machines job and agentosd L7-6 (confine-r2 and -r3). A conflict is a rebase, not a redesign.
 
 ## P3-4b-3r-confine-r5
 
 **Goal:** each of F16's defences fails a test when reverted, and nothing the fuzz user can grow lands unbounded in broker memory.
 
-**IDs:** ARC-2 (the child cannot reach outside its tree through root), LOOP-1 (a child cannot exhaust the broker). Tests carry `REQ: ARC-2, LOOP-1`.
+**IDs:** LOOP-7 (a fuzz child has no more authority than any guest, so it cannot reach outside its tree through root), LOOP-1 (a child cannot exhaust the broker). Tests carry `REQ: LOOP-7, LOOP-1`.
 
 **Sources:** BOARD P3-4b-3r-confine-r5 points 1 to 5. #588 Security, comments 6081240541, 6080932863 and 6080853844; L3, comments 6080174845 (point 3) and 6080932863; loop7 F16.
 
@@ -64,7 +64,7 @@ The `hang.json` parts of points 1 and 4 are not here. P3-4b-3h-r2 removes the fi
 
 **Goal:** emptying the fuzz leaf always ends with no fuzz process alive, and within LOOP-1's preemption target.
 
-**IDs:** LOOP-1 (the agent gets the box back within 2 s), ARC-2. Tests carry `REQ: LOOP-1, ARC-2`.
+**IDs:** LOOP-1 (the agent gets the box back within 2 s), LOOP-7 (no more authority than any guest). Tests carry `REQ: LOOP-1, LOOP-7`.
 
 **Sources:** BOARD P3-4b-3r-confine-r5 points 6 to 8: #588 Security 4a L-a and L-b (comment 6080212450), and the tier-A containment gap confirmed in `loop7.go` (L3, comment 6080174845 point 1).
 

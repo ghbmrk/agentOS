@@ -1,6 +1,6 @@
 # P3-4b-3r-confine-r3: fuzz children cannot gain privileges; the fuzz leaf's memory cap is measured
 
-Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md)); SPEC LOOP-1, LOOP-7, ARC-2, RES-2. Written 2026-10-09 from the #588 (P3-4b-3r-confine) review records.
+Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md)); SPEC LOOP-1, LOOP-7, RES-2. Written 2026-10-09 from the #588 (P3-4b-3r-confine) review records.
 
 **Package:** P3-4b-3r-confine-r3, carrying P3-4b-3r-confine-r1. Both are small changes to how agentosd starts and sizes the jail:
 - r3 adds one systemd line or one prctl and a root test;
@@ -10,7 +10,7 @@ Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md));
 
 **Dependencies, all merged:** P3-4b-3r-confine (#588, bba009a).
 
-**Parallel work.** P3-4b-3r-confine-r2 edits `fuzzJail`, `Jail`'s `Cloneflags` and the tmpfiles. This package edits `agentosd.service` and `fuzzLimits`, and the jail's start path in `loop7.go`. Whoever merges second rebases.
+**Parallel work.** P3-4b-3r-confine-r2 edits `fuzzJail`, `Jail`'s `Cloneflags` and the tmpfiles. This package edits `agentosd.service` and `fuzzLimits`, and the jail's start path in `loop7.go`. Shared across the five loop7 packages (3h-r2, confine-r2, -r3, -r5, -r6): `confine_test.go` (all five); loop7 F16 (3h-r2, confine-r2, -r5, -r6); `Jail.attr` and `run`'s start path in `loop7.go` (confine-r2's `Cloneflags`, -r3's prctl, -r5's output collection); `tests/test_image.py`, the `ci.yml` machines job and agentosd L7-6 (confine-r2 and -r3). Whoever merges second rebases.
 
 ## Goal
 
@@ -18,7 +18,7 @@ A fuzz child can never gain privileges through a setuid or file-capability binar
 
 ## IDs
 
-ARC-2 (the child holds none of the broker's authority), LOOP-1 (fuzzing never starves the agent), RES-2 (memory budget). Tests carry `REQ: ARC-2, LOOP-1`.
+LOOP-7 (a fuzz child runs with no more authority than any guest), LOOP-1 (fuzzing never starves the agent), RES-2 (memory budget). Tests carry `REQ: LOOP-7, LOOP-1`.
 
 ## Sources
 
@@ -32,7 +32,7 @@ ARC-2 (the child holds none of the broker's authority), LOOP-1 (fuzzing never st
      - start the child from a goroutine locked with `runtime.LockOSThread`, after `prctl(PR_SET_NO_NEW_PRIVS, 1)` on that thread;
      - let the goroutine exit still locked, so the thread is discarded.
 
-     The flag is per thread and is inherited across clone. Write down why Go's `forkExec` clones from the calling thread. If that cannot be shown, wrap the child in a tiny root-owned exec shim in the release that sets the flag and execs the target; record the choice in F2.
+     The flag is per thread and is inherited across clone. Write down why Go's `forkExec` clones from the calling thread. If that cannot be shown, stop and report it as a finding: the fallback, a root-owned exec shim in the release that sets the flag and execs the target, is a new shipped binary and a supply-chain change outside this package's scope, so it gets its own BOARD row with its image test.
    - **On the unit, if the audit passes.** Add `NoNewPrivileges=yes` to `agentosd.service`.
      - First, audit every binary agentosd starts. `daemon` `TestEveryChildGetsAnExplicitEnvironment` enumerates the call sites: runsc, chronyc, arecord and aplay, the guest bridge, the fuzz children, and `probecmd`'s.
      - For each one, confirm it needs no setuid bit and no file capability as agentosd runs it, as root. List the results in the PR.

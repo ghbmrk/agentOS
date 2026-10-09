@@ -1,6 +1,6 @@
 # P3-4b-3r-env-r1: the child-environment check catches the shapes it still passes
 
-Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md)); SPEC ARC-2, LOOP-7. Written 2026-10-09 from the #587 (P3-4b-3r-env) review records.
+Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md)); SPEC CRED-1, ARC-1, LOOP-7. Written 2026-10-09 from the #587 (P3-4b-3r-env) review records.
 
 **Package:** P3-4b-3r-env-r1 alone. It is one test-only check in one file. The BOARD row already folds the former LATER line P3-4b-3r-env-l1, which is no longer in LATER.md.
 
@@ -8,13 +8,15 @@ Board section: Phase 3: the agentic loops. Part of P3-4b ([P3-4b.md](P3-4b.md));
 
 **Dependencies, all merged:** P3-4b-3r-env (#587, 6473ce9).
 
+**Parallel work.** Low-conflict overlaps only: P3-4b-3r-told edits a different row of `reviews/security/README.md`, and P3-4b-3r-confine-r2, -r3 and -r6 edit agentosd `ASSUMPTIONS.md` (L7-6 and L7-3; this package edits L7-2). Whoever merges second rebases.
+
 ## Goal
 
 No non-test broker code can start a child process that inherits agentosd's environment without the check failing. The shapes the AST check still passes are each caught or narrowed, and the residue is named as procedural.
 
 ## IDs
 
-ARC-2 (the child-process path is reviewed). Tests carry `REQ: ARC-2`.
+CRED-1 (no reusable authentication material in I/O readable by a model-directed process; an inherited agentosd environment is such I/O) and ARC-1 (only the broker holds credentials). Tests carry `REQ: CRED-1`. ARC-2 is the inference ban and does not state this property; do not tag it.
 
 ## Sources
 
