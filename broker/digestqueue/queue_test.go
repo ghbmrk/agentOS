@@ -52,7 +52,7 @@ func ack(t *testing.T, q *Queue, b Batch) {
 func start(t *testing.T, q *Queue, b Batch) Batch {
 	t.Helper()
 	ack(t, q, b)
-	v, err := q.Begin(b.ID, at)
+	v, err := q.begin(b.ID, at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestSaveFailureNeverReturnsQueueAdmission(t *testing.T) {
 func TestOnlyExactSourceAcknowledgmentsAllowDispatch(t *testing.T) {
 	q, _ := queue(t)
 	b := enqueue(t, q, "change", 1)
-	if _, err := q.Begin(b.ID, at); !errors.Is(err, ErrUnacknowledged) {
+	if _, err := q.begin(b.ID, at); !errors.Is(err, ErrUnacknowledged) {
 		t.Fatal(err)
 	}
 	s := b.Snapshots[0]
@@ -104,7 +104,7 @@ func TestOnlyExactSourceAcknowledgmentsAllowDispatch(t *testing.T) {
 	}
 	ack(t, q, b)
 	ack(t, q, b)
-	if _, err := q.Begin(b.ID, at); err != nil {
+	if _, err := q.begin(b.ID, at); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -118,11 +118,11 @@ func TestAllSourcesMustBeAcknowledged(t *testing.T) {
 	if err = q.Acknowledge(b.ID, s.Source, s.Generation, s.Hash); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = q.Begin(b.ID, at); !errors.Is(err, ErrUnacknowledged) {
+	if _, err = q.begin(b.ID, at); !errors.Is(err, ErrUnacknowledged) {
 		t.Fatal(err)
 	}
 	ack(t, q, b)
-	if _, err = q.Begin(b.ID, at); err != nil {
+	if _, err = q.begin(b.ID, at); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -155,7 +155,7 @@ func TestRestartOfSendingIsUnknownAndNeverRedispatched(t *testing.T) {
 	if got.State != Unknown {
 		t.Fatal(got.State)
 	}
-	if _, err = q2.Begin(b.ID, at); !errors.Is(err, ErrState) {
+	if _, err = q2.begin(b.ID, at); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
 	if err = q2.Expire(at.Add(2 * time.Hour)); err != nil {
@@ -169,33 +169,33 @@ func TestRestartOfSendingIsUnknownAndNeverRedispatched(t *testing.T) {
 func TestUnknownRequiresExplicitNotSentEvidenceBeforeRetry(t *testing.T) {
 	q, _ := queue(t)
 	b := start(t, q, enqueue(t, q, "change", 1))
-	if err := q.Finish(b.ID, b.Attempts, OutcomeUnknown, ""); err != nil {
+	if err := q.finish(b.ID, b.Attempts, OutcomeUnknown, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.Begin(b.ID, at); !errors.Is(err, ErrState) {
+	if _, err := q.begin(b.ID, at); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
-	if err := q.Finish(b.ID, b.Attempts, NotSent, ""); !errors.Is(err, ErrInvalid) {
+	if err := q.finish(b.ID, b.Attempts, NotSent, ""); !errors.Is(err, ErrInvalid) {
 		t.Fatal("empty evidence enabled retry", err)
 	}
-	if err := q.Finish(b.ID, b.Attempts, NotSent, "adapter-proof-1"); err != nil {
+	if err := q.finish(b.ID, b.Attempts, NotSent, "adapter-proof-1"); err != nil {
 		t.Fatal(err)
 	}
-	retry, err := q.Begin(b.ID, at)
+	retry, err := q.begin(b.ID, at)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if retry.Attempts != 2 {
 		t.Fatal(retry.Attempts)
 	}
-	if err = q.Finish(b.ID, b.Attempts, TransportAccepted, "stale-receipt"); !errors.Is(err, ErrState) {
+	if err = q.finish(b.ID, b.Attempts, TransportAccepted, "stale-receipt"); !errors.Is(err, ErrState) {
 		t.Fatal("old attempt resolved new send", err)
 	}
 }
 func TestAcceptedIsTerminalAndDoesNotClaimVisibility(t *testing.T) {
 	q, st := queue(t)
 	b := start(t, q, enqueue(t, q, "change", 1))
-	if err := q.Finish(b.ID, b.Attempts, TransportAccepted, "transport-1"); err != nil {
+	if err := q.finish(b.ID, b.Attempts, TransportAccepted, "transport-1"); err != nil {
 		t.Fatal(err)
 	}
 	q2, err := New(st, limits)
@@ -206,7 +206,7 @@ func TestAcceptedIsTerminalAndDoesNotClaimVisibility(t *testing.T) {
 	if got.State != Accepted {
 		t.Fatal(got.State)
 	}
-	if _, err = q2.Begin(b.ID, at); !errors.Is(err, ErrState) {
+	if _, err = q2.begin(b.ID, at); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(got)
@@ -219,14 +219,14 @@ func TestAcceptedIsTerminalAndDoesNotClaimVisibility(t *testing.T) {
 func TestRetryLimitPersists(t *testing.T) {
 	q, st := queue(t)
 	b := start(t, q, enqueue(t, q, "change", 1))
-	if err := q.Finish(b.ID, 1, NotSent, "not-sent-1"); err != nil {
+	if err := q.finish(b.ID, 1, NotSent, "not-sent-1"); err != nil {
 		t.Fatal(err)
 	}
-	b, err := q.Begin(b.ID, at)
+	b, err := q.begin(b.ID, at)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = q.Finish(b.ID, b.Attempts, NotSent, "not-sent-2"); err != nil {
+	if err = q.finish(b.ID, b.Attempts, NotSent, "not-sent-2"); err != nil {
 		t.Fatal(err)
 	}
 	q2, err := New(st, limits)
@@ -237,7 +237,7 @@ func TestRetryLimitPersists(t *testing.T) {
 	if got.State != Failed {
 		t.Fatal(got.State)
 	}
-	if _, err = q2.Begin(b.ID, at); !errors.Is(err, ErrState) {
+	if _, err = q2.begin(b.ID, at); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
 }
@@ -273,7 +273,7 @@ func TestSourceLedgerBound(t *testing.T) {
 func TestExpiryPreventsSending(t *testing.T) {
 	q, _ := queue(t)
 	b := enqueue(t, q, "change", 1)
-	if _, err := q.Begin(b.ID, at.Add(time.Hour)); !errors.Is(err, ErrExpired) {
+	if _, err := q.begin(b.ID, at.Add(time.Hour)); !errors.Is(err, ErrExpired) {
 		t.Fatal(err)
 	}
 	if err := q.Expire(at.Add(time.Hour)); err != nil {
@@ -304,7 +304,7 @@ func TestExpiredBatchWithConsumedSourceIsHeldNotDropped(t *testing.T) {
 	if err != nil || len(h) != 1 || h[0].ID != b.ID {
 		t.Fatal(h, err)
 	}
-	if _, err = q.Begin(b.ID, at.Add(time.Hour)); !errors.Is(err, ErrExpired) {
+	if _, err = q.begin(b.ID, at.Add(time.Hour)); !errors.Is(err, ErrExpired) {
 		t.Fatal(err)
 	}
 	if err = q.Compact(); err != nil {
@@ -355,18 +355,18 @@ func TestDuplicateAcknowledgmentIsIdempotent(t *testing.T) {
 	}
 	b := enqueue(t, q, "change", 1)
 	ack(t, q, b)
-	started, err := q.Begin(b.ID, at)
+	started, err := q.begin(b.ID, at)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, state := range []string{"sending", "unknown", "accepted"} {
 		switch state {
 		case "unknown":
-			if err = q.Finish(b.ID, started.Attempts, OutcomeUnknown, ""); err != nil {
+			if err = q.finish(b.ID, started.Attempts, OutcomeUnknown, ""); err != nil {
 				t.Fatal(err)
 			}
 		case "accepted":
-			if err = q.Finish(b.ID, started.Attempts, TransportAccepted, "receipt-1"); err != nil {
+			if err = q.finish(b.ID, started.Attempts, TransportAccepted, "receipt-1"); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -393,7 +393,7 @@ func TestForgetPurgesPendingPayload(t *testing.T) {
 	if got.State != Cancelled || len(got.Snapshots) != 0 {
 		t.Fatal(got)
 	}
-	if _, err = q2.Begin(b.ID, at); !errors.Is(err, ErrState) {
+	if _, err = q2.begin(b.ID, at); !errors.Is(err, ErrState) {
 		t.Fatal(err)
 	}
 	raw, _ := st.Load()
@@ -417,8 +417,8 @@ func TestCompactionKeepsDedupeAndSequence(t *testing.T) {
 	q, st := queue(t)
 	b := enqueue(t, q, "change", 1)
 	ack(t, q, b)
-	started, _ := q.Begin(b.ID, at)
-	if err := q.Finish(b.ID, started.Attempts, TransportAccepted, "receipt-1"); err != nil {
+	started, _ := q.begin(b.ID, at)
+	if err := q.finish(b.ID, started.Attempts, TransportAccepted, "receipt-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := q.Compact(); err != nil {
@@ -674,7 +674,7 @@ func TestExistingFileStoreRestartsWithPrivateState(t *testing.T) {
 	}
 	b := enqueue(t, q, "change", 1)
 	ack(t, q, b)
-	started, err := q.Begin(b.ID, at)
+	started, err := q.begin(b.ID, at)
 	if err != nil {
 		t.Fatal(err)
 	}
