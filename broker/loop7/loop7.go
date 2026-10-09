@@ -373,9 +373,9 @@ func (s *Source) Urgent() bool {
 
 // Digest is Inner's digest lines (loops.Digester), which the scheduler
 // reads for STATUS, then one line when fuzzing is configured but no fuzz
-// step has completed for longer than Recheck, and one when a target
-// failed to run on each of its turns for a full cycle. Neither names a
-// target (P3-4b-3r-pass).
+// step has completed for longer than Recheck, or one when a target
+// failed to run on each of its turns for a full cycle, each with what
+// happens next. Neither names a target (P3-4b-3r-pass, P3-4b-3r-text).
 func (s *Source) Digest() []string {
 	var out []string
 	if d, ok := s.cfg.Inner.(loops.Digester); ok {
@@ -391,11 +391,13 @@ func (s *Source) Digest() []string {
 		broken = broken || n >= 2
 	}
 	s.mu.Unlock()
-	if since > s.Recheck() {
-		out = append(out, "Loop 2: my fuzz self-tests have not run for "+span(since)+".")
-	}
-	if broken {
-		out = append(out, "Loop 2: one of my fuzz self-tests cannot run.")
+	// Both lines describe one stall; the cannot-run line carries the more
+	// useful step, so the not-run line waits while it shows (F14).
+	switch {
+	case broken:
+		out = append(out, "Loop 2: one of my fuzz self-tests cannot run. The fix comes with an update.")
+	case since > s.Recheck():
+		out = append(out, "Loop 2: my fuzz self-tests have not run for "+span(since)+". I keep trying.")
 	}
 	return out
 }

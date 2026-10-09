@@ -592,10 +592,13 @@ func TestPausedAndFlapping(t *testing.T) {
 
 	// A High finding with nothing to pause flaps. The owner is texted the
 	// alert and that it cleared (S39); a return within ReText after that
-	// texted "Cleared" is texted again, so their last text is never a false
-	// all-clear (L3 #585 point 1). That return's clearing and any later
-	// return within ReText go to the digest only, so a flap costs at most
-	// three texts per ReText and the last one says it is back.
+	// texted "Cleared" is texted again, led "It is back: ", so their last
+	// text is never a false all-clear (L3 #585 point 1), and that
+	// return's own clearing is texted once more, so it never ends on "it
+	// is back" after it closed (P3-4b-3r-text). Later returns within
+	// ReText go to the digest only: at most four texts per ReText. The
+	// told mark survives a restart between the clear and the return
+	// (P3-4b-3r-told requirement 3; the json:"-" mutant fails here).
 	b2 := cleanBox()
 	b2.live["config/quiet.json"] = "edited"
 	r2 := newGuardRig(t, b2)
@@ -605,27 +608,81 @@ func TestPausedAndFlapping(t *testing.T) {
 	if len(r2.texts) != 2 || !strings.Contains(r2.texts[1], "Cleared: config/quiet.json.") {
 		t.Fatalf("texts %q, want the alert and one cleared", r2.texts)
 	}
+	r2.reopen(t)
 	b2.live["config/quiet.json"] = "edited"
 	r2.pass(t)
-	if len(r2.texts) != 3 || strings.Contains(r2.texts[2], "Cleared") || !strings.Contains(r2.texts[2], "config/quiet.json") {
-		t.Fatalf("return after a texted Cleared: texts %q, want it texted", r2.texts)
-	}
-	for i := 0; i < 3; i++ {
-		b2.live["config/quiet.json"] = "c1"
-		r2.pass(t)
-		b2.live["config/quiet.json"] = "edited"
-		r2.pass(t)
-	}
-	if len(r2.texts) != 3 {
-		t.Fatalf("flapping texts %q, want 3", r2.texts)
+	if len(r2.texts) != 3 || !strings.HasPrefix(r2.texts[2], "Security checks: It is back: Setting file config/quiet.json") {
+		t.Fatalf("return after a texted Cleared: texts %q, want it texted as back", r2.texts)
 	}
 	b2.live["config/quiet.json"] = "c1"
 	r2.pass(t)
+	if len(r2.texts) != 4 || !strings.Contains(r2.texts[3], "Cleared: config/quiet.json.") || r2.urgent[3] {
+		t.Fatalf("texts %q urgent %v, want the back's clearing texted once, not urgent", r2.texts, r2.urgent)
+	}
+	for i := 0; i < 3; i++ {
+		b2.live["config/quiet.json"] = "edited"
+		r2.pass(t)
+		b2.live["config/quiet.json"] = "c1"
+		r2.pass(t)
+	}
+	if len(r2.texts) != 4 {
+		t.Fatalf("flapping texts %q, want 4", r2.texts)
+	}
 	r2.now = r2.now.Add(25 * time.Hour)
 	b2.live["config/quiet.json"] = "edited"
 	r2.pass(t)
-	if len(r2.texts) != 4 || strings.Contains(r2.texts[3], "Cleared") {
-		t.Fatalf("texts after a day %q, want a fourth alert", r2.texts)
+	if len(r2.texts) != 5 || strings.Contains(r2.texts[4], "Cleared") || strings.Contains(r2.texts[4], "It is back") {
+		t.Fatalf("texts after a day %q, want a first alert again", r2.texts)
+	}
+}
+
+// P3-4b-3r-told requirement 1, through Pass: two texted findings share a
+// plain name (config/a! and config/a both read config/a). The one that
+// closes while the other is open says no "Cleared", so it is not marked,
+// and its return within ReText is digest-only. Two that close together
+// share one line and are both marked, so each one's return is texted.
+func TestPassMarksOnlyAClearItSaid(t *testing.T) {
+	b := cleanBox()
+	b.live["config/a!"], b.live["config/a"] = "x", "y"
+	r := newGuardRig(t, b)
+	r.pass(t)
+	before := len(r.texts)
+	delete(b.live, "config/a!")
+	r.now = r.now.Add(time.Hour)
+	r.pass(t)
+	b.live["config/a!"] = "x"
+	r.now = r.now.Add(time.Hour)
+	r.pass(t)
+	if got := r.texts[before:]; len(got) != 0 {
+		t.Fatalf("held clear, then its return: texts %q", got)
+	}
+	delete(b.live, "config/a!")
+	delete(b.live, "config/a")
+	r.now = r.now.Add(25 * time.Hour)
+	r.pass(t)
+	if got := clearedTexts(r.texts, before); len(got) != 1 || len(r.g.st.ToldCleared) != 1 {
+		t.Fatalf("cleared %q, marked %v", got, r.g.st.ToldCleared)
+	}
+	// config/a! came back as an untexted Again, so its close is digest
+	// only; config/a was texted, said and marked.
+	before = len(r.texts)
+	b.live["config/a"] = "y"
+	r.now = r.now.Add(time.Hour)
+	r.pass(t)
+	if got := r.texts[before:]; len(got) != 1 || !strings.HasPrefix(got[0], "Security checks: It is back: ") {
+		t.Fatalf("a marked return: texts %q", got)
+	}
+
+	b2 := cleanBox()
+	b2.live["config/a!"], b2.live["config/a"] = "x", "y"
+	r2 := newGuardRig(t, b2)
+	r2.pass(t)
+	delete(b2.live, "config/a!")
+	delete(b2.live, "config/a")
+	r2.now = r2.now.Add(time.Hour)
+	r2.pass(t)
+	if got := clearedTexts(r2.texts, 0); len(got) != 1 || len(r2.g.st.ToldCleared) != 2 {
+		t.Fatalf("closed together: cleared %q, marked %v", got, r2.g.st.ToldCleared)
 	}
 }
 
