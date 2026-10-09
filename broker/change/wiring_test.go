@@ -132,7 +132,7 @@ func TestDecidedDropsUnansweredWithoutDecline(t *testing.T) {
 		t.Fatal(r)
 	}
 	st, _ := e.eng.Get(adoptID(r.ID))
-	e.p.Decided(bg, st.Intent, false) // still pending: the request lapsed
+	e.p.Decided(bg, st.Intent, "") // still pending: the request lapsed
 	if _, err := e.p.Settle(bg, r.ID); err == nil {
 		t.Fatal("a lapsed proposal was kept")
 	}
@@ -149,8 +149,52 @@ func TestDecidedDropsUnansweredWithoutDecline(t *testing.T) {
 	if st.State != journal.Denied {
 		t.Fatal(st.State)
 	}
-	e.p.Decided(bg, st.Intent, true)
+	e.p.Decided(bg, st.Intent, "owner")
 	if d := e.p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "You declined security update 31;") {
 		t.Fatalf("%q", d)
+	}
+}
+
+// UPD-5 (P2-2a f3): a release dropped because its request closed without
+// the owner's answer is reported to Loop 3 once, so the next update check
+// offers it again; one the owner declined is not.
+func TestDecidedLapsedReleaseReportedOnce(t *testing.T) {
+	// REQ: UPD-5
+	e := newEnv(t, nil)
+	e.p.Attach(holdJournal{e.eng})
+	r := e.release(release(t, 30, true, map[string][]byte{"host-image/release": []byte("h")}))
+	if r.State != StateAwaitingOwner || e.p.Lapsed(r.ID) {
+		t.Fatalf("lapsed before the request closed: %+v", r)
+	}
+	st, _ := e.eng.Get(adoptID(r.ID))
+	e.p.Decided(bg, st.Intent, "expired") // the request expired unanswered
+	if !e.p.Lapsed(r.ID) {
+		t.Fatal("a lapsed release is not reported")
+	}
+	if e.p.Lapsed(r.ID) {
+		t.Fatal("a lapsed release is reported twice")
+	}
+
+	r = e.release(release(t, 31, true, map[string][]byte{"host-image/release": []byte("i")}))
+	e.eng.Authorize(bg, adoptID(r.ID)) // the owner says no
+	st, _ = e.eng.Get(adoptID(r.ID))
+	e.p.Decided(bg, st.Intent, "owner")
+	if e.p.Waiting(r.ID) || e.p.Lapsed(r.ID) {
+		t.Fatal("the owner's no reads as a lapse")
+	}
+
+	// Left out of a partial YES: dropped, not re-offered, and no decline.
+	r = e.release(release(t, 32, true, map[string][]byte{"host-image/release": []byte("j")}))
+	e.eng.Authorize(bg, adoptID(r.ID))
+	st, _ = e.eng.Get(adoptID(r.ID))
+	e.p.Decided(bg, st.Intent, "not chosen")
+	if e.p.Waiting(r.ID) || e.p.Lapsed(r.ID) {
+		t.Fatal("a release left out of a partial YES reads as a lapse")
+	}
+	if d := e.p.Digest(); len(d) != 1 {
+		t.Fatalf("a release left out of a partial YES reads as a decline: %q", d)
+	}
+	if e.p.Lapsed("c999") {
+		t.Fatal("an unknown proposal reads as lapsed")
 	}
 }
