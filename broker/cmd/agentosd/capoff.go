@@ -1,10 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -14,6 +14,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/loops"
+	"github.com/ghbmrk/agentos/broker/modelroute"
 )
 
 // The capability-off lines (OP-9, OP9-status-a): each capability that is
@@ -43,6 +44,10 @@ const (
 	modelUnset = "Model: not set up, so the agent cannot think or learn; " + fixUpdate + "."
 	// C2: the model route does not answer.
 	modelUnreachable = "Model: not reachable, so the agent cannot think and learning cannot test changes; " + fixRestart + "."
+	// C2: no model provider is granted (A11's no-grant cause).
+	modelNoGrant = "Model: no AI plan or key is connected, so no agent can think or learn; add one on the Wi-Fi page."
+	// C2: the vault is not open, so the model route serves nothing.
+	modelLocked = "Model: the vault is locked, so the agent cannot think or learn; unlock it on the local page."
 	// C7: no recall directory or vault verifier.
 	recallOffLine = "Memory across tasks: off on this box; " + fixUpdate + "."
 	// C9: the question book or the box clock did not open.
@@ -57,7 +62,7 @@ const (
 
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
-	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable,
+	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked,
 		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, routingHeldLine}
 }
 
@@ -256,15 +261,18 @@ func (s *capState) routingLine() string {
 // modelProbeEvery is how long a model-route probe is believed.
 const modelProbeEvery = time.Minute
 
-// modelProbe says whether the vault process's model socket exists,
-// checked at most once a minute. It looks without dialing, since agentosd
-// links no network client (ARC2). agentos-egress opens the socket at serve
-// start, before unlock and whatever the grants, so C2 shows only when the
-// vault process is not serving; no grant, a locked vault, or a socket
-// that stopped answering all read as up (ASSUMPTIONS S8, S12).
+// modelProbeWait bounds one probe, which STATUS waits on.
+const modelProbeWait = 3 * time.Second
+
+// modelProbe is C2's view of the model route, asked of the vault process
+// at most once a minute through modelroute's state probe (CRED-5f-mr):
+// whether it answers, whether a model provider is granted, and whether
+// the vault is open. agentosd dials nothing itself (ARC2); modelroute is
+// its one client of the vault process's model socket. A probe that gets
+// no well-formed answer reads as not reachable, never as the last state.
 type modelProbe struct {
-	socket string
-	now    func() time.Time
+	state func(context.Context) modelroute.ModelState // nil: no model route set up
+	now   func() time.Time
 
 	mu   sync.Mutex
 	at   time.Time
@@ -273,23 +281,41 @@ type modelProbe struct {
 }
 
 func newModelProbe(socket string) *modelProbe {
-	return &modelProbe{socket: socket, now: time.Now}
+	p := &modelProbe{now: time.Now}
+	if socket != "" {
+		p.state = modelroute.NewStateProbe(socket)
+	}
+	return p
 }
 
-// Line is C2's line, "" when the socket is there.
+// Line is C2's line, "" while the model route can serve.
 func (p *modelProbe) Line() string {
-	if p.socket == "" {
+	if p.state == nil {
 		return modelUnset
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if now := p.now(); !p.done || now.Sub(p.at) >= modelProbeEvery {
-		p.line, p.at, p.done = "", now, true
-		if fi, err := os.Stat(p.socket); err != nil || fi.Mode()&os.ModeSocket == 0 {
-			p.line = modelUnreachable
-		}
+		ctx, cancel := context.WithTimeout(context.Background(), modelProbeWait)
+		p.line = modelLine(p.state(ctx))
+		cancel()
+		p.at, p.done = now, true
 	}
 	return p.line
+}
+
+// modelLine is C2's line for st. With no grant, unlocking would not help,
+// so that line comes before the locked one.
+func modelLine(st modelroute.ModelState) string {
+	switch {
+	case !st.Reachable:
+		return modelUnreachable
+	case !st.Granted:
+		return modelNoGrant
+	case !st.Open:
+		return modelLocked
+	}
+	return ""
 }
 
 // digestSources is DIG-1's one list of what the digest repeats: the

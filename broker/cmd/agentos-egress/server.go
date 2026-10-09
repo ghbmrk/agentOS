@@ -41,8 +41,15 @@ var machineRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 //
 // A replay machine's calls (modelroute.EvalPrefix) take the evaluation
 // route, ev; see evalRoute.
+//
+// A request with modelroute.HeaderState is the broker's state probe (OP-9
+// C2), answered whatever the vault's phase; see modelState.
 func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(modelroute.HeaderState) != "" {
+			modelState(c, w, r)
+			return
+		}
 		machine := r.Header.Get(modelroute.HeaderMachine)
 		if !machineRE.MatchString(machine) {
 			http.Error(w, "no machine named", http.StatusBadRequest)
@@ -79,6 +86,19 @@ func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 			w.Header().Set(modelroute.HeaderUsage, u)
 		}
 	})
+}
+
+// modelState answers the broker's state probe: whether a model provider is
+// granted and whether the vault is open, and nothing else (never a grant's
+// machine or provider, a key, or any vault content). Only the broker sends
+// HeaderState: modelroute.Forward drops a guest's copy.
+func modelState(c *custody, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.granted, Open: c.model() != nil})
 }
 
 // evalRoute is the model access of replay machines (LOOP-5, replay K1).

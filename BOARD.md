@@ -75,7 +75,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | S8-live | [S8 live part](briefs/S8-live.md) | see brief | queued |
 | S8-codex-terms | [Read OpenAI's current terms on a proxy holding ChatGPT-managed…](briefs/S8-codex-terms.md) | openai.com reachable | in review (decided: broker-held, unconfirmed route, #328; [note](spikes/S8-provider-workers/CODEX-TERMS.md)) |
 | CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | merged (#420) |
-| CRED-5f-mr | [Model line for STATUS through `modelroute`: C2 grant, lock and reachability state, replacing agentosd's socket stat (#525 records)](briefs/CRED-5f.md#added-scope-model-line-for-status-release-from-525) | CRED-5f | queued (tier A: `modelroute`, `cmd`) |
+| CRED-5f-mr | [Model line for STATUS through `modelroute`: C2 grant, lock and reachability state, replacing agentosd's socket stat (#525 records)](briefs/CRED-5f.md#added-scope-model-line-for-status-release-from-525) | CRED-5f | in review (tier A: `modelroute`, `cmd`) |
 | CRED-5t | [Broker-held route failure triggers and fail-closed refresh test](briefs/CRED-5t.md) | #328 | queued |
 | CRED-5w | [Owner pause and withdrawal notice for broker-held routes](briefs/CRED-5w.md) | #328 | queued |
 | S1 | [Screenless USB4-SSD boot on ≥3 unmodified PCs](briefs/S1.md) | Mark: hardware + hands | queued (test kit ready; waiting on hardware) |

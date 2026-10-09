@@ -103,6 +103,25 @@ func (g grants) Set(v string) error {
 	return nil
 }
 
+// modelProviders are the providers the model router serves.
+func modelProviders() []route.Provider { return []route.Provider{route.OpenAI(), route.Anthropic()} }
+
+// modelGranted reports whether some machine has a model provider granted:
+// an adapter the router serves (newRouter). Without one the agent has no
+// model route at all (OP-9 C2, A11's no-grant cause).
+func modelGranted(g grants) bool {
+	for _, as := range g {
+		for _, a := range as {
+			for _, p := range modelProviders() {
+				if a == p.Name() {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // adapters are the built-in relays. Their credentials are vault entries of
 // kind api_key named after the adapter.
 func adapters() []egress.Adapter {
@@ -187,7 +206,7 @@ func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderF
 
 func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
 	return route.New(route.Config{
-		Providers: []route.Provider{route.OpenAI(), route.Anthropic()},
+		Providers: modelProviders(),
 		Rule:      rule,
 		Granted: func(machine, provider string) bool {
 			for _, a := range g[grantsKey(machine)] {
@@ -347,6 +366,7 @@ func serveCmd(args []string) error {
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 		owner:     *ownerNumber,
+		granted:   modelGranted(g),
 	})
 	if err != nil {
 		return err
