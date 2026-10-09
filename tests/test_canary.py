@@ -304,7 +304,8 @@ class TargetEnvTest(unittest.TestCase):
         # A Python target may add LC_CTYPE itself when it starts in the C
         # locale (PEP 538); the harness never passes it.
         env.pop("LC_CTYPE", None)
-        self.assertEqual(set(env), {"PATH", "HOME", "TMPDIR", "CANARY_PLANT", "CANARY_ACK", "CANARY_SURFACE_DIR"})
+        self.assertEqual(set(env), {"PATH", "HOME", "TMPDIR", "GOTOOLCHAIN", "CANARY_PLANT", "CANARY_ACK",
+                                    "CANARY_SURFACE_DIR"})
         self.assertEqual(env["PATH"], os.environ["PATH"])
         self.assertEqual(env["HOME"], env["TMPDIR"])
         self.assertNotEqual(env["HOME"], os.environ.get("HOME"))
@@ -322,10 +323,12 @@ class TargetEnvTest(unittest.TestCase):
 
     def test_a_named_variable_comes_from_the_parent(self):
         with unittest.mock.patch.dict(os.environ):
+            os.environ.pop("GOFLAGS", None)
             os.environ.pop("GOTOOLCHAIN", None)
-            env, _ = self.seen_env(target_env=["GOCACHE", "GOTOOLCHAIN"])
+            env, _ = self.seen_env(target_env=["GOCACHE", "GOFLAGS", "GOTOOLCHAIN"])
         self.assertEqual(env["GOCACHE"], "/synthetic/gocache")
-        self.assertNotIn("GOTOOLCHAIN", env, "a name the parent does not set stays unset")
+        self.assertNotIn("GOFLAGS", env, "a name the parent does not set stays unset")
+        self.assertEqual(env["GOTOOLCHAIN"], "local", "or keeps the harness's default")
         self.assertNotIn(self.SECRET, env)
 
     def test_a_name_outside_the_allow_list_is_refused_at_load(self):
@@ -341,6 +344,21 @@ class TargetEnvTest(unittest.TestCase):
     def test_the_shipped_registry_names_only_allowed_variables(self):
         for t in canary.load_registry(ROOT / "assurance" / "canary-targets.json"):
             self.assertLessEqual(set(t.get("env", [])), canary.TARGET_ENV_ALLOWED)
+
+    def test_shipped_targets_never_get_a_cache_go_refuses(self):
+        # Security 4a on #583, point 1: probecmd starts the harness with
+        # GOCACHE=off, under which `go test` refuses to build, so a shipped
+        # target must not take GOCACHE from the parent.
+        for t in canary.load_registry(ROOT / "assurance" / "canary-targets.json"):
+            env, _ = self.seen_env(target_env=t.get("env", []), parent={"GOCACHE": "off"})
+            self.assertNotIn("GOCACHE", env, t["name"])
+
+    def test_a_target_never_fetches_a_go_toolchain(self):
+        # Security 4a on #583, point 2: GOTOOLCHAIN=local, so a round never
+        # downloads the toolchain go.mod names into its scratch home.
+        with unittest.mock.patch.dict(os.environ, {"GOTOOLCHAIN": "auto"}):
+            env, _ = self.seen_env()
+        self.assertEqual(env["GOTOOLCHAIN"], "local")
 
     def test_controls_get_the_minimal_environment_too(self):
         with unittest.mock.patch.dict(os.environ, {self.SECRET: canary.mint("api_key").value}):

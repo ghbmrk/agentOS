@@ -13,8 +13,9 @@ writes them to a trusted-only plant file, and runs the target with:
                       transcripts, packet captures)
 The harness scans that directory plus the target's stdout and stderr (logs).
 A target never inherits the harness's environment (#515 Security 2): it gets
-PATH, HOME and TMPDIR set to a scratch directory removed after the round, the
-CANARY_* variables, and the parent's value of each variable its registry entry
+PATH, HOME and TMPDIR set to a scratch directory removed after the round,
+GOTOOLCHAIN=local (no toolchain download), the CANARY_* variables, and the
+parent's value of each variable its registry entry
 names under "env" (only names in TARGET_ENV_ALLOWED; any other is refused at
 load).
 A round is an error, never clean, if the ack is missing or incomplete, the
@@ -396,7 +397,7 @@ def _env_names(target):
 
 def target_env(target, home, **canary_vars):
     """The whole environment a target runs with: never the harness's own."""
-    env = {"PATH": os.environ.get("PATH", DEFAULT_PATH), "HOME": home, "TMPDIR": home}
+    env = {"PATH": os.environ.get("PATH", DEFAULT_PATH), "HOME": home, "TMPDIR": home, "GOTOOLCHAIN": "local"}
     env.update({n: os.environ[n] for n in _env_names(target) if n in os.environ})
     env.update(canary_vars)
     return env
