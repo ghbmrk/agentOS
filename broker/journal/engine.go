@@ -624,6 +624,10 @@ type Use struct {
 	// Started: an attempt has been dispatched and was not shown to have
 	// done nothing. Otherwise the intent is authorized and waiting.
 	Started bool
+	// Erased: its content was removed under CAP-3, so Intent.Params no
+	// longer names its record; a scope bound counts it against every
+	// record (SR3-2-f3).
+	Erased bool
 }
 
 // InUse returns the intents on account with action that hold a place
@@ -655,7 +659,7 @@ func (e *Engine) InUse(account, action string, since time.Time) []Use {
 			out = append(out, Use{Intent: en.intent, Started: true})
 		case Succeeded:
 			if !en.dispatched.Before(since) {
-				out = append(out, Use{Intent: en.intent, Started: true})
+				out = append(out, Use{Intent: en.intent, Started: true, Erased: en.erased})
 			}
 		}
 	}
