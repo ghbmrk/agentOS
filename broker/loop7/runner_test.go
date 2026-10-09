@@ -492,13 +492,26 @@ func TestAHungTargetIsNotRetriedAsPreempted(t *testing.T) {
 }
 
 // Go's progress lines for one fuzz step, as Go 1.26 prints them to the
-// fuzz step's output: a baseline of 2 inputs, then the exec count.
+// fuzz step's output: a baseline of 2 inputs, then the exec count, one
+// line every 3 s.
 func progress(execs ...int) string {
+	var at []execsAt
+	for i, n := range execs {
+		at = append(at, execsAt{3 * (i + 1), n})
+	}
+	return progressAt(at...)
+}
+
+// execsAt is one exec count line: elapsed seconds and the count.
+type execsAt struct{ sec, execs int }
+
+// progressAt is progress with each line's elapsed time given.
+func progressAt(lines ...execsAt) string {
 	out := `echo "fuzz: elapsed: 0s, gathering baseline coverage: 0/2 completed"
 echo "fuzz: elapsed: 0s, gathering baseline coverage: 2/2 completed, now fuzzing with 1 workers"
 `
-	for i, n := range execs {
-		out += "echo \"fuzz: elapsed: " + strconv.Itoa(3*(i+1)) + "s, execs: " + strconv.Itoa(n) + " (0/sec), new interesting: 0 (total: 2)\"\n"
+	for _, l := range lines {
+		out += "echo \"fuzz: elapsed: " + (time.Duration(l.sec) * time.Second).String() + ", execs: " + strconv.Itoa(l.execs) + " (0/sec), new interesting: 0 (total: 2)\"\n"
 	}
 	return out + "echo PASS"
 }
@@ -513,17 +526,30 @@ func stepBin(body, tag string) string {
 // baseline is a target finding: a fuzzed input hung the worker and the
 // engine stopped at its deadline with no input stored. A rising count,
 // or a step too short to print a progress line, is not.
+//
+// 3h-r1: so is a step whose count, wherever it stands against the
+// baseline, has not moved for a whole progress period (3 s by the lines'
+// own elapsed fields) by its last line: a worker that hung after the
+// count moved. A count flat for less than a period is not.
 func TestAStalledFuzzStepIsReported(t *testing.T) {
 	for name, c := range map[string]struct {
 		body   string
 		report bool
 	}{
-		"stalled":            {progress(2, 2), true},
-		"stalled at once":    {progress(1), true},
-		"rising":             {progress(2, 900, 4000), false},
-		"no progress line":   {"echo PASS", false},
-		"baseline only":      {progress(), false},
-		"moved then stalled": {progress(40, 40), false},
+		"stalled":                        {progress(2, 2), true},
+		"stalled at once":                {progress(1), true},
+		"rising":                         {progress(2, 900, 4000), false},
+		"no progress line":               {"echo PASS", false},
+		"baseline only":                  {progress(), false},
+		"moved then stalled":             {progress(40, 40), true},
+		"rose, then flat a period":       {progressAt(execsAt{3, 400}, execsAt{6, 900}, execsAt{9, 900}), true},
+		"rose, then flat under a period": {progressAt(execsAt{3, 400}, execsAt{6, 900}, execsAt{8, 900}), false},
+		"one line past the baseline":     {progressAt(execsAt{3, 900}), false},
+		// The engine's last line comes as it stops, often a second
+		// after its last tick: the count is flat since the tick before.
+		"flat since an earlier line": {progressAt(execsAt{3, 400}, execsAt{6, 900}, execsAt{9, 900}, execsAt{10, 900}), true},
+		"flat across minutes":        {progressAt(execsAt{57, 400}, execsAt{60, 900}, execsAt{63, 900}), true},
+		"rose on the last line":      {progressAt(execsAt{3, 900}, execsAt{6, 900}, execsAt{9, 901}), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			release := t.TempDir()
@@ -547,6 +573,78 @@ func TestAStalledFuzzStepIsReported(t *testing.T) {
 	}
 }
 
+// 3h-r1: the step bounds the engine's minimizing below a progress
+// period, so an honest worker's count never stands for one while it
+// minimizes a new input (default 60 s).
+func TestAFuzzStepBoundsMinimizing(t *testing.T) {
+	release, args := t.TempDir(), filepath.Join(t.TempDir(), "args")
+	g := newFake()
+	tg := fakeTarget(t, release, stepBin(`echo "$@" > `+args+"\n"+progress(2, 900), "1"))
+	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release})
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 0 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	b, err := os.ReadFile(args)
+	if err != nil || !strings.Contains(string(b), " -test.fuzzminimizetime=1s") || minimizeTime >= progressPeriod/2 {
+		t.Fatalf("args %q %v", b, err)
+	}
+}
+
+// P3-4b-3r-confine l9 (#588, #615): Go's coordinator can stop at its own
+// -test.fuzztime yet exit 1 with "context deadline exceeded" (its done
+// channel closes before the workers' context is cancelled, a race load
+// widens). A step that ran its whole FuzzTime and failed only so is
+// judged by its progress, as a clean stop is; the same text before
+// FuzzTime has passed, or beside another failure, is still a step that
+// did not run.
+func TestAFuzzStepStoppedByItsOwnDeadlineIsJudgedByItsProgress(t *testing.T) {
+	deadline := "echo '--- FAIL: FuzzFake (0.30s)'\necho '    context deadline exceeded'\necho FAIL\nexit 1"
+	for name, c := range map[string]struct {
+		body   string
+		report int // findings; -1: the runner's error
+	}{
+		"stalled at its deadline":         {"sleep 0.3\n" + progress(1, 1) + "\n" + deadline, 1},
+		"good step at its deadline":       {"sleep 0.3\n" + progress(2, 5000) + "\n" + deadline, 0},
+		"deadline text before FuzzTime":   {progress(1, 1) + "\n" + deadline, -1},
+		"another failure":                 {"sleep 0.3\n" + progress(1, 1) + "\necho '--- FAIL: FuzzFake (0.30s)'\necho '    fuzzing process hung or terminated unexpectedly: exit status 2'\nexit 1", -1},
+		"deadline text and another error": {"sleep 0.3\n" + progress(1, 1) + "\necho '--- FAIL: FuzzFake (0.30s)'\necho '    context deadline exceeded'\necho '    exit status 2'\nexit 1", -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			release := t.TempDir()
+			g := newFake()
+			tg := fakeTarget(t, release, stepBin(c.body, "1"))
+			s := newSource(t, g, Config{Targets: []Target{tg}, Release: release, FuzzTime: 200 * time.Millisecond})
+			n, err := s.Fuzz(context.Background(), tg)
+			switch {
+			case c.report < 0:
+				if err == nil || !strings.Contains(err.Error(), "did not run") || len(g.reported) != 0 {
+					t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+				}
+			case err != nil || n != c.report || len(g.reported) != c.report:
+				t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+			case c.report == 1 && g.reported[0].Detail != loops.FuzzStallDetail:
+				t.Fatalf("reported %+v", g.reported)
+			}
+		})
+	}
+}
+
+// 3h-r1: a step judged a stall is never a good step, so it closes no
+// open hang finding, even from a new binary.
+func TestALateStallClosesNothing(t *testing.T) {
+	release := t.TempDir()
+	g := newFake()
+	tg := fakeTarget(t, release, stepBin(progress(2, 2), "1"))
+	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release})
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	fakeBin(t, release, "fake.test", stepBin(progress(400, 900, 900), "2"))
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 || len(g.closed) != 0 || len(g.open) != 1 {
+		t.Fatalf("n=%d err=%v open %v closed %v", n, err, g.open, g.closed)
+	}
+}
+
 // fileDigest is the SHA-256 the runner records for a binary.
 func fileDigest(t *testing.T, path string) string {
 	t.Helper()
@@ -559,8 +657,9 @@ func fileDigest(t *testing.T, path string) string {
 
 // 3h: a hang finding closes only on a good step (in time, exec count past
 // the baseline) of a binary other than the one that produced it; the
-// closure is not a replay, and the producing binary's digest survives a
-// restart.
+// closure is not a replay. 3h-r2: the runner reports the producing
+// binary's digest with the finding and passes only the step's own digest
+// and counts to close it; loops holds the producer, across a restart.
 func TestAHangClosesOnlyOnAGoodStepOfANewBinary(t *testing.T) {
 	for _, hang := range []string{loops.FuzzStallDetail, loops.FuzzOverrunDetail} {
 		t.Run(hang, func(t *testing.T) {
@@ -579,6 +678,9 @@ func TestAHangClosesOnlyOnAGoodStepOfANewBinary(t *testing.T) {
 				t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
 			}
 			produced := fileDigest(t, tg.Binary)
+			if g.reported[0].Producer != produced {
+				t.Fatalf("reported producer %q, want %q", g.reported[0].Producer, produced)
+			}
 
 			// The same binary completes a good step: still open.
 			if err := os.WriteFile(good, nil, 0o600); err != nil {
@@ -602,62 +704,79 @@ func TestAHangClosesOnlyOnAGoodStepOfANewBinary(t *testing.T) {
 			if len(g.resolved) != 0 {
 				t.Fatalf("a hang was resolved as a replay: %v", g.resolved)
 			}
-			if st, err := s.readHangs(tg); err != nil || st[hang] != "" {
-				t.Fatalf("state after the close: %v %v", st, err)
-			}
 		})
 	}
 }
 
-// A hang the same target shows again on a newer build records that build
-// as the producer, so a lucky good step of it closes nothing.
+// A hang the same target shows again on a newer build is reported with
+// that build as the producer, so a lucky good step of it closes nothing.
 func TestARepeatedHangRecordsTheNewerBuild(t *testing.T) {
-	release := t.TempDir()
+	release, good := t.TempDir(), filepath.Join(t.TempDir(), "good")
+	body := "if [ -e " + good + " ]; then\n" + progress(2, 5000) + "\nelse\n" + progress(2, 2) + "\nfi"
 	g := newFake()
-	tg := fakeTarget(t, release, stepBin(progress(2, 2), "1"))
+	tg := fakeTarget(t, release, stepBin(body, "1"))
 	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release})
 	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
-	fakeBin(t, release, "fake.test", stepBin(progress(2, 2), "2"))
+	fakeBin(t, release, "fake.test", stepBin(body, "2"))
 	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
-	if st, err := s.readHangs(tg); err != nil || st[loops.FuzzStallDetail] != fileDigest(t, tg.Binary) {
-		t.Fatalf("state %v %v", st, err)
+	newer := fileDigest(t, tg.Binary)
+	if len(g.reported) != 2 || g.reported[1].Producer != newer {
+		t.Fatalf("reported %+v", g.reported)
+	}
+	if err := os.WriteFile(good, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Fuzz(context.Background(), tg); err != nil || len(g.open) != 1 || len(g.closed) != 0 {
+		t.Fatalf("a good step of the newer producer: err=%v open %v closed %v", err, g.open, g.closed)
 	}
 }
 
-// A good step closes nothing when the producing binary is unknown (state
-// lost) or recorded through a link: it fails closed.
-func TestAHangWithNoTrustedProducerStaysOpen(t *testing.T) {
-	release := t.TempDir()
+// 3h-r2: the fuzz child owns the target's directory, so a hang record
+// there is the child's to forge. A good step whose child writes a
+// hang.json naming another producer still closes nothing for its own
+// binary, and a hang.json planted before any step is never read,
+// rewritten or removed.
+func TestAForgedHangRecordClosesNothing(t *testing.T) {
+	release, good := t.TempDir(), filepath.Join(t.TempDir(), "good")
+	// One build: it hangs until the file good exists, then steps well
+	// and forges a record naming another producer.
+	forge := `printf '%s' '{"` + loops.FuzzStallDetail + `":"` + strings.Repeat("b", 64) + `"}' > hang.json`
+	body := "if [ -e " + good + " ]; then\n" + forge + "\n" + progress(2, 5000) + "\nelse\n" + progress(2, 2) + "\nfi"
 	g := newFake()
-	tg := fakeTarget(t, release, stepBin(progress(2, 2), "1"))
+	tg := fakeTarget(t, release, stepBin(body, "1"))
+	planted := []byte(`{"` + loops.FuzzStallDetail + `":"` + strings.Repeat("c", 64) + `"}`)
+	plant := filepath.Join(tg.Dir, "hang.json")
+	if err := os.WriteFile(plant, planted, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release})
 	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
-	state := filepath.Join(tg.Dir, hangFile)
-	elsewhere := filepath.Join(t.TempDir(), "hang.json")
-	if err := os.Rename(state, elsewhere); err != nil {
+	if b, err := os.ReadFile(plant); err != nil || string(b) != string(planted) {
+		t.Fatalf("the planted record was touched: %q %v", b, err)
+	}
+	if err := os.WriteFile(good, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fakeBin(t, release, "fake.test", stepBin(progress(2, 5000), "2"))
-	if _, err := s.Fuzz(context.Background(), tg); err != nil || len(g.open) != 1 || len(g.closed) != 0 {
-		t.Fatalf("no state: err=%v open %v closed %v", err, g.open, g.closed)
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 0 || len(g.open) != 1 || len(g.closed) != 0 {
+		t.Fatalf("a forged record closed it: n=%d err=%v open %v closed %v", n, err, g.open, g.closed)
 	}
-	if err := os.Symlink(elsewhere, state); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Fuzz(context.Background(), tg); err == nil || len(g.open) != 1 || len(g.closed) != 0 {
-		t.Fatalf("linked state: err=%v open %v closed %v", err, g.open, g.closed)
+	if b, err := os.ReadFile(plant); err != nil || !strings.Contains(string(b), strings.Repeat("b", 64)) {
+		t.Fatalf("the child's own record was touched: %q %v", b, err)
 	}
 }
 
 // 3h, the real engine's control: a planted target that loops forever on
 // inputs longer than three bytes stops at -test.fuzztime with PASS, exit
-// 0 and no stored input; the runner reports it as a stall.
+// 0 and no stored input; the runner reports it as a stall. FuzzTime
+// leaves a loaded host (the -race suite) time to finish the baseline
+// and print an exec count before it stops (P3-4b-3r-confine l9: at 2 s a
+// step under load printed none, and was no stall and no good step).
 func TestAPlantedHangIsReported(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a test binary")
@@ -675,7 +794,37 @@ func TestAPlantedHangIsReported(t *testing.T) {
 	}
 	tg := Target{Pkg: "hangtarget", Name: "FuzzHang", Binary: bin, Dir: t.TempDir()}
 	g := newFake()
-	s := newSource(t, g, Config{Targets: []Target{tg}, FuzzTime: 2 * time.Second})
+	s := newSource(t, g, Config{Targets: []Target{tg}, FuzzTime: 6 * time.Second})
+	start := time.Now()
+	n, err := s.Fuzz(context.Background(), tg)
+	if err != nil || n != 1 || len(g.reported) != 1 || g.reported[0].Detail != loops.FuzzStallDetail {
+		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
+	}
+	t.Logf("reported after %v", time.Since(start))
+}
+
+// 3h-r1, the real engine's control: a planted target whose worker hangs a
+// second after its first call, once its exec count has moved past the
+// baseline, stops at -test.fuzztime with PASS, exit 0 and no stored
+// input; the runner reports it as a stall.
+func TestAPlantedLateHangIsReported(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a test binary")
+	}
+	src, err := filepath.Abs(filepath.Join("testdata", "latehang"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "latehang.test")
+	cmd := exec.Command("go", "test", "-c", "-fuzz=FuzzLateHang", "-o", bin, ".")
+	cmd.Dir = src
+	cmd.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=-mod=mod")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	tg := Target{Pkg: "latehang", Name: "FuzzLateHang", Binary: bin, Dir: t.TempDir()}
+	g := newFake()
+	s := newSource(t, g, Config{Targets: []Target{tg}, FuzzTime: 8 * time.Second})
 	start := time.Now()
 	n, err := s.Fuzz(context.Background(), tg)
 	if err != nil || n != 1 || len(g.reported) != 1 || g.reported[0].Detail != loops.FuzzStallDetail {
