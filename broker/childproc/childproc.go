@@ -36,6 +36,7 @@ var allowedKeys = map[string]string{
 	"TMPDIR":  "fuzz and probe children (loop7, probecmd): their scratch directory",
 	"GOCACHE": "Go fuzz and probe binaries (loop7, probecmd): off, so no cache outside scratch",
 	"GOFLAGS": "Go fuzz and probe binaries (loop7, probecmd): empty, so no flags from outside",
+	"LANG":    "the browser driver (browser): C.UTF-8, so page text decodes the same everywhere",
 }
 
 // deniedPrefix names agentosd's own configuration, the owner's number
@@ -225,6 +226,10 @@ func (c *Cmd) CombinedOutput() ([]byte, error) {
 
 // StdinPipe returns a pipe to the child's standard input.
 func (c *Cmd) StdinPipe() (io.WriteCloser, error) {
+	// Checked here too: a refused start would leave the pipe open.
+	if err := c.env.check(); err != nil {
+		return nil, err
+	}
 	w, err := c.c.StdinPipe()
 	if err != nil {
 		return nil, scrub(err)
@@ -234,6 +239,10 @@ func (c *Cmd) StdinPipe() (io.WriteCloser, error) {
 
 // StdoutPipe returns a pipe from the child's standard output.
 func (c *Cmd) StdoutPipe() (io.ReadCloser, error) {
+	// Checked here too: a refused start would leave the pipe open.
+	if err := c.env.check(); err != nil {
+		return nil, err
+	}
 	r, err := c.c.StdoutPipe()
 	if err != nil {
 		return nil, scrub(err)

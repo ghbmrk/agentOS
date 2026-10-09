@@ -414,6 +414,18 @@ func TestAMalformedEntryIsNotPrinted(t *testing.T) {
 	}
 }
 
+// A refused environment is refused before a pipe is made, so a refused
+// start leaves no pipe open (r8b: browser's driver takes both pipes).
+func TestARefusedEnvironmentMakesNoPipe(t *testing.T) {
+	c := Command(context.Background(), NewEnv("LD_PRELOAD=/x.so"), Options{}, "/bin/cat")
+	if _, err := c.StdinPipe(); err == nil || !strings.Contains(err.Error(), "not allowlisted") {
+		t.Errorf("StdinPipe: %v", err)
+	}
+	if _, err := c.StdoutPipe(); err == nil || !strings.Contains(err.Error(), "not allowlisted") {
+		t.Errorf("StdoutPipe: %v", err)
+	}
+}
+
 func TestNilContextPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {
