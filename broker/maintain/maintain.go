@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
@@ -50,6 +51,10 @@ type Proposer interface {
 	// owner's request closed unanswered (change.Pipeline.Lapsed). It must
 	// not call into Loop 3: it is called under Loop 3's lock.
 	Lapsed(id string) bool
+	// Adoptions lists the pipeline's adoptions (change.Pipeline.Adoptions),
+	// read to find one the applier dropped (Reverted == change.WhyDropped,
+	// SR3-4f-2-r1). It must not call into Loop 3.
+	Adoptions() []change.Adoption
 }
 
 // Config configures New.
@@ -192,6 +197,10 @@ type state struct {
 	Source string `json:"source,omitempty"`
 	// SaidSource is the source the digest last announced (OSS-10).
 	SaidSource string `json:"said_source,omitempty"`
+	// Recheck: the owner's attestor lists changed since the last check
+	// began, so a check is due at once and each TestedBy claim is
+	// retired unless its release still holds its authority (SR3-6f-4).
+	Recheck bool `json:"recheck,omitempty"`
 }
 
 // Loop3 is the maintenance loop's scheduler source.
@@ -206,6 +215,12 @@ type Loop3 struct {
 	// owner narrowed after it was read (SR3-6f-1). Taken before the
 	// store's lock, never with mu held.
 	policy sync.Mutex
+	// changes counts AttestorsChanged calls, bumped under policy, so a
+	// check clears State.Recheck only when none came after its read.
+	changes atomic.Uint64
+	// held is, per version with a TestedBy claim, the release as proposed
+	// (in memory only): the claim stands while its Security() does.
+	held map[int64]*update.Verified
 }
 
 var (
@@ -282,7 +297,7 @@ func (l *Loop3) Urgent() bool {
 		l.noteOfflineLocked()
 		return false
 	}
-	if !l.st.OfflineSince.IsZero() || l.st.Failure != "" {
+	if !l.st.OfflineSince.IsZero() || l.st.Failure != "" || l.st.Recheck {
 		return true
 	}
 	p := l.st.Pending
@@ -291,7 +306,7 @@ func (l *Loop3) Urgent() bool {
 
 // Next offers a check when one is due: daily, within the hour after a
 // failed check or for a security fix waiting for its attestation, and at
-// once when the box comes back online. Nothing is offered while offline.
+// once when the box comes back online or the attestor lists changed. Nothing is offered while offline.
 // Checks make no model calls, so modelOK does not matter.
 func (l *Loop3) Next(_ context.Context, _ bool) (loops.Job, bool) {
 	online := l.cfg.Online()
@@ -305,8 +320,9 @@ func (l *Loop3) Next(_ context.Context, _ bool) (loops.Job, bool) {
 	// Back online: due at once until a check runs, which clears
 	// OfflineSince, so a box that turns busy first does not lose it. A
 	// clock that went back behind the last attempt is not trusted to say
-	// a check is not due.
-	if l.st.OfflineSince.IsZero() && !l.st.LastAttempt.IsZero() && now.Before(l.st.Next) && !now.Before(l.st.LastAttempt) {
+	// a check is not due. An attestor change makes one due until a check
+	// that began after it runs (SR3-6f-4).
+	if !l.st.Recheck && l.st.OfflineSince.IsZero() && !l.st.LastAttempt.IsZero() && now.Before(l.st.Next) && !now.Before(l.st.LastAttempt) {
 		return loops.Job{}, false
 	}
 	return loops.Job{Name: "update-check", Run: l.check}, true
@@ -320,6 +336,43 @@ func (l *Loop3) unproposeLocked(v int64) {
 	delete(l.st.ProposalID, v)
 	delete(l.st.TestedBy, v)
 	delete(l.st.Evidence, v)
+	delete(l.held, v)
+}
+
+// retireClaims, after an attestor change, forgets each proposed version
+// whose TestedBy claim no longer holds: its release's Security() is false
+// (the policy moved, as Store.Stage then refuses it), or it is not held
+// (Loop 3 restarted since). A check then decides it again under the
+// current list. It only retires, and evaluates outside mu, since the
+// policy read may reach the store's anchor.
+func (l *Loop3) retireClaims() error {
+	l.mu.Lock()
+	if !l.st.Recheck {
+		l.mu.Unlock()
+		return nil
+	}
+	held := make(map[int64]*update.Verified, len(l.st.TestedBy))
+	for v := range l.st.TestedBy {
+		held[v] = l.held[v]
+	}
+	l.mu.Unlock()
+	var gone []int64
+	for v, h := range held {
+		if !h.Security() {
+			gone = append(gone, v)
+		}
+	}
+	if len(gone) == 0 {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, v := range gone {
+		if _, ok := l.st.TestedBy[v]; ok && l.held[v] == held[v] {
+			l.unproposeLocked(v)
+		}
+	}
+	return l.saveLocked()
 }
 
 func (l *Loop3) noteOfflineLocked() {
@@ -351,6 +404,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	// would undo the owner's narrowing. Unreadable: no Check runs, and
 	// the store keeps the policy it has.
 	l.policy.Lock()
+	gen := l.changes.Load()
 	allow, interim, err := l.cfg.Attestors()
 	var (
 		res     update.Result
@@ -390,6 +444,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if failure == "" && ferr != nil {
 		failure, err = failState, ferr
 	}
+	dropped := l.dropped()
 	var (
 		rel *update.Verified
 		m   update.Manifest
@@ -407,9 +462,16 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		}
 	}
 	now := l.cfg.Now()
+	// Saved again below.
+	_ = l.retireClaims()
 
 	l.mu.Lock()
 	l.st.LastAttempt, l.st.OfflineSince = now, time.Time{}
+	if l.changes.Load() == gen {
+		// No attestor change since this check's read: its claims and
+		// decisions are under the current list.
+		l.st.Recheck = false
+	}
 	if failure != "" {
 		l.st.Failure = failure
 		l.st.Next = now.Add(l.cfg.Retry)
@@ -472,6 +534,11 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 		// the proposal (change.Decided): offer it again now.
 		l.unproposeLocked(v)
 	}
+	if id := l.st.ProposalID[v]; id != "" && dropped[id] {
+		// The applier dropped the adoption saved for v (SR3-4f-2-r1): offer
+		// it again now, under a new ID, with this check's authority.
+		l.unproposeLocked(v)
+	}
 	_, proposed := l.st.Proposed[v]
 	if channel == ChannelPinned {
 		l.st.Pending = &pending{Version: v, Security: security, Why: waitPinned}
@@ -514,6 +581,10 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 				l.st.TestedBy = map[int64]string{}
 			}
 			l.st.TestedBy[v] = o.tested
+			if l.held == nil {
+				l.held = map[int64]*update.Verified{}
+			}
+			l.held[v] = o.held
 		}
 	case o.wait == nil:
 		// Preempted before proposing: offered again.
@@ -610,7 +681,8 @@ type outcome struct {
 	proposed change.State
 	id       string // the pipeline's proposal ID
 	tested   string
-	evidence [2]int // listed independent and maintainer-operated passes
+	held     *update.Verified // what was proposed, when tested is set
+	evidence [2]int           // listed independent and maintainer-operated passes
 	wait     *pending
 	value    float64
 	err      error
@@ -654,7 +726,8 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 	if err := ctx.Err(); err != nil {
 		return outcome{err: err}
 	}
-	rep, err := l.cfg.Pipeline.ProposeRelease(ctx, rel.WithAttestations(atts, l.cfg.OwnKey))
+	held := rel.WithAttestations(atts, l.cfg.OwnKey)
+	rep, err := l.cfg.Pipeline.ProposeRelease(ctx, held)
 	if err != nil {
 		if ctx.Err() != nil {
 			return outcome{err: err}
@@ -664,7 +737,7 @@ func (l *Loop3) decide(ctx context.Context, rel *update.Verified, m update.Manif
 	ev := rel.Evidence(atts, l.cfg.OwnKey)
 	o := outcome{proposed: rep.State, id: rep.ID, evidence: [2]int{ev.Independent, ev.Maintainer}}
 	if security && rel.SecurityAutoStage(atts, l.cfg.OwnKey) == nil {
-		o.tested = testedIndependent
+		o.tested, o.held = testedIndependent, held
 		if rel.InterimAttestation() {
 			o.tested = testedProject
 		}
@@ -715,9 +788,23 @@ var failText = map[string]string{
 // releases checked before it at once, not at the next check. The wiring
 // calls it on every change to the owner's setting (W5b). A read error
 // notes no attestor at all, which only narrows, and is returned.
+// It also makes a check due at once and retires each TestedBy claim whose
+// release lost its authority, so STATUS does not keep claiming a pass the
+// store would refuse (SR3-6f-4). Loop 3's state lock is taken only after
+// policy is released, the order check uses.
 func (l *Loop3) AttestorsChanged() error {
+	err := l.noteAttestors()
+	l.mu.Lock()
+	l.st.Recheck = true
+	serr := l.saveLocked()
+	l.mu.Unlock()
+	return errors.Join(err, serr, l.retireClaims())
+}
+
+func (l *Loop3) noteAttestors() error {
 	l.policy.Lock()
 	defer l.policy.Unlock()
+	defer l.changes.Add(1)
 	allow, interim, err := l.cfg.Attestors()
 	if err != nil {
 		return errors.Join(fmt.Errorf("maintain: attestor list: %w", err), l.cfg.Store.NoteAttestors(nil, nil))
@@ -732,21 +819,34 @@ func (l *Loop3) listed() bool {
 	return err == nil && len(allow) > 0
 }
 
+// dropped is the IDs of the pipeline's adoptions the applier dropped
+// (change.WhyDropped). It is read outside l.mu.
+func (l *Loop3) dropped() map[string]bool {
+	out := map[string]bool{}
+	for _, a := range l.cfg.Pipeline.Adoptions() {
+		if a.Reverted == change.WhyDropped {
+			out[a.ID] = true
+		}
+	}
+	return out
+}
+
 // Status reports whether the box is up to date, and says why not.
 func (l *Loop3) Status() Status {
 	online, set, listed := l.cfg.Online(), l.cfg.Settings(), l.listed()
 	installed, ierr := l.cfg.Store.Installed()
 	src, serr := l.cfg.Store.Following()
+	dropped := l.dropped()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.statusLocked(online, set, listed, installed, src, errors.Join(ierr, serr))
+	return l.statusLocked(online, set, listed, installed, src, dropped, errors.Join(ierr, serr))
 }
 
 // statusLocked is the status line; on a fork it also names the fork
 // (Security C7) and, with no attestor listed, says each security fix is
 // the owner's to approve (potency C1). listed is from the attestor source.
-func (l *Loop3) statusLocked(online bool, set loops.Settings, listed bool, in update.Installed, src update.Followed, ierr error) Status {
-	st := l.baseStatusLocked(online, set, in, src, ierr)
+func (l *Loop3) statusLocked(online bool, set loops.Settings, listed bool, in update.Installed, src update.Followed, dropped map[string]bool, ierr error) Status {
+	st := l.baseStatusLocked(online, set, in, src, dropped, ierr)
 	if src.Name == "" {
 		return st
 	}
@@ -760,7 +860,7 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, listed bool, in up
 // forkAsks is potency C1's STATUS line on a fork with no attestor listed.
 const forkAsks = "Security fixes: you approve each one, since no attestor is listed for the fork you follow."
 
-func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Installed, src update.Followed, ierr error) Status {
+func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Installed, src update.Followed, dropped map[string]bool, ierr error) Status {
 	now := l.cfg.Now()
 	st := l.st
 	last := "never"
@@ -801,6 +901,10 @@ func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Inst
 		return Status{Line: pendingLine(p)}
 	}
 	if st.Newest > in.Version {
+		if id := st.ProposalID[st.Newest]; id != "" && dropped[id] {
+			// Until the next check offers it again (SR3-4f-2-r1, UX2 on #605).
+			return Status{Line: fmt.Sprintf("Update %d was not installed; I will offer it again.", st.Newest)}
+		}
 		switch st.Proposed[st.Newest] {
 		case change.StateRejected:
 			return Status{Line: fmt.Sprintf("Update %d did worse on my tests and was not installed.", st.Newest)}
@@ -864,9 +968,10 @@ func (l *Loop3) Digest() []string {
 	online, set, listed := l.cfg.Online(), l.cfg.Settings(), l.listed()
 	installed, ierr := l.cfg.Store.Installed()
 	src, serr := l.cfg.Store.Following()
+	dropped := l.dropped()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	st := l.statusLocked(online, set, listed, installed, src, errors.Join(ierr, serr))
+	st := l.statusLocked(online, set, listed, installed, src, dropped, errors.Join(ierr, serr))
 	var out []string
 	if serr == nil && src.RootSHA256 != l.st.SaidSource {
 		// Once per switch (Security C7, UX Q-C).
