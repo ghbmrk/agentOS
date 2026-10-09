@@ -446,3 +446,40 @@ func TestAPlantedStackOverflowIsReported(t *testing.T) {
 		t.Fatalf("finding %q does not name the kept input", g.reported[0].Detail)
 	}
 }
+
+// L3 point 1 on #560: a child past its bound while the job's own context
+// is live ends the job with a finding, not a preemption: the next job is
+// the following target's, not a retry of the hung one.
+func TestAHungTargetIsNotRetriedAsPreempted(t *testing.T) {
+	release, marks := t.TempDir(), t.TempDir()
+	hung := Target{Pkg: "hung", Name: "FuzzHung", Dir: t.TempDir(),
+		Binary: fakeBin(t, release, "hung.test", "echo x >> "+filepath.Join(marks, "hung")+"; sleep 300")}
+	next := Target{Pkg: "next", Name: "FuzzNext", Dir: t.TempDir(),
+		Binary: fakeBin(t, release, "next.test", "touch "+filepath.Join(marks, "next"))}
+	g := newFake()
+	clock := time.Unix(1_800_000_000, 0)
+	s := newSource(t, g, Config{Targets: []Target{hung, next}, Release: release, Every: time.Hour,
+		ReplayTime: 200 * time.Millisecond, InputTime: 200 * time.Millisecond, Now: func() time.Time { return clock }})
+	job, ok := s.Next(context.Background(), false)
+	if !ok {
+		t.Fatal("no job")
+	}
+	if r := job.Run(context.Background()); r.Value != 1 || len(g.open) != 1 {
+		t.Fatalf("result %+v open %v", r, g.open)
+	}
+	if _, again := s.Next(context.Background(), false); again {
+		t.Fatal("the hung target was offered again at once, as if preempted")
+	}
+	clock = clock.Add(time.Hour)
+	job, ok = s.Next(context.Background(), false)
+	if !ok {
+		t.Fatal("no next job")
+	}
+	job.Run(context.Background())
+	if _, err := os.Stat(filepath.Join(marks, "next")); err != nil {
+		t.Fatal("the following target did not run")
+	}
+	if b, _ := os.ReadFile(filepath.Join(marks, "hung")); strings.Count(string(b), "x") != 1 {
+		t.Fatalf("the hung target ran %d times", strings.Count(string(b), "x"))
+	}
+}
