@@ -23,7 +23,7 @@ The `hang.json` parts of points 1 and 4 are not here. P3-4b-3h-r2 removes the fi
 
 **Goal:** each of F16's defences fails a test when reverted, and nothing the fuzz user can grow lands unbounded in broker memory.
 
-**IDs:** LOOP-7 (a fuzz child has no more authority than any guest, so it cannot reach outside its tree through root), LOOP-1 (a child cannot exhaust the broker). Tests carry `REQ: LOOP-7, LOOP-1`.
+**IDs:** LOOP-7 (a fuzz child has no more authority than any guest, so it cannot reach outside its tree through root), LOOP-1 (a child cannot exhaust the broker). Tests carry `REQ: LOOP-7, LOOP-1`. No SPEC ID covers the confinement beyond LOOP-7's guest bound; if a test checks something these IDs do not state, stop and escalate for an L1 spec-diff rather than tag another ID.
 
 **Sources:** BOARD P3-4b-3r-confine-r5 points 1 to 5. #588 Security, comments 6081240541, 6080932863 and 6080853844; L3, comments 6080174845 (point 3) and 6080932863; loop7 F16.
 
@@ -64,7 +64,7 @@ The `hang.json` parts of points 1 and 4 are not here. P3-4b-3h-r2 removes the fi
 
 **Goal:** emptying the fuzz leaf always ends with no fuzz process alive, and within LOOP-1's preemption target.
 
-**IDs:** LOOP-1 (the agent gets the box back within 2 s), LOOP-7 (no more authority than any guest). Tests carry `REQ: LOOP-1, LOOP-7`.
+**IDs:** LOOP-1 (the agent gets the box back within 2 s), LOOP-7 (no more authority than any guest). Tests carry `REQ: LOOP-1, LOOP-7`. No SPEC ID covers the confinement beyond LOOP-7's guest bound; if a test checks something these IDs do not state, stop and escalate for an L1 spec-diff rather than tag another ID.
 
 **Sources:** BOARD P3-4b-3r-confine-r5 points 6 to 8: #588 Security 4a L-a and L-b (comment 6080212450), and the tier-A containment gap confirmed in `loop7.go` (L3, comment 6080174845 point 1).
 

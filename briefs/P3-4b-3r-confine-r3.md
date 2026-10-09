@@ -18,7 +18,7 @@ A fuzz child can never gain privileges through a setuid or file-capability binar
 
 ## IDs
 
-LOOP-7 (a fuzz child runs with no more authority than any guest), LOOP-1 (fuzzing never starves the agent), RES-2 (memory budget). Tests carry `REQ: LOOP-7, LOOP-1`.
+LOOP-7 (a fuzz child runs with no more authority than any guest), LOOP-1 (fuzzing never starves the agent), RES-2 (memory budget). Tests carry `REQ: LOOP-7, LOOP-1`. No SPEC ID covers the confinement beyond LOOP-7's guest bound; if a test checks something these IDs do not state, stop and escalate for an L1 spec-diff rather than tag another ID.
 
 ## Sources
 
