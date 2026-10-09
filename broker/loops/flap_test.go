@@ -62,6 +62,27 @@ var moveSeq = []flapStep{
 	{[2]bool{true, false}, nil},
 	{[2]bool{false, false}, []string{"cleared"}},
 	{[2]bool{false, false}, nil},
+	// The owed line covers both details: either one's return is "back"
+	// (UX and Potency deltas on #644), and is bounded as any Back is.
+	{[2]bool{true, false}, []string{"back"}},
+	{[2]bool{false, false}, []string{"cleared"}},
+	{[2]bool{false, true}, []string{"back"}},
+	{[2]bool{false, false}, []string{"cleared"}},
+	{[2]bool{false, true}, nil},
+	// The owed line was spent: a later untexted close says nothing.
+	{[2]bool{false, false}, nil},
+}
+
+// Both heard (L3 delta 1 on #644): both details open and texted; detail 0
+// closes while detail 1 holds the name (owed), detail 1 closes with its
+// own line, and detail 0's return is "back", since its "Cleared" was said.
+var bothSeq = []flapStep{
+	{[2]bool{true, false}, []string{"alert"}},
+	{[2]bool{true, true}, []string{"alert"}},
+	{[2]bool{false, true}, nil},
+	{[2]bool{false, false}, []string{"cleared"}},
+	{[2]bool{true, false}, []string{"back"}},
+	{[2]bool{false, false}, []string{"cleared"}},
 }
 
 func runFlap(t *testing.T, mk func(t *testing.T) flapPath) {
@@ -78,6 +99,9 @@ func runFlap(t *testing.T, mk func(t *testing.T) flapPath) {
 		})
 		t.Run(name+", move", func(t *testing.T) {
 			playFlap(t, mk(t), moveSeq, restart)
+		})
+		t.Run(name+", both heard", func(t *testing.T) {
+			playFlap(t, mk(t), bothSeq, restart)
 		})
 	}
 }
@@ -117,8 +141,8 @@ func playFlap(t *testing.T, p flapPath, seq []flapStep, restart bool) {
 	}
 }
 
-// Pass: a drift finding on one file, edited (detail 0) or missing
-// (detail 1); both read config/quiet.json.
+// Pass: drift findings on two files whose plain names join (config/a!
+// and config/a both read config/a), each changed (on) or gone (off).
 func TestFlapThroughPass(t *testing.T) {
 	runFlap(t, func(t *testing.T) flapPath {
 		b := cleanBox()
@@ -126,13 +150,12 @@ func TestFlapThroughPass(t *testing.T) {
 		return flapPath{
 			texts: func() ([]string, []bool) { return r.texts, r.urgent },
 			set: func(t *testing.T, on [2]bool) {
-				switch {
-				case on[0]:
-					b.live["config/quiet.json"] = "edited"
-				case on[1]:
-					delete(b.live, "config/quiet.json")
-				default:
-					b.live["config/quiet.json"] = "c1"
+				for i, name := range []string{"config/a!", "config/a"} {
+					if on[i] {
+						b.live[name] = "x"
+					} else {
+						delete(b.live, name)
+					}
 				}
 				r.pass(t)
 			},

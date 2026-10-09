@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -402,10 +403,12 @@ func (s *Guard) CloseTarget(id string, c Closure) error {
 // it cleared unless it is an untexted-worthy return: an Again close is
 // digest-only, except a pause (its line says it stays paused, so it is no
 // all-clear) and a Back return (texted once more, so the owner's last
-// text is not "it is back" after it closed). Only an unpaused record that
-// is not Back and whose line was said in this call is marked, so a return
-// within ReText is texted only after a "Cleared" the owner heard; two
-// records closed together on one key share the line and both are marked.
+// text is not "it is back" after it closed). A record is marked only when
+// it is unpaused, not Back, and its "Cleared" was said: a told record
+// whose line was said in this call (two closed together on one key share
+// the line and are both marked), or every owed record when their line is
+// said, so a return within ReText is texted only after a "Cleared" the
+// owner heard, whichever detail returns (UX and Potency deltas on #644).
 // A line held by an open finding on its key is owed, not dropped: it is
 // said when a close leaves the key with no open finding, an untexted
 // Again close included, so a finding that moves between two details and
@@ -419,7 +422,7 @@ func (s *Guard) closeTextLocked(closed []Record) []string {
 	}
 	lines, said, held := s.clearedLinesLocked(told)
 	if s.st.Owed == nil {
-		s.st.Owed = map[string]Record{}
+		s.st.Owed = map[string][]Record{}
 	}
 	mark := func(r Record) {
 		if r.Contained != "paused" && !r.Back {
@@ -428,23 +431,24 @@ func (s *Guard) closeTextLocked(closed []Record) []string {
 	}
 	for _, r := range told {
 		k := clearedKey(r)
-		switch {
-		case said[k]:
+		if said[k] {
 			mark(r)
-		default:
-			s.st.Owed[k] = r
+			continue
 		}
+		s.st.Owed[k] = append(slices.DeleteFunc(s.st.Owed[k], func(o Record) bool { return o.Finding.ID == r.Finding.ID }), r)
 	}
 	for _, r := range closed {
 		k := clearedKey(r)
-		o, owed := s.st.Owed[k]
-		if !owed || held[k] {
+		owed := s.st.Owed[k]
+		if len(owed) == 0 || held[k] {
 			continue
 		}
 		delete(s.st.Owed, k)
 		if !said[k] {
 			said[k] = true
-			lines = append(lines, clearedLine(o))
+			lines = append(lines, clearedLine(owed[len(owed)-1]))
+		}
+		for _, o := range owed {
 			mark(o)
 		}
 	}

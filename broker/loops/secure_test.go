@@ -639,8 +639,8 @@ func TestPausedAndFlapping(t *testing.T) {
 // P3-4b-3r-told requirement 1, through Pass: two texted findings share a
 // plain name (config/a! and config/a both read config/a). The one that
 // closes while the other is open says no "Cleared", so it is not marked,
-// and its return within ReText is digest-only. Two that close together
-// share one line and are both marked, so each one's return is texted.
+// and its return within ReText is digest-only. Its line is owed, so when
+// the name's last finding closes both are marked and each return is texted.
 func TestPassMarksOnlyAClearItSaid(t *testing.T) {
 	b := cleanBox()
 	b.live["config/a!"], b.live["config/a"] = "x", "y"
@@ -660,11 +660,12 @@ func TestPassMarksOnlyAClearItSaid(t *testing.T) {
 	delete(b.live, "config/a")
 	r.now = r.now.Add(25 * time.Hour)
 	r.pass(t)
-	if got := clearedTexts(r.texts, before); len(got) != 1 || len(r.g.st.ToldCleared) != 1 {
+	if got := clearedTexts(r.texts, before); len(got) != 1 || len(r.g.st.ToldCleared) != 2 {
 		t.Fatalf("cleared %q, marked %v", got, r.g.st.ToldCleared)
 	}
-	// config/a! came back as an untexted Again, so its close is digest
-	// only; config/a was texted, said and marked.
+	// config/a!'s held line was owed and is said with config/a's, so both
+	// are marked (UX and Potency deltas on #644): the owner's last text
+	// about either is "Cleared", so a return of either is texted.
 	before = len(r.texts)
 	b.live["config/a"] = "y"
 	r.now = r.now.Add(time.Hour)
