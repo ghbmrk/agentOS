@@ -40,6 +40,7 @@ type entry struct {
 	attempts   []Attempt
 	quality    Quality
 	authorized time.Time // when RecAuthorized was journaled
+	dispatched time.Time // when the latest RecDispatched was journaled
 	submitted  time.Time // when RecSubmitted was journaled
 	erased     bool      // RecErased: params and evidence removed
 }
@@ -617,6 +618,50 @@ func (e *Engine) AuthorizedSince(account, action string, since time.Time) []Inte
 	return out
 }
 
+// Use is one intent's place under a pre-allowance scope bound (ADP-9).
+type Use struct {
+	Intent Intent
+	// Started: an attempt has been dispatched and was not shown to have
+	// done nothing. Otherwise the intent is authorized and waiting.
+	Started bool
+}
+
+// InUse returns the intents on account with action that hold a place
+// under a scope bound counted from since, oldest first (SR3-2). A place is
+// charged when an effect may start, not when it was authorized, so an
+// intent queued past its authorization's day cannot run outside the bound:
+//   - authorized and not yet dispatched: reserved, whatever its age, until
+//     it is dispatched or refused at the recheck;
+//   - its latest attempt in flight or outcome_unknown: held until evidence
+//     resolves it (OP-2), whatever its age;
+//   - its latest attempt succeeded: charged to the window it was
+//     dispatched in, so counted while that is at or after since.
+//
+// An attempt that did not apply releases its place; a retry takes one
+// again when it is dispatched.
+func (e *Engine) InUse(account, action string, since time.Time) []Use {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []Use
+	for _, id := range e.order {
+		en := e.intents[id]
+		if en.intent.Account != account || en.intent.Action != action {
+			continue
+		}
+		switch en.state {
+		case Authorized:
+			out = append(out, Use{Intent: en.intent})
+		case InFlight, OutcomeUnknown:
+			out = append(out, Use{Intent: en.intent, Started: true})
+		case Succeeded:
+			if !en.dispatched.Before(since) {
+				out = append(out, Use{Intent: en.intent, Started: true})
+			}
+		}
+	}
+	return out
+}
+
 // Trail returns the journal records, oldest first: one audit trail for
 // effects and broker-state changes (OP-5).
 func (e *Engine) Trail() []Record {
@@ -808,6 +853,7 @@ func (e *Engine) apply(r Record) {
 		en.permission = Permission{Decision: "denied", Phase: PhaseDispatch, Reason: r.Reason, GuestReason: r.Guest}
 	case RecDispatched:
 		en.state = InFlight
+		en.dispatched = r.At
 		en.attempts = append(en.attempts, Attempt{N: r.Attempt, Result: ResultInFlight})
 	case RecObserved:
 		a := en.attempt(r.Attempt)
