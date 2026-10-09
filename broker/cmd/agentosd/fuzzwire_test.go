@@ -6,7 +6,9 @@ package main
 // passive guard, with the release's targets.
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,5 +149,31 @@ func TestNoReleaseRunsNoFuzz(t *testing.T) {
 	}
 	if j, ok := lp.fuzz.Next(context.Background(), false); !ok || j.Name != "passive" {
 		t.Fatalf("the guard's pass is not offered: %+v %v", j, ok)
+	}
+}
+
+// P3-4b-3r-pass requirement 3 (L7-4; #560 L3 point 3): an image always
+// ships a manifest, so a release directory without one is logged; a box
+// with no release directory (a dev build) logs nothing.
+func TestAReleaseWithoutAManifestIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+	for _, c := range []struct {
+		name    string
+		release string
+		logged  bool
+	}{
+		{"no manifest", t.TempDir(), true},
+		{"no release directory", filepath.Join(t.TempDir(), "absent"), false},
+	} {
+		buf.Reset()
+		if ts := fuzzTargets(learnPaths{Fuzz: c.release, Loop7: t.TempDir()}); len(ts) != 0 {
+			t.Fatalf("%s: targets %+v", c.name, ts)
+		}
+		if got := strings.Count(buf.String(), "loop7: no fuzz rounds"); got != map[bool]int{true: 1, false: 0}[c.logged] {
+			t.Fatalf("%s: log %q", c.name, buf.String())
+		}
 	}
 }
