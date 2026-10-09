@@ -213,6 +213,9 @@ func (l *lateServices) Close(id string) {
 type lateStatus struct {
 	k   atomic.Pointer[keeper]
 	off string // set before the daemon runs: why the agent is off (PE6)
+	// caps is the capability-off registry's state: when its line names
+	// the agent, this line says nothing, so STATUS has one (OP-9).
+	caps *capState
 }
 
 func (l *lateStatus) Status() string {
@@ -221,6 +224,9 @@ func (l *lateStatus) Status() string {
 	}
 	if l.off != "" {
 		return l.off
+	}
+	if l.caps != nil && l.caps.agentNamed() {
+		return ""
 	}
 	return agentNotSet
 }
@@ -354,6 +360,7 @@ func main() {
 	flag.StringVar(&updateStore, "update-store", "", "the box's update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
 	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
 	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
+	modemRoles := flag.String("modem-roles", "/var/lib/agentos/modem/roles.json", "agentos-modem's roles file, where a SIM the owner adopts on the local page is recorded")
 	flag.BoolVar(&ownerMessage, "owner-message", false, "also serve the raw \"message\" op on the owner socket with the bridge on (simulator and test builds only; it skips the bridge's checks)")
 	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most 4500 or one OpenClaw machine per two cores, whichever is more (PE6, RES-2c)")
 	flag.Int64Var(&floor.HeadroomMB, "headroom-mb", floor.HeadroomMB, "memory never admitted into, MB")
@@ -537,16 +544,25 @@ func main() {
 	// Agents' questions (W9): owner replies are answered before task chat
 	// reaches the agent.
 	qs := &questions{}
-	// STATUS notes read in wiring order: the time check, then spare-time
-	// work not running (learningOff, below), then recall's (an agent
-	// holding a deleted record, or memory not open), then the second
-	// line's. Keep the clock first.
+	// STATUS notes read in wiring order: the time check, then the
+	// capability-off lines (OP-9, capoff.go), then spare-time work not
+	// running (learningOff, below), then recall's (an agent holding a
+	// deleted record, or memory not open), then the second line's. Keep
+	// the clock first.
 	qs.wire(&cfg)
+	// Each line reads live state set as the box opens below; the daemon
+	// copies the notes, so they are wired now.
+	caps := newCapState(egressSocket)
+	caps.machinesUnset(runsc, agentOff)
+	capLines := newCapLines(caps)
+	capLines.wire(&cfg)
+	// No update-check loop (Loop 3, W5b) is built yet: caps.updateChecks
+	// is never called, and STATUS says update checks are not running.
 	agent := &lateAgent{}
 	cfg.Agent = agent
 	// Until the keeper runs, STATUS says the agent is not set up; it says
 	// so for good if the machine plane or the agent's setup fails.
-	agentStatus := &lateStatus{off: agentOff}
+	agentStatus := &lateStatus{off: agentOff, caps: caps}
 	cfg.AgentStatus = agentStatus.Status
 	// The code-generator seed lives in the vault, which only the vault
 	// process holds (P2-4a); the channel asks it to check high-tier codes
@@ -579,10 +595,12 @@ func main() {
 	// reports the owner line, sends fail as down and are counted for the
 	// recovery text. Its note, last outage and counts are for the box's local page (U-B1).
 	if modemBridge {
-		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber})
+		// A SIM the owner adopts on the page, with a code (P2-2w d2b), is
+		// recorded where the bridge reads it at its next open.
+		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles)})
 		cfg.Modem, cfg.OwnerOps = link, link.Ops()
 		if cfg.PageSocket != nil {
-			cfg.PageSocket.Line = pageLine(link)
+			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
 		}
 		cfg.BridgeOnly = !ownerMessage
 	}
@@ -603,6 +621,8 @@ func main() {
 	}
 	if lp == nil {
 		learningOff(&cfg)
+	} else {
+		caps.learning(lp) // routing held while learning is on (C12)
 	}
 	// Evidence delivery (CH-20): with a destination set, private replies
 	// are emailed to it. No mail account is connected in this process
@@ -655,13 +675,12 @@ func main() {
 	}
 	// The owner channel failing to take questions must not take it down:
 	// the tools are then not offered and replies are task chat.
-	if err := qs.open(ctx, d, pre, qcfg); err != nil {
-		log.Printf("owner questions disabled: %v", err)
-	}
+	qs.start(ctx, d, pre, qcfg, caps)
 	// At exit the question loops stop before the guard's notices flush.
 	defer func() { stop(); qs.wait() }()
 	if runsc != "" && md.err != nil {
 		log.Printf("agent machines disabled: %v", md.err)
+		caps.agentOff(agentNoMachines)
 	} else if runsc != "" {
 		services := &lateServices{}
 		vmc := vm.Config{
@@ -683,6 +702,7 @@ func main() {
 		m, err := vm.Open(ctx, vmc)
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
+			caps.agentOff(agentNoMachines)
 		} else {
 			pre.m.Store(m)
 			if lp != nil {
@@ -695,6 +715,7 @@ func main() {
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
+			caps.workers(wt != nil)
 			tools := registeredTools(qs, tree, recallTools, wt)
 			if wt != nil {
 				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
@@ -702,6 +723,7 @@ func main() {
 			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
+				caps.agentOff(agentNoMachines)
 			} else {
 				services.live.Store(&svc{plane})
 				var notice func(key, line string) error
@@ -750,6 +772,7 @@ func main() {
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
 				if err != nil {
 					log.Printf("no agent machine kept running: %v", err)
+					caps.agentOff(agentNoSoftware)
 				} else {
 					k := agentKeeper(ctx, m, d.Engine().RecordSleep, agentMachine, spec, agent.sleep.Load())
 					agentStatus.k.Store(k)
@@ -769,6 +792,7 @@ func main() {
 		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
 	} else {
 		recallExec.Off()
+		caps.recallWired(false)
 		if lp != nil {
 			go lp.forgetOwner.resumeAgent(ctx)
 		}
@@ -776,6 +800,10 @@ func main() {
 	if line != nil {
 		go line.run(ctx)
 	}
+	// What is off, in the box log too (OP-9); the digest's sender (DIG-1)
+	// takes this list once it lands.
+	logCapLines(capLines)
+	log.Printf("digest sources: %d, not sent until the digest is", len(newDigestSources(capLines, lp, line)))
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
 }

@@ -94,48 +94,29 @@ func TestAFindingMissingACaseIsNotClearedByTheOthers(t *testing.T) {
 	}
 }
 
-// P3-4b-1b item 2 (CHG-2, LOOP-10): a finding reported as X/original
-// holds the slot of finding X's original test. X's add of its original is
-// refused as another finding's case, so X is not linked and no fix is
-// requested for it. A re-report stays idempotent.
-func TestAFindingIDCannotTakeAnothersOriginalSlot(t *testing.T) {
-	two := change.TreeRule{Clauses: []change.Clause{
-		{Path: seedPath, Pointer: "/private", Op: change.OpSubset, Value: []byte(`["local"]`)},
-		{Path: seedPath, Pointer: "/fallback", Op: change.OpAbsent},
-	}}
-	partial := `{"private":["local","cloud"],"name":"r"}`
-	fx := &scriptFixer{cands: []change.Candidate{fixCand(partial)}}
+// P3-4b-1b item 2 (CHG-2, LOOP-10), closed by the #493 intake in P3-4b-3
+// (Security #493 1): a finding ID ending in /original would hold the slot
+// of finding X's original test, so X could never be linked and would fail
+// on every Pass. Report refuses such an ID before anything acts, and X
+// then links as usual.
+// REQ: LOOP-9
+func TestAFindingIDEndingInOriginalIsRefused(t *testing.T) {
+	fx := &scriptFixer{}
 	r := newReportRig(t, fx)
 	f := seedFinding()
-	f.Rule, f.ID = two.Encode(), "seeded:X/original"
-	first := r.report(t, f)
-	before := r.p.SecurityCount()
+	f.ID = "seeded:X" + OriginalSuffix
+	before, texts := r.p.SecurityCount(), len(r.texts)
+	rec, err := r.g.Report(context.Background(), f)
+	if !errors.Is(err, ErrFinding) {
+		t.Fatalf("an ID ending in %s: %v", OriginalSuffix, err)
+	}
+	if rec.Finding.ID != "" || r.p.SecurityCount() != before || len(r.texts) != texts || len(r.g.Evidence()) != 0 {
+		t.Fatalf("acted on a refused finding: %+v, suite %d -> %d, texts %d -> %d", rec, before, r.p.SecurityCount(), texts, len(r.texts))
+	}
 	f.ID = "seeded:X"
-	x, err := r.g.Report(context.Background(), f)
-	if !errors.Is(err, change.ErrConflict) {
-		t.Fatalf("the colliding add: %v", err)
-	}
-	if x.Fix != "" || x.Fixture != "" || r.p.SecurityCount() != before+1 {
-		t.Fatalf("X linked: %+v, suite %d -> %d", x, before, r.p.SecurityCount())
-	}
-	for i := 0; i < 2; i++ {
-		r.g.Trigger()
-		r.g.Pass(context.Background())
-	}
-	for _, got := range fx.got {
-		if got.ID == f.ID {
-			t.Fatal("a fix was requested for the unlinked finding")
-		}
-	}
-	if b := r.p.Files("config")[seedPath]; string(b) != defective {
-		t.Fatalf("tree changed: %s", b)
-	}
-	// Re-reporting the linked one changes nothing.
-	n, texts := r.p.SecurityCount(), len(r.texts)
-	f.ID = first.Finding.ID
-	again := r.report(t, f)
-	if again.Finding.ID != first.Finding.ID || r.p.SecurityCount() != n || len(r.texts) != texts {
-		t.Fatalf("re-report: %+v, suite %d -> %d, texts %d -> %d", again, n, r.p.SecurityCount(), texts, len(r.texts))
+	x := r.report(t, f)
+	if x.Fix != FixPending || x.Fixture != change.Loop2Fixture+f.ID {
+		t.Fatalf("X not linked after the refusal: %+v", x)
 	}
 }
 

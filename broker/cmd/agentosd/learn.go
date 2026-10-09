@@ -246,16 +246,8 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	// has finished each tombstoned one, and attach texts them once the
 	// owner channel is up. An owed file that does not read is started
 	// afresh; its texts are lost, not its forgets.
-	owedStore := change.FileStore{Path: filepath.Join(p.Dir, "forget-owed.json")}
-	owed, err := openForgetOwed(owedStore)
-	if err != nil {
-		// Kept aside, not read again, and the owner told (L3 B2 on #425).
-		if rerr := os.Rename(owedStore.Path, owedStore.Path+".bad"); rerr != nil {
-			log.Printf("forget: unreadable owed file not kept aside: %v", rerr)
-		}
-		log.Printf("forget: owed done texts lost, kept aside as %s.bad: %v", owedStore.Path, err)
-		owed = lostForgetOwed(owedStore)
-	}
+	owedPath := filepath.Join(p.Dir, "forget-owed.json")
+	owed := openOwedFile(change.FileStore{Path: owedPath}, owedPath)
 	l.forgetOwner.owed = owed
 	l.forgetOwner.owedAtStart = owed.goals()
 	for _, e := range restored {
@@ -1191,4 +1183,29 @@ func (s *syncedRouting) setLearned(r routerule.Rule) {
 	if err := store.Save(b); err != nil {
 		s.logf("routing: could not keep the learned order: %v", err)
 	}
+}
+
+// openOwedFile opens the owed done texts saved by store at path. One that
+// does not read is kept aside, not read again, and the owner told (L3 B2
+// on #425). The aside is a hard link, and the fresh file owing the notice
+// is then saved over path, so path holds the bad file or the fresh one,
+// never nothing: a crash between the two repeats both at the next start
+// (security S1 on #425).
+func openOwedFile(store change.Store, path string) *forgetOwed {
+	owed, err := openForgetOwed(store)
+	if err == nil {
+		return owed
+	}
+	aside := path + ".bad"
+	if rerr := os.Remove(aside); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		log.Printf("forget: old unreadable owed file not removed: %v", rerr)
+	}
+	kept := os.Link(path, aside)
+	owed = lostForgetOwed(store)
+	if kept != nil {
+		log.Printf("forget: owed done texts lost, unreadable file not kept aside: %v: %v", err, kept)
+	} else {
+		log.Printf("forget: owed done texts lost, kept aside as %s: %v", aside, err)
+	}
+	return owed
 }
