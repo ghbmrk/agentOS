@@ -16,8 +16,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 )
 
@@ -477,9 +479,10 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	since, _ := forgetSince(in.ID)
 	// Owed before the tombstone, so a tombstone that holds always has its
 	// done text owed across a restart (UX-182-3). A failed write does not
-	// stop the forget; the next write carries it.
-	if err := f.owed.owe(goal, owedForget{Since: since, Undone: undone}); err != nil {
-		log.Printf("forget: done text not kept for a restart: %v", err)
+	// stop the forget; retry saves it again (security S2 on #425).
+	owedErr := f.owed.owe(goal, owedForget{Since: since, Undone: undone})
+	if owedErr != nil {
+		log.Printf("forget: done text not kept for a restart: %v", owedErr)
 	}
 	err := f.forget(goal)
 	switch {
@@ -501,13 +504,15 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	}
 	// The tombstone holds: the replay at start finishes it if this
 	// process does not.
-	go f.retry(context.WithoutCancel(ctx), goal, since, undone)
+	go f.retry(context.WithoutCancel(ctx), goal, since, undone, owedErr == nil)
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgetting; retrying"}
 }
 
 // retry forgets goal again with backoff until every save holds, saying
-// once that it is not done yet when that takes forgetNotYet.
-func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, undone int) {
+// once that it is not done yet when that takes forgetNotYet. Until the
+// owed done text is saved (owedSaved), each pass saves it first, so it is
+// on disk before the forget can finish (security S2 on #425).
+func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, undone int, owedSaved bool) {
 	if f.retried != nil {
 		defer f.retried()
 	}
@@ -517,6 +522,13 @@ func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, u
 			// Shutdown: the tombstone's replay at start finishes it, and
 			// finishOwed then texts the done text.
 			return
+		}
+		if !owedSaved {
+			if err := f.owed.owe(goal, owedForget{Since: since, Undone: undone}); err != nil {
+				log.Printf("forget: done text not kept for a restart yet: %v", err)
+			} else {
+				owedSaved = true
+			}
 		}
 		err := f.forget(goal)
 		if err == nil {
@@ -662,17 +674,18 @@ func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time)
 	f.logForget(grants.ForgetAgentGoal(id), since, true)
 	a := f.agent.Load()
 	if a == nil {
-		f.inform(forgetAgentNoAgent)
+		f.promise(forgetAgentNoAgent)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "owed: no agent machine"}
 	}
 	err := a.takeBack(ctx, since, true)
 	switch {
 	case err == nil:
-		f.inform(forgetAgentDone)
+		f.agentDone(ctx, id)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "taken back"}
 	case errors.Is(err, recalltool.ErrCarried):
 		log.Printf("forget: agent take-back: %v", err)
-		f.inform(forgetAgentNotYet)
+		f.paid(id) // recall's Retry tells it (TakenBack)
+		f.promise(forgetAgentNotYet)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "taking back; recall retries"}
 	case errors.Is(err, recalltool.ErrNotOpen) && f.whenOpen != nil:
 		// Approved before the vault is unlocked (a request re-issued
@@ -681,10 +694,10 @@ func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time)
 		f.interrupted = append(f.interrupted, id)
 		f.mu.Unlock()
 		f.whenOpen()
-		f.inform(forgetAgentWhenOpen)
+		f.promise(forgetAgentWhenOpen)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "queued until recall opens"}
 	case errors.Is(err, recalltool.ErrNotOpen):
-		f.inform(forgetAgentNotOpen)
+		f.promise(forgetAgentNotOpen)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "owed: recall off"}
 	default:
 		// Not recorded, so nothing was taken back and trying again cannot
@@ -698,7 +711,7 @@ func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time)
 		f.carrying[id] = true
 		f.mu.Unlock()
 		if !carried {
-			f.inform(forgetAgentNotTaken)
+			f.promise(forgetAgentNotTaken)
 			// Execute's ctx ends when it returns; the process does not.
 			go f.carryAgent(context.WithoutCancel(ctx), id, since)
 		}
@@ -730,13 +743,36 @@ func (f *ownerForget) carryAgent(ctx context.Context, id string, since time.Time
 		err := a.takeBack(ctx, since, true)
 		switch {
 		case err == nil:
-			f.inform(forgetAgentDone)
+			f.agentDone(ctx, id)
 			return
 		case errors.Is(err, recalltool.ErrCarried):
 			log.Printf("forget: agent take-back: %v", err)
+			f.paid(id) // recall's Retry tells it (TakenBack)
 			return
 		}
 		log.Printf("forget: agent take-back not saved yet: %v", err)
+	}
+}
+
+// agentDone tells the owner an approved item 2 (id) is taken back. Its
+// take-back returned nil, so it is done: the done text is owed on disk
+// before it is sent and until it sends (done), keyed by item 2's ID so
+// item 1's entry for the same goal is kept apart (W3-forget-b2c-2;
+// UX-182-3). Only takeBack's own result says done; recall's Handled
+// ("recorded, owed or done") never does.
+func (f *ownerForget) agentDone(ctx context.Context, id string) {
+	e := owedForget{Agent: true}
+	if err := f.owed.owe(id, e); err != nil {
+		log.Printf("forget: take-back done text not kept for a restart: %v", err)
+	}
+	f.done(ctx, id, forgetAgentDone, e)
+}
+
+// promise sends a text that says what will happen; it is not owed, since
+// the done text that follows is, and a failed send is logged.
+func (f *ownerForget) promise(text string) {
+	if err := f.say(text); err != nil {
+		log.Printf("forget: owner text not sent: %v", err)
 	}
 }
 
@@ -887,11 +923,14 @@ func (f *ownerForget) Reconcile(_ context.Context, in journal.Intent, _ int) jou
 // (its ID's time) and what the forget undid, counted before it ran.
 // Logged and Back are set once the forget is done but its text did not
 // send, so a later start neither logs it again nor loses its tail.
+// Agent marks an approved item 2 whose take-back is done and whose done
+// text (forgetAgentDone) is owed (W3-forget-b2c-2), keyed by item 2's ID.
 type owedForget struct {
 	Since  time.Time `json:"since,omitzero"`
 	Undone int       `json:"undone,omitempty"`
 	Logged bool      `json:"logged,omitempty"`
 	Back   bool      `json:"back,omitempty"`
+	Agent  bool      `json:"agent,omitempty"`
 }
 
 // owedLostKey marks an owed file that did not read (L3 B2 on #425): the
@@ -1055,8 +1094,10 @@ func (f *ownerForget) paid(goal string) {
 // "Not forgotten" whose tombstone a later save wrote (SHOULD 4 of L3 on
 // #182). Like any done forget it is appended to the forget log, once. One
 // whose tombstone never held was not forgotten, and is dropped untold. An
-// owed file that did not read is told as lost. Each text stays owed until
-// it sends (done). It runs once the owner channel is attached.
+// owed file that did not read is told as lost. An item 2 owed its done
+// text (Agent) is told it, before any item 1 check (W3-forget-b2c-2). Each
+// text stays owed until it sends (done). It runs once the owner channel is
+// attached.
 func (f *ownerForget) finishOwed(ctx context.Context) {
 	goals := f.owedAtStart
 	f.owedAtStart = nil
@@ -1064,6 +1105,10 @@ func (f *ownerForget) finishOwed(ctx context.Context) {
 		e, ok := f.owed.get(g)
 		switch {
 		case !ok:
+		case e.Agent:
+			// Saved only after its take-back returned nil, so it is done;
+			// neither the agent machine nor recall is read.
+			f.done(ctx, g, forgetAgentDone, e)
 		case g == owedLostKey:
 			f.done(ctx, g, forgetOwedLost, e)
 		case f.forgotten != nil && f.forgotten(g):
@@ -1075,4 +1120,60 @@ func (f *ownerForget) finishOwed(ctx context.Context) {
 			f.paid(g)
 		}
 	}
+}
+
+// The Wi-Fi page's fixed replies (W3-forget-b3r): the page says only
+// that it asked, never that a task is forgotten; the owner hears the done
+// text by text once the forget is approved and saved.
+const (
+	forgetPageAsked   = "Asked. Nothing is forgotten until you approve the request with a code; you get a text when it's done."
+	forgetPageUnknown = "That task isn't in your recent tasks, so nothing was asked. Reload the page to see them."
+	forgetPageLocked  = "Your session is locked, so nothing was asked. Unlock it with a code first."
+)
+
+// PageTasks lists the recent tasks FORGET lists, for the Wi-Fi page
+// (W3-forget-b3r, potency R2): goal ID, date and FORGET's label only.
+// Locked, it lists none, as FORGET by text is not taken (CH-21).
+func (f *ownerForget) PageTasks(unlocked bool) localapi.ForgetTasks {
+	if !unlocked {
+		return localapi.ForgetTasks{Locked: true}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out localapi.ForgetTasks
+	for _, t := range f.tasks.recent(forgetList) {
+		out.Tasks = append(out.Tasks, localapi.ForgetTask{ID: t.Goal, Date: f.date(t.At), Label: f.shown(t.taskText, true)})
+	}
+	return out
+}
+
+// PageForget asks to forget goal from the Wi-Fi page through FORGET's own
+// ask (CAP-3): the owner approves the request with a code before anything
+// is deleted. Only a goal PageTasks would list is asked about.
+func (f *ownerForget) PageForget(ctx context.Context, goal string, unlocked bool) string {
+	if !unlocked {
+		return forgetPageLocked
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	listed := false
+	for _, t := range f.tasks.recent(forgetList) {
+		listed = listed || t.Goal == goal
+	}
+	if !listed {
+		return forgetPageUnknown
+	}
+	if !f.ask(ctx, goal, f.now()) {
+		return forgetRefused
+	}
+	return forgetPageAsked
+}
+
+// wirePage serves the Wi-Fi page's forget ops when there is a page.
+func (f *ownerForget) wirePage(cfg *daemon.Config) bool {
+	if f == nil || cfg.PageSocket == nil {
+		return false
+	}
+	cfg.PageSocket.Forget = f
+	return true
 }

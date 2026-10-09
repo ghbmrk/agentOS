@@ -41,10 +41,15 @@ MANIFEST = ROOT / "assurance" / "dependencies.json"
 CLASSES = ("inherent", "commodity", "optional")
 PROFILES = {"offline": frozenset(), "full": frozenset(CLASSES)}
 # Socket calls, plus every way to make a path inside the work directory lead
-# somewhere else (links, mounts). '?' tolerates names an older strace lacks.
+# somewhere else (links, mounts). Every name must be one strace knows, or the sandbox
+# is unavailable (DEP-4b); '?' marks only the names the architecture has no syscall for
+# (the generic table has symlinkat and linkat but no symlink or link). An architecture
+# not listed gets no '?': if it lacks a name, the run fails loudly until it is listed.
 _LINKS = ("symlink", "symlinkat", "link", "linkat")
 _MOUNTS = ("mount", "umount2", "open_tree", "move_mount", "fsopen", "fsmount", "pivot_root")
-TRACED = ",".join(("connect", "sendto", "sendmsg", "sendmmsg") + tuple("?" + n for n in _LINKS + _MOUNTS))
+_ABSENT = {"aarch64": ("symlink", "link")}
+TRACED = ",".join(("?" if n in _ABSENT.get(os.uname().machine, ()) else "") + n
+                  for n in ("connect", "sendto", "sendmsg", "sendmmsg") + _LINKS + _MOUNTS)
 
 SHIPPING_DIRS = ("broker", "src")
 CODE_SUFFIXES = {".go", ".py", ".rs", ".c", ".h", ".ts", ".js", ".sh", ".toml", ".json", ".yaml", ".yml", ".conf"}
@@ -284,7 +289,10 @@ def _unshare_flags():
     # A PID namespace: when its first process exits or is killed, the kernel kills every
     # process in it, including one that left the process group (setsid) or strace let go of.
     pid = ["--pid", "--fork", "--kill-child", "--mount-proc"]
-    return (["-n", "-m"] if os.geteuid() == 0 else ["-r", "-n", "-m"]) + pid
+    # A user namespace even as root: the capabilities setpriv keeps then act only inside it.
+    # Without one, real root keeps CAP_DAC_READ_SEARCH (open_by_handle_at), CAP_SYS_MODULE and
+    # others on the host, each a way past a read-only bind (B2, Security re-sign 2 on #437).
+    return ["-r", "-n", "-m"] + pid
 
 
 _SANDBOX = None
@@ -294,9 +302,12 @@ def sandbox_available():
     global _SANDBOX
     if _SANDBOX is None:
         _SANDBOX = False
-        if shutil.which("unshare") and shutil.which("strace"):
+        if shutil.which("unshare") and shutil.which("strace") and shutil.which("setpriv"):
             try:
-                p = subprocess.run(["unshare"] + _unshare_flags() + ["--", "strace", "-o", os.devnull, "true"],
+                # The same -e as the run: an strace that cannot name a traced syscall exits
+                # nonzero ("invalid system call") instead of skipping it unseen (DEP-4b).
+                p = subprocess.run(["unshare"] + _unshare_flags() + ["--", "strace", "-e", "trace=" + TRACED,
+                                                                     "-o", os.devnull, "true"],
                                    capture_output=True, timeout=30)
                 _SANDBOX = p.returncode == 0
             except (OSError, subprocess.SubprocessError):
@@ -329,23 +340,82 @@ def _under(path, base):
     return (os.path.realpath(path) + os.sep).startswith(os.path.realpath(base) + os.sep)
 
 
-def _mask_host_sockets(keep):
+# x86_64 and the generic table (arm64) share these numbers.
+_SYS_MOUNT_SETATTR, _SYS_OPEN_TREE_ATTR = 442, 467
+_MOUNT_ATTR_RDONLY, _OPEN_TREE_CLONE, _AT_RECURSIVE = 0x1, 0x1, 0x8000
+
+
+def _set_read_only(path):
+    """Makes the mount at path and every mount under it read-only (mount_setattr with
+    AT_RECURSIVE): `remount,bind,ro` reaches the top mount only, and `ro=recursive` left a
+    submount writable (D10). No fallback: without the call (ENOSYS, Linux < 5.12) the
+    attempt is a sandbox error, never a run with an unchecked submount (DEP-4a)."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    attr = (ctypes.c_uint64 * 4)(_MOUNT_ATTR_RDONLY, 0, 0, 0)  # set, clr, propagation, userns_fd
+    if libc.syscall(_SYS_MOUNT_SETATTR, -100, path.encode(), _AT_RECURSIVE, attr, ctypes.sizeof(attr)) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, "mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY) on %s: %s" % (path, os.strerror(err)))
+
+
+def _mask_host_sockets(keep, writable=()):
+    """Masks MASKED_DIRS and binds each kept path back; a kept path not in writable
+    is mounted read-only with every mount under it, so a scenario cannot change what a
+    later run executes. A writes path inside one is bound after it and stays writable."""
     fds = {k: os.open(k, os.O_PATH | os.O_DIRECTORY) for k in keep}
-    masked = []
+    masked, ro = [], []
     for d in MASKED_DIRS:
         if os.path.isdir(d) and not os.path.islink(d):
             _mount("-t", "tmpfs", "-o", "mode=1777,nosuid,nodev", "tmpfs", d)
             masked.append(d)
-    for k, fd in fds.items():
-        if any(_under(k, d) for d in masked):
-            os.makedirs(k, exist_ok=True)
-            _mount("--no-canonicalize", "--bind", "/proc/%d/fd/%d" % (os.getpid(), fd), k)
-        os.close(fd)
+    for k in sorted(fds):  # a parent before a path kept inside it
+        if k not in writable or any(_under(k, d) for d in masked + ro):
+            if not os.path.isdir(k):
+                os.makedirs(k)
+            _mount("--no-canonicalize", "--rbind", "/proc/%d/fd/%d" % (os.getpid(), fds[k]), k)
+        if k not in writable:
+            _set_read_only(k)
+            ro.append(k)
+        os.close(fds[k])
     if os.path.lexists("/dev/log") and not os.path.exists("/dev/log"):
         pass  # symlink into a masked directory: already gone
     elif os.path.exists("/dev/log") and not os.path.isfile("/dev/log"):
         _mount("--bind", "/dev/null", "/dev/log")
     return masked
+
+
+_OCTAL = re.compile(r"\\([0-7]{3})")
+
+
+def _reaches_rw(path):
+    """Whether path lookup of a mount point lands on a writable mount. A mount point that no
+    longer resolves (ENOENT) is under a mount that hides it; any other error fails closed."""
+    try:
+        return not os.statvfs(path).f_flag & os.ST_RDONLY
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def writable_mounts(mountinfo, read_only, writable, reaches_rw=_reaches_rw):
+    """Mount points in mountinfo text at or under a read-only kept path that are mounted rw,
+    unless a writes path at or under that kept path covers them (DEP-4a). An rw entry the
+    path no longer reaches (overmounted, or under a masking tmpfs) is hidden: the mount the
+    path does reach is judged by its own entry, so reaches_rw (statvfs) settles it."""
+    declared = [(p, True) for p in read_only] + [(p, False) for p in writable]
+    wrong = []
+    for line in mountinfo.splitlines():
+        f = line.split(" ")
+        if len(f) < 6 or not f[4].startswith("/"):
+            wrong.append("unparsed mountinfo line: %r" % line)
+            continue
+        mp = _OCTAL.sub(lambda m: chr(int(m.group(1), 8)), f[4])
+        covering = [(len(p), ro) for p, ro in declared if mp == p or mp.startswith(p.rstrip("/") + "/")]
+        if (covering and max(covering)[1] and "ro" not in f[5].split(",") and mp not in wrong
+                and reaches_rw(mp)):
+            wrong.append(mp)
+    return wrong
 
 
 def _place(content, dest, work, masked):
@@ -374,6 +444,16 @@ def _dns_sink(sock, names):
         sock.sendto(q[:2] + flags.to_bytes(2, "big") + q[4:6] + b"\0" * 6 + q[12:end], addr)
 
 
+# The scenario runs as (userns) root with CAP_SYS_ADMIN over the sandbox's mount
+# namespace, where the kept paths' ro flag is not locked: it could clear it with
+# mount_setattr or open_tree_attr, neither traced. Without the capability, in its
+# bounding and inheritable sets, no exec can get it back, so ro holds (DEP-2b).
+# CAP_SYS_PTRACE goes too: with it the scenario could attach to _inner or strace, which
+# keep CAP_SYS_ADMIN, and make the call through them. Without it, an ancestor holding
+# capabilities it lacks is out of its reach (cap_ptrace_access_check, and Yama scope 1).
+DROP_CAPS = ["setpriv", "--bounding-set", "-sys_admin,-sys_ptrace", "--inh-caps", "-sys_admin,-sys_ptrace", "--"]
+
+
 def _io_uring_disabled():
     try:
         return pathlib.Path("/proc/sys/kernel/io_uring_disabled").read_text().strip()
@@ -381,18 +461,46 @@ def _io_uring_disabled():
         return None
 
 
-def _inner(work, timeout, cmd, extra_keep=()):
-    """Runs inside the fresh user, network, and mount namespaces."""
+def _drain_into(fd, chunks):
+    with open(fd, "rb", buffering=0) as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            chunks.append(chunk)
+
+
+def _reader(fd):
+    chunks = []
+    t = threading.Thread(target=_drain_into, args=(fd, chunks), daemon=True)
+    t.start()
+    return t, chunks
+
+
+def _inner(work, timeout, cmd, extra_keep=(), writable=()):
+    """Runs inside the fresh user, network, and mount namespaces. The evidence
+    (strace's trace and its stderr) arrives over pipes this process holds, and the
+    result leaves on its stdout, so nothing the verdict reads is a file the scenario
+    could truncate or rewrite: the trace pipe is not even inherited by the scenario
+    (strace opens it close-on-exec), and stderr, which strace shares with the
+    scenario, can only be appended to."""
     work = pathlib.Path(work)
+    result = os.fdopen(os.dup(1), "w")  # only this process writes its result
+    null = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(null, 1)
+    os.close(null)
     _loopback_up()
-    keep = {str(work), str(ROOT), os.path.realpath(sys.prefix), *extra_keep,
-            os.path.dirname(os.path.realpath(sys.executable))}
-    masked = _mask_host_sockets(sorted(keep))
+    writable = {os.path.realpath(work)} | {os.path.realpath(w) for w in writable}
+    keep = {str(ROOT), os.path.realpath(sys.prefix), *(os.path.realpath(k) for k in extra_keep),
+            os.path.dirname(os.path.realpath(sys.executable))} | writable
+    masked = _mask_host_sockets(sorted(keep), writable)
     _place("nameserver 127.0.0.1\n", "/etc/resolv.conf", work, masked)
     if os.path.exists("/etc/nsswitch.conf"):
         lines = [l for l in pathlib.Path("/etc/nsswitch.conf").read_text().splitlines()
                  if not l.startswith("hosts:")]
         _place("\n".join(lines + ["hosts: files dns"]) + "\n", "/etc/nsswitch.conf", work, masked)
+    # Checked last, after every mount the sandbox makes: no rw mount at or under a
+    # read-only kept path, or the command never runs (DEP-4a).
+    wrong = writable_mounts(pathlib.Path("/proc/self/mountinfo").read_text(), sorted(keep - writable), writable)
+    if wrong:
+        sys.exit("depaudit: sandbox not run, rw mount under a read-only kept path: " + ", ".join(wrong))
     names = []
     sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sink.bind(("127.0.0.1", 53))
@@ -400,17 +508,31 @@ def _inner(work, timeout, cmd, extra_keep=()):
     for d in ("tmp", "home"):
         (work / d).mkdir(exist_ok=True)
     env = dict(os.environ, TMPDIR=str(work / "tmp"), HOME=str(work / "home"))
-    with open(work / "stdout", "wb") as out, open(work / "stderr", "wb") as err:
+    trace_r, trace_w = os.pipe()
+    err_r, err_w = os.pipe()
+    trace_t, trace = _reader(trace_r)
+    err_t, err = _reader(err_r)
+    with open(work / "stdout", "wb") as out:
+        proc = subprocess.Popen(["strace", "-f", "-qq", "-e", "trace=" + TRACED,
+                                 "-o", "/proc/%d/fd/%d" % (os.getpid(), trace_w), "--"] + DROP_CAPS + cmd,
+                                env=env, cwd=ROOT, stdout=out, stderr=err_w)
+        os.close(err_w)
         try:
-            rc = subprocess.run(["strace", "-f", "-qq", "-e", "trace=" + TRACED, "-o", str(work / "net.strace"),
-                                 "--"] + cmd, env=env, cwd=ROOT, stdout=out, stderr=err, timeout=timeout).returncode
+            rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
             rc = "timeout"
-    trace = work / "net.strace"
-    events = parse_strace(trace.read_text(errors="replace") if trace.exists() else "")
-    (work / "result.json").write_text(json.dumps({"rc": rc, "dns": names, "masked": masked,
-                                                  "realpaths": unix_realpaths(events),
-                                                  "io_uring_disabled": _io_uring_disabled()}))
+    os.close(trace_w)
+    # A tracee strace let go of may still hold stderr; take what has arrived.
+    trace_t.join(10)
+    err_t.join(2)
+    text = b"".join(list(trace)).decode(errors="replace")
+    events = parse_strace(text)
+    result.write(json.dumps({"rc": rc, "dns": names, "masked": masked, "realpaths": unix_realpaths(events),
+                             "io_uring_disabled": _io_uring_disabled(), "trace": text,
+                             "stderr": b"".join(list(err)).decode("latin-1")}) + "\n")
+    result.close()
     return 0
 
 
@@ -423,11 +545,12 @@ STRACE_ATTEMPTS = 3
 
 
 @contextlib.contextmanager
-def _scratch_dir(prefix, tries=50, pause=0.2):
+def _scratch_dir(prefix, tries=50, pause=0.2, stats=None):
     """TemporaryDirectory whose removal outlasts a straggler still writing into it
     (a go-build dir 'not empty' as rmtree reaches it). Only ENOTEMPTY is retried, and
     a directory that never empties still raises. run_target kills the sandbox before
-    this runs, so the retry covers only writes already in flight, not a live process."""
+    this runs, so the retry covers only writes already in flight, not a live process.
+    Each retry is counted in stats["cleanup_retries"], for the report."""
     path = tempfile.mkdtemp(prefix=prefix)
     try:
         yield path
@@ -439,6 +562,8 @@ def _scratch_dir(prefix, tries=50, pause=0.2):
             except OSError as e:
                 if e.errno != errno.ENOTEMPTY or left == 1:
                     raise
+                if stats is not None:
+                    stats["cleanup_retries"] += 1
                 time.sleep(pause)
 
 
@@ -457,27 +582,39 @@ def _run_sandboxed(cmd, env, timeout):
     return proc.returncode, out, err
 
 
-def _attempt(target, manifest, timeout):
+_RESULT_KEYS = {"rc", "dns", "masked", "realpaths", "io_uring_disabled", "trace", "stderr"}
+
+
+def _result(stdout):
+    """The sandbox's one result line, or None if its stdout is anything else."""
+    lines = stdout.splitlines()
+    try:
+        res = json.loads(lines[0]) if len(lines) == 1 else None
+    except ValueError:
+        return None
+    return res if isinstance(res, dict) and _RESULT_KEYS <= set(res) else None
+
+
+def _attempt(target, manifest, timeout, stats=None):
     """One sandboxed run in a fresh work directory: (result, whether strace faulted)."""
     profile = target.get("profile", "offline")
-    with _scratch_dir("depaudit-") as work:
+    with _scratch_dir("depaudit-", stats=stats) as work:
         os.chmod(work, 0o755)
         cmd = ["unshare"] + _unshare_flags() + ["--", sys.executable, str(pathlib.Path(__file__).resolve()),
                                                 "_inner", "--work", work, "--timeout", str(timeout)]
-        cmd += sum((["--keep", k] for k in target.get("keep", ())), []) + ["--"]
+        cmd += sum((["--keep", k] for k in target.get("keep", ())), [])
+        cmd += sum((["--writable", w] for w in target.get("writes", ())), []) + ["--"]
         env = dict(os.environ, **target.get("env", {}))
-        rc, _, stderr = _run_sandboxed(cmd + list(target["cmd"]), env, timeout + 60)
-        res_file = pathlib.Path(work, "result.json")
-        if rc != 0 or not res_file.exists():
+        rc, stdout, stderr = _run_sandboxed(cmd + list(target["cmd"]), env, timeout + 60)
+        res = _result(stdout)
+        if rc != 0 or res is None:
             return {"name": target["name"], "outcome": "error", "violations": [],
                     "detail": "sandbox exit %s, %s\n%s" % (
-                        rc, "result present" if res_file.exists() else "no result",
+                        rc, "result present" if res is not None else "no single result line",
                         stderr.decode(errors="replace")[-2000:])}, False
-        res = json.loads(res_file.read_text())
-        trace = pathlib.Path(work, "net.strace")
-        events = parse_strace(trace.read_text(errors="replace") if trace.exists() else "")
+        events = parse_strace(res["trace"])
         violations = evaluate(events, res["dns"], manifest, profile, work, res["realpaths"])
-        err = pathlib.Path(work, "stderr").read_bytes()
+        err = res["stderr"].encode("latin-1")
         out = {"name": target["name"], "profile": profile, "exit": res["rc"], "events": len(events),
                "logged": sorted({"%s %s" % (e.family, e.addr) for e in events}),
                "violations": violations, "masked": res["masked"], "io_uring_disabled": res["io_uring_disabled"]}
@@ -499,18 +636,23 @@ def run_target(target, manifest, timeout=600):
     if target.get("profile", "offline") != "offline":
         raise ValueError("%s: only offline scenarios run in the sandbox" % target["name"])
     carried = []  # violations from attempts strace itself cut short
+    stats = {"attempts": 0, "faults": 0, "cleanup_retries": 0}
     for attempt in range(1, STRACE_ATTEMPTS + 1):
-        out, fault = _attempt(target, manifest, timeout)
+        stats["attempts"] += 1
+        out, fault = _attempt(target, manifest, timeout, stats)
         if not fault:
             break
+        stats["faults"] += 1
         carried += out["violations"]
     else:
         out["detail"] = "on all %d attempts: %s" % (STRACE_ATTEMPTS, out["detail"])
         out["violations"] = carried
+        out.update(stats)
         return out
     out["violations"] = carried + out["violations"]
     if out["outcome"] == "pass" and carried:
         out["outcome"] = "violation"
+    out.update(stats)
     return out
 
 
@@ -524,7 +666,140 @@ def _ipv6_available():
         return False
 
 
-def control_targets(masked_probe, visible_probe):
+def _clear_read_only(path):
+    """What a scenario holding CAP_SYS_ADMIN over its mount namespace could do to a kept
+    path without a traced call: clear MOUNT_ATTR_RDONLY in place (mount_setattr), or on a
+    detached clone of the same mount (open_tree_attr, Linux 6.15+) and write through it."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    attr = (ctypes.c_uint64 * 4)(0, _MOUNT_ATTR_RDONLY, 0, 0)  # set, clr, propagation, userns_fd
+    wrong = []
+    if libc.syscall(_SYS_MOUNT_SETATTR, -100, path.encode(), _AT_RECURSIVE, attr, ctypes.sizeof(attr)) == 0:
+        wrong.append("mount_setattr cleared read-only on " + path)
+    fd = libc.syscall(_SYS_OPEN_TREE_ATTR, -100, path.encode(), _OPEN_TREE_CLONE | os.O_CLOEXEC | _AT_RECURSIVE,
+                      attr, ctypes.sizeof(attr))
+    if fd >= 0:
+        wrong.append("open_tree_attr cloned %s writable" % path)
+        probe = ".depaudit-write-%d" % os.getpid()
+        try:
+            os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, dir_fd=fd))
+            os.unlink(probe, dir_fd=fd)
+            wrong.append("wrote %s through the clone" % path)
+        except OSError:
+            pass
+        os.close(fd)
+    return wrong
+
+
+_PTRACE_SEIZE = 0x4206
+
+
+def _ptrace_denied(pid, comm, seize):
+    """Tries to attach to an ancestor that keeps CAP_SYS_ADMIN, into which a tracer could
+    inject mount_setattr (DEP-2b). With seize, a real PTRACE_SEIZE: it does not stop the
+    target, and the kernel detaches it when this process exits. strace cannot be seized
+    that way: once its own tracee traces it, the next stop of either deadlocks the pair. So
+    for strace this opens /proc/PID/mem, which the kernel allows only after the same check
+    PTRACE_ATTACH runs (ptrace_may_access in attach mode, Yama included)."""
+    import ctypes
+    try:
+        got = pathlib.Path("/proc/%d/comm" % pid).read_text().strip()
+    except OSError as e:
+        return ["pid %d: %s" % (pid, e)]
+    if not got.startswith(comm):
+        return ["pid %d is %s, not %s: nothing was tried" % (pid, got, comm)]
+    if seize:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+        if libc.ptrace(_PTRACE_SEIZE, pid, None, None) == 0:
+            return ["ptrace attached to %s (pid %d)" % (got, pid)]
+        err = ctypes.get_errno()
+    else:
+        try:
+            os.close(os.open("/proc/%d/mem" % pid, os.O_RDONLY))
+            return ["opened the memory of %s (pid %d) for ptrace" % (got, pid)]
+        except OSError as e:
+            err = e.errno
+    if err in (errno.EPERM, errno.EACCES):
+        return []
+    return ["ptrace %s (pid %d): %s, not denied" % (got, pid, os.strerror(err))]
+
+
+def _control(mode):
+    """Planted scenarios against the harness's own defences (DEP-2), run as
+    `depaudit.py _control MODE` inside the sandbox.
+      tamper-evidence  connects to a documentation address, then truncates or rewrites
+                       every evidence file the harness once read from its work directory
+      write-kept       exits nonzero unless every write to ROOT (tools/depaudit.py too),
+                       sys.prefix and $DEPAUDIT_KEEP_RO fails read-only, and a write to
+                       $DEPAUDIT_KEEP_RW (declared in the target's writes) succeeds; first it
+                       tries to clear read-only with the untraced mount_setattr and
+                       open_tree_attr (a mount(2) remount is traced: a violation by itself)
+      ptrace-ancestors exits nonzero unless a ptrace attach to the sandbox's PID 1 (_inner)
+                       and to its strace parent is denied: either still holds CAP_SYS_ADMIN
+      own-user-namespace exits nonzero if the scenario's uid_map is the initial namespace's
+                       identity map: its kept capabilities would then act on the host"""
+    if mode == "tamper-evidence":
+        with contextlib.suppress(OSError):
+            socket.create_connection(("192.0.2.10", 443), timeout=2).close()
+        work = os.path.dirname(os.environ["TMPDIR"])
+        forged = json.dumps({"rc": 0, "dns": [], "masked": list(MASKED_DIRS), "realpaths": {},
+                             "io_uring_disabled": "2", "trace": "", "stderr": ""})
+        for name, text in (("net.strace", ""), ("stderr", ""), ("result.json", forged)):
+            with contextlib.suppress(OSError):
+                pathlib.Path(work, name).write_text(text)
+        return 0
+    if mode == "ptrace-ancestors":
+        wrong = _ptrace_denied(1, "python", True) + _ptrace_denied(os.getppid(), "strace", False)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.sendto(b"x", ("127.0.0.1", 9))
+        if wrong:
+            sys.exit("; ".join(wrong))
+        return 0
+    if mode == "own-user-namespace":
+        uid_map = pathlib.Path("/proc/self/uid_map").read_text().split()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.sendto(b"x", ("127.0.0.1", 9))
+        if not uid_map or uid_map == ["0", "0", "4294967295"]:
+            sys.exit("uid_map is %r: the scenario runs in the initial user namespace" % " ".join(uid_map))
+        return 0
+    if mode != "write-kept":
+        raise ValueError(mode)
+    wrong = []
+    for d in (str(ROOT), os.path.realpath(sys.prefix), os.environ["DEPAUDIT_KEEP_RO"]):
+        wrong += _clear_read_only(d)
+        probe = os.path.join(d, ".depaudit-write-%d" % os.getpid())
+        try:
+            os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            os.unlink(probe)
+            wrong.append("wrote " + d)
+        except OSError as e:
+            if e.errno != errno.EROFS:
+                wrong.append("%s: %s, not read-only" % (d, e))
+    ro_kept = [str(ROOT), os.path.realpath(sys.prefix), os.environ["DEPAUDIT_KEEP_RO"]]
+    wrong += ["rw mount under a read-only kept path: " + m for m in writable_mounts(
+        pathlib.Path("/proc/self/mountinfo").read_text(), ro_kept, [os.environ["DEPAUDIT_KEEP_RW"]])]
+    try:
+        os.close(os.open(__file__, os.O_WRONLY | os.O_APPEND))
+        wrong.append("opened %s for writing" % __file__)
+    except OSError as e:
+        if e.errno != errno.EROFS:
+            wrong.append("%s: %s, not read-only" % (__file__, e))
+    probe = os.path.join(os.environ["DEPAUDIT_KEEP_RW"], ".depaudit-write-%d" % os.getpid())
+    try:
+        os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        os.unlink(probe)
+    except OSError as e:
+        wrong.append("declared writable, yet %s" % e)
+    # One logged loopback call, so the control is seen to have run under strace.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.sendto(b"x", ("127.0.0.1", 9))
+    if wrong:
+        sys.exit("; ".join(wrong))
+    return 0
+
+
+def control_targets(masked_probe, visible_probe, writable_dir):
     """Built-in controls, hard-coded so that removing one cannot keep CI green.
     masked_probe listens in /tmp (hidden in the sandbox); visible_probe listens in
     a directory bound back into the sandbox (reachable), so path tricks must be
@@ -536,6 +811,7 @@ def control_targets(masked_probe, visible_probe):
     probes = {"DEPAUDIT_PROBE": masked_probe, "DEPAUDIT_PROBE_VISIBLE": visible_probe}
     keep = [os.path.dirname(visible_probe)]
     probe_name = os.path.basename(visible_probe)
+    own = [sys.executable, str(pathlib.Path(__file__).resolve()), "_control"]
     return [
         {"name": "control-offline-clean", "cmd": cmd + ["clean"], "expect": "pass",
          "must_log": [("inet", "127.0.0.1"), ("unix", "/ctl.sock")]},
@@ -554,6 +830,16 @@ def control_targets(masked_probe, visible_probe):
         {"name": "control-symlink-removed", "must_reach": True, "cmd": cmd + ["host-socket-symlink-removed"], "expect": "violation",
          "expect_kinds": ["link"], "env": probes, "keep": keep,
          "must_log": [("link", os.path.dirname(visible_probe)), ("unix", "/l/" + probe_name)]},
+        # DEP-2: evidence the scenario rewrites after a connect, and writes to kept paths.
+        {"name": "control-evidence-tamper", "cmd": own + ["tamper-evidence"], "expect": "violation",
+         "expect_kinds": ["ipv4"], "must_log": [("inet", "192.0.2.10")]},
+        {"name": "control-kept-read-only", "cmd": own + ["write-kept"], "expect": "pass", "keep": keep,
+         "writes": [writable_dir], "env": {"DEPAUDIT_KEEP_RO": keep[0], "DEPAUDIT_KEEP_RW": writable_dir},
+         "must_log": [("inet", "127.0.0.1")]},
+        {"name": "control-no-ptrace-ancestors", "cmd": own + ["ptrace-ancestors"], "expect": "pass",
+         "must_log": [("inet", "127.0.0.1")]},
+        {"name": "control-own-user-namespace", "cmd": own + ["own-user-namespace"], "expect": "pass",
+         "must_log": [("inet", "127.0.0.1")]},
     ]
 
 
@@ -601,7 +887,8 @@ def cmd_static(args):
 
 def cmd_run(args):
     if not sandbox_available():
-        print("FAIL sandbox unavailable: needs strace and unprivileged user+network namespaces", file=sys.stderr)
+        print("FAIL sandbox unavailable: needs unshare, setpriv, unprivileged user+network namespaces and "
+              "an strace that names every traced syscall (%s)" % TRACED, file=sys.stderr)
         return 2
     try:
         product = load_registry(args.targets)
@@ -611,7 +898,9 @@ def cmd_run(args):
     manifest = load_manifest(json.loads(pathlib.Path(args.manifest).read_text()))
     report, ok_all = {"targets": []}, True
     with tempfile.TemporaryDirectory(prefix="depaudit-probe-", dir="/tmp") as masked_dir, \
-            tempfile.TemporaryDirectory(prefix="dpv-", dir="/tmp") as visible_dir:
+            tempfile.TemporaryDirectory(prefix="dpv-", dir="/tmp") as visible_dir, \
+            tempfile.TemporaryDirectory(prefix="dpw-", dir="/tmp") as writable_dir:
+        os.chmod(writable_dir, 0o755)
         probes = []
         for d in (masked_dir, visible_dir):
             probe = socket.socket(socket.AF_UNIX)
@@ -620,7 +909,7 @@ def cmd_run(args):
             probes.append(probe)
             os.chmod(d, 0o755)
         probes[1].setblocking(False)
-        for t in control_targets(os.path.join(masked_dir, "p"), os.path.join(visible_dir, "p")) + product:
+        for t in control_targets(os.path.join(masked_dir, "p"), os.path.join(visible_dir, "p"), writable_dir) + product:
             res = run_target(t, manifest, timeout=args.timeout)
             ok, why = _judge(t, res)
             reached = _drain(probes[1])
@@ -629,9 +918,11 @@ def cmd_run(args):
             ok_all &= ok
             res.update(control=t not in product, passed=ok)
             report["targets"].append(res)
-            print("%s %-28s %s (%s; %d socket events, %d violation(s))" % (
-                "PASS" if ok else "FAIL", t["name"], "scenario" if t in product else "control",
-                why, res.get("events", 0), len(res["violations"])))
+            print("%s %-28s %s (%s; %d socket events, %d violation(s); "
+                  "%d attempt(s), %d strace fault(s), %d cleanup retr(ies))" % (
+                      "PASS" if ok else "FAIL", t["name"], "scenario" if t in product else "control",
+                      why, res.get("events", 0), len(res["violations"]),
+                      res.get("attempts", 0), res.get("faults", 0), res.get("cleanup_retries", 0)))
             if not ok:
                 for v in res["violations"]:
                     print("    %s %s (%dx, first: %s)" % (v["kind"], v["target"], v["count"], v["first"]))
@@ -670,11 +961,16 @@ def main(argv=None):
     i.add_argument("--work", required=True)
     i.add_argument("--timeout", type=int, required=True)
     i.add_argument("--keep", action="append", default=[])
+    i.add_argument("--writable", action="append", default=[])
     i.add_argument("subject", nargs=argparse.REMAINDER)
+    c = sub.add_parser("_control")
+    c.add_argument("mode")
     args = ap.parse_args(argv)
     if args.cmd == "_inner":
         return _inner(args.work, args.timeout, args.subject[1:] if args.subject[:1] == ["--"] else args.subject,
-                      args.keep)
+                      args.keep, args.writable)
+    if args.cmd == "_control":
+        return _control(args.mode)
     return cmd_static(args) if args.cmd == "static" else cmd_run(args)
 
 

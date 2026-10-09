@@ -55,9 +55,9 @@ var (
 	// ErrExpired: metadata has expired, so the mirror may be frozen (online only).
 	ErrExpired = errors.New("update metadata has expired")
 	// ErrRollback: metadata older than what the box already trusts.
-	ErrRollback = errors.New("update metadata is older than what this box trusts")
+	ErrRollback = errors.New("update metadata is older than the metadata already trusted")
 	// ErrWeakThreshold: the root or targets role needs fewer keys than the box's floor.
-	ErrWeakThreshold = errors.New("update metadata threshold is below this box's floor")
+	ErrWeakThreshold = errors.New("update metadata threshold is below the trusted floor")
 	// ErrDriveTooOld: offline, the drive's root expired more than
 	// MaxOfflineRootAge ago; the owner sees DriveTooOldNotice.
 	ErrDriveTooOld = errors.New("drive's update is too old to trust offline")
@@ -88,7 +88,7 @@ func classify(err error) error {
 
 // OfflineNotice is what the box tells the owner after installing from a
 // drive (UPD-8). P2-2 and the owner channel show it.
-const OfflineNotice = "Update installed from a drive without a freshness check. The box will check it the next time it is online."
+const OfflineNotice = "Update installed from a drive without a freshness check. I will check it the next time I am online."
 
 // DriveTooOldNotice is what the owner sees when a drive's update is refused
 // for age (Mark, 2026-10-05). The same text accompanies the tier-4 override.
@@ -100,7 +100,7 @@ const MaxOfflineRootAge = 180 * 24 * time.Hour
 
 // NotConfirmedNotice is what the owner sees when an online check finds the
 // release installed from a drive missing from the fresh metadata.
-const NotConfirmedNotice = "The update installed from a drive is not in the latest signed release list. It may have been withdrawn; the box will offer the current release."
+const NotConfirmedNotice = "The update installed from a drive is not in the latest signed release list. It may have been withdrawn; I will offer the current release."
 
 // Options for one check.
 type Options struct {

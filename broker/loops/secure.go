@@ -18,8 +18,10 @@ import (
 )
 
 // Loop 2, self-securing (LOOP-8 to LOOP-10). This file holds the passive
-// checks and what happens to a finding. Active testing from inside the
-// sandbox (LOOP-7) is not built here (S1).
+// checks and what happens to a finding. LOOP-7's off-the-shelf probes
+// (canary rounds, published corpora) are in probe.go and corpus.go,
+// with the command runner in ../probecmd; the tamper and exhaustion
+// probes are P3-4b-4b.
 
 // Severity decides how the owner hears about a finding (LOOP-9).
 type Severity string
@@ -144,6 +146,9 @@ type SuitePipeline interface {
 	AddSecurityCase(c change.Case) error
 	Propose(ctx context.Context, c change.Candidate) (change.Report, error)
 	Files(ns string) change.Tree
+	// LinkedHold answers a finding's linked cases from the active tree
+	// (P3-4b-1b item 1).
+	LinkedHold(finding string) (linked int, hold bool)
 }
 
 // GuardConfig configures NewSecure.
@@ -199,6 +204,9 @@ type GuardConfig struct {
 	// ResumeFor is how long a preempted fix is kept: change.ResumeFor
 	// unless set (PE7).
 	ResumeFor time.Duration
+	// Probes are the LOOP-7 probes, run after the passive checks, one per
+	// check (P3-4b-4a).
+	Probes []Probe
 }
 
 // Guard is Loop 2's Source.
@@ -264,6 +272,13 @@ type secureState struct {
 	// (MaxPausesPerDay).
 	PauseDay string `json:"pause_day,omitempty"`
 	Pauses   int    `json:"pauses,omitempty"`
+	// SourcePauses counts PauseDay's automatic pauses per probe (A-6,
+	// P3-4b).
+	SourcePauses map[Check]int `json:"source_pauses,omitempty"`
+	// ProbeLast is when each probe last ran to the end; ProbeFailed are
+	// the probes whose last run failed (P3-4b-4a).
+	ProbeLast   map[Check]time.Time `json:"probe_last,omitempty"`
+	ProbeFailed []string            `json:"probe_failed,omitempty"`
 }
 
 // Record is a finding's preserved evidence (LOOP-9).
@@ -288,6 +303,13 @@ type Record struct {
 	// Regression is the minimized test added to the suite for a reported
 	// finding.
 	Regression []byte `json:"regression,omitempty"`
+	// Replay is the passing replay that closed a fuzz or probe finding
+	// (Resolve).
+	Replay *Replay `json:"replay,omitempty"`
+	// Told marks a reported finding's owner text as sent, so a resume
+	// after a crash sends a text not yet sent, and only that (P3-4b-1b
+	// item 3).
+	Told bool `json:"told,omitempty"`
 }
 
 // NewGuard loads Loop 2's state.
@@ -322,6 +344,13 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 	if cfg.Notify == nil {
 		cfg.Notify = func(string, bool) {}
 	}
+	seen := map[Check]bool{}
+	for _, p := range cfg.Probes {
+		if !probeChecks[p.Check()] || seen[p.Check()] || p.Every() <= 0 {
+			return nil, fmt.Errorf("loops: probe %q: unknown, repeated or without an interval", p.Check())
+		}
+		seen[p.Check()] = true
+	}
 	s := &Guard{cfg: cfg, force: true}
 	b, err := cfg.Store.Load()
 	if err != nil {
@@ -354,15 +383,21 @@ func (s *Guard) Trigger() {
 	s.mu.Unlock()
 }
 
-// Next offers one pass of the passive checks when one is due. It makes no
-// model calls.
+// Next offers one pass of the passive checks when one is due, else one
+// due probe (LOOP-7). Neither makes model calls.
 func (s *Guard) Next(_ context.Context, _ bool) (Job, bool) {
-	if !s.Urgent() {
+	if s.Urgent() {
+		return Job{Name: "passive", Run: func(ctx context.Context) Result {
+			n, err := s.Pass(ctx)
+			return Result{Value: float64(n), Err: err}
+		}}, true
+	}
+	p, ok := s.dueProbe()
+	if !ok {
 		return Job{}, false
 	}
-	return Job{Name: "passive", Run: func(ctx context.Context) Result {
-		n, err := s.Pass(ctx)
-		return Result{Value: float64(n), Err: err}
+	return Job{Name: "probe:" + string(p.Check()), Run: func(ctx context.Context) Result {
+		return s.runProbe(ctx, p)
 	}}, true
 }
 
@@ -380,6 +415,8 @@ func (s *Guard) Urgent() bool {
 // must not run concurrently; the scheduler runs one job at a time.
 func (s *Guard) Pass(ctx context.Context) (int, error) {
 	found, notes, failed, stale := s.check()
+	resumeErr := s.resumeReported(ctx)
+	clear := s.passedReported()
 	now := s.cfg.Now()
 	s.mu.Lock()
 	s.st.NotRun, s.st.Failed, s.stale, s.force = notes, failed, stale, false
@@ -398,7 +435,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	urgent := false
 	for _, id := range sortedKeys(s.st.Open) {
 		rec := s.st.Open[id]
-		if seen[id] || rec.Reported {
+		if seen[id] || rec.Reported && !clear[id] {
 			continue
 		}
 		// No longer observed; its evidence stays. A pause it caused stays
@@ -438,9 +475,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	var ids []string
 	pauses := 0
 	s.mu.Lock()
-	if day := now.UTC().Format(time.DateOnly); s.st.PauseDay != day {
-		s.st.PauseDay, s.st.Pauses = day, 0
-	}
+	s.rollDayLocked(now)
 	s.mu.Unlock()
 	for _, f := range fresh {
 		if ctx.Err() != nil {
@@ -476,7 +511,110 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	err2 := s.saveLocked()
 	s.mu.Unlock()
-	return len(fresh), errors.Join(append(errs, err, err2)...)
+	return len(fresh), errors.Join(append(errs, resumeErr, err, err2)...)
+}
+
+// passedReported answers each open reported finding's linked cases from
+// the active tree; the ones whose cases all hold close as cleared in this
+// pass, whoever repaired the tree (an owner-approved intent, an update),
+// so nothing says they wait for a fix (P3-4b-1b item 1). Only a finding
+// whose own cases are all in the suite qualifies: with its original test
+// missing, the regression passing says nothing about it.
+func (s *Guard) passedReported() map[string]bool {
+	s.mu.Lock()
+	var ids []string
+	for _, id := range sortedKeys(s.st.Open) {
+		if rec := s.st.Open[id]; rec.Reported && rec.Fixture == change.Loop2Fixture+id {
+			ids = append(ids, id)
+		}
+	}
+	s.mu.Unlock()
+	clear := map[string]bool{}
+	for _, id := range ids {
+		if _, hold := s.cfg.Pipeline.LinkedHold(id); hold {
+			clear[id] = true
+		}
+	}
+	return clear
+}
+
+// resumeReported repairs every open reported finding a crash or a store
+// error left part done (P3-4b-1b item 3).
+func (s *Guard) resumeReported(ctx context.Context) error {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	s.mu.Lock()
+	var ids []string
+	for _, id := range sortedKeys(s.st.Open) {
+		if rec := s.st.Open[id]; rec.Reported && unfinished(rec) {
+			ids = append(ids, id)
+		}
+	}
+	s.mu.Unlock()
+	var errs []error
+	for _, id := range ids {
+		if _, err := s.resumeLocked(ctx, id); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// unfinished reports a reported record whose case adds or fix request
+// never happened, or whose owner text was never sent.
+func unfinished(r Record) bool {
+	return r.Fix == "" && r.Finding.Rule != nil || r.Texted && !r.Told
+}
+
+// resumeLocked finishes what handle left undone for open reported
+// finding id: it adds the cases and opens the request, then sends the
+// owner text if it was never sent. s.reportMu is held.
+func (s *Guard) resumeLocked(ctx context.Context, id string) (Record, error) {
+	s.mu.Lock()
+	rec, ok := s.st.Open[id]
+	s.mu.Unlock()
+	if !ok || !rec.Reported {
+		return rec, nil
+	}
+	var errs []error
+	if rec.Fix == "" && rec.Finding.Rule != nil {
+		errs = append(errs, s.link(ctx, &rec))
+		s.mu.Lock()
+		if _, still := s.st.Open[id]; still {
+			s.st.Open[id] = rec
+			for i := range s.st.Evidence {
+				if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
+					e.Fixture, e.Fix, e.FixReason, e.Regression = rec.Fixture, rec.Fix, rec.FixReason, rec.Regression
+				}
+			}
+		}
+		s.mu.Unlock()
+	}
+	return s.tell(rec), errors.Join(append(errs, s.save())...)
+}
+
+// tell sends a reported finding's owner text once, on its own and not
+// through batch, so lines held for MORE stay; Told is saved after it.
+// A crash between the two sends it again on the next resume: at least
+// once, never lost.
+func (s *Guard) tell(rec Record) Record {
+	if !rec.Texted || rec.Told {
+		return rec
+	}
+	s.cfg.Notify("Security checks: "+ownerLine(rec), rec.Finding.Check != CheckExpiry)
+	rec.Told = true
+	s.mu.Lock()
+	if _, still := s.st.Open[rec.Finding.ID]; still {
+		s.st.Open[rec.Finding.ID] = rec
+	}
+	s.mu.Unlock()
+	return rec
+}
+
+func (s *Guard) save() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveLocked()
 }
 
 // textBudget is three SMS segments (CH-15).
@@ -533,6 +671,11 @@ func sortedKeys[V any](m map[string]V) []string {
 // Pass sends the text, then proposes the fix.
 func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Record, error) {
 	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f), Reported: reported}
+	if reported && f.Rule != nil {
+		// Minimized now and saved with the first save, so a resume adds
+		// the same test even if the tree has moved on since.
+		rec.Regression = s.regression(f)
+	}
 	var errs []error
 	if f.Contain != nil {
 		if !pause {
@@ -573,8 +716,29 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Re
 	if err != nil {
 		errs = append(errs, err)
 	}
+	if err := s.link(ctx, &rec); err != nil {
+		errs = append(errs, err)
+	}
+	s.mu.Lock()
+	s.st.Open[f.ID] = rec
+	e := &s.st.Evidence[ev]
+	e.Fixture, e.Fix, e.FixReason, e.Regression = rec.Fixture, rec.Fix, rec.FixReason, rec.Regression
+	s.mu.Unlock()
+	return rec, errors.Join(errs...)
+}
+
+// link adds rec's fixture, and for a reported finding its linked cases,
+// to the suite, then opens the fix request when that can grade a fix.
+// handle runs it after the first save; a resume runs it again.
+func (s *Guard) link(ctx context.Context, rec *Record) error {
+	f, reported := rec.Finding, rec.Reported
+	var errs []error
 	linked := false // every case for f is in the suite
-	if f.Rule != nil && !s.cfg.FixturesLive && !s.cfg.FixturesLiveFor[f.Check] {
+	if f.Rule == nil && reported && probeChecks[f.Check] {
+		// The probe that found it is its regression: it runs on its
+		// interval for as long as Loop 2 runs (P3-4b-4a).
+		rec.Fixture = "probe:" + string(f.Check)
+	} else if f.Rule != nil && !s.cfg.FixturesLive && !s.cfg.FixturesLiveFor[f.Check] {
 		rec.Fixture = "deferred"
 	} else if f.Rule != nil {
 		c := change.Case{ID: change.Loop2Fixture + f.ID, Class: change.ClassConfig, Input: f.Rule, Expect: []byte(FixtureOK)}
@@ -583,7 +747,6 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Re
 			// The minimized test, linked to its finding: a fix for it must
 			// pass every case linked to it (LOOP-10). Minimizing drops
 			// failing clauses, so the original test is linked beside it.
-			rec.Regression = s.regression(f)
 			cases[0].Input, cases[0].Expect, cases[0].Finding = rec.Regression, []byte(change.TreeRuleOK), f.ID
 			orig := cases[0]
 			orig.ID, orig.Input = c.ID+OriginalSuffix, f.Rule
@@ -592,8 +755,11 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Re
 		linked = true
 		for _, c := range cases {
 			switch err := s.cfg.Pipeline.AddSecurityCase(c); {
-			case err == nil, errors.Is(err, change.ErrDuplicate):
+			case err == nil, errors.Is(err, change.ErrDuplicate) && !errors.Is(err, change.ErrConflict):
+				// Already there, as this same case: a re-run after a crash.
 			default:
+				// Another finding's case holds the ID (ErrConflict), or the
+				// store failed: f is not linked (P3-4b-1b item 2).
 				linked = false
 				errs = append(errs, fmt.Errorf("fixture %s: %w", c.ID, err))
 			}
@@ -613,12 +779,7 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Re
 		// the digest can say it waits and why.
 		rec.Fix = FixPending
 	}
-	s.mu.Lock()
-	s.st.Open[f.ID] = rec
-	e := &s.st.Evidence[ev]
-	e.Fixture, e.Fix, e.FixReason, e.Regression = rec.Fixture, rec.Fix, rec.FixReason, rec.Regression
-	s.mu.Unlock()
-	return rec, errors.Join(errs...)
+	return errors.Join(errs...)
 }
 
 // fix proposes a fix for rec's finding through the pipeline. A candidate
@@ -828,6 +989,11 @@ func digestOf(f Finding) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
+
+// FindingID is the ID Report gives a finding of check c about subject with
+// detail; a probe outside this package that sets its own IDs uses it, such
+// as probecmd with an empty detail (P3-4b-4a).
+func FindingID(c Check, subject, detail string) string { return findingID(c, subject, detail) }
 
 func findingID(c Check, subject, detail string) string {
 	h := sha256.Sum256([]byte(string(c) + "\x00" + subject + "\x00" + detail))
@@ -1049,6 +1215,10 @@ var plainCheck = map[Check]string{
 	CheckAdvisory: "known vulnerabilities",
 	CheckDrift:    "settings",
 	CheckExpiry:   "credential expiry",
+	CheckCanary:   "leak tests",
+	CheckCorpus:   "attack-text tests",
+	CheckTamper:   "tamper tests",
+	CheckExhaust:  "load tests",
 }
 
 // safeName keeps owner-facing names to a fixed alphabet.
@@ -1133,6 +1303,24 @@ func findingText(f Finding) string {
 		return "Credential " + sub + " " + safeName(f.Detail) + ". Replace it on my Wi-Fi page."
 	case CheckSeeded:
 		return "Security test " + sub + " fails on my current setup."
+	case CheckFuzz:
+		return "Fuzz test " + sub + " crashes on my current setup. I take the fix when an update has it."
+	case CheckProbe:
+		return "Socket probe " + sub + " fails on my current setup. I take the fix when an update has it."
+	case CheckCanary:
+		return "A leak test found a planted test secret where " + sub + " could reach it."
+	case CheckCorpus:
+		return "A published attack text got past my " + safeName(f.Detail) + " (" + sub + ")."
+	case CheckTamper:
+		return "A tamper test changed my " + sub + " from inside an agent machine."
+	case CheckExhaust:
+		switch {
+		case f.Detail != "slow":
+			return "A load test found no " + sub + " limit on an agent machine."
+		case f.Subject == "preemption":
+			return "Under a load test I stopped an agent machine slower than my target."
+		}
+		return "Under a load test I answered slower than my target."
 	}
 	return "Security finding on " + sub + "."
 }
@@ -1239,9 +1427,9 @@ func (s *Guard) Digest() []string {
 	now := s.cfg.Now()
 	if s.overdueLocked(now) {
 		out = append(out, "Loop 2: checks haven't run since "+s.st.Last.Format("Mon 2 Jan")+".")
-	} else if said := strings.Join(s.st.NotRun, ",") + "/" + strings.Join(s.st.Failed, ","); said != s.st.NotRunSaid || len(s.st.Failed) > 0 {
+	} else if said := strings.Join(s.st.NotRun, ",") + "/" + strings.Join(s.st.Failed, ","); said != s.st.NotRunSaid || len(s.st.Failed)+len(s.st.ProbeFailed) > 0 {
 		// A check that failed is said every time, like an overdue pass.
-		if len(s.st.NotRun)+len(s.st.Failed) > 0 {
+		if len(s.st.NotRun)+len(s.st.Failed)+len(s.st.ProbeFailed) > 0 {
 			out = append(out, s.partialLocked())
 		}
 		s.st.NotRunSaid = said
@@ -1250,7 +1438,7 @@ func (s *Guard) Digest() []string {
 	if s.stale != "" {
 		out = append(out, s.stale)
 	}
-	return out
+	return append(out, s.repeatLinesLocked()...)
 }
 
 // overdueLocked reports no pass for twice the cadence since the last one.
@@ -1269,7 +1457,7 @@ func (s *Guard) partialLocked() string {
 		}
 		parts = append(parts, part)
 	}
-	for _, n := range s.st.Failed {
+	for _, n := range append(append([]string(nil), s.st.Failed...), s.st.ProbeFailed...) {
 		parts = append(parts, plainCheck[Check(n)]+", failed")
 	}
 	return "Loop 2: partial (not run: " + strings.Join(parts, "; ") + ")."
@@ -1287,7 +1475,7 @@ func (s *Guard) Status() string {
 		line = "Loop 2: not run yet."
 	case s.overdueLocked(now):
 		line = "Loop 2: checks haven't run since " + s.st.Last.Format("Mon 2 Jan") + "."
-	case len(s.st.NotRun)+len(s.st.Failed) > 0:
+	case len(s.st.NotRun)+len(s.st.Failed)+len(s.st.ProbeFailed) > 0:
 		line = s.partialLocked()
 	}
 	if wait := s.waitStatusLocked(); wait != "" {

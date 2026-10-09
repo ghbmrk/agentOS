@@ -82,12 +82,16 @@ func (e *event) first(s string) int {
 
 type logStore struct {
 	change.MemStore
-	ev *event
+	ev    *event
+	first []byte // the first save holding evidence: a crash point
 }
 
 func (s *logStore) Save(b []byte) error {
 	if strings.Contains(string(b), `"evidence":[{`) {
 		s.ev.add("evidence")
+		if s.first == nil {
+			s.first = append([]byte(nil), b...)
+		}
 	}
 	return s.MemStore.Save(b)
 }
@@ -172,13 +176,17 @@ type reportRig struct {
 	// makes the pipeline refuse the new security cases it matches.
 	liveFor map[Check]bool
 	refuse  func(change.Case) bool
+	// probes are the LOOP-7 probes Guard runs (P3-4b-4a).
+	probes []Probe
 }
 
-func seedPipe(t *testing.T) *change.Pipeline {
+func seedPipe(t *testing.T) *change.Pipeline { t.Helper(); return seedPipeWith(t, seedEval{}) }
+
+func seedPipeWith(t *testing.T, ev change.Evaluator) *change.Pipeline {
 	t.Helper()
 	p, err := change.New(change.Config{
 		Store:     &change.MemStore{},
-		Evaluator: seedEval{},
+		Evaluator: ev,
 		Initial:   change.Tree{"config/facts.json": facts("3.0.15"), "skills/greet": []byte("hi"), seedPath: []byte(defective)},
 		Now:       func() time.Time { return t0 },
 		Rand:      fixed{},
@@ -213,7 +221,7 @@ func (r *reportRig) reopen(t *testing.T) {
 		live = r.liveFor
 	}
 	cfg := GuardConfig{Box: cleanBox().Box(), Pipeline: logPipe{r.p, r.ev, &r.refuse}, Store: r.store, Contain: r.c,
-		FixturesLiveFor: live,
+		FixturesLiveFor: live, Probes: r.probes,
 		Notify: func(s string, u bool) {
 			r.ev.add("notify")
 			r.texts, r.urgent = append(r.texts, s), append(r.urgent, u)

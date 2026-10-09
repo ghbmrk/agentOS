@@ -10,13 +10,15 @@ A recurring review of the owner-facing experience (onboarding and everyday use) 
 
 Tier A PRs get a UX pass in the lens screen; tier B PRs get UX as part of the combined pass. Each run applies the scope below to the PR's diff. Verdicts go to `reviews/ux/YYYY-MM-DD-pr<N>.md` (combined passes to `reviews/combined/`), in the L3 format of docs/OPERATING.md §4.
 
+Before raising a finding on text shown to the guest, check that a guest can reach it: trace the path from a guest tool call to the text, through the MCP guard and the gate. #461 (SR2-3o) was built for refusals that no guest could reach.
+
 ## Checks that replaced findings
 
 Finding kinds CI now catches; the screen no longer looks for them by hand (OPERATING §4).
 
 | Finding kind | Check | Since |
 |---|---|---|
-| — | none recorded yet | — |
+| CH-12 "a problem text names a step that cannot work" (UX run 2, #327, #423; #409 U6), for the held-restore texts only | `TestHeldOwnerTextsNameOnlyStepsThatWork` (broker/cmd/agentosd/held_test.go): each text a held box can send names only steps that work in its state, is GSM-7 within three segments, and lists exactly the replies taken. Other owner texts are still screened by hand. | W3-forget-b1-7 |
 
 ## Spec-wide runs
 
@@ -33,4 +35,5 @@ Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory 
 
 ## Recurring kinds (to become checks)
 
-- **A problem text names a step that cannot work** (CH-12): UX run 2 (#124, #126, #132, #133), #327 and #423 (STATUS says a release waits for approval when no request is open, [2026-10-09](2026-10-09-pr423.md)). The next package touching owner texts adds a test that flags it ([2026-10-08](2026-10-08-lens-bundle-a.md#recurring-kind)).
+- **A problem text names a step that cannot work** (CH-12): UX run 2 (#124, #126, #132, #133), #327, #423 (STATUS says a release waits for approval when no request is open, [2026-10-09](2026-10-09-pr423.md)), #430 and #434 (staged-adoption texts, [2026-10-09](2026-10-09-pr434.md)). The next package touching owner texts adds a test that flags it ([2026-10-08](2026-10-08-lens-bundle-a.md#recurring-kind)).
+- **Finding text names an identifier, or alarms with no step** (#523, #515, [2026-10-09](2026-10-09-pr515.md)): proposed check `TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep` in `broker/loops`, for the next package touching probe wiring (P3-4b-4b or P3-4b-4c).

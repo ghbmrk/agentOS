@@ -1,0 +1,11 @@
+{
+ "name": "promptinject",
+ "url": "https://github.com/agencyenterprise/PromptInject",
+ "commit": "2928a719d5de62d3766226f1b44c51d9570bc530",
+ "license": "MIT",
+ "files": {
+  "prompt_data.py": "d26af509698c5f88e611a163cc162ab903d41040cc6307db9f6ee4b6195a5b6e",
+  "LICENSE": "168fb7a65f0cca6f4c613aa8ce6af39541c8bac7aa1bf97ffac43582a5642601"
+ },
+ "tables": ["goal_hikacking_attacks", "prompt_leaking_attacks"]
+}

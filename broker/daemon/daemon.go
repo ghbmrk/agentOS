@@ -40,6 +40,21 @@ var ownerIdle = 60 * time.Second
 // GuestSocket is the socket file handed to agent machine id.
 func GuestSocket(id string) string { return "guest-" + id + ".sock" }
 
+// journalRefusals journals each protocol refusal on machine id's socket,
+// coalesced per machine and code as egress denials are, so a guest
+// looping on bad frames cannot fill the journal. The code rides in
+// Operation as a token ("unknown-op"), since the journal may redact the
+// reason. A failed write is dropped: the refusal already stopped the
+// frame.
+func journalRefusals(eng *journal.Engine, gate *journal.EgressGate, id string) func(sockets.Peer, sockets.Code) {
+	return func(_ sockets.Peer, c sockets.Code) {
+		n := journal.EgressNote{Machine: id, Adapter: sockets.RefusalNote, Operation: c.Token(), Reason: sockets.RefusalNote + ": " + string(c)}
+		if gate.Admit(&n) {
+			eng.RecordEgress(n)
+		}
+	}
+}
+
 // Config configures Run.
 type Config struct {
 	JournalPath string
@@ -148,11 +163,26 @@ type PageSocket struct {
 	// Line is the owner line's note, last outage and counts (from the
 	// modem link); nil without the modem bridge.
 	Line func() localapi.Line
+	// AdoptSIM records the SIM the page showed as the owner line's once the
+	// owner's code is checked (modemlink.Link.Adopt, P2-2w d2b); nil
+	// without the modem bridge, which refuses the op.
+	AdoptSIM func(tag string) error
 	// DescribeRoot, when set, serves changing where updates come from on
 	// the page (OSS-10, follow.Executor.Describe): the page's request is
 	// then submitted to the gate as a follow intent, which the broker
 	// executor named grants.FollowExecutor must run. Nil refuses both ops.
 	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
+	// Forget, when set, lists the owner's recent tasks on the page and
+	// asks to forget one through FORGET's own ask (W3-forget-b3r); nil
+	// refuses both ops.
+	Forget PageForget
+}
+
+// PageForget is FORGET as the page serves it; unlocked is whether the
+// owner's session is unlocked, as FORGET by text is given.
+type PageForget interface {
+	PageTasks(unlocked bool) localapi.ForgetTasks
+	PageForget(ctx context.Context, goal string, unlocked bool) string
 }
 
 // The page's fixed replies to a follow request: the gate's reason is not
@@ -348,8 +378,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			eps[0].HangupOps[op] = true
 		}
 	}
+	refusals := &journal.EgressGate{}
 	for _, id := range cfg.Machines {
 		eps = append(eps, sockets.Endpoint{
+			Refused:     journalRefusals(eng, refusals, id),
 			Name:        GuestSocket(id),
 			Peer:        sockets.Peer{Kind: "guest", ID: id},
 			MaxConns:    4,
@@ -364,10 +396,13 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			store.Close()
 			return nil, errors.New("daemon: the local UI's socket needs the owner channel (OwnerState)")
 		}
-		lcfg := localsrv.Config{Owner: ch, Line: cfg.PageSocket.Line,
+		lcfg := localsrv.Config{Owner: ch, Line: cfg.PageSocket.Line, AdoptSIM: cfg.PageSocket.AdoptSIM,
 			Paused: func() []localapi.PausedGrant { return pausedGrants(gate) }, AskResume: func(ctx context.Context, id, pause string) (string, error) {
 				return askResume(ctx, gate, id, pause)
 			}}
+		if f := cfg.PageSocket.Forget; f != nil {
+			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget
+		}
 		if cfg.PageSocket.DescribeRoot != nil {
 			lcfg.DescribeRoot, lcfg.Follow = cfg.PageSocket.DescribeRoot, pageFollow(gate)
 		}

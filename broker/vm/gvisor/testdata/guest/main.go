@@ -3,9 +3,14 @@
 //	guest serve      hold a random token in memory and serve requests
 //	guest svc SOCK PATH  GET PATH from the broker service socket SOCK and
 //	                 print the status and body
-//	guest stdin N    copy stdin to stdout, then exit N (worker exec)
+//	guest stdin N    write "oops\n" to stderr, copy stdin to stdout, then
+//	                 exit N (worker exec)
 //	guest linger     ignore catchable signals, keep stdout open, and append
 //	                 a byte to /work/linger every 20ms until killed
+//	guest tamper PATH...  try to write each PATH (LOOP-7) and print how many
+//	                 writes the guest's view accepted
+//	guest press KIND MS   apply KIND pressure for MS milliseconds (LOOP-7)
+//	guest idle       sleep until killed (a pressure process)
 //	guest <cmd> ...  send one request to the server and print the answer
 //
 // Requests: token; write PATH TEXT; read PATH; remove PATH; stat PATH;
@@ -15,6 +20,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -26,6 +32,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/machprobe"
 )
 
 const sock = "/tmp/guest.sock"
@@ -36,6 +44,7 @@ func main() {
 		return
 	}
 	if len(os.Args) == 3 && os.Args[1] == "stdin" {
+		os.Stderr.WriteString("oops\n")
 		io.Copy(os.Stdout, os.Stdin)
 		var n int
 		fmt.Sscan(os.Args[2], &n)
@@ -43,6 +52,25 @@ func main() {
 	}
 	if len(os.Args) == 2 && os.Args[1] == "linger" {
 		linger()
+	}
+	if len(os.Args) > 3 && os.Args[1] == "tamper" {
+		fmt.Println(machprobe.Tamper(os.Args[2], os.Args[3:]))
+		return
+	}
+	if len(os.Args) == 4 && os.Args[1] == "press" {
+		ms, _ := strconv.Atoi(os.Args[3])
+		o := machprobe.Options{MemMB: 48, DiskMB: 32, Dir: "/work", Procs: 16, Child: []string{"/guest", "idle"}}
+		if err := machprobe.Press(context.Background(), os.Args[2], time.Duration(ms)*time.Millisecond, o); err != nil {
+			fmt.Println("ERR", err)
+			os.Exit(1)
+		}
+		fmt.Println("ok")
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "idle" {
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	if len(os.Args) == 4 && os.Args[1] == "svc" {
 		fmt.Println(get(os.Args[2], os.Args[3]))
