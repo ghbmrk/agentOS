@@ -51,7 +51,8 @@ These are part of the requirements. A reviewer holds the diff to them word for w
 - **One exemption list.** `childproc` itself is the only permanent entry. All exemptions are listed in one place, the gate's `exempt` map, each with its reason.
   - Every exemption must still be needed: if a listed package no longer reaches `os/exec` or names a selector, the test fails and says to drop it.
   - r8a lists the not-yet-moved r8b packages there, each with the reason "moves in P3-4b-3r-env-r8b", and `golang.org/x/sys/unix`'s own `Exec` definition, which calls `syscall.Exec`.
-  - Test files and the test-only graph are out of scope, because they are not linked into a shipped binary. That is stated once beside the map.
+  - The graph is the union over `CGO_ENABLED=0` and `=1`, so a file built under only one setting is still seen (#651 Security 4a point 1).
+  - Test files and the test-only graph are out of scope: agentosd links neither, and the fuzz binaries built from test code run only as `childproc` children. That is stated once beside the map.
 
 **D4. Nil `Env` anywhere.** `childEnvCheck` flags any assignment `X.Env = <nil>` and any keyed literal `Env: <nil>`, whatever the type or receiver.
 - `<nil>` means the literal `nil`, the conversion `[]string(nil)`, and r1's run-time-nil shapes: a package-level `var` with no initializer, a same-file func whose only return is `return nil`, and a local `var e []string` never assigned before use.
@@ -146,7 +147,9 @@ After r8b, the exemption map holds only `childproc` and the `unix` definition.
 Also in r8b (#651 L3 points 1 and 2):
 - The D1 walk rejects an exported interface that an `os/exec` type satisfies, checked with `types.Implements`.
 - The API-surface test pins each exported signature, not only the names.
-- The gate scans `CgoFiles` and `IgnoredGoFiles` as well as `GoFiles`.
+- The gate also covers files for other GOARCH values or behind other tags (`IgnoredGoFiles`). r8a already takes the union over both cgo settings and scans `CgoFiles`.
+- The fixture for D1's interface clause is a method returning `interface{ Start() error; Run() error }` (#651 Security 4a point 2).
+- A positive runner test: a loop7 or probecmd target dumps its environment, and the test compares it with the built pairs (#651 Security 4a point 4).
 
 ## Threat check
 

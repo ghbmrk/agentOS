@@ -26,8 +26,10 @@ import (
 // entry no longer needed fails the gate.
 //
 // Test files and the test-only graph are out of the gate's scope: go list
-// -deps without -test lists neither, and neither is linked into a shipped
-// binary.
+// -deps without -test lists neither, and agentosd links neither. The one
+// shipped build of test code, the fuzz binaries image/build.sh makes with
+// go test -c, runs only as a childproc child, so whatever it starts
+// inherits only the checked pairs (#651 Security 4a point 3).
 var exempt = map[string]string{
 	"golang.org/x/sys/unix":    "defines unix.Exec, a wrapper of syscall.Exec; every use of it is gated",
 	"vm/gvisor":                "moves in P3-4b-3r-env-r8b",
@@ -72,24 +74,51 @@ type node struct {
 // that is no longer needed.
 func gate(t *testing.T, dir, mod string, exempt map[string]string) []string {
 	t.Helper()
-	cmd := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{.Standard}}\t{{join .Imports \" \"}}\t{{join .GoFiles \" \"}}", "./...")
-	cmd.Dir = dir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("go list: %v\n%s", err, stderr.String())
+	// The graph is the union over both cgo settings: the shipped
+	// binaries build with CGO_ENABLED=0 (image/build.sh) and CI's race
+	// tests with 1, and a file tagged for one is invisible to go list
+	// under the other (#651 Security 4a point 1).
+	byPath := map[string]*node{}
+	var order []string
+	for _, cgo := range []string{"0", "1"} {
+		cmd := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{.Standard}}\t{{join .Imports \" \"}}\t{{join .GoFiles \" \"}} {{join .CgoFiles \" \"}}", "./...")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "CGO_ENABLED="+cgo, "GOOS=linux", "GOFLAGS=")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("go list (CGO_ENABLED=%s): %v\n%s", cgo, err, stderr.String())
+		}
+		sc := bufio.NewScanner(bytes.NewReader(out))
+		sc.Buffer(nil, 1<<20)
+		for sc.Scan() {
+			f := strings.Split(sc.Text(), "\t")
+			if len(f) != 5 {
+				t.Fatalf("go list line: %q", sc.Text())
+			}
+			n := byPath[f[0]]
+			if n == nil {
+				std, _ := strconv.ParseBool(f[2])
+				n = &node{path: f[0], dir: f[1], std: std}
+				byPath[f[0]] = n
+				order = append(order, f[0])
+			}
+			for _, im := range strings.Fields(f[3]) {
+				if !slices.Contains(n.imports, im) {
+					n.imports = append(n.imports, im)
+				}
+			}
+			for _, fn := range strings.Fields(f[4]) {
+				if !slices.Contains(n.files, fn) {
+					n.files = append(n.files, fn)
+				}
+			}
+		}
 	}
 	var nodes []node
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	sc.Buffer(nil, 1<<20)
-	for sc.Scan() {
-		f := strings.Split(sc.Text(), "\t")
-		if len(f) != 5 {
-			t.Fatalf("go list line: %q", sc.Text())
-		}
-		std, _ := strconv.ParseBool(f[2])
-		nodes = append(nodes, node{path: f[0], dir: f[1], std: std, imports: strings.Fields(f[3]), files: strings.Fields(f[4])})
+	for _, p := range order {
+		nodes = append(nodes, *byPath[p])
 	}
 	key := func(p string) string {
 		if r, ok := strings.CutPrefix(p, mod+"/"); ok {
@@ -245,6 +274,10 @@ func TestGateCatchesAChildStartedOutsideChildproc(t *testing.T) {
 		"dot/d.go":     "package dot\nimport . \"syscall\"\nfunc D() { Exec(\"/x\", nil, []string{}) }\n",
 		// Through childproc only: passes.
 		"good/g.go": "package good\nimport \"example.com/m/childproc\"\nfunc G() error { return childproc.Run(\"x\") }\n",
+		// A file only one cgo setting builds: the shipped binaries are
+		// CGO_ENABLED=0, CI's race tests 1 (#651 Security 4a point 1).
+		"nocgo/n.go":   "//go:build !cgo\n\npackage nocgo\nimport \"os/exec\"\nfunc N() { exec.Command(\"env\").Run() }\n",
+		"withcgo/w.go": "//go:build cgo\n\npackage withcgo\nimport \"os\"\nvar start = os.StartProcess\n",
 		// Exempt and still needed: passes.
 		"old/o.go":  "package old\nimport \"os/exec\"\nfunc O() { exec.Command(\"x\").Run() }\n",
 		"user/u.go": "package user\nimport \"example.com/m/old\"\nfunc U() { old.O() }\n",
@@ -258,6 +291,8 @@ func TestGateCatchesAChildStartedOutsideChildproc(t *testing.T) {
 		"example.com/m/dot/d.go: dot-imports syscall",
 		"example.com/m/fcgi: reaches os/exec",
 		"example.com/m/importer: reaches os/exec",
+		"example.com/m/nocgo: reaches os/exec",
+		"example.com/m/withcgo/w.go:5: names os.StartProcess",
 		"example.com/m/renamed/r.go:3: names syscall.ForkExec",
 		"example.com/m/value/v.go:3: names os.StartProcess",
 		"exempt names stale, which no longer reaches os/exec or names a launcher: drop it",
