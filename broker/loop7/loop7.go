@@ -201,8 +201,12 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 	return s.replay(ctx, t)
 }
 
-// failLine is a seed subtest failing under -test.v.
-var failLine = regexp.MustCompile(`^\s*--- FAIL: (Fuzz[A-Za-z0-9_]*)/([^\s/]+) `)
+// failLine and passLine are a seed subtest failing or passing under
+// -test.v.
+var (
+	failLine = regexp.MustCompile(`^\s*--- FAIL: (Fuzz[A-Za-z0-9_]*)/([^\s/]+) `)
+	passLine = regexp.MustCompile(`^\s*--- PASS: (Fuzz[A-Za-z0-9_]*)/([^\s/]+) `)
+)
 
 // replay runs t's corpus files, reports each failing one and resolves
 // t's open findings whose stored input it replayed and passed.
@@ -211,27 +215,26 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 	if ctx.Err() != nil {
 		return 0, nil
 	}
-	failing := map[string]bool{}
+	failing, ran := map[string]bool{}, map[string]bool{}
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
 		if m := failLine.FindStringSubmatch(sc.Text()); m != nil && m[1] == t.Name {
 			failing[m[2]] = true
+		} else if m := passLine.FindStringSubmatch(sc.Text()); m != nil && m[1] == t.Name {
+			ran[m[2]] = true
 		}
 	}
 	if runErr != nil && len(failing) == 0 {
 		return 0, fmt.Errorf("loop7: replaying %s: %v", t.subject(), runErr)
 	}
 	var errs []error
-	// Each stored input this run replayed and passed: only such a replay
-	// closes a finding, so a removed input keeps its finding open.
+	// Each stored input whose own subtest passed in this run: only such a
+	// replay closes a finding. An input that never ran (a panic stops the
+	// binary before later seeds) or was removed keeps its finding open.
 	passed := map[string]bool{}
-	if entries, err := os.ReadDir(filepath.Join(t.Dir, "testdata", "fuzz", t.Name)); err == nil {
-		for _, e := range entries {
-			if e.Type().IsRegular() && !failing[e.Name()] {
-				if data, err := os.ReadFile(filepath.Join(t.Dir, "testdata", "fuzz", t.Name, e.Name())); err == nil {
-					passed[crashDetail(data)] = true
-				}
-			}
+	for _, file := range sortedKeys(ran) {
+		if data, err := os.ReadFile(filepath.Join(t.Dir, "testdata", "fuzz", t.Name, file)); err == nil {
+			passed[crashDetail(data)] = true
 		}
 	}
 	for _, file := range sortedKeys(failing) {
@@ -285,7 +288,7 @@ func (s *Source) probe(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("loop7: probe: %w", err)
 	}
-	fails := append(res.Failures, Journaled(res, machine, s.cfg.Trail(), start, s.cfg.Now(), s.cfg.Window)...)
+	fails := append(res.Failures, Journaled(machine, s.cfg.Trail(), start, s.cfg.Now(), s.cfg.Window)...)
 	subject := "socket." + machine
 	var errs []error
 	detail := ""
@@ -319,16 +322,16 @@ func probeDetail(fails []string) string {
 }
 
 // Journaled is the broker side of a probe round on machine between start
-// and end: each refusal the probe saw is journaled (a socket-refusal note
+// and end: each refusal in the probe set is journaled (a socket-refusal note
 // for the machine and code, at most window before start, since notes are
 // coalesced per window), and no frame had an effect (no intent from the
 // machine in the round). It returns the failures in plain words.
-func Journaled(res sockprobe.Result, machine string, trail []journal.Record, start, end time.Time, window time.Duration) []string {
+func Journaled(machine string, trail []journal.Record, start, end time.Time, window time.Duration) []string {
+	// The codes come from the broker's own probe set, never from what the
+	// guest says it sent: an empty Result must not pass the round.
 	want := map[sockets.Code]bool{}
-	for _, s := range res.Sent {
-		if s.Got == s.Want && s.Want != "" {
-			want[s.Want] = true
-		}
+	for _, f := range sockprobe.Frames {
+		want[f.Want] = true
 	}
 	var fails []string
 	for _, r := range trail {

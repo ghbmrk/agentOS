@@ -7,7 +7,8 @@
 //
 // The frames are fixed and off the shelf (D-067): no input is generated,
 // mutated or searched for. That the refusals were journaled, and had no
-// effect, is checked on the broker side against Result.Sent, since the
+// effect, is checked on the broker side against Frames, never the guest's own
+// Result, since the
 // guest cannot read the journal (broker/loop7).
 package sockprobe
 

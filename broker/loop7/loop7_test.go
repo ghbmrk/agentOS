@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -177,6 +178,35 @@ func TestAFuzzCrashIsReportedKeptAndResolved(t *testing.T) {
 	}
 }
 
+// A panicking seed stops the binary, so a later seed never runs: its
+// open finding stays open, since only its own passing subtest is a
+// replay (Security 4a on #523).
+func TestASeedThatNeverRanResolvesNothing(t *testing.T) {
+	g := newFake()
+	tg := target(t, planted(t, true))
+	dir := filepath.Join(tg.Dir, "testdata", "fuzz", "FuzzPlanted")
+	write := func(name, in string) []byte {
+		data := []byte("go test fuzz v1\n[]byte(" + strconv.Quote(in) + ")\n")
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	write("0crash", "synthetic crash")
+	good := write("1good", "ab")
+	open := loops.Finding{Check: loops.CheckFuzz, Subject: tg.subject(), Severity: loops.High, Detail: crashDetail(good)}
+	if _, err := g.Report(context.Background(), open); err != nil {
+		t.Fatal(err)
+	}
+	s := newSource(t, g, Config{Targets: []Target{tg}})
+	if _, err := s.replay(context.Background(), tg); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.resolved) != 0 || len(g.open) != 2 {
+		t.Fatalf("open %v resolved %v", g.open, g.resolved)
+	}
+}
+
 // LOOP-1: a fuzz job returns within the preemption target once its
 // context is cancelled, and the source offers it again.
 func TestAFuzzJobYieldsWithinThePreemptionTarget(t *testing.T) {
@@ -249,27 +279,39 @@ func TestNextOffersInnerFirstThenTakesTurns(t *testing.T) {
 // The broker side of a probe round: each refusal journaled for the
 // machine, no intent from it in the round. Planted controls: a missing
 // note and an intent are each reported.
+func note(at time.Time, m string, c sockets.Code) journal.Record {
+	return journal.Record{At: at, Type: journal.RecEgress, Egress: &journal.EgressNote{Machine: m, Adapter: sockets.RefusalNote, Operation: c.Token(), Reason: "x"}}
+}
+
+// refusals is a broker trail with a refusal note at at for each code in
+// the probe set.
+func refusals(at time.Time, m string) []journal.Record {
+	var out []journal.Record
+	for _, f := range sockprobe.Frames {
+		out = append(out, note(at, m, f.Want))
+	}
+	return out
+}
+
 func TestJournaledChecksTheProbeRound(t *testing.T) {
 	start := time.Unix(1_800_000_000, 0)
 	end := start.Add(time.Second)
-	res := sockprobe.Result{Sent: []sockprobe.Sent{
-		{Want: sockets.ErrMalformed, Got: sockets.ErrMalformed},
-		{Want: sockets.ErrUnknownOp, Got: sockets.ErrUnknownOp},
-	}}
-	note := func(at time.Time, m string, c sockets.Code) journal.Record {
-		return journal.Record{At: at, Type: journal.RecEgress, Egress: &journal.EgressNote{Machine: m, Adapter: sockets.RefusalNote, Operation: c.Token(), Reason: "x"}}
-	}
-	full := []journal.Record{note(start, "m1", sockets.ErrMalformed), note(start.Add(-30*time.Second), "m1", sockets.ErrUnknownOp)}
-	if f := Journaled(res, "m1", full, start, end, time.Minute); len(f) != 0 {
+	full := append(refusals(start, "m1"), note(start.Add(-30*time.Second), "m1", sockets.ErrUnknownOp))
+	full = append(full[:2], full[3:]...) // ErrUnknownOp only from the earlier, coalesced note
+	if f := Journaled("m1", full, start, end, time.Minute); len(f) != 0 {
 		t.Fatalf("clean round: %q", f)
 	}
+	last := len(full) - 1
+	without := func(extra ...journal.Record) []journal.Record {
+		return append(append([]journal.Record{}, full[:last]...), extra...)
+	}
 	for name, trail := range map[string][]journal.Record{
-		"missing":       full[:1],
-		"other machine": {full[0], note(start, "m2", sockets.ErrUnknownOp)},
-		"too old":       {full[0], note(start.Add(-2*time.Minute), "m1", sockets.ErrUnknownOp)},
-		"effect":        append(full, journal.Record{At: end, Type: journal.RecSubmitted, Intent: &journal.Intent{Machine: "m1", Action: "send"}}),
+		"missing":       without(),
+		"other machine": without(note(start, "m2", sockets.ErrUnknownOp)),
+		"too old":       without(note(start.Add(-2*time.Minute), "m1", sockets.ErrUnknownOp)),
+		"effect":        append(append([]journal.Record{}, full...), journal.Record{At: end, Type: journal.RecSubmitted, Intent: &journal.Intent{Machine: "m1", Action: "send"}}),
 	} {
-		if f := Journaled(res, "m1", trail, start, end, time.Minute); len(f) != 1 {
+		if f := Journaled("m1", trail, start, end, time.Minute); len(f) != 1 {
 			t.Fatalf("%s: %q", name, f)
 		}
 	}
@@ -280,8 +322,14 @@ func TestAProbeFailureIsReportedAndAPassResolvesIt(t *testing.T) {
 	g := newFake()
 	var res sockprobe.Result
 	res.Failures = []string{"undeclared socket owner.sock is reachable"}
+	journaled := true
 	s := newSource(t, g, Config{Probe: func(context.Context) (string, sockprobe.Result, error) { return "m1", res, nil },
-		Trail: func() []journal.Record { return nil }})
+		Trail: func() []journal.Record {
+			if !journaled {
+				return nil
+			}
+			return refusals(time.Now(), "m1")
+		}})
 	if n, err := s.probe(context.Background()); err != nil || n != 1 || len(g.open) != 1 {
 		t.Fatalf("n=%d err=%v open %v", n, err, g.open)
 	}
@@ -289,7 +337,13 @@ func TestAProbeFailureIsReportedAndAPassResolvesIt(t *testing.T) {
 	if f.Check != loops.CheckProbe || f.Subject != "socket.m1" || !strings.Contains(f.Detail, "owner.sock") {
 		t.Fatalf("finding %+v", f)
 	}
-	res.Failures = nil
+	// A guest that claims an empty round, with nothing journaled on the
+	// broker side, does not clear it (Security 4a on #523).
+	res, journaled = sockprobe.Result{}, false
+	if n, err := s.probe(context.Background()); err != nil || n == 0 || len(g.resolved) != 0 || len(g.open) == 0 {
+		t.Fatalf("empty guest result n=%d err=%v open %v resolved %v", n, err, g.open, g.resolved)
+	}
+	journaled = true
 	if n, err := s.probe(context.Background()); err != nil || n != 0 || len(g.open) != 0 {
 		t.Fatalf("clean round n=%d err=%v open %v", n, err, g.open)
 	}
