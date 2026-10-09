@@ -106,7 +106,7 @@ func (s *Guard) runProbe(ctx context.Context, p Probe) Result {
 			}
 			delete(s.st.Open, id)
 			s.st.Cleared[id] = now
-			if rec.Contained == "paused" && rec.Texted {
+			if rec.Texted {
 				lines = append(lines, clearedLine(rec))
 			}
 		}

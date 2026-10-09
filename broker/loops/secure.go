@@ -495,7 +495,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		ids = append(ids, f.ID)
 		if rec.Texted {
 			lines = append(lines, ownerLine(rec))
-			urgent = urgent || rec.Finding.Check != CheckExpiry
+			urgent = urgent || urgentText(rec)
 		}
 	}
 	text := s.batch(append(lines, later...))
@@ -601,7 +601,7 @@ func (s *Guard) tell(rec Record) Record {
 	if !rec.Texted || rec.Told {
 		return rec
 	}
-	s.cfg.Notify("Security checks: "+ownerLine(rec), rec.Finding.Check != CheckExpiry)
+	s.cfg.Notify("Security checks: "+ownerLine(rec), urgentText(rec))
 	rec.Told = true
 	s.mu.Lock()
 	if _, still := s.st.Open[rec.Finding.ID]; still {
@@ -1304,13 +1304,17 @@ func findingText(f Finding) string {
 	case CheckSeeded:
 		return "Security test " + sub + " fails on my current setup."
 	case CheckFuzz:
-		return "Fuzz test " + sub + " crashes on my current setup. I take the fix when an update has it."
+		return "My self-test found a crash in " + plainSubject(f) + ". The fix comes with an update."
 	case CheckProbe:
-		return "Socket probe " + sub + " fails on my current setup. I take the fix when an update has it."
+		return "My self-test of " + plainSubject(f) + " failed. The fix comes with an update."
 	case CheckCanary:
-		return "A leak test found a planted test secret where " + sub + " could reach it."
+		return "My leak self-test found a planted test secret in " + plainSubject(f) + "."
 	case CheckCorpus:
-		return "A published attack text got past my " + safeName(f.Detail) + " (" + sub + ")."
+		c, ok := corpusNames[f.Detail]
+		if !ok {
+			c = corpusFallback
+		}
+		return "My self-test of " + c.name + " failed: it " + c.missed + ". Nothing real was exposed."
 	case CheckTamper:
 		return "A tamper test changed my " + sub + " from inside an agent machine."
 	case CheckExhaust:
@@ -1326,6 +1330,9 @@ func findingText(f Finding) string {
 }
 
 // ownerLine is a finding and what was done about it, in fixed wording.
+// A line names a step (a pause that happened, PAUSE or STOP) exactly when
+// urgentText holds; any other line says nothing is paused or needed,
+// unless its finding names the owner's own step (ownStep).
 func ownerLine(r Record) string {
 	f := r.Finding
 	line := findingText(f)
@@ -1341,13 +1348,50 @@ func ownerLine(r Record) string {
 		} else {
 			line += " Reply STOP to pause everything."
 		}
+	default:
+		if f.Check != CheckCanary && !ownStep(f) {
+			line += " " + nothingNeeded
+		}
+	}
+	// A canary leak always offers STOP (P3-4b-3c requirement 3).
+	// The failed and capped lines offer it already.
+	if f.Check == CheckCanary && r.Contained != "failed" && r.Contained != "capped" {
+		line += " Reply STOP to pause everything."
 	}
 	return line
 }
 
+// nothingNeeded ends the line of a finding with no pause and no step.
+const nothingNeeded = "Nothing is paused and nothing is needed from you."
+
+// urgentContained reports a containment state whose line names a step:
+// a pause that happened, or PAUSE or STOP.
+func urgentContained(c string) bool { return c == "paused" || c == "failed" || c == "capped" }
+
+// urgentText is the one urgency rule for a finding's owner text, in tell
+// and in Pass's batch: urgent only when the line names a pause that
+// happened or a reply that works, or the finding is a canary leak (which
+// always offers STOP). Severity decides whether the owner is texted at
+// all, not whether the text interrupts them (P3-4b-3c).
+func urgentText(r Record) bool {
+	return urgentContained(r.Contained) || r.Finding.Check == CheckCanary
+}
+
+// ownStep reports a finding whose text names a step of its own on my
+// Wi-Fi page, so its line does not say nothing is needed.
+func ownStep(f Finding) bool {
+	return f.Check == CheckExpiry ||
+		f.Check == CheckAdvisory && (strings.HasPrefix(f.Detail, uncompared) || strings.HasPrefix(f.Detail, unreadable))
+}
+
+// clearedLine tells the owner a texted finding cleared: a pause it caused
+// stays until they resume it; otherwise nothing more is needed.
 func clearedLine(r Record) string {
-	return fmt.Sprintf("Cleared: %s. %s stays paused until you resume it on my Wi-Fi page.",
-		safeName(r.Finding.Subject), capFirst(label(r.Finding.Contain)))
+	if r.Contained == "paused" {
+		return fmt.Sprintf("Cleared: %s. %s stays paused until you resume it on my Wi-Fi page.",
+			plainSubject(r.Finding), capFirst(label(r.Finding.Contain)))
+	}
+	return "Cleared: " + plainSubject(r.Finding) + ". Nothing more is needed from you."
 }
 
 // digestCap is how many open-finding lines the digest shows.

@@ -170,7 +170,7 @@ const (
 	waitRejected  = "the last one did not qualify; I try again at the next check"
 	waitForAFixOf = "waits for a fix: "
 	waitNoTest    = "its test could not be added to my security checks, so no fix can qualify yet"
-	waitUpdate    = "one comes with an update; I recheck it every round"
+	waitUpdate    = "one comes with an update; I check it again at least twice a day"
 )
 
 // waitingLocked is why an open reported record waits, "" if it does not.
@@ -260,7 +260,7 @@ func (s *Guard) Resolve(id string, r Replay) error {
 	s.st.Cleared[id] = s.cfg.Now()
 	err := s.saveLocked()
 	s.mu.Unlock()
-	if rec.Contained == "paused" && rec.Texted {
+	if rec.Texted {
 		if text := s.batch([]string{clearedLine(rec)}); text != "" {
 			s.cfg.Notify(text, false)
 		}
