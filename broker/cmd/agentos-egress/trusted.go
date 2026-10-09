@@ -957,7 +957,7 @@ func (h *tpmHost) giveBack(v *vault.Vault, t transport.TPM, id []byte) {
 				v.Delete(daOriginalName(id))
 			}
 		case err != nil:
-			h.say("couldn't give the TPM's lockout back to this PC yet; the box will try again at each restart")
+			h.say("couldn't give the TPM's lockout back to this PC yet; I will try again at each restart")
 			return
 		}
 		if err := v.Delete(name); err != nil {
@@ -989,7 +989,7 @@ func (h *tpmHost) restoreDA(v *vault.Vault, t transport.TPM, id []byte) {
 	}
 	switch err := tpmseal.RestoreDA(t, p); {
 	case errors.Is(err, tpmseal.ErrLockoutSet):
-		h.say("Another system on this PC, probably Windows, now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses. Nothing to do: your PIN is off and the box works as before.")
+		h.say("Another system on this PC, probably Windows, now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses. Nothing to do: your PIN is off and I work as before.")
 	case err != nil:
 		h.warnDA()
 		return
@@ -1018,8 +1018,8 @@ func (h *tpmHost) say(s string) {
 // chip's settings were given back. The next unattended start retries, so
 // the owner has nothing to do (CH-12).
 const (
-	lockoutForgetFailed = "I couldn't clear the box's saved copy of this PC's security chip lockout; I'll try again at each restart. Nothing to do."
-	daForgetFailed      = "I couldn't clear the box's saved copy of this PC's security chip limits; I'll try again at each restart. Nothing to do."
+	lockoutForgetFailed = "I couldn't clear my saved copy of this PC's security chip lockout; I'll try again at each restart. Nothing to do."
+	daForgetFailed      = "I couldn't clear my saved copy of this PC's security chip limits; I'll try again at each restart. Nothing to do."
 )
 
 // sayErr tells the owner a fixed sentence. The error can name a vault

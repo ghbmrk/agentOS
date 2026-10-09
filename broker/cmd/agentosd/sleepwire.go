@@ -83,11 +83,11 @@ func (s *sleeper) keepsAwake() bool {
 
 // sleepDigest is the one-time digest line on a sleep-mode box (PE7
 // condition 16).
-const sleepDigest = "Your box's memory is too small to run your agent and test changes together, so it tests them at night while the agent sleeps. Any task message wakes it."
+const sleepDigest = "My memory is too small to run your agent and test changes together, so I test them at night while your agent sleeps. Any task message wakes it."
 
 // sleepModeNote is STATUS's learning line on a sleep-mode box, in place of
 // noRoomNote.
-const sleepModeNote = "Learning: at night only, while the agent sleeps (the box's memory is too small to run both)."
+const sleepModeNote = "Learning: at night only, while your agent sleeps (my memory is too small to run both)."
 
 // sleepDeps are the daemon parts the sleeper reads.
 type sleepDeps struct {

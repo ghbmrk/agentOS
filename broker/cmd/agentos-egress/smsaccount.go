@@ -31,14 +31,14 @@ var (
 	errSMSSpace     = uerr(http.StatusBadRequest, "Enter the SignalWire space name: the first part of your-space.signalwire.com. Twilio has none.")
 	errSMSAccount   = uerr(http.StatusBadRequest, "Copy the account ID exactly from your provider: for Twilio the Account SID (AC and 32 characters), for SignalWire the Project ID.")
 	errSMSNumber    = uerr(http.StatusBadRequest, "Enter the number with its country code, like +44 7700 900123.")
-	errSMSOtherKind = uerr(http.StatusBadRequest, "The box already holds a different credential under this name. Remove the texting account first, then set it up again.")
+	errSMSOtherKind = uerr(http.StatusBadRequest, "I already hold a different credential under this name. Remove the texting account first, then set it up again.")
 	errWeakSMSToken = uerr(http.StatusBadRequest, "Paste the auth token from your provider's console, 12 to 256 characters.")
 )
 
 // Owner notices when the account changes, as for the SIP account.
 const (
-	noteSMSReplaced = "The second line's texting account was replaced on the box's Wi-Fi page."
-	noteSMSRemoved  = "The second line's texting account was removed on the box's Wi-Fi page."
+	noteSMSReplaced = "The second line's texting account was replaced on my Wi-Fi page."
+	noteSMSRemoved  = "The second line's texting account was removed on my Wi-Fi page."
 	// noteSMSMissed: a poll read smsapi.MaxPages with more to read, so
 	// older texts were passed over (security F1 on #159).
 	noteSMSMissed = "Some texts to your second line may have been missed."
