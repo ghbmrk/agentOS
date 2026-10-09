@@ -22,6 +22,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/attest"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
+	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 	"github.com/ghbmrk/agentos/broker/update"
 	"github.com/ghbmrk/agentos/broker/update/anchorsock"
 	"github.com/google/go-tpm/tpm2"
@@ -167,6 +168,146 @@ func TestUpdateAnchorWithoutTPM(t *testing.T) {
 	}
 	if err := a.Raise(); !errors.Is(err, update.ErrNoAnchor) {
 		t.Fatalf("no TPM: client raise = %v, want ErrNoAnchor", err)
+	}
+
+	// The vault records a counter (it was anchored on a PC with a TPM, or
+	// this PC's TPM was not found at start): never "no anchor" (L3 #600, 1).
+	rec, err := json.Marshal(updateAnchorRecord{Host: "synthetic-host", Ref: []byte("{}"), Auth: []byte("synthetic-auth")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.v.Put(UpdateAnchorName, KindUpdateAnchor, rec); err != nil {
+		t.Fatal(err)
+	}
+	r.notes = nil
+	if _, _, err := r.c.updateAnchorRead(); !errors.Is(err, errUpdateAnchorElsewhere) {
+		t.Fatalf("no TPM, counter recorded: read = %v, want anchor elsewhere", err)
+	}
+	for _, m := range []struct{ method, path string }{
+		{http.MethodGet, anchorsock.AnchorPath}, {http.MethodPost, anchorsock.AnchorRaisePath}} {
+		if code := verifyStatus(r.c, m.method, m.path); code != http.StatusConflict {
+			t.Fatalf("no TPM, counter recorded: %s %s = %d, want 409", m.method, m.path, code)
+		}
+	}
+	if _, err := a.Read(); err == nil || errors.Is(err, update.ErrNoAnchor) {
+		t.Fatalf("no TPM, counter recorded: client read = %v; want an error, not ErrNoAnchor", err)
+	}
+	if err := a.Raise(); err == nil || errors.Is(err, update.ErrNoAnchor) {
+		t.Fatalf("no TPM, counter recorded: client raise = %v; want an error, not ErrNoAnchor", err)
+	}
+	if n := countNote(r.notes, noteCounterReset); n != 1 {
+		t.Fatalf("no TPM, counter recorded: counter-reset notice shown %d times: %q", n, r.notes)
+	}
+}
+
+// SR3-6f-2b: root undefines the counter and defines it again under its
+// own auth. The recorded auth no longer reads it, which is "anchor
+// missing" with the notice, not a 500, and re-trust repairs it (L3 #600,
+// point 3).
+func TestRedefinedUpdateCounterFailsClosed(t *testing.T) {
+	r := newPCRig(t)
+	r.trusted(t)
+	undefineUpdateCounter(t, r)
+	defineOrphanUpdateCounter(t, r.tpm)
+	r.notes = nil
+	orphanFailsClosedThenRetrusts(t, r)
+}
+
+// SR3-6f-2b, the crash point: the counter was defined and the vault
+// process stopped before the vault recorded it. The counter's count is
+// unknown, so it is "anchor missing" with the owner's notice, never 0 and
+// never a lasting 500; the owner's re-trust gives a new counter already
+// raised (Security and L3 #600, 2).
+func TestOrphanedUpdateCounterAfterCrash(t *testing.T) {
+	r := newPCRig(t)
+	r.trusted(t)
+	defineOrphanUpdateCounter(t, r.tpm)
+	r.notes = nil
+	orphanFailsClosedThenRetrusts(t, r)
+}
+
+// SR3-6f-2b, the restore case: a vault restored onto the PC that already
+// holds the update counter has no record of its auth. Same answer as the
+// crash point.
+func TestRestoredVaultOnSamePCReanchors(t *testing.T) {
+	old := newPCRig(t)
+	old.trusted(t)
+	if _, _, err := old.c.updateAnchorRaise(); err != nil {
+		t.Fatalf("raise: %v", err)
+	}
+	r := newPCRig(t)
+	old.c.lock()
+	bootGood(old.tpm)
+	r.start(t, old.tpm)
+	r.unknownHostUnlock(t)
+	if r.phase() != open {
+		t.Fatalf("restored vault: phase %v, notes %q", r.phase(), r.notes)
+	}
+	r.tpm = old.tpm
+	r.notes = nil
+	orphanFailsClosedThenRetrusts(t, r)
+}
+
+// orphanFailsClosedThenRetrusts checks r, whose PC holds an update counter
+// its vault holds no working auth for.
+func orphanFailsClosedThenRetrusts(t *testing.T, r *pcRig) {
+	t.Helper()
+	box := newInterimBox(t, socketAnchor(r.c))
+	for i := 0; i < 2; i++ {
+		if _, _, err := r.c.updateAnchorRead(); !errors.Is(err, errUpdateAnchorMissing) {
+			t.Fatalf("read %d of a counter the vault cannot read = %v, want anchor missing", i, err)
+		}
+	}
+	if code := verifyStatus(r.c, http.MethodPost, anchorsock.AnchorRaisePath); code != http.StatusConflict {
+		t.Fatalf("socket raise: %d, want 409", code)
+	}
+	if _, err := socketAnchor(r.c).Read(); err == nil || errors.Is(err, update.ErrNoAnchor) {
+		t.Fatalf("client read = %v; want an error, not ErrNoAnchor", err)
+	}
+	if box.interimCounts(t) {
+		t.Fatal("a counter the vault cannot read revived the interim rule")
+	}
+	if n := countNote(r.notes, noteCounterReset); n != 1 {
+		t.Fatalf("counter-reset notice shown %d times: %q", n, r.notes)
+	}
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatalf("re-trust: %v", err)
+	}
+	if anchored, n, err := r.c.updateAnchorRead(); err != nil || !anchored || n < 1 {
+		t.Fatalf("after re-trust = %v, %d, %v; want anchored at 1 or more", anchored, n, err)
+	}
+	if box.interimCounts(t) {
+		t.Fatal("re-anchoring the orphaned counter revived the interim rule")
+	}
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatalf("trust again: %v", err)
+	}
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if r.phase() != open {
+		t.Fatalf("restart after re-trust: phase %v, notes %q", r.phase(), r.notes)
+	}
+	if anchored, n, err := r.c.updateAnchorRead(); err != nil || !anchored || n < 1 {
+		t.Fatalf("after restart = %v, %d, %v; want anchored at 1 or more", anchored, n, err)
+	}
+}
+
+// defineOrphanUpdateCounter defines the update counter with an auth no
+// vault holds: the state a crash between Define and the vault's Put
+// leaves.
+func defineOrphanUpdateCounter(t *testing.T, pc *swtpm.TPM) {
+	t.Helper()
+	tpm, err := pc.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tpm.Close()
+	srk, err := tpmseal.Identity(tpm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tpmseal.DefineCounter(tpm, srk, updateAnchorID, []byte("synthetic-orphan-auth")); err != nil {
+		t.Fatalf("define: %v", err)
 	}
 }
 
@@ -402,7 +543,7 @@ func TestUpdateAnchorAuthHasNoZeroByte(t *testing.T) {
 	r.c.confirm(r.unlock(t), r.code())
 	pc := &authCheckCounter{}
 	for i := 0; i < 200; i++ {
-		if _, err := defineUpdateAnchor(r.c.v, pc); err != nil {
+		if _, err := defineUpdateAnchor(r.c.v, pc, updateAnchorID); err != nil {
 			t.Fatalf("define %d: %v", i, err)
 		}
 	}

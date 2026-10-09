@@ -504,7 +504,8 @@ func unlockHandler(c *custody) http.Handler {
 // else.
 // updateAnchorHandler serves the update store's anchor (SR3-6f-2c): GET
 // reads it, POST raises it to 1. Nothing lowers it. {"anchored":false} is
-// a PC with no TPM; a counter that was defined and is gone is 409.
+// a vault that never had a counter, on a PC with no TPM; a recorded
+// counter that is gone, or on a TPM this PC lacks, is 409.
 func updateAnchorHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	read := c.updateAnchorRead
 	if r.Method == http.MethodPost {
@@ -514,7 +515,7 @@ func updateAnchorHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == errLocked:
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-	case err == errUpdateAnchorMissing:
+	case err == errUpdateAnchorMissing, err == errUpdateAnchorElsewhere:
 		http.Error(w, err.Error(), http.StatusConflict)
 	case err != nil:
 		http.Error(w, errInternal.Error(), http.StatusInternalServerError)
