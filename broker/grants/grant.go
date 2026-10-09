@@ -21,6 +21,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/verb"
 )
@@ -310,12 +311,58 @@ type Grant struct {
 	Pause, PausedBy string
 }
 
+// fault is a refusal whose owner text may name the request's values; the
+// guest's names only the field or cause, in fixed words (SR2-3o).
+func fault(guest guesterr.Literal, format string, args ...any) refusal {
+	return refusal{fmt.Sprintf(format, args...), guest}
+}
+
+// hint is the guest text for a malformed request: general, then the
+// field or cause a refusal names.
+func hint(general guesterr.Literal, err error) guesterr.Literal {
+	var r refusal
+	if errors.As(err, &r) && r.guest != "" {
+		return general + ": " + r.guest
+	}
+	return general
+}
+
+// specTypes names, in fixed words, the type each spec field takes, by its
+// JSON path (a map's or list's entries by the field's own).
+var specTypes = map[string]guesterr.Literal{
+	"":                "grant is an object",
+	"account":         "account is a string",
+	"executor":        "executor is a string",
+	"ops":             "ops maps each operation to a verb, both strings",
+	"resume":          "resume is a string",
+	"pause":           "pause is a string",
+	"rule":            "rule is an object",
+	"rule.action":     "rule action is a string",
+	"rule.params":     "rule params map names to strings",
+	"rule.recipients": "rule recipients is a list of strings",
+	"rule.amount_cap": "rule amount_cap is a whole number",
+	"rule.per_record": "rule per_record is a whole number",
+	"rule.per_day":    "rule per_day is a whole number",
+	"rule.hold_days":  "rule hold_days is a whole number",
+	"rule.reply":      "rule reply is true or false",
+}
+
+// specField is the spec field a JSON path falls under: a map key or list
+// index below a field is the field's.
+func specField(path string) string {
+	parts := strings.SplitN(path, ".", 3)
+	if parts[0] == "rule" && len(parts) > 1 {
+		return "rule." + parts[1]
+	}
+	return parts[0]
+}
+
 // parseSpec reads a grant intent's spec strictly: unknown fields are an
 // error, so nothing in the params is silently ignored.
 func parseSpec(in journal.Intent) (Spec, error) {
 	raw, ok := in.Params["grant"]
 	if !ok || len(in.Params) != 1 {
-		return Spec{}, errors.New("a grant intent carries exactly one param, grant")
+		return Spec{}, refuse("a grant change carries exactly one param, grant")
 	}
 	b, err := json.Marshal(raw)
 	if err != nil {
@@ -325,6 +372,15 @@ func parseSpec(in journal.Intent) (Spec, error) {
 	d.DisallowUnknownFields()
 	var s Spec
 	if err := d.Decode(&s); err != nil {
+		var te *json.UnmarshalTypeError
+		if errors.As(err, &te) {
+			if g, ok := specTypes[specField(te.Field)]; ok {
+				return Spec{}, fault(g, "grant spec: %v", err)
+			}
+		}
+		if strings.HasPrefix(err.Error(), "json: unknown field ") {
+			return Spec{}, fault("the grant spec has a field it does not define", "grant spec: %v", err)
+		}
 		return Spec{}, fmt.Errorf("grant spec: %v", err)
 	}
 	return s, nil
@@ -339,52 +395,52 @@ func (g *Gate) validateLocked(s Spec) error {
 		}
 	}
 	if shapes != 1 {
-		return errors.New("a grant is exactly one of: an adapter grant, a pre-allowance, or a resume")
+		return refuse("a grant is exactly one of: an adapter grant, a pre-allowance, or a resume")
 	}
 	if s.Pause != "" && s.Resume == "" {
-		return errors.New("only a resume names a pause")
+		return refuse("only a resume names a pause")
 	}
 	if s.Resume != "" {
 		gr := g.grants[s.Resume]
 		if gr == nil || !gr.Paused || s.Account != "" {
-			return fmt.Errorf("no paused grant %s", clip(s.Resume))
+			return fault("resume names no paused grant, and no account", "no paused grant %s", clip(s.Resume))
 		}
 		// A resume recorded before W5a-resume names no pause; the gate
 		// asks for one on every new resume (evaluateBroker).
 		if s.Pause != "" && s.Pause != gr.Pause {
-			return fmt.Errorf("grant %s was paused again since", clip(s.Resume))
+			return fault("the grant was paused again since the pause it names", "grant %s was paused again since", clip(s.Resume))
 		}
 		return nil
 	}
 	if s.Account == "" || s.Account == journal.BrokerAccount {
-		return errors.New("a grant names an external account")
+		return refuse("a grant names an external account")
 	}
 	if s.Rule == nil {
 		declared := g.cfg.Declared[s.Executor]
 		if s.Executor == ExecutorName || declared == nil {
-			return fmt.Errorf("executor %q is not a connected adapter", clip(s.Executor))
+			return fault("the executor is not a connected adapter", "executor %q is not a connected adapter", clip(s.Executor))
 		}
 		if len(s.Ops) == 0 {
-			return errors.New("an adapter grant chooses at least one operation")
+			return refuse("an adapter grant chooses at least one operation")
 		}
 		for op, v := range s.Ops {
 			dv, ok := declared[op]
 			if !ok {
-				return fmt.Errorf("operation %q is not one the adapter declares", clip(op))
+				return fault("an operation in ops is not one the adapter declares", "operation %q is not one the adapter declares", clip(op))
 			}
 			c, ok := verb.ClassOf(v)
 			dc, _ := verb.ClassOf(dv)
 			if !ok || c < dc {
 				// ADP-2: the adapter's mapping is the floor; a grant can
 				// only make an operation stricter.
-				return fmt.Errorf("operation %q: verb %q is weaker than the adapter's %q or not on the list", clip(op), clip(v), dv)
+				return fault("an operation's verb is weaker than the adapter's or not on the list", "operation %q: verb %q is weaker than the adapter's %q or not on the list", clip(op), clip(v), dv)
 			}
 		}
 		for _, x := range g.grants {
 			if x.Spec.Rule == nil && x.Spec.Account == s.Account {
 				// One connection per account, so policy never depends on
 				// which of two grants is found first (OP-5).
-				return fmt.Errorf("%s already connects this account; revoke it first", x.ID)
+				return fault("another grant already connects this account; revoke it first", "%s already connects this account; revoke it first", x.ID)
 			}
 		}
 		return nil
@@ -392,27 +448,27 @@ func (g *Gate) validateLocked(s Spec) error {
 	r := s.Rule
 	ag := g.adapterLocked(s.Account)
 	if ag == nil {
-		return fmt.Errorf("no adapter grant connects %s", clip(s.Account))
+		return fault("no adapter grant connects the rule's account", "no adapter grant connects %s", clip(s.Account))
 	}
 	v, ok := ag.Spec.Ops[r.Action]
 	if !ok {
-		return fmt.Errorf("operation %q is not declared for %s", clip(r.Action), clip(s.Account))
+		return fault("the rule's action is not an operation granted on its account", "operation %q is not declared for %s", clip(r.Action), clip(s.Account))
 	}
 	switch c, _ := verb.ClassOf(v); c {
 	case verb.Reversible:
-		return fmt.Errorf("%s is %s, which needs no pre-allowance", clip(r.Action), v)
+		return fault("the rule's action is reversible and needs no pre-allowance", "%s is %s, which needs no pre-allowance", clip(r.Action), v)
 	case verb.Secret:
-		return errors.New("reveal-or-create-secret keeps per-action approval under any rule (CRED-6)")
+		return refuse("reveal-or-create-secret keeps per-action approval under any rule (CRED-6)")
 	}
 	if r.PerRecord < 1 || r.PerDay < 1 || r.AmountCap < 0 || r.HoldDays < 0 {
-		return errors.New("every rule has scope bounds: per_record and per_day of at least 1 (ADP-9)")
+		return refuse("every rule has scope bounds: per_record and per_day of at least 1 (ADP-9)")
 	}
 	if r.Reply && (v != verb.Send || r.AmountCap != 0) {
-		return errors.New("a reply rule covers a send that moves no money (ADP-11)")
+		return refuse("a reply rule covers a send that moves no money (ADP-11)")
 	}
 	for k := range r.Params {
 		if k == ParamRecord || k == ParamBody {
-			return fmt.Errorf("param %q is filled per run, not fixed by the rule", k)
+			return fault("rule params may not fix record or body", "param %q is filled per run, not fixed by the rule", k)
 		}
 	}
 	return nil

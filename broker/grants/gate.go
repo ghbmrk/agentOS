@@ -925,7 +925,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 	case journal.ActionGrantChange:
 		s, err := parseSpec(in)
 		if err != nil {
-			return verdict{kind: deny, why: "the grant change is malformed", cause: err}
+			return verdict{kind: deny, why: hint("the grant change is malformed", err), cause: err}
 		}
 		if !g.cfg.LocalUI {
 			return verdict{kind: deny, why: NoPageGrant}
@@ -947,7 +947,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		}
 		g.mu.Unlock()
 		if err != nil {
-			return verdict{kind: deny, why: "the grant change is not valid", cause: err}
+			return verdict{kind: deny, why: hint("the grant change is not valid", err), cause: err}
 		}
 		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s), Detail: detail,
 			Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}}
@@ -1024,7 +1024,7 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 	}
 	d, err := parseDestination(in)
 	if err != nil {
-		return verdict{kind: deny, why: "malformed request to change where private replies go", cause: err}
+		return verdict{kind: deny, why: hint("malformed request to change where private replies go", err), cause: err}
 	}
 	if d.Address == "" {
 		// Clearing needs no code (security C3 on #148): the broker tells
@@ -1184,16 +1184,19 @@ func parseDestination(in journal.Intent) (destination, error) {
 	a, ok1 := in.Params[ParamEvidenceAddress].(string)
 	c, ok2 := in.Params[ParamEvidenceAccount].(string)
 	if !ok1 || !ok2 || len(in.Params) != 2 {
-		return destination{}, errors.New("malformed evidence destination")
+		return destination{}, fault("it carries exactly an address and an account, both strings", "malformed evidence destination")
 	}
 	if a == "" {
 		if c != "" {
-			return destination{}, errors.New("malformed evidence destination")
+			return destination{}, fault("clearing the destination names no account", "malformed evidence destination")
 		}
 		return destination{}, nil
 	}
-	if !bareAddress(a) || c == "" {
-		return destination{}, errors.New("the destination must be one bare, lower-case address")
+	if !bareAddress(a) {
+		return destination{}, refuse("the destination must be one bare, lower-case address")
+	}
+	if c == "" {
+		return destination{}, refuse("setting the destination names its account")
 	}
 	return destination{Address: a, Account: c}, nil
 }
