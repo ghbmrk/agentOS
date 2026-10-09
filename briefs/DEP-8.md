@@ -126,3 +126,18 @@ Each test must be shown red at main (after DEP-7), with the failing message cite
 Builder model: strongest model (risk tier A: `tools/depaudit*`). One package per session, tests first: land each test red at main before the fix, and keep the message for the PR. Locally there is no newuidmap and no subordinate range, and installing them needs a permission prompt, so the `SubmountTest` change is verified on CI only. Do not attempt live probes that need one. Review: L3 on the strongest model with the threat check above, then the UX and Potency lens and a separate Security section (OPERATING §3–4). Security re-signs any later tier-A delta. Estimate/checkpoint: about 60k tokens, not a ceiling (OPERATING §5). Checkpoint: if `SubmountTest` is still red on CI after two fix attempts, stop and escalate with a diagnosis. Do not weaken the rules to pass it.
 
 ## Delivery notes
+
+## DEP-8-r1
+
+Release finding from the UX lens on #596 (comment 6080618700, point 1). An NSS failure is reported with the right reason ("getpwuid_r(200000) failed with EIO"), but `_sandbox_missing` then says "replace it", and a new range cannot fix an NSS outage: the operator is sent to rewrite a good range. Written by the DEP-8-r1 builder; the BOARD row had no brief of its own.
+
+| ID | Rule |
+|---|---|
+| DEP-8-r1a | An NSS failure raises a distinct `UnusableRange` subclass, as `UnparsableLine` does: `getpwall()`/`getgrall()` raising, or `getpwuid_r`/`getgrgid_r` returning nonzero (EIO and EAGAIN tested; any nonzero return after ERANGE growth is the same kind, since the range was never judged). The reason text is unchanged. |
+| DEP-8-r1b | Its remedy says "fix the NSS source, then retry", and not "replace it", "add one" or a usermod step. A test asserts the remedy text through `sandbox_available()`, not only the reason. |
+
+**Threat check.** The subclass only changes which remedy is printed: every path that raised `UnusableRange` still raises it (the new class is a subclass), so no range becomes usable, and `_id_maps` callers that catch `OSError` are unchanged.
+
+**Scope.** `tools/depaudit.py` (`_range_problem`, `_id_maps`, `_sandbox_missing`), `tests/test_depaudit.py` (`IdMapTest`), `tools/ASSUMPTIONS.md` (D14 (3)), `LATER.md` (findings only), this section, BOARD row DEP-8-r1.
+
+**Estimate/checkpoint:** about 40k tokens. Risk tier A (`tools/depaudit*`); builder on the strongest model.
