@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -48,15 +50,20 @@ func (failStore) Save([]byte) error     { return errors.New("disk: unreadable") 
 
 // testSource is a DIG-1-shaped source: one pending generation until acked.
 type testSource struct {
-	name    string
-	gen     uint64
-	lines   []string
-	refs    []string
-	acked   uint64
-	ackFail int
+	name     string
+	gen      uint64
+	lines    []string
+	refs     []string
+	acked    uint64
+	ackFail  int
+	peekFail int
 }
 
 func (s *testSource) Peek(context.Context) (*digestqueue.Snapshot, error) {
+	if s.peekFail > 0 {
+		s.peekFail--
+		return nil, errors.New("source: not readable yet")
+	}
 	if s.gen == 0 || s.acked >= s.gen {
 		return nil, nil
 	}
@@ -96,6 +103,13 @@ func newDigestRig(t *testing.T, queue digestqueue.Store, sources map[string]dige
 
 // boot starts a fresh digestBox over the rig's stores, as a restart does.
 func (r *digestRig) boot(sources map[string]digestqueue.Source) {
+	r.make(sources)
+	r.d.open(context.Background())
+}
+
+// make builds a fresh digestBox without opening its queue, as main does
+// before attach.
+func (r *digestRig) make(sources map[string]digestqueue.Source) {
 	r.d = newDigestBox(digestConfig{
 		Queue: r.queue, State: r.state, Sources: sources, Transport: r.tr,
 		Inform: func(s string) error { r.informs = append(r.informs, s); return nil },
@@ -103,7 +117,6 @@ func (r *digestRig) boot(sources map[string]digestqueue.Source) {
 	})
 	r.reg = &capLines{}
 	r.d.register(r.reg)
-	r.d.open(context.Background())
 }
 
 // at moves the clock to day d, hh:mm and runs one step.
@@ -382,6 +395,177 @@ func TestDigestForgetReachesTheQueue(t *testing.T) {
 	}
 }
 
+// L3 1 on #592: a collection that fails keeps the day owed. STATUS says
+// so while it is owed, the box collects again on the retry cadence, and
+// exactly one digest goes that day, with the source's lines.
+// REQ: CH-15, OP-9
+func TestDigestFailedCollectionRetriesTheDay(t *testing.T) {
+	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, peekFail: 2}
+	r := newDigestRig(t, &change.MemStore{}, map[string]digestqueue.Source{"notes": src})
+	r.at(0, 8, 0)
+	if got := r.tr.sent(); len(got) != 0 || r.status() != digestOwedStatus {
+		t.Fatalf("08:00 sent %q status %q", got, r.status())
+	}
+	r.at(0, 8, 1) // not before the retry cadence
+	if src.peekFail != 1 || len(r.tr.sent()) != 0 {
+		t.Fatalf("collected again before the retry: %q", r.tr.sent())
+	}
+	r.day(0)
+	got := r.tr.sent()
+	if len(got) != 1 || !strings.Contains(got[0], src.lines[0]) || r.status() != "" {
+		t.Fatalf("day 0 sent %q status %q", got, r.status())
+	}
+	// A restart while it is owed collects the day at once.
+	src.gen, src.peekFail = 2, 1
+	r.at(1, 8, 0)
+	r.boot(map[string]digestqueue.Source{"notes": src})
+	r.at(1, 8, 1)
+	if got = r.tr.sent(); len(got) != 2 || !strings.Contains(got[1], src.lines[0]) {
+		t.Fatalf("day 1 sent %q", got)
+	}
+}
+
+// Security B2 on #592: a forget asked before the queue opens (main opens
+// it after attach, which replays owed forgets) is not done, and the queue
+// drops the reference when it opens, before anything is sent.
+// REQ: CAP-3, OP-2
+func TestDigestForgetBeforeOpenPurgesOnOpen(t *testing.T) {
+	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
+	sources := map[string]digestqueue.Source{"notes": src}
+	r := newDigestRig(t, &change.MemStore{}, sources)
+	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
+	r.at(0, 8, 0)
+	r.tr.out = nil
+	r.make(sources)
+	if err := r.d.forget("owner:a"); err == nil {
+		t.Fatal("forget before open reported done")
+	}
+	r.d.open(context.Background())
+	r.at(0, 9, 0)
+	// The first is the 08:00 try the bridge did not send.
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("forgotten lines sent: %q", got)
+	}
+	if err := r.d.forget("owner:a"); err != nil {
+		t.Fatalf("forget after open: %v", err)
+	}
+}
+
+// A ready batch holding a reference the queue refused to forget (another
+// batch holding it is unknown) is not sent while that forget is owed.
+// REQ: CAP-3, OP-2
+func TestDigestRefusedForgetHoldsItsReadyBatch(t *testing.T) {
+	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
+	r := newDigestRig(t, &change.MemStore{}, map[string]digestqueue.Source{"notes": src})
+	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.OutcomeUnknown, "" }
+	r.at(0, 8, 0)
+	src.gen, src.lines = 2, []string{"Notes: task 4 finished; reply MORE 4 for it."}
+	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
+	r.at(1, 8, 0)
+	if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
+		t.Fatalf("forget: %v", err)
+	}
+	n := len(r.tr.sent())
+	r.tr.out = nil
+	r.day(1)
+	for _, s := range r.tr.sent()[n:] {
+		if strings.Contains(s, src.lines[0]) {
+			t.Fatalf("batch of a refused forget sent: %q", s)
+		}
+	}
+}
+
+// Security B2 on #592: a forget owed across a restart because the digest
+// refused it is not told done at start until the digest's forget holds.
+// REQ: CAP-3
+func TestOwedForgetPurgesTheDigestAfterARestart(t *testing.T) {
+	store := &change.MemStore{}
+	r := restartRig(t, store)
+	r.f.digest = func(string) error { return digestqueue.ErrInFlight }
+	ended := make(chan struct{})
+	r.f.sleep = func(context.Context, time.Duration) bool { return false } // shutdown
+	r.f.retried = func() { close(ended) }
+	since := time.Date(2026, 10, 5, 13, 2, 0, 0, time.UTC)
+	if out := r.f.Execute(context.Background(), forgetIntent(fmt.Sprintf("1.1.%d", since.UnixNano()), "owner:a"), 1); out.Result != journal.ResultSucceeded {
+		t.Fatalf("execute: %+v", out)
+	}
+	<-ended
+	again := restart(t, store, map[string]bool{"owner:a": true})
+	var mu sync.Mutex
+	var asked []string
+	refuse := 1
+	again.f.digest = func(ref string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		asked = append(asked, ref)
+		if refuse > 0 {
+			refuse--
+			return errors.New("digest: queue not open")
+		}
+		return nil
+	}
+	gate, purged := make(chan struct{}), make(chan struct{})
+	again.f.sleep = func(context.Context, time.Duration) bool { <-gate; return true }
+	again.f.retried = func() { close(purged) }
+	again.f.finishOwed(context.Background())
+	again.mu.Lock()
+	early := len(again.texts)
+	again.mu.Unlock()
+	if early != 0 {
+		t.Fatalf("done text before the digest's forget: %q", again.texts)
+	}
+	close(gate)
+	<-purged
+	again.mu.Lock()
+	defer again.mu.Unlock()
+	mu.Lock()
+	defer mu.Unlock()
+	if want := "Your task from Mon 5 Oct 13:02 is forgotten now."; len(again.texts) != 1 || !strings.HasPrefix(again.texts[0], want) ||
+		strings.Join(asked, ",") != "owner:a,owner:a" {
+		t.Fatalf("texts %q asked %q", again.texts, asked)
+	}
+}
+
+// Security R3 on #592: the digest directory is made or tightened to 0700,
+// a leftover temp file is removed, and a symlink or a file is refused.
+// REQ: OP-2
+func TestPrepareDigestDir(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "digest")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(dir, "queue.json.tmp")
+	if err := os.WriteFile(tmp, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareDigestDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("dir %v %v", fi.Mode(), err)
+	}
+	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+		t.Fatalf("temp file kept: %v", err)
+	}
+	if err := prepareDigestDir(filepath.Join(root, "new")); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{link, file} {
+		if err := prepareDigestDir(p); err == nil {
+			t.Errorf("%s accepted", p)
+		}
+	}
+}
+
 // ownerForget's done text waits for the digest queue's forget too.
 // REQ: CAP-3
 func TestForgetStaysOwedWhileTheDigestHoldsItInFlight(t *testing.T) {
@@ -487,7 +671,7 @@ func TestDigestLinesAreOwnerWorded(t *testing.T) {
 		}
 	}
 	all := strings.Join(capLineTexts(), "|")
-	for _, l := range []string{digestUnknownStatus, digestFailedStatus, digestHeldStatus, digestDownStatus} {
+	for _, l := range []string{digestUnknownStatus, digestFailedStatus, digestHeldStatus, digestDownStatus, digestOwedStatus} {
 		if !strings.Contains(all, l) {
 			t.Errorf("%q not in capLineTexts", l)
 		}

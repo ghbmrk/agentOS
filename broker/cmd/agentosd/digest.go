@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,6 +58,7 @@ const (
 	digestFailedStatus  = "Daily digest: one could not be sent; the next digest says which."
 	digestHeldStatus    = "Daily digest: one was held and not sent; the next digest says which."
 	digestDownStatus    = "Daily digest: its store did not open, so none is sent; restart the box."
+	digestOwedStatus    = "Daily digest: the one due today is not ready yet; the box tries again every 30 minutes."
 )
 
 // digestOutageLine is DC-8's fixed text, sent at most once a day when the
@@ -121,8 +124,15 @@ type digestBox struct {
 	day       uint64
 	outageDay uint64
 	lastTry   time.Time
+	// forgets are the references whose forget the queue has not done
+	// (not open, or refused in flight): open purges them before anything
+	// is sent, and no batch holding one is sent (CAP-3, security B2 on
+	// #592).
+	forgets map[string]bool
 
-	down, unknown, failed, held atomic.Bool
+	// owing is a day whose collection failed: it stays owed and is
+	// collected again every digestRetry (L3 1 on #592).
+	down, unknown, failed, held, owing atomic.Bool
 }
 
 func newDigestBox(cfg digestConfig) *digestBox {
@@ -144,6 +154,7 @@ func (d *digestBox) register(r *capLines) {
 	r.add("digest-unknown", capHeld, func() string { return lineIf(d.unknown.Load(), digestUnknownStatus) })
 	r.add("digest-failed", capHeld, func() string { return lineIf(d.failed.Load(), digestFailedStatus) })
 	r.add("digest-held", capHeld, func() string { return lineIf(d.held.Load(), digestHeldStatus) })
+	r.add("digest-owed", capHeld, func() string { return lineIf(d.owing.Load(), digestOwedStatus) })
 }
 
 // open (re)opens the queue and the box's state.
@@ -165,6 +176,11 @@ func (d *digestBox) openLocked(ctx context.Context) error {
 	q, err := digestqueue.New(d.cfg.Queue, digestLimits)
 	if err != nil {
 		return err
+	}
+	for ref := range d.forgets {
+		if err = q.Forget(ref); err == nil {
+			delete(d.forgets, ref)
+		}
 	}
 	sources := maps.Clone(d.cfg.Sources)
 	if sources == nil {
@@ -246,7 +262,7 @@ func (d *digestBox) step(ctx context.Context, now time.Time) {
 	defer d.mu.Unlock()
 	today := d.dayOf(now)
 	switch {
-	case today > d.st.LastDay && !now.Before(d.digestAt(today)):
+	case today > d.st.LastDay && !now.Before(d.digestAt(today)) && (!d.owing.Load() || now.Sub(d.lastTry) >= digestRetry):
 		d.lastTry = now
 		d.daily(ctx, now, today)
 	case now.Sub(d.lastTry) >= digestRetry:
@@ -262,9 +278,16 @@ func (d *digestBox) step(ctx context.Context, now time.Time) {
 	d.flags(now)
 }
 
+// daily runs day today's digest step. A collection that fails with the
+// queue still reading leaves the day owed, so the step runs again after
+// digestRetry; any other end of the step closes the day.
 func (d *digestBox) daily(ctx context.Context, now time.Time, today uint64) {
+	owed := false
 	defer func() {
-		d.st.LastDay = today
+		d.owing.Store(owed)
+		if !owed {
+			d.st.LastDay = today
+		}
 		if err := d.save(); err != nil {
 			d.cfg.Logf("digest: state not saved: %v", err)
 		}
@@ -289,7 +312,8 @@ func (d *digestBox) daily(ctx context.Context, now time.Time, today uint64) {
 			d.outage(today)
 			return
 		}
-		d.cfg.Logf("digest: collection: %v", err)
+		d.cfg.Logf("digest: collection: %v; retrying", err)
+		owed = true
 	}
 	held, err := d.q.Held(now)
 	if err != nil {
@@ -354,7 +378,7 @@ func (d *digestBox) sendReady(ctx context.Context, now time.Time) {
 	}
 	for _, b := range bs {
 		if b.State != digestqueue.Ready || b.Redacted || !now.Before(b.Expires) || b.Attempts >= digestLimits.MaxAttempts ||
-			slices.Contains(b.Acknowledged, false) {
+			slices.Contains(b.Acknowledged, false) || refersTo(b, d.forgets) {
 			continue
 		}
 		out, err := d.snd.Send(ctx, b.ID)
@@ -379,6 +403,18 @@ func (d *digestBox) surfaced(b digestqueue.Batch, now time.Time) bool {
 		return true
 	case digestqueue.Ready:
 		return b.Late && !now.Before(b.Expires)
+	}
+	return false
+}
+
+// refersTo reports whether a snapshot of b holds one of refs.
+func refersTo(b digestqueue.Batch, refs map[string]bool) bool {
+	for _, s := range b.Snapshots {
+		for _, r := range s.References {
+			if refs[r] {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -488,18 +524,28 @@ func (d *digestBox) render(b digestqueue.Batch) (string, error) {
 
 // forget purges ref from the queue (CAP-3). A batch in flight refuses it
 // (digestqueue.ErrInFlight), as does a queue that is not open, so the
-// forget stays owed and its retry asks again.
+// forget stays owed and its retry asks again; meanwhile ref is kept in
+// forgets, so open purges it first and no batch holding it is sent.
 func (d *digestBox) forget(ref string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.q == nil {
-		return errors.New("digest: queue not open")
-	}
 	if !digestRef(ref) {
 		// No snapshot can carry it.
 		return nil
 	}
-	return d.q.Forget(ref)
+	err := errors.New("digest: queue not open")
+	if d.q != nil {
+		err = d.q.Forget(ref)
+	}
+	if err == nil {
+		delete(d.forgets, ref)
+		return nil
+	}
+	if d.forgets == nil {
+		d.forgets = map[string]bool{}
+	}
+	d.forgets[ref] = true
+	return err
 }
 
 // digestRef reports a reference the queue accepts.
@@ -641,3 +687,40 @@ func (t digestTransport) Deliver(_ context.Context, text string) (digestqueue.Ou
 	}
 	return digestqueue.OutcomeUnknown, ""
 }
+
+// prepareDigestDir makes dir the digest's own directory: created 0700
+// if missing, refused if it is a symlink or not a directory, else set to
+// 0700, and any temporary file a crashed save left is removed, so a save
+// never keeps a wider mode it had (security R3 on #592).
+func prepareDigestDir(dir string) error {
+	fi, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return os.MkdirAll(dir, 0o700)
+	}
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("digest: %s is not a directory", dir)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	tmps, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
+	if err != nil {
+		return err
+	}
+	for _, t := range tmps {
+		if err := os.Remove(t); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// downStore is a store that does not open, for a digest directory
+// prepareDigestDir refused: the box says its store is down.
+type downStore struct{ err error }
+
+func (s downStore) Load() ([]byte, error) { return nil, s.err }
+func (s downStore) Save([]byte) error     { return s.err }

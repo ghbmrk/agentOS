@@ -117,7 +117,10 @@ quiet-hours, pacing, reservation, disclosure and authority checks separately.
 ## W5-Dc wiring (agentosd)
 
 - Storage: queue.json and digest-sources.json under -digest (default
-  /var/lib/agentos/digest, created 0700) through change.FileStore. No digest
+  /var/lib/agentos/digest) through change.FileStore. At start the directory is
+  created 0700 if missing, refused if a symlink or not a directory, otherwise
+  set to 0700, and any leftover `*.tmp` is removed so a save cannot inherit a
+  wider mode; a refused directory leaves the store down (STATUS line). No digest
   runs without -modem-bridge; the queue opens on the first tick, never at
   construction, so a failed open is a STATUS line, not a crash loop.
 - Digest time: provisional 08:00 box-local (SG-2, W5-Dc-r2). One daily step
@@ -148,7 +151,22 @@ quiet-hours, pacing, reservation, disclosure and authority checks separately.
 - Forget (CAP-3): ownerForget calls the queue's Forget for the item reference
   after its own forget; ErrInFlight (a Sending or Unknown batch holds it)
   leaves the forget owed on the existing retry path. The start-up tombstone
-  replay does not call it yet (release row).
+  replay asks the queue's Forget again before the done text and retries with
+  backoff until it holds, so a restart between forget and purge cannot report
+  the forget done (security B2 on #592). A reference the queue has not purged
+  (not open, or ErrInFlight) is kept in memory: the next open purges it before
+  any send, and no Ready batch holding it is sent meanwhile.
+- Owed collection (CH-15, L3 1 on #592): a Collect error with the queue still
+  reading leaves the day owed (LastDay not advanced), shows a STATUS line, and
+  collects again every digestRetry (30 minutes); after a restart the owed day
+  collects at once. One digest goes out per day.
+- Gate (OP-2, DC-6): TestDigestGate parses the broker tree. Deliver is named
+  only in digestqueue/sender.go and three listed non-digest sites; cfg.Transport
+  only where main assigns it and as digestqueue.NewSender's argument in
+  openLocked; cfg is never copied bare; digestTransport only inside its own
+  constructor and methods; no reflect, MethodByName or Method in agentosd;
+  sendOutage takes no parameters and informs only digestOutageLine; Batch
+  Snapshots and Snapshot Lines are read only in render, carrier and refersTo.
 
 ## Remaining integration packages
 

@@ -1139,10 +1139,40 @@ func (f *ownerForget) finishOwed(ctx context.Context) {
 			if !e.Logged {
 				e.Logged = f.logForget(g, time.Time{}, false)
 			}
+			// A restart can come between the forget and the digest
+			// queue's purge, so the purge is asked again before the done
+			// text (security B2 on #592).
+			if f.digest != nil {
+				if err := f.digest(g); err != nil {
+					log.Printf("forget: digest not purged yet: %v", err)
+					go f.purgeLater(ctx, g, e)
+					continue
+				}
+			}
 			f.done(ctx, g, f.doneLater(e.Undone, e.Since, e.Back, e.Logged), e)
 		default:
 			f.paid(g)
 		}
+	}
+}
+
+// purgeLater asks the digest queue to purge an owed forget's goal again
+// with backoff, then texts its done text; until then the forget stays
+// owed, so a shutdown leaves it to the next start-up.
+func (f *ownerForget) purgeLater(ctx context.Context, goal string, e owedForget) {
+	if f.retried != nil {
+		defer f.retried()
+	}
+	for wait := 2 * time.Second; ; wait = min(2*wait, forgetRetryMax) {
+		if !f.sleep(ctx, wait) {
+			return
+		}
+		if err := f.digest(goal); err != nil {
+			log.Printf("forget: digest not purged yet: %v", err)
+			continue
+		}
+		f.done(ctx, goal, f.doneLater(e.Undone, e.Since, e.Back, e.Logged), e)
+		return
 	}
 }
 

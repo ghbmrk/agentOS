@@ -564,11 +564,13 @@ func main() {
 	// lines are wired with the rest. Its queue opens when it runs.
 	var dg *digestBox
 	if modemBridge && digestDir != "" {
-		if err := os.MkdirAll(digestDir, 0o700); err != nil {
+		var queue, state change.Store = change.FileStore{Path: filepath.Join(digestDir, "queue.json")},
+			change.FileStore{Path: filepath.Join(digestDir, "digest-sources.json")}
+		if err := prepareDigestDir(digestDir); err != nil {
 			log.Printf("digest: %v", err)
+			queue, state = downStore{err}, downStore{err}
 		}
-		dg = newDigestBox(digestConfig{Queue: change.FileStore{Path: filepath.Join(digestDir, "queue.json")},
-			State: change.FileStore{Path: filepath.Join(digestDir, "digest-sources.json")}})
+		dg = newDigestBox(digestConfig{Queue: queue, State: state})
 		dg.register(capLines)
 	}
 	capLines.wire(&cfg)
