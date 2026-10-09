@@ -9,6 +9,7 @@ Source: the #328 combined lens record (`reviews/combined/2026-10-08-pr328.md`, S
 - Name the route resume command (CRED-5, CH-11) in SPEC's control-word list. When a bare RESUME arrives with no halted work while a route is paused, the reply names that command (#421 lens screen, release).
 - Mid-life ask: one digest line naming the plan and the choice, e.g. "ChatGPT plan paused until you say yes; using your other routes meanwhile", and the same state on ONB-9's per-plan line.
 
+- **Notice-paused route (lens, #421, decision for Mark).** CRED-5 does not say whether the owner can resume a route a security notice paused. Recommended: a notice-paused route counts as withdrawn on that box and cannot be resumed; its STATUS line says only an update brings the plan back (see LATER `CRED-5t-msg`). The alternative lets the owner run a route the provider prohibits.
 An L1 spec-diff (SPEC.md changes need Mark's approval), plus a test that **Use the defaults** never records consent.
 
 **Requirements:** CRED-5, CH-10, CH-11, ONB-9
