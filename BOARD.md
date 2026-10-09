@@ -355,6 +355,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W5-Da-r1 | Status wording and resolution path for surfaced digest states (unknown, not-sent-exhausted, expired, `Held`) ship with the first sender (release, lens 4 on #555) | W5-Da | Next build item B | queued (with W5-Db/W5-Dc) |
 | W5-Da-r2 | How a forgotten, still-unacknowledged source generation is acknowledged or requeued after `Forget` cancels its batch (release, L3 4 on #555) | W5-Da | Next build item B | queued (with W5-Db/W5-Dc) |
 | W5-Da-r3 | Decide whether `broker/digestqueue` joins `TIER_A_BROKER` once W5-Db makes `Begin` the gate on an owner-facing send (release, L3 5 on #555) | W5-Da, W5-Db | Next build item B | queued |
+| W5-Da-r4 | Decide in W5-Db how a held batch (ready, past expiry, some source consumed) is resolved: `Collector.recover` currently acks its remaining sources although `Begin` will never send it; either skip held batches or say recover may finish them, and add a test (release, L3 delta on #555) | W5-Da, W5-Db | Next build item B | queued (with W5-Db/W5-Dc) |
 | UX3-1 | [Visible provider sign-in and bounded retry](briefs/UX3-1.md) | P2-2w c4 | primary; unclaimed | queued (A; from #405) |
 | UX3-6 | [Inspect every approval item over the owner channel](briefs/UX3-6.md) | L1 read-only command grammar | primary; unclaimed | queued (A; from #405) |
 | UX3-7 | [Truthful, bounded withheld-result retrieval](briefs/UX3-7.md) | CH-20p minimum split promoted to Release in LATER.md (D-079 spec-diff) | primary; unclaimed | queued (A; from #405) |
