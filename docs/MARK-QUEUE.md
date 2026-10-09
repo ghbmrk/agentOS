@@ -8,7 +8,7 @@ Questions and actions only Mark can take, one line each, answerable in one word,
 |---|---|---|---|
 | Q1 | Adopt the CLAUDE.md lines for D-085 (release test, `recheck`, tooling and depth rule, idle limit, Mark queue, daily ledger reading)? An agent may not edit CLAUDE.md without your approval; the text is in the CONV-1 PR description. | yes | CONV-1 |
 | Q2 | Approve the batched L1 spec-diff for D-079 to D-083 when CONV-4 opens it, and freeze first-release scope after it (new release requirements need your explicit promotion)? | yes | CONV-4 |
-| Q3 | Close the stale non-CODEX-1 PRs on CONV-3's list (branches kept)? | yes, once the list is posted | CONV-3 |
+| Q3 | Close these 11 PRs, branches kept? Superseded: #175, #193, #195, #198, #219, #231, #236 (#175 low confidence). Stale (idle 48h or more): #191, #192, #194, #197. Reasons in [conv-3-triage.md](conv-3-triage.md). No CODEX-1 draft is on it. | yes, except hold #175 if you want it checked first | CONV-3 |
 
 ## Actions
 

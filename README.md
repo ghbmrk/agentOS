@@ -20,6 +20,7 @@ Each fact has one home; other files point to it rather than restate it ([docs/OP
 | [LATER.md](LATER.md) | state | Which open rows the first release needs, and the backlog that waits. | L1 |
 | [docs/LANES.md](docs/LANES.md) | state | Which team owns which paths; onboarding records. | primary team |
 | [docs/MARK-QUEUE.md](docs/MARK-QUEUE.md) | state | Questions and actions only Mark can take, one line each, with a recommendation. | L1 adds, Mark answers |
+| [docs/conv-3-triage.md](docs/conv-3-triage.md) | state | Class of every open PR (merge-ready, finish, parts bin, superseded, stale) and the close list behind Q3. | CONV-3, then L1 |
 | [DECISIONS.md](DECISIONS.md) | record | Decisions as `D-NNN` rows with date, status and source; long reasoning in `decisions/D-NNN.md`. | L1, Mark |
 | `reviews/<lens>/` | record | Lens methods (README) and lens verdicts per PR. | lens screen |
 | `<package>/ASSUMPTIONS.md` | record | What each package's code rests on. | its builder |
