@@ -66,7 +66,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | S6 | [Consumer AI CLIs in no-tools relay mode](briefs/S6.md) | Mark's accounts | dropped (superseded by S8 (CRED-5 now covers full provider agents)) |
 | S8 | [Provider agents as workers](briefs/S8.md) | Cloud first (stubs), then Mark's accounts | merged (03641d1; #186 cloud part and spec diff) |
 | S8-W1 | [Image fix for worker-held custody](briefs/S8-W1.md) | S8, #186 | queued (blocked: needs a supervised session with prompts on, D-064; the design hand-off is a bwrap prefix for agentos-toolsh, managed-settings denies and a containment test) |
-| S8-W1a | [Inventory credential-bearing tool surfaces](briefs/S8-W1a.md) | S8 | queued (C; from #262; feeds S8-W1) |
+| S8-W1a | [Inventory credential-bearing tool surfaces](briefs/S8-W1a.md) | S8 | building (C; from #262; feeds S8-W1) |
 | S8-live | [S8 live part](briefs/S8-live.md) | see brief | queued |
 | S8-codex-terms | [Read OpenAI's current terms on a proxy holding ChatGPT-managed…](briefs/S8-codex-terms.md) | openai.com reachable | in review (decided: broker-held, unconfirmed route, #328; [note](spikes/S8-provider-workers/CODEX-TERMS.md)) |
 | CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | in review (#420); scope extended by #525 records: C2 grant and reachability through modelroute (see brief) |
