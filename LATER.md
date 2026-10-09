@@ -714,6 +714,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SPEC-D088 l3 | #669 L3 (comment 6090762892) (recheck): the text does not say whether items created while the switch was on but still queued (batched or time-delayed, OSS-6) are dropped or sent after a later on when the owner turns it off. |
 | SPEC-s14 l4 | #669 L3 (comment 6090762892) (recheck): §14 says "a new release requirement needs Mark's explicit promotion; review findings cannot add one", while CLAUDE.md says a release finding makes a BOARD row; say in §14 that "release requirement" means a SPEC requirement. |
 | UPD-1 l-216b | #216 combined lens (comment 6090523873): `brokerRefused` is a text denylist (`/` or `\`), so a host name or bare file name would pass; replace it with a fixed reason per error class if a second leak kind appears. The other #216 later item, `EOF/timeout` losing its reason, is the `UPD-1 l-216` line above. |
+| TOOLS-risk-tier l2 | #211 (recheck): once `OmitValues` moves into `broker/browser` (already tier A), the earlier idea of adding `browseract` to `TIER_A_BROKER` in `tools/risk_tier.py` and OPERATING §3 may be moot; if any CRED-4 redaction code stays under `broker/browseract`, it still tiers as B with no Security stage. |
+| CRED-4 l-211b | #211 combined lens (comment 6090839728): `Origin` does not lowercase the host or strip a trailing dot (fails closed); normalise the host case and trailing dot. |
+| CRED-4 l-211c | #211 combined lens (comment 6090839728): the PR title lacks the package ID and no brief row is linked; the decoy test picks its assertion with `in[len(in)-3:] == "ada"`, which is brittle (use an explicit expected value per case). |
 
 ## Reuse candidates
 | ID | Component | Why |
