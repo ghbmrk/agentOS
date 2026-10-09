@@ -39,8 +39,10 @@ var (
 	// Grouped codes such as XXXXX-XXXXX-XXXXX (recovery and backup codes).
 	groupedCode = regexp.MustCompile(`\b[A-Za-z0-9]{4,8}(?:-[A-Za-z0-9]{4,8}){2,}\b`)
 	// Fact predicates naming credential material, matched on whole words of
-	// the predicate as credWords spells it (api_key, recovery_codes, 2fa_seed).
-	credPredicate = regexp.MustCompile(`(?:^|_)(?:pass(?:word|wd|code|phrase)?s?|pwd|pins?|secrets?|credentials?|(?:api|access|private|secret|signing)_?keys?|tokens?|recovery|backup_?codes?|seeds?|mnemonic|totps?|otps?|2fa|mfa|cookies?|passkeys?|pw|security_answers?)(?:_|$)|(?:^|_)keys?$`)
+	// the predicate as credWords spells it (api_key, recovery_codes, 2fa_seed),
+	// or with key(s) as any word but the first, or as the whole name before a
+	// version or number (ssh_key_backup, key_v_2; key_points is kept).
+	credPredicate = regexp.MustCompile(`(?:^|_)(?:pass(?:word|wd|code|phrase)?s?|pwds?|pins?|secrets?|credentials?|(?:api|access|private|secret|signing)_?keys?|tokens?|recovery|backup_?codes?|seeds?|mnemonic|totps?|otps?|2fa|mfa|cookies?|passkeys?|pws?|security_answers?)(?:_|$)|_keys?(?:_|$)|^keys?(?:_v)?(?:_\d+)?$`)
 )
 
 // ScrubFact scrubs a fact. When its predicate names credential material the
@@ -70,7 +72,9 @@ func credWords(p string) string {
 		case c >= 'A' && c <= 'Z':
 			// An acronym's plural s ("OTPs") stays on the acronym.
 			plural := i > 0 && p[i-1] >= 'A' && p[i-1] <= 'Z' && p[i+1:] != "" && p[i+1] == 's' && !lower(i+2)
-			if i > 0 && caseBoundary(p, i) && !plural {
+			// A digit joins the capitals after it ("2FA"), so 2fa stays one word.
+			digit := i > 0 && p[i-1] >= '0' && p[i-1] <= '9'
+			if i > 0 && caseBoundary(p, i) && !plural && !digit {
 				sep()
 			}
 			b = append(b, c|0x20)
