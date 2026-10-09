@@ -119,6 +119,9 @@ func target(t *testing.T, bin string) Target {
 func newSource(t *testing.T, g *fakeGuard, cfg Config) *Source {
 	t.Helper()
 	cfg.Inner, cfg.Report = g, g
+	if cfg.Release == "" && len(cfg.Targets) > 0 {
+		cfg.Release = filepath.Dir(cfg.Targets[0].Binary)
+	}
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = t.TempDir()
 	}
@@ -160,7 +163,9 @@ func TestAFuzzCrashIsReportedKeptAndResolved(t *testing.T) {
 	}
 	// An update fixes the decoder, but with the stored input gone nothing
 	// replays it, so the finding stays open.
-	tg.Binary = planted(t, false)
+	if err := os.Rename(planted(t, false), tg.Binary); err != nil {
+		t.Fatal(err)
+	}
 	stored := filepath.Join(tg.Dir, "testdata", "fuzz", "FuzzPlanted", kept[0].Name())
 	aside := filepath.Join(t.TempDir(), "input")
 	if err := os.Rename(stored, aside); err != nil {
@@ -249,11 +254,11 @@ func TestAFuzzJobYieldsWithinThePreemptionTarget(t *testing.T) {
 func TestNextOffersInnerFirstThenTakesTurns(t *testing.T) {
 	g := newFake()
 	clock := time.Unix(1_800_000_000, 0)
-	probe := func(context.Context) (string, sockprobe.Result, error) { return "m1", sockprobe.Result{}, nil }
-	a := Target{Pkg: "p", Name: "FuzzA", Binary: "/nonexistent", Dir: t.TempDir()}
+	probe := func(context.Context) (string, []string, error) { return "m1", nil, nil }
+	a := Target{Pkg: "p", Name: "FuzzA", Binary: "/nonexistent/p.test", Dir: t.TempDir()}
 	b := a
 	b.Name = "FuzzB"
-	s := newSource(t, g, Config{Targets: []Target{a, b}, Probe: probe, Trail: func() []journal.Record { return nil },
+	s := newSource(t, g, Config{Targets: []Target{a, b}, Probe: probe, Trail: func() []journal.Record { return nil }, Want: probeSet(),
 		Every: time.Hour, Now: func() time.Time { return clock }})
 	g.job = true
 	if j, _ := s.Next(context.Background(), true); j.Name != "passive" {
@@ -284,6 +289,15 @@ func note(at time.Time, m string, c sockets.Code) journal.Record {
 	return journal.Record{At: at, Type: journal.RecEgress, Egress: &journal.EgressNote{Machine: m, Adapter: sockets.RefusalNote, Operation: c.Token(), Reason: "x"}}
 }
 
+// probeSet is the probe's refusal codes, as the wiring passes them.
+func probeSet() []sockets.Code {
+	var out []sockets.Code
+	for _, f := range sockprobe.Frames {
+		out = append(out, f.Want)
+	}
+	return out
+}
+
 // refusals is a broker trail with a refusal note at at for each code in
 // the probe set.
 func refusals(at time.Time, m string) []journal.Record {
@@ -299,7 +313,7 @@ func TestJournaledChecksTheProbeRound(t *testing.T) {
 	end := start.Add(time.Second)
 	full := append(refusals(start, "m1"), note(start.Add(-30*time.Second), "m1", sockets.ErrUnknownOp))
 	full = append(full[:2], full[3:]...) // ErrUnknownOp only from the earlier, coalesced note
-	if f := Journaled("m1", full, start, end, time.Minute); len(f) != 0 {
+	if f := Journaled("m1", probeSet(), full, start, end, time.Minute); len(f) != 0 {
 		t.Fatalf("clean round: %q", f)
 	}
 	last := len(full) - 1
@@ -312,7 +326,7 @@ func TestJournaledChecksTheProbeRound(t *testing.T) {
 		"too old":       without(note(start.Add(-2*time.Minute), "m1", sockets.ErrUnknownOp)),
 		"effect":        append(append([]journal.Record{}, full...), journal.Record{At: end, Type: journal.RecSubmitted, Intent: &journal.Intent{Machine: "m1", Action: "send"}}),
 	} {
-		if f := Journaled("m1", trail, start, end, time.Minute); len(f) != 1 {
+		if f := Journaled("m1", probeSet(), trail, start, end, time.Minute); len(f) != 1 {
 			t.Fatalf("%s: %q", name, f)
 		}
 	}
@@ -321,10 +335,9 @@ func TestJournaledChecksTheProbeRound(t *testing.T) {
 // A probe failure becomes a probe finding; a clean round resolves it.
 func TestAProbeFailureIsReportedAndAPassResolvesIt(t *testing.T) {
 	g := newFake()
-	var res sockprobe.Result
-	res.Failures = []string{"undeclared socket owner.sock is reachable"}
+	res := []string{"undeclared socket owner.sock is reachable"}
 	journaled := true
-	s := newSource(t, g, Config{Probe: func(context.Context) (string, sockprobe.Result, error) { return "m1", res, nil },
+	s := newSource(t, g, Config{Want: probeSet(), Probe: func(context.Context) (string, []string, error) { return "m1", res, nil },
 		Trail: func() []journal.Record {
 			if !journaled {
 				return nil
@@ -340,7 +353,7 @@ func TestAProbeFailureIsReportedAndAPassResolvesIt(t *testing.T) {
 	}
 	// A guest that claims an empty round, with nothing journaled on the
 	// broker side, does not clear it (Security 4a on #523).
-	res, journaled = sockprobe.Result{}, false
+	res, journaled = nil, false
 	if n, err := s.probe(context.Background()); err != nil || n == 0 || len(g.resolved) != 0 || len(g.open) == 0 {
 		t.Fatalf("empty guest result n=%d err=%v open %v resolved %v", n, err, g.open, g.resolved)
 	}

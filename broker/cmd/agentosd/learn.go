@@ -18,6 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/loop7"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -57,6 +58,9 @@ type learning struct {
 	// guard is Loop 2's passive checks (W5a, loop2.go); contain and
 	// notify reach the gate and the owner once the daemon attaches.
 	guard *loops.Guard
+	// fuzz is Loop 2's source: LOOP-7's fuzz rounds in front of guard
+	// (P3-4b-3a).
+	fuzz *loop7.Source
 	// running counts the scheduler's run, so a test can wait for it.
 	running sync.WaitGroup
 	contain loop2Contain
@@ -101,6 +105,38 @@ type learnPaths struct {
 	// ResumeFor is how long a preempted evaluation's pairs and candidates
 	// are kept; zero is change.ResumeFor (sleepResumeFor).
 	ResumeFor time.Duration
+	// Fuzz is the release's fuzz directory: main sets it to fuzzRelease,
+	// a constant, never a flag (ARC-2). Empty, or without a manifest,
+	// runs no fuzz targets.
+	Fuzz string
+	// Loop7 is LOOP-7's state: each target's corpus with the crash inputs
+	// found on this box, and the fuzz engine's cache.
+	Loop7 string
+}
+
+// LOOP-7's fuzz rounds (P3-4b-3a, loop7 F1-F2): one job per fuzzEvery,
+// taking turns over the targets and the probe's slot, so each target is
+// rechecked every (targets + 1) x fuzzEvery, 9.5 h with the 18 targets
+// image/fuzz-targets.json lists (TestEachFuzzTargetIsRecheckedTwiceADay).
+const (
+	fuzzRelease = "/usr/lib/agentos/fuzz"
+	fuzzEvery   = 30 * time.Minute
+	fuzzTime    = 30 * time.Second
+)
+
+// fuzzTargets are the release's fuzz targets, or none when it ships none.
+func fuzzTargets(p learnPaths) []loop7.Target {
+	if p.Fuzz == "" || p.Loop7 == "" {
+		return nil
+	}
+	ts, err := loop7.Load(p.Fuzz, p.Loop7)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		log.Printf("loop7: no fuzz rounds: %v", err)
+		return nil
+	}
+	return ts
 }
 
 // openLearning opens the learning plane and wires it into the daemon's
@@ -207,10 +243,25 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}); err != nil {
 		return nil, err
 	}
+	// Loop 2 is one source: the guard's passive checks first, then LOOP-7
+	// fuzz rounds in spare capacity, whose crashes the guard reports
+	// (LOOP-9). The socket probe stays off until P3-4b-3f picks its
+	// machine.
+	if l.fuzz, err = loop7.New(loop7.Config{
+		Inner:    l.guard,
+		Report:   l.guard,
+		Targets:  fuzzTargets(p),
+		Release:  p.Fuzz,
+		FuzzTime: fuzzTime,
+		Every:    fuzzEvery,
+		CacheDir: filepath.Join(p.Loop7, "cache"),
+	}); err != nil {
+		return nil, err
+	}
 	if l.sched, err = loops.New(loops.Config{
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
 		Spare:     spare,
-		Sources:   []loops.Source{sleepSource{learn, &l.sleep}, l.guard},
+		Sources:   []loops.Source{sleepSource{learn, &l.sleep}, l.fuzz},
 		Sharing:   l.pipe.SetSharing,
 		Busy:      l.busy,
 		BusyCause: l.busyCause,

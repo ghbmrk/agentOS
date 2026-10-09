@@ -80,8 +80,11 @@ var controlPath = map[string][]string{
 	// the page's root summary (localapi) the daemon serves. A held restore
 	// (W3-forget-b1-7) serves the bridge's ops itself, hears its state
 	// report (bridgeproto) and checks its texts fit (modem); both are
-	// already linked through modemlink.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem"},
+	// already linked through modemlink. It wires LOOP-7's fuzz source
+	// (loop7, P3-4b-3a), whose one exec runs release-listed fuzz binaries
+	// (TestAgentosdLinksNoInference's escapeOK); loop7 does not import
+	// sockprobe, whose in-guest dialer stays out of the daemon.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
