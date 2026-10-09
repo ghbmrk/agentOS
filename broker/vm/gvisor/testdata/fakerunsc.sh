@@ -45,6 +45,11 @@
 # one line to runsc's stderr and exits 0 with nothing holding the pipes:
 # a successful exec, which stays a result.
 #
+# fatal128 fails as runsc's util.Fatalf does (P1-4-flake-exit128): before
+# the pid write, the only place runsc's exec calls it, a --log JSON line
+# and the message on stderr, exit 128. exit128 is a guest that exits 128
+# with runsc silent, which stays a result.
+#
 # The rest fail before the pid is written, as runsc's exec does
 # (runsc/cmd/exec.go, runsc/sandbox/sandbox.go, pkg/urpc/urpc.go,
 # pkg/sentry/fsimpl/user/path.go, pkg/sentry/loader/loader.go at that
@@ -175,6 +180,8 @@ waitdelaytext)
 	) 3>&- 4>&- &
 	exit 0
 	;;
+fatal128) fail "loading container failed: $c: resource temporarily unavailable" 128 ;;
+exit128) echo 7 >"$pid"; echo "guest out"; exit 128 ;;
 exit2) echo 7 >"$pid"; echo "guest out"; echo "goroutine 1 [running]:" >&4; exit 2 ;;
 pidfail) fail "writing internal pid file: open $c: no space left on device" 1 ;;
 lostcall) insandbox 'urpc method "containerManager.ExecuteAsync" failed: EOF' ;;

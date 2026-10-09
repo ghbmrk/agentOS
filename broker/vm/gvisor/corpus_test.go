@@ -1,6 +1,7 @@
 package gvisor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -144,8 +145,8 @@ func newRelay(t *testing.T, machines guest.Machines) *relay {
 	}
 	a, err := mail.New(mail.Config{Account: "mail", Address: me, Store: st, AuthServ: "mx.example.test",
 		SecuritySenders: []string{"security@provider.example"}, Labels: []string{"Family"},
-		Authorized: func(action string, since time.Time) []journal.Intent {
-			return x.eng.AuthorizedSince("mail", action, since)
+		InUse: func(action string, since time.Time) []journal.Use {
+			return x.eng.InUse("mail", action, since)
 		}})
 	if err != nil {
 		t.Fatal(err)
@@ -506,12 +507,81 @@ func TestCorpusReplayInAMachine(t *testing.T) {
 	r.create(x.machine, admission.Accepted)
 	r.ask(x.machine, "token") // waits for the machine to start
 	x.sock = vm.ServicesMount + "/" + guest.Socket
+	logs := t.TempDir()
 	x.run = func(ctx context.Context, args ...string) (string, error) {
-		out, err := r.rt.cmd(ctx, append([]string{"exec", cid(x.machine), "/guest"}, args...)...).Output()
+		out, err := rawExec(ctx, r.rt, logs, x.machine, append([]string{"/guest"}, args...)...)
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		}
-		return strings.TrimSpace(string(out)), err
+		return strings.TrimSpace(out), err
 	}
 	replayAll(t, x)
+}
+
+// rawExecTail is how much of runsc's stderr and of its --log a failed raw
+// exec's error carries.
+const rawExecTail = 2048
+
+// rawExec runs argv in machine id with a raw `runsc exec`, as the corpus
+// replay always has, and answers its stdout. It does not go through
+// Runtime.Exec, whose --cwd, --user and --pass-fd differ (a release row
+// of its own). It adds only a --log file of its own, in dir, and keeps
+// the process's stderr: when the exec fails, the error carries the exit
+// code and the last rawExecTail bytes of each, since an exit 128 is
+// runsc's own fatal and its reason is only there (P1-4-flake-exit128).
+// With no --pass-fd, that stderr is runsc's merged with the guest's, and
+// its label says so; the --log file is runsc's alone. The text is from
+// synthetic corpus runs, printed only in a test failure.
+func rawExec(ctx context.Context, r *Runtime, dir, id string, argv ...string) (string, error) {
+	f, err := os.CreateTemp(dir, "exec-*.log")
+	if err != nil {
+		return "", err
+	}
+	f.Close()
+	defer os.Remove(f.Name())
+	var stderr bytes.Buffer
+	c := r.cmd(ctx, append([]string{"--log=" + f.Name(), "exec", cid(id)}, argv...)...)
+	c.Stderr = &stderr
+	out, err := c.Output()
+	if exit, ok := err.(*exec.ExitError); ok {
+		log, _ := os.ReadFile(f.Name())
+		err = fmt.Errorf("%w (exit %d)\nrunsc and guest stderr: %q\nrunsc log: %q", exit, exit.ExitCode(), tail(stderr.Bytes(), rawExecTail), tail(log, rawExecTail))
+	}
+	return string(out), err
+}
+
+// tail answers b's last n bytes.
+func tail(b []byte, n int) string { return string(b[max(0, len(b)-n):]) }
+
+// REQ: CAP-8, RES-4
+//
+// P1-4-flake-exit128: the corpus replay's raw `runsc exec` failed with a
+// bare "exit status 128", runsc's own fatal, its reason discarded. Its
+// error now carries the exit code and the tails of runsc's stderr and
+// --log, so the next occurrence names runsc's reason.
+func TestRawExecErrorCarriesRunscText(t *testing.T) {
+	r := fakeRunsc(t)
+	_, err := rawExec(context.Background(), r, t.TempDir(), "corpus", "fatal128")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 128 {
+		t.Fatalf("error %v, want runsc's exit 128", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"exit 128", "runsc and guest stderr: ", "runsc log: "} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error lacks %q: %s", want, msg)
+		}
+	}
+	// Once from stderr, once from the --log line.
+	if n := strings.Count(msg, "loading container failed: "+runscCanary); n != 2 {
+		t.Errorf("runsc's message %d times in the error, want 2: %s", n, msg)
+	}
+}
+
+// Only the tail of runsc's text is kept, so a large stderr cannot flood
+// the test log.
+func TestRawExecErrorClipsRunscText(t *testing.T) {
+	if got := tail([]byte(strings.Repeat("x", 3*rawExecTail)+"end"), rawExecTail); len(got) != rawExecTail || !strings.HasSuffix(got, "end") {
+		t.Fatalf("tail kept %d bytes ending %q", len(got), got[max(0, len(got)-8):])
+	}
 }

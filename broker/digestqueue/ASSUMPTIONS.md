@@ -65,9 +65,19 @@ explicit compaction. Source ledger capacity remains bounded and is never silentl
 evicted; exhaustion requires visible recovery and an explicit migration policy.
 
 Forget prechecks all matching batches and refuses without mutation if any matching
-send is unresolved. Otherwise it removes matching snapshots per snapshot from
-ready and expired batches (W5-Db below) and redacts accepted, failed and
-cancelled batches whole. Completion must also cover source
+batch is Sending (ErrInFlight). Otherwise it removes matching snapshots per snapshot from
+ready and expired batches (W5-Db below) and redacts accepted, failed, cancelled
+and unknown batches whole. An unknown batch keeps its state, attempts, evidence,
+dates and Late, so its STATUS line and the next digest's line about it stay
+(OP-9, CH-15); validate admits Redacted on Unknown as on terminal states, finish
+refuses any redacted batch (ErrState) and begin already does, so it is never
+resent or revived, and Compact keeps it, as it keeps every unknown batch
+(W5-Dc-r7). The source duty below holds for it too: a re-offer of the forgotten
+generation is ErrConflict, a higher generation is admitted. Redacting an unknown batch whole while keeping its state is a
+reading CAP-3 supports, not one SPEC states: its text is a derived copy nothing
+renders again, and a text the owner may already have is an action already taken.
+The Sending refusal is bounded: Send finishes the batch within the transport's
+wait, and a crash makes it unknown on reopen. Completion must also cover source
 state, transport containment, all copies/backups and tombstones; this API alone
 is not end-to-end CAP-3. Hash/source-generation dedupe metadata stays private and
 must be included in reviewed retention/encryption/forget policy. Concurrent
@@ -149,18 +159,23 @@ quiet-hours, pacing, reservation, disclosure and authority checks separately.
   it; if the state store fails too, only the in-memory latch holds and a
   restart may send the line again that day.
 - Forget (CAP-3): ownerForget calls the queue's Forget for the item reference
-  after its own forget; ErrInFlight (a Sending or Unknown batch holds it)
-  leaves the forget owed on the existing retry path. The start-up tombstone
+  after its own forget; an Unknown batch holding it is redacted and the forget
+  is done (W5-Dc-r7). ErrInFlight (a Sending batch holds it) leaves the forget
+  owed on the existing retry path. The start-up tombstone
   replay asks the queue's Forget again before the done text and retries with
   backoff until it holds, so a restart between forget and purge cannot report
   the forget done (security B2 on #592). A reference the queue has not purged
-  (not open, or ErrInFlight) is kept by the box and saved in its state store
+  (not open, a store refusal, or ErrInFlight) is kept by the box and saved in its state store
   (`digest-sources.json`, `forgets`) before the refusal returns: every open
   loads it and purges it before any send, no Ready batch holding it is sent
   meanwhile, and it is dropped once the queue's Forget holds. The hold so does
   not depend on boot order or on the forget owner's owed file (security B2' on
   #592). agentosd starts the digest after the forget owner's start-up replay.
   If the state store also fails, the hold is in memory only until a restart.
+  The box sends under its lock, so its own forget never sees a Sending batch:
+  with the queue open, only a store refusal (which breaks the queue until the
+  next open purges) reaches the hold; the Ready-batch skip in sendReady stays
+  as a guard and is pinned directly (W5-Dc-r7).
 - Owed collection (CH-15, L3 1 on #592): a Collect error with the queue still
   reading leaves the day owed (LastDay not advanced), shows a STATUS line, and
   collects again every digestRetry (30 minutes); after a restart the owed day

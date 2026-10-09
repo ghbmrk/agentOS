@@ -77,8 +77,10 @@ func (a *Adapter) undoOne(ctx context.Context, c Change) bool {
 	m := ms[0]
 	// A flag change names the message it found; under another UID
 	// validity the folder was rebuilt since, and a same-ID message there
-	// is not shown to be the one the agent changed (SR3-5).
-	if c.To == "" && c.Validity != 0 && m.Ref() != (Ref{Folder: c.From, Validity: c.Validity, UID: c.UID}) {
+	// is not shown to be the one the agent changed (SR3-5). Evidence with
+	// no validity names no message, so it is never restored (SR3-5-f1c).
+	// A move is checked by its destination instead (ASSUMPTIONS M17).
+	if c.To == "" && (c.Validity == 0 || m.Ref() != (Ref{Folder: c.From, Validity: c.Validity, UID: c.UID})) {
 		return false
 	}
 	for _, f := range c.Added {
