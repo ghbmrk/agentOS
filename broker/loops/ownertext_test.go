@@ -328,6 +328,7 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 		{Check: CheckSeeded, Subject: "private-route", Detail: "x"},
 		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzOverrunDetail},
 		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzStallDetail},
+		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzOversizeDetail},
 	}
 	// The scan catches what it must.
 	for _, s := range []string{"sockets.FuzzRequest", "a/b", "x.go", "00112233aa", "vmName", "TestX"} {
