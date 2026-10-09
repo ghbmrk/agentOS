@@ -24,6 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/loopbuild"
@@ -606,6 +607,10 @@ func main() {
 	cfg.Recall = recallExec
 	cfg.Grants.Contained = recallExec.Contained
 	cfg.Notes = append(cfg.Notes, recallExec.Status)
+	// Approval requests follow the owner's pacing setting and spend its one
+	// hourly budget; STATUS says what the pacer holds (W5-Dc-r1b QH-8,
+	// QH-10). The channel is attached once the daemon runs.
+	pacer := newOwnerPacer(&cfg)
 	var md machineDisk
 	if runsc != "" {
 		md = openMachineDisk(diskQuota, stateDir, &cfg.Notes)
@@ -707,17 +712,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	pacer.attach(ctx, d.Owner(), dg, time.Minute)
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
 	// Deletions reach the journal's guest intents (CAP-3), when learning
 	// runs what it keeps of them (change C19, learning.ForgetTasks),
 	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
-		Notify: func(text string) error {
-			if ch := d.Owner(); ch != nil {
-				return ch.Notify(text)
-			}
-			return errors.New("no owner channel")
-		}}
+		Notify: recallNotify(d.Owner)}
 	// and every reply kept on the box (CH-20).
 	fan := forgetFan{kept: ev.kept}
 	if lp != nil {
@@ -1192,4 +1193,101 @@ func ownerVerifyErr(err error) error {
 		modelroute.VerifyLost:   owner.VerifyLost,
 	}[ve.Kind]
 	return &owner.VerifyError{Kind: kind, Until: ve.Until}
+}
+
+// recallNotify is recall's take-back notice to the owner. Each closes a
+// take-back the owner approved, so it is approval class; the texts name
+// the agent, so they keep the agent prefix (W5-Dc-r1b QH-9).
+func recallNotify(own func() *owner.Channel) func(string) error {
+	return func(text string) error {
+		if ch := own(); ch != nil {
+			return ch.NotifyAs(owner.ClassApproval, text)
+		}
+		return errors.New("no owner channel")
+	}
+}
+
+// ownerPacer is agentosd's hold on the owner channel's pacer (CH-15,
+// W5-Dc-r1b): the grants and digest hooks read its setting, the minute
+// tick releases what it holds, and STATUS says what waits. Until the
+// channel is attached it is never quiet and has no allowance, so nothing
+// paced goes.
+type ownerPacer struct {
+	ch atomic.Pointer[owner.Channel]
+}
+
+// newOwnerPacer is the pacer's part of the daemon config, set before the
+// daemon runs: the grants hooks (QH-8) and STATUS's held line (QH-10).
+func newOwnerPacer(cfg *daemon.Config) *ownerPacer {
+	p := &ownerPacer{}
+	p.wire(&cfg.Grants)
+	cfg.Notes = append(cfg.Notes, p.note)
+	return p
+}
+
+// attach binds the owner channel once the daemon runs, makes the digest
+// (nil when none is configured; call before it runs) wait for quiet hours
+// (QH-7), and starts the tick that releases held texts (QH-10).
+func (p *ownerPacer) attach(ctx context.Context, ch *owner.Channel, dg *digestBox, every time.Duration) {
+	p.ch.Store(ch)
+	if dg != nil {
+		dg.cfg.Quiet = p.quiet
+	}
+	go p.run(ctx, every)
+}
+
+// wire sets the grants pacing hooks to the owner's setting and its one
+// hourly budget (QH-8).
+func (p *ownerPacer) wire(g *grants.Config) {
+	g.Quiet = p.quiet
+	g.Urgent = func(owner.Item) bool { return p.urgent(owner.ClassApproval) }
+	g.Allowance = p.allowance
+}
+
+func (p *ownerPacer) quiet(t time.Time) bool {
+	ch := p.ch.Load()
+	return ch != nil && ch.Quiet(t)
+}
+
+func (p *ownerPacer) urgent(class owner.Class) bool {
+	ch := p.ch.Load()
+	return ch != nil && ch.Urgent(class)
+}
+
+func (p *ownerPacer) allowance(t time.Time) int {
+	if ch := p.ch.Load(); ch != nil {
+		return ch.Allowance(t)
+	}
+	return 0
+}
+
+// note is STATUS's held line (QH-10).
+func (p *ownerPacer) note() string {
+	if ch := p.ch.Load(); ch != nil {
+		return ch.HeldNote()
+	}
+	return ""
+}
+
+// tick releases held texts that may go now (QH-10).
+func (p *ownerPacer) tick() {
+	if ch := p.ch.Load(); ch != nil {
+		if err := ch.Release(); err != nil {
+			log.Printf("owner: held texts not sent: %v", err)
+		}
+	}
+}
+
+// run ticks every interval until ctx ends.
+func (p *ownerPacer) run(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.tick()
+		}
+	}
 }

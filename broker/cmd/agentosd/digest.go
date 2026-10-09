@@ -88,11 +88,16 @@ type digestConfig struct {
 	// Sources are DIG-1's, beside the box's day and digest-status ones.
 	Sources   map[string]digestqueue.Source
 	Transport digestqueue.Transport
-	// Inform sends the outage line; nothing else (sendOutage).
+	// Inform sends the outage line; nothing else (sendOutage). The owner
+	// channel paces it as an update (W5-Dc-r1b QH-7).
 	Inform func(string) error
-	Now    func() time.Time
-	Loc    *time.Location
-	Logf   func(string, ...any)
+	// Quiet reports the owner's quiet hours: a digest due in them waits,
+	// Ready, for the first step after they end (W5-Dc-r1b QH-7). The
+	// digest never reads the hourly allowance (SG-r1-6). Nil: never quiet.
+	Quiet func(time.Time) bool
+	Now   func() time.Time
+	Loc   *time.Location
+	Logf  func(string, ...any)
 	// Forgotten lists the tombstoned goals; every open asks the queue to
 	// forget each before any send (W5-Dc-r12).
 	Forgotten func() []string
@@ -130,6 +135,9 @@ type digestBox struct {
 	day       uint64
 	outageDay uint64
 	lastTry   time.Time
+	// quietWait: the last sendReady found quiet hours, so the first step
+	// after they end sends (W5-Dc-r1b QH-7).
+	quietWait bool
 	// forgets are the references whose forget the queue has not done
 	// (not open, or refused in flight): open purges them before anything
 	// is sent, and no batch holding one is sent (CAP-3, security B2 on
@@ -331,7 +339,7 @@ func (d *digestBox) step(ctx context.Context, now time.Time) {
 	case today > d.st.LastDay && !now.Before(d.digestAt(today)) && (!d.owing.Load() || now.Sub(d.lastTry) >= digestRetry):
 		d.lastTry = now
 		d.daily(ctx, now, today)
-	case now.Sub(d.lastTry) >= digestRetry:
+	case now.Sub(d.lastTry) >= digestRetry || d.quietWait && !d.quiet(now):
 		d.lastTry = now
 		if d.q == nil {
 			if err := d.openLocked(ctx); err != nil {
@@ -435,8 +443,18 @@ func (d *digestBox) sendOutage() {
 	}
 }
 
-// sendReady sends each batch the queue would begin, oldest first.
+// quiet reports whether now is in the owner's quiet hours.
+func (d *digestBox) quiet(now time.Time) bool {
+	return d.cfg.Quiet != nil && d.cfg.Quiet(now)
+}
+
+// sendReady sends each batch the queue would begin, oldest first. In
+// quiet hours it sends none; they stay Ready and the first step after
+// quiet hours sends them.
 func (d *digestBox) sendReady(ctx context.Context, now time.Time) {
+	if d.quietWait = d.quiet(now); d.quietWait {
+		return
+	}
 	bs, err := d.q.List()
 	if err != nil {
 		d.broken(err)
