@@ -209,6 +209,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | OP9-status l2 | L3 on #416: give held-back fields values distinct from the finding's free text |
 | SR3-1 f1 | Builder on SR3-1: page deny (`LocalAnswer`), follow and ask-resume check the lock count at the token check only, not where they commit; deny only narrows and the other two only open a request that needs a code, so the race gains no authority |
 | SR3-1 f2 | Builder on SR3-1: a sign-in overlapped by a lock still returns a token, dead on first use; answering with a refusal instead would save the page one round trip |
+| W3-forget-b1-7 a | A held box serves no local page (localui.sock), so the page shows nothing while a restore is held; the owner learns of it by text only (broker/cmd/agentosd ASSUMPTIONS H1) |
 
 ## Reuse candidates
 | ID | Component | Why |
