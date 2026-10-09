@@ -78,6 +78,15 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | SR3-5-f3 | mail: `Reconcile`'s alert clause (`!(pinned && pn.alert)`) is untested (lens mutant M3 survives). M1 and M6 are killed in #579 by the same-ID alert twin route (`TestExecuteDoesNotHideAnAlertTheRecheckPassed`, `TestJudgementsMustAgreeOnTheAlert`); that route does not reach `Reconcile`, whose re-plan cannot find the moved copy under the hint and finds the twin ambiguous without it. Needs a pinned non-alert attempt that `Reconcile` finds hiding an alert on the same `Ref`, e.g. a changed contact set; brief to write (release, tier A; lens on #579, release 1; delta L3 on #579 point 2) | SR3-5-f1 | queued (release; needs brief) |
 | SR3-5-f4 | mail: `errChanged` ("changed since approval") is reported where nothing changed (an `Execute` with no pin, a `Reconcile` `Unknown` after a restart, a `movedFrom` failure): give each its own fixed reason words (CH-19); brief to write (release, tier A; lens on #579, release 2) | SR3-5-f1 | queued (release; needs brief) |
 
+## Local devices (D-069)
+
+The home-network boundary is release work (A14); device features follow the first release (LATER.md, A16).
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| DEV-net-a | [Home-network address policy and egress proxy](briefs/DEV-net-a.md) | P1-3, D-069 spec diff merged | queued (release; tier A) |
+| DEV-net-b | [Home-network boundary on the remaining dialers and inbound](briefs/DEV-net-b.md) | DEV-net-a | queued (release; tier A) |
+
 ## Phase 0: harness and risk spikes
 
 | ID | Package | Needs | State |
