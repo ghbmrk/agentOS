@@ -1,0 +1,8 @@
+[Unit]
+Description=Reboot into the next boot try after a failed health check
+Documentation=file:/usr/lib/agentos/fallback
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/agentos/fallback
+StandardOutput=journal+console

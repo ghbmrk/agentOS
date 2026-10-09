@@ -17,16 +17,17 @@ import (
 // "never". agentosd reads and answers it here without importing recovery
 // (the vault process's alone); recovery/testdata/confirm-v1.json pins the
 // format for both sides. The texts hold dates only, never what was
-// forgotten. Sending them while agentosd is held, and starting once
-// released, is the held mode's wiring (b1-7).
+// forgotten. held.go sends them while agentosd is held, and starts it once
+// released (W3-forget-b1-7).
 const (
-	heldUnanchored = "Restore on hold: this new PC can't check your forget list."
+	heldUnanchored = "Restore on hold: this PC can't check your forget list."
 	heldMissing    = "Restore on hold: this backup was made before your agent kept a forget list."
 	heldAsk        = "When did you last have your agent forget something?"
 	heldLater      = "Later than all of these"
 	heldNever      = "Never"
 	heldWrong      = "Restore stays on hold: this backup is older than your last forget, so it could bring back what you had forgotten."
 	heldNoNewer    = "Restore a newer backup, or from your old drive, instead."
+	heldRetry      = "If you picked by mistake, restore this backup again to answer again."
 	heldReleased   = "Restore confirmed. Your agent starts again shortly."
 	heldDateFmt    = "2 Jan 2006"
 )
@@ -140,9 +141,11 @@ func askText(q heldQuestion) string {
 }
 
 // wrongText tells the owner the restore stays held, and offers the newest
-// newer backup the restore found, if any (D-071).
+// newer backup the restore found, if any (D-071). With none, it names how
+// to answer again: restoring this backup writes its question afresh
+// (recovery writeQuestion), the same dates and an open question (#436 UX).
 func wrongText(q heldQuestion) string {
-	next := heldNoNewer
+	next := heldNoNewer + " " + heldRetry
 	if len(q.Newer) > 0 {
 		b := q.Newer[0]
 		next = "Restore your newer backup from " + b.Created.Local().Format(heldDateFmt) + " on " + plainName(b.Destination) + " instead."
