@@ -252,6 +252,16 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-1-envkey | `broker/change/env_test.go`: `newEnv`'s pinned key is a single `bytes.Reader`, so a second fresh-state pipeline opened with the same cfg would hit EOF. No test does this today (Potency on #491) |
 | P3-4b-2b-held | Fix-input audit (Security #500 1): a held array/object value leaked alone in non-canonical layout passes the audit; H-4's wording needs updating |
 | P3-4b-2b-ctrl | A11 leaking-adapter control (Security #500 2): accepts any audit hit, not only a `held/` hit |
+| SR2-3q f1 | Security 4a on #463 (fail-open drift): `notRun` reads urpc's `urpc method %q failed` text to tell a lost ExecuteAsync reply from a pre-start error; if a runsc upgrade rewords it, that reply reads as NotStarted ("retry it") and CI stays green because the fixture copies the text. When the runsc pin next changes, add a check against the format string at the pinned tag |
+| W3-forget-b1-7 d | L3 re-review of #487, point 1: a request `sockets.serve` reads just as the server stops can lose the race for the connection mutex; `handle` still runs the handler with a cancelled ctx, so its effect happens with no reply. Skip the request when `ctx.Err() != nil` |
+| W3-forget-b1-7 e | UX 2 and Potency 1 on #487 (CH-12, C3): the held box texts once per start and then only answers; send a reminder after a day |
+| W3-forget-b1-7 f | UX 3 on #487 (CH-2, CH-11): STOP and STATUS get the held question back, which does not say the agent is stopped; prefix "Your agent is stopped." |
+| W3-forget-b1-7 g | UX 4 on #487 (wording): "restore this backup again to answer again" says "again" twice |
+| W3-forget-b1-7 h | UX 5 on #487 (lens README): the CH-12 held-text check only matches phrasings in `heldSteps`; say so in the reviews/ux/README.md row |
+| SR2-3n f2 | UX 1 on #466 (CAP-8): when the guest's stderr is still held open past `ExecWaitDelay`, the read deadline cuts it and the result says `truncated: false`; set the flag when the copy ends on the deadline (pair with SR2-3n f1) |
+| SR2-3n f3 | Security 4a on #466: on a normal result, anything runsc wrote to its own stderr is discarded rather than logged; nothing leaks, only diagnostics are lost |
+| W3-forget-b3r l2 | L3 accept on #481, point 1: the `forget.go` comment at :224 cites CH-21 for the unlock rule; the cite is CH-3 (CH-21 is "Name and voice"). Fix it when a build touches that file |
+| W3-forget-b3r l3 | L3 accept on #481, point 2: the BOARD `W3-forget-b3` row says "in review (#425)" although #425 is merged; the coordinator corrects it |
 
 ## Reuse candidates
 | ID | Component | Why |
