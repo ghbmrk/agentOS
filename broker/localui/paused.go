@@ -28,7 +28,7 @@ type pausedGrantView struct {
 	Odd                      bool
 }
 
-const pausedUnreachable = "The box isn't answering right now. Nothing was asked. Reload to try again."
+const pausedUnreachable = "I can't answer right now. Nothing was asked. Reload to try again."
 
 // paused serves the Paused page behind sign-in (CH-7).
 func (s *Server) paused(w http.ResponseWriter, r *http.Request) {

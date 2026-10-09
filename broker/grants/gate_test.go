@@ -599,7 +599,7 @@ func TestRecipientsThatCannotBeShownAreAskedOnThePage(t *testing.T) {
 	if len(local) != 1 || local[0].Ref != bad.Intent.ID {
 		t.Fatalf("asked on the page: %+v", local)
 	}
-	if st := r.state(bad.Intent.ID); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the box's Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id" {
+	if st := r.state(bad.Intent.ID); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the local Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id" {
 		t.Fatalf("page item: %s %q", st.State, st.Permission.Reason)
 	}
 	if st := r.state(ok.Intent.ID); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval" {
@@ -716,7 +716,7 @@ func TestPageRequestsInOneFlushAreAskedTogether(t *testing.T) {
 		t.Fatalf("%d calls, local %v", calls, local)
 	}
 	for _, id := range []string{a.Intent.ID, b.Intent.ID} {
-		if st := r.state(id); st.State != journal.Pending || !strings.HasPrefix(st.Permission.Reason, "waiting for the owner's approval on the box's Wi-Fi page;") {
+		if st := r.state(id); st.State != journal.Pending || !strings.HasPrefix(st.Permission.Reason, "waiting for the owner's approval on the local Wi-Fi page;") {
 			t.Fatalf("%s: %s %q", id, st.State, st.Permission.Reason)
 		}
 	}
