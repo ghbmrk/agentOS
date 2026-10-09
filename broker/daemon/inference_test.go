@@ -82,9 +82,11 @@ var netOK = map[string]allowance{
 			"syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Stat_t", "syscall.Ucred"}},
 	"guest":      {"the guest plane's unix listeners", []string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener"}},
 	"modelroute": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
-	"loopbuild":  {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
-	"journal":    {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
-	"update":     {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
+	// The owner's mail account's client (SR3-mail-w2), as modelroute.
+	"mail/mailsock": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer"}},
+	"loopbuild":     {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
+	"journal":       {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
+	"update":        {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
 	// Recall (CAP-3, #59): one broker per index, as for the journal.
 	"recall": {"flock on the recall store", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
 	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, the FICLONE ioctl for copies, and handle-relative deletion in a stopped worker's layer (CAP-8c), and directory handles to measure a layer past the path limit",
@@ -170,8 +172,14 @@ var socketPkgs = map[string]bool{
 	"log/syslog": true, "syscall": true, "golang.org/x/sys/unix": true,
 }
 
+// unixDialers are the packages whose client types may be built, as
+// composite literals that set their own non-nil transport or dialer
+// (clientTypes), each dial on "unix" to a configured address: modelroute
+// and the mail socket's client (SR3-mail-w2), both to the vault process.
+var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true}
+
 // clients are the names that hold or open a connection, by package. In
-// modelroute the types are allowed only as composite literals that set
+// unixDialers the types are allowed only as composite literals that set
 // their own non-nil transport or dialer (clientTypes).
 var clients = map[string]map[string]bool{
 	"net/http":          {"Client": true, "DefaultClient": true, "DefaultTransport": true, "Transport": true, "Get": true, "Head": true, "Post": true, "PostForm": true},
@@ -379,13 +387,13 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			if key != "" && !setsChecked(n, key, sel, transports) {
 				at(n, full+" without its own "+key)
 			}
-			if rel == "modelroute" {
+			if unixDialers[rel] {
 				literalType[n.Type] = true
 			}
 		case *ast.StarExpr:
 			// A pointer type (a field holding a built client) has no
 			// value of its own but nil or a checked literal's.
-			if _, isClient := clientTypes[sel(n.X)]; isClient && rel == "modelroute" {
+			if _, isClient := clientTypes[sel(n.X)]; isClient && unixDialers[rel] {
 				literalType[n.X] = true
 			}
 		case *ast.CallExpr:
@@ -555,6 +563,9 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", src(`"net"`, `var sock = "/run/proxy.sock"; var c, _ = (&net.Dialer{}).Dial("unix", sock)`)},
 		{"modelroute", src(`"net"`, `func g() { (&net.Dialer{}).Dial("unix", otherFileSock) }`)},
 		{"modelroute", src(`"net"; "os"`, `func g() { (&net.Dialer{}).Dial("unix", os.DevNull) }`)},
+		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "tcp", "imap.example.com:993") }`)},
+		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "unix", "/run/agentos-egress/mail.sock") }`)},
+		{"mail/mailsock", src(`"net"`, `var c, _ = net.Dial("tcp", "smtp.example.com:465")`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {
@@ -577,6 +588,17 @@ func g(sock string, cfg config) {
 	}
 	if got := sourceUse(t, path, "ok.go", "modelroute"); len(got) != 0 {
 		t.Errorf("modelroute's unix dial flagged: %q", got)
+	}
+	mailsock := src(`"context"; "net"`, `type client struct{ path string }
+func (c *client) do(ctx context.Context) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, "unix", c.path)
+}`)
+	path = filepath.Join(t.TempDir(), "mailsock.go")
+	if err := os.WriteFile(path, []byte(mailsock), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := sourceUse(t, path, "mailsock.go", "mail/mailsock"); len(got) != 0 {
+		t.Errorf("mailsock's unix dial flagged: %q", got)
 	}
 	// Imports: RPC, mail, raw sockets, and escape hatches.
 	reach := httpReach([]listed{{path: "net/rpc", imports: []string{"net/http"}}, {path: "net/http"}})
