@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/big"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,17 +45,57 @@ type TamperTarget struct {
 // TamperProbe has a guest try to write each target where it might reach
 // it, then checks broker-side that no target changed. Attempt runs the
 // guest's scripted writes with the round's nonce as their marker and
-// returns the machine that ran them; Journal records one refusal per
-// unchanged target.
+// returns the machine that ran them, which must be a fresh one each round
+// (P3-4b-4c-fresh); Journal records one refusal per unchanged target.
+//
+// Control is the round's positive control (P3-4b-4c-fresh): a broker-made
+// directory the wiring mounts writable into the probe machine. Its paths
+// go to the guest mixed in with the targets', and it must change every
+// round, so a guest that skips its writes fails the round instead of
+// closing findings. Its Name is unused; it is never checked, journaled or
+// reported.
+//
+// Quiesce, when set, holds the broker's own writers of the targets (such
+// as checkpoints into snapshots) from the first digest to the last, so a
+// broker write is never taken for a guest's (P3-4b-4c-attrib).
 type TamperProbe struct {
 	Interval time.Duration
 	Targets  []TamperTarget
+	Control  TamperTarget
 	Attempt  func(ctx context.Context, nonce string, paths []string) (machine string, err error)
 	Journal  func(machine, target string) error
+	Quiesce  func(ctx context.Context) (resume func(), err error)
+
+	last lastMachine
 }
 
 func (p *TamperProbe) Check() Check         { return CheckTamper }
 func (p *TamperProbe) Every() time.Duration { return p.Interval }
+
+// lastMachine holds the machine a probe's previous round ran in, so a
+// round in the same machine fails: a round must start from the signed
+// image, not from what an earlier round's guest left (P3-4b-4c-fresh).
+// Producing the fresh machine is the wiring's job; this holds it to it.
+type lastMachine struct {
+	mu sync.Mutex
+	id string
+}
+
+// fresh records id as this round's machine and fails if it names no
+// machine or the previous round's.
+func (l *lastMachine) fresh(id string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if id == "" {
+		return errors.New("no machine named")
+	}
+	prev := l.id
+	l.id = id
+	if id == prev {
+		return errors.New("same machine as the last round")
+	}
+	return nil
+}
 
 // tamperRoots are where a guest might reach a host path: as named, and
 // through a process root link that escapes a chroot.
@@ -71,56 +114,122 @@ func newTamperNonce() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// Run digests every target, has the guest try them, and digests again. A
-// changed target is a High finding; an unchanged one is a journaled
-// refusal. A missing target, a failed attempt or a refusal the journal
-// does not take fails the run.
+// tamperPaths are the paths a guest tries for t.
+func tamperPaths(t TamperTarget) ([]string, error) {
+	var paths []string
+	for _, r := range tamperRoots {
+		paths = append(paths, r+filepath.Clean(t.Path))
+	}
+	for _, g := range t.Guest {
+		if !filepath.IsAbs(g) {
+			return nil, errors.New("bad guest path")
+		}
+		paths = append(paths, filepath.Clean(g))
+	}
+	return paths, nil
+}
+
+// shuffle puts paths in an order drawn from crypto/rand, so the guest
+// cannot tell the control's from the targets' by position.
+func shuffle(paths []string) error {
+	for i := len(paths) - 1; i > 0; i-- {
+		j, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
+		if err != nil {
+			return err
+		}
+		paths[i], paths[j.Int64()] = paths[j.Int64()], paths[i]
+	}
+	return nil
+}
+
+// Run holds the broker's writers, digests every target and the control,
+// has a fresh machine's guest try them, and digests again. A changed
+// target is a High finding; an unchanged one is a journaled refusal. An
+// unchanged control, a reused machine, a missing target, a failed attempt
+// or quiesce, or a refusal the journal does not take fails the run, which
+// then closes nothing. The siblings the guest's writes left are removed.
 func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
-	if len(p.Targets) == 0 || p.Attempt == nil || p.Journal == nil {
+	if len(p.Targets) == 0 || p.Attempt == nil || p.Journal == nil || !filepath.IsAbs(p.Control.Path) {
 		return ProbeResult{}, errors.New("tamper probe: not configured")
 	}
-	before := make([][]byte, len(p.Targets))
 	var paths []string
 	for i, t := range p.Targets {
 		if !ownerWord.MatchString(t.Name) || !filepath.IsAbs(t.Path) {
 			return ProbeResult{}, fmt.Errorf("tamper probe: bad target %d", i)
 		}
-		d, err := treeDigest(t.Path)
+		tp, err := tamperPaths(t)
+		if err != nil {
+			return ProbeResult{}, fmt.Errorf("tamper probe: %s: %w", t.Name, err)
+		}
+		paths = append(paths, tp...)
+	}
+	cp, err := tamperPaths(p.Control)
+	if err != nil {
+		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
+	}
+	paths = append(paths, cp...)
+	if err := shuffle(paths); err != nil {
+		return ProbeResult{}, fmt.Errorf("tamper probe: order: %w", err)
+	}
+	if p.Quiesce != nil {
+		resume, err := p.Quiesce(ctx)
+		if err != nil {
+			return ProbeResult{}, fmt.Errorf("tamper probe: quiesce: %w", err)
+		}
+		if resume != nil {
+			defer resume()
+		}
+	}
+	before := make([][]byte, len(p.Targets))
+	for i, t := range p.Targets {
+		d, err := targetDigest(t.Path)
 		if err != nil {
 			return ProbeResult{}, fmt.Errorf("tamper probe: target %s: %w", t.Name, err)
 		}
 		before[i] = d
-		for _, r := range tamperRoots {
-			paths = append(paths, r+filepath.Clean(t.Path))
-		}
-		for _, g := range t.Guest {
-			if !filepath.IsAbs(g) {
-				return ProbeResult{}, fmt.Errorf("tamper probe: bad guest path for %s", t.Name)
-			}
-			paths = append(paths, filepath.Clean(g))
-		}
+	}
+	control, err := targetDigest(p.Control.Path)
+	if err != nil {
+		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
 	}
 	nonce, err := newTamperNonce()
 	if err != nil {
 		return ProbeResult{}, fmt.Errorf("tamper probe: nonce: %w", err)
 	}
+	defer p.removeSiblings(nonce)
 	machine, err := p.Attempt(ctx, nonce, paths)
+	fresh := p.last.fresh(machine)
 	if err != nil {
 		return ProbeResult{}, fmt.Errorf("tamper probe: attempt: %w", err)
+	}
+	if fresh != nil {
+		return ProbeResult{}, fmt.Errorf("tamper probe: %w", fresh)
 	}
 	if err := ctx.Err(); err != nil {
 		return ProbeResult{}, err
 	}
-	var res ProbeResult
+	switch d, err := targetDigest(p.Control.Path); {
+	case errors.Is(err, fs.ErrNotExist):
+		// Removed from inside the machine is changed.
+	case err != nil:
+		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
+	case string(d) == string(control):
+		return ProbeResult{}, errors.New("tamper probe: the control did not change: the guest's writes did not run")
+	}
+	after := make([][]byte, len(p.Targets))
 	for i, t := range p.Targets {
-		d, err := treeDigest(t.Path)
+		d, err := targetDigest(t.Path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			// Removed from inside the machine is changed.
 		case err != nil:
 			return ProbeResult{}, fmt.Errorf("tamper probe: target %s: %w", t.Name, err)
 		}
-		if err == nil && string(d) == string(before[i]) {
+		after[i] = d
+	}
+	var res ProbeResult
+	for i, t := range p.Targets {
+		if after[i] != nil && string(after[i]) == string(before[i]) {
 			if err := p.Journal(machine, t.Name); err != nil {
 				return ProbeResult{}, fmt.Errorf("tamper probe: journal %s: %w", t.Name, err)
 			}
@@ -130,6 +239,53 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 		res.Checked = append(res.Checked, t.Name)
 	}
 	return res, nil
+}
+
+// targetDigest is treeDigest of path and, for anything but a directory,
+// the tamper-sibling names in its parent directory, so a sibling the
+// guest's write created beside a file target is a change
+// (P3-4b-4c-restore). Other names there are left out: the broker may
+// write beside a target it does not hold (#584 L3 1), and a replaced
+// target still changes treeDigest.
+func targetDigest(path string) ([]byte, error) {
+	d, err := treeDigest(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		return d, nil
+	}
+	ents, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	h := sha256.New()
+	h.Write(d)
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), tamperSibling("")) {
+			fmt.Fprintf(h, "%q\n", e.Name())
+		}
+	}
+	return h.Sum(nil), nil
+}
+
+// tamperSibling is the file the guest's fixed script creates for a round
+// (machprobe.Sibling; a test holds the two equal). loops does not import
+// machprobe: the control path links no process-starting code (ARC-2).
+func tamperSibling(nonce string) string { return ".agentos-tamper-" + nonce }
+
+// removeSiblings removes the files the round's guest writes may have left
+// beside or inside each target and the control. A target the guest
+// reached may still need restoring from a broker copy if something other
+// than the fixed script wrote it (loops S33).
+func (p *TamperProbe) removeSiblings(nonce string) {
+	for _, t := range append(slices.Clone(p.Targets), p.Control) {
+		dir := filepath.Dir(t.Path)
+		if fi, err := os.Stat(t.Path); err == nil && fi.IsDir() {
+			dir = t.Path
+		}
+		os.Remove(filepath.Join(dir, tamperSibling(nonce)))
+	}
 }
 
 // treeDigest hashes a file or directory tree: names, types, modes and

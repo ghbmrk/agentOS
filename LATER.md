@@ -73,6 +73,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5c | A12 | Clean-room builder in the scheduler |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
+| P3-4b-4c-dedupe | A1 (owner texts; UX on #589 classed it release under §2's stricter rule, for Mark to demote to later if no acceptance test needs it) | `Guard.batch` and the digest repeat one identical line per corpus item, so a weakened check gives the owner ten identical lines |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
@@ -244,6 +245,11 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-8 l1 | L3 re-review on #432, point 1: once `CR-quarantine-prune` is on main, add to it that any pruning of `.quarantine` must keep the per-artifact loss count (e.g. a count file), since C14's `maxRepairs` bound is counted from the copies; fold this line into that row |
 | SR3-8 l2 | L3 re-review on #432, point 2: a job stopped by the repair bound is logged `failed: no result within the allowed attempts`; only the log line says its output was lost repeatedly. Text only |
 | SR3-8 l3 | L3 re-review on #432, point 3: no test pins the `<id>-<12 hex>` name check in `Store.losses`; a bare prefix match passes every test. Unreachable today (fixed-length broker-written IDs) |
+| SR3-8-f l1 | L3 3 on #578: `New`'s `errBadID` branch is unreachable and untested (kept as defence in depth); in `park` a new `parked/` is not synced into `cfg.Dir`, and source-directory sync errors in `finish`/`park` are ignored. Both predate #578 |
+| SR3-8-f l2 | L3 4 on #578: `Get` follows a symlinked name inside the store; exploiting it needs store write access. Likewise `quarantine` follows an in-root symlink: with `.quarantine -> b` (another artifact directory) the rename lands in `b/`; same precondition (L3 6079915313) |
+| SR3-8-f l3 | Security 4 on #578: the seam's source check matches only `Sync`; add `syscall.Fsync`, `unix.Fsync` and `Fdatasync` to `allowed` if the package ever imports them |
+| SR3-8-f l4 | L3 6079535268 point 3 on #578: `syncHit` matches only a literal op string, so a const op or a direct `s.fault` call slips past the AST check; the recorder tests carry the guarantee |
+| SR3-8-f l5 | L3 6079915313 on #578: after the rename, `dirSync(q)` opens `.quarantine` by path, not through the root; durability only, the rename itself stays confined |
 | W3-forget-b1-4 l1 | L3 on #436: `broker/change` TestRouterCandidateAdoptsThroughPipeline flakes (~2/10k; random split key); fix is a seeded Rand, proposed on #436 |
 | W3-forget-b1-4 l2 | #436: decoy dates may fall before box setup or enrolment |
 | W3-forget-b1-4 l3 | #436: "Never" wording for owners whose forgets predate the log |
@@ -406,12 +412,20 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4d l5 | Potency on #556: the label route's stall under a permissive `labelClass` is bounded at 30 s but its cause (imapsmtp SetFlags) is undiagnosed |
 | P3-4b-4d l6 | L3 on #556: a production `Relay` should report a route timeout as its own error class, not as a generic route failure; P3-4b-4c |
 | P3-4b-4d l7 | L3 on #556: no test pins the `ok` check in the rig's `requested()` (relaxing it survives, since every replayed want is non-empty); add a guest that omits the key if a test needs it |
-| P3-4b-4d l8 | L3 on #556: one over-long vendored corpus item fails every code-filter run (S45); P3-4b-4c decides whether to exclude it at vendoring or report it as its own finding |
+| P3-4b-4c-corpus l1 | UX on #589: the corpus finding text ("My self-test of the code filter failed: …Nothing real was exposed.") gives no next step; add the fuzz and probe lines' "The fix comes with an update." |
+| P3-4b-4c-corpus l2 | UX on #589: the `ProbeFailed` STATUS line ("Loop 2: partial (not run: attack-text tests, failed).") says neither why nor what to do; say the tests did not run, nothing is needed, and when they retry, if that is the true behaviour |
+| P3-4b-4c-corpus l3 | UX on #589: only 2 of the 4 closed checks run in agentosd (agentosd LC-2), and a clean day shows nothing, which can read as "all attack-text tests ran"; say what is not run, for example through `cfg.NotRun`, as for the other unwired probes |
+| P3-4b-4c-corpus l4 | UX and L3 on #589: `tests/test_corpus.py`'s controls only compared the renderer's output to a mutated input; fixed in #589 (the controls now mutate a file and run the real assertion), recorded so the finding is counted |
+| P3-4b-4c-corpus l5 | Potency on #589: a package that links a new package into agentosd needs `broker/daemon/arc2_test.go` in its brief's declared scope; add it to the brief template |
 | P3-4b-4b l4 | L3 5 and UX 2 on #548: the `cpu` finding reads "found no cpu limit" when the finding is "machine weight >= broker weight" (suggested: "an agent machine can take as much CPU as I can"); "I answered slower than my target" and "I stopped an agent machine slower than my target" give no consequence; one wording pass |
 | P3-4b-4b l5 | L3 6 on #548: S34 should say a journal line means "unchanged after attempt", not "refused", since entries rest on the guest having tried |
 | P3-4b-4b l6 | Security 4a and L3 deltas on #548: each round leaves one more `.agentos-tamper-<nonce>` marker file in a directory target that stays writable; bounded by rounds x targets while a High finding is open; cleanup is the owner's remediation |
 | P3-4b-4b l7 | L3 delta on #548: `loops.tamperNonce` (regexp) in `machine.go` is used only by tests; move it to the test file or use it to check `newTamperNonce`'s output |
 | P3-4b-4b l8 | Security 4a delta 1 on #548 (predates the fix; covered by release row P3-4b-4c-fresh): a probe guest that skips its scripted writes still closes an open tamper finding; if the probe image is ever shared with agent code, closing must need a broker-side write check (a canary the broker plants and verifies through the same mount) |
+| P3-4b-4c-tamper l1 | UX 1 on #584: a failed probe round reads "tamper tests, failed" with no cause (control unchanged, reused machine, quiesce); give `NotRun`/`ProbeFailed` a plain cause string as `cfg.NotRun` has |
+| P3-4b-4c-tamper l2 | UX 2 on #584: STATUS lines are third person ("Loop 2: ...") across loops; existing wording |
+| P3-4b-4c-tamper l3 | L3 4 on #584: `removeSiblings` ignores errors and `os.Stat`s through a symlink to choose the directory; log failed removals and use `Lstat` |
+| P3-4b-4c-tamper l4 | L3 5 and Potency 3 on #584: the gVisor test's control is the machine's whole upper layer; P3-4b-4c's wiring test should use a dedicated control mount and pin sibling removal |
 | SR3-5-f1 l1 | Delta L3 on #571 (comment 6078264771): a pin is never cleared for an intent that is denied or never dispatched; pins live in memory, so a restart drops them |
 | P3-4b-3r-pass l1 | L3 point 2 on #585: a check in `NotRun` (its `Box` input nil) still closes its open findings in `Pass` and now texts "Cleared"; not live while `GuardConfig` sets no `Box` (learn.go), one line to add `notes` to `broke` when it does |
 | P3-4b-3r-pass l2 | L3 point 3 on #585: loop7 `stepped` counts a step that only replayed a standing crash or reported an overrun as progress, so a box whose every target has an open finding never shows "have not run"; count only a step where the engine ran (F14) |
@@ -420,6 +434,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-2-f-started-wording | With 1 queued and 1 started under `PerDay: 2` the owner sees `1 earlier send still queued`, not the bound; consider a form such as `1 of 2 today still queued` (UX lens on #581, comment 6078894198) |
 | SR3-2-f-max-rule | The queued count is the maximum over the failed rules, not the rule the owner would widen; differs only with several bound rules on one action (UX lens on #581, comment 6078894198) |
 | SR3-2-f-maxnoted | No test pins the `maxNoted` (1000) boundary where a restart closes the ask as changed; add one with 1001 queued or a lowered constant. A second shown-only fact goes into a separate `owner.Item` field (GR33), not `Detail` (Potency lens on #581, comment 6078894198) |
+| SR3-6f-1 l1 | `TestOwnerNarrowingSurvivesTheNextCheck`'s `r.p.proposed()[1:]` loop may check nothing, because version 2 was already proposed; the `old.Security()` assertion carries the test. Tighten it when the file is next touched (L3 on #595, comment 6080096018, point 3) |
+| SR3-6f-1 l2 | The `attestors` failure line gives the owner no step or time, and it sits above the pending-approval lines in `statusLocked`, so a security fix waiting for approval is not shown while the read fails; unlike a mirror failure it can persist. Revisit when W5b adds the settings page (UX and Potency lens on #595, comment 6080136904, point 3) |
+| SR3-6f-1 l3 | Make "trusted testers" (the `attestors` failure line) and "attestor" (`forkAsks`) match the label the settings page uses once W5b names it; `ownertext_test.go` covers only the finding texts (UX and Potency lens on #595, comment 6080136904, point 4) |
 
 ## Reuse candidates
 | ID | Component | Why |
