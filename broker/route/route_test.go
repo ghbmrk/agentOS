@@ -429,14 +429,14 @@ func TestDefaultNoProviderForPrivateData(t *testing.T) {
 func TestSkipsRouteThatCannotExpressTheCall(t *testing.T) {
 	r := newRig(t, rigOpts{})
 	r.up.set(hostOpenAI, serveFixture(200, "application/json", fixture(t, "openai_completion.json")))
-	w := r.do(t, "m1", `{"model":"default","n":2,"messages":[{"role":"user","content":"hi"}]}`)
+	w := r.do(t, "m1", `{"model":"default","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"hi"}]}`)
 	if w.Code != 200 || r.up.count(hostAnthropic) != 0 || r.up.count(hostOpenAI) != 1 {
 		t.Fatalf("%d anthropic=%d openai=%d", w.Code, r.up.count(hostAnthropic), r.up.count(hostOpenAI))
 	}
 	// With only the route that cannot express it, the guest is told why.
 	r2 := newRig(t, rigOpts{rule: Rule{"default": {{Provider: "anthropic", Model: "claude-fixture"}}}})
-	w = r2.do(t, "m1", `{"model":"default","n":2,"messages":[{"role":"user","content":"hi"}]}`)
-	if w.Code != 400 || !strings.Contains(w.Body.String(), "n other than 1") {
+	w = r2.do(t, "m1", `{"model":"default","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "response_format json_object") {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 }
@@ -956,9 +956,10 @@ func TestADP10DenialReasonClassIsFixed(t *testing.T) {
 		},
 		{
 			// No permitted route supports the request: m2's only route
-			// is Anthropic, which takes one choice and text system content.
+			// is Anthropic, which takes no structured response format and
+			// text system content only.
 			"m2",
-			`{"model":"default","n":7,"messages":[{"role":"user","content":"hi"}]}`,
+			`{"model":"default","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"hi"}]}`,
 			`{"model":"default","messages":[{"role":"system","content":[{"type":"image_url","image_url":{"url":"https://x.example/a"}}]},{"role":"user","content":"hi"}]}`,
 		},
 	} {

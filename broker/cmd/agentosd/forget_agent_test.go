@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -193,8 +192,8 @@ func TestForgetItem2RunsOnlyWithItem1(t *testing.T) {
 
 // #327 L3 1, 2: item 2 never repeats its take-back. One that fails after
 // recall recorded it owed is left to recall's Retry, which tells the owner
-// when it is done; one that fails before, nothing carries, so the owner
-// is told plainly.
+// when it is done; one that fails before is carried by the forget
+// (forget_owed_test.go, W3-forget-b2c).
 func TestForgetItem2LeavesAFailedTakeBackToRecall(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -203,8 +202,6 @@ func TestForgetItem2LeavesAFailedTakeBackToRecall(t *testing.T) {
 		text string
 	}{
 		{"owed", fmt.Errorf("%w: machine busy", recalltool.ErrCarried), journal.ResultSucceeded, forgetAgentNotYet},
-		{"not recorded", errors.New("disk full"), journal.ResultNotApplied, forgetAgentNotTaken},
-		{"recall not open", recalltool.ErrNotOpen, journal.ResultNotApplied, forgetAgentNotOpen},
 	} {
 		r := newForgetRig(t)
 		w := &fakeWork{worked: true, ok: true, err: c.err}
@@ -399,7 +396,8 @@ func TestForgetItem2NeverOffersAFruitlessForget(t *testing.T) {
 // #327 L3 B-3 (CH-12): an approved item 2 that finds memory not open yet
 // (a request re-issued after a restart, answered before the vault is
 // unlocked) is taken back once recall opens, and the owner is told so;
-// with recall off it cannot be, and the owner is told that.
+// with recall off it is owed to a later boot (W3-forget-b2c), and the
+// owner is told that.
 func TestForgetItem2WaitsForMemoryToOpen(t *testing.T) {
 	for _, off := range []bool{false, true} {
 		r := newForgetRig(t)
@@ -416,7 +414,7 @@ func TestForgetItem2WaitsForMemoryToOpen(t *testing.T) {
 		out := r.f.Execute(context.Background(), r.gate.got[1], 1)
 		want, res := forgetAgentWhenOpen, journal.ResultSucceeded
 		if off {
-			want, res = forgetAgentNotOpen, journal.ResultNotApplied
+			want = forgetAgentNotOpen
 		}
 		if out.Result != res || len(r.texts) != 1 || r.texts[0] != want || opens != map[bool]int{false: 1, true: 0}[off] {
 			t.Fatalf("off %v: %+v %q, %d opens", off, out, r.texts, opens)

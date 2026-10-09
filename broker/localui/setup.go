@@ -202,7 +202,14 @@ var (
 	ErrCodesEnrolled    = errors.New("code generator already set up")
 	ErrNoCodeEnrollment = errors.New("no code-generator enrollment waiting")
 	ErrCodesLimited     = errors.New("code-generator enrollment paused")
+	// ErrCodesUnavailable: the vault cannot finish setup's enrollment (it
+	// was never opened for setup, or it is sealed with no confirmation
+	// recorded), so no step on this page can.
+	ErrCodesUnavailable = errors.New("code-generator enrollment unavailable")
 )
+
+// cannotFinish is what the page says on ErrCodesUnavailable.
+const cannotFinish = "This box cannot finish setup: it cannot add approval codes. Ask whoever installed the box software to prepare it for setup again."
 
 var errElsewhere = errors.New("Setup is continuing on the phone that texted the box.")
 
@@ -395,6 +402,9 @@ type setupView struct {
 	// CodesEnrolled: the vault already holds a sealed seed, so the codes
 	// step shows none and only continues.
 	CodesEnrolled bool
+	// CodesUnavailable: the vault cannot finish setup's enrollment, so the
+	// codes step offers nothing to do (ErrCodesUnavailable).
+	CodesUnavailable bool
 	// CodesShown: the link was shown already; the step asks for its code
 	// and offers a new one.
 	CodesShown bool
@@ -486,6 +496,8 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, ErrCodesEnrolled):
 			v.CodesEnrolled = true
+		case errors.Is(err, ErrCodesUnavailable):
+			v.CodesUnavailable, v.Err = true, cannotFinish
 		case errors.Is(err, ErrCodesLimited):
 			v.Err = "Too many new codes in a minute. Wait a minute, then reload this page."
 		case err != nil:
@@ -843,6 +855,8 @@ func (u *setup) codes(r *http.Request, _ string) error {
 	}
 	switch {
 	case errors.Is(err, ErrCodesEnrolled):
+	case errors.Is(err, ErrCodesUnavailable):
+		return errors.New(cannotFinish)
 	case errors.Is(err, ErrNoCodeEnrollment):
 		u.mu.Lock()
 		u.shown = false
@@ -993,8 +1007,12 @@ func (u *setup) maybeFinish() {
 		return
 	}
 	if err := u.s.cfg.Hooks.Finish(who); err != nil && !u.s.cfg.Hooks.AlreadySetUp() {
+		msg := "Could not finish setup. Try again."
+		if errors.Is(err, ErrCodesUnavailable) {
+			msg = cannotFinish
+		}
 		u.mu.Lock()
-		u.err[u.st.Device] = "Could not finish setup. Try again."
+		u.err[u.st.Device] = msg
 		u.mu.Unlock()
 		return
 	}
