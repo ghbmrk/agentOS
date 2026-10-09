@@ -173,7 +173,7 @@ func TestAReleaseWithoutAManifestIsLogged(t *testing.T) {
 		{"no release directory", filepath.Join(t.TempDir(), "absent"), false},
 	} {
 		buf.Reset()
-		if ts := fuzzTargets(learnPaths{Fuzz: c.release, Loop7: t.TempDir()}); len(ts) != 0 {
+		if ts, _ := fuzzTargets(learnPaths{Fuzz: c.release, Loop7: t.TempDir()}); len(ts) != 0 {
 			t.Fatalf("%s: targets %+v", c.name, ts)
 		}
 		if got := strings.Count(buf.String(), "loop7: no fuzz rounds"); got != map[bool]int{true: 1, false: 0}[c.logged] {

@@ -599,7 +599,7 @@ func TestAHangClosesOnlyOnAGoodStepOfANewBinary(t *testing.T) {
 			if len(g.resolved) != 0 {
 				t.Fatalf("a hang was resolved as a replay: %v", g.resolved)
 			}
-			if st, err := readHangs(tg); err != nil || st[hang] != "" {
+			if st, err := s.readHangs(tg); err != nil || st[hang] != "" {
 				t.Fatalf("state after the close: %v %v", st, err)
 			}
 		})
@@ -620,7 +620,7 @@ func TestARepeatedHangRecordsTheNewerBuild(t *testing.T) {
 	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
-	if st, err := readHangs(tg); err != nil || st[loops.FuzzStallDetail] != fileDigest(t, tg.Binary) {
+	if st, err := s.readHangs(tg); err != nil || st[loops.FuzzStallDetail] != fileDigest(t, tg.Binary) {
 		t.Fatalf("state %v %v", st, err)
 	}
 }
