@@ -6,7 +6,7 @@ Board section: Integration: wiring merged packages into the box. Part of W3-forg
 
 **Requirement IDs:** CAP-3 (forgets propagate) and A8, as in W3-forget-b1; security C3; ARC-1 (only the vault process holds the log's key and imports recovery). Tests carry `REQ: CAP-3, A8` (add ARC-1 on the import and socket tests).
 
-**Sources:** BOARD row W3-forget-b1-5; #409 Security R1 and P3; #409 Security R5 (c) and L3, moved here from W3-forget-b1-6 (its "Placed elsewhere"); #409 Security R4, not carried by W3-forget-b1-7 (#487); `reviews/potency/2026-10-08-pr436.md` point 1; `broker/recovery/ASSUMPTIONS.md` Q5 and the b1-4 follow-ups paragraph.
+**Sources:** BOARD row W3-forget-b1-5; #409 Security R1 and P3; #409 Security R5 (c) and L3, moved here from W3-forget-b1-6 (its "Placed elsewhere"); #409 Security R4, not carried by W3-forget-b1-7 (#487); `reviews/potency/2026-10-08-pr436.md` point 1; #409 Security L1 (f3) and #409 L3 point 3 (forgetLog ordering), moved here from b1-6 as #519 decided (its "Not in b1-6"; #519 L3 point 4; #503 L3 point A); `broker/recovery/ASSUMPTIONS.md` Q5 and the b1-4 follow-ups paragraph.
 
 ## Requirements (each with a test)
 1. **The vault serves the log** (R1). `cmd/agentos-egress` serves two calls on its socket: append a forget (goal, time, since, agent) through `AppendForget` with its TPM counter (`tpmCounter`), and export the log through `ExportForgetLog`. Only agentosd's uid may call them (peer credentials, as the socket's other per-caller checks do); the reply to an append is the exported log or a refusal reason, never the key. A locked vault refuses. Tests: agentosd's uid appends and exports; another uid is refused; a locked vault refuses; `ErrNoForgetLog` comes back as its own reason.
@@ -17,6 +17,8 @@ Board section: Integration: wiring merged packages into the box. Part of W3-forg
 6. **The vault forgets a released hold** (b1-4 follow-up: "`State.Pending` is not cleared by the answer"). When `answerHeld` releases, agentosd tells the vault; the vault clears `State.Pending` only if the marker is gone and the learn dir's `forget-log.json` opens under its forget key. Without this, requirement 5 would hold a released box forever. Tests: release clears it; a clear request with the marker present, or with a log that does not open, is refused and the box stays held.
 7. **Q5 says what the decoys do** (#436 Potency point 1a). Reword `broker/recovery/ASSUMPTIONS.md` Q5: drop "on average the real date is anywhere in the list"; state that when the last forget falls within 45 days of the backup, the real date is always the latest one shown, and that "later than all of these" stays offered. Test: an existing decoy test, or a new one, pins that case (last forget within 45 days of the backup → no decoy after it), so the record and the code cannot drift.
 8. **Restored take-backs run before any agent machine opens** (#409 Security R4). On the start after a release, the learning plane's replay of the restored log (`readRestoredForgets`, `learn.go:110`) finishes, and its take-backs are applied, before the first agent or replay machine opens; if the replay fails, no machine opens. Test: release with a log holding a canary forget, then assert the take-back is recorded before the fake machine opener is first called, and a replay error leaves the opener uncalled. If this needs a restructuring of the start order beyond the replay call, split it into a release row rather than widening the package.
+9. **Destination copies are sealed (f3, #409 Security L1).** A destination copy is AEAD-sealed under a key derived from the recovery key with its own HKDF label (not the log's MAC key), so a destination learns no goal IDs, forget times or take-back flags. Requirement 4's function is the only writer of destination copies; W6's backup run is its only caller (the learn dir's copy in requirement 3 travels inside the encrypted bundle and stays the plain export). This package also updates W3-forget-b1-6's copy reader (named there; `ReadForgetLogCopy` in #519) to open sealed copies only: no writer exists before this package, so no plaintext copy exists in production and the reader needs no version switch. A copy that fails to open counts as absent, as b1-6 requirement 3 treats any bad copy. Tests: write then read back; a flipped byte → absent; a copy sealed under another recovery key → absent; the copy's bytes contain no canary goal ID. On merge, delete LATER `W3-forget-b1 f3`.
+10. **The forget logger is set only with the restore check** (#409 P3 and L3 point 3 ordering). Production `ownerForget.forgetLog` is set at start only after `restoreHold` and b1-6's learn-dir trust check have passed, and stays nil in held mode. Tests: a held start leaves it nil; a normal start sets it; a start whose restore check fails leaves it nil.
 
 ## Acceptance criteria
 - Every requirement above has a passing test; CI green.
@@ -24,22 +26,22 @@ Board section: Integration: wiring merged packages into the box. Part of W3-forg
 - No goal text, number or key in any log line or fixture; canary goals only.
 
 ## Open questions (flag in the PR; do not decide silently)
-1. **Closer after-decoys (#436 Potency point 1b). Pending Mark** (routed by the coordinator, 2026-10-09); this package does not start building until he has answered, since option B changes requirement 7. Within 45 days of the backup the real date is always the latest shown, so an owner who knows that picks it without remembering.
+1. **Closer after-decoys (#436 Potency point 1b). Pending Mark** (routed by the coordinator, 2026-10-09). Only requirement 7 waits for his answer, since option B changes it; requirements 1–6 and 8–10 can be built now (#503 L3 point C). Within 45 days of the backup the real date is always the latest shown, so an owner who knows that picks it without remembering.
    - (A, recommended for now) Keep D-071's 45-day spacing and record the limit (requirement 7). "Later than all of these" is the honest answer for a forget after the backup, so the cost is a weaker memory check for a recent last forget, not a wrong release of an old backup.
    - (B) Allow after-decoys closer than 45 days (e.g. down to 7) when the backup is recent. Strengthens the check; needs a ruling because D-071 sets the spacing, and closer dates are harder for the owner to tell apart.
 2. **Which socket (builder may decide; record it).** Recommended: the existing vault socket with a per-uid check, not a new socket, to avoid a second listener in the vault process.
 
 ## Assumptions to record
 - `broker/cmd/agentosd/ASSUMPTIONS.md`: forgets made before the recovery key is set up are not logged (the log's key comes from the recovery key), and their done text says so; the learn dir's copy is a convenience for the backup, checked only by the vault.
-- `broker/recovery/ASSUMPTIONS.md`: Q5's rewording; the vault trusts agentosd's release report only as far as the log opening under its key.
+- `broker/recovery/ASSUMPTIONS.md`: Q5's rewording; destination copies are sealed under their own HKDF label, and requirement 4's function is their only writer; the vault trusts agentosd's release report only as far as the log opening under its key.
 
 **Needs:** W3-forget-b1; W3-forget-b1-6 (#409 P3: the logger stays nil until the restore check is wired), and so W3-forget-b1-7.
 
-**Gate:** tier A (vault process and agentosd's forget path); strongest model; explicit threat check: another uid calling the socket, a forged release report, a vault locked at start, a machine opening before take-backs. Security lens signs off; potency lens on requirement 7.
+**Gate:** tier A (vault process and agentosd's forget path); strongest model; explicit threat check: another uid calling the socket, a forged release report, a vault locked at start, a machine opening before take-backs, a destination reading or altering a sealed copy. Security lens signs off; potency lens on requirement 7.
 
 **Scope:**
 - `broker/cmd/agentos-egress/server.go` (or a new `forgetlog.go` there) and its tests;
-- `broker/recovery/forgetlog.go` (the copy writer and the status field), `bundle.go` only if the status field needs it, their tests, `ASSUMPTIONS.md`;
+- `broker/recovery/forgetlog.go` (the copy writer, its sealing and the status field), b1-6's copy reader in `broker/recovery/restoreentry.go` (requirement 9 only), `bundle.go` only if the status field needs it, their tests, `ASSUMPTIONS.md`;
 - `broker/cmd/agentosd/main.go`, `forget.go`, `learn.go`, `held.go` (from b1-7), a new client file, their tests, `ASSUMPTIONS.md`.
 
-**Estimate:** about 120k tokens, strongest model (tier A). Checkpoint at 80k: requirements 1–3 green. If requirements 5, 6 and 8 push past 150k, split them into a release row before continuing.
+**Estimate:** about 135k tokens (120k, plus 15k for requirements 9 and 10), strongest model (tier A). Checkpoint at 80k: requirements 1–3 green. If requirements 5, 6, 8 and 9 push past 150k, split them into a release row before continuing.
