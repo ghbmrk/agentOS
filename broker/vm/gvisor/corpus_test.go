@@ -144,8 +144,8 @@ func newRelay(t *testing.T, machines guest.Machines) *relay {
 	}
 	a, err := mail.New(mail.Config{Account: "mail", Address: me, Store: st, AuthServ: "mx.example.test",
 		SecuritySenders: []string{"security@provider.example"}, Labels: []string{"Family"},
-		Authorized: func(action string, since time.Time) []journal.Intent {
-			return x.eng.AuthorizedSince("mail", action, since)
+		InUse: func(action string, since time.Time) []journal.Use {
+			return x.eng.InUse("mail", action, since)
 		}})
 	if err != nil {
 		t.Fatal(err)
