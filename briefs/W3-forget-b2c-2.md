@@ -32,6 +32,10 @@ Board section: Integration: wiring merged packages into the box. Follows W3-forg
 - The owed file holds goal IDs, times and counts only (synthetic canary in a task body never appears).
 - The no-direct-inform check (Work 4) and its mutant.
 - `-race` over the new tests with `Text` and `resumeAgent` running.
+- An owed save that fails is saved again on every retry pass until it holds, not only on the first (kills mutant S2b). Source: Security 4a on #528, release P1 (`reviews/security/2026-10-09-pr528.md`).
+- `TestForgetItem2NotSavedIsTriedAgain` passes 1000 runs under `-race -count`, with the race that made it flaky named and fixed. Source: L3 on #522 (3 failures in about 1040 runs on main).
+
+**Builder note (brief-gap, fixed in this package):** Work 2's key `grants.ForgetAgentGoal(id)` is item 1's goal key, so item 1's owe overwrites the `Agent` entry and either item's `paid` drops the other's. The entry is keyed by item 2's own ID (`forget-agent/<nonce>/<goal>`) instead; it holds the goal ID and a time nonce, no task words.
 
 **Scope:** `broker/cmd/agentosd/forget.go` (`agentBack`, `carryAgent`, `finishOwed`, the owed entry type), `broker/cmd/agentosd/learn.go` only if `finishOwed` needs its inputs wired there, their tests (`forget_agent_test.go`, `forget_owed_test.go`, a new lint test), and `broker/cmd/agentosd/ASSUMPTIONS.md`. Nothing else. It must not touch the methods W3-forget-b3r adds to `forget.go`.
 
