@@ -267,7 +267,9 @@ func (r *rig) logRise(t *testing.T, q *quota.FS, p *loops.ExhaustProbe, name str
 // exit at once, and ones where only the CPU press or only the memory
 // press exits at once each fail the round, the last two on that counter
 // alone (P3-4b-4c-fresh; B1 on #599); a cgroup with memory.max and
-// pids.max at "max" reports both above budget.
+// pids.max at "max" reports both above budget, pids.max's as the
+// sandbox's threads, which is what it bounds under gVisor (RES-2;
+// P3-4b-4c-pids).
 func TestIntegrationExhaustionProbeInAGuest(t *testing.T) {
 	if os.Getenv("AGENTOS_RUNSC") == "" || os.Geteuid() != 0 {
 		t.Skip("set AGENTOS_RUNSC to a runsc binary and run as root (CI integration job)")
@@ -347,7 +349,7 @@ func TestIntegrationExhaustionProbeInAGuest(t *testing.T) {
 	if err != nil || len(res.Found) != 2 {
 		t.Fatalf("control round: %+v %v", res, err)
 	}
-	for i, k := range []string{"memory", "processes"} {
+	for i, k := range []string{"memory", "sandbox threads"} {
 		if !same(res.Found[i], loops.CheckExhaust, k, "above budget") {
 			t.Fatalf("control round found %+v, want %s above budget", res.Found[i], k)
 		}
