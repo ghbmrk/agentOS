@@ -44,7 +44,11 @@ type Activator interface {
 	// reads each file only through v.Fetch, which checks the signed length
 	// and hash, never follows a symlink in the slot it writes, and verifies
 	// the written slot against the manifest's /usr root hash before it
-	// makes the entry the next boot (security C2 on #133).
+	// makes the entry the next boot (security C2 on #133). The inactive
+	// slot is the slot not booted, whatever the update store holds as
+	// installed; never the running slot. A blessed entry on that slot
+	// leaves the boot menu, and the running root's entry becomes the
+	// default, before any byte of the slot is written (A12).
 	Install(ctx context.Context, v *update.Verified) error
 	// Abandon undoes an Install the box did not restart into: the
 	// inactive slot is no longer the next boot. It is safe to call when
@@ -142,7 +146,11 @@ type pending struct {
 // point is the rollback point of an apply in flight: what ran before, what
 // was handed to the activator, and the boot it was handed over in.
 type point struct {
-	ID      string `json:"id"`
+	ID string `json:"id"`
+	// From is the update store's installed release and FromUsr the root
+	// that ran; after an other-root boot they differ (From = N, FromUsr =
+	// N-1's root), so they are never one update.Ref, and a fallback is
+	// judged by FromUsr (SR3-4f-r1).
 	From    int64  `json:"from"`
 	FromUsr string `json:"from_usr"`
 	To      int64  `json:"to"`
@@ -191,8 +199,6 @@ type last struct {
 	Kind    string `json:"kind"`
 	// Told: the digest carried it (UX-133-1).
 	Told bool `json:"told,omitempty"`
-	// Boot: for doneInstalledOtherRoot, the boot it was settled in.
-	Boot string `json:"boot,omitempty"`
 }
 
 type state struct {
@@ -895,10 +901,16 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	pt, err := a.pointLocked(ctx, in.ID, rel, p.Adoption)
 	if err == nil {
 		pt.TalkUntil, pt.Security = a.talkUntil(p), p.Security
-		prev := a.st.Unrecorded
+		prev, prevLast := a.st.Unrecorded, a.st.Last
 		a.st.Applying, a.st.Unrecorded = pt, counted(prev, key, prev[key]+1)
+		if prevLast != nil && prevLast.Kind == doneInstalledOtherRoot {
+			// Install writes the slot that holds that release (A12(3)), so
+			// its restart promise ends before any byte is written, whatever
+			// becomes of this attempt (SR3-4f-r1).
+			a.st.Last = nil
+		}
 		if err = a.saveLocked(); err != nil {
-			a.st.Applying, a.st.Unrecorded = nil, prev
+			a.st.Applying, a.st.Unrecorded, a.st.Last = nil, prev, prevLast
 		}
 	}
 	if err != nil {
@@ -1101,7 +1113,7 @@ func (a *Applier) Resume(ctx context.Context) error {
 					return err
 				}
 			}
-			next.Last = &last{Version: pt.To, Kind: doneInstalledOtherRoot, Boot: b.ID}
+			next.Last = &last{Version: pt.To, Kind: doneInstalledOtherRoot}
 			break
 		}
 		if err := a.cfg.Store.DropStaged(); err != nil {
@@ -1236,10 +1248,10 @@ func (a *Applier) Status() string {
 	case a.st.Last.Kind == doneUnrecorded:
 		return unrecordedText(a.st.Last.Version)
 	case a.st.Last.Kind == doneInstalledOtherRoot:
-		if b, err := a.cfg.Activator.Booted(context.Background()); err == nil && b.ID == a.st.Last.Boot {
+		if a.onOtherRoot() {
 			return otherRootText(a.st.Last.Version)
 		}
-		return "" // a later boot may run it
+		return ""
 	}
 	return fmt.Sprintf("Update %d was not installed; I will try again.", a.st.Last.Version)
 }
@@ -1261,12 +1273,26 @@ func (a *Applier) Digest() []string {
 	case doneUnrecorded:
 		return []string{unrecordedText(l.Version)}
 	case doneInstalledOtherRoot:
-		if b, err := a.cfg.Activator.Booted(context.Background()); err == nil && b.ID == l.Boot {
+		if a.onOtherRoot() {
 			return []string{otherRootText(l.Version)}
 		}
 		return []string{fmt.Sprintf("Update %d is installed.", l.Version)}
 	}
 	return []string{fellBackLine(l.Version)}
+}
+
+// onOtherRoot reports that this boot runs another root than the update
+// store's installed release: the other-root line holds in every such
+// boot, not only the one it was settled in (SR3-4f-r1). A boot or store
+// that cannot be read is not taken for it, since the line says what the
+// box started (CH-12).
+func (a *Applier) onOtherRoot() bool {
+	b, err := a.cfg.Activator.Booted(context.Background())
+	if err != nil {
+		return false
+	}
+	in, err := a.cfg.Store.Installed()
+	return err == nil && b.UsrRootHash != in.UsrRootHash
 }
 
 // otherRootText: the release is installed, but this boot runs the
