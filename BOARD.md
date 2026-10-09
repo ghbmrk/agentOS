@@ -14,6 +14,10 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
 | HK-1 | [depaudit self-test flake fix](briefs/HK-1.md) | — | in review |
 | DEP-2 | [depaudit evidence out of the tracee's reach](briefs/DEP-2.md) | HK-1 | queued (release; #401 L3 R1 and lens) |
+| CODEX-1 | [Intake of Codex drafts for implementation](briefs/CODEX-1.md) | — | in review (C; records only) |
+| CI-SOAK-f1 | [Fixtures independent of umask and tmpfs](briefs/CI-SOAK-f1.md) | — | queued (A; from #255) |
+| H8 | [Deterministic split entropy for change fixtures](briefs/H8.md) | — | queued (A; from #273) |
+| H6 | [A10 trial collector](briefs/H6.md) | — | queued (C; from #258) |
 
 ## Security and architecture review (2026-10-08)
 
@@ -59,6 +63,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | S6 | [Consumer AI CLIs in no-tools relay mode](briefs/S6.md) | Mark's accounts | dropped (superseded by S8 (CRED-5 now covers full provider agents)) |
 | S8 | [Provider agents as workers](briefs/S8.md) | Cloud first (stubs), then Mark's accounts | merged (03641d1; #186 cloud part and spec diff) |
 | S8-W1 | [Image fix for worker-held custody](briefs/S8-W1.md) | S8, #186 | queued (blocked: needs a supervised session with prompts on, D-064; the design hand-off is a bwrap prefix for agentos-toolsh, managed-settings denies and a containment test) |
+| S8-W1a | [Inventory credential-bearing tool surfaces](briefs/S8-W1a.md) | S8 | queued (C; from #262; feeds S8-W1) |
 | S8-live | [S8 live part](briefs/S8-live.md) | see brief | queued |
 | S8-codex-terms | [Read OpenAI's current terms on a proxy holding ChatGPT-managed…](briefs/S8-codex-terms.md) | openai.com reachable | in review (decided: broker-held, unconfirmed route, #328; [note](spikes/S8-provider-workers/CODEX-TERMS.md)) |
 | CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | in review (#420) |
@@ -127,7 +132,10 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-4b-2 | [A11 loop 2 qualification harness: seed catalog, held-back variants, harness-chosen seed](briefs/P3-4b.md#p3-4b-2-a11-qualification-harness) | P3-4b-1 | merged (336e29b; #490) |
 | P3-4b-2b | [A11 harness follow-ups to #490: evidence check fails on a missing evidence record; fix-input audit catches a raw held clause whose fields the visible test shares; leaking-adapter control on every valid seed](briefs/P3-4b.md#p3-4b-2b-harness-follow-ups-to-490) | P3-4b-2 | merged (682486e; #500) |
 | P3-4b-5 | [Model-backed loop 2 fixer: answers the §11 fix-candidate request through Loop 1's builder, wired in the daemon](briefs/P3-4b.md#p3-4b-5-model-backed-loop-2-fixer) | P3-4b-1, W3-builder-ship | queued (tier A) |
-| OP9-status | [OP-9: STATUS names every capability that is off or can't run (brief to be written)](briefs/P3-4b.md#op9-status-owner-row-for-op-9-not-yet-briefed) | P3-2, P3-4 | queued (needs its own brief) |
+| OP9-status | [OP-9: STATUS names every capability that is off or can't run; split into -a and -b](briefs/OP9-status.md) | P3-2, P3-4 | queued |
+| OP9-status-a | [OP-9 capability-line registry for STATUS and the digest; lines for every silent off case; A11 learning-cause test](briefs/OP9-status.md#op9-status-a-registry-and-the-silent-cases) | P3-2, P3-4 | queued (tier A) |
+| OP9-status-b | [OP-9 fix clauses on existing off lines; loop 2 wording; owner choices and the LOOP-3 loop-shares line](briefs/OP9-status.md#op9-status-b-fix-clauses-loop-lines-and-owner-choices) | OP9-status-a, P3-4b-1b, P3-4b-5 | queued (tier A) |
+| DIG-1 | [Daily digest sender (CH-15) reading every Digest() source, OP-9 lines included (brief to be written)](briefs/OP9-status.md#split) | W5, OP9-status-a | queued (tier A declared; needs its own brief) |
 | P3-4b-3 | [LOOP-7 off-the-shelf: socket and action-protocol fuzz targets, in-guest socket probe](briefs/P3-4b.md#p3-4b-3-loop-7-fuzzing-and-socket-probes) | P3-4b-1b | queued (tier A declared) |
 | P3-4b-4 | [LOOP-7 off-the-shelf: continuous canary rounds, published injection corpora, tamper and exhaustion probes](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-1b | queued (tier A declared) |
 | P3-5 | [Loop 3, maintenance, as a scheduler Source](briefs/P3-5.md) | P3-2, P4-3 | merged (4672fe8; broker/maintain) |
@@ -234,7 +242,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | SR2-3m | [A runsc panic after the guest starts reaches no guest output](briefs/SR2-3m.md) | RES-4, CAP-8, SR2-3h | building (release finding 362-1, Security on #362) |
 | SR2-3k | [guesterr.Guest values checked at run time](briefs/SR2-3k.md) | SR2-3g | building (recall thread) |
 | SR2-3n | [No runsc crash trace reaches the guest, and the guest cannot pick the logged part](briefs/SR2-3n.md) | SR2-3m | queued (release findings S2, S3, S4, Security on #391) |
-| SR2-3o | [Malformed-request refusals keep a field-level hint for the guest](briefs/SR2-3o.md) | SR2-3j | queued (release item 2, lens on #396) |
+| SR2-3o | [Malformed-request refusals keep a field-level hint for the guest](briefs/SR2-3o.md) | SR2-3j | dropped (#461: unreachable behind guest/mcp.go:263 and grants/gate.go:915) |
 | SR2-3p | [A command that cannot start is not told to retry](briefs/SR2-3p.md) | SR2-3j | in review (with SR2-3q, one PR) |
 | SR2-3q | [A runsc failure after the command may have started is not told it did not start](briefs/SR2-3q.md) | SR2-3j | in review (with SR2-3p, one PR) |
 | SR2-4 | [cgroup cpu, io and pids controllers](briefs/SR2-4.md) | #143 (RES-2 text) | merged (#155) |
@@ -314,6 +322,12 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b3r | [The local Wi-Fi page lists older tasks and can forget one](briefs/W3-forget-b3r.md) (potency R2, carried by W3-forget-b3; needs a page, socket route and forget path in `broker/localui`; release, L3 on #425; tier A, build on the strongest model) | W3-forget-b3 | Next build item B | queued (brief written) |
 | W3-forget-b4 | Fix #425 Security 4a S1-S3: (S1) `learn.go` renames an unreadable owed file to `.bad` before `lostForgetOwed` saves the file that owes `forgetOwedLost`, so a crash between the two leaves the owner never told: save first, then rename; (S2) in `Execute` a failed owed save is only logged, so a `retry` followed by a crash replays the forget with no done text owed (CAP-3): retry the save in `retry` or record it in ASSUMPTIONS; (S3) no test pins F4's order (tell the owner, then drop the entry; mutant M4 passes): add one whose owner send records the owed file's content at send time (release, tier A, Security 4a on #425, [note](reviews/security/2026-10-09-pr425-sec4a.md); its PR carries `Defect: W3-forget-b3`; brief to write) | W3-forget-b3 | Next build item B | queued (needs brief) |
 | W5 | [Owner channel](briefs/W5.md) | W3 | loops thread | queued |
+| W5-Da | [Digest contract and durable digest queue](briefs/W5-Da.md) | W3 | primary; unclaimed | queued (B; from #263/#266/#267) |
+| UX3-1 | [Visible provider sign-in and bounded retry](briefs/UX3-1.md) | P2-2w c4 | primary; unclaimed | queued (A; from #405) |
+| UX3-6 | [Inspect every approval item over the owner channel](briefs/UX3-6.md) | L1 read-only command grammar | primary; unclaimed | queued (A; from #405) |
+| UX3-7 | [Truthful, bounded withheld-result retrieval](briefs/UX3-7.md) | CH-20p minimum split promoted to Release in LATER.md (D-079 spec-diff) | primary; unclaimed | queued (A; from #405) |
+| UX4-1 | [Preserve explicit choices on failed setup retries](briefs/UX4-1.md) | P2-2w c4; UX3-4 (acc. 6 only) | primary; unclaimed | queued (A; from #417) |
+| UX4-2 | [Visible phone fallback and actionable errors](briefs/UX4-2.md) | P2-2w c4 | primary; unclaimed | queued (A; from #417) |
 | W5a | [Loop 2 passive checks](briefs/W5a.md) | #54 merged, W3 | builder B (lenses) | merged (3d2daab; #169) |
 | W5a-resume | [Per-grant resume on the local page](briefs/W5a-resume.md) | W5a, local page | builder (session_014jQE43g7uFA46BsQJD3VGh) | in review (tier A) |
 | W5b | [Loop 3 update checks](briefs/W5b.md) | #53 merged, W3, network state (P2-3 modem or Wi-Fi) | Loop 3 thread (P3-5) | queued |
