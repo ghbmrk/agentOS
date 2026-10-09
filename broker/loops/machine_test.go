@@ -554,10 +554,13 @@ func TestQuiesceHoldsTheBrokersWritersForTheRound(t *testing.T) {
 // testBudget is the per-machine budget the exhaustion rig's broker wrote.
 var testBudget = MachineBudget{MemoryBytes: 256 << 20, Pids: 4096, DiskBytes: 64 << 20}
 
+// testRise is half of what the rig's guest presses (40 MiB, 32 MiB).
+var testRise = PressRise{MemoryBytes: 20 << 20, DiskBytes: 16 << 20}
+
 // exhaustRig is an exhaustion probe over a fake cgroup directory whose
 // limits sit at the configured budget. Each round runs in a new machine,
-// and its guest's pressure raises every counter but those named in flat;
-// ping, preempt and the disk read are instant.
+// and its guest's pressure raises every counter by press, but those named
+// in flat; ping, preempt and the disk read are instant.
 type exhaustRig struct {
 	t        *testing.T
 	cg       string
@@ -567,11 +570,13 @@ type exhaustRig struct {
 	machines int
 	disk     int64
 	flat     map[string]bool
+	press    map[string]int64
 }
 
 func newExhaustRig(t *testing.T) *exhaustRig {
 	t.Helper()
-	x := &exhaustRig{t: t, cg: t.TempDir(), flat: map[string]bool{}}
+	x := &exhaustRig{t: t, cg: t.TempDir(), flat: map[string]bool{},
+		press: map[string]int64{"cpu": 900000, "memory": 40 << 20, "processes": 16, "disk": 32 << 20}}
 	for f, v := range map[string]string{"memory.max": "268435456\n", "pids.max": "4096\n", "cpu.weight": "1\n"} {
 		x.write(f, v)
 	}
@@ -583,6 +588,7 @@ func newExhaustRig(t *testing.T) *exhaustRig {
 		PreemptTarget:  time.Second,
 		BrokerWeight:   1000,
 		Budget:         testBudget,
+		Rise:           testRise,
 		Machine: func(context.Context) (PressedMachine, error) {
 			x.machines++
 			return PressedMachine{ID: fmt.Sprintf("probe-%d", x.machines), Cgroup: x.cg, DiskBytes: 64 << 20,
@@ -593,7 +599,7 @@ func newExhaustRig(t *testing.T) *exhaustRig {
 			up := map[string]int64{}
 			for _, k := range kinds {
 				if !x.flat[k] {
-					up[k] = map[string]int64{"cpu": 900000, "memory": 40 << 20, "processes": 16, "disk": 32 << 20}[k]
+					up[k] = x.press[k]
 				}
 			}
 			x.bump(up)
@@ -695,8 +701,8 @@ func TestACgroupWithNoLimitReportsExhaustionFindings(t *testing.T) {
 // LOOP-7, RES-1 (P3-4b-4c-limits; #548 Potency 2, L3 4): a limit holds
 // only when it is set and at most the configured per-machine budget. A
 // memory, process or disk limit above it is a finding, as is "max" or a
-// missing file; at or under it passes. A probe without a budget fails
-// the run closed.
+// missing file; at or under it passes. A probe without a budget, or
+// without a minimum rise within it, fails the run closed.
 func TestLimitsAreJudgedAgainstTheConfiguredBudget(t *testing.T) {
 	ctx := context.Background()
 	for _, c := range []struct {
@@ -748,6 +754,14 @@ func TestLimitsAreJudgedAgainstTheConfiguredBudget(t *testing.T) {
 			t.Fatalf("budget %+v: ran (%d machines), %v", b, x.machines, err)
 		}
 	}
+	// So does a minimum rise that is unset or above the budget.
+	for _, r := range []PressRise{{}, {MemoryBytes: 1}, {DiskBytes: 1}, {MemoryBytes: 256<<20 + 1, DiskBytes: 1}, {MemoryBytes: 1, DiskBytes: 64<<20 + 1}} {
+		x := newExhaustRig(t)
+		x.probe.Rise = r
+		if _, err := x.probe.Run(ctx); err == nil || x.machines != 0 {
+			t.Fatalf("rise %+v: ran (%d machines), %v", r, x.machines, err)
+		}
+	}
 }
 
 // LOOP-7: a broker slower than its response target under pressure, or a
@@ -794,10 +808,11 @@ func TestAnExhaustionRoundFailsClosed(t *testing.T) {
 }
 
 // LOOP-7 positive control (P3-4b-4c-fresh, exhaustion half; Security #548
-// 4a 2): a guest that does not press, so a counter (memory.current,
-// pids.current, cpu.stat usage_usec, the disk quota's usage) stays flat
-// over the hold, fails the round; its machine is preempted and an open
-// "slow" finding stays open, where on main such a round closed it.
+// 4a 2, and B1 on #599): a guest that does not press, or presses a token
+// amount, so a counter (cpu.stat usage_usec, memory.current, the disk
+// quota's usage) rises by less than its minimum over the hold, fails the
+// round; its machine is preempted and an open "slow" finding stays open,
+// where on main such a round closed it.
 func TestAGuestThatDoesNotPressFailsTheRoundAndClosesNothing(t *testing.T) {
 	x := newExhaustRig(t)
 	x.probe.ResponseTarget = time.Millisecond
@@ -814,29 +829,50 @@ func TestAGuestThatDoesNotPressFailsTheRoundAndClosesNothing(t *testing.T) {
 	if _, open := r.open(id); !open {
 		t.Fatal("rig: no open finding")
 	}
-	// The guest idles, and the broker answers at once.
+	// The guest presses a token amount (every counter rises by 1), and
+	// the broker answers at once.
 	x.probe.ResponseTarget = 200 * time.Millisecond
 	x.probe.Ping = func(context.Context) error { return nil }
-	for _, k := range pressureKinds {
-		x.flat[k] = true
-	}
+	x.press = map[string]int64{"cpu": 1, "memory": 1, "processes": 1, "disk": 1}
 	r.now = r.now.Add(time.Hour)
 	if name, res := runJob(t, r.g, ctx); name != "probe:exhaustion" || res.Err == nil {
-		t.Fatalf("an idle guest passed the round: %q %+v", name, res)
+		t.Fatalf("a token press passed the round: %q %+v", name, res)
 	}
 	if _, open := r.open(id); !open {
-		t.Fatal("an idle guest closed an open slow finding")
+		t.Fatal("a token press closed an open slow finding")
 	}
 	if len(x.stopped) != 2 {
 		t.Fatalf("preempted %v", x.stopped)
 	}
 	// Each counter on its own: one that stays flat fails the round.
-	for _, k := range pressureKinds {
+	// Processes have no counter under gVisor (S35).
+	for _, k := range []string{"cpu", "memory", "disk"} {
 		x := newExhaustRig(t)
 		x.flat[k] = true
 		res, err := x.probe.Run(ctx)
 		if err == nil || !strings.Contains(err.Error(), k) || len(res.Checked) != 0 || len(x.stopped) != 1 {
 			t.Fatalf("%s flat: %+v %v, stopped %v", k, res, err, x.stopped)
+		}
+	}
+	// A press that raises every counter by only 1 (a page, a block, a
+	// microsecond: the sandbox's own work, or a press that exits at once)
+	// fails the round, as does one just under its minimum; at the
+	// minimum it passes.
+	for _, c := range []struct {
+		press map[string]int64
+		pass  bool
+	}{
+		{map[string]int64{"cpu": 1, "memory": 1, "processes": 1, "disk": 1}, false},
+		{map[string]int64{"cpu": 900000, "memory": 20<<20 - 1, "processes": 16, "disk": 32 << 20}, false},
+		{map[string]int64{"cpu": 900000, "memory": 40 << 20, "processes": 16, "disk": 16<<20 - 1}, false},
+		{map[string]int64{"cpu": 14999, "memory": 40 << 20, "processes": 16, "disk": 32 << 20}, false}, // Hold 30 ms: 15 ms
+		{map[string]int64{"cpu": 15000, "memory": 20 << 20, "processes": 0, "disk": 16 << 20}, true},
+	} {
+		x := newExhaustRig(t)
+		x.press = c.press
+		res, err := x.probe.Run(ctx)
+		if (err == nil) != c.pass || !c.pass && len(res.Checked) != 0 {
+			t.Fatalf("press %v: %+v %v", c.press, res, err)
 		}
 	}
 	// A counter that cannot be read fails it too.

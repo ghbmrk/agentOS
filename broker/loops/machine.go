@@ -332,7 +332,8 @@ var pressureKinds = []string{"cpu", "memory", "disk", "processes"}
 
 // PressedMachine is the machine a round presses: its cgroup directory,
 // its disk budget as the file system holds it, and its disk quota's
-// usage, all read broker-side.
+// usage, all read broker-side. DiskUsed reads the quota's counter, never
+// the guest's tree, which a guest could make slow to walk.
 type PressedMachine struct {
 	ID        string
 	Cgroup    string
@@ -345,6 +346,15 @@ type PressedMachine struct {
 type MachineBudget struct {
 	MemoryBytes int64
 	Pids        int64
+	DiskBytes   int64
+}
+
+// PressRise is the least a round's memory and disk counters must rise
+// for its guest to have pressed: a stated fraction of what the fixed
+// script presses (S35), so that the sandbox's own work, or a press that
+// exits at once, does not pass.
+type PressRise struct {
+	MemoryBytes int64
 	DiskBytes   int64
 }
 
@@ -361,6 +371,7 @@ type ExhaustProbe struct {
 	// can starve the broker.
 	BrokerWeight int
 	Budget       MachineBudget
+	Rise         PressRise
 	// Machine starts a fresh machine, idle; Press has its guest start
 	// pressing kinds and returns while it presses.
 	Machine func(ctx context.Context) (PressedMachine, error)
@@ -378,12 +389,14 @@ func (p *ExhaustProbe) Every() time.Duration { return p.Interval }
 // High "above budget" finding on the resource; a slow answer or
 // preemption a High "slow" one. A failed machine, press, ping or
 // preemption, a machine the last round used, or a counter that did not
-// rise over the hold (the guest did not press) fails the run, which then
+// rise by its minimum over the hold (the guest did not press: Rise for
+// memory and disk, half of Hold in CPU time) fails the run, which then
 // closes nothing; a machine is preempted either way.
 func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 	b := p.Budget
 	if p.Machine == nil || p.Press == nil || p.Ping == nil || p.Preempt == nil || p.Hold <= 0 || p.ResponseTarget <= 0 || p.PreemptTarget <= 0 || p.BrokerWeight <= 0 ||
-		b.MemoryBytes <= 0 || b.Pids <= 0 || b.DiskBytes <= 0 {
+		b.MemoryBytes <= 0 || b.Pids <= 0 || b.DiskBytes <= 0 ||
+		p.Rise.MemoryBytes <= 0 || p.Rise.MemoryBytes > b.MemoryBytes || p.Rise.DiskBytes <= 0 || p.Rise.DiskBytes > b.DiskBytes {
 		return ProbeResult{}, errors.New("exhaustion probe: not configured")
 	}
 	m, err := p.Machine(ctx)
@@ -411,9 +424,10 @@ func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 	if rerr == nil {
 		var after map[string]int64
 		if after, rerr = p.usage(m); rerr == nil {
+			least := map[string]int64{"cpu": p.Hold.Microseconds() / 2, "memory": p.Rise.MemoryBytes, "disk": p.Rise.DiskBytes}
 			for _, k := range pressureKinds {
-				if after[k] <= before[k] {
-					rerr = errors.Join(rerr, fmt.Errorf("%s did not rise", k))
+				if want, ok := least[k]; ok && after[k]-before[k] < want {
+					rerr = errors.Join(rerr, fmt.Errorf("%s rose %d, under %d", k, after[k]-before[k], want))
 				}
 			}
 		}
@@ -442,9 +456,10 @@ func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 	return res, nil
 }
 
-// usage reads machine m's counter for each pressure kind, broker-side:
-// cpu.stat usage_usec, memory.current, pids.current and the disk quota's
-// usage.
+// usage reads machine m's counters, broker-side: cpu.stat usage_usec,
+// memory.current and the disk quota's usage. Processes have none: under
+// gVisor a guest process is not a host task, so pids.current does not
+// count them (S35).
 func (p *ExhaustProbe) usage(m PressedMachine) (map[string]int64, error) {
 	u := map[string]int64{}
 	var err error
@@ -452,9 +467,6 @@ func (p *ExhaustProbe) usage(m PressedMachine) (map[string]int64, error) {
 		return nil, err
 	}
 	if u["memory"], err = cgroupCounter(m.Cgroup, "memory.current", ""); err != nil {
-		return nil, err
-	}
-	if u["processes"], err = cgroupCounter(m.Cgroup, "pids.current", ""); err != nil {
 		return nil, err
 	}
 	if m.DiskUsed == nil {

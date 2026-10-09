@@ -1448,7 +1448,7 @@ var aboveBudget = map[string]string{
 	"memory":    "use more memory than its budget",
 	"processes": "start more processes than its budget",
 	"disk":      "use more disk space than its budget",
-	"cpu":       "take as much processor time as I can",
+	"cpu":       "take as large a share of processor time as I get",
 }
 
 // findingText is one finding in plain words, with the next step.

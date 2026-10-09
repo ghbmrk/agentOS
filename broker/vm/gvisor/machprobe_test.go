@@ -147,6 +147,9 @@ func (r *rig) exhaustProbe(svc *services, q *quota.FS, id string, hold time.Dura
 		PreemptTarget:  2 * time.Second,
 		BrokerWeight:   budget.BrokerWeight,
 		Budget:         loops.MachineBudget{MemoryBytes: 256 << 20, Pids: vm.MachinePids, DiskBytes: 64 << 20},
+		// Half of what the test guest's press holds (MemMB 48, DiskMB 32 in
+		// testdata's press command; S35).
+		Rise: loops.PressRise{MemoryBytes: 24 << 20, DiskBytes: 16 << 20},
 		Machine: func(ctx context.Context) (loops.PressedMachine, error) {
 			r.create(id, admission.Experiment)
 			r.ask(id, "token")
@@ -198,10 +201,11 @@ func (r *rig) exhaustProbe(svc *services, q *quota.FS, id string, hold time.Dura
 // experiment machine with its cgroup limits and disk quota at the
 // broker's budget leaves the broker answering within target and the
 // machine preempted within the frozen target: nothing reported. The
-// round passing shows the machine's memory.current, pids.current,
-// cpu.stat usage_usec and quota usage rose over the hold. Controls: a
-// guest that does not press fails the round (P3-4b-4c-fresh), and a
-// cgroup with memory.max and pids.max at "max" reports both above budget.
+// round passing shows the machine's cpu.stat usage_usec, memory.current
+// and quota usage rose by their minimums over the hold (S35). Controls: a
+// guest that does not press, and one whose press runs but exits at once,
+// each fail the round (P3-4b-4c-fresh; B1 on #599), and a cgroup with
+// memory.max and pids.max at "max" reports both above budget.
 func TestIntegrationExhaustionProbeInAGuest(t *testing.T) {
 	if os.Getenv("AGENTOS_RUNSC") == "" || os.Geteuid() != 0 {
 		t.Skip("set AGENTOS_RUNSC to a runsc binary and run as root (CI integration job)")
@@ -238,6 +242,22 @@ func TestIntegrationExhaustionProbeInAGuest(t *testing.T) {
 		t.Fatalf("idle machine %s, want preempted", mc.State)
 	}
 	r.m.Destroy(ctx, "idle")
+
+	brief := r.exhaustProbe(svc, q, "brief", time.Second, nil)
+	brief.Press = func(ctx context.Context, id string, kinds []string) error {
+		for _, k := range kinds {
+			if out, err := r.rt.cmd(ctx, "exec", cid(id), "/guest", "press", k, "1").CombinedOutput(); err != nil {
+				return fmt.Errorf("press %s: %v: %s", k, err, out)
+			}
+		}
+		return nil
+	}
+	if res, err := brief.Run(ctx); err == nil || !strings.Contains(err.Error(), "did not press") || len(res.Checked) != 0 {
+		t.Fatalf("a press that exits at once: %+v %v", res, err)
+	} else {
+		t.Logf("a press that exits at once: %v", err)
+	}
+	r.m.Destroy(ctx, "brief")
 
 	unlimit := func(cg string) {
 		for _, f := range []string{"memory.max", "pids.max"} {

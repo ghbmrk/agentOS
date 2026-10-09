@@ -296,7 +296,7 @@ func TestAnAboveBudgetLimitSaysSoAndThatNothingIsNeeded(t *testing.T) {
 		"memory":    "A load test found an agent machine can use more memory than its budget.",
 		"processes": "A load test found an agent machine can start more processes than its budget.",
 		"disk":      "A load test found an agent machine can use more disk space than its budget.",
-		"cpu":       "A load test found an agent machine can take as much processor time as I can.",
+		"cpu":       "A load test found an agent machine can take as large a share of processor time as I get.",
 	} {
 		f := Finding{Check: CheckExhaust, Subject: subject, Detail: "above budget", Severity: High}
 		if got := ownerLine(Record{Finding: f}); got != want+" "+nothingNeeded {
