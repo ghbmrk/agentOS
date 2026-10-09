@@ -235,6 +235,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-4f-1 l1 | L3 on #597, point 5 (6080061267): `CommitRelease` on `Resume`'s other-root branch is unpinned; no test cut leaves a staged record behind for it to remove |
 | SR3-4f-1 l2 | L3 on #597, point 5 (6080061267): the `Unrecorded` count is not cleared after a blessed boot of the new root; clear the key on every settle that records an outcome |
 | SR3-4f-1 l3 | L3 on #597, point 5 (6080061267): a legacy rollback point with empty `ToManifest` is keyed differently in `Resume`'s `unrecordedLast`, so at the bound it shows the not-handed line while `Schedule` refuses it |
+| SR3-4f-1 l4 | UX on #597, L1 (6080675106): `broker/apply` A11's "record" wording in the unrecorded line; reword it when SR3-4f-r2's retry control is built |
+| SR3-4f-1 l5 | UX on #597, L2 (6080675106): `otherRootText` could offer a restart when the installed release is a security fix |
+| SR3-4f-1 l6 | UX on #597, L3 (6080675106): the digest's "installed" wording for the other-root line reads wrong on a later boot |
+| SR3-4f-1 l7 | UX on #597, L4 (6080675106): if `ErrRefused`'s text is ever shown in the digest, it must go through the plain-name map |
 | SR3-6 l1 | Potency on #430, W5b wiring: a pending security fix dropped by a policy change and scheduled again by Loop 3 should keep its first-scheduled time for A7's 24-hour "no free moment" ask, so a policy change does not reset the clock |
 | SR3-7 l1 | L3 on #429: nested keys still last-win; an `n` check in `anthropic.go` is unreachable |
 | SR3-8 l5 | UX on #432: repeated "lost its output N times; not built again" points at failing storage; if a box-health line ever reads disk faults, this log is one input |
