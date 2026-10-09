@@ -240,6 +240,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1-4 l5 | #436 (ASSUMPTIONS Q1): leftover decoy variance across different stale backups |
 | W3-forget-b1-4 l6 | UX on #436: a shorter "replies" line in the confirmation text |
 | W3-forget-b1-4 l7 | Potency on #436 (considered, not proposed): an accept-and-re-forget flow |
+| W3-forget-b1-4 l9 | UX on #436 (point 3): reword the forget-log-missing question ("Since this backup on <date>, …") once W3-forget-b1-6 has the missing case carry an authentic copy (coordinator, 2026-10-09) |
 | OP9-status l2 | L3 on #416: give held-back fields values distinct from the finding's free text |
 | P3-4b-1 l1 | L3 on #464 (agreed with builder): LOOP-3's "unmeasured" state resets on every daemon restart; the brief keeps restart behavior unchanged (scheduler.go:153) |
 | P3-4b-1 l3 | Security 5 on #464: `loopKeys` lists exact paths no tree file or reader uses yet; when a reader of `config/loops.json` or `config/loop2.json` lands it must read exactly those keys, with a test tying the list to the reader |
@@ -251,12 +252,12 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-1b l2 | L3 on #493: a crash between the owner send and the `Told` save re-sends the owner text (at least once, S21) |
 | P3-4b-1b l3 | UX 2 on #493: no cleared text for a finding that was capped but not paused; take it with P3-4b-1 l5 (same text) |
 | P3-4b-1b l4 | Potency 4 on #493 (A11): when the K-S1 row makes plain config probes live, its brief should recheck that the A11 config seeds still qualify on a box with live plain probes, and take S22's lift if not |
-| W3-forget-b1-4 l8 | L3 on #460 (nit): the appended "Also (#436 …)" clauses in the W3-forget-b1-5, -6 and -7 BOARD cells run on with no separating punctuation; add it when those rows are next edited |
 | SR3-1 f1 | Builder on SR3-1: page deny (`LocalAnswer`), follow and ask-resume check the lock count at the token check only, not where they commit; deny only narrows and the other two only open a request that needs a code, so the race gains no authority. Also (Security re-sign on #444, R3): adopt-SIM checks the lock count after the code, not where `AdoptSIM` writes the roles file; closing that gap would take a lock-count argument on `AdoptSIM`, as `LocalResume` has, and it gains nothing, because a strong code lifts locks |
 | SR3-1 f2 | Builder on SR3-1: a sign-in overlapped by a lock still returns a token, dead on first use; answering with a refusal instead would save the page one round trip |
 | W3-forget-b1-7 a | A held box serves no local page (localui.sock), so the page shows nothing while a restore is held; the owner learns of it by text only (broker/cmd/agentosd ASSUMPTIONS H1) |
 | W3-forget-b1-7 b | A held release from the inbox whose confirmation Send fails is only logged before the hold is released; retry with bounded backoff first (#487 L3 point 2) |
 | W3-forget-b1-7 c | opening() builds the question text under the lock but sends it outside, so a stale question can follow a released reply on "message" (#487 L3 point 3) |
+| W3-forget-b1-6 l8 | L3 delta on #519, point C: if Mark's ruling on b1-6 open question 1 rewords `PendingNotice(PendingUnanchored)` (the anchor fallback makes "Restoring on your original PC still works" false there), the brief must state the CH-12 bound (GSM-7, at most three segments), or `heldNotice` silently falls back to `heldFallback` |
 | P3-4b-2 l1 | #490: the invalid-seed control assumes seed 0's first clause is padding; derive the padding from the seed when the catalog changes |
 | P3-4b-2 l2 | #490: the assurance/loop2 assumptions sit in the README, not ASSUMPTIONS.md (OPERATING §5); move them when the README is next touched |
 | P3-4b-2 l3 | Security 3 on #490 (H-4): leaks of single array elements and non-canonical JSON escapes (`\/`, `\u0063`) go undetected; verbatim and canonical only |
