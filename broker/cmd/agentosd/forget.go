@@ -477,9 +477,10 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	since, _ := forgetSince(in.ID)
 	// Owed before the tombstone, so a tombstone that holds always has its
 	// done text owed across a restart (UX-182-3). A failed write does not
-	// stop the forget; the next write carries it.
-	if err := f.owed.owe(goal, owedForget{Since: since, Undone: undone}); err != nil {
-		log.Printf("forget: done text not kept for a restart: %v", err)
+	// stop the forget; retry saves it again (security S2 on #425).
+	owedErr := f.owed.owe(goal, owedForget{Since: since, Undone: undone})
+	if owedErr != nil {
+		log.Printf("forget: done text not kept for a restart: %v", owedErr)
 	}
 	err := f.forget(goal)
 	switch {
@@ -501,13 +502,15 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	}
 	// The tombstone holds: the replay at start finishes it if this
 	// process does not.
-	go f.retry(context.WithoutCancel(ctx), goal, since, undone)
+	go f.retry(context.WithoutCancel(ctx), goal, since, undone, owedErr == nil)
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgetting; retrying"}
 }
 
 // retry forgets goal again with backoff until every save holds, saying
-// once that it is not done yet when that takes forgetNotYet.
-func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, undone int) {
+// once that it is not done yet when that takes forgetNotYet. Until the
+// owed done text is saved (owedSaved), each pass saves it first, so it is
+// on disk before the forget can finish (security S2 on #425).
+func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, undone int, owedSaved bool) {
 	if f.retried != nil {
 		defer f.retried()
 	}
@@ -517,6 +520,13 @@ func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, u
 			// Shutdown: the tombstone's replay at start finishes it, and
 			// finishOwed then texts the done text.
 			return
+		}
+		if !owedSaved {
+			if err := f.owed.owe(goal, owedForget{Since: since, Undone: undone}); err != nil {
+				log.Printf("forget: done text not kept for a restart yet: %v", err)
+			} else {
+				owedSaved = true
+			}
 		}
 		err := f.forget(goal)
 		if err == nil {
