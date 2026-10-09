@@ -7,8 +7,9 @@
 //	                 exit N (worker exec)
 //	guest linger     ignore catchable signals, keep stdout open, and append
 //	                 a byte to /work/linger every 20ms until killed
-//	guest tamper PATH...  try to write each PATH (LOOP-7) and print how many
-//	                 writes the guest's view accepted
+//	guest tamper NONCE PATH...  try to create a sibling named by NONCE
+//	                 beside or inside each PATH, never writing PATH itself
+//	                 (LOOP-7), and print how many the guest's view accepted
 //	guest press KIND MS   apply KIND pressure for MS milliseconds (LOOP-7)
 //	guest idle       sleep until killed (a pressure process)
 //	guest relay SOCK MODE [RECORD REQID]  act on the next owner message

@@ -1,7 +1,7 @@
 // Package machprobe is LOOP-7's in-guest tamper and pressure scripts
 // (P3-4b-4b). It runs inside an agent machine with guest authority only.
-// The scripts are fixed (D-067): they write a fixed marker to the paths
-// they are given and apply bounded CPU, memory, disk and process
+// The scripts are fixed (D-067): they write a fixed marker beside the
+// paths they are given and apply bounded CPU, memory, disk and process
 // pressure. Whether a write landed, and whether the broker held its
 // targets, is judged broker-side (loops.TamperProbe, loops.ExhaustProbe);
 // nothing this package says is trusted.
@@ -26,21 +26,37 @@ const Marker = "agentos-tamper-probe "
 // a file name.
 var nonce = regexp.MustCompile(`^[0-9a-f]{1,64}$`)
 
-// Tamper tries to change each path with the round's nonce: a directory
-// gets a new file named by it, anything else is overwritten with it. It
-// returns how many writes the guest's own view accepted; a malformed
-// nonce writes nothing.
+// Sibling is the name of the file a tamper write creates for a round:
+// the broker looks for it, and removes it, by this name.
+func Sibling(round string) string { return ".agentos-tamper-" + round }
+
+// Tamper tries to change each path with the round's nonce without
+// touching what is there (P3-4b-4c-restore): it creates a new sibling
+// named by Sibling, exclusively, holding the marker; a file's sibling
+// goes in the file's directory, a directory's inside it. It never opens
+// a path for writing, truncates or removes one, and skips a path it
+// cannot see. It returns how many writes the guest's own view accepted;
+// a malformed nonce writes nothing.
 func Tamper(round string, paths []string) int {
 	if !nonce.MatchString(round) {
 		return 0
 	}
 	n := 0
 	for _, p := range paths {
-		target := p
-		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-			target = filepath.Join(p, ".agentos-tamper-"+round)
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
 		}
-		if os.WriteFile(target, []byte(Marker+round+"\n"), 0o644) == nil {
+		dir := filepath.Dir(p)
+		if fi.IsDir() {
+			dir = p
+		}
+		f, err := os.OpenFile(filepath.Join(dir, Sibling(round)), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			continue
+		}
+		_, err = f.WriteString(Marker + round + "\n")
+		if f.Close() == nil && err == nil {
 			n++
 		}
 	}
