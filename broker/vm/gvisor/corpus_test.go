@@ -725,16 +725,34 @@ func rawExec(ctx context.Context, r *Runtime, dir, id string, argv ...string) (s
 	}
 	f.Close()
 	defer os.Remove(f.Name())
-	var stderr bytes.Buffer
-	c := r.cmd(ctx, append([]string{"--log=" + f.Name(), "exec", cid(id)}, argv...)...)
-	c.Stderr = &stderr
-	out, err := c.Output()
-	if exit, ok := err.(*exec.ExitError); ok {
+	for deadline := time.Now().Add(rawExecPausedWait); ; {
+		var stderr bytes.Buffer
+		c := r.cmd(ctx, append([]string{"--log=" + f.Name(), "exec", cid(id)}, argv...)...)
+		c.Stderr = &stderr
+		out, err := c.Output()
+		exit, ok := err.(*exec.ExitError)
+		if !ok {
+			return string(out), err
+		}
+		if exit.ExitCode() == 128 && bytes.Contains(stderr.Bytes(), []byte(rawExecPaused)) && time.Now().Before(deadline) && ctx.Err() == nil {
+			time.Sleep(rawExecPausedPoll)
+			continue
+		}
 		log, _ := os.ReadFile(f.Name())
-		err = fmt.Errorf("%w (exit %d)\nrunsc and guest stderr: %q\nrunsc log: %q", exit, exit.ExitCode(), tail(stderr.Bytes(), rawExecTail), tail(log, rawExecTail))
+		return string(out), fmt.Errorf("%w (exit %d)\nrunsc and guest stderr: %q\nrunsc log: %q", exit, exit.ExitCode(), tail(stderr.Bytes(), rawExecTail), tail(log, rawExecTail))
 	}
-	return string(out), err
 }
+
+// rawExec retries, only while runsc refuses with rawExecPaused, for up to
+// rawExecPausedWait: after a guest tool call the plane's step snapshot
+// pauses the container for the capture (vm.Manager.take), and a bare
+// `runsc exec` has no lock to wait on, unlike production's exec through
+// the worker (P1-4-flake-paused). Any other failure is returned at once.
+const (
+	rawExecPaused     = "in state paused"
+	rawExecPausedWait = 10 * time.Second
+	rawExecPausedPoll = 25 * time.Millisecond
+)
 
 // tail answers b's last n bytes.
 func tail(b []byte, n int) string { return string(b[max(0, len(b)-n):]) }
@@ -769,5 +787,30 @@ func TestRawExecErrorCarriesRunscText(t *testing.T) {
 func TestRawExecErrorClipsRunscText(t *testing.T) {
 	if got := tail([]byte(strings.Repeat("x", 3*rawExecTail)+"end"), rawExecTail); len(got) != rawExecTail || !strings.HasSuffix(got, "end") {
 		t.Fatalf("tail kept %d bytes ending %q", len(got), got[max(0, len(got)-8):])
+	}
+}
+
+// REQ: CAP-8, RES-4
+//
+// P1-4-flake-paused: a raw exec that lands while the step snapshot has the
+// container paused is refused ("in state paused", exit 128). rawExec waits
+// the pause out; the fake refuses the first two execs, as runsc does.
+func TestRawExecWaitsOutAPausedContainer(t *testing.T) {
+	r := fakeRunsc(t, "FAKE_RUNSC_PAUSES="+filepath.Join(t.TempDir(), "n")+":2")
+	out, err := rawExec(context.Background(), r, t.TempDir(), "corpus", "paused")
+	if err != nil || !strings.Contains(out, "guest out") {
+		t.Fatalf("out %q err %v, want the exec to succeed once the pause ends", out, err)
+	}
+}
+
+// Only the "paused" refusal is retried, and only for a bounded time: any
+// other exit 128 answers at once, so a real fault is not hidden.
+func TestRawExecDoesNotRetryOtherRefusals(t *testing.T) {
+	r := fakeRunsc(t)
+	start := time.Now()
+	_, err := rawExec(context.Background(), r, t.TempDir(), "corpus", "fatal128")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 128 || time.Since(start) > rawExecPausedWait/2 {
+		t.Fatalf("err %v after %v, want an immediate exit 128", err, time.Since(start))
 	}
 }
