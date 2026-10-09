@@ -73,6 +73,13 @@ type Config struct {
 	// returns ErrStaleSIM when that SIM is no longer offered. Nil refuses
 	// the op.
 	AdoptSIM func(tag string) error
+	// ForgetTasks lists the owner's recent tasks; Forget asks to forget
+	// one by its goal ID through FORGET's own ask and returns the fixed
+	// reply to show (W3-forget-b3r). Each is given whether the owner's
+	// session is unlocked, as FORGET by text is. Either nil refuses its
+	// op.
+	ForgetTasks func(unlocked bool) localapi.ForgetTasks
+	Forget      func(ctx context.Context, goal string, unlocked bool) string
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -134,7 +141,9 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpPaused:    s.authed(s.paused),
 		localapi.OpAskResume: s.askResume,
 		// Adopting a SIM needs a session, then always a code (CH-19).
-		localapi.OpSIM: s.adoptSIM,
+		localapi.OpSIM:         s.adoptSIM,
+		localapi.OpForgetTasks: s.forgetTasks,
+		localapi.OpForget:      s.forget,
 	}
 }
 
@@ -490,6 +499,41 @@ func (s *Server) askResume(ctx context.Context, _ sockets.Peer, args json.RawMes
 	return localapi.Text{Text: t}, nil
 }
 
+// forgetTasks and forget take whether the owner's session is unlocked
+// from the same status read that checked the token's lock generation, so
+// a lock between two reads cannot hand an older session "unlocked"
+// (SR3-1).
+func (s *Server) forgetTasks(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.Auth
+	if decode(args, &in) != nil {
+		return nil, errUnauthorized
+	}
+	_, st, ok := s.liveStatus(in.Token)
+	if !ok {
+		return nil, errUnauthorized
+	}
+	if s.cfg.ForgetTasks == nil {
+		return nil, errFailed
+	}
+	return s.cfg.ForgetTasks(st.Unlocked), nil
+}
+
+func (s *Server) forget(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.Forget
+	err := decode(args, &in)
+	_, st, ok := s.liveStatus(in.Token)
+	if !ok {
+		return nil, errUnauthorized
+	}
+	if err != nil || in.ID == "" || len(in.ID) > localapi.MaxGoal {
+		return nil, errBadArgs
+	}
+	if s.cfg.Forget == nil {
+		return nil, errFailed
+	}
+	return localapi.Text{Text: s.cfg.Forget(ctx, in.ID, st.Unlocked)}, nil
+}
+
 func lowerHex(v string, n int) bool {
 	if len(v) != n {
 		return false
@@ -552,22 +596,30 @@ func (s *Server) valid(tok string) bool {
 // live is tok's session, read in the same critical section that checks it
 // (Security S2 on step b).
 func (s *Server) live(tok string) (session, bool) {
+	ses, _, ok := s.liveStatus(tok)
+	return ses, ok
+}
+
+// liveStatus is live with the owner status it checked the lock generation
+// against, so a caller's Unlocked is of that same generation (SR3-1).
+func (s *Server) liveStatus(tok string) (session, owner.LocalStatus, bool) {
 	if len(tok) != 2*localapi.TokenBytes {
-		return session{}, false
+		return session{}, owner.LocalStatus{}, false
 	}
-	locks := s.cfg.Owner.LocalStatus().Locks
+	st := s.cfg.Owner.LocalStatus()
+	locks := st.Locks
 	k := sha256.Sum256([]byte(tok))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ses, ok := s.sessions[k]
 	if !ok {
-		return session{}, false
+		return session{}, owner.LocalStatus{}, false
 	}
 	if !s.cfg.Now().Before(ses.until) || locks != ses.locks {
 		delete(s.sessions, k)
-		return session{}, false
+		return session{}, owner.LocalStatus{}, false
 	}
-	return ses, true
+	return ses, st, true
 }
 
 // fresh says tok's session signed in within FreshFor.

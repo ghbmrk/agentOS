@@ -27,16 +27,24 @@ type fakeOwner struct {
 	signIns  int
 	resumes  int
 	left     int
+	unlocked bool
 	answers  []string
 	answerFn func(id, sum string, approve bool, code string) (string, error)
+	// relock, when set, locks and unlocks again just after each status
+	// read, as the owner can between two reads.
+	relock bool
 }
 
 func (f *fakeOwner) LocalStatus() owner.LocalStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	st := owner.LocalStatus{Stopped: f.stopped, Locks: f.locks, LocalLeft: f.left}
+	st := owner.LocalStatus{Stopped: f.stopped, Unlocked: f.unlocked, Locks: f.locks, LocalLeft: f.left}
 	if f.left <= 0 {
 		st.LocalReset = "14:05"
+	}
+	if f.relock {
+		f.locks++
+		f.unlocked = true
 	}
 	return st
 }
@@ -96,6 +104,7 @@ type rig struct {
 	ops     map[string]sockets.Handler
 	follows []string
 	asks    []string
+	forgets []string
 	adopted []string
 }
 
@@ -129,6 +138,19 @@ func newRig(t *testing.T) *rig {
 			}
 			r.adopted = append(r.adopted, tag)
 			return nil
+		},
+		ForgetTasks: func(unlocked bool) localapi.ForgetTasks {
+			if !unlocked {
+				return localapi.ForgetTasks{Locked: true}
+			}
+			return localapi.ForgetTasks{Tasks: []localapi.ForgetTask{{ID: "owner:a", Date: "Mon 5 Oct 11:00", Label: `"pay the gas bill" (today 11:00)`}}}
+		},
+		Forget: func(_ context.Context, goal string, unlocked bool) string {
+			if unlocked {
+				goal += "@unlocked"
+			}
+			r.forgets = append(r.forgets, goal)
+			return "Asked."
 		}})
 	r.ops = r.srv.Ops()
 	return r
@@ -182,19 +204,21 @@ func code(err error) string {
 // tokenOps are the ops that need a token, with args carrying tok.
 func tokenOps(tok string) map[string]any {
 	return map[string]any{
-		localapi.OpSignOut:    localapi.Auth{Token: tok},
-		localapi.OpSession:    localapi.Auth{Token: tok},
-		localapi.OpLines:      localapi.Auth{Token: tok},
-		localapi.OpLine:       localapi.Auth{Token: tok},
-		localapi.OpResume:     localapi.Resume{Token: tok},
-		localapi.OpRequests:   localapi.Auth{Token: tok},
-		localapi.OpWaiting:    localapi.Auth{Token: tok},
-		localapi.OpAnswer:     localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
-		localapi.OpFollowRoot: localapi.FollowRoot{Token: tok, Root: []byte("root")},
-		localapi.OpFollow:     localapi.Follow{Token: tok, Name: "Acme", Digest: digest},
-		localapi.OpPaused:     localapi.Auth{Token: tok},
-		localapi.OpAskResume:  localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
-		localapi.OpSIM:        localapi.AdoptSIM{Token: tok, SIM: simTag, Code: good},
+		localapi.OpSignOut:     localapi.Auth{Token: tok},
+		localapi.OpSession:     localapi.Auth{Token: tok},
+		localapi.OpLines:       localapi.Auth{Token: tok},
+		localapi.OpLine:        localapi.Auth{Token: tok},
+		localapi.OpResume:      localapi.Resume{Token: tok},
+		localapi.OpRequests:    localapi.Auth{Token: tok},
+		localapi.OpWaiting:     localapi.Auth{Token: tok},
+		localapi.OpAnswer:      localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
+		localapi.OpFollowRoot:  localapi.FollowRoot{Token: tok, Root: []byte("root")},
+		localapi.OpFollow:      localapi.Follow{Token: tok, Name: "Acme", Digest: digest},
+		localapi.OpPaused:      localapi.Auth{Token: tok},
+		localapi.OpAskResume:   localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
+		localapi.OpSIM:         localapi.AdoptSIM{Token: tok, SIM: simTag, Code: good},
+		localapi.OpForgetTasks: localapi.Auth{Token: tok},
+		localapi.OpForget:      localapi.Forget{Token: tok, ID: "owner:a"},
 	}
 }
 
@@ -224,8 +248,8 @@ func TestEveryOpButTheOpenOnesNeedsAToken(t *testing.T) {
 			t.Errorf("%s with no args: %v", op, err)
 		}
 	}
-	if len(r.own.answers) != 0 || len(r.follows) != 0 || len(r.adopted) != 0 {
-		t.Fatalf("reached the channel: %v %v %v", r.own.answers, r.follows, r.adopted)
+	if len(r.own.answers) != 0 || len(r.follows) != 0 || len(r.adopted) != 0 || len(r.forgets) != 0 {
+		t.Fatalf("reached the channel: %v %v %v %v", r.own.answers, r.follows, r.adopted, r.forgets)
 	}
 	for op := range open {
 		var args any = struct{}{}

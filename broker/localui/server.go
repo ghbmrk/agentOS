@@ -190,6 +190,7 @@ func (s *Server) routes() {
 	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
 	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))
 	s.Mount("/paused", "Paused", http.HandlerFunc(s.paused))
+	s.Mount("/forget", "Forget a task", http.HandlerFunc(s.forgetPage))
 	if s.cfg.SecondLine != nil {
 		s.Mount("/second-line", "Second line", http.HandlerFunc(s.secondLine))
 	}
