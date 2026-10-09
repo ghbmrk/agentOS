@@ -38,4 +38,4 @@ Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory 
 | Kind | Seen on | Check to add | Owner package |
 |---|---|---|---|
 | A broker child process inherits the daemon's whole environment | #523 (f3), #515 (f2) | A broker test beside the ARC-2 AST walk (`daemon/inference_test.go`) failing when non-test code builds an `exec.Cmd` without assigning `Env` | P3-4b-4c |
-| Code that decides finding closure or containment is not tier A | #523 (f5), #515 (f4) | `loops`, `probecmd`, `corpus`, `loop7` in `TIER_A_BROKER`, pinned in `tests/test_risk_tier.py` | P3-4b-4b |
+| Code that decides finding closure or containment is not tier A | #523 (f5), #515 (f4) | `loops`, `probecmd`, `corpus`, `loop7` in `TIER_A_BROKER`, pinned in `tests/test_risk_tier.py` | P3-4b-4b (done: enforced by `tools/risk_tier.py` since #548; loop7 tier A added at the Security 4a blocker) |
