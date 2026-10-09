@@ -1,6 +1,6 @@
 package maintain
 
-// REQ: UPD-8, SR3-6f-1a, SR3-6f-1b
+// REQ: UPD-8, SR3-6f-1a, SR3-6f-1b, SR3-6-f4b, SR3-6-f4c
 // SR3-6f-1 (Security 4a S1 on #430): one attestor source, read once at the
 // start of each check and by AttestorsChanged, so an owner's narrowing is
 // not undone by the next check.
@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
@@ -206,5 +207,56 @@ func TestNarrowingDuringACheckIsNotUndone(t *testing.T) {
 	r.must(<-changed)
 	if old.Security() {
 		t.Fatal("a check that read the list before the owner's narrowing undid it")
+	}
+}
+
+// SR3-6-f4b (UX and Potency lens on #595, point 1): a narrowing makes the
+// next check due at once and retires the adopted claim that rested on the
+// removed attestor, so STATUS stops saying an independent tester passed.
+func TestNarrowingRetiresTheAdoptedClaim(t *testing.T) {
+	r := newRig(t)
+	r.p.state = change.StateAdopted
+	r.release(2, func(m *update.Manifest) { m.Security = true })
+	r.attest()
+	r.tick()
+	const passed = "An independent tester's report passed."
+	if line := r.l.Status().Line; line != "Security update 2 is ready and installs at the next quiet time. "+passed {
+		t.Fatalf("status before the narrowing: %q", line)
+	}
+
+	r.p.state = ""
+	r.allow = nil
+	r.must(r.l.AttestorsChanged())
+	if !r.l.Urgent() {
+		t.Fatal("a narrowing did not make a check urgent")
+	}
+	if _, ok := r.l.Next(context.Background(), true); !ok {
+		t.Fatal("a narrowing did not make a check due")
+	}
+	r.tick()
+	if line := r.l.Status().Line; strings.Contains(line, passed) {
+		t.Fatalf("status after the narrowing still claims the removed tester's pass: %q", line)
+	}
+	if _, ok := r.l.st.TestedBy[2]; ok {
+		t.Fatalf("TestedBy kept the retired claim: %v", r.l.st.TestedBy)
+	}
+	if r.l.Urgent() {
+		t.Fatal("still urgent after the check that followed the narrowing")
+	}
+}
+
+// SR3-6-f4c (Security point 3 and L3 point 1 on #595): an unreadable list
+// reads as none listed in STATUS, so on a fork the owner is told each
+// security fix is theirs to approve. Kills listed()'s fail-open mutant.
+func TestAttestorSourceErrorStatusReadsAsNoneListed(t *testing.T) {
+	r := newRig(t)
+	r.followAs("Acme")
+	r.attErr = errors.New("settings unreadable")
+	r.tick()
+	if line := r.l.Status().Line; !strings.Contains(line, forkAsks) {
+		t.Fatalf("an unreadable attestor list read as listed: %q", line)
+	}
+	if d := r.digest(); !strings.Contains(d, forkAsks) {
+		t.Fatalf("digest: %q", d)
 	}
 }
