@@ -47,7 +47,7 @@ const (
 // DeliverFooter (security C4, UX U6 on #148).
 const (
 	DeliverSubject = "Your agent's reply"
-	AgentFirstLine = "Written by your AgentOS agent. Links in it were not checked by the box."
+	AgentFirstLine = "Written by your AgentOS agent. Its links were not checked."
 	DeliverFooter  = "Replies to this email are not read."
 	FromAgent      = grants.DeliverFromAgent
 	FromBox        = grants.DeliverFromBox

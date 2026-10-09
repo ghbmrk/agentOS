@@ -122,8 +122,8 @@ func TestPolledTextsReachTheInbox(t *testing.T) {
 // Each texting refusal has its owner wording, without internals.
 func TestTextingErrorsHaveOwnerWording(t *testing.T) {
 	for err, want := range map[error]string{
-		smsapi.ErrLocked:      "while the box is locked. Unlock it on the box's Wi-Fi page",
-		smsapi.ErrNoAccount:   "texting account isn't set up. Set it up on the box's Wi-Fi page",
+		smsapi.ErrLocked:      "while I am locked. Unlock me on my Wi-Fi page",
+		smsapi.ErrNoAccount:   "texting account isn't set up. Set it up on my Wi-Fi page",
 		smsapi.ErrRecipient:   "doesn't text or call that number",
 		smsapi.ErrLimited:     "sent as many texts as it may",
 		smsapi.ErrTooLong:     "too long",
