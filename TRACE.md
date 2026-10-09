@@ -88,7 +88,7 @@ Covered: 131 / 159 requirement IDs
 | OP-9 | — |
 | CAP-1 | `broker/admission/admission_test.go`, `broker/budget/budget_test.go`, `broker/cmd/agentosd/workers_test.go`, `broker/vm/gvisor/gvisor_test.go`, `broker/vm/worker_test.go`, `broker/workers/fit_test.go` |
 | CAP-2 | — |
-| CAP-3 | `broker/change/cascade_test.go`, `broker/change/forget_test.go`, `broker/change/pipeline_test.go`, `broker/cmd/agentos-egress/recallkey_test.go`, `broker/cmd/agentosd/cascade_test.go`, `broker/cmd/agentosd/evidence_test.go`, `broker/cmd/agentosd/forget_agent_test.go`, `broker/cmd/agentosd/forget_owed_test.go`, `broker/cmd/agentosd/forget_test.go`, `broker/cmd/agentosd/forgetlog_test.go`, `broker/cmd/agentosd/restoreconfirm_test.go`, `broker/cmd/agentosd/tasks_test.go`, `broker/cmd/agentosd/values_test.go`, `broker/events/bus_test.go`, `broker/grants/forget_test.go`, `broker/grants/recall_test.go`, `broker/guest/tools_test.go`, `broker/journal/erase_test.go`, `broker/loops/cascade_test.go`, `broker/loops/forget_test.go`, `broker/loops/requeue_test.go`, `broker/mail/watch_test.go`, `broker/recall/recall_test.go`, `broker/recall/review_test.go`, `broker/recall/segment_test.go`, `broker/recalltool/reach_test.go`, `broker/recalltool/takeback_test.go`, `broker/recalltool/tools_test.go`, `broker/recovery/confirm_test.go`, `broker/recovery/forgetlog_test.go`, `broker/vm/forget_test.go`, `broker/vm/worker_test.go` |
+| CAP-3 | `broker/change/cascade_test.go`, `broker/change/forget_test.go`, `broker/change/pipeline_test.go`, `broker/cmd/agentos-egress/recallkey_test.go`, `broker/cmd/agentosd/cascade_test.go`, `broker/cmd/agentosd/evidence_test.go`, `broker/cmd/agentosd/forget_agent_test.go`, `broker/cmd/agentosd/forget_owed_test.go`, `broker/cmd/agentosd/forget_test.go`, `broker/cmd/agentosd/forgetlog_test.go`, `broker/cmd/agentosd/forgetowed_test.go`, `broker/cmd/agentosd/restoreconfirm_test.go`, `broker/cmd/agentosd/tasks_test.go`, `broker/cmd/agentosd/values_test.go`, `broker/events/bus_test.go`, `broker/grants/forget_test.go`, `broker/grants/recall_test.go`, `broker/guest/tools_test.go`, `broker/journal/erase_test.go`, `broker/loops/cascade_test.go`, `broker/loops/forget_test.go`, `broker/loops/requeue_test.go`, `broker/mail/watch_test.go`, `broker/recall/recall_test.go`, `broker/recall/review_test.go`, `broker/recall/segment_test.go`, `broker/recalltool/reach_test.go`, `broker/recalltool/takeback_test.go`, `broker/recalltool/tools_test.go`, `broker/recovery/confirm_test.go`, `broker/recovery/forgetlog_test.go`, `broker/vm/forget_test.go`, `broker/vm/worker_test.go` |
 | CAP-4 | `broker/events/attention_test.go`, `broker/events/bus_test.go`, `broker/mail/watch_test.go`, `broker/recalltool/tools_test.go` |
 | CAP-5 | `broker/cmd/agentos-guest-bridge/main_test.go`, `broker/cmd/agentos-guest-bridge/tree_test.go`, `broker/cmd/agentosd/learn_test.go`, `broker/cmd/agentosd/tree_test.go`, `broker/cmd/agentosd/values_test.go`, `broker/compile/compile_test.go`, `broker/compile/implicit_test.go`, `broker/compile/shape_test.go`, `broker/grants/outcome_test.go`, `broker/skill/format/format_test.go`, `broker/skill/skill_test.go` |
 | CAP-6 | `broker/attention/attention_test.go` |
@@ -134,7 +134,7 @@ Covered: 131 / 159 requirement IDs
 | LOOP-10 | `broker/change/loop2_test.go`, `broker/change/pe5_test.go`, `broker/change/resume_test.go`, `broker/change/wiring_test.go`, `broker/loops/secure_test.go` |
 | LOOP-11 | `broker/maintain/maintain_test.go` |
 | OSS-1 | `broker/hint/emitter_test.go`, `broker/hint/hint_test.go`, `broker/hint/schema_test.go` |
-| OSS-2 | `broker/cleanroom/cleanroom_test.go`, `broker/cleanroom/integration_test.go` |
+| OSS-2 | `broker/cleanroom/cleanroom_test.go`, `broker/cleanroom/durable_test.go`, `broker/cleanroom/integration_test.go` |
 | OSS-3 | `broker/cleanroom/cleanroom_test.go`, `broker/cleanroom/integration_test.go` |
 | OSS-4 | `broker/attest/schema_test.go`, `broker/update/attest_test.go` |
 | OSS-5 | `broker/cleanroom/cleanroom_test.go`, `broker/hint/emitter_test.go`, `broker/hint/hint_test.go`, `broker/hint/schema_test.go` |
@@ -156,7 +156,7 @@ Covered: 131 / 159 requirement IDs
 | UPD-2 | `broker/cmd/agentos-release/main_test.go`, `broker/update/hardening_test.go`, `broker/update/update_test.go` |
 | UPD-3 | `broker/apply/firstboot_test.go`, `broker/firstboot/firstboot_test.go`, `broker/localui/upd3_test.go` |
 | UPD-4 | `broker/loops/updates_test.go`, `broker/maintain/maintain_test.go`, `broker/maintain/settings_test.go` |
-| UPD-5 | `broker/apply/apply_test.go`, `broker/loops/updates_test.go`, `broker/maintain/settings_test.go` |
+| UPD-5 | `broker/apply/apply_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go`, `broker/loops/updates_test.go`, `broker/maintain/maintain_test.go`, `broker/maintain/settings_test.go` |
 | UPD-6 | `broker/apply/apply_test.go` |
 | UPD-7 | — |
 | UPD-8 | `broker/cmd/agentos-release/main_test.go`, `broker/maintain/follow_test.go`, `broker/update/attest_test.go`, `broker/update/follow_test.go`, `broker/update/hardening_test.go`, `broker/update/stage_test.go`, `broker/update/update_test.go` |
