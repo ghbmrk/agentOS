@@ -16,6 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/localui"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 )
@@ -631,4 +632,21 @@ func TestModelLinesFollowTheVaultProcess(t *testing.T) {
 	step("locked again", modelLocked)
 	f.set(modelroute.ModelState{Open: true})
 	step("grant withdrawn", modelNoGrant)
+}
+
+// REQ: OP-9, A11
+// OP-9 (UX blocker on #566, a CH-12 repeat): the no-grant line's fix
+// names only a step the box serves. agentosd does not serve the local
+// page's API-key step yet (localui.AgentosdSetup.ConnectAPIKey), so the
+// line names no page and says a later box version adds it. When the step
+// is served this fails, and the line must name where the owner adds one.
+func TestModelNoGrantNamesAServedStep(t *testing.T) {
+	served := localui.AgentosdSetup{}.ConnectAPIKey("openai", "sk-synthetic-not-a-key") == nil
+	_, fix, _ := strings.Cut(modelNoGrant, "; ")
+	switch {
+	case !served && (strings.Contains(fix, "page") || !strings.Contains(fix, "later box version")):
+		t.Fatalf("adding a key is not served, but the fix reads %q", fix)
+	case served && !strings.Contains(fix, "page"):
+		t.Fatalf("adding a key is served now; name where in %q", fix)
+	}
 }

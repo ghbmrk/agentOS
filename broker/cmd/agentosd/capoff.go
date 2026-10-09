@@ -44,8 +44,10 @@ const (
 	modelUnset = "Model: not set up, so the agent cannot think or learn; " + fixUpdate + "."
 	// C2: the model route does not answer.
 	modelUnreachable = "Model: not reachable, so the agent cannot think and learning cannot test changes; " + fixRestart + "."
-	// C2: no model provider is granted (A11's no-grant cause).
-	modelNoGrant = "Model: no AI plan or key is connected, so no agent can think or learn; add one on the Wi-Fi page."
+	// C2: no model provider is granted (A11's no-grant cause). Grants come
+	// only from the vault process's configuration until agentosd serves
+	// the local page's API-key step (TestModelNoGrantNamesAServedStep).
+	modelNoGrant = "Model: no AI plan or key connected, so no agent can think or learn; a later box version adds this."
 	// C2: the vault is not open, so the model route serves nothing.
 	modelLocked = "Model: the vault is locked, so the agent cannot think or learn; unlock it on the local page."
 	// C7: no recall directory or vault verifier.
