@@ -378,8 +378,9 @@ func TestCredentialsNeverStored(t *testing.T) {
 	}
 	defer st.Close()
 	ix := open(t, st)
+	r := canaryRand(t)
 	for round := 0; round < 20; round++ {
-		cs := mintCanaries(t)
+		cs := mintCanaries(r)
 		var body strings.Builder
 		body.WriteString("Welcome! Your account is ready.\n")
 		for _, c := range cs {

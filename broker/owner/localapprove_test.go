@@ -127,7 +127,9 @@ func TestThePageDeniesAndListsEveryOpenRequest(t *testing.T) {
 	if msg, err := r.ch.LocalAnswer(textID, r.sum(textID), false, ""); err != nil || !strings.Contains(msg, "Denied") {
 		t.Fatalf("deny the rest: %q %v", msg, err)
 	}
-	if _, err := r.ch.LocalAnswer("Z9", "", false, ""); err != ErrNoRequest {
+	// "Z1" is an ID newIDLocked can never issue (a letter, then a digit 2-9),
+	// so it cannot collide with an open request; "Z9" could.
+	if _, err := r.ch.LocalAnswer("Z1", "", false, ""); err != ErrNoRequest {
 		t.Fatalf("unknown: %v", err)
 	}
 }
@@ -731,7 +733,7 @@ func TestTheSpentLocalBoundHasAFixedReset(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		r.advance(time.Hour)
 		code := totpAt(testSecrets.TOTPSeed, r.clock().Unix()) // a right code, refused unchecked
-		if _, err := r.ch.LocalSignIn(code); !errors.Is(err, ErrTooMany) {
+		if _, _, err := r.ch.LocalSignIn(code); !errors.Is(err, ErrTooMany) {
 			t.Fatalf("try %d past the bound: %v", i, err)
 		}
 		if st := r.ch.LocalStatus(); st.LocalLeft != 0 || st.LocalReset != want {

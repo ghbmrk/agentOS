@@ -1,7 +1,6 @@
 package grants
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -600,7 +599,7 @@ func TestRecipientsThatCannotBeShownAreAskedOnThePage(t *testing.T) {
 	if len(local) != 1 || local[0].Ref != bad.Intent.ID {
 		t.Fatalf("asked on the page: %+v", local)
 	}
-	if st := r.state(bad.Intent.ID); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the box's Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id" {
+	if st := r.state(bad.Intent.ID); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the local Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id" {
 		t.Fatalf("page item: %s %q", st.State, st.Permission.Reason)
 	}
 	if st := r.state(ok.Intent.ID); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval" {
@@ -638,23 +637,36 @@ func TestAHeldPageItemSaysHeld(t *testing.T) {
 	}
 }
 
-// Security D6 on P2-2a: until the daemon serves the Approvals page (part
-// 2), no binary turns LocalUI on, so #144's refusal and its wording stay
-// what every build shows.
-func TestNoBinaryAsksOnThePageYet(t *testing.T) {
+// Security D6 on P2-2a, as P2-2w d turns the page on: LocalUI is set in
+// one place, the daemon, and only from whether it serves the page
+// (localui.sock), so no binary asks on a page nobody serves; #144's
+// refusal and its wording stay what a box without the page shows.
+func TestOnlyTheServedPageTurnsLocalUIOn(t *testing.T) {
 	if RecipientsNotTextable != "can't be approved by text: each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all; ask again with a new request_id" {
 		t.Fatalf("wording changed: %q", RecipientsNotTextable)
 	}
-	for _, dir := range []string{"../cmd", "../daemon"} {
+	const want = "gcfg.LocalUI = cfg.PageSocket != nil"
+	// Every package but grants itself (L3 F2 on #322): a setter in any
+	// other main or library package fails too.
+	for _, dir := range []string{".."} {
 		err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && d.IsDir() && p == filepath.Join("..", "grants") {
+				return fs.SkipDir
+			}
 			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 				return err
 			}
 			b, err := os.ReadFile(p)
-			if err == nil && bytes.Contains(b, []byte("LocalUI")) {
-				t.Errorf("%s sets LocalUI", p)
+			if err != nil {
+				return err
 			}
-			return err
+			for _, line := range strings.Split(string(b), "\n") {
+				if strings.Contains(line, "LocalUI") && !strings.HasPrefix(strings.TrimSpace(line), "//") &&
+					(p != filepath.Join("..", "daemon", "daemon.go") || strings.TrimSpace(line) != want) {
+					t.Errorf("%s: %s", p, strings.TrimSpace(line))
+				}
+			}
+			return nil
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -704,7 +716,7 @@ func TestPageRequestsInOneFlushAreAskedTogether(t *testing.T) {
 		t.Fatalf("%d calls, local %v", calls, local)
 	}
 	for _, id := range []string{a.Intent.ID, b.Intent.ID} {
-		if st := r.state(id); st.State != journal.Pending || !strings.HasPrefix(st.Permission.Reason, "waiting for the owner's approval on the box's Wi-Fi page;") {
+		if st := r.state(id); st.State != journal.Pending || !strings.HasPrefix(st.Permission.Reason, "waiting for the owner's approval on the local Wi-Fi page;") {
 			t.Fatalf("%s: %s %q", id, st.State, st.Permission.Reason)
 		}
 	}
@@ -714,5 +726,69 @@ func TestPageRequestsInOneFlushAreAskedTogether(t *testing.T) {
 	r.g.Flush()
 	if st := r.state(c.Intent.ID); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "could not ask the owner") {
 		t.Fatalf("unasked: %s %q", st.State, st.Permission.Reason)
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1b QH-8)
+
+// TestGrantsUseOwnerQuietAndAllowance: wired as agentosd wires it, the
+// gate reads the owner's quiet hours, the owner's URGENT APPROVAL, and the
+// owner's one hourly allowance in place of its own count. A request in
+// quiet hours waits until they end; with the allowance spent by updates a
+// request waits for the next hour, though grants' own count has room;
+// with room in the allowance a request goes, though grants' own count is
+// past RequestsPerHour; URGENT APPROVAL ON sends at once.
+func TestGrantsUseOwnerQuietAndAllowance(t *testing.T) {
+	quiet, urgent, allow := true, false, 3
+	r := newRig(t, func(c *Config) {
+		c.Quiet = func(time.Time) bool { return quiet }
+		c.Urgent = func(owner.Item) bool { return urgent }
+		c.Allowance = func(time.Time) int { return allow }
+		c.RequestsPerHour = 1 // grants' own count: spent by the grant's request
+	})
+	r.grant(mailGrant())
+	base := r.own.count()
+	sent := func() int { return r.own.count() - base }
+	ask := func(id string) {
+		t.Helper()
+		x := sam()
+		x.Record = id
+		r.ver.set(id, x)
+		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
+		r.advance(5 * time.Minute)
+		r.g.Tick()
+	}
+
+	ask("a")
+	if sent() != 0 {
+		t.Fatal("sent in quiet hours")
+	}
+	quiet = false
+	r.g.Tick()
+	if sent() != 1 {
+		t.Fatalf("after quiet hours: %d requests, want 1 on the owner's allowance", sent())
+	}
+
+	allow = 0 // updates spent the hour
+	ask("b")
+	if sent() != 1 {
+		t.Fatal("sent past the owner's allowance")
+	}
+	if r.g.Reserve(false) {
+		t.Fatal("question reserved past the owner's allowance")
+	}
+	allow = 3 // the next hour
+	r.g.Tick()
+	if sent() != 2 {
+		t.Fatal("not sent once the allowance had room")
+	}
+	if !r.g.Reserve(false) {
+		t.Fatal("question refused with the owner's allowance left")
+	}
+
+	allow, quiet, urgent = 0, true, true
+	ask("c")
+	if sent() != 3 {
+		t.Fatal("URGENT APPROVAL ON: not sent at once")
 	}
 }

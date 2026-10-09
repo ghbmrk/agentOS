@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -41,8 +42,15 @@ var machineRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 //
 // A replay machine's calls (modelroute.EvalPrefix) take the evaluation
 // route, ev; see evalRoute.
+//
+// A request with modelroute.HeaderState is the broker's state probe (OP-9
+// C2), answered whatever the vault's phase; see modelState.
 func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(modelroute.HeaderState) != "" {
+			modelState(c, w, r)
+			return
+		}
 		machine := r.Header.Get(modelroute.HeaderMachine)
 		if !machineRE.MatchString(machine) {
 			http.Error(w, "no machine named", http.StatusBadRequest)
@@ -67,18 +75,27 @@ func modelHandler(c *custody, rt *route.Router, ev *evalRoute) http.Handler {
 			return
 		}
 		var ca callAudit
-		w.Header().Set("Trailer", modelroute.HeaderUsage)
 		// A Loop 1 builder machine is always private and uses the
 		// builders' grants (-builder-from), never its own (C-3c-6).
 		up := p.HandlerFor(machine, label, &ca)
 		if builder {
 			up = p.HandlerWithGrantsOf(machine, modelroute.BuilderPrefix, label, &ca)
 		}
-		rt.HandlerFor(machine, label, up, ca.decide(w, r.Method)).ServeHTTP(w, r)
-		if u := ca.usage(); u != "" {
-			w.Header().Set(modelroute.HeaderUsage, u)
-		}
+		ca.serve(rt, machine, label, up, w, r)
 	})
+}
+
+// modelState answers the broker's state probe: whether a model provider is
+// granted and whether the vault is open, and nothing else (never a grant's
+// machine or provider, a key, or any vault content). Only the broker sends
+// HeaderState: modelroute.Forward drops a guest's copy.
+func modelState(c *custody, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.granted, Open: c.model() != nil})
 }
 
 // evalRoute is the model access of replay machines (LOOP-5, replay K1).
@@ -195,11 +212,7 @@ func (ev *evalRoute) serve(c *custody, machine string, w http.ResponseWriter, r 
 		return
 	}
 	var ca callAudit
-	w.Header().Set("Trailer", modelroute.HeaderUsage)
-	rt.HandlerFor(machine, "private", p.HandlerWithGrantsOf(machine, ev.From, "private", &ca), ca.decide(w, r.Method)).ServeHTTP(w, r)
-	if u := ca.usage(); u != "" {
-		w.Header().Set(modelroute.HeaderUsage, u)
-	}
+	ca.serve(rt, machine, "private", p.HandlerWithGrantsOf(machine, ev.From, "private", &ca), w, r)
 }
 
 func (ev *evalRoute) rule(raw string) (route.Rule, error) {
@@ -221,9 +234,38 @@ func (ev *evalRoute) rule(raw string) (route.Rule, error) {
 // response header for its journal (egress E6), and a served call's
 // provider-reported usage in a trailer for its OP-8 meter (K9).
 type callAudit struct {
-	mu     sync.Mutex
-	denial *modelroute.Denial // the proxy's
-	served *route.Decision
+	mu       sync.Mutex
+	denial   *modelroute.Denial // the proxy's
+	served   *route.Decision
+	reported *modelroute.Usage // the router's report when it served none
+}
+
+// serve routes one call through rt to up for machine, with as many
+// attempts past the first as the broker's meter holds for it
+// (modelroute.HeaderAttempts, SR3-7-f1b): a missing or unreadable
+// allowance means one attempt. The broker's forwarder drops a guest's
+// copy of the header. The call's usage, with every attempt the router
+// failed over from, goes back in the HeaderUsage trailer (SR3-7-f1c).
+func (a *callAudit) serve(rt *route.Router, machine, label string, up http.Handler, w http.ResponseWriter, r *http.Request) {
+	left, err := strconv.Atoi(r.Header.Get(modelroute.HeaderAttempts))
+	if err != nil || left < 0 || left > modelroute.MaxRetries {
+		left = 0
+	}
+	ctx := route.WithAttempt(r.Context(), func() bool {
+		if left == 0 {
+			return false
+		}
+		left--
+		return true
+	})
+	ctx = route.WithUsage(ctx, func(provider string, u route.Usage) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		a.reported = usageOf(provider, u)
+	})
+	w.Header().Set("Trailer", modelroute.HeaderUsage)
+	rt.HandlerFor(machine, label, up, a.decide(w, r.Method)).ServeHTTP(w, r.WithContext(ctx))
+	w.Header().Set(modelroute.HeaderUsage, a.usage())
 }
 
 // Egress takes the proxy's decision. The proxy runs on its own goroutine
@@ -285,24 +327,36 @@ func clipReason(r string) string {
 	return strings.ToValidUTF8(r[:maxDenialReason], "") + "…[clipped]"
 }
 
-// usage renders a served call's usage as the HeaderUsage trailer, with the
-// serving provider so the meter weighs cached input at that provider's
-// rates; "" if no call was served. Unreported usage still carries the
-// output characters the router counted.
+// usage renders the call's usage as the HeaderUsage trailer: a served
+// call's with the serving provider, so the meter weighs cached input at
+// that provider's rates, and with the attempts it failed over from;
+// else the router's report of the attempts that failed; else
+// {"none":true}, nothing sent upstream. Unreported usage still carries
+// the output characters the router counted.
 func (a *callAudit) usage() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.served == nil || a.served.Usage == nil {
-		return ""
+	var u *modelroute.Usage
+	switch {
+	case a.served != nil && a.served.Usage != nil:
+		provider, _, _ := strings.Cut(a.served.Route, "/")
+		u = usageOf(provider, *a.served.Usage)
+	case a.reported != nil:
+		u = a.reported
+	default:
+		return `{"none":true}`
 	}
-	u := a.served.Usage
-	provider, _, _ := strings.Cut(a.served.Route, "/")
-	b, err := json.Marshal(modelroute.Usage{Provider: provider, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
-		CacheWrite: u.CacheWrite, Reported: u.Reported, Complete: u.Complete, OutputChars: u.OutputChars})
+	b, err := json.Marshal(u)
 	if err != nil {
 		return ""
 	}
 	return string(b)
+}
+
+func usageOf(provider string, u route.Usage) *modelroute.Usage {
+	return &modelroute.Usage{Provider: provider, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
+		CacheWrite: u.CacheWrite, Reported: u.Reported, Complete: u.Complete, OutputChars: u.OutputChars,
+		Failed: u.Failed, Unserved: u.Unserved}
 }
 
 // maxUnlockBody bounds a request on the unlock socket.
@@ -469,6 +523,7 @@ func unlockHandler(c *custody) http.Handler {
 	})
 	secondLineRoutes(mux, c, read, reply, fail)
 	smsRoutes(mux, c, read, reply, fail)
+	mailRoutes(mux, c, read, reply, fail)
 	return mux
 }
 
@@ -482,6 +537,32 @@ func unlockHandler(c *custody) http.Handler {
 // second line waits on the owner (egress K13), and GET /second-line/texts
 // whether its texting account's polls are failing (K16), and nothing
 // else.
+// updateAnchorHandler serves the update store's anchor (SR3-6f-2c): GET
+// reads it, POST raises it to 1. Nothing lowers it. {"anchored":false} is
+// a vault that never had a counter, on a PC with no TPM; a recorded
+// counter that is gone, or on a TPM this PC lacks, is 409.
+func updateAnchorHandler(c *custody, w http.ResponseWriter, r *http.Request) {
+	read := c.updateAnchorRead
+	if r.Method == http.MethodPost {
+		read = c.updateAnchorRaise
+	}
+	anchored, n, err := read()
+	switch {
+	case err == errLocked:
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	case err == errUpdateAnchorMissing, err == errUpdateAnchorElsewhere:
+		http.Error(w, err.Error(), http.StatusConflict)
+	case err != nil:
+		http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(struct {
+			Anchored bool   `json:"anchored"`
+			Count    uint64 `json:"count,omitempty"`
+		}{anchored, n})
+	}
+}
+
 func verifyHandler(c *custody) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/recall-key" {
@@ -523,8 +604,16 @@ func verifyHandler(c *custody) http.Handler {
 			}
 			return
 		}
+		if (r.Method == http.MethodGet && r.URL.Path == "/update-anchor") || (r.Method == http.MethodPost && r.URL.Path == "/update-anchor/raise") {
+			updateAnchorHandler(c, w, r)
+			return
+		}
+		if r.Method == http.MethodPost && (r.URL.Path == "/enroll" || r.URL.Path == "/enroll/confirm" || r.URL.Path == "/enroll/seal") {
+			enrollHandler(c, w, r)
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify or /recall-key, or GET /second-line or /second-line/texts, only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal or /update-anchor/raise, or GET /second-line, /second-line/texts or /update-anchor, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest
@@ -550,6 +639,52 @@ func verifyHandler(c *custody) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(modelroute.VerifyResult{OK: ok, Step: step})
 	})
+}
+
+// enrollHandler serves setup's enrollment (enroll.go) to agentosd: POST
+// /enroll answers the new seed's link once, POST /enroll/confirm only
+// whether the code matched, POST /enroll/seal nothing.
+func enrollHandler(c *custody, w http.ResponseWriter, r *http.Request) {
+	var res any
+	var err error
+	switch r.URL.Path {
+	case "/enroll":
+		var uri string
+		uri, err = c.enroll()
+		res = modelroute.EnrollResult{URI: uri}
+	case "/enroll/seal":
+		err = c.sealEnroll()
+		res = struct{}{}
+	default:
+		var req modelroute.EnrollConfirmRequest
+		if derr := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); derr != nil {
+			http.Error(w, "malformed request", http.StatusBadRequest)
+			return
+		}
+		var ok bool
+		ok, err = c.confirmEnroll(req.Code)
+		res = modelroute.VerifyResult{OK: ok}
+	}
+	var paused *pausedError
+	switch {
+	case err == nil:
+	case err == errLocked:
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	case err == errEnrolled, err == errNotOpen, err == errNoEnrollment, err == errNotConfirmed:
+		http.Error(w, err.Error(), err.(*unlockErr).status)
+		return
+	case errors.As(err, &paused):
+		w.Header().Set(modelroute.HeaderPausedUntil, paused.until.UTC().Format(time.RFC3339))
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	default:
+		http.Error(w, errInternal.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(res)
 }
 
 // peerListener accepts only connections from one uid (SO_PEERCRED); every

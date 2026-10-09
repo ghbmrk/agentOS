@@ -15,10 +15,13 @@ package modemlink
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,6 +74,9 @@ type Config struct {
 	// Location is the time zone of the recovery text's times: the box's
 	// (default time.Local).
 	Location *time.Location
+	// Record records iccid as the owner line's SIM, where the bridge reads
+	// it at its next open (agentos-modem's roles file); nil refuses Adopt.
+	Record func(iccid string) error
 }
 
 // Outage is a stretch when the owner line could not be used, and how many
@@ -111,6 +117,10 @@ type Link struct {
 	// began before it may be a dead bridge's connection, so it is handed
 	// nothing (its item would be lost).
 	okSince time.Time
+	// iccid is the SIM the bridge reports while the line is swapped or
+	// unbound ("": none, or unreadable); adopted, the one Adopt recorded,
+	// until the bridge reports another state or SIM.
+	iccid, adopted string
 }
 
 // New returns a Link. Until the bridge reports the owner line's state, it
@@ -225,6 +235,61 @@ func (l *Link) send(to, text string, request bool) error {
 	if to != l.cfg.Owner {
 		return ErrRecipient
 	}
+	return l.deliver(text, request).err()
+}
+
+// ReceiptOutcome is what a Receipt proves about one text.
+type ReceiptOutcome string
+
+const (
+	// ReceiptAccepted: the bridge reported CodeOK for this item.
+	ReceiptAccepted ReceiptOutcome = "accepted"
+	// ReceiptNotSent: provably never given to the modem (W5-Db DB-3).
+	ReceiptNotSent ReceiptOutcome = "not-sent"
+	// ReceiptUnknown: the text may have gone; nothing proves either way.
+	ReceiptUnknown ReceiptOutcome = "unknown"
+)
+
+// Receipt is SendReceipt's account of one text. Evidence is the item ID,
+// or for a text never queued a fixed tag; Code is the bridge's result
+// code when one arrived.
+type Receipt struct {
+	Outcome  ReceiptOutcome
+	Evidence string
+	Code     string
+}
+
+func (r Receipt) err() error {
+	if r.Outcome == ReceiptAccepted {
+		return nil
+	}
+	return modem.ErrDown
+}
+
+// SendReceipt is Send for a caller that must tell "not sent" from "maybe
+// sent" (the digest queue). NotSent only when the text was refused before
+// queuing, timed out still queued (never handed to the bridge), or the
+// bridge answered CodeRecipient, which it emits only before any modem call.
+// Everything else that is not CodeOK is Unknown. The error is as Send's.
+func (l *Link) SendReceipt(to, text string) (Receipt, error) {
+	if to != l.cfg.Owner {
+		return Receipt{Outcome: ReceiptNotSent, Evidence: "wrong-recipient"}, ErrRecipient
+	}
+	r := l.deliver(text, false)
+	return r, r.err()
+}
+
+func receiptOf(id, code string) Receipt {
+	switch code {
+	case bridgeproto.CodeOK:
+		return Receipt{Outcome: ReceiptAccepted, Evidence: id, Code: code}
+	case bridgeproto.CodeRecipient:
+		return Receipt{Outcome: ReceiptNotSent, Evidence: "recipient:" + id, Code: code}
+	}
+	return Receipt{Outcome: ReceiptUnknown, Evidence: id, Code: code}
+}
+
+func (l *Link) deliver(text string, request bool) Receipt {
 	now := l.cfg.Now()
 	l.mu.Lock()
 	if !l.usableLocked(now) || len(l.queue)+len(l.out) >= MaxQueued {
@@ -235,7 +300,7 @@ func (l *Link) send(to, text string, request bool) error {
 			}
 		}
 		l.mu.Unlock()
-		return modem.ErrDown
+		return Receipt{Outcome: ReceiptNotSent, Evidence: "not-queued"}
 	}
 	it := &item{Item: bridgeproto.Item{ID: newID(), Line: bridgeproto.LineOwner, To: l.cfg.Owner, Text: text},
 		result: make(chan string, 1), handed: make(chan struct{})}
@@ -253,23 +318,25 @@ func (l *Link) send(to, text string, request bool) error {
 		t.Reset(l.cfg.SendWait)
 	case <-t.C:
 		l.mu.Lock()
+		// Still queued under mu: the outbox can no longer hand it out.
+		queued := slices.Contains(l.queue, it)
 		l.dropLocked(it)
 		l.timedOut++
 		l.mu.Unlock()
-		return modem.ErrDown
+		if queued {
+			return Receipt{Outcome: ReceiptNotSent, Evidence: "not-handed:" + it.ID}
+		}
+		return Receipt{Outcome: ReceiptUnknown, Evidence: it.ID}
 	}
 	select {
 	case code := <-it.result:
-		if code == bridgeproto.CodeOK {
-			return nil
-		}
-		return modem.ErrDown
+		return receiptOf(it.ID, code)
 	case <-t.C:
 		l.mu.Lock()
 		l.dropLocked(it)
 		l.timedOut++
 		l.mu.Unlock()
-		return modem.ErrDown
+		return Receipt{Outcome: ReceiptUnknown, Evidence: it.ID}
 	}
 }
 
@@ -333,15 +400,76 @@ func (l *Link) OwnerLineNote() string {
 	if st == bridgeproto.StateOK && l.cfg.Now().Sub(l.seen) > Silent {
 		st = bridgeproto.StateDown
 	}
-	switch st {
-	case bridgeproto.StateOK:
+	switch {
+	case st == bridgeproto.StateOK:
 		return ""
-	case bridgeproto.StateSwapped:
-		return "The SIM in my phone modem changed. Texts to and from you are paused until you confirm it on my Wi-Fi page."
-	case bridgeproto.StateUnbound:
-		return "My phone modem has no SIM, or its number isn't set up. Set it up on my Wi-Fi page."
+	case st == bridgeproto.StateDown:
+		return "I can't reach my phone modem. Check it's plugged in."
+	case l.adopted != "":
+		return "Setting up the SIM ending in " + simEnds(l.adopted) + " as my number. Texts with you start again within a minute."
+	case st == bridgeproto.StateSwapped && l.iccid != "":
+		return "The SIM in my phone modem changed. Texts to and from you are paused until you confirm it below."
+	case st == bridgeproto.StateSwapped:
+		return "The SIM in my phone modem changed, and I can't read it. Texts to and from you are paused. Check the SIM is in properly."
+	case l.iccid != "":
+		return "My phone modem's SIM isn't set up as my number yet. Set it up below."
 	}
-	return "I can't reach my phone modem. Check it's plugged in."
+	return "My phone modem has no SIM I can read. Put the SIM for my number in it."
+}
+
+// ErrStale refuses Adopt: the line is no longer swapped or unbound, or its
+// SIM is not the one the page showed.
+var ErrStale = errors.New("modemlink: not the SIM the page showed")
+
+// SIM is the SIM the owner may adopt as the owner line's, while the line is
+// swapped or unbound and the bridge can read it: a tag for Adopt and the
+// serial's last four digits. The page is never given the serial itself.
+func (l *Link) SIM() (tag, ends string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.iccid == "" || l.adopted != "" {
+		return "", ""
+	}
+	return simTag(l.iccid), simEnds(l.iccid)
+}
+
+// Adopt records the SIM the page showed under tag as the owner line's
+// (P2-2w d2b). The caller has checked the owner's code (CH-19): adopting
+// re-opens the owner channel on that SIM's line. The bridge takes it at
+// its next open and reports the line ok.
+func (l *Link) Adopt(tag string) error {
+	l.mu.Lock()
+	iccid := l.iccid
+	ok := iccid != "" && l.adopted == "" && tag == simTag(iccid)
+	l.mu.Unlock()
+	if !ok {
+		return ErrStale
+	}
+	if l.cfg.Record == nil {
+		return errors.New("modemlink: no recorder for the owner line's SIM")
+	}
+	if err := l.cfg.Record(iccid); err != nil {
+		return err
+	}
+	l.mu.Lock()
+	if l.iccid == iccid {
+		l.adopted = iccid
+	}
+	l.mu.Unlock()
+	return nil
+}
+
+// simTag names a serial for the page without revealing it.
+func simTag(iccid string) string {
+	h := sha256.Sum256([]byte("agentos sim " + iccid))
+	return hex.EncodeToString(h[:8])
+}
+
+// simEnds is a serial's last four digits, as printed on the SIM's card,
+// past any hex pad.
+func simEnds(iccid string) string {
+	s := strings.TrimRight(iccid, "F")
+	return s[max(0, len(s)-4):]
 }
 
 // Ops are owner.sock's bridge ops.
@@ -474,13 +602,21 @@ func (l *Link) sent(_ context.Context, _ sockets.Peer, args json.RawMessage) (an
 
 func (l *Link) setState(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var st bridgeproto.State
-	if json.Unmarshal(args, &st) != nil || !bridgeproto.ValidOwnerLine(st.OwnerLine) {
+	if json.Unmarshal(args, &st) != nil || !bridgeproto.ValidOwnerLine(st.OwnerLine) || st.ICCID != "" && !bridgeproto.ValidICCID(st.ICCID) {
 		return nil, errBadState
 	}
 	now := l.cfg.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.state = st.OwnerLine
+	iccid := ""
+	if st.OwnerLine == bridgeproto.StateSwapped || st.OwnerLine == bridgeproto.StateUnbound {
+		iccid = st.ICCID
+	}
+	if iccid != l.iccid || iccid == "" {
+		l.adopted = ""
+	}
+	l.iccid = iccid
 	if st.OwnerLine != bridgeproto.StateOK {
 		// Swapped or unbound: what was handed out may be on the wrong
 		// SIM's line; nothing more goes (S-B8).
