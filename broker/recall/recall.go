@@ -467,7 +467,7 @@ func (ix *Index) prepare(id string, it Item, now time.Time) (pendingPut, error) 
 	it.Text = ix.scrub.Scrub(it.Text)
 	facts := make([]Fact, 0, len(it.Facts))
 	for _, f := range it.Facts {
-		facts = append(facts, Fact{ix.scrub.Scrub(f.Subject), ix.scrub.Scrub(f.Predicate), ix.scrub.Scrub(f.Object)})
+		facts = append(facts, ix.scrub.ScrubFact(f))
 	}
 	it.Facts = facts
 	it.Source.DerivedFrom = append([]string(nil), it.Source.DerivedFrom...)

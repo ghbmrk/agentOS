@@ -9,10 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/grants"
+	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
-// REQ: CH-7, CH-10, ARC-2
+// REQ: CH-7, CH-10, ARC-2, CH-3, CH-20, CHG-4
 
 func startLocalUI(t *testing.T, dir string, ui *PageSocket) {
 	t.Helper()
@@ -24,13 +26,50 @@ func startLocalUI(t *testing.T, dir string, ui *PageSocket) {
 	t.Cleanup(cancel)
 }
 
+// evidenceReason is the gate's reason for the owner asking to email
+// private replies, which needs the box's Wi-Fi page (CH-20).
+func evidenceReason(t *testing.T, d *Daemon) string {
+	t.Helper()
+	st, err := d.Gate().Submit(grants.EvidenceIntent("owner/evidence/t", grants.OriginOwner, "owner@example.test", "mail"))
+	if err == nil && st.State == journal.Pending {
+		st, err = d.Gate().Authorize(t.Context(), st.Intent.ID)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Permission.Reason
+}
+
+// P2-2w d: the gate asks on the box's Wi-Fi page exactly when agentosd
+// serves it (LocalUI on); without the page, such a change is refused
+// with the reason that names it (CH-3, CH-20, CHG-4).
+func TestServingThePageTurnsLocalUIOn(t *testing.T) {
+	keep := func(s string) string { return s } // reasons kept, to tell them apart
+	dir := t.TempDir()
+	cancel, d := startWith(t, dir, func(c *Config) {
+		c.Auth, c.OwnerState, c.Redactor = nil, filepath.Join(dir, "owner.json"), keep
+		c.PageSocket = &PageSocket{UID: os.Getuid()}
+	})
+	defer cancel()
+	if r := evidenceReason(t, d); r == grants.NoPageEvidence || r == Redacted {
+		t.Fatalf("page served: %q", r)
+	}
+	cancel2, off := startWith(t, t.TempDir(), func(c *Config) { c.Redactor = keep })
+	defer cancel2()
+	if r := evidenceReason(t, off); r != grants.NoPageEvidence {
+		t.Fatalf("no page: %q", r)
+	}
+}
+
 // P2-2w a: agentosd serves the page's ops on localui.sock, given to the
 // local UI's group (Security L3), and a raw client with the UI's uid and
 // no token is refused every op but status and STOP (L1).
 func TestTheLocalUISocketServesThePageOps(t *testing.T) {
 	dir := t.TempDir()
 	gid := os.Getgid()
-	startLocalUI(t, dir, &PageSocket{UID: os.Getuid(), GID: &gid, LineNote: func() string { return "note" }})
+	startLocalUI(t, dir, &PageSocket{UID: os.Getuid(), GID: &gid, Line: func() localapi.Line {
+		return localapi.Line{Note: "note", Others: 3, TimedOut: 2, Dropped: true, Outage: &localapi.Outage{Missed: 4, Requests: 1}}
+	}})
 	sock := filepath.Join(dir, "run", localapi.Socket)
 	fi, err := os.Stat(sock)
 	if err != nil {
@@ -39,11 +78,13 @@ func TestTheLocalUISocketServesThePageOps(t *testing.T) {
 	if fi.Mode().Perm() != 0o660 {
 		t.Fatalf("mode %v", fi.Mode().Perm())
 	}
-	// The owner line's note reaches the page before sign-in (L3 on #184).
-	if r := send(t, sock, localapi.OpStatus, struct{}{}); !r.OK || !strings.Contains(string(r.Result), `"line_note":"note"`) {
+	// The owner line's note reaches the page before sign-in (L3 on #184);
+	// its counts do not (Security D1, P2-2w d2a).
+	if r := send(t, sock, localapi.OpStatus, struct{}{}); !r.OK || !strings.Contains(string(r.Result), `"line_note":"note"`) ||
+		strings.Contains(string(r.Result), "missed") || strings.Contains(string(r.Result), "others") {
 		t.Fatalf("status: %+v", r)
 	}
-	for _, op := range []string{localapi.OpLines, localapi.OpRequests, localapi.OpResume, localapi.OpWaiting, localapi.OpAnswer, localapi.OpSignOut} {
+	for _, op := range []string{localapi.OpLine, localapi.OpLines, localapi.OpRequests, localapi.OpResume, localapi.OpWaiting, localapi.OpAnswer, localapi.OpSignOut, localapi.OpPaused, localapi.OpAskResume} {
 		if r := send(t, sock, op, struct{}{}); r.OK || r.Error != localapi.ErrUnauthorized {
 			t.Errorf("%s without a token: %+v", op, r)
 		}
@@ -120,5 +161,23 @@ func TestTheLocalUISocketCapsConnections(t *testing.T) {
 		if time.Now().After(deadline) || len(held) > 64 {
 			t.Fatalf("%d connections held, last answered %q", len(held), line)
 		}
+	}
+}
+
+// W5a-resume: the page's resume ask reaches the gate, and an ask for a
+// grant not paused as the page showed it gets fixed words, not an error.
+func TestThePageAsksTheGateToResume(t *testing.T) {
+	dir := t.TempDir()
+	cancel, d := startWith(t, dir, func(c *Config) {
+		c.Auth, c.OwnerState = nil, filepath.Join(dir, "owner.json")
+		c.PageSocket = &PageSocket{UID: os.Getuid()}
+	})
+	defer cancel()
+	if p := pausedGrants(d.Gate()); len(p) != 0 {
+		t.Fatalf("paused %+v", p)
+	}
+	txt, err := askResume(t.Context(), d.Gate(), "G1", "loop2/pause/G1/1")
+	if err != nil || !strings.Contains(txt, "no longer paused") {
+		t.Fatalf("%q %v", txt, err)
 	}
 }

@@ -1,5 +1,6 @@
 name: assurance
-# Permanent gates for SPEC.md A5 (canary test) and A9 (dependency audit).
+# Permanent gates for SPEC.md A5 (canary test), A9 (dependency audit) and
+# A11's loop 2 clause (qualification harness, in the canary job).
 # Each job runs deliberate-leak controls beside the real targets: a clean scan
 # counts only because the same scan, in the same run, caught every planted leak.
 on:
@@ -11,6 +12,11 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# A newer push to the same PR cancels the older run; pushes to main
+# and scheduled runs always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 # Builds never download a Go toolchain: setup-go installs the one go.mod's
 # toolchain line names (setup-go's go-version-file reads only the go line),
 # each job checks it, and an offline build fails rather than fetch one.
@@ -18,9 +24,12 @@ env:
   GOTOOLCHAIN: local
 # Both harnesses are stdlib-only, so they use the runner's system python3: no
 # setup action to pin or trust.
+# Every job has a 30-minute timeout: a whole run takes about 4 minutes, and a
+# hung job would otherwise hold one of the few runners for GitHub's 6h default.
 jobs:
   canary:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -35,6 +44,16 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      # Each target runs as the runner's first subordinate id in its own user
+      # namespace (tools/canary.py, tools/ASSUMPTIONS.md D13), as in dependency-audit.
+      - name: Subordinate ids for the canary sandbox
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          command -v newuidmap && command -v newgidmap || { sudo apt-get update -q && sudo apt-get install -yq uidmap; }
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: Canary scan (A5), fresh canaries every round
         run: python3 tools/canary.py run --targets assurance/canary-targets.json --rounds 3 --report canary-report.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -43,8 +62,23 @@ jobs:
           name: canary-report
           path: canary-report.json
           if-no-files-found: ignore
+      # A11 loop 2 qualification (P3-4b-2): every seed, then one picked at
+      # random; each run also runs its mutation controls.
+      - name: Loop 2 qualification (A11), every seed
+        if: always()
+        run: python3 assurance/loop2/run.py --catalog assurance/loop2-seeds --all --report loop2-all.json
+      - name: Loop 2 qualification (A11), one seed picked at random
+        if: always()
+        run: python3 assurance/loop2/run.py --catalog assurance/loop2-seeds --pick --report loop2-pick.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: loop2-qualification-report
+          path: loop2-*.json
+          if-no-files-found: ignore
   dependency-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -68,6 +102,13 @@ jobs:
           # io_uring socket operations are invisible to strace; disable them outright.
           sudo sysctl -w kernel.io_uring_disabled=2
           command -v strace || { sudo apt-get update -q && sudo apt-get install -yq strace; }
+          # The scenario runs as uid 1000 of the sandbox's user namespace, mapped to the
+          # runner's first subordinate id (DEP-3): newuidmap/newgidmap and a range are needed.
+          echo "probe: newuidmap=$(command -v newuidmap || echo none) newgidmap=$(command -v newgidmap || echo none)"
+          echo "probe: subuid=$(grep -E "^($(id -un)|$(id -u)):" /etc/subuid || echo none) subgid=$(grep -E "^($(id -un)|$(id -u)):" /etc/subgid || echo none)"
+          command -v newuidmap && command -v newgidmap || { sudo apt-get update -q && sudo apt-get install -yq uidmap; }
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: Static endpoint scan (DEP-2)
         run: python3 tools/depaudit.py static
       - name: Offline scenarios with all traffic logged (A9)

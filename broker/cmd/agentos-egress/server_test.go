@@ -352,7 +352,7 @@ func TestUsageTrailerNamesProvider(t *testing.T) {
 	}
 	var none callAudit
 	none.decide(httptest.NewRecorder(), "POST")(route.Decision{Outcome: route.Denied, Status: 400})
-	if got := none.usage(); got != "" {
+	if got := none.usage(); got != `{"none":true}` {
 		t.Fatalf("usage for a refused call: %s", got)
 	}
 }

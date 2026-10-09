@@ -45,6 +45,7 @@ type Folder struct {
 // lower-cased addresses, never display names.
 type Message struct {
 	Folder      string
+	Validity    uint32 // the folder's UID validity when UID was read
 	UID         uint32
 	MessageID   string // as in the header, with angle brackets
 	Date        time.Time
@@ -58,6 +59,26 @@ type Message struct {
 	Text        string   // the plain text, bounded (MaxText)
 	Attachments bool
 }
+
+// Ref is a message's remote identity: folder, UID validity and UID. A
+// UID names a message only within one UID validity: a mailbox rebuilt
+// under a new validity can give the same UID to another message, so a
+// Ref is acted on only while the folder still has its validity
+// (ErrValidity).
+type Ref struct {
+	Folder   string
+	Validity uint32
+	UID      uint32
+}
+
+// Ref is m's remote identity.
+func (m Message) Ref() Ref { return Ref{Folder: m.Folder, Validity: m.Validity, UID: m.UID} }
+
+// ErrValidity is a Store's refusal to act on a Ref (or fetch UIDs) whose
+// UID validity is not the folder's current one, or is unknown: the UID
+// may now name another message. Nothing was changed; the caller resolves
+// the message again rather than retrying by the old UID.
+var ErrValidity = errors.New("mail: the folder was rebuilt since the message was read; nothing changed, resolve it again")
 
 // MaxText bounds the text read from one message.
 const MaxText = 64 << 10
@@ -81,17 +102,21 @@ const (
 // the operations below: nothing can expunge, empty a folder, or change a
 // filter, forwarding or auto-reply setting, so a credentialed request that
 // is not one of the adapter's declared operations cannot be made (ADP-10).
-// UIDs are IMAP UIDs within the folder's current UID validity.
+// UIDs are IMAP UIDs within a UID validity: every method that takes UIDs
+// also takes the validity they were read under and, in the same selected
+// session, refuses with ErrValidity before acting if the folder's
+// validity differs. Messages it returns carry the validity they were
+// read under.
 type Store interface {
 	Folders(ctx context.Context) ([]Folder, error)
 	// UIDs lists every message in folder.
 	UIDs(ctx context.Context, folder string) (validity uint32, uids []uint32, err error)
 	// Fetch reads messages without marking them read.
-	Fetch(ctx context.Context, folder string, uids []uint32) ([]Message, error)
+	Fetch(ctx context.Context, folder string, validity uint32, uids []uint32) ([]Message, error)
 	// Find returns the messages in folder whose Message-ID is id.
 	Find(ctx context.Context, folder, id string) ([]Message, error)
-	SetFlags(ctx context.Context, folder string, uid uint32, add, remove []string) error
-	Move(ctx context.Context, from string, uid uint32, to string) error
+	SetFlags(ctx context.Context, m Ref, add, remove []string) error
+	Move(ctx context.Context, m Ref, to string) error
 	// Ensure creates folder if it does not exist. The adapter calls it
 	// only for folders in the broker's own namespace.
 	Ensure(ctx context.Context, folder string) error
@@ -146,12 +171,15 @@ type Config struct {
 	// 200). Past it the owner is asked once; while that ask is open or
 	// after a NO, the rest are held, and a YES lifts the bound for the
 	// day up to DailyCeiling (default 2000), past which each is asked.
-	// Authorized returns the intents on this account with action that the
-	// journal authorized since then (journal.Engine.AuthorizedSince), so
-	// the count survives restarts.
+	// InUse returns the intents with action that hold a place under the
+	// bound counted from since (journal.Engine.InUse for this account):
+	// authorized or in flight whatever their age, and dispatched since
+	// then (SR3-2-f1). The count is the journal's, so it survives restarts
+	// and a queue released long after its authorization. Nil: every
+	// organize effect is asked.
 	DailyLimit   int
 	DailyCeiling int
-	Authorized   func(action string, since time.Time) []journal.Intent
+	InUse        func(action string, since time.Time) []journal.Use
 
 	// Contacts reports whether addr is in the owner's contacts, read from
 	// the source (CH-10's existence rule for ADP-11 thread starters). Nil:
@@ -186,6 +214,26 @@ type Adapter struct {
 	mu       sync.Mutex
 	reserved map[string]time.Time // organize bound places not yet in the journal
 	over     overAsk              // the open "past today's bound" ask
+	pins     map[string][]pin     // by intent: what Escalate judged since the last Execute (SR3-5-f1)
+	judged   map[attemptKey]pin   // an unknown attempt's pin, for Reconcile
+}
+
+// attemptKey names one attempt of an intent.
+type attemptKey struct {
+	id      string
+	attempt int
+}
+
+// pin is what Escalate judged of an organize intent: the message it
+// planned on, the folder the plan moves it to, and whether the call
+// escalated hiding an alert (SR3-5-f1a). Execute acts only on that
+// message, only when every judgement since the last Execute agrees on
+// it, and only hides an alert they escalated.
+type pin struct {
+	ref   Ref
+	to    string
+	alert bool
+	at    time.Time
 }
 
 // overAsk is the one intent asked past the day's bound, and when.
@@ -221,7 +269,8 @@ func New(cfg Config) (*Adapter, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true, selfKey(addr): true}, alias: map[string]bool{}, reserved: map[string]time.Time{}}
+	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true, selfKey(addr): true}, alias: map[string]bool{}, reserved: map[string]time.Time{},
+		pins: map[string][]pin{}, judged: map[attemptKey]pin{}}
 	for _, x := range cfg.Aliases {
 		if c, ok := canon(x); ok {
 			a.self[c], a.self[selfKey(c)], a.alias[c] = true, true, true
