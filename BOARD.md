@@ -66,7 +66,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | S6 | [Consumer AI CLIs in no-tools relay mode](briefs/S6.md) | Mark's accounts | dropped (superseded by S8 (CRED-5 now covers full provider agents)) |
 | S8 | [Provider agents as workers](briefs/S8.md) | Cloud first (stubs), then Mark's accounts | merged (03641d1; #186 cloud part and spec diff) |
 | S8-W1 | [Image fix for worker-held custody](briefs/S8-W1.md) | S8, #186 | queued (blocked: needs a supervised session with prompts on, D-064; the design hand-off is a bwrap prefix for agentos-toolsh, managed-settings denies and a containment test) |
-| S8-W1a | [Inventory credential-bearing tool surfaces](briefs/S8-W1a.md) | S8 | queued (C; from #262; feeds S8-W1) |
+| S8-W1a | [Inventory credential-bearing tool surfaces](briefs/S8-W1a.md) | S8 | building (C; from #262; feeds S8-W1) |
 | S8-live | [S8 live part](briefs/S8-live.md) | see brief | queued |
 | S8-codex-terms | [Read OpenAI's current terms on a proxy holding ChatGPT-managed…](briefs/S8-codex-terms.md) | openai.com reachable | in review (decided: broker-held, unconfirmed route, #328; [note](spikes/S8-provider-workers/CODEX-TERMS.md)) |
 | CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | in review (#420); scope extended by #525 records: C2 grant and reachability through modelroute (see brief) |
@@ -331,7 +331,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | merged (4b60dc2; #425) |
 | W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | in review (#427) |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
-| W3-forget-b2c-2 | [Item 2's texts (`forgetAgentDone`, `forgetAgentNotYet` and the rest) are owed until they send](briefs/W3-forget-b2c-2.md), as W3-forget-b3 does for item 1; add a check that no done text in `ownerForget` reaches `inform` directly (release, UX-182-3 / CH-12; Defect: W3-forget-b2c; L3 on #425, second PR with this kind of finding) | W3-forget-b2c, W3-forget-b3 | Next build item B | queued (brief written; after W3-forget-b4) |
+| W3-forget-b2c-2 | [Item 2's texts (`forgetAgentDone`, `forgetAgentNotYet` and the rest) are owed until they send](briefs/W3-forget-b2c-2.md), as W3-forget-b3 does for item 1; add a check that no done text in `ownerForget` reaches `inform` directly (release, UX-182-3 / CH-12; Defect: W3-forget-b2c; L3 on #425, second PR with this kind of finding) | W3-forget-b2c, W3-forget-b3 | Next build item B | building |
 | W3-forget-b2c-f1 | The in-boot retry of an owed take-back is unbounded and gives the owner no signal on a permanent error: bound it and add a STATUS line; send the done text on the restore path and bound the silence on retries (folds the UX point f4) (release, tier A, L3 on #427; brief to write) | W3-forget-b2c | Next build item B | queued (needs brief) |
 | W3-forget-b2c-f2 | Restore the `ErrNotOpen` no-retry test guard (release, L3 on #427; brief to write) | W3-forget-b2c | Next build item B | queued (needs brief) |
 | W3-forget-b2c-f3 | Privacy: restore while a done text is still owed (release, L3 on #427; replaces the earlier idea of a LATER line; brief to write) | W3-forget-b2c | Next build item B | queued (needs brief) |
