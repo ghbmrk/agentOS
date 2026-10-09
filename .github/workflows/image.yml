@@ -1,0 +1,105 @@
+name: image
+# Builds the AgentOS device image (image/, PLAN P2-1) on two runners, boots one build under
+# Secure Boot in QEMU, and checks both builds give the same release (/usr verity root hash).
+# Runs here because GitHub's runners reach the Debian mirrors; the cloud agent sessions cannot.
+# Two builds and a boot cost about an hour of runner time, so only image changes trigger it;
+# run it by hand (workflow_dispatch) to rebuild after broker or guest changes.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["image/**", ".github/workflows/image.yml"]
+  push:
+    branches: [main]
+    paths: ["image/**", ".github/workflows/image.yml"]
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [a, b]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version-file: broker/go.mod
+          cache: false
+      - name: Install build and boot tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
+            systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin \
+            qemu-system-x86 ovmf swtpm swtpm-tools
+          # Ubuntu 24.04 confines user namespaces via AppArmor, which breaks mkosi's bubblewrap sandbox.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
+          sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
+      - name: Build image
+        run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out"
+      - name: Boot test (Secure Boot on)
+        if: matrix.run == 'a'
+        run: sudo image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
+      - name: Keep the console logs
+        if: always() && matrix.run == 'a'
+        run: |
+          for l in console console-reboot console-two-drives; do
+            sudo cp "$RUNNER_TEMP/boot/$l.log" "$RUNNER_TEMP/out/qemu-$l.log" || true
+          done
+      - name: Release record
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/rec"
+          cp "$RUNNER_TEMP"/out/*.release.json "$RUNNER_TEMP"/out/SHA256SUMS "$RUNNER_TEMP"/out/*.manifest "$RUNNER_TEMP/rec/" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: release-${{ matrix.run }}
+          path: ${{ runner.temp }}/rec
+          if-no-files-found: warn
+      - name: Compress the image
+        if: matrix.run == 'a'
+        run: sudo zstd -q -T0 -10 "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" -o "$RUNNER_TEMP/out/agentos.raw.zst"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always() && matrix.run == 'a'
+        with:
+          name: agentos-image
+          path: |
+            ${{ runner.temp }}/out/agentos.raw.zst
+            ${{ runner.temp }}/out/qemu-console*.log
+          retention-days: 7
+          if-no-files-found: warn
+  reproduce:
+    # Two runners, one commit: the release must match: the /usr root hash, the boot entry and the
+    # kernel. The initrd is compared but only reported until it is reproducible (BOARD IMG-2).
+    # The whole-disk hash is reported too.
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          path: rec
+      - name: Compare
+        run: |
+          a=$(jq -r .usrhash rec/release-a/*.release.json); b=$(jq -r .usrhash rec/release-b/*.release.json)
+          echo "usrhash a=$a"; echo "usrhash b=$b"
+          diff rec/release-a/SHA256SUMS rec/release-b/SHA256SUMS && echo "every output identical" || true
+          diff <(jq -S . rec/release-a/*.manifest) <(jq -S . rec/release-b/*.manifest) >/dev/null \
+            && echo "same packages" || echo "package manifests differ"
+          A=$(ls rec/release-a/*.release.json); B=$(ls rec/release-b/*.release.json)
+          ok=1
+          [ -n "$a" ] && [ "$a" = "$b" ] || { echo "MISMATCH /usr root hash"; ok=0; }
+          [ "$(jq -r .boot_entry.sha256 "$A")" = "$(jq -r .boot_entry.sha256 "$B")" ] \
+            && echo "same boot entry" || { echo "MISMATCH boot entry"; ok=0; }
+          for f in $(jq -r '.boot | keys[]' "$A"); do
+            ha=$(jq -r --arg f "$f" '.boot[$f]' "$A"); hb=$(jq -r --arg f "$f" '.boot[$f] // ""' "$B")
+            if [ "$ha" = "$hb" ]; then echo "same $f"
+            elif [ "${f##*/}" = initrd ]; then echo "::warning::initrd differs between runners ($f); report-only until IMG-2"
+            else echo "MISMATCH $f"; ok=0; fi
+          done
+          [ "$(jq '.boot | length' "$A")" -ge 2 ] || { echo "MISMATCH release.json lists no kernel and initrd"; ok=0; }
+          [ $ok = 1 ]

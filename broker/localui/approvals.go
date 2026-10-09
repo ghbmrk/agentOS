@@ -42,6 +42,8 @@ type itemView struct {
 	Verb, Object, Detail, Amount, Undo string
 	Unverified                         bool
 	Recipients                         []string
+	// Terms is a grant's complete rule, one field per line (SR3-3).
+	Terms []owner.Term
 	// Odd: a field holds a character outside plain ASCII, shown as its
 	// code point.
 	Odd bool
@@ -249,6 +251,13 @@ func (s *Server) requestView(rq owner.LocalRequest, sess string) requestView {
 			return shown
 		}
 		iv.Verb, iv.Object, iv.Detail, iv.Amount = show(it.Facts.Verb), show(it.Object), show(it.Detail), show(it.Amount)
+		ts, ok := it.Terms.List()
+		if !ok {
+			ts = []owner.Term{{Label: "Rule", Value: "could not be read; deny this request"}}
+		}
+		for _, t := range ts {
+			iv.Terms = append(iv.Terms, owner.Term{Label: show(t.Label), Value: show(t.Value)})
+		}
 		if it.Recipient != "" {
 			// Split as the text counts them; only the separator's one
 			// space is dropped.

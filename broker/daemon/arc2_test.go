@@ -77,8 +77,11 @@ var controlPath = map[string][]string{
 	// link's state to the page's socket as a localapi.Line (P2-2w d2a).
 	// It changes where updates come from (follow, OSS-10): the follow
 	// executor over the update store, already linked through change, and
-	// the page's root summary (localapi) the daemon serves.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update"},
+	// the page's root summary (localapi) the daemon serves. A held restore
+	// (W3-forget-b1-7) serves the bridge's ops itself, hears its state
+	// report (bridgeproto) and checks its texts fit (modem); both are
+	// already linked through modemlink.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

@@ -23,9 +23,9 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 |---|---|---|---|
 | SR3-1 | [Bind local sign-in to the authenticated lock generation](briefs/SR3-1.md) | P2-2w a, P2-2w b | in review (#431) |
 | SR3-2 | [Enforce pre-allowance rate limits at dispatch](briefs/SR3-2.md) | P2-grants, P2-gr8 | in review (#428) |
-| SR3-3 | [Show and bind the complete pre-allowance rule at approval](briefs/SR3-3.md) | P2-grants, P2-2a | queued (P2; release) |
+| SR3-3 | [Show and bind the complete pre-allowance rule at approval](briefs/SR3-3.md) | P2-grants, P2-2a | in review (#433) |
 | SR3-4 | [Make update finalization durable and idempotent](briefs/SR3-4.md) | UPD-a, P4-3, P3-1 | in review (#434) |
-| SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | queued (P2; release) |
+| SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | in review (#424) |
 | SR3-6 | [Invalidate verified updates when attestation policy narrows](briefs/SR3-6.md) | P4-3, P3-1 | in review (#430) |
 | SR3-7 | [Use one validated request for model reservation and routing](briefs/SR3-7.md) | P2-7, P1-7 | in review (#429) |
 | SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | in review (#432) |
@@ -43,6 +43,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | SR3-7-f1 | `route.failover` retries on 500/502/503/504/529, but the meter sees only the served route's usage; if a provider bills 5xx attempts, one call can spend attempts times the limit against one reservation. Predates #429 and is unmeasured. First read the provider documentation on 5xx billing; if any is billed, meter every attempt or stop failover after a timeout-class status (release, tier A, Security 4a on #429, [note](reviews/security/2026-10-08-pr429.md) point 1; brief to write) | SR3-7 | queued (needs brief) |
 | SR3-8-f1 | `openStore` and `New` quarantine on the manifest's own `m.ID` instead of the directory name, and nothing validates the ID: with store write access a tampered manifest can quarantine the wrong artifact or rename a directory from outside into the store. Quarantine by directory name and require `m.ID` to equal it (release, tier A, Security 4a on #432, S1, PR #452; brief to write) | SR3-8 | queued (needs brief) |
 | SR3-8-f2 | The durability tests check the fault-hook trace, not the syscalls, so mutants that drop `syncDir` or `f.Sync` survive: pin the syscalls (release, tier A, Security on #432, S2; brief to write) | SR3-8 | queued (needs brief) |
+| SR3-5-f1 | Execute and Reconcile re-plan an organize by Message-ID and never check the result against what the gate approved, so a same-ID alert that replaced the approved message is hidden without the change-account ask: carry the gate's Ref (or alert bit) in the intent and return NotApplied on a mismatch or an unescalated hidden alert; also refuse a flag-only undo whose `Change.Validity` is 0. Before mail is wired (release, tier A, Security 4a on #424, S1-S2, [note](reviews/security/2026-10-09-pr424.md); supersedes LATER `SR3-5 f1` and `SR3-5 l2`; brief to write) | SR3-5 | queued (needs brief; before mail is wired) |
 
 ## Phase 0: harness and risk spikes
 
@@ -87,6 +88,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 
 | ID | Package | Needs | State |
 |---|---|---|---|
+| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7 | in review (#41) |
 | P2-grants | [Grants and approval policy](briefs/P2-grants.md) | P1-7 | merged (a390f03; broker/grants) |
 | P2-rev3 | [Reversible conversions](briefs/P2-rev3.md) | P2-grants | merged (04be62e; broker/reversible) |
 | P2-gr8 | [GR8 fix: approval used up inside the dispatch commit](briefs/P2-gr8.md) | P2-rev3 | merged (a390f03; broker/grants) |
@@ -121,7 +123,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-2 | [Loop scheduler and Loop 1](briefs/P3-2.md) | P3-1, P3-1a | merged (0302131; #189; broker/loops) |
 | P3-4 | [Loop 2, self-securing, defensive part, as a scheduler Source](briefs/P3-4.md) | P3-2 | merged (c5feca1; broker/loops Guard) |
 | P3-4b-1 | [Loop 2 repairs an injected finding: contain, minimized regression, fix qualified against linked cases; LOOP-10 rejections; LOOP-3 unmeasured](briefs/P3-4b.md#p3-4b-1-product-side) | P3-4 | merged (1d4446b; #464) |
-| P3-4b-1b | [Loop 2 loop-side follow-ups to #464: close reported findings the tree comes to pass, finding-ID collision, crash resume, wording scan, config-probe fixes](briefs/P3-4b.md#p3-4b-1b-loop-side-follow-ups-to-464) | P3-4b-1 | in review (tier A; #493) |
+| P3-4b-1b | [Loop 2 loop-side follow-ups to #464: close reported findings the tree comes to pass, finding-ID collision, crash resume, wording scan, config-probe fixes](briefs/P3-4b.md#p3-4b-1b-loop-side-follow-ups-to-464) | P3-4b-1 | merged (2ba9e87; #493) |
 | P3-4b-2 | [A11 loop 2 qualification harness: seed catalog, held-back variants, harness-chosen seed](briefs/P3-4b.md#p3-4b-2-a11-qualification-harness) | P3-4b-1 | merged (336e29b; #490) |
 | P3-4b-2b | [A11 harness follow-ups to #490: evidence check fails on a missing evidence record; fix-input audit catches a raw held clause whose fields the visible test shares; leaking-adapter control on every valid seed](briefs/P3-4b.md#p3-4b-2b-harness-follow-ups-to-490) | P3-4b-2 | merged (682486e; #500) |
 | P3-4b-5 | [Model-backed loop 2 fixer: answers the §11 fix-candidate request through Loop 1's builder, wired in the daemon](briefs/P3-4b.md#p3-4b-5-model-backed-loop-2-fixer) | P3-4b-1, W3-builder-ship | queued (tier A) |
@@ -193,6 +195,10 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | OSS-10w2 | [Follow-fork wiring part 2](briefs/OSS-10w2.md) | OSS-10w, P2-2w b, P2-2w d | in review (A) |
 | OSS-10w2u | Follow page wording: UX lens picks between the page's text and `maintain.FollowPrompt`/`FollowCheckHeading`, and the page names the current source (L3 R3 on #370) | OSS-10w2 | queued (needs brief) |
 | IMG-1 | [Image checks for P2-1](briefs/IMG-1.md) | P2-1 (#41, draft since 01:07Z) | queued (blocked on P2-1) |
+| IMG-2 | [Reproducible initrd, blocking two-runner check](briefs/IMG-2.md) | P2-1 | queued |
+| IMG-3 | [Forced-fail fallback boot in CI](briefs/IMG-3.md) | P2-1, update package | queued |
+| IMG-4 | [Broker cgroups check and agentosd.service hardening](briefs/IMG-4.md) | P2-1, P2-2 | queued |
+| UX-41-2 | [Health result in STATUS and the digest](briefs/UX-41-2.md) | P2-1, W5 | queued |
 | SR2-1 | [Approval texts show only canonical recipients](briefs/SR2-1.md) | — | merged (#144) |
 | P2-2a | [Local-page approvals](briefs/P2-2a.md) | P2-2 | merged (6239bd4; #178 part 2) |
 | P2-2w | [Local UI process and owner socket](briefs/P2-2w.md) | P2-2a | building (in sub-rows a, b, d, c (P3-2 thread)) |
@@ -211,7 +217,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | P2-2w c2 | [Pairing and finish in agentosd](briefs/P2-2w-c2.md) | P2-2w c1 | in review |
 | P2-2w c3 | [`agentos-netjoin`](briefs/P2-2w-c3.md) | P2-2w c2 | queued (#422 merged the re-brief only; `agentos-netjoin` is not built) |
 | P2-2w c4 | Setup's remaining hooks in agentosd (the networks list, box number, host trust, texts, providers, real progress; joining a network is c3; `Online` must tell the owner when a saved home network never came online, since c3 may answer `saved`) and `agentos-localui` given `AgentosdSetup` (release finding on P2-2w c2; localui L28) | P2-2w c2 | queued |
-| P2-2w c2 r1 | Setup on a vault whose enrollment is closed: the vault answers "never opened" apart from "sealed", and the page says the box cannot finish setup instead of "already set up" with a Continue that finish refuses (release finding, L3 on #367; localui L28). Also: if the seal succeeds but the setup record is lost and the owner resets setup before retrying, every finish is refused; the vault answering "sealed by setup" apart from "never opened" lets agentosd accept the former at finish (release, L3 re-review on #367) | P2-2w c2 | queued |
+| P2-2w c2 r1 | [Setup on a vault whose enrollment is closed](briefs/P2-2w-c2-r1.md): the vault answers "never opened" apart from "sealed", and the page says the box cannot finish setup instead of "already set up" with a Continue that finish refuses (release finding, L3 on #367; localui L28). Also: if the seal succeeds but the setup record is lost and the owner resets setup before retrying, every finish is refused; the vault answering "sealed by setup" apart from "never opened" lets agentosd accept the former at finish (release, L3 re-review on #367) | P2-2w c2 | in review (#465) (A) |
 | P2-2w c3 r1 | D-Bus busconfig policy for `agentos-netjoin`: its uid may send only `Settings.AddConnection2`, `Settings.GetConnectionByUuid`, `Settings.Connection.Update2` and the property reads in L8.4, so a compromised helper can no longer `GetSecrets` or `Delete` (it can still rewrite the access point); one policy file and a parse test, foldable into c3 (release, L3 security on #422; [note](reviews/security/2026-10-08-p2-2w-l6-l8.md)) | P2-2w c3 | queued |
 | P2-2w c3 r2 | L1 spec diff: host network secrets (the access point's and the home Wi-Fi password) are held by the host network stack, outside ARC-1, and stay subject to CRED-1 and CRED-8. ARC-1 read literally cannot be met: the supplicant must hold the PSK or its PMK (release, spec-gap, L3 security on #422) | — | queued (L1 spec diff) |
 | P2-2w c3 r3 | P2-1: NetworkManager's connection store must not leave the home PSK in plaintext on the drive (CRED-8 says a lost drive is ciphertext; CRED-1 counts passwords). Choose one: the store on an encrypted volume, or in-memory connections (`AddConnection2` in-memory) re-added by agentosd through the helper after each vault unlock, which also settles r2 and amends L8.7 (release, L3 security on #422; [note](reviews/security/2026-10-08-p2-2w-l6-l8.md) L8.6) | P2-1 (#41), P2-2w c3 | queued (blocked on P2-1) |
@@ -229,8 +235,8 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | SR2-3k | [guesterr.Guest values checked at run time](briefs/SR2-3k.md) | SR2-3g | building (recall thread) |
 | SR2-3n | [No runsc crash trace reaches the guest, and the guest cannot pick the logged part](briefs/SR2-3n.md) | SR2-3m | queued (release findings S2, S3, S4, Security on #391) |
 | SR2-3o | [Malformed-request refusals keep a field-level hint for the guest](briefs/SR2-3o.md) | SR2-3j | queued (release item 2, lens on #396) |
-| SR2-3p | [A command that cannot start is not told to retry](briefs/SR2-3p.md) | SR2-3j | queued (release item 3, lens on #396) |
-| SR2-3q | [A runsc failure after the command may have started is not told it did not start](briefs/SR2-3q.md) | SR2-3j | queued (release, Security on #396 delta) |
+| SR2-3p | [A command that cannot start is not told to retry](briefs/SR2-3p.md) | SR2-3j | in review (with SR2-3q, one PR) |
+| SR2-3q | [A runsc failure after the command may have started is not told it did not start](briefs/SR2-3q.md) | SR2-3j | in review (with SR2-3p, one PR) |
 | SR2-4 | [cgroup cpu, io and pids controllers](briefs/SR2-4.md) | #143 (RES-2 text) | merged (#155) |
 | SR2-4i | [Host side of SR2-4](briefs/SR2-4i.md) | SR2-4 merged; host image | queued (blocked on the host image) |
 | SR2-5 | [Second-line sends](briefs/SR2-5.md) | #143 (ADP-12 text) | merged (2e85d06) |
@@ -293,9 +299,9 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b | [Authenticated forget log replayed over backups](briefs/W3-forget-b.md) | W3-forget-a | Next build item B | building (split into sub-rows) |
 | W3-forget-b1 | [Authenticated forget log checked on restore](briefs/W3-forget-b1.md) | W3-forget-a | Next build item B | merged (01c8515; #409; items 1–3 ruled by Mark on #317, 2026-10-08) |
 | W3-forget-b1-4 | [Owner confirms a restore with no anchor](briefs/W3-forget-b1-4.md) | W3-forget-b1, D-065 (#406) | Next build item B | merged (c422039; #436) |
-| W3-forget-b1-5 | [The vault keeps the forget log for agentosd](briefs/W3-forget-b1-5.md): #409 R1 and P3; #409 R5 (c), moved from b1-6; #436 Potency (Q5) | W3-forget-b1, W3-forget-b1-6 | Next build item B | queued |
-| W3-forget-b1-6 | [The restore entry checks the forget log safely](briefs/W3-forget-b1-6.md): #409 R2, R3, R5 (a), (b), (d) and L3; #436 Security point 2; R5 (c) moved to b1-5, R4 to b1-7 | W3-forget-b1, W3-forget-b1-7 | Next build item B | queued |
-| W3-forget-b1-7 | [Text the owner a held restore](briefs/W3-forget-b1-7.md): #409 U2, U6 and Security R4; #436 L3 and UX points 1–2 | W3-forget-b1, W3-forget-b1-4 | Next build item B | queued |
+| W3-forget-b1-5 | [The vault keeps the forget log for agentosd](briefs/W3-forget-b1-5.md): #409 R1 and P3; #409 R5 (c) and Security R4, moved from b1-6 and b1-7; #436 Potency (Q5) | W3-forget-b1, W3-forget-b1-6 | Next build item B | queued |
+| W3-forget-b1-6 | [The restore entry checks the forget log safely](briefs/W3-forget-b1-6.md): #409 R2, R3, R5 (a), (b), (d) and L3; #436 Security point 2; R5 (c) and R4 moved to b1-5 | W3-forget-b1, W3-forget-b1-7 | Next build item B | queued |
+| W3-forget-b1-7 | [Text the owner a held restore, and take their answer](briefs/W3-forget-b1-7.md) | W3-forget-b1, W3-forget-b1-4 | Next build item B | building |
 | W3-forget-b2 | [Builder-lineage rollback with A/B](briefs/W3-forget-b2.md) | W3-forget-a | Next build item B | merged (#321) |
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
 | W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | in review (#425) |
@@ -305,7 +311,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b2c-f1 | The in-boot retry of an owed take-back is unbounded and gives the owner no signal on a permanent error: bound it and add a STATUS line; send the done text on the restore path and bound the silence on retries (folds the UX point f4) (release, tier A, L3 on #427; brief to write) | W3-forget-b2c | Next build item B | queued (needs brief) |
 | W3-forget-b2c-f2 | Restore the `ErrNotOpen` no-retry test guard (release, L3 on #427; brief to write) | W3-forget-b2c | Next build item B | queued (needs brief) |
 | W3-forget-b2c-f3 | Privacy: restore while a done text is still owed (release, L3 on #427; replaces the earlier idea of a LATER line; brief to write) | W3-forget-b2c | Next build item B | queued (needs brief) |
-| W3-forget-b3r | The local Wi-Fi page lists older tasks and can forget one (potency R2, carried by W3-forget-b3; needs a page, socket route and forget path in `broker/localui`; release, L3 on #425; brief to write) | W3-forget-b3 | Next build item B | queued (needs brief) |
+| W3-forget-b3r | [The local Wi-Fi page lists older tasks and can forget one](briefs/W3-forget-b3r.md) (potency R2, carried by W3-forget-b3; needs a page, socket route and forget path in `broker/localui`; release, L3 on #425; tier A, build on the strongest model) | W3-forget-b3 | Next build item B | queued (brief written) |
 | W3-forget-b4 | Fix #425 Security 4a S1-S3: (S1) `learn.go` renames an unreadable owed file to `.bad` before `lostForgetOwed` saves the file that owes `forgetOwedLost`, so a crash between the two leaves the owner never told: save first, then rename; (S2) in `Execute` a failed owed save is only logged, so a `retry` followed by a crash replays the forget with no done text owed (CAP-3): retry the save in `retry` or record it in ASSUMPTIONS; (S3) no test pins F4's order (tell the owner, then drop the entry; mutant M4 passes): add one whose owner send records the owed file's content at send time (release, tier A, Security 4a on #425, [note](reviews/security/2026-10-09-pr425-sec4a.md); its PR carries `Defect: W3-forget-b3`; brief to write) | W3-forget-b3 | Next build item B | queued (needs brief) |
 | W5 | [Owner channel](briefs/W5.md) | W3 | loops thread | queued |
 | W5a | [Loop 2 passive checks](briefs/W5a.md) | #54 merged, W3 | builder B (lenses) | merged (3d2daab; #169) |

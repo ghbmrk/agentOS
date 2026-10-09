@@ -400,11 +400,6 @@ func main() {
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
 	flag.Parse()
-	// A restore the forget log's check held opens nothing on the restored
-	// tree: no recall, no agent machines (W3-forget-b1; security C3).
-	if err := restoreHold(learn.Dir); err != nil {
-		log.Fatal(err)
-	}
 	sleepHours, err := parseSleepHours(sleepHoursFlag)
 	if err != nil {
 		log.Fatal(err)
@@ -450,6 +445,35 @@ func main() {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
 		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid}
+	}
+	// A restore the forget log's check held opens nothing on the restored
+	// tree: no recall, no agent machines (W3-forget-b1; security C3). The
+	// held mode texts the owner why, takes their answer, and the start
+	// goes on once it releases the restore (W3-forget-b1-7). With no owner
+	// to text, agentosd does not start.
+	if held := restoreHold(learn.Dir); held != nil {
+		owner, err := heldOwner(cfg.OwnerNumber, localsrv.FileRecord{Path: setupRecord})
+		if err != nil {
+			log.Fatalf("%v; %v", held, err)
+		}
+		log.Print(held)
+		m := heldMode{Learn: learn.Dir, Dir: cfg.SocketDir, Owner: owner, PeerUID: &cfg.ModemUID, PeerGID: cfg.ModemGID,
+			Message: !modemBridge || ownerMessage, Logf: log.Printf}
+		if modemBridge {
+			m.Link = modemlink.New(modemlink.Config{Owner: owner})
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err = m.run(ctx)
+		stop()
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := restoreHold(learn.Dir); err != nil {
+			log.Fatal(err)
+		}
 	}
 	// A box with no -owner is set up by the local UI (P2-2w c2): only
 	// setup's ops are served until its finish is recorded, and the owner's

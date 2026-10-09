@@ -27,7 +27,7 @@ A new `broker/recovery/restoreentry.go` exposes one function (name is the builde
 
 ## Placed elsewhere
 - **(c) a start without the marker cross-checks `State.Pending`** needs agentosd to reach the vault, the same socket b1-5 builds for `AppendForget`/`ExportForgetLog`; it moves to W3-forget-b1-5 with the clearing of `State.Pending` on release, which b1-4 left unread.
-- **#409 Security R4** (an agent machine opens before restored take-backs run) belongs to the start after release: W3-forget-b1-7 requirement 8.
+- **#409 Security R4** (an agent machine opens before restored take-backs run) belongs to the start after release. W3-forget-b1-7 (#487) did not carry it, so it moves to W3-forget-b1-5 requirement 8, which already touches agentosd's start.
 - The restore command, its UI and the vault-process endpoint that calls `RestoreBox`: W6 (precondition added to its row; coordinator ruling, open question 2).
 
 ## Open questions (flag in the PR; do not decide silently)
