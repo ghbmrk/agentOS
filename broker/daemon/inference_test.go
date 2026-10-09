@@ -111,9 +111,11 @@ var netOK = map[string]allowance{
 	// LOOP-7's runners start children in a process group of their own and
 	// kill the group on cancel (#515 Security 1). loop7's fuzz children
 	// also start as an unprivileged user in an empty network namespace,
-	// and Jail.Own reads owners and link counts (P3-4b-3r-confine).
-	"loop7": {"process-group kill of its fuzz children; their jail's user and empty network namespace; owner and link-count checks",
-		[]string{"syscall.CLONE_NEWNET", "syscall.Credential", "syscall.Kill", "syscall.SIGKILL", "syscall.Stat_t", "syscall.SysProcAttr"}},
+	// and Jail.Own reads owners and link counts (P3-4b-3r-confine); each
+	// starts from a thread with no_new_privs set (P3-4b-3r-confine-r3).
+	"loop7": {"process-group kill of its fuzz children; their jail's user and empty network namespace; no_new_privs on the starting thread; owner and link-count checks",
+		[]string{"golang.org/x/sys/unix.PR_SET_NO_NEW_PRIVS", "golang.org/x/sys/unix.Prctl",
+			"syscall.CLONE_NEWNET", "syscall.Credential", "syscall.Kill", "syscall.SIGKILL", "syscall.Stat_t", "syscall.SysProcAttr"}},
 	"probecmd": {"process-group kill of its probe children", []string{"syscall.Kill", "syscall.SIGKILL", "syscall.SysProcAttr"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},

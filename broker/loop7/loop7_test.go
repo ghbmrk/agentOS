@@ -28,9 +28,14 @@ type fakeGuard struct {
 	resolved []string
 	closed   []loops.Closure
 	job      bool
+	// producer is each open hang's producing binary, held here as
+	// loops holds it on the record (P3-4b-3h-r2).
+	producer map[string]string
 }
 
-func newFake() *fakeGuard { return &fakeGuard{open: map[string]loops.Finding{}} }
+func newFake() *fakeGuard {
+	return &fakeGuard{open: map[string]loops.Finding{}, producer: map[string]string{}}
+}
 
 func (g *fakeGuard) Loop() loops.Loop { return loops.Secure }
 func (g *fakeGuard) Next(context.Context, bool) (loops.Job, bool) {
@@ -41,8 +46,12 @@ func (g *fakeGuard) Report(_ context.Context, f loops.Finding) (loops.Record, er
 	defer g.mu.Unlock()
 	f.ID = string(f.Check) + ":" + f.Subject + ":" + f.Detail
 	g.reported = append(g.reported, f)
+	if f.Producer != "" {
+		g.producer[f.ID] = f.Producer
+	}
+	f.Producer = ""
 	g.open[f.ID] = f
-	return loops.Record{Finding: f, Reported: true}, nil
+	return loops.Record{Finding: f, Reported: true, Producer: g.producer[f.ID]}, nil
 }
 func (g *fakeGuard) Resolve(id string, r loops.Replay) error {
 	g.mu.Lock()
@@ -57,10 +66,13 @@ func (g *fakeGuard) Resolve(id string, r loops.Replay) error {
 func (g *fakeGuard) CloseTarget(id string, c loops.Closure) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if _, ok := g.open[id]; !ok || c.Kind != loops.ClosureStep || c.Replayed || c.Binary == "" || c.Binary == c.Produced || c.Execs <= c.Baseline {
+	p := g.producer[id]
+	if _, ok := g.open[id]; !ok || p == "" || c.Kind != loops.ClosureStep || c.Replayed || c.Binary == "" || c.Binary == p || c.Execs <= c.Baseline {
 		return loops.ErrFinding
 	}
+	c.Produced = p
 	delete(g.open, id)
+	delete(g.producer, id)
 	g.closed = append(g.closed, c)
 	return nil
 }

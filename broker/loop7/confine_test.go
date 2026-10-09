@@ -8,11 +8,13 @@ package loop7
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -231,7 +233,7 @@ func TestJailedChildHelper(t *testing.T) {
 	}
 	st, _ := os.ReadFile("/proc/self/status")
 	for _, l := range strings.Split(string(st), "\n") {
-		for _, k := range []string{"Uid:", "Gid:", "Groups:", "CapInh:", "CapPrm:", "CapEff:", "CapAmb:"} {
+		for _, k := range []string{"Uid:", "Gid:", "Groups:", "CapInh:", "CapPrm:", "CapEff:", "CapAmb:", "NoNewPrivs:"} {
 			if strings.HasPrefix(l, k) {
 				fmt.Println(strings.Join(strings.Fields(l), " "))
 			}
@@ -320,6 +322,111 @@ func TestAJailedChildIsUnprivilegedAndOffline(t *testing.T) {
 	for _, n := range []string{"tcp", "udp"} {
 		if !strings.HasPrefix(said[n], "failed") {
 			t.Errorf("a jailed child dialed the host over %s: %q", n, said[n])
+		}
+	}
+}
+
+// LOOP-7: a jailed child runs with no_new_privs, so no setuid or
+// file-capability binary in the image (su, mount, passwd) can raise it
+// back to root across exec (P3-4b-3r-confine-r3; #588 Security R1).
+func TestAJailedChildCannotGainPrivileges(t *testing.T) {
+	needRoot(t)
+	s, tg := jailed(t, newFake(), "", helperBin(t))
+	if got := childSays(t, s, tg)["NoNewPrivs:"]; got != "1" {
+		t.Fatalf("jailed child NoNewPrivs %q, want 1", got)
+	}
+}
+
+// helperSource is an unjailed source whose one target is this test
+// binary, as TestJailedChildHelper.
+func helperSource(t *testing.T) (*Source, Target) {
+	t.Helper()
+	release := t.TempDir()
+	tg := Target{Pkg: "fake", Name: "FuzzFake", Binary: helperBin(t)(release), Dir: t.TempDir()}
+	return newSource(t, newFake(), Config{Targets: []Target{tg}}), tg
+}
+
+// noNewPrivs reads the NoNewPrivs field of a /proc status file.
+func noNewPrivs(t *testing.T, status string) string {
+	t.Helper()
+	b, err := os.ReadFile(status)
+	if err != nil {
+		return "gone"
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "NoNewPrivs:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	t.Fatalf("%s has no NoNewPrivs line", status)
+	return ""
+}
+
+// LOOP-7: the flag is set in loop7's start path, not only by the unit,
+// so every fuzz child carries it whoever starts agentosd; here as a
+// user, with no jail.
+func TestEveryFuzzChildHasNoNewPrivs(t *testing.T) {
+	s, tg := helperSource(t)
+	if got := childSays(t, s, tg)["NoNewPrivs:"]; got != "1" {
+		t.Fatalf("fuzz child NoNewPrivs %q, want 1", got)
+	}
+}
+
+// LOOP-7: the flag is per thread. The one loop7 sets it on is locked to
+// the starting goroutine and ends with it, so no thread that runs Go
+// code afterwards carries it, and children the daemon starts afterwards
+// from other goroutines, outside loop7, do not. The process's main
+// thread is the one exception the runtime makes: a locked goroutine that
+// exits there wedges it for good (runtime.mexit), and no goroutine runs
+// on it again, so it starts no child; it is left out of the scan. With
+// the unit's NoNewPrivileges=yes every child carries the flag and this is
+// moot.
+func TestNoNewPrivsStaysOffTheDaemonsOtherThreads(t *testing.T) {
+	if noNewPrivs(t, fmt.Sprintf("/proc/%d/status", os.Getppid())) != "0" {
+		t.Skip("the test process was started with no_new_privs")
+	}
+	s, tg := helperSource(t)
+	for range 5 {
+		childSays(t, s, tg)
+	}
+	main := fmt.Sprintf("/proc/self/task/%d/status", os.Getpid())
+	// A flagged thread may still be exiting: wait for it to go.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tasks, err := filepath.Glob("/proc/self/task/*/status")
+		if err != nil || len(tasks) == 0 {
+			t.Fatalf("no threads listed: %v", err)
+		}
+		var flagged []string
+		for _, st := range tasks {
+			if st != main && noNewPrivs(t, st) == "1" {
+				flagged = append(flagged, st)
+			}
+		}
+		if len(flagged) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon threads still carry no_new_privs: %v", flagged)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Children from many goroutines, so they start on many threads.
+	const n = 20
+	out := make(chan string, n)
+	for range n {
+		go func() {
+			b, err := exec.Command(tg.Binary, "-test.run=^TestJailedChildHelper$", "-test.v").CombinedOutput()
+			if err != nil {
+				out <- "error: " + err.Error()
+				return
+			}
+			out <- string(b)
+		}()
+	}
+	for range n {
+		if said := <-out; !strings.Contains(said, "NoNewPrivs: 0") {
+			t.Fatalf("a child started outside loop7 says:\n%s\nwant NoNewPrivs: 0", said)
 		}
 	}
 }
@@ -612,6 +719,180 @@ func TestAFuzzStepThatDidNotRunSaysWhy(t *testing.T) {
 	}
 }
 
+// P3-4b-3r-confine-r6: emptying the fuzz leaf ends with no fuzz process
+// alive, within LOOP-1's preemption target. REQ: LOOP-1, LOOP-7
+
+// inLeaf starts sh -c script as nobody in leaf, in a session of its own as
+// a child that left its run's process group would be, and waits until the
+// leaf lists at least n processes.
+func inLeaf(t *testing.T, leaf *cgroup.Group, n int, script string) {
+	t.Helper()
+	f, err := os.Open(leaf.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Dir = "/"
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid:      true,
+		Credential:  &syscall.Credential{Uid: nobody, Gid: nobody, Groups: []uint32{}},
+		UseCgroupFD: true, CgroupFD: int(f.Fd()),
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go cmd.Wait()
+	for end := time.Now().Add(5 * time.Second); len(procs(t, leaf)) < n; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("the leaf lists %d processes, want %d", len(procs(t, leaf)), n)
+		}
+	}
+}
+
+// procs is the leaf's cgroup.procs.
+func procs(t *testing.T, leaf *cgroup.Group) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(leaf.Path, "cgroup.procs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(b))
+}
+
+// freezeIs replaces empty's freeze for the test.
+func freezeIs(t *testing.T, f func(context.Context, *cgroup.Group) error) {
+	old := freeze
+	freeze = f
+	t.Cleanup(func() { freeze = old })
+}
+
+// neverFreezes is a freeze that cannot complete: it waits out its bound.
+func neverFreezes(ctx context.Context, _ *cgroup.Group) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// forkLoop forks as fast as it can inside the leaf's pids.max: every
+// process forks two more and exits, and a fork the limit refuses ends
+// only its own branch.
+const forkLoop = `exec 2>/dev/null; h() { h & h & }; h; exec sleep 60`
+
+// LOOP-7, LOOP-1 (#588 Security 4a L-b; r6 req. 1): a freeze that fails
+// still kills: no fuzz process survives it to race root's next path or
+// hold the leaf's memory while machines start. Before r6, empty thawed
+// and returned the freeze's error without a signal, and the processes
+// lived on.
+func TestAFailedFreezeStillEmptiesTheLeaf(t *testing.T) {
+	leaf := testLeaf(t, "loop7-nofreeze", 256<<20)
+	inLeaf(t, leaf, 3, `sleep 60 & setsid sleep 60 & exec sleep 60`)
+	freezeIs(t, func(context.Context, *cgroup.Group) error { return errors.New("freeze refused") })
+	j := &Jail{Leaf: leaf.Path, UID: nobody, GID: nobody}
+	if err := j.empty(); err != nil {
+		t.Fatalf("a failed freeze left the leaf unemptied: %v", err)
+	}
+	if p, err := leaf.Populated(); err != nil || p {
+		t.Fatalf("a process survived a failed freeze: %v %v %v", p, err, procs(t, leaf))
+	}
+}
+
+// LOOP-1 (#588 Security 4a L-a; r6 req. 2): a freeze that never completes,
+// over a fork loop the kill passes may never catch, still lets empty
+// return within LOOP-1's 2 s: the agent gets the box back. Before r6 the
+// freeze alone waited 5 s.
+func TestEmptyingALeafThatNeverFreezesStaysWithinThePreemptionTarget(t *testing.T) {
+	leaf := testLeaf(t, "loop7-slowfreeze", 256<<20)
+	inLeaf(t, leaf, 8, forkLoop)
+	freezeIs(t, neverFreezes)
+	j := &Jail{Leaf: leaf.Path, UID: nobody, GID: nobody}
+	start := time.Now()
+	err := j.empty()
+	took := time.Since(start)
+	t.Logf("empty took %v: %v", took, err)
+	// waitDelay is what run's last empty may follow a cancel by.
+	if took+waitDelay > 1900*time.Millisecond {
+		t.Fatalf("empty took %v, past LOOP-1's 2 s with waitDelay and a margin", took)
+	}
+	if err != nil && !strings.Contains(err.Error(), "survive") {
+		t.Fatalf("the error does not name the survivors: %v", err)
+	}
+	if p, _ := leaf.Populated(); p && err == nil {
+		t.Fatal("empty returned nil over a populated leaf")
+	}
+}
+
+// missed records what each kill pass after the first finds that the first
+// did not list: a process born after the first pass read cgroup.procs,
+// which a frozen leaf cannot fork.
+func missed(t *testing.T) (missed *[]int, passes *int) {
+	missed, passes = new([]int), new(int)
+	first := map[int]bool{}
+	old := killLeaf
+	killLeaf = func(leaf string) []int {
+		pids := old(leaf)
+		*passes++
+		for _, p := range pids {
+			if *passes == 1 {
+				first[p] = true
+			} else if !first[p] {
+				*missed = append(*missed, p)
+			}
+		}
+		return pids
+	}
+	t.Cleanup(func() { killLeaf = old })
+	return missed, passes
+}
+
+// forkRounds is how many fork loops the freeze test empties: one round
+// whose first pass happens to catch every process proves nothing. Without
+// the freeze, CI's first pass missed a newborn in 2 of 10 rounds, so 30
+// rounds let a removed freeze pass about once in a thousand runs.
+const forkRounds = 30
+
+// LOOP-7 (r6 req. 3): the freeze is what stops a fork loop in one pass.
+// Frozen, the leaf forks nothing after the first kill pass reads it, so in
+// no round does a later pass find a process the first missed. With the
+// freeze mutated out of empty, a fork loop's newborns escape the first
+// pass whenever a fork lands between its read and its kills, and the test
+// fails unless that happens in none of the rounds; the passes after it,
+// which still empty the leaf when a freeze fails
+// (TestAFailedFreezeStillEmptiesTheLeaf), then catch them. The subtest
+// measures that race without the freeze, for the records (F16).
+func TestAForkLoopIsEmptiedThroughTheFreeze(t *testing.T) {
+	for i := range forkRounds {
+		leaf := testLeaf(t, fmt.Sprintf("loop7-forkloop-%d", i), 256<<20)
+		inLeaf(t, leaf, 8, forkLoop)
+		m, n := missed(t)
+		if err := (&Jail{Leaf: leaf.Path, UID: nobody, GID: nobody}).empty(); err != nil {
+			t.Fatalf("round %d: a frozen fork loop was not emptied: %v", i, err)
+		}
+		if p, err := leaf.Populated(); err != nil || p {
+			t.Fatalf("round %d: a fork loop survived the freeze: %v %v", i, p, err)
+		}
+		if len(*m) > 0 {
+			t.Fatalf("round %d: a later kill pass found %v, which the first missed: the leaf forked after it was read", i, *m)
+		}
+		t.Logf("round %d frozen: %d kill passes, none missed", i, *n)
+	}
+
+	t.Run("without the freeze", func(t *testing.T) {
+		freezeIs(t, func(context.Context, *cgroup.Group) error { return nil })
+		caught := 0
+		for i := range forkRounds {
+			leaf := testLeaf(t, fmt.Sprintf("loop7-forkloop-nofreeze-%d", i), 256<<20)
+			inLeaf(t, leaf, 8, forkLoop)
+			m, n := missed(t)
+			err := (&Jail{Leaf: leaf.Path, UID: nobody, GID: nobody}).empty()
+			if len(*m) > 0 {
+				caught++
+			}
+			t.Logf("round %d without the freeze: %d kill passes, %d pids the first missed, %v", i, *n, len(*m), err)
+		}
+		t.Logf("without the freeze, the first kill pass missed a newborn in %d of %d rounds", caught, forkRounds)
+	})
+}
+
 // P3-4b-3r-confine-r5: each of F16's defences fails a test when reverted.
 // REQ: LOOP-7, LOOP-1
 
@@ -840,8 +1121,9 @@ func TestAJailedRepeatedHangRecordsTheNewerBuild(t *testing.T) {
 	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
-	if st, err := s.readHangs(tg); err != nil || st[loops.FuzzStallDetail] != fileDigest(t, tg.Binary) {
-		t.Fatalf("state %v %v", st, err)
+	// The producer is reported to loops, which holds it (P3-4b-3h-r2).
+	if len(g.reported) != 2 || g.reported[1].Producer != fileDigest(t, tg.Binary) {
+		t.Fatalf("reported %+v", g.reported)
 	}
 }
 

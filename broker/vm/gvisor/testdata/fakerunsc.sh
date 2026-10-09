@@ -50,6 +50,11 @@
 # and the message on stderr, exit 128. exit128 is a guest that exits 128
 # with runsc silent, which stays a result.
 #
+# paused refuses as runsc does while the step snapshot has the container
+# paused (P1-4-flake-paused): $FAKE_RUNSC_PAUSES is FILE:N, and the first N
+# execs, counted in FILE, fail with exit 128 and "cannot execute in
+# container ... in state paused"; later ones succeed.
+#
 # The rest fail before the pid is written, as runsc's exec does
 # (runsc/cmd/exec.go, runsc/sandbox/sandbox.go, pkg/urpc/urpc.go,
 # pkg/sentry/fsimpl/user/path.go, pkg/sentry/loader/loader.go at that
@@ -58,14 +63,14 @@
 # started; noconn before the call; nope* (a bare name) and /nope* and
 # /denied (paths) when the program is not found or cannot be loaded
 # (SR2-3p). The executing-command messages quote the argv as %q does.
-log= dlog= pid= cmd= gfd=2
+log= dlog= pid= cmd= ctr= gfd=2
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--log=*) log=${1#--log=} ;;
 	--debug-log=*) dlog=${1#--debug-log=} ;;
 	--internal-pid-file) shift; pid=$1 ;;
 	--pass-fd) shift; case "$1" in *:2) gfd=${1%:2} ;; esac ;;
-	*_) cmd=$2; shift; break ;; # the container ID; the guest's argv follows
+	*_) ctr=$1 cmd=$2; shift; break ;; # the container ID; the guest's argv follows
 	esac
 	shift
 done
@@ -179,6 +184,12 @@ waitdelaytext)
 		while [ -e "$FAKE_RUNSC_MARK" ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i + 1)); done
 	) 3>&- 4>&- &
 	exit 0
+	;;
+paused)
+	n=${FAKE_RUNSC_PAUSES#*:}; f=${FAKE_RUNSC_PAUSES%:*}
+	k=$(cat "$f" 2>/dev/null || echo 0); echo $((k + 1)) >"$f"
+	[ "$k" -lt "$n" ] && fail "cannot execute in container \"$ctr\" in state paused" 128
+	echo 7 >"$pid"; echo "guest out"; exit 0
 	;;
 fatal128) fail "loading container failed: $c: resource temporarily unavailable" 128 ;;
 exit128) echo 7 >"$pid"; echo "guest out"; exit 128 ;;
