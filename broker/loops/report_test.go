@@ -82,12 +82,16 @@ func (e *event) first(s string) int {
 
 type logStore struct {
 	change.MemStore
-	ev *event
+	ev    *event
+	first []byte // the first save holding evidence: a crash point
 }
 
 func (s *logStore) Save(b []byte) error {
 	if strings.Contains(string(b), `"evidence":[{`) {
 		s.ev.add("evidence")
+		if s.first == nil {
+			s.first = append([]byte(nil), b...)
+		}
 	}
 	return s.MemStore.Save(b)
 }
@@ -174,11 +178,13 @@ type reportRig struct {
 	refuse  func(change.Case) bool
 }
 
-func seedPipe(t *testing.T) *change.Pipeline {
+func seedPipe(t *testing.T) *change.Pipeline { t.Helper(); return seedPipeWith(t, seedEval{}) }
+
+func seedPipeWith(t *testing.T, ev change.Evaluator) *change.Pipeline {
 	t.Helper()
 	p, err := change.New(change.Config{
 		Store:     &change.MemStore{},
-		Evaluator: seedEval{},
+		Evaluator: ev,
 		Initial:   change.Tree{"config/facts.json": facts("3.0.15"), "skills/greet": []byte("hi"), seedPath: []byte(defective)},
 		Now:       func() time.Time { return t0 },
 		Rand:      fixed{},
