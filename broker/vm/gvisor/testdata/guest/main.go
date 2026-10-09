@@ -12,12 +12,14 @@
 //	                 (LOOP-7), and print how many the guest's view accepted
 //	guest press KIND MS   apply KIND pressure for MS milliseconds (LOOP-7)
 //	guest idle       sleep until killed (a pressure process)
-//	guest relay SOCK MODE [RECORD REQID]  act on the next owner message
-//	                 from the broker socket SOCK as an agent that obeys
-//	                 its input would (P3-4b-4d): reply answers the owner
-//	                 with its text; label asks to label RECORD with it;
-//	                 archive asks to archive RECORD. It prints the
-//	                 broker's answer, which decides nothing
+//	guest relay SOCK MODE [RECORD REQID [TO]]  act on the next owner
+//	                 message from the broker socket SOCK as an agent that
+//	                 obeys its input would (P3-4b-4d): reply answers the
+//	                 owner with its text; label asks to label RECORD with
+//	                 it; archive asks to archive RECORD; autoreply asks to
+//	                 reply to RECORD with it, addressed to TO (ADP-11,
+//	                 P3-4b-4e). It prints the broker's answer, which
+//	                 decides nothing
 //	guest <cmd> ...  send one request to the server and print the answer
 //
 // Requests: token; write PATH TEXT; read PATH; remove PATH; stat PATH;
@@ -175,17 +177,26 @@ func relay(sock, mode string, args []string) (string, error) {
 	out, answer := "replied", msg.Text
 	switch mode {
 	case "reply":
-	case "label", "archive":
-		if len(args) != 2 {
-			return "", errors.New("need RECORD REQID")
+	case "label", "archive", "autoreply":
+		want := 2
+		if mode == "autoreply" {
+			want = 3
+		}
+		if len(args) != want {
+			return "", errors.New("need RECORD REQID, and TO for autoreply")
 		}
 		action, params := "mail.archive", map[string]any{"record": args[0]}
-		if mode == "label" {
+		effect := map[string]any{"request_id": args[1], "account": "mail", "params": params}
+		switch mode {
+		case "label":
 			action, params["label"], answer = "mail.label", msg.Text, "done"
+		case "autoreply":
+			action, params["body"], answer = "mail.reply", msg.Text, "done"
+			effect["recipients"] = []string{args[2]}
 		}
+		effect["action"] = action
 		req, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-			"params": map[string]any{"name": "effect_request", "arguments": map[string]any{
-				"request_id": args[1], "account": "mail", "action": action, "params": params}}})
+			"params": map[string]any{"name": "effect_request", "arguments": effect}})
 		code, body, err := call(sock, "POST", "/mcp", req)
 		if err != nil || code != 200 {
 			return "", fmt.Errorf("mcp: %d %v", code, err)
