@@ -478,7 +478,8 @@ func TestIntegrationHostSocketInImageIsUnreachable(t *testing.T) {
 
 // TestIntegrationWorkerExec: a worker runs a command under runsc exec with
 // stdin, its exit code comes back as a result, and output is capped
-// (CAP-8).
+// (CAP-8). The guest's stderr arrives through Exec's own pipe, which real
+// runsc maps to the guest's fd 2 by --pass-fd 3:2 (SR2-3n, V32).
 func TestIntegrationWorkerExec(t *testing.T) {
 	r := newRig(t, 4096)
 	ctx := context.Background()
@@ -496,6 +497,9 @@ func TestIntegrationWorkerExec(t *testing.T) {
 	}
 	if res.ExitCode != 3 || string(res.Stdout) != "hello" || !res.Truncated {
 		t.Fatalf("exec = code %d, stdout %q, truncated %v; want 3, %q, true", res.ExitCode, res.Stdout, res.Truncated, "hello")
+	}
+	if string(res.Stderr) != "oops\n" {
+		t.Fatalf("exec stderr = %q; want the guest's %q and nothing else", res.Stderr, "oops\n")
 	}
 	// A command that cannot start is runsc's own failure: an error and no
 	// output, runsc's text only in the broker's exec log (SR2-3h).

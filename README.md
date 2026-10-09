@@ -19,6 +19,7 @@ Each fact has one home; other files point to it rather than restate it ([docs/OP
 | `briefs/<ID>.md` | state | One package's brief: goal, IDs, scope, dependencies, estimate. | L1 |
 | [LATER.md](LATER.md) | state | Which open rows the first release needs, and the backlog that waits. | L1 |
 | [docs/LANES.md](docs/LANES.md) | state | Which team owns which paths; onboarding records. | primary team |
+| [docs/MARK-QUEUE.md](docs/MARK-QUEUE.md) | state | Questions and actions only Mark can take, one line each, with a recommendation. | L1 adds, Mark answers |
 | [DECISIONS.md](DECISIONS.md) | record | Decisions as `D-NNN` rows with date, status and source; long reasoning in `decisions/D-NNN.md`. | L1, Mark |
 | `reviews/<lens>/` | record | Lens methods (README) and lens verdicts per PR. | lens screen |
 | `<package>/ASSUMPTIONS.md` | record | What each package's code rests on. | its builder |

@@ -260,7 +260,7 @@ func TestAChangeThatNeedsThePageIsConfirmedByItsPageAnswer(t *testing.T) {
 	if calls != 1 || local != 1 {
 		t.Fatalf("%d page calls, %d page requests", calls, local)
 	}
-	if st := r.state("local/p1"); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the box's Wi-Fi page" {
+	if st := r.state("local/p1"); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the local Wi-Fi page" {
 		t.Fatalf("waiting: %s %q", st.State, st.Permission.Reason)
 	}
 	r.pageDecide("")
