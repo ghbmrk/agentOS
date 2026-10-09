@@ -556,3 +556,40 @@ func TestPassTellsEveryTextedFindingItCleared(t *testing.T) {
 		}
 	})
 }
+
+// Security 4a point 1 on #585: a finding that moves between two details
+// keeps one plain name open, its return counted Again; "Cleared" for that
+// name is never texted while it is open, Again or not.
+func TestNoClearedWhileAFindingMovesBetweenDetails(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		a, b, back func(*box)
+	}{
+		{"unpaused drift",
+			func(b *box) { b.live["config/quiet.json"] = "edited" },
+			func(b *box) { delete(b.live, "config/quiet.json") },
+			func(b *box) { b.live["config/quiet.json"] = "edited" }},
+		{"paused hash",
+			func(b *box) { b.measured["guest-image/openclaw"] = "tampered" },
+			func(b *box) { delete(b.signed, "guest-image/openclaw") },
+			func(b *box) { b.signed["guest-image/openclaw"] = "aa" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := cleanBox()
+			c.a(b)
+			r := newGuardRig(t, b)
+			r.pass(t)
+			for _, step := range []func(*box){c.b, c.back} {
+				step(b)
+				r.now = r.now.Add(6 * time.Hour)
+				r.pass(t)
+			}
+			if got := clearedTexts(r.texts, 0); len(got) != 0 {
+				t.Fatalf("cleared while a finding on the same name is open: %q", got)
+			}
+			if len(r.g.st.Open) != 1 {
+				t.Fatalf("open %+v", r.g.st.Open)
+			}
+		})
+	}
+}
