@@ -189,7 +189,7 @@ func TestAFuzzChildReachesOnlyItsOwnBoundedTree(t *testing.T) {
 	probe := `case "$2" in -test.fuzz=*)
 r=$PWD/reach
 cat ` + roles + ` >/dev/null 2>&1 && echo "roles read" > $r || echo "roles denied" > $r
-chattr -p 0 . >/dev/null 2>&1 && echo "retag done" >> $r || echo "retag refused" >> $r
+chattr -p 0 . >/dev/null 2>&1 && echo "retag done" >> $r || echo "retag $(chattr -p 0 . 2>&1 | grep -o 'Invalid argument' | head -n 1)" >> $r
 f=$(dd if=/dev/zero of=big bs=1M count=1536 2>&1 >/dev/null | grep -o 'Disk quota exceeded\|No space left on device' | head -n 1)
 s=$(stat -c %s big)
 rm -f big
@@ -239,7 +239,9 @@ exit 0`
 	if said["roles"] != "denied" {
 		t.Errorf("a fuzz child read the broker's roles.json: %q", b)
 	}
-	if said["retag"] != "refused" {
+	// EINVAL: the kernel refuses a project change from outside the
+	// initial user namespace (fs/ioctl.c fileattr_set_prepare).
+	if said["retag"] != "Invalid argument" {
 		t.Errorf("a fuzz child moved its tree out of its quota project: %q", b)
 	}
 	if said["fill"] != "Disk quota exceeded" && said["fill"] != "No space left on device" {

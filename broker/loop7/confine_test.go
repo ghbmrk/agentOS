@@ -239,6 +239,10 @@ func TestJailedChildHelper(t *testing.T) {
 			}
 		}
 	}
+	for k, f := range map[string]string{"UidMap:": "/proc/self/uid_map", "GidMap:": "/proc/self/gid_map"} {
+		m, _ := os.ReadFile(f)
+		fmt.Println(k, strings.Join(strings.Fields(string(m)), " "))
+	}
 	cg, _ := os.ReadFile("/proc/self/cgroup")
 	fmt.Printf("cgroup %s\n", strings.TrimSpace(string(cg)))
 	for _, a := range flag.Args() {
@@ -754,6 +758,26 @@ func TestAJailedChildCannotWriteTheSharedTempDirs(t *testing.T) {
 	for _, a := range args {
 		if !strings.HasPrefix(said[a], "failed") || !strings.Contains(said[a], "permission denied") {
 			t.Errorf("a jailed child's %s: %q, want permission denied", a, said[a])
+		}
+	}
+}
+
+// LOOP-7, RES-4 (root; P3-4b-3r-confine-r4): a jailed child runs in a
+// user namespace that root (the daemon) created, mapping only the jail's
+// uid and gid to themselves, with no capability in it, so the kernel
+// refuses it a project ID change (loop7 F2).
+func TestAJailedChildsUserNamespaceMapsOnlyItsIDs(t *testing.T) {
+	needRoot(t)
+	s, tg := jailed(t, newFake(), "", helperBin(t))
+	said := childSays(t, s, tg)
+	for _, k := range []string{"UidMap:", "GidMap:"} {
+		if said[k] != "65534 65534 1" {
+			t.Errorf("child %s %q, want only 65534 mapped to itself", k, said[k])
+		}
+	}
+	for _, k := range []string{"CapPrm:", "CapEff:", "CapAmb:"} {
+		if said[k] != "0000000000000000" {
+			t.Errorf("child %s %q in its user namespace, want none", k, said[k])
 		}
 	}
 }
