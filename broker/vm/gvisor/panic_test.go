@@ -261,6 +261,23 @@ func TestRunscTextPastWaitDelayAnswersNoOutput(t *testing.T) {
 	wantPanicLogged(t, r)
 }
 
+// The exit-0 row of the same rule: runsc writes to its stderr but the
+// exec succeeds (err == nil), so it stays a result and nothing is logged.
+// This pins `err != nil` in crashed: without it, this test fails.
+func TestRunscTextOnSuccessIsAResult(t *testing.T) {
+	r := fakeRunsc(t)
+	res, err := r.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"exit0text"}, MaxOutput: 4096})
+	if err != nil {
+		t.Fatalf("a successful exec with runsc text read as a failure: %v", err)
+	}
+	if res.ExitCode != 0 || string(res.Stdout) != "guest out\n" {
+		t.Fatalf("a successful exec with runsc text: %+v", res)
+	}
+	if b, _ := os.ReadFile(filepath.Join(r.StateDir, "exec.log")); len(b) > 0 {
+		t.Fatalf("a successful exec was logged:\n%s", b)
+	}
+}
+
 // A guest's own non-zero exit, with nothing on runsc's stderr, stays a
 // result: only runsc's text withholds output.
 func TestGuestNonZeroExitWithoutRunscTextIsAResult(t *testing.T) {

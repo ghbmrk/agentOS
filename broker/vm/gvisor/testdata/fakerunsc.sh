@@ -41,7 +41,9 @@
 # waitdelaytext writes a trace and exits 0, but a process it left holds
 # stdout and stderr past ExecWaitDelay, so Exec's wait ends in
 # ErrWaitDelay; the fake creates $FAKE_RUNSC_MARK first, and the
-# leftover holds the pipes until the test removes it.
+# leftover holds the pipes until the test removes it. exit0text writes
+# one line to runsc's stderr and exits 0 with nothing holding the pipes:
+# a successful exec, which stays a result.
 #
 # The rest fail before the pid is written, as runsc's exec does
 # (runsc/cmd/exec.go, runsc/sandbox/sandbox.go, pkg/urpc/urpc.go,
@@ -161,6 +163,7 @@ oompanic)
 	kill -KILL $$
 	;;
 exit1text) echo 7 >"$pid"; echo "guest out"; echo "W runsc: $c" >&2; exit 1 ;;
+exit0text) echo 7 >"$pid"; echo "guest out"; echo "W runsc: $c" >&2; exit 0 ;;
 waitdelaytext)
 	echo 7 >"$pid"
 	echo "guest out"

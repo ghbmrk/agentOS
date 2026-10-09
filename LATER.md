@@ -369,6 +369,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P1-4-flake l4 | L3 4 and Security 4a 3 on #547 (pre-existing, since #391): a runsc crash at the deadline reaches callers as `TimedOut` with no output, not `ErrExecFailed`; the failure is visible only in `exec.log` |
 | P1-4-flake l5 | Potency 3 on #547 classed the soak row (P1-4-flake-soak) `later`; it rides P1-4-flake-counts in one package (coordinator, 2026-10-09), so the "don't start later rows" audit reads clean (#580 L3 8) |
 | P1-4-flake-crashed l1 | #580 L3 6: `panic_test.go` and V32/V34 cite RES-4 (storage reserve, per-machine quota), which links to them only through `exec.log`'s rotation bound; re-cite these tests the next time they are touched |
+| P1-4-flake-crashed l2 | [#591 L3](https://github.com/ghbmrk/agentOS/pull/591#issuecomment-6079765306): the brief's `go test ./vm/gvisor -race -count=50` exceeds `go test`'s default 10 m `-timeout` (the package takes about 20 s a pass, so about 17 min), on main too; name `-timeout 60m` wherever that command is prescribed |
 | W5-Da l1 | M11 on #555: `Finish` accepts `TransportAccepted` without an evidence reference; require one when the sender exists |
 | W5-Da l2 | M3 on #555: the `Attempts >=` check in `Begin` repeats the `MaxAttempts` bound enforced in `Finish`; keep one |
 | W5-Da l3 | #555: `Evidence` is an unauthenticated opaque string, and Forget keeps association hashes in the dedupe state; settle both in the retention policy |
