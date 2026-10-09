@@ -6,7 +6,9 @@ package main
 // passive guard, with the release's targets.
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,10 +62,11 @@ func TestARoundRunsThePassThenReportsAFuzzCrash(t *testing.T) {
 		t.Fatal("no fuzz source wired")
 	}
 	// The scheduler runs Loop 2's jobs one at a time, as offered (it
-	// needs an attached daemon to tick, so the jobs are run here).
+	// needs an attached daemon to tick, so the jobs are run here): the
+	// passive pass, the guard's corpus replay, then a fuzz round.
 	ctx := context.Background()
 	var ran []string
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		j, ok := lp.fuzz.Next(ctx, false)
 		if !ok {
 			break
@@ -73,7 +76,7 @@ func TestARoundRunsThePassThenReportsAFuzzCrash(t *testing.T) {
 		}
 		ran = append(ran, j.Name)
 	}
-	if strings.Join(ran, ",") != "passive,fuzz" {
+	if strings.Join(ran, ",") != "passive,probe:corpus,fuzz" {
 		t.Fatalf("jobs %v", ran)
 	}
 	if d := lp.guard.Status(); !strings.Contains(d, "Loop 2: partial") {
@@ -90,6 +93,9 @@ func TestAPreemptedFuzzRoundLeavesNoFinding(t *testing.T) {
 	lp := openFuzzLearning(t, fakeFuzzRelease(t, "sleep 30; "+crashing))
 	if _, err := lp.guard.Pass(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if j, ok := lp.fuzz.Next(context.Background(), false); !ok || j.Name != "probe:corpus" || j.Run(context.Background()).Err != nil {
+		t.Fatalf("job %+v %v", j, ok)
 	}
 	job, ok := lp.fuzz.Next(context.Background(), false)
 	if !ok || job.Name != "fuzz" {
@@ -147,5 +153,31 @@ func TestNoReleaseRunsNoFuzz(t *testing.T) {
 	}
 	if j, ok := lp.fuzz.Next(context.Background(), false); !ok || j.Name != "passive" {
 		t.Fatalf("the guard's pass is not offered: %+v %v", j, ok)
+	}
+}
+
+// P3-4b-3r-pass requirement 3 (L7-4; #560 L3 point 3): an image always
+// ships a manifest, so a release directory without one is logged; a box
+// with no release directory (a dev build) logs nothing.
+func TestAReleaseWithoutAManifestIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+	for _, c := range []struct {
+		name    string
+		release string
+		logged  bool
+	}{
+		{"no manifest", t.TempDir(), true},
+		{"no release directory", filepath.Join(t.TempDir(), "absent"), false},
+	} {
+		buf.Reset()
+		if ts := fuzzTargets(learnPaths{Fuzz: c.release, Loop7: t.TempDir()}); len(ts) != 0 {
+			t.Fatalf("%s: targets %+v", c.name, ts)
+		}
+		if got := strings.Count(buf.String(), "loop7: no fuzz rounds"); got != map[bool]int{true: 1, false: 0}[c.logged] {
+			t.Fatalf("%s: log %q", c.name, buf.String())
+		}
 	}
 }

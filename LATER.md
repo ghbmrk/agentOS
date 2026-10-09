@@ -73,6 +73,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5c | A12 | Clean-room builder in the scheduler |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
+| P3-4b-4c-dedupe | A1 (owner texts; UX on #589 classed it release under §2's stricter rule, for Mark to demote to later if no acceptance test needs it) | `Guard.batch` and the digest repeat one identical line per corpus item, so a weakened check gives the owner ten identical lines |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
@@ -245,6 +246,11 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-8 l1 | L3 re-review on #432, point 1: once `CR-quarantine-prune` is on main, add to it that any pruning of `.quarantine` must keep the per-artifact loss count (e.g. a count file), since C14's `maxRepairs` bound is counted from the copies; fold this line into that row |
 | SR3-8 l2 | L3 re-review on #432, point 2: a job stopped by the repair bound is logged `failed: no result within the allowed attempts`; only the log line says its output was lost repeatedly. Text only |
 | SR3-8 l3 | L3 re-review on #432, point 3: no test pins the `<id>-<12 hex>` name check in `Store.losses`; a bare prefix match passes every test. Unreachable today (fixed-length broker-written IDs) |
+| SR3-8-f l1 | L3 3 on #578: `New`'s `errBadID` branch is unreachable and untested (kept as defence in depth); in `park` a new `parked/` is not synced into `cfg.Dir`, and source-directory sync errors in `finish`/`park` are ignored. Both predate #578 |
+| SR3-8-f l2 | L3 4 on #578: `Get` follows a symlinked name inside the store; exploiting it needs store write access. Likewise `quarantine` follows an in-root symlink: with `.quarantine -> b` (another artifact directory) the rename lands in `b/`; same precondition (L3 6079915313) |
+| SR3-8-f l3 | Security 4 on #578: the seam's source check matches only `Sync`; add `syscall.Fsync`, `unix.Fsync` and `Fdatasync` to `allowed` if the package ever imports them |
+| SR3-8-f l4 | L3 6079535268 point 3 on #578: `syncHit` matches only a literal op string, so a const op or a direct `s.fault` call slips past the AST check; the recorder tests carry the guarantee |
+| SR3-8-f l5 | L3 6079915313 on #578: after the rename, `dirSync(q)` opens `.quarantine` by path, not through the root; durability only, the rename itself stays confined |
 | W3-forget-b1-4 l1 | L3 on #436: `broker/change` TestRouterCandidateAdoptsThroughPipeline flakes (~2/10k; random split key); fix is a seeded Rand, proposed on #436 |
 | W3-forget-b1-4 l2 | #436: decoy dates may fall before box setup or enrolment |
 | W3-forget-b1-4 l3 | #436: "Never" wording for owners whose forgets predate the log |
@@ -376,11 +382,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-3 l7 | Potency 7 on #523 (P3-4b-4): the probe sends four fixed frames per socket and tests no connection limits, rapid reconnects or half-open frames; promoting good fuzz inputs to seeds is a later choice |
 | P3-4b-3 l8 | UX 4 on #523: a fuzz finding whose corpus file is removed can never resolve, yet STATUS says it is rechecked; add a line to `broker/loop7/ASSUMPTIONS.md` when the source is wired |
 | P3-4b-3 l9 | UX 5 on #523: a probe finding's ID derives from its `Detail`, so a different failure set next round is a second High text for one machine; cap or fold per subject when the probe text is reworded |
-| P1-4-flake l1 | L3 1 on #547: the `ci.yml` comment and loop7 F8 say "about what 20s ran" (measured: 600000x took 6-20 s per target), and loop7 F6 still says "runs 20 s per CI run"; reword when the counts change (P1-4-flake-counts) |
-| P1-4-flake l2 | L3 2 on #547: the fuzz deadline race is not specific to Go 1.26 (`stop` against `fuzzCtx.Err()` is long-standing); reword "Go 1.26's coordinator" in ci.yml and the brief. The "toolchain with the coordinator fixed" condition stays right |
-| P1-4-flake l3 | L3 3 on #547: a count-bound fuzz run is capped only by `go test`'s default 10 m `-timeout`; an explicit per-step `-timeout` is the fix, and P1-4-flake-counts covers it, so this line closes with that row |
+| P1-4-flake l1 | L3 1 on #547: the `ci.yml` comment and loop7 F8 say "about what 20s ran" (measured: 600000x took 6-20 s per target), and loop7 F6 still says "runs 20 s per CI run"; reword when the counts change (P1-4-flake-counts) — amended by P1-4-flake-ci: ci.yml's comment is reworded and the figure is now measured and logged per run (`tools/fuzzrun.py`, `tools/ASSUMPTIONS.md` D15–D18); `broker/loop7/ASSUMPTIONS.md` F6 and F8 still say "runs 20 s per CI run" and "600000x", and are reworded by the next package that touches `broker/loop7` (tier A, out of this package's scope), pointing to D15–D18 |
 | P1-4-flake l4 | L3 4 and Security 4a 3 on #547 (pre-existing, since #391): a runsc crash at the deadline reaches callers as `TimedOut` with no output, not `ErrExecFailed`; the failure is visible only in `exec.log` |
 | P1-4-flake l5 | Potency 3 on #547 classed the soak row (P1-4-flake-soak) `later`; it rides P1-4-flake-counts in one package (coordinator, 2026-10-09), so the "don't start later rows" audit reads clean (#580 L3 8) |
+| P1-4-flake-ci l1 | #593 L3 2: `tools/fuzzrun.py` prints no `fuzzrun <pkg>:<target> chunk <k>` line when go's own `-timeout` fires; print one line for any non-zero exit |
 | P1-4-flake-crashed l1 | #580 L3 6: `panic_test.go` and V32/V34 cite RES-4 (storage reserve, per-machine quota), which links to them only through `exec.log`'s rotation bound; re-cite these tests the next time they are touched |
 | W5-Da l1 | M11 on #555: `Finish` accepts `TransportAccepted` without an evidence reference; require one when the sender exists |
 | W5-Da l2 | M3 on #555: the `Attempts >=` check in `Begin` repeats the `MaxAttempts` bound enforced in `Finish`; keep one |
@@ -408,13 +413,24 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4d l5 | Potency on #556: the label route's stall under a permissive `labelClass` is bounded at 30 s but its cause (imapsmtp SetFlags) is undiagnosed |
 | P3-4b-4d l6 | L3 on #556: a production `Relay` should report a route timeout as its own error class, not as a generic route failure; P3-4b-4c |
 | P3-4b-4d l7 | L3 on #556: no test pins the `ok` check in the rig's `requested()` (relaxing it survives, since every replayed want is non-empty); add a guest that omits the key if a test needs it |
-| P3-4b-4d l8 | L3 on #556: one over-long vendored corpus item fails every code-filter run (S45); P3-4b-4c decides whether to exclude it at vendoring or report it as its own finding |
+| P3-4b-4c-corpus l1 | UX on #589: the corpus finding text ("My self-test of the code filter failed: …Nothing real was exposed.") gives no next step; add the fuzz and probe lines' "The fix comes with an update." |
+| P3-4b-4c-corpus l2 | UX on #589: the `ProbeFailed` STATUS line ("Loop 2: partial (not run: attack-text tests, failed).") says neither why nor what to do; say the tests did not run, nothing is needed, and when they retry, if that is the true behaviour |
+| P3-4b-4c-corpus l3 | UX on #589: only 2 of the 4 closed checks run in agentosd (agentosd LC-2), and a clean day shows nothing, which can read as "all attack-text tests ran"; say what is not run, for example through `cfg.NotRun`, as for the other unwired probes |
+| P3-4b-4c-corpus l4 | UX and L3 on #589: `tests/test_corpus.py`'s controls only compared the renderer's output to a mutated input; fixed in #589 (the controls now mutate a file and run the real assertion), recorded so the finding is counted |
+| P3-4b-4c-corpus l5 | Potency on #589: a package that links a new package into agentosd needs `broker/daemon/arc2_test.go` in its brief's declared scope; add it to the brief template |
 | P3-4b-4b l4 | L3 5 and UX 2 on #548: the `cpu` finding reads "found no cpu limit" when the finding is "machine weight >= broker weight" (suggested: "an agent machine can take as much CPU as I can"); "I answered slower than my target" and "I stopped an agent machine slower than my target" give no consequence; one wording pass |
 | P3-4b-4b l5 | L3 6 on #548: S34 should say a journal line means "unchanged after attempt", not "refused", since entries rest on the guest having tried |
 | P3-4b-4b l6 | Security 4a and L3 deltas on #548: each round leaves one more `.agentos-tamper-<nonce>` marker file in a directory target that stays writable; bounded by rounds x targets while a High finding is open; cleanup is the owner's remediation |
 | P3-4b-4b l7 | L3 delta on #548: `loops.tamperNonce` (regexp) in `machine.go` is used only by tests; move it to the test file or use it to check `newTamperNonce`'s output |
 | P3-4b-4b l8 | Security 4a delta 1 on #548 (predates the fix; covered by release row P3-4b-4c-fresh): a probe guest that skips its scripted writes still closes an open tamper finding; if the probe image is ever shared with agent code, closing must need a broker-side write check (a canary the broker plants and verifies through the same mount) |
+| P3-4b-4c-tamper l1 | UX 1 on #584: a failed probe round reads "tamper tests, failed" with no cause (control unchanged, reused machine, quiesce); give `NotRun`/`ProbeFailed` a plain cause string as `cfg.NotRun` has |
+| P3-4b-4c-tamper l2 | UX 2 on #584: STATUS lines are third person ("Loop 2: ...") across loops; existing wording |
+| P3-4b-4c-tamper l3 | L3 4 on #584: `removeSiblings` ignores errors and `os.Stat`s through a symlink to choose the directory; log failed removals and use `Lstat` |
+| P3-4b-4c-tamper l4 | L3 5 and Potency 3 on #584: the gVisor test's control is the machine's whole upper layer; P3-4b-4c's wiring test should use a dedicated control mount and pin sibling removal |
 | SR3-5-f1 l1 | Delta L3 on #571 (comment 6078264771): a pin is never cleared for an intent that is denied or never dispatched; pins live in memory, so a restart drops them |
+| P3-4b-3r-pass l1 | L3 point 2 on #585: a check in `NotRun` (its `Box` input nil) still closes its open findings in `Pass` and now texts "Cleared"; not live while `GuardConfig` sets no `Box` (learn.go), one line to add `notes` to `broke` when it does |
+| P3-4b-3r-pass l2 | L3 point 3 on #585: loop7 `stepped` counts a step that only replayed a standing crash or reported an overrun as progress, so a box whose every target has an open finding never shows "have not run"; count only a step where the engine ran (F14) |
+| P3-4b-3r-pass l3 | Security 4a point 3 on #585: unpaused drift, advisory and expiry cleared lines now carry `safeName(Subject)`, which keeps spaces, `.` and `:`, so a filename such as `a. Reply RESUME` reads as a sentence in the SMS; alert texts already had this exposure; for the owner-text package |
 | SR3-2-f-page-sum | `Decide`'s page confirmation compares `d.Sum` with `ItemSum(w.base)`, not the item the page showed; safe only while noted asks are never `local`. Compare against `w.item`, or pin that local asks carry no note, when the area is next touched (Security 4a on #581, comment 6078904256; also L3 6078880234) |
 | SR3-2-f-started-wording | With 1 queued and 1 started under `PerDay: 2` the owner sees `1 earlier send still queued`, not the bound; consider a form such as `1 of 2 today still queued` (UX lens on #581, comment 6078894198) |
 | SR3-2-f-max-rule | The queued count is the maximum over the failed rules, not the rule the owner would widen; differs only with several bound rules on one action (UX lens on #581, comment 6078894198) |

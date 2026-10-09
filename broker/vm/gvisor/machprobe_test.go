@@ -37,11 +37,21 @@ func (r *rig) tamperIn(id string) func(context.Context, string, []string) (strin
 	}
 }
 
+// upper is machine id's writable layer as the broker sees it.
+func (r *rig) upper(id string, rel ...string) string {
+	return filepath.Join(append([]string{r.cfg.StateDir, "machines", id, "disk", "upper"}, rel...)...)
+}
+
 // LOOP-7 (tamper), clean: a guest writing a real snapshot directory, an
 // evaluator suite and a grader file held broker-side, the grader also at
 // its read-only services mount, changes none of them; each refusal is
-// journaled. Control (a writable snapshot in a test rig): a snapshot
-// target in the machine's own writable layer is reported through Report.
+// journaled. The round's positive control (P3-4b-4c-fresh) is the probe
+// machine's own writable root, standing in for the broker-made directory
+// the wiring mounts: the script's sibling lands there, so the round
+// counts. Control (a writable snapshot in a test rig): a snapshot target
+// in the machine's own writable layer is reported on every round, each in
+// a fresh machine; the target keeps its bytes and the sibling is removed
+// (P3-4b-4c-restore). A round in the last round's machine fails.
 func TestIntegrationTamperProbeInAGuest(t *testing.T) {
 	svc := &services{t: t, root: t.TempDir(), srv: map[string]*http.Server{}}
 	r := newRigWith(t, 4096, svc)
@@ -72,6 +82,7 @@ func TestIntegrationTamperProbeInAGuest(t *testing.T) {
 			{Name: "evaluator", Path: suite},
 			{Name: "grader", Path: grader, Guest: []string{vm.ServicesMount + "/grader.json"}},
 		},
+		Control: loops.TamperTarget{Path: r.upper("probe"), Guest: []string{"/"}},
 		Attempt: r.tamperIn("probe"),
 		Journal: func(machine, target string) error { notes = append(notes, machine+"/"+target); return nil },
 	}
@@ -82,22 +93,42 @@ func TestIntegrationTamperProbeInAGuest(t *testing.T) {
 	if strings.Join(notes, ",") != "probe/snapshots,probe/evaluator,probe/grader" {
 		t.Fatalf("journaled %v", notes)
 	}
-
-	// Control: the snapshot target is the guest's own /work/snap.
-	r.ask("probe", "write", "/work/snap", "original")
-	upper := filepath.Join(r.cfg.StateDir, "machines", "probe", "disk", "upper", "work", "snap")
-	if b, err := os.ReadFile(upper); err != nil || string(b) != "original" {
-		t.Fatalf("rig: the guest's layer is not at %s: %q %v", upper, b, err)
+	if b, err := os.ReadFile(grader); err != nil || string(b) != `{"pass":0.5}` {
+		t.Fatalf("grader holds %q %v", b, err)
 	}
-	p.Targets = []loops.TamperTarget{{Name: "snapshots", Path: upper, Guest: []string{"/work/snap"}}}
-	// Guard hands each found to Report (loops' probe tests).
-	// A target that stays writable is reported on every round, not just
-	// the first (each round's nonce changes it again).
-	for round := 1; round <= 2; round++ {
+
+	// Control: the snapshot target is each round's guest's own /work/snap.
+	for round, id := range []string{"probe2", "probe3"} {
+		r.create(id, admission.Experiment)
+		r.ask(id, "write", "/work/snap", "original")
+		snap := r.upper(id, "work", "snap")
+		if b, err := os.ReadFile(snap); err != nil || string(b) != "original" {
+			t.Fatalf("rig: the guest's layer is not at %s: %q %v", snap, b, err)
+		}
+		p.Targets = []loops.TamperTarget{{Name: "snapshots", Path: snap, Guest: []string{"/work/snap"}}}
+		p.Control = loops.TamperTarget{Path: r.upper(id), Guest: []string{"/"}}
+		p.Attempt = r.tamperIn(id)
+		// Guard hands each found to Report (loops' probe tests). A target
+		// that stays writable is reported on every round, not just the
+		// first (each round's nonce lands a new sibling).
 		res, err = p.Run(ctx)
 		if err != nil || len(res.Found) != 1 || !same(res.Found[0], loops.CheckTamper, "snapshots", "writable") {
-			t.Fatalf("control round %d: %+v %v", round, res, err)
+			t.Fatalf("control round %d: %+v %v", round+1, res, err)
 		}
+		if b, err := os.ReadFile(snap); err != nil || string(b) != "original" {
+			t.Fatalf("control round %d changed the target: %q %v", round+1, b, err)
+		}
+		for _, d := range []string{r.upper(id), r.upper(id, "work")} {
+			ents, _ := os.ReadDir(d)
+			for _, e := range ents {
+				if strings.HasPrefix(e.Name(), ".agentos-tamper-") {
+					t.Fatalf("control round %d left %s in %s", round+1, e.Name(), d)
+				}
+			}
+		}
+	}
+	if _, err := p.Run(ctx); err == nil || !strings.Contains(err.Error(), "same machine") {
+		t.Fatalf("a round in the last round's machine: %v", err)
 	}
 }
 
