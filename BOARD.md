@@ -299,8 +299,8 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b | [Authenticated forget log replayed over backups](briefs/W3-forget-b.md) | W3-forget-a | Next build item B | building (split into sub-rows) |
 | W3-forget-b1 | [Authenticated forget log checked on restore](briefs/W3-forget-b1.md) | W3-forget-a | Next build item B | merged (01c8515; #409; items 1–3 ruled by Mark on #317, 2026-10-08) |
 | W3-forget-b1-4 | [Owner confirms a restore with no anchor](briefs/W3-forget-b1-4.md) | W3-forget-b1, D-065 (#406) | Next build item B | merged (c422039; #436) |
-| W3-forget-b1-5 | [The vault keeps the forget log for agentosd](briefs/W3-forget-b1-5.md): #409 R1 and P3; #409 R5 (c) and Security R4, moved from b1-6 and b1-7; #436 Potency (Q5) | W3-forget-b1, W3-forget-b1-6 | Next build item B | queued |
-| W3-forget-b1-6 | [The restore entry checks the forget log safely](briefs/W3-forget-b1-6.md): #409 R2, R3, R5 (a), (b), (d) and L3; #436 Security point 2; R5 (c) and R4 moved to b1-5 | W3-forget-b1, W3-forget-b1-7 | Next build item B | queued |
+| W3-forget-b1-5 | [The vault keeps the forget log for agentosd](briefs/W3-forget-b1-5.md): #409 R1 and P3; #409 R5 (c) and Security R4, moved from b1-6 and b1-7; the vault's log replaces the learn-dir file as the replay source (from b1-6); #436 Potency (Q5) | W3-forget-b1, W3-forget-b1-6 | Next build item B | queued |
+| W3-forget-b1-6 | [The restore entry checks the forget log safely](briefs/W3-forget-b1-6.md): #409 R2, R3, R5 (a), (b), (d), L2 (f4) and L3; #436 Security point 2; #487 UX point 1 (no held page; the restore prints the hold); #519's L3 points; R5 (c) and R4 moved to b1-5 | W3-forget-b1, W3-forget-b1-7 | Next build item B | queued |
 | W3-forget-b1-7 | [Text the owner a held restore, and take their answer](briefs/W3-forget-b1-7.md) | W3-forget-b1, W3-forget-b1-4 | Next build item B | building |
 | W3-forget-b2 | [Builder-lineage rollback with A/B](briefs/W3-forget-b2.md) | W3-forget-a | Next build item B | merged (#321) |
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
@@ -318,7 +318,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W5a-resume | [Per-grant resume on the local page](briefs/W5a-resume.md) | W5a, local page | builder (session_014jQE43g7uFA46BsQJD3VGh) | in review (tier A) |
 | W5b | [Loop 3 update checks](briefs/W5b.md) | #53 merged, W3, network state (P2-3 modem or Wi-Fi) | Loop 3 thread (P3-5) | queued |
 | W5c | [Clean-room builder](briefs/W5c.md) | #43 merged, W3 | clean-room thread (P4-2) | queued |
-| W6 | [Recovery into the vault process and local UI](briefs/W6.md) | `vault.Reencrypt` (#45, P2-4d) merged and used by rotation; the restore command calls W3-forget-b1-6's restore entry, and the backup run writes b1-5's forget log copy to each destination | recovery thread (P2-8), after #64 | queued |
+| W6 | [Recovery into the vault process and local UI](briefs/W6.md) | `vault.Reencrypt` (#45, P2-4d) merged and used by rotation; the restore command calls W3-forget-b1-6's restore entry (its vault-process endpoint closes its vault around the swap and leaves the learn-dir files owned by agentosd's uid), and the backup run writes b1-5's forget log copy to each destination | recovery thread (P2-8), after #64 | queued |
 | W7 | [Compiled skills in live use](briefs/W7.md) | `suite.go` split, #52 merged | compiled-skills thread | queued (blocked) |
 | W8 | [Owner builds](briefs/W8.md) | P2-4f | — | queued (blocked) |
 | W9 | [Questions in the guest plane](briefs/W9.md) | P3-8 merged, #68 merged | — | merged (f38aeed8) |
