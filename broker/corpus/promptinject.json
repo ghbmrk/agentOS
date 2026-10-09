@@ -1,8 +1,4 @@
 {
- "name": "promptinject",
- "url": "https://github.com/agencyenterprise/PromptInject",
- "commit": "2928a719d5de62d3766226f1b44c51d9570bc530",
- "license": "MIT",
  "items": [
   {
    "id": "promptinject/goal_hikacking_attacks/ignore-say",

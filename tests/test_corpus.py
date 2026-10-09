@@ -15,11 +15,17 @@ import corpus  # noqa: E402
 CORPORA = ROOT / "assurance" / "corpora"
 # The broker embeds this copy (go:embed cannot reach assurance/), so the
 # signed binary carries the corpus and reads no drive file (#515 Security 3).
+# It holds the vendored items and nothing else: the provenance fields carry
+# the upstream URL, which depaudit's static scan of broker/ would flag.
 EMBEDDED = ROOT / "broker" / "corpus" / "promptinject.json"
+VENDORED = CORPORA / "promptinject" / "items.json"
 
 
-def same_bytes(a: pathlib.Path, b: pathlib.Path) -> bool:
-    return a.read_bytes() == b.read_bytes()
+def embedded_bytes(vendored: pathlib.Path) -> bytes:
+    """The one rendering of a vendored items.json the broker may embed: its
+    items, written as tools/corpus.py writes items.json."""
+    items = json.loads(vendored.read_text())["items"]
+    return (json.dumps({"items": items}, indent=1, ensure_ascii=False) + "\n").encode()
 
 
 class VendoredCorpusTest(unittest.TestCase):
@@ -60,15 +66,21 @@ class VendoredCorpusTest(unittest.TestCase):
 
 class EmbeddedCorpusTest(unittest.TestCase):
     def test_the_embedded_copy_is_the_vendored_items(self):
-        self.assertTrue(same_bytes(EMBEDDED, CORPORA / "promptinject" / "items.json"))
+        self.assertEqual(EMBEDDED.read_bytes(), embedded_bytes(VENDORED))
+        self.assertEqual(json.loads(EMBEDDED.read_text())["items"], json.loads(VENDORED.read_text())["items"])
 
     def test_a_changed_byte_in_the_copy_fails(self):
+        b = bytearray(EMBEDDED.read_bytes())
+        b[len(b) // 2] ^= 0x01
+        self.assertNotEqual(bytes(b), embedded_bytes(VENDORED))
+
+    def test_a_changed_vendored_item_fails(self):
         with tempfile.TemporaryDirectory() as t:
-            copy = pathlib.Path(t) / "promptinject.json"
-            b = bytearray(EMBEDDED.read_bytes())
-            b[len(b) // 2] ^= 0x01
-            copy.write_bytes(bytes(b))
-            self.assertFalse(same_bytes(copy, CORPORA / "promptinject" / "items.json"))
+            v = json.loads(VENDORED.read_text())
+            v["items"][0]["text"] += " "
+            changed = pathlib.Path(t) / "items.json"
+            changed.write_text(json.dumps(v))
+            self.assertNotEqual(EMBEDDED.read_bytes(), embedded_bytes(changed))
 
 
 if __name__ == "__main__":

@@ -376,7 +376,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4d l5 | Potency on #556: the label route's stall under a permissive `labelClass` is bounded at 30 s but its cause (imapsmtp SetFlags) is undiagnosed |
 | P3-4b-4d l6 | L3 on #556: a production `Relay` should report a route timeout as its own error class, not as a generic route failure; P3-4b-4c |
 | P3-4b-4d l7 | L3 on #556: no test pins the `ok` check in the rig's `requested()` (relaxing it survives, since every replayed want is non-empty); add a guest that omits the key if a test needs it |
-| P3-4b-4d l8 | L3 on #556: one over-long vendored corpus item fails every code-filter run (S45); P3-4b-4c decides whether to exclude it at vendoring or report it as its own finding |
 | P3-4b-4b l4 | L3 5 and UX 2 on #548: the `cpu` finding reads "found no cpu limit" when the finding is "machine weight >= broker weight" (suggested: "an agent machine can take as much CPU as I can"); "I answered slower than my target" and "I stopped an agent machine slower than my target" give no consequence; one wording pass |
 | P3-4b-4b l5 | L3 6 on #548: S34 should say a journal line means "unchanged after attempt", not "refused", since entries rest on the guest having tried |
 | P3-4b-4b l6 | Security 4a and L3 deltas on #548: each round leaves one more `.agentos-tamper-<nonce>` marker file in a directory target that stays writable; bounded by rounds x targets while a High finding is open; cleanup is the owner's remediation |

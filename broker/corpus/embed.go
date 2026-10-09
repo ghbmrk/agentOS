@@ -8,16 +8,17 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// promptInject is assurance/corpora/promptinject/items.json, copied
-// byte for byte (tests/test_corpus.py) because go:embed cannot reach it.
+// promptInject is the items of assurance/corpora/promptinject/items.json,
+// copied because go:embed cannot reach it, and held byte for byte to one
+// rendering of them by tests/test_corpus.py.
 // The corpus is part of the signed binary, so the binary's signature is
-// its digest and no drive file is read (#515 Security 3; corpus A1).
+// its digest and no drive file is read (#515 Security 3; corpus C1).
 //
 //go:embed promptinject.json
 var promptInject []byte
 
 // Items are the embedded corpus's items: every vendored item, since each
-// fits one owner text with the code filter's payload (corpus A2).
+// fits one owner text with the code filter's payload (corpus C2).
 func Items() ([]loops.CorpusItem, error) { return loops.ParseCorpus(promptInject) }
 
 // Probe is the in-process corpus replay agentosd runs in Loop 2's slot:
