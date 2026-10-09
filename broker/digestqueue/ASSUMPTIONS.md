@@ -170,7 +170,10 @@ quiet-hours, pacing, reservation, disclosure and authority checks separately.
   loads it and purges it before any send, no Ready batch holding it is sent
   meanwhile, and it is dropped once the queue's Forget holds. The hold so does
   not depend on boot order or on the forget owner's owed file (security B2' on
-  #592). agentosd starts the digest after the forget owner's start-up replay.
+  #592). Every open also asks the queue to forget each tombstoned goal and
+  stays down until each holds, so a stop between the tombstone and the purge
+  with the owed save failed too sends nothing (W5-Dc-r12).
+  agentosd starts the digest after the forget owner's start-up replay.
   If the state store also fails, the hold is in memory only until a restart.
   The box sends under its lock, so its own forget never sees a Sending batch:
   with the queue open, only a store refusal (which breaks the queue until the
