@@ -50,3 +50,9 @@ Release findings from the UX and Potency lens on #552 (DEP-4): Potency 2 and 3, 
 ## Delivery
 
 Builder model: strongest model (risk tier A: `tools/depaudit*`). One package per session, tests first: land each test red at main before the fix, and keep the message for the PR. Run `python3 tools/risk_tier.py --git origin/main HEAD` before opening the PR. Review: L3 on the strongest model with the threat check above, then the UX and Potency lens and a separate Security section (OPERATING §3–4). Estimate/checkpoint: about 80k tokens, not a ceiling (OPERATING §5).
+
+## Delivery notes
+
+- DEP-6a–e built on #568 from 82817bb. Local IDs have no SPEC row, so tests carry the "local ID, no REQ marker" docstring (trace.py rejects unknown IDs).
+- Locally there is no newuidmap or subuid range (installing them needs a permission prompt), so the sandbox tests (6d strace stub, 6d subrange, 6e, `control-kept-read-only`) run red and green on CI only.
+- One test was corrected after the red commit: the DEP-6c stub's message now uses `_set_read_only`'s new wording (errno before path), which the assertion expects.

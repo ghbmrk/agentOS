@@ -608,7 +608,8 @@ class UnavailableTest(unittest.TestCase):
     def test_a_failing_mount_setattr_in_the_sandbox_is_one_line(self):
         # DEP-6c: _inner refuses with the path and errno, before any command, not a traceback.
         def refuse(path):
-            raise OSError(errno.EPERM, "mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY) on %s: EPERM" % path)
+            raise OSError(errno.EPERM, "mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY) failed with EPERM "
+                          "(Operation not permitted) on %s" % path)
         with tempfile.TemporaryDirectory() as k, mock.patch.object(depaudit, "_mount"), \
                 mock.patch.object(depaudit, "MASKED_DIRS", ()), \
                 mock.patch.object(depaudit, "_set_read_only", side_effect=refuse), \

@@ -73,7 +73,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5c | A12 | Clean-room builder in the scheduler |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
-| DEP-3 | A9 (DEP-2a evidence integrity) | Every tracee shares `_inner`'s uid and can drain the evidence pipes via `/proc/1/fd` or ptrace `_inner`, or break the next trace line by writing a partial line through `/proc/1/fd/<trace_w>` (L3 and Security on #437, ASSUMPTIONS D9) |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
@@ -305,9 +304,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | DEP-3 l4 | depaudit: `writes` paths keep files owned by the scenario's subordinate id, persisting across targets that share it; not a regression (all shared the runner uid before DEP-3) (Security 4a on #562 point 7) |
 | DEP-3 l5 | depaudit: the runner's first subordinate range may be shared with rootless containers on the same host (ASSUMPTIONS D13) (Security 4a on #562 point 8) |
 | DEP-3 l6 | depaudit: a chown back that fails partway leaves files owned by the subordinate id; error path only, verdict already fails closed (Security 4a on #562 point 9) |
-| DEP-3 l7 | depaudit: test `shutil.which("newuidmap")`/`newgidmap` beside the existing `which` calls so the first missing binary is named directly; covered once DEP-6d/6e land (lens on #562 UX 3) |
-| DEP-3 l8 | depaudit: the sandbox-unavailable line splices the whole `TRACED` list in for every cause; print it only when the strace cause failed (lens on #562 UX 4) |
-| DEP-3 l9 | depaudit: the sandbox-unavailable FAIL line gives a local operator no pointer to ASSUMPTIONS D13 (lens on #562 UX 5) |
 | DEP-3 l10 | depaudit: `control-evidence-channels` tries the three channels the brief names, not the whole `ptrace_may_access` gate: add `/proc/1/mem`, `process_vm_writev` and `pidfd_getfd` on PID 1 (lens on #562 Potency 6) |
 | DEP-3 l11 | depaudit: `_evidence_fds()` falls back to `range(64)` once `/proc/1/fd` is closed, so the control never shows the tried fds include the trace pipe; add a positive run (caps back) that can open them (lens on #562 Potency 7) |
 | DEP-3 l12 | depaudit: `test_the_evidence_channels_are_closed_by_uid_alone` skips silently without the sandbox; check in the `dependency-audit` log that it ran (lens on #562 Potency 8) |
