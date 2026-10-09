@@ -111,7 +111,10 @@ func (c *Channel) Boot() {
 	}
 	c.mu.Unlock()
 	if c.cfg.Modem != nil {
-		_ = c.cfg.Modem.Send(c.cfg.Owner, text)
+		// Paced as an approval: it re-sends approval requests with new
+		// codes (CH-15).
+		// A broker template, so not through Disclose (CH-19).
+		_ = c.postTemplate(ClassApproval, text)
 	}
 	c.decide(decided)
 	if c.cfg.Reissue != nil {

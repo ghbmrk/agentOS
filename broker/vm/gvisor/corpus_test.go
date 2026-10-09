@@ -159,7 +159,11 @@ func newRelay(t *testing.T, machines guest.Machines) *relay {
 	carrier := modem.NewCarrier()
 	box := carrier.Line(boxNum)
 	x.box, x.phone = box, carrier.Line(ownerNum)
-	if x.ch, err = owner.New(owner.Config{Owner: ownerNum, Modem: box, Engine: x.eng, Store: &owner.MemStore{},
+	// The loosest pacing the owner can set: this replay is about the
+	// guest plane, not CH-15's pacing (W5-Dc-r1a).
+	state := &owner.MemStore{}
+	state.Save(owner.State{Pacing: owner.Pacing{PerHour: owner.MaxTextsPerHour, Urgent: []owner.Class{owner.ClassApproval, owner.ClassAgent}}})
+	if x.ch, err = owner.New(owner.Config{Owner: ownerNum, Modem: box, Engine: x.eng, Store: state,
 		Location: time.UTC, Decide: g.Decide}); err != nil {
 		t.Fatal(err)
 	}

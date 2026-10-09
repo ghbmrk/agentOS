@@ -83,12 +83,20 @@ func (w watchedLine) SendRequest(to, text string) error {
 	return err
 }
 
-// sendRequest texts the owner an approval request.
+// sendRequest texts the owner an approval request. Grants paces these,
+// so the owner never holds one, but a sent one counts toward the hour
+// (CH-15).
 func (c *Channel) sendRequest(text string) error {
+	var err error
 	if rs, ok := c.cfg.Modem.(RequestSender); ok {
-		return rs.SendRequest(c.cfg.Owner, text)
+		err = rs.SendRequest(c.cfg.Owner, text)
+	} else {
+		err = c.cfg.Modem.Send(c.cfg.Owner, text)
 	}
-	return c.cfg.Modem.Send(c.cfg.Owner, text)
+	if err == nil {
+		c.countSent()
+	}
+	return err
 }
 
 // QueueResult says what happened to a reply.
@@ -142,7 +150,8 @@ func (c *Channel) QueueAutoReply(ar AutoReply) (QueueResult, error) {
 	text := fmt.Sprintf("Auto-reply to %s: \"%s\". Sends %s. Reply UNDO %s to stop it.",
 		field(to, 40), field(firstLine(ar.Body), 60), q.SendAt.In(c.cfg.Location).Format("15:04"), id)
 	c.mu.Unlock()
-	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
+	// Not held (grants paces auto-replies), but counted (CH-15).
+	if err := c.sendCounted(text); err != nil {
 		c.mu.Lock()
 		delete(c.queued, id)
 		c.retireLocked(id, now)
