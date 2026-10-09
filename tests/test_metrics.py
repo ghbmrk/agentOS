@@ -37,6 +37,13 @@ class ParseTest(unittest.TestCase):
         self.assertIsNone(metrics.verdict("LGTM, nice work"))
         self.assertIsNone(metrics.verdict(""))
 
+    def test_cause_line(self):
+        self.assertEqual(metrics.cause("Verdict: fix-list\nCause: brief-gap\n- point"), "brief-gap")
+        self.assertEqual(metrics.cause("Verdict: reject\n**Cause:** Spec-gap"), "spec-gap")
+        self.assertIsNone(metrics.cause("Verdict: fix-list\nbecause: defect is mid-line"))
+        self.assertIsNone(metrics.cause("Cause: other"))
+        self.assertIsNone(metrics.cause(None))
+
     def test_defect_lines(self):
         body = "## Defect\nDefect: P1-3\nDefect: P1-4, P2-7\nnot a Defect: X"
         self.assertEqual(metrics.defects(body), ["P1-3", "P1-4", "P2-7"])
@@ -104,7 +111,8 @@ def raw_fixture():
         ],
         "phases": [["P0", "10%", "x"]],
         "pulls": [
-            {"number": 1, "merged_at": "2026-10-05T10:00:00Z", "body": "", "verdicts": ["fix-list", "accept"]},
+            {"number": 1, "merged_at": "2026-10-05T10:00:00Z", "body": "", "verdicts": ["fix-list", "accept"],
+             "causes": ["brief-gap"]},
             {"number": 2, "merged_at": "2026-10-06T10:00:00Z", "body": "", "verdicts": ["accept"]},
             {"number": 3, "merged_at": "2026-10-06T11:00:00Z", "body": "", "verdicts": []},
             {"number": 4, "merged_at": "2026-10-11T20:00:00Z", "body": "Defect: A", "verdicts": ["accept"]},
@@ -146,10 +154,19 @@ class ComputeTest(unittest.TestCase):
         self.assertEqual((w1["first_pass_ok"], w1["first_pass_n"]), (1, 2))
         self.assertEqual(w1["no_verdict"], [3])
 
+    def test_review_rounds_count_every_verdict_on_judged_prs(self):
+        # #1 took fix-list then accept, #2 accept; #3 has no verdict and is left out.
+        self.assertEqual(self.weeks["2026-10-04"]["rounds"], 3)
+
     def test_escalation_rate_is_cumulative_and_counts_past_escalations(self):
         self.assertEqual((self.weeks["2026-10-04"]["escalated"], self.weeks["2026-10-04"]["reviewed"]), (1, 2))
         # B left escalated, but it was escalated once; C and D reached merged.
         self.assertEqual((self.weeks["2026-10-11"]["escalated"], self.weeks["2026-10-11"]["reviewed"]), (1, 4))
+
+    def test_causes_tally_judged_prs_and_tolerate_old_data(self):
+        self.assertEqual(self.weeks["2026-10-04"]["causes"], ["brief-gap"])
+        # #4 has no "causes" key (collected before causes were parsed).
+        self.assertEqual(self.weeks["2026-10-11"]["causes"], [])
 
     def test_defects_count_merged_prs_only(self):
         self.assertEqual(self.weeks["2026-10-11"]["defects"], ["A"])
@@ -174,6 +191,28 @@ class RenderTest(unittest.TestCase):
         row = lambda md: next(l for l in md.splitlines() if l.startswith("| 2026-10-04 |"))
         self.assertEqual(row(again), row(first))
         self.assertIn("1/3", row(again))
+        self.assertTrue(row(first).endswith("| brief-gap 1 |"))
+
+    def test_rows_recorded_before_the_causes_column_keep_their_frozen_cells(self):
+        raw = raw_fixture()
+        first = metrics.render(metrics.compute(raw), raw)
+        # Drop the last column, as METRICS.md looked before it existed.
+        old = "\n".join(l.rsplit(" |", 2)[0] + " |" if l.startswith("| 2026-") else l for l in first.splitlines())
+        raw["runs"].append({"workflow": "ci", "sha": "e", "at": "2026-10-06T10:00:00Z", "conclusions": ["failure", "success"]})
+        later = metrics.render(metrics.compute(raw), raw, old)
+        row = next(l for l in later.splitlines() if l.startswith("| 2026-10-04 |"))
+        self.assertIn("1/3", row)
+        self.assertTrue(row.endswith("| — |"))
+
+    def test_rows_recorded_with_fewer_columns_keep_their_frozen_cells(self):
+        # METRICS.md on main predates the last three columns.
+        raw = raw_fixture()
+        first = metrics.render(metrics.compute(raw), raw)
+        old = "\n".join(l.rsplit(" |", 4)[0] + " |" if l.startswith("| 2026-") else l for l in first.splitlines())
+        raw["runs"].append({"workflow": "ci", "sha": "e", "at": "2026-10-06T10:00:00Z", "conclusions": ["failure", "success"]})
+        later = metrics.render(metrics.compute(raw), raw, old)
+        row = next(l for l in later.splitlines() if l.startswith("| 2026-10-04 |"))
+        self.assertIn("1/3", row)
 
 
 class FreezeTest(unittest.TestCase):
@@ -261,9 +300,9 @@ class TrustTest(unittest.TestCase):
             if path.startswith("pulls?"):
                 return [{"number": 7, "merged_at": "2026-10-05T01:00:00Z", "body": ""}] if "page=1&" in path + "&" else []
             if path.startswith("pulls/7/reviews"):
-                return [{"body": "L3 review. Verdict: reject.", "submitted_at": "1", "author_association": "NONE"},
+                return [{"body": "L3 review. Verdict: reject.\nCause: scope", "submitted_at": "1", "author_association": "NONE"},
                         {"body": "L3 review. Verdict: reject.", "submitted_at": "2", "author_association": "CONTRIBUTOR"},
-                        {"body": "L3 review. Verdict: fix-list.", "submitted_at": "3", "author_association": "OWNER"},
+                        {"body": "L3 review. Verdict: fix-list.\nCause: defect", "submitted_at": "3", "author_association": "OWNER"},
                         {"body": "L3 review. Verdict: accept.", "submitted_at": "4", "author_association": "COLLABORATOR"},
                         {"body": "L3 review. Verdict: accept.", "submitted_at": "5", "author_association": "MEMBER"}]
             if path.startswith("actions/runs?"):
@@ -277,6 +316,7 @@ class TrustTest(unittest.TestCase):
         finally:
             metrics._api = orig
         self.assertEqual(pulls[0]["verdicts"], ["fix-list", "accept", "accept"])
+        self.assertEqual(pulls[0]["causes"], ["defect"])
         # The fork's failure on the same commit would read as a flake; a run with no head
         # repository (deleted fork) is not known to be this repository's.
         self.assertEqual([(r["sha"], r["conclusions"]) for r in got], [("a", ["success"])])

@@ -35,7 +35,7 @@ var (
 	// ErrOwnerStop: STOP, LOOPS OFF, or the owner pausing a loop.
 	ErrOwnerStop = fmt.Errorf("change: stopped by the owner: %w", ErrOwnerPreempt)
 	// ErrOwnerWork: the owner's accepted work arrived without pressure.
-	ErrOwnerWork = fmt.Errorf("change: the owner's work needs the box: %w", ErrOwnerPreempt)
+	ErrOwnerWork = fmt.Errorf("change: the owner's work needs the host: %w", ErrOwnerPreempt)
 	// ErrNoRoomPreempt: admission had no room for the replay machine's
 	// fixed budget, with no other replay machine holding room.
 	ErrNoRoomPreempt = fmt.Errorf("change: no room for the replay machine: %w", ErrOwnerPreempt)

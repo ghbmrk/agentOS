@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,11 @@ const (
 	HeaderLabel   = "Agentos-Label"
 	HeaderDenial  = "Agentos-Egress-Denial"
 	HeaderUsage   = "Agentos-Usage"
+	// HeaderAttempts is how many attempts past the first the vault
+	// process's router may send for the call, failing over: as many as
+	// the call's meter holds, up to MaxRetries (SR3-7-f1b). Missing or
+	// unreadable, it is none.
+	HeaderAttempts = "Agentos-Attempts"
 	// HeaderRule carries, for a replay machine only, the routing rule of
 	// the tree under evaluation (base64 of its JSON); see Evaluation.
 	HeaderRule   = "Agentos-Rule"
@@ -75,7 +81,11 @@ type Denial struct {
 
 // Usage is the HeaderUsage trailer: a served call's usage as the router
 // measured it (route.Usage) and the provider that served it, whose cache
-// weights the meter applies. It carries no content.
+// weights the meter applies, with every attempt it failed over from
+// (Failed; SR3-7-f1c). Unserved says no route served the call: only its
+// failed attempts are charged. None says no attempt was sent upstream
+// (the router refused the call itself), so the meter keeps its own count.
+// It carries no content.
 type Usage struct {
 	Provider    string `json:"provider"`
 	Input       int64  `json:"input"`
@@ -85,7 +95,14 @@ type Usage struct {
 	Reported    bool   `json:"reported"`
 	Complete    bool   `json:"complete"`
 	OutputChars int64  `json:"output_chars"`
+
+	Failed   []meter.Attempt `json:"failed,omitempty"`
+	Unserved bool            `json:"unserved,omitempty"`
+	None     bool            `json:"none,omitempty"`
 }
+
+// MaxRetries bounds HeaderAttempts.
+const MaxRetries = 3
 
 // maxUsage bounds the usage trailer.
 const maxUsage = 4 << 10
@@ -106,6 +123,11 @@ type Config struct {
 	// that run as not evaluated (replay.Evaluator.OverPriceCeiling).
 	// Evaluation requires it: without it every call answers 503.
 	OverCeiling func(machine string)
+	// Retries is the most attempts past the first the owner's rule lets
+	// a call spend (Spare.Retries), read on each call, so it must not
+	// block. The meter holds no more than that, nor MaxRetries. Nil, or
+	// a negative answer (unknown), holds MaxRetries (SR3-7-f2).
+	Retries func() int
 }
 
 // Forward returns the guest plane's Model function: one handler per
@@ -166,17 +188,33 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 				}
 				pr.Out.Header.Set(HeaderMachine, machine)
 				pr.Out.Header.Set(HeaderLabel, label)
+				// The meter holds each attempt past the first before the
+				// vault process may send it; what is not spent is
+				// refunded when the call settles. It holds none the owner's
+				// rule cannot spend (SR3-7-f2).
+				n, most := 0, MaxRetries
+				if cfg.Retries != nil {
+					if r := cfg.Retries(); r >= 0 {
+						most = min(r, MaxRetries)
+					}
+				}
+				for n < most && meter.Another(pr.In.Context()) {
+					n++
+				}
+				pr.Out.Header.Set(HeaderAttempts, strconv.Itoa(n))
 				if eval && rule != nil {
 					pr.Out.Header.Set(HeaderRule, base64.StdEncoding.EncodeToString(rule))
 				}
 			},
 			ModifyResponse: func(resp *http.Response) error {
 				raw := resp.Header.Get(HeaderDenial)
+				_, announced := resp.Trailer[HeaderUsage]
+				allowed, _ := strconv.Atoi(resp.Request.Header.Get(HeaderAttempts))
 				dropOurs(resp.Header)
 				dropOurs(resp.Trailer)
 				// Trailer values arrive with the end of the body; strip
 				// ours again once they have.
-				resp.Body = &scrubTrailers{ReadCloser: resp.Body, resp: resp, ctx: resp.Request.Context()}
+				resp.Body = &scrubTrailers{ReadCloser: resp.Body, resp: resp, ctx: resp.Request.Context(), announced: announced, allowed: allowed}
 				if raw != "" {
 					var d Denial
 					if err := json.Unmarshal([]byte(raw), &d); err != nil {
@@ -200,12 +238,15 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 				// died) may come after a provider billed output. The cap
 				// counts what the provider may have billed, not what
 				// reached the guest, so the meter charges the call's full
-				// output reservation.
+				// output reservation, and so each further attempt the
+				// call was allowed (SR3-7-f1c). r is the request as sent,
+				// so its allowance is the broker's.
 				var op *net.OpError
 				if errors.As(err, &op) && op.Op == "dial" {
 					meter.Report(r.Context(), meter.Usage{NoResponse: true})
 				} else {
-					meter.Report(r.Context(), meter.Usage{Unanswered: true})
+					allowed, _ := strconv.Atoi(r.Header.Get(HeaderAttempts))
+					unanswered(r.Context(), allowed)
 				}
 				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
 			},
@@ -232,33 +273,89 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 // ends, before the reverse proxy copies the trailers to the guest. A body
 // that ended cleanly reports its usage trailer to the meter first, on the
 // metered call's context (the request's).
+//
+// When the vault process announced the trailer, a call whose trailer is
+// missing or unusable, or whose body broke off or was left unread, may
+// have reached a provider and spent every attempt it was allowed: the
+// meter charges it as Unanswered, with each allowed attempt past the first
+// as a failed one at the full reservation (SR3-7-f1c).
 type scrubTrailers struct {
 	io.ReadCloser
-	resp *http.Response
-	ctx  context.Context
-	done bool
+	resp      *http.Response
+	ctx       context.Context
+	done      bool
+	announced bool // the vault process announced HeaderUsage
+	allowed   int  // HeaderAttempts as sent
 }
 
 func (s *scrubTrailers) Read(b []byte) (int, error) {
 	n, err := s.ReadCloser.Read(b)
-	if err != nil {
-		if raw := s.resp.Trailer.Get(HeaderUsage); err == io.EOF && !s.done && raw != "" && len(raw) <= maxUsage {
+	if err != nil && !s.done {
+		s.done = true
+		reported := false
+		if raw := s.resp.Trailer.Get(HeaderUsage); err == io.EOF && raw != "" && len(raw) <= maxUsage {
 			var u Usage
-			if json.Unmarshal([]byte(raw), &u) == nil && u.valid() {
-				meter.Report(s.ctx, meter.Usage{Provider: u.Provider, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
-					CacheWrite: u.CacheWrite, Reported: u.Reported, Complete: u.Complete, OutputChars: u.OutputChars})
+			if json.Unmarshal([]byte(raw), &u) == nil && u.valid(s.allowed) {
+				reported = true
+				if !u.None {
+					meter.Report(s.ctx, meter.Usage{Provider: u.Provider, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
+						CacheWrite: u.CacheWrite, Reported: u.Reported, Complete: u.Complete, OutputChars: u.OutputChars,
+						Failed: u.Failed, Unserved: u.Unserved})
+				}
 			}
 		}
-		s.done = true
+		if !reported {
+			s.unanswered()
+		}
+	}
+	if err != nil {
 		dropOurs(s.resp.Trailer)
 	}
 	return n, err
 }
 
-// valid refuses negative or absurd counts; the meter would otherwise charge
-// them.
-func (u Usage) valid() bool {
-	for _, n := range []int64{u.Input, u.Output, u.CacheRead, u.CacheWrite, u.OutputChars} {
+// Close charges a body left unread as unanswered.
+func (s *scrubTrailers) Close() error {
+	if !s.done {
+		s.done = true
+		s.unanswered()
+	}
+	return s.ReadCloser.Close()
+}
+
+// unanswered reports the worst the call may have spent, if the vault
+// process announced a usage trailer.
+func (s *scrubTrailers) unanswered() {
+	if s.announced {
+		unanswered(s.ctx, s.allowed)
+	}
+}
+
+// unanswered reports the metered call on ctx as one that may have reached
+// a provider and spent all allowed attempts past the first, each at its
+// full reservation.
+func unanswered(ctx context.Context, allowed int) {
+	failed := make([]meter.Attempt, max(0, min(allowed, MaxRetries)))
+	for i := range failed {
+		failed[i] = meter.Attempt{Full: true}
+	}
+	meter.Report(ctx, meter.Usage{Unanswered: true, Failed: failed})
+}
+
+// valid refuses negative or absurd counts, which the meter would otherwise
+// charge, and more failed attempts than the call was allowed.
+func (u Usage) valid(allowed int) bool {
+	if len(u.Failed) > allowed+1 || (u.None && (u.Unserved || len(u.Failed) > 0)) || (u.Unserved && len(u.Failed) == 0) {
+		return false
+	}
+	counts := []int64{u.Input, u.Output, u.CacheRead, u.CacheWrite, u.OutputChars}
+	for _, a := range u.Failed {
+		if a.Status < 100 || a.Status > 599 {
+			return false
+		}
+		counts = append(counts, a.Input, a.Output, a.CacheRead, a.CacheWrite, a.OutputChars)
+	}
+	for _, n := range counts {
 		if n < 0 || n > 1e12 {
 			return false
 		}

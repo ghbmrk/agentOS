@@ -21,9 +21,10 @@ import (
 // C-3c-5: about 30-40%). It reserves nothing.
 const builderShareMax = 0.35
 
-// builderShare is the builder machines' share of the spare meter.
+// builderShare is Loop 1's builder machines' share of the spare meter;
+// Loop 2's fix machines have their own (loop2FixShare).
 func builderShare() meter.Share {
-	return meter.Share{Prefix: loopbuild.Prefix, Max: builderShareMax}
+	return meter.Share{Prefix: loopbuild.BuildPrefix, Max: builderShareMax}
 }
 
 // errNoBuilder: the box has no builder machines (no -builder-image, or no
@@ -78,7 +79,8 @@ type buildConfig struct {
 	AgentImage string
 	Launch     string // its argv and env; empty: the image's own
 	MemMB      int64
-	Egress     string // the vault process's model socket; empty: no model access
+	Egress     string     // the vault process's model socket; empty: no model access
+	Retries    func() int // modelroute.Config.Retries; nil: MaxRetries
 }
 
 // openBuilder attaches Loop 1's model-backed builder (W3-builder): builder
@@ -108,7 +110,7 @@ func (l *learning) openBuilder(m builderMachines, imgs images, services *lateSer
 		cfg.Argv, cfg.Env = argv, env
 	}
 	if c.Egress != "" {
-		cfg.Model = modelroute.Forward(modelroute.Config{Socket: c.Egress, Label: m.DataLabel, Denied: builderDenied(log.Printf), Logf: log.Printf})
+		cfg.Model = modelroute.Forward(modelroute.Config{Socket: c.Egress, Label: m.DataLabel, Denied: builderDenied(log.Printf), Logf: log.Printf, Retries: c.Retries})
 		cfg.Meter = l.spare
 	}
 	b, err := loopbuild.New(cfg)
