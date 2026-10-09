@@ -13,7 +13,7 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | DOC-4 | [Per-file review records; no shared run tables](briefs/DOC-4.md) | DOC-1, DOC-2 | building |
 | SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | merged (#380; Codex proposal to primary; documentation only) |
 | HK-1 | [depaudit self-test flake fix](briefs/HK-1.md) | — | merged (#401) |
-| DEP-2 | [depaudit evidence out of the tracee's reach](briefs/DEP-2.md) | HK-1 | building (release; #401 L3 R1 and lens) |
+| DEP-2 | [depaudit evidence out of the tracee's reach](briefs/DEP-2.md) | HK-1 | in review (#437) (release; #401 L3 R1 and lens) |
 
 ## Security and architecture review (2026-10-08)
 
@@ -21,14 +21,14 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| SR3-1 | [Bind local sign-in to the authenticated lock generation](briefs/SR3-1.md) | P2-2w a, P2-2w b | in review (#431) |
-| SR3-2 | [Enforce pre-allowance rate limits at dispatch](briefs/SR3-2.md) | P2-grants, P2-gr8 | in review (#428) |
-| SR3-3 | [Show and bind the complete pre-allowance rule at approval](briefs/SR3-3.md) | P2-grants, P2-2a | queued (P2; release) |
-| SR3-4 | [Make update finalization durable and idempotent](briefs/SR3-4.md) | UPD-a, P4-3, P3-1 | in review (#434) |
-| SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | queued (P2; release) |
-| SR3-6 | [Invalidate verified updates when attestation policy narrows](briefs/SR3-6.md) | P4-3, P3-1 | in review (#430) |
-| SR3-7 | [Use one validated request for model reservation and routing](briefs/SR3-7.md) | P2-7, P1-7 | in review (#429) |
-| SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | in review (#432) |
+| SR3-1 | [Bind local sign-in to the authenticated lock generation](briefs/SR3-1.md) | P2-2w a, P2-2w b | merged (#431) |
+| SR3-2 | [Enforce pre-allowance rate limits at dispatch](briefs/SR3-2.md) | P2-grants, P2-gr8 | merged (#428) |
+| SR3-3 | [Show and bind the complete pre-allowance rule at approval](briefs/SR3-3.md) | P2-grants, P2-2a | in review (#433) |
+| SR3-4 | [Make update finalization durable and idempotent](briefs/SR3-4.md) | UPD-a, P4-3, P3-1 | merged (#434) |
+| SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | in review (#424) |
+| SR3-6 | [Invalidate verified updates when attestation policy narrows](briefs/SR3-6.md) | P4-3, P3-1 | merged (#430) |
+| SR3-7 | [Use one validated request for model reservation and routing](briefs/SR3-7.md) | P2-7, P1-7 | merged (#429) |
+| SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | merged (#432) |
 
 ## Phase 0: harness and risk spikes
 
@@ -46,8 +46,8 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | S8-W1 | [Image fix for worker-held custody](briefs/S8-W1.md) | S8, #186 | building |
 | S8-live | [S8 live part](briefs/S8-live.md) | see brief | queued |
 | S8-codex-terms | [Read OpenAI's current terms on a proxy holding ChatGPT-managed…](briefs/S8-codex-terms.md) | openai.com reachable | in review (decided: broker-held, unconfirmed route, #328; [note](spikes/S8-provider-workers/CODEX-TERMS.md)) |
-| CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | in review (#420) |
-| CRED-5t | [Broker-held route failure triggers and fail-closed refresh test](briefs/CRED-5t.md) | #328 | queued |
+| CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | merged (#420) |
+| CRED-5t | [Broker-held route failure triggers and fail-closed refresh test](briefs/CRED-5t.md) | #328 | in review (#426) |
 | CRED-5w | [Owner pause and withdrawal notice for broker-held routes](briefs/CRED-5w.md) | #328 | queued |
 | S1 | [Screenless USB4-SSD boot on ≥3 unmodified PCs](briefs/S1.md) | Mark: hardware + hands | queued (test kit ready; waiting on hardware) |
 | S2 | [USB LTE modem](briefs/S2.md) | Mark: 2 modems + SIM | queued (test kit ready; waiting on hardware) |
@@ -182,13 +182,13 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | P2-2w | [Local UI process and owner socket](briefs/P2-2w.md) | P2-2a | building (in sub-rows a, b, d, c (P3-2 thread)) |
 | P2-2a f1 | [Page result after a changed item](briefs/P2-2a-f1.md) | P2-2a | merged (#329) |
 | P2-2a f2 | [Page result for a changed release adoption](briefs/P2-2a-f2.md) | P2-2a f1 | merged (#363) |
-| P2-2a f3 | [Re-offer an awaiting-owner release the pipeline dropped](briefs/P2-2a-f3.md) | P2-2a f2 | in review (#423) |
+| P2-2a f3 | [Re-offer an awaiting-owner release the pipeline dropped](briefs/P2-2a-f3.md) | P2-2a f2 | merged (#423) |
 | P2-2w a | [`localui.sock` in agentosd](briefs/P2-2w-a.md) | P2-2a | merged (b00db30; #184) |
 | P2-2w b | [`agentos-localui` command under its own uid](briefs/P2-2w-b.md) | P2-2w a | merged (0302131; #189) |
 | P2-2w d | [LocalUI on (part 1)](briefs/P2-2w-d.md) | P2-2w b | merged (#322; split 2026-10-08; part 2 is d2) |
 | P2-2w d2 | [Home page shows `Link.OwnerLineNote` and `Link.LastOutage`](briefs/P2-2w-d2.md) | P2-2w d | building (split into d2a, d2b) |
 | P2-2w d2a | [Home page shows the owner line's note, last outage and counts](briefs/P2-2w-d2a.md) | P2-2w d | merged (#378) |
-| P2-2w d2b | [Page control to confirm a SIM swap and set up the owner number](briefs/P2-2w-d2b.md) | P2-2w d2a | building (A) |
+| P2-2w d2b | [Page control to confirm a SIM swap and set up the owner number](briefs/P2-2w-d2b.md) | P2-2w d2a | in review (#444) (A) |
 | P2-2w c | [Setup moves into agentosd](briefs/P2-2w-c.md) | P2-2w b | building (split into c1-c3, each under one session) |
 | P2-2w c1 | [Code seed made in the vault process and handed out once](briefs/P2-2w-c1.md) | P2-2w b | merged (#320) |
 | P2-2w c2 | [Pairing and finish in agentosd](briefs/P2-2w-c2.md) | P2-2w c1 | merged (#367) |
@@ -281,8 +281,8 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b1-7 | Text the owner the held restore's PendingNotice (CH-12) from the marker agentosd refuses to start on (#409 U2; brief to write). Also (#409 UX U6, release): add the CH-12 recurring-kind check ("a step that cannot work") for owner texts, per reviews/ux/README.md Also (#436, release): L3 — route only authenticated owner-channel replies into answerHeld, and serialize replies; UX — the unanchored header says "this PC", not "new PC", and when there is no newer backup the wrong-answer text needs a named way to retry | W3-forget-b1, W3-forget-b1-4 | Next build item B | queued (needs brief) |
 | W3-forget-b2 | [Builder-lineage rollback with A/B](briefs/W3-forget-b2.md) | W3-forget-a | Next build item B | merged (#321) |
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
-| W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | in review (#425) |
-| W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | in review (#427) |
+| W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | merged (#425) |
+| W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | merged (#427) |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
 | W3-forget-b2c-2 | Item 2's texts (`forgetAgentDone`, `forgetAgentNotYet` and the rest) are owed until they send, as W3-forget-b3 does for item 1; add a check that no done text in `ownerForget` reaches `inform` directly (release, UX-182-3 / CH-12; Defect: W3-forget-b2c; L3 on #425, second PR with this kind of finding; brief to write) | W3-forget-b2c, W3-forget-b3 | Next build item B | queued (needs brief) |
 | W3-forget-b3r | The local Wi-Fi page lists older tasks and can forget one (potency R2, carried by W3-forget-b3; needs a page, socket route and forget path in `broker/localui`; release, L3 on #425; brief to write) | W3-forget-b3 | Next build item B | queued (needs brief) |
