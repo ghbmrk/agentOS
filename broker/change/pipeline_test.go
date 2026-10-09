@@ -437,7 +437,7 @@ func TestRegressingSecurityReleaseAsks(t *testing.T) {
 	if r, _ := e.p.Settle(bg, r.ID); r.State != StateRejected {
 		t.Fatal(r)
 	}
-	declined := "You declined security update 30; the box is still on the previous version until a newer update is installed."
+	declined := "You declined security update 30; I am still on the previous version until a newer update is installed."
 	for i := 0; i < 2; i++ {
 		if d := e.p.Digest(); len(d) != 1 || d[0] != declined {
 			t.Fatalf("digest %d: %q", i, d)

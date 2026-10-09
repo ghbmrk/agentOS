@@ -30,7 +30,7 @@ BRIEF_TOKENS = 20_000
 OPERATING_REF = re.compile(r"OPERATING(?:\.md)?\s*§\s*(\d+)(?:\s*[–-]\s*(\d+))?")
 RECORD_FROM = "2026-10-09"
 DECISION_CHARS = 300
-LONG_DECISION_OK = ("D-062",)  # over 300 characters, no link yet (LATER DOC-5 f1)
+LONG_DECISION_OK = ("D-062", "D-087", "D-088", "D-089")  # over 300 characters, no link yet (LATER DOC-5 f1)
 STATE_LINE = re.compile(r"^\*\*State:\*\*")
 RECORD_FILE = re.compile(r"(\d{4}-\d\d-\d\d)-.+\.md$")
 RECORD_FIELDS = (re.compile(r"\bPRs? (?:#\d+|none)\b"), re.compile(r"\bpackages? \S"),
@@ -114,7 +114,8 @@ def records(root):
             continue
         lines = [l for l in path.read_text().splitlines() if l.strip()]
         complete = [l for l in lines if l.startswith("Record:") and all(f.search(l) for f in RECORD_FIELDS)]
-        if complete and lines[1:2] == complete[:1]:
+        title = next((i for i, l in enumerate(lines) if l.startswith("# ")), 0)  # a Verdict line may precede it
+        if complete and lines[title + 1:title + 2] == complete[:1]:
             continue
         if complete:
             yield f"{rel}: put the `Record:` line directly under the title (OPERATING §4 step 3)"

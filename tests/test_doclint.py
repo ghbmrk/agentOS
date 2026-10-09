@@ -131,6 +131,10 @@ class LintTest(unittest.TestCase):
         self.assertEqual(len(got), 1)
         self.assertIn("directly under the title", got[0])
 
+    def test_record_line_may_follow_a_title_that_follows_the_verdict(self):
+        text = "Verdict: accept\n\n# U\n\nRecord: PR #1 · package A-1 · head abc1234\n"
+        self.assertEqual(self.lint(**{"reviews/ux/2026-10-09-pr1.md": text}), [])
+
     def test_new_lens_directory_is_checked(self):
         got = self.lint(**{"reviews/ops/2026-10-09-pr1.md": "# O\n"})
         self.assertEqual(len(got), 1)

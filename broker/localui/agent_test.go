@@ -25,10 +25,12 @@ type stillOwner struct{}
 func (stillOwner) LocalStatus() owner.LocalStatus {
 	return owner.LocalStatus{Stopped: true, LocalLeft: 24}
 }
-func (stillOwner) LocalGridCell() string                                    { return "C3" }
-func (stillOwner) LocalSignIn(string) (time.Time, error)                    { return time.Time{}, owner.ErrWrongCode }
+func (stillOwner) LocalGridCell() string { return "C3" }
+func (stillOwner) LocalSignIn(string) (time.Time, uint64, error) {
+	return time.Time{}, 0, owner.ErrWrongCode
+}
 func (stillOwner) LocalStop(context.Context) error                          { return nil }
-func (stillOwner) LocalResume() (string, error)                             { return "", nil }
+func (stillOwner) LocalResume(uint64) (string, error)                       { return "", nil }
 func (stillOwner) LocalRequests() []owner.LocalRequest                      { return nil }
 func (stillOwner) LocalWaiting() string                                     { return "" }
 func (stillOwner) LocalStatusLines() string                                 { return "" }
@@ -82,7 +84,7 @@ func TestWithoutSetupHooksEverySetupRouteIsRefused(t *testing.T) {
 	for _, path := range []string{"/setup", "/setup/", "/setup/network", "/setup/number", "/setup/number-code", "/setup/claim",
 		"/setup/codes", "/setup/recovery", "/setup/host", "/setup/ai-key", "/setup/ai-device", "/setup/restart", "/setup/anything"} {
 		for _, m := range []string{"GET", "POST"} {
-			if w := get(m, path); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "isn't ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.") {
+			if w := get(m, path); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "not ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.") {
 				t.Errorf("%s %s: %d", m, path, w.Code)
 			}
 		}
