@@ -456,7 +456,7 @@ class EvidenceTest(unittest.TestCase):
     def test_kept_paths_are_read_only_unless_declared(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as ro, tempfile.TemporaryDirectory(dir="/tmp") as rw:
             os.chmod(ro, 0o755)
-            os.chmod(rw, 0o755)
+            os.chmod(rw, 0o777)  # the scenario runs as SCENARIO_ID (DEP-3)
             res = depaudit.run_target({"name": "writes", "cmd": HARNESS_CONTROLS + ["write-kept"], "keep": [ro],
                                        "writes": [rw], "env": {"DEPAUDIT_KEEP_RO": ro, "DEPAUDIT_KEEP_RW": rw}},
                                       depaudit.load_manifest(MANIFEST))
@@ -475,7 +475,8 @@ class EvidenceTest(unittest.TestCase):
     # scenario's kept caps (CAP_DAC_READ_SEARCH's open_by_handle_at, CAP_SYS_MODULE, ...)
     # act on the host and can reach kept paths (B2, Security re-sign 2 on #437).
     def test_the_scenario_runs_in_its_own_user_namespace(self):
-        res = depaudit.run_target({"name": "userns", "cmd": HARNESS_CONTROLS + ["own-user-namespace"]},
+        res = depaudit.run_target({"name": "userns", "cmd": HARNESS_CONTROLS + ["own-user-namespace"],
+                                   "env": depaudit._expected_maps_env()},
                                   depaudit.load_manifest(MANIFEST))
         self.assertEqual(res["outcome"], "pass", res)
 
@@ -583,6 +584,13 @@ SUBMOUNT_HELPER = textwrap.dedent("""\
     sys.path.insert(0, %r)
     import depaudit
     keep, rw = sys.argv[1], sys.argv[2]
+    # This namespace maps only 0 (the runner) and SCENARIO_ID, so newuidmap here may give the
+    # sandbox only those: a private /etc/subuid and /etc/subgid say so (DEP-3).
+    ranges = os.path.join(rw, "subids")
+    with open(ranges, "w") as f:
+        f.write("root:{0}:1\\n0:{0}:1\\n".format(depaudit.SCENARIO_ID))
+    for path in (depaudit.SUBUID, depaudit.SUBGID):
+        subprocess.run(["mount", "--bind", ranges, path], check=True)
     sub = os.path.join(keep, "sub")
     subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=0755", "tmpfs", sub], check=True)
     manifest = depaudit.load_manifest(json.loads(sys.argv[3]))
@@ -607,7 +615,12 @@ class SubmountTest(unittest.TestCase):
             os.chmod(keep, 0o755)
             os.chmod(rw, 0o755)
             os.mkdir(os.path.join(keep, "sub"))
-            p = subprocess.run(["unshare", "-r", "-m", "--", sys.executable, "-c", SUBMOUNT_HELPER,
+            # The outer namespace carries the sandbox's own two ids, so the sandbox can map them again.
+            uids, gids = depaudit._id_maps()
+            outer = ["--map-user=0", "--map-group=0", "--map-users=%d:%d:%d" % uids[1],
+                     "--map-groups=%d:%d:%d" % gids[1]]
+            os.chmod(rw, 0o777)
+            p = subprocess.run(["unshare"] + outer + ["-m", "--", sys.executable, "-c", SUBMOUNT_HELPER,
                                 keep, rw, json.dumps(MANIFEST)], capture_output=True, text=True, timeout=300)
             self.assertEqual(p.returncode, 0, p.stderr[-2000:])
             out = json.loads(p.stdout.splitlines()[-1])

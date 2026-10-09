@@ -287,13 +287,20 @@ def static_scan(root, manifest, dirs=SHIPPING_DIRS):
 # ---- offline sandbox ----------------------------------------------------------------
 
 def _unshare_flags():
+    """Raises OSError without a subordinate uid and gid range (DEP-3a)."""
     # A PID namespace: when its first process exits or is killed, the kernel kills every
     # process in it, including one that left the process group (setsid) or strace let go of.
     pid = ["--pid", "--fork", "--kill-child", "--mount-proc"]
     # A user namespace even as root: the capabilities setpriv keeps then act only inside it.
     # Without one, real root keeps CAP_DAC_READ_SEARCH (open_by_handle_at), CAP_SYS_MODULE and
     # others on the host, each a way past a read-only bind (B2, Security re-sign 2 on #437).
-    return ["-r", "-n", "-m"] + pid
+    # Its maps hold the runner as uid 0 (_inner, strace) and SCENARIO_ID as the first id of
+    # its subordinate range; unshare sets both through newuidmap and newgidmap, and fails if
+    # either refuses (DEP-3a). No fallback to -r's single-id map.
+    uid_map, gid_map = _id_maps()
+    users = ["--map-user=0", "--map-group=0", "--map-users=%d:%d:%d" % uid_map[1],
+             "--map-groups=%d:%d:%d" % gid_map[1]]
+    return users + ["-n", "-m"] + pid
 
 
 # The scenario runs as this uid and gid inside the sandbox's user namespace, mapped to the
@@ -345,8 +352,10 @@ def sandbox_available():
             try:
                 # The same -e as the run: an strace that cannot name a traced syscall exits
                 # nonzero ("invalid system call") instead of skipping it unseen (DEP-4b).
+                # The same maps and uid drop too: without a subordinate range, newuidmap or
+                # the drop to SCENARIO_ID, the run fails loudly, never with the old map (DEP-3a).
                 p = subprocess.run(["unshare"] + _unshare_flags() + ["--", "strace", "-e", "trace=" + TRACED,
-                                                                     "-o", os.devnull, "true"],
+                                                                     "-o", os.devnull] + AS_SCENARIO + ["true"],
                                    capture_output=True, timeout=30)
                 _SANDBOX = p.returncode == 0
             except (OSError, subprocess.SubprocessError):
@@ -491,6 +500,24 @@ def _dns_sink(sock, names):
 # keep CAP_SYS_ADMIN, and make the call through them. Without it, an ancestor holding
 # capabilities it lacks is out of its reach (cap_ptrace_access_check, and Yama scope 1).
 DROP_CAPS = ["setpriv", "--bounding-set", "-sys_admin,-sys_ptrace", "--inh-caps", "-sys_admin,-sys_ptrace", "--"]
+# Then the command leaves uid 0 for SCENARIO_ID (after DROP_CAPS, which needs uid 0's
+# CAP_SETPCAP). A non-root uid keeps no capability across exec, and ptrace_may_access closes
+# /proc/1/fd, /proc/1/mem and a ptrace attach of _inner or strace to it without any cap
+# (DEP-3, D9). no_new_privs keeps a setuid or file-capability binary from handing it
+# capabilities back, so this holds even without DROP_CAPS (DEP-3b). Not setpriv --reuid:
+# it looks the number up as a user name first, and glibc's lookup tries nscd's socket, a
+# host-socket connect in every run. Python with -I -S makes no lookup; a failed step exits 1.
+_AS_SCENARIO = """import ctypes, os, sys
+os.setgroups([])
+os.setresgid(%(id)d, %(id)d, %(id)d)
+os.setresuid(%(id)d, %(id)d, %(id)d)
+if ctypes.CDLL(None, use_errno=True).prctl(38, 1, 0, 0, 0):  # PR_SET_NO_NEW_PRIVS
+    sys.exit("depaudit: no_new_privs: " + os.strerror(ctypes.get_errno()))
+if os.getresuid() != (%(id)d,) * 3 or os.getresgid() != (%(id)d,) * 3 or os.getgroups():
+    sys.exit("depaudit: still holds another id")
+os.execvp(sys.argv[1], sys.argv[1:])
+""" % {"id": SCENARIO_ID}
+AS_SCENARIO = [sys.executable, "-I", "-S", "-c", _AS_SCENARIO]
 
 
 def _io_uring_disabled():
@@ -511,6 +538,26 @@ def _reader(fd):
     t = threading.Thread(target=_drain_into, args=(fd, chunks), daemon=True)
     t.start()
     return t, chunks
+
+
+def _chown_tree(path, ident):
+    """Gives path and everything under it to uid and gid ident, following no symlink."""
+    os.lchown(path, ident, ident)
+    for base, dirs, files in os.walk(path):
+        for name in dirs + files:
+            os.lchown(os.path.join(base, name), ident, ident)
+
+
+def _end_namespace():
+    """As the PID namespace's init, kills every other process in it and reaps them all, so
+    nothing the scenario started still writes when its files go back to uid 0 (DEP-3)."""
+    if os.getpid() != 1:
+        raise RuntimeError("_inner is not its PID namespace's init")
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(-1, signal.SIGKILL)  # from init: every process in the namespace but this one
+    with contextlib.suppress(ChildProcessError):
+        while True:
+            os.waitpid(-1, 0)
 
 
 def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
@@ -544,7 +591,8 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
     sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sink.bind(("127.0.0.1", 53))
     threading.Thread(target=_dns_sink, args=(sink, names), daemon=True).start()
-    for d in ("tmp", "home"):
+    scenario_owned = [work / d for d in ("tmp", "home", "stdout")]
+    for d in scenario_owned[:2]:
         (work / d).mkdir(exist_ok=True)
     env = dict(os.environ, TMPDIR=str(work / "tmp"), HOME=str(work / "home"))
     trace_r, trace_w = os.pipe()
@@ -552,9 +600,12 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
     trace_t, trace = _reader(trace_r)
     err_t, err = _reader(err_r)
     with open(work / "stdout", "wb") as out:
+        # The work directory is the scenario's; kept paths stay root-owned and read-only.
+        for path in scenario_owned:
+            _chown_tree(path, SCENARIO_ID)
         proc = subprocess.Popen(["strace", "-f", "-qq", "-e", "trace=" + TRACED,
                                  "-o", "/proc/%d/fd/%d" % (os.getpid(), trace_w), "--"]
-                                + (DROP_CAPS if drop_caps else []) + cmd,
+                                + (DROP_CAPS if drop_caps else []) + AS_SCENARIO + cmd,
                                 env=env, cwd=ROOT, stdout=out, stderr=err_w)
         os.close(err_w)
         try:
@@ -564,9 +615,13 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
             proc.wait()
             rc = "timeout"
     os.close(trace_w)
-    # A tracee strace let go of may still hold stderr; take what has arrived.
+    # A tracee strace let go of may still hold stderr; take what has arrived, then end it.
     trace_t.join(10)
     err_t.join(2)
+    _end_namespace()
+    # Back to uid 0 (the runner outside), so the runner can remove the work directory.
+    for path in scenario_owned:
+        _chown_tree(path, 0)
     text = b"".join(list(trace)).decode(errors="replace")
     events = parse_strace(text)
     result.write(json.dumps({"rc": rc, "dns": names, "masked": masked, "realpaths": unix_realpaths(events),
@@ -834,6 +889,14 @@ def _id_triples(text):
     return sorted(tuple(int(x) for x in line.split()) for line in text.splitlines() if line.strip())
 
 
+def _refused_read_only(err, path):
+    """A write refused because path's mount is read-only. As SCENARIO_ID the kernel may check
+    file permissions first and say EACCES (DEP-3); that counts only on a read-only mount."""
+    if err.errno == errno.EROFS:
+        return True
+    return err.errno == errno.EACCES and bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+
+
 def _control(mode):
     """Planted scenarios against the harness's own defences (DEP-2), run as
     `depaudit.py _control MODE` inside the sandbox.
@@ -917,7 +980,7 @@ def _control(mode):
             os.unlink(probe)
             wrong.append("wrote " + d)
         except OSError as e:
-            if e.errno != errno.EROFS:
+            if not _refused_read_only(e, d):
                 wrong.append("%s: %s, not read-only" % (d, e))
     ro_kept = [str(ROOT), os.path.realpath(sys.prefix), os.environ["DEPAUDIT_KEEP_RO"]]
     wrong += ["rw mount under a read-only kept path: " + m for m in writable_mounts(
@@ -926,7 +989,7 @@ def _control(mode):
         os.close(os.open(__file__, os.O_WRONLY | os.O_APPEND))
         wrong.append("opened %s for writing" % __file__)
     except OSError as e:
-        if e.errno != errno.EROFS:
+        if not _refused_read_only(e, __file__):
             wrong.append("%s: %s, not read-only" % (__file__, e))
     probe = os.path.join(os.environ["DEPAUDIT_KEEP_RW"], ".depaudit-write-%d" % os.getpid())
     try:
@@ -1046,8 +1109,8 @@ def cmd_static(args):
 
 def cmd_run(args):
     if not sandbox_available():
-        print("FAIL sandbox unavailable: needs unshare, setpriv, unprivileged user+network namespaces and "
-              "an strace that names every traced syscall (%s)" % TRACED, file=sys.stderr)
+        print("FAIL sandbox unavailable: needs unshare, setpriv, unprivileged user+network namespaces, "
+              "newuidmap and newgidmap with a subordinate range in /etc/subuid and /etc/subgid, and an strace that names every traced syscall (%s)" % TRACED, file=sys.stderr)
         return 2
     try:
         product = load_registry(args.targets)
@@ -1059,13 +1122,15 @@ def cmd_run(args):
     with tempfile.TemporaryDirectory(prefix="depaudit-probe-", dir="/tmp") as masked_dir, \
             tempfile.TemporaryDirectory(prefix="dpv-", dir="/tmp") as visible_dir, \
             tempfile.TemporaryDirectory(prefix="dpw-", dir="/tmp") as writable_dir:
-        os.chmod(writable_dir, 0o755)
+        os.chmod(writable_dir, 0o777)  # the scenario runs as SCENARIO_ID (DEP-3)
         probes = []
         for d in (masked_dir, visible_dir):
             probe = socket.socket(socket.AF_UNIX)
             probe.bind(os.path.join(d, "p"))
             probe.listen(16)
             probes.append(probe)
+            # Connecting needs write permission on the socket; the scenario is not its owner.
+            os.chmod(os.path.join(d, "p"), 0o666)
             os.chmod(d, 0o755)
         probes[1].setblocking(False)
         for t in control_targets(os.path.join(masked_dir, "p"), os.path.join(visible_dir, "p"), writable_dir) + product:
