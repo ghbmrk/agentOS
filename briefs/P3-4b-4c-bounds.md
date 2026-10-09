@@ -1,6 +1,6 @@
 # P3-4b-4c-bounds: the exhaustion round claims only what it checks, and its parsers fail closed
 
-Board section: Phase 3: the agentic loops. Part of P3-4b-4c ([P3-4b-4c.md](P3-4b-4c.md#p3-4b-4c-exhaust)); SPEC LOOP-7, RES-1. Written 2026-10-09 from the #599 (P3-4b-4c-exhaust) review records.
+Board section: Phase 3: the agentic loops. Part of P3-4b-4c ([P3-4b-4c.md](P3-4b-4c.md#p3-4b-4c-exhaust)); SPEC LOOP-7, RES-1, RES-2. Written 2026-10-09 from the #599 (P3-4b-4c-exhaust) review records.
 
 **Package:** P3-4b-4c-bounds, carrying P3-4b-4c-pids. Both correct what `ExhaustProbe.Run` in `broker/loops/machine.go` reads and claims:
 - pids changes the `processes` claim;
@@ -20,7 +20,11 @@ A clean exhaustion round lists in `Checked` only limits that bound the guest. No
 
 ## IDs
 
-LOOP-7 (exhaustion probes from inside the sandbox) and RES-1 (experiments are bounded). Tests carry `REQ: LOOP-7, RES-1`.
+- LOOP-7: exhaustion probes from inside the sandbox.
+- RES-2: each machine's memory, CPU, I/O and process-count limits are enforced, and each machine has a process cap. The `processes` claim and the limit checks rest on it.
+- RES-1: admission classes, and experiments frozen or killed when foreground needs resources. This is the round's response half; its hold and CPU count are what requirement 2 bounds.
+
+Requirement 1's tests carry `REQ: LOOP-7, RES-2`. The tests of requirements 2 and 3 carry `REQ: LOOP-7, RES-1, RES-2`, because a counter feeds both a limit check and the round's rise.
 
 ## Sources
 
@@ -42,7 +46,9 @@ LOOP-7 (exhaustion probes from inside the sandbox) and RES-1 (experiments are bo
    - keep the `pids.max` check, but report it under a subject that says what it bounds: the sandbox's host threads. Suggested subject `"sandbox threads"`, with a plain name and a step in `findingText`'s `CheckExhaust` case. A host thread limit that is unset or above budget is still a real RES-1 risk, and stays a High finding;
    - the guest still presses processes (`machprobe.Press`). Its result is logged, per M1, and never a verdict.
 
-   Making the bound real needs a gVisor guest task limit that this repository does not use or document today. It is not in this package. Add a release row, P3-4b-4c-pids-r1, that verifies whether runsc enforces an OCI `pids` limit inside the sentry and, if it does, checks that limit and restores the claim.
+   Making the bound real needs a gVisor guest task limit that this repository does not use or document today. It is not in this package: BOARD row P3-4b-4c-pids-r1 owns it. Name that row on the PR's Findings line.
+
+   The lens test (`ownertext_test.go`) covers the new subject's text only. The rest of LATER P3-4b-4c-exhaust l2 (adding `CheckExhaust` and `CheckTamper` with hostile subjects to the identifier scan) stays in LATER.
 
    Tests:
    - a clean round's `Checked` has no `processes` (fails on main);
@@ -86,6 +92,5 @@ LOOP-7 (exhaustion probes from inside the sandbox) and RES-1 (experiments are bo
 - `broker/machprobe/machprobe.go` (guards only, if a table finds one open), `machprobe_test.go` and `ASSUMPTIONS.md`.
 - `broker/vm/gvisor/machprobe_test.go` (the expectations only).
 - `reviews/security/README.md` (one row).
-- `BOARD.md`: the new release row P3-4b-4c-pids-r1 only.
 
 **Estimate:** ~80k. Checkpoint at 45k: requirements 1 and 2 green.

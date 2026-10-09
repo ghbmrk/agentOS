@@ -8,7 +8,14 @@ Board section: Phase 3: the agentic loops. Part of P3-4b-4c ([P3-4b-4c.md](P3-4b
 
 **Dependencies, all merged:** P3-4b-4c-corpus (#589, e587276).
 
-**Parallel work.** P3-4b-3r-told edits `Pass`'s close loop, `clearedLinesLocked`, `Report`'s return text, `ownertext_test.go` and S39, all in `broker/loops`. Its "It is back: " lead changes line text, which this package keys on. Keep the dedupe inside `Guard.batch` and `Guard.Digest`, not at their call sites, so the two meet only in tests and records. Whoever merges second rebases and reruns both packages' tests.
+**Parallel work.** P3-4b-3r-told (queued; it carries P3-4b-3r-text) overlaps in `broker/loops`:
+- It sets `ToldCleared` only for records whose key produced a line, in `Pass` and `CloseTarget`.
+- It adds the flap-sequence test helper, run by `Pass`, `Resolve`, `runProbe` and `CloseTarget`.
+- Its requirement 4 (from 3r-text) gives a texted return an "It is back: " lead, which changes line text. This package keys on the final line text, so a return and its first alert stay distinct.
+- Its requirement 5 texts one extra "Cleared" through `Notify`.
+- Both packages edit `ownertext_test.go` and loops `ASSUMPTIONS.md`.
+
+Keep the dedupe inside `Guard.batch` and `Guard.Digest`, not at their call sites (`Pass`, `Resolve`, `CloseTarget`, `runProbe`), so the two packages meet only in tests and records. Whoever merges second rebases, reruns both packages' tests, and runs told's flap helper over a deduped batch. P3-4b-3r-pass, which edits `Pass` (the caller of `batch` at `secure.go:580`), merged as #585 (c9f7be1). Its branch `pkg/P3-4b-3r-pass-pass-close` is that merged head, so it is no live overlap.
 
 ## Goal
 

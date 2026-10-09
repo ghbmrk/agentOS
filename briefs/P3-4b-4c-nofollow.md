@@ -39,10 +39,10 @@ LOOP-7 (the probe's verdict is the broker's, from what it reads itself). Tests c
 2. **`Attempt`'s contract is written down** (nofollow). The row rests on "`Attempt` returns only after its machine has stopped". S33 does not say so today, and the gVisor test helper `tamperIn` waits only for its exec.
    - Add the sentence to S33 as a contract on whoever wires `Attempt`.
    - Make `Run` not depend on it for liveness: requirement 1's bound holds even while the guest still runs.
-   - The wiring that guarantees it belongs to box row P3-4b-4c. List it on the PR's Findings line as a release item for that row's acceptance.
+   - The wiring that guarantees it belongs to box row P3-4b-4c, whose acceptance now carries it (BOARD). Name that row on the PR's Findings line.
 3. **A symlinked `Path` is refused before the round** (symlink).
    - `Run` checks each target's and the control's `Path` with `os.Lstat` before `Quiesce`. If one is a symlink, it returns an error naming which, journals nothing and writes nothing.
-   - `targetDigest` and `removeSiblings` use `Lstat` for their directory test, so neither acts through a link even if one appears mid-round. In that case `removeSiblings` removes nothing and the round fails.
+   - `targetDigest` and `removeSiblings` use `Lstat` for their directory test, so neither acts through a link even if one appears mid-round. In that case `removeSiblings` removes nothing and the round fails. This closes the `Lstat` half of LATER P3-4b-4c-tamper l3. Its other half, logging failed removals, stays in LATER.
    - Tests:
      - a control whose `Path` is a symlink to a directory: `Run` errors, and the referent's sibling, planted by the test, is still there (fails on main);
      - the same for a target;
