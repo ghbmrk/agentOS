@@ -50,21 +50,87 @@ func TestRunscPanicAfterStartAnswersNoOutput(t *testing.T) {
 	}
 }
 
-// A panic at the deadline, read only after the context ended, still
-// answers no output (Security S1 on #391).
-func TestRunscPanicAtTheDeadlineAnswersNoOutput(t *testing.T) {
+// execAtMark runs mode and ends Exec's context once the fake creates its
+// mark, then removes the mark, which lets deadpanic's leftover process
+// exit. Exec checks only ctx.Err(), so a cancel stands for the deadline,
+// at a point that does not depend on the runner's speed (P1-4-flake: a
+// 100ms deadline raced runsc's exit on a slow CI runner).
+func execAtMark(t *testing.T, mode string) (*Runtime, vm.ExecResult, error) {
+	t.Helper()
 	r := fakeRunsc(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	mark := filepath.Join(t.TempDir(), "mark")
+	t.Setenv("FAKE_RUNSC_MARK", mark)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	res, err := r.Exec(ctx, "wk-1", vm.Command{Argv: []string{"deadpanic"}, MaxOutput: 4096})
-	if ctx.Err() == nil {
-		t.Fatal("Exec returned before the deadline; the case is not exercised")
+	seen := make(chan bool, 1)
+	go func() {
+		defer cancel()
+		for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(time.Millisecond) {
+			if _, err := os.Stat(mark); err == nil {
+				cancel()
+				os.Remove(mark)
+				seen <- true
+				return
+			}
+		}
+		seen <- false
+	}()
+	res, err := r.Exec(ctx, "wk-1", vm.Command{Argv: []string{mode}, MaxOutput: 4096})
+	if !<-seen {
+		t.Fatalf("%s: the fake never reached its mark; the case is not exercised", mode)
 	}
+	return r, res, err
+}
+
+func wantPanicLogged(t *testing.T, r *Runtime) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(r.StateDir, "exec.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "panic: open "+runscCanary) {
+		t.Errorf("exec log lacks runsc's trace:\n%s", b)
+	}
+}
+
+// A panic at the deadline, read only after the context ended, still
+// answers no output (Security S1 on #391): runsc exited 2 before the
+// context ended, and its stderr is read after.
+func TestRunscPanicAtTheDeadlineAnswersNoOutput(t *testing.T) {
+	r, res, err := execAtMark(t, "deadpanic")
 	if err == nil {
 		t.Fatalf("runsc's panic read as a result: %+v", res)
 	}
 	if len(res.Stdout) > 0 || len(res.Stderr) > 0 || res.ExitCode != 0 {
 		t.Fatalf("runsc's panic answered output: %+v", res)
+	}
+	wantPanicLogged(t, r)
+}
+
+// runsc wrote its trace, but the context ended before it exited, so Exec
+// killed it and its exit is the kill's, not 2 (P1-4-flake). What it wrote
+// on its own stderr still makes it runsc's failure: no output.
+func TestRunscPanicKilledAtTheDeadlineAnswersNoOutput(t *testing.T) {
+	r, res, err := execAtMark(t, "killpanic")
+	if err == nil {
+		t.Fatalf("runsc's panic read as a result: %+v", res)
+	}
+	if len(res.Stdout) > 0 || len(res.Stderr) > 0 || res.ExitCode != 0 {
+		t.Fatalf("runsc's panic answered output: %+v", res)
+	}
+	wantPanicLogged(t, r)
+}
+
+// A guest still running at the deadline, with nothing from runsc, keeps
+// what it wrote: the error is the context's, and vm.Manager answers the
+// partial output as TimedOut (CAP-8). Only runsc's own text withholds it.
+func TestDeadlineWithoutRunscTextKeepsPartialOutput(t *testing.T) {
+	_, res, err := execAtMark(t, "killquiet")
+	if err == nil {
+		t.Fatalf("a killed exec read as a result: %+v", res)
+	}
+	if string(res.Stdout) != "guest out\n" {
+		t.Fatalf("partial output lost at the deadline: %+v", res)
 	}
 }
 

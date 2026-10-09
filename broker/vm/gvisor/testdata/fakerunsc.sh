@@ -13,8 +13,15 @@
 # runtime fatal error, with the plain header, after the guest's stderr
 # filled the cap. exit2 is a guest that exits 2 with a goroutine header
 # but no panic line. deadpanic is latepanic at the deadline: runsc exits
-# 2 at once, but a process it left holds stderr open past the context's
-# end, so Exec returns after its deadline (Security S1 on #391).
+# 2, but a process it left holds stdout and stderr open past the
+# context's end, so Exec reads them after its context ended (Security S1
+# on #391). killpanic writes its trace and is killed before it exits:
+# Exec's context ends while runsc still runs (P1-4-flake). killquiet is
+# a guest still running when the context ends, with nothing from runsc.
+# Each of the three creates $FAKE_RUNSC_MARK at the point where its test
+# ends the context (deadpanic once runsc has been reaped), and deadpanic's
+# leftover process holds the pipes until the test removes it, so neither
+# order depends on timing.
 #
 # As runsc does, the fake gives the guest the host fd that --pass-fd M:2
 # names as its stderr, and fd 2 otherwise; runsc's own messages always go
@@ -74,8 +81,27 @@ deadpanic)
 	echo 7 >"$pid"
 	echo "guest out"
 	printf 'panic: open %s: permission denied\n\ngoroutine 1 [running]:\nmain.main()\n' "$c" >&2
-	sleep 0.5 >&2 &
+	parent=$$
+	(
+		while kill -0 "$parent" 2>/dev/null; do sleep 0.01; done
+		: >"$FAKE_RUNSC_MARK"
+		i=0
+		while [ -e "$FAKE_RUNSC_MARK" ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i + 1)); done
+	) &
 	exit 2
+	;;
+killpanic)
+	echo 7 >"$pid"
+	echo "guest out"
+	printf 'panic: open %s: permission denied\n\ngoroutine 1 [running]:\nmain.main()\n' "$c" >&2
+	: >"$FAKE_RUNSC_MARK"
+	exec sleep 30
+	;;
+killquiet)
+	echo 7 >"$pid"
+	echo "guest out"
+	: >"$FAKE_RUNSC_MARK"
+	exec sleep 30
 	;;
 fullpanic)
 	echo 7 >"$pid"
