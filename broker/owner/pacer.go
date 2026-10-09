@@ -518,3 +518,38 @@ func (c *Channel) settings(ctx context.Context, msg string, unlocked bool) (stri
 	}
 	return "", false
 }
+
+// HeldNote is STATUS's line for the hold (W5-Dc-r1b QH-10): how many
+// texts wait and why, and how many the cap dropped (OP-9). Empty while
+// nothing is held.
+func (c *Channel) HeldNote() string {
+	now := c.cfg.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.codes.st
+	n, dropped := len(st.Held), st.HeldDropped
+	if n == 0 && dropped == 0 {
+		return ""
+	}
+	var parts []string
+	if n > 0 {
+		texts := fmt.Sprintf("%d texts", n)
+		if n == 1 {
+			texts = "1 text"
+		}
+		if c.quietLocked(now) {
+			to := st.Pacing.QuietTo
+			parts = append(parts, fmt.Sprintf("%s held until %02d:%02d (quiet hours).", texts, to/60, to%60))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s held: %d an hour.", texts, st.Pacing.perHour()))
+		}
+	}
+	if dropped > 0 {
+		if dropped == 1 {
+			parts = append(parts, "1 earlier text was dropped.")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d earlier texts were dropped.", dropped))
+		}
+	}
+	return strings.Join(parts, " ")
+}

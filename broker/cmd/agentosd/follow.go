@@ -106,13 +106,15 @@ func (s *followSetting) attach(ctx context.Context, d *daemon.Daemon) {
 }
 
 // alert is fixed broker wording (maintain.FollowAlert), so it goes as the
-// broker's own text, not as an agent reply.
+// broker's own text, not as an agent reply. It asks the owner to act if
+// the switch was not theirs, so it is security class: never held
+// (W5-Dc-r1b QH-9).
 func (s *followSetting) alert(_ context.Context, text string) error {
 	ch := s.owner.Load()
 	if ch == nil {
 		return errors.New("no owner channel")
 	}
-	return ch.Inform(text)
+	return ch.Post(ownerch.ClassSecurity, text)
 }
 
 // errNoGuard: the clock guard has not started (or could not), so no root

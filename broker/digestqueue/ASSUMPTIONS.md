@@ -191,6 +191,18 @@ quiet-hours, pacing, reservation, disclosure and authority checks separately.
   sendOutage takes no parameters and informs only digestOutageLine; Batch
   Snapshots and Snapshot Lines are read only in render, carrier and refersTo.
 
+- Quiet hours (CH-15, W5-Dc-r1b QH-7): `sendReady` sends nothing while the
+  owner's quiet hours hold (`digestConfig.Quiet`, the owner channel's
+  `Quiet`); the batch stays Ready and the first step after they end sends it,
+  not the next 30-minute retry. The digest never reads the hourly allowance
+  (SG-r1-6). With the setting unchanged a wait cannot pass the batch's
+  Expires: quiet hours are under 24 hours, a batch due in them is made at the
+  digest time, and Expires is the next day's digest time, so the window ends
+  first. A setting widened while a batch waits can pass it; then the existing
+  Late path sends that day's digest once, as a late digest, before the next
+  day's (TestDigestWaitsForQuietHoursToEnd). If quiet hours end just before
+  the digest time, the held digest and the new one go minutes apart.
+
 ## Remaining integration packages
 
 - Source adapters: change/owner/question notices with persisted generations and
