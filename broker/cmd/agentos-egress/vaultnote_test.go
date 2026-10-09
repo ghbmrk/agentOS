@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// REQ: CH-12, HOST-1f
+// REQ: CH-12
 
 // The two texts giveBack and restoreDA send when the vault can't forget an
 // entry. Both call sites use these constants, so the test checks the
