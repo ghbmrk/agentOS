@@ -176,6 +176,8 @@ type reportRig struct {
 	// makes the pipeline refuse the new security cases it matches.
 	liveFor map[Check]bool
 	refuse  func(change.Case) bool
+	// probes are the LOOP-7 probes Guard runs (P3-4b-4a).
+	probes []Probe
 }
 
 func seedPipe(t *testing.T) *change.Pipeline { t.Helper(); return seedPipeWith(t, seedEval{}) }
@@ -219,7 +221,7 @@ func (r *reportRig) reopen(t *testing.T) {
 		live = r.liveFor
 	}
 	cfg := GuardConfig{Box: cleanBox().Box(), Pipeline: logPipe{r.p, r.ev, &r.refuse}, Store: r.store, Contain: r.c,
-		FixturesLiveFor: live,
+		FixturesLiveFor: live, Probes: r.probes,
 		Notify: func(s string, u bool) {
 			r.ev.add("notify")
 			r.texts, r.urgent = append(r.texts, s), append(r.urgent, u)

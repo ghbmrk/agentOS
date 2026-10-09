@@ -166,6 +166,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5a-resume-dedupe | Two concurrent asks for one pause can file two requests; approving one resumes and the other then fails at apply, so nothing widens twice |
 | W3-forget-b f1 | L3 on #317: a brief that stores its own state (`**State:**`) can drift from BOARD, which is authoritative; drop the line from new briefs and have doclint flag it |
 | W3-forget-b3 f4 | L3 on #425: a failed save after a told done text leaves it owed, so the next start tells it again; a repeat over a lost text |
+| W3-forget-b4 l1 | L3 on #528: no test pins that `openOwedFile` removes a stale `forget-owed.json.bad` before the hard link; dropping the `os.Remove` passes every test (the link then fails with EEXIST and the newer bad file is not kept aside, though the owner is still told) |
 | W3-forget-b3 f6 | L3 on #425: `forget-owed.json` is uncapped; cap it if forgets can be owed in bulk |
 | W3-forget-b3 f7 | L3 on #425: a restored backup's owed file is replayed like the live one, so its texts may be told again |
 | DOC-4 f1 | L3 on #400: a no-PR record must still write `head <sha>` for a `main` commit and invent a package (`POTENCY`); accept `PR none · package none · main <sha>` in the Record check |
@@ -259,6 +260,11 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-1-envkey | `broker/change/env_test.go`: `newEnv`'s pinned key is a single `bytes.Reader`, so a second fresh-state pipeline opened with the same cfg would hit EOF. No test does this today (Potency on #491) |
 | P3-4b-2b-held | Fix-input audit (Security #500 1): a held array/object value leaked alone in non-canonical layout passes the audit; H-4's wording needs updating |
 | P3-4b-2b-ctrl | A11 leaking-adapter control (Security #500 2): accepts any audit hit, not only a `held/` hit |
+| DEP-2-sum | depaudit: tools/ASSUMPTIONS.md D11 says attempts/faults/cleanup retries are summed on the `depaudit run` line; they are printed per target only. Fix the wording or add the total in DEP-3/DEP-4 (Potency on #437) |
+| P3-4b-4a corpora | Only PromptInject (10 items) is vendored: the larger published injection sets on Hugging Face are unreachable from the build environment (403); vendor one when a session can fetch it |
+| P3-4b-4a shape | Vendor the next injection set for shape (obfuscated, multilingual, long indirect), not size; the 10 PromptInject items are near-equivalent English wrappers (Potency 1 on #515) |
+| P3-4b-4a rule-less | Open question: rule-less probe findings get no §11 fix request (S23); the pause plus the probe's next clean run is the exit (UX 4, Potency 5 on #515) |
+| P3-4b-4a canary-trust | L3 on #515: a clean canary round inherits A5's trust in the surfaces the target hands back; a compromised guest could curate a copied `sweep` dump. Record an S-row when a guest-sweep target is registered for rounds |
 | SR2-3q f1 | Security 4a on #463 (fail-open drift): `notRun` reads urpc's `urpc method %q failed` text to tell a lost ExecuteAsync reply from a pre-start error; if a runsc upgrade rewords it, that reply reads as NotStarted ("retry it") and CI stays green because the fixture copies the text. When the runsc pin next changes, add a check against the format string at the pinned tag |
 | SR2-3q f2 | L3 on #463 point 1 (V33 gaps; UX lens, same item): a non-UTF-8 `argv[0]` or an unusual PATH dir still reads as a failure that advises a retry, though the command can never run; classify it as NoProgram when the text is next touched |
 | SR2-3q f3 | L3 on #463 point 1: re-read the runsc error prefixes (`loading container failed:`, `parsing process spec:`, `executing processes for container:`) against the new tag on the next pin bump (V33/V20) |
