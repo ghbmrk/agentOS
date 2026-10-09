@@ -8,9 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/attention"
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/verb"
 )
 
 // REQ: ADP-9, CH-3, CH-12
@@ -133,7 +136,7 @@ func TestSR3_3ThePageCardShowsTheWholeRule(t *testing.T) {
 		"Runs:</b> invoice.send on mail, without asking or notifying you",
 		"When:</b> every field comes from the source record",
 		"Fixed field:</b> template=inv-std",
-		"Recipients:</b> only billing@acme.example",
+		"Recipients:</b> only those of billing@acme.example the source record names",
 		"Amount:</b> up to 150000.00",
 		"Per record:</b> at most 25 runs per source record per day",
 		"Per day:</b> at most 50 runs",
@@ -235,5 +238,54 @@ func TestSR3_3TheCardCrossesTheSocketWhole(t *testing.T) {
 		if !strings.Contains(c, "<b>"+tm.Label+":</b> "+tm.Value+"</li>") {
 			t.Errorf("card lacks %+v:\n%s", tm, c)
 		}
+	}
+}
+
+// SR3-3 (review F3, L3 point 2 on #433): an attention suggestion that
+// carried Describe(X) does not stand in for the final card. When the
+// final ask is X' (one field changed), the page shows X”s terms, not
+// the suggestion's wording, and an approval bound to X's card is
+// refused for X'.
+func TestSR3_3ASuggestionIsNotTheFinalCard(t *testing.T) {
+	r := newGateRig(t)
+	r.approve(r.ask("local/g1", grants.Spec{Account: "mail", Executor: "mail", Ops: map[string]string{"invoice.send": "send"}}))
+	o, err := attention.New(attention.Config{Store: &change.MemStore{}, Threshold: 2, UserContent: func(string) bool { return false }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if err := o.Observe(attention.Decision{Account: "mail", Action: "invoice.send", Verb: verb.Send, Approved: true, Verified: true,
+			Params:     map[string]any{"template": "inv-std", attention.Record: "inv-" + string(rune('a'+i))},
+			Recipients: []string{"billing@acme.example"}, Amount: 15000000, At: r.clock().Add(time.Duration(i) * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sg, err := o.Suggestions()
+	if err != nil || len(sg) != 1 || sg[0].Spec.Rule == nil || !strings.Contains(sg[0].Detail, "inv-std") {
+		t.Fatalf("suggestion: %+v %v", sg, err)
+	}
+	x := sg[0].Spec
+	xr := r.ask("local/x", x)
+	xSum := r.form(xr).Get("sum")
+
+	// X': the same suggestion with its fixed template changed.
+	changed := *x.Rule
+	changed.Params = map[string]string{"template": "inv-alt"}
+	x2 := x
+	x2.Rule = &changed
+	x2r := r.ask("local/x2", x2)
+	c := html.UnescapeString(r.card(x2r))
+	if !strings.Contains(c, "Fixed field:</b> template=inv-alt") || strings.Contains(c, "inv-std") || strings.Contains(c, sg[0].Detail) {
+		t.Fatalf("X' card does not carry X''s own terms:\n%s", c)
+	}
+	f := r.form(x2r)
+	f.Set("sum", xSum)
+	r.advance(30 * time.Second)
+	if p := r.post("/approvals/", answer(f, "approve", r.code())).Body.String(); strings.Contains(p, "Approved "+x2r) {
+		t.Fatal("X's card approved X'")
+	}
+	r.g.Wait()
+	if st := r.state("local/x2"); st == journal.Succeeded {
+		t.Fatal("X' was added on X's approval")
 	}
 }

@@ -59,7 +59,7 @@ func TestSR3_3RuleApprovalCarriesTheWholeRule(t *testing.T) {
 		"Runs: invoice.send on mail, without asking or notifying you",
 		"When: every field comes from the source record",
 		"Fixed field: template=inv-std",
-		"Recipients: only billing@acme.example",
+		"Recipients: only those of billing@acme.example the source record names",
 		"Amount: up to 150000.00",
 		"Per record: at most 25 runs per source record per day",
 		"Per day: at most 50 runs",
@@ -77,6 +77,7 @@ func TestSR3_3RuleApprovalCarriesTheWholeRule(t *testing.T) {
 func TestSR3_3EachRuleFieldChangesTheCardAndItsBinding(t *testing.T) {
 	r := newRig(t, nil)
 	r.grant(mailGrant())
+	r.grant(Spec{Account: "books", Executor: "mail", Ops: mailOps()})
 	base := r.askRule("local/base", invoiceRule())
 	edits := map[string]func(*Rule){
 		"action":         func(x *Rule) { x.Action = "message.send" },
@@ -93,11 +94,16 @@ func TestSR3_3EachRuleFieldChangesTheCardAndItsBinding(t *testing.T) {
 	}
 	// Fields the short line already shows are covered by the same check.
 	edits["per day"] = func(x *Rule) { x.PerDay = 49 }
+	edits["reply"] = func(x *Rule) { x.Reply, x.AmountCap = true, 0 }
+	edits["account"] = func(*Rule) {} // the loop moves the rule to books
 	i := 0
 	for name, edit := range edits {
 		i++
 		s := invoiceRule()
 		edit(s.Rule)
+		if name == "account" {
+			s.Account = "books"
+		}
 		id := "local/e" + string(rune('a'+i))
 		it := r.askRule(id, s)
 		if termsText(it.Terms) == termsText(base.Terms) {
@@ -126,10 +132,16 @@ func TestSR3_3EachRuleFieldChangesTheCardAndItsBinding(t *testing.T) {
 func TestSR3_3GrantAndReplyCardsCarryTheirScope(t *testing.T) {
 	got := termsText(owner.NewTerms(Terms(mailGrant())))
 	for _, want := range []string{"Account: mail, through mail", "Allows: invoice.send (send)", "Allows: key.create (reveal-or-create-secret)",
-		"Allows: message.list (read)", "Without asking: reads and drafts only; every other verb needs your approval or a pre-allowance"} {
+		"Allows: message.list (read)", "Without asking: reads, drafts; every other verb needs your approval or a pre-allowance"} {
 		if !strings.Contains(got, want+"\n") {
 			t.Errorf("grant terms lack %q:\n%s", want, got)
 		}
+	}
+	// An organize op runs without asking behind the account's guard, so
+	// the card says so.
+	got = termsText(owner.NewTerms(Terms(Spec{Account: "mail", Executor: "mail", Ops: map[string]string{"label.add": "organize"}})))
+	if want := "Without asking: organize changes that undo in the account, when its guard allows them; every other verb needs your approval or a pre-allowance"; !strings.Contains(got, want+"\n") {
+		t.Errorf("organize grant terms lack %q:\n%s", want, got)
 	}
 	got = termsText(owner.NewTerms(Terms(Spec{Account: "mail", Rule: &Rule{Action: "message.send", PerRecord: 3, PerDay: 10, Reply: true}})))
 	for _, want := range []string{"Runs: message.send on mail, as agent replies texted to you first; each sends after the undo window unless you reply UNDO",

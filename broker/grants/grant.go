@@ -486,10 +486,24 @@ func Terms(s Spec) []owner.Term {
 			ops = append(ops, op)
 		}
 		sort.Strings(ops)
+		has := map[string]bool{}
 		for _, op := range ops {
 			add("Allows", "%s (%s)", op, s.Ops[op])
+			has[s.Ops[op]] = true
 		}
-		add("Without asking", "reads and drafts only; every other verb needs your approval or a pre-allowance")
+		// What runs without asking is the reversible verbs this grant
+		// holds (evaluate): organize only behind the account's guard.
+		var free []string
+		for _, f := range []struct{ v, say string }{{verb.Read, "reads"}, {verb.Draft, "drafts"},
+			{verb.Organize, "organize changes that undo in the account, when its guard allows them"}} {
+			if has[f.v] {
+				free = append(free, f.say)
+			}
+		}
+		if len(free) == 0 {
+			free = []string{"nothing"}
+		}
+		add("Without asking", "%s; every other verb needs your approval or a pre-allowance", strings.Join(free, ", "))
 		return ts
 	}
 	r := s.Rule
@@ -510,7 +524,7 @@ func Terms(s Spec) []owner.Term {
 	}
 	switch {
 	case len(r.Recipients) > 0:
-		add("Recipients", "only %s", strings.Join(r.Recipients, ", "))
+		add("Recipients", "only those of %s the source record names", strings.Join(r.Recipients, ", "))
 	case r.Reply:
 		add("Recipients", "the thread's own participants only")
 	default:
