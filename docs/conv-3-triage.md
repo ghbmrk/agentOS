@@ -1,7 +1,7 @@
 # CONV-3: open PR triage
 
 Snapshot 2026-10-09T15:20Z, base `main`. Query: `list_pull_requests state=open` (GitHub MCP), 195 PRs, each listed once.
-Classes follow `briefs/CONV-3.md`. Nothing is closed by this package (Q3 in [MARK-QUEUE.md](MARK-QUEUE.md)).
+Classes follow `briefs/CONV-3.md`. Nothing is closed by this package (Q3 answered, D-089).
 
 ## Counts
 
@@ -10,24 +10,24 @@ Classes follow `briefs/CONV-3.md`. Nothing is closed by this package (Q3 in [MAR
 | merge-ready | 3 |
 | finish | 95 |
 | parts bin | 86 |
-| superseded | 7 |
-| stale | 4 |
+| superseded | 5 |
+| stale | 6 |
 | total | 195 |
 
 ## Method
 
 - **Idle** is age of the last commit on the PR head (committer date), not `updated_at`, which bot activity resets. Stale needs idle of at least 48h (D-085). The number of PRs past the line rises every hour; `crosses 48h in Nh` marks those within 6h.
 - **parts bin**: any draft CODEX-1 lists as accepted-source or held, plus the W5-D stack. Never stale or superseded.
-- **superseded**: the same row or change is merged on main under another PR (named). Checked by row ID against main history and by reverse-applying the PR diff.
+- **superseded**: the same row or change is merged on main under another PR (named). Checked by row ID against main history, by BOARD row, and by the identifiers the PR adds. Main's history was rewritten, so a reverse apply of the diff does not show it.
 - **merge-ready**: non-draft, CI green, merges clean into main, L3 `accept` at the current head. Green without a verdict at head is `finish` (L3 owed).
 - **stale**: not the above, idle at least 48h.
-- **owning row** comes from matching BOARD row IDs against PR title and branch; `—` means no row claims it. No BOARD row cites a stale PR by number, so CONV-3-4 changes no row.
+- **owning row** comes from matching BOARD row IDs against PR title and branch; `—` means no row claims it. Two stale PRs own a BOARD row: #175 (P2-1, back to `queued`, cites #175) and #231 (CH-21e cites #231). CONV-3-4 changes those two rows.
 
 ## Table
 
 | PR | Title | Class | Owning row | Reason |
 |---|---|---|---|---|
-| #175 | P2-1: device image (supersedes #41): per-drive IDs, host clock untouched, closed device po | superseded | P2-1 | #41 (P2-1 image) is merged on main; this draft rebuilds it. Low confidence: 7 of 36 files identical, rest differ |
+| #175 | P2-1: device image (supersedes #41): per-drive IDs, host clock untouched, closed device po | stale | P2-1 | idle 48h or more (last commit 2026-10-05). Not superseded: its initrd per-drive ID check (power off on refusal) and `DevicePolicy=closed` on every service (HW-8, D-044, I12) are not under `image/` on main; #41 is the older image it rebuilds. Branch kept as the only copy |
 | #191 | H2 Point agents at uncovered IDs and queued packages | stale | — | idle 48h (D-085 limit 48h by last commit); conflicts with main |
 | #192 | H3 Reject a trace table that cites an unmarked requirement | stale | — | idle 48h (D-085 limit 48h by last commit); conflicts with main |
 | #193 | P2-2a f1 Tell the owner when a page approval changed underneath it | superseded | P2-2a f1, P2-2a | P2-2a f1 is on main (f2 #363 and f3 #423 followed) |
@@ -68,7 +68,7 @@ Classes follow `briefs/CONV-3.md`. Nothing is closed by this package (Q3 in [MAR
 | #228 | CH-20m: MORE pages non-redirected kept replies only | finish | CH-20m | draft, crosses 48h in 2h |
 | #229 | HOST-1e-ci: CI job for host-untouched harness | finish | HOST-1e | draft, crosses 48h in 2h |
 | #230 | W3-off-a: dynamic spare-time STATUS note | finish | W3-off-a, W3-off | draft, crosses 48h in 2h |
-| #231 | CH-21: box name rules, NAME parse, withhold helper | superseded | CH-21 | CH-21 voice work merged (CH-21a #372, CH-21c #462); voice test on main |
+| #231 | CH-21: box name rules, NAME parse, withhold helper | stale | CH-21, CH-21e | idle 48h or more (last commit 2026-10-07 17:58Z, 45h at the snapshot). Its voice work is on main (CH-21a #372, CH-21c #462), but `withholdAgent`, `AskForCode` and `ReplyGrammar` (CH-21e) are not; CH-21e cites this branch |
 | #232 | BAK-1h: rune limit and single-script backup destination names | finish | — | draft, crosses 48h in 2h |
 | #233 | HOST-1b-o1: open clock state once with O_NOFOLLOW | finish | HOST-1b | draft, crosses 48h in 2h |
 | #234 | PC1: hold adapter_gap changed_api/layout until ARC-6(d) | finish | — | draft, crosses 48h in 3h |
