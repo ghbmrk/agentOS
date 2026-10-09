@@ -43,7 +43,7 @@ SPEC UPD-8 makes update metadata TUF, with root keys that "rotate and revoke wit
 
 ## Acceptance tests (REQ: OSS-10, UPD-8, OSS-9)
 
-1. After the project rotates root keys (v1→v2, new keys), switching back with v2 alone is refused; with links [v2] and target v2, or [v2, v3] and target v3, it is admitted, `Project` agrees at describe time, and the store follows the project (no `source.json`).
+1. After the project rotates root keys (v1→v2, new keys), switching back to v3 with no links is refused (v2 alone is its own one-link chain from v1, so it is admitted); with links [v2] and target v2, or [v2, v3] and target v3, it is admitted, every walked root's keys join `seen_keys`, `Project` agrees at describe time, and the store follows the project (no `source.json`).
 2. Forged link: v2 signed only by its new keys, or by other material filed under the shipped key IDs: refused, nothing changes.
 3. Rooted elsewhere: a fork's v1→v2 rotation is refused as the project's; it can still be followed under a name.
 4. Rollback: the box trusted project v3 before leaving; a switch back to v2 (chained from v1) is refused; v3 itself and v4 chained from v3 are admitted.

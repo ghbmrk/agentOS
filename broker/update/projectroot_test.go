@@ -280,3 +280,32 @@ func TestOSS10wrLeavingTheProjectRecordsItsRoot(t *testing.T) {
 		t.Fatal("leaving a fork overwrote the project's root")
 	}
 }
+
+// A switch back through a rotation chain puts every walked root's keys in
+// seen_keys, not only the anchor's and the target's: a rotated-out
+// intermediate root key, even allow-listed, never counts as an
+// independent attestor (U13, security C2 and C8; L3 on #667).
+func TestOSS10wrSwitchBackSeesEveryWalkedRootsKeys(t *testing.T) {
+	f := newFixture(t)
+	v1 := f.rootFile(1)
+	fork := forkOf(t)
+	f.must(f.follow(fork.rootFile(1), Options{}))
+	v2 := f.rotateRoot()
+	v3 := f.rotateRoot()
+	o := f.opts(Options{})
+	sum, err := DescribeRoot(v3, o)
+	f.must(err)
+	f.must(f.store.FollowProject(v3, [][]byte{v2}, v1, sum.Digest, o))
+	seen, err := f.store.seenKeys()
+	f.must(err)
+	for _, b := range [][]byte{v1, v2, v3} {
+		s := mustV(DescribeRoot(b, o))
+		for role, fps := range s.Keys {
+			for _, fp := range fps {
+				if !seen[fp] {
+					t.Fatalf("a %s key of root %s is not in seen_keys after the switch back", role, s.RootSHA256[:8])
+				}
+			}
+		}
+	}
+}

@@ -180,44 +180,54 @@ const projectFile = "project_root.json"
 // threshold and its own, versions one apart, every root meeting the box's
 // floor, as Check walks a rotation. Expiry is DescribeRoot's.
 func ProjectRoot(anchor, target []byte, links [][]byte, o Options) error {
-	if err := projectRoot(anchor, target, links, o); err != nil {
-		return fmt.Errorf("%w: %w", ErrNotProject, err)
-	}
-	return nil
+	_, err := projectRoots(anchor, target, links, o)
+	return err
 }
 
-func projectRoot(anchor, target []byte, links [][]byte, o Options) error {
+// projectRoots is ProjectRoot, returning every root it verified on the way
+// (the anchor and each walked link), whose keys a switch back adds to
+// seen_keys.
+func projectRoots(anchor, target []byte, links [][]byte, o Options) ([]*metadata.Metadata[metadata.RootType], error) {
+	walked, err := projectRoot(anchor, target, links, o)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrNotProject, err)
+	}
+	return walked, nil
+}
+
+func projectRoot(anchor, target []byte, links [][]byte, o Options) ([]*metadata.Metadata[metadata.RootType], error) {
 	if len(links) > MaxRootRotations {
-		return fmt.Errorf("more than %d root files", MaxRootRotations)
+		return nil, fmt.Errorf("more than %d root files", MaxRootRotations)
 	}
 	if o.MinThreshold < 2 {
 		o.MinThreshold = 2
 	}
 	tm, err := trustedmetadata.New(anchor)
 	if err != nil {
-		return classify(err)
+		return nil, classify(err)
 	}
 	if err := floor(tm.Root, o.MinThreshold); err != nil {
-		return err
+		return nil, err
 	}
+	walked := []*metadata.Metadata[metadata.RootType]{tm.Root}
 	if bytes.Equal(anchor, target) {
-		return nil
+		return walked, nil
 	}
 	t, err := verifyRoot(target, o)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	same := sameRootKeys(t, tm.Root)
 	if same && t.Signed.Version < tm.Root.Signed.Version {
-		return fmt.Errorf("%w: root v%d is older than v%d", ErrRollback, t.Signed.Version, tm.Root.Signed.Version)
+		return nil, fmt.Errorf("%w: root v%d is older than v%d", ErrRollback, t.Signed.Version, tm.Root.Signed.Version)
 	}
 	// Same keys need no chain only when the anchor's own threshold of them
 	// signed the target, TUF's old-threshold rule; else the walk decides.
 	if same && tm.Root.VerifyDelegate(metadata.ROOT, t) == nil {
-		return nil
+		return walked, nil
 	}
 	if t.Signed.Version <= tm.Root.Signed.Version {
-		return fmt.Errorf("%w: root v%d is not newer than v%d, whose keys differ", ErrRollback, t.Signed.Version, tm.Root.Signed.Version)
+		return nil, fmt.Errorf("%w: root v%d is not newer than v%d, whose keys differ", ErrRollback, t.Signed.Version, tm.Root.Signed.Version)
 	}
 	type link struct {
 		b []byte
@@ -234,14 +244,14 @@ func projectRoot(anchor, target []byte, links [][]byte, o Options) error {
 			hasTarget = true
 		}
 		if len(b) > maxMetadata {
-			return fmt.Errorf("%w: root is larger than %d bytes", ErrBadRepository, maxMetadata)
+			return nil, fmt.Errorf("%w: root is larger than %d bytes", ErrBadRepository, maxMetadata)
 		}
 		if err := noNull(b); err != nil {
-			return fmt.Errorf("%w: %v", ErrBadRepository, err)
+			return nil, fmt.Errorf("%w: %v", ErrBadRepository, err)
 		}
 		m, err := metadata.Root().FromBytes(b)
 		if err != nil {
-			return classify(err)
+			return nil, classify(err)
 		}
 		// Root files at or below the anchor are history the box passed:
 		// skipped, so the owner may bring them all, and never walked.
@@ -254,17 +264,18 @@ func projectRoot(anchor, target []byte, links [][]byte, o Options) error {
 	last := anchor
 	for _, l := range chain {
 		if _, err := tm.UpdateRoot(l.b); err != nil {
-			return classify(err)
+			return nil, classify(err)
 		}
 		if err := floor(tm.Root, o.MinThreshold); err != nil {
-			return err
+			return nil, err
 		}
+		walked = append(walked, tm.Root)
 		last = l.b
 	}
 	if !bytes.Equal(last, target) {
-		return errors.New("the root files do not end at this root")
+		return nil, errors.New("the root files do not end at this root")
 	}
-	return nil
+	return walked, nil
 }
 
 // sameRootKeys reports whether a and b list the same root-role keys, by
@@ -411,21 +422,22 @@ func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error 
 // or another switch, landing after the page's check can then never let an
 // older project root through (security 4a on #667).
 func (s *Store) FollowProject(root []byte, links [][]byte, shipped []byte, approved string, o Options) error {
-	return s.follow(root, approved, "", o, func() error {
+	return s.follow(root, approved, "", o, func() ([]*metadata.Metadata[metadata.RootType], error) {
 		anchor, err := s.projectAnchor()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if anchor == nil {
 			anchor = shipped
 		}
-		return ProjectRoot(anchor, root, links, o)
+		return projectRoots(anchor, root, links, o)
 	})
 }
 
 // follow is FollowRoot; admit, if set, runs under the lock after settle
-// and before any write, and refuses the switch by returning an error.
-func (s *Store) follow(root []byte, approved, name string, o Options, admit func() error) error {
+// and before any write, refuses the switch by returning an error, and
+// returns the roots it verified, whose keys join seen_keys with the rest.
+func (s *Store) follow(root []byte, approved, name string, o Options, admit func() ([]*metadata.Metadata[metadata.RootType], error)) error {
 	m, err := verifyRoot(root, o)
 	if err != nil {
 		return err
@@ -445,8 +457,9 @@ func (s *Store) follow(root []byte, approved, name string, o Options, admit func
 	if err := s.settle(); err != nil {
 		return err
 	}
+	var walked []*metadata.Metadata[metadata.RootType]
 	if admit != nil {
-		if err := admit(); err != nil {
+		if walked, err = admit(); err != nil {
 			return err
 		}
 	}
@@ -480,6 +493,11 @@ func (s *Store) follow(root []byte, approved, name string, o Options, admit func
 	}
 	addKeys(seen, old)
 	addKeys(seen, m)
+	// A switch back's walked roots: each link's keys, rotated out or not,
+	// are the project's former signers and never count as attestors.
+	for _, r := range walked {
+		addKeys(seen, r)
+	}
 	if err := s.writeSeenKeys(seen); err != nil {
 		return err
 	}
