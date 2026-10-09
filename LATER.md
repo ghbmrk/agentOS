@@ -190,6 +190,15 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-8 l1 | L3 re-review on #432, point 1: once `CR-quarantine-prune` is on main, add to it that any pruning of `.quarantine` must keep the per-artifact loss count (e.g. a count file), since C14's `maxRepairs` bound is counted from the copies; fold this line into that row |
 | SR3-8 l2 | L3 re-review on #432, point 2: a job stopped by the repair bound is logged `failed: no result within the allowed attempts`; only the log line says its output was lost repeatedly. Text only |
 | SR3-8 l3 | L3 re-review on #432, point 3: no test pins the `<id>-<12 hex>` name check in `Store.losses`; a bare prefix match passes every test. Unreachable today (fixed-length broker-written IDs) |
+| W3-forget-b1-4 l1 | L3 on #436: `broker/change` TestRouterCandidateAdoptsThroughPipeline flakes (~2/10k; random split key); fix is a seeded Rand, proposed on #436 |
+| W3-forget-b1-4 l2 | #436: decoy dates may fall before box setup or enrolment |
+| W3-forget-b1-4 l3 | #436: "Never" wording for owners whose forgets predate the log |
+| W3-forget-b1-4 l4 | Security on #436: the derived decoy key is not wiped from memory |
+| W3-forget-b1-4 l5 | #436 (ASSUMPTIONS Q1): leftover decoy variance across different stale backups |
+| W3-forget-b1-4 l6 | UX on #436: a shorter "replies" line in the confirmation text |
+| W3-forget-b1-4 l7 | Potency on #436 (considered, not proposed): an accept-and-re-forget flow |
+| OP9-status l1 | L3 on #416: move the OP9-status anchor once its brief exists |
+| OP9-status l2 | L3 on #416: give held-back fields values distinct from the finding's free text |
 | SR3-1 f1 | Builder on SR3-1: page deny (`LocalAnswer`), follow and ask-resume check the lock count at the token check only, not where they commit; deny only narrows and the other two only open a request that needs a code, so the race gains no authority |
 | SR3-1 f2 | Builder on SR3-1: a sign-in overlapped by a lock still returns a token, dead on first use; answering with a refusal instead would save the page one round trip |
 
