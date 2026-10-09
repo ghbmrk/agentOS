@@ -7,9 +7,13 @@
                 file it links exists
   rule files    no /mnt paths (local paths of one machine, unreadable by other agents)
   all *.md      `OPERATING §N` references name a section docs/OPERATING.md has
-  reviews/      each record dated RECORD_FROM or later has a `Record:` line (PR, package, head SHA)
+  reviews/      every file in a lens directory is a README or has a dated name; each record dated
+                RECORD_FROM or later has a `Record:` line directly under its title (PR, package,
+                head or main SHA)
+  DECISIONS.md  a Decision cell over 300 characters links decisions/D-NNN.md (D-056); links resolve
   ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md
-  briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4
+  briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4, and
+                none keeps its own `**State:**` line (BOARD.md is authoritative)
 
 Usage: python3 tools/doclint.py [repo root]. Prints one line per problem; exits 1 if any.
 """
@@ -25,10 +29,12 @@ RULE_FILES = ("CLAUDE.md", "AGENTS.md", "README.md", "BOARD.md", "docs/OPERATING
 BRIEF_TOKENS = 20_000
 OPERATING_REF = re.compile(r"OPERATING(?:\.md)?\s*§\s*(\d+)(?:\s*[–-]\s*(\d+))?")
 RECORD_FROM = "2026-10-09"
-RECORD_DIRS = ("ux", "potency", "security", "combined", "arbitration")
+DECISION_CHARS = 300
+LONG_DECISION_OK = ("D-062",)  # over 300 characters, no link yet (LATER DOC-5 f1)
+STATE_LINE = re.compile(r"^\*\*State:\*\*")
 RECORD_FILE = re.compile(r"(\d{4}-\d\d-\d\d)-.+\.md$")
 RECORD_FIELDS = (re.compile(r"\bPRs? (?:#\d+|none)\b"), re.compile(r"\bpackages? \S"),
-                 re.compile(r"\bheads? [0-9a-f]{7,40}\b"))
+                 re.compile(r"\b(?:heads?|main) [0-9a-f]{7,40}\b"))
 LINK = re.compile(r"\]\(([^)#\s]+)")
 
 
@@ -76,20 +82,62 @@ def operating_refs(root, files):
 
 def briefs(root):
     for path in sorted((root / "briefs").glob("*.md")):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if STATE_LINE.match(line):
+                yield f"briefs/{path.name}:{n}: `**State:**` line; BOARD.md is the only record of state"
         tokens = len(path.read_text()) // 4
         if tokens > BRIEF_TOKENS:
             yield f"briefs/{path.name}: ~{tokens} tokens, over the {BRIEF_TOKENS} cap; split the package"
 
 
+def lens_files(root):
+    """Markdown files in reviews/<lens>/, tracked ones when root is a git checkout."""
+    try:
+        out = subprocess.run(["git", "ls-files", "reviews/*/*.md"], cwd=root, capture_output=True, text=True,
+                             check=True).stdout.split()
+        return sorted(root / f for f in out if (root / f).is_file())
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return sorted((root / "reviews").glob("*/*.md"))
+
+
 def records(root):
-    for lens in RECORD_DIRS:
-        for path in sorted((root / "reviews" / lens).glob("*.md")):
-            m = RECORD_FILE.match(path.name)
-            if not m or m.group(1) < RECORD_FROM:
-                continue
-            lines = [l for l in path.read_text().splitlines() if l.startswith("Record:")]
-            if not any(all(f.search(l) for f in RECORD_FIELDS) for l in lines):
-                yield f"reviews/{lens}/{path.name}: no complete `Record:` line; needs `PR #N` or `PR none`, `package <ID>`, `head <7–40 hex>`, e.g. `Record: PR #400 · package DOC-4 · head a74ee45`"
+    for path in lens_files(root):
+        rel = f"reviews/{path.parent.name}/{path.name}"
+        if path.name == "README.md":
+            continue
+        m = RECORD_FILE.match(path.name)
+        if not m:
+            yield f"{rel}: lens record names start `YYYY-MM-DD-`"
+            continue
+        if m.group(1) < RECORD_FROM:
+            continue
+        lines = [l for l in path.read_text().splitlines() if l.strip()]
+        complete = [l for l in lines if l.startswith("Record:") and all(f.search(l) for f in RECORD_FIELDS)]
+        if complete and lines[1:2] == complete[:1]:
+            continue
+        if complete:
+            yield f"{rel}: put the `Record:` line directly under the title (OPERATING §4 step 3)"
+        else:
+            yield (f"{rel}: no complete `Record:` line; needs `PR #N` or `PR none`, `package <ID>`, "
+                   "`head <7–40 lowercase hex>` (or `main <hex>`), e.g. `Record: PR #400 · package DOC-4 · head a74ee45`")
+
+
+def decisions(root):
+    path = root / "DECISIONS.md"
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        if len(cells) < 4 or not re.fullmatch(r"D-\d+", cells[0]):
+            continue
+        for link in LINK.findall(cells[3]):
+            if link.startswith("decisions/") and not (root / link).is_file():
+                yield f"DECISIONS.md: {cells[0]}: links missing {link}"
+        if len(cells[3]) > DECISION_CHARS and f"(decisions/{cells[0]}.md)" not in cells[3] \
+                and cells[0] not in LONG_DECISION_OK:
+            yield (f"DECISIONS.md: {cells[0]}: Decision cell is {len(cells[3])} characters; "
+                   f"keep it to {DECISION_CHARS} or link decisions/{cells[0]}.md (D-056)")
 
 
 def assumption_ids(root, files):
@@ -122,7 +170,7 @@ def lint(root):
     root = pathlib.Path(root)
     files = markdown_files(root)
     return [*board(root), *readme(root), *rule_files(root), *operating_refs(root, files),
-            *briefs(root), *records(root), *assumption_ids(root, files)]
+            *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files)]
 
 
 def main(argv):

@@ -33,6 +33,8 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 
 Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory (tier-B combined passes are in `../combined/`), in filename order, so there is no run number to pick. Each opens with a `Record:` line giving PR, package and head SHA; `tools/doclint.py` checks it on files dated 2026-10-09 or later. No run rows are appended to this README, so open PRs do not conflict on it; recurring kinds and the checks that replaced them still are (DOC-4, docs/OPERATING.md §4).
 
+**Requested reviews** (indexed by this list, not by a PR): [2026-10-08-architecture-review.md](2026-10-08-architecture-review.md) (SR3 intake, requested by Mark).
+
 ## Recurring kinds (to become checks)
 
 None yet.
