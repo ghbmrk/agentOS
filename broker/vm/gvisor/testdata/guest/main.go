@@ -3,7 +3,8 @@
 //	guest serve      hold a random token in memory and serve requests
 //	guest svc SOCK PATH  GET PATH from the broker service socket SOCK and
 //	                 print the status and body
-//	guest stdin N    copy stdin to stdout, then exit N (worker exec)
+//	guest stdin N    write "oops\n" to stderr, copy stdin to stdout, then
+//	                 exit N (worker exec)
 //	guest linger     ignore catchable signals, keep stdout open, and append
 //	                 a byte to /work/linger every 20ms until killed
 //	guest <cmd> ...  send one request to the server and print the answer
@@ -36,6 +37,7 @@ func main() {
 		return
 	}
 	if len(os.Args) == 3 && os.Args[1] == "stdin" {
+		os.Stderr.WriteString("oops\n")
 		io.Copy(os.Stdout, os.Stdin)
 		var n int
 		fmt.Sscan(os.Args[2], &n)

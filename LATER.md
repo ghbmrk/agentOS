@@ -164,6 +164,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5a-resume f1 | L3 on #381: no committed test covers restart; a legacy pause-less resume replaying and `Pause`/`PausedBy` rebuilt from the journal were shown only by a scratch test. The next package that touches grants adds it |
 | W5a-resume f2 | UX on #381: the Approvals line shows the raw pause intent ID (e.g. `loop2/pause/3fa9…`); keep it in Detail for the binding, but show the pause time or put the ID on a muted line |
 | SR2-3j f2 | Security on #396 delta: the guest text for a void approval, "a wrong code was given too many times", is passive and does not say whose code |
+| SR2-3n f1 | L3 point 2 on #466: no test bounds a guest that holds its stderr pipe open after runsc exits 0; only the context-deadline path is exercised. Add a fake-runsc mode that leaves `sleep 30 >&4 &` behind and assert Exec returns within `ExecWaitDelay` with the guest's output |
 | W3-forget-b1 f1 | L3 on #409: a forget log long enough to need 100+ copies or segments has no tested path; F4's notices assume one log file per destination (broker/recovery/ASSUMPTIONS.md F4) |
 | W3-forget-b1 f2 | L3 on #409: forgets made before the counter's anchor (a box with no TPM, or provisioned without Box.Counter) are only as fresh as the newest copy found (broker/recovery/ASSUMPTIONS.md F3) |
 | OSS-6s-a f1 | L3 on #411: `pubsend.New` reads the ledger with an unbounded `os.ReadFile` before `validate`; the directory is owner-only, so this is hardening; cap the read at about `MaxWaiting`×2×`FrameSize` |
