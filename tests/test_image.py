@@ -2,6 +2,7 @@
 # the counted boot entry, the boot health check, and the image's static configuration.
 # The image itself is built and booted under Secure Boot by .github/workflows/image.yml.
 # REQ: HW-1, HW-5, UPD-1, UPD-1a
+import base64
 import configparser
 import importlib.machinery
 import importlib.util
@@ -299,8 +300,9 @@ class HealthTest(unittest.TestCase):
 
 
 class FallbackTest(unittest.TestCase):
-    """UPD-1 (L3 blocker on #41): a failed health check reboots into the next counted try, with no
-    owner action, and stops once the entry has no tries left."""
+    """UPD-1 (L3 blockers on #41): a failed health check reboots into the next counted try, with no
+    owner action; at no tries left it reboots into the previous release if the drive has one, and
+    stays up otherwise."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -312,10 +314,15 @@ class FallbackTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_fallback(self, entry=None):
+    def run_fallback(self, entry=None, entries=None):
+        efivars = self.root / "sys/firmware/efi/efivars"
         if entry is not None:
-            (self.root / "sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+            (efivars / "LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
              ).write_bytes(b"\x06\x00\x00\x00" + ("\\loader\\entries\\%s\0" % entry).encode("utf-16le"))
+        if entries is not None:
+            # systemd-boot lists entry IDs (file names without the counter) NUL-separated, in UTF-16.
+            (efivars / "LoaderEntries-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+             ).write_bytes(b"\x06\x00\x00\x00" + "".join(e + "\0" for e in entries).encode("utf-16le"))
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_HEALTH_ROOT=str(self.root))
         r = subprocess.run(["sh", str(MK / "mkosi.extra/usr/lib/agentos/fallback")], env=env,
                            capture_output=True, text=True)
@@ -330,10 +337,24 @@ class FallbackTest(unittest.TestCase):
                 self.assertEqual(calls, "reboot\n")
                 self.assertIn("rebooting", out)
 
-    def test_stays_up_with_no_tries_left_or_no_counter(self):
-        for entry in ("agentos_7+0-3.conf", "agentos_7.conf", None):
+    def test_reboots_into_the_previous_release_with_no_tries_left(self):
+        # systemd-boot sorts a +0 entry last, so the reboot boots the other release (no default is set).
+        out, calls = self.run_fallback("agentos_7+0-3.conf",
+                                       ["agentos_8.conf", "agentos_7.conf", "auto-reboot-to-firmware-setup"])
+        self.assertEqual(calls, "reboot\n")
+        self.assertIn("rebooting into the previous release", out)
+
+    def test_stays_up_with_no_tries_left_and_no_other_release(self):
+        for entries in (["agentos_7.conf", "auto-reboot-to-firmware-setup"], None):
+            with self.subTest(entries):
+                out, calls = self.run_fallback("agentos_7+0-3.conf", entries)
+                self.assertEqual(calls, "")
+                self.assertIn("staying up", out)
+
+    def test_stays_up_on_an_entry_with_no_counter(self):
+        for entry in ("agentos_7.conf", None):
             with self.subTest(entry):
-                out, calls = self.run_fallback(entry)
+                out, calls = self.run_fallback(entry, ["agentos_8.conf", "agentos_7.conf"])
                 self.assertEqual(calls, "")
                 self.assertIn("staying up", out)
 
@@ -443,6 +464,33 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("fdisk", ini(MK / "mkosi.conf")["Content"]["Packages"].split())
         report = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-boot-report.service")
         self.assertIn("agentos-drive-id.service", report["Unit"]["After"])
+
+    def test_a_try_that_never_reaches_health_reboots(self):
+        # L3 blocker 2 on #41 (UPD-1): a kernel panic reboots, and emergency or rescue mode, in the
+        # initrd or the host, runs the fallback first. The default initrd has no mkosi.extra, so the
+        # drop-ins come as systemd.unit-dropin credentials on the command line, which both read.
+        args = ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"].split()
+        self.assertIn("panic=10", args)
+        creds = dict(a.split("=", 1)[1].split(":", 1) for a in args
+                     if a.startswith("systemd.set_credential_binary="))
+        for unit in ("emergency.service", "rescue.service"):
+            with self.subTest(unit):
+                d = configparser.ConfigParser(interpolation=None)
+                d.read_string(base64.b64decode(creds["systemd.unit-dropin." + unit]).decode())
+                cmd = d["Service"]["ExecStartPre"]
+                self.assertTrue(cmd.startswith("-bash -c '") and cmd.endswith("'"), cmd)
+                with tempfile.TemporaryDirectory() as t:
+                    t = pathlib.Path(t)
+                    log, fallback = t / "log", t / "fallback"
+                    stub(t, "systemctl", 'echo "systemctl $*" >>"%s"' % log)
+                    script = cmd[len("-bash -c '"):-1].replace("/usr/lib/agentos/fallback", str(fallback))
+                    env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]))
+                    subprocess.run(["bash", "-c", script], env=env, check=True)  # initrd: no fallback
+                    self.assertEqual(log.read_text(), "systemctl reboot\n")
+                    log.unlink()
+                    stub(t, "fallback", 'echo "fallback" >>"%s"' % log)
+                    subprocess.run(["bash", "-c", script], env=env, check=True)  # host: tries-aware
+                    self.assertEqual(log.read_text(), "fallback\n")
 
     def test_broker_runs_only_on_the_boot_drive(self):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")

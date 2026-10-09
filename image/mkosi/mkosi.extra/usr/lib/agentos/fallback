@@ -1,21 +1,26 @@
 #!/bin/sh
-# Boot-counted fallback without the owner (UPD-1; L3 blocker on #41). agentos-health.service runs
-# this on failure. systemd-boot counts a try down when it starts a counted entry, not when the
-# health check fails, so without a reboot a release that fails health stays up unblessed until
-# someone power-cycles the PC. Reboot while this entry has tries left; at zero systemd-boot boots
-# the previous release if there is one, and a single-entry drive stays up (no reboot loop).
-# A blessed entry has no counter, so a later failure on it does not reboot either.
-# AGENTOS_HEALTH_ROOT exists for tests/test_image.py.
+# Boot-counted fallback without the owner (UPD-1; L3 blockers on #41). agentos-health.service runs
+# this on failure, and emergency.service and rescue.service run it before their shell (the
+# systemd.unit-dropin credentials in mkosi.conf). systemd-boot counts a try down when it starts a
+# counted entry, not when the health check fails, so without a reboot a release that fails health
+# stays up unblessed until someone power-cycles the PC. Reboot while this entry has tries left. At
+# zero, reboot if the drive has another release: systemd-boot sorts the +0 entry last, so the
+# previous release boots. A single-entry drive at zero stays up (no reboot loop), and so does a
+# blessed entry, which has no counter. AGENTOS_HEALTH_ROOT exists for tests/test_image.py.
 R=${AGENTOS_HEALTH_ROOT:-}
-v=$R/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
-# 4 attribute bytes, then the entry's ESP path in UTF-16, e.g. \loader\entries\agentos_7+2-1.conf.
-path=$([ -r "$v" ] && cat "$v" | od -An -v -c -j4 | tr -s ' ' '\n' | grep -vx '\\0' | tr -d '\n')
+# 4 attribute bytes, then UTF-16; this keeps the ASCII and drops the NULs, so the NUL-separated IDs
+# of LoaderEntries run together, which is enough to count them.
+efivar() {
+    v=$R/sys/firmware/efi/efivars/$1-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+    [ -r "$v" ] && cat "$v" | od -An -v -c -j4 | tr -s ' ' '\n' | grep -vx '\\0' | tr -d '\n'
+}
+# e.g. \loader\entries\agentos_7+2-1.conf
+path=$(efivar LoaderBootCountPath)
 left=$(printf '%s\n' "$path" | sed -n 's/.*+\([0-9][0-9]*\)\(-[0-9][0-9]*\)\{0,1\}\.conf$/\1/p')
-if [ -z "$left" ]; then
-	echo "agentos-fallback: this boot entry is not counted; staying up"
-elif [ "$left" -eq 0 ]; then
-	echo "agentos-fallback: no tries left on this boot entry; staying up"
-else
-	echo "agentos-fallback: health check failed, $left tries left on this boot entry; rebooting"
-	exec systemctl reboot
-fi
+releases=$(efivar LoaderEntries | grep -o 'agentos_' | wc -l)
+if [ -z "$left" ]; then echo "agentos-fallback: this boot entry is not counted; staying up"
+elif [ "$left" -gt 0 ]; then
+    echo "agentos-fallback: health check failed, $left tries left on this boot entry; rebooting"; exec systemctl reboot
+elif [ "$releases" -ge 2 ]; then
+    echo "agentos-fallback: no tries left on this boot entry; rebooting into the previous release"; exec systemctl reboot
+else echo "agentos-fallback: no tries left on this boot entry and no other release; staying up"; fi

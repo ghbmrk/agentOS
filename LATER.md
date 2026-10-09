@@ -209,6 +209,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | OP9-status l2 | L3 on #416: give held-back fields values distinct from the finding's free text |
 | SR3-1 f1 | Builder on SR3-1: page deny (`LocalAnswer`), follow and ask-resume check the lock count at the token check only, not where they commit; deny only narrows and the other two only open a request that needs a code, so the race gains no authority |
 | SR3-1 f2 | Builder on SR3-1: a sign-in overlapped by a lock still returns a token, dead on first use; answering with a refusal instead would save the page one round trip |
+| P2-1 watchdog | L3 on #41 (UPD-1): a boot that hangs with no kernel panic and no failed unit never reaches a reboot; a hardware watchdog (`RuntimeWatchdogSec=` on the N95's iTCO timer) closes it. Panics, failed units and emergency or rescue mode already reboot |
 
 ## Reuse candidates
 | ID | Component | Why |
