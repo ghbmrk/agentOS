@@ -393,7 +393,7 @@ def conv_raw():
 
 
 class ConvergenceColumnsTest(unittest.TestCase):
-    # REQ: CONV-0-1
+    # REQ CONV-0-1
     def setUp(self):
         self.raw = conv_raw()
         self.weeks = {w["week"]: w for w in metrics.compute(self.raw)}
@@ -455,7 +455,7 @@ class ConvergenceColumnsTest(unittest.TestCase):
 
 
 class BaselineAndGuardTest(unittest.TestCase):
-    # REQ: CONV-0-2
+    # REQ CONV-0-2
     def render(self, raw):
         return metrics.render(metrics.compute(raw), raw)
 
@@ -500,7 +500,7 @@ class BaselineAndGuardTest(unittest.TestCase):
 
 
 class LedgerStaleTest(unittest.TestCase):
-    # REQ: CONV-0-4
+    # REQ CONV-0-4
     def first_line(self, now, readings):
         raw = conv_raw()
         raw["now"], raw["readings"] = now, readings
@@ -525,7 +525,7 @@ class LedgerStaleTest(unittest.TestCase):
 
 
 class HeldAndCollectTest(unittest.TestCase):
-    # REQ: CONV-0-1
+    # REQ CONV-0-1
     def test_held_drafts_come_from_the_held_table_only(self):
         text = ("## Queue\n\n| Item | Draft |\n|---|---|\n| X | #1 |\n\n"
                 "## Held (draft stays open)\n\n| Item | Draft | Why held |\n|---|---|---|\n"
@@ -551,7 +551,7 @@ class HeldAndCollectTest(unittest.TestCase):
 
 
 class GitFlagsTest(unittest.TestCase):
-    # REQ: CONV-0-1
+    # REQ CONV-0-1
     def test_history_snapshots_carry_flags(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
@@ -566,7 +566,7 @@ class GitFlagsTest(unittest.TestCase):
 
 
 class WorkflowTest(unittest.TestCase):
-    # REQ: CONV-0-3
+    # REQ CONV-0-3
     def test_runs_daily_from_main_only_with_the_same_permissions(self):
         text = (pathlib.Path(__file__).resolve().parent.parent / ".github/workflows/metrics.yml").read_text()
         crons = [l.split('"')[1] for l in text.splitlines() if l.strip().startswith("- cron:")]

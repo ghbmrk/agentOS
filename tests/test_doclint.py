@@ -110,7 +110,7 @@ HEAD = "| ID | Package | Needs | State |\n|---|---|---|---|\n"
 
 
 class CONV0Test(unittest.TestCase):
-    """REQ: CONV-0-5 (a BOARD row added on or after 2026-10-10 whose state says `release`
+    """REQ CONV-0-5 (a BOARD row added on or after 2026-10-10 whose state says `release`
     must name an acceptance test or invariant)."""
     ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid", "PATH": "/usr/bin:/bin"}
