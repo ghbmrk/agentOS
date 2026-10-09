@@ -590,29 +590,42 @@ func TestPausedAndFlapping(t *testing.T) {
 		t.Fatalf("after resume: %s", d)
 	}
 
-	// A High finding with nothing to pause flaps: texted once a day, and
-	// told once that it cleared (S39); its returns within the day are
-	// untexted, so their clearing is not texted either.
+	// A High finding with nothing to pause flaps. The owner is texted the
+	// alert and that it cleared (S39); a return within ReText after that
+	// texted "Cleared" is texted again, so their last text is never a false
+	// all-clear (L3 #585 point 1). That return's clearing and any later
+	// return within ReText go to the digest only, so a flap costs at most
+	// three texts per ReText and the last one says it is back.
 	b2 := cleanBox()
 	b2.live["config/quiet.json"] = "edited"
 	r2 := newGuardRig(t, b2)
 	r2.pass(t)
+	b2.live["config/quiet.json"] = "c1"
+	r2.pass(t)
+	if len(r2.texts) != 2 || !strings.Contains(r2.texts[1], "Cleared: config/quiet.json.") {
+		t.Fatalf("texts %q, want the alert and one cleared", r2.texts)
+	}
+	b2.live["config/quiet.json"] = "edited"
+	r2.pass(t)
+	if len(r2.texts) != 3 || strings.Contains(r2.texts[2], "Cleared") || !strings.Contains(r2.texts[2], "config/quiet.json") {
+		t.Fatalf("return after a texted Cleared: texts %q, want it texted", r2.texts)
+	}
 	for i := 0; i < 3; i++ {
 		b2.live["config/quiet.json"] = "c1"
 		r2.pass(t)
 		b2.live["config/quiet.json"] = "edited"
 		r2.pass(t)
 	}
-	if len(r2.texts) != 2 || !strings.Contains(r2.texts[1], "Cleared: config/quiet.json.") {
-		t.Fatalf("flapping texts %q, want the alert and one cleared", r2.texts)
+	if len(r2.texts) != 3 {
+		t.Fatalf("flapping texts %q, want 3", r2.texts)
 	}
 	b2.live["config/quiet.json"] = "c1"
 	r2.pass(t)
 	r2.now = r2.now.Add(25 * time.Hour)
 	b2.live["config/quiet.json"] = "edited"
 	r2.pass(t)
-	if len(r2.texts) != 3 {
-		t.Fatalf("texts after a day %d, want 3", len(r2.texts))
+	if len(r2.texts) != 4 || strings.Contains(r2.texts[3], "Cleared") {
+		t.Fatalf("texts after a day %q, want a fourth alert", r2.texts)
 	}
 }
 

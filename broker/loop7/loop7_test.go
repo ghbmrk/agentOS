@@ -452,6 +452,13 @@ func TestStatusSaysWhenFuzzingMakesNoProgress(t *testing.T) {
 				t.Fatalf("digest names %q: %q", id, d)
 			}
 		}
+		// It recovers: the next completed turn clears the line.
+		fakeBin(t, s.cfg.Release, "fake.test", "exit 0")
+		*clock = clock.Add(24 * time.Hour)
+		runTurn(t, s, context.Background())
+		if d := s.Digest(); len(d) != 0 {
+			t.Fatalf("digest %q after the target recovered", d)
+		}
 	})
 
 	t.Run("no targets", func(t *testing.T) {
