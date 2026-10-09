@@ -49,7 +49,11 @@ func (s *Guard) Report(ctx context.Context, f Finding) (Record, error) {
 	s.mu.Lock()
 	if rec, open := s.st.Open[f.ID]; open {
 		s.mu.Unlock()
-		return rec, nil
+		if !rec.Reported || !unfinished(rec) {
+			return rec, nil
+		}
+		// Left part done by a crash or a store error (P3-4b-1b item 3).
+		return s.resumeLocked(ctx, f.ID)
 	}
 	if day := now.UTC().Format(time.DateOnly); s.st.PauseDay != day {
 		s.st.PauseDay, s.st.Pauses = day, 0
@@ -60,14 +64,8 @@ func (s *Guard) Report(ctx context.Context, f Finding) (Record, error) {
 	}
 	s.mu.Unlock()
 	rec, err := s.handle(ctx, f, pause, true)
-	if rec.Texted {
-		// Sent on its own, not through batch, so lines held for MORE stay.
-		s.cfg.Notify("Security checks: "+ownerLine(rec), f.Check != CheckExpiry)
-	}
-	s.mu.Lock()
-	err2 := s.saveLocked()
-	s.mu.Unlock()
-	return rec, errors.Join(err, err2)
+	rec = s.tell(rec)
+	return rec, errors.Join(err, s.save())
 }
 
 // reportable checks f before anything acts on it: a check Report takes, a

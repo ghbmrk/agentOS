@@ -6,6 +6,11 @@
 # through the requirements the harness exercises.
 #
 # REQ: LOOP-9, LOOP-10, CHG-2
+#
+# P3-4b-2b adds the harness's own Go unit tests (run.py --go-test): the
+# evidence check fails on a missing record, the audit catches a raw held
+# clause whose fields the visible test shares, validation refuses such a
+# clause, and the leaking-adapter control runs on every valid seed.
 import hashlib
 import json
 import pathlib
@@ -136,10 +141,30 @@ class HarnessRunTest(unittest.TestCase):
 
     def test_controls_run_on_every_pass_and_are_caught(self):
         for rep in (self.all, self.pick):
-            names = {c["name"]: c for c in rep["controls"]}
-            self.assertEqual(set(names), {"invalid-seed", "leaking-adapter"})
-            for c in names.values():
+            self.assertEqual({c["name"] for c in rep["controls"]}, {"invalid-seed", "leaking-adapter"})
+            for c in rep["controls"]:
                 self.assertTrue(c["caught"], c)
+            # CHG-2: the leak control runs on every valid seed, not only the first.
+            leaks = [c["seed_id"] for c in rep["controls"] if c["name"] == "leaking-adapter"]
+            self.assertEqual(sorted(leaks), seed_ids(CATALOG))
+
+
+class GoUnitTest(unittest.TestCase):
+    # REQ: CHG-2 (audit, validation, leak control), LOOP-9 (evidence record)
+    WANT = (
+        "TestEvidenceNeedsOneAdoptedRecord",
+        "TestAuditCatchesRawHeldClauseWithSharedFields",
+        "TestFieldlessHeldClauses",
+        "TestValidateRefusesAFieldlessHeldClause",
+        "TestLeakingAdapterControlOnEverySeed",
+    )
+
+    def test_harness_unit_tests_pass(self):
+        p = subprocess.run(RUN + ["--go-test"], capture_output=True, text=True, timeout=900)
+        out = p.stdout + p.stderr
+        self.assertEqual(p.returncode, 0, out[-4000:])
+        for name in self.WANT:
+            self.assertIn("--- PASS: " + name, out)
 
 
 class MutationTest(unittest.TestCase):
