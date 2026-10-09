@@ -86,6 +86,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | CH-20p | Page view of kept replies; A15 needs delivery, not this view. Its minimum part, withheld outputs on the signed-in page, is release as CH-19a (D-079, A14); the history view stays here |
 | CH-20a | Attachments conflict with security C4; needs review; not in A15 |
 | CH-20m | MORE command for redirected replies; convenience |
+| CH-11a-rate | `MORE` replies are solicited, so CH-15's rate limit does not bound them; a spoofed number can make the box send many pages (cost, annoyance only). L3 on #480 point 7 |
+| CH-19a-rest | CH-19a keeps secret-shaped output (e.g. a mailed 2FA code) at rest for 7 days; CRED-7 redacts only vault values. Cover in the A14 canary design. L3 on #480 point 10 |
 | P2-2a f1 | L3 SHOULD on page wording after a changed item |
 | ADP-13 | Optional box mailbox; no A-test needs it |
 | HOST-1d | Optional internal-disk opt-in (HW-8a); A1 requires disks untouched |
