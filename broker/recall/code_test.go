@@ -55,9 +55,20 @@ func TestGroupedCodesRemoved(t *testing.T) {
 		if out := sc.Scrub(v); out != Removed {
 			t.Fatalf("alone: %q -> %q", v, out)
 		}
-		if out := sc.Scrub("codes (" + v + "), keep safe"); strings.Contains(out, groups[1]) {
-			t.Fatalf("in text: %q -> %q", v, out)
-		}
+		checkCodeInText(t, sc, v)
+	}
+	// Seed 17034256731814298294: a group ("tial") that is a substring of the
+	// Removed marker, which a substring check took for a leak.
+	checkCodeInText(t, sc, "qrio-tial-pubt-wtqm-wjxk-exax-sbuk")
+}
+
+// checkCodeInText requires the whole code, and only the code, to be replaced
+// in text. An exact match, because a short group can be a substring of the
+// Removed marker or of the surrounding words.
+func checkCodeInText(t *testing.T, sc *Scrubber, v string) {
+	t.Helper()
+	if out, want := sc.Scrub("codes ("+v+"), keep safe"), "codes ("+Removed+"), keep safe"; out != want {
+		t.Fatalf("in text: %q -> %q", v, out)
 	}
 }
 
