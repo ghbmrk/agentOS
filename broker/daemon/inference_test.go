@@ -894,7 +894,7 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 					switch n := n.(type) {
 					case *ast.AssignStmt:
 						for i, l := range n.Lhs {
-							if id, ok := l.(*ast.Ident); ok && objs[id.Obj] {
+							if id, ok := ast.Unparen(l).(*ast.Ident); ok && objs[id.Obj] {
 								r := n.Rhs[0]
 								if len(n.Rhs) == len(n.Lhs) {
 									r = n.Rhs[i]
@@ -1206,7 +1206,7 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				case *ast.MapType:
 					elt = t.Value
 				}
-				if s, ok := elt.(*ast.StarExpr); ok {
+				if s, ok := ast.Unparen(elt).(*ast.StarExpr); ok {
 					elt = s.X
 				}
 				if elt != nil && cmdType(elt) {
@@ -1233,7 +1233,9 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				}
 			case *ast.AssignStmt:
 				for i, l := range n.Lhs {
-					se, ok := l.(*ast.SelectorExpr)
+					// (c.Env) = nil is the same assignment (#621 delta
+					// Security 4a, 6085186527).
+					se, ok := ast.Unparen(l).(*ast.SelectorExpr)
 					if !ok || se.Sel.Name != "Env" {
 						continue
 					}
@@ -1636,6 +1638,13 @@ func TestEnvCheckCatchesTheShapesItPassed(t *testing.T) {
 		{src(`"os/exec"`, `func f() { c := exec.Command("a"); c.Run(); c = exec.Command("b"); c.Env = []string{}; c.Run() }`)},
 		// #621 delta Security 4a point 3: a conversion to a named type.
 		{src(`"os/exec"`, `type E []string; func f() { c := exec.Command("x"); c.Env = E(nil); c.Run() }`)},
+		// #621 delta Security 4a (6085186527): a parenthesised Env target.
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = []string{}; (c.Env) = nil; c.Run() }`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = []string{}; ((c).Env) = nil; c.Run() }`)},
+		{src(`"os"`, `func f() { a := os.ProcAttr{Env: []string{}}; (a.Env) = nil; os.StartProcess("/x", nil, &a) }`)},
+		// The same sweep: a parenthesised element type, and a helper's
+		// local assigned through parens.
+		{src(`"os/exec"`, `func f() { cs := [](*exec.Cmd){{Path: "/x"}}; cs[0].Run() }`)},
 	} {
 		if noEnv, _ := check(c...); len(noEnv) == 0 {
 			t.Errorf("missed:\n%s", strings.Join(c, "\n"))
@@ -1658,6 +1667,7 @@ func TestEnvCheckCatchesTheShapesItPassed(t *testing.T) {
 		{src(`"os"; "os/exec"`, `var base = os.Environ(); func env() []string { return base }; func f() { c := exec.Command("a"); c.Env = env(); c.Run() }`)},
 		{src(`"os"; "os/exec"`, `type cfg struct{ env []string }; var conf = cfg{env: os.Environ()}; func f() { c := exec.Command("a"); c.Env = conf.env; c.Run() }`)},
 		{src(`"os"; "syscall"`, `func env() []string { return os.Environ() }; func f() { (syscall.Exec)("/x", nil, env()) }`)},
+		{src(`"os"; "os/exec"`, `func env() []string { var e []string; (e) = os.Environ(); return e }; func f() { c := exec.Command("x"); c.Env = env(); c.Run() }`)},
 	} {
 		if _, inherits := check(c...); len(inherits) == 0 {
 			t.Errorf("os.Environ() missed:\n%s", strings.Join(c, "\n"))
@@ -1697,6 +1707,8 @@ var loopA = loopB
 var loopB = loopA
 func e8() { c := exec.Command("x"); c.Env = loopA; c.Run() }
 func e9() { c := (exec.Command)("x"); c.Env = []string{}; c.Run() }
+func e11() { c := exec.Command("x"); (c.Env) = []string{}; c.Run() }
+func e12() { c := exec.Command("x"); ((c).Env) = []string{}; (c).Run() }
 func e10() { c := exec.Command("x"); c.Env = build(nil); c.Run() }
 func build(extra []string) []string { return append([]string{"PATH=/bin"}, extra...) }`), src(``, `func fixed2() []string { return []string{"PATH=/bin"} }`)}
 	if noEnv, inherits := check(ok...); len(noEnv)+len(inherits) != 0 {
