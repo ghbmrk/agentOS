@@ -781,8 +781,15 @@ func TestWithdrawDropsPending(t *testing.T) {
 	if err := r.a.Schedule(rel, "a1"); !errors.Is(err, ErrRetired) {
 		t.Fatalf("withdrawn adoption scheduled again: %v", err)
 	}
-	r.must(r.a.Withdraw("other")) // not held: nothing to give up
-	r.dropsAre()                  // the pipeline's own revert settles it
+	// The withdrawal is also a drop: if the caller's own revert failed or
+	// was cut short (STOP, a cut before its journal), this settles it; the
+	// pipeline makes it a no-op when the revert ran (L3-1).
+	r.dropsAre("a1")
+	r.must(r.a.Withdraw("other")) // not held: nothing to give up, still dropped
+	if _, err := r.a.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.dropsAre("a1", "other")
 
 	r.must(r.a.Schedule(rel, "a2"))
 	var during error
@@ -799,6 +806,21 @@ func TestWithdrawDropsPending(t *testing.T) {
 	r.restart()
 	r.must(r.a.Resume(ctx))
 	r.settledInstalledAs("a2")
+}
+
+// A withdrawal cut short before any Tick, its revert lost with the
+// process, is still settled by the next Tick (L3-1).
+func TestWithdrawDropSurvivesARestart(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.a.Withdraw("a1"))
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	if _, err := r.a.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.dropsAre("a1")
 }
 
 // settledInstalledAs: the release was installed and adoption confirmed.

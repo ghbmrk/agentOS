@@ -210,18 +210,16 @@ type state struct {
 	Dropped []string `json:"dropped,omitempty"`
 }
 
-// retire marks adoption id as never scheduled again, and, when drop is
-// set, as still to settle with StageDropped. An adoption already retired
-// is left as it is: it is settled once, saved with its retirement. The
-// slices are copied, so a state copied from st is not changed.
-func retire(st *state, id string, drop bool) {
+// retire marks adoption id as never scheduled again and as still to
+// settle with StageDropped. An adoption already retired is left as it is:
+// it is settled once, saved with its retirement. The slices are copied,
+// so a state copied from st is not changed.
+func retire(st *state, id string) {
 	if id == "" || slices.Contains(st.Retired, id) {
 		return
 	}
 	st.Retired = append(slices.Clip(st.Retired), id)
-	if drop {
-		st.Dropped = append(slices.Clip(st.Dropped), id)
-	}
+	st.Dropped = append(slices.Clip(st.Dropped), id)
 }
 
 // refKey keys a release exactly in saved state.
@@ -261,8 +259,9 @@ type Applier struct {
 // New loads the applier's state. A pending release is not kept across a
 // restart (a *update.Verified is never persisted): its adoption is
 // retired and settled with StageDropped by the next Tick, and the
-// release is scheduled again only under a new adoption ID (SR3-4f-2b). A pending release whose handover is in flight is left to
-// Resume.
+// release is scheduled again only under a new adoption ID, once BOARD
+// SR3-4f-2-r1 lands (SR3-4f-2b). A pending release whose handover is in
+// flight is left to Resume.
 func New(cfg Config) (*Applier, error) {
 	if cfg.Journal == nil || cfg.Activator == nil || cfg.Store == nil || cfg.Pipeline == nil || cfg.State == nil ||
 		cfg.InCall == nil || cfg.Working == nil {
@@ -310,7 +309,7 @@ func New(cfg Config) (*Applier, error) {
 		a.st.Applied = map[string]bool{}
 	}
 	if p := a.st.Pending; p != nil && (a.st.Applying == nil || a.st.Applying.Adoption != p.Adoption) {
-		retire(&a.st, p.Adoption, true)
+		retire(&a.st, p.Adoption)
 	}
 	a.st.Pending = nil
 	return a, nil
@@ -375,7 +374,7 @@ func (a *Applier) schedule(v *update.Verified, adoption string, now bool) error 
 	}
 	err := a.scheduleLocked(v, adoption, now)
 	if err != nil && !a.holdsLocked(adoption) {
-		retire(&a.st, adoption, true)
+		retire(&a.st, adoption)
 		_ = a.saveLocked() // else the next settle saves it
 	}
 	return err
@@ -417,7 +416,7 @@ func (a *Applier) scheduleLocked(v *update.Verified, adoption string, now bool) 
 		return nil
 	}
 	if p := a.st.Pending; p != nil && p.Adoption != adoption {
-		retire(&a.st, p.Adoption, true) // superseded
+		retire(&a.st, p.Adoption) // superseded
 	}
 	a.st.Pending = &pending{Version: m.Version, Adoption: adoption, Security: v.Security(), NotBefore: nb}
 	a.rel = v
@@ -504,9 +503,9 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 		// The attestor policy narrowed since it was scheduled (SR3-6):
 		// drop the automatic authorization and settle the adoption
 		// (SR3-4f-2b). The release is adopted again only under a new
-		// ID, under the current policy.
+		// ID, under the current policy, once SR3-4f-2-r1 lands.
 		a.st.Pending, a.rel = nil, nil
-		retire(&a.st, p.Adoption, true)
+		retire(&a.st, p.Adoption)
 		err := a.saveLocked()
 		a.mu.Unlock()
 		return false, err
@@ -514,7 +513,7 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 	if a.st.Unrecorded[refKey(a.rel.Ref())] >= maxUnrecorded {
 		// Refused after its unrecorded installs (SR3-4f-1b).
 		a.st.Pending, a.rel = nil, nil
-		retire(&a.st, p.Adoption, true)
+		retire(&a.st, p.Adoption)
 		err := a.saveLocked()
 		a.mu.Unlock()
 		return false, err
@@ -596,7 +595,7 @@ func (a *Applier) withdrawHandover(ctx context.Context, pt *point) error {
 	next := a.st
 	next.Applying = nil
 	next.Last = &last{Version: pt.To, Kind: doneNotHanded}
-	retire(&next, pt.Adoption, true)
+	retire(&next, pt.Adoption)
 	if err := a.save(next); err != nil {
 		return err
 	}
@@ -610,7 +609,9 @@ func (a *Applier) withdrawHandover(ctx context.Context, pt *point) error {
 // takes effect, so it is never scheduled again. From the save before the
 // install until Resume settles the apply, Withdraw is refused with an
 // error that is ErrApplying and has Handover() true. Withdraw never calls
-// the pipeline: the caller reverts the adoption itself.
+// the pipeline: the caller reverts the adoption itself. It is also
+// dropped, so if that revert fails or is cut short, the next Tick settles
+// it with StageDropped, a no-op once the revert ran (SR3-4f-2 L3-1).
 func (a *Applier) Withdraw(adoption string) error {
 	if adoption == "" {
 		return errors.New("apply: no adoption")
@@ -625,7 +626,7 @@ func (a *Applier) Withdraw(adoption string) error {
 	if held {
 		next.Pending = nil
 	}
-	retire(&next, adoption, false)
+	retire(&next, adoption)
 	if err := a.save(next); err != nil {
 		return err
 	}
@@ -802,7 +803,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 			// As in Tick (SR3-6); Tick settles the adoption after the
 			// dispatch (SR3-4f-2b).
 			a.st.Pending, a.rel = nil, nil
-			retire(&a.st, p.Adoption, true)
+			retire(&a.st, p.Adoption)
 		}
 		a.abandonLocked(ctx, key, false)
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
@@ -949,7 +950,7 @@ func (a *Applier) Resume(ctx context.Context) error {
 		next.Last = unrecordedLast(a.st, pt.To, refKey(update.Ref{Version: pt.To, UsrRootHash: pt.ToUsr, ManifestSHA256: pt.ToManifest}),
 			&last{Version: pt.To, Kind: doneNotHanded})
 		if !a.holdsPendingLocked(pt.Adoption) {
-			retire(&next, pt.Adoption, true)
+			retire(&next, pt.Adoption)
 		}
 	case b.UsrRootHash == pt.ToUsr && !b.Blessed:
 		return nil // the health check has not passed yet

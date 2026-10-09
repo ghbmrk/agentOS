@@ -415,9 +415,23 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 	if origin == OriginPipeline {
 		action = ActionRevertAuto // not narrowing: held by STOP like other automation
 	}
-	return p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:%s:revert:%s:%s", id, n, why), Origin: origin,
+	err = p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:%s:revert:%s:%s", id, n, why), Origin: origin,
 		Account: journal.BrokerAccount, Action: action, Executor: Executor,
 		Params: map[string]any{"adoption": id, "why": why}})
+	if err != nil && withdraw && p.revertedByID(id) {
+		// The withdrawal is also a drop, and the applier's StageDropped
+		// reverted it first: the owner's undo is done (SR3-4f-2 L3-1).
+		return nil
+	}
+	return err
+}
+
+// revertedByID: adoption id exists and is reverted.
+func (p *Pipeline) revertedByID(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.adoptionByIDLocked(id)
+	return a != nil && a.Reverted != ""
 }
 
 // Withdrawer is the update applier as the pipeline sees it (SR3-4f-2a).
@@ -516,7 +530,10 @@ func (p *Pipeline) settleStaged(ctx context.Context, id, why string) error {
 	if err != nil {
 		return err
 	}
-	return p.revert(ctx, id, OriginPipeline, why)
+	if err := p.revert(ctx, id, OriginPipeline, why); err != nil && !p.revertedByID(id) {
+		return err
+	}
+	return nil // reverted, by this call or one that raced it
 }
 
 // adoptionByIDLocked finds an adoption by its exact ID only.

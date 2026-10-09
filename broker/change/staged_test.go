@@ -225,15 +225,22 @@ type withdrawer struct {
 	mu    sync.Mutex
 	calls []string
 	err   error
+	// then runs after a withdrawal, under held, as the applier's next
+	// Tick settles the drop.
+	then func(id string)
 }
 
 func (w *withdrawer) Withdraw(id string) error {
 	w.held.Lock()
 	defer w.held.Unlock()
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	w.calls = append(w.calls, id)
-	return w.err
+	err, then := w.err, w.then
+	w.mu.Unlock()
+	if err == nil && then != nil {
+		then(id)
+	}
+	return err
 }
 
 func (w *withdrawer) called() []string {
@@ -354,6 +361,52 @@ func TestUndoAndSettleDoNotDeadlock(t *testing.T) {
 		}
 	}
 	if a := e.adoption(r.ID); a.Reverted == "" {
+		t.Fatalf("adoption %+v", a)
+	}
+}
+
+// L3-1: a withdrawal is also a drop. When the revert that follows it
+// fails (STOP holds the pipeline's own), the applier's StageDropped still
+// reverts the adoption, so the digest stops promising to install it.
+func TestWithdrawnThenRevertFailsIsSettledByTheDrop(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	if _, err := e.eng.Stop(bg); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.revert(bg, r.ID, OriginPipeline, WhySecurity); err == nil {
+		t.Fatal("auto revert ran during STOP")
+	}
+	if a := e.adoption(r.ID); len(w.called()) != 1 || a.Reverted != "" || !a.Staged {
+		t.Fatalf("adoption %+v, withdraw calls %q", a, w.called())
+	}
+	if err := e.eng.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.StageDropped(bg, r.ID); err != nil { // the applier's next Tick
+		t.Fatal(err)
+	}
+	if a := e.adoption(r.ID); a.Reverted != WhyDropped || e.image() != update.Digest([]byte("a")) {
+		t.Fatalf("adoption %+v", a)
+	}
+	if d := e.p.Digest(); slices.ContainsFunc(d, func(l string) bool { return strings.HasPrefix(l, "Staged update 41") }) {
+		t.Fatalf("digest still promises the withdrawn release: %q", d)
+	}
+}
+
+// L3-1: the applier settles the drop before the owner's own revert runs;
+// that revert then finds no active adoption, and the undo still succeeds.
+func TestOwnerUndoLosesToTheDrop(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	w.then = func(id string) {
+		if err := e.p.StageDropped(bg, id); err != nil {
+			t.Error("drop:", err)
+		}
+	}
+	if err := e.p.Revert(bg, r.Short, OriginOwner); err != nil {
+		t.Fatal("owner undo that lost to the drop:", err)
+	}
+	// Both reverts are journaled; the owner's found nothing to undo.
+	if a := e.adoption(r.ID); a.Reverted != WhyDropped || e.image() != update.Digest([]byte("a")) {
 		t.Fatalf("adoption %+v", a)
 	}
 }
