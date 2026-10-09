@@ -24,7 +24,8 @@ const canaryLink = "otpauth://totp/AgentOS:AgentOS?secret=CANARYCANARYCANARY22&i
 // the owner channel verifies with.
 type fakeVault struct {
 	sealed    bool
-	pending   int // the seed waiting for confirmation, 0 for none
+	notOpen   bool // init -setup never opened enrollment
+	pending   int  // the seed waiting for confirmation, 0 for none
 	confirmed bool
 	channel   int
 	enrolls   int
@@ -37,6 +38,9 @@ func (v *fakeVault) Enroll() (string, error) {
 	v.enrolls++
 	if v.err != nil {
 		return "", v.err
+	}
+	if v.notOpen {
+		return "", EnrollNotOpen
 	}
 	if v.sealed {
 		return "", EnrollClosed
@@ -51,6 +55,8 @@ func (v *fakeVault) ConfirmEnroll(code string) (bool, error) {
 		return false, v.err
 	}
 	switch {
+	case v.notOpen:
+		return false, EnrollNotOpen
 	case v.sealed:
 		return false, EnrollClosed
 	case v.pending == 0:
@@ -68,6 +74,8 @@ func (v *fakeVault) SealEnroll() error {
 		return v.err
 	}
 	switch {
+	case v.notOpen:
+		return EnrollNotOpen
 	case v.sealed:
 		return EnrollClosed
 	case v.pending != 0 || !v.confirmed:
@@ -304,17 +312,18 @@ func TestFinishAfterASealWhoseRecordWasLost(t *testing.T) {
 	}
 }
 
-// The release finding on #367: a vault whose enrollment is closed to
-// setup (sealed, or never opened by init -setup) shows no seed, and setup
-// no longer counts that as enrolled: finish needs a confirmation agentosd
-// saw, so a box nobody holds a code generator for does not finish.
+// P2-2w c2 r1 (release finding on #367): a vault sealed with no
+// confirmation in setup's record (the record was deleted, which cannot be
+// told apart from tampering) shows no seed and does not count as
+// enrolled. Enroll and confirm answer that this box cannot finish setup,
+// not "enrolled" with a Continue that finish would refuse.
 func TestAClosedVaultDoesNotCountAsEnrolled(t *testing.T) {
 	r := newSetupRig(t)
 	r.vault.sealed = true
-	if err := r.call(localapi.OpSetupEnroll, nil, nil); code(err) != localapi.ErrEnrolled {
+	if err := r.call(localapi.OpSetupEnroll, nil, nil); code(err) != localapi.ErrEnrollUnavailable {
 		t.Fatalf("enroll %v", err)
 	}
-	if err := r.call(localapi.OpSetupConfirm, localapi.Confirm{Code: good}, nil); code(err) != localapi.ErrEnrolled {
+	if err := r.call(localapi.OpSetupConfirm, localapi.Confirm{Code: good}, nil); code(err) != localapi.ErrEnrollUnavailable {
 		t.Fatalf("confirm %v", err)
 	}
 	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); code(err) != localapi.ErrNotEnrolled {
@@ -322,6 +331,55 @@ func TestAClosedVaultDoesNotCountAsEnrolled(t *testing.T) {
 	}
 	if r.vault.seals != 0 || len(r.finished) != 0 {
 		t.Fatal("finish reached the vault without a confirmation")
+	}
+}
+
+// P2-2w c2 r1 (L3 on #367): a vault that init -setup never opened answers
+// apart from a sealed one, and every op, finish included, says this box
+// cannot finish setup.
+func TestAVaultNeverOpenedCannotFinishSetup(t *testing.T) {
+	r := newSetupRig(t)
+	r.vault.notOpen = true
+	if err := r.call(localapi.OpSetupEnroll, nil, nil); code(err) != localapi.ErrEnrollUnavailable {
+		t.Fatalf("enroll %v", err)
+	}
+	if err := r.call(localapi.OpSetupConfirm, localapi.Confirm{Code: good}, nil); code(err) != localapi.ErrEnrollUnavailable {
+		t.Fatalf("confirm %v", err)
+	}
+	// Even with a confirmation in the record, finish does not record.
+	if err := (FileRecord{Path: r.path}).Save(SetupRecord{Enrolled: true}); err != nil {
+		t.Fatal(err)
+	}
+	r.start()
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); code(err) != localapi.ErrEnrollUnavailable {
+		t.Fatalf("finish %v", err)
+	}
+	if _, ok := r.s.Owner(); ok || len(r.finished) != 0 || r.s.Closed() {
+		t.Fatal("finish recorded on a vault never opened")
+	}
+}
+
+// P2-2w c2 r1 (L3 re-review on #367, point 1): the seal succeeded but its
+// record was lost, and the owner reset setup before retrying. The codes
+// step's enroll finds the vault sealed; it keeps the confirmation it saw
+// and answers "enrolled", and finish then records, rather than refusing
+// every attempt.
+func TestAResetAfterASealWhoseRecordWasLostStillFinishes(t *testing.T) {
+	r := newSetupRig(t)
+	r.enrollAndConfirm()
+	r.vault.sealed = true // the seal, then agentosd stopped before Save
+	r.start()
+	if err := r.call(localapi.OpSetupEnroll, nil, nil); code(err) != localapi.ErrEnrolled {
+		t.Fatalf("enroll after the reset %v", err)
+	}
+	if err := r.call(localapi.OpSetupConfirm, localapi.Confirm{Code: good}, nil); code(err) != localapi.ErrEnrolled {
+		t.Fatalf("confirm after the reset %v", err)
+	}
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); err != nil {
+		t.Fatalf("finish %v", err)
+	}
+	if got, ok := r.s.Owner(); !ok || got != "+15550100100" {
+		t.Fatalf("owner %q %v", got, ok)
 	}
 }
 
