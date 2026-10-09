@@ -88,7 +88,7 @@ func (p *Pipeline) Export(ctx context.Context, id string) ([]byte, error) {
 		}
 	}
 	pub.security = set.security
-	s, err := p.evaluate(ctx, prev, cur, pub, strictFor(Shared, a.Classes))
+	s, err := p.evaluate(ctx, prev, cur, pub, strictFor(Shared, a.Classes), "")
 	if err != nil {
 		return nil, err
 	}

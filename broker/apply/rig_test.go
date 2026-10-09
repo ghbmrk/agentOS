@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,8 @@ type activator struct {
 	pending    bool // the new slot booted, health check not run yet
 	installErr error
 	abandoned  int
+	onInstall  func() // runs after a successful Install
+	abandonErr error
 }
 
 func (a *activator) Install(_ context.Context, v *update.Verified) error {
@@ -41,12 +44,18 @@ func (a *activator) Install(_ context.Context, v *update.Verified) error {
 	}
 	a.installed = append(a.installed, m.Version)
 	a.next = m.UsrRootHash
+	if a.onInstall != nil {
+		a.onInstall()
+	}
 	return nil
 }
 
 func (a *activator) Abandon(context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.abandonErr != nil {
+		return a.abandonErr
+	}
 	a.abandoned++
 	a.next = a.boot.UsrRootHash
 	return nil
@@ -74,24 +83,47 @@ func (a *activator) Booted(context.Context) (Boot, error) {
 	return a.boot, nil
 }
 
-// pipeline is the change pipeline's staged-adoption hooks.
+// pipeline is the change pipeline's staged-adoption hooks, with their
+// contract (SR3-4): settling an adoption again the same way is a success
+// that changes nothing, the other way is refused. confirmErr and failErr
+// fail the next call with no effect.
 type pipeline struct {
-	mu        sync.Mutex
-	confirmed []string
-	failed    []string
+	mu         sync.Mutex
+	confirmed  []string
+	failed     []string
+	confirmErr error
+	failErr    error
 }
 
 func (p *pipeline) ConfirmStaged(ref string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.confirmed = append(p.confirmed, ref)
+	if err := p.confirmErr; err != nil {
+		p.confirmErr = nil
+		return err
+	}
+	if slices.Contains(p.failed, ref) {
+		return errors.New("fell back")
+	}
+	if !slices.Contains(p.confirmed, ref) {
+		p.confirmed = append(p.confirmed, ref)
+	}
 	return nil
 }
 
 func (p *pipeline) StageFailed(_ context.Context, ref string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.failed = append(p.failed, ref)
+	if err := p.failErr; err != nil {
+		p.failErr = nil
+		return err
+	}
+	if slices.Contains(p.confirmed, ref) {
+		return errors.New("confirmed")
+	}
+	if !slices.Contains(p.failed, ref) {
+		p.failed = append(p.failed, ref)
+	}
 	return nil
 }
 
@@ -105,11 +137,20 @@ func (c *clock) add(d time.Duration) { c.mu.Lock(); defer c.mu.Unlock(); c.t = c
 
 // policy is the journal policy: the applier's Check for its intents, as
 // the grants gate will delegate meta.release to it.
-type policy struct{ a *Applier }
+// atDispatch, if set, runs once after the dispatch check passed.
+type policy struct {
+	a          *Applier
+	atDispatch func()
+}
 
 func (p *policy) Check(ctx context.Context, ph journal.Phase, in journal.Intent) error {
 	if in.Executor == Executor {
-		return p.a.Check(ctx, ph, in)
+		err := p.a.Check(ctx, ph, in)
+		if f := p.atDispatch; err == nil && ph == journal.PhaseDispatch && f != nil {
+			p.atDispatch = nil
+			f()
+		}
+		return err
 	}
 	return nil
 }
