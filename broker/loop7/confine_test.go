@@ -740,8 +740,10 @@ func missed(t *testing.T) (missed *[]int, passes *int) {
 }
 
 // forkRounds is how many fork loops the freeze test empties: one round
-// whose first pass happens to catch every process proves nothing.
-const forkRounds = 10
+// whose first pass happens to catch every process proves nothing. Without
+// the freeze, CI's first pass missed a newborn in 2 of 10 rounds, so 30
+// rounds let a removed freeze pass about once in a thousand runs.
+const forkRounds = 30
 
 // LOOP-7 (r6 req. 3): the freeze is what stops a fork loop in one pass.
 // Frozen, the leaf forks nothing after the first kill pass reads it, so in
