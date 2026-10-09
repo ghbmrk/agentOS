@@ -300,6 +300,10 @@ type secureState struct {
 	// Cleared is when each finding last cleared, so a flapping finding is
 	// not texted again unless it stayed clear for ReText.
 	Cleared map[string]time.Time `json:"cleared,omitempty"`
+	// ToldCleared are the findings whose last close in Pass texted the
+	// owner "Cleared", so a return within ReText is texted, not left as a
+	// false all-clear (L3 #585 point 1).
+	ToldCleared map[string]bool `json:"told_cleared,omitempty"`
 	// NotRun are the checks the last pass had no input for, Failed those
 	// whose input errored, and NotRunSaid the set the digest last named
 	// (Digest).
@@ -420,6 +424,9 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 	if s.st.Cleared == nil {
 		s.st.Cleared = map[string]time.Time{}
 	}
+	if s.st.ToldCleared == nil {
+		s.st.ToldCleared = map[string]bool{}
+	}
 	return s, nil
 }
 
@@ -483,18 +490,32 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	// findings in the text so a new alert is never pushed into MORE.
 	var lines, later []string
 	urgent := false
+	// A check that failed this pass looked at nothing, so none of its
+	// open findings closes, seen or not (P3-4b-3r-pass; #558 Security 4a).
+	broke := map[Check]bool{}
+	for _, c := range failed {
+		broke[Check(c)] = true
+	}
+	var closed []Record
 	for _, id := range sortedKeys(s.st.Open) {
 		rec := s.st.Open[id]
-		if seen[id] || rec.Reported && !clear[id] {
+		if seen[id] || rec.Reported && !clear[id] || broke[rec.Finding.Check] {
 			continue
 		}
 		// No longer observed; its evidence stays. A pause it caused stays
-		// too, and the owner hears it cleared where they heard of it.
+		// too.
 		delete(s.st.Open, id)
 		delete(s.held, id)
 		s.st.Cleared[id] = now
-		if rec.Contained == "paused" && rec.Texted {
-			later = append(later, clearedLine(rec))
+		// A texted return within ReText (Again) clears in the digest
+		// only, so the next return within ReText is not texted. A pause
+		// still hears it cleared: that line says it stays paused, so it
+		// is no all-clear and a return while paused stays untexted.
+		if rec.Texted && (!rec.Again || rec.Contained == "paused") {
+			closed = append(closed, rec)
+			if rec.Contained != "paused" {
+				s.st.ToldCleared[id] = true
+			}
 		}
 	}
 	// A version (installed or fixed) that stays uncomparable for
@@ -548,6 +569,11 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 			urgent = urgent || urgentText(rec)
 		}
 	}
+	// Every texted finding is told it cleared, paused or not, once no
+	// open texted finding shares its plain name, new ones included (S39).
+	s.mu.Lock()
+	later = append(later, s.clearedLinesLocked(closed)...)
+	s.mu.Unlock()
 	text := s.batch(append(lines, later...))
 	s.mu.Lock()
 	err := s.saveLocked()
@@ -743,9 +769,15 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Re
 	if rec.Contained == "paused" {
 		s.contained = true
 	}
+	// Back too soon: the digest says so instead, unless the owner's last
+	// text about it said it cleared; then it is texted once more, and as
+	// Again its own clearing is not (Pass), so a flap ends on "it is back".
+	told := false
 	if t, ok := s.st.Cleared[f.ID]; ok && rec.At.Sub(t) < s.cfg.ReText {
-		rec.Again = true // back too soon: the digest says so instead
+		rec.Again = true
+		told = s.st.ToldCleared[f.ID]
 	}
+	delete(s.st.ToldCleared, f.ID)
 	// Every automatic pause is texted at once (security L2 on W5a),
 	// unless the target was still paused from before: a finding back too
 	// soon then stays in the digest as "again".
@@ -754,7 +786,7 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Re
 		_, still := s.st.Paused[targetKey(*f.Contain)]
 		newPause = !still
 	}
-	rec.Texted = newPause || !rec.Again && (f.Severity == High || rec.Contained == "capped")
+	rec.Texted = newPause || told || !rec.Again && (f.Severity == High || rec.Contained == "capped")
 	// Evidence is saved before anything slower runs.
 	s.st.Open[f.ID] = rec
 	if rec.Contained == "paused" {

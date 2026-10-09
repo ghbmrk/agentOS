@@ -24,18 +24,28 @@ func LoadCorpus(path string) ([]CorpusItem, error) {
 	if err != nil {
 		return nil, err
 	}
+	items, err := ParseCorpus(b)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return items, nil
+}
+
+// ParseCorpus reads an items.json's bytes: at least one item, each with
+// an ID and a text.
+func ParseCorpus(b []byte) ([]CorpusItem, error) {
 	var c struct {
 		Items []CorpusItem `json:"items"`
 	}
 	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("corpus %s: %w", path, err)
+		return nil, fmt.Errorf("corpus: %w", err)
 	}
 	if len(c.Items) == 0 {
-		return nil, fmt.Errorf("corpus %s: no items", path)
+		return nil, errors.New("corpus: no items")
 	}
 	for _, it := range c.Items {
 		if it.ID == "" || it.Text == "" {
-			return nil, fmt.Errorf("corpus %s: an item lacks an id or text", path)
+			return nil, errors.New("corpus: an item lacks an id or text")
 		}
 	}
 	return c.Items, nil
@@ -114,11 +124,17 @@ func (p *CorpusProbe) Run(ctx context.Context) (ProbeResult, error) {
 			if !caught {
 				res.Found = append(res.Found, Finding{Check: CheckCorpus, Subject: it.ID, Detail: c.Name, Severity: High})
 			}
+			res.Checked = append(res.Checked, CorpusKey(it.ID, c.Name))
 		}
-		res.Checked = append(res.Checked, it.ID)
 	}
 	return res, nil
 }
+
+// CorpusKey is what a corpus run lists in Checked for one item taken
+// through one check (#515 L3): a corpus finding closes only on a run that
+// took its own check over its own item, so a check dropped from Checks
+// never closes what it found.
+func CorpusKey(item, check string) string { return item + "\x00" + check }
 
 func replay(text, payload string) string {
 	if strings.Contains(text, corpusSlot) {
