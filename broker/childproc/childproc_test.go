@@ -252,7 +252,7 @@ func TestTheEnvironmentIsDeniedByDefault(t *testing.T) {
 		{"empty key", NewEnv("=x")},
 		{"NUL", NewEnv("PATH=/bin\x00HOME=/")},
 		{"duplicate key", NewEnv("PATH=/bin", "PATH=/usr/bin")},
-		{"a filtered copy of the daemon's own environment", NewEnv(own("PATH", "AGENTOS_OWNER")...)},
+		{"a filtered copy of the daemon's environment that keeps AGENTOS_OWNER", NewEnv(own("PATH", "AGENTOS_OWNER")...)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := Command(context.Background(), tc.env, Options{}, "/bin/true")

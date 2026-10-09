@@ -143,6 +143,11 @@ Move `vm/gvisor`, `modem/at`, `browser`, `clock`, `cmd/agentos-guest-bridge`, `q
 
 After r8b, the exemption map holds only `childproc` and the `unix` definition.
 
+Also in r8b (#651 L3 points 1 and 2):
+- The D1 walk rejects an exported interface that an `os/exec` type satisfies, checked with `types.Implements`.
+- The API-surface test pins each exported signature, not only the names.
+- The gate scans `CgoFiles` and `IgnoredGoFiles` as well as `GoFiles`.
+
 ## Threat check
 
 - **An escape from the handle** to the `*exec.Cmd` inside, so its `Env` can be set after the check: D1 and requirement 1's walk. Reflection plus `unsafe` remains possible (later).
