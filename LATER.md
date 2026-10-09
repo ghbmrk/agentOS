@@ -718,6 +718,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CRED-4 l-211b | #211 combined lens (comment 6090839728): `Origin` does not lowercase the host or strip a trailing dot (fails closed); normalise the host case and trailing dot. |
 | CRED-4 l-211c | #211 combined lens (comment 6090839728): the PR title lacks the package ID and no brief row is linked; the decoy test picks its assertion with `in[len(in)-3:] == "ada"`, which is brittle (use an explicit expected value per case). |
 | P3-8 l-202 | #202 (merged a6ff0fd): a question store that keeps failing gives the guest an unbounded retry loop. Not a leak. |
+| FOLD l-670a | #670 Potency lens (record in #682): result read-back (`result_read`) has no offset or length, so a machine must take a whole oversized result back or none. |
+| FOLD l-670b | #670 Potency lens (record in #682): the stand-in for an oversized result names no next step, so the machine is not told how to read it back. |
+| FOLD l-670c | #670 Potency lens (record in #682): `result_read` is not excluded from the provider tool list. |
 
 ## Reuse candidates
 | ID | Component | Why |
