@@ -26,6 +26,15 @@ func TestRuntimeGetsExactlyTheNamedVariables(t *testing.T) {
 	if err := json.Unmarshal(b, &l); err != nil {
 		t.Fatal(err)
 	}
+	// The bridge runs in the guest, where no AGENTOS_* variable exists;
+	// one in the test's own environment (CI's AGENTOS_REQUIRE_SWTPM=1)
+	// would make childproc refuse OPENCLAW_CONFIG_READONLY=1 by value.
+	// Emptied, as unset, ownSecrets skips it.
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "AGENTOS_") {
+			t.Setenv(k, "")
+		}
+	}
 	want := []string{"OPENCLAW_GATEWAY_TOKEN=tok-123"}
 	for _, kv := range append([]string{"PATH=" + os.Getenv("PATH")}, l.Env...) {
 		k, v, _ := strings.Cut(kv, "=")
