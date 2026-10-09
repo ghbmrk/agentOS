@@ -244,6 +244,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W3-forget-reach l5 | L3 L2 on #569: mutant N12 (`judgeAgent` keeps None entries) leaves only a stale owed entry; the test is carried by W3-forget-reach-r3 |
 | W3-forget-reach l6 | L3 L3 on #569: `broker/recalltool/service.go` was outside the brief's scope but needed for the pass-throughs; brief-gap: a brief that adds a `Reach` hook lists `service.go` |
 | SR3-2 l1 | UX/Potency on #428 (L3 later point): an authorized intent that never dispatches (held, no executor, fenced) holds its bound place with no age-out; note it in GR31 and let STATUS show it |
+| CH-21b l1 | Builder on CH-21b: `boxname.Check` allows any Unicode letter, so a mixed-script look-alike (Cyrillic а in "Аgent OS") passes the reserved-word check; fold look-alikes as CH-10 does (same gap as OSS-10w2 f4) |
+| CH-21b l2 | Builder on CH-21b: a name with non-GSM-7 letters or U+2019 forces UCS-2 on every owner text that quotes it, halving the CH-12 length budget; count it when CH-12 budgets are next touched |
+| CH-21b l3 | Builder on CH-21b: renames are not journaled; the owner sees only the reply. Journal `name changed` when the journal next gains owner-channel events |
 | SR3-2 l2 | Security on #428, point 2: GR7 ("under a bound of 1 the second is asked") overstates, since concurrent `Authorize` calls are not seq-checked and both can be authorized, the second being refused at the dispatch recheck. Safe. Next time GR7 changes, add "or, if both are authorized at once, refused at the recheck" |
 | P2-2a f3 l1 | UX on #423, point 2: an owner who never answers is asked again at every check; after a few lapses the ask could move to the daily digest only (UPD-5) |
 | P2-2a f3 l2 | Potency on #423, point 1: the lapse record is in memory only; persist it with proposals (C9, potency PM4). No release is stranded meanwhile, since Loop 3 re-asks after a restart |

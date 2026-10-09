@@ -27,8 +27,9 @@ var controlPath = map[string][]string{
 	"cgroup":    {},
 	"budget":    {"admission", "cgroup"}, // RES-2 component budget (P2-5)
 	"accel":     {"admission"},           // RES-3 discovery from sysfs (P2-5)
-	"owner":     {"control", "journal", "modem"},
+	"owner":     {"boxname", "control", "journal", "modem"},
 	"modem":     {},
+	"boxname":   {}, // CH-21 name check, for NAME
 	// The modem bridge's contract and agentosd's end of it (P2-3w): types
 	// and an in-process queue; the bridge's client is bridgeclient.
 	"bridgeproto": {},
