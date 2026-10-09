@@ -1445,10 +1445,15 @@ func capFirst(s string) string {
 // aboveBudget says what an exhaustion round's "above budget" finding lets
 // an agent machine do, by resource.
 var aboveBudget = map[string]string{
-	"memory":    "use more memory than its budget",
+	"memory": "use more memory than its budget",
+	// No round reports "processes" now (S35), but an open record
+	// still reads this way.
 	"processes": "start more processes than its budget",
-	"disk":      "use more disk space than its budget",
-	"cpu":       "take as large a share of processor time as I get",
+	// pids.max bounds the sandbox's host threads, not guest processes
+	// (RES-2, loops S35).
+	sandboxThreads: "run more sandbox threads than its budget",
+	"disk":         "use more disk space than its budget",
+	"cpu":          "take as large a share of processor time as I get",
 }
 
 // findingText is one finding in plain words, with the next step.

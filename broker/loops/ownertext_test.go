@@ -285,18 +285,21 @@ func identifierIn(s string) string {
 	return ""
 }
 
-// REQ: LOOP-7, RES-1
+// REQ: LOOP-7, RES-1, RES-2
 //
 // P3-4b-4c-step (#548 UX 1): a limit above the configured budget says
 // which resource and that the machine is over its budget, not that no
 // limit exists; with no containment (S37) its line says nothing is
-// paused and nothing is needed.
+// paused and nothing is needed. P3-4b-4c-pids (RES-2): pids.max's
+// finding names the sandbox's threads, which is what it bounds, in plain
+// words.
 func TestAnAboveBudgetLimitSaysSoAndThatNothingIsNeeded(t *testing.T) {
 	for subject, want := range map[string]string{
-		"memory":    "A load test found an agent machine can use more memory than its budget.",
-		"processes": "A load test found an agent machine can start more processes than its budget.",
-		"disk":      "A load test found an agent machine can use more disk space than its budget.",
-		"cpu":       "A load test found an agent machine can take as large a share of processor time as I get.",
+		"sandbox threads": "A load test found an agent machine can run more sandbox threads than its budget.",
+		"memory":          "A load test found an agent machine can use more memory than its budget.",
+		"processes":       "A load test found an agent machine can start more processes than its budget.",
+		"disk":            "A load test found an agent machine can use more disk space than its budget.",
+		"cpu":             "A load test found an agent machine can take as large a share of processor time as I get.",
 	} {
 		f := Finding{Check: CheckExhaust, Subject: subject, Detail: "above budget", Severity: High}
 		if got := ownerLine(Record{Finding: f}); got != want+" "+nothingNeeded {
@@ -318,6 +321,7 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 		{Check: CheckTamper, Subject: "evaluator", Detail: "writable"},
 		{Check: CheckExhaust, Subject: "memory", Detail: "above budget"},
 		{Check: CheckExhaust, Subject: "processes", Detail: "above budget"},
+		{Check: CheckExhaust, Subject: "sandbox threads", Detail: "above budget"},
 		{Check: CheckExhaust, Subject: "disk", Detail: "above budget"},
 		{Check: CheckExhaust, Subject: "cpu", Detail: "above budget"},
 		{Check: CheckExhaust, Subject: "preemption", Detail: "slow"},
