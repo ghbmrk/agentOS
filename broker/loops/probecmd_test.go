@@ -17,7 +17,9 @@ import (
 
 // canaryRound runs the repository's canary harness in round mode over one
 // registry target whose command is tools/canary_controls.py in mode.
-func canaryRound(t *testing.T, mode string, contain map[string]string) []string {
+// The harness runs from a release-listed wrapper in release, as probecmd
+// requires (P3-4b-3a).
+func canaryRound(t *testing.T, release, mode string, contain map[string]string) []string {
 	t.Helper()
 	py, err := exec.LookPath("python3")
 	if err != nil {
@@ -36,7 +38,12 @@ func canaryRound(t *testing.T, mode string, contain map[string]string) []string 
 	if err := os.WriteFile(reg, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return []string{py, filepath.Join(root, "tools", "canary.py"), "round", "--targets", reg}
+	wrapper := filepath.Join(release, "canary")
+	body := "#!/bin/sh\nexec " + py + " " + filepath.Join(root, "tools", "canary.py") + ` "$@"` + "\n"
+	if err := os.WriteFile(wrapper, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return []string{wrapper, "round", "--targets", reg}
 }
 
 // LOOP-7 acceptance, canary rounds: a planted leak in a product target is
@@ -47,8 +54,9 @@ func TestCanaryRoundsReportAPlantedLeakAndCloseOnACleanRound(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs the canary harness")
 	}
-	leaky := &probecmd.CommandProbe{For: loops.CheckCanary, Interval: time.Hour, Timeout: 5 * time.Minute,
-		Cmd: canaryRound(t, "leaky", map[string]string{"kind": "grant", "name": "G9", "label": "pre-allowance G9"})}
+	release := t.TempDir()
+	leaky := &probecmd.CommandProbe{For: loops.CheckCanary, Interval: time.Hour, Timeout: 5 * time.Minute, Release: release,
+		Cmd: canaryRound(t, release, "leaky", map[string]string{"kind": "grant", "name": "G9", "label": "pre-allowance G9"})}
 	r := loops.NewProbeRig(t, leaky)
 	r.Run(t)
 	if name, res := r.Run(t); name != "probe:canary" || res.Err != nil || res.Value != 1 {
@@ -65,7 +73,7 @@ func TestCanaryRoundsReportAPlantedLeakAndCloseOnACleanRound(t *testing.T) {
 	if !strings.HasPrefix(ev[0].Finding.Detail, "kinds: ") {
 		t.Fatalf("detail %q", ev[0].Finding.Detail)
 	}
-	leaky.Cmd = canaryRound(t, "clean", nil)
+	leaky.Cmd = canaryRound(t, release, "clean", nil)
 	r.Advance(time.Hour)
 	if name, res := r.Run(t); name != "probe:canary" || res.Err != nil || res.Value != 0 {
 		t.Fatalf("%q %+v", name, res)
