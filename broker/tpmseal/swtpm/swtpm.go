@@ -5,16 +5,17 @@
 package swtpm
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
@@ -24,7 +25,7 @@ import (
 type TPM struct {
 	t   testing.TB
 	dir string
-	cmd *exec.Cmd
+	cmd *childproc.Cmd
 	tpm transport.TPMCloser
 }
 
@@ -32,7 +33,7 @@ type TPM struct {
 // skipped, unless AGENTOS_REQUIRE_SWTPM is set (CI), where it fails.
 func Start(t testing.TB) *TPM {
 	t.Helper()
-	if _, err := exec.LookPath("swtpm"); err != nil {
+	if _, err := childproc.LookPath("swtpm"); err != nil {
 		if os.Getenv("AGENTOS_REQUIRE_SWTPM") != "" {
 			t.Fatal("swtpm is required (AGENTOS_REQUIRE_SWTPM) but not installed")
 		}
@@ -62,16 +63,15 @@ func (s *TPM) sock() string { return filepath.Join(s.dir, "sock") }
 func (s *TPM) start() {
 	s.t.Helper()
 	os.Remove(s.sock())
-	s.cmd = exec.Command("swtpm", "socket", "--tpm2",
-		"--tpmstate", "dir="+s.dir,
-		"--server", "type=unixio,path="+s.sock(),
-		"--flags", "not-need-init,startup-clear")
 	logf, err := os.OpenFile(filepath.Join(s.dir, "log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		s.t.Fatal(err)
 	}
 	defer logf.Close()
-	s.cmd.Stdout, s.cmd.Stderr = logf, logf
+	s.cmd = command("swtpm", childproc.Options{Stdout: logf, Stderr: logf}, "socket", "--tpm2",
+		"--tpmstate", "dir="+s.dir,
+		"--server", "type=unixio,path="+s.sock(),
+		"--flags", "not-need-init,startup-clear")
 	if err := s.cmd.Start(); err != nil {
 		s.t.Fatal(err)
 	}
@@ -99,14 +99,14 @@ func (s *TPM) stop() {
 		s.tpm.Close()
 		s.tpm = nil
 	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		s.cmd.Process.Signal(os.Interrupt)
+	if s.cmd != nil && s.cmd.Pid() > 0 {
+		s.cmd.Signal(os.Interrupt)
 		done := make(chan struct{})
 		go func() { s.cmd.Wait(); close(done) }()
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			s.cmd.Process.Kill()
+			s.cmd.Kill()
 			<-done
 		}
 		s.cmd = nil
@@ -179,3 +179,10 @@ func (s *TPM) ThiefLockReset() error {
 }
 
 func (s *TPM) String() string { return fmt.Sprintf("swtpm(%s)", s.dir) }
+
+// toolPath is all of swtpm's environment (P3-4b-3r-env-r8b).
+const toolPath = "PATH=/usr/sbin:/usr/bin:/sbin:/bin"
+
+func command(name string, o childproc.Options, args ...string) *childproc.Cmd {
+	return childproc.Command(context.Background(), childproc.NewEnv(toolPath), o, name, args...)
+}

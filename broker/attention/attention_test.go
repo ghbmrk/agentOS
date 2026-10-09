@@ -258,7 +258,7 @@ func TestReplyRuleIsEarned(t *testing.T) {
 	if len(s) != 1 || !s[0].Spec.Rule.Reply || len(s[0].Spec.Rule.Recipients) != 0 || s[0].Spec.Rule.AmountCap != 0 || len(s[0].Spec.Rule.Params) != 0 {
 		t.Fatalf("%+v", s)
 	}
-	if !strings.Contains(s[0].Text, "20 of the agent's replies on mail unedited") || !strings.Contains(s[0].Text, "reply in existing threads") {
+	if !strings.Contains(s[0].Text, "20 of my replies on mail unedited") || !strings.Contains(s[0].Text, "reply in existing threads") {
 		t.Fatalf("text %q", s[0].Text)
 	}
 }
@@ -301,7 +301,7 @@ func TestReplyLightEdits(t *testing.T) {
 	if len(s) != 1 || !s[0].Spec.Rule.Reply || len(s[0].Spec.Rule.Recipients) != 0 || s[0].Spec.Rule.AmountCap != 0 || len(s[0].Spec.Rule.Params) != 0 {
 		t.Fatalf("one edit among 21 must still earn: %+v", s)
 	}
-	if !strings.Contains(s[0].Text, "20 of the agent's replies on mail unedited") || !strings.Contains(s[0].Text, "reply in existing threads") {
+	if !strings.Contains(s[0].Text, "20 of my replies on mail unedited") || !strings.Contains(s[0].Text, "reply in existing threads") {
 		t.Fatalf("text %q", s[0].Text)
 	}
 

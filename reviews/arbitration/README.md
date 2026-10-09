@@ -1,18 +1,20 @@
 # Arbitrator loop
 
-Reconciles the three lens loops so their proposals compound instead of trading off:
+Reconciles the three lenses so their proposals compound instead of trading off:
 
 | Lens | Asks | Home |
 |---|---|---|
-| Security | Can this be abused, leaked, or escalated? | `reviews/security/` |
-| Potency | Does the spec limit capability without need? | `reviews/potency/` |
-| UX | Is onboarding and everyday use low-effort for the owner? | `reviews/ux/` |
+| Security | Does the protection hold by mechanism against the threat model, without relying on owner attention? (SPEC §1 floor; OWN-7–12) | `reviews/security/` |
+| Potency | Does anything cap the consequence or breadth of verified outcomes without buying security? (§1 leverage; OWN-13–16) | `reviews/potency/` |
+| UX | Does it ask attention, time, decisions, memory, checking, or recovery that the system could carry? (§1 effort; OWN-1–6, OWN-17–18) | `reviews/ux/` |
 
-**Cadence:** weekly, Mondays after the lens loops (they run ~08:52 Eastern; this runs 10:41 Eastern). Each run reads what the lenses proposed or merged since the last arbitrated commit. It stays quiet when nothing conflicts.
+The lenses are the three terms of SPEC §1's objective: the most verified leverage per unit of owner effort, never below the structural security floor. Where no design dominates, §1's priority order applies (the floor, then verified correctness, then effort against leverage); a fork it does not settle goes to Mark (step 4).
+
+**When:** inside each batched lens screen, for the PRs in that bundle (docs/OPERATING.md §4, step 4). It stays quiet when nothing conflicts. Until 2026-10-07 it ran weekly after the lens loops; those runs are listed below.
 
 ## Method
 
-1. **Collect.** Every open lens proposal (PR or review file), plus merged spec changes since the last run.
+1. **Collect.** The lens verdicts the screen just wrote for the bundle, plus any open spec-wide lens proposal.
 2. **Cross-check.** Score each proposal on the other two lenses: improves, neutral, or costs. A proposal that is neutral or better on all three passes through untouched.
 3. **Redesign, don't split.** For each cost, look for a design that removes it rather than a midpoint. The usual levers:
    - move the check from the owner to the broker (a deterministic predicate over verified data costs the owner nothing; precedent: ADP-9 pre-allowances gave silence, safety and power at once);
@@ -23,18 +25,24 @@ Reconciles the three lens loops so their proposals compound instead of trading o
 
 ## Hard constraints (no trade may weaken)
 
+These are the core of SPEC §1's structural security floor.
+
 - **Credentials never reach the model** (Invariant C, CRED-1..7, ARC-1).
 - **Irreversible effects are always gated** (REV-2): by a code, a broker-checked pre-allowance (ADP-9), or STOP-able journaled intent; never by agent judgment.
 
 Everything else, including defaults, tiers, and timeouts, is tradable when the trade makes all three lenses better off.
 
-## Output per run
+## Output
 
-`YYYY-MM-DD-arbitration.md`: a cross-lens matrix, each conflict with its resolution and why it dominates, forks escalated, and steering notes for each lens. Spec changes go in an L1 spec-diff PR that Mark merges.
+Per PR with a conflict, `YYYY-MM-DD-pr<N>.md`: the conflict, its resolution and why it dominates, and any fork escalated. A spec-wide run writes `YYYY-MM-DD-arbitration.md`: a cross-lens matrix, each conflict with its resolution and why it dominates, forks escalated, and steering notes for each lens. Spec changes go in an L1 spec-diff PR that Mark merges.
 
-## Last arbitrated
+## Spec-wide runs
 
 | Run | main at | Inputs | Arbitration |
 |---|---|---|---|
 | 0 | e841b78 | loop set up | — |
 | 1 | e841b78 | PRs #8, #9, #11, #12 | [2026-10-04](2026-10-04-arbitration.md) |
+
+## Records
+
+Per-PR resolutions are the files `YYYY-MM-DD-pr<N>.md` in this directory, in filename order, with no run number. Each opens with a `Record:` line giving PR, package and head SHA; `tools/doclint.py` checks it on files dated 2026-10-09 or later. No resolution rows are appended to this README (DOC-4).

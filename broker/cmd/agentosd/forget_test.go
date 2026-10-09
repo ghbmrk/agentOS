@@ -26,13 +26,40 @@ import (
 type askRec struct {
 	got   []journal.Intent
 	state journal.State
+	// authorized is the IDs Authorize was called for, in order; st is
+	// what Get reports, by ID.
+	authorized []string
+	mu         sync.Mutex
+	st         map[string]journal.State
+}
+
+func (g *askRec) Get(id string) (journal.Status, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if s, ok := g.st[id]; ok {
+		return journal.Status{State: s}, nil
+	}
+	return journal.Status{}, errors.New("no such intent")
+}
+
+func (g *askRec) List() []journal.Status {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []journal.Status
+	for _, in := range g.got {
+		if s, ok := g.st[in.ID]; ok {
+			out = append(out, journal.Status{Intent: in, State: s})
+		}
+	}
+	return out
 }
 
 func (g *askRec) Submit(in journal.Intent) (journal.Status, error) {
 	g.got = append(g.got, in)
 	return journal.Status{Intent: in, State: journal.Pending}, nil
 }
-func (g *askRec) Authorize(context.Context, string) (journal.Status, error) {
+func (g *askRec) Authorize(_ context.Context, id string) (journal.Status, error) {
+	g.authorized = append(g.authorized, id)
 	return journal.Status{State: g.state}, nil
 }
 func (g *askRec) Dispatch(context.Context, string) (journal.Status, error) {
@@ -334,11 +361,16 @@ type forgetDaemon struct {
 	lp    *learning
 	d     *daemon.Daemon
 	ctx   context.Context
+	stop  context.CancelFunc
 	phone *modem.Line
 }
 
 func newForgetDaemon(t *testing.T) *forgetDaemon {
-	dir := t.TempDir()
+	return newForgetDaemonAt(t, t.TempDir())
+}
+
+// newForgetDaemonAt starts the daemon on dir's state, as a restart does.
+func newForgetDaemonAt(t *testing.T, dir string) *forgetDaemon {
 	carrier := modem.NewCarrier()
 	box, phone := carrier.Line("+15550000100"), carrier.Line(ownerNum)
 	cfg := &daemon.Config{
@@ -357,7 +389,7 @@ func newForgetDaemon(t *testing.T) *forgetDaemon {
 		t.Fatal(err)
 	}
 	attachForTest(t, lp, ctx, cancel, d)
-	return &forgetDaemon{t: t, dir: dir, cfg: cfg, lp: lp, d: d, ctx: ctx, phone: phone}
+	return &forgetDaemon{t: t, dir: dir, cfg: cfg, lp: lp, d: d, ctx: ctx, stop: cancel, phone: phone}
 }
 
 // text is the next text to the owner.

@@ -55,6 +55,12 @@ type Candidate struct {
 	// them in broker code; the builder never asserts them. Forgetting one
 	// undoes the adoption (ForgetGoal, C23).
 	Goals []string
+	// Finding is the finding this candidate is proposed to fix, set by
+	// Loop 2 in broker code, never by its fixer. It qualifies only if
+	// every security case linked to that finding passes on it; for those
+	// cases PS1's no-regression grading does not apply (P3-4b). It can
+	// only make qualification stricter.
+	Finding string
 }
 
 // Probe is what the evaluator sees of a case: its ID and input. The
@@ -252,6 +258,10 @@ type Score struct {
 	EndorsedPassed int `json:"endorsed_passed,omitempty"`
 	// Security fixtures on the baseline, so Recheck blames an adoption
 	// only for a fixture the state without it passes.
+	// Linked and LinkedPassed count the security cases linked to the
+	// candidate's finding, and those it passes; each must pass (P3-4b).
+	Linked                 int   `json:"linked,omitempty"`
+	LinkedPassed           int   `json:"linked_passed,omitempty"`
 	BaselineSecurityPassed int   `json:"baseline_security_passed"`
 	SecurityRegressions    int   `json:"security_regressions"`
 	example                *Case // first regressed case, for the owner's line
@@ -272,16 +282,28 @@ type Adoption struct {
 	// Staged marks an image change written to the inactive slot and not
 	// yet confirmed by the update code after boot (UPD-1).
 	Staged bool `json:"staged,omitempty"`
+	// Confirmed marks a staged image the update code confirmed booted;
+	// it stays set if the adoption is later undone (SR3-4).
+	Confirmed bool `json:"confirmed,omitempty"`
 	// Reverted names why the adoption was undone ("owner", "regression",
 	// "security", "fallback"), empty while it is active.
 	Reverted string `json:"reverted,omitempty"`
+	// WithdrawnFor names the revert that asked the update applier to
+	// withdraw this staged image, saved before the applier is asked. The
+	// applier's withdrawal is also a drop, so a revert cut short after it
+	// is settled by StageDropped; it is recorded with this why, never as
+	// a drop Loop 3 offers again (SR3-4f-2-r1).
+	WithdrawnFor string `json:"withdrawn_for,omitempty"`
 	// Concern is a regression Recheck found on a protected adoption, which
 	// the owner decides (arbitrator R2); ConcernScore its counts.
 	Concern      string `json:"concern,omitempty"`
 	ConcernScore Score  `json:"concern_score,omitempty"`
 	ConcernSeen  bool   `json:"concern_seen,omitempty"`
-	Listed       bool   `json:"listed,omitempty"`
-	RevertSeen   bool   `json:"revert_seen,omitempty"`
+	// ConcernStarts: a security Concern on an unprotected adoption whose
+	// image may start before it is undone (SR3-4f-3 B5).
+	ConcernStarts bool `json:"concern_starts,omitempty"`
+	Listed        bool `json:"listed,omitempty"`
+	RevertSeen    bool `json:"revert_seen,omitempty"`
 	// Goals are the candidate's Goals, IDs only (C23).
 	Goals []string `json:"goals,omitempty"`
 }
@@ -351,9 +373,13 @@ type Pipeline struct {
 	j   Journal
 	key []byte // split and probe key, fixed after New
 
-	mu     sync.Mutex
-	st     state
-	props  map[string]*proposal
+	mu    sync.Mutex
+	st    state
+	props map[string]*proposal
+	// lapsed holds release proposals dropped because the owner's request
+	// closed unanswered, until Loop 3 asks (Lapsed). Memory only, like
+	// props: a restart drops both, and Loop 3 re-asks after one anyway.
+	lapsed map[string]bool
 	broken error // set when state could neither be saved nor reloaded
 	// probes of running evaluations: use count and task intent.
 	probes    map[string]int
@@ -373,6 +399,12 @@ type Pipeline struct {
 	// from one and still in flight is never adopted (C23). In memory: a
 	// restarted Loop 1 builds nothing from a forgotten goal.
 	gone map[string]bool
+	// withdrawer is the update applier, set by the wiring (SetWithdrawer);
+	// withdrawn holds the staged adoptions it gave up, so their revert
+	// may run (SR3-4f-2a). In memory: after a restart the revert is asked
+	// again, and Withdraw answers the same.
+	withdrawer Withdrawer
+	withdrawn  map[string]bool
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -610,7 +642,7 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 		rep.State, rep.Reason = StateRejected, "learned from owner tasks, so it may change only skills, procedures and context"
 		return rep, nil
 	}
-	score, err := p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes))
+	score, err := p.evaluate(ctx, base, next, set, strictFor(c.Source, cl.classes), c.Finding)
 	if err != nil {
 		// Preempted: not a verdict. The ID is spent; the next proposal
 		// of the same candidate resumes from the kept pairs.
@@ -620,6 +652,12 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	images := cl.imagesOnly()
 	regressed := rep.Regressions > 0 || rep.Passed < rep.BaselinePassed
 	switch {
+	case c.Finding != "" && rep.Linked == 0:
+		rep.State, rep.Reason = StateRejected, ReasonUnlinked
+		return rep, nil
+	case rep.LinkedPassed < rep.Linked:
+		rep.State, rep.Reason = StateRejected, ReasonLinked
+		return rep, nil
 	case regressed && !(security && images):
 		rep.State, rep.Reason = StateRejected, "regresses on the held-out suite"
 		return rep, nil
@@ -696,14 +734,21 @@ func (p *Pipeline) Settle(ctx context.Context, id string) (Report, error) {
 }
 
 // Decided is the wiring's call once the owner's request for a change
-// intent closes (C7). declined is true only when the owner said NO; then
-// the adoption settles as Settle does, so a declined security release is
-// recorded. One still pending was never answered (the request expired,
-// was voided, or was dropped by a restart), and one denied for any other
-// reason (an approval gone stale before dispatch) is not the owner's no:
-// both drop the proposal and record nothing, so only the owner's NO reads
-// as a decline. Loop 1 proposes again.
-func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, declined bool) {
+// intent closes (C7). why is the request's denial cause: "owner" when the
+// owner said NO, "not chosen" when it was left out of a partial YES, and
+// anything else ("expired", "void", "restart", or "") when it closed
+// without an answer or was approved.
+// On the owner's NO the adoption settles as Settle does, so a declined
+// security release is recorded. One still pending was never answered (the
+// request expired, was voided, or was dropped by a restart), and one denied
+// for any other reason (an approval gone stale before dispatch) is not the
+// owner's no: both drop the proposal and record nothing, so only the
+// owner's NO reads as a decline. A release dropped this way is reported
+// once by Lapsed, so the next update check (UPD-5, maintain Loop 3) offers
+// it again (C25); one left out of a partial YES is dropped without a
+// decline and is not reported, so it is not re-asked. A local change is
+// proposed again only if Loop 1 produces it again.
+func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, why string) {
 	parts := parseID(in.ID)
 	if in.Action != ActionAdopt || parts == nil || in.ID != adoptID(parts[1]) || p.prop(parts[1]) == nil {
 		return
@@ -711,8 +756,10 @@ func (p *Pipeline) Decided(ctx context.Context, in journal.Intent, declined bool
 	st, err := p.j.Get(in.ID)
 	switch {
 	case err != nil:
-	case st.State == journal.Pending, st.State == journal.Denied && !declined:
+	case why == "not chosen" && (st.State == journal.Pending || st.State == journal.Denied):
 		p.drop(parts[1])
+	case st.State == journal.Pending, st.State == journal.Denied && why != "owner":
+		p.lapse(parts[1])
 	case st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied:
 		_, _ = p.Settle(ctx, parts[1])
 	}
@@ -801,6 +848,32 @@ func (p *Pipeline) prop(id string) *proposal {
 // dropped once adopted, declined, refused or lapsed.
 func (p *Pipeline) Waiting(id string) bool { return p.prop(id) != nil }
 
+// Lapsed reports, once, whether release proposal id was dropped because
+// the owner's request closed without the owner's answer (Decided), so Loop
+// 3 offers the release again. It is false for one still waiting, adopted,
+// declined or refused, and after it has been reported.
+func (p *Pipeline) Lapsed(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ok := p.lapsed[id]
+	delete(p.lapsed, id)
+	return ok
+}
+
+// lapse drops proposal id unanswered and, for a release, keeps that for
+// Lapsed.
+func (p *Pipeline) lapse(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if pr := p.props[id]; pr != nil && pr.cand.Source == Upstream {
+		if p.lapsed == nil {
+			p.lapsed = map[string]bool{}
+		}
+		p.lapsed[id] = true
+	}
+	delete(p.props, id)
+}
+
 func (p *Pipeline) drop(id string) {
 	p.mu.Lock()
 	delete(p.props, id)
@@ -819,7 +892,10 @@ func (p *Pipeline) drop(id string) {
 // trees runs only the rest (PE1). A candidate side cut short
 // MaxInterruptions times fails. A finished evaluation uses up what was
 // kept.
-func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st strictness) (Score, error) {
+//
+// finding is the finding the candidate fixes, if any: every security case
+// linked to it must pass on next, evaluated or not (P3-4b).
+func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st strictness, finding string) (Score, error) {
 	type run struct {
 		c     Case
 		cand  bool
@@ -1011,10 +1087,15 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 		delete(p.kept, k)    // kept sides are used up
 		delete(p.st.Cuts, k) // and so are the cut counts; saved with the verdict
 	}
-	// Loop 2 fixtures the active tree has never passed (PS1).
-	open := map[string]bool{}
+	// Loop 2 fixtures, and cases linked to a finding, the active tree
+	// has never passed (PS1); a case linked to the candidate's own
+	// finding is never open: it must pass (P3-4b).
+	open, must := map[string]bool{}, map[string]bool{}
 	for _, c := range set.security {
-		if strings.HasPrefix(c.ID, Loop2Fixture) && !p.st.Loop2Passed[loop2Key(c)] {
+		switch {
+		case finding != "" && c.Finding == finding:
+			must[c.ID] = true
+		case (strings.HasPrefix(c.ID, Loop2Fixture) || c.Finding != "") && !p.st.Loop2Passed[loop2Key(c)]:
 			open[c.ID] = true
 		}
 	}
@@ -1053,6 +1134,17 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	var s Score
 	for _, id := range order {
 		c, pr := cases[id], res[id]
+		if must[id] && !pr.NextEv {
+			// Untestable on the fix is a fail: a fix cannot qualify by
+			// making its finding's cases unevaluable (6(f)).
+			pr.NextEv, pr.NextOK = true, false
+		}
+		if must[id] {
+			s.Linked++
+			if pr.NextOK {
+				s.LinkedPassed++
+			}
+		}
 		if !pr.BaseEv {
 			s.NotEvaluated++
 			continue
@@ -1120,6 +1212,14 @@ func (p *Pipeline) evaluate(ctx context.Context, base, next Tree, set frozen, st
 	return s, nil
 }
 
+// ReasonLinked rejects a fix that fails a case linked to its finding: the
+// visible regression or a held-back one (P3-4b, LOOP-10 6(g)).
+const ReasonLinked = "fails a security case linked to the finding it fixes"
+
+// ReasonUnlinked rejects a fix for a finding no security case is linked
+// to: with nothing to grade it, it fails closed (P3-4b, LOOP-10).
+const ReasonUnlinked = "names a finding no security case is linked to"
+
 // OutageAlert is how many failed Recheck passes in a row the digest
 // reports.
 const OutageAlert = 3
@@ -1174,7 +1274,7 @@ func (s Score) outage() bool {
 // cannot exercise a tree on this box, for example a changed image or
 // config that replay does not boot. Such a case is neither a pass nor a
 // fail: it is counted as not evaluated.
-var ErrNotEvaluated = errors.New("change: not evaluated on this box")
+var ErrNotEvaluated = errors.New("change: not evaluated here")
 
 // pass reports whether the case passed on t, and whether it was evaluated
 // at all. Any other evaluator error is a fail.

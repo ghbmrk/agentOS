@@ -21,6 +21,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/cgroup"
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -31,7 +32,7 @@ import (
 // review aid: the guest launcher is not a back door to other programs).
 func TestOnlyRunscIsExecuted(t *testing.T) {
 	launchers := map[string]bool{
-		"exec.Command": true, "exec.CommandContext": true, "os.StartProcess": true,
+		"childproc.Command": true, "exec.Command": true, "exec.CommandContext": true, "os.StartProcess": true,
 		"syscall.ForkExec": true, "syscall.Exec": true, "syscall.StartProcess": true,
 	}
 	files, _ := filepath.Glob("../*.go")
@@ -61,11 +62,11 @@ func TestOnlyRunscIsExecuted(t *testing.T) {
 				return true
 			}
 			n++
-			if filepath.Base(path) != "gvisor.go" || sel.Sel.Name != "CommandContext" || len(call.Args) < 2 {
+			if filepath.Base(path) != "gvisor.go" || id.Name+"."+sel.Sel.Name != "childproc.Command" || len(call.Args) < 4 {
 				t.Errorf("%s: %s.%s", fs.Position(call.Pos()), id.Name, sel.Sel.Name)
 				return true
 			}
-			if s, ok := call.Args[1].(*ast.SelectorExpr); !ok || s.Sel.Name != "Bin" {
+			if s, ok := call.Args[3].(*ast.SelectorExpr); !ok || s.Sel.Name != "Bin" {
 				t.Errorf("%s: executes something other than r.Bin", fs.Position(call.Pos()))
 			}
 			return true
@@ -174,7 +175,7 @@ func (r *rig) ask(id string, args ...string) string {
 	r.t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for {
-		c := r.rt.cmd(context.Background(), append([]string{"exec", cid(id), "/guest"}, args...)...)
+		c := r.rt.cmd(context.Background(), childproc.Options{}, append([]string{"exec", cid(id), "/guest"}, args...)...)
 		out, err := c.Output()
 		s := strings.TrimSpace(string(out))
 		if err == nil && !strings.HasPrefix(s, "ERR dial") {
@@ -288,7 +289,7 @@ func TestIntegrationLifecycleUnderGVisor(t *testing.T) {
 	timed(t, "destroy x3", func() error {
 		return errors.Join(r.m.Destroy(ctx, "f1"), r.m.Destroy(ctx, "f2"), r.m.Destroy(ctx, "m1"))
 	})
-	out, _ := r.rt.cmd(ctx, "list").Output()
+	out, _ := r.rt.cmd(ctx, childproc.Options{}, "list").Output()
 	if strings.Contains(string(out), "_") {
 		t.Fatalf("runsc still lists sandboxes:\n%s", out)
 	}
@@ -470,7 +471,7 @@ func TestIntegrationHostSocketInImageIsUnreachable(t *testing.T) {
 	if got := r.ask("m1", "stat", "/planted.sock"); got == "absent" {
 		t.Fatal("the planted socket is not in the guest's root: the test proves nothing")
 	}
-	out, _ := r.rt.cmd(context.Background(), "exec", cid("m1"), "/guest", "svc", "/planted.sock", "/").Output()
+	out, _ := r.rt.cmd(context.Background(), childproc.Options{}, "exec", cid("m1"), "/guest", "svc", "/planted.sock", "/").Output()
 	if got := strings.TrimSpace(string(out)); !strings.HasPrefix(got, "ERR") {
 		t.Fatalf("guest reached a host socket in its image: %q", got)
 	}
@@ -478,7 +479,8 @@ func TestIntegrationHostSocketInImageIsUnreachable(t *testing.T) {
 
 // TestIntegrationWorkerExec: a worker runs a command under runsc exec with
 // stdin, its exit code comes back as a result, and output is capped
-// (CAP-8).
+// (CAP-8). The guest's stderr arrives through Exec's own pipe, which real
+// runsc maps to the guest's fd 2 by --pass-fd 3:2 (SR2-3n, V32).
 func TestIntegrationWorkerExec(t *testing.T) {
 	r := newRig(t, 4096)
 	ctx := context.Background()
@@ -496,6 +498,18 @@ func TestIntegrationWorkerExec(t *testing.T) {
 	}
 	if res.ExitCode != 3 || string(res.Stdout) != "hello" || !res.Truncated {
 		t.Fatalf("exec = code %d, stdout %q, truncated %v; want 3, %q, true", res.ExitCode, res.Stdout, res.Truncated, "hello")
+	}
+	if string(res.Stderr) != "oops\n" {
+		t.Fatalf("exec stderr = %q; want the guest's %q and nothing else", res.Stderr, "oops\n")
+	}
+	// A command that cannot start is runsc's own failure: an error and no
+	// output, runsc's text only in the broker's exec log (SR2-3h).
+	res, err = r.m.Exec(ctx, "wk-1", vm.Command{Argv: []string{"/no-such-program"}}, 20*time.Second)
+	if err == nil || len(res.Stdout)+len(res.Stderr) > 0 {
+		t.Fatalf("exec of a missing program = %+v, %v; want an error and no output", res, err)
+	}
+	if b, err := os.ReadFile(r.rt.execLog()); err != nil || !strings.Contains(string(b), "no-such-program") {
+		t.Fatalf("exec log lacks runsc's message: %v\n%s", err, b)
 	}
 }
 
