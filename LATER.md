@@ -317,6 +317,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P1-4-flake l2 | L3 2 on #547: the fuzz deadline race is not specific to Go 1.26 (`stop` against `fuzzCtx.Err()` is long-standing); reword "Go 1.26's coordinator" in ci.yml and the brief. The "toolchain with the coordinator fixed" condition stays right |
 | P1-4-flake l3 | L3 3 on #547: a count-bound fuzz run is capped only by `go test`'s default 10 m `-timeout`; an explicit per-step `-timeout` is the fix, and P1-4-flake-counts covers it, so this line closes with that row |
 | P1-4-flake l4 | L3 4 and Security 4a 3 on #547 (pre-existing, since #391): a runsc crash at the deadline reaches callers as `TimedOut` with no output, not `ErrExecFailed`; the failure is visible only in `exec.log` |
+| W3-forget-b2c-f3 l1 | L3 point 3 on #553: with f3's early append the owed entry still has `Logged` false, so a crash during `retry` makes `finishOwed` append the same goal again at restart; the replay is idempotent (`forgotten.has`), the cost is a duplicate log entry; the f3 builder records it in ASSUMPTIONS.md |
 
 ## Reuse candidates
 | ID | Component | Why |
