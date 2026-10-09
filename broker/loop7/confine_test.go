@@ -598,3 +598,16 @@ func TestAJailedFuzzStepUsesItsCacheOnFirstBoot(t *testing.T) {
 		t.Fatalf("the step wrote no cache: %v", err)
 	}
 }
+
+// LOOP-7 (L3 delta on #588): a fuzz step that did not run says why. A
+// failing Go test binary ends its output with a bare FAIL line, so the
+// runner's error carries the reason above it, not that trailer.
+func TestAFuzzStepThatDidNotRunSaysWhy(t *testing.T) {
+	release := t.TempDir()
+	tg := fakeTarget(t, release, stepBin(`printf -- '--- FAIL: FuzzFake\n    engine refused the cache directory\nFAIL\n'; exit 1`, "1"))
+	s := newSource(t, newFake(), Config{Targets: []Target{tg}})
+	_, err := s.Fuzz(context.Background(), tg)
+	if err == nil || !strings.Contains(err.Error(), "engine refused the cache directory") {
+		t.Fatalf("error %v, want the engine's reason", err)
+	}
+}

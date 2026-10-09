@@ -511,7 +511,7 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 		}
 		return 0, nil
 	case !bytes.Contains(out, []byte("Failing input written to")):
-		return 0, fmt.Errorf("loop7: fuzzing %s did not run: %v: %q", t.subject(), err, lastLine(out))
+		return 0, fmt.Errorf("loop7: fuzzing %s did not run: %v: %q", t.subject(), err, tail(out))
 	}
 	return s.replay(ctx, t)
 }
@@ -949,15 +949,23 @@ func (j *Jail) ownPath(r *os.Root, rel string) error {
 	return nil
 }
 
-// lastLine is the last non-empty line of a child's output, at most 200
-// bytes, so a runner error says why the engine stopped.
-func lastLine(out []byte) string {
+// trailer is a line a Go test binary prints after its reason: the bare
+// FAIL or PASS, or "exit status N".
+var trailer = regexp.MustCompile(`^(FAIL|PASS|exit status \d+)$`)
+
+// tail is the end of a child's output, without its trailing trailer
+// lines, at most 200 bytes, so a runner error says why the engine stopped
+// (L3 delta on #588: the bare FAIL alone says nothing).
+func tail(out []byte) string {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	l := strings.TrimSpace(lines[len(lines)-1])
-	if len(l) > 200 {
-		l = l[:200]
+	for len(lines) > 0 && trailer.MatchString(strings.TrimSpace(lines[len(lines)-1])) {
+		lines = lines[:len(lines)-1]
 	}
-	return l
+	t := strings.TrimSpace(strings.Join(lines, "\n"))
+	if len(t) > 200 {
+		t = t[len(t)-200:]
+	}
+	return t
 }
 
 // runName is a fresh scratch directory's name.
