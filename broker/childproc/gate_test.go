@@ -81,9 +81,9 @@ func gate(t *testing.T, dir, mod string, exempt map[string]string) []string {
 	list := func(extra bool, pkgs ...string) {
 		for _, cgo := range []string{"0", "1"} {
 			args := []string{"list", "-deps", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{.Standard}}\t{{join .Imports \" \"}}\t{{join .GoFiles \" \"}} {{join .CgoFiles \" \"}}\t{{join .IgnoredGoFiles \" \"}}"}
-			if extra {
-				// A package only another GOOS builds lists with an
-				// error; what it imports there is not followed.
+			if pkgs[0] != "./..." {
+				// A package no linux/amd64 build includes lists with
+				// an error; what it imports there is not followed.
 				args = append(args, "-e")
 			}
 			cmd := exec.Command("go", append(args, pkgs...)...)
@@ -123,18 +123,28 @@ func gate(t *testing.T, dir, mod string, exempt map[string]string) []string {
 		}
 	}
 	list(false, "./...")
-	// Ignored files' imports, by file; what they import that the graph
-	// lacks is listed too, so a route through it is seen.
-	ignoredImports := map[string][]string{}
-	var missing []string
-	for _, p := range order {
-		n := byPath[p]
+	// go list ./... omits a package whose every non-test file a tag or
+	// another GOARCH excludes, so the module's directories that hold a
+	// non-test .go file and are not in the graph are listed by path
+	// (#659 L3 1, Security 4a 1).
+	if dirs := unlisted(t, dir, byPath); len(dirs) > 0 {
+		list(false, dirs...)
+	}
+	prune := func(n *node) {
 		n.ignored = slices.DeleteFunc(n.ignored, func(f string) bool {
 			return strings.HasSuffix(f, "_test.go") || slices.Contains(n.files, f)
 		})
 		if n.std {
 			n.ignored = nil
 		}
+	}
+	// Ignored files' imports, by file; what they import that the graph
+	// lacks is listed too, so a route through it is seen.
+	ignoredImports := map[string][]string{}
+	var missing []string
+	for _, p := range order {
+		n := byPath[p]
+		prune(n)
 		for _, f := range n.ignored {
 			path := filepath.Join(n.dir, f)
 			ims := fileImports(t, path)
@@ -148,6 +158,11 @@ func gate(t *testing.T, dir, mod string, exempt map[string]string) []string {
 	}
 	if len(missing) > 0 {
 		list(true, missing...)
+	}
+	for _, p := range order {
+		if n := byPath[p]; n.extra {
+			prune(n)
+		}
 	}
 	var nodes []node
 	for _, p := range order {
@@ -190,18 +205,25 @@ func gate(t *testing.T, dir, mod string, exempt map[string]string) []string {
 	var bad []string
 	used := map[string]bool{}
 	for _, n := range nodes {
-		if n.std || n.extra || n.path == mod+"/childproc" {
+		if n.std || n.path == mod+"/childproc" {
 			continue
 		}
 		var found []string
-		if r := visit(n.path); r != nil && !cut(n.path) {
-			found = append(found, n.path+": reaches os/exec ("+strings.Join(r, " -> ")+")")
-		} else if cut(n.path) {
+		// An extra package's route to os/exec is reported at the
+		// ignored file that imports it; its own files are held to the
+		// source rule below (#659 Security 4a 1).
+		switch {
+		case n.extra:
+		case cut(n.path):
 			// An exempt package is cut from others' paths, not its own.
 			for _, im := range n.imports {
 				if r := visit(im); r != nil || im == "os/exec" {
 					used[key(n.path)] = true
 				}
+			}
+		default:
+			if r := visit(n.path); r != nil {
+				found = append(found, n.path+": reaches os/exec ("+strings.Join(r, " -> ")+")")
 			}
 		}
 		for _, f := range n.files {
@@ -234,6 +256,55 @@ func gate(t *testing.T, dir, mod string, exempt map[string]string) []string {
 	}
 	sort.Strings(bad)
 	return bad
+}
+
+// unlisted returns, as ./-relative patterns, the directories of the module
+// rooted at dir that hold a non-test .go file and that no node in byPath
+// has. It skips what go list ./... skips: testdata, vendor, names starting
+// with . or _, and nested modules.
+func unlisted(t *testing.T, dir string, byPath map[string]*node) []string {
+	t.Helper()
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, n := range byPath {
+		listed[n.dir] = true
+	}
+	var out []string
+	err = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if p != root {
+				if name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+					return filepath.SkipDir
+				}
+				if _, err := os.Stat(filepath.Join(p, "go.mod")); err == nil {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		name, pd := d.Name(), filepath.Dir(p)
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || listed[pd] {
+			return nil
+		}
+		rel, err := filepath.Rel(root, pd)
+		if err != nil {
+			return err
+		}
+		listed[pd] = true
+		out = append(out, "./"+filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // fileImports are the import paths of the file at path.
@@ -295,7 +366,9 @@ func launcherUse(t *testing.T, path, name string) []string {
 func fixture(t *testing.T, files map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
-	files["go.mod"] = "module example.com/m\n\ngo 1.25\n"
+	if files["go.mod"] == "" {
+		files["go.mod"] = "module example.com/m\n\ngo 1.25\n"
+	}
 	for name, src := range files {
 		p := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -351,6 +424,17 @@ func TestGateCatchesAChildStartedOutsideChildproc(t *testing.T) {
 		"tag/v.go":       "//go:build sometag\n\npackage tag\nimport \"example.com/m/a\"\nvar _ = a.New\n",
 		"cgofile/c.go":   "package cgofile\n",
 		"cgofile/d.go":   "package cgofile\n\n// int f(void) { return 0; }\nimport \"C\"\nimport \"os\"\nvar start = os.StartProcess\n",
+		// A package whose every non-test file a tag or another GOARCH
+		// excludes is missing from go list ./... (#659 L3 1, Security 4a
+		// 1); a nested module's directory is not the gate's.
+		"alltag/x.go":       "//go:build sometag\n\npackage alltag\nimport \"os/exec\"\nfunc X() { exec.Command(\"env\").Run() }\n",
+		"allarm/y_arm64.go": "package allarm\nimport \"syscall\"\nfunc Y() { syscall.Exec(\"/x\", nil, []string{}) }\n",
+		// A package listed only because an ignored file imports it is
+		// held to the source rule too (#659 Security 4a 1).
+		"go.mod":     "module example.com/m\n\ngo 1.25\n\nrequire example.com/dep v0.0.0\n\nreplace example.com/dep => ./dep\n",
+		"dep/go.mod": "module example.com/dep\n\ngo 1.25\n",
+		"dep/x/x.go": "package x\nimport \"os\"\nvar Start = os.StartProcess\n",
+		"tag/w.go":   "//go:build sometag\n\npackage tag\nimport _ \"example.com/dep/x\"\n",
 		// Exempt and still needed: passes.
 		"old/o.go":  "package old\nimport \"os/exec\"\nfunc O() { exec.Command(\"x\").Run() }\n",
 		"user/u.go": "package user\nimport \"example.com/m/old\"\nfunc U() { old.O() }\n",
@@ -374,6 +458,9 @@ func TestGateCatchesAChildStartedOutsideChildproc(t *testing.T) {
 		"example.com/m/tag/u.go (not built):5: names syscall.Exec",
 		"example.com/m/tag/v.go (not built): imports example.com/m/a, which reaches os/exec",
 		"example.com/m/cgofile/d.go:6: names os.StartProcess",
+		"example.com/m/alltag/x.go (not built): imports os/exec",
+		"example.com/m/allarm/y_arm64.go (not built):3: names syscall.Exec",
+		"example.com/dep/x/x.go:3: names os.StartProcess",
 	}
 	for _, w := range want {
 		if !slices.ContainsFunc(got, func(g string) bool { return strings.HasPrefix(g, w) }) {
