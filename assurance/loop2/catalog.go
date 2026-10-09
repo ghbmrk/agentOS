@@ -303,6 +303,9 @@ func (c *catalog) validate(s *seed) []string {
 		if !h.Holds(tr.fixed) {
 			no("held-back variant %s fails on the reference fix", name)
 		}
+		for _, f := range fieldless(test, h) {
+			no("held/%s.json: clause %s has no field the visible test lacks", name, f)
+		}
 		gamedCaught = gamedCaught || !h.Holds(gt)
 	}
 	if gerr != nil {
