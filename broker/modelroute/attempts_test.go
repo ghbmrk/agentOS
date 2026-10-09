@@ -101,3 +101,73 @@ func TestSR3_7f1cTrailerCarriesFailedAttempts(t *testing.T) {
 		})
 	}
 }
+
+// TestSR3_7f1cValidTrailer: a usage trailer that cannot describe a real
+// call is refused, and the call charged as unanswered: an unserved call
+// with no failed attempt, more attempts than allowed, a "none" trailer
+// that also claims attempts, a status outside HTTP's, or a count out of
+// range.
+func TestSR3_7f1cValidTrailer(t *testing.T) {
+	failed := []meter.Attempt{{Provider: "anthropic", Status: 504, Full: true}}
+	for _, c := range []struct {
+		name string
+		u    Usage
+		want bool
+	}{
+		{"served", Usage{Provider: "openai", Input: 5, Output: 2, Reported: true, Complete: true}, true},
+		{"served after a failover", Usage{Provider: "openai", Input: 5, Failed: failed}, true},
+		{"unserved after a failover", Usage{Failed: failed, Unserved: true}, true},
+		{"none", Usage{None: true}, true},
+		{"unserved, no attempt", Usage{Unserved: true}, false},
+		{"none and unserved", Usage{None: true, Unserved: true}, false},
+		{"none with an attempt", Usage{None: true, Failed: failed}, false},
+		{"more attempts than allowed", Usage{Failed: append(failed, failed...), Unserved: true}, false},
+		{"status 99", Usage{Failed: []meter.Attempt{{Status: 99}}, Unserved: true}, false},
+		{"status 600", Usage{Failed: []meter.Attempt{{Status: 600}}, Unserved: true}, false},
+		{"status 100", Usage{Failed: []meter.Attempt{{Status: 100}}, Unserved: true}, true},
+		{"status 599", Usage{Failed: []meter.Attempt{{Status: 599}}, Unserved: true}, true},
+		{"negative count", Usage{Input: -1}, false},
+		{"negative attempt count", Usage{Failed: []meter.Attempt{{Status: 504, Output: -1}}, Unserved: true}, false},
+		{"count past 1e12", Usage{Output: 1e12 + 1}, false},
+	} {
+		if got := c.u.valid(0); got != c.want {
+			t.Errorf("%s: valid %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestSR3_7f1cTrailerFallbackFailsClosed: the full charge is for a
+// trailer the vault process announced and that never arrived. A body
+// closed unread is charged as unanswered: its full reservation. A reply
+// with no trailer announced (the vault process's own denial) is left the
+// meter's own count.
+func TestSR3_7f1cTrailerFallbackFailsClosed(t *testing.T) {
+	in := meter.Tokens(int64(len(attemptsBody)))
+	t.Run("announced, closed unread", func(t *testing.T) {
+		// The meter's writer drains a body the guest hung up on, so the
+		// reverse proxy reads to the end; Close is the path for any other
+		// reader that stops early, pinned here on the metered context.
+		m := attemptsMeter(t, 1<<30)
+		m.Wrap("m1", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s := &scrubTrailers{ReadCloser: io.NopCloser(strings.NewReader("{}")), resp: &http.Response{Trailer: http.Header{}},
+				ctx: r.Context(), announced: true}
+			s.Close()
+		})).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(attemptsBody)))
+		if u := m.Usage("m1"); u.Tokens != attemptWorst {
+			t.Errorf("charged %d tokens, want the full reservation %d", u.Tokens, attemptWorst)
+		}
+	})
+	t.Run("not announced", func(t *testing.T) {
+		fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(403)
+			io.WriteString(w, `{"error":{"message":"denied"}}`)
+		}}
+		fwd := Forward(Config{Socket: serveUnix(t, fe), Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+		m := attemptsMeter(t, 1<<30)
+		m.Wrap("m1", fwd("m1")).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(attemptsBody)))
+		if u := m.Usage("m1"); u.Tokens != in || u.Calls != 1 {
+			t.Errorf("charged %d tokens and %d calls, want the meter's own %d and 1", u.Tokens, u.Calls, in)
+		}
+	})
+}

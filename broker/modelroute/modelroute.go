@@ -334,7 +334,7 @@ func unanswered(ctx context.Context, allowed int) {
 // valid refuses negative or absurd counts, which the meter would otherwise
 // charge, and more failed attempts than the call was allowed.
 func (u Usage) valid(allowed int) bool {
-	if len(u.Failed) > allowed+1 || (u.None && (u.Unserved || len(u.Failed) > 0)) {
+	if len(u.Failed) > allowed+1 || (u.None && (u.Unserved || len(u.Failed) > 0)) || (u.Unserved && len(u.Failed) == 0) {
 		return false
 	}
 	counts := []int64{u.Input, u.Output, u.CacheRead, u.CacheWrite, u.OutputChars}

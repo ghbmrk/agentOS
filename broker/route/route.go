@@ -369,8 +369,9 @@ type attemptKey struct{}
 // attempt after the first on ctx whether the call may spend one more
 // (SR3-7-f1b): f holds the worst charge of another attempt or refuses. On
 // a refusal the router stops failing over and answers with the last
-// provider status. Without f the router fails over unbounded; every
-// metered path installs one (Routed, agentos-egress).
+// provider status. Without f the router fails closed: it sends no
+// attempt past the first; every metered path installs one (Routed,
+// agentos-egress).
 func WithAttempt(ctx context.Context, f func() bool) context.Context {
 	return context.WithValue(ctx, attemptKey{}, f)
 }
@@ -575,7 +576,7 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 		if len(failed) > 0 {
 			// Bound before spending (SR3-7-f1b): another attempt is sent
 			// only if the call can be charged for it.
-			if f, ok := req.Context().Value(attemptKey{}).(func() bool); ok && !f() {
+			if f, ok := req.Context().Value(attemptKey{}).(func() bool); !ok || !f() {
 				bounded = true
 				break
 			}

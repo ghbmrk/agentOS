@@ -228,7 +228,7 @@ func (r *rig) do(t *testing.T, machine, body string) *httptest.ResponseRecorder 
 	req.Header.Set("Authorization", "Bearer placeholder-guest-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	r.router.Handler(machine).ServeHTTP(w, req)
+	r.router.Handler(machine).ServeHTTP(w, anyAttempt(req))
 	return w
 }
 
@@ -632,7 +632,7 @@ func (r *rig) doPath(t *testing.T, machine, path, body string) *httptest.Respons
 	t.Helper()
 	req := httptest.NewRequest("POST", path, strings.NewReader(body))
 	w := httptest.NewRecorder()
-	r.router.Handler(machine).ServeHTTP(w, req)
+	r.router.Handler(machine).ServeHTTP(w, anyAttempt(req))
 	return w
 }
 
@@ -897,7 +897,7 @@ func TestUsageReachesTheCallersContext(t *testing.T) {
 	r := newRig(t, rigOpts{rule: Rule{"default": {{Provider: "openai", Model: "gpt-fixture"}}}})
 	r.up.set(hostOpenAI, serveFixture(200, "text/event-stream", fixture(t, "openai_stream.sse")))
 	var got []string
-	ctx := WithUsage(context.Background(), func(provider string, u Usage) { got = append(got, fmt.Sprint(provider, u)) })
+	ctx := WithUsage(anyAttempt(httptest.NewRequest("GET", "/", nil)).Context(), func(provider string, u Usage) { got = append(got, fmt.Sprint(provider, u)) })
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
 	w := httptest.NewRecorder()
 	r.router.Handler("m1").ServeHTTP(w, req)
