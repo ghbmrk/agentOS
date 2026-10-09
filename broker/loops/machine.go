@@ -349,14 +349,18 @@ type MachineBudget struct {
 	DiskBytes   int64
 }
 
-// PressRise is the least a round's memory and disk counters must rise
-// for its guest to have pressed: a stated fraction of what the fixed
-// script presses (S35), so that the sandbox's own work, or a press that
-// exits at once, does not pass.
-type PressRise struct {
+// PressScript is what the fixed press script holds in a machine: its
+// memory and disk pressure (machprobe.Options MemMB and DiskMB, in
+// bytes). A round's memory and disk counters must rise by half of it for
+// its guest to have pressed (S35).
+type PressScript struct {
 	MemoryBytes int64
 	DiskBytes   int64
 }
+
+// cpuFloor is the least CPU time a round's minimum may ask for: over twice
+// what four `runsc exec` presses that exit at once used on CI (0.44 s; S35).
+const cpuFloor = time.Second
 
 // ExhaustProbe has a fresh machine's guest press CPU, memory, disk and
 // processes inside its machine's cgroup for Hold. Meanwhile it times the
@@ -371,7 +375,7 @@ type ExhaustProbe struct {
 	// can starve the broker.
 	BrokerWeight int
 	Budget       MachineBudget
-	Rise         PressRise
+	Script       PressScript
 	// Machine starts a fresh machine, idle; Press has its guest start
 	// pressing kinds and returns while it presses.
 	Machine func(ctx context.Context) (PressedMachine, error)
@@ -389,14 +393,15 @@ func (p *ExhaustProbe) Every() time.Duration { return p.Interval }
 // High "above budget" finding on the resource; a slow answer or
 // preemption a High "slow" one. A failed machine, press, ping or
 // preemption, a machine the last round used, or a counter that did not
-// rise by its minimum over the hold (the guest did not press: Rise for
-// memory and disk, half of Hold in CPU time) fails the run, which then
+// rise by its minimum over the hold (the guest did not press: half of
+// Script for memory and disk, half of Hold on every CPU the machine may
+// run on in CPU time, at least cpuFloor) fails the run, which then
 // closes nothing; a machine is preempted either way.
 func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 	b := p.Budget
 	if p.Machine == nil || p.Press == nil || p.Ping == nil || p.Preempt == nil || p.Hold <= 0 || p.ResponseTarget <= 0 || p.PreemptTarget <= 0 || p.BrokerWeight <= 0 ||
 		b.MemoryBytes <= 0 || b.Pids <= 0 || b.DiskBytes <= 0 ||
-		p.Rise.MemoryBytes <= 0 || p.Rise.MemoryBytes > b.MemoryBytes || p.Rise.DiskBytes <= 0 || p.Rise.DiskBytes > b.DiskBytes {
+		p.Script.MemoryBytes <= 1 || p.Script.MemoryBytes > b.MemoryBytes || p.Script.DiskBytes <= 1 || p.Script.DiskBytes > b.DiskBytes {
 		return ProbeResult{}, errors.New("exhaustion probe: not configured")
 	}
 	m, err := p.Machine(ctx)
@@ -413,7 +418,17 @@ func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 	if fresh != nil {
 		return ProbeResult{}, fmt.Errorf("exhaustion probe: %w", fresh)
 	}
-	before, rerr := p.usage(m)
+	// The machine's CPU count sets the CPU minimum; unreadable, the round
+	// cannot show the guest pressed, as with an unreadable counter.
+	cpus, rerr := cpusEffective(m.Cgroup)
+	cpuRise := p.Hold * time.Duration(cpus) / 2
+	if rerr == nil && cpuRise < cpuFloor {
+		return ProbeResult{}, fmt.Errorf("exhaustion probe: a %v hold on %d CPUs asks under %v of CPU time", p.Hold, cpus, cpuFloor)
+	}
+	var before map[string]int64
+	if rerr == nil {
+		before, rerr = p.usage(m)
+	}
 	if err := p.Press(ctx, m.ID, pressureKinds); err != nil {
 		return ProbeResult{}, fmt.Errorf("exhaustion probe: press: %w", err)
 	}
@@ -424,7 +439,7 @@ func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 	if rerr == nil {
 		var after map[string]int64
 		if after, rerr = p.usage(m); rerr == nil {
-			least := map[string]int64{"cpu": p.Hold.Microseconds() / 2, "memory": p.Rise.MemoryBytes, "disk": p.Rise.DiskBytes}
+			least := map[string]int64{"cpu": cpuRise.Microseconds(), "memory": p.Script.MemoryBytes / 2, "disk": p.Script.DiskBytes / 2}
 			for _, k := range pressureKinds {
 				if want, ok := least[k]; ok && after[k]-before[k] < want {
 					rerr = errors.Join(rerr, fmt.Errorf("%s rose %d, under %d", k, after[k]-before[k], want))
@@ -454,6 +469,44 @@ func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 	}
 	res.Checked = append(append(res.Checked, pressureKinds...), "response", "preemption")
 	return res, nil
+}
+
+// cpusEffective counts the CPUs a machine's cgroup may run on, read
+// broker-side from cpuset.cpus.effective: the group's own, or, where it
+// does not enable cpuset, its nearest ancestor's within the cgroup tree.
+// None found is an error.
+func cpusEffective(dir string) (int, error) {
+	if dir == "" {
+		return 0, errors.New("no cgroup")
+	}
+	for d := dir; ; d = filepath.Dir(d) {
+		b, err := os.ReadFile(filepath.Join(d, "cpuset.cpus.effective"))
+		if err == nil {
+			return cpuCount(strings.TrimSpace(string(b)))
+		}
+		parent := filepath.Dir(d)
+		if _, err := os.Stat(filepath.Join(parent, "cgroup.controllers")); parent == d || err != nil {
+			return 0, errors.New("no cpuset.cpus.effective")
+		}
+	}
+}
+
+// cpuCount counts a cpuset list such as "0-3,6".
+func cpuCount(list string) (int, error) {
+	n := 0
+	for part := range strings.SplitSeq(list, ",") {
+		lo, hi, ranged := strings.Cut(part, "-")
+		a, err := strconv.Atoi(lo)
+		b := a
+		if err == nil && ranged {
+			b, err = strconv.Atoi(hi)
+		}
+		if err != nil || a < 0 || b < a {
+			return 0, fmt.Errorf("bad cpuset %q", list)
+		}
+		n += b - a + 1
+	}
+	return n, nil
 }
 
 // usage reads machine m's counters, broker-side: cpu.stat usage_usec,

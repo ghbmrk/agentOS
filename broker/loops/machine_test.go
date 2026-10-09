@@ -554,8 +554,13 @@ func TestQuiesceHoldsTheBrokersWritersForTheRound(t *testing.T) {
 // testBudget is the per-machine budget the exhaustion rig's broker wrote.
 var testBudget = MachineBudget{MemoryBytes: 256 << 20, Pids: 4096, DiskBytes: 64 << 20}
 
-// testRise is half of what the rig's guest presses (40 MiB, 32 MiB).
-var testRise = PressRise{MemoryBytes: 20 << 20, DiskBytes: 16 << 20}
+// testScript is what the rig's guest presses: its counters must rise by
+// half of it, 20 MiB and 16 MiB.
+var testScript = PressScript{MemoryBytes: 40 << 20, DiskBytes: 32 << 20}
+
+// The rig's cgroup may run on 100 CPUs, so its 30 ms hold asks for 1.5 s
+// of CPU time, over the floor.
+const testCPUs = "0-99"
 
 // exhaustRig is an exhaustion probe over a fake cgroup directory whose
 // limits sit at the configured budget. Each round runs in a new machine,
@@ -576,8 +581,8 @@ type exhaustRig struct {
 func newExhaustRig(t *testing.T) *exhaustRig {
 	t.Helper()
 	x := &exhaustRig{t: t, cg: t.TempDir(), flat: map[string]bool{},
-		press: map[string]int64{"cpu": 900000, "memory": 40 << 20, "processes": 16, "disk": 32 << 20}}
-	for f, v := range map[string]string{"memory.max": "268435456\n", "pids.max": "4096\n", "cpu.weight": "1\n"} {
+		press: map[string]int64{"cpu": 2000000, "memory": 40 << 20, "processes": 16, "disk": 32 << 20}}
+	for f, v := range map[string]string{"memory.max": "268435456\n", "pids.max": "4096\n", "cpu.weight": "1\n", "cpuset.cpus.effective": testCPUs + "\n"} {
 		x.write(f, v)
 	}
 	x.bump(map[string]int64{"cpu": 1000, "memory": 1 << 20, "processes": 2, "disk": 4096})
@@ -588,7 +593,7 @@ func newExhaustRig(t *testing.T) *exhaustRig {
 		PreemptTarget:  time.Second,
 		BrokerWeight:   1000,
 		Budget:         testBudget,
-		Rise:           testRise,
+		Script:         testScript,
 		Machine: func(context.Context) (PressedMachine, error) {
 			x.machines++
 			return PressedMachine{ID: fmt.Sprintf("probe-%d", x.machines), Cgroup: x.cg, DiskBytes: 64 << 20,
@@ -701,8 +706,9 @@ func TestACgroupWithNoLimitReportsExhaustionFindings(t *testing.T) {
 // LOOP-7, RES-1 (P3-4b-4c-limits; #548 Potency 2, L3 4): a limit holds
 // only when it is set and at most the configured per-machine budget. A
 // memory, process or disk limit above it is a finding, as is "max" or a
-// missing file; at or under it passes. A probe without a budget, or
-// without a minimum rise within it, fails the run closed.
+// missing file; at or under it passes. A probe without a budget, without
+// a press script within it, or whose CPU minimum is under the floor fails
+// the run closed.
 func TestLimitsAreJudgedAgainstTheConfiguredBudget(t *testing.T) {
 	ctx := context.Background()
 	for _, c := range []struct {
@@ -754,13 +760,56 @@ func TestLimitsAreJudgedAgainstTheConfiguredBudget(t *testing.T) {
 			t.Fatalf("budget %+v: ran (%d machines), %v", b, x.machines, err)
 		}
 	}
-	// So does a minimum rise that is unset or above the budget.
-	for _, r := range []PressRise{{}, {MemoryBytes: 1}, {DiskBytes: 1}, {MemoryBytes: 256<<20 + 1, DiskBytes: 1}, {MemoryBytes: 1, DiskBytes: 64<<20 + 1}} {
+	// So does a probe with no machine to press (Potency 1 on #599).
+	x := newExhaustRig(t)
+	x.probe.Machine = nil
+	if _, err := x.probe.Run(ctx); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("no Machine: %v", err)
+	}
+	// So does a script unset, too small to halve, or above the budget.
+	for _, sc := range []PressScript{{}, {MemoryBytes: 1 << 20}, {DiskBytes: 1 << 20}, {MemoryBytes: 1, DiskBytes: 1 << 20},
+		{MemoryBytes: 256<<20 + 1, DiskBytes: 1 << 20}, {MemoryBytes: 1 << 20, DiskBytes: 64<<20 + 1}} {
 		x := newExhaustRig(t)
-		x.probe.Rise = r
+		x.probe.Script = sc
 		if _, err := x.probe.Run(ctx); err == nil || x.machines != 0 {
-			t.Fatalf("rise %+v: ran (%d machines), %v", r, x.machines, err)
+			t.Fatalf("script %+v: ran (%d machines), %v", sc, x.machines, err)
 		}
+	}
+	// A machine whose CPU minimum is under the floor (1 s of CPU time: too
+	// few CPUs for the hold, or a hold so short it rounds to nothing)
+	// fails before it presses. One whose CPU count cannot be read fails
+	// as an unreadable counter does: its findings stand, nothing closes.
+	// Either way the machine is preempted.
+	for _, c := range []struct {
+		cpus    string
+		hold    time.Duration
+		presses bool
+	}{{"", 30 * time.Millisecond, true}, {"x", 30 * time.Millisecond, true}, {"3-1", 30 * time.Millisecond, true},
+		{"0", time.Second + time.Second/2, false}, {"0-65", 30 * time.Millisecond, false}, {"0-1048575", time.Microsecond, false}} {
+		x := newExhaustRig(t)
+		if c.cpus == "" {
+			os.Remove(filepath.Join(x.cg, "cpuset.cpus.effective"))
+		} else {
+			x.write("cpuset.cpus.effective", c.cpus)
+		}
+		x.probe.Hold = c.hold
+		res, err := x.probe.Run(ctx)
+		if err == nil || len(res.Checked) != 0 || (x.pressed != nil) != c.presses || len(x.stopped) != 1 {
+			t.Fatalf("cpus %q, hold %v: pressed %v, stopped %v, %v", c.cpus, c.hold, x.pressed, x.stopped, err)
+		}
+	}
+	// The CPU count is the nearest ancestor's where the machine's own
+	// group does not enable cpuset; "0-1,4,8-9" is five CPUs.
+	if n, err := cpusEffective(newExhaustRig(t).cg); err != nil || n != 100 {
+		t.Fatalf("own group: %d %v", n, err)
+	}
+	parent := t.TempDir()
+	child := filepath.Join(parent, "m")
+	os.Mkdir(child, 0o700)
+	os.WriteFile(filepath.Join(parent, "cgroup.controllers"), []byte("cpuset cpu\n"), 0o600)
+	os.WriteFile(filepath.Join(parent, "cpuset.cpus.effective"), []byte("0-1,4,8-9\n"), 0o600)
+	if n, err := cpusEffective(child); err != nil || n != 5 {
+		t.Fatalf("ancestor: %d %v", n, err)
 	}
 }
 
@@ -863,10 +912,10 @@ func TestAGuestThatDoesNotPressFailsTheRoundAndClosesNothing(t *testing.T) {
 		pass  bool
 	}{
 		{map[string]int64{"cpu": 1, "memory": 1, "processes": 1, "disk": 1}, false},
-		{map[string]int64{"cpu": 900000, "memory": 20<<20 - 1, "processes": 16, "disk": 32 << 20}, false},
-		{map[string]int64{"cpu": 900000, "memory": 40 << 20, "processes": 16, "disk": 16<<20 - 1}, false},
-		{map[string]int64{"cpu": 14999, "memory": 40 << 20, "processes": 16, "disk": 32 << 20}, false}, // Hold 30 ms: 15 ms
-		{map[string]int64{"cpu": 15000, "memory": 20 << 20, "processes": 0, "disk": 16 << 20}, true},
+		{map[string]int64{"cpu": 2000000, "memory": 20<<20 - 1, "processes": 16, "disk": 32 << 20}, false},
+		{map[string]int64{"cpu": 2000000, "memory": 40 << 20, "processes": 16, "disk": 16<<20 - 1}, false},
+		{map[string]int64{"cpu": 1499999, "memory": 40 << 20, "processes": 16, "disk": 32 << 20}, false}, // 30 ms on 100 CPUs, halved
+		{map[string]int64{"cpu": 1500000, "memory": 20 << 20, "processes": 0, "disk": 16 << 20}, true},
 	} {
 		x := newExhaustRig(t)
 		x.press = c.press

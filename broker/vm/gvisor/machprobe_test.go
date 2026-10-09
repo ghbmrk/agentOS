@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -147,9 +150,9 @@ func (r *rig) exhaustProbe(svc *services, q *quota.FS, id string, hold time.Dura
 		PreemptTarget:  2 * time.Second,
 		BrokerWeight:   budget.BrokerWeight,
 		Budget:         loops.MachineBudget{MemoryBytes: 256 << 20, Pids: vm.MachinePids, DiskBytes: 64 << 20},
-		// Half of what the test guest's press holds (MemMB 48, DiskMB 32 in
+		// What the test guest's press holds (MemMB 48, DiskMB 32 in
 		// testdata's press command; S35).
-		Rise: loops.PressRise{MemoryBytes: 24 << 20, DiskBytes: 16 << 20},
+		Script: loops.PressScript{MemoryBytes: 48 << 20, DiskBytes: 32 << 20},
 		Machine: func(ctx context.Context) (loops.PressedMachine, error) {
 			r.create(id, admission.Experiment)
 			r.ask(id, "token")
@@ -173,17 +176,7 @@ func (r *rig) exhaustProbe(svc *services, q *quota.FS, id string, hold time.Dura
 			}
 			return loops.PressedMachine{ID: id, Cgroup: cg, DiskBytes: u.LimitBytes, DiskUsed: used}, nil
 		},
-		Press: func(ctx context.Context, id string, kinds []string) error {
-			for _, k := range kinds {
-				c := r.rt.cmd(context.Background(), "exec", cid(id), "/guest", "press", k, fmt.Sprint((hold + 5*time.Second).Milliseconds()))
-				if err := c.Start(); err != nil {
-					return err
-				}
-				go c.Wait() // ends when the machine is preempted
-			}
-			time.Sleep(500 * time.Millisecond) // let the pressure start
-			return nil
-		},
+		Press: r.pressFor(hold),
 		Ping: func(ctx context.Context) error {
 			req, _ := http.NewRequestWithContext(ctx, "GET", "http://broker/", nil)
 			resp, err := client.Do(req)
@@ -197,15 +190,78 @@ func (r *rig) exhaustProbe(svc *services, q *quota.FS, id string, hold time.Dura
 	}
 }
 
+// pressFor has machine id's guest press each kind for hold and more, but
+// the kinds in brief for 1 ms: those presses run and exit at once.
+func (r *rig) pressFor(hold time.Duration, brief ...string) func(context.Context, string, []string) error {
+	return func(ctx context.Context, id string, kinds []string) error {
+		for _, k := range kinds {
+			if slices.Contains(brief, k) {
+				if out, err := r.rt.cmd(ctx, "exec", cid(id), "/guest", "press", k, "1").CombinedOutput(); err != nil {
+					return fmt.Errorf("press %s: %v: %s", k, err, out)
+				}
+				continue
+			}
+			c := r.rt.cmd(context.Background(), "exec", cid(id), "/guest", "press", k, fmt.Sprint((hold + 5*time.Second).Milliseconds()))
+			if err := c.Start(); err != nil {
+				return err
+			}
+			go c.Wait() // ends when the machine is preempted
+		}
+		time.Sleep(500 * time.Millisecond) // let the pressure start
+		return nil
+	}
+}
+
+// logRise logs how far p's machine's counters rose from just before the
+// press to just before the preemption, the window the probe reads, so
+// CI shows the margin over the probe's minimums.
+func (r *rig) logRise(t *testing.T, q *quota.FS, p *loops.ExhaustProbe, name string) {
+	read := func(id string) (cpu, mem, disk int64) {
+		cg := filepath.Join(r.cfg.Cgroups.Path, id)
+		if b, err := os.ReadFile(filepath.Join(cg, "cpu.stat")); err == nil {
+			for line := range strings.Lines(string(b)) {
+				if v, ok := strings.CutPrefix(line, "usage_usec "); ok {
+					cpu, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+				}
+			}
+		}
+		if b, err := os.ReadFile(filepath.Join(cg, "memory.current")); err == nil {
+			mem, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		}
+		if mc, err := r.m.Get(id); err == nil {
+			u, _ := q.Usage(mc.Project)
+			disk = u.Bytes
+		}
+		return
+	}
+	var c0, m0, d0 int64
+	press, preempt := p.Press, p.Preempt
+	p.Press = func(ctx context.Context, id string, kinds []string) error {
+		c0, m0, d0 = read(id)
+		return press(ctx, id, kinds)
+	}
+	p.Preempt = func(id string) error {
+		if c0 != 0 {
+			c1, m1, d1 := read(id)
+			t.Logf("%s: over the hold (%v; host CPUs %d) cpu rose %d us (minimum hold x CPUs / 2), memory %d (minimum %d), disk %d (minimum %d)",
+				name, p.Hold, runtime.NumCPU(), c1-c0, m1-m0, p.Script.MemoryBytes/2, d1-d0, p.Script.DiskBytes/2)
+			c0 = 0
+		}
+		return preempt(id)
+	}
+}
+
 // LOOP-7 (exhaustion): CPU, memory, disk and process pressure in an
 // experiment machine with its cgroup limits and disk quota at the
 // broker's budget leaves the broker answering within target and the
 // machine preempted within the frozen target: nothing reported. The
 // round passing shows the machine's cpu.stat usage_usec, memory.current
-// and quota usage rose by their minimums over the hold (S35). Controls: a
-// guest that does not press, and one whose press runs but exits at once,
-// each fail the round (P3-4b-4c-fresh; B1 on #599), and a cgroup with
-// memory.max and pids.max at "max" reports both above budget.
+// and quota usage rose by their minimums over the hold (S35); the rises
+// are logged. Controls: a guest that does not press, one whose presses all
+// exit at once, and ones where only the CPU press or only the memory
+// press exits at once each fail the round, the last two on that counter
+// alone (P3-4b-4c-fresh; B1 on #599); a cgroup with memory.max and
+// pids.max at "max" reports both above budget.
 func TestIntegrationExhaustionProbeInAGuest(t *testing.T) {
 	if os.Getenv("AGENTOS_RUNSC") == "" || os.Geteuid() != 0 {
 		t.Skip("set AGENTOS_RUNSC to a runsc binary and run as root (CI integration job)")
@@ -224,7 +280,9 @@ func TestIntegrationExhaustionProbeInAGuest(t *testing.T) {
 		c.DiskReserveBytes = 16 << 20
 	})
 	ctx := context.Background()
-	res, err := r.exhaustProbe(svc, q, "load", 3*time.Second, nil).Run(ctx)
+	clean := r.exhaustProbe(svc, q, "load", 3*time.Second, nil)
+	r.logRise(t, q, clean, "clean round")
+	res, err := clean.Run(ctx)
 	if err != nil || len(res.Found) != 0 {
 		t.Fatalf("clean round: %+v %v", res, err)
 	}
@@ -243,21 +301,32 @@ func TestIntegrationExhaustionProbeInAGuest(t *testing.T) {
 	}
 	r.m.Destroy(ctx, "idle")
 
-	brief := r.exhaustProbe(svc, q, "brief", time.Second, nil)
-	brief.Press = func(ctx context.Context, id string, kinds []string) error {
-		for _, k := range kinds {
-			if out, err := r.rt.cmd(ctx, "exec", cid(id), "/guest", "press", k, "1").CombinedOutput(); err != nil {
-				return fmt.Errorf("press %s: %v: %s", k, err, out)
+	for _, c := range []struct {
+		id    string
+		brief []string
+		fail  []string // the counters that must fall short, and only they
+	}{
+		{"brief", []string{"cpu", "memory", "disk", "processes"}, []string{"cpu", "memory", "disk"}},
+		{"cpuburst", []string{"cpu"}, []string{"cpu"}},
+		// The process press's idle children hold memory of their own, so
+		// it exits at once here too; processes are not gated (S35).
+		{"memdrop", []string{"memory", "processes"}, []string{"memory"}},
+	} {
+		p := r.exhaustProbe(svc, q, c.id, time.Second, nil)
+		p.Press = r.pressFor(time.Second, c.brief...)
+		r.logRise(t, q, p, c.id)
+		res, err := p.Run(ctx)
+		if err == nil || !strings.Contains(err.Error(), "did not press") || len(res.Checked) != 0 {
+			t.Fatalf("%s: %+v %v", c.id, res, err)
+		}
+		for _, k := range []string{"cpu", "memory", "disk"} {
+			if short := strings.Contains(err.Error(), k+" rose"); short != slices.Contains(c.fail, k) {
+				t.Fatalf("%s: %s short %v, want %v: %v", c.id, k, short, !short, err)
 			}
 		}
-		return nil
+		t.Logf("%s: %v", c.id, err)
+		r.m.Destroy(ctx, c.id)
 	}
-	if res, err := brief.Run(ctx); err == nil || !strings.Contains(err.Error(), "did not press") || len(res.Checked) != 0 {
-		t.Fatalf("a press that exits at once: %+v %v", res, err)
-	} else {
-		t.Logf("a press that exits at once: %v", err)
-	}
-	r.m.Destroy(ctx, "brief")
 
 	unlimit := func(cg string) {
 		for _, f := range []string{"memory.max", "pids.max"} {
@@ -266,7 +335,9 @@ func TestIntegrationExhaustionProbeInAGuest(t *testing.T) {
 			}
 		}
 	}
-	res, err = r.exhaustProbe(svc, q, "load2", time.Second, unlimit).Run(ctx)
+	control := r.exhaustProbe(svc, q, "load2", time.Second, unlimit)
+	r.logRise(t, q, control, "control round")
+	res, err = control.Run(ctx)
 	if err != nil || len(res.Found) != 2 {
 		t.Fatalf("control round: %+v %v", res, err)
 	}
