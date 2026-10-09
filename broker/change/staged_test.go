@@ -224,17 +224,19 @@ type withdrawer struct {
 	held  sync.Mutex
 	mu    sync.Mutex
 	calls []string
+	whys  []string
 	err   error
 	// then runs after a withdrawal, under held, as the applier's next
 	// Tick settles the drop.
 	then func(id string)
 }
 
-func (w *withdrawer) Withdraw(id string) error {
+func (w *withdrawer) Withdraw(id, why string) error {
 	w.held.Lock()
 	defer w.held.Unlock()
 	w.mu.Lock()
 	w.calls = append(w.calls, id)
+	w.whys = append(w.whys, why)
 	err, then := w.err, w.then
 	w.mu.Unlock()
 	if err == nil && then != nil {
@@ -452,5 +454,107 @@ func TestStageDroppedIsIdempotentByExactID(t *testing.T) {
 	}
 	if err := e.p.StageDropped(bg, r2.ID); err == nil {
 		t.Fatal("a confirmed image dropped")
+	}
+}
+
+// REQ: UPD-1, UPD-8, CH-12, OP-5
+//
+// SR3-4f-3b: a security recheck whose revert of an unprotected staged
+// adoption the applier refuses (its release is being installed) sets a
+// Concern, so the digest says so, and the next pass reverts it.
+
+// failsSecurity makes image "b" fail the security suite and the staged
+// adoption unprotected, as TestRecheckRevertsAPendingStagedRelease does.
+func (e *env) failsSecurity(id string) {
+	ev := e.p.cfg.Evaluator
+	e.p.cfg.Evaluator = evalFunc(func(ctx context.Context, tr Tree, pr Probe) ([]byte, error) {
+		if string(tr["host-image/release"]) == update.Digest([]byte("b")) && string(pr.Input) == exfilProbe {
+			return []byte("leaked"), nil
+		}
+		return ev.Run(ctx, tr, pr)
+	})
+	e.p.mu.Lock()
+	e.p.adoptionByIDLocked(id).Basis = BasisStanding
+	e.p.mu.Unlock()
+}
+
+const refusedLine = "Update 41 failed a security check while it was being installed; it will be undone as soon as it starts. Nothing is needed from you."
+
+func TestRefusedSecurityRevertSetsConcern(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	e.failsSecurity(r.ID)
+	w.err = installing{}
+	ids, err := e.p.Recheck(bg)
+	if err != nil || slices.Contains(ids, r.ID) {
+		t.Fatalf("recheck: %v %v", ids, err)
+	}
+	if got := w.whys; len(got) != 1 || got[0] != WhySecurity {
+		t.Fatalf("withdraw reasons %q", got)
+	}
+	e.reopen()
+	if a := e.adoption(r.ID); a.Concern != WhySecurity || a.Reverted != "" || !a.Staged {
+		t.Fatalf("adoption %+v", a)
+	}
+	d := e.p.Digest()
+	if !slices.Contains(d, refusedLine) {
+		t.Fatalf("digest: %q", d)
+	}
+	for _, l := range d {
+		if strings.Contains(l, "pdate 41") && (strings.Contains(l, "UNDO") || strings.Contains(l, "only version")) {
+			t.Fatalf("digest offers what the owner cannot do: %q", l)
+		}
+	}
+	w = &withdrawer{}
+	e.p.SetWithdrawer(w)
+	e.failsSecurity(r.ID)
+	if ids, err := e.p.Recheck(bg); err != nil || !slices.Contains(ids, r.ID) {
+		t.Fatalf("recheck once it can withdraw: %v %v", ids, err)
+	}
+	if a := e.adoption(r.ID); a.Reverted != WhySecurity {
+		t.Fatalf("adoption %+v", a)
+	}
+	if d := e.p.Digest(); slices.Contains(d, refusedLine) {
+		t.Fatalf("digest after the revert: %q", d)
+	}
+}
+
+// An owner's refused UNDO is answered to the owner; it sets no Concern.
+func TestRefusedOwnerUndoSetsNoConcern(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	w.err = installing{}
+	if err := e.p.Revert(bg, r.Short, OriginOwner); err == nil {
+		t.Fatal("undo while installing")
+	}
+	if got := w.whys; len(got) != 1 || got[0] != WhyOwner {
+		t.Fatalf("withdraw reasons %q", got)
+	}
+	if a := e.adoption(r.ID); a.Concern != "" {
+		t.Fatalf("adoption %+v", a)
+	}
+}
+
+// REQ: UPD-1, OP-5
+//
+// SR3-4f-3c: Withdraw races ConfirmStaged (the applier settles the boot
+// while the pipeline asks it to withdraw). StageDropped of the confirmed
+// adoption is refused with the permanent ErrNotStaged, so the applier
+// clears its obligation instead of retrying it on every Tick.
+func TestDropOfAConfirmedAdoptionIsPermanentlyRefused(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	w.then = func(id string) {
+		if err := e.p.ConfirmStaged(id); err != nil {
+			t.Error("confirm:", err)
+		}
+	}
+	_ = e.p.Revert(bg, r.Short, OriginOwner) // either outcome; the drop is what matters
+	for i := 0; i < 2; i++ {
+		err := e.p.StageDropped(bg, r.ID)
+		var perm interface{ Permanent() bool }
+		if !errors.Is(err, ErrNotStaged) || !errors.As(err, &perm) || !perm.Permanent() {
+			t.Fatalf("drop %d of a confirmed adoption: %v", i, err)
+		}
+	}
+	if err := e.p.StageDropped(bg, "no-such-id"); !errors.Is(err, ErrNotStaged) {
+		t.Fatalf("drop of an unknown adoption: %v", err)
 	}
 }

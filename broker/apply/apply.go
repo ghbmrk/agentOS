@@ -161,6 +161,11 @@ type point struct {
 	// Security: it was scheduled as a security fix, so its restart is
 	// automatic only while the release still is one (SR3-4f-2c).
 	Security bool `json:"security,omitempty"`
+	// Withdrawing: a security recheck failed the adoption after the
+	// handover. The release is never restarted into; the next Tick or
+	// Withdraw finishes abandoning it, and a boot of the old root is not
+	// a fallback (SR3-4f-3a).
+	Withdrawing bool `json:"withdrawing,omitempty"`
 }
 
 // Outcome kinds for Status.
@@ -554,7 +559,8 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 // restarted into: it is abandoned and its adoption dropped, as when the
 // policy narrows before the handover (SR3-4f-2c, SR3-6). After a process
 // restart the release is not held and cannot be judged again, so a
-// security fix fails closed the same way (ASSUMPTIONS A13).
+// security fix fails closed the same way (ASSUMPTIONS A13). A release
+// being withdrawn (SR3-4f-3a) is never restarted into either.
 func (a *Applier) restartIfHandedOver(ctx context.Context) (bool, error) {
 	a.mu.Lock()
 	pt := a.st.Applying
@@ -562,7 +568,7 @@ func (a *Applier) restartIfHandedOver(ctx context.Context) (bool, error) {
 		a.mu.Unlock()
 		return false, nil
 	}
-	stale := pt.Security && (a.handed == nil || !a.handed.Security())
+	stale := pt.Withdrawing || pt.Security && (a.handed == nil || !a.handed.Security())
 	a.mu.Unlock()
 	b, err := a.cfg.Activator.Booted(ctx)
 	if err != nil || b.ID != pt.BootID {
@@ -586,6 +592,10 @@ func (a *Applier) withdrawHandover(ctx context.Context, pt *point) error {
 	if a.st.Applying != pt || a.executing {
 		return nil // settled meanwhile
 	}
+	return a.withdrawHandoverLocked(ctx, pt)
+}
+
+func (a *Applier) withdrawHandoverLocked(ctx context.Context, pt *point) error {
 	if err := a.cfg.Activator.Abandon(ctx); err != nil {
 		return err
 	}
@@ -603,23 +613,37 @@ func (a *Applier) withdrawHandover(ctx context.Context, pt *point) error {
 	return nil
 }
 
-// Withdraw gives up adoption before it is handed over, for the change
-// pipeline's revert of a staged adoption (SR3-4f-2a). A pending release
-// of it is dropped; the adoption is retired either way, saved before it
-// takes effect, so it is never scheduled again. From the save before the
-// install until Resume settles the apply, Withdraw is refused with an
-// error that is ErrApplying and has Handover() true. Withdraw never calls
-// the pipeline: the caller reverts the adoption itself. It is also
-// dropped, so if that revert fails or is cut short, the next Tick settles
-// it with StageDropped, a no-op once the revert ran (SR3-4f-2 L3-1).
-func (a *Applier) Withdraw(adoption string) error {
+// WhySecurity is the change pipeline's reason for a revert after a
+// failed security check (change.WhySecurity): the only reason Withdraw
+// undoes a handover (SR3-4f-3a).
+const WhySecurity = "security"
+
+// Withdraw gives up adoption for the change pipeline's revert of a staged
+// adoption for why (SR3-4f-2a). A pending release of it is dropped; the
+// adoption is retired either way, saved before it takes effect, so it is
+// never scheduled again. Withdraw never calls the pipeline: the caller
+// reverts the adoption itself. It is also dropped, so if that revert
+// fails or is cut short, the next Tick settles it with StageDropped, a
+// no-op once the revert ran (SR3-4f-2 L3-1).
+//
+// From the save before the install until Resume settles the apply,
+// Withdraw is refused with an error that is ErrApplying and has
+// Handover() true, with one exception (SR3-4f-3a): for a failed security
+// check, once the activator took the release and in the boot it was
+// handed over in, the handover is undone (Abandon, DropStaged) and the
+// adoption dropped, with no fallback recorded. That is marked durably
+// first, so the release is never restarted into even when a step fails;
+// a failure is the same refusal with the cause wrapped, and the next Tick
+// or Withdraw finishes it. An owner's UNDO or a regression revert keeps
+// the refusal: the image installs, and is reverted once it settles.
+func (a *Applier) Withdraw(adoption, why string) error {
 	if adoption == "" {
 		return errors.New("apply: no adoption")
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if pt := a.st.Applying; pt != nil && pt.Adoption == adoption {
-		return handoverError{}
+		return a.withdrawInstalledLocked(pt, why)
 	}
 	next := a.st
 	held := next.Pending != nil && next.Pending.Adoption == adoption
@@ -637,6 +661,33 @@ func (a *Applier) Withdraw(adoption string) error {
 	return nil
 }
 
+// withdrawInstalledLocked is Withdraw of the apply in flight (SR3-4f-3a).
+func (a *Applier) withdrawInstalledLocked(pt *point, why string) error {
+	// executing first: the activator may be mid-install, and Booted
+	// would wait on it.
+	if a.executing || !pt.Installed || why != WhySecurity && !pt.Withdrawing {
+		return handoverError{}
+	}
+	ctx := context.Background()
+	if b, err := a.cfg.Activator.Booted(ctx); err != nil || b.ID != pt.BootID {
+		return handoverError{} // a new boot is Resume's to settle
+	}
+	if !pt.Withdrawing {
+		marked := *pt
+		marked.Withdrawing = true
+		next := a.st
+		next.Applying = &marked
+		if err := a.save(next); err != nil {
+			return fmt.Errorf("%w: %w", handoverError{}, err)
+		}
+		a.st, pt = next, &marked
+	}
+	if err := a.withdrawHandoverLocked(ctx, pt); err != nil {
+		return fmt.Errorf("%w: %w", handoverError{}, err)
+	}
+	return nil
+}
+
 // handoverError: the adoption's release is being installed. It is
 // ErrApplying, and its Handover method lets the change pipeline tell it
 // apart without importing this package.
@@ -648,7 +699,8 @@ func (handoverError) Handover() bool       { return true }
 
 // settle calls StageDropped for each dropped adoption, after the state
 // that records it is saved; a failed call stays for the next settle
-// (SR3-4f-2b). It runs outside the journal's dispatch: Tick defers it.
+// (SR3-4f-2b), unless the pipeline refused it for good: the adoption was
+// confirmed meanwhile, or is unknown (SR3-4f-3c). It runs outside the journal's dispatch: Tick defers it.
 func (a *Applier) settle(ctx context.Context) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -661,12 +713,18 @@ func (a *Applier) settleLocked(ctx context.Context) {
 	}
 	var left []string
 	for _, id := range a.st.Dropped {
-		if a.cfg.Pipeline.StageDropped(ctx, id) != nil {
+		if err := a.cfg.Pipeline.StageDropped(ctx, id); err != nil && !permanent(err) {
 			left = append(left, id)
 		}
 	}
 	a.st.Dropped = left
 	_ = a.saveLocked() // else the calls are made again, as no-ops
+}
+
+// permanent: the pipeline refuses the call the same way every time.
+func permanent(err error) bool {
+	var p interface{ Permanent() bool }
+	return errors.As(err, &p) && p.Permanent()
 }
 
 // nextID numbers an apply attempt: upd:apply:<version>:n<seq>.
@@ -988,6 +1046,13 @@ func (a *Applier) Resume(ctx context.Context) error {
 		if err := a.cfg.Store.DropStaged(); err != nil {
 			return err
 		}
+		if pt.Withdrawing {
+			// The withdraw's Abandon took before the reboot: not a
+			// fallback (SR3-4f-3a).
+			next.Last = &last{Version: pt.To, Kind: doneNotHanded}
+			retire(&next, pt.Adoption)
+			break
+		}
 		if pt.Adoption != "" {
 			if err := a.cfg.Pipeline.StageFailed(ctx, pt.Adoption); err != nil {
 				return err
@@ -1081,6 +1146,8 @@ func (a *Applier) Status() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
+	case a.st.Applying != nil && a.st.Applying.Withdrawing:
+		return fmt.Sprintf("Update %d failed a security check; I will not start it. Nothing is needed from you.", a.st.Applying.To)
 	case a.st.Applying != nil && a.st.Applying.Installed:
 		return fmt.Sprintf("Update %d is installing; I will restart and check it.", a.st.Applying.To)
 	case a.st.Pending != nil && a.rel != nil:

@@ -233,7 +233,13 @@ func (p *Pipeline) Digest() []string {
 		}
 	}
 	for _, a := range p.st.Adoptions {
-		if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" {
+		if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" && !a.protected() {
+			// Recheck's revert was refused while it was being installed
+			// (SR3-4f-3b): it is undone once it settles, by the pipeline.
+			out = append(out, "Update "+safe(strings.TrimPrefix(a.Origin, "update:"))+
+				" failed a security check while it was being installed; it will be undone as soon as it starts. Nothing is needed from you.")
+			a.ConcernSeen = true
+		} else if a.Concern != "" && !a.ConcernSeen && a.Reverted == "" {
 			s := a.ConcernScore
 			line := p.what(&Adoption{Classes: a.Classes, Origin: a.Origin}) + " now"
 			if a.Concern == WhySecurity {

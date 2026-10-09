@@ -395,8 +395,8 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		// Never under p.mu: the applier holds its lock while it calls
 		// StageFailed and StageDropped (lock order applier, then
 		// pipeline).
-		if err := w.Withdraw(id); handover(err) {
-			return errors.New("Update " + v + " is being installed; undo it after it starts.")
+		if err := w.Withdraw(id, why); handover(err) {
+			return installingErr(v)
 		} else if err != nil {
 			return fmt.Errorf("change: withdrawing update %s: %w", v, err)
 		}
@@ -426,6 +426,15 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 	return err
 }
 
+// installingErr: the applier refused to withdraw update v while it is
+// being installed. Its Handover method lets Recheck tell it apart.
+type installingErr string
+
+func (v installingErr) Error() string {
+	return "Update " + string(v) + " is being installed; undo it after it starts."
+}
+func (installingErr) Handover() bool { return true }
+
 // revertedByID: adoption id exists and is reverted.
 func (p *Pipeline) revertedByID(id string) bool {
 	p.mu.Lock()
@@ -441,8 +450,18 @@ func (p *Pipeline) revertedByID(id string) bool {
 // the save before the install until the boot after it settles, it
 // returns an error whose Handover method reports true.
 type Withdrawer interface {
-	Withdraw(adoption string) error
+	Withdraw(adoption, why string) error
 }
+
+// ErrNotStaged: StageFailed or StageDropped named an adoption that is not
+// staged, confirmed or unknown. It is permanent: the same call is refused
+// again (SR3-4f-3c).
+var ErrNotStaged error = notStaged{}
+
+type notStaged struct{}
+
+func (notStaged) Error() string   { return "not a staged adoption" }
+func (notStaged) Permanent() bool { return true }
 
 // SetWithdrawer sets the update applier the pipeline asks before it
 // undoes a staged image. Without one, a staged image is not undone until
@@ -510,7 +529,7 @@ func (p *Pipeline) StageFailed(ctx context.Context, id string) error {
 // StageDropped reverts a staged image the update applier dropped before
 // it was installed: a narrowed policy, a newer release, a release it
 // refuses (SR3-4f-2b). Like StageFailed it is idempotent by the exact ID,
-// and a confirmed image is an error.
+// and a confirmed or unknown image is the permanent ErrNotStaged.
 func (p *Pipeline) StageDropped(ctx context.Context, id string) error {
 	return p.settleStaged(ctx, id, WhyDropped)
 }
@@ -521,7 +540,7 @@ func (p *Pipeline) settleStaged(ctx context.Context, id, why string) error {
 	var err error
 	switch {
 	case a == nil || a.Confirmed || (!a.Staged && a.Reverted == ""):
-		err = fmt.Errorf("change: %s is not a staged adoption", id)
+		err = fmt.Errorf("change: %s is %w", id, ErrNotStaged)
 	case a.Reverted != "":
 		p.mu.Unlock()
 		return nil
@@ -724,6 +743,13 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 			if errors.Is(err, journal.ErrStopped) {
 				return out, err
 			}
+			if why == WhySecurity && handover(err) {
+				// The applier is installing it and withdraws it once it
+				// can; the next pass reverts it. Until then the digest
+				// says so (SR3-4f-3b).
+				p.concern(id, why, s)
+				continue
+			}
 			errs = append(errs, fmt.Errorf("%s: %w", id, err))
 			continue
 		}
@@ -734,6 +760,16 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 
 // protected reports an image adoption the owner approved or that rests on
 // an attested security release: the pipeline never undoes it on its own.
+// concern records why and s on adoption id once, and saves.
+func (p *Pipeline) concern(id, why string, s Score) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.adoptionLocked(id); a != nil && a.Reverted == "" && a.Concern == "" {
+		a.Concern, a.ConcernScore = why, s
+		_ = p.saveLocked()
+	}
+}
+
 func (a *Adoption) protected() bool {
 	image := false
 	for _, c := range a.Classes {

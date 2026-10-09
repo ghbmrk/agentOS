@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ type activator struct {
 	abandoned  int
 	onInstall  func() // runs after a successful Install
 	abandonErr error
+	onAbandon  func() // runs after a successful Abandon
 }
 
 func (a *activator) Install(_ context.Context, v *update.Verified) error {
@@ -58,6 +60,9 @@ func (a *activator) Abandon(context.Context) error {
 	}
 	a.abandoned++
 	a.next = a.boot.UsrRootHash
+	if a.onAbandon != nil {
+		a.onAbandon()
+	}
 	return nil
 }
 
@@ -98,6 +103,23 @@ type pipeline struct {
 	onConfirm  func()
 	dropped    []string
 	dropErr    error
+	// reverted: the pipeline's own reverts, by adoption, with their why.
+	reverted map[string]string
+}
+
+// recheck is the pipeline's Recheck failing adoption id for security: it
+// asks the applier to withdraw, then reverts the adoption itself.
+func (r *rig) recheck(id string) error {
+	if err := r.a.Withdraw(id, WhySecurity); err != nil {
+		return err
+	}
+	r.pipe.mu.Lock()
+	defer r.pipe.mu.Unlock()
+	if r.pipe.reverted == nil {
+		r.pipe.reverted = map[string]string{}
+	}
+	r.pipe.reverted[id] = change.WhySecurity
+	return nil
 }
 
 func (p *pipeline) ConfirmStaged(ref string) error {
@@ -129,7 +151,10 @@ func (p *pipeline) StageDropped(_ context.Context, ref string) error {
 		return err
 	}
 	if slices.Contains(p.confirmed, ref) {
-		return errors.New("confirmed")
+		return fmt.Errorf("change: %s is %w", ref, change.ErrNotStaged)
+	}
+	if _, ok := p.reverted[ref]; ok {
+		return nil // the revert ran first: nothing to do
 	}
 	if !slices.Contains(p.dropped, ref) {
 		p.dropped = append(p.dropped, ref)
