@@ -117,7 +117,7 @@ Covered: 131 / 159 requirement IDs
 | ADP-16 | — |
 | CHG-1 | `broker/change/cascade_test.go`, `broker/change/implicit_test.go`, `broker/change/loop2_test.go`, `broker/change/pe5_test.go`, `broker/change/pe5b_test.go`, `broker/change/pe7_test.go`, `broker/change/pipeline_test.go`, `broker/change/resume_test.go`, `broker/change/review_test.go`, `broker/change/split_test.go`, `broker/change/task_test.go`, `broker/change/wiring_test.go`, `broker/cmd/agentosd/cascade_test.go`, `broker/cmd/agentosd/eval_test.go`, `broker/cmd/agentosd/tasks_test.go`, `broker/compile/implicit_test.go`, `broker/grants/outcome_test.go`, `broker/loopbuild/builder_test.go`, `broker/loops/cascade_test.go`, `broker/loops/forget_test.go`, `broker/loops/loop1_test.go`, `broker/loops/pe5_test.go`, `broker/loops/wiring_test.go`, `broker/modelroute/modelroute_test.go`, `broker/replay/replay_test.go` |
 | CHG-2 | `broker/change/forget_test.go`, `broker/change/pipeline_test.go`, `broker/change/wiring_test.go`, `broker/cmd/agentosd/learn_test.go`, `broker/daemon/learning_wiring_test.go`, `broker/grants/change_test.go`, `broker/grants/loops_test.go`, `broker/loops/pe4_test.go` |
-| CHG-3 | `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go`, `broker/replay/replay_test.go`, `broker/update/attest_test.go`, `broker/update/hardening_test.go` |
+| CHG-3 | `broker/change/pipeline_test.go`, `broker/change/policy_test.go`, `broker/change/review_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go`, `broker/replay/replay_test.go`, `broker/update/attest_test.go`, `broker/update/hardening_test.go` |
 | CHG-4 | `broker/change/share_test.go`, `broker/daemon/localui_test.go`, `broker/grants/pagewording_test.go` |
 | CHG-5 | `broker/change/share_test.go`, `broker/cmd/agentos-builder/build_test.go`, `broker/loopbuild/builder_test.go` |
 | CHG-6 | `broker/change/implicit_test.go`, `broker/change/notice_test.go`, `broker/change/pipeline_test.go`, `broker/change/review_test.go`, `broker/change/routing_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go` |
@@ -156,10 +156,10 @@ Covered: 131 / 159 requirement IDs
 | UPD-2 | `broker/cmd/agentos-release/main_test.go`, `broker/update/hardening_test.go`, `broker/update/update_test.go` |
 | UPD-3 | `broker/apply/firstboot_test.go`, `broker/firstboot/firstboot_test.go`, `broker/localui/upd3_test.go` |
 | UPD-4 | `broker/loops/updates_test.go`, `broker/maintain/maintain_test.go`, `broker/maintain/settings_test.go` |
-| UPD-5 | `broker/apply/apply_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go`, `broker/loops/updates_test.go`, `broker/maintain/maintain_test.go`, `broker/maintain/settings_test.go` |
+| UPD-5 | `broker/apply/apply_test.go`, `broker/apply/policy_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go`, `broker/loops/updates_test.go`, `broker/maintain/maintain_test.go`, `broker/maintain/settings_test.go` |
 | UPD-6 | `broker/apply/apply_test.go` |
 | UPD-7 | — |
-| UPD-8 | `broker/cmd/agentos-release/main_test.go`, `broker/maintain/follow_test.go`, `broker/update/attest_test.go`, `broker/update/follow_test.go`, `broker/update/hardening_test.go`, `broker/update/stage_test.go`, `broker/update/update_test.go` |
+| UPD-8 | `broker/apply/policy_test.go`, `broker/change/policy_test.go`, `broker/cmd/agentos-release/main_test.go`, `broker/maintain/follow_test.go`, `broker/update/attest_test.go`, `broker/update/follow_test.go`, `broker/update/hardening_test.go`, `broker/update/policy_test.go`, `broker/update/stage_test.go`, `broker/update/update_test.go` |
 | UPD-9 | — |
 | BAK-1 | `broker/recovery/choice_test.go` |
 | TIM-1 | `broker/clock/chrony_test.go`, `broker/clock/clock_test.go`, `broker/clock/hold_test.go`, `broker/clock/sync_linux_test.go`, `broker/clock/unverified_test.go`, `broker/cmd/agentos-clock-boot/main_test.go`, `broker/cmd/agentosd/questions_test.go`, `broker/cmd/agentosd/sleepsec_test.go`, `broker/control/handler_test.go`, `broker/daemon/daemon_test.go`, `broker/modem/at/nettime_internal_test.go`, `broker/modem/at/nettime_test.go`, `broker/owner/answer_test.go`, `broker/question/question_test.go`, `broker/question/w9a_test.go` |
