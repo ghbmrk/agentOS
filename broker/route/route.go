@@ -446,6 +446,12 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 	}
 	d.Class = chat.Model
 	chat = clamp(chat, r.cfg.MaxOutputTokens)
+	// Several choices could each run to the limit, past what the meter
+	// reserved (OP-8): every provider gets one, whatever reached here.
+	if chat.N != nil && *chat.N != 1 {
+		fail(http.StatusBadRequest, "invalid_request_error", "", "request not accepted: only one choice (n=1) per model call")
+		return
+	}
 	r.mu.Lock()
 	routes := append([]Route(nil), r.rule[chat.Model]...)
 	r.mu.Unlock()

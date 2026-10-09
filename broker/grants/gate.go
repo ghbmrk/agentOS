@@ -80,9 +80,10 @@ type Changes interface {
 	// adoption of a release, which also needs the local page (CH-3).
 	Line(in journal.Intent) (owner.Item, error)
 	// Decided is called once the owner's request for a change intent has
-	// closed, answered or not (change C7); declined is true only when the
-	// owner said NO.
-	Decided(ctx context.Context, in journal.Intent, declined bool)
+	// closed, answered or not (change C7). why is the denial's cause:
+	// "owner" for the owner's NO, "not chosen" for an item left out of a
+	// partial YES, "" when approved or closed for any other reason.
+	Decided(ctx context.Context, in journal.Intent, why string)
 }
 
 // Loops is the loop scheduler (loops.Scheduler) as the gate uses it: the
@@ -2046,10 +2047,11 @@ func (g *Gate) Decide(d owner.Decision) {
 		//
 		// A release adoption the pipeline proposed (Origin change, the
 		// pipeline's own origin) is page-confirmed too, but the owner made
-		// no request. The change is no decline (Decided is told so) and the
-		// proposal drops, but the update check does not offer that version
-		// again until a restart or a newer release, so the notice promises
-		// no new offer: nothing is needed (P2-2a f2; L3 on #363). The
+		// no request. The change is no decline (Decided is told so): the
+		// proposal drops and the next update check offers that version
+		// again (change C25). The notice promises no new offer: nothing is
+		// needed (P2-2a f2; L3 on #363); whether to say the offer comes
+		// back is the UX lens's call (GR27). The
 		// literal "change" is change.OriginPipeline, pinned by
 		// TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded.
 		step := "Make the request again if still needed."
@@ -2329,7 +2331,7 @@ func (g *Gate) lapse(d owner.Decision) {
 	eng := g.eng
 	g.mu.Unlock()
 	if st, err := eng.Get(d.Ref); err == nil && g.cfg.Changes != nil && changeAction(st.Intent.Action) {
-		g.cfg.Changes.Decided(context.Background(), st.Intent, false)
+		g.cfg.Changes.Decided(context.Background(), st.Intent, d.Why)
 	}
 	g.closeIntent(d.Ref, lapsed)
 }
@@ -2409,8 +2411,13 @@ func (g *Gate) settle(id string) {
 		if g.cfg.Changes != nil && changeAction(st.Intent.Action) && st.Intent.Account == journal.BrokerAccount &&
 			(st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied) {
 			// Only the owner's NO is a decline; a refusal at the recheck
-			// (stale approval, changed state) is not (change C7).
-			g.cfg.Changes.Decided(ctx, st.Intent, !d.approved && d.why == "owner")
+			// (stale approval, changed state) is not (change C7), and an
+			// item left out of a partial YES is neither (change C25).
+			why := ""
+			if !d.approved {
+				why = d.why
+			}
+			g.cfg.Changes.Decided(ctx, st.Intent, why)
 		}
 		switch v := (pending{ownerVerdict(d, st), d.req}); {
 		case v.v == "" || g.cfg.Outcome == nil:

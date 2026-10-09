@@ -6,6 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
+	"strings"
+
+	"github.com/ghbmrk/agentos/broker/meter"
 )
 
 // chatRequest is the part of an OpenAI chat-completions body (the guest
@@ -207,9 +211,26 @@ type jsonSchema struct {
 	Strict      *bool           `json:"strict,omitempty"`
 }
 
+// chatKeys are chatRequest's top-level keys.
+var chatKeys = func() []string {
+	t := reflect.TypeFor[chatRequest]()
+	keys := make([]string, t.NumField())
+	for i := range keys {
+		keys[i], _, _ = strings.Cut(t.Field(i).Tag.Get("json"), ",")
+	}
+	return keys
+}()
+
 // parseChat decodes exactly one JSON object; trailing data is refused, so
-// the router and every provider read the same request.
+// the router and every provider read the same request. Its top-level keys
+// pass meter.Object first: the decoder below matches them to fields
+// case-insensitively, last match winning, so a repeated key, or one
+// differing from another or from a field only in case, would let it read
+// a value (n, an output limit) other than the one the meter checked.
 func parseChat(body []byte) (*chatRequest, error) {
+	if _, err := meter.Object(body, chatKeys...); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	var req chatRequest
 	if err := dec.Decode(&req); err != nil {
