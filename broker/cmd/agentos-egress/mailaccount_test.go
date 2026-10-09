@@ -351,3 +351,45 @@ func TestNoMailAccountByDefault(t *testing.T) {
 		t.Fatalf("%d not-connected replies in %q", got, tp.String())
 	}
 }
+
+// TestAStoreHeldAcrossAChangeLogsInAsNoOne: a Store taken from the vault
+// before a lock, a removal or a replacement opens no session afterwards;
+// the old password is not cached in it, so the server sees no login.
+func TestAStoreHeldAcrossAChangeLogsInAsNoOne(t *testing.T) {
+	ctx := context.Background()
+	must := func(t *testing.T, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, change := range map[string]func(t *testing.T, r *fastRig, srv *mailtest.Server){
+		"lock":   func(t *testing.T, r *fastRig, _ *mailtest.Server) { r.c.lock() },
+		"remove": func(t *testing.T, r *fastRig, _ *mailtest.Server) { must(t, r.c.removeMail()) },
+		"new password": func(t *testing.T, r *fastRig, srv *mailtest.Server) {
+			must(t, r.c.setMail(mailSettings{Address: mailtest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, synthetic(t, "canary-mail-")))
+		},
+		"new account": func(t *testing.T, r *fastRig, srv *mailtest.Server) {
+			must(t, r.c.setMail(mailSettings{Address: "other@example.test", IMAP: srv.IMAP, SMTP: srv.SMTP}, mailtest.Password))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, srv, _ := mailRig(t)
+			acct, err := r.c.mailSource()
+			if err != nil {
+				t.Fatal(err)
+			}
+			change(t, r, srv)
+			if _, err := acct.Store.Folders(ctx); err == nil {
+				t.Error("folders listed after the change")
+			}
+			out := "From: " + mailtest.User + "\r\nTo: friend@example.test\r\nSubject: hi\r\n\r\nhello\r\n"
+			if err := acct.Store.Submit(ctx, []string{"friend@example.test"}, []byte(out)); err == nil {
+				t.Error("submitted after the change")
+			}
+			if l, s := srv.Logins(), srv.Submitted(); len(l) != 0 || len(s) != 0 {
+				t.Fatalf("logins %v, submitted %d", l, len(s))
+			}
+		})
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	netmail "net/mail"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -156,11 +157,23 @@ func call(ctx context.Context, req request, src Source) (reply, error) {
 // ownSender reports whether raw's header sends as address alone: one
 // From field naming only it, any Sender naming only it, and no Resent-
 // fields, so the agent cannot send as another address through the
-// owner's account.
+// owner's account. Every field name must be plain ftext in canonical
+// form: net/mail keys "From :" or "From\x00:" apart from From, but a
+// lax reader downstream may take either for a second From.
 func ownSender(raw []byte, address string) bool {
 	m, err := netmail.ReadMessage(bytes.NewReader(raw))
 	if err != nil || address == "" {
 		return false
+	}
+	for k := range m.Header {
+		if k == "" || k != textproto.CanonicalMIMEHeaderKey(k) {
+			return false
+		}
+		for i := 0; i < len(k); i++ {
+			if k[i] <= ' ' || k[i] >= 0x7f {
+				return false
+			}
+		}
 	}
 	only := func(field string, need bool) bool {
 		vs := m.Header[field]

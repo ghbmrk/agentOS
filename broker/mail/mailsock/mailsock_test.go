@@ -331,6 +331,16 @@ func TestSubmitSendsOnlyAsTheAccount(t *testing.T) {
 		"From: " + me + "\r\nResent-From: ceo@example.test\r\n",
 		"From: " + me + "\r\nReply-To: x@example.test\r\nResent-Sender: ceo@example.test\r\n",
 		"",
+		// A key net/mail keeps apart from From (WSP before the colon, a
+		// control or 8-bit byte in it) is still a From to some readers.
+		"From: " + me + "\r\nFrom : ceo@example.test\r\n",
+		"From: " + me + "\r\nFrom\t: ceo@example.test\r\n",
+		"From: " + me + "\r\nFrom\x00: ceo@example.test\r\n",
+		"From: " + me + "\r\nFrom\x7f: ceo@example.test\r\n",
+		"From: " + me + "\r\nFr\xc3\xb6m: ceo@example.test\r\n",
+		"From: " + me + "\r\nSender : ceo@example.test\r\n",
+		"From: " + me + "\r\nResent-From : ceo@example.test\r\n",
+		"From : " + me + "\r\nFrom: ceo@example.test\r\n",
 	} {
 		if err := c.Submit(ctx, []string{"friend@example.test"}, []byte(h+body)); !errors.Is(err, mailsock.ErrRefused) {
 			t.Errorf("%q: %v", h, err)
