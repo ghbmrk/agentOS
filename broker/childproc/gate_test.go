@@ -139,29 +139,29 @@ func gate(t *testing.T, dir, mod string, exempt map[string]string) []string {
 		}
 	}
 	// Ignored files' imports, by file; what they import that the graph
-	// lacks is listed too, so a route through it is seen.
+	// lacks is listed too, so a route through it is seen. A package so
+	// listed may have ignored files of its own, so this repeats until no
+	// import is missing (#659 delta L3 1, Security 4a 1).
 	ignoredImports := map[string][]string{}
-	var missing []string
-	for _, p := range order {
-		n := byPath[p]
-		prune(n)
-		for _, f := range n.ignored {
-			path := filepath.Join(n.dir, f)
-			ims := fileImports(t, path)
-			ignoredImports[path] = ims
-			for _, im := range ims {
-				if byPath[im] == nil && im != "C" && !slices.Contains(missing, im) {
-					missing = append(missing, im)
+	for done := 0; done < len(order); {
+		var missing []string
+		for _, p := range order[done:] {
+			n := byPath[p]
+			prune(n)
+			for _, f := range n.ignored {
+				path := filepath.Join(n.dir, f)
+				ims := fileImports(t, path)
+				ignoredImports[path] = ims
+				for _, im := range ims {
+					if byPath[im] == nil && im != "C" && !slices.Contains(missing, im) {
+						missing = append(missing, im)
+					}
 				}
 			}
 		}
-	}
-	if len(missing) > 0 {
-		list(true, missing...)
-	}
-	for _, p := range order {
-		if n := byPath[p]; n.extra {
-			prune(n)
+		done = len(order)
+		if len(missing) > 0 {
+			list(true, missing...)
 		}
 	}
 	var nodes []node
@@ -435,6 +435,15 @@ func TestGateCatchesAChildStartedOutsideChildproc(t *testing.T) {
 		"dep/go.mod": "module example.com/dep\n\ngo 1.25\n",
 		"dep/x/x.go": "package x\nimport \"os\"\nvar Start = os.StartProcess\n",
 		"tag/w.go":   "//go:build sometag\n\npackage tag\nimport _ \"example.com/dep/x\"\n",
+		// That package's own ignored files are read, and what they
+		// import that the graph lacks is listed in turn, until nothing
+		// is missing (#659 delta L3 1, Security 4a 1).
+		"tag/w2.go":      "//go:build sometag\n\npackage tag\nimport (\n_ \"example.com/dep/y\"\n_ \"example.com/dep/w\"\n)\n",
+		"dep/y/y.go":     "package y\n",
+		"dep/y/y_tag.go": "//go:build sometag\n\npackage y\nimport \"os/exec\"\nfunc init() { exec.Command(\"env\").Run() }\n",
+		"dep/w/w.go":     "package w\n",
+		"dep/w/w_tag.go": "//go:build sometag\n\npackage w\nimport _ \"example.com/dep/z\"\n",
+		"dep/z/z.go":     "package z\nimport \"os/exec\"\nfunc init() { exec.Command(\"env\").Run() }\n",
 		// Exempt and still needed: passes.
 		"old/o.go":  "package old\nimport \"os/exec\"\nfunc O() { exec.Command(\"x\").Run() }\n",
 		"user/u.go": "package user\nimport \"example.com/m/old\"\nfunc U() { old.O() }\n",
@@ -461,6 +470,8 @@ func TestGateCatchesAChildStartedOutsideChildproc(t *testing.T) {
 		"example.com/m/alltag/x.go (not built): imports os/exec",
 		"example.com/m/allarm/y_arm64.go (not built):3: names syscall.Exec",
 		"example.com/dep/x/x.go:3: names os.StartProcess",
+		"example.com/dep/y/y_tag.go (not built): imports os/exec",
+		"example.com/dep/w/w_tag.go (not built): imports example.com/dep/z, which reaches os/exec",
 	}
 	for _, w := range want {
 		if !slices.ContainsFunc(got, func(g string) bool { return strings.HasPrefix(g, w) }) {
