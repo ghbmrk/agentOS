@@ -438,7 +438,7 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 	if err != nil {
 		return grants.Escalation{}, err
 	}
-	if o.Verb != verb.Organize {
+	if !pinned(o) {
 		return grants.Escalation{}, nil
 	}
 	pl, err := a.planOrganize(ctx, o, p)
@@ -448,6 +448,13 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 		// the only one an attempt already in flight takes (SR3-5-f1a).
 		a.setPin(in.ID, pin{})
 		return grants.Escalation{}, err
+	}
+	if o.Verb == verb.DeleteRemote {
+		// A trash or spam effect is asked for each one (irreversible), so
+		// it is only pinned: Execute acts only on the message judged here
+		// (SR3-5-f2a).
+		a.setPin(in.ID, pin{ref: pl.msg.Ref(), to: pl.to})
+		return grants.Escalation{}, nil
 	}
 	e := a.escalate(in, pl, p)
 	// Each call adds what it judged to the intent's judgements; Execute
@@ -612,14 +619,51 @@ func (a *Adapter) reserve(id string) place {
 // since the last Execute consumed them. Every one is kept, not just the
 // last: a concurrent dispatch's recheck that the gate refuses still pins,
 // and Execute acts only when all of them agree (SR3-5-f1a). Judgements
-// older than a day are dropped: an intent dispatched later is judged
-// again by its dispatch recheck.
+// older than a day are dropped (expire), except an intent's the journal
+// still holds.
 func (a *Adapter) setPin(id string, p pin) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	p.at = a.cfg.Now()
-	old := p.at.Add(-dayWindow)
+	a.expire(p.at.Add(-dayWindow))
+	a.pins[id] = append(a.pins[id], p)
+}
+
+// expire drops the judgements and kept pins made before old, except
+// those of an intent the journal lists as in use: authorized, in flight,
+// unknown, or succeeded since old. One of those may still be executed or
+// reconciled, and dropping its judgement could leave a later refused
+// recheck's as the only one its attempt takes (SR3-5-f2b). Without the
+// journal hook no intent is known to be settled, so none expires. The
+// caller holds a.mu.
+func (a *Adapter) expire(old time.Time) {
+	stale := false
+	for _, xs := range a.pins {
+		for _, x := range xs {
+			stale = stale || x.at.Before(old)
+		}
+	}
+	for _, x := range a.judged {
+		stale = stale || x.at.Before(old)
+	}
+	if !stale || a.cfg.InUse == nil {
+		return
+	}
+	live := map[string]bool{}
+	for _, o := range ops {
+		if !pinned(o) {
+			continue
+		}
+		for _, u := range a.cfg.InUse(o.Name, old) {
+			if u.Intent.Account == a.cfg.Account {
+				live[u.Intent.ID] = true
+			}
+		}
+	}
 	for k, xs := range a.pins {
+		if live[k] {
+			continue
+		}
 		kept := xs[:0]
 		for _, x := range xs {
 			if !x.at.Before(old) {
@@ -633,12 +677,15 @@ func (a *Adapter) setPin(id string, p pin) {
 		}
 	}
 	for k, x := range a.judged {
-		if x.at.Before(old) {
+		if !live[k.id] && x.at.Before(old) {
 			delete(a.judged, k)
 		}
 	}
-	a.pins[id] = append(a.pins[id], p)
 }
+
+// pinned reports whether o's effects are pinned to the message Escalate
+// judged: organize, trash and spam.
+func pinned(o Op) bool { return o.Verb == verb.Organize || o.Verb == verb.DeleteRemote }
 
 // takePin removes intent id's judgements, so one Execute consumes them,
 // and returns the one they agree on. It reports false when there are
@@ -667,14 +714,14 @@ func (a *Adapter) takePin(id string) (pin, bool) {
 func (a *Adapter) keepJudged(id string, attempt int, p pin) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.judged[fmt.Sprint(id, "#", attempt)] = p
+	a.judged[attemptKey{id, attempt}] = p
 }
 
 // takeJudged returns and removes the pin an attempt ran under.
 func (a *Adapter) takeJudged(id string, attempt int) (pin, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	k := fmt.Sprint(id, "#", attempt)
+	k := attemptKey{id, attempt}
 	p, ok := a.judged[k]
 	delete(a.judged, k)
 	return p, ok
