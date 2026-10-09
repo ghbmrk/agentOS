@@ -626,7 +626,7 @@ if os.getresuid() != (%(id)d,) * 3 or os.getresgid() != (%(id)d,) * 3 or os.getg
     sys.exit("depaudit: still holds another id")
 os.execvp(sys.argv[1], sys.argv[1:])
 """ % {"id": SCENARIO_ID}
-AS_SCENARIO = [sys.executable, "-I", "-S", "-c", _AS_SCENARIO]
+AS_SCENARIO = [sys.executable, "-I", "-S", "-c", "import os, sys; os.execvp(sys.argv[1], sys.argv[1:])"]
 
 
 def _io_uring_disabled():
