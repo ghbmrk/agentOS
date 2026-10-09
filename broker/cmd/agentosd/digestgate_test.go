@@ -36,6 +36,10 @@ var deliverAllowed = map[string]string{
 //   - cfg.Inform is only assigned in main and called in sendOutage, which
 //     takes no parameters and calls it once with digestOutageLine, the
 //     line no other function names (bar digestLineTexts);
+//   - a Sender's Send is called only in digestBox.sendReady, which holds
+//     the cmd-side filters, and the snd field is only selected through or
+//     assigned in digest.go; the box's render is only NewSender's
+//     argument in openLocked, so its text goes nowhere else;
 //   - a batch's Snapshots and Lines are read only in digest.go's render,
 //     carrier and refersTo (Lines in render only).
 //
@@ -103,6 +107,12 @@ func digestGate(files map[string]string) []string {
 						!(path == "cmd/agentosd/main.go" && name == "main" && isAssigned(parent, n)) &&
 						!(digest && name == "sendOutage"):
 						bad = append(bad, path+": Inform in "+full)
+					case agentosd && sel == "Send" && isSnd(n.X) && !(digest && full == "digestBox.sendReady"):
+						bad = append(bad, path+": Sender.Send in "+full)
+					case agentosd && sel == "snd" && !isSelectorX(parent, n) && !(digest && isLhs(parent, n)):
+						bad = append(bad, path+": snd copied in "+full)
+					case agentosd && sel == "render" && !(digest && name == "openLocked" && isNewSenderArg(parent, n)):
+						bad = append(bad, path+": render in "+full)
 					case agentosd && sel == "Snapshots" && !(digest && (name == "render" || name == "carrier" || name == "refersTo")):
 						bad = append(bad, path+": Snapshots in "+full)
 					case agentosd && sel == "Lines" && !(digest && name == "render"):
@@ -110,7 +120,7 @@ func digestGate(files map[string]string) []string {
 					}
 				case *ast.Ident:
 					switch {
-					case n.Name == "newDigestTransport" && fn != nil && name != "newDigestTransport" &&
+					case n.Name == "newDigestTransport" && !(digest && name == "newDigestTransport") &&
 						!(path == "cmd/agentosd/main.go" && name == "main"):
 						bad = append(bad, path+": newDigestTransport in "+full)
 					case n.Name == "digestTransport" && !(digest && (name == "newDigestTransport" || recvIs(fn, "digestTransport"))):
@@ -201,6 +211,26 @@ func isAssigned(parent ast.Node, n ast.Expr) bool {
 	return ok && a.Tok == token.ASSIGN && len(a.Lhs) == 1 && a.Lhs[0] == n
 }
 
+// isSnd reports whether x is a selector ending in .snd (d.snd).
+func isSnd(x ast.Expr) bool {
+	s, ok := x.(*ast.SelectorExpr)
+	return ok && s.Sel.Name == "snd"
+}
+
+// isLhs reports whether n is on the left side of an assignment.
+func isLhs(parent ast.Node, n ast.Expr) bool {
+	a, ok := parent.(*ast.AssignStmt)
+	if !ok {
+		return false
+	}
+	for _, l := range a.Lhs {
+		if l == n {
+			return true
+		}
+	}
+	return false
+}
+
 // isNewSenderArg reports whether n is an argument to
 // digestqueue.NewSender.
 func isNewSenderArg(parent ast.Node, n ast.Expr) bool {
@@ -258,7 +288,7 @@ func TestDigestGate(t *testing.T) {
 
 // Each case is a bypass the gate must catch, including every mutant from
 // security 4a (6079804454, M1-M4) and L3 (6079813426, M1-M5) on #592.
-// REQ: OP-2, OP-9
+// REQ: OP-2, OP-9 (W5-Dc-r11)
 func TestDigestGateCatchesViolations(t *testing.T) {
 	const pre = "package main\n"
 	cases := map[string]map[string]string{
@@ -289,6 +319,22 @@ func TestDigestGateCatchesViolations(t *testing.T) {
 		"L3 M5 inform in another file": {"cmd/agentosd/leak.go": pre + "func (d *D) leak(t string) { d.cfg.Inform(t) }\n"},
 		"transport asserted": {"cmd/agentosd/leak.go": pre +
 			"func (d *D) leak(t T) { t.(digestTransport).send(\"o\", \"t\") }\n"},
+		"W5-Dc-r11 send outside sendReady": {"cmd/agentosd/digest.go": pre +
+			"func (d *D) daily(ctx C, id int) { d.snd.Send(ctx, id) }\n"},
+		"W5-Dc-r11 send in another file": {"cmd/agentosd/leak.go": pre +
+			"func (d *D) leak(ctx C, id int) { d.snd.Send(ctx, id) }\n"},
+		"W5-Dc-r11 snd aliased": {"cmd/agentosd/digest.go": pre +
+			"func (d *D) sendReady(ctx C, id int) { s := d.snd; s.Send(ctx, id) }\n"},
+		"W5-Dc-r11 render to an informer": {"cmd/agentosd/digest.go": pre +
+			"func (d *D) daily(b B) { s, _ := d.render(b); d.cfg.Inform(s) }\n"},
+		"W5-Dc-r11 render method value": {"cmd/agentosd/digest.go": pre +
+			"func (d *D) daily() { f := d.render; _ = f }\n"},
+		"W5-Dc-r11 render passed on in openLocked": {"cmd/agentosd/digest.go": pre +
+			"func (d *D) openLocked() { other(d.render) }\n"},
+		"W5-Dc-r11 package-level transport": {"cmd/agentosd/learn.go": pre +
+			"var tr = newDigestTransport(nil, \"o\")\n"},
+		"W5-Dc-r11 transport in a var block": {"cmd/agentosd/digest.go": pre +
+			"var (\n\ttr = newDigestTransport(nil, \"o\")\n)\n"},
 		"deliver method value": {"cmd/agentosd/leak.go": pre + "func leak(t T) { f := t.Deliver; _ = f }\n"},
 	}
 	for name, files := range cases {
