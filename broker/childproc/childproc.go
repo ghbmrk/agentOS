@@ -37,6 +37,16 @@ var allowedKeys = map[string]string{
 	"GOCACHE": "Go fuzz and probe binaries (loop7, probecmd): off, so no cache outside scratch",
 	"GOFLAGS": "Go fuzz and probe binaries (loop7, probecmd): empty, so no flags from outside",
 	"LANG":    "the browser driver (browser): C.UTF-8, so page text decodes the same everywhere",
+	// The guest runtime the guest bridge starts (agentos-guest-bridge).
+	// Both run in the guest, where no AGENTOS_* variable exists; the
+	// values are the guest's own (guest/openclaw/launch.json).
+	"OPENCLAW_GATEWAY_TOKEN":   "guest runtime: the bridge's fresh guest-local gateway token, valid in that guest only",
+	"OPENCLAW_CONFIG_PATH":     "guest runtime: its read-only configuration file",
+	"OPENCLAW_CONFIG_READONLY": "guest runtime: S4 defence in depth (ARC-7), configuration not writable",
+	"OPENCLAW_NO_AUTO_UPDATE":  "guest runtime: S4 defence in depth (ARC-7), no self-update",
+	"OPENCLAW_DISABLE_BONJOUR": "guest runtime: S4 defence in depth (ARC-7), no mDNS",
+	"OPENCLAW_CLAWHUB_URL":     "guest runtime: ClawHub pointed at a closed port (S4 finding 7)",
+	"DO_NOT_TRACK":             "guest runtime: no telemetry",
 }
 
 // deniedPrefix names agentosd's own configuration, the owner's number
