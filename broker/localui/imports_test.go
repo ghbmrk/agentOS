@@ -15,10 +15,13 @@ import (
 // package (#50 security C2, L15). The vault process serves the mailbox
 // (egress K18), whose IMAP client and message types bring x/text in, so
 // there x/text may enter only through those two importers: any other
-// importer, the decoder's included, fails.
+// importer, the decoder's included, fails. agentosd links mail for the
+// organize adapter (SR3-mail-w2 W2-f), so there mail alone may bring it.
 func TestDaemonAndVaultProcessLinkNoScanner(t *testing.T) {
 	textVia := map[string]map[string]bool{
-		"../cmd/agentosd": {},
+		"../cmd/agentosd": {
+			"github.com/ghbmrk/agentos/broker/mail": true,
+		},
 		"../cmd/agentos-egress": {
 			"github.com/emersion/go-imap/utf7":      true,
 			"github.com/ghbmrk/agentos/broker/mail": true,
