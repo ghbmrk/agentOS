@@ -390,6 +390,12 @@ type Pipeline struct {
 	// from one and still in flight is never adopted (C23). In memory: a
 	// restarted Loop 1 builds nothing from a forgotten goal.
 	gone map[string]bool
+	// withdrawer is the update applier, set by the wiring (SetWithdrawer);
+	// withdrawn holds the staged adoptions it gave up, so their revert
+	// may run (SR3-4f-2a). In memory: after a restart the revert is asked
+	// again, and Withdraw answers the same.
+	withdrawer Withdrawer
+	withdrawn  map[string]bool
 }
 
 // New loads the persisted state, or seeds it on first start, and applies

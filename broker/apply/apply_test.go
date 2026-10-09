@@ -378,10 +378,12 @@ func TestRestartWaitsForTheBoxToBeFreeAfterTheSlotWrite(t *testing.T) {
 	}
 }
 
+// An ordinary release: a security fix fails closed after a process
+// restart instead (SR3-4f-2c).
 func TestBrokerStoppedBeforeTheRestartRestartsLater(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
-	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.a.Schedule(r.release(1, false), "a1"))
 	id := r.a.nextID(1)
 	in, err := r.a.intent(ctx, id)
 	r.must(err)
@@ -446,10 +448,11 @@ func TestTalkHoldsASecurityFixForAtMostTwoHours(t *testing.T) {
 func TestStopHoldsTheRestart(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
-	rel := r.release(1, true)
+	rel := r.release(1, false) // a security fix fails closed after a process restart (SR3-4f-2c)
 	r.act0 = slowActivator{r.act, func() { r.stopped = true }}
 	r.restart()
 	r.must(r.a.Schedule(rel, "a1"))
+	r.clk.add(7 * time.Hour) // past the jitter
 	if ok, _ := r.a.Tick(ctx); ok || r.act.restarts != 0 || len(r.act.installed) != 1 {
 		t.Fatal("restarted after STOP during the slot write")
 	}

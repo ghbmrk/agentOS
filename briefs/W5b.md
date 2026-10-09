@@ -6,6 +6,8 @@ Loop 3 update checks (#53) as a scheduler Source: PM1 (a hidden security release
 
 **Precondition:** #53 merged, W3, network state (P2-3 modem or Wi-Fi), and the before-W5b follow-ups merged: SR3-4-f2 and f5 (package SR3-4f-1), SR3-4-f3, f4 and SR3-6-f3 (SR3-4f-2), SR3-6-f1 (SR3-6f-1). Those packages add their wiring lines to this brief.
 
+**Wiring from SR3-4f-2:** call the pipeline's `SetWithdrawer` with the applier, and pass the pipeline (with `StageDropped`) as the applier's `Stager`; with `Withdrawer` nil, UNDO of a staged update stays refused on the live box. `Schedule` takes the adoption's exact ID from Loop 3's `ProposeRelease` report (`Report.ID`, new for each adoption) and refuses one already dropped or withdrawn (`apply.ErrRetired`). Loop 3 offers a dropped release again only once SR3-4f-2-r1 lands.
+
 **Owner:** Loop 3 thread (P3-5)
 
 **State on the board before the 2026-10-08 index split:** queued
