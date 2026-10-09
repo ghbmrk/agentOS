@@ -398,7 +398,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.Grants.ForgetItem = l.forgetOwner.Item
 	cfg.Grants.ForgetAgentItem = l.forgetOwner.AgentItem
 	cfg.Settings = l.settings
-	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status)
+	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status, l.forgetOwner.Note)
 	cfg.Narrows = l.sched.Narrows
 	cfg.HelpExtra = loops.HelpLine
 	// The owner's verdicts on the agent's effects become Loop 1's cases
@@ -814,6 +814,8 @@ func (l *learning) openEvaluator(m *vm.Manager, services *lateServices, c evalCo
 			// ev is set before any replay machine exists: machines
 			// start only through Run, after New returns.
 			OverCeiling: func(id string) { ev.OverPriceCeiling(id) },
+			// Retries stays nil (MaxRetries): a tree's rule under
+			// evaluation is not a reordering of the owner's (SR3-7-f2).
 		}))
 	}
 	ev, err := replay.New(rc)
