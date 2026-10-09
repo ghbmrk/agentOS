@@ -587,6 +587,29 @@ class MountinfoTest(unittest.TestCase):
         self.assertEqual(depaudit.writable_mounts("20 1 0:1 / /proc rw - proc proc rw\n", ["/"], [],
                                                   lambda mp: True), ["/proc"])
 
+    def statvfs(self, result):
+        def fake(path):
+            if isinstance(result, Exception):
+                raise result
+            return mock.Mock(f_flag=result)
+        return mock.patch.object(depaudit.os, "statvfs", fake)
+
+    def test_a_mount_point_that_no_longer_resolves_is_not_reachable(self):
+        with self.statvfs(FileNotFoundError(errno.ENOENT, "gone")):
+            self.assertFalse(depaudit._reaches_rw("/k/sub"))
+
+    def test_any_other_lookup_error_counts_as_writable(self):
+        for err in (PermissionError(errno.EACCES, "denied"), NotADirectoryError(errno.ENOTDIR, "x"),
+                    OSError(errno.EIO, "io")):
+            with self.subTest(err=err), self.statvfs(err):
+                self.assertTrue(depaudit._reaches_rw("/k/sub"))
+
+    def test_a_path_that_lands_on_a_read_only_mount_is_not_reachable_rw(self):
+        with self.statvfs(os.ST_RDONLY | os.ST_NOSUID):
+            self.assertFalse(depaudit._reaches_rw("/k/sub"))
+        with self.statvfs(os.ST_NOSUID):
+            self.assertTrue(depaudit._reaches_rw("/k/sub"))
+
 
 @unittest.skipUnless(depaudit.sandbox_available(), "needs user+net namespaces and strace")
 class StraceNamesTest(unittest.TestCase):
