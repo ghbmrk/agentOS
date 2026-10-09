@@ -257,7 +257,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-4f-1 l3 | L3 on #597, point 5 (6080061267): a legacy rollback point with empty `ToManifest` is keyed differently in `Resume`'s `unrecordedLast`, so at the bound it shows the not-handed line while `Schedule` refuses it |
 | SR3-4f-1 l4 | UX on #597, L1 (6080675106): `broker/apply` A11's "record" wording in the unrecorded line; reword it when SR3-4f-r2's retry control is built |
 | SR3-4f-1 l5 | UX on #597, L2 (6080675106): `otherRootText` could offer a restart when the installed release is a security fix |
-| SR3-4f-1 l6 | UX on #597, L3 (6080675106): the digest's "installed" wording for the other-root line reads wrong on a later boot |
+| SR3-4f-1 l6 | UX on #597, L3 (6080675106): the digest's "installed" wording for the other-root line reads wrong on a later boot; done in SR3-4f-r1 (#647), pinned by `TestOtherRootLineHoldsInLaterBoots` |
 | SR3-4f-1 l7 | UX on #597, L4 (6080675106): if `ErrRefused`'s text is ever shown in the digest, it must go through the plain-name map |
 | SR3-4f-2 l1 | Builder on SR3-4f-2: an ID in the applier's `Dropped` that the pipeline refuses for good (the adoption is already `Confirmed`) is called again at every `Tick`; no path drops a confirmed adoption today, but clear it on that refusal. Not true since #605: a `Withdraw` that races `Resume`'s `ConfirmStaged` saves a `Confirmed` ID into `Dropped` (L3 delta on #605, point 1, comment 6082323037); now row SR3-4f-2-r2 (package SR3-4f-3) |
 | SR3-4f-2 l2 | Builder on SR3-4f-2: the applier's `Retired` list is never pruned (one short ID per drop or withdraw); prune IDs the pipeline reports reverted once that can be asked |
