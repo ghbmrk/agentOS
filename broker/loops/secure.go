@@ -710,12 +710,43 @@ func (s *Guard) save() error {
 // textBudget is three SMS segments (CH-15).
 const textBudget = 3 * 153
 
+// counted is a line that stood for n findings, with the count in plain
+// words when n > 1 (P3-4b-4c-dedupe, S53).
+func counted(line string, n int) string {
+	if n > 1 {
+		return fmt.Sprintf("%s (%d times)", line, n)
+	}
+	return line
+}
+
+// distinct collapses identical lines in first-seen order, each counted:
+// the key is the whole final line, so lines differing in any word stay
+// apart.
+func distinct(lines []string) []string {
+	at := map[string]int{}
+	var out []string
+	var n []int
+	for _, l := range lines {
+		if i, ok := at[l]; ok {
+			n[i]++
+			continue
+		}
+		at[l] = len(out)
+		out, n = append(out, l), append(n, 1)
+	}
+	for i := range out {
+		out[i] = counted(out[i], n[i])
+	}
+	return out
+}
+
 // batch joins a pass's lines into one text within textBudget, holding the
-// rest for MORE.
+// rest for MORE. Identical lines are said once, with their count.
 func (s *Guard) batch(lines []string) string {
 	if len(lines) == 0 {
 		return ""
 	}
+	lines = distinct(lines)
 	const tail = " Reply MORE for the rest."
 	text := "Security checks:"
 	n := 0
@@ -1699,8 +1730,21 @@ func (s *Guard) Digest() []string {
 	type item struct {
 		high bool
 		line string
+		n    int
 	}
 	var items []item
+	at := map[string]int{}
+	// add groups items by their final line before the sort and cap, so
+	// identical lines take one slot and "And N more" counts distinct ones.
+	add := func(high bool, line string) {
+		if i, ok := at[line]; ok {
+			items[i].high = items[i].high || high
+			items[i].n++
+			return
+		}
+		at[line] = len(items)
+		items = append(items, item{high, line, 1})
+	}
 	pkgs := map[string][]Record{}
 	for _, id := range sortedKeys(s.st.Open) {
 		r := s.st.Open[id]
@@ -1715,7 +1759,7 @@ func (s *Guard) Digest() []string {
 		if why := s.waitingLocked(r); why != "" {
 			line += " It " + waitForAFixOf + why + "."
 		}
-		items = append(items, item{r.Finding.Severity == High, line})
+		add(r.Finding.Severity == High, line)
 	}
 	for _, name := range sortedKeys(pkgs) {
 		rs := pkgs[name]
@@ -1724,7 +1768,7 @@ func (s *Guard) Digest() []string {
 			if rs[0].Again {
 				line = "Again: " + line
 			}
-			items = append(items, item{rs[0].Finding.Severity == High, line})
+			add(rs[0].Finding.Severity == High, line)
 			continue
 		}
 		high, fixed := false, ""
@@ -1738,8 +1782,8 @@ func (s *Guard) Digest() []string {
 				fixed = r.Finding.Fixed
 			}
 		}
-		items = append(items, item{high, fmt.Sprintf("Known vulnerabilities in %s (%s), all fixed in %s. I take the fix when an update has it.",
-			safeName(name), strings.Join(ids, ", "), safeVersion(fixed))})
+		add(high, fmt.Sprintf("Known vulnerabilities in %s (%s), all fixed in %s. I take the fix when an update has it.",
+			safeName(name), strings.Join(ids, ", "), safeVersion(fixed)))
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].high && !items[j].high })
 	var out []string
@@ -1748,7 +1792,7 @@ func (s *Guard) Digest() []string {
 			out = append(out, fmt.Sprintf("And %d more security findings: ask your agent for the list.", len(items)-digestCap))
 			break
 		}
-		out = append(out, "Security check: "+it.line)
+		out = append(out, "Security check: "+counted(it.line, it.n))
 	}
 	for _, k := range sortedKeys(s.st.Paused) {
 		r := s.st.Paused[k]

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -984,4 +985,153 @@ func TestThePassiveCadenceOutlivesParking(t *testing.T) {
 	if ran, _ := r.s.Tick(context.Background()); !ran {
 		t.Fatal("the passive pass waited out the park")
 	}
+}
+
+// corpusMisses is n corpus findings on one check, one per test item, as
+// CorpusProbe.Run makes them (#589 UX).
+func corpusMisses(n int) []Finding {
+	var out []Finding
+	for i := range n {
+		out = append(out, Finding{Check: CheckCorpus, Severity: High, Subject: fmt.Sprintf("promptinject/item-%d", i), Detail: "code filter"})
+	}
+	return out
+}
+
+// REQ: LOOP-9
+//
+// P3-4b-4c-dedupe 1: batch says each distinct final line once, in
+// first-seen order, with the number of findings it stands for; a line
+// said once carries no count, and MORE holds every distinct line left.
+func TestBatchSaysEachDistinctLineOnceWithItsCount(t *testing.T) {
+	g := newReportRig(t, nil).g
+	corpus := ownerLine(Record{Finding: corpusMisses(1)[0], Contained: "none"})
+	t.Run("ten corpus misses are one counted line", func(t *testing.T) {
+		var lines []string
+		for _, f := range corpusMisses(10) {
+			lines = append(lines, ownerLine(Record{Finding: f, Contained: "none"}))
+		}
+		text := g.batch(lines)
+		if want := "Security checks: " + corpus + " (10 times)"; text != want {
+			t.Fatalf("text %q, want %q", text, want)
+		}
+		if more := g.More(); len(more) != 0 {
+			t.Fatalf("MORE holds %q", more)
+		}
+	})
+	t.Run("two different lines both appear", func(t *testing.T) {
+		other := ownerLine(Record{Finding: fuzzFinding(), Contained: "none"})
+		text := g.batch([]string{corpus, other, corpus})
+		if want := "Security checks: " + corpus + " (2 times) " + other; text != want {
+			t.Fatalf("text %q, want %q", text, want)
+		}
+	})
+	t.Run("a single line has no count", func(t *testing.T) {
+		if text := g.batch([]string{corpus}); text != "Security checks: "+corpus {
+			t.Fatalf("text %q", text)
+		}
+	})
+	t.Run("MORE holds every distinct line once", func(t *testing.T) {
+		var lines, distinct []string
+		for i := range 8 {
+			l := fmt.Sprintf("Line %d is long enough that three of them fill most of one text on its own, and then some more words.", i)
+			distinct = append(distinct, l)
+			lines = append(lines, l, l)
+		}
+		text := g.batch(lines)
+		if !strings.HasSuffix(text, " Reply MORE for the rest.") {
+			t.Fatalf("no MORE: %q", text)
+		}
+		all := text + " " + strings.Join(g.More(), " ")
+		for _, l := range distinct {
+			if n := strings.Count(all, l+" (2 times)"); n != 1 {
+				t.Errorf("%q said %d times across the text and MORE: %q", l, n, all)
+			}
+		}
+	})
+}
+
+// REQ: LOOP-9
+//
+// P3-4b-4c-dedupe 2: the digest groups open findings by their final line
+// before it sorts and caps, so identical lines take one slot and "And N
+// more" counts distinct lines left out.
+func TestDigestDedupesBeforeItsCap(t *testing.T) {
+	security := func(d []string) (lines []string, more string) {
+		for _, l := range d {
+			switch {
+			case strings.HasPrefix(l, "Security check: "):
+				lines = append(lines, l)
+			case strings.HasPrefix(l, "And "):
+				more = l
+			}
+		}
+		return lines, more
+	}
+	r := newReportRig(t, nil)
+	for _, f := range corpusMisses(10) {
+		r.report(t, f)
+	}
+	a := fuzzFinding()
+	b := leak("t1", "G1")
+	r.report(t, a)
+	r.report(t, b)
+	lines, more := security(r.g.Digest())
+	corpus := "Security check: " + ownerLine(r.mustOpenFor(t, corpusMisses(1)[0])) + " (10 times)"
+	if len(lines) != 3 || more != "" || !slices.Contains(lines, corpus) {
+		t.Fatalf("digest lines %q, more %q; want the counted corpus line and two others", lines, more)
+	}
+	t.Run("the cap applies to distinct lines", func(t *testing.T) {
+		c := fuzzFinding()
+		c.Subject = "mail.FuzzParse"
+		r.report(t, c)
+		lines, more := security(r.g.Digest())
+		if len(lines) != digestCap || more != "And 1 more security findings: ask your agent for the list." {
+			t.Fatalf("digest lines %q, more %q", lines, more)
+		}
+	})
+}
+
+// REQ: LOOP-9
+//
+// P3-4b-4c-dedupe 2, Potency on #634: a line shared by a Low and a High
+// finding ranks as High whichever is seen first, so the cap never drops
+// it behind other Highs.
+func TestADigestLineSharedWithAHighFindingRanksHigh(t *testing.T) {
+	for _, ids := range [][2]string{{"a-low", "b-high"}, {"b-low", "a-high"}} {
+		t.Run(ids[0]+","+ids[1], func(t *testing.T) {
+			r := newReportRig(t, nil)
+			low, high := corpusMisses(2)[0], corpusMisses(2)[1]
+			low.Severity, low.ID, high.ID = Low, ids[0], ids[1]
+			recs := []Record{{Finding: low, Contained: "none"}, {Finding: high, Contained: "none"}}
+			for i, sub := range []string{"sockets.FuzzRequest", "mail.FuzzParse", "control.FuzzParse"} {
+				f := fuzzFinding()
+				f.Subject, f.ID = sub, fmt.Sprintf("c-high-%d", i)
+				recs = append(recs, Record{Finding: f, Contained: "none"})
+			}
+			r.g.mu.Lock()
+			for _, rec := range recs {
+				r.g.st.Open[rec.Finding.ID] = rec
+			}
+			r.g.mu.Unlock()
+			d := r.g.Digest()
+			shared := "Security check: " + ownerLine(recs[0]) + " (2 times)"
+			if len(d) < 1 || d[0] != shared {
+				t.Fatalf("digest %q: the shared line is not first among the Highs", d)
+			}
+		})
+	}
+}
+
+// mustOpenFor is the open record Report made for f.
+func (r *reportRig) mustOpenFor(t *testing.T, f Finding) Record {
+	t.Helper()
+	r.g.mu.Lock()
+	defer r.g.mu.Unlock()
+	for _, rec := range r.g.st.Open {
+		if rec.Finding.Check == f.Check && rec.Finding.Subject == f.Subject && rec.Finding.Detail == f.Detail {
+			return rec
+		}
+	}
+	t.Fatalf("no open record for %+v", f)
+	return Record{}
 }
