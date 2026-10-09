@@ -208,7 +208,12 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ProbeResult{}, err
 	}
-	if d, err := targetDigest(p.Control.Path); err == nil && string(d) == string(control) {
+	switch d, err := targetDigest(p.Control.Path); {
+	case errors.Is(err, fs.ErrNotExist):
+		// Removed from inside the machine is changed.
+	case err != nil:
+		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
+	case string(d) == string(control):
 		return ProbeResult{}, errors.New("tamper probe: the control did not change: the guest's writes did not run")
 	}
 	after := make([][]byte, len(p.Targets))
@@ -237,8 +242,11 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 }
 
 // targetDigest is treeDigest of path and, for anything but a directory,
-// the names in its parent directory, so a sibling the guest's write
-// created beside a file target is a change (P3-4b-4c-restore).
+// the tamper-sibling names in its parent directory, so a sibling the
+// guest's write created beside a file target is a change
+// (P3-4b-4c-restore). Other names there are left out: the broker may
+// write beside a target it does not hold (#584 L3 1), and a replaced
+// target still changes treeDigest.
 func targetDigest(path string) ([]byte, error) {
 	d, err := treeDigest(path)
 	if err != nil {
@@ -254,7 +262,9 @@ func targetDigest(path string) ([]byte, error) {
 	h := sha256.New()
 	h.Write(d)
 	for _, e := range ents {
-		fmt.Fprintf(h, "%q\n", e.Name())
+		if strings.HasPrefix(e.Name(), tamperSibling("")) {
+			fmt.Fprintf(h, "%q\n", e.Name())
+		}
 	}
 	return h.Sum(nil), nil
 }

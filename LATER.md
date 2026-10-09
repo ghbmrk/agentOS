@@ -386,6 +386,12 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4b l6 | Security 4a and L3 deltas on #548: each round leaves one more `.agentos-tamper-<nonce>` marker file in a directory target that stays writable; bounded by rounds x targets while a High finding is open; cleanup is the owner's remediation |
 | P3-4b-4b l7 | L3 delta on #548: `loops.tamperNonce` (regexp) in `machine.go` is used only by tests; move it to the test file or use it to check `newTamperNonce`'s output |
 | P3-4b-4b l8 | Security 4a delta 1 on #548 (predates the fix; covered by release row P3-4b-4c-fresh): a probe guest that skips its scripted writes still closes an open tamper finding; if the probe image is ever shared with agent code, closing must need a broker-side write check (a canary the broker plants and verifies through the same mount) |
+| P3-4b-4c-tamper l1 | UX 1 on #584: a failed probe round reads "tamper tests, failed" with no cause (control unchanged, reused machine, quiesce); give `NotRun`/`ProbeFailed` a plain cause string as `cfg.NotRun` has |
+| P3-4b-4c-tamper l2 | UX 2 on #584: STATUS lines are third person ("Loop 2: ...") across loops; existing wording |
+| P3-4b-4c-tamper l3 | L3 4 on #584: `removeSiblings` ignores errors and `os.Stat`s through a symlink to choose the directory; log failed removals and use `Lstat` |
+| P3-4b-4c-tamper l4 | L3 5 and Potency 3 on #584: the gVisor test's control is the machine's whole upper layer; P3-4b-4c's wiring test should use a dedicated control mount and pin sibling removal |
+| P3-4b-4c-tamper l5 | Security 4 on #584: `lastMachine` checks only the last round (X, Y, X passes) and trusts the ID the wiring gives; P3-4b-4c should pass a handle the broker mints when it creates the machine from the signed image |
+| P3-4b-4c-tamper l6 | Security 5 on #584: a nil `Quiesce` is allowed silently (false Highs from broker writes, never false clears); have the wiring refuse a target it writes without `Quiesce`, or log it |
 | SR3-5-f1 l1 | Delta L3 on #571 (comment 6078264771): a pin is never cleared for an intent that is denied or never dispatched; pins live in memory, so a restart drops them |
 
 ## Reuse candidates

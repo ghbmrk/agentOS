@@ -426,6 +426,29 @@ func TestAReadOnlyTargetGivesNoFinding(t *testing.T) {
 	}
 }
 
+// LOOP-7 broker writes beside a file target (#584 L3 1): a broker write of
+// another entry in a file target's directory during the round (a temp
+// file, a journal) is not tamper, though Quiesce holds only the target's
+// own writers; a tamper sibling there still is.
+func TestAnUnrelatedWriteBesideAFileTargetIsNotTamper(t *testing.T) {
+	var x *tamperRig
+	x = newTamperRig(t, func(string, []string) error {
+		return os.WriteFile(filepath.Join(x.dir, "grader.json.tmp"), []byte("{}"), 0o600)
+	})
+	res, err := x.probe.Run(context.Background())
+	if err != nil || len(res.Found) != 0 {
+		t.Fatalf("an unrelated write beside the grader: %+v %v", res, err)
+	}
+	x.attempt = func(nonce string, _ []string) error {
+		machprobe.Tamper(nonce, []string{filepath.Join(x.dir, "grader.json")})
+		return nil
+	}
+	res, err = x.probe.Run(context.Background())
+	if err != nil || len(res.Found) != 1 || res.Found[0].Subject != "grader" {
+		t.Fatalf("a tamper sibling beside the grader: %+v %v", res, err)
+	}
+}
+
 // LOOP-7 broker writes (P3-4b-4c-attrib, L3 #548 point 2): a broker writer
 // that changes a target during the round (a checkpoint into snapshots)
 // is a false High without Quiesce, the control for this test, and none
