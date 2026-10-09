@@ -61,7 +61,7 @@ must surface that hold, not acknowledge an expired batch or invent a successful
 send. Compact keeps a cancelled or failed batch while any source is
 unacknowledged, so recovery keeps blocking instead of wedging the source; an
 expired batch is dropped once no ledger entry points to it (W5-Db). Capacity includes unresolved/history records until
-explicit compaction. Source ledger capacity remains bounded and is never silently
+explicit compaction, except dead batches below. Source ledger capacity remains bounded and is never silently
 evicted; exhaustion requires visible recovery and an explicit migration policy.
 
 Forget prechecks all matching batches and refuses without mutation if any matching
@@ -72,7 +72,7 @@ dates and Late, so its STATUS line and the next digest's line about it stay
 (OP-9, CH-15); validate admits Redacted on Unknown as on terminal states, finish
 refuses any redacted batch (ErrState) and begin already does, so it is never
 resent or revived, and Compact keeps it, as it keeps every unknown batch
-(W5-Dc-r7). The source duty below holds for it too: a re-offer of the forgotten
+(W5-Dc-r7), until Enqueue evicts it for room (W5-Dc-r9 below). The source duty below holds for it too: a re-offer of the forgotten
 generation is ErrConflict, a higher generation is admitted. Redacting an unknown batch whole while keeping its state is a
 reading CAP-3 supports, not one SPEC states: its text is a derived copy nothing
 renders again, and a text the owner may already have is an action already taken.
@@ -170,7 +170,10 @@ quiet-hours, pacing, reservation, disclosure and authority checks separately.
   loads it and purges it before any send, no Ready batch holding it is sent
   meanwhile, and it is dropped once the queue's Forget holds. The hold so does
   not depend on boot order or on the forget owner's owed file (security B2' on
-  #592). agentosd starts the digest after the forget owner's start-up replay.
+  #592). Every open also asks the queue to forget each tombstoned goal and
+  stays down until each holds, so a stop between the tombstone and the purge
+  with the owed save failed too sends nothing (W5-Dc-r12).
+  agentosd starts the digest after the forget owner's start-up replay.
   If the state store also fails, the hold is in memory only until a restart.
   The box sends under its lock, so its own forget never sees a Sending batch:
   with the queue open, only a store refusal (which breaks the queue until the
@@ -188,6 +191,18 @@ quiet-hours, pacing, reservation, disclosure and authority checks separately.
   sendOutage takes no parameters and informs only digestOutageLine; Batch
   Snapshots and Snapshot Lines are read only in render, carrier and refersTo.
 
+- Quiet hours (CH-15, W5-Dc-r1b QH-7): `sendReady` sends nothing while the
+  owner's quiet hours hold (`digestConfig.Quiet`, the owner channel's
+  `Quiet`); the batch stays Ready and the first step after they end sends it,
+  not the next 30-minute retry. The digest never reads the hourly allowance
+  (SG-r1-6). With the setting unchanged a wait cannot pass the batch's
+  Expires: quiet hours are under 24 hours, a batch due in them is made at the
+  digest time, and Expires is the next day's digest time, so the window ends
+  first. A setting widened while a batch waits can pass it; then the existing
+  Late path sends that day's digest once, as a late digest, before the next
+  day's (TestDigestWaitsForQuietHoursToEnd). If quiet hours end just before
+  the digest time, the held digest and the new one go minutes apart.
+
 ## Remaining integration packages
 
 - Source adapters: change/owner/question notices with persisted generations and
@@ -202,3 +217,24 @@ quiet-hours, pacing, reservation, disclosure and authority checks separately.
 
 The current modemlink lossy outage behavior is unchanged. No auto-reply timing or
 owner-visibility evidence is replaced by this queue.
+
+Dead batches give way to today's digest (W5-Dc-r9). A dead batch can never be
+sent again and is kept only so a caller can name it: Unknown (redacted or not),
+or Ready, Late and not before its Expires at the new batch's created time (held
+again after one re-arm). Enqueue appends the new batch, then, while the new state
+holds more than MaxBatches batches or its JSON passes MaxBytes, removes the
+lowest-ID dead batch; if none is left and it still does not fit, ErrFull and the
+store is unchanged. Eviction and admission are one save. With room, nothing is
+evicted, so STATUS and the digest name every dead batch as long as it exists
+(OP-9); one goes only when the alternative is refusing today's digest (CH-15
+outranks keeping an old notice). Seq and every Latest entry stay, so a re-offer
+of an evicted batch's generation is ErrRetired (or ErrConflict for an older one):
+eviction removes text and never revives or resends it (CAP-3). Its sources are
+all acknowledged (validate and Late require it), so none is wedged. Assumed:
+Enqueue's created is the caller's now (agentosd Collect passes it); a created in
+the past only makes fewer late batches dead. Sending, Ready not dead, terminal
+and held-not-yet-late batches are never evicted here; terminal ones are
+Compact's. Rejected: age-based retention in Compact (needs a horizon SPEC does
+not give and still fills with more dead batches than MaxBatches inside it); a
+caller Retire after the line is carried (a carrier that keeps going Unknown never
+carries it); moving dead batches to Cancelled (claims not sent, loses the line).

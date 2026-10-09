@@ -2,6 +2,8 @@
 
 A recurring review of the owner-facing experience (onboarding and everyday use) against the spec. Purely advisory: findings become proposals here, and spec changes go through an L1 spec-diff PR that Mark merges.
 
+**Yardstick:** owner effort as SPEC §1 defines it (attention, time, decisions, memory, checking, and recovery, counted across failed tasks as well as accepted ones), judged against OWN-1–6 and OWN-17–18 and measured by OWN-19's journey components.
+
 **Scope:** setup, the text/voice channel, approvals and codes, notifications and digests, the local Wi-Fi UI, moving PCs, recovery as the owner experiences it. Security properties are fixed inputs; a UX proposal that touches one states the tradeoff.
 
 **Output of a spec-wide run** (only when Mark or L1 asks for one): `YYYY-MM-DD-ux-review.md` with findings (severity, owner effect, proposal), a decisions list for Mark, and, when warranted, SPEC.md edits in the same PR.
@@ -9,6 +11,8 @@ A recurring review of the owner-facing experience (onboarding and everyday use) 
 ## In the lens screen
 
 Tier A PRs get a UX pass in the lens screen; tier B PRs get UX as part of the combined pass. Each run applies the scope below to the PR's diff. Verdicts go to `reviews/ux/YYYY-MM-DD-pr<N>.md` (combined passes to `reviews/combined/`), in the L3 format of docs/OPERATING.md §4.
+
+Not on assurance tooling: a tier-A diff confined to `tools/depaudit*`, `tools/canary*`, `assurance/`, `tools/risk_tier*` and their tests gets no UX pass. Those tools' operators are CI and builders, and their messages are `later` (OPERATING §2, D-086). If one of them gains a human operator on the box, restore the pass with one line here.
 
 Before raising a finding on text shown to the guest, check that a guest can reach it: trace the path from a guest tool call to the text, through the MCP guard and the gate. #461 (SR2-3o) was built for refusals that no guest could reach.
 

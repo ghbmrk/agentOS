@@ -44,8 +44,8 @@ Each is its own session and PR; the PR title starts with `W5-Dc-r1a` or `W5-Dc-r
     - Any other class is held when it is quiet hours or the last hour's unsolicited sends have reached the allowance. Otherwise it sends and is counted.
   - `Inform` keeps its signature and becomes `Post(ClassUpdate, …)`. `Notify` keeps its signature, its Disclose and its `AgentPrefix`, and posts as `ClassAgent`: its callers on main are the agent reply and question paths and the recall closure (QH-9).
   - Add `NotifyAs(class Class, text string) error`: `Notify`'s Disclose and `AgentPrefix` with a caller-chosen class, for agent-derived text that belongs to another class (r1b's recall closure).
-  - `alert` becomes `Post(ClassSecurity, …)`.
-  - The `Boot` text becomes `Post(ClassApproval, …)`, since it re-sends approval requests with new codes. Read boot.go and say in the PR if a part of it is not an approval.
+  - `alert` becomes `Post(ClassSecurity, …)`. Agent text (`Notify`, `NotifyAs`) is never packed with another text on release, so a " / " inside it cannot forge a broker segment (CH-19).
+  - The `Boot` text is not paced (round 1 on #617, lens 1): it carries the new codes and explains them, so a held copy could be released after its codes died, or arrive after the codes it explains. It goes at once, like security, and counts toward the hour.
   - `sendRequest` and `QueueAutoReply` are not held by the owner, because grants paces them (r1b), but they are counted, so the allowance is one budget across all unsolicited texts.
   - Replies on `Run`'s `send` (channel.go:936) and the RESUME code text are never held or counted (SG-r1-4).
 - **QH-3, a durable, bounded hold.**
@@ -134,7 +134,7 @@ Each is its own session and PR; the PR title starts with `W5-Dc-r1a` or `W5-Dc-r
 **Threat check for the reviewer (both packages).**
 - No security text can be held. That covers `security` class texts (loops urgent security texts and the fork-switch alert) and local sign-in alerts; provider mail security alerts join once W5-Dc-r13 sends them. The owner cannot make `security` non-urgent, and a spoofed sender cannot change any pacing setting without an unlocked session.
 - STOP and RESUME confirmations, and every reply to an owner message, go at once in quiet hours and with the allowance spent (CH-11, CH-15).
-- No silent loss: a held text is saved before `Post` returns. It is released at most once: it leaves the hold only after a successful send. A dropped text is counted and said (OP-9, CH-12).
+- No silent loss: a held text is saved before `Post` returns. It leaves the hold only after a successful send, and is released at least once across a crash (O23: a repeat is preferred to a loss). A dropped text is counted and said (OP-9, CH-12).
 - One budget: no path sends unsolicited texts past the allowance except urgent classes, re-issued approvals (grants' existing rule) and the digest.
 - The digest is still sent every day (CH-15's last clause): quiet hours delay it and never drop it.
 - Nothing in a held text reaches logs. Held text sits in owner state, as approval items do today; its forget gap is the release finding above.
@@ -152,3 +152,5 @@ Each is its own session and PR; the PR title starts with `W5-Dc-r1a` or `W5-Dc-r
 ## Delivery
 
 Builder model: strongest model for both (risk tier A; the Sonnet pilot covers tiers B and C only). One package per session, tests first: land each test red at main before the fix, and keep the message for the PR. Run `python3 tools/risk_tier.py --git origin/main HEAD` before opening each PR. Review: L3 on the strongest model with the threat check above, then the UX lens (every new text) and a separate Security section (OPERATING §3–4). Estimate/checkpoint: r1a about 120k tokens, r1b about 90k, not ceilings (OPERATING §5). If r1a nears 150k with QH-6 red, ship QH-1 to QH-5 and move QH-6 into r1b's session, saying so in both PRs.
+
+**r1b delivery notes.** Built on the strongest model (tier A). Three widenings, declared as brief gaps on the PR: grants' one budget (`Config.Allowance`) also replaces grants' own count in `take` and `Reserve`, not only the `flushDue` line, or requests and questions would still have two budgets (grants GR34); `owner.Channel.HeldNote` is added in `broker/owner` because the owner exposes no held count for QH-10's STATUS line; the digest sends at 08:00 (`digestHour`), not 06:30, so the QH-7 test runs quiet hours past 08:00. Assumptions: `broker/cmd/agentosd/ASSUMPTIONS.md` PW1 to PW4, `broker/grants/ASSUMPTIONS.md` GR34, and the QH-7 bullet in `broker/digestqueue/ASSUMPTIONS.md`.

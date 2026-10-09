@@ -15,12 +15,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/loops"
 )
 
@@ -83,15 +83,14 @@ func (p *CommandProbe) Run(ctx context.Context) (loops.ProbeResult, error) {
 	out := filepath.Join(dir, "out.json")
 	ctx, cancel := context.WithTimeout(ctx, p.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, p.Cmd[0], append(append([]string{}, p.Cmd[1:]...), "--out", out)...)
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	// Never the daemon's environment (#515 Security 2): HOME and TMPDIR
-	// are the run's own directory.
-	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + dir, "TMPDIR=" + dir, "GOCACHE=off", "GOFLAGS="}
-	// The whole group dies on timeout, grandchildren too (#515 Security 1).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = waitDelay
+	// are the run's own directory. The whole group dies on timeout,
+	// grandchildren too (#515 Security 1).
+	env := childproc.NewEnv("PATH=/usr/local/bin:/usr/bin:/bin", "HOME="+dir, "TMPDIR="+dir, "GOCACHE=off", "GOFLAGS=")
+	cmd := childproc.Command(ctx, env, childproc.Options{
+		Stdout: io.Discard, Stderr: io.Discard, WaitDelay: waitDelay, KillGroup: true,
+		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
+	}, p.Cmd[0], append(append([]string{}, p.Cmd[1:]...), "--out", out)...)
 	runErr := cmd.Run()
 	if ctx.Err() != nil {
 		return loops.ProbeResult{}, fmt.Errorf("command probe %s: %w", p.For, ctx.Err())

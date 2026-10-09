@@ -91,7 +91,7 @@ func (f *fakeEvidenceGate) deliveries() []journal.Intent {
 	defer f.mu.Unlock()
 	var out []journal.Intent
 	for _, in := range f.subs {
-		if in.Action == opDeliver {
+		if in.Action == mail.OpDeliver {
 			out = append(out, in)
 		}
 	}
@@ -156,9 +156,6 @@ func TestPrivateRepliesGoToTheDestination(t *testing.T) {
 	d := r.gate.deliveries()
 	if len(d) != 1 {
 		t.Fatalf("submitted %d", len(d))
-	}
-	if opDeliver != mail.OpDeliver || mailExecutor != mail.Tool {
-		t.Fatal("the mail adapter's names changed")
 	}
 	in := d[0]
 	if in.Origin != grants.OriginEvidence || in.Action != mail.OpDeliver || in.Account != "mail" || in.Executor != "mail" ||
@@ -443,7 +440,7 @@ func TestEvidenceSetting(t *testing.T) {
 		t.Fatalf("off: %q", got)
 	}
 	subs := o.gate.subs[n:]
-	if len(subs) != 2 || subs[0].Action != opDeliver || subs[0].Params[grants.ParamFrom] != grants.DeliverFromBox ||
+	if len(subs) != 2 || subs[0].Action != mail.OpDeliver || subs[0].Params[grants.ParamFrom] != grants.DeliverFromBox ||
 		subs[0].Recipients[0] != destAddr || !strings.HasPrefix(subs[0].Params[grants.ParamBody].(string), "Emailing private replies was turned off by text at 09:00") ||
 		subs[1].Action != journal.ActionEvidence || subs[1].Params[grants.ParamEvidenceAddress] != "" {
 		t.Fatalf("off submitted %+v", subs)

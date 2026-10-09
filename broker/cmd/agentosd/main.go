@@ -24,9 +24,11 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/loopbuild"
+	"github.com/ghbmrk/agentos/broker/mail/mailsock"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
@@ -350,7 +352,7 @@ func main() {
 	var builderImage, builderLaunch, keptPath, setupRecord string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
-	var digestDir string
+	var digestDir, mailSocket string
 	localUIUID := -1
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
@@ -376,7 +378,7 @@ func main() {
 	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", "agent-machine layers and snapshots (created 0700)")
 	flag.StringVar(&runsc, "runsc", "", "gVisor runsc binary; empty runs no agent machines")
 	flag.Int64Var(&diskReserveMB, "disk-reserve-mb", budget.FloorDisk().ReserveBytes()>>20, "state-disk space snapshots never use (RES-4 reserve), MB")
-	flag.StringVar(&diskQuota, "disk-quota", "on", "per-machine disk quotas (RES-4): on needs -machines on a file system mounted with prjquota; off lets a guest fill the disk")
+	flag.StringVar(&diskQuota, "disk-quota", "on", "per-machine disk quotas (RES-4): on needs -machines on a file system mounted with prjquota; off lets a guest fill the disk and runs no fuzz targets")
 	flag.Int64Var(&machineDiskMB, "machine-disk-mb", 8192, "each agent machine's disk budget: its hard quota and largest snapshot, MB (RES-4)")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
@@ -390,10 +392,10 @@ func main() {
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
+	flag.StringVar(&mailSocket, "mail-socket", "/run/agentos-egress/"+mailsock.Socket, "the vault process's mail socket, which serves the owner's mail account; empty connects no mail")
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
 	flag.StringVar(&digestDir, "digest", "/var/lib/agentos/digest", "the daily digest's queue and state (created 0700); empty sends no digest")
-	flag.StringVar(&learn.Loop7, "loop7", "/var/lib/agentos/loop7", "LOOP-7's fuzz corpora, with crash inputs found on this box, and the fuzz cache (P3-4b-3a)")
-	learn.Fuzz, learn.FuzzUser = fuzzRelease, fuzzUser
+	learn.Fuzz, learn.Loop7, learn.FuzzUser = fuzzRelease, fuzzState, fuzzUser
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
 	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
 	flag.StringVar(&builderImage, "builder-image", defaultBuilderImage, "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty, or the default not registered, runs no model-backed builder")
@@ -419,6 +421,7 @@ func main() {
 	if err := checkDiskQuotaFlag(diskQuota); err != nil {
 		log.Fatal(err)
 	}
+	learn.DiskQuota = diskQuota
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
@@ -604,6 +607,10 @@ func main() {
 	cfg.Recall = recallExec
 	cfg.Grants.Contained = recallExec.Contained
 	cfg.Notes = append(cfg.Notes, recallExec.Status)
+	// Approval requests follow the owner's pacing setting and spend its one
+	// hourly budget; STATUS says what the pacer holds (W5-Dc-r1b QH-8,
+	// QH-10). The channel is attached once the daemon runs.
+	pacer := newOwnerPacer(&cfg)
 	var md machineDisk
 	if runsc != "" {
 		md = openMachineDisk(diskQuota, stateDir, &cfg.Notes)
@@ -648,14 +655,29 @@ func main() {
 	} else {
 		lp.forgetOwner.wirePage(&cfg)
 		if dg != nil {
-			lp.forgetOwner.digest = dg.forget // CAP-3
+			lp.forgetOwner.wireDigest(dg, lp.forgotten.goals) // CAP-3
 		}
 		caps.learning(lp) // routing held while learning is on (C12)
 	}
+	// One clock for the journal, the gate and the mail adapter, so the
+	// organize bound counts the journal's stamps on the adapter's day
+	// (SR3-mail-w2 W2-c).
+	cfg.Now = func() time.Time { return time.Now().UTC() }
+	cfg.Grants.Now = cfg.Now
+	// The owner's mail account (SR3-mail-w2): registered now, bound to
+	// the vault process's account once the journal is open.
+	var mw *lateMail
+	if mailSocket != "" {
+		mw = newLateMail()
+		mw.wire(&cfg)
+	}
 	// Evidence delivery (CH-20): with a destination set, private replies
-	// are emailed to it. No mail account is connected in this process
-	// yet, so none can be set (owns is nil) and replies go by text.
+	// are emailed to it, to the connected mail account's own address;
+	// while none is connected, none can be set and replies go by text.
 	ev := newEvidence(keptPath, cfg.PageSocket != nil, log.Printf)
+	if mw != nil {
+		ev.mail = mw
+	}
 	ev.wire(&cfg)
 	// Changing where updates come from (OSS-10): on the clock guard's
 	// Latest, which questions.open starts; until then nothing is followed.
@@ -690,17 +712,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	pacer.attach(ctx, d.Owner(), dg, time.Minute)
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
 	// Deletions reach the journal's guest intents (CAP-3), when learning
 	// runs what it keeps of them (change C19, learning.ForgetTasks),
 	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
-		Notify: func(text string) error {
-			if ch := d.Owner(); ch != nil {
-				return ch.Notify(text)
-			}
-			return errors.New("no owner channel")
-		}}
+		Notify: recallNotify(d.Owner)}
 	// and every reply kept on the box (CH-20).
 	fan := forgetFan{kept: ev.kept}
 	if lp != nil {
@@ -713,6 +731,9 @@ func main() {
 	// The digest runs once the forget owner's start-up replay has asked
 	// it again (security B2' on #592); its own saved forgets hold their
 	// batches either way.
+	if mw != nil {
+		wireMail(ctx, mw, d, mailSocket, learn.Dir, dg, digestDir, cfg.Now)
+	}
 	if dg != nil {
 		if o := d.Owner(); o != nil {
 			dg.cfg.Inform = o.Inform
@@ -1172,4 +1193,101 @@ func ownerVerifyErr(err error) error {
 		modelroute.VerifyLost:   owner.VerifyLost,
 	}[ve.Kind]
 	return &owner.VerifyError{Kind: kind, Until: ve.Until}
+}
+
+// recallNotify is recall's take-back notice to the owner. Each closes a
+// take-back the owner approved, so it is approval class; the texts name
+// the agent, so they keep the agent prefix (W5-Dc-r1b QH-9).
+func recallNotify(own func() *owner.Channel) func(string) error {
+	return func(text string) error {
+		if ch := own(); ch != nil {
+			return ch.NotifyAs(owner.ClassApproval, text)
+		}
+		return errors.New("no owner channel")
+	}
+}
+
+// ownerPacer is agentosd's hold on the owner channel's pacer (CH-15,
+// W5-Dc-r1b): the grants and digest hooks read its setting, the minute
+// tick releases what it holds, and STATUS says what waits. Until the
+// channel is attached it is never quiet and has no allowance, so nothing
+// paced goes.
+type ownerPacer struct {
+	ch atomic.Pointer[owner.Channel]
+}
+
+// newOwnerPacer is the pacer's part of the daemon config, set before the
+// daemon runs: the grants hooks (QH-8) and STATUS's held line (QH-10).
+func newOwnerPacer(cfg *daemon.Config) *ownerPacer {
+	p := &ownerPacer{}
+	p.wire(&cfg.Grants)
+	cfg.Notes = append(cfg.Notes, p.note)
+	return p
+}
+
+// attach binds the owner channel once the daemon runs, makes the digest
+// (nil when none is configured; call before it runs) wait for quiet hours
+// (QH-7), and starts the tick that releases held texts (QH-10).
+func (p *ownerPacer) attach(ctx context.Context, ch *owner.Channel, dg *digestBox, every time.Duration) {
+	p.ch.Store(ch)
+	if dg != nil {
+		dg.cfg.Quiet = p.quiet
+	}
+	go p.run(ctx, every)
+}
+
+// wire sets the grants pacing hooks to the owner's setting and its one
+// hourly budget (QH-8).
+func (p *ownerPacer) wire(g *grants.Config) {
+	g.Quiet = p.quiet
+	g.Urgent = func(owner.Item) bool { return p.urgent(owner.ClassApproval) }
+	g.Allowance = p.allowance
+}
+
+func (p *ownerPacer) quiet(t time.Time) bool {
+	ch := p.ch.Load()
+	return ch != nil && ch.Quiet(t)
+}
+
+func (p *ownerPacer) urgent(class owner.Class) bool {
+	ch := p.ch.Load()
+	return ch != nil && ch.Urgent(class)
+}
+
+func (p *ownerPacer) allowance(t time.Time) int {
+	if ch := p.ch.Load(); ch != nil {
+		return ch.Allowance(t)
+	}
+	return 0
+}
+
+// note is STATUS's held line (QH-10).
+func (p *ownerPacer) note() string {
+	if ch := p.ch.Load(); ch != nil {
+		return ch.HeldNote()
+	}
+	return ""
+}
+
+// tick releases held texts that may go now (QH-10).
+func (p *ownerPacer) tick() {
+	if ch := p.ch.Load(); ch != nil {
+		if err := ch.Release(); err != nil {
+			log.Printf("owner: held texts not sent: %v", err)
+		}
+	}
+}
+
+// run ticks every interval until ctx ends.
+func (p *ownerPacer) run(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.tick()
+		}
+	}
 }

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/corpus"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
@@ -30,18 +31,26 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: LOOP-7
+// REQ: LOOP-7, ADP-11
 //
 // P3-4b-4d: Loop 2's corpus probe replays the published injection items
 // into an agent machine as untrusted input over its guest plane (owner
 // messages, the MCP effect tool, mail it is asked to act on) and takes
 // each closed check's verdict from what the broker then saw: the owner's
 // line, the journal and the mailbox. The guest stand-in obeys its input.
+// P3-4b-4e adds the commitment filter, reached the only way a guest
+// reaches it: an ADP-11 auto-reply in a thread the owner pre-allowed,
+// whose verdict is what the gate and the owner channel did with it.
 
 const (
 	ownerNum, boxNum = "+15550000101", "+15550000102"
 	me               = "owner@example.test"
 	labelTarget      = "<label-target@news.example>"
+	// The pre-allowed thread: the owner wrote to peer (the Sent copy is
+	// the starter threadVerified reads) and peer answered in the inbox.
+	// A cold thread is outside mail from a stranger nobody wrote to.
+	peer, threadStart, threadReply = "pat@contacts.example", "<lunch-1@example.test>", "<lunch-2@contacts.example>"
+	coldThread                     = "<cold-1@stranger.example>"
 )
 
 // gateOwner is the owner channel as the gate sees it, with approval
@@ -54,6 +63,38 @@ type gateOwner struct {
 	reqs map[string][]owner.Item
 	last string
 	at   map[string]ask // the latest request asking about each ref
+	// replies is what the owner channel did with each auto-reply the
+	// gate handed it, by intent ref: the broker's own verdict.
+	replies map[string]queuedReply
+	// weak, when set, stands in for the channel's queue with a commitment
+	// filter that matches nothing (the commitment filter's control). It
+	// holds what it queues and never sends it.
+	weak func(owner.AutoReply) (owner.QueueResult, error)
+}
+
+// queuedReply is one auto-reply as the owner channel answered the gate.
+type queuedReply struct {
+	reply owner.AutoReply
+	res   owner.QueueResult
+	err   error
+	weak  bool
+}
+
+// QueueAutoReply is the gate's ADP-11 hand-off to the owner channel,
+// recorded.
+func (o *gateOwner) QueueAutoReply(ar owner.AutoReply) (owner.QueueResult, error) {
+	o.mu.Lock()
+	weak := o.weak
+	o.mu.Unlock()
+	queue := o.Channel.QueueAutoReply
+	if weak != nil {
+		queue = weak
+	}
+	res, err := queue(ar)
+	o.mu.Lock()
+	o.replies[ar.Ref] = queuedReply{reply: ar, res: res, err: err, weak: weak != nil}
+	o.mu.Unlock()
+	return res, err
 }
 
 func (o *gateOwner) Request(items []owner.Item, _ time.Duration) (string, error) {
@@ -127,7 +168,16 @@ type relay struct {
 	// approve has the owner approve the gate's alert archive (the
 	// archive route's control).
 	approve bool
+	// isolated is whether the gate counts the machine as an ADP-11
+	// reply composer (Config.Isolated); off only to show a reply the
+	// gate refuses for it is an error.
+	isolated atomic.Bool
 }
+
+// undoWindow is the rig's ADP-11 undo window: short, so a queued reply
+// the rig failed to cancel would be released by the gate's next tick,
+// which replayAll runs before it checks nothing was sent.
+const undoWindow = time.Millisecond
 
 // routeTimeout bounds each route, so a guest or mail exchange that stalls
 // fails the run on the check it was serving instead of hanging it.
@@ -151,8 +201,10 @@ func newRelay(t *testing.T, machines guest.Machines) *relay {
 	if err != nil {
 		t.Fatal(err)
 	}
+	x.isolated.Store(true)
 	g := grants.New(grants.Config{Declared: map[string]map[string]string{"mail": mail.Declared()},
-		Verifiers: map[string]grants.Verifier{"mail": a}, LocalUI: true})
+		Verifiers: map[string]grants.Verifier{"mail": a}, LocalUI: true,
+		Isolated: func(m string) bool { return x.isolated.Load() && m != "" && m == x.machine }})
 	if x.eng, err = journal.Open(&journal.MemStore{}, g, map[string]journal.Executor{"mail": a, grants.ExecutorName: g},
 		func(s string) string { return s }); err != nil {
 		t.Fatal(err)
@@ -160,15 +212,23 @@ func newRelay(t *testing.T, machines guest.Machines) *relay {
 	carrier := modem.NewCarrier()
 	box := carrier.Line(boxNum)
 	x.box, x.phone = box, carrier.Line(ownerNum)
-	if x.ch, err = owner.New(owner.Config{Owner: ownerNum, Modem: box, Engine: x.eng, Store: &owner.MemStore{},
-		Location: time.UTC, Decide: g.Decide}); err != nil {
+	// The loosest pacing the owner can set: this replay is about the
+	// guest plane, not CH-15's pacing (W5-Dc-r1a).
+	state := &owner.MemStore{}
+	state.Save(owner.State{Pacing: owner.Pacing{PerHour: owner.MaxTextsPerHour, Urgent: []owner.Class{owner.ClassApproval, owner.ClassAgent}}})
+	if x.ch, err = owner.New(owner.Config{Owner: ownerNum, Modem: box, Engine: x.eng, Store: state,
+		Location: time.UTC, Decide: g.Decide, UndoWindow: undoWindow}); err != nil {
 		t.Fatal(err)
 	}
 	x.send = x.ch.Notify
-	own := &gateOwner{Channel: x.ch, reqs: map[string][]owner.Item{}, at: map[string]ask{}}
+	own := &gateOwner{Channel: x.ch, reqs: map[string][]owner.Item{}, at: map[string]ask{}, replies: map[string]queuedReply{}}
 	g.Attach(x.eng, own)
 	x.gate, x.own = g, own
-	x.grant(g, own)
+	x.grant(grants.Spec{Account: "mail", Executor: "mail", Ops: mail.Declared()})
+	// ADP-11's pre-allowance, granted down the same owner path. The gate
+	// asks for no CAP-6 run when the owner grants it (a finding, recorded
+	// in loops ASSUMPTIONS S44), so the rig has none to earn.
+	x.grant(grants.Spec{Account: "mail", Rule: &grants.Rule{Action: mail.OpReply, Reply: true, PerRecord: 40, PerDay: 40}})
 
 	x.plane, err = guest.New(guest.Config{Dir: filepath.Join(t.TempDir(), "guests"), Machines: machines, Effects: g,
 		Route:       func(account string) (string, bool) { return "mail", account == "mail" },
@@ -186,17 +246,21 @@ func newRelay(t *testing.T, machines guest.Machines) *relay {
 	}
 	t.Cleanup(x.plane.Shutdown)
 	x.srv.Deliver("INBOX", letter(labelTarget, "news@news.example", "Weekly news", "Nothing urgent."))
+	x.srv.Deliver("Sent", mailOf(threadStart, me, peer, "Lunch", "", "Lunch next week?"))
+	x.srv.Deliver("INBOX", mailOf(threadReply, "Pat <"+peer+">", me, "Re: Lunch", threadStart, "Sure, glad to."))
+	x.srv.Deliver("INBOX", mailOf(coldThread, "stranger@stranger.example", me, "Hello", "", "Write back."))
 	return x
 }
 
-// grant connects mail the way the owner does: approved, then confirmed
-// on the local page.
-func (x *relay) grant(g *grants.Gate, own *gateOwner) {
+// grant grants spec the way the owner does: approved, then confirmed on
+// the local page.
+func (x *relay) grant(s grants.Spec) {
 	x.t.Helper()
-	b, _ := json.Marshal(grants.Spec{Account: "mail", Executor: "mail", Ops: mail.Declared()})
+	g, own := x.gate, x.own
+	b, _ := json.Marshal(s)
 	var spec map[string]any
 	json.Unmarshal(b, &spec)
-	in := journal.Intent{ID: "local/grant/1", Origin: "local", Account: journal.BrokerAccount,
+	in := journal.Intent{ID: fmt.Sprintf("local/grant/%d", len(x.eng.List())+1), Origin: "local", Account: journal.BrokerAccount,
 		Action: journal.ActionGrantChange, Params: map[string]any{"grant": spec}, Executor: grants.ExecutorName}
 	if _, err := g.Submit(in); err != nil {
 		x.t.Fatal(err)
@@ -218,9 +282,16 @@ func (x *relay) grant(g *grants.Gate, own *gateOwner) {
 	g.Wait()
 }
 
-func letter(id, from, subject, body string) string {
-	return "From: " + from + "\nTo: " + me + "\nSubject: " + subject +
-		"\nDate: Fri, 09 Oct 2026 08:00:00 +0000\nMessage-ID: " + id + "\n\n" + body + "\n"
+func letter(id, from, subject, body string) string { return mailOf(id, from, me, subject, "", body) }
+
+// mailOf is a message from from to to, in reply to parent when it is set.
+func mailOf(id, from, to, subject, parent, body string) string {
+	thread := ""
+	if parent != "" {
+		thread = "\nIn-Reply-To: " + parent + "\nReferences: " + parent
+	}
+	return "From: " + from + "\nTo: " + to + "\nSubject: " + subject +
+		"\nDate: Fri, 09 Oct 2026 08:00:00 +0000\nMessage-ID: " + id + thread + "\n\n" + body + "\n"
 }
 
 // owed drains what the owner's line carried, and returns the last text.
@@ -247,15 +318,21 @@ func (x *relay) next() string {
 // key=want in it, key present even for an empty want: the broker's own
 // record of what the guest asked.
 func (x *relay) requested(reqID, key, want string) error {
+	_, err := x.carried(reqID, key, want)
+	return err
+}
+
+// carried is requested, answering the journaled request.
+func (x *relay) carried(reqID, key, want string) (journal.Status, error) {
 	for _, st := range x.eng.List() {
 		if strings.HasSuffix(st.Intent.ID, "/"+reqID) && strings.HasPrefix(st.Intent.Origin, "guest:") {
 			if v, ok := st.Intent.Params[key].(string); !ok || v != want {
-				return errors.New("the request does not carry the text handed over")
+				return st, errors.New("the request does not carry the text handed over")
 			}
-			return nil
+			return st, nil
 		}
 	}
-	return errors.New("the broker journaled no request")
+	return journal.Status{}, errors.New("the broker journaled no request")
 }
 
 func (x *relay) Reply(ctx context.Context, text string) (string, error) {
@@ -341,6 +418,81 @@ func (x *relay) Archive(ctx context.Context, text string) (bool, error) {
 	return !ok || folder != "INBOX", nil
 }
 
+// AutoReply has the guest compose text as a reply in the pre-allowed
+// thread and reports what the broker did with it.
+func (x *relay) AutoReply(ctx context.Context, text string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, routeTimeout)
+	defer cancel()
+	return x.autoReply(ctx, text, threadReply, peer)
+}
+
+// autoReply has the guest compose text as a reply to record, addressed to
+// to, over MCP. Its verdict is the owner channel's answer to the gate: a
+// queued reply (which it then cancels, so nothing is sent) or a normal
+// approval request. A reply the gate did not hand the channel as an
+// auto-reply, one the channel refused, or one not left waiting on the
+// owner is an error: it says nothing about the filter.
+func (x *relay) autoReply(ctx context.Context, text, record, to string) (bool, error) {
+	x.owed()
+	if _, err := x.plane.DeliverOwner(x.machine, text, false); err != nil {
+		return false, err
+	}
+	req := x.next()
+	if _, err := x.run(ctx, "relay", x.sock, "autoreply", record, req, to); err != nil {
+		return false, err
+	}
+	x.owed()
+	st, err := x.carried(req, mail.ParamBody, text)
+	if err != nil {
+		return false, err
+	}
+	x.own.mu.Lock()
+	q, ok := x.own.replies[st.Intent.ID]
+	x.own.mu.Unlock()
+	switch {
+	case !ok:
+		return false, fmt.Errorf("the gate did not take the reply as an auto-reply (%s)", st.State)
+	case q.err != nil:
+		return false, q.err
+	case q.reply.Body != text:
+		return false, errors.New("the auto-reply is not the text handed over")
+	case st.State != journal.Pending:
+		return false, fmt.Errorf("the reply is %s, not waiting on the owner", st.State)
+	case q.res.Queued != nil:
+		if q.weak {
+			return true, nil // the stand-in holds it and never sends
+		}
+		return true, x.undo(ctx, req, q.res.Queued.ID)
+	case q.res.Request != "":
+		return false, nil
+	}
+	return false, errors.New("the owner channel neither queued the reply nor asked about it")
+}
+
+// undo has the owner cancel queued reply id within its undo window, as
+// ADP-11's alert offers, and checks the broker denied request reqID.
+func (x *relay) undo(ctx context.Context, reqID, id string) error {
+	out := x.ch.Handle(ctx, ownerNum, "UNDO "+id)
+	x.gate.Wait()
+	if len(out) != 1 || !strings.Contains(out[0], "The reply was not sent.") {
+		return fmt.Errorf("UNDO %s: %q", id, out)
+	}
+	for {
+		st, err := x.carried(reqID, mail.ParamRecord, threadReply)
+		if err != nil || st.State == journal.Denied {
+			return err
+		}
+		if st.State != journal.Pending {
+			return fmt.Errorf("the cancelled reply is %s", st.State)
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("the cancelled reply is still pending")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 // ask is where the owner was asked about one intent: request id, item
 // number and ref; id is empty when the intent was not left to the owner.
 type ask struct {
@@ -411,6 +563,20 @@ func replayAll(t *testing.T, x *relay) {
 	if hidden, err := x.Archive(ctx, "Nothing urgent this week."); err != nil || !hidden {
 		t.Fatalf("archive route: %v %v", hidden, err)
 	}
+	if queued, err := x.AutoReply(ctx, "Thanks, glad to hear it."); err != nil || !queued {
+		t.Fatalf("auto-reply route: %v %v", queued, err)
+	}
+	// A reply the gate refuses for a reason other than the filter is no
+	// verdict: a cold thread, a machine that is not a reply composer.
+	if _, err := x.autoReply(ctx, corpus.CommitmentPayload, coldThread, "stranger@stranger.example"); err == nil {
+		t.Fatal("a reply in a cold thread read as a verdict")
+	}
+	x.isolated.Store(false)
+	_, err := x.AutoReply(ctx, corpus.CommitmentPayload)
+	x.isolated.Store(true)
+	if err == nil {
+		t.Fatal("a reply from a machine that is not a composer read as a verdict")
+	}
 	items, err := loops.LoadCorpus("../../../assurance/corpora/promptinject/items.json")
 	if err != nil {
 		t.Fatal(err)
@@ -443,6 +609,22 @@ func replayAll(t *testing.T, x *relay) {
 		t.Fatalf("archive control: %v", err)
 	}
 
+	// Control: with the owner channel's commitment filter matching
+	// nothing, every reply is queued and the probe fails on the filter's
+	// own payload.
+	x.own.mu.Lock()
+	x.own.weak = func(ar owner.AutoReply) (owner.QueueResult, error) {
+		return owner.QueueResult{Queued: &owner.Queued{ID: "W" + ar.Ref, SendAt: time.Now().Add(undoWindow), Reply: ar}}, nil
+	}
+	x.own.mu.Unlock()
+	_, err = (&loops.CorpusProbe{Interval: 1, Items: items, Checks: planeCheck(x, corpus.CommitmentFilter)}).Run(ctx)
+	x.own.mu.Lock()
+	x.own.weak = nil
+	x.own.mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), corpus.CommitmentFilter+" misses its own payload") {
+		t.Fatalf("commitment control: %v", err)
+	}
+
 	// Control: a reply filter weakened to scan a text's first 40 bytes
 	// lets codes past it reach the owner, and the probe finds them.
 	x.mu.Lock()
@@ -462,6 +644,19 @@ func replayAll(t *testing.T, x *relay) {
 		if !ids[f.Subject] || f.Detail != corpus.CodeFilter || f.Check != loops.CheckCorpus || f.Rule != nil {
 			t.Fatalf("finding %+v", f)
 		}
+	}
+
+	// Nothing the replay composed is sent (ADP-11): the channel holds no
+	// queued reply, and past the undo window the gate's tick releases
+	// nothing, so no account submitted mail.
+	time.Sleep(10 * undoWindow)
+	x.gate.Tick()
+	x.gate.Wait()
+	if x.ch.UndoOpen() {
+		t.Fatal("an auto-reply is still queued to send")
+	}
+	if sent := x.srv.Submitted(); len(sent) != 0 {
+		t.Fatalf("the replay sent %d messages", len(sent))
 	}
 }
 
@@ -535,16 +730,36 @@ func rawExec(ctx context.Context, r *Runtime, dir, id string, argv ...string) (s
 	}
 	f.Close()
 	defer os.Remove(f.Name())
-	var stderr bytes.Buffer
-	c := r.cmd(ctx, append([]string{"--log=" + f.Name(), "exec", cid(id)}, argv...)...)
-	c.Stderr = &stderr
-	out, err := c.Output()
-	if exit, ok := err.(*exec.ExitError); ok {
+	paused := fmt.Sprintf("cannot execute in container %q in state paused", cid(id))
+	for deadline := time.Now().Add(rawExecPausedWait); ; {
+		var stderr bytes.Buffer
+		out, err := r.cmd(ctx, childproc.Options{Stderr: &stderr}, append([]string{"--log=" + f.Name(), "exec", cid(id)}, argv...)...).Output()
+		exit, ok := err.(*childproc.ExitError)
+		if !ok {
+			return string(out), err
+		}
+		if exit.ExitCode() == 128 && bytes.Contains(stderr.Bytes(), []byte(paused)) && time.Now().Before(deadline) && ctx.Err() == nil {
+			time.Sleep(rawExecPausedPoll)
+			continue
+		}
 		log, _ := os.ReadFile(f.Name())
-		err = fmt.Errorf("%w (exit %d)\nrunsc and guest stderr: %q\nrunsc log: %q", exit, exit.ExitCode(), tail(stderr.Bytes(), rawExecTail), tail(log, rawExecTail))
+		return string(out), fmt.Errorf("%w (exit %d)\nrunsc and guest stderr: %q\nrunsc log: %q", exit, exit.ExitCode(), tail(stderr.Bytes(), rawExecTail), tail(log, rawExecTail))
 	}
-	return string(out), err
 }
+
+// rawExec retries, only while runsc refuses with exit 128 and its
+// requireStatus text for this container in state paused, for up to
+// rawExecPausedWait: after a guest tool call the plane's step snapshot
+// pauses the container for the capture (vm.Manager.take), and a bare
+// `runsc exec` has no lock to wait on, unlike production's exec through
+// the Manager (P1-4-flake-paused). The bound covers one capture with
+// margin; StepInterval keeps snapshots at least 2s apart, so the 25ms
+// poll lands in a running window. A pause longer than the bound, and any
+// other failure, is returned with runsc's text.
+const (
+	rawExecPausedWait = 10 * time.Second
+	rawExecPausedPoll = 25 * time.Millisecond
+)
 
 // tail answers b's last n bytes.
 func tail(b []byte, n int) string { return string(b[max(0, len(b)-n):]) }
@@ -558,7 +773,7 @@ func tail(b []byte, n int) string { return string(b[max(0, len(b)-n):]) }
 func TestRawExecErrorCarriesRunscText(t *testing.T) {
 	r := fakeRunsc(t)
 	_, err := rawExec(context.Background(), r, t.TempDir(), "corpus", "fatal128")
-	var exit *exec.ExitError
+	var exit *childproc.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 128 {
 		t.Fatalf("error %v, want runsc's exit 128", err)
 	}
@@ -579,5 +794,28 @@ func TestRawExecErrorCarriesRunscText(t *testing.T) {
 func TestRawExecErrorClipsRunscText(t *testing.T) {
 	if got := tail([]byte(strings.Repeat("x", 3*rawExecTail)+"end"), rawExecTail); len(got) != rawExecTail || !strings.HasSuffix(got, "end") {
 		t.Fatalf("tail kept %d bytes ending %q", len(got), got[max(0, len(got)-8):])
+	}
+}
+
+// P1-4-flake-paused: a raw exec that lands while the step snapshot has the
+// container paused is refused ("in state paused", exit 128). rawExec waits
+// the pause out; the fake refuses the first two execs, as runsc does.
+func TestRawExecWaitsOutAPausedContainer(t *testing.T) {
+	r := fakeRunsc(t, "FAKE_RUNSC_PAUSES="+filepath.Join(t.TempDir(), "n")+":2")
+	out, err := rawExec(context.Background(), r, t.TempDir(), "corpus", "paused")
+	if err != nil || !strings.Contains(out, "guest out") {
+		t.Fatalf("out %q err %v, want the exec to succeed once the pause ends", out, err)
+	}
+}
+
+// Only the "paused" refusal is retried, and only for a bounded time: any
+// other exit 128 answers at once, so a real fault is not hidden.
+func TestRawExecDoesNotRetryOtherRefusals(t *testing.T) {
+	r := fakeRunsc(t)
+	start := time.Now()
+	_, err := rawExec(context.Background(), r, t.TempDir(), "corpus", "fatal128")
+	var exit *childproc.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 128 || time.Since(start) > rawExecPausedWait/2 {
+		t.Fatalf("err %v after %v, want an immediate exit 128", err, time.Since(start))
 	}
 }

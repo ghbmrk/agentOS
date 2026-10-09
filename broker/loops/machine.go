@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -144,10 +146,14 @@ func shuffle(paths []string) error {
 
 // Run holds the broker's writers, digests every target and the control,
 // has a fresh machine's guest try them, and digests again. A changed
-// target is a High finding; an unchanged one is a journaled refusal. An
-// unchanged control, a reused machine, a missing target, a failed attempt
-// or quiesce, or a refusal the journal does not take fails the run, which
-// then closes nothing. The siblings the guest's writes left are removed.
+// target is a High finding; an unchanged one is a journaled refusal. A
+// target or control Path that is a symbolic link is refused before
+// anything runs. An unchanged or missing control, a reused machine, a
+// missing target, a failed attempt or quiesce, a file swapped under the
+// digest, a cancelled ctx, or a refusal the journal does not take fails
+// the run, which then closes nothing; a target that became a link fails
+// it too, though its finding stands. The siblings the guest's writes left
+// are removed.
 func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 	if len(p.Targets) == 0 || p.Attempt == nil || p.Journal == nil || !filepath.IsAbs(p.Control.Path) {
 		return ProbeResult{}, errors.New("tamper probe: not configured")
@@ -157,11 +163,17 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 		if !ownerWord.MatchString(t.Name) || !filepath.IsAbs(t.Path) {
 			return ProbeResult{}, fmt.Errorf("tamper probe: bad target %d", i)
 		}
+		if err := notLinked(t.Path); err != nil {
+			return ProbeResult{}, fmt.Errorf("tamper probe: target %s: %w", t.Name, err)
+		}
 		tp, err := tamperPaths(t)
 		if err != nil {
 			return ProbeResult{}, fmt.Errorf("tamper probe: %s: %w", t.Name, err)
 		}
 		paths = append(paths, tp...)
+	}
+	if err := notLinked(p.Control.Path); err != nil {
+		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
 	}
 	cp, err := tamperPaths(p.Control)
 	if err != nil {
@@ -182,13 +194,13 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 	}
 	before := make([][]byte, len(p.Targets))
 	for i, t := range p.Targets {
-		d, err := targetDigest(t.Path)
+		d, err := targetDigest(ctx, t.Path)
 		if err != nil {
 			return ProbeResult{}, fmt.Errorf("tamper probe: target %s: %w", t.Name, err)
 		}
 		before[i] = d
 	}
-	control, err := targetDigest(p.Control.Path)
+	control, err := targetDigest(ctx, p.Control.Path)
 	if err != nil {
 		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
 	}
@@ -208,37 +220,69 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ProbeResult{}, err
 	}
-	switch d, err := targetDigest(p.Control.Path); {
-	case errors.Is(err, fs.ErrNotExist):
-		// Removed from inside the machine is changed.
+	if err := notLinked(p.Control.Path); err != nil {
+		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
+	}
+	// A missing control fails too: a teardown or a cleaner on the host can
+	// remove it without the guest's writes running (S33).
+	switch d, err := targetDigest(ctx, p.Control.Path); {
 	case err != nil:
 		return ProbeResult{}, fmt.Errorf("tamper probe: control: %w", err)
 	case string(d) == string(control):
 		return ProbeResult{}, errors.New("tamper probe: the control did not change: the guest's writes did not run")
 	}
-	after := make([][]byte, len(p.Targets))
+	var res ProbeResult
+	var refused, linked []string
 	for i, t := range p.Targets {
-		d, err := targetDigest(t.Path)
+		d, err := targetDigest(ctx, t.Path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			// Removed from inside the machine is changed.
 		case err != nil:
 			return ProbeResult{}, fmt.Errorf("tamper probe: target %s: %w", t.Name, err)
 		}
-		after[i] = d
-	}
-	var res ProbeResult
-	for i, t := range p.Targets {
-		if after[i] != nil && string(after[i]) == string(before[i]) {
-			if err := p.Journal(machine, t.Name); err != nil {
-				return ProbeResult{}, fmt.Errorf("tamper probe: journal %s: %w", t.Name, err)
-			}
+		// A target that became a link is changed, but the round fails:
+		// what was found stands and nothing closes (runProbe).
+		isLink := notLinked(t.Path) == errLinked
+		if isLink {
+			linked = append(linked, t.Name)
+		}
+		if d != nil && !isLink && string(d) == string(before[i]) {
+			refused = append(refused, t.Name)
 		} else {
 			res.Found = append(res.Found, Finding{Check: CheckTamper, Subject: t.Name, Detail: "writable", Severity: High})
 		}
+	}
+	if len(linked) > 0 {
+		return res, fmt.Errorf("tamper probe: target %s: %w", strings.Join(linked, ", "), errLinked)
+	}
+	for _, name := range refused {
+		if err := p.Journal(machine, name); err != nil {
+			return ProbeResult{}, fmt.Errorf("tamper probe: journal %s: %w", name, err)
+		}
+	}
+	for _, t := range p.Targets {
 		res.Checked = append(res.Checked, t.Name)
 	}
 	return res, nil
+}
+
+// errLinked is a target or control Path that is a symbolic link. The
+// probe refuses one rather than resolve it, so a wiring change that
+// passes a link fails closed (S33).
+var errLinked = errors.New("is a symbolic link")
+
+// notLinked fails if path is a symbolic link, by Lstat, or cannot be
+// read.
+func notLinked(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&fs.ModeSymlink != 0 {
+		return errLinked
+	}
+	return nil
 }
 
 // targetDigest is treeDigest of path and, for anything but a directory,
@@ -247,12 +291,12 @@ func (p *TamperProbe) Run(ctx context.Context) (ProbeResult, error) {
 // (P3-4b-4c-restore). Other names there are left out: the broker may
 // write beside a target it does not hold (#584 L3 1), and a replaced
 // target still changes treeDigest.
-func targetDigest(path string) ([]byte, error) {
-	d, err := treeDigest(path)
+func targetDigest(ctx context.Context, path string) ([]byte, error) {
+	d, err := treeDigest(ctx, path)
 	if err != nil {
 		return nil, err
 	}
-	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+	if fi, err := os.Lstat(path); err == nil && fi.IsDir() {
 		return d, nil
 	}
 	ents, err := os.ReadDir(filepath.Dir(path))
@@ -275,60 +319,187 @@ func targetDigest(path string) ([]byte, error) {
 func tamperSibling(nonce string) string { return ".agentos-tamper-" + nonce }
 
 // removeSiblings removes the files the round's guest writes may have left
-// beside or inside each target and the control. A target the guest
+// beside or inside each target and the control, never through a link: a
+// Path that is one now has nothing removed. A target the guest
 // reached may still need restoring from a broker copy if something other
 // than the fixed script wrote it (loops S33).
 func (p *TamperProbe) removeSiblings(nonce string) {
 	for _, t := range append(slices.Clone(p.Targets), p.Control) {
 		dir := filepath.Dir(t.Path)
-		if fi, err := os.Stat(t.Path); err == nil && fi.IsDir() {
+		fi, err := os.Lstat(t.Path)
+		switch {
+		case err == nil && fi.Mode()&fs.ModeSymlink != 0:
+			continue
+		case err == nil && fi.IsDir():
 			dir = t.Path
 		}
 		os.Remove(filepath.Join(dir, tamperSibling(nonce)))
 	}
 }
 
+// beforeDigestOpen, set only by tests, runs between the walk's Lstat of a
+// regular file or directory and its open, with the target's root and the
+// entry's name under it: where a guest's swap races the digest.
+var beforeDigestOpen func(root, rel string)
+
+// errSwapped is an entry that changed between the walk's Lstat and its
+// open, or while the walk read it: never a pass, since the digest no
+// longer says what was there.
+var errSwapped = errors.New("a file changed under the digest")
+
 // treeDigest hashes a file or directory tree: names, types, modes and
-// contents, without following symbolic links.
-func treeDigest(root string) ([]byte, error) {
-	if _, err := os.Lstat(root); err != nil {
+// contents, under ctx. It follows no symbolic link, at any depth: each
+// directory is read through a handle checked against the walk's Lstat,
+// and its entries are reached through that handle (walkedPath), never
+// by a path a guest could swap a link into (S33).
+func treeDigest(ctx context.Context, root string) ([]byte, error) {
+	info, err := os.Lstat(root)
+	if err != nil {
 		return nil, err
 	}
 	h := sha256.New()
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(root, path)
-		fmt.Fprintf(h, "%q %v %d\n", rel, info.Mode(), info.Size())
-		switch {
-		case info.Mode()&fs.ModeSymlink != 0:
-			l, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(h, "-> %q\n", l)
-		case info.Mode().IsRegular():
-			f, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			_, err = io.Copy(h, f)
-			f.Close()
-			return err
-		}
-		return nil
-	})
+	err = digestEntry(ctx, h, root, root, ".", info, 0)
 	return h.Sum(nil), err
+}
+
+// maxDigestDepth bounds how deep the digest walks, so a guest's deep
+// nesting cannot hold one handle per level until the broker runs out;
+// deeper fails the round. Real targets are a few levels deep.
+const maxDigestDepth = 64
+
+// digestEntry hashes the entry rel of root, found at path as walked.
+func digestEntry(ctx context.Context, h io.Writer, root, path, rel string, walked fs.FileInfo, depth int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	fmt.Fprintf(h, "%q %v %d\n", rel, walked.Mode(), walked.Size())
+	switch {
+	case walked.Mode()&fs.ModeSymlink != 0:
+		l, err := os.Readlink(path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "-> %q\n", l)
+	case walked.Mode().IsRegular():
+		return hashFile(ctx, h, root, path, rel, walked)
+	case walked.IsDir():
+		return digestDir(ctx, h, root, path, rel, walked, depth)
+	}
+	return nil
+}
+
+// digestDir hashes the directory the walk found at path, read through a
+// handle that must be that directory, its entries in name order. After
+// the read, path must still name it, so a directory swapped while the
+// walk was inside it fails too.
+func digestDir(ctx context.Context, h io.Writer, root, path, rel string, walked fs.FileInfo, depth int) error {
+	if depth >= maxDigestDepth {
+		return errors.New("a tree deeper than the digest walks")
+	}
+	d, err := openWalked(root, path, rel, walked)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	names, err := d.Readdirnames(-1)
+	if err != nil {
+		return err
+	}
+	slices.Sort(names)
+	for _, n := range names {
+		p := walkedPath(d, n)
+		info, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if err := digestEntry(ctx, h, root, p, filepath.Join(rel, n), info, depth+1); err != nil {
+			return err
+		}
+	}
+	if now, err := os.Lstat(path); err != nil || !os.SameFile(now, walked) {
+		return errSwapped
+	}
+	return nil
+}
+
+// walkedPath names entry name of the open directory d through d itself
+// (/proc/self/fd), so resolving it never passes through a path component
+// a guest could have swapped for a link since d was checked.
+func walkedPath(d *os.File, name string) string {
+	return "/proc/self/fd/" + strconv.FormatUint(uint64(d.Fd()), 10) + "/" + name
+}
+
+// openWalked opens the entry the walk found at path without following a
+// link and without blocking (a FIFO), and fails with errSwapped unless it
+// is the same file, of the same type, as walked.
+func openWalked(root, path, rel string, walked fs.FileInfo) (*os.File, error) {
+	if beforeDigestOpen != nil {
+		beforeDigestOpen(root, rel)
+	}
+	// os.OpenFile adds O_CLOEXEC; a link fails with ELOOP.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil && (fi.Mode().Type() != walked.Mode().Type() || !os.SameFile(fi, walked)) {
+		err = errSwapped
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// digestChunk is how much hashFile reads between checks of ctx.
+const digestChunk = 64 << 10
+
+// hashFile hashes the regular file the walk found at path as walked
+// (openWalked), so a guest that swapped it for a link, a FIFO or a device
+// cannot steer or wedge the read. It reads at most walked's size, in
+// chunks, under ctx, so it ends even while a guest still writes the file.
+func hashFile(ctx context.Context, h io.Writer, root, path, rel string, walked fs.FileInfo) error {
+	f, err := openWalked(root, path, rel, walked)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	r := io.LimitReader(f, walked.Size())
+	buf := make([]byte, digestChunk)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := r.Read(buf)
+		h.Write(buf[:n])
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // Pressure kinds an exhaustion round applies, and the subjects for the
 // broker's own targets.
 var pressureKinds = []string{"cpu", "memory", "disk", "processes"}
+
+// sandboxThreads is the subject of the pids.max check. Under gVisor a
+// guest process is a task inside the sentry, not a host task, so the
+// machine cgroup's pids.max bounds the sandbox's host threads, not guest
+// processes (RES-2, S35): a round checks that limit under this name and
+// never claims "processes" (P3-4b-4c-pids-r1 owns a guest bound).
+const sandboxThreads = "sandbox threads"
+
+// limitKinds are the limits a round reads, in report order.
+var limitKinds = []string{"cpu", "memory", "disk", sandboxThreads}
+
+// maxCPUs caps a machine's CPU count: no kernel writes a larger
+// cpuset, and a count over it could wrap the sum or Hold × CPUs (#599
+// Security L1).
+const maxCPUs = 1 << 16
 
 // PressedMachine is the machine a round presses: its cgroup directory,
 // its disk budget as the file system holds it, and its disk quota's
@@ -362,6 +533,13 @@ type PressScript struct {
 // what four `runsc exec` presses that exit at once used on CI (0.44 s; S35).
 const cpuFloor = time.Second
 
+// scriptFloor is the least memory and disk a press script may hold: half
+// of it, the round's minimum, is over twice the largest rise presses that
+// exited at once left on CI (shmem 5.1 MiB, disk 4 KiB; S35), so a guest
+// that idles cannot meet it, as it could with Script{2, 2}'s 1-byte
+// minimums.
+var scriptFloor = PressScript{MemoryBytes: 24 << 20, DiskBytes: 1 << 20}
+
 // ExhaustProbe has a fresh machine's guest press CPU, memory, disk and
 // processes inside its machine's cgroup for Hold. Meanwhile it times the
 // broker's answers; then it checks the guest pressed, reads the machine's
@@ -390,18 +568,21 @@ func (p *ExhaustProbe) Check() Check         { return CheckExhaust }
 func (p *ExhaustProbe) Every() time.Duration { return p.Interval }
 
 // Run presses, times and preempts. A limit unset or above Budget is a
-// High "above budget" finding on the resource; a slow answer or
+// High "above budget" finding on the resource (pids.max's is
+// sandboxThreads); a slow answer or
 // preemption a High "slow" one. A failed machine, press, ping or
 // preemption, a machine the last round used, or a counter that did not
 // rise by its minimum over the hold (the guest did not press: half of
 // Script for memory and disk, half of Hold on every CPU the machine may
 // run on in CPU time, at least cpuFloor) fails the run, which then
-// closes nothing; a machine is preempted either way.
+// closes nothing; a machine is preempted either way. Guest processes are
+// pressed but not checked, so a round never closes a "processes" finding.
 func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 	b := p.Budget
 	if p.Machine == nil || p.Press == nil || p.Ping == nil || p.Preempt == nil || p.Hold <= 0 || p.ResponseTarget <= 0 || p.PreemptTarget <= 0 || p.BrokerWeight <= 0 ||
 		b.MemoryBytes <= 0 || b.Pids <= 0 || b.DiskBytes <= 0 ||
-		p.Script.MemoryBytes <= 1 || p.Script.MemoryBytes > b.MemoryBytes || p.Script.DiskBytes <= 1 || p.Script.DiskBytes > b.DiskBytes {
+		p.Script.MemoryBytes < scriptFloor.MemoryBytes || p.Script.MemoryBytes > b.MemoryBytes ||
+		p.Script.DiskBytes < scriptFloor.DiskBytes || p.Script.DiskBytes > b.DiskBytes {
 		return ProbeResult{}, errors.New("exhaustion probe: not configured")
 	}
 	m, err := p.Machine(ctx)
@@ -421,9 +602,14 @@ func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 	// The machine's CPU count sets the CPU minimum; unreadable, the round
 	// cannot show the guest pressed, as with an unreadable counter.
 	cpus, rerr := cpusEffective(m.Cgroup)
-	cpuRise := p.Hold * time.Duration(cpus) / 2
-	if rerr == nil && cpuRise < cpuFloor {
-		return ProbeResult{}, fmt.Errorf("exhaustion probe: a %v hold on %d CPUs asks under %v of CPU time", p.Hold, cpus, cpuFloor)
+	var cpuRise time.Duration
+	if rerr == nil {
+		if time.Duration(cpus) > math.MaxInt64/p.Hold {
+			return ProbeResult{}, fmt.Errorf("exhaustion probe: a %v hold on %d CPUs overflows", p.Hold, cpus)
+		}
+		if cpuRise = p.Hold * time.Duration(cpus) / 2; cpuRise < cpuFloor {
+			return ProbeResult{}, fmt.Errorf("exhaustion probe: a %v hold on %d CPUs asks under %v of CPU time", p.Hold, cpus, cpuFloor)
+		}
 	}
 	var before map[string]int64
 	if rerr == nil {
@@ -447,7 +633,7 @@ func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 			}
 		}
 	}
-	for _, k := range pressureKinds {
+	for _, k := range limitKinds {
 		if !p.limited(m, k) {
 			res.Found = append(res.Found, Finding{Check: CheckExhaust, Subject: k, Detail: "above budget", Severity: High})
 		}
@@ -467,7 +653,7 @@ func (p *ExhaustProbe) Run(ctx context.Context) (res ProbeResult, err error) {
 		// What was found stands; nothing closes (runProbe).
 		return res, fmt.Errorf("exhaustion probe: the guest did not press: %w", rerr)
 	}
-	res.Checked = append(append(res.Checked, pressureKinds...), "response", "preemption")
+	res.Checked = append(append(res.Checked, limitKinds...), "response", "preemption")
 	return res, nil
 }
 
@@ -491,7 +677,8 @@ func cpusEffective(dir string) (int, error) {
 	}
 }
 
-// cpuCount counts a cpuset list such as "0-3,6".
+// cpuCount counts a cpuset list such as "0-3,6". Over maxCPUs is an
+// error, checked while summing so the sum cannot wrap first.
 func cpuCount(list string) (int, error) {
 	n := 0
 	for part := range strings.SplitSeq(list, ",") {
@@ -504,13 +691,17 @@ func cpuCount(list string) (int, error) {
 		if err != nil || a < 0 || b < a {
 			return 0, fmt.Errorf("bad cpuset %q", list)
 		}
+		if b-a >= maxCPUs-n {
+			return 0, fmt.Errorf("cpuset over %d CPUs", maxCPUs)
+		}
 		n += b - a + 1
 	}
 	return n, nil
 }
 
 // usage reads machine m's counters, broker-side: cpu.stat usage_usec,
-// memory.stat shmem and the disk quota's usage. Processes have none: under
+// memory.stat shmem and the disk quota's usage; a negative one is an
+// error, as from cgroupCounter. Processes have none: under
 // gVisor a guest process is not a host task, so pids.current does not
 // count them (S35).
 func (p *ExhaustProbe) usage(m PressedMachine) (map[string]int64, error) {
@@ -530,6 +721,9 @@ func (p *ExhaustProbe) usage(m PressedMachine) (map[string]int64, error) {
 	}
 	if u["disk"], err = m.DiskUsed(); err != nil {
 		return nil, fmt.Errorf("disk usage: %w", err)
+	}
+	if u["disk"] < 0 {
+		return nil, errors.New("disk usage: negative")
 	}
 	return u, nil
 }
@@ -562,7 +756,8 @@ func (p *ExhaustProbe) timePings(ctx context.Context) (bool, error) {
 }
 
 // limited says whether the broker set a limit on kind for m at or under
-// Budget; for cpu, a weight below the broker's.
+// Budget; for cpu, a weight below the broker's. An unknown kind,
+// "processes" included, is not limited.
 func (p *ExhaustProbe) limited(m PressedMachine, kind string) bool {
 	switch kind {
 	case "disk":
@@ -573,7 +768,7 @@ func (p *ExhaustProbe) limited(m PressedMachine, kind string) bool {
 	case "memory":
 		n, ok := cgroupInt(m.Cgroup, "memory.max")
 		return ok && n <= p.Budget.MemoryBytes
-	case "processes":
+	case sandboxThreads:
 		n, ok := cgroupInt(m.Cgroup, "pids.max")
 		return ok && n <= p.Budget.Pids
 	}
@@ -595,8 +790,9 @@ func cgroupInt(dir, file string) (int64, bool) {
 }
 
 // cgroupCounter reads a cgroup v2 counter: the file's one integer, or with
-// key the integer on its "key N" line. No cgroup, a missing file or no
-// such line is an error.
+// key the integer on its "key N" line. No cgroup, a missing file, no
+// such line or a negative value, which the kernel never writes, is an
+// error (#599 Security L2: a negative baseline inflates a rise).
 func cgroupCounter(dir, file, key string) (int64, error) {
 	if dir == "" {
 		return 0, errors.New("no cgroup")
@@ -621,6 +817,9 @@ func cgroupCounter(dir, file, key string) (int64, error) {
 	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", file, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("%s: negative", file)
 	}
 	return n, nil
 }
