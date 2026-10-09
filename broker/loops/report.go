@@ -358,8 +358,18 @@ func (s *Guard) CloseTarget(id string, c Closure) error {
 	delete(s.st.Open, id)
 	delete(s.held, id)
 	s.st.Cleared[id] = s.cfg.Now()
+	// As in Pass: an Again close is digest-only, so a flap ends on "it
+	// is back"; a told, unpaused close is marked, so a return within
+	// ReText is texted again (delta L3 on #586).
+	var told []Record
+	if rec.Texted && (!rec.Again || rec.Contained == "paused") {
+		told = append(told, rec)
+		if rec.Contained != "paused" {
+			s.st.ToldCleared[id] = true
+		}
+	}
 	err := s.saveLocked()
-	lines := s.clearedLinesLocked([]Record{rec})
+	lines := s.clearedLinesLocked(told)
 	s.mu.Unlock()
 	if text := s.batch(lines); text != "" {
 		s.cfg.Notify(text, false)

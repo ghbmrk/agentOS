@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -184,6 +185,33 @@ func TestAHangFindingSaysHangNotCrash(t *testing.T) {
 	for _, f := range []Finding{fuzzFinding(), hangFinding(FuzzNoInputDetail)} {
 		if got := findingText(f); got != "My self-test found a crash in the check that reads agent requests. The fix comes with an update." {
 			t.Errorf("%s: %q", f.Detail, got)
+		}
+	}
+}
+
+// A hang that returns within ReText after its texted "responds to test
+// inputs again" is texted again, not left as a digest-only Again (delta
+// L3 on #586): CloseTarget marks the told close as Pass does.
+func TestAHangBackSoonAfterItsClearedTextIsTextedAgain(t *testing.T) {
+	for _, d := range []string{FuzzOverrunDetail, FuzzStallDetail} {
+		r := newReportRig(t, nil)
+		id := r.report(t, hangFinding(d)).Finding.ID
+		if err := r.g.CloseTarget(id, goodStep()); err != nil {
+			t.Fatalf("%s: %v", d, err)
+		}
+		before := len(r.texts)
+		r.now = r.now.Add(time.Hour)
+		again := r.report(t, hangFinding(d))
+		if !again.Again || !again.Texted || len(r.texts) != before+1 || strings.Contains(r.texts[before], "Cleared") {
+			t.Fatalf("%s: back soon: %+v texts %q", d, again, r.texts[before:])
+		}
+		// As Again, its own close is digest-only: a flap ends on "it is back".
+		before = len(r.texts)
+		if err := r.g.CloseTarget(id, goodStep()); err != nil {
+			t.Fatalf("%s: %v", d, err)
+		}
+		if got := r.texts[before:]; len(got) != 0 {
+			t.Fatalf("%s: an Again close was texted: %q", d, got)
 		}
 	}
 }
