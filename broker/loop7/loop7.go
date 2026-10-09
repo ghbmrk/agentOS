@@ -511,7 +511,7 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 		}
 		return 0, nil
 	case !bytes.Contains(out, []byte("Failing input written to")):
-		return 0, fmt.Errorf("loop7: fuzzing %s did not run: %v", t.subject(), err)
+		return 0, fmt.Errorf("loop7: fuzzing %s did not run: %v: %q", t.subject(), err, lastLine(out))
 	}
 	return s.replay(ctx, t)
 }
@@ -947,6 +947,17 @@ func (j *Jail) ownPath(r *os.Root, rel string) error {
 		}
 	}
 	return nil
+}
+
+// lastLine is the last non-empty line of a child's output, at most 200
+// bytes, so a runner error says why the engine stopped.
+func lastLine(out []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	l := strings.TrimSpace(lines[len(lines)-1])
+	if len(l) > 200 {
+		l = l[:200]
+	}
+	return l
 }
 
 // runName is a fresh scratch directory's name.

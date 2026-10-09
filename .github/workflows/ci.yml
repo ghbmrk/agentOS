@@ -145,12 +145,11 @@ jobs:
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery ./cleanroom
-          # Fuzz children's leaf, user, network and tree (P3-4b-3r-confine): the
-          # root tests only, in a run of their own; the rest of loop7 runs in
-          # the broker job.
+          # Fuzz children's leaf, user, network and tree (P3-4b-3r-confine), as
+          # root, in a run of their own.
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
-            go test -count=1 -v -run '^(TestAJailedChildIsUnprivilegedAndOffline|TestAJailedChildStartsInTheLeaf|TestAnInputPastMemoryMaxIsKilledInTheLeafAndReported|TestAJailedTargetStillReportsItsCrash|TestOwnGivesTheStateToTheJailUser|TestScratchIsMadeWithoutFollowingALink|TestAChildThatLeavesItsGroupDiesWithItsRun|TestAJailedFuzzStepUsesItsCacheOnFirstBoot|TestLoadNeverWritesThroughAPlantedLink|TestThePruneRemovesNothingThroughALink)$' ./loop7
+            go test -count=1 -v ./loop7
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -v -run '^TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound$' ./cmd/agentosd
