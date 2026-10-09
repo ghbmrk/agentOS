@@ -293,7 +293,7 @@ func TestForgetInFlightRefusesBeforeMutation(t *testing.T) {
 	}
 }
 
-// REQ: OP-1 (W5-Db DB-6), OP-1
+// REQ: OP-1 (W5-Db DB-6)
 func TestCompactDropsSupersededExpired(t *testing.T) {
 	q, st := queue(t)
 	s := snapshot(t, "change", 1, "Fixed broker notice.")
