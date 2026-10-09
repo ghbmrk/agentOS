@@ -86,7 +86,10 @@ func (p *Pipeline) what(a *Adoption) string {
 	switch {
 	case has[ClassGuestImage] || has[ClassHostImage]:
 		v := safe(strings.TrimPrefix(a.Origin, "update:"))
-		if a.Staged {
+		switch {
+		case a.Staged && a.Reverted != "":
+			return "Staged update " + v // undone before it was installed
+		case a.Staged:
 			return "Staged update " + v + "; I will install it when I am free" // C27
 		}
 		return "Installed update " + v

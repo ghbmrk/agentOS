@@ -50,6 +50,10 @@ type Proposer interface {
 	// owner's request closed unanswered (change.Pipeline.Lapsed). It must
 	// not call into Loop 3: it is called under Loop 3's lock.
 	Lapsed(id string) bool
+	// Adoptions lists the pipeline's adoptions (change.Pipeline.Adoptions),
+	// read to find one the applier dropped (Reverted == change.WhyDropped,
+	// SR3-4f-2-r1). It must not call into Loop 3.
+	Adoptions() []change.Adoption
 }
 
 // Config configures New.
@@ -390,6 +394,7 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if failure == "" && ferr != nil {
 		failure, err = failState, ferr
 	}
+	dropped := l.dropped()
 	var (
 		rel *update.Verified
 		m   update.Manifest
@@ -470,6 +475,11 @@ func (l *Loop3) check(ctx context.Context) loops.Result {
 	if l.st.Proposed[v] == change.StateAwaitingOwner && l.st.ProposalID[v] != "" && l.cfg.Pipeline.Lapsed(l.st.ProposalID[v]) {
 		// The owner's request closed unanswered and the pipeline dropped
 		// the proposal (change.Decided): offer it again now.
+		l.unproposeLocked(v)
+	}
+	if id := l.st.ProposalID[v]; id != "" && dropped[id] {
+		// The applier dropped the adoption saved for v (SR3-4f-2-r1): offer
+		// it again now, under a new ID, with this check's authority.
 		l.unproposeLocked(v)
 	}
 	_, proposed := l.st.Proposed[v]
@@ -732,21 +742,34 @@ func (l *Loop3) listed() bool {
 	return err == nil && len(allow) > 0
 }
 
+// dropped is the IDs of the pipeline's adoptions the applier dropped
+// (change.WhyDropped). It is read outside l.mu.
+func (l *Loop3) dropped() map[string]bool {
+	out := map[string]bool{}
+	for _, a := range l.cfg.Pipeline.Adoptions() {
+		if a.Reverted == change.WhyDropped {
+			out[a.ID] = true
+		}
+	}
+	return out
+}
+
 // Status reports whether the box is up to date, and says why not.
 func (l *Loop3) Status() Status {
 	online, set, listed := l.cfg.Online(), l.cfg.Settings(), l.listed()
 	installed, ierr := l.cfg.Store.Installed()
 	src, serr := l.cfg.Store.Following()
+	dropped := l.dropped()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.statusLocked(online, set, listed, installed, src, errors.Join(ierr, serr))
+	return l.statusLocked(online, set, listed, installed, src, dropped, errors.Join(ierr, serr))
 }
 
 // statusLocked is the status line; on a fork it also names the fork
 // (Security C7) and, with no attestor listed, says each security fix is
 // the owner's to approve (potency C1). listed is from the attestor source.
-func (l *Loop3) statusLocked(online bool, set loops.Settings, listed bool, in update.Installed, src update.Followed, ierr error) Status {
-	st := l.baseStatusLocked(online, set, in, src, ierr)
+func (l *Loop3) statusLocked(online bool, set loops.Settings, listed bool, in update.Installed, src update.Followed, dropped map[string]bool, ierr error) Status {
+	st := l.baseStatusLocked(online, set, in, src, dropped, ierr)
 	if src.Name == "" {
 		return st
 	}
@@ -760,7 +783,7 @@ func (l *Loop3) statusLocked(online bool, set loops.Settings, listed bool, in up
 // forkAsks is potency C1's STATUS line on a fork with no attestor listed.
 const forkAsks = "Security fixes: you approve each one, since no attestor is listed for the fork you follow."
 
-func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Installed, src update.Followed, ierr error) Status {
+func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Installed, src update.Followed, dropped map[string]bool, ierr error) Status {
 	now := l.cfg.Now()
 	st := l.st
 	last := "never"
@@ -801,6 +824,10 @@ func (l *Loop3) baseStatusLocked(online bool, set loops.Settings, in update.Inst
 		return Status{Line: pendingLine(p)}
 	}
 	if st.Newest > in.Version {
+		if id := st.ProposalID[st.Newest]; id != "" && dropped[id] {
+			// Until the next check offers it again (SR3-4f-2-r1, UX2 on #605).
+			return Status{Line: fmt.Sprintf("Update %d was not installed; I will offer it again.", st.Newest)}
+		}
 		switch st.Proposed[st.Newest] {
 		case change.StateRejected:
 			return Status{Line: fmt.Sprintf("Update %d did worse on my tests and was not installed.", st.Newest)}
@@ -864,9 +891,10 @@ func (l *Loop3) Digest() []string {
 	online, set, listed := l.cfg.Online(), l.cfg.Settings(), l.listed()
 	installed, ierr := l.cfg.Store.Installed()
 	src, serr := l.cfg.Store.Following()
+	dropped := l.dropped()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	st := l.statusLocked(online, set, listed, installed, src, errors.Join(ierr, serr))
+	st := l.statusLocked(online, set, listed, installed, src, dropped, errors.Join(ierr, serr))
 	var out []string
 	if serr == nil && src.RootSHA256 != l.st.SaidSource {
 		// Once per switch (Security C7, UX Q-C).
