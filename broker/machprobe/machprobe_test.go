@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -70,5 +71,42 @@ func TestPressHoldsEachKindThenReleases(t *testing.T) {
 	}
 	if err := Press(context.Background(), "network", time.Millisecond, o); err == nil {
 		t.Fatal("unknown pressure accepted")
+	}
+}
+
+// REQ: ARC-2
+//
+// P3-4b-3r-env requirement 3: a process-pressure child starts with an
+// empty environment, not the caller's (#548 Security 4a point 4).
+func TestPressChildrenInheritNoEnvironment(t *testing.T) {
+	const canary = "agentos-machprobe-canary"
+	t.Setenv("AGENTOS_MACHPROBE_CANARY", canary)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "env")
+	o := Options{Dir: dir, Procs: 1, Child: []string{"/bin/sh", "-c", "{ /usr/bin/env; echo END; } >" + out + ".tmp && /bin/mv " + out + ".tmp " + out + " && exec /bin/sleep 30"}}
+	for _, p := range []string{"/bin/sh", "/usr/bin/env", "/bin/mv", "/bin/sleep"} {
+		if _, err := os.Stat(p); err != nil {
+			t.Skip("no " + p)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Press(ctx, "processes", time.Minute, o) }()
+	var got []byte
+	var err error
+	for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if got, err = os.ReadFile(out); err == nil {
+			break
+		}
+	}
+	cancel()
+	if perr := <-done; perr != nil {
+		t.Fatal(perr)
+	}
+	if err != nil {
+		t.Fatalf("the child wrote no environment: %v", err)
+	}
+	if strings.Contains(string(got), canary) {
+		t.Fatalf("child inherits the caller's environment:\n%s", got)
 	}
 }
