@@ -295,7 +295,7 @@ func TestReportRunsTheChainInOrder(t *testing.T) {
 		t.Fatalf("fix %q, %d fixer calls", rec.Fix, fx.calls())
 	}
 	// (5) one text, urgent, in fixed wording.
-	want := "Security checks: Security test private-route fails on this box. Paused pre-allowance P7. It stays paused until you resume it on my Wi-Fi page."
+	want := "Security checks: Security test private-route fails on my current setup. Paused pre-allowance P7. It stays paused until you resume it on my Wi-Fi page."
 	if len(r.texts) != 1 || r.texts[0] != want || !r.urgent[0] {
 		t.Fatalf("texts %q urgent %v", r.texts, r.urgent)
 	}
@@ -339,13 +339,13 @@ func TestReportNoticeFollowsSeverity(t *testing.T) {
 	if len(r.texts) != 0 || rec.Texted {
 		t.Fatalf("a Low finding was texted: %q", r.texts)
 	}
-	if d := strings.Join(r.g.Digest(), "\n"); !strings.Contains(d, "Security check: Security test private-route fails on this box.") {
+	if d := strings.Join(r.g.Digest(), "\n"); !strings.Contains(d, "Security check: Security test private-route fails on my current setup.") {
 		t.Fatalf("digest %s", d)
 	}
 	f = seedFinding()
 	f.Subject, f.Contain = "other-route", nil
 	r.report(t, f)
-	if len(r.texts) != 1 || !r.urgent[0] || r.texts[0] != "Security checks: Security test other-route fails on this box." {
+	if len(r.texts) != 1 || !r.urgent[0] || r.texts[0] != "Security checks: Security test other-route fails on my current setup." {
 		t.Fatalf("texts %q urgent %v", r.texts, r.urgent)
 	}
 }
@@ -364,7 +364,7 @@ func TestWithNoFixerTheRequestStaysOpen(t *testing.T) {
 	if !open || rec.Fix != FixPending || !rec.Reported {
 		t.Fatalf("after passes and a restart: open %v, %+v", open, rec)
 	}
-	why := "waits for a fix: nothing on this box can build one yet"
+	why := "waits for a fix: I cannot build one yet"
 	if s := r.g.Status(); !strings.Contains(s, "Loop 2: 1 finding "+why+".") {
 		t.Fatalf("status %q", s)
 	}

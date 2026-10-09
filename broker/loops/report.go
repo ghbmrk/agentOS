@@ -84,7 +84,7 @@ func (s *Guard) reportable(f Finding) (change.TreeRule, error) {
 		return change.TreeRule{}, fmt.Errorf("%w: no valid tree rule (%v)", ErrFinding, err)
 	}
 	if rule.Holds(s.activeTree(rule)) {
-		return change.TreeRule{}, fmt.Errorf("%w: the test passes on this box", ErrFinding)
+		return change.TreeRule{}, fmt.Errorf("%w: the test already passes", ErrFinding)
 	}
 	return rule, nil
 }
@@ -122,7 +122,7 @@ func (s *Guard) Measured() bool {
 // Why a reported finding still waits for its fix, for STATUS and the
 // digest.
 const (
-	waitNoFixer   = "nothing on this box can build one yet"
+	waitNoFixer   = "I cannot build one yet"
 	waitBuilding  = "one is being prepared"
 	waitFailed    = "building one failed; I try again at the next check"
 	waitRejected  = "the last one did not qualify; I try again at the next check"

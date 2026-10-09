@@ -1111,7 +1111,7 @@ func findingText(f Finding) string {
 		}
 		return "Credential " + sub + " " + safeName(f.Detail) + ". Replace it on my Wi-Fi page."
 	case CheckSeeded:
-		return "Security test " + sub + " fails on this box."
+		return "Security test " + sub + " fails on my current setup."
 	}
 	return "Security finding on " + sub + "."
 }
