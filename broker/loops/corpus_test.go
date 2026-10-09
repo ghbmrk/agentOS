@@ -139,16 +139,17 @@ func TestADeliveredCheckIsTakenThroughItsGuest(t *testing.T) {
 // LOOP-7: a delivery that fails (the guest did not act, the broker saw
 // nothing) fails the run and reports nothing, bare payload or item.
 func TestAFailedDeliveryFailsTheRun(t *testing.T) {
+	errNoReply := errors.New("no reply reached the owner line")
 	for _, failAt := range []int{1, 3} {
 		n := 0
 		c := ClosedCheck{Name: "label check", Payload: "", Deliver: func(context.Context, string) (bool, error) {
 			if n++; n == failAt {
-				return false, errors.New("no reply reached the owner line")
+				return false, errNoReply
 			}
-			return false, nil
+			return true, nil // every other text is caught, so only the delivery error can fail the run
 		}}
 		res, err := (&CorpusProbe{Interval: 1, Items: corpusItems(t), Checks: []ClosedCheck{c}}).Run(context.Background())
-		if err == nil || len(res.Found) != 0 {
+		if !errors.Is(err, errNoReply) || len(res.Found) != 0 || n != failAt {
 			t.Fatalf("fail at %d: %+v %v", failAt, res, err)
 		}
 	}

@@ -2,9 +2,12 @@ package corpus
 
 import (
 	"context"
+	"errors"
 	"strings"
 
+	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/loops"
+	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // Relay takes a replayed text through a guest machine as untrusted input
@@ -33,10 +36,15 @@ type Relay interface {
 // filter on the owner's line, the label check and the alert patterns on
 // the mailbox. Each keeps Checks' name and payload. The commitment filter
 // is not among them: its route is the grants gate's auto-reply (ADP-11),
-// so Checks' in-process copy stays its probe.
+// so Checks' in-process copy stays its probe. A text the owner's line
+// would clip fails the code filter's run before the guest is asked: the
+// clip could cut the code, so a missing code would be no verdict.
 func PlaneChecks(r Relay) []loops.ClosedCheck {
 	return []loops.ClosedCheck{
 		{Name: CodeFilter, Payload: CodePayload, Deliver: func(ctx context.Context, s string) (bool, error) {
+			if len(owner.AgentPrefix+s) > control.MaxText {
+				return false, errOverOneText
+			}
 			sent, err := r.Reply(ctx, s)
 			return !strings.Contains(sent, Code), err
 		}},
@@ -50,3 +58,5 @@ func PlaneChecks(r Relay) []loops.ClosedCheck {
 		}},
 	}
 }
+
+var errOverOneText = errors.New("corpus: a replayed text is over one owner text")

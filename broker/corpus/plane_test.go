@@ -5,8 +5,10 @@ package corpus
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/mail"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -96,4 +98,34 @@ func TestAFailedRouteFailsThePlaneRun(t *testing.T) {
 	if err == nil || len(res.Found) != 0 {
 		t.Fatalf("%+v %v", res, err)
 	}
+}
+
+// LOOP-7: a replayed text the owner's line would clip is no verdict for
+// the code filter: the clip could drop the code, so the run fails before
+// the guest is asked.
+func TestATextOverOneOwnerTextFailsTheCodeFilter(t *testing.T) {
+	asked := false
+	r := fakeRelay{a: adapter(t)}
+	for _, c := range PlaneChecks(askedRelay{r, &asked}) {
+		if c.Name != CodeFilter {
+			continue
+		}
+		long := CodePayload + strings.Repeat(" x", control.MaxText)
+		if _, err := c.Deliver(context.Background(), long); err == nil || asked {
+			t.Fatalf("an over-long text got a verdict (asked %v): %v", asked, err)
+		}
+		if caught, err := c.Deliver(context.Background(), CodePayload); err != nil || !caught || !asked {
+			t.Fatalf("the bare payload: %v %v %v", caught, err, asked)
+		}
+	}
+}
+
+type askedRelay struct {
+	fakeRelay
+	asked *bool
+}
+
+func (r askedRelay) Reply(ctx context.Context, s string) (string, error) {
+	*r.asked = true
+	return r.fakeRelay.Reply(ctx, s)
 }

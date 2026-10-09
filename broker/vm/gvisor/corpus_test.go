@@ -109,7 +109,9 @@ type relay struct {
 	ch      *owner.Channel
 	machine string
 	sock    string // the broker socket as the guest sees it
-	run     func(args ...string) (string, error)
+	run     func(ctx context.Context, args ...string) (string, error)
+	gate    *grants.Gate
+	own     *gateOwner
 
 	mu      sync.Mutex
 	n       int
@@ -117,7 +119,14 @@ type relay struct {
 	// send is what the broker does with a guest's reply to the owner:
 	// the owner channel's Notify, or a weakened copy (the control).
 	send func(text string) error
+	// approve has the owner approve the gate's alert archive (the
+	// archive route's control).
+	approve bool
 }
+
+// routeTimeout bounds each route, so a guest or mail exchange that stalls
+// fails the run on the check it was serving instead of hanging it.
+const routeTimeout = 30 * time.Second
 
 func newRelay(t *testing.T, machines guest.Machines) *relay {
 	t.Helper()
@@ -153,6 +162,7 @@ func newRelay(t *testing.T, machines guest.Machines) *relay {
 	x.send = x.ch.Notify
 	own := &gateOwner{Channel: x.ch, reqs: map[string][]owner.Item{}}
 	g.Attach(x.eng, own)
+	x.gate, x.own = g, own
 	x.grant(g, own)
 
 	x.plane, err = guest.New(guest.Config{Dir: filepath.Join(t.TempDir(), "guests"), Machines: machines, Effects: g,
@@ -229,11 +239,12 @@ func (x *relay) next() string {
 }
 
 // requested is the journaled request reqID, and whether the guest carried
-// key=want in it: the broker's own record of what the guest asked.
+// key=want in it, key present even for an empty want: the broker's own
+// record of what the guest asked.
 func (x *relay) requested(reqID, key, want string) error {
 	for _, st := range x.eng.List() {
 		if strings.HasSuffix(st.Intent.ID, "/"+reqID) && strings.HasPrefix(st.Intent.Origin, "guest:") {
-			if v, _ := st.Intent.Params[key].(string); v != want {
+			if v, ok := st.Intent.Params[key].(string); !ok || v != want {
 				return errors.New("the request does not carry the text handed over")
 			}
 			return nil
@@ -242,7 +253,9 @@ func (x *relay) requested(reqID, key, want string) error {
 	return errors.New("the broker journaled no request")
 }
 
-func (x *relay) Reply(_ context.Context, text string) (string, error) {
+func (x *relay) Reply(ctx context.Context, text string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, routeTimeout)
+	defer cancel()
 	x.owed()
 	x.mu.Lock()
 	x.replied = ""
@@ -250,7 +263,7 @@ func (x *relay) Reply(_ context.Context, text string) (string, error) {
 	if _, err := x.plane.DeliverOwner(x.machine, text, false); err != nil {
 		return "", err
 	}
-	if _, err := x.run("relay", x.sock, "reply"); err != nil {
+	if _, err := x.run(ctx, "relay", x.sock, "reply"); err != nil {
 		return "", err
 	}
 	x.mu.Lock()
@@ -266,7 +279,9 @@ func (x *relay) Reply(_ context.Context, text string) (string, error) {
 	return sent, nil
 }
 
-func (x *relay) Label(_ context.Context, text string) (bool, error) {
+func (x *relay) Label(ctx context.Context, text string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, routeTimeout)
+	defer cancel()
 	_, before, ok := x.srv.Find(labelTarget)
 	if !ok {
 		return false, errors.New("label target gone")
@@ -275,7 +290,7 @@ func (x *relay) Label(_ context.Context, text string) (bool, error) {
 		return false, err
 	}
 	req := x.next()
-	if _, err := x.run("relay", x.sock, "label", labelTarget, req); err != nil {
+	if _, err := x.run(ctx, "relay", x.sock, "label", labelTarget, req); err != nil {
 		return false, err
 	}
 	x.owed()
@@ -291,18 +306,41 @@ func (x *relay) Label(_ context.Context, text string) (bool, error) {
 	return false, nil
 }
 
-func (x *relay) Archive(_ context.Context, text string) (bool, error) {
+func (x *relay) Archive(ctx context.Context, text string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, routeTimeout)
+	defer cancel()
 	req := x.next()
 	rec := "<" + req + "@news.example>"
 	x.srv.Deliver("INBOX", letter(rec, "news@news.example", "Weekly news", text))
-	if _, err := x.run("relay", x.sock, "archive", rec, req); err != nil {
+	if _, err := x.run(ctx, "relay", x.sock, "archive", rec, req); err != nil {
 		return false, err
 	}
 	if err := x.requested(req, "record", rec); err != nil {
 		return false, err
 	}
+	if x.approve {
+		x.gate.Flush()
+		x.own.mu.Lock()
+		id, items := x.own.last, x.own.reqs[x.own.last]
+		x.own.mu.Unlock()
+		for i, it := range items {
+			x.gate.Decide(owner.Decision{Request: id, Item: i + 1, Ref: it.Ref, Approved: true, Why: "owner"})
+		}
+		x.gate.Wait()
+	}
 	folder, _, ok := x.srv.Find(rec)
 	return !ok || folder != "INBOX", nil
+}
+
+// planeCheck is the one check of corpus.PlaneChecks(x) named name.
+func planeCheck(x *relay, name string) []loops.ClosedCheck {
+	for _, c := range corpus.PlaneChecks(x) {
+		if c.Name == name {
+			return []loops.ClosedCheck{c}
+		}
+	}
+	x.t.Fatalf("no plane check %q", name)
+	return nil
 }
 
 // replayAll checks that every route is live (a benign text gets through
@@ -330,9 +368,23 @@ func replayAll(t *testing.T, x *relay) {
 	if err != nil || len(res.Found) != 0 || len(res.Checked) != len(items) {
 		t.Fatalf("clean run: %+v %v", res, err)
 	}
-	// The label route is live last: a configured label applies.
-	if labelled, err := x.Label(ctx, "Family"); err != nil || !labelled {
-		t.Fatalf("label route: %v %v", labelled, err)
+	// Control: an item that replays to a configured label gets past the
+	// label check, and the probe finds it through the plane. It runs
+	// after the clean run, as the label it applies stays on the target.
+	labelProbe := &loops.CorpusProbe{Interval: 1, Items: []loops.CorpusItem{{ID: "control-label", Text: "Family{REPLACE_rogue_string}"}},
+		Checks: planeCheck(x, corpus.LabelCheck)}
+	res, err = labelProbe.Run(ctx)
+	if err != nil || len(res.Found) != 1 || res.Found[0].Subject != "control-label" || res.Found[0].Detail != corpus.LabelCheck {
+		t.Fatalf("label control: %+v %v", res, err)
+	}
+
+	// Control: with the owner approving the gate's alert archive, alert
+	// mail leaves the inbox and the probe fails on the check's own payload.
+	x.approve = true
+	_, err = (&loops.CorpusProbe{Interval: 1, Items: items, Checks: planeCheck(x, corpus.AlertPatterns)}).Run(ctx)
+	x.approve = false
+	if err == nil || !strings.Contains(err.Error(), corpus.AlertPatterns+" misses its own payload") {
+		t.Fatalf("archive control: %v", err)
 	}
 
 	// Control: a reply filter weakened to scan a text's first 40 bytes
@@ -345,7 +397,7 @@ func replayAll(t *testing.T, x *relay) {
 		return x.box.Send(ownerNum, owner.AgentPrefix+s)
 	}
 	x.mu.Unlock()
-	probe.Checks = corpus.PlaneChecks(x)[:1]
+	probe.Checks = planeCheck(x, corpus.CodeFilter)
 	res, err = probe.Run(ctx)
 	if err != nil || len(res.Found) == 0 {
 		t.Fatalf("weakened run: %+v %v", res, err)
@@ -374,8 +426,11 @@ func TestCorpusReplayThroughTheGuestPlane(t *testing.T) {
 		t.Fatal(err)
 	}
 	x.sock = filepath.Join(dir, guest.Socket)
-	x.run = func(args ...string) (string, error) {
-		out, err := exec.Command(bin, args...).Output()
+	x.run = func(ctx context.Context, args ...string) (string, error) {
+		out, err := exec.CommandContext(ctx, bin, args...).Output()
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		return strings.TrimSpace(string(out)), err
 	}
 	replayAll(t, x)
@@ -392,10 +447,11 @@ func TestCorpusReplayInAMachine(t *testing.T) {
 	r.create(x.machine, admission.Accepted)
 	r.ask(x.machine, "token") // waits for the machine to start
 	x.sock = vm.ServicesMount + "/" + guest.Socket
-	x.run = func(args ...string) (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
+	x.run = func(ctx context.Context, args ...string) (string, error) {
 		out, err := r.rt.cmd(ctx, append([]string{"exec", cid(x.machine), "/guest"}, args...)...).Output()
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		return strings.TrimSpace(string(out)), err
 	}
 	replayAll(t, x)
