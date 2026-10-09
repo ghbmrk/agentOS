@@ -2,18 +2,23 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/localui"
 	"github.com/ghbmrk/agentos/broker/loops"
+	"github.com/ghbmrk/agentos/broker/modelroute"
 )
 
 // REQ: OP-9
@@ -87,16 +92,72 @@ func (b *capBox) status() string {
 	return h.Status()
 }
 
-// reachableModel is a model route with a socket that accepts.
+// reachableModel is a model route whose vault process answers: granted
+// and open.
 func reachableModel(t *testing.T) *modelProbe {
 	t.Helper()
-	sock := filepath.Join(shortDir(t), "m.sock")
-	ln, err := net.Listen("unix", sock)
+	return newModelProbe(serveFakeVault(t, filepath.Join(shortDir(t), "m.sock"), modelOn).sock)
+}
+
+var modelOn = modelroute.ModelState{Granted: true, Open: true}
+
+// fakeVault stands in for the vault process on its model socket: it
+// answers the broker's state probe with st. Stopping it leaves the socket
+// file behind, as a vault process that stopped answering does.
+type fakeVault struct {
+	sock string
+	st   atomic.Pointer[modelroute.ModelState]
+	srv  *http.Server
+}
+
+func serveFakeVault(t *testing.T, sock string, st modelroute.ModelState) *fakeVault {
+	t.Helper()
+	f := &fakeVault{sock: sock}
+	f.set(st)
+	f.start(t)
+	return f
+}
+
+func (f *fakeVault) set(st modelroute.ModelState) { f.st.Store(&st) }
+
+func (f *fakeVault) start(t *testing.T) {
+	t.Helper()
+	os.Remove(f.sock)
+	ln, err := net.Listen("unix", f.sock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
-	return newModelProbe(sock)
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	f.srv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(modelroute.HeaderState) == "" {
+			http.Error(w, "not a state request", http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(f.st.Load())
+	})}
+	go f.srv.Serve(ln)
+	t.Cleanup(func() { f.srv.Close() })
+}
+
+// stop stops answering; the socket file stays.
+func (f *fakeVault) stop() { f.srv.Close() }
+
+// staleModel is a model route whose socket file is there with nothing
+// answering.
+func staleModel(t *testing.T) *modelProbe {
+	t.Helper()
+	f := serveFakeVault(t, filepath.Join(shortDir(t), "m.sock"), modelOn)
+	f.stop()
+	if _, err := os.Stat(f.sock); err != nil {
+		t.Fatal(err)
+	}
+	return newModelProbe(f.sock)
+}
+
+// modelWith is a model route whose vault process answers st.
+func modelWith(t *testing.T, st modelroute.ModelState) *modelProbe {
+	t.Helper()
+	return newModelProbe(serveFakeVault(t, filepath.Join(shortDir(t), "m.sock"), st).sock)
 }
 
 // shortDir is a temporary directory short enough for a socket path.
@@ -150,6 +211,15 @@ func capCases() []capCase {
 		}},
 		{row: "C2_model_unreachable", name: "Model:", induce: func(t *testing.T, b *capBox) {
 			b.caps.model = newModelProbe(filepath.Join(shortDir(t), "gone.sock"))
+		}},
+		{row: "C2_model_stale_socket", name: "Model:", induce: func(t *testing.T, b *capBox) {
+			b.caps.model = staleModel(t)
+		}},
+		{row: "C2_model_no_grant", name: "Model:", induce: func(t *testing.T, b *capBox) {
+			b.caps.model = modelWith(t, modelroute.ModelState{Open: true})
+		}},
+		{row: "C2_model_locked", name: "Model:", induce: func(t *testing.T, b *capBox) {
+			b.caps.model = modelWith(t, modelroute.ModelState{Granted: true})
 		}},
 		{row: "C7_recall_off", name: "Memory across tasks:", induce: func(t *testing.T, b *capBox) {
 			b.caps.recallWired(false)
@@ -307,11 +377,7 @@ func TestCapabilityLinesRepeatInTheDigestWhileTheyLast(t *testing.T) {
 		if d := reg.Digest(); len(d) != 1 || d[0] != modelUnreachable {
 			t.Fatalf("socket down: %q", d)
 		}
-		ln, err := net.Listen("unix", sock)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer ln.Close()
+		serveFakeVault(t, sock, modelOn)
 		now = now.Add(modelProbeEvery)
 		if d := reg.Digest(); len(d) != 0 {
 			t.Fatalf("socket back: %q", d)
@@ -342,21 +408,16 @@ func TestCapabilityLinesRepeatInTheDigestWhileTheyLast(t *testing.T) {
 }
 
 // OP-9: the model probe is cached at most a minute, so STATUS does not
-// look for the vault socket on every text, and is not stale for longer.
+// ask the vault process on every text, and is not stale for longer.
 func TestModelProbeIsCachedAMinute(t *testing.T) {
-	sock := filepath.Join(shortDir(t), "m.sock")
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := serveFakeVault(t, filepath.Join(shortDir(t), "m.sock"), modelOn)
 	now := time.Unix(1_800_000_000, 0)
-	p := newModelProbe(sock)
+	p := newModelProbe(f.sock)
 	p.now = func() time.Time { return now }
 	if l := p.Line(); l != "" {
 		t.Fatalf("reachable: %q", l)
 	}
-	ln.Close()
-	os.Remove(sock)
+	f.stop()
 	now = now.Add(modelProbeEvery - time.Second)
 	if l := p.Line(); l != "" {
 		t.Fatalf("within the minute: %q", l)
@@ -478,8 +539,8 @@ func TestOwnerChoicesAreDigestOnly(t *testing.T) {
 
 // REQ: A11, OP-9
 // A11: with learning on but unable to run, STATUS names the cause: the
-// memory too small, no builder, or no model socket, each alone. A11's
-// no-grant cause is not met here (ASSUMPTIONS S8).
+// memory too small, no builder, no model socket, or no model grant, each
+// alone.
 func TestLearningUnableToRunNamesTheCause(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -491,6 +552,9 @@ func TestLearningUnableToRunNamesTheCause(t *testing.T) {
 		{"no_model_socket", func(b *capBox, lp *learning) {
 			b.caps.model = newModelProbe(filepath.Join(shortDir(t), "gone.sock"))
 		}, modelUnreachable},
+		{"no_model_grant", func(b *capBox, lp *learning) {
+			b.caps.model = modelWith(t, modelroute.ModelState{Open: true})
+		}, modelNoGrant},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := newCapBox(t)
@@ -501,7 +565,7 @@ func TestLearningUnableToRunNamesTheCause(t *testing.T) {
 				t.Fatal("learning is not on")
 			}
 			before := b.status()
-			for _, l := range []string{noRoomNote, builderOffNote, builderUnsetNote, modelUnreachable, modelUnset} {
+			for _, l := range []string{noRoomNote, builderOffNote, builderUnsetNote, modelUnreachable, modelUnset, modelNoGrant, modelLocked} {
 				if strings.Contains(before, l) {
 					t.Fatalf("a cause before any: %q", before)
 				}
@@ -519,9 +583,7 @@ func TestLearningUnableToRunNamesTheCause(t *testing.T) {
 	}
 }
 
-// OP-9, ARC2: the probe looks for the socket without dialing it
-// (agentosd links no network client), so a plain file where the socket
-// belongs reads as not reachable.
+// OP-9: a plain file where the socket belongs reads as not reachable.
 func TestModelProbeWantsASocket(t *testing.T) {
 	path := filepath.Join(shortDir(t), "m.sock")
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
@@ -529,5 +591,62 @@ func TestModelProbeWantsASocket(t *testing.T) {
 	}
 	if l := newModelProbe(path).Line(); l != modelUnreachable {
 		t.Fatalf("plain file: %q", l)
+	}
+}
+
+// REQ: OP-9, A11, CRED-5
+// OP-9 C2 (CRED-5f-mr): one probe, one vault process, each condition in
+// turn. Each gives its one line, and the line clears at the next probe
+// after the condition does. A stale socket reads as not reachable, never
+// as the last good state.
+func TestModelLinesFollowTheVaultProcess(t *testing.T) {
+	f := serveFakeVault(t, filepath.Join(shortDir(t), "m.sock"), modelroute.ModelState{})
+	now := time.Unix(1_800_000_000, 0)
+	p := newModelProbe(f.sock)
+	p.now = func() time.Time { return now }
+	caps := newCapState("")
+	caps.model = p
+	caps.updateChecks(stubUpdates{})
+	reg := newCapLines(caps)
+	step := func(name, want string) {
+		t.Helper()
+		var got []string
+		if want != "" {
+			got = []string{want}
+		}
+		if d := reg.Digest(); !slices.Equal(d, got) {
+			t.Fatalf("%s: %q, want %q", name, d, got)
+		}
+		now = now.Add(modelProbeEvery)
+	}
+	step("no grant, locked", modelNoGrant)
+	f.set(modelroute.ModelState{Granted: true})
+	step("granted, locked", modelLocked)
+	f.set(modelOn)
+	step("granted, open", "")
+	f.stop()
+	step("stale socket", modelUnreachable)
+	f.start(t)
+	step("answering again", "")
+	f.set(modelroute.ModelState{Granted: true})
+	step("locked again", modelLocked)
+	f.set(modelroute.ModelState{Open: true})
+	step("grant withdrawn", modelNoGrant)
+}
+
+// REQ: OP-9, A11
+// OP-9 (UX blocker on #566, a CH-12 repeat): the no-grant line's fix
+// names only a step the box serves. agentosd does not serve the local
+// page's API-key step yet (localui.AgentosdSetup.ConnectAPIKey), so the
+// line names no page and says a later box version adds it. When the step
+// is served this fails, and the line must name where the owner adds one.
+func TestModelNoGrantNamesAServedStep(t *testing.T) {
+	served := localui.AgentosdSetup{}.ConnectAPIKey("openai", "sk-synthetic-not-a-key") == nil
+	_, fix, _ := strings.Cut(modelNoGrant, "; ")
+	switch {
+	case !served && (strings.Contains(fix, "page") || !strings.Contains(fix, "later box version")):
+		t.Fatalf("adding a key is not served, but the fix reads %q", fix)
+	case served && !strings.Contains(fix, "page"):
+		t.Fatalf("adding a key is served now; name where in %q", fix)
 	}
 }

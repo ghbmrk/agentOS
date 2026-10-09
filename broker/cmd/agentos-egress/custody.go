@@ -204,6 +204,9 @@ type custody struct {
 	// budget is the second line's sending budget, shared by SIP MESSAGE
 	// and the HTTP account (security Q2).
 	budget smsapi.Budget
+	// granted: some machine has a model provider granted (modelGranted),
+	// for the broker's model state (OP-9 C2). Set before serving.
+	granted bool
 
 	mu sync.Mutex
 	// smsFailSince is when the texting account's polls started failing
