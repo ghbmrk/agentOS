@@ -155,6 +155,19 @@ type Installed struct {
 	// manifest bytes, recorded at Commit.
 	ManifestPath   string `json:"manifest_path,omitempty"`
 	ManifestSHA256 string `json:"manifest_sha256,omitempty"`
+	// UsrRootHash is the installed release's /usr root hash, recorded at
+	// Commit and CommitRelease.
+	UsrRootHash string `json:"usr_root_hash,omitempty"`
+}
+
+// Ref names one release exactly: its version, its /usr root hash and the
+// digest of its signed manifest. Settling an apply is keyed by it, so a
+// different release that reuses a version is never taken for this one
+// (SR3-4).
+type Ref struct {
+	Version        int64  `json:"version"`
+	UsrRootHash    string `json:"usr_root_hash"`
+	ManifestSHA256 string `json:"manifest_sha256"`
 }
 
 // InitStore bootstraps a box from the root shipped in its image and the
@@ -254,6 +267,15 @@ func (v *Verified) Manifest() (Manifest, error) {
 	r := v.release
 	r.Files = append([]string(nil), r.Files...)
 	return r, nil
+}
+
+// Ref names the release exactly; the zero Ref when v was not made by
+// Store.Check.
+func (v *Verified) Ref() Ref {
+	if !v.ok() {
+		return Ref{}
+	}
+	return Ref{Version: v.release.Version, UsrRootHash: v.release.UsrRootHash, ManifestSHA256: v.manifest.SHA256}
 }
 
 // OK reports whether v was made by Store.Check (a zero value or nil was not).
@@ -938,7 +960,7 @@ func (s *Store) Commit(v *Verified) error {
 		return fmt.Errorf("%w: release %d is not newer than installed %d", ErrRollback, v.release.Version, in.Version)
 	}
 	return s.writeInstalled(Installed{Version: v.release.Version, UnconfirmedFreshness: !v.fresh,
-		ManifestPath: v.manifest.Path, ManifestSHA256: v.manifest.SHA256})
+		ManifestPath: v.manifest.Path, ManifestSHA256: v.manifest.SHA256, UsrRootHash: v.release.UsrRootHash})
 }
 
 // Staged is a release handed to the A/B activator and not yet committed:
@@ -1033,6 +1055,59 @@ func (s *Store) CommitStaged(version int64) error {
 		return err
 	}
 	return os.Remove(s.p("staged.json"))
+}
+
+// CommitRelease is CommitStaged for exactly the release r, and safe to
+// call again until its caller has recorded that it returned nil: when r is
+// already the installed release it only finishes removing staged.json, if
+// a crash left it, and returns nil. Any other release, staged or not, is
+// refused, whatever its version (SR3-4).
+func (s *Store) CommitRelease(r Ref) error {
+	if r.Version <= 0 || r.UsrRootHash == "" || r.ManifestSHA256 == "" {
+		return errors.New("update: incomplete release reference")
+	}
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.settle(); err != nil {
+		return err
+	}
+	st, staged, err := s.Staged()
+	if err != nil {
+		return err
+	}
+	staged = staged && st.Version == r.Version && st.UsrRootHash == r.UsrRootHash && st.ManifestSHA256 == r.ManifestSHA256
+	in, err := s.Installed()
+	if err != nil {
+		return err
+	}
+	if in.Version == r.Version && in.UsrRootHash == r.UsrRootHash && in.ManifestSHA256 == r.ManifestSHA256 {
+		if staged {
+			return s.removeStaged()
+		}
+		return nil
+	}
+	if !staged {
+		return fmt.Errorf("update: release %d (%s) is not staged", r.Version, r.ManifestSHA256)
+	}
+	if st.Version <= in.Version {
+		return fmt.Errorf("%w: release %d is not newer than installed %d", ErrRollback, st.Version, in.Version)
+	}
+	if err := s.writeInstalled(Installed{Version: st.Version, UnconfirmedFreshness: !st.Fresh,
+		ManifestPath: st.ManifestPath, ManifestSHA256: st.ManifestSHA256, UsrRootHash: st.UsrRootHash}); err != nil {
+		return err
+	}
+	return s.removeStaged()
+}
+
+// removeStaged removes staged.json durably; a missing file is no error.
+func (s *Store) removeStaged() error {
+	if err := os.Remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncDir(s.Dir)
 }
 
 // DropStaged forgets the staged release after a fallback. Nothing else in
