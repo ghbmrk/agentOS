@@ -870,10 +870,12 @@ const inputCap = 1 << 20
 // errTooLarge is an input past inputCap.
 var errTooLarge = fmt.Errorf("loop7: input larger than %d bytes", inputCap)
 
-// input reads one of t's stored inputs, through the tree. It opens the
-// file without blocking (a FIFO would block the open), refuses anything
-// but a regular file within inputCap before reading a byte, and reads at
-// most inputCap+1, so a file grown since the stat is refused too.
+// input reads one of t's stored inputs, through the tree. It refuses
+// anything but a regular file within inputCap by its Lstat, before
+// opening it (a FIFO would block the open), and reads at most
+// inputCap+1, so a file grown since the stat is refused too. Nothing can
+// swap the file between the two: no process of the jail's user lives
+// while root reads (run empties the leaf after every child).
 func (s *Source) input(t Target, file string) ([]byte, error) {
 	r, err := s.tree()
 	if err != nil {
@@ -881,12 +883,7 @@ func (s *Source) input(t Target, file string) ([]byte, error) {
 	}
 	defer r.Close()
 	p := filepath.Join(s.in(corpusDir(t)), file)
-	f, err := r.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	fi, err := f.Stat()
+	fi, err := r.Lstat(p)
 	switch {
 	case err != nil:
 		return nil, err
@@ -895,6 +892,11 @@ func (s *Source) input(t Target, file string) ([]byte, error) {
 	case fi.Size() > inputCap:
 		return nil, errTooLarge
 	}
+	f, err := r.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
 	return capped(f)
 }
 
