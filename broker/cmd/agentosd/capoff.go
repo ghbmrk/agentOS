@@ -39,7 +39,7 @@ const (
 	// did not start.
 	agentNoMachines = "Agent and worker tools: off, their machines did not start; " + fixRestart + "."
 	// C1: the agent's image or launch file is missing.
-	agentNoSoftware = "Your agent is not set up, its software is missing here; " + fixUpdate + "."
+	agentNoSoftware = "Agent software: missing here, so it is not set up; " + fixUpdate + "."
 	// C2: no model route is configured.
 	modelUnset = "Model: not set up, so your agent cannot think or learn; " + fixUpdate + "."
 	// C2: the model route does not answer.
