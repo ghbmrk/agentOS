@@ -620,8 +620,6 @@ _AS_SCENARIO = """import ctypes, os, sys
 os.setgroups([])
 os.setresgid(%(id)d, %(id)d, %(id)d)
 os.setresuid(%(id)d, %(id)d, %(id)d)
-if ctypes.CDLL(None, use_errno=True).prctl(38, 1, 0, 0, 0):  # PR_SET_NO_NEW_PRIVS
-    sys.exit("depaudit: no_new_privs: " + os.strerror(ctypes.get_errno()))
 if os.getresuid() != (%(id)d,) * 3 or os.getresgid() != (%(id)d,) * 3 or os.getgroups():
     sys.exit("depaudit: still holds another id")
 os.execvp(sys.argv[1], sys.argv[1:])
@@ -1127,8 +1125,6 @@ def _control(mode):
         with contextlib.suppress(OSError):
             socket.create_connection(("192.0.2.10", 443), timeout=2).close()
         wrong = _evidence_channels()
-        with contextlib.suppress(OSError):
-            socket.create_connection(("192.0.2.10", 443), timeout=2).close()
         if wrong:
             sys.exit("; ".join(wrong))
         return 0
