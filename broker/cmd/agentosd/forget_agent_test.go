@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 )
 
@@ -340,7 +342,13 @@ func TestForgetItem1TakesBackAnIdleAgent(t *testing.T) {
 // item 2; YES for item 2 alone takes nothing back and says so plainly,
 // and YES for both forgets the task and takes the agent back to it.
 func TestForgetItem2EndToEnd(t *testing.T) {
-	x := newForgetDaemon(t)
+	// The loosest pacing the owner can set: this test is about forget,
+	// not CH-15's pacing (W5-Dc-r1a).
+	dir := t.TempDir()
+	if err := (owner.FileStore{Path: filepath.Join(dir, "owner.json")}).Save(owner.State{Pacing: owner.Pacing{PerHour: owner.MaxTextsPerHour, Urgent: []owner.Class{owner.ClassApproval, owner.ClassAgent}}}); err != nil {
+		t.Fatal(err)
+	}
+	x := newForgetDaemonAt(t, dir)
 	w := &fakeWork{worked: true, ok: true}
 	x.lp.forgetOwner.agent.Store(&forgetAgent{work: w, lineage: func() (string, error) { return "agent.l1", nil }})
 	x.lp.tasks.put("owner:a", "pay the gas bill", false, viaSMS)
