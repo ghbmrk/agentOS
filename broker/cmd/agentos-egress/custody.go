@@ -949,8 +949,17 @@ func (c *custody) reanchorUpdate(v *vault.Vault) error {
 	if err != nil {
 		return err
 	}
+	if reanchorCrash != nil {
+		if err := reanchorCrash(); err != nil {
+			return err
+		}
+	}
 	return pc.Increment(rec.Ref, rec.Auth)
 }
+
+// reanchorCrash, set only by tests, stops reanchorUpdate between its two
+// writes, as a crash there would.
+var reanchorCrash func() error
 
 // since keeps the times after cut, in place.
 func since(ts []time.Time, cut time.Time) []time.Time {

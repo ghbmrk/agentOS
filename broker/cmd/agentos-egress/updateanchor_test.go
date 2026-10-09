@@ -292,6 +292,32 @@ func orphanFailsClosedThenRetrusts(t *testing.T, r *pcRig) {
 	}
 }
 
+// SR3-6f-2b, threat "no route turns missing into 0": a re-anchor that
+// stops between its two writes, then a retried trust, still leaves the
+// counter at 1 or more; the interim rule never comes back (Security #600,
+// combined round 1).
+func TestReanchorCrashBetweenRaiseAndRecord(t *testing.T) {
+	r := newPCRig(t)
+	r.trusted(t)
+	defineOrphanUpdateCounter(t, r.tpm)
+	box := newInterimBox(t, socketAnchor(r.c))
+	reanchorCrash = func() error { return errors.New("synthetic crash") }
+	_, err := r.c.trust(r.code(), "")
+	reanchorCrash = nil
+	if err == nil {
+		t.Fatal("setup: the crash hook did not stop the re-trust")
+	}
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatalf("retried trust: %v", err)
+	}
+	if anchored, n, err := r.c.updateAnchorRead(); err != nil || !anchored || n < 1 {
+		t.Fatalf("after a crash and a retried trust = %v, %d, %v; want anchored at 1 or more", anchored, n, err)
+	}
+	if box.interimCounts(t) {
+		t.Fatal("a crash in the re-anchor revived the interim rule")
+	}
+}
+
 // defineOrphanUpdateCounter defines the update counter with an auth no
 // vault holds: the state a crash between Define and the vault's Put
 // leaves.
