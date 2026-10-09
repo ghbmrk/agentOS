@@ -146,6 +146,10 @@ func TestCredentialPredicateRemovesObject(t *testing.T) {
 		{"recovery", "recovery,recovery_code,recoveryCodes,Recovery Codes,backup_codes,backup code"},
 		{"api_key", "api_key,apiKey,APIKey,API-Key,access_key,secret_key,private_key,client_secret,access_token,refreshToken,token"},
 		{"seed", "seed,totp_seed,2fa seed,seed phrase,seedPhrase,mnemonic,totp,otp_secret"},
+		// Acronym plurals and trailing digits (Security 4a point 1).
+		{"spelling", "PINs,OTPs,TOTPs,PINsReset,password1,pin2,PIN2,backupCodes2"},
+		// Any predicate ending in key(s), and other names (Security 4a point 2).
+		{"key", "ssh_key,sshKey,SSH key,encryption_key,master_key,license_key,keys,passkey,pw,security_answer,securityAnswers"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "recall")
@@ -173,7 +177,7 @@ func TestCredentialPredicateRemovesObject(t *testing.T) {
 // Predicates that only resemble credential names keep their object.
 func TestOtherPredicatesKeepObject(t *testing.T) {
 	sc := NewScrubber(nil)
-	for _, p := range []string{"email", "employer", "passport_country", "pinned_note", "seeded_by", "keyboard", "tokenizer", "birthday", "compass"} {
+	for _, p := range []string{"email", "employer", "passport_country", "pinned_note", "seeded_by", "keyboard", "tokenizer", "birthday", "compass", "key_points", "keynote", "monkey", "PINned", "pwm_duty", "answer"} {
 		f := Fact{"account", p, "Sunflower Tuesday"}
 		if got := sc.ScrubFact(f); got != f {
 			t.Errorf("%q: %+v", p, got)

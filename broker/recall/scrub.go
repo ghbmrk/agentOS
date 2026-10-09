@@ -40,7 +40,7 @@ var (
 	groupedCode = regexp.MustCompile(`\b[A-Za-z0-9]{4,8}(?:-[A-Za-z0-9]{4,8}){2,}\b`)
 	// Fact predicates naming credential material, matched on whole words of
 	// the predicate as credWords spells it (api_key, recovery_codes, 2fa_seed).
-	credPredicate = regexp.MustCompile(`(?:^|_)(?:pass(?:word|wd|code|phrase)?s?|pwd|pins?|secrets?|credentials?|(?:api|access|private|secret|signing)_?keys?|tokens?|recovery|backup_?codes?|seeds?|mnemonic|totp|otp|2fa|mfa|cookies?)(?:_|$)`)
+	credPredicate = regexp.MustCompile(`(?:^|_)(?:pass(?:word|wd|code|phrase)?s?|pwd|pins?|secrets?|credentials?|(?:api|access|private|secret|signing)_?keys?|tokens?|recovery|backup_?codes?|seeds?|mnemonic|totps?|otps?|2fa|mfa|cookies?|passkeys?|pw|security_answers?)(?:_|$)|(?:^|_)keys?$`)
 )
 
 // ScrubFact scrubs a fact. When its predicate names credential material the
@@ -54,9 +54,9 @@ func (sc *Scrubber) ScrubFact(f Fact) Fact {
 }
 
 // credWords spells a predicate as lower-case words joined by '_', splitting
-// at case boundaries and at anything but letters and digits:
-// "recoveryCodes", "API-Key" and "2FA seed" become recovery_codes, api_key
-// and 2fa_seed.
+// at case boundaries, after letters followed by a digit, and at anything but
+// letters and digits: "recoveryCodes", "API-Key", "2FA seed", "PINs" and
+// "password1" become recovery_codes, api_key, 2fa_seed, pins and password_1.
 func credWords(p string) string {
 	var b []byte
 	sep := func() {
@@ -64,14 +64,22 @@ func credWords(p string) string {
 			b = append(b, '_')
 		}
 	}
+	lower := func(i int) bool { return i < len(p) && p[i] >= 'a' && p[i] <= 'z' }
 	for i := 0; i < len(p); i++ {
 		switch c := p[i]; {
 		case c >= 'A' && c <= 'Z':
-			if i > 0 && caseBoundary(p, i) {
+			// An acronym's plural s ("OTPs") stays on the acronym.
+			plural := i > 0 && p[i-1] >= 'A' && p[i-1] <= 'Z' && p[i+1:] != "" && p[i+1] == 's' && !lower(i+2)
+			if i > 0 && caseBoundary(p, i) && !plural {
 				sep()
 			}
 			b = append(b, c|0x20)
-		case c >= 'a' && c <= 'z' || c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'z':
+			b = append(b, c)
+		case c >= '0' && c <= '9':
+			if len(b) > 0 && b[len(b)-1] >= 'a' && b[len(b)-1] <= 'z' {
+				sep()
+			}
 			b = append(b, c)
 		default:
 			sep()
