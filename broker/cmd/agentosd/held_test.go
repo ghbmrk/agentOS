@@ -191,6 +191,44 @@ func TestHeldMessageAnswersOnlyTheOwner(t *testing.T) {
 	}
 }
 
+// #487 L3 point 1: an answer on "message" that releases the restore ends
+// held mode, and the owner still gets the confirmation.
+func TestAReleaseOnMessageStillAnswers(t *testing.T) {
+	learn := t.TempDir()
+	writeHeld(t, learn, recovery.PendingUnanchored, 2, nil)
+	m := newHeldMode(t, learn)
+	m.Message = true
+	done := make(chan error, 1)
+	go func() { done <- m.run(context.Background()) }()
+	b := fakeBridge{t: t, c: bridgeclient.Client{Path: filepath.Join(m.Dir, daemon.OwnerSocket)}}
+	var out struct{ Replies []string }
+	deadline := time.Now().Add(5 * time.Second)
+	for b.call("message", map[string]string{"From": heldOwnerNumber, "Text": "STATUS"}, &out) != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("owner.sock never served")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	out.Replies = nil
+	if err := b.call("message", map[string]string{"From": heldOwnerNumber, "Text": "c"}, &out); err != nil {
+		t.Fatalf("the releasing answer got no reply: %v", err)
+	}
+	if len(out.Replies) != 1 || out.Replies[0] != heldReleased {
+		t.Fatalf("the releasing answer got %q", out.Replies)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("held mode did not end at release")
+	}
+	if restoreHold(learn) != nil {
+		t.Fatal("still held")
+	}
+}
+
 // #436 L3 point 5: replies are taken one at a time, so two right answers
 // at once release the restore once, and a wrong one racing the right one
 // cannot both close and release it.
