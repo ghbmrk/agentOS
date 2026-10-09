@@ -264,11 +264,29 @@ func projectRoot(anchor, target []byte, links [][]byte, o Options) ([]*metadata.
 		}
 		chain = append(chain, link{b, m.Signed.Version})
 	}
-	sort.SliceStable(chain, func(i, j int) bool { return chain[i].v < chain[j].v })
+	// Target first among files of its version, so the walk ends there when
+	// it verifies.
+	sort.SliceStable(chain, func(i, j int) bool {
+		if chain[i].v != chain[j].v {
+			return chain[i].v < chain[j].v
+		}
+		return bytes.Equal(chain[i].b, target) && !bytes.Equal(chain[j].b, target)
+	})
+	// A file UpdateRoot refuses is skipped, never the end of the walk: a
+	// stray root (a fork's, or a duplicate) can neither hide the project's
+	// chain from FollowFork nor block a switch back (security 4a on #667).
+	// UpdateRoot changes nothing when it refuses.
 	last := anchor
+	var refused error
 	for _, l := range chain {
+		if l.v != tm.Root.Signed.Version+1 {
+			continue
+		}
 		if _, err := tm.UpdateRoot(l.b); err != nil {
-			return nil, classify(err)
+			if refused == nil {
+				refused = classify(err)
+			}
+			continue
 		}
 		if err := floor(tm.Root, o.MinThreshold); err != nil {
 			return nil, err
@@ -277,6 +295,9 @@ func projectRoot(anchor, target []byte, links [][]byte, o Options) ([]*metadata.
 		last = l.b
 	}
 	if !bytes.Equal(last, target) {
+		if refused != nil {
+			return nil, refused
+		}
 		return nil, errors.New("the root files do not end at this root")
 	}
 	return walked, nil
@@ -456,6 +477,11 @@ func (s *Store) FollowFork(root []byte, links [][]byte, shipped []byte, approved
 		}
 		if anchor == nil {
 			anchor = shipped
+		}
+		// An anchor the box cannot read as a root fails closed, never as
+		// "not the project's" (L3 on #667).
+		if _, err := projectRoot(anchor, anchor, nil, o); err != nil {
+			return nil, fmt.Errorf("update: the project's root on this box: %w", err)
 		}
 		if _, err := projectRoot(anchor, root, links, o); err == nil {
 			return nil, ErrIsProject

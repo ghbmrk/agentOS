@@ -3,8 +3,10 @@ package update
 // REQ: OSS-10, UPD-8, OSS-9
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/theupdateframework/go-tuf/v2/metadata"
@@ -307,5 +309,48 @@ func TestOSS10wrSwitchBackSeesEveryWalkedRootsKeys(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A stray root file among the brought links (a fork's own root at a version
+// the chain needs) is skipped, never a reason to stop: the project's root
+// is still the project's, so a named follow of it is refused and a switch
+// back through it is admitted (security 4a on #667).
+func TestOSS10wrStrayLinkNeitherHidesNorBlocksTheChain(t *testing.T) {
+	f := newFixture(t)
+	v1 := f.rootFile(1)
+	v2 := f.rotateRoot()
+	v3 := f.rotateRoot()
+	stray := forkOf(t).rotateRoot() // the fork's own v2
+	o := f.opts(Options{})
+	f.must(ProjectRoot(v1, v3, [][]byte{stray, v2}, o))
+	f.must(ProjectRoot(v1, v2, [][]byte{stray}, o))
+	for _, c := range []struct {
+		root  []byte
+		links [][]byte
+	}{{v2, [][]byte{stray}}, {v3, [][]byte{stray, v2}}, {v3, [][]byte{v2, stray}}} {
+		sum := mustV(DescribeRoot(c.root, o))
+		if err := f.store.FollowFork(c.root, c.links, v1, sum.Digest, "AgentOS", o); !errors.Is(err, ErrIsProject) {
+			t.Fatalf("named follow of project v%d with a stray link: %v, want ErrIsProject", sum.Version, err)
+		}
+	}
+	if !bytes.Equal(storeFile(t, f, "root.json"), v1) {
+		t.Fatal("a refused named follow changed the trusted root")
+	}
+}
+
+// A project record the box cannot read as a root fails a named follow
+// closed instead of switching the project check off (L3 on #667).
+func TestOSS10wrUnreadableAnchorFailsANamedFollowClosed(t *testing.T) {
+	f := newFixture(t)
+	v1 := f.rootFile(1)
+	fork := forkOf(t)
+	f.must(f.follow(fork.rootFile(1), Options{}))
+	f.must(os.WriteFile(f.store.p(projectFile), []byte("{}"), 0o600))
+	other := forkOf(t).rootFile(1)
+	o := f.opts(Options{})
+	sum := mustV(DescribeRoot(other, o))
+	if err := f.store.FollowFork(other, nil, v1, sum.Digest, "Other", o); err == nil {
+		t.Fatal("a named follow went ahead with an unreadable project record")
 	}
 }
