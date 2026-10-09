@@ -840,8 +840,9 @@ func TestAJailedRepeatedHangRecordsTheNewerBuild(t *testing.T) {
 	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
-	if st, err := s.readHangs(tg); err != nil || st[loops.FuzzStallDetail] != fileDigest(t, tg.Binary) {
-		t.Fatalf("state %v %v", st, err)
+	// The producer is reported to loops, which holds it (P3-4b-3h-r2).
+	if len(g.reported) != 2 || g.reported[1].Producer != fileDigest(t, tg.Binary) {
+		t.Fatalf("reported %+v", g.reported)
 	}
 }
 
