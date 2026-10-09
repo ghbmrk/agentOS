@@ -206,7 +206,7 @@ func gone(pid int) bool {
 // no grandchild holds the CPU after it returns.
 func TestATimeoutKillsTheGrandchildToo(t *testing.T) {
 	release, pidfile := t.TempDir(), filepath.Join(t.TempDir(), "pid")
-	tg := fakeTarget(t, release, "sleep 300 &\necho $! > "+pidfile+"\nsleep 300")
+	tg := fakeTarget(t, release, "sleep 10 &\necho $! > "+pidfile+"\nsleep 10")
 	s := newSource(t, newFake(), Config{Targets: []Target{tg}, Release: release})
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -361,7 +361,7 @@ func TestAHangingInputIsReportedAndBounded(t *testing.T) {
 	release := t.TempDir()
 	g := newFake()
 	tg := fakeTarget(t, release, `case "$1" in
--test.run=^FuzzFake\$|-test.run=^FuzzFake\$/^bad\$) sleep 300;;
+-test.run=^FuzzFake\$|-test.run=^FuzzFake\$/^bad\$) sleep 10;;
 -test.run=^FuzzFake\$/^good\$) exit 0;;
 esac
 exit 0`)
@@ -377,19 +377,21 @@ exit 0`)
 	}
 }
 
-// A fuzz step that runs past its bound is a target finding, resolved by a
-// later step that stops in time.
+// A fuzz step whose engine runs past its bound is a target finding. A
+// later clean step does not resolve it: it never replayed what kept the
+// engine running, so it is no evidence (delta L3 on #560); the finding
+// stays open for P3-4b-3c's rules.
 func TestAFuzzStepPastItsBoundIsReported(t *testing.T) {
 	release := t.TempDir()
 	g := newFake()
-	tg := fakeTarget(t, release, `case "$1" in -test.run=^\$) sleep 300;; esac; exit 0`)
+	tg := fakeTarget(t, release, `case "$1" in -test.run=^\$) sleep 10;; esac; exit 0`)
 	s := newSource(t, g, Config{Targets: []Target{tg}, Release: release, FuzzTime: 100 * time.Millisecond, ReplayTime: 300 * time.Millisecond})
 	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 || len(g.open) != 1 || g.reported[0].Detail != overrunDetail {
 		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
 	}
 	fakeBin(t, release, "fake.test", "exit 0")
-	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 0 || len(g.open) != 0 {
-		t.Fatalf("after the fix n=%d err=%v open %v", n, err, g.open)
+	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 0 || len(g.open) != 1 || len(g.resolved) != 0 {
+		t.Fatalf("a clean step: n=%d err=%v open %v resolved %v", n, err, g.open, g.resolved)
 	}
 }
 
@@ -453,7 +455,7 @@ func TestAPlantedStackOverflowIsReported(t *testing.T) {
 func TestAHungTargetIsNotRetriedAsPreempted(t *testing.T) {
 	release, marks := t.TempDir(), t.TempDir()
 	hung := Target{Pkg: "hung", Name: "FuzzHung", Dir: t.TempDir(),
-		Binary: fakeBin(t, release, "hung.test", "echo x >> "+filepath.Join(marks, "hung")+"; sleep 300")}
+		Binary: fakeBin(t, release, "hung.test", "echo x >> "+filepath.Join(marks, "hung")+"; sleep 10")}
 	next := Target{Pkg: "next", Name: "FuzzNext", Dir: t.TempDir(),
 		Binary: fakeBin(t, release, "next.test", "touch "+filepath.Join(marks, "next"))}
 	g := newFake()

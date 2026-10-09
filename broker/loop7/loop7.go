@@ -347,11 +347,13 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 	case ctx.Err() != nil:
 		return 0, nil
 	case overran && (err == nil || exited(err)):
-		// The engine's own deadline did not stop it: an input hung a
-		// worker, or the engine did.
+		// The engine's own -test.fuzztime did not stop it. A clean step
+		// later never replays what kept it running, so this finding is
+		// not resolved here (delta L3 on #560): it stays open for
+		// P3-4b-3c's rules.
 		return 1, s.report(ctx, t, overrunDetail)
 	case err == nil:
-		return 0, s.resolveTarget(t, overrunDetail)
+		return 0, nil
 	case !bytes.Contains(out, []byte("Failing input written to")):
 		return 0, fmt.Errorf("loop7: fuzzing %s did not run: %v", t.subject(), err)
 	}
@@ -361,7 +363,7 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 // Target findings: a failure no stored input can be named for.
 const (
 	noInputDetail = "the target failed before any stored input could be named (a seed added in code, or a crash at start)"
-	overrunDetail = "fuzzing did not stop within its bound (an input hung)"
+	overrunDetail = "the fuzz engine did not stop within its bound"
 )
 
 // failLine and passLine are a seed subtest failing or passing under
@@ -486,18 +488,6 @@ func exited(err error) bool {
 func (s *Source) report(ctx context.Context, t Target, detail string) error {
 	_, err := s.cfg.Report.Report(ctx, loops.Finding{Check: loops.CheckFuzz, Subject: t.subject(), Severity: loops.High, Detail: detail})
 	return err
-}
-
-// resolveTarget resolves t's open finding with detail, which a clean run
-// has just replayed.
-func (s *Source) resolveTarget(t Target, detail string) error {
-	var errs []error
-	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
-		if f.Subject == t.subject() && f.Detail == detail {
-			errs = append(errs, s.cfg.Report.Resolve(f.ID, loops.Replay{Evidence: f.Detail, Passed: true, At: s.cfg.Now()}))
-		}
-	}
-	return errors.Join(errs...)
 }
 
 // crashDetail names a crashing input by its digest; the input itself
