@@ -310,6 +310,10 @@ type secureState struct {
 	// owner, on any close path (closeTextLocked), so a return within
 	// ReText is texted, not left as a false all-clear (L3 #585 point 1).
 	ToldCleared map[string]bool `json:"told_cleared,omitempty"`
+	// Owed are the cleared lines held back, by clearedKey: a texted
+	// record closed while an open finding held its key, so its "Cleared"
+	// is said once the key's last open record closes (closeTextLocked).
+	Owed map[string]Record `json:"owed,omitempty"`
 	// NotRun are the checks the last pass had no input for, Failed those
 	// whose input errored, and NotRunSaid the set the digest last named
 	// (Digest).

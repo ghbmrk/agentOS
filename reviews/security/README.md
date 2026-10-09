@@ -18,7 +18,7 @@ Finding kinds CI now catches; the screen no longer looks for them by hand (OPERA
 
 | Finding kind | Check | Since |
 |---|---|---|
-| A "Cleared" or return text disagrees with the finding's state: Cleared while a same-name finding is open, a return texted "back" though Cleared was suppressed, a silent return after Cleared (#585, #586) | `loops` flap helper (`flap_test.go`: alert, cleared, back, cleared, untexted return, a move between details, a restart after every step) run by `Pass`, `Resolve`, `runProbe` and `CloseTarget`, all through one close routine (`closeTextLocked`, S39) | P3-4b-3r-told |
+| A "Cleared" or return text disagrees with the finding's state: Cleared while a same-name finding is open, a return texted "back" though Cleared was suppressed, a silent return after Cleared (#585, #586) | `loops` flap helper (`flap_test.go`: alert, cleared, back, cleared, untexted return; a move between details and back that then clears, ending on one owed "Cleared"; a restart after every step) run by `Pass`, `Resolve`, `runProbe` and `CloseTarget`, all through one close routine (`closeTextLocked`, S39) | P3-4b-3r-told |
 
 ## Spec-wide runs
 

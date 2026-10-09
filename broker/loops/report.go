@@ -406,6 +406,10 @@ func (s *Guard) CloseTarget(id string, c Closure) error {
 // is not Back and whose line was said in this call is marked, so a return
 // within ReText is texted only after a "Cleared" the owner heard; two
 // records closed together on one key share the line and both are marked.
+// A line held by an open finding on its key is owed, not dropped: it is
+// said when a close leaves the key with no open finding, an untexted
+// Again close included, so a finding that moves between two details and
+// then clears does not leave the owner on an alert (L3 1 on #644).
 func (s *Guard) closeTextLocked(closed []Record) []string {
 	var told []Record
 	for _, r := range closed {
@@ -413,10 +417,35 @@ func (s *Guard) closeTextLocked(closed []Record) []string {
 			told = append(told, r)
 		}
 	}
-	lines, said := s.clearedLinesLocked(told)
-	for _, r := range told {
-		if said[clearedKey(r)] && r.Contained != "paused" && !r.Back {
+	lines, said, held := s.clearedLinesLocked(told)
+	if s.st.Owed == nil {
+		s.st.Owed = map[string]Record{}
+	}
+	mark := func(r Record) {
+		if r.Contained != "paused" && !r.Back {
 			s.st.ToldCleared[r.Finding.ID] = true
+		}
+	}
+	for _, r := range told {
+		k := clearedKey(r)
+		switch {
+		case said[k]:
+			mark(r)
+		default:
+			s.st.Owed[k] = r
+		}
+	}
+	for _, r := range closed {
+		k := clearedKey(r)
+		o, owed := s.st.Owed[k]
+		if !owed || held[k] {
+			continue
+		}
+		delete(s.st.Owed, k)
+		if !said[k] {
+			said[k] = true
+			lines = append(lines, clearedLine(o))
+			mark(o)
 		}
 	}
 	return lines
@@ -433,7 +462,7 @@ func clearedKey(r Record) string {
 }
 
 // clearedLinesLocked is the cleared text for the texted records just
-// closed, and the keys it said: one line per check and plain subject,
+// closed, the keys it said, and the keys an open finding holds: one line per check and plain subject,
 // and none while another open texted finding shares that name, so
 // "Cleared: X" is never said
 // while an X the owner heard of is still open (L3 #558 point 1). A fuzz
@@ -441,7 +470,7 @@ func clearedKey(r Record) string {
 // and clearedLine names which cleared, so an open hang never hides a
 // crash fix's line, nor a crash the hang's, and no line is ambiguous
 // with a finding still open (P3-4b-3r-fuzz; L3 on #586 point 1).
-func (s *Guard) clearedLinesLocked(closed []Record) ([]string, map[string]bool) {
+func (s *Guard) clearedLinesLocked(closed []Record) ([]string, map[string]bool, map[string]bool) {
 	// An open Again record is one the owner was told of before it came
 	// back too soon, so it holds the line too: a finding that moves
 	// between two details is never told "Cleared" (Security 4a on #585).
@@ -459,7 +488,7 @@ func (s *Guard) clearedLinesLocked(closed []Record) ([]string, map[string]bool) 
 			lines = append(lines, clearedLine(r))
 		}
 	}
-	return lines, said
+	return lines, said, open
 }
 
 // OpenReported is the open reported findings of check c, so a LOOP-7

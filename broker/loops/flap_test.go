@@ -51,12 +51,17 @@ var flapSeq = []flapStep{
 }
 
 // The move (Security 4a on #585, L3 #586 point 4): the finding moves to
-// its other detail and back. No "Cleared" is said while either is open,
-// and a return the owner never heard cleared is not texted as "back".
+// its other detail and back, then clears. No "Cleared" is said while
+// either is open, a return the owner never heard cleared is not texted
+// as "back", and once both close the held "Cleared" is owed and said
+// once, so the owner is not left on the second detail's alert (L3 1 on
+// #644).
 var moveSeq = []flapStep{
 	{[2]bool{true, false}, []string{"alert"}},
 	{[2]bool{false, true}, []string{"alert"}},
 	{[2]bool{true, false}, nil},
+	{[2]bool{false, false}, []string{"cleared"}},
+	{[2]bool{false, false}, nil},
 }
 
 func runFlap(t *testing.T, mk func(t *testing.T) flapPath) {
