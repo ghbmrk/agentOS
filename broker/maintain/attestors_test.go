@@ -6,6 +6,7 @@ package maintain
 // not undone by the next check.
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -161,4 +162,49 @@ func TestNoAttestorSourceOnlyNarrows(t *testing.T) {
 		t.Fatalf("proposed %+v", got)
 	}
 	r.must(r.l.AttestorsChanged())
+}
+
+func TestNarrowingDuringACheckIsNotUndone(t *testing.T) {
+	// The owner narrows while a check, which read {a, b}, is between its
+	// read and its Store.Check calls: the check must not write {a, b}
+	// back over the narrowing.
+	r := newRig(t)
+	twoAttestors(r)
+	r.tick()
+	old := r.p.proposed()[0]
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once atomic.Bool
+	mirrors := r.mirrors
+	r.l.cfg.Mirrors = func() []update.Source {
+		if once.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+		return mirrors
+	}
+	r.clk.add(time.Hour)
+	r.l.st.Next = time.Time{}
+	job, ok := r.l.Next(context.Background(), true)
+	if !ok {
+		t.Fatal("no check offered")
+	}
+	checked := make(chan struct{})
+	go func() { job.Run(context.Background()); close(checked) }()
+	<-entered
+
+	r.allow = r.allow[1:]
+	changed := make(chan error, 1)
+	go func() { changed <- r.l.AttestorsChanged() }()
+	select {
+	case err := <-changed: // not serialized with the check
+		changed <- err
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	<-checked
+	r.must(<-changed)
+	if old.Security() {
+		t.Fatal("a check that read the list before the owner's narrowing undid it")
+	}
 }
