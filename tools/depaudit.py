@@ -25,6 +25,7 @@ import ipaddress
 import json
 import os
 import pathlib
+import pwd
 import re
 import shutil
 import signal
@@ -295,6 +296,44 @@ def _unshare_flags():
     return ["-r", "-n", "-m"] + pid
 
 
+# The scenario runs as this uid and gid inside the sandbox's user namespace, mapped to the
+# first id of the runner's subordinate range; _inner and strace stay uid 0 there, mapped to
+# the runner's own ids. A different uid closes /proc/1/* and ptrace of either to the scenario
+# by DAC alone, with or without the capability drop (DEP-3a, D9).
+SCENARIO_ID = 1000
+SUBUID, SUBGID = "/etc/subuid", "/etc/subgid"
+
+
+def _subordinate(path):
+    """The start of the first range path grants the effective user (by name or uid), or None."""
+    me = {str(os.geteuid())}
+    with contextlib.suppress(KeyError):
+        me.add(pwd.getpwuid(os.geteuid()).pw_name)
+    try:
+        lines = pathlib.Path(path).read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        f = line.strip().split(":")
+        if len(f) == 3 and f[0] in me and f[1].isdigit() and f[2].isdigit() and int(f[2]) >= 1:
+            return int(f[1])
+    return None
+
+
+def _id_maps():
+    """The exact uid_map and gid_map lines the sandbox sets, as (inside, outside, count)
+    triples: uid 0 is the runner, SCENARIO_ID the first subordinate id (DEP-3c). Raises
+    OSError without a subordinate range: the sandbox is then unavailable (DEP-3a)."""
+    uid, gid = _subordinate(SUBUID), _subordinate(SUBGID)
+    if uid is None or gid is None:
+        raise OSError("no subordinate uid and gid range for uid %d in %s and %s" % (os.geteuid(), SUBUID, SUBGID))
+    return ([(0, os.geteuid(), 1), (SCENARIO_ID, uid, 1)], [(0, os.getegid(), 1), (SCENARIO_ID, gid, 1)])
+
+
+def _map_text(triples):
+    return "\n".join("%d %d %d" % t for t in triples)
+
+
 _SANDBOX = None
 
 
@@ -474,7 +513,7 @@ def _reader(fd):
     return t, chunks
 
 
-def _inner(work, timeout, cmd, extra_keep=(), writable=()):
+def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
     """Runs inside the fresh user, network, and mount namespaces. The evidence
     (strace's trace and its stderr) arrives over pipes this process holds, and the
     result leaves on its stdout, so nothing the verdict reads is a file the scenario
@@ -514,7 +553,8 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=()):
     err_t, err = _reader(err_r)
     with open(work / "stdout", "wb") as out:
         proc = subprocess.Popen(["strace", "-f", "-qq", "-e", "trace=" + TRACED,
-                                 "-o", "/proc/%d/fd/%d" % (os.getpid(), trace_w), "--"] + DROP_CAPS + cmd,
+                                 "-o", "/proc/%d/fd/%d" % (os.getpid(), trace_w), "--"]
+                                + (DROP_CAPS if drop_caps else []) + cmd,
                                 env=env, cwd=ROOT, stdout=out, stderr=err_w)
         os.close(err_w)
         try:
@@ -595,13 +635,14 @@ def _result(stdout):
     return res if isinstance(res, dict) and _RESULT_KEYS <= set(res) else None
 
 
-def _attempt(target, manifest, timeout, stats=None):
+def _attempt(target, manifest, timeout, stats=None, drop_caps=True):
     """One sandboxed run in a fresh work directory: (result, whether strace faulted)."""
     profile = target.get("profile", "offline")
     with _scratch_dir("depaudit-", stats=stats) as work:
         os.chmod(work, 0o755)
         cmd = ["unshare"] + _unshare_flags() + ["--", sys.executable, str(pathlib.Path(__file__).resolve()),
                                                 "_inner", "--work", work, "--timeout", str(timeout)]
+        cmd += [] if drop_caps else ["--no-drop-caps"]
         cmd += sum((["--keep", k] for k in target.get("keep", ())), [])
         cmd += sum((["--writable", w] for w in target.get("writes", ())), []) + ["--"]
         env = dict(os.environ, **target.get("env", {}))
@@ -630,16 +671,18 @@ def _attempt(target, manifest, timeout, stats=None):
         return out, fault
 
 
-def run_target(target, manifest, timeout=600):
+def run_target(target, manifest, timeout=600, drop_caps=True):
     """Reruns a scenario strace faulted on, up to STRACE_ATTEMPTS; what a faulted attempt
-    saw is kept, so a fault can hide neither a leak nor (all faulting) pass."""
+    saw is kept, so a fault can hide neither a leak nor (all faulting) pass. drop_caps=False
+    is for tests only: it runs the scenario without DROP_CAPS, to show the uid boundary holds
+    alone (DEP-3b). No registry entry or environment variable reaches it."""
     if target.get("profile", "offline") != "offline":
         raise ValueError("%s: only offline scenarios run in the sandbox" % target["name"])
     carried = []  # violations from attempts strace itself cut short
     stats = {"attempts": 0, "faults": 0, "cleanup_retries": 0}
     for attempt in range(1, STRACE_ATTEMPTS + 1):
         stats["attempts"] += 1
-        out, fault = _attempt(target, manifest, timeout, stats)
+        out, fault = _attempt(target, manifest, timeout, stats, drop_caps)
         if not fault:
             break
         stats["faults"] += 1
@@ -725,6 +768,72 @@ def _ptrace_denied(pid, comm, seize):
     return ["ptrace %s (pid %d): %s, not denied" % (got, pid, os.strerror(err))]
 
 
+def _ids(pid):
+    """The Uid: and Gid: fields of /proc/PID/status (real, effective, saved, fs)."""
+    found = {}
+    for line in pathlib.Path("/proc/%d/status" % pid).read_text().splitlines():
+        k, _, v = line.partition(":")
+        if k in ("Uid", "Gid"):
+            found[k] = set(v.split())
+    return found["Uid"], found["Gid"]
+
+
+def _evidence_fds():
+    """The fds of _inner (PID 1) to try. If its fd table is readable, the evidence pipes: a
+    pipe it holds both ends of (the trace pipe), or the one this process's stderr writes to
+    (strace's stderr). Its result pipe is left alone, so a breach shows as a lost connect,
+    not as a torn result. If the table is unreadable, every fd below 64 is tried blind."""
+    try:
+        links = {int(n): os.readlink("/proc/1/fd/" + n) for n in os.listdir("/proc/1/fd")}
+    except OSError:
+        return list(range(64))
+    mine = os.readlink("/proc/self/fd/2")
+    held = collections.Counter(links.values())
+    return sorted(n for n, l in links.items() if l.startswith("pipe:") and (held[l] > 1 or l == mine))
+
+
+def _evidence_channels():
+    """What a tracee sharing _inner's uid could do to the evidence without a traced call
+    (D9): drain the trace or stderr pipe's read end, write a partial line into its write end
+    so strace's next line no longer parses, and PTRACE_SEIZE _inner. Returns each that worked."""
+    import ctypes
+    wrong = []
+    for n in _evidence_fds():
+        path = "/proc/1/fd/%d" % n
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            pass
+        else:
+            with contextlib.suppress(OSError):
+                os.read(fd, 1 << 20)
+            os.close(fd)
+            wrong.append("opened %s to read" % path)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            continue
+        with contextlib.suppress(OSError):
+            os.write(fd, b"depaudit partial line, no newline ")
+        os.close(fd)
+        wrong.append("opened %s to write" % path)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+    if libc.ptrace(_PTRACE_SEIZE, 1, None, None) == 0:
+        wrong.append("ptrace attached to pid 1 (_inner)")
+    return wrong
+
+
+def _loopback_call():
+    """One logged loopback call, so a control is seen to have run under strace."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.sendto(b"x", ("127.0.0.1", 9))
+
+
+def _id_triples(text):
+    return sorted(tuple(int(x) for x in line.split()) for line in text.splitlines() if line.strip())
+
+
 def _control(mode):
     """Planted scenarios against the harness's own defences (DEP-2), run as
     `depaudit.py _control MODE` inside the sandbox.
@@ -737,8 +846,13 @@ def _control(mode):
                        open_tree_attr (a mount(2) remount is traced: a violation by itself)
       ptrace-ancestors exits nonzero unless a ptrace attach to the sandbox's PID 1 (_inner)
                        and to its strace parent is denied: either still holds CAP_SYS_ADMIN
-      own-user-namespace exits nonzero if the scenario's uid_map is the initial namespace's
-                       identity map: its kept capabilities would then act on the host"""
+      own-user-namespace exits nonzero unless the scenario's uid_map and gid_map are exactly
+                       $DEPAUDIT_UID_MAP and $DEPAUDIT_GID_MAP, the maps the harness sets (DEP-3c)
+      distinct-uid     exits nonzero if its uid or gid shares a value with _inner's (PID 1) or
+                       its strace parent's (DEP-3a)
+      evidence-channels connects to a documentation address, drains and writes a partial line
+                       into _inner's evidence pipes through /proc/1/fd, PTRACE_SEIZEs _inner,
+                       connects again, and exits nonzero if any of that worked (DEP-3b)"""
     if mode == "tamper-evidence":
         with contextlib.suppress(OSError):
             socket.create_connection(("192.0.2.10", 443), timeout=2).close()
@@ -757,11 +871,40 @@ def _control(mode):
             sys.exit("; ".join(wrong))
         return 0
     if mode == "own-user-namespace":
-        uid_map = pathlib.Path("/proc/self/uid_map").read_text().split()
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.sendto(b"x", ("127.0.0.1", 9))
-        if not uid_map or uid_map == ["0", "0", "4294967295"]:
-            sys.exit("uid_map is %r: the scenario runs in the initial user namespace" % " ".join(uid_map))
+        _loopback_call()
+        wrong = []
+        for name in ("uid_map", "gid_map"):
+            got = pathlib.Path("/proc/self/" + name).read_text()
+            want = os.environ["DEPAUDIT_" + name.upper()]
+            if _id_triples(got) != _id_triples(want):
+                wrong.append("%s is %r, not %r" % (name, " / ".join(" ".join(l.split()) for l in got.splitlines()),
+                                                   " / ".join(want.splitlines())))
+        if wrong:
+            sys.exit("; ".join(wrong))
+        return 0
+    if mode == "distinct-uid":
+        _loopback_call()
+        ppid = os.getppid()
+        if not pathlib.Path("/proc/%d/comm" % ppid).read_text().startswith("strace"):
+            sys.exit("parent pid %d is not strace: nothing was compared" % ppid)
+        uid, gid = _ids(os.getpid())
+        wrong = []
+        for who, pid in (("_inner", 1), ("strace", ppid)):
+            ouid, ogid = _ids(pid)
+            if uid & ouid or gid & ogid:
+                wrong.append("uid %s gid %s shares an id with %s's uid %s gid %s" % (
+                    sorted(uid), sorted(gid), who, sorted(ouid), sorted(ogid)))
+        if wrong:
+            sys.exit("; ".join(wrong))
+        return 0
+    if mode == "evidence-channels":
+        with contextlib.suppress(OSError):
+            socket.create_connection(("192.0.2.10", 443), timeout=2).close()
+        wrong = _evidence_channels()
+        with contextlib.suppress(OSError):
+            socket.create_connection(("192.0.2.10", 443), timeout=2).close()
+        if wrong:
+            sys.exit("; ".join(wrong))
         return 0
     if mode != "write-kept":
         raise ValueError(mode)
@@ -839,8 +982,24 @@ def control_targets(masked_probe, visible_probe, writable_dir):
         {"name": "control-no-ptrace-ancestors", "cmd": own + ["ptrace-ancestors"], "expect": "pass",
          "must_log": [("inet", "127.0.0.1")]},
         {"name": "control-own-user-namespace", "cmd": own + ["own-user-namespace"], "expect": "pass",
+         "env": _expected_maps_env(), "must_log": [("inet", "127.0.0.1")]},
+        # DEP-3: the scenario's uid is not _inner's or strace's, so the evidence pipes and a
+        # ptrace of _inner are closed to it by uid alone.
+        {"name": "control-distinct-uid", "cmd": own + ["distinct-uid"], "expect": "pass",
          "must_log": [("inet", "127.0.0.1")]},
+        {"name": "control-evidence-channels", "cmd": own + ["evidence-channels"], "expect": "violation",
+         "expect_kinds": ["ipv4"], "must_log": [("inet", "192.0.2.10")]},
     ]
+
+
+def _expected_maps_env():
+    """The maps control-own-user-namespace compares against; empty if there is no range (the
+    sandbox is then unavailable and no control runs)."""
+    try:
+        uid_map, gid_map = _id_maps()
+    except OSError:
+        return {"DEPAUDIT_UID_MAP": "", "DEPAUDIT_GID_MAP": ""}
+    return {"DEPAUDIT_UID_MAP": _map_text(uid_map), "DEPAUDIT_GID_MAP": _map_text(gid_map)}
 
 
 def _judge(target, res):
@@ -962,13 +1121,14 @@ def main(argv=None):
     i.add_argument("--timeout", type=int, required=True)
     i.add_argument("--keep", action="append", default=[])
     i.add_argument("--writable", action="append", default=[])
+    i.add_argument("--no-drop-caps", action="store_true", help=argparse.SUPPRESS)  # tests only (DEP-3b)
     i.add_argument("subject", nargs=argparse.REMAINDER)
     c = sub.add_parser("_control")
     c.add_argument("mode")
     args = ap.parse_args(argv)
     if args.cmd == "_inner":
         return _inner(args.work, args.timeout, args.subject[1:] if args.subject[:1] == ["--"] else args.subject,
-                      args.keep, args.writable)
+                      args.keep, args.writable, not args.no_drop_caps)
     if args.cmd == "_control":
         return _control(args.mode)
     return cmd_static(args) if args.cmd == "static" else cmd_run(args)
