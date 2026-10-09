@@ -311,6 +311,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-3 l7 | Potency 7 on #523 (P3-4b-4): the probe sends four fixed frames per socket and tests no connection limits, rapid reconnects or half-open frames; promoting good fuzz inputs to seeds is a later choice |
 | P3-4b-3 l8 | UX 4 on #523: a fuzz finding whose corpus file is removed can never resolve, yet STATUS says it is rechecked; add a line to `broker/loop7/ASSUMPTIONS.md` when the source is wired |
 | P3-4b-3 l9 | UX 5 on #523: a probe finding's ID derives from its `Detail`, so a different failure set next round is a second High text for one machine; cap or fold per subject when the probe text is reworded |
+| W3-forget-b2c-f3 l1 | L3 point 3 on #553: with f3's early append the owed entry still has `Logged` false, so a crash during `retry` makes `finishOwed` append the same goal again at restart; the replay is idempotent (`forgotten.has`), the cost is a duplicate log entry; the f3 builder records it in ASSUMPTIONS.md |
 
 ## Reuse candidates
 | ID | Component | Why |
