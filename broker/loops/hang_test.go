@@ -63,7 +63,7 @@ func TestAGoodStepOfANewBinaryClosesAHangFinding(t *testing.T) {
 		if e.Closure == nil || e.Closure.Replayed || e.Closure.Binary != binB || e.Closure.Produced != binA || e.Replay != nil {
 			t.Fatalf("%s: evidence %+v closure %+v", d, e, e.Closure)
 		}
-		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the check that reads agent requests.") {
+		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the check that reads agent requests responds to test inputs again.") {
 			t.Fatalf("%s: texts %q", d, got)
 		}
 		for _, u := range r.urgent[before:] {
@@ -127,19 +127,48 @@ func TestCloseTargetRefusesAnythingElse(t *testing.T) {
 	}
 }
 
-// An open hang finding on a target does not hide the cleared text of a
-// crash fix in the same target: the two are keyed apart.
-func TestAHangFindingDoesNotHideACrashFixsClearedText(t *testing.T) {
-	r := newReportRig(t, nil)
-	r.report(t, hangFinding(FuzzStallDetail))
-	crash := r.report(t, fuzzFinding()).Finding
-	before := len(r.texts)
-	if err := r.g.Resolve(crash.ID, Replay{Evidence: crash.Detail, Passed: true}); err != nil {
-		t.Fatal(err)
-	}
-	if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the check that reads agent requests.") {
-		t.Fatalf("texts %q", got)
-	}
+// The cleared line names what cleared, and is keyed on it (L3 on #586
+// point 1): a crash fix and a hang closing on one target are told
+// apart, so "Cleared" is never ambiguous with a finding still open.
+func TestClearedNamesTheCrashOrTheHang(t *testing.T) {
+	const crashCleared = "Cleared: the crash in the check that reads agent requests. Nothing more is needed from you."
+	const hangCleared = "Cleared: the check that reads agent requests responds to test inputs again. Nothing more is needed from you."
+	t.Run("hang open, crash resolves", func(t *testing.T) {
+		r := newReportRig(t, nil)
+		r.report(t, hangFinding(FuzzStallDetail))
+		crash := r.report(t, fuzzFinding()).Finding
+		before := len(r.texts)
+		if err := r.g.Resolve(crash.ID, Replay{Evidence: crash.Detail, Passed: true}); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.texts[before:]; len(got) != 1 || !strings.HasSuffix(got[0], crashCleared) {
+			t.Fatalf("texts %q", got)
+		}
+	})
+	t.Run("no-input open, input crash resolves", func(t *testing.T) {
+		r := newReportRig(t, nil)
+		r.report(t, hangFinding(FuzzNoInputDetail))
+		crash := r.report(t, fuzzFinding()).Finding
+		before := len(r.texts)
+		if err := r.g.Resolve(crash.ID, Replay{Evidence: crash.Detail, Passed: true}); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.texts[before:]; len(got) != 0 {
+			t.Fatalf("cleared while a crash in the same target is open: %q", got)
+		}
+	})
+	t.Run("crash open, hang closes", func(t *testing.T) {
+		r := newReportRig(t, nil)
+		hang := r.report(t, hangFinding(FuzzOverrunDetail)).Finding
+		r.report(t, fuzzFinding())
+		before := len(r.texts)
+		if err := r.g.CloseTarget(hang.ID, goodStep()); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.texts[before:]; len(got) != 1 || !strings.HasSuffix(got[0], hangCleared) {
+			t.Fatalf("texts %q", got)
+		}
+	})
 }
 
 // A3-r6, 3h: the owner hears that a self-test stopped responding, not

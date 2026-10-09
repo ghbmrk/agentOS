@@ -1399,11 +1399,25 @@ func ownStep(f Finding) bool {
 // clearedLine tells the owner a texted finding cleared: a pause it caused
 // stays until they resume it; otherwise nothing more is needed.
 func clearedLine(r Record) string {
+	what := clearedWhat(r.Finding)
 	if r.Contained == "paused" {
 		return fmt.Sprintf("Cleared: %s. %s stays paused until you resume it on my Wi-Fi page.",
-			plainSubject(r.Finding), capFirst(label(r.Finding.Contain)))
+			what, capFirst(label(r.Finding.Contain)))
 	}
-	return "Cleared: " + plainSubject(r.Finding) + ". Nothing more is needed from you."
+	return "Cleared: " + what + ". Nothing more is needed from you."
+}
+
+// clearedWhat is what a cleared line says cleared: for a fuzz finding,
+// the crash or the hang, so the line is never ambiguous with another
+// finding on the same plain name still open (L3 on #586 point 1).
+func clearedWhat(f Finding) string {
+	switch {
+	case f.Check == CheckFuzz && hangDetail(f.Detail):
+		return plainSubject(f) + " responds to test inputs again"
+	case f.Check == CheckFuzz:
+		return "the crash in " + plainSubject(f)
+	}
+	return plainSubject(f)
 }
 
 // digestCap is how many open-finding lines the digest shows.

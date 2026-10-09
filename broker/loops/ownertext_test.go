@@ -43,8 +43,8 @@ func TestResolveTellsEveryTextedFindingItCleared(t *testing.T) {
 		f       Finding
 		cleared string
 	}{
-		{"unpaused", fuzzFinding(), "Cleared: the check that reads agent requests. Nothing more is needed from you."},
-		{"paused", withContain(fuzzFinding()), "Cleared: the check that reads agent requests. Pre-allowance G7 stays paused until you resume it on my Wi-Fi page."},
+		{"unpaused", fuzzFinding(), "Cleared: the crash in the check that reads agent requests. Nothing more is needed from you."},
+		{"paused", withContain(fuzzFinding()), "Cleared: the crash in the check that reads agent requests. Pre-allowance G7 stays paused until you resume it on my Wi-Fi page."},
 		{"untexted", lowFuzz(), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -367,7 +367,7 @@ func TestClearedWaitsForEveryFindingSharingItsPlainName(t *testing.T) {
 		if err := r.g.Resolve(idb, Replay{Evidence: b.Detail, Passed: true}); err != nil {
 			t.Fatal(err)
 		}
-		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the check that reads agent requests.") {
+		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the crash in the check that reads agent requests.") {
 			t.Fatalf("texts %q", got)
 		}
 	})

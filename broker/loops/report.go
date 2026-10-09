@@ -47,10 +47,6 @@ const (
 // hangDetail reports a fuzz finding's detail that names a hang.
 func hangDetail(d string) bool { return d == FuzzOverrunDetail || d == FuzzStallDetail }
 
-// targetDetail reports a fuzz finding's detail that names the target, not
-// one of its stored inputs.
-func targetDetail(d string) bool { return d == FuzzNoInputDetail || hangDetail(d) }
-
 // ruleLess reports a check Report takes without a tree rule.
 func ruleLess(c Check) bool { return c == CheckFuzz || c == CheckProbe }
 
@@ -360,14 +356,15 @@ func (s *Guard) CloseTarget(id string, c Closure) error {
 // closed: one line per check and plain subject, and none while another
 // open texted finding shares that name, so "Cleared: X" is never said
 // while an X the owner heard of is still open (L3 #558 point 1). A fuzz
-// finding naming its target (a hang, no input) is keyed apart from the
-// target's input findings, so an open hang never hides a crash fix's
-// cleared line, nor a crash the hang's (P3-4b-3r-fuzz).
+// hang is keyed apart from the target's crashes (an input or no input),
+// and clearedLine names which cleared, so an open hang never hides a
+// crash fix's line, nor a crash the hang's, and no line is ambiguous
+// with a finding still open (P3-4b-3r-fuzz; L3 on #586 point 1).
 func (s *Guard) clearedLinesLocked(closed []Record) []string {
 	key := func(r Record) string {
 		k := string(r.Finding.Check) + "\x00" + plainSubject(r.Finding)
-		if r.Finding.Check == CheckFuzz && targetDetail(r.Finding.Detail) {
-			k += "\x00target"
+		if r.Finding.Check == CheckFuzz && hangDetail(r.Finding.Detail) {
+			k += "\x00hang"
 		}
 		return k
 	}
