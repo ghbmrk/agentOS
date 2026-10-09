@@ -422,6 +422,23 @@ def target_env(target, home, **canary_vars):
     return env
 
 
+def _reach_root():
+    """Makes ROOT reachable to SCENARIO_ID in this mount namespace: the topmost
+    ancestor others cannot search (CI's /home/runner is 0750) is covered by a 0755
+    tmpfs, and ROOT is bound back at its own path. The rest of that ancestor, the
+    harness's HOME on CI, is then hidden from the target."""
+    fd = os.open(ROOT, os.O_PATH | os.O_DIRECTORY)
+    try:
+        for a in reversed(ROOT.parents):
+            if not os.stat(a).st_mode & 0o001:
+                depaudit._mount("-t", "tmpfs", "-o", "mode=0755,nosuid,nodev", "tmpfs", str(a))
+                os.makedirs(ROOT, mode=0o755)
+                depaudit._mount("--no-canonicalize", "--rbind", "/proc/%d/fd/%d" % (os.getpid(), fd), str(ROOT))
+                return
+    finally:
+        os.close(fd)
+
+
 def _confine(status, owned, timeout, cmd):
     """Runs as init of the target's PID namespace, as uid 0 of its user namespace
     (the harness's uid outside). Gives owned to SCENARIO_ID, runs cmd as it, then
@@ -429,6 +446,7 @@ def _confine(status, owned, timeout, cmd):
     writes the target's exit to status, a file in a directory only the harness's
     uid can reach. No status means the round is an error."""
     try:
+        _reach_root()
         for path in owned:
             depaudit._chown_tree(path, depaudit.SCENARIO_ID)
         proc = subprocess.Popen(depaudit.AS_SCENARIO + cmd, cwd=ROOT)
@@ -451,7 +469,7 @@ def run_confined(cmd, env, owned, timeout):
         flags = depaudit._unshare_flags(own_network=False)
     except OSError as e:
         return None, b"", b"", "sandbox unavailable: %s" % e
-    with tempfile.TemporaryDirectory(prefix="canary-sandbox-") as box:
+    with tempfile.TemporaryDirectory(prefix="canary-sandbox-", dir=ROUND_DIR) as box:
         status = pathlib.Path(box, "status.json")
         argv = ["unshare"] + flags + ["--", sys.executable, str(pathlib.Path(__file__).resolve()), "_confine",
                                       "--status", str(status), "--timeout", str(timeout)]
