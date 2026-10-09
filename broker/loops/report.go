@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -314,8 +315,8 @@ func (s *Guard) Resolve(id string, r Replay) error {
 	delete(s.st.Open, id)
 	delete(s.held, id)
 	s.st.Cleared[id] = s.cfg.Now()
+	lines := s.closeTextLocked([]Record{rec})
 	err := s.saveLocked()
-	lines := s.clearedLinesLocked([]Record{rec})
 	s.mu.Unlock()
 	if text := s.batch(lines); text != "" {
 		s.cfg.Notify(text, false)
@@ -387,18 +388,8 @@ func (s *Guard) CloseTarget(id string, c Closure) error {
 	delete(s.st.Open, id)
 	delete(s.held, id)
 	s.st.Cleared[id] = s.cfg.Now()
-	// As in Pass: an Again close is digest-only, so a flap ends on "it
-	// is back"; a told, unpaused close is marked, so a return within
-	// ReText is texted again (delta L3 on #586).
-	var told []Record
-	if rec.Texted && (!rec.Again || rec.Contained == "paused") {
-		told = append(told, rec)
-		if rec.Contained != "paused" {
-			s.st.ToldCleared[id] = true
-		}
-	}
+	lines := s.closeTextLocked([]Record{rec})
 	err := s.saveLocked()
-	lines := s.clearedLinesLocked(told)
 	s.mu.Unlock()
 	if text := s.batch(lines); text != "" {
 		s.cfg.Notify(text, false)
@@ -406,40 +397,102 @@ func (s *Guard) CloseTarget(id string, c Closure) error {
 	return err
 }
 
-// clearedLinesLocked is the cleared text for the texted records just
-// closed: one line per check and plain subject, and none while another
-// open texted finding shares that name, so "Cleared: X" is never said
-// while an X the owner heard of is still open (L3 #558 point 1). A fuzz
-// hang is keyed apart from the target's crashes (an input or no input),
-// and clearedLine names which cleared, so an open hang never hides a
-// crash fix's line, nor a crash the hang's, and no line is ambiguous
-// with a finding still open (P3-4b-3r-fuzz; L3 on #586 point 1).
-func (s *Guard) clearedLinesLocked(closed []Record) []string {
-	key := func(r Record) string {
-		k := string(r.Finding.Check) + "\x00" + plainSubject(r.Finding)
-		if r.Finding.Check == CheckFuzz && hangDetail(r.Finding.Detail) {
-			k += "\x00hang"
+// closeTextLocked is the one close routine every close path calls
+// (Pass, Resolve, CloseTarget, runProbe; S39): the cleared lines for the
+// records just closed, and the ToldCleared marks. A texted record is told
+// it cleared unless it is an untexted-worthy return: an Again close is
+// digest-only, except a pause (its line says it stays paused, so it is no
+// all-clear) and a Back return (texted once more, so the owner's last
+// text is not "it is back" after it closed). A record is marked only when
+// it is unpaused, not Back, and its "Cleared" was said: a told record
+// whose line was said in this call (two closed together on one key share
+// the line and are both marked), or every owed record when their line is
+// said, so a return within ReText is texted only after a "Cleared" the
+// owner heard, whichever detail returns (UX and Potency deltas on #644).
+// A line held by an open finding on its key is owed, not dropped: it is
+// said when a close leaves the key with no open finding, an untexted
+// Again close included, so a finding that moves between two details and
+// then clears does not leave the owner on an alert (L3 1 on #644).
+func (s *Guard) closeTextLocked(closed []Record) []string {
+	var told []Record
+	for _, r := range closed {
+		if r.Texted && (!r.Again || r.Back || r.Contained == "paused") {
+			told = append(told, r)
 		}
-		return k
 	}
+	lines, said, held := s.clearedLinesLocked(told)
+	if s.st.Owed == nil {
+		s.st.Owed = map[string][]Record{}
+	}
+	mark := func(r Record) {
+		if r.Contained != "paused" && !r.Back {
+			s.st.ToldCleared[r.Finding.ID] = true
+		}
+	}
+	for _, r := range told {
+		k := clearedKey(r)
+		if said[k] {
+			mark(r)
+			continue
+		}
+		s.st.Owed[k] = append(slices.DeleteFunc(s.st.Owed[k], func(o Record) bool { return o.Finding.ID == r.Finding.ID }), r)
+	}
+	for _, r := range closed {
+		k := clearedKey(r)
+		owed := s.st.Owed[k]
+		if len(owed) == 0 || held[k] {
+			continue
+		}
+		delete(s.st.Owed, k)
+		said[k] = true
+		for _, o := range owed {
+			if l := clearedLine(o); !slices.Contains(lines, l) {
+				lines = append(lines, l)
+			}
+			mark(o)
+		}
+	}
+	return lines
+}
+
+// clearedKey is what one cleared line covers: a check and what its line
+// says cleared (clearedWhat), so a fuzz target's crashes, its hangs and
+// its oversize input are keyed apart, and records sharing a key differ in
+// their line only by a pause (Security round-2 delta 1 on #644).
+func clearedKey(r Record) string {
+	return string(r.Finding.Check) + "\x00" + clearedWhat(r.Finding)
+}
+
+// clearedLinesLocked is the cleared text for the texted records just
+// closed, the keys it said, and the keys an open finding holds: each
+// distinct line once (a paused and an unpaused record of one key say
+// both), and none while another open texted finding shares that key, so
+// "Cleared: X" is never said while an X the owner heard of is still open
+// (L3 #558 point 1). A fuzz target's hangs, crashes and oversize input
+// are keyed apart (clearedKey) and clearedLine names which cleared, so
+// one never hides another's line and no line is ambiguous with a finding
+// still open (P3-4b-3r-fuzz; L3 on #586 point 1; Security round 2 on #644).
+func (s *Guard) clearedLinesLocked(closed []Record) ([]string, map[string]bool, map[string]bool) {
 	// An open Again record is one the owner was told of before it came
 	// back too soon, so it holds the line too: a finding that moves
 	// between two details is never told "Cleared" (Security 4a on #585).
 	open := map[string]bool{}
 	for _, r := range s.st.Open {
 		if r.Texted || r.Again {
-			open[key(r)] = true
+			open[clearedKey(r)] = true
 		}
 	}
 	said := map[string]bool{}
 	var lines []string
 	for _, r := range closed {
-		if k := key(r); r.Texted && !open[k] && !said[k] {
+		if k := clearedKey(r); r.Texted && !open[k] {
 			said[k] = true
-			lines = append(lines, clearedLine(r))
+			if l := clearedLine(r); !slices.Contains(lines, l) {
+				lines = append(lines, l)
+			}
 		}
 	}
-	return lines
+	return lines, said, open
 }
 
 // OpenReported is the open reported findings of check c, so a LOOP-7

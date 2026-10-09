@@ -4,9 +4,11 @@ Reconciles the three lenses so their proposals compound instead of trading off:
 
 | Lens | Asks | Home |
 |---|---|---|
-| Security | Can this be abused, leaked, or escalated? | `reviews/security/` |
-| Potency | Does the spec limit capability without need? | `reviews/potency/` |
-| UX | Is onboarding and everyday use low-effort for the owner? | `reviews/ux/` |
+| Security | Does the protection hold by mechanism against the threat model, without relying on owner attention? (SPEC §1 floor; OWN-7–12) | `reviews/security/` |
+| Potency | Does anything cap the consequence or breadth of verified outcomes without buying security? (§1 leverage; OWN-13–16) | `reviews/potency/` |
+| UX | Does it ask attention, time, decisions, memory, checking, or recovery that the system could carry? (§1 effort; OWN-1–6, OWN-17–18) | `reviews/ux/` |
+
+The lenses are the three terms of SPEC §1's objective: the most verified leverage per unit of owner effort, never below the structural security floor. Where no design dominates, §1's priority order applies (the floor, then verified correctness, then effort against leverage); a fork it does not settle goes to Mark (step 4).
 
 **When:** inside each batched lens screen, for the PRs in that bundle (docs/OPERATING.md §4, step 4). It stays quiet when nothing conflicts. Until 2026-10-07 it ran weekly after the lens loops; those runs are listed below.
 
@@ -22,6 +24,8 @@ Reconciles the three lenses so their proposals compound instead of trading off:
 4. **Escalate only real forks.** When no design dominates and the choice changes Mark's goal or an output he will notice, ask one question answerable in one word, with a recommendation. Everything else is decided here with the reasoning written down.
 
 ## Hard constraints (no trade may weaken)
+
+These are the core of SPEC §1's structural security floor.
 
 - **Credentials never reach the model** (Invariant C, CRED-1..7, ARC-1).
 - **Irreversible effects are always gated** (REV-2): by a code, a broker-checked pre-allowance (ADP-9), or STOP-able journaled intent; never by agent judgment.
