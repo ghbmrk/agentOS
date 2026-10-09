@@ -56,8 +56,9 @@ func NewCollector(q *Queue, sources map[string]Source) (*Collector, error) {
 }
 
 // Recover replays incomplete source acknowledgments from durable associations.
-// It does not re-peek a source or regenerate its times/text. A missing/expired
-// source blocks new collection visibly rather than abandoning a pending batch.
+// It does not re-peek a source or regenerate its times/text. A missing source
+// blocks new collection visibly rather than abandoning a pending batch; expired
+// batches are skipped because their sources re-offer them.
 func (c *Collector) Recover(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -75,12 +76,16 @@ func (c *Collector) recover(ctx context.Context) error {
 		return err
 	}
 	for _, b := range batches {
+		// An expired batch never consumed its sources: they still hold the
+		// snapshot and re-offer it, admitted as a new batch (DB-6).
+		if b.State == Expired {
+			continue
+		}
+		// A held batch (ready, past expiry, partly acknowledged) is finished
+		// here too, so Late can re-arm it with every source consumed (DB-4).
 		for i, acked := range b.Acknowledged {
 			if acked {
 				continue
-			}
-			if b.State == Expired {
-				return fmt.Errorf("%w: source acknowledgment pending for batch %d", ErrExpired, b.ID)
 			}
 			if b.State != Ready {
 				return ErrState

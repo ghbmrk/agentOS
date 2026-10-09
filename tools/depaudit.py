@@ -669,6 +669,15 @@ def _end_namespace():
             os.waitpid(-1, 0)
 
 
+def _hand_back(paths):
+    """Ends the namespace, then gives paths back to uid 0 (the runner outside) so the runner
+    can remove the work directory. In this order only: nothing the scenario started may
+    still write once its files are root's (DEP-3, DEP-7g)."""
+    _end_namespace()
+    for path in paths:
+        _chown_tree(path, 0)
+
+
 def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
     """Runs inside the fresh user, network, and mount namespaces. The evidence
     (strace's trace and its stderr) arrives over pipes this process holds, and the
@@ -728,10 +737,7 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=(), drop_caps=True):
     # A tracee strace let go of may still hold stderr; take what has arrived, then end it.
     trace_t.join(10)
     err_t.join(2)
-    _end_namespace()
-    # Back to uid 0 (the runner outside), so the runner can remove the work directory.
-    for path in scenario_owned:
-        _chown_tree(path, 0)
+    _hand_back(scenario_owned)
     text = b"".join(list(trace)).decode(errors="replace")
     events = parse_strace(text)
     result.write(json.dumps({"rc": rc, "dns": names, "masked": masked, "realpaths": unix_realpaths(events),
@@ -957,12 +963,53 @@ def _evidence_fds():
     return sorted(n for n, l in links.items() if l.startswith("pipe:") and (held[l] > 1 or l == mine))
 
 
+def _tracer_channels(strace):
+    """Through the tracer's own /proc entry, so ptrace_may_access on strace is tried as well
+    as the pipe's DAC: reopen strace's stderr to drain fault lines (DEP-7b), and signal strace
+    and _inner (DEP-7c). Signal 0 runs kill's permission check and delivers nothing, so one
+    that is allowed stops neither. Only a PermissionError is a refusal: a target that is not
+    there was not denied by the uid. Returns each that was not refused."""
+    wrong = []
+    path = "/proc/%d/fd/2" % strace
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except PermissionError:
+        pass
+    except OSError as e:
+        wrong.append("%s (strace's stderr): %s, not denied" % (path, e.strerror))
+    else:
+        with contextlib.suppress(OSError):
+            os.read(fd, 1 << 20)
+        os.close(fd)
+        wrong.append("opened %s (strace's stderr) to read" % path)
+    for who, pid in (("strace", strace), ("_inner", 1)):
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            continue
+        except OSError as e:
+            wrong.append("signal 0 to %s (pid %d): %s, not denied" % (who, pid, e.strerror))
+        else:
+            wrong.append("signalled %s (pid %d)" % (who, pid))
+    return wrong
+
+
 def _evidence_channels():
     """What a tracee sharing _inner's uid could do to the evidence without a traced call
     (D9): drain the trace or stderr pipe's read end, write a partial line into its write end
-    so strace's next line no longer parses, and PTRACE_SEIZE _inner. Returns each that worked."""
+    so strace's next line no longer parses, PTRACE_SEIZE _inner, and reopen strace's stderr
+    or signal strace and _inner (_tracer_channels). Returns each that worked."""
     import ctypes
     wrong = []
+    strace = os.getppid()
+    try:
+        comm = pathlib.Path("/proc/%d/comm" % strace).read_text().strip()
+    except OSError as e:
+        comm = str(e)
+    if comm.startswith("strace"):
+        wrong += _tracer_channels(strace)
+    else:
+        wrong.append("parent pid %d is %s, not strace: its stderr and signals were not tried" % (strace, comm))
     for n in _evidence_fds():
         path = "/proc/1/fd/%d" % n
         try:
@@ -1022,10 +1069,12 @@ def _control(mode):
       own-user-namespace exits nonzero unless the scenario's uid_map and gid_map are exactly
                        $DEPAUDIT_UID_MAP and $DEPAUDIT_GID_MAP, the maps the harness sets (DEP-3c)
       distinct-uid     exits nonzero if its uid or gid shares a value with _inner's (PID 1) or
-                       its strace parent's (DEP-3a)
+                       its strace parent's (DEP-3a), or no_new_privs is not set (DEP-7d)
       evidence-channels connects to a documentation address, drains and writes a partial line
                        into _inner's evidence pipes through /proc/1/fd, PTRACE_SEIZEs _inner,
-                       connects again, and exits nonzero if any of that worked (DEP-3b)"""
+                       reopens strace's stderr through /proc/<strace>/fd/2, signals strace and
+                       _inner with signal 0, connects again, and exits nonzero if any of that
+                       worked (DEP-3b, DEP-7b, DEP-7c)"""
     if mode == "tamper-evidence":
         with contextlib.suppress(OSError):
             socket.create_connection(("192.0.2.10", 443), timeout=2).close()
@@ -1062,6 +1111,10 @@ def _control(mode):
             sys.exit("parent pid %d is not strace: nothing was compared" % ppid)
         uid, gid = _ids(os.getpid())
         wrong = []
+        # no_new_privs, set by AS_SCENARIO, keeps a setuid or file-capability binary from
+        # handing the scenario capabilities back (DEP-3b, DEP-7d).
+        if "NoNewPrivs:\t1" not in pathlib.Path("/proc/self/status").read_text().splitlines():
+            wrong.append("no_new_privs is not set (no 'NoNewPrivs:\\t1' in /proc/self/status)")
         for who, pid in (("_inner", 1), ("strace", ppid)):
             ouid, ogid = _ids(pid)
             if uid & ouid or gid & ogid:
