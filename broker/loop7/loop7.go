@@ -16,11 +16,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -111,6 +114,9 @@ type Config struct {
 // Source is Loop 2's source with LOOP-7 rounds added.
 type Source struct {
 	cfg Config
+	// base is the tree root does its file work in for the children: the
+	// jail's State, or / with no jail (Source.tree).
+	base string
 
 	mu   sync.Mutex
 	next time.Time
@@ -136,11 +142,23 @@ func New(cfg Config) (*Source, error) {
 			return nil, err
 		}
 	}
-	if len(cfg.Targets) > 0 && cfg.CacheDir == "" {
-		return nil, errors.New("loop7: fuzz targets need a CacheDir")
+	if len(cfg.Targets) > 0 && !filepath.IsAbs(cfg.CacheDir) {
+		return nil, errors.New("loop7: fuzz targets need an absolute CacheDir")
 	}
-	if cfg.Jail != nil && cfg.Jail.UID == 0 {
-		return nil, errors.New("loop7: a jail needs an unprivileged user")
+	base := "/"
+	if j := cfg.Jail; j != nil {
+		if j.UID == 0 {
+			return nil, errors.New("loop7: a jail needs an unprivileged user")
+		}
+		if !filepath.IsAbs(j.State) || filepath.Clean(j.State) != j.State {
+			return nil, fmt.Errorf("loop7: jail state %q is not an absolute clean path", j.State)
+		}
+		base = j.State
+	}
+	for _, p := range targetDirs(cfg.Targets, cfg.CacheDir) {
+		if !within(base, p) {
+			return nil, fmt.Errorf("loop7: %q is outside %s, the tree the children may write", p, base)
+		}
 	}
 	if cfg.CacheCap <= 0 {
 		cfg.CacheCap = 64 << 20
@@ -166,7 +184,42 @@ func New(cfg Config) (*Source, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Source{cfg: cfg}, nil
+	return &Source{cfg: cfg, base: base}, nil
+}
+
+// targetDirs are the cache and each target's directory, which the
+// children write; none without targets.
+func targetDirs(ts []Target, cache string) []string {
+	if len(ts) == 0 {
+		return nil
+	}
+	ds := []string{cache}
+	for _, t := range ts {
+		ds = append(ds, t.Dir)
+	}
+	return ds
+}
+
+// within reports that p is base or lies under it.
+func within(base, p string) bool {
+	rel, err := filepath.Rel(base, p)
+	return err == nil && filepath.IsAbs(p) && rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
+// tree opens the directory root does its file work in for the children:
+// the jail's State, which the jail's user owns, or / with no jail. Every
+// path root uses there resolves through the os.Root, so no link a child
+// planted takes root's reads, writes, chowns or removals out of it (L3 1
+// on #588).
+func (s *Source) tree() (*os.Root, error) { return os.OpenRoot(s.base) }
+
+// in is p, checked within s.base by New, relative to the tree.
+func (s *Source) in(p string) string {
+	rel, err := filepath.Rel(s.base, p)
+	if err != nil {
+		return p
+	}
+	return rel
 }
 
 var fuzzName = regexp.MustCompile(`^Fuzz[A-Za-z0-9_]*$`)
@@ -211,7 +264,9 @@ type manifest struct {
 // state/targets/<pkg>, never in the read-only release: the release's seed
 // corpus (release/corpus/<pkg>/<Name>) is copied there, file by file,
 // where no file of that name exists, so a crash input found on this box
-// stays across updates.
+// stays across updates. state's parent must not be writable by the jail's
+// user: state itself becomes that user's (Jail.Own), so Load writes in it
+// only through an os.Root, which no link the user plants can lead out of.
 func Load(release, state string) ([]Target, error) {
 	b, err := os.ReadFile(filepath.Join(release, "manifest.json"))
 	if err != nil {
@@ -226,13 +281,21 @@ func Load(release, state string) ([]Target, error) {
 	if len(m.Targets) == 0 {
 		return nil, errors.New("loop7: manifest lists no targets")
 	}
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		return nil, err
+	}
+	r, err := os.OpenRoot(state)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
 	var out []Target
 	for _, e := range m.Targets {
 		if !pkgPath.MatchString(e.Pkg) || !fuzzName.MatchString(e.Name) || !binName.MatchString(e.Binary) {
 			return nil, fmt.Errorf("loop7: bad manifest entry %+v", e)
 		}
 		t := Target{Pkg: e.Pkg, Name: e.Name, Binary: filepath.Join(release, e.Binary), Dir: filepath.Join(state, "targets", filepath.FromSlash(e.Pkg))}
-		if err := seed(filepath.Join(release, "corpus", filepath.FromSlash(e.Pkg), e.Name), filepath.Join(t.Dir, "testdata", "fuzz", e.Name)); err != nil {
+		if err := seed(r, filepath.Join(release, "corpus", filepath.FromSlash(e.Pkg), e.Name), filepath.Join("targets", filepath.FromSlash(e.Pkg), "testdata", "fuzz", e.Name)); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -240,9 +303,9 @@ func Load(release, state string) ([]Target, error) {
 	return out, nil
 }
 
-// seed copies each regular file in from that to lacks.
-func seed(from, to string) error {
-	if err := os.MkdirAll(to, 0o700); err != nil {
+// seed copies each regular file in from that to, a path in r, lacks.
+func seed(r *os.Root, from, to string) error {
+	if err := r.MkdirAll(to, 0o700); err != nil {
 		return err
 	}
 	es, err := os.ReadDir(from)
@@ -255,15 +318,22 @@ func seed(from, to string) error {
 		if !e.Type().IsRegular() {
 			continue
 		}
-		dst := filepath.Join(to, e.Name())
-		if _, err := os.Lstat(dst); err == nil {
-			continue
-		}
 		data, err := os.ReadFile(filepath.Join(from, e.Name()))
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(dst, data, 0o600); err != nil {
+		// O_EXCL: a file or link of that name, even a dangling one, stays.
+		f, err := r.OpenFile(filepath.Join(to, e.Name()), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		_, err = f.Write(data)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -435,12 +505,12 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 	// binary before later seeds) or was removed keeps its finding open.
 	passed := map[string]bool{}
 	for _, file := range sortedKeys(ran) {
-		if data, err := os.ReadFile(filepath.Join(t.Dir, "testdata", "fuzz", t.Name, file)); err == nil {
+		if data, err := s.input(t, file); err == nil {
 			passed[crashDetail(data)] = true
 		}
 	}
 	for _, file := range sortedKeys(failing) {
-		data, err := os.ReadFile(filepath.Join(t.Dir, "testdata", "fuzz", t.Name, file))
+		data, err := s.input(t, file)
 		if err != nil {
 			// A failing f.Add seed, not a file: report it by name.
 			data = []byte(file)
@@ -469,7 +539,12 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 // that exits non-zero or runs past it fails; one that exits zero passed.
 func (s *Source) eachInput(ctx context.Context, t Target) (failing, ran map[string]bool, err error) {
 	failing, ran = map[string]bool{}, map[string]bool{}
-	es, err := os.ReadDir(filepath.Join(t.Dir, "testdata", "fuzz", t.Name))
+	r, err := s.tree()
+	if err != nil {
+		return nil, nil, err
+	}
+	es, err := fs.ReadDir(r.FS(), filepath.ToSlash(s.in(corpusDir(t))))
+	r.Close()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, err
 	}
@@ -494,6 +569,19 @@ func (s *Source) eachInput(ctx context.Context, t Target) (failing, ran map[stri
 		}
 	}
 	return failing, ran, nil
+}
+
+// corpusDir holds t's stored inputs, crash inputs among them.
+func corpusDir(t Target) string { return filepath.Join(t.Dir, "testdata", "fuzz", t.Name) }
+
+// input reads one of t's stored inputs, through the tree.
+func (s *Source) input(t Target, file string) ([]byte, error) {
+	r, err := s.tree()
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return r.ReadFile(filepath.Join(s.in(corpusDir(t)), file))
 }
 
 // exited reports that a child ran and exited non-zero or was killed: a
@@ -538,21 +626,37 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 	} else if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("loop7: %s is not a regular file", t.Binary)
 	}
-	if err := os.MkdirAll(s.cfg.CacheDir, 0o700); err != nil {
+	// No process of the jail's user may live while root works in its
+	// tree: one could swap a path root is about to use (L3 1 on #588).
+	if err := s.cfg.Jail.empty(); err != nil {
 		return nil, err
 	}
-	scratch, err := os.MkdirTemp(s.cfg.CacheDir, "run-")
+	r, err := s.tree()
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(scratch)
+	defer r.Close()
+	name, err := runName()
+	if err != nil {
+		return nil, err
+	}
+	rel := filepath.Join(s.in(s.cfg.CacheDir), name)
+	if err := r.MkdirAll(filepath.Dir(rel), 0o700); err != nil {
+		return nil, err
+	}
+	if err := r.Mkdir(rel, 0o700); err != nil {
+		return nil, err
+	}
+	scratch := filepath.Join(s.cfg.CacheDir, name)
 	attr := &syscall.SysProcAttr{Setpgid: true}
 	if j := s.cfg.Jail; j != nil {
-		if err := os.Chown(scratch, int(j.UID), int(j.GID)); err != nil {
+		if err := r.Lchown(rel, int(j.UID), int(j.GID)); err != nil {
+			r.RemoveAll(rel)
 			return nil, err
 		}
 		leaf, err := j.attr(attr)
 		if err != nil {
+			r.RemoveAll(rel)
 			return nil, err
 		}
 		if leaf != nil {
@@ -565,7 +669,43 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 	cmd.SysProcAttr = attr
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = waitDelay
-	return cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	// Whatever left the process group (setsid) dies with the run, before
+	// root removes the scratch directory or prunes the cache. A failure
+	// here is the runner's, never a finding: it is not an ExitError.
+	if kerr := s.cfg.Jail.empty(); kerr != nil {
+		return nil, fmt.Errorf("loop7: emptying the fuzz leaf: %w", kerr)
+	}
+	if rerr := r.RemoveAll(rel); rerr != nil && err == nil {
+		err = rerr
+	}
+	return out, err
+}
+
+// runName is a fresh scratch directory's name.
+func runName() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "run-" + hex.EncodeToString(b), nil
+}
+
+// killWait bounds the wait for the leaf to empty.
+const killWait = 5 * time.Second
+
+// empty kills every process left in the jail's leaf and waits until the
+// kernel reports it empty (cgroup.kill). With no jail or no leaf (tests,
+// dev builds) there is nothing to empty: agentosd always sets the leaf
+// (L7-6), and without one a child that leaves its process group outlives
+// its run.
+func (j *Jail) empty() error {
+	if j == nil || j.Leaf == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), killWait)
+	defer cancel()
+	return (&cgroup.Group{Path: j.Leaf}).Kill(ctx)
 }
 
 // Jail confines fuzz children (P3-4b-3r-confine; F2, F7): a decoder bug
@@ -582,6 +722,11 @@ type Jail struct {
 	// groups: setting a non-zero UID from root clears every capability
 	// across exec, and no ambient capability is raised. UID 0 is refused.
 	UID, GID uint32
+	// State is the tree the user owns: the targets' directories and the
+	// cache lie in it (New checks), and root works in it only through an
+	// os.Root opened there (Source.tree, Load), with no process of the
+	// user alive (empty). Its parent must not be writable by the user.
+	State string
 }
 
 // attr sets the jail on a child's attributes; the returned leaf, if any,
@@ -601,17 +746,26 @@ func (j *Jail) attr(a *syscall.SysProcAttr) (*os.File, error) {
 	return leaf, nil
 }
 
-// Own gives the state tree at dir to the jail's user, which the children
-// write their crash inputs and cache into (F9). It runs at start-up,
-// before any child, so a tree written by root before the jail stays
-// readable. It never follows a link, and leaves a file with more than one
-// link alone, so nothing a child planted can hand it a file from outside.
-func (j *Jail) Own(dir string) error {
-	return filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+// Own gives the jail's State to its user, which the children write their
+// crash inputs and cache into (F9). It runs at start-up, after emptying
+// the leaf, so a tree written by root before the jail stays readable. It
+// works through an os.Root and never follows a link, and leaves a file
+// with more than one link alone, so nothing a child planted can hand it a
+// file from outside.
+func (j *Jail) Own() error {
+	if err := j.empty(); err != nil {
+		return err
+	}
+	r, err := os.OpenRoot(j.State)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	return fs.WalkDir(r.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		fi, err := d.Info()
+		fi, err := r.Lstat(p)
 		if err != nil {
 			return err
 		}
@@ -622,7 +776,7 @@ func (j *Jail) Own(dir string) error {
 		if st.Uid == j.UID && st.Gid == j.GID {
 			return nil
 		}
-		return os.Lchown(p, int(j.UID), int(j.GID))
+		return r.Lchown(p, int(j.UID), int(j.GID))
 	})
 }
 
@@ -637,12 +791,19 @@ type cached struct {
 // (F14): pkg's own entries (CacheDir/fuzz/<pkg>/Fuzz*, so not a nested
 // package's) to CacheCap, then the whole cache to CacheTotal, removing
 // the oldest first. It walks only CacheDir/fuzz: crash inputs live in the
-// targets' testdata, which is evidence and never pruned (F3, F9).
+// targets' testdata, which is evidence and never pruned (F3, F9). It
+// walks and removes through the tree, after the last run emptied the
+// leaf, so no link takes a removal out of the cache.
 func (s *Source) prune(pkg string) error {
-	root := filepath.Join(s.cfg.CacheDir, "fuzz")
+	r, err := s.tree()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	root := filepath.Join(s.in(s.cfg.CacheDir), "fuzz")
 	own := filepath.Join(root, filepath.FromSlash(pkg))
 	var mine, all []cached
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+	err = fs.WalkDir(r.FS(), filepath.ToSlash(root), func(p string, d fs.DirEntry, err error) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		} else if err != nil {
@@ -681,7 +842,7 @@ func (s *Source) prune(pkg string) error {
 			if gone[c.path] {
 				continue
 			}
-			if err := os.Remove(c.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := r.Remove(c.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 			gone[c.path], total = true, total-c.size

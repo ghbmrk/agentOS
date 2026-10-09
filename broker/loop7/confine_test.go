@@ -185,8 +185,8 @@ func jailed(t *testing.T, g *fakeGuard, leaf string, bin func(release string) st
 		t.Fatal(err)
 	}
 	cacheFile(t, tg.Dir, "testdata/fuzz/FuzzFake/0crash", 10, 0)
-	j := &Jail{Leaf: leaf, UID: nobody, GID: nobody}
-	if err := j.Own(filepath.Join(base, "state")); err != nil {
+	j := &Jail{Leaf: leaf, UID: nobody, GID: nobody, State: filepath.Join(base, "state")}
+	if err := j.Own(); err != nil {
 		t.Fatal(err)
 	}
 	s := newSource(t, g, Config{Targets: []Target{tg}, CacheDir: filepath.Join(base, "state", "cache"), Jail: j})
@@ -413,7 +413,7 @@ func TestOwnGivesTheStateToTheJailUser(t *testing.T) {
 	if err := os.Link(outside, filepath.Join(state, "hard")); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&Jail{UID: nobody, GID: nobody}).Own(state); err != nil {
+	if err := (&Jail{UID: nobody, GID: nobody, State: state}).Own(); err != nil {
 		t.Fatal(err)
 	}
 	uid := func(p string) uint32 {
@@ -431,6 +431,140 @@ func TestOwnGivesTheStateToTheJailUser(t *testing.T) {
 	for _, p := range []string{outside, seed, release} {
 		if uid(p) != 0 {
 			t.Errorf("%s left root's hands", p)
+		}
+	}
+}
+
+// outsideDir is a root-owned directory outside every fuzz tree, as /etc
+// is; the tests check root never writes, chowns or removes there.
+func outsideDir(t *testing.T) string {
+	t.Helper()
+	d := t.TempDir()
+	cacheFile(t, d, "keep", 7, 300*time.Hour)
+	return d
+}
+
+func untouched(t *testing.T, d string) {
+	t.Helper()
+	es, err := os.ReadDir(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(es) != 1 || es[0].Name() != "keep" {
+		t.Fatalf("root wrote through a planted link into %s: %v", d, es)
+	}
+	fi, err := os.Lstat(filepath.Join(d, "keep"))
+	if err != nil {
+		t.Fatalf("root removed through a planted link: %v", err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); int(st.Uid) != os.Getuid() {
+		t.Fatalf("root chowned through a planted link: uid %d", st.Uid)
+	}
+}
+
+// LOOP-7, ARC-2 (L3 1a on #588): the state tree belongs to the fuzz user,
+// who can swap a corpus directory for a link; Load, which runs as root,
+// writes no seed through it.
+func TestLoadNeverWritesThroughAPlantedLink(t *testing.T) {
+	release, state, outside := t.TempDir(), t.TempDir(), outsideDir(t)
+	seeds := filepath.Join(release, "corpus", "fake", "FuzzFake")
+	cacheFile(t, seeds, "s1", 3, 0)
+	if err := os.WriteFile(filepath.Join(release, "manifest.json"), []byte(`{"targets":[{"pkg":"fake","name":"FuzzFake","binary":"fake.test"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	corpus := filepath.Join(state, "targets", "fake", "testdata", "fuzz")
+	if err := os.MkdirAll(corpus, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(corpus, "FuzzFake")); err != nil {
+		t.Fatal(err)
+	}
+	Load(release, state) // refusing is fine; writing outside is not
+	untouched(t, outside)
+}
+
+// LOOP-1, ARC-2 (L3 1b on #588): a cache directory swapped for a link
+// does not take the per-run scratch directory, or its chown to the fuzz
+// user, out of the tree.
+func TestScratchIsMadeWithoutFollowingALink(t *testing.T) {
+	needRoot(t)
+	// Reachable by the fuzz user, so the child can show where HOME went.
+	outside := filepath.Join(jailDir(t), "etc")
+	cacheFile(t, outside, "keep", 7, 300*time.Hour)
+	if err := os.Chmod(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, tg := jailed(t, newFake(), "", func(release string) string {
+		return fakeBin(t, release, "fake.test", `readlink -f "$HOME" > home`)
+	})
+	if err := os.Symlink(outside, s.cfg.CacheDir); err != nil {
+		t.Fatal(err)
+	}
+	s.run(context.Background(), tg, "-test.run=^$")
+	untouched(t, outside)
+	if home, err := os.ReadFile(filepath.Join(tg.Dir, "home")); err == nil && strings.HasPrefix(string(home), outside) {
+		t.Fatalf("the scratch directory was made through the link: HOME %s", home)
+	}
+}
+
+// LOOP-1 (L3 1c on #588): the prune removes nothing reached through a
+// link, even one swapped in for a package's cache directory.
+func TestThePruneRemovesNothingThroughALink(t *testing.T) {
+	release, cache, outside := t.TempDir(), t.TempDir(), outsideDir(t)
+	tg := fakeTarget(t, release, "exit 0")
+	if err := os.MkdirAll(filepath.Join(cache, "fuzz"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(cache, "fuzz", "fake")); err != nil {
+		t.Fatal(err)
+	}
+	s := newSource(t, newFake(), Config{Targets: []Target{tg}, CacheDir: cache, CacheCap: 1, CacheTotal: 1})
+	s.Fuzz(context.Background(), tg)
+	untouched(t, outside)
+}
+
+// LOOP-1, ARC-2 (L3 1 on #588): a child that leaves its process group
+// (setsid) is killed with its run: nothing of the fuzz user outlives a
+// run to race root's work in its tree, or to fill the disk.
+func TestAChildThatLeavesItsGroupDiesWithItsRun(t *testing.T) {
+	leaf := testLeaf(t, "loop7-setsid", 256<<20)
+	s, tg := jailed(t, newFake(), leaf.Path, func(release string) string {
+		return fakeBin(t, release, "fake.test", `setsid sh -c 'echo $$ > escaped; exec sleep 60' </dev/null >/dev/null 2>&1 &
+			while [ ! -s escaped ]; do sleep 0.05; done; exit 0`)
+	})
+	if _, err := s.run(context.Background(), tg, "-test.run=^$"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(tg.Dir, "escaped"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := strings.TrimSpace(string(b))
+	if st, err := os.ReadFile("/proc/" + pid + "/stat"); err == nil && !strings.Contains(string(st), ") Z ") {
+		t.Fatalf("the escaped child %s outlived its run", pid)
+	}
+	if p, err := leaf.Populated(); err != nil || p {
+		t.Fatalf("the leaf still holds a process after the run: %v %v", p, err)
+	}
+}
+
+// LOOP-7, ARC-2: a jail's cache and every target's directory lie in its
+// State, the only tree root works in for the fuzz user.
+func TestAJailedPathOutsideItsStateIsRefused(t *testing.T) {
+	release, state := t.TempDir(), t.TempDir()
+	tg := fakeTarget(t, release, "exit 0")
+	tg.Dir = filepath.Join(state, "targets", "fake")
+	for name, c := range map[string]Config{
+		"cache outside":  {CacheDir: t.TempDir(), Targets: []Target{tg}},
+		"target outside": {CacheDir: filepath.Join(state, "cache"), Targets: []Target{fakeTarget(t, release, "exit 0")}},
+		"no state":       {CacheDir: filepath.Join(state, "cache"), Targets: []Target{tg}, Jail: &Jail{UID: nobody, GID: nobody}},
+	} {
+		if c.Jail == nil {
+			c.Jail = &Jail{UID: nobody, GID: nobody, State: state}
+		}
+		c.Inner, c.Report, c.Release = newFake(), newFake(), release
+		if _, err := New(c); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }

@@ -170,8 +170,8 @@ func fuzzJail(p learnPaths) (*loop7.Jail, error) {
 	if err != nil {
 		return nil, err
 	}
-	j := &loop7.Jail{Leaf: leaf.Path, UID: uint32(uid), GID: uint32(gid)}
-	if err := j.Own(p.Loop7); err != nil {
+	j := &loop7.Jail{Leaf: leaf.Path, UID: uint32(uid), GID: uint32(gid), State: filepath.Clean(p.Loop7)}
+	if err := j.Own(); err != nil {
 		return nil, err
 	}
 	return j, nil
