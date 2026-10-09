@@ -112,8 +112,9 @@ type Reach struct {
 	// Notify tells the owner an approved rollback is done (the owner
 	// channel). Nil: not told.
 	Notify func(text string) error
-	// OnTakenBack, when set, is told of each take-back Retry finished
-	// (TakeBackOf reports it done), instead of the owner being told
+	// OnTakenBack, when set, is told by Retry of each take-back seen not
+	// done where a reset can finish and done since (TakeBackOf reports it
+	// done), whatever finished it, instead of the owner being told
 	// TakenBack: the caller then owns the done text (RCH-3).
 	OnTakenBack func(lineage string, since time.Time)
 	// Location is the owner's time zone for the owner's texts.
@@ -132,6 +133,9 @@ type Reach struct {
 	// kept: lineages the owner said NO for, which still hold a deleted
 	// record.
 	held, kept map[string]bool
+	// unreported: take-backs seen not done where a reset can finish, by
+	// since, until Retry reports them done (#569 B1).
+	unreported map[int64]OwedTakeBack
 }
 
 // Contained reports a lineage being asked about, or left unanswered: no
@@ -219,11 +223,11 @@ func (r *Reach) Retry(ctx context.Context) error {
 	// deletion was reached since) is finished here, after any approved
 	// take-back still owed is run.
 	// A take-back whose machines went back by a reset not recorded has it
-	// recorded here, never reset again (RCH-2). Each take-back not done
-	// before and done after is reported once, after run is released, so
-	// the report may ask TakeBackOf (RCH-1, RCH-3).
+	// recorded here, never reset again (RCH-2). Each take-back seen not
+	// done here or by a settle, and done now, is reported once, after run
+	// is released, so the report may ask TakeBackOf (RCH-1, RCH-3).
 	r.run.Lock()
-	notDone := r.Prov.TakeBacksNotDone()
+	r.watch()
 	for _, tb := range r.Prov.TakeBacksOwed() {
 		if err := r.takeBack(ctx, tb.Lineage, tb.Since, true); err != nil {
 			errs = append(errs, fmt.Errorf("take-back of %s: %w", tb.Lineage, err))
@@ -242,15 +246,16 @@ func (r *Reach) Retry(ctx context.Context) error {
 		}
 	}
 	var done []OwedTakeBack
-	seen := map[int64]bool{}
-	for _, tb := range notDone {
-		at := tb.Since.UnixNano()
-		if !seen[at] && r.Prov.TakeBackOf(tb.Since) == TakeBackDone {
-			seen[at] = true
+	r.mu.Lock()
+	for at, tb := range r.unreported {
+		if r.Prov.TakeBackOf(tb.Since) == TakeBackDone {
 			done = append(done, tb)
+			delete(r.unreported, at)
 		}
 	}
+	r.mu.Unlock()
 	r.run.Unlock()
+	sort.Slice(done, func(i, j int) bool { return done[i].Since.Before(done[j].Since) })
 	for _, tb := range done {
 		if r.OnTakenBack != nil {
 			r.OnTakenBack(tb.Lineage, tb.Since)
@@ -403,9 +408,30 @@ func (r *Reach) logf(format string, args ...any) {
 }
 
 // Owed reports work Retry carries that Pending does not count: an owed
-// take-back, a reset not recorded, or an unfinished reset.
+// take-back, a reset not recorded, an unfinished reset, or a take-back
+// not yet reported.
 func (r *Reach) Owed() bool {
-	return len(r.Prov.TakeBacksOwed()) > 0 || len(r.Prov.Backs()) > 0 || len(r.Prov.ResetLineages()) > 0
+	r.mu.Lock()
+	unreported := len(r.unreported) > 0
+	r.mu.Unlock()
+	return unreported || len(r.Prov.TakeBacksOwed()) > 0 || len(r.Prov.Backs()) > 0 || len(r.Prov.ResetLineages()) > 0
+}
+
+// watch keeps each take-back not yet done for Retry to report once it is,
+// so one a settle finishes is reported too (#569 B1). Called with run
+// held, before a reset can finish.
+func (r *Reach) watch() {
+	nd := r.Prov.TakeBacksNotDone()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, tb := range nd {
+		if r.unreported == nil {
+			r.unreported = map[int64]OwedTakeBack{}
+		}
+		if _, ok := r.unreported[tb.Since.UnixNano()]; !ok {
+			r.unreported[tb.Since.UnixNano()] = tb
+		}
+	}
 }
 
 // Pending reports how many deletions are not yet fully reached.
@@ -479,6 +505,7 @@ func (r *Reach) settle(ctx context.Context, lineage string) error {
 	}
 	r.run.Lock()
 	defer r.run.Unlock()
+	r.watch()
 	// A reset already done (an approval run, or before a restart) is
 	// finished, never repeated.
 	for _, rs := range r.Prov.Resets(lineage) {

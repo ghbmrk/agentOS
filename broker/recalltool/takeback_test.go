@@ -480,6 +480,73 @@ func TestRCH3RetryReportsAFinishedTakeBackToTheCallerOnce(t *testing.T) {
 	}
 }
 
+// W3-forget-reach RCH-3 and RCH-4 (brief IDs; CAP-3 is marked at the top).
+// #569 B1 (L3, Security 4a, Lens): a take-back left owed whose reset a
+// deletion's reach finishes, at once or later from Retry's pending
+// deletions, is still reported once, and Retry stays owed until it is.
+func TestRCH3ATakeBackADeletionFinishesIsReportedOnce(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		for _, hook := range []bool{false, true} {
+			x, read := newReachRig(t)
+			var reps []time.Time
+			if hook {
+				x.reach.OnTakenBack = func(_ string, s time.Time) { reps = append(reps, s) }
+			}
+			x.j.submitted["late"] = read.Add(time.Second)
+			x.j.inFlight["late"] = true
+			if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil {
+				t.Fatal(err)
+			}
+			if st, _ := x.reach.TakeBackOf(read); st != TakeBackOwed {
+				t.Fatalf("in flight: %v", st)
+			}
+			var early string
+			for _, id := range x.r.prov.Of("root") {
+				if x.r.prov.Holders(id)["root"].Before(read) {
+					early = id
+				}
+			}
+			if early == "" {
+				t.Fatal("no item given before the read")
+			}
+			if !pending {
+				x.j.inFlight["late"] = false
+			}
+			x.clock = x.clock.Add(time.Minute)
+			if _, err := x.r.ix.Delete(early); (err != nil) != pending || !x.r.ix.Deleted(early) {
+				t.Fatalf("pending %v: delete: %v", pending, err)
+			}
+			x.j.inFlight["late"] = false
+			if !pending {
+				if st, _ := x.reach.TakeBackOf(read); st != TakeBackDone {
+					t.Fatalf("deletion did not finish the take-back: %v", st)
+				}
+			}
+			if !x.reach.Owed() {
+				t.Fatalf("pending %v hook %v: report not owed, so Service would not run Retry", pending, hook)
+			}
+			for i := 0; i < 3; i++ {
+				_ = x.reach.Retry(context.Background())
+			}
+			if st, _ := x.reach.TakeBackOf(read); st != TakeBackDone {
+				t.Fatalf("not done: %v", st)
+			}
+			n := 0
+			for _, s := range x.told {
+				if s == TakenBack {
+					n++
+				}
+			}
+			if hook && (len(reps) != 1 || !reps[0].Equal(read) || n != 0) || !hook && n != 1 {
+				t.Fatalf("pending %v hook %v: reported %v told %v", pending, hook, reps, x.told)
+			}
+			if x.reach.Owed() {
+				t.Fatalf("pending %v hook %v: still owed once reported", pending, hook)
+			}
+		}
+	}
+}
+
 // W3-forget-reach RCH-2 (brief IDs; CAP-3 is marked at the top).
 // An unrecorded reset kept by MarkBack survives a compaction and a
 // reopen, so Retry still finishes it.
