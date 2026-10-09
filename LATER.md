@@ -508,6 +508,12 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-5-f1 l4 | Security on #579 L1: after a restart, `Reconcile` with no pin reports `Succeeded` for a same-ID non-alert swapped in at the destination state |
 | SR3-5-f1 l5 | Lens on #579 M5: organize `reserved` entries are kept until they age out, so the bound can over-count (fails toward asking) |
 | SR3-5-f1 l7 | Lens on #579: the undo comment and ASSUMPTIONS M17 wording for validity 0 ("names no message") could say what `Undo` returns |
+| SR3-5-f2 l1 | SR3-5-f2: an `Unknown` trash or spam keeps no pin, so its `Reconcile` judges by Message-ID; its source can never be Trash or Junk, and a same-ID swap at the destination needs a message the provider filed there itself |
+| SR3-5-f2 l2 | L3 point 2 / Security L1 on #616: `InUse` does not list Pending intents, so expiry's safety for them rests on `owner.MaxTTL` (24 h) <= `dayWindow` (24 h) with a strict `Before`; assert `MaxTTL <= dayWindow` in a test, or count Pending as live |
+| SR3-5-f2 l3 | L3 point 3 on #616: the account-filter mutant in `expire` survives but fails safe (it keeps more); SR3-mail-w pins the wiring |
+| SR3-5-f2 l4 | Security L2 on #616: the mutants poison-for-plan-error, `InUse(…, old)` vs `now`, and the staleness scan survive; each is near-equivalent |
+| SR3-5-f2 l5 | Security L3 on #616: `setPin` calls `InUse` once per pinned op, each a full journal scan under `e.mu`; performance only |
+| SR3-5-f2 l6 | Lens point 1 on #616: the refusals "the adapter's guard refuses this effect (ADP-2)" and "mail: changed since approval" give no next step (CH-12 kind); goes with the next owner-text package |
 | P3-4b-3r-pass l1 | L3 point 2 on #585: a check in `NotRun` (its `Box` input nil) still closes its open findings in `Pass` and now texts "Cleared"; not live while `GuardConfig` sets no `Box` (learn.go), one line to add `notes` to `broke` when it does |
 | P3-4b-3r-pass l2 | L3 point 3 on #585: loop7 `stepped` counts a step that only replayed a standing crash or reported an overrun as progress, so a box whose every target has an open finding never shows "have not run"; count only a step where the engine ran (F14) |
 | P3-4b-3r-pass l3 | Security 4a point 3 on #585: unpaused drift, advisory and expiry cleared lines now carry `safeName(Subject)`, which keeps spaces, `.` and `:`, so a filename such as `a. Reply RESUME` reads as a sentence in the SMS; alert texts already had this exposure; for the owner-text package |

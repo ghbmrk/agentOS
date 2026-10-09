@@ -74,15 +74,13 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 	// acts only on that message, and hides an alert only if they
 	// escalated it (SR3-5-f1a). The judgements are consumed whatever
 	// happens, so another attempt is judged again by its own recheck.
-	pn, pinned := pin{}, true
-	if o.Verb == verb.Organize {
-		pn, pinned = a.takePin(in.ID)
-	}
+	// Trash and spam are checked the same way (SR3-5-f2a).
+	pn, agreed := a.takePin(in.ID)
 	pl, err := a.planOrganize(ctx, o, p)
 	if err != nil {
 		return notApplied(err)
 	}
-	if o.Verb == verb.Organize && (!pinned || pl.msg.Ref() != pn.ref || pl.hides && pl.alert && !pn.alert) {
+	if !agreed || pl.msg.Ref() != pn.ref || pl.hides && pl.alert && !pn.alert {
 		return notApplied(errChanged)
 	}
 	out := a.organize(ctx, o, pl)
