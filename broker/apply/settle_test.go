@@ -1139,30 +1139,198 @@ func TestSecurityRecheckWithdrawsAnInstalledImage(t *testing.T) {
 	}
 }
 
-// From the save before the install until Installed is saved, the
-// applier is executing: the withdraw is refused as a handover, nothing
-// is abandoned, and the pipeline's next Recheck gets it.
-func TestSecurityWithdrawWhileExecutingIsRetried(t *testing.T) {
+// starts: err is the handover refusal, and says whether the image may
+// start before it is undone.
+func starts(t *testing.T, err error) bool {
+	t.Helper()
+	var h interface {
+		Handover() bool
+		Starts() bool
+	}
+	if !errors.Is(err, ErrApplying) || !errors.As(err, &h) || !h.Handover() {
+		t.Fatalf("not a handover refusal: %v", err)
+	}
+	return h.Starts()
+}
+
+const (
+	wontStart = "Update 1 failed a security check; I will not start it. Nothing is needed from you."
+	mayStart  = "Update 1 failed a security check while it was being installed; it may start before I can undo it. Nothing is needed from you."
+)
+
+// REQ: UPD-1, UPD-8, OP-4, OP-5
+//
+// SR3-4f-3 B2: from the save before the install until Installed is
+// saved, the applier is executing. A security withdraw then is refused,
+// but recorded: Execute saves the point as withdrawing, and the same Tick
+// abandons it instead of restarting into it, though the box is free.
+// Mutant: drop the Withdrawing set in Execute, and the Tick restarts.
+func TestSecurityWithdrawDuringInstallNeverBoots(t *testing.T) {
 	r := newRig(t)
-	ctx := context.Background()
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
 	var during error
+	var status string
 	r.act.onInstall = func() {
-		r.working = true
 		during = r.a.Withdraw("a1", WhySecurity)
+		status = r.a.Status()
 	}
-	if ok, err := r.a.Tick(ctx); ok || err != nil {
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
-	var h interface{ Handover() bool }
-	if !errors.Is(during, ErrApplying) || !errors.As(during, &h) || !h.Handover() {
-		t.Fatalf("withdraw during the install: %v", during)
+	if starts(t, during) || status != wontStart {
+		t.Fatalf("withdraw during the install: %v, status %q", during, status)
 	}
-	if r.act.abandoned != 0 {
-		t.Fatalf("abandoned while executing: %+v", r.act)
+	if r.act.boot.UsrRootHash != strings.Repeat(oldHash, 32) {
+		t.Fatalf("booted %+v", r.act.boot)
 	}
 	r.act.onInstall = nil
+	r.withdrawn()
+}
+
+// The refusal is saved with the handover: when the same Tick's withdraw
+// fails, then the broker restarts in the same boot, an ordinary release
+// is still not restarted into.
+// Mutant: drop the Withdrawing set in Execute, and the Tick restarts.
+func TestSecurityWithdrawDuringInstallSurvivesAProcessRestart(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, false), "a1"))
+	r.clk.add(7 * time.Hour) // past the jitter
+	var during error
+	r.act.onInstall = func() {
+		r.act.abandonErr = errIO // the same Tick's withdraw fails
+		during = r.a.Withdraw("a1", WhySecurity)
+	}
+	if ok, err := r.a.Tick(context.Background()); ok || !errors.Is(err, errIO) || starts(t, during) {
+		t.Fatalf("tick: %v %v, withdraw %v", ok, err, during)
+	}
+	r.act.onInstall, r.act.abandonErr = nil, nil
+	if pt := r.saved().Applying; pt == nil || !pt.Installed || !pt.Withdrawing {
+		t.Fatalf("applying %+v", pt)
+	}
+	r.restart()
+	r.must(r.a.Resume(context.Background()))
+	r.working = false
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.withdrawn()
+}
+
+// B3: a handover Execute could not record (not installed, not executing)
+// is refused with no Abandon; the next Tick's Resume abandons it, and
+// its release is dropped rather than installed again.
+// Mutant: drop !pt.Installed from the refusal, and the withdraw abandons
+// at once; drop the refused adoption from Tick's drop, and it reinstalls.
+func TestSecurityWithdrawOfAnUnrecordedHandoverIsRefused(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.act.onInstall = func() { r.state.Fail, r.act.abandonErr = errIO, errIO }
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.state.Fail, r.act.abandonErr, r.act.onInstall = nil, nil, nil
+	if pt := r.a.st.Applying; pt == nil || pt.Installed {
+		t.Fatalf("in memory: %+v", pt)
+	}
+	if err := r.a.Withdraw("a1", WhySecurity); starts(t, err) || r.act.abandoned != 0 {
+		t.Fatalf("withdraw: %v, activator %+v", err, r.act)
+	}
+	if got := r.a.Status(); got != wontStart {
+		t.Fatalf("status: %q", got)
+	}
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil || len(r.act.installed) != 1 {
+		t.Fatalf("tick: %v %v, activator %+v", ok, err, r.act)
+	}
+	r.withdrawn()
+}
+
+// B1: the restart is decided under the lock, after Booted and after the
+// busy check. A withdraw that lands in either gap wins: no restart.
+// Mutant: drop either recheck, and the Tick restarts into the image.
+func TestWithdrawRacingTheRestartIsNotRestartedInto(t *testing.T) {
+	for name, gap := range map[string]func(r *rig, f func()){
+		"booted": func(r *rig, f func()) { r.act.onBooted = f },
+		"busy":   func(r *rig, f func()) { r.atBusy = f },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := installedHeld(t, false)
+			r.working = false
+			var during error
+			gap(r, func() { during = r.a.Withdraw("a1", WhySecurity) })
+			if ok, err := r.a.Tick(context.Background()); ok || err != nil || during != nil {
+				t.Fatalf("tick: %v %v, withdraw %v", ok, err, during)
+			}
+			r.withdrawn()
+		})
+	}
+}
+
+// B1: once the restart is decided, a withdraw is refused as one that may
+// start the image, and the status says so; it is not abandoned under the
+// restart. Mutant: drop the restarting check, and it abandons.
+func TestWithdrawDuringTheRestartIsRefused(t *testing.T) {
+	r := installedHeld(t, false)
+	r.working = false
+	var during error
+	var status string
+	r.act.onRestart = func() {
+		during = r.a.Withdraw("a1", WhySecurity)
+		status = r.a.Status()
+	}
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if !starts(t, during) || status != mayStart || r.act.abandoned != 0 || r.act.restarts != 1 {
+		t.Fatalf("withdraw: %v, status %q, activator %+v", during, status, r.act)
+	}
+}
+
+// B1: a failed restart lifts the refusal, and the next withdraw undoes
+// the handover. Mutant: keep restarting set, and it is refused.
+func TestFailedRestartAllowsTheWithdraw(t *testing.T) {
+	r := installedHeld(t, false)
+	r.working = false
+	r.act.restartErr = errIO
+	if _, err := r.a.Tick(context.Background()); !errors.Is(err, errIO) {
+		t.Fatalf("tick: %v", err)
+	}
+	r.act.restartErr = nil
+	r.working = true
 	r.must(r.recheck("a1"))
+	r.withdrawn()
+}
+
+// B2: a withdraw refused because the boot could not be read may start
+// the image, and says so; the refusal is recorded, so the next Tick
+// abandons it instead of restarting.
+// Mutant: drop the refused adoption from staleLocked, and it restarts.
+func TestWithdrawRefusedOnAnUnreadBootIsNotRestartedInto(t *testing.T) {
+	r := installedHeld(t, false)
+	r.act.bootedErr = errIO
+	if err := r.a.Withdraw("a1", WhySecurity); !starts(t, err) || r.act.abandoned != 0 {
+		t.Fatalf("withdraw: %v, activator %+v", err, r.act)
+	}
+	if got := r.a.Status(); got != mayStart {
+		t.Fatalf("status: %q", got)
+	}
+	r.act.bootedErr = nil
+	r.working = false
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.withdrawn()
+}
+
+// LATER (c), pinned: once the withdraw is durable, a withdraw for any
+// reason finishes it. Mutant: drop !pt.Withdrawing from the why check.
+func TestAnyWithdrawFinishesAMarkedOne(t *testing.T) {
+	r := installedHeld(t, false)
+	r.act.abandonErr = errIO
+	if err := r.a.Withdraw("a1", WhySecurity); starts(t, err) {
+		t.Fatalf("withdraw: %v", err)
+	}
+	r.act.abandonErr = nil
+	r.must(r.a.Withdraw("a1", "owner"))
 	r.withdrawn()
 }
 
@@ -1246,8 +1414,11 @@ func TestOwnerUndoStillRefusedAfterInstall(t *testing.T) {
 	if ok, err := r.a.Tick(ctx); !ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
-	if err := r.a.Withdraw("a1", WhySecurity); !errors.Is(err, ErrApplying) || r.act.abandoned != 0 {
+	if err := r.a.Withdraw("a1", WhySecurity); !starts(t, err) || r.act.abandoned != 0 {
 		t.Fatalf("withdraw in the new boot: %v, activator %+v", err, r.act)
+	}
+	if got := r.a.Status(); got != mayStart {
+		t.Fatalf("status in the new boot: %q", got)
 	}
 	r.restart()
 	r.must(r.a.Resume(ctx))

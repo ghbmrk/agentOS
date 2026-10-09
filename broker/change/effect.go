@@ -396,7 +396,7 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		// StageFailed and StageDropped (lock order applier, then
 		// pipeline).
 		if err := w.Withdraw(id, why); handover(err) {
-			return installingErr(v)
+			return installingErr{v: v, starts: startsFirst(err)}
 		} else if err != nil {
 			return fmt.Errorf("change: withdrawing update %s: %w", v, err)
 		}
@@ -427,13 +427,25 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 }
 
 // installingErr: the applier refused to withdraw update v while it is
-// being installed. Its Handover method lets Recheck tell it apart.
-type installingErr string
+// being installed. Its Handover method lets Recheck tell it apart;
+// starts: the image may start before it is undone.
+type installingErr struct {
+	v      string
+	starts bool
+}
 
-func (v installingErr) Error() string {
-	return "Update " + string(v) + " is being installed; undo it after it starts."
+func (e installingErr) Error() string {
+	return "Update " + e.v + " is being installed; undo it after it starts."
 }
 func (installingErr) Handover() bool { return true }
+func (e installingErr) Starts() bool { return e.starts }
+
+// startsFirst: err says the image may start before it is undone
+// (SR3-4f-3 B5). Without a Starts method it may.
+func startsFirst(err error) bool {
+	var s interface{ Starts() bool }
+	return !errors.As(err, &s) || s.Starts()
+}
 
 // revertedByID: adoption id exists and is reverted.
 func (p *Pipeline) revertedByID(id string) bool {
@@ -747,7 +759,7 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 				// The applier is installing it and withdraws it once it
 				// can; the next pass reverts it. Until then the digest
 				// says so (SR3-4f-3b).
-				p.concern(id, why, s)
+				p.concern(id, why, s, startsFirst(err))
 				continue
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", id, err))
@@ -758,18 +770,18 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 	return out, errors.Join(errs...)
 }
 
-// protected reports an image adoption the owner approved or that rests on
-// an attested security release: the pipeline never undoes it on its own.
-// concern records why and s on adoption id once, and saves.
-func (p *Pipeline) concern(id, why string, s Score) {
+// concern records why, s and starts on adoption id once, and saves.
+func (p *Pipeline) concern(id, why string, s Score, starts bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if a := p.adoptionLocked(id); a != nil && a.Reverted == "" && a.Concern == "" {
-		a.Concern, a.ConcernScore = why, s
+		a.Concern, a.ConcernScore, a.ConcernStarts = why, s, starts
 		_ = p.saveLocked()
 	}
 }
 
+// protected reports an image adoption the owner approved or that rests on
+// an attested security release: the pipeline never undoes it on its own.
 func (a *Adoption) protected() bool {
 	image := false
 	for _, c := range a.Classes {

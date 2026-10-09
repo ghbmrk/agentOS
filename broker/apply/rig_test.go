@@ -32,6 +32,21 @@ type activator struct {
 	onInstall  func() // runs after a successful Install
 	abandonErr error
 	onAbandon  func() // runs after a successful Abandon
+	// onBooted runs once, after Booted answers; onRestart runs once,
+	// before the restart. Both run outside the activator's lock.
+	onBooted   func()
+	onRestart  func()
+	restartErr error
+	bootedErr  error
+}
+
+// once takes and clears the hook *f under the activator's lock.
+func (a *activator) once(f *func()) func() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g := *f
+	*f = nil
+	return g
 }
 
 func (a *activator) Install(_ context.Context, v *update.Verified) error {
@@ -67,8 +82,14 @@ func (a *activator) Abandon(context.Context) error {
 }
 
 func (a *activator) Restart(context.Context) error {
+	if f := a.once(&a.onRestart); f != nil {
+		f()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.restartErr != nil {
+		return a.restartErr
+	}
 	a.restarts++
 	a.boot.ID = "boot" + string(rune('0'+a.restarts))
 	switch {
@@ -84,8 +105,12 @@ func (a *activator) Restart(context.Context) error {
 
 func (a *activator) Booted(context.Context) (Boot, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.boot, nil
+	b, err := a.boot, a.bootedErr
+	a.mu.Unlock()
+	if f := a.once(&a.onBooted); f != nil {
+		f()
+	}
+	return b, err
 }
 
 // pipeline is the change pipeline's staged-adoption hooks, with their
@@ -222,7 +247,18 @@ type rig struct {
 	excluded func(time.Time) bool
 	talk     time.Time
 	stopped  bool
-	a        *Applier
+	// atBusy runs once, when the applier next asks whether the box is
+	// working; never set while Status may run (it asks under its lock).
+	atBusy func()
+	a      *Applier
+}
+
+func (r *rig) isWorking() bool {
+	if f := r.atBusy; f != nil {
+		r.atBusy = nil
+		f()
+	}
+	return r.working
 }
 
 const oldHash = "11"
@@ -261,7 +297,7 @@ func (r *rig) restart() {
 		act = r.act0
 	}
 	a, err := New(Config{Journal: r.eng, Activator: act, Store: r.store, Pipeline: r.pipe, State: r.state,
-		InCall: func() bool { return r.inCall }, Working: func() bool { return r.working },
+		InCall: func() bool { return r.inCall }, Working: r.isWorking,
 		Excluded: func(t time.Time) bool { return r.excluded != nil && r.excluded(t) },
 		LastTalk: func() time.Time { return r.talk },
 		Stopped:  func() bool { return r.stopped },

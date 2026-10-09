@@ -258,6 +258,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-4f-2 l5 | L3 on #605: the "fails at main" evidence for SR3-4f-2's tests is build failures only (the new API is absent at main); a behavioural at-main failure would need the tests ported to main's API |
 | SR3-4f-2 l6 | Security L1 on #605: guard the applier's `settleLocked` against an ID that `Applying` names, or pin where `ErrPolicyMoved` can come from, so a drop never settles an adoption whose release is being handed over |
 | SR3-4f-2 l7 | UX3 on #605: "I will install it when I am free" is false in the handover window (after `Install`, before the reboot); word that window as "installing" |
+| SR3-4f-3 l1 | Round 1 on #614: pass a bounded caller context through `Withdraw` to `Booted` and `Abandon`, which run under the applier lock |
+| SR3-4f-3 l2 | Round 1 on #614: pin `a.Concern == ""` in change `concern()` so a second refusal never rewrites a saved Concern |
+| SR3-4f-3 l3 | Round 1 on #614: `!pt.Withdrawing` for a withdraw with a reason other than security; done in #614, pinned by `TestAnyWithdrawFinishesAMarkedOne` |
+| SR3-4f-3 l4 | Round 1 on #614: mixed identifiers in the digest, "Update 41" against "Undid <short>"; pick one |
 | SR3-4f-2 l8 | UX4 on #605: comments that say a dropped release is "scheduled again under a new adoption" should say "once SR3-4f-2-r1 lands" (fixed in passing in apply.go `New` and the Tick narrowing drop, and ASSUMPTIONS A5 and A9; the `Stager` comment already names r1) |
 | SR3-6 l1 | Potency on #430, W5b wiring: a pending security fix dropped by a policy change and scheduled again by Loop 3 should keep its first-scheduled time for A7's 24-hour "no free moment" ask, so a policy change does not reset the clock |
 | SR3-7 l1 | L3 on #429: nested keys still last-win; an `n` check in `anthropic.go` is unreachable |

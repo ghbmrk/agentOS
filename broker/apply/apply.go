@@ -259,6 +259,20 @@ type Applier struct {
 	// handed: the release the activator took in this process, until it
 	// settles; nil after a process restart (SR3-4f-2c).
 	handed *update.Verified
+	// restarting: the point restartIfHandedOver is restarting into; a
+	// Withdraw of it is refused from then on (SR3-4f-3 B1).
+	restarting string
+	// refused: a security Withdraw of the apply in flight was refused
+	// for this adoption, in this process (SR3-4f-3 B2). Its release is
+	// never restarted into, and a pending release of it never installs.
+	refused refusal
+}
+
+// refusal: a security Withdraw of adoption refused; starts says whether
+// its image may start before it is undone.
+type refusal struct {
+	adoption string
+	starts   bool
 }
 
 // New loads the applier's state. A pending release is not kept across a
@@ -504,7 +518,7 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 		a.mu.Unlock()
 		return false, nil
 	}
-	if p.Security && !a.rel.Security() {
+	if p.Security && !a.rel.Security() || a.refused.adoption != "" && a.refused.adoption == p.Adoption {
 		// The attestor policy narrowed since it was scheduled (SR3-6):
 		// drop the automatic authorization and settle the adoption
 		// (SR3-4f-2b). The release is adopted again only under a new
@@ -560,7 +574,10 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 // policy narrows before the handover (SR3-4f-2c, SR3-6). After a process
 // restart the release is not held and cannot be judged again, so a
 // security fix fails closed the same way (ASSUMPTIONS A13). A release
-// being withdrawn (SR3-4f-3a) is never restarted into either.
+// being withdrawn (SR3-4f-3a), or whose security Withdraw was refused
+// (SR3-4f-3 B2), is never restarted into either. The point is checked
+// again under the lock just before the restart, and a Withdraw from then
+// on is refused (B1); a failed restart lifts that.
 func (a *Applier) restartIfHandedOver(ctx context.Context) (bool, error) {
 	a.mu.Lock()
 	pt := a.st.Applying
@@ -568,33 +585,55 @@ func (a *Applier) restartIfHandedOver(ctx context.Context) (bool, error) {
 		a.mu.Unlock()
 		return false, nil
 	}
-	stale := pt.Withdrawing || pt.Security && (a.handed == nil || !a.handed.Security())
 	a.mu.Unlock()
 	b, err := a.cfg.Activator.Booted(ctx)
 	if err != nil || b.ID != pt.BootID {
 		return false, err // a new boot is Resume's to judge
 	}
-	if stale {
-		return false, a.withdrawHandover(ctx, pt)
+	a.mu.Lock()
+	if pt = a.applyingLocked(pt.ID); pt != nil && a.staleLocked(pt) {
+		// A failed step leaves Applying set, and the next Tick tries
+		// again (SR3-4f-2c).
+		err := a.withdrawHandoverLocked(ctx, pt)
+		a.mu.Unlock()
+		return false, err
 	}
-	if a.busy(a.cfg.Now(), pt.TalkUntil) != "" {
+	a.mu.Unlock()
+	if pt == nil || a.busy(a.cfg.Now(), pt.TalkUntil) != "" {
 		return false, nil
 	}
-	return true, a.cfg.Activator.Restart(ctx)
-}
-
-// withdrawHandover undoes the handover of pt in the boot it was handed
-// over in, and drops its adoption (SR3-4f-2c). A failed step leaves
-// Applying set, and the next Tick tries again.
-func (a *Applier) withdrawHandover(ctx context.Context, pt *point) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.st.Applying != pt || a.executing {
-		return nil // settled meanwhile
+	if pt = a.applyingLocked(pt.ID); pt == nil || a.staleLocked(pt) {
+		a.mu.Unlock()
+		return false, nil // withdrawn meanwhile: the next Tick settles it
 	}
-	return a.withdrawHandoverLocked(ctx, pt)
+	a.restarting = pt.ID
+	a.mu.Unlock()
+	if err := a.cfg.Activator.Restart(ctx); err != nil {
+		a.mu.Lock()
+		a.restarting = ""
+		a.mu.Unlock()
+		return true, err
+	}
+	return true, nil
 }
 
+// applyingLocked is the installed apply in flight if its ID is id.
+func (a *Applier) applyingLocked(id string) *point {
+	if pt := a.st.Applying; pt != nil && pt.ID == id && pt.Installed && !a.executing {
+		return pt
+	}
+	return nil
+}
+
+// staleLocked: pt's release is never restarted into.
+func (a *Applier) staleLocked(pt *point) bool {
+	return pt.Withdrawing || a.refused.adoption != "" && a.refused.adoption == pt.Adoption ||
+		pt.Security && (a.handed == nil || !a.handed.Security())
+}
+
+// withdrawHandoverLocked undoes the handover of pt in the boot it was
+// handed over in, and drops its adoption (SR3-4f-2c).
 func (a *Applier) withdrawHandoverLocked(ctx context.Context, pt *point) error {
 	if err := a.cfg.Activator.Abandon(ctx); err != nil {
 		return err
@@ -662,15 +701,32 @@ func (a *Applier) Withdraw(adoption, why string) error {
 }
 
 // withdrawInstalledLocked is Withdraw of the apply in flight (SR3-4f-3a).
+// A refused security Withdraw is recorded (SR3-4f-3 B2).
 func (a *Applier) withdrawInstalledLocked(pt *point, why string) error {
-	// executing first: the activator may be mid-install, and Booted
-	// would wait on it.
-	if a.executing || !pt.Installed || why != WhySecurity && !pt.Withdrawing {
+	if why != WhySecurity && !pt.Withdrawing {
 		return handoverError{}
+	}
+	err := a.undoHandoverLocked(pt)
+	var h handoverError
+	if errors.As(err, &h) { // security, or already withdrawing
+		a.refused = refusal{adoption: pt.Adoption, starts: h.starts}
+	}
+	return err
+}
+
+func (a *Applier) undoHandoverLocked(pt *point) error {
+	switch {
+	case a.executing, !pt.Installed:
+		// executing first: the activator may be mid-install, and Booted
+		// would wait on it. Execute marks it withdrawing, or Resume
+		// abandons it: it never starts.
+		return handoverError{}
+	case a.restarting == pt.ID:
+		return handoverError{starts: true}
 	}
 	ctx := context.Background()
 	if b, err := a.cfg.Activator.Booted(ctx); err != nil || b.ID != pt.BootID {
-		return handoverError{} // a new boot is Resume's to settle
+		return handoverError{starts: true} // a new boot is Resume's to settle
 	}
 	if !pt.Withdrawing {
 		marked := *pt
@@ -678,7 +734,9 @@ func (a *Applier) withdrawInstalledLocked(pt *point, why string) error {
 		next := a.st
 		next.Applying = &marked
 		if err := a.save(next); err != nil {
-			return fmt.Errorf("%w: %w", handoverError{}, err)
+			// Not durable: after a process restart only a security
+			// fix fails closed (ASSUMPTIONS A13).
+			return fmt.Errorf("%w: %w", handoverError{starts: !pt.Security}, err)
 		}
 		a.st, pt = next, &marked
 	}
@@ -690,12 +748,14 @@ func (a *Applier) withdrawInstalledLocked(pt *point, why string) error {
 
 // handoverError: the adoption's release is being installed. It is
 // ErrApplying, and its Handover method lets the change pipeline tell it
-// apart without importing this package.
-type handoverError struct{}
+// apart without importing this package. Starts: the image may start
+// before it is undone (SR3-4f-3 B5).
+type handoverError struct{ starts bool }
 
 func (handoverError) Error() string        { return ErrApplying.Error() }
 func (handoverError) Is(target error) bool { return target == ErrApplying }
 func (handoverError) Handover() bool       { return true }
+func (h handoverError) Starts() bool       { return h.starts }
 
 // settle calls StageDropped for each dropped adoption, after the state
 // that records it is saved; a failed call stays for the next settle
@@ -869,6 +929,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	next := a.st
 	pt2 := *a.st.Applying
 	pt2.Installed = true
+	pt2.Withdrawing = a.refused.adoption != "" && a.refused.adoption == pt2.Adoption // B2
 	next.Applying = &pt2
 	if next.Pending == p {
 		next.Pending = nil
@@ -1139,6 +1200,13 @@ func (a *Applier) refLocked(pt *point) (update.Ref, error) {
 	return ref, nil
 }
 
+// The STATUS lines for an apply whose security Withdraw was refused or
+// is under way (SR3-4f-3 B6).
+const (
+	wontStartLine = "Update %d failed a security check; I will not start it. Nothing is needed from you."
+	mayStartLine  = "Update %d failed a security check while it was being installed; it may start before I can undo it. Nothing is needed from you."
+)
+
 // Status is the applier's STATUS line, or "": an update installing or
 // waiting, with why, and a fallback until the next update installs
 // (UX-133-1 to 3). A successful install is said once, in the digest.
@@ -1147,7 +1215,12 @@ func (a *Applier) Status() string {
 	defer a.mu.Unlock()
 	switch {
 	case a.st.Applying != nil && a.st.Applying.Withdrawing:
-		return fmt.Sprintf("Update %d failed a security check; I will not start it. Nothing is needed from you.", a.st.Applying.To)
+		return fmt.Sprintf(wontStartLine, a.st.Applying.To)
+	case a.st.Applying != nil && a.refused.adoption != "" && a.refused.adoption == a.st.Applying.Adoption:
+		if a.refused.starts {
+			return fmt.Sprintf(mayStartLine, a.st.Applying.To)
+		}
+		return fmt.Sprintf(wontStartLine, a.st.Applying.To)
 	case a.st.Applying != nil && a.st.Applying.Installed:
 		return fmt.Sprintf("Update %d is installing; I will restart and check it.", a.st.Applying.To)
 	case a.st.Pending != nil && a.rel != nil:

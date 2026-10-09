@@ -252,10 +252,12 @@ func (w *withdrawer) called() []string {
 }
 
 // installing is the applier's answer in its handover window.
-type installing struct{}
+// starts: the image may start before it is undone.
+type installing struct{ starts bool }
 
 func (installing) Error() string  { return "apply: a release is being applied" }
 func (installing) Handover() bool { return true }
+func (i installing) Starts() bool { return i.starts }
 
 // pendingStaged is a confirmed release 40 (image "a") and a staged
 // release 41 (image "b") the applier has not installed yet.
@@ -478,43 +480,114 @@ func (e *env) failsSecurity(id string) {
 	e.p.mu.Unlock()
 }
 
-const refusedLine = "Update 41 failed a security check while it was being installed; it will be undone as soon as it starts. Nothing is needed from you."
+// The refused-revert digest lines: the applier will not start the image,
+// or it may start before it is undone (SR3-4f-3 B5).
+const (
+	wontStartLine = "Update 41 failed a security check while it was being installed; I will not start it. Nothing is needed from you."
+	mayStartLine  = "Update 41 failed a security check while it was being installed; it may start before I can undo it. Nothing is needed from you."
+)
 
+// handoverOnly is a handover refusal that does not say whether the image
+// starts first: the digest must not promise that it does not.
+type handoverOnly struct{}
+
+func (handoverOnly) Error() string  { return "apply: a release is being applied" }
+func (handoverOnly) Handover() bool { return true }
+
+// Mutants: drop ConcernStarts from the digest, or read a refusal with no
+// Starts as will not start, and the line promises what may not hold.
 func TestRefusedSecurityRevertSetsConcern(t *testing.T) {
+	for name, c := range map[string]struct {
+		err    error
+		starts bool
+	}{
+		"will not start": {installing{}, false},
+		"may start":      {installing{starts: true}, true},
+		"not said":       {handoverOnly{}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			starts := c.starts
+			line, other := wontStartLine, mayStartLine
+			if starts {
+				line, other = other, line
+			}
+			e, r, w := pendingStaged(t)
+			e.failsSecurity(r.ID)
+			w.err = c.err
+			ids, err := e.p.Recheck(bg)
+			if err != nil || slices.Contains(ids, r.ID) {
+				t.Fatalf("recheck: %v %v", ids, err)
+			}
+			if got := w.whys; len(got) != 1 || got[0] != WhySecurity {
+				t.Fatalf("withdraw reasons %q", got)
+			}
+			e.reopen()
+			if a := e.adoption(r.ID); a.Concern != WhySecurity || a.ConcernStarts != starts || a.Reverted != "" || !a.Staged {
+				t.Fatalf("adoption %+v", a)
+			}
+			d := e.p.Digest()
+			if !slices.Contains(d, line) || slices.Contains(d, other) {
+				t.Fatalf("digest: %q", d)
+			}
+			for _, l := range d {
+				if strings.Contains(l, "pdate 41") && (strings.Contains(l, "UNDO") || strings.Contains(l, "only version")) {
+					t.Fatalf("digest offers what the owner cannot do: %q", l)
+				}
+				if strings.Contains(l, "as soon as it starts") || !starts && strings.Contains(l, "start before") {
+					t.Fatalf("digest promises a start: %q", l)
+				}
+			}
+			w = &withdrawer{}
+			e.p.SetWithdrawer(w)
+			e.failsSecurity(r.ID)
+			if ids, err := e.p.Recheck(bg); err != nil || !slices.Contains(ids, r.ID) {
+				t.Fatalf("recheck once it can withdraw: %v %v", ids, err)
+			}
+			if a := e.adoption(r.ID); a.Reverted != WhySecurity {
+				t.Fatalf("adoption %+v", a)
+			}
+			if d := e.p.Digest(); slices.Contains(d, line) {
+				t.Fatalf("digest after the revert: %q", d)
+			}
+		})
+	}
+}
+
+// B4: only a security revert sets the Concern. A refused regression
+// revert keeps its error and sets none; and a regression Concern on an
+// unprotected adoption is never told as a refused security revert.
+// Mutants: drop why == WhySecurity from Recheck, or a.Concern ==
+// WhySecurity from the digest.
+func TestRefusedRegressionRevertSetsNoConcern(t *testing.T) {
 	e, r, w := pendingStaged(t)
-	e.failsSecurity(r.ID)
+	ev := e.p.cfg.Evaluator
+	e.p.cfg.Evaluator = evalFunc(func(ctx context.Context, tr Tree, pr Probe) ([]byte, error) {
+		if string(tr["host-image/release"]) == update.Digest([]byte("b")) && string(pr.Input) == "skills/greet" {
+			return []byte("bye"), nil
+		}
+		return ev.Run(ctx, tr, pr)
+	})
+	e.p.mu.Lock()
+	e.p.adoptionByIDLocked(r.ID).Basis = BasisStanding
+	e.p.mu.Unlock()
 	w.err = installing{}
 	ids, err := e.p.Recheck(bg)
-	if err != nil || slices.Contains(ids, r.ID) {
+	if !handover(err) || slices.Contains(ids, r.ID) {
 		t.Fatalf("recheck: %v %v", ids, err)
 	}
-	if got := w.whys; len(got) != 1 || got[0] != WhySecurity {
+	if got := w.whys; len(got) != 1 || got[0] != WhyRegression {
 		t.Fatalf("withdraw reasons %q", got)
 	}
-	e.reopen()
-	if a := e.adoption(r.ID); a.Concern != WhySecurity || a.Reverted != "" || !a.Staged {
+	if a := e.adoption(r.ID); a.Concern != "" {
 		t.Fatalf("adoption %+v", a)
 	}
-	d := e.p.Digest()
-	if !slices.Contains(d, refusedLine) {
-		t.Fatalf("digest: %q", d)
-	}
-	for _, l := range d {
-		if strings.Contains(l, "pdate 41") && (strings.Contains(l, "UNDO") || strings.Contains(l, "only version")) {
-			t.Fatalf("digest offers what the owner cannot do: %q", l)
+	e.p.mu.Lock()
+	e.p.adoptionByIDLocked(r.ID).Concern = WhyRegression
+	e.p.mu.Unlock()
+	for _, l := range e.p.Digest() {
+		if strings.Contains(l, "failed a security check") {
+			t.Fatalf("digest: %q", l)
 		}
-	}
-	w = &withdrawer{}
-	e.p.SetWithdrawer(w)
-	e.failsSecurity(r.ID)
-	if ids, err := e.p.Recheck(bg); err != nil || !slices.Contains(ids, r.ID) {
-		t.Fatalf("recheck once it can withdraw: %v %v", ids, err)
-	}
-	if a := e.adoption(r.ID); a.Reverted != WhySecurity {
-		t.Fatalf("adoption %+v", a)
-	}
-	if d := e.p.Digest(); slices.Contains(d, refusedLine) {
-		t.Fatalf("digest after the revert: %q", d)
 	}
 }
 
