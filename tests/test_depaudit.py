@@ -463,9 +463,18 @@ class EvidenceTest(unittest.TestCase):
             self.assertEqual(os.listdir(ro), [])
         self.assertEqual(res["outcome"], "pass", res)
 
+    # DEP-2b (briefs/DEP-2.md; a local ID with no SPEC row, so no REQ marker). With CAP_SYS_PTRACE
+    # the scenario could attach to _inner or strace, which keep CAP_SYS_ADMIN, and clear ro
+    # through them (B1, Security re-sign on #437).
+    def test_the_scenario_cannot_ptrace_its_privileged_ancestors(self):
+        res = depaudit.run_target({"name": "ptrace", "cmd": HARNESS_CONTROLS + ["ptrace-ancestors"]},
+                                  depaudit.load_manifest(MANIFEST))
+        self.assertEqual(res["outcome"], "pass", res)
+
     def test_the_built_in_controls_include_the_evidence_and_write_controls(self):
         names = {t["name"] for t in depaudit.control_targets("/tmp/a/p", "/tmp/b/p", "/tmp/c")}
-        self.assertLessEqual({"control-evidence-tamper", "control-kept-read-only"}, names)
+        self.assertLessEqual({"control-evidence-tamper", "control-kept-read-only", "control-no-ptrace-ancestors"},
+                             names)
 
 
 class CarryTest(unittest.TestCase):

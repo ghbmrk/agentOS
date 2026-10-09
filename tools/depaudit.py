@@ -384,7 +384,10 @@ def _dns_sink(sock, names):
 # namespace, where the kept paths' ro flag is not locked: it could clear it with
 # mount_setattr or open_tree_attr, neither traced. Without the capability, in its
 # bounding and inheritable sets, no exec can get it back, so ro holds (DEP-2b).
-DROP_SYS_ADMIN = ["setpriv", "--bounding-set", "-sys_admin", "--inh-caps", "-sys_admin", "--"]
+# CAP_SYS_PTRACE goes too: with it the scenario could attach to _inner or strace, which
+# keep CAP_SYS_ADMIN, and make the call through them. Without it, an ancestor holding
+# capabilities it lacks is out of its reach (cap_ptrace_access_check, and Yama scope 1).
+DROP_CAPS = ["setpriv", "--bounding-set", "-sys_admin,-sys_ptrace", "--inh-caps", "-sys_admin,-sys_ptrace", "--"]
 
 
 def _io_uring_disabled():
@@ -442,7 +445,7 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=()):
     err_t, err = _reader(err_r)
     with open(work / "stdout", "wb") as out:
         proc = subprocess.Popen(["strace", "-f", "-qq", "-e", "trace=" + TRACED,
-                                 "-o", "/proc/%d/fd/%d" % (os.getpid(), trace_w), "--"] + DROP_SYS_ADMIN + cmd,
+                                 "-o", "/proc/%d/fd/%d" % (os.getpid(), trace_w), "--"] + DROP_CAPS + cmd,
                                 env=env, cwd=ROOT, stdout=out, stderr=err_w)
         os.close(err_w)
         try:
@@ -624,6 +627,40 @@ def _clear_read_only(path):
     return wrong
 
 
+_PTRACE_SEIZE = 0x4206
+
+
+def _ptrace_denied(pid, comm, seize):
+    """Tries to attach to an ancestor that keeps CAP_SYS_ADMIN, into which a tracer could
+    inject mount_setattr (DEP-2b). With seize, a real PTRACE_SEIZE: it does not stop the
+    target, and the kernel detaches it when this process exits. strace cannot be seized
+    that way: once its own tracee traces it, the next stop of either deadlocks the pair. So
+    for strace this opens /proc/PID/mem, which the kernel allows only after the same check
+    PTRACE_ATTACH runs (ptrace_may_access in attach mode, Yama included)."""
+    import ctypes
+    try:
+        got = pathlib.Path("/proc/%d/comm" % pid).read_text().strip()
+    except OSError as e:
+        return ["pid %d: %s" % (pid, e)]
+    if not got.startswith(comm):
+        return ["pid %d is %s, not %s: nothing was tried" % (pid, got, comm)]
+    if seize:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+        if libc.ptrace(_PTRACE_SEIZE, pid, None, None) == 0:
+            return ["ptrace attached to %s (pid %d)" % (got, pid)]
+        err = ctypes.get_errno()
+    else:
+        try:
+            os.close(os.open("/proc/%d/mem" % pid, os.O_RDONLY))
+            return ["opened the memory of %s (pid %d) for ptrace" % (got, pid)]
+        except OSError as e:
+            err = e.errno
+    if err in (errno.EPERM, errno.EACCES):
+        return []
+    return ["ptrace %s (pid %d): %s, not denied" % (got, pid, os.strerror(err))]
+
+
 def _control(mode):
     """Planted scenarios against the harness's own defences (DEP-2), run as
     `depaudit.py _control MODE` inside the sandbox.
@@ -633,7 +670,9 @@ def _control(mode):
                        sys.prefix and $DEPAUDIT_KEEP_RO fails read-only, and a write to
                        $DEPAUDIT_KEEP_RW (declared in the target's writes) succeeds; first it
                        tries to clear read-only with the untraced mount_setattr and
-                       open_tree_attr (a mount(2) remount is traced: a violation by itself)"""
+                       open_tree_attr (a mount(2) remount is traced: a violation by itself)
+      ptrace-ancestors exits nonzero unless a ptrace attach to the sandbox's PID 1 (_inner)
+                       and to its strace parent is denied: either still holds CAP_SYS_ADMIN"""
     if mode == "tamper-evidence":
         with contextlib.suppress(OSError):
             socket.create_connection(("192.0.2.10", 443), timeout=2).close()
@@ -644,12 +683,19 @@ def _control(mode):
             with contextlib.suppress(OSError):
                 pathlib.Path(work, name).write_text(text)
         return 0
+    if mode == "ptrace-ancestors":
+        wrong = _ptrace_denied(1, "python", True) + _ptrace_denied(os.getppid(), "strace", False)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.sendto(b"x", ("127.0.0.1", 9))
+        if wrong:
+            sys.exit("; ".join(wrong))
+        return 0
     if mode != "write-kept":
         raise ValueError(mode)
     wrong = []
     for d in (str(ROOT), os.path.realpath(sys.prefix), os.environ["DEPAUDIT_KEEP_RO"]):
         wrong += _clear_read_only(d)
-        probe =os.path.join(d, ".depaudit-write-%d" % os.getpid())
+        probe = os.path.join(d, ".depaudit-write-%d" % os.getpid())
         try:
             os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
             os.unlink(probe)
@@ -713,6 +759,8 @@ def control_targets(masked_probe, visible_probe, writable_dir):
          "expect_kinds": ["ipv4"], "must_log": [("inet", "192.0.2.10")]},
         {"name": "control-kept-read-only", "cmd": own + ["write-kept"], "expect": "pass", "keep": keep,
          "writes": [writable_dir], "env": {"DEPAUDIT_KEEP_RO": keep[0], "DEPAUDIT_KEEP_RW": writable_dir},
+         "must_log": [("inet", "127.0.0.1")]},
+        {"name": "control-no-ptrace-ancestors", "cmd": own + ["ptrace-ancestors"], "expect": "pass",
          "must_log": [("inet", "127.0.0.1")]},
     ]
 
