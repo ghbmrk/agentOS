@@ -666,7 +666,9 @@ class FuzzConfineTest(unittest.TestCase):
         lines = [l.split() for l in (MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf").read_text().splitlines()
                  if l.strip() and not l.startswith("#")]
         self.assertIn(["d", "/var/lib/agentos", "0700", "root", "root", "-"], lines)
-        self.assertIn(["d", "/var/lib/agentos/loop7", "0700", "agentos-fuzz", "agentos-fuzz", "-"], lines)
+        # agentosd creates loop7 (loop7.Load) and gives it to the user (Jail.Own): a tmpfiles line would
+        # also run at image build and ship it, and the image's /var/lib/agentos must stay empty.
+        self.assertFalse([l for l in lines if l[1].startswith("/var/lib/agentos/")])
         acl = [l for l in lines if l[0].startswith("a") and l[1] == "/var/lib/agentos"]
         self.assertEqual(acl, [["a+", "/var/lib/agentos", "-", "-", "-", "-", "u:agentos-fuzz:--x"]])
         # Nothing else in the broker's state is given to the fuzz user.
