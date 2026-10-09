@@ -147,7 +147,7 @@ func TestCredentialPredicateRemovesObject(t *testing.T) {
 		{"api_key", "api_key,apiKey,APIKey,API-Key,access_key,secret_key,private_key,client_secret,access_token,refreshToken,token"},
 		{"seed", "seed,totp_seed,2fa seed,seed phrase,seedPhrase,mnemonic,totp,otp_secret"},
 		// Acronym plurals and trailing digits (Security 4a point 1).
-		{"spelling", "PINs,OTPs,TOTPs,PINsReset,password1,pin2,PIN2,backupCodes2,PWs,PWDs,2FA,2FA_code,2FACodes,2FA seed,TOTP2FA"},
+		{"spelling", "PINs,OTPs,TOTPs,PINsReset,password1,pin2,PIN2,backupCodes2,PWs,PWDs,2FA,2FA_code,2FACodes,2FA seed,TOTP2FA,oauth2Token,OAuth2Token,aes256Key,ssh2Key,v2Password,user1Password,account2Pin,sha256Secret,md5Token,x509Key,ed25519Key"},
 		// Any predicate ending in key(s), and other names (Security 4a point 2).
 		{"key", "ssh_key,sshKey,SSH key,encryption_key,master_key,license_key,keys,passkey,pw,security_answer,securityAnswers,key2,keyV2,master_key2,ssh_key_1,ssh_key_2,encryptionKeyV2,ssh_keys_old,sshKeyBackup,master_key_hex,license_key_value,gpgKeyId,walletKeys1"},
 	} {

@@ -57,8 +57,9 @@ func (sc *Scrubber) ScrubFact(f Fact) Fact {
 
 // credWords spells a predicate as lower-case words joined by '_', splitting
 // at case boundaries, after letters followed by a digit, and at anything but
-// letters and digits: "recoveryCodes", "API-Key", "2FA seed", "PINs" and
-// "password1" become recovery_codes, api_key, 2fa_seed, pins and password_1.
+// letters and digits: "recoveryCodes", "API-Key", "2FA seed", "PINs",
+// "password1" and "oauth2Token" become recovery_codes, api_key, 2fa_seed,
+// pins, password_1 and oauth_2_token.
 func credWords(p string) string {
 	var b []byte
 	sep := func() {
@@ -72,8 +73,9 @@ func credWords(p string) string {
 		case c >= 'A' && c <= 'Z':
 			// An acronym's plural s ("OTPs") stays on the acronym.
 			plural := i > 0 && p[i-1] >= 'A' && p[i-1] <= 'Z' && p[i+1:] != "" && p[i+1] == 's' && !lower(i+2)
-			// A digit joins the capitals after it ("2FA"), so 2fa stays one word.
-			digit := i > 0 && p[i-1] >= '0' && p[i-1] <= '9'
+			// A digit joins an acronym after it ("2FA"), so 2fa stays one word;
+			// a capitalised word after it ("oauth2Token") does not.
+			digit := i > 0 && p[i-1] >= '0' && p[i-1] <= '9' && !lower(i+1)
 			if i > 0 && caseBoundary(p, i) && !plural && !digit {
 				sep()
 			}
