@@ -337,6 +337,10 @@ class UnparsableLine(UnusableRange):
     """A line of /etc/subuid or /etc/subgid does not parse strictly, so no range is checked (DEP-8c)."""
 
 
+class NssFailure(UnusableRange):
+    """An NSS source failed while the range was checked, so the range was not judged (DEP-8-r1a)."""
+
+
 def _sub_floor(kind):
     """max(SUB_FLOOR, SUB_UID_MIN or SUB_GID_MIN from LOGIN_DEFS); a missing file or key is
     SUB_FLOOR. Raises ValueError for a value that is not a plain decimal (DEP-8a)."""
@@ -405,42 +409,43 @@ def _subordinate(path):
 
 
 def _range_problem(kind, path, mine, others):
-    """The first DEP-8 rule the runner's range breaks, as text, or "" if it breaks none."""
+    """The first DEP-8 rule the runner's range breaks, as (exception class, text), or None if it
+    breaks none. An NSS failure is NssFailure: the range was not judged (DEP-8-r1a)."""
     _, start, count = mine
     end = start + count  # exclusive
     try:
         floor = _sub_floor(kind)
     except ValueError as e:
-        return str(e)
+        return UnusableRange, str(e)
     if start < floor:
-        return "start %d is below the floor %d (SUB_%s_MIN)" % (start, floor, kind.upper())
+        return UnusableRange, "start %d is below the floor %d (SUB_%s_MIN)" % (start, floor, kind.upper())
     if count < 1:
-        return "count 0 grants no id"
+        return UnusableRange, "count 0 grants no id"
     if end - 1 > _ID_LAST:
-        return "the range ends at %d, past %d (4294967295 is (%s_t)-1)" % (end - 1, _ID_LAST, kind)
+        return UnusableRange, "the range ends at %d, past %d (4294967295 is (%s_t)-1)" % (end - 1, _ID_LAST, kind)
     for line, o_start, o_count in others:
         if o_start < end and start < o_start + o_count:
-            return "overlaps %s" % line
+            return UnusableRange, "overlaps %s" % line
     own = os.geteuid() if kind == "uid" else os.getegid()
     if start <= own < end:
-        return "%s %d (the runner) is in the range" % (kind, own)
+        return UnusableRange, "%s %d (the runner) is in the range" % (kind, own)
     try:
         if kind == "uid":
             known = [(e.pw_uid, e.pw_name) for e in pwd.getpwall()]
         else:
             known = [(e.gr_gid, e.gr_name) for e in grp.getgrall()]
     except Exception as e:  # noqa: BLE001 - any failure leaves the range unchecked
-        return "%s failed: %r" % ("getpwall()" if kind == "uid" else "getgrall()", e)
+        return NssFailure, "%s failed: %r" % ("getpwall()" if kind == "uid" else "getgrall()", e)
     for ident, name in known:
         if start <= ident < end:
-            return "%s %d (%s) is in the range" % (kind, ident, name)
+            return UnusableRange, "%s %d (%s) is in the range" % (kind, ident, name)
     call = "getpwuid_r" if kind == "uid" else "getgrgid_r"
     rc, found = _nss_lookup(call, start)
     if rc:
-        return "%s(%d) failed with %s" % (call, start, errno.errorcode.get(rc, str(rc)))
+        return NssFailure, "%s(%d) failed with %s" % (call, start, errno.errorcode.get(rc, str(rc)))
     if found:
-        return "%s %d has an entry (%s) and is in the range" % (kind, start, call)
-    return ""
+        return UnusableRange, "%s %d has an entry (%s) and is in the range" % (kind, start, call)
+    return None
 
 
 def _id_maps():
@@ -452,9 +457,10 @@ def _id_maps():
     if uid is None or gid is None:
         raise OSError("no subordinate uid and gid range for uid %d in %s and %s" % (os.geteuid(), SUBUID, SUBGID))
     for kind, path, mine, others in (("uid", SUBUID, uid, uid_others), ("gid", SUBGID, gid, gid_others)):
-        why = _range_problem(kind, path, mine, others)
-        if why:
-            raise UnusableRange("range %d:%d for %s in %s is not usable: %s" % (mine[1], mine[2], mine[0], path, why))
+        problem = _range_problem(kind, path, mine, others)
+        if problem:
+            cls, why = problem
+            raise cls("range %d:%d for %s in %s is not usable: %s" % (mine[1], mine[2], mine[0], path, why))
     return ([(0, os.geteuid(), 1), (SCENARIO_ID, uid[1], 1)], [(0, os.getegid(), 1), (SCENARIO_ID, gid[1], 1)])
 
 
@@ -505,6 +511,10 @@ def _sandbox_missing():
             # The line is the fault, whoever owns it: no range of the runner's fixes it (DEP-8e).
             return ("%s; correct or remove that line, so every line reads NAME:START:COUNT in ASCII decimal "
                     "(tools/ASSUMPTIONS.md D13)" % e)
+        if isinstance(e, NssFailure):
+            # The range was not judged, and no new range fixes the source (DEP-8-r1b).
+            return ("%s; fix the NSS source, then retry: getent passwd, getent group and a lookup by id "
+                    "must answer without error (tools/ASSUMPTIONS.md D13)" % e)
         # No fixed range: one that overlaps another user's would share their ids. The rules are
         # the ones _range_problem checks, and only those (DEP-8e, D13).
         floors = []
