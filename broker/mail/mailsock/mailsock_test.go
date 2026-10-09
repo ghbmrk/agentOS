@@ -341,6 +341,12 @@ func TestSubmitSendsOnlyAsTheAccount(t *testing.T) {
 		"From: " + me + "\r\nSender : ceo@example.test\r\n",
 		"From: " + me + "\r\nResent-From : ceo@example.test\r\n",
 		"From : " + me + "\r\nFrom: ceo@example.test\r\n",
+		// A bare CR, LF or NUL in a value is a line break to some
+		// receivers, and what follows it a field of its own.
+		"From: " + me + "\r\nX-Note: a\rFrom: ceo@example.test\r\n",
+		"From: " + me + "\r\nX-Note: a\nFrom: ceo@example.test\r\n",
+		"From: " + me + "\r\nX-Note: a\x00b\r\n",
+		"From: " + me + "\rFrom: ceo@example.test\r\n",
 	} {
 		if err := c.Submit(ctx, []string{"friend@example.test"}, []byte(h+body)); !errors.Is(err, mailsock.ErrRefused) {
 			t.Errorf("%q: %v", h, err)
@@ -376,5 +382,27 @@ func TestClientHonoursItsContext(t *testing.T) {
 	}
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("took %v", d)
+	}
+}
+
+// TestAPanicCostsOnlyItsCall: a panic while serving one call answers
+// "failed" without its value, and the vault process keeps serving.
+func TestAPanicCostsOnlyItsCall(t *testing.T) {
+	n := 0
+	path, f := serve(t, func() (mailsock.Account, error) {
+		if n++; n == 1 {
+			panic("canary-panic-value")
+		}
+		return mailsock.Account{}, mailsock.ErrNotConnected
+	})
+	c := mailsock.NewClient(path)
+	if _, err := c.Folders(ctx); !errors.Is(err, mailsock.ErrFailed) {
+		t.Fatalf("panicking call: %v", err)
+	}
+	if _, err := c.Folders(ctx); !errors.Is(err, mailsock.ErrNotConnected) {
+		t.Fatalf("next call: %v", err)
+	}
+	if strings.Contains(f.all(), "canary-panic") {
+		t.Fatal("panic value crossed the socket")
 	}
 }

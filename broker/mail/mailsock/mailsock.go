@@ -112,11 +112,23 @@ func ServeConn(conn net.Conn, src Source) {
 	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 	defer cancel()
 	conn.SetWriteDeadline(time.Now().Add(callTimeout + readTimeout))
+	json.NewEncoder(conn).Encode(answer(ctx, req, src))
+}
+
+// answer is call's reply as the wire carries it. A panic in the Store
+// costs only its own call, answered "failed" without its value, so the
+// vault process keeps serving.
+func answer(ctx context.Context, req request, src Source) (rep reply) {
+	defer func() {
+		if recover() != nil {
+			rep = reply{Error: codeOf(ErrFailed)}
+		}
+	}()
 	rep, err := call(ctx, req, src)
 	if err != nil {
 		rep = reply{Error: codeOf(err)}
 	}
-	json.NewEncoder(conn).Encode(rep)
+	return rep
 }
 
 func call(ctx context.Context, req request, src Source) (reply, error) {
@@ -158,16 +170,22 @@ func call(ctx context.Context, req request, src Source) (reply, error) {
 // From field naming only it, any Sender naming only it, and no Resent-
 // fields, so the agent cannot send as another address through the
 // owner's account. Every field name must be plain ftext in canonical
-// form: net/mail keys "From :" or "From\x00:" apart from From, but a
-// lax reader downstream may take either for a second From.
+// form, and no value may hold a CR, LF or NUL: net/mail keys "From :"
+// apart from From and keeps "a\rFrom: x" as one value, but a lax reader
+// downstream may take either for a second From.
 func ownSender(raw []byte, address string) bool {
 	m, err := netmail.ReadMessage(bytes.NewReader(raw))
 	if err != nil || address == "" {
 		return false
 	}
-	for k := range m.Header {
+	for k, vs := range m.Header {
 		if k == "" || k != textproto.CanonicalMIMEHeaderKey(k) {
 			return false
+		}
+		for _, v := range vs {
+			if strings.ContainsAny(v, "\r\n\x00") {
+				return false
+			}
 		}
 		for i := 0; i < len(k); i++ {
 			if k[i] <= ' ' || k[i] >= 0x7f {
