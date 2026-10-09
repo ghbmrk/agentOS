@@ -147,6 +147,8 @@ type Options struct {
 	// KillGroup makes a cancelled context SIGKILL the child's whole
 	// process group, not only the child; SysProcAttr must set Setpgid.
 	KillGroup bool
+	// OnCancel, if set, runs when the context ends, before the kill.
+	OnCancel func()
 }
 
 // Cmd is a child process to start. It is opaque: its exec.Cmd never
@@ -171,8 +173,14 @@ func Command(ctx context.Context, env Env, o Options, name string, args ...strin
 	c.SysProcAttr = o.SysProcAttr
 	c.ExtraFiles = o.ExtraFiles
 	c.WaitDelay = o.WaitDelay
-	if o.KillGroup {
-		c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
+	c.Cancel = func() error {
+		if o.OnCancel != nil {
+			o.OnCancel()
+		}
+		if o.KillGroup {
+			return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+		}
+		return c.Process.Kill()
 	}
 	return &Cmd{c: c, env: env}
 }

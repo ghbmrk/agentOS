@@ -4,17 +4,20 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
-// REQ: ARC-2
+// REQ: ARC-2, CRED-1
 //
-// P3-4b-3r-env requirement 1: runsc gets a fixed PATH and nothing from
-// agentosd's environment, which carries the owner's number; the guest's
-// own environment is the OCI spec's (writeBundle). A fake runsc dumps the
-// environment it was given.
-func TestRunscGetsNoInheritedEnvironment(t *testing.T) {
+// P3-4b-3r-env requirement 1 and r8b: runsc starts through childproc with
+// exactly a fixed PATH, nothing from agentosd's environment, which carries
+// the owner's number; the guest's own environment is the OCI spec's
+// (writeBundle). A fake runsc dumps the environment it was given.
+func TestRunscGetsExactlyItsEnvironment(t *testing.T) {
 	const canary = "+15550100999-runsc-canary"
 	t.Setenv("AGENTOS_OWNER", canary)
 	bin := filepath.Join(t.TempDir(), "runsc")
@@ -22,16 +25,18 @@ func TestRunscGetsNoInheritedEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &Runtime{Bin: bin, StateDir: t.TempDir()}
-	c := r.cmd(context.Background(), "state", "wk-1")
-	out, err := c.Output()
+	out, err := r.cmd(context.Background(), childproc.Options{}, "state", "wk-1").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), canary) {
-		t.Fatalf("runsc sees the daemon's environment:\n%s", out)
+	var got []string
+	for _, kv := range strings.Fields(string(out)) {
+		if !strings.HasPrefix(kv, "PWD=") { // the fake's shell sets PWD itself
+			got = append(got, kv)
+		}
 	}
-	if got := strings.Join(c.Env, " "); got != "PATH=/usr/sbin:/usr/bin:/sbin:/bin" {
-		t.Fatalf("runsc env %q", got)
+	if want := []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}; !slices.Equal(got, want) {
+		t.Fatalf("runsc env %q, want %q", got, want)
 	}
 }
 

@@ -50,7 +50,7 @@ var surface = []string{
 	"ExitError: struct{msg string; code int}",
 	"LookPath: func(file string) (string, error)",
 	"NewEnv: func(kv ...string) Env",
-	"Options: struct{Dir string; Stdin io.Reader; Stdout io.Writer; Stderr io.Writer; SysProcAttr *syscall.SysProcAttr; ExtraFiles []*os.File; WaitDelay time.Duration; KillGroup bool}",
+	"Options: struct{Dir string; Stdin io.Reader; Stdout io.Writer; Stderr io.Writer; SysProcAttr *syscall.SysProcAttr; ExtraFiles []*os.File; WaitDelay time.Duration; KillGroup bool; OnCancel func()}",
 }
 
 // checkPkg type-checks the non-test Go files of dir, or src when given,
@@ -423,6 +423,27 @@ func TestARefusedEnvironmentMakesNoPipe(t *testing.T) {
 	}
 	if _, err := c.StdoutPipe(); err == nil || !strings.Contains(err.Error(), "not allowlisted") {
 		t.Errorf("StdoutPipe: %v", err)
+	}
+}
+
+// OnCancel runs when the context ends, before the child is killed
+// (r8b: gvisor's Exec kills the command inside the sandbox from it).
+func TestOnCancelRunsBeforeTheKill(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	called := make(chan bool, 1)
+	c := Command(ctx, NewEnv(), Options{OnCancel: func() { called <- true }}, "/bin/sleep", "30")
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	var ee *ExitError
+	if err := c.Wait(); !errors.As(err, &ee) || ee.ExitCode() != -1 {
+		t.Fatalf("wait: %v, want a killed child", err)
+	}
+	select {
+	case <-called:
+	default:
+		t.Fatal("OnCancel was not called")
 	}
 }
 
