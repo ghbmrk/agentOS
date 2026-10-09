@@ -238,6 +238,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-2 l5 | UX 2 on #490: `run.py` sets `GOTOOLCHAIN=local`, so an older local Go stops with a go.mod error; add a README line naming the toolchain or `GOTOOLCHAIN=auto` |
 | P3-4b-2 l6 | Potency 2 on #490: no seed in `routing/` or `skills/`; add a routing seed when the catalog is next extended |
 | P3-4b-2 l7 | Potency 3 on #490: `--all` and `--pick` each rebuild and rerun both controls; one invocation that records a pick would halve the CI step |
+| P3-1-rand | `broker/change`: no test asserts that `change.New` draws a fresh 32-byte split key from crypto/rand when `Config.Rand` is nil, or that two fresh pipelines get different keys. Raised by L3 (#491 comment 6073134807) and Security |
+| P3-1-envkey | `broker/change/env_test.go`: `newEnv`'s pinned key is a single `bytes.Reader`, so a second fresh-state pipeline opened with the same cfg would hit EOF. No test does this today (Potency on #491) |
 
 ## Reuse candidates
 | ID | Component | Why |
