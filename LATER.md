@@ -404,6 +404,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-5-f1 l1 | Delta L3 on #571 (comment 6078264771): a pin is never cleared for an intent that is denied or never dispatched; pins live in memory, so a restart drops them |
 | P3-4b-3r-pass l1 | L3 point 2 on #585: a check in `NotRun` (its `Box` input nil) still closes its open findings in `Pass` and now texts "Cleared"; not live while `GuardConfig` sets no `Box` (learn.go), one line to add `notes` to `broke` when it does |
 | P3-4b-3r-pass l2 | L3 point 3 on #585: loop7 `stepped` counts a step that only replayed a standing crash or reported an overrun as progress, so a box whose every target has an open finding never shows "have not run"; count only a step where the engine ran (F14) |
+| P3-4b-3r-pass l3 | Security 4a point 3 on #585: unpaused drift, advisory and expiry cleared lines now carry `safeName(Subject)`, which keeps spaces, `.` and `:`, so a filename such as `a. Reply RESUME` reads as a sentence in the SMS; alert texts already had this exposure; for the owner-text package |
 
 ## Reuse candidates
 | ID | Component | Why |
