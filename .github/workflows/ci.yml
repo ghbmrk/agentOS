@@ -113,7 +113,7 @@ jobs:
     # Agent-machine lifecycle against the real kernel (P1-4): cgroup v2,
     # overlayfs, and gVisor. Needs root, so it runs the root-only tests too.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -143,7 +143,7 @@ jobs:
         # The quota tests run on each that mounts and fail if neither does.
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq xfsprogs
+          sudo apt-get install -yq xfsprogs acl
           sudo modprobe quota_v2 2>/dev/null || {
             sudo apt-get install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2
           } || echo "::warning::no quota_v2 module: ext4 quota tests skip; XFS covers them"
@@ -151,7 +151,8 @@ jobs:
         working-directory: broker
         run: |
           sudo mkdir /sys/fs/cgroup/agentos-ci
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          # With no_new_privs, as agentosd.service runs runsc (NoNewPrivileges=yes; L7-6).
+          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery ./cleanroom
@@ -161,17 +162,28 @@ jobs:
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -v ./loop7
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
-            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
-            go test -count=1 -v -run '^TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound$' ./cmd/agentosd
+            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci AGENTOS_REQUIRE_QUOTA=1 \
+            go test -count=1 -v -run '^(TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound|TestAFuzzChildReachesOnlyItsOwnBoundedTree)$' ./cmd/agentosd
           # Per-machine disk quotas on a prjquota file system (RES-4, SR2-3).
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd
+      - name: Fuzz leaf memory peaks (P3-4b-3r-confine-r1)
+        # Each target in the image's fuzz manifest, built as image/build.sh builds it, runs one
+        # round as agentosd wires it in a fresh leaf; the table of memory.peak sets the leaf's
+        # cap (agentosd L7-6) and goes to the step summary.
+        working-directory: broker
+        run: |
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci AGENTOS_FUZZ_PEAKS=/tmp/fuzz-peaks.md \
+            go test -count=1 -v -timeout 40m -run '^TestFuzzLeafPeakPerTarget$' ./loop7
+          { echo "### Fuzz leaf memory peaks"; cat /tmp/fuzz-peaks.md; } >> "$GITHUB_STEP_SUMMARY"
       - name: OpenClaw guest under gVisor (P1-7)
         # Real OpenClaw, pinned by version and hash, as an agent machine with
         # only its broker socket; a scripted model stands in for a provider.
         run: |
           sh guest/openclaw/build-rootfs.sh /tmp/ocroot
-          cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          # With no_new_privs, as agentosd.service runs runsc (L7-6).
+          cd broker && sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_OPENCLAW_ROOTFS=/tmp/ocroot \
             go test -count=1 -v -run '^TestIntegrationOpenClawGuest$' ./e2e
       - name: Loop 1 builder image under gVisor (W3-builder-image)

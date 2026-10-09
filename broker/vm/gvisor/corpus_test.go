@@ -211,7 +211,11 @@ func newRelay(t *testing.T, machines guest.Machines) *relay {
 	carrier := modem.NewCarrier()
 	box := carrier.Line(boxNum)
 	x.box, x.phone = box, carrier.Line(ownerNum)
-	if x.ch, err = owner.New(owner.Config{Owner: ownerNum, Modem: box, Engine: x.eng, Store: &owner.MemStore{},
+	// The loosest pacing the owner can set: this replay is about the
+	// guest plane, not CH-15's pacing (W5-Dc-r1a).
+	state := &owner.MemStore{}
+	state.Save(owner.State{Pacing: owner.Pacing{PerHour: owner.MaxTextsPerHour, Urgent: []owner.Class{owner.ClassApproval, owner.ClassAgent}}})
+	if x.ch, err = owner.New(owner.Config{Owner: ownerNum, Modem: box, Engine: x.eng, Store: state,
 		Location: time.UTC, Decide: g.Decide, UndoWindow: undoWindow}); err != nil {
 		t.Fatal(err)
 	}
@@ -725,16 +729,38 @@ func rawExec(ctx context.Context, r *Runtime, dir, id string, argv ...string) (s
 	}
 	f.Close()
 	defer os.Remove(f.Name())
-	var stderr bytes.Buffer
-	c := r.cmd(ctx, append([]string{"--log=" + f.Name(), "exec", cid(id)}, argv...)...)
-	c.Stderr = &stderr
-	out, err := c.Output()
-	if exit, ok := err.(*exec.ExitError); ok {
+	paused := fmt.Sprintf("cannot execute in container %q in state paused", cid(id))
+	for deadline := time.Now().Add(rawExecPausedWait); ; {
+		var stderr bytes.Buffer
+		c := r.cmd(ctx, append([]string{"--log=" + f.Name(), "exec", cid(id)}, argv...)...)
+		c.Stderr = &stderr
+		out, err := c.Output()
+		exit, ok := err.(*exec.ExitError)
+		if !ok {
+			return string(out), err
+		}
+		if exit.ExitCode() == 128 && bytes.Contains(stderr.Bytes(), []byte(paused)) && time.Now().Before(deadline) && ctx.Err() == nil {
+			time.Sleep(rawExecPausedPoll)
+			continue
+		}
 		log, _ := os.ReadFile(f.Name())
-		err = fmt.Errorf("%w (exit %d)\nrunsc and guest stderr: %q\nrunsc log: %q", exit, exit.ExitCode(), tail(stderr.Bytes(), rawExecTail), tail(log, rawExecTail))
+		return string(out), fmt.Errorf("%w (exit %d)\nrunsc and guest stderr: %q\nrunsc log: %q", exit, exit.ExitCode(), tail(stderr.Bytes(), rawExecTail), tail(log, rawExecTail))
 	}
-	return string(out), err
 }
+
+// rawExec retries, only while runsc refuses with exit 128 and its
+// requireStatus text for this container in state paused, for up to
+// rawExecPausedWait: after a guest tool call the plane's step snapshot
+// pauses the container for the capture (vm.Manager.take), and a bare
+// `runsc exec` has no lock to wait on, unlike production's exec through
+// the Manager (P1-4-flake-paused). The bound covers one capture with
+// margin; StepInterval keeps snapshots at least 2s apart, so the 25ms
+// poll lands in a running window. A pause longer than the bound, and any
+// other failure, is returned with runsc's text.
+const (
+	rawExecPausedWait = 10 * time.Second
+	rawExecPausedPoll = 25 * time.Millisecond
+)
 
 // tail answers b's last n bytes.
 func tail(b []byte, n int) string { return string(b[max(0, len(b)-n):]) }
@@ -769,5 +795,28 @@ func TestRawExecErrorCarriesRunscText(t *testing.T) {
 func TestRawExecErrorClipsRunscText(t *testing.T) {
 	if got := tail([]byte(strings.Repeat("x", 3*rawExecTail)+"end"), rawExecTail); len(got) != rawExecTail || !strings.HasSuffix(got, "end") {
 		t.Fatalf("tail kept %d bytes ending %q", len(got), got[max(0, len(got)-8):])
+	}
+}
+
+// P1-4-flake-paused: a raw exec that lands while the step snapshot has the
+// container paused is refused ("in state paused", exit 128). rawExec waits
+// the pause out; the fake refuses the first two execs, as runsc does.
+func TestRawExecWaitsOutAPausedContainer(t *testing.T) {
+	r := fakeRunsc(t, "FAKE_RUNSC_PAUSES="+filepath.Join(t.TempDir(), "n")+":2")
+	out, err := rawExec(context.Background(), r, t.TempDir(), "corpus", "paused")
+	if err != nil || !strings.Contains(out, "guest out") {
+		t.Fatalf("out %q err %v, want the exec to succeed once the pause ends", out, err)
+	}
+}
+
+// Only the "paused" refusal is retried, and only for a bounded time: any
+// other exit 128 answers at once, so a real fault is not hidden.
+func TestRawExecDoesNotRetryOtherRefusals(t *testing.T) {
+	r := fakeRunsc(t)
+	start := time.Now()
+	_, err := rawExec(context.Background(), r, t.TempDir(), "corpus", "fatal128")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 128 || time.Since(start) > rawExecPausedWait/2 {
+		t.Fatalf("err %v after %v, want an immediate exit 128", err, time.Since(start))
 	}
 }

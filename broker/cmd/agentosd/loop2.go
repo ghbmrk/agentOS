@@ -136,19 +136,34 @@ func (c *loop2Contain) Contain(ctx context.Context, t loops.Target, finding stri
 }
 
 // loop2Notify texts the owner Loop 2's fixed-wording notices once the
-// owner channel is attached. Urgency waits for CH-15's quiet-hours
-// classes in the owner channel: until then every notice goes at once.
+// owner channel is attached, through its pacer (CH-15).
 type loop2Notify struct {
 	ch atomic.Pointer[ownerch.Channel]
 }
 
-func (n *loop2Notify) send(text string, _ bool) {
-	if err := n.try(text); err != nil {
+// send texts the owner a loops text: security class when urgent, so it
+// goes at once even in quiet hours; else an update (W5-Dc-r1b QH-9).
+func (n *loop2Notify) send(text string, urgent bool) {
+	class := ownerch.ClassUpdate
+	if urgent {
+		class = ownerch.ClassSecurity
+	}
+	if err := n.post(class, text); err != nil {
 		log.Printf("loop2: owner notice not sent: %v", err)
 	}
 }
 
-// try sends text to the owner, reporting whether it went.
+// post sends text to the owner in class.
+func (n *loop2Notify) post(class ownerch.Class, text string) error {
+	ch := n.ch.Load()
+	if ch == nil {
+		return errors.New("owner channel not attached")
+	}
+	return ch.Post(class, text)
+}
+
+// try sends text to the owner as an update, reporting whether it went or
+// was held: the hold keeps it (CH-15).
 func (n *loop2Notify) try(text string) error {
 	ch := n.ch.Load()
 	if ch == nil {

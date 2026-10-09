@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -124,6 +125,11 @@ type Finding struct {
 	// Rule is the regression fixture's input, empty when the finding is
 	// not something a change could reintroduce (expiry, drift).
 	Rule []byte `json:"rule,omitempty"`
+	// Producer is the SHA-256 of the binary that produced a fuzz hang
+	// finding, and is set on nothing else (P3-4b-3h-r2). Report moves it
+	// to the record's Producer, so it is never part of the finding's
+	// digest.
+	Producer string `json:"producer,omitempty"`
 }
 
 // Containment pauses a grant or executor. Pausing only narrows authority
@@ -300,10 +306,15 @@ type secureState struct {
 	// Cleared is when each finding last cleared, so a flapping finding is
 	// not texted again unless it stayed clear for ReText.
 	Cleared map[string]time.Time `json:"cleared,omitempty"`
-	// ToldCleared are the findings whose last close in Pass texted the
-	// owner "Cleared", so a return within ReText is texted, not left as a
-	// false all-clear (L3 #585 point 1).
+	// ToldCleared are the findings whose last close said "Cleared" to the
+	// owner, on any close path (closeTextLocked), so a return within
+	// ReText is texted, not left as a false all-clear (L3 #585 point 1).
 	ToldCleared map[string]bool `json:"told_cleared,omitempty"`
+	// Owed are the cleared lines held back, by clearedKey: the texted
+	// records closed while an open finding held their key, so their
+	// "Cleared" is said, and each of them marked, once the key's last open
+	// record closes (closeTextLocked).
+	Owed map[string][]Record `json:"owed,omitempty"`
 	// NotRun are the checks the last pass had no input for, Failed those
 	// whose input errored, and NotRunSaid the set the digest last named
 	// (Digest).
@@ -336,6 +347,10 @@ type Record struct {
 	// came back too soon after clearing to be texted.
 	Texted bool `json:"texted,omitempty"`
 	Again  bool `json:"again,omitempty"`
+	// Back marks a return texted because the owner's last text about it
+	// said it cleared: its text leads with "It is back: ", and its own
+	// close is texted once and never marked ToldCleared (S39).
+	Back bool `json:"back,omitempty"`
 	// Seen counts the times the finding appeared; Last is the latest.
 	Seen int       `json:"seen"`
 	Last time.Time `json:"last"`
@@ -351,6 +366,11 @@ type Record struct {
 	// Closure is the good fuzz step that closed a hang finding
 	// (CloseTarget), which replayed no stored input.
 	Closure *Closure `json:"closure,omitempty"`
+	// Producer is the SHA-256 of the binary that last produced an open
+	// fuzz hang finding: set by Report, replaced when the finding is
+	// reported again, and the only producer CloseTarget compares against
+	// (P3-4b-3h-r2).
+	Producer string `json:"producer,omitempty"`
 	// Told marks a reported finding's owner text as sent, so a resume
 	// after a crash sends a text not yet sent, and only that (P3-4b-1b
 	// item 3).
@@ -510,16 +530,7 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		delete(s.st.Open, id)
 		delete(s.held, id)
 		s.st.Cleared[id] = now
-		// A texted return within ReText (Again) clears in the digest
-		// only, so the next return within ReText is not texted. A pause
-		// still hears it cleared: that line says it stays paused, so it
-		// is no all-clear and a return while paused stays untexted.
-		if rec.Texted && (!rec.Again || rec.Contained == "paused") {
-			closed = append(closed, rec)
-			if rec.Contained != "paused" {
-				s.st.ToldCleared[id] = true
-			}
-		}
+		closed = append(closed, rec)
 	}
 	// A version (installed or fixed) that stays uncomparable for
 	// UncomparedAlert is texted once
@@ -568,14 +579,14 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 		}
 		ids = append(ids, f.ID)
 		if rec.Texted {
-			lines = append(lines, ownerLine(rec))
+			lines = append(lines, alertLine(rec))
 			urgent = urgent || urgentText(rec)
 		}
 	}
 	// Every texted finding is told it cleared, paused or not, once no
 	// open texted finding shares its plain name, new ones included (S39).
 	s.mu.Lock()
-	later = append(later, s.clearedLinesLocked(closed)...)
+	later = append(later, s.closeTextLocked(closed)...)
 	s.mu.Unlock()
 	text := s.batch(append(lines, later...))
 	s.mu.Lock()
@@ -680,7 +691,7 @@ func (s *Guard) tell(rec Record) Record {
 	if !rec.Texted || rec.Told {
 		return rec
 	}
-	s.cfg.Notify("Security checks: "+ownerLine(rec), urgentText(rec))
+	s.cfg.Notify("Security checks: "+alertLine(rec), urgentText(rec))
 	rec.Told = true
 	s.mu.Lock()
 	if _, still := s.st.Open[rec.Finding.ID]; still {
@@ -699,12 +710,43 @@ func (s *Guard) save() error {
 // textBudget is three SMS segments (CH-15).
 const textBudget = 3 * 153
 
+// counted is a line that stood for n findings, with the count in plain
+// words when n > 1 (P3-4b-4c-dedupe, S53).
+func counted(line string, n int) string {
+	if n > 1 {
+		return fmt.Sprintf("%s (%d times)", line, n)
+	}
+	return line
+}
+
+// distinct collapses identical lines in first-seen order, each counted:
+// the key is the whole final line, so lines differing in any word stay
+// apart.
+func distinct(lines []string) []string {
+	at := map[string]int{}
+	var out []string
+	var n []int
+	for _, l := range lines {
+		if i, ok := at[l]; ok {
+			n[i]++
+			continue
+		}
+		at[l] = len(out)
+		out, n = append(out, l), append(n, 1)
+	}
+	for i := range out {
+		out[i] = counted(out[i], n[i])
+	}
+	return out
+}
+
 // batch joins a pass's lines into one text within textBudget, holding the
-// rest for MORE.
+// rest for MORE. Identical lines are said once, with their count.
 func (s *Guard) batch(lines []string) string {
 	if len(lines) == 0 {
 		return ""
 	}
+	lines = distinct(lines)
 	const tail = " Reply MORE for the rest."
 	text := "Security checks:"
 	n := 0
@@ -749,7 +791,9 @@ func sortedKeys[V any](m map[string]V) []string {
 // fixture, and mark a fix pending. It decides whether the owner is texted;
 // Pass sends the text, then proposes the fix.
 func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Record, error) {
-	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f), Reported: reported}
+	producer := f.Producer
+	f.Producer = ""
+	rec := Record{Finding: f, At: s.cfg.Now(), Contained: "none", Digest: digestOf(f), Reported: reported, Producer: producer}
 	if reported && f.Rule != nil {
 		// Minimized now and saved with the first save, so a resume adds
 		// the same test even if the tree has moved on since.
@@ -773,14 +817,15 @@ func (s *Guard) handle(ctx context.Context, f Finding, pause, reported bool) (Re
 		s.contained = true
 	}
 	// Back too soon: the digest says so instead, unless the owner's last
-	// text about it said it cleared; then it is texted once more, and as
-	// Again its own clearing is not (Pass), so a flap ends on "it is back".
-	told := false
+	// text about it said it cleared; then it is texted once more as Back,
+	// and its own clearing is texted once more and not marked, so a flap
+	// costs at most four texts per ReText (closeTextLocked).
 	if t, ok := s.st.Cleared[f.ID]; ok && rec.At.Sub(t) < s.cfg.ReText {
 		rec.Again = true
-		told = s.st.ToldCleared[f.ID]
+		rec.Back = s.st.ToldCleared[f.ID]
 	}
 	delete(s.st.ToldCleared, f.ID)
+	told := rec.Back
 	// Every automatic pause is texted at once (security L2 on W5a),
 	// unless the target was still paused from before: a finding back too
 	// soon then stays in the digest as "again".
@@ -1115,6 +1160,9 @@ func (s *Guard) evidenceLocked(rec Record) int {
 		if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
 			e.Seen++
 			e.Last = rec.At
+			if rec.Producer != "" {
+				e.Producer = rec.Producer
+			}
 			return i
 		}
 	}
@@ -1562,6 +1610,53 @@ func ownerLine(r Record) string {
 	return line
 }
 
+// The lens rule for owner text (UX, second occurrence on #523 and #515):
+// LOOP-7 text names no Go identifier, path or digest, and a line names a
+// step exactly when it is urgent. Exported so loop7's digest lines are
+// held to the same rule as Guard's (P3-4b-3r-text).
+var (
+	// innerCap is a word with a capital after a lower-case letter, as in
+	// FuzzRequest or vmName.
+	innerCap   = regexp.MustCompile(`[a-z][A-Z]`)
+	goPrefix   = regexp.MustCompile(`\b(Fuzz|Test)[A-Z0-9_]`)
+	hexRun     = regexp.MustCompile(`[0-9a-fA-F]{8,}`)
+	stepPhrase = regexp.MustCompile(`\bPaused \S|\bReply (STOP|PAUSE)\b|\bSTOP pauses everything\b`)
+)
+
+// NamesAStep reports a line that names an owner step: a pause that
+// happened, PAUSE or STOP.
+func NamesAStep(line string) bool { return stepPhrase.MatchString(line) }
+
+// IdentifierIn is the first Go identifier, path or digest in s, or "".
+func IdentifierIn(s string) string {
+	for _, re := range []*regexp.Regexp{innerCap, goPrefix, hexRun} {
+		if m := re.FindString(s); m != "" {
+			return m
+		}
+	}
+	if strings.Contains(s, "/") {
+		return "/"
+	}
+	if strings.Contains(s, ".go") {
+		return ".go"
+	}
+	return ""
+}
+
+// itIsBack leads a return texted after "Cleared", so it does not repeat
+// the first alert word for word (P3-4b-3r-text). The digest keeps its
+// "Again: " lead.
+const itIsBack = "It is back: "
+
+// alertLine is a texted finding's line: ownerLine, led by itIsBack for a
+// return after "Cleared" (Back).
+func alertLine(r Record) string {
+	if r.Back {
+		return itIsBack + ownerLine(r)
+	}
+	return ownerLine(r)
+}
+
 // stopChecks are the checks whose findings always offer STOP, so they
 // stay urgent when nothing was paused: a canary leak, and tampering with
 // a file, a setting or an evaluator (hash, drift, tamper).
@@ -1635,8 +1730,21 @@ func (s *Guard) Digest() []string {
 	type item struct {
 		high bool
 		line string
+		n    int
 	}
 	var items []item
+	at := map[string]int{}
+	// add groups items by their final line before the sort and cap, so
+	// identical lines take one slot and "And N more" counts distinct ones.
+	add := func(high bool, line string) {
+		if i, ok := at[line]; ok {
+			items[i].high = items[i].high || high
+			items[i].n++
+			return
+		}
+		at[line] = len(items)
+		items = append(items, item{high, line, 1})
+	}
 	pkgs := map[string][]Record{}
 	for _, id := range sortedKeys(s.st.Open) {
 		r := s.st.Open[id]
@@ -1651,7 +1759,7 @@ func (s *Guard) Digest() []string {
 		if why := s.waitingLocked(r); why != "" {
 			line += " It " + waitForAFixOf + why + "."
 		}
-		items = append(items, item{r.Finding.Severity == High, line})
+		add(r.Finding.Severity == High, line)
 	}
 	for _, name := range sortedKeys(pkgs) {
 		rs := pkgs[name]
@@ -1660,7 +1768,7 @@ func (s *Guard) Digest() []string {
 			if rs[0].Again {
 				line = "Again: " + line
 			}
-			items = append(items, item{rs[0].Finding.Severity == High, line})
+			add(rs[0].Finding.Severity == High, line)
 			continue
 		}
 		high, fixed := false, ""
@@ -1674,8 +1782,8 @@ func (s *Guard) Digest() []string {
 				fixed = r.Finding.Fixed
 			}
 		}
-		items = append(items, item{high, fmt.Sprintf("Known vulnerabilities in %s (%s), all fixed in %s. I take the fix when an update has it.",
-			safeName(name), strings.Join(ids, ", "), safeVersion(fixed))})
+		add(high, fmt.Sprintf("Known vulnerabilities in %s (%s), all fixed in %s. I take the fix when an update has it.",
+			safeName(name), strings.Join(ids, ", "), safeVersion(fixed)))
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].high && !items[j].high })
 	var out []string
@@ -1684,7 +1792,7 @@ func (s *Guard) Digest() []string {
 			out = append(out, fmt.Sprintf("And %d more security findings: ask your agent for the list.", len(items)-digestCap))
 			break
 		}
-		out = append(out, "Security check: "+it.line)
+		out = append(out, "Security check: "+counted(it.line, it.n))
 	}
 	for _, k := range sortedKeys(s.st.Paused) {
 		r := s.st.Paused[k]

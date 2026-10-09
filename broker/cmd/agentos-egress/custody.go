@@ -203,6 +203,10 @@ type custody struct {
 	// smsHTTP is the texting provider's client; nil is
 	// smsapi.NewHTTPClient(). Only tests set it.
 	smsHTTP *http.Client
+	// mailPlain lets the mail account reach the loopback test server
+	// without TLS (imapsmtp.Plain refuses any other host). Only tests set
+	// it.
+	mailPlain bool
 	// budget is the second line's sending budget, shared by SIP MESSAGE
 	// and the HTTP account (security Q2).
 	budget smsapi.Budget

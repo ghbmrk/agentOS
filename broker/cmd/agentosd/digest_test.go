@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modemlink"
+	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
 // fakeDigestTransport answers each Deliver with out(n), n counting from 1.
@@ -108,6 +110,8 @@ type digestRig struct {
 	informs []string
 	d       *digestBox
 	reg     *capLines
+	// quiet, if set, is the owner's quiet hours (W5-Dc-r1b QH-7).
+	quiet func(time.Time) bool
 }
 
 // day0 is a Monday; the digest time is 08:00 UTC in these tests.
@@ -133,6 +137,7 @@ func (r *digestRig) make(sources map[string]digestqueue.Source) {
 		Queue: r.queue, State: r.state, Sources: sources, Transport: r.tr,
 		Inform: func(s string) error { r.informs = append(r.informs, s); return nil },
 		Now:    func() time.Time { return r.now }, Loc: time.UTC, Logf: r.t.Logf,
+		Quiet: func(t time.Time) bool { return r.quiet != nil && r.quiet(t) },
 	})
 	r.reg = &capLines{}
 	r.d.register(r.reg)
@@ -848,5 +853,148 @@ func TestDigestLinesAreOwnerWorded(t *testing.T) {
 		if !strings.Contains(all, l) {
 			t.Errorf("%q not in capLineTexts", l)
 		}
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1b QH-7)
+
+// TestDigestWaitsForQuietHoursToEnd: a digest due in quiet hours stays
+// Ready and goes at the first tick after they end, once. The digest time
+// on main is 08:00, so quiet hours here run to 09:10. Past the batch's
+// expiry (quiet hours the owner widened in between), the Late path sends
+// it once.
+func TestDigestWaitsForQuietHoursToEnd(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	// Quiet hours end at 09:10, between two 30-minute retries: the first
+	// step after them sends, not the next retry.
+	end := day0.Add(9*time.Hour + 10*time.Minute)
+	r.quiet = func(t time.Time) bool { return t.Before(end) }
+	r.at(0, 8, 0)
+	r.at(0, 8, 30)
+	r.at(0, 9, 0)
+	r.at(0, 9, 9)
+	if got := r.tr.sent(); len(got) != 0 {
+		t.Fatalf("sent in quiet hours: %q", got)
+	}
+	if bs := r.batches(); len(bs) != 1 || bs[0].State != digestqueue.Ready {
+		t.Fatalf("batches in quiet hours: %+v", bs)
+	}
+	r.at(0, 9, 10)
+	if got := r.tr.sent(); len(got) != 1 || !strings.HasPrefix(got[0], fmt.Sprintf(digestHead, "Mon 5 Oct")) {
+		t.Fatalf("at the end of quiet hours: %q", got)
+	}
+	r.at(0, 9, 11)
+	r.at(0, 12, 0)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("sent again: %q", got)
+	}
+
+	// Past its expiry: day 1's digest waits until day 2 09:00, past day
+	// 2's digest time; day 1 goes late once, then day 2.
+	end = day0.AddDate(0, 0, 2).Add(9 * time.Hour)
+	r.day(1)
+	r.at(2, 8, 0)
+	r.at(2, 8, 30)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("sent in widened quiet hours: %q", got)
+	}
+	r.at(2, 9, 0)
+	r.day(2)
+	got := r.tr.sent()
+	all := strings.Join(got, "|")
+	if len(got) != 3 || strings.Count(all, fmt.Sprintf(digestLateHead, "Tue 6 Oct")) != 1 ||
+		!strings.HasPrefix(got[2], fmt.Sprintf(digestHead, "Wed 7 Oct")) {
+		t.Fatalf("after the widened quiet hours: %q", got)
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1b QH-7)
+
+// TestDigestIgnoresTheHourlyAllowance: the digest neither waits for nor
+// reads the owner's hourly allowance (SG-r1-6). Its only pacing hook is
+// Quiet: with the allowance spent and not quiet, it goes at its time.
+func TestDigestIgnoresTheHourlyAllowance(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	ch := pacedOwner(t, ownerch.Pacing{}, day0.Add(7*time.Hour+50*time.Minute))
+	for i := range 3 {
+		if err := ch.ch.Inform(fmt.Sprintf("Update %d.", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ch.ch.Allowance(ch.clock()) != 0 {
+		t.Fatal("allowance not spent")
+	}
+	r.quiet = ch.pacer().quiet // as main wires it
+	r.at(0, 8, 0)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("digest with the allowance spent: %q", got)
+	}
+}
+
+// A saved LastDay later than tomorrow is clock skew (the clock was set back,
+// or a skewed save): the digest does not wait for that day, it goes today.
+// REQ: CH-15, OP-9
+func TestDigestSkewedLastDayDoesNotStopTheDigest(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	r.at(0, 8, 0)
+	n := len(r.tr.sent())
+	r.d.mu.Lock()
+	r.d.st.LastDay = r.d.dayOf(r.now) + 400
+	r.d.mu.Unlock()
+	r.at(1, 8, 0)
+	if got := r.tr.sent(); len(got) != n+1 {
+		t.Fatalf("digest stopped by a LastDay far ahead: %q", got)
+	}
+	if want := r.d.dayOf(r.now); r.d.st.LastDay != want {
+		t.Fatalf("LastDay %d, want %d", r.d.st.LastDay, want)
+	}
+	// Tomorrow's LastDay is not skew (a save just after midnight): no resend today.
+	r.at(1, 9, 0)
+	if got := r.tr.sent(); len(got) != n+1 {
+		t.Fatalf("resent the same day: %q", got)
+	}
+}
+
+// The skew reset never underflows: a clock at the epoch (today 0) with a
+// saved day ahead resets to 0, not past the end of uint64, and the digest
+// goes once the clock is right again.
+// REQ: CH-15, OP-9
+func TestDigestSkewResetAtDayZeroDoesNotUnderflow(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	r.d.mu.Lock()
+	r.d.st.LastDay = 400
+	r.d.mu.Unlock()
+	r.now = time.Unix(0, 0)
+	r.d.step(context.Background(), r.now)
+	if got := r.d.st.LastDay; got != 0 {
+		t.Fatalf("LastDay %d after a reset at day 0, want 0", got)
+	}
+	r.at(0, 8, 0)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("digest stopped after the epoch clock: %q", got)
+	}
+}
+
+// LastDay of today or tomorrow is not skew and stays as saved; the day after
+// is. The test also covers a clock near the top of the range, where
+// today+1 would wrap.
+// REQ: CH-15, OP-9
+func TestDigestSkewEdges(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	r.now = day0.Add(7 * time.Hour) // before the digest time: nothing else moves LastDay
+	today := r.d.dayOf(r.now)
+	for _, c := range []struct {
+		last, want uint64
+	}{{today, today}, {today + 1, today + 1}, {today + 2, today - 1}, {0, 0}} {
+		r.d.mu.Lock()
+		r.d.st.LastDay = c.last
+		r.d.mu.Unlock()
+		r.d.step(context.Background(), r.now)
+		if r.d.st.LastDay != c.want {
+			t.Fatalf("LastDay %d (today %d) became %d, want %d", c.last, today, r.d.st.LastDay, c.want)
+		}
+	}
+	if skewed(math.MaxUint64, math.MaxUint64) || !skewed(math.MaxUint64, 5) {
+		t.Fatal("skewed wraps at the top of the range")
 	}
 }

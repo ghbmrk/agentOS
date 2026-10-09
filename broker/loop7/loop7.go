@@ -25,15 +25,18 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -373,9 +376,9 @@ func (s *Source) Urgent() bool {
 
 // Digest is Inner's digest lines (loops.Digester), which the scheduler
 // reads for STATUS, then one line when fuzzing is configured but no fuzz
-// step has completed for longer than Recheck, and one when a target
-// failed to run on each of its turns for a full cycle. Neither names a
-// target (P3-4b-3r-pass).
+// step has completed for longer than Recheck, or one when a target
+// failed to run on each of its turns for a full cycle, each with what
+// happens next. Neither names a target (P3-4b-3r-pass, P3-4b-3r-text).
 func (s *Source) Digest() []string {
 	var out []string
 	if d, ok := s.cfg.Inner.(loops.Digester); ok {
@@ -391,11 +394,13 @@ func (s *Source) Digest() []string {
 		broken = broken || n >= 2
 	}
 	s.mu.Unlock()
-	if since > s.Recheck() {
-		out = append(out, "Loop 2: my fuzz self-tests have not run for "+span(since)+".")
-	}
-	if broken {
-		out = append(out, "Loop 2: one of my fuzz self-tests cannot run.")
+	// Both lines describe one stall; the cannot-run line carries the more
+	// useful step, so the not-run line waits while it shows (F14).
+	switch {
+	case broken:
+		out = append(out, "Loop 2: one of my fuzz self-tests cannot run. The fix comes with an update.")
+	case since > s.Recheck():
+		out = append(out, "Loop 2: my fuzz self-tests have not run for "+span(since)+". I keep trying.")
 	}
 	return out
 }
@@ -499,11 +504,22 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 		return 0, fmt.Errorf("loop7: pruning the fuzz cache: %w", err)
 	}
 	fctx, cancel := context.WithTimeout(ctx, s.cfg.FuzzTime+s.cfg.ReplayTime)
+	start := time.Now()
 	out, err := s.run(fctx, t, "-test.run=^$", "-test.fuzz=^"+t.Name+"$",
 		"-test.fuzztime="+s.cfg.FuzzTime.String(), "-test.parallel=1",
+		// An honest worker call then returns within a progress period,
+		// minimizing included, so a count flat for one is a hang (F12).
+		"-test.fuzzminimizetime="+minimizeTime.String(),
 		"-test.fuzzcachedir="+filepath.Join(s.cfg.CacheDir, "fuzz", filepath.FromSlash(t.Pkg)))
 	overran := fctx.Err() != nil
 	cancel()
+	if err != nil && exited(err) && !overran && time.Since(start) >= s.cfg.FuzzTime && stoppedAtDeadline(out, t.Name) {
+		// The engine stopped at its own -test.fuzztime but lost a race
+		// with its own cancellation and failed with "context deadline
+		// exceeded" (P3-4b-3r-confine l9): judged as the clean stop it
+		// is, by its progress (F12).
+		err = nil
+	}
 	switch {
 	case ctx.Err() != nil:
 		return 0, nil
@@ -539,114 +555,69 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 // gathered, then the exec count, which counts the baseline's runs.
 var (
 	baselineLine = regexp.MustCompile(`^fuzz: elapsed: \S+, (?:gathering baseline coverage|testing seed corpus): (\d+)/(\d+) completed`)
-	execsLine    = regexp.MustCompile(`^fuzz: elapsed: \S+, execs: (\d+) \(`)
+	execsLine    = regexp.MustCompile(`^fuzz: elapsed: (\S+), execs: (\d+) \(`)
 )
 
 // stepProgress is what a fuzz step's output says of its progress: the
-// baseline input count and the last exec count, -1 where no such line
-// was printed.
-type stepProgress struct{ baseline, execs int }
+// baseline input count, the last exec count, and for how long by the
+// lines' own elapsed fields that count had stood when the last line was
+// printed; -1 where no such line was printed.
+type stepProgress struct {
+	baseline, execs int
+	flat            time.Duration
+}
 
-// progressOf reads a fuzz step's output. Only the last exec count counts:
-// the coordinator prints it as it stops, after its workers, so no line
-// from the target itself comes after it.
+// progressPeriod is how often the engine prints an exec count line
+// (internal/fuzz's statTicker).
+const progressPeriod = 3 * time.Second
+
+// minimizeTime bounds each minimizing call of the engine's one worker
+// (-test.fuzzminimizetime, 60 s by default), well under progressPeriod.
+const minimizeTime = time.Second
+
+// progressOf reads a fuzz step's output. The lines come from the child's
+// combined output, the regexes are line-anchored and the last match
+// wins, so a target that prints a line shaped like the engine's can move
+// the parse (F12): a forged stall only opens a finding, and a forged
+// good step closes one only from a release binary other than the
+// producer loops holds (F13).
 func progressOf(out []byte) stepProgress {
-	p := stepProgress{-1, -1}
+	p := stepProgress{-1, -1, -1}
+	var since time.Duration // elapsed at the first line of the last count
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
 		if m := baselineLine.FindStringSubmatch(sc.Text()); m != nil && m[1] == m[2] {
 			p.baseline, _ = strconv.Atoi(m[1])
 		} else if m := execsLine.FindStringSubmatch(sc.Text()); m != nil {
-			p.execs, _ = strconv.Atoi(m[1])
+			n, _ := strconv.Atoi(m[2])
+			at, err := time.ParseDuration(m[1])
+			switch {
+			case err != nil:
+				// No time to measure from: judged by the baseline only.
+				p.flat, since = -1, -1
+			case p.execs != n || since < 0 || at < since:
+				p.flat, since = 0, at
+			default:
+				p.flat = at - since
+			}
+			p.execs = n
 		}
 	}
 	return p
 }
 
 // stalled: the step printed its baseline and an exec count, and the count
-// never moved past the baseline. A step too short to print either is no
-// stall, and no good step either.
-func (p stepProgress) stalled() bool { return p.baseline >= 0 && p.execs >= 0 && p.execs <= p.baseline }
+// never moved past the baseline; or its last count had stood for a whole
+// progress period (3h-r1). With one worker, whose calls return every
+// 100 ms of fuzzing, a count flat for a period means one input ran that
+// long (F12). A step too short to print either is no stall, and no good
+// step either.
+func (p stepProgress) stalled() bool {
+	return p.baseline >= 0 && p.execs >= 0 && p.execs <= p.baseline || p.execs >= 0 && p.flat >= progressPeriod
+}
 
 // moved: the step's exec count moved past its baseline.
 func (p stepProgress) moved() bool { return p.baseline >= 0 && p.execs > p.baseline }
-
-// hangFile, in a target's Dir, records for each open hang finding the
-// SHA-256 of the binary that last produced it, so a restart keeps it.
-const hangFile = "hang.json"
-
-// readHangs reads t's hang record: detail to producing binary digest. A
-// missing record is empty; one that is not a regular file (a link) is
-// refused, never trusted. t.Dir is the fuzz user's, so the record is read
-// through the tree (F16).
-func (s *Source) readHangs(t Target) (map[string]string, error) {
-	r, err := s.tree()
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	p := filepath.Join(s.in(t.Dir), hangFile)
-	fi, err := r.Lstat(p)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]string{}, nil
-	} else if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("loop7: %s is not a regular file", p)
-	}
-	b, err := r.ReadFile(p)
-	if err != nil {
-		return nil, err
-	}
-	m := map[string]string{}
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("loop7: %s: %w", p, err)
-	}
-	return m, nil
-}
-
-// writeHangs replaces t's hang record, or removes it when empty, through
-// the tree (F16).
-func (s *Source) writeHangs(t Target, m map[string]string) error {
-	r, err := s.tree()
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	p := filepath.Join(s.in(t.Dir), hangFile)
-	if len(m) == 0 {
-		if err := r.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	if err := r.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
-	suffix, err := runName()
-	if err != nil {
-		return err
-	}
-	tmpName := p + "." + suffix
-	tmp, err := r.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	defer r.Remove(tmpName)
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return r.Rename(tmpName, p)
-}
 
 // binaryDigest is the SHA-256 of the file at path.
 func binaryDigest(path string) (string, error) {
@@ -662,29 +633,24 @@ func binaryDigest(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// hang records the binary that produced a hang of t, then reports it. The
-// record comes first, so a crash in between leaves a record and no
-// finding, never a finding no step can close. A hang seen again records
-// the newer binary: a lucky good step of a build that hung closes nothing.
+// hang reports a hang of t with the SHA-256 of the binary that produced
+// it, which loops holds on the finding's record (F13). A hang seen again
+// reports the newer binary: a lucky good step of a build that hung closes
+// nothing.
 func (s *Source) hang(ctx context.Context, t Target, detail string) error {
 	d, err := binaryDigest(t.Binary)
 	if err != nil {
 		return err
 	}
-	m, err := s.readHangs(t)
-	if err != nil {
-		return errors.Join(err, s.report(ctx, t, detail))
-	}
-	m[detail] = d
-	if err := s.writeHangs(t, m); err != nil {
-		return errors.Join(err, s.report(ctx, t, detail))
-	}
-	return s.report(ctx, t, detail)
+	_, err = s.cfg.Report.Report(ctx, loops.Finding{Check: loops.CheckFuzz, Subject: t.subject(), Severity: loops.High, Detail: detail, Producer: d})
+	return err
 }
 
-// closeHangs closes t's open hang findings after good step p, each only
-// when this binary differs from the one that produced it (CloseTarget,
-// S30). A finding with no trusted record of its producer stays open.
+// closeHangs offers good step p of t's binary to close each of t's open
+// hang findings. It passes only the step's own digest and counts: loops
+// compares the digest against the producer on its own record and closes
+// only on another binary (CloseTarget, S30), so a refusal is the rule
+// working, not an error.
 func (s *Source) closeHangs(t Target, p stepProgress) error {
 	var open []loops.Finding
 	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
@@ -695,33 +661,47 @@ func (s *Source) closeHangs(t Target, p stepProgress) error {
 	if len(open) == 0 {
 		return nil
 	}
-	m, err := s.readHangs(t)
-	if err != nil {
-		return err
-	}
 	d, err := binaryDigest(t.Binary)
 	if err != nil {
 		return err
 	}
 	var errs []error
-	closed := false
 	for _, f := range open {
-		produced := m[f.Detail]
-		if produced == "" || produced == d {
-			continue
-		}
-		c := loops.Closure{Kind: loops.ClosureStep, Binary: d, Produced: produced, Execs: p.execs, Baseline: p.baseline, At: s.cfg.Now()}
-		if err := s.cfg.Report.CloseTarget(f.ID, c); err != nil {
+		c := loops.Closure{Kind: loops.ClosureStep, Binary: d, Execs: p.execs, Baseline: p.baseline, At: s.cfg.Now()}
+		if err := s.cfg.Report.CloseTarget(f.ID, c); err != nil && !errors.Is(err, loops.ErrFinding) {
 			errs = append(errs, err)
-			continue
 		}
-		delete(m, f.Detail)
-		closed = true
-	}
-	if closed {
-		errs = append(errs, s.writeHangs(t, m))
 	}
 	return errors.Join(errs...)
+}
+
+// stoppedAtDeadline reports output whose one failure is fuzz target
+// name's "context deadline exceeded" and nothing after it but FAIL: what
+// Go's coordinator prints when its done channel closes before its
+// workers' context is cancelled, so its own -test.fuzztime reads as an
+// error. A step that stored an input or failed otherwise is not one.
+func stoppedAtDeadline(out []byte, name string) bool {
+	if bytes.Contains(out, []byte("Failing input written to")) {
+		return false
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	at := -1
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "--- FAIL: ") {
+			if at >= 0 || !strings.HasPrefix(l, "--- FAIL: "+name+" (") {
+				return false
+			}
+			at = i
+		}
+	}
+	if at < 0 {
+		return false
+	}
+	rest := lines[at+1:]
+	if n := len(rest); n > 0 && strings.TrimSpace(rest[n-1]) == "FAIL" {
+		rest = rest[:n-1]
+	}
+	return len(rest) == 1 && strings.TrimSpace(rest[0]) == context.DeadlineExceeded.Error()
 }
 
 // failLine and passLine are a seed subtest failing or passing under
@@ -913,7 +893,7 @@ func capped(r io.Reader) ([]byte, error) {
 // failure of the target. Anything else (refused before exec, could not
 // start) is the runner's error, never a finding.
 func exited(err error) bool {
-	var ee *exec.ExitError
+	var ee *childproc.ExitError
 	return errors.As(err, &ee)
 }
 
@@ -934,7 +914,8 @@ func crashDetail(data []byte) string {
 const waitDelay = 200 * time.Millisecond
 
 // run runs t's binary with args and returns its combined output. This is
-// loop7's one exec (ARC-2, daemon escapeOK): the binary must be a regular
+// loop7's one child, started through childproc (ARC-2; P3-4b-3r-env-r8),
+// which checks its environment at the start: the binary must be a regular
 // file the release lists, not a link, checked before exec; the child gets
 // a minimal environment and a scratch directory of its own, never the
 // daemon's environment (#515 Security 2), and runs in its own process
@@ -990,17 +971,16 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 			defer leaf.Close()
 		}
 	}
-	cmd := exec.CommandContext(ctx, t.Binary, args...)
-	cmd.Dir = t.Dir
-	cmd.Env = childEnv(scratch)
-	cmd.SysProcAttr = attr
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = waitDelay
 	// The broker keeps at most outputCap of the output, which the leaf's
 	// memory.max does not bound; the pipe is drained to its end.
 	buf := &capBuffer{}
-	cmd.Stdout, cmd.Stderr = buf, buf
-	err = cmd.Run()
+	cmd := childproc.Command(ctx, childproc.NewEnv(childEnv(scratch)...), childproc.Options{
+		Dir: t.Dir, SysProcAttr: attr, KillGroup: true, WaitDelay: waitDelay, Stdout: buf, Stderr: buf,
+	}, t.Binary, args...)
+	err = startNoNewPrivs(cmd.Start)
+	if err == nil {
+		err = cmd.Wait()
+	}
 	out := buf.Bytes()
 	// Whatever left the process group (setsid) dies with the run, before
 	// root removes the scratch directory or prunes the cache. A failure
@@ -1012,6 +992,34 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 		err = rerr
 	}
 	return out, err
+}
+
+// startNoNewPrivs calls start with no_new_privs set, so neither the child
+// nor anything it execs gains privileges through a setuid or
+// file-capability binary (F2; #588 Security R1). The flag is per thread
+// and is inherited across clone and kept across execve (prctl(2)). Go's
+// forkExec clones the child from the calling thread: syscall's
+// forkAndExecInChild issues clone or clone3 inline, without switching
+// threads, which is why SysProcAttr.Pdeathsig ties the child to "the
+// creating thread" and asks for runtime.LockOSThread. So the start runs
+// on a goroutine locked to its thread, which sets the flag first, and
+// that goroutine exits still locked: the runtime then ends the thread
+// (runtime.LockOSThread), or, if it is the process's main thread, wedges
+// it for good with no goroutine on it (runtime.mexit), so the flag never
+// reaches a thread that starts another child
+// (TestNoNewPrivsStaysOffTheDaemonsOtherThreads).
+func startNoNewPrivs(start func() error) error {
+	done := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		// No UnlockOSThread: the thread must die with this goroutine.
+		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+			done <- fmt.Errorf("loop7: setting no_new_privs: %w", err)
+			return
+		}
+		done <- start()
+	}()
+	return <-done
 }
 
 // outputCap bounds the output the broker keeps of one child (F12): its
@@ -1102,14 +1110,31 @@ func runName() (string, error) {
 	return "run-" + hex.EncodeToString(b), nil
 }
 
-// killWait bounds the wait for the leaf to empty.
-const killWait = 5 * time.Second
+// emptyWait bounds empty's whole run, the kill included, so a cancelled
+// job hands the agent the box back within LOOP-1's 2 s: run's last empty
+// follows a killed child by at most waitDelay (F16). It is empty's own
+// bound, not the caller's context, which is cancelled exactly when the
+// leaf must still be emptied.
+const emptyWait = 1500 * time.Millisecond
+
+// freezeWait bounds the freeze within emptyWait, so a freeze that cannot
+// complete still leaves time to kill.
+const freezeWait = 500 * time.Millisecond
+
+// freeze freezes the leaf; a test replaces it with a freeze that cannot
+// complete.
+var freeze = func(ctx context.Context, g *cgroup.Group) error { return g.Freeze(ctx) }
 
 // empty kills every process left in the jail's leaf and waits until the
-// kernel reports it empty. It freezes the leaf, so nothing in it can fork,
-// SIGKILLs each process cgroup.procs lists (a fatal signal reaches a
-// frozen task), thaws it and waits for populated 0. It does not write
-// cgroup.kill: on CI's kernel a child started into a group by
+// kernel reports it empty, all within emptyWait. It freezes the leaf, so
+// nothing in it can fork, SIGKILLs each process cgroup.procs lists (a
+// fatal signal reaches a frozen task), thaws it and waits for populated
+// 0. When the freeze fails or does not complete within freezeWait, it
+// kills all the same, and on every later read of cgroup.procs until the
+// leaf is empty: without the freeze a fork can race a pass, but pids.max
+// bounds the set each pass faces. Only processes still alive at the
+// deadline make it fail, and the error names them (F16). It does not
+// write cgroup.kill: on CI's kernel a child started into a group by
 // CLONE_INTO_CGROUP after a cgroup.kill there is killed at once (on #588
 // every jailed child then died with "signal: killed"). With no jail or no
 // leaf (tests, dev builds) there is nothing to empty: agentosd always sets
@@ -1119,37 +1144,43 @@ func (j *Jail) empty() error {
 	if j == nil || j.Leaf == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), killWait)
-	defer cancel()
+	deadline := time.Now().Add(emptyWait)
 	g := &cgroup.Group{Path: j.Leaf}
-	if err := g.Freeze(ctx); err != nil {
-		g.Thaw()
-		return err
-	}
-	b, err := os.ReadFile(filepath.Join(j.Leaf, "cgroup.procs"))
-	for _, f := range strings.Fields(string(b)) {
-		if pid, perr := strconv.Atoi(f); perr == nil && pid > 0 {
-			syscall.Kill(pid, syscall.SIGKILL)
-		}
-	}
-	if terr := g.Thaw(); err == nil {
-		err = terr
-	}
-	if err != nil {
-		return err
-	}
-	t := time.NewTicker(time.Millisecond)
-	defer t.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), freezeWait)
+	ferr := freeze(ctx, g)
+	cancel()
+	killLeaf(j.Leaf)
+	terr := g.Thaw()
 	for {
-		if p, err := g.Populated(); err != nil || !p {
+		p, err := g.Populated()
+		if err != nil {
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("loop7: fuzz leaf %s did not empty: %w", j.Leaf, ctx.Err())
-		case <-t.C:
+		if !p {
+			return terr
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("loop7: fuzz leaf %s did not empty within %v: pids %v survive (freeze: %v, thaw: %v)", j.Leaf, emptyWait, killLeaf(j.Leaf), ferr, terr)
+		}
+		time.Sleep(time.Millisecond)
+		killLeaf(j.Leaf)
+	}
+}
+
+// killLeaf is one kill pass: it SIGKILLs each process leaf's cgroup.procs
+// lists and returns their pids. A pid is signalled within the pass that
+// read it, far sooner than the kernel hands a freed pid out again (F16).
+// A test wraps it to see what each pass found.
+var killLeaf = func(leaf string) []int {
+	b, _ := os.ReadFile(filepath.Join(leaf, "cgroup.procs"))
+	var pids []int
+	for _, f := range strings.Fields(string(b)) {
+		if pid, err := strconv.Atoi(f); err == nil && pid > 0 {
+			syscall.Kill(pid, syscall.SIGKILL)
+			pids = append(pids, pid)
 		}
 	}
+	return pids
 }
 
 // Jail confines fuzz children (P3-4b-3r-confine; F2, F7): a decoder bug
@@ -1171,6 +1202,10 @@ type Jail struct {
 	// os.Root opened there (Source.tree, Load), with no process of the
 	// user alive (empty). Its parent must not be writable by the user.
 	State string
+	// Disk, if set, bounds State's disk use (RES-4): Own calls it on State
+	// once the leaf is empty, before giving the tree to the user.
+	// agentosd always sets it (L7-6).
+	Disk func(state string) error
 }
 
 // attr sets the jail on a child's attributes; the returned leaf, if any,
@@ -1178,7 +1213,19 @@ type Jail struct {
 func (j *Jail) attr(a *syscall.SysProcAttr) (*os.File, error) {
 	a.Credential = &syscall.Credential{Uid: j.UID, Gid: j.GID, Groups: []uint32{}}
 	// An empty network namespace: only a loopback device, which is down.
-	a.Cloneflags = syscall.CLONE_NEWNET
+	// An IPC namespace of its own, whose SysV segments and POSIX queues
+	// die with its last process, so none stays charged to the leaf after
+	// empty. A user namespace mapping only the jail's user and group to
+	// themselves: the child keeps its ids and gains no capability across
+	// exec, and the kernel refuses a project ID change from outside the
+	// initial namespace, so the child cannot retag its tree out of its
+	// quota (RES-4), which an owner otherwise may.
+	a.Cloneflags = syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUSER
+	a.UidMappings = []syscall.SysProcIDMap{{ContainerID: int(j.UID), HostID: int(j.UID), Size: 1}}
+	a.GidMappings = []syscall.SysProcIDMap{{ContainerID: int(j.GID), HostID: int(j.GID), Size: 1}}
+	// Setgroups stays allowed, so the child's group list is emptied
+	// rather than kept from the daemon.
+	a.GidMappingsEnableSetgroups = true
 	if j.Leaf == "" {
 		return nil, nil
 	}
@@ -1199,6 +1246,11 @@ func (j *Jail) attr(a *syscall.SysProcAttr) (*os.File, error) {
 func (j *Jail) Own() error {
 	if err := j.empty(); err != nil {
 		return err
+	}
+	if j.Disk != nil {
+		if err := j.Disk(j.State); err != nil {
+			return err
+		}
 	}
 	r, err := os.OpenRoot(j.State)
 	if err != nil {
