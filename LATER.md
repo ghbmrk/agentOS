@@ -83,7 +83,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | CR-open-cost | `broker/cleanroom` (L3 on #432, potency note): open re-reads every artifact (at most 8 MiB each), so open time grows linearly with the store |
 | P2-8b | Deferred re-encrypt after trusted-PC removal; slot removal already covers CRED-9 |
 | P3-6d | Digest wording for deleted procedures; no A-test needs it |
-| CH-20p | Page view of kept replies; A15 needs delivery, not this view |
+| CH-20p | Page view of kept replies; A15 needs delivery, not this view. Its minimum part, withheld outputs on the signed-in page, is release as CH-19a (D-079, A14); the history view stays here |
 | CH-20a | Attachments conflict with security C4; needs review; not in A15 |
 | CH-20m | MORE command for redirected replies; convenience |
 | P2-2a f1 | L3 SHOULD on page wording after a changed item |
