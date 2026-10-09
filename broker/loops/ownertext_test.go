@@ -285,6 +285,26 @@ func identifierIn(s string) string {
 	return ""
 }
 
+// REQ: LOOP-7, RES-1
+//
+// P3-4b-4c-step (#548 UX 1): a limit above the configured budget says
+// which resource and that the machine is over its budget, not that no
+// limit exists; with no containment (S37) its line says nothing is
+// paused and nothing is needed.
+func TestAnAboveBudgetLimitSaysSoAndThatNothingIsNeeded(t *testing.T) {
+	for subject, want := range map[string]string{
+		"memory":    "A load test found an agent machine can use more memory than its budget.",
+		"processes": "A load test found an agent machine can start more processes than its budget.",
+		"disk":      "A load test found an agent machine can use more disk space than its budget.",
+		"cpu":       "A load test found an agent machine can take as large a share of processor time as I get.",
+	} {
+		f := Finding{Check: CheckExhaust, Subject: subject, Detail: "above budget", Severity: High}
+		if got := ownerLine(Record{Finding: f}); got != want+" "+nothingNeeded {
+			t.Errorf("%s: %q", subject, got)
+		}
+	}
+}
+
 // The lens check (UX, second occurrence on #523 and #515): every check's
 // owner line in each containment state names no identifier, never alarms
 // without a step, and fits three GSM-7 segments.
@@ -296,7 +316,10 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 		{Check: CheckFuzz, Subject: "hostdisk.FuzzProbe", Detail: "x"},
 		{Check: CheckCanary, Subject: "registry-entry-0a1b2c3d4e", Detail: "kinds: api_key"},
 		{Check: CheckTamper, Subject: "evaluator", Detail: "writable"},
-		{Check: CheckExhaust, Subject: "memory", Detail: "no limit"},
+		{Check: CheckExhaust, Subject: "memory", Detail: "above budget"},
+		{Check: CheckExhaust, Subject: "processes", Detail: "above budget"},
+		{Check: CheckExhaust, Subject: "disk", Detail: "above budget"},
+		{Check: CheckExhaust, Subject: "cpu", Detail: "above budget"},
 		{Check: CheckExhaust, Subject: "preemption", Detail: "slow"},
 		{Check: CheckHash, Subject: "agent-image", Detail: "differs from the signed release"},
 		{Check: CheckDrift, Subject: "routes", Detail: "changed"},

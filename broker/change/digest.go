@@ -87,7 +87,7 @@ func (p *Pipeline) what(a *Adoption) string {
 	case has[ClassGuestImage] || has[ClassHostImage]:
 		v := safe(strings.TrimPrefix(a.Origin, "update:"))
 		if a.Staged {
-			return "Staged update " + v + "; it starts at the next restart"
+			return "Staged update " + v + "; I will install it when I am free" // C27
 		}
 		return "Installed update " + v
 	case has[ClassConfig]:
@@ -186,6 +186,12 @@ func (p *Pipeline) Digest() []string {
 	defer p.mu.Unlock()
 	var out []string
 	for _, a := range p.st.Adoptions {
+		if a.Reverted == WhyDropped {
+			// Never installed, so nothing changed: the applier's own
+			// line, or the next release's, says what happens (C27).
+			a.Listed, a.RevertSeen = true, true
+			continue
+		}
 		if !a.Listed {
 			line := p.what(a) + "."
 			line += testedText(a.Score)
