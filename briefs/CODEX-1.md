@@ -25,7 +25,8 @@ The UX review documents and synthetic evidence from #405 and #417 are imported a
 | UX3-2..5, UX3-8..12 | #405 | Proposed release; promote one at a time once UX3-1/6/7 land. UX3-4 also gates UX4-1 acceptance 6 |
 | UX4-3..6 | #417 | UX4-3/4 need an L1 design gate; UX4-5 needs UX3-1; UX4-6 is an acceptance extension |
 | ARCH1-1, ARCH1-2 | #447 | Architecture proposals; L1 decides before any brief |
-| POT-P3a, POT-P5, POT-P6 | #387, #399, #390, #388 | Need H6; #387's broker job fails `TestNoThirdPersonSelfReference` (daemon.go:162) |
+| POT plan (incl. POT-P3a gate), POT-P5, POT-P6 | #387, #390, #388 | Need H6; #390 and #388 are stacked on #387; #387's broker job fails `TestNoThirdPersonSelfReference` (daemon.go:162) |
+| POT-P3 | #399 | Stacked on #387; activation blocked on POT-P3a qualification, CHG-2 approval, W3/W7-A and H6 |
 | INT-A | #261 | Needs H6 evidence |
 | W7-A | #264 | Needs H6; W7 is blocked (LATER.md) |
 | W5-Db (digest sources, D4–D8; attempt-to-transport join D9, crash matrix D10, receipt fuzz D11), W5-Dc (owner outbox, D12–D28) | #263→#435 stack, incl. #274, #276, #277 | Follow W5-Da; D29–D67 (pacing-lease self-hardening) wait for a defect that needs them |
