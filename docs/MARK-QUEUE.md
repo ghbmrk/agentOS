@@ -6,8 +6,7 @@ Questions and actions only Mark can take, one line each, answerable in one word,
 
 | # | Question | Recommendation | Source |
 |---|---|---|---|
-| Q2 | Approve CONV-4's spec-diff PR once it is open (the freeze principle and the start of CONV-4 were approved 2026-10-09; the SPEC.md text itself still needs your approval on the PR)? | yes, after reading the diff | CONV-4 |
-| Q3 | Close the stale non-CODEX-1 PRs on CONV-3's list (branches kept)? Approved in principle 2026-10-09; the specific list still needs your yes. | yes, once the list is posted | CONV-3 |
+| Q2 | Approve CONV-4's revised spec diff (#633) once the 2026-10-09 fix-list (D-086) is pushed? | yes, after reading the revised diff | CONV-4 |
 
 ## Actions
 
