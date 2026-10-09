@@ -456,7 +456,7 @@ class EvidenceTest(unittest.TestCase):
     def test_kept_paths_are_read_only_unless_declared(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as ro, tempfile.TemporaryDirectory(dir="/tmp") as rw:
             os.chmod(ro, 0o755)
-            os.chmod(rw, 0o755)
+            os.chmod(rw, 0o777)  # the scenario runs as SCENARIO_ID (DEP-3)
             res = depaudit.run_target({"name": "writes", "cmd": HARNESS_CONTROLS + ["write-kept"], "keep": [ro],
                                        "writes": [rw], "env": {"DEPAUDIT_KEEP_RO": ro, "DEPAUDIT_KEEP_RW": rw}},
                                       depaudit.load_manifest(MANIFEST))
@@ -475,7 +475,8 @@ class EvidenceTest(unittest.TestCase):
     # scenario's kept caps (CAP_DAC_READ_SEARCH's open_by_handle_at, CAP_SYS_MODULE, ...)
     # act on the host and can reach kept paths (B2, Security re-sign 2 on #437).
     def test_the_scenario_runs_in_its_own_user_namespace(self):
-        res = depaudit.run_target({"name": "userns", "cmd": HARNESS_CONTROLS + ["own-user-namespace"]},
+        res = depaudit.run_target({"name": "userns", "cmd": HARNESS_CONTROLS + ["own-user-namespace"],
+                                   "env": depaudit._expected_maps_env()},
                                   depaudit.load_manifest(MANIFEST))
         self.assertEqual(res["outcome"], "pass", res)
 
@@ -486,6 +487,96 @@ class EvidenceTest(unittest.TestCase):
                              names)
 
 
+@unittest.skipUnless(depaudit.sandbox_available(), "needs user+net namespaces and strace")
+class UidBoundaryTest(unittest.TestCase):
+    """DEP-3 (briefs/DEP-3.md; local IDs DEP-3a-c with no SPEC row, so no REQ marker): the
+    scenario runs under a uid and gid of its own, so the evidence is out of its reach by uid,
+    not only by the capability drop (tools/ASSUMPTIONS.md D9)."""
+
+    def control(self, name):
+        return next(t for t in depaudit.control_targets("/tmp/a/p", "/tmp/b/p", "/tmp/c") if t["name"] == name)
+
+    def judged(self, name, **kw):
+        t = self.control(name)
+        res = depaudit.run_target(t, depaudit.load_manifest(MANIFEST), **kw)
+        return depaudit._judge(t, res), res
+
+    # DEP-3a: the scenario's uid and gid differ from _inner's and strace's.
+    def test_the_scenario_uid_is_not_inner_or_strace(self):
+        (ok, why), res = self.judged("control-distinct-uid")
+        self.assertTrue(ok, (why, res))
+
+    # DEP-3b: drain, partial line and ptrace of _inner, tried after a connect, leave the
+    # connect counted, with DROP_CAPS as shipped and with it emptied (uid alone).
+    def test_the_evidence_channels_are_closed_with_the_capability_drop(self):
+        (ok, why), res = self.judged("control-evidence-channels")
+        self.assertTrue(ok, (why, res))
+
+    def test_the_evidence_channels_are_closed_by_uid_alone(self):
+        (ok, why), res = self.judged("control-evidence-channels", drop_caps=False)
+        self.assertTrue(ok, (why, res))
+        self.assertEqual([v["target"] for v in res["violations"]], ["192.0.2.10:443"], res)
+
+    # DEP-3c: the maps are exactly the ones _inner intends, not merely not the identity map.
+    def test_the_user_namespace_maps_are_exact(self):
+        (ok, why), res = self.judged("control-own-user-namespace")
+        self.assertTrue(ok, (why, res))
+
+    def test_the_built_in_controls_include_the_uid_controls(self):
+        names = {t["name"] for t in depaudit.control_targets("/tmp/a/p", "/tmp/b/p", "/tmp/c")}
+        self.assertLessEqual({"control-distinct-uid", "control-evidence-channels"}, names)
+
+
+class IdMapTest(unittest.TestCase):
+    """DEP-3a and DEP-3c (local IDs, no REQ marker): the map comes from the runner's
+    subordinate range, and without one the sandbox is unavailable, never the old map."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def ranges(self, text):
+        path = os.path.join(self.dir.name, "sub")
+        pathlib.Path(path).write_text(text)
+        return mock.patch.multiple(depaudit, SUBUID=path, SUBGID=path)
+
+    def available(self, env=None):
+        saved = depaudit._SANDBOX
+        depaudit._SANDBOX = None
+        try:
+            with mock.patch.dict(os.environ, env or {}):
+                return depaudit.sandbox_available()
+        finally:
+            depaudit._SANDBOX = saved
+
+    def test_the_map_is_the_runner_and_its_first_subordinate_id(self):
+        with self.ranges("someone:5000:10\n%d:300000:65536\n%d:400000:1\n" % (os.geteuid(), os.geteuid())):
+            uid_map, gid_map = depaudit._id_maps()
+        self.assertEqual(uid_map, [(0, os.geteuid(), 1), (depaudit.SCENARIO_ID, 300000, 1)])
+        self.assertEqual(gid_map, [(0, os.getegid(), 1), (depaudit.SCENARIO_ID, 300000, 1)])
+        self.assertNotEqual(depaudit.SCENARIO_ID, 0)
+
+    def test_no_subordinate_range_means_no_map(self):
+        with self.ranges("someone:5000:10\n"), self.assertRaises(OSError):
+            depaudit._id_maps()
+
+    @unittest.skipUnless(shutil.which("unshare") and shutil.which("strace") and shutil.which("setpriv"),
+                         "needs unshare, strace and setpriv")
+    def test_without_a_subordinate_range_the_sandbox_is_unavailable(self):
+        with self.ranges("someone:5000:10\n"):
+            self.assertFalse(self.available())
+
+    @unittest.skipUnless(shutil.which("unshare") and shutil.which("strace") and shutil.which("setpriv"),
+                         "needs unshare, strace and setpriv")
+    def test_a_failing_newuidmap_makes_the_sandbox_unavailable(self):
+        os.chmod(self.dir.name, 0o755)
+        for name in ("newuidmap", "newgidmap"):
+            stub = pathlib.Path(self.dir.name, name)
+            stub.write_text("#!/bin/sh\necho 'newuidmap: stub refuses' >&2\nexit 1\n")
+            stub.chmod(0o755)
+        self.assertFalse(self.available({"PATH": self.dir.name + os.pathsep + os.environ["PATH"]}))
+
+
 # A scenario, run through run_target inside an outer `unshare -r -m`, after a tmpfs is
 # mounted on <keep>/sub there: the sandbox's rbind of the kept path carries that submount.
 SUBMOUNT_HELPER = textwrap.dedent("""\
@@ -493,6 +584,13 @@ SUBMOUNT_HELPER = textwrap.dedent("""\
     sys.path.insert(0, %r)
     import depaudit
     keep, rw = sys.argv[1], sys.argv[2]
+    # This namespace maps only 0 (the runner) and SCENARIO_ID, so newuidmap here may give the
+    # sandbox only those: a private /etc/subuid and /etc/subgid say so (DEP-3).
+    ranges = os.path.join(rw, "subids")
+    with open(ranges, "w") as f:
+        f.write("root:{0}:1\\n0:{0}:1\\n".format(depaudit.SCENARIO_ID))
+    for path in (depaudit.SUBUID, depaudit.SUBGID):
+        subprocess.run(["mount", "--bind", ranges, path], check=True)
     sub = os.path.join(keep, "sub")
     subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=0755", "tmpfs", sub], check=True)
     manifest = depaudit.load_manifest(json.loads(sys.argv[3]))
@@ -517,7 +615,12 @@ class SubmountTest(unittest.TestCase):
             os.chmod(keep, 0o755)
             os.chmod(rw, 0o755)
             os.mkdir(os.path.join(keep, "sub"))
-            p = subprocess.run(["unshare", "-r", "-m", "--", sys.executable, "-c", SUBMOUNT_HELPER,
+            # The outer namespace carries the sandbox's own two ids, so the sandbox can map them again.
+            uids, gids = depaudit._id_maps()
+            outer = ["--map-user=0", "--map-group=0", "--map-users=%d:%d:%d" % uids[1],
+                     "--map-groups=%d:%d:%d" % gids[1]]
+            os.chmod(rw, 0o777)
+            p = subprocess.run(["unshare"] + outer + ["-m", "--", sys.executable, "-c", SUBMOUNT_HELPER,
                                 keep, rw, json.dumps(MANIFEST)], capture_output=True, text=True, timeout=300)
             self.assertEqual(p.returncode, 0, p.stderr[-2000:])
             out = json.loads(p.stdout.splitlines()[-1])
