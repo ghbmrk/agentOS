@@ -73,8 +73,17 @@ func (r *Runtime) platform() string {
 
 func (r *Runtime) cmd(ctx context.Context, args ...string) *exec.Cmd {
 	base := []string{"--root", r.StateDir, "--platform=" + r.platform(), "--network=none", "--ignore-cgroups", "--overlay2=none", "--host-uds=open"}
-	return exec.CommandContext(ctx, r.Bin, append(base, args...)...)
+	c := exec.CommandContext(ctx, r.Bin, append(base, args...)...)
+	c.Env = runscEnv
+	return c
 }
+
+// runscEnv is all of runsc's environment: a fixed PATH. runsc runs as
+// root with every path on its command line or in the bundle, and the
+// guest's environment is the OCI spec's (writeBundle), so nothing in
+// agentosd's environment, which carries the owner's number, reaches it
+// (P3-4b-3r-env).
+var runscEnv = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 
 func (r *Runtime) run(ctx context.Context, args ...string) error {
 	var stderr bytes.Buffer
