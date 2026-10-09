@@ -68,7 +68,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | SR3-4f-2-r2 | [Clear a dropped adoption the pipeline refuses for good](briefs/SR3-4f-3.md) (SR3-4f-3c): `StageDropped` of a confirmed or unknown adoption returns the permanent `change.ErrNotStaged`, and the applier drops that ID from `Dropped` instead of calling again at every `Tick`; reachable when `Withdraw` races `ConfirmStaged` (release, tier A, L3 delta point 1 on #605, LATER SR3-4f-2 l1; package SR3-4f-3) | SR3-4-f4 | merged 4410a20 (#614) |
 | SR3-4f-3-f1 | Follow up an open security Concern: a security `Concern` still unreverted after one day or N `Recheck` passes adds one digest line with a step for the owner (release, lens point 3 on #614) | SR3-4f-3 | queued (needs brief) |
 | SR3-4f-r3 | [Re-ask the owner about a refused or unrecorded security fix](briefs/SR3-4f-1.md) (release, tier A, UX on #597 R2 (6080675106)): a refused or unrecorded security fix gets a repeated digest line and an ask on the A7 channel, paced per GR9 | W5b | queued |
-| SR3-4f-2-r2 | Settle a confirmed ID in the applier's `Dropped` list: a `Withdraw` that races `Resume`'s `ConfirmStaged` saves a `Confirmed` adoption into `Dropped`, `StageDropped` refuses it for good, and every `Tick` calls it and saves state again. Not unsafe (nothing installed is reverted), but LATER SR3-4f-2 l1's premise, "no path drops a confirmed adoption today", is now false. `settleStaged` returns a typed permanent `ErrNotStaged` for a `Confirmed` or unknown ID, `settleLocked` removes the ID from `Dropped` on that error, and a test drives the race with a withdrawer that confirms inside `Withdraw` (release, tier A, L3 delta on #605, point 1, comment 6082323037; before W5b, or folded into SR3-4f-2-r1) | SR3-4-f4 | merged 4410a20 (#614) |
+| SR3-4f-2-r3 | Settle a confirmed ID in the applier's `Dropped` list: a `Withdraw` that races `Resume`'s `ConfirmStaged` saves a `Confirmed` adoption into `Dropped`, `StageDropped` refuses it for good, and every `Tick` calls it and saves state again. Not unsafe (nothing installed is reverted), but LATER SR3-4f-2 l1's premise, "no path drops a confirmed adoption today", is now false. `settleStaged` returns a typed permanent `ErrNotStaged` for a `Confirmed` or unknown ID, `settleLocked` removes the ID from `Dropped` on that error, and a test drives the race with a withdrawer that confirms inside `Withdraw` (release, tier A, L3 delta on #605, point 1, comment 6082323037; before W5b, or folded into SR3-4f-2-r1) | SR3-4-f4 | merged 4410a20 (#614) |
 | SR3-6-f1 | [One attestor source for every update check](briefs/SR3-6f-1.md) (release, tier A, W5b wiring condition, Security 4a on #430, S1 and point 2; package SR3-6f-1, parallel with SR3-4f-1) | SR3-6 | merged 47b5961 (#595) |
 | SR3-6-f2 | [Anchor the sticky outside-attestor record in the TPM](briefs/SR3-6f-2.md) (release, tier A, L3 on #430; package SR3-6f-2; swtpm on CI, no hardware to build) | SR3-6-f1, P2-4b | merged 0fc5a88 (#600) |
 | SR3-6-f3 | [Apply drop paths settle the adoption; no restart after a narrowing](briefs/SR3-4f-2.md) (release, tier A, L3 on #430 and Security 4a points 3-4, with SR3-4-f3/f4 in package SR3-4f-2; point 5 is in SR3-6f-1; before W5b) | SR3-6, SR3-4-f2, SR3-4-f5 | building (package SR3-4f-2) |
@@ -519,3 +519,10 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W9 | [Questions in the guest plane](briefs/W9.md) | P3-8 merged, #68 merged | — | merged (f38aeed8) |
 | W9a | [Questions follow-ups (#95)](briefs/W9a.md) | W9 | Next build item A (part 2) | merged (#125 (part 2; part 1 #98)) |
 | CH-20w | [Evidence delivery](briefs/CH-20w.md) | CH-20 merged; P2-6m wired into the vault process | — | queued (blocked on mail wiring) |
+
+## claude2
+
+Per-team section (OPERATING §7): the claude2 team appends only here; its IDs are prefixed `C2-` or `D-claude2-`.
+
+| ID | Package | Needs | State |
+|---|---|---|---|

@@ -674,3 +674,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | HOST-1d | cryptsetup / LUKS2 | Vault-keyed disk encryption without custom crypto |
 | SR2-4i | systemd resource control (IOWeight=, CPUWeight=) | Sets io.weight and cpu.weight per slice; add iocost QoS on the image |
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
+
+## claude2
+
+Per-team section (OPERATING §7): the claude2 team appends only here; its IDs are prefixed `C2-` or `D-claude2-`.
+
+| ID | Why it can wait |
+|---|---|

@@ -21,6 +21,8 @@ GOOD = {
     "briefs/A-1.md": "# A-1\n",
 }
 
+WITH_DECISIONS = GOOD["README.md"].replace("| [CLAUDE.md](CLAUDE.md) |\n", "| [CLAUDE.md](CLAUDE.md) |\n| [DECISIONS.md](DECISIONS.md) |\n")
+
 
 class LintTest(unittest.TestCase):
     def lint(self, **changes):
@@ -102,6 +104,19 @@ class LintTest(unittest.TestCase):
         text = "| # | A |\n|---|---|\n| 1 | a |\n| 1 | b |\n\n| Item | Size |\n|---|---|\n| x | 1 |\n| x | 2 |\n"
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
                          ["broker/x/ASSUMPTIONS.md:4: duplicate ID 1 (first on line 3)"])
+
+    def test_duplicate_board_id(self):
+        board = GOOD["BOARD.md"] + "| B-1 | [b](briefs/A-1.md) | — | queued |\n| A-1 | [c](briefs/A-1.md) | — | queued |\n"
+        self.assertEqual(self.lint(**{"BOARD.md": board}), ["BOARD.md:7: duplicate ID A-1 (first on line 5)"])
+
+    def test_duplicate_decision_id(self):
+        text = "# D\n\n| ID | Date | Status | Decision | Source |\n|---|---|---|---|---|\n" \
+               "| D-001 | x | active | a | m |\n| D-claude2-001 | x | active | b | m |\n| D-001 | x | active | c | m |\n"
+        self.assertEqual(self.lint(**{"DECISIONS.md": text, "README.md": WITH_DECISIONS}), ["DECISIONS.md:7: duplicate ID D-001 (first on line 5)"])
+
+    def test_per_team_sections_with_distinct_ids_pass(self):
+        text = "| ID | Decision |\n|---|---|\n| D-001 | a |\n\n## claude2\n\n| ID | Decision |\n|---|---|\n| D-claude2-001 | b |\n"
+        self.assertEqual(self.lint(**{"DECISIONS.md": text, "README.md": WITH_DECISIONS}), [])
 
 if __name__ == "__main__":
     unittest.main()
