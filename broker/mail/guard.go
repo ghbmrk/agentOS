@@ -443,7 +443,10 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 	}
 	pl, err := a.planOrganize(ctx, o, p)
 	if err != nil {
-		a.dropPin(in.ID)
+		// A recheck that cannot plan adds a poisoned judgement rather than
+		// dropping the others, so it can never leave a later judgement as
+		// the only one an attempt already in flight takes (SR3-5-f1a).
+		a.setPin(in.ID, pin{})
 		return grants.Escalation{}, err
 	}
 	e := a.escalate(in, pl, p)
@@ -637,16 +640,11 @@ func (a *Adapter) setPin(id string, p pin) {
 	a.pins[id] = append(a.pins[id], p)
 }
 
-func (a *Adapter) dropPin(id string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	delete(a.pins, id)
-}
-
 // takePin removes intent id's judgements, so one Execute consumes them,
 // and returns the one they agree on. It reports false when there are
 // none, or when any two differ in the message or in whether they
-// escalated hiding an alert (SR3-5-f1a).
+// escalated hiding an alert (SR3-5-f1a). A poisoned judgement's zero Ref
+// differs from every message's, and no plan resolves to it.
 func (a *Adapter) takePin(id string) (pin, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

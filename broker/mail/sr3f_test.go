@@ -280,6 +280,151 @@ func TestRefusedRecheckCannotRepinAnAttemptInFlight(t *testing.T) {
 	}
 }
 
+// TestPlanErrorPoisonsTheJudgements (SR3-5-f1a race, Security B1 on
+// #579): D1 rechecks the newsletter and commits; the newsletter is then
+// removed, so D2's concurrent recheck cannot plan; a same-ID alert
+// arrives and D3's concurrent recheck judges it. Both are refused, and
+// D2's failure must not erase D1's judgement and leave D3's as the only
+// one: D1's attempt must not hide the alert.
+func TestPlanErrorPoisonsTheJudgements(t *testing.T) {
+	w := &ordered{pre: map[int]func(){}, post: map[int]func(){}}
+	r := newGatedVia(t, nil, func(a *mail.Adapter) adapterAPI { w.Adapter = a; return w })
+	id := r.news(1)
+	in := r.intent(mail.OpArchive, rec(id))
+	in.Machine, in.Label = "agent", "private"
+	if _, err := r.g.Submit(in); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.g.Authorize(ctx, in.ID); st.State != journal.Authorized {
+		t.Fatalf("authorize: %s %q", st.State, st.Permission.Reason)
+	}
+	d1Judged, d1Go := make(chan struct{}), make(chan struct{})
+	d2In, d2Go := make(chan struct{}), make(chan struct{})
+	d3In, d3Go := make(chan struct{}), make(chan struct{})
+	d1Exec, d1Run := make(chan struct{}), make(chan struct{})
+	w.mu.Lock()
+	w.post[w.n+1] = func() { close(d1Judged); <-d1Go }
+	w.pre[w.n+2] = func() { close(d2In); <-d2Go }
+	w.pre[w.n+3] = func() { close(d3In); <-d3Go }
+	w.mu.Unlock()
+	w.exec = func() { close(d1Exec); <-d1Run }
+
+	dispatch := func() chan journal.Status {
+		c := make(chan journal.Status, 1)
+		go func() { st, _ := r.g.Dispatch(ctx, in.ID); c <- st }()
+		return c
+	}
+	d1 := dispatch()
+	<-d1Judged
+	d2 := dispatch()
+	<-d2In
+	d3 := dispatch()
+	<-d3In // D2 and D3 are both past the journal's dispatchable check
+	close(d1Go)
+	<-d1Exec // D1 committed and is in flight
+	r.srv.Remove("INBOX", id)
+	close(d2Go)
+	if st := <-d2; st.State == journal.Succeeded {
+		t.Fatalf("D2: %s", st.State)
+	}
+	r.deliver("INBOX", msg{id: id, from: "someone@x.example", to: me, subject: "New sign-in on your account", body: "Was this you?"})
+	close(d3Go)
+	if st := <-d3; st.State == journal.Succeeded {
+		t.Fatalf("D3: %s", st.State)
+	}
+	close(d1Run)
+	if st := <-d1; st.State != journal.NotApplied {
+		t.Fatalf("D1: %s %q", st.State, st.Permission.Reason)
+	}
+	if folder, flags, _ := r.srv.Find(id); folder != "INBOX" || len(flags) != 0 {
+		t.Fatalf("alert in %s with %v", folder, flags)
+	}
+}
+
+// TestJudgementsMustAgreeOnTheMessage (SR3-5-f1a, Security B2 on #579):
+// two judgements that both escalated an alert, but of different messages
+// with one Message-ID, do not carry the first one's approval to the
+// second.
+func TestJudgementsMustAgreeOnTheMessage(t *testing.T) {
+	x := newH(t, nil)
+	id := "<alert-1@x.example>"
+	x.deliver("INBOX", msg{id: id, from: "someone@x.example", to: me, subject: "New sign-in on your account", body: "Was this you?"})
+	in := x.intent(mail.OpArchive, rec(id))
+	if e, err := x.a.Escalate(ctx, in); err != nil || e.Verb != verb.ChangeAccount {
+		t.Fatalf("first: %+v %v", e, err)
+	}
+	x.swap(id, "INBOX")
+	if e, err := x.a.Escalate(ctx, in); err != nil || e.Verb != verb.ChangeAccount {
+		t.Fatalf("second: %+v %v", e, err)
+	}
+	out := x.a.Execute(ctx, in, 1)
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
+		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
+	}
+	if folder, flags, _ := x.srv.Find(id); folder != "INBOX" || len(flags) != 0 {
+		t.Fatalf("alert in %s with %v", folder, flags)
+	}
+}
+
+// twin delivers a same-ID "New sign-in" alert to Receipts. Escalate's
+// plan counts an alert copy of the record in any searched folder, so the
+// newsletter's own Ref is judged an alert from then on.
+func (x *h) twin(id string) {
+	x.deliver("Receipts", msg{id: id, from: "someone@x.example", to: me, subject: "New sign-in on your account", body: "Was this you?"})
+}
+
+// untouched fails unless the newsletter id is still in INBOX unflagged.
+func (x *h) untouched(id string) {
+	x.t.Helper()
+	for _, m := range x.srv.Messages("INBOX") {
+		if m.ID == id && len(m.Flags) == 0 {
+			return
+		}
+	}
+	x.t.Fatalf("%s moved or flagged", id)
+}
+
+// TestJudgementsMustAgreeOnTheAlert (SR3-5-f1a, delta L3 B1 on #579): the
+// same message judged first a non-alert and then, once a same-ID alert
+// twin arrived, an alert, gives judgements that disagree, so Execute
+// does nothing.
+func TestJudgementsMustAgreeOnTheAlert(t *testing.T) {
+	x := newH(t, nil)
+	id := x.news(1)
+	in := x.intent(mail.OpArchive, map[string]any{mail.ParamRecord: id, mail.ParamFolder: "INBOX"})
+	if e, err := x.a.Escalate(ctx, in); err != nil || e.Verb != "" {
+		t.Fatalf("first: %+v %v", e, err)
+	}
+	x.twin(id)
+	if e, err := x.a.Escalate(ctx, in); err != nil || e.Verb != verb.ChangeAccount {
+		t.Fatalf("second: %+v %v", e, err)
+	}
+	out := x.a.Execute(ctx, in, 1)
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
+		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
+	}
+	x.untouched(id)
+}
+
+// TestExecuteDoesNotHideAnAlertTheRecheckPassed (SR3-5-f1a check, lens M1
+// on #579): the recheck judged the newsletter a non-alert; a same-ID alert
+// twin arrived before Execute, whose plan now hides an alert on the same
+// Ref, so it does nothing.
+func TestExecuteDoesNotHideAnAlertTheRecheckPassed(t *testing.T) {
+	x := newH(t, nil)
+	id := x.news(1)
+	in := x.intent(mail.OpArchive, map[string]any{mail.ParamRecord: id, mail.ParamFolder: "INBOX"})
+	if e, err := x.a.Escalate(ctx, in); err != nil || e.Verb != "" {
+		t.Fatalf("recheck: %+v %v", e, err)
+	}
+	x.twin(id)
+	out := x.a.Execute(ctx, in, 1)
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
+		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
+	}
+	x.untouched(id)
+}
+
 func (x *h) mustRun2(in journal.Intent, attempt int) {
 	x.t.Helper()
 	if out := x.a.Execute(ctx, in, attempt); out.Result != journal.ResultSucceeded {
