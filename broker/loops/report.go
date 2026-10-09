@@ -259,13 +259,35 @@ func (s *Guard) Resolve(id string, r Replay) error {
 	delete(s.held, id)
 	s.st.Cleared[id] = s.cfg.Now()
 	err := s.saveLocked()
+	lines := s.clearedLinesLocked([]Record{rec})
 	s.mu.Unlock()
-	if rec.Texted {
-		if text := s.batch([]string{clearedLine(rec)}); text != "" {
-			s.cfg.Notify(text, false)
-		}
+	if text := s.batch(lines); text != "" {
+		s.cfg.Notify(text, false)
 	}
 	return err
+}
+
+// clearedLinesLocked is the cleared text for the texted records just
+// closed: one line per check and plain subject, and none while another
+// open texted finding shares that name, so "Cleared: X" is never said
+// while an X the owner heard of is still open (L3 #558 point 1).
+func (s *Guard) clearedLinesLocked(closed []Record) []string {
+	key := func(r Record) string { return string(r.Finding.Check) + "\x00" + plainSubject(r.Finding) }
+	open := map[string]bool{}
+	for _, r := range s.st.Open {
+		if r.Texted {
+			open[key(r)] = true
+		}
+	}
+	said := map[string]bool{}
+	var lines []string
+	for _, r := range closed {
+		if k := key(r); r.Texted && !open[k] && !said[k] {
+			said[k] = true
+			lines = append(lines, clearedLine(r))
+		}
+	}
+	return lines
 }
 
 // OpenReported is the open reported findings of check c, so a LOOP-7

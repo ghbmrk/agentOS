@@ -341,3 +341,52 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 		}
 	}
 }
+
+// A1 R1, L3 #558 point 1: plain names can join distinct findings (two
+// crashes in one target, two machines' probes), so "Cleared: X" is sent
+// only once no open texted finding shares X, and once per X.
+func TestClearedWaitsForEveryFindingSharingItsPlainName(t *testing.T) {
+	t.Run("Resolve", func(t *testing.T) {
+		r := newReportRig(t, nil)
+		a, b := fuzzFinding(), fuzzFinding()
+		b.Detail = "crash input sha256:ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+		ida, idb := r.report(t, a).Finding.ID, r.report(t, b).Finding.ID
+		before := len(r.texts)
+		if err := r.g.Resolve(ida, Replay{Evidence: a.Detail, Passed: true}); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.texts[before:]; len(got) != 0 {
+			t.Fatalf("cleared while another crash in the same check is open: %q", got)
+		}
+		if err := r.g.Resolve(idb, Replay{Evidence: b.Detail, Passed: true}); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the check that reads agent requests.") {
+			t.Fatalf("texts %q", got)
+		}
+	})
+	t.Run("runProbe", func(t *testing.T) {
+		pa, pb := hostile(CheckCorpus), hostile(CheckCorpus)
+		pb.Subject = "other/item"
+		p := &fakeProbe{check: CheckCorpus, every: time.Hour, results: []ProbeResult{
+			{Found: []Finding{pa, pb}, Checked: []string{pa.Subject, pb.Subject}},
+			{Found: []Finding{pb}, Checked: []string{pa.Subject, pb.Subject}},
+			{Checked: []string{pa.Subject, pb.Subject}},
+		}}
+		r := newReportRig(t, nil)
+		r.probes = []Probe{p}
+		r.reopen(t)
+		runProbeJob(t, r.g)
+		before := len(r.texts)
+		r.now = r.now.Add(time.Hour)
+		runProbeJob(t, r.g)
+		if got := r.texts[before:]; len(got) != 0 {
+			t.Fatalf("cleared while another item on the same check is open: %q", got)
+		}
+		r.now = r.now.Add(time.Hour)
+		runProbeJob(t, r.g)
+		if got := r.texts[before:]; len(got) != 1 || got[0] != "Security checks: Cleared: the code filter. Nothing more is needed from you." {
+			t.Fatalf("texts %q", got)
+		}
+	})
+}

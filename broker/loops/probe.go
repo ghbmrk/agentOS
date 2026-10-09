@@ -97,7 +97,7 @@ func (s *Guard) runProbe(ctx context.Context, p Probe) Result {
 	s.reportMu.Lock()
 	s.mu.Lock()
 	now := s.cfg.Now()
-	var lines []string
+	var closed []Record
 	if !failed {
 		for _, id := range sortedKeys(s.st.Open) {
 			rec := s.st.Open[id]
@@ -106,11 +106,10 @@ func (s *Guard) runProbe(ctx context.Context, p Probe) Result {
 			}
 			delete(s.st.Open, id)
 			s.st.Cleared[id] = now
-			if rec.Texted {
-				lines = append(lines, clearedLine(rec))
-			}
+			closed = append(closed, rec)
 		}
 	}
+	lines := s.clearedLinesLocked(closed)
 	if s.st.ProbeLast == nil {
 		s.st.ProbeLast = map[Check]time.Time{}
 	}

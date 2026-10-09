@@ -19,6 +19,7 @@ var fuzzNames = map[string]string{
 	"at.FuzzTIM1ParseNetworkTime":   "the check that reads the network time",
 	"browser.FuzzParse":             "the check that reads browser replies",
 	"control.FuzzParse":             "the check that reads your commands",
+	"digestqueue.FuzzLoadState":     "the check that reads my saved digest queue",
 	"guest.FuzzMCP":                 "the check that reads agent tool calls",
 	"hint.FuzzParse":                "the check that reads bridge hints",
 	"hostdisk.FuzzProbe":            "the check that reads attached disks",
