@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -231,7 +232,7 @@ func TestJailedChildHelper(t *testing.T) {
 	}
 	st, _ := os.ReadFile("/proc/self/status")
 	for _, l := range strings.Split(string(st), "\n") {
-		for _, k := range []string{"Uid:", "Gid:", "Groups:", "CapInh:", "CapPrm:", "CapEff:", "CapAmb:"} {
+		for _, k := range []string{"Uid:", "Gid:", "Groups:", "CapInh:", "CapPrm:", "CapEff:", "CapAmb:", "NoNewPrivs:"} {
 			if strings.HasPrefix(l, k) {
 				fmt.Println(strings.Join(strings.Fields(l), " "))
 			}
@@ -320,6 +321,111 @@ func TestAJailedChildIsUnprivilegedAndOffline(t *testing.T) {
 	for _, n := range []string{"tcp", "udp"} {
 		if !strings.HasPrefix(said[n], "failed") {
 			t.Errorf("a jailed child dialed the host over %s: %q", n, said[n])
+		}
+	}
+}
+
+// LOOP-7: a jailed child runs with no_new_privs, so no setuid or
+// file-capability binary in the image (su, mount, passwd) can raise it
+// back to root across exec (P3-4b-3r-confine-r3; #588 Security R1).
+func TestAJailedChildCannotGainPrivileges(t *testing.T) {
+	needRoot(t)
+	s, tg := jailed(t, newFake(), "", helperBin(t))
+	if got := childSays(t, s, tg)["NoNewPrivs:"]; got != "1" {
+		t.Fatalf("jailed child NoNewPrivs %q, want 1", got)
+	}
+}
+
+// helperSource is an unjailed source whose one target is this test
+// binary, as TestJailedChildHelper.
+func helperSource(t *testing.T) (*Source, Target) {
+	t.Helper()
+	release := t.TempDir()
+	tg := Target{Pkg: "fake", Name: "FuzzFake", Binary: helperBin(t)(release), Dir: t.TempDir()}
+	return newSource(t, newFake(), Config{Targets: []Target{tg}}), tg
+}
+
+// noNewPrivs reads the NoNewPrivs field of a /proc status file.
+func noNewPrivs(t *testing.T, status string) string {
+	t.Helper()
+	b, err := os.ReadFile(status)
+	if err != nil {
+		return "gone"
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "NoNewPrivs:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	t.Fatalf("%s has no NoNewPrivs line", status)
+	return ""
+}
+
+// LOOP-7: the flag is set in loop7's start path, not only by the unit,
+// so every fuzz child carries it whoever starts agentosd; here as a
+// user, with no jail.
+func TestEveryFuzzChildHasNoNewPrivs(t *testing.T) {
+	s, tg := helperSource(t)
+	if got := childSays(t, s, tg)["NoNewPrivs:"]; got != "1" {
+		t.Fatalf("fuzz child NoNewPrivs %q, want 1", got)
+	}
+}
+
+// LOOP-7: the flag is per thread. The one loop7 sets it on is locked to
+// the starting goroutine and ends with it, so no thread that runs Go
+// code afterwards carries it, and children the daemon starts afterwards
+// from other goroutines, outside loop7, do not. The process's main
+// thread is the one exception the runtime makes: a locked goroutine that
+// exits there wedges it for good (runtime.mexit), and no goroutine runs
+// on it again, so it starts no child; it is left out of the scan. With
+// the unit's NoNewPrivileges=yes every child carries the flag and this is
+// moot.
+func TestNoNewPrivsStaysOffTheDaemonsOtherThreads(t *testing.T) {
+	if noNewPrivs(t, fmt.Sprintf("/proc/%d/status", os.Getppid())) != "0" {
+		t.Skip("the test process was started with no_new_privs")
+	}
+	s, tg := helperSource(t)
+	for range 5 {
+		childSays(t, s, tg)
+	}
+	main := fmt.Sprintf("/proc/self/task/%d/status", os.Getpid())
+	// A flagged thread may still be exiting: wait for it to go.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tasks, err := filepath.Glob("/proc/self/task/*/status")
+		if err != nil || len(tasks) == 0 {
+			t.Fatalf("no threads listed: %v", err)
+		}
+		var flagged []string
+		for _, st := range tasks {
+			if st != main && noNewPrivs(t, st) == "1" {
+				flagged = append(flagged, st)
+			}
+		}
+		if len(flagged) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon threads still carry no_new_privs: %v", flagged)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Children from many goroutines, so they start on many threads.
+	const n = 20
+	out := make(chan string, n)
+	for range n {
+		go func() {
+			b, err := exec.Command(tg.Binary, "-test.run=^TestJailedChildHelper$", "-test.v").CombinedOutput()
+			if err != nil {
+				out <- "error: " + err.Error()
+				return
+			}
+			out <- string(b)
+		}()
+	}
+	for range n {
+		if said := <-out; !strings.Contains(said, "NoNewPrivs: 0") {
+			t.Fatalf("a child started outside loop7 says:\n%s\nwant NoNewPrivs: 0", said)
 		}
 	}
 }
@@ -840,8 +946,9 @@ func TestAJailedRepeatedHangRecordsTheNewerBuild(t *testing.T) {
 	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 1 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
-	if st, err := s.readHangs(tg); err != nil || st[loops.FuzzStallDetail] != fileDigest(t, tg.Binary) {
-		t.Fatalf("state %v %v", st, err)
+	// The producer is reported to loops, which holds it (P3-4b-3h-r2).
+	if len(g.reported) != 2 || g.reported[1].Producer != fileDigest(t, tg.Binary) {
+		t.Fatalf("reported %+v", g.reported)
 	}
 }
 
