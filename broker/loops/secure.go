@@ -1264,6 +1264,10 @@ func findingText(f Finding) string {
 		return "Credential " + sub + " " + safeName(f.Detail) + ". Replace it on my Wi-Fi page."
 	case CheckSeeded:
 		return "Security test " + sub + " fails on my current setup."
+	case CheckFuzz:
+		return "Fuzz test " + sub + " crashes on my current setup. I take the fix when an update has it."
+	case CheckProbe:
+		return "Socket probe " + sub + " fails on my current setup. I take the fix when an update has it."
 	}
 	return "Security finding on " + sub + "."
 }

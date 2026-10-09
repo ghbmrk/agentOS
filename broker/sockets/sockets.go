@@ -63,6 +63,23 @@ type Endpoint struct {
 	// the op runs: long polls, whose answer would be lost on a closed
 	// connection. Other ops run to the end whoever hangs up.
 	HangupOps map[string]bool
+	// Refused, if set, is told each frame or connection this socket
+	// refuses before any op runs (a protocol refusal: malformed, unknown
+	// op, too large, too many, peer, internal), with the socket's peer,
+	// so the broker can journal it (LOOP-7). It runs on the serving
+	// goroutine and must not block; an op's own answer is not told.
+	Refused func(Peer, Code)
+}
+
+// refused tells ep.Refused of a protocol refusal in resp, if any.
+func (ep Endpoint) refused(resp Response) Response {
+	switch c := Code(resp.Error); c {
+	case ErrMalformed, ErrUnknownOp, ErrTooLarge, ErrTooMany, ErrPeer, ErrInternal:
+		if ep.Refused != nil {
+			ep.Refused(ep.Peer, c)
+		}
+	}
+	return resp
 }
 
 // listened is a test hook, called after each socket is listened on and
@@ -73,6 +90,14 @@ var listened = func(dir string) {}
 type Code string
 
 func (c Code) Error() string { return string(c) }
+
+// RefusalNote is the adapter, and the reason's prefix, of the journal
+// note the daemon writes for a frame a guest socket refused (LOOP-7).
+const RefusalNote = "socket-refusal"
+
+// Token is c as one word ("unknown-op"), for a journal field that takes
+// tokens only.
+func (c Code) Token() string { return strings.ReplaceAll(string(c), " ", "-") }
 
 // Fixed error codes.
 const (
@@ -246,6 +271,7 @@ func (s *Server) accept(ctx context.Context, ln net.Listener, ep Endpoint) {
 		backoff = 0
 		if ep.PeerUID != nil {
 			if uid, ok := peerUID(c); !ok || uid != *ep.PeerUID {
+				ep.refused(Response{Error: string(ErrPeer)})
 				refuse(c, ErrPeer)
 				continue
 			}
@@ -253,6 +279,7 @@ func (s *Server) accept(ctx context.Context, ln net.Listener, ep Endpoint) {
 		mu.Lock()
 		if ep.MaxConns > 0 && n >= ep.MaxConns {
 			mu.Unlock()
+			ep.refused(Response{Error: string(ErrTooMany)})
 			refuse(c, ErrTooMany)
 			continue
 		}
@@ -287,7 +314,7 @@ func (s *Server) serve(ctx context.Context, c net.Conn, ep Endpoint) {
 		}
 		line, err := readLine(r)
 		if errors.Is(err, errTooLarge) {
-			enc.Encode(Response{Error: string(ErrTooLarge)})
+			enc.Encode(ep.refused(Response{Error: string(ErrTooLarge)}))
 			return
 		}
 		if err != nil {
@@ -299,7 +326,7 @@ func (s *Server) serve(ctx context.Context, c net.Conn, ep Endpoint) {
 			}
 			continue
 		}
-		if err := enc.Encode(handle(ctx, ep, line)); err != nil {
+		if err := enc.Encode(ep.refused(handle(ctx, ep, line))); err != nil {
 			return
 		}
 	}
@@ -316,7 +343,7 @@ func (s *Server) serveWatched(ctx context.Context, c net.Conn, r *bufio.Reader, 
 	peeked := make(chan error, 1)
 	go func() { _, err := r.Peek(1); peeked <- err }()
 	done := make(chan Response, 1)
-	go func() { done <- handle(hctx, ep, line) }()
+	go func() { done <- ep.refused(handle(hctx, ep, line)) }()
 	var resp Response
 	var peekErr error
 	select {

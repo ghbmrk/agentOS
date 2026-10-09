@@ -126,7 +126,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-4b-2b | [A11 harness follow-ups to #490: evidence check fails on a missing evidence record; fix-input audit catches a raw held clause whose fields the visible test shares; leaking-adapter control on every valid seed](briefs/P3-4b.md#p3-4b-2b-harness-follow-ups-to-490) | P3-4b-2 | merged (682486e; #500) |
 | P3-4b-5 | [Model-backed loop 2 fixer: answers the §11 fix-candidate request through Loop 1's builder, wired in the daemon](briefs/P3-4b.md#p3-4b-5-model-backed-loop-2-fixer) | P3-4b-1, W3-builder-ship | queued (tier A) |
 | OP9-status | [OP-9: STATUS names every capability that is off or can't run (brief to be written)](briefs/P3-4b.md#op9-status-owner-row-for-op-9-not-yet-briefed) | P3-2, P3-4 | queued (needs its own brief) |
-| P3-4b-3 | [LOOP-7 off-the-shelf: socket and action-protocol fuzz targets, in-guest socket probe](briefs/P3-4b.md#p3-4b-3-loop-7-fuzzing-and-socket-probes) | P3-4b-1b | queued (tier A declared) |
+| P3-4b-3 | [LOOP-7 off-the-shelf: socket and action-protocol fuzz targets, in-guest socket probe](briefs/P3-4b.md#p3-4b-3-loop-7-fuzzing-and-socket-probes) | P3-4b-1b | building (tier A declared) |
 | P3-4b-4 | [LOOP-7 off-the-shelf: continuous canary rounds, published injection corpora, tamper and exhaustion probes](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-1b | queued (tier A declared) |
 | P3-5 | [Loop 3, maintenance, as a scheduler Source](briefs/P3-5.md) | P3-2, P4-3 | merged (4672fe8; broker/maintain) |
 | P3-3 | [Recall index and event bus](briefs/P3-3.md) | P1-1, P1-2 | merged (5980098; broker/recall) |
