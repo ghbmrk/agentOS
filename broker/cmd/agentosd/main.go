@@ -666,6 +666,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// The model routes hold only the attempts the owner's rule can spend,
+	// read from the routing socket off the request path (SR3-7-f2); with
+	// no routing socket they hold MaxRetries.
+	var retries func() int
+	if egressSocket != "" && learn.Routing != "" {
+		spare := &modelroute.Spare{}
+		go spare.Run(ctx, modelroute.NewRouting(learn.Routing).State, 30*time.Second)
+		retries = spare.Retries
+	}
 	steps := newStepNotes(&cfg.Notes)
 	if lp != nil && recallDir != "" && verifier != nil {
 		// An approved item 2 that finds recall not open yet waits for it
@@ -757,7 +766,7 @@ func main() {
 			if wt != nil {
 				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
 			}
-			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
+			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, retries, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
 				caps.agentOff(agentNoMachines)
@@ -803,7 +812,7 @@ func main() {
 						log.Printf("replay evaluation disabled: %v", err)
 					}
 					bc := builderFlags(flag.CommandLine, builderImage, builderLaunch)
-					bc.Dir, bc.AgentImage, bc.MemMB, bc.Egress = filepath.Join(cfg.SocketDir, "build"), namedAgentImage, builderMemMB, egressSocket
+					bc.Dir, bc.AgentImage, bc.MemMB, bc.Egress, bc.Retries = filepath.Join(cfg.SocketDir, "build"), namedAgentImage, builderMemMB, egressSocket, retries
 					lp.startBuilder(m, imgs, services, bc)
 				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
@@ -1077,7 +1086,7 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, tools guest.Tools) (*guest.Plane, error) {
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -1129,10 +1138,11 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 	}
 	if egressSocket != "" {
 		gcfg.Model = modelroute.Forward(modelroute.Config{
-			Socket: egressSocket,
-			Label:  m.DataLabel,
-			Denied: modelroute.Journal(eng, log.Printf),
-			Logf:   log.Printf,
+			Socket:  egressSocket,
+			Label:   m.DataLabel,
+			Denied:  modelroute.Journal(eng, log.Printf),
+			Logf:    log.Printf,
+			Retries: retries,
 		})
 	}
 	return guest.New(gcfg)

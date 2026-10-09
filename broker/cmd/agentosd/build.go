@@ -79,7 +79,8 @@ type buildConfig struct {
 	AgentImage string
 	Launch     string // its argv and env; empty: the image's own
 	MemMB      int64
-	Egress     string // the vault process's model socket; empty: no model access
+	Egress     string     // the vault process's model socket; empty: no model access
+	Retries    func() int // modelroute.Config.Retries; nil: MaxRetries
 }
 
 // openBuilder attaches Loop 1's model-backed builder (W3-builder): builder
@@ -109,7 +110,7 @@ func (l *learning) openBuilder(m builderMachines, imgs images, services *lateSer
 		cfg.Argv, cfg.Env = argv, env
 	}
 	if c.Egress != "" {
-		cfg.Model = modelroute.Forward(modelroute.Config{Socket: c.Egress, Label: m.DataLabel, Denied: builderDenied(log.Printf), Logf: log.Printf})
+		cfg.Model = modelroute.Forward(modelroute.Config{Socket: c.Egress, Label: m.DataLabel, Denied: builderDenied(log.Printf), Logf: log.Printf, Retries: c.Retries})
 		cfg.Meter = l.spare
 	}
 	b, err := loopbuild.New(cfg)

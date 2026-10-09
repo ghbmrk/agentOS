@@ -753,6 +753,8 @@ func (l *learning) openEvaluator(m *vm.Manager, services *lateServices, c evalCo
 			// ev is set before any replay machine exists: machines
 			// start only through Run, after New returns.
 			OverCeiling: func(id string) { ev.OverPriceCeiling(id) },
+			// Retries stays nil (MaxRetries): a tree's rule under
+			// evaluation is not a reordering of the owner's (SR3-7-f2).
 		}))
 	}
 	ev, err := replay.New(rc)
