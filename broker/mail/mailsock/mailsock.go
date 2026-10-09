@@ -82,6 +82,7 @@ type request struct {
 
 type reply struct {
 	Error    string         `json:"error,omitempty"`
+	Address  string         `json:"address,omitempty"`
 	Folders  []mail.Folder  `json:"folders,omitempty"`
 	Validity uint32         `json:"validity,omitempty"`
 	UIDs     []uint32       `json:"uids,omitempty"`
@@ -139,6 +140,13 @@ func call(ctx context.Context, req request, src Source) (reply, error) {
 	s := acct.Store
 	var rep reply
 	switch req.Op {
+	case "address":
+		// The owner's address, which agentosd binds the adapter to
+		// (SR3-mail-w2): nothing of the Store, and no mailbox call.
+		if acct.Address == "" {
+			return reply{}, ErrNotConnected
+		}
+		rep.Address = acct.Address
 	case "folders":
 		rep.Folders, err = s.Folders(ctx)
 	case "uids":
@@ -254,6 +262,17 @@ func (c *Client) do(ctx context.Context, req request) (reply, error) {
 		return reply{}, ErrUnreachable
 	}
 	return rep, nil
+}
+
+// Address returns the owner's address the vault process sends as. It
+// fails with ErrNotConnected while no account is set up and ErrLocked
+// while the vault is locked.
+func (c *Client) Address(ctx context.Context) (string, error) {
+	rep, err := c.do(ctx, request{Op: "address"})
+	if err == nil && rep.Address == "" {
+		err = ErrNotConnected
+	}
+	return rep.Address, err
 }
 
 func (c *Client) Folders(ctx context.Context) ([]mail.Folder, error) {

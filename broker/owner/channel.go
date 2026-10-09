@@ -153,7 +153,9 @@ type Channel struct {
 	queued   map[string]*Queued
 	released map[string]time.Time // queued IDs released, for UNDO's reply
 	lateUndo map[string]bool      // released IDs the owner texted UNDO for
-	resume   *resumeCode
+	// undo takes an UNDO whose ID the channel does not hold (SetUndo).
+	undo   atomic.Pointer[UndoHook]
+	resume *resumeCode
 	// lineFailed is when the box's line last failed to send (unix nanos
 	// of cfg.Now), so a queued reply's silence is not read as the
 	// owner's over a line that was down (security B1(a) on PW3).
@@ -286,6 +288,7 @@ type route struct {
 	delegate string // text for the control handler
 	run      bool   // delegate goes to the control handler
 	narrow   *reply // PAUSE or REVOKE, run outside the lock
+	undo     string // an UNDO ID the channel does not hold, for the hook
 	// limited: the replies count against ReplyLimit (CH-15).
 	limited bool
 	// alerts have their own limit (one per AlertEvery) and are not counted
@@ -379,6 +382,9 @@ func (c *Channel) finish(ctx context.Context, from string, rt route) []string {
 		c.mu.Unlock()
 		replies = append(replies, c.ctrl.Handle(ctx, from, rt.delegate)...)
 	}
+	if rt.undo != "" {
+		replies = append(replies, c.undoElsewhere(ctx, rt.undo))
+	}
 	if rt.narrow != nil {
 		if c.cfg.Narrow == nil {
 			replies = append(replies, "There are no grants to "+strings.ToLower(rt.narrow.word)+".")
@@ -438,7 +444,11 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 			out, accepted := c.resumeLocked(r, now)
 			return route{replies: out, limited: !accepted}
 		case "UNDO":
-			return route{replies: []string{c.undoLocked(r.id, now, decided)}, limited: !unlocked}
+			out, held := c.undoLocked(r.id, now, decided)
+			if !held {
+				return route{undo: r.id, limited: !unlocked}
+			}
+			return route{replies: []string{out}, limited: !unlocked}
 		case "PAUSE", "REVOKE":
 			return route{narrow: &r, limited: !unlocked}
 		case "MORE":

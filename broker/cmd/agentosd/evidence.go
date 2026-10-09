@@ -16,6 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/mail"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -36,6 +37,15 @@ type mailbox interface {
 	Main() (addr, account string)
 }
 
+// mailOn reports whether a mail account is connected.
+func (e *evidence) mailOn() bool {
+	if e.mail == nil {
+		return false
+	}
+	addr, _ := e.mail.Main()
+	return addr != ""
+}
+
 // evidenceGate is what the router and the setting use of the gate.
 type evidenceGate interface {
 	Evidence() (address, account string)
@@ -52,8 +62,9 @@ type evidence struct {
 	// notify texts the owner an agent reply (owner.Channel.Notify, which
 	// adds the prefix and runs CH-19's filter).
 	notify func(string) error
-	// mail is the connected mail account; nil while none is, as in this
-	// build: no destination can be set and every reply goes by text.
+	// mail is the mail account (lateMail): with none connected (nil, or
+	// no main address) no destination can be set and every reply goes by
+	// text.
 	mail  mailbox
 	kept  *keptReplies
 	now   func() time.Time
@@ -124,13 +135,6 @@ const (
 // delivery that did not succeed (UX U2): bounded, then the reply is kept.
 var deliverRetries = []time.Duration{10 * time.Second, time.Minute}
 
-// The mail adapter's delivery operation and executor (mail.OpDeliver,
-// mail.Tool): agentosd does not link the adapter (ARC-2).
-const (
-	opDeliver    = "mail.deliver"
-	mailExecutor = "mail"
-)
-
 // newEvidence keeps undelivered replies at keptPath.
 // page says the box's Wi-Fi page is served.
 func newEvidence(keptPath string, page bool, logf func(string, ...any)) *evidence {
@@ -172,7 +176,7 @@ func (e *evidence) run(ctx context.Context) {
 func (e *evidence) reply(machine string, private bool, text, summary string) {
 	addr, acct := "", ""
 	g := e.g()
-	if g != nil && e.mail != nil {
+	if g != nil && e.mailOn() {
 		addr, acct = g.Evidence()
 	}
 	if !private || addr == "" {
@@ -249,8 +253,8 @@ func (e *evidence) deliverOnce(g evidenceGate, addr, acct, body, from string) er
 	id := "evidence/" + randHex(8)
 	ctx, cancel := context.WithTimeout(context.Background(), deliverTimeout)
 	defer cancel()
-	st, err := g.Submit(journal.Intent{ID: id, Origin: grants.OriginEvidence, Account: acct, Action: opDeliver,
-		Params: map[string]any{grants.ParamBody: body, grants.ParamFrom: from}, Recipients: []string{addr}, Executor: mailExecutor})
+	st, err := g.Submit(journal.Intent{ID: id, Origin: grants.OriginEvidence, Account: acct, Action: mail.OpDeliver,
+		Params: map[string]any{grants.ParamBody: body, grants.ParamFrom: from}, Recipients: []string{addr}, Executor: mail.Tool})
 	if err == nil && st.State == journal.Pending {
 		st, err = g.Authorize(ctx, id)
 	}
@@ -403,7 +407,7 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str
 	if !unlocked {
 		return "", false
 	}
-	if e.mail == nil {
+	if !e.mailOn() {
 		return evidenceNotYet, true
 	}
 	g := e.g()
