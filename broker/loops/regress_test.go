@@ -54,8 +54,12 @@ func TestARuleLessFuzzFindingIsReportedAndResolved(t *testing.T) {
 	if got := r.g.OpenReported(CheckProbe); len(got) != 0 {
 		t.Fatalf("open probe findings %+v", got)
 	}
-	if err := r.g.Resolve(id); err != nil {
+	passed := Replay{Evidence: fuzzFinding().Detail, Passed: true}
+	if err := r.g.Resolve(id, passed); err != nil {
 		t.Fatal(err)
+	}
+	if e := r.evidenceFor(t, id); e.Replay == nil || *e.Replay != passed {
+		t.Fatalf("replay not recorded: %+v", e.Replay)
 	}
 	if got := r.g.OpenReported(CheckFuzz); len(got) != 0 {
 		t.Fatalf("resolved but listed %+v", got)
@@ -66,7 +70,7 @@ func TestARuleLessFuzzFindingIsReportedAndResolved(t *testing.T) {
 	if s := r.g.Status(); strings.Contains(s, waitForAFixOf) {
 		t.Fatalf("status still waits: %q", s)
 	}
-	if err := r.g.Resolve(id); !errors.Is(err, ErrFinding) {
+	if err := r.g.Resolve(id, passed); !errors.Is(err, ErrFinding) {
 		t.Fatalf("resolving a closed finding: %v", err)
 	}
 }
@@ -76,7 +80,7 @@ func TestARuleLessFuzzFindingIsReportedAndResolved(t *testing.T) {
 func TestResolveRefusesAFindingWithATreeRule(t *testing.T) {
 	r := newReportRig(t, nil)
 	rec := r.report(t, seedFinding())
-	if err := r.g.Resolve(rec.Finding.ID); !errors.Is(err, ErrFinding) {
+	if err := r.g.Resolve(rec.Finding.ID, Replay{Evidence: rec.Finding.Detail, Passed: true}); !errors.Is(err, ErrFinding) {
 		t.Fatalf("resolved a rule finding: %v", err)
 	}
 	if _, open := r.open(rec.Finding.ID); !open {
@@ -97,5 +101,45 @@ func TestRuleLessOnlyForFuzzAndProbe(t *testing.T) {
 	}
 	if len(r.g.Evidence()) != 0 {
 		t.Fatal("acted on a refused finding")
+	}
+}
+
+// Coordinator condition on P3-4b-3: Resolve clears a fuzz or probe
+// finding only on a passing replay of its own stored input. A failed
+// replay, or a passing one of another input, leaves it open and changes
+// nothing.
+func TestResolveWithoutAPassingReplayDoesNothing(t *testing.T) {
+	r := newReportRig(t, nil)
+	rec := r.report(t, fuzzFinding())
+	id := rec.Finding.ID
+	texts := len(r.texts)
+	for name, rp := range map[string]Replay{
+		"no replay":     {},
+		"failed":        {Evidence: rec.Finding.Detail},
+		"another input": {Evidence: "crash input sha256:ff", Passed: true},
+	} {
+		if err := r.g.Resolve(id, rp); !errors.Is(err, ErrFinding) {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, open := r.open(id); !open {
+			t.Fatalf("%s: closed", name)
+		}
+		if e := r.evidenceFor(t, id); e.Replay != nil {
+			t.Fatalf("%s: replay recorded %+v", name, e.Replay)
+		}
+	}
+	if _, cleared := r.g.st.Cleared[id]; cleared || len(r.texts) != texts {
+		t.Fatalf("acted: cleared %v, texts %q", cleared, r.texts)
+	}
+}
+
+// The new wait wording is owner text in a scanned file and passes the
+// scan (S18).
+func TestTheUpdateWaitWordingIsScanned(t *testing.T) {
+	if !contains(ownerTables, "report.go") {
+		t.Fatal("report.go is not scanned")
+	}
+	if banned.MatchString(waitUpdate) || banned.MatchString(findingText(fuzzFinding())) {
+		t.Fatalf("wording %q", waitUpdate)
 	}
 }

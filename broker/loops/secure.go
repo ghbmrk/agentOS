@@ -291,6 +291,9 @@ type Record struct {
 	// Regression is the minimized test added to the suite for a reported
 	// finding.
 	Regression []byte `json:"regression,omitempty"`
+	// Replay is the passing replay that closed a fuzz or probe finding
+	// (Resolve).
+	Replay *Replay `json:"replay,omitempty"`
 	// Told marks a reported finding's owner text as sent, so a resume
 	// after a crash sends a text not yet sent, and only that (P3-4b-1b
 	// item 3).

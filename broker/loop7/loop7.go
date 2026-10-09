@@ -38,7 +38,7 @@ import (
 // Reporter is Loop 2's in-process entry point (*loops.Guard).
 type Reporter interface {
 	Report(ctx context.Context, f loops.Finding) (loops.Record, error)
-	Resolve(id string) error
+	Resolve(id string, r loops.Replay) error
 	OpenReported(c loops.Check) []loops.Finding
 }
 
@@ -205,7 +205,7 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 var failLine = regexp.MustCompile(`^\s*--- FAIL: (Fuzz[A-Za-z0-9_]*)/([^\s/]+) `)
 
 // replay runs t's corpus files, reports each failing one and resolves
-// t's open findings whose input passes.
+// t's open findings whose stored input it replayed and passed.
 func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 	out, runErr := s.command(ctx, t, "-test.run=^"+t.Name+"$", "-test.v").CombinedOutput()
 	if ctx.Err() != nil {
@@ -222,7 +222,18 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 		return 0, fmt.Errorf("loop7: replaying %s: %v", t.subject(), runErr)
 	}
 	var errs []error
-	reported := map[string]bool{}
+	// Each stored input this run replayed and passed: only such a replay
+	// closes a finding, so a removed input keeps its finding open.
+	passed := map[string]bool{}
+	if entries, err := os.ReadDir(filepath.Join(t.Dir, "testdata", "fuzz", t.Name)); err == nil {
+		for _, e := range entries {
+			if e.Type().IsRegular() && !failing[e.Name()] {
+				if data, err := os.ReadFile(filepath.Join(t.Dir, "testdata", "fuzz", t.Name, e.Name())); err == nil {
+					passed[crashDetail(data)] = true
+				}
+			}
+		}
+	}
 	for _, file := range sortedKeys(failing) {
 		data, err := os.ReadFile(filepath.Join(t.Dir, "testdata", "fuzz", t.Name, file))
 		if err != nil {
@@ -230,14 +241,14 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 			data = []byte(file)
 		}
 		f := loops.Finding{Check: loops.CheckFuzz, Subject: t.subject(), Severity: loops.High, Detail: crashDetail(data)}
-		reported[f.Detail] = true
 		if _, err := s.cfg.Report.Report(ctx, f); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
-		if f.Subject == t.subject() && !reported[f.Detail] {
-			errs = append(errs, s.cfg.Report.Resolve(f.ID))
+		if f.Subject == t.subject() && passed[f.Detail] {
+			r := loops.Replay{Evidence: f.Detail, Passed: true, At: s.cfg.Now()}
+			errs = append(errs, s.cfg.Report.Resolve(f.ID, r))
 		}
 	}
 	return len(failing), errors.Join(errs...)
@@ -286,8 +297,11 @@ func (s *Source) probe(ctx context.Context) (int, error) {
 		}
 	}
 	for _, f := range s.cfg.Report.OpenReported(loops.CheckProbe) {
-		if f.Subject == subject && f.Detail != detail {
-			errs = append(errs, s.cfg.Report.Resolve(f.ID))
+		// A clean round replays the probe's frames: the only pass that
+		// closes a probe finding.
+		if f.Subject == subject && len(fails) == 0 {
+			r := loops.Replay{Evidence: f.Detail, Passed: true, At: s.cfg.Now()}
+			errs = append(errs, s.cfg.Report.Resolve(f.ID, r))
 		}
 	}
 	return len(fails), errors.Join(errs...)

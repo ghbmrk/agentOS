@@ -210,12 +210,22 @@ func (s *Guard) waitStatusLocked() string {
 	return strings.Join(out, " ")
 }
 
-// Resolve closes open reported fuzz or probe finding id as cleared once
-// the caller's regression for it passes. A pause it caused stays until
-// the owner resumes the target, and the owner hears it cleared where
-// they heard of it. A finding with a tree rule clears only when its
-// linked cases hold (passedReported), never on a caller's word.
-func (s *Guard) Resolve(id string) error {
+// Replay is a source's record of re-running a fuzz or probe finding's
+// stored input: Evidence names the input (the finding's Detail, an input
+// digest) and Passed says the replay of that input passed.
+type Replay struct {
+	Evidence string    `json:"evidence"`
+	Passed   bool      `json:"passed"`
+	At       time.Time `json:"at"`
+}
+
+// Resolve closes open reported fuzz or probe finding id as cleared, only
+// on a replay that passed on the finding's own stored input; nothing else
+// clears one. The replay is saved on the finding's evidence. A pause it
+// caused stays until the owner resumes the target, and the owner hears it
+// cleared where they heard of it. A finding with a tree rule clears only
+// when its linked cases hold (passedReported), never on a caller's word.
+func (s *Guard) Resolve(id string, r Replay) error {
 	s.reportMu.Lock()
 	defer s.reportMu.Unlock()
 	s.mu.Lock()
@@ -223,6 +233,15 @@ func (s *Guard) Resolve(id string) error {
 	if !ok || !rec.Reported || !ruleLess(rec.Finding.Check) {
 		s.mu.Unlock()
 		return fmt.Errorf("%w: %q is not an open fuzz or probe finding", ErrFinding, id)
+	}
+	if !r.Passed || r.Evidence != rec.Finding.Detail {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: no passing replay of %q's stored input", ErrFinding, id)
+	}
+	for i := range s.st.Evidence {
+		if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
+			e.Replay = &r
+		}
 	}
 	delete(s.st.Open, id)
 	delete(s.held, id)

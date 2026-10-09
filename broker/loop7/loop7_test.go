@@ -42,9 +42,12 @@ func (g *fakeGuard) Report(_ context.Context, f loops.Finding) (loops.Record, er
 	g.open[f.ID] = f
 	return loops.Record{Finding: f, Reported: true}, nil
 }
-func (g *fakeGuard) Resolve(id string) error {
+func (g *fakeGuard) Resolve(id string, r loops.Replay) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if f, ok := g.open[id]; !ok || !r.Passed || r.Evidence != f.Detail {
+		return loops.ErrFinding
+	}
 	delete(g.open, id)
 	g.resolved = append(g.resolved, id)
 	return nil
@@ -154,9 +157,21 @@ func TestAFuzzCrashIsReportedKeptAndResolved(t *testing.T) {
 	if n, err := s.replay(context.Background(), tg); err != nil || n != 1 || len(g.open) != 1 {
 		t.Fatalf("replay n=%d err=%v open %v", n, err, g.open)
 	}
-	// An update fixes the decoder: the regression passes and the finding
-	// is resolved.
+	// An update fixes the decoder, but with the stored input gone nothing
+	// replays it, so the finding stays open.
 	tg.Binary = planted(t, false)
+	stored := filepath.Join(tg.Dir, "testdata", "fuzz", "FuzzPlanted", kept[0].Name())
+	aside := filepath.Join(t.TempDir(), "input")
+	if err := os.Rename(stored, aside); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.replay(context.Background(), tg); err != nil || n != 0 || len(g.open) != 1 || len(g.resolved) != 0 {
+		t.Fatalf("without the stored input n=%d err=%v open %v resolved %v", n, err, g.open, g.resolved)
+	}
+	if err := os.Rename(aside, stored); err != nil {
+		t.Fatal(err)
+	}
+	// Replayed, the stored input passes and the finding is resolved.
 	if n, err := s.replay(context.Background(), tg); err != nil || n != 0 || len(g.open) != 0 || len(g.resolved) != 1 {
 		t.Fatalf("after the fix n=%d err=%v open %v resolved %v", n, err, g.open, g.resolved)
 	}
