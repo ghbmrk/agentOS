@@ -393,7 +393,7 @@ func main() {
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
 	flag.StringVar(&digestDir, "digest", "/var/lib/agentos/digest", "the daily digest's queue and state (created 0700); empty sends no digest")
 	flag.StringVar(&learn.Loop7, "loop7", "/var/lib/agentos/loop7", "LOOP-7's fuzz corpora, with crash inputs found on this box, and the fuzz cache (P3-4b-3a)")
-	learn.Fuzz = fuzzRelease
+	learn.Fuzz, learn.FuzzUser = fuzzRelease, fuzzUser
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
 	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
 	flag.StringVar(&builderImage, "builder-image", defaultBuilderImage, "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty, or the default not registered, runs no model-backed builder")
@@ -537,6 +537,9 @@ func main() {
 			}
 		} else {
 			cg, psiPath = g, filepath.Join(g.Path, "memory.pressure")
+			// The machines group sits in the delegated root, where the
+			// fuzz children's leaf goes too (loop7 Jail, L7-6).
+			learn.Cgroup = filepath.Dir(g.Path)
 		}
 	}
 	if read, ok := cgroup.PressureSource(psiPath); ok {
