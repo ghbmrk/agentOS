@@ -451,7 +451,8 @@ class EvidenceTest(unittest.TestCase):
             res = depaudit.run_target({"name": "forged", "cmd": ["true"]}, depaudit.load_manifest(MANIFEST))
         self.assertEqual(res["outcome"], "error", res)
 
-    # DEP-2b (briefs/DEP-2.md; a local ID with no SPEC row, so no REQ marker)
+    # DEP-2b (briefs/DEP-2.md; a local ID with no SPEC row, so no REQ marker). The control first
+    # tries to clear read-only with mount_setattr and open_tree_attr (Security on #437).
     def test_kept_paths_are_read_only_unless_declared(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as ro, tempfile.TemporaryDirectory(dir="/tmp") as rw:
             os.chmod(ro, 0o755)

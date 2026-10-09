@@ -14,8 +14,9 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
 | HK-1 | [depaudit self-test flake fix](briefs/HK-1.md) | — | in review |
 | DEP-2 | [depaudit evidence out of the tracee's reach](briefs/DEP-2.md) | HK-1 | in review (#437) |
-| DEP-3 | Move depaudit's evidence out of the tracee's uid: run the scenario under a uid distinct from `_inner` and strace (or hold the read ends outside the PID namespace and deny ptrace by seccomp), plus a planted control that drains `/proc/1/fd` and ptrace-attaches after a connect and expects `violation` (release, tier A, A9 evidence integrity; L3 on #437 point 2, tools/ASSUMPTIONS.md D9; brief to write) | DEP-2 | queued (needs brief) |
+| DEP-3 | Move depaudit's evidence out of the tracee's uid: run the scenario under a uid distinct from `_inner` and strace (or hold the read ends outside the PID namespace and deny ptrace by seccomp), plus a planted control that drains `/proc/1/fd`, ptrace-attaches, and writes a partial line through the trace pipe's write end after a connect, and expects `violation` (release, tier A, A9 evidence integrity; L3 on #437 point 2, Security on #437 point 3, tools/ASSUMPTIONS.md D9; brief to write) | DEP-2 | queued (needs brief) |
 | DEP-4 | depaudit kept paths read-only recursively: fail closed on writable submounts under `ROOT`, `sys.prefix` or a keep entry (release, tier A, DEP-2b; L3 on #437 point 3, tools/ASSUMPTIONS.md D10; brief to write) | DEP-2 | queued (needs brief) |
+| DEP-5 | depaudit fails closed on an strace that cannot name a `TRACED` syscall: `?`-prefixed names are skipped silently, so `sandbox_available()` must reject such an strace (release, tier A, A9; Security on #437 point 2, predates DEP-2; brief to write) | DEP-2 | queued (needs brief) |
 
 ## Security and architecture review (2026-10-08)
 

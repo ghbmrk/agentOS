@@ -70,8 +70,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5c | A12 | Clean-room builder in the scheduler |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
-| DEP-3 | A9 (DEP-2a evidence integrity) | Every tracee shares `_inner`'s uid and can drain the evidence pipes via `/proc/1/fd` or ptrace `_inner` (L3 on #437, ASSUMPTIONS D9) |
+| DEP-3 | A9 (DEP-2a evidence integrity) | Every tracee shares `_inner`'s uid and can drain the evidence pipes via `/proc/1/fd` or ptrace `_inner`, or break the next trace line by writing a partial line through `/proc/1/fd/<trace_w>` (L3 and Security on #437, ASSUMPTIONS D9) |
 | DEP-4 | A9 (DEP-2b) | Writable rbind submounts under kept paths; tier-A security, so not later (L3 on #437, ASSUMPTIONS D10) |
+| DEP-5 | A9 | An strace lacking a `?`-prefixed `TRACED` name skips it silently, so that syscall goes unseen; tier-A security, so not later (Security on #437 point 2) |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |

@@ -294,7 +294,7 @@ def sandbox_available():
     global _SANDBOX
     if _SANDBOX is None:
         _SANDBOX = False
-        if shutil.which("unshare") and shutil.which("strace"):
+        if shutil.which("unshare") and shutil.which("strace") and shutil.which("setpriv"):
             try:
                 p = subprocess.run(["unshare"] + _unshare_flags() + ["--", "strace", "-o", os.devnull, "true"],
                                    capture_output=True, timeout=30)
@@ -380,6 +380,13 @@ def _dns_sink(sock, names):
         sock.sendto(q[:2] + flags.to_bytes(2, "big") + q[4:6] + b"\0" * 6 + q[12:end], addr)
 
 
+# The scenario runs as (userns) root with CAP_SYS_ADMIN over the sandbox's mount
+# namespace, where the kept paths' ro flag is not locked: it could clear it with
+# mount_setattr or open_tree_attr, neither traced. Without the capability, in its
+# bounding and inheritable sets, no exec can get it back, so ro holds (DEP-2b).
+DROP_SYS_ADMIN = ["setpriv", "--bounding-set", "-sys_admin", "--inh-caps", "-sys_admin", "--"]
+
+
 def _io_uring_disabled():
     try:
         return pathlib.Path("/proc/sys/kernel/io_uring_disabled").read_text().strip()
@@ -435,7 +442,7 @@ def _inner(work, timeout, cmd, extra_keep=(), writable=()):
     err_t, err = _reader(err_r)
     with open(work / "stdout", "wb") as out:
         proc = subprocess.Popen(["strace", "-f", "-qq", "-e", "trace=" + TRACED,
-                                 "-o", "/proc/%d/fd/%d" % (os.getpid(), trace_w), "--"] + cmd,
+                                 "-o", "/proc/%d/fd/%d" % (os.getpid(), trace_w), "--"] + DROP_SYS_ADMIN + cmd,
                                 env=env, cwd=ROOT, stdout=out, stderr=err_w)
         os.close(err_w)
         try:
@@ -587,6 +594,36 @@ def _ipv6_available():
         return False
 
 
+# x86_64 and the generic table (arm64) share these numbers.
+_SYS_MOUNT_SETATTR, _SYS_OPEN_TREE_ATTR = 442, 467
+_MOUNT_ATTR_RDONLY, _OPEN_TREE_CLONE, _AT_RECURSIVE = 0x1, 0x1, 0x8000
+
+
+def _clear_read_only(path):
+    """What a scenario holding CAP_SYS_ADMIN over its mount namespace could do to a kept
+    path without a traced call: clear MOUNT_ATTR_RDONLY in place (mount_setattr), or on a
+    detached clone of the same mount (open_tree_attr, Linux 6.15+) and write through it."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    attr = (ctypes.c_uint64 * 4)(0, _MOUNT_ATTR_RDONLY, 0, 0)  # set, clr, propagation, userns_fd
+    wrong = []
+    if libc.syscall(_SYS_MOUNT_SETATTR, -100, path.encode(), _AT_RECURSIVE, attr, ctypes.sizeof(attr)) == 0:
+        wrong.append("mount_setattr cleared read-only on " + path)
+    fd = libc.syscall(_SYS_OPEN_TREE_ATTR, -100, path.encode(), _OPEN_TREE_CLONE | os.O_CLOEXEC | _AT_RECURSIVE,
+                      attr, ctypes.sizeof(attr))
+    if fd >= 0:
+        wrong.append("open_tree_attr cloned %s writable" % path)
+        probe = ".depaudit-write-%d" % os.getpid()
+        try:
+            os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, dir_fd=fd))
+            os.unlink(probe, dir_fd=fd)
+            wrong.append("wrote %s through the clone" % path)
+        except OSError:
+            pass
+        os.close(fd)
+    return wrong
+
+
 def _control(mode):
     """Planted scenarios against the harness's own defences (DEP-2), run as
     `depaudit.py _control MODE` inside the sandbox.
@@ -594,7 +631,9 @@ def _control(mode):
                        every evidence file the harness once read from its work directory
       write-kept       exits nonzero unless every write to ROOT (tools/depaudit.py too),
                        sys.prefix and $DEPAUDIT_KEEP_RO fails read-only, and a write to
-                       $DEPAUDIT_KEEP_RW (declared in the target's writes) succeeds"""
+                       $DEPAUDIT_KEEP_RW (declared in the target's writes) succeeds; first it
+                       tries to clear read-only with the untraced mount_setattr and
+                       open_tree_attr (a mount(2) remount is traced: a violation by itself)"""
     if mode == "tamper-evidence":
         with contextlib.suppress(OSError):
             socket.create_connection(("192.0.2.10", 443), timeout=2).close()
@@ -609,7 +648,8 @@ def _control(mode):
         raise ValueError(mode)
     wrong = []
     for d in (str(ROOT), os.path.realpath(sys.prefix), os.environ["DEPAUDIT_KEEP_RO"]):
-        probe = os.path.join(d, ".depaudit-write-%d" % os.getpid())
+        wrong += _clear_read_only(d)
+        probe =os.path.join(d, ".depaudit-write-%d" % os.getpid())
         try:
             os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
             os.unlink(probe)
