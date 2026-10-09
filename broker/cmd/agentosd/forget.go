@@ -582,6 +582,14 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgetting; retrying"}
 }
 
+// wireDigest makes dg the digest queue's purge and has dg replay the
+// tombstone at each open, so a stop between the tombstone and the purge
+// leaves no batch to send (W5-Dc-r12).
+func (f *ownerForget) wireDigest(dg *digestBox, tombstoned func() []string) {
+	f.digest = dg.forget
+	dg.cfg.Forgotten = tombstoned
+}
+
 // forgetAll is forget, then the digest queue's purge.
 func (f *ownerForget) forgetAll(goal string) error {
 	if err := f.forget(goal); err != nil {

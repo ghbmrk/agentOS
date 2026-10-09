@@ -319,8 +319,10 @@ func (v *Verified) passes(atts [][]byte, own ed25519.PublicKey, f func(fp string
 // (see above)
 // with a valid, passing, fast-channel attestation for exactly this
 // release. own is this box's key and may be nil.
+// It is 0 once the attestor policy changed since the check (SR3-6f-4), as
+// for SecurityAutoStage: a removed attestor's pass no longer counts.
 func (v *Verified) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
-	if !v.ok() {
+	if !v.ok() || v.policyCurrent() != nil {
 		return 0
 	}
 	n := 0
