@@ -13,11 +13,19 @@ writes them to a trusted-only plant file, and runs the target with:
                       transcripts, packet captures)
 The harness scans that directory plus the target's stdout and stderr (logs).
 A target never inherits the harness's environment (#515 Security 2): it gets
-PATH, HOME and TMPDIR set to a scratch directory removed after the round,
-GOTOOLCHAIN=local (no toolchain download), the CANARY_* variables, and the
-parent's value of each variable its registry entry
-names under "env" (only names in TARGET_ENV_ALLOWED; any other is refused at
-load).
+PATH, HOME and TMPDIR set to a scratch directory removed after the round, the
+CANARY_* variables, the parent's value of each variable its registry entry
+names under "env" (only names in TARGET_ENV_ALLOWED, today GOFLAGS; any other
+is refused at load), and GOTOOLCHAIN=local, set after all of those, so no
+entry can make a round download a Go toolchain.
+A target, and each control, runs as another uid: the first id of the harness's
+subordinate range, in its own user and PID namespace (the sandbox entry of
+tools/depaudit.py, tools/ASSUMPTIONS.md D13). It cannot read the harness's
+/proc entries, which it cannot even name, or a private file in the harness's
+HOME; it still reads what any uid may (world-readable files, the repository)
+and keeps the host's network. The round's scratch, plant and surface
+directories are its own until it ends, then the harness's again. Without a usable subordinate range, or if the
+sandbox fails to start, the target never runs and the round is an error.
 A round is an error, never clean, if the ack is missing or incomplete, the
 surface is empty, the scan budget runs out, or the target exits nonzero.
 Built-in controls (deliberate leaks the scan must catch) run on every pass;
@@ -52,6 +60,8 @@ import subprocess
 import sys
 import tempfile
 import urllib.parse
+
+import depaudit
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -103,8 +113,14 @@ DEFAULT_MAX_BYTES = 4 << 30
 SKIP_ROOT_DIRS = {"/proc", "/sys", "/dev"}
 DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
 # Parent variables a registry entry may pass on by name (values are never in
-# the registry). The broker's own targets run `go test`.
-TARGET_ENV_ALLOWED = frozenset({"GOCACHE", "GOFLAGS", "GOTOOLCHAIN"})
+# the registry). The broker's own targets run `go test`. Never GOTOOLCHAIN (the
+# parent's may be auto, a toolchain download) or GOCACHE (CommandProbe's off
+# breaks `go test`): P3-4b-4c-canary-env-r1.
+TARGET_ENV_ALLOWED = frozenset({"GOFLAGS"})
+# Where a round's plant, surface and scratch directories go: not the harness's
+# TMPDIR, which may sit under a directory the target's uid cannot search (a Go
+# test's t.TempDir is 0700). Each directory is still 0700, then the target's.
+ROUND_DIR = "/tmp"
 MEM_SKIP = ("[vvar]", "[vsyscall]", "[vvar_vclock]")
 MAX_HITS_PER_LOCATION = 20
 
@@ -356,6 +372,7 @@ CONTROLS = (
     ("control-partial-ack", "partial-ack", "error", (), None, "plant ack missing kinds"),
     ("control-empty-surface", "empty-surface", "error", (), None, "empty surface"),
     ("control-truncated-sweep", "truncated-sweep", "error", (), None, "exit 4"),
+    ("control-confined", "confined", "clean", (), None, None),
 )
 
 
@@ -396,11 +413,88 @@ def _env_names(target):
 
 
 def target_env(target, home, **canary_vars):
-    """The whole environment a target runs with: never the harness's own."""
-    env = {"PATH": os.environ.get("PATH", DEFAULT_PATH), "HOME": home, "TMPDIR": home, "GOTOOLCHAIN": "local"}
+    """The whole environment a target runs with: never the harness's own.
+    GOTOOLCHAIN=local goes last, over anything the allow-list let through."""
+    env = {"PATH": os.environ.get("PATH", DEFAULT_PATH), "HOME": home, "TMPDIR": home}
     env.update({n: os.environ[n] for n in _env_names(target) if n in os.environ})
     env.update(canary_vars)
+    env["GOTOOLCHAIN"] = "local"
     return env
+
+
+def _reach_root():
+    """Makes ROOT reachable to SCENARIO_ID in this mount namespace: the topmost
+    ancestor others cannot search (CI's /home/runner is 0750) is covered by a 0755
+    tmpfs, and ROOT is bound back at its own path. The rest of that ancestor, the
+    harness's HOME on CI, is then hidden from the target."""
+    fd = os.open(ROOT, os.O_PATH | os.O_DIRECTORY)
+    try:
+        for a in reversed(ROOT.parents):
+            if not os.stat(a).st_mode & 0o001:
+                depaudit._mount("-t", "tmpfs", "-o", "mode=0755,nosuid,nodev", "tmpfs", str(a))
+                os.makedirs(ROOT, mode=0o755)
+                depaudit._mount("--no-canonicalize", "--rbind", "/proc/%d/fd/%d" % (os.getpid(), fd), str(ROOT))
+                return
+    finally:
+        os.close(fd)
+
+
+def _confine(status, owned, timeout, cmd):
+    """Runs as init of the target's PID namespace, as uid 0 of its user namespace
+    (the harness's uid outside). Gives owned to SCENARIO_ID, runs cmd as it, then
+    ends the namespace and gives owned back (depaudit._hand_back), and only then
+    writes the target's exit to status, a file in a directory only the harness's
+    uid can reach. No status means the round is an error."""
+    try:
+        _reach_root()
+        for path in owned:
+            depaudit._chown_tree(path, depaudit.SCENARIO_ID)
+        proc = subprocess.Popen(depaudit.AS_SCENARIO + cmd, cwd=ROOT)
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            rc = "timeout"
+    finally:
+        depaudit._hand_back(owned)
+    pathlib.Path(status).write_text(json.dumps({"rc": rc}))
+    return 0
+
+
+def run_confined(cmd, env, owned, timeout):
+    """(rc, stdout, stderr, problem): cmd run by _confine in the uid sandbox, with
+    env as its whole environment. A sandbox that is unavailable, fails to start or
+    does not report gives problem, and rc None: the target did not run, or its
+    result is unknown (P3-4b-4c-canary-uid)."""
+    try:
+        flags = depaudit._unshare_flags(own_network=False)
+    except OSError as e:
+        return None, b"", b"", "sandbox unavailable: %s" % e
+    with tempfile.TemporaryDirectory(prefix="canary-sandbox-", dir=ROUND_DIR) as box:
+        status = pathlib.Path(box, "status.json")
+        argv = ["unshare"] + flags + ["--", sys.executable, str(pathlib.Path(__file__).resolve()), "_confine",
+                                      "--status", str(status), "--timeout", str(timeout)]
+        argv += sum((["--own", str(p)] for p in owned), []) + ["--"] + list(cmd)
+        try:
+            rc, out, err = depaudit._run_sandboxed(argv, env, timeout + 60)
+        except (OSError, subprocess.SubprocessError) as e:
+            return None, b"", b"", "sandbox did not run: %s" % e
+        try:
+            return json.loads(status.read_text())["rc"], out, err, None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None, out, err, "sandbox exit %s without a result" % rc
+
+
+_CONFINEMENT = None
+
+
+def confinement_available():
+    """Whether a command runs in the uid sandbox here (for the tests' skips; a
+    round never asks, it fails closed)."""
+    global _CONFINEMENT
+    if _CONFINEMENT is None:
+        rc, _, _, problem = run_confined(["true"], {"PATH": os.environ.get("PATH", DEFAULT_PATH)}, [], 30)
+        _CONFINEMENT = rc == 0 and not problem
+    return _CONFINEMENT
 
 
 def run_target(target, rounds, timeout=600, minted=None, max_bytes=DEFAULT_MAX_BYTES):
@@ -411,20 +505,18 @@ def run_target(target, rounds, timeout=600, minted=None, max_bytes=DEFAULT_MAX_B
             minted.extend(cans)
         det = Detector(cans)
         errors = []
-        with tempfile.TemporaryDirectory(prefix="canary-trusted-") as trusted, \
-                tempfile.TemporaryDirectory(prefix="canary-surface-") as surface, \
-                tempfile.TemporaryDirectory(prefix="canary-home-") as home:
+        with tempfile.TemporaryDirectory(prefix="canary-trusted-", dir=ROUND_DIR) as trusted, \
+                tempfile.TemporaryDirectory(prefix="canary-surface-", dir=ROUND_DIR) as surface, \
+                tempfile.TemporaryDirectory(prefix="canary-home-", dir=ROUND_DIR) as home:
             plant, ack = pathlib.Path(trusted, "plant.json"), pathlib.Path(trusted, "ack.json")
             fd = os.open(plant, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as f:
                 json.dump({"canaries": [{"kind": c.kind, "value": c.value} for c in cans]}, f)
             env = target_env(target, home, CANARY_PLANT=str(plant), CANARY_ACK=str(ack), CANARY_SURFACE_DIR=surface)
-            try:
-                p = subprocess.run(target["cmd"], env=env, cwd=ROOT, capture_output=True, timeout=timeout)
-                rc, out, err = p.returncode, p.stdout, p.stderr
-            except subprocess.TimeoutExpired as e:
-                rc, out, err = "timeout", e.stdout or b"", e.stderr or b""
-            if rc != 0:
+            rc, out, err, problem = run_confined(target["cmd"], env, [trusted, surface, home], timeout)
+            if problem:
+                errors.append(problem)
+            elif rc != 0:
                 errors.append("exit %s" % rc)
             problem = _ack_problem(ack, cans)
             if problem:
@@ -594,7 +686,14 @@ def main(argv=None):
     s.add_argument("--pid", action="append", default=[])
     s.add_argument("--out", required=True)
     s.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    c = sub.add_parser("_confine")  # internal: run_confined's namespace init
+    c.add_argument("--status", required=True)
+    c.add_argument("--timeout", type=int, required=True)
+    c.add_argument("--own", action="append", default=[])
+    c.add_argument("target", nargs=argparse.REMAINDER)
     args = ap.parse_args(argv)
+    if args.cmd == "_confine":
+        return _confine(args.status, args.own, args.timeout, args.target[1:] if args.target[:1] == ["--"] else args.target)
     return {"run": cmd_run, "round": cmd_round, "sweep": cmd_sweep}[args.cmd](args)
 
 
