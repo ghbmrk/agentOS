@@ -262,7 +262,7 @@ const HelpText = "LOOPS OFF/ON: all spare-time work. LEARNING, SECURITY TESTS, U
 	"SPARE BUDGET 100: AI calls/day. STOP SHARING. HELP UPDATES."
 
 // HelpUpdates is the reply to HELP UPDATES.
-const HelpUpdates = "UPDATES STABLE, FAST or PINNED: which releases the box offers. UPDATE SOAK 7: days other boxes test a release first. " +
+const HelpUpdates = "UPDATES STABLE, FAST or PINNED: which releases I offer. UPDATE SOAK 7: days other boxes test a release first. " +
 	"SECURITY UPDATES AUTO or ASK."
 
 // Confirm is the owner's one-line reply once a request took effect
@@ -278,11 +278,11 @@ func Confirm(r Request, set Settings) string {
 		case ChannelFast:
 			return "Updates: fast channel. New releases are offered as they come out."
 		case ChannelPinned:
-			return "Updates: pinned. Nothing installs on its own; the box still tells you about security fixes."
+			return "Updates: pinned. Nothing installs on its own; I still tell you about security fixes."
 		}
 		return fmt.Sprintf("Updates: stable channel. Releases are offered after other boxes have tested them for %d days.", set.Updates.Soak())
 	case KindSoak:
-		reply := fmt.Sprintf("Stable releases now wait %d days before the box offers them.", set.Updates.Soak())
+		reply := fmt.Sprintf("Stable releases now wait %d days before I offer them.", set.Updates.Soak())
 		if set.Updates.ChannelName() != ChannelStable {
 			reply += " It applies once you're on UPDATES STABLE." // UX-130-3
 		}
@@ -291,14 +291,14 @@ func Confirm(r Request, set Settings) string {
 		if r.On {
 			return "Tested security fixes install on their own again. Reply SECURITY UPDATES ASK if this wasn't you."
 		}
-		return "The box will ask you before it installs each security fix. Reply SECURITY UPDATES AUTO to undo."
+		return "I will ask you before I install each security fix. Reply SECURITY UPDATES AUTO to undo."
 	case KindBudget:
 		return fmt.Sprintf("Spare-time work may now use up to %d AI calls a day.", set.SpareCalls)
 	case KindSharing:
 		if r.On {
 			return "Sharing is on: learned skills built from public data may be shared. Reply STOP SHARING to stop."
 		}
-		return "Sharing is off: nothing learned leaves this box."
+		return "Sharing is off: nothing I learn leaves me."
 	}
 	if r.Loop == "" {
 		if r.On {
@@ -425,7 +425,7 @@ func (s *Scheduler) Text(ctx context.Context, msg string, unlocked bool) (reply 
 	case errors.As(err, &no):
 		return "Not allowed: " + no.reason + ".", true
 	default:
-		return "The box could not save that setting. Try again later.", true
+		return "I could not save that setting. Try again later.", true
 	}
 }
 
@@ -467,7 +467,7 @@ var errNoSharing = errors.New("loops: sharing is not wired")
 
 // DefaultsLine is onboarding's one line on the loop defaults (LOOP-0).
 func DefaultsLine(calls int64) string {
-	return fmt.Sprintf("In spare time the box learns from your tasks, tests its own security and checks for updates, "+
+	return fmt.Sprintf("In spare time I learn from your tasks, check myself against known problems and repair what I can, and check for updates, "+
 		"using up to %d AI calls a day; reply LOOPS OFF to stop that.", calls)
 }
 

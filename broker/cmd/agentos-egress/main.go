@@ -103,6 +103,33 @@ func (g grants) Set(v string) error {
 	return nil
 }
 
+// withGrants sets c's fields that follow the grants: the proxy it builds
+// over an open vault, and whether a model provider is granted (OP-9 C2).
+func withGrants(c *custody, g grants) *custody {
+	c.build = func(v *vault.Vault) (*egress.Proxy, error) { return newProxy(v, g, nil) }
+	c.granted = modelGranted(g)
+	return c
+}
+
+// modelProviders are the providers the model router serves.
+func modelProviders() []route.Provider { return []route.Provider{route.OpenAI(), route.Anthropic()} }
+
+// modelGranted reports whether some machine has a model provider granted:
+// an adapter the router serves (newRouter). Without one the agent has no
+// model route at all (OP-9 C2, A11's no-grant cause).
+func modelGranted(g grants) bool {
+	for _, as := range g {
+		for _, a := range as {
+			for _, p := range modelProviders() {
+				if a == p.Name() {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // adapters are the built-in relays. Their credentials are vault entries of
 // kind api_key named after the adapter.
 func adapters() []egress.Adapter {
@@ -187,7 +214,7 @@ func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderF
 
 func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
 	return route.New(route.Config{
-		Providers: []route.Provider{route.OpenAI(), route.Anthropic()},
+		Providers: modelProviders(),
 		Rule:      rule,
 		Granted: func(machine, provider string) bool {
 			for _, a := range g[grantsKey(machine)] {
@@ -335,19 +362,18 @@ func serveCmd(args []string) error {
 	if *polPath == "" {
 		*polPath = filepath.Join(filepath.Dir(*keysPath), "vault.pcrpolicy")
 	}
-	c, err := newCustody(&custody{
+	c, err := newCustody(withGrants(&custody{
 		keysPath: *keysPath,
 		open: func(p string) (*vault.Vault, error) {
 			return vault.OpenSealed(*vaultPath, *keysPath, vault.Passphrase(p))
 		},
-		build:     func(v *vault.Vault) (*egress.Proxy, error) { return newProxy(v, g, nil) },
 		ttl:       *ttl,
 		now:       time.Now,
 		notify:    func(s string) { log.Print(s) },
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 		owner:     *ownerNumber,
-	})
+	}, g))
 	if err != nil {
 		return err
 	}
@@ -362,6 +388,14 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	mailLn, err := serveMail(*run, c, *brokerUID)
+	if err != nil {
+		for _, s := range srvs {
+			s.Close()
+		}
+		return err
+	}
+	defer mailLn.Close()
 	if *modemUID >= 0 {
 		sign, err := serveSign(*run, c, *modemUID)
 		if err != nil {
@@ -443,6 +477,7 @@ func initCmd(args []string, out io.Writer) error {
 	vaultPath := fs.String("vault", defaultVault, "sealed vault file to create")
 	keysPath := fs.String("keys", defaultKeys, "key slots file to create")
 	statePath := fs.String("state", "", "unlock state to create; default unlock.json beside the keys")
+	setup := fs.Bool("setup", false, "setup mode: open code-generator enrollment once and leave the seed hand-out to setup (image boxes)")
 	fs.Parse(args)
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
@@ -466,11 +501,15 @@ func initCmd(args []string, out io.Writer) error {
 	if err := writeFileAtomic(*statePath, []byte("{}")); err != nil {
 		return err
 	}
-	if err := sealNew(*vaultPath, *keysPath, pass, seed); err != nil {
+	if err := sealNew(*vaultPath, *keysPath, pass, seed, *setup); err != nil {
 		return err
 	}
-	secret := b32().EncodeToString(seed)
 	fmt.Fprintf(out, "Vault passphrase: %s\n", pass)
+	if *setup {
+		fmt.Fprintln(out, "Setup shows the code generator. Keep the passphrase offline. It is shown once.")
+		return nil
+	}
+	secret := b32().EncodeToString(seed)
 	fmt.Fprintf(out, "Code generator:   otpauth://totp/AgentOS?secret=%s&issuer=AgentOS\n", secret)
 	fmt.Fprintln(out, "Keep both offline. They are shown once.")
 	return nil
@@ -481,12 +520,13 @@ func statePathFor(keysPath string) string {
 	return filepath.Join(filepath.Dir(keysPath), "unlock.json")
 }
 
-// sealNew builds the vault and keys under temporary names, stores the seed,
+// sealNew builds the vault and keys under temporary names, stores the seed
+// (and, in setup mode, the entry that opens enrollment once, K17),
 // and only then renames them into place, keys last: the keys file is what
 // makes a vault openable, so a crash leaves either nothing usable or a
 // complete vault. A vault file without its keys file can never be opened,
 // so init reports it for removal rather than leaving the owner stuck.
-func sealNew(vaultPath, keysPath, pass string, seed []byte) error {
+func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
 	if _, err := os.Lstat(keysPath); err == nil {
 		return fmt.Errorf("%s already exists; this box already has a vault", keysPath)
 	}
@@ -501,6 +541,12 @@ func sealNew(vaultPath, keysPath, pass string, seed []byte) error {
 		return err
 	}
 	err = v.Put(SeedName, vault.KindTOTPSeed, seed)
+	if err == nil && setup {
+		open := make([]byte, 16)
+		if _, err = rand.Read(open); err == nil {
+			err = v.Put(SetupOpenName, KindSetupOpen, open)
+		}
+	}
 	v.Close()
 	if err == nil {
 		err = os.Rename(vt, vaultPath)

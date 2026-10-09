@@ -53,7 +53,7 @@ func TestGrantsAreIntentsWithCodeAndLocalConfirmation(t *testing.T) {
 		Params: specParams(Spec{Account: "cal", Executor: "cal", Ops: map[string]string{"event.add": "draft"}}), Executor: ExecutorName})
 	r.g.Flush()
 	r.decide(true, "owner")
-	if st := r.state("local/g3"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "local page") {
+	if st := r.state("local/g3"); st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "Wi-Fi page") {
 		t.Fatalf("g3 without confirmation: %s %q", st.State, st.Permission.Reason)
 	}
 
@@ -91,8 +91,8 @@ func TestGrantsAreIntentsWithCodeAndLocalConfirmation(t *testing.T) {
 	noUI := newRig(t, func(c *Config) { c.LocalUI = false })
 	st := noUI.submit(journal.Intent{ID: "local/g1", Origin: "local", Account: journal.BrokerAccount, Action: journal.ActionGrantChange,
 		Params: specParams(mailGrant()), Executor: ExecutorName})
-	if st.State != journal.Denied || noUI.own.count() != 0 {
-		t.Fatalf("without a local page: %s, %d requests", st.State, noUI.own.count())
+	if st.State != journal.Denied || st.Permission.Reason != NoPageGrant || noUI.own.count() != 0 {
+		t.Fatalf("without a local page: %s %q, %d requests", st.State, st.Permission.Reason, noUI.own.count())
 	}
 }
 
@@ -225,7 +225,7 @@ func TestPauseAndRevokeNeedOnlyTheOwner(t *testing.T) {
 		t.Fatalf("pause lost on restart: %s", st.State)
 	}
 
-	r.grant(Spec{Resume: rule})
+	r.resume(rule)
 	if st := r.effect("agent/s3", "invoice.send", tpl("inv-3"), "sam@example.com"); st.State != journal.Succeeded {
 		t.Fatalf("resumed rule: %s %q", st.State, st.Permission.Reason)
 	}
@@ -260,7 +260,7 @@ func TestAChangeThatNeedsThePageIsConfirmedByItsPageAnswer(t *testing.T) {
 	if calls != 1 || local != 1 {
 		t.Fatalf("%d page calls, %d page requests", calls, local)
 	}
-	if st := r.state("local/p1"); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the box's Wi-Fi page" {
+	if st := r.state("local/p1"); st.State != journal.Pending || st.Permission.Reason != "waiting for the owner's approval on the local Wi-Fi page" {
 		t.Fatalf("waiting: %s %q", st.State, st.Permission.Reason)
 	}
 	r.pageDecide("")

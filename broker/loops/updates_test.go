@@ -56,13 +56,13 @@ func TestOwnerTextsSetTheUpdateChannelAndCadence(t *testing.T) {
 	for _, c := range []struct{ msg, reply string }{
 		{"UPDATES FAST", "Updates: fast channel. New releases are offered as they come out. Reply UPDATES STABLE if this wasn't you."},
 		{"UPDATES STABLE", "Updates: stable channel. Releases are offered after other boxes have tested them for 7 days."},
-		{"UPDATE SOAK 14", "Stable releases now wait 14 days before the box offers them."},
-		{"UPDATE SOAK 10 DAYS", "Stable releases now wait 10 days before the box offers them. Reply UPDATE SOAK 14 if this wasn't you."},
-		{"SECURITY UPDATES ASK", "The box will ask you before it installs each security fix. Reply SECURITY UPDATES AUTO to undo."},
+		{"UPDATE SOAK 14", "Stable releases now wait 14 days before I offer them."},
+		{"UPDATE SOAK 10 DAYS", "Stable releases now wait 10 days before I offer them. Reply UPDATE SOAK 14 if this wasn't you."},
+		{"SECURITY UPDATES ASK", "I will ask you before I install each security fix. Reply SECURITY UPDATES AUTO to undo."},
 		{"SECURITY UPDATES AUTO", "Tested security fixes install on their own again. Reply SECURITY UPDATES ASK if this wasn't you."},
-		{"UPDATES PINNED", "Updates: pinned. Nothing installs on its own; the box still tells you about security fixes. Reply UPDATES STABLE to undo."},
+		{"UPDATES PINNED", "Updates: pinned. Nothing installs on its own; I still tell you about security fixes. Reply UPDATES STABLE to undo."},
 		// UX-130-3: a soak set off the stable channel says when it applies.
-		{"UPDATES SOAK 9 DAYS", "Stable releases now wait 9 days before the box offers them. It applies once you're on UPDATES STABLE. Reply UPDATE SOAK 10 if this wasn't you."},
+		{"UPDATES SOAK 9 DAYS", "Stable releases now wait 9 days before I offer them. It applies once you're on UPDATES STABLE. Reply UPDATE SOAK 10 if this wasn't you."},
 	} {
 		if got, ok := r.s.Text(ctx, c.msg, true); !ok || got != c.reply {
 			t.Fatalf("%s: %q %v", c.msg, got, ok)

@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"github.com/ghbmrk/agentos/broker/recall"
 )
 
@@ -150,7 +151,7 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		return "", false, nil
 	}
 	if !t.take(machine) {
-		return "", true, errors.New("too many recall requests from this machine; wait and retry")
+		return "", true, guesterr.New("too many recall requests from this machine; wait and retry")
 	}
 	if len(raw) == 0 || string(raw) == "null" {
 		raw = json.RawMessage("{}")
@@ -167,13 +168,13 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 			Limit int      `json:"limit"`
 		}
 		if err := dec.Decode(&a); err != nil {
-			return "", true, errors.New("arguments: query, scope, kinds, fact, limit")
+			return "", true, guesterr.New("arguments: query, scope, kinds, fact, limit")
 		}
 		if len(a.Query) > maxQuery || len(a.Kinds) > maxKinds {
-			return "", true, fmt.Errorf("query is at most %d bytes and kinds at most %d", maxQuery, maxKinds)
+			return "", true, guesterr.Newf("query is at most %d bytes and kinds at most %d", guesterr.Num(maxQuery), guesterr.Num(maxKinds))
 		}
 		if strings.TrimSpace(a.Query) == "" && a.Fact == nil {
-			return "", true, errors.New("give a query, a fact, or both")
+			return "", true, guesterr.New("give a query, a fact, or both")
 		}
 		q := recall.Query{Text: a.Query, Kinds: a.Kinds, Limit: a.Limit}
 		if a.Fact != nil {
@@ -187,12 +188,12 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 			// K7: a public machine stays public unless it asks for owner data.
 			q.PublicOnly = t.cfg.Label(machine) == "public"
 		default:
-			return "", true, errors.New(`scope is "public" or "owner"`)
+			return "", true, guesterr.New(`scope is "public" or "owner"`)
 		}
 		rs, err := t.cfg.Index.Search(machine, q)
 		if err != nil {
 			t.cfg.Logf("recall %s: search: %v", machine, err)
-			return "", true, errors.New("the owner's records are unavailable to this machine now")
+			return "", true, guesterr.New("the owner's records are unavailable to this machine now")
 		}
 		ids := make([]string, len(rs))
 		for i, r := range rs {
@@ -201,18 +202,18 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		// Durable before the guest sees anything (K2b).
 		if err := t.cfg.Prov.Given(lineage, ids, t.cfg.Now()); err != nil {
 			t.cfg.Logf("recall %s: provenance: %v", machine, err)
-			return "", true, errors.New("broker could not serve recall now; retry")
+			return "", true, guesterr.New("broker could not serve recall now; retry")
 		}
 		return recall.Render(rs), true, nil
 	case "owner_preferences":
 		var a struct{}
 		if err := dec.Decode(&a); err != nil {
-			return "", true, errors.New("no arguments")
+			return "", true, guesterr.New("no arguments")
 		}
 		ps, err := t.cfg.Index.PreferencesFor(machine)
 		if err != nil {
 			t.cfg.Logf("recall %s: preferences: %v", machine, err)
-			return "", true, errors.New("the owner's preferences are unavailable to this machine now")
+			return "", true, guesterr.New("the owner's preferences are unavailable to this machine now")
 		}
 		return renderPrefs(ps), true, nil
 	default: // recall_note
@@ -222,18 +223,18 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 			Facts []factArg `json:"facts"`
 		}
 		if err := dec.Decode(&a); err != nil {
-			return "", true, errors.New("arguments: key, text, facts")
+			return "", true, guesterr.New("arguments: key, text, facts")
 		}
 		if !keyRE.MatchString(a.Key) {
-			return "", true, errors.New("key: letters, digits, . _ -; at most 64")
+			return "", true, guesterr.New("key: letters, digits, . _ -; at most 64")
 		}
 		if len(a.Text) > maxNote || len(a.Facts) > maxFacts {
-			return "", true, fmt.Errorf("text is at most %d bytes and facts at most %d", maxNote, maxFacts)
+			return "", true, guesterr.Newf("text is at most %d bytes and facts at most %d", guesterr.Num(maxNote), guesterr.Num(maxFacts))
 		}
 		var facts []recall.Fact
 		for _, f := range a.Facts {
 			if len(f.Subject) > maxFactLen || len(f.Predicate) > maxFactLen || len(f.Object) > maxFactLen {
-				return "", true, fmt.Errorf("each fact field is at most %d bytes", maxFactLen)
+				return "", true, guesterr.Newf("each fact field is at most %d bytes", guesterr.Num(maxFactLen))
 			}
 			facts = append(facts, recall.Fact{Subject: f.Subject, Predicate: f.Predicate, Object: f.Object})
 		}
@@ -250,11 +251,11 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		if errors.Is(err, recall.ErrDeleted) {
 			// #59 security B1: a lineage that read a deleted record
 			// derives no note from it, even after the owner keeps it.
-			return "", true, errors.New("this agent read a record the owner deleted; notes are off until that is settled")
+			return "", true, guesterr.New("this agent read a record the owner deleted; notes are off until that is settled")
 		}
 		if err != nil {
 			t.cfg.Logf("recall %s: note: %v", machine, err)
-			return "", true, errors.New("broker could not store the note")
+			return "", true, guesterr.New("broker could not store the note")
 		}
 		return "saved", true, nil
 	}
