@@ -240,6 +240,9 @@ func TestForgetItem2LeavesAFailedTakeBackToRecall(t *testing.T) {
 		text string
 	}{
 		{"owed", fmt.Errorf("%w: machine busy", recalltool.ErrCarried), journal.ResultSucceeded, forgetAgentNotYet},
+		// W3-forget-b2c-f1 F1-4 (L3 on #427, release 2): recall not open
+		// is owed to its next open, never retried here.
+		{"recall not open", recalltool.ErrNotOpen, journal.ResultSucceeded, forgetAgentNotOpen},
 	} {
 		r := newForgetRig(t)
 		w := &fakeWork{worked: true, ok: true, err: c.err}
