@@ -499,11 +499,22 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 		return 0, fmt.Errorf("loop7: pruning the fuzz cache: %w", err)
 	}
 	fctx, cancel := context.WithTimeout(ctx, s.cfg.FuzzTime+s.cfg.ReplayTime)
+	start := time.Now()
 	out, err := s.run(fctx, t, "-test.run=^$", "-test.fuzz=^"+t.Name+"$",
 		"-test.fuzztime="+s.cfg.FuzzTime.String(), "-test.parallel=1",
+		// An honest worker call then returns within a progress period,
+		// minimizing included, so a count flat for one is a hang (F12).
+		"-test.fuzzminimizetime="+minimizeTime.String(),
 		"-test.fuzzcachedir="+filepath.Join(s.cfg.CacheDir, "fuzz", filepath.FromSlash(t.Pkg)))
 	overran := fctx.Err() != nil
 	cancel()
+	if err != nil && exited(err) && !overran && time.Since(start) >= s.cfg.FuzzTime && stoppedAtDeadline(out, t.Name) {
+		// The engine stopped at its own -test.fuzztime but lost a race
+		// with its own cancellation and failed with "context deadline
+		// exceeded" (P3-4b-3r-confine l9): judged as the clean stop it
+		// is, by its progress (F12).
+		err = nil
+	}
 	switch {
 	case ctx.Err() != nil:
 		return 0, nil
@@ -539,114 +550,69 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 // gathered, then the exec count, which counts the baseline's runs.
 var (
 	baselineLine = regexp.MustCompile(`^fuzz: elapsed: \S+, (?:gathering baseline coverage|testing seed corpus): (\d+)/(\d+) completed`)
-	execsLine    = regexp.MustCompile(`^fuzz: elapsed: \S+, execs: (\d+) \(`)
+	execsLine    = regexp.MustCompile(`^fuzz: elapsed: (\S+), execs: (\d+) \(`)
 )
 
 // stepProgress is what a fuzz step's output says of its progress: the
-// baseline input count and the last exec count, -1 where no such line
-// was printed.
-type stepProgress struct{ baseline, execs int }
+// baseline input count, the last exec count, and for how long by the
+// lines' own elapsed fields that count had stood when the last line was
+// printed; -1 where no such line was printed.
+type stepProgress struct {
+	baseline, execs int
+	flat            time.Duration
+}
 
-// progressOf reads a fuzz step's output. Only the last exec count counts:
-// the coordinator prints it as it stops, after its workers, so no line
-// from the target itself comes after it.
+// progressPeriod is how often the engine prints an exec count line
+// (internal/fuzz's statTicker).
+const progressPeriod = 3 * time.Second
+
+// minimizeTime bounds each minimizing call of the engine's one worker
+// (-test.fuzzminimizetime, 60 s by default), well under progressPeriod.
+const minimizeTime = time.Second
+
+// progressOf reads a fuzz step's output. The lines come from the child's
+// combined output, the regexes are line-anchored and the last match
+// wins, so a target that prints a line shaped like the engine's can move
+// the parse (F12): a forged stall only opens a finding, and a forged
+// good step closes one only from a release binary other than the
+// producer loops holds (F13).
 func progressOf(out []byte) stepProgress {
-	p := stepProgress{-1, -1}
+	p := stepProgress{-1, -1, -1}
+	var since time.Duration // elapsed at the first line of the last count
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
 		if m := baselineLine.FindStringSubmatch(sc.Text()); m != nil && m[1] == m[2] {
 			p.baseline, _ = strconv.Atoi(m[1])
 		} else if m := execsLine.FindStringSubmatch(sc.Text()); m != nil {
-			p.execs, _ = strconv.Atoi(m[1])
+			n, _ := strconv.Atoi(m[2])
+			at, err := time.ParseDuration(m[1])
+			switch {
+			case err != nil:
+				// No time to measure from: judged by the baseline only.
+				p.flat, since = -1, -1
+			case p.execs != n || since < 0 || at < since:
+				p.flat, since = 0, at
+			default:
+				p.flat = at - since
+			}
+			p.execs = n
 		}
 	}
 	return p
 }
 
 // stalled: the step printed its baseline and an exec count, and the count
-// never moved past the baseline. A step too short to print either is no
-// stall, and no good step either.
-func (p stepProgress) stalled() bool { return p.baseline >= 0 && p.execs >= 0 && p.execs <= p.baseline }
+// never moved past the baseline; or its last count had stood for a whole
+// progress period (3h-r1). With one worker, whose calls return every
+// 100 ms of fuzzing, a count flat for a period means one input ran that
+// long (F12). A step too short to print either is no stall, and no good
+// step either.
+func (p stepProgress) stalled() bool {
+	return p.baseline >= 0 && p.execs >= 0 && p.execs <= p.baseline || p.execs >= 0 && p.flat >= progressPeriod
+}
 
 // moved: the step's exec count moved past its baseline.
 func (p stepProgress) moved() bool { return p.baseline >= 0 && p.execs > p.baseline }
-
-// hangFile, in a target's Dir, records for each open hang finding the
-// SHA-256 of the binary that last produced it, so a restart keeps it.
-const hangFile = "hang.json"
-
-// readHangs reads t's hang record: detail to producing binary digest. A
-// missing record is empty; one that is not a regular file (a link) is
-// refused, never trusted. t.Dir is the fuzz user's, so the record is read
-// through the tree (F16).
-func (s *Source) readHangs(t Target) (map[string]string, error) {
-	r, err := s.tree()
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	p := filepath.Join(s.in(t.Dir), hangFile)
-	fi, err := r.Lstat(p)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]string{}, nil
-	} else if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("loop7: %s is not a regular file", p)
-	}
-	b, err := r.ReadFile(p)
-	if err != nil {
-		return nil, err
-	}
-	m := map[string]string{}
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("loop7: %s: %w", p, err)
-	}
-	return m, nil
-}
-
-// writeHangs replaces t's hang record, or removes it when empty, through
-// the tree (F16).
-func (s *Source) writeHangs(t Target, m map[string]string) error {
-	r, err := s.tree()
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	p := filepath.Join(s.in(t.Dir), hangFile)
-	if len(m) == 0 {
-		if err := r.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	if err := r.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
-	suffix, err := runName()
-	if err != nil {
-		return err
-	}
-	tmpName := p + "." + suffix
-	tmp, err := r.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	defer r.Remove(tmpName)
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return r.Rename(tmpName, p)
-}
 
 // binaryDigest is the SHA-256 of the file at path.
 func binaryDigest(path string) (string, error) {
@@ -662,29 +628,24 @@ func binaryDigest(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// hang records the binary that produced a hang of t, then reports it. The
-// record comes first, so a crash in between leaves a record and no
-// finding, never a finding no step can close. A hang seen again records
-// the newer binary: a lucky good step of a build that hung closes nothing.
+// hang reports a hang of t with the SHA-256 of the binary that produced
+// it, which loops holds on the finding's record (F13). A hang seen again
+// reports the newer binary: a lucky good step of a build that hung closes
+// nothing.
 func (s *Source) hang(ctx context.Context, t Target, detail string) error {
 	d, err := binaryDigest(t.Binary)
 	if err != nil {
 		return err
 	}
-	m, err := s.readHangs(t)
-	if err != nil {
-		return errors.Join(err, s.report(ctx, t, detail))
-	}
-	m[detail] = d
-	if err := s.writeHangs(t, m); err != nil {
-		return errors.Join(err, s.report(ctx, t, detail))
-	}
-	return s.report(ctx, t, detail)
+	_, err = s.cfg.Report.Report(ctx, loops.Finding{Check: loops.CheckFuzz, Subject: t.subject(), Severity: loops.High, Detail: detail, Producer: d})
+	return err
 }
 
-// closeHangs closes t's open hang findings after good step p, each only
-// when this binary differs from the one that produced it (CloseTarget,
-// S30). A finding with no trusted record of its producer stays open.
+// closeHangs offers good step p of t's binary to close each of t's open
+// hang findings. It passes only the step's own digest and counts: loops
+// compares the digest against the producer on its own record and closes
+// only on another binary (CloseTarget, S30), so a refusal is the rule
+// working, not an error.
 func (s *Source) closeHangs(t Target, p stepProgress) error {
 	var open []loops.Finding
 	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
@@ -695,33 +656,47 @@ func (s *Source) closeHangs(t Target, p stepProgress) error {
 	if len(open) == 0 {
 		return nil
 	}
-	m, err := s.readHangs(t)
-	if err != nil {
-		return err
-	}
 	d, err := binaryDigest(t.Binary)
 	if err != nil {
 		return err
 	}
 	var errs []error
-	closed := false
 	for _, f := range open {
-		produced := m[f.Detail]
-		if produced == "" || produced == d {
-			continue
-		}
-		c := loops.Closure{Kind: loops.ClosureStep, Binary: d, Produced: produced, Execs: p.execs, Baseline: p.baseline, At: s.cfg.Now()}
-		if err := s.cfg.Report.CloseTarget(f.ID, c); err != nil {
+		c := loops.Closure{Kind: loops.ClosureStep, Binary: d, Execs: p.execs, Baseline: p.baseline, At: s.cfg.Now()}
+		if err := s.cfg.Report.CloseTarget(f.ID, c); err != nil && !errors.Is(err, loops.ErrFinding) {
 			errs = append(errs, err)
-			continue
 		}
-		delete(m, f.Detail)
-		closed = true
-	}
-	if closed {
-		errs = append(errs, s.writeHangs(t, m))
 	}
 	return errors.Join(errs...)
+}
+
+// stoppedAtDeadline reports output whose one failure is fuzz target
+// name's "context deadline exceeded" and nothing after it but FAIL: what
+// Go's coordinator prints when its done channel closes before its
+// workers' context is cancelled, so its own -test.fuzztime reads as an
+// error. A step that stored an input or failed otherwise is not one.
+func stoppedAtDeadline(out []byte, name string) bool {
+	if bytes.Contains(out, []byte("Failing input written to")) {
+		return false
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	at := -1
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "--- FAIL: ") {
+			if at >= 0 || !strings.HasPrefix(l, "--- FAIL: "+name+" (") {
+				return false
+			}
+			at = i
+		}
+	}
+	if at < 0 {
+		return false
+	}
+	rest := lines[at+1:]
+	if n := len(rest); n > 0 && strings.TrimSpace(rest[n-1]) == "FAIL" {
+		rest = rest[:n-1]
+	}
+	return len(rest) == 1 && strings.TrimSpace(rest[0]) == context.DeadlineExceeded.Error()
 }
 
 // failLine and passLine are a seed subtest failing or passing under
