@@ -178,9 +178,9 @@ func TestAFuzzCrashIsReportedKeptAndResolved(t *testing.T) {
 	}
 }
 
-// A panicking seed stops the binary, so a later seed never runs: its
-// open finding stays open, since only its own passing subtest is a
-// replay (Security 4a on #523).
+// Two crashing seeds sort before the open finding's input: a panic stops
+// the binary, so that input never runs and its finding stays open, since
+// only its own passing subtest is a replay (Security 4a and L3 on #523).
 func TestASeedThatNeverRanResolvesNothing(t *testing.T) {
 	g := newFake()
 	tg := target(t, planted(t, true))
@@ -193,6 +193,7 @@ func TestASeedThatNeverRanResolvesNothing(t *testing.T) {
 		return data
 	}
 	write("0crash", "synthetic crash")
+	write("0crash2", "another synthetic crash")
 	good := write("1good", "ab")
 	open := loops.Finding{Check: loops.CheckFuzz, Subject: tg.subject(), Severity: loops.High, Detail: crashDetail(good)}
 	if _, err := g.Report(context.Background(), open); err != nil {
@@ -202,7 +203,7 @@ func TestASeedThatNeverRanResolvesNothing(t *testing.T) {
 	if _, err := s.replay(context.Background(), tg); err != nil {
 		t.Fatal(err)
 	}
-	if len(g.resolved) != 0 || len(g.open) != 2 {
+	if _, stillOpen := g.open[string(open.Check)+":"+open.Subject+":"+open.Detail]; !stillOpen || len(g.resolved) != 0 {
 		t.Fatalf("open %v resolved %v", g.open, g.resolved)
 	}
 }
