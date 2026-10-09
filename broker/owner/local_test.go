@@ -72,7 +72,7 @@ func TestLocalWrongCodesCountAndAlertTheOwner(t *testing.T) {
 	if !r.ch.codes.st.LowLocked || r.ch.SessionUnlocked(r.clock()) {
 		t.Fatal("five wrong local codes did not lock")
 	}
-	if got := r.inbox(); !strings.Contains(got, "box's Wi-Fi") {
+	if got := r.inbox(); !strings.Contains(got, "my Wi-Fi") {
 		t.Fatalf("owner alert: %q", got)
 	}
 }
@@ -167,7 +167,7 @@ func TestLocalSignInAlertsAreCoalesced(t *testing.T) {
 
 	r = newRig(t, nil)
 	r.ch.LocalSignIn(wrongCode(1))
-	if got := r.inbox(); !strings.HasPrefix(got, "A wrong code was entered on the box's Wi-Fi") {
+	if got := r.inbox(); !strings.HasPrefix(got, "A wrong code was entered on my Wi-Fi") {
 		t.Fatalf("first wrong-code alert: %q", got)
 	}
 	r.advance(time.Minute)
@@ -178,7 +178,7 @@ func TestLocalSignInAlertsAreCoalesced(t *testing.T) {
 	default:
 	}
 	notes := strings.Join(r.ch.TakeDigestNotes(), " ")
-	if !strings.Contains(notes, "2 wrong codes entered on the box's Wi-Fi") {
+	if !strings.Contains(notes, "2 wrong codes entered on my Wi-Fi") {
 		t.Fatalf("digest: %q", notes)
 	}
 	if r.ch.UnlockPeriod() != DefaultUnlockFor {
@@ -260,7 +260,7 @@ func TestLocalBoundExhaustionIsTexted(t *testing.T) {
 		}
 		break
 	}
-	if !strings.HasPrefix(last, "Sign-in on the box's Wi-Fi is paused until") {
+	if !strings.HasPrefix(last, "Sign-in on my Wi-Fi is paused until") {
 		t.Fatalf("bound alert: %q", last)
 	}
 }

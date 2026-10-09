@@ -125,7 +125,7 @@ func sentinel(err error) (said, bool) {
 	case errors.Is(err, vm.ErrContained):
 		return said{"this agent holds a record the owner deleted; no fork until that is settled"}, true
 	case errors.Is(err, vm.ErrNoExec):
-		return said{"this box cannot run commands in workers"}, true
+		return said{"this host cannot run commands in workers"}, true
 	case errors.Is(err, overlay.ErrDeleteFailed):
 		return said{"the deletion could not finish; try again, or roll back or destroy the worker"}, true
 	case errors.Is(err, overlay.ErrUnsafe):

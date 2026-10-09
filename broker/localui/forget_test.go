@@ -3,6 +3,7 @@ package localui
 import (
 	"bytes"
 	"context"
+	"html/template"
 	"log"
 	"net/http"
 	"net/url"
@@ -238,7 +239,7 @@ func TestTheForgetPageLogsNoTaskWords(t *testing.T) {
 	f.post("/forget/ask", f.forgetForm("owner:b"))
 	f.srv.SetOwner(f.pageWith(f.ch, localsrv.Config{}))
 	f.signIn()
-	if p := f.get("/forget/"); !strings.Contains(p, "The box isn&#39;t answering right now.") || strings.Contains(p, forgetCanary) {
+	if p := f.get("/forget/"); !strings.Contains(p, template.HTMLEscapeString(pausedUnreachable)) || strings.Contains(p, forgetCanary) {
 		t.Fatalf("no hook: %s", p)
 	}
 	if strings.Contains(buf.String(), forgetCanary) {

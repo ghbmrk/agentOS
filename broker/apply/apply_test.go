@@ -89,7 +89,7 @@ func TestNeverAppliesDuringACallWorkOrExcludedHours(t *testing.T) {
 		line string
 	}{
 		{func(b bool) { r.inCall = b }, "Update 1 will install after the current call."},
-		{func(b bool) { r.working = b }, "Update 1 will install once the agent's current task is done."},
+		{func(b bool) { r.working = b }, "Update 1 will install once my current task is done."},
 		{func(b bool) { r.excluded = func(time.Time) bool { return b } }, "Update 1 will install after your update-free hours."},
 		{func(b bool) {
 			if b {
@@ -210,7 +210,7 @@ func TestFallbackRevertsTheAdoptionAndRewindsNothing(t *testing.T) {
 	}
 	// UX-133-2: in STATUS until the next update installs, and once in
 	// the digest.
-	want := "Update 1 did not start cleanly, so the box went back to the version it had. Nothing is needed from you. It won't be tried again; a later update will replace it."
+	want := "Update 1 did not start cleanly, so I went back to the version I had. Nothing is needed from you. It won't be tried again; a later update will replace it."
 	if got := r.a.Status(); got != want {
 		t.Fatalf("status: %q", got)
 	}

@@ -1,0 +1,65 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+)
+
+// recordOwnerSIM records an adopted SIM as the owner line's in
+// agentos-modem's roles file (P2-2w d2b), where the bridge reads it at
+// each open. agentosd writes it, not the bridge: the bridge parses hostile
+// PDUs, and its unit binds the roles directory read-only (L3 on #170).
+// The file is replaced whole by rename, keeps the other keys it holds,
+// and is 0644 for the bridge's user; one that is not JSON is left alone.
+func recordOwnerSIM(path string) func(iccid string) error {
+	return func(iccid string) error {
+		roles := map[string]json.RawMessage{}
+		b, err := os.ReadFile(path)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return err
+		default:
+			if err := json.Unmarshal(b, &roles); err != nil {
+				return errors.New("agentosd: the modem's roles file is not JSON")
+			}
+		}
+		v, _ := json.Marshal(iccid)
+		roles["owner_iccid"] = v
+		out, err := json.Marshal(roles)
+		if err != nil {
+			return err
+		}
+		dir := filepath.Dir(path)
+		tmp, err := os.CreateTemp(dir, ".roles-*")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(tmp.Name())
+		if _, err := tmp.Write(out); err != nil {
+			tmp.Close()
+			return err
+		}
+		if err := tmp.Chmod(0o644); err != nil {
+			tmp.Close()
+			return err
+		}
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
+			return err
+		}
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp.Name(), path); err != nil {
+			return err
+		}
+		if d, err := os.Open(dir); err == nil {
+			d.Sync()
+			d.Close()
+		}
+		return nil
+	}
+}

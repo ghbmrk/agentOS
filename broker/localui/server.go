@@ -182,6 +182,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/resume", s.post(s.resume))
 	s.mux.HandleFunc("/signout", s.post(s.signout))
 	s.mux.Handle("/home", s.signedIn(http.HandlerFunc(s.home)))
+	s.mux.Handle("/line/sim", s.signedIn(s.post(s.adoptSIM)))
 	s.mux.HandleFunc("/box.vcf", s.contact)
 	if s.cfg.Vault != nil {
 		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
@@ -573,6 +574,12 @@ func (s *Server) signout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
+	s.homePage(w, r, "", "")
+}
+
+// homePage is the signed-in home page, with msg or errText from a form
+// on it.
+func (s *Server) homePage(w http.ResponseWriter, r *http.Request, msg, errText string) {
 	s.mu.Lock()
 	ms := append([]mount(nil), s.mounts...)
 	s.mu.Unlock()
@@ -581,7 +588,11 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		Waiting   int
 		LineNote  string
 		LineTexts []string
-	}{Mounts: ms}
+		// SIM and SIMEnds name a SIM to adopt as the owner line's (P2-2w
+		// d2b); Cell is the grid cell its code field may take.
+		SIM, SIMEnds, Cell string
+		Msg, Err           string
+	}{Mounts: ms, Msg: msg, Err: errText}
 	auth := localapi.Auth{Token: cookieToken(r)}
 	var rq localapi.Requests
 	if s.call(r.Context(), localapi.OpRequests, auth, &rq) == nil {
@@ -591,9 +602,51 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	var line localapi.Line
 	if s.call(r.Context(), localapi.OpLine, auth, &line) == nil {
 		v.LineNote, v.LineTexts = line.Note, lineTexts(line, time.Local)
+		v.SIM, v.SIMEnds = line.SIM, line.SIMEnds
+	}
+	if v.SIM != "" {
+		var cell localapi.Text
+		if s.call(r.Context(), localapi.OpGridCell, struct{}{}, &cell) == nil {
+			v.Cell = cell.Text
+		}
 	}
 	s.render(w, "home", v)
 }
+
+// adoptSIM adopts the SIM the home page showed as the owner line's (P2-2w
+// d2b). It always takes a code, however fresh the sign-in: adopting
+// re-opens the owner channel on that SIM's line (CH-19).
+func (s *Server) adoptSIM(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.PostFormValue("code"))
+	if strings.HasPrefix(code, owner.UnlockProofPrefix) || len(code) > localapi.MaxCode {
+		s.homePage(w, r, "", wrongCodeText)
+		return
+	}
+	var a localapi.Answered
+	err := s.call(r.Context(), localapi.OpSIM, localapi.AdoptSIM{Token: cookieToken(r), SIM: r.PostFormValue("sim"), Code: code}, &a)
+	switch {
+	case refused(err, localapi.ErrLimited):
+		s.homePage(w, r, "", limitedText)
+	case refused(err, localapi.ErrBadArgs):
+		s.homePage(w, r, "", simStaleText)
+	case err != nil:
+		s.homePage(w, r, "", simFailedText)
+	case a.Refusal == "":
+		s.homePage(w, r, a.Text, "")
+	case a.Refusal == localapi.RefusedCodeNeeded:
+		s.homePage(w, r, "", simCodeText)
+	case a.Refusal == localapi.RefusedChanged:
+		s.homePage(w, r, "", simStaleText)
+	default:
+		s.homePage(w, r, "", refusalText(a.Refusal, a.Text))
+	}
+}
+
+const (
+	simCodeText   = "To use this SIM, enter a code from your code generator (not the one I texted)."
+	simStaleText  = "My phone modem's SIM changed since this page loaded. Check the SIM below and try again."
+	simFailedText = "I can't answer right now. Nothing changed. Reload to try again."
+)
 
 // contact serves the box's number as a contact card (§8.1 step 5).
 func (s *Server) contact(w http.ResponseWriter, r *http.Request) {

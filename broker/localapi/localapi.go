@@ -49,6 +49,10 @@ const (
 	// a code like any grant (W5a-resume).
 	OpPaused    = "page_paused"
 	OpAskResume = "page_ask_resume"
+	// OpSIM adopts the SIM the page showed as the owner line's (P2-2w
+	// d2b): always with a code-generator code or the asked grid cell
+	// (CH-19), since it re-opens the owner channel on that SIM's line.
+	OpSIM = "page_sim"
 	// OpForgetTasks lists the owner's recent tasks as FORGET does;
 	// OpForget asks to forget one by its goal ID, and the owner then
 	// approves it with a code like any forget (W3-forget-b3r, CAP-3).
@@ -57,7 +61,7 @@ const (
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpForgetTasks, OpForget}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -143,6 +147,26 @@ type Line struct {
 	Others   int  `json:"others,omitempty"`
 	TimedOut int  `json:"timed_out,omitempty"`
 	Dropped  bool `json:"dropped,omitempty"`
+	// SIM names a SIM in the owner line's modem the owner may adopt as the
+	// owner line's, while the line is swapped or unbound (P2-2w d2b): an
+	// opaque tag of SIMLen lowercase hex, never the serial. SIMEnds is the
+	// serial's last four digits, as printed on the SIM's card.
+	SIM     string `json:"sim,omitempty"`
+	SIMEnds string `json:"sim_ends,omitempty"`
+}
+
+// SIMLen is a SIM tag's length.
+const SIMLen = 16
+
+// AdoptSIM adopts the SIM the page showed under SIM as the owner line's,
+// with a code-generator code or the asked grid cell. Its reply is an
+// Answered: RefusedCodeNeeded without a code, RefusedChanged when the
+// modem no longer has that SIM or the line is no longer swapped or
+// unbound.
+type AdoptSIM struct {
+	Token string `json:"token"`
+	SIM   string `json:"sim"`
+	Code  string `json:"code,omitempty"`
 }
 
 // Outage is a stretch when the owner line could not be used: Missed

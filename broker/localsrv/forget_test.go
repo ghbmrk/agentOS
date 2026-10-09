@@ -51,3 +51,32 @@ func TestARecentTaskIsAskedToBeForgottenFromASession(t *testing.T) {
 		}
 	}
 }
+
+// SR3-1, as #444 holds every new route to: a forget op reads the lock
+// generation and the unlocked state in one status read, so a lock and a
+// re-unlock between two reads never hands an older session "unlocked",
+// and the next call finds the session gone.
+func TestAForgetOpReadsTheLockAndTheUnlockTogether(t *testing.T) {
+	for _, op := range []string{localapi.OpForgetTasks, localapi.OpForget} {
+		r := newRig(t)
+		tok := r.signIn()
+		args := map[string]any{localapi.OpForgetTasks: localapi.Auth{Token: tok}, localapi.OpForget: localapi.Forget{Token: tok, ID: "owner:a"}}[op]
+		r.own.relock = true
+		out, err := r.call(op, args)
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		if l, ok := out.(localapi.ForgetTasks); ok && !l.Locked {
+			t.Fatalf("%s listed for a session locked since: %+v", op, l)
+		}
+		if len(r.forgets) != 0 && r.forgets[0] != "owner:a" {
+			t.Fatalf("%s forwarded %v", op, r.forgets)
+		}
+		if _, err := r.call(op, args); code(err) != localapi.ErrUnauthorized {
+			t.Fatalf("%s after a lock: %v", op, err)
+		}
+		if len(r.forgets) > 1 {
+			t.Fatalf("%s forwarded %v", op, r.forgets)
+		}
+	}
+}

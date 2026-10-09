@@ -33,7 +33,7 @@ Built for W3-forget-b3 ("Promised done text survives a restart") against CAP-3, 
 
 ## The Forget page's hook (W3-forget-b3r)
 
-Built for W3-forget-b3r (potency R2 of W3-forget-b3) against CAP-3, CH-7 and CH-8. Covers `PageTasks`, `PageForget` and `wirePage` in `forget.go`; the page is `broker/localui` (L32 there).
+Built for W3-forget-b3r (potency R2 of W3-forget-b3) against CAP-3, CH-7 and CH-8. Covers `PageTasks`, `PageForget` and `wirePage` in `forget.go`; the page is `broker/localui` (L33 there).
 
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|
