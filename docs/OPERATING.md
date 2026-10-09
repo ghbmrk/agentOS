@@ -36,7 +36,7 @@ Cost per merged package = (calls × context per call × read price + writes + ou
 Levers in order of effect:
 
 1. **Cut rework.** Raise the first-pass rate and build only what the first release needs (§2, §4). L3 cause codes (§4) say which part of the pipeline the rework comes from.
-2. **Shrink context per call.** Small briefs, a short BOARD index, compaction at 120k, fresh sessions instead of revived ones (§5).
+2. **Shrink context per call.** Small briefs, a short BOARD index, compaction at 200k, fresh sessions instead of revived ones (§5).
 3. **Fewer calls per package.** One package per session; batch reviews (§4).
 4. **Route by model price.** Use the cheapest model that keeps quality, and check with tests rather than with a more expensive model (§5).
 5. **Fill capped time with free CI.** Fuzzing, race soak and mutation run on Actions while the allowance resets.
