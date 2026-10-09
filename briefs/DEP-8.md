@@ -59,6 +59,7 @@ Each test must be shown red at main (after DEP-7), with the failing message cite
 | 8c | `alice:99999:2` and runner `100000:65536` (ends at 100000, one-id overlap at the start) | refused, names `alice:99999:2` | no overlap check |
 | 8c | `alice: 150000:65536`, and separately `alice:0x24000:65536`, next to runner `100000:65536` | refused, names the line as unparsable | the line is skipped |
 | 8c | `alice:0303240:65536` (octal 100000 to shadow), and separately `alice:0x186a0:65536` (hex 100000), next to runner `100000:65536`; also `alice:150000:065536` (leading zero in count) | refused, names the line as unparsable | read as decimal 303240 or skipped, so no overlap is seen |
+| 8c | `alice:150000:6553²` (non-ASCII digit `²` in the count; `str.isdigit()` accepts it, `int()` raises) next to runner `100000:65536` | refused, names the file and the line as unparsable | `isdigit()` passes and `int()` raises, or the line is skipped (closes DEP-7 l6) |
 | 8d | runner `0:65536` then runner `300000:65536` | refused, names `0:65536` | at main the first line is taken, so this is red only through the floor; keep the case to pin "no fall-through" against a mutant that skips bad lines |
 | 8e | `sandbox_available()` with a refused range (the probe binaries present, as in `UnavailableTest`) | `SANDBOX_WHY` has the rule's reason, `replace it`, the computed floor, `getent passwd`, `getent group`, and `/etc/subuid or /etc/subgid`; no `above every uid` | the text says "above every uid" and "add one" |
 | 8e | a range that is missing | `add one` with the same rules | (text change) |
@@ -77,6 +78,7 @@ Each test must be shown red at main (after DEP-7), with the failing message cite
 | other-owner overlap deleted; `<` vs `<=` at the runner's end | 8c `alice:165536` / `alice:165535:1` pair |
 | `<` vs `<=` at the runner's start (`runner.start < other.end`) | 8c `alice:99999:1` / `alice:99999:2` pair |
 | leading zeros accepted and read as decimal | 8c `0303240` / `065536` rows |
+| `str.isdigit()` used as the digit test (accepts `²`) | 8c `6553²` row |
 | overlap checked in `SUBUID` only | 8c gid-side row |
 | unparsable lines skipped | 8c `alice: 150000` / `0x24000` rows |
 | a bad line skipped instead of refused | 8d |
