@@ -65,14 +65,21 @@ class VendoredCorpusTest(unittest.TestCase):
 
 
 class EmbeddedCorpusTest(unittest.TestCase):
+    def assert_copy_matches(self, copy: pathlib.Path, vendored: pathlib.Path):
+        self.assertEqual(copy.read_bytes(), embedded_bytes(vendored))
+        self.assertEqual(json.loads(copy.read_text())["items"], json.loads(vendored.read_text())["items"])
+
     def test_the_embedded_copy_is_the_vendored_items(self):
-        self.assertEqual(EMBEDDED.read_bytes(), embedded_bytes(VENDORED))
-        self.assertEqual(json.loads(EMBEDDED.read_text())["items"], json.loads(VENDORED.read_text())["items"])
+        self.assert_copy_matches(EMBEDDED, VENDORED)
 
     def test_a_changed_byte_in_the_copy_fails(self):
-        b = bytearray(EMBEDDED.read_bytes())
-        b[len(b) // 2] ^= 0x01
-        self.assertNotEqual(bytes(b), embedded_bytes(VENDORED))
+        with tempfile.TemporaryDirectory() as t:
+            copy = pathlib.Path(t) / "promptinject.json"
+            b = bytearray(EMBEDDED.read_bytes())
+            b[len(b) // 2] ^= 0x01
+            copy.write_bytes(bytes(b))
+            with self.assertRaises(AssertionError):
+                self.assert_copy_matches(copy, VENDORED)
 
     def test_a_changed_vendored_item_fails(self):
         with tempfile.TemporaryDirectory() as t:
@@ -80,8 +87,8 @@ class EmbeddedCorpusTest(unittest.TestCase):
             v["items"][0]["text"] += " "
             changed = pathlib.Path(t) / "items.json"
             changed.write_text(json.dumps(v))
-            self.assertNotEqual(EMBEDDED.read_bytes(), embedded_bytes(changed))
-
+            with self.assertRaises(AssertionError):
+                self.assert_copy_matches(EMBEDDED, changed)
 
 if __name__ == "__main__":
     unittest.main()
