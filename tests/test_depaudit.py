@@ -2,7 +2,9 @@
 # parsing, the endpoint policy, the static endpoint scan, and the offline run.
 # Makes no coverage claim for DEP-1–4: those are claimed by the packages whose
 # scenarios pass this harness (broker P1-2 onward).
+import contextlib
 import errno
+import inspect
 import io
 import json
 import os
@@ -527,6 +529,186 @@ class UidBoundaryTest(unittest.TestCase):
         self.assertLessEqual({"control-distinct-uid", "control-evidence-channels"}, names)
 
 
+REJECTING_STRACE = textwrap.dedent("""\
+    #!%s
+    import os, sys
+    for a, b in zip(sys.argv, sys.argv[1:]):
+        if a == "-e" and b.startswith("trace=") and "mount" in b[6:].split(","):
+            sys.exit("strace: invalid system call 'mount'")
+    os.execv(%r, [%r] + sys.argv[1:])
+    """)
+
+
+def run_unavailable(env=None, **patches):
+    """cmd_run with a fresh sandbox probe; returns (exit code, stderr). No target may run."""
+    saved = depaudit._SANDBOX
+    depaudit._SANDBOX = None
+    err = io.StringIO()
+    try:
+        with mock.patch.dict(os.environ, env or {}), mock.patch.multiple(depaudit, **patches) if patches \
+                else contextlib.nullcontext(), \
+                mock.patch.object(depaudit, "run_target", side_effect=AssertionError("a target ran")), \
+                contextlib.redirect_stderr(err):
+            code = depaudit.main(["run", "--targets", os.devnull])
+    finally:
+        depaudit._SANDBOX = saved
+    return code, err.getvalue()
+
+
+def path_without(*absent):
+    """A PATH directory with every sandbox binary found now except those named."""
+    d = tempfile.TemporaryDirectory()
+    for name in ("unshare", "setpriv", "strace", "newuidmap", "newgidmap", "python3", "sh"):
+        if name not in absent and shutil.which(name):
+            os.symlink(shutil.which(name), os.path.join(d.name, name))
+    return d
+
+
+class UnavailableTest(unittest.TestCase):
+    """DEP-6c, DEP-6d and DEP-6e (briefs/DEP-6.md; local IDs with no SPEC row, so no REQ
+    marker): `depaudit run` exits 2 up front, naming the need that failed and its remedy."""
+
+    def test_a_kernel_without_mount_setattr_exits_2_up_front(self):
+        # An unassigned syscall number: the kernel itself answers ENOSYS (DEP-6c).
+        code, err = run_unavailable(_SYS_MOUNT_SETATTR=1000)
+        self.assertEqual(code, 2, err)
+        self.assertIn("mount_setattr", err)
+        self.assertIn("5.12", err)
+
+    def test_the_mount_setattr_probe_finds_the_real_call(self):
+        self.assertTrue(depaudit._has_mount_setattr())
+
+    def test_a_missing_binary_is_named(self):
+        with path_without("unshare") as d:
+            code, err = run_unavailable({"PATH": d})
+        self.assertEqual(code, 2, err)
+        self.assertRegex(err, r"missing on PATH: unshare\b")
+
+    def test_a_missing_newuidmap_names_its_package(self):
+        # DEP-6e (lens on #562 UX 2): the remedy, per cause.
+        with path_without("newuidmap", "newgidmap") as d:
+            code, err = run_unavailable({"PATH": d})
+        self.assertEqual(code, 2, err)
+        self.assertRegex(err, r"missing on PATH: .*newuidmap")
+        self.assertIn("apt-get install uidmap", err)
+
+    @unittest.skipUnless(all(shutil.which(n) for n in ("unshare", "setpriv", "strace", "newuidmap", "newgidmap")),
+                         "needs every sandbox binary, so the subordinate range is the first need to fail")
+    def test_a_missing_subordinate_range_is_named_with_its_remedy(self):
+        # DEP-6d and DEP-6e (lens on #562 UX 1 and 2): _id_maps()'s reason, not a bare exit 2.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "sub")
+            pathlib.Path(path).write_text("someone:5000:10\n")
+            code, err = run_unavailable(SUBUID=path, SUBGID=path)
+        self.assertEqual(code, 2, err)
+        self.assertIn("no subordinate uid and gid range for uid %d" % os.geteuid(), err)
+        self.assertIn("usermod --add-subuids", err)
+        self.assertIn("D13", err)
+        # Security 4a on #568 point 1: no fixed range, which can overlap another user's.
+        self.assertNotRegex(err, r"--add-sub[ug]ids \d")
+        self.assertIn("/etc/subuid", err)
+        self.assertIn("/etc/subgid", err)
+
+    def test_a_failing_mount_setattr_in_the_sandbox_is_one_line(self):
+        # DEP-6c: _inner refuses with the path and errno, before any command, not a traceback.
+        def refuse(path):
+            raise OSError(errno.EPERM, "mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY) failed with EPERM "
+                          "(Operation not permitted) on %s" % path)
+        with tempfile.TemporaryDirectory() as k, mock.patch.object(depaudit, "_mount"), \
+                mock.patch.object(depaudit, "MASKED_DIRS", ()), \
+                mock.patch.object(depaudit, "_set_read_only", side_effect=refuse), \
+                self.assertRaises(SystemExit) as cm:
+            depaudit._mask_or_refuse([k], set())
+        self.assertRegex(str(cm.exception.code), r"^depaudit: sandbox not run, .*EPERM.*on %s" % k)
+
+    def test_the_subordinate_range_remedy_names_no_fixed_range(self):
+        # Security 4a on #568 point 1: a fixed range can overlap another user's (D13); unskipped.
+        with mock.patch.object(depaudit, "_has_mount_setattr", return_value=True), \
+                mock.patch.object(depaudit.shutil, "which", return_value="/bin/x"), \
+                mock.patch.object(depaudit, "_unshare_flags", side_effect=OSError("no range")):
+            why = depaudit._sandbox_missing()
+        self.assertTrue(why.startswith("no range; "), why)
+        self.assertNotRegex(why, r"\d+-\d+")
+        self.assertIn("--add-subuids START-END --add-subgids START-END", why)
+        self.assertIn("overlaps no line in /etc/subuid or /etc/subgid", why)
+        self.assertIn("D13", why)
+        # Security re-sign on #568 point 1: START=0 or a login uid would map the scenario onto
+        # root or that user, so the text sets a floor and excludes every passwd/group id.
+        self.assertIn("START at least 100000 or SUB_UID_MIN/SUB_GID_MIN from /etc/login.defs", why)
+        self.assertIn("above every uid in /etc/passwd and gid in /etc/group", why)
+
+    def test_inner_refuses_through_mask_or_refuse(self):
+        # L3 on #568 point 2: _inner must not call _mask_host_sockets bare, or the traceback is back.
+        src = inspect.getsource(depaudit._inner)
+        self.assertIn("_mask_or_refuse(", src)
+        self.assertNotIn("_mask_host_sockets(", src)
+
+
+class KeptMountsTest(unittest.TestCase):
+    """DEP-6b (briefs/DEP-6.md; a local ID with no SPEC row, so no REQ marker): the control's
+    mount check reads /proc/self/mounts and statvfs, sharing no code with writable_mounts."""
+
+    # source mount-point fstype options dump pass
+    TEXT = "\n".join("t %s tmpfs %s 0 0" % e for e in [
+        ("/", "rw,relatime"),
+        ("/k", "ro,relatime"),
+        ("/k/sub", "rw,nosuid"),
+        ("/k/w", "rw"),
+        ("/k/w/inner", "rw"),
+        ("/k/w/ro2", "rw"),
+        ("/k/ro", "ro"),
+        ("/kx", "rw"),
+        ("/k/a\\040b", "rw"),
+        ("/k/gone", "rw"),
+        ("/k/denied", "rw"),
+        ("/k/lands-ro", "rw"),
+    ]) + "\n"
+
+    @staticmethod
+    def statvfs(path):
+        if path == "/k/gone":
+            raise FileNotFoundError(errno.ENOENT, "gone", path)
+        if path == "/k/denied":
+            raise PermissionError(errno.EACCES, "denied", path)
+        return mock.Mock(f_flag=os.ST_RDONLY if path == "/k/lands-ro" else 0)
+
+    def check(self, text=None):
+        # /k/w/ro2 is read-only inside a writes path inside a read-only kept path: the closest
+        # declared path decides (D10), so it is checked (L3 on #557 point 1).
+        return depaudit.kept_rw_mounts(self.TEXT if text is None else text, ["/k", "/k/w/ro2"], ["/k/w"],
+                                       self.statvfs)
+
+    def test_rw_mounts_under_read_only_kept_paths_are_found(self):
+        self.assertEqual(self.check(), ["/k/sub", "/k/w/ro2", "/k/a b", "/k/denied"])
+
+    def test_a_bug_in_writable_mounts_does_not_blind_it(self):
+        with mock.patch.object(depaudit, "writable_mounts", return_value=[]), \
+                mock.patch.object(depaudit, "_reaches_rw", return_value=False):
+            self.assertIn("/k/sub", self.check())
+
+    def test_the_mounted_root_is_checked(self):
+        self.assertEqual(depaudit.kept_rw_mounts("p /proc proc rw 0 0\n", ["/"], [], self.statvfs), ["/proc"])
+
+    def test_an_unparsable_line_fails_closed(self):
+        for line in ("garbage", "t /k/b\\x tmpfs rw 0 0"):
+            with self.subTest(line=line):
+                self.assertEqual(len(self.check(line + "\n")), 1)
+                self.assertIn("unparsed", self.check(line + "\n")[0])
+
+    def test_it_reads_its_own_source(self):
+        src = inspect.getsource(depaudit.kept_rw_mounts)
+        for shared in ("writable_mounts", "_reaches_rw", "_OCTAL", "mountinfo"):
+            self.assertNotIn(shared, src)
+
+    def test_the_kept_read_only_control_uses_it(self):
+        # L3 point 1 and Security 4a point 2 on #568: the control reads the second source.
+        src = inspect.getsource(depaudit._control)
+        self.assertIn("kept_rw_mounts(", src)
+        self.assertIn("/proc/self/mounts", src)
+        self.assertNotIn("writable_mounts", src)
+        self.assertNotIn("mountinfo", src)
+
+
 class IdMapTest(unittest.TestCase):
     """DEP-3a and DEP-3c (local IDs, no REQ marker): the map comes from the runner's
     subordinate range, and without one the sandbox is unavailable, never the old map."""
@@ -644,6 +826,8 @@ class SubmountTest(unittest.TestCase):
             self.assertEqual(os.listdir(d), [])
         self.assertEqual(res["outcome"], "error", res)
         self.assertRegex(res["detail"], "rw mount under a read-only kept path: .*/etc/nsswitch.conf")
+        # DEP-6e (briefs/DEP-6.md; local ID, no REQ marker): the error gives the next step.
+        self.assertRegex(res["detail"], r"bind it read-only, or drop the keep entry \(tools/ASSUMPTIONS\.md D10\)")
 
 
 class MountinfoTest(unittest.TestCase):
@@ -746,10 +930,38 @@ class StraceNamesTest(unittest.TestCase):
     def test_the_real_strace_names_every_traced_syscall(self):
         self.assertTrue(self.available_with_path(os.environ["PATH"]))
 
-    def test_only_the_architecture_list_carries_a_question_mark(self):
-        names = depaudit.TRACED.split(",")
-        self.assertEqual(sorted(n[1:] for n in names if n.startswith("?")),
-                         sorted(depaudit._ABSENT.get(os.uname().machine, ())))
+    def test_a_rejected_strace_name_is_on_the_exit_2_line(self):
+        # DEP-6d: the probe's stderr tail reaches the FAIL line.
+        with tempfile.TemporaryDirectory(dir="/tmp") as d:
+            os.chmod(d, 0o755)
+            pathlib.Path(d, "strace").write_text(REJECTING_STRACE % (sys.executable, shutil.which("strace"),
+                                                                    shutil.which("strace")))
+            pathlib.Path(d, "strace").chmod(0o755)
+            code, err = run_unavailable({"PATH": d + os.pathsep + os.environ["PATH"]})
+        self.assertEqual(code, 2, err)
+        self.assertIn("invalid system call 'mount'", err)
+
+
+class TracedTest(unittest.TestCase):
+    """DEP-6a (briefs/DEP-6.md; a local ID with no SPEC row, so no REQ marker): TRACED per
+    architecture, each branch run on any machine."""
+
+    ALL = ("connect", "sendto", "sendmsg", "sendmmsg") + depaudit._LINKS + depaudit._MOUNTS
+
+    def test_aarch64_marks_exactly_symlink_and_link(self):
+        names = depaudit._traced("aarch64").split(",")
+        self.assertEqual(sorted(n for n in names if n.startswith("?")), ["?link", "?symlink"])
+        self.assertEqual(sorted(n.lstrip("?") for n in names), sorted(self.ALL))
+
+    def test_x86_64_and_an_unlisted_machine_mark_nothing(self):
+        for machine in ("x86_64", "riscv64"):
+            with self.subTest(machine=machine):
+                names = depaudit._traced(machine).split(",")
+                self.assertEqual([n for n in names if "?" in n], [])
+                self.assertEqual(sorted(names), sorted(self.ALL))
+
+    def test_traced_is_the_running_machine_list(self):
+        self.assertEqual(depaudit.TRACED, depaudit._traced(os.uname().machine))
 
 
 class CarryTest(unittest.TestCase):
