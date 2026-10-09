@@ -125,3 +125,9 @@ Release findings on SR3-5-f1 (#579): L3 point 2 and Security round 1 R1 (delete 
 **Needs:** SR3-5-f1 (merged, #579 cf62d2a).
 
 **Delivery.** Tier A (`broker/mail`), strongest model, one session. Estimate/checkpoint about 90k tokens. L3 with the threat check, then Security. Done = CI green, every row above covered by a passing test, red-at-main messages quoted in the PR.
+
+### SR3-5-f2 delivery notes
+
+- `Execute` now takes the judgements of every effect that reaches the organize path (all of them are organize or delete-remote), so the `verb.Organize` guard on the check is gone; `keepJudged` and `Reconcile` stay organize-only.
+- The kept-pin map is keyed by `attemptKey{id, attempt}` so expiry can ask whether the intent is in use.
+- ASSUMPTIONS M16 updated and M18 added.
