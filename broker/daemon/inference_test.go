@@ -119,7 +119,9 @@ var netOK = map[string]allowance{
 	"loop7": {"process-group kill of its fuzz children; their jail's user, empty network namespace, own IPC namespace and identity-mapped user namespace; no_new_privs on the starting thread; owner and link-count checks",
 		[]string{"golang.org/x/sys/unix.PR_SET_NO_NEW_PRIVS", "golang.org/x/sys/unix.Prctl",
 			"syscall.CLONE_NEWIPC", "syscall.CLONE_NEWNET", "syscall.CLONE_NEWUSER", "syscall.Credential", "syscall.Kill", "syscall.SIGKILL", "syscall.Stat_t", "syscall.SysProcAttr", "syscall.SysProcIDMap"}},
-	"probecmd": {"process-group kill of its probe children", []string{"syscall.Kill", "syscall.SIGKILL", "syscall.SysProcAttr"}},
+	"probecmd": {"its probe children's own process group", []string{"syscall.SysProcAttr"}},
+	// The one package that starts a process (P3-4b-3r-env-r8).
+	"childproc": {"a child's SysProcAttr, and the process-group kill on cancel", []string{"syscall.Kill", "syscall.SIGKILL", "syscall.SysProcAttr"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
 }
@@ -135,8 +137,11 @@ var escapeOK = map[string]map[string]string{
 	// in agentosd, never a link and never a path from configuration or
 	// state, with a minimal environment, in a process group a timeout
 	// kills whole.
-	"loop7":    {"os/exec": "runs the release-listed fuzz test binaries in /usr/lib/agentos/fuzz (loop7 TestABinaryOutsideTheReleaseIsRefused, TestALinkInTheReleaseIsNotExecuted)"},
-	"probecmd": {"os/exec": "runs release-listed probe harnesses (probecmd TestACommandOutsideTheReleaseIsRefused); not linked until P3-4b-4c"},
+	// They start them through childproc, the one package that may import
+	// os/exec once P3-4b-3r-env-r8b moves vm/gvisor and clock (childproc
+	// TestOnlyChildprocStartsAProcess); it checks each child's environment
+	// immediately before the start.
+	"childproc": {"os/exec": "starts every child, with a deny-by-default environment checked at the start (childproc TestTheEnvironmentIsDeniedByDefault)"},
 }
 
 // rawOK are the syscall numbers besides SYS_IOCTL a broker package may
@@ -587,16 +592,21 @@ func g(sock string, cfg config) {
 
 // REQ: LOOP-7, LOOP-9
 //
-// P3-4b-3a requirement 1: agentosd links LOOP-7's fuzz runner, and its
-// os/exec is the reviewed escapeOK entry; probecmd has the same entry for
-// when P3-4b-4c links it. No other package of the graph gains one.
+// P3-4b-3a requirement 1: agentosd links LOOP-7's fuzz runner. Since
+// P3-4b-3r-env-r8 the runners start children through childproc, which
+// holds the reviewed os/exec entry; neither runner has one of its own,
+// and no other package of the graph gains one (vm/gvisor and clock keep
+// theirs until P3-4b-3r-env-r8b).
 func TestEscapeOKNamesTheLoopRunners(t *testing.T) {
 	for _, p := range []string{"loop7", "probecmd"} {
-		if escapeOK[p]["os/exec"] == "" {
-			t.Errorf("%s has no reviewed os/exec entry", p)
+		if escapeOK[p]["os/exec"] != "" {
+			t.Errorf("%s has its own os/exec entry; it starts children through childproc", p)
 		}
 	}
-	runners := map[string]bool{"vm/gvisor": true, "clock": true, "loop7": true, "probecmd": true}
+	if escapeOK["childproc"]["os/exec"] == "" {
+		t.Error("childproc has no reviewed os/exec entry")
+	}
+	runners := map[string]bool{"vm/gvisor": true, "clock": true, "childproc": true}
 	for p, es := range escapeOK {
 		if es["os/exec"] != "" && !runners[p] {
 			t.Errorf("%s has an os/exec entry no review named", p)
@@ -622,13 +632,16 @@ var envExempt = map[string]string{
 
 // launcherPkgs are the packages whose calls start a child or read the
 // process's environment, with their default names.
-var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "syscall", "golang.org/x/sys/unix": "unix"}
+var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "syscall", "golang.org/x/sys/unix": "unix", module + "childproc": "childproc"}
 
 // childEnvCheck reads one Go source and returns the functions that start
 // a child without an explicit environment (noEnv) and those that put the
 // process's own environment into one (inherits). Imports count under any
-// name, dot imports included; a file that imports no launcher package is
-// skipped. Each function declaration, with the func literals inside it,
+// name, dot imports included. Every file is read, whatever it imports, so
+// the Env-value rules below hold everywhere (P3-4b-3r-env-r8). Since
+// P3-4b-3r-env-r8 this check is defence in depth: the boundary is
+// childproc, which checks a child's environment at its start, and the
+// gate that keeps every other package from starting one. Each function declaration, with the func literals inside it,
 // is checked as one unit, and so is each package-level var or type spec;
 // a flagged unit is named by its function, or by "var" or "type" and its
 // names.
@@ -697,6 +710,8 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //     this file declared so and assigned nowhere in the file; a call to a
 //     package function whose every return is one of those, or a bare
 //     return of a named result it never assigns.
+//   - Such a nil Env is flagged whatever holds it, a command or not: an
+//     .Env assignment or an Env key of any literal (P3-4b-3r-env-r8, D4).
 //
 // inherits is a reference to any selector named Environ (os.Environ,
 // syscall.Environ, unix.Environ, (*exec.Cmd).Environ) anywhere inside an
@@ -707,7 +722,8 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 // package) whose return expression, or a local variable it returns, holds
 // one, followed three calls deep; a package-level var is followed into
 // its initializer and every assignment to it in its file. syscall.Exec and unix.Exec count as
-// starting a child. It has no exemption.
+// starting a child. An argument to childproc.NewEnv counts as an Env value
+// (P3-4b-3r-env-r8). It has no exemption.
 func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -724,9 +740,9 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 			names[p] = name
 		}
 	}
-	if len(names) == 0 {
-		return nil, nil
-	}
+	// No early return for a file without a launcher import: the Env-value
+	// rules (a nil Env on any receiver, an Environ in an Env) hold in
+	// every file (P3-4b-3r-env-r8, brief D4).
 	is := func(e ast.Expr, pkg string, sels ...string) bool {
 		name := names[pkg]
 		sel := ""
@@ -1288,6 +1304,8 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 					skip[id] = true
 					if id.Name == "Env" {
 						u.inherit = u.inherit || holds(n.Value, 3)
+						// A nil Env, whatever the literal's type (brief D4).
+						u.bad = u.bad || nilAt(n.Value, n.Pos())
 					}
 				}
 			case *ast.CompositeLit:
@@ -1326,12 +1344,21 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 						rhs = n.Rhs[i : i+1]
 						if nilAt(rhs[0], n.Pos()) {
 							nilEnvAt[k] = append(nilEnvAt[k], n.Pos())
+							// Whatever the receiver (brief D4).
+							u.bad = true
 						}
 					}
 					envAt[k] = append(envAt[k], n.Pos())
 					for _, r := range rhs {
 						u.inherit = u.inherit || holds(r, 3)
 					}
+				}
+			}
+			// The process's environment given to childproc.NewEnv is
+			// inherited, as in an Env (P3-4b-3r-env-r8 requirement 6).
+			if c, ok := n.(*ast.CallExpr); ok && is(c.Fun, module+"childproc", "NewEnv") {
+				for _, a := range c.Args {
+					u.inherit = u.inherit || holds(a, 3)
 				}
 			}
 			if x, ok := n.(ast.Expr); ok {
@@ -1813,6 +1840,59 @@ func e12() { c := exec.Command("x"); ((c).Env) = []string{}; (c).Run() }
 func e10() { c := exec.Command("x"); c.Env = build(nil); c.Run() }
 func build(extra []string) []string { return append([]string{"PATH=/bin"}, extra...) }`), src(``, `func fixed2() []string { return []string{"PATH=/bin"} }`)}
 	if noEnv, inherits := check(ok...); len(noEnv)+len(inherits) != 0 {
+		t.Errorf("flagged %v %v", noEnv, inherits)
+	}
+}
+
+// REQ: CRED-1, ARC-1
+//
+// P3-4b-3r-env-r8 requirements 5 and 6 (brief D4): a nil Env is flagged
+// outright, whatever holds it and whatever the file imports, and the
+// process's environment given to childproc.NewEnv counts as inherited.
+func TestEnvCheckFlagsANilEnvOnAnyReceiver(t *testing.T) {
+	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
+	check := func(c string) (noEnv, inherits []string) {
+		path := filepath.Join(t.TempDir(), "p.go")
+		if err := os.WriteFile(path, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return childEnvCheck(t, path)
+	}
+	for _, c := range []string{
+		src(``, `type T struct{ Env []string }; func f() { var t T; t.Env = nil; _ = t }`),
+		src(``, `type T struct{ Env []string }; func f() T { return T{Env: []string(nil)} }`),
+		src(``, `type T struct{ Env []string }; var unset []string; func f() T { return T{Env: unset} }`),
+		src(``, `type T struct{ Env []string }; func none() []string { return nil }; func f(t *T) { t.Env = none() }`),
+		src(`"fmt"`, `func f(x *struct{ Env []string }) { x.Env = nil; fmt.Println(x) }`),
+	} {
+		if noEnv, _ := check(c); len(noEnv) == 0 {
+			t.Errorf("nil Env missed:\n%s", c)
+		}
+	}
+	// Environ in an Env, in a file with no launcher import (closes
+	// P3-4b-3r-env-r2; #651 UX 1).
+	noImport := src(``, `type C struct{ Env []string }; func (C) Environ() []string { return nil }; func f(c *C) { c.Env = append(c.Environ(), "A=1") }`)
+	if _, inherits := check(noImport); len(inherits) == 0 {
+		t.Errorf("Environ in an Env missed in a file with no launcher import:\n%s", noImport)
+	}
+	noImportOK := src(``, `type C struct{ Env []string }; func f(c *C) { c.Env = append([]string{"PATH=/bin"}, "A=1") }`)
+	if noEnv, inherits := check(noImportOK); len(noEnv)+len(inherits) != 0 {
+		t.Errorf("flagged %v %v:\n%s", noEnv, inherits, noImportOK)
+	}
+	for _, c := range []string{
+		src(`"os"; "github.com/ghbmrk/agentos/broker/childproc"`, `func f() childproc.Env { return childproc.NewEnv(os.Environ()...) }`),
+		src(`"os"; cp "github.com/ghbmrk/agentos/broker/childproc"`, `func f() cp.Env { return cp.NewEnv(append([]string{"PATH=/bin"}, os.Environ()...)...) }`),
+		src(`"os"; "github.com/ghbmrk/agentos/broker/childproc"`, `func env() []string { return os.Environ() }; func f() childproc.Env { return childproc.NewEnv(env()...) }`),
+	} {
+		if _, inherits := check(c); len(inherits) == 0 {
+			t.Errorf("Environ into NewEnv missed:\n%s", c)
+		}
+	}
+	ok := src(`"os"; "github.com/ghbmrk/agentos/broker/childproc"`, `type T struct{ Env []string }
+func f() T { return T{Env: []string{}} }
+func g(t *T) { t.Env = []string{"A=1"} }
+func h() childproc.Env { return childproc.NewEnv("PATH=/bin", "HOME="+os.Getenv("X")) }`)
+	if noEnv, inherits := check(ok); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v", noEnv, inherits)
 	}
 }
