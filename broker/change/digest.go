@@ -197,6 +197,8 @@ func (p *Pipeline) Digest() []string {
 			}
 			switch {
 			case a.Reverted != "":
+			case a.Staged: // UNDO is offered once it has started (SR3-4)
+				line += fmt.Sprintf(" MORE %s", a.Short)
 			case p.undoableLocked(a):
 				line += fmt.Sprintf(" UNDO %s / MORE %s", a.Short, a.Short)
 			default:

@@ -174,6 +174,7 @@ form { margin: .6em 0 1.2em; }
 {{range .Requests}}<section class="card"><h2>{{.ID}}{{with .Expires}} <span class="muted">Answer before {{.}}</span>{{end}}</h2>
 {{if .Local}}<p class="muted">Can't be shown in a text, so it is asked only here.</p>{{end}}
 {{range .Items}}<p>{{if .Unverified}}<b>Unverified:</b> I could not read these details from the source. {{end}}<b>{{.Verb}}</b> {{.Object}}{{with .Detail}}, {{.}}{{end}}{{with .Amount}}, <b>{{.}}</b>{{end}}</p>
+{{with .Terms}}<ul>{{range .}}<li><b>{{.Label}}:</b> {{.Value}}</li>{{end}}</ul>{{end}}
 {{with .Recipients}}<p>To {{len .}} recipient{{if ne (len .) 1}}s{{end}}, exactly as the action uses them:</p><ul>{{range .}}<li class="mono">{{.}}</li>{{end}}</ul>{{end}}
 {{if .Odd}}<p class="err">Has an unusual character, shown as [U+…]. Letters from other alphabets can look like plain ones; deny if you didn't expect it.</p>{{end}}
 <p class="muted">{{.Undo}}</p>{{end}}
@@ -280,7 +281,8 @@ form { margin: .6em 0 1.2em; }
 {{else if eq .Step "codes"}}
 <p class="muted">Paired with your number {{.Paired}}.</p>{{template "restart" false}}
 <h2>3. Add approval codes</h2>
-{{if .CodesEnrolled}}<p>Approval codes are already set up. If you no longer have the code generator, replace it with your recovery key after setup.</p>
+{{if .CodesUnavailable}}
+{{else if .CodesEnrolled}}<p>Approval codes are already set up. If you no longer have the code generator, replace it with your recovery key after setup.</p>
 <form method="post" action="/setup/codes"><input type="hidden" name="enrolled" value="1"><button>Continue</button></form>
 {{else if .CodesShown}}<form method="post" action="/setup/codes"><label>Type the 6-digit code your code generator shows for AgentOS<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Confirm</button></form>
 <form method="post" action="/setup/codes"><input type="hidden" name="new" value="1"><button>Show a new key</button></form>

@@ -248,7 +248,12 @@ func (c *Channel) LocalGridCell() string {
 // one (CH-18). Sign-ins are always texted to the owner, at most one text
 // an hour listing each; wrong codes are texted on the first of a bound
 // window and when the bound is used up, and listed in the digest.
-func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
+//
+// locks is the session-lock count (LocalStatus.Locks) the code was accepted
+// under, read in the same critical section: the texts go out after it, and
+// a lock meanwhile must not be credited to this sign-in (SR3-1). The caller
+// binds its session to locks and passes it to LocalResume.
+func (c *Channel) LocalSignIn(code string) (until time.Time, locks uint64, err error) {
 	now := c.cfg.Now()
 	c.mu.Lock()
 	ok, err := c.takeLocalLocked(now)
@@ -257,7 +262,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 		if err == nil {
 			err = ErrTooMany
 		}
-		return time.Time{}, err
+		return time.Time{}, 0, err
 	}
 	// A refused unlock proof is not a wrong code: it is refused when the
 	// vault process has no proof to match (a late redirect, no Verifier),
@@ -269,7 +274,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	signIn, signIns, answers := "", 0, 0
 	switch {
 	case err == nil && res == strongOK:
-		until = c.codes.st.UnlockedUntil
+		until, locks = c.codes.st.UnlockedUntil, c.codes.st.Locks
 		c.codes.unlockCh = ""
 		// Every local sign-in is told to the owner, since it lifts locks
 		// and challenge mode without the owner's phone (L1), coalesced to
@@ -300,11 +305,11 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, err error) {
 	}
 	switch {
 	case err != nil:
-		return time.Time{}, err
+		return time.Time{}, 0, err
 	case res != strongOK:
-		return time.Time{}, ErrWrongCode
+		return time.Time{}, 0, ErrWrongCode
 	}
-	return until, nil
+	return until, locks, nil
 }
 
 // takeLocalLocked spends one local attempt of the fixed 24-hour bound.
@@ -353,15 +358,23 @@ func (c *Channel) LocalStop(ctx context.Context) error {
 	return nil
 }
 
+// ErrLocked: the session was locked since the sign-in a local op rests on.
+var ErrLocked = errors.New("owner: session locked since sign-in")
+
 // LocalResume is RESUME from a signed-in local device (P1-5 carry-forward).
 // The caller must have checked the sign-in; it is a stronger proof than the
-// texted code CH-11 asks for, so no further code is needed. A texted RESUME
+// texted code CH-11 asks for, so no further code is needed. locks is the
+// count that sign-in returned: any session lock since refuses with
+// ErrLocked, checked where the resume commits (SR3-1). A texted RESUME
 // code issued earlier is voided.
-func (c *Channel) LocalResume() (string, error) {
+func (c *Channel) LocalResume(locks uint64) (string, error) {
 	// c.mu spans the resume and the fresh windows, so no release slips
 	// between them (L3 on #76), as on the text path.
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.codes.st.Locks != locks {
+		return "", ErrLocked
+	}
 	c.resume = nil
 	if !c.cfg.Engine.Stopped() {
 		return "Not stopped. Nothing to resume.", nil

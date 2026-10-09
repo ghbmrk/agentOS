@@ -78,7 +78,7 @@ func TestStagedImages(t *testing.T) {
 	if len(d) != 1 || !strings.HasPrefix(d[0], "Staged update 40; it starts at the next restart.") {
 		t.Fatalf("staged digest: %q", d)
 	}
-	if err := e.p.ConfirmStaged(r.Short); err != nil {
+	if err := e.p.ConfirmStaged(r.ID); err != nil {
 		t.Fatal(err)
 	}
 	if d := e.p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "Installed update 40.") {
@@ -86,7 +86,7 @@ func TestStagedImages(t *testing.T) {
 	}
 	r2 := e.release(release(t, 41, false, map[string][]byte{"host-image/release": []byte("b")}))
 	e.p.Digest()
-	if err := e.p.StageFailed(bg, r2.Short); err != nil {
+	if err := e.p.StageFailed(bg, r2.ID); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(e.p.Files("host-image")["host-image/release"]); got != update.Digest([]byte("a")) {
@@ -374,6 +374,9 @@ func TestRevertNeverEmptiesTarget(t *testing.T) {
 	}
 	if d := e.p.Digest(); len(d) != 1 || strings.Contains(d[0], "UNDO") || !strings.HasSuffix(d[0], " MORE "+r.Short) {
 		t.Fatalf("offered an undo that cannot work: %q", d)
+	}
+	if err := e.p.ConfirmStaged(r.ID); err != nil {
+		t.Fatal(err)
 	}
 	if err := e.p.Revert(bg, r.Short, OriginOwner); err == nil || !strings.Contains(err.Error(), "nothing to boot") {
 		t.Fatalf("emptied the image slot: %v", err)

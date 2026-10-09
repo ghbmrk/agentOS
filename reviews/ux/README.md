@@ -16,7 +16,7 @@ Finding kinds CI now catches; the screen no longer looks for them by hand (OPERA
 
 | Finding kind | Check | Since |
 |---|---|---|
-| — | none recorded yet | — |
+| CH-12 "a problem text names a step that cannot work" (UX run 2, #327, #423; #409 U6), for the held-restore texts only | `TestHeldOwnerTextsNameOnlyStepsThatWork` (broker/cmd/agentosd/held_test.go): each text a held box can send names only steps that work in its state, is GSM-7 within three segments, and lists exactly the replies taken. Other owner texts are still screened by hand. | W3-forget-b1-7 |
 
 ## Spec-wide runs
 
@@ -33,4 +33,4 @@ Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory 
 
 ## Recurring kinds (to become checks)
 
-- **A problem text names a step that cannot work** (CH-12): UX run 2 (#124, #126, #132, #133) and #327. The next package touching owner texts adds a test that flags it ([2026-10-08](2026-10-08-lens-bundle-a.md#recurring-kind)).
+- **A problem text names a step that cannot work** (CH-12): UX run 2 (#124, #126, #132, #133), #327 and #423 (STATUS says a release waits for approval when no request is open, [2026-10-09](2026-10-09-pr423.md)). The next package touching owner texts adds a test that flags it ([2026-10-08](2026-10-08-lens-bundle-a.md#recurring-kind)).

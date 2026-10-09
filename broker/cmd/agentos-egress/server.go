@@ -586,7 +586,7 @@ func enrollHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	case err == errLocked:
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
-	case err == errEnrolled, err == errNoEnrollment, err == errNotConfirmed:
+	case err == errEnrolled, err == errNotOpen, err == errNoEnrollment, err == errNotConfirmed:
 		http.Error(w, err.Error(), err.(*unlockErr).status)
 		return
 	case errors.As(err, &paused):

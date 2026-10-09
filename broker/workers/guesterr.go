@@ -106,6 +106,8 @@ func sentinel(err error) (said, bool) {
 		return errStopped, true
 	case errors.Is(err, vm.ErrExecNotStarted):
 		return said{"the command did not start; retry it"}, true
+	case errors.Is(err, vm.ErrExecNoProgram):
+		return said{"the command did not start: its program was not found or cannot run; check its path and that it is executable, since a retry fails the same way"}, true
 	case errors.Is(err, vm.ErrExecFailed):
 		return said{"the runtime failed after the command started, so it may have run; check what it changed before running it again"}, true
 	case errors.Is(err, vm.ErrPreempted):

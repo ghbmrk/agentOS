@@ -25,10 +25,12 @@ type stillOwner struct{}
 func (stillOwner) LocalStatus() owner.LocalStatus {
 	return owner.LocalStatus{Stopped: true, LocalLeft: 24}
 }
-func (stillOwner) LocalGridCell() string                                    { return "C3" }
-func (stillOwner) LocalSignIn(string) (time.Time, error)                    { return time.Time{}, owner.ErrWrongCode }
+func (stillOwner) LocalGridCell() string { return "C3" }
+func (stillOwner) LocalSignIn(string) (time.Time, uint64, error) {
+	return time.Time{}, 0, owner.ErrWrongCode
+}
 func (stillOwner) LocalStop(context.Context) error                          { return nil }
-func (stillOwner) LocalResume() (string, error)                             { return "", nil }
+func (stillOwner) LocalResume(uint64) (string, error)                       { return "", nil }
 func (stillOwner) LocalRequests() []owner.LocalRequest                      { return nil }
 func (stillOwner) LocalWaiting() string                                     { return "" }
 func (stillOwner) LocalStatusLines() string                                 { return "" }
