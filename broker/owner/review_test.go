@@ -379,6 +379,7 @@ func TestRestartCancelsAndReportsWhatItDropped(t *testing.T) {
 // with their first-asked time, expiry, and item digest, denies those that
 // expired meanwhile, cancels a record saved without its expiry, and says
 // so in the boot text. It hands over once.
+// REQ: TEST-1-1
 func TestRestartHandsOpenRequestsToReissue(t *testing.T) {
 	store := FileStore{Path: filepath.Join(t.TempDir(), "owner.json")}
 	r := newRig(t, store)
@@ -391,9 +392,9 @@ func TestRestartHandsOpenRequestsToReissue(t *testing.T) {
 	// an older build without its expiry, and one asked in the future. One
 	// whose expiry is past MaxTTL is capped.
 	if err := r.ch.codes.commit(func(s *State) {
-		s.Pending = append(s.Pending, PendingRef{ID: "Z9", Refs: []string{"z"}},
-			PendingRef{ID: "Y9", Refs: []string{"y"}, Asked: t0.Add(time.Hour), Expires: t0.Add(2 * time.Hour), Sums: []string{"s"}},
-			PendingRef{ID: "X9", Refs: []string{"x"}, Asked: t0, Expires: t0.Add(30 * 24 * time.Hour), Sums: []string{"s"}})
+		s.Pending = append(s.Pending, PendingRef{ID: "Z1", Refs: []string{"z"}},
+			PendingRef{ID: "Y1", Refs: []string{"y"}, Asked: t0.Add(time.Hour), Expires: t0.Add(2 * time.Hour), Sums: []string{"s"}},
+			PendingRef{ID: "X1", Refs: []string{"x"}, Asked: t0, Expires: t0.Add(30 * 24 * time.Hour), Sums: []string{"s"}})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +404,7 @@ func TestRestartHandsOpenRequestsToReissue(t *testing.T) {
 	r.ch = r.open() // reboot
 	r.ch.Boot()
 	text := r.inbox()
-	for _, want := range []string{a + ", X9 will be re-sent with new codes", "Cancelled requests: Z9, Y9.", "Expired: " + b + "."} {
+	for _, want := range []string{a + ", X1 will be re-sent with new codes", "Cancelled requests: Z1, Y1.", "Expired: " + b + "."} {
 		if !strings.Contains(text, want) {
 			t.Errorf("boot text %q lacks %q", text, want)
 		}
@@ -421,7 +422,7 @@ func TestRestartHandsOpenRequestsToReissue(t *testing.T) {
 	if len(ds) != 3 || ds[0].Ref != "c" || ds[0].Why != "expired" || ds[1].Ref != "z" || ds[1].Why != "restart" || ds[2].Ref != "y" {
 		t.Fatalf("decisions %+v", ds)
 	}
-	for _, id := range []string{a, b, "Z9", "Y9", "X9"} {
+	for _, id := range []string{a, b, "Z1", "Y1", "X1"} {
 		if _, ok := r.ch.codes.st.Retired[id]; !ok {
 			t.Errorf("%s not retired", id)
 		}

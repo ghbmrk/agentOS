@@ -1,6 +1,7 @@
 package change
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -118,6 +119,12 @@ func (noop) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
 	return journal.Outcome{Result: journal.ResultSucceeded}
 }
 
+// pinnedSplitKey fixes which side of the dev/held-out split each test case
+// lands on. With a random key, 12 cases at DevPercent 30 leave fewer than
+// MinHeldOut (3) held-out cases about once in 4,500 runs, and an adoption
+// then needs the owner and is rejected as "the owner said no" (CH-21a f1).
+var pinnedSplitKey = []byte("agentos-change-tests-split-key-1")
+
 func newEnv(t *testing.T, mod func(*Config)) *env {
 	t.Helper()
 	e := &env{t: t, store: &MemStore{}, ev: &evaluator{ran: map[string]bool{}, tasks: map[string]bool{}}}
@@ -130,6 +137,7 @@ func newEnv(t *testing.T, mod func(*Config)) *env {
 		Private:     func(b []byte) bool { return containsCanary(b) },
 		DevPercent:  30,
 		MinSecurity: 1,
+		Rand:        bytes.NewReader(pinnedSplitKey),
 	}
 	if mod != nil {
 		mod(&cfg)

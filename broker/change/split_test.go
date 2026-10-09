@@ -3,6 +3,7 @@ package change
 // REQ: CHG-1
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"testing"
@@ -119,5 +120,25 @@ func TestSplitKeepsLegacySide(t *testing.T) {
 	}
 	if k := splitKey(Case{ID: "case-1", Goal: "owner:m"}); k != "goal:owner:m" {
 		t.Fatalf("goal split key %q", k)
+	}
+}
+
+// REQ: TEST-1-2
+// The test env's split key is pinned, and leaves the 12-case suites the
+// tests build well above MinHeldOut, so no run can reject a setup for want
+// of held-out cases.
+func TestEnvSplitKeyIsPinned(t *testing.T) {
+	a, b := newEnv(t, nil), newEnv(t, nil)
+	if !bytes.Equal(a.p.key, b.p.key) || !bytes.Equal(a.p.key, pinnedSplitKey) {
+		t.Fatal("the env's split key is not the pinned one")
+	}
+	held := 0
+	for i := 1; i <= 12; i++ {
+		if splitOf(a.p.key, fmt.Sprintf("case-task-%d", i), 30) == heldOut {
+			held++
+		}
+	}
+	if held < 6 {
+		t.Fatalf("pinned key leaves %d of 12 cases held out", held)
 	}
 }
