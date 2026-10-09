@@ -35,6 +35,6 @@ The check is recorded in reviews/ux/README.md under "Checks that replaced findin
 
 **Gate:** tier A (cmd/agentosd, recovery state). Needs L3, the UX lens on the texts, and Security 4a (who may answer, and what a held box opens).
 
-**Scope:** `broker/cmd/agentosd/` (main.go, restoreconfirm.go, a new held.go and their tests, ASSUMPTIONS.md), reviews/ux/README.md, BOARD.md, LATER.md.
+**Scope:** `broker/cmd/agentosd/` (main.go, restoreconfirm.go, a new held.go and their tests, ASSUMPTIONS.md), reviews/ux/README.md, BOARD.md, LATER.md; `broker/daemon/arc2_test.go` for agentosd's ARC-2 import list (bridgeproto, modem), added when CI found it.
 
 **Estimate:** under 120k tokens, strongest model (tier A).
