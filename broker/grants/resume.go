@@ -58,7 +58,7 @@ func pausedBy(origin string) string {
 	case OriginLoop2:
 		return "Loop 2"
 	}
-	return "the box"
+	return "me"
 }
 
 // AskResume asks the owner, on the page, to resume grant id from pause,

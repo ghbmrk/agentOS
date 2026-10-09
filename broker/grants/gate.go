@@ -80,9 +80,10 @@ type Changes interface {
 	// adoption of a release, which also needs the local page (CH-3).
 	Line(in journal.Intent) (owner.Item, error)
 	// Decided is called once the owner's request for a change intent has
-	// closed, answered or not (change C7); declined is true only when the
-	// owner said NO.
-	Decided(ctx context.Context, in journal.Intent, declined bool)
+	// closed, answered or not (change C7). why is the denial's cause:
+	// "owner" for the owner's NO, "not chosen" for an item left out of a
+	// partial YES, "" when approved or closed for any other reason.
+	Decided(ctx context.Context, in journal.Intent, why string)
 }
 
 // Loops is the loop scheduler (loops.Scheduler) as the gate uses it: the
@@ -239,12 +240,18 @@ type Config struct {
 	// Coalesce, CoalesceIdle, and RequestsPerHour pace approval requests
 	// (CH-15); zero takes the defaults. Urgent marks owner-defined urgent
 	// items, sent at once and in quiet hours. Quiet reports the owner's
-	// quiet hours: non-urgent requests wait for them to end.
+	// quiet hours: non-urgent requests wait for them to end. Allowance,
+	// when set, is the owner's unsolicited texts left in the hour before
+	// now (W5-Dc-r1b QH-8): it replaces grants' own count and
+	// RequestsPerHour, so approval requests and questions spend the
+	// owner's one budget, once. It takes the owner's lock, so the gate
+	// calls it without g.mu.
 	Coalesce        time.Duration
 	CoalesceIdle    time.Duration
 	RequestsPerHour int
 	Urgent          func(owner.Item) bool
 	Quiet           func(time.Time) bool
+	Allowance       func(time.Time) int
 	Fresh           time.Duration
 	Now             func() time.Time
 	Logf            func(format string, args ...any)
@@ -325,11 +332,12 @@ type heldImplicit struct {
 
 // wait is an intent waiting on the owner.
 type wait struct {
-	item    owner.Item
-	local   bool   // also needs local confirmation
-	onlyUI  bool   // waits for the local page (a hold); never texted
-	request string // owner request ID, "" while batched
-	reply   string // queued auto-reply ID
+	item    owner.Item // as the owner was asked it
+	base    owner.Item // without the queued note: what an approval covers
+	local   bool       // also needs local confirmation
+	onlyUI  bool       // waits for the local page (a hold); never texted
+	request string     // owner request ID, "" while batched
+	reply   string     // queued auto-reply ID
 	sendAt  time.Time
 	held    bool      // approved, and held under reply until sendAt (REV-3)
 	attempt int       // which hold of the intent this is, from 1
@@ -507,17 +515,17 @@ func (g *Gate) reissueDue() {
 			continue
 		}
 		v := g.evaluate(ctx, journal.PhaseAuthorize, st.Intent)
-		if v.kind != ask || owner.ItemSum(v.item) != c.Sum {
+		it, ok := v.reissued(c.Sum, st.Intent.Action)
+		if v.kind != ask || !ok {
 			// OP-3 at re-issue: what the owner was asked no longer
 			// holds, so it is not re-sent.
-			g.closeIntent(c.Ref, "the details changed while the box restarted; ask again with a new request_id")
+			g.closeIntent(c.Ref, "the details changed while AgentOS restarted; ask again with a new request_id")
 			continue
 		}
-		it := v.item
 		it.Asked = c.Asked
 		g.mu.Lock()
 		if g.waiting[c.Ref] == nil {
-			g.waiting[c.Ref] = &wait{item: it, local: v.local, expires: c.Expires}
+			g.waiting[c.Ref] = &wait{item: it, base: v.item, local: v.local, expires: c.Expires}
 			if len(g.batch) == 0 {
 				g.first = now
 			}
@@ -535,7 +543,7 @@ const RecipientsNotTextable = "can't be approved by text: each recipient must be
 // WaitingOnThePage is the reason an agent sees while an action waits for
 // the owner on the Wi-Fi page; it says how to ask by text instead
 // (Potency R1 on P2-2a).
-const WaitingOnThePage = "waiting for the owner's approval on the box's Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id"
+const WaitingOnThePage = "waiting for the owner's approval on the local Wi-Fi page; to ask by text instead, each recipient must be a plain email address, a full +country number or acct ...1234, at most 100 characters in all, in a new request_id"
 
 // NoPage* are the gate's reasons for a change that needs the owner's
 // confirmation on the box's Wi-Fi page while agentosd does not serve it
@@ -543,10 +551,10 @@ const WaitingOnThePage = "waiting for the owner's approval on the box's Wi-Fi pa
 // page as the owner does (CH-12). No caller matches them: the journal
 // redacts reasons, so a caller decides from its own page flag (P2-2w d).
 const (
-	NoPageGrant    = "a new or wider grant needs confirmation on the box's Wi-Fi page, which is not running (CH-3)"
-	NoPageEvidence = "changing where private replies go needs confirmation on the box's Wi-Fi page, which is not running (CH-20)"
-	NoPageFollow   = "changing where updates come from needs confirmation on the box's Wi-Fi page, which is not running (OSS-10)"
-	NoPageSharing  = "turning sharing on needs confirmation on the box's Wi-Fi page, which is not running (CHG-4)"
+	NoPageGrant    = "a new or wider grant needs confirmation on the local Wi-Fi page, which is not running (CH-3)"
+	NoPageEvidence = "changing where private replies go needs confirmation on the local Wi-Fi page, which is not running (CH-20)"
+	NoPageFollow   = "changing where updates come from needs confirmation on the local Wi-Fi page, which is not running (OSS-10)"
+	NoPageSharing  = "turning sharing on needs confirmation on the local Wi-Fi page, which is not running (CHG-4)"
 )
 
 // onPage reports whether a waiting intent is asked on the local page:
@@ -626,9 +634,36 @@ type verdict struct {
 	why   guesterr.Literal
 	cause error
 	item  owner.Item
+	// note is shown with item's Detail but is not part of what the owner
+	// approves: the queued count it names may change before the effect
+	// runs (SR3-2-f2).
+	note  string
 	local bool
 	hold  bool // waits for the local page without texting the owner
 	reply *owner.AutoReply
+}
+
+// shown is the item as the owner is asked it.
+func (v verdict) shown() owner.Item { return withNote(v.item, v.note) }
+
+// reissued is the item a restart re-sends for an ask whose shown item had
+// digest sum: v's item with the queued note the owner was sent, which may
+// name a count other than today's (SR3-2-f2). ok is false when no such
+// item matches sum: what the owner was asked no longer holds.
+func (v verdict) reissued(sum, action string) (owner.Item, bool) {
+	if it := v.shown(); owner.ItemSum(it) == sum {
+		return it, true
+	}
+	for n := 0; n <= maxNoted; n++ {
+		note := ""
+		if n > 0 {
+			note = queuedNote(n, action)
+		}
+		if it := withNote(v.item, note); owner.ItemSum(it) == sum {
+			return it, true
+		}
+	}
+	return owner.Item{}, false
 }
 
 // refusal is the gate's answer to an intent it refuses (SR2-3j): Error is
@@ -754,8 +789,13 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 	}
 	if cls == verb.Irreversible && verified && !g.contained(in.Origin) {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
+		queued := 0
 		for _, r := range rules {
-			if g.matches(phase, *r.Spec.Rule, in, ver) != nil {
+			if err := g.matches(phase, *r.Spec.Rule, in, ver); err != nil {
+				var b boundReached
+				if errors.As(err, &b) && b.queued > queued {
+					queued = b.queued
+				}
 				continue
 			}
 			if r.Spec.Rule.Reply {
@@ -765,9 +805,54 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 			}
 			return verdict{kind: allow}
 		}
+		if queued > 0 {
+			return verdict{kind: ask, item: item, note: queuedNote(queued, in.Action)}
+		}
 	}
 	return verdict{kind: ask, item: item}
 }
+
+// detailMax is the owner line's Detail width (owner.Item.line).
+const detailMax = 40
+
+// maxNoted bounds the queued counts a restart tries when matching a
+// re-issued ask to what the owner was sent (reissued).
+const maxNoted = 1000
+
+// queuedNote says how many of the places a scope bound counted are
+// intents still queued (SR3-2-f2): a count and a fixed verb only, never a
+// queued intent's parameters.
+func queuedNote(n int, action string) string {
+	noun := "action"
+	if _, op, _ := strings.Cut(action, "."); op == "send" || action == "send" {
+		noun = "send"
+	}
+	if n != 1 {
+		noun += "s"
+	}
+	return fmt.Sprintf("%d earlier %s still queued", n, noun)
+}
+
+// withNote adds note to an ask's Detail. A Detail already set, such as an
+// adapter guard's reason, is kept, and the note is added only if both fit
+// the field.
+func withNote(it owner.Item, note string) owner.Item {
+	switch {
+	case note == "":
+	case it.Detail == "":
+		it.Detail = note
+	case len(it.Detail)+len("; ")+len(note) <= detailMax:
+		it.Detail += "; " + note
+	}
+	return it
+}
+
+// boundReached is matches' error for a rule that fails only on its scope
+// bound; queued is how many of the places counted under the reached bound
+// are intents not yet started.
+type boundReached struct{ queued int }
+
+func (boundReached) Error() string { return "scope bound reached" }
 
 // contained reports a guest lineage that still holds a record the owner
 // deleted (recalltool W10): no pre-allowance acts for it, so each of its
@@ -840,15 +925,26 @@ func (g *Gate) matches(phase journal.Phase, r Rule, in journal.Intent, v Verifie
 			return errors.New("not a context-scoped reply (ADP-11)")
 		}
 	}
-	day, perRec := 0, 0
+	day, perRec, dayQ, recQ := 0, 0, 0, 0
 	for _, x := range g.inUse(phase, in, now) {
 		day++
-		if s, _ := x.Params[ParamRecord].(string); s == rec {
+		if !x.Started {
+			dayQ++
+		}
+		// An erased use no longer names its record (CAP-3), so it counts
+		// against every record (SR3-2-f3).
+		if s, _ := x.Intent.Params[ParamRecord].(string); s == rec || x.Erased {
 			perRec++
+			if !x.Started {
+				recQ++
+			}
 		}
 	}
-	if day >= r.PerDay || perRec >= r.PerRecord {
-		return errors.New("scope bound reached")
+	switch {
+	case day >= r.PerDay:
+		return boundReached{queued: dayQ}
+	case perRec >= r.PerRecord:
+		return boundReached{queued: recQ}
 	}
 	return nil
 }
@@ -860,13 +956,13 @@ func (g *Gate) matches(phase journal.Phase, r Rule, in journal.Intent, v Verifie
 // is one of the queued, and the engine commits its dispatch only if
 // nothing was journaled since this count, so two dispatches cannot both
 // take the last place (OP-3).
-func (g *Gate) inUse(phase journal.Phase, in journal.Intent, now time.Time) []journal.Intent {
-	var out []journal.Intent
+func (g *Gate) inUse(phase journal.Phase, in journal.Intent, now time.Time) []journal.Use {
+	var out []journal.Use
 	for _, u := range g.eng.InUse(in.Account, in.Action, now.Add(-window)) {
 		if u.Intent.ID == in.ID || (phase == journal.PhaseDispatch && !u.Started) {
 			continue
 		}
-		out = append(out, u.Intent)
+		out = append(out, u)
 	}
 	return out
 }
@@ -933,7 +1029,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		if s.Resume != "" && (in.Origin != originLocal || s.Pause == "") {
 			// W5a-resume: only the page resumes, naming the pause it
 			// showed (Security R2 on #169).
-			return verdict{kind: deny, why: "a paused grant is resumed only on the box's Wi-Fi page"}
+			return verdict{kind: deny, why: "a paused grant is resumed only on the local Wi-Fi page"}
 		}
 		g.mu.Lock()
 		err = g.validateLocked(s)
@@ -949,7 +1045,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		if err != nil {
 			return verdict{kind: deny, why: "the grant change is not valid", cause: err}
 		}
-		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s), Detail: detail,
+		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s), Detail: detail, Terms: owner.NewTerms(Terms(s)),
 			Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}}
 	case journal.ActionRecallRollback:
 		// Recall's deletion reach asks before taking back agent work
@@ -1054,7 +1150,7 @@ func (g *Gate) evaluateEvidence(in journal.Intent) verdict {
 // approval buys one switch.
 func (g *Gate) evaluateFollow(in journal.Intent) verdict {
 	if in.Origin != originLocal {
-		return verdict{kind: deny, why: "only the owner, on the box's Wi-Fi page, changes where updates come from"}
+		return verdict{kind: deny, why: "only the owner, on the local Wi-Fi page, changes where updates come from"}
 	}
 	digest, name, ok := FollowOf(in.ID)
 	if !ok || len(in.Params) != 0 || in.Executor != FollowExecutor || !hexDigest(digest) || (name != "" && !followName(name)) {
@@ -1160,7 +1256,7 @@ func (g *Gate) evaluateDelivery(phase journal.Phase, in journal.Intent) verdict 
 	}
 	n := 0
 	for _, x := range g.inUse(phase, in, g.cfg.Now()) {
-		if x.Origin == OriginEvidence {
+		if x.Intent.Origin == OriginEvidence {
 			n++
 		}
 	}
@@ -1346,7 +1442,7 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 		return refuse("needs the owner's approval")
 	}
 	if v.local && !g.isConfirmed(in.ID) {
-		return refuse("needs confirmation on the box's Wi-Fi page")
+		return refuse("needs confirmation on the local Wi-Fi page")
 	}
 	if !sameItem(d.item, v.item) {
 		return refuse("the details changed after the owner approved; ask again")
@@ -1542,7 +1638,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		g.mu.Lock()
 		fresh := g.waiting[id] == nil
 		if fresh {
-			g.waiting[id] = &wait{item: v.item, local: v.local, onlyUI: onlyUI}
+			g.waiting[id] = &wait{item: v.shown(), base: v.item, local: v.local, onlyUI: onlyUI}
 			if !onlyUI {
 				now := g.cfg.Now()
 				if len(g.batch) == 0 {
@@ -1558,7 +1654,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
 			// Arbitrator Q1 on #48: one fixed line, no code.
-			_ = own.Inform("Waiting for your confirmation on the box's Wi-Fi page, or your recovery key.")
+			_ = own.Inform("Waiting for your confirmation on my Wi-Fi page, or your recovery key.")
 		}
 	case autoReply:
 		g.queueReply(id, v)
@@ -1587,17 +1683,17 @@ func (g *Gate) annotate(st *journal.Status) {
 	defer g.mu.Unlock()
 	id := st.Intent.ID
 	if g.carried[id] || g.reissuing(id) {
-		st.Permission.Reason = "the box restarted; the owner will be asked again"
+		st.Permission.Reason = "AgentOS restarted; the owner will be asked again"
 	} else if d, ok := g.decided[id]; ok && d.approved && d.local && !g.confirmed[id] {
-		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the box's Wi-Fi page"
+		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the local Wi-Fi page"
 	} else if w := g.waiting[id]; w != nil && w.onlyUI {
-		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
+		st.Permission.Reason = "waiting for the owner's approval on the local Wi-Fi page"
 	} else if w != nil && w.held {
 		st.Permission.Reason = "approved; held for the owner's undo window until " + w.sendAt.UTC().Format("15:04") + " UTC"
 	} else if w != nil && w.reply != "" {
 		st.Permission.Reason = "auto-reply queued; it sends at " + w.sendAt.UTC().Format("15:04") + " UTC unless the owner cancels it"
 	} else if w != nil && g.cfg.LocalUI && w.local {
-		st.Permission.Reason = "waiting for the owner's approval on the box's Wi-Fi page"
+		st.Permission.Reason = "waiting for the owner's approval on the local Wi-Fi page"
 	} else if w != nil && g.cfg.LocalUI && !owner.SMSApprovable(w.item) {
 		// After held and reply: an approved page item is held, not
 		// waiting (L3 S1 on #165).
@@ -1638,7 +1734,7 @@ func (g *Gate) queueReply(id string, v verdict) {
 		g.mu.Unlock()
 		return
 	}
-	g.waiting[id] = &wait{item: v.item}
+	g.waiting[id] = &wait{item: v.item, base: v.item}
 	g.mu.Unlock()
 	var res owner.QueueResult
 	err := errors.New("no owner channel")
@@ -1668,6 +1764,7 @@ func (g *Gate) queueReply(id string, v verdict) {
 // restart.
 func (g *Gate) flushDue() {
 	now := g.cfg.Now()
+	allowance := g.allowance(now)
 	g.mu.Lock()
 	if len(g.batch) == 0 {
 		g.mu.Unlock()
@@ -1687,7 +1784,7 @@ func (g *Gate) flushDue() {
 		}
 	}
 	own := g.own
-	budget := g.textsLocked(now) < g.cfg.RequestsPerHour
+	budget := g.roomLocked(now, allowance) > 0
 	ripe := now.Sub(g.first) >= g.cfg.Coalesce || now.Sub(g.last) >= g.cfg.CoalesceIdle
 	g.mu.Unlock()
 	active := own != nil && own.Active(activeFor)
@@ -1700,6 +1797,26 @@ func (g *Gate) flushDue() {
 		// even past the budget (security R3 on #95); the rest stay paced.
 		g.flush(true)
 	}
+}
+
+// allowance is the owner's allowance at now, or -1 when Config.Allowance
+// is unset. Call it without g.mu.
+func (g *Gate) allowance(now time.Time) int {
+	if g.cfg.Allowance == nil {
+		return -1
+	}
+	return g.cfg.Allowance(now)
+}
+
+// roomLocked is the CH-15 budget left at now: the owner's allowance (from
+// g.allowance) when set, else RequestsPerHour less grants' own count.
+// Grants' count is still taken, so its record is pruned to the hour.
+func (g *Gate) roomLocked(now time.Time, allowance int) int {
+	own := g.cfg.RequestsPerHour - g.textsLocked(now)
+	if allowance >= 0 {
+		return allowance
+	}
+	return own
 }
 
 // textsLocked is the unsolicited texts on the CH-15 budget in the hour
@@ -1729,9 +1846,10 @@ func (g *Gate) textsLocked(now time.Time) int {
 // one step. Time is the gate's own clock, as for request texts.
 func (g *Gate) Reserve(aged bool) bool {
 	now := g.cfg.Now()
+	allowance := g.allowance(now)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.textsLocked(now) >= g.cfg.RequestsPerHour {
+	if g.roomLocked(now, allowance) <= 0 {
 		return false
 	}
 	if len(g.batch) > 0 {
@@ -1750,10 +1868,11 @@ func (g *Gate) Reserve(aged bool) bool {
 // so no question is reserved in between.
 func (g *Gate) take(paced bool, n int) int {
 	now := g.cfg.Now()
+	allowance := g.allowance(now)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if paced {
-		n = max(0, min(n, g.cfg.RequestsPerHour-g.textsLocked(now)))
+		n = max(0, min(n, g.roomLocked(now, allowance)))
 	}
 	for range n {
 		g.sent = append(g.sent, now)
@@ -1977,7 +2096,7 @@ func (g *Gate) Decide(d owner.Decision) {
 	var item owner.Item
 	local := false
 	if w != nil {
-		item, local = w.item, w.local
+		item, local = w.base, w.local
 	}
 	delete(g.waiting, d.Ref)
 	delete(g.carried, d.Ref)
@@ -2046,10 +2165,11 @@ func (g *Gate) Decide(d owner.Decision) {
 		//
 		// A release adoption the pipeline proposed (Origin change, the
 		// pipeline's own origin) is page-confirmed too, but the owner made
-		// no request. The change is no decline (Decided is told so) and the
-		// proposal drops, but the update check does not offer that version
-		// again until a restart or a newer release, so the notice promises
-		// no new offer: nothing is needed (P2-2a f2; L3 on #363). The
+		// no request. The change is no decline (Decided is told so): the
+		// proposal drops and the next update check offers that version
+		// again (change C25). The notice promises no new offer: nothing is
+		// needed (P2-2a f2; L3 on #363); whether to say the offer comes
+		// back is the UX lens's call (GR27). The
 		// literal "change" is change.OriginPipeline, pinned by
 		// TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded.
 		step := "Make the request again if still needed."
@@ -2329,7 +2449,7 @@ func (g *Gate) lapse(d owner.Decision) {
 	eng := g.eng
 	g.mu.Unlock()
 	if st, err := eng.Get(d.Ref); err == nil && g.cfg.Changes != nil && changeAction(st.Intent.Action) {
-		g.cfg.Changes.Decided(context.Background(), st.Intent, false)
+		g.cfg.Changes.Decided(context.Background(), st.Intent, d.Why)
 	}
 	g.closeIntent(d.Ref, lapsed)
 }
@@ -2409,8 +2529,13 @@ func (g *Gate) settle(id string) {
 		if g.cfg.Changes != nil && changeAction(st.Intent.Action) && st.Intent.Account == journal.BrokerAccount &&
 			(st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied) {
 			// Only the owner's NO is a decline; a refusal at the recheck
-			// (stale approval, changed state) is not (change C7).
-			g.cfg.Changes.Decided(ctx, st.Intent, !d.approved && d.why == "owner")
+			// (stale approval, changed state) is not (change C7), and an
+			// item left out of a partial YES is neither (change C25).
+			why := ""
+			if !d.approved {
+				why = d.why
+			}
+			g.cfg.Changes.Decided(ctx, st.Intent, why)
 		}
 		switch v := (pending{ownerVerdict(d, st), d.req}); {
 		case v.v == "" || g.cfg.Outcome == nil:

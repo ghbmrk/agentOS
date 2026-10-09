@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 )
 
@@ -29,13 +31,51 @@ type fakeWork struct {
 	noCount bool          // the count is not known
 	closed  bool          // recall is not open: Handled is not known
 	slow    time.Duration // Handled answers after this long
+	// recorded: recall holds a take-back as owed, not done, so Handled
+	// is true though nothing was taken back.
+	recorded bool
+	// state, if set, is TakeBackOf's answer for a take-back from that
+	// time (RCH-1); unset, one taken back is done and one recorded owed.
+	state map[time.Time]recalltool.TakeBackState
+}
+
+func (w *fakeWork) TakeBackOf(since time.Time) (recalltool.TakeBackState, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return recalltool.TakeBackNone, false
+	}
+	for t, st := range w.state {
+		if t.Equal(since) {
+			return st, true
+		}
+	}
+	for _, b := range w.backs {
+		if b.Equal(since) {
+			return recalltool.TakeBackDone, true
+		}
+	}
+	if w.recorded {
+		return recalltool.TakeBackOwed, true
+	}
+	return recalltool.TakeBackNone, true
+}
+
+// setState sets TakeBackOf's answer for since.
+func (w *fakeWork) setState(since time.Time, st recalltool.TakeBackState) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.state == nil {
+		w.state = map[time.Time]recalltool.TakeBackState{}
+	}
+	w.state[since] = st
 }
 
 // Handled answers, then waits slow before returning, so runs that overlap
 // all read the answer before any of them takes back.
 func (w *fakeWork) Handled(since time.Time) (bool, bool) {
 	w.mu.Lock()
-	handled, ok, slow := false, !w.closed, w.slow
+	handled, ok, slow := w.recorded, !w.closed, w.slow
 	for _, b := range w.backs {
 		if b.Equal(since) {
 			handled = true
@@ -202,6 +242,9 @@ func TestForgetItem2LeavesAFailedTakeBackToRecall(t *testing.T) {
 		text string
 	}{
 		{"owed", fmt.Errorf("%w: machine busy", recalltool.ErrCarried), journal.ResultSucceeded, forgetAgentNotYet},
+		// W3-forget-b2c-f1 F1-4 (L3 on #427, release 2): recall not open
+		// is owed to its next open, never retried here.
+		{"recall not open", recalltool.ErrNotOpen, journal.ResultSucceeded, forgetAgentNotOpen},
 	} {
 		r := newForgetRig(t)
 		w := &fakeWork{worked: true, ok: true, err: c.err}
@@ -299,7 +342,13 @@ func TestForgetItem1TakesBackAnIdleAgent(t *testing.T) {
 // item 2; YES for item 2 alone takes nothing back and says so plainly,
 // and YES for both forgets the task and takes the agent back to it.
 func TestForgetItem2EndToEnd(t *testing.T) {
-	x := newForgetDaemon(t)
+	// The loosest pacing the owner can set: this test is about forget,
+	// not CH-15's pacing (W5-Dc-r1a).
+	dir := t.TempDir()
+	if err := (owner.FileStore{Path: filepath.Join(dir, "owner.json")}).Save(owner.State{Pacing: owner.Pacing{PerHour: owner.MaxTextsPerHour, Urgent: []owner.Class{owner.ClassApproval, owner.ClassAgent}}}); err != nil {
+		t.Fatal(err)
+	}
+	x := newForgetDaemonAt(t, dir)
 	w := &fakeWork{worked: true, ok: true}
 	x.lp.forgetOwner.agent.Store(&forgetAgent{work: w, lineage: func() (string, error) { return "agent.l1", nil }})
 	x.lp.tasks.put("owner:a", "pay the gas bill", false, viaSMS)
@@ -546,5 +595,28 @@ func TestForgetItem2ResumesOnceWhenRunsOverlap(t *testing.T) {
 	defer r.mu.Unlock()
 	if len(w.backs) != 1 || len(r.texts) != 1 || r.texts[0] != forgetAgentDone {
 		t.Fatalf("took back %v, told %q", w.backs, r.texts)
+	}
+}
+
+// W3-forget-reach RCH-5 (brief ID).
+// REQ: CAP-3
+
+// W3-forget-reach: item 1's idle take-back drops the tail's caveat only
+// once recall says it is done; one whose reset is unfinished or not
+// recorded keeps "your agent's own files may still hold it".
+func TestForgetItem1TailKeepsTheCaveatUntilTheTakeBackIsDone(t *testing.T) {
+	at := time.Date(2026, 10, 5, 13, 2, 0, 0, time.UTC)
+	for _, st := range []recalltool.TakeBackState{recalltool.TakeBackOwed, recalltool.TakeBackNone} {
+		r := newForgetRig(t)
+		w := &fakeWork{ok: true}
+		w.setState(at, st)
+		r.withAgent(w)
+		r.task("owner:a", "pay the gas bill", at, viaSMS)
+		r.say("FORGET LAST")
+		out := r.f.Execute(context.Background(), r.gate.got[0], 1)
+		want := "Forgotten. Older backups and your agent's own files may still hold it."
+		if out.Result != journal.ResultSucceeded || len(w.backs) != 1 || len(r.texts) != 1 || r.texts[0] != want {
+			t.Fatalf("%v: %+v took back %v told %q", st, out, w.backs, r.texts)
+		}
 	}
 }

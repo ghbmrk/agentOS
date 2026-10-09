@@ -7,20 +7,29 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/budget"
+	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/corpus"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/loop7"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/quota"
 	"github.com/ghbmrk/agentos/broker/replay"
 	"github.com/ghbmrk/agentos/broker/routerule"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -57,6 +66,11 @@ type learning struct {
 	// guard is Loop 2's passive checks (W5a, loop2.go); contain and
 	// notify reach the gate and the owner once the daemon attaches.
 	guard *loops.Guard
+	// fuzz is Loop 2's source: LOOP-7's fuzz rounds in front of guard
+	// (P3-4b-3a).
+	fuzz *loop7.Source
+	// corpus is the guard's in-process corpus replay (LOOP-7).
+	corpus *loops.CorpusProbe
 	// running counts the scheduler's run, so a test can wait for it.
 	running sync.WaitGroup
 	contain loop2Contain
@@ -101,6 +115,184 @@ type learnPaths struct {
 	// ResumeFor is how long a preempted evaluation's pairs and candidates
 	// are kept; zero is change.ResumeFor (sleepResumeFor).
 	ResumeFor time.Duration
+	// Fuzz is the release's fuzz directory: main sets it to fuzzRelease,
+	// a constant, never a flag (ARC-2). Empty, or without a manifest,
+	// runs no fuzz targets.
+	Fuzz string
+	// Loop7 is LOOP-7's state: each target's corpus with the crash inputs
+	// found on this box, and the fuzz engine's cache. main sets it to
+	// fuzzState, a constant, never a flag.
+	Loop7 string
+	// DiskQuota is -disk-quota: "on" bounds the fuzz user's tree with a
+	// project quota of its own (RES-4); anything else, with FuzzUser set,
+	// runs no fuzz targets.
+	DiskQuota string
+	// FuzzDiskBytes is the fuzz tree's block quota; zero, as main leaves
+	// it, is fuzzDiskBytes. Only tests set it, to stay under the leaf's
+	// memory.max on a loop-backed file system.
+	FuzzDiskBytes int64
+	// FuzzUser names the unprivileged user fuzz children run as, and
+	// Cgroup the broker's delegated cgroup root, where their leaf goes
+	// beside broker/ (L7-6). main sets both; with FuzzUser set, a box that
+	// cannot confine the children runs no fuzz targets. Tests that leave
+	// FuzzUser empty run children unconfined.
+	FuzzUser, Cgroup string
+}
+
+// LOOP-7's fuzz rounds (P3-4b-3a, loop7 F1-F2): one job per fuzzEvery,
+// taking turns over the targets and the probe's slot, so each target is
+// rechecked every (targets + 1) x fuzzEvery, 10 h with the 19 targets
+// image/fuzz-targets.json lists (TestEachFuzzTargetIsRecheckedTwiceADay).
+const (
+	fuzzRelease = "/usr/lib/agentos/fuzz"
+	fuzzEvery   = 30 * time.Minute
+	fuzzTime    = 30 * time.Second
+	fuzzUser    = "agentos-fuzz"
+	// fuzzState is the fuzz user's tree (L7-6): beside the broker's
+	// /var/lib/agentos, not in it, under root-owned /var/lib.
+	fuzzState = "/var/lib/agentos-fuzz"
+)
+
+// The fuzz tree's disk quota (RES-4, L7-6): a project of its own, below
+// the IDs vm gives machines (from 0x41470001), so no machine shares it;
+// 1 GiB holds the caches' 512 MiB (loop7 F15) with the targets' corpora
+// and the runs' scratch, and the inode cap stops a child exhausting the
+// state disk's inodes with empty files.
+const (
+	fuzzProject    = 0x41460000
+	fuzzDiskBytes  = 1 << 30
+	fuzzDiskInodes = 1 << 18
+)
+
+// corpusEvery is how often the guard replays the embedded corpus through
+// the in-process closed checks (agentosd LC-1): a run costs
+// milliseconds, and a weakened check is found within a day.
+const corpusEvery = 24 * time.Hour
+
+// fuzzLimits are the fuzz children's cgroup leaf (L7-6): 512 MiB, from
+// the targets' measured peaks (the largest 314 MiB, within the 384 MiB a
+// quarter's headroom allows; P3-4b-3r-confine-r1), 256 tasks, and the
+// lowest CPU and I/O weight in use (budget's browser and pool), below the
+// broker's. memory.high is the hard limit, so a runaway input is
+// OOM-killed rather than throttled into a hang, and memory.oom.group
+// stays off (Component, not Child): the kernel kills the fuzz worker that
+// grew, and the engine around it lives to store the input that did it.
+var fuzzLimits = cgroup.Limits{MaxBytes: 512 << 20, HighBytes: 512 << 20, Pids: 256, CPUWeight: budget.PoolWeight, IOWeight: budget.PoolWeight}
+
+// fuzzJail confines fuzz children (L7-6): their own leaf under p.Cgroup,
+// p.FuzzUser, no network, and p.Loop7 given to that user under a disk
+// quota of its own. Nil without a FuzzUser (tests).
+func fuzzJail(p learnPaths) (*loop7.Jail, error) {
+	if p.FuzzUser == "" {
+		return nil, nil
+	}
+	if p.Cgroup == "" {
+		return nil, errors.New("no delegated cgroup for the fuzz leaf")
+	}
+	u, err := user.Lookup(p.FuzzUser)
+	if err != nil {
+		return nil, err
+	}
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	state := filepath.Clean(p.Loop7)
+	if err := unswappable(state, uint32(uid), uint32(gid)); err != nil {
+		return nil, err
+	}
+	disk, err := fuzzQuota(p.DiskQuota, state, p.fuzzDisk())
+	if err != nil {
+		return nil, err
+	}
+	leaf, err := (&cgroup.Group{Path: p.Cgroup}).Component("fuzz", fuzzLimits)
+	if err != nil {
+		return nil, err
+	}
+	j := &loop7.Jail{Leaf: leaf.Path, UID: uint32(uid), GID: uint32(gid), State: state, Disk: disk}
+	if err := j.Own(); err != nil {
+		return nil, err
+	}
+	return j, nil
+}
+
+// unswappable refuses a state the fuzz user could replace with a link
+// (loop7 F16): one that is a link itself, or whose parent the user owns
+// or may write by its mode.
+func unswappable(state string, uid, gid uint32) error {
+	if fi, err := os.Lstat(state); err != nil {
+		return err
+	} else if !fi.IsDir() {
+		return fmt.Errorf("fuzz state %s is not a directory", state)
+	}
+	fi, err := os.Lstat(filepath.Dir(state))
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid == uid || fi.Mode().Perm()&0o002 != 0 || (st.Gid == gid && fi.Mode().Perm()&0o020 != 0) {
+		return fmt.Errorf("fuzz state %s: its parent is writable by the fuzz user", state)
+	}
+	return nil
+}
+
+// fuzzDisk is the fuzz tree's block quota: FuzzDiskBytes, or
+// fuzzDiskBytes when unset.
+func (p learnPaths) fuzzDisk() int64 {
+	if p.FuzzDiskBytes > 0 {
+		return p.FuzzDiskBytes
+	}
+	return fuzzDiskBytes
+}
+
+// fuzzQuota is the jail's disk hook for the fuzz tree at state (RES-4):
+// it tags the whole tree with fuzzProject and sets the project's limits.
+// mode is -disk-quota; with it off, or no project quotas on state's file
+// system, there is no hook and why.
+func fuzzQuota(mode, state string, bytes int64) (func(string) error, error) {
+	if mode != "on" {
+		return nil, fmt.Errorf("-disk-quota=%s: nothing would bound the fuzz user's writes", mode)
+	}
+	fs, err := quota.Open(state)
+	if err != nil {
+		return nil, err
+	}
+	return func(dir string) error {
+		if err := fs.Tag(dir, fuzzProject); err != nil {
+			return err
+		}
+		return fs.Limit(dir, fuzzProject, bytes, fuzzDiskInodes)
+	}, nil
+}
+
+// fuzzTargets are the release's fuzz targets and their jail, or none when
+// it ships none or they cannot be confined. A release directory with no
+// targets is logged: an image always ships a manifest (L7-4), so only a
+// dev build, with no directory, is quiet.
+func fuzzTargets(p learnPaths) ([]loop7.Target, *loop7.Jail) {
+	if p.Fuzz == "" || p.Loop7 == "" {
+		return nil, nil
+	}
+	ts, err := loop7.Load(p.Fuzz, p.Loop7)
+	if errors.Is(err, os.ErrNotExist) {
+		if fi, serr := os.Stat(p.Fuzz); serr == nil && fi.IsDir() {
+			log.Printf("loop7: no fuzz rounds: %v", err)
+		}
+		return nil, nil
+	} else if err != nil {
+		log.Printf("loop7: no fuzz rounds: %v", err)
+		return nil, nil
+	}
+	j, err := fuzzJail(p)
+	if err != nil {
+		log.Printf("loop7: no fuzz rounds: children cannot be confined: %v", err)
+		return nil, nil
+	}
+	return ts, j
 }
 
 // openLearning opens the learning plane and wires it into the daemon's
@@ -168,8 +360,24 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	if l.forgotten, err = openForgotten(change.FileStore{Path: filepath.Join(p.Dir, "forgotten.json")}, time.Now); err != nil {
 		return nil, err
 	}
+	// The done texts the last boot owed (W3-forget-b3), opened before the
+	// restored forgets are tombstoned so a restore can owe one. An owed
+	// file that does not read is started afresh; its texts are lost, not
+	// its forgets.
+	owedPath := filepath.Join(p.Dir, "forget-owed.json")
+	owed := openOwedFile(change.FileStore{Path: owedPath}, owedPath)
 	for _, e := range restored {
 		if !l.forgotten.has(e.Goal) {
+			// An item 1 forget logged while it still retried (no agent, no
+			// since) may hold the owner's forgetNotSaved, a promise the
+			// restored learn dir does not keep: it is owed again before its
+			// tombstone, as Execute owes it (W3-forget-b2c-f1-r1 R1A;
+			// ASSUMPTIONS R5).
+			if _, ok := owed.get(e.Goal); !ok && !e.Agent && e.Since.IsZero() {
+				if err := owed.owe(e.Goal, owedForget{Logged: true}); err != nil {
+					log.Printf("forget: restored forget's done text not kept: %v", err)
+				}
+			}
 			if err := l.forgotten.add(e.Goal); err != nil {
 				return nil, err
 			}
@@ -195,6 +403,15 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		return nil, err
 	}
 	l.learn = learn
+	// LOOP-7's corpus replay runs in Loop 2's slot after the passive
+	// checks: the corpus built into this binary through the closed checks
+	// this process holds, CH-19's code filter and the commitment filter
+	// with the owner channel's defaults (no owner additions are wired).
+	// The mail checks and the guest-plane replay wait for the box wiring
+	// (loops S28, P3-4b-4c).
+	if l.corpus, err = corpus.Probe(corpusEvery, owner.Commitments{}); err != nil {
+		return nil, err
+	}
 	if l.guard, err = loops.NewGuard(loops.GuardConfig{
 		Pipeline:  l.pipe,
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loop2.json")},
@@ -202,13 +419,35 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		NotRun:    loop2NotRun,
 		Notify:    l.notify.send,
 		ResumeFor: p.ResumeFor,
+		// Fix requests go to Loop 1's builder machines (loop2.go).
+		Fixer: lateFix{&l.build},
+		// Seeded findings' fixtures are live (loop2.go).
+		FixturesLiveFor: loop2Live,
+		Probes:          []loops.Probe{l.corpus},
+	}); err != nil {
+		return nil, err
+	}
+	// Loop 2 is one source: the guard's passive checks first, then LOOP-7
+	// fuzz rounds in spare capacity, whose crashes the guard reports
+	// (LOOP-9). The socket probe stays off until P3-4b-3f picks its
+	// machine.
+	fuzzTs, jail := fuzzTargets(p)
+	if l.fuzz, err = loop7.New(loop7.Config{
+		Inner:    l.guard,
+		Report:   l.guard,
+		Targets:  fuzzTs,
+		Jail:     jail,
+		Release:  p.Fuzz,
+		FuzzTime: fuzzTime,
+		Every:    fuzzEvery,
+		CacheDir: filepath.Join(p.Loop7, "cache"),
 	}); err != nil {
 		return nil, err
 	}
 	if l.sched, err = loops.New(loops.Config{
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loops.json")},
 		Spare:     spare,
-		Sources:   []loops.Source{sleepSource{learn, &l.sleep}, l.guard},
+		Sources:   []loops.Source{sleepSource{learn, &l.sleep}, l.fuzz},
 		Sharing:   l.pipe.SetSharing,
 		Busy:      l.busy,
 		BusyCause: l.busyCause,
@@ -227,8 +466,9 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	}
 	// Evaluation keeps its reserve of the spare budget while Loop 1
 	// evaluates (loops L3); builder machines take at most their Max of it
-	// (C-3c-5). The clean room takes its Max here once it exists.
-	if err := spare.SetShares([]meter.Share{l.sched.EvalShare(), builderShare()}); err != nil {
+	// (C-3c-5), and Loop 2's fix machines theirs (LOOP-2). The clean room
+	// takes its Max here once it exists.
+	if err := spare.SetShares([]meter.Share{l.sched.EvalShare(), builderShare(), loop2FixShare()}); err != nil {
 		return nil, err
 	}
 	cfg.Grants.Changes = l.pipe
@@ -239,8 +479,13 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.BrokerExecutors[change.Executor] = l.pipe
 	cfg.BrokerExecutors[loops.Executor] = l.sched
 	l.forgetOwner = &ownerForget{tasks: l.tasks, learned: l.pipe.LearnedFrom, forget: l.forgetTask, forgotten: l.forgotten.has,
-		inform: func(s string) { l.notify.send(s, false) }, now: time.Now, loc: time.Local, sleep: sleepCtx}
+		inform: func(s string) { l.notify.send(s, false) }, tell: l.notify.try, now: time.Now, loc: time.Local, sleep: sleepCtx}
+	// The replay above has finished each owed tombstoned forget, and
+	// attach texts them once the owner channel is up.
+	l.forgetOwner.owed = owed
+	l.forgetOwner.owedAtStart = owed.goals()
 	for _, e := range restored {
+		l.forgetOwner.restoredGoals = append(l.forgetOwner.restoredGoals, e.Goal)
 		if e.Agent {
 			l.forgetOwner.restored = append(l.forgetOwner.restored, e.Since)
 		}
@@ -249,7 +494,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.Grants.ForgetItem = l.forgetOwner.Item
 	cfg.Grants.ForgetAgentItem = l.forgetOwner.AgentItem
 	cfg.Settings = l.settings
-	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status)
+	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status, l.forgetOwner.Note, l.forgetOwner.RetryNote)
 	cfg.Narrows = l.sched.Narrows
 	cfg.HelpExtra = loops.HelpLine
 	// The owner's verdicts on the agent's effects become Loop 1's cases
@@ -524,6 +769,7 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 		}
 	}
 	l.notify.ch.Store(d.Owner())
+	l.forgetOwner.finishOwed(ctx)
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())
 	if l.routing != nil {
@@ -664,6 +910,8 @@ func (l *learning) openEvaluator(m *vm.Manager, services *lateServices, c evalCo
 			// ev is set before any replay machine exists: machines
 			// start only through Run, after New returns.
 			OverCeiling: func(id string) { ev.OverPriceCeiling(id) },
+			// Retries stays nil (MaxRetries): a tree's rule under
+			// evaluation is not a reordering of the owner's (SR3-7-f2).
 		}))
 	}
 	ev, err := replay.New(rc)
@@ -1172,4 +1420,29 @@ func (s *syncedRouting) setLearned(r routerule.Rule) {
 	if err := store.Save(b); err != nil {
 		s.logf("routing: could not keep the learned order: %v", err)
 	}
+}
+
+// openOwedFile opens the owed done texts saved by store at path. One that
+// does not read is kept aside, not read again, and the owner told (L3 B2
+// on #425). The aside is a hard link, and the fresh file owing the notice
+// is then saved over path, so path holds the bad file or the fresh one,
+// never nothing: a crash between the two repeats both at the next start
+// (security S1 on #425).
+func openOwedFile(store change.Store, path string) *forgetOwed {
+	owed, err := openForgetOwed(store)
+	if err == nil {
+		return owed
+	}
+	aside := path + ".bad"
+	if rerr := os.Remove(aside); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		log.Printf("forget: old unreadable owed file not removed: %v", rerr)
+	}
+	kept := os.Link(path, aside)
+	owed = lostForgetOwed(store)
+	if kept != nil {
+		log.Printf("forget: owed done texts lost, unreadable file not kept aside: %v: %v", err, kept)
+	} else {
+		log.Printf("forget: owed done texts lost, kept aside as %s: %v", aside, err)
+	}
+	return owed
 }
