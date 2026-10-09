@@ -1,6 +1,6 @@
 package main
 
-// REQ: CAP-3, UX-182-3, CH-12, R1A, R1B, R1C, R1D
+// REQ: CAP-3, CH-12, R1A, R1B, R1C, R1D
 
 import (
 	"context"
@@ -15,10 +15,10 @@ import (
 )
 
 // W3-forget-b2c-f1-r1 (L3 release 2 on #559, UX U4 and Security 1 on
-// #602): a restore that replays an item 1 forget still retrying owes the
-// owner the done text forgetNotSaved promised; STATUS shows item 1
-// forgets still retrying; and a restore asks the digest queue to forget
-// each restored goal again.
+// #602; UX-182-3 of the UX lens on #182): a restore that replays an item 1
+// forget still retrying owes the owner the done text forgetNotSaved
+// promised; STATUS shows item 1 forgets still retrying; and a restore asks
+// the digest queue to forget each restored goal again.
 
 // restoreBox opens the learning plane in dir as a boot does, with the
 // owner's texts and the digest queue's forgets recorded.
