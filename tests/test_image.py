@@ -361,6 +361,7 @@ class DriveIdTest(unittest.TestCase):
                     "vda6 vda bbbbbbbb-0000-4000-8000-000000000006"))
         self.root_on("/dev/vda6")
         stub(self.bin, "sfdisk", 'echo "$*" >>"%s"' % self.log)
+        stub(self.bin, "sync", 'echo "sync $*" >>"%s"' % self.log)
 
     def disks(self, partitions):
         lines = ["vda  ", "vdb  "] + list(partitions) + ["usr vda2 ", "usr vda3 "]
@@ -417,7 +418,8 @@ class DriveIdTest(unittest.TestCase):
         nr = "--no-reread --no-tell-kernel"
         self.assertEqual(self.sfdisk_calls(), ["%s --disk-id /dev/vda %s" % (nr, u),
                                                "%s --part-uuid /dev/vda 1 %s" % (nr, u),
-                                               "%s --part-uuid /dev/vda 6 %s" % (nr, u)])
+                                               "%s --part-uuid /dev/vda 6 %s" % (nr, u),
+                                               "sync -f %s/var/lib/agentos/drive-id" % self.root])
         self.assertTrue((self.root / "var/lib/agentos/drive-id").exists())
 
     def test_assign_writes_nothing_when_the_check_fails(self):

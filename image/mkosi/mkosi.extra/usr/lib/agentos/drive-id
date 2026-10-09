@@ -39,4 +39,7 @@ sfdisk --no-reread --no-tell-kernel --part-uuid "/dev/$disk" "$espn" "$(new)"
 sfdisk --no-reread --no-tell-kernel --part-uuid "/dev/$disk" "$rootn" "$(new)"
 mkdir -p "$R/var/lib/agentos"
 : >"$R/var/lib/agentos/drive-id"
+# sfdisk syncs the table; sync the marker too, or a power cut inside ext4's commit interval keeps the
+# new GUIDs but loses the marker, and the next boot assigns again.
+sync -f "$R/var/lib/agentos/drive-id"
 echo "agentos-drive-id: assigned new GUIDs on $disk (ESP $espn, root $rootn), used from the next boot"
