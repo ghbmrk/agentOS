@@ -17,6 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modemlink"
+	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
 // fakeDigestTransport answers each Deliver with out(n), n counting from 1.
@@ -108,6 +109,8 @@ type digestRig struct {
 	informs []string
 	d       *digestBox
 	reg     *capLines
+	// quiet, if set, is the owner's quiet hours (W5-Dc-r1b QH-7).
+	quiet func(time.Time) bool
 }
 
 // day0 is a Monday; the digest time is 08:00 UTC in these tests.
@@ -133,6 +136,7 @@ func (r *digestRig) make(sources map[string]digestqueue.Source) {
 		Queue: r.queue, State: r.state, Sources: sources, Transport: r.tr,
 		Inform: func(s string) error { r.informs = append(r.informs, s); return nil },
 		Now:    func() time.Time { return r.now }, Loc: time.UTC, Logf: r.t.Logf,
+		Quiet: func(t time.Time) bool { return r.quiet != nil && r.quiet(t) },
 	})
 	r.reg = &capLines{}
 	r.d.register(r.reg)
@@ -848,5 +852,80 @@ func TestDigestLinesAreOwnerWorded(t *testing.T) {
 		if !strings.Contains(all, l) {
 			t.Errorf("%q not in capLineTexts", l)
 		}
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1b QH-7)
+
+// TestDigestWaitsForQuietHoursToEnd: a digest due in quiet hours stays
+// Ready and goes at the first tick after they end, once. The digest time
+// on main is 08:00, so quiet hours here run to 09:00. Past the batch's
+// expiry (quiet hours the owner widened in between), the Late path sends
+// it once.
+func TestDigestWaitsForQuietHoursToEnd(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	// Quiet hours end at 09:10, between two 30-minute retries: the first
+	// step after them sends, not the next retry.
+	end := day0.Add(9*time.Hour + 10*time.Minute)
+	r.quiet = func(t time.Time) bool { return t.Before(end) }
+	r.at(0, 8, 0)
+	r.at(0, 8, 30)
+	r.at(0, 9, 0)
+	r.at(0, 9, 9)
+	if got := r.tr.sent(); len(got) != 0 {
+		t.Fatalf("sent in quiet hours: %q", got)
+	}
+	if bs := r.batches(); len(bs) != 1 || bs[0].State != digestqueue.Ready {
+		t.Fatalf("batches in quiet hours: %+v", bs)
+	}
+	r.at(0, 9, 10)
+	if got := r.tr.sent(); len(got) != 1 || !strings.HasPrefix(got[0], fmt.Sprintf(digestHead, "Mon 5 Oct")) {
+		t.Fatalf("at the end of quiet hours: %q", got)
+	}
+	r.at(0, 9, 11)
+	r.at(0, 12, 0)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("sent again: %q", got)
+	}
+
+	// Past its expiry: day 1's digest waits until day 2 09:00, past day
+	// 2's digest time; day 1 goes late once, then day 2.
+	end = day0.AddDate(0, 0, 2).Add(9 * time.Hour)
+	r.day(1)
+	r.at(2, 8, 0)
+	r.at(2, 8, 30)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("sent in widened quiet hours: %q", got)
+	}
+	r.at(2, 9, 0)
+	r.day(2)
+	got := r.tr.sent()
+	all := strings.Join(got, "|")
+	if len(got) != 3 || strings.Count(all, fmt.Sprintf(digestLateHead, "Tue 6 Oct")) != 1 ||
+		!strings.HasPrefix(got[2], fmt.Sprintf(digestHead, "Wed 7 Oct")) {
+		t.Fatalf("after the widened quiet hours: %q", got)
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1b QH-7)
+
+// TestDigestIgnoresTheHourlyAllowance: the digest neither waits for nor
+// reads the owner's hourly allowance (SG-r1-6). Its only pacing hook is
+// Quiet: with the allowance spent and not quiet, it goes at its time.
+func TestDigestIgnoresTheHourlyAllowance(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	ch := pacedOwner(t, ownerch.Pacing{}, day0.Add(7*time.Hour+50*time.Minute))
+	for i := range 3 {
+		if err := ch.ch.Inform(fmt.Sprintf("Update %d.", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ch.ch.Allowance(ch.clock()) != 0 {
+		t.Fatal("allowance not spent")
+	}
+	r.quiet = ch.pacer().quiet // as main wires it
+	r.at(0, 8, 0)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("digest with the allowance spent: %q", got)
 	}
 }
