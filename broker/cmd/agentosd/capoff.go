@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -256,9 +256,10 @@ func (s *capState) routingLine() string {
 // modelProbeEvery is how long a model-route probe is believed.
 const modelProbeEvery = time.Minute
 
-// modelProbe says whether the model route answers: a dial of the vault
-// process's model socket, at most once a minute. A dial cannot tell "no
-// model grant" from "unreachable" (ASSUMPTIONS S8).
+// modelProbe says whether the model route is up: the vault process's
+// model socket exists, checked at most once a minute. It looks without
+// dialing, since agentosd links no network client (ARC2), and cannot
+// tell "no model grant" from "unreachable" (ASSUMPTIONS S8).
 type modelProbe struct {
 	socket string
 	now    func() time.Time
@@ -273,7 +274,7 @@ func newModelProbe(socket string) *modelProbe {
 	return &modelProbe{socket: socket, now: time.Now}
 }
 
-// Line is C2's line, "" when the route answers.
+// Line is C2's line, "" when the socket is there.
 func (p *modelProbe) Line() string {
 	if p.socket == "" {
 		return modelUnset
@@ -282,11 +283,8 @@ func (p *modelProbe) Line() string {
 	defer p.mu.Unlock()
 	if now := p.now(); !p.done || now.Sub(p.at) >= modelProbeEvery {
 		p.line, p.at, p.done = "", now, true
-		c, err := net.DialTimeout("unix", p.socket, 300*time.Millisecond)
-		if err != nil {
+		if fi, err := os.Stat(p.socket); err != nil || fi.Mode()&os.ModeSocket == 0 {
 			p.line = modelUnreachable
-		} else {
-			c.Close()
 		}
 	}
 	return p.line

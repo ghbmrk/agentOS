@@ -342,7 +342,7 @@ func TestCapabilityLinesRepeatInTheDigestWhileTheyLast(t *testing.T) {
 }
 
 // OP-9: the model probe is cached at most a minute, so STATUS does not
-// dial the vault process on every text, and is not stale for longer.
+// look for the vault socket on every text, and is not stale for longer.
 func TestModelProbeIsCachedAMinute(t *testing.T) {
 	sock := filepath.Join(shortDir(t), "m.sock")
 	ln, err := net.Listen("unix", sock)
@@ -515,5 +515,18 @@ func TestLearningUnableToRunNamesTheCause(t *testing.T) {
 				t.Errorf("cause line %q does not say learning is affected", c.want)
 			}
 		})
+	}
+}
+
+// OP-9, ARC2: the probe looks for the socket without dialing it
+// (agentosd links no network client), so a plain file where the socket
+// belongs reads as not reachable.
+func TestModelProbeWantsASocket(t *testing.T) {
+	path := filepath.Join(shortDir(t), "m.sock")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if l := newModelProbe(path).Line(); l != modelUnreachable {
+		t.Fatalf("plain file: %q", l)
 	}
 }
