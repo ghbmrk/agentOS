@@ -54,6 +54,16 @@ type State struct {
 	Queued  []QueuedRef  `json:"queued,omitempty"`
 	// Retired holds IDs closed in the last RetireFor, which are not reused.
 	Retired map[string]time.Time `json:"retired,omitempty"`
+	// Pacing is the owner's quiet hours and texts-an-hour setting; the
+	// zero value is the default (CH-15).
+	Pacing Pacing `json:"pacing"`
+	// Held are unsolicited texts waiting for quiet hours to end or for
+	// room in the hour, oldest first; HeldDropped counts the oldest ones
+	// dropped past MaxHeld, not yet said to the owner.
+	Held        []HeldText `json:"held,omitempty"`
+	HeldDropped int        `json:"held_dropped,omitempty"`
+	// Sent are the unsolicited texts sent in the last hour.
+	Sent []time.Time `json:"sent,omitempty"`
 }
 
 // PendingRef is an open request as a restart sees it. Asked, Expires,
@@ -112,6 +122,9 @@ func copyState(s State) State {
 		r[k] = v
 	}
 	s.Retired = r
+	s.Pacing.Urgent = append([]Class(nil), s.Pacing.Urgent...)
+	s.Held = append([]HeldText(nil), s.Held...)
+	s.Sent = append([]time.Time(nil), s.Sent...)
 	return s
 }
 

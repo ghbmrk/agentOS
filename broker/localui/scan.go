@@ -17,7 +17,7 @@ import (
 
 // Scan errors; the page turns each into one owner-facing line.
 var (
-	ErrNotPhoto  = errors.New("localui: not a JPEG or PNG photo the box can read")
+	ErrNotPhoto  = errors.New("localui: not a JPEG or PNG photo I can read")
 	ErrNoQR      = errors.New("localui: no QR code found")
 	ErrWiFiQR    = errors.New("localui: only the Wi-Fi QR code was found")
 	ErrManyQR    = errors.New("localui: more than one passphrase-like QR code found")

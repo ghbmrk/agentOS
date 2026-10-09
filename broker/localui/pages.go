@@ -59,16 +59,16 @@ form { margin: .6em 0 1.2em; }
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 <button>Sign in</button>
 </form>
-<p class="muted">This phone stays signed in for {{.Days}} days, or until the box restarts. Signing in also unlocks chat by text, and the box texts you that a phone signed in.</p>
+<p class="muted">This phone stays signed in for {{.Days}} days, or until I restart. Signing in also unlocks chat by text, and I text you that a phone signed in.</p>
 {{else}}<p>Setup is not finished yet. <a href="/setup">Continue setup</a></p>{{end}}
-{{if .Vault}}<p><a href="/unlock/vault">Unlock the box on a new PC</a></p>{{end}}
+{{if .Vault}}<p><a href="/unlock/vault">Unlock me on a new PC</a></p>{{end}}
 <p><a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
 
 {{define "vault"}}{{template "head" .Refresh}}
-<h1>Unlock the box</h1>
-{{if .Down}}<p>The box is still starting. This page reloads by itself.</p>
-{{else if eq .State "open"}}<p class="ok">The box is unlocked.{{if .Kept}} This PC stays trusted.{{end}}</p>
+<h1>Unlock me</h1>
+{{if .Down}}<p>I am still starting. This page reloads by itself.</p>
+{{else if eq .State "open"}}<p class="ok">I am unlocked.{{if .Kept}} This PC stays trusted.{{end}}</p>
 {{with .Change}}<p>{{.}}</p>{{end}}
 {{if .SignedIn}}<p>This phone is signed in, and chat by text is unlocked.</p>
 {{else}}<p>To approve by text again, <a href="/unlock">sign in</a> with your next code.</p>{{end}}
@@ -106,13 +106,13 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">Or type the passphrase words.</p>
 <input type="text" name="passphrase" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="Passphrase words">
 <button>Next</button></form>
-<p class="muted">Next, the box asks for a code from your code generator. The passphrase alone does not unlock it.</p>
+<p class="muted">Next, I ask for a code from your code generator. The passphrase alone does not unlock it.</p>
 <script>{{shrinkjs}}</script>{{end}}
 
 {{define "secondline"}}{{template "head" .Refresh}}
 <h1>Second line</h1>
-{{if .Down}}<p>The box is still starting. This page reloads by itself.</p>
-{{else if .Locked}}<p>The box is locked, so it can't read or change the second line. <a href="/unlock/vault">Unlock the box</a>, then come back here.</p>
+{{if .Down}}<p>I am still starting. This page reloads by itself.</p>
+{{else if .Locked}}<p>I am locked, so I can't read or change the second line. <a href="/unlock/vault">Unlock me</a>, then come back here.</p>
 {{else}}
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 {{if and .Removing .St.Set}}<p>Remove the second line? Texts and calls from {{.St.Settings.Number}} stop, and you'll need the provider's password to add it again.</p>
@@ -120,21 +120,21 @@ form { margin: .6em 0 1.2em; }
 <p><a href="/second-line/">Cancel</a></p>
 {{else if .St.Set}}
 {{if .St.RealmConfirmed}}<p class="ok">The second line is ready: {{.St.Settings.Number}} through {{.St.Settings.Domain}}.</p>
-{{else if .St.RealmRecorded}}<p>The box signed in to your provider, which calls itself <b class="mono">{{.Realm}}</b>.
+{{else if .St.RealmRecorded}}<p>I signed in to your provider, which calls itself <b class="mono">{{.Realm}}</b>.
 {{if .Matches}}This matches the domain you entered.{{else}}This differs from the domain you entered ({{.St.Settings.Domain}}). Some providers use another name here; check it on your provider's setup page.{{end}}</p>
 <p>Texts and calls start once you confirm it is your provider.</p>
 <form method="post" action="/second-line/"><input type="hidden" name="step" value="confirm"><input type="hidden" name="realm" value="{{.RealmExact}}"><button>It is my provider</button></form>
 <p class="muted">If it is not, remove the second line below and check the server name with your provider.</p>
-{{else if .St.WaitingForRegistration}}<p>Waiting for the box to sign in to your provider. This page reloads by itself.</p>
+{{else if .St.WaitingForRegistration}}<p>Waiting for me to sign in to your provider. This page reloads by itself.</p>
 {{if .Slow}}<p>Still trying. If this doesn't change in a few minutes, check the server name, port and password with your provider.</p>{{end}}
-{{else}}<p class="err">The box didn't reach your provider within 30 minutes of setup. Check the server name and password with your provider, then save the account again.</p>{{end}}
+{{else}}<p class="err">I didn't reach your provider within 30 minutes of setup. Check the server name and password with your provider, then save the account again.</p>{{end}}
 <p class="muted">{{.St.Settings.User}} at {{.St.Settings.Server}}, number {{.St.Settings.Number}}.</p>
 <details{{if and (not .St.RealmRecorded) (not .St.WaitingForRegistration)}} open{{end}}><summary>Change the account</summary>{{template "lineform" .Form}}</details>
 <form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><button class="stop">Remove the second line</button></form>
-<p class="muted">The box texts you when the account is changed or removed.</p>
+<p class="muted">I text you when the account is changed or removed.</p>
 {{else}}
-<p>A second line lets the box text and call businesses for you from its own number, a calling (SIP) account you hold with a provider. Your own number stays private.</p>
-<p>First, in your provider's settings: turn on encrypted calls (SRTP), and turn off voicemail on this number, so callers hear the box's message asking them to text instead.</p>
+<p>A second line lets me text and call businesses for you from my own number, a calling (SIP) account you hold with a provider. Your own number stays private.</p>
+<p>First, in your provider's settings: turn on encrypted calls (SRTP), and turn off voicemail on this number, so callers hear my message asking them to text instead.</p>
 {{template "lineform" .Form}}
 {{end}}
 <h2>Texts over your provider's web API</h2>
@@ -144,7 +144,7 @@ form { margin: .6em 0 1.2em; }
 {{else if .SMS.Set}}<p class="ok">Texts go through {{.SMS.ProviderName}} from {{.SMS.Settings.Number}}.</p>
 <details><summary>Change the texting account</summary>{{template "smsform" .SMSForm}}</details>
 <form method="post" action="/second-line/"><input type="hidden" name="step" value="sms-remove"><button class="stop">Remove the texting account</button></form>
-{{else}}<p>Some providers' calling accounts can't send texts. If yours is Twilio or SignalWire, the box can text through the provider's web API instead, from the same number.</p>
+{{else}}<p>Some providers' calling accounts can't send texts. If yours is Twilio or SignalWire, I can text through the provider's web API instead, from the same number.</p>
 <p class="muted">For a US number, register it for A2P 10DLC (business texting) in your provider's console first, or carriers block the texts.</p>
 <details{{if .SMSForm.Provider}} open{{end}}><summary>Set up texting</summary>{{template "smsform" .SMSForm}}</details>
 {{end}}{{end}}
@@ -173,7 +173,8 @@ form { margin: .6em 0 1.2em; }
 {{with .Msg}}<p class="ok">{{.}}</p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
 {{range .Requests}}<section class="card"><h2>{{.ID}}{{with .Expires}} <span class="muted">Answer before {{.}}</span>{{end}}</h2>
 {{if .Local}}<p class="muted">Can't be shown in a text, so it is asked only here.</p>{{end}}
-{{range .Items}}<p>{{if .Unverified}}<b>Unverified:</b> the box could not read these details from the source. {{end}}<b>{{.Verb}}</b> {{.Object}}{{with .Detail}}, {{.}}{{end}}{{with .Amount}}, <b>{{.}}</b>{{end}}</p>
+{{range .Items}}<p>{{if .Unverified}}<b>Unverified:</b> I could not read these details from the source. {{end}}<b>{{.Verb}}</b> {{.Object}}{{with .Detail}}, {{.}}{{end}}{{with .Amount}}, <b>{{.}}</b>{{end}}</p>
+{{with .Terms}}<ul>{{range .}}<li><b>{{.Label}}:</b> {{.Value}}</li>{{end}}</ul>{{end}}
 {{with .Recipients}}<p>To {{len .}} recipient{{if ne (len .) 1}}s{{end}}, exactly as the action uses them:</p><ul>{{range .}}<li class="mono">{{.}}</li>{{end}}</ul>{{end}}
 {{if .Odd}}<p class="err">Has an unusual character, shown as [U+…]. Letters from other alphabets can look like plain ones; deny if you didn't expect it.</p>{{end}}
 <p class="muted">{{.Undo}}</p>{{end}}
@@ -190,19 +191,19 @@ form { margin: .6em 0 1.2em; }
 <h1>Update source</h1>
 {{with .Msg}}<p class="ok">{{.}}</p><p><a class="button" href="/approvals/">Go to Approvals</a></p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
 {{with .Sum}}<section class="card"><h2>What following this source means</h2>
-<p>Its root file is version {{.Version}}{{with .Expires}}, good until {{.}} by this box's clock{{end}}.</p>
+<p>Its root file is version {{.Version}}{{with .Expires}}, good until {{.}} by my clock{{end}}.</p>
 <ul>{{range .Roles}}<li>{{.Does}}: {{.Need}} of {{.Have}} keys must agree.</li>{{end}}</ul>
 <details><summary>Its root keys</summary><ul>{{range .RootIDs}}<li class="mono">{{.}}</li>{{end}}</ul></details>
 {{if .Odd}}<p class="err">A key has an unusual character, shown as [U+…]. Don't follow a source you didn't expect this from.</p>{{end}}
 <p>Fingerprint: <span class="mono">{{.Print}}</span>, the same as on the approval.<br><span class="muted">In full: <span class="mono">{{.Digest}}</span>. Check it matches the one the source publishes.</span></p>
-{{if .Project}}<p>These are the AgentOS project's own keys, as this box shipped with them.</p>
+{{if .Project}}<p>These are the AgentOS project's own keys, as I shipped with them.</p>
 <form method="post" action="/follow/"><input type="hidden" name="digest" value="{{.Digest}}"><input type="hidden" name="tok" value="{{$.Tok}}"><input type="hidden" name="project" value="1">
 <button name="step" value="ask">Switch back to the AgentOS project</button></form></section>
-{{else}}<p class="err">Whoever holds these keys can change any software on this box. Follow only a source you trust.</p>
+{{else}}<p class="err">Whoever holds these keys can change any of my software. Follow only a source you trust.</p>
 <form method="post" action="/follow/"><input type="hidden" name="digest" value="{{.Digest}}"><input type="hidden" name="tok" value="{{$.Tok}}">
 <label>Your name for this source<input type="text" name="name" maxlength="{{$.MaxName}}" autocomplete="off" spellcheck="false" required></label>
 <button name="step" value="ask">Ask to follow it</button></form></section>{{end}}
-{{else}}{{if not $.Msg}}<p>This box gets its software updates from the AgentOS project. To get them from another source you trust, such as a fork, choose that source's root file (root.json). Nothing changes until you approve it with a code.</p>
+{{else}}{{if not $.Msg}}<p>I get my software updates from the AgentOS project. To get them from another source you trust, such as a fork, choose that source's root file (root.json). Nothing changes until you approve it with a code.</p>
 <form method="post" action="/follow/" enctype="multipart/form-data"><label>Root file<br><input type="file" name="root" accept=".json,application/json" required></label><br>
 <button name="step" value="show">Show what it means</button></form>{{end}}{{end}}
 <p><a href="/home">More</a> · <a href="/approvals/">Approvals</a> · <a href="/status">Status</a></p>
@@ -223,12 +224,20 @@ form { margin: .6em 0 1.2em; }
 
 {{define "notready"}}{{template "head" "30"}}
 <h1>AgentOS</h1>
-<p>This box isn't ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.</p>
+<p>I'm not ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.</p>
 {{template "foot"}}{{end}}
 {{define "home"}}{{template "head" ""}}
 <h1>AgentOS</h1>
 {{with .Waiting}}<p class="ok"><a href="/approvals/">{{.}} waiting for you</a></p>{{end}}
+{{with .Msg}}<p class="ok">{{.}}</p>{{end}}
 {{with .LineNote}}<p class="err">{{.}}</p>{{end}}
+{{if .SIM}}<section class="card"><form method="post" action="/line/sim"><input type="hidden" name="sim" value="{{.SIM}}">
+<p>Do this only if you put this SIM in my phone modem yourself. Whoever has my number's SIM gets your texts with me.</p>
+<label>Code from your code generator{{with .Cell}}, or grid cell <b>{{.}}</b> from your card{{end}}
+<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+<button>Use the SIM ending in {{.SIMEnds}} for my number</button></form></section>
+{{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}{{end}}
 {{with .LineTexts}}<h2>Texts with you</h2><ul>{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
 <ul>{{range .Mounts}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
 <p><a href="/status">Status, STOP and RESUME</a></p>
@@ -257,10 +266,10 @@ form { margin: .6em 0 1.2em; }
 {{else if eq .Step "number"}}
 <h2>2. Text your box</h2>
 {{if .SMSLink}}<p><a class="button" href="{{.SMSLink}}">Text my box</a></p>
-<p class="muted">Your messages app opens with the box's number and a code filled in. Press Send, then come back here.</p>
+<p class="muted">Your messages app opens with my number and a code filled in. Press Send, then come back here.</p>
 <p class="muted">Or text <span class="mono">PAIR {{.PairCode}}</span> to <span class="mono">{{.BoxNumber}}</span>. The setup code on your card works too.</p>
-<p><a href="/box.vcf">Save the box's number as a contact</a></p>{{end}}
-<details><summary>Enter my number instead</summary>
+<p><a href="/box.vcf">Save my number as a contact</a></p>{{end}}
+<details><summary>Enter your number instead</summary>
 <form method="post" action="/setup/number"><label>Your mobile number<input type="tel" name="number" placeholder="+1 555 010 0000" autocomplete="tel"></label><button>Text me a code</button></form>
 {{if .NumTo}}<form method="post" action="/setup/number-code"><label>Code texted to {{.NumTo}}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Confirm</button></form>{{end}}
 </details>
@@ -268,19 +277,20 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "claim"}}
 <h2>2. Text your box</h2>
-<p>Your number ({{.Paired}}) is paired. The box texted you a page code; type it here to continue on this phone.</p>
+<p>Your number ({{.Paired}}) is paired. I texted you a page code; type it here to continue on this phone.</p>
 <form method="post" action="/setup/claim"><label>Page code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Continue</button></form>
 {{template "restart" true}}
 
 {{else if eq .Step "elsewhere"}}
 <h2>Setup in progress</h2>
-<p>Setup is continuing on the phone that texted the box ({{.Paired}}). Finish it there.</p>
+<p>Setup is continuing on the phone that texted me ({{.Paired}}). Finish it there.</p>
 {{template "restart" true}}
 
 {{else if eq .Step "codes"}}
 <p class="muted">Paired with your number {{.Paired}}.</p>{{template "restart" false}}
 <h2>3. Add approval codes</h2>
-{{if .CodesEnrolled}}<p>Approval codes are already set up for this box. If you no longer have the code generator, replace it with your recovery key after setup.</p>
+{{if .CodesUnavailable}}
+{{else if .CodesEnrolled}}<p>Approval codes are already set up. If you no longer have the code generator, replace it with your recovery key after setup.</p>
 <form method="post" action="/setup/codes"><input type="hidden" name="enrolled" value="1"><button>Continue</button></form>
 {{else if .CodesShown}}<form method="post" action="/setup/codes"><label>Type the 6-digit code your code generator shows for AgentOS<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Confirm</button></form>
 <form method="post" action="/setup/codes"><input type="hidden" name="new" value="1"><button>Show a new key</button></form>
@@ -303,8 +313,8 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "ai"}}
 <h2>6. Connect AI</h2>
-{{if not .Progress.Updated}}{{if eq .Progress.Phase "offline"}}<p>The box is offline, so it is running the version it shipped with. It updates when it is next online, and this step opens after that.</p>
-{{else}}<p>The box is updating to the latest version first. This step opens when it finishes.</p>{{end}}
+{{if not .Progress.Updated}}{{if eq .Progress.Phase "offline"}}<p>I am offline, so I am running the version I shipped with. I update when I am next online, and this step opens after that.</p>
+{{else}}<p>I am updating to the latest version first. This step opens when it finishes.</p>{{end}}
 {{else}}<p class="muted">One is enough. You can add more later.</p>
 {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>
 {{if not .Connected}}

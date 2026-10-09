@@ -22,10 +22,13 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/loopbuild"
+	"github.com/ghbmrk/agentos/broker/mail/mailsock"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
@@ -213,6 +216,9 @@ func (l *lateServices) Close(id string) {
 type lateStatus struct {
 	k   atomic.Pointer[keeper]
 	off string // set before the daemon runs: why the agent is off (PE6)
+	// caps is the capability-off registry's state: when its line names
+	// the agent, this line says nothing, so STATUS has one (OP-9).
+	caps *capState
 }
 
 func (l *lateStatus) Status() string {
@@ -221,6 +227,9 @@ func (l *lateStatus) Status() string {
 	}
 	if l.off != "" {
 		return l.off
+	}
+	if l.caps != nil && l.caps.agentNamed() {
+		return ""
 	}
 	return agentNotSet
 }
@@ -343,6 +352,7 @@ func main() {
 	var builderImage, builderLaunch, keptPath, setupRecord string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
+	var digestDir, mailSocket string
 	localUIUID := -1
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
@@ -354,6 +364,7 @@ func main() {
 	flag.StringVar(&updateStore, "update-store", "", "the update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
 	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
 	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
+	modemRoles := flag.String("modem-roles", "/var/lib/agentos/modem/roles.json", "agentos-modem's roles file, where a SIM the owner adopts on the local page is recorded")
 	flag.BoolVar(&ownerMessage, "owner-message", false, "also serve the raw \"message\" op on the owner socket with the bridge on (simulator and test builds only; it skips the bridge's checks)")
 	flag.Int64Var(&cfg.Admission.CapacityMB, "capacity-mb", defaultCapacityMB, "memory for agent machines, MB; unset, MemTotal less the floor budget outside the pool, at most 4500 or one OpenClaw machine per two cores, whichever is more (PE6, RES-2c)")
 	flag.Int64Var(&floor.HeadroomMB, "headroom-mb", floor.HeadroomMB, "memory never admitted into, MB")
@@ -367,7 +378,7 @@ func main() {
 	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", "agent-machine layers and snapshots (created 0700)")
 	flag.StringVar(&runsc, "runsc", "", "gVisor runsc binary; empty runs no agent machines")
 	flag.Int64Var(&diskReserveMB, "disk-reserve-mb", budget.FloorDisk().ReserveBytes()>>20, "state-disk space snapshots never use (RES-4 reserve), MB")
-	flag.StringVar(&diskQuota, "disk-quota", "on", "per-machine disk quotas (RES-4): on needs -machines on a file system mounted with prjquota; off lets a guest fill the disk")
+	flag.StringVar(&diskQuota, "disk-quota", "on", "per-machine disk quotas (RES-4): on needs -machines on a file system mounted with prjquota; off lets a guest fill the disk and runs no fuzz targets")
 	flag.Int64Var(&machineDiskMB, "machine-disk-mb", 8192, "each agent machine's disk budget: its hard quota and largest snapshot, MB (RES-4)")
 	flag.Var(imgs, "image", "agent-machine image, name=dir (repeatable)")
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
@@ -381,7 +392,10 @@ func main() {
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
+	flag.StringVar(&mailSocket, "mail-socket", "/run/agentos-egress/"+mailsock.Socket, "the vault process's mail socket, which serves the owner's mail account; empty connects no mail")
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
+	flag.StringVar(&digestDir, "digest", "/var/lib/agentos/digest", "the daily digest's queue and state (created 0700); empty sends no digest")
+	learn.Fuzz, learn.Loop7, learn.FuzzUser = fuzzRelease, fuzzState, fuzzUser
 	flag.StringVar(&learn.Spare, "spare-meter", "/var/lib/agentos/spare-meter.json", "spare-time model budget state (LOOP-2), apart from -meter")
 	flag.StringVar(&learn.Routing, "routing", "/run/agentos-egress/routing.sock", "the vault process's routing socket, through which routing changes are read and adopted (W3); empty holds routing changes")
 	flag.StringVar(&builderImage, "builder-image", defaultBuilderImage, "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty, or the default not registered, runs no model-backed builder")
@@ -400,11 +414,6 @@ func main() {
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the clock check's state (P2-9)")
 	flag.Parse()
-	// A restore the forget log's check held opens nothing on the restored
-	// tree: no recall, no agent machines (W3-forget-b1; security C3).
-	if err := restoreHold(learn.Dir); err != nil {
-		log.Fatal(err)
-	}
 	sleepHours, err := parseSleepHours(sleepHoursFlag)
 	if err != nil {
 		log.Fatal(err)
@@ -412,6 +421,7 @@ func main() {
 	if err := checkDiskQuotaFlag(diskQuota); err != nil {
 		log.Fatal(err)
 	}
+	learn.DiskQuota = diskQuota
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
@@ -450,6 +460,35 @@ func main() {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
 		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid}
+	}
+	// A restore the forget log's check held opens nothing on the restored
+	// tree: no recall, no agent machines (W3-forget-b1; security C3). The
+	// held mode texts the owner why, takes their answer, and the start
+	// goes on once it releases the restore (W3-forget-b1-7). With no owner
+	// to text, agentosd does not start.
+	if held := restoreHold(learn.Dir); held != nil {
+		owner, err := heldOwner(cfg.OwnerNumber, localsrv.FileRecord{Path: setupRecord})
+		if err != nil {
+			log.Fatalf("%v; %v", held, err)
+		}
+		log.Print(held)
+		m := heldMode{Learn: learn.Dir, Dir: cfg.SocketDir, Owner: owner, PeerUID: &cfg.ModemUID, PeerGID: cfg.ModemGID,
+			Message: !modemBridge || ownerMessage, Logf: log.Printf}
+		if modemBridge {
+			m.Link = modemlink.New(modemlink.Config{Owner: owner})
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err = m.run(ctx)
+		stop()
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := restoreHold(learn.Dir); err != nil {
+			log.Fatal(err)
+		}
 	}
 	// A box with no -owner is set up by the local UI (P2-2w c2): only
 	// setup's ops are served until its finish is recorded, and the owner's
@@ -501,6 +540,9 @@ func main() {
 			}
 		} else {
 			cg, psiPath = g, filepath.Join(g.Path, "memory.pressure")
+			// The machines group sits in the delegated root, where the
+			// fuzz children's leaf goes too (loop7 Jail, L7-6).
+			learn.Cgroup = filepath.Dir(g.Path)
 		}
 	}
 	if read, ok := cgroup.PressureSource(psiPath); ok {
@@ -513,16 +555,38 @@ func main() {
 	// Agents' questions (W9): owner replies are answered before task chat
 	// reaches the agent.
 	qs := &questions{}
-	// STATUS notes read in wiring order: the time check, then spare-time
-	// work not running (learningOff, below), then recall's (an agent
-	// holding a deleted record, or memory not open), then the second
-	// line's. Keep the clock first.
+	// STATUS notes read in wiring order: the time check, then the
+	// capability-off lines (OP-9, capoff.go), then spare-time work not
+	// running (learningOff, below), then recall's (an agent holding a
+	// deleted record, or memory not open), then the second line's. Keep
+	// the clock first.
 	qs.wire(&cfg)
+	// Each line reads live state set as the box opens below; the daemon
+	// copies the notes, so they are wired now.
+	caps := newCapState(egressSocket)
+	caps.machinesUnset(runsc, agentOff)
+	capLines := newCapLines(caps)
+	// The daily digest (CH-15, W5-Dc) goes by the modem bridge; its STATUS
+	// lines are wired with the rest. Its queue opens when it runs.
+	var dg *digestBox
+	if modemBridge && digestDir != "" {
+		var queue, state change.Store = change.FileStore{Path: filepath.Join(digestDir, "queue.json")},
+			change.FileStore{Path: filepath.Join(digestDir, "digest-sources.json")}
+		if err := prepareDigestDir(digestDir); err != nil {
+			log.Printf("digest: %v", err)
+			queue, state = downStore{err}, downStore{err}
+		}
+		dg = newDigestBox(digestConfig{Queue: queue, State: state})
+		dg.register(capLines)
+	}
+	capLines.wire(&cfg)
+	// No update-check loop (Loop 3, W5b) is built yet: caps.updateChecks
+	// is never called, and STATUS says update checks are not running.
 	agent := &lateAgent{}
 	cfg.Agent = agent
 	// Until the keeper runs, STATUS says the agent is not set up; it says
 	// so for good if the machine plane or the agent's setup fails.
-	agentStatus := &lateStatus{off: agentOff}
+	agentStatus := &lateStatus{off: agentOff, caps: caps}
 	cfg.AgentStatus = agentStatus.Status
 	// The code-generator seed lives in the vault, which only the vault
 	// process holds (P2-4a); the channel asks it to check high-tier codes
@@ -543,6 +607,10 @@ func main() {
 	cfg.Recall = recallExec
 	cfg.Grants.Contained = recallExec.Contained
 	cfg.Notes = append(cfg.Notes, recallExec.Status)
+	// Approval requests follow the owner's pacing setting and spend its one
+	// hourly budget; STATUS says what the pacer holds (W5-Dc-r1b QH-8,
+	// QH-10). The channel is attached once the daemon runs.
+	pacer := newOwnerPacer(&cfg)
 	var md machineDisk
 	if runsc != "" {
 		md = openMachineDisk(diskQuota, stateDir, &cfg.Notes)
@@ -555,12 +623,17 @@ func main() {
 	// reports the owner line, sends fail as down and are counted for the
 	// recovery text. Its note, last outage and counts are for the box's local page (U-B1).
 	if modemBridge {
-		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber})
+		// A SIM the owner adopts on the page, with a code (P2-2w d2b), is
+		// recorded where the bridge reads it at its next open.
+		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles)})
 		cfg.Modem, cfg.OwnerOps = link, link.Ops()
 		if cfg.PageSocket != nil {
-			cfg.PageSocket.Line = pageLine(link)
+			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
 		}
 		cfg.BridgeOnly = !ownerMessage
+		if dg != nil {
+			dg.cfg.Transport = newDigestTransport(link, cfg.OwnerNumber)
+		}
 	}
 
 	// The learning plane failing must not take the owner channel down
@@ -579,11 +652,32 @@ func main() {
 	}
 	if lp == nil {
 		learningOff(&cfg)
+	} else {
+		lp.forgetOwner.wirePage(&cfg)
+		if dg != nil {
+			lp.forgetOwner.wireDigest(dg, lp.forgotten.goals) // CAP-3
+		}
+		caps.learning(lp) // routing held while learning is on (C12)
+	}
+	// One clock for the journal, the gate and the mail adapter, so the
+	// organize bound counts the journal's stamps on the adapter's day
+	// (SR3-mail-w2 W2-c).
+	cfg.Now = func() time.Time { return time.Now().UTC() }
+	cfg.Grants.Now = cfg.Now
+	// The owner's mail account (SR3-mail-w2): registered now, bound to
+	// the vault process's account once the journal is open.
+	var mw *lateMail
+	if mailSocket != "" {
+		mw = newLateMail()
+		mw.wire(&cfg)
 	}
 	// Evidence delivery (CH-20): with a destination set, private replies
-	// are emailed to it. No mail account is connected in this process
-	// yet, so none can be set (owns is nil) and replies go by text.
+	// are emailed to it, to the connected mail account's own address;
+	// while none is connected, none can be set and replies go by text.
 	ev := newEvidence(keptPath, cfg.PageSocket != nil, log.Printf)
+	if mw != nil {
+		ev.mail = mw
+	}
 	ev.wire(&cfg)
 	// Changing where updates come from (OSS-10): on the clock guard's
 	// Latest, which questions.open starts; until then nothing is followed.
@@ -597,6 +691,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// The model routes hold only the attempts the owner's rule can spend,
+	// read from the routing socket off the request path (SR3-7-f2); with
+	// no routing socket they hold MaxRetries.
+	var retries func() int
+	if egressSocket != "" && learn.Routing != "" {
+		spare := &modelroute.Spare{}
+		go spare.Run(ctx, modelroute.NewRouting(learn.Routing).State, 30*time.Second)
+		retries = spare.Retries
+	}
 	steps := newStepNotes(&cfg.Notes)
 	if lp != nil && recallDir != "" && verifier != nil {
 		// An approved item 2 that finds recall not open yet waits for it
@@ -609,17 +712,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	pacer.attach(ctx, d.Owner(), dg, time.Minute)
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
 	// Deletions reach the journal's guest intents (CAP-3), when learning
 	// runs what it keeps of them (change C19, learning.ForgetTasks),
 	recallCfg := recalltool.ServiceConfig{Dir: recallDir, Journal: d.Engine(), Ask: d.Gate(), Location: time.Local,
-		Notify: func(text string) error {
-			if ch := d.Owner(); ch != nil {
-				return ch.Notify(text)
-			}
-			return errors.New("no owner channel")
-		}}
+		Notify: recallNotify(d.Owner)}
 	// and every reply kept on the box (CH-20).
 	fan := forgetFan{kept: ev.kept}
 	if lp != nil {
@@ -629,15 +728,26 @@ func main() {
 	if lp != nil {
 		lp.attach(ctx, d)
 	}
+	// The digest runs once the forget owner's start-up replay has asked
+	// it again (security B2' on #592); its own saved forgets hold their
+	// batches either way.
+	if mw != nil {
+		wireMail(ctx, mw, d, mailSocket, learn.Dir, dg, digestDir, cfg.Now)
+	}
+	if dg != nil {
+		if o := d.Owner(); o != nil {
+			dg.cfg.Inform = o.Inform
+		}
+		go dg.run(ctx)
+	}
 	// The owner channel failing to take questions must not take it down:
 	// the tools are then not offered and replies are task chat.
-	if err := qs.open(ctx, d, pre, qcfg); err != nil {
-		log.Printf("owner questions disabled: %v", err)
-	}
+	qs.start(ctx, d, pre, qcfg, caps)
 	// At exit the question loops stop before the guard's notices flush.
 	defer func() { stop(); qs.wait() }()
 	if runsc != "" && md.err != nil {
 		log.Printf("agent machines disabled: %v", md.err)
+		caps.agentOff(agentNoMachines)
 	} else if runsc != "" {
 		services := &lateServices{}
 		vmc := vm.Config{
@@ -659,6 +769,7 @@ func main() {
 		m, err := vm.Open(ctx, vmc)
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
+			caps.agentOff(agentNoMachines)
 		} else {
 			pre.m.Store(m)
 			if lp != nil {
@@ -666,18 +777,23 @@ func main() {
 				// work since a task, taken back by recall's Reach.
 				lp.forgetOwner.agent.Store(&forgetAgent{work: recallExec,
 					lineage: func() (string, error) { return machines{m}.Lineage(agentMachine) }})
+				// Recall's Retry reports a take-back it finished here,
+				// which tells item 2's done text (RCH-3, RCH-4).
+				recallCfg.OnTakenBack = func(_ string, since time.Time) { lp.forgetOwner.agentTakenBack(ctx, since) }
 			}
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
+			caps.workers(wt != nil)
 			tools := registeredTools(qs, tree, recallTools, wt)
 			if wt != nil {
 				go reapWorkers(ctx, wt, m, d.Engine().Stopped, 5*time.Second)
 			}
-			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, tools); err != nil {
+			if plane, err := openGuestPlane(m, d, ev, cfg.SocketDir, meterPath, inboxPath, egressSocket, retries, tools); err != nil {
 				// Machines cannot start without their guest sockets.
 				log.Printf("agent machines disabled: %v", err)
+				caps.agentOff(agentNoMachines)
 			} else {
 				services.live.Store(&svc{plane})
 				var notice func(key, line string) error
@@ -720,12 +836,13 @@ func main() {
 						log.Printf("replay evaluation disabled: %v", err)
 					}
 					bc := builderFlags(flag.CommandLine, builderImage, builderLaunch)
-					bc.Dir, bc.AgentImage, bc.MemMB, bc.Egress = filepath.Join(cfg.SocketDir, "build"), namedAgentImage, builderMemMB, egressSocket
+					bc.Dir, bc.AgentImage, bc.MemMB, bc.Egress, bc.Retries = filepath.Join(cfg.SocketDir, "build"), namedAgentImage, builderMemMB, egressSocket, retries
 					lp.startBuilder(m, imgs, services, bc)
 				}
 				spec, err := agentSpec(imgs, agentImage, agentLaunch, agentMemMB)
 				if err != nil {
 					log.Printf("no agent machine kept running: %v", err)
+					caps.agentOff(agentNoSoftware)
 				} else {
 					k := agentKeeper(ctx, m, d.Engine().RecordSleep, agentMachine, spec, agent.sleep.Load())
 					agentStatus.k.Store(k)
@@ -745,6 +862,7 @@ func main() {
 		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
 	} else {
 		recallExec.Off()
+		caps.recallWired(false)
 		if lp != nil {
 			go lp.forgetOwner.resumeAgent(ctx)
 		}
@@ -752,6 +870,10 @@ func main() {
 	if line != nil {
 		go line.run(ctx)
 	}
+	// What is off, in the box log too (OP-9); the digest's sender (DIG-1)
+	// takes this list once it lands.
+	logCapLines(capLines)
+	log.Printf("digest sources: %d, not sent until the digest is", len(newDigestSources(capLines, lp, line)))
 	log.Printf("broker up; owner socket %s/%s", cfg.SocketDir, daemon.OwnerSocket)
 	d.Wait()
 }
@@ -988,7 +1110,7 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 
 // openGuestPlane opens the OP-8 meter and the guest plane (ARC-6) over the
 // machine manager. Without them no agent machine can start.
-func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, tools guest.Tools) (*guest.Plane, error) {
+func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, meterPath, inboxPath, egressSocket string, retries func() int, tools guest.Tools) (*guest.Plane, error) {
 	eng := d.Engine()
 	mtr, err := meter.Open(meter.Config{
 		Path:           meterPath,
@@ -1040,10 +1162,11 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 	}
 	if egressSocket != "" {
 		gcfg.Model = modelroute.Forward(modelroute.Config{
-			Socket: egressSocket,
-			Label:  m.DataLabel,
-			Denied: modelroute.Journal(eng, log.Printf),
-			Logf:   log.Printf,
+			Socket:  egressSocket,
+			Label:   m.DataLabel,
+			Denied:  modelroute.Journal(eng, log.Printf),
+			Logf:    log.Printf,
+			Retries: retries,
 		})
 	}
 	return guest.New(gcfg)
@@ -1070,4 +1193,101 @@ func ownerVerifyErr(err error) error {
 		modelroute.VerifyLost:   owner.VerifyLost,
 	}[ve.Kind]
 	return &owner.VerifyError{Kind: kind, Until: ve.Until}
+}
+
+// recallNotify is recall's take-back notice to the owner. Each closes a
+// take-back the owner approved, so it is approval class; the texts name
+// the agent, so they keep the agent prefix (W5-Dc-r1b QH-9).
+func recallNotify(own func() *owner.Channel) func(string) error {
+	return func(text string) error {
+		if ch := own(); ch != nil {
+			return ch.NotifyAs(owner.ClassApproval, text)
+		}
+		return errors.New("no owner channel")
+	}
+}
+
+// ownerPacer is agentosd's hold on the owner channel's pacer (CH-15,
+// W5-Dc-r1b): the grants and digest hooks read its setting, the minute
+// tick releases what it holds, and STATUS says what waits. Until the
+// channel is attached it is never quiet and has no allowance, so nothing
+// paced goes.
+type ownerPacer struct {
+	ch atomic.Pointer[owner.Channel]
+}
+
+// newOwnerPacer is the pacer's part of the daemon config, set before the
+// daemon runs: the grants hooks (QH-8) and STATUS's held line (QH-10).
+func newOwnerPacer(cfg *daemon.Config) *ownerPacer {
+	p := &ownerPacer{}
+	p.wire(&cfg.Grants)
+	cfg.Notes = append(cfg.Notes, p.note)
+	return p
+}
+
+// attach binds the owner channel once the daemon runs, makes the digest
+// (nil when none is configured; call before it runs) wait for quiet hours
+// (QH-7), and starts the tick that releases held texts (QH-10).
+func (p *ownerPacer) attach(ctx context.Context, ch *owner.Channel, dg *digestBox, every time.Duration) {
+	p.ch.Store(ch)
+	if dg != nil {
+		dg.cfg.Quiet = p.quiet
+	}
+	go p.run(ctx, every)
+}
+
+// wire sets the grants pacing hooks to the owner's setting and its one
+// hourly budget (QH-8).
+func (p *ownerPacer) wire(g *grants.Config) {
+	g.Quiet = p.quiet
+	g.Urgent = func(owner.Item) bool { return p.urgent(owner.ClassApproval) }
+	g.Allowance = p.allowance
+}
+
+func (p *ownerPacer) quiet(t time.Time) bool {
+	ch := p.ch.Load()
+	return ch != nil && ch.Quiet(t)
+}
+
+func (p *ownerPacer) urgent(class owner.Class) bool {
+	ch := p.ch.Load()
+	return ch != nil && ch.Urgent(class)
+}
+
+func (p *ownerPacer) allowance(t time.Time) int {
+	if ch := p.ch.Load(); ch != nil {
+		return ch.Allowance(t)
+	}
+	return 0
+}
+
+// note is STATUS's held line (QH-10).
+func (p *ownerPacer) note() string {
+	if ch := p.ch.Load(); ch != nil {
+		return ch.HeldNote()
+	}
+	return ""
+}
+
+// tick releases held texts that may go now (QH-10).
+func (p *ownerPacer) tick() {
+	if ch := p.ch.Load(); ch != nil {
+		if err := ch.Release(); err != nil {
+			log.Printf("owner: held texts not sent: %v", err)
+		}
+	}
+}
+
+// run ticks every interval until ctx ends.
+func (p *ownerPacer) run(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.tick()
+		}
+	}
 }

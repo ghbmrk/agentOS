@@ -361,11 +361,16 @@ type forgetDaemon struct {
 	lp    *learning
 	d     *daemon.Daemon
 	ctx   context.Context
+	stop  context.CancelFunc
 	phone *modem.Line
 }
 
 func newForgetDaemon(t *testing.T) *forgetDaemon {
-	dir := t.TempDir()
+	return newForgetDaemonAt(t, t.TempDir())
+}
+
+// newForgetDaemonAt starts the daemon on dir's state, as a restart does.
+func newForgetDaemonAt(t *testing.T, dir string) *forgetDaemon {
 	carrier := modem.NewCarrier()
 	box, phone := carrier.Line("+15550000100"), carrier.Line(ownerNum)
 	cfg := &daemon.Config{
@@ -384,7 +389,7 @@ func newForgetDaemon(t *testing.T) *forgetDaemon {
 		t.Fatal(err)
 	}
 	attachForTest(t, lp, ctx, cancel, d)
-	return &forgetDaemon{t: t, dir: dir, cfg: cfg, lp: lp, d: d, ctx: ctx, phone: phone}
+	return &forgetDaemon{t: t, dir: dir, cfg: cfg, lp: lp, d: d, ctx: ctx, stop: cancel, phone: phone}
 }
 
 // text is the next text to the owner.

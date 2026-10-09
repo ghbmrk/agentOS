@@ -97,6 +97,9 @@ type trustedHost interface {
 	// so they only pick the owner's wording.
 	updated() bool
 	secureBootChanged() bool
+	// updateCounter is this PC's TPM as the counter that anchors the
+	// update store's outside-attestor record (SR3-6f-2b).
+	updateCounter() (vault.Counter, error)
 }
 
 // tpmHost is trustedHost over the PC's TPM (package tpmseal). Approved
@@ -643,6 +646,12 @@ func (h *tpmHost) counter() (*tpmCounter, error) {
 		return nil, err
 	}
 	return &tpmCounter{openTPM: h.openTPM, srk: id}, nil
+}
+
+func (h *tpmHost) updateCounter() (vault.Counter, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.counter()
 }
 
 func (h *tpmHost) bind(v *vault.Vault) error {

@@ -23,6 +23,16 @@ class RiskTierTest(unittest.TestCase):
             "broker/mail/deliver.go": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",
+            "broker/sockprobe/probe.go": "A",
+            # LOOP-7's verdicts and in-guest scripts (P3-4b-4b; Security #515 f4).
+            "broker/loops/probe.go": "A",
+            "broker/loops/machine.go": "A",
+            "broker/probecmd/probecmd.go": "A",
+            "broker/corpus/checks.go": "A",
+            "broker/machprobe/machprobe.go": "A",
+            "broker/loop7/loop7.go": "A",
+            # REQ: OP-2 (W5-Db DB-1: Begin is the single gate on digest sends).
+            "broker/digestqueue/queue.go": "A",
             "broker/recall/index.go": "B",
             "broker/newpkg/x.go": "B",
             "guest/openclaw/Dockerfile": "B",

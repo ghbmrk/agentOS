@@ -7,7 +7,7 @@ import (
 
 // Hidden replaces an outbound text that looks like it carries a code or a
 // key (CH-19).
-const Hidden = "A message was held back because it may contain a code or key. Read it on the box's Wi-Fi page."
+const Hidden = "I held back a message because it may contain a code or key. Read it on my Wi-Fi page."
 
 // tokenFormats are known secret formats. They are fixed patterns, not
 // inference (ARC-2); Loop 2 regressions add to them (LOOP-10).

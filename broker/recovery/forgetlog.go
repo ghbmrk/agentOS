@@ -62,7 +62,7 @@ const PendingSuffix = ".pending"
 
 // ErrNoForgetLog is an append to a vault that has no log yet: one made
 // before this release, until its recovery key is next stored.
-var ErrNoForgetLog = errors.New("recovery: this box has no forget log yet")
+var ErrNoForgetLog = errors.New("recovery: no forget log yet")
 
 var (
 	errForeignLog = errors.New("recovery: forget log copy is not under this recovery key")
@@ -379,7 +379,8 @@ func ExportForgetLog(b *Box) ([]byte, error) {
 
 // checkForgetLog checks the restored vault's log against every copy at
 // hand and the PC's counter. It returns the log to carry on, or why the
-// restore stays pending.
+// restore stays pending; unanchored, it also returns the longest
+// authentic log, for the owner to confirm (W3-forget-b1-4).
 func checkForgetLog(v *vault.Vault, rk RecoveryKey, copies [][]byte, c vault.Counter) (forgetLog, string) {
 	key := forgetKey(rk)
 	defer wipe(key)
@@ -415,15 +416,15 @@ func checkForgetLog(v *vault.Vault, rk RecoveryKey, copies [][]byte, c vault.Cou
 	// The anchor is the PC's counter for this log, whatever the copies
 	// say: a copy from before the log was anchored here is behind it.
 	if c == nil || !ok || err != nil {
-		return forgetLog{}, PendingUnanchored
+		return best, PendingUnanchored
 	}
 	ref, found, err := c.Find(best.ID)
 	if err != nil || !found {
-		return forgetLog{}, PendingUnanchored
+		return best, PendingUnanchored
 	}
 	n, err := c.Read(ref, kv.Auth)
 	if err != nil {
-		return forgetLog{}, PendingUnanchored
+		return best, PendingUnanchored
 	}
 	h := best.head()
 	if best.Host != c.Host() {
@@ -453,8 +454,11 @@ func prefixOf(a, b forgetLog) bool {
 
 // settleForgetLog runs the check in a restore's extracted tree: a checked
 // log goes into the vault and the state dir; otherwise the state dir's
-// copy goes and a pending marker takes its place.
-func settleForgetLog(v *vault.Vault, rk RecoveryKey, tmp string, lay Layout, opt Options) (string, error) {
+// copy goes and a pending marker takes its place, with the owner's
+// question beside it when the owner can confirm the restore. An
+// unanchored log is authentic, so the vault keeps the longest copy: it
+// only adds forgets, and the next append chains on from it.
+func settleForgetLog(v *vault.Vault, rk RecoveryKey, tmp string, lay Layout, opt Options, created, now time.Time) (string, error) {
 	copies := append([][]byte(nil), opt.ForgetLogs...)
 	var path string
 	if lay.ForgetLog != "" {
@@ -464,7 +468,8 @@ func settleForgetLog(v *vault.Vault, rk RecoveryKey, tmp string, lay Layout, opt
 		}
 	}
 	l, pending := checkForgetLog(v, rk, copies, opt.Counter)
-	if pending == "" {
+	has := pending == "" || pending == PendingUnanchored
+	if has {
 		if err := saveForgetLog(v, l); err != nil {
 			return "", err
 		}
@@ -479,10 +484,23 @@ func settleForgetLog(v *vault.Vault, rk RecoveryKey, tmp string, lay Layout, opt
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
+		if Confirmable(pending) {
+			f, err := newQuestion(pending, l, has, now, opt.Newer, created, decoyStream(rk, l, has))
+			if err != nil {
+				return "", err
+			}
+			if err := writeQuestion(path, f); err != nil {
+				return "", err
+			}
+		} else if err := os.Remove(path + ConfirmSuffix); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
 		return pending, writeAtomic(path+PendingSuffix, []byte(pending+"\n"+PendingNotice(pending)+"\n"))
 	}
-	if err := os.Remove(path + PendingSuffix); err != nil && !os.IsNotExist(err) {
-		return "", err
+	for _, sfx := range []string{PendingSuffix, ConfirmSuffix} {
+		if err := os.Remove(path + sfx); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
 	}
 	enc, err := json.Marshal(l)
 	if err != nil {
