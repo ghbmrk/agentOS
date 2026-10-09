@@ -21,6 +21,7 @@ import collections
 import contextlib
 import errno
 import fnmatch
+import grp
 import ipaddress
 import json
 import os
@@ -316,32 +317,145 @@ def _unshare_flags():
 # by DAC alone, with or without the capability drop (DEP-3a, D9).
 SCENARIO_ID = 1000
 SUBUID, SUBGID = "/etc/subuid", "/etc/subgid"
+# DEP-8: a range is usable only if it maps the scenario onto an id no one else owns (D13).
+# The floor keeps every id systemd reserves below it; login.defs can raise it, never lower it.
+LOGIN_DEFS = "/etc/login.defs"
+SUB_FLOOR = 100000
+_ID_LAST = 4294967294  # 4294967295 is (uid_t)-1
+_NSS_BUF_MAX = 1 << 20
+# shadow reads START and COUNT with base 0 (lib/subordinateio.c): ASCII decimal with no sign,
+# space, base prefix or leading 0 reads the same in base 0 and base 10 (DEP-8c). No id has more
+# than 10 digits, and the bound keeps int() below its 4300-digit limit.
+_SUBID_LINE = re.compile(r"([^:\s]+):(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,9})")
+
+
+class UnusableRange(OSError):
+    """The runner has a subordinate range, but it breaks a DEP-8 rule."""
+
+
+class UnparsableLine(UnusableRange):
+    """A line of /etc/subuid or /etc/subgid does not parse strictly, so no range is checked (DEP-8c)."""
+
+
+def _sub_floor(kind):
+    """max(SUB_FLOOR, SUB_UID_MIN or SUB_GID_MIN from LOGIN_DEFS); a missing file or key is
+    SUB_FLOOR. Raises ValueError for a value that is not a plain decimal (DEP-8a)."""
+    key = "SUB_%s_MIN" % kind.upper()
+    try:
+        lines = pathlib.Path(LOGIN_DEFS).read_text(errors="surrogateescape").split("\n")
+    except FileNotFoundError:
+        return SUB_FLOOR
+    except OSError as e:
+        raise ValueError("%s cannot be read: %s" % (LOGIN_DEFS, e))
+    floor = SUB_FLOOR
+    for line in lines:
+        f = line.split()
+        if f and f[0] == key:
+            if len(f) != 2 or not re.fullmatch(r"0|[1-9][0-9]*", f[1]):
+                raise ValueError("%s %s %r is not a decimal number" % (LOGIN_DEFS, key, " ".join(f[1:])))
+            floor = max(floor, int(f[1]))
+    return floor
+
+
+def _nss_lookup(call, ident):
+    """(rc, found) from glibc's getpwuid_r or getgrgid_r of ident, through nsswitch. The buffer
+    grows on ERANGE up to _NSS_BUF_MAX; past it, ERANGE is returned. What rc means is the
+    caller's: CPython's pwd.getpwuid reads every NSS error as KeyError (DEP-8b)."""
+    import ctypes
+    fn = getattr(ctypes.CDLL(None, use_errno=True), call)
+    fn.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+                   ctypes.POINTER(ctypes.c_void_p)]
+    fn.restype = ctypes.c_int
+    entry = ctypes.create_string_buffer(256)  # struct passwd is 48 bytes and struct group 32 on LP64
+    size = 1024
+    while True:
+        buf, result = ctypes.create_string_buffer(size), ctypes.c_void_p()
+        rc = fn(ident, entry, buf, size, ctypes.byref(result))
+        if rc != errno.ERANGE or size >= _NSS_BUF_MAX:
+            return rc, bool(result.value)
+        size *= 2
 
 
 def _subordinate(path):
-    """The start of the first range path grants the effective user (by name or uid), or None."""
+    """The first line path grants the effective user (by name or uid) as (owner, start, count),
+    with every other owner's line as (line, start, count), or (None, []) without one. Raises
+    UnusableRange for a non-blank line that does not parse strictly (DEP-8c)."""
     me = {str(os.geteuid())}
     with contextlib.suppress(KeyError):
         me.add(pwd.getpwuid(os.geteuid()).pw_name)
     try:
-        lines = pathlib.Path(path).read_text().splitlines()
+        lines = pathlib.Path(path).read_text(errors="surrogateescape").split("\n")
     except OSError:
-        return None
-    for line in lines:
-        f = line.strip().split(":")
-        if len(f) == 3 and f[0] in me and f[1].isdigit() and f[2].isdigit() and int(f[2]) >= 1:
-            return int(f[1])
-    return None
+        return None, []
+    mine, others = None, []
+    for n, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        m = _SUBID_LINE.fullmatch(line)
+        if not m:
+            raise UnparsableLine("line %d of %s, %r, does not parse as NAME:START:COUNT in ASCII decimal "
+                                 "(no sign, space, base prefix or leading 0; at most 10 digits), so the "
+                                 "overlap check cannot read it" % (n, path, line))
+        owner, start, count = m.group(1), int(m.group(2)), int(m.group(3))
+        if owner not in me:
+            others.append((line, start, count))
+        elif mine is None:
+            mine = (owner, start, count)
+    return mine, others
+
+
+def _range_problem(kind, path, mine, others):
+    """The first DEP-8 rule the runner's range breaks, as text, or "" if it breaks none."""
+    _, start, count = mine
+    end = start + count  # exclusive
+    try:
+        floor = _sub_floor(kind)
+    except ValueError as e:
+        return str(e)
+    if start < floor:
+        return "start %d is below the floor %d (SUB_%s_MIN)" % (start, floor, kind.upper())
+    if count < 1:
+        return "count 0 grants no id"
+    if end - 1 > _ID_LAST:
+        return "the range ends at %d, past %d (4294967295 is (%s_t)-1)" % (end - 1, _ID_LAST, kind)
+    for line, o_start, o_count in others:
+        if o_start < end and start < o_start + o_count:
+            return "overlaps %s" % line
+    own = os.geteuid() if kind == "uid" else os.getegid()
+    if start <= own < end:
+        return "%s %d (the runner) is in the range" % (kind, own)
+    try:
+        if kind == "uid":
+            known = [(e.pw_uid, e.pw_name) for e in pwd.getpwall()]
+        else:
+            known = [(e.gr_gid, e.gr_name) for e in grp.getgrall()]
+    except Exception as e:  # noqa: BLE001 - any failure leaves the range unchecked
+        return "%s failed: %r" % ("getpwall()" if kind == "uid" else "getgrall()", e)
+    for ident, name in known:
+        if start <= ident < end:
+            return "%s %d (%s) is in the range" % (kind, ident, name)
+    call = "getpwuid_r" if kind == "uid" else "getgrgid_r"
+    rc, found = _nss_lookup(call, start)
+    if rc:
+        return "%s(%d) failed with %s" % (call, start, errno.errorcode.get(rc, str(rc)))
+    if found:
+        return "%s %d has an entry (%s) and is in the range" % (kind, start, call)
+    return ""
 
 
 def _id_maps():
     """The exact uid_map and gid_map lines the sandbox sets, as (inside, outside, count)
     triples: uid 0 is the runner, SCENARIO_ID the first subordinate id (DEP-3c). Raises
-    OSError without a subordinate range: the sandbox is then unavailable (DEP-3a)."""
-    uid, gid = _subordinate(SUBUID), _subordinate(SUBGID)
+    OSError without a subordinate range, and UnusableRange for one that breaks a DEP-8 rule:
+    the sandbox is then unavailable (DEP-3a). Only the first line counts (DEP-8d)."""
+    (uid, uid_others), (gid, gid_others) = _subordinate(SUBUID), _subordinate(SUBGID)
     if uid is None or gid is None:
         raise OSError("no subordinate uid and gid range for uid %d in %s and %s" % (os.geteuid(), SUBUID, SUBGID))
-    return ([(0, os.geteuid(), 1), (SCENARIO_ID, uid, 1)], [(0, os.getegid(), 1), (SCENARIO_ID, gid, 1)])
+    for kind, path, mine, others in (("uid", SUBUID, uid, uid_others), ("gid", SUBGID, gid, gid_others)):
+        why = _range_problem(kind, path, mine, others)
+        if why:
+            raise UnusableRange("range %d:%d for %s in %s is not usable: %s" % (mine[1], mine[2], mine[0], path, why))
+    return ([(0, os.geteuid(), 1), (SCENARIO_ID, uid[1], 1)], [(0, os.getegid(), 1), (SCENARIO_ID, gid[1], 1)])
 
 
 def _map_text(triples):
@@ -387,12 +501,25 @@ def _sandbox_missing():
             user = pwd.getpwuid(os.geteuid()).pw_name
         except KeyError:
             user = str(os.geteuid())
-        # No fixed range: one that overlaps another user's would share their ids, and one at 0
-        # or a login uid would map the scenario onto root or that user (D13).
-        return ("%s; add one: sudo usermod --add-subuids START-END --add-subgids START-END %s, with a "
-                "65536-id START-END, START at least 100000 or SUB_UID_MIN/SUB_GID_MIN from /etc/login.defs, "
-                "the range above every uid in /etc/passwd and gid in /etc/group, and that overlaps no "
-                "line in /etc/subuid or /etc/subgid (tools/ASSUMPTIONS.md D13)" % (e, user))
+        if isinstance(e, UnparsableLine):
+            # The line is the fault, whoever owns it: no range of the runner's fixes it (DEP-8e).
+            return ("%s; correct or remove that line, so every line reads NAME:START:COUNT in ASCII decimal "
+                    "(tools/ASSUMPTIONS.md D13)" % e)
+        # No fixed range: one that overlaps another user's would share their ids. The rules are
+        # the ones _range_problem checks, and only those (DEP-8e, D13).
+        floors = []
+        for kind in ("uid", "gid"):
+            try:
+                floors.append("%d (SUB_%s_MIN in /etc/login.defs, never below 100000)" % (_sub_floor(kind), kind.upper()))
+            except ValueError as err:
+                floors.append("max(100000, SUB_%s_MIN), which cannot be computed: %s" % (kind.upper(), err))
+        verb = "replace it: sudo usermod --del-subuids/--del-subgids the old range, then" \
+            if isinstance(e, UnusableRange) else "add one:"
+        return ("%s; %s sudo usermod --add-subuids START-END --add-subgids START-END %s, with a 65536-id "
+                "START-END: START at least %s for uids and %s for gids; containing no uid or gid that "
+                "getent passwd, getent group or a lookup by id returns, and not the runner's own; and that "
+                "overlaps no other owner's line in /etc/subuid or /etc/subgid (tools/ASSUMPTIONS.md D13)"
+                % (e, verb, user, floors[0], floors[1]))
     try:
         # The same -e as the run: an strace that cannot name a traced syscall exits
         # nonzero ("invalid system call") instead of skipping it unseen (DEP-4b).

@@ -86,18 +86,22 @@ func (a *activator) Booted(context.Context) (Boot, error) {
 // pipeline is the change pipeline's staged-adoption hooks, with their
 // contract (SR3-4): settling an adoption again the same way is a success
 // that changes nothing, the other way is refused. confirmErr and failErr
-// fail the next call with no effect.
+// fail the next call with no effect. calls logs every call, refused or
+// not; onConfirm runs after a ConfirmStaged that succeeded.
 type pipeline struct {
 	mu         sync.Mutex
 	confirmed  []string
 	failed     []string
 	confirmErr error
 	failErr    error
+	calls      []string
+	onConfirm  func()
 }
 
 func (p *pipeline) ConfirmStaged(ref string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.calls = append(p.calls, "confirm "+ref)
 	if err := p.confirmErr; err != nil {
 		p.confirmErr = nil
 		return err
@@ -108,12 +112,16 @@ func (p *pipeline) ConfirmStaged(ref string) error {
 	if !slices.Contains(p.confirmed, ref) {
 		p.confirmed = append(p.confirmed, ref)
 	}
+	if f := p.onConfirm; f != nil {
+		f()
+	}
 	return nil
 }
 
 func (p *pipeline) StageFailed(_ context.Context, ref string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.calls = append(p.calls, "fail "+ref)
 	if err := p.failErr; err != nil {
 		p.failErr = nil
 		return err
