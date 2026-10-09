@@ -1217,6 +1217,8 @@ var plainCheck = map[Check]string{
 	CheckExpiry:   "credential expiry",
 	CheckCanary:   "leak tests",
 	CheckCorpus:   "attack-text tests",
+	CheckTamper:   "tamper tests",
+	CheckExhaust:  "load tests",
 }
 
 // safeName keeps owner-facing names to a fixed alphabet.
@@ -1309,6 +1311,16 @@ func findingText(f Finding) string {
 		return "A leak test found a planted test secret where " + sub + " could reach it."
 	case CheckCorpus:
 		return "A published attack text got past my " + safeName(f.Detail) + " (" + sub + ")."
+	case CheckTamper:
+		return "A tamper test changed my " + sub + " from inside an agent machine."
+	case CheckExhaust:
+		switch {
+		case f.Detail != "slow":
+			return "A load test found no " + sub + " limit on an agent machine."
+		case f.Subject == "preemption":
+			return "Under a load test I stopped an agent machine slower than my target."
+		}
+		return "Under a load test I answered slower than my target."
 	}
 	return "Security finding on " + sub + "."
 }

@@ -24,7 +24,7 @@ const (
 )
 
 // probeChecks are the checks Report takes without a tree rule.
-var probeChecks = map[Check]bool{CheckCanary: true, CheckCorpus: true}
+var probeChecks = map[Check]bool{CheckCanary: true, CheckCorpus: true, CheckTamper: true, CheckExhaust: true}
 
 // Probe is one LOOP-7 source. Run makes no model calls. It returns what it
 // found and the subjects it checked; an error with a result means part of
@@ -163,7 +163,7 @@ func (s *Guard) repeatLinesLocked() []string {
 		return nil
 	}
 	var out []string
-	for _, c := range []Check{CheckCanary, CheckCorpus} {
+	for _, c := range []Check{CheckCanary, CheckCorpus, CheckTamper, CheckExhaust} {
 		if n := s.st.SourcePauses[c]; n > 1 {
 			out = append(out, fmt.Sprintf("Loop 2: %s paused access %d times today.", plainCheck[c], n))
 		}
