@@ -9,7 +9,7 @@ Release findings from the reviews of #437 (DEP-2): L3 point 3 (tools/ASSUMPTIONS
 - **Unknown strace names (old DEP-5).** `TRACED` prefixes every link and mount name with `?`, so an strace that does not know one skips it silently and that syscall goes unseen; the run still says `pass`. strace 6.8 knows them all on x86_64 (checked: an unknown name without `?` fails with "invalid system call"). This predates DEP-2.
 
 **Requirements** (local IDs; no SPEC row, a defect in tooling):
-- **DEP-4a:** every mount at or under each read-only kept path is read-only inside the sandbox before the command runs. Set it recursively with `mount_setattr` and `AT_RECURSIVE`, then verify from `/proc/self/mountinfo`: if any mount at or under a read-only kept path is `rw` and is not a declared `writes` path (or under one), the attempt fails as a sandbox error, never runs the command. `writes` paths inside a read-only parent are bound after the recursive set and stay writable, as today. If `mount_setattr` is missing (ENOSYS, kernel before 5.12), fall back to a `remount,bind,ro` per mountinfo entry, or fail closed; never run with an unchecked submount.
+- **DEP-4a:** every mount at or under each read-only kept path is read-only inside the sandbox before the command runs. Set it recursively with `mount_setattr` and `AT_RECURSIVE`, then verify from `/proc/self/mountinfo`: if any mount at or under a read-only kept path is `rw` and is not a declared `writes` path (or under one), the attempt fails as a sandbox error, never runs the command. `writes` paths inside a read-only parent are bound after the recursive set and stay writable, as today. If `mount_setattr` is missing (ENOSYS, kernel before 5.12), prefer failing closed: a fallback remount path would be a tier-A branch CI never runs (L3 on #545 point 3). Never run with an unchecked submount.
 - **DEP-4b:** `sandbox_available()` is false, so `depaudit run` fails loudly (exit 2), if the strace on PATH cannot name every syscall in `TRACED` that exists on the running architecture. Probe without the `?` prefix. Names the architecture does not have (`symlink` and `link` on aarch64's generic table) are allowed by an explicit per-architecture list, not by `?`: the `?` stays in `TRACED` only for those.
 
 **Failing-test-first controls.** Each must be shown failing at main (cite the failing message in the PR), then passing at the head.
@@ -34,7 +34,7 @@ Release findings from the reviews of #437 (DEP-2): L3 point 3 (tools/ASSUMPTIONS
 - `LATER.md`: remove DEP-2-sum, and the DEP-4 and DEP-5 release lines once closed.
 - `briefs/DEP-4.md` (Delivery notes only), `BOARD.md` rows DEP-4 and DEP-5.
 
-**Needs:** DEP-2 (merged). DEP-3 also edits `sandbox_available()`, `_control` and `control_targets`; whichever merges second merges main first and re-runs every control.
+**Needs:** DEP-2 (merged). Build before DEP-3: both change `control-kept-read-only`, `sandbox_available()`, `_control` and `control_targets`, and DEP-3 builds on this package's mountinfo check (L3 on #545).
 
 **Done:**
 - CI green; `dependency-audit` runs the new tests unskipped (grep its log for the test names and `PASS control-kept-read-only`, and quote them).
