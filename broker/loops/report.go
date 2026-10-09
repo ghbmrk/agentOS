@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
 )
@@ -18,6 +19,20 @@ import (
 
 // CheckSeeded names a finding handed in as a failing tree-rule test.
 const CheckSeeded Check = "seeded"
+
+// CheckFuzz and CheckProbe name findings from Loop 7's off-the-shelf
+// checks (P3-4b-3): a fuzz target's crash and an in-guest socket probe's
+// failure. They have no tree rule, so nothing in the suite can grade a
+// Loop 2 fix: the fix comes with an update, and the caller's own
+// regression (the crash input, the probe frame) replays it, calling
+// Resolve once it passes. Detail names the evidence (an input digest).
+const (
+	CheckFuzz  Check = "fuzz"
+	CheckProbe Check = "probe"
+)
+
+// ruleLess reports a check Report takes without a tree rule.
+func ruleLess(c Check) bool { return c == CheckFuzz || c == CheckProbe }
 
 // OriginalSuffix ends the ID of a reported finding's original,
 // unminimized test, linked beside its regression `loop2/<id>`.
@@ -40,7 +55,10 @@ func (s *Guard) Report(ctx context.Context, f Finding) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	if f.ID == "" && f.Rule == nil {
+	if f.ID == "" && ruleLess(f.Check) {
+		h := sha256.Sum256([]byte(f.Detail))
+		f.ID = findingID(f.Check, f.Subject, hex.EncodeToString(h[:]))
+	} else if f.ID == "" && f.Rule == nil {
 		f.ID = reportID(f)
 	} else if f.ID == "" {
 		h := sha256.Sum256(rule.Encode())
@@ -69,11 +87,17 @@ func (s *Guard) Report(ctx context.Context, f Finding) (Record, error) {
 }
 
 // reportable checks f before anything acts on it: a check Report takes, a
-// severity, a valid tree rule that fails on the active tree, and a
-// containment target of a known kind. A probe finding (LOOP-7) may carry
-// no rule, and then needs a subject, which its probe closes it by.
+// severity, a valid tree rule that fails on the active tree, a
+// containment target of a known kind, and an ID that is not another
+// finding's original-test slot: one ending in OriginalSuffix would take
+// that slot, so the other finding could never link (#493 intake). A
+// probe finding (LOOP-7) may carry no rule, and then needs a subject,
+// which its probe closes it by.
 func (s *Guard) reportable(f Finding) (change.TreeRule, error) {
-	if f.Check != CheckSeeded && !probeChecks[f.Check] {
+	if strings.HasSuffix(f.ID, OriginalSuffix) {
+		return change.TreeRule{}, fmt.Errorf("%w: ID %q ends in %s", ErrFinding, f.ID, OriginalSuffix)
+	}
+	if f.Check != CheckSeeded && !probeChecks[f.Check] && !ruleLess(f.Check) {
 		return change.TreeRule{}, fmt.Errorf("%w: check %q is not reported", ErrFinding, f.Check)
 	}
 	if probeChecks[f.Check] && f.Subject == "" {
@@ -84,6 +108,15 @@ func (s *Guard) reportable(f Finding) (change.TreeRule, error) {
 	}
 	if f.Contain != nil && f.Contain.Kind != "grant" && f.Contain.Kind != "executor" {
 		return change.TreeRule{}, fmt.Errorf("%w: containment kind %q", ErrFinding, f.Contain.Kind)
+	}
+	if ruleLess(f.Check) {
+		switch {
+		case f.Rule != nil:
+			return change.TreeRule{}, fmt.Errorf("%w: a %s finding carries no tree rule", ErrFinding, f.Check)
+		case f.Detail == "" || f.Subject == "":
+			return change.TreeRule{}, fmt.Errorf("%w: a %s finding needs a subject and its evidence", ErrFinding, f.Check)
+		}
+		return change.TreeRule{}, nil
 	}
 	if f.Rule == nil && probeChecks[f.Check] {
 		return change.TreeRule{}, nil
@@ -137,10 +170,14 @@ const (
 	waitRejected  = "the last one did not qualify; I try again at the next check"
 	waitForAFixOf = "waits for a fix: "
 	waitNoTest    = "its test could not be added to my security checks, so no fix can qualify yet"
+	waitUpdate    = "one comes with an update; I recheck it every round"
 )
 
 // waitingLocked is why an open reported record waits, "" if it does not.
 func (s *Guard) waitingLocked(r Record) string {
+	if r.Reported && r.Fix == "" && ruleLess(r.Finding.Check) {
+		return waitUpdate
+	}
 	if r.Reported && r.Finding.Rule == nil && probeChecks[r.Finding.Check] {
 		return "" // its probe closes it (P3-4b-4a)
 	}
@@ -183,4 +220,64 @@ func (s *Guard) waitStatusLocked() string {
 		}
 	}
 	return strings.Join(out, " ")
+}
+
+// Replay is a source's record of re-running a fuzz or probe finding's
+// stored input: Evidence names the input (the finding's Detail, an input
+// digest) and Passed says the replay of that input passed.
+type Replay struct {
+	Evidence string    `json:"evidence"`
+	Passed   bool      `json:"passed"`
+	At       time.Time `json:"at"`
+}
+
+// Resolve closes open reported fuzz or probe finding id as cleared, only
+// on a replay that passed on the finding's own stored input; nothing else
+// clears one. The replay is saved on the finding's evidence. A pause it
+// caused stays until the owner resumes the target, and the owner hears it
+// cleared where they heard of it. A finding with a tree rule clears only
+// when its linked cases hold (passedReported), never on a caller's word.
+func (s *Guard) Resolve(id string, r Replay) error {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	s.mu.Lock()
+	rec, ok := s.st.Open[id]
+	if !ok || !rec.Reported || !ruleLess(rec.Finding.Check) {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %q is not an open fuzz or probe finding", ErrFinding, id)
+	}
+	if !r.Passed || r.Evidence != rec.Finding.Detail {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: no passing replay of %q's stored input", ErrFinding, id)
+	}
+	for i := range s.st.Evidence {
+		if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
+			e.Replay = &r
+		}
+	}
+	delete(s.st.Open, id)
+	delete(s.held, id)
+	s.st.Cleared[id] = s.cfg.Now()
+	err := s.saveLocked()
+	s.mu.Unlock()
+	if rec.Contained == "paused" && rec.Texted {
+		if text := s.batch([]string{clearedLine(rec)}); text != "" {
+			s.cfg.Notify(text, false)
+		}
+	}
+	return err
+}
+
+// OpenReported is the open reported findings of check c, so a LOOP-7
+// source can resolve the ones its regression now passes.
+func (s *Guard) OpenReported(c Check) []Finding {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Finding
+	for _, id := range sortedKeys(s.st.Open) {
+		if r := s.st.Open[id]; r.Reported && r.Finding.Check == c {
+			out = append(out, r.Finding)
+		}
+	}
+	return out
 }

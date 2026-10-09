@@ -132,7 +132,13 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | OSS-10w f1 | UX on #323: the alert wording "Switch back there" reads oddly after a switch back to the project |
 | OSS-10w-r | WF1 after a project root-key rotation: switching back compares against the image's shipped root keys and so fails closed once the project rotates them; a chain walk from the shipped root would admit it. Meanwhile the owner's only route back is a named follow (beside U13 limit (b)). No release has rotated root keys; a new image ships the new root |
 | W3-forget-b2b f1 | Security 327-1: race between `worked()` and `takeBack(approved=false)` in `agentBackWithoutAsking`; re-check under `r.run` |
-| W3-forget-b2c l1 | UX: the recall-off owed take-back text names no owner step, because STATUS has no line when recall is Off (`LateExecutor.Status`); a config only a dev box has |
+| W3-forget-b2c l1 | UX: the recall-off owed take-back text names no owner step, because STATUS has no line when recall is Off (`LateExecutor.Status`); a config only a dev box has; #525 (Security, UX) saw the same wording, and recall Off still has no STATUS line |
+| OP9-status-a l1 | L3 L1 on #525: the `C1_vm_open_fails` and `C1_guest_plane_fails` subtests set the same state (`agentOff(agentNoMachines)`), so neither exercises its own path (S11); a split of `main` wiring would let them run end to end |
+| OP9-status-a l2 | L3 L2 on #525: with the guest plane failing and no worker image set, STATUS gives both "Agent and worker tools: off" and "Worker tools: not set up" (opposite fixes, against OP-9's "exactly one"); clear `workersOff` in `agentOff(agentNoMachines)` or skip the C10 line while C1 names worker tools |
+| OP9-status-a l3 | Security 3 on #525: `ownerWorded` runs only in tests; fine while every line is a constant, but if one is ever formatted, call `capLines.check` at start or fail the test that enumerates producers |
+| OP9-status-a l4 | UX 4 on #525: a STATUS in the first minute, before `agentos-egress` is up, says "restart the box" (cached up to a minute), which does not help; fixed in effect by CRED-5f's modelroute state |
+| OP9-status-a l5 | UX 5 on #525: C11 stands on every box until W5b, so a daily digest would repeat "Update checks: not running; nothing to do"; the DIG-1 brief says how lines with no owner step are paced, decided by Mark together with Q1 |
+| OP9-status-a l6 | UX 6 on #525: "Routing: learning cannot change how work is routed here" is the least plain line; say "Learning cannot change which model does which work" |
 | DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR |
 | DOC-3 f2 | L3 on #356: D-041 (license) has date `Pending`, not ISO; set it when the license is chosen |
 | DOC-2 f1 | L3 on #357: doclint does not check DECISIONS cells ≤300 characters or that `decisions/D-NNN.md` links resolve (D-056) |
