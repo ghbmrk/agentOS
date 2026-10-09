@@ -212,7 +212,7 @@ func TestMissingSourceBlocksRecoveryBeforeNewCollection(t *testing.T) {
 	}
 }
 
-// REQ: DB-6
+// REQ: OP-1 (W5-Db DB-6)
 // W5-Da expected ErrExpired here; recover now skips expired batches.
 func TestRecoverSkipsExpired(t *testing.T) {
 	q, _ := queue(t)
@@ -389,7 +389,7 @@ func TestDistinctFileStoresRecoverAcrossBothReopens(t *testing.T) {
 	}
 }
 
-// REQ: OP-1, DB-6
+// REQ: OP-1 (W5-Db DB-6)
 // Replaces W5-Da's TestCompactedExpiredBatchStillBlocksRatherThanWedgingSource:
 // an expired batch no longer blocks its source; its lines are re-offered.
 func TestExpiredGenerationReofferedInNewBatch(t *testing.T) {

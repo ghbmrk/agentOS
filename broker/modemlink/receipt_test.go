@@ -33,7 +33,7 @@ func receiptAsync(l *Link, text string) chan receipted {
 	return done
 }
 
-// REQ: DB-3
+// REQ: OP-2 (W5-Db DB-3)
 func TestSendReceiptOKCarriesID(t *testing.T) {
 	l, _ := rig(t)
 	done := receiptAsync(l, "Digest.")
@@ -45,7 +45,7 @@ func TestSendReceiptOKCarriesID(t *testing.T) {
 	}
 }
 
-// REQ: DB-3
+// REQ: OP-2 (W5-Db DB-3)
 func TestSendReceiptRefusedBeforeQueueIsNotSent(t *testing.T) {
 	l, _ := rig(t)
 	if r, err := l.SendReceipt("+15550200001", "Digest."); !errors.Is(err, ErrRecipient) || r.Outcome != ReceiptNotSent || r.Evidence == "" {
@@ -65,7 +65,7 @@ func TestSendReceiptRefusedBeforeQueueIsNotSent(t *testing.T) {
 	}
 }
 
-// REQ: DB-3
+// REQ: OP-2 (W5-Db DB-3)
 func TestSendReceiptTimeoutBeforeHandIsNotSent(t *testing.T) {
 	l := quick(t)
 	r, err := l.SendReceipt(ownerNum, "Digest.")
@@ -83,7 +83,7 @@ func TestSendReceiptTimeoutBeforeHandIsNotSent(t *testing.T) {
 	}
 }
 
-// REQ: DB-3
+// REQ: OP-2 (W5-Db DB-3)
 func TestSendReceiptTimeoutAfterHandIsUnknown(t *testing.T) {
 	l := quick(t)
 	done := receiptAsync(l, "Digest.")
@@ -94,7 +94,7 @@ func TestSendReceiptTimeoutAfterHandIsUnknown(t *testing.T) {
 	}
 }
 
-// REQ: DB-3
+// REQ: OP-2 (W5-Db DB-3)
 // CodeRecipient is the bridge refusing the item before any modem call (see
 // TestRecipientCodeOnlyBeforeModemSend); every other failure code may follow
 // a modem attempt, so it proves nothing.
@@ -109,7 +109,7 @@ func TestSendReceiptRecipientIsNotSent(t *testing.T) {
 	}
 }
 
-// REQ: DB-3
+// REQ: OP-2 (W5-Db DB-3)
 func TestSendReceiptOtherCodesAreUnknown(t *testing.T) {
 	for _, code := range []string{bridgeproto.CodeDown, bridgeproto.CodeUnreachable, bridgeproto.CodeLimited,
 		bridgeproto.CodeRefused, bridgeproto.CodeTooLong} {
@@ -127,7 +127,7 @@ func TestSendReceiptOtherCodesAreUnknown(t *testing.T) {
 	}
 }
 
-// REQ: DB-3
+// REQ: OP-2 (W5-Db DB-3)
 // The proof behind CodeRecipient => not sent, pinned against drift: in
 // production the bridge emits CodeRecipient only for a non-owner item, before
 // calling the modem, or by mapping at.ErrNumber, which only Dial returns, never

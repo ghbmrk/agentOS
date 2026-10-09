@@ -62,7 +62,7 @@ func sender(t *testing.T, q *Queue, tr Transport) *Sender {
 	return s
 }
 
-// REQ: DB-2, OP-2
+// REQ: OP-2 (W5-Db DB-2)
 func TestSenderRefusalNeverCallsTransport(t *testing.T) {
 	q, _ := queue(t)
 	unacked := enqueue(t, q, "change", 1)
@@ -107,7 +107,7 @@ func TestSenderRefusalNeverCallsTransport(t *testing.T) {
 	}
 }
 
-// REQ: DB-2
+// REQ: OP-2 (W5-Db DB-2)
 func TestSenderBeginSaveFailureDoesNotCallTransport(t *testing.T) {
 	st := &failAfter{}
 	q, err := New(st, limits)
@@ -138,7 +138,7 @@ func (f *failAfter) Save(b []byte) error {
 	return f.MemStore.Save(b)
 }
 
-// REQ: DB-2
+// REQ: OP-2 (W5-Db DB-2)
 func TestSenderCancelledAndNilContextsDoNotBegin(t *testing.T) {
 	q, _ := queue(t)
 	b := enqueue(t, q, "change", 1)
@@ -160,7 +160,7 @@ func TestSenderCancelledAndNilContextsDoNotBegin(t *testing.T) {
 	}
 }
 
-// REQ: DB-2, OP-2
+// REQ: OP-2 (W5-Db DB-2)
 func TestSenderTransportPanicOrCancelIsUnknown(t *testing.T) {
 	cases := map[string]func(*fakeTransport, context.CancelFunc){
 		"panic":          func(f *fakeTransport, _ context.CancelFunc) { f.panics = true },
@@ -195,7 +195,7 @@ func TestSenderTransportPanicOrCancelIsUnknown(t *testing.T) {
 	}
 }
 
-// REQ: DB-2, OP-2
+// REQ: OP-2 (W5-Db DB-2)
 func TestSenderFinishFailureReopensUnknownNotResent(t *testing.T) {
 	st := &failAfter{}
 	q, err := New(st, limits)
@@ -223,7 +223,7 @@ func TestSenderFinishFailureReopensUnknownNotResent(t *testing.T) {
 	}
 }
 
-// REQ: DB-2
+// REQ: OP-2 (W5-Db DB-2)
 func TestSenderRendersOnlyBegunBatch(t *testing.T) {
 	q, _ := queue(t)
 	other := enqueue(t, q, "owner", 1)
@@ -256,7 +256,7 @@ func TestSenderRendersOnlyBegunBatch(t *testing.T) {
 	}
 }
 
-// REQ: DB-2
+// REQ: OP-2 (W5-Db DB-2)
 func TestSenderRenderFailureIsNotSentWithoutTransport(t *testing.T) {
 	for name, render := range map[string]func(Batch) (string, error){
 		"error": func(Batch) (string, error) { return "", errors.New("too long") },
@@ -279,7 +279,7 @@ func TestSenderRenderFailureIsNotSentWithoutTransport(t *testing.T) {
 	}
 }
 
-// REQ: DB-2
+// REQ: OP-2 (W5-Db DB-2)
 func TestSenderNotSentRetriesWithinLimitThenExhausts(t *testing.T) {
 	q, _ := queue(t)
 	b := enqueue(t, q, "change", 1)
@@ -300,7 +300,7 @@ func TestSenderNotSentRetriesWithinLimitThenExhausts(t *testing.T) {
 	}
 }
 
-// REQ: DB-2
+// REQ: OP-2 (W5-Db DB-2)
 func TestNewSenderRequiresEveryPart(t *testing.T) {
 	q, _ := queue(t)
 	tr := &fakeTransport{}
@@ -316,7 +316,7 @@ func TestNewSenderRequiresEveryPart(t *testing.T) {
 	}
 }
 
-// REQ: DB-2
+// REQ: OP-2 (W5-Db DB-2)
 func TestConcurrentSendsDeliverOnce(t *testing.T) {
 	q, _ := queue(t)
 	b := enqueue(t, q, "change", 1)
@@ -334,7 +334,7 @@ func TestConcurrentSendsDeliverOnce(t *testing.T) {
 	}
 }
 
-// REQ: DB-2
+// REQ: OP-2 (W5-Db DB-2)
 // The gate is structural: in this package's non-test files, only
 // (*Sender).Send names Transport.Deliver, begin or finish, and nothing
 // exported is named Begin or Finish.

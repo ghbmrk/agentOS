@@ -40,7 +40,7 @@ func held(t *testing.T, q *Queue, change, owner Snapshot) Batch {
 	return b
 }
 
-// REQ: DB-4, OP-2
+// REQ: OP-2 (W5-Db DB-4)
 func TestRecoverFinishesHeldBatch(t *testing.T) {
 	q, st := queue(t)
 	ch := snap(t, "change", 1, "Change line.", "task-1")
@@ -73,7 +73,7 @@ func TestRecoverFinishesHeldBatch(t *testing.T) {
 	}
 }
 
-// REQ: DB-4, OP-2
+// REQ: OP-2 (W5-Db DB-4)
 func TestLateRearmsHeldOnce(t *testing.T) {
 	q, st := queue(t)
 	b := enqueue(t, q, "change", 1)
@@ -110,7 +110,7 @@ func TestLateRearmsHeldOnce(t *testing.T) {
 	}
 }
 
-// REQ: DB-4
+// REQ: OP-2 (W5-Db DB-4)
 func TestLateRefusedOnFreshOrLateBatch(t *testing.T) {
 	q, _ := queue(t)
 	now := at.Add(time.Hour)
@@ -145,7 +145,7 @@ func TestLateRefusedOnFreshOrLateBatch(t *testing.T) {
 	}
 }
 
-// REQ: DB-5
+// REQ: OP-2 (W5-Db DB-5)
 func TestForgetRemovesOnlyMatchingSnapshots(t *testing.T) {
 	q, st := queue(t)
 	ch := snap(t, "change", 1, "Forgotten change line.", "task-1")
@@ -189,7 +189,7 @@ func TestForgetRemovesOnlyMatchingSnapshots(t *testing.T) {
 	}
 }
 
-// REQ: DB-5, OP-1
+// REQ: OP-1 (W5-Db DB-5)
 func TestForgetKeepsUnaffectedSourceCollectable(t *testing.T) {
 	q, _ := queue(t)
 	ch := snap(t, "change", 1, "Change line.", "task-1")
@@ -217,7 +217,7 @@ func TestForgetKeepsUnaffectedSourceCollectable(t *testing.T) {
 	}
 }
 
-// REQ: DB-5
+// REQ: OP-2 (W5-Db DB-5)
 func TestForgetLastSnapshotCancels(t *testing.T) {
 	q, st := queue(t)
 	ready := enqueue(t, q, "change", 1)
@@ -240,7 +240,7 @@ func TestForgetLastSnapshotCancels(t *testing.T) {
 	}
 }
 
-// REQ: DB-5, DB-6
+// REQ: OP-1 (W5-Db DB-5, DB-6)
 // A source that re-offers a forgotten generation is refused visibly, from a
 // ready or an expired batch alike.
 func TestForgottenGenerationNeverReadmitted(t *testing.T) {
@@ -276,7 +276,7 @@ func TestForgottenGenerationNeverReadmitted(t *testing.T) {
 	}
 }
 
-// REQ: DB-5, OP-2
+// REQ: OP-2 (W5-Db DB-5)
 func TestForgetInFlightRefusesBeforeMutation(t *testing.T) {
 	q, st := queue(t)
 	pending, _ := q.Enqueue([]Snapshot{snap(t, "change", 1, "Change line.", "task-1"), snap(t, "owner", 1, "Owner line.", "note-1")}, at, at.Add(time.Hour))
@@ -295,7 +295,7 @@ func TestForgetInFlightRefusesBeforeMutation(t *testing.T) {
 	}
 }
 
-// REQ: DB-6, OP-1
+// REQ: OP-1 (W5-Db DB-6), OP-1
 func TestCompactDropsSupersededExpired(t *testing.T) {
 	q, st := queue(t)
 	s := snapshot(t, "change", 1, "Fixed broker notice.")
@@ -333,7 +333,7 @@ func TestCompactDropsSupersededExpired(t *testing.T) {
 	}
 }
 
-// REQ: OP-1, DB-6
+// REQ: OP-1 (W5-Db DB-6)
 // Against any batch that is not expired, the same source, generation and
 // hash return the existing batch and a different hash conflicts (W5-Da).
 func TestSameParamsNonExpiredStillIdempotent(t *testing.T) {
@@ -371,7 +371,7 @@ func TestSameParamsNonExpiredStillIdempotent(t *testing.T) {
 	}
 }
 
-// REQ: DB-6
+// REQ: OP-1 (W5-Db DB-6)
 // A re-offered generation's new batch can expire in turn and be re-offered
 // again; every intermediate state reopens.
 func TestRepeatedExpiryReoffersAgain(t *testing.T) {
