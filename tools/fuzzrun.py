@@ -5,7 +5,7 @@
 
 Never passes a duration to -fuzztime: a duration bound can end in a bare "context deadline
 exceeded" with no input written (the fuzz coordinator's deadline race). Each chunk runs
-`go test -fuzztime <N>x -timeout <T>`; N comes from the rate the previous chunk measured, and T
+`go test -fuzztime <N>x -timeout <T>`; N comes from the rate the previous chunk measured (planned time at most 4x that chunk's), and T
 is proportional to the chunk's expected time, so a hang is loud and a slowdown is not a hang.
 Exit status: go's own on failure (its output, with any crasher path, passes through), 124 on a
 chunk that overran its cap, 2 on a bad argument.
@@ -21,6 +21,7 @@ import threading
 import time
 
 FACTOR = 2.5  # a chunk may take this many times its expected time (the rate can halve)
+GROWTH = 4  # a chunk plans at most this many times the previous chunk's measured time
 DEFAULT_CALIBRATE = 20000
 # go test's `ok  \tpkg\t0.337s`: the run without the build, which a cold cache makes far longer
 OK_LINE = re.compile(r"^ok\s+\S+\s+([\d.]+)s\b")
@@ -102,12 +103,15 @@ def main(argv=None):
     name = f"{a.pkg}:{a.target}"
     start = time.monotonic()
     rate = None
+    prev_time = None
     total_execs = 0
     k = 0
     while k == 0 or time.monotonic() - start < budget:
         k += 1
         remaining = budget - (time.monotonic() - start)
         span = min(max(remaining, 0.0) if k > 1 else budget, chunk_max)
+        if prev_time is not None:
+            span = min(span, GROWTH * prev_time)  # re-measure the rate before any long chunk
         if rate is None:
             n = a.calibrate
         else:
@@ -127,6 +131,7 @@ def main(argv=None):
             return rc if rc > 0 else 1
         # the build is not fuzzing: rate from go's own run time, else from the wall clock
         rate = n / max(ran, 1e-9) if ran else n / took
+        prev_time = ran or took
         total_execs += n
         print(f"fuzzrun {name} chunk {k}: {n} execs in {took:.1f}s ({rate:.0f}/s)", flush=True)
 
