@@ -390,7 +390,7 @@ func (q *Queue) Enqueue(snapshots []Snapshot, created, expires time.Time) (Batch
 		}
 	}
 	next := clone(q.st)
-	if len(next.Batches) >= next.Policy.MaxBatches || next.Seq == math.MaxUint64 {
+	if next.Seq == math.MaxUint64 {
 		return Batch{}, ErrFull
 	}
 	next.Seq++
@@ -402,10 +402,42 @@ func (q *Queue) Enqueue(snapshots []Snapshot, created, expires time.Time) (Batch
 		return Batch{}, ErrFull
 	}
 	next.Batches = append(next.Batches, b)
+	if err := evict(&next, created); err != nil {
+		return Batch{}, err
+	}
 	if err := q.commit(next); err != nil {
 		return Batch{}, err
 	}
 	return clone(b), nil
+}
+
+// dead reports a batch that can never be sent again and is kept only so the
+// caller can name it: an unknown send, or a late batch held again at now.
+func dead(b Batch, now time.Time) bool {
+	return b.State == Unknown || (b.State == Ready && b.Late && !now.Before(b.Expires))
+}
+
+// evict removes the oldest dead batches, and only those, until next fits
+// MaxBatches and MaxBytes (W5-Dc-r9): a dead batch is kept as long as it
+// leaves room for today's digest (CH-15). Seq and Latest stay, so an evicted
+// batch's snapshot offered again is refused, never revived (CAP-3).
+func evict(next *state, now time.Time) error {
+	for {
+		if len(next.Batches) <= next.Policy.MaxBatches {
+			b, err := json.Marshal(next)
+			if err != nil {
+				return err
+			}
+			if len(b) <= next.Policy.MaxBytes {
+				return nil
+			}
+		}
+		i := slices.IndexFunc(next.Batches, func(b Batch) bool { return dead(b, now) })
+		if i < 0 {
+			return ErrFull
+		}
+		next.Batches = slices.Delete(next.Batches, i, i+1)
+	}
 }
 
 // Acknowledge is called only after a trusted source durably acknowledges this
