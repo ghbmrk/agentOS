@@ -1,6 +1,6 @@
 # CONV-5: Triage and build against the 24 uncovered requirement IDs
 
-Board section: Harness and operating model. Decision: D-085. Tier: per child row (`tools/risk_tier.py`). This package is the triage; builds are child rows. Builder for triage: Sonnet (PILOT-S). Usage estimate: 50k tokens.
+Board section: Harness and operating model. Decision: D-086. Tier: per child row (`tools/risk_tier.py`). This package is the triage; builds are child rows. Builder for triage: Sonnet (PILOT-S). Usage estimate: 50k tokens.
 
 **Why.** TRACE.md shows 135/159 IDs covered. The 24 uncovered (HW-3, HW-4, HW-6, HW-7, CRED-2, CRED-11, ONB-2, ONB-9, CAP-2, CAP-7, CAP-11, CAP-12, CAP-13, ADP-5, ADP-6, ADP-8, ADP-13, ADP-14, ADP-15, ADP-16, OSS-12, RES-5, UPD-7, UPD-9) decide when the first release can ship, yet no list says what blocks each.
 

@@ -12,7 +12,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
   - Same test still failing after 2 fix attempts: stop, write a diagnosis in the PR, and mark the package `escalated` on BOARD.md.
   - Diff growing while the pass count is flat: stop and escalate.
 - Don't start a row LATER.md lists as later. Class every finding you raise or receive as **blocker** (fix in this PR), **release** (new BOARD row) or **later** (one line in LATER.md), and list them on the PR's Findings line (OPERATING §2).
-- A **release** finding names the acceptance test or invariant it serves and one failure path. Unsure between release and later: `later` tagged `recheck`. Tooling messages, and findings on a follow-up of a follow-up, are `later` unless they are a false pass or exploit path (OPERATING §2, D-085).
+- A **release** finding names the acceptance test or invariant it serves and one failure path. Unsure between release and later: `later` tagged `recheck`. Tooling messages, and findings on a follow-up of a follow-up, are `later` unless they are a false pass or exploit path (OPERATING §2, D-086).
 - Record what the package rests on in its `ASSUMPTIONS.md` (OPERATING §5).
 - Prefer reusing mature components. A new component needs a sentence in the PR on why reuse fails.
 - Never put credentials, tokens, or personal data in code, tests, fixtures, or logs. Use synthetic canaries only.

@@ -1,6 +1,6 @@
 # CONV-3: Triage the open PR inventory
 
-Board section: Harness and operating model. Decision: D-085 (48-hour idle limit). Tier C (records only). Builder: Sonnet (PILOT-S). Usage estimate: 80k tokens.
+Board section: Harness and operating model. Decision: D-086 (48-hour idle limit). Tier C (records only). Builder: Sonnet (PILOT-S). Usage estimate: 80k tokens.
 
 **Why.** 186 PRs were open on 2026-10-09: 136 drafts, 103 untouched since before 2026-10-08. Each costs every later session a look.
 

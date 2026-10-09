@@ -1,6 +1,6 @@
 # CONV-4: One batched spec diff, then scope freeze
 
-Board section: Harness and operating model. Decision: D-085; spec diffs pending in D-067 (partly superseded), D-079, D-080, D-081, D-082, D-083. Tier B (SPEC.md). Builder: strongest model (L1 work); Mark approves.
+Board section: Harness and operating model. Decision: D-086; spec diffs pending in D-067 (partly superseded), D-079, D-080, D-081, D-082, D-083. Tier B (SPEC.md). Builder: strongest model (L1 work); Mark approves.
 
 **Why.** Six decisions name spec changes that have not landed, so briefs and tests target a moving SPEC.md, and each new requirement adds rows.
 

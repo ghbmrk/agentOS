@@ -6,7 +6,7 @@ Questions and actions only Mark can take, one line each, answerable in one word,
 
 | # | Question | Recommendation | Source |
 |---|---|---|---|
-| Q2 | Approve CONV-4's revised spec diff (#633) once the 2026-10-09 fix-list (D-086) is pushed? | yes, after reading the revised diff | CONV-4 |
+| Q2 | Approve CONV-4's revised spec diff (#633) once the 2026-10-09 fix-list (D-087) is pushed? | yes, after reading the revised diff | CONV-4 |
 
 ## Actions
 
