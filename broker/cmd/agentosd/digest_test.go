@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -872,5 +873,49 @@ func TestDigestSkewedLastDayDoesNotStopTheDigest(t *testing.T) {
 	r.at(1, 9, 0)
 	if got := r.tr.sent(); len(got) != n+1 {
 		t.Fatalf("resent the same day: %q", got)
+	}
+}
+
+// The skew reset never underflows: a clock at the epoch (today 0) with a
+// saved day ahead resets to 0, not past the end of uint64, and the digest
+// goes once the clock is right again.
+// REQ: CH-15, OP-9
+func TestDigestSkewResetAtDayZeroDoesNotUnderflow(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	r.d.mu.Lock()
+	r.d.st.LastDay = 400
+	r.d.mu.Unlock()
+	r.now = time.Unix(0, 0)
+	r.d.step(context.Background(), r.now)
+	if got := r.d.st.LastDay; got != 0 {
+		t.Fatalf("LastDay %d after a reset at day 0, want 0", got)
+	}
+	r.at(0, 8, 0)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("digest stopped after the epoch clock: %q", got)
+	}
+}
+
+// LastDay of today or tomorrow is not skew and stays as saved; the day after
+// is. The test also covers a clock near the top of the range, where
+// today+1 would wrap.
+// REQ: CH-15, OP-9
+func TestDigestSkewEdges(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	r.now = day0.Add(7 * time.Hour) // before the digest time: nothing else moves LastDay
+	today := r.d.dayOf(r.now)
+	for _, c := range []struct {
+		last, want uint64
+	}{{today, today}, {today + 1, today + 1}, {today + 2, today - 1}, {0, 0}} {
+		r.d.mu.Lock()
+		r.d.st.LastDay = c.last
+		r.d.mu.Unlock()
+		r.d.step(context.Background(), r.now)
+		if r.d.st.LastDay != c.want {
+			t.Fatalf("LastDay %d (today %d) became %d, want %d", c.last, today, r.d.st.LastDay, c.want)
+		}
+	}
+	if skewed(math.MaxUint64, math.MaxUint64) || !skewed(math.MaxUint64, 5) {
+		t.Fatal("skewed wraps at the top of the range")
 	}
 }

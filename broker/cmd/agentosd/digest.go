@@ -284,6 +284,10 @@ func (d *digestBox) save() error {
 	return d.cfg.State.Save(raw)
 }
 
+// skewed reports whether a saved last day is later than tomorrow. It is
+// written without today+1 so it cannot wrap.
+func skewed(last, today uint64) bool { return last > 0 && last-1 > today }
+
 // dayOf is t's box-local date as days since 1970-01-01.
 func (d *digestBox) dayOf(t time.Time) uint64 {
 	y, m, dd := t.In(d.cfg.Loc).Date()
@@ -317,11 +321,11 @@ func (d *digestBox) step(ctx context.Context, now time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	today := d.dayOf(now)
-	if d.st.LastDay > today+1 {
+	if skewed(d.st.LastDay, today) {
 		// Clock skew (set back, or a skewed save): the day it names is
 		// not coming, so the digest is due as if yesterday had run.
 		d.cfg.Logf("digest: saved day %d is ahead of day %d; treated as clock skew and reset", d.st.LastDay, today)
-		d.st.LastDay = today - 1
+		d.st.LastDay = max(today, 1) - 1
 	}
 	switch {
 	case today > d.st.LastDay && !now.Before(d.digestAt(today)) && (!d.owing.Load() || now.Sub(d.lastTry) >= digestRetry):
