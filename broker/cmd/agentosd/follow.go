@@ -117,7 +117,7 @@ func (s *followSetting) alert(_ context.Context, text string) error {
 
 // errNoGuard: the clock guard has not started (or could not), so no root
 // is described; the switch itself fails closed on guardClock.
-var errNoGuard = errors.New("follow: the box clock check is not running")
+var errNoGuard = errors.New("follow: the clock check is not running")
 
 func (s *followSetting) describe(ctx context.Context, root []byte) (localapi.RootSummary, error) {
 	if s.guard() == nil {

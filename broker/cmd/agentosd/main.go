@@ -351,7 +351,7 @@ func main() {
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
 	flag.IntVar(&localUIUID, "localui-uid", -1, "uid of the local UI (agentos-localui), the only peer allowed on localui.sock; unset, the socket is not served (P2-2w)")
 	var updateStore, shippedRoot string
-	flag.StringVar(&updateStore, "update-store", "", "the box's update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
+	flag.StringVar(&updateStore, "update-store", "", "the update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
 	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
 	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
 	flag.BoolVar(&ownerMessage, "owner-message", false, "also serve the raw \"message\" op on the owner socket with the bridge on (simulator and test builds only; it skips the bridge's checks)")
@@ -374,9 +374,9 @@ func main() {
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
-	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the agent machine is created from on first start; empty keeps no agent machine")
-	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the agent machine starts: argv and env (guest/openclaw/launch.json)")
-	flag.Int64Var(&agentMemMB, "agent-mem-mb", defaultAgentMemMB, "the agent machine's memory budget, MB")
+	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
+	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
+	flag.Int64Var(&agentMemMB, "agent-mem-mb", defaultAgentMemMB, "the owner's agent machine's memory budget, MB")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
@@ -387,7 +387,7 @@ func main() {
 	flag.StringVar(&builderImage, "builder-image", defaultBuilderImage, "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty, or the default not registered, runs no model-backed builder")
 	flag.StringVar(&builderLaunch, "builder-launch", defaultBuilderLaunch, "how a builder machine starts: argv and env (guest/builder/launch.json); empty uses the image's own")
 	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
-	flag.StringVar(&sleepHoursFlag, "sleep-hours", "", "on a box where the agent and a replay machine do not fit together, the hours the agent may sleep while the box tests changes, HH:MM-HH:MM box time (PE7); empty is 01:00-06:00")
+	flag.StringVar(&sleepHoursFlag, "sleep-hours", "", "where the owner's agent machine and a replay machine do not fit together, the hours it may sleep while changes are tested, HH:MM-HH:MM box time (PE7); empty is 01:00-06:00")
 	var workerImage, workerArgv string
 	var workerMaxMB, workerLayerMB int64
 	flag.StringVar(&workerImage, "worker-image", "", "the base image worker machines are built from (CAP-8), registered with -image; empty offers guests no worker tools")
@@ -398,7 +398,7 @@ func main() {
 	flag.StringVar(&keptPath, "kept-replies", "/var/lib/agentos/kept-replies.json", "private agent replies that could not be emailed, kept for the local page (CH-20)")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
-	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
+	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the clock check's state (P2-9)")
 	flag.Parse()
 	// A restore the forget log's check held opens nothing on the restored
 	// tree: no recall, no agent machines (W3-forget-b1; security C3).
@@ -825,9 +825,9 @@ func planMemory(meminfo string, cores int, explicit bool, flagMB int64, floor bu
 			need += floor.HostMB + floor.InferenceMB + floor.BrowserMB
 		}
 		if total > 0 && !explicit {
-			p.AgentOff = fmt.Sprintf("Agent: off, this box has %s of memory and running the agent needs about %s.", gb(total), gb(need))
+			p.AgentOff = fmt.Sprintf("Your agent is off: I have %s of memory and running it needs about %s.", gb(total), gb(need))
 		} else {
-			p.AgentOff = "Agent: off, the memory set aside for it is too small to run it."
+			p.AgentOff = "Your agent is off: the memory set aside for it is too small to run it."
 		}
 		p.CapacityMB = max(c, headroomMB+1)
 	}
@@ -856,7 +856,7 @@ func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
 		return fmt.Errorf("-replay-mem-mb is %d", replayMB)
 	}
 	if pool := capacityMB - headroomMB; agentMB+replayMB > pool {
-		return fmt.Errorf("the agent machine (%d MB) and one replay machine (%d MB) do not fit in the %d MB pool (-capacity-mb less -headroom-mb)", agentMB, replayMB, pool)
+		return fmt.Errorf("the owner's agent machine (%d MB) and one replay machine (%d MB) do not fit in the %d MB pool (-capacity-mb less -headroom-mb)", agentMB, replayMB, pool)
 	}
 	return nil
 }

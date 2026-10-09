@@ -61,7 +61,7 @@ const (
 	// can be (W3-forget-b2c).
 	forgetAgentNoAgent  = "Not taken back yet: your agent is not running. I will do it when it runs again and text you. Send STATUS to see why."
 	forgetAgentNotTaken = "Not taken back yet: I couldn't save the request. I keep trying and will text you when it's done."
-	forgetAgentNotOpen  = "Not taken back yet: memory is off on this box, so your agent still holds that task. I will do it if memory comes on and text you."
+	forgetAgentNotOpen  = "Not taken back yet: my memory is off, so your agent still holds that task. I will do it if memory comes on and text you."
 	// forgetAgentWhenOpen: an approved item 2 waits for recall to open
 	// (#327 L3 B-3).
 	forgetAgentWhenOpen = "Not taken back yet: memory is not open. I will do it when it opens and text you."

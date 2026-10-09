@@ -85,19 +85,19 @@ type evidenceJob struct {
 // Fixed wording, in the box's first-person voice (UX U7).
 const (
 	keptLong         = "Cut here. Ask me to send it in shorter parts."
-	capNote          = "I've emailed the most replies I send in a day, so I kept this one on the box."
-	failNote         = "I couldn't email the full reply, so I kept it on the box. Check that your mail account still signs in."
-	refusedNote      = "I couldn't email the full reply, so I kept it on the box. Send EMAIL REPLIES ON to set emailing up again."
+	capNote          = "I've emailed the most replies I send in a day, so I kept this one here."
+	failNote         = "I couldn't email the full reply, so I kept it here. Check that your mail account still signs in."
+	refusedNote      = "I couldn't email the full reply, so I kept it here. Send EMAIL REPLIES ON to set emailing up again."
 	evidenceEffect   = "With this on, I email your private replies and texts carry a one-line summary. Send EMAIL REPLIES OFF to stop. A request for your code follows; then confirm on my Wi-Fi page."
 	evidenceNotYet   = "Emailing private replies is not in this build yet."
 	evidenceOff      = "Private replies come by text again."
 	evidenceNone     = "Private replies already come by text."
 	evidenceStarting = "I'm still starting. Try again in a minute."
 	evidenceFailed   = "I couldn't save that setting. Try again later."
-	evidenceNoPage   = "Not changed: turning this on needs my Wi-Fi page, which this box isn't serving. Private replies still come by text."
+	evidenceNoPage   = "Not changed: turning this on needs my Wi-Fi page, which I'm not serving. Private replies still come by text."
 	// evidenceNoPageSet is the same refusal while replies already go to
 	// an address (%s, masked).
-	evidenceNoPageSet = "Not changed: this needs my Wi-Fi page, which this box isn't serving. Private replies still go to %s."
+	evidenceNoPageSet = "Not changed: this needs my Wi-Fi page, which I'm not serving. Private replies still go to %s."
 	// offNotice goes to the old destination when it is cleared by text
 	// (security C3 on #148, its wording).
 	offNotice = "Emailing private replies was turned off by text at %s. If that wasn't you, send EMAIL REPLIES ON, then confirm on my Wi-Fi page."

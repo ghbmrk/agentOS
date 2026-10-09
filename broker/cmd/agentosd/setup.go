@@ -46,7 +46,7 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		return "", errOwnedWithoutRecord
 	}
 	if m.Page == nil {
-		return "", errors.New("setup: no -owner and no -localui-uid: nothing can set this box up")
+		return "", errors.New("setup: no -owner and no -localui-uid: nothing can run setup")
 	}
 	if m.Enroll == nil {
 		return "", errors.New("setup: no -owner and no -owner-verify: the code generator cannot be enrolled")

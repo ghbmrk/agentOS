@@ -27,7 +27,6 @@ var pending = map[string]string{
 	"apply": "CH-21c", "change": "CH-21c", "clock": "CH-21c", "grants": "CH-21c",
 	"guest": "CH-21c", "localui": "CH-21c", "mail": "CH-21c", "modem": "CH-21c",
 	"owner": "CH-21c", "card": "CH-21c", "recovery": "CH-21c", "update": "CH-21c", "workers": "CH-21c",
-	"cmd": "CH-21d",
 }
 
 // literals returns the string literals of every non-test Go file under

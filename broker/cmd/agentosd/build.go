@@ -97,7 +97,7 @@ func (l *learning) openBuilder(m builderMachines, imgs images, services *lateSer
 		return fmt.Errorf("image %q is not registered with -image", c.Image)
 	}
 	if c.AgentImage != "" && (c.Image == c.AgentImage || imgs[c.Image] == imgs[c.AgentImage]) {
-		return fmt.Errorf("builder image %q is the agent's image; the builder runs a minimal image of its own", c.Image)
+		return fmt.Errorf("builder image %q is the same as -agent-image; the builder runs a minimal image of its own", c.Image)
 	}
 	cfg := loopbuild.Config{Dir: c.Dir, Machines: m, Image: c.Image, MemMB: c.MemMB, Logf: log.Printf}
 	if c.Launch != "" {
@@ -123,13 +123,13 @@ func (l *learning) openBuilder(m builderMachines, imgs images, services *lateSer
 
 // builderOffNote is STATUS's line when -builder-image is set but the
 // builder did not start (UX-126-1).
-const builderOffNote = "Learning from failed, corrected, slow or costly tasks: not running. Restarting the box may fix it."
+const builderOffNote = "Learning from failed, corrected, slow or costly tasks: not running. Restarting me may fix it."
 
 // builderUnsetNote is STATUS's line when no -builder-image is given, so an
 // inert builder is never silent (potency R3 on #126). It states a fact and
 // implies no setting: the owner never sets the flag; the box image does
 // (UX-134-1).
-const builderUnsetNote = "Learning: this box learns from repeated routines only, not yet from mistakes or slow tasks."
+const builderUnsetNote = "Learning: I learn from repeated routines only, not yet from mistakes or slow tasks."
 
 // Defaults for -builder-image and -builder-launch (W3-builder-ship): the
 // box image registers its builder image under this name and installs
