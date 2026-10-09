@@ -152,8 +152,9 @@ func relay(t *testing.T, to string) (string, *tap) {
 				in.Close()
 				continue
 			}
-			go func() { io.Copy(io.MultiWriter(out, tp), in); out.(*net.UnixConn).CloseWrite() }()
-			go func() { io.Copy(io.MultiWriter(in, tp), out); in.Close(); out.Close() }()
+			// tp first: the peer may answer (and the test read tp) the instant bytes are forwarded.
+			go func() { io.Copy(io.MultiWriter(tp, out), in); out.(*net.UnixConn).CloseWrite() }()
+			go func() { io.Copy(io.MultiWriter(tp, in), out); in.Close(); out.Close() }()
 		}
 	}()
 	return path, tp
