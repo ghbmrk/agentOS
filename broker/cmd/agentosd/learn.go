@@ -547,10 +547,10 @@ func journalRedacted(v string) bool {
 // noRoomNote is STATUS's line when replay evaluation was not opened for
 // lack of memory (PE2; UX-114-1, potency C1 on #114). It follows the time
 // check's note.
-const noRoomNote = "Learning: paused, the box's memory is too small to test changes."
+const noRoomNote = "Learning: paused, my memory is too small to test changes."
 
 // noRoomOn is what turning learning back on adds then.
-const noRoomOn = "Learning is on, but the box's memory is too small to test changes, so nothing new will be adopted."
+const noRoomOn = "Learning is on, but my memory is too small to test changes, so nothing new will be adopted."
 
 func (l *learning) note() string {
 	if l.noRoom.Load() {
@@ -585,10 +585,10 @@ func (l *learning) settings(ctx context.Context, msg string, unlocked bool) (str
 // learningOffText answers loop settings and ends HELP when the learning
 // plane could not start (L3 S3 on #90). It names everything the loop texts
 // cover, and a restart retries opening the plane (UX-92-1).
-const learningOffText = "Spare-time work (learning, self-tests, update checks) is not running on this box. Restarting the box may fix it."
+const learningOffText = "Spare-time work (learning, self-tests, update checks) is not running. Restarting me may fix it."
 
 // forgetOffText answers FORGET when the learning plane could not start.
-const forgetOffText = "I can't forget tasks right now: learning isn't running. Restarting the box may fix it."
+const forgetOffText = "I can't forget tasks right now: learning isn't running. Restarting me may fix it."
 
 // learningOffNote is STATUS's line for it, so the owner learns it without
 // sending a loop setting (UX R1 on #92).
@@ -1060,12 +1060,12 @@ type syncedRouting struct {
 // model order is in use in place of an order the box learned, because
 // they changed their AI settings since (W3-route; UX-108-1 on #108). Not
 // urgent, so it waits for the digest (CH-15).
-const routingStandsInText = "Your AI model settings changed, so the box uses your order of models. It learns a new order over time while learning is on."
+const routingStandsInText = "Your AI model settings changed, so I use your order of models. I learn a new order over time while learning is on."
 
 // routingProjectedText replaces it when part of the learned order still
 // fits the owner's new rule, so Loop 1 proposes that part (W3-route-a,
 // potency PR1 on #108). One GSM-7 segment.
-const routingProjectedText = "Your AI model settings changed, so the box uses your order of models. While learning is on, it will check whether its learned order still helps."
+const routingProjectedText = "Your AI model settings changed, so I use your order of models. While learning is on, I will check whether my learned order still helps."
 
 // project carries a learned order onto the owner's rule (W3-route-a): in
 // each of the owner's classes, routes the learned order had keep their
