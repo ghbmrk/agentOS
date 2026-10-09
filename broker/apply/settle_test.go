@@ -14,6 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/update"
+	"github.com/ghbmrk/agentos/broker/update/updatetest"
 )
 
 // REQ: UPD-1, UPD-1a, OP-4, OP-5
@@ -447,6 +448,15 @@ func TestCommittedBeforeConfirmThenOldRootConverges(t *testing.T) {
 func settleOnOldRoot(t *testing.T) (*rig, *update.Verified) {
 	t.Helper()
 	r, rel := handedOver(t, false)
+	r.settleOnOldRoot()
+	return r, rel
+}
+
+// settleOnOldRoot settles the handed-over release 1 as installed while the
+// box boots the old root.
+func (r *rig) settleOnOldRoot() {
+	t := r.t
+	t.Helper()
 	r.restart()
 	r.pipe.confirmErr = errIO
 	if err := r.a.Resume(context.Background()); !errors.Is(err, errIO) {
@@ -457,7 +467,24 @@ func settleOnOldRoot(t *testing.T) (*rig, *update.Verified) {
 	if l := r.saved().Last; l == nil || l.Kind != doneInstalledOtherRoot {
 		t.Fatalf("settled as %+v", l)
 	}
-	return r, rel
+}
+
+// mirroredOnOldRoot is settleOnOldRoot with a store that checks every
+// release the rig makes, so release 2 stages. Mirrored releases are not
+// security fixes, so each waits out its jitter.
+func mirroredOnOldRoot(t *testing.T) *rig {
+	t.Helper()
+	r := newRig(t)
+	r.mirror = updatetest.NewMirror(t)
+	r.store = r.mirror.Box(0)
+	r.restart()
+	r.must(r.a.Schedule(r.release(1, false), "a1"))
+	r.clk.add(7 * time.Hour)
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.settleOnOldRoot()
+	return r
 }
 
 // bootNewRoot reboots the box into release 1's root, blessed, and restarts
@@ -550,6 +577,47 @@ func TestNextReleaseAfterOtherRootIsAdmitted(t *testing.T) {
 	}
 	if len(next.Attempts) != 1 || !strings.Contains(next.Attempts[0].Evidence, "checked by another store") {
 		t.Fatalf("not dispatched to the store: %+v", next.Attempts)
+	}
+}
+
+// Release 2's Install writes the slot that holds release 1 (A12(3)), so
+// the promise to start release 1 ends there, even when that attempt
+// fails or goes unrecorded and release 2 is then withdrawn.
+func TestOtherRootPromiseEndsWithTheNextInstall(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		arm  func(r *rig)
+		took int // Installs that returned, release 1's included
+	}{
+		{"install fails", func(r *rig) { r.act.installErr = errIO }, 1},
+		{"handover unrecorded", func(r *rig) { r.act.onInstall = func() { r.state.Fail = errIO } }, 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := mirroredOnOldRoot(t)
+			r.restart()
+			r.must(r.a.Schedule(r.release(2, false), "a2"))
+			r.clk.add(7 * time.Hour)
+			c.arm(r)
+			if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+				t.Fatalf("tick: %v %v", ok, err)
+			}
+			if len(r.act.installed) != c.took {
+				t.Fatalf("installed %v", r.act.installed)
+			}
+			r.act.installErr, r.state.Fail = nil, nil
+			r.must(r.a.Withdraw("a2", "undo"))
+			for i := 0; i < 2; i++ { // this boot, then a later one on the old root
+				if got := r.a.Status(); got == otherRootLine {
+					t.Fatalf("status in boot %s: %q", r.act.boot.ID, got)
+				}
+				for _, l := range r.a.Digest() {
+					if l == otherRootLine {
+						t.Fatalf("digest in boot %s: %q", r.act.boot.ID, l)
+					}
+				}
+				r.bootOldRoot()
+			}
+		})
 	}
 }
 

@@ -259,6 +259,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-4f-1 l5 | UX on #597, L2 (6080675106): `otherRootText` could offer a restart when the installed release is a security fix |
 | SR3-4f-1 l6 | UX on #597, L3 (6080675106): the digest's "installed" wording for the other-root line reads wrong on a later boot; done in SR3-4f-r1 (#647), pinned by `TestOtherRootLineHoldsInLaterBoots` |
 | SR3-4f-1 l7 | UX on #597, L4 (6080675106): if `ErrRefused`'s text is ever shown in the digest, it must go through the plain-name map |
+| SR3-4f-r1 l1 | Security point 5 and L3 point 3 on #647: `Digest` sets `Told` before `onOtherRoot` reads `Booted`, so a failed read words the other-root release as "installed" once; read first, then set `Told` |
+| SR3-4f-r1 l2 | Lens on #647: no test pins the digest staying silent on a second old-root boot after `Told` |
+| SR3-4f-r1 l3 | Lens on #647: `onOtherRoot` calls `Booted` with `context.Background()` under `a.mu`; give it a bounded context or cache the boot when P2-1's activator lands |
+| SR3-4f-r1 l4 | Lens on #647: the rig's N+1 fallback and success paths; the mirror rig (`updatetest.Mirror`) now stages a second release, so the "checked by another store" string match can go |
 | SR3-4f-2 l1 | Builder on SR3-4f-2: an ID in the applier's `Dropped` that the pipeline refuses for good (the adoption is already `Confirmed`) is called again at every `Tick`; no path drops a confirmed adoption today, but clear it on that refusal. Not true since #605: a `Withdraw` that races `Resume`'s `ConfirmStaged` saves a `Confirmed` ID into `Dropped` (L3 delta on #605, point 1, comment 6082323037); now row SR3-4f-2-r2 (package SR3-4f-3) |
 | SR3-4f-2 l2 | Builder on SR3-4f-2: the applier's `Retired` list is never pruned (one short ID per drop or withdraw); prune IDs the pipeline reports reverted once that can be asked |
 | SR3-4f-2 l3 | Builder on SR3-4f-2: with a `Withdrawer` set, the digest could offer UNDO on a pending staged line ("I will install it when I am free"); today it offers UNDO only once the image has started (change C27) |
