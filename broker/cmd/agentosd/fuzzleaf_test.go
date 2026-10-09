@@ -133,7 +133,15 @@ func TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound(t *testing.T) {
 	if _, err := lp.guard.Pass(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// The guard's corpus replay (P3-4b-4c-corpus) is offered before the
+	// fuzz round, as in TestARoundRunsThePassThenReportsAFuzzCrash.
 	j, ok := lp.fuzz.Next(ctx, false)
+	if ok && j.Name == "probe:corpus" {
+		if r := j.Run(ctx); r.Err != nil {
+			t.Fatal(r.Err)
+		}
+		j, ok = lp.fuzz.Next(ctx, false)
+	}
 	if !ok || j.Name != "fuzz" {
 		t.Fatalf("job %+v %v", j, ok)
 	}
