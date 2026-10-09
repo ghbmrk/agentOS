@@ -145,6 +145,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P2-2w d2a-2 | `pageLine` takes five separate locks, so one page can mix states; display only, fixed on reload (#378 L3) |
 | P2-2w d2a-3 | `plural` lives in both `localui/line.go` and modemlink's recovery text; wording can drift (#378 L3) |
 | broker/owner review_test.go IDs | L3 on #386: `TestRestartHandsOpenRequestsToReissue` seeds the restart record with hard-coded IDs `Z9`, `Y9`, `X9`, which `newIDLocked` can issue, so a request opened earlier in the test can collide with one (0 of 600 runs failed; assertions tolerate it today); use IDs outside the generator's range (e.g. `Z1`, `Y1`, `X1`) when a package next touches review_test.go |
+| W3-forget-b3 rr1 | L3 on #425: `retry` and `finishOwed` log a forget with a zero `Since` though the time is known, so the forget log loses the task's time; restore reads `Since` only for agent entries |
+| W3-forget-b3 rr2 | L3 on #425: fold `forget-owed.json` (W3-forget-b3) and the owed take-backs (W3-forget-b2c) into one store or one start-up step; rename `forget_owed_test.go`/`forgetowed_test.go` then |
+| W3-forget-b3 rr3 | L3 on #425: `tellLater` and `retry` run on `context.WithoutCancel`, so their shutdown branch never runs; behaviour is right (exit leaves it owed), the comment misleads |
+| W3-forget-b3 rr4 | L3 on #425: `TestAGarbageOwedFileFailsSafe` does not assert the rewritten owed file is valid JSON or that a later forget is told |
 | HK-1 f1 | Lens screen on #401: the sandbox-unavailable message in `tools/depaudit.py` names neither the PID namespace nor the `/proc` mount it now needs; the probe already fails loudly |
 | HK-1 f2 | Lens screen on #401: violations carried from faulted attempts are not de-duplicated, so the same leak seen twice is listed twice; the outcome is unchanged |
 | HK-1 f3 | Lens screen on #401: `_scratch_dir` drops `TemporaryDirectory`'s chmod-and-retry cleanup of read-only entries; removal still raises rather than passing |
@@ -186,6 +190,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | CH-21b l1 | Builder on CH-21b: `boxname.Check` allows any Unicode letter, so a mixed-script look-alike (Cyrillic а in "Аgent OS") passes the reserved-word check; fold look-alikes as CH-10 does (same gap as OSS-10w2 f4) |
 | CH-21b l2 | Builder on CH-21b: a name with non-GSM-7 letters or U+2019 forces UCS-2 on every owner text that quotes it, halving the CH-12 length budget; count it when CH-12 budgets are next touched |
 | CH-21b l3 | Builder on CH-21b: renames are not journaled; the owner sees only the reply. Journal `name changed` when the journal next gains owner-channel events |
+| SR3-8 l1 | L3 re-review on #432, point 1: once `CR-quarantine-prune` is on main, add to it that any pruning of `.quarantine` must keep the per-artifact loss count (e.g. a count file), since C14's `maxRepairs` bound is counted from the copies; fold this line into that row |
+| SR3-8 l2 | L3 re-review on #432, point 2: a job stopped by the repair bound is logged `failed: no result within the allowed attempts`; only the log line says its output was lost repeatedly. Text only |
+| SR3-8 l3 | L3 re-review on #432, point 3: no test pins the `<id>-<12 hex>` name check in `Store.losses`; a bare prefix match passes every test. Unreachable today (fixed-length broker-written IDs) |
 
 ## Reuse candidates
 | ID | Component | Why |
