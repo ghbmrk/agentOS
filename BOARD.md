@@ -88,9 +88,12 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P1-2 | [Broker skeleton](briefs/P1-2.md) | P1-1 | merged (7ff7417; broker/daemon) |
 | P1-3 | [Vault and credentialed egress proxy](briefs/P1-3.md) | P1-2 | merged |
 | P1-4 | [Agent-machine lifecycle](briefs/P1-4.md) | P1-2 | merged (f19f97c; broker/vm) |
-| P1-4-flake | [`TestRunscPanicAtTheDeadlineAnswersNoOutput` raced runsc's exit at its deadline; a trace written before a kill answered output](briefs/P1-4-flake.md) | P1-4 | in review |
-| P1-4-flake-fuzz | [CI's time-bounded fuzz step failed at its deadline (#537): Go 1.26's fuzz coordinator race; bound by count](briefs/P1-4-flake.md) | P3-4b-3 | in review (with P1-4-flake) |
+| P1-4-flake | [`TestRunscPanicAtTheDeadlineAnswersNoOutput` raced runsc's exit at its deadline; a trace written before a kill answered output](briefs/P1-4-flake.md) | P1-4 | merged (#547; c0eb06e) |
+| P1-4-flake-fuzz | [CI's time-bounded fuzz step failed at its deadline (#537): Go 1.26's fuzz coordinator race; bound by count](briefs/P1-4-flake.md) | P3-4b-3 | merged (#547; c0eb06e) |
 | P1-4-flake-soak | `soak.yml` fuzzes for a duration (`-fuzztime "$FUZZTIME"`), so it can hit the same Go 1.26 coordinator race at its deadline (P1-4-flake-fuzz); fix by a toolchain carrying the upstream fix or a count bound sized to the soak (brief to be written) | P1-4-flake-fuzz | queued |
+| P1-4-flake-counts | Per-target CI fuzz counts with a wall-clock cap: 600000x matches 20s only for `modemlink:FuzzInbound`; `sockets:FuzzFrames` gets about a third of its budget. Take counts from CI's exec/s (log them), and add a `timeout` per `go test` so a count-bound hang is loud (#547 Security 4a 1, Potency 1-2; release; brief to be written) | P1-4-flake-fuzz | queued (release) |
+| P1-4-flake-crashed | Simplify gvisor `crashed` to `err != nil && len(runscErr) > 0`: closes the gap where runsc is killed by something else (cgroup OOM) after a trace, exits -1 with `ctx.Err() == nil`, and leaves no `exec.log` entry (CAP-8, RES-4; #547 Security 4a 2; release; tier A; brief to be written) | P1-4-flake | queued (release) |
+| P1-4-flake-runsc-recheck | At the next pinned-runsc bump, re-check that runsc writes nothing to stderr during a normal exec; otherwise a deadline would lose partial output (V20, V34; #547 UX 1; release; rides the bump) | P1-4-flake | queued (release) |
 | P1-6 | [Canary harness](briefs/P1-6.md) | Cloud only | merged |
 | P1-5 | [Owner channel on a modem simulator](briefs/P1-5.md) | P1-2 | merged |
 | P1-7 | [OpenClaw as first guest](briefs/P1-7.md) | P1-3, P1-4, P1-5, P1-6 | merged (847ea23; broker/guest) |
