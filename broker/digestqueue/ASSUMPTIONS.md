@@ -154,8 +154,13 @@ quiet-hours, pacing, reservation, disclosure and authority checks separately.
   replay asks the queue's Forget again before the done text and retries with
   backoff until it holds, so a restart between forget and purge cannot report
   the forget done (security B2 on #592). A reference the queue has not purged
-  (not open, or ErrInFlight) is kept in memory: the next open purges it before
-  any send, and no Ready batch holding it is sent meanwhile.
+  (not open, or ErrInFlight) is kept by the box and saved in its state store
+  (`digest-sources.json`, `forgets`) before the refusal returns: every open
+  loads it and purges it before any send, no Ready batch holding it is sent
+  meanwhile, and it is dropped once the queue's Forget holds. The hold so does
+  not depend on boot order or on the forget owner's owed file (security B2' on
+  #592). agentosd starts the digest after the forget owner's start-up replay.
+  If the state store also fails, the hold is in memory only until a restart.
 - Owed collection (CH-15, L3 1 on #592): a Collect error with the queue still
   reading leaves the day owed (LastDay not advanced), shows a STATUS line, and
   collects again every digestRetry (30 minutes); after a restart the owed day

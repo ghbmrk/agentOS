@@ -135,6 +135,17 @@ func (r *digestRig) day(d int) {
 
 func (r *digestRig) status() string { return strings.Join(r.reg.Digest(), "|") }
 
+// holding counts the queued batches with a snapshot holding ref.
+func (r *digestRig) holding(ref string) int {
+	n := 0
+	for _, b := range r.batches() {
+		if refersTo(b, map[string]bool{ref: true}) {
+			n++
+		}
+	}
+	return n
+}
+
 func (r *digestRig) batches() []digestqueue.Batch {
 	r.t.Helper()
 	bs, err := r.d.q.List()
@@ -446,8 +457,81 @@ func TestDigestForgetBeforeOpenPurgesOnOpen(t *testing.T) {
 	if got := r.tr.sent(); len(got) != 1 {
 		t.Fatalf("forgotten lines sent: %q", got)
 	}
+	if held := r.holding("owner:a"); held != 0 {
+		t.Fatalf("open left %d batches holding the forgotten reference", held)
+	}
 	if err := r.d.forget("owner:a"); err != nil {
 		t.Fatalf("forget after open: %v", err)
+	}
+}
+
+// A forget the queue refused is kept in the digest's own state, so a
+// restart holds its ready batch from the first step, before the forget
+// owner asks again or even when it never does (its owed save failed)
+// (security B2' on #592).
+// REQ: CAP-3, OP-2
+func TestDigestRefusedForgetHoldsItsReadyBatchAfterARestart(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// ask is the forget owner's replay after the restart: none when
+		// its owed save failed.
+		ask bool
+	}{{"replay after the first step", true}, {"owed save failed", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
+			srcs := map[string]digestqueue.Source{"notes": src}
+			r := newDigestRig(t, &change.MemStore{}, srcs)
+			r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.OutcomeUnknown, "" }
+			r.at(0, 8, 0)
+			src.gen, src.lines = 2, []string{"Notes: task 4 finished; reply MORE 4 for it."}
+			r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
+			r.at(1, 8, 0)
+			if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
+				t.Fatalf("forget: %v", err)
+			}
+			n := len(r.tr.sent())
+			r.tr.out = nil
+			r.boot(srcs)
+			r.at(1, 9, 0)
+			if tc.ask {
+				if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
+					t.Fatalf("forget after restart: %v", err)
+				}
+			}
+			r.day(1)
+			for _, s := range r.tr.sent()[n:] {
+				if strings.Contains(s, src.lines[0]) {
+					t.Fatalf("forgotten reference sent after restart: %q", s)
+				}
+			}
+		})
+	}
+}
+
+// A forget asked before the queue opened is kept in the digest's state
+// too, so the open after a restart purges it from the queue on disk.
+// REQ: CAP-3
+func TestDigestForgetBeforeOpenSurvivesARestart(t *testing.T) {
+	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
+	sources := map[string]digestqueue.Source{"notes": src}
+	r := newDigestRig(t, &change.MemStore{}, sources)
+	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
+	r.at(0, 8, 0)
+	r.tr.out = nil
+	r.make(sources)
+	if err := r.d.forget("owner:a"); err == nil {
+		t.Fatal("forget before open reported done")
+	}
+	if r.d.st.LastDay == 0 {
+		t.Fatal("forget before open lost the saved digest state")
+	}
+	r.boot(sources) // the restart comes before this box opened
+	if held := r.holding("owner:a"); held != 0 {
+		t.Fatalf("open after a restart left %d batches holding the forgotten reference", held)
+	}
+	r.boot(sources)
+	if len(r.d.st.Forgets) != 0 {
+		t.Fatalf("purged forget still kept: %q", r.d.st.Forgets)
 	}
 }
 

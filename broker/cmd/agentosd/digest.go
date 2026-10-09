@@ -107,6 +107,9 @@ type digestState struct {
 	StatusGen uint64            `json:"status_gen"`
 	Carried   map[uint64]uint64 `json:"carried,omitempty"`
 	Done      []uint64          `json:"done,omitempty"`
+	// Forgets are the references whose forget the queue has not done yet
+	// (digestBox.forgets), kept across a restart (security B2' on #592).
+	Forgets []string `json:"forgets,omitempty"`
 }
 
 // digestBox runs the digest. mu serializes collection, sending and forget,
@@ -127,8 +130,12 @@ type digestBox struct {
 	// forgets are the references whose forget the queue has not done
 	// (not open, or refused in flight): open purges them before anything
 	// is sent, and no batch holding one is sent (CAP-3, security B2 on
-	// #592).
+	// #592). They are kept in the state store as st.Forgets, so a restart
+	// holds them before the forget owner asks again (security B2').
 	forgets map[string]bool
+	// loaded is set once st holds the state store's contents, so a save
+	// never overwrites the store with an unloaded state.
+	loaded bool
 
 	// owing is a day whose collection failed: it stays owed and is
 	// collected again every digestRetry (L3 1 on #592).
@@ -177,9 +184,16 @@ func (d *digestBox) openLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	purged := false
 	for ref := range d.forgets {
 		if err = q.Forget(ref); err == nil {
 			delete(d.forgets, ref)
+			purged = true
+		}
+	}
+	if purged {
+		if err = d.keepForgets(); err != nil {
+			d.cfg.Logf("digest: forgets not saved: %v", err)
 		}
 	}
 	sources := maps.Clone(d.cfg.Sources)
@@ -216,8 +230,33 @@ func (d *digestBox) load() error {
 			return err
 		}
 	}
+	for _, ref := range st.Forgets {
+		d.hold(ref)
+	}
 	d.st = st
+	d.st.Forgets = slices.Sorted(maps.Keys(d.forgets))
+	d.loaded = true
 	return nil
+}
+
+// hold adds ref to the forgets the queue has not done.
+func (d *digestBox) hold(ref string) {
+	if d.forgets == nil {
+		d.forgets = map[string]bool{}
+	}
+	d.forgets[ref] = true
+}
+
+// keepForgets saves the forgets the queue has not done with the state,
+// loading the state first if the box has not opened yet.
+func (d *digestBox) keepForgets() error {
+	if !d.loaded {
+		if err := d.load(); err != nil {
+			return err
+		}
+	}
+	d.st.Forgets = slices.Sorted(maps.Keys(d.forgets))
+	return d.save()
 }
 
 func (d *digestBox) save() error {
@@ -538,13 +577,20 @@ func (d *digestBox) forget(ref string) error {
 		err = d.q.Forget(ref)
 	}
 	if err == nil {
-		delete(d.forgets, ref)
+		if d.forgets[ref] {
+			delete(d.forgets, ref)
+			if err = d.keepForgets(); err != nil {
+				d.cfg.Logf("digest: forgets not saved: %v", err)
+			}
+		}
 		return nil
 	}
-	if d.forgets == nil {
-		d.forgets = map[string]bool{}
+	// Saved before the refusal returns, so the hold outlives a restart
+	// whatever the forget owner keeps (security B2' on #592).
+	d.hold(ref)
+	if serr := d.keepForgets(); serr != nil {
+		d.cfg.Logf("digest: forgets not saved: %v", serr)
 	}
-	d.forgets[ref] = true
 	return err
 }
 

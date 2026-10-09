@@ -679,12 +679,6 @@ func main() {
 		log.Fatal(err)
 	}
 	ev.attach(ctx, d)
-	if dg != nil {
-		if o := d.Owner(); o != nil {
-			dg.cfg.Inform = o.Inform
-		}
-		go dg.run(ctx)
-	}
 	fs.attach(ctx, d)
 	// Deletions reach the journal's guest intents (CAP-3), when learning
 	// runs what it keeps of them (change C19, learning.ForgetTasks),
@@ -703,6 +697,15 @@ func main() {
 	recallCfg.Cases = fan
 	if lp != nil {
 		lp.attach(ctx, d)
+	}
+	// The digest runs once the forget owner's start-up replay has asked
+	// it again (security B2' on #592); its own saved forgets hold their
+	// batches either way.
+	if dg != nil {
+		if o := d.Owner(); o != nil {
+			dg.cfg.Inform = o.Inform
+		}
+		go dg.run(ctx)
 	}
 	// The owner channel failing to take questions must not take it down:
 	// the tools are then not offered and replies are task chat.
