@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -241,5 +242,63 @@ func TestTickReleasesAndStatusSaysHeld(t *testing.T) {
 	}
 	if l := d.pacer().note(); l != "32 texts held until 07:00 (quiet hours). 2 earlier texts were dropped." {
 		t.Fatalf("STATUS line past the cap: %q", l)
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1b QH-7, QH-8, QH-10)
+
+// TestMainWiresThePacer: the two calls main makes are the whole wiring.
+// Before the daemon runs, newOwnerPacer sets the grants hooks and STATUS's
+// held line on the daemon config; once the channel exists, attach makes
+// the digest wait for quiet hours and starts the tick, which sends a held
+// text once the clock passes 07:00 (lens 1 on #652).
+func TestMainWiresThePacer(t *testing.T) {
+	var cfg daemon.Config
+	p := newOwnerPacer(&cfg)
+	if cfg.Grants.Quiet == nil || cfg.Grants.Urgent == nil || cfg.Grants.Allowance == nil {
+		t.Fatal("grants hooks not wired")
+	}
+	if len(cfg.Notes) != 1 {
+		t.Fatalf("STATUS notes %d, want the held line", len(cfg.Notes))
+	}
+	r := pacedOwner(t, quiet22to7(), at23)
+	if err := r.ch.Inform("Update one."); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Grants.Allowance(at23) != 0 || cfg.Notes[0]() != "" {
+		t.Fatal("before attach: the hooks read a channel")
+	}
+	dg := newDigestBox(digestConfig{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.attach(ctx, r.ch, dg, time.Millisecond)
+	if !cfg.Grants.Quiet(at23) || dg.cfg.Quiet == nil || !dg.cfg.Quiet(at23) {
+		t.Fatal("grants or digest do not read the owner's quiet hours")
+	}
+	if l := cfg.Notes[0](); l != "1 text held until 07:00 (quiet hours)." {
+		t.Fatalf("STATUS held line: %q", l)
+	}
+	time.Sleep(20 * time.Millisecond) // ticks in quiet hours
+	if got := r.sent(); len(got) != 0 {
+		t.Fatalf("released in quiet hours: %q", got)
+	}
+	r.set(day0.AddDate(0, 0, 1).Add(7 * time.Hour))
+	var got []string
+	for deadline := time.Now().Add(5 * time.Second); len(got) == 0 && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+		got = r.sent()
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "Update one.") {
+		t.Fatalf("held text after 07:00: %q", got)
+	}
+	if cfg.Grants.Allowance(r.clock()) != 2 {
+		t.Fatal("grants does not read the owner's allowance after attach")
+	}
+
+	// Without a digest (none configured) attach still wires the rest.
+	q := newOwnerPacer(&daemon.Config{})
+	q.attach(ctx, r.ch, nil, time.Hour)
+	if !q.quiet(at23) {
+		t.Fatal("attach without a digest")
 	}
 }

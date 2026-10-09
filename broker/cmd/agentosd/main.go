@@ -608,9 +608,7 @@ func main() {
 	// Approval requests follow the owner's pacing setting and spend its one
 	// hourly budget; STATUS says what the pacer holds (W5-Dc-r1b QH-8,
 	// QH-10). The channel is attached once the daemon runs.
-	pacer := &ownerPacer{}
-	pacer.wire(&cfg.Grants)
-	cfg.Notes = append(cfg.Notes, pacer.note)
+	pacer := newOwnerPacer(&cfg)
 	var md machineDisk
 	if runsc != "" {
 		md = openMachineDisk(diskQuota, stateDir, &cfg.Notes)
@@ -697,8 +695,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	pacer.ch.Store(d.Owner())
-	go pacer.run(ctx)
+	pacer.attach(ctx, d.Owner(), dg, time.Minute)
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
 	// Deletions reach the journal's guest intents (CAP-3), when learning
@@ -721,7 +718,6 @@ func main() {
 		if o := d.Owner(); o != nil {
 			dg.cfg.Inform = o.Inform
 		}
-		dg.cfg.Quiet = pacer.quiet
 		go dg.run(ctx)
 	}
 	// The owner channel failing to take questions must not take it down:
@@ -1200,6 +1196,26 @@ type ownerPacer struct {
 	ch atomic.Pointer[owner.Channel]
 }
 
+// newOwnerPacer is the pacer's part of the daemon config, set before the
+// daemon runs: the grants hooks (QH-8) and STATUS's held line (QH-10).
+func newOwnerPacer(cfg *daemon.Config) *ownerPacer {
+	p := &ownerPacer{}
+	p.wire(&cfg.Grants)
+	cfg.Notes = append(cfg.Notes, p.note)
+	return p
+}
+
+// attach binds the owner channel once the daemon runs, makes the digest
+// (nil when none is configured; call before it runs) wait for quiet hours
+// (QH-7), and starts the tick that releases held texts (QH-10).
+func (p *ownerPacer) attach(ctx context.Context, ch *owner.Channel, dg *digestBox, every time.Duration) {
+	p.ch.Store(ch)
+	if dg != nil {
+		dg.cfg.Quiet = p.quiet
+	}
+	go p.run(ctx, every)
+}
+
 // wire sets the grants pacing hooks to the owner's setting and its one
 // hourly budget (QH-8).
 func (p *ownerPacer) wire(g *grants.Config) {
@@ -1242,9 +1258,9 @@ func (p *ownerPacer) tick() {
 	}
 }
 
-// run ticks every minute until ctx ends.
-func (p *ownerPacer) run(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+// run ticks every interval until ctx ends.
+func (p *ownerPacer) run(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {
