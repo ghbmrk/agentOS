@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -688,7 +689,7 @@ func TestDecisionsReportProviderUsage(t *testing.T) {
 	r := newRig(t, rigOpts{})
 	r.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
 	r.do(t, "m1", simpleChat)
-	if d := r.lastDecision(); d.Usage == nil || *d.Usage != (Usage{Input: 412, Output: 57, CacheRead: 3000, CacheWrite: 200, Reported: true, Complete: true, OutputChars: 51}) {
+	if d := r.lastDecision(); d.Usage == nil || !reflect.DeepEqual(*d.Usage, Usage{Input: 412, Output: 57, CacheRead: 3000, CacheWrite: 200, Reported: true, Complete: true, OutputChars: 51}) {
 		t.Fatalf("decision %+v", d)
 	}
 	r.up.set(hostAnthropic, serveFixture(200, "text/event-stream", fixture(t, "anthropic_stream.sse")))
@@ -696,7 +697,7 @@ func TestDecisionsReportProviderUsage(t *testing.T) {
 	if a := reassemble(t, w.Body.Bytes()); a.usage != nil || !a.done {
 		t.Fatalf("usage chunk sent unasked: %+v", a)
 	}
-	if d := r.lastDecision(); d.Usage == nil || *d.Usage != (Usage{Input: 25, Output: 32, CacheRead: 1800, Reported: true, Complete: true, OutputChars: 29}) {
+	if d := r.lastDecision(); d.Usage == nil || !reflect.DeepEqual(*d.Usage, Usage{Input: 25, Output: 32, CacheRead: 1800, Reported: true, Complete: true, OutputChars: 29}) {
 		t.Fatalf("stream decision %+v", d)
 	}
 
@@ -715,7 +716,7 @@ func TestDecisionsReportProviderUsage(t *testing.T) {
 	if sent.StreamOptions == nil || !sent.StreamOptions.IncludeUsage {
 		t.Fatalf("usage not requested upstream: %s", r2.up.lastBody(hostOpenAI))
 	}
-	if d := r2.lastDecision(); d.Usage == nil || *d.Usage != (Usage{Input: 9, Output: 2, CacheRead: 10, Reported: true, Complete: true, OutputChars: 2}) {
+	if d := r2.lastDecision(); d.Usage == nil || !reflect.DeepEqual(*d.Usage, Usage{Input: 9, Output: 2, CacheRead: 10, Reported: true, Complete: true, OutputChars: 2}) {
 		t.Fatalf("openai stream decision %+v", d.Usage)
 	}
 	w = r2.do(t, "m1", `{"model":"default","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`)
@@ -859,7 +860,7 @@ func TestUnreportedUsageFallsBackToCharacters(t *testing.T) {
 	r := newRig(t, rigOpts{rule: Rule{"default": {{Provider: "openai", Model: "gpt-fixture"}}}})
 	r.up.set(hostOpenAI, serveFixture(200, "application/json", []byte(`{"choices":[{"message":{"content":"twelve chars","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}`)))
 	r.do(t, "m1", simpleChat)
-	if d := r.lastDecision(); d.Usage == nil || *d.Usage != (Usage{Complete: true, OutputChars: 14}) {
+	if d := r.lastDecision(); d.Usage == nil || !reflect.DeepEqual(*d.Usage, Usage{Complete: true, OutputChars: 14}) {
 		t.Fatalf("usage %+v", d.Usage)
 	}
 }
