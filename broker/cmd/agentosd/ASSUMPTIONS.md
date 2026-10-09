@@ -27,9 +27,20 @@ Built for W3-forget-b3 ("Promised done text survives a restart") against CAP-3, 
 | F5 | **Named by its time, never its text.** The text says "Your task from <date> is forgotten now." because the owner may have texted since. Without the ID's time it says "A task you asked me to forget". The store holds goal IDs, times and counts only. | security C2 on W3-forget | None expected. |
 | F6 | **Uncapped.** One entry per forget not yet told. Entries exist only between a YES and its done text, so the store stays small. | — | Cap it if forgets can be owed in bulk. Class: later (L3 on #425). |
 | F7 | **A restored backup's owed file is replayed like the live one.** Its goals that the restored tombstone or forget log hold are told again, as "forgotten now". | REC-2 | Drop the owed file on restore. Class: later (L3 on #425). |
-| F8 | **The local Wi-Fi page's task list (potency R2) is not built here.** `broker/localui` has no task page. Listing older tasks needs a new page, a socket route and a forget path, all outside this brief's files. It is classed release (agreed with L3 on #425; the coordinator adds the BOARD row). | brief W3-forget-b3 (carried) | — |
+| F8 | **The local Wi-Fi page's task list (potency R2) is not built here.** `broker/localui` has no task page. Listing older tasks needs a new page, a socket route and a forget path, all outside this brief's files. It is classed release (agreed with L3 on #425; the coordinator adds the BOARD row). Built by W3-forget-b3r (P1–P4). | brief W3-forget-b3 (carried) | — |
 | F9 | **A done text is owed until it sends.** The owner channel's send reports failure (`loop2Notify.try`), for example modemlink's ErrDown just after boot. A text that does not send stays in the owed file, with whether it was logged and the agent taken back, and is sent again with backoff (2s doubling to a minute). At a shutdown it is left to the next start. | CAP-3; L3 B1 on #425 | None expected. |
 | F10 | **An unreadable owed file fails safe.** It is renamed to `forget-owed.json.bad`, a fresh file starts, and the owner is owed one fixed notice: "After a restart I couldn't read which forget texts I still owed you. Send FORGET to see your recent tasks." Entries that read but no forget wrote are sanitized: a goal with no tombstone gets no text, a negative count reads as none, and a future time reads as "A task you asked me to forget". No text repeats words from the file. | security C2; L3 B2 on #425 | Text each recoverable goal from the `.bad` file instead. |
+
+## The Forget page's hook (W3-forget-b3r)
+
+Built for W3-forget-b3r (potency R2 of W3-forget-b3) against CAP-3, CH-7 and CH-8. Covers `PageTasks`, `PageForget` and `wirePage` in `forget.go`; the page is `broker/localui` (L32 there).
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| P1 | **A page ask is FORGET's own ask.** `PageForget` takes `f.mu` and calls the same `ask` FORGET by text uses: one intent through the gate, nothing deleted until the owner approves it with a code, the done text owed before the tombstone (F1–F4). The page gets only fixed texts, never "forgotten". | CAP-3 | A second forget path would need its own approval check; keep this one. |
+| P2 | **Only a listed task is asked.** The page sends a goal ID; it must be among `recent(forgetList)` right now, the same list the page showed, so an edited, forgotten or older ID asks nothing. | CAP-3, CH-8 | If the list grows past `forgetList`, the check grows with it. |
+| P3 | **Locked lists and asks nothing.** localsrv passes `LocalStatus().Unlocked`, the signal FORGET by text gets (CH-21); locked, the page shows no task label and submits nothing. | CH-7, CH-21 | — |
+| P4 | **Labels are FORGET's own.** `shown(t, true)`: a texted task's clipped words, every other task only its date (security C2), so the page shows on Wi-Fi only what the owner already texted. Nothing about a task is logged. | CH-8, CAP-3 | A label with more words is a security-lens change, not a page change. |
 
 ## Held restore (W3-forget-b1-7)
 

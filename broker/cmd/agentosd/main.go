@@ -603,6 +603,8 @@ func main() {
 	}
 	if lp == nil {
 		learningOff(&cfg)
+	} else {
+		lp.forgetOwner.wirePage(&cfg)
 	}
 	// Evidence delivery (CH-20): with a destination set, private replies
 	// are emailed to it. No mail account is connected in this process

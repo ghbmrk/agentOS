@@ -67,6 +67,13 @@ type Config struct {
 	// (W5a-resume). Either nil refuses its op.
 	Paused    func() []localapi.PausedGrant
 	AskResume func(ctx context.Context, grant, pause string) (string, error)
+	// ForgetTasks lists the owner's recent tasks; Forget asks to forget
+	// one by its goal ID through FORGET's own ask and returns the fixed
+	// reply to show (W3-forget-b3r). Each is given whether the owner's
+	// session is unlocked, as FORGET by text is. Either nil refuses its
+	// op.
+	ForgetTasks func(unlocked bool) localapi.ForgetTasks
+	Forget      func(ctx context.Context, goal string, unlocked bool) string
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -125,8 +132,10 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpFollowRoot: s.followRoot,
 		localapi.OpFollow:     s.follow,
 		// Resuming a paused grant needs a session, then a code (W5a-resume).
-		localapi.OpPaused:    s.authed(s.paused),
-		localapi.OpAskResume: s.askResume,
+		localapi.OpPaused:      s.authed(s.paused),
+		localapi.OpAskResume:   s.askResume,
+		localapi.OpForgetTasks: s.authed(s.forgetTasks),
+		localapi.OpForget:      s.forget,
 	}
 }
 
@@ -424,6 +433,28 @@ func (s *Server) askResume(ctx context.Context, _ sockets.Peer, args json.RawMes
 		return nil, errFailed
 	}
 	return localapi.Text{Text: t}, nil
+}
+
+func (s *Server) forgetTasks(context.Context) (any, error) {
+	if s.cfg.ForgetTasks == nil {
+		return nil, errFailed
+	}
+	return s.cfg.ForgetTasks(s.cfg.Owner.LocalStatus().Unlocked), nil
+}
+
+func (s *Server) forget(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.Forget
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || in.ID == "" || len(in.ID) > localapi.MaxGoal {
+		return nil, errBadArgs
+	}
+	if s.cfg.Forget == nil {
+		return nil, errFailed
+	}
+	return localapi.Text{Text: s.cfg.Forget(ctx, in.ID, s.cfg.Owner.LocalStatus().Unlocked)}, nil
 }
 
 func lowerHex(v string, n int) bool {
