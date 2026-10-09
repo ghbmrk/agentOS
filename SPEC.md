@@ -471,7 +471,7 @@ Every installation's verified gains can flow into one public project, and every 
 
 ### Contribution flow: clean-room by construction
 
-**Principle:** no private content is ever published. Published artifacts are produced only by a process that **never has access** to private data and whose only private-derived input is the hint (OSS-1): a choice among publicly listed values, derived by broker code and bounded per day (OSS-14). Content leakage is therefore ruled out by information flow, not by filtering or redaction (which can miss things). That channel is bounded, not zero. Both guarantees hold relative to the CRED-2 trusted base, which includes the broker code that derives hints.
+**Principle:** no private content is ever published. Published artifacts are produced only by a process that **never has access** to private data and whose only private-derived input is the hint (OSS-1): a choice among publicly listed values, derived by broker code and bounded per day (OSS-14). Content leakage is therefore ruled out by information flow, not by filtering or redaction (which can miss things). The hint channel is bounded, not zero. Both guarantees hold relative to the CRED-2 trusted base, which includes the broker code that derives hints.
 
 - **OSS-1** **Two sides, one narrow bridge.**
   - The *private side* (journal, recall index, workspaces, real tasks) may emit only a **hint**: a record whose every field is an **enumerated value from a public schema**. Examples: `skill_gap{domain: calendar, format: ics, failure: timezone}` or `vuln{class: prompt_injection, vector: email_html}`.
