@@ -438,7 +438,7 @@ func Describe(s Spec) string {
 	r := s.Rule
 	var b strings.Builder
 	if r.Reply {
-		fmt.Fprintf(&b, "Let the agent reply in existing threads on %s (%s) without asking, to the thread's own participants only. Each reply is texted to you first and sends after the undo window unless you reply UNDO.", s.Account, r.Action)
+		fmt.Fprintf(&b, "Let me reply in existing threads on %s (%s) without asking, to the thread's own participants only. Each reply is texted to you first and sends after the undo window unless you reply UNDO.", s.Account, r.Action)
 	} else {
 		fmt.Fprintf(&b, "Let %s on %s run without asking or notifying you, when every field comes from the source record.", r.Action, s.Account)
 	}

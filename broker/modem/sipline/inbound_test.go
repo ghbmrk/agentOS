@@ -206,16 +206,16 @@ func TestLineErrorsHaveOwnerWording(t *testing.T) {
 		sipline.ErrNumber:                            "isn't a phone number",
 		sipline.ErrBusy:                              "already on a call",
 		sipline.ErrClosed:                            "isn't connected right now",
-		sipline.ErrConfig:                            "isn't set up. Set it up on the box's Wi-Fi page",
-		sipline.ErrInsecure:                          "Check the server name on the box's Wi-Fi page",
+		sipline.ErrConfig:                            "isn't set up. Set it up on my Wi-Fi page",
+		sipline.ErrInsecure:                          "Check the server name on my Wi-Fi page",
 		sipline.ErrNoSRTP:                            "Turn on encrypted calls (SRTP)",
 		sipline.ErrMediaAddress:                      "isn't on a safe address",
 		sipline.ErrTextRefused:                       "provider didn't accept",
-		fmt.Errorf("%w: 486", sipline.ErrCallFailed): "doesn't call again on its own",
+		fmt.Errorf("%w: 486", sipline.ErrCallFailed): "don't call again on my own",
 		fmt.Errorf("x: %w", sipline.ErrUnreachable):  "It will keep trying to reconnect",
-		sipsign.ErrLocked:                            "Unlock it on the box's Wi-Fi page",
-		sipsign.ErrNoAccount:                         "account isn't set up. Set it up on the box's Wi-Fi page",
-		sipsign.ErrRefused:                           "on the box's Wi-Fi page",
+		sipsign.ErrLocked:                            "Unlock me on my Wi-Fi page",
+		sipsign.ErrNoAccount:                         "account isn't set up. Set it up on my Wi-Fi page",
+		sipsign.ErrRefused:                           "on my Wi-Fi page",
 		sipsign.ErrLimited:                           "sent as many texts as it may for now",
 		sipsign.ErrRecipient:                         "doesn't text or call that number",
 		errors.New("anything else 486 Busy"):         "couldn't reach its provider, so that didn't go through",
@@ -389,7 +389,7 @@ func TestARefusedCallEndsWithCallFailed(t *testing.T) {
 	_ = far.Reject(486)
 	<-c.Ended()
 	err = c.(interface{ Err() error }).Err()
-	if !errors.Is(err, sipline.ErrCallFailed) || !strings.Contains(sipline.OwnerText(err), "doesn't call again") {
+	if !errors.Is(err, sipline.ErrCallFailed) || !strings.Contains(sipline.OwnerText(err), "don't call again") {
 		t.Fatalf("%v", err)
 	}
 }

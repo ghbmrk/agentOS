@@ -58,15 +58,15 @@ var followRoles = []struct{ role, does string }{
 // The page's own words for a refused root (OSS-10w L3: only the coarse
 // cause agentosd names).
 const (
-	rootExpiredText    = "This root file has expired by this box's clock. Ask the source for its current root file."
-	rootSignaturesText = "This root file isn't signed by enough of its own keys, so the box can't trust it."
-	rootThresholdText  = "This root file lets too few keys sign. This box needs at least two keys to agree for each change."
-	rootUnreadText     = "The box can't use this root file. Check it's the root.json the source gave you, or ask the source's maintainers for theirs."
+	rootExpiredText    = "This root file has expired by my clock. Ask the source for its current root file."
+	rootSignaturesText = "This root file isn't signed by enough of its own keys, so I can't trust it."
+	rootThresholdText  = "This root file lets too few keys sign. I need at least two keys to agree for each change."
+	rootUnreadText     = "I can't use this root file. Check it's the root.json the source gave you, or ask the source's maintainers for theirs."
 	rootTooBigText     = "That file is too big to be a root file. Make sure you chose the source's root.json."
-	followOffText      = "This box can't change where its updates come from. Nothing was changed."
+	followOffText      = "I can't change where my updates come from. Nothing was changed."
 	followStale        = "This page is out of date. Choose the root file again."
-	followUnreachable  = "The box isn't answering right now. Nothing was asked. Reload to try again."
-	followNoName       = "Give this source a name first. The box's texts use it to say where updates come from."
+	followUnreachable  = "I can't answer right now. Nothing was asked. Reload to try again."
+	followNoName       = "Give this source a name first. My texts use it to say where updates come from."
 	followReservedName = "Choose another name. Only switching back may be called " + reservedName + "."
 )
 
