@@ -151,12 +151,19 @@ func TestAFuzzChildReachesOnlyItsOwnBoundedTree(t *testing.T) {
 			t.Skipf("this host keeps %s", p)
 		}
 	}
+	// The state is a directory below the file system's root, so the
+	// untagged root shows the whole disk: statfs on a directory in a
+	// project with inheritance reports the project's quota instead.
 	q := quotatest.Dir(t, 2048)
+	src := filepath.Join(q, "state")
+	if err := os.Mkdir(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(fuzzState, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Remove(fuzzState) })
-	if out, err := exec.Command("mount", "--bind", q, fuzzState).CombinedOutput(); err != nil {
+	if out, err := exec.Command("mount", "--bind", src, fuzzState).CombinedOutput(); err != nil {
 		t.Fatalf("mount: %v: %s", err, out)
 	}
 	t.Cleanup(func() { exec.Command("umount", fuzzState).Run() })
@@ -268,7 +275,7 @@ exit 0`
 		t.Errorf("a fuzz child wrote %s bytes past a %d byte quota", said["size"], int64(testDisk))
 	}
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(fuzzState, &st); err != nil || int64(st.Bavail)*st.Bsize < 512<<20 {
+	if err := syscall.Statfs(q, &st); err != nil || int64(st.Bavail)*st.Bsize < 1<<30 {
 		t.Errorf("the disk around the fuzz tree was filled: %d bytes free (%v)", int64(st.Bavail)*st.Bsize, err)
 	}
 }
