@@ -12,6 +12,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
   - Same test still failing after 2 fix attempts: stop, write a diagnosis in the PR, and mark the package `escalated` on BOARD.md.
   - Diff growing while the pass count is flat: stop and escalate.
 - Don't start a row LATER.md lists as later. Class every finding you raise or receive as **blocker** (fix in this PR), **release** (new BOARD row) or **later** (one line in LATER.md), and list them on the PR's Findings line (OPERATING §2).
+- A **release** finding names the acceptance test or invariant it serves and one failure path. Unsure between release and later: `later` tagged `recheck`. Tooling messages, and findings on a follow-up of a follow-up, are `later` unless they are a false pass or exploit path (OPERATING §2, D-085).
 - Record what the package rests on in its `ASSUMPTIONS.md` (OPERATING §5).
 - Prefer reusing mature components. A new component needs a sentence in the PR on why reuse fails.
 - Never put credentials, tokens, or personal data in code, tests, fixtures, or logs. Use synthetic canaries only.
@@ -19,7 +20,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 ## Reviewer (L3)
 - Review in a fresh context, from the diff plus the cited requirement IDs. Don't rely on the builder's reasoning.
 - First line `Verdict: accept|fix-list|reject`; any verdict but accept adds `Cause: spec-gap|brief-gap|defect|scope`. Each point cites a requirement ID or a concrete defect and carries its class (OPERATING §4).
-- A point outside the cited IDs is `release` or `later`, never a blocker.
+- A point outside the cited IDs is `release` or `later`, never a blocker. The release findings from one PR's reviews make one follow-up brief.
 - Review depth follows the risk tier `python3 tools/risk_tier.py --git origin/main HEAD` prints; the stages each tier needs are in OPERATING §3–4. Tier A needs the strongest model and an explicit threat check.
 - Each review runs in a new session. There are no standing reviewer or lens sessions; lens memory lives in DECISIONS.md and `reviews/<lens>/README.md`.
 - A kind of finding seen on a second PR becomes a lint rule, test or CI check in the next package that touches the area, listed in the lens README (OPERATING §4).
@@ -33,10 +34,13 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - One package or one review per session. Start a fresh session with a hand-off packet of 20k tokens or less (OPERATING §5) rather than reviving a session over ~150k that sat idle more than an hour.
 - Mechanical subagent work (search, log triage, wording sweeps, test scaffolding) passes `model: "haiku"` and stays under 100k tokens, above which Haiku costs 5x; use `"sonnet"` when it needs judgment. Reviews of security-critical paths keep the session's model.
 - Sonnet pilot (OPERATING §5, 2026-10-08 to the 2026-10-18 reset): tier B and C builder sessions run on a Sonnet-class model, tier A on the strongest model. Run `tools/risk_tier.py` before opening the PR; on A, stop and hand off. Name the builder model in the PR's Budget section.
+- Mark adds a usage reading to LEDGER.md daily; a decision about pace waits for a reading under 36 hours old.
 - Read tool output narrowly (grep, tail, `go test -run`), never whole CI logs or large files. Send cross-session messages for decisions, blockers and hand-offs only; progress goes in the status checklist.
 
 ## Repository conventions
 - Branch per package: `pkg/<id>-<slug>-<suffix>`. The coordinator sets the `pkg/<id>-<slug>` stem when it starts a thread; the server appends a session-unique suffix. Threads started without a stem keep their assigned `claude/…` branch, and the PR title starts with the package ID (DECISIONS.md). PRs use the template's trace table.
+- Nothing sits idle more than 48 hours: a PR or `building` row is finished, handed off, or returned to `queued`. CODEX-1 drafts are exempt (OPERATING §5).
+- Questions for Mark go to docs/MARK-QUEUE.md, one-word answerable, with a recommendation.
 - A PR that fixes a defect in already-merged code carries a `Defect: <package ID>` line in its body; METRICS.md counts them for L4.
 - SPEC.md changes only through an L1 spec-diff PR that Mark approves.
 - Parallel teams (another subscription or another vendor's agent) work only in their own lane (docs/LANES.md), claim rows on BOARD.md before building, run their own fresh L3 review before marking a PR ready, and never merge; the repository is the only shared state (OPERATING §7).
