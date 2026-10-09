@@ -28,7 +28,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | SR3-5 | [Preserve IMAP message identity through mutations and undo](briefs/SR3-5.md) | P2-6m | queued (P2; release) |
 | SR3-6 | [Invalidate verified updates when attestation policy narrows](briefs/SR3-6.md) | P4-3, P3-1 | queued (P2; release) |
 | SR3-7 | [Use one validated request for model reservation and routing](briefs/SR3-7.md) | P2-7, P1-7 | in review (#429) |
-| SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | queued (P2; release) |
+| SR3-8 | [Commit clean-room output durably before recording completion](briefs/SR3-8.md) | P4-2 | in review (#432) |
 
 ## Phase 0: harness and risk spikes
 
@@ -281,7 +281,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b1-7 | Text the owner the held restore's PendingNotice (CH-12) from the marker agentosd refuses to start on (#409 U2; brief to write). Also (#409 UX U6, release): add the CH-12 recurring-kind check ("a step that cannot work") for owner texts, per reviews/ux/README.md Also (#436, release): L3 — route only authenticated owner-channel replies into answerHeld, and serialize replies; UX — the unanchored header says "this PC", not "new PC", and when there is no newer backup the wrong-answer text needs a named way to retry | W3-forget-b1, W3-forget-b1-4 | Next build item B | queued (needs brief) |
 | W3-forget-b2 | [Builder-lineage rollback with A/B](briefs/W3-forget-b2.md) | W3-forget-a | Next build item B | merged (#321) |
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
-| W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | queued |
+| W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | in review (#425) |
 | W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | in review (#427) |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
 | W3-forget-b2c-2 | Item 2's texts (`forgetAgentDone`, `forgetAgentNotYet` and the rest) are owed until they send, as W3-forget-b3 does for item 1; add a check that no done text in `ownerForget` reaches `inform` directly (release, UX-182-3 / CH-12; Defect: W3-forget-b2c; L3 on #425, second PR with this kind of finding; brief to write) | W3-forget-b2c, W3-forget-b3 | Next build item B | queued (needs brief) |

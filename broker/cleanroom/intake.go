@@ -262,9 +262,31 @@ func writeJSON(path string, v any) error {
 }
 
 // writeFile writes data durably: a synced temporary file renamed into place.
-func writeFile(path string, data []byte) error {
+func writeFile(path string, data []byte) error { return writeFileWith(nil, path, data) }
+
+func writeFileWith(fault faultFn, path string, data []byte) error {
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err := writeSynced(fault, tmp, data); err != nil {
+		return err
+	}
+	if err := fault.hit("rename", path); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	if err := fault.hit("syncdir", filepath.Dir(path)); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// writeSynced creates path with data and syncs it.
+func writeSynced(fault faultFn, path string, data []byte) error {
+	if err := fault.hit("write", path); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -272,17 +294,26 @@ func writeFile(path string, data []byte) error {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	err = fault.hit("sync", path)
+	if err == nil {
+		err = f.Sync()
+	}
+	if err != nil {
 		f.Close()
 		return err
 	}
-	if err := f.Close(); err != nil {
-		return err
+	return f.Close()
+}
+
+// faultFn, when set (tests only), is told of each file operation before it
+// runs and may fail it.
+type faultFn func(op, path string) error
+
+func (f faultFn) hit(op, path string) error {
+	if f == nil {
+		return nil
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(path))
+	return f(op, path)
 }
 
 func readJSON(path string, v any) error {
