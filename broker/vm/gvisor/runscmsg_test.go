@@ -42,9 +42,10 @@ func TestRunscFailureAnswersNoOutputAndNoRunscText(t *testing.T) {
 		}
 		// The error is a bare vm sentinel: no host path, not even the
 		// exec log's (SR2-3j, release finding 362-2).
-		want := vm.ErrExecNotStarted
-		if mode == "wait" {
-			want = vm.ErrExecFailed
+		// A panic with no --log line may follow the start (SR2-3q).
+		want := vm.ErrExecFailed
+		if mode == "prestart" {
+			want = vm.ErrExecNotStarted
 		}
 		if err != want {
 			t.Fatalf("%s: error %v, want %v", mode, err, want)

@@ -371,7 +371,7 @@ func TestUndoRestoresOnlyWhatIsUnchanged(t *testing.T) {
 	// another elsewhere, and took the AgentOS label off a third.
 	x.srv.SetFlags(ids[0], mail.Seen, mail.Keyword)
 	moved, _ := x.store.Find(ctx, "Archive", ids[1])
-	if err := x.store.Move(ctx, "Archive", moved[0].UID, "Receipts"); err != nil {
+	if err := x.store.Move(ctx, moved[0].Ref(), "Receipts"); err != nil {
 		t.Fatal(err)
 	}
 	x.srv.SetFlags(ids[2])
