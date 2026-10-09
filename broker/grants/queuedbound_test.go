@@ -26,20 +26,29 @@ func (v reasonVerifier) Escalate(context.Context, journal.Intent) (Escalation, e
 // dayRig is a rig with one invoice rule allowing two sends a day and ten
 // per record; reason, if set, is the adapter guard's reason.
 func dayRig(t *testing.T, reason string) (*rig, func(id, rec string) journal.Status) {
-	var mod func(*Config)
-	if reason != "" {
-		mod = func(c *Config) { c.Verifiers["mail"] = reasonVerifier{c.Verifiers["mail"].(*fakeVerifier), reason} }
-	}
-	r := newRig(t, mod)
-	r.grant(mailGrant())
-	r.grant(Spec{Account: "mail", Rule: &Rule{Action: "invoice.send", Params: map[string]string{"template": "invoice"},
-		AmountCap: 15000, PerRecord: 10, PerDay: 2}})
+	return ruleRig(t, reason, "invoice.send", 10, 2)
+}
+
+// ruleRig is a rig with one rule on action, which the mail adapter
+// declares as a send, bounded perRec per record and perDay a day.
+func ruleRig(t *testing.T, reason, action string, perRec, perDay int) (*rig, func(id, rec string) journal.Status) {
+	r := newRig(t, func(c *Config) {
+		c.Declared["mail"][action] = "send"
+		if reason != "" {
+			c.Verifiers["mail"] = reasonVerifier{c.Verifiers["mail"].(*fakeVerifier), reason}
+		}
+	})
+	g := mailGrant()
+	g.Ops[action] = "send"
+	r.grant(g)
+	r.grant(Spec{Account: "mail", Rule: &Rule{Action: action, Params: map[string]string{"template": "invoice"},
+		AmountCap: 15000, PerRecord: perRec, PerDay: perDay}})
 	send := func(id, rec string) journal.Status {
 		r.t.Helper()
 		x := sam()
 		x.Record = rec
 		r.ver.set(rec, x)
-		return r.effect(id, "invoice.send", map[string]any{"template": "invoice", "record": rec}, "sam@example.com")
+		return r.effect(id, action, map[string]any{"template": "invoice", "record": rec}, "sam@example.com")
 	}
 	return r, send
 }
@@ -47,7 +56,13 @@ func dayRig(t *testing.T, reason string) (*rig, func(id, rec string) journal.Sta
 // askedDetail submits id past the bound and returns its owner item's Detail.
 func askedDetail(t *testing.T, r *rig, send func(id, rec string) journal.Status, id string) string {
 	t.Helper()
-	if st := send(id, "inv-"+id); st.State != journal.Pending {
+	return askedDetailOn(t, r, send, id, "inv-"+id)
+}
+
+// askedDetailOn is askedDetail with id on record rec.
+func askedDetailOn(t *testing.T, r *rig, send func(id, rec string) journal.Status, id, rec string) string {
+	t.Helper()
+	if st := send(id, rec); st.State != journal.Pending {
 		t.Fatalf("%s past the bound: %s %q", id, st.State, st.Permission.Reason)
 	}
 	r.g.Flush()
@@ -98,6 +113,76 @@ func TestBoundAskNamesQueuedSends(t *testing.T) {
 			// The decision is unchanged: asked, nothing ran past the bound.
 			if r.exec.runs("agent/q3") != 0 {
 				t.Fatal("the asked send ran")
+			}
+		})
+	}
+}
+
+// TestBoundAskNamesQueuedActions (SR3-2-f2 noun): when the rule's action
+// is not a send, the note counts earlier actions, not sends.
+func TestBoundAskNamesQueuedActions(t *testing.T) {
+	for _, c := range []struct {
+		started int
+		want    string
+	}{
+		{0, "2 earlier actions still queued"},
+		{1, "1 earlier action still queued"},
+	} {
+		r, send := ruleRig(t, "", "invoice.remind", 10, 2)
+		for i, id := range []string{"agent/q1", "agent/q2"} {
+			if i == c.started {
+				if _, err := r.eng.Stop(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := journal.Succeeded
+			if i >= c.started {
+				want = journal.Authorized
+			}
+			if st := send(id, "inv-"+id); st.State != want {
+				t.Fatalf("%s: %s %q, want %s", id, st.State, st.Permission.Reason, want)
+			}
+		}
+		if got := askedDetail(t, r, send, "agent/q3"); got != c.want {
+			t.Fatalf("Detail %q, want %q", got, c.want)
+		}
+	}
+}
+
+// TestBoundAskNamesQueuedPerRecord (SR3-2-f2 per record): an ask made
+// because the record's places are taken, with the day still open, counts
+// the sends queued on that record only, not those queued on another.
+func TestBoundAskNamesQueuedPerRecord(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		started int // sends on the record that run before STOP
+		want    string
+	}{
+		{"both queued", 0, "2 earlier sends still queued"},
+		{"one queued", 1, "1 earlier send still queued"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, send := ruleRig(t, "", "invoice.send", 2, 10)
+			for i, id := range []string{"agent/r1", "agent/r2"} {
+				if i == c.started {
+					if _, err := r.eng.Stop(context.Background()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				want := journal.Succeeded
+				if i >= c.started {
+					want = journal.Authorized
+				}
+				if st := send(id, "inv-r"); st.State != want {
+					t.Fatalf("%s: %s %q, want %s", id, st.State, st.Permission.Reason, want)
+				}
+			}
+			// Queued on another record: within the day, not this record.
+			if st := send("agent/o1", "inv-o"); st.State != journal.Authorized {
+				t.Fatalf("o1: %s %q", st.State, st.Permission.Reason)
+			}
+			if got := askedDetailOn(t, r, send, "agent/r3", "inv-r"); got != c.want {
+				t.Fatalf("Detail %q, want %q", got, c.want)
 			}
 		})
 	}

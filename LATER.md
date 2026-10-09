@@ -383,6 +383,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4b l7 | L3 delta on #548: `loops.tamperNonce` (regexp) in `machine.go` is used only by tests; move it to the test file or use it to check `newTamperNonce`'s output |
 | P3-4b-4b l8 | Security 4a delta 1 on #548 (predates the fix; covered by release row P3-4b-4c-fresh): a probe guest that skips its scripted writes still closes an open tamper finding; if the probe image is ever shared with agent code, closing must need a broker-side write check (a canary the broker plants and verifies through the same mount) |
 | SR3-5-f1 l1 | Delta L3 on #571 (comment 6078264771): a pin is never cleared for an intent that is denied or never dispatched; pins live in memory, so a restart drops them |
+| SR3-2-f-page-sum | `Decide`'s page confirmation compares `d.Sum` with `ItemSum(w.base)`, not the item the page showed; safe only while noted asks are never `local`. Compare against `w.item`, or pin that local asks carry no note, when the area is next touched (Security 4a on #581, comment 6078904256; also L3 6078880234) |
+| SR3-2-f-started-wording | With 1 queued and 1 started under `PerDay: 2` the owner sees `1 earlier send still queued`, not the bound; consider a form such as `1 of 2 today still queued` (UX lens on #581, comment 6078894198) |
+| SR3-2-f-max-rule | The queued count is the maximum over the failed rules, not the rule the owner would widen; differs only with several bound rules on one action (UX lens on #581, comment 6078894198) |
+| SR3-2-f-maxnoted | No test pins the `maxNoted` (1000) boundary where a restart closes the ask as changed; add one with 1001 queued or a lowered constant. A second shown-only fact goes into a separate `owner.Item` field (GR33), not `Detail` (Potency lens on #581, comment 6078894198) |
 
 ## Reuse candidates
 | ID | Component | Why |
