@@ -96,7 +96,7 @@ Use synthetic canaries only. The credential in every test is a canary string tha
 - `broker/cmd/agentos-egress/ASSUMPTIONS.md`.
 - BOARD row SR3-mail-w1.
 
-**Order:** none of #614, #617, #620, #622, #626, #628, #629 or #621 edits `agentos-egress` or `broker/mail`. w1 can start now.
+**Order:** none of the open PRs #614, #617, #626, #628, #629 or #621 edits `agentos-egress` or `broker/mail`. w1 can start now.
 
 ### Delivery (w1)
 
@@ -197,18 +197,17 @@ Use the `mailtest` double behind the w1 client in a test server, and synthetic a
 
 **Needs:** SR3-mail-w1, SR3-2-f1, SR3-5-f1, and SR3-5-f2 (merged, #616 d43fba8).
 
-**Order against open PRs: build after #622 and #628 merge.**
-- **#622 (W5-Dc-r12).** It edits agentosd `digest.go`, `forget.go`, `main.go` and `ASSUMPTIONS.md`. Start w2 from a main that includes it.
+**Order against open PRs: build after #628 merges.** #622 (W5-Dc-r12, agentosd `digest.go` and `main.go`) merged as 3fa52cf, and #620 as 0c24e94.
 - **#628.** It edits agentosd `main.go`, `learn.go` and `ASSUMPTIONS.md`. Start after it too.
 - **#626, #629 and #621.** These edit agentosd `ASSUMPTIONS.md`; #629 and #621 also edit `broker/daemon/inference_test.go`, which W2-f touches (one `netOK` line). If any is still open, merge main before review; the ASSUMPTIONS and `netOK` edits go last.
 - **#617.** It edits agentosd `forget_agent_test.go` and `grants` tests. There is no overlap.
-- **#614 and #620.** These touch only records. There is no overlap.
+- **#614.** It touches only records. There is no overlap.
 
 ### Delivery (w2)
 
 - **Builder model:** the strongest model. Risk tier **A** (`daemon`, `broker/cmd/agentosd`, `broker/owner`, the ARC-2 fence).
 - **Order of work:**
-  - Write the tests first, after w1 merges and the PRs above merge.
+  - Write the tests first, after w1 and #628 merge.
   - Before opening the PR, run `python3 tools/risk_tier.py --git origin/main HEAD`.
 - **Review:**
   - L3 on the strongest model with the threat check above.
