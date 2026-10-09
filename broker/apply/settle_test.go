@@ -434,6 +434,125 @@ func TestCommittedBeforeConfirmThenOldRootConverges(t *testing.T) {
 	r.settledOnOldRoot(rel)
 }
 
+// SR3-4f-r1 (Security 4a and L3 on #597, point 4): the other-root line is
+// decided by the root the box runs, not by the boot it was settled in.
+// While the box runs another root than the update store's installed
+// release, STATUS keeps saying so, in every boot; once the release runs,
+// it is silent. A later boot on the old root must not read as "installed".
+
+// REQ: UPD-1, UPD-1a, CH-12
+
+// settleOnOldRoot hands release 1 over, cuts the settle after
+// CommitRelease, boots the old root and settles it as installed_other_root.
+func settleOnOldRoot(t *testing.T) (*rig, *update.Verified) {
+	t.Helper()
+	r, rel := handedOver(t, false)
+	r.restart()
+	r.pipe.confirmErr = errIO
+	if err := r.a.Resume(context.Background()); !errors.Is(err, errIO) {
+		t.Fatalf("resume: %v", err)
+	}
+	r.bootOldRoot()
+	r.must(r.a.Resume(context.Background()))
+	if l := r.saved().Last; l == nil || l.Kind != doneInstalledOtherRoot {
+		t.Fatalf("settled as %+v", l)
+	}
+	return r, rel
+}
+
+// bootNewRoot reboots the box into release 1's root, blessed, and restarts
+// the applier.
+func (r *rig) bootNewRoot() {
+	r.t.Helper()
+	r.act.next = strings.Repeat("0f", 32)
+	r.must(r.act.Restart(context.Background()))
+	r.restart()
+}
+
+func TestOtherRootLineHoldsInLaterBoots(t *testing.T) {
+	r, _ := settleOnOldRoot(t)
+	settled := r.act.boot.ID
+	r.bootOldRoot()
+	if r.act.boot.ID == settled {
+		t.Fatal("no later boot")
+	}
+	for i := 0; i < 2; i++ { // every later boot on the old root
+		if got := r.a.Status(); got != otherRootLine {
+			t.Fatalf("status in boot %s: %q", r.act.boot.ID, got)
+		}
+		r.bootOldRoot()
+	}
+	if d := r.a.Digest(); len(d) != 1 || d[0] != otherRootLine {
+		t.Fatalf("digest in a later boot on the old root: %q", d)
+	}
+	if got := r.a.Status(); got != otherRootLine {
+		t.Fatalf("status after the digest: %q", got)
+	}
+	r.bootNewRoot()
+	if got := r.a.Status(); got != "" {
+		t.Fatalf("status once release 1 runs: %q", got)
+	}
+}
+
+// Told in a later boot that runs the release, the digest says it is
+// installed; STATUS is silent there.
+func TestOtherRootDigestOnceTheReleaseRuns(t *testing.T) {
+	r, _ := settleOnOldRoot(t)
+	r.bootNewRoot()
+	if got := r.a.Status(); got != "" {
+		t.Fatalf("status: %q", got)
+	}
+	if d := r.a.Digest(); len(d) != 1 || d[0] != "Update 1 is installed." {
+		t.Fatalf("digest: %q", d)
+	}
+}
+
+// A boot that cannot be read is never taken for the old root: the line
+// says what the box started, so it is shown only when that is known
+// (CH-12). The digest still says what is true either way.
+func TestOtherRootLineNeedsTheBootRead(t *testing.T) {
+	r, _ := settleOnOldRoot(t)
+	r.act.bootedErr = errIO
+	if got := r.a.Status(); got != "" {
+		t.Fatalf("status: %q", got)
+	}
+	if d := r.a.Digest(); len(d) != 1 || d[0] != "Update 1 is installed." {
+		t.Fatalf("digest: %q", d)
+	}
+}
+
+// SR3-4f-r1 (b): after installed_other_root, the next release is admitted
+// on the old root (ASSUMPTIONS A12): refusing it until release 1 boots
+// would hold every later update, security fixes included, until a restart
+// nothing schedules. Its rollback point names the root that ran, so a
+// fallback of it is judged against the old root. The rig's store checked
+// only release 1, so the store refuses to stage release 2; the applier's
+// part is what is pinned: Schedule and Tick pass it to the journal.
+func TestNextReleaseAfterOtherRootIsAdmitted(t *testing.T) {
+	r, _ := settleOnOldRoot(t)
+	r.restart()
+	r.must(r.a.Schedule(r.release(2, true), "a2"))
+	if _, err := r.a.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var next *journal.Status
+	for _, st := range r.intents() {
+		if fmt.Sprint(st.Intent.Params["to"]) == "2" {
+			next = &st
+		}
+	}
+	if next == nil {
+		t.Fatalf("release 2 never reached the journal: %+v", r.intents())
+	}
+	p := next.Intent.Params
+	if fmt.Sprint(p["adoption"]) != "a2" || fmt.Sprint(p["from"]) != "1" || fmt.Sprint(p["from_usr"]) != strings.Repeat(oldHash, 32) {
+		t.Fatalf("rollback point %v", p)
+	}
+	if len(next.Attempts) != 1 || !strings.Contains(next.Attempts[0].Evidence, "checked by another store") {
+		t.Fatalf("not dispatched to the store: %+v", next.Attempts)
+	}
+}
+
 // SR3-4f-1b (SR3-4-f5): Install runs at most twice for one release with
 // no recorded outcome; then the release is refused until the owner
 // retries it. A boot on the old root after an unrecorded Install proves
