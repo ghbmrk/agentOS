@@ -127,6 +127,10 @@ type learnPaths struct {
 	// project quota of its own (RES-4); anything else, with FuzzUser set,
 	// runs no fuzz targets.
 	DiskQuota string
+	// FuzzDiskBytes is the fuzz tree's block quota; zero, as main leaves
+	// it, is fuzzDiskBytes. Only tests set it, to stay under the leaf's
+	// memory.max on a loop-backed file system.
+	FuzzDiskBytes int64
 	// FuzzUser names the unprivileged user fuzz children run as, and
 	// Cgroup the broker's delegated cgroup root, where their leaf goes
 	// beside broker/ (L7-6). main sets both; with FuzzUser set, a box that
@@ -201,7 +205,7 @@ func fuzzJail(p learnPaths) (*loop7.Jail, error) {
 	if err := unswappable(state, uint32(uid), uint32(gid)); err != nil {
 		return nil, err
 	}
-	disk, err := fuzzQuota(p.DiskQuota, state)
+	disk, err := fuzzQuota(p.DiskQuota, state, p.fuzzDisk())
 	if err != nil {
 		return nil, err
 	}
@@ -236,11 +240,20 @@ func unswappable(state string, uid, gid uint32) error {
 	return nil
 }
 
+// fuzzDisk is the fuzz tree's block quota: FuzzDiskBytes, or
+// fuzzDiskBytes when unset.
+func (p learnPaths) fuzzDisk() int64 {
+	if p.FuzzDiskBytes > 0 {
+		return p.FuzzDiskBytes
+	}
+	return fuzzDiskBytes
+}
+
 // fuzzQuota is the jail's disk hook for the fuzz tree at state (RES-4):
 // it tags the whole tree with fuzzProject and sets the project's limits.
 // mode is -disk-quota; with it off, or no project quotas on state's file
 // system, there is no hook and why.
-func fuzzQuota(mode, state string) (func(string) error, error) {
+func fuzzQuota(mode, state string, bytes int64) (func(string) error, error) {
 	if mode != "on" {
 		return nil, fmt.Errorf("-disk-quota=%s: nothing would bound the fuzz user's writes", mode)
 	}
@@ -252,7 +265,7 @@ func fuzzQuota(mode, state string) (func(string) error, error) {
 		if err := fs.Tag(dir, fuzzProject); err != nil {
 			return err
 		}
-		return fs.Limit(dir, fuzzProject, fuzzDiskBytes, fuzzDiskInodes)
+		return fs.Limit(dir, fuzzProject, bytes, fuzzDiskInodes)
 	}, nil
 }
 

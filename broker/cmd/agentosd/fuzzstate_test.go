@@ -67,8 +67,16 @@ func TestTheFuzzTreeHasAProjectOfItsOwn(t *testing.T) {
 	if fuzzProject == 0 || fuzzProject >= 0x41470000 {
 		t.Fatalf("fuzz project %#x may be a machine's", fuzzProject)
 	}
-	if fuzzDiskBytes != 1<<30 || fuzzDiskInodes <= 0 {
-		t.Fatalf("fuzz tree limits %d bytes, %d inodes", fuzzDiskBytes, fuzzDiskInodes)
+	// main leaves FuzzDiskBytes unset, so the box gets the constant.
+	if fuzzDiskBytes != 1<<30 || (learnPaths{}).fuzzDisk() != 1<<30 || fuzzDiskInodes <= 0 {
+		t.Fatalf("fuzz tree limits %d bytes (%d unset), %d inodes", fuzzDiskBytes, (learnPaths{}).fuzzDisk(), fuzzDiskInodes)
+	}
+	b, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "FuzzDiskBytes") {
+		t.Fatal("main.go sets the fuzz tree's quota")
 	}
 }
 
@@ -129,6 +137,10 @@ func TestFuzzJailRefusesAStateTheUserCouldSwap(t *testing.T) {
 // writes past it, with the disk around it left free. A prjquota file
 // system is mounted at the state path for the test.
 func TestAFuzzChildReachesOnlyItsOwnBoundedTree(t *testing.T) {
+	// The test's quota is 256 MiB, under the leaf's memory.max: the loop
+	// device charges its backing file's page cache to the writer's memcg,
+	// so at the box's 1 GiB the leaf's OOM kill would come first (#628).
+	const testDisk = 256 << 20
 	parent := os.Getenv("AGENTOS_CGROUP_PARENT")
 	if os.Geteuid() != 0 || parent == "" {
 		t.Skip("needs root and AGENTOS_CGROUP_PARENT (CI machines job)")
@@ -192,7 +204,7 @@ func TestAFuzzChildReachesOnlyItsOwnBoundedTree(t *testing.T) {
 r=$PWD/reach
 cat ` + roles + ` >/dev/null 2>&1 && echo "roles read" > $r || echo "roles denied" > $r
 chattr -p 0 . >/dev/null 2>&1 && echo "retag done" >> $r || echo "retag $(chattr -p 0 . 2>&1 | grep -o 'Invalid argument' | head -n 1)" >> $r
-f=$(dd if=/dev/zero of=big bs=1M count=1536 oflag=direct 2>&1 >/dev/null; echo "exit $?")
+f=$(dd if=/dev/zero of=big bs=1M count=384 oflag=direct 2>&1 >/dev/null; echo "exit $?")
 f=$(echo "$f" | grep -v 'records\|copied' | tr '\n' ' ')
 s=$(stat -c %s big)
 rm -f big
@@ -205,7 +217,7 @@ exit 0`
 		t.Fatal("release")
 	}
 	dir := t.TempDir()
-	lp := openConfinedLearning(t, dir, learnPaths{Fuzz: release, Loop7: fuzzState, FuzzUser: "nobody", Cgroup: root, DiskQuota: "on"})
+	lp := openConfinedLearning(t, dir, learnPaths{Fuzz: release, Loop7: fuzzState, FuzzUser: "nobody", Cgroup: root, DiskQuota: "on", FuzzDiskBytes: testDisk})
 	if lp.fuzz.Recheck() == fuzzEvery {
 		t.Fatal("no fuzz targets wired")
 	}
@@ -252,8 +264,8 @@ exit 0`
 	if f := said["fill"]; strings.Contains(f, "exit 0") || !strings.Contains(f, "Disk quota exceeded") && !strings.Contains(f, "No space left on device") {
 		t.Errorf("a fill past the quota was not stopped by it: %q", b)
 	}
-	if n, err := strconv.ParseInt(said["size"], 10, 64); err != nil || n > fuzzDiskBytes {
-		t.Errorf("a fuzz child wrote %s bytes past a %d byte quota", said["size"], int64(fuzzDiskBytes))
+	if n, err := strconv.ParseInt(said["size"], 10, 64); err != nil || n > testDisk {
+		t.Errorf("a fuzz child wrote %s bytes past a %d byte quota", said["size"], int64(testDisk))
 	}
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(fuzzState, &st); err != nil || int64(st.Bavail)*st.Bsize < 512<<20 {
