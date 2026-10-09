@@ -493,6 +493,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-6f-2 l1 | Each anchor `policy()` read costs two ECC `CreatePrimary` calls, the handle probes and a salted session under `custody.mu`, on every `Security()`, `InterimAttestation()` and `Stage`; measure the latency on a real TPM at the S1 hardware run (Security 4a on #600, comment 6081396179, point 4) |
 | SR3-6f-2 l2 | `FollowRoot`'s failed `Raise` returns after the interim flag is written and before the root switch, and the owner sees a raw `update: raise the outside-attestor anchor` error; the fork-switch page should say "nothing was switched, try again after unlocking" (UX lens on #600, comment 6081356116, point 4) |
 | SR3-6f-2 l3 | `noteCounterReset` fires once per `counterReset` flag, cleared only by re-trust, so an update-anchor loss after a vault-counter notice adds no second one; fine while both name the same step (UX lens on #600, comment 6081356116, point 5) |
+| SR3-6f-2 l4 | On a PC with no TPM, the 409 for a recorded counter raises the counter-reset notice, which tells the owner to trust this PC again, which that PC cannot do; that case should say the vault expects a security chip this PC lacks (move it back, or restore onto a PC with one) (L3 delta on #600, comment 6082722933) |
 
 ## Reuse candidates
 | ID | Component | Why |

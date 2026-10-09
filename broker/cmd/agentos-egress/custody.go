@@ -866,6 +866,16 @@ func counterReplaced(err error) bool {
 // defineUpdateAnchor makes update counter id on this PC and records it in
 // v, at count 0.
 func defineUpdateAnchor(v *vault.Vault, pc vault.Counter, id []byte) (updateAnchorRecord, error) {
+	rec, err := newUpdateAnchor(pc, id)
+	if err != nil {
+		return updateAnchorRecord{}, err
+	}
+	return rec, recordUpdateAnchor(v, rec)
+}
+
+// newUpdateAnchor makes update counter id on this PC, with its count now
+// as the base, without recording it.
+func newUpdateAnchor(pc vault.Counter, id []byte) (updateAnchorRecord, error) {
 	// 16 random bytes as hex: no zero byte, which go-tpm would cut the
 	// auth value at (tpmseal T7), as the vault's own counter does.
 	a := make([]byte, 16)
@@ -885,17 +895,22 @@ func defineUpdateAnchor(v *vault.Vault, pc vault.Counter, id []byte) (updateAnch
 	if !bytes.Equal(id, updateAnchorID) {
 		rec.ID = id
 	}
+	return rec, nil
+}
+
+// recordUpdateAnchor keeps rec in v.
+func recordUpdateAnchor(v *vault.Vault, rec updateAnchorRecord) error {
 	b, err := json.Marshal(rec)
 	if err != nil {
-		return updateAnchorRecord{}, errInternal
+		return errInternal
 	}
 	if err := v.Put(UpdateAnchorName, KindUpdateAnchor, b); err != nil {
 		if errors.Is(err, vault.ErrRolledBack) {
-			return updateAnchorRecord{}, errRolledBack
+			return errRolledBack
 		}
-		return updateAnchorRecord{}, errInternal
+		return errInternal
 	}
-	return rec, nil
+	return nil
 }
 
 // reanchorUpdate gives this PC a new update counter, raised to 1, when the
@@ -945,8 +960,14 @@ func (c *custody) reanchorUpdate(v *vault.Vault) error {
 		h := sha256.Sum256(append([]byte("agentos update policy "), nonce...))
 		id = h[:]
 	}
-	rec, err := defineUpdateAnchor(v, pc, id)
+	// Raise before recording: a crash between the two leaves the vault
+	// as it was, still "anchor missing", never a record of a counter at its
+	// base, which would read 0 (SR3-6f-2b).
+	rec, err := newUpdateAnchor(pc, id)
 	if err != nil {
+		return err
+	}
+	if err := pc.Increment(rec.Ref, rec.Auth); err != nil {
 		return err
 	}
 	if reanchorCrash != nil {
@@ -954,7 +975,7 @@ func (c *custody) reanchorUpdate(v *vault.Vault) error {
 			return err
 		}
 	}
-	return pc.Increment(rec.Ref, rec.Auth)
+	return recordUpdateAnchor(v, rec)
 }
 
 // reanchorCrash, set only by tests, stops reanchorUpdate between its two
