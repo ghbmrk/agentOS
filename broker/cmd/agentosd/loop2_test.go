@@ -161,3 +161,36 @@ func TestLoop2HeldIsOnlyAPausedGrant(t *testing.T) {
 		}
 	}
 }
+
+type pauseExec struct{ paused []string }
+
+func (x *pauseExec) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
+	x.paused = append(x.paused, in.GrantRef)
+	return journal.Outcome{Result: journal.ResultSucceeded}
+}
+func (x *pauseExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultSucceeded}
+}
+
+// P3-4b LOOP-9 (1): containment works even during STOP. A pause only
+// narrows authority (journal A9), so a stopped engine still dispatches it,
+// and a seeded finding reported after STOP pauses exactly its target.
+func TestLoop2ContainsDuringStop(t *testing.T) {
+	x := &pauseExec{}
+	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{grants.ExecutorName: x},
+		func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c := &loop2Contain{}
+	c.gate.Store(&pauseGateBox{eng})
+	if err := c.Contain(context.Background(), loops.Target{Kind: "grant", Name: "G7"}, "seeded:f1"); err != nil {
+		t.Fatalf("pause during STOP: %v", err)
+	}
+	if len(x.paused) != 1 || x.paused[0] != "G7" {
+		t.Fatalf("paused %q", x.paused)
+	}
+}

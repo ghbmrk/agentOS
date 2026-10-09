@@ -27,7 +27,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | S1 | A1 (G1) | Test kit ready; waits on Mark's hardware |
 | S2 | A1, A3 | Modem SMS and voice; waits on Mark's modems |
 | P2-4-hw | A8 | Real-TPM trusted-host run; risk 14 |
-| P3-4b-1 | A11 (LOOP-9, LOOP-10, LOOP-3) | Loop 2, given a seeded failing security test as a finding, contains it, adds a minimized regression and qualifies a fix; weakening fixes rejected (D-070) |
+| P3-4b-1b | LOOP-9, LOOP-10 | Loop-side follow-ups to #464 before -3/-4 wire `Report`: close findings the tree comes to pass, finding-ID collision, crash resume, wording-scan coverage, config-probe fixes |
+| P3-4b-2b | A11, CHG-2 | Harness follow-ups to #490: evidence check passes with no evidence record; raw held clause whose fields the visible test shares escapes the audit; leaking-adapter control runs on every valid seed |
 | P3-4b-2 | A11 | Qualification harness for A11's loop 2 clause: harness-chosen seed, held-back variants, scripted rejected fixes |
 | P3-4b-5 | LOOP-9 | Model-backed loop 2 fixer answering the §11 fix-candidate request through Loop 1's builder; needs W3-builder-ship |
 | OP9-status | A11 (OP-9) | STATUS names every capability that is off or can't run; owner row, brief to be written |
@@ -195,6 +196,21 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b2c l1 | UX on #427: with no agent, "when it runs again" means the next boot (the agent machine opens only at boot); STATUS's agent line should name that step |
 | W3-forget-b2c l2 | UX on #427: an owed take-back is journaled `succeeded` with evidence `owed: …`; once the digest renders journal outcomes it must not read as done |
 | SR3-2 l1 | UX/Potency on #428 (L3 later point): an authorized intent that never dispatches (held, no executor, fenced) holds its bound place with no age-out; note it in GR31 and let STATUS show it |
+| SR3-2 l2 | Security on #428, point 2: GR7 ("under a bound of 1 the second is asked") overstates, since concurrent `Authorize` calls are not seq-checked and both can be authorized, the second being refused at the dispatch recheck. Safe. Next time GR7 changes, add "or, if both are authorized at once, refused at the recheck" |
+| P2-2a f3 l1 | UX on #423, point 2: an owner who never answers is asked again at every check; after a few lapses the ask could move to the daily digest only (UPD-5) |
+| P2-2a f3 l2 | Potency on #423, point 1: the lapse record is in memory only; persist it with proposals (C9, potency PM4). No release is stranded meanwhile, since Loop 3 re-asks after a restart |
+| SR3-1 f3 | UX on #431: a RESUME refused by a lock race shows "RESUME failed to record. Still stopped."; map `ErrUnauthorized` on /resume to the unlock page, as Approvals and Paused do (CH-11, CH-12). Also L3: the refresh-path check `locks != ses.locks` at `localsrv.go:285` is untested and redundant with `LocalResume`'s commit-point check; remove it or comment it as belt and braces. #431's PR body wrongly says reverting the localsrv read also fails the refresh test |
+| SR3-4 l1 | L3 on #434: a pre-PR rollback point without `ToManifest`, cut after `staged.json` was removed, gets stuck in CommitRelease (a nil exposure while the applier is unwired) |
+| SR3-4 l4 | Delta L3 on #434, A: update the Revisit column of `broker/apply/ASSUMPTIONS.md` A9, and fix `abandonLocked`'s doc comment ("stays pending" is false on the `ErrPolicyMoved` path: Pending is cleared in memory, and only Tick's Resume or New's reset on load persists it) |
+| SR3-4 l5 | Delta L3 on #434, B: pin the Pending reset in `New()` (`apply.go` near line 241) with a restart test; a mutation that removes it survives |
+| SR3-4 l6 | UX on #434: name the ID the owner sent (`UNDO <short ID>`), or both, in the refusal text instead of only the release version. The signed UX and Potency records for #434 keep IDs A9, C25 and U16 (head 215deae); they were renumbered A10, C27 and U17 on merge |
+| SR3-6 l1 | Potency on #430, W5b wiring: a pending security fix dropped by a policy change and scheduled again by Loop 3 should keep its first-scheduled time for A7's 24-hour "no free moment" ask, so a policy change does not reset the clock |
+| SR3-7 l1 | L3 on #429: nested keys still last-win; an `n` check in `anthropic.go` is unreachable |
+| SR3-8 l5 | UX on #432: repeated "lost its output N times; not built again" points at failing storage; if a box-health line ever reads disk faults, this log is one input |
+| W3-forget-b3 rr8 | UX on #425, point 1 (CAP-3, F3): a crash after the owner's YES and before the tombstone saves ends silently; reconcile marks the intent not applied and the owed entry is dropped untold. The owed file holds the date, so "Your task from <date> was not forgotten. Send FORGET to try again." would close it. Pre-existing, narrow window |
+| W3-forget-b3 rr9 | UX on #425, point 2: several owed texts after one restart go as separate texts; if forgets are ever owed in bulk, send one text listing the dates |
+| W3-forget-b3r l1 | L3 on #481: repeated POSTs for one goal submit repeated forget requests, as repeated texted `FORGET n` do; consider one open request per goal |
+| SEC-record-format | Security records: #443 puts `Verdict` on line 1 above the title while other security records put the title first; pick one and add a doclint rule |
 | SR3-8 l1 | L3 re-review on #432, point 1: once `CR-quarantine-prune` is on main, add to it that any pruning of `.quarantine` must keep the per-artifact loss count (e.g. a count file), since C14's `maxRepairs` bound is counted from the copies; fold this line into that row |
 | SR3-8 l2 | L3 re-review on #432, point 2: a job stopped by the repair bound is logged `failed: no result within the allowed attempts`; only the log line says its output was lost repeatedly. Text only |
 | SR3-8 l3 | L3 re-review on #432, point 3: no test pins the `<id>-<12 hex>` name check in `Store.losses`; a bare prefix match passes every test. Unreachable today (fixed-length broker-written IDs) |
@@ -207,8 +223,30 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1-4 l7 | Potency on #436 (considered, not proposed): an accept-and-re-forget flow |
 | OP9-status l1 | L3 on #416: move the OP9-status anchor once its brief exists |
 | OP9-status l2 | L3 on #416: give held-back fields values distinct from the finding's free text |
+| P3-4b-1 l1 | L3 on #464 (agreed with builder): LOOP-3's "unmeasured" state resets on every daemon restart; the brief keeps restart behavior unchanged (scheduler.go:153) |
+| P3-4b-1 l3 | Security 5 on #464: `loopKeys` lists exact paths no tree file or reader uses yet; when a reader of `config/loops.json` or `config/loop2.json` lands it must read exactly those keys, with a test tying the list to the reader |
+| P3-4b-1 l5 | UX on #464: text the owner when a reported finding's fix is adopted, as a passive finding's clearing is texted (secure.go:409-410), so the owner who was texted "Paused grant Y" learns it is safe to resume; P3-4b-1b item 1 texts the cleared close once, and this line is the same text for an adopted fix, so use one wording for both |
+| P3-4b-1 l6 | UX on #464: "I cannot build one yet" does not say whether anything will ever fix the finding; say "no repair is set up on this box yet; an update may bring one" when OP9-status writes its owner lines |
+| P3-4b-1 l7 | UX on #464: LOOP-0 line "check myself against known problems and repair what I can, and check for updates" says "check" twice and "repair" is true only once a fixer is wired; reword when P3-4b-5 lands ("check myself against known problems, repair what I can, and look for updates") |
+| P3-4b-1 l8 | UX on #464: a partial line followed by a wait line repeats the prefix ("Loop 2: partial (…). Loop 2: 1 finding waits…"); join them under one "Loop 2:" when STATUS wording is next touched |
+| P3-4b-1b l1 | Security 2 on #493: the clear check (`LinkedHold`) and the close in `Pass` are not atomic; impact is bounded (the pause and cases stay) and a re-report reopens the finding |
+| P3-4b-1b l2 | L3 on #493: a crash between the owner send and the `Told` save re-sends the owner text (at least once, S21) |
+| P3-4b-1b l3 | UX 2 on #493: no cleared text for a finding that was capped but not paused; take it with P3-4b-1 l5 (same text) |
+| P3-4b-1b l4 | Potency 4 on #493 (A11): when the K-S1 row makes plain config probes live, its brief should recheck that the A11 config seeds still qualify on a box with live plain probes, and take S22's lift if not |
+| W3-forget-b1-4 l8 | L3 on #460 (nit): the appended "Also (#436 …)" clauses in the W3-forget-b1-5, -6 and -7 BOARD cells run on with no separating punctuation; add it when those rows are next edited |
 | SR3-1 f1 | Builder on SR3-1: page deny (`LocalAnswer`), follow and ask-resume check the lock count at the token check only, not where they commit; deny only narrows and the other two only open a request that needs a code, so the race gains no authority |
 | SR3-1 f2 | Builder on SR3-1: a sign-in overlapped by a lock still returns a token, dead on first use; answering with a refusal instead would save the page one round trip |
+| P3-4b-2 l1 | #490: the invalid-seed control assumes seed 0's first clause is padding; derive the padding from the seed when the catalog changes |
+| P3-4b-2 l2 | #490: the assurance/loop2 assumptions sit in the README, not ASSUMPTIONS.md (OPERATING §5); move them when the README is next touched |
+| P3-4b-2 l3 | Security 3 on #490 (H-4): leaks of single array elements and non-canonical JSON escapes (`\/`, `\u0063`) go undetected; verbatim and canonical only |
+| P3-4b-2 l4 | UX 1 on #490: assurance/README.md says a seeded defect is "found"; say "reported" when next touched (LOOP-3 item 8) |
+| P3-4b-2 l5 | UX 2 on #490: `run.py` sets `GOTOOLCHAIN=local`, so an older local Go stops with a go.mod error; add a README line naming the toolchain or `GOTOOLCHAIN=auto` |
+| P3-4b-2 l6 | Potency 2 on #490: no seed in `routing/` or `skills/`; add a routing seed when the catalog is next extended |
+| P3-4b-2 l7 | Potency 3 on #490: `--all` and `--pick` each rebuild and rerun both controls; one invocation that records a pick would halve the CI step |
+| P3-1-rand | `broker/change`: no test asserts that `change.New` draws a fresh 32-byte split key from crypto/rand when `Config.Rand` is nil, or that two fresh pipelines get different keys. Raised by L3 (#491 comment 6073134807) and Security |
+| P3-1-envkey | `broker/change/env_test.go`: `newEnv`'s pinned key is a single `bytes.Reader`, so a second fresh-state pipeline opened with the same cfg would hit EOF. No test does this today (Potency on #491) |
+| P3-4b-2b-held | Fix-input audit (Security #500 1): a held array/object value leaked alone in non-canonical layout passes the audit; H-4's wording needs updating |
+| P3-4b-2b-ctrl | A11 leaking-adapter control (Security #500 2): accepts any audit hit, not only a `held/` hit |
 
 ## Reuse candidates
 | ID | Component | Why |
