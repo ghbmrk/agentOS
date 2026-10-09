@@ -256,3 +256,62 @@ func TestFlapThroughRunProbe(t *testing.T) {
 		}
 	})
 }
+
+// Security round-2 delta 1 on #644: a crash and an oversize input of one
+// target say different "Cleared" lines, so they never share a key. The
+// crash's line is said when it resolves, not held by the oversize, and
+// only a crash the owner heard cleared is texted "It is back".
+func TestACrashLineIsNotHeldByAnOversizeOfItsTarget(t *testing.T) {
+	r := newReportRig(t, nil)
+	crash := fuzzFinding()
+	over := Finding{Check: CheckFuzz, Subject: crash.Subject, Severity: High, Detail: FuzzOversizeDetail}
+	cid := r.report(t, crash).Finding.ID
+	oid := r.report(t, over).Finding.ID
+	before := len(r.texts)
+	r.now = r.now.Add(time.Hour)
+	must(t, r.g.Resolve(cid, Replay{Evidence: crash.Detail, Passed: true}))
+	if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the crash in the check that reads agent requests.") {
+		t.Fatalf("crash resolved while an oversize is open: texts %q", got)
+	}
+	r.reopen(t)
+	r.now = r.now.Add(time.Hour)
+	must(t, r.g.Resolve(oid, Replay{Evidence: over.Detail, Passed: true}))
+	if got := r.texts[before+1:]; len(got) != 1 || !strings.Contains(got[0], "is tested again") || strings.Contains(got[0], "crash") {
+		t.Fatalf("oversize resolved: texts %q", got)
+	}
+	r.now = r.now.Add(time.Hour)
+	if back := r.report(t, crash); !back.Back {
+		t.Fatalf("a crash whose Cleared was said came back: %+v", back)
+	}
+}
+
+// Every distinct owed line is said when its key is released, so a held
+// paused finding's "stays paused" line is not dropped for an unpaused
+// one's (Security 3 on #644, owed half), and an owed record is kept once
+// however often it closes while held (Security round-2 delta 2).
+func TestOwedLinesAreSaidOnceEach(t *testing.T) {
+	r := newReportRig(t, nil)
+	a := withContain(fuzzFinding())
+	b := fuzzFinding()
+	b.Detail = "crash input sha256:ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+	ra := r.report(t, a)
+	idb := r.report(t, b).Finding.ID
+	k := clearedKey(ra)
+	before := len(r.texts)
+	must(t, r.g.Resolve(ra.Finding.ID, Replay{Evidence: a.Detail, Passed: true}))
+	r.now = r.now.Add(25 * time.Hour)
+	ra = r.report(t, a)
+	must(t, r.g.Resolve(ra.Finding.ID, Replay{Evidence: a.Detail, Passed: true}))
+	if n := len(r.g.st.Owed[k]); n != 1 {
+		t.Fatalf("owed %d records for one finding closed twice while held", n)
+	}
+	must(t, r.g.Resolve(idb, Replay{Evidence: b.Detail, Passed: true}))
+	got := clearedTexts(r.texts, before)
+	if len(got) != 1 || strings.Count(got[0], "Cleared:") != 2 ||
+		!strings.Contains(got[0], "Nothing more is needed from you.") || !strings.Contains(got[0], "Pre-allowance G7 stays paused") {
+		t.Fatalf("texts %q, want the unpaused and the paused line once each", got)
+	}
+	if len(r.g.st.Owed) != 0 {
+		t.Fatalf("owed left: %v", r.g.st.Owed)
+	}
+}
