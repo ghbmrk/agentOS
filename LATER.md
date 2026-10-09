@@ -251,6 +251,14 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-4f-1 l5 | UX on #597, L2 (6080675106): `otherRootText` could offer a restart when the installed release is a security fix |
 | SR3-4f-1 l6 | UX on #597, L3 (6080675106): the digest's "installed" wording for the other-root line reads wrong on a later boot |
 | SR3-4f-1 l7 | UX on #597, L4 (6080675106): if `ErrRefused`'s text is ever shown in the digest, it must go through the plain-name map |
+| SR3-4f-2 l1 | Builder on SR3-4f-2: an ID in the applier's `Dropped` that the pipeline refuses for good (the adoption is already `Confirmed`) is called again at every `Tick`; no path drops a confirmed adoption today, but clear it on that refusal |
+| SR3-4f-2 l2 | Builder on SR3-4f-2: the applier's `Retired` list is never pruned (one short ID per drop or withdraw); prune IDs the pipeline reports reverted once that can be asked |
+| SR3-4f-2 l3 | Builder on SR3-4f-2: with a `Withdrawer` set, the digest could offer UNDO on a pending staged line ("I will install it when I am free"); today it offers UNDO only once the image has started (change C27) |
+| SR3-4f-2 l4 | Builder on SR3-4f-2: a `Schedule` refused for a passing reason (`ErrApplying` while another release is in flight) also retires and drops the incoming adoption; the release comes back only through SR3-4f-2-r1 or a newer release |
+| SR3-4f-2 l5 | L3 on #605: the "fails at main" evidence for SR3-4f-2's tests is build failures only (the new API is absent at main); a behavioural at-main failure would need the tests ported to main's API |
+| SR3-4f-2 l6 | Security L1 on #605: guard the applier's `settleLocked` against an ID that `Applying` names, or pin where `ErrPolicyMoved` can come from, so a drop never settles an adoption whose release is being handed over |
+| SR3-4f-2 l7 | UX3 on #605: "I will install it when I am free" is false in the handover window (after `Install`, before the reboot); word that window as "installing" |
+| SR3-4f-2 l8 | UX4 on #605: comments that say a dropped release is "scheduled again under a new adoption" should say "once SR3-4f-2-r1 lands" (fixed in passing in apply.go `New` and the Tick narrowing drop, and ASSUMPTIONS A5 and A9; the `Stager` comment already names r1) |
 | SR3-6 l1 | Potency on #430, W5b wiring: a pending security fix dropped by a policy change and scheduled again by Loop 3 should keep its first-scheduled time for A7's 24-hour "no free moment" ask, so a policy change does not reset the clock |
 | SR3-7 l1 | L3 on #429: nested keys still last-win; an `n` check in `anthropic.go` is unreachable |
 | SR3-7-f1 l1 | Lens on #582 (comment 6079162578), point 4: the latest-first refund of unused attempt holds across buckets is unpinned; a mutation that refunds in another order survives |
