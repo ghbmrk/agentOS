@@ -337,74 +337,133 @@ func (p *TamperProbe) removeSiblings(nonce string) {
 }
 
 // beforeDigestOpen, set only by tests, runs between the walk's Lstat of a
-// regular file and its open: where a guest's swap races the digest.
-var beforeDigestOpen func(path string)
+// regular file or directory and its open, with the target's root and the
+// entry's name under it: where a guest's swap races the digest.
+var beforeDigestOpen func(root, rel string)
 
-// errSwapped is a file that changed between the walk's Lstat and its
-// open: never a pass, since the digest no longer says what was there.
+// errSwapped is an entry that changed between the walk's Lstat and its
+// open, or while the walk read it: never a pass, since the digest no
+// longer says what was there.
 var errSwapped = errors.New("a file changed under the digest")
 
 // treeDigest hashes a file or directory tree: names, types, modes and
-// contents, without following symbolic links, under ctx.
+// contents, under ctx. It follows no symbolic link, at any depth: each
+// directory is read through a handle checked against the walk's Lstat,
+// and its entries are reached through that handle (walkedPath), never
+// by a path a guest could swap a link into (S33).
 func treeDigest(ctx context.Context, root string) ([]byte, error) {
-	if _, err := os.Lstat(root); err != nil {
+	info, err := os.Lstat(root)
+	if err != nil {
 		return nil, err
 	}
 	h := sha256.New()
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(root, path)
-		fmt.Fprintf(h, "%q %v %d\n", rel, info.Mode(), info.Size())
-		switch {
-		case info.Mode()&fs.ModeSymlink != 0:
-			l, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(h, "-> %q\n", l)
-		case info.Mode().IsRegular():
-			return hashFile(ctx, h, path, info)
-		}
-		return nil
-	})
+	err = digestEntry(ctx, h, root, root, ".", info, 0)
 	return h.Sum(nil), err
+}
+
+// maxDigestDepth bounds how deep the digest walks, so a guest's deep
+// nesting cannot hold one handle per level until the broker runs out;
+// deeper fails the round. Real targets are a few levels deep.
+const maxDigestDepth = 64
+
+// digestEntry hashes the entry rel of root, found at path as walked.
+func digestEntry(ctx context.Context, h io.Writer, root, path, rel string, walked fs.FileInfo, depth int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	fmt.Fprintf(h, "%q %v %d\n", rel, walked.Mode(), walked.Size())
+	switch {
+	case walked.Mode()&fs.ModeSymlink != 0:
+		l, err := os.Readlink(path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "-> %q\n", l)
+	case walked.Mode().IsRegular():
+		return hashFile(ctx, h, root, path, rel, walked)
+	case walked.IsDir():
+		return digestDir(ctx, h, root, path, rel, walked, depth)
+	}
+	return nil
+}
+
+// digestDir hashes the directory the walk found at path, read through a
+// handle that must be that directory, its entries in name order. After
+// the read, path must still name it, so a directory swapped while the
+// walk was inside it fails too.
+func digestDir(ctx context.Context, h io.Writer, root, path, rel string, walked fs.FileInfo, depth int) error {
+	if depth >= maxDigestDepth {
+		return errors.New("a tree deeper than the digest walks")
+	}
+	d, err := openWalked(root, path, rel, walked)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	names, err := d.Readdirnames(-1)
+	if err != nil {
+		return err
+	}
+	slices.Sort(names)
+	for _, n := range names {
+		p := walkedPath(d, n)
+		info, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if err := digestEntry(ctx, h, root, p, filepath.Join(rel, n), info, depth+1); err != nil {
+			return err
+		}
+	}
+	if now, err := os.Lstat(path); err != nil || !os.SameFile(now, walked) {
+		return errSwapped
+	}
+	return nil
+}
+
+// walkedPath names entry name of the open directory d through d itself
+// (/proc/self/fd), so resolving it never passes through a path component
+// a guest could have swapped for a link since d was checked.
+func walkedPath(d *os.File, name string) string {
+	return "/proc/self/fd/" + strconv.FormatUint(uint64(d.Fd()), 10) + "/" + name
+}
+
+// openWalked opens the entry the walk found at path without following a
+// link and without blocking (a FIFO), and fails with errSwapped unless it
+// is the same file, of the same type, as walked.
+func openWalked(root, path, rel string, walked fs.FileInfo) (*os.File, error) {
+	if beforeDigestOpen != nil {
+		beforeDigestOpen(root, rel)
+	}
+	// os.OpenFile adds O_CLOEXEC; a link fails with ELOOP.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil && (fi.Mode().Type() != walked.Mode().Type() || !os.SameFile(fi, walked)) {
+		err = errSwapped
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // digestChunk is how much hashFile reads between checks of ctx.
 const digestChunk = 64 << 10
 
-// hashFile hashes the regular file the walk found at path as walked,
-// opened without following a link and without blocking, so a guest that
-// swapped it for a link, a FIFO or a device cannot steer or wedge the
-// read; anything but that same regular file is errSwapped. It reads at
-// most walked's size, in chunks, under ctx, so it ends even while a guest
-// still writes the file.
-func hashFile(ctx context.Context, h io.Writer, path string, walked fs.FileInfo) error {
-	if beforeDigestOpen != nil {
-		beforeDigestOpen(path)
-	}
-	// os.OpenFile adds O_CLOEXEC; a link fails with ELOOP.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+// hashFile hashes the regular file the walk found at path as walked
+// (openWalked), so a guest that swapped it for a link, a FIFO or a device
+// cannot steer or wedge the read. It reads at most walked's size, in
+// chunks, under ctx, so it ends even while a guest still writes the file.
+func hashFile(ctx context.Context, h io.Writer, root, path, rel string, walked fs.FileInfo) error {
+	f, err := openWalked(root, path, rel, walked)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if !fi.Mode().IsRegular() || !os.SameFile(fi, walked) {
-		return errSwapped
-	}
 	r := io.LimitReader(f, walked.Size())
 	buf := make([]byte, digestChunk)
 	for {
