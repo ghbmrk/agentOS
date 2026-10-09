@@ -867,6 +867,15 @@ func (s *Store) outsideListed() (bool, error) {
 	case err != nil:
 		return false, fmt.Errorf("update: read the outside-attestor anchor: %w", err)
 	}
+	if listed && n == 0 {
+		// A record from before the anchor (or an anchor defined after
+		// it): carry it into the anchor, so deleting the file later
+		// changes nothing. The file already answers listed, so a failed
+		// Raise only waits for the next read.
+		if err := s.Anchor.Raise(); err != nil && !errors.Is(err, ErrNoAnchor) {
+			log.Printf("update: raise the outside-attestor anchor: %v", err)
+		}
+	}
 	return listed || n >= 1, nil
 }
 

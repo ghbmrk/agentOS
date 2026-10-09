@@ -209,3 +209,22 @@ type noAnchor struct{}
 
 func (noAnchor) Read() (uint64, error) { return 0, ErrNoAnchor }
 func (noAnchor) Raise() error          { return ErrNoAnchor }
+
+// SR3-6f-2a: a record written before the anchor existed is carried into
+// it at the next read, so deleting the file afterwards changes nothing.
+func TestExistingRecordCarriedIntoAnchor(t *testing.T) {
+	f, box, pinned, _, a := anchoredInterimFix(t)
+	f.store.Anchor = nil
+	listOutside(t, f, pinned)
+	f.store.Anchor = a
+	if a.n != 0 {
+		t.Fatal("setup: the anchor was raised without the store")
+	}
+	if interimCounts(t, f, box, pinned) {
+		t.Fatal("the outside record did not end the interim rule")
+	}
+	f.must(os.Remove(filepath.Join(f.store.Dir, outsideFile)))
+	if interimCounts(t, f, box, pinned) {
+		t.Fatal("a record from before the anchor was not carried into it")
+	}
+}
