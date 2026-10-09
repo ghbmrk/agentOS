@@ -12,6 +12,12 @@ writes them to a trusted-only plant file, and runs the target with:
                       reach (guest files, `canary.py sweep` dumps, protocol
                       transcripts, packet captures)
 The harness scans that directory plus the target's stdout and stderr (logs).
+A target never inherits the harness's environment (#515 Security 2): it gets
+PATH, HOME and TMPDIR set to a scratch directory removed after the round,
+GOTOOLCHAIN=local (no toolchain download), the CANARY_* variables, and the
+parent's value of each variable its registry entry
+names under "env" (only names in TARGET_ENV_ALLOWED; any other is refused at
+load).
 A round is an error, never clean, if the ack is missing or incomplete, the
 surface is empty, the scan budget runs out, or the target exits nonzero.
 Built-in controls (deliberate leaks the scan must catch) run on every pass;
@@ -24,7 +30,8 @@ A round (`canary.py round`) is the scheduled form Loop 2's canary probe runs
 canaries, written as Loop 2 findings JSON. A product target that leaks is a
 High finding about that target, with the grant or executor its registry entry
 names under "contain"; a failed control or a target error is an error, never
-clean.
+clean. A target that leaked and also errored gives both the finding and the
+error (#515 Security 5), and is not listed as checked, so it closes nothing.
 
 Usage:
   canary.py run --targets assurance/canary-targets.json [--rounds N] [--report F]
@@ -94,6 +101,10 @@ DECODED_WINDOW = DECODED_NEEDLE + DECODED_STEP - 1
 CHUNK = 1 << 20
 DEFAULT_MAX_BYTES = 4 << 30
 SKIP_ROOT_DIRS = {"/proc", "/sys", "/dev"}
+DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
+# Parent variables a registry entry may pass on by name (values are never in
+# the registry). The broker's own targets run `go test`.
+TARGET_ENV_ALLOWED = frozenset({"GOCACHE", "GOFLAGS", "GOTOOLCHAIN"})
 MEM_SKIP = ("[vvar]", "[vsyscall]", "[vvar_vclock]")
 MAX_HITS_PER_LOCATION = 20
 
@@ -377,6 +388,21 @@ def _ack_problem(path, cans):
     return "plant ack missing kinds %s" % missing if missing else None
 
 
+def _env_names(target):
+    names = target.get("env", [])
+    if not isinstance(names, list) or not all(isinstance(n, str) and n in TARGET_ENV_ALLOWED for n in names):
+        raise ValueError("%s: env must be a list of names from %s" % (target.get("name"), sorted(TARGET_ENV_ALLOWED)))
+    return names
+
+
+def target_env(target, home, **canary_vars):
+    """The whole environment a target runs with: never the harness's own."""
+    env = {"PATH": os.environ.get("PATH", DEFAULT_PATH), "HOME": home, "TMPDIR": home, "GOTOOLCHAIN": "local"}
+    env.update({n: os.environ[n] for n in _env_names(target) if n in os.environ})
+    env.update(canary_vars)
+    return env
+
+
 def run_target(target, rounds, timeout=600, minted=None, max_bytes=DEFAULT_MAX_BYTES):
     results = []
     for r in range(rounds):
@@ -386,12 +412,13 @@ def run_target(target, rounds, timeout=600, minted=None, max_bytes=DEFAULT_MAX_B
         det = Detector(cans)
         errors = []
         with tempfile.TemporaryDirectory(prefix="canary-trusted-") as trusted, \
-                tempfile.TemporaryDirectory(prefix="canary-surface-") as surface:
+                tempfile.TemporaryDirectory(prefix="canary-surface-") as surface, \
+                tempfile.TemporaryDirectory(prefix="canary-home-") as home:
             plant, ack = pathlib.Path(trusted, "plant.json"), pathlib.Path(trusted, "ack.json")
             fd = os.open(plant, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as f:
                 json.dump({"canaries": [{"kind": c.kind, "value": c.value} for c in cans]}, f)
-            env = dict(os.environ, CANARY_PLANT=str(plant), CANARY_ACK=str(ack), CANARY_SURFACE_DIR=surface)
+            env = target_env(target, home, CANARY_PLANT=str(plant), CANARY_ACK=str(ack), CANARY_SURFACE_DIR=surface)
             try:
                 p = subprocess.run(target["cmd"], env=env, cwd=ROOT, capture_output=True, timeout=timeout)
                 rc, out, err = p.returncode, p.stdout, p.stderr
@@ -455,6 +482,7 @@ def load_registry(path):
                               or not isinstance(c.get("name"), str) or not c["name"]
                               or not isinstance(c.get("label", ""), str) or set(c) - {"kind", "name", "label"}):
             raise ValueError("%s: contain must be {kind: grant|executor, name, label?}" % t.get("name"))
+        _env_names(t)
     return targets
 
 
@@ -514,13 +542,14 @@ def cmd_round(args):
     if not out["errors"]:
         for t in product:
             res = run_target(t, 1, timeout=args.timeout, minted=minted, max_bytes=args.max_bytes)
+            rnd = res["rounds"][0]
             if res["outcome"] == "error":
-                out["errors"].append("%s: %s" % (t["name"], "; ".join(res["rounds"][0]["errors"])))
-                continue
-            out["checked"].append(t["name"])
-            if res["outcome"] == "leak":
+                out["errors"].append("%s: %s" % (t["name"], "; ".join(rnd["errors"])))
+            else:
+                out["checked"].append(t["name"])
+            if rnd["kinds_hit"]:
                 f = {"check": "canary", "subject": t["name"],
-                     "detail": "kinds: " + ", ".join(res["rounds"][0]["kinds_hit"]), "severity": "high"}
+                     "detail": "kinds: " + ", ".join(rnd["kinds_hit"]), "severity": "high"}
                 if t.get("contain"):
                     f["contain"] = t["contain"]
                 out["findings"].append(f)
