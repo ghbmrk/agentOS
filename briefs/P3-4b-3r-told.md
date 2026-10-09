@@ -60,7 +60,7 @@ LOOP-9 (the owner is told, and told when it ends; plain words with a step) and C
 
    The extra "Cleared" is an unsolicited non-urgent text, so it goes through CH-15's pacing and quiet-hours path like any other: it goes through `Notify` with `urgent` false, so the owner channel's CH-15 pacing and quiet hours apply to it downstream. Test that the extra "Cleared" is sent with `urgent` false. Check that the sink `agentosd` wires to `Notify` paces non-urgent loops texts; if it does not, that is a finding (a release row against the sink), not a change here.
 
-   Record the new bound in S39. UX offered a digest-only "Cleared again: …" instead. That is an open lens tension, and OPERATING §4 settles it in the batched screen (`reviews/arbitration/README.md`), not here. The builder builds the text route through CH-15's path, notes the tension on the PR's Findings line as open arbitration, and the screen's record decides; if it picks the digest, requirement 5 becomes the digest-only line.
+   Record the new bound in S39. UX offered a digest-only "Cleared again: …" instead. That is an open lens tension, recorded in `reviews/arbitration/2026-10-09-pr613.md`; OPERATING §4 settles it in the batched screen, not here. The builder builds the text route through CH-15's path, notes the tension on the PR's Findings line as open arbitration, and the screen's record decides; if it picks the digest, requirement 5 becomes the digest-only line.
 
    Tests: the full sequence's texts, in order, through the helper for `Pass` and `CloseTarget`; a third return within `ReText` is untexted.
 6. **LOOP-7's digest lines give a step and do not repeat each other** (3r-text). In loop7 F14's `Digest`:
