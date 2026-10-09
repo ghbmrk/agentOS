@@ -92,6 +92,19 @@ type gated struct {
 
 func newGated(t *testing.T, edit func(*mail.Config)) *gated {
 	t.Helper()
+	return newGatedVia(t, edit, nil)
+}
+
+// adapterAPI is what the gate and the journal call on the adapter.
+type adapterAPI interface {
+	grants.Verifier
+	journal.Executor
+}
+
+// newGatedVia is newGated with the gate and the journal calling the
+// adapter through wrap, when it is not nil.
+func newGatedVia(t *testing.T, edit func(*mail.Config), wrap func(*mail.Adapter) adapterAPI) *gated {
+	t.Helper()
 	var eng *journal.Engine
 	x := newH(t, func(c *mail.Config) {
 		c.InUse = func(action string, since time.Time) []journal.Use {
@@ -102,12 +115,16 @@ func newGated(t *testing.T, edit func(*mail.Config)) *gated {
 			edit(c)
 		}
 	})
+	var api adapterAPI = x.a
+	if wrap != nil {
+		api = wrap(x.a)
+	}
 	g := grants.New(grants.Config{Declared: map[string]map[string]string{"mail": mail.Declared()},
-		Verifiers: map[string]grants.Verifier{"mail": x.a}, LocalUI: true, Now: func() time.Time { return x.now },
+		Verifiers: map[string]grants.Verifier{"mail": api}, LocalUI: true, Now: func() time.Time { return x.now },
 		Isolated: func(m string) bool { return m == "composer" }})
 	own := &ownerFake{reqs: map[string][]owner.Item{}, now: func() time.Time { return x.now }}
 	var err error
-	eng, err = journal.Open(&journal.MemStore{}, g, map[string]journal.Executor{"mail": x.a, grants.ExecutorName: g},
+	eng, err = journal.Open(&journal.MemStore{}, g, map[string]journal.Executor{"mail": api, grants.ExecutorName: g},
 		func(s string) string { return s }, journal.WithClock(func() time.Time { return x.now }))
 	if err != nil {
 		t.Fatal(err)

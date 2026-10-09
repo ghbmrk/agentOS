@@ -214,14 +214,15 @@ type Adapter struct {
 	mu       sync.Mutex
 	reserved map[string]time.Time // organize bound places not yet in the journal
 	over     overAsk              // the open "past today's bound" ask
-	pins     map[string]pin       // by intent: what Escalate last judged (SR3-5-f1)
+	pins     map[string][]pin     // by intent: what Escalate judged since the last Execute (SR3-5-f1)
 	judged   map[string]pin       // by intent and attempt: an unknown attempt's pin, for Reconcile
 }
 
 // pin is what Escalate judged of an organize intent: the message it
 // planned on, the folder the plan moves it to, and whether the call
 // escalated hiding an alert (SR3-5-f1a). Execute acts only on that
-// message, and only hides an alert the judgement escalated.
+// message, only when every judgement since the last Execute agrees on
+// it, and only hides an alert they escalated.
 type pin struct {
 	ref   Ref
 	to    string
@@ -263,7 +264,7 @@ func New(cfg Config) (*Adapter, error) {
 		cfg.Now = time.Now
 	}
 	a := &Adapter{cfg: cfg, self: map[string]bool{addr: true, selfKey(addr): true}, alias: map[string]bool{}, reserved: map[string]time.Time{},
-		pins: map[string]pin{}, judged: map[string]pin{}}
+		pins: map[string][]pin{}, judged: map[string]pin{}}
 	for _, x := range cfg.Aliases {
 		if c, ok := canon(x); ok {
 			a.self[c], a.self[selfKey(c)], a.alias[c] = true, true, true

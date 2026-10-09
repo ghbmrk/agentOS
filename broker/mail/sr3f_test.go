@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
 	"github.com/ghbmrk/agentos/broker/verb"
@@ -174,10 +176,11 @@ func TestExecuteWithoutPinDoesNothing(t *testing.T) {
 	}
 }
 
-// TestRecheckRepinsTheSwappedMessage (SR3-5-f1a recheck, control): an
-// alert swapped in before the dispatch recheck is judged there, escalated
-// to change-account, and that judgement is the one Execute acts on.
-func TestRecheckRepinsTheSwappedMessage(t *testing.T) {
+// TestJudgementsMustAgree (SR3-5-f1a recheck, control): an alert swapped
+// in between the authorize judgement and the dispatch recheck is escalated
+// there, but the two judgements disagree on the message, so Execute acts
+// on neither.
+func TestJudgementsMustAgree(t *testing.T) {
 	x := newH(t, nil)
 	id := x.news(1)
 	in := x.intent(mail.OpArchive, rec(id))
@@ -188,9 +191,92 @@ func TestRecheckRepinsTheSwappedMessage(t *testing.T) {
 	if e, err := x.a.Escalate(ctx, in); err != nil || e.Verb != verb.ChangeAccount {
 		t.Fatalf("recheck: %+v %v", e, err)
 	}
-	x.mustRun2(in, 1)
-	if folder, _, _ := x.srv.Find(id); folder != "Archive" {
-		t.Fatalf("alert in %s after an approved archive", folder)
+	out := x.a.Execute(ctx, in, 1)
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
+		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
+	}
+	if folder, _, _ := x.srv.Find(id); folder != "INBOX" {
+		t.Fatalf("alert in %s", folder)
+	}
+}
+
+// ordered calls the adapter unchanged, running a test's hooks before or
+// after its nth Escalate and before Execute, to order concurrent calls.
+type ordered struct {
+	*mail.Adapter
+	mu        sync.Mutex
+	n         int
+	pre, post map[int]func()
+	exec      func()
+}
+
+func (o *ordered) Escalate(ctx context.Context, in journal.Intent) (grants.Escalation, error) {
+	o.mu.Lock()
+	o.n++
+	pre, post := o.pre[o.n], o.post[o.n]
+	o.mu.Unlock()
+	if pre != nil {
+		pre()
+	}
+	e, err := o.Adapter.Escalate(ctx, in)
+	if post != nil {
+		post()
+	}
+	return e, err
+}
+
+func (o *ordered) Execute(ctx context.Context, in journal.Intent, attempt int) journal.Outcome {
+	if o.exec != nil {
+		o.exec()
+	}
+	return o.Adapter.Execute(ctx, in, attempt)
+}
+
+// TestRefusedRecheckCannotRepinAnAttemptInFlight (SR3-5-f1a race, L3 on
+// #579): through the real gate and journal, dispatch D1 rechecks the
+// newsletter and commits; D2's concurrent recheck, which began before
+// that commit, judges an alert swapped in meanwhile and is refused. D1's
+// attempt, already in flight, must not hide the alert.
+func TestRefusedRecheckCannotRepinAnAttemptInFlight(t *testing.T) {
+	w := &ordered{pre: map[int]func(){}, post: map[int]func(){}}
+	r := newGatedVia(t, nil, func(a *mail.Adapter) adapterAPI { w.Adapter = a; return w })
+	id := r.news(1)
+	in := r.intent(mail.OpArchive, rec(id))
+	in.Machine, in.Label = "agent", "private"
+	if _, err := r.g.Submit(in); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.g.Authorize(ctx, in.ID); st.State != journal.Authorized {
+		t.Fatalf("authorize: %s %q", st.State, st.Permission.Reason)
+	}
+	d1Judged, d1Go := make(chan struct{}), make(chan struct{})
+	d2In, d2Go := make(chan struct{}), make(chan struct{})
+	d1Exec, d1Run := make(chan struct{}), make(chan struct{})
+	w.mu.Lock()
+	w.post[w.n+1] = func() { close(d1Judged); <-d1Go }
+	w.pre[w.n+2] = func() { close(d2In); <-d2Go }
+	w.mu.Unlock()
+	w.exec = func() { close(d1Exec); <-d1Run }
+
+	d1 := make(chan journal.Status)
+	go func() { st, _ := r.g.Dispatch(ctx, in.ID); d1 <- st }()
+	<-d1Judged // D1's recheck judged the newsletter
+	d2 := make(chan journal.Status)
+	go func() { st, _ := r.g.Dispatch(ctx, in.ID); d2 <- st }()
+	<-d2In // D2 is past the journal's dispatchable check, in its recheck
+	close(d1Go)
+	<-d1Exec // D1 committed and is in flight
+	r.swap(id, "INBOX")
+	close(d2Go)
+	if st := <-d2; st.State == journal.Succeeded {
+		t.Fatalf("D2: %s", st.State)
+	}
+	close(d1Run)
+	if st := <-d1; st.State != journal.NotApplied {
+		t.Fatalf("D1: %s %q", st.State, st.Permission.Reason)
+	}
+	if folder, flags, _ := r.srv.Find(id); folder != "INBOX" || len(flags) != 0 {
+		t.Fatalf("alert in %s with %v", folder, flags)
 	}
 }
 

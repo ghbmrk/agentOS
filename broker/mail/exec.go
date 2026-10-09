@@ -69,10 +69,11 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 	case OpDeliver:
 		return a.deliver(ctx, in, attempt, p)
 	}
-	// An organize acts only on the message its last Escalate judged, and
-	// hides an alert only if that judgement escalated it (SR3-5-f1a). The
-	// pin is consumed whatever happens, so another attempt is judged
-	// again by its own dispatch recheck.
+	// An organize acts only when every Escalate since the last Execute
+	// judged the same message and agreed on whether hiding it escalated,
+	// acts only on that message, and hides an alert only if they
+	// escalated it (SR3-5-f1a). The judgements are consumed whatever
+	// happens, so another attempt is judged again by its own recheck.
 	pn, pinned := pin{}, true
 	if o.Verb == verb.Organize {
 		pn, pinned = a.takePin(in.ID)

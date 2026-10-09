@@ -383,6 +383,12 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4b l7 | L3 delta on #548: `loops.tamperNonce` (regexp) in `machine.go` is used only by tests; move it to the test file or use it to check `newTamperNonce`'s output |
 | P3-4b-4b l8 | Security 4a delta 1 on #548 (predates the fix; covered by release row P3-4b-4c-fresh): a probe guest that skips its scripted writes still closes an open tamper finding; if the probe image is ever shared with agent code, closing must need a broker-side write check (a canary the broker plants and verifies through the same mount) |
 | SR3-5-f1 l1 | Delta L3 on #571 (comment 6078264771): a pin is never cleared for an intent that is denied or never dispatched; pins live in memory, so a restart drops them |
+| SR3-5-f1 l2 | L3 on #579 point 3: `Reconcile` drops the judged pin when it returns `Unknown`, so a later `Reconcile` of the same attempt judges without it and stays `Unknown` (fails closed) |
+| SR3-5-f1 l3 | L3 on #579 point 4: the `movedFrom` mutant (always pass) survives the suite; the agreement fix (B1) does not kill it; add a `Reconcile` test where the pinned message is not at the pinned destination |
+| SR3-5-f1 l4 | Security on #579 L1: after a restart, `Reconcile` with no pin reports `Succeeded` for a same-ID non-alert swapped in at the destination state |
+| SR3-5-f1 l5 | Lens on #579 M5: organize `reserved` entries are kept until they age out, so the bound can over-count (fails toward asking) |
+| SR3-5-f1 l6 | Lens on #579 M7: `Escalate` drops every judgement on a planning error, which a mutant that keeps them survives; it fails toward `NotApplied` |
+| SR3-5-f1 l7 | Lens on #579: the undo comment and ASSUMPTIONS M17 wording for validity 0 ("names no message") could say what `Undo` returns |
 
 ## Reuse candidates
 | ID | Component | Why |

@@ -447,9 +447,8 @@ func (a *Adapter) Escalate(ctx context.Context, in journal.Intent) (grants.Escal
 		return grants.Escalation{}, err
 	}
 	e := a.escalate(in, pl, p)
-	// Each call pins what it judged, so the dispatch recheck's judgement
-	// replaces the authorize call's and Execute acts on that one only
-	// (SR3-5-f1a).
+	// Each call adds what it judged to the intent's judgements; Execute
+	// acts only when they all agree (SR3-5-f1a).
 	a.setPin(in.ID, pin{ref: pl.msg.Ref(), to: pl.to, alert: e.Verb == verb.ChangeAccount})
 	return e, nil
 }
@@ -606,24 +605,36 @@ func (a *Adapter) reserve(id string) place {
 	return held
 }
 
-// setPin records what Escalate judged of intent id, replacing an earlier
-// judgement. Pins older than a day are dropped: an intent dispatched
-// later is judged again by its dispatch recheck.
+// setPin adds what Escalate judged of intent id to the judgements made
+// since the last Execute consumed them. Every one is kept, not just the
+// last: a concurrent dispatch's recheck that the gate refuses still pins,
+// and Execute acts only when all of them agree (SR3-5-f1a). Judgements
+// older than a day are dropped: an intent dispatched later is judged
+// again by its dispatch recheck.
 func (a *Adapter) setPin(id string, p pin) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	p.at = a.cfg.Now()
-	for k, x := range a.pins {
-		if x.at.Before(p.at.Add(-dayWindow)) {
+	old := p.at.Add(-dayWindow)
+	for k, xs := range a.pins {
+		kept := xs[:0]
+		for _, x := range xs {
+			if !x.at.Before(old) {
+				kept = append(kept, x)
+			}
+		}
+		if len(kept) == 0 {
 			delete(a.pins, k)
+		} else {
+			a.pins[k] = kept
 		}
 	}
 	for k, x := range a.judged {
-		if x.at.Before(p.at.Add(-dayWindow)) {
+		if x.at.Before(old) {
 			delete(a.judged, k)
 		}
 	}
-	a.pins[id] = p
+	a.pins[id] = append(a.pins[id], p)
 }
 
 func (a *Adapter) dropPin(id string) {
@@ -632,13 +643,25 @@ func (a *Adapter) dropPin(id string) {
 	delete(a.pins, id)
 }
 
-// takePin returns and removes intent id's pin: one Execute consumes it.
+// takePin removes intent id's judgements, so one Execute consumes them,
+// and returns the one they agree on. It reports false when there are
+// none, or when any two differ in the message or in whether they
+// escalated hiding an alert (SR3-5-f1a).
 func (a *Adapter) takePin(id string) (pin, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	p, ok := a.pins[id]
+	xs := a.pins[id]
 	delete(a.pins, id)
-	return p, ok
+	if len(xs) == 0 {
+		return pin{}, false
+	}
+	p := xs[len(xs)-1]
+	for _, x := range xs {
+		if x.ref != p.ref || x.alert != p.alert {
+			return pin{}, false
+		}
+	}
+	return p, true
 }
 
 // keepJudged keeps the pin an attempt ran under when its outcome is
