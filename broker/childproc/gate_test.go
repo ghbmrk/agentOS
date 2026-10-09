@@ -31,14 +31,7 @@ import (
 // go test -c, runs only as a childproc child, so whatever it starts
 // inherits only the checked pairs (#651 Security 4a point 3).
 var exempt = map[string]string{
-	"golang.org/x/sys/unix":    "defines unix.Exec, a wrapper of syscall.Exec; every use of it is gated",
-	"vm/gvisor":                "moves in P3-4b-3r-env-r8b",
-	"modem/at":                 "moves in P3-4b-3r-env-r8b",
-	"browser":                  "moves in P3-4b-3r-env-r8b",
-	"clock":                    "moves in P3-4b-3r-env-r8b",
-	"cmd/agentos-guest-bridge": "moves in P3-4b-3r-env-r8b",
-	"quota/quotatest":          "moves in P3-4b-3r-env-r8b",
-	"tpmseal/swtpm":            "moves in P3-4b-3r-env-r8b",
+	"golang.org/x/sys/unix": "defines unix.Exec, a wrapper of syscall.Exec; every use of it is gated",
 }
 
 // launchers are the selectors, by import path, that start a process
