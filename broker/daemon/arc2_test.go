@@ -83,8 +83,10 @@ var controlPath = map[string][]string{
 	// already linked through modemlink. It wires LOOP-7's fuzz source
 	// (loop7, P3-4b-3a), whose one exec runs release-listed fuzz binaries
 	// (TestAgentosdLinksNoInference's escapeOK); loop7 does not import
-	// sockprobe, whose in-guest dialer stays out of the daemon.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7"},
+	// sockprobe, whose in-guest dialer stays out of the daemon. It replays
+	// the corpus built into the binary through the in-process closed
+	// checks (corpus, P3-4b-4c-corpus), which links no mail code.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -163,6 +165,10 @@ var learningPlane = map[string]struct {
 	// The skill file format without the bridge (P3-6e): Loop 1 decodes
 	// the skills and procedures a builder writes.
 	"skill/format": {nil, forbiddenStd},
+	// LOOP-7's closed checks and the embedded corpus (P3-4b-4c-corpus):
+	// pure data and functions over owner's filters; the mail checks come
+	// in through an interface, so no mail code is linked.
+	"corpus": {[]string{"control", "loops", "owner"}, forbiddenStd},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}

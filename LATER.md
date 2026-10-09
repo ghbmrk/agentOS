@@ -73,6 +73,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W5c | A12 | Clean-room builder in the scheduler |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
+| P3-4b-4c-dedupe | A1 (owner texts; UX on #589 classed it release under §2's stricter rule, for Mark to demote to later if no acceptance test needs it) | `Guard.batch` and the digest repeat one identical line per corpus item, so a weakened check gives the owner ten identical lines |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
@@ -403,7 +404,11 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4d l5 | Potency on #556: the label route's stall under a permissive `labelClass` is bounded at 30 s but its cause (imapsmtp SetFlags) is undiagnosed |
 | P3-4b-4d l6 | L3 on #556: a production `Relay` should report a route timeout as its own error class, not as a generic route failure; P3-4b-4c |
 | P3-4b-4d l7 | L3 on #556: no test pins the `ok` check in the rig's `requested()` (relaxing it survives, since every replayed want is non-empty); add a guest that omits the key if a test needs it |
-| P3-4b-4d l8 | L3 on #556: one over-long vendored corpus item fails every code-filter run (S45); P3-4b-4c decides whether to exclude it at vendoring or report it as its own finding |
+| P3-4b-4c-corpus l1 | UX on #589: the corpus finding text ("My self-test of the code filter failed: …Nothing real was exposed.") gives no next step; add the fuzz and probe lines' "The fix comes with an update." |
+| P3-4b-4c-corpus l2 | UX on #589: the `ProbeFailed` STATUS line ("Loop 2: partial (not run: attack-text tests, failed).") says neither why nor what to do; say the tests did not run, nothing is needed, and when they retry, if that is the true behaviour |
+| P3-4b-4c-corpus l3 | UX on #589: only 2 of the 4 closed checks run in agentosd (agentosd LC-2), and a clean day shows nothing, which can read as "all attack-text tests ran"; say what is not run, for example through `cfg.NotRun`, as for the other unwired probes |
+| P3-4b-4c-corpus l4 | UX and L3 on #589: `tests/test_corpus.py`'s controls only compared the renderer's output to a mutated input; fixed in #589 (the controls now mutate a file and run the real assertion), recorded so the finding is counted |
+| P3-4b-4c-corpus l5 | Potency on #589: a package that links a new package into agentosd needs `broker/daemon/arc2_test.go` in its brief's declared scope; add it to the brief template |
 | P3-4b-4b l4 | L3 5 and UX 2 on #548: the `cpu` finding reads "found no cpu limit" when the finding is "machine weight >= broker weight" (suggested: "an agent machine can take as much CPU as I can"); "I answered slower than my target" and "I stopped an agent machine slower than my target" give no consequence; one wording pass |
 | P3-4b-4b l5 | L3 6 on #548: S34 should say a journal line means "unchanged after attempt", not "refused", since entries rest on the guest having tried |
 | P3-4b-4b l6 | Security 4a and L3 deltas on #548: each round leaves one more `.agentos-tamper-<nonce>` marker file in a directory target that stays writable; bounded by rounds x targets while a High finding is open; cleanup is the owner's remediation |

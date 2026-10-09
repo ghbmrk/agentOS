@@ -62,10 +62,11 @@ func TestARoundRunsThePassThenReportsAFuzzCrash(t *testing.T) {
 		t.Fatal("no fuzz source wired")
 	}
 	// The scheduler runs Loop 2's jobs one at a time, as offered (it
-	// needs an attached daemon to tick, so the jobs are run here).
+	// needs an attached daemon to tick, so the jobs are run here): the
+	// passive pass, the guard's corpus replay, then a fuzz round.
 	ctx := context.Background()
 	var ran []string
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		j, ok := lp.fuzz.Next(ctx, false)
 		if !ok {
 			break
@@ -75,7 +76,7 @@ func TestARoundRunsThePassThenReportsAFuzzCrash(t *testing.T) {
 		}
 		ran = append(ran, j.Name)
 	}
-	if strings.Join(ran, ",") != "passive,fuzz" {
+	if strings.Join(ran, ",") != "passive,probe:corpus,fuzz" {
 		t.Fatalf("jobs %v", ran)
 	}
 	if d := lp.guard.Status(); !strings.Contains(d, "Loop 2: partial") {
@@ -92,6 +93,9 @@ func TestAPreemptedFuzzRoundLeavesNoFinding(t *testing.T) {
 	lp := openFuzzLearning(t, fakeFuzzRelease(t, "sleep 30; "+crashing))
 	if _, err := lp.guard.Pass(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if j, ok := lp.fuzz.Next(context.Background(), false); !ok || j.Name != "probe:corpus" || j.Run(context.Background()).Err != nil {
+		t.Fatalf("job %+v %v", j, ok)
 	}
 	job, ok := lp.fuzz.Next(context.Background(), false)
 	if !ok || job.Name != "fuzz" {

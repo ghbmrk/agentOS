@@ -7,7 +7,6 @@ package corpus
 
 import (
 	"github.com/ghbmrk/agentos/broker/loops"
-	"github.com/ghbmrk/agentos/broker/mail"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -27,15 +26,30 @@ const (
 	LabelPayload      = ""
 )
 
-// Checks are the closed checks of a wired mail adapter and commitment
-// filter, code filter first.
-func Checks(a *mail.Adapter, c owner.Commitments) []loops.ClosedCheck {
+// Mailbox is the mail adapter's two closed checks (*mail.Adapter). It is
+// an interface so a process that holds no adapter links no mail code.
+type Mailbox interface {
+	AlertWording(text string) bool
+	LabelClass(label string) (string, error)
+}
+
+// InProcess are the closed checks a broker process holds without a mail
+// adapter: CH-19's code filter and c's commitment filter, with Checks'
+// names and payloads. agentosd replays the corpus through these (S28).
+func InProcess(c owner.Commitments) []loops.ClosedCheck {
 	return []loops.ClosedCheck{
 		{Name: CodeFilter, Payload: CodePayload, Hit: owner.SecretShaped},
 		{Name: CommitmentFilter, Payload: CommitmentPayload, Hit: func(s string) bool { return c.Match(s) != "" }},
-		{Name: AlertPatterns, Payload: AlertPayload, Hit: a.AlertWording},
+	}
+}
+
+// Checks are the closed checks of a wired mail adapter and commitment
+// filter, code filter first.
+func Checks(a Mailbox, c owner.Commitments) []loops.ClosedCheck {
+	return append(InProcess(c),
+		loops.ClosedCheck{Name: AlertPatterns, Payload: AlertPayload, Hit: func(s string) bool { return a.AlertWording(s) }},
 		// A label must name a configured label or the agent's namespace;
 		// an attack text as a label name is refused.
-		{Name: LabelCheck, Payload: LabelPayload, Hit: func(s string) bool { _, err := a.LabelClass(s); return err != nil }},
-	}
+		loops.ClosedCheck{Name: LabelCheck, Payload: LabelPayload, Hit: func(s string) bool { _, err := a.LabelClass(s); return err != nil }},
+	)
 }
