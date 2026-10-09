@@ -109,6 +109,8 @@ Release findings on SR3-5-f1 (#579): L3 point 2 and Security round 1 R1 (delete 
 | SR3-5-f2b judged | An alert archive the owner approved ends `Unknown` (lossy store), `InUse` lists it; after 25 h and another intent's `Escalate`, `Reconcile` is `Succeeded`. | At main the kept pin is dropped, so `Reconcile` sees an unpinned hidden alert and returns `Unknown`. |
 | SR3-5-f2b nil hook | With `InUse` nil: `Escalate`, 25 h, swap, another `Escalate`, `Execute` is `NotApplied`. | At main the judgement expires. |
 | SR3-5-f2b control (settled expires) | An `InUse` that lists nothing: a judgement older than 24 h is dropped, so a later recheck alone lets `Execute` run. | Mutant: never expire. |
+| SR3-5-f2b delete in flight (round 1, L3 B1) | For both `mail.delete` and `mail.report_spam`, with an `InUse` that lists only that intent under its own action: `Escalate` a newsletter; 25 h later swap in a same-ID alert and `Escalate` again; `Execute` is `NotApplied` and the alert stays in INBOX. | Mutant: `expire` builds its live set from `verb.Organize` actions only (the trash or spam judgement expires and the alert is trashed). |
+| SR3-5-f2a bound (round 1, Security R2) | With a daily limit of 1: rechecks of trash and spam effects on an alert return no escalation and no error; the next archive is neither asked nor held. | Mutants: a delete goes through the organize judgement; a delete reserves a place in the bound. |
 
 **Controls that must keep passing.** All of `broker/mail`, including the delete uses in `organize_test.go` and `watch_test.go`, and the stale-queue tests in `gate_test.go`.
 
@@ -131,3 +133,4 @@ Release findings on SR3-5-f1 (#579): L3 point 2 and Security round 1 R1 (delete 
 - `Execute` now takes the judgements of every effect that reaches the organize path (all of them are organize or delete-remote), so the `verb.Organize` guard on the check is gone; `keepJudged` and `Reconcile` stay organize-only.
 - The kept-pin map is keyed by `attemptKey{id, attempt}` so expiry can ask whether the intent is in use.
 - ASSUMPTIONS M16 updated and M18 added.
+- Round 1 (#616): two tests added, production code unchanged. The delete-in-flight test kills the organize-only live-set mutant; the bound test kills both delete-through-the-organize-judgement mutants.

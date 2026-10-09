@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
 	"github.com/ghbmrk/agentos/broker/verb"
@@ -188,5 +189,56 @@ func TestSettledJudgementsExpire(t *testing.T) {
 	x.mustRun2(in, 1)
 	if folder, _, _ := x.srv.Find(id); folder != "Archive" {
 		t.Fatalf("archive put it in %s", folder)
+	}
+}
+
+// TestExpiryKeepsTheJudgementOfADeleteInFlight (SR3-5-f2b delete, L3 B1 on
+// #616): a trash or spam intent the journal still holds a day after its
+// recheck keeps that judgement when a later recheck of a same-ID alert
+// runs expiry, so the two disagree and the alert is not acted on.
+func TestExpiryKeepsTheJudgementOfADeleteInFlight(t *testing.T) {
+	for _, op := range []string{mail.OpDelete, mail.OpReportSpam} {
+		t.Run(op, func(t *testing.T) {
+			var held []journal.Use
+			x := newH(t, func(c *mail.Config) {
+				c.InUse = func(action string, _ time.Time) []journal.Use {
+					if action == op {
+						return held
+					}
+					return nil
+				}
+			})
+			id := x.news(1)
+			in := x.intent(op, rec(id))
+			held = []journal.Use{{Intent: in, Started: true}}
+			if _, err := x.a.Escalate(ctx, in); err != nil {
+				t.Fatal(err)
+			}
+			x.now = x.now.Add(25 * time.Hour)
+			x.swap(id, "INBOX")
+			if _, err := x.a.Escalate(ctx, in); err != nil {
+				t.Fatal(err)
+			}
+			changed(t, x.a.Execute(ctx, in, 1))
+			if folder, _, _ := x.srv.Find(id); folder != "INBOX" {
+				t.Fatalf("alert in %s", folder)
+			}
+		})
+	}
+}
+
+// TestDeleteTakesNoPlaceInTheBound (SR3-5-f2a bound, Security R2 on #616):
+// the recheck of a trash or spam effect, even of an alert, asks nothing of
+// its own and takes no place in the daily organize bound.
+func TestDeleteTakesNoPlaceInTheBound(t *testing.T) {
+	x := newH(t, func(c *mail.Config) { c.DailyLimit, c.DailyCeiling = 1, 2 })
+	x.deliver("INBOX", msg{id: "<al@x.example>", from: "someone@x.example", to: me, subject: "New sign-in", body: "x"})
+	for _, op := range []string{mail.OpDelete, mail.OpReportSpam, mail.OpDelete} {
+		if e, err := x.a.Escalate(ctx, x.intent(op, rec("<al@x.example>"))); err != nil || e != (grants.Escalation{}) {
+			t.Fatalf("%s recheck: %+v %v", op, e, err)
+		}
+	}
+	if e, err := x.a.Escalate(ctx, x.intent(mail.OpArchive, rec(x.news(1)))); err != nil || e.Ask || e.Held {
+		t.Fatalf("first organize: %+v %v", e, err)
 	}
 }
