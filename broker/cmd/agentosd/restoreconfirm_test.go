@@ -128,7 +128,7 @@ func TestHeldRestoreHeaderNamesItsCase(t *testing.T) {
 		head, _, _ := strings.Cut(text, "\n")
 		heads[c.name] = head
 	}
-	if !strings.Contains(heads["unanchored"], "new PC") || !strings.Contains(heads["unanchored"], "can't check") {
+	if !strings.Contains(heads["unanchored"], "this PC") || !strings.Contains(heads["unanchored"], "can't check") {
 		t.Fatalf("unanchored header: %q", heads["unanchored"])
 	}
 	if !strings.Contains(heads["missing"], "before") || !strings.Contains(heads["missing"], "forget list") {
