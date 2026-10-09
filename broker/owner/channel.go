@@ -650,6 +650,9 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 	if _, code := splitCode(text); code != "" {
 		return c.dropLocked(now), true
 	}
+	if n, ok := parseName(text); ok && n.code != "" {
+		return c.dropLocked(now), true
+	}
 	return route{}, false
 }
 

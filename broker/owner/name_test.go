@@ -176,6 +176,30 @@ func TestNameConfirmationAfterTheSessionLockedNeedsAStrongCode(t *testing.T) {
 	}
 }
 
+// TestNameCodeInChallengeModeIsDropped: in challenge mode a NAME with a
+// code of any accepted length (6 to 8 digits) is dropped like any other
+// code outside the challenge: ignored, not counted (CH-11, A14).
+func TestNameCodeInChallengeModeIsDropped(t *testing.T) {
+	r := named(t)
+	r.unlock()
+	if m := nameCodeRe.FindStringSubmatch(r.say("NAME Dave Smith")); m == nil {
+		t.Fatal("no pending rename")
+	}
+	r.ch.codes.st.Challenged = true
+	wrong := len(r.ch.codes.st.Wrong)
+	for _, in := range []string{"NAME 123456", "NAME 1234567", "NAME 12345678"} {
+		if got := r.say(in); strings.HasPrefix(got, "Wrong code") {
+			t.Errorf("%s: checked: %q", in, got)
+		}
+		if n := len(r.ch.codes.st.Wrong); n != wrong {
+			t.Errorf("%s: wrong count %d, want %d", in, n, wrong)
+		}
+	}
+	if n := r.ch.Name(); n != "" {
+		t.Fatalf("renamed: %q", n)
+	}
+}
+
 // TestNameCheckRefusesBeforeAnyCode: a name failing CH-21's check is
 // refused in fixed wording, locked or not, and nothing is held.
 func TestNameCheckRefusesBeforeAnyCode(t *testing.T) {
