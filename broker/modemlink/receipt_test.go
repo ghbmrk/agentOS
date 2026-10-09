@@ -95,6 +95,32 @@ func TestSendReceiptTimeoutAfterHandIsUnknown(t *testing.T) {
 }
 
 // REQ: OP-2 (W5-Db DB-3)
+// The first timer fires while the item is queued, but the outbox takes it
+// before the timeout path gets mu: it was handed, so the receipt is unknown.
+// Pins the under-mu queued check (L3 #1, Security F1 on #573).
+func TestSendReceiptTimeoutRacingHandIsUnknown(t *testing.T) {
+	l := quick(t)
+	done := receiptAsync(l, "Digest.")
+	for {
+		l.mu.Lock()
+		if len(l.queue) == 1 {
+			break
+		}
+		l.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond) // SendWait passes; deliver blocks on mu
+	it := l.queue[0]                   // what outbox does under mu
+	l.queue = l.queue[1:]
+	l.out[it.ID] = it
+	close(it.handed)
+	l.mu.Unlock()
+	if got := <-done; got.r.Outcome != ReceiptUnknown || got.r.Evidence != it.ID {
+		t.Fatalf("handed text reported %+v", got)
+	}
+}
+
+// REQ: OP-2 (W5-Db DB-3)
 // CodeRecipient is the bridge refusing the item before any modem call (see
 // TestRecipientCodeOnlyBeforeModemSend); every other failure code may follow
 // a modem attempt, so it proves nothing.

@@ -206,8 +206,9 @@ func TestSenderFinishFailureReopensUnknownNotResent(t *testing.T) {
 	ack(t, q, b)
 	tr := &fakeTransport{outcome: TransportAccepted, evidence: "item-1"}
 	tr.during = func() { st.fail = true }
-	if _, err = sender(t, q, tr).Send(context.Background(), b.ID); !errors.Is(err, ErrRecovery) {
-		t.Fatal(err)
+	// The transport accepted, but the lost finish makes the outcome unknown.
+	if out, err := sender(t, q, tr).Send(context.Background(), b.ID); !errors.Is(err, ErrRecovery) || out != OutcomeUnknown {
+		t.Fatal(out, err)
 	}
 	st.fail = false
 	q2, err := New(st, limits)
