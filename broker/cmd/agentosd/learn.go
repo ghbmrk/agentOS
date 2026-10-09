@@ -7,13 +7,17 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/budget"
+	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
@@ -112,6 +116,12 @@ type learnPaths struct {
 	// Loop7 is LOOP-7's state: each target's corpus with the crash inputs
 	// found on this box, and the fuzz engine's cache.
 	Loop7 string
+	// FuzzUser names the unprivileged user fuzz children run as, and
+	// Cgroup the broker's delegated cgroup root, where their leaf goes
+	// beside broker/ (L7-6). main sets both; with FuzzUser set, a box that
+	// cannot confine the children runs no fuzz targets. Tests that leave
+	// FuzzUser empty run children unconfined.
+	FuzzUser, Cgroup string
 }
 
 // LOOP-7's fuzz rounds (P3-4b-3a, loop7 F1-F2): one job per fuzzEvery,
@@ -122,21 +132,70 @@ const (
 	fuzzRelease = "/usr/lib/agentos/fuzz"
 	fuzzEvery   = 30 * time.Minute
 	fuzzTime    = 30 * time.Second
+	fuzzUser    = "agentos-fuzz"
 )
 
-// fuzzTargets are the release's fuzz targets, or none when it ships none.
-func fuzzTargets(p learnPaths) []loop7.Target {
+// fuzzLimits are the fuzz children's cgroup leaf (L7-6): 1 GiB and 256
+// tasks, checked against the HW-4 floor in ASSUMPTIONS, and the lowest
+// CPU and I/O weight in use (budget's browser and pool), below the
+// broker's. memory.high is the hard limit, so a runaway input is
+// OOM-killed rather than throttled into a hang, and memory.oom.group
+// stays off (Component, not Child): the kernel kills the fuzz worker that
+// grew, and the engine around it lives to store the input that did it.
+var fuzzLimits = cgroup.Limits{MaxBytes: 1 << 30, HighBytes: 1 << 30, Pids: 256, CPUWeight: budget.PoolWeight, IOWeight: budget.PoolWeight}
+
+// fuzzJail confines fuzz children (L7-6): their own leaf under p.Cgroup,
+// p.FuzzUser, no network, and p.Loop7 given to that user. Nil without a
+// FuzzUser (tests).
+func fuzzJail(p learnPaths) (*loop7.Jail, error) {
+	if p.FuzzUser == "" {
+		return nil, nil
+	}
+	if p.Cgroup == "" {
+		return nil, errors.New("no delegated cgroup for the fuzz leaf")
+	}
+	u, err := user.Lookup(p.FuzzUser)
+	if err != nil {
+		return nil, err
+	}
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	leaf, err := (&cgroup.Group{Path: p.Cgroup}).Component("fuzz", fuzzLimits)
+	if err != nil {
+		return nil, err
+	}
+	j := &loop7.Jail{Leaf: leaf.Path, UID: uint32(uid), GID: uint32(gid)}
+	if err := j.Own(p.Loop7); err != nil {
+		return nil, err
+	}
+	return j, nil
+}
+
+// fuzzTargets are the release's fuzz targets and their jail, or none when
+// it ships none or they cannot be confined.
+func fuzzTargets(p learnPaths) ([]loop7.Target, *loop7.Jail) {
 	if p.Fuzz == "" || p.Loop7 == "" {
-		return nil
+		return nil, nil
 	}
 	ts, err := loop7.Load(p.Fuzz, p.Loop7)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return nil, nil
 	} else if err != nil {
 		log.Printf("loop7: no fuzz rounds: %v", err)
-		return nil
+		return nil, nil
 	}
-	return ts
+	j, err := fuzzJail(p)
+	if err != nil {
+		log.Printf("loop7: no fuzz rounds: children cannot be confined: %v", err)
+		return nil, nil
+	}
+	return ts, j
 }
 
 // openLearning opens the learning plane and wires it into the daemon's
@@ -247,10 +306,12 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	// fuzz rounds in spare capacity, whose crashes the guard reports
 	// (LOOP-9). The socket probe stays off until P3-4b-3f picks its
 	// machine.
+	fuzzTs, jail := fuzzTargets(p)
 	if l.fuzz, err = loop7.New(loop7.Config{
 		Inner:    l.guard,
 		Report:   l.guard,
-		Targets:  fuzzTargets(p),
+		Targets:  fuzzTs,
+		Jail:     jail,
 		Release:  p.Fuzz,
 		FuzzTime: fuzzTime,
 		Every:    fuzzEvery,

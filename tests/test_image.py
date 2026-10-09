@@ -649,5 +649,30 @@ class FuzzManifestTest(unittest.TestCase):
         self.assertIn('"$FUZZ/corpus/$pkg/$name"', b)
 
 
+class FuzzConfineTest(unittest.TestCase):
+    # REQ: LOOP-1, LOOP-7
+    # P3-4b-3r-confine requirement 2: fuzz children run as an unprivileged system user the image
+    # creates; it owns LOOP-7's state and reaches it through the broker's 0700 state directory by an
+    # ACL entry granting search only. The user is the one agentosd looks up.
+
+    def test_the_image_creates_the_fuzz_user(self):
+        lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-fuzz.conf").read_text().splitlines()
+        users = [l.split() for l in lines if l.strip() and not l.startswith("#")]
+        self.assertEqual([u[:3] for u in users], [["u", "agentos-fuzz", "-"]])
+        learn = (ROOT / "broker/cmd/agentosd/learn.go").read_text()
+        self.assertRegex(learn, r'fuzzUser\s*=\s*"agentos-fuzz"')
+
+    def test_the_fuzz_user_owns_its_state_and_only_traverses_the_broker_s(self):
+        lines = [l.split() for l in (MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf").read_text().splitlines()
+                 if l.strip() and not l.startswith("#")]
+        self.assertIn(["d", "/var/lib/agentos", "0700", "root", "root", "-"], lines)
+        self.assertIn(["d", "/var/lib/agentos/loop7", "0700", "agentos-fuzz", "agentos-fuzz", "-"], lines)
+        acl = [l for l in lines if l[0].startswith("a") and l[1] == "/var/lib/agentos"]
+        self.assertEqual(acl, [["a+", "/var/lib/agentos", "-", "-", "-", "-", "u:agentos-fuzz:--x"]])
+        # Nothing else in the broker's state is given to the fuzz user.
+        others = [l for l in lines if "agentos-fuzz" in " ".join(l) and l[1] not in ("/var/lib/agentos", "/var/lib/agentos/loop7")]
+        self.assertEqual(others, [])
+
+
 if __name__ == "__main__":
     unittest.main()

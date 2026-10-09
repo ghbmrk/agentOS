@@ -87,6 +87,14 @@ type Config struct {
 	// CacheDir holds the fuzz engine's generated corpus and each child's
 	// scratch directory.
 	CacheDir string
+	// CacheCap bounds one package's generated corpus (CacheDir/fuzz/<pkg>)
+	// and CacheTotal the whole of CacheDir/fuzz; each fuzz step prunes the
+	// oldest entries past them first (F14). Defaults 64 MiB and 512 MiB.
+	CacheCap, CacheTotal int64
+	// Jail confines every child; agentosd's wiring sets it (L7-6). Nil
+	// (tests, dev builds) runs children as the daemon's own user, group
+	// and network.
+	Jail *Jail
 	// Probe and Trail run the socket probe and read the journal; both or
 	// neither.
 	Probe ProbeRun
@@ -130,6 +138,15 @@ func New(cfg Config) (*Source, error) {
 	}
 	if len(cfg.Targets) > 0 && cfg.CacheDir == "" {
 		return nil, errors.New("loop7: fuzz targets need a CacheDir")
+	}
+	if cfg.Jail != nil && cfg.Jail.UID == 0 {
+		return nil, errors.New("loop7: a jail needs an unprivileged user")
+	}
+	if cfg.CacheCap <= 0 {
+		cfg.CacheCap = 64 << 20
+	}
+	if cfg.CacheTotal <= 0 {
+		cfg.CacheTotal = 512 << 20
 	}
 	if cfg.FuzzTime <= 0 {
 		cfg.FuzzTime = 30 * time.Second
@@ -337,6 +354,9 @@ func (s *Source) Fuzz(ctx context.Context, t Target) (int, error) {
 	if err != nil || n > 0 || ctx.Err() != nil {
 		return n, err
 	}
+	if err := s.prune(t.Pkg); err != nil {
+		return 0, fmt.Errorf("loop7: pruning the fuzz cache: %w", err)
+	}
 	fctx, cancel := context.WithTimeout(ctx, s.cfg.FuzzTime+s.cfg.ReplayTime)
 	out, err := s.run(fctx, t, "-test.run=^$", "-test.fuzz=^"+t.Name+"$",
 		"-test.fuzztime="+s.cfg.FuzzTime.String(), "-test.parallel=1",
@@ -507,6 +527,8 @@ const waitDelay = 200 * time.Millisecond
 // daemon's environment (#515 Security 2), and runs in its own process
 // group, which cancelling kills whole: the fuzz engine runs workers as
 // children, and a job must yield within the preemption target (LOOP-1).
+// With a Jail, the child also starts as its user in an empty network
+// namespace, inside its cgroup leaf (F2, F7).
 func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, error) {
 	if err := released(s.cfg.Release, t.Binary); err != nil {
 		return nil, err
@@ -524,13 +546,152 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 		return nil, err
 	}
 	defer os.RemoveAll(scratch)
+	attr := &syscall.SysProcAttr{Setpgid: true}
+	if j := s.cfg.Jail; j != nil {
+		if err := os.Chown(scratch, int(j.UID), int(j.GID)); err != nil {
+			return nil, err
+		}
+		leaf, err := j.attr(attr)
+		if err != nil {
+			return nil, err
+		}
+		if leaf != nil {
+			defer leaf.Close()
+		}
+	}
 	cmd := exec.CommandContext(ctx, t.Binary, args...)
 	cmd.Dir = t.Dir
 	cmd.Env = childEnv(scratch)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = attr
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = waitDelay
 	return cmd.CombinedOutput()
+}
+
+// Jail confines fuzz children (P3-4b-3r-confine; F2, F7): a decoder bug
+// a fuzz input reaches runs as an unprivileged user with no capabilities
+// and no network, and a child that blows memory or forks is stopped by
+// its own cgroup leaf, never by the broker's.
+type Jail struct {
+	// Leaf is the cgroup v2 leaf each child starts in, through
+	// CLONE_INTO_CGROUP (SysProcAttr.CgroupFD), so no child runs a moment
+	// in the broker's group. agentosd always sets it (L7-6); empty starts
+	// children in the daemon's group.
+	Leaf string
+	// UID and GID are the user children run as, with no supplementary
+	// groups: setting a non-zero UID from root clears every capability
+	// across exec, and no ambient capability is raised. UID 0 is refused.
+	UID, GID uint32
+}
+
+// attr sets the jail on a child's attributes; the returned leaf, if any,
+// must stay open until the child has started.
+func (j *Jail) attr(a *syscall.SysProcAttr) (*os.File, error) {
+	a.Credential = &syscall.Credential{Uid: j.UID, Gid: j.GID, Groups: []uint32{}}
+	// An empty network namespace: only a loopback device, which is down.
+	a.Cloneflags = syscall.CLONE_NEWNET
+	if j.Leaf == "" {
+		return nil, nil
+	}
+	leaf, err := os.Open(j.Leaf)
+	if err != nil {
+		return nil, err
+	}
+	a.UseCgroupFD, a.CgroupFD = true, int(leaf.Fd())
+	return leaf, nil
+}
+
+// Own gives the state tree at dir to the jail's user, which the children
+// write their crash inputs and cache into (F9). It runs at start-up,
+// before any child, so a tree written by root before the jail stays
+// readable. It never follows a link, and leaves a file with more than one
+// link alone, so nothing a child planted can hand it a file from outside.
+func (j *Jail) Own(dir string) error {
+	return filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok || d.Type()&os.ModeSymlink != 0 || (fi.Mode().IsRegular() && st.Nlink > 1) {
+			return nil
+		}
+		if st.Uid == j.UID && st.Gid == j.GID {
+			return nil
+		}
+		return os.Lchown(p, int(j.UID), int(j.GID))
+	})
+}
+
+// cached is one file of the fuzz engine's generated corpus.
+type cached struct {
+	path string
+	size int64
+	mod  time.Time
+}
+
+// prune keeps the fuzz cache within its caps before pkg's fuzz step
+// (F14): pkg's own entries (CacheDir/fuzz/<pkg>/Fuzz*, so not a nested
+// package's) to CacheCap, then the whole cache to CacheTotal, removing
+// the oldest first. It walks only CacheDir/fuzz: crash inputs live in the
+// targets' testdata, which is evidence and never pruned (F3, F9).
+func (s *Source) prune(pkg string) error {
+	root := filepath.Join(s.cfg.CacheDir, "fuzz")
+	own := filepath.Join(root, filepath.FromSlash(pkg))
+	var mine, all []cached
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		c := cached{p, fi.Size(), fi.ModTime()}
+		all = append(all, c)
+		if rel, err := filepath.Rel(own, p); err == nil && fuzzName.MatchString(strings.Split(rel, string(filepath.Separator))[0]) {
+			mine = append(mine, c)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	gone := map[string]bool{}
+	trim := func(cs []cached, limit int64) error {
+		sort.Slice(cs, func(i, k int) bool { return cs[i].mod.Before(cs[k].mod) })
+		var total int64
+		for _, c := range cs {
+			if !gone[c.path] {
+				total += c.size
+			}
+		}
+		for _, c := range cs {
+			if total <= limit {
+				break
+			}
+			if gone[c.path] {
+				continue
+			}
+			if err := os.Remove(c.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			gone[c.path], total = true, total-c.size
+		}
+		return nil
+	}
+	if err := trim(mine, s.cfg.CacheCap); err != nil {
+		return err
+	}
+	return trim(all, s.cfg.CacheTotal)
 }
 
 // childEnv is all of a child's environment: a fixed PATH, HOME and TMPDIR

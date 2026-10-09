@@ -143,7 +143,11 @@ jobs:
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             AGENTOS_REQUIRE_QUOTA=1 \
-            go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery ./cleanroom
+            go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery ./cleanroom ./loop7
+          # Fuzz children's leaf, user and network (P3-4b-3r-confine).
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
+            go test -count=1 -v -run '^TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound$' ./cmd/agentosd
           # Per-machine disk quotas on a prjquota file system (RES-4, SR2-3).
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd
