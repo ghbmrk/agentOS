@@ -43,8 +43,8 @@ func newH(t *testing.T, edit func(*mail.Config)) *h {
 	x.cfg = mail.Config{Account: "mail", Address: me, Store: st, AuthServ: "mx.example.test",
 		SecuritySenders: []string{"security@provider.example"}, Folders: []string{"Receipts"},
 		Labels: []string{"Family"}, Shared: []string{"Team"}, Retention: []string{"Legal"},
-		Authorized: func(string, time.Time) []journal.Intent { return nil },
-		Now:        func() time.Time { return x.now }}
+		InUse: func(string, time.Time) []journal.Use { return nil },
+		Now:   func() time.Time { return x.now }}
 	srv.AddFolder("Receipts", "")
 	srv.AddFolder("Team", "")
 	srv.AddFolder("Legal", "")
@@ -99,9 +99,21 @@ func (x *h) intent(action string, params map[string]any, recips ...string) journ
 		Params: params, Recipients: recips, Executor: "mail"}
 }
 
+// run executes in as the journal does after the gate: the dispatch
+// recheck's Escalate (which pins what it judged), then Execute.
 func (x *h) run(in journal.Intent) journal.Outcome {
 	x.t.Helper()
+	x.a.Escalate(ctx, in)
 	return x.a.Execute(ctx, in, 1)
+}
+
+// uses wraps intents as the journal's places in use.
+func uses(xs []journal.Intent) []journal.Use {
+	out := make([]journal.Use, len(xs))
+	for i, x := range xs {
+		out[i] = journal.Use{Intent: x}
+	}
+	return out
 }
 
 func (x *h) mustRun(in journal.Intent) journal.Outcome {
