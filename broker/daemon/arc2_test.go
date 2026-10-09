@@ -40,8 +40,9 @@ var controlPath = map[string][]string{
 	"localsrv": {"localapi", "owner", "sockets"},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
-	// Verifier interface.
-	"grants": {"journal", "owner", "reversible", "verb"},
+	// Verifier interface. Its refusals' guest text is guesterr's (SR2-3j),
+	// which imports nothing beyond the standard library.
+	"grants": {"guesterr", "journal", "owner", "reversible", "verb"},
 	"verb":   {},
 	// Reversible forms (REV-3) are declarations the gate validates: pure
 	// data, held to the control path's rules.
@@ -72,8 +73,28 @@ var controlPath = map[string][]string{
 	// It serves the worker-machine tools (workers, CAP-8) on the live guest
 	// plane. It opens the machines' disk quotas (quota, RES-4); quota
 	// imports golang.org/x/sys/unix, so like clock it is held by
-	// TestAgentosdLinksNoInference through netOK.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink"},
+	// TestAgentosdLinksNoInference through netOK. It hands the modem
+	// link's state to the page's socket as a localapi.Line (P2-2w d2a).
+	// It changes where updates come from (follow, OSS-10): the follow
+	// executor over the update store, already linked through change, and
+	// the page's root summary (localapi) the daemon serves. A held restore
+	// (W3-forget-b1-7) serves the bridge's ops itself, hears its state
+	// report (bridgeproto) and checks its texts fit (modem); both are
+	// already linked through modemlink. It wires LOOP-7's fuzz source
+	// (loop7, P3-4b-3a), whose one exec runs release-listed fuzz binaries
+	// (TestAgentosdLinksNoInference's escapeOK); loop7 does not import
+	// sockprobe, whose in-guest dialer stays out of the daemon. It replays
+	// the corpus built into the binary through the in-process closed
+	// checks (corpus, P3-4b-4c-corpus), which links no mail code. It sends
+	// the daily digest (W5-Dc) from its queue (digestqueue), fitted to one
+	// owner text as Inform fits it (control). It binds the owner's mail
+	// account (SR3-mail-w2): the mail adapter (mail, which judges organize
+	// by verb) over the vault process's mail socket (mail/mailsock), so the
+	// credential and the IMAP and SMTP clients stay in agentos-egress (M1);
+	// mail imports golang.org/x/text, so like clock it has no entry below
+	// and is held by TestAgentosdLinksNoInference, which holds mailsock to
+	// the unix dial modelroute makes.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control", "mail", "mail/mailsock", "verb"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -91,7 +112,7 @@ var machinePlane = map[string]struct {
 }{
 	"vm":         {[]string{"admission", "cgroup", "vm/overlay", "quota"}, forbiddenStd},
 	"vm/overlay": {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
-	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
+	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota", "childproc"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 }
 
 // The guest plane serves each machine's ARC-6 socket (P1-7). STOP,
@@ -103,7 +124,7 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"guest": {[]string{"guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
 	// modelroute forwards to the vault process over its Unix socket and
 	// reports usage to the meter; never the vault or the proxy. It
@@ -122,7 +143,7 @@ var guestPlane = map[string]struct {
 	// beyond the in-process hashing embedder (DEP-1).
 	"recall":     {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	"events":     {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
-	"recalltool": {[]string{"recall", "events", "journal"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"recalltool": {[]string{"recall", "events", "journal", "guesterr"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	// Loop 1's model-backed builder (W3-builder) serves each builder
 	// machine its own socket, as replay does: the brief, one candidate,
 	// and the metered model route; no executors, no network clients.
@@ -130,10 +151,13 @@ var guestPlane = map[string]struct {
 	// Worker machines (CAP-8): served to guests as tools over the machine
 	// manager; no journal, no executors, no network clients, no processes
 	// (commands run through vm/gvisor's runsc exec).
-	"workers": {[]string{"admission", "vm", "vm/overlay"}, forbiddenStd},
+	"workers": {[]string{"admission", "vm", "vm/overlay", "guesterr"}, forbiddenStd},
 	// Agents' questions to the owner (P3-8, W9): served to guests and
 	// answered from the owner channel, through hooks the wiring passes.
-	"question": {nil, forbiddenStd},
+	"question": {[]string{"guesterr"}, forbiddenStd},
+	// The one filter on what a tool's error shows the guest (SR2-3g):
+	// fixed text passes, anything else is a ref and a broker-log line.
+	"guesterr": {nil, forbiddenStd},
 }
 
 // The learning plane (W3; arbitrator, adopting potency PW1 on #56): the
@@ -149,6 +173,13 @@ var learningPlane = map[string]struct {
 	// The skill file format without the bridge (P3-6e): Loop 1 decodes
 	// the skills and procedures a builder writes.
 	"skill/format": {nil, forbiddenStd},
+	// The daily digest's queue (W5-Db): durable batches and a send gate,
+	// standard library only (W5-Dc).
+	"digestqueue": {nil, forbiddenStd},
+	// LOOP-7's closed checks and the embedded corpus (P3-4b-4c-corpus):
+	// pure data and functions over owner's filters; the mail checks come
+	// in through an interface, so no mail code is linked.
+	"corpus": {[]string{"control", "loops", "owner"}, forbiddenStd},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
@@ -159,6 +190,7 @@ var stdExceptions = map[string][]string{
 	"sockets":      {"net", "syscall"}, // Unix listeners, SO_PEERCRED, flock
 	"cmd/agentosd": {"syscall"},        // signal numbers for shutdown
 	"journal":      {"syscall"},        // flock on the journal file
+	"loops":        {"syscall"},        // O_NOFOLLOW, O_NONBLOCK for the tamper digest (P3-4b-4c-nofollow)
 }
 
 // Never anywhere in the control path's transitive dependencies.
@@ -177,7 +209,7 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
 	for pkg, rule := range learningPlane {
-		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+		checkImports(t, pkg, rule.allowed, rule.forbid, stdExceptions[pkg])
 	}
 }
 
@@ -190,7 +222,12 @@ func TestDaemonLinksNoCredentialCustody(t *testing.T) {
 		t.Fatalf("go list: %v", err)
 	}
 	for _, dep := range strings.Fields(string(out)) {
-		if dep == module+"vault" || dep == module+"egress" || dep == module+"tpmseal" {
+		// mail/imapsmtp holds the mailbox credential's clients, and with
+		// net/smtp sends mail; both run in agentos-egress behind the mail
+		// socket (SR3-mail-w2, M1). crypto/tls and net/http are linked
+		// through modelroute's unix-socket client (TestAgentosdLinks-
+		// NoInference holds every dial to "unix").
+		if dep == module+"vault" || dep == module+"egress" || dep == module+"tpmseal" || dep == module+"mail/imapsmtp" || dep == "net/smtp" {
 			t.Errorf("agentosd links %s", dep)
 		}
 	}

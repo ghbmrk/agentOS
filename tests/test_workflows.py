@@ -49,6 +49,19 @@ class WorkflowTest(unittest.TestCase):
                 if action.startswith("actions/checkout@"):
                     self.assertRegex(step, r"persist-credentials:\s*false", f"{f.name}: {step}")
 
+    def test_fuzz_runs_go_through_fuzzrun_and_never_by_duration(self):
+        # P1-4-flake-ci (REQ: LOOP-7): a duration -fuzztime can end in the fuzz coordinator's
+        # deadline race ("context deadline exceeded", no input), so no workflow passes one,
+        # and every `go test ... -fuzz` runs through tools/fuzzrun.py, which counts and caps.
+        for f in self.files():
+            text = f.read_text()
+            for m in re.finditer(r"-fuzztime[ =]+(\S+)", text):
+                self.assertRegex(m.group(1), r"^\d+x$", f"{f.name}: -fuzztime {m.group(1)}")
+            for m in re.finditer(r"go test\b[^\n]*(?:\\\n[^\n]*)*", text):
+                self.assertNotRegex(m.group(0), r"-fuzz\b", f"{f.name}: go test -fuzz outside fuzzrun")
+        for name in ("ci.yml", "soak.yml"):
+            self.assertIn("tools/fuzzrun.py", (WORKFLOWS / name).read_text(), name)
+
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
         self.assertEqual(list(steps(sample)), [("actions/checkout@v4", "      - uses: actions/checkout@v4\n        with:\n          x: 1")])
