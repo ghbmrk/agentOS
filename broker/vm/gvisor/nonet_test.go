@@ -54,9 +54,23 @@ func TestAGuestCannotDial(t *testing.T) {
 	if !netns {
 		t.Fatal("bundle has no private network namespace")
 	}
+	r := &Runtime{Bin: "runsc", StateDir: dir}
+	for sub, image := range map[string]string{"run": "", "restore": filepath.Join(dir, "image")} {
+		args := r.launchArgs(l, image)
+		// A flag before the subcommand is a global flag runsc applies.
+		if args[0] != sub {
+			t.Fatalf("%s: runsc gets %q before the subcommand", sub, args[0])
+		}
+		noNetwork(t, r.argv(args...))
+	}
+}
+
+// noNetwork fails unless runsc argv args leaves the guest without a
+// network and cannot be overridden from the bundle.
+func noNetwork(t *testing.T, args []string) {
+	t.Helper()
 	// runsc parses flags with Go's flag package: the last --network wins,
 	// in either the --network=x or the --network x form.
-	args := (&Runtime{Bin: "runsc", StateDir: dir}).argv("run")
 	network := ""
 	for i, a := range args {
 		if name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "="); strings.HasPrefix(a, "-") && name == "allow-flag-override" {
