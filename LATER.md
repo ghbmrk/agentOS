@@ -220,6 +220,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b1-4 l5 | #436 (ASSUMPTIONS Q1): leftover decoy variance across different stale backups |
 | W3-forget-b1-4 l6 | UX on #436: a shorter "replies" line in the confirmation text |
 | W3-forget-b1-4 l7 | Potency on #436 (considered, not proposed): an accept-and-re-forget flow |
+| W3-forget-b1-4 l9 | UX on #436 (point 3): reword the forget-log-missing question ("Since this backup on <date>, …") once W3-forget-b1-6 has the missing case carry an authentic copy (coordinator, 2026-10-09) |
 | OP9-status l1 | L3 on #416: move the OP9-status anchor once its brief exists |
 | OP9-status l2 | L3 on #416: give held-back fields values distinct from the finding's free text |
 | P3-4b-1 l1 | L3 on #464 (agreed with builder): LOOP-3's "unmeasured" state resets on every daemon restart; the brief keeps restart behavior unchanged (scheduler.go:153) |
@@ -228,7 +229,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-1 l6 | UX on #464: "I cannot build one yet" does not say whether anything will ever fix the finding; say "no repair is set up on this box yet; an update may bring one" when OP9-status writes its owner lines |
 | P3-4b-1 l7 | UX on #464: LOOP-0 line "check myself against known problems and repair what I can, and check for updates" says "check" twice and "repair" is true only once a fixer is wired; reword when P3-4b-5 lands ("check myself against known problems, repair what I can, and look for updates") |
 | P3-4b-1 l8 | UX on #464: a partial line followed by a wait line repeats the prefix ("Loop 2: partial (…). Loop 2: 1 finding waits…"); join them under one "Loop 2:" when STATUS wording is next touched |
-| W3-forget-b1-4 l8 | L3 on #460 (nit): the appended "Also (#436 …)" clauses in the W3-forget-b1-5, -6 and -7 BOARD cells run on with no separating punctuation; add it when those rows are next edited |
 | SR3-1 f1 | Builder on SR3-1: page deny (`LocalAnswer`), follow and ask-resume check the lock count at the token check only, not where they commit; deny only narrows and the other two only open a request that needs a code, so the race gains no authority |
 | SR3-1 f2 | Builder on SR3-1: a sign-in overlapped by a lock still returns a token, dead on first use; answering with a refusal instead would save the page one round trip |
 | P3-4b-2 l1 | #490: the invalid-seed control assumes seed 0's first clause is padding; derive the padding from the seed when the catalog changes |
