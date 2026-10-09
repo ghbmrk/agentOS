@@ -258,7 +258,7 @@ const modelProbeEvery = time.Minute
 
 // modelProbe says whether the model route answers: a dial of the vault
 // process's model socket, at most once a minute. A dial cannot tell "no
-// model grant" from "unreachable" (ASSUMPTIONS, Capability lines 5).
+// model grant" from "unreachable" (ASSUMPTIONS S8).
 type modelProbe struct {
 	socket string
 	now    func() time.Time
