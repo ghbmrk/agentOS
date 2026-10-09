@@ -32,6 +32,13 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | DEP-6-r1 | [depaudit](briefs/DEP-8.md): `_subordinate`/`_id_maps` treat a range whose start is below max(100000, `SUB_UID_MIN`/`SUB_GID_MIN`), that holds any uid or gid NSS knows (`getpwall`/`getgrall` plus a lookup of the mapped id; the runner's own included), or that overlaps another owner's line, as no usable range, so `sandbox_available()` fails with a remedy text that states the same rules (release, tier A, DEP-3a, D13; Security re-sign on #568 point 2 and on a68e912 point 1) | DEP-6, DEP-7 | building (#596) |
 | DEP-8-r1 | [depaudit](briefs/DEP-8.md#dep-8-r1): an NSS failure (`getpwall()`/`getgrall()` raising, or `getpwuid_r`/`getgrgid_r` returning EIO or EAGAIN) gets its own remedy, "fix the NSS source, then retry", through a distinct exception subclass as `UnparsableLine` does, not "replace it"; a test asserts the remedy text, not only the reason (release, tier A, DEP-8e; UX lens on #596 point 1, comment 6080618700) | DEP-6-r1 | building (#608) |
 | CODEX-1 | [Intake of Codex drafts for implementation](briefs/CODEX-1.md) | — | in review (C; records only) |
+| CONV-1 | Convergence rules: release test, `recheck`, tooling and depth rule, idle limit, Mark queue ([D-085](decisions/D-085.md)) | — | in review (C; docs only) |
+| CONV-0 | [Convergence measures, daily metrics, ledger staleness](briefs/CONV-0.md) | CONV-1 | queued (C) |
+| CONV-2 | [Re-audit open BOARD rows against the release test](briefs/CONV-2.md) | CONV-1 | queued (C) |
+| CONV-3 | [Triage the open PR inventory](briefs/CONV-3.md) | CONV-1 | queued (C; closes nothing without Mark) |
+| CONV-4 | [One batched spec diff, then scope freeze](briefs/CONV-4.md) | — | queued (B; Mark approves) |
+| CONV-5 | [Triage the 24 uncovered requirement IDs](briefs/CONV-5.md) | — | queued (C) |
+| CONV-6 | [Turn recurring finding kinds into checks](briefs/CONV-6.md) | CONV-1 | queued (tier per check) |
 | CI-SOAK-f1 | [Fixtures independent of umask and tmpfs](briefs/CI-SOAK-f1.md) | — | merged (8c49dc5; #563) |
 | H8 | [Deterministic split entropy for change fixtures](briefs/H8.md) | — | merged (9358360; #564) |
 | H6 | [A10 trial collector](briefs/H6.md) | — | merged (464736c; #561) |

@@ -10,7 +10,7 @@ A recurring review of what AgentOS can do for its owner: leverage, reach, autono
 
 ## In the lens screen
 
-Tier A PRs get a Potency pass in the lens screen; tier B PRs get Potency as part of the combined pass. Each run asks the question below of the PR's diff. Verdicts go to `reviews/potency/YYYY-MM-DD-pr<N>.md` (combined passes to `reviews/combined/`), in the L3 format of docs/OPERATING.md §4.
+Tier A PRs get a Potency pass in the lens screen; tier B PRs get Potency as part of the combined pass. On assurance tooling, where the UX pass does not run (D-085), this pass also owns any message or exit status that could let a failure read as a pass. Each run asks the question below of the PR's diff. Verdicts go to `reviews/potency/YYYY-MM-DD-pr<N>.md` (combined passes to `reviews/combined/`), in the L3 format of docs/OPERATING.md §4.
 
 ## Checks that replaced findings
 
