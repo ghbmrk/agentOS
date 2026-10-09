@@ -123,6 +123,11 @@ type Config struct {
 	// that run as not evaluated (replay.Evaluator.OverPriceCeiling).
 	// Evaluation requires it: without it every call answers 503.
 	OverCeiling func(machine string)
+	// Retries is the most attempts past the first the owner's rule lets
+	// a call spend (Spare.Retries), read on each call, so it must not
+	// block. The meter holds no more than that, nor MaxRetries. Nil, or
+	// a negative answer (unknown), holds MaxRetries (SR3-7-f2).
+	Retries func() int
 }
 
 // Forward returns the guest plane's Model function: one handler per
@@ -185,9 +190,15 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 				pr.Out.Header.Set(HeaderLabel, label)
 				// The meter holds each attempt past the first before the
 				// vault process may send it; what is not spent is
-				// refunded when the call settles.
-				n := 0
-				for n < MaxRetries && meter.Another(pr.In.Context()) {
+				// refunded when the call settles. It holds none the owner's
+				// rule cannot spend (SR3-7-f2).
+				n, most := 0, MaxRetries
+				if cfg.Retries != nil {
+					if r := cfg.Retries(); r >= 0 {
+						most = min(r, MaxRetries)
+					}
+				}
+				for n < most && meter.Another(pr.In.Context()) {
 					n++
 				}
 				pr.Out.Header.Set(HeaderAttempts, strconv.Itoa(n))
