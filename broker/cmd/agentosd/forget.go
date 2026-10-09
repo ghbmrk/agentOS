@@ -136,6 +136,9 @@ type ownerForget struct {
 	learned func(goal string) int
 	// forget is learning.forgetTask: tombstone first, then every store.
 	forget func(goal string) error
+	// digest, if set, purges the goal from the digest queue (CAP-3,
+	// W5-Dc); a send in flight refuses it, so the forget stays owed.
+	digest func(ref string) error
 	// forgotten reports a goal's tombstone (forgotten.has).
 	forgotten func(goal string) bool
 	gate      atomic.Pointer[pauseGateBox]
@@ -484,7 +487,7 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	if owedErr != nil {
 		log.Printf("forget: done text not kept for a restart: %v", owedErr)
 	}
-	err := f.forget(goal)
+	err := f.forgetAll(goal)
 	switch {
 	case err == nil:
 		back := f.agentBackWithoutAsking(ctx, in.ID)
@@ -509,6 +512,20 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	logged := f.logForget(goal, time.Time{}, false)
 	go f.retry(context.WithoutCancel(ctx), goal, since, undone, owedErr == nil, logged)
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgetting; retrying"}
+}
+
+// forgetAll is forget, then the digest queue's purge.
+func (f *ownerForget) forgetAll(goal string) error {
+	if err := f.forget(goal); err != nil {
+		return err
+	}
+	if f.digest == nil {
+		return nil
+	}
+	if err := f.digest(goal); err != nil {
+		return fmt.Errorf("digest: %w", err)
+	}
+	return nil
 }
 
 // retry forgets goal again with backoff until every save holds, saying
@@ -538,7 +555,7 @@ func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, u
 		if !logged {
 			logged = f.logForget(goal, time.Time{}, false)
 		}
-		err := f.forget(goal)
+		err := f.forgetAll(goal)
 		if err == nil {
 			f.done(ctx, goal, forgetDone(undone, false, logged), owedForget{Since: since, Undone: undone, Logged: logged})
 			return

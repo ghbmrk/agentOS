@@ -114,6 +114,42 @@ quiet-hours, pacing, reservation, disclosure and authority checks separately.
   that snapshot (validate accepts an expired batch whose snapshot the ledger has
   since moved past). Non-expired batches keep OP-1 idempotence and ErrConflict.
 
+## W5-Dc wiring (agentosd)
+
+- Storage: queue.json and digest-sources.json under -digest (default
+  /var/lib/agentos/digest, created 0700) through change.FileStore. No digest
+  runs without -modem-bridge; the queue opens on the first tick, never at
+  construction, so a failed open is a STATUS line, not a crash loop.
+- Digest time: provisional 08:00 box-local (SG-2, W5-Dc-r2). One daily step
+  per calendar day after 08:00; a box started later sends that day's digest at
+  once. Days are counted from the box clock; a clock moved back never sends a
+  second digest for a day already done (LastDay is persisted).
+- Attempts (W5-Dc-r4): a NotSent costs one attempt. Ready batches are retried
+  every 30 minutes, so a batch gets 48 tries over its own day and 48 over its
+  late day; MaxAttempts is 96, and a line-down or full-queue outage under 24
+  hours cannot exhaust a batch.
+- Limits: MaxBatches 128, MaxSnapshots 16, MaxAttempts 96, MaxBytes 8 MiB.
+- Sources: "day" (generation = days since epoch, its fixed line only when no
+  other source is pending) and "digest-status" (one line per surfaced
+  batch not yet carried by an accepted digest, at most 3 per digest; its carried
+  map is persisted, so a line is carried once unless its carrier itself turns
+  unknown). DIG-1 owns the other sources.
+- Transport: the adapter keeps only Receipt.Evidence (the bridge's item ID or
+  fixed tag); the recipient number and text never reach the queue. An
+  unrecognised receipt outcome is Unknown with no evidence.
+- Render refuses (NotSent "render-failed") a digest over control.MaxText; it
+  never cuts one. Bounding the sources' total length is DIG-1's.
+- Outage (DC-8, provisional, SG-3): when Collect fails and the queue no longer
+  reads, one fixed line through owner.Inform from the daily step only, at most
+  once per box-local day, never retried; the STATUS line stays while the queue
+  is down. The daily step's LastDay is persisted, so a restart does not repeat
+  it; if the state store fails too, only the in-memory latch holds and a
+  restart may send the line again that day.
+- Forget (CAP-3): ownerForget calls the queue's Forget for the item reference
+  after its own forget; ErrInFlight (a Sending or Unknown batch holds it)
+  leaves the forget owed on the existing retry path. The start-up tombstone
+  replay does not call it yet (release row).
+
 ## Remaining integration packages
 
 - Source adapters: change/owner/question notices with persisted generations and
