@@ -59,7 +59,7 @@ func (a *SocketAnchor) Raise() error {
 }
 
 func (a *SocketAnchor) do(method, path string) (AnchorState, error) {
-	req, err := http.NewRequest(method, "http://agentos-egress"+path, nil) // over the Unix socket
+	req, err := http.NewRequest(method, "http://egress.localhost"+path, nil) // over the Unix socket
 	if err != nil {
 		return AnchorState{}, err
 	}
