@@ -150,7 +150,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-4b-3c | [Owner text for LOOP-7 findings: a "Cleared" text for every texted finding, plain words with no Go identifiers, urgent only when the text names a step, the real recheck cadence; takes rows 3d and 3e and 4c's UX items and lens check (#523 UX 1–3, #515 UX 1–2)](briefs/P3-4b-3c.md) | P3-4b-3 | queued (tier A declared) |
 | P3-4b-3d | No Go identifiers in owner text; every urgent alert names a step (#523 UX 2) | P3-4b-3a | dropped (merged into P3-4b-3c) |
 | P3-4b-3e | Correct the "I recheck it every round" wait wording (#523 UX 3) | P3-4b-3a | dropped (merged into P3-4b-3c) |
-| P3-4b-3f | [Socket probe wired on a machine whose journal is the probe's own, so `Journaled` raises no false High on a busy machine; takes row 3g. Open question for Mark: dedicated probe machine (recommended), idle live machines, or per-effect attribution (#523 Potency 1, 3; L3 point 2)](briefs/P3-4b-3f.md) | P3-4b-3a | queued (owner decision) |
+| P3-4b-3f | [Socket probe wired on a machine whose journal is the probe's own, so `Journaled` raises no false High on a busy machine; takes row 3g. Open question for Mark: dedicated probe machine (recommended), idle live machines, or per-effect attribution (#523 Potency 1, 3; L3 point 2)](briefs/P3-4b-3f.md) | P3-4b-3a, P3-4b-3c | queued (owner decision) |
 | P3-4b-3g | Live-agent intents in `Journaled` (#523 L3 release point 2) | P3-4b-3a | dropped (merged into P3-4b-3f) |
 | P3-5 | [Loop 3, maintenance, as a scheduler Source](briefs/P3-5.md) | P3-2, P4-3 | merged (4672fe8; broker/maintain) |
 | P3-3 | [Recall index and event bus](briefs/P3-3.md) | P1-1, P1-2 | merged (5980098; broker/recall) |
