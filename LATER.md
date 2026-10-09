@@ -412,8 +412,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | P3-4b-4c-tamper l2 | UX 2 on #584: STATUS lines are third person ("Loop 2: ...") across loops; existing wording |
 | P3-4b-4c-tamper l3 | L3 4 on #584: `removeSiblings` ignores errors and `os.Stat`s through a symlink to choose the directory; log failed removals and use `Lstat` |
 | P3-4b-4c-tamper l4 | L3 5 and Potency 3 on #584: the gVisor test's control is the machine's whole upper layer; P3-4b-4c's wiring test should use a dedicated control mount and pin sibling removal |
-| P3-4b-4c-tamper l5 | Security 4 on #584: `lastMachine` checks only the last round (X, Y, X passes) and trusts the ID the wiring gives; P3-4b-4c should pass a handle the broker mints when it creates the machine from the signed image |
-| P3-4b-4c-tamper l6 | Security 5 on #584: a nil `Quiesce` is allowed silently (false Highs from broker writes, never false clears); have the wiring refuse a target it writes without `Quiesce`, or log it |
 | SR3-5-f1 l1 | Delta L3 on #571 (comment 6078264771): a pin is never cleared for an intent that is denied or never dispatched; pins live in memory, so a restart drops them |
 | SR3-2-f-page-sum | `Decide`'s page confirmation compares `d.Sum` with `ItemSum(w.base)`, not the item the page showed; safe only while noted asks are never `local`. Compare against `w.item`, or pin that local asks carry no note, when the area is next touched (Security 4a on #581, comment 6078904256; also L3 6078880234) |
 | SR3-2-f-started-wording | With 1 queued and 1 started under `PerDay: 2` the owner sees `1 earlier send still queued`, not the bound; consider a form such as `1 of 2 today still queued` (UX lens on #581, comment 6078894198) |

@@ -426,6 +426,39 @@ func TestAReadOnlyTargetGivesNoFinding(t *testing.T) {
 	}
 }
 
+// LOOP-7 positive control, fail closed (#584 L3 3, delta L3 1): a control
+// the broker cannot read after the round (here its parent became a file,
+// ENOTDIR) fails the round instead of counting as changed; a removed
+// control still counts as changed.
+func TestAnUnreadableControlFailsTheRound(t *testing.T) {
+	var x *tamperRig
+	x = newTamperRig(t, func(string, []string) error {
+		parent := filepath.Dir(x.control)
+		if err := os.RemoveAll(parent); err != nil {
+			return err
+		}
+		return os.WriteFile(parent, []byte("not a directory"), 0o600)
+	})
+	x.control = filepath.Join(x.dir, "mounts", "probe")
+	if err := os.MkdirAll(x.control, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	x.probe.Control.Path = x.control
+	x.idle = true
+	if _, err := x.probe.Run(context.Background()); err == nil {
+		t.Fatal("an unreadable control passed the round")
+	}
+	if len(x.notes) != 0 {
+		t.Fatalf("journaled %v", x.notes)
+	}
+
+	x = newTamperRig(t, func(string, []string) error { return os.RemoveAll(x.control) })
+	x.idle = true
+	if _, err := x.probe.Run(context.Background()); err != nil {
+		t.Fatalf("a removed control: %v", err)
+	}
+}
+
 // LOOP-7 broker writes beside a file target (#584 L3 1): a broker write of
 // another entry in a file target's directory during the round (a temp
 // file, a journal) is not tamper, though Quiesce holds only the target's
