@@ -64,9 +64,41 @@ func TestGroupedCodesRemoved(t *testing.T) {
 // Hyphenated words and dates, whose parts differ in length, are not codes.
 func TestHyphenatedTextKept(t *testing.T) {
 	sc := NewScrubber(nil)
-	for _, in := range []string{"a well-known-thing", "state-of-the-art", "2026-10-07", "INV-2026-0042", "follow-up", "Jean-Pierre-Rampal", "blue-fish-tanks"} {
+	for _, in := range []string{"a well-known-thing", "state-of-the-art", "2026-10-07", "INV-2026-0042", "follow-up", "Jean-Pierre-Rampal", "blue-fish-tanks",
+		"rapid-fire-test", "stop-start-stop", "data-sets-ready"} {
 		if out := sc.Scrub(in); out != in {
 			t.Fatalf("over-scrubbed: %q -> %q", in, out)
+		}
+	}
+}
+
+// The even-group rule trades recall for custody (R4, R10): a dash-written
+// number cut into three or more even groups of 4 to 8 is removed like a
+// numeric backup code, while numbers with uneven groups are kept. Moving a
+// line between these lists is a deliberate change to that trade.
+func TestGroupedNumbersTradeoff(t *testing.T) {
+	sc := NewScrubber(nil)
+	for _, in := range []string{
+		"Order 1234-5678-9012 shipped",      // order number, 4-4-4
+		"Call 0412-3456-7890 tomorrow",      // phone, 4-4-4
+		"tracking 9400-1118-9922-3344-5566", // parcel tracking, digits only
+		"ISBN 9783-1614-8410",               // ISBN-13 cut 4-4-4
+		"card 4111-1111-1111-1111",          // card number
+	} {
+		if out := sc.Scrub(in); !strings.Contains(out, Removed) {
+			t.Errorf("expected removal: %q -> %q", in, out)
+		}
+	}
+	for _, in := range []string{
+		"Call 555-123-4567",     // US phone, 3-3-4
+		"Call +1-555-0142-7788", // 1-3-4-4
+		"Call 0800-123-456",     // 4-3-3
+		"Ticket TKT-2026-0042",  // 3-4-4
+		"Booking BK-7731-9902",  // two digit groups
+		"Due 2026-10-07",        // date
+	} {
+		if out := sc.Scrub(in); out != in {
+			t.Errorf("expected kept: %q -> %q", in, out)
 		}
 	}
 }

@@ -250,6 +250,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-3b | [Recall at mailbox scale and wired into the broker](briefs/P3-3b.md) | P3-3 | merged (44975b6; 2/2, #59; wired in #152 469c644) |
 | RECALL-canary-1 | [A digit-free recovery code with low entropy escaped the scrubber as a fact object (#617 CI): grouped codes of even groups are removed whatever their alphabet; canary test seeded and replayable](briefs/RECALL-canary-1.md) | P3-3 | building (tier A) |
 | RECALL-canary-2 | [Letters-only random secrets of 16–24 characters with no key or grouping are kept by `randomLooking`, and fact objects lose their predicate's context (RECALL-canary-1 finding; release; tier A)](briefs/RECALL-canary-1.md#recall-canary-2) | RECALL-canary-1 | queued (release; tier A declared) |
+| RECALL-canary-3 | [Grouped codes the even-group rule misses: other separators (space, `.`, `_`, Unicode dashes), two groups, groups of 3 or 9+, confusables, codes split across fact fields, space-separated codes after a key; a TOTP seed without context (RECALL-canary-1 reviews; release; tier A)](briefs/RECALL-canary-1.md#recall-canary-3) | RECALL-canary-1 | queued (release; tier A declared) |
 | P3-8 | [Default-on-timeout questions](briefs/P3-8.md) | P1-7, P2-grants | merged (2b1bd8a; broker/question) |
 | P3-8b | [Questions: potency follow-ups (#71)](briefs/P3-8b.md) | P3-8, W9 | merged (2041b06b) |
 

@@ -522,6 +522,11 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-6f-2 l2 | `FollowRoot`'s failed `Raise` returns after the interim flag is written and before the root switch, and the owner sees a raw `update: raise the outside-attestor anchor` error; the fork-switch page should say "nothing was switched, try again after unlocking" (UX lens on #600, comment 6081356116, point 4) |
 | SR3-6f-2 l3 | `noteCounterReset` fires once per `counterReset` flag, cleared only by re-trust, so an update-anchor loss after a vault-counter notice adds no second one; fine while both name the same step (UX lens on #600, comment 6081356116, point 5) |
 | SR3-6f-2 l4 | On a PC with no TPM, the 409 for a recorded counter raises the counter-reset notice, which tells the owner to trust this PC again, which that PC cannot do; that case should say the vault expects a security chip this PC lacks (move it back, or restore onto a PC with one) (L3 delta on #600, comment 6082722933) |
+| RECALL-canary-1 l1 | A trailing `_x` breaks `groupedCode`'s final `\b`: a 3-group code is kept whole, a 6-group code loses only its last group (Security L1 on #624) |
+| RECALL-canary-1 l2 | The even-group rule removes evenly cut words (`part-time-work`) and 4-4-4 order, phone, ISBN and tracking numbers (R10, `TestGroupedNumbersTradeoff`); measure the recall loss on the mail corpus before any carve-out, and never exempt all-digit runs (Security L2, L3 5 and lens 4 on #624) |
+| RECALL-canary-1 l3 | Cosmetic overlap of removals: `rc_<code>` scrubs to `[credential removed] removed]` and a UUID to `[credential [credential removed]`, because `scrubRandom` splits `Removed` at its space; nothing leaks (Security L3 and L3 on #624) |
+| RECALL-canary-1 l4 | A dash-written IBAN keeps its tail group (`[credential removed]-00`); pre-existing (lens 5 on #624) |
+| RECALL-canary-1 l5 | `tools/risk_tier.py` rates a `broker/recall/scrub.go` change B; CRED-1 custody code should map to tier A (L3 7 on #624) |
 
 ## Reuse candidates
 | ID | Component | Why |

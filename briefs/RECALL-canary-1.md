@@ -19,5 +19,17 @@ Board section: Phase 3: compounding.
 ## RECALL-canary-2
 
 Release, tier A, from RECALL-canary-1's root cause. Two neighbouring gaps, not widened into canary-1:
-- `randomLooking` keeps a random letters-only token with no grouping and no key beside it when it is under 20 characters, or 20–24 with entropy under 3.5: measured, 16% of random 20-letter uppercase tokens and 3% of 24-letter ones. Context-free paths (fact objects, event summaries) reach it. Decide a length-aware floor (expected entropy of a random string of that length) against over-scrubbing words, with a corpus test.
+- `randomLooking` keeps a random letters-only token with no grouping and no key beside it when it is under 20 characters, or 20–24 with entropy under 3.5: measured, 16% of random 20-letter uppercase tokens and 3% of 24-letter ones. Security on #624 (R6) found a 30-character run kept too, so the gap reaches past 24; the floor must hold at every length. Context-free paths (fact objects, event summaries) reach it. Decide a length-aware floor (expected entropy of a random string of that length) against over-scrubbing words, with a corpus test.
 - A fact whose predicate names credential material (`password`, `recovery`, `api_key`, `seed`) is scrubbed on its object alone, so the predicate's context is lost. Remove the object when the predicate names a credential, with a test per predicate.
+
+## RECALL-canary-3
+
+Release, tier A, CRED-1, from the reviews of #624 (Security R1–R5, L3 points 3, 4 and 6, lens point 3). The even-group rule closes dash-separated codes of 3+ groups of 4–8 only. Still kept, all on main before canary-1:
+- A separator other than ASCII `-`: space, `.`, `_`, NBSP, U+2011, en dash. With a key, `recovery code: A7KQ2 M3XZP 9RTB4 WQ8LN` keeps all but the first group, because `secretKV` takes one token; `recovery codes:` lists keep every code after the first. Even groups cannot simply be matched across spaces (`have been with them` is 4-4-4-4): capture the keyed list after `recovery/backup code(s)`, with a corpus test.
+- Two groups (GitHub's `xxxxx-xxxxx`), groups of 3 or of 9+, and an uneven last group, with guards so dates, phone numbers and prose are kept.
+- Non-ASCII confusables and fullwidth forms: normalise (NFKC, confusables to ASCII, Unicode dashes and spaces to ASCII) before matching.
+- A code split across a fact's fields or across facts (`Fact{"JMNOX-CPMGJ","JYTLJ-OOYJG","PXOYY-JDNTG"}`): scrub the joined fields too; sits with canary-2's predicate bullet.
+- A base32 TOTP seed (32 characters, digit-free, low entropy) without context leaked about 1 in 1M (L3 fuzz); the same `randomLooking` floor as canary-2, so build them together or in order.
+- Owner visibility (lens): a shape-only removal reads `[credential removed]`, so a removed phone or order number looks like a credential; consider a neutral marker for the shape rules.
+
+Property test: apply every separator and confusable mapping to `TestGroupedCodesRemoved`'s generator.
