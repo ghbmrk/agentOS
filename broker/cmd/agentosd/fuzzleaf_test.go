@@ -124,7 +124,9 @@ func TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound(t *testing.T) {
 		t.Fatal(err)
 	}
 	// nobody must reach the release and the state, as agentos-fuzz
-	// reaches /var/lib/agentos/loop7 through its ACL.
+	// reaches /var/lib/agentos-fuzz under /var/lib; the state is on a
+	// file system with project quotas, which its jail needs (RES-4).
+	state := filepath.Join(reachableQuotaDir(t), "loop7")
 	base, err := os.MkdirTemp("", "agentosd-fuzz-")
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +142,7 @@ func TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound(t *testing.T) {
 		t.Fatal("release")
 	}
 	dir := t.TempDir()
-	lp := openConfinedLearning(t, dir, learnPaths{Fuzz: release, Loop7: filepath.Join(base, "loop7"), FuzzUser: "nobody", Cgroup: root})
+	lp := openConfinedLearning(t, dir, learnPaths{Fuzz: release, Loop7: state, FuzzUser: "nobody", Cgroup: root, DiskQuota: "on"})
 
 	leaf := filepath.Join(root, "fuzz")
 	for f, want := range map[string]string{
@@ -153,7 +155,7 @@ func TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound(t *testing.T) {
 		}
 	}
 	var st syscall.Stat_t
-	if err := syscall.Stat(filepath.Join(base, "loop7", "targets", "fake"), &st); err != nil || st.Uid != 65534 {
+	if err := syscall.Stat(filepath.Join(state, "targets", "fake"), &st); err != nil || st.Uid != 65534 {
 		t.Errorf("the state is not the fuzz user's: uid %d, %v", st.Uid, err)
 	}
 
