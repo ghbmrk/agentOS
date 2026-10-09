@@ -16,8 +16,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 )
 
@@ -1118,4 +1120,60 @@ func (f *ownerForget) finishOwed(ctx context.Context) {
 			f.paid(g)
 		}
 	}
+}
+
+// The Wi-Fi page's fixed replies (W3-forget-b3r): the page says only
+// that it asked, never that a task is forgotten; the owner hears the done
+// text by text once the forget is approved and saved.
+const (
+	forgetPageAsked   = "Asked. Nothing is forgotten until you approve the request with a code; you get a text when it's done."
+	forgetPageUnknown = "That task isn't in your recent tasks, so nothing was asked. Reload the page to see them."
+	forgetPageLocked  = "Your session is locked, so nothing was asked. Unlock it with a code first."
+)
+
+// PageTasks lists the recent tasks FORGET lists, for the Wi-Fi page
+// (W3-forget-b3r, potency R2): goal ID, date and FORGET's label only.
+// Locked, it lists none, as FORGET by text is not taken (CH-21).
+func (f *ownerForget) PageTasks(unlocked bool) localapi.ForgetTasks {
+	if !unlocked {
+		return localapi.ForgetTasks{Locked: true}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out localapi.ForgetTasks
+	for _, t := range f.tasks.recent(forgetList) {
+		out.Tasks = append(out.Tasks, localapi.ForgetTask{ID: t.Goal, Date: f.date(t.At), Label: f.shown(t.taskText, true)})
+	}
+	return out
+}
+
+// PageForget asks to forget goal from the Wi-Fi page through FORGET's own
+// ask (CAP-3): the owner approves the request with a code before anything
+// is deleted. Only a goal PageTasks would list is asked about.
+func (f *ownerForget) PageForget(ctx context.Context, goal string, unlocked bool) string {
+	if !unlocked {
+		return forgetPageLocked
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	listed := false
+	for _, t := range f.tasks.recent(forgetList) {
+		listed = listed || t.Goal == goal
+	}
+	if !listed {
+		return forgetPageUnknown
+	}
+	if !f.ask(ctx, goal, f.now()) {
+		return forgetRefused
+	}
+	return forgetPageAsked
+}
+
+// wirePage serves the Wi-Fi page's forget ops when there is a page.
+func (f *ownerForget) wirePage(cfg *daemon.Config) bool {
+	if f == nil || cfg.PageSocket == nil {
+		return false
+	}
+	cfg.PageSocket.Forget = f
+	return true
 }

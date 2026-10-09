@@ -622,6 +622,7 @@ func main() {
 	if lp == nil {
 		learningOff(&cfg)
 	} else {
+		lp.forgetOwner.wirePage(&cfg)
 		caps.learning(lp) // routing held while learning is on (C12)
 	}
 	// Evidence delivery (CH-20): with a destination set, private replies

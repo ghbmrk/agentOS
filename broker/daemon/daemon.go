@@ -172,6 +172,17 @@ type PageSocket struct {
 	// then submitted to the gate as a follow intent, which the broker
 	// executor named grants.FollowExecutor must run. Nil refuses both ops.
 	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
+	// Forget, when set, lists the owner's recent tasks on the page and
+	// asks to forget one through FORGET's own ask (W3-forget-b3r); nil
+	// refuses both ops.
+	Forget PageForget
+}
+
+// PageForget is FORGET as the page serves it; unlocked is whether the
+// owner's session is unlocked, as FORGET by text is given.
+type PageForget interface {
+	PageTasks(unlocked bool) localapi.ForgetTasks
+	PageForget(ctx context.Context, goal string, unlocked bool) string
 }
 
 // The page's fixed replies to a follow request: the gate's reason is not
@@ -389,6 +400,9 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			Paused: func() []localapi.PausedGrant { return pausedGrants(gate) }, AskResume: func(ctx context.Context, id, pause string) (string, error) {
 				return askResume(ctx, gate, id, pause)
 			}}
+		if f := cfg.PageSocket.Forget; f != nil {
+			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget
+		}
 		if cfg.PageSocket.DescribeRoot != nil {
 			lcfg.DescribeRoot, lcfg.Follow = cfg.PageSocket.DescribeRoot, pageFollow(gate)
 		}

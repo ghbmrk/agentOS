@@ -53,10 +53,15 @@ const (
 	// d2b): always with a code-generator code or the asked grid cell
 	// (CH-19), since it re-opens the owner channel on that SIM's line.
 	OpSIM = "page_sim"
+	// OpForgetTasks lists the owner's recent tasks as FORGET does;
+	// OpForget asks to forget one by its goal ID, and the owner then
+	// approves it with a code like any forget (W3-forget-b3r, CAP-3).
+	OpForgetTasks = "page_forget_tasks"
+	OpForget      = "page_forget"
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -81,6 +86,8 @@ const (
 	DigestLen = 64
 	// MaxPause bounds a pause's intent ID (grants.Grant.Pause).
 	MaxPause = 128
+	// MaxGoal bounds a task's goal ID (OpForget).
+	MaxGoal = 128
 )
 
 // Status is the box's state as the page shows it before sign-in: fixed
@@ -281,6 +288,28 @@ type PausedGrant struct {
 // Paused are the paused grants, by ID.
 type Paused struct {
 	Grants []PausedGrant `json:"grants"`
+}
+
+// ForgetTask is a recent task as the page lists it: its goal ID, its date,
+// and the label FORGET shows (the clipped text of a task the owner
+// texted, else only when it came; security C2 on W3-forget).
+type ForgetTask struct {
+	ID    string `json:"id"`
+	Date  string `json:"date"`
+	Label string `json:"label"`
+}
+
+// ForgetTasks are the owner's recent tasks, newest first; none while the
+// owner's session is locked (Locked).
+type ForgetTasks struct {
+	Tasks  []ForgetTask `json:"tasks,omitempty"`
+	Locked bool         `json:"locked,omitempty"`
+}
+
+// Forget asks to forget the task with goal ID ID.
+type Forget struct {
+	Token string `json:"token"`
+	ID    string `json:"id"`
 }
 
 // AskResume asks to resume Grant from Pause, as the page showed it.
