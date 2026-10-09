@@ -60,3 +60,4 @@ These are release findings on #428 (SR3-2): UX point 1 ([note](../reviews/ux/202
 - **Before the PR:** run `python3 tools/risk_tier.py --git origin/main HEAD`.
 - **Review:** L3 on the strongest model with the threat check above, then the UX lens (for the `Detail` wording) and a Security section (OPERATING §3–4).
 - **Estimate/checkpoint:** about 70k tokens. This is not a ceiling (OPERATING §5).
+- **Delivery note (builder):** the note is shown with `Detail` but kept out of what an approval binds (`wait.base`; restart re-issue matches the carried digest over counts up to 1000). Adding it to the approved item would have refused every approved bound ask at dispatch (count 0 there) and closed it at restart; `TestQueuedNoteIsNotWhatIsApproved` covers both. The record key is not kept after erasure (alternative not taken; journal A16).
