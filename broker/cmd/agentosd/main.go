@@ -716,6 +716,9 @@ func main() {
 				// work since a task, taken back by recall's Reach.
 				lp.forgetOwner.agent.Store(&forgetAgent{work: recallExec,
 					lineage: func() (string, error) { return machines{m}.Lineage(agentMachine) }})
+				// Recall's Retry reports a take-back it finished here,
+				// which tells item 2's done text (RCH-3, RCH-4).
+				recallCfg.OnTakenBack = func(_ string, since time.Time) { lp.forgetOwner.agentTakenBack(ctx, since) }
 			}
 			recallCfg.Labeler, recallCfg.Machines = recallLabels{m}, recallMachines{m}
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())

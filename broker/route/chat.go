@@ -301,6 +301,10 @@ type Usage struct {
 	Reported    bool  `json:"reported"`
 	Complete    bool  `json:"complete"`
 	OutputChars int64 `json:"output_chars"`
+	// Failed are the attempts the router sent and failed over from
+	// before this one; Unserved, that none served the call (SR3-7-f1c).
+	Failed   []meter.Attempt `json:"failed,omitempty"`
+	Unserved bool            `json:"unserved,omitempty"`
 }
 
 // Total is every token the call was billed for.
