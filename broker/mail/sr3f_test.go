@@ -523,3 +523,44 @@ func TestUndoRefusesFlagChangeWithoutValidity(t *testing.T) {
 		t.Fatalf("flags %v", flags)
 	}
 }
+
+// TestExecuteRefusesASwappedAlertAfterOneJudgement (SR3-5-f1a, Security
+// re-sign B1 on #579 round 3): the owner approved hiding alert A, and a
+// same-ID alert B replaced it before Execute. With one judgement, only
+// Execute's Ref check stops B being hidden under A's approval.
+func TestExecuteRefusesASwappedAlertAfterOneJudgement(t *testing.T) {
+	x := newH(t, nil)
+	id := "<alert-1@x.example>"
+	x.deliver("INBOX", msg{id: id, from: "someone@x.example", to: me, subject: "New sign-in on your account", body: "Was this you?"})
+	in := x.intent(mail.OpArchive, rec(id))
+	if e, err := x.a.Escalate(ctx, in); err != nil || e.Verb != verb.ChangeAccount {
+		t.Fatalf("recheck: %+v %v", e, err)
+	}
+	x.swap(id, "INBOX")
+	out := x.a.Execute(ctx, in, 1)
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
+		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
+	}
+	if folder, flags, _ := x.srv.Find(id); folder != "INBOX" || len(flags) != 0 {
+		t.Fatalf("alert in %s with %v", folder, flags)
+	}
+}
+
+// TestExecuteRefusesASwappedNonAlert (SR3-5-f1a, delta L3 point 1 on #579
+// round 3): a same-ID non-alert that replaced the judged newsletter after
+// the recheck is a message nobody judged, so Execute leaves it alone.
+func TestExecuteRefusesASwappedNonAlert(t *testing.T) {
+	x := newH(t, nil)
+	id := x.news(1)
+	in := x.intent(mail.OpArchive, rec(id))
+	if e, err := x.a.Escalate(ctx, in); err != nil || e.Ask || e.Verb != "" {
+		t.Fatalf("recheck: %+v %v", e, err)
+	}
+	x.srv.Remove("INBOX", id)
+	x.deliver("INBOX", msg{id: id, from: "Bank <noreply@bank.example>", to: me, subject: "Your statement", body: "Your monthly statement is ready."})
+	out := x.a.Execute(ctx, in, 1)
+	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "changed since approval") {
+		t.Fatalf("execute: %s %q", out.Result, out.Evidence)
+	}
+	x.untouched(id)
+}
