@@ -24,18 +24,28 @@ func LoadCorpus(path string) ([]CorpusItem, error) {
 	if err != nil {
 		return nil, err
 	}
+	items, err := ParseCorpus(b)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return items, nil
+}
+
+// ParseCorpus reads an items.json's bytes: at least one item, each with
+// an ID and a text.
+func ParseCorpus(b []byte) ([]CorpusItem, error) {
 	var c struct {
 		Items []CorpusItem `json:"items"`
 	}
 	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("corpus %s: %w", path, err)
+		return nil, fmt.Errorf("corpus: %w", err)
 	}
 	if len(c.Items) == 0 {
-		return nil, fmt.Errorf("corpus %s: no items", path)
+		return nil, errors.New("corpus: no items")
 	}
 	for _, it := range c.Items {
 		if it.ID == "" || it.Text == "" {
-			return nil, fmt.Errorf("corpus %s: an item lacks an id or text", path)
+			return nil, errors.New("corpus: an item lacks an id or text")
 		}
 	}
 	return c.Items, nil
@@ -49,6 +59,24 @@ type ClosedCheck struct {
 	Name    string // what the owner calls it: "code filter"
 	Payload string
 	Hit     func(text string) bool
+	// Deliver, when set, takes the check through a guest instead of Hit
+	// (P3-4b-4d): it hands text to a guest machine as untrusted input over
+	// its guest plane and reports, from what the broker itself then saw,
+	// whether the check caught it. An error means the broker saw no
+	// outcome, and fails the run.
+	Deliver func(ctx context.Context, text string) (caught bool, err error)
+}
+
+// hit takes c on text, through its guest when it has one.
+func (c ClosedCheck) hit(ctx context.Context, text string) (bool, error) {
+	if c.Deliver == nil {
+		return c.Hit(text), nil
+	}
+	caught, err := c.Deliver(ctx, text)
+	if err != nil {
+		return false, fmt.Errorf("corpus probe: %s: %w", c.Name, err)
+	}
+	return caught, nil
 }
 
 // The placeholder PromptInject puts where its attack wants its own text.
@@ -68,13 +96,18 @@ func (p *CorpusProbe) Check() Check         { return CheckCorpus }
 func (p *CorpusProbe) Every() time.Duration { return p.Interval }
 
 // Run checks every item against every check. A check that misses its bare
-// payload is broken, and the run is an error that reports nothing.
+// payload is broken, and the run is an error that reports nothing; so is
+// a failed delivery.
 func (p *CorpusProbe) Run(ctx context.Context) (ProbeResult, error) {
 	if len(p.Items) == 0 || len(p.Checks) == 0 {
 		return ProbeResult{}, errors.New("corpus probe: no items or checks")
 	}
 	for _, c := range p.Checks {
-		if !c.Hit(c.Payload) {
+		caught, err := c.hit(ctx, c.Payload)
+		if err != nil {
+			return ProbeResult{}, err
+		}
+		if !caught {
 			return ProbeResult{}, fmt.Errorf("corpus probe: %s misses its own payload", c.Name)
 		}
 	}
@@ -84,14 +117,24 @@ func (p *CorpusProbe) Run(ctx context.Context) (ProbeResult, error) {
 			return ProbeResult{}, err
 		}
 		for _, c := range p.Checks {
-			if !c.Hit(replay(it.Text, c.Payload)) {
+			caught, err := c.hit(ctx, replay(it.Text, c.Payload))
+			if err != nil {
+				return ProbeResult{}, err
+			}
+			if !caught {
 				res.Found = append(res.Found, Finding{Check: CheckCorpus, Subject: it.ID, Detail: c.Name, Severity: High})
 			}
+			res.Checked = append(res.Checked, CorpusKey(it.ID, c.Name))
 		}
-		res.Checked = append(res.Checked, it.ID)
 	}
 	return res, nil
 }
+
+// CorpusKey is what a corpus run lists in Checked for one item taken
+// through one check (#515 L3): a corpus finding closes only on a run that
+// took its own check over its own item, so a check dropped from Checks
+// never closes what it found.
+func CorpusKey(item, check string) string { return item + "\x00" + check }
 
 func replay(text, payload string) string {
 	if strings.Contains(text, corpusSlot) {

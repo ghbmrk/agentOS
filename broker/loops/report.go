@@ -25,11 +25,27 @@ const CheckSeeded Check = "seeded"
 // failure. They have no tree rule, so nothing in the suite can grade a
 // Loop 2 fix: the fix comes with an update, and the caller's own
 // regression (the crash input, the probe frame) replays it, calling
-// Resolve once it passes. Detail names the evidence (an input digest).
+// Resolve once it passes. Detail names the evidence: an input digest,
+// or a target detail (FuzzNoInputDetail, or a hang, which CloseTarget
+// closes).
 const (
 	CheckFuzz  Check = "fuzz"
 	CheckProbe Check = "probe"
 )
+
+// Target details: a fuzz finding no stored input can be named for
+// (P3-4b-3r-fuzz). loop7 reports them; loops words and closes them.
+// FuzzNoInputDetail resolves through Resolve once a whole replay passes;
+// the two hang details have no input to replay, and close only through
+// CloseTarget.
+const (
+	FuzzNoInputDetail = "the target failed before any stored input could be named (a seed added in code, or a crash at start)"
+	FuzzOverrunDetail = "the fuzz engine did not stop within its bound"
+	FuzzStallDetail   = "a fuzzed input stopped the fuzz engine making progress"
+)
+
+// hangDetail reports a fuzz finding's detail that names a hang.
+func hangDetail(d string) bool { return d == FuzzOverrunDetail || d == FuzzStallDetail }
 
 // ruleLess reports a check Report takes without a tree rule.
 func ruleLess(c Check) bool { return c == CheckFuzz || c == CheckProbe }
@@ -170,7 +186,11 @@ const (
 	waitRejected  = "the last one did not qualify; I try again at the next check"
 	waitForAFixOf = "waits for a fix: "
 	waitNoTest    = "its test could not be added to my security checks, so no fix can qualify yet"
-	waitUpdate    = "one comes with an update; I recheck it every round"
+	waitUpdate    = "one comes with an update; I check it again at least twice a day"
+	waitLater     = "building one failed twice; I try again in a day"
+	waitUnchanged = "the last fix I built did not pass my security checks; I try again when those checks change"
+	waitStopped   = "I stopped trying after 8 fixes that did not work; anything I paused for it stays paused until you resume it, and an update may bring a fix"
+	waitUnfixable = "it is not something I can repair myself; an update may bring a fix"
 )
 
 // waitingLocked is why an open reported record waits, "" if it does not.
@@ -187,9 +207,20 @@ func (s *Guard) waitingLocked(r Record) string {
 	if !r.Reported || r.Fix == string(change.StateAdopted) {
 		return ""
 	}
+	u, _ := s.cfg.Fixer.(Unready)
 	switch {
 	case s.cfg.Fixer == nil:
 		return waitNoFixer
+	case u != nil && u.Unready() != "":
+		return waitNoFixer + ", because " + u.Unready()
+	case r.FixHold == holdUnfixable:
+		return waitUnfixable
+	case r.FixHold == holdStopped:
+		return waitStopped
+	case r.FixHold == holdUnchanged:
+		return waitUnchanged
+	case r.FixHold == holdLater:
+		return waitLater
 	case r.Fix == FixFailed:
 		return waitFailed
 	case r.Fix == string(change.StateRejected):
@@ -246,6 +277,10 @@ func (s *Guard) Resolve(id string, r Replay) error {
 		s.mu.Unlock()
 		return fmt.Errorf("%w: %q is not an open fuzz or probe finding", ErrFinding, id)
 	}
+	if rec.Finding.Check == CheckFuzz && hangDetail(rec.Finding.Detail) {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %q is a hang, with no stored input to replay", ErrFinding, id)
+	}
 	if !r.Passed || r.Evidence != rec.Finding.Detail {
 		s.mu.Unlock()
 		return fmt.Errorf("%w: no passing replay of %q's stored input", ErrFinding, id)
@@ -259,13 +294,123 @@ func (s *Guard) Resolve(id string, r Replay) error {
 	delete(s.held, id)
 	s.st.Cleared[id] = s.cfg.Now()
 	err := s.saveLocked()
+	lines := s.clearedLinesLocked([]Record{rec})
 	s.mu.Unlock()
-	if rec.Contained == "paused" && rec.Texted {
-		if text := s.batch([]string{clearedLine(rec)}); text != "" {
-			s.cfg.Notify(text, false)
-		}
+	if text := s.batch(lines); text != "" {
+		s.cfg.Notify(text, false)
 	}
 	return err
+}
+
+// ClosureStep is the one kind of Closure: a fuzz step that ran.
+const ClosureStep = "step"
+
+// Closure is a source's record of a fuzz step that closes a hang finding
+// (P3-4b-3r-fuzz): the step stopped within its bound and moved its exec
+// count past the baseline, run from Binary (its SHA-256), which differs
+// from Produced, the binary that last produced the finding. Replayed is
+// always false: no stored input was replayed.
+type Closure struct {
+	Kind     string    `json:"kind"`
+	Binary   string    `json:"binary"`
+	Produced string    `json:"produced"`
+	Execs    int       `json:"execs"`
+	Baseline int       `json:"baseline"`
+	Replayed bool      `json:"replayed"`
+	At       time.Time `json:"at"`
+}
+
+// sha256Hex reports a lowercase hex SHA-256.
+func sha256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil && strings.ToLower(s) == s
+}
+
+// CloseTarget closes open reported hang finding id (a fuzz finding whose
+// Detail is a hang detail, never an input digest) as cleared, only on a
+// good step of a different binary: c is a step, from a binary other than
+// the one that produced the finding, whose exec count moved past its
+// baseline. The closure is saved on the finding's evidence, marked as not
+// a replay, and the owner hears it cleared through Resolve's path (S39).
+// Like Resolve, it trusts its in-process caller to build c honestly
+// (S32).
+func (s *Guard) CloseTarget(id string, c Closure) error {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	s.mu.Lock()
+	rec, ok := s.st.Open[id]
+	if !ok || !rec.Reported || rec.Finding.Check != CheckFuzz || rec.Finding.Rule != nil || !hangDetail(rec.Finding.Detail) {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %q is not an open fuzz hang finding", ErrFinding, id)
+	}
+	if c.Kind != ClosureStep || c.Replayed || !sha256Hex(c.Binary) || !sha256Hex(c.Produced) || c.Binary == c.Produced || c.Execs <= c.Baseline {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: no good step of a new binary for %q", ErrFinding, id)
+	}
+	for i := range s.st.Evidence {
+		if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
+			e.Closure = &c
+		}
+	}
+	delete(s.st.Open, id)
+	delete(s.held, id)
+	s.st.Cleared[id] = s.cfg.Now()
+	// As in Pass: an Again close is digest-only, so a flap ends on "it
+	// is back"; a told, unpaused close is marked, so a return within
+	// ReText is texted again (delta L3 on #586).
+	var told []Record
+	if rec.Texted && (!rec.Again || rec.Contained == "paused") {
+		told = append(told, rec)
+		if rec.Contained != "paused" {
+			s.st.ToldCleared[id] = true
+		}
+	}
+	err := s.saveLocked()
+	lines := s.clearedLinesLocked(told)
+	s.mu.Unlock()
+	if text := s.batch(lines); text != "" {
+		s.cfg.Notify(text, false)
+	}
+	return err
+}
+
+// clearedLinesLocked is the cleared text for the texted records just
+// closed: one line per check and plain subject, and none while another
+// open texted finding shares that name, so "Cleared: X" is never said
+// while an X the owner heard of is still open (L3 #558 point 1). A fuzz
+// hang is keyed apart from the target's crashes (an input or no input),
+// and clearedLine names which cleared, so an open hang never hides a
+// crash fix's line, nor a crash the hang's, and no line is ambiguous
+// with a finding still open (P3-4b-3r-fuzz; L3 on #586 point 1).
+func (s *Guard) clearedLinesLocked(closed []Record) []string {
+	key := func(r Record) string {
+		k := string(r.Finding.Check) + "\x00" + plainSubject(r.Finding)
+		if r.Finding.Check == CheckFuzz && hangDetail(r.Finding.Detail) {
+			k += "\x00hang"
+		}
+		return k
+	}
+	// An open Again record is one the owner was told of before it came
+	// back too soon, so it holds the line too: a finding that moves
+	// between two details is never told "Cleared" (Security 4a on #585).
+	open := map[string]bool{}
+	for _, r := range s.st.Open {
+		if r.Texted || r.Again {
+			open[key(r)] = true
+		}
+	}
+	said := map[string]bool{}
+	var lines []string
+	for _, r := range closed {
+		if k := key(r); r.Texted && !open[k] && !said[k] {
+			said[k] = true
+			lines = append(lines, clearedLine(r))
+		}
+	}
+	return lines
 }
 
 // OpenReported is the open reported findings of check c, so a LOOP-7

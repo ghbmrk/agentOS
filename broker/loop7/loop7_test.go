@@ -26,6 +26,7 @@ type fakeGuard struct {
 	reported []loops.Finding
 	open     map[string]loops.Finding
 	resolved []string
+	closed   []loops.Closure
 	job      bool
 }
 
@@ -53,6 +54,16 @@ func (g *fakeGuard) Resolve(id string, r loops.Replay) error {
 	g.resolved = append(g.resolved, id)
 	return nil
 }
+func (g *fakeGuard) CloseTarget(id string, c loops.Closure) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.open[id]; !ok || c.Kind != loops.ClosureStep || c.Replayed || c.Binary == "" || c.Binary == c.Produced || c.Execs <= c.Baseline {
+		return loops.ErrFinding
+	}
+	delete(g.open, id)
+	g.closed = append(g.closed, c)
+	return nil
+}
 func (g *fakeGuard) OpenReported(c loops.Check) []loops.Finding {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -70,12 +81,22 @@ func (g *fakeGuard) OpenReported(c loops.Check) []loops.Finding {
 // planted-decoder control for the whole source.
 func planted(t *testing.T, crash bool) string {
 	t.Helper()
+	if !crash {
+		return plantedWith(t, "")
+	}
+	return plantedWith(t, `panic("planted decoder crash")`)
+}
+
+// plantedWith builds the planted target whose decoder runs crash on any
+// input longer than three bytes; an empty crash never fails.
+func plantedWith(t *testing.T, crash string) string {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("builds a test binary")
 	}
 	src := t.TempDir()
 	cond := "false"
-	if crash {
+	if crash != "" {
 		cond = "len(b) > 3"
 	}
 	files := map[string]string{
@@ -88,7 +109,7 @@ func FuzzPlanted(f *testing.F) {
 	f.Add([]byte("a"))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		if ` + cond + ` {
-			panic("planted decoder crash")
+			` + crash + `
 		}
 	})
 }
@@ -119,6 +140,9 @@ func target(t *testing.T, bin string) Target {
 func newSource(t *testing.T, g *fakeGuard, cfg Config) *Source {
 	t.Helper()
 	cfg.Inner, cfg.Report = g, g
+	if cfg.Release == "" && len(cfg.Targets) > 0 {
+		cfg.Release = filepath.Dir(cfg.Targets[0].Binary)
+	}
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = t.TempDir()
 	}
@@ -160,7 +184,9 @@ func TestAFuzzCrashIsReportedKeptAndResolved(t *testing.T) {
 	}
 	// An update fixes the decoder, but with the stored input gone nothing
 	// replays it, so the finding stays open.
-	tg.Binary = planted(t, false)
+	if err := os.Rename(planted(t, false), tg.Binary); err != nil {
+		t.Fatal(err)
+	}
 	stored := filepath.Join(tg.Dir, "testdata", "fuzz", "FuzzPlanted", kept[0].Name())
 	aside := filepath.Join(t.TempDir(), "input")
 	if err := os.Rename(stored, aside); err != nil {
@@ -249,11 +275,11 @@ func TestAFuzzJobYieldsWithinThePreemptionTarget(t *testing.T) {
 func TestNextOffersInnerFirstThenTakesTurns(t *testing.T) {
 	g := newFake()
 	clock := time.Unix(1_800_000_000, 0)
-	probe := func(context.Context) (string, sockprobe.Result, error) { return "m1", sockprobe.Result{}, nil }
-	a := Target{Pkg: "p", Name: "FuzzA", Binary: "/nonexistent", Dir: t.TempDir()}
+	probe := func(context.Context) (string, []string, error) { return "m1", nil, nil }
+	a := Target{Pkg: "p", Name: "FuzzA", Binary: "/nonexistent/p.test", Dir: t.TempDir()}
 	b := a
 	b.Name = "FuzzB"
-	s := newSource(t, g, Config{Targets: []Target{a, b}, Probe: probe, Trail: func() []journal.Record { return nil },
+	s := newSource(t, g, Config{Targets: []Target{a, b}, Probe: probe, Trail: func() []journal.Record { return nil }, Want: probeSet(),
 		Every: time.Hour, Now: func() time.Time { return clock }})
 	g.job = true
 	if j, _ := s.Next(context.Background(), true); j.Name != "passive" {
@@ -284,6 +310,15 @@ func note(at time.Time, m string, c sockets.Code) journal.Record {
 	return journal.Record{At: at, Type: journal.RecEgress, Egress: &journal.EgressNote{Machine: m, Adapter: sockets.RefusalNote, Operation: c.Token(), Reason: "x"}}
 }
 
+// probeSet is the probe's refusal codes, as the wiring passes them.
+func probeSet() []sockets.Code {
+	var out []sockets.Code
+	for _, f := range sockprobe.Frames {
+		out = append(out, f.Want)
+	}
+	return out
+}
+
 // refusals is a broker trail with a refusal note at at for each code in
 // the probe set.
 func refusals(at time.Time, m string) []journal.Record {
@@ -299,7 +334,7 @@ func TestJournaledChecksTheProbeRound(t *testing.T) {
 	end := start.Add(time.Second)
 	full := append(refusals(start, "m1"), note(start.Add(-30*time.Second), "m1", sockets.ErrUnknownOp))
 	full = append(full[:2], full[3:]...) // ErrUnknownOp only from the earlier, coalesced note
-	if f := Journaled("m1", full, start, end, time.Minute); len(f) != 0 {
+	if f := Journaled("m1", probeSet(), full, start, end, time.Minute); len(f) != 0 {
 		t.Fatalf("clean round: %q", f)
 	}
 	last := len(full) - 1
@@ -312,7 +347,7 @@ func TestJournaledChecksTheProbeRound(t *testing.T) {
 		"too old":       without(note(start.Add(-2*time.Minute), "m1", sockets.ErrUnknownOp)),
 		"effect":        append(append([]journal.Record{}, full...), journal.Record{At: end, Type: journal.RecSubmitted, Intent: &journal.Intent{Machine: "m1", Action: "send"}}),
 	} {
-		if f := Journaled("m1", trail, start, end, time.Minute); len(f) != 1 {
+		if f := Journaled("m1", probeSet(), trail, start, end, time.Minute); len(f) != 1 {
 			t.Fatalf("%s: %q", name, f)
 		}
 	}
@@ -321,10 +356,9 @@ func TestJournaledChecksTheProbeRound(t *testing.T) {
 // A probe failure becomes a probe finding; a clean round resolves it.
 func TestAProbeFailureIsReportedAndAPassResolvesIt(t *testing.T) {
 	g := newFake()
-	var res sockprobe.Result
-	res.Failures = []string{"undeclared socket owner.sock is reachable"}
+	res := []string{"undeclared socket owner.sock is reachable"}
 	journaled := true
-	s := newSource(t, g, Config{Probe: func(context.Context) (string, sockprobe.Result, error) { return "m1", res, nil },
+	s := newSource(t, g, Config{Want: probeSet(), Probe: func(context.Context) (string, []string, error) { return "m1", res, nil },
 		Trail: func() []journal.Record {
 			if !journaled {
 				return nil
@@ -340,7 +374,7 @@ func TestAProbeFailureIsReportedAndAPassResolvesIt(t *testing.T) {
 	}
 	// A guest that claims an empty round, with nothing journaled on the
 	// broker side, does not clear it (Security 4a on #523).
-	res, journaled = sockprobe.Result{}, false
+	res, journaled = nil, false
 	if n, err := s.probe(context.Background()); err != nil || n == 0 || len(g.resolved) != 0 || len(g.open) == 0 {
 		t.Fatalf("empty guest result n=%d err=%v open %v resolved %v", n, err, g.open, g.resolved)
 	}
@@ -348,4 +382,102 @@ func TestAProbeFailureIsReportedAndAPassResolvesIt(t *testing.T) {
 	if n, err := s.probe(context.Background()); err != nil || n != 0 || len(g.open) != 0 {
 		t.Fatalf("clean round n=%d err=%v open %v", n, err, g.open)
 	}
+}
+
+// runTurn runs the LOOP-7 job Next offers now, under ctx.
+func runTurn(t *testing.T, s *Source, ctx context.Context) {
+	t.Helper()
+	j, ok := s.Next(ctx, true)
+	if !ok {
+		t.Fatal("no LOOP-7 job offered")
+	}
+	j.Run(ctx)
+}
+
+// P3-4b-3r-pass requirement 3 (3a-r5; #560 Potency, L3 point 3): STATUS
+// says when fuzzing is configured but no fuzz step has completed for
+// longer than Recheck, and when a target fails on every turn for a full
+// cycle, in plain words that name no target. A step offered but preempted
+// is not progress.
+func TestStatusSaysWhenFuzzingMakesNoProgress(t *testing.T) {
+	const stalled = "Loop 2: my fuzz self-tests have not run for "
+	const broken = "Loop 2: one of my fuzz self-tests cannot run."
+	start := time.Unix(1_800_000_000, 0)
+	setup := func(t *testing.T, body string) (*Source, *time.Time) {
+		release := t.TempDir()
+		tg := fakeTarget(t, release, body)
+		clock := start
+		s := newSource(t, newFake(), Config{Targets: []Target{tg}, Release: release, Every: 12 * time.Hour,
+			Now: func() time.Time { return clock }})
+		return s, &clock
+	}
+
+	t.Run("completing steps", func(t *testing.T) {
+		s, clock := setup(t, "exit 0")
+		for i := 0; i < 6; i++ {
+			runTurn(t, s, context.Background())
+			*clock = clock.Add(12 * time.Hour)
+		}
+		if d := s.Digest(); len(d) != 0 {
+			t.Fatalf("digest %q for a source whose steps complete", d)
+		}
+	})
+
+	t.Run("preempted", func(t *testing.T) {
+		s, clock := setup(t, "exit 0")
+		runTurn(t, s, context.Background())
+		gone, cancel := context.WithCancel(context.Background())
+		cancel()
+		for i := 0; i < 4; i++ {
+			*clock = clock.Add(12 * time.Hour)
+			runTurn(t, s, gone) // offered, preempted at once
+		}
+		if d := strings.Join(s.Digest(), "\n"); d != stalled+"2 days." {
+			t.Fatalf("digest %q, want %q", d, stalled+"2 days.")
+		}
+		// A completed step clears it.
+		runTurn(t, s, context.Background())
+		if d := s.Digest(); len(d) != 0 {
+			t.Fatalf("digest %q after a completed step", d)
+		}
+	})
+
+	t.Run("a target that cannot run", func(t *testing.T) {
+		s, clock := setup(t, "exit 0")
+		if err := os.Remove(s.cfg.Targets[0].Binary); err != nil {
+			t.Fatal(err)
+		}
+		runTurn(t, s, context.Background())
+		if d := s.Digest(); len(d) != 0 {
+			t.Fatalf("digest %q after one failed turn", d)
+		}
+		*clock = clock.Add(24 * time.Hour) // its next turn: a full cycle
+		runTurn(t, s, context.Background())
+		d := strings.Join(s.Digest(), "\n")
+		// Exactly Recheck since the start: not yet longer than it.
+		if d != broken {
+			t.Fatalf("digest %q", d)
+		}
+		for _, id := range []string{"Fuzz", "fake", "/", ".test"} {
+			if strings.Contains(d, id) {
+				t.Fatalf("digest names %q: %q", id, d)
+			}
+		}
+		// It recovers: the next completed turn clears the line.
+		fakeBin(t, s.cfg.Release, "fake.test", "exit 0")
+		*clock = clock.Add(24 * time.Hour)
+		runTurn(t, s, context.Background())
+		if d := s.Digest(); len(d) != 0 {
+			t.Fatalf("digest %q after the target recovered", d)
+		}
+	})
+
+	t.Run("no targets", func(t *testing.T) {
+		clock := start
+		s := newSource(t, newFake(), Config{Every: time.Hour, Now: func() time.Time { return clock }})
+		clock = clock.Add(30 * 24 * time.Hour)
+		if d := s.Digest(); len(d) != 0 {
+			t.Fatalf("digest %q with no fuzzing configured", d)
+		}
+	})
 }

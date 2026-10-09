@@ -57,8 +57,8 @@ func (s *Guard) dueProbe() (Probe, bool) {
 }
 
 // runProbe runs p once: it reports each finding through Report, then
-// closes the open findings of p's check whose subject the run checked and
-// did not find. A preempted run changes nothing and is offered again; a
+// closes the open findings of p's check whose subject (for corpus, item
+// and check) the run checked and did not find. A preempted run changes nothing and is offered again; a
 // failed one is said in STATUS and the digest until a run succeeds.
 func (s *Guard) runProbe(ctx context.Context, p Probe) Result {
 	c := p.Check()
@@ -97,20 +97,19 @@ func (s *Guard) runProbe(ctx context.Context, p Probe) Result {
 	s.reportMu.Lock()
 	s.mu.Lock()
 	now := s.cfg.Now()
-	var lines []string
+	var closed []Record
 	if !failed {
 		for _, id := range sortedKeys(s.st.Open) {
 			rec := s.st.Open[id]
-			if rec.Finding.Check != c || !rec.Reported || rec.Finding.Rule != nil || found[id] || !slices.Contains(res.Checked, rec.Finding.Subject) {
+			if rec.Finding.Check != c || !rec.Reported || rec.Finding.Rule != nil || found[id] || !slices.Contains(res.Checked, checkedKey(rec.Finding)) {
 				continue
 			}
 			delete(s.st.Open, id)
 			s.st.Cleared[id] = now
-			if rec.Contained == "paused" && rec.Texted {
-				lines = append(lines, clearedLine(rec))
-			}
+			closed = append(closed, rec)
 		}
 	}
+	lines := s.clearedLinesLocked(closed)
 	if s.st.ProbeLast == nil {
 		s.st.ProbeLast = map[Check]time.Time{}
 	}
@@ -127,6 +126,15 @@ func (s *Guard) runProbe(ctx context.Context, p Probe) Result {
 		s.cfg.Notify(text, false)
 	}
 	return Result{Value: float64(n), Err: errors.Join(append(errs, serr)...)}
+}
+
+// checkedKey is what a run lists in Checked when it tested f's subject:
+// the subject, or for a corpus finding its item and check (#515 L3).
+func checkedKey(f Finding) string {
+	if f.Check == CheckCorpus {
+		return CorpusKey(f.Subject, f.Detail)
+	}
+	return f.Subject
 }
 
 // reportID is the ID Report gives f.

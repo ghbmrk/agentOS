@@ -4,6 +4,7 @@ package loops
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -109,5 +110,148 @@ func TestACorpusCheckThatMissesItsPayloadIsAnError(t *testing.T) {
 	}
 	if _, err := LoadCorpus("testdata/none.json"); err == nil {
 		t.Fatal("a missing corpus loaded")
+	}
+}
+
+// LOOP-7 (corpus replay through a guest, P3-4b-4d): a check with Deliver
+// is taken through it, not Hit, bare payload first; a miss is a finding
+// naming only the broker-held item ID and check name.
+func TestADeliveredCheckIsTakenThroughItsGuest(t *testing.T) {
+	items := corpusItems(t)
+	var got []string
+	c := ClosedCheck{Name: "code filter", Payload: "code 482913",
+		Hit: func(string) bool { t.Fatal("Hit used for a delivered check"); return false },
+		Deliver: func(_ context.Context, s string) (bool, error) {
+			got = append(got, s)
+			return s == "code 482913", nil // the guest route catches only the bare payload
+		}}
+	res, err := (&CorpusProbe{Interval: 1, Items: items, Checks: []ClosedCheck{c}}).Run(context.Background())
+	if err != nil || len(res.Found) != len(items) || len(got) != len(items)+1 || got[0] != "code 482913" {
+		t.Fatalf("%+v %v (%d deliveries)", res, err, len(got))
+	}
+	for i, f := range res.Found {
+		if f.Check != CheckCorpus || f.Subject != items[i].ID || f.Detail != "code filter" || f.Severity != High || f.Rule != nil {
+			t.Fatalf("finding %+v", f)
+		}
+	}
+}
+
+// LOOP-7: a delivery that fails (the guest did not act, the broker saw
+// nothing) fails the run and reports nothing, bare payload or item.
+func TestAFailedDeliveryFailsTheRun(t *testing.T) {
+	errNoReply := errors.New("no reply reached the owner line")
+	for _, failAt := range []int{1, 3} {
+		n := 0
+		c := ClosedCheck{Name: "label check", Payload: "", Deliver: func(context.Context, string) (bool, error) {
+			if n++; n == failAt {
+				return false, errNoReply
+			}
+			return true, nil // every other text is caught, so only the delivery error can fail the run
+		}}
+		res, err := (&CorpusProbe{Interval: 1, Items: corpusItems(t), Checks: []ClosedCheck{c}}).Run(context.Background())
+		if !errors.Is(err, errNoReply) || len(res.Found) != 0 || n != failAt {
+			t.Fatalf("fail at %d: %+v %v", failAt, res, err)
+		}
+	}
+}
+
+// LOOP-9 (#515 L3): a corpus finding closes only on a run that took its
+// own check over its own item. A run whose checks no longer hold that
+// check leaves it open and sends no cleared text; the run that takes the
+// check over the item again, and passes, closes it and clears it once
+// (S39).
+func TestACorpusFindingClosesOnlyWhenItsOwnCheckRanOnItsItem(t *testing.T) {
+	item := corpusItems(t)[:1]
+	p := &CorpusProbe{Interval: 1, Items: item, Checks: []ClosedCheck{containsCheck("check A", "PAYLOAD-A", true)}}
+	r := newReportRig(t, nil)
+	r.probes = []Probe{p}
+	r.reopen(t)
+	ctx := context.Background()
+	runJob(t, r.g, ctx)
+	if name, res := runJob(t, r.g, ctx); name != "probe:corpus" || res.Err != nil || res.Value != 1 {
+		t.Fatalf("%q %+v", name, res)
+	}
+	ev := r.g.Evidence()
+	if len(ev) != 1 || ev[0].Finding.Detail != "check A" {
+		t.Fatalf("evidence %+v", ev)
+	}
+	id, sent := ev[0].Finding.ID, len(r.texts)
+
+	p.Checks = []ClosedCheck{containsCheck("check B", "PAYLOAD-B", false)}
+	res, err := p.Run(ctx)
+	if err != nil || len(res.Checked) != 1 || res.Checked[0] != CorpusKey(item[0].ID, "check B") {
+		t.Fatalf("checked %q %v", res.Checked, err)
+	}
+	r.now = r.now.Add(2)
+	if name, res := runJob(t, r.g, ctx); name != "probe:corpus" || res.Err != nil || res.Value != 0 {
+		t.Fatalf("%q %+v", name, res)
+	}
+	if _, open := r.open(id); !open {
+		t.Fatal("a run that never took check A closed its finding")
+	}
+	if len(r.texts) != sent {
+		t.Fatalf("cleared text without the check: %q", r.texts[sent:])
+	}
+
+	p.Checks = []ClosedCheck{containsCheck("check B", "PAYLOAD-B", false), containsCheck("check A", "PAYLOAD-A", false)}
+	for range 2 {
+		r.now = r.now.Add(2)
+		if name, res := runJob(t, r.g, ctx); name != "probe:corpus" || res.Err != nil || res.Value != 0 {
+			t.Fatalf("%q %+v", name, res)
+		}
+	}
+	if _, open := r.open(id); open {
+		t.Fatal("check A passed on its item and the finding stayed open")
+	}
+	if len(r.texts) != sent+1 {
+		t.Fatalf("cleared texts %q, want one", r.texts[sent:])
+	}
+}
+
+// LOOP-9 (#515 L3): the item half of the closure key. A run that takes
+// check A over another item only leaves item I's check-A finding open and
+// sends no cleared text; the run that takes A over I again, and passes,
+// closes it and clears it once.
+func TestACorpusFindingClosesOnlyWhenItsOwnItemRanUnderItsCheck(t *testing.T) {
+	items := corpusItems(t)[:2]
+	p := &CorpusProbe{Interval: 1, Items: items[:1], Checks: []ClosedCheck{containsCheck("check A", "PAYLOAD-A", true)}}
+	r := newReportRig(t, nil)
+	r.probes = []Probe{p}
+	r.reopen(t)
+	ctx := context.Background()
+	runJob(t, r.g, ctx)
+	if name, res := runJob(t, r.g, ctx); name != "probe:corpus" || res.Err != nil || res.Value != 1 {
+		t.Fatalf("%q %+v", name, res)
+	}
+	ev := r.g.Evidence()
+	if len(ev) != 1 || ev[0].Finding.Subject != items[0].ID {
+		t.Fatalf("evidence %+v", ev)
+	}
+	id, sent := ev[0].Finding.ID, len(r.texts)
+
+	p.Items, p.Checks = items[1:], []ClosedCheck{containsCheck("check A", "PAYLOAD-A", false)}
+	r.now = r.now.Add(2)
+	if name, res := runJob(t, r.g, ctx); name != "probe:corpus" || res.Err != nil || res.Value != 0 {
+		t.Fatalf("%q %+v", name, res)
+	}
+	if _, open := r.open(id); !open {
+		t.Fatal("a run that never took check A over its item closed its finding")
+	}
+	if len(r.texts) != sent {
+		t.Fatalf("cleared text without the item: %q", r.texts[sent:])
+	}
+
+	p.Items = items
+	for range 2 {
+		r.now = r.now.Add(2)
+		if name, res := runJob(t, r.g, ctx); name != "probe:corpus" || res.Err != nil || res.Value != 0 {
+			t.Fatalf("%q %+v", name, res)
+		}
+	}
+	if _, open := r.open(id); open {
+		t.Fatal("check A passed on its item and the finding stayed open")
+	}
+	if len(r.texts) != sent+1 {
+		t.Fatalf("cleared texts %q, want one", r.texts[sent:])
 	}
 }

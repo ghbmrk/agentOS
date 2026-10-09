@@ -30,6 +30,29 @@ for cmd in agentosd agentos-egress; do
 		-o "$STAGE/usr/lib/agentos/$cmd" "./cmd/$cmd")
 done
 
+# LOOP-7's fuzz targets (P3-4b-3a): one test binary per package image/fuzz-targets.json names,
+# built with Go's fuzzing instrumentation, the seed corpora read-only beside them, and the
+# manifest agentosd reads (loop7.Load). A binary whose targets differ from the manifest's fails
+# the build. Crash inputs found on the box go to /var/lib/agentos/loop7, never here.
+FUZZ=$STAGE/usr/lib/agentos/fuzz
+install -D -m 0644 "$REPO/image/fuzz-targets.json" "$FUZZ/manifest.json"
+python3 -c 'import json, sys
+for t in json.load(open(sys.argv[1]))["targets"]: print(t["pkg"], t["name"], t["binary"])' \
+	"$REPO/image/fuzz-targets.json" > "$OUT/fuzz-targets"
+cut -d' ' -f1,3 "$OUT/fuzz-targets" | sort -u | while read -r pkg bin; do
+	(cd "$REPO/broker" && CGO_ENABLED=0 go test -c -trimpath -ldflags='-s -w -buildid=' -fuzz=. \
+		-o "$FUZZ/$bin" "./$pkg")
+	want=$(awk -v p="$pkg" '$1 == p { print $2 }' "$OUT/fuzz-targets" | sort)
+	got=$("$FUZZ/$bin" -test.list '^Fuzz' | sort)
+	[ "$want" = "$got" ] || { echo "fuzz-targets.json lists [$want] for $pkg; its binary has [$got]" >&2; exit 1; }
+done
+while read -r pkg name bin; do
+	if [ -d "$REPO/broker/$pkg/testdata/fuzz/$name" ]; then
+		mkdir -p "$FUZZ/corpus/$pkg" && cp -R "$REPO/broker/$pkg/testdata/fuzz/$name" "$FUZZ/corpus/$pkg/$name"
+	fi
+done < "$OUT/fuzz-targets"
+rm -f "$OUT/fuzz-targets"
+
 # gVisor, the same release and hash as CI's machine tests.
 curl -fsSLo "$OUT/gvisor.tar.bz2" \
 	"https://storage.googleapis.com/gvisor/releases/release/${GVISOR#release-}/x86_64/gvisor.tar.bz2"

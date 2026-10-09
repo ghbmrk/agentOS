@@ -198,7 +198,7 @@ func TestAProbeClosesWhatItCheckedAndNoLongerFinds(t *testing.T) {
 		t.Fatal("an unchecked subject closed")
 	}
 	digest := strings.Join(r.g.Digest(), "\n")
-	if !strings.Contains(digest, "Cleared: t1. Pre-allowance G1 stays paused") {
+	if !strings.Contains(digest, "Cleared: one of my internal checks. Pre-allowance G1 stays paused") {
 		t.Fatalf("digest %q", digest)
 	}
 }

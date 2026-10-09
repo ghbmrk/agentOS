@@ -3,6 +3,7 @@
 # The image itself is built and booted under Secure Boot by .github/workflows/image.yml.
 # REQ: HW-1, HW-5, UPD-1, UPD-1a
 import base64
+import json
 import configparser
 import importlib.machinery
 import importlib.util
@@ -597,6 +598,82 @@ class ConfigTest(unittest.TestCase):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Unit"]["ConditionPathExists"], "/etc/agentos/agentosd.env")
         self.assertIn("/usr/lib/agentos/agentosd", u["Service"]["ExecStart"])
+
+
+def fuzz_targets(broker):
+    """(pkg, name) for every Go fuzz target in broker's *_test.go files, skipping raw strings
+    (a generated source in a test, like loop7's planted target, is not a target) and testdata."""
+    out = set()
+    for f in pathlib.Path(broker).rglob("*_test.go"):
+        if "testdata" in f.parts:
+            continue
+        text = re.sub(r"`[^`]*`", "", f.read_text())
+        for name in re.findall(r"^func (Fuzz\w*)\(\w+ \*testing\.F\)", text, re.M):
+            out.add((f.parent.relative_to(broker).as_posix(), name))
+    return out
+
+
+class FuzzManifestTest(unittest.TestCase):
+    # REQ: LOOP-7, LOOP-9
+    # P3-4b-3a requirement 4: the image ships a binary for every fuzz target in the tree, listed in
+    # the manifest agentosd reads; a new target without a binary fails here.
+
+    def manifest(self):
+        return json.loads((IMG / "fuzz-targets.json").read_text())["targets"]
+
+    def test_manifest_lists_every_fuzz_target(self):
+        listed = {(t["pkg"], t["name"]) for t in self.manifest()}
+        found = fuzz_targets(ROOT / "broker")
+        self.assertTrue(found)
+        self.assertEqual(sorted(found - listed), [], "fuzz targets with no binary in the image")
+        self.assertEqual(sorted(listed - found), [], "manifest entries with no fuzz target")
+        for t in self.manifest():
+            self.assertEqual(sorted(t), ["binary", "name", "pkg"])
+            self.assertEqual(t["binary"], t["pkg"].replace("/", "_") + ".test")
+            self.assertRegex(t["pkg"], r"^[a-z0-9]+(/[a-z0-9]+)*$")
+
+    def test_scan_finds_a_new_target_and_skips_generated_source(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            write(d, "a/x_test.go", "package a\nfunc FuzzNew(f *testing.F) {}\n")
+            write(d, "b/y_test.go", "package b\nvar src = `\nfunc FuzzPlanted(f *testing.F) {\n` + c + `}`\n")
+            write(d, "c/testdata/z_test.go", "package c\nfunc FuzzData(f *testing.F) {}\n")
+            self.assertEqual(fuzz_targets(d), {("a", "FuzzNew")})
+
+    def test_build_ships_binaries_seeds_and_manifest(self):
+        b = (IMG / "build.sh").read_text()
+        self.assertIn('install -D -m 0644 "$REPO/image/fuzz-targets.json" "$FUZZ/manifest.json"', b)
+        self.assertIn("FUZZ=$STAGE/usr/lib/agentos/fuzz", b)
+        self.assertRegex(b, r"go test -c -trimpath [^\n]*-fuzz=\.")
+        self.assertIn("-test.list '^Fuzz'", b)  # a binary's targets must match the manifest
+        self.assertIn('"$FUZZ/corpus/$pkg/$name"', b)
+
+
+class FuzzConfineTest(unittest.TestCase):
+    # REQ: LOOP-1, LOOP-7
+    # P3-4b-3r-confine requirement 2: fuzz children run as an unprivileged system user the image
+    # creates; it owns LOOP-7's state and reaches it through the broker's 0700 state directory by an
+    # ACL entry granting search only. The user is the one agentosd looks up.
+
+    def test_the_image_creates_the_fuzz_user(self):
+        lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-fuzz.conf").read_text().splitlines()
+        users = [l.split() for l in lines if l.strip() and not l.startswith("#")]
+        self.assertEqual([u[:3] for u in users], [["u", "agentos-fuzz", "-"]])
+        learn = (ROOT / "broker/cmd/agentosd/learn.go").read_text()
+        self.assertRegex(learn, r'fuzzUser\s*=\s*"agentos-fuzz"')
+
+    def test_the_fuzz_user_owns_its_state_and_only_traverses_the_broker_s(self):
+        lines = [l.split() for l in (MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf").read_text().splitlines()
+                 if l.strip() and not l.startswith("#")]
+        self.assertIn(["d", "/var/lib/agentos", "0700", "root", "root", "-"], lines)
+        # agentosd creates loop7 (loop7.Load) and gives it to the user (Jail.Own): a tmpfiles line would
+        # also run at image build and ship it, and the image's /var/lib/agentos must stay empty.
+        self.assertFalse([l for l in lines if l[1].startswith("/var/lib/agentos/")])
+        acl = [l for l in lines if l[0].startswith("a") and l[1] == "/var/lib/agentos"]
+        self.assertEqual(acl, [["a+", "/var/lib/agentos", "-", "-", "-", "-", "u:agentos-fuzz:--x"]])
+        # Nothing else in the broker's state is given to the fuzz user.
+        others = [l for l in lines if "agentos-fuzz" in " ".join(l) and l[1] not in ("/var/lib/agentos", "/var/lib/agentos/loop7")]
+        self.assertEqual(others, [])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 )
@@ -350,9 +351,10 @@ func TestForgetBothItemsOwedForOneGoalAreBothTold(t *testing.T) {
 	}
 }
 
-// On ErrCarried recall's Retry owns the done text (recalltool TakenBack):
-// no entry is made or kept, and this path does not send it, so it is not
-// doubled. Through carryAgent too.
+// On ErrCarried recall's Retry carries it and reports it done
+// (agentTakenBack, RCH-3): this path does not send the done text, and
+// the entry stays owed, not done (Taking), for that report or a restart
+// (RCH-4). Through carryAgent too.
 func TestForgetItem2CarriedByRecallOwesNothingHere(t *testing.T) {
 	for _, viaRetry := range []bool{false, true} {
 		w := &fakeWork{worked: true, ok: true, err: recalltool.ErrCarried}
@@ -361,7 +363,7 @@ func TestForgetItem2CarriedByRecallOwesNothingHere(t *testing.T) {
 		}
 		a := newAgentOwed(t, w, "pay the gas bill")
 		a.d.setUp()
-		// Left by an earlier run: dropped.
+		// Left by an earlier run: replaced, not told.
 		if err := a.f.owed.owe(a.in.ID, owedForget{Agent: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -381,7 +383,7 @@ func TestForgetItem2CarriedByRecallOwesNothingHere(t *testing.T) {
 		if got := a.d.got(); len(got) != 1 || got[0] != want {
 			t.Fatalf("retry %v: sent %q", viaRetry, got)
 		}
-		if len(a.entries(t)) != 0 {
+		if e, ok := a.entries(t)[a.in.ID]; len(a.entries(t)) != 1 || !ok || !e.Agent || !e.Taking {
 			t.Fatalf("retry %v: owed %v", viaRetry, a.entries(t))
 		}
 	}
@@ -518,5 +520,189 @@ func TestAnOwedSaveIsRetriedOnEveryPassUntilItHolds(t *testing.T) {
 	}
 	if store.holds("owner:a") {
 		t.Fatal("still owed after the send")
+	}
+}
+
+// W3-forget-reach RCH-4 and UX-182-3 (brief IDs).
+// REQ: CAP-3
+
+// W3-forget-reach: item 2's done text is owed (Taking) before its
+// take-back and told once, only once recall says the take-back is done
+// (TakeBackOf): at once, from recall's report (agentTakenBack), or after
+// a restart (judgeAgent).
+
+// crashWork is fakeWork whose take-back keeps a copy of the owed file as
+// it was when the machines went back: a crash just after.
+type crashWork struct {
+	*fakeWork
+	store *countStore
+	at    []byte
+}
+
+func (w *crashWork) TakeBack(ctx context.Context, lineage string, since time.Time, approved bool) error {
+	err := w.fakeWork.TakeBack(ctx, lineage, since, approved)
+	b, _ := w.store.Load()
+	w.at = append([]byte(nil), b...)
+	return err
+}
+
+// nextStart is a restart on the owed file b, with the journal of a and w
+// as recall: the owner channel attaches (finishOwed) and recall opens
+// (resumeAgent), each twice.
+func (a *agentOwed) nextStart(t *testing.T, b []byte, w *fakeWork) *forgetRig {
+	t.Helper()
+	st := &change.MemStore{}
+	if err := st.Save(b); err != nil {
+		t.Fatal(err)
+	}
+	again := restart(t, st, nil)
+	again.f.gate.Store(&pauseGateBox{a.gate})
+	again.withAgent(w)
+	for range 2 {
+		again.f.finishOwed(context.Background())
+		again.f.resumeAgent(context.Background())
+	}
+	return again
+}
+
+func TestForgetItem2CrashBeforeTheDoneTextIsToldOnceAfterARestart(t *testing.T) {
+	w := &fakeWork{worked: true, ok: true}
+	a := newAgentOwed(t, w, "pay the gas bill")
+	cw := &crashWork{fakeWork: w, store: a.store}
+	a.f.agent.Store(&forgetAgent{work: cw, lineage: func() (string, error) { return "agent.l1", nil }})
+	a.d.setUp()
+	a.f.Execute(context.Background(), a.in, 1)
+	if e, ok := owedIn(t, cw.at)[a.in.ID]; !ok || !e.Agent || !e.Taking {
+		t.Fatalf("not owed at the take-back: %q", cw.at)
+	}
+	a.gate.st[a.in.ID] = journal.InFlight // the crash: Execute never returned
+	again := a.nextStart(t, cw.at, w)
+	if strings.Join(again.texts, "|") != forgetAgentDone || len(again.f.owed.goals()) != 0 || len(w.backs) != 1 {
+		t.Fatalf("after the crash: told %q owed %v took back %v", again.texts, again.f.owed.goals(), w.backs)
+	}
+}
+
+func TestForgetItem2FinishedByRetryWhoseSendFailsIsToldAfterARestart(t *testing.T) {
+	w := &fakeWork{worked: true, ok: true}
+	a := newAgentOwed(t, w, "pay the gas bill")
+	since, _ := forgetSince(a.in.ID)
+	w.setState(since, recalltool.TakeBackOwed) // back; reach unfinished
+	a.f.Execute(context.Background(), a.in, 1)
+	if e := a.entries(t)[a.in.ID]; !e.Taking || len(a.d.got()) != 0 {
+		t.Fatalf("told before done: %q, owed %v", a.d.got(), a.entries(t))
+	}
+	w.setState(since, recalltool.TakeBackDone)
+	a.f.agentTakenBack(context.Background(), since) // recall's Retry
+	within(t, a.asleep)                             // the send failed
+	give(t, a.step, false)                          // shutdown
+	within(t, a.told)
+	if e := a.entries(t)[a.in.ID]; !e.Agent || e.Taking {
+		t.Fatalf("not owed as done: %v", a.entries(t))
+	}
+	b, _ := a.store.Load()
+	again := a.nextStart(t, b, w)
+	if strings.Join(again.texts, "|") != forgetAgentDone || len(again.f.owed.goals()) != 0 {
+		t.Fatalf("after the restart: told %q owed %v", again.texts, again.f.owed.goals())
+	}
+}
+
+func TestForgetItem2CarriedThenRetriedIsToldOnce(t *testing.T) {
+	for _, restarted := range []bool{false, true} {
+		w := &fakeWork{worked: true, ok: true, err: recalltool.ErrCarried}
+		a := newAgentOwed(t, w, "pay the gas bill")
+		since, _ := forgetSince(a.in.ID)
+		a.d.setUp()
+		a.f.Execute(context.Background(), a.in, 1)
+		f, got := a.f, a.d.got
+		if restarted {
+			w.setState(since, recalltool.TakeBackOwed)
+			b, _ := a.store.Load()
+			again := a.nextStart(t, b, w)
+			f, got = again.f, func() []string { return append([]string{forgetAgentNotYet}, again.texts...) }
+		}
+		w.setState(since, recalltool.TakeBackDone)
+		for range 2 { // two reports, and recall's open after them
+			f.agentTakenBack(context.Background(), since)
+		}
+		f.resumeAgent(context.Background())
+		f.finishOwed(context.Background())
+		if s := got(); len(s) != 2 || s[0] != forgetAgentNotYet || s[1] != forgetAgentDone {
+			t.Fatalf("restarted %v: sent %q", restarted, s)
+		}
+		if len(f.owed.goals()) != 0 {
+			t.Fatalf("restarted %v: owed %v", restarted, f.owed.goals())
+		}
+	}
+}
+
+func TestForgetItem2WithAnUnfinishedResetIsNotToldDone(t *testing.T) {
+	for _, st := range []recalltool.TakeBackState{recalltool.TakeBackOwed, recalltool.TakeBackNone} {
+		w := &fakeWork{worked: true, ok: true}
+		a := newAgentOwed(t, w, "pay the gas bill")
+		since, _ := forgetSince(a.in.ID)
+		w.setState(since, st) // back, but its reset unfinished or not recorded
+		a.d.setUp()
+		a.f.Execute(context.Background(), a.in, 1)
+		if got := a.d.got(); len(got) != 1 || got[0] != forgetAgentNotYet {
+			t.Fatalf("%v: sent %q", st, got)
+		}
+		b, _ := a.store.Load()
+		again := a.nextStart(t, b, w)
+		if len(again.texts) != 0 {
+			t.Fatalf("%v: told %q after a restart", st, again.texts)
+		}
+	}
+}
+
+// owedIn reads an owed file's bytes.
+func owedIn(t *testing.T, b []byte) map[string]owedForget {
+	t.Helper()
+	m := map[string]owedForget{}
+	if len(b) > 0 {
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return m
+}
+
+// A second report while the first done text waits to be sent again does
+// not send another: the text is told once per process (tellAgent's claim).
+func TestForgetItem2ReportedAgainWhileItsSendWaitsIsToldOnce(t *testing.T) {
+	w := &fakeWork{worked: true, ok: true}
+	a := newAgentOwed(t, w, "pay the gas bill")
+	since, _ := forgetSince(a.in.ID)
+	w.setState(since, recalltool.TakeBackOwed)
+	a.f.Execute(context.Background(), a.in, 1)
+	w.setState(since, recalltool.TakeBackDone)
+	a.f.agentTakenBack(context.Background(), since)
+	within(t, a.asleep) // the send failed; tellLater waits
+	a.d.setUp()
+	a.f.agentTakenBack(context.Background(), since) // a second report
+	if got := a.d.got(); len(got) != 0 {
+		t.Fatalf("second report sent %q", got)
+	}
+	give(t, a.step, true)
+	within(t, a.told)
+	if got := a.d.got(); len(got) != 1 || got[0] != forgetAgentDone {
+		t.Fatalf("sent %q", got)
+	}
+}
+
+// Recall's report names the take-back's time: one from another time does
+// not tell item 2 done.
+func TestForgetItem2ReportOfAnotherTakeBackIsNotTold(t *testing.T) {
+	w := &fakeWork{worked: true, ok: true}
+	a := newAgentOwed(t, w, "pay the gas bill")
+	since, _ := forgetSince(a.in.ID)
+	w.setState(since, recalltool.TakeBackOwed)
+	a.d.setUp()
+	a.f.Execute(context.Background(), a.in, 1)
+	a.f.agentTakenBack(context.Background(), since.Add(time.Second))
+	if got := a.d.got(); len(got) != 1 || got[0] != forgetAgentNotYet {
+		t.Fatalf("sent %q", got)
+	}
+	if e := a.entries(t)[a.in.ID]; !e.Taking {
+		t.Fatalf("owed %v", a.entries(t))
 	}
 }

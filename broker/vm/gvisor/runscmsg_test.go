@@ -20,16 +20,6 @@ import (
 
 const runscCanary = "/canary-host/agentos/state/runsc/wk-c4n4ry_"
 
-func fakeRunsc(t *testing.T) *Runtime {
-	t.Helper()
-	bin, err := filepath.Abs("testdata/fakerunsc.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("FAKE_RUNSC_CANARY", runscCanary)
-	return &Runtime{Bin: bin, StateDir: filepath.Join(t.TempDir(), "runsc")}
-}
-
 func TestRunscFailureAnswersNoOutputAndNoRunscText(t *testing.T) {
 	r := fakeRunsc(t)
 	for _, mode := range []string{"prestart", "panic", "wait"} {

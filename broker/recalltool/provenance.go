@@ -26,7 +26,11 @@ type Provenance struct {
 	// takeBacks: approved take-backs of a lineage from since (UnixNano),
 	// true once its machines went back (W3-forget-b2b, #327 L3).
 	takeBacks map[string]map[int64]bool
-	lines     int
+	// backs: take-backs whose machines went back by the Reset whose
+	// recording failed (errUnrecorded), by since: Retry records and
+	// finishes it without resetting the machines again (RCH-2).
+	backs map[string]map[int64]Reset
+	lines int
 }
 
 type provRecord struct {
@@ -41,14 +45,15 @@ type provRecord struct {
 	// Until, with Reset: when the machines were all back.
 	Until time.Time `json:"until,omitempty"`
 	// TakeBack, with At: a take-back of the lineage from At is owed; with
-	// Forget, done. A reset from At also marks an owed one done.
+	// Forget, done. A reset from At also marks an owed one done. With
+	// Forget and Reset (and Until), done by a reset not yet recorded.
 	TakeBack bool `json:"tb,omitempty"`
 }
 
 // OpenProvenance loads the record from store (a recall.FileStore in the
 // broker's state directory; unreadable lines are skipped).
 func OpenProvenance(store recall.Store) (*Provenance, error) {
-	p := &Provenance{store: store, sets: map[string]map[string]time.Time{}, resets: map[string]map[int64]Reset{}, takeBacks: map[string]map[int64]bool{}}
+	p := &Provenance{store: store, sets: map[string]map[string]time.Time{}, resets: map[string]map[int64]Reset{}, takeBacks: map[string]map[int64]bool{}, backs: map[string]map[int64]Reset{}}
 	data, err := store.ReadAll()
 	if err != nil {
 		return nil, err
@@ -81,6 +86,12 @@ func (p *Provenance) apply(r provRecord) {
 		if done, ok := p.takeBacks[r.Lineage][since]; !ok || !done {
 			p.takeBacks[r.Lineage][since] = r.Forget
 		}
+		if r.Forget && !r.Reset.IsZero() {
+			if p.backs[r.Lineage] == nil {
+				p.backs[r.Lineage] = map[int64]Reset{}
+			}
+			p.backs[r.Lineage][since] = resetOf(r)
+		}
 		return
 	}
 	if !r.Reset.IsZero() {
@@ -98,14 +109,14 @@ func (p *Provenance) apply(r provRecord) {
 		if _, ok := p.takeBacks[r.Lineage][since]; ok {
 			p.takeBacks[r.Lineage][since] = true
 		}
+		delete(p.backs[r.Lineage], since)
+		if len(p.backs[r.Lineage]) == 0 {
+			delete(p.backs, r.Lineage)
+		}
 		if p.resets[r.Lineage] == nil {
 			p.resets[r.Lineage] = map[int64]Reset{}
 		}
-		until := r.Until
-		if until.IsZero() {
-			until = r.Reset
-		}
-		p.resets[r.Lineage][since] = Reset{Since: r.At.UTC(), At: r.Reset.UTC(), Until: until.UTC()}
+		p.resets[r.Lineage][since] = resetOf(r)
 		return
 	}
 	if r.Forget {
@@ -130,13 +141,25 @@ func (p *Provenance) apply(r provRecord) {
 	}
 }
 
-// undone reports a time inside an unfinished reset of lineage: what was
-// given then is no longer in its machines, so giving it again is new
-// (#59 L3 re-review 1). Called with mu held, or while loading.
+// resetOf is the Reset a reset or back record holds.
+func resetOf(r provRecord) Reset {
+	until := r.Until
+	if until.IsZero() {
+		until = r.Reset
+	}
+	return Reset{Since: r.At.UTC(), At: r.Reset.UTC(), Until: until.UTC()}
+}
+
+// undone reports a time inside an unfinished reset of lineage, recorded
+// or not: what was given then is no longer in its machines, so giving it
+// again is new (#59 L3 re-review 1). Called with mu held, or while
+// loading.
 func (p *Provenance) undone(lineage string, t time.Time) bool {
-	for _, rs := range p.resets[lineage] {
-		if !t.Before(rs.Since) && t.Before(rs.At) {
-			return true
+	for _, m := range []map[int64]Reset{p.resets[lineage], p.backs[lineage]} {
+		for _, rs := range m {
+			if !t.Before(rs.Since) && t.Before(rs.At) {
+				return true
+			}
 		}
 	}
 	return false
@@ -257,6 +280,16 @@ func (p *Provenance) compact() error {
 			n++
 		}
 	}
+	for _, l := range sortedKeys(p.backs) {
+		for _, rs := range p.backs[l] {
+			b, err := json.Marshal(provRecord{Lineage: l, At: rs.Since, Reset: rs.At, Until: rs.Until, TakeBack: true, Forget: true})
+			if err != nil {
+				return err
+			}
+			buf = append(append(buf, b...), '\n')
+			n++
+		}
+	}
 	if err := p.store.Rewrite(buf); err != nil {
 		return err
 	}
@@ -331,6 +364,108 @@ func (p *Provenance) TakeBack(lineage string, since time.Time) (recorded, done b
 	defer p.mu.Unlock()
 	done, recorded = p.takeBacks[lineage][since.UTC().UnixNano()]
 	return recorded, done
+}
+
+// MarkBack records, durably, that an approved or unasked take-back of
+// lineage went back by rs but MarkReset did not record it (RCH-2): the
+// take-back is done, so its machines never go back again, and its reach
+// is owed until Retry records the reset (MarkReset) and finishes it. Kept
+// in memory even when it cannot be written, as MarkTakeBack's done.
+func (p *Provenance) MarkBack(lineage string, rs Reset) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := provRecord{Lineage: lineage, At: rs.Since.UTC(), Reset: rs.At.UTC(), Until: rs.Until.UTC(), TakeBack: true, Forget: true}
+	err := p.write(r)
+	if err != nil {
+		p.apply(r)
+	}
+	return err
+}
+
+// Back is a lineage whose machines went back by Reset, not yet recorded.
+type Back struct {
+	Lineage string
+	Reset
+}
+
+// Backs lists the take-backs whose machines went back by a reset not yet
+// recorded (MarkBack), by lineage and since.
+func (p *Provenance) Backs() []Back {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []Back
+	for _, l := range sortedKeys(p.backs) {
+		for _, rs := range p.backs[l] {
+			out = append(out, Back{Lineage: l, Reset: rs})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Lineage != out[j].Lineage {
+			return out[i].Lineage < out[j].Lineage
+		}
+		return out[i].Since.Before(out[j].Since)
+	})
+	return out
+}
+
+// TakeBackState is where a take-back from a time stands (RCH-1).
+type TakeBackState int
+
+const (
+	// TakeBackNone: no take-back or reset from that time is recorded.
+	TakeBackNone TakeBackState = iota
+	// TakeBackOwed: recorded and not done, or its machines are back but
+	// the reset is unrecorded or its reach unfinished; Retry carries it.
+	TakeBackOwed
+	// TakeBackDone: its machines are back and the reset is recorded and
+	// finished.
+	TakeBackDone
+)
+
+// TakeBackOf reports where a take-back from since stands, on any lineage
+// (as TakenBackFrom): owed while any take-back or reset from since is not
+// finished, done once one is and none is left.
+func (p *Provenance) TakeBackOf(since time.Time) TakeBackState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	at := since.UTC().UnixNano()
+	for _, m := range []map[string]map[int64]Reset{p.resets, p.backs} {
+		for _, rs := range m {
+			if _, ok := rs[at]; ok {
+				return TakeBackOwed
+			}
+		}
+	}
+	st := TakeBackNone
+	for _, m := range p.takeBacks {
+		if done, ok := m[at]; ok && !done {
+			return TakeBackOwed
+		} else if ok {
+			st = TakeBackDone
+		}
+	}
+	return st
+}
+
+// TakeBacksNotDone lists the take-backs whose TakeBackOf is not done, by
+// lineage and since.
+func (p *Provenance) TakeBacksNotDone() []OwedTakeBack {
+	var out []OwedTakeBack
+	p.mu.Lock()
+	for _, l := range sortedKeys(p.takeBacks) {
+		for since := range p.takeBacks[l] {
+			out = append(out, OwedTakeBack{Lineage: l, Since: time.Unix(0, since).UTC()})
+		}
+	}
+	p.mu.Unlock()
+	kept := out[:0]
+	for _, tb := range out {
+		if p.TakeBackOf(tb.Since) != TakeBackDone {
+			kept = append(kept, tb)
+		}
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].Since.Before(kept[j].Since) })
+	return kept
 }
 
 // TakenBackFrom reports whether a take-back from since, owed or done,
