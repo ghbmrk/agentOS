@@ -35,4 +35,5 @@ Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory 
 
 ## Recurring kinds (to become checks)
 
-- **A problem text names a step that cannot work** (CH-12): UX run 2 (#124, #126, #132, #133), #327 and #423 (STATUS says a release waits for approval when no request is open, [2026-10-09](2026-10-09-pr423.md)). The next package touching owner texts adds a test that flags it ([2026-10-08](2026-10-08-lens-bundle-a.md#recurring-kind)).
+- **A problem text names a step that cannot work** (CH-12): UX run 2 (#124, #126, #132, #133), #327, #423 (STATUS says a release waits for approval when no request is open, [2026-10-09](2026-10-09-pr423.md)), #430 and #434 (staged-adoption texts, [2026-10-09](2026-10-09-pr434.md)). The next package touching owner texts adds a test that flags it ([2026-10-08](2026-10-08-lens-bundle-a.md#recurring-kind)).
+- **Finding text names an identifier, or alarms with no step** (#523, #515, [2026-10-09](2026-10-09-pr515.md)): proposed check `TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep` in `broker/loops`, for the next package touching probe wiring (P3-4b-4b or P3-4b-4c).

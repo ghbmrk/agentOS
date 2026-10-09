@@ -23,6 +23,8 @@ class RiskTierTest(unittest.TestCase):
             "broker/mail/deliver.go": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",
+            "broker/sockprobe/probe.go": "A",
+            "broker/loop7/loop7.go": "B",
             "broker/recall/index.go": "B",
             "broker/newpkg/x.go": "B",
             "guest/openclaw/Dockerfile": "B",

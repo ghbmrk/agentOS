@@ -235,6 +235,9 @@ func (a *Adapter) folderClass(name string, byName map[string]Role) (string, erro
 	return "", ErrTarget
 }
 
+// LabelClass is labelClass, for Loop 2's corpus probe (LOOP-7).
+func (a *Adapter) LabelClass(label string) (string, error) { return a.labelClass(label) }
+
 // labelClass says what adding or removing a label is.
 func (a *Adapter) labelClass(label string) (string, error) {
 	switch {
@@ -382,7 +385,13 @@ func (a *Adapter) isAlert(m Message) bool {
 			return true
 		}
 	}
-	text := m.Subject + "\n" + m.Text
+	return a.AlertWording(m.Subject + "\n" + m.Text)
+}
+
+// AlertWording is isAlert's second net alone: security-alert wording or
+// a code (CH-19), whoever sent the text. Loop 2's corpus probe replays
+// published attack texts through it (LOOP-7).
+func (a *Adapter) AlertWording(text string) bool {
 	if owner.SecretShaped(text) {
 		return true
 	}
