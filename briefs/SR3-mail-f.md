@@ -81,3 +81,47 @@ Release findings on `broker/mail` from Security on #428 (SR3-2, point 1, [note](
 - `Config.Authorized` is replaced by `Config.InUse` (`journal.Engine.InUse`); `broker/journal` is unchanged. `broker/vm/gvisor/corpus_test.go` is outside the declared scope and changed only to compile against the new field.
 - The test harness's `run` now calls `Escalate` before `Execute`, as the gate's dispatch recheck does; `TestQueuedActionAfterRestartAcrossAReset` gains that recheck for its second attempt.
 - Pins are in memory (ASSUMPTIONS M16); delete and report-spam are not pinned (release finding). Undo of a validity-0 flag change is skipped (M17).
+
+## SR3-5-f2: delete-remote pins and in-flight-safe expiry
+
+Release findings on SR3-5-f1 (#579): L3 point 2 and Security round 1 R1 (delete and report-spam are unpinned), Security re-sign R1 (expiry can remove a passed judgement). BOARD row SR3-5-f2; SR3-mail-w needs it. Anchors: ADP-2, OP-2, OP-3, A4, A13, A15. `Defect: SR3-5-f1`.
+
+**Requirements** (local IDs):
+
+- **SR3-5-f2a (pin delete-remote):** `Escalate` plans every `verb.DeleteRemote` intent (`mail.delete`, `mail.report_spam`) with `planOrganize`, as it does an organize.
+  - A plan error adds a poisoned judgement and returns the error, so the gate denies it (ADP-2). Today such a delete passes `Escalate` and fails only at `Execute`.
+  - Otherwise it adds the judgement (`Ref`, destination, alert bit false) and returns no escalation. `DeleteRemote` is irreversible, so the owner is asked for each one anyway; the bound (`reserve`) stays organize-only.
+  - `Execute` takes the intent's judgements and returns `NotApplied` ("changed since approval") on the same conditions as an organize: none, disagreement, or a re-planned `Ref` that differs. Nothing is moved.
+  - `Reconcile` and `keepJudged` stay organize-only. A delete's source can never be Trash or Junk, `planOrganize` refuses that, so after an `Unknown` delete the message is judged by Message-ID as today (LATER if a reviewer wants it pinned).
+- **SR3-5-f2b (expiry spares intents in use):** the expiry in `setPin` never drops a judgement, or an `Unknown` attempt's kept pin, of an intent the journal still lists in `InUse` for a pinned action (Authorized, InFlight, OutcomeUnknown, or Succeeded within 24 h). Only judgements older than 24 h of intents it does not list are dropped. With a nil `InUse` hook nothing is known to be settled, so nothing expires.
+
+**Design choice (no expiry in flight, not a poisoned marker).** Turning an expired judgement into poison would make a queue authorized more than 24 h ago and then released fail its first attempt with `NotApplied`, since its authorize-time judgement would be poison. `TestStaleQueueCountsAfterRestart` and `TestBoundIsExactAfterRestart` dispatch exactly such queues and expect `Succeeded`. Poison markers would also never be removed for an intent that is never dispatched again. Asking the journal which intents are still live keeps the stale queue's authorize-time judgement, which must agree with the recheck's, and frees memory for settled intents only. `setPin` already runs under `a.mu`, and `reserve` makes the same `InUse` call from there, so the lock order is unchanged. `InUse` is called only when some judgement is old enough to drop.
+
+**Failing-test-first controls.** Show each row failing at main (quote the message in the PR), then passing at the head. A control passes at main and must fail under the named mutant. Marker: `REQ: ADP-2, OP-2, OP-3 (SR3-5-f2a, SR3-5-f2b)`.
+
+| ID | Test | Why it fails at main / mutant |
+|---|---|---|
+| SR3-5-f2a swap | For both `mail.delete` and `mail.report_spam`: `Escalate` a newsletter (no ask, no escalation), `swap` in a same-ID alert, then `Execute`. Result is `NotApplied` "changed since approval" and the alert stays in INBOX. | At main the delete re-plans by Message-ID and moves the alert. Mutant: drop `DeleteRemote` from the `Execute` check. |
+| SR3-5-f2a nopin | `Execute` of a delete never passed to `Escalate` returns `NotApplied`. | At main it runs. |
+| SR3-5-f2a plan error | `Escalate` of a delete whose record is missing returns an error. | At main it returns no error. |
+| SR3-5-f2a control | `Escalate` then `Execute` of an unchanged delete succeeds and the message is in Trash. | Mutant: `Escalate` does not pin a delete. |
+| SR3-5-f2b race | Through the real gate and journal: D1's recheck judges the newsletter; D2 waits before its recheck; D1 commits and blocks before `Execute`; the clock moves 25 h and a same-ID alert is swapped in; D2's recheck adds the alert judgement and is refused; D1's `Execute` is `NotApplied` and the alert stays in INBOX. | At main D2's `setPin` drops D1's judgement as older than 24 h, so `Execute` hides the alert. Mutant: drop the in-use exemption. |
+| SR3-5-f2b judged | An alert archive the owner approved ends `Unknown` (lossy store), `InUse` lists it; after 25 h and another intent's `Escalate`, `Reconcile` is `Succeeded`. | At main the kept pin is dropped, so `Reconcile` sees an unpinned hidden alert and returns `Unknown`. |
+| SR3-5-f2b nil hook | With `InUse` nil: `Escalate`, 25 h, swap, another `Escalate`, `Execute` is `NotApplied`. | At main the judgement expires. |
+| SR3-5-f2b control (settled expires) | An `InUse` that lists nothing: a judgement older than 24 h is dropped, so a later recheck alone lets `Execute` run. | Mutant: never expire. |
+
+**Controls that must keep passing.** All of `broker/mail`, including the delete uses in `organize_test.go` and `watch_test.go`, and the stale-queue tests in `gate_test.go`.
+
+**Threat check for the reviewer.**
+- Can any delete or report-spam reach `Move` without every judgement since the last `Execute` agreeing on the planned `Ref`?
+- Can an expiry drop a judgement of an intent that is Authorized, in flight or unknown? What does `InUse` not list that still matters? (Known: a `NotApplied` retry stalled more than 24 h between its recheck and its commit, which needs goroutine starvation while holding no lock.)
+- Does the new `Escalate` error for an unplannable delete change any approved path other than to deny?
+- Is the lock order (`a.mu` then the journal's `e.mu`) safe on every caller of `setPin`?
+
+**Out of scope.** Wiring (SR3-mail-w); pins across restarts (LATER `SR3-5-f1 l1`); a pinned `Reconcile` for delete; the other `SR3-5-f1 l*` rows.
+
+**Scope:** `broker/mail/{guard.go, exec.go, mail.go}`, new `broker/mail/sr3f2_test.go` (and harness helpers in existing `_test.go` files), `broker/mail/ASSUMPTIONS.md` (M16 and a delete-pin note), this section's Delivery notes, `BOARD.md` row SR3-5-f2, `LATER.md`.
+
+**Needs:** SR3-5-f1 (merged, #579 cf62d2a).
+
+**Delivery.** Tier A (`broker/mail`), strongest model, one session. Estimate/checkpoint about 90k tokens. L3 with the threat check, then Security. Done = CI green, every row above covered by a passing test, red-at-main messages quoted in the PR.
