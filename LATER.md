@@ -725,6 +725,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | FOLD l-670e | #670 L3 (`recheck`): error results (`isErr`) are never folded, so a large error passes inline at full size. |
 | FOLD l-670f | #670 L3: `broker/fold/fold_test.go` has no `REQ:` marker, so coverage rests only on `tools_test.go`. |
 | A14 l-674 | #674 lens (records in #685; `recheck`, borders on a false pass in TRACE): the `REQ: A14` marker claims all of A14, but the test pins only the no-guest-network clause. Split the A14 clauses into separate IDs, or narrow the marker. The #674 L3 review raised the same `REQ: A14` coverage marker as a later item. |
+| CTRL l-203 | #203 and #673 (`recheck`): when the inbox is full or a read fails, the owner path reports "agent not running". Belongs to the next package that touches `control` or `guest/owner.go`. |
 
 ## Reuse candidates
 | ID | Component | Why |
