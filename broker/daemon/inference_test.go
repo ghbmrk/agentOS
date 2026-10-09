@@ -37,6 +37,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -620,21 +621,50 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 // childEnvCheck reads one Go source and returns the functions that start
 // a child without an explicit environment (noEnv) and those that put the
 // process's own environment into one (inherits). Imports count under any
-// name, dot imports included.
+// name, dot imports included. Each function declaration, with the func
+// literals inside it, is checked as one unit, and so is each package-level
+// var spec, initializer and literals included; a flagged unit is named by
+// its function, or by "var" and its names.
 //
-// A child starts through exec.Command, exec.CommandContext or an exec.Cmd
-// literal, which need a .Env assignment or an Env key in the same
-// function; or through os.StartProcess, syscall.ForkExec or
-// syscall.StartProcess, whose ProcAttr may not be nil, must have an Env
-// key when it is a literal, and otherwise needs a .Env assignment in the
-// same function. A literal nil Env counts as none, and fails a function
-// that starts a child however else it sets Env. inherits is a reference
-// to any selector named Environ (os.Environ, syscall.Environ,
-// unix.Environ, (*exec.Cmd).Environ) anywhere inside an Env value (a .Env
-// assignment or an Env key of any literal), or anywhere in a function
-// that starts a child, which catches one passed through a local
-// variable; syscall.Exec and unix.Exec count as starting a child. It
-// has no exemption.
+// Children and their environment, per command (P3-4b-3r-env-r1):
+//   - A command is an exec.Command or exec.CommandContext call, an exec.Cmd
+//     literal without Env, new(exec.Cmd), or a var declared as exec.Cmd.
+//     A ProcAttr passed to os.StartProcess, syscall.ForkExec or
+//     syscall.StartProcess may not be nil, needs an Env key when it is a
+//     literal, and otherwise counts as a command held in that variable.
+//   - A command needs an Env set on the variable that holds it: a .Env
+//     assignment to the same identifier or selector chain (resolved to its
+//     declaration, so a same-named variable in another scope does not
+//     count), or a literal with an Env key bound to it. An Env set on any
+//     other value, an unrelated struct's included, does not count. A
+//     command held in no variable (a call chained on the constructor, a
+//     return, an argument) is flagged, as is any reference to a launcher
+//     that is not a call (exec.Command as a function value), since the
+//     call it makes cannot be followed.
+//   - An Env that is nil at run time counts as none and fails its command:
+//     a literal nil; a typed-nil conversion ([]string(nil)); a local var
+//     declared without a value and not assigned (or its address taken)
+//     before the Env takes it; a package-level var of this file declared
+//     without a value and assigned nowhere in the file; a call to a
+//     package function whose every return is one of those literals.
+//
+// inherits is a reference to any selector named Environ (os.Environ,
+// syscall.Environ, unix.Environ, (*exec.Cmd).Environ) anywhere inside an
+// Env value (a .Env assignment or an Env key of any literal) or Exec's
+// environment argument, or anywhere in a unit that starts a child, which
+// catches one passed through a local variable; or, in the same places, a
+// call to a package function or method (by name, in any file of the
+// package) whose return expression, or a local variable it returns, holds
+// one, followed three calls deep. syscall.Exec and unix.Exec count as
+// starting a child. It has no exemption.
+//
+// Procedural, held by review (cmd/agentosd ASSUMPTIONS L7-2): an Env value
+// the check cannot classify (a parameter, another struct's field, a map
+// lookup, a package-level var or nil helper in another file, a
+// multi-value call); a command copied to another variable, or whose Env
+// is set in another function; an Environ helper reached through a func
+// value, an interface, another package, or more than three calls; and
+// reflection.
 func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -678,6 +708,11 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		}
 		return false
 	}
+	command := func(e ast.Expr) bool { return is(e, "os/exec", "Command", "CommandContext") }
+	attrLauncher := func(e ast.Expr) bool {
+		return is(e, "os", "StartProcess") || is(e, "syscall", "ForkExec", "StartProcess")
+	}
+	execLauncher := func(e ast.Expr) bool { return is(e, "syscall", "Exec") || is(e, "golang.org/x/sys/unix", "Exec") }
 	environ := func(e ast.Node) bool {
 		found := false
 		ast.Inspect(e, func(n ast.Node) bool {
@@ -694,69 +729,330 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		})
 		return found
 	}
-	// isNil: a literal nil Env, which exec.Cmd and os.StartProcess read
-	// as "inherit" (L3 on #587).
+	strip := func(e ast.Expr) ast.Expr {
+		e = ast.Unparen(e)
+		if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.AND {
+			e = ast.Unparen(u.X)
+		}
+		return e
+	}
+	// isNil: a literal nil, bare or converted ([]string(nil)), which
+	// exec.Cmd and os.StartProcess read as "inherit" (L3 on #587).
 	isNil := func(e ast.Expr) bool {
-		id, ok := ast.Unparen(e).(*ast.Ident)
+		e = ast.Unparen(e)
+		if c, ok := e.(*ast.CallExpr); ok && len(c.Args) == 1 {
+			if _, ok := ast.Unparen(c.Fun).(*ast.ArrayType); ok {
+				e = ast.Unparen(c.Args[0])
+			}
+		}
+		id, ok := e.(*ast.Ident)
 		return ok && id.Name == "nil"
+	}
+	// key names the variable that holds a command or ProcAttr: the root
+	// identifier's declaration and the selector chain under it, or "" if
+	// it is held in none.
+	key := func(e ast.Expr) string {
+		e = strip(e)
+		if s, ok := e.(*ast.StarExpr); ok {
+			e = ast.Unparen(s.X)
+		}
+		chain := ""
+		for {
+			switch x := e.(type) {
+			case *ast.SelectorExpr:
+				chain, e = "."+x.Sel.Name+chain, ast.Unparen(x.X)
+				continue
+			case *ast.Ident:
+				if x.Name == "_" || x.Name == "nil" {
+					return ""
+				}
+				if x.Obj != nil {
+					return fmt.Sprintf("%p", x.Obj) + chain
+				}
+				return x.Name + chain
+			}
+			return ""
+		}
+	}
+	// helpers are the package's functions (by name) and methods (by
+	// "."+name) that a call may reach, read from every file of the
+	// package once a call needs them.
+	var pkg map[string][]*ast.FuncDecl
+	helpers := func(c *ast.CallExpr) []*ast.FuncDecl {
+		var name string
+		switch fn := ast.Unparen(c.Fun).(type) {
+		case *ast.Ident:
+			if fn.Obj != nil && fn.Obj.Kind != ast.Fun {
+				return nil
+			}
+			name = fn.Name
+		case *ast.SelectorExpr:
+			if id, ok := fn.X.(*ast.Ident); ok && id.Obj == nil {
+				return nil // another package's function
+			}
+			name = "." + fn.Sel.Name
+		default:
+			return nil
+		}
+		if pkg == nil {
+			pkg = packageFuncs(t, filepath.Dir(path))
+		}
+		return pkg[name]
+	}
+	returns := func(d *ast.FuncDecl) (rs []*ast.ReturnStmt) {
+		ast.Inspect(d.Body, func(n ast.Node) bool {
+			if r, ok := n.(*ast.ReturnStmt); ok {
+				rs = append(rs, r)
+			}
+			_, lit := n.(*ast.FuncLit)
+			return !lit
+		})
+		return rs
+	}
+	// holds: e references Environ, or calls a helper whose return does,
+	// depth calls deep (P3-4b-3r-env-r1 requirement 4).
+	var holds func(e ast.Node, depth int) bool
+	holds = func(e ast.Node, depth int) bool {
+		if environ(e) {
+			return true
+		}
+		found := false
+		ast.Inspect(e, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok || depth == 0 {
+				return !found
+			}
+			for _, d := range helpers(c) {
+				if found || d.Body == nil {
+					continue
+				}
+				objs := map[*ast.Object]bool{}
+				for _, r := range returns(d) {
+					for _, x := range r.Results {
+						found = found || holds(x, depth-1)
+						ast.Inspect(x, func(n ast.Node) bool {
+							if id, ok := n.(*ast.Ident); ok && id.Obj != nil && id.Obj.Kind == ast.Var {
+								objs[id.Obj] = true
+							}
+							return true
+						})
+					}
+				}
+				// A local the helper returns, assigned from one.
+				ast.Inspect(d.Body, func(n ast.Node) bool {
+					switch n := n.(type) {
+					case *ast.AssignStmt:
+						for i, l := range n.Lhs {
+							if id, ok := l.(*ast.Ident); ok && objs[id.Obj] {
+								r := n.Rhs[0]
+								if len(n.Rhs) == len(n.Lhs) {
+									r = n.Rhs[i]
+								}
+								found = found || holds(r, depth-1)
+							}
+						}
+					case *ast.ValueSpec:
+						for i, id := range n.Names {
+							if objs[id.Obj] && i < len(n.Values) {
+								found = found || holds(n.Values[i], depth-1)
+							}
+						}
+					}
+					return !found
+				})
+			}
+			return !found
+		})
+		return found
+	}
+	top := map[*ast.ValueSpec]bool{}
+	for _, d := range f.Decls {
+		if g, ok := d.(*ast.GenDecl); ok {
+			for _, s := range g.Specs {
+				if vs, ok := s.(*ast.ValueSpec); ok {
+					top[vs] = true
+				}
+			}
+		}
+	}
+	// assigned: where each variable is assigned or has its address taken.
+	assigned := map[*ast.Object][]token.Pos{}
+	bind := map[ast.Expr]string{}
+	mark := func(e ast.Expr, at token.Pos) {
+		if id, ok := ast.Unparen(e).(*ast.Ident); ok && id.Obj != nil {
+			assigned[id.Obj] = append(assigned[id.Obj], at)
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for i, l := range n.Lhs {
+				mark(l, n.Pos())
+				if len(n.Rhs) == len(n.Lhs) {
+					bind[strip(n.Rhs[i])] = key(l)
+				}
+			}
+		case *ast.ValueSpec:
+			for i, id := range n.Names {
+				if i < len(n.Values) {
+					bind[strip(n.Values[i])] = key(id)
+				}
+			}
+		case *ast.UnaryExpr:
+			if n.Op == token.AND {
+				mark(n.X, n.Pos())
+			}
+		case *ast.RangeStmt:
+			if n.Tok == token.ASSIGN {
+				for _, x := range []ast.Expr{n.Key, n.Value} {
+					if x != nil {
+						mark(x, n.Pos())
+					}
+				}
+			}
+		}
+		return true
+	})
+	// nilAt: an Env value that is nil when it is taken at pos at
+	// (P3-4b-3r-env-r1 requirement 5).
+	nilAt := func(e ast.Expr, at token.Pos) bool {
+		if isNil(e) {
+			return true
+		}
+		switch x := ast.Unparen(e).(type) {
+		case *ast.Ident:
+			if x.Obj == nil || x.Obj.Kind != ast.Var {
+				return false
+			}
+			vs, ok := x.Obj.Decl.(*ast.ValueSpec)
+			if !ok || len(vs.Values) != 0 {
+				return false
+			}
+			for _, p := range assigned[x.Obj] {
+				if top[vs] || p < at {
+					return false
+				}
+			}
+			return true
+		case *ast.CallExpr:
+			if _, ok := ast.Unparen(x.Fun).(*ast.Ident); !ok {
+				return false
+			}
+			ds := helpers(x)
+			for _, d := range ds {
+				rs := returns(d)
+				if d.Body == nil || len(rs) == 0 {
+					return false
+				}
+				for _, r := range rs {
+					if len(r.Results) != 1 || !isNil(r.Results[0]) {
+						return false
+					}
+				}
+			}
+			return len(ds) > 0
+		}
+		return false
 	}
 	hasEnv := func(lit *ast.CompositeLit) bool {
 		for _, e := range lit.Elts {
 			if kv, ok := e.(*ast.KeyValueExpr); ok {
-				if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Env" && !isNil(kv.Value) {
+				if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Env" && !nilAt(kv.Value, kv.Pos()) {
 					return true
 				}
 			}
 		}
 		return false
 	}
+	type unit struct {
+		name                 string
+		node                 ast.Node
+		starts, bad, inherit bool
+	}
+	var units []*unit
 	for _, d := range f.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
+		switch d := d.(type) {
+		case *ast.FuncDecl:
+			if d.Body != nil {
+				units = append(units, &unit{name: d.Name.Name, node: d.Body})
+			}
+		case *ast.GenDecl:
+			for _, s := range d.Specs {
+				if vs, ok := s.(*ast.ValueSpec); ok && d.Tok == token.VAR {
+					var ns []string
+					for _, id := range vs.Names {
+						ns = append(ns, id.Name)
+					}
+					units = append(units, &unit{name: "var " + strings.Join(ns, ","), node: vs})
+				}
+			}
 		}
-		// bare: a ProcAttr that is nil or a literal without Env, which no
-		// later assignment can fix.
-		starts, setsEnv, bare, inherit, launches, nilEnv := false, false, false, false, false, false
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
+	}
+	// envSet and nilEnv hold the variables an Env is set on, and those
+	// set to a nil one; each command's variable is checked against them
+	// once the whole file is read.
+	envSet, nilEnv := map[string]bool{}, map[string]bool{}
+	type held struct {
+		u   *unit
+		key string
+	}
+	var children []held
+	for _, u := range units {
+		calls, skip := map[ast.Expr]bool{}, map[*ast.Ident]bool{}
+		ast.Inspect(u.node, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.CallExpr:
-				starts = starts || is(n.Fun, "os/exec", "Command", "CommandContext")
-				launches = launches || is(n.Fun, "os", "StartProcess") || is(n.Fun, "syscall", "ForkExec", "StartProcess")
+				calls[ast.Unparen(n.Fun)] = true
+				if fn, ok := ast.Unparen(n.Fun).(*ast.Ident); command(n.Fun) || ok && fn.Name == "new" && fn.Obj == nil && len(n.Args) == 1 && is(n.Args[0], "os/exec", "Cmd") {
+					u.starts = true
+					children = append(children, held{u, bind[n]})
+				}
 				// syscall.Exec and unix.Exec run a new program with the
 				// environment in their third argument (Security 4a on #587).
-				if (is(n.Fun, "syscall", "Exec") || is(n.Fun, "golang.org/x/sys/unix", "Exec")) && len(n.Args) == 3 {
-					launches = true
-					inherit = inherit || environ(n.Args[2])
+				if execLauncher(n.Fun) && len(n.Args) == 3 {
+					u.starts = true
+					u.inherit = u.inherit || holds(n.Args[2], 3)
 				}
-				if (is(n.Fun, "os", "StartProcess") || is(n.Fun, "syscall", "ForkExec", "StartProcess")) && len(n.Args) == 3 {
-					a := ast.Unparen(n.Args[2])
-					if u, ok := a.(*ast.UnaryExpr); ok && u.Op == token.AND {
-						a = ast.Unparen(u.X)
-					}
-					switch a := a.(type) {
-					case *ast.Ident:
-						bare = bare || a.Name == "nil"
-						starts = starts || a.Name != "nil"
+				if attrLauncher(n.Fun) && len(n.Args) == 3 {
+					u.starts = true
+					switch a := strip(n.Args[2]).(type) {
 					case *ast.CompositeLit:
-						bare = bare || !hasEnv(a)
+						u.bad = u.bad || !hasEnv(a)
 					default:
-						starts = true
+						if k := key(a); k == "" {
+							u.bad = true // nil, or a value no variable holds
+						} else {
+							children = append(children, held{u, k})
+						}
+					}
+				}
+			case *ast.SelectorExpr:
+				skip[n.Sel] = true
+			case *ast.KeyValueExpr:
+				if id, ok := n.Key.(*ast.Ident); ok {
+					skip[id] = true
+					if id.Name == "Env" {
+						u.inherit = u.inherit || holds(n.Value, 3)
 					}
 				}
 			case *ast.CompositeLit:
 				if is(n.Type, "os/exec", "Cmd") {
-					starts = true
+					u.starts = true
+					if !hasEnv(n) {
+						children = append(children, held{u, bind[n]})
+					}
 				}
-				if hasEnv(n) && (is(n.Type, "os/exec", "Cmd") || is(n.Type, "os", "ProcAttr") || is(n.Type, "syscall", "ProcAttr")) {
-					setsEnv = true
+				if k := bind[n]; k != "" && hasEnv(n) {
+					envSet[k] = true
 				}
-				for _, e := range n.Elts {
-					if kv, ok := e.(*ast.KeyValueExpr); ok {
-						if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Env" {
-							inherit = inherit || environ(kv.Value)
-							nilEnv = nilEnv || isNil(kv.Value)
-						}
+			case *ast.ValueSpec:
+				for _, id := range n.Names {
+					skip[id] = true
+				}
+				if len(n.Values) == 0 && n.Type != nil && is(n.Type, "os/exec", "Cmd") {
+					u.starts = true
+					for _, id := range n.Names {
+						children = append(children, held{u, key(id)})
 					}
 				}
 			case *ast.AssignStmt:
@@ -765,28 +1061,82 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 					if !ok || se.Sel.Name != "Env" {
 						continue
 					}
-					rhs, isNilHere := n.Rhs, false
+					rhs, k := n.Rhs, key(se.X)
 					if len(n.Rhs) == len(n.Lhs) {
-						rhs, isNilHere = n.Rhs[i:i+1], isNil(n.Rhs[i])
+						rhs = n.Rhs[i : i+1]
+						if nilAt(rhs[0], n.Pos()) {
+							nilEnv[k] = true
+						}
 					}
-					setsEnv = setsEnv || !isNilHere
-					nilEnv = nilEnv || isNilHere
+					envSet[k] = true
 					for _, r := range rhs {
-						inherit = inherit || environ(r)
+						u.inherit = u.inherit || holds(r, 3)
 					}
+				}
+			}
+			// A launcher referenced but not called: its call cannot be
+			// followed (P3-4b-3r-env-r1 requirement 2).
+			if x, ok := n.(ast.Expr); ok && !calls[x] && (command(x) || attrLauncher(x) || execLauncher(x)) {
+				if id, ok := x.(*ast.Ident); !ok || !skip[id] {
+					u.starts, u.bad = true, true
 				}
 			}
 			return true
 		})
-		inherit = inherit || (starts || launches) && environ(fn.Body)
-		if bare || starts && !setsEnv || nilEnv && (starts || launches) {
-			noEnv = append(noEnv, fn.Name.Name)
+	}
+	for _, c := range children {
+		if c.key == "" || nilEnv[c.key] || !envSet[c.key] {
+			c.u.bad = true
 		}
-		if inherit {
-			inherits = append(inherits, fn.Name.Name)
+	}
+	for _, u := range units {
+		u.inherit = u.inherit || u.starts && holds(u.node, 3)
+		if u.bad {
+			noEnv = append(noEnv, u.name)
+		}
+		if u.inherit {
+			inherits = append(inherits, u.name)
 		}
 	}
 	return noEnv, inherits
+}
+
+// pkgFuncs caches each package directory's functions for packageFuncs.
+var pkgFuncs sync.Map
+
+// packageFuncs returns the function declarations in the non-test Go files
+// of dir, functions by name and methods by "."+name, so childEnvCheck can
+// follow a helper into another file of the package.
+func packageFuncs(t *testing.T, dir string) map[string][]*ast.FuncDecl {
+	t.Helper()
+	if m, ok := pkgFuncs.Load(dir); ok {
+		return m.(map[string][]*ast.FuncDecl)
+	}
+	m := map[string][]*ast.FuncDecl{}
+	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range files {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			if fn, ok := d.(*ast.FuncDecl); ok {
+				name := fn.Name.Name
+				if fn.Recv != nil {
+					name = "." + name
+				}
+				m[name] = append(m[name], fn)
+			}
+		}
+	}
+	pkgFuncs.Store(dir, m)
+	return m
 }
 
 // P3-4b-3a requirement 2 (#515 Security 2, owed check), widened by
@@ -940,6 +1290,96 @@ func j() { _ = os.Environ() }
 func k() { a := &os.ProcAttr{Env: []string{}}; os.StartProcess("/x", nil, a) }
 func l() { syscall.Exec("/x", nil, []string{"PATH=/bin"}) }`)
 	if noEnv, inherits := check(ok); len(noEnv)+len(inherits) != 0 {
+		t.Errorf("flagged %v %v", noEnv, inherits)
+	}
+}
+
+// REQ: CRED-1, ARC-1
+//
+// P3-4b-3r-env-r1: the shapes the check passed before (#587 Security 4a
+// point 1 and L3 point 3; runtime-nil Env, Security comment 6079549676;
+// typed-nil conversion, L3 comment 6079546431). Each file set is one
+// package; the first file is the one checked.
+func TestEnvCheckCatchesTheShapesItPassed(t *testing.T) {
+	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
+	check := func(files ...string) (noEnv, inherits []string) {
+		dir := t.TempDir()
+		for i, c := range files {
+			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("p%d.go", i)), []byte(c), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return childEnvCheck(t, filepath.Join(dir, "p0.go"))
+	}
+	for _, c := range [][]string{
+		// Requirement 1: an exec.Cmd made without a constructor.
+		{src(`"os/exec"`, `func f() { var c exec.Cmd; c.Path = "/x"; c.Args = []string{"x"}; c.Run() }`)},
+		{src(`"os/exec"`, `func f() { c := new(exec.Cmd); c.Path = "/x"; c.Args = []string{"x"}; c.Start() }`)},
+		{src(`x "os/exec"`, `func f() ([]byte, error) { var c *x.Cmd; c = new(x.Cmd); c.Path = "/x"; return c.Output() }`)},
+		{src(`"os/exec"`, `var c exec.Cmd; func f() { c.Path = "/x"; c.Run() }`)},
+		// Requirement 2: a launcher as a function value, wherever it is
+		// referenced, and a call in a package-level var initializer or a
+		// func literal.
+		{src(`"os/exec"`, `func f() { run := exec.Command; c := run("x"); c.Env = []string{}; c.Run() }`)},
+		{src(`x "os/exec"`, `func g(func(string, ...string) *x.Cmd) {}; func f() { g(x.Command) }`)},
+		{src(`"os/exec"`, `var mk = exec.CommandContext`)},
+		{src(`"os"`, `var start = os.StartProcess`)},
+		{src(`. "os/exec"`, `func f() { _ = Command }`)},
+		{src(`"os/exec"`, `var c = exec.Command("x")`)},
+		{src(`"os/exec"`, `var run = func() error { return exec.Command("x").Run() }`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("y"); c.Env = []string{}; c.Run(); go func() { d := exec.Command("x"); d.Run() }() }`)},
+		// Requirement 3: Env belongs to the command it is set on.
+		{src(`"os/exec"`, `func f() { a := exec.Command("a"); a.Env = []string{}; b := exec.Command("b"); a.Run(); b.Run() }`)},
+		{src(`"os/exec"`, `type L struct{ Env []string }; func f() { var l L; l.Env = []string{"A=1"}; c := exec.Command("x"); c.Run(); _ = l }`)},
+		{src(`"os/exec"`, `func f(b bool) { if b { c := exec.Command("x"); c.Env = []string{}; c.Run() } else { c := exec.Command("y"); c.Run() } }`)},
+		{src(`"os/exec"`, `type R struct{ a, b *exec.Cmd }; func (r *R) f() { r.a = exec.Command("a"); r.b = exec.Command("b"); r.a.Env = []string{}; r.b.Run() }`)},
+		{src(`"os"`, `func f() { a := os.ProcAttr{}; b := os.ProcAttr{}; b.Env = []string{}; os.StartProcess("/x", nil, &a); _ = b }`)},
+		// Requirement 5: an Env that is nil at run time.
+		{src(`"os/exec"`, `func f() { var e []string; c := exec.Command("x"); c.Env = e; c.Run() }`)},
+		{src(`"os/exec"`, `var e []string; func f() { c := exec.Command("x"); c.Env = e; c.Run() }`)},
+		{src(`"os/exec"`, `func env() []string { return nil }; func f() { c := exec.Command("x"); c.Env = env(); c.Run() }`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = []string(nil); c.Run() }`)},
+		{src(`"os/exec"`, `func f() { (&exec.Cmd{Path: "/x", Env: ([]string)(nil)}).Run() }`)},
+		{src(`"os"`, `func f() { var e []string; os.StartProcess("/x", nil, &os.ProcAttr{Env: e}) }`)},
+		{src(`"os/exec"`, `func f() { var e []string; c := exec.Command("x"); c.Env = e; e = []string{"A=1"}; c.Run() }`)},
+	} {
+		if noEnv, _ := check(c...); len(noEnv) == 0 {
+			t.Errorf("missed:\n%s", strings.Join(c, "\n"))
+		}
+	}
+	// Requirement 4: the process's environment through a same-package
+	// helper's return value, followed three calls deep.
+	for _, c := range [][]string{
+		{src(`"os"; "os/exec"`, `func env() []string { return append(os.Environ(), "A=1") }; func f() { c := exec.Command("x"); c.Env = env(); c.Run() }`)},
+		{src(`"os"; "os/exec"`, `func e1() []string { return os.Environ() }; func e2() []string { return e1() }; func e3() []string { return append(e2(), "A=1") }; func f() { c := exec.Command("x"); c.Env = e3(); c.Run() }`)},
+		{src(`"os"; "os/exec"`, `func env() []string { e := os.Environ(); return append(e, "A=1") }; func f() { c := exec.Command("x"); c.Env = env(); c.Run() }`)},
+		{src(`"os"; "os/exec"`, `type T struct{}; func (T) env() []string { return os.Environ() }; func f(t T) { c := exec.Command("x"); c.Env = t.env(); c.Run() }`)},
+		{src(`"os"`, `func env() []string { return os.Environ() }; func f() { os.StartProcess("/x", nil, &os.ProcAttr{Env: env()}) }`)},
+		{src(`"os"; "os/exec"`, `func env() []string { return os.Environ() }; func f() { e := env(); c := exec.Command("x"); c.Env = e; c.Run() }`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = env(); c.Run() }`), src(`"os"`, `func env() []string { return os.Environ() }`)},
+	} {
+		if _, inherits := check(c...); len(inherits) == 0 {
+			t.Errorf("os.Environ() missed:\n%s", strings.Join(c, "\n"))
+		}
+	}
+	ok := []string{src(`"os/exec"; "os"`, `func m() { var c exec.Cmd; c.Path = "/x"; c.Env = []string{}; c.Run() }
+func n() { c := new(exec.Cmd); c.Path = "/x"; c.Env = []string{"PATH=/bin"}; c.Start() }
+var pc = &exec.Cmd{Path: "/x", Env: []string{}}
+var run = func() { c := exec.Command("x"); c.Env = []string{}; c.Run() }
+func o() { go func() { c := exec.Command("x"); c.Env = []string{}; c.Run() }() }
+type R struct{ cmd *exec.Cmd }
+func (r *R) p() { r.cmd = exec.Command("x"); r.cmd.Env = []string{}; r.cmd.Run() }
+func q() { c := exec.Command("x"); c.Env = explicit(); c.Run() }
+func explicit() []string { return []string{"PATH=/bin"} }
+var fixedEnv = []string{"PATH=/bin"}
+func r() { c := exec.Command("x"); c.Env = fixedEnv; c.Run() }
+func s(env []string) { c := exec.Command("x"); c.Env = env; c.Run() }
+func u() { var e []string; e = append(e, "A=1"); c := exec.Command("x"); c.Env = e; c.Run() }
+func v() { c := exec.Command("x"); c.Env = []string{}; go func() { c.Run() }() }
+func w() { a := exec.Command("a"); b := exec.Command("b"); a.Env, b.Env = []string{}, []string{}; a.Run(); b.Run() }
+func y() { a := os.ProcAttr{Env: []string{}}; os.StartProcess("/x", nil, &a) }
+func z() { c := exec.Command("x"); c.Env = fixed2(); c.Run() }`), src(``, `func fixed2() []string { return []string{"PATH=/bin"} }`)}
+	if noEnv, inherits := check(ok...); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v", noEnv, inherits)
 	}
 }
