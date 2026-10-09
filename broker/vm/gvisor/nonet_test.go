@@ -26,12 +26,21 @@ func TestAGuestCannotDial(t *testing.T) {
 		t.Fatal(err)
 	}
 	var spec struct {
-		Linux struct {
+		Annotations map[string]string
+		Linux       struct {
 			Namespaces []struct{ Type, Path string }
 		}
 	}
 	if err := json.Unmarshal(b, &spec); err != nil {
 		t.Fatal(err)
+	}
+	// With --allow-flag-override, runsc takes dev.gvisor.flag.<name>
+	// annotations as flags, so dev.gvisor.flag.network could undo
+	// --network=none. Neither may appear.
+	for k := range spec.Annotations {
+		if strings.HasPrefix(k, "dev.gvisor.flag.") {
+			t.Fatalf("bundle overrides a runsc flag: %q", k)
+		}
 	}
 	netns := false
 	for _, ns := range spec.Linux.Namespaces {
@@ -50,6 +59,9 @@ func TestAGuestCannotDial(t *testing.T) {
 	args := (&Runtime{Bin: "runsc", StateDir: dir}).argv("run")
 	network := ""
 	for i, a := range args {
+		if name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "="); strings.HasPrefix(a, "-") && name == "allow-flag-override" {
+			t.Fatalf("runsc lets the bundle override its flags: %q", args)
+		}
 		switch {
 		case a == "--network" || a == "-network":
 			if i+1 < len(args) {
