@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -28,6 +29,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/quota"
 	"github.com/ghbmrk/agentos/broker/replay"
 	"github.com/ghbmrk/agentos/broker/routerule"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -118,8 +120,13 @@ type learnPaths struct {
 	// runs no fuzz targets.
 	Fuzz string
 	// Loop7 is LOOP-7's state: each target's corpus with the crash inputs
-	// found on this box, and the fuzz engine's cache.
+	// found on this box, and the fuzz engine's cache. main sets it to
+	// fuzzState, a constant, never a flag.
 	Loop7 string
+	// DiskQuota is -disk-quota: "on" bounds the fuzz user's tree with a
+	// project quota of its own (RES-4); anything else, with FuzzUser set,
+	// runs no fuzz targets.
+	DiskQuota string
 	// FuzzUser names the unprivileged user fuzz children run as, and
 	// Cgroup the broker's delegated cgroup root, where their leaf goes
 	// beside broker/ (L7-6). main sets both; with FuzzUser set, a box that
@@ -137,6 +144,20 @@ const (
 	fuzzEvery   = 30 * time.Minute
 	fuzzTime    = 30 * time.Second
 	fuzzUser    = "agentos-fuzz"
+	// fuzzState is the fuzz user's tree (L7-6): beside the broker's
+	// /var/lib/agentos, not in it, under root-owned /var/lib.
+	fuzzState = "/var/lib/agentos-fuzz"
+)
+
+// The fuzz tree's disk quota (RES-4, L7-6): a project of its own, below
+// the IDs vm gives machines (from 0x41470001), so no machine shares it;
+// 1 GiB holds the caches' 512 MiB (loop7 F15) with the targets' corpora
+// and the runs' scratch, and the inode cap stops a child exhausting the
+// state disk's inodes with empty files.
+const (
+	fuzzProject    = 0x41460000
+	fuzzDiskBytes  = 1 << 30
+	fuzzDiskInodes = 1 << 18
 )
 
 // corpusEvery is how often the guard replays the embedded corpus through
@@ -154,8 +175,8 @@ const corpusEvery = 24 * time.Hour
 var fuzzLimits = cgroup.Limits{MaxBytes: 1 << 30, HighBytes: 1 << 30, Pids: 256, CPUWeight: budget.PoolWeight, IOWeight: budget.PoolWeight}
 
 // fuzzJail confines fuzz children (L7-6): their own leaf under p.Cgroup,
-// p.FuzzUser, no network, and p.Loop7 given to that user. Nil without a
-// FuzzUser (tests).
+// p.FuzzUser, no network, and p.Loop7 given to that user under a disk
+// quota of its own. Nil without a FuzzUser (tests).
 func fuzzJail(p learnPaths) (*loop7.Jail, error) {
 	if p.FuzzUser == "" {
 		return nil, nil
@@ -175,15 +196,63 @@ func fuzzJail(p learnPaths) (*loop7.Jail, error) {
 	if err != nil {
 		return nil, err
 	}
+	state := filepath.Clean(p.Loop7)
+	if err := unswappable(state, uint32(uid), uint32(gid)); err != nil {
+		return nil, err
+	}
+	disk, err := fuzzQuota(p.DiskQuota, state)
+	if err != nil {
+		return nil, err
+	}
 	leaf, err := (&cgroup.Group{Path: p.Cgroup}).Component("fuzz", fuzzLimits)
 	if err != nil {
 		return nil, err
 	}
-	j := &loop7.Jail{Leaf: leaf.Path, UID: uint32(uid), GID: uint32(gid), State: filepath.Clean(p.Loop7)}
+	j := &loop7.Jail{Leaf: leaf.Path, UID: uint32(uid), GID: uint32(gid), State: state, Disk: disk}
 	if err := j.Own(); err != nil {
 		return nil, err
 	}
 	return j, nil
+}
+
+// unswappable refuses a state the fuzz user could replace with a link
+// (loop7 F16): one that is a link itself, or whose parent the user owns
+// or may write by its mode.
+func unswappable(state string, uid, gid uint32) error {
+	if fi, err := os.Lstat(state); err != nil {
+		return err
+	} else if !fi.IsDir() {
+		return fmt.Errorf("fuzz state %s is not a directory", state)
+	}
+	fi, err := os.Lstat(filepath.Dir(state))
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid == uid || fi.Mode().Perm()&0o002 != 0 || (st.Gid == gid && fi.Mode().Perm()&0o020 != 0) {
+		return fmt.Errorf("fuzz state %s: its parent is writable by the fuzz user", state)
+	}
+	return nil
+}
+
+// fuzzQuota is the jail's disk hook for the fuzz tree at state (RES-4):
+// it tags the whole tree with fuzzProject and sets the project's limits.
+// mode is -disk-quota; with it off, or no project quotas on state's file
+// system, there is no hook and why.
+func fuzzQuota(mode, state string) (func(string) error, error) {
+	if mode != "on" {
+		return nil, fmt.Errorf("-disk-quota=%s: nothing would bound the fuzz user's writes", mode)
+	}
+	fs, err := quota.Open(state)
+	if err != nil {
+		return nil, err
+	}
+	return func(dir string) error {
+		if err := fs.Tag(dir, fuzzProject); err != nil {
+			return err
+		}
+		return fs.Limit(dir, fuzzProject, fuzzDiskBytes, fuzzDiskInodes)
+	}, nil
 }
 
 // fuzzTargets are the release's fuzz targets and their jail, or none when

@@ -133,7 +133,7 @@ jobs:
         # The quota tests run on each that mounts and fail if neither does.
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq xfsprogs
+          sudo apt-get install -yq xfsprogs acl
           sudo modprobe quota_v2 2>/dev/null || {
             sudo apt-get install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2
           } || echo "::warning::no quota_v2 module: ext4 quota tests skip; XFS covers them"
@@ -151,8 +151,8 @@ jobs:
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -v ./loop7
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
-            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
-            go test -count=1 -v -run '^TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound$' ./cmd/agentosd
+            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci AGENTOS_REQUIRE_QUOTA=1 \
+            go test -count=1 -v -run '^(TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound|TestAFuzzChildReachesOnlyItsOwnBoundedTree)$' ./cmd/agentosd
           # Per-machine disk quotas on a prjquota file system (RES-4, SR2-3).
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd

@@ -1,6 +1,6 @@
 package loop7
 
-// REQ: LOOP-1, LOOP-7
+// REQ: LOOP-1, LOOP-7, RES-4
 //
 // P3-4b-3r-confine: a fuzz child cannot take the broker down. It runs
 // without root and without the network, in a cgroup leaf with its own
@@ -13,7 +13,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -155,8 +157,8 @@ func testLeaf(t *testing.T, name string, maxBytes int64) *cgroup.Group {
 	return leaf
 }
 
-// jailDir is a directory nobody can traverse, as /var/lib/agentos is for
-// agentos-fuzz (its ACL); t.TempDir's parent is 0700.
+// jailDir is a directory nobody can traverse, as /var/lib is for
+// agentos-fuzz; t.TempDir's parent is 0700.
 func jailDir(t *testing.T) string {
 	t.Helper()
 	d, err := os.MkdirTemp("", "loop7-jail-")
@@ -241,9 +243,39 @@ func TestJailedChildHelper(t *testing.T) {
 	fmt.Printf("cgroup %s\n", strings.TrimSpace(string(cg)))
 	for _, a := range flag.Args() {
 		network, addr, _ := strings.Cut(a, ":")
-		fmt.Printf("dial %s %s\n", network, dialed(network, addr))
+		switch network {
+		case "create", "shm":
+			fmt.Printf("dial %s %s\n", a, reached(network, addr))
+		default:
+			fmt.Printf("dial %s %s\n", network, dialed(network, addr))
+		}
 	}
 }
+
+// reached creates the file addr, or the SysV shm segment with key addr
+// (decimal), and leaves it there.
+func reached(kind, addr string) string {
+	var err error
+	switch kind {
+	case "create":
+		var f *os.File
+		if f, err = os.OpenFile(addr, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
+			f.Close()
+		}
+	case "shm":
+		key, _ := strconv.Atoi(addr)
+		if _, _, e := syscall.Syscall(syscall.SYS_SHMGET, uintptr(key), 4096, ipcCreat|0o600); e != 0 {
+			err = e
+		}
+	}
+	if err != nil {
+		return "failed: " + err.Error()
+	}
+	return "ok"
+}
+
+// ipcCreat is IPC_CREAT, which package syscall does not name.
+const ipcCreat = 0o1000
 
 // dialed dials addr and, for UDP, which has no handshake, sends a datagram.
 func dialed(network, addr string) string {
@@ -609,5 +641,119 @@ func TestAFuzzStepThatDidNotRunSaysWhy(t *testing.T) {
 	_, err := s.Fuzz(context.Background(), tg)
 	if err == nil || !strings.Contains(err.Error(), "engine refused the cache directory") {
 		t.Fatalf("error %v, want the engine's reason", err)
+	}
+}
+
+// shmKeys are the SysV shm keys the host's IPC namespace holds.
+func shmKeys(t *testing.T) map[string]bool {
+	t.Helper()
+	b, err := os.ReadFile("/proc/sysvipc/shm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for _, l := range strings.Split(string(b), "\n")[1:] {
+		if f := strings.Fields(l); len(f) > 0 {
+			keys[f[0]] = true
+		}
+	}
+	return keys
+}
+
+// LOOP-1, RES-4 (root; P3-4b-3r-confine-r4): a SysV shm segment a jailed
+// child makes lives in the child's own IPC namespace and dies with the
+// run, so nothing stays charged to the fuzz leaf after it is emptied.
+// Without CLONE_NEWIPC the segment stays in the host's namespace.
+func TestAJailedChildsSharedMemoryDiesWithItsRun(t *testing.T) {
+	needRoot(t)
+	key := 0x4c370000 + os.Getpid()%0xffff
+	k := strconv.Itoa(key)
+	if shmKeys(t)[k] {
+		t.Skipf("shm key %d is in use", key)
+	}
+	t.Cleanup(func() {
+		// On a failure, take the host's segment away again.
+		if id, _, e := syscall.Syscall(syscall.SYS_SHMGET, uintptr(key), 0, 0); e == 0 {
+			syscall.Syscall(syscall.SYS_SHMCTL, id, 0 /* IPC_RMID */, 0)
+		}
+	})
+	s, tg := jailed(t, newFake(), "", helperBin(t))
+	said := childSays(t, s, tg, "shm:"+k)
+	if said["shm:"+k] != "ok" {
+		t.Fatalf("the child made no segment: %q", said["shm:"+k])
+	}
+	if shmKeys(t)[k] {
+		t.Fatal("the child's SysV shm segment outlived its run in the host's IPC namespace")
+	}
+}
+
+// restoreACL saves path's ACL and puts it back when the test ends.
+func restoreACL(t *testing.T, path string) {
+	t.Helper()
+	saved, err := exec.Command("getfacl", "-p", path).Output()
+	if err != nil {
+		t.Fatalf("getfacl %s: %v", path, err)
+	}
+	t.Cleanup(func() {
+		cmd := exec.Command("setfacl", "--restore=-")
+		cmd.Stdin = strings.NewReader(string(saved))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("restoring %s's ACL: %v: %s", path, err, out)
+		}
+	})
+}
+
+// imageACL is the ACL entry the image's tmpfiles.d gives the fuzz user on
+// dir, for nobody, the user the tests jail children as; "" if none.
+func imageACL(t *testing.T, dir string) string {
+	t.Helper()
+	b, err := os.ReadFile("../../image/mkosi/mkosi.extra/usr/lib/tmpfiles.d/agentos.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		f := strings.Fields(l)
+		if len(f) == 7 && (f[0] == "a" || f[0] == "a+") && f[1] == dir && strings.HasPrefix(f[6], "u:agentos-fuzz:") {
+			return "u:nobody:" + strings.TrimPrefix(f[6], "u:agentos-fuzz:")
+		}
+	}
+	return ""
+}
+
+// LOOP-1, RES-4 (root; P3-4b-3r-confine-r4): with the ACL entries the
+// image's tmpfiles.d gives the fuzz user (here nobody) on /tmp, /var/tmp
+// and /dev/shm, a jailed child cannot create a file in any of them, though
+// each is world-writable: its writes stay in its own tree, which its
+// quota bounds. The jail's tree is put outside /tmp for the test.
+func TestAJailedChildCannotWriteTheSharedTempDirs(t *testing.T) {
+	needRoot(t)
+	base, err := os.MkdirTemp("/var/lib", "loop7-tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(base) })
+	if err := os.Chmod(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", base)
+	s, tg := jailed(t, newFake(), "", helperBin(t))
+	shared := []string{"/tmp", "/var/tmp", "/dev/shm"}
+	var args []string
+	for _, d := range shared {
+		restoreACL(t, d)
+		if e := imageACL(t, d); e != "" {
+			if out, err := exec.Command("setfacl", "-m", e, d).CombinedOutput(); err != nil {
+				t.Fatalf("setfacl %s: %v: %s", d, err, out)
+			}
+		}
+		p := filepath.Join(d, fmt.Sprintf("loop7-jail-%d", os.Getpid()))
+		t.Cleanup(func() { os.Remove(p) })
+		args = append(args, "create:"+p)
+	}
+	said := childSays(t, s, tg, args...)
+	for _, a := range args {
+		if !strings.HasPrefix(said[a], "failed") || !strings.Contains(said[a], "permission denied") {
+			t.Errorf("a jailed child's %s: %q, want permission denied", a, said[a])
+		}
 	}
 }
