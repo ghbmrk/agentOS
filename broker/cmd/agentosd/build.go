@@ -21,9 +21,10 @@ import (
 // C-3c-5: about 30-40%). It reserves nothing.
 const builderShareMax = 0.35
 
-// builderShare is the builder machines' share of the spare meter.
+// builderShare is Loop 1's builder machines' share of the spare meter;
+// Loop 2's fix machines have their own (loop2FixShare).
 func builderShare() meter.Share {
-	return meter.Share{Prefix: loopbuild.Prefix, Max: builderShareMax}
+	return meter.Share{Prefix: loopbuild.BuildPrefix, Max: builderShareMax}
 }
 
 // errNoBuilder: the box has no builder machines (no -builder-image, or no

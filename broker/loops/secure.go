@@ -139,6 +139,19 @@ type Fixer interface {
 	Fix(ctx context.Context, f Finding) (change.Candidate, error)
 }
 
+// ErrNotFixable is what a fixer's error wraps when it can never build a fix
+// for the finding (no namespace it may write, LOOP-10): Loop 2 then holds
+// the request without counting a failed build, and STATUS says so.
+var ErrNotFixable = errors.New("loops: no fix this fixer can build")
+
+// Unready is a Fixer that can tell, without building, that it cannot
+// build now (no builder machines, no model access). Loop 2 then asks it
+// nothing, the request stays open, and STATUS says why: the answer is
+// owner text, in the box's words.
+type Unready interface {
+	Unready() string
+}
+
 // SuitePipeline is the part of the change pipeline Loop 2 uses: it adds
 // fixtures, proposes fixes and reads the active tree they change. It has
 // no way to remove a fixture (LOOP-10): that is an owner-approved intent.
@@ -149,6 +162,9 @@ type SuitePipeline interface {
 	// LinkedHold answers a finding's linked cases from the active tree
 	// (P3-4b-1b item 1).
 	LinkedHold(finding string) (linked int, hold bool)
+	// Digests are the active tree's and the whole suite's digests: what a
+	// rejection was graded against (fixKey, P3-4b-5).
+	Digests() (tree, suite string)
 }
 
 // GuardConfig configures NewSecure.
@@ -249,6 +265,28 @@ const (
 // maxHeldFixes bounds the kept candidates, oldest dropped first.
 const maxHeldFixes = 16
 
+// The retry bound for a fix request (Potency 1 on #464, #493). Each
+// failed or rejected attempt is a builder job with a model fixer. Two
+// rejections in a row for the same reason, with the suite and tree as the
+// last one found them, mean the verdict is deterministic (S22), so the
+// fixer is not asked again until the suite or the tree changes; after fixBurst failures to build
+// one, the next waits fixBackoff; after maxFixTries the box stops asking
+// and STATUS says so. A rejection for a new reason is asked again at the
+// next pass, as the A11 harness's scripted set needs.
+const (
+	fixBurst    = 2
+	maxFixTries = 8
+	fixBackoff  = 24 * time.Hour
+)
+
+// Why a fix request is held back (Record.FixHold).
+const (
+	holdUnchanged = "unchanged"
+	holdLater     = "later"
+	holdStopped   = "stopped"
+	holdUnfixable = "unfixable"
+)
+
 type secureState struct {
 	Last time.Time `json:"last"`
 	// Open are findings still observed, by ID.
@@ -310,6 +348,18 @@ type Record struct {
 	// after a crash sends a text not yet sent, and only that (P3-4b-1b
 	// item 3).
 	Told bool `json:"told,omitempty"`
+	// FixTries counts the fix attempts that failed or did not qualify,
+	// FixLast is the latest, FixKey what its rejection was graded against
+	// (fixKey), FixAgain marks a rejection for the same reason as the one
+	// before, FixSeen the rejected candidates' hashes, and FixHold why the
+	// request is held back (holdUnchanged, holdLater, holdStopped): they
+	// bound the retries (Potency 1 on #464, #493; LOOP-2).
+	FixTries int       `json:"fix_tries,omitempty"`
+	FixLast  time.Time `json:"fix_last,omitempty"`
+	FixKey   string    `json:"fix_key,omitempty"`
+	FixAgain bool      `json:"fix_again,omitempty"`
+	FixSeen  []string  `json:"fix_seen,omitempty"`
+	FixHold  string    `json:"fix_hold,omitempty"`
 }
 
 // NewGuard loads Loop 2's state.
@@ -793,26 +843,48 @@ func (s *Guard) link(ctx context.Context, rec *Record) error {
 // a broken fixer is not called on every pass (OP-8).
 func (s *Guard) fix(ctx context.Context, rec *Record) error {
 	f := rec.Finding
+	prev, rejected := rec.FixReason, rec.Fix == string(change.StateRejected)
 	s.mu.Lock()
 	h, ok := s.held[f.ID]
 	delete(s.held, f.ID)
 	s.mu.Unlock()
 	cand, base := h.cand, h.base
 	if !ok || s.cfg.Now().Sub(h.at) > s.resumeFor() || !maps.Equal(base, s.bases(cand)) {
+		// The fixer gets the minimized regression, not the padded test
+		// (P3-4b-5): what a fix must pass, and no more of the suite.
+		in := f
+		if rec.Regression != nil {
+			in.Rule = rec.Regression
+		}
 		var err error
-		if cand, err = s.cfg.Fixer.Fix(ctx, f); err != nil {
+		if cand, err = s.cfg.Fixer.Fix(ctx, in); err != nil {
 			if ctx.Err() != nil {
 				rec.Fix, rec.FixReason = FixPreempted, ""
 				return nil
 			}
 			rec.Fix, rec.FixReason = FixFailed, ""
+			if errors.Is(err, ErrNotFixable) {
+				// Not a failed build: no job ran and none ever can.
+				rec.FixHold = holdUnfixable
+				return nil
+			}
+			s.tried(rec, "", false)
 			return fmt.Errorf("fix %s: %w", f.ID, err)
 		}
-		// Loop 2 sets these, never the fixer.
-		cand.Source, cand.Origin, cand.Public, cand.Finding = change.Local, "loop2", false, ""
+		// Loop 2 sets these, never the fixer; goals a fixer sets would tie
+		// the fix to an owner goal whose forgetting undoes it (Security 4
+		// on #464, CHG-2).
+		cand.Source, cand.Origin, cand.Public, cand.Finding, cand.Goals, cand.Claim = change.Local, "loop2", false, "", nil, ""
 		if rec.Reported {
 			// Only a reported finding has linked cases to grade the fix.
 			cand.Finding = f.ID
+		}
+		if slices.Contains(rec.FixSeen, candHash(cand)) {
+			// Rejected before: the same verdict, without a second
+			// evaluation.
+			rec.Fix = string(change.StateRejected)
+			s.tried(rec, "", rejected)
+			return nil
 		}
 		base = s.bases(cand)
 	}
@@ -823,10 +895,72 @@ func (s *Guard) fix(ctx context.Context, rec *Record) error {
 		return nil
 	}
 	rec.Fix, rec.FixReason = string(rep.State), rep.Reason
+	if rep.State == change.StateRejected {
+		s.tried(rec, candHash(cand), rejected && rep.Reason == prev)
+	}
 	if err != nil {
 		return fmt.Errorf("fix %s: %w", f.ID, err)
 	}
 	return nil
+}
+
+// tried counts a fix attempt that failed or was rejected, with the
+// rejected candidate's hash if any; again marks a rejection for the same
+// reason as the last.
+func (s *Guard) tried(rec *Record, hash string, again bool) {
+	rec.FixTries++
+	rec.FixLast = s.cfg.Now()
+	rec.FixKey, rec.FixAgain = s.fixKey(*rec), again
+	if hash != "" && !slices.Contains(rec.FixSeen, hash) {
+		rec.FixSeen = append(rec.FixSeen, hash)
+	}
+}
+
+// fixKey is what rec's rejection was graded against: its reason and the
+// digests of the active tree and the whole suite (its linked cases
+// included). Equal keys give the same verdict to the same candidate. ""
+// for anything but a rejection. It calls the pipeline: never with s.mu
+// held.
+func (s *Guard) fixKey(rec Record) string {
+	if rec.Fix != string(change.StateRejected) {
+		return ""
+	}
+	tree, suite := s.cfg.Pipeline.Digests()
+	h := sha256.Sum256(fmt.Appendf(nil, "%q\ntree %s\nsuite %s\n", rec.FixReason, tree, suite))
+	return hex.EncodeToString(h[:])
+}
+
+// hold is why rec's fix request is held back now, "" when it is due. It
+// calls the pipeline: never with s.mu held.
+func (s *Guard) hold(rec Record) string {
+	switch {
+	case rec.FixHold == holdUnfixable:
+		return holdUnfixable
+	case rec.FixTries >= maxFixTries:
+		return holdStopped
+	case rec.FixTries < fixBurst:
+		return ""
+	case rec.Fix == string(change.StateRejected):
+		if rec.FixAgain && rec.FixKey == s.fixKey(rec) {
+			return holdUnchanged
+		}
+	case rec.Fix == FixFailed && s.cfg.Now().Before(rec.FixLast.Add(fixBackoff)):
+		return holdLater
+	}
+	return ""
+}
+
+// candHash identifies a candidate's changes.
+func candHash(c change.Candidate) string {
+	h := sha256.New()
+	for _, p := range slices.Sorted(maps.Keys(c.Files)) {
+		fmt.Fprintf(h, "%q %d\n", p, len(c.Files[p]))
+		h.Write(c.Files[p])
+	}
+	for _, p := range slices.Sorted(slices.Values(c.Delete)) {
+		fmt.Fprintf(h, "-%q\n", p)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (s *Guard) resumeFor() time.Duration {
@@ -877,6 +1011,9 @@ func (s *Guard) fixPending(ctx context.Context, fresh []string) error {
 	if s.cfg.Fixer == nil {
 		return nil
 	}
+	if u, ok := s.cfg.Fixer.(Unready); ok && u.Unready() != "" {
+		return nil // the requests stay open; STATUS says why
+	}
 	s.mu.Lock()
 	var ids []string
 	for _, id := range sortedKeys(s.st.Open) {
@@ -896,8 +1033,13 @@ func (s *Guard) fixPending(ctx context.Context, fresh []string) error {
 		if !ok || !retry(rec) {
 			continue
 		}
-		if err := s.fix(ctx, &rec); err != nil {
-			errs = append(errs, err)
+		if rec.FixHold = s.hold(rec); rec.FixHold == "" {
+			if err := s.fix(ctx, &rec); err != nil {
+				errs = append(errs, err)
+			}
+			if rec.FixHold != holdUnfixable {
+				rec.FixHold = s.hold(rec)
+			}
 		}
 		s.mu.Lock()
 		if _, still := s.st.Open[id]; still {
