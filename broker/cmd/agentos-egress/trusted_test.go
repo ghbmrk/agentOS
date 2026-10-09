@@ -550,7 +550,7 @@ func TestLockoutReleaseRetried(t *testing.T) {
 	if r.lockoutEntry() == "" {
 		t.Fatal("lockout authorization dropped before it was given back")
 	}
-	if !r.noted("give the TPM's lockout back") {
+	if !r.noted(lockoutReleaseFailed) {
 		t.Fatalf("owner not told: %q", r.notes)
 	}
 }
