@@ -725,6 +725,7 @@ func rawExec(ctx context.Context, r *Runtime, dir, id string, argv ...string) (s
 	}
 	f.Close()
 	defer os.Remove(f.Name())
+	paused := fmt.Sprintf("cannot execute in container %q in state paused", cid(id))
 	for deadline := time.Now().Add(rawExecPausedWait); ; {
 		var stderr bytes.Buffer
 		c := r.cmd(ctx, append([]string{"--log=" + f.Name(), "exec", cid(id)}, argv...)...)
@@ -734,7 +735,7 @@ func rawExec(ctx context.Context, r *Runtime, dir, id string, argv ...string) (s
 		if !ok {
 			return string(out), err
 		}
-		if exit.ExitCode() == 128 && bytes.Contains(stderr.Bytes(), []byte(rawExecPaused)) && time.Now().Before(deadline) && ctx.Err() == nil {
+		if exit.ExitCode() == 128 && bytes.Contains(stderr.Bytes(), []byte(paused)) && time.Now().Before(deadline) && ctx.Err() == nil {
 			time.Sleep(rawExecPausedPoll)
 			continue
 		}
@@ -743,13 +744,16 @@ func rawExec(ctx context.Context, r *Runtime, dir, id string, argv ...string) (s
 	}
 }
 
-// rawExec retries, only while runsc refuses with rawExecPaused, for up to
+// rawExec retries, only while runsc refuses with exit 128 and its
+// requireStatus text for this container in state paused, for up to
 // rawExecPausedWait: after a guest tool call the plane's step snapshot
 // pauses the container for the capture (vm.Manager.take), and a bare
 // `runsc exec` has no lock to wait on, unlike production's exec through
-// the worker (P1-4-flake-paused). Any other failure is returned at once.
+// the Manager (P1-4-flake-paused). The bound covers one capture with
+// margin; StepInterval keeps snapshots at least 2s apart, so the 25ms
+// poll lands in a running window. A pause longer than the bound, and any
+// other failure, is returned with runsc's text.
 const (
-	rawExecPaused     = "in state paused"
 	rawExecPausedWait = 10 * time.Second
 	rawExecPausedPoll = 25 * time.Millisecond
 )
@@ -790,8 +794,6 @@ func TestRawExecErrorClipsRunscText(t *testing.T) {
 	}
 }
 
-// REQ: CAP-8, RES-4
-//
 // P1-4-flake-paused: a raw exec that lands while the step snapshot has the
 // container paused is refused ("in state paused", exit 128). rawExec waits
 // the pause out; the fake refuses the first two execs, as runsc does.

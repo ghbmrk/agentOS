@@ -63,14 +63,14 @@
 # started; noconn before the call; nope* (a bare name) and /nope* and
 # /denied (paths) when the program is not found or cannot be loaded
 # (SR2-3p). The executing-command messages quote the argv as %q does.
-log= dlog= pid= cmd= gfd=2
+log= dlog= pid= cmd= ctr= gfd=2
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--log=*) log=${1#--log=} ;;
 	--debug-log=*) dlog=${1#--debug-log=} ;;
 	--internal-pid-file) shift; pid=$1 ;;
 	--pass-fd) shift; case "$1" in *:2) gfd=${1%:2} ;; esac ;;
-	*_) cmd=$2; shift; break ;; # the container ID; the guest's argv follows
+	*_) ctr=$1 cmd=$2; shift; break ;; # the container ID; the guest's argv follows
 	esac
 	shift
 done
@@ -188,7 +188,7 @@ waitdelaytext)
 paused)
 	n=${FAKE_RUNSC_PAUSES#*:}; f=${FAKE_RUNSC_PAUSES%:*}
 	k=$(cat "$f" 2>/dev/null || echo 0); echo $((k + 1)) >"$f"
-	[ "$k" -lt "$n" ] && fail "cannot execute in container \"$cmd\" in state paused" 128
+	[ "$k" -lt "$n" ] && fail "cannot execute in container \"$ctr\" in state paused" 128
 	echo 7 >"$pid"; echo "guest out"; exit 0
 	;;
 fatal128) fail "loading container failed: $c: resource temporarily unavailable" 128 ;;
