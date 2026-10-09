@@ -74,6 +74,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
 | P3-4b-4c-dedupe | A1 (owner texts; UX on #589 classed it release under §2's stricter rule, for Mark to demote to later if no acceptance test needs it) | `Guard.batch` and the digest repeat one identical line per corpus item, so a weakened check gives the owner ten identical lines |
+| P3-4b-4c-dedupe-probe | A1 (owner texts; the probe half of P3-4b-4c-dedupe's Goal, release like its parent) | `runProbe` texts each new finding on its own through `tell`, so a weakened corpus check sends ten identical texts |
 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
