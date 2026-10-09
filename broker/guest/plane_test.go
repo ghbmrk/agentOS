@@ -93,7 +93,7 @@ func (e *exec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
 }
 
 type rig struct {
-	t     *testing.T
+	t     testing.TB
 	p     *Plane
 	ms    *fakeMachines
 	eng   *journal.Engine
@@ -104,7 +104,7 @@ type rig struct {
 	reps  []string
 }
 
-func newRig(t *testing.T, mod func(*Config)) *rig {
+func newRig(t testing.TB, mod func(*Config)) *rig {
 	t.Helper()
 	r := &rig{t: t, ms: newMachines(), ex: &exec{runs: map[string]int{}}}
 	eng, err := journal.Open(&journal.MemStore{}, allow{}, map[string]journal.Executor{"mail": r.ex}, func(s string) string { return s })

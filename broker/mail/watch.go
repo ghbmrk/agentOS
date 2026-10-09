@@ -239,7 +239,7 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 			}
 			fresh = fresh[len(fresh)-w.cfg.Backfill:]
 		}
-		n, err := w.publish(ctx, name, fresh, fst, present)
+		n, err := w.publish(ctx, name, validity, fresh, fst, present)
 		rep.Published += n
 		if err != nil {
 			complete = false
@@ -282,13 +282,17 @@ func (w *Watcher) Poll(ctx context.Context) (PollReport, error) {
 
 // publish fetches and publishes fresh messages, recording each one it
 // published. One that fails stays unrecorded and is tried next poll.
-func (w *Watcher) publish(ctx context.Context, folder string, fresh []uint32, fst *folderState, present map[string]bool) (int, error) {
+//
+// It fetches under the validity the UIDs were listed with: a folder
+// rebuilt in between is refused (ErrValidity), so no new-epoch message is
+// recorded under an old UID and validity; the next poll reads it afresh.
+func (w *Watcher) publish(ctx context.Context, folder string, validity uint32, fresh []uint32, fst *folderState, present map[string]bool) (int, error) {
 	n := 0
 	for len(fresh) > 0 {
 		k := min(len(fresh), w.cfg.Batch)
 		batch := fresh[:k]
 		fresh = fresh[k:]
-		ms, err := w.a.cfg.Store.Fetch(ctx, folder, batch)
+		ms, err := w.a.cfg.Store.Fetch(ctx, folder, validity, batch)
 		if err != nil {
 			return n, err
 		}

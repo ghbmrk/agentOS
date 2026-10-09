@@ -21,8 +21,10 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
-	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -71,8 +73,17 @@ func (r *Runtime) platform() string {
 
 func (r *Runtime) cmd(ctx context.Context, args ...string) *exec.Cmd {
 	base := []string{"--root", r.StateDir, "--platform=" + r.platform(), "--network=none", "--ignore-cgroups", "--overlay2=none", "--host-uds=open"}
-	return exec.CommandContext(ctx, r.Bin, append(base, args...)...)
+	c := exec.CommandContext(ctx, r.Bin, append(base, args...)...)
+	c.Env = runscEnv
+	return c
 }
+
+// runscEnv is all of runsc's environment: a fixed PATH. runsc runs as
+// root with every path on its command line or in the bundle, and the
+// guest's environment is the OCI spec's (writeBundle), so nothing in
+// agentosd's environment, which carries the owner's number, reaches it
+// (P3-4b-3r-env).
+var runscEnv = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 
 func (r *Runtime) run(ctx context.Context, args ...string) error {
 	var stderr bytes.Buffer
@@ -255,12 +266,20 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		f.Close()
 		defer os.Remove(logs[i])
 	}
-	cmd := r.cmd(ctx, append([]string{"--log=" + logs[0], "--debug-log=" + logs[1], "exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, cid(id)}, c.Argv...)...)
+	// The guest's stderr is a pipe of its own: runsc's fd 3, which
+	// --pass-fd 3:2 makes the guest's fd 2. runsc's own fd 2 then carries
+	// only runsc's text, so no guest write can split, mimic or crowd out a
+	// trace on it, and none of it reaches the guest (SR2-3n).
+	gr, gw, err := os.Pipe()
+	if err != nil {
+		return vm.ExecResult{}, err
+	}
+	defer gr.Close()
+	cmd := r.cmd(ctx, append([]string{"--log=" + logs[0], "--debug-log=" + logs[1], "exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, "--pass-fd", "3:2", cid(id)}, c.Argv...)...)
 	cmd.Stdin = bytes.NewReader(c.Stdin)
 	stdout, stderr := &capped{max: c.MaxOutput}, &capped{max: c.MaxOutput}
-	// The watch sees each write before the cap does, and all of them.
-	watch := &panicWatch{}
-	cmd.Stdout, cmd.Stderr = stdout, io.MultiWriter(watch, stderr)
+	runscErr := &capped{max: runscMsgMax}
+	cmd.Stdout, cmd.Stderr, cmd.ExtraFiles = stdout, runscErr, []*os.File{gw}
 	cmd.WaitDelay = ExecWaitDelay
 	cmd.Cancel = func() error {
 		// Read the pid now: the deferred Remove may run before the kill.
@@ -268,31 +287,49 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		go r.killExec(id, strings.TrimSpace(string(b)))
 		return cmd.Process.Kill()
 	}
-	err = cmd.Run()
-	// runsc writes each of its errors to stderr as well as to its log, and
-	// stderr is the guest command's too. So when runsc reports an error, or
-	// the command never started (runsc writes the pid once it has), nothing
-	// on either stream is known to be the guest's: Exec answers no output,
-	// and runsc's messages go only to the broker's exec log (SR2-3h). A Go
-	// runtime panic in runsc after the command started writes no --log
-	// line, only its trace to stderr, and exits 2 (SR2-3m), whether or not
-	// the context has since ended (Security S1 on #391). The error is a
-	// bare vm sentinel, naming no path (SR2-3j): a panic after the command
-	// started is ErrExecFailed, since the command may have run.
+	// The guest's stderr is read to its end, but no longer than
+	// ExecWaitDelay past the context's end or runsc's exit, as os/exec
+	// bounds stdout: something left in the sandbox may hold it open.
+	copied := make(chan struct{})
+	go func() { io.Copy(stderr, gr); close(copied) }()
+	stop := context.AfterFunc(ctx, func() { gr.SetReadDeadline(time.Now().Add(ExecWaitDelay)) })
+	err = cmd.Start()
+	gw.Close()
+	if err == nil {
+		err = cmd.Wait()
+	}
+	if stop() {
+		gr.SetReadDeadline(time.Now().Add(ExecWaitDelay))
+	}
+	<-copied
+	// runsc writes each of its errors to stderr as well as to its log.
+	// When runsc reports an error, or the command never started (runsc
+	// writes the pid once it has), the guest's exit code and output are
+	// not known to be its own: Exec answers no output, and runsc's
+	// messages go only to the broker's exec log (SR2-3h). A Go runtime
+	// panic, fatal error or fatal signal in runsc after the command
+	// started writes no --log line, only its trace to runsc's stderr
+	// (SR2-3m). runsc's stderr is only runsc's; the guest's is a pipe
+	// apart (SR2-3n). So any failed exec with text on it is runsc's
+	// failure, whatever the exit (2, a kill at the deadline or from
+	// outside, any other) or ErrWaitDelay (P1-4-flake-crashed). An exit 0
+	// with text is left a result: the same exit and text read as a
+	// failure only when something held the pipes past ExecWaitDelay;
+	// change neither case without the other. The error is a bare vm
+	// sentinel, naming no path (SR2-3j): with no pid, it is the one
+	// runsc's --log line shows (notRun, SR2-3q, SR2-3p); otherwise, a
+	// crash after the start included, ErrExecFailed, since the command
+	// may have run.
 	var exit *exec.ExitError
-	panicked := errors.As(err, &exit) && exit.ExitCode() == 2 && watch.found()
+	crashed := err != nil && len(runscErr.bytes()) > 0
 	pid, _ := os.ReadFile(pidFile)
-	if started := len(bytes.TrimSpace(pid)) > 0; !started || size(logs[0]) > 0 || panicked {
-		msgs := stderr.bytes()
-		if panicked {
-			msgs = watch.trailer()
-		}
-		r.logExec(id, err, logs, msgs)
+	if started := len(bytes.TrimSpace(pid)) > 0; !started || size(logs[0]) > 0 || crashed {
+		r.logExec(id, err, logs, runscErr.bytes())
 		if ctx.Err() != nil {
 			return vm.ExecResult{}, err
 		}
 		if !started {
-			return vm.ExecResult{}, vm.ErrExecNotStarted
+			return vm.ExecResult{}, notRun(logs[0], c.Argv)
 		}
 		return vm.ExecResult{}, vm.ErrExecFailed
 	}
@@ -302,6 +339,94 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		return res, nil
 	}
 	return res, err
+}
+
+// runscExecPrestart are the messages runsc's exec writes to --log for a
+// failure before the command starts (runsc/cmd/exec.go at the pinned
+// tag, V32); runscExecCall is the one of them for the sandbox's call,
+// which sandbox.go follows with " in sandbox: " and the call's error.
+var runscExecPrestart = []string{"loading container failed: ", "parsing process spec: ", runscExecCall}
+
+const runscExecCall = "executing processes for container: "
+
+// runscMsgLineMax bounds what notRun reads of runsc's --log: past the
+// argv cap with every byte escaped by %q and then by JSON.
+const runscMsgLineMax = 1 << 20
+
+// notRun is the error for an exec whose pid runsc never wrote (SR2-3q):
+// ErrExecNotStarted only when runsc's first --log line is one it writes
+// before the command starts, ErrExecNoProgram when that line says the
+// program was not found or cannot be loaded (SR2-3p), and otherwise
+// ErrExecFailed, since the command may have run: a failed pid write, a
+// lost answer from the sandbox (urpc's "urpc method" error, the call was
+// sent), runsc killed or panicking with no line, or a line too long to
+// read. The line's prefix is runsc's own text, and a guest's argv appears
+// only after it; a guest argv that reads as a lost answer only makes the
+// error the safer ErrExecFailed.
+func notRun(errLog string, argv []string) error {
+	f, err := os.Open(errLog)
+	if err != nil {
+		return vm.ErrExecFailed
+	}
+	defer f.Close()
+	var line struct{ Msg string }
+	if json.NewDecoder(io.LimitReader(f, runscMsgLineMax)).Decode(&line) != nil {
+		return vm.ErrExecFailed
+	}
+	msg := line.Msg
+	if !slices.ContainsFunc(runscExecPrestart, func(p string) bool { return strings.HasPrefix(msg, p) }) {
+		return vm.ErrExecFailed
+	}
+	if !strings.HasPrefix(msg, runscExecCall) {
+		return vm.ErrExecNotStarted
+	}
+	if strings.Contains(msg, ` in sandbox: urpc method "`) {
+		return vm.ErrExecFailed
+	}
+	if len(argv) > 0 && noProgram(msg, argv[0]) {
+		return vm.ErrExecNoProgram
+	}
+	return vm.ErrExecNotStarted
+}
+
+// cannotLoad are the errno texts with which the sentry fails a program it
+// cannot find or load; a retry fails the same way.
+var cannotLoad = []string{"no such file or directory", "permission denied", "exec format error", "not a directory"}
+
+// noProgram reports whether msg, runsc's failed sandbox call for argv[0]
+// name, ends with the sentry's error for that program: the loader's
+// "failed to load <path>: <errno>" (pkg/sentry/loader), for name, the
+// path runsc resolves it to, or, for a bare name, a PATH directory's
+// entry; or the PATH lookup's "error finding executable <%q name> in PATH
+// [<dirs>]: <errno>" (pkg/sentry/fsimpl/user/path.go). The match is
+// anchored at the end, where the sentry's error is, and %q has escaped
+// every quote of the argv before it; the PATH directories come from the
+// worker image, not the guest, so they hold no space, quote or colon.
+func noProgram(msg, name string) bool {
+	const at = " in sandbox: "
+	for _, e := range cannotLoad {
+		m, ok := strings.CutSuffix(msg, ": "+e)
+		if !ok {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(name, "/"):
+			return strings.HasSuffix(m, at+"failed to load "+name)
+		case strings.Contains(name, "/"):
+			return strings.HasSuffix(m, at+"failed to load "+path.Join("/", name))
+		}
+		lookup := at + "error finding executable " + strconv.Quote(name) + " in PATH ["
+		if i := strings.LastIndex(m, lookup); i >= 0 {
+			dirs, ok := strings.CutSuffix(m[i+len(lookup):], "]")
+			return ok && !strings.ContainsAny(dirs, `]":`)
+		}
+		if i := strings.LastIndex(m, at+"failed to load /"); i >= 0 {
+			dir, ok := strings.CutSuffix(m[i+len(at+"failed to load "):], "/"+name)
+			return ok && !strings.ContainsAny(dir, ` ":`)
+		}
+		return false
+	}
+	return false
 }
 
 // execLogMax is the size at which the broker's exec log is rotated: it and
@@ -360,66 +485,6 @@ func (r *Runtime) killExec(id, pid string) {
 	if err := r.run(ctx, "kill", "--pid", pid, cid(id), "KILL"); err != nil {
 		log.Printf("gvisor: %s: killing cancelled command %s: %v", id, pid, err)
 	}
-}
-
-// panicWatch watches all of an exec's stderr, past its cap, for the trace
-// a Go runtime panic or fatal error writes: a "panic: " or "fatal error: "
-// marker and, after it, a goroutine header (SR2-3m). Neither need start a
-// line, since the guest shares the stream and may leave a partial line
-// before runsc's trace. It keeps the trace from the first marker, clipped
-// to runscMsgMax, for the exec log. A guest that writes the same and
-// exits 2 loses only its own output.
-type panicWatch struct {
-	mu    sync.Mutex
-	carry []byte // the end of what was searched: a match may span writes
-	text  []byte // from the first marker on, clipped
-	hdr   bool
-}
-
-var (
-	panicMarker = regexp.MustCompile(`panic: |fatal error: `)
-	// "goroutine 1 [running]:", or Go 1.23's at traceback system and
-	// above (runsc's default): "goroutine 1 gp=0xc0... m=0 mp=0x... [".
-	goroutineHeader = regexp.MustCompile(`goroutine [0-9]+ [^\[\n]{0,96}\[`)
-)
-
-// watchCarry exceeds the longest marker or header.
-const watchCarry = 256
-
-func (w *panicWatch) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.text != nil {
-		w.text = append(w.text, p[:min(len(p), runscMsgMax-len(w.text))]...)
-	}
-	if w.hdr {
-		return len(p), nil
-	}
-	buf := append(w.carry, p...)
-	if w.text == nil {
-		loc := panicMarker.FindIndex(buf)
-		if loc == nil {
-			w.carry = bytes.Clone(buf[max(len(buf)-watchCarry, 0):])
-			return len(p), nil
-		}
-		buf = buf[loc[0]:]
-		w.text = bytes.Clone(buf[:min(len(buf), runscMsgMax)])
-	}
-	w.hdr = goroutineHeader.Match(buf)
-	w.carry = bytes.Clone(buf[max(len(buf)-watchCarry, 0):])
-	return len(p), nil
-}
-
-func (w *panicWatch) found() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.hdr
-}
-
-func (w *panicWatch) trailer() []byte {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return bytes.Clone(w.text)
 }
 
 // capped keeps the first max bytes written (all of them when max is 0).

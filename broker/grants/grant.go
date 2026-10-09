@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/verb"
 )
 
@@ -437,7 +438,7 @@ func Describe(s Spec) string {
 	r := s.Rule
 	var b strings.Builder
 	if r.Reply {
-		fmt.Fprintf(&b, "Let the agent reply in existing threads on %s (%s) without asking, to the thread's own participants only. Each reply is texted to you first and sends after the undo window unless you reply UNDO.", s.Account, r.Action)
+		fmt.Fprintf(&b, "Let me reply in existing threads on %s (%s) without asking, to the thread's own participants only. Each reply is texted to you first and sends after the undo window unless you reply UNDO.", s.Account, r.Action)
 	} else {
 		fmt.Fprintf(&b, "Let %s on %s run without asking or notifying you, when every field comes from the source record.", r.Action, s.Account)
 	}
@@ -465,8 +466,87 @@ func Describe(s Spec) string {
 	return b.String()
 }
 
+// Terms is a grant's complete summary for its approval card (ADP-9,
+// SR3-3): every operation, recipient rule, fixed field, amount, bound
+// and hold, one term each, in fixed wording. The item's sum covers it,
+// so an approval binds to exactly what the card showed. A resume has
+// none: its detail already carries the paused grant's Describe.
+func Terms(s Spec) []owner.Term {
+	var ts []owner.Term
+	add := func(label, format string, a ...any) {
+		ts = append(ts, owner.Term{Label: label, Value: fmt.Sprintf(format, a...)})
+	}
+	switch {
+	case s.Resume != "":
+		return nil
+	case s.Rule == nil:
+		add("Account", "%s, through %s", s.Account, s.Executor)
+		ops := make([]string, 0, len(s.Ops))
+		for op := range s.Ops {
+			ops = append(ops, op)
+		}
+		sort.Strings(ops)
+		has := map[string]bool{}
+		for _, op := range ops {
+			add("Allows", "%s (%s)", op, s.Ops[op])
+			has[s.Ops[op]] = true
+		}
+		// What runs without asking is the reversible verbs this grant
+		// holds (evaluate): organize only behind the account's guard.
+		var free []string
+		for _, f := range []struct{ v, say string }{{verb.Read, "reads"}, {verb.Draft, "drafts"},
+			{verb.Organize, "organize changes that undo in the account, when its guard allows them"}} {
+			if has[f.v] {
+				free = append(free, f.say)
+			}
+		}
+		if len(free) == 0 {
+			free = []string{"nothing"}
+		}
+		add("Without asking", "%s; every other verb needs your approval or a pre-allowance", strings.Join(free, ", "))
+		return ts
+	}
+	r := s.Rule
+	if r.Reply {
+		add("Runs", "%s on %s, as agent replies texted to you first; each sends after the undo window unless you reply UNDO", r.Action, s.Account)
+		add("When", "the reply is in an existing thread")
+	} else {
+		add("Runs", "%s on %s, without asking or notifying you", r.Action, s.Account)
+		add("When", "every field comes from the source record")
+	}
+	ks := make([]string, 0, len(r.Params))
+	for k := range r.Params {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	for _, k := range ks {
+		add("Fixed field", "%s=%s", k, r.Params[k])
+	}
+	switch {
+	case len(r.Recipients) > 0:
+		add("Recipients", "only those of %s the source record names", strings.Join(r.Recipients, ", "))
+	case r.Reply:
+		add("Recipients", "the thread's own participants only")
+	default:
+		add("Recipients", "any the source record names")
+	}
+	if r.AmountCap > 0 {
+		add("Amount", "up to %s", minor(r.AmountCap))
+	} else {
+		add("Amount", "no money may move")
+	}
+	add("Per record", "at most %d runs per source record per day", r.PerRecord)
+	add("Per day", "at most %d runs", r.PerDay)
+	if r.HoldDays > 0 {
+		add("Recent edits", "a record edited in the last %d days needs your approval", r.HoldDays)
+	} else {
+		add("Recent edits", "no hold: a record edited at any time can run")
+	}
+	return ts
+}
+
 // short is the approval text's object for a grant (CH-12 keeps it to one
-// line; the local page shows Describe).
+// line; the local page shows Terms).
 func short(s Spec) string {
 	switch {
 	case s.Resume != "":

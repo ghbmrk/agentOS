@@ -1,0 +1,48 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	boxclock "github.com/ghbmrk/agentos/broker/clock"
+	"github.com/ghbmrk/agentos/broker/control"
+	"github.com/ghbmrk/agentos/broker/journal"
+)
+
+type engine struct{ stopped bool }
+
+func (e *engine) Stop(context.Context) (journal.StopReport, error) {
+	e.stopped = true
+	return journal.StopReport{}, nil
+}
+func (e *engine) Resume() error          { e.stopped = false; return nil }
+func (e *engine) Stopped() bool          { return e.stopped }
+func (e *engine) List() []journal.Status { return nil }
+
+type auth struct{}
+
+func (auth) IsOwner(string) bool            { return true }
+func (auth) SessionUnlocked(time.Time) bool { return true }
+func main() {
+	ctx := context.Background()
+	e := &engine{}
+	clockLine := boxclock.Status{Start: time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)}.Line(time.UTC)
+	h := control.Handler{Engine: e, Auth: auth{}, Notes: []func() string{func() string { return clockLine }}}
+	fmt.Printf("CLOCK_RAW=%q\nCLOCK_STATUS=%q\n", clockLine, h.Handle(ctx, "owner", "STATUS")[0])
+	notes := []string{
+		clockLine,
+		"Your agent still holds a record you deleted; reply YES to its take-back request or NO to keep its work.",
+		"Calls to other people are paused. Open my Wi-Fi page to reconnect the calling account.",
+		"Texts to other people are paused. Open my Wi-Fi page to reconnect the texting account.",
+		"I can't learn new ways to do tasks right now. Tasks still work; try again after the next update.",
+		"Rollback: recent steps could not be saved. Open my Wi-Fi page to check what I can restore.",
+	}
+	h.Machines = func() string { return "I can't work on tasks right now. STOP, STATUS and HELP still work." }
+	h.Notes = nil
+	for _, n := range notes {
+		n := n
+		h.Notes = append(h.Notes, func() string { return n })
+	}
+	fmt.Printf("STATUS_MULTI_RAW=%q\nSTATUS_MULTI_SMS=%q\n", h.Status(), h.Handle(ctx, "owner", "STATUS")[0])
+}
