@@ -1,9 +1,13 @@
 package change
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/update"
 )
@@ -205,5 +209,248 @@ func TestStagedImageIsNotUndoneBeforeItSettles(t *testing.T) {
 	}
 	if err := e.p.Revert(bg, r.Short, OriginOwner); err != nil {
 		t.Fatal("undo after the image started:", err)
+	}
+}
+
+// REQ: UPD-1, UPD-8, OP-4, OP-5, CH-12
+//
+// SR3-4f-2: a staged image may be undone until the applier starts to
+// install it. The pipeline asks the applier (Withdrawer) first, outside
+// its lock; the applier settles an image it dropped with WhyDropped.
+
+// withdrawer stands in for the update applier. Withdraw takes held, as
+// the applier takes its lock.
+type withdrawer struct {
+	held  sync.Mutex
+	mu    sync.Mutex
+	calls []string
+	err   error
+	// then runs after a withdrawal, under held, as the applier's next
+	// Tick settles the drop.
+	then func(id string)
+}
+
+func (w *withdrawer) Withdraw(id string) error {
+	w.held.Lock()
+	defer w.held.Unlock()
+	w.mu.Lock()
+	w.calls = append(w.calls, id)
+	err, then := w.err, w.then
+	w.mu.Unlock()
+	if err == nil && then != nil {
+		then(id)
+	}
+	return err
+}
+
+func (w *withdrawer) called() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.calls)
+}
+
+// installing is the applier's answer in its handover window.
+type installing struct{}
+
+func (installing) Error() string  { return "apply: a release is being applied" }
+func (installing) Handover() bool { return true }
+
+// pendingStaged is a confirmed release 40 (image "a") and a staged
+// release 41 (image "b") the applier has not installed yet.
+func pendingStaged(t *testing.T) (*env, Report, *withdrawer) {
+	t.Helper()
+	e, r1 := stagedEnv(t)
+	if err := e.p.ConfirmStaged(r1.ID); err != nil {
+		t.Fatal(err)
+	}
+	r := e.release(release(t, 41, false, map[string][]byte{"host-image/release": []byte("b")}))
+	if r.State != StateAdopted || !e.adoption(r.ID).Staged {
+		t.Fatal(r)
+	}
+	w := &withdrawer{}
+	e.p.SetWithdrawer(w)
+	return e, r, w
+}
+
+func (e *env) image() string {
+	return string(e.p.Files("host-image")["host-image/release"])
+}
+
+func TestOwnerUndoesAPendingStagedRelease(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	if err := e.p.Revert(bg, r.Short, OriginOwner); err != nil {
+		t.Fatal("owner undo of a pending staged release:", err)
+	}
+	if got := w.called(); len(got) != 1 || got[0] != r.ID {
+		t.Fatalf("withdraw calls %q", got)
+	}
+	if a := e.adoption(r.ID); a.Reverted != WhyOwner || e.reverts() != 1 {
+		t.Fatalf("adoption %+v, reverts %d", a, e.reverts())
+	}
+	if e.image() != update.Digest([]byte("a")) {
+		t.Fatal("previous image not restored")
+	}
+}
+
+func TestRecheckRevertsAPendingStagedRelease(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	ev := e.p.cfg.Evaluator
+	e.p.cfg.Evaluator = evalFunc(func(ctx context.Context, tr Tree, pr Probe) ([]byte, error) {
+		if string(tr["host-image/release"]) == update.Digest([]byte("b")) && string(pr.Input) == exfilProbe {
+			return []byte("leaked"), nil
+		}
+		return ev.Run(ctx, tr, pr)
+	})
+	// Unprotected, as no image adoption is today (owner-approved and
+	// attested ones only raise a Concern).
+	e.p.mu.Lock()
+	e.p.adoptionByIDLocked(r.ID).Basis = BasisStanding
+	e.p.mu.Unlock()
+	ids, err := e.p.Recheck(bg)
+	if err != nil || !slices.Contains(ids, r.ID) {
+		t.Fatalf("recheck: %v %v", ids, err)
+	}
+	if a := e.adoption(r.ID); a.Reverted != WhySecurity || len(w.called()) != 1 {
+		t.Fatalf("adoption %+v, withdraw calls %q", a, w.called())
+	}
+}
+
+func TestUndoRefusedInTheHandoverWindow(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	w.err = installing{}
+	err := e.p.Revert(bg, r.Short, OriginOwner)
+	if err == nil || err.Error() != "Update 41 is being installed; undo it after it starts." {
+		t.Fatalf("undo while installing: %v", err)
+	}
+	w.err = errors.New("disk full")
+	if err := e.p.revert(bg, r.ID, OriginPipeline, WhySecurity); err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("withdraw error: %v", err)
+	}
+	e.p.SetWithdrawer(nil)
+	if err := e.p.Revert(bg, r.Short, OriginOwner); err == nil || err.Error() != "Update 41 starts at the next restart; undo it after." {
+		t.Fatalf("no applier: %v", err)
+	}
+	if a := e.adoption(r.ID); a.Reverted != "" || !a.Staged || e.reverts() != 0 || e.image() != update.Digest([]byte("b")) {
+		t.Fatalf("adoption %+v, reverts %d", a, e.reverts())
+	}
+}
+
+// The applier holds its lock while it settles (Resume calls StageFailed);
+// an owner UNDO at the same moment asks it to withdraw. Withdraw must run
+// outside the pipeline's lock, or the two wait on each other.
+func TestUndoAndSettleDoNotDeadlock(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	held := make(chan struct{})
+	done := make(chan error, 2)
+	go func() {
+		w.held.Lock() // Resume holds the applier's lock
+		close(held)
+		time.Sleep(50 * time.Millisecond) // the owner's UNDO asks meanwhile
+		done <- e.p.StageFailed(bg, r.ID)
+		w.held.Unlock()
+	}()
+	go func() {
+		<-held
+		done <- e.p.Revert(bg, r.Short, OriginOwner) // may lose to the fallback
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("deadlock: Withdraw called under the pipeline lock")
+		}
+	}
+	if a := e.adoption(r.ID); a.Reverted == "" {
+		t.Fatalf("adoption %+v", a)
+	}
+}
+
+// L3-1: a withdrawal is also a drop. When the revert that follows it
+// fails (STOP holds the pipeline's own), the applier's StageDropped still
+// reverts the adoption, so the digest stops promising to install it.
+func TestWithdrawnThenRevertFailsIsSettledByTheDrop(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	if _, err := e.eng.Stop(bg); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.revert(bg, r.ID, OriginPipeline, WhySecurity); err == nil {
+		t.Fatal("auto revert ran during STOP")
+	}
+	if a := e.adoption(r.ID); len(w.called()) != 1 || a.Reverted != "" || !a.Staged {
+		t.Fatalf("adoption %+v, withdraw calls %q", a, w.called())
+	}
+	if err := e.eng.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.StageDropped(bg, r.ID); err != nil { // the applier's next Tick
+		t.Fatal(err)
+	}
+	if a := e.adoption(r.ID); a.Reverted != WhyDropped || e.image() != update.Digest([]byte("a")) {
+		t.Fatalf("adoption %+v", a)
+	}
+	if d := e.p.Digest(); slices.ContainsFunc(d, func(l string) bool { return strings.HasPrefix(l, "Staged update 41") }) {
+		t.Fatalf("digest still promises the withdrawn release: %q", d)
+	}
+}
+
+// L3-1: the applier settles the drop before the owner's own revert runs;
+// that revert then finds no active adoption, and the undo still succeeds.
+func TestOwnerUndoLosesToTheDrop(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	w.then = func(id string) {
+		if err := e.p.StageDropped(bg, id); err != nil {
+			t.Error("drop:", err)
+		}
+	}
+	if err := e.p.Revert(bg, r.Short, OriginOwner); err != nil {
+		t.Fatal("owner undo that lost to the drop:", err)
+	}
+	// Both reverts are journaled; the owner's found nothing to undo.
+	if a := e.adoption(r.ID); a.Reverted != WhyDropped || e.image() != update.Digest([]byte("a")) {
+		t.Fatalf("adoption %+v", a)
+	}
+}
+
+func TestStageDroppedIsIdempotentByExactID(t *testing.T) {
+	e, r, w := pendingStaged(t)
+	if d := e.p.Digest(); len(d) == 0 || !strings.HasPrefix(d[len(d)-1], "Staged update 41; I will install it when I am free.") {
+		t.Fatalf("digest: %q", d)
+	}
+	if err := e.p.StageDropped(bg, r.Short); err == nil {
+		t.Fatal("dropped by the owner-facing ID")
+	}
+	e.store.Fail = errors.New("disk full")
+	if err := e.p.StageDropped(bg, r.ID); err == nil {
+		t.Fatal("reverted without saving")
+	}
+	e.store.Fail = nil
+	if a := e.adoption(r.ID); a.Reverted != "" || !a.Staged {
+		t.Fatalf("after a failed save: %+v", a)
+	}
+	if err := e.p.StageDropped(bg, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if a := e.adoption(r.ID); a.Reverted != WhyDropped || e.reverts() != 1 || e.image() != update.Digest([]byte("a")) {
+		t.Fatalf("adoption %+v, reverts %d", a, e.reverts())
+	}
+	if len(w.called()) != 0 {
+		t.Fatal("the applier's own drop asked it to withdraw")
+	}
+	if d := e.p.Digest(); len(d) != 0 {
+		t.Fatalf("a dropped release was reported: %q", d)
+	}
+	e.reopen()
+	if err := e.p.StageDropped(bg, r.ID); err != nil || e.reverts() != 0 {
+		t.Fatalf("replay after a restart: %v, new reverts %d", err, e.reverts())
+	}
+	if err := e.p.ConfirmStaged(r.ID); err == nil {
+		t.Fatal("a dropped image confirmed")
+	}
+	r2 := e.release(release(t, 42, false, map[string][]byte{"host-image/release": []byte("c")}))
+	if err := e.p.ConfirmStaged(r2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.StageDropped(bg, r2.ID); err == nil {
+		t.Fatal("a confirmed image dropped")
 	}
 }

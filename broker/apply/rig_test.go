@@ -96,6 +96,8 @@ type pipeline struct {
 	failErr    error
 	calls      []string
 	onConfirm  func()
+	dropped    []string
+	dropErr    error
 }
 
 func (p *pipeline) ConfirmStaged(ref string) error {
@@ -114,6 +116,23 @@ func (p *pipeline) ConfirmStaged(ref string) error {
 	}
 	if f := p.onConfirm; f != nil {
 		f()
+	}
+	return nil
+}
+
+func (p *pipeline) StageDropped(_ context.Context, ref string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, "drop "+ref)
+	if err := p.dropErr; err != nil {
+		p.dropErr = nil
+		return err
+	}
+	if slices.Contains(p.confirmed, ref) {
+		return errors.New("confirmed")
+	}
+	if !slices.Contains(p.dropped, ref) {
+		p.dropped = append(p.dropped, ref)
 	}
 	return nil
 }

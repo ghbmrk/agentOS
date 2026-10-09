@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/update"
@@ -337,6 +339,7 @@ func TestUnrecordedHandoverThenPowerCutIsNotAFallback(t *testing.T) {
 	if r.saved().Applying != nil || strings.Contains(r.a.Status(), "did not start") {
 		t.Fatalf("status %q", r.a.Status())
 	}
+	r.dropsAre("a1") // SR3-4f-2b: nothing holds it after the restart
 	r.admitsNext(rel)
 }
 
@@ -450,7 +453,8 @@ func (r *rig) unrecordedAttempt() {
 }
 
 // twiceUnrecorded runs three Tick/restart cycles on the old root, each
-// scheduling release 1 again as Loop 3 would; the third finds the bound.
+// scheduling release 1 again under a new adoption (a1 to a3), since a
+// dropped adoption is retired; the third finds the bound.
 func twiceUnrecorded(t *testing.T) (*rig, *update.Verified) {
 	t.Helper()
 	r := newRig(t)
@@ -461,7 +465,7 @@ func twiceUnrecorded(t *testing.T) (*rig, *update.Verified) {
 		if ok, err := r.a.Tick(ctx); ok || err != nil { // settles the last attempt
 			t.Fatalf("cycle %d: %v %v", i, ok, err)
 		}
-		if err := r.a.Schedule(rel, "a1"); err != nil && i < 2 {
+		if err := r.a.Schedule(rel, fmt.Sprintf("a%d", i+1)); err != nil && i < 2 {
 			t.Fatalf("cycle %d: %v", i, err)
 		}
 		if i < 2 {
@@ -483,17 +487,21 @@ func TestInstalledSaveFailingIsBoundedPerRelease(t *testing.T) {
 		t.Fatalf("installed %d times", len(r.act.installed))
 	}
 	st := r.saved()
-	if r.a.FellBack(1) || len(r.pipe.calls) != 0 || st.Applying != nil || st.Last == nil || st.Last.Kind != "unrecorded" {
+	if r.a.FellBack(1) || st.Applying != nil || st.Last == nil || st.Last.Kind != "unrecorded" {
 		t.Fatalf("settled as %+v, fell back %v, pipeline %q", st.Last, r.a.FellBack(1), r.pipe.calls)
 	}
+	if len(r.pipe.confirmed) != 0 || len(r.pipe.failed) != 0 {
+		t.Fatalf("pipeline: %q", r.pipe.calls)
+	}
+	r.dropsAre("a1", "a2", "a3") // a3 was refused at the bound
 	if got := r.a.Status(); got != unrecordedLine {
 		t.Fatalf("status: %q", got)
 	}
 	if d := r.a.Digest(); len(d) != 1 || d[0] != unrecordedLine {
 		t.Fatalf("digest: %q", d)
 	}
-	if err := r.a.Schedule(rel, "a1"); err == nil {
-		t.Fatal("refused release scheduled again")
+	if err := r.a.Schedule(rel, "a4"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("refused release scheduled again: %v", err)
 	}
 	if ok, err := r.a.Tick(ctx); ok || err != nil || len(r.act.installed) != 2 {
 		t.Fatalf("fourth tick: %v %v, installed %d", ok, err, len(r.act.installed))
@@ -504,14 +512,14 @@ func TestInstalledSaveFailingIsBoundedPerRelease(t *testing.T) {
 func TestRefusedReleaseIsRetriedOnlyByTheOwner(t *testing.T) {
 	r, rel := twiceUnrecorded(t)
 	ctx := context.Background()
-	if err := r.a.Schedule(rel, "a1"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), rel.Ref().ManifestSHA256) {
+	if err := r.a.Schedule(rel, "b1"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), rel.Ref().ManifestSHA256) {
 		t.Fatalf("schedule: %v", err)
 	}
 	r.state.Fail = errIO
 	if err := r.a.Retry(rel.Ref()); !errors.Is(err, errIO) {
 		t.Fatalf("retry: %v", err)
 	}
-	if err := r.a.Schedule(rel, "a1"); !errors.Is(err, ErrRefused) {
+	if err := r.a.Schedule(rel, "b2"); !errors.Is(err, ErrRefused) {
 		t.Fatalf("refusal lifted without being saved: %v", err)
 	}
 	r.state.Fail = nil
@@ -520,7 +528,7 @@ func TestRefusedReleaseIsRetriedOnlyByTheOwner(t *testing.T) {
 	if got := r.a.Status(); got != "" {
 		t.Fatalf("status after retry: %q", got)
 	}
-	r.must(r.a.Schedule(rel, "a1"))
+	r.must(r.a.Schedule(rel, "b3"))
 	if ok, err := r.a.Tick(ctx); !ok || err != nil || len(r.act.installed) != 3 {
 		t.Fatalf("tick after retry: %v %v, installed %d", ok, err, len(r.act.installed))
 	}
@@ -549,7 +557,7 @@ func TestRecordedHandoverResetsTheUnrecordedCount(t *testing.T) {
 	if ok, err := r.a.Tick(ctx); ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
-	r.must(r.a.Schedule(rel, "a2"))
+	r.must(r.a.Schedule(rel, "a3")) // a2 was dropped across the restart
 	if ok, err := r.a.Tick(ctx); !ok || err != nil || len(r.act.installed) != 4 {
 		t.Fatalf("tick: %v %v, installed %d", ok, err, len(r.act.installed))
 	}
@@ -584,8 +592,9 @@ func TestRestartDropsPendingEvenAfterAFailedAbandon(t *testing.T) {
 	if ok, err := r.a.Tick(ctx); ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
-	if r.saved().Pending == nil {
-		t.Fatal("control: the saved state no longer holds the release")
+	// SR3-4f-2b: the Tick's settle saved the drop, and settled it once.
+	if st := r.saved(); st.Pending != nil || st.Applying == nil {
+		t.Fatalf("saved pending %+v, applying %+v", st.Pending, st.Applying)
 	}
 	r.act.abandonErr = nil
 	r.restart()
@@ -598,6 +607,7 @@ func TestRestartDropsPendingEvenAfterAFailedAbandon(t *testing.T) {
 	if r.saved().Pending != nil || len(r.act.installed) != 0 {
 		t.Fatalf("pending %+v, installed %v", r.saved().Pending, r.act.installed)
 	}
+	r.dropsAre("a1")
 }
 
 // SR3-4f-1a: an update store that cannot be read on the old root is not
@@ -717,4 +727,349 @@ func TestUnrecordedBoundHoldsWithinOneBoot(t *testing.T) {
 	if got := r.a.Status(); got != unrecordedLine {
 		t.Fatalf("status: %q", got)
 	}
+}
+
+// REQ: UPD-1, UPD-8, OP-4, OP-5
+//
+// SR3-4f-2: an adoption whose release leaves the applier before it is
+// installed is settled with StageDropped, after the applier's own save;
+// a failed call stays an obligation the next Tick retries. Withdraw gives
+// a pending release up for the pipeline's revert, and refuses from the
+// save before the install until the boot after it settles.
+
+// drops lists the adoptions StageDropped was called for, in order.
+func (r *rig) drops() []string {
+	r.t.Helper()
+	r.pipe.mu.Lock()
+	defer r.pipe.mu.Unlock()
+	var out []string
+	for _, c := range r.pipe.calls {
+		if id, ok := strings.CutPrefix(c, "drop "); ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func (r *rig) dropsAre(want ...string) {
+	r.t.Helper()
+	if got := r.drops(); strings.Join(got, ",") != strings.Join(want, ",") {
+		r.t.Fatalf("StageDropped calls %q, want %q", got, want)
+	}
+	if d := r.saved().Dropped; len(d) != 0 {
+		r.t.Fatalf("obligations left: %q", d)
+	}
+}
+
+func TestWithdrawDropsPending(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	rel := r.release(1, true)
+	r.must(r.a.Schedule(rel, "a1"))
+	r.state.Fail = errIO
+	if err := r.a.Withdraw("a1"); !errors.Is(err, errIO) || r.a.st.Pending == nil {
+		t.Fatalf("withdraw without saving: %v", err)
+	}
+	r.state.Fail = nil
+	r.must(r.a.Withdraw("a1"))
+	if ok, err := r.a.Tick(ctx); ok || err != nil || len(r.act.installed) != 0 {
+		t.Fatalf("tick: %v %v, installed %d", ok, err, len(r.act.installed))
+	}
+	if r.saved().Pending != nil || r.a.rel != nil {
+		t.Fatal("a withdrawn release is still pending")
+	}
+	if err := r.a.Schedule(rel, "a1"); !errors.Is(err, ErrRetired) {
+		t.Fatalf("withdrawn adoption scheduled again: %v", err)
+	}
+	// The withdrawal is also a drop: if the caller's own revert failed or
+	// was cut short (STOP, a cut before its journal), this settles it; the
+	// pipeline makes it a no-op when the revert ran (L3-1).
+	r.dropsAre("a1")
+	r.must(r.a.Withdraw("other")) // not held: nothing to give up, still dropped
+	if _, err := r.a.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.dropsAre("a1", "other")
+
+	r.must(r.a.Schedule(rel, "a2"))
+	var during error
+	r.act.onInstall = func() { during = r.a.Withdraw("a2") }
+	if ok, err := r.a.Tick(ctx); !ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if !errors.Is(during, ErrApplying) {
+		t.Fatalf("withdraw during the install: %v", during)
+	}
+	if err := r.a.Withdraw("a2"); !errors.Is(err, ErrApplying) {
+		t.Fatalf("withdraw before the restart settled: %v", err)
+	}
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	r.settledInstalledAs("a2")
+}
+
+// A withdrawal cut short before any Tick, its revert lost with the
+// process, is still settled by the next Tick (L3-1).
+func TestWithdrawDropSurvivesARestart(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.a.Withdraw("a1"))
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	if _, err := r.a.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.dropsAre("a1")
+}
+
+// settledInstalledAs: the release was installed and adoption confirmed.
+func (r *rig) settledInstalledAs(adoption string) {
+	r.t.Helper()
+	if in, _ := r.store.Installed(); in.Version != 1 || len(r.pipe.confirmed) != 1 || r.pipe.confirmed[0] != adoption {
+		r.t.Fatalf("installed %+v, pipeline %+v", in, r.pipe)
+	}
+}
+
+func TestPolicyDropSettlesTheAdoption(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.store.NoteAttestors(nil, nil))
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.dropsAre("a1")
+}
+
+func TestPolicyMovedAtStageSettlesTheAdoption(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.pol.atDispatch = func() { r.must(r.store.NoteAttestors(nil, nil)) }
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if len(r.act.installed) != 0 {
+		t.Fatal("installed")
+	}
+	r.dropsAre("a1")
+}
+
+// The pipeline is told only after a drop is saved: told first, a restart
+// could forget the drop and take the reverted adoption again
+// (SR3-4f-2b). Here Tick's narrowing drop meets a failing state store.
+func TestDropIsSavedBeforeThePipelineIsTold(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.store.NoteAttestors(nil, nil))
+	r.state.Fail = errIO
+	if ok, _ := r.a.Tick(context.Background()); ok {
+		t.Fatal("applied")
+	}
+	if d := r.drops(); len(d) != 0 {
+		t.Fatalf("pipeline told before the save: %q", d)
+	}
+	r.state.Fail = nil
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.dropsAre("a1")
+}
+
+func TestSupersedeSettlesTheOldAdoption(t *testing.T) {
+	r := newRig(t)
+	rel1 := r.release(1, true)
+	r.must(r.a.Schedule(rel1, "a1"))
+	r.must(r.a.Schedule(rel1, "a1")) // the same release again: kept
+	r.dropsAre()
+	r.must(r.a.Schedule(rel1, "a2")) // a new adoption of it
+	if d := r.saved().Dropped; len(d) != 1 || d[0] != "a1" {
+		t.Fatalf("obligation not saved: %q", d)
+	}
+	if err := r.a.Schedule(rel1, "a1"); !errors.Is(err, ErrRetired) {
+		t.Fatalf("dropped adoption scheduled again: %v", err)
+	}
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil || r.saved().Applying.Adoption != "a2" {
+		t.Fatalf("tick: %v %v, installed %v", ok, err, r.act.installed)
+	}
+	r.dropsAre("a1")
+}
+
+// A pending release saved before a process restart is not kept: New
+// retires its adoption and the next Tick settles it; the release is
+// scheduled again only under a new ID.
+func TestNewDropsASavedPendingRelease(t *testing.T) {
+	r := newRig(t)
+	rel := r.release(1, true)
+	r.must(r.a.Schedule(rel, "a1"))
+	r.restart()
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil || len(r.act.installed) != 0 {
+		t.Fatalf("tick: %v %v, installed %d", ok, err, len(r.act.installed))
+	}
+	r.dropsAre("a1")
+	if err := r.a.Schedule(rel, "a1"); !errors.Is(err, ErrRetired) {
+		t.Fatalf("schedule: %v", err)
+	}
+	r.must(r.a.Schedule(rel, "a2"))
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.dropsAre("a1")
+}
+
+func TestNotHandedAbandonAcrossRestartSettles(t *testing.T) {
+	ctx := context.Background()
+	// In the same boot the release is still pending: no settle, and the
+	// next Tick installs it (A5).
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.unrecordedAttempt()
+	if ok, err := r.a.Tick(ctx); !ok || err != nil || len(r.act.installed) != 2 {
+		t.Fatalf("same boot: %v %v, installed %d", ok, err, len(r.act.installed))
+	}
+	r.dropsAre()
+
+	// After a process restart nothing holds it: settled at once.
+	r = newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.unrecordedAttempt()
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	r.must(r.a.Resume(ctx))
+	r.dropsAre("a1")
+	if st := r.saved(); st.Applying != nil || st.Last == nil || st.Last.Kind != doneNotHanded {
+		t.Fatalf("settled as %+v", st.Last)
+	}
+}
+
+func TestUnrecordedBoundSettlesTheAdoption(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.act.onInstall = func() { r.state.Fail = errIO }
+	for i := 0; i < 5; i++ {
+		if ok, err := r.a.Tick(ctx); ok || err != nil {
+			t.Fatalf("tick %d: %v %v", i, ok, err)
+		}
+		r.state.Fail = nil
+	}
+	if len(r.act.installed) != 2 {
+		t.Fatalf("installs %d", len(r.act.installed))
+	}
+	r.dropsAre("a1")
+}
+
+func TestRefusedRefSettlesTheIncomingAdoption(t *testing.T) {
+	r, rel := twiceUnrecorded(t)
+	before := r.drops()
+	if err := r.a.Schedule(rel, "b1"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("schedule: %v", err)
+	}
+	if d := r.saved().Dropped; len(d) != 1 || d[0] != "b1" {
+		t.Fatalf("obligation not saved: %q", d)
+	}
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.dropsAre(append(before, "b1")...)
+	r.must(r.a.Retry(rel.Ref()))
+	r.must(r.a.Schedule(rel, "b2"))
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		t.Fatalf("tick after retry: %v %v", ok, err)
+	}
+	r.dropsAre(append(before, "b1")...)
+}
+
+func TestDropSettleFailureConverges(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.store.NoteAttestors(nil, nil))
+	r.pipe.dropErr = errIO
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if d := r.saved().Dropped; len(d) != 1 || d[0] != "a1" {
+		t.Fatalf("obligation: %q", d)
+	}
+	r.restart() // the obligation is durable
+	for i := 0; i < 2; i++ {
+		if ok, err := r.a.Tick(ctx); ok || err != nil {
+			t.Fatalf("tick: %v %v", ok, err)
+		}
+	}
+	r.dropsAre("a1", "a1")
+}
+
+// SR3-4f-2c: a security release whose attestor policy narrowed after the
+// install is not restarted into (SR3-6, UPD-8).
+func TestNarrowingAfterInstallIsNotRestarted(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.act.onInstall = func() { r.working = true } // holds the restart
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if pt := r.saved().Applying; pt == nil || !pt.Installed || !pt.Security {
+		t.Fatalf("not handed over: %+v", pt)
+	}
+	r.must(r.store.NoteAttestors(nil, nil))
+	r.working = false
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if r.act.restarts != 0 || r.act.abandoned != 1 || r.a.FellBack(1) {
+		t.Fatalf("activator %+v", r.act)
+	}
+	if st := r.saved(); st.Applying != nil || st.Last == nil || st.Last.Kind != doneNotHanded {
+		t.Fatalf("settled as %+v", st.Last)
+	}
+	if _, ok, _ := r.store.Staged(); ok {
+		t.Fatal("still staged")
+	}
+	r.dropsAre("a1")
+}
+
+// A process restart loses the held release, so a security fix handed over
+// before it cannot be judged again: it fails closed (SR3-4f-2c).
+func TestSecurityHandoverAfterAProcessRestartFailsClosed(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.act.onInstall = func() { r.working = true } // holds the restart
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.restart() // the broker restarts in the same boot
+	r.must(r.a.Resume(ctx))
+	r.working = false
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if r.act.restarts != 0 || r.act.abandoned != 1 || r.a.FellBack(1) {
+		t.Fatalf("activator %+v", r.act)
+	}
+	if st := r.saved(); st.Applying != nil || st.Last == nil || st.Last.Kind != doneNotHanded {
+		t.Fatalf("settled as %+v", st.Last)
+	}
+	r.dropsAre("a1")
+}
+
+// An ordinary release is restarted into after a narrowing: its restart
+// never rested on the attestors.
+func TestNarrowingAfterInstallKeepsAnOrdinaryRelease(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, false), "a1"))
+	r.clk.add(7 * time.Hour)
+	r.act.onInstall = func() { r.working = true }
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.must(r.store.NoteAttestors(nil, nil))
+	r.working = false
+	if ok, err := r.a.Tick(ctx); !ok || err != nil || r.act.abandoned != 0 {
+		t.Fatalf("tick: %v %v, activator %+v", ok, err, r.act)
+	}
+	r.dropsAre()
 }

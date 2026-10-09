@@ -75,7 +75,7 @@ func TestStagedImages(t *testing.T) {
 		t.Fatal(r)
 	}
 	d := e.p.Digest()
-	if len(d) != 1 || !strings.HasPrefix(d[0], "Staged update 40; it starts at the next restart.") {
+	if len(d) != 1 || !strings.HasPrefix(d[0], "Staged update 40; I will install it when I am free.") {
 		t.Fatalf("staged digest: %q", d)
 	}
 	if err := e.p.ConfirmStaged(r.ID); err != nil {
