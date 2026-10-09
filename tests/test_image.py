@@ -316,6 +316,25 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("SOURCE_DATE_EPOCH", b)
         self.assertIn("-trimpath", b)
 
+    def test_snapshot_sources_outlive_their_valid_until(self):
+        # The pinned snapshot's Release files expire a week after the timestamp; apt must still read
+        # them (signatures checked), while live security.debian.org keeps the expiry check.
+        mirror = ini(MK / "mkosi.conf")["Distribution"]["Mirror"].rstrip("/")
+        text = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_text()
+        stanzas = [dict(l.split(": ", 1) for l in s.splitlines() if l and not l.startswith("#"))
+                   for s in text.split("\n\n")]
+        stanzas = [s for s in stanzas if s]
+        snap = [s for s in stanzas if s["URIs"].rstrip("/") == mirror]
+        live = [s for s in stanzas if s["URIs"].rstrip("/") != mirror]
+        self.assertEqual(len(snap), 1)
+        self.assertEqual(snap[0]["Suites"].split(), ["trixie", "trixie-updates"])
+        self.assertEqual(snap[0]["Check-Valid-Until"], "no")
+        self.assertEqual([s["Suites"] for s in live], ["trixie-security"])
+        self.assertNotIn("Check-Valid-Until", live[0])
+        for s in stanzas:
+            self.assertEqual(s["Signed-By"], "/usr/share/keyrings/debian-archive-keyring.gpg")
+            self.assertNotIn("Trusted", s)
+
     def test_ab_usr_slots(self):
         # UPD-1: two equal /usr slots plus verity, so an update writes the idle one.
         parts = [ini(f)["Partition"] for f in sorted((MK / "mkosi.repart").glob("*.conf"))]
