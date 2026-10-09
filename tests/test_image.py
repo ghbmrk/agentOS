@@ -298,6 +298,46 @@ class HealthTest(unittest.TestCase):
                 self.assertIn("agentos-health: FAIL", r.stdout)
 
 
+class FallbackTest(unittest.TestCase):
+    """UPD-1 (L3 blocker on #41): a failed health check reboots into the next counted try, with no
+    owner action, and stops once the entry has no tries left."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.bin, self.root, self.log = t / "bin", t / "root", t / "systemctl.log"
+        (self.root / "sys/firmware/efi/efivars").mkdir(parents=True)
+        stub(self.bin, "systemctl", 'echo "$*" >>"%s"' % self.log)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_fallback(self, entry=None):
+        if entry is not None:
+            (self.root / "sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+             ).write_bytes(b"\x06\x00\x00\x00" + ("\\loader\\entries\\%s\0" % entry).encode("utf-16le"))
+        env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_HEALTH_ROOT=str(self.root))
+        r = subprocess.run(["sh", str(MK / "mkosi.extra/usr/lib/agentos/fallback")], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout, self.log.read_text() if self.log.exists() else ""
+
+    def test_reboots_while_tries_are_left(self):
+        for entry in ("agentos_7+2-1.conf", "agentos_7+1-2.conf", "agentos_7+3.conf"):
+            with self.subTest(entry):
+                self.log.unlink(missing_ok=True)
+                out, calls = self.run_fallback(entry)
+                self.assertEqual(calls, "reboot\n")
+                self.assertIn("rebooting", out)
+
+    def test_stays_up_with_no_tries_left_or_no_counter(self):
+        for entry in ("agentos_7+0-3.conf", "agentos_7.conf", None):
+            with self.subTest(entry):
+                out, calls = self.run_fallback(entry)
+                self.assertEqual(calls, "")
+                self.assertIn("staying up", out)
+
+
 ESP_GUID = "9bb3f5ba-ad2b-4857-929b-cc8ff3ed410c"
 
 
@@ -474,6 +514,11 @@ class ConfigTest(unittest.TestCase):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-health.service")
         self.assertIn("boot-complete.target", u["Unit"]["Before"])
         self.assertEqual(u["Install"]["RequiredBy"], "boot-complete.target")
+        # UPD-1 (L3 blocker on #41): a failed or hung check reboots into the next try.
+        self.assertEqual(u["Unit"]["OnFailure"], "agentos-fallback.service")
+        self.assertIn("TimeoutStartSec", u["Service"])
+        f = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-fallback.service")
+        self.assertEqual(f["Service"]["ExecStart"], "/usr/lib/agentos/fallback")
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("enable agentos-health.service", preset)
 

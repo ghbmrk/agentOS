@@ -2,10 +2,13 @@
 Description=AgentOS boot health check
 Documentation=file:/usr/lib/agentos/health
 Before=boot-complete.target
+# A failure (or a hang past the timeout) reboots into the next try (UPD-1).
+OnFailure=agentos-fallback.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+TimeoutStartSec=5min
 ExecStart=/usr/lib/agentos/health
 StandardOutput=journal+console
 

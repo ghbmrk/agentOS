@@ -5,7 +5,7 @@
 # blessed, and root grew. virtio disk, not emulated USB: S7 saw QEMU's usb-storage corrupt reads.
 # Then the per-drive GUIDs (drive-id, L3 MUST on #41): the first boot gave the drive its own disk,
 # ESP and root GUIDs; the drive boots again on them; and a PC with two fresh copies attached (every
-# GUID shared) fails the health check, so that boot is never blessed.
+# GUID shared) fails the health check, so that boot is never blessed and reboots into its next try.
 # Usage: ci_boot.sh IMAGE [WORKDIR]. Console logs: WORKDIR/console.log, console-reboot.log,
 # console-two-drives.log.
 set -eu
@@ -15,7 +15,7 @@ ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
 copy() { cp --sparse=always "$IMG" "$1"; truncate -s +2G "$1"; }
 
 # boot LOG DISK...: boot from the first disk, the others attached, until the boot report or a
-# failed health check reaches the console.
+# failed health check (or, with UNTIL set, that pattern) reaches the console.
 boot() {
 	log=$1; shift
 	t=$(mktemp -d "$W/tpm.XXXXXX")
@@ -36,7 +36,7 @@ boot() {
 	QEMU=$!
 	end=$(( $(date +%s) + ${TMO:-1800} ))
 	while kill -0 $QEMU 2>/dev/null && [ "$(date +%s)" -lt "$end" ]; do
-		grep -aq "agentos-boot:\|agentos-health: FAIL" "$log" 2>/dev/null && break
+		grep -aq "${UNTIL:-agentos-boot:\|agentos-health: FAIL}" "$log" 2>/dev/null && break
 		sleep 5
 	done
 	sleep 2; kill $QEMU 2>/dev/null || true; wait $QEMU 2>/dev/null || true
@@ -98,10 +98,12 @@ hasnt "$W/console-reboot.log" "agentos-drive-id: assigned"
 
 # Two fresh copies on one PC: the boot drive is ambiguous, so health fails and nothing is assigned.
 copy "$W/two-a.raw"; copy "$W/two-b.raw"
-boot "$W/console-two-drives.log" "$W/two-a.raw" "$W/two-b.raw"
+UNTIL="agentos-fallback:" boot "$W/console-two-drives.log" "$W/two-a.raw" "$W/two-b.raw"
 has "$W/console-two-drives.log" "agentos-drive-id: FAIL 2 partitions"
 has "$W/console-two-drives.log" "agentos-health: FAIL boot drive is ambiguous"
 hasnt "$W/console-two-drives.log" "agentos-boot: bless=good"
 hasnt "$W/console-two-drives.log" "agentos-drive-id: assigned"
+# The failed check reboots into the entry's next try without anyone at the PC (UPD-1).
+has "$W/console-two-drives.log" "agentos-fallback: health check failed, 2 tries left on this boot entry; rebooting"
 rm -f "$W/two-a.raw" "$W/two-b.raw"
 exit $fail
