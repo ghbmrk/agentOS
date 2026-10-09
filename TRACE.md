@@ -134,7 +134,7 @@ Covered: 135 / 159 requirement IDs
 | LOOP-10 | `broker/change/hold_test.go`, `broker/change/link_test.go`, `broker/change/loop10_test.go`, `broker/change/loop2_test.go`, `broker/change/pe5_test.go`, `broker/change/resume_test.go`, `broker/change/treerule_test.go`, `broker/change/wiring_test.go`, `broker/loops/fixer_test.go`, `broker/loops/followup_test.go`, `broker/loops/report_test.go`, `broker/loops/secure_test.go`, `broker/replay/treerule_test.go`, `tests/test_loop2_harness.py` |
 | LOOP-11 | `broker/maintain/maintain_test.go` |
 | OSS-1 | `broker/hint/emitter_test.go`, `broker/hint/hint_test.go`, `broker/hint/schema_test.go` |
-| OSS-2 | `broker/cleanroom/cleanroom_test.go`, `broker/cleanroom/durable_test.go`, `broker/cleanroom/identity_test.go`, `broker/cleanroom/integration_test.go`, `broker/cleanroom/syncseam_test.go` |
+| OSS-2 | `broker/cleanroom/cleanroom_test.go`, `broker/cleanroom/durable_test.go`, `broker/cleanroom/identity_test.go`, `broker/cleanroom/integration_test.go`, `broker/cleanroom/nilhook_test.go`, `broker/cleanroom/syncseam_test.go` |
 | OSS-3 | `broker/cleanroom/cleanroom_test.go`, `broker/cleanroom/integration_test.go` |
 | OSS-4 | `broker/attest/schema_test.go`, `broker/update/attest_test.go` |
 | OSS-5 | `broker/cleanroom/cleanroom_test.go`, `broker/hint/emitter_test.go`, `broker/hint/hint_test.go`, `broker/hint/schema_test.go` |
