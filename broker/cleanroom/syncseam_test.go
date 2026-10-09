@@ -24,10 +24,11 @@ import (
 // syncRec records the real syncs, in order, as "file <rel>" or
 // "dir <rel>", with the stage directory's random name made ".stage".
 type syncRec struct {
-	mu   sync.Mutex
-	root string
-	seen []string
-	at   func(dir string) // called before each directory sync
+	mu     sync.Mutex
+	root   string
+	seen   []string
+	at     func(dir string)  // called before each directory sync
+	atFile func(path string) // called before each file sync
 }
 
 func (r *syncRec) add(kind, path string) {
@@ -53,6 +54,9 @@ func recordSyncs(t *testing.T, root string) *syncRec {
 	r := &syncRec{root: root}
 	file, dir := syncFile, syncDirFn
 	syncFile = func(f *os.File) error {
+		if r.atFile != nil {
+			r.atFile(f.Name())
+		}
 		r.add("file", f.Name())
 		return file(f)
 	}
