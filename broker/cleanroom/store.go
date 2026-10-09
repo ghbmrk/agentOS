@@ -38,6 +38,13 @@ var errDamaged = errors.New("cleanroom: artifact output damaged")
 
 var segment = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
 
+// errBadID: an artifact ID that is not one plain, visible directory name.
+var errBadID = errors.New("cleanroom: not an artifact ID")
+
+// validID reports whether id can name an artifact directory in the store:
+// one segment with no leading dot, so never "", "." or "..".
+func validID(id string) bool { return segment.MatchString(id) && !strings.HasPrefix(id, ".") }
+
 // Result is what a clean-room guest submits: the generalized skill, adapter,
 // or regression it built from public information, as UTF-8 text files, and
 // the outcome of running it on the synthetic fixtures.
@@ -179,7 +186,9 @@ type Store struct {
 // those whose manifest does not parse, or whose files are missing or do not
 // match it (output a crash lost), still in place: the caller queues their
 // jobs again and only then quarantines them, so a crash between the two
-// cannot lose a job. An unreadable manifest is returned with only its ID.
+// cannot lose a job. An artifact's identity is its directory name: an
+// unreadable manifest, or one naming another ID, is returned with only the
+// directory's name, so every returned ID is a name ReadDir listed (SR3-8-f1).
 func openStore(dir string) (*Store, []Manifest, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, nil, err
@@ -197,7 +206,7 @@ func openStore(dir string) (*Store, []Manifest, error) {
 	}
 	var damaged []Manifest
 	for _, e := range ents {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		if !e.IsDir() || !validID(e.Name()) {
 			continue
 		}
 		a, err := s.get(e.Name())
@@ -213,8 +222,12 @@ func openStore(dir string) (*Store, []Manifest, error) {
 }
 
 // quarantine moves an artifact out of every listing and Get, kept aside
-// for diagnosis. Its job must already be queued again (SR3-8).
+// for diagnosis. Its job must already be queued again (SR3-8). An id that
+// is not an artifact directory name is refused and nothing is renamed.
 func (s *Store) quarantine(id string) error {
+	if !validID(id) {
+		return fmt.Errorf("%w: %q", errBadID, clip(id, 64))
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	q := filepath.Join(s.dir, ".quarantine")
@@ -228,10 +241,10 @@ func (s *Store) quarantine(id string) error {
 	if err := os.Rename(filepath.Join(s.dir, id), dst); err != nil {
 		return err
 	}
-	if err := syncDir(q); err != nil {
+	if err := s.fault.dirSync(q); err != nil {
 		return err
 	}
-	return syncDir(s.dir)
+	return s.fault.dirSync(s.dir)
 }
 
 // losses counts the quarantined copies of an artifact: how often its output
@@ -271,10 +284,7 @@ func (s *Store) settle(id string) error {
 	if err := a.verify(); err != nil {
 		return fmt.Errorf("%w: %s: %v", errDamaged, id, err)
 	}
-	if err := s.fault.hit("syncdir", s.dir); err != nil {
-		return err
-	}
-	return syncDir(s.dir)
+	return s.fault.dirSync(s.dir)
 }
 
 // stage writes an artifact under a hidden name, which no listing or Get
@@ -336,10 +346,7 @@ func (s *Store) fill(tmp string, m Manifest, files map[string]string) (Manifest,
 	}
 	// Created parents precede their children in dirs: sync in reverse.
 	for i := len(dirs) - 1; i >= 0; i-- {
-		if err := s.fault.hit("syncdir", dirs[i]); err != nil {
-			return m, err
-		}
-		if err := syncDir(dirs[i]); err != nil {
+		if err := s.fault.dirSync(dirs[i]); err != nil {
 			return m, err
 		}
 	}
@@ -366,11 +373,7 @@ func (s *Store) commit(staged string, m Manifest) (Artifact, error) {
 	// as failed. It is reported for the log; the job is recorded complete
 	// only once settle has synced it.
 	a := Artifact{m: m, dir: dir}
-	err := s.fault.hit("syncdir", s.dir)
-	if err == nil {
-		err = syncDir(s.dir)
-	}
-	if err != nil {
+	if err := s.fault.dirSync(s.dir); err != nil {
 		return a, fmt.Errorf("%w: %v", errCommittedUnsynced, err)
 	}
 	return a, nil
@@ -397,7 +400,7 @@ func (s *Store) Get(id string) (Artifact, error) {
 }
 
 func (s *Store) get(id string) (Artifact, error) {
-	if !segment.MatchString(id) || strings.HasPrefix(id, ".") {
+	if !validID(id) {
 		return Artifact{}, ErrNoArtifact
 	}
 	dir := filepath.Join(s.dir, id)
@@ -407,6 +410,9 @@ func (s *Store) get(id string) (Artifact, error) {
 			return Artifact{}, ErrNoArtifact
 		}
 		return Artifact{}, err
+	}
+	if m.ID != id {
+		return Artifact{}, fmt.Errorf("%w: %s: manifest names %q", errDamaged, id, clip(m.ID, 64))
 	}
 	return Artifact{m: m, dir: dir}, nil
 }
@@ -420,7 +426,7 @@ func (s *Store) list(keep func(Manifest) bool) ([]Artifact, error) {
 	}
 	var out []Artifact
 	for _, e := range ents {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		if !e.IsDir() || !validID(e.Name()) {
 			continue
 		}
 		a, err := s.get(e.Name())
