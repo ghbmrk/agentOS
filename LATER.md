@@ -242,6 +242,11 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-8 l1 | L3 re-review on #432, point 1: once `CR-quarantine-prune` is on main, add to it that any pruning of `.quarantine` must keep the per-artifact loss count (e.g. a count file), since C14's `maxRepairs` bound is counted from the copies; fold this line into that row |
 | SR3-8 l2 | L3 re-review on #432, point 2: a job stopped by the repair bound is logged `failed: no result within the allowed attempts`; only the log line says its output was lost repeatedly. Text only |
 | SR3-8 l3 | L3 re-review on #432, point 3: no test pins the `<id>-<12 hex>` name check in `Store.losses`; a bare prefix match passes every test. Unreachable today (fixed-length broker-written IDs) |
+| SR3-8-f l1 | L3 3 on #578: `New`'s `errBadID` branch is unreachable and untested (kept as defence in depth); in `park` a new `parked/` is not synced into `cfg.Dir`, and source-directory sync errors in `finish`/`park` are ignored. Both predate #578 |
+| SR3-8-f l2 | L3 4 on #578: `Get` follows a symlinked name inside the store; exploiting it needs store write access. Likewise `quarantine` follows an in-root symlink: with `.quarantine -> b` (another artifact directory) the rename lands in `b/`; same precondition (L3 6079915313) |
+| SR3-8-f l3 | Security 4 on #578: the seam's source check matches only `Sync`; add `syscall.Fsync`, `unix.Fsync` and `Fdatasync` to `allowed` if the package ever imports them |
+| SR3-8-f l4 | L3 6079535268 point 3 on #578: `syncHit` matches only a literal op string, so a const op or a direct `s.fault` call slips past the AST check; the recorder tests carry the guarantee |
+| SR3-8-f l5 | L3 6079915313 on #578: after the rename, `dirSync(q)` opens `.quarantine` by path, not through the root; durability only, the rename itself stays confined |
 | W3-forget-b1-4 l1 | L3 on #436: `broker/change` TestRouterCandidateAdoptsThroughPipeline flakes (~2/10k; random split key); fix is a seeded Rand, proposed on #436 |
 | W3-forget-b1-4 l2 | #436: decoy dates may fall before box setup or enrolment |
 | W3-forget-b1-4 l3 | #436: "Never" wording for owners whose forgets predate the log |
@@ -426,6 +431,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | SR3-2-f-started-wording | With 1 queued and 1 started under `PerDay: 2` the owner sees `1 earlier send still queued`, not the bound; consider a form such as `1 of 2 today still queued` (UX lens on #581, comment 6078894198) |
 | SR3-2-f-max-rule | The queued count is the maximum over the failed rules, not the rule the owner would widen; differs only with several bound rules on one action (UX lens on #581, comment 6078894198) |
 | SR3-2-f-maxnoted | No test pins the `maxNoted` (1000) boundary where a restart closes the ask as changed; add one with 1001 queued or a lowered constant. A second shown-only fact goes into a separate `owner.Item` field (GR33), not `Detail` (Potency lens on #581, comment 6078894198) |
+| SR3-6f-1 l1 | `TestOwnerNarrowingSurvivesTheNextCheck`'s `r.p.proposed()[1:]` loop may check nothing, because version 2 was already proposed; the `old.Security()` assertion carries the test. Tighten it when the file is next touched (L3 on #595, comment 6080096018, point 3) |
+| SR3-6f-1 l2 | The `attestors` failure line gives the owner no step or time, and it sits above the pending-approval lines in `statusLocked`, so a security fix waiting for approval is not shown while the read fails; unlike a mirror failure it can persist. Revisit when W5b adds the settings page (UX and Potency lens on #595, comment 6080136904, point 3) |
+| SR3-6f-1 l3 | Make "trusted testers" (the `attestors` failure line) and "attestor" (`forkAsks`) match the label the settings page uses once W5b names it; `ownertext_test.go` covers only the finding texts (UX and Potency lens on #595, comment 6080136904, point 4) |
 
 ## Reuse candidates
 | ID | Component | Why |

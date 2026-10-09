@@ -44,8 +44,8 @@ func TestResolveTellsEveryTextedFindingItCleared(t *testing.T) {
 		f       Finding
 		cleared string
 	}{
-		{"unpaused", fuzzFinding(), "Cleared: the check that reads agent requests. Nothing more is needed from you."},
-		{"paused", withContain(fuzzFinding()), "Cleared: the check that reads agent requests. Pre-allowance G7 stays paused until you resume it on my Wi-Fi page."},
+		{"unpaused", fuzzFinding(), "Cleared: the crash in the check that reads agent requests. Nothing more is needed from you."},
+		{"paused", withContain(fuzzFinding()), "Cleared: the crash in the check that reads agent requests. Pre-allowance G7 stays paused until you resume it on my Wi-Fi page."},
 		{"untexted", lowFuzz(), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -326,6 +326,8 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 		{Check: CheckAdvisory, Subject: "openssl", Detail: "CVE-2026-1", Fixed: "3.1"},
 		{Check: CheckExpiry, Subject: "mail-login", Detail: "expires in 3 days"},
 		{Check: CheckSeeded, Subject: "private-route", Detail: "x"},
+		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzOverrunDetail},
+		{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Detail: FuzzStallDetail},
 	}
 	// The scan catches what it must.
 	for _, s := range []string{"sockets.FuzzRequest", "a/b", "x.go", "00112233aa", "vmName", "TestX"} {
@@ -346,6 +348,10 @@ func TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep(t *testing.T) {
 				}
 				line := ownerLine(rec)
 				cleared := clearedLine(rec)
+				// A hang is not a crash (P3-4b-3r-fuzz).
+				if hangDetail(f.Detail) && strings.Contains(strings.ToLower(line), "crash") {
+					t.Errorf("%s/%s: a hang reads as a crash: %q", f.Check, state, line)
+				}
 				for _, s := range []string{line, cleared} {
 					loop7 := f.Check == CheckFuzz || f.Check == CheckProbe || f.Check == CheckCanary || f.Check == CheckCorpus
 					if bad := identifierIn(s); bad != "" && loop7 {
@@ -385,7 +391,7 @@ func TestClearedWaitsForEveryFindingSharingItsPlainName(t *testing.T) {
 		if err := r.g.Resolve(idb, Replay{Evidence: b.Detail, Passed: true}); err != nil {
 			t.Fatal(err)
 		}
-		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the check that reads agent requests.") {
+		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the crash in the check that reads agent requests.") {
 			t.Fatalf("texts %q", got)
 		}
 	})
