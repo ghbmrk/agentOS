@@ -57,9 +57,8 @@ func TestRunscPanicAfterStartAnswersNoOutput(t *testing.T) {
 // 100ms deadline raced runsc's exit on a slow CI runner).
 func execAtMark(t *testing.T, mode string) (*Runtime, vm.ExecResult, error) {
 	t.Helper()
-	r := fakeRunsc(t)
 	mark := filepath.Join(t.TempDir(), "mark")
-	t.Setenv("FAKE_RUNSC_MARK", mark)
+	r := fakeRunsc(t, "FAKE_RUNSC_MARK="+mark)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	seen := make(chan bool, 1)
