@@ -87,16 +87,17 @@ jobs:
         env:
           AGENTOS_REQUIRE_SWTPM: "1"
         run: go test -race -count=1 ./...
-      - name: Fuzz the socket and action-protocol decoders for a fixed number of executions (LOOP-7, P3-4b-3)
+      - name: Fuzz the socket and action-protocol decoders, 20s per target (LOOP-7, P3-4b-3)
         # Each target already ran its seeds and planted-decoder control above;
-        # this fuzzes past the seeds. The long runs are in soak.yml. The
-        # bound is a count, not a time: Go 1.26's fuzz coordinator can fail a
-        # time-bounded run at its deadline with a bare "context deadline
-        # exceeded" and no input (P1-4-flake); a count has no deadline. 600000
-        # is about what 20s ran on CI.
+        # this fuzzes past the seeds. The long runs are in soak.yml. tools/fuzzrun.py
+        # runs each target for the time budget as count-bound chunks sized from the
+        # exec/s it measures (logged per chunk below). It never passes a duration to
+        # -fuzztime: a time-bounded run can fail at its deadline with a bare "context
+        # deadline exceeded" and no input (P1-4-flake), and a count has no deadline. A
+        # chunk that hangs is killed at a cap proportional to its expected time.
         run: |
           for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP; do
-            go test "./${t%%:*}" -run '^$' -fuzz "^${t#*:}\$" -fuzztime 600000x || exit 1
+            python3 ../tools/fuzzrun.py --pkg "./${t%%:*}" --target "${t#*:}" --budget 20s || exit 1
           done
   machines:
     # Agent-machine lifecycle against the real kernel (P1-4): cgroup v2,

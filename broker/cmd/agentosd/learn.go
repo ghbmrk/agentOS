@@ -19,6 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/corpus"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -26,6 +27,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/replay"
 	"github.com/ghbmrk/agentos/broker/routerule"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -65,6 +67,8 @@ type learning struct {
 	// fuzz is Loop 2's source: LOOP-7's fuzz rounds in front of guard
 	// (P3-4b-3a).
 	fuzz *loop7.Source
+	// corpus is the guard's in-process corpus replay (LOOP-7).
+	corpus *loops.CorpusProbe
 	// running counts the scheduler's run, so a test can wait for it.
 	running sync.WaitGroup
 	contain loop2Contain
@@ -135,6 +139,11 @@ const (
 	fuzzUser    = "agentos-fuzz"
 )
 
+// corpusEvery is how often the guard replays the embedded corpus through
+// the in-process closed checks (agentosd LC-1): a run costs
+// milliseconds, and a weakened check is found within a day.
+const corpusEvery = 24 * time.Hour
+
 // fuzzLimits are the fuzz children's cgroup leaf (L7-6): 1 GiB and 256
 // tasks, checked against the HW-4 floor in ASSUMPTIONS, and the lowest
 // CPU and I/O weight in use (budget's browser and pool), below the
@@ -178,13 +187,18 @@ func fuzzJail(p learnPaths) (*loop7.Jail, error) {
 }
 
 // fuzzTargets are the release's fuzz targets and their jail, or none when
-// it ships none or they cannot be confined.
+// it ships none or they cannot be confined. A release directory with no
+// targets is logged: an image always ships a manifest (L7-4), so only a
+// dev build, with no directory, is quiet.
 func fuzzTargets(p learnPaths) ([]loop7.Target, *loop7.Jail) {
 	if p.Fuzz == "" || p.Loop7 == "" {
 		return nil, nil
 	}
 	ts, err := loop7.Load(p.Fuzz, p.Loop7)
 	if errors.Is(err, os.ErrNotExist) {
+		if fi, serr := os.Stat(p.Fuzz); serr == nil && fi.IsDir() {
+			log.Printf("loop7: no fuzz rounds: %v", err)
+		}
 		return nil, nil
 	} else if err != nil {
 		log.Printf("loop7: no fuzz rounds: %v", err)
@@ -290,6 +304,15 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		return nil, err
 	}
 	l.learn = learn
+	// LOOP-7's corpus replay runs in Loop 2's slot after the passive
+	// checks: the corpus built into this binary through the closed checks
+	// this process holds, CH-19's code filter and the commitment filter
+	// with the owner channel's defaults (no owner additions are wired).
+	// The mail checks and the guest-plane replay wait for the box wiring
+	// (loops S28, P3-4b-4c).
+	if l.corpus, err = corpus.Probe(corpusEvery, owner.Commitments{}); err != nil {
+		return nil, err
+	}
 	if l.guard, err = loops.NewGuard(loops.GuardConfig{
 		Pipeline:  l.pipe,
 		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loop2.json")},
@@ -301,6 +324,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		Fixer: lateFix{&l.build},
 		// Seeded findings' fixtures are live (loop2.go).
 		FixturesLiveFor: loop2Live,
+		Probes:          []loops.Probe{l.corpus},
 	}); err != nil {
 		return nil, err
 	}

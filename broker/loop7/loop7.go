@@ -93,7 +93,7 @@ type Config struct {
 	CacheDir string
 	// CacheCap bounds one package's generated corpus (CacheDir/fuzz/<pkg>)
 	// and CacheTotal the whole of CacheDir/fuzz; each fuzz step prunes the
-	// oldest entries past them first (F14). Defaults 64 MiB and 512 MiB.
+	// oldest entries past them first (F15). Defaults 64 MiB and 512 MiB.
 	CacheCap, CacheTotal int64
 	// Jail confines every child; agentosd's wiring sets it (L7-6). Nil
 	// (tests, dev builds) runs children as the daemon's own user, group
@@ -122,6 +122,11 @@ type Source struct {
 	mu   sync.Mutex
 	next time.Time
 	turn int // which LOOP-7 job comes next: the probe, then each target
+	// fuzzed is when a fuzz step last completed, or when the source was
+	// built; failing counts each target's turns in a row that failed to
+	// run (P3-4b-3r-pass).
+	fuzzed  time.Time
+	failing map[int]int
 }
 
 // New checks cfg and returns the source.
@@ -185,7 +190,7 @@ func New(cfg Config) (*Source, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Source{cfg: cfg, base: base}, nil
+	return &Source{cfg: cfg, base: base, fuzzed: cfg.Now(), failing: map[int]int{}}, nil
 }
 
 // targetDirs are the cache and each target's directory, which the
@@ -351,13 +356,61 @@ func (s *Source) Urgent() bool {
 }
 
 // Digest is Inner's digest lines (loops.Digester), which the scheduler
-// reads for STATUS.
+// reads for STATUS, then one line when fuzzing is configured but no fuzz
+// step has completed for longer than Recheck, and one when a target
+// failed to run on each of its turns for a full cycle. Neither names a
+// target (P3-4b-3r-pass).
 func (s *Source) Digest() []string {
-	d, ok := s.cfg.Inner.(loops.Digester)
-	if !ok {
-		return nil
+	var out []string
+	if d, ok := s.cfg.Inner.(loops.Digester); ok {
+		out = d.Digest()
 	}
-	return d.Digest()
+	if len(s.cfg.Targets) == 0 {
+		return out
+	}
+	s.mu.Lock()
+	since := s.cfg.Now().Sub(s.fuzzed)
+	broken := false
+	for _, n := range s.failing {
+		broken = broken || n >= 2
+	}
+	s.mu.Unlock()
+	if since > s.Recheck() {
+		out = append(out, "Loop 2: my fuzz self-tests have not run for "+span(since)+".")
+	}
+	if broken {
+		out = append(out, "Loop 2: one of my fuzz self-tests cannot run.")
+	}
+	return out
+}
+
+// span is d in whole days, or whole hours under a day.
+func span(d time.Duration) string {
+	n, unit := int(d/(24*time.Hour)), "day"
+	if n == 0 {
+		n, unit = int(d/time.Hour), "hour"
+	}
+	if n != 1 {
+		unit += "s"
+	}
+	return strconv.Itoa(n) + " " + unit
+}
+
+// stepped records how fuzz step i ended: completion time is taken when a
+// step ends with ctx live and no error, never when it is offered, so a
+// preempted step is not progress; a step that errors is a failed turn.
+func (s *Source) stepped(ctx context.Context, i int, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		s.failing[i]++
+		return
+	}
+	delete(s.failing, i)
+	s.fuzzed = s.cfg.Now()
 }
 
 // Measured is Inner's (loops.Measured): LOOP-7 jobs do not change how
@@ -408,6 +461,7 @@ func (s *Source) Next(ctx context.Context, modelOK bool) (loops.Job, bool) {
 	t := s.cfg.Targets[i]
 	return loops.Job{Name: "fuzz", Run: func(ctx context.Context) loops.Result {
 		n, err := s.Fuzz(ctx, t)
+		s.stepped(ctx, i, err)
 		retry(ctx)
 		return loops.Result{Value: float64(n), Err: err}
 	}}, true
@@ -835,7 +889,7 @@ type cached struct {
 }
 
 // prune keeps the fuzz cache within its caps before pkg's fuzz step
-// (F14): pkg's own entries (CacheDir/fuzz/<pkg>/Fuzz*, so not a nested
+// (F15): pkg's own entries (CacheDir/fuzz/<pkg>/Fuzz*, so not a nested
 // package's) to CacheCap, then the whole cache to CacheTotal, removing
 // the oldest first. It walks only CacheDir/fuzz: crash inputs live in the
 // targets' testdata, which is evidence and never pruned (F3, F9). It

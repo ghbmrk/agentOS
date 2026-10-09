@@ -288,9 +288,12 @@ func (s *Guard) Resolve(id string, r Replay) error {
 // while an X the owner heard of is still open (L3 #558 point 1).
 func (s *Guard) clearedLinesLocked(closed []Record) []string {
 	key := func(r Record) string { return string(r.Finding.Check) + "\x00" + plainSubject(r.Finding) }
+	// An open Again record is one the owner was told of before it came
+	// back too soon, so it holds the line too: a finding that moves
+	// between two details is never told "Cleared" (Security 4a on #585).
 	open := map[string]bool{}
 	for _, r := range s.st.Open {
-		if r.Texted {
+		if r.Texted || r.Again {
 			open[key(r)] = true
 		}
 	}
