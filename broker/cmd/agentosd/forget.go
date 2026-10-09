@@ -57,10 +57,11 @@ const (
 	forgetAgentDone   = recalltool.TakenBack
 	forgetAgentNotYet = "Your agent is not back to before that task yet. I keep trying and will text you when it is."
 	// Item 1 has forgotten the task, so these never offer FORGET again
-	// (CH-12); carrying them as owed take-backs is a release row.
-	forgetAgentNoAgent  = "Nothing taken back: your agent is not running, so it holds nothing new. Nothing is needed."
-	forgetAgentNotTaken = "Not taken back: I couldn't save the request. Your agent's own files may still hold that task."
-	forgetAgentNotOpen  = "Not taken back: memory was not open yet. Your agent's own files may still hold that task."
+	// (CH-12); each is an owed take-back the journal holds, done once it
+	// can be (W3-forget-b2c).
+	forgetAgentNoAgent  = "Not taken back yet: your agent is not running. I will do it when it runs again and text you. Send STATUS to see why."
+	forgetAgentNotTaken = "Not taken back yet: I couldn't save the request. I keep trying and will text you when it's done."
+	forgetAgentNotOpen  = "Not taken back yet: memory is off on this box, so your agent still holds that task. I will do it if memory comes on and text you."
 	// forgetAgentWhenOpen: an approved item 2 waits for recall to open
 	// (#327 L3 B-3).
 	forgetAgentWhenOpen = "Not taken back yet: memory is not open. I will do it when it opens and text you."
@@ -157,6 +158,9 @@ type ownerForget struct {
 	// restored: the take-backs a restored forget log holds, by where the
 	// agent went back to, taken back by resumeAgent once recall opens.
 	restored []time.Time
+	// carrying: approved item 2s not saved, by ID, that carryAgent is
+	// trying again; resumeAgent leaves them to it.
+	carrying map[string]bool
 	list     []string // goals, as last listed
 	listAt   time.Time
 	seq      int
@@ -536,7 +540,7 @@ type forgetLogger interface {
 	Append(goal string, at, since time.Time, agent bool) error
 }
 
-// logForget appends a done forget to the forget log, reporting whether it
+// logForget appends an approved forget to the forget log, reporting whether it
 // holds; a failure leaves the done text's caveat.
 func (f *ownerForget) logForget(goal string, since time.Time, agent bool) bool {
 	if f.forgetLog == nil {
@@ -597,22 +601,26 @@ func (f *ownerForget) executeAgent(ctx context.Context, in journal.Intent) journ
 }
 
 // agentBack takes the agent back for an approved item 2 (id) and tells
-// the owner how it went.
+// the owner how it went. One it cannot take back now is owed
+// (W3-forget-b2c): it succeeds, so the journal holds it, and resumeAgent
+// takes it back at a later open of recall once it can. Each is in the
+// forget log before the owner is told, so a restore takes the agent back
+// too, done or owed (security 4a on #427); one logged twice is taken back
+// once (resumeRestored).
 func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time) journal.Outcome {
+	f.logForget(grants.ForgetAgentGoal(id), since, true)
 	a := f.agent.Load()
 	if a == nil {
 		f.inform(forgetAgentNoAgent)
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "no agent machine"}
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "owed: no agent machine"}
 	}
 	err := a.takeBack(ctx, since, true)
 	switch {
 	case err == nil:
-		f.logForget(grants.ForgetAgentGoal(id), since, true)
 		f.inform(forgetAgentDone)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "taken back"}
 	case errors.Is(err, recalltool.ErrCarried):
 		log.Printf("forget: agent take-back: %v", err)
-		f.logForget(grants.ForgetAgentGoal(id), since, true) // recall owes it
 		f.inform(forgetAgentNotYet)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "taking back; recall retries"}
 	case errors.Is(err, recalltool.ErrNotOpen) && f.whenOpen != nil:
@@ -626,11 +634,58 @@ func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time)
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "queued until recall opens"}
 	case errors.Is(err, recalltool.ErrNotOpen):
 		f.inform(forgetAgentNotOpen)
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "recall not open"}
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "owed: recall off"}
 	default:
+		// Not recorded, so nothing was taken back and trying again cannot
+		// repeat a take-back (recalltool.Reach.TakeBack).
 		log.Printf("forget: agent take-back: %v", err)
-		f.inform(forgetAgentNotTaken)
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not recorded"}
+		f.mu.Lock()
+		carried := f.carrying[id]
+		if f.carrying == nil {
+			f.carrying = map[string]bool{}
+		}
+		f.carrying[id] = true
+		f.mu.Unlock()
+		if !carried {
+			f.inform(forgetAgentNotTaken)
+			// Execute's ctx ends when it returns; the process does not.
+			go f.carryAgent(context.WithoutCancel(ctx), id, since)
+		}
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "owed: not recorded; retrying"}
+	}
+}
+
+// carryAgent tries an approved item 2 that was not saved again with
+// backoff until recall holds it, then tells the owner it is done; one
+// recall records but fails is left to recall's Retry, which tells them.
+// A shutdown leaves it to the journal and the next open of recall.
+func (f *ownerForget) carryAgent(ctx context.Context, id string, since time.Time) {
+	if f.retried != nil {
+		defer f.retried()
+	}
+	defer func() {
+		f.mu.Lock()
+		delete(f.carrying, id)
+		f.mu.Unlock()
+	}()
+	for wait := 2 * time.Second; ; wait = min(2*wait, forgetRetryMax) {
+		if !f.sleep(ctx, wait) {
+			return
+		}
+		a := f.agent.Load()
+		if a == nil {
+			continue
+		}
+		err := a.takeBack(ctx, since, true)
+		switch {
+		case err == nil:
+			f.inform(forgetAgentDone)
+			return
+		case errors.Is(err, recalltool.ErrCarried):
+			log.Printf("forget: agent take-back: %v", err)
+			return
+		}
+		log.Printf("forget: agent take-back not saved yet: %v", err)
 	}
 }
 
@@ -663,7 +718,10 @@ func (f *ownerForget) resumeAgent(ctx context.Context) {
 	seen := map[string]bool{}
 	for _, id := range ids {
 		since, ok := forgetSince(id)
-		if seen[id] || !ok {
+		f.mu.Lock()
+		carried := f.carrying[id]
+		f.mu.Unlock()
+		if seen[id] || !ok || carried {
 			continue
 		}
 		seen[id] = true
