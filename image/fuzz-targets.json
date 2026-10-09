@@ -2,6 +2,7 @@
   {"pkg": "attest", "name": "FuzzParse", "binary": "attest.test"},
   {"pkg": "browser", "name": "FuzzParse", "binary": "browser.test"},
   {"pkg": "control", "name": "FuzzParse", "binary": "control.test"},
+  {"pkg": "digestqueue", "name": "FuzzLoadState", "binary": "digestqueue.test"},
   {"pkg": "guest", "name": "FuzzMCP", "binary": "guest.test"},
   {"pkg": "hint", "name": "FuzzParse", "binary": "hint.test"},
   {"pkg": "hostdisk", "name": "FuzzProbe", "binary": "hostdisk.test"},

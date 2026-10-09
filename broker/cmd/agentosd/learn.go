@@ -116,7 +116,7 @@ type learnPaths struct {
 
 // LOOP-7's fuzz rounds (P3-4b-3a, loop7 F1-F2): one job per fuzzEvery,
 // taking turns over the targets and the probe's slot, so each target is
-// rechecked every (targets + 1) x fuzzEvery, 9.5 h with the 18 targets
+// rechecked every (targets + 1) x fuzzEvery, 10 h with the 19 targets
 // image/fuzz-targets.json lists (TestEachFuzzTargetIsRecheckedTwiceADay).
 const (
 	fuzzRelease = "/usr/lib/agentos/fuzz"
