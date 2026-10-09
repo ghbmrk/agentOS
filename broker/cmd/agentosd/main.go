@@ -27,6 +27,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/loopbuild"
+	"github.com/ghbmrk/agentos/broker/mail/mailsock"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
@@ -350,7 +351,7 @@ func main() {
 	var builderImage, builderLaunch, keptPath, setupRecord string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
-	var digestDir string
+	var digestDir, mailSocket string
 	localUIUID := -1
 	floor := budget.Floor()
 	flag.StringVar(&cfg.JournalPath, "journal", "/var/lib/agentos/journal.log", "journal file")
@@ -390,6 +391,7 @@ func main() {
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
+	flag.StringVar(&mailSocket, "mail-socket", "/run/agentos-egress/"+mailsock.Socket, "the vault process's mail socket, which serves the owner's mail account; empty connects no mail")
 	flag.StringVar(&learn.Dir, "learn", "/var/lib/agentos/learn", "change pipeline and loop scheduler state (W3)")
 	flag.StringVar(&digestDir, "digest", "/var/lib/agentos/digest", "the daily digest's queue and state (created 0700); empty sends no digest")
 	flag.StringVar(&learn.Loop7, "loop7", "/var/lib/agentos/loop7", "LOOP-7's fuzz corpora, with crash inputs found on this box, and the fuzz cache (P3-4b-3a)")
@@ -652,10 +654,25 @@ func main() {
 		}
 		caps.learning(lp) // routing held while learning is on (C12)
 	}
+	// One clock for the journal, the gate and the mail adapter, so the
+	// organize bound counts the journal's stamps on the adapter's day
+	// (SR3-mail-w2 W2-c).
+	cfg.Now = func() time.Time { return time.Now().UTC() }
+	cfg.Grants.Now = cfg.Now
+	// The owner's mail account (SR3-mail-w2): registered now, bound to
+	// the vault process's account once the journal is open.
+	var mw *lateMail
+	if mailSocket != "" {
+		mw = newLateMail()
+		mw.wire(&cfg)
+	}
 	// Evidence delivery (CH-20): with a destination set, private replies
-	// are emailed to it. No mail account is connected in this process
-	// yet, so none can be set (owns is nil) and replies go by text.
+	// are emailed to it, to the connected mail account's own address;
+	// while none is connected, none can be set and replies go by text.
 	ev := newEvidence(keptPath, cfg.PageSocket != nil, log.Printf)
+	if mw != nil {
+		ev.mail = mw
+	}
 	ev.wire(&cfg)
 	// Changing where updates come from (OSS-10): on the clock guard's
 	// Latest, which questions.open starts; until then nothing is followed.
@@ -713,6 +730,9 @@ func main() {
 	// The digest runs once the forget owner's start-up replay has asked
 	// it again (security B2' on #592); its own saved forgets hold their
 	// batches either way.
+	if mw != nil {
+		wireMail(ctx, mw, d, mailSocket, learn.Dir, dg, digestDir, cfg.Now)
+	}
 	if dg != nil {
 		if o := d.Owner(); o != nil {
 			dg.cfg.Inform = o.Inform

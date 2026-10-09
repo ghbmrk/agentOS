@@ -87,8 +87,14 @@ var controlPath = map[string][]string{
 	// the corpus built into the binary through the in-process closed
 	// checks (corpus, P3-4b-4c-corpus), which links no mail code. It sends
 	// the daily digest (W5-Dc) from its queue (digestqueue), fitted to one
-	// owner text as Inform fits it (control).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control"},
+	// owner text as Inform fits it (control). It binds the owner's mail
+	// account (SR3-mail-w2): the mail adapter (mail, which judges organize
+	// by verb) over the vault process's mail socket (mail/mailsock), so the
+	// credential and the IMAP and SMTP clients stay in agentos-egress (M1);
+	// mail imports golang.org/x/text, so like clock it has no entry below
+	// and is held by TestAgentosdLinksNoInference, which holds mailsock to
+	// the unix dial modelroute makes.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control", "mail", "mail/mailsock", "verb"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -215,7 +221,12 @@ func TestDaemonLinksNoCredentialCustody(t *testing.T) {
 		t.Fatalf("go list: %v", err)
 	}
 	for _, dep := range strings.Fields(string(out)) {
-		if dep == module+"vault" || dep == module+"egress" || dep == module+"tpmseal" {
+		// mail/imapsmtp holds the mailbox credential's clients, and with
+		// net/smtp sends mail; both run in agentos-egress behind the mail
+		// socket (SR3-mail-w2, M1). crypto/tls and net/http are linked
+		// through modelroute's unix-socket client (TestAgentosdLinks-
+		// NoInference holds every dial to "unix").
+		if dep == module+"vault" || dep == module+"egress" || dep == module+"tpmseal" || dep == module+"mail/imapsmtp" || dep == "net/smtp" {
 			t.Errorf("agentosd links %s", dep)
 		}
 	}
