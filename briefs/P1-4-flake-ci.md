@@ -22,11 +22,11 @@ python3 ../tools/fuzzrun.py --pkg ./sockets --target FuzzFrames --budget 20s [--
 ```
 
 - **Chunks.** Run `go test <pkg> -run '^$' -fuzz '^<target>$' -fuzztime <N>x -timeout <T>` repeatedly. The first chunk is a small calibration count (e.g. 20000x). Each later chunk's N is the measured rate × min(remaining budget, `--chunk`), at least 1. Rate = executions ÷ the chunk's wall-clock time (startup included, so it errs short). Stop starting chunks once the budget is spent. Go keeps interesting inputs in `$GOCACHE/fuzz`, so later chunks continue from what earlier ones found.
-- **Loud hang.** Each chunk runs with go test's `-timeout` and a subprocess timeout a little above it (process group killed), both derived from the chunk's expected time plus a fixed grace (build time included). A chunk that overruns fails the run with a message naming the package, target and chunk, never a silent pass.
+- **Loud hang.** Each chunk runs with go test's `-timeout` and a subprocess timeout a little above it (process group killed). Both are **proportional**: `2.5 × E + G`, where E is the chunk's expected time (its N ÷ the last measured rate) and G a fixed grace for the build (`--grace`, default 2m). The factor makes a chunk whose rate has halved, which fuzzing does as the corpus grows, still pass, so the deadline flake is not swapped for a timeout flake. The calibration chunk has no rate yet: its cap is `2.5 × min(budget, --chunk) + G`, the same as a full chunk's, so it fails only for a target slower than `C ÷ (2.5 × min(budget, --chunk))` executions per second (with C = 20000 and ci.yml's 20 s, 400/s; #547 measured 30000/s and up). A chunk that overruns fails the run with a message naming the package, target and chunk, never a silent pass.
 - **Failure.** A non-zero `go test` exit stops at once with that exit status; its output (the crasher path go prints) passes through unchanged, and nothing deletes `testdata/fuzz/`, so soak's "Keep crashers" step still works.
 - **Log.** After each chunk, one line: `fuzzrun <pkg>:<target> chunk <k>: <N> execs in <s>s (<rate>/s)`; at the end a total line, also appended to `$GITHUB_STEP_SUMMARY` when set. This is the "log CI's exec/s" the row asks for.
 - **Budget syntax.** Seconds or a Go-style duration of `h`/`m`/`s` parts (`3h`, `90s`, `1h30m`); anything else is an error before go runs. soak.yml keeps its `fuzztime` input name and its "at most 5h" limit.
-- **Bounds.** With `--chunk 10m`, the last chunk overruns the budget by at most one chunk at a rate that has halved, so soak's 5 h maximum stays under its 345 m job limit; set the per-chunk `-timeout` accordingly and drop soak's single `-timeout 330m`. ci.yml uses `--budget 20s` per target (the pre-#547 time); `--chunk` defaults to the budget.
+- **Bounds.** A chunk ends by its timeout at the latest, so a run lasts at most the budget plus one chunk's cap. With `--chunk 10m` that is 5 h + 2.5 × 10 m + 2 m = 327 m for soak's 5 h maximum, under its 345 m job limit; a last chunk whose rate has halved takes 20 m and passes. Drop soak's single `-timeout 330m`. ci.yml uses `--budget 20s` per target (the pre-#547 time); `--chunk` defaults to the budget.
 - **Why not per-target fixed counts plus `timeout`** (what the row literally says): the counts go stale with every decoder change and someone must re-measure; self-calibration measures every run and logs the figures instead. If the builder finds the calibration chunk's startup distorts the 20 s budget badly (rate off by more than 2x against the later chunks on CI), fall back to a per-target count table in ci.yml derived from the logged rates, still run through the tool for the timeout and the log line.
 
 Reuse: Python stdlib only (`subprocess`, `time`, `re`, `argparse`), like the other `tools/*.py`; no new dependency.
@@ -50,9 +50,10 @@ Write each test in `tests/test_fuzzrun.py` against a fake `go` (a small Python s
 | Test | Shows |
 |---|---|
 | no duration ever | Every recorded `-fuzztime` argument matches `^\d+x$`, for a budget that needs several chunks. (The soak regression.) |
-| chunks fill the budget | With a fake rate, total wall time is at least the budget and at most budget + one chunk + grace; the second chunk's N ≈ rate × chunk. |
+| chunks fill the budget | With a fake rate, total wall time is at least the budget and at most budget + one chunk's cap; the second chunk's N ≈ rate × chunk. |
+| slowdown is not a hang | The fake's per-execution time doubles after chunk 1 (its rate halves): the run passes, with no timeout message. (Fails against a timeout of E + G.) |
 | rate is logged | Stdout has one `fuzzrun ... execs in ... (.../s)` line per chunk and a total; with `GITHUB_STEP_SUMMARY` set to a temp file, the total line is appended there. |
-| hang is loud | The fake hangs: the tool exits non-zero within expected time + grace + a small margin, with a message naming package and target. |
+| hang is loud | The fake hangs, once in the calibration chunk and once in a later chunk: each time the tool exits non-zero within 2.5 × E + G + a small margin, with a message naming package, target and chunk. |
 | failure stops | The fake fails on chunk 2: exit status non-zero, no chunk 3 recorded, the fake's crasher line on output. |
 | budget parsing | `20s`, `3h`, `1h30m`, `90` accepted; `3 hours`, `-1s`, `` refused before any go call. |
 
