@@ -5,7 +5,7 @@
 
 ## Scope
 
-BOARD.md, LATER.md, briefs/ARCH1*.md, reviews/combined/2026-10-08-holistic-architecture.md, reviews/combined/2026-10-08-cross-silo-architecture.md and their shared evidence directory. Review AgentOS from first principles against stronger credential/data guarantees and greater functional leverage. Register three release design/acceptance extensions, correct the existing CAP-3 release mapping, and register three later policy proposals without duplicating existing defects or implementation ownership.
+BOARD.md, LATER.md, briefs/ARCH1*.md, reviews/combined/2026-10-08-holistic-architecture.md, reviews/combined/2026-10-08-cross-silo-architecture.md, reviews/combined/2026-10-08-simple-interface-review.md and their shared evidence directory. Review AgentOS from first principles against stronger credential/data guarantees and greater functional leverage. Register four release design/acceptance extensions, correct the existing CAP-3 release mapping, and register three later policy proposals without duplicating existing defects or implementation ownership.
 
 Mark explicitly requested this review and earlier requested repository work items/draft PRs. This is a cross-lane advisory PR to primary under AGENTS item 5, with no runtime implementation, main claim, new lane, SPEC/DECISIONS change, or generated TRACE edit. Only primary merges.
 
@@ -16,7 +16,8 @@ Mark explicitly requested this review and earlier requested repository work item
 3. Evidence includes a reproducible synthetic two-account recall probe and scoped test results. No claim of real account leakage, transitive source erasure, hardware qualification or measured productivity benefit.
 4. Each proposed release extension has a BOARD row, LATER classification, existing owner/dependency mapping and falsifiable acceptance. The later proposals require L1 adoption before implementation and do not become first-release blockers by inference.
 5. Address Mark's clarified cross-pollination goal: broad authorized private context, independently granted source/compute/effect/custody roles, useful cross-account artifacts, observed dependent effects, and separate inference-host versus general hardware scope. Positive cross-silo acceptance is required before claiming the benefit; preserve owner-selected exceptions without default silos.
-6. Links, doclint, trace and appropriate checks pass. Fresh independent L3 accepts the final advisory diff; include a separate challenge of the security/leverage synthesis. CI and limitations are accurately reported; draft remains unmerged.
+6. Address the simple text/call experience: hide routine coordination and technical choices while exposing consequential decisions and truthful outcomes. Reuse current owner/task/voice/output and UX3/UX4 work; preserve fixed proof, disclosure and local-confirmation rules. ARCH1-4 adds falsifiable composed acceptance, not a parallel UI or permission framework.
+7. Links, doclint, trace and appropriate checks pass. Fresh independent L3 accepts the final advisory diff; include a separate challenge of the security/leverage synthesis. CI and limitations are accurately reported; draft remains unmerged.
 
 ## Reuse and estimate
 

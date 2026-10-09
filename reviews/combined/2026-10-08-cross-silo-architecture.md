@@ -6,6 +6,8 @@ Record: PR #447 · package ARCH1 · head c422039d41acdb4b70f89c1ece9b0fbd4019179
 
 **Scope:** source review at the pinned main head above, plus explicitly identified drafts. This extends the [holistic review](2026-10-08-holistic-architecture.md), whose earlier evidence remains pinned to its own source. No runtime, authority policy, SPEC, device enrollment or account change is made here.
 
+The [simple text/call follow-up](2026-10-08-simple-interface-review.md) adds Mark's owner-complexity lens: the OS must carry the coordination burden of these capabilities while keeping consequential choices visible. Its source and evidence are separately pinned.
+
 ## Revised architectural judgment
 
 **AgentOS should maximize useful, owner-authorized combinations.** Isolating credential custody is a means to enable broad reasoning and action across accounts. Treating every account or project as an information island would undermine the intended advantage.

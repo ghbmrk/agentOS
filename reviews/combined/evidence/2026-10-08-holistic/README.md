@@ -44,3 +44,7 @@ These checks support local package claims, not production Linux service identiti
 [Daemon import inventory](daemon-first-party-imports.txt) contains 51 unique first-party packages from the union of `go list -mod=vendor -deps ./cmd/agentosd ./cmd/agentos-egress` on the reviewed source. This is a coupling inventory, **not** the number of trusted components, executable processes, vulnerabilities, or a measure of the TCB's size. The two processes have different custody privileges.
 
 Three author source reviews covered credential/effect authority, data/provenance lifecycle and execution/leverage. Fresh independent L3 and architectural challenge verdicts are linked in the PR. They evaluate this advisory report/intake; they do not establish the proposed runtime guarantees or certify the system secure.
+
+## Simple text/call follow-up
+
+The [separately pinned interface evidence](simple-interface-evidence.md) records source `a52a678a4f4d854eaf737ffaa8c3777781efea56`, focused owner/question/modem checks and native test limits. It does not extend the original probe into a voice or usability qualification.

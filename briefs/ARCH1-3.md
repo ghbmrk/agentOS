@@ -25,6 +25,8 @@ Current canary targets cover guest-socket/vault/egress and drive-at-rest; the fo
 
 11. Cover the existing CAP-3 deletion contract in the joined workflow: show affected learned skills before confirmation, rebuild/requalify from remaining evidence, preserve still-qualified independent learning, and remove failed candidates. Exercise source → task → learned artifact → later worker without claiming external disclosures are retractable. Reuse P3-3b/current learning and FORGET work; ARCH1-L2 is a corrected release mapping, not a new erasure framework.
 
+12. Apply [ARCH1-4](ARCH1-4.md) to the joined workflow: the owner requests an outcome and receives a usable result without managing routing, provenance or recovery machinery. Qualify text/call continuity, attention and maintenance effort alongside benefit; preserve consequential decisions, exact proof and truthful partial/unknown states.
+
 ## Delivery, potency and safety
 
 Release acceptance extension, not a duplicate runtime package or a demand to complete all hardware in this documentation PR. Existing INT-A/H6/A1 owners retain execution. Minimize authority-bearing trusted code and unsafe configurations without blanket process splitting or restricting guest reasoning. No claimed productivity gain until measured.
