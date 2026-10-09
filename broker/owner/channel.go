@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/boxname"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -105,6 +106,9 @@ type Config struct {
 	// .Answer) in an unlocked session, with any code stripped, before it
 	// would reach the agent (control.Handler.Answer, W9). Nil: none.
 	Answer func(ctx context.Context, msg string) (reply string, ok bool)
+	// OwnerName is the owner's own name, "" when unknown; the box's name
+	// may not be it (CH-21).
+	OwnerName string
 }
 
 // Carried is an item of a request open at the last shutdown, handed to
@@ -160,6 +164,7 @@ type Channel struct {
 	lineFailed  atomic.Int64
 	resumeTexts []time.Time
 	held        *heldMsg
+	rename      *renameReq // a NAME waiting for its code (name.go)
 	limited     []time.Time
 	active      time.Time // last owner message the control handler ran
 	alertAt     time.Time
@@ -428,6 +433,9 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		}
 	}
 	unlocked := c.codes.unlocked(now)
+	if n, ok := parseName(text); ok {
+		return c.nameLocked(text, n, now, unlocked)
+	}
 	if r, ok := parseReply(text); ok {
 		switch r.word {
 		case "RESUME":
@@ -541,6 +549,14 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 		return route{replies: []string{msg}, delegate: rest, run: true}
 	}
 	if h := c.held; h != nil && now.Before(h.expires) {
+		if n, ok := parseName(h.text); ok && n.name != "" && n.code == "" {
+			// A held NAME is not run by RUN: the unlock code proves
+			// the owner, not who wrote it, so it gets the texted
+			// confirmation instead. Its name passed the check when held.
+			c.held = nil
+			name, _ := boxname.Check(n.name, c.cfg.OwnerName)
+			return route{replies: []string{msg + " " + c.askRenameLocked(name, now)}, limited: true}
+		}
 		h.ready = true
 		h.expires = now.Add(c.cfg.CodeTTL)
 		return route{replies: []string{fmt.Sprintf("%s Held: \"%s\". Reply RUN to send it.", msg, field(h.text, 40))}}

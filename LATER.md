@@ -183,6 +183,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b2c l1 | UX on #427: with no agent, "when it runs again" means the next boot (the agent machine opens only at boot); STATUS's agent line should name that step |
 | W3-forget-b2c l2 | UX on #427: an owed take-back is journaled `succeeded` with evidence `owed: …`; once the digest renders journal outcomes it must not read as done |
 | SR3-2 l1 | UX/Potency on #428 (L3 later point): an authorized intent that never dispatches (held, no executor, fenced) holds its bound place with no age-out; note it in GR31 and let STATUS show it |
+| CH-21b l1 | Builder on CH-21b: `boxname.Check` allows any Unicode letter, so a mixed-script look-alike (Cyrillic а in "Аgent OS") passes the reserved-word check; fold look-alikes as CH-10 does (same gap as OSS-10w2 f4) |
+| CH-21b l2 | Builder on CH-21b: a name with non-GSM-7 letters or U+2019 forces UCS-2 on every owner text that quotes it, halving the CH-12 length budget; count it when CH-12 budgets are next touched |
+| CH-21b l3 | Builder on CH-21b: renames are not journaled; the owner sees only the reply. Journal `name changed` when the journal next gains owner-channel events |
 
 ## Reuse candidates
 | ID | Component | Why |
