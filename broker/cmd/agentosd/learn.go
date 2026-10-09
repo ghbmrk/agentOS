@@ -277,8 +277,24 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	if l.forgotten, err = openForgotten(change.FileStore{Path: filepath.Join(p.Dir, "forgotten.json")}, time.Now); err != nil {
 		return nil, err
 	}
+	// The done texts the last boot owed (W3-forget-b3), opened before the
+	// restored forgets are tombstoned so a restore can owe one. An owed
+	// file that does not read is started afresh; its texts are lost, not
+	// its forgets.
+	owedPath := filepath.Join(p.Dir, "forget-owed.json")
+	owed := openOwedFile(change.FileStore{Path: owedPath}, owedPath)
 	for _, e := range restored {
 		if !l.forgotten.has(e.Goal) {
+			// An item 1 forget logged while it still retried (no agent, no
+			// since) may hold the owner's forgetNotSaved, a promise the
+			// restored learn dir does not keep: it is owed again before its
+			// tombstone, as Execute owes it (W3-forget-b2c-f1-r1 R1A;
+			// ASSUMPTIONS R5).
+			if _, ok := owed.get(e.Goal); !ok && !e.Agent && e.Since.IsZero() {
+				if err := owed.owe(e.Goal, owedForget{Logged: true}); err != nil {
+					log.Printf("forget: restored forget's done text not kept: %v", err)
+				}
+			}
 			if err := l.forgotten.add(e.Goal); err != nil {
 				return nil, err
 			}
@@ -381,15 +397,12 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.BrokerExecutors[loops.Executor] = l.sched
 	l.forgetOwner = &ownerForget{tasks: l.tasks, learned: l.pipe.LearnedFrom, forget: l.forgetTask, forgotten: l.forgotten.has,
 		inform: func(s string) { l.notify.send(s, false) }, tell: l.notify.try, now: time.Now, loc: time.Local, sleep: sleepCtx}
-	// The done texts the last boot owed (W3-forget-b3): the replay above
-	// has finished each tombstoned one, and attach texts them once the
-	// owner channel is up. An owed file that does not read is started
-	// afresh; its texts are lost, not its forgets.
-	owedPath := filepath.Join(p.Dir, "forget-owed.json")
-	owed := openOwedFile(change.FileStore{Path: owedPath}, owedPath)
+	// The replay above has finished each owed tombstoned forget, and
+	// attach texts them once the owner channel is up.
 	l.forgetOwner.owed = owed
 	l.forgetOwner.owedAtStart = owed.goals()
 	for _, e := range restored {
+		l.forgetOwner.restoredGoals = append(l.forgetOwner.restoredGoals, e.Goal)
 		if e.Agent {
 			l.forgetOwner.restored = append(l.forgetOwner.restored, e.Since)
 		}
@@ -398,7 +411,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.Grants.ForgetItem = l.forgetOwner.Item
 	cfg.Grants.ForgetAgentItem = l.forgetOwner.AgentItem
 	cfg.Settings = l.settings
-	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status, l.forgetOwner.Note)
+	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status, l.forgetOwner.Note, l.forgetOwner.RetryNote)
 	cfg.Narrows = l.sched.Narrows
 	cfg.HelpExtra = loops.HelpLine
 	// The owner's verdicts on the agent's effects become Loop 1's cases
