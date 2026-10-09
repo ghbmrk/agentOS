@@ -698,6 +698,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W5-Dc-r1b l5 | #652 L3 3 (6087271656): grants reads `allowance(now)` before taking `g.mu`, so a grants flush racing an owner `Post` can go one text over the hour's budget (bounded, nothing lost) |
 | W5-Dc-r1b l6 | #652 L3 delta (6087655573): `main()` still passes `attach` its arguments untested (`nil` for `dg` would build and pass); testing `main()` itself is out of scope |
 | SR3-mail-w1 l8 | #654 UX, L3 1, Security 1 (6087870595, 6087872442, 6087873796): `TestNoMailAccountByDefault` counts the `not_connected` frames but does not assert that nothing else crossed the socket (its doc comment says "the socket says nothing more"); compare each connection's full reply after it closes to exactly `{"error":"not_connected"}\n` |
+| CRED-4 l1 | #683 L3 3 (5476467112): `OmitValues` keeps the child lines of a password node (`- textbox "Password" [ref=e5]:` then an indented `- text: <value>`); a native password input has no children, so recheck only if CRED-4b part 2 derives password refs from something broader (K14) |
 
 ## Reuse candidates
 | ID | Component | Why |

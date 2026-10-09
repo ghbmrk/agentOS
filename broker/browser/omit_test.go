@@ -77,3 +77,31 @@ func TestCRED4OmitValuesKeepsOtherLines(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+// Any line shape other than the canonical `- role "name" [ref=…]` or
+// `- role [ref=…]` cannot be parsed, so it fails closed too (L3 on 3f5687d).
+func TestCRED4NonCanonicalLineFailsClosed(t *testing.T) {
+	refs := map[string]bool{"e5": true}
+	for _, in := range []string{
+		`- textbox x [ref=e1] [ref=e5]: hunter2`,
+		`- textbox /x [ref=e1]/ [ref=e5]: hunter2`,
+		`- textbox  "x [ref=e1]" [ref=e5]: hunter2`,
+		`-  textbox "x [ref=e1]" [ref=e5]: hunter2`,
+		`- "textbox \"x [ref=e1]\" [ref=e5]: hunter2"`,
+		`[ref=e1] [ref=e5]: hunter2`,
+	} {
+		got := OmitValues(in, refs)
+		if strings.Contains(got, "hunter2") || !strings.Contains(got, "[password omitted]") || !strings.Contains(got, "[ref=e5]") {
+			t.Fatalf("%q -> %q", in, got)
+		}
+	}
+	for _, in := range []string{
+		`- textbox x [ref=e1] [ref=e6]: ada`,
+		`- /url: https://example.test/a`,
+		`- text: plain`,
+	} {
+		if got := OmitValues(in, refs); got != in {
+			t.Fatalf("non-password changed: %q -> %q", in, got)
+		}
+	}
+}
