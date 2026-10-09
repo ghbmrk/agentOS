@@ -642,6 +642,9 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //     (d := *c);
 //   - a command constructed by a generic with an inferred type argument
 //     (var z T or new(T) where T is inferred as *exec.Cmd);
+//   - a *exec.Cmd held where the check does not look for a constructor:
+//     a parameter, a function result, a type assertion (the deny-by-
+//     default rule covers exec.Cmd by value; P3-4b-3r-env-r8);
 //   - a command whose Env is set in another function (except for a
 //     package-level declaration), or reached through a pointer the check
 //     does not follow;
@@ -656,7 +659,8 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //     literal without Env, new(exec.Cmd), or a var declared as exec.Cmd.
 //     exec.Cmd as a type anywhere else (an alias or defined type, a struct
 //     field, an element of a slice, array or map, a parameter) is flagged.
-//     Deny by default: exec.Cmd or *exec.Cmd anywhere inside a slice,
+//     Deny by default (exec.Cmd by value, and either form inside a
+//     container): exec.Cmd or *exec.Cmd anywhere inside a slice,
 //     array, map (key or value) or channel type, a generic's type
 //     argument or a type-parameter constraint, at any depth, or as the
 //     definition of a named type or alias, is flagged as a holder the
