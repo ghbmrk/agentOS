@@ -92,6 +92,13 @@ jobs:
           # io_uring socket operations are invisible to strace; disable them outright.
           sudo sysctl -w kernel.io_uring_disabled=2
           command -v strace || { sudo apt-get update -q && sudo apt-get install -yq strace; }
+          # The scenario runs as uid 1000 of the sandbox's user namespace, mapped to the
+          # runner's first subordinate id (DEP-3): newuidmap/newgidmap and a range are needed.
+          echo "probe: newuidmap=$(command -v newuidmap || echo none) newgidmap=$(command -v newgidmap || echo none)"
+          echo "probe: subuid=$(grep -E "^($(id -un)|$(id -u)):" /etc/subuid || echo none) subgid=$(grep -E "^($(id -un)|$(id -u)):" /etc/subgid || echo none)"
+          command -v newuidmap && command -v newgidmap || { sudo apt-get update -q && sudo apt-get install -yq uidmap; }
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: Static endpoint scan (DEP-2)
         run: python3 tools/depaudit.py static
       - name: Offline scenarios with all traffic logged (A9)
