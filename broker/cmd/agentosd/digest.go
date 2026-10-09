@@ -93,6 +93,9 @@ type digestConfig struct {
 	Now    func() time.Time
 	Loc    *time.Location
 	Logf   func(string, ...any)
+	// Forgotten lists the tombstoned goals; every open asks the queue to
+	// forget each before any send (W5-Dc-r12).
+	Forgotten func() []string
 }
 
 // digestState is the box's own sources' persisted state.
@@ -194,6 +197,20 @@ func (d *digestBox) openLocked(ctx context.Context) error {
 	if purged {
 		if err = d.keepForgets(); err != nil {
 			d.cfg.Logf("digest: forgets not saved: %v", err)
+		}
+	}
+	// The tombstone names every forgotten goal, so a stop between it and
+	// forget, with the owed save failed too, still leaves no batch to send:
+	// until each forget holds the box stays down (W5-Dc-r12). Forget writes
+	// only when a batch holds the goal.
+	if d.cfg.Forgotten != nil {
+		for _, g := range d.cfg.Forgotten() {
+			if !digestRef(g) {
+				continue
+			}
+			if err = q.Forget(g); err != nil {
+				return fmt.Errorf("tombstone replay: %w", err)
+			}
 		}
 	}
 	sources := maps.Clone(d.cfg.Sources)
