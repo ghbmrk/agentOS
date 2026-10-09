@@ -65,7 +65,8 @@ const (
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
 	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked,
-		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, routingHeldLine}
+		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, routingHeldLine,
+		digestUnknownStatus, digestFailedStatus, digestHeldStatus, digestDownStatus, digestOwedStatus}
 }
 
 // capClass is why a capability is off. An owner choice (LOOPS OFF, say)
