@@ -26,7 +26,7 @@ Board section: Integration: wiring merged packages into the box. Part of W3-forg
 - No goal text, number or key in any log line or fixture; canary goals only.
 
 ## Open questions (flag in the PR; do not decide silently)
-1. **Closer after-decoys (#436 Potency point 1b). Pending Mark** (routed by the coordinator, 2026-10-09). Only requirement 7 waits for his answer, since option B changes it; requirements 1–6 and 8–10 can be built now (#503 L3 point C). Within 45 days of the backup the real date is always the latest shown, so an owner who knows that picks it without remembering.
+1. **Closer after-decoys (#436 Potency point 1b). Pending Mark** (routed by the coordinator, 2026-10-09). Only requirement 7 waits for his answer, since option B changes it; b1-5 waits for b1-6, whose build waits on Mark's (d) ruling, since requirement 10 needs b1-6's learn-dir trust check and requirement 9 edits b1-6's restoreentry.go (#503 L3 point 1). Within 45 days of the backup the real date is always the latest shown, so an owner who knows that picks it without remembering.
    - (A, recommended for now) Keep D-071's 45-day spacing and record the limit (requirement 7). "Later than all of these" is the honest answer for a forget after the backup, so the cost is a weaker memory check for a recent last forget, not a wrong release of an old backup.
    - (B) Allow after-decoys closer than 45 days (e.g. down to 7) when the backup is recent. Strengthens the check; needs a ruling because D-071 sets the spacing, and closer dates are harder for the owner to tell apart.
 2. **Which socket (builder may decide; record it).** Recommended: the existing vault socket with a per-uid check, not a new socket, to avoid a second listener in the vault process.

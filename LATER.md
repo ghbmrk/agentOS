@@ -135,7 +135,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | OSS-10w f1 | UX on #323: the alert wording "Switch back there" reads oddly after a switch back to the project |
 | OSS-10w-r | WF1 after a project root-key rotation: switching back compares against the image's shipped root keys and so fails closed once the project rotates them; a chain walk from the shipped root would admit it. Meanwhile the owner's only route back is a named follow (beside U13 limit (b)). No release has rotated root keys; a new image ships the new root |
 | W3-forget-b2b f1 | Security 327-1: race between `worked()` and `takeBack(approved=false)` in `agentBackWithoutAsking`; re-check under `r.run` |
-| W3-forget-b2c l1 | UX: the recall-off owed take-back text names no owner step, because STATUS has no line when recall is Off (`LateExecutor.Status`); a config only a dev box has; #525 (Security, UX) saw the same wording, and recall Off still has no STATUS line |
+| W3-forget-b2c l1 | UX: the recall-off owed take-back text names no owner step, because STATUS has no line when recall is Off (`LateExecutor.Status`); a config only a dev box has; recall Off still has no STATUS line |
 | OP9-status-a l1 | L3 L1 on #525: the `C1_vm_open_fails` and `C1_guest_plane_fails` subtests set the same state (`agentOff(agentNoMachines)`), so neither exercises its own path (S11); a split of `main` wiring would let them run end to end |
 | OP9-status-a l2 | L3 L2 on #525: with the guest plane failing and no worker image set, STATUS gives both "Agent and worker tools: off" and "Worker tools: not set up" (opposite fixes, against OP-9's "exactly one"); clear `workersOff` in `agentOff(agentNoMachines)` or skip the C10 line while C1 names worker tools |
 | OP9-status-a l3 | Security 3 on #525: `ownerWorded` runs only in tests; fine while every line is a constant, but if one is ever formatted, call `capLines.check` at start or fail the test that enumerates producers |
@@ -300,6 +300,15 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image, PR #41)
 | W3-forget-b3r-scope | L3 on #522 (brief-gap, process): the b3r brief's Scope omitted the `localapi` and `daemon` wiring, which any new page op needs; future briefs for a page op should list `broker/localapi/` and `broker/daemon/daemon.go` PageSocket wiring |
 | P2-1 watchdog | L3 on #41 (UPD-1): a boot that hangs with no kernel panic and no failed unit never reaches a reboot; a hardware watchdog (`RuntimeWatchdogSec=` on the N95's iTCO timer) closes it. Panics, failed units and emergency or rescue mode already reboot |
 | P2-1 unblessed | Fourth L3 on #41 (UPD-1): two unblessed `+0` entries make the fallback reboot between them forever, since each counts the other as an earlier release. Fix in the update package (refuse to stage on an unblessed boot) or count only blessed or tries-left entries. An initrd failure on a blessed or single-release `+0` entry also reboot-loops (image/ASSUMPTIONS.md I4) |
+| P3-4b-3 l1 | Security 3 on #523: `loop7.command` hands the fuzz binaries `os.Environ()`; use a minimal environment (`PATH`, `HOME`, `TMPDIR`, `GOFLAGS=`) when F7 wires the source |
+| P3-4b-3 l2 | Security 4 on #523: `ErrPeer` on a guest socket is journaled under that machine's ID, though the peer was another host process; coalesced, harmless; note the attribution in B19's row |
+| P3-4b-3 l3 | Security 5 on #523: `loop7` decides which findings `Resolve` closes yet `tools/risk_tier.py` rates it tier B; it should be tier A. Reconcile `TIER_A_BROKER`, the security README (which lists `loop7`) and the BOARD P3-4b-4b row (which does not; #529's L3 noted the inconsistency) |
+| P3-4b-3 l4 | Security 6 on #523 (LOOP-7): the broker-side probe check is per code, not per frame; give each fixed frame a distinct code or a broker-known frame token in the refusal note when LOOP-7 next touches `sockprobe` |
+| P3-4b-3 l5 | Potency 5 on #523: `Resolve`'s replay gate is tautological for probes (the source builds `Replay` from the open finding); add a probe digest or round ID to the evidence if another caller appears |
+| P3-4b-3 l6 | Potency 6 on #523: a probe finding for a machine never probed again (retired, renamed) stays open; add a staleness line to the digest when the source is wired |
+| P3-4b-3 l7 | Potency 7 on #523 (P3-4b-4): the probe sends four fixed frames per socket and tests no connection limits, rapid reconnects or half-open frames; promoting good fuzz inputs to seeds is a later choice |
+| P3-4b-3 l8 | UX 4 on #523: a fuzz finding whose corpus file is removed can never resolve, yet STATUS says it is rechecked; add a line to `broker/loop7/ASSUMPTIONS.md` when the source is wired |
+| P3-4b-3 l9 | UX 5 on #523: a probe finding's ID derives from its `Detail`, so a different failure set next round is a second High text for one machine; cap or fold per subject when the probe text is reworded |
 
 ## Reuse candidates
 | ID | Component | Why |
