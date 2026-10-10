@@ -97,6 +97,9 @@ type trustedHost interface {
 	// so they only pick the owner's wording.
 	updated() bool
 	secureBootChanged() bool
+	// updateCounter is this PC's TPM as the counter that anchors the
+	// update store's outside-attestor record (SR3-6f-2b).
+	updateCounter() (vault.Counter, error)
 }
 
 // tpmHost is trustedHost over the PC's TPM (package tpmseal). Approved
@@ -645,6 +648,12 @@ func (h *tpmHost) counter() (*tpmCounter, error) {
 	return &tpmCounter{openTPM: h.openTPM, srk: id}, nil
 }
 
+func (h *tpmHost) updateCounter() (vault.Counter, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.counter()
+}
+
 func (h *tpmHost) bind(v *vault.Vault) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -948,11 +957,11 @@ func (h *tpmHost) giveBack(v *vault.Vault, t transport.TPM, id []byte) {
 				v.Delete(daOriginalName(id))
 			}
 		case err != nil:
-			h.say("couldn't give the TPM's lockout back to this PC yet; the box will try again at each restart")
+			h.say(lockoutReleaseFailed)
 			return
 		}
 		if err := v.Delete(name); err != nil {
-			h.say("couldn't remove the box's copy of the TPM lockout from the vault: " + err.Error())
+			h.sayErr(lockoutForgetFailed, err)
 			return
 		}
 	}
@@ -980,13 +989,13 @@ func (h *tpmHost) restoreDA(v *vault.Vault, t transport.TPM, id []byte) {
 	}
 	switch err := tpmseal.RestoreDA(t, p); {
 	case errors.Is(err, tpmseal.ErrLockoutSet):
-		h.say("Another system on this PC, probably Windows, now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses. Nothing to do: your PIN is off and the box works as before.")
+		h.say("Another system on this PC, probably Windows, now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses. Nothing to do: your PIN is off and I work as before.")
 	case err != nil:
 		h.warnDA()
 		return
 	}
 	if err := v.Delete(name); err != nil {
-		h.say("couldn't remove the box's copy of this PC's security chip settings from the vault: " + err.Error())
+		h.sayErr(daForgetFailed, err)
 	}
 }
 
@@ -1003,6 +1012,23 @@ func (h *tpmHost) say(s string) {
 	if h.notify != nil {
 		h.notify(s)
 	}
+}
+
+// The texts for a lockout the chip won't take back yet, and for a vault
+// that can't forget an entry after the lockout or the chip's settings were
+// given back. The next unattended start retries, so the owner has nothing
+// to do (CH-12).
+const (
+	lockoutReleaseFailed = "I couldn't give this PC's security chip lockout back to it yet; I'll try again at each restart. Nothing to do."
+	lockoutForgetFailed  = "I couldn't clear my saved copy of this PC's security chip lockout; I'll try again at each restart. Nothing to do."
+	daForgetFailed       = "I couldn't clear my saved copy of this PC's security chip limits; I'll try again at each restart. Nothing to do."
+)
+
+// sayErr tells the owner a fixed sentence. The error can name a vault
+// path, so it goes to the log and not into the text (CH-12).
+func (h *tpmHost) sayErr(sentence string, err error) {
+	log.Printf("custody: %s: %v", sentence, err)
+	h.say(sentence)
 }
 
 func (h *tpmHost) list() ([]hostInfo, error) {

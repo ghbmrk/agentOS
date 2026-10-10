@@ -40,6 +40,7 @@ type entry struct {
 	attempts   []Attempt
 	quality    Quality
 	authorized time.Time // when RecAuthorized was journaled
+	dispatched time.Time // when the latest RecDispatched was journaled
 	submitted  time.Time // when RecSubmitted was journaled
 	erased     bool      // RecErased: params and evidence removed
 }
@@ -178,12 +179,24 @@ func (e *Engine) Authorize(ctx context.Context, id string) (Status, error) {
 	}
 	r := Record{Type: RecAuthorized, ID: id}
 	if perr != nil {
-		r = Record{Type: RecDenied, ID: id, Reason: perr.Error()}
+		r = Record{Type: RecDenied, ID: id, Reason: perr.Error(), Guest: guestText(perr)}
 	}
 	if err := e.commit(r); err != nil {
 		return Status{}, err
 	}
 	return en.status(), nil
+}
+
+// guestText is a refusal's text for the guest: GuestText when err is
+// guesterr.Safe by its own method set, so a Safe error wrapped with other
+// text is not; otherwise none, and the guest is given a ref (SR2-3j). The
+// interface is matched structurally, keeping journal free of broker
+// imports (ARC-2); guesterr's allowlist test bounds which types have it.
+func guestText(err error) string {
+	if s, ok := err.(interface{ GuestText() string }); ok {
+		return s.GuestText()
+	}
+	return ""
 }
 
 // Dispatch runs one attempt of an authorized intent, or a new attempt of one
@@ -227,7 +240,7 @@ func (e *Engine) Dispatch(ctx context.Context, id string) (Status, error) {
 			continue
 		}
 		if perr != nil {
-			err := e.commit(Record{Type: RecRecheckFailed, ID: id, Reason: perr.Error()})
+			err := e.commit(Record{Type: RecRecheckFailed, ID: id, Reason: perr.Error(), Guest: guestText(perr)})
 			st := en.status()
 			e.mu.Unlock()
 			if err != nil {
@@ -605,6 +618,54 @@ func (e *Engine) AuthorizedSince(account, action string, since time.Time) []Inte
 	return out
 }
 
+// Use is one intent's place under a pre-allowance scope bound (ADP-9).
+type Use struct {
+	Intent Intent
+	// Started: an attempt has been dispatched and was not shown to have
+	// done nothing. Otherwise the intent is authorized and waiting.
+	Started bool
+	// Erased: its content was removed under CAP-3, so Intent.Params no
+	// longer names its record; a scope bound counts it against every
+	// record (SR3-2-f3).
+	Erased bool
+}
+
+// InUse returns the intents on account with action that hold a place
+// under a scope bound counted from since, oldest first (SR3-2). A place is
+// charged when an effect may start, not when it was authorized, so an
+// intent queued past its authorization's day cannot run outside the bound:
+//   - authorized and not yet dispatched: reserved, whatever its age, until
+//     it is dispatched or refused at the recheck;
+//   - its latest attempt in flight or outcome_unknown: held until evidence
+//     resolves it (OP-2), whatever its age;
+//   - its latest attempt succeeded: charged to the window it was
+//     dispatched in, so counted while that is at or after since.
+//
+// An attempt that did not apply releases its place; a retry takes one
+// again when it is dispatched.
+func (e *Engine) InUse(account, action string, since time.Time) []Use {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []Use
+	for _, id := range e.order {
+		en := e.intents[id]
+		if en.intent.Account != account || en.intent.Action != action {
+			continue
+		}
+		switch en.state {
+		case Authorized:
+			out = append(out, Use{Intent: en.intent})
+		case InFlight, OutcomeUnknown:
+			out = append(out, Use{Intent: en.intent, Started: true})
+		case Succeeded:
+			if !en.dispatched.Before(since) {
+				out = append(out, Use{Intent: en.intent, Started: true, Erased: en.erased})
+			}
+		}
+	}
+	return out
+}
+
 // Trail returns the journal records, oldest first: one audit trail for
 // effects and broker-state changes (OP-5).
 func (e *Engine) Trail() []Record {
@@ -790,12 +851,13 @@ func (e *Engine) apply(r Record) {
 		en.permission = Permission{Decision: "allowed", Phase: PhaseAuthorize}
 	case RecDenied:
 		en.state = Denied
-		en.permission = Permission{Decision: "denied", Phase: PhaseAuthorize, Reason: r.Reason}
+		en.permission = Permission{Decision: "denied", Phase: PhaseAuthorize, Reason: r.Reason, GuestReason: r.Guest}
 	case RecRecheckFailed:
 		en.state = Denied
-		en.permission = Permission{Decision: "denied", Phase: PhaseDispatch, Reason: r.Reason}
+		en.permission = Permission{Decision: "denied", Phase: PhaseDispatch, Reason: r.Reason, GuestReason: r.Guest}
 	case RecDispatched:
 		en.state = InFlight
+		en.dispatched = r.At
 		en.attempts = append(en.attempts, Attempt{N: r.Attempt, Result: ResultInFlight})
 	case RecObserved:
 		a := en.attempt(r.Attempt)

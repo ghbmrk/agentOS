@@ -32,7 +32,18 @@ var errCommittedUnsynced = errors.New("cleanroom: committed; directory sync fail
 // ErrNoArtifact is returned when an ID names no stored artifact.
 var ErrNoArtifact = errors.New("cleanroom: no such artifact")
 
+// errDamaged: a committed artifact's files do not match its manifest. Its
+// job must be queued again and the artifact quarantined.
+var errDamaged = errors.New("cleanroom: artifact output damaged")
+
 var segment = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+
+// errBadID: an artifact ID that is not one plain, visible directory name.
+var errBadID = errors.New("cleanroom: not an artifact ID")
+
+// validID reports whether id can name an artifact directory in the store:
+// one segment with no leading dot, so never "", "." or "..".
+func validID(id string) bool { return segment.MatchString(id) && !strings.HasPrefix(id, ".") }
 
 // Result is what a clean-room guest submits: the generalized skill, adapter,
 // or regression it built from public information, as UTF-8 text files, and
@@ -153,15 +164,34 @@ func (a Artifact) ReadFile(path string) ([]byte, error) {
 	return nil, fmt.Errorf("%w: %s has no file %s", ErrNoArtifact, a.m.ID, path)
 }
 
-// Store holds clean-room artifacts in a broker-held directory.
-type Store struct {
-	dir string
-	mu  sync.Mutex
+// verify checks every file the manifest lists is present and matches its
+// hash.
+func (a Artifact) verify() error {
+	for _, f := range a.m.Files {
+		if _, err := a.ReadFile(f.Path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func openStore(dir string) (*Store, error) {
+// Store holds clean-room artifacts in a broker-held directory.
+type Store struct {
+	dir   string
+	mu    sync.Mutex
+	fault faultFn // tests only: sees, and may fail, each file operation
+}
+
+// openStore opens the store and checks every committed artifact. It returns
+// those whose manifest does not parse, or whose files are missing or do not
+// match it (output a crash lost), still in place: the caller queues their
+// jobs again and only then quarantines them, so a crash between the two
+// cannot lose a job. An artifact's identity is its directory name: an
+// unreadable manifest, or one naming another ID, is returned with only the
+// directory's name, so every returned ID is a name ReadDir listed (SR3-8-f1).
+func openStore(dir string) (*Store, []Manifest, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Staged artifacts a crash left were never committed: not published.
 	if old, err := filepath.Glob(filepath.Join(dir, ".stage-*")); err == nil {
@@ -169,7 +199,115 @@ func openStore(dir string) (*Store, error) {
 			os.RemoveAll(d)
 		}
 	}
-	return &Store{dir: dir}, nil
+	s := &Store{dir: dir}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	var damaged []Manifest
+	for _, e := range ents {
+		if !e.IsDir() || !validID(e.Name()) {
+			continue
+		}
+		a, err := s.get(e.Name())
+		if err != nil {
+			damaged = append(damaged, Manifest{ID: e.Name()})
+			continue
+		}
+		if err := a.verify(); err != nil {
+			damaged = append(damaged, a.m)
+		}
+	}
+	return s, damaged, nil
+}
+
+// quarantine moves an artifact out of every listing and Get, kept aside
+// for diagnosis. Its job must already be queued again (SR3-8). An id that
+// is not an artifact directory name is refused and nothing is renamed.
+func (s *Store) quarantine(id string) error {
+	if !validID(id) {
+		return fmt.Errorf("%w: %q", errBadID, clip(id, 64))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	q := filepath.Join(s.dir, ".quarantine")
+	if err := os.MkdirAll(q, 0o700); err != nil {
+		return err
+	}
+	// A symlink in its place would move the artifact out of the store.
+	if fi, err := os.Lstat(q); err != nil {
+		return err
+	} else if !fi.IsDir() {
+		return fmt.Errorf("cleanroom: %s is not a directory; not quarantining %s", q, id)
+	}
+	// The rename resolves inside the store's root, so a symlink put in
+	// place after the check above fails it instead of leading out.
+	r, err := os.OpenRoot(s.dir)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	name := id + "-" + newID()
+	if err := s.fault.hit("rename", filepath.Join(q, name)); err != nil {
+		return err
+	}
+	if err := r.Rename(id, filepath.Join(".quarantine", name)); err != nil {
+		return err
+	}
+	if err := s.fault.dirSync(q); err != nil {
+		return err
+	}
+	return s.fault.dirSync(s.dir)
+}
+
+// losses counts the quarantined copies of an artifact: how often its output
+// was found damaged, across restarts.
+func (s *Store) losses(id string) (int, error) {
+	r, err := os.OpenRoot(s.dir)
+	if err != nil {
+		return 0, err
+	}
+	defer r.Close()
+	f, err := r.Open(".quarantine")
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	ents, err := f.ReadDir(-1)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range ents {
+		rest, ok := strings.CutPrefix(e.Name(), id+"-")
+		if ok && quarantineSuffix.MatchString(rest) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// quarantineSuffix is the random part quarantine appends (newID).
+var quarantineSuffix = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
+// settle establishes that a committed artifact is durable before its job
+// is recorded complete: its files match the manifest, and the rename that
+// committed it is synced. Damaged output is left in place (errDamaged):
+// the caller queues its job again, then quarantines it.
+func (s *Store) settle(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, err := s.get(id)
+	if err != nil {
+		return err
+	}
+	if err := a.verify(); err != nil {
+		return fmt.Errorf("%w: %s: %v", errDamaged, id, err)
+	}
+	return s.fault.dirSync(s.dir)
 }
 
 // stage writes an artifact under a hidden name, which no listing or Get
@@ -179,30 +317,67 @@ func (s *Store) stage(m Manifest, files map[string]string) (string, Manifest, er
 	if err != nil {
 		return "", m, err
 	}
+	m, err = s.fill(tmp, m, files)
+	if err != nil {
+		os.RemoveAll(tmp)
+		return "", m, err
+	}
+	return tmp, m, nil
+}
+
+// fill writes and syncs each file, then syncs every directory it created,
+// deepest first, so each file and directory entry is durable before its
+// parent's is; only then is the manifest, the record that the output is
+// complete, written durably (SR3-8).
+func (s *Store) fill(tmp string, m Manifest, files map[string]string) (Manifest, error) {
 	paths := make([]string, 0, len(files))
 	for p := range files {
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
+	dirs := []string{tmp}
+	made := map[string]bool{tmp: true}
+	var mkdirs func(d string) error
+	mkdirs = func(d string) error {
+		if made[d] {
+			return nil
+		}
+		if err := mkdirs(filepath.Dir(d)); err != nil {
+			return err
+		}
+		if err := s.fault.hit("mkdir", d); err != nil {
+			return err
+		}
+		if err := os.Mkdir(d, 0o700); err != nil {
+			return err
+		}
+		made[d] = true
+		dirs = append(dirs, d)
+		return nil
+	}
 	m.Files = nil
 	for _, p := range paths {
 		dst := filepath.Join(tmp, "files", filepath.FromSlash(p))
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			os.RemoveAll(tmp)
-			return "", m, err
+		if err := mkdirs(filepath.Dir(dst)); err != nil {
+			return m, err
 		}
-		if err := os.WriteFile(dst, []byte(files[p]), 0o600); err != nil {
-			os.RemoveAll(tmp)
-			return "", m, err
+		if err := writeSynced(s.fault, dst, []byte(files[p])); err != nil {
+			return m, err
 		}
 		sum := sha256.Sum256([]byte(files[p]))
 		m.Files = append(m.Files, File{Path: p, SHA256: hex.EncodeToString(sum[:]), Size: len(files[p])})
 	}
-	if err := writeJSON(filepath.Join(tmp, "manifest.json"), m); err != nil {
-		os.RemoveAll(tmp)
-		return "", m, err
+	// Created parents precede their children in dirs: sync in reverse.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := s.fault.dirSync(dirs[i]); err != nil {
+			return m, err
+		}
 	}
-	return tmp, m, nil
+	data, err := json.Marshal(m)
+	if err != nil {
+		return m, err
+	}
+	return m, writeFileWith(s.fault, filepath.Join(tmp, "manifest.json"), data)
 }
 
 // commit makes a staged artifact visible under its ID by one rename.
@@ -210,14 +385,18 @@ func (s *Store) commit(staged string, m Manifest) (Artifact, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	dir := filepath.Join(s.dir, m.ID)
+	if err := s.fault.hit("rename", dir); err != nil {
+		return Artifact{}, err
+	}
 	if err := os.Rename(staged, dir); err != nil {
 		return Artifact{}, err
 	}
 	// Once renamed the artifact is in place: a failed directory sync is
 	// not a failed commit, or a stored artifact would outlive a job logged
-	// as failed. It is reported for the log.
+	// as failed. It is reported for the log; the job is recorded complete
+	// only once settle has synced it.
 	a := Artifact{m: m, dir: dir}
-	if err := syncDir(s.dir); err != nil {
+	if err := s.fault.dirSync(s.dir); err != nil {
 		return a, fmt.Errorf("%w: %v", errCommittedUnsynced, err)
 	}
 	return a, nil
@@ -244,7 +423,7 @@ func (s *Store) Get(id string) (Artifact, error) {
 }
 
 func (s *Store) get(id string) (Artifact, error) {
-	if !segment.MatchString(id) || strings.HasPrefix(id, ".") {
+	if !validID(id) {
 		return Artifact{}, ErrNoArtifact
 	}
 	dir := filepath.Join(s.dir, id)
@@ -254,6 +433,9 @@ func (s *Store) get(id string) (Artifact, error) {
 			return Artifact{}, ErrNoArtifact
 		}
 		return Artifact{}, err
+	}
+	if m.ID != id {
+		return Artifact{}, fmt.Errorf("%w: %s: manifest names %q", errDamaged, id, clip(m.ID, 64))
 	}
 	return Artifact{m: m, dir: dir}, nil
 }
@@ -267,7 +449,7 @@ func (s *Store) list(keep func(Manifest) bool) ([]Artifact, error) {
 	}
 	var out []Artifact
 	for _, e := range ents {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		if !e.IsDir() || !validID(e.Name()) {
 			continue
 		}
 		a, err := s.get(e.Name())

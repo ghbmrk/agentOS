@@ -40,6 +40,11 @@ type State struct {
 	// FreshBudgets: the owner chose to start the restore period's
 	// budgets fresh instead of treating them as spent.
 	FreshBudgets bool `json:"fresh_budgets,omitempty"`
+	// Pending says why the restore's forget log was not checked (Pending*
+	// in forgetlog.go), recorded beside the state dir's marker, which
+	// keeps agentosd from starting until the owner confirms it
+	// (W3-forget-b1-4). Re-confirming grants does not clear it.
+	Pending string `json:"pending,omitempty"`
 }
 
 const stateFormat = "agentos-recovery-state-v2"
@@ -206,7 +211,7 @@ func Reconfirm(b *Box, ans Answer, auth Auth, now time.Time) (State, error) {
 			declined[s.ID] = true
 		}
 	}
-	next := State{RestoredAt: st.RestoredAt, Source: st.Source, ConfirmedAt: now.UTC(), FreshBudgets: ans.FreshBudgets}
+	next := State{RestoredAt: st.RestoredAt, Source: st.Source, ConfirmedAt: now.UTC(), FreshBudgets: ans.FreshBudgets, Pending: st.Pending}
 	if next.RestoredAt.IsZero() {
 		// An unreadable state entry: the restore time is unknown, so the
 		// current period counts as the restore's.

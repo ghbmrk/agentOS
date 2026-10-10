@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"v\":0,\"verb\":\"type\",\"ref\":\"e3\",\"text\":\"helloe3\",\"submit\":true}")

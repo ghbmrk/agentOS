@@ -38,6 +38,16 @@ VERDICT_LINE = re.compile(r"verdict\W{0,4}" + VERDICTS + r"\b", re.I)
 DEFECT = re.compile(r"^Defect:\s*([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*(?:\s*,\s*[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*)*)\s*$", re.M)
 COVERED = re.compile(r"^Covered: (\d+) / \d+", re.M)
 NONE = "—"
+NA = "n/a"  # a column that cannot be computed from the data at hand (never printed as 0)
+OPEN_STATES = ("queued", "building", "in review", "escalated")
+# D-085 convergence measures (CONV-0). The guard compares weeks starting after DECISION with the
+# mean of the two 7-day windows that end at DECISION 00:00 local time.
+DECISION = dt.date(2026, 10, 9)
+STALE_HOURS = 48
+LEDGER_STALE_HOURS = 36
+FOLLOWUP_ID = re.compile(r"-[frl]\d+$")
+CITES_REVIEW = re.compile(r"\b(?:L3|Security|UX\d*|Potency|lens|review)\b")
+CITES_LATER = re.compile(r"\bLATER(?:\.md)?\s+(?:line\s+)?[A-Z][A-Za-z0-9]*-[\w-]*")
 
 
 # ---------- parsing ----------
@@ -51,6 +61,16 @@ def verdict(body):
         return m.group(1).lower()
     first = next((l for l in body.splitlines() if l.strip()), "")
     m = re.search(r"\b" + VERDICTS + r"\b", first, re.I)
+    return m.group(1).lower() if m else None
+
+
+CAUSES = ("spec-gap", "brief-gap", "defect", "scope")
+CAUSE_LINE = re.compile(r"^\W*cause\W{0,4}(" + "|".join(CAUSES) + r")\b", re.I | re.M)
+
+
+def cause(body):
+    """The rework cause a non-accept L3 verdict names on its `Cause: X` line (OPERATING §4)."""
+    m = CAUSE_LINE.search(body or "")
     return m.group(1).lower() if m else None
 
 
@@ -105,6 +125,26 @@ def board_states(text):
     return out
 
 
+def board_flags(text):
+    """{row ID: flags} for rows that are review follow-ups ("f": an ID ending -f<N>, -r<N> or -l<N>,
+    or a `(release` row citing a review) or promotions from LATER.md ("p": its text cites a LATER line)."""
+    out = {}
+    for cells in _rows(text, "| State |"):
+        body = " ".join(cells[1:])
+        flags = ("f" if FOLLOWUP_ID.search(cells[0]) or ("(release" in body and CITES_REVIEW.search(body)) else "") \
+            + ("p" if CITES_LATER.search(body) else "")
+        if flags:
+            out[cells[0]] = flags
+    return out
+
+
+def held_drafts(text):
+    """PR numbers in the Draft column of briefs/CODEX-1.md's "Held" table."""
+    section = text.split("\n## Held", 1)[-1].split("\n## ", 1)[0] if "\n## Held" in text else ""
+    return sorted({int(n) for cells in _rows(section, "| Item |") if len(cells) > 1
+                   for n in re.findall(r"#(\d+)", cells[1])})
+
+
 def _pct(cell):
     m = re.match(r"\s*(\d+(?:\.\d+)?)\s*%", cell)
     return float(m.group(1)) if m else None
@@ -151,7 +191,8 @@ def git_history(root, ref):
                 out.append((when, value))
         return out
     trace = [{"at": w, "covered": v} for w, v in series("TRACE.md", trace_covered)]
-    board = [{"at": w, "states": v} for w, v in series("BOARD.md", board_states)]
+    board = [{"at": w, "states": v[0], "flags": v[1]}
+             for w, v in series("BOARD.md", lambda t: (board_states(t), board_flags(t)))]
     return trace, board
 
 
@@ -200,14 +241,18 @@ def collect_github(repo, token, since=None):
     the call count inside GITHUB_TOKEN's hourly limit as history grows."""
     pulls = []
     for p in _pages(repo, "pulls?state=all", token):
-        verdicts = None
+        verdicts = causes = None
         if p.get("merged_at") and (since is None or p["merged_at"] >= since):
             reviews = list(_pages(repo, f"pulls/{p['number']}/reviews", token))
             reviews.sort(key=lambda r: r.get("submitted_at") or "")
-            verdicts = [v for v in (verdict(r.get("body")) for r in reviews
-                                    if trusted_review(r) and is_l3(r.get("body"))) if v]
+            l3 = [r.get("body") for r in reviews if trusted_review(r) and is_l3(r.get("body"))]
+            verdicts = [v for v in map(verdict, l3) if v]
+            # A non-accept verdict without a Cause line counts as "none" so the gap shows.
+            causes = [cause(b) or "none" for b in l3 if verdict(b) in ("fix-list", "reject")]
         pulls.append({"number": p["number"], "merged_at": p.get("merged_at"),
-                      "body": p.get("body") or "", "verdicts": verdicts})
+                      "state": p.get("state"), "draft": bool(p.get("draft")), "updated_at": p.get("updated_at"),
+                      "body": p.get("body") or "", "verdicts": verdicts,
+                      "causes": causes})
     runs = []
     # No query filter: GitHub caps any filtered runs listing (status, created, ...) at 1,000
     # results, which this repo passes in days. The listing is newest first, so paging stops
@@ -242,6 +287,54 @@ def week_start(t, tz):
     return start
 
 
+def convergence(raw, tz, a, b):
+    """D-085 measures for the window [a, b): open rows at b, follow-up rows and promotions first seen
+    in the window, PRs merged and `Defect:` lines. None where the raw data cannot say."""
+    snaps = sorted(raw["board"], key=lambda x: _when(x["at"], tz))
+    upto = [x for x in snaps if _when(x["at"], tz) < b]
+    first = {}
+    for x in snaps:
+        for k in x["states"]:
+            first.setdefault(k, _when(x["at"], tz))
+    new = {k for k, t in first.items() if a <= t < b}
+    # Before the first BOARD.md commit nothing was open or added; with no history at all, unknown.
+    out = {"open_rows": (sum(v in OPEN_STATES for v in upto[-1]["states"].values()) if upto else 0) if snaps else None,
+           "followups": None, "promotions": None}
+    if snaps and all("flags" in x for x in snaps):
+        flags = upto[-1]["flags"] if upto else {}
+        out["followups"] = sum("f" in flags.get(k, "") for k in new)
+        out["promotions"] = sum("p" in flags.get(k, "") for k in new)
+    merged = [p for p in raw["pulls"] if p.get("merged_at") and a <= _when(p["merged_at"], tz) < b]
+    out["merged"] = len(merged)
+    out["defects"] = sorted(d for p in merged for d in defects(p["body"]))
+    out["followups_per_pr"] = out["followups"] / len(merged) if merged and out["followups"] is not None else None
+    return out
+
+
+def stale_prs(raw, tz):
+    """Open PRs untouched for STALE_HOURS at run time, minus drafts held in briefs/CODEX-1.md."""
+    if raw.get("held") is None or not any(p.get("state") for p in raw["pulls"]):
+        return None
+    cutoff = _when(raw["now"], tz) - dt.timedelta(hours=STALE_HOURS)
+    held = set(raw["held"])
+    return sorted(p["number"] for p in raw["pulls"]
+                  if p.get("state") == "open" and p.get("updated_at") and _when(p["updated_at"], tz) < cutoff
+                  and not (p.get("draft") and p["number"] in held))
+
+
+def baseline(raw):
+    """Mean of the two 7-day windows before DECISION, per D-085 measure (None where unknown)."""
+    tz = dt.timezone(dt.timedelta(hours=raw.get("tz_hours", TZ_HOURS)))
+    end = dt.datetime.combine(DECISION, dt.time(), tzinfo=tz)
+    wins = [convergence(raw, tz, end - dt.timedelta(days=14), end - dt.timedelta(days=7)),
+            convergence(raw, tz, end - dt.timedelta(days=7), end)]
+    wins = [dict(w, defects=len(w["defects"])) for w in wins]
+    mean = lambda k: None if any(w[k] is None for w in wins) else sum(w[k] for w in wins) / 2
+    out = {k: mean(k) for k in ("open_rows", "followups", "followups_per_pr", "promotions", "defects")}
+    out["stale"] = None  # open PRs are known only at run time; no history to average
+    return out
+
+
 def compute(raw):
     tz = dt.timezone(dt.timedelta(hours=raw.get("tz_hours", TZ_HOURS)))
     wk = lambda s: week_start(_when(s, tz), tz)
@@ -251,6 +344,8 @@ def compute(raw):
     weeks |= {wk(p["merged_at"]) for p in raw["pulls"] if p.get("merged_at")}
 
     out = []
+    base = baseline(raw)
+    stale_now = stale_prs(raw, tz)
     for start in sorted(weeks):
         end = start + dt.timedelta(days=7)
         inside = lambda s: start <= _when(s, tz) < end
@@ -299,6 +394,9 @@ def compute(raw):
             "usage_per_req": usage_all / reqs if usage_all is not None and reqs > 0 else None,
             "first_pass_ok": sum(p["verdicts"][0] == "accept" for p in judged),
             "first_pass_n": len(judged),
+            "rounds": sum(len(p["verdicts"]) for p in judged),
+            # Pulls collected before causes were parsed have no "causes" key.
+            "causes": sorted(c for p in judged for c in (p.get("causes") or [])),
             "no_verdict": [p["number"] for p in merged if p["verdicts"] == []],
             "merged": len(merged),
             "escalated": len(ever_esc),
@@ -307,6 +405,15 @@ def compute(raw):
             "flaky": flaky,
             "runs": n_runs,
         })
+        conv = convergence(raw, tz, start, end)
+        judged_week = start.date() > DECISION  # the decision's own week is half baseline
+        out[-1].update({
+            "open_rows": conv["open_rows"], "followups": conv["followups"],
+            "followups_per_pr": conv["followups_per_pr"], "promotions": conv["promotions"],
+            "stale": stale_now if out[-1]["current"] else None,
+            "red": {k for k, v in (("promotions", conv["promotions"]), ("defects", len(conv["defects"])))
+                    if judged_week and v is not None and base[k] is not None and v > base[k]},
+        })
     return out
 
 
@@ -314,10 +421,13 @@ def compute(raw):
 
 # Columns sourced from the GitHub API: frozen once a closed week has been recorded, so
 # later edits, deleted reviews or expired runs cannot rewrite a finished week.
-FROZEN = (5, 7, 8)
+FROZEN = (5, 7, 8, 9, 11, 16)
 COLUMNS = [
     "Week starting", "Usage all / Fable", "On-pace mark", "Reqs newly covered", "Usage per req",
     "First-pass L3 accept", "Escalation rate (cum.)", "Defects after merge", "CI flake rate",
+    "L3 rounds per merged PR", "Usage per merged PR", "L3 causes",
+    "Open BOARD rows", "Follow-up rows added", "Follow-ups per merged PR", "Promotions later to release",
+    "Stale PRs (48 h)",
 ]
 
 
@@ -326,6 +436,8 @@ def _ratio(k, n):
 
 
 def _cells(w):
+    red = lambda key: " red" if key in w["red"] else ""
+    n = lambda v: NA if v is None else str(v)
     return [
         w["week"] + (" (to date)" if w["current"] else ""),
         f"{w['usage_all']:g}% / {w['usage_fable']:g}%" if w["usage_all"] is not None else NONE,
@@ -334,8 +446,17 @@ def _cells(w):
         f"{w['usage_per_req']:.2f} pts" if w["usage_per_req"] is not None else NONE,
         _ratio(w["first_pass_ok"], w["first_pass_n"]),
         _ratio(w["escalated"], w["reviewed"]),
-        f"{len(w['defects'])} ({', '.join(w['defects'])})" if w["defects"] else ("0" if w["merged"] else NONE),
+        (f"{len(w['defects'])} ({', '.join(w['defects'])})" if w["defects"] else ("0" if w["merged"] else NONE))
+        + red("defects"),
         _ratio(w["flaky"], w["runs"]),
+        f"{w['rounds'] / w['first_pass_n']:.1f}" if w["first_pass_n"] else NONE,
+        f"{w['usage_all'] / w['merged']:.2f} pts" if w["usage_all"] is not None and w["merged"] else NONE,
+        ", ".join(f"{c} {w['causes'].count(c)}" for c in sorted(set(w["causes"]))) if w["causes"]
+        else ("0" if w["first_pass_n"] else NONE),
+        n(w["open_rows"]), n(w["followups"]),
+        NA if w["followups_per_pr"] is None else f"{w['followups_per_pr']:.1f}",
+        n(w["promotions"]) + red("promotions") if w["promotions"] is not None else NA,
+        NA if w["stale"] is None else str(len(w["stale"])),
     ]
 
 
@@ -346,12 +467,25 @@ def _previous(text):
     return rows
 
 
+def _ledger_stale(raw):
+    """First line of METRICS.md when LEDGER.md's newest reading is over LEDGER_STALE_HOURS old (D-085)."""
+    tz = dt.timezone(dt.timedelta(hours=raw.get("tz_hours", TZ_HOURS)))
+    newest = max((r["at"] for r in raw["readings"]), default=None)
+    if newest is None:
+        return ["**LEDGER.md has no reading; take one (D-085).**", ""]
+    if _when(raw["now"], tz) - _when(newest, tz) <= dt.timedelta(hours=LEDGER_STALE_HOURS):
+        return []
+    return [f"**LEDGER.md is stale: its newest reading, {newest.replace('T', ' ')} (local), is over "
+            f"{LEDGER_STALE_HOURS} hours old; take a reading (D-085).**", ""]
+
+
 def render(weeks, raw, previous_md=None):
     old = _previous(previous_md)
     lines = [
+        *_ledger_stale(raw),
         "# METRICS (generated by tools/metrics.py; do not edit)",
         "",
-        "Inputs for the L4 meta loop (PLAN.md §2). Regenerated weekly by `.github/workflows/metrics.yml`, "
+        "Inputs for the L4 meta loop (PLAN.md §2). Regenerated daily by `.github/workflows/metrics.yml`, "
         f"or on demand. Data as of {raw['now'][:16].replace('T', ' ')} UTC.",
         "",
         "## Weekly",
@@ -362,11 +496,28 @@ def render(weeks, raw, previous_md=None):
     for w in weeks:
         cells = _cells(w)
         prev = old.get(w["week"])
+        if prev and len(prev) < len(cells):
+            prev = prev + [NONE] * (len(cells) - len(prev))  # recorded before later columns were appended
         if prev and len(prev) == len(cells):
             closed = not w["current"] and "(to date)" not in prev[0]
-            cells = [o if (c == NONE and o != NONE) or (closed and i in FROZEN) else c
+            cells = [o if (c in (NONE, NA) and o not in (NONE, NA)) or (closed and i in FROZEN) else c
                      for i, (c, o) in enumerate(zip(cells, prev))]
         lines.append("| " + " | ".join(cells) + " |")
+    base = baseline(raw)
+    lines += ["", "## Baseline (D-085)", "",
+              "Mean of the two 7-day windows before 2026-10-09 (2026-09-25 to 2026-10-09, UTC-4). "
+              "A week starting after 2026-10-09 is marked `red` when its promotions or `Defect:` lines exceed it.",
+              "", "| Column | Baseline |", "|---|---|"]
+    for key, name in (("open_rows", "Open BOARD rows"), ("followups", "Follow-up rows added"),
+                      ("followups_per_pr", "Follow-ups per merged PR"), ("promotions", "Promotions later to release"),
+                      ("defects", "Defects after merge"), ("stale", "Stale PRs (48 h)")):
+        lines.append(f"| {name} | {NA if base[key] is None else format(base[key], 'g')} |")
+    for key, name in (("promotions", "promotions"), ("defects", "`Defect:` lines")):
+        if any(a["red"] >= {key} and b["red"] >= {key} and
+               (dt.date.fromisoformat(b["week"]) - dt.date.fromisoformat(a["week"])).days == 7
+               for a, b in zip(weeks, weeks[1:])):
+            lines += ["", "D-085 guard tripped: revert the release-class rule (decisions/D-085.md)",
+                      f"(two weeks in a row above baseline: {name})"]
     unjudged = sorted(n for w in weeks for n in w["no_verdict"])
     lines += [
         "",
@@ -388,6 +539,21 @@ def render(weeks, raw, previous_md=None):
         "(a fix to code already merged; see the PR template).",
         "- **CI flake rate**: commits that, within one workflow, had both a failed and a passed run or "
         "attempt, over commits with any finished run; counted in the week of the first run.",
+        "- **L3 rounds per merged PR**: L3 reviews with a verdict, averaged over the PRs merged that week "
+        "that had one. 1.0 means every PR was accepted on its first review (COST-1: rework is the main cost).",
+        "- **Usage per merged PR**: weekly-limit points per PR merged that week; the cost-per-package "
+        "figure the operating model steers by (docs/OPERATING.md §6).",
+        "- **L3 causes**: the `Cause:` lines of fix-list and reject L3 reviews on PRs merged that week, "
+        "by code (spec-gap, brief-gap, defect, scope; docs/OPERATING.md §4). `none` is a non-accept "
+        "verdict without a Cause line.",
+        "- **Open BOARD rows**: rows queued, building, in review or escalated in the last BOARD.md of the week.",
+        "- **Follow-up rows added**: rows first seen on BOARD.md that week whose ID ends `-f<N>`, `-r<N>` or `-l<N>`, "
+        "or whose package text says `(release` and cites a review. **Per merged PR**: that count over PRs merged that week.",
+        "- **Promotions later to release**: rows first seen that week whose text cites a LATER.md line (`LATER <ID>`).",
+        "- **Stale PRs (48 h)**: open PRs with no update for 48 hours at run time, leaving out draft PRs listed under "
+        "Held in briefs/CODEX-1.md; counted for the current week only.",
+        "- **red** / **n/a**: red marks a week above the D-085 baseline; `n/a` means the data to compute a column is "
+        "absent (never printed as 0).",
         "- **Closed weeks**: once a finished week is recorded, its L3, defect and flake cells are kept as "
         "recorded; the other columns are recomputed from git and LEDGER.md each run.",
         "",
@@ -426,6 +592,7 @@ def main(argv=None):
         raw = json.loads(pathlib.Path(args.raw).read_text())
     else:
         trace, board = git_history(root, args.ref)
+        codex = root / "briefs" / "CODEX-1.md"
         ledger = (root / "LEDGER.md").read_text()
         tz = dt.timezone(dt.timedelta(hours=TZ_HOURS))
         pulls, runs = collect_github(args.repo, os.environ.get("GITHUB_TOKEN"), _since(previous, tz))
@@ -434,6 +601,7 @@ def main(argv=None):
             "tz_hours": TZ_HOURS, "trace": trace, "board": board,
             "readings": ledger_readings(ledger), "phases": ledger_phases(ledger),
             "pulls": pulls, "runs": runs,
+            "held": held_drafts(codex.read_text()) if codex.is_file() else None,
         }
         if args.raw_out:
             pathlib.Path(args.raw_out).write_text(json.dumps(raw, indent=1, sort_keys=True))
