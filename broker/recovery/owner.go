@@ -38,7 +38,7 @@ func ReEnroll(b *Box, rk RecoveryKey, local bool, r io.Reader) (Enrollment, erro
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !local {
-		return Enrollment{}, errors.New("recovery: re-enrollment happens on the box's Wi-Fi page")
+		return Enrollment{}, errors.New("recovery: re-enrollment happens on the local Wi-Fi page")
 	}
 	if err := (Auth{Recovery: rk}).check(b); err != nil {
 		return Enrollment{}, err
@@ -91,7 +91,7 @@ type NumberChange struct {
 // and returns a pairing code for the owner to text from the new number.
 func BeginNumberChange(b *Box, rk RecoveryKey, local bool, now time.Time, r io.Reader) (*NumberChange, error) {
 	if !local {
-		return nil, errors.New("recovery: a number change starts on the box's Wi-Fi page")
+		return nil, errors.New("recovery: a number change starts on the local Wi-Fi page")
 	}
 	if err := (Auth{Recovery: rk}).check(b); err != nil {
 		return nil, err
@@ -142,7 +142,7 @@ func (nc *NumberChange) Complete(current, from, text string, now time.Time) (str
 	}
 	nc.Expires = time.Time{}
 	return from, Texts{
-		ToOld: fmt.Sprintf("AgentOS: the owner number moved to %s with the recovery key. This number can no longer control the box. If you did not do this, enter the recovery key on the box's Wi-Fi page to move it back.", tail(from)),
+		ToOld: fmt.Sprintf("AgentOS: the owner number moved to %s with the recovery key. This number can no longer control me. If you did not do this, enter the recovery key on my Wi-Fi page to move it back.", tail(from)),
 		ToNew: "AgentOS: this is now the owner number. Text a code from your code generator to unlock. HELP for commands.",
 	}, nil
 }
@@ -162,10 +162,10 @@ func eightDigits(s string) bool {
 // RestoreNotice is the owner text after a restore (REC-2).
 func RestoreNotice(rep Report) string {
 	if rep.Source == "drive" {
-		return "AgentOS: Box restored from its old drive. Pre-allowances and today's budget are paused until you review them on the box page (one step). Grants you revoked recently may appear there; leave them off."
+		return "AgentOS: I was restored from my old drive. Pre-allowances and today's budget are paused until you review them on my Wi-Fi page (one step). Grants you revoked recently may appear there; leave them off."
 	}
 	d := rep.Created.UTC().Format("2006-01-02")
-	return fmt.Sprintf("AgentOS: Box restored from a backup made %s. Pre-allowances and today's budget are paused until you review them on the box page (one step). Grants you revoked after %s appear there; leave them off.", d, d)
+	return fmt.Sprintf("AgentOS: I was restored from a backup made %s. Pre-allowances and today's budget are paused until you review them on my Wi-Fi page (one step). Grants you revoked after %s appear there; leave them off.", d, d)
 }
 
 // EndSession ends the owner channel's session unlock and, after a new

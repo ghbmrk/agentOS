@@ -39,7 +39,11 @@ class Executor:
         self.stubs = set()  # URLs answered with a redirect stub; never returned to
         self.last_good = "about:blank"
         self._pw = sync_playwright().start()
-        self.browser = self._pw.chromium.launch(executable_path=CHROME, headless=headless)
+        # Sandboxes that force egress through a proxy: S5_PROXY (default $HTTPS_PROXY).
+        proxy = os.environ.get("S5_PROXY") or os.environ.get("HTTPS_PROXY")
+        self.browser = self._pw.chromium.launch(
+            executable_path=CHROME, headless=headless,
+            **({"proxy": {"server": proxy}} if proxy else {}))
         self.ctx = self.browser.new_context(
             storage_state=storage_state, accept_downloads=True,
             viewport={"width": 1280, "height": 900})
@@ -266,6 +270,13 @@ class Executor:
             self._confine()
         except Exception:
             pass
+        try:
+            # Every reply names the page it ended on, so the broker gate can check
+            # confinement after actions too (CRED-10 G4); it stops the executor on
+            # an ok reply without one.
+            res["url"] = P.redact_text(self.page.url)[0]
+        except Exception:
+            res.pop("url", None)
         if self.refused:
             res["refused_navigations"] = list(dict.fromkeys(self.refused))
             self.refused = []

@@ -127,7 +127,7 @@ func TestEvidenceDestinationIsAHighRiskLocalChange(t *testing.T) {
 func TestEvidenceNeedsTheLocalPage(t *testing.T) {
 	r, _ := evidenceRig(t, nil)
 	r.g.cfg.LocalUI = false
-	if st := r.setEvidence(OriginOwner, ownAddr, false); st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "local page") {
+	if st := r.setEvidence(OriginOwner, ownAddr, false); st.State != journal.Denied || st.Permission.Reason != NoPageEvidence {
 		t.Fatalf("%s %q", st.State, st.Permission.Reason)
 	}
 }
