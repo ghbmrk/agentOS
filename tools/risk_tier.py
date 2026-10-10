@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Risk tier of a change, decided by the paths it touches (docs/OPERATING.md §3).
 
-  A  credentials, isolation, irreversible effects, update and supply chain,
+  A  the trusted core and its wiring (broker/core/core.txt), credentials,
+     isolation, irreversible effects, update and supply chain,
      the image and its systemd units, the guest's build inputs, CI workflows
      and agent permissions: L3 review on the session's model with an explicit
      threat check, plus the batched lens screen with Security; a later
@@ -20,14 +21,44 @@ Usage:
   --markdown                            print a short table (for a CI step summary)
 """
 import argparse
+import functools
+import pathlib
 import subprocess
 import sys
 
+# The trusted core (ARC-1, D-095): `core <pkg>` and `wiring <pkg>` lines name
+# directories under broker/ that are tier A. broker/core/core_test.go keeps
+# write paths into the core inside it, so the list and the check are one file.
+CORE_LIST = pathlib.Path(__file__).resolve().parent.parent / "broker" / "core" / "core.txt"
+
+
+@functools.lru_cache(maxsize=None)
+def core_list(path=CORE_LIST):
+    """Return (core, wiring) package sets from the core list; exit if unreadable."""
+    try:
+        text = path.read_text()
+    except OSError as e:
+        sys.exit(f"risk_tier: cannot read the core list: {e}")
+    core, wiring = set(), set()
+    for n, line in enumerate(text.splitlines(), 1):
+        w = line.split()
+        if not w or w[0].startswith("#") or w[0] in ("open", "allow"):
+            continue
+        if w[0] in ("core", "wiring") and len(w) == 2:
+            (core if w[0] == "core" else wiring).add(w[1])
+        else:
+            sys.exit(f"risk_tier: {path}:{n}: unreadable line {line.strip()!r}")
+    if not core:
+        sys.exit(f"risk_tier: {path} names no core package")
+    return core, wiring
+
+
 # broker/ packages that hold credentials, enforce isolation, gate effects,
-# or sign and apply updates. Keep in step with docs/OPERATING.md §3.
+# or sign and apply updates, beyond the core list. Keep in step with
+# docs/OPERATING.md §3.
 TIER_A_BROKER = {
     "apply", "attest", "bridgeclient", "bridgeproto", "browser", "card", "cgroup", "change",
-    "cleanroom", "clock", "cmd", "control", "corpus", "daemon", "digestqueue", "egress",
+    "cleanroom", "core", "clock", "cmd", "control", "corpus", "daemon", "digestqueue", "egress",
     "grants", "guest", "hint", "hostchange", "hostdisk", "journal", "localapi", "localsrv",
     "localui", "loop7", "loops", "machprobe", "mail", "modelroute", "modem", "modemlink",
     "owner", "probecmd", "pubid", "recovery", "replay", "reversible", "sendrules", "sipsign",
@@ -75,6 +106,11 @@ def tier_of(path):
             return "A", pre
     if parts[0] == "broker" and len(parts) > 2 and parts[1] in TIER_A_BROKER:
         return "A", "broker/" + parts[1] + "/"
+    if parts[0] == "broker":
+        core, wiring = core_list()
+        for pkg in sorted(core | wiring):
+            if p.startswith("broker/" + pkg + "/"):
+                return "A", "core list: broker/" + pkg + "/"
     if parts[0] == "guest" and len(parts) == 3 and name in TIER_A_GUEST_FILES:
         return "A", "guest/*/" + name
     if p in TIER_A_GUEST_PATHS:
