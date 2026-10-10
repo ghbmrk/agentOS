@@ -59,6 +59,8 @@ const (
 	kindOffline    = "offline"
 	kindUnreached  = "unreached"
 	kindUnverified = "unverified"
+	kindMixed      = "mixed"
+	kindNotStarted = "not_started"
 	kindInstalling = "installing"
 	kindFellBack   = "fell_back"
 )
@@ -116,6 +118,8 @@ func (g *Gate) Step(context.Context) error {
 		res     update.Result
 		lastErr error
 		ok      bool
+		// Which kinds of failure the mirrors showed, for STATUS.
+		unreached, unverified bool
 	)
 	for _, src := range g.cfg.Mirrors() {
 		r, err := g.cfg.Store.Check(src, o)
@@ -124,13 +128,19 @@ func (g *Gate) Step(context.Context) error {
 			break
 		}
 		lastErr = err
+		if verifyFailure(err) {
+			unverified = true
+		} else {
+			unreached = true
+		}
 	}
 	if !ok {
 		kind := kindUnreached
-		for _, e := range []error{update.ErrExpired, update.ErrSignatures, update.ErrRollback, update.ErrWeakThreshold, update.ErrTrustMoved} {
-			if errors.Is(lastErr, e) {
-				kind = kindUnverified
-			}
+		switch {
+		case unverified && unreached:
+			kind = kindMixed
+		case unverified:
+			kind = kindUnverified
 		}
 		if err := g.set(kind, 0); err != nil {
 			return err
@@ -152,7 +162,7 @@ func (g *Gate) Step(context.Context) error {
 		case err == nil, errors.Is(err, apply.ErrApplying):
 			return g.set(kindInstalling, m.Version)
 		}
-		_ = g.set(kindInstalling, m.Version)
+		_ = g.set(kindNotStarted, m.Version)
 		return err
 	}
 	// Nothing newer. Trust only a release whose freshness is confirmed: a
@@ -168,6 +178,17 @@ func (g *Gate) Step(context.Context) error {
 	defer g.mu.Unlock()
 	g.st = state{Trusted: true, TrustedAt: g.cfg.Now().UTC(), TrustedOn: in.Version}
 	return g.saveLocked()
+}
+
+// verifyFailure reports a mirror that answered but whose answer failed
+// verification, as opposed to one that could not be reached.
+func verifyFailure(err error) bool {
+	for _, e := range []error{update.ErrExpired, update.ErrSignatures, update.ErrRollback, update.ErrWeakThreshold, update.ErrTrustMoved} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Gate) set(kind string, version int64) error {
@@ -204,6 +225,12 @@ func (g *Gate) Hold() error {
 	if g.st.Kind == kindOffline {
 		return fmt.Errorf("%w: I am offline and have not updated yet; AI and accounts can be connected once I am online and updated", ErrUpdating)
 	}
+	switch g.st.Kind {
+	case kindFellBack:
+		return fmt.Errorf("%w: AI and accounts stay closed until a newer update is out", ErrUpdating)
+	case kindNotStarted:
+		return fmt.Errorf("%w: update %d could not be started, so AI and accounts stay closed while I try again", ErrUpdating, g.st.Version)
+	}
 	return fmt.Errorf("%w: AI and accounts can be connected when the update finishes", ErrUpdating)
 }
 
@@ -236,6 +263,10 @@ func (g *Gate) Status() string {
 		return "First start: I could not reach the update server. I will try again." + wait
 	case kindUnverified:
 		return "First start: the update server's answer could not be verified, so I cannot tell I am current. I will try again." + wait
+	case kindMixed:
+		return "First start: one update server's answer could not be verified and another could not be reached, so I cannot tell I am current. I will try again." + wait
+	case kindNotStarted:
+		return fmt.Sprintf("First start: update %d could not be started. I will try again.", g.st.Version) + wait
 	case kindInstalling:
 		return fmt.Sprintf("First start: updating to version %d. I will restart once.", g.st.Version) + wait
 	case kindFellBack:

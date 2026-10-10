@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -28,6 +29,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/quota"
 	"github.com/ghbmrk/agentos/broker/replay"
 	"github.com/ghbmrk/agentos/broker/routerule"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -118,8 +120,17 @@ type learnPaths struct {
 	// runs no fuzz targets.
 	Fuzz string
 	// Loop7 is LOOP-7's state: each target's corpus with the crash inputs
-	// found on this box, and the fuzz engine's cache.
+	// found on this box, and the fuzz engine's cache. main sets it to
+	// fuzzState, a constant, never a flag.
 	Loop7 string
+	// DiskQuota is -disk-quota: "on" bounds the fuzz user's tree with a
+	// project quota of its own (RES-4); anything else, with FuzzUser set,
+	// runs no fuzz targets.
+	DiskQuota string
+	// FuzzDiskBytes is the fuzz tree's block quota; zero, as main leaves
+	// it, is fuzzDiskBytes. Only tests set it, to stay under the leaf's
+	// memory.max on a loop-backed file system.
+	FuzzDiskBytes int64
 	// FuzzUser names the unprivileged user fuzz children run as, and
 	// Cgroup the broker's delegated cgroup root, where their leaf goes
 	// beside broker/ (L7-6). main sets both; with FuzzUser set, a box that
@@ -137,6 +148,20 @@ const (
 	fuzzEvery   = 30 * time.Minute
 	fuzzTime    = 30 * time.Second
 	fuzzUser    = "agentos-fuzz"
+	// fuzzState is the fuzz user's tree (L7-6): beside the broker's
+	// /var/lib/agentos, not in it, under root-owned /var/lib.
+	fuzzState = "/var/lib/agentos-fuzz"
+)
+
+// The fuzz tree's disk quota (RES-4, L7-6): a project of its own, below
+// the IDs vm gives machines (from 0x41470001), so no machine shares it;
+// 1 GiB holds the caches' 512 MiB (loop7 F15) with the targets' corpora
+// and the runs' scratch, and the inode cap stops a child exhausting the
+// state disk's inodes with empty files.
+const (
+	fuzzProject    = 0x41460000
+	fuzzDiskBytes  = 1 << 30
+	fuzzDiskInodes = 1 << 18
 )
 
 // corpusEvery is how often the guard replays the embedded corpus through
@@ -144,18 +169,19 @@ const (
 // milliseconds, and a weakened check is found within a day.
 const corpusEvery = 24 * time.Hour
 
-// fuzzLimits are the fuzz children's cgroup leaf (L7-6): 1 GiB and 256
-// tasks, checked against the HW-4 floor in ASSUMPTIONS, and the lowest
-// CPU and I/O weight in use (budget's browser and pool), below the
+// fuzzLimits are the fuzz children's cgroup leaf (L7-6): 512 MiB, from
+// the targets' measured peaks (the largest 314 MiB, within the 384 MiB a
+// quarter's headroom allows; P3-4b-3r-confine-r1), 256 tasks, and the
+// lowest CPU and I/O weight in use (budget's browser and pool), below the
 // broker's. memory.high is the hard limit, so a runaway input is
 // OOM-killed rather than throttled into a hang, and memory.oom.group
 // stays off (Component, not Child): the kernel kills the fuzz worker that
 // grew, and the engine around it lives to store the input that did it.
-var fuzzLimits = cgroup.Limits{MaxBytes: 1 << 30, HighBytes: 1 << 30, Pids: 256, CPUWeight: budget.PoolWeight, IOWeight: budget.PoolWeight}
+var fuzzLimits = cgroup.Limits{MaxBytes: 512 << 20, HighBytes: 512 << 20, Pids: 256, CPUWeight: budget.PoolWeight, IOWeight: budget.PoolWeight}
 
 // fuzzJail confines fuzz children (L7-6): their own leaf under p.Cgroup,
-// p.FuzzUser, no network, and p.Loop7 given to that user. Nil without a
-// FuzzUser (tests).
+// p.FuzzUser, no network, and p.Loop7 given to that user under a disk
+// quota of its own. Nil without a FuzzUser (tests).
 func fuzzJail(p learnPaths) (*loop7.Jail, error) {
 	if p.FuzzUser == "" {
 		return nil, nil
@@ -175,15 +201,72 @@ func fuzzJail(p learnPaths) (*loop7.Jail, error) {
 	if err != nil {
 		return nil, err
 	}
+	state := filepath.Clean(p.Loop7)
+	if err := unswappable(state, uint32(uid), uint32(gid)); err != nil {
+		return nil, err
+	}
+	disk, err := fuzzQuota(p.DiskQuota, state, p.fuzzDisk())
+	if err != nil {
+		return nil, err
+	}
 	leaf, err := (&cgroup.Group{Path: p.Cgroup}).Component("fuzz", fuzzLimits)
 	if err != nil {
 		return nil, err
 	}
-	j := &loop7.Jail{Leaf: leaf.Path, UID: uint32(uid), GID: uint32(gid), State: filepath.Clean(p.Loop7)}
+	j := &loop7.Jail{Leaf: leaf.Path, UID: uint32(uid), GID: uint32(gid), State: state, Disk: disk}
 	if err := j.Own(); err != nil {
 		return nil, err
 	}
 	return j, nil
+}
+
+// unswappable refuses a state the fuzz user could replace with a link
+// (loop7 F16): one that is a link itself, or whose parent the user owns
+// or may write by its mode.
+func unswappable(state string, uid, gid uint32) error {
+	if fi, err := os.Lstat(state); err != nil {
+		return err
+	} else if !fi.IsDir() {
+		return fmt.Errorf("fuzz state %s is not a directory", state)
+	}
+	fi, err := os.Lstat(filepath.Dir(state))
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid == uid || fi.Mode().Perm()&0o002 != 0 || (st.Gid == gid && fi.Mode().Perm()&0o020 != 0) {
+		return fmt.Errorf("fuzz state %s: its parent is writable by the fuzz user", state)
+	}
+	return nil
+}
+
+// fuzzDisk is the fuzz tree's block quota: FuzzDiskBytes, or
+// fuzzDiskBytes when unset.
+func (p learnPaths) fuzzDisk() int64 {
+	if p.FuzzDiskBytes > 0 {
+		return p.FuzzDiskBytes
+	}
+	return fuzzDiskBytes
+}
+
+// fuzzQuota is the jail's disk hook for the fuzz tree at state (RES-4):
+// it tags the whole tree with fuzzProject and sets the project's limits.
+// mode is -disk-quota; with it off, or no project quotas on state's file
+// system, there is no hook and why.
+func fuzzQuota(mode, state string, bytes int64) (func(string) error, error) {
+	if mode != "on" {
+		return nil, fmt.Errorf("-disk-quota=%s: nothing would bound the fuzz user's writes", mode)
+	}
+	fs, err := quota.Open(state)
+	if err != nil {
+		return nil, err
+	}
+	return func(dir string) error {
+		if err := fs.Tag(dir, fuzzProject); err != nil {
+			return err
+		}
+		return fs.Limit(dir, fuzzProject, bytes, fuzzDiskInodes)
+	}, nil
 }
 
 // fuzzTargets are the release's fuzz targets and their jail, or none when
@@ -277,8 +360,24 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	if l.forgotten, err = openForgotten(change.FileStore{Path: filepath.Join(p.Dir, "forgotten.json")}, time.Now); err != nil {
 		return nil, err
 	}
+	// The done texts the last boot owed (W3-forget-b3), opened before the
+	// restored forgets are tombstoned so a restore can owe one. An owed
+	// file that does not read is started afresh; its texts are lost, not
+	// its forgets.
+	owedPath := filepath.Join(p.Dir, "forget-owed.json")
+	owed := openOwedFile(change.FileStore{Path: owedPath}, owedPath)
 	for _, e := range restored {
 		if !l.forgotten.has(e.Goal) {
+			// An item 1 forget logged while it still retried (no agent, no
+			// since) may hold the owner's forgetNotSaved, a promise the
+			// restored learn dir does not keep: it is owed again before its
+			// tombstone, as Execute owes it (W3-forget-b2c-f1-r1 R1A;
+			// ASSUMPTIONS R5).
+			if _, ok := owed.get(e.Goal); !ok && !e.Agent && e.Since.IsZero() {
+				if err := owed.owe(e.Goal, owedForget{Logged: true}); err != nil {
+					log.Printf("forget: restored forget's done text not kept: %v", err)
+				}
+			}
 			if err := l.forgotten.add(e.Goal); err != nil {
 				return nil, err
 			}
@@ -381,15 +480,12 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.BrokerExecutors[loops.Executor] = l.sched
 	l.forgetOwner = &ownerForget{tasks: l.tasks, learned: l.pipe.LearnedFrom, forget: l.forgetTask, forgotten: l.forgotten.has,
 		inform: func(s string) { l.notify.send(s, false) }, tell: l.notify.try, now: time.Now, loc: time.Local, sleep: sleepCtx}
-	// The done texts the last boot owed (W3-forget-b3): the replay above
-	// has finished each tombstoned one, and attach texts them once the
-	// owner channel is up. An owed file that does not read is started
-	// afresh; its texts are lost, not its forgets.
-	owedPath := filepath.Join(p.Dir, "forget-owed.json")
-	owed := openOwedFile(change.FileStore{Path: owedPath}, owedPath)
+	// The replay above has finished each owed tombstoned forget, and
+	// attach texts them once the owner channel is up.
 	l.forgetOwner.owed = owed
 	l.forgetOwner.owedAtStart = owed.goals()
 	for _, e := range restored {
+		l.forgetOwner.restoredGoals = append(l.forgetOwner.restoredGoals, e.Goal)
 		if e.Agent {
 			l.forgetOwner.restored = append(l.forgetOwner.restored, e.Since)
 		}
@@ -398,7 +494,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	cfg.Grants.ForgetItem = l.forgetOwner.Item
 	cfg.Grants.ForgetAgentItem = l.forgetOwner.AgentItem
 	cfg.Settings = l.settings
-	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status)
+	cfg.Notes = append(cfg.Notes, l.note, l.builderNote, l.guard.Status, l.forgetOwner.Note, l.forgetOwner.RetryNote)
 	cfg.Narrows = l.sched.Narrows
 	cfg.HelpExtra = loops.HelpLine
 	// The owner's verdicts on the agent's effects become Loop 1's cases
@@ -451,10 +547,10 @@ func journalRedacted(v string) bool {
 // noRoomNote is STATUS's line when replay evaluation was not opened for
 // lack of memory (PE2; UX-114-1, potency C1 on #114). It follows the time
 // check's note.
-const noRoomNote = "Learning: paused, the box's memory is too small to test changes."
+const noRoomNote = "Learning: paused, my memory is too small to test changes."
 
 // noRoomOn is what turning learning back on adds then.
-const noRoomOn = "Learning is on, but the box's memory is too small to test changes, so nothing new will be adopted."
+const noRoomOn = "Learning is on, but my memory is too small to test changes, so nothing new will be adopted."
 
 func (l *learning) note() string {
 	if l.noRoom.Load() {
@@ -489,10 +585,10 @@ func (l *learning) settings(ctx context.Context, msg string, unlocked bool) (str
 // learningOffText answers loop settings and ends HELP when the learning
 // plane could not start (L3 S3 on #90). It names everything the loop texts
 // cover, and a restart retries opening the plane (UX-92-1).
-const learningOffText = "Spare-time work (learning, self-tests, update checks) is not running on this box. Restarting the box may fix it."
+const learningOffText = "Spare-time work (learning, self-tests, update checks) is not running. Restarting me may fix it."
 
 // forgetOffText answers FORGET when the learning plane could not start.
-const forgetOffText = "I can't forget tasks right now: learning isn't running. Restarting the box may fix it."
+const forgetOffText = "I can't forget tasks right now: learning isn't running. Restarting me may fix it."
 
 // learningOffNote is STATUS's line for it, so the owner learns it without
 // sending a loop setting (UX R1 on #92).
@@ -814,6 +910,8 @@ func (l *learning) openEvaluator(m *vm.Manager, services *lateServices, c evalCo
 			// ev is set before any replay machine exists: machines
 			// start only through Run, after New returns.
 			OverCeiling: func(id string) { ev.OverPriceCeiling(id) },
+			// Retries stays nil (MaxRetries): a tree's rule under
+			// evaluation is not a reordering of the owner's (SR3-7-f2).
 		}))
 	}
 	ev, err := replay.New(rc)
@@ -962,12 +1060,12 @@ type syncedRouting struct {
 // model order is in use in place of an order the box learned, because
 // they changed their AI settings since (W3-route; UX-108-1 on #108). Not
 // urgent, so it waits for the digest (CH-15).
-const routingStandsInText = "Your AI model settings changed, so the box uses your order of models. It learns a new order over time while learning is on."
+const routingStandsInText = "Your AI model settings changed, so I use your order of models. I learn a new order over time while learning is on."
 
 // routingProjectedText replaces it when part of the learned order still
 // fits the owner's new rule, so Loop 1 proposes that part (W3-route-a,
 // potency PR1 on #108). One GSM-7 segment.
-const routingProjectedText = "Your AI model settings changed, so the box uses your order of models. While learning is on, it will check whether its learned order still helps."
+const routingProjectedText = "Your AI model settings changed, so I use your order of models. While learning is on, I will check whether my learned order still helps."
 
 // project carries a learned order onto the owner's rule (W3-route-a): in
 // each of the owner's classes, routes the learned order had keep their

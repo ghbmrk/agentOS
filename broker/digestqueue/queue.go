@@ -235,8 +235,9 @@ func validate(st state, limits Limits) error {
 		if b.State == Ready && b.Attempts >= limits.MaxAttempts {
 			return ErrInvalid
 		}
+		// Forget redacts an unknown batch whole and keeps its state (W5-Dc-r7).
 		if b.Redacted {
-			if !terminal || len(b.Snapshots) != 0 || len(b.Acknowledged) != 0 {
+			if (!terminal && b.State != Unknown) || len(b.Snapshots) != 0 || len(b.Acknowledged) != 0 {
 				return ErrInvalid
 			}
 			continue
@@ -389,7 +390,7 @@ func (q *Queue) Enqueue(snapshots []Snapshot, created, expires time.Time) (Batch
 		}
 	}
 	next := clone(q.st)
-	if len(next.Batches) >= next.Policy.MaxBatches || next.Seq == math.MaxUint64 {
+	if next.Seq == math.MaxUint64 {
 		return Batch{}, ErrFull
 	}
 	next.Seq++
@@ -401,10 +402,42 @@ func (q *Queue) Enqueue(snapshots []Snapshot, created, expires time.Time) (Batch
 		return Batch{}, ErrFull
 	}
 	next.Batches = append(next.Batches, b)
+	if err := evict(&next, created); err != nil {
+		return Batch{}, err
+	}
 	if err := q.commit(next); err != nil {
 		return Batch{}, err
 	}
 	return clone(b), nil
+}
+
+// dead reports a batch that can never be sent again and is kept only so the
+// caller can name it: an unknown send, or a late batch held again at now.
+func dead(b Batch, now time.Time) bool {
+	return b.State == Unknown || (b.State == Ready && b.Late && !now.Before(b.Expires))
+}
+
+// evict removes the oldest dead batches, and only those, until next fits
+// MaxBatches and MaxBytes (W5-Dc-r9): a dead batch is kept as long as it
+// leaves room for today's digest (CH-15). Seq and Latest stay, so an evicted
+// batch's snapshot offered again is refused, never revived (CAP-3).
+func evict(next *state, now time.Time) error {
+	for {
+		if len(next.Batches) <= next.Policy.MaxBatches {
+			b, err := json.Marshal(next)
+			if err != nil {
+				return err
+			}
+			if len(b) <= next.Policy.MaxBytes {
+				return nil
+			}
+		}
+		i := slices.IndexFunc(next.Batches, func(b Batch) bool { return dead(b, now) })
+		if i < 0 {
+			return ErrFull
+		}
+		next.Batches = slices.Delete(next.Batches, i, i+1)
+	}
 }
 
 // Acknowledge is called only after a trusted source durably acknowledges this
@@ -493,7 +526,8 @@ func (q *Queue) finish(id uint64, attempt int, outcome Outcome, evidence string)
 	if err != nil {
 		return err
 	}
-	if (b.State != Sending && b.State != Unknown) || attempt != b.Attempts {
+	// A redacted batch has no text to resend or account for: it stays as it is.
+	if (b.State != Sending && b.State != Unknown) || b.Redacted || attempt != b.Attempts {
 		return ErrState
 	}
 	if evidence != "" && !name.MatchString(evidence) {
@@ -601,8 +635,10 @@ func (q *Queue) Late(id uint64, now, expires time.Time) error {
 // batch it removes only the snapshots that carry the reference, with their
 // acknowledgment bits; if none remain, a ready batch is cancelled and an expired
 // one stays expired, both redacted. Accepted, failed and cancelled batches are
-// redacted whole. Any matching sending or unknown batch refuses the whole call
-// before any mutation: the caller must contain/reconcile that send first.
+// redacted whole, and so is an unknown batch, which keeps its state, attempts
+// and evidence: it is never resent, and the owner may have its text already
+// (W5-Dc-r7). Any matching sending batch refuses the whole call before any
+// mutation: Send finishes it or a reopen makes it unknown, then ask again.
 // The source keeps a duty too: drop the reference and never re-offer it; a
 // forgotten generation re-offered is refused with ErrConflict.
 // Association hashes remain in bounded private dedupe state until an explicitly
@@ -621,7 +657,7 @@ func (q *Queue) Forget(reference string) error {
 	changed := false
 	for _, b := range next.Batches {
 		if slices.ContainsFunc(b.Snapshots, matches) {
-			if b.State == Sending || b.State == Unknown {
+			if b.State == Sending {
 				return ErrInFlight
 			}
 			changed = true

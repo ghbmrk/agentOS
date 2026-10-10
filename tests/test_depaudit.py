@@ -1000,6 +1000,46 @@ class IdMapTest(unittest.TestCase):
         self.assertIn("no subordinate uid and gid range", depaudit.SANDBOX_WHY)
         self.assert_remedy(depaudit.SANDBOX_WHY, "add one")
 
+    # DEP-8-r1 (local IDs, no REQ marker): an NSS failure is its own class with its own remedy.
+    def nss_failures(self):
+        """(name, patch, gid side) for each NSS failure DEP-8-r1a names."""
+        def lookup(call, err):
+            return mock.patch.object(depaudit, "_nss_lookup",
+                                     side_effect=lambda c, ident: (err, False) if c == call else (0, False))
+        yield "getpwall", mock.patch("pwd.getpwall", side_effect=OSError(errno.EIO, "synthetic")), False
+        yield "getgrall", mock.patch("grp.getgrall", side_effect=OSError(errno.EIO, "synthetic")), True
+        for err in (errno.EIO, errno.EAGAIN):
+            yield "getpwuid_r " + errno.errorcode[err], lookup("getpwuid_r", err), False
+            yield "getgrgid_r " + errno.errorcode[err], lookup("getgrgid_r", err), True
+
+    def nss_ranges(self, gid_side):
+        return self.ranges(self.mine(300000), self.mine(200000)) if gid_side else self.ranges(self.mine(200000))
+
+    def test_8_r1a_an_nss_failure_raises_its_own_class(self):
+        nss = getattr(depaudit, "NssFailure", None)
+        self.assertIsNotNone(nss, "no NssFailure")
+        self.assertTrue(issubclass(nss, depaudit.UnusableRange))
+        for name, patch, gid_side in self.nss_failures():
+            with self.subTest(name), patch, self.nss_ranges(gid_side), self.assertRaises(nss) as cm:
+                depaudit._id_maps()
+            self.assertIn("failed", str(cm.exception))
+        # A rule the range itself breaks stays a plain UnusableRange.
+        with self.ranges(self.mine(0)), self.assertRaises(depaudit.UnusableRange) as cm:
+            depaudit._id_maps()
+        self.assertNotIsInstance(cm.exception, nss)
+
+    def test_8_r1b_an_nss_failure_says_fix_the_nss_source_not_replace_it(self):
+        for name, patch, gid_side in self.nss_failures():
+            with self.subTest(name), patch, self.nss_ranges(gid_side), \
+                    mock.patch.object(depaudit, "_has_mount_setattr", return_value=True), \
+                    mock.patch.object(depaudit.shutil, "which", return_value="/bin/x"):
+                self.assertFalse(self.available())
+                why = depaudit.SANDBOX_WHY
+                self.assertIn("failed", why)
+                self.assertIn("fix the NSS source, then retry", why)
+                for wrong in ("replace it", "add one", "--add-subuids", "--del-subuids"):
+                    self.assertNotIn(wrong, why)
+
     def assert_remedy(self, why, verb):
         self.assertIn("; %s: " % verb, why)
         for needle in ("524288 (SUB_UID_MIN", "300000 (SUB_GID_MIN", "getent passwd", "getent group",

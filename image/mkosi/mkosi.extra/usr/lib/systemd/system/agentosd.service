@@ -12,6 +12,9 @@ EnvironmentFile=/etc/agentos/agentosd.env
 # components beside it (RES-2, #124); -cgroup-root defaults to the broker's own group.
 Slice=agentos.slice
 Delegate=yes
+# No child gains privileges through a setuid or file-capability binary (agentosd L7-6): runsc
+# keeps root's full set, and fuzz children never regain what their jail took (LOOP-7).
+NoNewPrivileges=yes
 # Only on the drive this PC booted (drive-id: no other disk carries the boot partition's GUID).
 ExecStartPre=/usr/lib/agentos/drive-id check
 ExecStart=/usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} -modem-uid ${AGENTOS_MODEM_UID} \

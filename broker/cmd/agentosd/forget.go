@@ -70,14 +70,53 @@ const (
 	// can be (W3-forget-b2c).
 	forgetAgentNoAgent  = "Not taken back yet: your agent is not running. I will do it when it runs again and text you. Send STATUS to see why."
 	forgetAgentNotTaken = "Not taken back yet: I couldn't save the request. I keep trying and will text you when it's done."
-	forgetAgentNotOpen  = "Not taken back yet: memory is off on this box, so your agent still holds that task. I will do it if memory comes on and text you."
+	forgetAgentNotOpen  = "Not taken back yet: my memory is off, so your agent still holds that task. I will do it if memory comes on and text you."
 	// forgetAgentWhenOpen: an approved item 2 waits for recall to open
 	// (#327 L3 B-3).
 	forgetAgentWhenOpen = "Not taken back yet: memory is not open. I will do it when it opens and text you."
 	// forgetSiblingWait bounds how long item 2 waits for item 1's outcome;
 	// the gate settles the items of one answer together.
 	forgetSiblingWait = 30 * time.Second
+	// forgetAgentStillHeld is told once per take-back per boot when
+	// carryAgent has carried it forgetCarryBound, or at once on an error
+	// retrying cannot fix (W3-forget-b2c-f1 F1-1); STATUS then shows
+	// carryNote. The take-back stays owed and is still retried.
+	forgetAgentStillHeld = "Not taken back yet: your agent still holds that task. I keep trying and will text you when it's done. Send STATUS to see it."
+	// forgetCarryBound is how long carryAgent retries a take-back before
+	// the owner hears it is still not done.
+	forgetCarryBound = time.Hour
 )
+
+// carryNote is STATUS's line while n take-backs are carried
+// (W3-forget-b2c-f1 F1-2): a count, never a task.
+func carryNote(n int) string {
+	if n == 1 {
+		return "Forget: 1 take-back not done yet; your agent still holds that task. I keep trying."
+	}
+	return "Forget: " + strconv.Itoa(n) + " take-backs not done yet; your agent still holds those tasks. I keep trying."
+}
+
+// retryNote is STATUS's line while n item 1 forgets are still retrying
+// (W3-forget-b2c-f1-r1 R1C), in forgetNotSaved's words: a count, never a
+// task.
+func retryNote(n int) string {
+	if n == 1 {
+		return "Forget: 1 task not forgotten yet; I couldn't save it. I keep trying."
+	}
+	return "Forget: " + strconv.Itoa(n) + " tasks not forgotten yet; I couldn't save them. I keep trying."
+}
+
+// errNoLineage: the agent machine's lineage did not read, so there is no
+// machine to take back; retrying alone does not fix it, and the owner is
+// told at once (F1-1; ASSUMPTIONS.md).
+var errNoLineage = errors.New("forget: no agent machine lineage")
+
+// restoredAgentID is the owed key of a take-back a restored forget log
+// replays (F1-3): it has no item 2 ID, so its key names only its time,
+// which forgetSince reads back; never a task.
+func restoredAgentID(since time.Time) string {
+	return grants.ForgetAgentID("restored.0."+strconv.FormatInt(since.UnixNano(), 10), "restored")
+}
 
 // forgetAgent takes the agent machine's work since a task back on the
 // ask-first deletion-rollback rule (W3-forget-b2b): recall's Reach, with
@@ -125,7 +164,7 @@ func (a *forgetAgent) takeBack(ctx context.Context, since time.Time, approved bo
 	}
 	l, err := a.lineage()
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errNoLineage, err)
 	}
 	return a.work.TakeBack(ctx, l, since, approved)
 }
@@ -179,6 +218,10 @@ type ownerForget struct {
 	// finishOwed texts once the start-up replay has finished them.
 	owed        *forgetOwed
 	owedAtStart []string
+	// restoredGoals are the goals a restored forget log holds, which
+	// finishOwed asks the digest queue to forget again at each boot
+	// (W3-forget-b2c-f1-r1 R1D; Security 1 on #602).
+	restoredGoals []string
 	// tell, if set, sends an owner text and reports whether it went
 	// (loop2Notify.try); a done text is owed until it does (L3 B1 on
 	// #425). Unset, inform sends and is taken as sent.
@@ -196,6 +239,12 @@ type ownerForget struct {
 	// carrying: approved item 2s not saved, by ID, that carryAgent is
 	// trying again; resumeAgent leaves them to it.
 	carrying map[string]bool
+	// retrying: item 1 forgets retry or purgeLater is still finishing, by
+	// goal, which RetryNote counts (R1C).
+	retrying map[string]bool
+	// stillTold: take-backs told forgetAgentStillHeld in this boot, by
+	// ID, so each is told it once (F1-1).
+	stillTold map[string]bool
 	// telling: item 2s whose done text this process has taken on to tell,
 	// by ID, so agentBack, carryAgent, recall's report (agentTakenBack),
 	// resumeAgent and finishOwed tell each once (RCH-4).
@@ -533,6 +582,14 @@ func (f *ownerForget) Execute(ctx context.Context, in journal.Intent, _ int) jou
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "forgetting; retrying"}
 }
 
+// wireDigest makes dg the digest queue's purge and has dg replay the
+// tombstone at each open, so a stop between the tombstone and the purge
+// leaves no batch to send (W5-Dc-r12).
+func (f *ownerForget) wireDigest(dg *digestBox, tombstoned func() []string) {
+	f.digest = dg.forget
+	dg.cfg.Forgotten = tombstoned
+}
+
 // forgetAll is forget, then the digest queue's purge.
 func (f *ownerForget) forgetAll(goal string) error {
 	if err := f.forget(goal); err != nil {
@@ -557,6 +614,7 @@ func (f *ownerForget) retry(ctx context.Context, goal string, since time.Time, u
 	if f.retried != nil {
 		defer f.retried()
 	}
+	defer f.markRetrying(goal)()
 	start, wait, said := f.now(), 2*time.Second, false
 	for {
 		if !f.sleep(ctx, wait) {
@@ -771,7 +829,11 @@ func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time)
 		f.carrying[id] = true
 		f.mu.Unlock()
 		if !carried {
-			f.promise(forgetAgentNotTaken)
+			if errors.Is(err, errNoLineage) {
+				f.stillHeld(id) // retrying alone cannot fix it (F1-1)
+			} else {
+				f.promise(forgetAgentNotTaken)
+			}
 			// Execute's ctx ends when it returns; the process does not.
 			go f.carryAgent(context.WithoutCancel(ctx), id, since)
 		}
@@ -784,6 +846,9 @@ func (f *ownerForget) agentBack(ctx context.Context, id string, since time.Time)
 // recall says so; one recall records but has not done is left to recall's
 // Retry, which reports it (agentTakenBack).
 // A shutdown leaves it to the journal and the next open of recall.
+// Past forgetCarryBound of waits, or at once on an error retrying cannot
+// fix, the owner is told once that it is still not done; the retries go
+// on (W3-forget-b2c-f1 F1-1).
 func (f *ownerForget) carryAgent(ctx context.Context, id string, since time.Time) {
 	if f.retried != nil {
 		defer f.retried()
@@ -793,12 +858,17 @@ func (f *ownerForget) carryAgent(ctx context.Context, id string, since time.Time
 		delete(f.carrying, id)
 		f.mu.Unlock()
 	}()
+	var carried time.Duration
 	for wait := 2 * time.Second; ; wait = min(2*wait, forgetRetryMax) {
 		if !f.sleep(ctx, wait) {
 			return
 		}
+		carried += wait
 		a := f.agent.Load()
 		if a == nil {
+			if carried >= forgetCarryBound {
+				f.stillHeld(id)
+			}
 			continue
 		}
 		err := a.takeBack(ctx, since, true)
@@ -811,7 +881,75 @@ func (f *ownerForget) carryAgent(ctx context.Context, id string, since time.Time
 			return // recall's Retry reports it (agentTakenBack)
 		}
 		log.Printf("forget: agent take-back not saved yet: %v", err)
+		if carried >= forgetCarryBound || errors.Is(err, errNoLineage) {
+			f.stillHeld(id)
+		}
 	}
+}
+
+// stillHeld tells the owner, once per take-back (id) per boot, that the
+// agent still holds the task (F1-1). Like promise, it is not owed: the
+// done text that follows is.
+func (f *ownerForget) stillHeld(id string) {
+	f.mu.Lock()
+	told := f.stillTold[id]
+	if f.stillTold == nil {
+		f.stillTold = map[string]bool{}
+	}
+	f.stillTold[id] = true
+	f.mu.Unlock()
+	if !told {
+		f.promise(forgetAgentStillHeld)
+	}
+}
+
+// Note is STATUS's line while any take-back is still owed (F1-2): one
+// carryAgent carries, or one owed but not yet known done (Taking), which
+// recall's Retry or a later open of recall finishes; "" when none is.
+// The line stays until the done text goes (U1 on #602).
+func (f *ownerForget) Note() string {
+	f.mu.Lock()
+	held := make(map[string]bool, len(f.carrying))
+	for id := range f.carrying {
+		held[id] = true
+	}
+	f.mu.Unlock()
+	for _, g := range f.owed.goals() {
+		if e, ok := f.owed.get(g); ok && e.Agent && e.Taking {
+			held[g] = true
+		}
+	}
+	if len(held) == 0 {
+		return ""
+	}
+	return carryNote(len(held))
+}
+
+// markRetrying counts goal on RetryNote until the returned func runs.
+func (f *ownerForget) markRetrying(goal string) func() {
+	f.mu.Lock()
+	if f.retrying == nil {
+		f.retrying = map[string]bool{}
+	}
+	f.retrying[goal] = true
+	f.mu.Unlock()
+	return func() {
+		f.mu.Lock()
+		delete(f.retrying, goal)
+		f.mu.Unlock()
+	}
+}
+
+// RetryNote is STATUS's line while any item 1 forget is still retrying
+// (R1C), as Note is for item 2's take-backs.
+func (f *ownerForget) RetryNote() string {
+	f.mu.Lock()
+	n := len(f.retrying)
+	f.mu.Unlock()
+	if n == 0 {
+		return ""
+	}
+	return retryNote(n)
 }
 
 // agentDone tells the owner an approved item 2 (id) is taken back when
@@ -952,8 +1090,14 @@ func (f *ownerForget) resumeAgent(ctx context.Context) {
 
 // resumeRestored takes the agent back for each take-back a restored forget
 // log holds that recall has not recorded; the owner approved each before
-// the backup, so it is not asked or told again. One that fails stays
-// queued for recall's next open.
+// the backup, so it is not asked again. It is told done as item 2 is
+// (F1-3; Security #427 r2 later 2): owed before its take-back under
+// restoredAgentID, so a crash before the text is told after a restart
+// (judgeAgent), and told only once recall says done (agentDone, or
+// recall's report, agentTakenBack). One recall already holds is not run
+// again, and one an item 2 still owes is left to it, so a take-back is
+// told once. One not saved is carried (carryAgent, F1-1); one recall
+// cannot read yet stays queued for its next open.
 func (f *ownerForget) resumeRestored(ctx context.Context, a *forgetAgent) {
 	f.mu.Lock()
 	sinces := f.restored
@@ -965,20 +1109,73 @@ func (f *ownerForget) resumeRestored(ctx context.Context, a *forgetAgent) {
 			left = append(left, since)
 			continue
 		}
+		id := restoredAgentID(since)
+		f.mu.Lock()
+		carried := f.carrying[id]
+		f.mu.Unlock()
+		if carried || f.owedElsewhere(id, since) {
+			continue
+		}
 		if handled, known := a.work.Handled(since); handled {
 			continue
 		} else if !known {
 			left = append(left, since)
 			continue
 		}
-		if err := a.takeBack(ctx, since, true); err != nil && !errors.Is(err, recalltool.ErrCarried) {
-			log.Printf("forget: restored take-back: %v", err)
+		f.mu.Lock()
+		if f.owing == nil {
+			f.owing = map[string]bool{}
+		}
+		f.owing[id] = true
+		f.mu.Unlock()
+		if err := f.owed.owe(id, owedForget{Agent: true, Taking: true}); err != nil {
+			log.Printf("forget: restored take-back done text not kept for a restart: %v", err)
+		}
+		err := a.takeBack(ctx, since, true)
+		switch {
+		case err == nil:
+			f.agentDone(ctx, id, since) // else recall's Retry reports it
+		case errors.Is(err, recalltool.ErrCarried):
+			log.Printf("forget: restored take-back: %v", err) // recall's Retry reports it
+		case errors.Is(err, recalltool.ErrNotOpen):
 			left = append(left, since)
+		default:
+			log.Printf("forget: restored take-back: %v", err)
+			f.mu.Lock()
+			if f.carrying == nil {
+				f.carrying = map[string]bool{}
+			}
+			f.carrying[id] = true
+			f.mu.Unlock()
+			if errors.Is(err, errNoLineage) {
+				f.stillHeld(id)
+			}
+			go f.carryAgent(context.WithoutCancel(ctx), id, since)
 		}
 	}
 	f.mu.Lock()
 	f.restored = append(left, f.restored...)
 	f.mu.Unlock()
+}
+
+// owedElsewhere reports whether a take-back from since is owed, or
+// carried, under a key other than id: an item 2 of this box that tells
+// its own done text, so the restored replay neither repeats nor tells it.
+func (f *ownerForget) owedElsewhere(id string, since time.Time) bool {
+	for _, g := range f.owed.goals() {
+		e, ok := f.owed.get(g)
+		if at, sok := forgetSince(g); g != id && ok && sok && e.Agent && at.Equal(since) {
+			return true
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for g := range f.carrying {
+		if at, ok := forgetSince(g); g != id && ok && at.Equal(since) {
+			return true
+		}
+	}
+	return false
 }
 
 // siblingApproved waits for the owner's decision on item 1, which the
@@ -1218,6 +1415,16 @@ func (f *ownerForget) paid(goal string) {
 // text stays owed until it sends (done). It runs once the owner channel is
 // attached.
 func (f *ownerForget) finishOwed(ctx context.Context) {
+	// A restore may bring back a digest queue that holds a restored goal,
+	// so each is asked again; a refusal is held by the digest box's own
+	// kept forgets (R1D).
+	if f.digest != nil {
+		for _, g := range f.restoredGoals {
+			if err := f.digest(g); err != nil {
+				log.Printf("forget: restored forget not purged from the digest yet: %v", err)
+			}
+		}
+	}
 	goals := f.owedAtStart
 	f.owedAtStart = nil
 	for _, g := range goals {
@@ -1260,6 +1467,7 @@ func (f *ownerForget) purgeLater(ctx context.Context, goal string, e owedForget)
 	if f.retried != nil {
 		defer f.retried()
 	}
+	defer f.markRetrying(goal)()
 	for wait := 2 * time.Second; ; wait = min(2*wait, forgetRetryMax) {
 		if !f.sleep(ctx, wait) {
 			return

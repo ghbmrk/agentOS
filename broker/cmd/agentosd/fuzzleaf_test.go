@@ -11,6 +11,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -69,6 +70,33 @@ func TestTheFuzzLeafWeighsLeast(t *testing.T) {
 	}
 }
 
+// LOOP-1 (P3-4b-3r-confine-r1): the leaf's memory cap is the one L7-6
+// states and measured from the targets' peaks; memory.high equals it.
+func TestTheFuzzLeafCapIsTheOneL76States(t *testing.T) {
+	b, err := os.ReadFile("ASSUMPTIONS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row string
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(l, "| L7-6 |") {
+			row = l
+		}
+	}
+	m := regexp.MustCompile("`memory\\.max` (\\d+) (GiB|MiB)").FindStringSubmatch(row)
+	if m == nil {
+		t.Fatal("L7-6 states no memory.max")
+	}
+	n, _ := strconv.ParseInt(m[1], 10, 64)
+	want := n << 20
+	if m[2] == "GiB" {
+		want = n << 30
+	}
+	if fuzzLimits.MaxBytes != want || fuzzLimits.HighBytes != want {
+		t.Fatalf("fuzzLimits max %d high %d; L7-6 states %s %s", fuzzLimits.MaxBytes, fuzzLimits.HighBytes, m[1], m[2])
+	}
+}
+
 // LOOP-1, LOOP-7 (root, cgroup v2; CI machines job): agentosd puts the
 // fuzz leaf beside broker/ under its root, with memory.max, pids.max and
 // the lowest weight, and no group OOM kill, so the engine survives a
@@ -96,7 +124,9 @@ func TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound(t *testing.T) {
 		t.Fatal(err)
 	}
 	// nobody must reach the release and the state, as agentos-fuzz
-	// reaches /var/lib/agentos/loop7 through its ACL.
+	// reaches /var/lib/agentos-fuzz under /var/lib; the state is on a
+	// file system with project quotas, which its jail needs (RES-4).
+	state := filepath.Join(reachableQuotaDir(t), "loop7")
 	base, err := os.MkdirTemp("", "agentosd-fuzz-")
 	if err != nil {
 		t.Fatal(err)
@@ -112,11 +142,11 @@ func TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound(t *testing.T) {
 		t.Fatal("release")
 	}
 	dir := t.TempDir()
-	lp := openConfinedLearning(t, dir, learnPaths{Fuzz: release, Loop7: filepath.Join(base, "loop7"), FuzzUser: "nobody", Cgroup: root})
+	lp := openConfinedLearning(t, dir, learnPaths{Fuzz: release, Loop7: state, FuzzUser: "nobody", Cgroup: root, DiskQuota: "on"})
 
 	leaf := filepath.Join(root, "fuzz")
 	for f, want := range map[string]string{
-		"memory.max": strconv.FormatInt(1<<30, 10), "memory.high": strconv.FormatInt(1<<30, 10), "pids.max": "256",
+		"memory.max": strconv.FormatInt(fuzzLimits.MaxBytes, 10), "memory.high": strconv.FormatInt(fuzzLimits.HighBytes, 10), "pids.max": "256",
 		"cpu.weight": strconv.Itoa(fuzzLimits.CPUWeight), "memory.oom.group": "0",
 	} {
 		b, err := os.ReadFile(filepath.Join(leaf, f))
@@ -125,7 +155,7 @@ func TestTheFuzzLeafSitsBesideTheBrokerAndConfinesARound(t *testing.T) {
 		}
 	}
 	var st syscall.Stat_t
-	if err := syscall.Stat(filepath.Join(base, "loop7", "targets", "fake"), &st); err != nil || st.Uid != 65534 {
+	if err := syscall.Stat(filepath.Join(state, "targets", "fake"), &st); err != nil || st.Uid != 65534 {
 		t.Errorf("the state is not the fuzz user's: uid %d, %v", st.Uid, err)
 	}
 

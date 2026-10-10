@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/update"
+	"github.com/ghbmrk/agentos/broker/update/updatetest"
 )
 
 // REQ: UPD-1, UPD-1a, OP-4, OP-5
@@ -337,6 +341,7 @@ func TestUnrecordedHandoverThenPowerCutIsNotAFallback(t *testing.T) {
 	if r.saved().Applying != nil || strings.Contains(r.a.Status(), "did not start") {
 		t.Fatalf("status %q", r.a.Status())
 	}
+	r.dropsAre("a1") // SR3-4f-2b: nothing holds it after the restart
 	r.admitsNext(rel)
 }
 
@@ -430,6 +435,192 @@ func TestCommittedBeforeConfirmThenOldRootConverges(t *testing.T) {
 	r.settledOnOldRoot(rel)
 }
 
+// SR3-4f-r1 (Security 4a and L3 on #597, point 4): the other-root line is
+// decided by the root the box runs, not by the boot it was settled in.
+// While the box runs another root than the update store's installed
+// release, STATUS keeps saying so, in every boot; once the release runs,
+// it is silent. A later boot on the old root must not read as "installed".
+
+// REQ: UPD-1, UPD-1a, CH-12
+
+// settleOnOldRoot hands release 1 over, cuts the settle after
+// CommitRelease, boots the old root and settles it as installed_other_root.
+func settleOnOldRoot(t *testing.T) (*rig, *update.Verified) {
+	t.Helper()
+	r, rel := handedOver(t, false)
+	r.settleOnOldRoot()
+	return r, rel
+}
+
+// settleOnOldRoot settles the handed-over release 1 as installed while the
+// box boots the old root.
+func (r *rig) settleOnOldRoot() {
+	t := r.t
+	t.Helper()
+	r.restart()
+	r.pipe.confirmErr = errIO
+	if err := r.a.Resume(context.Background()); !errors.Is(err, errIO) {
+		t.Fatalf("resume: %v", err)
+	}
+	r.bootOldRoot()
+	r.must(r.a.Resume(context.Background()))
+	if l := r.saved().Last; l == nil || l.Kind != doneInstalledOtherRoot {
+		t.Fatalf("settled as %+v", l)
+	}
+}
+
+// mirroredOnOldRoot is settleOnOldRoot with a store that checks every
+// release the rig makes, so release 2 stages. Mirrored releases are not
+// security fixes, so each waits out its jitter.
+func mirroredOnOldRoot(t *testing.T) *rig {
+	t.Helper()
+	r := newRig(t)
+	r.mirror = updatetest.NewMirror(t)
+	r.store = r.mirror.Box(0)
+	r.restart()
+	r.must(r.a.Schedule(r.release(1, false), "a1"))
+	r.clk.add(7 * time.Hour)
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.settleOnOldRoot()
+	return r
+}
+
+// bootNewRoot reboots the box into release 1's root, blessed, and restarts
+// the applier.
+func (r *rig) bootNewRoot() {
+	r.t.Helper()
+	r.act.next = strings.Repeat("0f", 32)
+	r.must(r.act.Restart(context.Background()))
+	r.restart()
+}
+
+func TestOtherRootLineHoldsInLaterBoots(t *testing.T) {
+	r, _ := settleOnOldRoot(t)
+	settled := r.act.boot.ID
+	r.bootOldRoot()
+	if r.act.boot.ID == settled {
+		t.Fatal("no later boot")
+	}
+	for i := 0; i < 2; i++ { // every later boot on the old root
+		if got := r.a.Status(); got != otherRootLine {
+			t.Fatalf("status in boot %s: %q", r.act.boot.ID, got)
+		}
+		r.bootOldRoot()
+	}
+	if d := r.a.Digest(); len(d) != 1 || d[0] != otherRootLine {
+		t.Fatalf("digest in a later boot on the old root: %q", d)
+	}
+	if got := r.a.Status(); got != otherRootLine {
+		t.Fatalf("status after the digest: %q", got)
+	}
+	r.bootNewRoot()
+	if got := r.a.Status(); got != "" {
+		t.Fatalf("status once release 1 runs: %q", got)
+	}
+}
+
+// Told in a later boot that runs the release, the digest says it is
+// installed; STATUS is silent there.
+func TestOtherRootDigestOnceTheReleaseRuns(t *testing.T) {
+	r, _ := settleOnOldRoot(t)
+	r.bootNewRoot()
+	if got := r.a.Status(); got != "" {
+		t.Fatalf("status: %q", got)
+	}
+	if d := r.a.Digest(); len(d) != 1 || d[0] != "Update 1 is installed." {
+		t.Fatalf("digest: %q", d)
+	}
+}
+
+// A boot that cannot be read is never taken for the old root: the line
+// says what the box started, so it is shown only when that is known
+// (CH-12). The digest still says what is true either way.
+func TestOtherRootLineNeedsTheBootRead(t *testing.T) {
+	r, _ := settleOnOldRoot(t)
+	r.act.bootedErr = errIO
+	if got := r.a.Status(); got != "" {
+		t.Fatalf("status: %q", got)
+	}
+	if d := r.a.Digest(); len(d) != 1 || d[0] != "Update 1 is installed." {
+		t.Fatalf("digest: %q", d)
+	}
+}
+
+// SR3-4f-r1 (b): after installed_other_root, the next release is admitted
+// on the old root (ASSUMPTIONS A12): refusing it until release 1 boots
+// would hold every later update, security fixes included, until a restart
+// nothing schedules. Its rollback point names the root that ran, so a
+// fallback of it is judged against the old root. The rig's store checked
+// only release 1, so the store refuses to stage release 2; the applier's
+// part is what is pinned: Schedule and Tick pass it to the journal.
+func TestNextReleaseAfterOtherRootIsAdmitted(t *testing.T) {
+	r, _ := settleOnOldRoot(t)
+	r.restart()
+	r.must(r.a.Schedule(r.release(2, true), "a2"))
+	if _, err := r.a.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var next *journal.Status
+	for _, st := range r.intents() {
+		if fmt.Sprint(st.Intent.Params["to"]) == "2" {
+			next = &st
+		}
+	}
+	if next == nil {
+		t.Fatalf("release 2 never reached the journal: %+v", r.intents())
+	}
+	p := next.Intent.Params
+	if fmt.Sprint(p["adoption"]) != "a2" || fmt.Sprint(p["from"]) != "1" || fmt.Sprint(p["from_usr"]) != strings.Repeat(oldHash, 32) {
+		t.Fatalf("rollback point %v", p)
+	}
+	if len(next.Attempts) != 1 || !strings.Contains(next.Attempts[0].Evidence, "checked by another store") {
+		t.Fatalf("not dispatched to the store: %+v", next.Attempts)
+	}
+}
+
+// Release 2's Install writes the slot that holds release 1 (A12(3)), so
+// the promise to start release 1 ends there, even when that attempt
+// fails or goes unrecorded and release 2 is then withdrawn.
+func TestOtherRootPromiseEndsWithTheNextInstall(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		arm  func(r *rig)
+		took int // Installs that returned, release 1's included
+	}{
+		{"install fails", func(r *rig) { r.act.installErr = errIO }, 1},
+		{"handover unrecorded", func(r *rig) { r.act.onInstall = func() { r.state.Fail = errIO } }, 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := mirroredOnOldRoot(t)
+			r.restart()
+			r.must(r.a.Schedule(r.release(2, false), "a2"))
+			r.clk.add(7 * time.Hour)
+			c.arm(r)
+			if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+				t.Fatalf("tick: %v %v", ok, err)
+			}
+			if len(r.act.installed) != c.took {
+				t.Fatalf("installed %v", r.act.installed)
+			}
+			r.act.installErr, r.state.Fail = nil, nil
+			r.must(r.a.Withdraw("a2", "undo"))
+			for i := 0; i < 2; i++ { // this boot, then a later one on the old root
+				if got := r.a.Status(); got == otherRootLine {
+					t.Fatalf("status in boot %s: %q", r.act.boot.ID, got)
+				}
+				for _, l := range r.a.Digest() {
+					if l == otherRootLine {
+						t.Fatalf("digest in boot %s: %q", r.act.boot.ID, l)
+					}
+				}
+				r.bootOldRoot()
+			}
+		})
+	}
+}
+
 // SR3-4f-1b (SR3-4-f5): Install runs at most twice for one release with
 // no recorded outcome; then the release is refused until the owner
 // retries it. A boot on the old root after an unrecorded Install proves
@@ -450,7 +641,8 @@ func (r *rig) unrecordedAttempt() {
 }
 
 // twiceUnrecorded runs three Tick/restart cycles on the old root, each
-// scheduling release 1 again as Loop 3 would; the third finds the bound.
+// scheduling release 1 again under a new adoption (a1 to a3), since a
+// dropped adoption is retired; the third finds the bound.
 func twiceUnrecorded(t *testing.T) (*rig, *update.Verified) {
 	t.Helper()
 	r := newRig(t)
@@ -461,7 +653,7 @@ func twiceUnrecorded(t *testing.T) (*rig, *update.Verified) {
 		if ok, err := r.a.Tick(ctx); ok || err != nil { // settles the last attempt
 			t.Fatalf("cycle %d: %v %v", i, ok, err)
 		}
-		if err := r.a.Schedule(rel, "a1"); err != nil && i < 2 {
+		if err := r.a.Schedule(rel, fmt.Sprintf("a%d", i+1)); err != nil && i < 2 {
 			t.Fatalf("cycle %d: %v", i, err)
 		}
 		if i < 2 {
@@ -483,17 +675,21 @@ func TestInstalledSaveFailingIsBoundedPerRelease(t *testing.T) {
 		t.Fatalf("installed %d times", len(r.act.installed))
 	}
 	st := r.saved()
-	if r.a.FellBack(1) || len(r.pipe.calls) != 0 || st.Applying != nil || st.Last == nil || st.Last.Kind != "unrecorded" {
+	if r.a.FellBack(1) || st.Applying != nil || st.Last == nil || st.Last.Kind != "unrecorded" {
 		t.Fatalf("settled as %+v, fell back %v, pipeline %q", st.Last, r.a.FellBack(1), r.pipe.calls)
 	}
+	if len(r.pipe.confirmed) != 0 || len(r.pipe.failed) != 0 {
+		t.Fatalf("pipeline: %q", r.pipe.calls)
+	}
+	r.dropsAre("a1", "a2", "a3") // a3 was refused at the bound
 	if got := r.a.Status(); got != unrecordedLine {
 		t.Fatalf("status: %q", got)
 	}
 	if d := r.a.Digest(); len(d) != 1 || d[0] != unrecordedLine {
 		t.Fatalf("digest: %q", d)
 	}
-	if err := r.a.Schedule(rel, "a1"); err == nil {
-		t.Fatal("refused release scheduled again")
+	if err := r.a.Schedule(rel, "a4"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("refused release scheduled again: %v", err)
 	}
 	if ok, err := r.a.Tick(ctx); ok || err != nil || len(r.act.installed) != 2 {
 		t.Fatalf("fourth tick: %v %v, installed %d", ok, err, len(r.act.installed))
@@ -504,14 +700,14 @@ func TestInstalledSaveFailingIsBoundedPerRelease(t *testing.T) {
 func TestRefusedReleaseIsRetriedOnlyByTheOwner(t *testing.T) {
 	r, rel := twiceUnrecorded(t)
 	ctx := context.Background()
-	if err := r.a.Schedule(rel, "a1"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), rel.Ref().ManifestSHA256) {
+	if err := r.a.Schedule(rel, "b1"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), rel.Ref().ManifestSHA256) {
 		t.Fatalf("schedule: %v", err)
 	}
 	r.state.Fail = errIO
 	if err := r.a.Retry(rel.Ref()); !errors.Is(err, errIO) {
 		t.Fatalf("retry: %v", err)
 	}
-	if err := r.a.Schedule(rel, "a1"); !errors.Is(err, ErrRefused) {
+	if err := r.a.Schedule(rel, "b2"); !errors.Is(err, ErrRefused) {
 		t.Fatalf("refusal lifted without being saved: %v", err)
 	}
 	r.state.Fail = nil
@@ -520,7 +716,7 @@ func TestRefusedReleaseIsRetriedOnlyByTheOwner(t *testing.T) {
 	if got := r.a.Status(); got != "" {
 		t.Fatalf("status after retry: %q", got)
 	}
-	r.must(r.a.Schedule(rel, "a1"))
+	r.must(r.a.Schedule(rel, "b3"))
 	if ok, err := r.a.Tick(ctx); !ok || err != nil || len(r.act.installed) != 3 {
 		t.Fatalf("tick after retry: %v %v, installed %d", ok, err, len(r.act.installed))
 	}
@@ -549,7 +745,7 @@ func TestRecordedHandoverResetsTheUnrecordedCount(t *testing.T) {
 	if ok, err := r.a.Tick(ctx); ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
-	r.must(r.a.Schedule(rel, "a2"))
+	r.must(r.a.Schedule(rel, "a3")) // a2 was dropped across the restart
 	if ok, err := r.a.Tick(ctx); !ok || err != nil || len(r.act.installed) != 4 {
 		t.Fatalf("tick: %v %v, installed %d", ok, err, len(r.act.installed))
 	}
@@ -584,8 +780,9 @@ func TestRestartDropsPendingEvenAfterAFailedAbandon(t *testing.T) {
 	if ok, err := r.a.Tick(ctx); ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
-	if r.saved().Pending == nil {
-		t.Fatal("control: the saved state no longer holds the release")
+	// SR3-4f-2b: the Tick's settle saved the drop, and settled it once.
+	if st := r.saved(); st.Pending != nil || st.Applying == nil {
+		t.Fatalf("saved pending %+v, applying %+v", st.Pending, st.Applying)
 	}
 	r.act.abandonErr = nil
 	r.restart()
@@ -598,6 +795,7 @@ func TestRestartDropsPendingEvenAfterAFailedAbandon(t *testing.T) {
 	if r.saved().Pending != nil || len(r.act.installed) != 0 {
 		t.Fatalf("pending %+v, installed %v", r.saved().Pending, r.act.installed)
 	}
+	r.dropsAre("a1")
 }
 
 // SR3-4f-1a: an update store that cannot be read on the old root is not
@@ -716,5 +914,746 @@ func TestUnrecordedBoundHoldsWithinOneBoot(t *testing.T) {
 	}
 	if got := r.a.Status(); got != unrecordedLine {
 		t.Fatalf("status: %q", got)
+	}
+}
+
+// REQ: UPD-1, UPD-8, OP-4, OP-5
+//
+// SR3-4f-2: an adoption whose release leaves the applier before it is
+// installed is settled with StageDropped, after the applier's own save;
+// a failed call stays an obligation the next Tick retries. Withdraw gives
+// a pending release up for the pipeline's revert, and refuses from the
+// save before the install until the boot after it settles.
+
+// drops lists the adoptions StageDropped was called for, in order.
+func (r *rig) drops() []string {
+	r.t.Helper()
+	r.pipe.mu.Lock()
+	defer r.pipe.mu.Unlock()
+	var out []string
+	for _, c := range r.pipe.calls {
+		if id, ok := strings.CutPrefix(c, "drop "); ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func (r *rig) dropsAre(want ...string) {
+	r.t.Helper()
+	if got := r.drops(); strings.Join(got, ",") != strings.Join(want, ",") {
+		r.t.Fatalf("StageDropped calls %q, want %q", got, want)
+	}
+	if d := r.saved().Dropped; len(d) != 0 {
+		r.t.Fatalf("obligations left: %q", d)
+	}
+}
+
+func TestWithdrawDropsPending(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	rel := r.release(1, true)
+	r.must(r.a.Schedule(rel, "a1"))
+	r.state.Fail = errIO
+	if err := r.a.Withdraw("a1", "owner"); !errors.Is(err, errIO) || r.a.st.Pending == nil {
+		t.Fatalf("withdraw without saving: %v", err)
+	}
+	r.state.Fail = nil
+	r.must(r.a.Withdraw("a1", "owner"))
+	if ok, err := r.a.Tick(ctx); ok || err != nil || len(r.act.installed) != 0 {
+		t.Fatalf("tick: %v %v, installed %d", ok, err, len(r.act.installed))
+	}
+	if r.saved().Pending != nil || r.a.rel != nil {
+		t.Fatal("a withdrawn release is still pending")
+	}
+	if err := r.a.Schedule(rel, "a1"); !errors.Is(err, ErrRetired) {
+		t.Fatalf("withdrawn adoption scheduled again: %v", err)
+	}
+	// The withdrawal is also a drop: if the caller's own revert failed or
+	// was cut short (STOP, a cut before its journal), this settles it; the
+	// pipeline makes it a no-op when the revert ran (L3-1).
+	r.dropsAre("a1")
+	r.must(r.a.Withdraw("other", "owner")) // not held: nothing to give up, still dropped
+	if _, err := r.a.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.dropsAre("a1", "other")
+
+	r.must(r.a.Schedule(rel, "a2"))
+	var during error
+	r.act.onInstall = func() { during = r.a.Withdraw("a2", "owner") }
+	if ok, err := r.a.Tick(ctx); !ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if !errors.Is(during, ErrApplying) {
+		t.Fatalf("withdraw during the install: %v", during)
+	}
+	if err := r.a.Withdraw("a2", "owner"); !errors.Is(err, ErrApplying) {
+		t.Fatalf("withdraw before the restart settled: %v", err)
+	}
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	r.settledInstalledAs("a2")
+}
+
+// A withdrawal cut short before any Tick, its revert lost with the
+// process, is still settled by the next Tick (L3-1).
+func TestWithdrawDropSurvivesARestart(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.a.Withdraw("a1", "owner"))
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	if _, err := r.a.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.dropsAre("a1")
+}
+
+// settledInstalledAs: the release was installed and adoption confirmed.
+func (r *rig) settledInstalledAs(adoption string) {
+	r.t.Helper()
+	if in, _ := r.store.Installed(); in.Version != 1 || len(r.pipe.confirmed) != 1 || r.pipe.confirmed[0] != adoption {
+		r.t.Fatalf("installed %+v, pipeline %+v", in, r.pipe)
+	}
+}
+
+func TestPolicyDropSettlesTheAdoption(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.store.NoteAttestors(nil, nil))
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.dropsAre("a1")
+}
+
+func TestPolicyMovedAtStageSettlesTheAdoption(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.pol.atDispatch = func() { r.must(r.store.NoteAttestors(nil, nil)) }
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if len(r.act.installed) != 0 {
+		t.Fatal("installed")
+	}
+	r.dropsAre("a1")
+}
+
+// The pipeline is told only after a drop is saved: told first, a restart
+// could forget the drop and take the reverted adoption again
+// (SR3-4f-2b). Here Tick's narrowing drop meets a failing state store.
+func TestDropIsSavedBeforeThePipelineIsTold(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.store.NoteAttestors(nil, nil))
+	r.state.Fail = errIO
+	if ok, _ := r.a.Tick(context.Background()); ok {
+		t.Fatal("applied")
+	}
+	if d := r.drops(); len(d) != 0 {
+		t.Fatalf("pipeline told before the save: %q", d)
+	}
+	r.state.Fail = nil
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.dropsAre("a1")
+}
+
+func TestSupersedeSettlesTheOldAdoption(t *testing.T) {
+	r := newRig(t)
+	rel1 := r.release(1, true)
+	r.must(r.a.Schedule(rel1, "a1"))
+	r.must(r.a.Schedule(rel1, "a1")) // the same release again: kept
+	r.dropsAre()
+	r.must(r.a.Schedule(rel1, "a2")) // a new adoption of it
+	if d := r.saved().Dropped; len(d) != 1 || d[0] != "a1" {
+		t.Fatalf("obligation not saved: %q", d)
+	}
+	if err := r.a.Schedule(rel1, "a1"); !errors.Is(err, ErrRetired) {
+		t.Fatalf("dropped adoption scheduled again: %v", err)
+	}
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil || r.saved().Applying.Adoption != "a2" {
+		t.Fatalf("tick: %v %v, installed %v", ok, err, r.act.installed)
+	}
+	r.dropsAre("a1")
+}
+
+// A pending release saved before a process restart is not kept: New
+// retires its adoption and the next Tick settles it; the release is
+// scheduled again only under a new ID.
+func TestNewDropsASavedPendingRelease(t *testing.T) {
+	r := newRig(t)
+	rel := r.release(1, true)
+	r.must(r.a.Schedule(rel, "a1"))
+	r.restart()
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil || len(r.act.installed) != 0 {
+		t.Fatalf("tick: %v %v, installed %d", ok, err, len(r.act.installed))
+	}
+	r.dropsAre("a1")
+	if err := r.a.Schedule(rel, "a1"); !errors.Is(err, ErrRetired) {
+		t.Fatalf("schedule: %v", err)
+	}
+	r.must(r.a.Schedule(rel, "a2"))
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.dropsAre("a1")
+}
+
+func TestNotHandedAbandonAcrossRestartSettles(t *testing.T) {
+	ctx := context.Background()
+	// In the same boot the release is still pending: no settle, and the
+	// next Tick installs it (A5).
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.unrecordedAttempt()
+	if ok, err := r.a.Tick(ctx); !ok || err != nil || len(r.act.installed) != 2 {
+		t.Fatalf("same boot: %v %v, installed %d", ok, err, len(r.act.installed))
+	}
+	r.dropsAre()
+
+	// After a process restart nothing holds it: settled at once.
+	r = newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.unrecordedAttempt()
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	r.must(r.a.Resume(ctx))
+	r.dropsAre("a1")
+	if st := r.saved(); st.Applying != nil || st.Last == nil || st.Last.Kind != doneNotHanded {
+		t.Fatalf("settled as %+v", st.Last)
+	}
+}
+
+func TestUnrecordedBoundSettlesTheAdoption(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.act.onInstall = func() { r.state.Fail = errIO }
+	for i := 0; i < 5; i++ {
+		if ok, err := r.a.Tick(ctx); ok || err != nil {
+			t.Fatalf("tick %d: %v %v", i, ok, err)
+		}
+		r.state.Fail = nil
+	}
+	if len(r.act.installed) != 2 {
+		t.Fatalf("installs %d", len(r.act.installed))
+	}
+	r.dropsAre("a1")
+}
+
+func TestRefusedRefSettlesTheIncomingAdoption(t *testing.T) {
+	r, rel := twiceUnrecorded(t)
+	before := r.drops()
+	if err := r.a.Schedule(rel, "b1"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("schedule: %v", err)
+	}
+	if d := r.saved().Dropped; len(d) != 1 || d[0] != "b1" {
+		t.Fatalf("obligation not saved: %q", d)
+	}
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.dropsAre(append(before, "b1")...)
+	r.must(r.a.Retry(rel.Ref()))
+	r.must(r.a.Schedule(rel, "b2"))
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		t.Fatalf("tick after retry: %v %v", ok, err)
+	}
+	r.dropsAre(append(before, "b1")...)
+}
+
+func TestDropSettleFailureConverges(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.store.NoteAttestors(nil, nil))
+	r.pipe.dropErr = errIO
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if d := r.saved().Dropped; len(d) != 1 || d[0] != "a1" {
+		t.Fatalf("obligation: %q", d)
+	}
+	r.restart() // the obligation is durable
+	for i := 0; i < 2; i++ {
+		if ok, err := r.a.Tick(ctx); ok || err != nil {
+			t.Fatalf("tick: %v %v", ok, err)
+		}
+	}
+	r.dropsAre("a1", "a1")
+}
+
+// SR3-4f-2c: a security release whose attestor policy narrowed after the
+// install is not restarted into (SR3-6, UPD-8).
+func TestNarrowingAfterInstallIsNotRestarted(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.act.onInstall = func() { r.working = true } // holds the restart
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if pt := r.saved().Applying; pt == nil || !pt.Installed || !pt.Security {
+		t.Fatalf("not handed over: %+v", pt)
+	}
+	r.must(r.store.NoteAttestors(nil, nil))
+	r.working = false
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if r.act.restarts != 0 || r.act.abandoned != 1 || r.a.FellBack(1) {
+		t.Fatalf("activator %+v", r.act)
+	}
+	if st := r.saved(); st.Applying != nil || st.Last == nil || st.Last.Kind != doneNotHanded {
+		t.Fatalf("settled as %+v", st.Last)
+	}
+	if _, ok, _ := r.store.Staged(); ok {
+		t.Fatal("still staged")
+	}
+	r.dropsAre("a1")
+}
+
+// A process restart loses the held release, so a security fix handed over
+// before it cannot be judged again: it fails closed (SR3-4f-2c).
+func TestSecurityHandoverAfterAProcessRestartFailsClosed(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.act.onInstall = func() { r.working = true } // holds the restart
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.restart() // the broker restarts in the same boot
+	r.must(r.a.Resume(ctx))
+	r.working = false
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if r.act.restarts != 0 || r.act.abandoned != 1 || r.a.FellBack(1) {
+		t.Fatalf("activator %+v", r.act)
+	}
+	if st := r.saved(); st.Applying != nil || st.Last == nil || st.Last.Kind != doneNotHanded {
+		t.Fatalf("settled as %+v", st.Last)
+	}
+	r.dropsAre("a1")
+}
+
+// An ordinary release is restarted into after a narrowing: its restart
+// never rested on the attestors.
+func TestNarrowingAfterInstallKeepsAnOrdinaryRelease(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, false), "a1"))
+	r.clk.add(7 * time.Hour)
+	r.act.onInstall = func() { r.working = true }
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.must(r.store.NoteAttestors(nil, nil))
+	r.working = false
+	if ok, err := r.a.Tick(ctx); !ok || err != nil || r.act.abandoned != 0 {
+		t.Fatalf("tick: %v %v, activator %+v", ok, err, r.act)
+	}
+	r.dropsAre()
+}
+
+// REQ: UPD-1, UPD-8, OP-4, OP-5
+//
+// SR3-4f-3a: a security recheck that fails an adoption whose release the
+// activator already took withdraws it in the boot it was handed over in:
+// Abandon, DropStaged, then Applying cleared. Only a security failure
+// withdraws; an owner UNDO or a regression revert keeps the refusal, and
+// so does an install in flight or a new boot.
+
+// installedHeld schedules release 1 (security when security is set) for
+// adoption a1 and installs it, holding the restart.
+func installedHeld(t *testing.T, security bool) *rig {
+	t.Helper()
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, security), "a1"))
+	if !security {
+		r.clk.add(7 * time.Hour) // past the jitter
+	}
+	r.act.onInstall = func() { r.working = true } // holds the restart
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if pt := r.saved().Applying; pt == nil || !pt.Installed {
+		t.Fatalf("not handed over: %+v", pt)
+	}
+	r.act.onInstall = nil
+	return r
+}
+
+// withdrawn: the handover was undone and the adoption dropped, with no
+// fallback recorded and nothing restarted into.
+func (r *rig) withdrawn() {
+	r.t.Helper()
+	if r.act.restarts != 0 || r.act.abandoned != 1 || r.a.FellBack(1) {
+		r.t.Fatalf("activator %+v, fell back %v", r.act, r.a.FellBack(1))
+	}
+	if st := r.saved(); st.Applying != nil || st.Last == nil || st.Last.Kind != doneNotHanded {
+		r.t.Fatalf("settled as %+v, applying %+v", st.Last, st.Applying)
+	}
+	if _, ok, _ := r.store.Staged(); ok {
+		r.t.Fatal("still staged")
+	}
+	if in, _ := r.store.Installed(); in.Version == 1 {
+		r.t.Fatal("committed")
+	}
+	r.working = false
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil || r.act.restarts != 0 {
+		r.t.Fatalf("tick: %v %v, restarts %d", ok, err, r.act.restarts)
+	}
+	r.dropsAre("a1")
+	if err := r.a.Schedule(r.release(1, true), "a1"); !errors.Is(err, ErrRetired) {
+		r.t.Fatalf("withdrawn adoption scheduled again: %v", err)
+	}
+}
+
+func TestSecurityRecheckWithdrawsAnInstalledImage(t *testing.T) {
+	for name, security := range map[string]bool{"security fix": true, "ordinary": false} {
+		t.Run(name, func(t *testing.T) {
+			r := installedHeld(t, security)
+			r.must(r.recheck("a1"))
+			r.withdrawn()
+		})
+	}
+}
+
+// starts: err is the handover refusal, and says whether the image may
+// start before it is undone.
+func starts(t *testing.T, err error) bool {
+	t.Helper()
+	var h interface {
+		Handover() bool
+		Starts() bool
+	}
+	if !errors.Is(err, ErrApplying) || !errors.As(err, &h) || !h.Handover() {
+		t.Fatalf("not a handover refusal: %v", err)
+	}
+	return h.Starts()
+}
+
+const (
+	wontStart = "Update 1 failed a security check; I will not start it. Nothing is needed from you."
+	mayStart  = "Update 1 failed a security check while it was being installed; it may start before I can undo it. Nothing is needed from you."
+)
+
+// REQ: UPD-1, UPD-8, OP-4, OP-5
+//
+// SR3-4f-3 B2: from the save before the install until Installed is
+// saved, the applier is executing. A security withdraw then is refused,
+// but recorded: Execute saves the point as withdrawing, and the same Tick
+// abandons it instead of restarting into it, though the box is free.
+// Mutant: drop the Withdrawing set in Execute, and the Tick restarts.
+func TestSecurityWithdrawDuringInstallNeverBoots(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	var during error
+	var status string
+	r.act.onInstall = func() {
+		during = r.a.Withdraw("a1", WhySecurity)
+		status = r.a.Status()
+	}
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if starts(t, during) || status != wontStart {
+		t.Fatalf("withdraw during the install: %v, status %q", during, status)
+	}
+	if r.act.boot.UsrRootHash != strings.Repeat(oldHash, 32) {
+		t.Fatalf("booted %+v", r.act.boot)
+	}
+	r.act.onInstall = nil
+	r.withdrawn()
+}
+
+// The refusal is saved with the handover: when the same Tick's withdraw
+// fails, then the broker restarts in the same boot, an ordinary release
+// is still not restarted into.
+// Mutant: drop the Withdrawing set in Execute, and the Tick restarts.
+func TestSecurityWithdrawDuringInstallSurvivesAProcessRestart(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, false), "a1"))
+	r.clk.add(7 * time.Hour) // past the jitter
+	var during error
+	r.act.onInstall = func() {
+		r.act.abandonErr = errIO // the same Tick's withdraw fails
+		during = r.a.Withdraw("a1", WhySecurity)
+	}
+	if ok, err := r.a.Tick(context.Background()); ok || !errors.Is(err, errIO) || starts(t, during) {
+		t.Fatalf("tick: %v %v, withdraw %v", ok, err, during)
+	}
+	r.act.onInstall, r.act.abandonErr = nil, nil
+	if pt := r.saved().Applying; pt == nil || !pt.Installed || !pt.Withdrawing {
+		t.Fatalf("applying %+v", pt)
+	}
+	r.restart()
+	r.must(r.a.Resume(context.Background()))
+	r.working = false
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.withdrawn()
+}
+
+// B3: a handover Execute could not record (not installed, not executing)
+// is refused with no Abandon; the next Tick's Resume abandons it, and
+// its release is dropped rather than installed again.
+// Mutant: drop !pt.Installed from the refusal, and the withdraw abandons
+// at once; drop the refused adoption from Tick's drop, and it reinstalls.
+func TestSecurityWithdrawOfAnUnrecordedHandoverIsRefused(t *testing.T) {
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.act.onInstall = func() { r.state.Fail, r.act.abandonErr = errIO, errIO }
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.state.Fail, r.act.abandonErr, r.act.onInstall = nil, nil, nil
+	if pt := r.a.st.Applying; pt == nil || pt.Installed {
+		t.Fatalf("in memory: %+v", pt)
+	}
+	if err := r.a.Withdraw("a1", WhySecurity); starts(t, err) || r.act.abandoned != 0 {
+		t.Fatalf("withdraw: %v, activator %+v", err, r.act)
+	}
+	if got := r.a.Status(); got != wontStart {
+		t.Fatalf("status: %q", got)
+	}
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil || len(r.act.installed) != 1 {
+		t.Fatalf("tick: %v %v, activator %+v", ok, err, r.act)
+	}
+	r.withdrawn()
+}
+
+// B1: the restart is decided under the lock, after Booted and after the
+// busy check. A withdraw that lands in either gap wins: no restart.
+// Mutant: drop either recheck, and the Tick restarts into the image.
+func TestWithdrawRacingTheRestartIsNotRestartedInto(t *testing.T) {
+	for name, gap := range map[string]func(r *rig, f func()){
+		"booted": func(r *rig, f func()) { r.act.onBooted = f },
+		"busy":   func(r *rig, f func()) { r.atBusy = f },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := installedHeld(t, false)
+			r.working = false
+			var during error
+			gap(r, func() { during = r.a.Withdraw("a1", WhySecurity) })
+			if ok, err := r.a.Tick(context.Background()); ok || err != nil || during != nil {
+				t.Fatalf("tick: %v %v, withdraw %v", ok, err, during)
+			}
+			r.withdrawn()
+		})
+	}
+}
+
+// B1: once the restart is decided, a withdraw is refused as one that may
+// start the image, and the status says so; it is not abandoned under the
+// restart. Mutant: drop the restarting check, and it abandons.
+func TestWithdrawDuringTheRestartIsRefused(t *testing.T) {
+	r := installedHeld(t, false)
+	r.working = false
+	var during error
+	var status string
+	r.act.onRestart = func() {
+		during = r.a.Withdraw("a1", WhySecurity)
+		status = r.a.Status()
+	}
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if !starts(t, during) || status != mayStart || r.act.abandoned != 0 || r.act.restarts != 1 {
+		t.Fatalf("withdraw: %v, status %q, activator %+v", during, status, r.act)
+	}
+}
+
+// B1: a failed restart lifts the refusal, and the next withdraw undoes
+// the handover. Mutant: keep restarting set, and it is refused.
+func TestFailedRestartAllowsTheWithdraw(t *testing.T) {
+	r := installedHeld(t, false)
+	r.working = false
+	r.act.restartErr = errIO
+	if _, err := r.a.Tick(context.Background()); !errors.Is(err, errIO) {
+		t.Fatalf("tick: %v", err)
+	}
+	r.act.restartErr = nil
+	r.working = true
+	r.must(r.recheck("a1"))
+	r.withdrawn()
+}
+
+// B2: a withdraw refused because the boot could not be read may start
+// the image, and says so; the refusal is recorded, so the next Tick
+// abandons it instead of restarting.
+// Mutant: drop the refused adoption from staleLocked, and it restarts.
+func TestWithdrawRefusedOnAnUnreadBootIsNotRestartedInto(t *testing.T) {
+	r := installedHeld(t, false)
+	r.act.bootedErr = errIO
+	if err := r.a.Withdraw("a1", WhySecurity); !starts(t, err) || r.act.abandoned != 0 {
+		t.Fatalf("withdraw: %v, activator %+v", err, r.act)
+	}
+	if got := r.a.Status(); got != mayStart {
+		t.Fatalf("status: %q", got)
+	}
+	r.act.bootedErr = nil
+	r.working = false
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.withdrawn()
+}
+
+// LATER (c), pinned: once the withdraw is durable, a withdraw for any
+// reason finishes it. Mutant: drop !pt.Withdrawing from the why check.
+func TestAnyWithdrawFinishesAMarkedOne(t *testing.T) {
+	r := installedHeld(t, false)
+	r.act.abandonErr = errIO
+	if err := r.a.Withdraw("a1", WhySecurity); starts(t, err) {
+		t.Fatalf("withdraw: %v", err)
+	}
+	r.act.abandonErr = nil
+	r.must(r.a.Withdraw("a1", "owner"))
+	r.withdrawn()
+}
+
+// A failed Abandon clears nothing and is reported; the durable flag keeps
+// the restart from booting the image, across a process restart, until a
+// later Tick completes the withdraw. An ordinary release past its jitter
+// shows it is the flag, not the policy check, that holds the restart.
+func TestWithdrawAbandonFailureKeepsTheImageFromBooting(t *testing.T) {
+	r := installedHeld(t, false)
+	ctx := context.Background()
+	r.act.abandonErr = errIO
+	err := r.a.Withdraw("a1", WhySecurity)
+	if !errors.Is(err, ErrApplying) || !errors.Is(err, errIO) {
+		t.Fatalf("withdraw with Abandon failing: %v", err)
+	}
+	if pt := r.saved().Applying; pt == nil || !pt.Installed || !pt.Withdrawing {
+		t.Fatalf("applying %+v", pt)
+	}
+	r.working = false
+	if ok, err := r.a.Tick(ctx); ok || !errors.Is(err, errIO) || r.act.restarts != 0 {
+		t.Fatalf("tick: %v %v, restarts %d", ok, err, r.act.restarts)
+	}
+	r.restart() // the broker restarts in the same boot
+	r.must(r.a.Resume(ctx))
+	if ok, err := r.a.Tick(ctx); ok || !errors.Is(err, errIO) || r.act.restarts != 0 {
+		t.Fatalf("tick after a process restart: %v %v, restarts %d", ok, err, r.act.restarts)
+	}
+	if got := r.a.Status(); got != "Update 1 failed a security check; I will not start it. Nothing is needed from you." {
+		t.Fatalf("status: %q", got)
+	}
+	r.act.abandonErr = nil
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.withdrawn()
+}
+
+// Abandon took, the save after it failed, and the box rebooted into the
+// old root: that is the withdraw finishing, not a fallback.
+func TestHalfWithdrawnThenOldRootIsNotAFallback(t *testing.T) {
+	r := installedHeld(t, true)
+	ctx := context.Background()
+	r.act.onAbandon = func() { r.state.Fail = errIO }
+	err := r.a.Withdraw("a1", WhySecurity)
+	r.state.Fail = nil
+	if !errors.Is(err, ErrApplying) || !errors.Is(err, errIO) || r.act.abandoned != 1 {
+		t.Fatalf("withdraw with the save failing: %v, activator %+v", err, r.act)
+	}
+	if pt := r.saved().Applying; pt == nil || !pt.Withdrawing {
+		t.Fatalf("applying %+v", pt)
+	}
+	r.bootOldRoot()
+	r.must(r.a.Resume(ctx))
+	if st := r.saved(); st.Applying != nil || st.Last == nil || st.Last.Kind != doneNotHanded || r.a.FellBack(1) {
+		t.Fatalf("settled as %+v, fell back %v", st.Last, r.a.FellBack(1))
+	}
+	for _, c := range r.pipe.calls {
+		if strings.HasPrefix(c, "fail ") || strings.HasPrefix(c, "confirm ") {
+			t.Fatalf("pipeline: %q", r.pipe.calls)
+		}
+	}
+	r.dropsAre("a1")
+}
+
+// Only a security failure withdraws an installed image: an owner UNDO and
+// a regression revert are still refused, as is any reason in a new boot.
+// Mutant: drop the why check, and the owner's UNDO abandons the image.
+func TestOwnerUndoStillRefusedAfterInstall(t *testing.T) {
+	r := installedHeld(t, true)
+	ctx := context.Background()
+	for _, why := range []string{"owner", "regression", ""} {
+		var h interface{ Handover() bool }
+		if err := r.a.Withdraw("a1", why); !errors.Is(err, ErrApplying) || !errors.As(err, &h) {
+			t.Fatalf("withdraw for %q: %v", why, err)
+		}
+	}
+	if pt := r.saved().Applying; r.act.abandoned != 0 || pt == nil || pt.Withdrawing {
+		t.Fatalf("activator %+v, applying %+v", r.act, pt)
+	}
+	r.working = false
+	if ok, err := r.a.Tick(ctx); !ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if err := r.a.Withdraw("a1", WhySecurity); !starts(t, err) || r.act.abandoned != 0 {
+		t.Fatalf("withdraw in the new boot: %v, activator %+v", err, r.act)
+	}
+	if got := r.a.Status(); got != mayStart {
+		t.Fatalf("status in the new boot: %q", got)
+	}
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	r.settledInstalledAs("a1")
+}
+
+// REQ: UPD-1, OP-5
+//
+// SR3-4f-3c: a withdraw that races the confirm (the adoption confirmed
+// after the applier dropped it) gets a permanent refusal from
+// StageDropped, and the obligation is cleared rather than retried on
+// every Tick.
+func TestPermanentDropRefusalIsCleared(t *testing.T) {
+	r, _ := handedOver(t, false)
+	ctx := context.Background()
+	r.must(r.a.Resume(ctx))
+	r.settledInstalledAs("a1")
+	r.must(r.a.Withdraw("a1", "owner")) // the race: dropped after the confirm
+	for i := 0; i < 3; i++ {
+		if _, err := r.a.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.dropsAre("a1")
+}
+
+// A transient refusal still stays for the next settle.
+func TestTransientDropRefusalStays(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.must(r.a.Withdraw("a1", "owner"))
+	r.pipe.dropErr = errIO
+	if _, err := r.a.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if d := r.saved().Dropped; len(d) != 1 {
+		t.Fatalf("obligations: %q", d)
+	}
+	if _, err := r.a.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.dropsAre("a1", "a1")
+}
+
+// apply's WhySecurity is the pipeline's.
+func TestWhySecurityMatchesThePipeline(t *testing.T) {
+	if WhySecurity != change.WhySecurity {
+		t.Fatalf("%q != %q", WhySecurity, change.WhySecurity)
 	}
 }

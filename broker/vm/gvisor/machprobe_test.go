@@ -16,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/budget"
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/quota"
 	"github.com/ghbmrk/agentos/broker/quota/quotatest"
@@ -31,7 +32,7 @@ import (
 // tamperIn is an Attempt that runs the tamper script in machine id.
 func (r *rig) tamperIn(id string) func(context.Context, string, []string) (string, error) {
 	return func(ctx context.Context, nonce string, paths []string) (string, error) {
-		out, err := r.rt.cmd(ctx, append([]string{"exec", cid(id), "/guest", "tamper", nonce}, paths...)...).Output()
+		out, err := r.rt.cmd(ctx, childproc.Options{}, append([]string{"exec", cid(id), "/guest", "tamper", nonce}, paths...)...).Output()
 		if err != nil {
 			return "", fmt.Errorf("tamper script: %v", err)
 		}
@@ -196,12 +197,12 @@ func (r *rig) pressFor(hold time.Duration, brief ...string) func(context.Context
 	return func(ctx context.Context, id string, kinds []string) error {
 		for _, k := range kinds {
 			if slices.Contains(brief, k) {
-				if out, err := r.rt.cmd(ctx, "exec", cid(id), "/guest", "press", k, "1").CombinedOutput(); err != nil {
+				if out, err := r.rt.cmd(ctx, childproc.Options{}, "exec", cid(id), "/guest", "press", k, "1").CombinedOutput(); err != nil {
 					return fmt.Errorf("press %s: %v: %s", k, err, out)
 				}
 				continue
 			}
-			c := r.rt.cmd(context.Background(), "exec", cid(id), "/guest", "press", k, fmt.Sprint((hold + 5*time.Second).Milliseconds()))
+			c := r.rt.cmd(context.Background(), childproc.Options{}, "exec", cid(id), "/guest", "press", k, fmt.Sprint((hold + 5*time.Second).Milliseconds()))
 			if err := c.Start(); err != nil {
 				return err
 			}
@@ -267,7 +268,9 @@ func (r *rig) logRise(t *testing.T, q *quota.FS, p *loops.ExhaustProbe, name str
 // exit at once, and ones where only the CPU press or only the memory
 // press exits at once each fail the round, the last two on that counter
 // alone (P3-4b-4c-fresh; B1 on #599); a cgroup with memory.max and
-// pids.max at "max" reports both above budget.
+// pids.max at "max" reports both above budget, pids.max's as the
+// sandbox's threads, which is what it bounds under gVisor (RES-2;
+// P3-4b-4c-pids).
 func TestIntegrationExhaustionProbeInAGuest(t *testing.T) {
 	if os.Getenv("AGENTOS_RUNSC") == "" || os.Geteuid() != 0 {
 		t.Skip("set AGENTOS_RUNSC to a runsc binary and run as root (CI integration job)")
@@ -347,7 +350,7 @@ func TestIntegrationExhaustionProbeInAGuest(t *testing.T) {
 	if err != nil || len(res.Found) != 2 {
 		t.Fatalf("control round: %+v %v", res, err)
 	}
-	for i, k := range []string{"memory", "processes"} {
+	for i, k := range []string{"memory", "sandbox threads"} {
 		if !same(res.Found[i], loops.CheckExhaust, k, "above budget") {
 			t.Fatalf("control round found %+v, want %s above budget", res.Found[i], k)
 		}

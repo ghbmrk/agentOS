@@ -1,6 +1,7 @@
 package owner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -83,12 +84,20 @@ func (w watchedLine) SendRequest(to, text string) error {
 	return err
 }
 
-// sendRequest texts the owner an approval request.
+// sendRequest texts the owner an approval request. Grants paces these,
+// so the owner never holds one, but a sent one counts toward the hour
+// (CH-15).
 func (c *Channel) sendRequest(text string) error {
+	var err error
 	if rs, ok := c.cfg.Modem.(RequestSender); ok {
-		return rs.SendRequest(c.cfg.Owner, text)
+		err = rs.SendRequest(c.cfg.Owner, text)
+	} else {
+		err = c.cfg.Modem.Send(c.cfg.Owner, text)
 	}
-	return c.cfg.Modem.Send(c.cfg.Owner, text)
+	if err == nil {
+		c.countSent()
+	}
+	return err
 }
 
 // QueueResult says what happened to a reply.
@@ -142,7 +151,8 @@ func (c *Channel) QueueAutoReply(ar AutoReply) (QueueResult, error) {
 	text := fmt.Sprintf("Auto-reply to %s: \"%s\". Sends %s. Reply UNDO %s to stop it.",
 		field(to, 40), field(firstLine(ar.Body), 60), q.SendAt.In(c.cfg.Location).Format("15:04"), id)
 	c.mu.Unlock()
-	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
+	// Not held (grants paces auto-replies), but counted (CH-15).
+	if err := c.sendCounted(text); err != nil {
 		c.mu.Lock()
 		delete(c.queued, id)
 		c.retireLocked(id, now)
@@ -204,15 +214,16 @@ const ResumeWindow = 2 * time.Minute
 // undoLocked cancels a queued reply or held effect that has not been
 // released (CH-16), whatever the clock: one that STOP kept past its window
 // has still not run (UX-76-1). Its item is decided as denied with Why
-// "undo"; a held effect's decision names its Hold.
-func (c *Channel) undoLocked(id string, now time.Time, decided *[]Decision) string {
+// "undo"; a held effect's decision names its Hold. held is false, and
+// the reply empty, for an ID the channel does not hold (SetUndo's hook).
+func (c *Channel) undoLocked(id string, now time.Time, decided *[]Decision) (reply string, held bool) {
 	q := c.queued[id]
 	if q == nil {
 		if _, ok := c.released[id]; ok {
 			c.lateUndo[id] = true
-			return fmt.Sprintf("%s is past its undo window; it was released.", id)
+			return fmt.Sprintf("%s is past its undo window; it was released.", id), true
 		}
-		return fmt.Sprintf("Nothing to undo for %s.", id)
+		return "", false
 	}
 	delete(c.queued, id)
 	c.retireLocked(id, now)
@@ -222,9 +233,36 @@ func (c *Channel) undoLocked(id string, now time.Time, decided *[]Decision) stri
 	}
 	*decided = append(*decided, d)
 	if q.Held {
-		return fmt.Sprintf("Cancelled %s. It did not run.", id)
+		return fmt.Sprintf("Cancelled %s. It did not run.", id), true
 	}
-	return fmt.Sprintf("Cancelled %s. The reply was not sent.", id)
+	return fmt.Sprintf("Cancelled %s. The reply was not sent.", id), true
+}
+
+// UndoHook answers an UNDO for an ID the channel does not hold, such as a
+// digest line's (the mail adapter's organize UNDO, ADP-2). ok is false
+// when the ID is not the hook's either. It runs outside the channel's
+// lock and may call back into the channel.
+type UndoHook func(ctx context.Context, id string) (reply string, ok bool)
+
+// SetUndo sets the hook UNDO consults when undoLocked reports a miss; nil
+// removes it. Only that bool routes an UNDO: no reply's wording does, and
+// a queued or released ID never reaches the hook.
+func (c *Channel) SetUndo(h UndoHook) {
+	if h == nil {
+		c.undo.Store(nil)
+		return
+	}
+	c.undo.Store(&h)
+}
+
+// undoElsewhere is an UNDO the channel missed, given to the hook.
+func (c *Channel) undoElsewhere(ctx context.Context, id string) string {
+	if h := c.undo.Load(); h != nil {
+		if out, ok := (*h)(ctx, id); ok {
+			return out
+		}
+	}
+	return fmt.Sprintf("Nothing to undo for %s.", id)
 }
 
 // rewindowLocked gives every queued reply and held effect due within

@@ -41,6 +41,9 @@ def violations(root):
             out.append("etc/agentos: owner configuration; written at onboarding only")
         elif d == "var/lib/agentos" and p.is_dir() and any(p.iterdir()):
             out.append("var/lib/agentos: broker state; must be empty")
+    # LOOP-7's state: agentosd creates it on the box and gives it to the fuzz user (agentosd L7-6).
+    if os.path.lexists(root / "var/lib/agentos-fuzz"):
+        out.append("var/lib/agentos-fuzz: fuzz state; created on the box, never shipped")
     for dirpath, dirnames, filenames in os.walk(root):
         for n in dirnames + filenames:
             p = os.path.join(dirpath, n)

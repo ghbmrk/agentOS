@@ -19,6 +19,9 @@ const (
 	WhyRegression = "regression"
 	WhySecurity   = "security"
 	WhyFallback   = "fallback" // a staged image did not boot cleanly
+	// WhyDropped: the update applier dropped a staged image before it
+	// was installed (SR3-4f-2b).
+	WhyDropped = "dropped"
 	// WhySettings: the owner's own configuration replaced the adopted
 	// state outside the pipeline (Superseded); never an intent ID.
 	WhySettings = "settings"
@@ -75,7 +78,7 @@ func (p *Pipeline) Check(_ context.Context, _ journal.Phase, in journal.Intent) 
 		}
 		switch {
 		case in.Action == ActionRevert && in.Origin == OriginOwner && parts[4] == WhyOwner:
-		case in.Action == ActionRevertAuto && in.Origin == OriginPipeline && (parts[4] == WhyRegression || parts[4] == WhySecurity || parts[4] == WhyFallback):
+		case in.Action == ActionRevertAuto && in.Origin == OriginPipeline && (parts[4] == WhyRegression || parts[4] == WhySecurity || parts[4] == WhyFallback || parts[4] == WhyDropped):
 		default:
 			return errors.New("change: only the owner or the pipeline reverts")
 		}
@@ -331,8 +334,11 @@ func (p *Pipeline) revertLocked(id, why string) error {
 	if a == nil || a.Reverted != "" {
 		return errors.New("no active adoption " + id)
 	}
-	if err := unsettled(a, why); err != nil {
-		return err
+	if p.unsettledLocked(a, why) {
+		return unsettledErr(a)
+	}
+	if why == WhyDropped && a.WithdrawnFor != "" {
+		why = a.WithdrawnFor // the revert that withdrew it, cut short
 	}
 	next, err := p.undoTreeLocked(a)
 	if err != nil {
@@ -369,16 +375,62 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		p.mu.Unlock()
 		return fmt.Errorf("change: %s is not an active adoption", ref)
 	}
-	id := a.ID
-	if err := unsettled(a, why); err != nil {
+	id, w := a.ID, p.withdrawer
+	withdraw := p.unsettledLocked(a, why)
+	if withdraw && w == nil {
 		p.mu.Unlock()
-		return err
+		return unsettledErr(a) // no applier to ask: fail closed
 	}
-	if _, err := p.undoTreeLocked(a); err != nil {
-		p.mu.Unlock()
-		return err
+	next, err := p.undoTreeLocked(a)
+	if err == nil && withdraw {
+		// Checked before the applier gives the release up, so a revert
+		// that cannot run does not withdraw it.
+		if ns := emptiedSlot(a, next); ns != "" {
+			err = fmt.Errorf("undoing %s would leave %s with nothing to boot; install another version instead", a.Short, ns)
+		}
 	}
+	prev := a.WithdrawnFor // what a refused withdrawal restores
+	if err == nil && withdraw && a.WithdrawnFor != why {
+		// Saved before the applier is asked: if this revert is cut short
+		// after the withdrawal, the drop that settles it keeps its why.
+		a.WithdrawnFor = why
+		if err = p.saveLocked(); err != nil {
+			a.WithdrawnFor = prev
+		}
+	}
+	v := safe(strings.TrimPrefix(a.Origin, "update:"))
 	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if withdraw {
+		// Never under p.mu: the applier holds its lock while it calls
+		// StageFailed and StageDropped (lock order applier, then
+		// pipeline).
+		if err := w.Withdraw(id, why); err != nil {
+			if handover(err) {
+				// The applier changed nothing: the mark goes back to what
+				// it was, a first revert's or none. A refused security
+				// withdrawal is kept by the applier, which withdraws the
+				// image itself once it can (SR3-4f-3 B2): with no first
+				// revert, its drop stays the security revert.
+				if why != WhySecurity || prev != "" {
+					p.unwithdraw(id, prev)
+				}
+				return installingErr{v: v, starts: startsFirst(err)}
+			}
+			// Any other error may follow the applier's saved withdrawal
+			// (a store that fails after its rename): the mark stays, so a
+			// drop is never taken for one Loop 3 offers again (C31).
+			return fmt.Errorf("change: withdrawing update %s: %w", v, err)
+		}
+		p.mu.Lock()
+		if p.withdrawn == nil {
+			p.withdrawn = map[string]bool{}
+		}
+		p.withdrawn[id] = true
+		p.mu.Unlock()
+	}
 	n, err := p.nonce()
 	if err != nil {
 		return err
@@ -387,20 +439,111 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 	if origin == OriginPipeline {
 		action = ActionRevertAuto // not narrowing: held by STOP like other automation
 	}
-	return p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:%s:revert:%s:%s", id, n, why), Origin: origin,
+	err = p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:%s:revert:%s:%s", id, n, why), Origin: origin,
 		Account: journal.BrokerAccount, Action: action, Executor: Executor,
 		Params: map[string]any{"adoption": id, "why": why}})
-}
-
-// unsettled refuses to undo a staged image for any reason but its own
-// fallback: until the update code settles it, the image may already be
-// installed, and an adoption undone under it could never be confirmed, so
-// the applier would wait forever (SR3-4). The owner can undo it once it
-// has started.
-func unsettled(a *Adoption, why string) error {
-	if !a.Staged || why == WhyFallback {
+	if err != nil && withdraw && p.revertedByID(id) {
+		// The withdrawal is also a drop, and the applier's StageDropped
+		// reverted it first: the owner's undo is done (SR3-4f-2 L3-1).
 		return nil
 	}
+	return err
+}
+
+// installingErr: the applier refused to withdraw update v while it is
+// being installed. Its Handover method lets Recheck tell it apart;
+// starts: the image may start before it is undone.
+type installingErr struct {
+	v      string
+	starts bool
+}
+
+func (e installingErr) Error() string {
+	return "Update " + e.v + " is being installed; undo it after it starts."
+}
+func (installingErr) Handover() bool { return true }
+func (e installingErr) Starts() bool { return e.starts }
+
+// startsFirst: err says the image may start before it is undone
+// (SR3-4f-3 B5). Without a Starts method it may.
+func startsFirst(err error) bool {
+	var s interface{ Starts() bool }
+	return !errors.As(err, &s) || s.Starts()
+}
+
+// unwithdraw restores the why saved before a withdrawal the applier
+// refused in its handover window to prev, its value before that revert:
+// a first revert's why stays, and with none a later drop is a drop. If
+// the save fails the newer why stays: the release is then not offered
+// again after a drop, which errs toward the revert the owner or Recheck
+// asked.
+func (p *Pipeline) unwithdraw(id, prev string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.adoptionByIDLocked(id); a != nil && a.Reverted == "" && a.WithdrawnFor != prev {
+		cur := a.WithdrawnFor
+		a.WithdrawnFor = prev
+		if p.saveLocked() != nil {
+			a.WithdrawnFor = cur
+		}
+	}
+}
+
+// revertedByID: adoption id exists and is reverted.
+func (p *Pipeline) revertedByID(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.adoptionByIDLocked(id)
+	return a != nil && a.Reverted != ""
+}
+
+// Withdrawer is the update applier as the pipeline sees it (SR3-4f-2a).
+// Withdraw gives up a staged adoption's release before it is installed,
+// durably, and refuses it from then on; it returns nil for an adoption
+// the applier does not hold. While the release is being installed, from
+// the save before the install until the boot after it settles, it
+// returns an error whose Handover method reports true.
+type Withdrawer interface {
+	Withdraw(adoption, why string) error
+}
+
+// ErrNotStaged: StageFailed or StageDropped named an adoption that is not
+// staged, confirmed or unknown. It is permanent: the same call is refused
+// again (SR3-4f-3c).
+var ErrNotStaged error = notStaged{}
+
+type notStaged struct{}
+
+func (notStaged) Error() string   { return "not a staged adoption" }
+func (notStaged) Permanent() bool { return true }
+
+// SetWithdrawer sets the update applier the pipeline asks before it
+// undoes a staged image. Without one, a staged image is not undone until
+// it settles.
+func (p *Pipeline) SetWithdrawer(w Withdrawer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.withdrawer = w
+}
+
+// handover reports whether a Withdraw error says the release is being
+// installed.
+func handover(err error) bool {
+	var h interface{ Handover() bool }
+	return errors.As(err, &h) && h.Handover()
+}
+
+// unsettledLocked reports whether a staged image must be withdrawn from
+// the update applier before it is undone for why. Until the update code
+// settles it, the image may already be installed, and an adoption undone
+// under it could never be confirmed, so the applier would wait forever
+// (SR3-4). Its own settling (a fallback, a drop) needs no withdraw.
+func (p *Pipeline) unsettledLocked(a *Adoption, why string) bool {
+	return a.Staged && why != WhyFallback && why != WhyDropped && !p.withdrawn[a.ID]
+}
+
+// unsettledErr is the refusal when no applier can withdraw the image.
+func unsettledErr(a *Adoption) error {
 	return errors.New("Update " + safe(strings.TrimPrefix(a.Origin, "update:")) + " starts at the next restart; undo it after.")
 }
 
@@ -434,12 +577,24 @@ func (p *Pipeline) ConfirmStaged(id string) error {
 // owner, is a success that changes nothing, so the update code can retry
 // (SR3-4); a confirmed image never fell back.
 func (p *Pipeline) StageFailed(ctx context.Context, id string) error {
+	return p.settleStaged(ctx, id, WhyFallback)
+}
+
+// StageDropped reverts a staged image the update applier dropped before
+// it was installed: a narrowed policy, a newer release, a release it
+// refuses (SR3-4f-2b). Like StageFailed it is idempotent by the exact ID,
+// and a confirmed or unknown image is the permanent ErrNotStaged.
+func (p *Pipeline) StageDropped(ctx context.Context, id string) error {
+	return p.settleStaged(ctx, id, WhyDropped)
+}
+
+func (p *Pipeline) settleStaged(ctx context.Context, id, why string) error {
 	p.mu.Lock()
 	a := p.adoptionByIDLocked(id)
 	var err error
 	switch {
 	case a == nil || a.Confirmed || (!a.Staged && a.Reverted == ""):
-		err = fmt.Errorf("change: %s is not a staged adoption", id)
+		err = fmt.Errorf("change: %s is %w", id, ErrNotStaged)
 	case a.Reverted != "":
 		p.mu.Unlock()
 		return nil
@@ -448,7 +603,10 @@ func (p *Pipeline) StageFailed(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return p.revert(ctx, id, OriginPipeline, WhyFallback)
+	if err := p.revert(ctx, id, OriginPipeline, why); err != nil && !p.revertedByID(id) {
+		return err
+	}
+	return nil // reverted, by this call or one that raced it
 }
 
 // adoptionByIDLocked finds an adoption by its exact ID only.
@@ -639,12 +797,29 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 			if errors.Is(err, journal.ErrStopped) {
 				return out, err
 			}
+			if why == WhySecurity && handover(err) {
+				// The applier is installing it and withdraws it once it
+				// can; the next pass reverts it. Until then the digest
+				// says so (SR3-4f-3b).
+				p.concern(id, why, s, startsFirst(err))
+				continue
+			}
 			errs = append(errs, fmt.Errorf("%s: %w", id, err))
 			continue
 		}
 		out = append(out, id)
 	}
 	return out, errors.Join(errs...)
+}
+
+// concern records why, s and starts on adoption id once, and saves.
+func (p *Pipeline) concern(id, why string, s Score, starts bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.adoptionLocked(id); a != nil && a.Reverted == "" && a.Concern == "" {
+		a.Concern, a.ConcernScore, a.ConcernStarts = why, s, starts
+		_ = p.saveLocked()
+	}
 }
 
 // protected reports an image adoption the owner approved or that rests on

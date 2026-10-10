@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modemlink"
+	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
 
 // fakeDigestTransport answers each Deliver with out(n), n counting from 1.
@@ -47,6 +49,25 @@ type failStore struct{}
 
 func (failStore) Load() ([]byte, error) { return nil, errors.New("disk: unreadable") }
 func (failStore) Save([]byte) error     { return errors.New("disk: unreadable") }
+
+// keepRefStore refuses the next refuse saves that would drop ref from bytes
+// holding it, so the queue refuses that many forgets of ref (ErrRecovery)
+// while every other write goes through: a refusal with no batch in flight,
+// now that an unknown batch no longer refuses one (W5-Dc-r7).
+type keepRefStore struct {
+	change.MemStore
+	ref    string
+	refuse int
+}
+
+func (s *keepRefStore) Save(b []byte) error {
+	old, _ := s.MemStore.Load()
+	if s.refuse > 0 && strings.Contains(string(old), s.ref) && !strings.Contains(string(b), s.ref) {
+		s.refuse--
+		return errors.New("disk: refused")
+	}
+	return s.MemStore.Save(b)
+}
 
 // testSource is a DIG-1-shaped source: one pending generation until acked.
 type testSource struct {
@@ -89,6 +110,8 @@ type digestRig struct {
 	informs []string
 	d       *digestBox
 	reg     *capLines
+	// quiet, if set, is the owner's quiet hours (W5-Dc-r1b QH-7).
+	quiet func(time.Time) bool
 }
 
 // day0 is a Monday; the digest time is 08:00 UTC in these tests.
@@ -114,6 +137,7 @@ func (r *digestRig) make(sources map[string]digestqueue.Source) {
 		Queue: r.queue, State: r.state, Sources: sources, Transport: r.tr,
 		Inform: func(s string) error { r.informs = append(r.informs, s); return nil },
 		Now:    func() time.Time { return r.now }, Loc: time.UTC, Logf: r.t.Logf,
+		Quiet: func(t time.Time) bool { return r.quiet != nil && r.quiet(t) },
 	})
 	r.reg = &capLines{}
 	r.d.register(r.reg)
@@ -376,15 +400,15 @@ func TestDigestQueueUnavailable(t *testing.T) {
 }
 
 // A forget reaches the queue: a ready batch loses the forgotten snapshot,
-// and one in flight refuses, so the forget stays owed (CAP-3).
-// REQ: CAP-3
+// and an unknown one is redacted whole (W5-Dc-r7), so the forget is done.
+// REQ: CAP-3, CAP-3 (W5-Dc-r7 UF-3)
 func TestDigestForgetReachesTheQueue(t *testing.T) {
 	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
 	r := newDigestRig(t, &change.MemStore{}, map[string]digestqueue.Source{"notes": src})
 	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.OutcomeUnknown, "" }
 	r.at(0, 8, 0)
-	if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
-		t.Fatalf("in flight: %v", err)
+	if err := r.d.forget("owner:a"); err != nil {
+		t.Fatalf("unknown: %v", err)
 	}
 	src.gen, src.refs = 2, []string{"owner:b"}
 	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
@@ -468,8 +492,9 @@ func TestDigestForgetBeforeOpenPurgesOnOpen(t *testing.T) {
 // A forget the queue refused is kept in the digest's own state, so a
 // restart holds its ready batch from the first step, before the forget
 // owner asks again or even when it never does (its owed save failed)
-// (security B2' on #592).
-// REQ: CAP-3, OP-2
+// (security B2' on #592). The queue refuses through its store, once: the
+// open after the restart purges the reference, so the replay is done.
+// REQ: CAP-3, OP-2, CAP-3 (W5-Dc-r7 UF-3)
 func TestDigestRefusedForgetHoldsItsReadyBatchAfterARestart(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -480,13 +505,13 @@ func TestDigestRefusedForgetHoldsItsReadyBatchAfterARestart(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
 			srcs := map[string]digestqueue.Source{"notes": src}
-			r := newDigestRig(t, &change.MemStore{}, srcs)
+			r := newDigestRig(t, &keepRefStore{ref: "owner:a", refuse: 1}, srcs)
 			r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.OutcomeUnknown, "" }
 			r.at(0, 8, 0)
 			src.gen, src.lines = 2, []string{"Notes: task 4 finished; reply MORE 4 for it."}
 			r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
 			r.at(1, 8, 0)
-			if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
+			if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrRecovery) {
 				t.Fatalf("forget: %v", err)
 			}
 			n := len(r.tr.sent())
@@ -494,7 +519,7 @@ func TestDigestRefusedForgetHoldsItsReadyBatchAfterARestart(t *testing.T) {
 			r.boot(srcs)
 			r.at(1, 9, 0)
 			if tc.ask {
-				if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
+				if err := r.d.forget("owner:a"); err != nil {
 					t.Fatalf("forget after restart: %v", err)
 				}
 			}
@@ -535,18 +560,18 @@ func TestDigestForgetBeforeOpenSurvivesARestart(t *testing.T) {
 	}
 }
 
-// A ready batch holding a reference the queue refused to forget (another
-// batch holding it is unknown) is not sent while that forget is owed.
-// REQ: CAP-3, OP-2
+// A ready batch holding a reference the queue refused to forget (its store
+// refused the forget's save) is not sent: the reopen purges it first.
+// REQ: CAP-3, OP-2, CAP-3 (W5-Dc-r7 UF-3)
 func TestDigestRefusedForgetHoldsItsReadyBatch(t *testing.T) {
 	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
-	r := newDigestRig(t, &change.MemStore{}, map[string]digestqueue.Source{"notes": src})
+	r := newDigestRig(t, &keepRefStore{ref: "owner:a", refuse: 1}, map[string]digestqueue.Source{"notes": src})
 	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.OutcomeUnknown, "" }
 	r.at(0, 8, 0)
 	src.gen, src.lines = 2, []string{"Notes: task 4 finished; reply MORE 4 for it."}
 	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
 	r.at(1, 8, 0)
-	if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrInFlight) {
+	if err := r.d.forget("owner:a"); !errors.Is(err, digestqueue.ErrRecovery) {
 		t.Fatalf("forget: %v", err)
 	}
 	n := len(r.tr.sent())
@@ -555,6 +580,75 @@ func TestDigestRefusedForgetHoldsItsReadyBatch(t *testing.T) {
 	for _, s := range r.tr.sent()[n:] {
 		if strings.Contains(s, src.lines[0]) {
 			t.Fatalf("batch of a refused forget sent: %q", s)
+		}
+	}
+}
+
+// A ready batch holding a reference whose forget is held is not sent. No
+// queue refusal reaches this with the queue open now that an unknown batch
+// no longer refuses (W5-Dc-r7), so the hold is set directly.
+// REQ: CAP-3, OP-2, CAP-3 (W5-Dc-r7 UF-3)
+func TestDigestHeldForgetKeepsItsReadyBatchUnsent(t *testing.T) {
+	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
+	r := newDigestRig(t, &change.MemStore{}, map[string]digestqueue.Source{"notes": src})
+	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.NotSent, "not-queued" }
+	r.at(0, 8, 0)
+	r.d.mu.Lock()
+	r.d.hold("owner:a")
+	r.d.mu.Unlock()
+	n := len(r.tr.sent())
+	r.tr.out = nil
+	r.day(0)
+	for _, s := range r.tr.sent()[n:] {
+		if strings.Contains(s, src.lines[0]) {
+			t.Fatalf("batch of a held forget sent: %q", s)
+		}
+	}
+	if r.holding("owner:a") != 1 {
+		t.Fatal("ready batch not kept")
+	}
+}
+
+// A forget of a reference only an unknown batch holds is done: the batch is
+// redacted whole and stays unknown, so STATUS and the next digest still say
+// that day's digest may not have arrived (W5-Dc-r7).
+// REQ: CAP-3 (W5-Dc-r7 UF-3), OP-9, CH-15
+func TestDigestForgetOfAnUnknownDigestCompletes(t *testing.T) {
+	src := &testSource{name: "notes", gen: 1, lines: []string{"Notes: task 3 finished; reply MORE 3 for it."}, refs: []string{"owner:a"}}
+	srcs := map[string]digestqueue.Source{"notes": src}
+	r := newDigestRig(t, &change.MemStore{}, srcs)
+	r.tr.out = func(int) (digestqueue.Outcome, string) { return digestqueue.OutcomeUnknown, "" }
+	r.at(0, 8, 0)
+	if err := r.d.forget("owner:a"); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if len(r.d.forgets) != 0 {
+		t.Fatalf("done forget still held: %v", r.d.forgets)
+	}
+	// The source keeps its duty: it drops the reference.
+	src.gen, src.lines, src.refs = 2, []string{"Notes: task 4 finished; reply MORE 4 for it."}, []string{"owner:b"}
+	r.boot(srcs)
+	if len(r.d.st.Forgets) != 0 || len(r.d.forgets) != 0 {
+		t.Fatalf("done forget kept after a reboot: %q", r.d.st.Forgets)
+	}
+	if held := r.holding("owner:a"); held != 0 {
+		t.Fatalf("%d batches hold the forgotten reference", held)
+	}
+	if bs := r.batches(); bs[0].State != digestqueue.Unknown || !bs[0].Redacted || bs[0].Attempts != 1 {
+		t.Fatalf("unknown batch %+v", bs[0])
+	}
+	if r.status() != digestUnknownStatus {
+		t.Fatalf("status %q", r.status())
+	}
+	r.tr.out = nil
+	r.at(1, 8, 0)
+	got := r.tr.sent()
+	if len(got) != 2 || !strings.Contains(got[1], fmt.Sprintf(digestUnknownLine, "Mon 5 Oct")) {
+		t.Fatalf("day 1: %q", got)
+	}
+	for _, s := range got[1:] {
+		if strings.Contains(s, "task 3") {
+			t.Fatalf("forgotten line sent: %q", s)
 		}
 	}
 }
@@ -759,5 +853,148 @@ func TestDigestLinesAreOwnerWorded(t *testing.T) {
 		if !strings.Contains(all, l) {
 			t.Errorf("%q not in capLineTexts", l)
 		}
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1b QH-7)
+
+// TestDigestWaitsForQuietHoursToEnd: a digest due in quiet hours stays
+// Ready and goes at the first tick after they end, once. The digest time
+// on main is 08:00, so quiet hours here run to 09:10. Past the batch's
+// expiry (quiet hours the owner widened in between), the Late path sends
+// it once.
+func TestDigestWaitsForQuietHoursToEnd(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	// Quiet hours end at 09:10, between two 30-minute retries: the first
+	// step after them sends, not the next retry.
+	end := day0.Add(9*time.Hour + 10*time.Minute)
+	r.quiet = func(t time.Time) bool { return t.Before(end) }
+	r.at(0, 8, 0)
+	r.at(0, 8, 30)
+	r.at(0, 9, 0)
+	r.at(0, 9, 9)
+	if got := r.tr.sent(); len(got) != 0 {
+		t.Fatalf("sent in quiet hours: %q", got)
+	}
+	if bs := r.batches(); len(bs) != 1 || bs[0].State != digestqueue.Ready {
+		t.Fatalf("batches in quiet hours: %+v", bs)
+	}
+	r.at(0, 9, 10)
+	if got := r.tr.sent(); len(got) != 1 || !strings.HasPrefix(got[0], fmt.Sprintf(digestHead, "Mon 5 Oct")) {
+		t.Fatalf("at the end of quiet hours: %q", got)
+	}
+	r.at(0, 9, 11)
+	r.at(0, 12, 0)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("sent again: %q", got)
+	}
+
+	// Past its expiry: day 1's digest waits until day 2 09:00, past day
+	// 2's digest time; day 1 goes late once, then day 2.
+	end = day0.AddDate(0, 0, 2).Add(9 * time.Hour)
+	r.day(1)
+	r.at(2, 8, 0)
+	r.at(2, 8, 30)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("sent in widened quiet hours: %q", got)
+	}
+	r.at(2, 9, 0)
+	r.day(2)
+	got := r.tr.sent()
+	all := strings.Join(got, "|")
+	if len(got) != 3 || strings.Count(all, fmt.Sprintf(digestLateHead, "Tue 6 Oct")) != 1 ||
+		!strings.HasPrefix(got[2], fmt.Sprintf(digestHead, "Wed 7 Oct")) {
+		t.Fatalf("after the widened quiet hours: %q", got)
+	}
+}
+
+// REQ: CH-15 (W5-Dc-r1b QH-7)
+
+// TestDigestIgnoresTheHourlyAllowance: the digest neither waits for nor
+// reads the owner's hourly allowance (SG-r1-6). Its only pacing hook is
+// Quiet: with the allowance spent and not quiet, it goes at its time.
+func TestDigestIgnoresTheHourlyAllowance(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	ch := pacedOwner(t, ownerch.Pacing{}, day0.Add(7*time.Hour+50*time.Minute))
+	for i := range 3 {
+		if err := ch.ch.Inform(fmt.Sprintf("Update %d.", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ch.ch.Allowance(ch.clock()) != 0 {
+		t.Fatal("allowance not spent")
+	}
+	r.quiet = ch.pacer().quiet // as main wires it
+	r.at(0, 8, 0)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("digest with the allowance spent: %q", got)
+	}
+}
+
+// A saved LastDay later than tomorrow is clock skew (the clock was set back,
+// or a skewed save): the digest does not wait for that day, it goes today.
+// REQ: CH-15, OP-9
+func TestDigestSkewedLastDayDoesNotStopTheDigest(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	r.at(0, 8, 0)
+	n := len(r.tr.sent())
+	r.d.mu.Lock()
+	r.d.st.LastDay = r.d.dayOf(r.now) + 400
+	r.d.mu.Unlock()
+	r.at(1, 8, 0)
+	if got := r.tr.sent(); len(got) != n+1 {
+		t.Fatalf("digest stopped by a LastDay far ahead: %q", got)
+	}
+	if want := r.d.dayOf(r.now); r.d.st.LastDay != want {
+		t.Fatalf("LastDay %d, want %d", r.d.st.LastDay, want)
+	}
+	// Tomorrow's LastDay is not skew (a save just after midnight): no resend today.
+	r.at(1, 9, 0)
+	if got := r.tr.sent(); len(got) != n+1 {
+		t.Fatalf("resent the same day: %q", got)
+	}
+}
+
+// The skew reset never underflows: a clock at the epoch (today 0) with a
+// saved day ahead resets to 0, not past the end of uint64, and the digest
+// goes once the clock is right again.
+// REQ: CH-15, OP-9
+func TestDigestSkewResetAtDayZeroDoesNotUnderflow(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	r.d.mu.Lock()
+	r.d.st.LastDay = 400
+	r.d.mu.Unlock()
+	r.now = time.Unix(0, 0)
+	r.d.step(context.Background(), r.now)
+	if got := r.d.st.LastDay; got != 0 {
+		t.Fatalf("LastDay %d after a reset at day 0, want 0", got)
+	}
+	r.at(0, 8, 0)
+	if got := r.tr.sent(); len(got) != 1 {
+		t.Fatalf("digest stopped after the epoch clock: %q", got)
+	}
+}
+
+// LastDay of today or tomorrow is not skew and stays as saved; the day after
+// is. The test also covers a clock near the top of the range, where
+// today+1 would wrap.
+// REQ: CH-15, OP-9
+func TestDigestSkewEdges(t *testing.T) {
+	r := newDigestRig(t, &change.MemStore{}, nil)
+	r.now = day0.Add(7 * time.Hour) // before the digest time: nothing else moves LastDay
+	today := r.d.dayOf(r.now)
+	for _, c := range []struct {
+		last, want uint64
+	}{{today, today}, {today + 1, today + 1}, {today + 2, today - 1}, {0, 0}} {
+		r.d.mu.Lock()
+		r.d.st.LastDay = c.last
+		r.d.mu.Unlock()
+		r.d.step(context.Background(), r.now)
+		if r.d.st.LastDay != c.want {
+			t.Fatalf("LastDay %d (today %d) became %d, want %d", c.last, today, r.d.st.LastDay, c.want)
+		}
+	}
+	if skewed(math.MaxUint64, math.MaxUint64) || !skewed(math.MaxUint64, 5) {
+		t.Fatal("skewed wraps at the top of the range")
 	}
 }
