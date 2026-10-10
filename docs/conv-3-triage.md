@@ -14,6 +14,15 @@ Classes follow `briefs/CONV-3.md`. Nothing is closed by this package (Q3 answere
 | stale | 6 |
 | total | 195 |
 
+## Close list (Q3, D-090)
+
+The brief posts this list as Q3 in `docs/MARK-QUEUE.md`. Q3 was asked and answered ("Yes", D-090) before this PR, and the queue keeps only open questions, so the list is recorded here and in D-090 instead.
+
+- superseded (5): #193, #195, #198, #219, #236
+- stale (6): #175, #191, #192, #194, #197, #231
+
+Nine are already closed (D-087). #175 and #231 close after this PR's L3 accepts, branches kept (BOARD rows P2-1 and CH-21e cite them).
+
 ## Method
 
 - **Idle** is age of the last commit on the PR head (committer date), not `updated_at`, which bot activity resets. Stale needs idle of at least 48h (D-086). The number of PRs past the line rises every hour; `crosses 48h in Nh` marks those within 6h.
