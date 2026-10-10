@@ -612,3 +612,11 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | UPD-7t | Soak plus attestations test and marker (UPD-7; brief to write) | — | queued (C) |
 | CH-5v | [Live calls and codes on calls](briefs/CH-5v.md) (CH-5, CH-17; stub; simulator slice first, hardware qualification on S2) | S2, P2-3w | queued (A) |
 | CAP-4c | [Calendar as an event source](briefs/CAP-4c.md) (CAP-4; stub; read-only adapter first) | P3-3 | queued (A) |
+
+## Outside-the-box limits (2026-10-10)
+
+Promoted by Mark on 2026-10-10 ("Can just become a row", "Just bypass gap list"; Questions thread), so the D-086 scope freeze (SPEC §14) is met by his explicit promotion. SPEC has no requirement yet; the brief carries the proposed text for a later spec-diff PR that Mark approves.
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| PAYCAP-1 | [Spend limits the card issuer enforces: a merchant-locked, capped virtual card for the box, a backstop that holds if the broker is compromised](briefs/PAYCAP-1.md) (stub; no friction in normal use; declines reach the owner as a digest line) | — | queued (A) |
