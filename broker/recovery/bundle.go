@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -449,11 +450,11 @@ func restore(r io.Reader, rk RecoveryKey, dst string, lay Layout, opt Options, n
 			return rep, err
 		}
 	}
-	if err := os.Rename(tmp, dst); err != nil {
+	if err := durable.Rename(tmp, dst); err != nil {
 		return rep, err
 	}
 	ok = true
-	return rep, syncDir(filepath.Dir(dst))
+	return rep, nil
 }
 
 // RestoreDrive restores from the old drive itself (REC-1: "or the drive
@@ -474,46 +475,6 @@ func RestoreDrive(roots []Root, rk RecoveryKey, dst string, lay Layout, opt Opti
 	rep, err := restore(pr, rk, dst, lay, opt, now, true)
 	pr.CloseWithError(errors.New("restore ended"))
 	return rep, err
-}
-
-func writeAtomic(path string, raw []byte) error {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".recovery-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if err := f.Chmod(0o600); err != nil {
-		f.Close()
-		return err
-	}
-	if _, err := f.Write(raw); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	return syncDir(dir)
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	serr := d.Sync()
-	if err := d.Close(); serr == nil {
-		serr = err
-	}
-	return serr
 }
 
 // writeTree archives root without following symlinks. It keeps regular
@@ -764,7 +725,7 @@ func (x *extractor) run(tr *tar.Reader) error {
 			return err
 		}
 	}
-	return syncDir(x.dst)
+	return durable.SyncDir(x.dst)
 }
 
 // linkSet is the symlinks a restore has accepted outside the machine

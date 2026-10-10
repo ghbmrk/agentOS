@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // Store is the durable medium under the index (and under the event bus).
@@ -59,21 +61,12 @@ func OpenFile(path string) (*FileStore, error) {
 		lock.Close()
 		return nil, err
 	}
-	if err := syncDir(filepath.Dir(path)); err != nil {
+	if err := durable.SyncDir(filepath.Dir(path)); err != nil {
 		f.Close()
 		lock.Close()
 		return nil, err
 	}
 	return &FileStore{path: path, f: f, lock: lock}, nil
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }
 
 func (s *FileStore) Append(line []byte) error {
@@ -97,31 +90,12 @@ func (s *FileStore) ReadAll() ([]byte, error) {
 func (s *FileStore) Rewrite(data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tmp := s.path + ".tmp"
-	t, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
+	werr := durable.WriteFile(s.path, data, 0o600)
+	if werr != nil && !errors.Is(werr, durable.ErrDirSync) {
+		return werr
 	}
-	if _, err := t.Write(data); err != nil {
-		t.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := t.Sync(); err != nil {
-		t.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := t.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	// The old handle now points at an unlinked file: swap before anything
-	// else can fail.
+	// The old handle now points at an unlinked file: swap it even when
+	// only the directory sync failed.
 	f, err := os.OpenFile(s.path, os.O_RDWR|os.O_APPEND, 0o600)
 	s.f.Close()
 	if err != nil {
@@ -130,7 +104,7 @@ func (s *FileStore) Rewrite(data []byte) error {
 	}
 	s.f = f
 	s.broken = nil
-	return syncDir(filepath.Dir(s.path))
+	return werr
 }
 
 // Close releases the file and the lock.
