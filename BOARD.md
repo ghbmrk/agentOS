@@ -350,7 +350,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | UPD-b3 | First-boot update, image side: preloaded root metadata and mirror list, real activator (UPD-3; broker/firstboot/ASSUMPTIONS.md F8; brief to write) | UPD-b, P2-1 (#41) | queued (P2-1 merged; brief to write) |
 | UPD-c | [Update channel and cadence as owner settings](briefs/UPD-c.md) | P3-5; W5b to reach the live box | merged (#130; carry: local page, quiet-window jitter (UPD-a), standing grant for…) |
 | CH-20 | [Evidence delivery](briefs/CH-20.md) | P2-6m; P2-3 for MMS | merged (#148: destination path; MMS waits on P2-3) |
-| CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued (blocked on P2-2) |
+| CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued |
 | CH-20a | [Bounded attachments in `mail.deliver`](briefs/CH-20a.md) | CH-20w | queued (needs security review) |
 | CH-20m | [MORE for a redirected reply](briefs/CH-20m.md) | CH-20w | queued |
 | CRED-4b | [Credentialed browser executor in the broker](briefs/CRED-4b.md) | S5 fixture suite | building (claude2; part 1 in review, #300; part 2 per K1-K14) |
