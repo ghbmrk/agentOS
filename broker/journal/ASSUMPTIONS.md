@@ -47,9 +47,28 @@ intent (`ActionBudgetChange`, OP-5), which the engine already handles.
   exclusive `flock`, so two engines cannot write one journal.
 - **Size limits.** Intents over 64 KiB are rejected; free text over 4 KiB is cut
   and tagged with a SHA-256 of the whole.
-- **Not yet here:** journal compaction (records are kept in memory and the
-  file grows without bound), and a hash chain for tamper evidence. Both can be
-  added without changing the record format's meaning.
+- **Bounded memory for refusals (SIM-bound).** The engine keeps no per-record
+  history in memory: the journal file is the history, and `Trail` reads it.
+  Settled denials past the newest `hotDenials` (1024) leave the in-memory
+  index. What stays of each is 36 bytes: a 16-byte SHA-256 prefix of
+  its id, a 16-byte prefix of its fingerprint, and the index of its shape
+  (goal, origin, account, action, executor, refusal texts and phase), each
+  distinct shape kept once. `Get`, an OP-1
+  resubmission, and a refused `Authorize`, `Dispatch` or `Resolve` of an
+  evicted denial answer from that, with no journal read;
+  `Get` then omits params, recipients and the other free-form fields, which
+  `List`, `Between`, `StatusBetween` and `Trail` still return. Rated denials and ones
+  with attempts are not evicted. `List`, `Between`, `StatusBetween`, `Trail`
+  and the owner-side rehydration (`RecordQuality`, `Erase`) read the whole
+  journal, and the store holds its mutex
+  for that read, so a STOP arriving meanwhile waits for it to finish.
+- **STOP reads an index.** `open` holds the unsettled intents (pending, held,
+  outcome unknown); `Stop`, `Waiting`, `Reconcile` and `GuestActive` walk it,
+  so their work does not grow with the settled history.
+- **Not yet here:** journal compaction (the file grows without bound and
+  `Open` replays all of it), eviction of settled successes, and a hash chain
+  for tamper evidence. All can be added without changing the record format's
+  meaning.
 
 ## Notes for P1-2 (broker skeleton)
 
