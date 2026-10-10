@@ -251,7 +251,7 @@ func TestModifiedBootPathDoesNotUnlockUnattended(t *testing.T) {
 		if r.phase() != locked || r.c.model() != nil {
 			t.Fatalf("modified boot path %q unlocked", b)
 		}
-		if !r.noted("started the box in a way it hasn't before") || !r.noted("tampered") {
+		if !r.noted("started me in a way it hasn't before") || !r.noted("tampered") {
 			t.Fatalf("owner not told: %q", r.notes)
 		}
 	}
@@ -317,7 +317,7 @@ func TestBootPIN(t *testing.T) {
 		t.Fatalf("PIN host after restart: phase %v, wants PIN %v", r.phase(), r.c.pinWanted())
 	}
 	// CH-12: the owner is pointed at the box's Wi-Fi page.
-	if !r.noted("This PC starts with a boot PIN: enter the PIN on the box's Wi-Fi page.") {
+	if !r.noted("This PC starts with a boot PIN: enter the PIN on my Wi-Fi page.") {
 		t.Fatalf("PIN note: %q", r.notes)
 	}
 	r.clk.add(MinAttemptGap)
@@ -550,7 +550,7 @@ func TestLockoutReleaseRetried(t *testing.T) {
 	if r.lockoutEntry() == "" {
 		t.Fatal("lockout authorization dropped before it was given back")
 	}
-	if !r.noted("give the TPM's lockout back") {
+	if !r.noted(lockoutReleaseFailed) {
 		t.Fatalf("owner not told: %q", r.notes)
 	}
 }
@@ -699,7 +699,7 @@ func TestKeepTrustedFailureTellsAFixedReason(t *testing.T) {
 	if r.phase() != open {
 		t.Fatal("a failed keep closed the vault")
 	}
-	if !r.noted(noteKeepTrustedFailed) || !strings.HasSuffix(noteKeepTrustedFailed, " on the box's Wi-Fi page.") {
+	if !r.noted(noteKeepTrustedFailed) || !strings.HasSuffix(noteKeepTrustedFailed, " on my Wi-Fi page.") {
 		t.Fatalf("notes %q", r.notes)
 	}
 	for _, n := range r.notes {
@@ -1068,7 +1068,7 @@ func TestDARestoreNeverProbesAForeignLockout(t *testing.T) {
 	if n, _ := r.daEntry(); n != "" {
 		t.Fatal("unrestorable entry kept for retries")
 	}
-	const msg = "Another system on this PC, probably Windows, now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses. Nothing to do: your PIN is off and the box works as before."
+	const msg = "Another system on this PC, probably Windows, now controls its security chip's lockout, so I couldn't put back the chip's limit on wrong guesses. Nothing to do: your PIN is off and I work as before."
 	told := 0
 	for _, n := range r.notes {
 		if strings.Contains(n, "security chip") {

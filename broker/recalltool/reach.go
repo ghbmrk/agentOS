@@ -316,6 +316,10 @@ const TakenBack = "Your agent is back to before that task and no longer holds it
 // failure leaves nothing to carry it.
 var ErrCarried = errors.New("recall: take-back owed; Retry carries it")
 
+// ErrWorked refuses a take-back not approved: the agent worked since,
+// so on the ask-first rule it is not taken back without asking (CAP-3).
+var ErrWorked = errors.New("recall: work done since; not taken back without asking")
+
 // errUnrecorded: the machines went back but the reset was not recorded.
 var errUnrecorded = errors.New("reset not recorded")
 
@@ -346,8 +350,28 @@ func (r *Reach) TakeBack(ctx context.Context, lineage string, since time.Time, a
 	r.run.Lock()
 	defer r.run.Unlock()
 	recorded, done := r.Prov.TakeBack(lineage, since)
-	if done || r.resetFrom(lineage, since) {
+	if done {
 		return nil
+	}
+	if r.resetFrom(lineage, since) {
+		// A reset from the same time is under way and Retry finishes it:
+		// it is not repeated, and an approved take-back is marked done,
+		// never owed (Retry would run an owed one again), so a later
+		// boot's Handled still sees it once the reset is gone (#327 L3 r5
+		// #3).
+		if approved && !recorded {
+			return r.Prov.MarkTakeBack(lineage, since, true)
+		}
+		return nil
+	}
+	// The caller's check that the agent did no work is re-made here, under
+	// run, so work since that check is not rolled back unasked (Security
+	// 327-1). The agent acts without run, so work landing between this and
+	// the machines going back is still possible (ASSUMPTIONS W13).
+	if !approved {
+		if worked, ok := r.Work(lineage, since); !ok || worked {
+			return ErrWorked
+		}
 	}
 	if approved && !recorded {
 		if err := r.Prov.MarkTakeBack(lineage, since, false); err != nil {
@@ -743,9 +767,15 @@ func (r *Reach) Execute(ctx context.Context, in journal.Intent, _ int) journal.O
 	case err == nil:
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "rolled back"}
 	case len(r.Prov.Resets(lineage)) > 0:
-		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "machines reset; finishing: " + err.Error()}
+		if r.Logf != nil {
+			r.Logf("recall: rollback of %s still finishing: %v", lineage, err)
+		}
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "machines reset; finishing"}
 	}
-	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + err.Error()}
+	if r.Logf != nil {
+		r.Logf("recall: rollback of %s did not reset: %v", lineage, err)
+	}
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + "the reset did not finish"}
 }
 
 // tell sends the owner a text about lineage's rollback.

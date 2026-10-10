@@ -45,7 +45,7 @@ var coldCodes = map[string]string{
 // The owner's lines (PE7 conditions 14, 15). Neither says whether a wake
 // kept the agent's memory (UX P2-c).
 const (
-	sleepStatus = "Agent: asleep while the box learns. Any task message wakes it."
+	sleepStatus = "Your agent is asleep while I learn. Any task message wakes it."
 	holdLine    = "One moment, your agent is waking up."
 )
 

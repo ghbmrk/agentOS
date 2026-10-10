@@ -39,7 +39,11 @@ class Executor:
         self.stubs = set()  # URLs answered with a redirect stub; never returned to
         self.last_good = "about:blank"
         self._pw = sync_playwright().start()
-        self.browser = self._pw.chromium.launch(executable_path=CHROME, headless=headless)
+        # Sandboxes that force egress through a proxy: S5_PROXY (default $HTTPS_PROXY).
+        proxy = os.environ.get("S5_PROXY") or os.environ.get("HTTPS_PROXY")
+        self.browser = self._pw.chromium.launch(
+            executable_path=CHROME, headless=headless,
+            **({"proxy": {"server": proxy}} if proxy else {}))
         self.ctx = self.browser.new_context(
             storage_state=storage_state, accept_downloads=True,
             viewport={"width": 1280, "height": 900})

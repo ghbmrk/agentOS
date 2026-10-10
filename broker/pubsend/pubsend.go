@@ -38,6 +38,12 @@ const MaxWaiting = 7
 // year of days, so a key is still known when the same batch comes back.
 const maxConfirmed = 400
 
+// maxLedgerBytes caps the ledger read, before it is decoded (OSS-6s-a-f1):
+// MaxWaiting frames base64-encoded take 4/3 of MaxWaiting×FrameSize, and
+// the confirmed keys about 50 KB more, so twice the frames holds the
+// largest valid ledger with room to spare.
+const maxLedgerBytes = MaxWaiting * 2 * FrameSize
+
 // seedSize is the padding seed's length, an AES-256 key.
 const seedSize = 32
 
@@ -96,7 +102,7 @@ func New(cfg Config) (*Sender, error) {
 		return nil, err
 	}
 	s := &Sender{cfg: cfg}
-	b, err := os.ReadFile(cfg.Path)
+	b, err := readLedger(cfg.Path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return s, nil
@@ -108,10 +114,31 @@ func New(cfg Config) (*Sender, error) {
 	if err := d.Decode(&s.st); err != nil {
 		return nil, fmt.Errorf("pubsend: ledger: %w", err)
 	}
+	if _, err := d.Token(); err != io.EOF {
+		return nil, errors.New("pubsend: ledger: data after the ledger")
+	}
 	if err := s.st.validate(); err != nil {
 		return nil, fmt.Errorf("pubsend: ledger: %w", err)
 	}
 	return s, nil
+}
+
+// readLedger reads the ledger file, refusing one over maxLedgerBytes
+// without reading the rest of it.
+func readLedger(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxLedgerBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxLedgerBytes {
+		return nil, fmt.Errorf("pubsend: ledger: over %d bytes", maxLedgerBytes)
+	}
+	return b, nil
 }
 
 func (l *ledger) validate() error {
