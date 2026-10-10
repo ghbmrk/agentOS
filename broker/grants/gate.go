@@ -2852,7 +2852,12 @@ func (g *Gate) Execute(_ context.Context, in journal.Intent, _ int) journal.Outc
 	}
 	g.mu.Unlock()
 	if err != nil {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: err.Error()}
+		ev := err.Error()
+		if strings.Contains(ev, "/") || strings.Contains(ev, `\`) {
+			g.cfg.Logf("grants: %s not applied: %v", in.ID, err)
+			ev = "not applied"
+		}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: ev}
 	}
 	for _, k := range ended {
 		g.unpaused(k)

@@ -504,6 +504,17 @@ func (p *Pipeline) healthy() error {
 // meta.change intents to Check.
 func (p *Pipeline) Attach(j Journal) { p.j = j }
 
+// errStateBroken is what callers see once a save and its reload both
+// failed. It names no path. The errors themselves are logged.
+var errStateBroken = errors.New("change: state cannot be saved or reloaded; restart needed")
+
+func (p *Pipeline) markBroken(save, reload error) {
+	if p.cfg.Logf != nil {
+		p.cfg.Logf("change: state cannot be saved (%v) or reloaded (%v)", save, reload)
+	}
+	p.broken = errStateBroken
+}
+
 func (p *Pipeline) saveLocked() error {
 	if p.broken != nil {
 		return p.broken

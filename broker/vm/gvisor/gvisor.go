@@ -98,12 +98,22 @@ func (r *Runtime) run(ctx context.Context, args ...string) error {
 
 // Start mounts the machine's root and starts its guest.
 func (r *Runtime) Start(ctx context.Context, l vm.Launch) error {
-	return r.launch(ctx, l, "run", "--bundle", r.bundle(l), "-detach", cid(l.ID))
+	return r.launch(ctx, l, r.launchArgs(l, "")...)
 }
 
 // Restore mounts the machine's root and restores memory from image.
 func (r *Runtime) Restore(ctx context.Context, l vm.Launch, image string) error {
-	return r.launch(ctx, l, "restore", "--bundle", r.bundle(l), "--image-path="+image, "-detach", cid(l.ID))
+	return r.launch(ctx, l, r.launchArgs(l, image)...)
+}
+
+// launchArgs is the subcommand and its flags that start a guest: run, or
+// restore from image when image is set. Every global flag comes from
+// argv, which TestAGuestCannotDial checks together with these (A14).
+func (r *Runtime) launchArgs(l vm.Launch, image string) []string {
+	if image == "" {
+		return []string{"run", "--bundle", r.bundle(l), "-detach", cid(l.ID)}
+	}
+	return []string{"restore", "--bundle", r.bundle(l), "--image-path=" + image, "-detach", cid(l.ID)}
 }
 
 func (r *Runtime) bundle(l vm.Launch) string { return filepath.Join(l.Dir, "bundle") }
