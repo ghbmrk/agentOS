@@ -74,15 +74,15 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 ## SIM-owner-hold: owner texts are intents; the pacer hold becomes a projection (tier A)
 
-**Needs.** SIM-sd, SIM-proj, DEL-1 and PACE-1 merged (#709, #708: the two point fixes this generalizes).
+**Needs.** SIM-sd, SIM-proj, SIM-cases, DEL-1 and PACE-1 merged (#709, #708: the two point fixes this generalizes).
 
 **Change.** Owner texts are `owner.inform` intents with a subject and subject revision, rendered at dispatch. The pacer's hold and owner-state held texts become a projection over those intents. Quiet hours, urgent classes, eviction priority and held-text visibility become rules in that projection: provider security alerts sent at once (W5-Dc-r13), class-aware eviction (r15), the held marker on packed released texts (r16), and forget dropping a held text (r17). The pacer's string hold and its own persistence are deleted.
 
-**Requirement IDs.** OP-3, OP-4, OP-9, CH-15, CAP-3. **Acceptance.** A guest reply accepted before a crash is delivered after restart (DEL-1's test, unchanged); a "Cleared" whose subject revised before dispatch is not sent; a forgotten subject's held text is not sent (r17); a flood of agent texts does not evict a held approval (r15); a security alert bypasses quiet hours (r13); a released text packed after a hold carries its held marker (r16); SIM-cases' hold cases pass. Net lines go down. **Usage estimate.** Under 130k tokens. Tier A.
+**Requirement IDs.** OP-3, OP-4, OP-9, CH-15, CAP-3. **Acceptance.** A guest reply accepted before a crash is delivered after restart (DEL-1's test, unchanged); a "Cleared" whose subject revised before dispatch is not sent; a forgotten subject's held text is not sent (r17); a flood of agent texts does not evict a held approval (r15); a security alert bypasses quiet hours (r13); a released text packed after a hold carries its held marker (r16); a crash or failed save after a send never refills the hourly allowance; SIM-cases' hold cases pass. Net lines go down. **Usage estimate.** Under 130k tokens. Tier A.
 
 ## SIM-pull: STATUS is the owner's view; only urgent texts are pushed (tier A)
 
-**Needs.** SIM-owner-hold; SIM-sd carrying the pull-first rule (Mark chose pull-first, Decisions card 2026-10-10).
+**Needs.** SIM-owner-hold, SIM-cases; SIM-sd carrying the pull-first rule (Mark chose pull-first, Decisions card 2026-10-10).
 
 **Change.** STATUS becomes one projection of the owner's open questions, results and alerts at their latest revision, always current. Push is kept only for urgent classes: approvals that block work, security alerts, STOP/RESUME confirmations, and the classes SPEC names as urgent. Everything else is no longer pushed; it appears in STATUS. The daily digest is deleted rather than rebuilt: `broker/digestqueue` in whole (durability, leases, receipts, `Sender`, `Batch`, `Snapshot`), the agentosd digest box, and the digest gate (`batchLeaks`, the "`Send` only in `sendReady`" rule). The pacer keeps only what urgent push needs.
 
@@ -94,7 +94,7 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 **Change.** Read each open W5-D draft PR and list every crash cut, acknowledgement and forget case it tests in `briefs/SIM-cases.md` (one line each: draft PR, case, the outcome the owner sees). Write each case as a test against main's observable behaviour (owner text sent or not, after restart or forget), not against the draft's internal types. Cases main already passes land as tests in this PR. Cases main fails are not skipped or quarantined: each is assigned in the list to SIM-owner-hold, SIM-pull or SIM-erase, or listed as retired with the digest, whose acceptance then includes it.
 
-**Requirement IDs.** OP-4, CAP-3, CH-15. **Acceptance.** Every open W5-D draft PR appears in the list with its cases or "no owner-visible case"; each case is a passing test here or assigned to a named SIM package. **Usage estimate.** Under 120k tokens; split by draft range if the list exceeds 20k tokens. Tier A (agentosd tests).
+**Requirement IDs.** OP-4, CAP-3, CH-15. **Acceptance.** Every open W5-D draft PR appears in the list with its cases or "no owner-visible case"; each case is a passing test here, assigned to a named SIM package, or retired with the digest. **Usage estimate.** Under 120k tokens; split by draft range if the list exceeds 20k tokens. Tier A (agentosd tests).
 
 ## SIM-outcome: one revisable outcome record (tier A)
 
@@ -104,7 +104,7 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 ## SIM-erase: forget once, in the journal (tier A)
 
-**Needs.** SIM-sd, SIM-proj, SIM-check.
+**Needs.** SIM-sd, SIM-proj, SIM-check, SIM-cases.
 
 **Change.** FORGET erases the subject in the journal (`journal/erase.go`) and rebuilds affected projections; SIM-check's "no erased subject readable" predicate is the test. The per-package forget hooks are deleted as each store becomes a projection. Out of scope: restores, which the forget log over backups governs (W3-forget-b1-5, b1-6, with W3-forget-b2c-f1-r2 and r4), and recall's take-back (`broker/recall`, `recalltool`), which is not a projection and keeps its rows W3-forget-reach-r1 to r5.
 
@@ -160,6 +160,6 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 **Needs.** SIM-repo-1.
 
-**Change.** Run the migration. Merged and dropped rows stay in an archived BOARD history file; everything live is an issue. METRICS and TRACE are generated by the `trace` workflow from PRs and tests, as TRACE already is. LATER becomes a label. MARK-QUEUE is replaced by the Decisions cards and a `decision` label. doclint's BOARD and LATER rules are deleted. CLAUDE.md and OPERATING are amended to match (a change to the operating contract: the PR names the lines and needs Mark's approval, as SPEC changes do).
+**Change.** Run the migration. Merged and dropped rows stay in an archived BOARD history file; everything live is an issue. METRICS and TRACE are generated by the `trace` workflow from PRs and tests, as TRACE already is. LATER becomes a label. MARK-QUEUE is replaced by the Decisions cards and a `decision` label. doclint's BOARD and LATER rules are deleted. `board.py render --repo` reads work items only from issues opened by a repository collaborator, so an outsider's issue with the `work-item` label cannot place a row (release finding from the #721 L3; failure path: anyone who can open an issue adds a fake row). CLAUDE.md and OPERATING are amended to match (a change to the operating contract: the PR names the lines and needs Mark's approval, as SPEC changes do).
 
 **Requirement IDs.** None in SPEC. **Acceptance.** Every live BOARD row has exactly one issue; the generated BOARD equals the pre-migration live rows; no hand-maintained status file remains other than briefs, decisions and reviews. **Usage estimate.** Under 100k tokens. Tier A.
