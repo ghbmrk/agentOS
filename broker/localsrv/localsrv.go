@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,9 +30,12 @@ import (
 type Owner interface {
 	LocalStatus() owner.LocalStatus
 	LocalGridCell() string
-	LocalSignIn(code string) (time.Time, error)
+	// LocalSignIn returns the sign-in's end and the session-lock count
+	// it authenticated under; LocalResume refuses once the count moved
+	// (owner.ErrLocked), so a lock is checked where RESUME commits.
+	LocalSignIn(code string) (until time.Time, locks uint64, err error)
 	LocalStop(ctx context.Context) error
-	LocalResume() (string, error)
+	LocalResume(locks uint64) (string, error)
 	LocalRequests() []owner.LocalRequest
 	LocalAnswer(id, sum string, approve bool, code string) (string, error)
 	LocalWaiting() string
@@ -44,11 +48,38 @@ type Owner interface {
 // Config configures a Server.
 type Config struct {
 	Owner Owner
-	// LineNote is the owner line's note (modemlink.Link.OwnerLineNote);
-	// nil when there is no modem bridge.
-	LineNote func() string
-	Now      func() time.Time
-	Rand     io.Reader
+	// Line is the owner line's note, last outage and counts (the modem
+	// link's); nil when there is no modem bridge. Status carries only its
+	// note (Security D1).
+	Line func() localapi.Line
+	Now  func() time.Time
+	Rand io.Reader
+	// DescribeRoot verifies a root to follow and holds it for approval
+	// (follow.Executor.Describe); on an error, only the summary's Reason
+	// is kept, and only if it is a coarse cause the page words. Follow
+	// submits the owner's request to follow a held root
+	// (grants.FollowIntent) and returns the channel's reply. Either nil
+	// refuses its op.
+	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
+	Follow       func(ctx context.Context, name, digest string) (string, error)
+	// Paused lists the paused grants (grants.Gate.Paused); AskResume asks
+	// the owner, on the page, to resume one from the pause the page
+	// showed (grants.Gate.AskResume) and returns the reply to show
+	// (W5a-resume). Either nil refuses its op.
+	Paused    func() []localapi.PausedGrant
+	AskResume func(ctx context.Context, grant, pause string) (string, error)
+	// AdoptSIM records the SIM the page showed under a tag as the owner
+	// line's (modemlink.Link.Adopt), once the owner's code is checked; it
+	// returns ErrStaleSIM when that SIM is no longer offered. Nil refuses
+	// the op.
+	AdoptSIM func(tag string) error
+	// ForgetTasks lists the owner's recent tasks; Forget asks to forget
+	// one by its goal ID through FORGET's own ask and returns the fixed
+	// reply to show (W3-forget-b3r). Each is given whether the owner's
+	// session is unlocked, as FORGET by text is. Either nil refuses its
+	// op.
+	ForgetTasks func(unlocked bool) localapi.ForgetTasks
+	Forget      func(ctx context.Context, goal string, unlocked bool) string
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -98,10 +129,21 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpSignOut:  s.signOut,
 		localapi.OpSession:  s.session,
 		localapi.OpLines:    s.authed(s.lines),
+		localapi.OpLine:     s.authed(s.line),
 		localapi.OpResume:   s.resume,
 		localapi.OpRequests: s.authed(s.requests),
 		localapi.OpWaiting:  s.authed(s.waiting),
 		localapi.OpAnswer:   s.answer,
+		// Changing where updates come from needs a session (WF3).
+		localapi.OpFollowRoot: s.followRoot,
+		localapi.OpFollow:     s.follow,
+		// Resuming a paused grant needs a session, then a code (W5a-resume).
+		localapi.OpPaused:    s.authed(s.paused),
+		localapi.OpAskResume: s.askResume,
+		// Adopting a SIM needs a session, then always a code (CH-19).
+		localapi.OpSIM:         s.adoptSIM,
+		localapi.OpForgetTasks: s.forgetTasks,
+		localapi.OpForget:      s.forget,
 	}
 }
 
@@ -129,8 +171,8 @@ func (s *Server) status(context.Context, sockets.Peer, json.RawMessage) (any, er
 	st := s.cfg.Owner.LocalStatus()
 	out := localapi.Status{Stopped: st.Stopped, Unlocked: st.Unlocked, UnlockedUntil: st.UnlockedUntil,
 		LowLocked: st.LowLocked, Challenged: st.Challenged, UnlockDays: int(s.cfg.Owner.UnlockPeriod() / (24 * time.Hour))}
-	if s.cfg.LineNote != nil {
-		out.LineNote = s.cfg.LineNote()
+	if s.cfg.Line != nil {
+		out.LineNote = s.cfg.Line().Note
 	}
 	return out, nil
 }
@@ -154,7 +196,7 @@ func (s *Server) signIn(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	if !s.takeTry() {
 		return nil, errLimited
 	}
-	until, err := s.cfg.Owner.LocalSignIn(in.Code)
+	until, locks, err := s.cfg.Owner.LocalSignIn(in.Code)
 	// Every refused sign-in counts, a refused unlock proof included, which
 	// the channel leaves to the vault process (Security S1 on step a);
 	// only the day's spent bound does not, since nothing was tried.
@@ -168,7 +210,9 @@ func (s *Server) signIn(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	case err != nil:
 		return nil, errFailed
 	}
-	tok := s.mint(until, s.cfg.Owner.LocalStatus().Locks)
+	// Bound to the count the code was accepted under, never one read
+	// after: a lock while the sign-in was texted kills the token (SR3-1).
+	tok := s.mint(until, locks)
 	if tok == "" {
 		return nil, errFailed
 	}
@@ -183,10 +227,15 @@ func (s *Server) signOut(_ context.Context, _ sockets.Peer, args json.RawMessage
 	if !s.valid(in.Token) {
 		return nil, errUnauthorized
 	}
-	s.mu.Lock()
-	delete(s.sessions, sha256.Sum256([]byte(in.Token)))
-	s.mu.Unlock()
+	s.drop(in.Token)
 	return localapi.Text{}, nil
+}
+
+// drop ends tok's session.
+func (s *Server) drop(tok string) {
+	s.mu.Lock()
+	delete(s.sessions, sha256.Sum256([]byte(tok)))
+	s.mu.Unlock()
 }
 
 // session reports a live token's session; a dead one is unauthorized.
@@ -217,10 +266,19 @@ func (s *Server) lines(context.Context) (any, error) {
 	return localapi.Lines{Status: s.cfg.Owner.LocalStatusLines()}, nil
 }
 
+// line is the owner line's counts, for a signed-in page only (Security D1).
+func (s *Server) line(context.Context) (any, error) {
+	if s.cfg.Line == nil {
+		return localapi.Line{}, nil
+	}
+	return s.cfg.Line(), nil
+}
+
 func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var in localapi.Resume
 	err := decode(args, &in)
-	if !s.valid(in.Token) {
+	ses, ok := s.live(in.Token)
+	if !ok {
 		return nil, errUnauthorized
 	}
 	if err != nil || len(in.Code) > localapi.MaxCode {
@@ -233,7 +291,7 @@ func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		if !s.takeTry() {
 			return nil, errLimited
 		}
-		_, err := s.cfg.Owner.LocalSignIn(in.Code)
+		_, locks, err := s.cfg.Owner.LocalSignIn(in.Code)
 		s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
 		switch {
 		case errors.Is(err, owner.ErrWrongCode), errors.Is(err, owner.ErrTooMany):
@@ -241,14 +299,79 @@ func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage)
 			return localapi.Answered{Refusal: r, Text: t}, nil
 		case err != nil:
 			return nil, errFailed
+		case locks != ses.locks:
+			// A lock came between the token check and the code: the
+			// session is dead, and the code alone does not revive it.
+			s.drop(in.Token)
+			return nil, errUnauthorized
 		}
 		s.refresh(in.Token)
 	}
-	t, err := s.cfg.Owner.LocalResume()
-	if err != nil {
+	t, err := s.cfg.Owner.LocalResume(ses.locks)
+	switch {
+	case errors.Is(err, owner.ErrLocked):
+		s.drop(in.Token)
+		return nil, errUnauthorized
+	case err != nil:
 		return nil, errFailed
 	}
 	return localapi.Answered{Text: t}, nil
+}
+
+// ErrStaleSIM is AdoptSIM's refusal of a SIM no longer offered. localsrv
+// stays off the modem link's package (ARC-2's control path), so agentosd
+// maps modemlink.ErrStale to it.
+var ErrStaleSIM = errors.New("localsrv: not the SIM the page showed")
+
+// SIMAdopted is the reply to an adopted SIM.
+const SIMAdopted = "Done. I'll use that SIM for my number. Texts with you start again within a minute."
+
+// adoptSIM adopts the SIM the page showed as the owner line's (P2-2w d2b).
+// Unlike RESUME, a fresh session is not enough: adopting re-opens the
+// owner channel on another SIM's line, so it always takes a code-generator
+// code or the asked grid cell, checked as a sign-in (CH-19). The vault
+// unlock's proof is refused: it is not a code in the owner's hand.
+func (s *Server) adoptSIM(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.AdoptSIM
+	err := decode(args, &in)
+	ses, ok := s.live(in.Token)
+	if !ok {
+		return nil, errUnauthorized
+	}
+	if err != nil || !lowerHex(in.SIM, localapi.SIMLen) || len(in.Code) > localapi.MaxCode || strings.HasPrefix(in.Code, owner.UnlockProofPrefix) {
+		return nil, errBadArgs
+	}
+	if in.Code == "" {
+		return localapi.Answered{Refusal: localapi.RefusedCodeNeeded}, nil
+	}
+	if s.cfg.AdoptSIM == nil {
+		return nil, errFailed
+	}
+	if !s.takeTry() {
+		return nil, errLimited
+	}
+	_, locks, err := s.cfg.Owner.LocalSignIn(in.Code)
+	s.endTry(err != nil && !errors.Is(err, owner.ErrTooMany))
+	switch {
+	case errors.Is(err, owner.ErrWrongCode), errors.Is(err, owner.ErrTooMany):
+		r, t := s.triesLeft(err)
+		return localapi.Answered{Refusal: r, Text: t}, nil
+	case err != nil:
+		return nil, errFailed
+	case locks != ses.locks:
+		// As in RESUME: a lock between the token check and the code
+		// kills the session, and the code alone does not revive it (SR3-1).
+		s.drop(in.Token)
+		return nil, errUnauthorized
+	}
+	s.refresh(in.Token)
+	switch err := s.cfg.AdoptSIM(in.SIM); {
+	case errors.Is(err, ErrStaleSIM):
+		return localapi.Answered{Refusal: localapi.RefusedChanged}, nil
+	case err != nil:
+		return nil, errFailed
+	}
+	return localapi.Answered{Text: SIMAdopted}, nil
 }
 
 func (s *Server) requests(context.Context) (any, error) {
@@ -301,6 +424,128 @@ func (s *Server) answer(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	return nil, errFailed
 }
 
+func (s *Server) followRoot(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.FollowRoot
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || len(in.Root) == 0 || len(in.Root) > localapi.MaxRoot {
+		return nil, errBadArgs
+	}
+	if s.cfg.DescribeRoot == nil {
+		return nil, errFailed
+	}
+	sum, err := s.cfg.DescribeRoot(ctx, in.Root)
+	if err != nil {
+		return localapi.RootSummary{Refusal: localapi.RefusedRoot, Reason: rootReason(sum.Reason)}, nil
+	}
+	sum.Refusal, sum.Reason = "", ""
+	return sum, nil
+}
+
+// rootReason keeps a refused root's coarse cause only if it is one the
+// page words, never other text (agentosd maps the updater's errors).
+func rootReason(r string) string {
+	switch r {
+	case localapi.RootExpired, localapi.RootSignatures, localapi.RootThreshold:
+		return r
+	}
+	return ""
+}
+
+func (s *Server) follow(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.Follow
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || len(in.Name) > localapi.MaxFollowName || !lowerHex(in.Digest, localapi.DigestLen) {
+		return nil, errBadArgs
+	}
+	if s.cfg.Follow == nil {
+		return nil, errFailed
+	}
+	t, err := s.cfg.Follow(ctx, in.Name, in.Digest)
+	if err != nil {
+		return nil, errFailed
+	}
+	return localapi.Text{Text: t}, nil
+}
+
+func (s *Server) paused(context.Context) (any, error) {
+	if s.cfg.Paused == nil {
+		return nil, errFailed
+	}
+	return localapi.Paused{Grants: s.cfg.Paused()}, nil
+}
+
+func (s *Server) askResume(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.AskResume
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || in.Grant == "" || in.Pause == "" || len(in.Grant) > localapi.MaxID || len(in.Pause) > localapi.MaxPause {
+		return nil, errBadArgs
+	}
+	if s.cfg.AskResume == nil {
+		return nil, errFailed
+	}
+	t, err := s.cfg.AskResume(ctx, in.Grant, in.Pause)
+	if err != nil {
+		return nil, errFailed
+	}
+	return localapi.Text{Text: t}, nil
+}
+
+// forgetTasks and forget take whether the owner's session is unlocked
+// from the same status read that checked the token's lock generation, so
+// a lock between two reads cannot hand an older session "unlocked"
+// (SR3-1).
+func (s *Server) forgetTasks(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.Auth
+	if decode(args, &in) != nil {
+		return nil, errUnauthorized
+	}
+	_, st, ok := s.liveStatus(in.Token)
+	if !ok {
+		return nil, errUnauthorized
+	}
+	if s.cfg.ForgetTasks == nil {
+		return nil, errFailed
+	}
+	return s.cfg.ForgetTasks(st.Unlocked), nil
+}
+
+func (s *Server) forget(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.Forget
+	err := decode(args, &in)
+	_, st, ok := s.liveStatus(in.Token)
+	if !ok {
+		return nil, errUnauthorized
+	}
+	if err != nil || in.ID == "" || len(in.ID) > localapi.MaxGoal {
+		return nil, errBadArgs
+	}
+	if s.cfg.Forget == nil {
+		return nil, errFailed
+	}
+	return localapi.Text{Text: s.cfg.Forget(ctx, in.ID, st.Unlocked)}, nil
+}
+
+func lowerHex(v string, n int) bool {
+	if len(v) != n {
+		return false
+	}
+	for _, c := range v {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // triesLeft is the refusal of a wrong or unchecked code and what the day's
 // local tries have left, told only in a signed-in response to the code
 // just tried (Security D1, UX-2wb-2): a count once 2 or fewer remain, and once none
@@ -351,22 +596,30 @@ func (s *Server) valid(tok string) bool {
 // live is tok's session, read in the same critical section that checks it
 // (Security S2 on step b).
 func (s *Server) live(tok string) (session, bool) {
+	ses, _, ok := s.liveStatus(tok)
+	return ses, ok
+}
+
+// liveStatus is live with the owner status it checked the lock generation
+// against, so a caller's Unlocked is of that same generation (SR3-1).
+func (s *Server) liveStatus(tok string) (session, owner.LocalStatus, bool) {
 	if len(tok) != 2*localapi.TokenBytes {
-		return session{}, false
+		return session{}, owner.LocalStatus{}, false
 	}
-	locks := s.cfg.Owner.LocalStatus().Locks
+	st := s.cfg.Owner.LocalStatus()
+	locks := st.Locks
 	k := sha256.Sum256([]byte(tok))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ses, ok := s.sessions[k]
 	if !ok {
-		return session{}, false
+		return session{}, owner.LocalStatus{}, false
 	}
 	if !s.cfg.Now().Before(ses.until) || locks != ses.locks {
 		delete(s.sessions, k)
-		return session{}, false
+		return session{}, owner.LocalStatus{}, false
 	}
-	return ses, true
+	return ses, st, true
 }
 
 // fresh says tok's session signed in within FreshFor.

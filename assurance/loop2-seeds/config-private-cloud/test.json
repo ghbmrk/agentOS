@@ -1,0 +1,5 @@
+{"tree_rule": [
+  {"path": "config/privacy.json", "pointer": "/name", "op": "eq", "value": "default"},
+  {"path": "config/privacy.json", "pointer": "/retired", "op": "absent"},
+  {"path": "config/privacy.json", "pointer": "/private_routes", "op": "subset", "value": ["local"]}
+]}

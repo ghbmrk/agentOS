@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/guesterr"
 )
 
 // Broker tools for the guest socket (ARC-6 (b)). The guest plane serves
@@ -86,18 +88,18 @@ func (b *Book) Call(ctx context.Context, asker, machine, name string, raw []byte
 			AskBy     *float64 `json:"ask_by_minutes"`
 		}
 		if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&a); err != nil {
-			return ToolResult{}, errors.New("arguments must be an object")
+			return ToolResult{}, guesterr.New("arguments must be an object")
 		}
 		if !requestIDRE.MatchString(a.RequestID) {
-			return ToolResult{}, errors.New("request_id is required: letters, digits, . _ -; at most 64")
+			return ToolResult{}, guesterr.New("request_id is required: letters, digits, . _ -; at most 64")
 		}
 		if a.Wait == nil || *a.Wait <= 0 || *a.Wait > 1e6 {
-			return ToolResult{}, errors.New("wait_minutes is required and must be positive")
+			return ToolResult{}, guesterr.New("wait_minutes is required and must be positive")
 		}
 		spec := Spec{Text: a.Question, Default: a.Default, Choices: a.Choices, Wait: time.Duration(*a.Wait * float64(time.Minute))}
 		if a.AskBy != nil {
 			if *a.AskBy <= 0 || *a.AskBy > 1e6 {
-				return ToolResult{}, errors.New("ask_by_minutes must be positive")
+				return ToolResult{}, guesterr.New("ask_by_minutes must be positive")
 			}
 			spec.AskWithin = time.Duration(*a.AskBy * float64(time.Minute))
 		}
@@ -112,25 +114,25 @@ func (b *Book) Call(ctx context.Context, asker, machine, name string, raw []byte
 			Wait      *float64 `json:"wait_seconds"`
 		}
 		if err := json.Unmarshal(raw, &a); err != nil || !requestIDRE.MatchString(a.RequestID) {
-			return ToolResult{}, errors.New("request_id is required")
+			return ToolResult{}, guesterr.New("request_id is required")
 		}
 		var wait time.Duration
 		if a.Wait != nil {
 			if *a.Wait < 0 {
-				return ToolResult{}, errors.New("wait_seconds must not be negative")
+				return ToolResult{}, guesterr.New("wait_seconds must not be negative")
 			}
 			wait = time.Duration(min(*a.Wait, MaxPoll.Seconds()) * float64(time.Second))
 		}
 		st, err := b.Await(ctx, asker, a.RequestID, machine, wait)
 		if errors.Is(err, ErrNotFound) {
-			return ToolResult{}, fmt.Errorf("no question %s", a.RequestID)
+			return ToolResult{}, guesterr.Newf("no question %s", guesterr.Guest(a.RequestID))
 		}
 		if err != nil {
-			return ToolResult{}, errors.New("the broker could not read that question now; ask again later")
+			return ToolResult{}, guesterr.New("the broker could not read that question now; ask again later")
 		}
 		return result(a.RequestID, st), nil
 	}
-	return ToolResult{}, errors.New("no such tool")
+	return ToolResult{}, guesterr.New("no such tool")
 }
 
 func result(req string, st Status) ToolResult {

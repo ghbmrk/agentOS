@@ -66,7 +66,7 @@ func TestLoop1sModelBuilderWaitsForTheBox(t *testing.T) {
 	if lp.builder.Private(loops.Brief{Hypothesis: loops.Hypothesis{Signal: loops.SignalRepeat}}) {
 		t.Fatal("the in-process compiler's skills are marked private by the builder")
 	}
-	if sh := builderShare(); sh.Prefix != loopbuild.Prefix || sh.Reserve != 0 || sh.Max < 0.3 || sh.Max > 0.4 {
+	if sh := builderShare(); sh.Prefix != loopbuild.BuildPrefix || sh.Reserve != 0 || sh.Max < 0.3 || sh.Max > 0.4 {
 		t.Fatalf("builder share %+v", sh)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/boxname"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -105,6 +106,9 @@ type Config struct {
 	// .Answer) in an unlocked session, with any code stripped, before it
 	// would reach the agent (control.Handler.Answer, W9). Nil: none.
 	Answer func(ctx context.Context, msg string) (reply string, ok bool)
+	// OwnerName is the owner's own name, "" when unknown; the box's name
+	// may not be it (CH-21).
+	OwnerName string
 }
 
 // Carried is an item of a request open at the last shutdown, handed to
@@ -153,13 +157,16 @@ type Channel struct {
 	queued   map[string]*Queued
 	released map[string]time.Time // queued IDs released, for UNDO's reply
 	lateUndo map[string]bool      // released IDs the owner texted UNDO for
-	resume   *resumeCode
+	// undo takes an UNDO whose ID the channel does not hold (SetUndo).
+	undo   atomic.Pointer[UndoHook]
+	resume *resumeCode
 	// lineFailed is when the box's line last failed to send (unix nanos
 	// of cfg.Now), so a queued reply's silence is not read as the
 	// owner's over a line that was down (security B1(a) on PW3).
 	lineFailed  atomic.Int64
 	resumeTexts []time.Time
 	held        *heldMsg
+	rename      *renameReq // a NAME waiting for its code (name.go)
 	limited     []time.Time
 	active      time.Time // last owner message the control handler ran
 	alertAt     time.Time
@@ -183,6 +190,9 @@ type Channel struct {
 	boot           *bootReport
 	// local coalesces texts about local UI sign-ins (local.go).
 	local localAlerts
+	// pmu orders the pacer's non-urgent Post and Release (pacer.go), so
+	// held texts leave the hold once and in order. It is taken before mu.
+	pmu sync.Mutex
 }
 
 var _ control.Auth = (*Channel)(nil)
@@ -233,6 +243,7 @@ func New(cfg Config) (*Channel, error) {
 	if err != nil {
 		return nil, err
 	}
+	checkPacing(&st)
 	c := &Channel{
 		cfg:    cfg,
 		codes:  codes{sec: cfg.Secrets, verify: cfg.Verifier, st: st, store: cfg.Store, rand: cfg.Rand},
@@ -244,7 +255,7 @@ func New(cfg Config) (*Channel, error) {
 		c.cfg.Modem = watchedLine{Modem: cfg.Modem, c: c}
 	}
 	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: cfg.Agent, Machines: cfg.Machines, Notes: append(cfg.Notes[:len(cfg.Notes):len(cfg.Notes)], c.LocalWaiting), Now: cfg.Now,
-		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
+		Settings: c.settings, HelpExtra: strings.TrimSpace(cfg.HelpExtra + " " + pacingHelp), Answer: cfg.Answer}
 	return c, nil
 }
 
@@ -282,6 +293,7 @@ type route struct {
 	delegate string // text for the control handler
 	run      bool   // delegate goes to the control handler
 	narrow   *reply // PAUSE or REVOKE, run outside the lock
+	undo     string // an UNDO ID the channel does not hold, for the hook
 	// limited: the replies count against ReplyLimit (CH-15).
 	limited bool
 	// alerts have their own limit (one per AlertEvery) and are not counted
@@ -375,6 +387,9 @@ func (c *Channel) finish(ctx context.Context, from string, rt route) []string {
 		c.mu.Unlock()
 		replies = append(replies, c.ctrl.Handle(ctx, from, rt.delegate)...)
 	}
+	if rt.undo != "" {
+		replies = append(replies, c.undoElsewhere(ctx, rt.undo))
+	}
 	if rt.narrow != nil {
 		if c.cfg.Narrow == nil {
 			replies = append(replies, "There are no grants to "+strings.ToLower(rt.narrow.word)+".")
@@ -428,13 +443,20 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		}
 	}
 	unlocked := c.codes.unlocked(now)
+	if n, ok := parseName(text); ok {
+		return c.nameLocked(text, n, now, unlocked)
+	}
 	if r, ok := parseReply(text); ok {
 		switch r.word {
 		case "RESUME":
 			out, accepted := c.resumeLocked(r, now)
 			return route{replies: out, limited: !accepted}
 		case "UNDO":
-			return route{replies: []string{c.undoLocked(r.id, now, decided)}, limited: !unlocked}
+			out, held := c.undoLocked(r.id, now, decided)
+			if !held {
+				return route{undo: r.id, limited: !unlocked}
+			}
+			return route{replies: []string{out}, limited: !unlocked}
 		case "PAUSE", "REVOKE":
 			return route{narrow: &r, limited: !unlocked}
 		case "MORE":
@@ -541,6 +563,14 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 		return route{replies: []string{msg}, delegate: rest, run: true}
 	}
 	if h := c.held; h != nil && now.Before(h.expires) {
+		if n, ok := parseName(h.text); ok && n.name != "" && n.code == "" {
+			// A held NAME is not run by RUN: the unlock code proves
+			// the owner, not who wrote it, so it gets the texted
+			// confirmation instead. Its name passed the check when held.
+			c.held = nil
+			name, _ := boxname.Check(n.name, c.cfg.OwnerName)
+			return route{replies: []string{msg + " " + c.askRenameLocked(name, now)}, limited: true}
+		}
 		h.ready = true
 		h.expires = now.Add(c.cfg.CodeTTL)
 		return route{replies: []string{fmt.Sprintf("%s Held: \"%s\". Reply RUN to send it.", msg, field(h.text, 40))}}
@@ -618,6 +648,9 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 		return c.dropLocked(now), true
 	}
 	if _, code := splitCode(text); code != "" {
+		return c.dropLocked(now), true
+	}
+	if n, ok := parseName(text); ok && n.code != "" {
 		return c.dropLocked(now), true
 	}
 	return route{}, false
@@ -896,25 +929,17 @@ const AgentPrefix = "Agent: "
 // Notify texts the owner content that did not come from the broker's own
 // templates, such as an agent's answer, behind AgentPrefix. Secret-shaped
 // content becomes a pointer to the local UI (CH-19).
+// It is paced as ClassAgent (CH-15).
 func (c *Channel) Notify(text string) error {
-	if c.cfg.Modem == nil {
-		return errors.New("owner: no modem")
-	}
-	if text = Disclose(text); text != Hidden {
-		text = AgentPrefix + text
-	}
-	return c.cfg.Modem.Send(c.cfg.Owner, control.Fit(text))
+	return c.NotifyAs(ClassAgent, text)
 }
 
 // Inform texts the owner one of the broker's own fixed-wording notices
 // (a grant added, an action waiting on the local page). Callers never
 // pass agent text: that goes through Notify. Secret-shaped content still
-// becomes a pointer (CH-19).
+// becomes a pointer (CH-19). It is paced as ClassUpdate (CH-15).
 func (c *Channel) Inform(text string) error {
-	if c.cfg.Modem == nil {
-		return errors.New("owner: no modem")
-	}
-	return c.cfg.Modem.Send(c.cfg.Owner, control.Fit(Disclose(text)))
+	return c.Post(ClassUpdate, text)
 }
 
 // Run serves the modem until ctx is done. It first reports what a restart
