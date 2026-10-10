@@ -27,8 +27,9 @@ var controlPath = map[string][]string{
 	"cgroup":    {},
 	"budget":    {"admission", "cgroup"}, // RES-2 component budget (P2-5)
 	"accel":     {"admission"},           // RES-3 discovery from sysfs (P2-5)
-	"owner":     {"control", "journal", "modem"},
+	"owner":     {"boxname", "control", "journal", "modem"},
 	"modem":     {},
+	"boxname":   {}, // CH-21 name check, for NAME
 	// The modem bridge's contract and agentosd's end of it (P2-3w): types
 	// and an in-process queue; the bridge's client is bridgeclient.
 	"bridgeproto": {},
@@ -112,7 +113,7 @@ var machinePlane = map[string]struct {
 }{
 	"vm":         {[]string{"admission", "cgroup", "vm/overlay", "quota"}, forbiddenStd},
 	"vm/overlay": {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
-	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
+	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota", "childproc"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 }
 
 // The guest plane serves each machine's ARC-6 socket (P1-7). STOP,
@@ -124,8 +125,12 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"guest": {[]string{"fold", "guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// fold keeps an oversized tool result for the machine that produced it
+	// and hands back a stand-in. It stores bytes in memory. No network,
+	// no process, no model.
+	"fold": {nil, forbiddenStd},
 	// modelroute forwards to the vault process over its Unix socket and
 	// reports usage to the meter; never the vault or the proxy. It
 	// journals the denials that come back (modelroute.Journal), coalesced

@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os/exec"
 	"sync"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 // Call audio reaches the host one of two ways (Profile.Audio). Either way
@@ -93,8 +94,7 @@ func (ALSA) Record(ctx context.Context, card string) (io.ReadCloser, error) {
 	if !validCard(card) {
 		return nil, errors.New("at: bad sound card")
 	}
-	cmd := exec.CommandContext(ctx, "arecord", alsaArgs(card)...)
-	cmd.Env = alsaEnv
+	cmd := childproc.Command(ctx, childproc.NewEnv(alsaEnv...), childproc.Options{}, "arecord", alsaArgs(card)...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -110,8 +110,7 @@ func (ALSA) Play(ctx context.Context, card string) (io.WriteCloser, error) {
 	if !validCard(card) {
 		return nil, errors.New("at: bad sound card")
 	}
-	cmd := exec.CommandContext(ctx, "aplay", alsaArgs(card)...)
-	cmd.Env = alsaEnv
+	cmd := childproc.Command(ctx, childproc.NewEnv(alsaEnv...), childproc.Options{}, "aplay", alsaArgs(card)...)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -136,28 +135,24 @@ func validCard(card string) bool {
 
 type procReader struct {
 	io.ReadCloser
-	cmd *exec.Cmd
+	cmd *childproc.Cmd
 }
 
 func (p *procReader) Close() error {
 	_ = p.ReadCloser.Close()
-	if p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-	}
+	_ = p.cmd.Kill() // an error only before a start
 	_ = p.cmd.Wait()
 	return nil
 }
 
 type procWriter struct {
 	io.WriteCloser
-	cmd *exec.Cmd
+	cmd *childproc.Cmd
 }
 
 func (p *procWriter) Close() error {
 	_ = p.WriteCloser.Close()
-	if p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-	}
+	_ = p.cmd.Kill() // an error only before a start
 	_ = p.cmd.Wait()
 	return nil
 }

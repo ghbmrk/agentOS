@@ -8,6 +8,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/fold"
 )
 
 type fakeTools struct{ calls []string }
@@ -37,7 +39,7 @@ func TestARC6FurtherToolsTakeIdentityFromTheSocket(t *testing.T) {
 	for _, tl := range r.rpc("fork-1", "tools/list", nil)["tools"].([]any) {
 		names = append(names, tl.(map[string]any)["name"].(string))
 	}
-	if strings.Join(names, ",") != "effect_request,effect_status,recall_search" {
+	if strings.Join(names, ",") != "effect_request,effect_status,result_read,recall_search" {
 		t.Fatalf("tools %v", names)
 	}
 	res := r.rpc("fork-1", "tools/call", map[string]any{"name": "recall_search", "arguments": map[string]any{"query": "x"}}, "X-Machine", "m2")
@@ -64,18 +66,102 @@ func TestARC6FurtherToolsTakeIdentityFromTheSocket(t *testing.T) {
 type shadowTools struct{ fakeTools }
 
 func (shadowTools) List() []map[string]any {
-	return []map[string]any{{"name": "effect_status"}, {"name": "recall_search"}}
+	return []map[string]any{{"name": "effect_status"}, {"name": "result_read"}, {"name": "recall_search"}}
 }
 
-// A further tool set cannot list a tool under an effect tool's name: the
-// broker's own names are served only by the plane (L3 N2 on #95).
+// A further tool set cannot list a tool under an effect tool's or
+// result_read's name: the broker's own names are served only by the plane
+// (L3 N2 on #95, L3 on #670).
 func TestFurtherToolsCannotShadowTheEffectTools(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Tools = &shadowTools{} })
 	var names []string
 	for _, tl := range r.rpc("m1", "tools/list", nil)["tools"].([]any) {
 		names = append(names, tl.(map[string]any)["name"].(string))
 	}
-	if strings.Join(names, ",") != "effect_request,effect_status,recall_search" {
+	if strings.Join(names, ",") != "effect_request,effect_status,result_read,recall_search" {
 		t.Fatalf("tools %v", names)
+	}
+}
+
+// A JSON tool result loses insignificant whitespace and nothing else.
+func TestAJSONToolResultLosesOnlyWhitespace(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Tools = prettyTools{} })
+	res := r.rpc("m1", "tools/call", map[string]any{"name": "pretty", "arguments": map[string]any{}})
+	text, _ := res["content"].([]any)[0].(map[string]any)["text"].(string)
+	if text != `{"note":"keep  spaces","n":1}` && text != `{"n":1,"note":"keep  spaces"}` {
+		// key order is the tool's order, only spaces go
+		if compactJSON(prettyBody) != text {
+			t.Fatalf("result %q", text)
+		}
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil || got["note"] != "keep  spaces" {
+		t.Fatalf("value %q %v", text, err)
+	}
+	if res["isError"] == true {
+		t.Fatal("error")
+	}
+}
+
+const prettyBody = "{\n  \"n\": 1,\n  \"note\": \"keep  spaces\"\n}\n"
+
+type prettyTools struct{}
+
+func (prettyTools) List() []map[string]any {
+	return []map[string]any{{"name": "pretty", "inputSchema": map[string]any{"type": "object"}}}
+}
+
+func (prettyTools) Call(context.Context, string, string, string, json.RawMessage) (string, bool, error) {
+	return prettyBody, true, nil
+}
+
+type bigTools struct{}
+
+func (bigTools) List() []map[string]any {
+	return []map[string]any{{"name": "big", "inputSchema": map[string]any{"type": "object"}}}
+}
+
+func (bigTools) Call(_ context.Context, _, _, name string, _ json.RawMessage) (string, bool, error) {
+	if name != "big" {
+		return "", false, nil
+	}
+	return strings.Repeat("x", fold.Max+32), true, nil
+}
+
+// An oversized tool result is handed back as a stand-in. Only the machine
+// that received it can read the original, which is not folded a second time.
+func TestAnOversizedToolResultIsReadBackWhole(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Tools = bigTools{} })
+	res := r.rpc("m1", "tools/call", map[string]any{"name": "big", "arguments": map[string]any{}})
+	text, _ := res["content"].([]any)[0].(map[string]any)["text"].(string)
+	var in fold.StandIn
+	if err := json.Unmarshal([]byte(text), &in); err != nil || !in.Folded || in.Bytes != fold.Max+32 {
+		t.Fatalf("stand-in: %s %v", text, err)
+	}
+	got := r.rpc("m1", "tools/call", map[string]any{"name": "result_read", "arguments": map[string]any{"id": in.ID}})
+	full, _ := got["content"].([]any)[0].(map[string]any)["text"].(string)
+	if full != strings.Repeat("x", fold.Max+32) || got["isError"] == true {
+		t.Fatalf("read back %d err %v", len(full), got["isError"])
+	}
+	other := r.rpc("m2", "tools/call", map[string]any{"name": "result_read", "arguments": map[string]any{"id": in.ID}})
+	if other["isError"] != true {
+		t.Fatalf("other machine: %v", other)
+	}
+}
+
+// A machine created later under a destroyed machine's ID cannot read the
+// results held for the destroyed one (L3 and Security on #670).
+func TestAReusedMachineIDCannotReadTheOldMachinesResults(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Tools = bigTools{} })
+	res := r.rpc("m1", "tools/call", map[string]any{"name": "big", "arguments": map[string]any{}})
+	text, _ := res["content"].([]any)[0].(map[string]any)["text"].(string)
+	var in fold.StandIn
+	if err := json.Unmarshal([]byte(text), &in); err != nil || !in.Folded {
+		t.Fatalf("stand-in: %.80s %v", text, err)
+	}
+	r.p.Close("m1")
+	got := r.rpc("m1", "tools/call", map[string]any{"name": "result_read", "arguments": map[string]any{"id": in.ID}})
+	if got["isError"] != true {
+		t.Fatal("a reused ID read the destroyed machine's result")
 	}
 }

@@ -24,7 +24,9 @@
 //
 // Requests: token; write PATH TEXT; read PATH; remove PATH; stat PATH;
 // hold SOCK (keep a connection to SOCK open); heldget PATH (GET over the
-// held connection).
+// held connection); dial NET ADDR (dial ADDR over tcp or udp, send a
+// line and wait for one back); lookup NAME (resolve NAME); ls DIR (the
+// names in DIR, space-separated).
 package main
 
 import (
@@ -235,6 +237,25 @@ func fill(path string, mb int) string {
 	return "ok"
 }
 
+// dial sends one line to addr over network and returns the line it gets
+// back, or the first error.
+func dial(network, addr string) string {
+	c, err := net.DialTimeout(network, addr, 3*time.Second)
+	if err != nil {
+		return "ERR net: " + err.Error()
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.WriteString(c, "guest\n"); err != nil {
+		return "ERR net: " + err.Error()
+	}
+	line, err := bufio.NewReader(c).ReadString('\n')
+	if err != nil {
+		return "ERR net: " + err.Error()
+	}
+	return strings.TrimSpace(line)
+}
+
 func serve() {
 	var b [16]byte
 	rand.Read(b[:])
@@ -315,6 +336,25 @@ func serve() {
 				os.Stdout.WriteString(line)
 			}
 			out = "ok"
+		case "dial":
+			out = dial(f[1], f[2])
+		case "lookup":
+			if addrs, err := net.DefaultResolver.LookupHost(context.Background(), f[1]); err != nil {
+				out = "ERR " + err.Error()
+			} else {
+				out = strings.Join(addrs, " ")
+			}
+		case "ls":
+			es, err := os.ReadDir(f[1])
+			if err != nil {
+				out = "ERR " + err.Error()
+				break
+			}
+			var names []string
+			for _, e := range es {
+				names = append(names, e.Name())
+			}
+			out = strings.Join(names, " ")
 		case "stat":
 			if _, err := os.Stat(f[1]); err != nil {
 				out = "absent"

@@ -1,12 +1,13 @@
 name: metrics
-# L4 inputs (PLAN.md §2, §5): regenerate METRICS.md weekly, just before the Sunday 06:00
-# (UTC-4) plan-week reset, and on demand. Only this workflow writes METRICS.md.
+# L4 inputs (PLAN.md §2, §5): regenerate METRICS.md daily (D-085 convergence measures; the
+# plan week resets Sunday 06:00 UTC-4, so the 05:30 run on Sunday closes the week), and
+# on demand. Only this workflow writes METRICS.md.
 # Runs only from main (schedule and dispatch never run PR code), with no third-party
 # action beyond the pinned checkout. Collection runs with a read-only token; only the
 # commit job can write, and it runs no repository code.
 on:
   schedule:
-    - cron: "30 9 * * 0" # Sunday 09:30 UTC = 05:30 UTC-4
+    - cron: "30 9 * * *" # daily 09:30 UTC = 05:30 UTC-4
   workflow_dispatch:
 permissions:
   contents: read
@@ -52,5 +53,5 @@ jobs:
           test -z "$(git status --porcelain | grep -v ' METRICS.md$')"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -qm "metrics: weekly METRICS.md" -- METRICS.md
+          git commit -qm "metrics: daily METRICS.md" -- METRICS.md
           git pull -q --rebase origin main && git push origin HEAD:main

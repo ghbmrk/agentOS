@@ -20,7 +20,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
@@ -30,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/quota"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
@@ -71,11 +71,14 @@ func (r *Runtime) platform() string {
 	return r.Platform
 }
 
-func (r *Runtime) cmd(ctx context.Context, args ...string) *exec.Cmd {
+func (r *Runtime) cmd(ctx context.Context, o childproc.Options, args ...string) *childproc.Cmd {
+	return childproc.Command(ctx, childproc.NewEnv(runscEnv...), o, r.Bin, r.argv(args...)...)
+}
+
+// argv is runsc's argv after its name: the global flags, then args.
+func (r *Runtime) argv(args ...string) []string {
 	base := []string{"--root", r.StateDir, "--platform=" + r.platform(), "--network=none", "--ignore-cgroups", "--overlay2=none", "--host-uds=open"}
-	c := exec.CommandContext(ctx, r.Bin, append(base, args...)...)
-	c.Env = runscEnv
-	return c
+	return append(base, args...)
 }
 
 // runscEnv is all of runsc's environment: a fixed PATH. runsc runs as
@@ -87,9 +90,7 @@ var runscEnv = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 
 func (r *Runtime) run(ctx context.Context, args ...string) error {
 	var stderr bytes.Buffer
-	c := r.cmd(ctx, args...)
-	c.Stderr = &stderr
-	if err := c.Run(); err != nil {
+	if err := r.cmd(ctx, childproc.Options{Stderr: &stderr}, args...).Run(); err != nil {
 		return fmt.Errorf("runsc %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
@@ -97,12 +98,22 @@ func (r *Runtime) run(ctx context.Context, args ...string) error {
 
 // Start mounts the machine's root and starts its guest.
 func (r *Runtime) Start(ctx context.Context, l vm.Launch) error {
-	return r.launch(ctx, l, "run", "--bundle", r.bundle(l), "-detach", cid(l.ID))
+	return r.launch(ctx, l, r.launchArgs(l, "")...)
 }
 
 // Restore mounts the machine's root and restores memory from image.
 func (r *Runtime) Restore(ctx context.Context, l vm.Launch, image string) error {
-	return r.launch(ctx, l, "restore", "--bundle", r.bundle(l), "--image-path="+image, "-detach", cid(l.ID))
+	return r.launch(ctx, l, r.launchArgs(l, image)...)
+}
+
+// launchArgs is the subcommand and its flags that start a guest: run, or
+// restore from image when image is set. Every global flag comes from
+// argv, which TestAGuestCannotDial checks together with these (A14).
+func (r *Runtime) launchArgs(l vm.Launch, image string) []string {
+	if image == "" {
+		return []string{"run", "--bundle", r.bundle(l), "-detach", cid(l.ID)}
+	}
+	return []string{"restore", "--bundle", r.bundle(l), "--image-path=" + image, "-detach", cid(l.ID)}
 }
 
 func (r *Runtime) bundle(l vm.Launch) string { return filepath.Join(l.Dir, "bundle") }
@@ -133,7 +144,6 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 		syscall.Unmount(l.Root, syscall.MNT_DETACH)
 		return fmt.Errorf("mount %s private: %w", l.Root, err)
 	}
-	c := r.cmd(ctx, args...)
 	// The guest's console reaches the log through the broker, which caps
 	// it: given the file itself, a guest printing without end would fill
 	// the disk (RES-4).
@@ -144,7 +154,7 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 	}
 	go keepConsole(pr, filepath.Join(l.Dir, "console.log"), maxConsoleLog)
 	defer pw.Close() // the sandbox holds its own copy
-	c.Stdout, c.Stderr = pw, pw
+	o := childproc.Options{Stdout: pw, Stderr: pw}
 	if l.Cgroup != "" {
 		fd, err := syscall.Open(l.Cgroup, syscall.O_DIRECTORY|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		if err != nil {
@@ -154,9 +164,9 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 		defer syscall.Close(fd)
 		// clone3 places runsc, and so the sandbox and gofer it starts, in
 		// the machine's group from its first instruction.
-		c.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: fd}
+		o.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: fd}
 	}
-	if err := c.Run(); err != nil {
+	if err := r.cmd(ctx, o, args...).Run(); err != nil {
 		r.Kill(context.WithoutCancel(ctx), l)
 		return fmt.Errorf("runsc %s %s: %w (see %s)", args[0], l.ID, err, filepath.Join(l.Dir, "console.log"))
 	}
@@ -275,18 +285,18 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		return vm.ExecResult{}, err
 	}
 	defer gr.Close()
-	cmd := r.cmd(ctx, append([]string{"--log=" + logs[0], "--debug-log=" + logs[1], "exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, "--pass-fd", "3:2", cid(id)}, c.Argv...)...)
-	cmd.Stdin = bytes.NewReader(c.Stdin)
 	stdout, stderr := &capped{max: c.MaxOutput}, &capped{max: c.MaxOutput}
 	runscErr := &capped{max: runscMsgMax}
-	cmd.Stdout, cmd.Stderr, cmd.ExtraFiles = stdout, runscErr, []*os.File{gw}
-	cmd.WaitDelay = ExecWaitDelay
-	cmd.Cancel = func() error {
-		// Read the pid now: the deferred Remove may run before the kill.
-		b, _ := os.ReadFile(pidFile)
-		go r.killExec(id, strings.TrimSpace(string(b)))
-		return cmd.Process.Kill()
-	}
+	cmd := r.cmd(ctx, childproc.Options{
+		Stdin:  bytes.NewReader(c.Stdin),
+		Stdout: stdout, Stderr: runscErr, ExtraFiles: []*os.File{gw},
+		WaitDelay: ExecWaitDelay,
+		OnCancel: func() {
+			// Read the pid now: the deferred Remove may run before the kill.
+			b, _ := os.ReadFile(pidFile)
+			go r.killExec(id, strings.TrimSpace(string(b)))
+		},
+	}, append([]string{"--log=" + logs[0], "--debug-log=" + logs[1], "exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, "--pass-fd", "3:2", cid(id)}, c.Argv...)...)
 	// The guest's stderr is read to its end, but no longer than
 	// ExecWaitDelay past the context's end or runsc's exit, as os/exec
 	// bounds stdout: something left in the sandbox may hold it open.
@@ -320,7 +330,7 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 	// runsc's --log line shows (notRun, SR2-3q, SR2-3p); otherwise, a
 	// crash after the start included, ErrExecFailed, since the command
 	// may have run.
-	var exit *exec.ExitError
+	var exit *childproc.ExitError
 	crashed := err != nil && len(runscErr.bytes()) > 0
 	pid, _ := os.ReadFile(pidFile)
 	if started := len(bytes.TrimSpace(pid)) > 0; !started || size(logs[0]) > 0 || crashed {

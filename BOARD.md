@@ -6,11 +6,12 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| PILOT-S | [Sonnet builder pilot](briefs/PILOT-S.md) | — | building (2026-10-08 through the 2026-10-18 reset, D-060) |
+| PILOT-S | [Sonnet builder pilot](briefs/PILOT-S.md) | — | building (2026-10-08 through the 2026-10-13 reset, D-060) |
 | DOC-1 | [One home per fact; review pipeline; per-PR lens records](briefs/DOC-1.md) | — | merged (#355) |
 | DOC-3 | [BOARD index and briefs; DECISIONS format](briefs/DOC-3.md) | DOC-1 | merged (#356) |
 | DOC-2 | [doclint and cause metrics](briefs/DOC-2.md) | DOC-3 | merged (#357) |
 | DOC-4 | [Per-file review records; no shared run tables](briefs/DOC-4.md) | DOC-1, DOC-2 | building |
+| DOC-7 | [LATER records sweep](briefs/DOC-7.md) | DOC-2, DOC-4 | in review (C; D-048 exception, owner to confirm) |
 | SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
 | HK-1 | [depaudit self-test flake fix](briefs/HK-1.md) | — | in review |
 | DEP-2 | [depaudit evidence out of the tracee's reach](briefs/DEP-2.md) | HK-1 | merged (1355d27; #437) |
@@ -99,6 +100,26 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | SR3-5-f4 | mail: `errChanged` ("changed since approval") is reported where nothing changed (an `Execute` with no pin, a `Reconcile` `Unknown` after a restart, a `movedFrom` failure): give each its own fixed reason words (CH-19); brief to write (release, tier A; lens on #579, release 2) | SR3-5-f1 | queued (release; needs brief) |
 | OWN-gaps | Owner principles with no realizing requirement (#653 L3): a check of the resulting state after each effect (OWN-13), detail served without rerunning the task (OWN-6), correction available while no route works (OWN-18), on-track obligations retrievable by text (OWN-16). Spec-diff or brief to write (release) | #653 merged | queued |
 
+## Owner-benefit review (2026-10-09)
+
+Primary lane; from an external review's points 2 to 6, checked against main at 9b4bf8a and planned with Mark on 2026-10-09 (an uncertain SMS is flagged, not resent; the board-sync workflow may commit to main). Suggested order: RT-1, DEL-sd, DEL-1, DOC-5, DIG-1, DEL-2, DOC-6, MET-1, IMG-5.
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| RT-1 | [Risk tiers for the image, guest build and CI; unmatched paths default to B](briefs/RT-1.md) | — | building (claude; tier A) |
+| DEL-sd | L1 spec diff: an owner reply the broker accepted is delivered, kept or flagged, never lost across a restart; an SMS whose delivery is uncertain is flagged, not resent (DEL-1 and DEL-2 build on these as provisional choices) | — | queued (Mark approves) |
+| DEL-1 | [An accepted owner reply survives a crash: persist before 204, idempotent reply, guest retries what it holds](briefs/DEL-1.md) | DEL-sd opened | queued (brief ready; tier A) |
+| DEL-2 | [Send outcomes for owner replies: retry known-unsent, flag uncertain, stable email intent](briefs/DEL-2.md) | DEL-1 | queued (brief ready; tier A) |
+| DOC-5 | [doclint catches BOARD and LATER contradictions](briefs/DOC-5.md) | — | in review (#703) |
+| DOC-6 | [BOARD state follows merges automatically](briefs/DOC-6.md) | DOC-5 | queued (brief ready; tier A) |
+| MET-1 | [Metrics measure matching periods and stay current](briefs/MET-1.md) | — | queued (brief ready) |
+| IMG-5 | Retroactive tier-A review of `image/` as merged at tier C (P2-1 #41 and later image PRs): Security lens with an explicit threat check on the boot chain, verity layout and the systemd units' privileges; findings become rows (brief to write) | RT-1 | queued |
+| RT-2 | Risk-tier follow-ups from PR #705's reviews (brief to write): CI and reviewers compute the tier with the base branch's `tools/risk_tier.py`, not the PR's own copy (invariant: a PR cannot edit the rules that set its review depth; failure: a PR drops `image/` from the A list and edits a unit, and both runs print B); `tools/hostcheck*` to A (HOST-1e; failure: a C PR allow-lists a real host change and the HW-8 check reports it as disclosed) | RT-1 | queued |
+| UX-INV | Owner-effort inventory: script one week of owner traffic and count texts and taps per task for MORE paging, withheld replies (CH-19, CH-20p), a retry that loses the owner's earlier choice, quiet hours and pacing (W5-Dc-r1) and digest sources (DIG-1); each step over budget becomes a row (brief to write) | DIG-1 | queued |
+| REV-CHK | Sweep `reviews/*/README.md` for finding kinds seen on two or more PRs without a lint rule, test or CI check (CLAUDE.md, OPERATING §4); one row per gap (brief to write) | — | queued |
+| A10-T1 | Owner-minutes trial (A10, H6): the same H6 tasks on AgentOS, OpenClaw alone and a provider CLI, owner-minutes and outcomes measured over the same period | Mark sets the trial time | queued (needs Mark) |
+| LRN-1 | [No adoption bonus without a measured gain](briefs/LRN-1.md) | — | in review (tier A) |
+
 ## Phase 0: harness and risk spikes
 
 | ID | Package | Needs | State |
@@ -109,21 +130,23 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 | S7 | [Host foundation](briefs/S7.md) | Cloud only | merged (result, systemd image stack on Debian 13; HW-5a decided) |
 | S3 | [Agent machines at 8 GB](briefs/S3.md) | Cloud first, then N95 | merged (cloud part; Firecracker + N95 timings wait on hardware) |
 | S4 | [OpenClaw unmodified as a guest via broker tools; record any…](briefs/S4.md) | Cloud only | merged |
-| S5 | [Credentialed browser](briefs/S5.md) | see brief | building (fixture suite passes (interim result); live run blocked on network policy) |
+| S5 | [Credentialed browser](briefs/S5.md) | see brief | in review (fixture suite and live run on 5 real sites pass; see RESULT.md) |
 | S6 | [Consumer AI CLIs in no-tools relay mode](briefs/S6.md) | Mark's accounts | dropped (superseded by S8 (CRED-5 now covers full provider agents)) |
 | S8 | [Provider agents as workers](briefs/S8.md) | Cloud first (stubs), then Mark's accounts | merged (03641d1; #186 cloud part and spec diff) |
 | S8-W1 | [Image fix for worker-held custody](briefs/S8-W1.md) | S8, #186 | queued (blocked: needs a supervised session with prompts on, D-064; the design hand-off is a bwrap prefix for agentos-toolsh, managed-settings denies and a containment test) |
 | S8-W1a | [Inventory credential-bearing tool surfaces](briefs/S8-W1a.md) | S8 | building (C; from #262; feeds S8-W1) |
 | S8-live | [S8 live part](briefs/S8-live.md) | see brief | queued |
 | S8-codex-terms | [Read OpenAI's current terms on a proxy holding ChatGPT-managed…](briefs/S8-codex-terms.md) | openai.com reachable | in review (decided: broker-held, unconfirmed route, #328; [note](spikes/S8-provider-workers/CODEX-TERMS.md)) |
-| CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | merged (#420) |
+| CRED-5f | [CRED-5 fallback when no API key is granted](briefs/CRED-5f.md) | #328 | merged (#420); spec side in review (#421) |
 | CRED-5f-mr | [Model line for STATUS through `modelroute`: C2 grant, lock and reachability state, replacing agentosd's socket stat (#525 records)](briefs/CRED-5f.md#added-scope-model-line-for-status-release-from-525) | CRED-5f | in review (tier A: `modelroute`, `cmd`) |
 | CRED-5f-mr-busy | C2: a probe that times out while the vault process is busy (an unlock's key derivation, say) reads "not reachable ... restart the box", like a dead process; tell a slow answer apart from none, or retry before naming a restart (release, tier A, OP-9; UX lens on #566; brief to be written) | CRED-5f-mr | queued (release) |
 | CRED-5f-mr-page | C2: `modelLocked` says "the local page" where other owner texts say "my Wi-Fi page"; settle one name for the box's page across owner lines, within `ownerWorded` (no apostrophes) (release, tier B, OP-9; UX lens on #566; brief to be written) | CRED-5f-mr | queued (release) |
 | CRED-5f-mr-grant | Grants a real box can get: agentosd serves the local page's API-key step (`localui.AgentosdSetup.ConnectAPIKey` answers `errNotServed` today) and the vault process's model grants follow stored keys, not only `-grant` flags read at start (egress K8); until then every box reads "no AI plan or key connected", and `modelNoGrant` returns to naming the page (`TestModelNoGrantNamesAServedStep`); also a test that `serveCmd` calls `withGrants` (drive its custody construction, or factor out a `serveCustody(flags)`, and see `granted` follow `-grant`), because `TestWithGrantsSetsTheGrantState` pins the helper and not the call, and dropping the call reads every granted box as "no AI plan or key connected" with all tests green (release, tier A, A11, ONB-3, CRED-5, OP-9; Potency on #566; L3 on #566 point 1, comment 6078095135; Security on #566 point 1, comment 6078102450; brief to be written) | CRED-5f-mr | queued (release) |
 | CRED-5f-mr-trailers | `modelroute.Forward` scrubs broker-only headers incompletely: `dropOurs` deletes the canonical key, so a non-canonical map key (`h["agentos-state"]`) survives, and request trailers are never scrubbed, so a declared `Agentos-*` trailer reaches the vault process; delete by the original key and run `dropOurs` on `pr.Out.Trailer`, with a raw-wire test. Not reachable from the wire today (release, tier A, ARC-6, CRED-1; L3 point 1 and Security point 1 on #566; brief to be written) | — | queued (release) |
 | CRED-5t | [Broker-held route failure triggers and fail-closed refresh test](briefs/CRED-5t.md) | #328 | in review (#426) |
-| CRED-5w | [Owner pause and withdrawal notice for broker-held routes](briefs/CRED-5w.md) | #328 | queued |
+| CRED-5w | [Owner pause and withdrawal notice for broker-held routes](briefs/CRED-5w.md) | #328 | in review (#421) |
+| CRED-5b | [Build and test broker-held route failure, fallback and owner pause](briefs/CRED-5b.md) | #421, CRED-5c, CAP-11 plan-route code (S8) | queued (release; checks #420 provider-keyed withdrawal and notice cadence, takes #426 relay findings) |
+| CRED-5c | [Consent ask placement and wording for unconfirmed broker-held routes](briefs/CRED-5c.md) | #421 | queued (release; serves CH-10 tiers: an unconfirmed route is not granted until consent stands; #328 S1/U1/U2, #421 L3 point 5) |
 | S1 | [Screenless USB4-SSD boot on ≥3 unmodified PCs](briefs/S1.md) | Mark: hardware + hands | queued (test kit ready; waiting on hardware) |
 | S2 | [USB LTE modem](briefs/S2.md) | Mark: 2 modems + SIM | queued (test kit ready; waiting on hardware) |
 | P0X | [Spec v0.12](briefs/P0X.md) | — | merged (cada7c1; SPEC.md v0.12) |
@@ -158,7 +181,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7 | in review (#41) |
+| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7 | queued (#41 merged the older image; #175 is the unmerged rebuild: per-drive ID check in the initrd, `DevicePolicy=closed`; branch `pkg/p2-1-image-build-6izuf9` kept) |
 | P2-grants | [Grants and approval policy](briefs/P2-grants.md) | P1-7 | merged (a390f03; broker/grants) |
 | P2-rev3 | [Reversible conversions](briefs/P2-rev3.md) | P2-grants | merged (04be62e; broker/reversible) |
 | P2-gr8 | [GR8 fix: approval used up inside the dispatch commit](briefs/P2-gr8.md) | P2-rev3 | merged (a390f03; broker/grants) |
@@ -201,7 +224,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | OP9-status | [OP-9: STATUS names every capability that is off or can't run; split into -a and -b](briefs/OP9-status.md) | P3-2, P3-4 | queued |
 | OP9-status-a | [OP-9 capability-line registry for STATUS and the digest; lines for every silent off case; A11 learning-cause test](briefs/OP9-status.md#op9-status-a-registry-and-the-silent-cases) | P3-2, P3-4 | merged (#525, 38c5f1c) |
 | OP9-status-b | [OP-9 fix clauses on existing off lines; loop 2 wording; owner choices and the LOOP-3 loop-shares line](briefs/OP9-status.md#op9-status-b-fix-clauses-loop-lines-and-owner-choices) | OP9-status-a, P3-4b-1b, P3-4b-5 | queued (tier A; scope extended by #525 records: worker tools named under H1/H2 lines, plainLine keeps apostrophes; also, from the #532 L3 (comment 6074799003): `capState.recallWired` (broker `capoff.go`) is called only from tests, so C7's "Memory across tasks: off" line can never show in production; wire it) |
-| DIG-1 | [Daily digest sender (CH-15) reading every Digest() source, OP-9 lines included (brief to be written)](briefs/OP9-status.md#split) | W5, OP9-status-a, W5-Db | queued (tier A declared; needs its own brief) |
+| DIG-1 | [Daily digest sender (CH-15) reading every Digest() source, OP-9 lines included, with a test that no `Digest()` goes unwired](briefs/DIG-1.md) | W5, OP9-status-a, W5-Db, W5-Dc (#592) | queued (brief ready; tier A) |
 | P3-4b-3 | [LOOP-7 off-the-shelf: socket and action-protocol fuzz targets, in-guest socket probe](briefs/P3-4b.md#p3-4b-3-loop-7-fuzzing-and-socket-probes) | P3-4b-1b | merged (#523, 58a6994) |
 | P3-4b-4a | [LOOP-7 off-the-shelf: probe findings through `Report`, continuous canary rounds, published injection corpora](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-1b | merged (#515, afd66a7) |
 | P3-4b-4b | [LOOP-7 off-the-shelf: tamper and exhaustion probes, and corpus replay through a real guest channel (both need the in-machine rig). Owed check (second occurrence, Security #515 f4 after #523 f5): move `broker/loops`, `broker/probecmd` and `broker/corpus` to tier A in `tools/risk_tier.py` (`TIER_A_BROKER`) with `test_risk_tier.py` pins. Corpus replay split to P3-4b-4d (size)](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-4a | merged (#548; 8a31dc9) |
@@ -263,8 +286,9 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | P3-4b-3r-env-r7 | [Detect commands by type in `childEnvCheck`: `go/types` with `importer.ForCompiler(fset, "source", nil)` (no new module) to catch what names miss (a command behind a pointer or interface, an alias used in another package) and to carry a flow check for an `Env` set after the start or under a condition; keep the run under ~20 s (release, tier A; #621 L3 point 4, comment 6083950242)](https://github.com/ghbmrk/agentOS/pull/621) | P3-4b-3r-env-r1 | queued (release; tier A declared) |
 | P3-4b-3r-env-r8 | [Make child environments fail closed at run time, so `childEnvCheck` becomes defence in depth, not the boundary: (a) one wrapper package, `childproc`, hands out no `*exec.Cmd`, only an opaque handle (e.g. from `childproc.Command`/`childproc.StartProcess`) whose start checks `Env` immediately before starting, panics on a nil `Env` or `ProcAttr`, and refuses the process's own environment or denylisted keys; (b) an import gate allows `os/exec` and the launcher selectors in `os`, `syscall` and `unix` only inside `childproc`, so with (a) `os/exec` is reachable only there and no file can call `.Run`/`.Start`/`.Output`/`.CombinedOutput` on a `*exec.Cmd` from a helper (#621 delta Security 6: `fresh(a.New()).Run()` in a file without `os/exec` started a child that saw `AGENTOS_OWNER`); loop7, probecmd, vm/gvisor and the modem tools move onto it; files that import `childproc` are in `childEnvCheck`'s scope. Rejected alternative: gating those methods on `*exec.Cmd` outside `childproc`, which needs r7's type information. Also flag any `.Env = <nil>` or `Env: <nil>` outright whatever the receiver (release, tier A; #621 delta Security 4a, comments 6085089719, 6085443650, 6085554043)](briefs/P3-4b-3r-env-r8.md) | P3-4b-3r-env-r1 | queued (split into P3-4b-3r-env-r8a and -r8b: one package cannot finish under 150k; not startable itself, build the two rows) |
 | P3-4b-3r-env-r8a | [`childproc`: the opaque launcher with a deny-by-default run-time `Env` check, the dependency-graph import gate with its one exemption map, `Env: <nil>` flagged whatever the receiver, and the first moves (loop7, probecmd, machprobe); the #621 delta Security 6 repro is a gate fixture (release, tier A)](briefs/P3-4b-3r-env-r8.md#requirements-r8a) | P3-4b-3r-env-r1 | in review ([#651](https://github.com/ghbmrk/agentOS/pull/651)) (A) |
-| P3-4b-3r-env-r8b | [Move the remaining launchers onto `childproc` (vm/gvisor, modem/at, browser, clock, agentos-guest-bridge, quotatest, swtpm) and drop their gate exemptions. Also (#651 L3 1, 2; comment 6087157132): the D1 walk also rejects an exported interface that an `os/exec` type satisfies (`types.Implements`) and pins each exported signature, not only the names; the gate also covers other-GOARCH and tag-gated files (`IgnoredGoFiles`; r8a already takes the union over both cgo settings); a D1 fixture for an interface result `*exec.Cmd` satisfies (#651 Security 4a 2); a positive runner test comparing a running child's environment with the built pairs (Security 4a 4); the daemon's escapes walk (`TestAgentosdLinksNoInference`) takes the same union of `CGO_ENABLED` settings as the gate, because it passes a `//go:build !cgo` file that starts a child under `CGO_ENABLED=1` and fails it under 0 (Security 4a 5, comment 6087176896; predates r8a); and a gate fixture with `import "C"` and `os.StartProcess` pins the `CgoFiles` scan, which no test covers today (removing `{{join .CgoFiles " "}}` from the `go list` format passes every gate test; no CRED-1 bypass, since a file importing "C" is not built under `CGO_ENABLED=0`; Security 4a round 2 point 1, comment 6087400018) (release, tier A)](briefs/P3-4b-3r-env-r8.md#requirements-r8b-its-own-session-after-r8a-merges) | P3-4b-3r-env-r8a | queued (release; tier A declared) |
+| P3-4b-3r-env-r8b | [Move the remaining launchers onto `childproc` (vm/gvisor, modem/at, browser, clock, agentos-guest-bridge, quotatest, swtpm) and drop their gate exemptions. Also (#651 L3 1, 2; comment 6087157132): the D1 walk also rejects an exported interface that an `os/exec` type satisfies (`types.Implements`) and pins each exported signature, not only the names; the gate also covers other-GOARCH and tag-gated files (`IgnoredGoFiles`; r8a already takes the union over both cgo settings); a D1 fixture for an interface result `*exec.Cmd` satisfies (#651 Security 4a 2); a positive runner test comparing a running child's environment with the built pairs (Security 4a 4); the daemon's escapes walk (`TestAgentosdLinksNoInference`) takes the same union of `CGO_ENABLED` settings as the gate, because it passes a `//go:build !cgo` file that starts a child under `CGO_ENABLED=1` and fails it under 0 (Security 4a 5, comment 6087176896; predates r8a; not built here, carried by P3-4b-3r-env-r10, #659 L3 2); and a gate fixture with `import "C"` and `os.StartProcess` pins the `CgoFiles` scan, which no test covers today (removing `{{join .CgoFiles " "}}` from the `go list` format passes every gate test; no CRED-1 bypass, since a file importing "C" is not built under `CGO_ENABLED=0`; Security 4a round 2 point 1, comment 6087400018) (release, tier A)](briefs/P3-4b-3r-env-r8.md#requirements-r8b-its-own-session-after-r8a-merges) | P3-4b-3r-env-r8a | in review (release; tier A) |
 | P3-4b-3r-env-r9 | [`childproc` failure texts give the next step (#651 UX 2, 4; comment 6087104605): the gate's text names `childproc.Command` with `NewEnv` and says an `exempt` entry needs a reviewed reason; `environment key X is not allowlisted` and `is agentosd's own` say to add the key to `allowedKeys` with the children that need it, by review; a refusal by value says the cause is the operator's own `AGENTOS_*` or credential setting (a plain word of 6+ bytes is found inside every child's `HOME`, a short one equal to `off` matches `GOCACHE`), and a test pins that loop7 reports a start refusal as the runner's error, never a finding; the NUL and duplicate-key refusals in `Env.check` print the key `k`, so a caller that builds `"<secret>\x00X=1"` puts the secret prefix in the daemon's error text (log only, never a child, so outside CRED-1's child boundary): report the entry's index, as the malformed-entry refusal does (Security 4a round 2 point 2, comment 6087400018) (release, tier A)](briefs/P3-4b-3r-env-r8.md) | P3-4b-3r-env-r8a | queued (release; tier A declared) |
+| P3-4b-3r-env-r10 | [Two false passes left after r8b (release, tier A; #659 L3 2 and Security 4a 2, comments 6089925620, 6089927614): (a) `linkedDeps` in `broker/daemon/inference_test.go` runs one `go list -deps`, so `TestAgentosdLinksNoInference` never sees an inference import made only under the other cgo setting; take the union over `CGO_ENABLED=0` and `1`, as the childproc gate does, with a `//go:build cgo` fixture. (b) The D1 walk in `TestTheHandleIsOpaque` walks interface methods always as inputs and out-params (`*any`, `chan<- fmt.Stringer`, and map or slice elements of a parameter) as inputs, so an `Options` field `Hook interface{ Started(any) }` passes; walk interface methods with the current direction and treat what a parameter points to or carries as outflow, with fixtures `interface{ Put(any) }`, `Out(p *any)` and `Ch(chan<- fmt.Stringer)`](https://github.com/ghbmrk/agentOS/pull/659) | P3-4b-3r-env-r8b | queued (release; tier A declared) |
 | P3-4b-3r-confine | [Fuzz children confined: own cgroup leaf with `memory.max` and `pids.max`, empty network namespace, unprivileged user, bounded fuzz cache; carries 3a-r3, r4](briefs/P3-4b-3r.md#p3-4b-3r-confine) | P3-4b-3a | merged (bba009a; #588) |
 | P3-4b-3r-confine-r1 | [The fuzz leaf's 1 GiB `memory.max` sits outside the RES-2 budget sum: it fits the HW-4 floor only because fuzzing runs in spare capacity and is preempted within 2 s. Measure a fuzz worker beside a starting machine on the floor box, then lower the cap to 512 MiB or count the leaf in the budget (agentosd L7-6 "If wrong"; L3 2 and Security R4 on #588; release; tier A)](briefs/P3-4b-3r-confine-r3.md) | P3-4b-3r-confine | in review (built in P3-4b-3r-confine-r3) |
 | P3-4b-3r-confine-r2 | [The search-only ACL `u:agentos-fuzz:--x` on `/var/lib/agentos` stops the 0700 directory being the fuzz user's boundary: any file below it at a known path whose own mode lets others read it (`modem/roles.json` is 0644) is open to a fuzz child. Move LOOP-7's state out of `/var/lib/agentos` (for example `/var/lib/agentos-fuzz`, 0700 and the user's) and drop the ACL, which also takes root's work in the fuzz tree out of the broker's state, or test that nothing under it is others-readable apart from listed exceptions (L3 3 and Security R3 on #588; release; tier A)](briefs/P3-4b-3r-confine-r2.md) | P3-4b-3r-confine | in review (#628; tier A) |
@@ -312,7 +336,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 
 ## Backlog refill (2026-10-05)
 
-Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRACE.md (31 of 144 IDs uncovered at a0feaa7) and the open PRs. **Unblocked** rows can start now in the cloud. Rows are in suggested order. P2-1 (plan P2 item 1) has a draft PR, #41, but no row of its own; IMG-1 adds its missing checks. Not listed: hardware-only IDs (HW-3 to HW-7, the N95 halves of HW-4 and A2), OSS-12 (Mark chooses the license), LOOP-7 (off-the-shelf testing is P3-4b-3 and P3-4b-4, outside A11 since D-070; finding a seeded vulnerability is later, P3-4c), CRED-2 (a scope statement, not testable), and CAP-7 (guest behavior, which the spec says is not infrastructure).
+Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRACE.md (31 of 144 IDs uncovered at a0feaa7) and the open PRs. **Unblocked** rows can start now in the cloud. Rows are in suggested order. P2-1 (plan P2 item 1) merged as #41 at risk tier C; IMG-1 adds its missing checks and IMG-5 re-reviews it at tier A. Not listed: hardware-only IDs (HW-3 to HW-7, the N95 halves of HW-4 and A2), OSS-12 (Mark chooses the license), LOOP-7 (off-the-shelf testing is P3-4b-3 and P3-4b-4, outside A11 since D-070; finding a seeded vulnerability is later, P3-4c), CRED-2 (a scope statement, not testable), and CAP-7 (guest behavior, which the spec says is not infrastructure).
 
 | ID | Package | Needs | State |
 |---|---|---|---|
@@ -327,36 +351,39 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | UPD-a | [Update apply, broker side](briefs/UPD-a.md) | P3-5, W5b; P2-1 for real activation | merged (#133) |
 | UPD-b | [First boot updates before trust](briefs/UPD-b.md) | UPD-a | in review (broker side: `broker/firstboot`, applier first-boot path, local page wording; wiring UPD-b2 and image side UPD-b3 queued) |
 | UPD-b2 | Wire the first-boot gate into agentosd (UPD-3; conditions in broker/firstboot/ASSUMPTIONS.md F7, including the clock-guard condition and a test that no connect path skips `Hold()`; brief to write) | UPD-b, W5b, UPD-a wiring (apply A7) | queued |
-| UPD-b3 | First-boot update, image side: preloaded root metadata and mirror list, real activator (UPD-3; broker/firstboot/ASSUMPTIONS.md F8; brief to write) | UPD-b, P2-1 (#41) | queued (blocked on P2-1) |
+| UPD-b3 | First-boot update, image side: preloaded root metadata and mirror list, real activator (UPD-3; broker/firstboot/ASSUMPTIONS.md F8; brief to write) | UPD-b, P2-1 (#41) | queued (P2-1 merged; brief to write) |
 | UPD-c | [Update channel and cadence as owner settings](briefs/UPD-c.md) | P3-5; W5b to reach the live box | merged (#130; carry: local page, quiet-window jitter (UPD-a), standing grant for…) |
 | CH-20 | [Evidence delivery](briefs/CH-20.md) | P2-6m; P2-3 for MMS | merged (#148: destination path; MMS waits on P2-3) |
-| CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued (blocked on P2-2) |
+| CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued |
 | CH-20a | [Bounded attachments in `mail.deliver`](briefs/CH-20a.md) | CH-20w | queued (needs security review) |
 | CH-20m | [MORE for a redirected reply](briefs/CH-20m.md) | CH-20w | queued |
-| CRED-4b | [Credentialed browser executor in the broker](briefs/CRED-4b.md) | S5 fixture suite | building (claude2; part 1 in review, #300; part 2 per K1-K13) |
+| CRED-4b | [Credentialed browser executor in the broker](briefs/CRED-4b.md) | S5 fixture suite | building (claude2; part 1 in review, #300; part 2 per K1-K14) |
 | ADP-8 | [Adapter mismatch check and the §11 adapter path](briefs/ADP-8.md) | P3-1, P2-7 | queued (unblocked; lane claude2) |
 | ADP-5 | [Desktop-app executor, Linux](briefs/ADP-5.md) | CRED-4b | queued (blocked on CRED-4b; lane claude2) |
 | OSS-6 | [Publication identity](briefs/OSS-6.md) | P4-1, P4-4 | merged (#163, 8a67351) |
 | OSS-6s | [Publication sender](briefs/OSS-6s.md) | OSS-6 | dropped (split into OSS-6s-a and OSS-6s-b on #325) |
 | OSS-6s-a | [Constant daily batch, idempotent ledger, cover send](briefs/OSS-6s-a.md) | OSS-6 | merged (6790cf4; #411) |
+| OSS-6s-a-f | [pubsend ledger read cap, producer sizes against MaxPayload](briefs/OSS-6s-a-f.md) | OSS-6s-a | building (LATER rows f1, f2; D-048 exception at the coordinator's request, awaits Mark) |
 | OSS-6s-b | [Tor transport to Nostr relays, and the pull job](briefs/OSS-6s-b.md) | OSS-6s-a, OSS-6p, OSS-6i, OSS-6j | queued |
 | OSS-6m | [Measure the daily publication batch constant](briefs/OSS-6m.md) | OSS-6s-a | queued (optional, non-blocking) |
 | OSS-6j | [Spec: what the repository's pull job is](briefs/OSS-6j.md) | #330 | queued (L1 spec diff) |
 | OSS-6i | [Fresh Tor circuit per batch and signing key](briefs/OSS-6i.md) | #330 | queued (L1 clause, then test in OSS-6s) |
 | OSS-6p | [Relay count, delivery rule, queue bound, relay list source](briefs/OSS-6p.md) | #330 | queued |
 | OSS-6a | [Spec: where ask-each-time prompts appear](briefs/OSS-6a.md) | #330 | queued (L1 spec diff) |
-| OSS-7c | Publication off by default: one local-UI opt-in with live examples, re-ask on schema change (D-088; release, likely tier A; failure path: an upgraded box publishes without consent) | #633 | queued (brief after #633 merges; may supersede OSS-6a) |
-| CRED-3e | Email codes carry authority like token links: the agent uses a code from delivered mail only for an action the owner started in the same session; account-recovery and credential changes are high-risk (CH-10) (D-089; release, likely tier A; serves A6/A14; failure path: an injected agent runs "forgot password", reads the reset code from mail, and takes over the account) | #633 | queued (brief after #633 merges) |
-| CH-19r | Held-back content by kind: content classed as a code expires within hours (owner-set), other held text keeps the 30-day default; the pointer names source and kind without the value ("a 6-digit code from your bank's email") (D-089; release; serves CH-19; failure path: an away owner gets a pointer to a dead code they cannot reach, while the box stores live secrets for 30 days) | #633 | queued (brief after #633 merges) |
-| CH-19m | Measure false holds of the CH-21 vocabulary check (agent output to the owner) on real task results and set a target rate (D-089; release; serves CH-19; failure path: ordinary replies such as "I fixed the code" are routinely held, so the owner learns to ignore the pointer) | #633 | queued (brief after #633 merges) |
+| OSS-7c | Publication off by default: one local-UI opt-in with live examples, re-ask on schema change (D-088; release, likely tier A; failure path: an upgraded box publishes without consent) | #669 | queued (may supersede OSS-6a) |
+| CRED-3e | Email codes carry authority like token links: the agent uses a code from delivered mail only for an action the owner started in the same session; account-recovery and credential changes are high-risk (CH-10) (D-089; release, likely tier A; serves A6/A14; failure path: an injected agent runs "forgot password", reads the reset code from mail, and takes over the account) | #669 | queued |
+| CH-19r | Held-back content by kind: content classed as a code expires within hours (owner-set), other held text keeps the 30-day default; the pointer names source and kind without the value ("a 6-digit code from your bank's email") (D-089; release; serves CH-19; failure path: an away owner gets a pointer to a dead code they cannot reach, while the box stores live secrets for 30 days) | #669 | queued |
+| CH-19m | Measure false holds of the CH-21 vocabulary check (agent output to the owner) on real task results and set a target rate (D-089; release; serves CH-19; failure path: ordinary replies such as "I fixed the code" are routinely held, so the owner learns to ignore the pointer) | #669 | queued |
 | OSS-5t | [Spec: transport for the embargoed security report](briefs/OSS-5t.md) | #330 | queued (L1 spec diff) |
 | OSS-9 | [Attestations as evidence and following forks](briefs/OSS-9.md) | P4-3, P4-4 | merged (4329b1d; #180) |
 | OSS-6c | [Publication clock hardening](briefs/OSS-6c.md) | OSS-6 | merged (4329b1d; #180) |
 | OSS-6e | [Floor across restarts](briefs/OSS-6e.md) | OSS-6c | in review (A) |
 | OSS-10w | [Follow-fork executor wiring](briefs/OSS-10w.md) | OSS-9, HOST-1b, P2-2w | merged (#323) (A) |
 | OSS-10w2 | [Follow-fork wiring part 2](briefs/OSS-10w2.md) | OSS-10w, P2-2w b, P2-2w d | in review (A) |
+| OSS-10w-r2 | Switch-back size bound: the owner socket's 64 KiB `sockets.MaxRequest` line, not `MaxRootChain` x `MaxRoot`, limits the root files, so a long chain fails at transport with a generic error; align the bounds (page, `localui` total check) and give a specific message (L3 2 and Security F2 on #476); and `update.Store.FollowRoot` with an empty name skips admission: refuse it and move `update`/`maintain` follow tests to `FollowProject`/`FollowFork` (Security 2 on #667); and a project root followed under a name without the root files that chain it (v3 alone) passes `FollowFork`, after which a switch back to v2 is admitted though the box trusted v3: keep a switch back from dropping below a followed root that carries the project's lineage, or warn on the page (L3 1 on c3bf14a; acceptance test 4) | OSS-10w-r | queued (needs brief) |
 | OSS-10w2u | Follow page wording: UX lens picks between the page's text and `maintain.FollowPrompt`/`FollowCheckHeading`, and the page names the current source (L3 R3 on #370) | OSS-10w2 | queued (needs brief) |
-| IMG-1 | [Image checks for P2-1](briefs/IMG-1.md) | P2-1 (#41, draft since 01:07Z) | queued (blocked on P2-1) |
+| OSS-10w-r | [Switching back after a project root-key rotation](briefs/OSS-10w-r.md) (LATER row started at the coordinator's request; Mark confirmed it as a D-048 exception, 2026-10-09) | OSS-10w, OSS-10w2 | in review (A) |
+| IMG-1 | [Image checks for P2-1](briefs/IMG-1.md) | P2-1 (#41) | queued (P2-1 merged) |
 | IMG-2 | [Reproducible initrd, blocking two-runner check](briefs/IMG-2.md) | P2-1 | queued |
 | IMG-3 | [Forced-fail fallback boot in CI](briefs/IMG-3.md) | P2-1, update package | queued |
 | IMG-4 | [Broker cgroups check and agentosd.service hardening](briefs/IMG-4.md) | P2-1, P2-2 | queued |
@@ -410,21 +437,23 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | SR2-9 | [ci.yml pins actions by SHA](briefs/SR2-9.md) | — | merged (64220e9; #162) |
 | CH-21 | [Name and first-person voice](briefs/CH-21.md) | CH-12 strings; P2-3 | queued (split into CH-21a to CH-21e) |
 | CH-21a | [First-person voice: lint test and tier-B sweep](briefs/CH-21a.md) | CH-12s | building (primary lane) |
-| CH-21b | [Box name: setup suggestion and `NAME`](briefs/CH-21b.md) | CH-21a | queued (tier A) |
+| CH-21b | [Box name: setup suggestion and `NAME`](briefs/CH-21b.md) | CH-21a | in review (#467) (`NAME` and the name check; setup suggestion split to CH-21f) |
+| CH-21f | [Box name at setup: suggested name, owner-name field, contact card](briefs/CH-21b.md) | CH-21b | queued (tier A; the setup half of the CH-21b brief) |
 | CH-21c | [First-person voice: owner-page and recovery texts](briefs/CH-21c.md) | CH-21a | in review (all 13 packages swept; `owner` stays pending for CH-21e's `Agent: ` prefix) |
-| CH-21d | [First-person voice: daemon and egress texts](briefs/CH-21d.md) | CH-21a | queued (tier A) |
-| CH-21e | [Agent text asking for a code is withheld; welcome-text code line](briefs/CH-21e.md) | CH-21b | queued (tier A; security first) |
+| CH-21d | [First-person voice: daemon and egress texts](briefs/CH-21d.md) | CH-21a | in review (#457; tier A) |
+| CH-21e | [Agent text asking for a code is withheld; welcome-text code line](briefs/CH-21e.md) | CH-21b | queued (tier A; security first; start from #231's `withholdAgent`, `AskForCode`, `ReplyGrammar`, branch `pkg/ch-21-name-voice-draft` kept) |
 | CH-12s | ["Local page" rename in owner texts](briefs/CH-12s.md) | CH-12 | merged (a390f03; #185) |
 | ADP-13 | [The box's own mailbox](briefs/ADP-13.md) | CRED-4b; P2-6m; CH-21 | queued |
 | HOST-1 | [Spec: the host PC is left as it was](briefs/HOST-1.md) | — | merged (fa52b76) |
-| HOST-1a | [No host disk is mounted or used](briefs/HOST-1a.md) | P2-1 image | queued (part 2; part 1 merged (#172); part 2 queued on P2-1) |
+| HOST-1a | [No host disk is mounted or used](briefs/HOST-1a.md) | P2-1 image | queued (part 2; part 1 merged (#172); part 2 ready, P2-1 merged) |
 | HOST-1b | [No hardware-clock writes](briefs/HOST-1b.md) | P2-1 image | queued (part 2; part 1 merged (#177); part 2 queued on P2-2w (R1 needs the live page)) |
 | HOST-1c | [Firmware-change disclosure and BitLocker prevention](briefs/HOST-1c.md) | HOST-1a, P2-2 | queued (part 2; part 1 merged (#183); part 2 queued (needs P2-2)) |
 | HOST-1d | [Internal-disk opt-in](briefs/HOST-1d.md) | HOST-1a, P2-2, P2-4 | queued |
-| HOST-1e | [Host-untouched acceptance check](briefs/HOST-1e.md) | HOST-1a, HOST-1b | merged (part 1, #326); part 2 (HOST-1e2) queued on P2-1 |
+| HOST-1e | [Host-untouched acceptance check](briefs/HOST-1e.md) | HOST-1a, HOST-1b | merged (part 1, #326); part 2 (HOST-1e2) queued (P2-1 merged) |
 | HOST-1f | [Give the TPM's dictionary-attack settings back as they were](briefs/HOST-1f.md) | P2-4b (tpmseal, boot PIN #42) | merged (de01c80; #188) |
 | CI-SOAK | [Unattended soak workflow](briefs/CI-SOAK.md) | — | merged (8bab3fe; #187) |
 | OSS-10w2 r1 | Follow names: the reserved-name check (`grants.followName`, localui `askFollow`) also refuses look-alikes of "the AgentOS project" (folded as `owner.fold` does for CH-10, or a confusable skeleton), so a named follow never reads as switching back (release, security lens 370-1 on #370; supersedes LATER OSS-10w2 f4) | OSS-10w2 | queued (needs brief) (A) |
+| HOST-1f-r2 | Owned lockout, failed forget: on `giveBack`'s `ErrLockoutOwned` branch a failed `v.Delete` leaves the stale lockout entry, so each unattended start sends it again and fails a lockout authorization on the PC's TPM (comment at `trusted.go:953`: retrying "would only re-arm the TPM's lockout"); keep an "owned" mark outside the vault so later starts retry only the `Delete`, and send the "dropped my copy" text after the `Delete` succeeds (release, `recheck`, Security to confirm; HW-8, A1; UX 1 and Potency 1 on #666, [record](reviews/ux/2026-10-09-pr666.md)) | HOST-1f, #666 | queued (release) (A) |
 
 ## Integration: wiring merged packages into the box
 
@@ -457,7 +486,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-builder | [W3 step 3c: model-backed Loop 1 builder](briefs/W3-builder.md) | W3 step 3a | loops thread (P3-2) | merged (#126) |
 | W3-builder-image | [The minimal builder image for W3-builder](briefs/W3-builder-image.md) | W3-builder | loops thread (P3-2) | merged (4b0d00e) |
 | W3-builder-tune | [Builder per-job counters (#126)](briefs/W3-builder-tune.md) | W3-builder-image | loops thread (P3-2) | merged (61cfd90) |
-| W3-builder-ship | [Ship the builder so owners never see the repeats-only line](briefs/W3-builder-ship.md) | W3-builder-image, P2-1 | this package (P3-2) | queued (agentosd side merged, bb7c40d in #154; the P2-1 side waits on P2-1) |
+| W3-builder-ship | [Ship the builder so owners never see the repeats-only line](briefs/W3-builder-ship.md) | W3-builder-image, P2-1 | this package (P3-2) | queued (agentosd side merged, bb7c40d in #154; the image side can start, P2-1 merged (#41)) |
 | W3-tasks | [Learn-side forget primitive](briefs/W3-tasks.md) | W3 PW3 | Next build item B | merged (538d180; #160 part 2; wiring waits for forget action) |
 | W3-forget | [Owner-facing forget command](briefs/W3-forget.md) | W3-tasks part 2, W5 | Next build item B | building (split into sub-rows) |
 | W3-forget-a | [FORGET by text in an unlocked session](briefs/W3-forget-a.md) | W3-forget | Next build item B | merged (05913d0; #182) |
@@ -471,6 +500,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
 | W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | merged (4b60dc2; #425) |
 | W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | merged (#427) |
+| W3-forget-f | [LATER follow-ups to the forget packages](briefs/W3-forget-f.md) | W3-forget-b2b | coordinator thread | in review (#473) |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
 | W3-forget-b2c-2 | [Item 2's texts (`forgetAgentDone`, `forgetAgentNotYet` and the rest) are owed until they send](briefs/W3-forget-b2c-2.md), as W3-forget-b3 does for item 1; add a check that no done text in `ownerForget` reaches `inform` directly (release, UX-182-3 / CH-12; Defect: W3-forget-b2c; L3 on #425, second PR with this kind of finding) | W3-forget-b2c, W3-forget-b3 | Next build item B | merged (d63322a; #541) |
 | W3-forget-b2c-f1 | [The in-boot retry of an owed item 2 take-back is unbounded and gives the owner no signal on a permanent error: bound it, add a STATUS line while a take-back is owed, send its done text on the restore path, and bound the silence on retries (folds the UX point f4)](briefs/W3-forget-b2c-f1.md) (release, tier A, L3 on #427; also Security #541 P1, the CH-12-lint; folds f2; builds after W3-forget-reach) | W3-forget-b2c | Next build item B | merged d575ff6 (#602; item 1 restore text split to W3-forget-b2c-f1-r1) |
@@ -536,3 +566,19 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W9 | [Questions in the guest plane](briefs/W9.md) | P3-8 merged, #68 merged | — | merged (f38aeed8) |
 | W9a | [Questions follow-ups (#95)](briefs/W9a.md) | W9 | Next build item A (part 2) | merged (#125 (part 2; part 1 #98)) |
 | CH-20w | [Evidence delivery](briefs/CH-20w.md) | CH-20 merged; P2-6m wired into the vault process | — | queued (blocked on mail wiring) |
+
+## Uncovered requirement IDs (CONV-5, [triage](docs/conv-5-uncovered.md))
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| HW-3t | Supported-host text and test (HW-3, HW-7; brief to write) | — | queued (C) |
+| RES-5a | Usage-pool tracker and reserve admission (RES-5; brief to write) | S8 | queued (B) |
+| ONB-9a | Plans in plain words on the Wi-Fi page and STATUS (ONB-9; brief to write) | RES-5a, P2-2w | queued (B) |
+| CAP-12a | `resources` broker tool (CAP-12; brief to write) | RES-5a, CAP-9 | queued (B) |
+| CAP-13a | Local leverage passes as broker tools (CAP-13; brief to write) | ARC-6 | queued (B) |
+| CAP-2t | Reach fixture test (CAP-2; brief to write) | CRED-4b part 2 | queued (B) |
+| CRED-11a | Hand-off verbs between executors (CRED-11; brief to write; lane claude2) | CRED-4b part 2 | queued (A) |
+| ADP-14a | Web recipes (ADP-14; brief to write; lane claude2) | CRED-4b part 2, ADP-8 | queued (A) |
+| ADP-15a | One desktop over separate executors (ADP-15; brief to write; lane claude2) | CRED-11a, ADP-5 | queued (A) |
+| ADP-16a | Suite executor (ADP-16; brief to write; lane claude2) | ADP-5 | queued (A) |
+| UPD-7t | Soak plus attestations test and marker (UPD-7; brief to write) | — | queued (C) |

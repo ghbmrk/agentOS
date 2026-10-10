@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -321,7 +323,7 @@ func TestARC6MCPHandshakeAndToolList(t *testing.T) {
 	for _, tl := range r.rpc("m1", "tools/list", nil)["tools"].([]any) {
 		names = append(names, tl.(map[string]any)["name"].(string))
 	}
-	if strings.Join(names, ",") != "effect_request,effect_status" {
+	if strings.Join(names, ",") != "effect_request,effect_status,result_read" {
 		t.Fatalf("tools %v", names)
 	}
 	r.rpc("m1", "ping", nil)
@@ -538,6 +540,27 @@ func TestCH2EffectRequestsAreBoundedAndRateLimited(t *testing.T) {
 	}
 }
 
+// TestServicesDirectoryHoldsOnlyTheBrokerSocket: the guest sees its
+// services directory at vm.ServicesMount, and runsc --host-uds=open lets it
+// connect to any socket there, so the plane puts its one socket there and
+// nothing else, also on a reopen (ARC-6 "nothing else").
+func TestServicesDirectoryHoldsOnlyTheBrokerSocket(t *testing.T) {
+	r := newRig(t, nil)
+	for range 2 {
+		dir, err := r.p.Open("m1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		es, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(es) != 1 || es[0].Name() != Socket || es[0].Type()&fs.ModeSocket == 0 {
+			t.Fatalf("services directory holds %v, want only the socket %s", es, Socket)
+		}
+	}
+}
+
 // TestCH2GuestCannotExhaustBrokerConnections: a guest that opens thousands
 // of connections holds at most MaxOpenConns of the broker's; the rest wait
 // in the kernel, and another machine is still served.
@@ -604,6 +627,21 @@ func TestG5OwnerMessagesSurviveABrokerRestart(t *testing.T) {
 	r3.client("m1")
 	if code, body := r3.do("m1", "GET", "/owner/next", ""); code != 204 {
 		t.Fatalf("an answered message came back: %s", body)
+	}
+}
+
+// A failed inbox store must not hand the caller the path.
+func TestAFailedInboxStoreDoesNotNameThePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing", "inbox.json")
+	r := newRig(t, func(c *Config) { c.InboxPath = path })
+	r.client("m1")
+	_, err := r.p.DeliverOwner("m1", "book the dentist", true)
+	if err == nil || strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "missing") || strings.Contains(err.Error(), "/") {
+		t.Fatalf("path leaked: %v", err)
+	}
+	if err.Error() != "guest: the message was not stored" {
+		t.Fatalf("err %v", err)
 	}
 }
 
