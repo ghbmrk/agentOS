@@ -6,4 +6,3 @@ Follow-fork wiring part 2 (OSS-10; GR26, WF3): agentosd builds `follow.New` with
 
 **Gate:** lenses (security, UX)
 
-**State:** building (A)
