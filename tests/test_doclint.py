@@ -4,7 +4,7 @@ No SPEC requirement IDs: PLAN.md tooling, not SPEC.md behaviour. DOC-7 requireme
 (briefs/DOC-7.md) are claimed below; CONV0Test claims the CONV-0 brief's IDs (briefs/CONV-0.md).
 All data is synthetic.
 
-REQ: DOC7-1, DOC7-2, DOC7-3, DOC7-4, DOC7-5
+REQ: DOC7-1, DOC7-2, DOC7-3, DOC7-4, DOC7-5, DOC5-a, DOC5-b, DOC5-c, DOC5-d
 """
 import pathlib
 import subprocess
@@ -238,6 +238,64 @@ class CONV0Test(unittest.TestCase):
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text(text)
             self.assertEqual(doclint.lint(root), [])
+
+
+
+README = GOOD["README.md"].replace("| [BOARD.md](BOARD.md) |\n", "| [BOARD.md](BOARD.md) |\n| [LATER.md](LATER.md) |\n")
+
+
+class Doc5Test(unittest.TestCase):
+    """DOC-5: BOARD and LATER contradictions."""
+    lint = LintTest.lint
+
+    LATER = ("# LATER\n\n| ID | Needed for | Note |\n|---|---|---|\n{rows}\n"
+             "| ID | Why it can wait |\n|---|---|\n| Z-9 | fine |\n")
+
+    def later(self, rows, merged="merged"):
+        board = GOOD["BOARD.md"].replace("in review (#1)", merged) + "| B-2 | b | — | queued |\n"
+        return self.lint(**{"BOARD.md": board, "LATER.md": self.LATER.format(rows=rows),
+                            "README.md": README})
+
+    def test_later_row_for_a_merged_board_row(self):
+        self.assertEqual(self.later("| A-1 | x | y |"),
+                         ["LATER.md: A-1: the BOARD row is merged; remove the LATER row"])
+        self.assertEqual(self.later("| A-1 | x | y |", merged="dropped"),
+                         ["LATER.md: A-1: the BOARD row is dropped; remove the LATER row"])
+
+    def test_later_row_sharing_an_open_board_id_passes(self):
+        self.assertEqual(self.later("| B-2 | x | y |", merged="merged"), [])
+
+    def test_later_finding_suffix_is_not_checked_against_the_parent(self):
+        self.assertEqual(self.later("| A-1 l1 | x | y |"), [])
+
+    def test_later_second_table_is_checked_too(self):
+        later = "# LATER\n\n| ID | Why it can wait |\n|---|---|\n| A-1 | x |\n"
+        board = GOOD["BOARD.md"].replace("in review (#1)", "merged")
+        self.assertEqual(self.lint(**{"BOARD.md": board, "LATER.md": later,
+                                      "README.md": README}),
+                         ["LATER.md: A-1: the BOARD row is merged; remove the LATER row"])
+
+    def test_no_board_row_claim_while_a_row_exists(self):
+        got = self.later("| B-2 l1 | B-2 has no board row | y |")
+        self.assertEqual(got, ["LATER.md: B-2 has a BOARD row but the text says it has no board row"])
+        got = self.lint(**{"BOARD.md": GOOD["BOARD.md"] + "\nNote: A-1 has no row of its own.\n"})
+        self.assertEqual(got, ["BOARD.md: A-1 has a BOARD row but the text says it has no board row"])
+
+    def test_no_board_row_claim_for_an_absent_id_passes(self):
+        self.assertEqual(self.later("| Q-1 | Q-1 has no board row | y |"), [])
+
+    def test_duplicate_board_ids(self):
+        board = GOOD["BOARD.md"] + "| A-1 | [a](briefs/A-1.md) | — | queued |\n"
+        self.assertEqual(self.lint(**{"BOARD.md": board}), ["BOARD.md: duplicate row ID A-1"])
+
+    def test_blocked_on_a_merged_row(self):
+        board = (GOOD["BOARD.md"] + "| B-2 | b | — | merged (#2) |\n"
+                 "| C-3 | c | — | queued (blocked on B-2; lane x) |\n"
+                 "| D-4 | d | — | queued (blocked on mail wiring) |\n"
+                 "| E-5 | e | — | queued (blocked on A-1) |\n")
+        self.assertEqual(self.lint(**{"BOARD.md": board}),
+                         ["BOARD.md: C-3: blocked on B-2, which is merged"])
+
 
     def test_main_files_pass(self):
         self.assertEqual(doclint.lint(ROOT), [])
