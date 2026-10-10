@@ -3,8 +3,9 @@ package change
 import (
 	"errors"
 	"os"
-	"path/filepath"
 	"sync"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // Store holds the pipeline's state. Load returns nil, nil when nothing has
@@ -53,29 +54,5 @@ func (f FileStore) Load() ([]byte, error) {
 }
 
 func (f FileStore) Save(b []byte) error {
-	tmp := f.Path + ".tmp"
-	fh, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := fh.Write(b); err != nil {
-		fh.Close()
-		return err
-	}
-	if err := fh.Sync(); err != nil {
-		fh.Close()
-		return err
-	}
-	if err := fh.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, f.Path); err != nil {
-		return err
-	}
-	dir, err := os.Open(filepath.Dir(f.Path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return durable.WriteFile(f.Path, b, 0o600)
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/route"
 )
@@ -166,7 +167,7 @@ func TestRoutingErrorsAreNotRefusals(t *testing.T) {
 // to start on it.
 func TestARepeatInTheOwnersRuleIsNeverABase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routing.json")
-	if err := writeFileAtomic(path, []byte(`{"chat":[{"provider":"anthropic","model":"claude-test"},{"provider":"openai","model":"gpt-test"}]}`)); err != nil {
+	if err := durable.WriteFile(path, []byte(`{"chat":[{"provider":"anthropic","model":"claude-test"},{"provider":"openai","model":"gpt-test"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	bad := route.Rule{"chat": {ra, ra}}

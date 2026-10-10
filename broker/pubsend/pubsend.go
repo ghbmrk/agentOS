@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/pubid"
 )
 
@@ -98,7 +99,7 @@ func New(cfg Config) (*Sender, error) {
 	if err := checkDir(dir); err != nil {
 		return nil, err
 	}
-	if err := sweepTemp(dir); err != nil {
+	if err := durable.SweepTemp(dir); err != nil {
 		return nil, err
 	}
 	s := &Sender{cfg: cfg}
@@ -290,41 +291,11 @@ func (s *Sender) save() error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(s.cfg.Path, b)
+	return durable.WriteFile(s.cfg.Path, b, 0o600)
 }
 
-// writeAtomic, checkDir and sweepTemp follow pubid's (identity.go,
-// publisher.go): the ledger is replaced by rename, synced with its
-// directory, in a directory only this user can change.
-func writeAtomic(path string, b []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".pubsend-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err == nil {
-		err = tmp.Sync()
-	}
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	err = d.Sync()
-	if cerr := d.Close(); err == nil {
-		err = cerr
-	}
-	return err
-}
-
+// checkDir follows pubid's (publisher.go): the ledger lives in a
+// directory only this user can change.
 func checkDir(dir string) error {
 	fi, err := os.Lstat(dir)
 	if err != nil {
@@ -336,19 +307,6 @@ func checkDir(dir string) error {
 		return fmt.Errorf("pubsend: %s belongs to another user", dir)
 	case fi.Mode().Perm()&0o022 != 0:
 		return fmt.Errorf("pubsend: %s is writable by others", dir)
-	}
-	return nil
-}
-
-func sweepTemp(dir string) error {
-	names, err := filepath.Glob(filepath.Join(dir, ".pubsend-*"))
-	if err != nil {
-		return err
-	}
-	for _, n := range names {
-		if err := os.Remove(n); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
 	}
 	return nil
 }
