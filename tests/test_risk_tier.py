@@ -199,6 +199,39 @@ class RiskTierTest(unittest.TestCase):
         missing = [p for p in sorted(rt.TIER_A_BROKER) if not (ROOT / "broker" / p).is_dir()]
         self.assertEqual(missing, [])
 
+    # REQ: ARC-1 (SIM-core: the trusted core is the list in broker/core/core.txt)
+    def test_core_list_rates_core_and_wiring_a(self):
+        core, wiring = rt.core_list()
+        self.assertIn("journal", core)
+        self.assertIn("cmd/agentosd", wiring)
+        cases = {
+            # core packages that no other rule makes A
+            "broker/childproc/childproc.go": "A",
+            "broker/meter/meter.go": "A",
+            "broker/guesterr/guesterr.go": "A",
+            # the list and its check decide what is core
+            "broker/core/core.txt": "A",
+            "broker/core/core_test.go": "A",
+            # a broker package in neither the core nor TIER_A_BROKER
+            "broker/attention/attention.go": "B",
+        }
+        for path, want in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(rt.tier_of(path)[0], want)
+        for pkg in sorted(core | wiring):
+            with self.subTest(pkg=pkg):
+                self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")
+                self.assertTrue((ROOT / "broker" / pkg).is_dir(), pkg)
+
+    def test_core_list_unreadable_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = pathlib.Path(d) / "core.txt"
+            bad.write_text("core journal\nkernel vault\n")
+            with self.assertRaises(SystemExit):
+                rt.core_list(bad)
+            with self.assertRaises(SystemExit):
+                rt.core_list(pathlib.Path(d) / "missing.txt")
+
     def test_markdown_output(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

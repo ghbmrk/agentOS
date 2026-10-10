@@ -1,0 +1,63 @@
+# The trusted core: the broker floor of briefs/SIM.md (ARC-1, D-095).
+#
+#   core <pkg>             a core package. tools/risk_tier.py rates it tier A.
+#   wiring <pkg>           a composition root that builds and connects the core,
+#                          so it may call write paths. Also rated tier A.
+#   open <symbol>          a core function or method any package may call:
+#                          a read, a pure helper, or the core's sanctioned
+#                          interface. Every other function or method of a
+#                          core package is a write path.
+#   allow <pkg> <symbol> -- <reason>
+#                          one named non-core caller of a write path, and why.
+#
+# <pkg> is a directory under broker/. <symbol> is pkg.Func, pkg.Type.Method,
+# pkg.Type.* or pkg.*. broker/core/core_test.go fails when a package outside
+# core and wiring calls a write path that no open or allow line covers, and
+# when a line names a package or symbol that does not exist.
+
+core journal
+core grants
+core vault
+core sockets
+core egress
+core childproc
+core verb
+core guest
+core meter
+core guesterr
+
+wiring daemon
+wiring cmd/agentosd
+wiring cmd/agentos-egress
+wiring cmd/agentos-a8scan
+
+# The one way in: an intent goes to the journal. The gate's Submit is the
+# same call behind the gate's refusal of broker-reserved intent IDs.
+open journal.Engine.Submit
+open grants.Gate.Submit
+
+# Reads and pure helpers.
+open journal.AttemptKey
+open journal.EgressGate.Admit
+open journal.Executor.*
+open grants.Describe
+open grants.FollowOf
+open meter.Meter.Usage
+open meter.Meter.Overall
+open meter.Object
+open sockets.Code.Token
+
+# Sanctioned interfaces: the only way to start a child process, to build
+# guest-visible error text, to name a verb, and to meter a model call.
+# Report and Another act only on the metered call the meter put on ctx.
+open childproc.*
+open guesterr.*
+open verb.*
+open meter.Meter.Wrap
+open meter.Report
+open meter.Another
+
+allow recovery vault.* -- P2-8 restore rebuilds the vault from the recovery key (vault TestOnlyRecoveryCallsRebase)
+allow loops meter.Meter.SetOverallCap -- the owner's spare-call setting sets the spare meter's cap
+allow replay guest.New -- LOOP5 replays a run on its own guest plane
+allow replay guest.Plane.* -- LOOP5 replays a run on its own guest plane
