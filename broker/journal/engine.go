@@ -676,6 +676,20 @@ func (e *Engine) Trail() []Record {
 	return out
 }
 
+// RecordsAfter returns the journal records with a sequence number greater
+// than seq, oldest first. Records are numbered from 1 with no gaps, so a
+// projection that has applied through seq reads its tail here (SIM-proj).
+func (e *Engine) RecordsAfter(seq uint64) []Record {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if seq >= uint64(len(e.records)) {
+		return nil
+	}
+	out := make([]Record, len(e.records)-int(seq))
+	copy(out, e.records[seq:])
+	return out
+}
+
 // Fenced returns the intents on account that the last restart left
 // unresolved and that still are; dispatch on the account waits for them.
 func (e *Engine) Fenced(account string) []string {

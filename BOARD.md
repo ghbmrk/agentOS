@@ -55,7 +55,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-bound | [Bounded broker memory under deny-all; STOP reads an index](briefs/SIM.md#sim-bound-bounded-broker-memory-and-stop-without-a-history-walk-tier-a) | — | queued (brief ready; tier A) |
 | SIM-sd | [L1 spec diff: one log, owner messages as intents, one outcome, learning off until it wins](briefs/SIM.md#sim-sd-l1-spec-diff-for-one-log-mark-approves) | — | queued (B; Mark approves) |
 | SIM-check | [One journal invariant checker: test, CI and runtime](briefs/SIM.md#sim-check-one-journal-invariant-checker-tier-a) | — | queued (brief ready; tier A) |
-| SIM-proj | [Journal snapshots and a projection API](briefs/SIM.md#sim-proj-journal-snapshots-and-a-projection-api-tier-a) | — | queued (brief ready; tier A) |
+| SIM-proj | [Journal snapshots and a projection API](briefs/SIM.md#sim-proj-journal-snapshots-and-a-projection-api-tier-a) | — | building (tier A) |
 | SIM-owner-hold | [Owner texts are intents; the pacer hold becomes a projection](briefs/SIM.md#sim-owner-hold-owner-texts-are-intents-the-pacer-hold-becomes-a-projection-tier-a) | SIM-sd, SIM-proj, DEL-1, #708 (PACE-1) | queued (A) |
 | SIM-pull | [STATUS is the owner's view; only urgent texts pushed; digest deleted](briefs/SIM.md#sim-pull-status-is-the-owners-view-only-urgent-texts-are-pushed-tier-a) | SIM-owner-hold, SIM-sd | queued (A) |
 | SIM-cases | [W5-D drafts' crash, ack and forget cases become tests against main](briefs/SIM.md#sim-cases-w5-d-cases-become-tests-against-main-tier-a) | — | queued (brief ready; tier A) |
