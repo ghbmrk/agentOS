@@ -18,7 +18,7 @@ Each fact has one home; other files point to it rather than restate it ([docs/OP
 | [BOARD.md](BOARD.md) | state | Index of work packages: one line each with state and owner, linking its brief. | L1, L2 |
 | `briefs/<ID>.md` | state | One package's brief: goal, IDs, scope, dependencies, estimate. | L1 |
 | [LATER.md](LATER.md) | state | Which open rows the first release needs, and the backlog that waits. | L1 |
-| [docs/LANES.md](docs/LANES.md) | state | Which team owns which paths; onboarding records. | primary team |
+| [docs/LANES.md](docs/LANES.md) | state | Which team owns which paths; onboarding records. | either peer subscription |
 | [docs/MARK-QUEUE.md](docs/MARK-QUEUE.md) | state | Questions and actions only Mark can take, one line each, with a recommendation. | L1 adds, Mark answers |
 | [DECISIONS.md](DECISIONS.md) | record | Decisions as `D-NNN` rows with date, status and source; long reasoning in `decisions/D-NNN.md`. | L1, Mark |
 | `reviews/<lens>/` | record | Lens methods (README) and lens verdicts per PR. | lens screen |
