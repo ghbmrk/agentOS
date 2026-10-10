@@ -838,13 +838,18 @@ func inClass(class change.Class, cand change.Candidate) error {
 
 // value is a proposal's measured return: its held-out gain over the
 // baseline, implicit cases' gain counted half (potency C3(c) on #90), plus
-// a little for an adoption with no gain (it qualified with no regression),
-// half for one waiting on the owner, none if rejected.
+// a little when it is adopted with a gain, half for one waiting on the
+// owner, none if rejected. An adoption with no gain still takes effect (it
+// qualified with no regression) but earns nothing, so a loop that changes
+// the system without improving it goes dry and parks (LOOP-3, LRN-1).
 func value(rep change.Report) float64 {
 	explicit := (rep.Passed - rep.ImplicitPassed) - (rep.BaselinePassed - rep.ImplicitBaselinePassed)
 	gain := math.Max(float64(explicit)+float64(rep.ImplicitPassed-rep.ImplicitBaselinePassed)/2, 0)
 	switch rep.State {
 	case change.StateAdopted:
+		if gain == 0 {
+			return 0
+		}
 		return gain + 0.25
 	case change.StateAwaitingOwner:
 		return gain / 2

@@ -1365,3 +1365,36 @@ func TestAPrivateBuilderNeverMakesAPublicCandidate(t *testing.T) {
 		}
 	}
 }
+
+// REQ: LOOP-3
+// LRN-1 (L14): an adoption earns the adoption bonus only with a
+// measured gain. A change adopted with no gain (no regression, no
+// improvement) is worth nothing to the scheduler, so a loop that only
+// changes the system without improving it goes dry and parks.
+// Revert mutant: returning gain + 0.25 for every adoption fails the
+// zero-gain rows.
+func TestAdoptionBonusNeedsMeasuredGain(t *testing.T) {
+	score := func(passed, base, impl, implBase int) change.Score {
+		return change.Score{HeldOut: 8, Passed: passed, BaselinePassed: base,
+			Implicit: 4, ImplicitPassed: impl, ImplicitBaselinePassed: implBase}
+	}
+	for _, c := range []struct {
+		name  string
+		state change.State
+		score change.Score
+		want  float64
+	}{
+		{"adopted, equal to baseline", change.StateAdopted, score(5, 5, 2, 2), 0},
+		{"adopted, nothing passed either side", change.StateAdopted, score(0, 0, 0, 0), 0},
+		{"adopted, explicit gain 1 cancelled by implicit loss 2", change.StateAdopted, score(4, 5, 1, 3), 0},
+		{"adopted, explicit gain 1", change.StateAdopted, score(6, 5, 2, 2), 1.25},
+		{"adopted, implicit gain 1 only", change.StateAdopted, score(6, 5, 3, 2), 0.75},
+		{"awaiting owner, equal to baseline", change.StateAwaitingOwner, score(5, 5, 2, 2), 0},
+		{"awaiting owner, explicit gain 2", change.StateAwaitingOwner, score(7, 5, 2, 2), 1},
+		{"rejected, explicit gain 2", change.StateRejected, score(7, 5, 2, 2), 0},
+	} {
+		if v := value(change.Report{State: c.state, Score: c.score}); v != c.want {
+			t.Errorf("%s: value %v, want %v", c.name, v, c.want)
+		}
+	}
+}
