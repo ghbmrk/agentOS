@@ -116,6 +116,26 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 **Requirement IDs.** ARC-1. **Acceptance.** A fixture package that writes grants directly fails the check; `risk_tier.py` rates a core file A and a non-core broker file B. **Usage estimate.** Small, under 60k tokens. Tier A: it changes `tools/risk_tier.py` and `.github/`, both tier A paths.
 
+## SIM-split: one key-holder process per account, and a separate checker (tier A)
+
+**Needs.** SIM-core (its list names the holder, not all of egress).
+
+**Fact.** `agentos-egress` (about 12.4k lines in `broker/cmd/agentos-egress`) opens the whole vault and reads every secret: proxy injection (`broker/egress/proxy.go:340`), mail (`mailaccount.go:178`), SMS (`smsaccount.go:169`) and TPM policy keys (`trusted.go:705`). A bug anywhere in it reaches every account.
+
+**Change.** (1) A small unlock step derives the vault key and hands each account's secret to that account's holder, a process under its own uid that has only that secret and speaks a closed request shape (ADP-10). Egress, mail and SMS keep their logic but hold no secrets; they ask the holder to inject a login into a request it checks. This extends the CRED-4 / ADP-5 executor pattern to the vault. (2) The CH-4 code seed moves out of the broker into a separate checker process; before releasing a login for a high-risk act (CH-10) the holder consults the checker. No SPEC change and no owner-visible change; the vault still unlocks once at boot. (3) SIM-core's list gains the holder and the checker as core packages; SIM-check gains the predicate "no secret appears in any process except its account's holder".
+
+**Known gap (state in the PR).** A generator code is bound to time, not content, so a compromised broker could reuse a fresh code within its window; paper-grid cells do not have this gap.
+
+**Requirement IDs.** CRED-4, ADP-10, CH-4, CH-10, ARC-1. **Acceptance.** A synthetic canary secret is readable only in its account's holder (checked by process); a request the holder's shape rejects never gets a login; a high-risk act without a checker-verified code is refused; restart re-hands every secret and the mail, SMS and proxy paths still pass their tests. **Usage estimate.** Under 140k tokens; split the checker off if the holder split alone exceeds half. Tier A.
+
+## SIM-outer: outer limits held by the provider (L1 spec diff, Mark approves)
+
+**Change to SPEC.** Extend CRED-5 item 3 (narrowest login for worker-held routes) to every broker-held account: (1) OAuth scopes limited to what the enabled loops use, asked on the same consent screen as today; a loop needing a new permission asks once, when the owner turns it on. (2) Provider or card spend limits and provider rate limits set at about 2x the box's own cap (OP-8) and above the broker's per-hour bounds, so the broker's caps trip first in normal use and a provider refusal is itself the alarm: the broker texts that a provider refused what its own cap allowed, and pauses. (3) A provider with no narrow scope or limit is stated once in STATUS.
+
+**Limit.** Bounds the worst case at about 2x the cap, not a hard guarantee where a provider offers no limit or scope. Owner notices it only on a clearly malicious act, plus one setup step per provider.
+
+**Acceptance.** Mark approves the diff. doclint and trace pass. **Usage estimate.** Small, under 40k tokens. Tier B.
+
 ## SIM-shred: forget by deleting a per-subject key (tier A)
 
 **Needs.** SIM-erase, SIM-proj; SIM-sd item 7.
