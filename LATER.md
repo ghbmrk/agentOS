@@ -682,6 +682,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | RT-1 l3 | PR #705 reviews (recheck): outside image/ and the A broker packages, only .service/.socket/.timer and *.conf under a systemd dir are A; .path, .mount, .slice, .target, .automount, .swap, *.service.d/ drop-ins, tmpfiles.d, sysusers.d, udev and polkit files would be B. None exist there today |
 | RT-1 l4 | PR #705 reviews: hand-typed paths are not normalised (`.//image/x`, `/image/x`, `docs/../image/x`, backslashes); a nested `guest/x/sub/package.json` is B; a whitespace-only name is dropped. `--git` mode never emits these forms |
 | RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
+| DEL-1 l1 | #709 Findings (recheck): a crash after the evidence router returns but before `ReplyDone` sends that owner reply twice; DEL-2 (recorded send outcomes) closes it |
+| DEL-1 l2 | #709 Findings: a repeat of a reply older than the last 256 handed on (the done ring) is no longer recognised and gets 404; it is never sent twice |
 
 ## Reuse candidates
 | ID | Component | Why |

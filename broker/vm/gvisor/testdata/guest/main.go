@@ -208,6 +208,8 @@ func relay(sock, mode string, args []string) (string, error) {
 		return "", fmt.Errorf("no mode %q", mode)
 	}
 	if mode != "archive" {
+		// One post, no retry (unlike the bridge, DEL-1d): this probe
+		// should fail loudly if the broker does not take the reply.
 		rep, _ := json.Marshal(map[string]string{"id": msg.ID, "text": answer})
 		if code, _, err := call(sock, "POST", "/owner/reply", rep); err != nil || code != 204 {
 			return "", fmt.Errorf("owner/reply: %d %v", code, err)
