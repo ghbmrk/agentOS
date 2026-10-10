@@ -194,7 +194,7 @@ type reachRig struct {
 // is 08:12 the same day.
 func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	r := newRig(t)
-	x := &reachRig{r: r, clock: time.Now().UTC().Truncate(time.Minute).Add(-time.Hour)} // notes refuse future receipt
+	x := &reachRig{r: r, clock: time.Date(2026, 10, 5, 12, 30, 0, 0, time.UTC)} // pinned: a two-digit day pushes the rollback detail past fieldCap (40) and the long form fits only on a one-digit day
 	r.tl.cfg.Now = func() time.Time { return x.clock }
 	x.j = &fakeJournal{submitted: map[string]time.Time{}, origin: map[string]string{}, erased: map[string]bool{}, inFlight: map[string]bool{}, denied: map[string]bool{}}
 	x.before = x.clock.Add(-10 * time.Minute)

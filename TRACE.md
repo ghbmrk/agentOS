@@ -160,8 +160,8 @@ Covered: 135 / 178 requirement IDs
 | OSS-6 | `broker/pubid/batch_test.go`, `broker/pubid/carry_test.go`, `broker/pubid/clock_test.go`, `broker/pubid/identity_test.go`, `broker/pubid/imports_test.go`, `broker/pubid/mono_linux_test.go`, `broker/pubid/publisher_test.go`, `broker/pubid/restart_test.go`, `broker/pubid/review_test.go`, `broker/pubsend/pubsend_test.go` |
 | OSS-7 | `broker/hint/emitter_test.go` |
 | OSS-8 | `broker/update/attest_test.go` |
-| OSS-9 | `broker/follow/follow_test.go`, `broker/grants/follow_test.go`, `broker/maintain/follow_test.go`, `broker/maintain/maintain_test.go`, `broker/update/follow_test.go`, `broker/update/oss9_test.go` |
-| OSS-10 | `broker/cmd/agentosd/follow_test.go`, `broker/daemon/follow_test.go`, `broker/follow/follow_test.go`, `broker/grants/follow_test.go`, `broker/localsrv/follow_test.go`, `broker/localui/follow_test.go`, `broker/maintain/follow_test.go`, `broker/update/follow_test.go` |
+| OSS-9 | `broker/follow/follow_test.go`, `broker/follow/rotation_test.go`, `broker/grants/follow_test.go`, `broker/maintain/follow_test.go`, `broker/maintain/maintain_test.go`, `broker/update/follow_test.go`, `broker/update/oss9_test.go`, `broker/update/projectroot_test.go` |
+| OSS-10 | `broker/cmd/agentosd/follow_test.go`, `broker/daemon/follow_test.go`, `broker/follow/follow_test.go`, `broker/follow/rotation_test.go`, `broker/grants/follow_test.go`, `broker/localsrv/follow_test.go`, `broker/localui/follow_test.go`, `broker/maintain/follow_test.go`, `broker/update/follow_test.go`, `broker/update/projectroot_test.go` |
 | OSS-13 | `broker/change/oss13_test.go` |
 | OSS-11 | `broker/cleanroom/oss11_test.go`, `broker/update/oss11_test.go` |
 | OSS-12 | — |
@@ -178,7 +178,7 @@ Covered: 135 / 178 requirement IDs
 | UPD-5 | `broker/apply/apply_test.go`, `broker/apply/policy_test.go`, `broker/apply/reoffer_test.go`, `broker/change/wiring_test.go`, `broker/grants/change_test.go`, `broker/loops/updates_test.go`, `broker/maintain/maintain_test.go`, `broker/maintain/reoffer_test.go`, `broker/maintain/settings_test.go` |
 | UPD-6 | `broker/apply/apply_test.go` |
 | UPD-7 | — |
-| UPD-8 | `broker/apply/policy_test.go`, `broker/apply/settle_test.go`, `broker/change/policy_test.go`, `broker/change/staged_test.go`, `broker/cmd/agentos-release/main_test.go`, `broker/maintain/attestors_test.go`, `broker/maintain/follow_test.go`, `broker/maintain/reoffer_test.go`, `broker/update/attest_test.go`, `broker/update/follow_test.go`, `broker/update/hardening_test.go`, `broker/update/policy_test.go`, `broker/update/stage_test.go`, `broker/update/update_test.go` |
+| UPD-8 | `broker/apply/policy_test.go`, `broker/apply/settle_test.go`, `broker/change/policy_test.go`, `broker/change/staged_test.go`, `broker/cmd/agentos-release/main_test.go`, `broker/cmd/agentosd/follow_test.go`, `broker/follow/rotation_test.go`, `broker/localsrv/follow_test.go`, `broker/maintain/attestors_test.go`, `broker/maintain/follow_test.go`, `broker/maintain/reoffer_test.go`, `broker/update/attest_test.go`, `broker/update/follow_test.go`, `broker/update/hardening_test.go`, `broker/update/policy_test.go`, `broker/update/projectroot_test.go`, `broker/update/stage_test.go`, `broker/update/update_test.go` |
 | UPD-9 | — |
 | BAK-1 | `broker/recovery/choice_test.go` |
 | TIM-1 | `broker/clock/chrony_test.go`, `broker/clock/clock_test.go`, `broker/clock/hold_test.go`, `broker/clock/sync_linux_test.go`, `broker/clock/unverified_test.go`, `broker/cmd/agentos-clock-boot/main_test.go`, `broker/cmd/agentosd/questions_test.go`, `broker/cmd/agentosd/sleepsec_test.go`, `broker/control/handler_test.go`, `broker/daemon/daemon_test.go`, `broker/modem/at/nettime_internal_test.go`, `broker/modem/at/nettime_test.go`, `broker/owner/answer_test.go`, `broker/question/question_test.go`, `broker/question/w9a_test.go` |

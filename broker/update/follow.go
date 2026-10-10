@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/theupdateframework/go-tuf/v2/metadata"
+	"github.com/theupdateframework/go-tuf/v2/metadata/trustedmetadata"
 )
 
 // Following a fork (OSS-10, OSS-9): the box trusts whichever root of trust
@@ -160,6 +161,206 @@ func describe(b []byte, m *metadata.Metadata[metadata.RootType]) (RootSummary, e
 	return s, nil
 }
 
+// ErrNotProject: a root is not the project's own, judged from the anchor
+// (ProjectRoot). It wraps the cause where there is one.
+var ErrNotProject = errors.New("update: this root is not the project's own")
+
+// ErrIsProject: a root the anchor admits as the project's own, which is
+// switched back to, never followed under a name (FollowFork).
+var ErrIsProject = errors.New("update: this root is the project's own")
+
+// projectFile is the project's root as this box last trusted it, saved
+// when a follow leaves the project chain: the anchor a switch back walks
+// from (OSS-10w-r).
+const projectFile = "project_root.json"
+
+// ProjectRoot reports whether target is the project's own root, judged
+// from anchor, the newest project root the box trusted (Store.ProjectRoot,
+// else the root the image ships). It is when target's root-role keys, by
+// key material, are anchor's, it is no older and a threshold of them, by
+// anchor's root role, signed it; or when the owner's links
+// (any order, target among them or not) carry the anchor to exactly target
+// by TUF root rotation (UPD-8): each root signed by its predecessor's root
+// threshold and its own, versions one apart, every root meeting the box's
+// floor, as Check walks a rotation. Expiry is DescribeRoot's.
+func ProjectRoot(anchor, target []byte, links [][]byte, o Options) error {
+	_, err := projectRoots(anchor, target, links, o)
+	return err
+}
+
+// projectRoots is ProjectRoot, returning every root it verified on the way
+// (the anchor and each walked link), whose keys a switch back adds to
+// seen_keys.
+func projectRoots(anchor, target []byte, links [][]byte, o Options) ([]*metadata.Metadata[metadata.RootType], error) {
+	walked, err := projectRoot(anchor, target, links, o)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrNotProject, err)
+	}
+	return walked, nil
+}
+
+func projectRoot(anchor, target []byte, links [][]byte, o Options) ([]*metadata.Metadata[metadata.RootType], error) {
+	if len(links) > MaxRootRotations {
+		return nil, fmt.Errorf("more than %d root files", MaxRootRotations)
+	}
+	if o.MinThreshold < 2 {
+		o.MinThreshold = 2
+	}
+	tm, err := trustedmetadata.New(anchor)
+	if err != nil {
+		return nil, classify(err)
+	}
+	if err := floor(tm.Root, o.MinThreshold); err != nil {
+		return nil, err
+	}
+	walked := []*metadata.Metadata[metadata.RootType]{tm.Root}
+	if bytes.Equal(anchor, target) {
+		return walked, nil
+	}
+	t, err := verifyRoot(target, o)
+	if err != nil {
+		return nil, err
+	}
+	same := sameRootKeys(t, tm.Root)
+	if same && t.Signed.Version < tm.Root.Signed.Version {
+		return nil, fmt.Errorf("%w: root v%d is older than v%d", ErrRollback, t.Signed.Version, tm.Root.Signed.Version)
+	}
+	// Same keys need no chain only when the anchor's own threshold of them
+	// signed the target, TUF's old-threshold rule; else the walk decides.
+	if same && tm.Root.VerifyDelegate(metadata.ROOT, t) == nil {
+		return walked, nil
+	}
+	if t.Signed.Version <= tm.Root.Signed.Version {
+		return nil, fmt.Errorf("%w: root v%d is not newer than v%d, whose keys differ", ErrRollback, t.Signed.Version, tm.Root.Signed.Version)
+	}
+	type link struct {
+		b []byte
+		v int64
+	}
+	chain := []link{}
+	hasTarget := false
+	// A fresh slice: links may be a caller's, shared with other walks.
+	for _, b := range append(append([][]byte{}, links...), target) {
+		if bytes.Equal(b, target) {
+			if hasTarget {
+				continue
+			}
+			hasTarget = true
+		}
+		if len(b) > maxMetadata {
+			return nil, fmt.Errorf("%w: root is larger than %d bytes", ErrBadRepository, maxMetadata)
+		}
+		if err := noNull(b); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadRepository, err)
+		}
+		m, err := metadata.Root().FromBytes(b)
+		if err != nil {
+			return nil, classify(err)
+		}
+		// Root files at or below the anchor are history the box passed:
+		// skipped, so the owner may bring them all, and never walked.
+		if m.Signed.Version <= tm.Root.Signed.Version {
+			continue
+		}
+		chain = append(chain, link{b, m.Signed.Version})
+	}
+	// Target first among files of its version, so the walk ends there when
+	// it verifies.
+	sort.SliceStable(chain, func(i, j int) bool {
+		if chain[i].v != chain[j].v {
+			return chain[i].v < chain[j].v
+		}
+		return bytes.Equal(chain[i].b, target) && !bytes.Equal(chain[j].b, target)
+	})
+	// A file UpdateRoot refuses is skipped, never the end of the walk: a
+	// stray root (a fork's, or a duplicate) can neither hide the project's
+	// chain from FollowFork nor block a switch back (security 4a on #667).
+	// UpdateRoot changes nothing when it refuses.
+	last := anchor
+	var refused error
+	for _, l := range chain {
+		if l.v != tm.Root.Signed.Version+1 {
+			continue
+		}
+		if _, err := tm.UpdateRoot(l.b); err != nil {
+			if refused == nil {
+				refused = classify(err)
+			}
+			continue
+		}
+		if err := floor(tm.Root, o.MinThreshold); err != nil {
+			return nil, err
+		}
+		walked = append(walked, tm.Root)
+		last = l.b
+	}
+	if !bytes.Equal(last, target) {
+		if refused != nil {
+			return nil, refused
+		}
+		return nil, errors.New("the root files do not end at this root")
+	}
+	return walked, nil
+}
+
+// sameRootKeys reports whether a and b list the same root-role keys, by
+// key material, never by the key IDs they claim.
+func sameRootKeys(a, b *metadata.Metadata[metadata.RootType]) bool {
+	ka, kb := rootKeyMaterial(a), rootKeyMaterial(b)
+	if ka == nil || kb == nil || len(ka) != len(kb) {
+		return false
+	}
+	for k := range ka {
+		if !kb[k] {
+			return false
+		}
+	}
+	return true
+}
+
+func rootKeyMaterial(m *metadata.Metadata[metadata.RootType]) map[string]bool {
+	out := map[string]bool{}
+	for _, id := range m.Signed.Roles[metadata.ROOT].KeyIDs {
+		k, ok := m.Signed.Keys[id]
+		if !ok {
+			return nil
+		}
+		out[k.Type+"\x00"+k.Scheme+"\x00"+k.Value.PublicKey] = true
+	}
+	return out
+}
+
+// ProjectRoot is the newest project root the box trusted, the anchor a
+// switch back walks from: the root it trusts now while it is on the
+// project chain (after a switch back, or a rotation Check verified), else
+// the root saved when it last left the chain, or nil if it never saved
+// one (security F1 on #476).
+func (s *Store) ProjectRoot() ([]byte, error) {
+	unlock, err := s.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if err := s.settle(); err != nil {
+		return nil, err
+	}
+	return s.projectAnchor()
+}
+
+// projectAnchor is ProjectRoot; the caller holds the lock and has settled.
+func (s *Store) projectAnchor() ([]byte, error) {
+	if _, err := os.Stat(s.p(sourceFile)); errors.Is(err, os.ErrNotExist) {
+		return os.ReadFile(s.p("root.json"))
+	} else if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(s.p(projectFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return b, err
+}
+
 // followFile marks a switch in progress: it holds the Followed being
 // switched to, written before the root. The next store operation finishes
 // the switch if the root was written, or forgets it if not (settle).
@@ -170,7 +371,7 @@ const followFile = "following"
 const sourceFile = "source.json"
 
 // followSteps are the switch's writes, in order, under the store lock.
-var followSteps = []string{"seen_keys", "interim_flag", "marker", "root", "timestamp", "snapshot", "staged", "source", "done"}
+var followSteps = []string{"seen_keys", "interim_flag", "project_root", "marker", "root", "timestamp", "snapshot", "staged", "source", "done"}
 
 // Followed is the fork the box takes updates from, for STATUS, the digest
 // and the audit (Security C7). The zero Followed is the project's own chain.
@@ -230,12 +431,89 @@ func step(name string) error {
 // followed (OSS-10). Only the owner's tier-4 intent calls it, with the
 // Digest of the summary the owner approved and the owner's name for the
 // fork; an empty name means the root is the project's own (switching
-// back), which the caller knows from the root its image ships. The root must pass verifyRoot.
+// back), which FollowProject checks under the lock. The root must pass verifyRoot.
 // The installed version is kept, so a fork must release above it (UPD-8,
 // Security C5); every key the new root and the current one list, in any
 // role, joins seen_keys and never leaves (C2, C8); and the project's
 // interim test box stops counting for good (C1, B2). The allow-list itself is the caller's and is unchanged.
 func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error {
+	return s.follow(root, approved, name, o, nil)
+}
+
+// FollowProject switches back to the project's own root: FollowRoot with
+// no name, admitted under the store's lock, after settle, against the
+// anchor at the moment of the switch (ProjectRoot's root, else shipped,
+// carried to root by links; ProjectRoot, UPD-8). A rotation Check verifies,
+// or another switch, landing after the page's check can then never let an
+// older project root through (security 4a on #667).
+func (s *Store) FollowProject(root []byte, links [][]byte, shipped []byte, approved string, o Options) error {
+	return s.follow(root, approved, "", o, func() ([]*metadata.Metadata[metadata.RootType], error) {
+		anchor, err := s.projectAnchor()
+		if err != nil {
+			return nil, err
+		}
+		if anchor == nil {
+			anchor = shipped
+		}
+		return projectRoots(anchor, root, links, o)
+	})
+}
+
+// FollowFork follows root under the owner's name for it: FollowRoot with
+// a name, refused under the store's lock, after settle, when the anchor
+// (as FollowProject takes it) admits root, by itself or through links, as
+// the project's own. Followed under a name, the project's chain would
+// rotate under Check while the anchor stayed behind, so a later switch
+// back could re-trust a root the box had seen rotated out (security 4a on
+// #667).
+func (s *Store) FollowFork(root []byte, links [][]byte, shipped []byte, approved, name string, o Options) error {
+	if name == "" {
+		return errors.New("update: following a fork needs its name")
+	}
+	return s.follow(root, approved, name, o, func() ([]*metadata.Metadata[metadata.RootType], error) {
+		anchor, err := s.projectAnchor()
+		if err != nil {
+			return nil, err
+		}
+		if anchor == nil {
+			anchor = shipped
+		}
+		// An anchor the box cannot read as a root fails closed, never as
+		// "not the project's" (L3 on #667).
+		if _, err := projectRoot(anchor, anchor, nil, o); err != nil {
+			return nil, fmt.Errorf("update: the project's root I last trusted: %w", err)
+		}
+		// Only the files that could chain to root are walked: one newer
+		// than root, or one that is no root at all, would end the walk
+		// short of it and pass the project's root off as a fork's
+		// (security 4a on f2cc2f9).
+		if err := noNull(root); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadRepository, err)
+		}
+		t, err := metadata.Root().FromBytes(root)
+		if err != nil {
+			return nil, classify(err)
+		}
+		var below [][]byte
+		for _, b := range links {
+			if len(b) > maxMetadata || noNull(b) != nil {
+				continue
+			}
+			if m, err := metadata.Root().FromBytes(b); err == nil && m.Signed.Version <= t.Signed.Version {
+				below = append(below, b)
+			}
+		}
+		if _, err := projectRoot(anchor, root, below, o); err == nil {
+			return nil, ErrIsProject
+		}
+		return nil, nil
+	})
+}
+
+// follow is FollowRoot; admit, if set, runs under the lock after settle
+// and before any write, refuses the switch by returning an error, and
+// returns the roots it verified, whose keys join seen_keys with the rest.
+func (s *Store) follow(root []byte, approved, name string, o Options, admit func() ([]*metadata.Metadata[metadata.RootType], error)) error {
 	m, err := verifyRoot(root, o)
 	if err != nil {
 		return err
@@ -254,6 +532,12 @@ func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error 
 	defer unlock()
 	if err := s.settle(); err != nil {
 		return err
+	}
+	var walked []*metadata.Metadata[metadata.RootType]
+	if admit != nil {
+		if walked, err = admit(); err != nil {
+			return err
+		}
 	}
 	// Narrowing writes first: a crash after them leaves the old chain
 	// with fewer keys able to attest and no interim rule.
@@ -285,6 +569,11 @@ func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error 
 	}
 	addKeys(seen, old)
 	addKeys(seen, m)
+	// A switch back's walked roots: each link's keys, rotated out or not,
+	// are the project's former signers and never count as attestors.
+	for _, r := range walked {
+		addKeys(seen, r)
+	}
 	if err := s.writeSeenKeys(seen); err != nil {
 		return err
 	}
@@ -293,6 +582,21 @@ func (s *Store) FollowRoot(root []byte, approved, name string, o Options) error 
 	}
 	if err := s.recordOutside(); err != nil {
 		return err
+	}
+	if err := step("project_root"); err != nil {
+		return err
+	}
+	// Leaving the project chain: the root being left is the anchor a
+	// later switch back walks from (OSS-10w-r). It only raises the floor
+	// a switch back must meet, so a crash after it narrows.
+	if name != "" {
+		if _, err := os.Stat(s.p(sourceFile)); errors.Is(err, os.ErrNotExist) {
+			if err := writeAtomic(s.p(projectFile), cur, 0o600); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
 	}
 	if err := step("marker"); err != nil {
 		return err
