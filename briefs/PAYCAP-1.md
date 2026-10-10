@@ -8,6 +8,13 @@ Board section: Outside-the-box limits (2026-10-10).
 - A virtual card with a monthly cap (Privacy.com-style), made in the issuer's app.
 - Capped agent-payment tokens (Stripe's), if consumers can obtain them. Stripe Link is out (Mark, 2026-10-10).
 
+**Intended UX.**
+1. No setup step. The card is asked for just in time, the first time a task needs to pay (as SPEC's setup step 8 does for other grants); ONB-3 is unchanged.
+2. The Wi-Fi page offers "spending-limited virtual card (recommended)", with a link to the issuer (privacy.com), or "my own card" with the one line "no limit outside the box". The owner enters the number and the limit, then confirms with an approval code (a CH-10 high-risk grant). Card details are entered only there, never by text (CH-6).
+3. A text confirms the card's last four digits and the limit.
+4. Day to day nothing changes.
+5. A decline at the limit becomes one digest line, with no prompt and no retry.
+
 **No friction.** The box asks for nothing in normal use. When the issuer declines a charge (cap reached), the box does not prompt. It reports the decline as one line in the next digest (CH-15, OP-9 wording rules), with what would fix it (raise the cap at the issuer). The box never raises a cap itself, and holds no credential that can.
 
 **Proposed requirement text (for a spec-diff PR, not edited here).** The payment card the box holds MUST be capped by its issuer per month, at a limit the owner sets outside the box; the box MUST NOT hold a credential that can create cards or change the cap; an issuer decline MUST reach the owner as a digest line, not an approval prompt.
