@@ -255,8 +255,9 @@ type RootSummary struct {
 	Digest     string              `json:"digest,omitempty"`
 	Refusal    string              `json:"refusal,omitempty"`
 	Reason     string              `json:"reason,omitempty"`
-	// Project: the root has the project's own root keys, as the image
-	// ships them, so the page may offer switching back (WF1).
+	// Project: the root is the project's own, admitted from the project
+	// root the box last trusted (or the shipped one) by itself or through
+	// a chain of root files, so the page may offer switching back (WF1).
 	Project bool `json:"project,omitempty"`
 }
 

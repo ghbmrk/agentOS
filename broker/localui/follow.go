@@ -35,8 +35,8 @@ type rootView struct {
 	// Print is the short fingerprint the approval card shows
 	// (grants.FollowPrint).
 	Print string
-	// Project: the root has the project's own keys, so the form offers
-	// only switching back, with no name (WF1).
+	// Project: the root follows from the project root the box last
+	// trusted, so the form offers only switching back, with no name (WF1).
 	Project bool
 	Roles   []roleView
 	RootIDs []string

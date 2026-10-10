@@ -196,7 +196,7 @@ form { margin: .6em 0 1.2em; }
 <details><summary>Its root keys</summary><ul>{{range .RootIDs}}<li class="mono">{{.}}</li>{{end}}</ul></details>
 {{if .Odd}}<p class="err">A key has an unusual character, shown as [U+…]. Don't follow a source you didn't expect this from.</p>{{end}}
 <p>Fingerprint: <span class="mono">{{.Print}}</span>, the same as on the approval.<br><span class="muted">In full: <span class="mono">{{.Digest}}</span>. Check it matches the one the source publishes.</span></p>
-{{if .Project}}<p>These are the AgentOS project's own keys, as I shipped with them.</p>
+{{if .Project}}<p>These are the AgentOS project's keys: they follow from the project root I last trusted.</p>
 <form method="post" action="/follow/"><input type="hidden" name="digest" value="{{.Digest}}"><input type="hidden" name="tok" value="{{$.Tok}}"><input type="hidden" name="project" value="1">
 <button name="step" value="ask">Switch back to the AgentOS project</button></form></section>
 {{else}}<p class="err">Whoever holds these keys can change any of my software. Follow only a source you trust.</p>

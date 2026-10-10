@@ -360,3 +360,22 @@ func TestOSS10wrPageSendsTheChain(t *testing.T) {
 		t.Fatalf("shown %d", shown)
 	}
 }
+
+// UX lens on #667 (OSS-10, OSS-9): a root the box admits as the project's
+// may be a rotated one the image never shipped, so the switch-back page
+// says what was checked (it follows from the root the box last trusted),
+// never that the image shipped these keys.
+func TestOSS10wrSwitchBackPageClaimsOnlyTheChain(t *testing.T) {
+	f := newFollowRig(t)
+	f.mu.Lock()
+	f.describe = func([]byte) (localapi.RootSummary, error) {
+		return localapi.RootSummary{Version: 12, Digest: followDigest, Project: true,
+			Keys: map[string][]string{"root": {"rotated1", "rotated2"}}, Thresholds: map[string]int{"root": 2}}, nil
+	}
+	f.mu.Unlock()
+	p := f.upload([]byte("rotated project root"))
+	if strings.Contains(p, "shipped") || !strings.Contains(p, "follow from the project root I last trusted") ||
+		!strings.Contains(p, "Switch back to the AgentOS project") {
+		t.Fatalf("%s", p)
+	}
+}
