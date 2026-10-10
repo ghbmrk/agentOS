@@ -106,7 +106,7 @@ Primary lane; from an external review's points 2 to 6, checked against main at 9
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| RT-1 | [Risk tiers for the image, guest build and CI; unmatched paths default to B](briefs/RT-1.md) | — | queued (brief ready; tier A) |
+| RT-1 | [Risk tiers for the image, guest build and CI; unmatched paths default to B](briefs/RT-1.md) | — | building (claude; tier A) |
 | DEL-sd | L1 spec diff: an owner reply the broker accepted is delivered, kept or flagged, never lost across a restart; an SMS whose delivery is uncertain is flagged, not resent (DEL-1 and DEL-2 build on these as provisional choices) | — | queued (Mark approves) |
 | DEL-1 | [An accepted owner reply survives a crash: persist before 204, idempotent reply, guest retries what it holds](briefs/DEL-1.md) | DEL-sd opened | queued (brief ready; tier A) |
 | DEL-2 | [Send outcomes for owner replies: retry known-unsent, flag uncertain, stable email intent](briefs/DEL-2.md) | DEL-1 | queued (brief ready; tier A) |
