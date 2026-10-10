@@ -16,4 +16,3 @@ Questions and actions only Mark can take, one line each, answerable in one word,
 | A2 | Hardware for S1: three unmodified PCs and the USB4 SSD, plus hands | S1 (A1) |
 | A3 | Two USB LTE modems and a SIM for S2 | S2 (A1, A3) |
 | A4 | Claude and ChatGPT plan logins for the S8 live run | S8-live (A3, CAP-11) |
-| A5 | S5's live run is denied by the cloud environment's network policy: add the hosts S5 names under the environment's settings, Network access, Allowed domains (https://code.claude.com/docs/en/cloud-environments#network-access) | S5 (A5, A13) |

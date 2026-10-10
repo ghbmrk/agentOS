@@ -127,7 +127,7 @@ Primary lane; from an external review's points 2 to 6, checked against main at 9
 | S7 | [Host foundation](briefs/S7.md) | Cloud only | merged (result, systemd image stack on Debian 13; HW-5a decided) |
 | S3 | [Agent machines at 8 GB](briefs/S3.md) | Cloud first, then N95 | merged (cloud part; Firecracker + N95 timings wait on hardware) |
 | S4 | [OpenClaw unmodified as a guest via broker tools; record any…](briefs/S4.md) | Cloud only | merged |
-| S5 | [Credentialed browser](briefs/S5.md) | see brief | building (fixture suite passes (interim result); live run blocked on network policy) |
+| S5 | [Credentialed browser](briefs/S5.md) | see brief | in review (fixture suite and live run on 5 real sites pass; see RESULT.md) |
 | S6 | [Consumer AI CLIs in no-tools relay mode](briefs/S6.md) | Mark's accounts | dropped (superseded by S8 (CRED-5 now covers full provider agents)) |
 | S8 | [Provider agents as workers](briefs/S8.md) | Cloud first (stubs), then Mark's accounts | merged (03641d1; #186 cloud part and spec diff) |
 | S8-W1 | [Image fix for worker-held custody](briefs/S8-W1.md) | S8, #186 | queued (blocked: needs a supervised session with prompts on, D-064; the design hand-off is a bwrap prefix for agentos-toolsh, managed-settings denies and a containment test) |
@@ -358,6 +358,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | OSS-6 | [Publication identity](briefs/OSS-6.md) | P4-1, P4-4 | merged (#163, 8a67351) |
 | OSS-6s | [Publication sender](briefs/OSS-6s.md) | OSS-6 | dropped (split into OSS-6s-a and OSS-6s-b on #325) |
 | OSS-6s-a | [Constant daily batch, idempotent ledger, cover send](briefs/OSS-6s-a.md) | OSS-6 | merged (6790cf4; #411) |
+| OSS-6s-a-f | [pubsend ledger read cap, producer sizes against MaxPayload](briefs/OSS-6s-a-f.md) | OSS-6s-a | building (LATER rows f1, f2; D-048 exception at the coordinator's request, awaits Mark) |
 | OSS-6s-b | [Tor transport to Nostr relays, and the pull job](briefs/OSS-6s-b.md) | OSS-6s-a, OSS-6p, OSS-6i, OSS-6j | queued |
 | OSS-6m | [Measure the daily publication batch constant](briefs/OSS-6m.md) | OSS-6s-a | queued (optional, non-blocking) |
 | OSS-6j | [Spec: what the repository's pull job is](briefs/OSS-6j.md) | #330 | queued (L1 spec diff) |
@@ -445,6 +446,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | HOST-1f | [Give the TPM's dictionary-attack settings back as they were](briefs/HOST-1f.md) | P2-4b (tpmseal, boot PIN #42) | merged (de01c80; #188) |
 | CI-SOAK | [Unattended soak workflow](briefs/CI-SOAK.md) | — | merged (8bab3fe; #187) |
 | OSS-10w2 r1 | Follow names: the reserved-name check (`grants.followName`, localui `askFollow`) also refuses look-alikes of "the AgentOS project" (folded as `owner.fold` does for CH-10, or a confusable skeleton), so a named follow never reads as switching back (release, security lens 370-1 on #370; supersedes LATER OSS-10w2 f4) | OSS-10w2 | queued (needs brief) (A) |
+| HOST-1f-r2 | Owned lockout, failed forget: on `giveBack`'s `ErrLockoutOwned` branch a failed `v.Delete` leaves the stale lockout entry, so each unattended start sends it again and fails a lockout authorization on the PC's TPM (comment at `trusted.go:953`: retrying "would only re-arm the TPM's lockout"); keep an "owned" mark outside the vault so later starts retry only the `Delete`, and send the "dropped my copy" text after the `Delete` succeeds (release, `recheck`, Security to confirm; HW-8, A1; UX 1 and Potency 1 on #666, [record](reviews/ux/2026-10-09-pr666.md)) | HOST-1f, #666 | queued (release) (A) |
 
 ## Integration: wiring merged packages into the box
 
@@ -491,6 +493,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W3-forget-b2b | [Agent machine's work taken back as item 2](briefs/W3-forget-b2b.md) | W3-forget-b2 | Next build item B | merged (#327) |
 | W3-forget-b3 | [Promised done text survives a restart](briefs/W3-forget-b3.md) | W3-forget-b1 | Next build item B | merged (4b60dc2; #425) |
 | W3-forget-b2c | [Owed take-backs for W3-forget-b2b](briefs/W3-forget-b2c.md) | W3-forget-b2b | Next build item B | merged (#427) |
+| W3-forget-f | [LATER follow-ups to the forget packages](briefs/W3-forget-f.md) | W3-forget-b2b | coordinator thread | in review (#473) |
 | W3-implicit | [Report accepted-implicitly guest effects](briefs/W3-implicit.md) | W3 PW3 | — | queued |
 | W3-forget-b2c-2 | [Item 2's texts (`forgetAgentDone`, `forgetAgentNotYet` and the rest) are owed until they send](briefs/W3-forget-b2c-2.md), as W3-forget-b3 does for item 1; add a check that no done text in `ownerForget` reaches `inform` directly (release, UX-182-3 / CH-12; Defect: W3-forget-b2c; L3 on #425, second PR with this kind of finding) | W3-forget-b2c, W3-forget-b3 | Next build item B | merged (d63322a; #541) |
 | W3-forget-b2c-f1 | [The in-boot retry of an owed item 2 take-back is unbounded and gives the owner no signal on a permanent error: bound it, add a STATUS line while a take-back is owed, send its done text on the restore path, and bound the silence on retries (folds the UX point f4)](briefs/W3-forget-b2c-f1.md) (release, tier A, L3 on #427; also Security #541 P1, the CH-12-lint; folds f2; builds after W3-forget-reach) | W3-forget-b2c | Next build item B | merged d575ff6 (#602; item 1 restore text split to W3-forget-b2c-f1-r1) |

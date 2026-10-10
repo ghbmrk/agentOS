@@ -571,11 +571,13 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 			bctx, cancel := context.WithCancelCause(ctx)
 			defer cancel(nil)
 			l.mu.Lock()
-			l.building = &running{goals: goals, cancel: cancel}
 			if l.goneSinceLocked(goals, at) {
-				// Forgotten after this job was offered, before it began.
-				cancel(ErrRequeued)
+				// Forgotten after this job was offered, before it began:
+				// nothing is built (L3 on #321).
+				l.mu.Unlock()
+				return Result{Err: ErrRequeued}
 			}
+			l.building = &running{goals: goals, cancel: cancel}
 			l.mu.Unlock()
 			rep, err := l.propose(bctx, h, ev)
 			// One critical section, so no forget lands between the check
@@ -583,9 +585,17 @@ func (l *Learn) Next(ctx context.Context, modelOK bool) (Job, bool) {
 			l.mu.Lock()
 			l.building = nil
 			if errors.Is(context.Cause(bctx), ErrRequeued) || l.goneSinceLocked(goals, at) {
-				// Not tried and not asked: what it built from the
-				// forgotten task is not proposed or kept (propose drops
-				// a candidate whose goal is gone).
+				// Not tried: what it built from the forgotten task is not
+				// proposed or kept (propose drops a candidate whose goal
+				// is gone). A proposal that already reached the owner
+				// counts as an ask, as when the forget lands after the
+				// job, and the rebuild is not held back by its backoff
+				// (ForgetGoal), so forgets never ask more than MaxAsks
+				// times (L3 on #321).
+				if err == nil && rep.State == change.StateAwaitingOwner {
+					l.askedLocked(h.Key, rep)
+					delete(l.notBefore, h.Key)
+				}
 				l.mu.Unlock()
 				return Result{Err: ErrRequeued}
 			}
