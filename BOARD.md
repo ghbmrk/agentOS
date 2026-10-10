@@ -620,3 +620,4 @@ Promoted by Mark on 2026-10-10 ("Can just become a row", "Just bypass gap list";
 | ID | Package | Needs | State |
 |---|---|---|---|
 | PAYCAP-1 | [A spending limit set outside the box: the box pays with one card whose limit the owner's bank enforces, a backstop that holds if the broker is compromised](briefs/PAYCAP-1.md) (stub; no friction in normal use; declines reach the owner as a digest line) | — | queued (A) |
+| PAYCAP-2 | [An optional Link agent-wallet payment adapter: one spend request and one-time card per purchase, approval as a state so Stripe's announced limits only make it instant; Step 0 checks that the API is open to self-hosted apps, its regions and merchant coverage](briefs/PAYCAP-2.md) (stub; failures are digest lines with a checkout-link fallback) | PAYCAP-1 | queued (A) |
