@@ -31,7 +31,7 @@ Classes: **buildable now** (cloud-buildable; dependencies are in Needs), **stand
 | OSS-12 | environment-blocked | Waits on Mark's licence choice (D-041, date `Pending`). No class fits a decision; the blocker is named instead. Upstream-notice preservation is checkable now and rides the first row that ships a LICENSE. | MARK-QUEUE Q4 |
 | RES-5 | buildable now | Pool tracker and reserve admission against S8 stub CLIs. | RES-5a |
 | UPD-7 | buildable now | Soak plus attestations, no project-run rollout. Likely already exercised by M6's tests in `broker/maintain`; first step is to add the `REQ: UPD-7` marker, then fill any gap. | UPD-7t |
-| UPD-9 | buildable now | Held security fix put to the owner. Wiring (`maintain.Loop3`) and the D3 and O2 registrations are W5b's. | W5b (existing) |
+| UPD-9 | buildable now | Held security fix put to the owner. Wiring (`maintain.Loop3`) is W5b's; the D3 and O2 registrations are OP9-status-b's, or W5b's if -b has not (briefs/OP9-status.md, line "Update checks (C11)", IDs OP-9, UPD-9). | W5b (existing) |
 
 Counts: buildable now 10, stand-in 7, environment-blocked 4, hardware-blocked 2, spec-blocked 1 (24).
 
