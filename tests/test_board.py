@@ -391,6 +391,15 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("do not render BOARD.md's live rows", err.getvalue())
 
+    def test_later_classes_label_rows_that_name_no_class(self):
+        later = ("# LATER\n\n## Release (x)\n| ID | Needed for | Note |\n|---|---|---|\n| A-1 | A3 | n |\n\n"
+                 "## Later (backlog)\n| ID | Why |\n|---|---|\n| W-1 | w |\n| A-1 | dup |\n\n## Reuse\n| ID | C |\n|---|---|\n| W-3 | c |\n")
+        self.assertEqual(board_migrate.later_classes(later), {"A-1": "class:release", "W-1": "class:later"})
+        planned = [{"title": "A-1: a", "labels": ["work-item"]}, {"title": "W-1: w", "labels": ["work-item", "class:release"]},
+                   {"title": "W-3: c", "labels": ["work-item"]}]
+        got = board_migrate.with_later(planned, {"A-1": "class:release", "W-1": "class:later"})
+        self.assertEqual([i["labels"] for i in got], [["work-item", "class:release"], ["work-item", "class:release"], ["work-item"]])
+
     def test_apply_needs_a_repo(self):
         with redirect_stderr(io.StringIO()):
             self.assertEqual(board_migrate.main(["--apply"], read=lambda: BOARD, api=lambda *a: None), 2)

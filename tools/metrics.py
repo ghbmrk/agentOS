@@ -2,11 +2,13 @@
 """L4 metrics: writes METRICS.md, one row per plan week (PLAN.md §2 L4, §5).
 
 Sources, all re-read in full on every run so METRICS.md is regenerated, never appended:
-  git, first-parent history of --ref   TRACE.md covered count; BOARD.md package states
+  git, first-parent history of --ref   TRACE.md covered count; BOARD.md package states (the
+                                       hand-kept board up to SIM-repo-2b, the generated one since)
   LEDGER.md                            usage readings (weekly %, all models and Fable only); phase table
   GitHub API                           PRs: L3 verdicts in collaborators' reviews, `Defect: <ID>`
                                        lines in bodies; this repository's own Actions runs and
-                                       their attempts (CI flakes)
+                                       their attempts (CI flakes); `state:` labels added to
+                                       work-item issues (package states between board renders)
 GitHub drops Actions runs after its retention window; a value already in METRICS.md is kept
 when the source no longer has data for that week.
 
@@ -214,6 +216,25 @@ def _api(repo, path, token):
         time.sleep(2 ** attempt * 5)
 
 
+WORK_ITEM_TITLE = re.compile(r"([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*(?: [a-z][A-Za-z0-9]*)*): ")
+
+
+def collect_states(repo, token):
+    """[{at, id, state}] for every `state:` label added to a work-item issue (tools/board.py).
+    The generated BOARD.md only shows a package while it is open, and a state held between two
+    board renders never reaches its history, so escalations and reviews are also counted here."""
+    out = []
+    for e in _pages(repo, "issues/events", token):
+        issue, label = e.get("issue") or {}, (e.get("label") or {}).get("name", "")
+        names = {x["name"] for x in issue.get("labels", [])}
+        m = WORK_ITEM_TITLE.match(issue.get("title", ""))
+        if e.get("event") == "labeled" and label.startswith("state:") and "work-item" in names and m \
+                and "pull_request" not in issue:
+            out.append({"at": e["created_at"], "id": m.group(1), "state": label[len("state:"):]})
+    out.sort(key=lambda x: (x["at"], x["id"]))
+    return out
+
+
 def _since(previous_md, tz):
     """UTC start of the week after the last closed week METRICS.md already records."""
     closed = [k for k, cells in _previous(previous_md).items() if "(to date)" not in cells[0]]
@@ -342,6 +363,7 @@ def compute(raw):
     for key in ("trace", "board", "readings", "runs"):
         weeks |= {wk(x["at"]) for x in raw[key]}
     weeks |= {wk(p["merged_at"]) for p in raw["pulls"] if p.get("merged_at")}
+    weeks |= {wk(x["at"]) for x in raw.get("states", [])}
 
     out = []
     base = baseline(raw)
@@ -371,6 +393,10 @@ def compute(raw):
             if upto(snap["at"]):
                 ever_esc |= {k for k, v in snap["states"].items() if v == "escalated"}
                 ever_rev |= {k for k, v in snap["states"].items() if v in REACHED_REVIEW}
+        for x in raw.get("states", []):  # raw data saved before SIM-repo-2b has none
+            if upto(x["at"]):
+                ever_esc |= {x["id"]} if x["state"] == "escalated" else set()
+                ever_rev |= {x["id"]} if x["state"] in REACHED_REVIEW else set()
 
         groups = {}
         for r in raw["runs"]:
@@ -533,7 +559,7 @@ def render(weeks, raw, previous_md=None):
         "Stands in for tokens per merged requirement until tokens are metered.",
         "- **First-pass L3 accept**: PRs merged that week whose first review with a verdict "
         "(an L3 review stating `Verdict: accept|fix-list|reject`, or the verdict on its first line) was accept.",
-        "- **Escalation rate**: packages ever `escalated` on BOARD.md over packages that ever reached "
+        "- **Escalation rate**: packages ever `escalated` on BOARD.md or by a work-item issue's state label over packages that ever reached "
         "`in review`, `merged` or `escalated`, up to that week.",
         "- **Defects after merge**: `Defect: <package ID>` lines in the bodies of PRs merged that week "
         "(a fix to code already merged; see the PR template).",
@@ -601,6 +627,7 @@ def main(argv=None):
             "tz_hours": TZ_HOURS, "trace": trace, "board": board,
             "readings": ledger_readings(ledger), "phases": ledger_phases(ledger),
             "pulls": pulls, "runs": runs,
+            "states": collect_states(args.repo, os.environ.get("GITHUB_TOKEN")),
             "held": held_drafts(codex.read_text()) if codex.is_file() else None,
         }
         if args.raw_out:

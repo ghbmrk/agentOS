@@ -12,6 +12,10 @@ issues back and checks that they render BOARD.md's live rows (the SIM-repo-2 acc
 Each new issue notifies everyone watching the repository once: about 270 notifications to the
 owner. Tell them before running --apply, so the burst is expected.
 
+LATER.md's rows (archived as docs/LATER-HISTORY.md) reach the issues as labels: an ID in its Release table gets class:release and
+one in its Later table class:later, unless the BOARD row already names a class (SIM-repo-2b;
+LATER.md is then archived).
+
 After it passes, add board.GENERATED below BOARD.md's title and move the merged and dropped
 rows to the history file (SIM-repo-2b). Delete this script once the migration has run.
 """
@@ -24,7 +28,33 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import board  # noqa: E402
 
 
-def main(argv=None, read=lambda: (board.ROOT / "BOARD.md").read_text(), api=None, pause=time.sleep):
+def later_classes(text):
+    """{ID: class:release or class:later} from LATER.md's Release and Later tables."""
+    out, cls = {}, None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            cls = "class:release" if line.startswith("## Release") else "class:later" if line.startswith("## Later") else None
+        elif cls and line.startswith("| ") and not line.startswith("| ID |"):
+            out.setdefault(board._cells(line)[0], cls)
+    return out
+
+
+def with_later(planned, classes):
+    """planned, each issue labelled with its LATER.md class when it has none."""
+    out = []
+    for i in planned:
+        cls = classes.get(board.issue_id(i))
+        has = any(x.startswith("class:") for x in i["labels"])
+        out.append(dict(i, labels=i["labels"] + [cls]) if cls and not has else i)
+    return out
+
+
+def _later():
+    path = board.ROOT / "docs/LATER-HISTORY.md"
+    return path.read_text() if path.is_file() else ""
+
+
+def main(argv=None, read=lambda: (board.ROOT / "BOARD.md").read_text(), api=None, pause=time.sleep, later=_later):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--apply", action="store_true", help="create the labels and issues (default: dry run)")
     ap.add_argument("--repo", help="owner/name, required with --apply")
@@ -34,7 +64,7 @@ def main(argv=None, read=lambda: (board.ROOT / "BOARD.md").read_text(), api=None
         return 2
     text = read()
     try:
-        planned = board.plan(text)
+        planned = with_later(board.plan(text), later_classes(later()))
         ok = board.render(text, [dict(i, number=n) for n, i in enumerate(planned, 1)]) == board.live(text)
     except ValueError as e:
         print(f"board_migrate: {e}", file=sys.stderr)

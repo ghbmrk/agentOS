@@ -10,7 +10,7 @@ How AgentOS is built for the most progress per weekly limit at the same quality.
 | How it is phased | PLAN.md |
 | Rules | CLAUDE.md |
 | Procedures and reasons | this file |
-| Live state | BOARD.md (index), LATER.md (release vs later), docs/LANES.md (team lanes) |
+| Live state | `work-item` issues (state, tier, class and lane as labels; BOARD.md is rendered from them by tools/board.py), `decision` issues (actions only Mark can take), docs/LANES.md (team lanes) |
 | One package's work | `briefs/<ID>.md`, linked from its BOARD row |
 | Records | DECISIONS.md, `reviews/`, each package's `ASSUMPTIONS.md` |
 | Generated | TRACE.md, METRICS.md |
@@ -52,18 +52,18 @@ Every finding (L3, lens, CI soak, an agent's own observation) gets one class at 
 | Class | Meaning | Where it goes |
 |---|---|---|
 | **blocker** | Breaks a requirement the PR cites, or an invariant. | Fixed in the same PR before merge. |
-| **release** | Needed to pass an acceptance test in SPEC §15 (A1–A15) or an invariant, but not in this PR's scope. The finding names that test or invariant and one failure path: what goes wrong without it. | A new BOARD.md row, named in the PR's Findings line. |
-| **later** | Anything else: polish, hardening beyond the spec, nice-to-have wording. | One line in LATER.md. No package is started for it before the first release ships. |
+| **release** | Needed to pass an acceptance test in SPEC §15 (A1–A15) or an invariant, but not in this PR's scope. The finding names that test or invariant and one failure path: what goes wrong without it. | A new `work-item` issue labelled `class:release`, named in the PR's Findings line. |
+| **later** | Anything else: polish, hardening beyond the spec, nice-to-have wording. | An issue labelled `class:later` (one line). No package is started for it before the first release ships. |
 
-The PR's Findings line also names every LATER.md row the PR removes, including a row outside its brief's scope that it strikes; the reviewer checks the line against the diff.
+The PR's Findings line also names every `class:later` issue the PR closes, including one outside its brief's scope; the reviewer checks the line against the diff.
 
 Security findings on tier-A broker paths are never `later` unless they are purely wording. On assurance tooling (`tools/depaudit*`, `tools/canary*`, `assurance/`), a finding is `release` only if it can make the tool report a pass on a real violation (a false pass); the tool's messages, diagnostics and remedy text are `later`. When unsure between blocker and release, pick blocker. When unsure between release and later, class it `later` with the tag `recheck` and say so (D-086).
 
 - **Follow-up depth.** A finding raised on a follow-up of a follow-up (a row whose source is itself a review finding on a follow-up row) is `later` unless it is a blocker on the cited IDs, a false pass, or an exploit path.
-- **One review, one package.** The release findings from one PR's reviews go into one follow-up brief, with one BOARD row per finding grouped under it, not one package each.
-- **Pre-release sweep.** Before the first release ships, one session re-reads every `recheck` line and every tier-A `later` line in LATER.md and promotes any that now block an acceptance test.
+- **One review, one package.** The release findings from one PR's reviews go into one follow-up brief, with one `work-item` issue per finding grouped under it, not one package each.
+- **Pre-release sweep.** Before the first release ships, one session re-reads every `recheck` and every tier-A `class:later` issue (and the archived docs/LATER-HISTORY.md) and promotes any that now block an acceptance test.
 
-LATER.md also holds the critical-path audit of BOARD.md: each open row is marked release or later. The coordinator does not start `later` rows. A row moves to release only with the acceptance test it now blocks.
+The critical-path audit of the board lives on the issues: each open row's issue carries `class:release` or `class:later` (the 2026-10-10 audit is in docs/LATER-HISTORY.md). The coordinator does not start `later` rows. A row moves to release, by relabelling its issue, only with the acceptance test it now blocks.
 
 ## 3. Risk tiers
 
@@ -73,7 +73,7 @@ Review depth follows risk, decided mechanically from the paths a change touches.
 |---|---|---|
 | **A** | broker packages holding credentials, isolation, effects, owner auth, update and supply chain (vault, tpmseal, egress, grants, verb, journal, reversible, sockets, guest, vm, workers, cgroup, owner, control, card, modem*, localapi/localsrv/localui, cleanroom, hint, pubid, attest, update, apply, change, replay, sim, sipsign, smsapi, sendrules, clock, recovery, hostdisk, hostchange, vendor, mail, plus the wiring in daemon and cmd), `broker/go.mod`, `broker/go.sum`, `assurance/`, `tools/canary*`, `tools/depaudit*`, `tools/risk_tier*`; `image/` except its top-level `*.md`; `.github/` (workflows build the image, gate merges and push to main); `.claude/` (agent permissions); the guest's build inputs (`guest/*/build-rootfs.sh`, `package.json`, `package-lock.json`, `launch.json`, `guest/openclaw/openclaw.json5`); any `*.service`, `*.socket` or `*.timer`, and any `*.conf` under a `systemd` directory, outside `spikes/` | CI, L3 on the strongest model with a threat check, lens screen with a separate Security section, Security re-sign on later deltas |
 | **B** | other `broker/` packages, the rest of `guest/`, SPEC.md (which also needs Mark through an L1 spec-diff PR), and any path no rule names, so a new top-level directory gets a lens pass until it is classed | CI, L3, one combined lens pass |
-| **C** | only the explicit list: top-level `*.md` other than SPEC.md (BOARD, LATER, DECISIONS, LEDGER, METRICS, TRACE among them), `docs/`, `briefs/`, `reviews/`, `decisions/`, `spikes/`, `tests/`, `tools/` outside the tier-A prefixes, `image/*.md` | CI, L3; no lens screen |
+| **C** | only the explicit list: top-level `*.md` other than SPEC.md (BOARD, DECISIONS, LEDGER, METRICS, TRACE among them), `docs/`, `briefs/`, `reviews/`, `decisions/`, `spikes/`, `tests/`, `tools/` outside the tier-A prefixes, `image/*.md` | CI, L3; no lens screen |
 
 A new broker package that holds credentials or gates effects is added to `TIER_A_BROKER` in the same PR that creates it. A renamed tier-A package fails `tests/test_risk_tier.py` until the list is updated.
 
@@ -134,7 +134,7 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 - **Sonnet pilot (from 2026-10-08, through the 2026-10-13 reset):** every tier B and C builder session runs on Sonnet 5.5: the coordinator starts it with that model, choosing the tier from the brief's declared scope; tier A stays on the strongest model. Before opening its PR the builder runs `tools/risk_tier.py`; if it prints A, the builder stops and writes a hand-off packet, and the coordinator continues the work in a strongest-model session. Each PR's Budget section names its builder model. Judge on PRs merged from 2026-10-08 to the 2026-10-13 reset against those merged the week before 2026-10-08: first-pass L3 accept, L3 rounds per merged PR and `Defect:` lines within 7 days of merge, counted by hand from the `Builder model:` lines (METRICS.md does not split by model); usage per merged PR from METRICS.md, the 2026-10-11 week against the 2026-10-04 week, noting the latter carries three pilot days, which narrows any gap. Keep Sonnet for B/C if none is worse; otherwise revert. The result is recorded in DECISIONS.md.
 
 - **Idle limit:** a PR or `building` row with no activity for 48 hours is finished, handed off with a packet, or returned to `queued` with its PR closed (branch kept). Drafts held under CODEX-1 are a parts bin, not work in progress; they are counted apart and never closed for age (D-086).
-- **Questions for Mark** go to docs/MARK-QUEUE.md, one line each, answerable in one word, with a recommendation. Mark answers the queue in one sitting; an answered line moves to DECISIONS.md.
+- **Questions for Mark** go to the coordinator, who asks each on a Decisions card: one question, answerable with a tap, with a recommendation; an answer that sets policy moves to DECISIONS.md. Actions only Mark can take (hardware, accounts, readings) are issues labelled `decision`, closed when done.
 
 **Coordinator chat layout** (token rules for any team's coordinator; Mark, 2026-10-09 and 2026-10-10). A chat-based project runs on these rules; a second subscription's team (§7) follows them in its own project.
 
@@ -169,7 +169,7 @@ Extra capacity (a second subscription, a teammate's agent, or another vendor's c
 
 **Disjoint lanes.** Each team owns whole subsystems behind stable interfaces, listed in docs/LANES.md. A team changes files only inside its lane. A change that must cross a lane boundary is an interface change: it goes as a PR to the owning team, or as an issue labelled `lane:<name>` if it needs their design.
 
-**Claims on BOARD.md.** A team claims a row by a PR or commit to main that sets the row's state to `building` and its owner to the team name, before any work. A row with an owner belongs to that team until its state changes. Two claims on one row: the earlier merged one wins and the other stops.
+**Claims on BOARD.md.** A team claims a row by setting its `work-item` issue's label to `state:building` and naming the team in the issue, before any work; BOARD.md follows through board.yml, never a hand edit. A row with an owner belongs to that team until its state changes. Two claims on one row: the earlier merged one wins and the other stops.
 
 **One merge authority.** Only the primary coordinator merges to main, after the stages its tier needs (§3, §4). Other teams open PRs; they do not merge, and they never push to another team's branch. Branch stems carry the team: `pkg/<team>-<id>-<slug>`.
 

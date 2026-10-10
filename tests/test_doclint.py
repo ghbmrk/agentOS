@@ -1,10 +1,11 @@
 """Tests for tools/doclint.py, the operating-document consistency check (BOARD row DOC-2).
 
 No SPEC requirement IDs: PLAN.md tooling, not SPEC.md behaviour. DOC-7 requirement IDs
-(briefs/DOC-7.md) are claimed below; CONV0Test claims the CONV-0 brief's IDs (briefs/CONV-0.md).
+(briefs/DOC-7.md) are claimed below. The BOARD and LATER rules (DOC-5, CONV-0-5) were retired with
+the generated board (SIM-repo-2b): BOARD.md is rendered from work-item issues by tools/board.py.
 All data is synthetic.
 
-REQ: DOC7-1, DOC7-2, DOC7-3, DOC7-4, DOC7-5, DOC5-a, DOC5-b, DOC5-c, DOC5-d
+REQ: DOC7-1, DOC7-2, DOC7-3, DOC7-4, DOC7-5
 """
 import pathlib
 import subprocess
@@ -39,15 +40,6 @@ class LintTest(unittest.TestCase):
 
     def test_consistent_documents_pass(self):
         self.assertEqual(self.lint(), [])
-
-    def test_board_state_outside_the_enum(self):
-        board = GOOD["BOARD.md"].replace("in review (#1)", "reviewing")
-        self.assertEqual(self.lint(**{"BOARD.md": board}),
-                         ["BOARD.md: A-1: state 'reviewing' does not start with one of "
-                          "queued, building, in review, merged, escalated, dropped"])
-
-    def test_board_links_a_missing_brief(self):
-        self.assertEqual(self.lint(**{"briefs/A-1.md": None}), ["BOARD.md: A-1: links missing briefs/A-1.md"])
 
     def test_readme_must_list_every_document_and_only_existing_ones(self):
         got = self.lint(**{"LATER.md": "x", "docs/LANES.md": "x", "CLAUDE.md": None})
@@ -174,170 +166,7 @@ class LintTest(unittest.TestCase):
 
     def test_brief_with_its_own_state_line(self):
         got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**State:** building\n"})
-        self.assertEqual(got, ["briefs/A-1.md:3: `**State:**` line; BOARD.md is the only record of state"])
-
-
-HEAD = "| ID | Package | Needs | State |\n|---|---|---|---|\n"
-
-
-class CONV0Test(unittest.TestCase):
-    """REQ CONV-0-5 (a BOARD row added on or after 2026-10-10 whose state says `release`
-    must name an acceptance test or invariant)."""
-    ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid", "PATH": "/usr/bin:/bin"}
-
-    def repo(self, history, spec="Requirements DEP-1 and CRED-4 are normative.\n"):
-        """history: [(commit date, BOARD.md rows added)]; returns lint problems for the final tree."""
-        with tempfile.TemporaryDirectory() as d:
-            root = pathlib.Path(d)
-            git = lambda *a, date: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True,
-                                                 env={**self.ENV, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date})
-            git("init", "-q", "-b", "main", date="2026-10-01T00:00:00-04:00")
-            readme = GOOD["README.md"].replace("| [BOARD.md](BOARD.md) |", "| [BOARD.md](BOARD.md) |\n| [SPEC.md](SPEC.md) |")
-            for name, text in {**GOOD, "README.md": readme, "SPEC.md": spec}.items():
-                (root / name).parent.mkdir(parents=True, exist_ok=True)
-                (root / name).write_text(text)
-            rows = ""
-            for date, add in history:
-                rows += add
-                (root / "BOARD.md").write_text(HEAD + "| A-1 | [a](briefs/A-1.md) | — | in review (#1) |\n" + rows)
-                git("add", ".", date=date)
-                git("commit", "-qm", "x", date=date)
-            return doclint.lint(root)
-
-    def test_new_release_row_without_a_test_or_invariant_is_flagged(self):
-        got = self.repo([("2026-10-10T09:00:00-04:00", "| N-1 | thing (release, tier A) | — | queued (release) |\n")])
-        self.assertEqual(len(got), 1)
-        self.assertIn("BOARD.md: N-1", got[0])
-        self.assertIn("acceptance test or invariant", got[0])
-
-    def test_new_release_row_naming_a_spec_id_invariant_or_test_passes(self):
-        rows = ("| N-1 | thing (release; CRED-4) | — | queued |\n"
-                "| N-2 | thing | — | queued (release, Invariant 3) |\n"
-                "| N-3 | thing (release, TestNoThirdPersonSelfReference) | — | queued |\n")
-        self.assertEqual(self.repo([("2026-10-10T09:00:00-04:00", rows)]), [])
-
-    def test_a_token_that_is_not_a_spec_id_does_not_count_and_the_row_id_is_ignored(self):
-        rows = ("| DEP-1 | thing (release, A9, UX3-1) | — | queued |\n")
-        self.assertEqual(len(self.repo([("2026-10-10T09:00:00-04:00", rows)])), 1)
-
-    def test_older_rows_are_exempt_and_only_the_adding_commit_counts(self):
-        row = "| O-1 | old (release, tier A) | — | queued (release) |\n"
-        self.assertEqual(self.repo([("2026-10-09T23:00:00-04:00", row),
-                                    ("2026-10-12T09:00:00-04:00", "| N-2 | plain | — | queued |\n")]), [])
-
-    def merged(self, resolution=""):
-        """A branch off an old base adds a file; main adds BOARD row O-1 (2026-10-09); the branch merges main
-        on 2026-10-12, adding `resolution` to BOARD.md in the merge commit. Returns the lint problems."""
-        row = "| O-1 | old (release, tier A) | — | queued (release) |\n"
-        with tempfile.TemporaryDirectory() as d:
-            root = pathlib.Path(d)
-            def git(*a, date, check=True):
-                subprocess.run(["git", "-C", d, *a], check=check, capture_output=True,
-                               env={**self.ENV, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date})
-            git("init", "-q", "-b", "main", date="2026-10-01T00:00:00-04:00")
-            readme = GOOD["README.md"].replace("| [BOARD.md](BOARD.md) |", "| [BOARD.md](BOARD.md) |\n| [SPEC.md](SPEC.md) |")
-            for name, text in {**GOOD, "README.md": readme, "SPEC.md": "x\n"}.items():
-                (root / name).parent.mkdir(parents=True, exist_ok=True)
-                (root / name).write_text(text)
-            board = HEAD + "| A-1 | [a](briefs/A-1.md) | — | in review (#1) |\n"
-            (root / "BOARD.md").write_text(board)
-            git("add", ".", date="2026-10-01T00:00:00-04:00")
-            git("commit", "-qm", "base", date="2026-10-01T00:00:00-04:00")
-            git("checkout", "-qb", "feat", date="2026-10-01T00:00:00-04:00")
-            (root / "note.txt").write_text("n")
-            git("add", ".", date="2026-10-11T09:00:00-04:00")
-            git("commit", "-qm", "feat", date="2026-10-11T09:00:00-04:00")
-            git("checkout", "-q", "main", date="2026-10-09T09:00:00-04:00")
-            (root / "BOARD.md").write_text(board + row)
-            git("add", ".", date="2026-10-09T09:00:00-04:00")
-            git("commit", "-qm", "row", date="2026-10-09T09:00:00-04:00")
-            git("checkout", "-q", "feat", date="2026-10-12T09:00:00-04:00")
-            git("merge", "-q", "--no-ff", "--no-commit", "main", date="2026-10-12T09:00:00-04:00")
-            (root / "BOARD.md").write_text(board + row + resolution)
-            git("add", ".", date="2026-10-12T09:00:00-04:00")
-            git("commit", "-qm", "merge main", date="2026-10-12T09:00:00-04:00")
-            return doclint.lint(root)
-
-    def test_a_row_merged_in_from_main_keeps_the_date_it_first_landed(self):
-        # A branch that merges main must not date main's older rows by the merge commit.
-        self.assertEqual(self.merged(), [])
-
-    def test_a_row_first_added_in_a_merge_resolution_is_still_checked(self):
-        got = self.merged("| N-1 | thing (release, tier A) | — | queued (release) |\n")
-        self.assertEqual(len(got), 1)
-        self.assertIn("BOARD.md: N-1", got[0])
-
-    def test_rows_that_do_not_say_release_are_not_checked(self):
-        self.assertEqual(self.repo([("2026-10-11T09:00:00-04:00", "| N-1 | the first release needs it | — | queued |\n")]), [])
-
-    def test_no_git_history_skips_the_check(self):
-        # The fixture directory used by the other tests is not a git repository.
-        board = GOOD["BOARD.md"] + "| N-1 | thing (release) | — | queued (release) |\n"
-        with tempfile.TemporaryDirectory() as d:
-            root = pathlib.Path(d)
-            for name, text in {**GOOD, "BOARD.md": board}.items():
-                (root / name).parent.mkdir(parents=True, exist_ok=True)
-                (root / name).write_text(text)
-            self.assertEqual(doclint.lint(root), [])
-
-
-
-README = GOOD["README.md"].replace("| [BOARD.md](BOARD.md) |\n", "| [BOARD.md](BOARD.md) |\n| [LATER.md](LATER.md) |\n")
-
-
-class Doc5Test(unittest.TestCase):
-    """DOC-5: BOARD and LATER contradictions."""
-    lint = LintTest.lint
-
-    LATER = ("# LATER\n\n| ID | Needed for | Note |\n|---|---|---|\n{rows}\n"
-             "| ID | Why it can wait |\n|---|---|\n| Z-9 | fine |\n")
-
-    def later(self, rows, merged="merged"):
-        board = GOOD["BOARD.md"].replace("in review (#1)", merged) + "| B-2 | b | — | queued |\n"
-        return self.lint(**{"BOARD.md": board, "LATER.md": self.LATER.format(rows=rows),
-                            "README.md": README})
-
-    def test_later_row_for_a_merged_board_row(self):
-        self.assertEqual(self.later("| A-1 | x | y |"),
-                         ["LATER.md: A-1: the BOARD row is merged; remove the LATER row"])
-        self.assertEqual(self.later("| A-1 | x | y |", merged="dropped"),
-                         ["LATER.md: A-1: the BOARD row is dropped; remove the LATER row"])
-
-    def test_later_row_sharing_an_open_board_id_passes(self):
-        self.assertEqual(self.later("| B-2 | x | y |", merged="merged"), [])
-
-    def test_later_finding_suffix_is_not_checked_against_the_parent(self):
-        self.assertEqual(self.later("| A-1 l1 | x | y |"), [])
-
-    def test_later_second_table_is_checked_too(self):
-        later = "# LATER\n\n| ID | Why it can wait |\n|---|---|\n| A-1 | x |\n"
-        board = GOOD["BOARD.md"].replace("in review (#1)", "merged")
-        self.assertEqual(self.lint(**{"BOARD.md": board, "LATER.md": later,
-                                      "README.md": README}),
-                         ["LATER.md: A-1: the BOARD row is merged; remove the LATER row"])
-
-    def test_no_board_row_claim_while_a_row_exists(self):
-        got = self.later("| B-2 l1 | B-2 has no board row | y |")
-        self.assertEqual(got, ["LATER.md: B-2 has a BOARD row but the text says it has no board row"])
-        got = self.lint(**{"BOARD.md": GOOD["BOARD.md"] + "\nNote: A-1 has no row of its own.\n"})
-        self.assertEqual(got, ["BOARD.md: A-1 has a BOARD row but the text says it has no board row"])
-
-    def test_no_board_row_claim_for_an_absent_id_passes(self):
-        self.assertEqual(self.later("| Q-1 | Q-1 has no board row | y |"), [])
-
-    def test_duplicate_board_ids(self):
-        board = GOOD["BOARD.md"] + "| A-1 | [a](briefs/A-1.md) | — | queued |\n"
-        self.assertEqual(self.lint(**{"BOARD.md": board}), ["BOARD.md: duplicate row ID A-1"])
-
-    def test_blocked_on_a_merged_row(self):
-        board = (GOOD["BOARD.md"] + "| B-2 | b | — | merged (#2) |\n"
-                 "| C-3 | c | — | queued (blocked on B-2; lane x) |\n"
-                 "| D-4 | d | — | queued (blocked on mail wiring) |\n"
-                 "| E-5 | e | — | queued (blocked on A-1) |\n")
-        self.assertEqual(self.lint(**{"BOARD.md": board}),
-                         ["BOARD.md: C-3: blocked on B-2, which is merged"])
-
+        self.assertEqual(got, ["briefs/A-1.md:3: `**State:**` line; state lives on the work-item issue"])
 
     def test_main_files_pass(self):
         self.assertEqual(doclint.lint(ROOT), [])
