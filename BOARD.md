@@ -562,3 +562,19 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W9 | [Questions in the guest plane](briefs/W9.md) | P3-8 merged, #68 merged | — | merged (f38aeed8) |
 | W9a | [Questions follow-ups (#95)](briefs/W9a.md) | W9 | Next build item A (part 2) | merged (#125 (part 2; part 1 #98)) |
 | CH-20w | [Evidence delivery](briefs/CH-20w.md) | CH-20 merged; P2-6m wired into the vault process | — | queued (blocked on mail wiring) |
+
+## Uncovered requirement IDs (CONV-5, [triage](docs/conv-5-uncovered.md))
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| HW-3t | Supported-host text and test (HW-3, HW-7; brief to write) | — | queued (C) |
+| RES-5a | Usage-pool tracker and reserve admission (RES-5; brief to write) | S8 | queued (B) |
+| ONB-9a | Plans in plain words on the Wi-Fi page and STATUS (ONB-9; brief to write) | RES-5a, P2-2w | queued (B) |
+| CAP-12a | `resources` broker tool (CAP-12; brief to write) | RES-5a, CAP-9 | queued (B) |
+| CAP-13a | Local leverage passes as broker tools (CAP-13; brief to write) | ARC-6 | queued (B) |
+| CAP-2t | Reach fixture test (CAP-2; brief to write) | CRED-4b part 2 | queued (B) |
+| CRED-11a | Hand-off verbs between executors (CRED-11; brief to write; lane claude2) | CRED-4b part 2 | queued (A) |
+| ADP-14a | Web recipes (ADP-14; brief to write; lane claude2) | CRED-4b part 2, ADP-8 | queued (A) |
+| ADP-15a | One desktop over separate executors (ADP-15; brief to write; lane claude2) | CRED-11a, ADP-5 | queued (A) |
+| ADP-16a | Suite executor (ADP-16; brief to write; lane claude2) | ADP-5 | queued (A) |
+| UPD-7t | Soak plus attestations test and marker (UPD-7; brief to write) | — | queued (C) |
