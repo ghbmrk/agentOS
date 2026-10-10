@@ -321,7 +321,7 @@ func TestARC6MCPHandshakeAndToolList(t *testing.T) {
 	for _, tl := range r.rpc("m1", "tools/list", nil)["tools"].([]any) {
 		names = append(names, tl.(map[string]any)["name"].(string))
 	}
-	if strings.Join(names, ",") != "effect_request,effect_status" {
+	if strings.Join(names, ",") != "effect_request,effect_status,result_read" {
 		t.Fatalf("tools %v", names)
 	}
 	r.rpc("m1", "ping", nil)
