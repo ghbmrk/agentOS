@@ -682,6 +682,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | RT-1 l3 | PR #705 reviews (recheck): outside image/ and the A broker packages, only .service/.socket/.timer and *.conf under a systemd dir are A; .path, .mount, .slice, .target, .automount, .swap, *.service.d/ drop-ins, tmpfiles.d, sysusers.d, udev and polkit files would be B. None exist there today |
 | RT-1 l4 | PR #705 reviews: hand-typed paths are not normalised (`.//image/x`, `/image/x`, `docs/../image/x`, backslashes); a nested `guest/x/sub/package.json` is B; a whitespace-only name is dropped. `--git` mode never emits these forms |
 | RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
+| SIM-bound l1 | SIM-bound builder (recheck): once a denial is evicted, owner STATUS and RESUME (`List`), recall's `supersede` (`Get` per id) and rehydrating lookups (RecordQuality, Erase, Authorize on an evicted id) replay the whole journal; outside the engine lock except the owner-only rehydrating paths, so STOP is not blocked. Fix with SIM-proj snapshots or an on-disk id index |
+| SIM-bound l2 | SIM-bound builder: settled successes stay in memory in full, and `Open` still replays the whole journal into memory before trimming; both wait for SIM-proj compaction. Each evicted denial keeps a 16-byte id hash for OP-1 |
+| SIM-bound l3 | SIM-bound builder: `Trail`, `List` and `each` fall back to nil or the in-memory intents when the journal read fails, instead of returning an error; their signatures carry none |
 
 ## Reuse candidates
 | ID | Component | Why |
