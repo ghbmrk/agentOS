@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -427,10 +428,13 @@ func TestAReadOnlyTargetGivesNoFinding(t *testing.T) {
 	}
 }
 
-// LOOP-7 positive control, fail closed (#584 L3 3, delta L3 1): a control
-// the broker cannot read after the round (here its parent became a file,
-// ENOTDIR) fails the round instead of counting as changed; a removed
-// control still counts as changed.
+// LOOP-7 positive control, fail closed (#584 L3 3, delta L3 1, Security 2):
+// a control the broker cannot read after the round (here its parent
+// became a file, ENOTDIR) fails the round instead of counting as changed,
+// and so does a removed control, since a teardown or a cleaner on the
+// host can remove it without the script running (P3-4b-4c-symlink). A
+// removed target still counts as changed: the guest can remove a target
+// it can write.
 func TestAnUnreadableControlFailsTheRound(t *testing.T) {
 	var x *tamperRig
 	x = newTamperRig(t, func(string, []string) error {
@@ -455,8 +459,327 @@ func TestAnUnreadableControlFailsTheRound(t *testing.T) {
 
 	x = newTamperRig(t, func(string, []string) error { return os.RemoveAll(x.control) })
 	x.idle = true
-	if _, err := x.probe.Run(context.Background()); err != nil {
-		t.Fatalf("a removed control: %v", err)
+	if res, err := x.probe.Run(context.Background()); err == nil || len(res.Found) != 0 || len(x.notes) != 0 {
+		t.Fatalf("a removed control passed the round: %+v %v %v", res, err, x.notes)
+	}
+
+	x = newTamperRig(t, func(string, []string) error { return os.Remove(filepath.Join(x.dir, "grader.json")) })
+	res, err := x.probe.Run(context.Background())
+	if err != nil || len(res.Found) != 1 || res.Found[0].Subject != "grader" {
+		t.Fatalf("a removed target: %+v %v", res, err)
+	}
+}
+
+// swapInDigest is a tamper rig whose guest, once it has run, swaps the
+// evaluator's entry rel (cases.json unless given) between the
+// after-digest's walk and its open (the beforeDigestOpen seam), as a
+// guest still running could. swap gets the entry's host path. resumed
+// counts Quiesce's resumes.
+func swapInDigest(t *testing.T, swap func(path string) error, rel ...string) (x *tamperRig, resumed *int) {
+	t.Helper()
+	armed := false
+	x = newTamperRig(t, func(string, []string) error { armed = true; return nil })
+	resumed = new(int)
+	x.probe.Quiesce = func(context.Context) (func(), error) { return func() { *resumed++ }, nil }
+	suite, at := filepath.Join(x.dir, "suite"), "cases.json"
+	if len(rel) > 0 {
+		at = rel[0]
+	}
+	beforeDigestOpen = func(root, r string) {
+		if armed && root == suite && r == at {
+			armed = false
+			if err := swap(filepath.Join(root, r)); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { beforeDigestOpen = nil })
+	return x, resumed
+}
+
+// runWithin runs a round under ctx and fails the test if it outlasts ctx's
+// deadline by a second.
+func runWithin(t *testing.T, ctx context.Context, x *tamperRig) (ProbeResult, error) {
+	t.Helper()
+	type out struct {
+		res ProbeResult
+		err error
+	}
+	ch := make(chan out, 1)
+	go func() {
+		res, err := x.probe.Run(ctx)
+		ch <- out{res, err}
+	}()
+	dl, _ := ctx.Deadline()
+	select {
+	case o := <-ch:
+		return o.res, o.err
+	case <-time.After(time.Until(dl) + time.Second):
+		t.Fatal("the round outlasted its context")
+		return ProbeResult{}, nil
+	}
+}
+
+// LOOP-7 digest (P3-4b-4c-nofollow, #584 Security 2): a file the guest
+// swaps between the walk's stat and the open, for a FIFO, a link out of
+// the target, a link to a device or another regular file, fails the
+// round within its context: the broker never blocks with its writers
+// held, never hashes what a link points at, and never takes a swap for a
+// refusal. Nothing is reported or journaled, and resume runs.
+func TestASwapUnderTheDigestFailsTheRoundWithoutBlocking(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	swaps := map[string]func(path string) error{
+		"fifo": func(path string) error {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			return syscall.Mkfifo(path, 0o600)
+		},
+		"link out": func(path string) error {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			return os.Symlink(outside, path)
+		},
+		"link to a device": func(path string) error {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			return os.Symlink("/dev/zero", path)
+		},
+		// Same bytes, new inode: only the inode check sees it.
+		"another file": func(path string) error {
+			tmp := filepath.Join(filepath.Dir(filepath.Dir(path)), "cases.tmp")
+			if err := os.WriteFile(tmp, []byte("[]"), 0o600); err != nil {
+				return err
+			}
+			return os.Rename(tmp, path)
+		},
+	}
+	for name, swap := range swaps {
+		t.Run(name, func(t *testing.T) {
+			x, resumed := swapInDigest(t, swap)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			res, err := runWithin(t, ctx, x)
+			if err == nil || len(res.Found) != 0 || len(x.notes) != 0 || *resumed != 1 {
+				t.Fatalf("%+v %v notes %v resumed %d", res, err, x.notes, *resumed)
+			}
+		})
+	}
+}
+
+// LOOP-7 digest, directories (#635 L3 and Security 4a blocker): a
+// directory inside a target that the guest swaps for a link to a
+// directory outside it, after the parent's listing and before the walk
+// reads it, fails the round, and the walk never reads through the link.
+// So does a directory swapped for a link while the walk is inside it.
+func TestADirectorySwappedUnderTheDigestFailsTheRoundAndIsNotFollowed(t *testing.T) {
+	for _, at := range []string{"sub", "sub/a.json"} {
+		t.Run(at, func(t *testing.T) {
+			outside := filepath.Join(t.TempDir(), "outside")
+			var sub string
+			swapped, through := false, false
+			x, resumed := swapInDigest(t, func(string) error {
+				swapped = true
+				if err := os.Rename(sub, filepath.Join(filepath.Dir(outside), "moved")); err != nil {
+					return err
+				}
+				return os.Symlink(outside, sub)
+			}, at)
+			sub = filepath.Join(x.dir, "suite", "sub")
+			for _, d := range []string{sub, outside} {
+				if err := os.MkdirAll(d, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for _, f := range []string{"a.json", "b.json"} {
+					if err := os.WriteFile(filepath.Join(d, f), []byte("{}"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			// A name only the outside directory holds: the walk reaches it
+			// only by reading through the link.
+			if err := os.WriteFile(filepath.Join(outside, "outside.json"), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			seam := beforeDigestOpen
+			beforeDigestOpen = func(root, rel string) {
+				if rel == "sub/outside.json" {
+					through = true
+				}
+				seam(root, rel)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			res, err := runWithin(t, ctx, x)
+			if err == nil || len(res.Found) != 0 || len(x.notes) != 0 || *resumed != 1 || !swapped {
+				t.Fatalf("%+v %v notes %v resumed %d swapped %v", res, err, x.notes, *resumed, swapped)
+			}
+			if through {
+				t.Fatal("the walk read through the link")
+			}
+		})
+	}
+}
+
+// countWriter counts what is hashed and runs each after every write.
+type countWriter struct {
+	n    int
+	each func()
+}
+
+func (w *countWriter) Write(b []byte) (int, error) {
+	w.n += len(b)
+	if w.each != nil {
+		w.each()
+	}
+	return len(b), nil
+}
+
+// LOOP-7 digest bound (#635 Potency 1): a cancel during a file's read is
+// seen within one chunk, and a file read while it grows is read only up
+// to the size the walk saw, so the read ends while a guest still writes.
+func TestAFilesReadStopsWithinAChunkAndAtTheWalkedSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "big")
+	if err := os.WriteFile(path, make([]byte, 3*digestChunk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	walked, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &countWriter{each: cancel}
+	if err := hashFile(ctx, w, path, path, ".", walked); !errors.Is(err, context.Canceled) || w.n > digestChunk {
+		t.Fatalf("cancelled mid-read: %v after %d bytes", err, w.n)
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	w = &countWriter{each: func() { f.Write(make([]byte, digestChunk)) }}
+	if err := hashFile(context.Background(), w, path, path, ".", walked); err != nil || w.n != int(walked.Size()) {
+		t.Fatalf("a growing file: %v, read %d of %d", err, w.n, walked.Size())
+	}
+}
+
+// LOOP-7 digest depth (#635): a tree nested deeper than the digest walks
+// fails the round rather than hold a handle per level.
+func TestATreeTooDeepToDigestFailsTheRound(t *testing.T) {
+	var x *tamperRig
+	x = newTamperRig(t, func(string, []string) error {
+		d := filepath.Join(x.dir, "suite")
+		for range maxDigestDepth + 1 {
+			d = filepath.Join(d, "d")
+		}
+		return os.MkdirAll(d, 0o700)
+	})
+	res, err := x.probe.Run(context.Background())
+	if err == nil || len(res.Found) != 0 || len(x.notes) != 0 {
+		t.Fatalf("%+v %v %v", res, err, x.notes)
+	}
+}
+
+// LOOP-7 digest bound (P3-4b-4c-nofollow): the digest reads under the
+// round's context, so a cancel while it reads fails the round; it holds
+// whether or not the guest has stopped (S33).
+func TestTheDigestStopsWithTheRoundsContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	x, resumed := swapInDigest(t, func(string) error { cancel(); return nil })
+	res, err := runWithin(t, ctx, x)
+	if err == nil || len(res.Found) != 0 || len(x.notes) != 0 || *resumed != 1 {
+		t.Fatalf("%+v %v notes %v resumed %d", res, err, x.notes, *resumed)
+	}
+}
+
+// LOOP-7 symlinked Path (P3-4b-4c-symlink, #584 Security 1): a target or
+// control whose Path is a link to a directory is refused before the
+// round, naming which: no quiesce, no guest, no journal, and nothing in
+// the referent is removed. On main the guest's write landed in the
+// referent, the digest hashed only the link text, and the round read as
+// a refusal that then deleted that write.
+func TestASymlinkedTargetOrControlIsRefusedBeforeTheRound(t *testing.T) {
+	for _, which := range []string{"control", "evaluator"} {
+		t.Run(which, func(t *testing.T) {
+			elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+			keep := filepath.Join(elsewhere, "keep.json")
+			if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(keep, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var planted string
+			x := newTamperRig(t, func(nonce string, _ []string) error {
+				planted = filepath.Join(elsewhere, machprobe.Sibling(nonce))
+				return os.WriteFile(planted, []byte("evidence"), 0o600)
+			})
+			link := filepath.Join(x.dir, "link")
+			if err := os.Symlink(elsewhere, link); err != nil {
+				t.Fatal(err)
+			}
+			if which == "control" {
+				x.probe.Control.Path, x.control = link, link
+			} else {
+				x.probe.Targets[1].Path = link
+			}
+			quiesced := false
+			x.probe.Quiesce = func(context.Context) (func(), error) { quiesced = true; return nil, nil }
+			res, err := x.probe.Run(context.Background())
+			if err == nil || !strings.Contains(err.Error(), which) || strings.Contains(err.Error(), x.dir) {
+				t.Fatalf("a symlinked %s: %v", which, err)
+			}
+			if x.rounds != 0 || quiesced || len(x.notes) != 0 || len(res.Found) != 0 {
+				t.Fatalf("ran: rounds %d quiesced %v notes %v %+v", x.rounds, quiesced, x.notes, res)
+			}
+			for _, p := range []string{planted, keep} {
+				if _, err := os.Lstat(p); p != "" && err != nil {
+					t.Fatalf("removed from the referent: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// LOOP-7 a link mid-round (P3-4b-4c-symlink, LATER P3-4b-4c-tamper l3):
+// a target the guest replaces with a link to a directory is changed, but
+// the round fails, and nothing the digest or the cleanup does goes
+// through the link: the write the guest left in the referent stays.
+func TestATargetReplacedByALinkMidRoundFailsTheRoundAndRemovesNothingThroughIt(t *testing.T) {
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var x *tamperRig
+	var planted string
+	x = newTamperRig(t, func(nonce string, _ []string) error {
+		planted = filepath.Join(elsewhere, machprobe.Sibling(nonce))
+		if err := os.WriteFile(planted, []byte("evidence"), 0o600); err != nil {
+			return err
+		}
+		suite := filepath.Join(x.dir, "suite")
+		if err := os.RemoveAll(suite); err != nil {
+			return err
+		}
+		return os.Symlink(elsewhere, suite)
+	})
+	res, err := x.probe.Run(context.Background())
+	if err == nil || len(x.notes) != 0 {
+		t.Fatalf("a link mid-round passed: %+v %v %v", res, err, x.notes)
+	}
+	if len(res.Found) != 1 || res.Found[0].Subject != "evaluator" {
+		t.Fatalf("the replaced target is not reported: %+v", res)
+	}
+	if _, err := os.Lstat(planted); err != nil {
+		t.Fatalf("removed through the link: %v", err)
 	}
 }
 

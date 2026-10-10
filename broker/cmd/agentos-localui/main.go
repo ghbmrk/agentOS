@@ -38,7 +38,7 @@ func main() {
 	flag.StringVar(&sock, "sock", "/run/agentos/localui.sock", "agentosd's localui.sock (agentosd -localui-uid)")
 	flag.StringVar(&vaultSock, "vault-sock", "", "the vault process's unlock socket, for the unknown-host unlock page; empty: not served")
 	flag.StringVar(&iface, "iface", "wlan0", "the access point's interface")
-	flag.StringVar(&addr, "addr", "10.42.0.1/24", "the box's address on the access point, with the subnet's length")
+	flag.StringVar(&addr, "addr", "10.42.0.1/24", "the Wi-Fi page's address on the access point, with the subnet's length")
 	flag.IntVar(&port, "port", localui.UIPort, "TCP port")
 	flag.Parse()
 	log.SetFlags(0)

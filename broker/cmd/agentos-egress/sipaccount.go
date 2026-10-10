@@ -32,15 +32,15 @@ var (
 	errSIPDomain       = uerr(http.StatusBadRequest, "Enter the SIP domain as a host name, like example.net.")
 	errSIPUser         = uerr(http.StatusBadRequest, "The SIP user name has a character providers don't use. Copy it exactly from your provider.")
 	errSIPNumber       = uerr(http.StatusBadRequest, "Enter the number with its country code, like +44 7700 900123.")
-	errSIPOtherKind    = uerr(http.StatusBadRequest, "The box already holds a different credential under this name. Remove the second line first, then set it up again.")
+	errSIPOtherKind    = uerr(http.StatusBadRequest, "I already hold a different credential under this name. Remove the second line first, then set it up again.")
 	errWeakSIPPassword = uerr(http.StatusBadRequest, "Use the SIP password your provider generated, 12 to 256 characters. If it is shorter, have the provider generate a new one.")
-	errSIPRealm        = uerr(http.StatusConflict, "That is not the provider name the box recorded. Check it again on this page.")
+	errSIPRealm        = uerr(http.StatusConflict, "That is not the provider name I recorded. Check it again on this page.")
 )
 
 // Owner notices when the account changes (S2 on #116).
 const (
-	noteSIPReplaced = "The second line's calling account was replaced on the box's Wi-Fi page."
-	noteSIPRemoved  = "The second line's calling account was removed on the box's Wi-Fi page."
+	noteSIPReplaced = "The second line's calling account was replaced on my Wi-Fi page."
+	noteSIPRemoved  = "The second line's calling account was removed on my Wi-Fi page."
 )
 
 // sipFieldErr maps a sipsign refusal to its owner wording.
