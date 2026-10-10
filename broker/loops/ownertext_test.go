@@ -25,6 +25,7 @@ func hostile(c Check) Finding {
 	switch c {
 	case CheckFuzz:
 		f.Subject = "sockets.FuzzRequest"
+		f.Producer = binA
 	case CheckProbe:
 		f.Subject = "socket.vm-0a1b2c3d4e5f6a7b"
 	case CheckCanary:
@@ -52,7 +53,7 @@ func TestResolveTellsEveryTextedFindingItCleared(t *testing.T) {
 			r := newReportRig(t, nil)
 			id := r.report(t, tc.f).Finding.ID
 			before := len(r.texts)
-			if err := r.g.Resolve(id, Replay{Evidence: tc.f.Detail, Passed: true}); err != nil {
+			if err := r.g.Resolve(id, Replay{Evidence: tc.f.Detail, Passed: true, Binary: binB}); err != nil {
 				t.Fatal(err)
 			}
 			got := r.texts[before:]
@@ -412,13 +413,13 @@ func TestClearedWaitsForEveryFindingSharingItsPlainName(t *testing.T) {
 		b.Detail = "crash input sha256:ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
 		ida, idb := r.report(t, a).Finding.ID, r.report(t, b).Finding.ID
 		before := len(r.texts)
-		if err := r.g.Resolve(ida, Replay{Evidence: a.Detail, Passed: true}); err != nil {
+		if err := r.g.Resolve(ida, Replay{Evidence: a.Detail, Passed: true, Binary: binB}); err != nil {
 			t.Fatal(err)
 		}
 		if got := r.texts[before:]; len(got) != 0 {
 			t.Fatalf("cleared while another crash in the same check is open: %q", got)
 		}
-		if err := r.g.Resolve(idb, Replay{Evidence: b.Detail, Passed: true}); err != nil {
+		if err := r.g.Resolve(idb, Replay{Evidence: b.Detail, Passed: true, Binary: binB}); err != nil {
 			t.Fatal(err)
 		}
 		if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the crash in the check that reads agent requests.") {

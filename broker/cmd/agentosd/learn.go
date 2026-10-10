@@ -441,6 +441,9 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		FuzzTime: fuzzTime,
 		Every:    fuzzEvery,
 		CacheDir: filepath.Join(p.Loop7, "cache"),
+		// Root's copy of each input a finding names, in the broker's own
+		// state, outside the fuzz user's tree (P3-4b-3r-evidence).
+		Evidence: filepath.Join(p.Dir, "fuzz-evidence"),
 	}); err != nil {
 		return nil, err
 	}

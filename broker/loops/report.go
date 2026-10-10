@@ -86,8 +86,9 @@ func (s *Guard) Report(ctx context.Context, f Finding) (Record, error) {
 	if rec, open := s.st.Open[f.ID]; open {
 		var err error
 		if rec.Reported && f.Producer != "" && rec.Producer != f.Producer {
-			// A hang seen again names the newer binary, so a lucky good
-			// step of a build that hung closes nothing (F13).
+			// A finding seen again names the newer binary, so a lucky good
+			// step or a forged replay of a build that failed closes
+			// nothing (F13, P3-4b-3r-evidence).
 			rec.Producer = f.Producer
 			s.st.Open[f.ID] = rec
 			for i := range s.st.Evidence {
@@ -144,8 +145,8 @@ func (s *Guard) reportable(f Finding) (change.TreeRule, error) {
 	switch {
 	case hang && !sha256Hex(f.Producer):
 		return change.TreeRule{}, fmt.Errorf("%w: a hang finding needs the SHA-256 of the binary that produced it", ErrFinding)
-	case !hang && f.Producer != "":
-		return change.TreeRule{}, fmt.Errorf("%w: only a fuzz hang finding names a producing binary", ErrFinding)
+	case f.Producer != "" && (!produced(f) || !sha256Hex(f.Producer)):
+		return change.TreeRule{}, fmt.Errorf("%w: only a fuzz finding names a producing binary, as a SHA-256", ErrFinding)
 	}
 	if ruleLess(f.Check) {
 		switch {
@@ -277,11 +278,23 @@ func (s *Guard) waitStatusLocked() string {
 
 // Replay is a source's record of re-running a fuzz or probe finding's
 // stored input: Evidence names the input (the finding's Detail, an input
-// digest) and Passed says the replay of that input passed.
+// digest) and Passed says the replay of that input passed. Binary is the
+// SHA-256 of the fuzz binary that replayed it; Produced is the binary
+// that last produced the finding, which Resolve sets from the record and
+// takes from no caller (P3-4b-3r-evidence).
 type Replay struct {
 	Evidence string    `json:"evidence"`
 	Passed   bool      `json:"passed"`
+	Binary   string    `json:"binary,omitempty"`
+	Produced string    `json:"produced,omitempty"`
 	At       time.Time `json:"at"`
+}
+
+// produced reports a finding that names the binary that produced it:
+// every fuzz finding but the oversize one, which no binary's output
+// decides (P3-4b-3r-evidence).
+func produced(f Finding) bool {
+	return f.Check == CheckFuzz && f.Rule == nil && f.Detail != FuzzOversizeDetail
 }
 
 // Resolve closes open reported fuzz or probe finding id as cleared, only
@@ -290,6 +303,14 @@ type Replay struct {
 // caused stays until the owner resumes the target, and the owner hears it
 // cleared where they heard of it. A finding with a tree rule clears only
 // when its linked cases hold (passedReported), never on a caller's word.
+//
+// A fuzz finding (but the oversize one) clears only on a replay from a
+// binary other than the producer on its record: an exploited input
+// controls its target's output and exit status, so the binary that
+// failed never clears its own finding (P3-4b-3r-evidence). A record with
+// no producer is refused until it is reported again with one. Like
+// CloseTarget, Resolve trusts its in-process caller for the replay's
+// binary; the producer it takes from no one.
 func (s *Guard) Resolve(id string, r Replay) error {
 	s.reportMu.Lock()
 	defer s.reportMu.Unlock()
@@ -306,6 +327,18 @@ func (s *Guard) Resolve(id string, r Replay) error {
 	if !r.Passed || r.Evidence != rec.Finding.Detail {
 		s.mu.Unlock()
 		return fmt.Errorf("%w: no passing replay of %q's stored input", ErrFinding, id)
+	}
+	r.Produced = ""
+	if produced(rec.Finding) {
+		if !sha256Hex(rec.Producer) {
+			s.mu.Unlock()
+			return fmt.Errorf("%w: %q has no producing binary on record", ErrFinding, id)
+		}
+		if !sha256Hex(r.Binary) || r.Binary == rec.Producer {
+			s.mu.Unlock()
+			return fmt.Errorf("%w: no replay of %q from a binary other than its producer", ErrFinding, id)
+		}
+		r.Produced = rec.Producer
 	}
 	for i := range s.st.Evidence {
 		if e := &s.st.Evidence[i]; e.Digest == rec.Digest {
@@ -503,7 +536,9 @@ func (s *Guard) OpenReported(c Check) []Finding {
 	var out []Finding
 	for _, id := range sortedKeys(s.st.Open) {
 		if r := s.st.Open[id]; r.Reported && r.Finding.Check == c {
-			out = append(out, r.Finding)
+			f := r.Finding
+			f.Producer = r.Producer
+			out = append(out, f)
 		}
 	}
 	return out

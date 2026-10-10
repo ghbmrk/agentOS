@@ -96,6 +96,11 @@ type Config struct {
 	// CacheDir holds the fuzz engine's generated corpus and each child's
 	// scratch directory.
 	CacheDir string
+	// Evidence is root's store of the inputs findings name
+	// (<pkg>/<Name>/<sha256>, P3-4b-3r-evidence): an absolute clean path
+	// outside the jail's tree and every directory a child writes, so no
+	// child can delete or rewrite the input its finding is replayed on.
+	Evidence string
 	// CacheCap bounds one package's generated corpus (CacheDir/fuzz/<pkg>)
 	// and CacheTotal the whole of CacheDir/fuzz; each fuzz step prunes the
 	// oldest entries past them first (F15). Defaults 64 MiB and 512 MiB.
@@ -156,6 +161,9 @@ func New(cfg Config) (*Source, error) {
 	if len(cfg.Targets) > 0 && !filepath.IsAbs(cfg.CacheDir) {
 		return nil, errors.New("loop7: fuzz targets need an absolute CacheDir")
 	}
+	if len(cfg.Targets) > 0 && (!filepath.IsAbs(cfg.Evidence) || filepath.Clean(cfg.Evidence) != cfg.Evidence) {
+		return nil, fmt.Errorf("loop7: fuzz targets need an absolute clean Evidence directory, not %q", cfg.Evidence)
+	}
 	base := "/"
 	if j := cfg.Jail; j != nil {
 		if j.UID == 0 {
@@ -170,6 +178,12 @@ func New(cfg Config) (*Source, error) {
 		if !within(base, p) {
 			return nil, fmt.Errorf("loop7: %q is outside %s, the tree the children may write", p, base)
 		}
+		if within(p, cfg.Evidence) || within(cfg.Evidence, p) {
+			return nil, fmt.Errorf("loop7: the evidence store %q overlaps %q, which the children write", cfg.Evidence, p)
+		}
+	}
+	if j := cfg.Jail; j != nil && len(cfg.Targets) > 0 && (within(j.State, cfg.Evidence) || within(cfg.Evidence, j.State)) {
+		return nil, fmt.Errorf("loop7: the evidence store %q overlaps the jail's tree %s", cfg.Evidence, j.State)
 	}
 	if cfg.CacheCap <= 0 {
 		cfg.CacheCap = 64 << 20
@@ -711,12 +725,23 @@ var (
 	passLine = regexp.MustCompile(`^\s*--- PASS: (Fuzz[A-Za-z0-9_]*)/([^\s/]+) `)
 )
 
-// replay runs t's corpus files, reports each failing one and resolves
-// t's open findings whose stored input it replayed and passed. A run that
-// fails with no "--- FAIL" line (a runtime fatal error, out of memory,
-// os.Exit, or a hang past ReplayTime) is replayed input by input to name
-// the failing ones; if none fails alone, the target itself is reported.
+// replay runs t's corpus files and reports each failing one with the
+// SHA-256 of the binary that failed. A run that fails with no "--- FAIL"
+// line (a runtime fatal error, out of memory, os.Exit, or a hang past
+// ReplayTime) is replayed input by input to name the failing ones; if
+// none fails alone, the target itself is reported.
+//
+// Nothing this run prints clears a crash finding: an exploited input
+// controls the child's output and exit status, and the fuzz user owns
+// the corpus (P3-4b-3r-evidence). Each failing input, and each input an
+// open finding names, is kept in root's evidence store, and an open
+// crash finding clears only through confirm: root's own copy of the
+// input, replayed alone by a binary other than the one that produced it.
 func (s *Source) replay(ctx context.Context, t Target) (int, error) {
+	bin, err := binaryDigest(t.Binary)
+	if err != nil {
+		return 0, err
+	}
 	rctx, cancel := context.WithTimeout(ctx, s.cfg.ReplayTime)
 	out, runErr := s.run(rctx, t, "-test.run=^"+t.Name+"$", "-test.v", "-test.timeout="+s.cfg.ReplayTime.String())
 	cancel()
@@ -742,18 +767,19 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 		}
 		noInput = len(failing) == 0
 	}
-	// A PASS line for an input that also failed is not a pass (the
-	// decoder's own output can print one).
-	for f := range failing {
-		delete(ran, f)
+	var open []loops.Finding
+	named := map[string]bool{}
+	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
+		if f.Subject == t.subject() {
+			open = append(open, f)
+			named[f.Detail] = true
+		}
 	}
-	// Each stored input whose own subtest passed in this run: only such a
-	// replay closes a finding. An input that never ran (a panic stops the
-	// binary before later seeds) or was removed keeps its finding open.
 	// Every input is read before anything is reported: one root cannot
 	// read within the tree (a link out of it, a FIFO) fails the round as
-	// the runner's error, never as a finding or a resolution (F16).
-	passed, crashed := map[string]bool{}, []string{}
+	// the runner's error, never as a finding (F16). An input that both
+	// passed and failed failed.
+	crashed, kept := []string{}, map[string][]byte{}
 	oversize := false
 	for _, file := range append(sortedKeys(ran), sortedKeys(failing)...) {
 		data, err := s.input(t, file)
@@ -762,37 +788,37 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 			oversize = true
 			continue
 		case errors.Is(err, os.ErrNotExist):
-			// An f.Add seed, not a file: a failing one is reported by name.
+			// An f.Add seed, not a file: a failing one is reported by
+			// name, and there is no input to keep.
 			data = []byte(file)
 		case err != nil:
 			return 0, fmt.Errorf("loop7: reading %s's stored input %q: %w", t.subject(), file, err)
 		}
+		d := crashDetail(data)
 		if failing[file] {
-			crashed = append(crashed, crashDetail(data))
-		} else if err == nil {
-			passed[crashDetail(data)] = true
+			crashed = append(crashed, d)
+		}
+		if err == nil && (failing[file] || named[d]) {
+			kept[d] = data
 		}
 	}
 	var errs []error
+	for _, d := range sortedKeys(kept) {
+		if err := s.keep(t, kept[d]); err != nil {
+			errs = append(errs, fmt.Errorf("loop7: keeping %s's input: %w", t.subject(), err))
+		}
+	}
+	reported := map[string]bool{}
 	for _, d := range crashed {
-		errs = append(errs, s.report(ctx, t, d))
+		reported[d] = true
+		errs = append(errs, s.report(ctx, t, d, bin))
 	}
 	if oversize {
-		errs = append(errs, s.report(ctx, t, loops.FuzzOversizeDetail))
+		errs = append(errs, s.report(ctx, t, loops.FuzzOversizeDetail, ""))
 	}
 	if noInput {
-		errs = append(errs, s.report(ctx, t, loops.FuzzNoInputDetail))
-	} else if runErr == nil {
-		passed[loops.FuzzNoInputDetail] = true // the whole replay passed
-		if !oversize {
-			passed[loops.FuzzOversizeDetail] = true // and read every input it named
-		}
-	}
-	for _, f := range s.cfg.Report.OpenReported(loops.CheckFuzz) {
-		if f.Subject == t.subject() && passed[f.Detail] {
-			r := loops.Replay{Evidence: f.Detail, Passed: true, At: s.cfg.Now()}
-			errs = append(errs, s.cfg.Report.Resolve(f.ID, r))
-		}
+		reported[loops.FuzzNoInputDetail] = true
+		errs = append(errs, s.report(ctx, t, loops.FuzzNoInputDetail, bin))
 	}
 	n := len(crashed)
 	if noInput {
@@ -801,7 +827,230 @@ func (s *Source) replay(ctx context.Context, t Target) (int, error) {
 	if oversize {
 		n++
 	}
+	for _, f := range open {
+		switch {
+		case reported[f.Detail] || f.Detail == loops.FuzzOverrunDetail || f.Detail == loops.FuzzStallDetail:
+			// Reported this round, or a hang, which closeHangs closes.
+		case f.Detail == loops.FuzzOversizeDetail:
+			// No binary's output decides it: root read every input the
+			// whole replay named, and none was too large.
+			if runErr == nil && !oversize {
+				errs = append(errs, s.resolve(f, ""))
+			}
+		case f.Producer == "":
+			// Opened before findings named their binary: adopted by the
+			// current one, it clears only on another (P3-4b-3r-evidence).
+			f.Producer = bin
+			_, err := s.cfg.Report.Report(ctx, f)
+			errs = append(errs, err)
+		case f.Producer == bin:
+			// Only another binary's replay clears it.
+		case f.Detail == loops.FuzzNoInputDetail:
+			if runErr == nil {
+				errs = append(errs, s.resolve(f, bin))
+			}
+		case strings.HasPrefix(f.Detail, crashPrefix):
+			failed, err := s.confirm(ctx, t, f, bin)
+			if failed {
+				n++
+			}
+			errs = append(errs, err)
+			if ctx.Err() != nil {
+				return n, errors.Join(errs...)
+			}
+		}
+	}
 	return n, errors.Join(errs...)
+}
+
+// resolve offers f's replay, from binary bin, to Resolve. loops checks
+// bin against the producer on its own record, so a refusal is the rule
+// working, not an error.
+func (s *Source) resolve(f loops.Finding, bin string) error {
+	r := loops.Replay{Evidence: f.Detail, Passed: true, Binary: bin, At: s.cfg.Now()}
+	if err := s.cfg.Report.Resolve(f.ID, r); err != nil && !errors.Is(err, loops.ErrFinding) {
+		return err
+	}
+	return nil
+}
+
+// confirm replays open crash finding f's input, from the evidence store,
+// alone with t's binary bin, which did not produce f. Root writes the
+// input to a fresh directory it owns (0755, the input 0444), whose
+// testdata/fuzz/<Name> holds that one file, and runs only it there, so
+// the input judged is root's copy, which the child can neither write nor
+// swap. It passes only on exit 0 with that input's own PASS line and no
+// FAIL line, and then f is resolved; a failure reports f again with bin
+// as its producer. An input the store does not hold leaves f open:
+// nothing is replayed in its place.
+func (s *Source) confirm(ctx context.Context, t Target, f loops.Finding, bin string) (failed bool, err error) {
+	sum := strings.TrimPrefix(f.Detail, crashPrefix)
+	data, err := s.kept(t, sum)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("loop7: reading %s's kept input: %w", t.subject(), err)
+	}
+	if err := s.cfg.Jail.empty(); err != nil {
+		return false, err
+	}
+	r, err := s.tree()
+	if err != nil {
+		return false, err
+	}
+	defer r.Close()
+	name, err := runName()
+	if err != nil {
+		return false, err
+	}
+	name = "replay-" + name
+	cache := s.in(s.cfg.CacheDir)
+	if err := r.MkdirAll(cache, 0o700); err != nil {
+		return false, err
+	}
+	rel := filepath.Join(cache, name)
+	if err := r.Mkdir(rel, 0o755); err != nil {
+		return false, err
+	}
+	defer r.RemoveAll(rel)
+	dir := rel
+	for _, d := range []string{"testdata", "fuzz", t.Name} {
+		dir = filepath.Join(dir, d)
+		if err := r.Mkdir(dir, 0o755); err != nil {
+			return false, err
+		}
+	}
+	file := filepath.Join(dir, sum)
+	if err := r.WriteFile(file, data, 0o444); err != nil {
+		return false, err
+	}
+	// Modes exactly as meant, whatever the umask.
+	for p := file; ; p = filepath.Dir(p) {
+		mode := os.FileMode(0o755)
+		if p == file {
+			mode = 0o444
+		}
+		if err := r.Chmod(p, mode); err != nil {
+			return false, err
+		}
+		if p == rel {
+			break
+		}
+	}
+	ictx, cancel := context.WithTimeout(ctx, s.cfg.InputTime)
+	out, err := s.runIn(ictx, t, filepath.Join(s.cfg.CacheDir, name),
+		"-test.run=^"+t.Name+"$/^"+sum+"$", "-test.v", "-test.timeout="+s.cfg.InputTime.String())
+	cancel()
+	switch {
+	case ctx.Err() != nil:
+		return false, nil
+	case err != nil && !exited(err):
+		return false, fmt.Errorf("loop7: replaying %s's kept input: %w", t.subject(), err)
+	case err != nil:
+		f.Producer = bin
+		_, err := s.cfg.Report.Report(ctx, f)
+		return true, err
+	case ranAlone(out, t.Name, sum):
+		return false, s.resolve(f, bin)
+	}
+	// Exit 0 without its own PASS line: the input did not run, so
+	// nothing clears and nothing new is known.
+	return false, nil
+}
+
+// ranAlone reports output in which input file of fuzz target name passed
+// and no input failed.
+func ranAlone(out []byte, name, file string) bool {
+	pass := false
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		if failLine.MatchString(sc.Text()) {
+			return false
+		}
+		if m := passLine.FindStringSubmatch(sc.Text()); m != nil && m[1] == name && m[2] == file {
+			pass = true
+		}
+	}
+	return pass
+}
+
+// keep copies data, an input root read from t's corpus, into the
+// evidence store as <pkg>/<Name>/<sha256>: root's own copy, which no
+// child can reach, so the input survives whatever the fuzz user does to
+// its corpus (LOOP-9, P3-4b-3r-evidence). The file is written whole
+// under a temporary name, then renamed, read-only; one already kept
+// whole is left as it is.
+func (s *Source) keep(t Target, data []byte) error {
+	sum := strings.TrimPrefix(crashDetail(data), crashPrefix)
+	if _, err := s.kept(t, sum); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(s.cfg.Evidence, 0o700); err != nil {
+		return err
+	}
+	r, err := os.OpenRoot(s.cfg.Evidence)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	dir := filepath.Join(filepath.FromSlash(t.Pkg), t.Name)
+	if err := r.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	p := filepath.Join(dir, sum)
+	tmp := p + ".tmp"
+	if err := r.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	f, err := r.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = r.Rename(tmp, p)
+	}
+	if err != nil {
+		r.Remove(tmp)
+	}
+	return err
+}
+
+// kept reads t's input with digest sum from the evidence store, only if
+// it is a regular file within inputCap whose digest is its name.
+func (s *Source) kept(t Target, sum string) ([]byte, error) {
+	r, err := os.OpenRoot(s.cfg.Evidence)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	p := filepath.Join(filepath.FromSlash(t.Pkg), t.Name, sum)
+	fi, err := r.Lstat(p)
+	switch {
+	case err != nil:
+		return nil, err
+	case !fi.Mode().IsRegular():
+		return nil, fmt.Errorf("loop7: kept input %s is not a regular file", p)
+	}
+	f, err := r.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := capped(f)
+	if err != nil {
+		return nil, err
+	}
+	if crashDetail(data) != crashPrefix+sum {
+		return nil, fmt.Errorf("loop7: kept input %s does not match its digest", p)
+	}
+	return data, nil
 }
 
 // eachInput replays each stored input of t alone, within InputTime: one
@@ -897,17 +1146,21 @@ func exited(err error) bool {
 	return errors.As(err, &ee)
 }
 
-// report reports a High fuzz finding for t.
-func (s *Source) report(ctx context.Context, t Target, detail string) error {
-	_, err := s.cfg.Report.Report(ctx, loops.Finding{Check: loops.CheckFuzz, Subject: t.subject(), Severity: loops.High, Detail: detail})
+// report reports a High fuzz finding for t, produced by the binary whose
+// SHA-256 is producer (none for the oversize finding).
+func (s *Source) report(ctx context.Context, t Target, detail, producer string) error {
+	_, err := s.cfg.Report.Report(ctx, loops.Finding{Check: loops.CheckFuzz, Subject: t.subject(), Severity: loops.High, Detail: detail, Producer: producer})
 	return err
 }
 
-// crashDetail names a crashing input by its digest; the input itself
-// stays in the corpus.
+// crashPrefix begins a crash finding's detail, before its input's digest.
+const crashPrefix = "crash input sha256:"
+
+// crashDetail names a crashing input by its digest; the input itself is
+// in the corpus and, once root has read it, in the evidence store.
 func crashDetail(data []byte) string {
 	h := sha256.Sum256(data)
-	return "crash input sha256:" + hex.EncodeToString(h[:])
+	return crashPrefix + hex.EncodeToString(h[:])
 }
 
 // waitDelay bounds the wait for a killed child's pipes.
@@ -924,6 +1177,11 @@ const waitDelay = 200 * time.Millisecond
 // With a Jail, the child also starts as its user in an empty network
 // namespace, inside its cgroup leaf (F2, F7).
 func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, error) {
+	return s.runIn(ctx, t, t.Dir, args...)
+}
+
+// runIn is run with dir as the child's working directory.
+func (s *Source) runIn(ctx context.Context, t Target, dir string, args ...string) ([]byte, error) {
 	if err := released(s.cfg.Release, t.Binary); err != nil {
 		return nil, err
 	}
@@ -975,7 +1233,7 @@ func (s *Source) run(ctx context.Context, t Target, args ...string) ([]byte, err
 	// memory.max does not bound; the pipe is drained to its end.
 	buf := &capBuffer{}
 	cmd := childproc.Command(ctx, childproc.NewEnv(childEnv(scratch)...), childproc.Options{
-		Dir: t.Dir, SysProcAttr: attr, KillGroup: true, WaitDelay: waitDelay, Stdout: buf, Stderr: buf,
+		Dir: dir, SysProcAttr: attr, KillGroup: true, WaitDelay: waitDelay, Stdout: buf, Stderr: buf,
 	}, t.Binary, args...)
 	err = startNoNewPrivs(cmd.Start)
 	if err == nil {

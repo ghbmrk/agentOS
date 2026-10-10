@@ -199,7 +199,7 @@ func TestFlapThroughResolve(t *testing.T) {
 	b.Detail = "crash input sha256:ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
 	runFlap(t, func(t *testing.T) flapPath {
 		return reportPath(t, [2]Finding{a, b}, func(r *reportRig, id string, f Finding) error {
-			return r.g.Resolve(id, Replay{Evidence: f.Detail, Passed: true})
+			return r.g.Resolve(id, Replay{Evidence: f.Detail, Passed: true, Binary: binB})
 		})
 	})
 }
@@ -269,13 +269,13 @@ func TestACrashLineIsNotHeldByAnOversizeOfItsTarget(t *testing.T) {
 	oid := r.report(t, over).Finding.ID
 	before := len(r.texts)
 	r.now = r.now.Add(time.Hour)
-	must(t, r.g.Resolve(cid, Replay{Evidence: crash.Detail, Passed: true}))
+	must(t, r.g.Resolve(cid, Replay{Evidence: crash.Detail, Passed: true, Binary: binB}))
 	if got := r.texts[before:]; len(got) != 1 || !strings.Contains(got[0], "Cleared: the crash in the check that reads agent requests.") {
 		t.Fatalf("crash resolved while an oversize is open: texts %q", got)
 	}
 	r.reopen(t)
 	r.now = r.now.Add(time.Hour)
-	must(t, r.g.Resolve(oid, Replay{Evidence: over.Detail, Passed: true}))
+	must(t, r.g.Resolve(oid, Replay{Evidence: over.Detail, Passed: true, Binary: binB}))
 	if got := r.texts[before+1:]; len(got) != 1 || !strings.Contains(got[0], "is tested again") || strings.Contains(got[0], "crash") {
 		t.Fatalf("oversize resolved: texts %q", got)
 	}
@@ -298,14 +298,14 @@ func TestOwedLinesAreSaidOnceEach(t *testing.T) {
 	idb := r.report(t, b).Finding.ID
 	k := clearedKey(ra)
 	before := len(r.texts)
-	must(t, r.g.Resolve(ra.Finding.ID, Replay{Evidence: a.Detail, Passed: true}))
+	must(t, r.g.Resolve(ra.Finding.ID, Replay{Evidence: a.Detail, Passed: true, Binary: binB}))
 	r.now = r.now.Add(25 * time.Hour)
 	ra = r.report(t, a)
-	must(t, r.g.Resolve(ra.Finding.ID, Replay{Evidence: a.Detail, Passed: true}))
+	must(t, r.g.Resolve(ra.Finding.ID, Replay{Evidence: a.Detail, Passed: true, Binary: binB}))
 	if n := len(r.g.st.Owed[k]); n != 1 {
 		t.Fatalf("owed %d records for one finding closed twice while held", n)
 	}
-	must(t, r.g.Resolve(idb, Replay{Evidence: b.Detail, Passed: true}))
+	must(t, r.g.Resolve(idb, Replay{Evidence: b.Detail, Passed: true, Binary: binB}))
 	got := clearedTexts(r.texts, before)
 	if len(got) != 1 || strings.Count(got[0], "Cleared:") != 2 ||
 		!strings.Contains(got[0], "Nothing more is needed from you.") || !strings.Contains(got[0], "Pre-allowance G7 stays paused") {

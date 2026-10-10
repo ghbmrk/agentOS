@@ -31,7 +31,7 @@ const binC = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 // detail carries no producer.
 func hangFinding(detail string) Finding {
 	f := Finding{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Severity: High, Detail: detail}
-	if hangDetail(detail) {
+	if detail != FuzzOversizeDetail {
 		f.Producer = binA
 	}
 	return f
@@ -50,7 +50,7 @@ func TestResolveRefusesAHangFinding(t *testing.T) {
 	for _, d := range []string{FuzzOverrunDetail, FuzzStallDetail} {
 		r := newReportRig(t, nil)
 		id := r.report(t, hangFinding(d)).Finding.ID
-		if err := r.g.Resolve(id, Replay{Evidence: d, Passed: true}); !errors.Is(err, ErrFinding) {
+		if err := r.g.Resolve(id, Replay{Evidence: d, Passed: true, Binary: binB}); !errors.Is(err, ErrFinding) {
 			t.Fatalf("%s: resolved by a replay: %v", d, err)
 		}
 		if _, open := r.open(id); !open {
@@ -157,7 +157,7 @@ func TestClearedNamesTheCrashOrTheHang(t *testing.T) {
 		r.report(t, hangFinding(FuzzStallDetail))
 		crash := r.report(t, fuzzFinding()).Finding
 		before := len(r.texts)
-		if err := r.g.Resolve(crash.ID, Replay{Evidence: crash.Detail, Passed: true}); err != nil {
+		if err := r.g.Resolve(crash.ID, Replay{Evidence: crash.Detail, Passed: true, Binary: binB}); err != nil {
 			t.Fatal(err)
 		}
 		if got := r.texts[before:]; len(got) != 1 || !strings.HasSuffix(got[0], crashCleared) {
@@ -169,7 +169,7 @@ func TestClearedNamesTheCrashOrTheHang(t *testing.T) {
 		r.report(t, hangFinding(FuzzNoInputDetail))
 		crash := r.report(t, fuzzFinding()).Finding
 		before := len(r.texts)
-		if err := r.g.Resolve(crash.ID, Replay{Evidence: crash.Detail, Passed: true}); err != nil {
+		if err := r.g.Resolve(crash.ID, Replay{Evidence: crash.Detail, Passed: true, Binary: binB}); err != nil {
 			t.Fatal(err)
 		}
 		if got := r.texts[before:]; len(got) != 0 {
@@ -243,16 +243,17 @@ func TestAHangBackSoonAfterItsClearedTextIsTextedAgain(t *testing.T) {
 }
 
 // 3h-r2: a hang finding is reported with the SHA-256 of the binary that
-// produced it, and only a hang carries one, so no finding is opened that
-// no step can close.
+// produced it, so no finding is opened that no step can close. Only a
+// fuzz finding carries one, and never the oversize one
+// (P3-4b-3r-evidence).
 func TestAHangFindingIsReportedWithItsProducer(t *testing.T) {
 	r := newReportRig(t, nil)
 	none, short, upper := hangFinding(FuzzStallDetail), hangFinding(FuzzStallDetail), hangFinding(FuzzOverrunDetail)
 	none.Producer, short.Producer, upper.Producer = "", "abc", strings.ToUpper(binA)
-	input, noInput, probe := fuzzFinding(), hangFinding(FuzzNoInputDetail), hostile(CheckProbe)
-	input.Producer, noInput.Producer, probe.Producer = binA, binA, binA
+	input, over, probe := fuzzFinding(), hangFinding(FuzzOversizeDetail), hostile(CheckProbe)
+	input.Producer, over.Producer, probe.Producer = "abc", binA, binA
 	for name, f := range map[string]Finding{"no producer": none, "a malformed producer": short, "an uppercase producer": upper,
-		"an input finding": input, "a no-input finding": noInput, "a probe finding": probe} {
+		"an input finding's malformed producer": input, "an oversize finding": over, "a probe finding": probe} {
 		if _, err := r.g.Report(context.Background(), f); !errors.Is(err, ErrFinding) {
 			t.Errorf("%s: %v", name, err)
 		}

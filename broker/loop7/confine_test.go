@@ -1187,12 +1187,13 @@ func TestALinkOutOfTheStateIsNeverFollowed(t *testing.T) {
 			os.Remove(filepath.Join(marks, "stepped"))
 			g := newFake()
 			s, tg, outside, before := linkedOut(t, g, body)
-			// An open finding a read of the outside x would resolve.
+			// An open finding a read of the outside x would resolve: one
+			// another binary produced, so this one may clear it.
 			x, err := os.ReadFile(filepath.Join(outside, "testdata", "fuzz", "FuzzFake", "x"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := g.Report(context.Background(), loops.Finding{Check: loops.CheckFuzz, Subject: tg.subject(), Severity: loops.High, Detail: crashDetail(x)}); err != nil {
+			if _, err := g.Report(context.Background(), loops.Finding{Check: loops.CheckFuzz, Subject: tg.subject(), Severity: loops.High, Detail: crashDetail(x), Producer: strings.Repeat("0", 64)}); err != nil {
 				t.Fatal(err)
 			}
 			g.reported = nil
