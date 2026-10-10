@@ -43,6 +43,7 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | CI-SOAK-f1 | [Fixtures independent of umask and tmpfs](briefs/CI-SOAK-f1.md) | — | merged (8c49dc5; #563) |
 | H8 | [Deterministic split entropy for change fixtures](briefs/H8.md) | — | merged (9358360; #564) |
 | H6 | [A10 trial collector](briefs/H6.md) | — | merged (464736c; #561) |
+| MAIN-PROT-3 | Main-side guard on `bot/trace` and `bot/metrics` PRs (Invariant: only reviewed or bot-generated changes reach main, D-091): a `bot/**` ruleset restricting updates to the Actions integration, or a required check defined on main (`pull_request_target`, no head checkout) that the diff is only the one generated file and every commit is the bot's, not satisfiable by a dispatched same-named run (release, tier A; L3 and Security 4a on #713 f1, [record](reviews/security/2026-10-10-pr713.md)) | MAIN-PROT-2 | queued (A) |
 
 ## Simplification (2026-10-10)
 
@@ -56,16 +57,16 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-sd | [L1 spec diff: one log, owner messages as intents, one outcome, learning off until it wins](briefs/SIM.md#sim-sd-l1-spec-diff-for-one-log-mark-approves) | — | queued (B; Mark approves) |
 | SIM-check | [One journal invariant checker: test, CI and runtime](briefs/SIM.md#sim-check-one-journal-invariant-checker-tier-a) | — | queued (brief ready; tier A) |
 | SIM-proj | [Journal snapshots and a projection API](briefs/SIM.md#sim-proj-journal-snapshots-and-a-projection-api-tier-a) | — | queued (brief ready; tier A) |
-| SIM-owner-hold | [Owner texts are intents; the pacer hold becomes a projection](briefs/SIM.md#sim-owner-hold-owner-texts-are-intents-the-pacer-hold-becomes-a-projection-tier-a) | SIM-sd, SIM-proj, DEL-1, #708 (PACE-1) | queued (A) |
-| SIM-pull | [STATUS is the owner's view; only urgent texts pushed; digest deleted](briefs/SIM.md#sim-pull-status-is-the-owners-view-only-urgent-texts-are-pushed-tier-a) | SIM-owner-hold, SIM-sd | queued (A) |
-| SIM-cases | [W5-D drafts' crash, ack and forget cases become tests against main](briefs/SIM.md#sim-cases-w5-d-cases-become-tests-against-main-tier-a) | — | queued (brief ready; tier A) |
+| SIM-owner-hold | [Owner texts are intents; the pacer hold becomes a projection](briefs/SIM.md#sim-owner-hold-owner-texts-are-intents-the-pacer-hold-becomes-a-projection-tier-a) | SIM-sd, SIM-proj, SIM-cases, DEL-1, #708 (PACE-1) | queued (A) |
+| SIM-pull | [STATUS is the owner's view; only urgent texts pushed; digest deleted](briefs/SIM.md#sim-pull-status-is-the-owners-view-only-urgent-texts-are-pushed-tier-a) | SIM-owner-hold, SIM-sd, SIM-cases | queued (A) |
+| SIM-cases | [W5-D drafts' crash, ack and forget cases become tests against main](briefs/SIM.md#sim-cases-w5-d-cases-become-tests-against-main-tier-a); [list](briefs/SIM-cases.md) | — | in review (tier A) |
 | SIM-outcome | [One revisable outcome record per goal](briefs/SIM.md#sim-outcome-one-revisable-outcome-record-tier-a) | SIM-sd | queued (A) |
-| SIM-erase | [Forget once, in the journal](briefs/SIM.md#sim-erase-forget-once-in-the-journal-tier-a) | SIM-sd, SIM-proj, SIM-check | queued (A) |
+| SIM-erase | [Forget once, in the journal](briefs/SIM.md#sim-erase-forget-once-in-the-journal-tier-a) | SIM-sd, SIM-proj, SIM-check, SIM-cases | queued (A) |
 | SIM-core | [Trusted core is a named list; CI import check; core = tier A](briefs/SIM.md#sim-core-the-trusted-core-is-a-named-list-tier-a) | — | queued (brief ready; tier A) |
 | SIM-shred | [Forget by deleting a per-subject key; reaches backups and snapshots](briefs/SIM.md#sim-shred-forget-by-deleting-a-per-subject-key-tier-a) | SIM-erase, SIM-proj, SIM-sd | queued (A) |
 | SIM-policy | [Policy as data with one match-and-compare evaluator](briefs/SIM.md#sim-policy-policy-as-data-one-evaluator-tier-a) | SIM-outcome, SIM-pull, SIM-core | queued (A) |
 | SIM-cap | [Capability grants scoped per intent](briefs/SIM.md#sim-cap-capability-grants-scoped-per-intent-tier-a) | SIM-core, SIM-check, SIM-policy | queued (A) |
-| SIM-sim | [Deterministic simulation of the broker, judged by SIM-check](briefs/SIM.md#sim-sim-deterministic-simulation-of-the-broker-tier-a) | SIM-check (second half) | queued (brief ready; tier A) |
+| SIM-sim | [Deterministic simulation of the broker, judged by SIM-check](briefs/SIM.md#sim-sim-deterministic-simulation-of-the-broker-tier-a) | SIM-check (second half) | building (first half: harness, PR pending; tier A) |
 | SIM-repo-1 | [Work items as GitHub issues; BOARD generated; migration dry run](briefs/SIM.md#sim-repo-1-work-items-as-github-issues-board-generated-tier-a) | — | in review (tier A) |
 | SIM-repo-2 | [Migrate; METRICS generated; doclint board rules retired](briefs/SIM.md#sim-repo-2-migrate-generate-metrics-and-trace-retire-doclints-board-rules-tier-a) | SIM-repo-1 | queued (A) |
 
