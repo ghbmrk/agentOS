@@ -671,9 +671,7 @@ func (e *Engine) InUse(account, action string, since time.Time) []Use {
 func (e *Engine) Trail() []Record {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	out := make([]Record, len(e.records))
-	copy(out, e.records)
-	return out
+	return cloneRecords(e.records)
 }
 
 // RecordsAfter returns the journal records with a sequence number greater
@@ -685,8 +683,31 @@ func (e *Engine) RecordsAfter(seq uint64) []Record {
 	if seq >= uint64(len(e.records)) {
 		return nil
 	}
-	out := make([]Record, len(e.records)-int(seq))
-	copy(out, e.records[seq:])
+	return cloneRecords(e.records[seq:])
+}
+
+// cloneRecords deep-copies records for a caller outside the engine. A
+// record's Intent shares Params, Recipients and the rest with the intent
+// the engine later dispatches, so a caller that changed a shallow copy in
+// place would change a live effect. The stored intent was normalized on
+// submit, so normalizing it again is an exact copy and cannot fail.
+func cloneRecords(rs []Record) []Record {
+	out := make([]Record, len(rs))
+	for i, r := range rs {
+		if r.Intent != nil {
+			in, _ := normalize(*r.Intent)
+			r.Intent = &in
+		}
+		if r.Egress != nil {
+			n := *r.Egress
+			r.Egress = &n
+		}
+		if r.Sleep != nil {
+			n := *r.Sleep
+			r.Sleep = &n
+		}
+		out[i] = r
+	}
 	return out
 }
 

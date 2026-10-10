@@ -498,6 +498,51 @@ func TestEraseReplacesOlderSnapshots(t *testing.T) {
 	}
 }
 
+// When the save after an erase fails, the older snapshot, which may hold
+// the erased content, is deleted rather than left on disk (P6).
+func TestEraseDeletesTheSnapshotWhenItsReplacementFails(t *testing.T) {
+	st := &saveFails{MemStore: &MemStore{}}
+	rng := rand.New(rand.NewSource(6))
+	e := open(t, &journal.MemStore{}, rng)
+	pr, _ := New(st, 1000, newTally("t"))
+	ctx := context.Background()
+	e.Submit(journal.Intent{ID: "x", Origin: "owner", Account: "mail", Action: "send", Executor: "svc",
+		Params: map[string]any{"subject": canary}})
+	if _, err := pr.Boot(e); err != nil {
+		t.Fatal(err)
+	}
+	if err := pr.SnapshotNow(); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(st.files["t"], []byte(canary)) {
+		t.Fatal("setup: snapshot does not hold the subject")
+	}
+	e.Authorize(ctx, "x")
+	e.Dispatch(ctx, "x")
+	if _, _, err := e.Erase([]string{"x"}); err != nil {
+		t.Fatal(err)
+	}
+	st.fail = true
+	if err := pr.Sync(e); err == nil {
+		t.Fatal("the failing save was not reported")
+	}
+	if _, ok := st.files["t"]; ok {
+		t.Fatal("a pre-erase snapshot survived a failed replacement")
+	}
+}
+
+type saveFails struct {
+	*MemStore
+	fail bool
+}
+
+func (s *saveFails) Save(name string, data []byte) error {
+	if s.fail {
+		return errors.New("disk full")
+	}
+	return s.MemStore.Save(name, data)
+}
+
 // A failing snapshot store never loses projection state: the projection is
 // current and the error is reported, and the next boot replays in full.
 func TestFailingStoreKeepsTheProjectionCurrent(t *testing.T) {

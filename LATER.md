@@ -683,6 +683,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | RT-1 l3 | PR #705 reviews (recheck): outside image/ and the A broker packages, only .service/.socket/.timer and *.conf under a systemd dir are A; .path, .mount, .slice, .target, .automount, .swap, *.service.d/ drop-ins, tmpfiles.d, sysusers.d, udev and polkit files would be B. None exist there today |
 | RT-1 l4 | PR #705 reviews: hand-typed paths are not normalised (`.//image/x`, `/image/x`, `docs/../image/x`, backslashes); a nested `guest/x/sub/package.json` is B; a whitespace-only name is dropped. `--git` mode never emits these forms |
 | RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
+| SIM-proj l1 | #722 L3 point 4: fallback leaves the reset to the projection's `Restore(nil, 0)`, and the test projection always resets, so a projection that fails half-way through a restore is not exercised (surviving `reset` mutant). Add with the first real projection (SIM-owner-hold) |
+| SIM-proj l2 | #722 L3 point 5: `DirStore.Load` reads a snapshot of any size; only a writer of the 0700 directory can supply one, outside the threat model (P3). Cap it when SIM-fs's helper replaces the local write |
 
 ## Reuse candidates
 | ID | Component | Why |
