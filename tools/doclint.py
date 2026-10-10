@@ -88,11 +88,12 @@ def contradictions(root):
 
 
 def board_added(root):
-    """{row ID: date of the first-parent commit that first added it}; None without usable history."""
+    """{row ID: date of the earliest commit that added it}; None without usable history.
+    Not --first-parent: a branch that merges main would date main's rows by the merge commit."""
     try:
         if _git(root, "rev-parse", "--is-shallow-repository").strip() != "false":
             return None  # a grafted tip would date every row as new
-        log = _git(root, "log", "--first-parent", "--reverse", "-p", "--format=%x01%cI", "--", "BOARD.md")
+        log = _git(root, "log", "--no-merges", "--reverse", "-p","--format=%x01%cI", "--", "BOARD.md")
     except (OSError, subprocess.CalledProcessError):
         return None
     added, date = {}, None
