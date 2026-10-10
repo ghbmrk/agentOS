@@ -685,6 +685,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
 | ADP-8 l1 | PR #208 UX lens (recheck): once ADP-8b wires `Mismatch` in, a blocked adapter needs an OP-9 STATUS line in owner words naming the operation and the fix; `mismatch.go` has no owner text today |
 | ADP-8 l2 | PR #208 Potency lens: `Mismatch` reports only the first mismatching operation, so each demo cycle surfaces one fix |
+| SIM-sd l1 | PR #714 L3 (34e114e): OP-11 lists STATUS lines both as `owner.inform` intents and as a projection over them; say which |
+| SIM-sd l2 | PR #714 L3 (34e114e), `recheck` for SIM-outcome: LOOP-3's "above noise" has no measure |
+| SIM-sd l3 | PR #714 L3 (34e114e): CAP-3's "a missing or unreadable key store fails closed" does not say whether replay halts or records read as erased; settle in SIM-shred |
 
 ## Reuse candidates
 | ID | Component | Why |
