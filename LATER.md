@@ -683,6 +683,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | RT-1 l3 | PR #705 reviews (recheck): outside image/ and the A broker packages, only .service/.socket/.timer and *.conf under a systemd dir are A; .path, .mount, .slice, .target, .automount, .swap, *.service.d/ drop-ins, tmpfiles.d, sysusers.d, udev and polkit files would be B. None exist there today |
 | RT-1 l4 | PR #705 reviews: hand-typed paths are not normalised (`.//image/x`, `/image/x`, `docs/../image/x`, backslashes); a nested `guest/x/sub/package.json` is B; a whitespace-only name is dropped. `--git` mode never emits these forms |
 | RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
+| ADP-8 l1 | PR #208 UX lens (recheck): once ADP-8b wires `Mismatch` in, a blocked adapter needs an OP-9 STATUS line in owner words naming the operation and the fix; `mismatch.go` has no owner text today |
+| ADP-8 l2 | PR #208 Potency lens: `Mismatch` reports only the first mismatching operation, so each demo cycle surfaces one fix |
 
 ## Reuse candidates
 | ID | Component | Why |
