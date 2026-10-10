@@ -288,7 +288,8 @@ def github(path, method="GET", payload=None):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28"}
     if method != "GET":
-        return call(urllib.request.Request("https://api.github.com" + path, method=method, headers=headers,
+        return call(urllib.request.Request("https://api.github.com" + path, method=method,
+                                           headers={**headers, "Content-Type": "application/json"},
                                            data=json.dumps(payload).encode()))
     out, page = [], 1
     while True:

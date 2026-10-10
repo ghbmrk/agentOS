@@ -35,7 +35,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-sd | [L1 spec diff: one log, owner messages as intents, one outcome, learning off until it wins](briefs/SIM.md#sim-sd-l1-spec-diff-for-one-log-mark-approves) | — | queued (B; Mark approves) |
 | SIM-check | [One journal invariant checker: test, CI and runtime](briefs/SIM.md#sim-check-one-journal-invariant-checker-tier-a) | — | queued (brief ready; tier A) |
 | SIM-proj | [Journal snapshots and a projection API](briefs/SIM.md#sim-proj-journal-snapshots-and-a-projection-api-tier-a) | — | queued (brief ready; tier A) |
-| SIM-owner-hold | [Owner texts are intents; the pacer hold becomes a projection](briefs/SIM.md#sim-owner-hold-owner-texts-are-intents-the-pacer-hold-becomes-a-projection-tier-a) | SIM-sd, SIM-proj, SIM-cases, DEL-1, #708 (PACE-1) | queued (A) |
+| SIM-owner-hold | [Owner texts are intents; the pacer hold becomes a projection](briefs/SIM.md) | SIM-sd, SIM-proj, SIM-cases, DEL-1, #708 (PACE-1) | queued (A) |
 | SIM-pull | [STATUS is the owner's view; only urgent texts pushed; digest deleted](briefs/SIM.md#sim-pull-status-is-the-owners-view-only-urgent-texts-are-pushed-tier-a) | SIM-owner-hold, SIM-sd, SIM-cases | queued (A) |
 | SIM-cases | [W5-D drafts' crash, ack and forget cases become tests against main](briefs/SIM.md#sim-cases-w5-d-cases-become-tests-against-main-tier-a); [list](briefs/SIM-cases.md) | — | in review (tier A) |
 | SIM-outcome | [One revisable outcome record per goal](briefs/SIM.md#sim-outcome-one-revisable-outcome-record-tier-a) | SIM-sd | queued (A) |
@@ -45,8 +45,8 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-policy | [Policy as data with one match-and-compare evaluator](briefs/SIM.md#sim-policy-policy-as-data-one-evaluator-tier-a) | SIM-outcome, SIM-pull, SIM-core | queued (A) |
 | SIM-cap | [Capability grants scoped per intent](briefs/SIM.md#sim-cap-capability-grants-scoped-per-intent-tier-a) | SIM-core, SIM-check, SIM-policy | queued (A) |
 | SIM-sim | [Deterministic simulation of the broker, judged by SIM-check](briefs/SIM.md#sim-sim-deterministic-simulation-of-the-broker-tier-a) | SIM-check (second half) | building (first half: harness, PR pending; tier A) |
-| SIM-repo-2 | [Collaborator-only work items; CI and board.yml enforce the generated board; safe migration](briefs/SIM.md#sim-repo-2-migrate-generate-metrics-and-trace-retire-doclints-board-rules-tier-a) | SIM-repo-1 | in review (A; #738) |
-| SIM-repo-2b | [Migrate; BOARD history archived; LATER and MARK-QUEUE as labels; doclint board rules retired](briefs/SIM.md#sim-repo-2-migrate-generate-metrics-and-trace-retire-doclints-board-rules-tier-a) | SIM-repo-2, Mark's tap on the migration card, stage-2 main ruleset live (required `checks`, strict; #738 Security 4a) | queued (A; Mark approves) |
+| SIM-repo-2 | [Collaborator-only work items; CI and board.yml enforce the generated board; safe migration](briefs/SIM.md) | SIM-repo-1 | in review (A; #738) |
+| SIM-repo-2b | [Migrate; BOARD history archived; LATER and MARK-QUEUE as labels; doclint board rules retired](briefs/SIM.md) | SIM-repo-2, Mark's tap on the migration card, stage-2 main ruleset live (required `checks`, strict; #738 Security 4a) | queued (A; Mark approves) |
 
 ## Security and architecture review (2026-10-08)
 
