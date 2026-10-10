@@ -711,6 +711,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SPEC-ARC-1 l-453 | #453 L3 delta (`recheck`; SPEC change, so an L1 spec-diff PR): ARC-1's "never in the journal, logs, snapshots or recall index" now covers only copies outside the broker. It should cover every copy, with the encrypted vault in snapshots as the stated exception. |
 | CRED-4b l-683 | #683 Security (CRED-4 browser redaction, K14): a driver that breaks lines on a bare `\r`, or reports no password fields, gets past `OmitValues`. Covered by the K14 untrusted-driver item on the CRED-4b row, so no new row. |
 | CRED-4b l-683b | #683 Potency lens: on a redacted line the `- '` unquote is not anchored to the role, so a name like `a - 'b` renders as `a - b`. Cosmetic; leaks nothing. |
+| A14 l-674c | #674 L3 (recheck): `Restore(ctx, l, "")` now starts a fresh guest instead of failing. No current caller passes an empty image. |
 | SPEC-D088 l1 | #669 L3 (comment 6090762892): the §16 D-088 row's ID list omits OSS-5 and UPD-4, which the PR now gates; add them so the log matches the hunks. |
 | SPEC-D088 l2 | #669 L3 (comment 6090762892): OSS-7 says the box offers the switch "when it has real candidates to send"; under option (b) logged candidates are never sent, so "real candidates to illustrate" reads truer. |
 | SPEC-D088 l3 | #669 L3 (comment 6090762892) (recheck): the text does not say whether items created while the switch was on but still queued (batched or time-delayed, OSS-6) are dropped or sent after a later on when the owner turns it off. |
