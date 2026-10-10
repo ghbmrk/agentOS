@@ -683,6 +683,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | RT-1 l3 | PR #705 reviews (recheck): outside image/ and the A broker packages, only .service/.socket/.timer and *.conf under a systemd dir are A; .path, .mount, .slice, .target, .automount, .swap, *.service.d/ drop-ins, tmpfiles.d, sysusers.d, udev and polkit files would be B. None exist there today |
 | RT-1 l4 | PR #705 reviews: hand-typed paths are not normalised (`.//image/x`, `/image/x`, `docs/../image/x`, backslashes); a nested `guest/x/sub/package.json` is B; a whitespace-only name is dropped. `--git` mode never emits these forms |
 | RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
+| SIM-cases-390 | L3 on #723 point 2: POT-P5 (#390) kept account suggestion pacing across reload and decline (`TestAccountPacingSurvivesReloadAndDecline`); main has no account suggestion pacing, so there is nothing to keep until a package adds it |
+| SIM-cases-stop | recheck. L3 on #723 point 5: STOP and urgent texts must not wait behind blocked storage (#282, #303, #305, #309, #331, #347, #348, #353, #373); briefs/SIM-cases.md assigns it to SIM-owner-hold, whose review should confirm every path |
 
 ## Reuse candidates
 | ID | Component | Why |

@@ -22,18 +22,26 @@ Cases are written against what the owner sees (a text sent or not, after a resta
 | #304 W5-D22 | A strong code used, then a restart | The same code is refused after restart | main: `TestGridCellsAndGeneratorStepsAreSingleUseAcrossRestarts`, `TestACodeIsSpentAcrossThePageAndTexts` |
 | #304 W5-D22 | Code check whose state save fails | No unlock, the code is not spent, the owner gets the state-error reply | main: `TestFailedSaveLeavesNothingLiveInMemory` |
 | #305 W5-D23 | Wrong codes on the local page | Counted once each; the lock and challenge are texted once | main: `TestLocalWrongCodesCountAndAlertTheOwner`, `TestManyWrongPageCodesTellTheLockAndChallengeOnce` |
-| #307 W5-D25 | Sign-in alert whose save or send fails | The alert is still delivered after restart | main: `TestLocalSignInAlertsSurviveRestartAndFailedSend` |
-| #335 W5-D37, #336 W5-D38, #337 W5-D39 | Hourly allowance spent, then a restart | The fourth update in the hour is held, not sent; it goes once the hour passes, across restarts | here: `TestSpentAllowanceSurvivesARestart` |
+| #307 W5-D25 | Sign-in alert whose send fails | The held alert is still delivered, once, after restart | main: `TestLocalSignInAlertsSurviveRestartAndFailedSend` |
+| #307 W5-D25 | Sign-in whose record save fails | The sign-in stands and is texted at once, once (main's semantics; the draft's "no authority without the record" is not carried) | here: `TestSignInWhoseRecordSaveFailsIsTextedAtOnce` |
+| #306 W5-D24 | Owner state unreadable at startup | The channel refuses to start and writes nothing over the state | here: `TestUnreadableStateRefusesToStartAndWritesNothing` |
+| #306 W5-D24 | STOP while owner state is unreadable | STOP still takes effect | SIM-owner-hold (STOP must not depend on owner state loading) |
+| #335 W5-D37, #336 W5-D38, #337 W5-D39 | Hourly allowance spent and saved, then a restart | The fourth update in the hour is held, not sent; it goes once the hour passes, across restarts | here: `TestSpentAllowanceSurvivesARestart` (stamp saves succeed) |
+| #335 W5-D37, #336 W5-D38, #337 W5-D39 | A crash or failed stamp save after a text goes out | The restart does not refill the hourly allowance | SIM-owner-hold: main sends before it saves the stamp and ignores the save error (`pacer.go` `sendCounted`, `countSent`), so the allowance refills; draft tests #336 `TestLedgerFailureDuringActualBeginPreventsOwnerHandoff`, #337 `TestFiveStoreLedgerCutRecoversExactDebtBeforeBridgeRetry`, `…StopDuringLedgerSave` |
+| #335 W5-D37 | An aged request's priority turn, then a restart | The aged request still goes first after restart | SIM-owner-hold: main's `grants` `Gate.Reserve` keeps the aged turn in memory only; draft test `TestDurablePacingAgedPrioritySurvivesRestart` |
+| #335 W5-D37 | A pacing storage fault on any request path | The request is requeued, never sent uncounted or dropped | SIM-owner-hold: main has no reserve before hand-off; draft test `TestDurablePacingFaultRequeuesEveryRequestPath` |
 | #335 W5-D37 | Concurrent sends against the allowance | Never more than the allowance in the hour | main: `TestReleaseSendsExactlyTheAllowance`, `TestRequestsShareTheAllowance` |
 | #335 W5-D37 | A blocked pacing save | STOP and urgent texts are not delayed by it | SIM-owner-hold (the hold becomes a projection; no pacing write sits in front of STOP) |
-| #336 W5-D38 | Pacing save fails before a text goes out | The text is not sent; the error is returned | main: `TestHeldTextSurvivesARestart` (failing-save half) |
+| #336 W5-D38 | Pacing save fails before a text goes out | The text is not sent; the error is returned | SIM-owner-hold: main's `TestHeldTextSurvivesARestart` covers only the hold save, and main sends before the stamp save |
 | #333 W5-D35 | Questions and other updates share one allowance | One hourly budget across kinds | main: `TestRequestsShareTheAllowance`; the digest half is retired with the digest |
 | #385 W5-D60 | Accounting state missing at daemon start | Owner STOP still works | SIM-owner-hold (STOP must not depend on any pacing state) |
 | #287 W5-sid | A short request ID lent, then a restart before the pipeline saves it | Two open requests never share one short ID | SIM-owner-hold (request IDs come from the journal; main has no lending API) |
-| #388 POT-P6, #390 POT-P5 | Forget of an agent's item 2 queued, then a restart | The forget still runs once after restart | main: `agentosd` `TestForgetItem2ResumesAfterARestart`, `TestForgetItem2QueuedOutlivesARestart` |
-| #390 POT-P5 | A declined suggestion, then a reload | It is not offered again | main: `attention` `TestDeclineAndRestart` |
+| #390 POT-P5 | A declined suggestion, then a reload | It is not offered again | main: `attention` `TestDeclineAndRestart` (the draft's `TestDeclineSurvivesNewShapesExpiryAndReload`) |
+| #390 POT-P5 | Account suggestion pacing, then a reload | The pacing is kept across reload | Not carried: main has no account suggestion pacing to keep (draft `TestAccountPacingSurvivesReloadAndDecline`); LATER.md |
 
 Cases main already fails, from the W5-Dc reviews these drafts answered: a forget drops a held text, and the hold is rebuilt from owner-text intents (r13, r15, r16, r17), are SIM-owner-hold's acceptance; a forget reaching every projection once is SIM-erase's.
+
+STOP and urgent texts never wait behind blocked storage (the pattern in #282, #303, #305, #309, #331, #347, #348, #353 and #373) rides with SIM-owner-hold's "no pacing write sits in front of STOP" row above; LATER.md `SIM-cases-stop` keeps it, tagged recheck, until SIM-owner-hold's review confirms it.
 
 ## Retired with the digest
 
@@ -54,13 +62,13 @@ Every case in these drafts exists only because a digest is collected, queued, ac
 | #282 W5-D15 | Owner notes survive source and channel reopen; note failure never falls back to a destructive digest |
 | #284 W5-D16, #308 W5-D26 | Owner source reopen after source ack before queue bit; queue consumption before uncertain owner retirement does not resurrect |
 | #302 W5-D20, #303 W5-D21 | Guard and note share one transaction; source/outbox ack cuts recover without duplicate counts; digest ack before uncertain outbox retirement does not resurrect a note |
-| #306 W5-D24 | Transactional startup keeps control on load failure; source outage keeps STOP and the outbox (STOP half: main `TestStopIsNotQueuedBehindAHungVerifier`) |
+| #306 W5-D24 | Source outage keeps the digest outbox (load-failure and STOP halves: the owner-visible table above) |
 | #309 W5-D27, #310 W5-D28 | STOP during begin prevents the bridge call; STOP after hand-off persists Unknown and ignores the late receipt |
 | #311 W5-D29, #313 W5-D31 | Daily alive line due/ack survive reopen; no double issue across DST |
 | #312 W5-D30 | Expiry or heartbeat rollover during begin never calls transport |
 | #314 W5-D32, #332 W5-D34 | Daily cadence reopens on the same identity; ambiguous delivery never creates a replacement; maintenance never hides Unknown outcomes |
 | #331 W5-D33, #334 W5-D36 | Host STOP after hand-off persists Unknown and rejects the late receipt; four-file reopen |
-| #336 W5-D38, #337 W5-D39 | Question and digest allowance survives reopen (question half: here, `TestSpentAllowanceSurvivesARestart`); Unknown reopen keeps debt and rejects late acceptance |
+| #336 W5-D38, #337 W5-D39 | Digest allowance survives reopen (question half: the owner-visible table above); Unknown reopen keeps debt and rejects late acceptance |
 | #348 W5-D42 | Provisioned host with missing ledger keeps recovery controls |
 
 What the owner keeps from these after SIM-pull: an urgent text is never sent twice after a crash and an uncertain send is reported as such (the modemlink rows above), STATUS after a crash shows the same open items (SIM-pull acceptance), and a forgotten subject never appears in STATUS (SIM-pull, SIM-erase).
@@ -82,4 +90,5 @@ These drafts test pacing-file storage, leases, manifests, ancestors, drain order
 | #385 W5-D60 | Provisioned daemon config refusals (its STOP case is above) |
 | #395 W5-D61 | Owner factory assembly |
 | #397 W5-D62 to #435 W5-D67 | Inspection, protected lease and manifest, close results, constructor cleanup, protected recovery |
+| #388 POT-P6 | First-boot release wiring; no crash, acknowledgement or forget case |
 | #252 W5-sl, #387, #399, #405, #417 | Digest wording, replay fixtures, UX reviews: no crash, acknowledgement or forget case |
