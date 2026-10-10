@@ -26,6 +26,8 @@ the GENERATED line and its rows come from the live issues, never from hand edits
   board.py check --repo o/r      once BOARD.md carries the GENERATED line: the committed file
                                  equals the board rendered from the live issues; before that,
                                  the same round trip as plain check
+           [--base FILE]         fail if the base branch's BOARD.md carries the GENERATED line
+                                 and this one does not, so a PR cannot switch the check off
   board.py render [--repo o/r]   print BOARD.md from the planned issues, or from GitHub's
                                  issues and PRs (GITHUB_TOKEN); PR disagreements go to stderr
 """
@@ -313,8 +315,13 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("command", choices=("check", "render"))
     ap.add_argument("--repo", help="owner/name: render from its issues and PRs instead of the plan")
+    ap.add_argument("--base", metavar="FILE", help="the base branch's BOARD.md: once it carries the GENERATED line, so must this one")
     args = ap.parse_args(argv)
     text = read()
+    if args.base and GENERATED in pathlib.Path(args.base).read_text() and GENERATED not in text:
+        print("board: BOARD.md drops the GENERATED line its base carries; its rows come from the issues"
+              " (retiring the generated board needs a ci.yml change)", file=sys.stderr)
+        return 1
     try:
         if args.repo and (args.command == "render" or GENERATED in text):
             items = work_items(fetch, args.repo)

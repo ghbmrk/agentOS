@@ -8,6 +8,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -253,11 +254,35 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.run_repo("check", text=generated,
                                        items=opened(issues(generated)) + opened([dict(extra, number=999)], "NONE"))[0], 0)
 
+    def test_a_board_cannot_drop_the_generated_line_its_base_carries(self):
+        # Generated-ness comes from the base branch: a PR that deletes the line and hand-edits a
+        # row would otherwise fall back to the round trip and pass.
+        generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
+        dropped = LIVE.replace("| A-1 | [Pilot](briefs/A-1.md) | — | building", "| A-1 | [Pilot](briefs/A-1.md) | — | in review")
+        self.assertEqual(self.run_tool("check", text=dropped)[0], 0)
+        with tempfile.TemporaryDirectory() as d:
+            base, plain = pathlib.Path(d, "base.md"), pathlib.Path(d, "plain.md")
+            base.write_text(generated)
+            plain.write_text(LIVE)
+            code, _, err = self.run_repo("check", "--base", str(base), text=dropped, items=opened(issues(generated)))
+            self.assertEqual(code, 1)
+            self.assertIn("drops the GENERATED line", err)
+            self.assertEqual(self.run_repo("check", "--base", str(base), text=generated, items=opened(issues(generated)))[0], 0)
+            # Before the migration, and when the PR adds the line, the base does not constrain it.
+            self.assertEqual(self.run_repo("check", "--base", str(plain), text=BOARD, items=[])[0], 0)
+            self.assertEqual(self.run_repo("check", "--base", str(plain), text=generated, items=opened(issues(generated)))[0], 0)
+
     def test_board_workflow_and_ci_recognise_the_generated_line(self):
         workflow = (ROOT / ".github" / "workflows" / "board.yml").read_text()
         needle = workflow.split("grep -qF '")[1].split("'")[0]
         self.assertTrue(board.GENERATED.startswith(needle))
-        self.assertIn("board.py check --repo", (ROOT / ".github" / "workflows" / "ci.yml").read_text())
+        # Both take generated-ness from the base: ci.yml from the PR's base (or main for
+        # bot/board), board.yml from main before the push.
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIn('board.py check --repo "$GITHUB_REPOSITORY" --base', ci)
+        self.assertIn("HEAD^1:BOARD.md", ci)
+        self.assertIn('git show "$BEFORE:BOARD.md"', workflow)
+        self.assertIn("github.event.before", workflow)
 
     def test_check_repo_before_the_migration_is_the_round_trip(self):
         self.assertEqual(self.run_repo("check", text=BOARD, items=[])[0], 0)

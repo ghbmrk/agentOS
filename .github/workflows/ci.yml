@@ -59,14 +59,21 @@ jobs:
         # changes BOARD.md, and board.yml's bot/board branch, must match the board rendered from
         # the live issues. Other PRs skip it, so an issue change between board.yml runs turns no
         # unrelated PR red. Before the migration this is the same round trip as the step above.
+        # Generated-ness comes from the base (the PR's, or main for bot/board), so deleting the
+        # line cannot switch the check off.
         if: github.event_name == 'pull_request' || github.ref == 'refs/heads/bot/board'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = pull_request ] && git diff --quiet HEAD^1...HEAD^2 -- BOARD.md; then
-            echo "BOARD.md unchanged by this PR"; exit 0
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            if git diff --quiet HEAD^1...HEAD^2 -- BOARD.md; then
+              echo "BOARD.md unchanged by this PR"; exit 0
+            fi
+            git show HEAD^1:BOARD.md > "$RUNNER_TEMP/base-BOARD.md"
+          else
+            git show origin/main:BOARD.md > "$RUNNER_TEMP/base-BOARD.md"
           fi
-          python tools/board.py check --repo "$GITHUB_REPOSITORY"
+          python tools/board.py check --repo "$GITHUB_REPOSITORY" --base "$RUNNER_TEMP/base-BOARD.md"
       - name: PR leaves TRACE.md to trace.yml
         if: github.event_name == 'pull_request'
         # HEAD is the PR's test merge (base^1, branch^2). Three dots compare the branch with
