@@ -23,6 +23,8 @@ Board section: Outside-the-box limits (2026-10-10).
 
 **Later (when Stripe ships limits).** The owner sets a limit once in the Link app. Under it, the spend request is approved instantly (`pending` skipped); over it, the same tap as today. The box's own amount limit stays at or below the Link limit so the box never asks for something Link will refuse. Because approval is already a state, no new flow is needed. The builder re-reads Stripe's page at Step 0 to catch the launch.
 
+**Caveat: weak Link sign-in.** Link sign-in can fall back to a texted code, which CH-19 (SPEC.md:221) rates weak because of SIM swap. If someone takes over the Link account, they can file spend requests the owner never sees, so the Link tap is only as strong as that sign-in. The PAYCAP-1 bank limit still caps the loss. The brief expansion states this to the owner on the connect page and prefers a stronger Link sign-in where Link offers one.
+
 **Spec-diff owed (decision made, SPEC.md not edited here).** Mark decided that a Link approval stands in for the CH-10 high-risk owner code (SPEC.md:209-210). A later spec-diff PR that Mark approves must write it into SPEC. It should state why the code's purpose still holds: it resists SIM swap and agent self-approval, and a Link approval is a signed-in session on the owner's device, not the agent's channel.
 
 **Needs:** PAYCAP-1 (the card Link draws on). Nothing builds until Step 0 passes.
