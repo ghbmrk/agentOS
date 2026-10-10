@@ -2,6 +2,8 @@ package journal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -14,16 +16,29 @@ import (
 // methods are safe for concurrent use. Executors and policies run without
 // the engine lock held.
 type Engine struct {
-	mu      sync.Mutex
-	store   Store
-	policy  Policy
-	redact  Redactor
-	execs   map[string]Executor
-	now     func() time.Time
-	seq     uint64
+	mu     sync.Mutex
+	store  Store
+	policy Policy
+	redact Redactor
+	execs  map[string]Executor
+	now    func() time.Time
+	seq    uint64
+	// intents holds every intent but the evicted denials; open holds the
+	// ones not yet settled (succeeded or denied). STOP, STATUS and the
+	// duplicate and fence checks read open, so their work does not grow
+	// with history (CH-2). Records live only in the journal.
 	intents map[string]*entry
-	order   []string
-	records []Record
+	open    map[string]*entry
+	// denied lists the denials in intents, oldest first. Past hotDenials
+	// the oldest leave memory (they stay in the journal): cold keeps a
+	// 16-byte key per evicted ID, so a resubmission is still recognised
+	// (OP-1) and its status is read back from the journal. pinned holds
+	// eviction off while replay or an erase needs every entry in place.
+	denied  []string
+	cold    map[coldKey]coldVal
+	shapes  []coldShape // what evicted denials share, by coldVal.shape
+	shapeIx map[coldShape]uint32
+	pinned  bool
 	stopped bool
 	// fence maps an account to the intents left unresolved by the last
 	// restart. Dispatch on the account waits until it is empty (OP-4).
@@ -31,7 +46,40 @@ type Engine struct {
 	broken error
 }
 
+// hotDenials is how many settled denials stay in memory. Refusals are
+// what an untrusted guest can produce without limit, so they are the
+// history that is bounded (SIM-bound).
+const hotDenials = 1024
+
+// coldKey identifies an evicted denial: the first 16 bytes of the SHA-256
+// of its ID. Two IDs colliding (odds 2^-128) read as one denial.
+type coldKey [16]byte
+
+// coldVal is what memory keeps of an evicted denial: enough to answer Get
+// and an idempotent Submit without reading the journal, so a guest
+// repeating old requests never holds the store while STOP waits on it.
+// Params live only in the journal.
+type coldVal struct {
+	fp    [16]byte // prefix of the entry's fp
+	shape uint32   // index in Engine.shapes
+}
+
+// coldShape is the rest of an evicted denial. Denials from one source
+// share goal, origin, account, action, executor and refusal, so each
+// distinct shape is kept once.
+type coldShape struct {
+	goal, origin, account, action, exec string
+	reason, guest                       string
+	phase                               Phase
+}
+
+func coldKeyOf(id string) coldKey {
+	sum := sha256.Sum256([]byte(id))
+	return coldKey(sum[:16])
+}
+
 type entry struct {
+	seq        uint64 // of its RecSubmitted: submission order
 	intent     Intent
 	fp         string
 	efp        string // effectFingerprint
@@ -67,7 +115,11 @@ func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor
 		execs:   execs,
 		now:     func() time.Time { return time.Now().UTC() },
 		intents: map[string]*entry{},
+		open:    map[string]*entry{},
+		cold:    map[coldKey]coldVal{},
+		shapeIx: map[coldShape]uint32{},
 		fence:   map[string]map[string]bool{},
+		pinned:  true,
 	}
 	for _, o := range opts {
 		o(e)
@@ -91,32 +143,32 @@ func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor
 		}
 		e.apply(r)
 	}
-	for _, id := range e.order {
-		en := e.intents[id]
+	for _, en := range bySeq(e.open) {
 		if en.state != InFlight {
 			continue
 		}
 		n := en.attempts[len(en.attempts)-1].N
-		if err := e.commit(Record{Type: RecObserved, ID: id, Attempt: n, Result: ResultUnknown,
+		if err := e.commit(Record{Type: RecObserved, ID: en.intent.ID, Attempt: n, Result: ResultUnknown,
 			Source: "restart", Evidence: "in flight when the broker stopped"}); err != nil {
 			return nil, err
 		}
 	}
 	// An erase a crash cut off before its rewrite is finished now.
-	if e.unerased() {
+	if unerased(recs) {
 		if err := e.rewriteErased(); err != nil {
 			return nil, err
 		}
 	}
-	for _, id := range e.order {
-		en := e.intents[id]
+	for _, en := range bySeq(e.open) {
 		if en.state == OutcomeUnknown {
 			if e.fence[en.intent.Account] == nil {
 				e.fence[en.intent.Account] = map[string]bool{}
 			}
-			e.fence[en.intent.Account][id] = true
+			e.fence[en.intent.Account][en.intent.ID] = true
 		}
 	}
+	e.pinned = false
+	e.trim()
 	return e, nil
 }
 
@@ -142,16 +194,27 @@ func (e *Engine) Submit(in Intent) (Status, error) {
 	if norm, err = normalize(e.scrubIntent(raw)); err != nil {
 		return Status{}, err
 	}
+	fp := fingerprint(norm)
+	known := func(en *entry) (Status, error) {
+		if en.fp != fp {
+			return Status{}, fmt.Errorf("%w: %s", ErrConflict, norm.ID)
+		}
+		return en.status(), nil
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.broken != nil {
 		return Status{}, e.broken
 	}
 	if en, ok := e.intents[norm.ID]; ok {
-		if en.fp != fingerprint(norm) {
+		return known(en)
+	}
+	if cv, ok := e.cold[coldKeyOf(norm.ID)]; ok {
+		// An evicted denial answers from memory, without the journal.
+		if cv.fp != fpPrefix(fp) {
 			return Status{}, fmt.Errorf("%w: %s", ErrConflict, norm.ID)
 		}
-		return en.status(), nil
+		return e.coldStatus(norm.ID, cv), nil
 	}
 	if err := e.commit(Record{Type: RecSubmitted, ID: raw.ID, Intent: &raw}); err != nil {
 		return Status{}, err
@@ -163,7 +226,7 @@ func (e *Engine) Submit(in Intent) (Status, error) {
 func (e *Engine) Authorize(ctx context.Context, id string) (Status, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	en, err := e.lookup(id)
+	en, err := e.lookup(id, false)
 	if err != nil {
 		return Status{}, err
 	}
@@ -275,7 +338,7 @@ const maxRechecks = 16
 // dispatchable returns the intent and its executor if a new attempt may
 // start now. Called with e.mu held.
 func (e *Engine) dispatchable(id string) (*entry, Executor, error) {
-	en, err := e.lookup(id)
+	en, err := e.lookup(id, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -305,13 +368,17 @@ func (e *Engine) dispatchable(id string) (*entry, Executor, error) {
 // duplicateOf returns an unresolved intent with the same effect as en
 // under another ID, or "". Called with e.mu held.
 func (e *Engine) duplicateOf(en *entry) string {
-	for _, oid := range e.order {
-		o := e.intents[oid]
-		if o != en && o.efp == en.efp && (o.state == OutcomeUnknown || o.state == InFlight) {
-			return oid
+	var first *entry
+	for _, o := range e.open {
+		if o != en && o.efp == en.efp && (o.state == OutcomeUnknown || o.state == InFlight) &&
+			(first == nil || o.seq < first.seq) {
+			first = o
 		}
 	}
-	return ""
+	if first == nil {
+		return ""
+	}
+	return first.intent.ID
 }
 
 // HeldError says an intent is held behind an unresolved intent with the
@@ -346,8 +413,8 @@ func (e *Engine) Waiting() []Wait {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var out []Wait
-	for _, id := range e.order {
-		en := e.intents[id]
+	for _, en := range bySeq(e.open) {
+		id := en.intent.ID
 		if en.state != Authorized && en.state != NotApplied {
 			continue
 		}
@@ -388,8 +455,7 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 		exec Executor
 	}
 	var jobs []job
-	for _, id := range e.order {
-		en := e.intents[id]
+	for _, en := range bySeq(e.open) {
 		if en.state == OutcomeUnknown {
 			jobs = append(jobs, job{en.intent, en.attempts[len(en.attempts)-1].N, e.execs[en.intent.Executor]})
 		}
@@ -424,7 +490,7 @@ func (e *Engine) Resolve(id string, attempt int, out Outcome, source string) (St
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	en, err := e.lookup(id)
+	en, err := e.lookup(id, false)
 	if err != nil {
 		return Status{}, err
 	}
@@ -481,8 +547,8 @@ func (e *Engine) Stop(ctx context.Context) (StopReport, error) {
 		n  int
 	}
 	var jobs []job
-	for _, id := range e.order {
-		en := e.intents[id]
+	for _, en := range bySeq(e.open) {
+		id := en.intent.ID
 		switch en.state {
 		case Authorized, NotApplied:
 			if !narrowing(en.intent) {
@@ -539,8 +605,7 @@ func (e *Engine) Resume() error {
 func (e *Engine) GuestActive() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	for _, id := range e.order {
-		en := e.intents[id]
+	for _, en := range e.open {
 		if strings.HasPrefix(en.intent.Origin, "guest:") && (en.state == Authorized || en.state == InFlight) {
 			return true
 		}
@@ -566,7 +631,7 @@ func (e *Engine) RecordQuality(id string, q Quality) (Status, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	en, err := e.lookup(id)
+	en, err := e.lookup(id, true)
 	if err != nil {
 		return Status{}, err
 	}
@@ -576,26 +641,49 @@ func (e *Engine) RecordQuality(id string, q Quality) (Status, error) {
 	return en.status(), nil
 }
 
-// Get returns one intent's status.
+// Get returns one intent's status. An evicted denial answers from memory
+// without its params, recipients or other free-form fields; List, Between,
+// StatusBetween and Trail read them from the journal.
 func (e *Engine) Get(id string) (Status, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	en, ok := e.intents[id]
-	if !ok {
-		return Status{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	if en, ok := e.intents[id]; ok {
+		return en.status(), nil
 	}
-	return en.status(), nil
+	if cv, ok := e.cold[coldKeyOf(id)]; ok {
+		return e.coldStatus(id, cv), nil
+	}
+	return Status{}, fmt.Errorf("%w: %s", ErrNotFound, id)
 }
 
 // List returns every intent in submission order.
 func (e *Engine) List() []Status {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := make([]Status, 0, len(e.order))
-	for _, id := range e.order {
-		out = append(out, e.intents[id].status())
-	}
+	var out []Status
+	e.each(func(en *entry) { out = append(out, en.status()) })
 	return out
+}
+
+// each calls f on every intent in submission order. While none has been
+// evicted it reads memory, under the lock; otherwise it replays the
+// journal into private entries, without the lock. If the journal cannot be
+// read it falls back to memory, which lacks the evicted denials. f must
+// not call the engine.
+func (e *Engine) each(f func(*entry)) {
+	e.mu.Lock()
+	if len(e.cold) > 0 {
+		e.mu.Unlock()
+		if ens, err := e.journalEntries(nil); err == nil {
+			for _, en := range ens {
+				f(en)
+			}
+			return
+		}
+		e.mu.Lock()
+	}
+	defer e.mu.Unlock()
+	for _, en := range bySeq(e.intents) {
+		f(en)
+	}
 }
 
 // AuthorizedSince returns the intents on account with action that were
@@ -606,8 +694,7 @@ func (e *Engine) AuthorizedSince(account, action string, since time.Time) []Inte
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var out []Intent
-	for _, id := range e.order {
-		en := e.intents[id]
+	for _, en := range bySeq(e.intents) {
 		if en.intent.Account != account || en.intent.Action != action || en.state == Denied || en.authorized.IsZero() {
 			continue
 		}
@@ -647,8 +734,7 @@ func (e *Engine) InUse(account, action string, since time.Time) []Use {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var out []Use
-	for _, id := range e.order {
-		en := e.intents[id]
+	for _, en := range bySeq(e.intents) {
 		if en.intent.Account != account || en.intent.Action != action {
 			continue
 		}
@@ -667,13 +753,14 @@ func (e *Engine) InUse(account, action string, since time.Time) []Use {
 }
 
 // Trail returns the journal records, oldest first: one audit trail for
-// effects and broker-state changes (OP-5).
+// effects and broker-state changes (OP-5). It reads the journal, not
+// memory, and is nil if the journal cannot be read.
 func (e *Engine) Trail() []Record {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := make([]Record, len(e.records))
-	copy(out, e.records)
-	return out
+	recs, err := e.readJournal()
+	if err != nil {
+		return nil
+	}
+	return recs
 }
 
 // Fenced returns the intents on account that the last restart left
@@ -689,15 +776,29 @@ func (e *Engine) Fenced(account string) []string {
 	return out
 }
 
-func (e *Engine) lookup(id string) (*entry, error) {
+// lookup finds an intent for a change. An evicted denial is rehydrated
+// from the journal only when warm is set (a rating); otherwise it is a
+// detached entry that no state change accepts. Caller holds mu.
+func (e *Engine) lookup(id string, warm bool) (*entry, error) {
 	if e.broken != nil {
 		return nil, e.broken
 	}
-	en, ok := e.intents[id]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
+	if en, ok := e.intents[id]; ok {
+		return en, nil
 	}
-	return en, nil
+	if cv, ok := e.cold[coldKeyOf(id)]; ok && !warm {
+		st := e.coldStatus(id, cv)
+		return &entry{intent: st.Intent, state: Denied, permission: st.Permission}, nil
+	}
+	if e.evicted(id) {
+		if err := e.rehydrate([]string{id}); err != nil {
+			return nil, err
+		}
+		if en, ok := e.intents[id]; ok {
+			return en, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
 }
 
 // commit validates a record, makes it durable, then applies it. Live
@@ -731,6 +832,7 @@ func (e *Engine) commit(r Record) error {
 		return e.broken
 	}
 	e.apply(stored)
+	e.trim()
 	return nil
 }
 
@@ -827,7 +929,6 @@ func (e *Engine) validate(r Record) error {
 // apply moves state forward by one validated record.
 func (e *Engine) apply(r Record) {
 	e.seq = r.Seq
-	e.records = append(e.records, r)
 	switch r.Type {
 	case RecStop:
 		e.stopped = true
@@ -838,12 +939,163 @@ func (e *Engine) apply(r Record) {
 	case RecEgress, RecSleep:
 		return
 	case RecSubmitted:
-		in := *r.Intent
-		e.intents[r.ID] = &entry{intent: in, fp: fingerprint(in), efp: effectFingerprint(in), state: Pending, submitted: r.At}
-		e.order = append(e.order, r.ID)
+		en := newEntry(r)
+		e.intents[r.ID], e.open[r.ID] = en, en
 		return
 	}
 	en := e.intents[r.ID]
+	was := en.state
+	en.apply(r)
+	if r.Type == RecObserved && r.Result != ResultUnknown {
+		if f := e.fence[en.intent.Account]; f != nil {
+			delete(f, r.ID)
+		}
+	}
+	switch en.state {
+	case Succeeded, Denied:
+		delete(e.open, r.ID)
+	default:
+		e.open[r.ID] = en
+	}
+	if en.state == Denied && was != Denied {
+		e.denied = append(e.denied, r.ID)
+	}
+}
+
+// trim evicts the oldest denials past hotDenials. They stay in the journal.
+func (e *Engine) trim() {
+	if e.pinned {
+		return
+	}
+	for len(e.denied) > hotDenials {
+		id := e.denied[0]
+		e.denied = e.denied[1:]
+		// A rated denial, or one with attempts, stays: only the owner
+		// makes those, and coldVal does not carry them.
+		if en := e.intents[id]; en != nil && en.state == Denied && len(en.attempts) == 0 && en.quality == (Quality{}) {
+			delete(e.intents, id)
+			e.cold[coldKeyOf(id)] = e.coldValOf(en)
+		}
+	}
+}
+
+// coldValOf is what stays in memory of an evicted denial. Caller holds mu.
+func (e *Engine) coldValOf(en *entry) coldVal {
+	in, p := en.intent, en.permission
+	sh := coldShape{goal: in.GoalID, origin: in.Origin, account: in.Account, action: in.Action,
+		exec: in.Executor, reason: p.Reason, guest: p.GuestReason, phase: p.Phase}
+	i, ok := e.shapeIx[sh]
+	if !ok {
+		i = uint32(len(e.shapes))
+		e.shapes = append(e.shapes, sh)
+		e.shapeIx[sh] = i
+	}
+	return coldVal{fp: fpPrefix(en.fp), shape: i}
+}
+
+// coldStatus is an evicted denial's status. Caller holds mu.
+func (e *Engine) coldStatus(id string, cv coldVal) Status {
+	sh := e.shapes[cv.shape]
+	in, _ := normalize(Intent{ID: id, GoalID: sh.goal, Origin: sh.origin, Account: sh.account,
+		Action: sh.action, Executor: sh.exec})
+	return Status{
+		Intent:     in,
+		State:      Denied,
+		Permission: Permission{Decision: "denied", Phase: sh.phase, Reason: sh.reason, GuestReason: sh.guest},
+		Attempts:   []Attempt{},
+	}
+}
+
+// fpPrefix is the first 16 bytes of a hex fingerprint.
+func fpPrefix(fp string) (out [16]byte) {
+	hex.Decode(out[:], []byte(fp[:min(len(fp), 32)]))
+	return out
+}
+
+// evicted reports whether id may be an evicted denial. Caller holds mu.
+func (e *Engine) evicted(id string) bool {
+	_, ok := e.cold[coldKeyOf(id)]
+	return ok
+}
+
+// rehydrate brings evicted denials back into memory with one journal read,
+// for an operation that changes them (a rating, an erase). It reads under
+// the lock; guest-facing reads (Get, Submit) never come here. They are
+// evicted again in turn. Caller holds mu.
+func (e *Engine) rehydrate(ids []string) error {
+	want := map[string]bool{}
+	for _, id := range ids {
+		if e.intents[id] == nil && e.evicted(id) {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	ens, err := e.journalEntries(func(id string) bool { return want[id] })
+	if err != nil {
+		return err
+	}
+	for _, en := range ens {
+		e.intents[en.intent.ID] = en
+		e.denied = append(e.denied, en.intent.ID)
+	}
+	return nil
+}
+
+// readJournal decodes the whole journal. The store serialises its own
+// reads and writes, so this needs no engine lock and sees whole records.
+func (e *Engine) readJournal() ([]Record, error) {
+	data, err := e.store.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	recs, _, err := decodeJournal(data)
+	return recs, err
+}
+
+// journalEntries replays the journal into fresh entries for the intents
+// keep accepts (every intent if keep is nil), in submission order.
+func (e *Engine) journalEntries(keep func(id string) bool) ([]*entry, error) {
+	recs, err := e.readJournal()
+	if err != nil {
+		return nil, err
+	}
+	byID := map[string]*entry{}
+	var out []*entry
+	for _, r := range recs {
+		if r.ID == "" || (keep != nil && !keep(r.ID)) {
+			continue
+		}
+		if r.Type == RecSubmitted {
+			en := newEntry(r)
+			byID[r.ID] = en
+			out = append(out, en)
+		} else if en := byID[r.ID]; en != nil {
+			en.apply(r)
+		}
+	}
+	return out, nil
+}
+
+// bySeq returns the entries of m in submission order.
+func bySeq(m map[string]*entry) []*entry {
+	out := make([]*entry, 0, len(m))
+	for _, en := range m {
+		out = append(out, en)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].seq < out[j].seq })
+	return out
+}
+
+func newEntry(r Record) *entry {
+	in := *r.Intent
+	return &entry{seq: r.Seq, intent: in, fp: fingerprint(in), efp: effectFingerprint(in), state: Pending, submitted: r.At}
+}
+
+// apply moves one intent forward by a validated record about it. Live
+// state and every replay of the journal share it.
+func (en *entry) apply(r Record) {
 	switch r.Type {
 	case RecAuthorized:
 		en.state = Authorized
@@ -864,11 +1116,6 @@ func (e *Engine) apply(r Record) {
 		a.Result, a.Source, a.Evidence = r.Result, r.Source, r.Evidence
 		if a.N == len(en.attempts) {
 			en.state = map[Result]State{ResultSucceeded: Succeeded, ResultNotApplied: NotApplied, ResultUnknown: OutcomeUnknown}[r.Result]
-		}
-		if r.Result != ResultUnknown {
-			if f := e.fence[en.intent.Account]; f != nil {
-				delete(f, r.ID)
-			}
 		}
 	case RecCancel:
 		a := en.attempt(r.Attempt)

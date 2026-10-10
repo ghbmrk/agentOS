@@ -347,6 +347,8 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | ADP-15a | One desktop over separate executors (ADP-15; brief to write; lane claude2) | CRED-11a, ADP-5 | queued (A) |
 | ADP-16a | Suite executor (ADP-16; brief to write; lane claude2) | ADP-5 | queued (A) |
 | UPD-7t | Soak plus attestations test and marker (UPD-7; brief to write) | — | queued (C) |
+| CH-5v | [Live calls and codes on calls](briefs/CH-5v.md) (CH-5, CH-17; stub; simulator slice first, hardware qualification on S2) | S2, P2-3w | queued (A) |
+| CAP-4c | [Calendar as an event source](briefs/CAP-4c.md) (CAP-4; stub; read-only adapter first) | P3-3 | queued (A) |
 
 ## Release rows carried from LATER.md (2026-10-10)
 
