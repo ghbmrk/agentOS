@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	mrand "math/rand/v2"
 	"slices"
 	"sort"
@@ -160,8 +161,9 @@ type Config struct {
 	// learning sets 36 h, so a candidate cut at the end of one night
 	// resumes the next (PE7).
 	ResumeFor time.Duration
-	// Logf logs each counted candidate cut by a fixed class only (PE5).
-	// Nil: not logged.
+	// Logf logs each counted candidate cut, and each failed activation
+	// or state save, by a fixed class only (PE5): never an error's text,
+	// which can name a host path. Nil: not logged.
 	Logf func(string, ...any)
 	Now  func() time.Time
 	Rand io.Reader
@@ -505,12 +507,29 @@ func (p *Pipeline) healthy() error {
 func (p *Pipeline) Attach(j Journal) { p.j = j }
 
 // errStateBroken is what callers see once a save and its reload both
-// failed. It names no path. The errors themselves are logged.
+// failed. It names no path. The errors' classes are logged.
 var errStateBroken = errors.New("change: state cannot be saved or reloaded; restart needed")
+
+// errClass names an error for the log by a fixed class (PE5). Its text
+// can name a host path, so it is never logged.
+func errClass(err error) string {
+	var pe *fs.PathError
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return "permission denied"
+	case errors.Is(err, fs.ErrNotExist):
+		return "not found"
+	case errors.Is(err, fs.ErrExist):
+		return "already exists"
+	case errors.As(err, &pe):
+		return "file error"
+	}
+	return "error"
+}
 
 func (p *Pipeline) markBroken(save, reload error) {
 	if p.cfg.Logf != nil {
-		p.cfg.Logf("change: state cannot be saved (%v) or reloaded (%v)", save, reload)
+		p.cfg.Logf("change: state cannot be saved (%s) or reloaded (%s)", errClass(save), errClass(reload))
 	}
 	p.broken = errStateBroken
 }

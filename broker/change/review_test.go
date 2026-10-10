@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -200,7 +201,7 @@ type pathTarget struct{}
 
 func (pathTarget) Current() (Tree, error) { return nil, nil }
 func (pathTarget) Apply(Tree) error {
-	return errors.New("open /var/lib/agentos/skills: permission denied")
+	return &fs.PathError{Op: "open", Path: "/var/lib/agentos/skills", Err: fs.ErrPermission}
 }
 
 // An activation failure can name a host path. The journal evidence does not.
@@ -225,6 +226,7 @@ func TestActivationErrorNamesNoHostPath(t *testing.T) {
 type flakyStore struct {
 	*MemStore
 	failSave, failLoad bool
+	loadPath           bool // the load error names a path, as FileStore's does
 }
 
 func (f *flakyStore) Save(b []byte) error {
@@ -236,6 +238,9 @@ func (f *flakyStore) Save(b []byte) error {
 
 func (f *flakyStore) Load() ([]byte, error) {
 	if f.failLoad {
+		if f.loadPath {
+			return nil, &fs.PathError{Op: "open", Path: "/var/lib/agentos/change/state.json", Err: fs.ErrNotExist}
+		}
 		return nil, errors.New("load failed")
 	}
 	return f.MemStore.Load()
@@ -495,5 +500,49 @@ func TestStopHoldsAutoRevert(t *testing.T) {
 	}
 	if string(e.p.Files("skills")["skills/greet"]) != "hello" {
 		t.Fatal("reverted during STOP")
+	}
+}
+
+// Logf carries a fixed class only (PE5), so a target or store error that
+// names a host path reaches neither the journal nor the log.
+func TestHostPathNotLogged(t *testing.T) {
+	var logged []string
+	e := newEnv(t, func(c *Config) {
+		c.Targets = map[string]Target{"skills": pathTarget{}}
+		c.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
+	})
+	put := func() {
+		e.p.mu.Lock()
+		e.p.props["cX"] = &proposal{
+			base:   e.p.st.Active.Hash(),
+			next:   e.p.st.Active.clone(),
+			edits:  []Edit{{Path: "skills/greet"}},
+			report: Report{Basis: BasisStanding},
+		}
+		e.p.mu.Unlock()
+	}
+	adopt := journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}
+	put()
+	if o := e.p.Execute(bg, adopt, 1); o.Result != journal.ResultNotApplied {
+		t.Fatal(o)
+	}
+	// Save and reload both fail: the save line and the broken line.
+	e.p.cfg.Targets = nil
+	bad := &flakyStore{MemStore: e.store, failSave: true, failLoad: true, loadPath: true}
+	e.p.cfg.Store = bad
+	put()
+	if o := e.p.Execute(bg, adopt, 1); o.Evidence != "state not saved" {
+		t.Fatal(o)
+	}
+	if len(logged) < 3 {
+		t.Fatalf("logged %q", logged)
+	}
+	for _, l := range logged {
+		if strings.Contains(l, "/var/") || strings.Contains(l, "agentos") {
+			t.Fatalf("log line names a host path: %q", l)
+		}
+	}
+	if !strings.Contains(logged[0], "permission denied") {
+		t.Fatalf("activation line lost its class: %q", logged[0])
 	}
 }
