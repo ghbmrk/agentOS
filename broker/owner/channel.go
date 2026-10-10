@@ -158,8 +158,10 @@ type Channel struct {
 	released map[string]time.Time // queued IDs released, for UNDO's reply
 	lateUndo map[string]bool      // released IDs the owner texted UNDO for
 	// undo takes an UNDO whose ID the channel does not hold (SetUndo).
-	undo   atomic.Pointer[UndoHook]
-	resume *resumeCode
+	undo atomic.Pointer[UndoHook]
+	// current confirms a held text's subjects at send (SetCurrent).
+	current atomic.Pointer[CurrentHook]
+	resume  *resumeCode
 	// lineFailed is when the box's line last failed to send (unix nanos
 	// of cfg.Now), so a queued reply's silence is not read as the
 	// owner's over a line that was down (security B1(a) on PW3).

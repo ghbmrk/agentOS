@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/modem"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
@@ -300,5 +304,98 @@ func TestMainWiresThePacer(t *testing.T) {
 	q.attach(ctx, r.ch, nil, time.Hour)
 	if !q.quiet(at23) {
 		t.Fatal("attach without a digest")
+	}
+}
+
+// REQ: OWN-4, CH-15 (PACE-1 PC-6)
+func TestLoopsClearedTextCarriesItsKeys(t *testing.T) {
+	r := pacedOwner(t, quiet22to7(), at23)
+	var ln loop2Notify
+	ln.clear("Security checks: Cleared: x.", []string{"k"}) // no channel yet: logged, not sent
+	ln.ch.Store(r.ch)
+	open := true
+	r.ch.SetCurrent(func(keys []string) bool { return !(open && len(keys) == 1 && keys[0] == "k") })
+	ln.clear("Security checks: Cleared: x.", []string{"k"})
+	ln.clear("Security checks: Cleared: y.", []string{"j"})
+	r.set(at23.Add(8*time.Hour + time.Minute)) // 07:01
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sent(); len(got) != 1 || !strings.Contains(got[0], "Cleared: y.") || strings.Contains(got[0], "Cleared: x.") {
+		t.Fatalf("sent %q, want only the clear whose key still holds", got)
+	}
+}
+
+// REQ: OWN-4, CH-15 (PACE-1 PC-6)
+
+// TestLearningWiresTheClearedCheck: the Loop 2 guard openLearning builds
+// sends its "Cleared" texts with their keys, and attach makes its Current
+// the owner channel's hook (L3 on #708). A fuzz crash is reported and
+// resolved in quiet hours, so its "Cleared" is held; it comes back before
+// 07:00, so the release drops that clear; resolved again, the true clear
+// goes.
+func TestLearningWiresTheClearedCheck(t *testing.T) {
+	dir := t.TempDir()
+	cfg := daemon.Config{
+		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
+		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
+		OwnerState: filepath.Join(dir, "owner.json"),
+	}
+	lp, err := openLearning(learnPaths{Dir: dir, Spare: filepath.Join(dir, "spare.json")}, false, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := pacedOwner(t, quiet22to7(), at23)
+	lp.attachOwner(r.ch)
+	ctx := context.Background()
+	crash := loops.Finding{Check: loops.CheckFuzz, Subject: "sockets.FuzzRequest", Severity: loops.High,
+		Detail: "crash input sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}
+	report := func() string {
+		t.Helper()
+		rec, err := lp.guard.Report(ctx, crash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rec.Finding.ID
+	}
+	resolve := func(id string) {
+		t.Helper()
+		if err := lp.guard.Resolve(id, loops.Replay{Evidence: crash.Detail, Passed: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolve(report())
+	id := report() // back before quiet hours end
+	if got := r.sent(); len(got) != 0 {
+		t.Fatalf("sent %q in quiet hours", got)
+	}
+	r.set(at23.Add(8*time.Hour + time.Minute)) // 07:01
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(r.sent(), " | ")
+	if !strings.Contains(got, "crash") || strings.Contains(got, "Cleared") {
+		t.Fatalf("released %q, want the crash texts and no Cleared while it is open again", got)
+	}
+	resolve(id)
+	if got := r.sent(); len(got) != 1 || !strings.Contains(got[0], "Cleared") {
+		t.Fatalf("sent %q, want the true Cleared", got)
+	}
+
+	// main's attach wires the daemon's own channel the same way: with the
+	// hook set, a confirmed clear goes at once instead of waiting for one.
+	cfg.Modem = modem.NewCarrier().Line("+15550000100")
+	dctx, cancel := context.WithCancel(ctx)
+	d, err := daemon.Run(dctx, cfg)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	attachForTest(t, lp, dctx, cancel, d)
+	if err := d.Owner().PostAbout(ownerch.ClassUpdate, "Cleared: x.", []string{"no open finding"}); err != nil {
+		t.Fatal(err)
+	}
+	if l := d.Owner().HeldNote(); l != "" {
+		t.Fatalf("a confirmed clear waits after attach: %q", l)
 	}
 }

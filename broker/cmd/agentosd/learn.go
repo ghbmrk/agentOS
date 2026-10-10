@@ -413,12 +413,15 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		return nil, err
 	}
 	if l.guard, err = loops.NewGuard(loops.GuardConfig{
-		Pipeline:  l.pipe,
-		Store:     change.FileStore{Path: filepath.Join(p.Dir, "loop2.json")},
-		Contain:   &l.contain,
-		NotRun:    loop2NotRun,
-		Notify:    l.notify.send,
-		ResumeFor: p.ResumeFor,
+		Pipeline: l.pipe,
+		Store:    change.FileStore{Path: filepath.Join(p.Dir, "loop2.json")},
+		Contain:  &l.contain,
+		NotRun:   loop2NotRun,
+		Notify:   l.notify.send,
+		// "Cleared" texts are checked again when the hold sends them
+		// (PACE-1; attach sets the hook).
+		NotifyClear: l.notify.clear,
+		ResumeFor:   p.ResumeFor,
 		// Fix requests go to Loop 1's builder machines (loop2.go).
 		Fixer: lateFix{&l.build},
 		// Seeded findings' fixtures are live (loop2.go).
@@ -754,6 +757,16 @@ func (l *learning) ForgetTasks(ids ...string) (int, error) {
 
 // attach binds the running daemon's engine and admission and starts the
 // scheduler. Before it, the box reads as busy and stopped: no loop work.
+// attachOwner gives Loop 2 the owner channel o, which may be nil.
+func (l *learning) attachOwner(o *owner.Channel) {
+	if o != nil {
+		// Set before the channel is stored, so no "Cleared" is posted
+		// that the hold cannot confirm (PACE-1).
+		o.SetCurrent(l.guard.Current)
+	}
+	l.notify.ch.Store(o)
+}
+
 func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	eng := d.Engine()
 	l.pipe.Attach(eng)
@@ -768,7 +781,7 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 			log.Printf("loop2: an ended pause stays listed: %v", err)
 		}
 	}
-	l.notify.ch.Store(d.Owner())
+	l.attachOwner(d.Owner())
 	l.forgetOwner.finishOwed(ctx)
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())

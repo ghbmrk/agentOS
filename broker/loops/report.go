@@ -315,12 +315,10 @@ func (s *Guard) Resolve(id string, r Replay) error {
 	delete(s.st.Open, id)
 	delete(s.held, id)
 	s.st.Cleared[id] = s.cfg.Now()
-	lines := s.closeTextLocked([]Record{rec})
+	lines, keys := s.closeTextLocked([]Record{rec})
 	err := s.saveLocked()
 	s.mu.Unlock()
-	if text := s.batch(lines); text != "" {
-		s.cfg.Notify(text, false)
-	}
+	s.tellCleared(lines, keys)
 	return err
 }
 
@@ -388,12 +386,10 @@ func (s *Guard) CloseTarget(id string, c Closure) error {
 	delete(s.st.Open, id)
 	delete(s.held, id)
 	s.st.Cleared[id] = s.cfg.Now()
-	lines := s.closeTextLocked([]Record{rec})
+	lines, keys := s.closeTextLocked([]Record{rec})
 	err := s.saveLocked()
 	s.mu.Unlock()
-	if text := s.batch(lines); text != "" {
-		s.cfg.Notify(text, false)
-	}
+	s.tellCleared(lines, keys)
 	return err
 }
 
@@ -413,7 +409,7 @@ func (s *Guard) CloseTarget(id string, c Closure) error {
 // said when a close leaves the key with no open finding, an untexted
 // Again close included, so a finding that moves between two details and
 // then clears does not leave the owner on an alert (L3 1 on #644).
-func (s *Guard) closeTextLocked(closed []Record) []string {
+func (s *Guard) closeTextLocked(closed []Record) ([]string, []string) {
 	var told []Record
 	for _, r := range closed {
 		if r.Texted && (!r.Again || r.Back || r.Contained == "paused") {
@@ -452,7 +448,36 @@ func (s *Guard) closeTextLocked(closed []Record) []string {
 			mark(o)
 		}
 	}
-	return lines
+	var keys []string
+	for k := range said {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return lines, keys
+}
+
+// tellCleared texts the owner a close's "Cleared" lines through
+// NotifyClear, with the keys they speak for (PACE-1).
+func (s *Guard) tellCleared(lines, keys []string) {
+	if text := s.batch(lines); text != "" {
+		s.cfg.NotifyClear(text, keys)
+	}
+}
+
+// Current reports whether a "Cleared" text for these cleared keys is
+// still true: no open finding the owner was told of, Again included,
+// shares any of them. It is the test clearedLinesLocked makes when it
+// writes the line, made again when the owner's hold sends it (PACE-1).
+// An unknown key holds nothing.
+func (s *Guard) Current(keys []string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.st.Open {
+		if (r.Texted || r.Again) && slices.Contains(keys, clearedKey(r)) {
+			return false
+		}
+	}
+	return true
 }
 
 // clearedKey is what one cleared line covers: a check and what its line
