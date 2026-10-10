@@ -143,7 +143,7 @@ Primary lane; from an external review's points 2 to 6, checked against main at 9
 | CRED-5t | [Broker-held route failure triggers and fail-closed refresh test](briefs/CRED-5t.md) | #328 | in review (#421) |
 | CRED-5w | [Owner pause and withdrawal notice for broker-held routes](briefs/CRED-5w.md) | #328 | in review (#421) |
 | CRED-5b | [Build and test broker-held route failure, fallback and owner pause](briefs/CRED-5b.md) | #421, CRED-5c, CAP-11 plan-route code (S8) | queued (release; checks #420 provider-keyed withdrawal and notice cadence, takes #426 relay findings) |
-| CRED-5c | [Consent ask placement and wording for unconfirmed broker-held routes](briefs/CRED-5c.md) | #421 | queued (release; #328 S1/U1/U2, #421 L3 point 5) |
+| CRED-5c | [Consent ask placement and wording for unconfirmed broker-held routes](briefs/CRED-5c.md) | #421 | queued (release; serves CH-10 tiers: an unconfirmed route is not granted until consent stands; #328 S1/U1/U2, #421 L3 point 5) |
 | S1 | [Screenless USB4-SSD boot on ≥3 unmodified PCs](briefs/S1.md) | Mark: hardware + hands | queued (test kit ready; waiting on hardware) |
 | S2 | [USB LTE modem](briefs/S2.md) | Mark: 2 modems + SIM | queued (test kit ready; waiting on hardware) |
 | P0X | [Spec v0.12](briefs/P0X.md) | — | merged (cada7c1; SPEC.md v0.12) |
