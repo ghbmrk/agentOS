@@ -4,10 +4,10 @@ Live record of which team owns which paths, and each team's onboarding. The rule
 
 ## Lanes
 
-| Lane | Team | Paths |
-|---|---|---|
-| executors and adoption (A13) | claude2 (Claude Code, second subscription) | `broker/browser/`, `broker/desktop/`, `broker/adopt/` (new packages), `spikes/S5-browser-actions/`, and only the BOARD.md rows CRED-4b, ADP-5, ADP-8 (and S5's live run if its network policy allows) |
-| everything else | primary (Claude, Mark's subscription) | all other paths |
+| Lane | Team | Label | Prefix | Paths |
+|---|---|---|---|---|
+| executors and adoption (A13) | claude2 (Claude Code, second subscription) | `lane:claude2` | `C2-`, `D-claude2-` | `broker/browser/`, `broker/desktop/`, `broker/adopt/` (new packages), `spikes/S5-browser-actions/`, and only the BOARD.md rows CRED-4b, ADP-5, ADP-8 (and S5's live run if its network policy allows) |
+| everything else | primary (Claude, Mark's subscription) | `lane:primary` | none (`D-NNN`) | all other paths |
 
 Rows are added by the onboarding PR for each new team; the primary team's lane shrinks to match.
 
@@ -17,4 +17,4 @@ Rows are added by the onboarding PR for each new team; the primary team's lane s
 - **Start with** CRED-4b or ADP-8. Both are release-critical for A13 (LATER.md).
 - **Interfaces you may call, not change:** `broker/vault` (sessions are held by the vault process, CRED-4), `broker/verb` (fixed verb list), `broker/journal`, `broker/egress`, `broker/grants`, `broker/change` (the change pipeline, for ADP-8's agent-drafted adapters), `broker/modelroute`. A change any of them needs goes as a PR or a `lane:primary` issue.
 - **Tiers:** the browser and desktop executors hold credentials and gate effects, so they are tier A. The PR that creates `broker/browser/` or `broker/desktop/` adds that name to `TIER_A_BROKER` in `tools/risk_tier.py`; that one edit is inside your lane.
-- **Access:** your session needs its own linked GitHub account. Work from a fork of the repo (it is public) and open PRs from the fork; never use another team's login.
+- **Access:** your project uses Mark's GitHub login; push branches with your `pkg/claude2-…` stem to the repo (no fork). Main's ruleset holds you to the same gates as everyone. Merging is covered in OPERATING §7.

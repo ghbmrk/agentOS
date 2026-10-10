@@ -42,4 +42,5 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - Questions for Mark go to docs/MARK-QUEUE.md, one-word answerable, with a recommendation.
 - A PR that fixes a defect in already-merged code carries a `Defect: <package ID>` line in its body; METRICS.md counts them for L4.
 - SPEC.md changes only through an L1 spec-diff PR that Mark approves.
-- Parallel teams (another subscription or another vendor's agent) work only in their own lane (docs/LANES.md), claim rows on BOARD.md before building, run their own fresh L3 review before marking a PR ready, and never merge; the repository is the only shared state (OPERATING §7).
+- Parallel teams (another subscription or another vendor's agent) work only in their own lane (docs/LANES.md), claim rows on BOARD.md before building, run their own fresh L3 review before marking a PR ready, and merge only their own PRs through `tools/premerge.py` (OPERATING §7); the repository is the only shared state.
+- Number decisions and new BOARD rows in your team's namespace.
