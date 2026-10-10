@@ -174,6 +174,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | OSS-10w2 f4 | L3 on #370 (23bc810): the follow page's reserved-name check folds case only, so look-alikes (Cyrillic А in "the АgentOS project again") pass; the name is the owner's own and the card shows the fingerprint. Fold look-alikes as CH-10 does |
 | OSS-10w2 f5 | L3 on #370 (23bc810): localui's `reservedName` and `followPrint` duplicate `grants.ReservedFollowName` and `grants.FollowPrint`; move both into localapi so page and card cannot drift |
 | CRED-4b f10 | L3 on #300 (f135e43 re-review): the label rule's value charset misses passwords with other punctuation (`password: Abc123@xyz789#Qq`) |
+| CRED-4b f11 | Potency on #683 (bf6ebae): K14 should also name the C0 control range; a value with C0 control characters (U+0000–U+001F) is escaped by the snapshot and may not match, as the C1 case already noted in K14 |
+| CRED-4b f12 | Potency on #683 (bf6ebae), recheck: `OmitValues` scrubs value copies inside role keys and `[ref=…]` tokens, so a 1–3 character value (`e`, `in`) destroys every ref on the page; scrub only the quoted name and the text after `:`, with a test that a one-character value leaves refs intact; lands with part 2's K14 wiring |
 | CH-21a f1 | `change` `TestForgetGoalRewritesALaterAdoptionsUndo` failed once in a full `go test ./...` run (setup: candidates rejected) and passed on four reruns and alone; look for a load-dependent timing in its setup
 | P2-2w d2a-1 | `localsrv.status` reads the whole `Line()` (five modem-link locks) for `.Note`; a note-only accessor would show the D1 split in the types (#378 L3) |
 | P2-2w d2a-2 | `pageLine` takes five separate locks, so one page can mix states; display only, fixed on reload (#378 L3) |
