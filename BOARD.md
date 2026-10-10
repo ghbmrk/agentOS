@@ -11,6 +11,7 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | DOC-3 | [BOARD index and briefs; DECISIONS format](briefs/DOC-3.md) | DOC-1 | merged (#356) |
 | DOC-2 | [doclint and cause metrics](briefs/DOC-2.md) | DOC-3 | merged (#357) |
 | DOC-4 | [Per-file review records; no shared run tables](briefs/DOC-4.md) | DOC-1, DOC-2 | building |
+| DOC-7 | [LATER records sweep](briefs/DOC-7.md) | DOC-2, DOC-4 | in review (C; D-048 exception, owner to confirm) |
 | SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
 | HK-1 | [depaudit self-test flake fix](briefs/HK-1.md) | — | in review |
 | DEP-2 | [depaudit evidence out of the tracee's reach](briefs/DEP-2.md) | HK-1 | merged (1355d27; #437) |
@@ -109,7 +110,7 @@ Primary lane; from an external review's points 2 to 6, checked against main at 9
 | DEL-sd | L1 spec diff: an owner reply the broker accepted is delivered, kept or flagged, never lost across a restart; an SMS whose delivery is uncertain is flagged, not resent (DEL-1 and DEL-2 build on these as provisional choices) | — | queued (Mark approves) |
 | DEL-1 | [An accepted owner reply survives a crash: persist before 204, idempotent reply, guest retries what it holds](briefs/DEL-1.md) | DEL-sd opened | queued (brief ready; tier A) |
 | DEL-2 | [Send outcomes for owner replies: retry known-unsent, flag uncertain, stable email intent](briefs/DEL-2.md) | DEL-1 | queued (brief ready; tier A) |
-| DOC-5 | [doclint catches BOARD and LATER contradictions](briefs/DOC-5.md) | — | queued (brief ready) |
+| DOC-5 | [doclint catches BOARD and LATER contradictions](briefs/DOC-5.md) | — | in review (#703) |
 | DOC-6 | [BOARD state follows merges automatically](briefs/DOC-6.md) | DOC-5 | queued (brief ready; tier A) |
 | MET-1 | [Metrics measure matching periods and stay current](briefs/MET-1.md) | — | queued (brief ready) |
 | IMG-5 | Retroactive tier-A review of `image/` as merged at tier C (P2-1 #41 and later image PRs): Security lens with an explicit threat check on the boot chain, verity layout and the systemd units' privileges; findings become rows (brief to write) | RT-1 | queued |
@@ -176,7 +177,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7 | merged (#41; at tier C, re-review is IMG-5) |
+| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7 | queued (#41 merged the older image; #175 is the unmerged rebuild: per-drive ID check in the initrd, `DevicePolicy=closed`; branch `pkg/p2-1-image-build-6izuf9` kept) |
 | P2-grants | [Grants and approval policy](briefs/P2-grants.md) | P1-7 | merged (a390f03; broker/grants) |
 | P2-rev3 | [Reversible conversions](briefs/P2-rev3.md) | P2-grants | merged (04be62e; broker/reversible) |
 | P2-gr8 | [GR8 fix: approval used up inside the dispatch commit](briefs/P2-gr8.md) | P2-rev3 | merged (a390f03; broker/grants) |
@@ -349,10 +350,10 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | UPD-b3 | First-boot update, image side: preloaded root metadata and mirror list, real activator (UPD-3; broker/firstboot/ASSUMPTIONS.md F8; brief to write) | UPD-b, P2-1 (#41) | queued (P2-1 merged; brief to write) |
 | UPD-c | [Update channel and cadence as owner settings](briefs/UPD-c.md) | P3-5; W5b to reach the live box | merged (#130; carry: local page, quiet-window jitter (UPD-a), standing grant for…) |
 | CH-20 | [Evidence delivery](briefs/CH-20.md) | P2-6m; P2-3 for MMS | merged (#148: destination path; MMS waits on P2-3) |
-| CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued (blocked on P2-2) |
+| CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued |
 | CH-20a | [Bounded attachments in `mail.deliver`](briefs/CH-20a.md) | CH-20w | queued (needs security review) |
 | CH-20m | [MORE for a redirected reply](briefs/CH-20m.md) | CH-20w | queued |
-| CRED-4b | [Credentialed browser executor in the broker](briefs/CRED-4b.md) | S5 fixture suite | building (claude2; part 1 in review, #300; part 2 per K1-K13) |
+| CRED-4b | [Credentialed browser executor in the broker](briefs/CRED-4b.md) | S5 fixture suite | building (claude2; part 1 in review, #300; part 2 per K1-K14) |
 | ADP-8 | [Adapter mismatch check and the §11 adapter path](briefs/ADP-8.md) | P3-1, P2-7 | queued (unblocked; lane claude2) |
 | ADP-5 | [Desktop-app executor, Linux](briefs/ADP-5.md) | CRED-4b | queued (blocked on CRED-4b; lane claude2) |
 | OSS-6 | [Publication identity](briefs/OSS-6.md) | P4-1, P4-4 | merged (#163, 8a67351) |
@@ -365,17 +366,19 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | OSS-6i | [Fresh Tor circuit per batch and signing key](briefs/OSS-6i.md) | #330 | queued (L1 clause, then test in OSS-6s) |
 | OSS-6p | [Relay count, delivery rule, queue bound, relay list source](briefs/OSS-6p.md) | #330 | queued |
 | OSS-6a | [Spec: where ask-each-time prompts appear](briefs/OSS-6a.md) | #330 | queued (L1 spec diff) |
-| OSS-7c | Publication off by default: one local-UI opt-in with live examples, re-ask on schema change (D-088; release, likely tier A; failure path: an upgraded box publishes without consent) | #633 | queued (brief after #633 merges; may supersede OSS-6a) |
-| CRED-3e | Email codes carry authority like token links: the agent uses a code from delivered mail only for an action the owner started in the same session; account-recovery and credential changes are high-risk (CH-10) (D-089; release, likely tier A; serves A6/A14; failure path: an injected agent runs "forgot password", reads the reset code from mail, and takes over the account) | #633 | queued (brief after #633 merges) |
-| CH-19r | Held-back content by kind: content classed as a code expires within hours (owner-set), other held text keeps the 30-day default; the pointer names source and kind without the value ("a 6-digit code from your bank's email") (D-089; release; serves CH-19; failure path: an away owner gets a pointer to a dead code they cannot reach, while the box stores live secrets for 30 days) | #633 | queued (brief after #633 merges) |
-| CH-19m | Measure false holds of the CH-21 vocabulary check (agent output to the owner) on real task results and set a target rate (D-089; release; serves CH-19; failure path: ordinary replies such as "I fixed the code" are routinely held, so the owner learns to ignore the pointer) | #633 | queued (brief after #633 merges) |
+| OSS-7c | Publication off by default: one local-UI opt-in with live examples, re-ask on schema change (D-088; release, likely tier A; failure path: an upgraded box publishes without consent) | #669 | queued (may supersede OSS-6a) |
+| CRED-3e | Email codes carry authority like token links: the agent uses a code from delivered mail only for an action the owner started in the same session; account-recovery and credential changes are high-risk (CH-10) (D-089; release, likely tier A; serves A6/A14; failure path: an injected agent runs "forgot password", reads the reset code from mail, and takes over the account) | #669 | queued |
+| CH-19r | Held-back content by kind: content classed as a code expires within hours (owner-set), other held text keeps the 30-day default; the pointer names source and kind without the value ("a 6-digit code from your bank's email") (D-089; release; serves CH-19; failure path: an away owner gets a pointer to a dead code they cannot reach, while the box stores live secrets for 30 days) | #669 | queued |
+| CH-19m | Measure false holds of the CH-21 vocabulary check (agent output to the owner) on real task results and set a target rate (D-089; release; serves CH-19; failure path: ordinary replies such as "I fixed the code" are routinely held, so the owner learns to ignore the pointer) | #669 | queued |
 | OSS-5t | [Spec: transport for the embargoed security report](briefs/OSS-5t.md) | #330 | queued (L1 spec diff) |
 | OSS-9 | [Attestations as evidence and following forks](briefs/OSS-9.md) | P4-3, P4-4 | merged (4329b1d; #180) |
 | OSS-6c | [Publication clock hardening](briefs/OSS-6c.md) | OSS-6 | merged (4329b1d; #180) |
 | OSS-6e | [Floor across restarts](briefs/OSS-6e.md) | OSS-6c | in review (A) |
 | OSS-10w | [Follow-fork executor wiring](briefs/OSS-10w.md) | OSS-9, HOST-1b, P2-2w | merged (#323) (A) |
 | OSS-10w2 | [Follow-fork wiring part 2](briefs/OSS-10w2.md) | OSS-10w, P2-2w b, P2-2w d | in review (A) |
+| OSS-10w-r2 | Switch-back size bound: the owner socket's 64 KiB `sockets.MaxRequest` line, not `MaxRootChain` x `MaxRoot`, limits the root files, so a long chain fails at transport with a generic error; align the bounds (page, `localui` total check) and give a specific message (L3 2 and Security F2 on #476); and `update.Store.FollowRoot` with an empty name skips admission: refuse it and move `update`/`maintain` follow tests to `FollowProject`/`FollowFork` (Security 2 on #667); and a project root followed under a name without the root files that chain it (v3 alone) passes `FollowFork`, after which a switch back to v2 is admitted though the box trusted v3: keep a switch back from dropping below a followed root that carries the project's lineage, or warn on the page (L3 1 on c3bf14a; acceptance test 4) | OSS-10w-r | queued (needs brief) |
 | OSS-10w2u | Follow page wording: UX lens picks between the page's text and `maintain.FollowPrompt`/`FollowCheckHeading`, and the page names the current source (L3 R3 on #370) | OSS-10w2 | queued (needs brief) |
+| OSS-10w-r | [Switching back after a project root-key rotation](briefs/OSS-10w-r.md) (LATER row started at the coordinator's request; Mark confirmed it as a D-048 exception, 2026-10-09) | OSS-10w, OSS-10w2 | in review (A) |
 | IMG-1 | [Image checks for P2-1](briefs/IMG-1.md) | P2-1 (#41) | queued (P2-1 merged) |
 | IMG-2 | [Reproducible initrd, blocking two-runner check](briefs/IMG-2.md) | P2-1 | queued |
 | IMG-3 | [Forced-fail fallback boot in CI](briefs/IMG-3.md) | P2-1, update package | queued |
@@ -434,7 +437,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | CH-21f | [Box name at setup: suggested name, owner-name field, contact card](briefs/CH-21b.md) | CH-21b | queued (tier A; the setup half of the CH-21b brief) |
 | CH-21c | [First-person voice: owner-page and recovery texts](briefs/CH-21c.md) | CH-21a | in review (all 13 packages swept; `owner` stays pending for CH-21e's `Agent: ` prefix) |
 | CH-21d | [First-person voice: daemon and egress texts](briefs/CH-21d.md) | CH-21a | in review (#457; tier A) |
-| CH-21e | [Agent text asking for a code is withheld; welcome-text code line](briefs/CH-21e.md) | CH-21b | queued (tier A; security first) |
+| CH-21e | [Agent text asking for a code is withheld; welcome-text code line](briefs/CH-21e.md) | CH-21b | queued (tier A; security first; start from #231's `withholdAgent`, `AskForCode`, `ReplyGrammar`, branch `pkg/ch-21-name-voice-draft` kept) |
 | CH-12s | ["Local page" rename in owner texts](briefs/CH-12s.md) | CH-12 | merged (a390f03; #185) |
 | ADP-13 | [The box's own mailbox](briefs/ADP-13.md) | CRED-4b; P2-6m; CH-21 | queued |
 | HOST-1 | [Spec: the host PC is left as it was](briefs/HOST-1.md) | — | merged (fa52b76) |

@@ -1,6 +1,6 @@
 package localsrv
 
-// REQ: OSS-10, CH-7
+// REQ: OSS-10, CH-7, UPD-8
 
 import (
 	"context"
@@ -76,6 +76,17 @@ func TestOSS10wFollowFieldsAreBounded(t *testing.T) {
 			t.Fatalf("root of %d bytes: %v", len(root), err)
 		}
 	}
+	// OSS-10w-r: the root files brought with it are bounded alike.
+	for _, chain := range [][][]byte{{nil}, {make([]byte, localapi.MaxRoot+1)}, make([][]byte, localapi.MaxRootChain+1)} {
+		for i := range chain {
+			if chain[i] == nil && len(chain) > 1 {
+				chain[i] = []byte("root")
+			}
+		}
+		if _, err := r.call(localapi.OpFollowRoot, localapi.FollowRoot{Token: tok, Root: []byte("root"), Chain: chain}); code(err) != localapi.ErrBadArgs {
+			t.Fatalf("chain of %d: %v", len(chain), err)
+		}
+	}
 	if len(r.follows) != 0 {
 		t.Fatalf("%v", r.follows)
 	}
@@ -113,7 +124,7 @@ func TestOSS10w2RefusedRootHasACoarseReason(t *testing.T) {
 		{"tuf: root v3 expired 2026-01-01 by key 0f3a", ""},
 		{"", ""},
 	} {
-		r.srv.cfg.DescribeRoot = func(context.Context, []byte) (localapi.RootSummary, error) {
+		r.srv.cfg.DescribeRoot = func(context.Context, []byte, [][]byte) (localapi.RootSummary, error) {
 			return localapi.RootSummary{Version: 3, Digest: digest, Reason: tc.reason}, errFailed
 		}
 		out, err := r.call(localapi.OpFollowRoot, localapi.FollowRoot{Token: tok, Root: []byte("root")})
@@ -123,11 +134,29 @@ func TestOSS10w2RefusedRootHasACoarseReason(t *testing.T) {
 		}
 	}
 	// A root that verifies carries no reason.
-	r.srv.cfg.DescribeRoot = func(context.Context, []byte) (localapi.RootSummary, error) {
+	r.srv.cfg.DescribeRoot = func(context.Context, []byte, [][]byte) (localapi.RootSummary, error) {
 		return localapi.RootSummary{Version: 3, Digest: digest, Reason: localapi.RootExpired, Refusal: "x", Project: true}, nil
 	}
 	out, err := r.call(localapi.OpFollowRoot, localapi.FollowRoot{Token: tok, Root: []byte("root")})
 	if sum, ok := out.(localapi.RootSummary); err != nil || !ok || sum.Reason != "" || sum.Refusal != "" || sum.Digest != digest || !sum.Project {
 		t.Fatalf("%+v %v", out, err)
+	}
+}
+
+// OSS-10w-r: the chain reaches agentosd's describe as brought.
+func TestOSS10wrChainIsPassedThrough(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	var got [][]byte
+	r.srv.cfg.DescribeRoot = func(_ context.Context, _ []byte, chain [][]byte) (localapi.RootSummary, error) {
+		got = chain
+		return localapi.RootSummary{Version: 3, Digest: digest}, nil
+	}
+	want := [][]byte{[]byte("v1"), []byte("v2")}
+	if _, err := r.call(localapi.OpFollowRoot, localapi.FollowRoot{Token: tok, Root: []byte("root"), Chain: want}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || string(got[0]) != "v1" || string(got[1]) != "v2" {
+		t.Fatalf("%q", got)
 	}
 }
