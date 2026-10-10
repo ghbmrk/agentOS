@@ -691,6 +691,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | HOST-1f-215 l1 | #215 Security 4a later 1 (6090325350), `recheck`: `follow/follow.go:247` appends a `setUnsent` error (an `os` error naming the pending-alert file path) to journal Evidence; establish whether that Evidence reaches the owner (MORE, local UI) and keep the path out if it does (CH-12) |
 | HOST-1f-215 l2 | #215 Security 4a later 2 (6090325350): nothing stops a future `h.say("…" + err.Error())`; a lint or grep check banning `err.Error()` or a formatted error in arguments to `say`/`notify` would. Becomes that check if the same kind of finding appears on a second PR |
 | A14-206 l1 | #206 L3 fix-list release finding, classed later: OP-2 and OP-4 are cited by the PR but untested there; TRACE.md already maps both to passing tests elsewhere (e.g. `journal/engine_test.go`) and counts only REQ markers, so no false pass. Revisit if a no-network change touches journal outcomes |
+| A14-206 l2 | #698 L3 a (6092380804), `recheck`: the live no-dial test's name lookup fails partly because the test image has no resolv.conf, so on its own it does not show the netns blocks DNS; the TCP/UDP dials carry the property |
+| A14-206 l3 | #698 L3 b (6092380804), `recheck`: with `--host-uds=open`, the live test asserts only the services mount; sockets under the image or upper rootfs are covered by main's `TestIntegrationHostSocketInImageIsUnreachable` per the Security re-sign, so confirm and close |
+| A14-206 l4 | #698 L3 c (6092380804): `onlySocket` is duplicated in `loopbuild/builder_test.go` and `cleanroom/cleanroom_test.go`, and the cleanroom fake panics where it could return; share one helper when either file is next touched |
+| A14-206 l5 | #698 Security re-sign (6092448694): `lastFlag` in `vm/gvisor/nonet_test.go` scans the whole argv, not stopping at `--` or the subcommand; no live path while the argv base is a fixed literal, revisit if it becomes data-driven |
 
 ## Reuse candidates
 | ID | Component | Why |
