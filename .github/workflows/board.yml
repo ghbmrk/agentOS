@@ -1,11 +1,12 @@
 name: board
-# SIM-repo-2: once BOARD.md carries board.GENERATED, only this workflow writes its rows, rendered
-# from the work-item issues (tools/board.py render --repo); until then it does nothing.
+# SIM-repo-2: BOARD.md carries board.GENERATED (SIM-repo-2b), so only this workflow writes its
+# rows, rendered from the work-item issues (tools/board.py render --repo).
 # Same split as trace.yml: rendering runs with a read-only token; only the commit job can
-# write, it runs no repository code, and it changes only BOARD.md. main requires status checks,
-# so the commit job pushes the bot/board branch, opens (or updates) its PR and dispatches
-# ci.yml there, where board.py check --repo compares the file with the live issues; the PR
-# auto-merges once green.
+# write, it runs no repository code, and it changes only BOARD.md. The commit job pushes the
+# bot/board branch, opens (or updates) its PR and dispatches ci.yml there, where board.py check
+# --repo compares the file with the live issues. The PR asks for auto-merge; that waits for
+# green checks only once main's ruleset requires them (stage 2), and without the repo's
+# 'Allow auto-merge' setting the PR is merged by hand.
 on:
   issues:
     types: [opened, edited, deleted, transferred, closed, reopened, labeled, unlabeled]

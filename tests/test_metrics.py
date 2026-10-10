@@ -164,6 +164,15 @@ class ComputeTest(unittest.TestCase):
         # B left escalated, but it was escalated once; C and D reached merged.
         self.assertEqual((self.weeks["2026-10-11"]["escalated"], self.weeks["2026-10-11"]["reviewed"]), (1, 4))
 
+    def test_issue_state_labels_count_escalations_the_generated_board_never_showed(self):
+        # SIM-repo-2b: E is escalated and back in review between two board renders, so only
+        # its issue's label events show it; old raw data without "states" still computes.
+        raw = raw_fixture()
+        raw["states"] = [{"at": "2026-10-12T10:00:00Z", "id": "E", "state": "escalated"},
+                         {"at": "2026-10-12T11:00:00Z", "id": "E", "state": "in review"}]
+        week = {w["week"]: w for w in metrics.compute(raw)}["2026-10-11"]
+        self.assertEqual((week["escalated"], week["reviewed"]), (2, 5))
+
     def test_causes_tally_judged_prs_and_tolerate_old_data(self):
         self.assertEqual(self.weeks["2026-10-04"]["causes"], ["brief-gap"])
         # #4 has no "causes" key (collected before causes were parsed).
@@ -281,6 +290,29 @@ class CollectTest(unittest.TestCase):
         self.assertEqual(next(r for r in got if r["sha"] == "s1")["conclusions"], ["failure", "success"])
         # Only the L3 review counts as a verdict.
         self.assertEqual(next(p for p in pulls if p["number"] == 7)["verdicts"], ["accept"])
+
+
+class StatesTest(unittest.TestCase):
+    def test_collect_states_keeps_state_labels_added_to_work_item_issues(self):
+        item = {"title": "SIM-x: Thing", "labels": [{"name": "work-item"}, {"name": "state:queued"}]}
+        events = [
+            {"event": "labeled", "created_at": "2", "label": {"name": "state:escalated"}, "issue": item},
+            {"event": "labeled", "created_at": "1", "label": {"name": "state:queued"}, "issue": item},
+            {"event": "unlabeled", "created_at": "3", "label": {"name": "state:queued"}, "issue": item},
+            {"event": "labeled", "created_at": "4", "label": {"name": "tier:A"}, "issue": item},
+            {"event": "labeled", "created_at": "5", "label": {"name": "state:merged"},
+             "issue": dict(item, labels=[{"name": "bug"}])},  # not a work item
+            {"event": "labeled", "created_at": "6", "label": {"name": "state:merged"},
+             "issue": dict(item, pull_request={})},
+        ]
+        orig = metrics._api
+        metrics._api = lambda repo, path, token: events if path.endswith("page=1") else []
+        try:
+            got = metrics.collect_states("o/r", None)
+        finally:
+            metrics._api = orig
+        self.assertEqual(got, [{"at": "1", "id": "SIM-x", "state": "queued"},
+                               {"at": "2", "id": "SIM-x", "state": "escalated"}])
 
 
 class TrustTest(unittest.TestCase):
