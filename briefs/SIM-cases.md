@@ -90,5 +90,5 @@ These drafts test pacing-file storage, leases, manifests, ancestors, drain order
 | #385 W5-D60 | Provisioned daemon config refusals (its STOP case is above) |
 | #395 W5-D61 | Owner factory assembly |
 | #397 W5-D62 to #435 W5-D67 | Inspection, protected lease and manifest, close results, constructor cleanup, protected recovery |
-| #388 POT-P6 | First-boot release wiring; no crash, acknowledgement or forget case |
+| #388 POT-P6 | Router candidate evidence per task class (in memory, reset on restart); no crash, acknowledgement or forget case |
 | #252 W5-sl, #387, #399, #405, #417 | Digest wording, replay fixtures, UX reviews: no crash, acknowledgement or forget case |
