@@ -43,6 +43,7 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | CI-SOAK-f1 | [Fixtures independent of umask and tmpfs](briefs/CI-SOAK-f1.md) | — | merged (8c49dc5; #563) |
 | H8 | [Deterministic split entropy for change fixtures](briefs/H8.md) | — | merged (9358360; #564) |
 | H6 | [A10 trial collector](briefs/H6.md) | — | merged (464736c; #561) |
+| MAIN-PROT-3 | Main-side guard on `bot/trace` and `bot/metrics` PRs: a `bot/**` ruleset restricting updates to the Actions integration, or a required check defined on main (`pull_request_target`, no head checkout) that the diff is only the one generated file and every commit is the bot's, not satisfiable by a dispatched same-named run (release, tier A; L3 and Security 4a on #713 f1, [record](reviews/security/2026-10-10-pr713.md)) | MAIN-PROT-2 | queued (A) |
 
 ## Simplification (2026-10-10)
 
