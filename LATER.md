@@ -86,7 +86,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CRED-5f-mr-bound | Pin the C2 probe's time bound: a silent-socket case on `context.Background()` returning under 3 s, and an agentosd fake that honours ctx, so the client `Timeout` and `modelProbeWait` cannot both regress unseen (Security on #566 point 2) |
 | CRED-5f-mr-wording | UX 5 on #566 (comment 6078058414): the no-grant fix clause says "a later box version adds this" without "nothing to do"; use the `fixUpdate` constant (S7: "nothing to do; a later box version adds it") when the line is next touched, for example under CRED-5f-mr-page |
 | A5-reask | `broker/apply` A5 (SR3-4f-2b): until the owner calls `Retry`, each Loop 3 check re-adopts and drops a refused release, so the owner is asked again daily; A5 should name that daily re-ask as well as the re-adoption cost (L3 on #572, comment 6079384349). Text only. SR3-4f-2-r1 makes the daily re-adoption real and A5 now names it; left open for the owner-facing wording of the re-ask |
-| APPLY-dup | `broker/apply/ASSUMPTIONS.md` repeats rows A3–A7 (found on UPD-b); text only, no behaviour |
 | CR-dup-built | `broker/cleanroom` (L3 on #432, point 3): a crash between logging `built` and removing the queue entry logs `built` twice for one job; one artifact, no duplicate publication, may double-count the weekly hint summary |
 | CR-quarantine-prune | `broker/cleanroom` (L3 on #432, point 4): quarantined artifact copies are never pruned; bounded at `maxRepairs`+1 copies (8 MiB each at most) per artifact ID |
 | CR-power-cut | `broker/cleanroom` (L3 on #432, point 5): hardware power-cut qualification of the artifact store; no SPEC §15 acceptance test needs it, and simulated faults are recorded as no substitute (C14) |
@@ -97,7 +96,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CH-20p | Page view of kept replies; A15 needs delivery, not this view |
 | CH-20a | Attachments conflict with security C4; needs review; not in A15 |
 | CH-20m | MORE command for redirected replies; convenience |
-| P2-2a f1 | L3 SHOULD on page wording after a changed item |
 | ADP-13 | Optional box mailbox; no A-test needs it |
 | HOST-1d | Optional internal-disk opt-in (HW-8a); A1 requires disks untouched |
 | PE3 | Potency follow-up on replay-interruption counting |
@@ -157,11 +155,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | OP9-status-a l4 | UX 4 on #525: a STATUS in the first minute, before `agentos-egress` is up, says "restart the box" (cached up to a minute), which does not help; fixed in effect by CRED-5f's modelroute state |
 | OP9-status-a l5 | UX 5 on #525: C11 stands on every box until W5b, so a daily digest would repeat "Update checks: not running; nothing to do"; the DIG-1 brief says how lines with no owner step are paced, decided by Mark together with Q1 |
 | OP9-status-a l6 | UX 6 on #525: "Routing: learning cannot change how work is routed here" is the least plain line; say "Learning cannot change which model does which work" |
-| DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR |
+| DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR. DOC-7 left it: the inferred rows are not recorded and the clone history is shallow, so they cannot be told from the other SHA rows |
 | DOC-3 f2 | L3 on #356: D-041 (license) has date `Pending`, not ISO; set it when the license is chosen |
-| DOC-2 f1 | L3 on #357: doclint does not check DECISIONS cells ≤300 characters or that `decisions/D-NNN.md` links resolve (D-056) |
+| DOC-7 f1 | `tools/doclint.py` exempts D-062, D-087, D-088 and D-089 from the D-056 limit: its Decision cell is 352 characters with no `decisions/D-062.md` link; move the long text out when the coordinator next amends DECISIONS (decisions are not edited in place) |
 | CRED-5 f5 | L3 point 5 on #328: restore "only" in the broker-held use set so it is closed on its own; state precedence between unconfirmed broker-held and worker-held when terms are silent on proxies but require the provider's sign-in flow |
-| CRED-5 f6 | L3 point 6 on #328: D-061 was numbered at merge time; if another PR also claims D-061, the coordinator renumbers whichever merges second |
 | CRED-4b f1 | L3 on #300 (#9): the browser gate passes the raw `cfg.Origins` to the driver, not the canonical keys (`gate.go:99`) |
 | CRED-4b f2 | L3 on #300 (re-review #7): `exec.CommandContext` kills only the driver's group leader on ctx cancel; set `cmd.Cancel` to kill the process group (`gate.go:100`) |
 | CRED-4b f3 | L3 on #300 (re-review #6): no test isolates the Lstat and O_NOFOLLOW symlink layers |
@@ -188,21 +185,13 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | HK-1 f3 | Lens screen on #401: `_scratch_dir` drops `TemporaryDirectory`'s chmod-and-retry cleanup of read-only entries; removal still raises rather than passing |
 | W5a-resume-pace | A page resume ask waits for the gate's CH-15 batch before it shows under Approvals; the page says it shows shortly |
 | W5a-resume-dedupe | Two concurrent asks for one pause can file two requests; approving one resumes and the other then fails at apply, so nothing widens twice |
-| W3-forget-b f1 | L3 on #317: a brief that stores its own state (`**State:**`) can drift from BOARD, which is authoritative; drop the line from new briefs and have doclint flag it |
 | W3-forget-b3 f4 | L3 on #425: a failed save after a told done text leaves it owed, so the next start tells it again; a repeat over a lost text |
 | W3-forget-b4 l1 | L3 on #528: no test pins that `openOwedFile` removes a stale `forget-owed.json.bad` before the hard link; dropping the `os.Remove` passes every test (the link then fails with EEXIST and the newer bad file is not kept aside, though the owner is still told) |
 | W3-forget-b4-promise | UX on #528: `Execute` can leave the owner with `forgetNotSaved` ("I'll text you when it's done") while no owed entry has held (ASSUMPTIONS F11: failing disk plus a crash); a softer promise while `owedSaved` is false, or holding that text until the entry is on disk, would remove it; it changes owner wording, so it belongs to a later owner-text package with a test of the `TestHeldOwnerTextsNameOnlyStepsThatWork` kind |
 | W3-forget-b4-aside | Potency on #528: `openOwedFile` removes an older `forget-owed.json.bad` before linking the new one, so a second unreadable file destroys the first, and the aside is never read back (F10's "text each recoverable goal from the .bad file" stays open); when that recovery is built, keep a numbered or dated aside instead |
 | W3-forget-b3 f6 | L3 on #425: `forget-owed.json` is uncapped; cap it if forgets can be owed in bulk |
 | W3-forget-b3 f7 | L3 on #425: a restored backup's owed file is replayed like the live one, so its texts may be told again |
-| DOC-4 f1 | L3 on #400: a no-PR record must still write `head <sha>` for a `main` commit and invent a package (`POTENCY`); accept `PR none · package none · main <sha>` in the Record check |
-| DOC-4 f2 | L3 on #400: the Record check skips lens files without a `YYYY-MM-DD-` name (e.g. `reviews/ux/pr500.md`); require dated names for non-README files in lens directories |
-| DOC-4 f3 | L3 on #400: the Record check accepts the line anywhere in the file, not only under the title as OPERATING §4 step 3 says; harmless today |
-| DOC-4 f4 | L3 on #400: U15 sits between U10 and U13 in `broker/update/ASSUMPTIONS.md`; cosmetic reorder |
-| DOC-4 f5 | Lens screen on #400: the Mark-requested SR3 and deep-potency reviews are indexed only by filename, beside per-PR records; keep a one-line "Requested reviews" pointer list (regex part is DOC-4 f1) |
-| DOC-4 f6 | Lens screen on #400: OPERATING §4 step 1 could give the run index in one command, `grep -H -e '^Record:' -e '^Verdict' reviews/<lens>/*.md` |
-| DOC-4 f7 | Lens screen on #400: `RECORD_DIRS` is hard-coded, so a new lens directory goes unchecked, and `records()` globs the disk, so an untracked scratch record fails a local run |
-| DOC-4 f8 | Lens screen on #400: the `head` regex in the Record check accepts lowercase hex only, while its message says "hex"; say "lowercase hex" or match case-insensitively |
+| DOC-4 f4 | L3 on #400: U15 sits between U10 and U13 in `broker/update/ASSUMPTIONS.md`; cosmetic reorder. DOC-7 left it: open PR #430 appends U16 to the same file |
 | CH-21c f2 | CH-21c: recovery owner texts still open with "AgentOS: " (`recovery/owner.go`), a signature CH-21 says owner texts do not carry; drop it with CH-21e, which owns how broker text is told from agent text |
 | CH-21c f3 | CH-21c: third person the voice regex cannot see stays in swept packages ("your box" in `recovery/choice.go`, "AgentOS project" is fine); a wording sweep with the UX lens, no new check; includes mixed voice such as the card recovery sheet ("restores your box … I cannot print this again", L3 on #462) |
 | CH-21c f4 | L3 on #462: `grants/resume.go` `pausedBy` shows the owner "Paused by Loop 2", naming an internal part (CH-12); predates #462 |
@@ -216,7 +205,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W3-forget-b1 f2 | L3 on #409: forgets made before the counter's anchor (a box with no TPM, or provisioned without Box.Counter) are only as fresh as the newest copy found (broker/recovery/ASSUMPTIONS.md F3) |
 | OSS-6s-a f3 | UX on #411: in Release, a signed item over `SignerOverhead` is counted in the "could not be signed" error; harmless while the caller is a broker timer, so give it its own reason when W6 lands |
 | OSS-6s-a-f f1 | Raised on OSS-6s-a-f: a clean-room result (up to 8 MiB, files up to 1 MiB) does not fit `MaxPayload` (261,116) or one daily batch; the clean-room publisher package (none on BOARD yet) chooses what it queues, per pubid P10 *Producers* |
-| OSS-6s-a f4 | Security on #411 (re-sign): a PR's Findings line should name the LATER rows its delta removes (the `OSS-6s-a age bound` row was struck outside the brief's scope) |
 | W5a-resume f3 | UX on #381: a gate refusal other than "pause changed" shows the "isn't answering" text, which names the wrong cause; reload still works as the next step |
 | W5a-resume f4 | UX on #381: the paused-grant card heading is the bare grant ID; lead with what the grant does (the `What` line) and keep the ID second |
 | W5a-resume f5 | Security record on #381 (point 1 in its record, unlabeled in the comment): `localsrv.askResume` checks the token inline instead of through `s.authed`; equivalent today, but a later check added to `authed` would miss it; fold it in when the file is next touched |
@@ -693,6 +681,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | HOST-1f-666 l2 | #666 Potency 2: with production `notify` = `log.Print`, `sayErr` logs each failure twice (sentence with error, then sentence alone); harmless until notify reaches the owner channel |
 | W5-Dc-r1b l6 | #652 L3 delta (6087655573): `main()` still passes `attach` its arguments untested (`nil` for `dg` would build and pass); testing `main()` itself is out of scope |
 | SR3-mail-w1 l8 | #654 UX, L3 1, Security 1 (6087870595, 6087872442, 6087873796): `TestNoMailAccountByDefault` counts the `not_connected` frames but does not assert that nothing else crossed the socket (its doc comment says "the socket says nothing more"); compare each connection's full reply after it closes to exactly `{"error":"not_connected"}\n` |
+| ARC-6-fold l1 | #670 L3 4 (6090864635), Security 4 (6090880853): if `crypto/rand` fails, `newID` returns `""` and `fold.Store.Hand` still returns a stand-in `Read` can never satisfy; return the body unchanged. Not reachable on Go 1.24+ |
+| ARC-6-fold l2 | #670 Potency 3 (6090861948), `recheck`: `result_read` has no offset/length, so reading a fold back re-spends the context the stand-in saved |
+| ARC-6-fold l3 | #670 UX (6090861948): the stand-in names no next step (call `result_read` with its `id`), and `no such result` does not say the original is gone for good |
+| ARC-6-fold l4 | #670 L3 5 (6090864635), `recheck`: error results (`isErr`) are never folded, so a large error passes inline at full size; a result over the per-machine bound (4 MiB) now also passes inline whole rather than as an unreadable stand-in |
 | HOST-1f-215 l1 | #215 Security 4a later 1 (6090325350), `recheck`: `follow/follow.go:247` appends a `setUnsent` error (an `os` error naming the pending-alert file path) to journal Evidence; establish whether that Evidence reaches the owner (MORE, local UI) and keep the path out if it does (CH-12) |
 | HOST-1f-215 l2 | #215 Security 4a later 2 (6090325350): nothing stops a future `h.say("…" + err.Error())`; a lint or grep check banning `err.Error()` or a formatted error in arguments to `say`/`notify` would. Becomes that check if the same kind of finding appears on a second PR |
 

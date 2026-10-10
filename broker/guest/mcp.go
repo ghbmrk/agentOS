@@ -67,6 +67,15 @@ var tools = []map[string]any{
 			"required":   []string{"request_id"},
 		},
 	},
+	{
+		"name":        "result_read",
+		"description": "Read the full text of a tool result that was too long to return inline. Pass the id from that result. Only this machine can read it.",
+		"inputSchema": map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"id": map[string]any{"type": "string"}},
+			"required":   []string{"id"},
+		},
+	},
 }
 
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -121,8 +130,8 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 		if p.cfg.Tools != nil {
 			list = append([]map[string]any(nil), tools...)
 			for _, t := range p.cfg.Tools.List() {
-				// The effect tools' names are the broker's own.
-				if n := t["name"]; n != "effect_request" && n != "effect_status" {
+				// The effect tools' and result_read's names are the broker's own.
+				if n := t["name"]; n != "effect_request" && n != "effect_status" && n != "result_read" {
 					list = append(list, t)
 				}
 			}
@@ -135,6 +144,24 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 		}
 		if err := json.Unmarshal(req.Params, &call); err != nil {
 			writeRPC(w, req.ID, nil, &rpcError{-32602, "bad params"})
+			return
+		}
+		if call.Name == "result_read" {
+			var args struct {
+				ID string `json:"id"`
+			}
+			_ = json.Unmarshal(call.Arguments, &args)
+			body, ok := m.folds.Read(m.id, args.ID)
+			if !ok {
+				writeRPC(w, req.ID, m.result("no such result", true), nil)
+				return
+			}
+			// The full text, not folded again: this is how the guest reads what was held back.
+			res := toolResult(body, false)
+			if n := m.takeNote(); n != "" {
+				res["content"] = append(res["content"].([]map[string]string), map[string]string{"type": "text", "text": n})
+			}
+			writeRPC(w, req.ID, res, nil)
 			return
 		}
 		if call.Name != "effect_request" && call.Name != "effect_status" && p.cfg.Tools != nil {
@@ -175,6 +202,9 @@ func (m *machine) result(text string, isErr bool) map[string]any {
 	if !isErr {
 		// Insignificant whitespace only. Strings, keys, and number text stay.
 		text = compactJSON(text)
+		if m.folds != nil {
+			text = m.folds.Hand(m.id, text)
+		}
 	}
 	res := toolResult(text, isErr)
 	if n := m.takeNote(); n != "" {
