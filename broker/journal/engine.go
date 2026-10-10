@@ -3,6 +3,7 @@ package journal
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -34,7 +35,9 @@ type Engine struct {
 	// (OP-1) and its status is read back from the journal. pinned holds
 	// eviction off while replay or an erase needs every entry in place.
 	denied  []string
-	cold    map[coldKey]struct{}
+	cold    map[coldKey]coldVal
+	shapes  []coldShape // what evicted denials share, by coldVal.shape
+	shapeIx map[coldShape]uint32
 	pinned  bool
 	stopped bool
 	// fence maps an account to the intents left unresolved by the last
@@ -49,8 +52,26 @@ type Engine struct {
 const hotDenials = 1024
 
 // coldKey identifies an evicted denial: the first 16 bytes of the SHA-256
-// of its ID. A collision only costs a journal read that finds nothing.
+// of its ID. Two IDs colliding (odds 2^-128) read as one denial.
 type coldKey [16]byte
+
+// coldVal is what memory keeps of an evicted denial: enough to answer Get
+// and an idempotent Submit without reading the journal, so a guest
+// repeating old requests never holds the store while STOP waits on it.
+// Params live only in the journal.
+type coldVal struct {
+	fp    [16]byte // prefix of the entry's fp
+	shape uint32   // index in Engine.shapes
+}
+
+// coldShape is the rest of an evicted denial. Denials from one source
+// share goal, origin, account, action, executor and refusal, so each
+// distinct shape is kept once.
+type coldShape struct {
+	goal, origin, account, action, exec string
+	reason, guest                       string
+	phase                               Phase
+}
 
 func coldKeyOf(id string) coldKey {
 	sum := sha256.Sum256([]byte(id))
@@ -95,7 +116,8 @@ func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor
 		now:     func() time.Time { return time.Now().UTC() },
 		intents: map[string]*entry{},
 		open:    map[string]*entry{},
-		cold:    map[coldKey]struct{}{},
+		cold:    map[coldKey]coldVal{},
+		shapeIx: map[coldShape]uint32{},
 		fence:   map[string]map[string]bool{},
 		pinned:  true,
 	}
@@ -187,21 +209,12 @@ func (e *Engine) Submit(in Intent) (Status, error) {
 	if en, ok := e.intents[norm.ID]; ok {
 		return known(en)
 	}
-	if e.evicted(norm.ID) {
-		// An evicted denial is read back without the lock, so a guest
-		// repeating old requests never delays STOP.
-		e.mu.Unlock()
-		en, err := e.journalEntry(norm.ID)
-		e.mu.Lock()
-		if err != nil {
-			return Status{}, err
+	if cv, ok := e.cold[coldKeyOf(norm.ID)]; ok {
+		// An evicted denial answers from memory, without the journal.
+		if cv.fp != fpPrefix(fp) {
+			return Status{}, fmt.Errorf("%w: %s", ErrConflict, norm.ID)
 		}
-		if en == nil {
-			en = e.intents[norm.ID] // a key collision: the ID is new
-		}
-		if en != nil {
-			return known(en)
-		}
+		return e.coldStatus(norm.ID, cv), nil
 	}
 	if err := e.commit(Record{Type: RecSubmitted, ID: raw.ID, Intent: &raw}); err != nil {
 		return Status{}, err
@@ -213,7 +226,7 @@ func (e *Engine) Submit(in Intent) (Status, error) {
 func (e *Engine) Authorize(ctx context.Context, id string) (Status, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	en, err := e.lookup(id)
+	en, err := e.lookup(id, false)
 	if err != nil {
 		return Status{}, err
 	}
@@ -325,7 +338,7 @@ const maxRechecks = 16
 // dispatchable returns the intent and its executor if a new attempt may
 // start now. Called with e.mu held.
 func (e *Engine) dispatchable(id string) (*entry, Executor, error) {
-	en, err := e.lookup(id)
+	en, err := e.lookup(id, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -477,7 +490,7 @@ func (e *Engine) Resolve(id string, attempt int, out Outcome, source string) (St
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	en, err := e.lookup(id)
+	en, err := e.lookup(id, false)
 	if err != nil {
 		return Status{}, err
 	}
@@ -618,7 +631,7 @@ func (e *Engine) RecordQuality(id string, q Quality) (Status, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	en, err := e.lookup(id)
+	en, err := e.lookup(id, true)
 	if err != nil {
 		return Status{}, err
 	}
@@ -628,24 +641,17 @@ func (e *Engine) RecordQuality(id string, q Quality) (Status, error) {
 	return en.status(), nil
 }
 
-// Get returns one intent's status. An evicted denial is read back from
-// the journal without the engine lock.
+// Get returns one intent's status. An evicted denial answers from memory
+// without its params, recipients or other free-form fields; List, Between,
+// StatusBetween and Trail read them from the journal.
 func (e *Engine) Get(id string) (Status, error) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	if en, ok := e.intents[id]; ok {
-		defer e.mu.Unlock()
 		return en.status(), nil
 	}
-	evicted := e.evicted(id)
-	e.mu.Unlock()
-	if evicted {
-		en, err := e.journalEntry(id)
-		if err != nil {
-			return Status{}, err
-		}
-		if en != nil {
-			return en.status(), nil
-		}
+	if cv, ok := e.cold[coldKeyOf(id)]; ok {
+		return e.coldStatus(id, cv), nil
 	}
 	return Status{}, fmt.Errorf("%w: %s", ErrNotFound, id)
 }
@@ -770,12 +776,19 @@ func (e *Engine) Fenced(account string) []string {
 	return out
 }
 
-func (e *Engine) lookup(id string) (*entry, error) {
+// lookup finds an intent for a change. An evicted denial is rehydrated
+// from the journal only when warm is set (a rating); otherwise it is a
+// detached entry that no state change accepts. Caller holds mu.
+func (e *Engine) lookup(id string, warm bool) (*entry, error) {
 	if e.broken != nil {
 		return nil, e.broken
 	}
 	if en, ok := e.intents[id]; ok {
 		return en, nil
+	}
+	if cv, ok := e.cold[coldKeyOf(id)]; ok && !warm {
+		st := e.coldStatus(id, cv)
+		return &entry{intent: st.Intent, state: Denied, permission: st.Permission}, nil
 	}
 	if e.evicted(id) {
 		if err := e.rehydrate([]string{id}); err != nil {
@@ -957,11 +970,46 @@ func (e *Engine) trim() {
 	for len(e.denied) > hotDenials {
 		id := e.denied[0]
 		e.denied = e.denied[1:]
-		if en := e.intents[id]; en != nil && en.state == Denied {
+		// A rated denial, or one with attempts, stays: only the owner
+		// makes those, and coldVal does not carry them.
+		if en := e.intents[id]; en != nil && en.state == Denied && len(en.attempts) == 0 && en.quality == (Quality{}) {
 			delete(e.intents, id)
-			e.cold[coldKeyOf(id)] = struct{}{}
+			e.cold[coldKeyOf(id)] = e.coldValOf(en)
 		}
 	}
+}
+
+// coldValOf is what stays in memory of an evicted denial. Caller holds mu.
+func (e *Engine) coldValOf(en *entry) coldVal {
+	in, p := en.intent, en.permission
+	sh := coldShape{goal: in.GoalID, origin: in.Origin, account: in.Account, action: in.Action,
+		exec: in.Executor, reason: p.Reason, guest: p.GuestReason, phase: p.Phase}
+	i, ok := e.shapeIx[sh]
+	if !ok {
+		i = uint32(len(e.shapes))
+		e.shapes = append(e.shapes, sh)
+		e.shapeIx[sh] = i
+	}
+	return coldVal{fp: fpPrefix(en.fp), shape: i}
+}
+
+// coldStatus is an evicted denial's status. Caller holds mu.
+func (e *Engine) coldStatus(id string, cv coldVal) Status {
+	sh := e.shapes[cv.shape]
+	in, _ := normalize(Intent{ID: id, GoalID: sh.goal, Origin: sh.origin, Account: sh.account,
+		Action: sh.action, Executor: sh.exec})
+	return Status{
+		Intent:     in,
+		State:      Denied,
+		Permission: Permission{Decision: "denied", Phase: sh.phase, Reason: sh.reason, GuestReason: sh.guest},
+		Attempts:   []Attempt{},
+	}
+}
+
+// fpPrefix is the first 16 bytes of a hex fingerprint.
+func fpPrefix(fp string) (out [16]byte) {
+	hex.Decode(out[:], []byte(fp[:min(len(fp), 32)]))
+	return out
 }
 
 // evicted reports whether id may be an evicted denial. Caller holds mu.
@@ -1028,15 +1076,6 @@ func (e *Engine) journalEntries(keep func(id string) bool) ([]*entry, error) {
 		}
 	}
 	return out, nil
-}
-
-// journalEntry is one intent replayed from the journal, or nil.
-func (e *Engine) journalEntry(id string) (*entry, error) {
-	ens, err := e.journalEntries(func(x string) bool { return x == id })
-	if err != nil || len(ens) == 0 {
-		return nil, err
-	}
-	return ens[0], nil
 }
 
 // bySeq returns the entries of m in submission order.

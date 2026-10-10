@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -138,21 +140,26 @@ func TestSIMBoundStopIgnoresSettledHistory(t *testing.T) {
 
 // Restart replays the journal and rebuilds the open-intent index and the
 // evicted denials (OP-4). An evicted denial is still the same intent: Get
-// returns it whole, resubmitting it is idempotent or a conflict (OP-1),
-// and it is listed, found by origin, rated and erased like any other.
+// answers its state and refusal from memory, resubmitting it is idempotent
+// or a conflict (OP-1), and it is listed whole, found by origin, rated and
+// erased like any other.
 func TestSIMBoundReplayRebuildsIndexAndEvictedDenials(t *testing.T) {
 	st := &MemStore{}
 	e, _ := openMix(t, st, 3000)
 	before := e.List()
-	old := must(e.Get("done-1"))
-	if old.State != Denied || old.Intent.Params["n"] == nil {
+	old := before[1]
+	if old.Intent.ID != "done-1" || old.State != Denied || old.Intent.Params["n"] == nil {
 		t.Fatalf("done-1 before restart: %+v", old)
 	}
 	trail := len(e.Trail())
 
 	e2 := mustOpen(t, st, newPolicy(), newService())
-	if got := must(e2.Get("done-1")); !reflect.DeepEqual(got, old) {
-		t.Fatalf("evicted denial after restart:\n got %+v\nwant %+v", got, old)
+	want := old
+	want.Intent = Intent{ID: old.Intent.ID, GoalID: old.Intent.GoalID, Origin: old.Intent.Origin,
+		Account: old.Intent.Account, Action: old.Intent.Action, Executor: old.Intent.Executor}
+	want.Intent, _ = normalize(want.Intent)
+	if got := must(e2.Get("done-1")); !reflect.DeepEqual(got, want) {
+		t.Fatalf("evicted denial after restart:\n got %+v\nwant %+v", got, want)
 	}
 	if got := e2.List(); !reflect.DeepEqual(got, before) {
 		t.Fatalf("List after restart differs: %d intents, want %d", len(got), len(before))
@@ -192,7 +199,7 @@ func TestSIMBoundReplayRebuildsIndexAndEvictedDenials(t *testing.T) {
 		t.Fatalf("between: %d ids, want %d", len(ids), len(before))
 	}
 	sts := e2.StatusBetween("owner-sms", time.Time{}, time.Time{})
-	if len(sts) != len(before) || !reflect.DeepEqual(sts[1], must(e2.Get("done-1"))) {
+	if len(sts) != len(before) || !reflect.DeepEqual(sts[1], old) {
 		t.Fatalf("status between: %d statuses", len(sts))
 	}
 	erased, _ := must2(e2.Erase([]string{"done-1", "done-3"}))
@@ -211,8 +218,115 @@ func TestSIMBoundReplayRebuildsIndexAndEvictedDenials(t *testing.T) {
 	if got := must(e3.Get("done-2")); got.Quality.Verdict != VerdictWrong {
 		t.Fatalf("quality after restart: %+v", got.Quality)
 	}
-	if got := must(e3.Get("done-3")); got.Intent.Params != nil {
-		t.Fatalf("erasure after restart: %+v", got.Intent)
+	if got := e3.StatusBetween("owner-sms", time.Time{}, time.Time{}); got[3].Intent.ID != "done-3" || got[3].Intent.Params != nil {
+		t.Fatalf("erasure after restart: %+v", got[3].Intent)
+	}
+}
+
+// readCounter counts whole-journal reads.
+type readCounter struct {
+	Store
+	reads atomic.Int64
+}
+
+func (c *readCounter) ReadAll() ([]byte, error) {
+	c.reads.Add(1)
+	return c.Store.ReadAll()
+}
+
+// A guest repeating old requests is answered from memory: no Get,
+// resubmission, Authorize or Dispatch of an evicted denial reads the journal, which would hold
+// the store while STOP waits to append (CH-2, review of #720).
+func TestSIMBoundEvictedLookupsReadNoJournal(t *testing.T) {
+	st := &readCounter{Store: &MemStore{}}
+	e, _ := openMix(t, st, 5000)
+	if e.intents["done-1"] != nil || !e.evicted("done-1") {
+		t.Fatal("done-1 is not evicted")
+	}
+	st.reads.Store(0)
+	for i := 1; i < 5000; i++ {
+		if i%10 == 0 {
+			continue // succeeded, still in memory
+		}
+		id := fmt.Sprintf("done-%d", i)
+		got := must(e.Get(id))
+		if got.State != Denied || got.Permission.Reason != "grant revoked" || got.Intent.GoalID != "goal-1" {
+			t.Fatalf("get %s: %+v", id, got)
+		}
+		in := intent(id, "acct")
+		in.Params = map[string]any{"n": i}
+		if got := must(e.Submit(in)); got.State != Denied {
+			t.Fatalf("resubmit %s: %s", id, got.State)
+		}
+		in.Params = map[string]any{"n": -i}
+		if _, err := e.Submit(in); !errors.Is(err, ErrConflict) {
+			t.Fatalf("resubmit %s with other params: %v", id, err)
+		}
+		if got, err := e.Authorize(ctx, id); !errors.Is(err, ErrState) || got.State != Denied {
+			t.Fatalf("authorize %s: %s %v", id, got.State, err)
+		}
+		if _, err := e.Dispatch(ctx, id); !errors.Is(err, ErrState) {
+			t.Fatalf("dispatch %s: %v", id, err)
+		}
+	}
+	if n := st.reads.Load(); n != 0 {
+		t.Fatalf("%d journal reads answering evicted denials", n)
+	}
+}
+
+// STOP stays prompt while guests hammer evicted denials (CH-2). Before the
+// fix each resubmission read the whole journal under the store's mutex,
+// and the review measured STOP at 8.9 s under this load.
+func TestSIMBoundStopPromptUnderEvictedResubmission(t *testing.T) {
+	st := &readCounter{Store: &MemStore{}}
+	e, _ := openMix(t, st, 20000)
+	best := time.Duration(1 << 62)
+	for i := 0; i < 5; i++ {
+		start := time.Now()
+		must(e.Stop(ctx))
+		best = min(best, time.Since(start))
+	}
+	st.reads.Store(0)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 1 + g; ; i = (i + 8) % 20000 {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				if i%10 == 0 {
+					continue
+				}
+				in := intent(fmt.Sprintf("done-%d", i), "acct")
+				in.Params = map[string]any{"n": i}
+				if _, err := e.Submit(in); err != nil {
+					t.Errorf("resubmit: %v", err)
+					return
+				}
+				e.Get(in.ID)
+			}
+		}(g)
+	}
+	worst := time.Duration(0)
+	for i := 0; i < 9; i++ {
+		start := time.Now()
+		must(e.Stop(ctx))
+		worst = max(worst, time.Since(start))
+		time.Sleep(time.Millisecond)
+	}
+	close(done)
+	wg.Wait()
+	t.Logf("STOP alone %v, under resubmission at worst %v", best, worst)
+	if n := st.reads.Load(); n != 0 {
+		t.Fatalf("%d journal reads under resubmission", n)
+	}
+	if worst > 10*best+100*time.Millisecond {
+		t.Fatalf("STOP took %v under resubmission, %v alone", worst, best)
 	}
 }
 
