@@ -295,6 +295,10 @@ func fuzzTargets(p learnPaths) ([]loop7.Target, *loop7.Jail) {
 	return ts, j
 }
 
+// pipelineStore is the change pipeline's store; a variable so a test can
+// fail its save.
+var pipelineStore = func(path string) change.Store { return change.FileStore{Path: path} }
+
 // openLearning opens the learning plane and wires it into the daemon's
 // configuration: the gate's Changes and Loops policies, their executors,
 // and the owner's settings texts.
@@ -329,7 +333,7 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 		}
 	}
 	if l.pipe, err = change.New(change.Config{
-		Store:     change.FileStore{Path: filepath.Join(p.Dir, "change.json")},
+		Store:     pipelineStore(filepath.Join(p.Dir, "change.json")),
 		Evaluator: &l.eval,
 		Targets:   targets,
 		ResumeFor: p.ResumeFor,

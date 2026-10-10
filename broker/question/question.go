@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/guesterr"
 )
 
@@ -408,31 +408,7 @@ func (b *Book) persist() error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(b.cfg.Path), ".questions-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), b.cfg.Path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(b.cfg.Path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return durable.WriteFile(b.cfg.Path, raw, 0o600)
 }
 
 // save persists after a change that has already taken effect (a text

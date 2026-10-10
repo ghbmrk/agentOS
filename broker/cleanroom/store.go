@@ -388,7 +388,7 @@ func (s *Store) commit(staged string, m Manifest) (Artifact, error) {
 	if err := s.fault.hit("rename", dir); err != nil {
 		return Artifact{}, err
 	}
-	if err := os.Rename(staged, dir); err != nil {
+	if err := os.Rename(staged, dir); err != nil { // durable:exempt synced through the fault seam (dirSync), C14
 		return Artifact{}, err
 	}
 	// Once renamed the artifact is in place: a failed directory sync is
