@@ -686,6 +686,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | ADP-8 l1 | PR #208 UX lens (recheck): once ADP-8b wires `Mismatch` in, a blocked adapter needs an OP-9 STATUS line in owner words naming the operation and the fix; `mismatch.go` has no owner text today |
 | ADP-8 l2 | PR #208 Potency lens: `Mismatch` reports only the first mismatching operation, so each demo cycle surfaces one fix |
 | ADP-8 l3 | PR #696 Security 4a: #208's UX and Potency lens verdicts are a PR comment only, not files under reviews/ux/ and reviews/potency/ |
+| SIM-fs l1 | PR #718 UX lens (recheck): the localui pairing saves (`setup.go` 626, 712) and localsrv saves now return `durable.ErrDirSync` where the old code ignored it, so on a state volume that cannot fsync a directory every pairing retry fails with no step that helps; the state is written (fails safe). Add a step to the pairing error text if such a volume appears |
+| SIM-fs l2 | PR #718 Potency lens (recheck): `durable.SweepTemp` uses one `.durable-*` prefix for every caller (ASSUMPTIONS D3), so if `pubid.Identity` and `pubid.Publisher` ever share a directory and open at different times, the later open can remove the other's in-flight temp; give each writer a prefix if a directory is ever shared |
 
 ## Reuse candidates
 | ID | Component | Why |
