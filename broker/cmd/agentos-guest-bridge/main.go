@@ -196,18 +196,21 @@ func ownerOnce(broker *http.Client, gateway, model, token string) error {
 		sleep(wait)
 	}
 	// The answer is kept until the broker has it (DEL-1d): a network error
-	// or a 5xx (503: the broker could not store it yet) is retried with the
-	// same body, never by asking the model again. 204, 404 and 409 are
-	// final: stored, never handed to this machine, or already answered.
+	// or any other status (503: not stored yet; 429: the machine has too
+	// many requests in flight) is retried with the same body, never by
+	// asking the model again. 204, 404 and 409 are final: stored, never
+	// handed to this machine, or already answered. So is 400, which the
+	// same body can never pass (an answer over the 64 KiB reply limit):
+	// retrying it would stall every later owner message.
 	out, _ := json.Marshal(map[string]string{"id": msg.ID, "text": answer})
 	for wait := time.Second; ; wait = min(2*wait, 30*time.Second) {
 		resp, err = broker.Post("http://broker.localhost/owner/reply", "application/json", bytes.NewReader(out))
 		if err == nil {
 			resp.Body.Close()
-			switch {
-			case resp.StatusCode == http.StatusNoContent:
+			switch resp.StatusCode {
+			case http.StatusNoContent:
 				return nil
-			case resp.StatusCode < 500:
+			case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict:
 				return fmt.Errorf("reply %s: %s", msg.ID, resp.Status)
 			}
 			err = fmt.Errorf("%s", resp.Status)

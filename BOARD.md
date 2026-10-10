@@ -108,7 +108,8 @@ Primary lane; from an external review's points 2 to 6, checked against main at 9
 |---|---|---|---|
 | RT-1 | [Risk tiers for the image, guest build and CI; unmatched paths default to B](briefs/RT-1.md) | — | building (claude; tier A) |
 | DEL-sd | L1 spec diff: an owner reply the broker accepted is delivered, kept or flagged, never lost across a restart; an SMS whose delivery is uncertain is flagged, not resent (DEL-1 and DEL-2 build on these as provisional choices) | — | queued (Mark approves) |
-| DEL-1 | [An accepted owner reply survives a crash: persist before 204, idempotent reply, guest retries what it holds](briefs/DEL-1.md) | DEL-sd opened | queued (brief ready; tier A) |
+| DEL-1 | [An accepted owner reply survives a crash: persist before 204, idempotent reply, guest retries what it holds](briefs/DEL-1.md) | DEL-sd opened | in review (#709; tier A) |
+| DEL-1-f1 | A deletion reaches owner replies waiting in the guest outbox: the forget fan (CAP-3) removes or redacts a deleted machine's or task's outbox entries, which today stay until sent; failure path: delete while replies are waiting to be sent (release, tier A; #709 Findings, brief to write) | DEL-1 | queued (needs brief) |
 | DEL-2 | [Send outcomes for owner replies: retry known-unsent, flag uncertain, stable email intent](briefs/DEL-2.md) | DEL-1 | queued (brief ready; tier A) |
 | DOC-5 | [doclint catches BOARD and LATER contradictions](briefs/DOC-5.md) | — | in review (#703) |
 | DOC-6 | [BOARD state follows merges automatically](briefs/DOC-6.md) | DOC-5 | queued (brief ready; tier A) |

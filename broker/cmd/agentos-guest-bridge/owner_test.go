@@ -22,12 +22,13 @@ func (r rewrite) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // DEL-1d: the bridge keeps its answer until the broker has it. A 503
-// (the broker could not store the reply) is retried after a backoff with
-// the same body; the model is asked once.
+// (the broker could not store the reply), a 429 (the machine had too many
+// requests in flight) or a 502 is retried after a backoff with the same
+// body; the model is asked once.
 func TestDEL1BridgeRetriesTheReplyNotTheModel(t *testing.T) {
 	var mu sync.Mutex
 	var posts []string
-	codes := []int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusNoContent}
+	codes := []int{http.StatusServiceUnavailable, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusNoContent}
 	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -57,18 +58,19 @@ func TestDEL1BridgeRetriesTheReplyNotTheModel(t *testing.T) {
 	if err := ownerOnce(&http.Client{Transport: rewrite{u}}, gateway.URL, "m", "t"); err != nil {
 		t.Fatal(err)
 	}
-	if asks != 1 || len(posts) != 3 || posts[0] != posts[2] || posts[0] != `{"id":"0a0b0c0d0e0f","text":"booked"}` {
+	if asks != 1 || len(posts) != 4 || posts[0] != posts[1] || posts[0] != posts[2] || posts[0] != posts[3] || posts[0] != `{"id":"0a0b0c0d0e0f","text":"booked"}` {
 		t.Fatalf("asks %d, posts %q", asks, posts)
 	}
-	if len(waits) != 2 || waits[0] != time.Second || waits[1] != 2*time.Second {
+	if len(waits) != 3 || waits[0] != time.Second || waits[1] != 2*time.Second || waits[2] != 4*time.Second {
 		t.Fatalf("waits %v", waits)
 	}
 }
 
-// DEL-1d: a 409 or 404 is final: the broker has an answer or never had
-// the message, so the bridge stops without retrying.
+// DEL-1d: a 409, 404 or 400 is final: the broker has an answer, never had
+// the message, or can never take this body, so the bridge stops without
+// retrying.
 func TestDEL1BridgeStopsOnFinalAnswers(t *testing.T) {
-	for _, code := range []int{http.StatusConflict, http.StatusNotFound} {
+	for _, code := range []int{http.StatusConflict, http.StatusNotFound, http.StatusBadRequest} {
 		var posts int
 		broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/owner/next" {
