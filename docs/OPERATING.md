@@ -105,6 +105,8 @@ Never a standing reviewer session: the one long-lived reviewer cost 27% of the f
 
 Each fix-list point cites a requirement ID or a concrete defect and carries its class (§2). METRICS counts causes per week, so L4 can tell whether to fix the spec, the briefs, the builders or the reviewers.
 
+The verdict comment's last line states the PR's next step and the reviews still owed (for example `Next: merge on green CI; owed: none`), so the comment alone tells a cold session what happens next (§5, §7).
+
 **Lens screen checklist.** The coordinator starts one fresh session per bundle: the tier A and B PRs that passed L3 when the screen starts, at least daily while any PR waits, from every team.
 
 1. Read the bundle's diffs, the IDs they cite, the active DECISIONS rows and each lens README (`reviews/security/`, `reviews/potency/`, `reviews/ux/`). Not whole files, not transcripts. The run index for a lens is one command: `grep -H -e '^Record:' -e '^Verdict' reviews/<lens>/*.md`.

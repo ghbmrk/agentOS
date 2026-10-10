@@ -4,7 +4,7 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 
 ## 1. Rebuild in-flight state from GitHub alone
 1. List open PRs (`list_pull_requests`, state open, newest first). Titles carry the package ID; drafts are reference only.
-2. For each PR you may act on, read its latest verdict comment. Every verdict comment ends with the PR's next step and the reviews still owed (OPERATING §5, §7), so that line says what happens next without any chat history.
+2. For each PR you may act on, read its latest verdict comment. Every verdict comment ends with the PR's next step and the reviews still owed (OPERATING §4, §5, §7), so that line says what happens next without any chat history.
 3. Read the PR's check runs on the current head: green CI plus all required reviews accepting that head plus a clean merge means merge.
 4. Read BOARD.md rows for state and owner; a row `building` with an owner belongs to that team (OPERATING §7).
 5. Read `briefs/SIM.md` for the plan and wave order, and DECISIONS.md for anything newer than the list below.
