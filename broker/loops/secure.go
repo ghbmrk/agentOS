@@ -125,10 +125,12 @@ type Finding struct {
 	// Rule is the regression fixture's input, empty when the finding is
 	// not something a change could reintroduce (expiry, drift).
 	Rule []byte `json:"rule,omitempty"`
-	// Producer is the SHA-256 of the binary that produced a fuzz hang
-	// finding, and is set on nothing else (P3-4b-3h-r2). Report moves it
-	// to the record's Producer, so it is never part of the finding's
-	// digest.
+	// Producer is the SHA-256 of the binary that produced a fuzz
+	// finding: required on a hang (P3-4b-3h-r2), set by loop7 on every
+	// other fuzz finding but the oversize one, and on nothing else
+	// (P3-4b-3r-evidence). Report moves it to the record's Producer, so
+	// it is never part of the finding's digest; OpenReported copies it
+	// back.
 	Producer string `json:"producer,omitempty"`
 }
 
@@ -367,9 +369,9 @@ type Record struct {
 	// (CloseTarget), which replayed no stored input.
 	Closure *Closure `json:"closure,omitempty"`
 	// Producer is the SHA-256 of the binary that last produced an open
-	// fuzz hang finding: set by Report, replaced when the finding is
-	// reported again, and the only producer CloseTarget compares against
-	// (P3-4b-3h-r2).
+	// fuzz finding: set by Report, replaced when the finding is reported
+	// again, and the only producer CloseTarget and Resolve compare
+	// against (P3-4b-3h-r2, P3-4b-3r-evidence).
 	Producer string `json:"producer,omitempty"`
 	// Told marks a reported finding's owner text as sent, so a resume
 	// after a crash sends a text not yet sent, and only that (P3-4b-1b

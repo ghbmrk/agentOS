@@ -44,7 +44,7 @@ func fakeTarget(t *testing.T, release, body string) Target {
 func TestABinaryOutsideTheReleaseIsRefused(t *testing.T) {
 	release := t.TempDir()
 	ok := fakeTarget(t, release, "exit 0")
-	if _, err := New(Config{Inner: newFake(), Report: newFake(), Targets: []Target{ok}, Release: release, CacheDir: t.TempDir()}); err != nil {
+	if _, err := New(Config{Inner: newFake(), Report: newFake(), Targets: []Target{ok}, Release: release, CacheDir: t.TempDir(), Evidence: t.TempDir()}); err != nil {
 		t.Fatalf("a release binary refused: %v", err)
 	}
 	other := t.TempDir()
@@ -132,7 +132,7 @@ func TestLoadReadsTheReleaseManifest(t *testing.T) {
 	if b, _ := os.ReadFile(kept); string(b) != "found on this box" {
 		t.Fatalf("a kept crash input was overwritten: %q", b)
 	}
-	if _, err := New(Config{Inner: newFake(), Report: newFake(), Targets: ts, Release: release, CacheDir: t.TempDir()}); err != nil {
+	if _, err := New(Config{Inner: newFake(), Report: newFake(), Targets: ts, Release: release, CacheDir: t.TempDir(), Evidence: t.TempDir()}); err != nil {
 		t.Fatalf("loaded targets refused: %v", err)
 	}
 	for name, bad := range map[string]string{
@@ -319,6 +319,17 @@ const fatalReplay = `case "$1" in
 esac
 exit 0`
 
+// passAlone is a fake binary that runs whole as whole says, and run on
+// one input alone ("-test.run=^FuzzFake$/^<file>$") prints that input's
+// own PASS line.
+func passAlone(whole string) string {
+	return `case "$1" in
+-test.run=^FuzzFake\$) ` + whole + `;;
+-test.run=^FuzzFake\$/*) n=${1#*/^}; n=${n%\$}; echo "--- PASS: FuzzFake/$n (0.00s)";;
+esac
+exit 0`
+}
+
 // LOOP-9 (Security 4a on #560, blocker 1): a crash the binary reports
 // without a "--- FAIL" line (a stack overflow, out of memory, a
 // concurrent map write, os.Exit) is still a finding: each stored input is
@@ -333,9 +344,10 @@ func TestACrashWithoutAFailLineIsReported(t *testing.T) {
 	if err != nil || n != 1 || len(g.reported) != 1 || g.reported[0].Detail != details["bad"] {
 		t.Fatalf("n=%d err=%v reported %+v", n, err, g.reported)
 	}
-	// Fixed by an update: the stored input passes alone and in the whole
-	// replay, and the finding resolves.
-	fakeBin(t, release, "fake.test", `case "$1" in -test.run=^FuzzFake\$) echo "--- PASS: FuzzFake/bad (0.00s)"; echo "--- PASS: FuzzFake/good (0.00s)";; esac; exit 0`)
+	// Fixed by an update: the stored input passes in the whole replay and
+	// alone, from root's copy named by its digest, and the finding
+	// resolves.
+	fakeBin(t, release, "fake.test", passAlone(`echo "--- PASS: FuzzFake/bad (0.00s)"; echo "--- PASS: FuzzFake/good (0.00s)"`))
 	if n, err := s.Fuzz(context.Background(), tg); err != nil || n != 0 || len(g.open) != 0 {
 		t.Fatalf("after the fix n=%d err=%v open %v", n, err, g.open)
 	}

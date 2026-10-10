@@ -27,10 +27,11 @@ type fakeGuard struct {
 	reported []loops.Finding
 	open     map[string]loops.Finding
 	resolved []string
+	replays  []loops.Replay
 	closed   []loops.Closure
 	job      bool
-	// producer is each open hang's producing binary, held here as
-	// loops holds it on the record (P3-4b-3h-r2).
+	// producer is each open finding's producing binary, held here as
+	// loops holds it on the record (P3-4b-3h-r2, P3-4b-3r-evidence).
 	producer map[string]string
 }
 
@@ -57,11 +58,22 @@ func (g *fakeGuard) Report(_ context.Context, f loops.Finding) (loops.Record, er
 func (g *fakeGuard) Resolve(id string, r loops.Replay) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if f, ok := g.open[id]; !ok || !r.Passed || r.Evidence != f.Detail {
+	f, ok := g.open[id]
+	if !ok || !r.Passed || r.Evidence != f.Detail {
 		return loops.ErrFinding
 	}
+	if f.Check == loops.CheckFuzz && f.Detail != loops.FuzzOversizeDetail {
+		// loops.Resolve's rule: only a binary other than the producer.
+		p := g.producer[id]
+		if p == "" || r.Binary == "" || r.Binary == p {
+			return loops.ErrFinding
+		}
+		r.Produced = p
+	}
 	delete(g.open, id)
+	delete(g.producer, id)
 	g.resolved = append(g.resolved, id)
+	g.replays = append(g.replays, r)
 	return nil
 }
 func (g *fakeGuard) CloseTarget(id string, c loops.Closure) error {
@@ -82,8 +94,9 @@ func (g *fakeGuard) OpenReported(c loops.Check) []loops.Finding {
 	defer g.mu.Unlock()
 	var out []loops.Finding
 	for _, k := range sortedKeys(g.open) {
-		if g.open[k].Check == c {
-			out = append(out, g.open[k])
+		if f := g.open[k]; f.Check == c {
+			f.Producer = g.producer[k]
+			out = append(out, f)
 		}
 	}
 	return out
@@ -159,6 +172,9 @@ func newSource(t *testing.T, g *fakeGuard, cfg Config) *Source {
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = t.TempDir()
 	}
+	if cfg.Evidence == "" {
+		cfg.Evidence = t.TempDir()
+	}
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -195,25 +211,20 @@ func TestAFuzzCrashIsReportedKeptAndResolved(t *testing.T) {
 	if n, err := s.replay(context.Background(), tg); err != nil || n != 1 || len(g.open) != 1 {
 		t.Fatalf("replay n=%d err=%v open %v", n, err, g.open)
 	}
-	// An update fixes the decoder, but with the stored input gone nothing
-	// replays it, so the finding stays open.
+	// An update fixes the decoder. The corpus copy is gone, but root kept
+	// its own: replayed from it by the new binary, it passes and the
+	// finding is resolved (P3-4b-3r-evidence).
 	if err := os.Rename(planted(t, false), tg.Binary); err != nil {
 		t.Fatal(err)
 	}
-	stored := filepath.Join(tg.Dir, "testdata", "fuzz", "FuzzPlanted", kept[0].Name())
-	aside := filepath.Join(t.TempDir(), "input")
-	if err := os.Rename(stored, aside); err != nil {
+	if err := os.Remove(filepath.Join(tg.Dir, "testdata", "fuzz", "FuzzPlanted", kept[0].Name())); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := s.replay(context.Background(), tg); err != nil || n != 0 || len(g.open) != 1 || len(g.resolved) != 0 {
-		t.Fatalf("without the stored input n=%d err=%v open %v resolved %v", n, err, g.open, g.resolved)
-	}
-	if err := os.Rename(aside, stored); err != nil {
-		t.Fatal(err)
-	}
-	// Replayed, the stored input passes and the finding is resolved.
 	if n, err := s.replay(context.Background(), tg); err != nil || n != 0 || len(g.open) != 0 || len(g.resolved) != 1 {
 		t.Fatalf("after the fix n=%d err=%v open %v resolved %v", n, err, g.open, g.resolved)
+	}
+	if r := g.replays[0]; r.Binary == "" || r.Produced == "" || r.Binary == r.Produced {
+		t.Fatalf("replay %+v", r)
 	}
 }
 

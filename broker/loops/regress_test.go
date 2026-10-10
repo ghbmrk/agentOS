@@ -11,7 +11,8 @@ import (
 
 func fuzzFinding() Finding {
 	return Finding{Check: CheckFuzz, Subject: "sockets.FuzzRequest", Severity: High,
-		Detail: "crash input sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}
+		Detail:   "crash input sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+		Producer: binA}
 }
 
 // P3-4b-3 (LOOP-7, LOOP-9): a fuzz or probe failure has no tree rule, so
@@ -54,12 +55,12 @@ func TestARuleLessFuzzFindingIsReportedAndResolved(t *testing.T) {
 	if got := r.g.OpenReported(CheckProbe); len(got) != 0 {
 		t.Fatalf("open probe findings %+v", got)
 	}
-	passed := Replay{Evidence: fuzzFinding().Detail, Passed: true}
+	passed := Replay{Evidence: fuzzFinding().Detail, Passed: true, Binary: binB}
 	if err := r.g.Resolve(id, passed); err != nil {
 		t.Fatal(err)
 	}
-	if e := r.evidenceFor(t, id); e.Replay == nil || *e.Replay != passed {
-		t.Fatalf("replay not recorded: %+v", e.Replay)
+	if want := (Replay{Evidence: passed.Evidence, Passed: true, Binary: binB, Produced: binA}); r.evidenceFor(t, id).Replay == nil || *r.evidenceFor(t, id).Replay != want {
+		t.Fatalf("replay not recorded: %+v", r.evidenceFor(t, id).Replay)
 	}
 	if got := r.g.OpenReported(CheckFuzz); len(got) != 0 {
 		t.Fatalf("resolved but listed %+v", got)
@@ -80,7 +81,7 @@ func TestARuleLessFuzzFindingIsReportedAndResolved(t *testing.T) {
 func TestResolveRefusesAFindingWithATreeRule(t *testing.T) {
 	r := newReportRig(t, nil)
 	rec := r.report(t, seedFinding())
-	if err := r.g.Resolve(rec.Finding.ID, Replay{Evidence: rec.Finding.Detail, Passed: true}); !errors.Is(err, ErrFinding) {
+	if err := r.g.Resolve(rec.Finding.ID, Replay{Evidence: rec.Finding.Detail, Passed: true, Binary: binB}); !errors.Is(err, ErrFinding) {
 		t.Fatalf("resolved a rule finding: %v", err)
 	}
 	if _, open := r.open(rec.Finding.ID); !open {
