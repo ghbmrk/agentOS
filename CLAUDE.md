@@ -35,6 +35,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - Mechanical subagent work (search, log triage, wording sweeps, test scaffolding) passes `model: "haiku"` and stays under 100k tokens, above which Haiku costs 5x; use `"sonnet"` when it needs judgment. Reviews of security-critical paths keep the session's model.
 - Sonnet pilot (OPERATING §5, 2026-10-08 to the 2026-10-18 reset): tier B and C builder sessions run on a Sonnet-class model, tier A on the strongest model. Run `tools/risk_tier.py` before opening the PR; on A, stop and hand off. Name the builder model in the PR's Budget section.
 - Read tool output narrowly (grep, tail, `go test -run`), never whole CI logs or large files. Send cross-session messages for decisions, blockers and hand-offs only; progress goes in the status checklist.
+- Coordinators of chat-based projects follow the chat layout and coordinator cost rules in OPERATING §5 (D-094).
 
 ## Repository conventions
 - Branch per package: `pkg/<id>-<slug>-<suffix>`. The coordinator sets the `pkg/<id>-<slug>` stem when it starts a thread; the server appends a session-unique suffix. Threads started without a stem keep their assigned `claude/…` branch, and the PR title starts with the package ID (DECISIONS.md). PRs use the template's trace table.

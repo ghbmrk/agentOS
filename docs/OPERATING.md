@@ -127,6 +127,21 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 - **Idle limit:** a PR or `building` row with no activity for 48 hours is finished, handed off with a packet, or returned to `queued` with its PR closed (branch kept). Drafts held under CODEX-1 are a parts bin, not work in progress; they are counted apart and never closed for age (D-086).
 - **Questions for Mark** go to docs/MARK-QUEUE.md, one line each, answerable in one word, with a recommendation. Mark answers the queue in one sitting; an answered line moves to DECISIONS.md.
 
+**Coordinator chat layout** (token rules for any team's coordinator; Mark, 2026-10-09 and 2026-10-10). A chat-based project runs on these rules; a second subscription's team (§7) follows them in its own project.
+
+- **Chat only manages threads.** The project chat creates and manages threads; everything else goes in a thread. Keep thread cards few: batch related mechanical work into one thread where one-review-per-session allows, hang every card under a single anchor post, and resolve each thread as soon as it finishes so it collapses to one line.
+- **Four standing threads**, each replaced by a numbered successor after about 30 replies or 100k tokens of context:
+  - *Decisions*: every multiple-choice question for the owner, as a decision card.
+  - *Questions*: the owner asks, Claude answers there.
+  - *PR updates*: merges, review verdicts and conflicts.
+  - *Alerts*: blockers, failures and anything else needing the owner's attention.
+
+  Work threads report results in their own thread and route decisions and alerts through the coordinator. The owner pins the current version of each standing thread; Claude has no pin tool, so every successor's root post ends with "Pin this one and unpin the previous one."
+- **Merges.** Mark, 2026-10-09: "if all reviews accept I don't need to approve to merge just do it." Merge with no question when every required review accepts the current head, CI is green and it merges cleanly; this includes SPEC PRs and D-048 exceptions. A merge goes to Decisions only when reviewers disagree or a required review is missing. If the permission check refuses, cite the owner's typed approval of this rule; if it still refuses, stop and post in Alerts what was refused with a direct GitHub link so the owner can merge it, and never try another route.
+- **Asks to the owner.** Mark, 2026-10-09: "Typing the text doesn't help, don't do that" and "Ideally give me a card to press." Every ask is a card to press, never a phrase to type. Where a card tap cannot satisfy a permission check, say so and give the one action that clears it: a GitHub link, a named permission prompt, or the physical step.
+- **Blocked threads.** Mark, 2026-10-10: "When threads are marked blocked check to see if actually blocked." Before telling the owner anything is blocked, check the PR's live state on GitHub (it may be merged, closed or superseded) and whether the block is only an approval that the merge rule above already covers. Raise only what truly needs the owner's hands. Thread surveys and status labels go stale, so verify each against GitHub; a close announced in a comment may not have taken effect, so confirm the PR's state after closing it.
+- **Coordinator cost rules.** Count cold starts (new sessions, wakes after more than an hour idle, model switches, compactions) per merged PR and minimise them. Pick the model at spawn and never switch mid-thread; a second opinion is a fresh thread. The coordinator routes and merges in its own turn, batched; investigation goes to a thread. Per thread: one ack, one result, one blocker reply, with progress in the status checklist. Wait by subscription, not polling. Never wake an idle thread for new work; start a fresh one (D-094).
+
 **Package records.**
 
 - **Brief** (`briefs/<ID>.md`): what the builder reads. Goal, requirement IDs, declared file scope, dependencies, the usage estimate, and anything the coordinator learned that the builder needs, including the "Recurring kinds" each lens README lists for the touched area, as acceptance criteria. 20k tokens or less. The BOARD row links it and stays one line.
@@ -157,5 +172,7 @@ Extra capacity (a second subscription, a teammate's agent, or another vendor's c
 **Credentials stay with their owner.** No team shares a subscription login, token or key with another, in the repo or anywhere else. Each team runs on its own account.
 
 **Terms.** Anthropic subscriptions may be used only through Claude Code and claude.ai; a second Claude subscription for the same person needs its terms checked before purchase. OpenAI's Codex CLI on a ChatGPT plan is OpenAI's own tool and fine on its own account. AGENTS.md is the entry point Codex reads.
+
+**Chat coordination.** Each team's coordinator follows the coordinator chat layout in §5 (standing threads, merge rule, asks as cards, verified blockers).
 
 Lanes, and each team's onboarding record, are in docs/LANES.md.
