@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,8 +35,8 @@ type rootView struct {
 	// Print is the short fingerprint the approval card shows
 	// (grants.FollowPrint).
 	Print string
-	// Project: the root has the project's own keys, so the form offers
-	// only switching back, with no name (WF1).
+	// Project: the root follows from the project root the box last
+	// trusted, so the form offers only switching back, with no name (WF1).
 	Project bool
 	Roles   []roleView
 	RootIDs []string
@@ -63,6 +64,7 @@ const (
 	rootThresholdText  = "This root file lets too few keys sign. I need at least two keys to agree for each change."
 	rootUnreadText     = "I can't use this root file. Check it's the root.json the source gave you, or ask the source's maintainers for theirs."
 	rootTooBigText     = "That file is too big to be a root file. Make sure you chose the source's root.json."
+	rootTooManyText    = "That is too many root files. Choose the newest root file, and for switching back, the project's root files after the one I last trusted."
 	followOffText      = "I can't change where my updates come from. Nothing was changed."
 	followStale        = "This page is out of date. Choose the root file again."
 	followUnreachable  = "I can't answer right now. Nothing was asked. Reload to try again."
@@ -111,39 +113,59 @@ func (s *Server) follow(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "follow", v)
 }
 
-// showRoot reads the brought file and shows agentosd's summary of it. It
-// reports a session agentosd no longer knows.
+// showRoot reads the brought files and shows agentosd's summary of the
+// newest: the others go with it as the chain a switch back across the
+// project's key rotations walks (OSS-10w-r). It reports a session agentosd
+// no longer knows.
 func (s *Server) showRoot(w http.ResponseWriter, r *http.Request, tok, sess string, v *followView) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, localapi.MaxRoot+16<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, (localapi.MaxRootChain+1)*localapi.MaxRoot+64<<10)
 	mr, err := r.MultipartReader()
 	if err != nil {
 		v.Err = rootUnreadText
 		return false
 	}
-	var root []byte
+	var files [][]byte
+	var bad error
 	for {
 		p, err := mr.NextPart()
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				bad = err
+			}
 			break
 		}
-		if p.FormName() == "root" && root == nil {
-			root, err = io.ReadAll(io.LimitReader(p, localapi.MaxRoot+1))
-			if err != nil {
-				v.Err = rootTooBigText
-				return false
-			}
+		if p.FormName() != "root" {
+			continue
+		}
+		if len(files) == localapi.MaxRootChain+1 {
+			v.Err = rootTooManyText
+			return false
+		}
+		b, err := io.ReadAll(io.LimitReader(p, localapi.MaxRoot+1))
+		switch {
+		case err != nil:
+			bad = err
+		case len(b) > localapi.MaxRoot:
+			v.Err = rootTooBigText
+			return false
+		case len(b) > 0:
+			files = append(files, b)
+		}
+		if bad != nil {
+			break
 		}
 	}
 	switch {
-	case len(root) == 0:
+	case bad != nil:
+		v.Err = rootUnreadText
+		return false
+	case len(files) == 0:
 		v.Err = "Choose the source's root file first."
 		return false
-	case len(root) > localapi.MaxRoot:
-		v.Err = rootTooBigText
-		return false
 	}
+	root, chain := newestRoot(files)
 	var sum localapi.RootSummary
-	err = s.call(r.Context(), localapi.OpFollowRoot, localapi.FollowRoot{Token: tok, Root: root}, &sum)
+	err = s.call(r.Context(), localapi.OpFollowRoot, localapi.FollowRoot{Token: tok, Root: root, Chain: chain}, &sum)
 	switch {
 	case refused(err, localapi.ErrUnauthorized):
 		return true
@@ -160,6 +182,29 @@ func (s *Server) showRoot(w http.ResponseWriter, r *http.Request, tok, sess stri
 	}
 	v.Sum, v.Tok = s.rootView(sum), s.followToken(sess, sum.Digest, sum.Project)
 	return false
+}
+
+// newestRoot picks the file with the highest root version (the first, on
+// a tie or when none reads) as the root; the rest, in the order brought,
+// are its chain. Only agentosd verifies them.
+func newestRoot(files [][]byte) (root []byte, chain [][]byte) {
+	best, top := 0, int64(-1)
+	for i, b := range files {
+		var m struct {
+			Signed struct {
+				Version int64 `json:"version"`
+			} `json:"signed"`
+		}
+		if json.Unmarshal(b, &m) == nil && m.Signed.Version > top {
+			best, top = i, m.Signed.Version
+		}
+	}
+	for i, b := range files {
+		if i != best {
+			chain = append(chain, b)
+		}
+	}
+	return files[best], chain
 }
 
 func refusedRootText(reason string) string {

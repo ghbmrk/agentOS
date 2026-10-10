@@ -113,6 +113,8 @@ func (c *fakeClock) Latest(context.Context) (time.Time, clock.Status) {
 type rig struct {
 	t       *testing.T
 	shipped []byte
+	// pk are the shipped root's root keys.
+	pk      []ed25519.PrivateKey
 	fork    []byte
 	store   *update.Store
 	clk     *fakeClock
@@ -123,7 +125,8 @@ type rig struct {
 
 func newRig(t *testing.T) *rig {
 	r := &rig{t: t, clk: &fakeClock{at: time.Now().Add(time.Hour)}}
-	r.shipped = rootOf(t, newKey(t), newKey(t))
+	r.pk = []ed25519.PrivateKey{newKey(t), newKey(t)}
+	r.shipped = rootOf(t, r.pk[0], r.pk[1])
 	r.fork = rootOf(t, newKey(t), newKey(t))
 	st, err := update.InitStore(filepath.Join(t.TempDir(), "box"), r.shipped, 0)
 	if err != nil {
@@ -214,14 +217,14 @@ func TestOSS10wRefusesARootThePageDoesNotHold(t *testing.T) {
 func TestOSS10wSwitchingBackNeedsTheShippedRootKeys(t *testing.T) {
 	r := newRig(t)
 	if out := r.run(grants.FollowIntent("a1", "", r.describe(r.fork))); out.Result != journal.ResultNotApplied ||
-		!strings.Contains(out.Evidence, "project's own root keys") || !r.trusts(r.shipped) {
+		!strings.Contains(out.Evidence, "project's own root") || !r.trusts(r.shipped) {
 		t.Fatalf("a fork's root as the project's: %+v", out)
 	}
 	fake := forged(t, r.shipped)
 	// TUF accepts such a root (key IDs are labels); only the key material
 	// tells it from the project's.
 	if out := r.run(grants.FollowIntent("a2", "", r.describe(fake))); out.Result != journal.ResultNotApplied ||
-		!strings.Contains(out.Evidence, "project's own root keys") {
+		!strings.Contains(out.Evidence, "project's own root") {
 		t.Fatalf("a root claiming the shipped key IDs: %+v", out)
 	}
 	if !r.trusts(r.shipped) || len(r.alerts) != 0 {
@@ -245,13 +248,13 @@ func TestOSS10wSwitchingBackNeedsTheShippedRootKeys(t *testing.T) {
 // a root Execute would admit it for, judged the same way.
 func TestOSS10w2ProjectIsKnownAtDescribe(t *testing.T) {
 	r := newRig(t)
-	if !r.x.Project(r.describe(r.shipped)) {
+	if !r.x.Project(context.Background(), r.describe(r.shipped)) {
 		t.Fatal("the shipped root is not the project's")
 	}
-	if r.x.Project(r.describe(r.fork)) || r.x.Project(r.describe(forged(t, r.shipped))) {
+	if r.x.Project(context.Background(), r.describe(r.fork)) || r.x.Project(context.Background(), r.describe(forged(t, r.shipped))) {
 		t.Fatal("a fork's root, or one claiming the shipped key IDs, read as the project's")
 	}
-	if r.x.Project(strings.Repeat("ab", 32)) {
+	if r.x.Project(context.Background(), strings.Repeat("ab", 32)) {
 		t.Fatal("a root not held read as the project's")
 	}
 }
@@ -394,16 +397,16 @@ func TestOSS10wReconcileAfterARestart(t *testing.T) {
 	}
 }
 
-// failingStore fails FollowRoot after (written) or instead of the real
+// failingStore fails FollowFork after (written) or instead of the real
 // switch, and can fail reading the trusted root.
 type failingStore struct {
 	*update.Store
 	written, unreadable bool
 }
 
-func (s failingStore) FollowRoot(root []byte, approved, name string, o update.Options) error {
+func (s failingStore) FollowFork(root []byte, links [][]byte, shipped []byte, approved, name string, o update.Options) error {
 	if s.written {
-		if err := s.Store.FollowRoot(root, approved, name, o); err != nil {
+		if err := s.Store.FollowFork(root, links, shipped, approved, name, o); err != nil {
 			return err
 		}
 	}
