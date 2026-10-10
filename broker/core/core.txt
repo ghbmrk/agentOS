@@ -12,8 +12,12 @@
 #
 # <pkg> is a directory under broker/. <symbol> is pkg.Func, pkg.Type.Method,
 # pkg.Type.* or pkg.*. broker/core/core_test.go fails when a package outside
-# core and wiring calls a write path that no open or allow line covers, and
-# when a line names a package or symbol that does not exist.
+# core and wiring calls a write path that no open or allow line covers, or
+# declares an interface that a core type satisfies through one (wiring can
+# then hand it the core type), and when a line names a package or symbol
+# that does not exist. An interface finding names the package that declares
+# the interface, which an alias elsewhere (loops.Journal = change.Journal)
+# shares.
 
 core journal
 core grants
@@ -46,6 +50,16 @@ open meter.Meter.Usage
 open meter.Meter.Overall
 open meter.Object
 open sockets.Code.Token
+open journal.Engine.Get
+open journal.Engine.List
+open journal.Engine.Trail
+open journal.Engine.Between
+open journal.Engine.Stopped
+open journal.FileStore.ReadAll
+open journal.MemStore.ReadAll
+open grants.Gate.Get
+open grants.Gate.List
+open vault.Redactor.Redact
 
 # Sanctioned interfaces: the only way to start a child process, to build
 # guest-visible error text, to name a verb, and to meter a model call.
@@ -61,3 +75,31 @@ allow recovery vault.* -- P2-8 restore rebuilds the vault from the recovery key 
 allow loops meter.Meter.SetOverallCap -- the owner's spare-call setting sets the spare meter's cap
 allow replay guest.New -- LOOP5 replays a run on its own guest plane
 allow replay guest.Plane.* -- LOOP5 replays a run on its own guest plane
+
+# Interfaces a core type satisfies through a write path (see the header).
+# Authorize and Dispatch move an intent the caller already submitted through
+# the gate's policy and the journal's dispatch; they run nothing the journal
+# did not judge.
+allow apply journal.Engine.Authorize -- apply.Journal moves the change intent it submitted through policy
+allow apply journal.Engine.Dispatch -- apply.Journal dispatches the change intent it submitted once authorized
+allow apply grants.Gate.Authorize -- apply.Journal is the grants gate on the box; same as journal.Engine.Authorize
+allow apply grants.Gate.Dispatch -- apply.Journal is the grants gate on the box; same as journal.Engine.Dispatch
+allow change journal.Engine.Authorize -- change.Journal (also loops.Journal) moves the intent it submitted through policy
+allow change journal.Engine.Dispatch -- change.Journal (also loops.Journal) dispatches the intent it submitted once authorized
+allow change grants.Gate.Authorize -- change.Journal is the grants gate on the box; same as journal.Engine.Authorize
+allow change grants.Gate.Dispatch -- change.Journal is the grants gate on the box; same as journal.Engine.Dispatch
+allow recalltool journal.Engine.Authorize -- recalltool moves the erase intent it submitted through policy
+allow recalltool grants.Gate.Authorize -- recalltool's journal is the grants gate on the box; same as journal.Engine.Authorize
+allow recalltool journal.Engine.Erase -- the owner's FORGET erases the journal records it names (recalltool.Journal)
+allow recalltool grants.Gate.Withdraw -- FORGET withdraws an owner question about an erased intent as superseded (recalltool.Withdrawer)
+allow control journal.Engine.Stop -- the owner's STOP text (control.Engine)
+allow control journal.Engine.Resume -- the owner's code-checked RESUME text (control.Engine)
+allow control guest.OwnerAgent.Deliver -- owner chat goes to the owner's agent machine (control.Agent)
+allow loops journal.Engine.RecordQuality -- Loop 1 records the quality signal on a finished intent (loops.JournalReader)
+allow modelroute journal.Engine.RecordEgress -- each routed model call leaves its egress note (modelroute.Recorder)
+allow vm guest.Plane.Open -- a machine's sandbox opens its own guest socket at creation (vm.Services)
+allow vm guest.Plane.Close -- and closes it when the machine is destroyed (vm.Services)
+allow recall journal.FileStore.Append -- shape only: recall.Store matches the journal's store, and wiring gives recall its own FileStore
+allow recall journal.FileStore.Rewrite -- shape only: as journal.FileStore.Append
+allow recall journal.MemStore.Append -- shape only: as journal.FileStore.Append
+allow recall journal.MemStore.Rewrite -- shape only: as journal.FileStore.Append

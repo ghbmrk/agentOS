@@ -8,7 +8,9 @@ package core
 // interfaces) or allows that package by name; anything else is a write
 // path into the core and fails here. The check type-checks each package
 // against the compiler's export data, so a call through an embedded field
-// or a method value counts as much as a direct call.
+// or a method value counts as much as a direct call. An interface the
+// package declares counts too: when a core type satisfies it, each core
+// method behind the interface's methods is reachable through it.
 
 import (
 	"bufio"
@@ -180,7 +182,14 @@ func symbol(obj types.Object, core map[string]bool) string {
 func writePaths(t *testing.T, l list, patterns ...string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
-	targets, imp := load(t, fset, patterns...)
+	// Load the core with the patterns, so every core type is in hand for
+	// the interface pass whatever the patterns import.
+	all := append([]string{}, patterns...)
+	for p := range l.core {
+		all = append(all, "./"+p)
+	}
+	targets, imp := load(t, fset, all...)
+	coreTypes := namedTypes(t, imp, l.core)
 	var found []string
 	for _, p := range targets {
 		pkg, ok := strings.CutPrefix(p.ImportPath, modPrefix)
@@ -198,7 +207,7 @@ func writePaths(t *testing.T, l list, patterns ...string) []string {
 			}
 			files = append(files, af)
 		}
-		info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
+		info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}
 		if _, err := (&types.Config{Importer: imp}).Check(p.ImportPath, fset, files, info); err != nil {
 			t.Fatalf("type-check %s: %v", p.ImportPath, err)
 		}
@@ -213,9 +222,74 @@ func writePaths(t *testing.T, l list, patterns ...string) []string {
 				found = append(found, fmt.Sprintf("%s calls core write path %s (%s)", pkg, sym, fset.Position(id.Pos())))
 			}
 		}
+		for expr, tv := range info.Types {
+			if _, ok := expr.(*ast.InterfaceType); !ok {
+				continue
+			}
+			iface, ok := tv.Type.Underlying().(*types.Interface)
+			if !ok {
+				continue
+			}
+			for _, sym := range throughInterface(iface, coreTypes, l.core) {
+				if covered(l.open, sym) || covered(l.allow[pkg], sym) || seen[sym] {
+					continue
+				}
+				seen[sym] = true
+				found = append(found, fmt.Sprintf("%s reaches core write path %s through an interface (%s)", pkg, sym, fset.Position(expr.Pos())))
+			}
+		}
 	}
 	sort.Strings(found)
 	return found
+}
+
+// namedTypes returns every non-generic, non-interface named type the core
+// packages declare.
+func namedTypes(t *testing.T, imp types.Importer, core map[string]bool) []*types.Named {
+	t.Helper()
+	var named []*types.Named
+	for p := range core {
+		tp, err := imp.Import(modPrefix + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range tp.Scope().Names() {
+			tn, ok := tp.Scope().Lookup(name).(*types.TypeName)
+			if !ok || tn.IsAlias() {
+				continue
+			}
+			n, ok := tn.Type().(*types.Named)
+			if !ok || n.TypeParams().Len() > 0 || types.IsInterface(n) {
+				continue
+			}
+			named = append(named, n)
+		}
+	}
+	return named
+}
+
+// throughInterface returns the core methods reachable through iface: for
+// each core type T where T or *T satisfies it, the core method behind each
+// of iface's methods.
+func throughInterface(iface *types.Interface, coreTypes []*types.Named, core map[string]bool) []string {
+	if !iface.IsMethodSet() || iface.NumMethods() == 0 {
+		return nil
+	}
+	var syms []string
+	for _, n := range coreTypes {
+		ptr := types.NewPointer(n)
+		if !types.Implements(n, iface) && !types.Implements(ptr, iface) {
+			continue
+		}
+		for i := 0; i < iface.NumMethods(); i++ {
+			m := iface.Method(i)
+			obj, _, _ := types.LookupFieldOrMethod(ptr, false, m.Pkg(), m.Name())
+			if sym := symbol(obj, core); sym != "" {
+				syms = append(syms, sym)
+			}
+		}
+	}
+	return syms
 }
 
 func TestNoWritePathOutsideTheCore(t *testing.T) {
@@ -229,6 +303,15 @@ func TestAFixtureThatWritesGrantsFails(t *testing.T) {
 	found := writePaths(t, readList(t), "./core/testdata/writesgrants")
 	if len(found) != 1 || !strings.HasPrefix(found[0], "core/testdata/writesgrants calls core write path grants.Gate.Decide ") {
 		t.Fatalf("want exactly the fixture's grants.Gate.Decide call, got %q", found)
+	}
+}
+
+// A package that declares an interface a core type satisfies through a
+// write path fails the check, with no call to the core at all.
+func TestAFixtureThatDecidesThroughAnInterfaceFails(t *testing.T) {
+	found := writePaths(t, readList(t), "./core/testdata/decidesgrants")
+	if len(found) != 1 || !strings.HasPrefix(found[0], "core/testdata/decidesgrants reaches core write path grants.Gate.Decide through an interface ") {
+		t.Fatalf("want exactly the fixture's grants.Gate.Decide interface, got %q", found)
 	}
 }
 
