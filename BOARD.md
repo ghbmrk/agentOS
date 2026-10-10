@@ -6,7 +6,7 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| PILOT-S | [Sonnet builder pilot](briefs/PILOT-S.md) | — | building (2026-10-08 through the 2026-10-18 reset, D-060) |
+| PILOT-S | [Sonnet builder pilot](briefs/PILOT-S.md) | — | building (2026-10-08 through the 2026-10-13 reset, D-060) |
 | DOC-1 | [One home per fact; review pipeline; per-PR lens records](briefs/DOC-1.md) | — | merged (#355) |
 | DOC-3 | [BOARD index and briefs; DECISIONS format](briefs/DOC-3.md) | DOC-1 | merged (#356) |
 | DOC-2 | [doclint and cause metrics](briefs/DOC-2.md) | DOC-3 | merged (#357) |
