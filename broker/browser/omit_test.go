@@ -131,6 +131,11 @@ func TestCRED4PasswordValueScrubbedFromOtherNames(t *testing.T) {
 		{"- textbox [ref=e5]: 'it''s'\n- button \"it's\" [ref=e6]", "it's"},
 		{"- textbox [ref=e5]: q\"u\\o\n- button \"q\\\"u\\\\o\" [ref=e6]", `u\\o`},
 		{"- textbox [ref=e5]: hun   ter2\n- button \"hun ter2\" [ref=e6]", "hun ter2"},
+		{"- 'row \"Login: it''s\" [ref=e2]':\n  - textbox \"Password\" [ref=e5]: it's", "it''s"},
+		{"- textbox \"Password\" [ref=e5]: it's\n- 'button \"Show: it''s\" [ref=e7]'", "it''s"},
+		{"- textbox [ref=e5]: \"it's: x\"\n- 'cell \"it''s: x\" [ref=e8]'", "it''s: x"},
+		{"- 'row \"Password: pa''ss\" [ref=e3]':\n  - textbox \"Password\" [ref=e5]: pa'ss", "pa''ss"},
+		{"- textbox [ref=e5]: 'q\"u''s'\n- 'button \"Show: q\\\"u''s\" [ref=e7]'", "u''s"},
 	} {
 		got := OmitValues(c.in, refs)
 		if strings.Contains(got, c.secret) || !strings.Contains(got, "[ref=e5]") {

@@ -139,8 +139,9 @@ func omitChild(line string) (string, string) {
 }
 
 // valueForms are the ways a value can appear in another element's
-// accessible name: as is, with whitespace collapsed, and JSON-escaped
-// inside a quoted name.
+// accessible name: as is, with whitespace collapsed, JSON-escaped inside
+// a quoted name, and each of those with ' doubled, because a key that
+// needs YAML quoting (a name holding ": ", for one) is single-quoted.
 func valueForms(values []string) []string {
 	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	seen := map[string]bool{}
@@ -148,11 +149,13 @@ func valueForms(values []string) []string {
 	for _, v := range values {
 		for _, d := range []string{v, yamlValue(v)} {
 			c := strings.Join(strings.Fields(d), " ")
-			for _, f := range []string{d, c, esc.Replace(d), esc.Replace(c)} {
-				f = strings.TrimSpace(f)
-				if f != "" && !strings.Contains(f, "\x00") && !seen[f] {
-					seen[f] = true
-					forms = append(forms, f)
+			for _, e := range []string{d, c, esc.Replace(d), esc.Replace(c)} {
+				for _, f := range []string{e, strings.ReplaceAll(e, "'", "''")} {
+					f = strings.TrimSpace(f)
+					if f != "" && !strings.Contains(f, "\x00") && !seen[f] {
+						seen[f] = true
+						forms = append(forms, f)
+					}
 				}
 			}
 		}
