@@ -227,7 +227,7 @@ class CONV0Test(unittest.TestCase):
                                     ("2026-10-12T09:00:00-04:00", "| N-2 | plain | — | queued |\n")]), [])
 
     def test_a_row_merged_in_from_main_keeps_the_date_it_first_landed(self):
-        # REQ: CONV-0-5. A branch that merges main must not date main's older rows by the merge commit.
+        # A branch that merges main must not date main's older rows by the merge commit.
         row = "| O-1 | old (release, tier A) | — | queued (release) |\n"
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
