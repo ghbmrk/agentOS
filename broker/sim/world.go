@@ -25,6 +25,9 @@ var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 type policy struct {
 	s      *sim
 	grants map[string]bool
+	// stale holds, per intent, the decision a dispatch check made before
+	// its nested operation ran; only MutantStaleRecheck reads it.
+	stale map[string]error
 }
 
 var errNoGrant = errors.New("no grant for this account")
@@ -33,16 +36,28 @@ func (p *policy) Check(_ context.Context, phase journal.Phase, in journal.Intent
 	if in.Account == journal.BrokerAccount {
 		return nil
 	}
-	if phase == journal.PhaseDispatch {
-		p.s.interleave("check " + in.ID)
-		if p.s.cfg.Mutant == MutantNoRecheck {
-			return nil
-		}
-	}
+	// Read the grant first, so a revoke nested below lands between this
+	// read and the dispatched record: the window the engine's recheck
+	// closes (OP-3).
+	var err error
 	if !p.grants[in.Account] {
-		return errNoGrant
+		err = errNoGrant
 	}
-	return nil
+	if phase != journal.PhaseDispatch {
+		return err
+	}
+	if prev, ok := p.stale[in.ID]; ok && p.s.cfg.Mutant == MutantStaleRecheck {
+		// The engine checks again because something was journaled during
+		// the first check; the mutant answers from before that change.
+		delete(p.stale, in.ID)
+		return prev
+	}
+	p.s.interleave("check " + in.ID)
+	if p.s.cfg.Mutant == MutantNoRecheck {
+		return nil
+	}
+	p.stale[in.ID] = err
+	return err
 }
 
 // rebuild replays every grant change the journal shows as succeeded.

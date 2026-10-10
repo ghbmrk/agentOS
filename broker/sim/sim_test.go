@@ -97,9 +97,10 @@ func TestMutantsAreFoundWithinTheSeedBudget(t *testing.T) {
 		m    Mutant
 		rule string
 	}{
-		{MutantNoRecheck, "OP-3"},  // dispatch skips the recheck
-		{MutantSkipFsync, "OP-4"},  // Append returns before the line is durable
-		{MutantTornErase, "CAP-3"}, // the erase rewrite is acknowledged before the directory is synced
+		{MutantNoRecheck, "OP-3"},    // dispatch skips the recheck
+		{MutantStaleRecheck, "OP-3"}, // the recheck after a change during the check is stale
+		{MutantSkipFsync, "OP-4"},    // Append returns before the line is durable
+		{MutantTornErase, "CAP-3"},   // the erase rewrite is acknowledged before the directory is synced
 	}
 	for _, c := range cases {
 		_, r := firstFailure(t, c.m, 50)

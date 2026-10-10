@@ -20,6 +20,10 @@ type Mutant string
 const (
 	// MutantNoRecheck skips the authority recheck at dispatch (OP-3).
 	MutantNoRecheck Mutant = "no-recheck"
+	// MutantStaleRecheck answers the engine's second check, made because
+	// something was journaled during the first, with the first decision:
+	// as if the engine's e.seq guard were gone (OP-3).
+	MutantStaleRecheck Mutant = "stale-recheck"
 	// MutantSkipFsync acknowledges an append before it is durable (OP-4).
 	MutantSkipFsync Mutant = "skip-fsync"
 	// MutantTornErase acknowledges the erase rewrite before the directory
@@ -85,7 +89,7 @@ func Run(cfg Config) Result {
 	}
 	s := &sim{cfg: cfg, rng: rand.New(rand.NewSource(cfg.Seed)), clock: &Clock{t: epoch}, ctx: context.Background()}
 	s.disk = newDisk(s.rng, cfg.Mutant, s.log)
-	s.pol = &policy{s: s, grants: map[string]bool{}}
+	s.pol = &policy{s: s, grants: map[string]bool{}, stale: map[string]error{}}
 	s.svc = &service{s: s, applied: map[string]int{}, keys: map[string]bool{}, took: map[string]bool{}}
 	s.boot()
 	for _, a := range accounts {
@@ -247,6 +251,7 @@ func (s *sim) submit(in journal.Intent) {
 }
 
 func (s *sim) dispatch(id string) {
+	delete(s.pol.stale, id)
 	st, err := s.eng.Dispatch(s.ctx, id)
 	state := string(st.State)
 	if errors.Is(err, journal.ErrRecheck) {
