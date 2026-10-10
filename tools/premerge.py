@@ -3,24 +3,38 @@
 
   tools/premerge.py [--base origin/main] <reviewed-sha> [head]
 
-Compares each file's diff against the base (`base...sha`, by `git patch-id --stable`) for the reviewed
-commit and for `head` (default HEAD). Prints `same` and exits 0, or `changed <files>` and exits 1: those
+Compares each file's diff against the base (`base...sha`) for the reviewed commit and for `head` (default
+HEAD), by a SHA-256 of the exact diff bytes: whitespace, binary content and modes count. Only `index`
+lines and hunk line numbers are dropped, so main merged in elsewhere reads as same. Not `git patch-id`:
+it ignores whitespace, so an indentation-only change that flips a branch would read as same. Prints `same` and exits 0, or `changed <files>` and exits 1: those
 files need a delta review. Git only, no network; fetch first. Patch ids include context lines, so an
 unrelated base change next to a hunk reads as changed: conservative, never unsafe.
 """
+import hashlib
+import re
 import subprocess
 import sys
 
+# Pinned so local config (renames, algorithm, external or textconv drivers, colour) cannot change the bytes.
+DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--binary", "--full-index",
+        "--diff-algorithm=myers", "--src-prefix=a/", "--dst-prefix=b/"]
+HUNK = re.compile(rb"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@.*$")
 
-def _git(cwd, *args, stdin=None):
-    return subprocess.run(["git", *args], cwd=cwd, input=stdin, check=True, capture_output=True, text=True).stdout
+
+def _git(cwd, *args):
+    return subprocess.run(["git", "-c", "core.quotePath=true", *args], cwd=cwd, check=True, capture_output=True).stdout
+
+
+def _fingerprint(patch):
+    lines = [b"@@" if HUNK.match(l) else l for l in patch.split(b"\n") if not l.startswith(b"index ")]
+    return hashlib.sha256(b"\n".join(lines)).hexdigest()
 
 
 def _ids(cwd, base, sha):
     out = {}
-    for f in _git(cwd, "diff", "--name-only", f"{base}...{sha}").splitlines():
-        patch = _git(cwd, "diff", f"{base}...{sha}", "--", f)
-        out[f] = _git(cwd, "patch-id", "--stable", stdin=patch).split()[:1]
+    for f in _git(cwd, *DIFF, "--name-only", "-z", f"{base}...{sha}").decode(errors="surrogateescape").split("\0"):
+        if f:
+            out[f] = _fingerprint(_git(cwd, *DIFF, f"{base}...{sha}", "--", f":(literal){f}"))
     return out
 
 

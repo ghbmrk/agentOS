@@ -65,6 +65,29 @@ class PremergeTest(unittest.TestCase):
         self.commit("after the accept")
         self.assertEqual(self.check(reviewed), ["b.txt"])
 
+    def test_an_indentation_only_push_that_flips_a_decision_is_changed(self):
+        # Reported 2026-10-10: patch-id ignores whitespace, so this read as `same`.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("auth.py", "def allowed(user):\n    ok = False\n    if user.admin:\n        log(user)\n        ok = True\n    return ok\n")
+        reviewed = self.commit("pr: only admins")
+        self.write("auth.py", self.read("auth.py").replace("        ok = True\n", "    ok = True\n"))
+        self.commit("dedent: everyone allowed")
+        self.assertEqual(self.check(reviewed), ["auth.py"])
+
+    def test_a_whitespace_only_change_is_changed(self):
+        reviewed = self.pr()
+        self.write("a.txt", self.read("a.txt").replace("line two\n", "line  two\n"))
+        self.commit("spacing")
+        self.assertEqual(self.check(reviewed), ["a.txt"])
+
+    def test_a_binary_change_is_changed(self):
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "blob.bin").write_bytes(b"\x00\x01deny")
+        reviewed = self.commit("pr")
+        (self.r / "blob.bin").write_bytes(b"\x00\x01allow")
+        self.commit("later")
+        self.assertEqual(self.check(reviewed), ["blob.bin"])
+
     def test_cli_exit_codes(self):
         reviewed = self.pr()
         run = lambda: subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--base", "main", reviewed],
