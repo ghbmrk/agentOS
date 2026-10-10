@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
 )
 
@@ -124,47 +125,7 @@ func writeMeta[T role](name string, m *metadata.Metadata[T]) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(name, b, 0o644)
-}
-
-func writeAtomic(name string, b []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(name), ".tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), name); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(name))
-}
-
-// syncDir makes a rename in dir durable across power loss.
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	err = d.Sync()
-	if cerr := d.Close(); err == nil {
-		err = cerr
-	}
-	return err
+	return durable.WriteFile(name, b, 0o644)
 }
 
 // latest returns the highest published version of a versioned role, or 0.
@@ -447,17 +408,20 @@ func (r Repo) storeTarget(targetPath, local string) (*metadata.TargetFiles, erro
 		return nil, err
 	}
 	defer os.Remove(out.Name())
-	if _, err := io.Copy(out, f); err != nil {
-		out.Close()
+	_, err = io.Copy(out, f)
+	if err == nil {
+		err = out.Chmod(0o644)
+	}
+	if err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
 		return nil, err
 	}
-	if err := out.Close(); err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(out.Name(), 0o644); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(out.Name(), dst); err != nil {
+	if err := durable.Rename(out.Name(), dst); err != nil {
 		return nil, err
 	}
 	raw, _ := hex.DecodeString(sum)
@@ -631,7 +595,7 @@ func (r Repo) Refresh(snapshot, timestamp ed25519.PrivateKey) error {
 	if err := signAs(root, metadata.TIMESTAMP, ts, timestamp); err != nil {
 		return err
 	}
-	if err := writeAtomic(r.p("metadata", fmt.Sprintf("%d.snapshot.json", snap.Signed.Version)), sb, 0o644); err != nil {
+	if err := durable.WriteFile(r.p("metadata", fmt.Sprintf("%d.snapshot.json", snap.Signed.Version)), sb, 0o644); err != nil {
 		return err
 	}
 	return writeMeta(r.p("metadata", "timestamp.json"), ts)

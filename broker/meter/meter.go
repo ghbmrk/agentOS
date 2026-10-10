@@ -43,13 +43,14 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // Limits is an amount of model use: calls and tokens.
@@ -251,31 +252,7 @@ func (m *Meter) save() error {
 	if err != nil {
 		return err
 	}
-	tmp := m.cfg.Path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, m.cfg.Path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(m.cfg.Path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return durable.WriteFile(m.cfg.Path, b, 0o600)
 }
 
 // sum totals the buckets inside the window ending now.

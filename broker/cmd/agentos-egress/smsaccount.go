@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/sipsign"
 	"github.com/ghbmrk/agentos/broker/smsapi"
@@ -323,7 +324,7 @@ func (s smsStore) SetMark(m smsapi.Mark, gen uint64) error {
 	if gen != s.c.smsGen {
 		return errSMSStale
 	}
-	return writeFileAtomic(s.c.smsMarkPath(), raw)
+	return durable.WriteFile(s.c.smsMarkPath(), raw, 0o600)
 }
 
 // Allow checks a MESSAGE or INVITE before sign.sock signs it: the same
