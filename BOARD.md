@@ -619,4 +619,4 @@ Promoted by Mark on 2026-10-10 ("Can just become a row", "Just bypass gap list";
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| PAYCAP-1 | [Spend limits the card issuer enforces: a merchant-locked, capped virtual card for the box, a backstop that holds if the broker is compromised](briefs/PAYCAP-1.md) (stub; no friction in normal use; declines reach the owner as a digest line) | — | queued (A) |
+| PAYCAP-1 | [Spend limits the card issuer enforces: one owner-made, monthly-capped virtual card for the box, a backstop that holds if the broker is compromised](briefs/PAYCAP-1.md) (stub; no friction in normal use; declines reach the owner as a digest line) | — | queued (A) |
