@@ -1,29 +1,32 @@
-# DOC-5: LATER records sweep (docs and tooling rows)
+# DOC-5: doclint catches BOARD and LATER contradictions
 
-Done at the coordinator's request on 2026-10-09, **a deviation from D-048** (LATER rows are held until the first release). The PR does not merge until the owner confirms the exception. No SPEC IDs; the requirement IDs below are this brief's own.
+Board section: Owner-benefit review (2026-10-09). Finding from the 2026-10-09 owner-benefit review (point 4): LATER.md:6 said P2-1 "has no board row" while BOARD had one, and BOARD said "in review (#41)" after #41 merged. The coordinator fixed both by hand in the records PR that opened this row. These checks stop it from recurring for the cases a PR gate can see. DOC-6 covers the case it cannot (merge state).
 
-**Needs:** DOC-2, DOC-4
+**Tier:** C (`tools/doclint.py`, tests). Sonnet-class builder. About 30k tokens.
 
-**Scope:** `LATER.md`, `tools/doclint.py`, `tests/test_doclint.py`, `docs/OPERATING.md` §2 and §4 step 1, `reviews/{security,potency}/README.md`, `briefs/OSS-10w2.md` (one line), this brief and its BOARD row.
+**Needs:** nothing.
 
-## Rows and acceptance
+## Today
 
-| Row | Action | Check |
-|---|---|---|
-| DOC-2 f1 | doclint: Decision cell over 300 characters must link `decisions/D-NNN.md`; links resolve | DOC5-1 |
-| W3-forget-b f1 | doclint flags `**State:**` in briefs; the one existing line (OSS-10w2) removed | DOC5-2 |
-| DOC-4 f1 | Record accepts `PR none · package none · main <sha>` | DOC5-3 |
-| DOC-4 f2, f3, f7, f8 | dated names in lens dirs; Record line directly under the title; lens dirs found on disk, tracked files only in git; "lowercase hex" message | DOC5-3, DOC5-4 |
-| DOC-4 f5, f6 | "Requested reviews" pointer in the security and potency READMEs; one-command run index in OPERATING §4 step 1 | doclint passes |
-| OSS-6s-a f4 | OPERATING §2 line: Findings names the LATER rows a PR removes | doclint passes |
-| APPLY-dup | already fixed: `broker/apply/ASSUMPTIONS.md` has A1–A8 once each (DOC-4 duplicate-ID check); row removed | DOC5-5 |
-| CRED-5 f6 | no second D-061 in DECISIONS.md or `decisions/`; row removed | DOC5-5 |
-| P2-2a f1 | merged per BOARD (#329); row removed | — |
+`tools/doclint.py` (DOC-2) checks BOARD state cells against `metrics.STATES`, brief links, the README docs table, OPERATING § references, review `Record:` lines, duplicate ASSUMPTIONS IDs and the brief token cap. `lint(root)` concatenates seven generator checks. It reads LATER.md for nothing.
 
-Left in LATER.md: DOC-3 f1 (inferred rows not recorded, shallow history), DOC-3 f2 (waits on the license), DOC-4 f4 (open PR #430 appends U16 to the same file). New later row DOC-5 f1: D-062 exceeds 300 characters unlinked, so doclint exempts it.
+LATER.md has three tables keyed by first-cell ID: `| ID | Needed for | Note |` (Release), `| ID | Why it can wait |` (Later) and `| ID | Component | Why |` (Reuse candidates). About 79 of its IDs are also BOARD IDs. **That overlap is by design** (LATER classes open BOARD rows), so sharing an ID is not an error.
 
-## Requirements
+## Requirements (local IDs)
 
-1. DOC5-1: decision length/link check. 2. DOC5-2: `**State:**` flag. 3. DOC5-3: Record forms. 4. DOC5-4: lens directory handling. 5. DOC5-5: the repository passes `tools/doclint.py`.
+- **DOC-5a, a LATER row whose BOARD row is merged or dropped.** For each first-cell ID in the Release and Later tables that is also a BOARD ID, an error if the BOARD state is `merged` or `dropped` (LATER's own summary says rows since merged are removed). IDs with a suffix LATER uses for findings (`<ID> l1`, `<ID> f1`, `<ID> c3 r3`) are matched on their own first cell only, so they are not checked against the parent.
+- **DOC-5b, "no board row" claims.** An error when LATER.md prose or a table cell says an ID "has no board row" (or "no row of its own") and BOARD has that ID. The same check applies to BOARD.md's own prose paragraphs.
+- **DOC-5c, duplicate BOARD IDs.** An error when two BOARD rows share a first-cell ID (one exists at 9b4bf8a; the builder finds it and fixes it in this PR, or the coordinator does if it needs a judgment call).
+- **DOC-5d, blocked-on a merged row.** A warning-class error when a row's state says `blocked on <ID>` and `<ID>`'s BOARD state is `merged`. Report it as an error; doclint has no warnings, and the fix is a one-word edit.
 
-**Estimate:** under 60k tokens.
+## Tests (`tests/test_doclint.py`, written first, using the `GOOD` fixture pattern)
+
+One failing and one passing case per requirement. Add the overlap case: a LATER row sharing an open BOARD ID passes. Add the suffix case: `X-1 l1` in LATER with `X-1` merged passes.
+
+## Scope
+
+`tools/doclint.py`, `tests/test_doclint.py`, and BOARD.md and LATER.md only for the errors the new checks find at the branch point (each fix listed in the PR).
+
+## Not in scope
+
+Merge state from GitHub (DOC-6). Rewriting LATER's audit.

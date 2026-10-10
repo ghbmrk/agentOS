@@ -1,9 +1,10 @@
 """Tests for tools/doclint.py, the operating-document consistency check (BOARD row DOC-2).
 
-No SPEC.md IDs: PLAN.md tooling. DOC-5 requirement IDs (briefs/DOC-5.md) are claimed below.
+No SPEC requirement IDs: PLAN.md tooling, not SPEC.md behaviour. DOC-7 requirement IDs
+(briefs/DOC-7.md) are claimed below; CONV0Test claims the CONV-0 brief's IDs (briefs/CONV-0.md).
 All data is synthetic.
 
-REQ: DOC5-1, DOC5-2, DOC5-3, DOC5-4, DOC5-5
+REQ: DOC7-1, DOC7-2, DOC7-3, DOC7-4, DOC7-5
 """
 import pathlib
 import subprocess
@@ -107,7 +108,8 @@ class LintTest(unittest.TestCase):
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
                          ["broker/x/ASSUMPTIONS.md:4: duplicate ID 1 (first on line 3)"])
 
-    # DOC-5: records sweep
+
+    # DOC-7: records sweep
 
     def test_record_without_pr_or_package_may_cite_a_main_commit(self):
         files = {"reviews/security/2026-10-09-sweep.md": "# S\n\nRecord: PR none · package none · main 0123abc\n"}
@@ -173,6 +175,72 @@ class LintTest(unittest.TestCase):
     def test_brief_with_its_own_state_line(self):
         got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**State:** building\n"})
         self.assertEqual(got, ["briefs/A-1.md:3: `**State:**` line; BOARD.md is the only record of state"])
+
+
+HEAD = "| ID | Package | Needs | State |\n|---|---|---|---|\n"
+
+
+class CONV0Test(unittest.TestCase):
+    """REQ CONV-0-5 (a BOARD row added on or after 2026-10-10 whose state says `release`
+    must name an acceptance test or invariant)."""
+    ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid", "PATH": "/usr/bin:/bin"}
+
+    def repo(self, history, spec="Requirements DEP-1 and CRED-4 are normative.\n"):
+        """history: [(commit date, BOARD.md rows added)]; returns lint problems for the final tree."""
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            git = lambda *a, date: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True,
+                                                 env={**self.ENV, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date})
+            git("init", "-q", "-b", "main", date="2026-10-01T00:00:00-04:00")
+            readme = GOOD["README.md"].replace("| [BOARD.md](BOARD.md) |", "| [BOARD.md](BOARD.md) |\n| [SPEC.md](SPEC.md) |")
+            for name, text in {**GOOD, "README.md": readme, "SPEC.md": spec}.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(text)
+            rows = ""
+            for date, add in history:
+                rows += add
+                (root / "BOARD.md").write_text(HEAD + "| A-1 | [a](briefs/A-1.md) | — | in review (#1) |\n" + rows)
+                git("add", ".", date=date)
+                git("commit", "-qm", "x", date=date)
+            return doclint.lint(root)
+
+    def test_new_release_row_without_a_test_or_invariant_is_flagged(self):
+        got = self.repo([("2026-10-10T09:00:00-04:00", "| N-1 | thing (release, tier A) | — | queued (release) |\n")])
+        self.assertEqual(len(got), 1)
+        self.assertIn("BOARD.md: N-1", got[0])
+        self.assertIn("acceptance test or invariant", got[0])
+
+    def test_new_release_row_naming_a_spec_id_invariant_or_test_passes(self):
+        rows = ("| N-1 | thing (release; CRED-4) | — | queued |\n"
+                "| N-2 | thing | — | queued (release, Invariant 3) |\n"
+                "| N-3 | thing (release, TestNoThirdPersonSelfReference) | — | queued |\n")
+        self.assertEqual(self.repo([("2026-10-10T09:00:00-04:00", rows)]), [])
+
+    def test_a_token_that_is_not_a_spec_id_does_not_count_and_the_row_id_is_ignored(self):
+        rows = ("| DEP-1 | thing (release, A9, UX3-1) | — | queued |\n")
+        self.assertEqual(len(self.repo([("2026-10-10T09:00:00-04:00", rows)])), 1)
+
+    def test_older_rows_are_exempt_and_only_the_adding_commit_counts(self):
+        row = "| O-1 | old (release, tier A) | — | queued (release) |\n"
+        self.assertEqual(self.repo([("2026-10-09T23:00:00-04:00", row),
+                                    ("2026-10-12T09:00:00-04:00", "| N-2 | plain | — | queued |\n")]), [])
+
+    def test_rows_that_do_not_say_release_are_not_checked(self):
+        self.assertEqual(self.repo([("2026-10-11T09:00:00-04:00", "| N-1 | the first release needs it | — | queued |\n")]), [])
+
+    def test_no_git_history_skips_the_check(self):
+        # The fixture directory used by the other tests is not a git repository.
+        board = GOOD["BOARD.md"] + "| N-1 | thing (release) | — | queued (release) |\n"
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for name, text in {**GOOD, "BOARD.md": board}.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(text)
+            self.assertEqual(doclint.lint(root), [])
+
+    def test_main_files_pass(self):
+        self.assertEqual(doclint.lint(ROOT), [])
 
 
 if __name__ == "__main__":

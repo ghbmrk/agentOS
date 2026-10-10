@@ -12,6 +12,8 @@
                 head or main SHA)
   DECISIONS.md  a Decision cell over 300 characters links decisions/D-NNN.md (D-056); links resolve
   ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md
+  BOARD.md      a row added on or after RELEASE_FROM whose state says `release` (or whose package
+                says `(release`) names an acceptance test or invariant (D-085, CONV-0-5)
   briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4, and
                 none keeps its own `**State:**` line (BOARD.md is authoritative)
 
@@ -30,11 +32,16 @@ BRIEF_TOKENS = 20_000
 OPERATING_REF = re.compile(r"OPERATING(?:\.md)?\s*§\s*(\d+)(?:\s*[–-]\s*(\d+))?")
 RECORD_FROM = "2026-10-09"
 DECISION_CHARS = 300
-LONG_DECISION_OK = ("D-062", "D-087", "D-088", "D-089")  # over 300 characters, no link yet (LATER DOC-5 f1)
+LONG_DECISION_OK = ("D-062", "D-087", "D-088", "D-089")  # over 300 characters, no link yet (LATER DOC-7 f1)
 STATE_LINE = re.compile(r"^\*\*State:\*\*")
 RECORD_FILE = re.compile(r"(\d{4}-\d\d-\d\d)-.+\.md$")
 RECORD_FIELDS = (re.compile(r"\bPRs? (?:#\d+|none)\b"), re.compile(r"\bpackages? \S"),
                  re.compile(r"\b(?:heads?|main) [0-9a-f]{7,40}\b"))
+RELEASE_FROM = "2026-10-10"
+RELEASE_STATE = re.compile(r"\brelease\b")
+RELEASE_CLASS = re.compile(r"\(release\b")
+ACCEPTANCE = re.compile(r"\bInvariant\b|\bTest[A-Z]\w+")
+SPEC_ID = re.compile(r"\b[A-Z][A-Z0-9]*-\d+[a-z]?\b")
 LINK = re.compile(r"\]\(([^)#\s]+)")
 
 
@@ -46,6 +53,45 @@ def board(root):
         for link in LINK.findall(" ".join(cells)):
             if link.startswith("briefs/") and not (root / link).is_file():
                 yield f"BOARD.md: {cells[0]}: links missing {link}"
+
+
+def board_added(root):
+    """{row ID: date of the first-parent commit that first added it}; None without usable history."""
+    try:
+        if _git(root, "rev-parse", "--is-shallow-repository").strip() != "false":
+            return None  # a grafted tip would date every row as new
+        log = _git(root, "log", "--first-parent", "--reverse", "-p", "--format=%x01%cI", "--", "BOARD.md")
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    added, date = {}, None
+    for line in log.splitlines():
+        if line.startswith("\x01"):
+            date = line[1:]
+        elif line.startswith("+| "):
+            added.setdefault(line[1:].strip("| ").split(" |")[0].strip(), date)
+    return added
+
+
+def _git(root, *args):
+    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout
+
+
+def release_rows(root):
+    rows = [c for c in _rows((root / "BOARD.md").read_text(), "| ID |")
+            if RELEASE_STATE.search(c[-1]) or RELEASE_CLASS.search(" ".join(c[1:-1]))]
+    added = board_added(root) if rows else None
+    if not added:
+        return
+    spec = root / "SPEC.md"
+    spec_ids = set(SPEC_ID.findall(spec.read_text())) if spec.is_file() else set()
+    for cells in rows:
+        when = added.get(cells[0])
+        if when is None or when[:10] < RELEASE_FROM:
+            continue
+        text = " ".join(cells[1:])
+        if not (ACCEPTANCE.search(text) or spec_ids & set(SPEC_ID.findall(text))):
+            yield (f"BOARD.md: {cells[0]}: a release row added {when[:10]} names no acceptance test or invariant "
+                   "(a SPEC requirement ID, `Invariant`, or `TestName`; D-085)")
 
 
 def readme(root):
@@ -170,7 +216,7 @@ def markdown_files(root):
 def lint(root):
     root = pathlib.Path(root)
     files = markdown_files(root)
-    return [*board(root), *readme(root), *rule_files(root), *operating_refs(root, files),
+    return [*board(root), *release_rows(root), *readme(root), *rule_files(root), *operating_refs(root, files),
             *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files)]
 
 

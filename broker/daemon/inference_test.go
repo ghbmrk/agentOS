@@ -649,12 +649,10 @@ func TestEscapeOKNamesTheLoopRunners(t *testing.T) {
 
 // envExempt are the functions in non-test broker code that start a child
 // without an explicit environment, so it inherits the process's, and why
-// each may. Only test fixtures outside the image remain (P3-4b-3r-env);
+// each may. None remain: the last two, the test fixtures swtpm and
+// quotatest, start through childproc since P3-4b-3r-env-r8b;
 // TestEnvExemptionsAreTestFixturesOnly pins that no binary links one.
-var envExempt = map[string]string{
-	"tpmseal/swtpm/swtpm.go:start":    "the software TPM, a test fixture outside the image",
-	"quota/quotatest/quotatest.go:On": "mkfs and mount in a test helper, outside the image",
-}
+var envExempt = map[string]string{}
 
 // launcherPkgs are the packages whose calls start a child or read the
 // process's environment, with their default names.

@@ -61,11 +61,10 @@ sys.stdin.read()`)
 	const canaryURLToken = "s5CanaryUrlTokenR2d2C3po4BB8Kx9" // planted by the fixture
 	const canaryShown = "sk-ant-s5canaryDisplayedKey0123456789abcdef"
 	g, err := Start(context.Background(), Config{
-		Driver:    []string{py, filepath.Join(s5, "executor.py")},
+		Driver:    wrapDriver(t, []string{py, filepath.Join(s5, "executor.py")}, []string{"S5_CHROME=" + chrome}),
 		Origins:   []string{site},
 		Workspace: filepath.Join(t.TempDir(), "ws"),
 		Scrub:     vault.NewRedactor([][]byte{[]byte(canaryShown)}),
-		Env:       []string{"S5_CHROME=" + chrome},
 		Timeout:   60 * time.Second,
 	})
 	if err != nil {
