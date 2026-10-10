@@ -682,11 +682,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | RT-1 l3 | PR #705 reviews (recheck): outside image/ and the A broker packages, only .service/.socket/.timer and *.conf under a systemd dir are A; .path, .mount, .slice, .target, .automount, .swap, *.service.d/ drop-ins, tmpfiles.d, sysusers.d, udev and polkit files would be B. None exist there today |
 | RT-1 l4 | PR #705 reviews: hand-typed paths are not normalised (`.//image/x`, `/image/x`, `docs/../image/x`, backslashes); a nested `guest/x/sub/package.json` is B; a whitespace-only name is dropped. `--git` mode never emits these forms |
 | RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
-| SIM l1 | recheck: erase by deleting a per-subject key in the vault (crypto-shredding), so FORGET reaches backups and snapshots without rewriting; after SIM-erase, when restore-time forget is the pain (D-095) |
-| SIM l2 | recheck: policy as data (grants, pacing classes, adoption and retry rules) with one small evaluator inside the floor; when a policy change needs code twice (D-095) |
-| SIM l3 | recheck: capability grants scoped per intent instead of per account; after SIM-core (D-095) |
-| SIM l4 | recheck: deterministic simulation of the broker state machine (seeded scheduler, fake clock and fs) driving SIM-check; after SIM-check (D-095) |
-| SIM l6 | recheck: repo as the log: issues and PRs with labels as work items, BOARD, TRACE and METRICS generated, doclint retired; one-time migration (D-095) |
 
 ## Reuse candidates
 | ID | Component | Why |
