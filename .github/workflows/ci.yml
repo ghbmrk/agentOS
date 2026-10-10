@@ -45,6 +45,8 @@ jobs:
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
         run: python tools/doclint.py
+      - name: BOARD.md round-trips through its work-item issues (SIM-repo-1)
+        run: python tools/board.py check
       - name: PR leaves TRACE.md to trace.yml
         if: github.event_name == 'pull_request'
         # HEAD is the PR's test merge (base^1, branch^2). Three dots compare the branch with
