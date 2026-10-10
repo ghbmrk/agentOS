@@ -686,7 +686,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SIM l2 | recheck: policy as data (grants, pacing classes, adoption and retry rules) with one small evaluator inside the floor; when a policy change needs code twice (D-095) |
 | SIM l3 | recheck: capability grants scoped per intent instead of per account; after SIM-core (D-095) |
 | SIM l4 | recheck: deterministic simulation of the broker state machine (seeded scheduler, fake clock and fs) driving SIM-check; after SIM-check (D-095) |
-| SIM l5 | recheck: pull-first owner surface (one current-state view, push only urgent alerts and blocking questions); a product call for Mark (D-095) |
 | SIM l6 | recheck: repo as the log: issues and PRs with labels as work items, BOARD, TRACE and METRICS generated, doclint retired; one-time migration (D-095) |
 
 ## Reuse candidates

@@ -14,7 +14,7 @@ Board section: Simplification (2026-10-10). Decision: D-095. Analysis: the simpl
 
 The verb is the intent lifecycle: intent, authorized, dispatched, observed, settled, judged.
 
-**Order.** Wave 0 fixes foundation defects and needs no spec change. Wave 1: SIM-check, SIM-proj and SIM-cases need no spec change and can start at once; SIM-owner-hold, SIM-owner-digest, SIM-outcome and SIM-erase need SIM-sd. Wave 2 migrates consumers and deletes the duplicates. Each package is one session; tier A packages run on the strongest model.
+**Order.** Wave 0 fixes foundation defects and needs no spec change. Wave 1: SIM-check, SIM-proj and SIM-cases need no spec change and can start at once; SIM-owner-hold, SIM-pull, SIM-outcome and SIM-erase need SIM-sd. Wave 2 migrates consumers and deletes the duplicates. Each package is one session; tier A packages run on the strongest model.
 
 **Rule for every package.** Deletion is the deliverable as much as the addition: each PR lists the lines, files and BOARD rows it retires. A package that adds a durable format outside the journal is rejected unless SIM-sd lists it as a documented cache.
 
@@ -54,7 +54,7 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 ## SIM-sd: L1 spec diff for one log (Mark approves)
 
-**Change to SPEC.** (1) The journal is the only durable source of truth; every other store is a projection rebuilt from it, or a cache named in SPEC with the journal offset it reflects. (2) Owner messages are intents: `owner.inform` with a subject and the subject's revision, rendered at dispatch, so OP-3 drops a message whose subject has moved on. (3) One outcome record per goal, revisable, latest revision wins (OP-7). (4) A learning mechanism is off until it beats the baseline on SPEC §1's objective on independent goals (LOOP-3). (5) FORGET erases in the journal and rebuilds projections (CAP-3).
+**Change to SPEC.** (1) The journal is the only durable source of truth; every other store is a projection rebuilt from it, or a cache named in SPEC with the journal offset it reflects. (2) Owner messages are intents: `owner.inform` with a subject and the subject's revision, rendered at dispatch, so OP-3 drops a message whose subject has moved on. (3) One outcome record per goal, revisable, latest revision wins (OP-7). (4) A learning mechanism is off until it beats the baseline on SPEC §1's objective on independent goals (LOOP-3). (5) FORGET erases in the journal and rebuilds projections (CAP-3). (6) Pull-first (Mark, 2026-10-10): STATUS is the owner's primary view; only urgent classes are pushed; the daily digest is removed from CH-15.
 
 **Acceptance.** Mark approves the diff. doclint and trace pass. **Usage estimate.** Small, under 40k tokens. Tier B.
 
@@ -80,19 +80,19 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 **Requirement IDs.** OP-3, OP-4, OP-9, CH-15, CAP-3. **Acceptance.** A guest reply accepted before a crash is delivered after restart (DEL-1's test, unchanged); a "Cleared" whose subject revised before dispatch is not sent; a forgotten subject's held text is not sent (r17); a flood of agent texts does not evict a held approval (r15); a security alert bypasses quiet hours (r13); a released text packed after a hold carries its held marker (r16); SIM-cases' hold cases pass. Net lines go down. **Usage estimate.** Under 130k tokens. Tier A.
 
-## SIM-owner-digest: the digest becomes a projection (tier A)
+## SIM-pull: STATUS is the owner's view; only urgent texts are pushed (tier A)
 
-**Needs.** SIM-owner-hold.
+**Needs.** SIM-owner-hold; SIM-sd carrying the pull-first rule (Mark chose pull-first, Decisions card 2026-10-10).
 
-**Change.** The digest is a projection over `owner.inform` intents of class digest, sent through the same dispatch path as every owner text. `broker/digestqueue` is deleted whole: its durability, leases, receipts, `Sender`, `Batch` and `Snapshot`, and the agentosd digest gate (`batchLeaks`, the "`Send` only in `sendReady`" rule) with it, since no batch object or second sender remains to leak or escape. The clock set-back notice (W5-Dc-r20) becomes a rule in the projection.
+**Change.** STATUS becomes one projection of the owner's open questions, results and alerts at their latest revision, always current. Push is kept only for urgent classes: approvals that block work, security alerts, STOP/RESUME confirmations, and the classes SPEC names as urgent. Everything else is no longer pushed; it appears in STATUS. The daily digest is deleted rather than rebuilt: `broker/digestqueue` in whole (durability, leases, receipts, `Sender`, `Batch`, `Snapshot`), the agentosd digest box, and the digest gate (`batchLeaks`, the "`Send` only in `sendReady`" rule). The pacer keeps only what urgent push needs.
 
-**Requirement IDs.** OP-3, OP-4, OP-9, CH-15, CAP-3. **Acceptance.** A carrier outage of any length does not stop new digest lines from being carried once the carrier returns (r18's case); exactly one dispatch path sends owner texts, checked by an import or call-site test (r21's case); no digest content reaches a log sink, checked by a test over the log output with a synthetic canary (r22's case); a clock set back shows one explaining line (r20); SIM-cases' digest cases pass. If any of `Sender`, `Batch` or the gate is kept, the PR reopens W5-Dc-r18, r21 and r22. Net lines go down. **Usage estimate.** Under 130k tokens. Tier A.
+**Requirement IDs.** OP-3, OP-4, OP-9, CH-2, CH-15, CAP-3 (as amended by SIM-sd). **Acceptance.** STATUS after a crash shows the same open items as before it; a resolved question leaves STATUS on its next read; a forgotten subject never appears in STATUS; an urgent text is pushed within quiet hours and a non-urgent one is not; exactly one dispatch path sends owner texts, checked by a call-site test (r21's case); no owner content reaches a log sink, checked with a synthetic canary (r22's case); no queue of unsent texts can fill during a carrier outage, because none is kept (r18's case); SIM-cases' digest cases are either met or listed as retired with the digest. Net lines go down. **Usage estimate.** Under 130k tokens. Tier A.
 
 ## SIM-cases: W5-D cases become tests against main (tier A)
 
 **Goal.** Mark chose (decision 1, 2026-10-10) to stop W5 building and keep the W5-D draft PRs open as reference, with their crash, acknowledgement and forget cases extracted as tests. This package owns that extraction so no case is lost when the drafts' mechanisms are not built.
 
-**Change.** Read each open W5-D draft PR and list every crash cut, acknowledgement and forget case it tests in `briefs/SIM-cases.md` (one line each: draft PR, case, the outcome the owner sees). Write each case as a test against main's observable behaviour (owner text sent or not, after restart or forget), not against the draft's internal types. Cases main already passes land as tests in this PR. Cases main fails are not skipped or quarantined: each is assigned in the list to SIM-owner-hold, SIM-owner-digest or SIM-erase, whose acceptance then includes it.
+**Change.** Read each open W5-D draft PR and list every crash cut, acknowledgement and forget case it tests in `briefs/SIM-cases.md` (one line each: draft PR, case, the outcome the owner sees). Write each case as a test against main's observable behaviour (owner text sent or not, after restart or forget), not against the draft's internal types. Cases main already passes land as tests in this PR. Cases main fails are not skipped or quarantined: each is assigned in the list to SIM-owner-hold, SIM-pull or SIM-erase, or listed as retired with the digest, whose acceptance then includes it.
 
 **Requirement IDs.** OP-4, CAP-3, CH-15. **Acceptance.** Every open W5-D draft PR appears in the list with its cases or "no owner-visible case"; each case is a passing test here or assigned to a named SIM package. **Usage estimate.** Under 120k tokens; split by draft range if the list exceeds 20k tokens. Tier A (agentosd tests).
 
