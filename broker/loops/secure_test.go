@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -25,11 +26,13 @@ type box struct {
 	adopted  map[string]string
 	live     map[string]string
 	expiries []Expiry
+	// signedErr and liveErr make the hash and drift checks fail to run.
+	signedErr, liveErr error
 }
 
 func (b *box) Box() Box {
 	return Box{
-		Signed: func() (map[string]string, error) { return b.signed, nil },
+		Signed: func() (map[string]string, error) { return b.signed, b.signedErr },
 		Artifacts: []Artifact{
 			{Name: "guest-image/openclaw", Contain: &Target{Kind: "executor", Name: "openclaw", Label: "the agent machine"}},
 			{Name: "dep/libfoo"},
@@ -44,7 +47,7 @@ func (b *box) Box() Box {
 		Installed:  func() ([]Package, error) { return b.pkgs, nil },
 		Advisories: func() (Snapshot, error) { return b.snap, nil },
 		Adopted:    func() (map[string]string, error) { return b.adopted, nil },
-		Live:       func() (map[string]string, error) { return b.live, nil },
+		Live:       func() (map[string]string, error) { return b.live, b.liveErr },
 		Expiries:   func() ([]Expiry, error) { return b.expiries, nil },
 	}
 }
@@ -378,7 +381,7 @@ func TestFindingHandling(t *testing.T) {
 	// Only the High finding is texted; the Low one is in the digest.
 	if len(r.texts) != 1 || !r.urgent[0] ||
 		!strings.Contains(r.texts[0], "Known vulnerability in openssl (ADV-1), fixed in 3.0.14.") ||
-		!strings.Contains(r.texts[0], "Paused the network gateway. It stays paused until you resume it; the box page will offer that in an update.") ||
+		!strings.Contains(r.texts[0], "Paused the network gateway. It stays paused until you resume it on my Wi-Fi page.") ||
 		strings.Contains(r.texts[0], "executor") || strings.Contains(r.texts[0], "grant") {
 		t.Fatalf("texts %q", r.texts)
 	}
@@ -396,7 +399,7 @@ func TestFindingHandling(t *testing.T) {
 	// and that the pause stays.
 	b.pkgs[0].Version = "3.0.14"
 	r.pass(t)
-	if len(r.texts) != 2 || !strings.Contains(r.texts[1], "Cleared: openssl. The network gateway stays paused until you resume it; the box page will offer that in an update.") {
+	if len(r.texts) != 2 || !strings.Contains(r.texts[1], "Cleared: openssl. The network gateway stays paused until you resume it on my Wi-Fi page.") {
 		t.Fatalf("cleared text %q", r.texts)
 	}
 	// Back within a day: handled again (contained, evidence), but not
@@ -580,7 +583,7 @@ func TestPausedAndFlapping(t *testing.T) {
 	b.pkgs[0].Version = "3.0.14"
 	r.pass(t)
 	d := strings.Join(r.g.Digest(), "\n")
-	if !strings.Contains(d, "Cleared: openssl. The network gateway stays paused until you resume it; the box page will offer that in an update.") {
+	if !strings.Contains(d, "Cleared: openssl. The network gateway stays paused until you resume it on my Wi-Fi page.") {
 		t.Fatalf("digest: %s", d)
 	}
 	must(t, r.g.Resumed(Target{Kind: "executor", Name: "egress", Label: "the network gateway"}))
@@ -588,27 +591,100 @@ func TestPausedAndFlapping(t *testing.T) {
 		t.Fatalf("after resume: %s", d)
 	}
 
-	// A High finding with nothing to pause flaps: texted once a day.
+	// A High finding with nothing to pause flaps. The owner is texted the
+	// alert and that it cleared (S39); a return within ReText after that
+	// texted "Cleared" is texted again, led "It is back: ", so their last
+	// text is never a false all-clear (L3 #585 point 1), and that
+	// return's own clearing is texted once more, so it never ends on "it
+	// is back" after it closed (P3-4b-3r-text). Later returns within
+	// ReText go to the digest only: at most four texts per ReText. The
+	// told mark survives a restart between the clear and the return
+	// (P3-4b-3r-told requirement 3; the json:"-" mutant fails here).
 	b2 := cleanBox()
 	b2.live["config/quiet.json"] = "edited"
 	r2 := newGuardRig(t, b2)
 	r2.pass(t)
-	for i := 0; i < 3; i++ {
-		b2.live["config/quiet.json"] = "c1"
-		r2.pass(t)
-		b2.live["config/quiet.json"] = "edited"
-		r2.pass(t)
+	b2.live["config/quiet.json"] = "c1"
+	r2.pass(t)
+	if len(r2.texts) != 2 || !strings.Contains(r2.texts[1], "Cleared: config/quiet.json.") {
+		t.Fatalf("texts %q, want the alert and one cleared", r2.texts)
 	}
-	if len(r2.texts) != 1 {
-		t.Fatalf("flapping texts %d, want 1", len(r2.texts))
+	r2.reopen(t)
+	b2.live["config/quiet.json"] = "edited"
+	r2.pass(t)
+	if len(r2.texts) != 3 || !strings.HasPrefix(r2.texts[2], "Security checks: It is back: Setting file config/quiet.json") {
+		t.Fatalf("return after a texted Cleared: texts %q, want it texted as back", r2.texts)
 	}
 	b2.live["config/quiet.json"] = "c1"
 	r2.pass(t)
+	if len(r2.texts) != 4 || !strings.Contains(r2.texts[3], "Cleared: config/quiet.json.") || r2.urgent[3] {
+		t.Fatalf("texts %q urgent %v, want the back's clearing texted once, not urgent", r2.texts, r2.urgent)
+	}
+	for i := 0; i < 3; i++ {
+		b2.live["config/quiet.json"] = "edited"
+		r2.pass(t)
+		b2.live["config/quiet.json"] = "c1"
+		r2.pass(t)
+	}
+	if len(r2.texts) != 4 {
+		t.Fatalf("flapping texts %q, want 4", r2.texts)
+	}
 	r2.now = r2.now.Add(25 * time.Hour)
 	b2.live["config/quiet.json"] = "edited"
 	r2.pass(t)
-	if len(r2.texts) != 2 {
-		t.Fatalf("texts after a day %d, want 2", len(r2.texts))
+	if len(r2.texts) != 5 || strings.Contains(r2.texts[4], "Cleared") || strings.Contains(r2.texts[4], "It is back") {
+		t.Fatalf("texts after a day %q, want a first alert again", r2.texts)
+	}
+}
+
+// P3-4b-3r-told requirement 1, through Pass: two texted findings share a
+// plain name (config/a! and config/a both read config/a). The one that
+// closes while the other is open says no "Cleared", so it is not marked,
+// and its return within ReText is digest-only. Its line is owed, so when
+// the name's last finding closes both are marked and each return is texted.
+func TestPassMarksOnlyAClearItSaid(t *testing.T) {
+	b := cleanBox()
+	b.live["config/a!"], b.live["config/a"] = "x", "y"
+	r := newGuardRig(t, b)
+	r.pass(t)
+	before := len(r.texts)
+	delete(b.live, "config/a!")
+	r.now = r.now.Add(time.Hour)
+	r.pass(t)
+	b.live["config/a!"] = "x"
+	r.now = r.now.Add(time.Hour)
+	r.pass(t)
+	if got := r.texts[before:]; len(got) != 0 {
+		t.Fatalf("held clear, then its return: texts %q", got)
+	}
+	delete(b.live, "config/a!")
+	delete(b.live, "config/a")
+	r.now = r.now.Add(25 * time.Hour)
+	r.pass(t)
+	if got := clearedTexts(r.texts, before); len(got) != 1 || len(r.g.st.ToldCleared) != 2 {
+		t.Fatalf("cleared %q, marked %v", got, r.g.st.ToldCleared)
+	}
+	// config/a!'s held line was owed and is said with config/a's, so both
+	// are marked (UX and Potency deltas on #644): the owner's last text
+	// about either is "Cleared", so a return of either is texted.
+	before = len(r.texts)
+	b.live["config/a"] = "y"
+	r.now = r.now.Add(time.Hour)
+	r.pass(t)
+	if got := r.texts[before:]; len(got) != 1 || !strings.HasPrefix(got[0], "Security checks: It is back: ") {
+		t.Fatalf("a marked return: texts %q", got)
+	}
+
+	b2 := cleanBox()
+	b2.live["config/a!"], b2.live["config/a"] = "x", "y"
+	r2 := newGuardRig(t, b2)
+	r2.pass(t)
+	delete(b2.live, "config/a!")
+	delete(b2.live, "config/a")
+	r2.now = r2.now.Add(time.Hour)
+	r2.pass(t)
+	if got := clearedTexts(r2.texts, 0); len(got) != 1 || len(r2.g.st.ToldCleared) != 2 {
+		t.Fatalf("closed together: cleared %q, marked %v", got, r2.g.st.ToldCleared)
 	}
 }
 
@@ -640,7 +716,7 @@ func TestOwnerText(t *testing.T) {
 	b2.pkgs[0].Version = "3.0.15" // no advisory
 	r2 := newGuardRig(t, b2)
 	r2.pass(t)
-	if len(r2.texts) != 1 || r2.urgent[0] || !strings.Contains(r2.texts[0], "Credential old-token has expired. Replace it on the box page.") {
+	if len(r2.texts) != 1 || r2.urgent[0] || !strings.Contains(r2.texts[0], "Credential old-token has expired. Replace it on my Wi-Fi page.") {
 		t.Fatalf("expiry text %q urgent %v", r2.texts, r2.urgent)
 	}
 
@@ -666,7 +742,7 @@ func TestUncomparedAndWording(t *testing.T) {
 	if len(ev) != 1 || ev[0].Contained != "none" || ev[0].Fixture != "" || ev[0].Finding.Severity != Low || len(r.c.got) != 0 || len(r.texts) != 0 {
 		t.Fatalf("uncompared: %+v paused %d texts %q", ev, len(r.c.got), r.texts)
 	}
-	want := "Security check: Could not check openssl version build-42 against known vulnerabilities. Check it on the box page."
+	want := "Security check: Could not check openssl version build-42 against known vulnerabilities. Check it on my Wi-Fi page."
 	if d := r.g.Digest(); len(d) != 1 || d[0] != want {
 		t.Fatalf("digest %q\nwant %q", d, want)
 	}
@@ -690,9 +766,9 @@ func TestUncomparedAndWording(t *testing.T) {
 	}{
 		{Finding{Check: CheckHash, Subject: "guest-image/openclaw", Detail: "differs from the signed release"}, "File guest-image/openclaw does not match the signed release."},
 		{Finding{Check: CheckHash, Subject: "dep/libfoo", Detail: "could not be measured"}, "File dep/libfoo could not be checked."},
-		{Finding{Check: CheckDrift, Subject: "config/quiet.json", Detail: "changed outside the change pipeline"}, "Setting file config/quiet.json changed outside the box's change process."},
-		{Finding{Check: CheckExpiry, Subject: "cal-cert", Detail: "expires 2026-10-08"}, "Credential cal-cert expires 2026-10-08. Replace it on the box page."},
-		{Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "ADV-1", Fixed: "3.0.14"}, "Known vulnerability in openssl (ADV-1), fixed in 3.0.14. The box takes the fix when an update has it."},
+		{Finding{Check: CheckDrift, Subject: "config/quiet.json", Detail: "changed outside the change pipeline"}, "Setting file config/quiet.json changed outside my change process."},
+		{Finding{Check: CheckExpiry, Subject: "cal-cert", Detail: "expires 2026-10-08"}, "Credential cal-cert expires 2026-10-08. Replace it on my Wi-Fi page."},
+		{Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "ADV-1", Fixed: "3.0.14"}, "Known vulnerability in openssl (ADV-1), fixed in 3.0.14. I take the fix when an update has it."},
 	} {
 		if got := findingText(c.f); got != c.want {
 			t.Errorf("got  %q\nwant %q", got, c.want)
@@ -753,7 +829,7 @@ func TestSeverityOrder(t *testing.T) {
 	}
 
 	f := Finding{Check: CheckAdvisory, Subject: "openssl", Detail: "DSA-1", Fixed: "1:3.0.14-1~deb12u1+b1"}
-	if got, want := findingText(f), "Known vulnerability in openssl (DSA-1), fixed in 1:3.0.14-1~deb12u1+b1. The box takes the fix when an update has it."; got != want {
+	if got, want := findingText(f), "Known vulnerability in openssl (DSA-1), fixed in 1:3.0.14-1~deb12u1+b1. I take the fix when an update has it."; got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
 
@@ -761,7 +837,7 @@ func TestSeverityOrder(t *testing.T) {
 	b3.snap.Advisories[0].Fixed = "not-a-version!"
 	r3 := newGuardRig(t, b3)
 	r3.pass(t)
-	want := "Security check: Could not read the fixed version in advisory ADV-1 for openssl. Check it on the box page."
+	want := "Security check: Could not read the fixed version in advisory ADV-1 for openssl. Check it on my Wi-Fi page."
 	if d := r3.g.Digest(); len(d) != 1 || d[0] != want || len(r3.c.got) != 0 {
 		t.Fatalf("digest %q\nwant %q", d, want)
 	}
@@ -909,4 +985,153 @@ func TestThePassiveCadenceOutlivesParking(t *testing.T) {
 	if ran, _ := r.s.Tick(context.Background()); !ran {
 		t.Fatal("the passive pass waited out the park")
 	}
+}
+
+// corpusMisses is n corpus findings on one check, one per test item, as
+// CorpusProbe.Run makes them (#589 UX).
+func corpusMisses(n int) []Finding {
+	var out []Finding
+	for i := range n {
+		out = append(out, Finding{Check: CheckCorpus, Severity: High, Subject: fmt.Sprintf("promptinject/item-%d", i), Detail: "code filter"})
+	}
+	return out
+}
+
+// REQ: LOOP-9
+//
+// P3-4b-4c-dedupe 1: batch says each distinct final line once, in
+// first-seen order, with the number of findings it stands for; a line
+// said once carries no count, and MORE holds every distinct line left.
+func TestBatchSaysEachDistinctLineOnceWithItsCount(t *testing.T) {
+	g := newReportRig(t, nil).g
+	corpus := ownerLine(Record{Finding: corpusMisses(1)[0], Contained: "none"})
+	t.Run("ten corpus misses are one counted line", func(t *testing.T) {
+		var lines []string
+		for _, f := range corpusMisses(10) {
+			lines = append(lines, ownerLine(Record{Finding: f, Contained: "none"}))
+		}
+		text := g.batch(lines)
+		if want := "Security checks: " + corpus + " (10 times)"; text != want {
+			t.Fatalf("text %q, want %q", text, want)
+		}
+		if more := g.More(); len(more) != 0 {
+			t.Fatalf("MORE holds %q", more)
+		}
+	})
+	t.Run("two different lines both appear", func(t *testing.T) {
+		other := ownerLine(Record{Finding: fuzzFinding(), Contained: "none"})
+		text := g.batch([]string{corpus, other, corpus})
+		if want := "Security checks: " + corpus + " (2 times) " + other; text != want {
+			t.Fatalf("text %q, want %q", text, want)
+		}
+	})
+	t.Run("a single line has no count", func(t *testing.T) {
+		if text := g.batch([]string{corpus}); text != "Security checks: "+corpus {
+			t.Fatalf("text %q", text)
+		}
+	})
+	t.Run("MORE holds every distinct line once", func(t *testing.T) {
+		var lines, distinct []string
+		for i := range 8 {
+			l := fmt.Sprintf("Line %d is long enough that three of them fill most of one text on its own, and then some more words.", i)
+			distinct = append(distinct, l)
+			lines = append(lines, l, l)
+		}
+		text := g.batch(lines)
+		if !strings.HasSuffix(text, " Reply MORE for the rest.") {
+			t.Fatalf("no MORE: %q", text)
+		}
+		all := text + " " + strings.Join(g.More(), " ")
+		for _, l := range distinct {
+			if n := strings.Count(all, l+" (2 times)"); n != 1 {
+				t.Errorf("%q said %d times across the text and MORE: %q", l, n, all)
+			}
+		}
+	})
+}
+
+// REQ: LOOP-9
+//
+// P3-4b-4c-dedupe 2: the digest groups open findings by their final line
+// before it sorts and caps, so identical lines take one slot and "And N
+// more" counts distinct lines left out.
+func TestDigestDedupesBeforeItsCap(t *testing.T) {
+	security := func(d []string) (lines []string, more string) {
+		for _, l := range d {
+			switch {
+			case strings.HasPrefix(l, "Security check: "):
+				lines = append(lines, l)
+			case strings.HasPrefix(l, "And "):
+				more = l
+			}
+		}
+		return lines, more
+	}
+	r := newReportRig(t, nil)
+	for _, f := range corpusMisses(10) {
+		r.report(t, f)
+	}
+	a := fuzzFinding()
+	b := leak("t1", "G1")
+	r.report(t, a)
+	r.report(t, b)
+	lines, more := security(r.g.Digest())
+	corpus := "Security check: " + ownerLine(r.mustOpenFor(t, corpusMisses(1)[0])) + " (10 times)"
+	if len(lines) != 3 || more != "" || !slices.Contains(lines, corpus) {
+		t.Fatalf("digest lines %q, more %q; want the counted corpus line and two others", lines, more)
+	}
+	t.Run("the cap applies to distinct lines", func(t *testing.T) {
+		c := fuzzFinding()
+		c.Subject = "mail.FuzzParse"
+		r.report(t, c)
+		lines, more := security(r.g.Digest())
+		if len(lines) != digestCap || more != "And 1 more security findings: ask your agent for the list." {
+			t.Fatalf("digest lines %q, more %q", lines, more)
+		}
+	})
+}
+
+// REQ: LOOP-9
+//
+// P3-4b-4c-dedupe 2, Potency on #634: a line shared by a Low and a High
+// finding ranks as High whichever is seen first, so the cap never drops
+// it behind other Highs.
+func TestADigestLineSharedWithAHighFindingRanksHigh(t *testing.T) {
+	for _, ids := range [][2]string{{"a-low", "b-high"}, {"b-low", "a-high"}} {
+		t.Run(ids[0]+","+ids[1], func(t *testing.T) {
+			r := newReportRig(t, nil)
+			low, high := corpusMisses(2)[0], corpusMisses(2)[1]
+			low.Severity, low.ID, high.ID = Low, ids[0], ids[1]
+			recs := []Record{{Finding: low, Contained: "none"}, {Finding: high, Contained: "none"}}
+			for i, sub := range []string{"sockets.FuzzRequest", "mail.FuzzParse", "control.FuzzParse"} {
+				f := fuzzFinding()
+				f.Subject, f.ID = sub, fmt.Sprintf("c-high-%d", i)
+				recs = append(recs, Record{Finding: f, Contained: "none"})
+			}
+			r.g.mu.Lock()
+			for _, rec := range recs {
+				r.g.st.Open[rec.Finding.ID] = rec
+			}
+			r.g.mu.Unlock()
+			d := r.g.Digest()
+			shared := "Security check: " + ownerLine(recs[0]) + " (2 times)"
+			if len(d) < 1 || d[0] != shared {
+				t.Fatalf("digest %q: the shared line is not first among the Highs", d)
+			}
+		})
+	}
+}
+
+// mustOpenFor is the open record Report made for f.
+func (r *reportRig) mustOpenFor(t *testing.T, f Finding) Record {
+	t.Helper()
+	r.g.mu.Lock()
+	defer r.g.mu.Unlock()
+	for _, rec := range r.g.st.Open {
+		if rec.Finding.Check == f.Check && rec.Finding.Subject == f.Subject && rec.Finding.Detail == f.Detail {
+			return rec
+		}
+	}
+	t.Fatalf("no open record for %+v", f)
+	return Record{}
 }

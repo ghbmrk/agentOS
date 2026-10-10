@@ -26,6 +26,10 @@ func (p *Pipeline) classify(edits []Edit, base Tree, src Source) classification 
 	seen := map[Class]bool{}
 	for _, e := range edits {
 		c := classOf(e.Path)
+		if why := loopKeyChange(e); why != "" {
+			c = ClassAuthority
+			cl.forbid(why)
+		}
 		if !seen[c] {
 			seen[c] = true
 			cl.classes = append(cl.classes, c)
@@ -34,6 +38,9 @@ func (p *Pipeline) classify(edits []Edit, base Tree, src Source) classification 
 		case ClassAuthority:
 			cl.forbid(fmt.Sprintf("changes %s, which no candidate may change (LOOP-10)", namespace(e.Path)))
 		case ClassGovernance:
+			if e.After == nil {
+				cl.forbid(fmt.Sprintf("deletes from %s, which only an owner-approved intent changes (CHG-2)", namespace(e.Path)))
+			}
 			cl.forbid(fmt.Sprintf("changes %s, which only an owner-approved intent changes (CHG-2)", namespace(e.Path)))
 		case ClassUnknown:
 			cl.forbid(fmt.Sprintf("changes %s, which is not a known namespace", namespace(e.Path)))
@@ -67,6 +74,45 @@ func (p *Pipeline) classify(edits []Edit, base Tree, src Source) classification 
 	}
 	sort.Slice(cl.classes, func(i, j int) bool { return cl.classes[i] < cl.classes[j] })
 	return cl
+}
+
+// loopKeyChange names the loop-governing key e changes (loopKeys), or ""
+// when it changes none. A listed file deleted, or not a JSON object after
+// the edit, changes every key it held.
+func loopKeyChange(e Edit) string {
+	keys, ok := loopKeys[e.Path]
+	if !ok {
+		return ""
+	}
+	var before, after map[string]json.RawMessage
+	_ = json.Unmarshal(e.Before, &before)
+	if e.After == nil || json.Unmarshal(e.After, &after) != nil || after == nil {
+		if e.Before == nil {
+			return ""
+		}
+		return fmt.Sprintf("changes %s, which governs the loops; no candidate may (LOOP-10)", e.Path)
+	}
+	names := make([]string, 0, len(keys))
+	for k := range keys {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		b, inB := before[k]
+		a, inA := after[k]
+		if inA != inB || (inA && !bytes.Equal(canonicalRaw(a), canonicalRaw(b))) {
+			return fmt.Sprintf("sets %q in %s, which %s; no candidate may (LOOP-10)", k, e.Path, keys[k])
+		}
+	}
+	return ""
+}
+
+func canonicalRaw(b json.RawMessage) []byte {
+	v, err := decodeJSON(b)
+	if err != nil {
+		return b
+	}
+	return canonicalJSON(v)
 }
 
 // imagesOnly reports that every edit is to an image namespace.

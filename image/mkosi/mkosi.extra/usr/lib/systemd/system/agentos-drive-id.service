@@ -1,0 +1,17 @@
+[Unit]
+Description=Give this drive its own partition GUIDs
+Documentation=file:/usr/lib/agentos/drive-id
+# Once per drive, after its first boot has passed the health check (which runs drive-id check) and
+# been blessed.
+Requires=boot-complete.target
+After=boot-complete.target systemd-bless-boot.service
+ConditionPathExists=!/var/lib/agentos/drive-id
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/agentos/drive-id assign
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

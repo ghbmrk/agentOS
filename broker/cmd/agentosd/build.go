@@ -21,9 +21,10 @@ import (
 // C-3c-5: about 30-40%). It reserves nothing.
 const builderShareMax = 0.35
 
-// builderShare is the builder machines' share of the spare meter.
+// builderShare is Loop 1's builder machines' share of the spare meter;
+// Loop 2's fix machines have their own (loop2FixShare).
 func builderShare() meter.Share {
-	return meter.Share{Prefix: loopbuild.Prefix, Max: builderShareMax}
+	return meter.Share{Prefix: loopbuild.BuildPrefix, Max: builderShareMax}
 }
 
 // errNoBuilder: the box has no builder machines (no -builder-image, or no
@@ -78,7 +79,8 @@ type buildConfig struct {
 	AgentImage string
 	Launch     string // its argv and env; empty: the image's own
 	MemMB      int64
-	Egress     string // the vault process's model socket; empty: no model access
+	Egress     string     // the vault process's model socket; empty: no model access
+	Retries    func() int // modelroute.Config.Retries; nil: MaxRetries
 }
 
 // openBuilder attaches Loop 1's model-backed builder (W3-builder): builder
@@ -97,7 +99,7 @@ func (l *learning) openBuilder(m builderMachines, imgs images, services *lateSer
 		return fmt.Errorf("image %q is not registered with -image", c.Image)
 	}
 	if c.AgentImage != "" && (c.Image == c.AgentImage || imgs[c.Image] == imgs[c.AgentImage]) {
-		return fmt.Errorf("builder image %q is the agent's image; the builder runs a minimal image of its own", c.Image)
+		return fmt.Errorf("builder image %q is the same as -agent-image; the builder runs a minimal image of its own", c.Image)
 	}
 	cfg := loopbuild.Config{Dir: c.Dir, Machines: m, Image: c.Image, MemMB: c.MemMB, Logf: log.Printf}
 	if c.Launch != "" {
@@ -108,7 +110,7 @@ func (l *learning) openBuilder(m builderMachines, imgs images, services *lateSer
 		cfg.Argv, cfg.Env = argv, env
 	}
 	if c.Egress != "" {
-		cfg.Model = modelroute.Forward(modelroute.Config{Socket: c.Egress, Label: m.DataLabel, Denied: builderDenied(log.Printf), Logf: log.Printf})
+		cfg.Model = modelroute.Forward(modelroute.Config{Socket: c.Egress, Label: m.DataLabel, Denied: builderDenied(log.Printf), Logf: log.Printf, Retries: c.Retries})
 		cfg.Meter = l.spare
 	}
 	b, err := loopbuild.New(cfg)
@@ -123,13 +125,13 @@ func (l *learning) openBuilder(m builderMachines, imgs images, services *lateSer
 
 // builderOffNote is STATUS's line when -builder-image is set but the
 // builder did not start (UX-126-1).
-const builderOffNote = "Learning from failed, corrected, slow or costly tasks: not running. Restarting the box may fix it."
+const builderOffNote = "Learning from failed, corrected, slow or costly tasks: not running. Restarting me may fix it."
 
 // builderUnsetNote is STATUS's line when no -builder-image is given, so an
 // inert builder is never silent (potency R3 on #126). It states a fact and
 // implies no setting: the owner never sets the flag; the box image does
 // (UX-134-1).
-const builderUnsetNote = "Learning: this box learns from repeated routines only, not yet from mistakes or slow tasks."
+const builderUnsetNote = "Learning: I learn from repeated routines only, not yet from mistakes or slow tasks."
 
 // Defaults for -builder-image and -builder-launch (W3-builder-ship): the
 // box image registers its builder image under this name and installs

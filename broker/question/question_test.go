@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ghbmrk/agentos/broker/guesterr"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -348,13 +349,20 @@ func TestBrokerBoundsDefaultAndDeadline(t *testing.T) {
 		{Text: "Is it 482 913?", Default: "x", Wait: time.Hour},
 		{Text: "Is it ４８２９１３?", Default: "x", Wait: time.Hour},
 		{Text: "Which?", Default: "undo b12", Wait: time.Hour},
+		{Text: "Long choice?", Default: "a", Choices: []string{"a", strings.Repeat("c", MaxChoice+1)}, Wait: time.Hour},
 		// Rendered past one owner text (control.MaxText less the agent prefix).
 		{Text: strings.Repeat("q", MaxText), Default: strings.Repeat("a", MaxChoice),
 			Choices: []string{strings.Repeat("a", MaxChoice), strings.Repeat("b", MaxChoice), strings.Repeat("c", MaxChoice), strings.Repeat("d", MaxChoice)}, Wait: time.Hour},
 	}
 	for i, s := range bad {
-		if _, err := r.b.Ask(context.Background(), "lin1", fmt.Sprintf("bad%d", i), s); err == nil {
+		_, err := r.b.Ask(context.Background(), "lin1", fmt.Sprintf("bad%d", i), s)
+		if err == nil {
 			t.Errorf("spec %d accepted: %+v", i, s)
+		}
+		// The reason is guidance the guest sees, so it can correct the
+		// question, not a ref (SR2-3g, CAP-10).
+		if _, ok := err.(guesterr.Safe); !ok {
+			t.Errorf("spec %d: %q is not guest text", i, err)
 		}
 	}
 	if _, err := r.b.Ask(context.Background(), "lin1", "toolong", bad[len(bad)-1]); err == nil || !strings.Contains(err.Error(), "too long for one text") {
@@ -529,7 +537,7 @@ func TestAnswersCannotCarryCodes(t *testing.T) {
 		// Whatever the channel would withhold as secret-shaped (C1).
 		"Q100 sk-live-abc"} {
 		reply, ok := r.answer(a)
-		if !ok || !strings.Contains(reply, "only for the box") {
+		if !ok || !strings.Contains(reply, "only for me") {
 			t.Fatalf("%q: reply %q %v", a, reply, ok)
 		}
 	}
@@ -545,7 +553,7 @@ func TestAnswersCannotCarryCodes(t *testing.T) {
 		"Q100 great sweet happy dance", "Q100 between 9:30, 10:00",
 		"Q100 05/10/2026", "Q100 12/31/2026", "Q100 the 2026/27 season", "Q100 2026-10-05 at 14:30", "Q100 9:30-10:00",
 		"Q100 1250 pounds", "Q100 +44 7700 900123", "Q100 from 1990-2026", "Q100 9:30, 9:45, 10:00"} {
-		if reply, _ := r.answer(a); strings.Contains(reply, "only for the box") {
+		if reply, _ := r.answer(a); strings.Contains(reply, "only for me") {
 			t.Fatalf("%q refused: %q", a, reply)
 		}
 	}
@@ -762,5 +770,22 @@ func TestOneRefusedAnswerReadsSingular(t *testing.T) {
 	r.answer("Q100 482913")
 	if d := r.b.TakeDigest(); len(d) != 1 || !strings.HasPrefix(d[0], "1 answer to") {
 		t.Fatalf("digest %q", d)
+	}
+}
+
+// A failed store must not hand the guest the path (os errors name it).
+func TestAStoreFailureDoesNotNameThePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing", "questions.json")
+	r := newRig(t, func(c *Config) { c.Path = path })
+	_, err := r.b.Ask(context.Background(), "lin1", "q", slot())
+	if err == nil || strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "missing") || strings.Contains(err.Error(), "/") {
+		t.Fatalf("path leaked: %v", err)
+	}
+	if err.Error() != "the broker could not store that question; retry" {
+		t.Fatalf("err %v", err)
+	}
+	if _, err := r.b.Status(context.Background(), "lin1", "q", "m1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a failed store kept the question: %v", err)
 	}
 }

@@ -66,11 +66,11 @@ func TestQuestionsAreTextedWhileTheClockIsChecked(t *testing.T) {
 	if st := r.status("lin3", "c"); st.State != Defaulted {
 		t.Fatalf("texted while restricted: %+v", st)
 	}
-	if out, _ := r.answer("Q102 9:00"); out != `Too late for Q102: the agent went ahead with "9:30". Your answer is passed to it.` {
+	if out, _ := r.answer("Q102 9:00"); out != `Too late for Q102: I went ahead with "9:30". Your answer is passed on.` {
 		t.Fatalf("late reply %q", out)
 	}
 	d := strings.Join(r.b.TakeDigest(), "\n")
-	if !strings.Contains(d, `Q102 "Book the 9:00 or the 9:30 dentist slot?": no reply within 30 minutes, so the agent went ahead with "9:30".`) {
+	if !strings.Contains(d, `Q102 "Book the 9:00 or the 9:30 dentist slot?": no reply within 30 minutes, so I went ahead with "9:30".`) {
 		t.Fatalf("digest %q", d)
 	}
 	r.set(func() { r.restricted = false })

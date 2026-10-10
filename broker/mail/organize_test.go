@@ -254,7 +254,7 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	var approved []string // intents the owner approved past the bound
 	var since time.Time
 	x := newH(t, func(c *mail.Config) {
-		c.Authorized = func(action string, s time.Time) []journal.Intent {
+		c.InUse = func(action string, s time.Time) []journal.Use {
 			since = s
 			if action != mail.OpArchive {
 				return nil
@@ -266,7 +266,7 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 			for _, a := range approved {
 				out = append(out, journal.Intent{ID: a, Account: "mail"})
 			}
-			return out
+			return uses(out)
 		}
 	})
 	id := x.news(1)
@@ -330,11 +330,11 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	zj := []journal.Intent{{ID: "a", Account: "mail"}, {ID: "b", Account: "mail"}}
 	z := newH(t, func(c *mail.Config) {
 		c.DailyLimit, c.DailyCeiling = 2, 3
-		c.Authorized = func(action string, _ time.Time) []journal.Intent {
+		c.InUse = func(action string, _ time.Time) []journal.Use {
 			if action != mail.OpArchive {
 				return nil
 			}
-			return zj
+			return uses(zj)
 		}
 	})
 	id = z.news(1)
@@ -346,7 +346,7 @@ func TestOrganizeBoundAsksPastTheDailyLimit(t *testing.T) {
 	if e, _ := z.a.Escalate(ctx, z.intent(mail.OpArchive, rec(id))); !e.Ask || e.Reason != "past 3 today" {
 		t.Fatalf("owner's ceiling: %+v", e)
 	}
-	y := newH(t, func(c *mail.Config) { c.Authorized = nil })
+	y := newH(t, func(c *mail.Config) { c.InUse = nil })
 	id = y.news(1)
 	if e, _ := y.a.Escalate(ctx, y.intent(mail.OpArchive, rec(id))); !e.Ask {
 		t.Fatal("no journal count, not asked")
@@ -371,7 +371,7 @@ func TestUndoRestoresOnlyWhatIsUnchanged(t *testing.T) {
 	// another elsewhere, and took the AgentOS label off a third.
 	x.srv.SetFlags(ids[0], mail.Seen, mail.Keyword)
 	moved, _ := x.store.Find(ctx, "Archive", ids[1])
-	if err := x.store.Move(ctx, "Archive", moved[0].UID, "Receipts"); err != nil {
+	if err := x.store.Move(ctx, moved[0].Ref(), "Receipts"); err != nil {
 		t.Fatal(err)
 	}
 	x.srv.SetFlags(ids[2])
@@ -470,11 +470,11 @@ func TestReasonsFitTheDetailCap(t *testing.T) {
 					x := newH(t, func(c *mail.Config) {
 						c.Shared = append(c.Shared, long)
 						c.DailyLimit, c.DailyCeiling = lim[0], lim[1]
-						c.Authorized = func(action string, _ time.Time) []journal.Intent {
+						c.InUse = func(action string, _ time.Time) []journal.Use {
 							if action != mail.OpMove && action != mail.OpArchive {
 								return nil
 							}
-							return journaled
+							return uses(journaled)
 						}
 					})
 					x.srv.AddFolder(long, "")
