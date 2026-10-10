@@ -54,21 +54,44 @@ func TestHeldTextIsRevalidatedAtRelease(t *testing.T) {
 
 // REQ: CH-15, OWN-4 (PACE-1 PC-3)
 func TestTextWithSubjectsFailsClosed(t *testing.T) {
-	// No hook attached: a text whose subjects nothing can confirm is
-	// dropped, at release and when it would go now.
+	// No hook attached yet (a restart before agentosd wires it): a paced
+	// text whose subjects nothing can confirm is not sent, at release or
+	// when it would go now, but stays held while the rest go past it;
+	// an urgent one is dropped.
 	r := pacedRig(t, quiet22to7(), 23, 0)
 	if err := r.ch.PostAbout(ClassUpdate, "Cleared: A.", []string{"a"}); err != nil {
 		t.Fatal(err)
 	}
-	r.advance(8*time.Hour + time.Minute)
+	if err := r.ch.Inform("Plain update."); err != nil {
+		t.Fatal(err)
+	}
+	r.advance(8*time.Hour + time.Minute) // 07:01
 	if err := r.ch.Release(); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.ch.PostAbout(ClassUpdate, "Cleared: B.", []string{"b"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 0 {
+	if err := r.ch.PostAbout(ClassSecurity, "Cleared: S.", []string{"s"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "Plain update." {
 		t.Fatalf("sent with no hook: %q", got)
+	}
+	if h := r.held(); len(h) != 2 || h[0].Text != "Cleared: A." || h[1].Text != "Cleared: B." {
+		t.Fatalf("held with no hook: %+v", h)
+	}
+	// Once the hook is set, the next release checks them: A came back
+	// meanwhile and is dropped, B is sent.
+	r.ch.SetCurrent(func(s []string) bool { return s[0] != "a" })
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "Cleared: B." {
+		t.Fatalf("sent once hooked: %q", got)
+	}
+	if h := r.held(); len(h) != 0 {
+		t.Fatalf("still held once hooked: %+v", h)
 	}
 	// With the hook, one that would go now is checked too.
 	r.ch.SetCurrent(func(s []string) bool { return s[0] != "c" })

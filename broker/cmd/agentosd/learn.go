@@ -757,6 +757,16 @@ func (l *learning) ForgetTasks(ids ...string) (int, error) {
 
 // attach binds the running daemon's engine and admission and starts the
 // scheduler. Before it, the box reads as busy and stopped: no loop work.
+// attachOwner gives Loop 2 the owner channel o, which may be nil.
+func (l *learning) attachOwner(o *owner.Channel) {
+	if o != nil {
+		// Set before the channel is stored, so no "Cleared" is posted
+		// that the hold cannot confirm (PACE-1).
+		o.SetCurrent(l.guard.Current)
+	}
+	l.notify.ch.Store(o)
+}
+
 func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 	eng := d.Engine()
 	l.pipe.Attach(eng)
@@ -771,12 +781,7 @@ func (l *learning) attach(ctx context.Context, d *daemon.Daemon) {
 			log.Printf("loop2: an ended pause stays listed: %v", err)
 		}
 	}
-	if o := d.Owner(); o != nil {
-		// Set before the channel is stored, so no "Cleared" is posted
-		// that the hold cannot confirm (PACE-1).
-		o.SetCurrent(l.guard.Current)
-	}
-	l.notify.ch.Store(d.Owner())
+	l.attachOwner(d.Owner())
 	l.forgetOwner.finishOwed(ctx)
 	l.eng.Store(eng)
 	l.adm.Store(d.Admission())

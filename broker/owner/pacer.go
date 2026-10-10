@@ -121,7 +121,9 @@ type CurrentHook func(subjects []string) bool
 
 // SetCurrent sets the hook that confirms a text's subjects when it is
 // sent (PostAbout); nil removes it. Without a hook a text with subjects
-// is dropped, never sent unconfirmed.
+// is never sent unconfirmed: a paced one waits in the hold until a hook
+// is set, so a restart outside quiet hours cannot lose a true one before
+// its owner is wired (L3 on #708); an urgent one is dropped.
 func (c *Channel) SetCurrent(h CurrentHook) {
 	if h == nil {
 		c.current.Store(nil)
@@ -144,7 +146,8 @@ func (c *Channel) stillCurrent(h HeldText) bool {
 // PostAbout is Post for a text that is true only while its subjects
 // hold, such as a security "Cleared" line (PACE-1). Held, it keeps its
 // subjects, and it is sent only if the Current hook confirms them then;
-// otherwise it is dropped, unsent and uncounted.
+// otherwise it is dropped, unsent and uncounted. With no hook yet it
+// waits in the hold (SetCurrent).
 func (c *Channel) PostAbout(class Class, text string, subjects []string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
@@ -206,9 +209,10 @@ func (c *Channel) postHeld(class Class, h HeldText) error {
 	// this one then waits behind them.
 	_ = c.releasePaced()
 	now := c.cfg.Now()
+	wait := len(h.Subjects) > 0 && c.current.Load() == nil
 	c.mu.Lock()
 	st := &c.codes.st
-	if len(st.Held) > 0 || st.HeldDropped > 0 || c.quietLocked(now) || c.allowanceLocked(now) == 0 {
+	if wait || len(st.Held) > 0 || st.HeldDropped > 0 || c.quietLocked(now) || c.allowanceLocked(now) == 0 {
 		err := c.codes.commit(func(s *State) {
 			h.Class, h.At = class, now
 			s.Held = append(s.Held, h)
@@ -308,12 +312,21 @@ func (c *Channel) releasePaced() error {
 		}
 		c.mu.Unlock()
 		// A held text whose subjects no longer hold is dropped before
-		// packing, unsent and uncounted (PACE-1). Only posts and releases
-		// change the hold, both under pmu, so its indexes stay put.
-		var stale []int
+		// packing, unsent and uncounted (PACE-1); with no hook set yet,
+		// one with subjects stays held and the rest go past it. Only
+		// posts and releases change the hold, both under pmu, so its
+		// indexes stay put.
+		hook := c.current.Load()
+		var stale, ready []int
+		var send []HeldText
 		for i, h := range st.Held {
-			if !c.stillCurrent(h) {
+			switch {
+			case len(h.Subjects) > 0 && hook == nil:
+				continue
+			case len(h.Subjects) > 0 && !(*hook)(h.Subjects):
 				stale = append(stale, i)
+			default:
+				ready, send = append(ready, i), append(send, h)
 			}
 		}
 		if len(stale) > 0 {
@@ -333,15 +346,25 @@ func (c *Channel) releasePaced() error {
 			}
 			continue
 		}
-		text, n, dropped := packHeld(st.HeldDropped, st.Held)
+		if len(send) == 0 && st.HeldDropped == 0 {
+			return nil
+		}
+		text, n, dropped := packHeld(st.HeldDropped, send)
 		if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
 			return err
 		}
 		c.mu.Lock()
 		// Only this release removes from the hold, under pmu, so the
-		// first n are still the ones sent.
+		// held texts at ready[:n] are still the ones sent.
+		sent := ready[:n]
 		err := c.saveLocked(func(s *State) {
-			s.Held = append([]HeldText(nil), s.Held[n:]...)
+			keep := s.Held[:0:0]
+			for i, h := range s.Held {
+				if !slices.Contains(sent, i) {
+					keep = append(keep, h)
+				}
+			}
+			s.Held = keep
 			s.HeldDropped -= dropped
 			s.Sent = append(recentSends(s.Sent, now), now)
 		})
