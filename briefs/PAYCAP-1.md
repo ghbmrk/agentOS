@@ -1,32 +1,30 @@
-# PAYCAP-1: Spend limits the card issuer enforces
+# PAYCAP-1: A spending limit set outside the box
 
 Board section: Outside-the-box limits (2026-10-10).
 
-**Why.** Every money control in SPEC is enforced by the broker: OP-8 meters model spend, CH-10 sets the owner's amount limit for the low-risk tier, and ADP-9 caps pre-allowances. If the broker is compromised, all of them fail together. A card limit set by the issuer sits outside the box and holds either way. Mark asked for this on 2026-10-10 (Questions thread) with one constraint: the limits add no friction in normal use and bite only in the "in case" scenario.
+**Why.** Every money control in SPEC is enforced by the broker: OP-8 meters model spend, CH-10 sets the owner's amount limit for the low-risk tier, and ADP-9 caps pre-allowances. If the broker is compromised, all of them fail together. A limit set by the owner's bank sits outside the box and holds either way. Mark asked for this on 2026-10-10 (Questions thread) with one constraint: the limit adds no friction in normal use and bites only in the "in case" scenario.
 
-**What.** One virtual card with a monthly cap, made by the owner at the issuer once, at setup, with the cap set well above normal use, and handed to the box in place of the real card. No merchant lock: per-merchant cards are too much work for the owner (Mark, 2026-10-10), and the broker's own rules already decide where money goes. The box never creates cards: anything that can mint cards can mint uncapped ones, which would put the backstop back inside the box. Candidates, to be checked against the issuer's own documentation in step 0:
-- A virtual card with a monthly cap (Privacy.com-style), made in the issuer's app.
-- Capped agent-payment tokens (Stripe's), if consumers can obtain them. Stripe Link is out (Mark, 2026-10-10).
+**What.** The box pays with one card whose spending limit the owner's own bank or card provider enforces. The owner sets the limit there, once, well above normal use, and gives the box that card in place of a main card. Examples, none required: a second debit account holding only a small balance, a low-limit credit card, or a limited virtual card from the owner's existing bank. No merchant lock: per-merchant cards are too much work for the owner (Mark, 2026-10-10), and the broker's own rules already decide where money goes. The box never talks to the bank or card provider, and never creates cards or changes a limit: anything that can mint cards or raise limits can mint uncapped ones, which would put the backstop back inside the box. The box sees only the card number and the limit the owner types. It cannot verify that limit, so it uses it only to confirm back to the owner and to word the decline line.
+
+No card provider is named in SPEC, the row or the tests (a named provider is a dependency and a security risk, Mark, 2026-10-10).
 
 **Intended UX.**
 1. No setup step. The card is asked for just in time, the first time a task needs to pay (as SPEC's setup step 8 does for other grants); ONB-3 is unchanged.
-2. The Wi-Fi page offers "spending-limited virtual card (recommended)", with a link to the issuer (privacy.com), or "my own card" with the one line "no limit outside the box". The owner enters the number and the limit, then confirms with an approval code (a CH-10 high-risk grant). Card details are entered only there, never by text (CH-6).
+2. The Wi-Fi page offers "Use a card with a spending limit set by your bank" (recommended), or "my own card" with the one line "no limit outside the box". The owner enters the number and the limit, then confirms with an approval code (a CH-10 high-risk grant). Card details are entered only there, never by text (CH-6).
 3. A text confirms the card's last four digits and the limit.
 4. Day to day nothing changes.
 5. A decline at the limit becomes one digest line, with no prompt and no retry.
 
-**No friction.** The box asks for nothing in normal use. When the issuer declines a charge (cap reached), the box does not prompt. It reports the decline as one line in the next digest (CH-15, OP-9 wording rules), with what would fix it (raise the cap at the issuer). The box never raises a cap itself, and holds no credential that can.
+**No friction.** The box asks for nothing in normal use. When the bank declines a charge (limit reached), the box does not prompt. It reports the decline as one line in the next digest (CH-15, OP-9 wording rules), with what would fix it (raise the limit with the bank). The box holds no credential that can change the limit.
 
-**Proposed requirement text (for a spec-diff PR, not edited here).** The payment card the box holds MUST be capped by its issuer per month, at a limit the owner sets outside the box; the box MUST NOT hold a credential that can create cards or change the cap; an issuer decline MUST reach the owner as a digest line, not an approval prompt.
+**Proposed requirement text (for a spec-diff PR, not edited here).** The payment card the box holds MUST carry a spending limit set and enforced outside the box; the box MUST NOT hold a credential that can create cards or change that limit; a decline at the limit MUST reach the owner as a digest line, not an approval prompt.
 
 **Needs:** none (documentation and owner setup first). The code part waits on the broker holding a payment credential at all (CRED-1 custody applies); no row builds that yet.
 
-**Tier for the build: A.** The card number is a credential the broker holds (CRED-1), and the work sits beside the money controls CH-10 and OP-8 (`tools/risk_tier.py` rates `broker/` credential paths A). A docs-only slice (the owner's setup page and the decline wording) would be B or C.
+**Tier for the build: A.** The card number is a credential the broker holds (CRED-1), and the work sits beside the money controls CH-10 and OP-8 (`tools/risk_tier.py` rates `broker/` credential paths A). A docs-only slice (the Wi-Fi page copy and the decline wording) would be B or C.
 
-**Failure path to test first:** a charge past the cap is declined by the issuer with the broker's own spend checks mocked as passing; the box reports it in the digest and takes no further action.
-
-**Step 0 (builder):** read each issuer's current documentation for caps, who can create cards and change them (a box-held key must not be able to), and whether a consumer can get the account. Record dates and results in the package's `ASSUMPTIONS.md`. If none fits, record that and mark the row `dropped`.
+**Failure path to test first:** a charge the card's limit declines, with the broker's own spend checks mocked as passing, shows in the digest as one line and the box takes no further action (no prompt, no retry).
 
 **Scope:** to be set when the brief is expanded.
 
-**Gate:** Security lens first (the cap must not be changeable from the box).
+**Gate:** Security lens first (nothing in the box can change the limit or create a card; the card number is entered only on the Wi-Fi page).
