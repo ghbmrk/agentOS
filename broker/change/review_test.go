@@ -75,10 +75,10 @@ func TestStagedImages(t *testing.T) {
 		t.Fatal(r)
 	}
 	d := e.p.Digest()
-	if len(d) != 1 || !strings.HasPrefix(d[0], "Staged update 40; it starts at the next restart.") {
+	if len(d) != 1 || !strings.HasPrefix(d[0], "Staged update 40; I will install it when I am free.") {
 		t.Fatalf("staged digest: %q", d)
 	}
-	if err := e.p.ConfirmStaged(r.Short); err != nil {
+	if err := e.p.ConfirmStaged(r.ID); err != nil {
 		t.Fatal(err)
 	}
 	if d := e.p.Digest(); len(d) != 1 || !strings.HasPrefix(d[0], "Installed update 40.") {
@@ -86,13 +86,13 @@ func TestStagedImages(t *testing.T) {
 	}
 	r2 := e.release(release(t, 41, false, map[string][]byte{"host-image/release": []byte("b")}))
 	e.p.Digest()
-	if err := e.p.StageFailed(bg, r2.Short); err != nil {
+	if err := e.p.StageFailed(bg, r2.ID); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(e.p.Files("host-image")["host-image/release"]); got != update.Digest([]byte("a")) {
 		t.Fatal("fallback did not restore the previous release")
 	}
-	if d := e.p.Digest(); len(d) != 1 || d[0] != "Undid "+r2.Short+": the update did not start cleanly, so the box kept the previous one." {
+	if d := e.p.Digest(); len(d) != 1 || d[0] != "Undid "+r2.Short+": the update did not start cleanly, so I kept the previous one." {
 		t.Fatalf("fallback digest: %q", d)
 	}
 }
@@ -303,7 +303,7 @@ func TestNotEvaluatedImage(t *testing.T) {
 	if r.State != StateAwaitingOwner || r.NotEvaluated == 0 || r.HeldOut != 0 {
 		t.Fatalf("image: %+v", r)
 	}
-	if ask, _ := e.p.Ask(r.ID); !strings.Contains(ask, "Not tested on this box.") {
+	if ask, _ := e.p.Ask(r.ID); !strings.Contains(ask, "Not tested here.") {
 		t.Fatalf("ask: %q", ask)
 	}
 }
@@ -401,6 +401,9 @@ func TestRevertNeverEmptiesTarget(t *testing.T) {
 	if d := e.p.Digest(); len(d) != 1 || strings.Contains(d[0], "UNDO") || !strings.HasSuffix(d[0], " MORE "+r.Short) {
 		t.Fatalf("offered an undo that cannot work: %q", d)
 	}
+	if err := e.p.ConfirmStaged(r.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := e.p.Revert(bg, r.Short, OriginOwner); err == nil || !strings.Contains(err.Error(), "nothing to boot") {
 		t.Fatalf("emptied the image slot: %v", err)
 	}
@@ -453,7 +456,7 @@ func TestRecheckContinuesPastFailedRevert(t *testing.T) {
 		}
 	}
 	d := e.p.Digest()
-	if len(d) == 0 || !strings.HasPrefix(d[len(d)-1], "The box could not re-test its learned changes") {
+	if len(d) == 0 || !strings.HasPrefix(d[len(d)-1], "I could not re-test my learned changes") {
 		t.Fatalf("outages not surfaced: %q", d)
 	}
 }

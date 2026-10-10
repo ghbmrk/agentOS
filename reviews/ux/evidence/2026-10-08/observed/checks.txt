@@ -1,0 +1,13 @@
+REPRODUCED: Initial provider sign-in has empty link/code and no start control
+REPRODUCED: The same provider challenge survives 24 hours without a renew control
+REPRODUCED: Paired network repair has no visible form and invokes no join
+REPRODUCED: No-provider setup has no Local only choice and does not finish
+REPRODUCED: Update hold displays generic updating copy with a 10-second refresh
+REPRODUCED: Two locked messages are dropped and RUN delivers no task
+REPRODUCED: Repeated MORE returns the same truncated list
+REPRODUCED: A benign source-code sentence is withheld by the code filter
+REPRODUCED: Clock note loses the end of Nothing to do
+REPRODUCED: Multi-exception SMS truncates later recovery guidance
+REPRODUCED: All six synthetic UI captures return HTTP 200
+REPRODUCED: Four existing setup tests pass despite the reproduced visible defect
+12/12 observations reproduced.

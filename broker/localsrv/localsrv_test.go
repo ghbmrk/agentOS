@@ -27,28 +27,36 @@ type fakeOwner struct {
 	signIns  int
 	resumes  int
 	left     int
+	unlocked bool
 	answers  []string
 	answerFn func(id, sum string, approve bool, code string) (string, error)
+	// relock, when set, locks and unlocks again just after each status
+	// read, as the owner can between two reads.
+	relock bool
 }
 
 func (f *fakeOwner) LocalStatus() owner.LocalStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	st := owner.LocalStatus{Stopped: f.stopped, Locks: f.locks, LocalLeft: f.left}
+	st := owner.LocalStatus{Stopped: f.stopped, Unlocked: f.unlocked, Locks: f.locks, LocalLeft: f.left}
 	if f.left <= 0 {
 		st.LocalReset = "14:05"
+	}
+	if f.relock {
+		f.locks++
+		f.unlocked = true
 	}
 	return st
 }
 func (f *fakeOwner) LocalGridCell() string { return "B4" }
-func (f *fakeOwner) LocalSignIn(code string) (time.Time, error) {
+func (f *fakeOwner) LocalSignIn(code string) (time.Time, uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.signIns++
 	if code != good {
-		return time.Time{}, owner.ErrWrongCode
+		return time.Time{}, 0, owner.ErrWrongCode
 	}
-	return f.now.Add(time.Hour), nil
+	return f.now.Add(time.Hour), f.locks, nil
 }
 func (f *fakeOwner) LocalStop(context.Context) error {
 	f.mu.Lock()
@@ -56,10 +64,13 @@ func (f *fakeOwner) LocalStop(context.Context) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeOwner) LocalResume() (string, error) {
+func (f *fakeOwner) LocalResume(locks uint64) (string, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if locks != f.locks {
+		return "", owner.ErrLocked
+	}
 	f.resumes++
-	f.mu.Unlock()
 	return "Resumed.", nil
 }
 func (f *fakeOwner) LocalRequests() []owner.LocalRequest {
@@ -86,17 +97,61 @@ func (f *fakeOwner) LocalAnswer(id, sum string, approve bool, code string) (stri
 }
 
 type rig struct {
-	t   *testing.T
-	now time.Time
-	own *fakeOwner
-	srv *Server
-	ops map[string]sockets.Handler
+	t       *testing.T
+	now     time.Time
+	own     *fakeOwner
+	srv     *Server
+	ops     map[string]sockets.Handler
+	follows []string
+	asks    []string
+	forgets []string
+	adopted []string
 }
 
 func newRig(t *testing.T) *rig {
 	r := &rig{t: t, now: time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)}
 	r.own = &fakeOwner{now: &r.now, left: 24}
-	r.srv = New(Config{Owner: r.own, LineNote: func() string { return "I can't reach my phone modem." }, Now: func() time.Time { return r.now }})
+	r.srv = New(Config{Owner: r.own, Line: func() localapi.Line { return testLine }, Now: func() time.Time { return r.now },
+		DescribeRoot: func(_ context.Context, root []byte) (localapi.RootSummary, error) {
+			if string(root) != "root" {
+				return localapi.RootSummary{}, errors.New("bad root")
+			}
+			return localapi.RootSummary{Version: 1, Digest: digest}, nil
+		},
+		Follow: func(_ context.Context, name, d string) (string, error) {
+			r.follows = append(r.follows, name+"@"+d)
+			return "Asked: K8", nil
+		},
+		Paused: func() []localapi.PausedGrant {
+			return []localapi.PausedGrant{{ID: "G2", What: "Read mail.", By: "Loop 2", Pause: "loop2/pause/G2/1"}}
+		},
+		AskResume: func(_ context.Context, grant, pause string) (string, error) {
+			r.asks = append(r.asks, grant+"@"+pause)
+			if pause != "loop2/pause/G2/1" {
+				return "", errors.New("grants: /var/lib/x")
+			}
+			return "Asked.", nil
+		},
+		AdoptSIM: func(tag string) error {
+			if tag != simTag {
+				return ErrStaleSIM
+			}
+			r.adopted = append(r.adopted, tag)
+			return nil
+		},
+		ForgetTasks: func(unlocked bool) localapi.ForgetTasks {
+			if !unlocked {
+				return localapi.ForgetTasks{Locked: true}
+			}
+			return localapi.ForgetTasks{Tasks: []localapi.ForgetTask{{ID: "owner:a", Date: "Mon 5 Oct 11:00", Label: `"pay the gas bill" (today 11:00)`}}}
+		},
+		Forget: func(_ context.Context, goal string, unlocked bool) string {
+			if unlocked {
+				goal += "@unlocked"
+			}
+			r.forgets = append(r.forgets, goal)
+			return "Asked."
+		}})
 	r.ops = r.srv.Ops()
 	return r
 }
@@ -149,13 +204,21 @@ func code(err error) string {
 // tokenOps are the ops that need a token, with args carrying tok.
 func tokenOps(tok string) map[string]any {
 	return map[string]any{
-		localapi.OpSignOut:  localapi.Auth{Token: tok},
-		localapi.OpSession:  localapi.Auth{Token: tok},
-		localapi.OpLines:    localapi.Auth{Token: tok},
-		localapi.OpResume:   localapi.Resume{Token: tok},
-		localapi.OpRequests: localapi.Auth{Token: tok},
-		localapi.OpWaiting:  localapi.Auth{Token: tok},
-		localapi.OpAnswer:   localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
+		localapi.OpSignOut:     localapi.Auth{Token: tok},
+		localapi.OpSession:     localapi.Auth{Token: tok},
+		localapi.OpLines:       localapi.Auth{Token: tok},
+		localapi.OpLine:        localapi.Auth{Token: tok},
+		localapi.OpResume:      localapi.Resume{Token: tok},
+		localapi.OpRequests:    localapi.Auth{Token: tok},
+		localapi.OpWaiting:     localapi.Auth{Token: tok},
+		localapi.OpAnswer:      localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
+		localapi.OpFollowRoot:  localapi.FollowRoot{Token: tok, Root: []byte("root")},
+		localapi.OpFollow:      localapi.Follow{Token: tok, Name: "Acme", Digest: digest},
+		localapi.OpPaused:      localapi.Auth{Token: tok},
+		localapi.OpAskResume:   localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
+		localapi.OpSIM:         localapi.AdoptSIM{Token: tok, SIM: simTag, Code: good},
+		localapi.OpForgetTasks: localapi.Auth{Token: tok},
+		localapi.OpForget:      localapi.Forget{Token: tok, ID: "owner:a"},
 	}
 }
 
@@ -185,8 +248,8 @@ func TestEveryOpButTheOpenOnesNeedsAToken(t *testing.T) {
 			t.Errorf("%s with no args: %v", op, err)
 		}
 	}
-	if len(r.own.answers) != 0 {
-		t.Fatalf("answers reached the channel: %v", r.own.answers)
+	if len(r.own.answers) != 0 || len(r.follows) != 0 || len(r.adopted) != 0 || len(r.forgets) != 0 {
+		t.Fatalf("reached the channel: %v %v %v %v", r.own.answers, r.follows, r.adopted, r.forgets)
 	}
 	for op := range open {
 		var args any = struct{}{}
@@ -292,7 +355,9 @@ func TestAWrongSignInIsRefusedWithAFixedCode(t *testing.T) {
 
 type fakeTooMany struct{ *fakeOwner }
 
-func (f *fakeTooMany) LocalSignIn(string) (time.Time, error) { return time.Time{}, owner.ErrTooMany }
+func (f *fakeTooMany) LocalSignIn(string) (time.Time, uint64, error) {
+	return time.Time{}, 0, owner.ErrTooMany
+}
 
 // Security L2: wrong codes are counted in agentosd for the socket, so a
 // compromised page cannot spray codes faster than the page's own bound.
@@ -470,10 +535,10 @@ func TestChannelFailuresAreFixedCodes(t *testing.T) {
 
 type failing struct{ *fakeOwner }
 
-func (f *failing) LocalStop(context.Context) error { return errors.New("journal: /var/lib/x") }
-func (f *failing) LocalResume() (string, error)    { return "", errors.New("journal: /var/lib/x") }
-func (f *failing) LocalSignIn(string) (time.Time, error) {
-	return time.Time{}, errors.New("state: /var/lib/x")
+func (f *failing) LocalStop(context.Context) error    { return errors.New("journal: /var/lib/x") }
+func (f *failing) LocalResume(uint64) (string, error) { return "", errors.New("journal: /var/lib/x") }
+func (f *failing) LocalSignIn(string) (time.Time, uint64, error) {
+	return time.Time{}, 0, errors.New("state: /var/lib/x")
 }
 
 // Security D1 on the P2-2w plan: status before sign-in carries fixed
@@ -659,5 +724,48 @@ func TestAWrongSignInTellsNoTriesLeft(t *testing.T) {
 			t.Fatalf("status before sign-in tells the tries: %s", b)
 		}
 		r.now = r.now.Add(time.Minute)
+	}
+}
+
+// W5a-resume: a signed-in page lists the paused grants and asks to resume
+// one from the pause it showed; the ask's own failures are fixed codes,
+// and a bad ask never reaches the gate.
+func TestAPausedGrantIsAskedToResumeFromASession(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	out, err := r.call(localapi.OpPaused, localapi.Auth{Token: tok})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := out.(localapi.Paused); len(p.Grants) != 1 || p.Grants[0].ID != "G2" || p.Grants[0].Pause != "loop2/pause/G2/1" {
+		t.Fatalf("paused %+v", p)
+	}
+	out, err = r.call(localapi.OpAskResume, localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"})
+	if err != nil || out.(localapi.Text).Text != "Asked." {
+		t.Fatalf("ask: %v %v", out, err)
+	}
+	if _, err := r.call(localapi.OpAskResume, localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/0"}); code(err) != localapi.ErrFailed {
+		t.Fatalf("stale pause: %v", err)
+	}
+	long := func(n int) string { return strings.Repeat("a", n+1) }
+	for _, in := range []localapi.AskResume{
+		{Token: tok, Pause: "p"}, {Token: tok, Grant: "G2"},
+		{Token: tok, Grant: long(localapi.MaxID), Pause: "p"}, {Token: tok, Grant: "G2", Pause: long(localapi.MaxPause)},
+	} {
+		if _, err := r.call(localapi.OpAskResume, in); code(err) != localapi.ErrBadArgs {
+			t.Errorf("%+v: %v", in, err)
+		}
+	}
+	if len(r.asks) != 2 {
+		t.Fatalf("asks reaching the gate %v", r.asks)
+	}
+	r.srv.cfg.Paused, r.srv.cfg.AskResume = nil, nil
+	for op, args := range map[string]any{
+		localapi.OpPaused:    localapi.Auth{Token: tok},
+		localapi.OpAskResume: localapi.AskResume{Token: tok, Grant: "G2", Pause: "loop2/pause/G2/1"},
+	} {
+		if _, err := r.call(op, args); code(err) != localapi.ErrFailed {
+			t.Errorf("%s with no hook: %v", op, err)
+		}
 	}
 }

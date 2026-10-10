@@ -195,6 +195,10 @@ type Permission struct {
 	Decision string `json:"decision,omitempty"` // "allowed" or "denied"
 	Phase    Phase  `json:"phase,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	// GuestReason is the policy's text for the guest, set only when the
+	// refusal was guesterr.Safe by its own method set (SR2-3j); Reason,
+	// which may name host paths or internal IDs, is the owner's.
+	GuestReason string `json:"guest_reason,omitempty"`
 }
 
 // Attempt records one dispatch and what is known about it.

@@ -9,6 +9,7 @@ import (
 func (e *Engine) scrub(r Record) Record {
 	r.Evidence = e.text(r.Evidence)
 	r.Reason = e.text(r.Reason)
+	r.Guest = e.text(r.Guest)
 	if r.Intent != nil {
 		in := e.scrubIntent(*r.Intent)
 		r.Intent = &in

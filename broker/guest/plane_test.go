@@ -93,7 +93,7 @@ func (e *exec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
 }
 
 type rig struct {
-	t     *testing.T
+	t     testing.TB
 	p     *Plane
 	ms    *fakeMachines
 	eng   *journal.Engine
@@ -104,7 +104,7 @@ type rig struct {
 	reps  []string
 }
 
-func newRig(t *testing.T, mod func(*Config)) *rig {
+func newRig(t testing.TB, mod func(*Config)) *rig {
 	t.Helper()
 	r := &rig{t: t, ms: newMachines(), ex: &exec{runs: map[string]int{}}}
 	eng, err := journal.Open(&journal.MemStore{}, allow{}, map[string]journal.Executor{"mail": r.ex}, func(s string) string { return s })
@@ -604,6 +604,21 @@ func TestG5OwnerMessagesSurviveABrokerRestart(t *testing.T) {
 	r3.client("m1")
 	if code, body := r3.do("m1", "GET", "/owner/next", ""); code != 204 {
 		t.Fatalf("an answered message came back: %s", body)
+	}
+}
+
+// A failed inbox store must not hand the caller the path.
+func TestAFailedInboxStoreDoesNotNameThePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing", "inbox.json")
+	r := newRig(t, func(c *Config) { c.InboxPath = path })
+	r.client("m1")
+	_, err := r.p.DeliverOwner("m1", "book the dentist", true)
+	if err == nil || strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), "missing") || strings.Contains(err.Error(), "/") {
+		t.Fatalf("path leaked: %v", err)
+	}
+	if err.Error() != "guest: the message was not stored" {
+		t.Fatalf("err %v", err)
 	}
 }
 

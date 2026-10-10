@@ -44,10 +44,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // Limits is an amount of model use: calls and tokens.
@@ -58,10 +60,10 @@ type Limits struct {
 
 func (l Limits) add(o Limits) Limits { return Limits{l.Calls + o.Calls, l.Tokens + o.Tokens} }
 
-// over reports whether charging one more call carrying in tokens (input
-// and reserved output) to used would pass cap.
-func over(used, cap Limits, in int64) bool {
-	return used.Calls+1 > cap.Calls || used.Tokens+in > cap.Tokens
+// over reports whether charging use (one call carrying its input and
+// reserved output, or a hold of tokens alone) to used would pass cap.
+func over(used, cap, use Limits) bool {
+	return used.Calls+use.Calls > cap.Calls || used.Tokens+use.Tokens > cap.Tokens
 }
 
 // Scopes a limit applies at.
@@ -311,10 +313,14 @@ type Call struct {
 	machine string
 	task    string
 	goal    string
-	charged int64 // tokens charged at Start
-	at      int64 // start of the bucket they were charged to
+	charged int64  // tokens charged at Start
+	at      int64  // start of the bucket they were charged to
+	holds   []held // tokens Another added later, charged (and refunded) in their own buckets
 	once    sync.Once
 }
+
+// held is n tokens a hold charged to the bucket starting at at.
+type held struct{ at, n int64 }
 
 // Start admits one model call from machine carrying in input tokens and
 // reserving reserve output tokens, or refuses it with ErrExhausted. The
@@ -344,7 +350,7 @@ func (m *Meter) StartFor(machine, goal string, in, reserve int64) (*Call, error)
 	m.mu.Lock()
 	now := m.cfg.Now().Unix()
 	tid := m.st.Bound[machine]
-	if err := m.admitShares(shares, active, machine, now, in+reserve); err != nil {
+	if err := m.admitShares(shares, active, machine, now, Limits{1, in + reserve}); err != nil {
 		m.mu.Unlock()
 		return nil, err
 	}
@@ -381,15 +387,8 @@ func (e Exhausted) key() string {
 
 // admit checks every limit and charges the call. Called with mu held.
 func (m *Meter) admit(machine, tid, goal string, now, in int64) (*Exhausted, error) {
-	if used := m.sum(m.st.Overall, now); over(used, m.cfg.OverallCap, in) {
-		return &Exhausted{Scope: ScopeOverall, Machine: machine, Used: used, Limit: m.cfg.OverallCap}, ErrExhausted
-	}
-	if t := m.st.Tasks[tid]; t != nil {
-		if over(t.Used, t.limit(), in) {
-			return &Exhausted{Scope: ScopeTask, Machine: machine, Task: tid, Used: t.Used, Limit: t.limit()}, ErrExhausted
-		}
-	} else if used := m.sum(m.st.Machines[machine], now); over(used, m.cfg.MachineCap, in) {
-		return &Exhausted{Scope: ScopeMachine, Machine: machine, Used: used, Limit: m.cfg.MachineCap}, ErrExhausted
+	if ex := m.check(machine, tid, now, Limits{1, in}); ex != nil {
+		return ex, ErrExhausted
 	}
 	m.add(machine, tid, goal, now, Limits{Calls: 1, Tokens: in})
 	// A task's notice stays sent until the owner extends it (Extend), so
@@ -398,6 +397,50 @@ func (m *Meter) admit(machine, tid, goal string, now, in int64) (*Exhausted, err
 	delete(m.st.Notified, ScopeOverall)
 	delete(m.st.Notified, ScopeMachine+":"+machine)
 	return nil, m.save()
+}
+
+// check reports the first limit charging use would pass, or nil. Called
+// with mu held.
+func (m *Meter) check(machine, tid string, now int64, use Limits) *Exhausted {
+	if used := m.sum(m.st.Overall, now); over(used, m.cfg.OverallCap, use) {
+		return &Exhausted{Scope: ScopeOverall, Machine: machine, Used: used, Limit: m.cfg.OverallCap}
+	}
+	if t := m.st.Tasks[tid]; t != nil {
+		if over(t.Used, t.limit(), use) {
+			return &Exhausted{Scope: ScopeTask, Machine: machine, Task: tid, Used: t.Used, Limit: t.limit()}
+		}
+	} else if used := m.sum(m.st.Machines[machine], now); over(used, m.cfg.MachineCap, use) {
+		return &Exhausted{Scope: ScopeMachine, Machine: machine, Used: used, Limit: m.cfg.MachineCap}
+	}
+	return nil
+}
+
+// hold charges c n more tokens, for one more upstream attempt (Another),
+// or refuses with ErrExhausted if that would pass a limit c counts
+// against. The call was admitted, so no owner notice is sent: the router
+// answers with the provider status it has instead of failing over.
+func (m *Meter) hold(c *Call, n int64) error {
+	m.mu.Lock()
+	shares := m.shares
+	m.mu.Unlock()
+	active := make([]bool, len(shares))
+	for i, sh := range shares {
+		active[i] = sh.Active == nil || sh.Active()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.cfg.Now().Unix()
+	use := Limits{Tokens: n}
+	if err := m.admitShares(shares, active, c.machine, now, use); err != nil {
+		return err
+	}
+	if m.check(c.machine, c.task, now, use) != nil {
+		return ErrExhausted
+	}
+	m.add(c.machine, c.task, c.goal, now, use)
+	c.charged += n
+	c.holds = append(c.holds, held{now - now%m.slot, n})
+	return m.save()
 }
 
 func (m *Meter) add(machine, tid, goal string, now int64, use Limits) {
@@ -477,11 +520,15 @@ func (m *Meter) settleLocked(c *Call, used int64) error {
 	case d > 0:
 		m.add(c.machine, c.task, c.goal, m.cfg.Now().Unix(), Limits{Tokens: d})
 	case d < 0:
-		refund(m.st.Overall, c.at, -d)
-		refund(m.st.Machines[c.machine], c.at, -d)
-		if p, ok := m.shareOf(c.machine); ok {
-			refund(m.st.Shares[p], c.at, -d)
+		// Refund the latest holds first, each from the bucket it was
+		// charged to, then the rest from Start's.
+		back := -d
+		for i := len(c.holds) - 1; i >= 0 && back > 0; i-- {
+			n := min(back, c.holds[i].n)
+			m.refundBuckets(c, c.holds[i].at, n)
+			back -= n
 		}
+		m.refundBuckets(c, c.at, back)
 		if t := m.st.Tasks[c.task]; t != nil {
 			t.Used.Tokens = max(0, t.Used.Tokens+d)
 		}
@@ -492,6 +539,19 @@ func (m *Meter) settleLocked(c *Call, used int64) error {
 		return nil
 	}
 	return m.save()
+}
+
+// refundBuckets takes n tokens of c's back from the buckets starting at
+// at. Called with mu held.
+func (m *Meter) refundBuckets(c *Call, at, n int64) {
+	if n <= 0 {
+		return
+	}
+	refund(m.st.Overall, at, n)
+	refund(m.st.Machines[c.machine], at, n)
+	if p, ok := m.shareOf(c.machine); ok {
+		refund(m.st.Shares[p], at, n)
+	}
 }
 
 // refund takes up to n tokens back from the bucket starting at at.
@@ -664,7 +724,7 @@ func frac(l Limits, f float64) Limits {
 // admitShares refuses a call carrying in tokens that would pass its own
 // share's Max or eat into another Active share's unused reserve. Called
 // with mu held; active[i] is shares[i].Active().
-func (m *Meter) admitShares(shares []Share, active []bool, machine string, now, in int64) error {
+func (m *Meter) admitShares(shares []Share, active []bool, machine string, now int64, in Limits) error {
 	cap := m.cfg.OverallCap
 	var held Limits // other active shares' reserves not yet used
 	for i, sh := range shares {
@@ -732,7 +792,7 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), m.cfg.CallTimeout)
 		defer cancel()
-		rep := &reportSlot{}
+		rep := &reportSlot{call: c, in: in, reserve: reserve}
 		r = r.WithContext(context.WithValue(ctx, reportKey{}, rep))
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
@@ -747,9 +807,11 @@ func (m *Meter) Wrap(machine string, next http.Handler) http.Handler {
 // Every output-limit key present (max_tokens, max_completion_tokens,
 // max_output_tokens; any reasoning budget sits inside them) is clamped to
 // MaxReserve, a missing or unusable one counts as MaxReserve, and when
-// none is present the limit is inserted at DefaultReserve, under the key
-// the path's API reads. The body is re-encoded from what was checked, so
-// duplicate keys cannot carry a second, larger limit past the meter. The
+// none the path's API reads is present the limit is inserted at
+// DefaultReserve, under the key it reads: a limit only another API reads
+// would leave the provider to its own default. The body is re-encoded
+// from what was checked, and Object refuses duplicate and case-colliding
+// keys, so what the provider's decoder reads is what was checked. The
 // reservation is the largest limit forwarded, so a provider that honors
 // its limit cannot be charged past what Start reserved. An empty body
 // (a GET) passes unchanged; any other body that is not one JSON object
@@ -758,14 +820,9 @@ func (m *Meter) limit(path string, body []byte) ([]byte, int64, error) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body, m.cfg.DefaultReserve, nil
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var obj map[string]json.RawMessage
-	if err := dec.Decode(&obj); err != nil || obj == nil {
-		return nil, 0, errors.New("body is not a JSON object")
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, 0, errors.New("trailing data after JSON body")
+	obj, err := Object(body, append([]string{"n"}, limitKeys...)...)
+	if err != nil {
+		return nil, 0, err
 	}
 	// n asks for several choices, each up to the limit, so output could
 	// pass the reservation n times over. One choice only.
@@ -785,22 +842,86 @@ func (m *Meter) limit(path string, body []byte) ([]byte, int64, error) {
 		obj[k] = json.RawMessage(strconv.FormatInt(n, 10))
 		reserve = max(reserve, n)
 	}
-	if reserve == 0 {
-		reserve = m.cfg.DefaultReserve
-		k := "max_completion_tokens"
-		switch {
-		case strings.HasSuffix(path, "/messages"):
-			k = "max_tokens" // Anthropic Messages
-		case strings.HasSuffix(path, "/responses"):
-			k = "max_output_tokens" // OpenAI Responses
-		}
-		obj[k] = json.RawMessage(strconv.FormatInt(reserve, 10))
+	read := []string{"max_tokens", "max_completion_tokens"} // chat completions
+	switch {
+	case strings.HasSuffix(path, "/messages"):
+		read = []string{"max_tokens"} // Anthropic Messages
+	case strings.HasSuffix(path, "/responses"):
+		read = []string{"max_output_tokens"} // OpenAI Responses
+	}
+	if !slices.ContainsFunc(read, func(k string) bool { _, ok := obj[k]; return ok }) {
+		obj[read[len(read)-1]] = json.RawMessage(strconv.FormatInt(m.cfg.DefaultReserve, 10))
+		reserve = max(reserve, m.cfg.DefaultReserve)
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return nil, 0, err
 	}
 	return out, reserve, nil
+}
+
+// Object decodes body as exactly one JSON object, refusing trailing data,
+// a key given twice, and two keys that differ only in case. encoding/json
+// matches a struct field to a key case-insensitively (Unicode simple
+// folding, so the KELVIN SIGN matches k) and the last match wins, so
+// either would let a decoder downstream read a different value from the
+// one checked here. A key that differs only in case from one of canon is
+// refused too: a decoder would read it as that key, which a check on the
+// exact key does not see.
+func Object(body []byte, canon ...string) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, errors.New("body is not a JSON object")
+	}
+	want := make(map[string]string, len(canon))
+	for _, k := range canon {
+		want[fold(k)] = k
+	}
+	obj := map[string]json.RawMessage{}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, errors.New("body is not a JSON object")
+		}
+		k := t.(string)
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, errors.New("body is not a JSON object")
+		}
+		f := fold(k)
+		if seen[f] {
+			return nil, fmt.Errorf("key %q repeated or differs from another only in case", k)
+		}
+		if c, ok := want[f]; ok && c != k {
+			return nil, fmt.Errorf("key %q must be spelled %q", k, c)
+		}
+		seen[f] = true
+		obj[k] = v
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, errors.New("body is not a JSON object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("trailing data after JSON body")
+	}
+	return obj, nil
+}
+
+// fold maps s to one representative of its case-folding class: each rune
+// becomes the least rune of its simple-folding orbit, the equivalence
+// encoding/json and strings.EqualFold use.
+func fold(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			least = min(least, f)
+		}
+		b.WriteRune(least)
+	}
+	return b.String()
 }
 
 // limitKeys are the request keys that bound a call's output.
