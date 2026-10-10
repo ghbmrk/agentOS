@@ -42,7 +42,7 @@ func TestAGuestCannotDial(t *testing.T) {
 	if !netns {
 		t.Fatal("bundle has no private network namespace")
 	}
-	args := (&Runtime{Bin: "runsc", StateDir: dir}).cmd(t.Context(), "run").Args
+	args := (&Runtime{Bin: "runsc", StateDir: dir}).argv("run")
 	if !strings.Contains(strings.Join(args, " "), "--network=none") {
 		t.Fatalf("runsc is not started with --network=none: %q", args)
 	}
