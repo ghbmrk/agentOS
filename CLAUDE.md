@@ -42,7 +42,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 
 ## Repository conventions
 - Branch per package: `pkg/<id>-<slug>-<suffix>`. The coordinator sets the `pkg/<id>-<slug>` stem when it starts a thread; the server appends a session-unique suffix. Threads started without a stem keep their assigned `claude/…` branch, and the PR title starts with the package ID (DECISIONS.md). PRs use the template's trace table.
-- Nothing sits idle more than 48 hours: a PR or `building` row is finished, handed off, or returned to `queued`. CODEX-1 drafts are exempt (OPERATING §5).
+- Nothing sits idle more than 48 hours: a PR or `building` row is finished, handed off, or returned to `queued`. No draft is exempt, and a lane holds about 10 open PRs at most; the W5-D drafts D-095 keeps open as reference are exempt until SIM-cases lists their cases (OPERATING §5, D-096).
 - Questions for Mark go to docs/MARK-QUEUE.md, one-word answerable, with a recommendation.
 - A PR that fixes a defect in already-merged code carries a `Defect: <package ID>` line in its body; METRICS.md counts them for L4.
 - SPEC.md changes only through an L1 spec-diff PR that Mark approves.
