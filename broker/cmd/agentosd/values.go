@@ -20,6 +20,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/compile"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/loops"
@@ -179,11 +180,7 @@ func readValuesKey(path string) ([]byte, error) {
 		if _, err = rand.Read(key); err != nil {
 			return nil, err
 		}
-		tmp := path + ".tmp"
-		if err = os.WriteFile(tmp, key, 0o600); err == nil {
-			err = os.Rename(tmp, path)
-		}
-		if err != nil {
+		if err = durable.WriteFile(path, key, 0o600); err != nil {
 			return nil, err
 		}
 	} else if err != nil {

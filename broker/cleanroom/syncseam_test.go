@@ -184,14 +184,14 @@ func TestSettleMakesRealSync(t *testing.T) {
 	}
 }
 
-// The real syncs are made only inside the seam: syncDir (the directory
-// sync) is the only caller of File.Sync, and syncFile and syncDirFn are
-// called only from fileSync and dirSync. A durable write anywhere else
+// The real syncs are made only inside the seam: no function calls File.Sync
+// or package durable (whose renames would skip the hook), and syncFile and
+// syncDirFn are called only from fileSync and dirSync. A durable write anywhere else
 // would skip the hook, and so the recorder above. The "sync" and "syncdir"
 // hooks are called only there too, so no hook stands in for a sync that
 // is not made.
 func TestSyncsOnlyThroughSeam(t *testing.T) {
-	allowed := map[string]string{"Sync": "syncDir", "syncDir": "", "syncFile": "fileSync", "syncDirFn": "dirSync"}
+	allowed := map[string]string{"Sync": "", "durable": "", "syncFile": "fileSync", "syncDirFn": "dirSync"}
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
 	if err != nil {

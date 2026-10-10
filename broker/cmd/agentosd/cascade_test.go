@@ -138,7 +138,9 @@ func TestLearningStaysOffWhenTheReplayFails(t *testing.T) {
 	must(t, err)
 	must(t, os.WriteFile(path, raw, 0o600))
 	must(t, os.WriteFile(filepath.Join(dir, "forgotten.json"), []byte(`{"owner:f1":"2026-10-05T09:00:00Z"}`), 0o600))
-	must(t, os.Mkdir(path+".tmp", 0o700)) // the pipeline's save cannot write
+	real := pipelineStore
+	t.Cleanup(func() { pipelineStore = real })
+	pipelineStore = func(p string) change.Store { return unsaved{change.FileStore{Path: p}} } // the pipeline's save cannot write
 	cfg := daemon.Config{
 		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
 		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
@@ -152,3 +154,8 @@ func TestLearningStaysOffWhenTheReplayFails(t *testing.T) {
 		t.Fatal("the tree was marked ready")
 	}
 }
+
+// unsaved is a FileStore whose saves fail.
+type unsaved struct{ change.FileStore }
+
+func (unsaved) Save([]byte) error { return errors.New("synthetic save failure") }

@@ -441,7 +441,7 @@ func CreateSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := writeAtomic(keysPath, raw); err != nil {
+	if err := writeFile(keysPath, raw, 0o600); err != nil {
 		v.Close()
 		os.Remove(vaultPath)
 		return nil, err
