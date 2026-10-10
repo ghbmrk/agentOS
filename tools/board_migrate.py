@@ -5,17 +5,26 @@ Dry run by default: prints the issues and labels it would create and checks that
 back to BOARD.md's live rows (tools/board.py). With --apply --repo owner/name (GITHUB_TOKEN)
 it first creates the labels in board.LABELS that the repository lacks, then one issue per live
 row in BOARD order, skipping any ID that already has a work-item issue, so a rerun after a
-partial failure resumes where it stopped. Delete this script once the migration has run.
+partial failure resumes where it stopped. It waits out GitHub's rate limits (board.call) and
+pauses a second between issues, as GitHub asks of content-creating calls. Last it reads the
+issues back and checks that they render BOARD.md's live rows (the SIM-repo-2 acceptance).
+
+Each new issue notifies everyone watching the repository once: about 270 notifications to the
+owner. Tell them before running --apply, so the burst is expected.
+
+After it passes, add board.GENERATED below BOARD.md's title and move the merged and dropped
+rows to the history file (SIM-repo-2b). Delete this script once the migration has run.
 """
 import argparse
 import pathlib
 import sys
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import board  # noqa: E402
 
 
-def main(argv=None, read=lambda: (board.ROOT / "BOARD.md").read_text(), api=None):
+def main(argv=None, read=lambda: (board.ROOT / "BOARD.md").read_text(), api=None, pause=time.sleep):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--apply", action="store_true", help="create the labels and issues (default: dry run)")
     ap.add_argument("--repo", help="owner/name, required with --apply")
@@ -37,6 +46,7 @@ def main(argv=None, read=lambda: (board.ROOT / "BOARD.md").read_text(), api=None
         for i in planned:
             print(f"{', '.join(i['labels']):60}  {i['title'][:100]}")
         print(f"dry run: {len(planned)} issues, {len(board.LABELS)} labels; round trip: ok")
+        print(f"--apply sends each repository watcher {len(planned)} notifications, one per issue")
         return 0
     api = api or (lambda method, path, payload=None: board.github(path, method, payload))
     repo = f"/repos/{args.repo}"
@@ -49,9 +59,21 @@ def main(argv=None, read=lambda: (board.ROOT / "BOARD.md").read_text(), api=None
     made = 0
     for i in planned:
         if board.issue_id(i) not in existing:
+            if made:
+                pause(1)
             api("POST", f"{repo}/issues", i)
             made += 1
     print(f"created {made} issues; {len(planned) - made} already existed")
+    try:
+        ok = board.render(text, board.work_items(lambda path: api("GET", path), args.repo)) == board.live(text)
+    except ValueError as e:
+        print(f"board_migrate: read back: {e}", file=sys.stderr)
+        return 1
+    if not ok:
+        print(f"board_migrate: read back: the issues do not render BOARD.md's live rows; "
+              f"diff tools/board.py render --repo {args.repo} against BOARD.md", file=sys.stderr)
+        return 1
+    print("read back: every live row has one issue and the issues render BOARD.md's live rows")
     return 0
 
 
