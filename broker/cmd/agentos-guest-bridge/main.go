@@ -38,11 +38,11 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/skill"
 )
 
@@ -70,7 +70,7 @@ func main() {
 	}
 	go http.Serve(l, routes(broker, *tree))
 
-	var child *exec.Cmd
+	var child *childproc.Cmd
 	if args := flag.Args(); len(args) > 0 {
 		if child, err = startRuntime(args, token); err != nil {
 			log.Fatal(err)
@@ -86,7 +86,7 @@ func main() {
 	go func() {
 		s := <-sig
 		if child != nil {
-			child.Process.Signal(s)
+			child.Signal(s)
 		}
 	}()
 	reap(child)
@@ -102,18 +102,18 @@ var runtimeVars = []string{
 	"OPENCLAW_DISABLE_BONJOUR", "OPENCLAW_CLAWHUB_URL", "DO_NOT_TRACK",
 }
 
-// startRuntime starts the guest runtime with runtimeVars and the gateway
-// token as its whole environment.
-func startRuntime(args []string, token string) (*exec.Cmd, error) {
+// startRuntime starts the guest runtime, through childproc, with
+// runtimeVars and the gateway token as its whole environment. Each key is
+// on childproc's allowlist for this reason: they run in the guest, where
+// no AGENTOS_* variable exists.
+func startRuntime(args []string, token string) (*childproc.Cmd, error) {
 	env := []string{"OPENCLAW_GATEWAY_TOKEN=" + token}
 	for _, k := range runtimeVars {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
 		}
 	}
-	child := exec.Command(args[0], args[1:]...)
-	child.Env = env
-	child.Stdout, child.Stderr = os.Stdout, os.Stderr
+	child := childproc.Command(context.Background(), childproc.NewEnv(env...), childproc.Options{Stdout: os.Stdout, Stderr: os.Stderr}, args[0], args[1:]...)
 	return child, child.Start()
 }
 
@@ -136,7 +136,7 @@ func routes(broker *http.Client, tree string) http.Handler {
 }
 
 // reap waits for every child, as PID 1 must, and exits with the runtime.
-func reap(child *exec.Cmd) {
+func reap(child *childproc.Cmd) {
 	for {
 		var ws syscall.WaitStatus
 		pid, err := syscall.Wait4(-1, &ws, 0, nil)
@@ -149,7 +149,7 @@ func reap(child *exec.Cmd) {
 			}
 			os.Exit(1)
 		}
-		if child != nil && pid == child.Process.Pid {
+		if child != nil && pid == child.Pid() {
 			log.Printf("runtime exited: %v", ws)
 			os.Exit(ws.ExitStatus())
 		}

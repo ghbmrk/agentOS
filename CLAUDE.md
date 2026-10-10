@@ -5,7 +5,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 ## Builder (L2)
 - Work only from a package brief (`briefs/<ID>.md`, linked from its BOARD.md row). Touch only files inside the brief's declared scope.
 - **Tests first.** For each requirement ID in the brief, write a failing test, then the smallest change that passes it.
-- Claim coverage with a marker comment in the test file: `REQ: CRED-1, CRED-4`. Run `python3 tools/trace.py` locally to see coverage, but never commit TRACE.md: CI fails a PR that changes it, and the `trace` workflow commits the regenerated file to main after each merge.
+- Claim coverage with a marker comment in the test file: `REQ: CRED-1, CRED-4`. Run `python3 tools/trace.py` locally to see coverage, but never commit TRACE.md: CI fails a PR that changes it, and the `trace` workflow opens a PR with the regenerated file after each merge.
 - "Done" = CI green + every brief ID covered by a passing test. Never assert done without that evidence.
 - **Stop on lack of progress, not on spend:**
   - The brief's usage figure is an *estimate and checkpoint*, not a ceiling. At the checkpoint, continue if tests are moving toward green (note the extension in the PR), otherwise escalate.
@@ -29,13 +29,17 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - The only hard limit is the subscription (usage credits off). Target: ~100% of the weekly limit used by each reset, paced evenly at ~14% a day so it never runs out early (Mark, 2026-10-04); these are targets: spend where the next unit of work has clear value, don't idle to stay on pace, and don't spend just because budget remains.
 - Near a session-window limit, finish the current step cleanly; start heavy new work after the reset.
 - Keep contexts small: brief + touched files. Summarize CI logs instead of pasting them.
+- Cold starts cost most: on 5.5 models a cache write costs 40x a cache read. Per merged PR, minimise sessions started, wakes after >1h idle, model switches and compactions (OPERATING §1, §5).
+- Pick the model at spawn; never switch models mid-session. A second opinion is a fresh session.
+- A session past 150k that will idle over an hour writes a hand-off packet and stops watching. The coordinator routes, and merges in its own turn; investigation goes to a thread.
 - `.claude/settings.json` compacts at 200k tokens; don't raise it.
 - Size each package so its brief is 20k tokens or less and it finishes under 150k; split it before starting otherwise.
 - One package or one review per session. Start a fresh session with a hand-off packet of 20k tokens or less (OPERATING §5) rather than reviving a session over ~150k that sat idle more than an hour.
 - Mechanical subagent work (search, log triage, wording sweeps, test scaffolding) passes `model: "haiku"` and stays under 100k tokens, above which Haiku costs 5x; use `"sonnet"` when it needs judgment. Reviews of security-critical paths keep the session's model.
-- Sonnet pilot (OPERATING §5, 2026-10-08 to the 2026-10-18 reset): tier B and C builder sessions run on a Sonnet-class model, tier A on the strongest model. Run `tools/risk_tier.py` before opening the PR; on A, stop and hand off. Name the builder model in the PR's Budget section.
+- Sonnet pilot (OPERATING §5, 2026-10-08 to the 2026-10-13 reset): tier B and C builder sessions run on a Sonnet-class model, tier A on the strongest model. Run `tools/risk_tier.py` before opening the PR; on A, stop and hand off. Name the builder model in the PR's Budget section.
 - Live state lives on GitHub: every review verdict comment ends with the PR's next step and the reviews still owed. A cold session starts from `handoff/CURRENT.md` (rebuild steps and standing decisions; updated only when a standing decision changes), then GitHub (OPERATING §5, §7).
-- Read tool output narrowly (grep, tail, `go test -run`), never whole CI logs or large files. Send cross-session messages for decisions, blockers and hand-offs only; progress goes in the status checklist.
+- Read tool output narrowly (grep, tail, `go test -run`), never whole CI logs or large files. Send cross-session messages for decisions, blockers and hand-offs only; progress goes in the status checklist. Per thread, post one acknowledgement, one result and one blocker reply at most.
+- Coordinators of chat-based projects follow the chat layout and coordinator cost rules in OPERATING §5 (D-094).
 
 ## Repository conventions
 - Branch per package: `pkg/<id>-<slug>-<suffix>`. The coordinator sets the `pkg/<id>-<slug>` stem when it starts a thread; the server appends a session-unique suffix. Threads started without a stem keep their assigned `claude/…` branch, and the PR title starts with the package ID (DECISIONS.md). PRs use the template's trace table.
@@ -43,4 +47,4 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - Questions for Mark go to docs/MARK-QUEUE.md, one-word answerable, with a recommendation.
 - A PR that fixes a defect in already-merged code carries a `Defect: <package ID>` line in its body; METRICS.md counts them for L4.
 - SPEC.md changes only through an L1 spec-diff PR that Mark approves.
-- Parallel teams (another subscription or another vendor's agent) work only in their own lane (docs/LANES.md), claim rows on BOARD.md before building, run their own fresh L3 review before marking a PR ready, and never merge; the repository is the only shared state (OPERATING §7).
+- Mark's two Claude subscriptions are equal peers: either builds any row and merges under the same rule. Other teams (another vendor's agent, a teammate) work only in their own lane (docs/LANES.md), claim rows on BOARD.md before building, run their own fresh L3 review before marking a PR ready, and never merge; the repository is the only shared state (OPERATING §7).

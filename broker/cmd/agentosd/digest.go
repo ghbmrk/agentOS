@@ -8,7 +8,6 @@ import (
 	"log"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/digestqueue"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
@@ -57,13 +57,13 @@ const (
 	digestUnknownStatus = "Daily digest: one may not have reached you; the next digest says which."
 	digestFailedStatus  = "Daily digest: one could not be sent; the next digest says which."
 	digestHeldStatus    = "Daily digest: one was held and not sent; the next digest says which."
-	digestDownStatus    = "Daily digest: its store did not open, so none is sent; restart the box."
-	digestOwedStatus    = "Daily digest: the one due today is not ready yet; the box tries again every 30 minutes."
+	digestDownStatus    = "Daily digest: its store did not open, so none is sent; restart me."
+	digestOwedStatus    = "Daily digest: the one due today is not ready yet; I try again every 30 minutes."
 )
 
 // digestOutageLine is DC-8's fixed text, sent at most once a day when the
 // queue does not open; only sendOutage sends it (provisional, SG-3).
-const digestOutageLine = "Daily digest: not sent today, its store did not open; restart the box."
+const digestOutageLine = "Daily digest: not sent today, its store did not open; restart me."
 
 const digestDate = "Mon 2 Jan"
 
@@ -798,16 +798,7 @@ func prepareDigestDir(dir string) error {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
-	tmps, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
-	if err != nil {
-		return err
-	}
-	for _, t := range tmps {
-		if err := os.Remove(t); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	}
-	return nil
+	return durable.SweepTemp(dir)
 }
 
 // downStore is a store that does not open, for a digest directory

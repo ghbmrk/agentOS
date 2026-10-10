@@ -28,6 +28,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // EpochLength is how long one publication key is used.
@@ -81,7 +83,7 @@ func Open(path string, now func() time.Time) (*Identity, error) {
 	if err := checkDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
-	if err := sweepTemp(filepath.Dir(path)); err != nil {
+	if err := durable.SweepTemp(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
 	b, err := os.ReadFile(path)
@@ -141,7 +143,7 @@ func (id *Identity) rotate(e int64) error {
 	if err != nil {
 		return err
 	}
-	if err := writeAtomic(id.path, b); err != nil {
+	if err := durable.WriteFile(id.path, b, 0o600); err != nil {
 		return err
 	}
 	clear(id.priv)
@@ -195,37 +197,4 @@ func exactKeys(b []byte, keys ...string) error {
 		return fmt.Errorf("%w: trailing data", ErrDamaged)
 	}
 	return nil
-}
-
-// writeAtomic replaces path with b, readable only by the broker
-// (os.CreateTemp makes the file 0600), and syncs the directory.
-func writeAtomic(path string, b []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".pubid-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err == nil {
-		err = tmp.Sync()
-	}
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
-	// The rename must be on disk before anything relies on it: a batch
-	// confirmed sent, or an old seed taken as gone (L3 on #163).
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	err = d.Sync()
-	if cerr := d.Close(); err == nil {
-		err = cerr
-	}
-	return err
 }

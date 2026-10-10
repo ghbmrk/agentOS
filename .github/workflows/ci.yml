@@ -3,6 +3,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # trace.yml and metrics.yml dispatch it on their bot branches: PRs opened with
+  # GITHUB_TOKEN start no pull_request runs, and main requires these checks.
+  workflow_dispatch:
 permissions:
   contents: read
 # A newer push to the same PR cancels the older run; pushes to main

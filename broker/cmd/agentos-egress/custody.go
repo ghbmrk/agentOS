@@ -12,12 +12,12 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -93,10 +93,10 @@ var (
 	errWrongPIN     = uerr(http.StatusForbidden, "wrong PIN; this PC's TPM limits how many tries it allows")
 	errPINLockout   = uerr(http.StatusTooManyRequests, "Too many wrong PINs. Unlock with your passphrase and a code instead.")
 	errNotTrusted   = uerr(http.StatusConflict, "this PC is not a trusted host; unlock with the vault passphrase and a code")
-	errBootChanged  = uerr(http.StatusConflict, "This PC started the box in a way it hasn't before. Unlock with your passphrase and a code.")
+	errBootChanged  = uerr(http.StatusConflict, "This PC started me in a way it hasn't before. Unlock with your passphrase and a code.")
 	errNoSuchHost   = uerr(http.StatusNotFound, "no trusted host with that id")
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
-	errLockoutOwned = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so the box can't protect a boot PIN here. Trust this PC without a PIN instead.")
+	errLockoutOwned = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so I can't protect a boot PIN here. Trust this PC without a PIN instead.")
 
 	// Rollback (V6): the drive's vault is older than this PC's counter.
 	errRolledBack = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
@@ -114,12 +114,12 @@ const noteCounterReset = "This PC's copy check was reset. If you cleared this PC
 
 // noteTPMSilent is the owner's notice when this PC's TPM does not answer
 // the rollback check; the detail goes to the log only (UX-45-3).
-const noteTPMSilent = "This PC's security chip didn't respond, so the box stayed locked. Restart the PC. If it happens again, move the drive to another PC and unlock there with your passphrase and a code."
+const noteTPMSilent = "This PC's security chip didn't respond, so I stayed locked. Restart the PC. If it happens again, move the drive to another PC and unlock there with your passphrase and a code."
 
 // noteKeepTrustedFailed is the owner's notice when "Keep this PC
 // trusted" could not approve the new boot path; the detail goes to the
 // log only (CH-12).
-const noteKeepTrustedFailed = "Couldn't keep this PC trusted after its start-up changed. The box is unlocked; to restart without your card, trust this PC again on the box's Wi-Fi page."
+const noteKeepTrustedFailed = "I couldn't keep this PC trusted after its start-up changed. I'm unlocked; to restart without your card, trust this PC again on my Wi-Fi page."
 
 // noteRolledBack is the owner's notice for an old copy of the drive (V6).
 const noteRolledBack = "the vault on this drive is older than this PC has seen: it may be an old copy of the drive put back, so it stayed locked. If you did not restore it, the drive was out of your hands; restore from your backup with the recovery key."
@@ -136,7 +136,7 @@ func errLockedOut(until time.Time) error {
 }
 
 func errClockSkew(seconds int64) error {
-	return uerr(http.StatusForbidden, fmt.Sprintf("that code is for another time: the box clock and your phone differ by about %d s; this try was not counted", seconds))
+	return uerr(http.StatusForbidden, fmt.Sprintf("that code is for another time: my clock and your phone differ by about %d s; this try was not counted", seconds))
 }
 
 type phase int
@@ -331,7 +331,7 @@ func (c *custody) noteWrongPassLocked(now time.Time) {
 		c.wrongPassQuiet++
 		return
 	}
-	msg := "wrong vault passphrase tried on the box's Wi-Fi"
+	msg := "wrong vault passphrase tried on my Wi-Fi"
 	if c.wrongPassQuiet > 0 {
 		msg += fmt.Sprintf(" (%d more since the last notice)", c.wrongPassQuiet)
 	}
@@ -348,7 +348,7 @@ func (c *custody) noteSupersedeLocked(now time.Time) {
 		c.supersedeQuiet++
 		return
 	}
-	msg := "The box unlock was started over with your card; the earlier one was cancelled."
+	msg := "The unlock was started over with your card; the earlier one was cancelled."
 	if c.supersedeQuiet > 0 {
 		msg += " It was started over " + times(c.supersedeQuiet) + " more since the last notice."
 	}
@@ -465,7 +465,7 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	c.timer = time.AfterFunc(c.ttl, c.expire)
 	if c.wrongPassQuiet > 0 {
 		// A burst that stopped still reports its total.
-		c.notify(fmt.Sprintf("%d more wrong vault passphrases were tried on the box's Wi-Fi since the last notice", c.wrongPassQuiet))
+		c.notify(fmt.Sprintf("%d more wrong vault passphrases were tried on my Wi-Fi since the last notice", c.wrongPassQuiet))
 		c.wrongPassQuiet = 0
 	}
 	if !superseded {
@@ -520,7 +520,7 @@ func (c *custody) confirmKeep(ticket, code string, keep bool) (bool, error) {
 	}
 	if c.supersedeQuiet > 0 {
 		// Restarts that stopped still report their total.
-		c.notify("The box unlock was started over " + times(c.supersedeQuiet) + " more before it was unlocked.")
+		c.notify("The unlock was started over " + times(c.supersedeQuiet) + " more before it was unlocked.")
 		c.supersedeQuiet = 0
 	}
 	c.notify("vault unlocked")
@@ -630,7 +630,7 @@ func (c *custody) persist(next unlockState) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(c.statePath, raw); err != nil {
+	if err := durable.WriteFile(c.statePath, raw, 0o600); err != nil {
 		return err
 	}
 	c.st = next
@@ -759,7 +759,7 @@ var errUpdateAnchorMissing = uerr(http.StatusConflict, "this PC's update counter
 // PC has no TPM (the vault moved here, or the TPM was not found at start).
 // The store fails closed on it; "no anchor" is only for a vault that never
 // had one.
-var errUpdateAnchorElsewhere = uerr(http.StatusConflict, "this box's update check is kept in a security chip this PC doesn't have")
+var errUpdateAnchorElsewhere = uerr(http.StatusConflict, "my update check is kept in a security chip this PC doesn't have")
 
 // updateAnchorRead returns the update counter, defining it at the first
 // read on a PC with a TPM. anchored is false only on a PC with no TPM.
@@ -1127,44 +1127,6 @@ func (a apiKeysOnly) Secret(name string) (vault.Secret, bool) {
 
 func (a apiKeysOnly) Redactor() (*vault.Redactor, error) { return a.v.Redactor() }
 
-// writeFileAtomic replaces path with raw, mode 0600, fsynced, so a crash
-// leaves the old file or the new one.
-func writeFileAtomic(path string, raw []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".state-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	serr := d.Sync()
-	if err := d.Close(); serr == nil {
-		serr = err
-	}
-	return serr
-}
-
 // bootTrusted tries this PC's trusted-host slot once at start, so a
 // trusted PC restarts unattended (CRED-8). Anything else leaves the vault
 // locked for the unknown-host flow, and the owner is told why.
@@ -1204,7 +1166,7 @@ func (c *custody) bootTrusted() {
 		c.noteChangeUnfinishedLocked()
 	case errors.Is(err, tpmseal.ErrNeedPIN):
 		c.needPIN = true
-		c.notify("This PC starts with a boot PIN: enter the PIN on the box's Wi-Fi page.")
+		c.notify("This PC starts with a boot PIN: enter the PIN on my Wi-Fi page.")
 	case errors.Is(err, vault.ErrRolledBack):
 		c.notify(noteRolledBack)
 	case errors.Is(err, vault.ErrCounterMissing):
@@ -1220,7 +1182,7 @@ func (c *custody) bootTrusted() {
 		c.markBootChanged()
 	default:
 		log.Printf("trusted-host unlock: %v", err)
-		c.notify("This PC couldn't unlock the box by itself. Unlock with your passphrase and a code.")
+		c.notify("This PC couldn't unlock me by itself. Unlock with your passphrase and a code.")
 	}
 }
 
@@ -1254,7 +1216,7 @@ func (c *custody) markBootChanged() {
 		c.notify("Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.")
 		return
 	}
-	c.notify("This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
+	c.notify("This PC started me in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
 }
 
 // bootChange reports, while the vault is not open, whether this trusted

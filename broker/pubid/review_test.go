@@ -361,7 +361,7 @@ func TestOSS6NoDayTwiceAfterAWrongClock(t *testing.T) {
 // SHOULD 4; round 3 SHOULD 3; round 4 SHOULD 2).
 func TestOSS6StartSweepsAndChecksTheDirectory(t *testing.T) {
 	dir := t.TempDir()
-	stale := filepath.Join(dir, ".pubid-123")
+	stale := filepath.Join(dir, ".durable-123")
 	must(t, os.WriteFile(stale, []byte("old seed"), 0o600))
 	c := &clock{Reference.Add(time.Hour)}
 	id, err := Open(filepath.Join(dir, "pubid.json"), c.now)

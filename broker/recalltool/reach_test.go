@@ -194,7 +194,7 @@ type reachRig struct {
 // is 08:12 the same day.
 func newReachRig(t *testing.T) (*reachRig, time.Time) {
 	r := newRig(t)
-	x := &reachRig{r: r, clock: time.Now().UTC().Truncate(time.Minute).Add(-time.Hour)} // notes refuse future receipt
+	x := &reachRig{r: r, clock: time.Date(2026, 10, 5, 12, 30, 0, 0, time.UTC)} // pinned: a two-digit day pushes the rollback detail past fieldCap (40) and the long form fits only on a one-digit day
 	r.tl.cfg.Now = func() time.Time { return x.clock }
 	x.j = &fakeJournal{submitted: map[string]time.Time{}, origin: map[string]string{}, erased: map[string]bool{}, inFlight: map[string]bool{}, denied: map[string]bool{}}
 	x.before = x.clock.Add(-10 * time.Minute)
@@ -263,6 +263,32 @@ func TestCAP3InMachineWorkIsAskedAbout(t *testing.T) {
 	in := x.ask.st[x.ask.asked[0]].Intent
 	if in.Params["detail"] != "back to "+x.before.Format("15:04 Jan 2")+"; no actions yet" {
 		t.Fatalf("detail %q", in.Params["detail"])
+	}
+}
+
+// A reset that fails must not put the host path from the error into the
+// journal evidence the owner can later be shown.
+func TestCAP3AFailedResetRecordsNoHostPath(t *testing.T) {
+	x, _ := newReachRig(t)
+	x.vm.plan.Changes = 4
+	canary := "/var/lib/agentos/machines/root/upper"
+	x.vm.fail = errors.New("rename " + canary + ": permission denied")
+	x.del(t, x.mail)
+	if len(x.ask.asked) != 1 {
+		t.Fatalf("asked %v", x.ask.asked)
+	}
+	x.ask.answer("yes")
+	ev := ""
+	if st := x.ask.st[x.ask.asked[0]]; len(st.Attempts) > 0 {
+		ev = st.Attempts[0].Evidence
+	}
+	if strings.Contains(ev, canary) || strings.Contains(ev, "/var/") || ev == "" || ev == "rolled back" {
+		t.Fatalf("evidence %q", ev)
+	}
+	for _, told := range x.told {
+		if strings.Contains(told, canary) {
+			t.Fatalf("told %q", told)
+		}
 	}
 }
 
