@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/cgroup"
 )
 
 // inside reports whether path a is b or lies under it.
@@ -25,12 +26,18 @@ func inside(a, b string) bool {
 // in another's. Workers get no services directory at all. Information can
 // move between them only through broker tools (CAP-12).
 func TestCAP12MachinesRunningTogetherShareNoHostPath(t *testing.T) {
+	parent := t.TempDir()
+	write(t, parent, "cgroup.controllers", "cpu io memory pids")
+	write(t, parent, "cgroup.subtree_control", "")
+	g, err := cgroup.Open(parent)
+	must(t, err)
 	e := newEnv(t, 8192)
+	e.cfg.Cgroups, e.cfg.NoCgroups = g, false
 	svc := &recServices{root: t.TempDir(), open: map[string]bool{}}
 	e.cfg.Services = svc
 	e.open()
 	guest := e.create("guest", admission.Accepted, 256)
-	_, err := e.m.Checkpoint(bg, "guest")
+	_, err = e.m.Checkpoint(bg, "guest")
 	must(t, err)
 	_, err = e.m.Fork(bg, "guest", []string{"f1", "f2"})
 	must(t, err)
@@ -54,6 +61,9 @@ func TestCAP12MachinesRunningTogetherShareNoHostPath(t *testing.T) {
 	for _, a := range running {
 		if a.Lower != e.img {
 			t.Errorf("%s's lower layer is %q, want the read-only image", a.ID, a.Lower)
+		}
+		if filepath.Dir(a.Cgroup) != parent {
+			t.Errorf("%s runs in cgroup %q, want its own under %q", a.ID, a.Cgroup, parent)
 		}
 		worker := strings.HasPrefix(a.ID, WorkerPrefix)
 		if worker != (a.Services == "") {
