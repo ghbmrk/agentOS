@@ -169,6 +169,12 @@ def row_of(item):
         section, cells, rest = data["section"], data["cells"], data["rest"]
     except (ValueError, KeyError) as e:
         raise ValueError(f"{where}: board-row block: {e}") from None
+    # Body text reaches BOARD.md verbatim, so each value must stay inside its one cell.
+    if not (isinstance(cells, list) and all(isinstance(v, str) for v in [section, *cells, rest])):
+        raise ValueError(f"{where}: board-row section, cells and rest must be text")
+    for v in [*cells, rest]:
+        if "".join(v.splitlines()) != v or len(_cells(f"|{v}|")) != 1:
+            raise ValueError(f"{where}: board-row value {v!r} has a line break or an unescaped |")
     return {"id": issue_id(item), "number": item["number"], "section": section,
             "cells": cells, "state": states[0], "rest": rest}
 

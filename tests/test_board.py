@@ -121,6 +121,32 @@ class RoundTripTest(unittest.TestCase):
         with self.assertRaises(ValueError):  # two issues for one ID
             board.render(BOARD, planned)
 
+    def test_body_text_cannot_leave_its_cell(self):
+        def refused(field, value):
+            planned = issues()
+            block = board.BLOCK.search(planned[0]["body"])
+            data = json.loads(block.group(1))
+            if field == "cells":
+                data["cells"][0] = value
+            elif field == "all cells":
+                data["cells"] = value
+            else:
+                data[field] = value
+            planned[0]["body"] = planned[0]["body"].replace(block.group(1), json.dumps(data))
+            with self.assertRaises(ValueError, msg=repr(value)):
+                board.render(BOARD, planned)
+        fake = " (C) |\n| A-9 | Fake | — | in review (#1)"
+        refused("rest", fake)  # an injected row
+        for brk in ("\n", "\r", " ", "\x85"):
+            refused("cells", f"a{brk}b")
+        refused("cells", "a | b")
+        refused("rest", " | extra")
+        refused("cells", 7)
+        refused("cells", ["nested"])
+        refused("rest", None)
+        refused("section", ["Harness"])
+        refused("all cells", {"x": ["[Pilot](briefs/A-1.md)", "—"]})
+
     def test_source_with_a_bad_state_or_two_tables_in_a_section_is_refused(self):
         with self.assertRaises(ValueError):
             board.plan(BOARD.replace("escalated |", "parked |"))
