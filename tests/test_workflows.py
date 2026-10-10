@@ -59,6 +59,7 @@ class WorkflowTest(unittest.TestCase):
             text = (WORKFLOWS / name).read_text()
             self.assertIn("gh pr create --base main", text, name)
             self.assertIn('gh workflow run ci.yml --ref "$BRANCH"', text, name)
+            self.assertIn('gh pr merge "$BRANCH" --auto --squash', text, name)
 
     def test_fuzz_runs_go_through_fuzzrun_and_never_by_duration(self):
         # P1-4-flake-ci (REQ: LOOP-7): a duration -fuzztime can end in the fuzz coordinator's
