@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/hint"
 )
 
@@ -143,7 +144,7 @@ func (b *Builder) Send(day string, batch [][]byte) error {
 			}
 		}
 		// Batch directories are named by day, so they sort by day.
-		if err := os.Rename(tmp, filepath.Join(b.queueDir(), day)); err != nil {
+		if err := os.Rename(tmp, filepath.Join(b.queueDir(), day)); err != nil { // durable:exempt synced through the fault seam (dirSync), C14
 			return err
 		}
 		if err := faultFn(nil).dirSync(b.queueDir()); err != nil {
@@ -272,7 +273,7 @@ func writeFileWith(fault faultFn, path string, data []byte) error {
 	if err := fault.hit("rename", path); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := os.Rename(tmp, path); err != nil { // durable:exempt synced through the fault seam (dirSync), C14
 		return err
 	}
 	return fault.dirSync(filepath.Dir(path))
@@ -315,7 +316,7 @@ func (f faultFn) hit(op, path string) error {
 // (SR3-8-f2).
 var (
 	syncFile  = (*os.File).Sync
-	syncDirFn = syncDir
+	syncDirFn = durable.SyncDir
 )
 
 // fileSync runs the hook, then syncs file. Every durable file sync goes
@@ -342,13 +343,4 @@ func readJSON(path string, v any) error {
 		return err
 	}
 	return json.Unmarshal(data, v)
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }

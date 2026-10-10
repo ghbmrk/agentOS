@@ -219,7 +219,9 @@ func TestHW8FloorAheadOfVerifiedTimeIsReplaced(t *testing.T) {
 		v := readSaved(t, path)
 		ahead := r.wall.Add(400 * 24 * time.Hour)
 		v.Floor = ahead
-		if err := writeAtomic(path, v); err != nil {
+		if b, err := json.Marshal(v); err != nil {
+			t.Fatal(err)
+		} else if err := os.WriteFile(path, b, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var logs []string

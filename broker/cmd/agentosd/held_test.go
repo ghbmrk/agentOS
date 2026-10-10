@@ -17,6 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/bridgeclient"
 	"github.com/ghbmrk/agentos/broker/bridgeproto"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modemlink"
@@ -277,10 +278,9 @@ func TestAnAnswerThatCannotBeSavedFailsClosed(t *testing.T) {
 	learn := t.TempDir()
 	writeHeld(t, learn, recovery.PendingUnanchored, 2, nil)
 	h := &heldReplies{dir: learn, logf: t.Logf}
-	orig := syncDir
-	syncDir = func(string) error { return errors.New("synthetic sync failure") }
+	hookSyncs(t, func(string) error { return errors.New("synthetic sync failure") })
 	text, rel := h.reply("A")
-	syncDir = orig
+	hookSyncs(t, durable.SyncDir)
 	if rel || text != heldNotice(learn) {
 		t.Fatalf("a failed save: %v %q", rel, text)
 	}

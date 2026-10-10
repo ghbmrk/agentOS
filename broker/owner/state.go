@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // State is the owner channel's durable state. It survives restarts so that a
@@ -150,29 +151,5 @@ func (f FileStore) Save(s State) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(f.Path), ".owner-state-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), f.Path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(f.Path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return durable.WriteFile(f.Path, b, 0o600)
 }

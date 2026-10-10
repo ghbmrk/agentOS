@@ -2,6 +2,7 @@ package meter
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -23,8 +24,11 @@ func TestASettleThatCannotBeSavedIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The state can no longer be written.
-	if err := os.Mkdir(m.cfg.Path+".tmp", 0o700); err != nil {
+	// The state can no longer be written: a directory holds its name.
+	if err := os.Remove(m.cfg.Path); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(m.cfg.Path, "x"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	c.Done(500)

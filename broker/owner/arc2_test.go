@@ -17,7 +17,7 @@ import (
 // network client, a process launcher, a third-party module, or a broker
 // package outside the control path, so nothing here can reach a model.
 var ownerPath = map[string][]string{
-	"owner":   {"boxname", "control", "journal", "modem"},
+	"owner":   {"boxname", "control", "durable", "journal", "modem"},
 	"modem":   {},
 	"boxname": {},
 }

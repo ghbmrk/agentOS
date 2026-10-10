@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
 	"github.com/theupdateframework/go-tuf/v2/metadata/trustedmetadata"
 )
@@ -221,7 +222,7 @@ func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 	if _, err := os.Stat(s.p("root.json")); err == nil {
 		return nil, errors.New("update store already initialised")
 	}
-	if err := writeAtomic(s.p("root.json"), root, 0o600); err != nil {
+	if err := durable.WriteFile(s.p("root.json"), root, 0o600); err != nil {
 		return nil, err
 	}
 	return s, s.writeInstalled(Installed{Version: installed})
@@ -241,7 +242,7 @@ func (s *Store) Installed() (Installed, error) {
 
 func (s *Store) writeInstalled(in Installed) error {
 	b, _ := json.Marshal(in)
-	return writeAtomic(s.p("installed.json"), b, 0o600)
+	return durable.WriteFile(s.p("installed.json"), b, 0o600)
 }
 
 // File is one target file a verified release names.
@@ -428,10 +429,7 @@ func (v *Verified) Fetch(src Source, targetPath, dst string) error {
 	if n != f.Length || hex.EncodeToString(h.Sum(nil)) != f.SHA256 {
 		return fmt.Errorf("%w: %s does not match its signed hash", ErrBadRepository, targetPath)
 	}
-	if err := os.Rename(tmp.Name(), dst); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(dst))
+	return durable.Rename(tmp.Name(), dst)
 }
 
 // Result of a check.
@@ -605,7 +603,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		if err := s.writeSeenKeys(seen); err != nil {
 			return Result{}, err
 		}
-		if err := writeAtomic(s.p("root.json"), rootBytes, 0o600); err != nil {
+		if err := durable.WriteFile(s.p("root.json"), rootBytes, 0o600); err != nil {
 			return Result{}, err
 		}
 		res.RootRotatedTo = tm.Root.Signed.Version
@@ -662,11 +660,11 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 
 	// All metadata checked: save what the next check must not go below.
 	if tsBytes != nil {
-		if err := writeAtomic(s.p("timestamp.json"), tsBytes, 0o600); err != nil {
+		if err := durable.WriteFile(s.p("timestamp.json"), tsBytes, 0o600); err != nil {
 			return Result{}, err
 		}
 	}
-	if err := writeAtomic(s.p("snapshot.json"), snapBytes, 0o600); err != nil {
+	if err := durable.WriteFile(s.p("snapshot.json"), snapBytes, 0o600); err != nil {
 		return Result{}, err
 	}
 
@@ -828,7 +826,7 @@ func (s *Store) writeAllowList(allowed, pinned map[string]bool) error {
 	if b, err := os.ReadFile(s.p(allowListFile)); err == nil && string(b) == d {
 		return nil
 	}
-	return writeAtomic(s.p(allowListFile), []byte(d), 0o600)
+	return durable.WriteFile(s.p(allowListFile), []byte(d), 0o600)
 }
 
 // recordOutside raises the anchor, then writes outsideFile. A failed
@@ -842,7 +840,7 @@ func (s *Store) recordOutside() error {
 			raised = fmt.Errorf("update: raise the outside-attestor anchor: %w", err)
 		}
 	}
-	if err := writeAtomic(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
+	if err := durable.WriteFile(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
 		return err
 	}
 	return raised
@@ -921,7 +919,7 @@ func (s *Store) writeSeenKeys(seen map[string]bool) error {
 	}
 	sort.Strings(list)
 	b, _ := json.Marshal(list)
-	return writeAtomic(s.p("seen_keys.json"), b, 0o600)
+	return durable.WriteFile(s.p("seen_keys.json"), b, 0o600)
 }
 
 // operatedAttestors reads the signed list of maintainer-operated attestor
@@ -1093,7 +1091,7 @@ func (s *Store) Stage(v *Verified) error {
 	}
 	b, _ := json.Marshal(Staged{Version: v.release.Version, UsrRootHash: v.release.UsrRootHash,
 		ManifestPath: v.manifest.Path, ManifestSHA256: v.manifest.SHA256, Fresh: v.fresh})
-	return writeAtomic(s.p("staged.json"), b, 0o600)
+	return durable.WriteFile(s.p("staged.json"), b, 0o600)
 }
 
 // Staged reads the staged release; ok is false when none is staged.
@@ -1192,7 +1190,7 @@ func (s *Store) removeStaged() error {
 	if err := os.Remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncDir(s.Dir)
+	return durable.SyncDir(s.Dir)
 }
 
 // DropStaged forgets the staged release after a fallback. Nothing else in

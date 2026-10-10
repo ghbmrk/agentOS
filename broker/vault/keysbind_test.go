@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // REQ: CRED-8, CRED-9
@@ -402,17 +404,17 @@ func TestStaleStagedKeysFileRemovedOnOpen(t *testing.T) {
 // passphrase opens.
 func TestRekeySaveFailsAfterRenameKeepsStagedFile(t *testing.T) {
 	v, vp, kp := openWithPassphrase(t)
-	afterRename = func(path string) error {
-		if path == vp {
-			return errors.New("dir sync failed")
+	writeFile = func(path string, raw []byte, perm os.FileMode) error {
+		if err := durable.WriteFile(path, raw, perm); err != nil || path != vp {
+			return err
 		}
-		return nil
+		return errors.New("dir sync failed")
 	}
-	t.Cleanup(func() { afterRename = func(string) error { return nil } })
+	t.Cleanup(func() { writeFile = durable.WriteFile })
 	if err := v.Rekey(Passphrase(testPass), Passphrase(newPass)); err == nil {
 		t.Fatal("no failure")
 	}
-	afterRename = func(string) error { return nil }
+	writeFile = durable.WriteFile
 	v.Close()
 	if _, err := os.Stat(kp + nextSuffix); err != nil {
 		t.Fatalf("staged file removed: %v", err)

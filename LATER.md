@@ -685,6 +685,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
 | SIM-cases-390 | L3 on #723 point 2: POT-P5 (#390) kept account suggestion pacing across reload and decline (`TestAccountPacingSurvivesReloadAndDecline`); main has no account suggestion pacing, so there is nothing to keep until a package adds it |
 | SIM-cases-stop | recheck. L3 on #723 point 5: STOP and urgent texts must not wait behind blocked storage (#282, #303, #305, #309, #331, #347, #348, #353, #373); briefs/SIM-cases.md assigns it to SIM-owner-hold, whose review should confirm every path |
+| ADP-8 l1 | PR #208 UX lens (recheck): once ADP-8b wires `Mismatch` in, a blocked adapter needs an OP-9 STATUS line in owner words naming the operation and the fix; `mismatch.go` has no owner text today |
+| ADP-8 l2 | PR #208 Potency lens: `Mismatch` reports only the first mismatching operation, so each demo cycle surfaces one fix |
 
 ## Reuse candidates
 | ID | Component | Why |
