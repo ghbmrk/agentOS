@@ -686,6 +686,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | ADP-8 l1 | PR #208 UX lens (recheck): once ADP-8b wires `Mismatch` in, a blocked adapter needs an OP-9 STATUS line in owner words naming the operation and the fix; `mismatch.go` has no owner text today |
 | ADP-8 l2 | PR #208 Potency lens: `Mismatch` reports only the first mismatching operation, so each demo cycle surfaces one fix |
 | SIM-fs l1 | PR #718 L3 (6098161841), `recheck`: `TestNoBareRename` does not match the `(*os.Root).Rename` method form; `broker/cmd/agentos-guest-bridge/tree.go:166` renames that way with no file or dir fsync (not a listed SIM-fs site; the next tree sync re-fetches what a crash loses). Extend the grep or route the site through `durable` when the guest bridge is next touched |
+| ADP-8 l3 | PR #696 Security 4a: #208's UX and Potency lens verdicts are a PR comment only, not files under reviews/ux/ and reviews/potency/ |
 
 ## Reuse candidates
 | ID | Component | Why |
