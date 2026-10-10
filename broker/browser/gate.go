@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,6 +15,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 // MaxLine bounds one driver reply.
@@ -41,7 +42,8 @@ type Config struct {
 	// is stopped.
 	Timeout time.Duration
 	// Env is the driver's whole environment beyond PATH, HOME and LANG; the
-	// broker's own environment is never inherited.
+	// broker's own environment is never inherited. Each key must be on
+	// childproc's allowlist, or Start refuses the configuration.
 	Env []string
 }
 
@@ -70,7 +72,7 @@ type Gate struct {
 	ws      string
 
 	mu      sync.Mutex
-	cmd     *exec.Cmd
+	cmd     *childproc.Cmd
 	stdin   io.WriteCloser
 	lines   chan []byte
 	stopped bool
@@ -97,11 +99,9 @@ func Start(ctx context.Context, cfg Config) (*Gate, error) {
 	}
 	args := append(append([]string{}, cfg.Driver[1:]...), "--origins")
 	args = append(append(args, cfg.Origins...), "--workspace", ws)
-	cmd := exec.CommandContext(ctx, cfg.Driver[0], args...)
-	cmd.Env = append([]string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + ws, "LANG=C.UTF-8"}, cfg.Env...)
-	cmd.Dir = ws
-	cmd.Stderr = nil // driver diagnostics may quote page text; never relayed
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	env := childproc.NewEnv(append([]string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + ws, "LANG=C.UTF-8"}, cfg.Env...)...)
+	// No Stderr: driver diagnostics may quote page text; never relayed.
+	cmd := childproc.Command(ctx, env, childproc.Options{Dir: ws, SysProcAttr: &syscall.SysProcAttr{Setpgid: true}}, cfg.Driver[0], args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -162,8 +162,8 @@ func (g *Gate) stop() {
 	}
 	g.stopped = true
 	g.stdin.Close()
-	if g.cmd.Process != nil {
-		_ = syscall.Kill(-g.cmd.Process.Pid, syscall.SIGKILL)
+	if pid := g.cmd.Pid(); pid > 0 {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
 	go func() {
 		for range g.lines {

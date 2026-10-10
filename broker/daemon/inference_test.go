@@ -124,6 +124,10 @@ var netOK = map[string]allowance{
 	"probecmd": {"its probe children's own process group", []string{"syscall.SysProcAttr"}},
 	// The one package that starts a process (P3-4b-3r-env-r8).
 	"childproc": {"a child's SysProcAttr, and the process-group kill on cancel", []string{"syscall.Kill", "syscall.SIGKILL", "syscall.SysProcAttr"}},
+	// The tamper verdict's digest (P3-4b-4c-nofollow): a file a guest can
+	// swap is opened without following a link or blocking on a FIFO.
+	"loops": {"O_NOFOLLOW and O_NONBLOCK to open a guest-writable file safely; no network client",
+		[]string{"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
 }
@@ -645,12 +649,10 @@ func TestEscapeOKNamesTheLoopRunners(t *testing.T) {
 
 // envExempt are the functions in non-test broker code that start a child
 // without an explicit environment, so it inherits the process's, and why
-// each may. Only test fixtures outside the image remain (P3-4b-3r-env);
+// each may. None remain: the last two, the test fixtures swtpm and
+// quotatest, start through childproc since P3-4b-3r-env-r8b;
 // TestEnvExemptionsAreTestFixturesOnly pins that no binary links one.
-var envExempt = map[string]string{
-	"tpmseal/swtpm/swtpm.go:start":    "the software TPM, a test fixture outside the image",
-	"quota/quotatest/quotatest.go:On": "mkfs and mount in a test helper, outside the image",
-}
+var envExempt = map[string]string{}
 
 // launcherPkgs are the packages whose calls start a child or read the
 // process's environment, with their default names.

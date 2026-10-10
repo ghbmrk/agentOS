@@ -17,8 +17,9 @@ import (
 // network client, a process launcher, a third-party module, or a broker
 // package outside the control path, so nothing here can reach a model.
 var ownerPath = map[string][]string{
-	"owner": {"control", "journal", "modem"},
-	"modem": {},
+	"owner":   {"boxname", "control", "journal", "modem"},
+	"modem":   {},
+	"boxname": {},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall"}

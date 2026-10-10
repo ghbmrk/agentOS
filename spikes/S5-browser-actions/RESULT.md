@@ -1,6 +1,6 @@
-# S5 result (interim): fixture suite done, live run blocked on network access
+# S5 result: fixture suite and live run done
 
-**Answer so far:** on a local fixture with the hard widget patterns, **yes**: v0 drives every pattern, and no planted canary leaves the executor. The 5 real sites have **not** been run: this cloud environment's network policy refuses them (`connect_rejected` for en.wikipedia.org, www.gov.uk and others). `live.py` is ready; one command (`python3 spikes/S5-browser-actions/live.py`) fills `results.jsonl` once access is opened.
+**Answer:** **yes, with gaps.** The closed v0 protocol (navigate, click, type, select, snapshot, screenshot, download) completed a multi-step task on **5 of 5 real sites** [Measured, 2026-10-09, Chromium headless shell 141, `results.jsonl`], and on the local fixture drives every hard widget pattern with no planted canary leaving the executor. No verb needed widening for these tasks; three gaps are listed under "Live run". Logins use each demo site's published credentials (no real accounts). Not measured: gVisor, off-site subresource confinement, real accounts.
 
 ## Fixture results [Measured, Chromium 141.0.7390.37 headless, Playwright 1.63.0]
 
@@ -25,6 +25,25 @@
 Canaries (all synthetic): the HttpOnly session cookie, a script-readable cookie, a local-storage value, a saved password (also after the page's "Show password" toggle), an API key the page displays without a reveal step, a token in a link's query, and a token in a URL fragment. None appears in any response line, snapshot or downloaded file (checked by a named last test over the whole transcript). The displayed key and link token come back as `[REDACTED]`; screenshots of that page are withheld (CRED-10).
 
 Executor memory on the fixture page: **165 MB PSS** with Chromium's headless shell, 280 MB with full Chromium in headless mode (browser processes only, shared pages counted once). S3's floor budget is 0.5 GB. Real sites will be measured by `live.py`.
+
+## Live run (2026-10-09) [Measured: `live.py`, `results.jsonl`]
+| Site | Task | Result | Time | Chromium PSS |
+|---|---|---|---|---|
+| Wikipedia | search "Alan Turing", read, open history | pass (562 redactions in article snapshots) | 8 s | 365 MB |
+| GOV.UK | visa checker: start, nationality select, 3 radio questions, outcome page | pass | 10 s | 256 MB |
+| Sauce Demo | login (out of band), sort select, add to cart, checkout form, finish | pass; password absent from all output | 7 s | 228 MB |
+| the-internet.herokuapp.com | session carry-over, dropdown, download, shadow DOM, dynamic load | pass on retry (first run: a 30 s `navigate` timeout on the site) | 14-41 s | 212 MB |
+| GitHub, logged out (ghbmrk/agentOS) | repo, pull-request list, "Raw" link to raw.githubusercontent.com | pass | 24 s | 242 MB |
+
+Peak Chromium PSS was 365 MB (Wikipedia), under S3's 0.5 GB floor budget before the executor's own Python and Playwright driver, which were not measured. gVisor still unmeasured.
+
+**Gaps and findings from the live run**
+1. **Expected gaps confirmed** (`herokuapp_gaps`): a JavaScript `confirm` is auto-dismissed (the page reported "You clicked: Cancel"), so the agent cannot accept one; the hover menu was visible without hover; file upload has no verb.
+2. **CRED-10 false positive on a download.** The first random file picked on /download (`Images.txt`, a public upload listing container image names such as `ghcr.io/…-hotfix-alerts-13-07-26:741bb67`) was withheld: long hyphenated tokens matched the 24+ character candidate rule. Failing closed is the intended behaviour; the cost is lost downloads of benign text. [Inference] Tuning the detector for dash-separated names is a release candidate; not changed here.
+3. **GitHub's "Download raw file" is a script-driven button**: it never produced a download event (30 s timeout), so a download verb cannot reach it. The "Raw" link navigates to the second declared origin and works, which exercised multi-origin declarations. Refs inside iframes (`f1e…`, `f2e…`) worked.
+4. **Executor needs an egress proxy in a sandbox.** `route.fetch` runs in the Playwright driver and, with no proxy set, hit the sandbox's gate directly ("Host not in allowlist" page, returned as page content). `executor.py` and `live.py` now pass `S5_PROXY` or `HTTPS_PROXY` to Chromium. This is consistent with finding 5: confinement belongs outside the browser.
+5. **Real DOMs differ from the first scripts.** GOV.UK asks a variable number of questions (the flow now answers by heading), Wikipedia infobox "born" text was not matched (`born=?`, a script regex miss, not a protocol limit), and GitHub's PR list renders client-side after load (3 s wait). Test scripts changed, protocol unchanged.
+6. **Environment**: github.com for repositories outside the session's GitHub scope returns a proxy 403, so `microsoft/playwright` was replaced by `ghbmrk/agentOS`.
 
 ## Findings so far
 
@@ -57,7 +76,7 @@ Expected gaps that `live.py`'s `herokuapp_gaps` task probes (no verb exists for 
 - **CI.** CI has no Chromium, so `test_s5_executor.py` skips there; `test_s5_protocol.py` runs.
 
 ## Proposed SPEC.md diff
-Held until the live run.
+None. The protocol answered the question without new verbs. Candidate additions, each needing L3 review before any SPEC change: a dialog-accept verb, a hover verb and a file-upload verb (all three gaps above); none is requested here.
 
 ## Model usage
 Within the ~3% time box so far.
