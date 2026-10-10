@@ -150,6 +150,8 @@ Extra capacity (a second subscription, a teammate's agent, or another vendor's c
 
 **Each PR gets a fresh L3 review (§4 stage 3) in a new session**, on whichever subscription has usage; the reviewer is never the PR's builder session. The lens screen on tier A and B PRs follows §4; a tier C PR merges on an L3 accept and green CI (§4 stages 4-5).
 
+**Every review verdict comment ends with the PR's next step and the reviews still owed**, so GitHub stays the live handoff and handoff/CURRENT.md only holds standing decisions and a dated snapshot.
+
 **GitHub is the bus.** PRs and issues carry everything between teams: claims, interface requests, blockers, review verdicts. No team needs access to another team's chat, sessions or memory.
 
 **Hand-off to a new team** is one onboarding PR that adds the team's lane and an onboarding section to docs/LANES.md: the BOARD rows in its lane with their state, and the interfaces it may call. The new team's first session reads only that PR plus README.md's reading order for its role.

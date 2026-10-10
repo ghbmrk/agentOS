@@ -1,33 +1,44 @@
-# Hand-off snapshot, 2026-10-10 14:30 UTC
+# Hand-off: resume from here
 
-Purpose: a cold coordinator on either subscription resumes from this file. Both subscriptions are equal peers (OPERATING §7). Authoritative state is GitHub (PRs, checks) plus BOARD.md and DECISIONS.md on main; this file is a map, and anything in it older than a few hours is verified on GitHub before acting. Read order: README.md role list, this file, `briefs/SIM.md` for the plan, then only the PR or brief you act on.
+Read this first, on either subscription (both are equal peers, OPERATING §7). GitHub is the live handoff; this file is the durable map. Read order: README.md role list, this file, `briefs/SIM.md` for the plan, then only the PR or brief you act on.
 
-## Decisions in force today
+## 1. Rebuild in-flight state from GitHub alone
+1. List open PRs (`list_pull_requests`, state open, newest first). Titles carry the package ID; drafts are reference only.
+2. For each PR you may act on, read its latest verdict comment. Every verdict comment ends with the PR's next step and the reviews still owed (OPERATING §4), so that line says what happens next without any chat history.
+3. Read the PR's check runs on the current head: green CI plus all required reviews accepting that head plus a clean merge means merge.
+4. Read BOARD.md rows for state and owner; a row `building` with an owner belongs to that team (OPERATING §7).
+5. Verify before acting: any snapshot below, and any thread or status label, can be stale.
+
+## 2. Standing decisions and rules
 - **D-095** Simplification: the journal is the only durable state, owner messages are intents, one revisable outcome, forget once, a named trusted core. Plan and packages: `briefs/SIM.md`.
 - **D-096** (a) SPEC one log (SIM-sd, #714). (b) Scope freeze and PR cap (#717): off-gate scope (OSS bridge, second line, fuzz in the loop, extra learning sources) frozen until G2 passes; open PRs capped at about 10 per lane. Both rows carry the number D-096 in the open PRs; whichever merges second renumbers.
 - **D-097** Pull-first (STATUS is the primary owner view, only urgent classes pushed, daily digest removed) and key erasure (SIM-sd items 6, 7).
 - Standing rule: merge when every required review accepts the current head, CI is green and it merges cleanly; asks to Mark are cards, never typed phrases.
 - Both subscriptions work equally; there is no main one.
 
-## Merged today
+## 3. Snapshot (2026-10-10 14:30 UTC; dated, verify against GitHub)
+
+Update this file only when a standing decision changes, not each batch. Everything below this line is a dated snapshot.
+
+### Merged today
 #696 (ADP-8), #718 (SIM-fs), #426, #719, #712.
 
-## Open PRs by state (14:16 snapshot)
+### Open PRs by state (14:16)
 - **Fix-lists with builders:** #714 (SIM-sd), #722 (SIM-proj), #723 (SIM-cases), #721 (SIM-repo-1), #724 (CAP-12), #715 (SIM-core), #717 (freeze), #708 (PACE-1), #709 (DEL-1).
 - **L3 running:** #720 (SIM-bound), #716 (CONV-0; merge it, then #692 PMERGE-1), #725 (Security 4a for #696), #728, #729, #730 (records for #718).
 - **Waiting on CI:** #713 (MAIN-PROT-2). It then needs Mark's stage-2 ruleset card and the repo's Allow auto-merge setting.
 - **Building:** #726 (SIM-check), #727 (SIM-sim harness), #731 (SIM-split and SIM-outer brief and rows).
 - **Older, parked:** #677 (records batch), #453, #451, #418, #403 (spec and spike PRs); drafts #710, #449, #447, #435, #417 and the W5-D and POT/UX draft series (reference only; W5 building stopped, their cases are extracted by SIM-cases #723).
 
-## Plan (from briefs/SIM.md)
+### Plan (from briefs/SIM.md)
 Wave 0: foundation defects (DEL-1, PACE-1, SIM-gate in #692, SIM-fs, SIM-bound). Wave 1: SIM-check, SIM-proj, SIM-cases need no spec change; SIM-owner-hold, SIM-pull, SIM-outcome and SIM-erase need SIM-sd (#714). Wave 2 migrates consumers and deletes duplicates. Wave 3: SIM-shred, SIM-policy, SIM-cap, SIM-sim, SIM-repo-1/2. Every package lists the lines, files and rows it retires; a durable format outside the journal is rejected unless SIM-sd names it a cache.
 
-## Next actions
+### Next actions
 1. Merge anything with all-accept reviews, green CI and a clean merge; verify on GitHub first.
 2. Land #716, then #692.
 3. Put Mark's stage-2 ruleset step for #713 in Decisions as a card.
 4. Start SIM-owner-hold, SIM-pull, SIM-outcome and SIM-erase once #714 and #722 merge (one fresh thread each, strongest model, tier A).
 5. Keep open PRs under the D-096 cap; close or park before opening more.
 
-## Chat state
+### Chat state
 Standing threads: Decisions, Questions, PR updates, Alerts (successors after about 30 replies or 100k tokens). Finished threads are resolved at once. Project memory is off; durable state lives in the repo.
