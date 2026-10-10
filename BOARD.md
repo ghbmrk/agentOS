@@ -69,7 +69,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-sim | [Deterministic simulation of the broker, judged by SIM-check](briefs/SIM.md#sim-sim-deterministic-simulation-of-the-broker-tier-a) | SIM-check (second half) | building (first half: harness, PR pending; tier A) |
 | SIM-repo-1 | [Work items as GitHub issues; BOARD generated; migration dry run](briefs/SIM.md#sim-repo-1-work-items-as-github-issues-board-generated-tier-a) | — | merged (#721) |
 | SIM-repo-2 | [Collaborator-only work items; CI and board.yml enforce the generated board; safe migration](briefs/SIM.md#sim-repo-2-migrate-generate-metrics-and-trace-retire-doclints-board-rules-tier-a) | SIM-repo-1 | in review (A; #738) |
-| SIM-repo-2b | [Migrate; BOARD history archived; LATER and MARK-QUEUE as labels; doclint board rules retired](briefs/SIM.md#sim-repo-2-migrate-generate-metrics-and-trace-retire-doclints-board-rules-tier-a) | SIM-repo-2, Mark's tap on the migration card | queued (A; Mark approves) |
+| SIM-repo-2b | [Migrate; BOARD history archived; LATER and MARK-QUEUE as labels; doclint board rules retired](briefs/SIM.md#sim-repo-2-migrate-generate-metrics-and-trace-retire-doclints-board-rules-tier-a) | SIM-repo-2, Mark's tap on the migration card, stage-2 main ruleset live (required `checks`, strict; #738 Security 4a) | queued (A; Mark approves) |
 
 ## Security and architecture review (2026-10-08)
 

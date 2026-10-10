@@ -695,6 +695,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SIM-repo-2 l2 | PR #738 L3: `board_migrate.py`'s `existing` set counts any labelled issue, an outsider's included, so a squatted ID is skipped and the read-back then fails safely; filter it through `board.work_items` for a clearer message |
 | SIM-repo-2 l3 | PR #738 L3 (recheck in SIM-repo-2b): board.yml's commit job applies a board rendered on an older main to a newer one, so a skeleton edit landing between the two jobs can be reverted by the bot PR, whose CI checks its own skeleton; the rerun from the BOARD.md push usually supersedes it |
 | SIM-repo-2 l4 | PR #738 L3: run `board_migrate.py --apply` with a collaborator's token; issues opened by `github-actions[bot]` are not OWNER, MEMBER or COLLABORATOR and fail the read-back; say so in the docstring |
+| SIM-repo-2 l5 | PR #738 L3 delta (recheck): a direct push to main skips the PR-only board step: push a branch with board.GENERATED dropped, dispatch `ci.yml` there (the step runs only on `pull_request` and `bot/board`), fast-forward main; `board.yml` fails red once and later bases constrain nothing. Run the step on `workflow_dispatch` too, with `origin/main` as the base; the PR-only TRACE guard has the same class |
+| SIM-repo-2 l6 | PR #738 L3 delta: `board.yml`'s `$BEFORE` guard fails open if `git show "$BEFORE:BOARD.md"` errors; unreachable while main's ruleset keeps `non_fast_forward` |
+| SIM-repo-2 l7 | PR #738 Security 4a: `board.yml`'s header says main requires status checks and the bot PR auto-merges once green; neither holds until the stage-2 ruleset is live; reword in SIM-repo-2b or when stage 2 lands |
 
 ## Reuse candidates
 | ID | Component | Why |
