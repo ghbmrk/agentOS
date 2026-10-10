@@ -14,7 +14,7 @@ Board section: Simplification (2026-10-10). Decision: D-095. Analysis: the simpl
 
 The verb is the intent lifecycle: intent, authorized, dispatched, observed, settled, judged.
 
-**Order.** Wave 0 fixes foundation defects and needs no spec change. Wave 1: SIM-check, SIM-proj and SIM-cases need no spec change and can start at once; SIM-owner-hold, SIM-pull, SIM-outcome and SIM-erase need SIM-sd. Wave 2 migrates consumers and deletes the duplicates. Wave 3 (Mark, 2026-10-10: "urgently pursue all simplifications") turns the former LATER ideas into packages: SIM-shred, SIM-policy, SIM-cap, SIM-sim and SIM-repo-1/2. SIM-repo-1 and SIM-sim's harness need nothing and start with wave 0; the others start when their Needs merge. Each package is one session; tier A packages run on the strongest model.
+**Order.** Wave 0 fixes foundation defects and needs no spec change. Wave 1: SIM-check, SIM-proj and SIM-cases need no spec change and can start at once; SIM-owner-hold, SIM-pull, SIM-outcome and SIM-erase need SIM-sd. Wave 2 migrates consumers and deletes the duplicates. Wave 3 (Mark, 2026-10-10: "urgently pursue all simplifications") turns the former LATER ideas into packages: SIM-shred, SIM-policy, SIM-cap, SIM-sim, SIM-split, SIM-outer and SIM-repo-1/2. SIM-repo-1 and SIM-sim's harness need nothing and start with wave 0; the others start when their Needs merge. Each package is one session; tier A packages run on the strongest model.
 
 **Rule for every package.** Deletion is the deliverable as much as the addition: each PR lists the lines, files and BOARD rows it retires. A package that adds a durable format outside the journal is rejected unless SIM-sd lists it as a documented cache.
 
@@ -118,15 +118,15 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 ## SIM-split: one key-holder process per account, and a separate checker (tier A)
 
-**Needs.** SIM-core (its list names the holder, not all of egress).
+**Needs.** SIM-core (its list names the holder, not all of egress); SIM-check (item 3 adds its predicate).
 
-**Fact.** `agentos-egress` (about 12.4k lines in `broker/cmd/agentos-egress`) opens the whole vault and reads every secret: proxy injection (`broker/egress/proxy.go:340`), mail (`mailaccount.go:178`), SMS (`smsaccount.go:169`) and TPM policy keys (`trusted.go:705`). A bug anywhere in it reaches every account.
+**Fact.** `agentos-egress` (about 12.4k lines in `broker/cmd/agentos-egress`) opens the whole vault and reads every secret: proxy injection and the CRED-7 redactor (`broker/egress/proxy.go:375`, `:308`), and in `broker/cmd/agentos-egress/` mail (`mailaccount.go:178`), SMS (`smsaccount.go:170`) and TPM policy keys (`trusted.go:706`). A bug anywhere in it reaches every account.
 
-**Change.** (1) A small unlock step derives the vault key and hands each account's secret to that account's holder, a process under its own uid that has only that secret and speaks a closed request shape (ADP-10). Egress, mail and SMS keep their logic but hold no secrets; they ask the holder to inject a login into a request it checks. This extends the CRED-4 / ADP-5 executor pattern to the vault. (2) The CH-4 code seed moves out of the broker into a separate checker process; before releasing a login for a high-risk act (CH-10) the holder consults the checker. No SPEC change and no owner-visible change; the vault still unlocks once at boot. (3) SIM-core's list gains the holder and the checker as core packages; SIM-check gains the predicate "no secret appears in any process except its account's holder".
+**Change.** (1) A small unlock step derives the vault key and hands each account's secret to that account's holder, a process under its own uid that has only that secret and speaks a closed request shape (ADP-10). Egress, mail and SMS keep their logic but hold no secrets; they hand the holder a request it checks, and the holder injects the login, opens the upstream TLS connection itself, swaps a token-refresh response back to placeholders (CRED-5, ADP-10), and redacts its own secret from the response (CRED-7), so no login passes through egress in either direction. Keys tied to no account (TPM policy keys) stay with the unlock step, which holds nothing else. Holders and the checker are broker processes (ARC-1). This extends the CRED-4 / ADP-5 executor pattern to the vault. (2) The CH-4 code seed moves out of the broker into a separate checker process; before releasing a login for a high-risk act (CH-10) the holder consults the checker. No SPEC change and no owner-visible change; the vault still unlocks once at boot. (3) SIM-core's list gains the holder and the checker as core packages; SIM-check gains the predicate "no secret appears in any process except its account's holder".
 
 **Known gap (state in the PR).** A generator code is bound to time, not content, so a compromised broker could reuse a fresh code within its window; paper-grid cells do not have this gap.
 
-**Requirement IDs.** CRED-4, ADP-10, CH-4, CH-10, ARC-1. **Acceptance.** A synthetic canary secret is readable only in its account's holder (checked by process); a request the holder's shape rejects never gets a login; a high-risk act without a checker-verified code is refused; restart re-hands every secret and the mail, SMS and proxy paths still pass their tests. **Usage estimate.** Under 140k tokens; split the checker off if the holder split alone exceeds half. Tier A.
+**Requirement IDs.** CRED-4, CRED-5, CRED-7, ADP-10, CH-4, CH-10, ARC-1. **Acceptance.** A synthetic canary secret is readable only in its account's holder (checked by process); a request the holder's shape rejects never gets a login; a canary login and a refreshed canary token never appear in egress memory or traffic; a high-risk act without a checker-verified code is refused; restart re-hands every secret and the mail, SMS and proxy paths still pass their tests. **Usage estimate.** Under 140k tokens; split the checker off if the holder split alone exceeds half. Tier A.
 
 ## SIM-outer: outer limits held by the provider (L1 spec diff, Mark approves)
 
@@ -134,7 +134,7 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 **Limit.** Bounds the worst case at about 2x the cap, not a hard guarantee where a provider offers no limit or scope. Owner notices it only on a clearly malicious act, plus one setup step per provider.
 
-**Acceptance.** Mark approves the diff. doclint and trace pass. **Usage estimate.** Small, under 40k tokens. Tier B.
+**Requirement IDs.** CRED-5, OP-8. **Acceptance.** Mark approves the diff. doclint and trace pass. **Usage estimate.** Small, under 40k tokens. Tier B.
 
 ## SIM-shred: forget by deleting a per-subject key (tier A)
 
