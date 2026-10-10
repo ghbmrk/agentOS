@@ -242,6 +242,14 @@ func decodeLine(line []byte) (Record, error) {
 	return r, nil
 }
 
+// Decode parses a journal's bytes into records, as Open reads them: a torn
+// final line is dropped and a corrupt complete line is an error. It does not
+// check transitions; journal/check judges a decoded journal.
+func Decode(data []byte) ([]Record, error) {
+	recs, _, err := decodeJournal(data)
+	return recs, err
+}
+
 // decodeJournal parses a journal and returns its records and the length of
 // the valid prefix.
 //

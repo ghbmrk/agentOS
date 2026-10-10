@@ -83,6 +83,7 @@ func boot(t *testing.T, dir string) *broker {
 		cancel()
 		t.Fatal(err)
 	}
+	checkJournal(t, d.Engine())
 	mtr, err := meter.Open(meter.Config{Path: filepath.Join(dir, "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
 	if err != nil {
 		t.Fatal(err)

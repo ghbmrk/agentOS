@@ -99,6 +99,10 @@ const (
 	ActionLoopsBudgetLower = "meta.loops.budget.lower"
 )
 
+// Narrowing reports whether an intent only takes authority away, and so is
+// exempt from STOP's hold and restart fences (A9). journal/check uses it.
+func Narrowing(in Intent) bool { return narrowing(in) }
+
 // narrowing reports whether an intent only takes authority away.
 func narrowing(in Intent) bool {
 	if in.Account != BrokerAccount {

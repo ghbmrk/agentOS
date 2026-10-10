@@ -102,6 +102,7 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkJournal(t, d.Engine())
 	defer func() { cancel(); d.Wait() }()
 	mtr, err := meter.Open(meter.Config{Path: filepath.Join(dir, "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
 	if err != nil {
