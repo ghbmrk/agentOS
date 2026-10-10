@@ -18,7 +18,7 @@ Each fact has one home; other files point to it rather than restate it ([docs/OP
 | [BOARD.md](BOARD.md) | state | Index of work packages: one line each with state and owner, linking its brief. | L1, L2 |
 | `briefs/<ID>.md` | state | One package's brief: goal, IDs, scope, dependencies, estimate. | L1 |
 | [LATER.md](LATER.md) | state | Which open rows the first release needs, and the backlog that waits. | L1 |
-| [docs/LANES.md](docs/LANES.md) | state | Which team owns which paths; onboarding records. | primary team |
+| [docs/LANES.md](docs/LANES.md) | state | Which team owns which paths; onboarding records. | either peer subscription |
 | [docs/MARK-QUEUE.md](docs/MARK-QUEUE.md) | state | Questions and actions only Mark can take, one line each, with a recommendation. | L1 adds, Mark answers |
 | [docs/conv-3-triage.md](docs/conv-3-triage.md) | state | Class of every open PR (merge-ready, finish, parts bin, superseded, stale) and the close list (Q3, D-090). | CONV-3, then L1 |
 | [docs/conv-5-uncovered.md](docs/conv-5-uncovered.md) | state | What blocks each requirement ID TRACE.md lists as uncovered, and the BOARD rows that close them. | CONV-5 builder, L1 |
