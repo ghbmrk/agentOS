@@ -318,7 +318,7 @@ func writeKeys(path string, kf *keyFile) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(path, raw)
+	return writeFile(path, raw, 0o600)
 }
 
 // forceKeys installs kf as the keys file and records it in the vault, as

@@ -20,6 +20,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -183,7 +184,7 @@ func (h *tpmHost) writeFile(pf policyFile) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(h.policyPath, raw)
+	return durable.WriteFile(h.policyPath, raw, 0o600)
 }
 
 func (h *tpmHost) readPolicies() ([]tpmseal.Policy, error) {
