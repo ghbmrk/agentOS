@@ -687,6 +687,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | ARC-6-fold l4 | #670 L3 5 (6090864635), `recheck`: error results (`isErr`) are never folded, so a large error passes inline at full size; a result over the per-machine bound (4 MiB) now also passes inline whole rather than as an unreadable stand-in |
 | HOST-1f-215 l1 | #215 Security 4a later 1 (6090325350), `recheck`: `follow/follow.go:247` appends a `setUnsent` error (an `os` error naming the pending-alert file path) to journal Evidence; establish whether that Evidence reaches the owner (MORE, local UI) and keep the path out if it does (CH-12) |
 | HOST-1f-215 l2 | #215 Security 4a later 2 (6090325350): nothing stops a future `h.say("…" + err.Error())`; a lint or grep check banning `err.Error()` or a formatted error in arguments to `say`/`notify` would. Becomes that check if the same kind of finding appears on a second PR |
+| A14-206 l1 | #206 L3 fix-list release finding, classed later: OP-2 and OP-4 are cited by the PR but untested there; TRACE.md already maps both to passing tests elsewhere (e.g. `journal/engine_test.go`) and counts only REQ markers, so no false pass. Revisit if a no-network change touches journal outcomes |
 
 ## Reuse candidates
 | ID | Component | Why |
