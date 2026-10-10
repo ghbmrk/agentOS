@@ -15,6 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
+	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/mail"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -74,7 +75,10 @@ type evidence struct {
 	// setting a destination is confirmed (CH-20); the gate's LocalUI.
 	page bool
 
-	q chan evidenceJob
+	// wake tells the worker the guest plane's outbox has new replies;
+	// src is that outbox, once the plane is open (DEL-1b).
+	wake chan struct{}
+	src  atomic.Pointer[replySourceBox]
 
 	mu sync.Mutex
 	// failing is when deliveries started failing; zero while they work.
@@ -87,11 +91,13 @@ type evidence struct {
 	digest []string
 }
 
-type evidenceJob struct {
-	machine       string
-	private       bool
-	text, summary string
+// replySource is the guest plane's reply outbox (guest.Plane).
+type replySource interface {
+	PendingReplies() []guest.PendingReply
+	ReplyDone(machine, id string) error
 }
+
+type replySourceBox struct{ s replySource }
 
 // Fixed wording, in the box's first-person voice (UX U7).
 const (
@@ -139,7 +145,7 @@ var deliverRetries = []time.Duration{10 * time.Second, time.Minute}
 // page says the box's Wi-Fi page is served.
 func newEvidence(keptPath string, page bool, logf func(string, ...any)) *evidence {
 	return &evidence{kept: &keptReplies{store: change.FileStore{Path: keptPath}, now: time.Now, logf: logf},
-		now: time.Now, sleep: time.Sleep, logf: logf, page: page}
+		now: time.Now, sleep: time.Sleep, logf: logf, page: page, wake: make(chan struct{}, 1)}
 }
 
 func (e *evidence) g() evidenceGate {
@@ -149,24 +155,46 @@ func (e *evidence) g() evidenceGate {
 	return nil
 }
 
-// enqueue hands a reply to the router's worker, in order, so a delivery
-// and its retries never hold up the guest's call. Before attach it runs
-// inline.
-func (e *evidence) enqueue(machine string, private bool, text, summary string) {
-	if e.q == nil {
-		e.reply(machine, private, text, summary)
-		return
-	}
-	e.q <- evidenceJob{machine: machine, private: private, text: text, summary: summary}
+// serve takes replies from the guest plane's outbox, where each waits on
+// disk from the guest's 204 until it has gone out (DEL-1b): replies a
+// crash left there go first.
+func (e *evidence) serve(src replySource) {
+	e.src.Store(&replySourceBox{src})
+	e.poke()
 }
 
+// poke tells the worker the outbox has a new reply (guest.Config.Replies).
+// It never blocks the guest's call.
+func (e *evidence) poke() {
+	select {
+	case e.wake <- struct{}{}:
+	default:
+	}
+}
+
+// run routes the outbox's replies one at a time, in the order the guests
+// sent them. A reply leaves the outbox once reply returns, whatever its
+// outcome (it was texted, emailed or kept); a crash between the two may
+// send it again (provisional until DEL-2 records outcomes).
 func (e *evidence) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case j := <-e.q:
-			e.reply(j.machine, j.private, j.text, j.summary)
+		case <-e.wake:
+		}
+		b := e.src.Load()
+		if b == nil {
+			continue
+		}
+		for _, p := range b.s.PendingReplies() {
+			if ctx.Err() != nil {
+				return
+			}
+			e.reply(p.Machine, p.Private, p.Text, p.Summary)
+			if err := b.s.ReplyDone(p.Machine, p.ID); err != nil {
+				e.logf("evidence: reply %s left in the outbox store: %v", p.ID, err)
+			}
 		}
 	}
 }
@@ -519,8 +547,8 @@ func (e *evidence) attach(ctx context.Context, d *daemon.Daemon) {
 	}
 	e.gate.Store(&evidenceGateBox{d.Gate()})
 	e.shown, _ = d.Gate().Evidence()
-	e.q = make(chan evidenceJob, 16)
 	go e.run(ctx)
+	e.poke()
 }
 
 // Kept replies: a reply that could not be emailed, or was too long for a

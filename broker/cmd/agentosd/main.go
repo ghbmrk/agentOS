@@ -219,9 +219,19 @@ type lateStatus struct {
 	// caps is the capability-off registry's state: when its line names
 	// the agent, this line says nothing, so STATUS has one (OP-9).
 	caps *capState
+	// replies is the guest plane once open: while its outbox refuses
+	// replies, STATUS says so (DEL-1e).
+	replies atomic.Pointer[replyWait]
+}
+
+type replyWait struct {
+	p interface{ RepliesWaiting() bool }
 }
 
 func (l *lateStatus) Status() string {
+	if w := l.replies.Load(); w != nil && w.p.RepliesWaiting() {
+		return repliesWaiting
+	}
 	if k := l.k.Load(); k != nil {
 		return k.Status()
 	}
@@ -796,6 +806,8 @@ func main() {
 				caps.agentOff(agentNoMachines)
 			} else {
 				services.live.Store(&svc{plane})
+				ev.serve(plane)
+				agentStatus.replies.Store(&replyWait{plane})
 				var notice func(key, line string) error
 				if lp != nil {
 					notice = lp.pipe.Notice
@@ -1150,11 +1162,11 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 		Route:   d.Gate().Route,
 		Label:   label,
 		Meter:   mtr,
-		// A private machine's reply goes to the owner's evidence
-		// destination when one is set (CH-20).
-		OwnerReply: func(machine string, rep guest.Reply) {
-			ev.enqueue(machine, label(machine) != "public", rep.Text, rep.Summary)
-		},
+		// A guest's reply waits in the plane's outbox, on disk, until the
+		// evidence worker has routed it (DEL-1b); a private machine's
+		// goes to the owner's evidence destination when one is set
+		// (CH-20).
+		Replies: ev.poke,
 		// Further broker tools: the owner-question tools (W9) and the
 		// managed tree (W4).
 		Tools: tools,

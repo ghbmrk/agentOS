@@ -744,7 +744,8 @@ func TestREV5OwnerMessageRaisesLabelFirst(t *testing.T) {
 	if len(r.reps) != 1 || r.reps[0] != "m1 "+id+" dentist at 3|" {
 		t.Fatalf("replies %v", r.reps)
 	}
-	if code, _ := r.do("m1", "POST", "/owner/reply", fmt.Sprintf(`{"id":%q,"text":"again"}`, id)); code != 404 {
+	// DEL-1c: a different second answer conflicts.
+	if code, _ := r.do("m1", "POST", "/owner/reply", fmt.Sprintf(`{"id":%q,"text":"again"}`, id)); code != 409 || len(r.reps) != 1 {
 		t.Fatal("answered twice")
 	}
 
