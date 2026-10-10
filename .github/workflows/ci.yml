@@ -24,6 +24,10 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read # board.py check --repo reads the work-item issues
+      pull-requests: read # and cross-checks them against PRs (D21)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -50,6 +54,19 @@ jobs:
         run: python tools/doclint.py
       - name: BOARD.md round-trips through its work-item issues (SIM-repo-1)
         run: python tools/board.py check
+      - name: BOARD.md rows equal the live work-item issues (SIM-repo-2)
+        # Once BOARD.md carries board.GENERATED, its rows come only from issues: a PR that
+        # changes BOARD.md, and board.yml's bot/board branch, must match the board rendered from
+        # the live issues. Other PRs skip it, so an issue change between board.yml runs turns no
+        # unrelated PR red. Before the migration this is the same round trip as the step above.
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/bot/board'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] && git diff --quiet HEAD^1...HEAD^2 -- BOARD.md; then
+            echo "BOARD.md unchanged by this PR"; exit 0
+          fi
+          python tools/board.py check --repo "$GITHUB_REPOSITORY"
       - name: PR leaves TRACE.md to trace.yml
         if: github.event_name == 'pull_request'
         # HEAD is the PR's test merge (base^1, branch^2). Three dots compare the branch with
