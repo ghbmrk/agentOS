@@ -182,8 +182,11 @@ func TestFailStop(t *testing.T) {
 	e.p.mu.Lock()
 	e.p.props["cX"] = &proposal{base: e.p.st.Active.Hash(), next: e.p.st.Active.clone(), report: Report{Basis: BasisStanding}}
 	e.p.mu.Unlock()
-	if o := e.p.Execute(bg, journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}, 1); o.Result != journal.ResultNotApplied {
+	if o := e.p.Execute(bg, journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}, 1); o.Result != journal.ResultNotApplied || o.Evidence != "state not saved" || strings.Contains(o.Evidence, "/var/") {
 		t.Fatal(o)
+	}
+	if o := e.p.Execute(bg, journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}, 1); o.Evidence != "state cannot be saved; restart needed" || strings.Contains(o.Evidence, "/var/") {
+		t.Fatalf("later evidence %q", o.Evidence)
 	}
 	if err := e.p.healthy(); err == nil {
 		t.Fatal("not broken after save and reload failed")
@@ -200,7 +203,7 @@ type flakyStore struct {
 
 func (f *flakyStore) Save(b []byte) error {
 	if f.failSave {
-		return errors.New("save failed")
+		return errors.New("save /var/lib/agentos/change/state.json: permission denied")
 	}
 	return f.MemStore.Save(b)
 }

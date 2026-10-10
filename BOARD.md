@@ -11,6 +11,7 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | DOC-3 | [BOARD index and briefs; DECISIONS format](briefs/DOC-3.md) | DOC-1 | merged (#356) |
 | DOC-2 | [doclint and cause metrics](briefs/DOC-2.md) | DOC-3 | merged (#357) |
 | DOC-4 | [Per-file review records; no shared run tables](briefs/DOC-4.md) | DOC-1, DOC-2 | building |
+| DOC-7 | [LATER records sweep](briefs/DOC-7.md) | DOC-2, DOC-4 | in review (C; D-048 exception, owner to confirm) |
 | SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
 | HK-1 | [depaudit self-test flake fix](briefs/HK-1.md) | — | in review |
 | DEP-2 | [depaudit evidence out of the tracee's reach](briefs/DEP-2.md) | HK-1 | merged (1355d27; #437) |
@@ -365,10 +366,10 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | OSS-6i | [Fresh Tor circuit per batch and signing key](briefs/OSS-6i.md) | #330 | queued (L1 clause, then test in OSS-6s) |
 | OSS-6p | [Relay count, delivery rule, queue bound, relay list source](briefs/OSS-6p.md) | #330 | queued |
 | OSS-6a | [Spec: where ask-each-time prompts appear](briefs/OSS-6a.md) | #330 | queued (L1 spec diff) |
-| OSS-7c | Publication off by default: one local-UI opt-in with live examples, re-ask on schema change (D-088; release, likely tier A; failure path: an upgraded box publishes without consent) | #633 | queued (brief after #633 merges; may supersede OSS-6a) |
-| CRED-3e | Email codes carry authority like token links: the agent uses a code from delivered mail only for an action the owner started in the same session; account-recovery and credential changes are high-risk (CH-10) (D-089; release, likely tier A; serves A6/A14; failure path: an injected agent runs "forgot password", reads the reset code from mail, and takes over the account) | #633 | queued (brief after #633 merges) |
-| CH-19r | Held-back content by kind: content classed as a code expires within hours (owner-set), other held text keeps the 30-day default; the pointer names source and kind without the value ("a 6-digit code from your bank's email") (D-089; release; serves CH-19; failure path: an away owner gets a pointer to a dead code they cannot reach, while the box stores live secrets for 30 days) | #633 | queued (brief after #633 merges) |
-| CH-19m | Measure false holds of the CH-21 vocabulary check (agent output to the owner) on real task results and set a target rate (D-089; release; serves CH-19; failure path: ordinary replies such as "I fixed the code" are routinely held, so the owner learns to ignore the pointer) | #633 | queued (brief after #633 merges) |
+| OSS-7c | Publication off by default: one local-UI opt-in with live examples, re-ask on schema change (D-088; release, likely tier A; failure path: an upgraded box publishes without consent) | #669 | queued (may supersede OSS-6a) |
+| CRED-3e | Email codes carry authority like token links: the agent uses a code from delivered mail only for an action the owner started in the same session; account-recovery and credential changes are high-risk (CH-10) (D-089; release, likely tier A; serves A6/A14; failure path: an injected agent runs "forgot password", reads the reset code from mail, and takes over the account) | #669 | queued |
+| CH-19r | Held-back content by kind: content classed as a code expires within hours (owner-set), other held text keeps the 30-day default; the pointer names source and kind without the value ("a 6-digit code from your bank's email") (D-089; release; serves CH-19; failure path: an away owner gets a pointer to a dead code they cannot reach, while the box stores live secrets for 30 days) | #669 | queued |
+| CH-19m | Measure false holds of the CH-21 vocabulary check (agent output to the owner) on real task results and set a target rate (D-089; release; serves CH-19; failure path: ordinary replies such as "I fixed the code" are routinely held, so the owner learns to ignore the pointer) | #669 | queued |
 | OSS-5t | [Spec: transport for the embargoed security report](briefs/OSS-5t.md) | #330 | queued (L1 spec diff) |
 | OSS-9 | [Attestations as evidence and following forks](briefs/OSS-9.md) | P4-3, P4-4 | merged (4329b1d; #180) |
 | OSS-6c | [Publication clock hardening](briefs/OSS-6c.md) | OSS-6 | merged (4329b1d; #180) |

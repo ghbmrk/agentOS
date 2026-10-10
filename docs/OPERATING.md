@@ -53,6 +53,8 @@ Every finding (L3, lens, CI soak, an agent's own observation) gets one class at 
 | **release** | Needed to pass an acceptance test in SPEC §15 (A1–A15) or an invariant, but not in this PR's scope. The finding names that test or invariant and one failure path: what goes wrong without it. | A new BOARD.md row, named in the PR's Findings line. |
 | **later** | Anything else: polish, hardening beyond the spec, nice-to-have wording. | One line in LATER.md. No package is started for it before the first release ships. |
 
+The PR's Findings line also names every LATER.md row the PR removes, including a row outside its brief's scope that it strikes; the reviewer checks the line against the diff.
+
 Security findings on tier-A broker paths are never `later` unless they are purely wording. On assurance tooling (`tools/depaudit*`, `tools/canary*`, `assurance/`), a finding is `release` only if it can make the tool report a pass on a real violation (a false pass); the tool's messages, diagnostics and remedy text are `later`. When unsure between blocker and release, pick blocker. When unsure between release and later, class it `later` with the tag `recheck` and say so (D-086).
 
 - **Follow-up depth.** A finding raised on a follow-up of a follow-up (a row whose source is itself a review finding on a follow-up row) is `later` unless it is a blocker on the cited IDs, a false pass, or an exploit path.
@@ -105,7 +107,7 @@ Each fix-list point cites a requirement ID or a concrete defect and carries its 
 
 **Lens screen checklist.** The coordinator starts one fresh session per bundle: the tier A and B PRs that passed L3 when the screen starts, at least daily while any PR waits, from every team.
 
-1. Read the bundle's diffs, the IDs they cite, the active DECISIONS rows and each lens README (`reviews/security/`, `reviews/potency/`, `reviews/ux/`). Not whole files, not transcripts.
+1. Read the bundle's diffs, the IDs they cite, the active DECISIONS rows and each lens README (`reviews/security/`, `reviews/potency/`, `reviews/ux/`). Not whole files, not transcripts. The run index for a lens is one command: `grep -H -e '^Record:' -e '^Verdict' reviews/<lens>/*.md`.
 2. For each PR, apply each lens's question and method. Tier B gets one combined pass; tier A gets UX and Potency here and Security in its own session (stage 4a). A tier-A diff confined to assurance tooling (`tools/depaudit*`, `tools/canary*`, `assurance/`, `tools/risk_tier*` and their tests) gets no UX pass: its messages are `later` under §2 (D-086).
 3. Write one verdict per lens per PR to `reviews/<lens>/YYYY-MM-DD-pr<N>.md` (for a tier-B combined pass, `reviews/combined/YYYY-MM-DD-pr<N>.md`), in the L3 format above, and link it from the PR. Under the title put one line, `Record: PR #N · package <ID> · head <SHA>`, where `PR`, `package` and `head` are literal, e.g. `Record: PR #400 · package DOC-4 · head a74ee45` (a bundle lists several; `PR none` if there is no PR); `tools/doclint.py` requires it from 2026-10-09. The record files, in filename order, are the run index: no lens README keeps a run table, so no PR edits one.
 4. Settle tensions between lenses in the same session under `reviews/arbitration/README.md`; write any resolution to `reviews/arbitration/YYYY-MM-DD-pr<N>.md`. Only a real fork goes to Mark: one question answerable in one word, with a recommendation.

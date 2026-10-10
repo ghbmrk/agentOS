@@ -1,7 +1,10 @@
 """Tests for tools/doclint.py, the operating-document consistency check (BOARD row DOC-2).
 
-No SPEC requirement IDs: PLAN.md tooling, not SPEC.md behaviour. CONV0Test claims the CONV-0
-brief's IDs (briefs/CONV-0.md). All data is synthetic.
+No SPEC requirement IDs: PLAN.md tooling, not SPEC.md behaviour. DOC-7 requirement IDs
+(briefs/DOC-7.md) are claimed below; CONV0Test claims the CONV-0 brief's IDs (briefs/CONV-0.md).
+All data is synthetic.
+
+REQ: DOC7-1, DOC7-2, DOC7-3, DOC7-4, DOC7-5
 """
 import pathlib
 import subprocess
@@ -73,7 +76,7 @@ class LintTest(unittest.TestCase):
 
     def test_new_record_without_a_record_line(self):
         got = self.lint(**{"reviews/ux/2026-10-09-pr400.md": "# UX\n\nVerdict: accept\n"})
-        self.assertEqual(got, ["reviews/ux/2026-10-09-pr400.md: no complete `Record:` line; needs `PR #N` or `PR none`, `package <ID>`, `head <7–40 hex>`, e.g. `Record: PR #400 · package DOC-4 · head a74ee45`"])
+        self.assertEqual(got, ["reviews/ux/2026-10-09-pr400.md: no complete `Record:` line; needs `PR #N` or `PR none`, `package <ID>`, `head <7–40 lowercase hex>` (or `main <hex>`), e.g. `Record: PR #400 · package DOC-4 · head a74ee45`"])
 
     def test_record_line_with_a_missing_field(self):
         for line in ("Record: PR #400 · package CH-1", "Record: package CH-1 · head abc1234",
@@ -90,7 +93,7 @@ class LintTest(unittest.TestCase):
 
     def test_older_files_readmes_and_other_directories_are_exempt(self):
         files = {"reviews/ux/2026-10-08-pr1.md": "# old\n", "reviews/ux/README.md": "# lens\n",
-                 "reviews/ux/notes.md": "x", "notes/2026-10-09-note.md": "x"}
+                 "notes/2026-10-09-note.md": "x"}
         self.assertEqual(self.lint(**files), [])
 
     def test_duplicate_assumption_id(self):
@@ -119,6 +122,74 @@ class LintTest(unittest.TestCase):
     def test_per_team_sections_with_distinct_ids_pass(self):
         text = "| ID | Decision |\n|---|---|\n| D-001 | a |\n\n## claude2\n\n| ID | Decision |\n|---|---|\n| D-claude2-001 | b |\n"
         self.assertEqual(self.lint(**{"DECISIONS.md": text, "README.md": WITH_DECISIONS}), [])
+
+    # DOC-7: records sweep
+
+    def test_record_without_pr_or_package_may_cite_a_main_commit(self):
+        files = {"reviews/security/2026-10-09-sweep.md": "# S\n\nRecord: PR none · package none · main 0123abc\n"}
+        self.assertEqual(self.lint(**files), [])
+
+    def test_record_head_must_be_lowercase_hex(self):
+        got = self.lint(**{"reviews/ux/2026-10-09-pr1.md": "# U\n\nRecord: PR #1 · package A-1 · head ABC1234\n"})
+        self.assertEqual(len(got), 1)
+        self.assertIn("lowercase hex", got[0])
+
+    def test_scratch_note_without_a_date_is_exempt_only_outside_lens_directories(self):
+        self.assertEqual(self.lint(**{"notes/pr500.md": "x"}), [])
+
+    def test_non_readme_lens_file_needs_a_dated_name(self):
+        got = self.lint(**{"reviews/ux/pr500.md": "# U\n"})
+        self.assertEqual(got, ["reviews/ux/pr500.md: lens record names start `YYYY-MM-DD-`"])
+
+    def test_record_line_must_follow_the_title(self):
+        text = "# U\n\nVerdict: accept\n\nRecord: PR #1 · package A-1 · head abc1234\n"
+        got = self.lint(**{"reviews/ux/2026-10-09-pr1.md": text})
+        self.assertEqual(len(got), 1)
+        self.assertIn("directly under the title", got[0])
+
+    def test_record_line_may_follow_a_title_that_follows_the_verdict(self):
+        text = "Verdict: accept\n\n# U\n\nRecord: PR #1 · package A-1 · head abc1234\n"
+        self.assertEqual(self.lint(**{"reviews/ux/2026-10-09-pr1.md": text}), [])
+
+    def test_new_lens_directory_is_checked(self):
+        got = self.lint(**{"reviews/ops/2026-10-09-pr1.md": "# O\n"})
+        self.assertEqual(len(got), 1)
+        self.assertIn("reviews/ops/2026-10-09-pr1.md", got[0])
+
+    def test_untracked_scratch_record_is_not_checked_in_a_git_repo(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for name, text in GOOD.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(text)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            (root / "reviews/ux").mkdir(parents=True)
+            (root / "reviews/ux/2026-10-09-scratch.md").write_text("# scratch\n")
+            self.assertEqual(doclint.lint(root), [])
+
+    DECISIONS = ("# DECISIONS\n\n| ID | Date | Status | Decision | Source |\n|---|---|---|---|---|\n"
+                 "| D-001 | 2026-10-04 | active | %s | Mark |\n")
+
+    LISTED = {"README.md": GOOD["README.md"].replace("| [CLAUDE.md]", "| [DECISIONS.md](DECISIONS.md) |\n| [CLAUDE.md]")}
+
+    def test_decision_cell_over_300_characters_needs_a_resolving_link(self):
+        long = "x" * 301
+        got = self.lint(**{"DECISIONS.md": self.DECISIONS % long, **self.LISTED})
+        self.assertEqual(got, ["DECISIONS.md: D-001: Decision cell is 301 characters; keep it to 300 or link decisions/D-001.md (D-056)"])
+        linked = self.DECISIONS % (long + " ([full](decisions/D-001.md))")
+        self.assertEqual(self.lint(**{"DECISIONS.md": linked, "decisions/D-001.md": "# D-001\n", **self.LISTED}), [])
+        self.assertEqual(self.lint(**{"DECISIONS.md": linked, **self.LISTED}),
+                         ["DECISIONS.md: D-001: links missing decisions/D-001.md"])
+
+    def test_short_decision_passes_and_escaped_pipes_do_not_split_cells(self):
+        text = self.DECISIONS % "a \\| b"
+        self.assertEqual(self.lint(**{"DECISIONS.md": text, **self.LISTED}), [])
+
+    def test_brief_with_its_own_state_line(self):
+        got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**State:** building\n"})
+        self.assertEqual(got, ["briefs/A-1.md:3: `**State:**` line; BOARD.md is the only record of state"])
+
 
 HEAD = "| ID | Package | Needs | State |\n|---|---|---|---|\n"
 
