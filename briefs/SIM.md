@@ -136,7 +136,7 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 ## SIM-cap: capability grants scoped per intent (tier A)
 
-**Needs.** SIM-core.
+**Needs.** SIM-core, SIM-check, SIM-policy.
 
 **Change.** A grant names the intent (action, subject, bounds, expiry) it authorizes, instead of standing authority per account or tool. The broker mints the capability at authorize and checks it at dispatch (OP-3). A capability cannot be widened by its holder, and it is spent or expires with its intent. Standing per-account grants become policies (SIM-policy) that mint capabilities, or are deleted where nothing uses them.
 

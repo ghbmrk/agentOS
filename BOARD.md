@@ -64,7 +64,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-core | [Trusted core is a named list; CI import check; core = tier A](briefs/SIM.md#sim-core-the-trusted-core-is-a-named-list-tier-a) | — | queued (brief ready; tier A) |
 | SIM-shred | [Forget by deleting a per-subject key; reaches backups and snapshots](briefs/SIM.md#sim-shred-forget-by-deleting-a-per-subject-key-tier-a) | SIM-erase, SIM-proj, SIM-sd | queued (A) |
 | SIM-policy | [Policy as data with one match-and-compare evaluator](briefs/SIM.md#sim-policy-policy-as-data-one-evaluator-tier-a) | SIM-outcome, SIM-pull, SIM-core | queued (A) |
-| SIM-cap | [Capability grants scoped per intent](briefs/SIM.md#sim-cap-capability-grants-scoped-per-intent-tier-a) | SIM-core | queued (A) |
+| SIM-cap | [Capability grants scoped per intent](briefs/SIM.md#sim-cap-capability-grants-scoped-per-intent-tier-a) | SIM-core, SIM-check, SIM-policy | queued (A) |
 | SIM-sim | [Deterministic simulation of the broker, judged by SIM-check](briefs/SIM.md#sim-sim-deterministic-simulation-of-the-broker-tier-a) | SIM-check (second half) | queued (brief ready; tier A) |
 | SIM-repo-1 | [Work items as GitHub issues; BOARD generated; migration dry run](briefs/SIM.md#sim-repo-1-work-items-as-github-issues-board-generated-tier-a) | — | queued (brief ready; tier A) |
 | SIM-repo-2 | [Migrate; METRICS generated; doclint board rules retired](briefs/SIM.md#sim-repo-2-migrate-generate-metrics-and-trace-retire-doclints-board-rules-tier-a) | SIM-repo-1 | queued (A) |
