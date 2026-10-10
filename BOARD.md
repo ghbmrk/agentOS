@@ -177,7 +177,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7 | merged (#41; at tier C, re-review is IMG-5) |
+| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7 | queued (#41 merged the older image; #175 is the unmerged rebuild: per-drive ID check in the initrd, `DevicePolicy=closed`; branch `pkg/p2-1-image-build-6izuf9` kept) |
 | P2-grants | [Grants and approval policy](briefs/P2-grants.md) | P1-7 | merged (a390f03; broker/grants) |
 | P2-rev3 | [Reversible conversions](briefs/P2-rev3.md) | P2-grants | merged (04be62e; broker/reversible) |
 | P2-gr8 | [GR8 fix: approval used up inside the dispatch commit](briefs/P2-gr8.md) | P2-rev3 | merged (a390f03; broker/grants) |
@@ -437,7 +437,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | CH-21f | [Box name at setup: suggested name, owner-name field, contact card](briefs/CH-21b.md) | CH-21b | queued (tier A; the setup half of the CH-21b brief) |
 | CH-21c | [First-person voice: owner-page and recovery texts](briefs/CH-21c.md) | CH-21a | in review (all 13 packages swept; `owner` stays pending for CH-21e's `Agent: ` prefix) |
 | CH-21d | [First-person voice: daemon and egress texts](briefs/CH-21d.md) | CH-21a | in review (#457; tier A) |
-| CH-21e | [Agent text asking for a code is withheld; welcome-text code line](briefs/CH-21e.md) | CH-21b | queued (tier A; security first) |
+| CH-21e | [Agent text asking for a code is withheld; welcome-text code line](briefs/CH-21e.md) | CH-21b | queued (tier A; security first; start from #231's `withholdAgent`, `AskForCode`, `ReplyGrammar`, branch `pkg/ch-21-name-voice-draft` kept) |
 | CH-12s | ["Local page" rename in owner texts](briefs/CH-12s.md) | CH-12 | merged (a390f03; #185) |
 | ADP-13 | [The box's own mailbox](briefs/ADP-13.md) | CRED-4b; P2-6m; CH-21 | queued |
 | HOST-1 | [Spec: the host PC is left as it was](briefs/HOST-1.md) | — | merged (fa52b76) |
