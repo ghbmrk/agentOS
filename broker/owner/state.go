@@ -54,6 +54,8 @@ type State struct {
 	Queued  []QueuedRef  `json:"queued,omitempty"`
 	// Retired holds IDs closed in the last RetireFor, which are not reused.
 	Retired map[string]time.Time `json:"retired,omitempty"`
+	// Name is the box's name (CH-21), set by NAME; "" before one is set.
+	Name string `json:"name,omitempty"`
 	// Pacing is the owner's quiet hours and texts-an-hour setting; the
 	// zero value is the default (CH-15).
 	Pacing Pacing `json:"pacing"`

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/corpus"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
@@ -732,10 +733,8 @@ func rawExec(ctx context.Context, r *Runtime, dir, id string, argv ...string) (s
 	paused := fmt.Sprintf("cannot execute in container %q in state paused", cid(id))
 	for deadline := time.Now().Add(rawExecPausedWait); ; {
 		var stderr bytes.Buffer
-		c := r.cmd(ctx, append([]string{"--log=" + f.Name(), "exec", cid(id)}, argv...)...)
-		c.Stderr = &stderr
-		out, err := c.Output()
-		exit, ok := err.(*exec.ExitError)
+		out, err := r.cmd(ctx, childproc.Options{Stderr: &stderr}, append([]string{"--log=" + f.Name(), "exec", cid(id)}, argv...)...).Output()
+		exit, ok := err.(*childproc.ExitError)
 		if !ok {
 			return string(out), err
 		}
@@ -774,7 +773,7 @@ func tail(b []byte, n int) string { return string(b[max(0, len(b)-n):]) }
 func TestRawExecErrorCarriesRunscText(t *testing.T) {
 	r := fakeRunsc(t)
 	_, err := rawExec(context.Background(), r, t.TempDir(), "corpus", "fatal128")
-	var exit *exec.ExitError
+	var exit *childproc.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 128 {
 		t.Fatalf("error %v, want runsc's exit 128", err)
 	}
@@ -815,7 +814,7 @@ func TestRawExecDoesNotRetryOtherRefusals(t *testing.T) {
 	r := fakeRunsc(t)
 	start := time.Now()
 	_, err := rawExec(context.Background(), r, t.TempDir(), "corpus", "fatal128")
-	var exit *exec.ExitError
+	var exit *childproc.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 128 || time.Since(start) > rawExecPausedWait/2 {
 		t.Fatalf("err %v after %v, want an immediate exit 128", err, time.Since(start))
 	}

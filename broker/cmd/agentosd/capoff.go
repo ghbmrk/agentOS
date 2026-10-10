@@ -27,37 +27,37 @@ import (
 // so a rewording is one edit.
 const (
 	fixUpdate  = "nothing to do; a later box version adds it"
-	fixRestart = "restart the box"
+	fixRestart = "restart me"
 )
 
 // The lines. Each is checked by ownerWorded in the tests.
 const (
 	// C1: no machine runtime on this box, so neither the agent nor worker
 	// tools run.
-	agentNoRuntime = "Agent and worker tools: not set up on this box; " + fixUpdate + "."
+	agentNoRuntime = "Agent and worker tools: not set up here; " + fixUpdate + "."
 	// C1: the machine plane (machines, their disk or the guest plane)
 	// did not start.
 	agentNoMachines = "Agent and worker tools: off, their machines did not start; " + fixRestart + "."
 	// C1: the agent's image or launch file is missing.
-	agentNoSoftware = "Agent: not set up, its software is missing on this box; " + fixUpdate + "."
+	agentNoSoftware = "Agent software: missing here, so it is not set up; " + fixUpdate + "."
 	// C2: no model route is configured.
-	modelUnset = "Model: not set up, so the agent cannot think or learn; " + fixUpdate + "."
+	modelUnset = "Model: not set up, so your agent cannot think or learn; " + fixUpdate + "."
 	// C2: the model route does not answer.
-	modelUnreachable = "Model: not reachable, so the agent cannot think and learning cannot test changes; " + fixRestart + "."
+	modelUnreachable = "Model: not reachable, so your agent cannot think and learning cannot test changes; " + fixRestart + "."
 	// C2: no model provider is granted (A11's no-grant cause). Grants come
 	// only from the vault process's configuration until agentosd serves
 	// the local page's API-key step (TestModelNoGrantNamesAServedStep).
 	modelNoGrant = "Model: no AI plan or key connected, so no agent can think or learn; a later box version adds this."
 	// C2: the vault is not open, so the model route serves nothing.
-	modelLocked = "Model: the vault is locked, so the agent cannot think or learn; unlock it on the local page."
+	modelLocked = "Model: the vault is locked, so your agent cannot think or learn; unlock it on the local page."
 	// C7: no recall directory or vault verifier.
-	recallOffLine = "Memory across tasks: off on this box; " + fixUpdate + "."
+	recallOffLine = "Memory across tasks: off here; " + fixUpdate + "."
 	// C9: the question book or the box clock did not open.
 	questionsOffLine = "Questions from agents: cannot reach you, and the time check is off; " + fixRestart + "."
 	// C10: the machine plane is up but no worker image is registered.
-	workersOffLine = "Worker tools: not set up on this box; " + fixUpdate + "."
+	workersOffLine = "Worker tools: not set up here; " + fixUpdate + "."
 	// C11: no update-check loop (Loop 3) is registered.
-	updateChecksOff = "Update checks: not running on this box; " + fixUpdate + "."
+	updateChecksOff = "Update checks: not running here; " + fixUpdate + "."
 	// C12: learning is on but routing changes are held.
 	routingHeldLine = "Routing: learning cannot change how work is routed here; " + fixUpdate + "."
 )

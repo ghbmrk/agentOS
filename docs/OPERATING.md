@@ -38,7 +38,7 @@ Cost per merged package = (calls × context per call × read price + writes + ou
 Levers in order of effect:
 
 1. **Cut rework.** Raise the first-pass rate and build only what the first release needs (§2, §4). L3 cause codes (§4) say which part of the pipeline the rework comes from.
-2. **Fewer cold starts, then smaller context.** Count cold starts per merged PR and cut them: pick the model at spawn, don't wake idle sessions, hand off before a long idle (§5). Then small briefs, a short BOARD index and compaction at 120k keep each call's context small.
+2. **Fewer cold starts, then smaller context.** Count cold starts per merged PR and cut them: pick the model at spawn, don't wake idle sessions, hand off before a long idle (§5). Then small briefs, a short BOARD index and compaction at 200k keep each call's context small.
 3. **Fewer calls per package.** One package per session; batch reviews (§4).
 4. **Route by model price.** Use the cheapest model that keeps quality, and check with tests rather than with a more expensive model (§5).
 5. **Fill capped time with free CI.** Fuzzing, race soak and mutation run on Actions while the allowance resets.
@@ -52,10 +52,14 @@ Every finding (L3, lens, CI soak, an agent's own observation) gets one class at 
 | Class | Meaning | Where it goes |
 |---|---|---|
 | **blocker** | Breaks a requirement the PR cites, or an invariant. | Fixed in the same PR before merge. |
-| **release** | Needed to pass an acceptance test in SPEC §15 (A1–A15) or an invariant, but not in this PR's scope. | A new BOARD.md row, named in the PR's Findings line. |
+| **release** | Needed to pass an acceptance test in SPEC §15 (A1–A15) or an invariant, but not in this PR's scope. The finding names that test or invariant and one failure path: what goes wrong without it. | A new BOARD.md row, named in the PR's Findings line. |
 | **later** | Anything else: polish, hardening beyond the spec, nice-to-have wording. | One line in LATER.md. No package is started for it before the first release ships. |
 
-Security findings on tier-A paths are never `later` unless they are purely wording. When unsure between two classes, pick the stricter one and say so.
+Security findings on tier-A broker paths are never `later` unless they are purely wording. On assurance tooling (`tools/depaudit*`, `tools/canary*`, `assurance/`), a finding is `release` only if it can make the tool report a pass on a real violation (a false pass); the tool's messages, diagnostics and remedy text are `later`. When unsure between blocker and release, pick blocker. When unsure between release and later, class it `later` with the tag `recheck` and say so (D-086).
+
+- **Follow-up depth.** A finding raised on a follow-up of a follow-up (a row whose source is itself a review finding on a follow-up row) is `later` unless it is a blocker on the cited IDs, a false pass, or an exploit path.
+- **One review, one package.** The release findings from one PR's reviews go into one follow-up brief, with one BOARD row per finding grouped under it, not one package each.
+- **Pre-release sweep.** Before the first release ships, one session re-reads every `recheck` line and every tier-A `later` line in LATER.md and promotes any that now block an acceptance test.
 
 LATER.md also holds the critical-path audit of BOARD.md: each open row is marked release or later. The coordinator does not start `later` rows. A row moves to release only with the acceptance test it now blocks.
 
@@ -102,7 +106,7 @@ Each fix-list point cites a requirement ID or a concrete defect and carries its 
 **Lens screen checklist.** The coordinator starts one fresh session per bundle: the tier A and B PRs that passed L3 when the screen starts, at least daily while any PR waits, from every team.
 
 1. Read the bundle's diffs, the IDs they cite, the active DECISIONS rows and each lens README (`reviews/security/`, `reviews/potency/`, `reviews/ux/`). Not whole files, not transcripts.
-2. For each PR, apply each lens's question and method. Tier B gets one combined pass; tier A gets UX and Potency here and Security in its own session (stage 4a).
+2. For each PR, apply each lens's question and method. Tier B gets one combined pass; tier A gets UX and Potency here and Security in its own session (stage 4a). A tier-A diff confined to assurance tooling (`tools/depaudit*`, `tools/canary*`, `assurance/`, `tools/risk_tier*` and their tests) gets no UX pass: its messages are `later` under §2 (D-086).
 3. Write one verdict per lens per PR to `reviews/<lens>/YYYY-MM-DD-pr<N>.md` (for a tier-B combined pass, `reviews/combined/YYYY-MM-DD-pr<N>.md`), in the L3 format above, and link it from the PR. Under the title put one line, `Record: PR #N · package <ID> · head <SHA>`, where `PR`, `package` and `head` are literal, e.g. `Record: PR #400 · package DOC-4 · head a74ee45` (a bundle lists several; `PR none` if there is no PR); `tools/doclint.py` requires it from 2026-10-09. The record files, in filename order, are the run index: no lens README keeps a run table, so no PR edits one.
 4. Settle tensions between lenses in the same session under `reviews/arbitration/README.md`; write any resolution to `reviews/arbitration/YYYY-MM-DD-pr<N>.md`. Only a real fork goes to Mark: one question answerable in one word, with a recommendation.
 5. Skip any finding kind a lens README lists under "Checks that replaced findings": CI already catches it.
@@ -127,14 +131,17 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 - **Pilots** of a cheaper route run as a BOARD row with the measures that judge them, and the result goes to DECISIONS.md.
 - **Sonnet pilot (from 2026-10-08, through the 2026-10-13 reset):** every tier B and C builder session runs on Sonnet 5.5: the coordinator starts it with that model, choosing the tier from the brief's declared scope; tier A stays on the strongest model. Before opening its PR the builder runs `tools/risk_tier.py`; if it prints A, the builder stops and writes a hand-off packet, and the coordinator continues the work in a strongest-model session. Each PR's Budget section names its builder model. Judge on PRs merged from 2026-10-08 to the 2026-10-13 reset against those merged the week before 2026-10-08: first-pass L3 accept, L3 rounds per merged PR and `Defect:` lines within 7 days of merge, counted by hand from the `Builder model:` lines (METRICS.md does not split by model); usage per merged PR from METRICS.md, the 2026-10-11 week against the 2026-10-04 week, noting the latter carries three pilot days, which narrows any gap. Keep Sonnet for B/C if none is worse; otherwise revert. The result is recorded in DECISIONS.md.
 
+- **Idle limit:** a PR or `building` row with no activity for 48 hours is finished, handed off with a packet, or returned to `queued` with its PR closed (branch kept). Drafts held under CODEX-1 are a parts bin, not work in progress; they are counted apart and never closed for age (D-086).
+- **Questions for Mark** go to docs/MARK-QUEUE.md, one line each, answerable in one word, with a recommendation. Mark answers the queue in one sitting; an answered line moves to DECISIONS.md.
+
 **Package records.**
 
-- **Brief** (`briefs/<ID>.md`): what the builder reads. Goal, requirement IDs, declared file scope, dependencies, the usage estimate, and anything the coordinator learned that the builder needs. 20k tokens or less. The BOARD row links it and stays one line.
+- **Brief** (`briefs/<ID>.md`): what the builder reads. Goal, requirement IDs, declared file scope, dependencies, the usage estimate, and anything the coordinator learned that the builder needs, including the "Recurring kinds" each lens README lists for the touched area, as acceptance criteria. 20k tokens or less. The BOARD row links it and stays one line.
 - **Assumptions** (`<package>/ASSUMPTIONS.md`): what the package's code rests on, one table row each: `# | Assumption | Spec basis | If it changes`. The builder writes it; reviewers check the code against it. When an assumption is settled, it becomes a SPEC.md change or a DECISIONS row and its line is struck through with the pointer. Keep it under about 3k words; past that, the package is probably two.
 
 ## 6. Weekly measures
 
-METRICS.md (generated weekly by `.github/workflows/metrics.yml`) carries first-pass L3 accept, L3 rounds and causes per merged PR, usage per merged PR, defects after merge and CI flakes. Usage comes from the manual readings in LEDGER.md, the only hand-kept input. Session-level spend (cache-write share, cold starts per merged PR, spend by role) is measured by the weekly cost routine outside the repository; any figure from it that drives a decision is copied into LEDGER.md with its date before anyone relies on it. Targets: first-pass accept rising toward 50%; L3 rounds per merged PR falling toward 1.5; cold starts per merged PR falling. The earlier target of a cache-write share under 20% assumed reads at 0.1x; at 0.05x a session must reread its context about 160 times before writes fall to a fifth of input cost, so it was dropped (D-086).
+METRICS.md (generated daily by `.github/workflows/metrics.yml`, once CONV-0 lands) carries first-pass L3 accept, L3 rounds and causes per merged PR, usage per merged PR, defects after merge and CI flakes, and the convergence measures of D-086: open PRs and `building` rows by age, follow-up rows created per merged PR by source review, and rows promoted from later to release. Usage comes from the manual readings in LEDGER.md, the only hand-kept input; Mark adds a reading when he chooses. Session-level spend (cache-write share, cold starts per merged PR, spend by role) is measured by the weekly cost routine outside the repository; any figure from it that drives a decision is copied into LEDGER.md with its date before anyone relies on it. Targets: first-pass accept rising toward 50%; L3 rounds per merged PR falling toward 1.5; cold starts per merged PR falling; follow-up rows per merged PR under 0.5; nothing idle past the §5 limit. Guard: if promotions from later to release or `Defect:` lines run above their baseline two weeks in a row, D-086's narrower release class is reverted. The earlier target of a cache-write share under 20% assumed reads at 0.1x; at 0.05x a session must reread its context about 160 times before writes fall to a fifth of input cost, so it was dropped (D-092).
 
 ## 7. Working in parallel: a second subscription or another coding agent
 
