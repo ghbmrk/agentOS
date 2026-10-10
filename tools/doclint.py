@@ -14,6 +14,10 @@
   ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md
   BOARD.md      a row added on or after RELEASE_FROM whose state says `release` (or whose package
                 says `(release`) names an acceptance test or invariant (D-085, CONV-0-5)
+  BOARD.md      no two rows share an ID; no state says `blocked on <ID>` for a merged row
+  LATER.md      a Release or Later row's ID is not a merged or dropped BOARD row (shared open IDs and
+                finding suffixes such as `X-1 l1` are fine); no text says an ID "has no board row"
+                while BOARD has one (DOC-5)
   briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4, and
                 none keeps its own `**State:**` line (BOARD.md is authoritative)
 
@@ -42,6 +46,8 @@ RELEASE_STATE = re.compile(r"\brelease\b")
 RELEASE_CLASS = re.compile(r"\(release\b")
 ACCEPTANCE = re.compile(r"\bInvariant\b|\bTest[A-Z]\w+")
 SPEC_ID = re.compile(r"\b[A-Z][A-Z0-9]*-\d+[a-z]?\b")
+NO_ROW = re.compile(r"(?<![\w-])([A-Z][A-Za-z0-9]*-[A-Za-z0-9]+)\b[^.|\n]{0,80}?\b(?:has|have) no (?:board row|row of its own)")
+BLOCKED_ON = re.compile(r"\bblocked on ([A-Z][A-Za-z0-9]*-[A-Za-z0-9]+)(?![\w-])")
 LINK = re.compile(r"\]\(([^)#\s]+)")
 
 
@@ -55,12 +61,41 @@ def board(root):
                 yield f"BOARD.md: {cells[0]}: links missing {link}"
 
 
+def contradictions(root):
+    """BOARD and LATER claims that contradict each other (DOC-5); merge state from GitHub is DOC-6's."""
+    text = (root / "BOARD.md").read_text()
+    states, seen = {}, set()
+    for cells in _rows(text, "| State |"):
+        if cells[0] in seen:
+            yield f"BOARD.md: duplicate row ID {cells[0]}"
+        seen.add(cells[0])
+        states.setdefault(cells[0], cells[-1])
+    for cells in _rows(text, "| State |"):
+        for target in BLOCKED_ON.findall(cells[-1]):
+            if states.get(target, "").startswith("merged"):
+                yield f"BOARD.md: {cells[0]}: blocked on {target}, which is merged"
+    later = root / "LATER.md"
+    for name, body in (("BOARD.md", text), ("LATER.md", later.read_text() if later.is_file() else "")):
+        for target in dict.fromkeys(NO_ROW.findall(body)):
+            if target in states:
+                yield f"{name}: {target} has a BOARD row but the text says it has no board row"
+    if later.is_file():
+        for cells in _rows(later.read_text(), "| ID |"):
+            state = states.get(cells[0], "")
+            for done in ("merged", "dropped"):
+                if state.startswith(done):
+                    yield f"LATER.md: {cells[0]}: the BOARD row is {done}; remove the LATER row"
+
+
 def board_added(root):
-    """{row ID: date of the first-parent commit that first added it}; None without usable history."""
+    """{row ID: date of the earliest commit that added it}; None without usable history.
+    Every commit is walked and a merge is diffed against its first parent: main's rows first appear at their
+    own earlier commit (a plain --first-parent log would date them by a merge of main), and a row born in a
+    merge's conflict resolution is dated by the merge."""
     try:
         if _git(root, "rev-parse", "--is-shallow-repository").strip() != "false":
             return None  # a grafted tip would date every row as new
-        log = _git(root, "log", "--first-parent", "--reverse", "-p", "--format=%x01%cI", "--", "BOARD.md")
+        log = _git(root, "log", "--diff-merges=first-parent", "--reverse", "-p", "--format=%x01%cI", "--", "BOARD.md")
     except (OSError, subprocess.CalledProcessError):
         return None
     added, date = {}, None
@@ -189,7 +224,7 @@ def decisions(root):
 
 def assumption_ids(root, files):
     for name in files:
-        if name not in ("BOARD.md", "DECISIONS.md") and pathlib.PurePosixPath(name).name != "ASSUMPTIONS.md":
+        if name != "DECISIONS.md" and pathlib.PurePosixPath(name).name != "ASSUMPTIONS.md":
             continue
         seen, in_table = {}, False
         for n, line in enumerate((root / name).read_text().splitlines(), 1):
@@ -216,7 +251,7 @@ def markdown_files(root):
 def lint(root):
     root = pathlib.Path(root)
     files = markdown_files(root)
-    return [*board(root), *release_rows(root), *readme(root), *rule_files(root), *operating_refs(root, files),
+    return [*board(root), *contradictions(root), *release_rows(root), *readme(root), *rule_files(root), *operating_refs(root, files),
             *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files)]
 
 

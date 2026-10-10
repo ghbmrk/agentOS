@@ -33,7 +33,7 @@ func (f *fakeFollow) Reconcile(context.Context, journal.Intent, int) journal.Out
 	return journal.Outcome{Result: journal.ResultNotApplied}
 }
 
-func describeStub(context.Context, []byte) (localapi.RootSummary, error) {
+func describeStub(context.Context, []byte, [][]byte) (localapi.RootSummary, error) {
 	return localapi.RootSummary{}, nil
 }
 

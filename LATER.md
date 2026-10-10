@@ -9,58 +9,38 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | ID | Needed for | Note |
 |---|---|---|
 | SR3 | A4, A7, A12–A15 | Documentation intake for eight release findings; remediation stays open after intake merges |
-| SR3-1 | A4, A6, A14 (CH-7, localui L25) | Lock during sign-in/refresh cannot mint a live token; stale sessions cannot RESUME |
-| SR3-2 | A4, A13 (ADP-9, OP-3) | STOP-aged queues and concurrent dispatch obey current daily/per-record bounds |
-| SR3-3 | A13, A14 (ADP-9, CH-3, CH-12) | Final approval shows and binds every authority-bearing grant field |
-| SR3-4 | A7 (UPD-1, OP-4/5) | Interrupted update settlement converges after reopen; subsequent updates work |
-| SR3-5 | A4, A13, A15 (ADP-2, OP-3, REV-2) | Mailbox epoch changes cannot redirect a guarded mutation or undo to another message |
-| SR3-6 | A7, A14 (UPD-8) | Retiring interim trust invalidates pending automatic update authorization |
-| SR3-7 | A4 (OP-8, ARC-7) | Meter-to-provider composition enforces one canonical, reserved request; source-only finding |
-| SR3-8 | A12 (OSS-2) | Crash cuts cannot leave a completed clean-room job with unrecoverable output; source-only finding |
 | S5 | A5, A13 | CRED-4 action protocol; live run blocked on network policy |
 | S8-W1 | A14, CRED-5 | Blocks every worker-held route; credential invariant |
 | S8-live | A3 (CAP-11) | Needs Mark's Claude and ChatGPT plans |
 | S8-W1-tunnel | A3, A14 (CRED-5 W4) | CONNECT-only tunnel with broker-resolved host and SNI binding; precondition of any worker-held route; no CONNECT handler in `broker/egress` at 256b7cc (from S8-W1a, #543). Promote to a BOARD row with a brief when S8-W1 is scheduled |
 | S8-W1-volume | A14 (CRED-5 W2) | Per-provider login volume (schema check, writable login file only) and its exclusion from snapshots, recall, journal and results; no code at 256b7cc (from S8-W1a, #543). Promote with S8-W1 |
 | S8-codex-terms | A3, CRED-5 (unsure) | Decides Codex custody; a Claude plan route may already satisfy A3 |
-| CRED-5f | A3 (CAP-9), CRED-5 | Plan route withdrawn with no API key granted must still route or tell the owner |
 | CRED-5t | CRED-1 invariant | Unswappable refresh response must fail closed; stop retrying on account restriction |
 | CRED-5w | CRED-5 | Owner can pause a broker-held route before a withdrawing release |
 | S1 | A1 (G1) | Test kit ready; waits on Mark's hardware |
 | S2 | A1, A3 | Modem SMS and voice; waits on Mark's modems |
 | P2-4-hw | A8 | Real-TPM trusted-host run; risk 14 |
-| P3-4b-1b | LOOP-9, LOOP-10 | Loop-side follow-ups to #464 before -3/-4 wire `Report`: close findings the tree comes to pass, finding-ID collision, crash resume, wording-scan coverage, config-probe fixes |
-| P3-4b-2b | A11, CHG-2 | Harness follow-ups to #490: evidence check passes with no evidence record; raw held clause whose fields the visible test shares escapes the audit; leaking-adapter control runs on every valid seed |
-| P3-4b-2 | A11 | Qualification harness for A11's loop 2 clause: harness-chosen seed, held-back variants, scripted rejected fixes |
-| P3-4b-5 | LOOP-9 | Model-backed loop 2 fixer answering the §11 fix-candidate request through Loop 1's builder; needs W3-builder-ship |
 | OP9-status | A11 (OP-9) | STATUS names every capability that is off or can't run; briefs/OP9-status.md, split into -a and -b |
 | DIG-1 | A3 (CH-15), OP-9 | Daily digest sender reading every `Digest()` source; nothing sends a digest today; brief to be written |
-| P3-4b-3 | LOOP-7 (D-067) | Off-the-shelf fuzz targets and in-guest socket probe; no longer in A11 (D-070), release because D-067 still governs LOOP-7 (D-070 supersedes it on A11 only) |
 | P3-4b-4 | LOOP-7 (D-067) | Continuous canary rounds, published corpora, scripted tamper and exhaustion probes; same basis as P3-4b-3 |
 | UPD-b | A1, A14 (UPD-3) | Update before accounts connect |
 | CH-20w | A15 (CH-20) | Evidence delivery through the vault-held mail adapter |
 | CRED-4b | A5, A13 | Credentialed browser executor; sessions only in the vault process |
 | ADP-8 | A13 (ADP-8) | Mislabelled-draft check blocks adoption |
 | ADP-5 | A13 | Desktop executor and kiosk-escape test; blocked on CRED-4b |
-| OSS-6s | A12 | Publication sender, idempotent by day and batch |
 | OSS-6j | A12 (OSS-6, DEP-2) | L3 on #330: the pull job is repository automation, not a service |
 | OSS-6i | A12 (OSS-6) | L3 on #330: rotation is void if batches share a circuit |
 | OSS-6p | A12 (OSS-6) | L3 on #330: OSS-6 values the sender needs |
 | OSS-6a | A12 (OSS-6, OSS-7) | L3 on #330: silence vs ask-each-time |
 | OSS-5t | A12 (OSS-5) | L3 on #330: embargoed report over Tor or not |
 | OSS-6e | A12, clean-room invariant | Security ruling on #180: floor holds across restarts |
-| OSS-10w | A12 (unsure) | Follow-fork wiring; OSS-1–13 are in A12's requirements |
 | IMG-1 | A1 | CI scan for per-owner secrets in the image; blocked on P2-1 |
-| P2-2w | A1, A14 (ARC-2) | Local UI process; sub-rows a, b merged, c and d open |
 | P2-2w c | A1, A14 | Setup into agentosd; Security L6, L7 MUST |
-| P2-2w d | A1, A3, A14 | Turns LocalUI on; unblocks approvals and CH-20p |
-| SR2-3g | A5, A6 (security) | No host path in agent-visible tool errors |
 | SR2-4i | A2 (RES-2) | Host image enables iocost; blocked on host image |
 | CH-21 | A14 (CH-21) | Name, first-person voice, spoofed NAME refused |
 | HOST-1a | A1 (HW-8) | Part 2 needs P2-1 image |
 | HOST-1b | A1 (HW-8) | Part 2 needs P2-2w live page |
 | HOST-1c | A1 (HW-8, ONB-7) | Part 2 needs P2-2 |
-| HOST-1e | A1 | Host-untouched hash harness |
 | PE7-bus | A11, A2 | Condition on the events-bus package; floor host; follows that package (D-067) |
 | PE7-call | A11, A2 | Condition on the inbound-call package; follows that package (D-067) |
 | W3 | A11 | Learning process; steps 3a, 3c open |
@@ -79,6 +59,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
 |---|---|
+| CRED-5t-msg | #421 L3 point 7: an unmatched-response stop gets only CH-12's general STATUS exception line; on a pinned box (UPD-4) that line should say the route stays down until the owner changes channel. Wording only, after CRED-5b |
 | P3-4c | LOOP-7 attacks generated by a model, and SPEC §15's later criterion "loop 2 finds a seeded vulnerability" (D-070); waits until builders have model access sanctioned for adversarial security work (D-067); the non-model half (an off-the-shelf fuzzer or canary hunt against a planted defect) may be promotable earlier through another lane (potency 3 on #408) |
 | PKG-ids | Package IDs SR3-4f-1..3 sit one hyphen from row IDs SR3-4-f1..f5 and map to different rows (L3 on #572, point 5); rename future follow-up packages to a distinct form (for example SR3-4p1) before more are cut. Text only |
 | CRED-5f-mr-key | C2's "granted" reads `-grant` only, not whether the open vault holds that provider's key (cmd/agentosd ASSUMPTIONS M1); a grant without a key fails at the route and is logged; widen with plan routes (CAP-11) |
@@ -132,8 +113,11 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SR2-3k f1 | The ID pattern `^[A-Za-z0-9._-]{1,64}$` is written out in `guesterr`, `guest/mcp.go`, `question/tool.go` and `recalltool/tools.go`; one exported pattern would keep them from drifting (later 2, L3 on #398) |
 | SR2-3k f2 | An unknown tool named by a non-ID value reads `no tool "(not shown)"`, which looks like a tool's name; unquoted wording would read better (later 3, L3 on #398) |
 | SR2-3j f1 | `annotate`'s `GuestReason = Reason` fallback takes a plain string; typing it `guesterr.Literal` would let the compiler hold the rule GR30 states (lens on #396) |
+| OSS-10w-r f1 | `recheck`. L3 3 on #476: in `ProjectRoot`'s same-keys branch, a target not signed by the anchor's threshold and not newer reads "whose keys differ" though the keys are the same; wording only |
+| OSS-10w-r f2 | `recheck`. L3 4 on #476: a box that left the project under OSS-10w before #476 has no `project_root.json`, so while it follows a fork its switch-back anchor is the shipped root; matters only if such a box exists in the field (U13 (c)) |
+| OSS-10w-r f3 | `recheck`. Security 2 on #667 (c3bf14a): a project root the box saw rotated out (v1 after a `Check` to v2 with new keys) can still be followed under a name, since the same-chain guard needs key containment; it needs tier-4 approval, the keys are already in seen_keys, and it gives no more than a fresh-key fork |
+| OSS-10w-r f4 | Security 2 on #667 (f2cc2f9): a link `UpdateRoot` accepts but `floor()` refuses ends the chain walk instead of being skipped; only a weak root the project's own keys signed at the same version can cause it |
 | OSS-10w f1 | UX on #323: the alert wording "Switch back there" reads oddly after a switch back to the project |
-| OSS-10w-r | WF1 after a project root-key rotation: switching back compares against the image's shipped root keys and so fails closed once the project rotates them; a chain walk from the shipped root would admit it. Meanwhile the owner's only route back is a named follow (beside U13 limit (b)). No release has rotated root keys; a new image ships the new root |
 | W3-forget-b2c l1 | UX: the recall-off owed take-back text names no owner step, because STATUS has no line when recall is Off (`LateExecutor.Status`); a config only a dev box has; since #602 recall Off shows "I keep trying" on STATUS for the whole boot (an approved item 2 is owed `Taking` on the `forgetAgentNotOpen` path and nothing retries until recall opens; dev box only; delta UX 2 and delta L3 2 on #602, comments 6082130531 and 6082183740) |
 | W3-forget-b2c-f1 l1 | L3 1 on #602: `carryAgent`'s `a == nil` bound branch is untested and unreachable today (the agent is never unset after it is stored); delete it or test it |
 | W3-forget-b2c-f1 l2 | L3 2 on #602: `resumeRestored`'s `ErrNotOpen` re-queue is untested |
@@ -171,6 +155,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | OSS-10w2 f4 | L3 on #370 (23bc810): the follow page's reserved-name check folds case only, so look-alikes (Cyrillic А in "the АgentOS project again") pass; the name is the owner's own and the card shows the fingerprint. Fold look-alikes as CH-10 does |
 | OSS-10w2 f5 | L3 on #370 (23bc810): localui's `reservedName` and `followPrint` duplicate `grants.ReservedFollowName` and `grants.FollowPrint`; move both into localapi so page and card cannot drift |
 | CRED-4b f10 | L3 on #300 (f135e43 re-review): the label rule's value charset misses passwords with other punctuation (`password: Abc123@xyz789#Qq`) |
+| CRED-4b f11 | Potency on #683 (bf6ebae): K14 should also name the C0 control range; a value with C0 control characters (U+0000–U+001F) is escaped by the snapshot and may not match, as the C1 case already noted in K14 |
+| CRED-4b f12 | Potency on #683 (bf6ebae), recheck: `OmitValues` scrubs value copies inside role keys and `[ref=…]` tokens, so a 1–3 character value (`e`, `in`) destroys every ref on the page; scrub only the quoted name and the text after `:`, with a test that a one-character value leaves refs intact; lands with part 2's K14 wiring |
 | CH-21a f1 | `change` `TestForgetGoalRewritesALaterAdoptionsUndo` failed once in a full `go test ./...` run (setup: candidates rejected) and passed on four reruns and alone; look for a load-dependent timing in its setup
 | P2-2w d2a-1 | `localsrv.status` reads the whole `Line()` (five modem-link locks) for `.Note`; a note-only accessor would show the D1 split in the types (#378 L3) |
 | P2-2w d2a-2 | `pageLine` takes five separate locks, so one page can mix states; display only, fixed on reload (#378 L3) |
@@ -424,7 +410,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W3-forget-b3r-askedtask | UX on #522: the reply to "Ask to forget" does not name which task was asked, and the list comes back unchanged with the same button, so a second press files a second request and a second text to the owner (a texted `FORGET n` repeated does the same); the effect is a duplicate approval, not data loss. Name the label in the reply, or mark a task as asked until the request resolves; it changes owner wording, so it belongs to a later owner-text package (Security 4a on #522, point 2, says the same: harmless, since each request needs a code; a later page package could show "already asked" for a goal with a Pending forget) |
 | W3-forget-b3r-deeper | Potency on #522: the page lists `recent(forgetList)`, five tasks, as the brief requires, so an older task still cannot be forgotten from the page or by text (R2 says "older tasks"); lifting it means a deeper `recent(n)` and a paged list, with the ask check (P2) and the texted `FORGET n` list kept equal. Security cost: a longer label list on shared Wi-Fi after sign-in |
 | W3-forget-b3r-label | Potency on #522: a task the owner did not text shows only "(a task, <time>)" (security C2), so for tasks from other channels the page cannot say what it would forget and the owner picks by time alone; any richer label is a security-lens change (agentosd P4); a UX-side proposal is a fixed label by origin (for example "(a voice task, <time>)"), if the task records its channel |
-| W3-forget-b3r | L3 on #522: `localapi.ForgetTask.Date` is sent but the template never shows it; the label already carries the time, so the field is unused. Either drop it or show it (Security 4a on #522, point 1, says the same) |
+| W3-forget-b3r f1 | L3 on #522: `localapi.ForgetTask.Date` is sent but the template never shows it; the label already carries the time, so the field is unused. Either drop it or show it (Security 4a on #522, point 1, says the same) |
 | W3-forget-b3r-scope | L3 on #522 (brief-gap, process): the b3r brief's Scope omitted the `localapi` and `daemon` wiring, which any new page op needs; future briefs for a page op should list `broker/localapi/` and `broker/daemon/daemon.go` PageSocket wiring |
 | P2-1 watchdog | L3 on #41 (UPD-1): a boot that hangs with no kernel panic and no failed unit never reaches a reboot; a hardware watchdog (`RuntimeWatchdogSec=` on the N95's iTCO timer) closes it. Panics, failed units and emergency or rescue mode already reboot |
 | P2-1 unblessed | Fourth L3 on #41 (UPD-1): two unblessed `+0` entries make the fallback reboot between them forever, since each counts the other as an earlier release. Fix in the update package (refuse to stage on an unblessed boot) or count only blessed or tries-left entries. An initrd failure on a blessed or single-release `+0` entry also reboot-loops (image/ASSUMPTIONS.md I4) |
@@ -432,9 +418,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | P3-4b-3 l4 | Security 6 on #523 (LOOP-7): the broker-side probe check is per code, not per frame; give each fixed frame a distinct code or a broker-known frame token in the refusal note when LOOP-7 next touches `sockprobe` |
 | P3-4b-3 l5 | Potency 5 on #523: `Resolve`'s replay gate is tautological for probes (the source builds `Replay` from the open finding); add a probe digest or round ID to the evidence if another caller appears |
 | P3-4b-3 l6 | Potency 6 on #523: a probe finding for a machine never probed again (retired, renamed) stays open; add a staleness line to the digest when the source is wired |
-| H6 | #561: `KeyError`/`AttributeError` raised instead of `ValueError`; column naming; `trace.py` A10 regex; the PR's Findings line said "None" |
-| CI-SOAK-f1 | #563: no exactly-at-cap test |
-| H8 | #564: the `devA != devB` check can't fail; only the 12-case fixture is guarded; replace before-variance with a 20k-env measurement |
+| H6 f1 | #561: `KeyError`/`AttributeError` raised instead of `ValueError`; column naming; `trace.py` A10 regex; the PR's Findings line said "None" |
+| CI-SOAK-f1 f1 | #563: no exactly-at-cap test |
+| H8 f1 | #564: the `devA != devB` check can't fail; only the 12-case fixture is guarded; replace before-variance with a 20k-env measurement |
 | P3-4b-3a l1 | #560: stale `run-*` dirs; `FuzzMCP` 108-byte path test; 17 vs 16 binaries |
 | P3-4b-3a l2 | #560: `eachInput`'s total time is outside the 1 m cap (about 3 min); exit 0 when `-test.run` matched nothing counts as pass; `eachInput` exit 0 without PASS |
 | P3-4b-3a l3 | #560: a hang behind a FAIL goes unnamed; a slow corpus gives a sticky `noInput` false positive; a fuzz exit without "Failing input written to" only reaches `Logf` |
@@ -687,6 +673,18 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | ARC-6-fold l4 | #670 L3 5 (6090864635), `recheck`: error results (`isErr`) are never folded, so a large error passes inline at full size; a result over the per-machine bound (4 MiB) now also passes inline whole rather than as an unreadable stand-in |
 | HOST-1f-215 l1 | #215 Security 4a later 1 (6090325350), `recheck`: `follow/follow.go:247` appends a `setUnsent` error (an `os` error naming the pending-alert file path) to journal Evidence; establish whether that Evidence reaches the owner (MORE, local UI) and keep the path out if it does (CH-12) |
 | HOST-1f-215 l2 | #215 Security 4a later 2 (6090325350): nothing stops a future `h.say("…" + err.Error())`; a lint or grep check banning `err.Error()` or a formatted error in arguments to `say`/`notify` would. Becomes that check if the same kind of finding appears on a second PR |
+| A14-206 l1 | #206 L3 fix-list release finding, classed later: OP-2 and OP-4 are cited by the PR but untested there; TRACE.md already maps both to passing tests elsewhere (e.g. `journal/engine_test.go`) and counts only REQ markers, so no false pass. Revisit if a no-network change touches journal outcomes |
+| A14-206 l2 | #698 L3 a (6092380804), `recheck`: the live no-dial test's name lookup fails partly because the test image has no resolv.conf, so on its own it does not show the netns blocks DNS; the TCP/UDP dials carry the property |
+| A14-206 l3 | #698 L3 b (6092380804), `recheck`: with `--host-uds=open`, the live test asserts only the services mount; sockets under the image or upper rootfs are covered by main's `TestIntegrationHostSocketInImageIsUnreachable` per the Security re-sign, so confirm and close |
+| A14-206 l4 | #698 L3 c (6092380804): `onlySocket` is duplicated in `loopbuild/builder_test.go` and `cleanroom/cleanroom_test.go`, and the cleanroom fake panics where it could return; share one helper when either file is next touched |
+| A14-206 l5 | #698 Security re-sign (6092448694): `lastFlag` in `vm/gvisor/nonet_test.go` scans the whole argv, not stopping at `--` or the subcommand; no live path while the argv base is a fixed literal, revisit if it becomes data-driven |
+| RT-1 l1 | RT-1 builder: CI only prints the tier to the step summary; nothing fails a PR whose Risk tier line or reviews are below what `tools/risk_tier.py` prints. A check that compares the PR body's tier with the tool's would catch a tier-A PR reviewed at C; wait until the review comments carry a machine-readable tier |
+| RT-1 l2 | PR #705 reviews (recheck): files that steer agents or gate CI stay C under the brief's explicit list: CLAUDE.md, AGENTS.md, docs/OPERATING.md, reviews/*/README.md, tools/doclint.py, tools/trace.py, tests/ run by CI; `.mcp.json` is B |
+| RT-1 l3 | PR #705 reviews (recheck): outside image/ and the A broker packages, only .service/.socket/.timer and *.conf under a systemd dir are A; .path, .mount, .slice, .target, .automount, .swap, *.service.d/ drop-ins, tmpfiles.d, sysusers.d, udev and polkit files would be B. None exist there today |
+| RT-1 l4 | PR #705 reviews: hand-typed paths are not normalised (`.//image/x`, `/image/x`, `docs/../image/x`, backslashes); a nested `guest/x/sub/package.json` is B; a whitespace-only name is dropped. `--git` mode never emits these forms |
+| RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
+| ADP-8 l1 | PR #208 UX lens (recheck): once ADP-8b wires `Mismatch` in, a blocked adapter needs an OP-9 STATUS line in owner words naming the operation and the fix; `mismatch.go` has no owner text today |
+| ADP-8 l2 | PR #208 Potency lens: `Mismatch` reports only the first mismatching operation, so each demo cycle surfaces one fix |
 | PMERGE-1 l1 | `recheck`: Mark applies main's ruleset (strict required checks `checks`, `broker`, `machines`, `hostcheck`), the `lane:*` and `handoff` labels and the claude2 collaborator; until then the up-to-date gate of OPERATING §7 is not enforced. PMERGE-1 has no BOARD row or brief; its ID lives here and in D-093 |
 
 ## Reuse candidates
