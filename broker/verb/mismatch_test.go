@@ -29,3 +29,27 @@ func TestADP8ADraftThatSendsBlocksAdoption(t *testing.T) {
 		t.Fatal("an unknown verb that did not send blocked")
 	}
 }
+
+// Any outbound run whose verb is Reversible blocks, whatever its name:
+// an operation mapped to organize that sends is a gate bypass, and so is
+// a read that sends.
+func TestADP8AReversibleVerbThatSendsBlocksAdoption(t *testing.T) {
+	for _, v := range []string{Read, Draft, Organize} {
+		op, blocked := Mismatch([]DemoRun{
+			{Operation: "deliver", Verb: Send, Outbound: true},
+			{Operation: "tidy", Verb: v, Outbound: true},
+		})
+		if !blocked || op != "tidy" {
+			t.Fatalf("outbound %s: got %q blocked=%v", v, op, blocked)
+		}
+	}
+	if _, blocked := Mismatch([]DemoRun{{Operation: "tidy", Verb: Organize}}); blocked {
+		t.Fatal("an organize that stays inside blocked")
+	}
+	for v, c := range classes {
+		_, blocked := Mismatch([]DemoRun{{Operation: "op", Verb: v, Outbound: true}})
+		if want := c == Reversible; blocked != want {
+			t.Fatalf("outbound %s: blocked=%v, want %v", v, blocked, want)
+		}
+	}
+}
