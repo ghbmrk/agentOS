@@ -111,12 +111,14 @@ def tier_of_change(paths):
 
 def changed_paths(base, head):
     # --no-renames lists a moved file under its old path too, so moving
-    # image/build.sh to docs/ is still tier A.
+    # image/build.sh to docs/ is still tier A. -z keeps git from quoting
+    # names with non-ASCII bytes, quotes or newlines, which would match
+    # no prefix.
     out = subprocess.run(
-        ["git", "diff", "--name-only", "--no-renames", f"{base}...{head}"],
-        check=True, capture_output=True, text=True,
+        ["git", "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}"],
+        check=True, capture_output=True,
     ).stdout
-    return [line for line in out.splitlines() if line]
+    return [p for p in out.decode("utf-8", "surrogateescape").split("\0") if p]
 
 
 def main(argv=None):

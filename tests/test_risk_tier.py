@@ -161,6 +161,33 @@ class RiskTierTest(unittest.TestCase):
         self.assertIn("image/build.sh", paths)
         self.assertEqual(rt.tier_of_change(paths)[0], "A")
 
+    def test_paths_git_would_quote_keep_tier_a(self):
+        # git diff quotes names with non-ASCII bytes, quotes, tabs, backslashes
+        # or newlines; the quoted form would match no A prefix and fall to B.
+        names = ["image/mkosi/\u00e9", "image/a\tb", "image/a\\b", '.github/workflows/a"b.yml', "image/build\nx.sh"]
+        with tempfile.TemporaryDirectory() as d:
+            def git(*args):
+                subprocess.run(["git", "-C", d, *args], check=True, capture_output=True)
+            git("init", "-q")
+            git("config", "user.email", "t@example.invalid")
+            git("config", "user.name", "t")
+            git("commit", "-q", "--allow-empty", "-m", "base")
+            for n in names:
+                os.makedirs(os.path.join(d, os.path.dirname(n)), exist_ok=True)
+                with open(os.path.join(d, n), "w") as f:
+                    f.write("x\n")
+            git("add", ".")
+            git("commit", "-qm", "add")
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                paths = rt.changed_paths("HEAD~1", "HEAD")
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(sorted(paths), sorted(names))
+        for n in names:
+            self.assertEqual(rt.tier_of(n)[0], "A", n)
+
     def test_highest_tier_wins(self):
         tier, why = rt.tier_of_change(["docs/a.md", "broker/recall/x.go", "broker/vault/y.go"])
         self.assertEqual((tier, why), ("A", ["broker/vault/y.go"]))

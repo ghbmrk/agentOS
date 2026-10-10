@@ -698,6 +698,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | A14-206 l4 | #698 L3 c (6092380804): `onlySocket` is duplicated in `loopbuild/builder_test.go` and `cleanroom/cleanroom_test.go`, and the cleanroom fake panics where it could return; share one helper when either file is next touched |
 | A14-206 l5 | #698 Security re-sign (6092448694): `lastFlag` in `vm/gvisor/nonet_test.go` scans the whole argv, not stopping at `--` or the subcommand; no live path while the argv base is a fixed literal, revisit if it becomes data-driven |
 | RT-1 l1 | RT-1 builder: CI only prints the tier to the step summary; nothing fails a PR whose Risk tier line or reviews are below what `tools/risk_tier.py` prints. A check that compares the PR body's tier with the tool's would catch a tier-A PR reviewed at C; wait until the review comments carry a machine-readable tier |
+| RT-1 l2 | PR #705 reviews (recheck): files that steer agents or gate CI stay C under the brief's explicit list: CLAUDE.md, AGENTS.md, docs/OPERATING.md, reviews/*/README.md, tools/doclint.py, tools/trace.py, tests/ run by CI; `.mcp.json` is B |
+| RT-1 l3 | PR #705 reviews (recheck): outside image/ and the A broker packages, only .service/.socket/.timer and *.conf under a systemd dir are A; .path, .mount, .slice, .target, .automount, .swap, *.service.d/ drop-ins, tmpfiles.d, sysusers.d, udev and polkit files would be B. None exist there today |
+| RT-1 l4 | PR #705 reviews: hand-typed paths are not normalised (`.//image/x`, `/image/x`, `docs/../image/x`, backslashes); a nested `guest/x/sub/package.json` is B; a whitespace-only name is dropped. `--git` mode never emits these forms |
+| RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
 
 ## Reuse candidates
 | ID | Component | Why |
