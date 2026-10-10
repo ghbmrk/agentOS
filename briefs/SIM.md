@@ -14,7 +14,7 @@ Board section: Simplification (2026-10-10). Decision: D-095. Analysis: the simpl
 
 The verb is the intent lifecycle: intent, authorized, dispatched, observed, settled, judged.
 
-**Order.** Wave 0 fixes foundation defects and needs no spec change. Wave 1 needs the SIM-sd spec diff for SIM-5 onward; SIM-3 and SIM-4 can start before it. Wave 2 migrates consumers and deletes the duplicates. Each package is one session; tier A packages run on the strongest model.
+**Order.** Wave 0 fixes foundation defects and needs no spec change. Wave 1: SIM-check, SIM-proj and SIM-cases need no spec change and can start at once; SIM-owner-hold, SIM-owner-digest, SIM-outcome and SIM-erase need SIM-sd. Wave 2 migrates consumers and deletes the duplicates. Each package is one session; tier A packages run on the strongest model.
 
 **Rule for every package.** Deletion is the deliverable as much as the addition: each PR lists the lines, files and BOARD rows it retires. A package that adds a durable format outside the journal is rejected unless SIM-sd lists it as a documented cache.
 
@@ -62,7 +62,7 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 **Goal.** Floor invariants are written today as many separate crash-cut and composition tests, and fuzz "Cleared" trusts the target's own PASS lines.
 
-**Change.** A package of predicates over any journal: no effect dispatched without a grant valid at dispatch (OP-3); every dispatched effect ends settled or explicitly uncertain (OP-4); no erased subject readable from any projection (CAP-3); no owner message dispatched with a stale subject revision (after SIM-5). The same checker runs in property tests over generated logs, in CI over the five-journey runs, and at runtime as a STATUS line when it finds a violation.
+**Change.** A package of predicates over any journal: no effect dispatched without a grant valid at dispatch (OP-3); every dispatched effect ends settled or explicitly uncertain (OP-4); no erased subject readable from any projection (CAP-3); no owner message dispatched with a stale subject revision (added by SIM-owner-hold). The same checker runs in property tests over generated logs, in CI over the five-journey runs, and at runtime as a STATUS line when it finds a violation.
 
 **Requirement IDs.** OP-3, OP-4, OP-5, CAP-3. **Acceptance.** Each predicate has a generated counterexample journal it rejects and a valid one it accepts; mutants that drop each predicate fail. **Usage estimate.** Medium, under 120k tokens. Tier A.
 
@@ -72,13 +72,29 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 **Requirement IDs.** OP-4, RES-4. **Acceptance.** Rebuild from snapshot plus tail equals rebuild from empty, for a generated log (property test); a corrupt snapshot falls back to full replay. **Usage estimate.** Medium, under 120k tokens. Tier A.
 
-## SIM-owner: owner messages are intents (tier A)
+## SIM-owner-hold: owner texts are intents; the pacer hold becomes a projection (tier A)
 
 **Needs.** SIM-sd, SIM-proj, DEL-1 and PACE-1 merged (#709, #708: the two point fixes this generalizes).
 
-**Change.** The pacer's hold, the digest queue and owner-state held texts become projections over `owner.inform` intents. Quiet hours, urgent classes, eviction priority and held-text visibility (W5-Dc-r13 to r16) become rules in that projection. The W5-D draft PRs stay open as reference; their crash and composition cases are extracted as tests against the projection. `broker/digestqueue`'s own durability, leases and receipts are deleted.
+**Change.** Owner texts are `owner.inform` intents with a subject and subject revision, rendered at dispatch. The pacer's hold and owner-state held texts become a projection over those intents. Quiet hours, urgent classes, eviction priority and held-text visibility become rules in that projection: provider security alerts sent at once (W5-Dc-r13), class-aware eviction (r15), the held marker on packed released texts (r16), and forget dropping a held text (r17). The pacer's string hold and its own persistence are deleted.
 
-**Requirement IDs.** OP-3, OP-4, OP-9, CH-15. **Acceptance.** A guest reply accepted before a crash is delivered after restart (DEL-1's test, unchanged); a "Cleared" whose subject revised before dispatch is not sent; a forgotten subject's held text is not sent (W5-Dc-r17's case). Net lines go down. **Usage estimate.** Large; split at start if the brief exceeds 20k tokens. Tier A.
+**Requirement IDs.** OP-3, OP-4, OP-9, CH-15, CAP-3. **Acceptance.** A guest reply accepted before a crash is delivered after restart (DEL-1's test, unchanged); a "Cleared" whose subject revised before dispatch is not sent; a forgotten subject's held text is not sent (r17); a flood of agent texts does not evict a held approval (r15); a security alert bypasses quiet hours (r13); a released text packed after a hold carries its held marker (r16); SIM-cases' hold cases pass. Net lines go down. **Usage estimate.** Under 130k tokens. Tier A.
+
+## SIM-owner-digest: the digest becomes a projection (tier A)
+
+**Needs.** SIM-owner-hold.
+
+**Change.** The digest is a projection over `owner.inform` intents of class digest, sent through the same dispatch path as every owner text. `broker/digestqueue` is deleted whole: its durability, leases, receipts, `Sender`, `Batch` and `Snapshot`, and the agentosd digest gate (`batchLeaks`, the "`Send` only in `sendReady`" rule) with it, since no batch object or second sender remains to leak or escape. The clock set-back notice (W5-Dc-r20) becomes a rule in the projection.
+
+**Requirement IDs.** OP-3, OP-4, OP-9, CH-15, CAP-3. **Acceptance.** A carrier outage of any length does not stop new digest lines from being carried once the carrier returns (r18's case); exactly one dispatch path sends owner texts, checked by an import or call-site test (r21's case); no digest content reaches a log sink, checked by a test over the log output with a synthetic canary (r22's case); a clock set back shows one explaining line (r20); SIM-cases' digest cases pass. If any of `Sender`, `Batch` or the gate is kept, the PR reopens W5-Dc-r18, r21 and r22. Net lines go down. **Usage estimate.** Under 130k tokens. Tier A.
+
+## SIM-cases: W5-D cases become tests against main (tier A)
+
+**Goal.** Mark chose (decision 1, 2026-10-10) to stop W5 building and keep the W5-D draft PRs open as reference, with their crash, acknowledgement and forget cases extracted as tests. This package owns that extraction so no case is lost when the drafts' mechanisms are not built.
+
+**Change.** Read each open W5-D draft PR and list every crash cut, acknowledgement and forget case it tests in `briefs/SIM-cases.md` (one line each: draft PR, case, the outcome the owner sees). Write each case as a test against main's observable behaviour (owner text sent or not, after restart or forget), not against the draft's internal types. Cases main already passes land as tests in this PR. Cases main fails are not skipped or quarantined: each is assigned in the list to SIM-owner-hold, SIM-owner-digest or SIM-erase, whose acceptance then includes it.
+
+**Requirement IDs.** OP-4, CAP-3, CH-15. **Acceptance.** Every open W5-D draft PR appears in the list with its cases or "no owner-visible case"; each case is a passing test here or assigned to a named SIM package. **Usage estimate.** Under 120k tokens; split by draft range if the list exceeds 20k tokens. Tier A (agentosd tests).
 
 ## SIM-outcome: one revisable outcome record (tier A)
 
@@ -88,14 +104,14 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 ## SIM-erase: forget once, in the journal (tier A)
 
-**Needs.** SIM-proj, SIM-check.
+**Needs.** SIM-sd, SIM-proj, SIM-check.
 
-**Change.** FORGET erases the subject in the journal (`journal/erase.go`) and rebuilds affected projections; SIM-check's "no erased subject readable" predicate is the test. The per-package forget hooks are deleted as each store becomes a projection. The forget log over backups (W3-forget-b1-5, b1-6) keeps its own row: it governs restores, which a projection does not cover.
+**Change.** FORGET erases the subject in the journal (`journal/erase.go`) and rebuilds affected projections; SIM-check's "no erased subject readable" predicate is the test. The per-package forget hooks are deleted as each store becomes a projection. Out of scope: restores, which the forget log over backups governs (W3-forget-b1-5, b1-6, with W3-forget-b2c-f1-r2 and r4), and recall's take-back (`broker/recall`, `recalltool`), which is not a projection and keeps its rows W3-forget-reach-r1 to r5.
 
-**Requirement IDs.** CAP-3. **Acceptance.** The checker finds no erased subject in any projection after forget, after restart, and after a restore. **Usage estimate.** Medium, under 120k tokens. Tier A.
+**Requirement IDs.** CAP-3. **Acceptance.** The checker finds no erased subject in any projection after forget and after restart; a source re-offering a forgotten reference in a higher generation is never sent (W5-Dc-r5); SIM-cases' forget cases pass. **Usage estimate.** Medium, under 120k tokens. Tier A.
 
-## SIM-core: the trusted core is a named list (tier B)
+## SIM-core: the trusted core is a named list (tier A)
 
 **Change.** One file lists the core packages (journal, grants, vault, sockets, egress, childproc, verb, guest, meter, guesterr). A CI import check fails when a package outside it imports a core write path other than the journal's `Submit`. `tools/risk_tier.py` reads the list: core = A.
 
-**Requirement IDs.** ARC-1. **Acceptance.** A fixture package that writes grants directly fails the check; `risk_tier.py` rates a core file A and a non-core broker file B. **Usage estimate.** Small, under 60k tokens. Tier B (tools and CI).
+**Requirement IDs.** ARC-1. **Acceptance.** A fixture package that writes grants directly fails the check; `risk_tier.py` rates a core file A and a non-core broker file B. **Usage estimate.** Small, under 60k tokens. Tier A: it changes `tools/risk_tier.py` and `.github/`, both tier A paths.
