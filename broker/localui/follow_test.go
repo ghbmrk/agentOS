@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"html"
 	"io"
 	"mime/multipart"
@@ -33,6 +34,7 @@ type followRig struct {
 	*rig
 	mu       sync.Mutex
 	shown    [][]byte
+	chains   [][][]byte
 	asked    []string
 	reply    string
 	describe func([]byte) (localapi.RootSummary, error)
@@ -54,9 +56,10 @@ func newFollowRig(t *testing.T) *followRig {
 			Thresholds: map[string]int{"root": 2, "targets": 2}}, nil
 	}
 	f.srv.SetOwner(f.pageWith(ch, localsrv.Config{
-		DescribeRoot: func(_ context.Context, b []byte) (localapi.RootSummary, error) {
+		DescribeRoot: func(_ context.Context, b []byte, chain [][]byte) (localapi.RootSummary, error) {
 			f.mu.Lock()
 			f.shown = append(f.shown, b)
+			f.chains = append(f.chains, chain)
 			d := f.describe
 			f.mu.Unlock()
 			return d(b)
@@ -78,16 +81,18 @@ func (f *followRig) calls() (shown int, asked []string) {
 	return len(f.shown), append([]string(nil), f.asked...)
 }
 
-// upload posts root as the page's file form.
-func (f *followRig) upload(root []byte) string {
+// upload posts roots as the page's file form.
+func (f *followRig) upload(roots ...[]byte) string {
 	f.t.Helper()
 	var b bytes.Buffer
 	mw := multipart.NewWriter(&b)
-	fw, err := mw.CreateFormFile("root", "root.json")
-	if err != nil {
-		f.t.Fatal(err)
+	for i, root := range roots {
+		fw, err := mw.CreateFormFile("root", fmt.Sprintf("%d.root.json", i))
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		fw.Write(root)
 	}
-	fw.Write(root)
 	mw.WriteField("step", "show")
 	mw.Close()
 	w := f.do("POST", "/follow/", nil, func(r *http.Request) {
@@ -321,5 +326,56 @@ func TestOSS10w2FollowMirrorsTheGate(t *testing.T) {
 		if followPrint(d) != grants.FollowPrint(d) {
 			t.Fatalf("%q: %q != %q", d, followPrint(d), grants.FollowPrint(d))
 		}
+	}
+}
+
+// OSS-10w-r: the owner may bring several root files, the project's
+// rotations from the one this box last trusted; the newest version is the
+// root shown and the rest go with it, in the order brought, as its chain.
+// One over the bound is refused on the page.
+func TestOSS10wrPageSendsTheChain(t *testing.T) {
+	f := newFollowRig(t)
+	if page := f.get("/follow/"); !strings.Contains(page, `type="file" name="root" accept=".json,application/json" multiple required`) {
+		t.Fatalf("the file input takes one file: %s", page)
+	}
+	v := func(n int) []byte {
+		return []byte(fmt.Sprintf(`{"signatures":[],"signed":{"_type":"root","version":%d}}`, n))
+	}
+	f.upload(v(2), v(4), []byte("not json"), v(3))
+	f.mu.Lock()
+	shown, chain := f.shown[0], f.chains[0]
+	f.mu.Unlock()
+	if string(shown) != string(v(4)) || len(chain) != 3 || string(chain[0]) != string(v(2)) ||
+		string(chain[1]) != "not json" || string(chain[2]) != string(v(3)) {
+		t.Fatalf("root %s chain %q", shown, chain)
+	}
+	many := make([][]byte, localapi.MaxRootChain+2)
+	for i := range many {
+		many[i] = v(i + 1)
+	}
+	if page := f.upload(many...); !strings.Contains(page, rootTooManyText) {
+		t.Fatalf("%s", page)
+	}
+	if shown, _ := f.calls(); shown != 1 {
+		t.Fatalf("shown %d", shown)
+	}
+}
+
+// UX lens on #667 (OSS-10, OSS-9): a root the box admits as the project's
+// may be a rotated one the image never shipped, so the switch-back page
+// says what was checked (it follows from the root the box last trusted),
+// never that the image shipped these keys.
+func TestOSS10wrSwitchBackPageClaimsOnlyTheChain(t *testing.T) {
+	f := newFollowRig(t)
+	f.mu.Lock()
+	f.describe = func([]byte) (localapi.RootSummary, error) {
+		return localapi.RootSummary{Version: 12, Digest: followDigest, Project: true,
+			Keys: map[string][]string{"root": {"rotated1", "rotated2"}}, Thresholds: map[string]int{"root": 2}}, nil
+	}
+	f.mu.Unlock()
+	p := f.upload([]byte("rotated project root"))
+	if strings.Contains(p, "shipped") || !strings.Contains(p, "follow from the project root I last trusted") ||
+		!strings.Contains(p, "Switch back to the AgentOS project") {
+		t.Fatalf("%s", p)
 	}
 }

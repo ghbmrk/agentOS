@@ -125,8 +125,12 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"guest": {[]string{"fold", "guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// fold keeps an oversized tool result for the machine that produced it
+	// and hands back a stand-in. It stores bytes in memory. No network,
+	// no process, no model.
+	"fold": {nil, forbiddenStd},
 	// modelroute forwards to the vault process over its Unix socket and
 	// reports usage to the meter; never the vault or the proxy. It
 	// journals the denials that come back (modelroute.Journal), coalesced
