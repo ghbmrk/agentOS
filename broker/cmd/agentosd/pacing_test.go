@@ -302,3 +302,22 @@ func TestMainWiresThePacer(t *testing.T) {
 		t.Fatal("attach without a digest")
 	}
 }
+
+// REQ: OWN-4, CH-15 (PACE-1 PC-6)
+func TestLoopsClearedTextCarriesItsKeys(t *testing.T) {
+	r := pacedOwner(t, quiet22to7(), at23)
+	var ln loop2Notify
+	ln.clear("Security checks: Cleared: x.", []string{"k"}) // no channel yet: logged, not sent
+	ln.ch.Store(r.ch)
+	open := true
+	r.ch.SetCurrent(func(keys []string) bool { return !(open && len(keys) == 1 && keys[0] == "k") })
+	ln.clear("Security checks: Cleared: x.", []string{"k"})
+	ln.clear("Security checks: Cleared: y.", []string{"j"})
+	r.set(at23.Add(8*time.Hour + time.Minute)) // 07:01
+	if err := r.ch.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sent(); len(got) != 1 || !strings.Contains(got[0], "Cleared: y.") || strings.Contains(got[0], "Cleared: x.") {
+		t.Fatalf("sent %q, want only the clear whose key still holds", got)
+	}
+}

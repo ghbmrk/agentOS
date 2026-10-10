@@ -682,6 +682,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | RT-1 l3 | PR #705 reviews (recheck): outside image/ and the A broker packages, only .service/.socket/.timer and *.conf under a systemd dir are A; .path, .mount, .slice, .target, .automount, .swap, *.service.d/ drop-ins, tmpfiles.d, sysusers.d, udev and polkit files would be B. None exist there today |
 | RT-1 l4 | PR #705 reviews: hand-typed paths are not normalised (`.//image/x`, `/image/x`, `docs/../image/x`, backslashes); a nested `guest/x/sub/package.json` is B; a whitespace-only name is dropped. `--git` mode never emits these forms |
 | RT-1 l5 | PR #705 Security 4a (recheck): spikes/ is C, but testkit.yml builds spikes/S1S2-testkit under sudo and uploads the image |
+| PACE-1 f1 | Builder: MORE overflow lines (`s.more`) are not revalidated, so a cleared line pushed to MORE can be read after its finding returned; the owner asks for MORE, and the urgent return already reached them |
+| PACE-1 f2 | Builder: `ToldCleared` is marked when the cleared line is queued, not when the owner hears it, so a dropped stale clear still counts as told; the return was texted as `Back`, so the owner is not left on a false all-clear |
+| PACE-1 f3 | Builder: two true "Cleared" texts for one key (one held, one later) can both send; redundant, never false |
+| PACE-1 f4 | Builder `recheck`: the hook check and the modem send are not atomic, and an urgent pass with cleared lines sends without revalidation; both windows are sub-second and the urgent return follows any stale clear |
 
 ## Reuse candidates
 | ID | Component | Why |

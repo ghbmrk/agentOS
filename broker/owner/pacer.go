@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -108,6 +109,47 @@ type HeldText struct {
 	// Agent marks agent-derived text (Notify, NotifyAs).
 	Agent bool      `json:"agent,omitempty"`
 	At    time.Time `json:"at"`
+	// Subjects are what the text says about, opaque to the channel; a
+	// text with subjects is sent only while the Current hook says they
+	// still hold (PACE-1).
+	Subjects []string `json:"subjects,omitempty"`
+}
+
+// CurrentHook reports whether a text about these subjects is still true
+// (SetCurrent).
+type CurrentHook func(subjects []string) bool
+
+// SetCurrent sets the hook that confirms a text's subjects when it is
+// sent (PostAbout); nil removes it. Without a hook a text with subjects
+// is dropped, never sent unconfirmed.
+func (c *Channel) SetCurrent(h CurrentHook) {
+	if h == nil {
+		c.current.Store(nil)
+		return
+	}
+	c.current.Store(&h)
+}
+
+// stillCurrent reports whether held text h may be sent: it has no
+// subjects, or the Current hook confirms them. Call it without c.mu: the
+// hook takes its owner's lock.
+func (c *Channel) stillCurrent(h HeldText) bool {
+	if len(h.Subjects) == 0 {
+		return true
+	}
+	hook := c.current.Load()
+	return hook != nil && (*hook)(h.Subjects)
+}
+
+// PostAbout is Post for a text that is true only while its subjects
+// hold, such as a security "Cleared" line (PACE-1). Held, it keeps its
+// subjects, and it is sent only if the Current hook confirms them then;
+// otherwise it is dropped, unsent and uncounted.
+func (c *Channel) PostAbout(class Class, text string, subjects []string) error {
+	if c.cfg.Modem == nil {
+		return errors.New("owner: no modem")
+	}
+	return c.postHeld(class, HeldText{Text: control.Fit(Disclose(text)), Subjects: append([]string(nil), subjects...)})
 }
 
 // checkPacing fails a bad saved setting closed to the defaults (QH-1).
@@ -146,7 +188,16 @@ func (c *Channel) sendTemplate(text string) error {
 // post is Post for text already disclosed and fitted. agent marks
 // agent-derived text, which a release never packs with another text.
 func (c *Channel) post(class Class, text string, agent bool) error {
+	return c.postHeld(class, HeldText{Text: text, Agent: agent})
+}
+
+// postHeld is post for h, whose Class and At it sets.
+func (c *Channel) postHeld(class Class, h HeldText) error {
+	text := h.Text
 	if c.Urgent(class) {
+		if !c.stillCurrent(h) {
+			return nil
+		}
 		return c.sendCounted(text)
 	}
 	c.pmu.Lock()
@@ -159,7 +210,8 @@ func (c *Channel) post(class Class, text string, agent bool) error {
 	st := &c.codes.st
 	if len(st.Held) > 0 || st.HeldDropped > 0 || c.quietLocked(now) || c.allowanceLocked(now) == 0 {
 		err := c.codes.commit(func(s *State) {
-			s.Held = append(s.Held, HeldText{Text: text, Class: class, Agent: agent, At: now})
+			h.Class, h.At = class, now
+			s.Held = append(s.Held, h)
 			if n := len(s.Held) - MaxHeld; n > 0 {
 				s.Held = append([]HeldText(nil), s.Held[n:]...)
 				s.HeldDropped += n
@@ -169,6 +221,9 @@ func (c *Channel) post(class Class, text string, agent bool) error {
 		return err
 	}
 	c.mu.Unlock()
+	if !c.stillCurrent(h) {
+		return nil
+	}
 	return c.sendCounted(text)
 }
 
@@ -251,8 +306,34 @@ func (c *Channel) releasePaced() error {
 			c.mu.Unlock()
 			return nil
 		}
-		text, n, dropped := packHeld(st.HeldDropped, st.Held)
 		c.mu.Unlock()
+		// A held text whose subjects no longer hold is dropped before
+		// packing, unsent and uncounted (PACE-1). Only posts and releases
+		// change the hold, both under pmu, so its indexes stay put.
+		var stale []int
+		for i, h := range st.Held {
+			if !c.stillCurrent(h) {
+				stale = append(stale, i)
+			}
+		}
+		if len(stale) > 0 {
+			c.mu.Lock()
+			err := c.saveLocked(func(s *State) {
+				keep := s.Held[:0:0]
+				for i, h := range s.Held {
+					if !slices.Contains(stale, i) {
+						keep = append(keep, h)
+					}
+				}
+				s.Held = keep
+			})
+			c.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		text, n, dropped := packHeld(st.HeldDropped, st.Held)
 		if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
 			return err
 		}

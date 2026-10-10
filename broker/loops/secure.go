@@ -188,6 +188,11 @@ type GuardConfig struct {
 	// (CH-15): a tampered file or a vulnerability, not an expiring
 	// credential.
 	Notify func(text string, urgent bool)
+	// NotifyClear texts the owner a text of only "Cleared" lines that
+	// may wait in the owner's hold, with the cleared keys it speaks for,
+	// so the hold can ask Current at send and drop it if any came back
+	// (PACE-1). Nil sends it through Notify, not urgent.
+	NotifyClear func(text string, subjects []string)
 	// FixturesLive turns on adding regression fixtures to the security
 	// suite. Leave it off until replay answers them (K-S1) and the pipeline
 	// grades open findings as no-regression (PS1): every fixture must pass
@@ -421,6 +426,10 @@ func NewGuard(cfg GuardConfig) (*Guard, error) {
 	if cfg.Notify == nil {
 		cfg.Notify = func(string, bool) {}
 	}
+	if cfg.NotifyClear == nil {
+		notify := cfg.Notify
+		cfg.NotifyClear = func(text string, _ []string) { notify(text, false) }
+	}
 	seen := map[Check]bool{}
 	for _, p := range cfg.Probes {
 		if !probeChecks[p.Check()] || seen[p.Check()] || p.Every() <= 0 {
@@ -586,14 +595,31 @@ func (s *Guard) Pass(ctx context.Context) (int, error) {
 	// Every texted finding is told it cleared, paused or not, once no
 	// open texted finding shares its plain name, new ones included (S39).
 	s.mu.Lock()
-	later = append(later, s.closeTextLocked(closed)...)
+	cleared, keys := s.closeTextLocked(closed)
 	s.mu.Unlock()
-	text := s.batch(append(lines, later...))
+	// An urgent text goes at once, so its "Cleared" lines are said while
+	// still true. Otherwise they go in a text of their own, which the
+	// owner's hold checks again when it sends (PACE-1), so a dropped
+	// "Cleared" never takes another notice with it.
+	var text, clearText string
+	if urgent || len(cleared) == 0 {
+		text = s.batch(append(append(lines, later...), cleared...))
+	} else {
+		var rest, crest []string
+		text, rest = pack(distinct(append(lines, later...)))
+		clearText, crest = pack(distinct(cleared))
+		s.mu.Lock()
+		s.more = append(rest, crest...)
+		s.mu.Unlock()
+	}
 	s.mu.Lock()
 	err := s.saveLocked()
 	s.mu.Unlock()
 	if text != "" {
 		s.cfg.Notify(text, urgent)
+	}
+	if clearText != "" {
+		s.cfg.NotifyClear(clearText, keys)
 	}
 	if err := s.fixPending(ctx, ids); err != nil {
 		errs = append(errs, err)
@@ -743,10 +769,22 @@ func distinct(lines []string) []string {
 // batch joins a pass's lines into one text within textBudget, holding the
 // rest for MORE. Identical lines are said once, with their count.
 func (s *Guard) batch(lines []string) string {
-	if len(lines) == 0 {
+	text, rest := pack(distinct(lines))
+	if text == "" {
 		return ""
 	}
-	lines = distinct(lines)
+	s.mu.Lock()
+	s.more = rest
+	s.mu.Unlock()
+	return text
+}
+
+// pack joins lines into one text within textBudget and returns the lines
+// it left out.
+func pack(lines []string) (string, []string) {
+	if len(lines) == 0 {
+		return "", nil
+	}
 	const tail = " Reply MORE for the rest."
 	text := "Security checks:"
 	n := 0
@@ -760,13 +798,10 @@ func (s *Guard) batch(lines []string) string {
 		}
 		text += " " + lines[n]
 	}
-	s.mu.Lock()
-	s.more = append([]string(nil), lines[n:]...)
-	s.mu.Unlock()
 	if n < len(lines) {
 		text += tail
 	}
-	return text
+	return text, append([]string(nil), lines[n:]...)
 }
 
 // More returns the lines the last text held back (the owner's MORE), once.
