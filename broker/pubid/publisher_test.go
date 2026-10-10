@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,16 +14,29 @@ import (
 
 type sent struct {
 	day   string
-	batch [][]byte
+	batch [][]byte // the signed items
+	raw   []byte   // the sealed batch
+	key   ed25519.PublicKey
 }
 
+// fakeSender opens each batch it is handed. got holds those with items;
+// all holds every send, cover batches included (OSS-6s-a2).
 type fakeSender struct {
 	got  []sent
+	all  []sent
 	fail error
 }
 
-func (f *fakeSender) Publish(day string, batch [][]byte) error {
-	f.got = append(f.got, sent{day, append([][]byte(nil), batch...)})
+func (f *fakeSender) Publish(day string, batch []byte) error {
+	b, err := OpenBatch(batch)
+	if err != nil || b.Day != day || b.Len != len(batch) {
+		panic(fmt.Sprintf("bad batch for %s: %v", day, err))
+	}
+	s := sent{day, b.Items, append([]byte(nil), batch...), b.Key}
+	f.all = append(f.all, s)
+	if len(b.Items) > 0 {
+		f.got = append(f.got, s)
+	}
 	return f.fail
 }
 
@@ -51,6 +65,9 @@ type rig struct {
 	// mono is the publisher's monotonic clock. By default each reading is
 	// a day after the last, so only the tests of the floor meet it.
 	mono func() time.Duration
+	// boot names the boot mono counts from; nil means none, so the floor
+	// is not carried across a reopen.
+	boot func() string
 }
 
 func newRig(t *testing.T, r fixedRand) *rig {
@@ -83,6 +100,7 @@ func (g *rig) reopen(t *testing.T) {
 	g.p, err = NewPublisher(Config{
 		Path: filepath.Join(g.dir, "outbox.json"), Identity: g.id, Sender: g.out, Now: g.c.now,
 		Signers: map[string]Signer{"artifact": signer, "attestation": signer}, Rand: g.rand, Mono: g.mono,
+		BootID: g.boot,
 	})
 	must(t, err)
 }

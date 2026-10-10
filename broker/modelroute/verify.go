@@ -135,6 +135,96 @@ func (v *Verifier) RecallKey() ([]byte, error) {
 	return key, nil
 }
 
+// EnrollResult is the vault process's answer to an enroll: the new
+// code-generator seed's otpauth:// link, handed out this once (Security L7
+// on the P2-2w plan). It is never logged.
+type EnrollResult struct {
+	URI string `json:"uri"`
+}
+
+// String keeps the link out of logs.
+func (EnrollResult) String() string { return "[code-generator enrollment]" }
+
+// EnrollConfirmRequest is the code the owner entered from the new seed
+// (ONB-3); the answer is a VerifyResult with only OK set.
+type EnrollConfirmRequest struct {
+	Code string `json:"code"`
+}
+
+// ErrEnrolled means enrollment is sealed: a new seed needs the recovery
+// key (REC-3). ErrNoEnrollment means no seed waits for confirmation (or,
+// from SealEnroll, none was confirmed since the last Enroll).
+var (
+	ErrEnrolled     = errors.New("code generator already enrolled")
+	ErrNoEnrollment = errors.New("no enrollment waiting for confirmation")
+	// ErrEnrollNotOpen means setup mode never opened enrollment on this
+	// vault (P2-2w c2 r1): setup cannot finish on it.
+	ErrEnrollNotOpen = errors.New("code-generator enrollment not open")
+)
+
+// Enroll asks the vault process for a new code-generator seed, made in
+// the vault and returned once as an otpauth:// link for setup's page.
+func (v *Verifier) Enroll() (string, error) {
+	var res EnrollResult
+	if err := v.enrollCall("/enroll", nil, &res); err != nil {
+		return "", err
+	}
+	if res.URI == "" {
+		return "", errors.New("enroll: empty answer")
+	}
+	return res.URI, nil
+}
+
+// ConfirmEnroll checks one code from the new seed; a match makes the seed
+// the owner channel's, for SealEnroll to seal. A *VerifyError with
+// VerifyPaused means too many wrong codes.
+func (v *Verifier) ConfirmEnroll(code string) (bool, error) {
+	body, _ := json.Marshal(EnrollConfirmRequest{Code: code})
+	var res VerifyResult
+	if err := v.enrollCall("/enroll/confirm", body, &res); err != nil {
+		return false, err
+	}
+	return res.OK, nil
+}
+
+// SealEnroll closes enrollment for good at setup's finish (L3 on #367).
+// ErrNoEnrollment means no seed was confirmed since the last Enroll;
+// ErrEnrolled that setup already sealed it; ErrEnrollNotOpen that setup
+// never opened it.
+func (v *Verifier) SealEnroll() error {
+	var res struct{}
+	return v.enrollCall("/enroll/seal", nil, &res)
+}
+
+func (v *Verifier) enrollCall(path string, body []byte, res any) error {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: path} // over the Unix socket
+	resp, err := v.c.Post(u.String(), "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusServiceUnavailable:
+		return ErrVaultLocked
+	case http.StatusGone:
+		return ErrEnrolled
+	case http.StatusPreconditionFailed:
+		return ErrEnrollNotOpen
+	case http.StatusConflict:
+		return ErrNoEnrollment
+	case http.StatusTooManyRequests:
+		until, err := time.Parse(time.RFC3339, resp.Header.Get(HeaderPausedUntil))
+		if err != nil {
+			until = time.Now().Add(10 * time.Minute)
+		}
+		return &VerifyError{Kind: VerifyPaused, Until: until}
+	default:
+		return fmt.Errorf("enroll: vault process answered %s", resp.Status)
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 1<<10)).Decode(res)
+}
+
 // SecondLineState is what the vault process tells agentosd about the
 // second line's calling account (egress K13): only whether it waits on
 // the owner, never its settings (potency R1 on #139).

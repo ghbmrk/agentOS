@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -23,6 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/vault"
+	"github.com/google/go-tpm/tpm2"
 )
 
 // SeedName is the vault entry holding the owner's code-generator seed.
@@ -91,10 +93,10 @@ var (
 	errWrongPIN     = uerr(http.StatusForbidden, "wrong PIN; this PC's TPM limits how many tries it allows")
 	errPINLockout   = uerr(http.StatusTooManyRequests, "Too many wrong PINs. Unlock with your passphrase and a code instead.")
 	errNotTrusted   = uerr(http.StatusConflict, "this PC is not a trusted host; unlock with the vault passphrase and a code")
-	errBootChanged  = uerr(http.StatusConflict, "This PC started the box in a way it hasn't before. Unlock with your passphrase and a code.")
+	errBootChanged  = uerr(http.StatusConflict, "This PC started me in a way it hasn't before. Unlock with your passphrase and a code.")
 	errNoSuchHost   = uerr(http.StatusNotFound, "no trusted host with that id")
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
-	errLockoutOwned = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so the box can't protect a boot PIN here. Trust this PC without a PIN instead.")
+	errLockoutOwned = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so I can't protect a boot PIN here. Trust this PC without a PIN instead.")
 
 	// Rollback (V6): the drive's vault is older than this PC's counter.
 	errRolledBack = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
@@ -112,12 +114,12 @@ const noteCounterReset = "This PC's copy check was reset. If you cleared this PC
 
 // noteTPMSilent is the owner's notice when this PC's TPM does not answer
 // the rollback check; the detail goes to the log only (UX-45-3).
-const noteTPMSilent = "This PC's security chip didn't respond, so the box stayed locked. Restart the PC. If it happens again, move the drive to another PC and unlock there with your passphrase and a code."
+const noteTPMSilent = "This PC's security chip didn't respond, so I stayed locked. Restart the PC. If it happens again, move the drive to another PC and unlock there with your passphrase and a code."
 
 // noteKeepTrustedFailed is the owner's notice when "Keep this PC
 // trusted" could not approve the new boot path; the detail goes to the
 // log only (CH-12).
-const noteKeepTrustedFailed = "Couldn't keep this PC trusted after its start-up changed. The box is unlocked; to restart without your card, trust this PC again on the box's Wi-Fi page."
+const noteKeepTrustedFailed = "I couldn't keep this PC trusted after its start-up changed. I'm unlocked; to restart without your card, trust this PC again on my Wi-Fi page."
 
 // noteRolledBack is the owner's notice for an old copy of the drive (V6).
 const noteRolledBack = "the vault on this drive is older than this PC has seen: it may be an old copy of the drive put back, so it stayed locked. If you did not restore it, the drive was out of your hands; restore from your backup with the recovery key."
@@ -134,7 +136,7 @@ func errLockedOut(until time.Time) error {
 }
 
 func errClockSkew(seconds int64) error {
-	return uerr(http.StatusForbidden, fmt.Sprintf("that code is for another time: the box clock and your phone differ by about %d s; this try was not counted", seconds))
+	return uerr(http.StatusForbidden, fmt.Sprintf("that code is for another time: my clock and your phone differ by about %d s; this try was not counted", seconds))
 }
 
 type phase int
@@ -201,9 +203,16 @@ type custody struct {
 	// smsHTTP is the texting provider's client; nil is
 	// smsapi.NewHTTPClient(). Only tests set it.
 	smsHTTP *http.Client
+	// mailPlain lets the mail account reach the loopback test server
+	// without TLS (imapsmtp.Plain refuses any other host). Only tests set
+	// it.
+	mailPlain bool
 	// budget is the second line's sending budget, shared by SIP MESSAGE
 	// and the HTTP account (security Q2).
 	budget smsapi.Budget
+	// granted: some machine has a model provider granted (modelGranted),
+	// for the broker's model state (OP-9 C2). Set before serving.
+	granted bool
 
 	mu sync.Mutex
 	// smsFailSince is when the texting account's polls started failing
@@ -322,7 +331,7 @@ func (c *custody) noteWrongPassLocked(now time.Time) {
 		c.wrongPassQuiet++
 		return
 	}
-	msg := "wrong vault passphrase tried on the box's Wi-Fi"
+	msg := "wrong vault passphrase tried on my Wi-Fi"
 	if c.wrongPassQuiet > 0 {
 		msg += fmt.Sprintf(" (%d more since the last notice)", c.wrongPassQuiet)
 	}
@@ -339,7 +348,7 @@ func (c *custody) noteSupersedeLocked(now time.Time) {
 		c.supersedeQuiet++
 		return
 	}
-	msg := "The box unlock was started over with your card; the earlier one was cancelled."
+	msg := "The unlock was started over with your card; the earlier one was cancelled."
 	if c.supersedeQuiet > 0 {
 		msg += " It was started over " + times(c.supersedeQuiet) + " more since the last notice."
 	}
@@ -456,7 +465,7 @@ func (c *custody) unlock(passphrase string) (string, error) {
 	c.timer = time.AfterFunc(c.ttl, c.expire)
 	if c.wrongPassQuiet > 0 {
 		// A burst that stopped still reports its total.
-		c.notify(fmt.Sprintf("%d more wrong vault passphrases were tried on the box's Wi-Fi since the last notice", c.wrongPassQuiet))
+		c.notify(fmt.Sprintf("%d more wrong vault passphrases were tried on my Wi-Fi since the last notice", c.wrongPassQuiet))
 		c.wrongPassQuiet = 0
 	}
 	if !superseded {
@@ -511,7 +520,7 @@ func (c *custody) confirmKeep(ticket, code string, keep bool) (bool, error) {
 	}
 	if c.supersedeQuiet > 0 {
 		// Restarts that stopped still report their total.
-		c.notify("The box unlock was started over " + times(c.supersedeQuiet) + " more before it was unlocked.")
+		c.notify("The unlock was started over " + times(c.supersedeQuiet) + " more before it was unlocked.")
 		c.supersedeQuiet = 0
 	}
 	c.notify("vault unlocked")
@@ -708,6 +717,274 @@ func (c *custody) recallKey() ([]byte, error) {
 	}
 	return key, nil
 }
+
+// UpdateAnchorName is the vault entry recording the TPM counter that
+// anchors the update store's outside-attestor record (SR3-6f-2b): once it
+// exists, a counter this PC cannot find is "anchor missing", never 0.
+const UpdateAnchorName = "update-policy-anchor"
+
+// KindUpdateAnchor marks that entry.
+const KindUpdateAnchor = "update_anchor"
+
+// updateAnchorID names the first update counter on every PC. Once
+// defined it stays, so a PC that ever had one never looks fresh. Only the
+// vault process picks counter ids; agentosd cannot.
+var updateAnchorID = func() []byte { h := sha256.Sum256([]byte("agentos update policy")); return h[:] }()
+
+// updateAnchorRecord is the entry's value. A new counter starts at the
+// TPM's highest count so far, so the store sees the count less Base.
+type updateAnchorRecord struct {
+	Host string `json:"host"`
+	// ID is the counter's id when it is not updateAnchorID: a re-anchor
+	// beside a counter whose auth no vault holds (reanchorUpdate).
+	ID   []byte `json:"id,omitempty"`
+	Ref  []byte `json:"ref"`
+	Auth []byte `json:"auth"`
+	Base uint64 `json:"base"`
+}
+
+func (r updateAnchorRecord) counterID() []byte {
+	if len(r.ID) > 0 {
+		return r.ID
+	}
+	return updateAnchorID
+}
+
+// errUpdateAnchorMissing: the counter was defined on this PC and is gone
+// (the TPM cleared, or the vault moved to another PC). The store fails
+// closed on it until the owner trusts this PC again.
+var errUpdateAnchorMissing = uerr(http.StatusConflict, "this PC's update counter is gone; unlock with your card to trust this PC again")
+
+// errUpdateAnchorElsewhere: the vault records an update counter and this
+// PC has no TPM (the vault moved here, or the TPM was not found at start).
+// The store fails closed on it; "no anchor" is only for a vault that never
+// had one.
+var errUpdateAnchorElsewhere = uerr(http.StatusConflict, "my update check is kept in a security chip this PC doesn't have")
+
+// updateAnchorRead returns the update counter, defining it at the first
+// read on a PC with a TPM. anchored is false only on a PC with no TPM.
+func (c *custody) updateAnchorRead() (anchored bool, n uint64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.updateAnchorLocked(false)
+}
+
+// updateAnchorRaise raises the update counter to 1; it never lowers it.
+func (c *custody) updateAnchorRaise() (anchored bool, n uint64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.updateAnchorLocked(true)
+}
+
+// updateAnchorLocked reads (and with raise, raises) the update counter.
+// Caller holds mu.
+func (c *custody) updateAnchorLocked(raise bool) (bool, uint64, error) {
+	if c.ph != open {
+		return false, 0, errLocked
+	}
+	if hasOtherKind(c.v, UpdateAnchorName, KindUpdateAnchor) {
+		return false, 0, errInternal
+	}
+	sec, ok := c.v.Secret(UpdateAnchorName)
+	if c.host == nil {
+		if ok {
+			c.noteCounterResetLocked()
+			return false, 0, errUpdateAnchorElsewhere
+		}
+		return false, 0, nil
+	}
+	pc, err := c.host.updateCounter()
+	if err != nil {
+		return false, 0, errInternal
+	}
+	if !ok {
+		_, found, err := pc.Find(updateAnchorID)
+		if err != nil {
+			return false, 0, errInternal
+		}
+		if found {
+			// A counter no vault record holds the auth of: a crash
+			// between Define and the vault's Put, or a vault restored
+			// onto this PC. Its count is unknown, so it is missing
+			// until the owner trusts this PC again.
+			c.noteCounterResetLocked()
+			return false, 0, errUpdateAnchorMissing
+		}
+		rec, err := defineUpdateAnchor(c.v, pc, updateAnchorID)
+		if err != nil {
+			return false, 0, err
+		}
+		if raise {
+			if err := pc.Increment(rec.Ref, rec.Auth); err != nil {
+				return false, 0, errInternal
+			}
+			return true, 1, nil
+		}
+		return true, 0, nil
+	}
+	var rec updateAnchorRecord
+	if err := json.Unmarshal([]byte(sec.Reveal()), &rec); err != nil {
+		return false, 0, errInternal
+	}
+	if rec.Host != pc.Host() {
+		c.noteCounterResetLocked()
+		return false, 0, errUpdateAnchorMissing
+	}
+	_, found, err := pc.Find(rec.counterID())
+	if err != nil {
+		return false, 0, errInternal
+	}
+	if !found {
+		c.noteCounterResetLocked()
+		return false, 0, errUpdateAnchorMissing
+	}
+	n, err := pc.Read(rec.Ref, rec.Auth)
+	if counterReplaced(err) {
+		c.noteCounterResetLocked()
+		return false, 0, errUpdateAnchorMissing
+	}
+	if err != nil {
+		return false, 0, errInternal
+	}
+	if n < rec.Base {
+		c.noteCounterResetLocked()
+		return false, 0, errUpdateAnchorMissing
+	}
+	if raise && n == rec.Base {
+		if err := pc.Increment(rec.Ref, rec.Auth); err != nil {
+			return false, 0, errInternal
+		}
+		n++
+	}
+	return true, n - rec.Base, nil
+}
+
+// counterReplaced reports a read error showing the recorded counter is no
+// longer the one at its ref: an index there under another auth, or none
+// at that handle while Find sees ours elsewhere. Other errors (a busy or
+// silent TPM) stay internal.
+func counterReplaced(err error) bool {
+	return errors.Is(err, tpm2.TPMRCAuthFail) || errors.Is(err, tpm2.TPMRCBadAuth) || errors.Is(err, tpm2.TPMRCHandle)
+}
+
+// defineUpdateAnchor makes update counter id on this PC and records it in
+// v, at count 0.
+func defineUpdateAnchor(v *vault.Vault, pc vault.Counter, id []byte) (updateAnchorRecord, error) {
+	rec, err := newUpdateAnchor(pc, id)
+	if err != nil {
+		return updateAnchorRecord{}, err
+	}
+	return rec, recordUpdateAnchor(v, rec)
+}
+
+// newUpdateAnchor makes update counter id on this PC, with its count now
+// as the base, without recording it.
+func newUpdateAnchor(pc vault.Counter, id []byte) (updateAnchorRecord, error) {
+	// 16 random bytes as hex: no zero byte, which go-tpm would cut the
+	// auth value at (tpmseal T7), as the vault's own counter does.
+	a := make([]byte, 16)
+	if _, err := rand.Read(a); err != nil {
+		return updateAnchorRecord{}, errInternal
+	}
+	auth := []byte(hex.EncodeToString(a))
+	ref, err := pc.Define(id, auth)
+	if err != nil {
+		return updateAnchorRecord{}, errInternal
+	}
+	base, err := pc.Read(ref, auth)
+	if err != nil {
+		return updateAnchorRecord{}, errInternal
+	}
+	rec := updateAnchorRecord{Host: pc.Host(), Ref: ref, Auth: auth, Base: base}
+	if !bytes.Equal(id, updateAnchorID) {
+		rec.ID = id
+	}
+	return rec, nil
+}
+
+// recordUpdateAnchor keeps rec in v.
+func recordUpdateAnchor(v *vault.Vault, rec updateAnchorRecord) error {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return errInternal
+	}
+	if err := v.Put(UpdateAnchorName, KindUpdateAnchor, b); err != nil {
+		if errors.Is(err, vault.ErrRolledBack) {
+			return errRolledBack
+		}
+		return errInternal
+	}
+	return nil
+}
+
+// reanchorUpdate gives this PC a new update counter, raised to 1, when the
+// vault recorded one this PC no longer has, or this PC has one no vault
+// record holds the auth of (a crash before the record, or a restored
+// vault). Nothing then shows whether an outside attestor was listed, so
+// the interim rule ends there; it only narrows (SR3-6f-2b). A fresh PC,
+// or a healthy counter, is left as it is.
+func (c *custody) reanchorUpdate(v *vault.Vault) error {
+	pc, err := c.host.updateCounter()
+	if err != nil {
+		return err
+	}
+	_, first, err := pc.Find(updateAnchorID)
+	if err != nil {
+		return err
+	}
+	sec, ok := v.Secret(UpdateAnchorName)
+	if !ok && !first {
+		return nil
+	}
+	if ok {
+		var rec updateAnchorRecord
+		if err := json.Unmarshal([]byte(sec.Reveal()), &rec); err != nil {
+			return err
+		}
+		if rec.Host == pc.Host() {
+			_, found, err := pc.Find(rec.counterID())
+			if err != nil {
+				return err
+			}
+			if found {
+				if n, err := pc.Read(rec.Ref, rec.Auth); err == nil && n >= rec.Base {
+					return nil
+				}
+			}
+		}
+	}
+	// Define would hand back the first counter without its auth, so a
+	// PC that still has it gets a new counter id beside it.
+	id := updateAnchorID
+	if first {
+		nonce := make([]byte, 16)
+		if _, err := rand.Read(nonce); err != nil {
+			return err
+		}
+		h := sha256.Sum256(append([]byte("agentos update policy "), nonce...))
+		id = h[:]
+	}
+	// Raise before recording: a crash between the two leaves the vault
+	// as it was, still "anchor missing", never a record of a counter at its
+	// base, which would read 0 (SR3-6f-2b).
+	rec, err := newUpdateAnchor(pc, id)
+	if err != nil {
+		return err
+	}
+	if err := pc.Increment(rec.Ref, rec.Auth); err != nil {
+		return err
+	}
+	if reanchorCrash != nil {
+		if err := reanchorCrash(); err != nil {
+			return err
+		}
+	}
+	return recordUpdateAnchor(v, rec)
+}
+
+// reanchorCrash, set only by tests, stops reanchorUpdate between its two
+// writes, as a crash there would.
+var reanchorCrash func() error
 
 // since keeps the times after cut, in place.
 func since(ts []time.Time, cut time.Time) []time.Time {
@@ -927,7 +1204,7 @@ func (c *custody) bootTrusted() {
 		c.noteChangeUnfinishedLocked()
 	case errors.Is(err, tpmseal.ErrNeedPIN):
 		c.needPIN = true
-		c.notify("This PC starts with a boot PIN: enter the PIN on the box's Wi-Fi page.")
+		c.notify("This PC starts with a boot PIN: enter the PIN on my Wi-Fi page.")
 	case errors.Is(err, vault.ErrRolledBack):
 		c.notify(noteRolledBack)
 	case errors.Is(err, vault.ErrCounterMissing):
@@ -943,7 +1220,7 @@ func (c *custody) bootTrusted() {
 		c.markBootChanged()
 	default:
 		log.Printf("trusted-host unlock: %v", err)
-		c.notify("This PC couldn't unlock the box by itself. Unlock with your passphrase and a code.")
+		c.notify("This PC couldn't unlock me by itself. Unlock with your passphrase and a code.")
 	}
 }
 
@@ -977,7 +1254,7 @@ func (c *custody) markBootChanged() {
 		c.notify("Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.")
 		return
 	}
-	c.notify("This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
+	c.notify("This PC started me in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
 }
 
 // bootChange reports, while the vault is not open, whether this trusted
@@ -1108,6 +1385,9 @@ func (c *custody) trust(code, pin string) (string, error) {
 		if errors.Is(err, vault.ErrRolledBack) {
 			return "", errRolledBack
 		}
+		return "", errHostNotSaved
+	}
+	if err := c.reanchorUpdate(v); err != nil {
 		return "", errHostNotSaved
 	}
 	c.mu.Lock()

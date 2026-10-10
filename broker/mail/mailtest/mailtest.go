@@ -176,6 +176,17 @@ func (s *Server) Renumber(folder string) {
 	}
 }
 
+// Reset recreates folder empty under a new UID validity, numbering from
+// UID 1 again, as a provider rebuilding a mailbox would: a message
+// delivered after it can carry a UID an earlier message had.
+func (s *Server) Reset(folder string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.boxes[folder]
+	b.validity += 100
+	b.msgs, b.next = nil, 1
+}
+
 // FailList makes listing folder fail (or not).
 func (s *Server) FailList(folder string, fail bool) {
 	s.mu.Lock()
