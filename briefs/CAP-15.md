@@ -14,7 +14,7 @@ Board section: Backlog refill (rows CAP-15a and CAP-15b, next to CRED-12).
 
 **Failure path to test first:** a target binary inside an analysis worker opens a TCP connection and a DNS query; both are refused, journaled, and appear in the qualification report (CAP-15, LOOP-11).
 
-**Limits (Mark, 2026-10-11: "Use should be fine as long as no regulatory/legal issues otherwise arbitrary prohibition"):** legal, not categorical, per CAP-15. A clearly unlawful task is refused; an unclear one goes to the owner and waits for a yes; both are journaled. The build adds the refusal and ask paths and their journal entries; it does not try to encode the law.
+**Limits (Mark, 2026-10-11: "Use should be fine as long as no regulatory/legal issues otherwise arbitrary prohibition"):** legal, not categorical, per CAP-15: statutory repair and interoperability rights apply over a licence, otherwise the licence binds; no DRM circumvention without a legal exemption; no third-party service or its private interfaces as a target. The build adds the owner's purpose statement on the local page (repair, interoperability, own data, security of own systems), the refusal path, their journal entries, and the owner's-guide line that jurisdiction is the owner's responsibility; it does not try to encode the law.
 
 **Off-gate.** Not release acceptance. If D-096's scope freeze merges, these rows start after G2.
 
