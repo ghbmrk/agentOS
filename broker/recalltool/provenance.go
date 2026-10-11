@@ -263,7 +263,9 @@ func (p *Provenance) maybeCompact() {
 	}
 }
 
-// Given records that lineage was given ids at time at.
+// Given records that lineage was given ids at time at. It refuses
+// (ErrReadLimit) ids that would take the lineage past Limits.Reads, recording
+// none of them.
 func (p *Provenance) Given(lineage string, ids []string, at time.Time) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -275,6 +277,12 @@ func (p *Provenance) Given(lineage string, ids []string, at time.Time) error {
 	}
 	if len(fresh) == 0 {
 		return nil
+	}
+	// A lineage holds at most Reads items until the owner renews it, so
+	// memory is bounded by lineages x Reads whatever other lineages read
+	// (RECALL-prov-L1, S-R1). Nothing is recorded for a refused search.
+	if len(p.sets[lineage])+len(fresh) > p.lim().Reads {
+		return ErrReadLimit
 	}
 	return p.write(provRecord{Lineage: lineage, IDs: fresh, At: at})
 }
@@ -640,20 +648,24 @@ func sortedKeys[V any](m map[string]V) []string {
 	return out
 }
 
-// Limits bound what one guest, and all of them, can make the broker keep
-// for recall notes (W3). A note past a limit is refused before anything is
-// stored.
+// Limits bound what one guest can make the broker keep for recall notes
+// (W3). A search or note past a limit is refused before anything is stored.
+// Each is per lineage: a lineage's refusals never depend on what another
+// lineage did, so no guest can switch recall off for the rest.
 type Limits struct {
-	Notes, NotesAll int // note keys per lineage, and in all
-	Reads, ReadsAll int // items a lineage has read, and in all
+	Notes int // note keys per lineage
+	Reads int // items a lineage has read
 }
 
-// DefaultLimits keeps a lineage to 1000 notes and 20,000 read items, the
-// broker to ten times each.
-var DefaultLimits = Limits{Notes: 1000, NotesAll: 10000, Reads: 20000, ReadsAll: 200000}
+// DefaultLimits keeps a lineage to 1000 notes and 20,000 read items.
+var DefaultLimits = Limits{Notes: 1000, Reads: 20000}
 
-// ErrLimit means a note was refused for a limit.
+// ErrLimit means a note was refused for the note limit.
 var ErrLimit = errors.New("recalltool: provenance limit reached")
+
+// ErrReadLimit means a search was refused because the lineage has read as
+// much as it may until the owner renews it (Reach.Renew).
+var ErrReadLimit = errors.New("recalltool: read limit reached")
 
 // SetLimits replaces the limits (zero fields keep the defaults).
 func (p *Provenance) SetLimits(l Limits) {
@@ -663,7 +675,7 @@ func (p *Provenance) SetLimits(l Limits) {
 	for _, f := range []struct {
 		dst *int
 		v   int
-	}{{&d.Notes, l.Notes}, {&d.NotesAll, l.NotesAll}, {&d.Reads, l.Reads}, {&d.ReadsAll, l.ReadsAll}} {
+	}{{&d.Notes, l.Notes}, {&d.Reads, l.Reads}} {
 		if f.v > 0 {
 			*f.dst = f.v
 		}
@@ -678,14 +690,6 @@ func (p *Provenance) lim() Limits {
 	return p.limits
 }
 
-func sum[V any](m map[string]V, n func(V) int) int {
-	t := 0
-	for _, v := range m {
-		t += n(v)
-	}
-	return t
-}
-
 // Check refuses (ErrLimit) a note of lineage with key that a limit does not
 // allow, and writes nothing for it. exists says whether a note key still has
 // its item: at a limit, keys whose items are gone are forgotten first, so
@@ -694,16 +698,11 @@ func sum[V any](m map[string]V, n func(V) int) int {
 func (p *Provenance) Check(lineage, key string, exists func(lineage, key string) bool) error {
 	p.mu.Lock()
 	lm := p.lim()
-	if len(p.sets[lineage]) > lm.Reads || sum(p.sets, func(s map[string]time.Time) int { return len(s) }) > lm.ReadsAll {
-		p.mu.Unlock()
-		return ErrLimit
-	}
 	if p.notes[lineage][key] {
 		p.mu.Unlock()
 		return nil
 	}
-	count := func(m map[string]bool) int { return len(m) }
-	if len(p.notes[lineage]) < lm.Notes && sum(p.notes, count) < lm.NotesAll {
+	if len(p.notes[lineage]) < lm.Notes {
 		p.mu.Unlock()
 		return nil
 	}
@@ -732,7 +731,7 @@ func (p *Provenance) Check(lineage, key string, exists func(lineage, key string)
 			}
 		}
 	}
-	if len(p.notes[lineage]) >= lm.Notes || sum(p.notes, count) >= lm.NotesAll {
+	if len(p.notes[lineage]) >= lm.Notes {
 		return ErrLimit
 	}
 	return nil
@@ -816,4 +815,32 @@ func (p *Provenance) Size(lineage string) (reads, notes, anchors int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.sets[lineage]), len(p.notes[lineage]), p.anchors[lineage]
+}
+
+// ReadsFull lists the lineages that hold as many reads as the per-lineage cap
+// allows, so a search that would give them anything new is refused until the
+// owner starts their memory over (Reach.Renew).
+func (p *Provenance) ReadsFull() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for _, l := range sortedKeys(p.sets) {
+		if len(p.sets[l]) >= p.lim().Reads {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// firstRead is when lineage was first given an item it still holds.
+func (p *Provenance) firstRead(lineage string) (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var first time.Time
+	for _, t := range p.sets[lineage] {
+		if first.IsZero() || t.Before(first) {
+			first = t
+		}
+	}
+	return first, !first.IsZero()
 }

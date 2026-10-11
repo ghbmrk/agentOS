@@ -202,6 +202,9 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		}
 		// Durable before the guest sees anything (K2b).
 		if err := t.cfg.Prov.Given(lineage, ids, t.cfg.Now()); err != nil {
+			if errors.Is(err, ErrReadLimit) {
+				return "", true, guesterr.New("this agent has read as much as it may; ask the owner to start this agent's memory over")
+			}
 			t.cfg.Logf("recall %s: provenance: %v", machine, err)
 			return "", true, guesterr.New("broker could not serve recall now; retry")
 		}
@@ -253,7 +256,7 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		defer t.noteMu.Unlock()
 		if err := t.cfg.Prov.Check(lineage, a.Key, exists); err != nil {
 			if errors.Is(err, ErrLimit) {
-				return "", true, guesterr.New("this agent has saved or read as much as notes allow; delete old notes or ask the owner")
+				return "", true, guesterr.New("this agent has as many notes as it may; reuse an existing note key, or ask the owner to delete old notes")
 			}
 			t.cfg.Logf("recall %s: reserve: %v", machine, err)
 			return "", true, guesterr.New("broker could not store the note")
@@ -267,7 +270,7 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 			})
 		})
 		if errors.Is(err, ErrLimit) {
-			return "", true, guesterr.New("this agent has saved or read as much as notes allow; delete old notes or ask the owner")
+			return "", true, guesterr.New("this agent has as many notes as it may; reuse an existing note key, or ask the owner to delete old notes")
 		}
 		if err == nil {
 			_, err = t.cfg.Index.Ingest(recall.Item{

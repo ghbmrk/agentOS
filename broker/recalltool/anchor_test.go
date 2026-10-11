@@ -3,7 +3,10 @@ package recalltool
 // REQ: CAP-3
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -156,7 +159,7 @@ func compacted(t *testing.T, r *rig) *Provenance {
 // Caps are refused before the note is stored, with a plain error.
 func TestNoteLimitsFailClosed(t *testing.T) {
 	r := newRig(t).fast()
-	r.prov.SetLimits(Limits{Notes: 3, NotesAll: 4})
+	r.prov.SetLimits(Limits{Notes: 3})
 	note := func(l, k string) error {
 		_, err := r.call("m-"+l, l, "recall_note", map[string]any{"key": k, "text": "x"})
 		return err
@@ -170,7 +173,7 @@ func TestNoteLimitsFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := r.ix.Len()
-	if err := note("a", "k3"); err == nil || !strings.Contains(err.Error(), "allow") {
+	if err := note("a", "k3"); err == nil || !strings.Contains(err.Error(), "as many notes") {
 		t.Fatalf("per-lineage note cap: %v", err)
 	}
 	if r.ix.Len() != before {
@@ -179,22 +182,12 @@ func TestNoteLimitsFailClosed(t *testing.T) {
 	if err := note("b", "k0"); err != nil {
 		t.Fatal(err)
 	}
-	if err := note("c", "k0"); err == nil {
-		t.Fatal("global note cap")
-	}
 	// A deleted note frees its place.
 	if _, err := r.ix.Delete(r.ix.SourceID("agent", "", "a/k1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := note("c", "k0"); err != nil {
+	if err := note("a", "k3"); err != nil {
 		t.Fatalf("a deleted note should free a place: %v", err)
-	}
-	// Reads: a lineage past the read cap makes no notes.
-	r3 := newRig(t).fast()
-	r3.prov.SetLimits(Limits{Reads: 1})
-	r3.call("m", "root", "recall_search", map[string]any{"query": "shed", "scope": "owner"})
-	if _, err := r3.call("m", "root", "recall_note", map[string]any{"key": "n", "text": "x"}); err == nil {
-		t.Fatal("read cap")
 	}
 }
 
@@ -470,5 +463,109 @@ func TestCascadeAfterReopenAndCompaction(t *testing.T) {
 	}
 	if _, err := d.call("m", "root", "recall_note", map[string]any{"key": "after", "text": "z"}); err == nil {
 		t.Fatal("note accepted after the source was deleted")
+	}
+}
+
+// REQ: CAP-3 (RECALL-prov-L1: S-R1, P-R1, U-L1)
+
+// S-R1: no lineage's reads or notes cost another lineage anything. A lineage
+// stops at Reads (nothing recorded for the refused search), and the others
+// keep reading and noting.
+func TestRecallProvL1OneLineagesReadsDoNotCostOthersTheirNotes(t *testing.T) {
+	r := newRig(t)
+	r.prov.SetLimits(Limits{Reads: 20, Notes: 2})
+	at := time.Now()
+	var ids []string
+	for i := 0; i < 101; i++ {
+		ids = append(ids, fmt.Sprintf("g%d", i))
+	}
+	if err := r.prov.Given("heavy", ids, at); !errors.Is(err, ErrReadLimit) {
+		t.Fatalf("101 reads past a cap of 20: %v", err)
+	}
+	if got := r.prov.Of("heavy"); len(got) != 0 {
+		t.Fatalf("a refused search recorded %d reads", len(got))
+	}
+	for l := 0; l < 10; l++ {
+		if err := r.prov.Given(fmt.Sprintf("h%d", l), ids[:20], at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.prov.Given("h0", ids[:20], at); err != nil { // re-reading costs nothing
+		t.Fatal(err)
+	}
+	if err := r.prov.Given("h0", []string{"more"}, at); !errors.Is(err, ErrReadLimit) {
+		t.Fatalf("one over the cap: %v", err)
+	}
+	if err := r.prov.Given("victim", []string{"x1", "x2", "x3"}, at); err != nil {
+		t.Fatalf("a light lineage lost reads to others: %v", err)
+	}
+	exists := func(l, k string) bool { return true }
+	for l := 0; l < 10; l++ {
+		for _, k := range []string{"a", "b"} {
+			lin := fmt.Sprintf("h%d", l)
+			if err := r.prov.Check(lin, k, exists); err != nil {
+				t.Fatal(err)
+			}
+			r.prov.Noted(lin, k)
+		}
+	}
+	if err := r.prov.Check("victim", "n", exists); err != nil {
+		t.Fatalf("a light lineage lost its notes to others: %v", err)
+	}
+}
+
+// P-R1, U-L1, B1: a lineage at its read cap is refused further reads with a
+// step that works (the owner's Renew), while its notes stay available and a
+// note key can be reused; a notes-cap refusal names its own step; a note made
+// before the renewal still goes when its source is deleted.
+func TestRecallProvL1TheOwnerRenewsALineagePastItsReadCap(t *testing.T) {
+	x, _ := newReachRig(t)
+	r := x.r
+	r.call("root", "root", "recall_search", map[string]any{"query": "invoice", "scope": "owner"})
+	if _, err := r.call("root", "root", "recall_note", map[string]any{"key": "n0", "text": "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ix.Ingest(recall.Item{Source: recall.Source{Kind: "mail", Account: "owner@example.test", Ref: "<m2@x>"}, Text: "quarterly zeppelin report", Received: x.clock}); err != nil {
+		t.Fatal(err)
+	}
+	r.prov.SetLimits(Limits{Reads: 1, Notes: 2})
+	x.clock = x.clock.Add(time.Minute)
+	_, err := r.call("root", "root", "recall_search", map[string]any{"query": "zeppelin", "scope": "owner"})
+	if err == nil || !strings.Contains(err.Error(), "ask the owner to start this agent's memory over") {
+		t.Fatalf("read limit text: %v", err)
+	}
+	if full := r.prov.ReadsFull(); len(full) != 2 || full[1] != "root" { // bystander holds one read too
+		t.Fatalf("full %v", full)
+	}
+	// Notes stay available, and a key is reusable at the notes cap.
+	for _, k := range []string{"n1", "n1"} {
+		if _, err := r.call("root", "root", "recall_note", map[string]any{"key": k, "text": "second"}); err != nil {
+			t.Fatalf("a lineage at its read cap keeps its notes: %v", err)
+		}
+	}
+	_, err = r.call("root", "root", "recall_note", map[string]any{"key": "n2", "text": "third"})
+	if err == nil || !strings.Contains(err.Error(), "reuse an existing note key") || strings.Contains(err.Error(), "start this agent's memory over") {
+		t.Fatalf("notes limit text: %v", err)
+	}
+	if _, err := r.call("root", "root", "recall_note", map[string]any{"key": "n0", "text": "again"}); err != nil {
+		t.Fatalf("reusing a key at the notes cap: %v", err)
+	}
+	if err := x.reach.Renew(context.Background(), "root"); err != nil {
+		t.Fatal(err)
+	}
+	if len(x.vm.calls) != 1 || x.vm.calls[0] != "root" || slices.Contains(r.prov.ReadsFull(), "root") {
+		t.Fatalf("machines %v full %v", x.vm.calls, r.prov.ReadsFull())
+	}
+	r.prov.SetLimits(Limits{Reads: 1000, Notes: 2})
+	if _, err := r.call("root", "root", "recall_search", map[string]any{"query": "zeppelin", "scope": "owner"}); err != nil {
+		t.Fatalf("reads should resume: %v", err)
+	}
+	if err := x.reach.Renew(context.Background(), "nobody"); err != nil {
+		t.Fatal(err)
+	}
+	// B1: n0 derived from what was read before the renewal.
+	x.del(t, x.mail)
+	if _, ok := r.ix.Get(r.ix.SourceID("agent", "", "root/n0")); ok {
+		t.Fatal("a note derived from deleted content must go")
 	}
 }
