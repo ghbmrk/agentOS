@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	mrand "math/rand/v2"
 	"slices"
 	"sort"
@@ -160,8 +161,9 @@ type Config struct {
 	// learning sets 36 h, so a candidate cut at the end of one night
 	// resumes the next (PE7).
 	ResumeFor time.Duration
-	// Logf logs each counted candidate cut by a fixed class only (PE5).
-	// Nil: not logged.
+	// Logf logs each counted candidate cut, and each failed activation
+	// or state save, by a fixed class only (PE5): never an error's text,
+	// which can name a host path. Nil: not logged.
 	Logf func(string, ...any)
 	Now  func() time.Time
 	Rand io.Reader
@@ -288,13 +290,22 @@ type Adoption struct {
 	// Reverted names why the adoption was undone ("owner", "regression",
 	// "security", "fallback"), empty while it is active.
 	Reverted string `json:"reverted,omitempty"`
+	// WithdrawnFor names the revert that asked the update applier to
+	// withdraw this staged image, saved before the applier is asked. The
+	// applier's withdrawal is also a drop, so a revert cut short after it
+	// is settled by StageDropped; it is recorded with this why, never as
+	// a drop Loop 3 offers again (SR3-4f-2-r1).
+	WithdrawnFor string `json:"withdrawn_for,omitempty"`
 	// Concern is a regression Recheck found on a protected adoption, which
 	// the owner decides (arbitrator R2); ConcernScore its counts.
 	Concern      string `json:"concern,omitempty"`
 	ConcernScore Score  `json:"concern_score,omitempty"`
 	ConcernSeen  bool   `json:"concern_seen,omitempty"`
-	Listed       bool   `json:"listed,omitempty"`
-	RevertSeen   bool   `json:"revert_seen,omitempty"`
+	// ConcernStarts: a security Concern on an unprotected adoption whose
+	// image may start before it is undone (SR3-4f-3 B5).
+	ConcernStarts bool `json:"concern_starts,omitempty"`
+	Listed        bool `json:"listed,omitempty"`
+	RevertSeen    bool `json:"revert_seen,omitempty"`
 	// Goals are the candidate's Goals, IDs only (C23).
 	Goals []string `json:"goals,omitempty"`
 }
@@ -390,6 +401,12 @@ type Pipeline struct {
 	// from one and still in flight is never adopted (C23). In memory: a
 	// restarted Loop 1 builds nothing from a forgotten goal.
 	gone map[string]bool
+	// withdrawer is the update applier, set by the wiring (SetWithdrawer);
+	// withdrawn holds the staged adoptions it gave up, so their revert
+	// may run (SR3-4f-2a). In memory: after a restart the revert is asked
+	// again, and Withdraw answers the same.
+	withdrawer Withdrawer
+	withdrawn  map[string]bool
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -488,6 +505,34 @@ func (p *Pipeline) healthy() error {
 // journal's executor named Executor, and the broker's policy must delegate
 // meta.change intents to Check.
 func (p *Pipeline) Attach(j Journal) { p.j = j }
+
+// errStateBroken is what callers see once a save and its reload both
+// failed. It names no path. The errors' classes are logged.
+var errStateBroken = errors.New("change: state cannot be saved or reloaded; restart needed")
+
+// errClass names an error for the log by a fixed class (PE5). Its text
+// can name a host path, so it is never logged.
+func errClass(err error) string {
+	var pe *fs.PathError
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return "permission denied"
+	case errors.Is(err, fs.ErrNotExist):
+		return "not found"
+	case errors.Is(err, fs.ErrExist):
+		return "already exists"
+	case errors.As(err, &pe):
+		return "file error"
+	}
+	return "error"
+}
+
+func (p *Pipeline) markBroken(save, reload error) {
+	if p.cfg.Logf != nil {
+		p.cfg.Logf("change: state cannot be saved (%s) or reloaded (%s)", errClass(save), errClass(reload))
+	}
+	p.broken = errStateBroken
+}
 
 func (p *Pipeline) saveLocked() error {
 	if p.broken != nil {
@@ -1259,7 +1304,7 @@ func (s Score) outage() bool {
 // cannot exercise a tree on this box, for example a changed image or
 // config that replay does not boot. Such a case is neither a pass nor a
 // fail: it is counted as not evaluated.
-var ErrNotEvaluated = errors.New("change: not evaluated on this box")
+var ErrNotEvaluated = errors.New("change: not evaluated here")
 
 // pass reports whether the case passed on t, and whether it was evaluated
 // at all. Any other evaluator error is a fail.

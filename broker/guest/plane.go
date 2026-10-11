@@ -38,6 +38,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/fold"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 )
@@ -130,6 +131,7 @@ type Plane struct {
 	mu    sync.Mutex
 	ms    map[string]*machine
 	store *store
+	folds *fold.Store
 }
 
 type machine struct {
@@ -145,6 +147,7 @@ type machine struct {
 	box     *inbox
 	steps   stepper
 	rate    bucket
+	folds   *fold.Store
 	conns   atomic.Int64 // connections the server holds open
 }
 
@@ -195,7 +198,7 @@ func New(cfg Config) (*Plane, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Plane{cfg: cfg, ms: map[string]*machine{}, store: st}, nil
+	return &Plane{cfg: cfg, ms: map[string]*machine{}, store: st, folds: &fold.Store{}}, nil
 }
 
 // Open starts serving machine id and returns its services directory. It is
@@ -224,7 +227,7 @@ func (p *Plane) Open(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	m := &machine{id: id, dir: dir, slot: make(chan struct{}, p.cfg.MaxConns), box: newInbox(id, p.store)}
+	m := &machine{id: id, dir: dir, slot: make(chan struct{}, p.cfg.MaxConns), box: newInbox(id, p.store), folds: p.folds}
 	m.rate = bucket{tokens: float64(p.cfg.SubmitBurst), last: time.Now()}
 	m.ln = newLimitListener(l, p.cfg.MaxOpenConns)
 	m.srv = &http.Server{
@@ -263,6 +266,9 @@ func (p *Plane) close(id string, forget bool) {
 	m.box.close(forget)
 	m.srv.Close()
 	os.RemoveAll(m.dir)
+	if forget {
+		p.folds.Drop(id) // a later machine under this ID must not read them
+	}
 	if l := m.lineage.Load(); forget && l != nil && !p.lineageOpen(*l) {
 		p.store.setGoal(*l, "", time.Time{}) // the lineage is gone; so is its goal
 	}
@@ -407,9 +413,9 @@ const (
 	stepNoteOther   = "The rollback point after your last effect request was not saved. The broker tries again after your next effect request; until then your steps since then can't be rolled back."
 	// The owner's STATUS lines take the time of the last saved rollback
 	// point, in the box's local time (UX-SR23s-1, CH-12): rollback, not UNDO, which still works.
-	statusNoRoom  = "Rollback: the agent's files since %s can't be rolled back yet; they're full. It has been told to free space. UNDO still works. Nothing to do unless this lasts."
-	statusTooDeep = "Rollback: the agent's files since %s can't be rolled back yet; its folders nest too deep to save. It has been told to flatten them. UNDO still works. Nothing to do unless this lasts."
-	statusOther   = "Rollback: the agent's files since %s can't be rolled back yet; the box couldn't save them. It tries again after the agent's next action. UNDO still works. Nothing to do unless this lasts."
+	statusNoRoom  = "Rollback: my files since %s can't be rolled back yet; they're full. I've asked for space to be freed. UNDO still works. Nothing to do unless this lasts."
+	statusTooDeep = "Rollback: my files since %s can't be rolled back yet; my folders nest too deep to save. I've asked for them to be flattened. UNDO still works. Nothing to do unless this lasts."
+	statusOther   = "Rollback: my files since %s can't be rolled back yet; I couldn't save them. I'll try again after my next action. UNDO still works. Nothing to do unless this lasts."
 )
 
 var (

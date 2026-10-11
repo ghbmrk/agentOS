@@ -51,7 +51,7 @@ func TestRES3NoHostDevicesReachAMachine(t *testing.T) {
 		}
 	}
 	r := &Runtime{Bin: "runsc", StateDir: dir}
-	for _, a := range r.cmd(t.Context(), "run").Args {
+	for _, a := range r.argv("run") {
 		for _, bad := range []string{"--nvproxy", "--tpuproxy", "--dev", "--gpu"} {
 			if strings.HasPrefix(a, bad) {
 				t.Errorf("runsc gets device passthrough flag %q", a)

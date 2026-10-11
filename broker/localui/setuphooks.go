@@ -80,6 +80,8 @@ func enrollErr(err error) error {
 		return ErrNoCodeEnrollment
 	case refused(err, localapi.ErrLimited):
 		return ErrCodesLimited
+	case refused(err, localapi.ErrEnrollUnavailable):
+		return ErrCodesUnavailable
 	}
 	return err
 }
@@ -91,9 +93,14 @@ func (a AgentosdSetup) AlreadySetUp() bool {
 }
 
 // Finish records the owner's number with agentosd, which closes setup for
-// good and starts the owner channel.
+// good and starts the owner channel. A vault that cannot finish setup's
+// enrollment answers ErrCodesUnavailable.
 func (a AgentosdSetup) Finish(owner string) error {
-	return a.call(localapi.OpSetupFinish, localapi.Finish{Owner: owner}, nil)
+	err := a.call(localapi.OpSetupFinish, localapi.Finish{Owner: owner}, nil)
+	if refused(err, localapi.ErrEnrollUnavailable) {
+		return ErrCodesUnavailable
+	}
+	return err
 }
 
 func (AgentosdSetup) Networks() []string                 { return nil }

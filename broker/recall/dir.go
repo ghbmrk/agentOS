@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // Dir is the index's durable medium (R8): a small meta log (header,
@@ -61,10 +63,7 @@ func OpenDir(path string) (*DirStore, error) {
 	}
 	d := &DirStore{path: path, meta: meta, segs: map[uint32]*os.File{}, broken: map[uint32]error{}}
 	// Leftovers of a rewrite a crash cut off are never live.
-	tmps, _ := filepath.Glob(filepath.Join(path, "seg-*.tmp"))
-	for _, t := range tmps {
-		os.Remove(t)
-	}
+	durable.SweepTemp(path)
 	return d, nil
 }
 
@@ -113,7 +112,7 @@ func (d *DirStore) file(n uint32, create bool) (*os.File, error) {
 			f.Close()
 			return nil, err
 		}
-		if err := syncDir(d.path); err != nil {
+		if err := durable.SyncDir(d.path); err != nil {
 			f.Close()
 			return nil, err
 		}
@@ -173,33 +172,14 @@ func (d *DirStore) Rewrite(n uint32, data []byte) error {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		return syncDir(d.path)
+		return durable.SyncDir(d.path)
 	}
-	tmp := strings.TrimSuffix(p, ".jsonl") + ".tmp"
-	t, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
+	werr := durable.WriteFile(p, data, 0o600)
+	if werr != nil && !errors.Is(werr, durable.ErrDirSync) {
+		return werr
 	}
-	if _, err := t.Write(data); err != nil {
-		t.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := t.Sync(); err != nil {
-		t.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := t.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	// The old handle now points at an unlinked file: swap before anything
-	// else can fail.
+	// The old handle now points at an unlinked file: swap it even when
+	// only the directory sync failed.
 	if f := d.segs[n]; f != nil {
 		f.Close()
 		delete(d.segs, n)
@@ -208,7 +188,7 @@ func (d *DirStore) Rewrite(n uint32, data []byte) error {
 		d.broken[n] = fmt.Errorf("recall: segment reopen after rewrite: %w", err)
 		return d.broken[n]
 	}
-	return syncDir(d.path)
+	return werr
 }
 
 // Close releases the files and the lock.

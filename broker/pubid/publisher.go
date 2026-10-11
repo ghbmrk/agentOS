@@ -18,6 +18,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 const (
@@ -244,7 +246,7 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 	if err := checkDir(filepath.Dir(cfg.Path)); err != nil {
 		return nil, err
 	}
-	if err := sweepTemp(filepath.Dir(cfg.Path)); err != nil {
+	if err := durable.SweepTemp(filepath.Dir(cfg.Path)); err != nil {
 		return nil, err
 	}
 	b, err := os.ReadFile(cfg.Path)
@@ -387,22 +389,6 @@ func checkDir(dir string) error {
 		return fmt.Errorf("pubid: %s belongs to another user", dir)
 	case fi.Mode().Perm()&0o022 != 0:
 		return fmt.Errorf("pubid: %s is writable by others", dir)
-	}
-	return nil
-}
-
-// sweepTemp removes temporary files a crash left in dir. The identity and
-// the outbox belong to one broker process, which opens each once at start,
-// so no other writer's temporary file is in flight then.
-func sweepTemp(dir string) error {
-	names, err := filepath.Glob(filepath.Join(dir, ".pubid-*"))
-	if err != nil {
-		return err
-	}
-	for _, n := range names {
-		if err := os.Remove(n); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
 	}
 	return nil
 }
@@ -717,5 +703,5 @@ func (p *Publisher) save() error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(p.cfg.Path, b)
+	return durable.WriteFile(p.cfg.Path, b, 0o600)
 }

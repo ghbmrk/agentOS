@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Finish a built AgentOS image: one counted boot entry, and the release manifest (UPD-1, UPD-1a).
+
+mkosi writes one boot entry named after the kernel. This replaces it, inside the image's ESP,
+with agentos_VERSION+3.conf: systemd-boot counts down the 3 tries on each unblessed boot and
+falls back once they run out, and systemd-bless-boot drops the counter after agentos-health
+passes (boot-complete.target). The entry's usrhash= names the /usr verity root hash, so the
+entry and the /usr partitions are one release: the build verifies the split /usr partition and
+its hash tree against that hash with veritysetup, and the manifest records both.
+Uses mtools on the raw image, so no loop devices or mounts are needed.
+Usage: finish_image.py OUTDIR VERSION"""
+import hashlib
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+ESP = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+TRIES = 3
+# No menu: boot the default entry at once (a held key still shows it on a PC with a screen).
+# No editor: anyone at the keyboard could otherwise drop usrhash= or add init=/bin/sh (Type #1
+# entries are not covered by Secure Boot, HW-5a). Never offer to enroll keys.
+LOADER_CONF = "timeout 0\neditor no\nsecure-boot-enroll off\n"
+# What the ESP may hold, besides the kernel and initrd the entry names. Anything else (a
+# loader/random-seed, a system token) would ship identical on every drive (HW-1).
+ESP_ALLOWED = (r"EFI/BOOT/[^/]+", r"EFI/systemd/[^/]+", r"loader/loader\.conf", r"loader/entries\.srel",
+               r"loader/entries/agentos_[^/]+\.conf")
+
+
+def usrhash(entry):
+    m = re.search(r"(?:^|\s)usrhash=([0-9a-f]{64})(?:\s|$)", entry, re.M)
+    if not m:
+        raise ValueError("boot entry has no usrhash=")
+    return m.group(1)
+
+
+def counted_entry(src, version, tries=TRIES):
+    """From mkosi's entry text, return (file name, text) of the AgentOS entry for VERSION."""
+    usrhash(src)
+    body = [ln for ln in src.splitlines() if not re.match(r"(title|version|sort-key)\b", ln)]
+    lines = ["title AgentOS", "sort-key agentos", "version %s" % version] + body
+    return "agentos_%s+%d.conf" % (version, tries), "\n".join(lines) + "\n"
+
+
+def boot_files(entry):
+    """The ESP paths the entry boots: its linux and initrd lines, without the leading slash."""
+    return [ln.split(None, 1)[1].strip().lstrip("/") for ln in entry.splitlines()
+            if re.match(r"(linux|initrd)\s", ln)]
+
+
+def esp_violations(paths, entry):
+    """ESP files outside the allowlist (HW-1). paths: every file on the ESP, relative."""
+    allowed = set(boot_files(entry))
+    return sorted(p for p in paths
+                  if p not in allowed and not any(re.fullmatch(a, p) for a in ESP_ALLOWED))
+
+
+def manifest(version, roothash, entry_name, entry_text, files, boot=None):
+    """The release (UPD-1a): /usr verity root hash plus the boot entry that mounts it, and the
+    sha256 of the kernel and initrd that entry boots."""
+    if usrhash(entry_text) != roothash:
+        raise ValueError("entry usrhash %s != /usr root hash %s" % (usrhash(entry_text), roothash))
+    return {
+        "version": version,
+        "usrhash": roothash,
+        "boot_entry": {"name": re.sub(r"\+\d+(-\d+)?\.conf$", ".conf", entry_name),
+                       "sha256": hashlib.sha256(entry_text.encode()).hexdigest()},
+        "boot": boot or {},
+        "files": files,
+    }
+
+
+def verify_usr(data, tree, roothash):
+    """Check the /usr partition and its hash tree against the entry's usrhash, independently of mkosi."""
+    r = subprocess.run(["veritysetup", "verify", str(data), str(tree), roothash])
+    if r.returncode != 0:
+        raise ValueError("/usr does not verify against usrhash=%s" % roothash)
+
+
+def esp_offset(img):
+    t = json.loads(subprocess.check_output(["sfdisk", "-J", img]))["partitiontable"]
+    p = next(p for p in t["partitions"] if p["type"].lower() == ESP)
+    return p["start"] * t.get("sectorsize", 512)
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def main(out, version):
+    out = pathlib.Path(out)
+    img = out / ("agentos_%s.raw" % version)
+    fs = "%s@@%d" % (img, esp_offset(str(img)))
+    names = subprocess.check_output(["mdir", "-i", fs, "-b", "::/loader/entries"], text=True).split()
+    names = [n.rsplit("/", 1)[-1] for n in names if n.endswith(".conf")]
+    if len(names) != 1:
+        sys.exit("expected one mkosi boot entry, found %s" % names)
+    src = subprocess.check_output(["mtype", "-i", fs, "::/loader/entries/" + names[0]], text=True)
+    name, text = counted_entry(src, version)
+    subprocess.run(["mcopy", "-o", "-i", fs, "-", "::/loader/entries/" + name], input=text.encode(), check=True)
+    subprocess.run(["mdel", "-i", fs, "::/loader/entries/" + names[0]], check=True)
+    subprocess.run(["mcopy", "-o", "-i", fs, "-", "::/loader/loader.conf"], input=LOADER_CONF.encode(), check=True)
+    (out / name).write_text(text)
+    listing = subprocess.check_output(["mdir", "-i", fs, "-/", "-b", "::/"], text=True).splitlines()
+    paths = [p[3:] for p in listing if p.startswith("::/") and not p.endswith("/")]
+    print("ESP:\n  " + "\n  ".join(sorted(paths)))
+    bad = esp_violations(paths, text)
+    if bad:
+        sys.exit("ESP holds files outside the allowlist (HW-1): %s" % bad)
+    boot = {}
+    for p in boot_files(text):
+        data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
+        boot[p] = hashlib.sha256(data_).hexdigest()
+    roothash = usrhash(text)
+    data, tree = out / ("agentos_%s.usr.raw" % version), out / ("agentos_%s.usr-verity.raw" % version)
+    verify_usr(data, tree, roothash)
+    # Only the two files just verified: mkosi also leaves arch-named split copies beside them.
+    files = {p.name: sha256(p) for p in (data, tree)}
+    m = manifest(version, roothash, name, text, files, boot)
+    (out / ("agentos_%s.release.json" % version)).write_text(json.dumps(m, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(m, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main(*sys.argv[1:3])

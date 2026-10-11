@@ -80,7 +80,7 @@ func main() {
 		}
 	}
 	for _, ct := range r.Controls {
-		fmt.Printf("control %s caught=%v %s\n", ct.Name, ct.Caught, ct.Detail)
+		fmt.Printf("control %s %s caught=%v %s\n", ct.Name, ct.SeedID, ct.Caught, ct.Detail)
 	}
 	if r.Error != "" {
 		fmt.Println("error:", r.Error)
@@ -144,21 +144,20 @@ func controls(ctx context.Context, c *catalog) []control {
 		}
 	}
 	out = append(out, ct)
-	// leaking-adapter: a valid seed run with an adapter that hands the
-	// held-back bytes to the fixer; the audit must catch it.
-	ct = control{Name: "leaking-adapter"}
+	// leaking-adapter: every valid seed run with an adapter that hands its
+	// held-back bytes to the fixer; the audit must catch each one.
+	leaks := 0
 	for _, s := range c.Seeds {
 		if len(c.validate(s)) > 0 {
 			continue
 		}
-		ct.SeedID = s.ID
+		leaks++
 		run := c.run(ctx, s, true)
-		ct.Caught = !run.Audit.Clean && !run.Pass
-		ct.Detail = fmt.Sprintf("%d audit hits", len(run.Audit.Hits))
-		break
+		out = append(out, control{Name: "leaking-adapter", SeedID: s.ID, Caught: !run.Audit.Clean && !run.Pass,
+			Detail: fmt.Sprintf("%d audit hits", len(run.Audit.Hits))})
 	}
-	if ct.SeedID == "" {
-		ct.Detail = "no valid seed to run it on"
+	if leaks == 0 {
+		out = append(out, control{Name: "leaking-adapter", Detail: "no valid seed to run it on"})
 	}
-	return append(out, ct)
+	return out
 }

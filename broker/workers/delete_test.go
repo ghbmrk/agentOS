@@ -30,6 +30,9 @@ func fullWorker(t *testing.T) *rig {
 	r.agent("agent", vm.Public)
 	r.must("agent", toolCreate, m{"name": "w"}, nil)
 	r.must("agent", toolWrite, m{"name": "w", "path": "/small", "content": "x"}, nil)
+	// Leave the large files above the cap even after /small is removed.
+	// tmpfs directories use no blocks; directory overhead is not a fixture.
+	r.must("agent", toolWrite, m{"name": "w", "path": "/padding", "content": "x"}, nil)
 	big := strings.Repeat("x", MaxStdin)
 	for i := range 2 { // the second starts under the cap and ends over it
 		r.must("agent", toolWrite, m{"name": "w", "path": fmt.Sprintf("/big%d", i), "content": big}, nil)

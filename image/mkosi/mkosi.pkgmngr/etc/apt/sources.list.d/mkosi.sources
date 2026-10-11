@@ -1,0 +1,17 @@
+# Build-time apt sources. mkosi v24 uses this file instead of generating its own, so the pinned
+# snapshot (keep the timestamp equal to Mirror= in mkosi.conf) can still be read after its Release
+# files' Valid-Until passes, a week after the timestamp: a snapshot never changes, and its
+# signatures are still checked. Live security.debian.org keeps the expiry check, which guards
+# against replayed, stale security metadata. mkosi's debug and deb-src entries are dropped.
+Types: deb
+URIs: https://snapshot.debian.org/archive/debian/20261001T000000Z/
+Suites: trixie trixie-updates
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+Check-Valid-Until: no
+
+Types: deb
+URIs: http://security.debian.org/debian-security
+Suites: trixie-security
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg

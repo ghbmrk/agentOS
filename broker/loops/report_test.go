@@ -82,12 +82,16 @@ func (e *event) first(s string) int {
 
 type logStore struct {
 	change.MemStore
-	ev *event
+	ev    *event
+	first []byte // the first save holding evidence: a crash point
 }
 
 func (s *logStore) Save(b []byte) error {
 	if strings.Contains(string(b), `"evidence":[{`) {
 		s.ev.add("evidence")
+		if s.first == nil {
+			s.first = append([]byte(nil), b...)
+		}
 	}
 	return s.MemStore.Save(b)
 }
@@ -172,13 +176,17 @@ type reportRig struct {
 	// makes the pipeline refuse the new security cases it matches.
 	liveFor map[Check]bool
 	refuse  func(change.Case) bool
+	// probes are the LOOP-7 probes Guard runs (P3-4b-4a).
+	probes []Probe
 }
 
-func seedPipe(t *testing.T) *change.Pipeline {
+func seedPipe(t *testing.T) *change.Pipeline { t.Helper(); return seedPipeWith(t, seedEval{}) }
+
+func seedPipeWith(t *testing.T, ev change.Evaluator) *change.Pipeline {
 	t.Helper()
 	p, err := change.New(change.Config{
 		Store:     &change.MemStore{},
-		Evaluator: seedEval{},
+		Evaluator: ev,
 		Initial:   change.Tree{"config/facts.json": facts("3.0.15"), "skills/greet": []byte("hi"), seedPath: []byte(defective)},
 		Now:       func() time.Time { return t0 },
 		Rand:      fixed{},
@@ -213,7 +221,7 @@ func (r *reportRig) reopen(t *testing.T) {
 		live = r.liveFor
 	}
 	cfg := GuardConfig{Box: cleanBox().Box(), Pipeline: logPipe{r.p, r.ev, &r.refuse}, Store: r.store, Contain: r.c,
-		FixturesLiveFor: live,
+		FixturesLiveFor: live, Probes: r.probes,
 		Notify: func(s string, u bool) {
 			r.ev.add("notify")
 			r.texts, r.urgent = append(r.texts, s), append(r.urgent, u)
@@ -343,7 +351,8 @@ func TestReportRunsTheChainInOrder(t *testing.T) {
 }
 
 // LOOP-9, per severity: a Low finding that pauses nothing goes only to
-// the digest; a High one is texted once, urgent unless it is an expiry.
+// the digest; a High one is texted once, urgent only when its line names
+// a step (P3-4b-3c): with nothing paused, it says nothing is needed.
 func TestReportNoticeFollowsSeverity(t *testing.T) {
 	r := newReportRig(t, nil)
 	f := seedFinding()
@@ -358,7 +367,7 @@ func TestReportNoticeFollowsSeverity(t *testing.T) {
 	f = seedFinding()
 	f.Subject, f.Contain = "other-route", nil
 	r.report(t, f)
-	if len(r.texts) != 1 || !r.urgent[0] || r.texts[0] != "Security checks: Security test other-route fails on my current setup." {
+	if len(r.texts) != 1 || r.urgent[0] || r.texts[0] != "Security checks: Security test other-route fails on my current setup. Nothing is paused and nothing is needed from you." {
 		t.Fatalf("texts %q urgent %v", r.texts, r.urgent)
 	}
 }
@@ -453,7 +462,8 @@ func TestACaseLinkedAfterReportGradesTheFix(t *testing.T) {
 }
 
 // CHG-2, item 5: the fixer is handed the finding and nothing else: no
-// suite content, no other case's bytes.
+// suite content, no other case's bytes. Its rule is the minimized
+// regression (P3-4b-5).
 func TestTheFixerGetsOnlyTheFinding(t *testing.T) {
 	fx := &scriptFixer{cands: []change.Candidate{fixCand(reference)}}
 	r := newReportRig(t, fx)
@@ -463,7 +473,9 @@ func TestTheFixerGetsOnlyTheFinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.pass(t)
-	if len(fx.got) != 1 || !reflect.DeepEqual(fx.got[0], rec.Finding) {
+	want := rec.Finding
+	want.Rule = rec.Regression
+	if len(fx.got) != 1 || !reflect.DeepEqual(fx.got[0], want) {
 		t.Fatalf("fixer input %+v, reported %+v", fx.got, rec.Finding)
 	}
 	b, _ := json.Marshal(fx.got[0])

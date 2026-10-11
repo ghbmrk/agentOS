@@ -261,10 +261,8 @@ func (c *catalog) run(ctx context.Context, s *seed, leak bool) (r runReport) {
 			fail("(%s) was %s for %q, want rejected for %q", pl.Class, rep.State, rep.Reason, cr.Expect)
 		}
 	}
-	for _, e := range g.Evidence() {
-		if e.Finding.ID == id && e.Fix != string(change.StateAdopted) {
-			fail("the evidence records the fix as %q", e.Fix)
-		}
+	if f := evidenceFailure(g.Evidence(), id); f != "" {
+		fail("%s", f)
 	}
 	r.SuiteAfter = p.SecurityCount()
 	for i := 1; i < len(counts); i++ {
@@ -281,6 +279,25 @@ func (c *catalog) run(ctx context.Context, s *seed, leak bool) (r runReport) {
 		fail("the pipeline evaluated a tree holding %v", sortedKeys(ev.seen))
 	}
 	return r
+}
+
+// evidenceFailure is why recs are not the finding's evidence of a fix:
+// there must be exactly one record for id, and it must record the fix as
+// adopted (LOOP-9). "" means they are.
+func evidenceFailure(recs []loops.Record, id string) string {
+	var mine []loops.Record
+	for _, e := range recs {
+		if e.Finding.ID == id {
+			mine = append(mine, e)
+		}
+	}
+	switch {
+	case len(mine) != 1:
+		return fmt.Sprintf("the evidence holds %d records for the finding, not 1", len(mine))
+	case mine[0].Fix != string(change.StateAdopted):
+		return fmt.Sprintf("the evidence records the fix as %q", mine[0].Fix)
+	}
+	return ""
 }
 
 // minimal reports the regression's clause count and whether it is a

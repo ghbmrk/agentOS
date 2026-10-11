@@ -1,0 +1,42 @@
+{
+  "context_change": {
+    "elsewhere": true,
+    "reset_secret_required": true,
+    "resume_action": false,
+    "same_remote_address": true
+  },
+  "host_retry": {
+    "error_visible": true,
+    "not_mine_checked": false,
+    "requested_trust": false,
+    "retry_with_rendered_defaults_trust": true
+  },
+  "missing_box_number": {
+    "has_sms_link": false,
+    "rate_limit_tells_use_text_my_box": true
+  },
+  "network_retry": {
+    "error": true,
+    "first_option_neighbor": true,
+    "selected_attribute": false,
+    "submitted_ssid": "Synthetic Home"
+  },
+  "number_fallback": {
+    "code_form": true,
+    "details_open": false,
+    "number_retained_in_input": false,
+    "sent_text_count": 1
+  },
+  "private_retry": {
+    "calls": [
+      false,
+      true
+    ],
+    "key_echoed": false,
+    "private_checked_after_optout": true
+  },
+  "process_restart_during_sms_handoff": {
+    "handled": true,
+    "reply": "That pairing code did not match. Check the setup page."
+  }
+}

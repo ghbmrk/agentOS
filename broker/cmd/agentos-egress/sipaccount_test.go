@@ -310,9 +310,9 @@ func TestTheOwnerIsToldWhenTheAccountChanges(t *testing.T) {
 	if got := r.notes[n:]; len(got) != 2 || got[0] != noteSIPReplaced || got[1] != noteSIPRemoved {
 		t.Fatalf("notes %q", got)
 	}
-	// CH-12: owner texts name "the box's Wi-Fi page".
+	// CH-12, CH-21: owner texts name "my Wi-Fi page".
 	for _, s := range []string{noteSIPReplaced, noteSIPRemoved} {
-		if !strings.HasSuffix(s, " on the box's Wi-Fi page.") {
+		if !strings.HasSuffix(s, " on my Wi-Fi page.") {
 			t.Errorf("note %q", s)
 		}
 	}

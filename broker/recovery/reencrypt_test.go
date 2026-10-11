@@ -370,8 +370,8 @@ func TestDonePageLines(t *testing.T) {
 		want  string
 	}{
 		{0, nil, ""},
-		{1, []string{"study-pc"}, "1 other PC (study-pc) must be trusted again: on each, open the box page, unlock, and tick Keep this PC trusted."},
-		{3, nil, "3 other PCs must be trusted again: on each, open the box page, unlock, and tick Keep this PC trusted."},
+		{1, []string{"study-pc"}, "1 other PC (study-pc) must be trusted again: on each, open my Wi-Fi page, unlock, and tick Keep this PC trusted."},
+		{3, nil, "3 other PCs must be trusted again: on each, open my Wi-Fi page, unlock, and tick Keep this PC trusted."},
 	} {
 		if got := RetrustNote(c.n, c.names); got != c.want {
 			t.Fatalf("retrust %d: %q", c.n, got)

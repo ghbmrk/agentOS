@@ -194,6 +194,11 @@ func TestUnansweredCallCharges(t *testing.T) {
 				t.Fatalf("got %d", w.Code)
 			}
 			want := meter.Tokens(int64(len(c.body))) + c.extra
+			if c.extra > 0 {
+				// It may also have spent every further attempt it was
+				// allowed (SR3-7-f1c).
+				want *= MaxRetries + 1
+			}
 			if u := m.Usage("m1"); u.Tokens != want || u.Calls != 1 {
 				t.Fatalf("charged %d tokens and %d calls, want %d and 1", u.Tokens, u.Calls, want)
 			}
@@ -351,8 +356,9 @@ func TestUsageTrailerReachesMeterNotGuest(t *testing.T) {
 	}{
 		// 12 + 100*0.1 input, 7 output.
 		{"reported", trailer, 29},
-		// No usable report: the meter's own count (Tokens of the
-		// request bytes and the 2 content characters it saw).
+		// No usable report from a vault process that announced one:
+		// the call may have spent every attempt it was allowed
+		// (SR3-7-f1c), so each is charged its full reservation.
 		{"absent", "", -1},
 		{"malformed", `{"provider":`, -1},
 		{"negative", strings.Replace(trailer, `"output":7`, `"output":-7`, 1), -1},
@@ -397,7 +403,7 @@ func TestUsageTrailerReachesMeterNotGuest(t *testing.T) {
 			}
 			want := c.want
 			if want < 0 {
-				want = meter.Tokens(int64(len(body))) + meter.Tokens(2)
+				want = (MaxRetries + 1) * (meter.Tokens(int64(len(body))) + 100)
 			}
 			if u := m.Usage("m1"); u.Tokens != want {
 				t.Fatalf("charged %d tokens, want %d", u.Tokens, want)
@@ -426,9 +432,11 @@ func TestEgressDeniedMarkIsScrubbed(t *testing.T) {
 	}
 }
 
-// A body cut off before its end reports no usage, even with a trailer
-// declared: the meter keeps its own count of what the guest got.
-func TestTruncatedBodyReportsNoUsage(t *testing.T) {
+// A body cut off before its end, with a trailer declared, may come after
+// a provider billed output on every attempt the call was allowed: the
+// meter charges each its full reservation (SR3-7-f1c), not what the guest
+// got.
+func TestTruncatedBodyChargesEveryAllowedAttempt(t *testing.T) {
 	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
 		// Read the request first: closing a socket with unread data
 		// resets it, and a reset can reach the broker before the
@@ -454,8 +462,8 @@ func TestTruncatedBodyReportsNoUsage(t *testing.T) {
 	const body = `{"model":"default","max_tokens":100}`
 	w := httptest.NewRecorder()
 	m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
-	if want := meter.Tokens(int64(len(body))) + meter.Tokens(2); m.Usage("m1").Tokens != want {
-		t.Fatalf("charged %d tokens, want the counted floor %d", m.Usage("m1").Tokens, want)
+	if want := (MaxRetries + 1) * (meter.Tokens(int64(len(body))) + 100); m.Usage("m1").Tokens != want {
+		t.Fatalf("charged %d tokens, want every allowed attempt's reservation %d", m.Usage("m1").Tokens, want)
 	}
 }
 

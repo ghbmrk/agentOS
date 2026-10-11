@@ -1,0 +1,39 @@
+{
+  "method": "Actual generated localui HTML inspected using Codex in-app browser; read-only DOM/computed styles and screenshot inspection, existing dark mode. No physical-device or screen-reader trial.",
+  "date": "2026-10-08",
+  "base": "c34f2f4b2e9db7ceb8ee71a7a8b8a63a5a7948a1",
+  "provider_before": {
+    "viewport_width": 390,
+    "empty_link": true,
+    "empty_code": true,
+    "form_count": 0
+  },
+  "normal_approvals": {
+    "viewport_width": 390,
+    "document_scroll_width": 390
+  },
+  "long_approvals": {
+    "viewport_width": 320,
+    "document_scroll_width": 1716,
+    "paragraph_client_width": 288,
+    "paragraph_scroll_widths": [
+      1697,
+      1701
+    ],
+    "filename": "report_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf"
+  },
+  "dark_theme": {
+    "body_background": "#121212",
+    "button_font_px": 17,
+    "button_foreground": "#ffffff",
+    "approve_background": "#6ea8fe",
+    "deny_background": "#ff6b81",
+    "link_foreground": "#0000ee",
+    "wcag_contrast_ratios": {
+      "approve": 2.415,
+      "deny": 2.737,
+      "link": 1.993
+    }
+  },
+  "limits": "Saved HTML is source-rendered with synthetic owner data and fake session seam. Metrics describe this browser run only. Proposed fixes preserve complete canonical fields."
+}

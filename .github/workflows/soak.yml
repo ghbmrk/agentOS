@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 345 # under GitHub's 6h job limit
     strategy:
       fail-fast: false
-      max-parallel: 6 # leaves runners for pull-request CI (13 targets: three waves)
+      max-parallel: 6 # leaves runners for pull-request CI (18 targets: three waves)
       matrix:
         include:
           - { pkg: owner, target: FuzzParseReply }
@@ -45,6 +45,11 @@ jobs:
           - { pkg: tpmseal, target: FuzzParse }
           - { pkg: hint, target: FuzzParse }
           - { pkg: attest, target: FuzzParse }
+          - { pkg: sockets, target: FuzzRequest }
+          - { pkg: sockets, target: FuzzFrames }
+          - { pkg: browser, target: FuzzParse }
+          - { pkg: modemlink, target: FuzzInbound }
+          - { pkg: guest, target: FuzzMCP }
     name: fuzz ${{ matrix.pkg }} ${{ matrix.target }}
     defaults:
       run:
@@ -68,8 +73,10 @@ jobs:
           FUZZTIME: ${{ inputs.fuzztime || '3h' }}
         run: |
           mkdir -p "$RUNNER_TEMP/out"
-          go test "./${{ matrix.pkg }}" -run '^$' -fuzz '^${{ matrix.target }}$' \
-            -fuzztime "$FUZZTIME" -timeout 330m 2>&1 | tee "$RUNNER_TEMP/out/fuzz.log"
+          # Count-bound chunks for the time budget, never a duration for go test (its
+          # coordinator deadline race); at most 5h + one 10m chunk's cap (2.5 x 10m + 2m).
+          python3 ../tools/fuzzrun.py --pkg "./${{ matrix.pkg }}" --target "${{ matrix.target }}" \
+            --budget "$FUZZTIME" --chunk 10m 2>&1 | tee "$RUNNER_TEMP/out/fuzz.log"
       - name: Keep crashers
         if: failure()
         run: cp -r "${{ matrix.pkg }}/testdata/fuzz" "$RUNNER_TEMP/out/" 2>/dev/null || true

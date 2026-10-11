@@ -39,6 +39,15 @@ import (
 // (agentosd TestBuilderMachinesReachOnlyTheBuilder).
 const Prefix = vm.BuilderPrefix
 
+// BuildPrefix starts Loop 1's job machines, FixPrefix those answering Loop
+// 2's fix requests (Fix). Neither is a prefix of the other, so each is its
+// own share of the spare meter and a fix spends Loop 2's budget, not Loop
+// 1's (LOOP-2).
+const (
+	BuildPrefix = Prefix + "1-"
+	FixPrefix   = Prefix + "2-"
+)
+
 // Machines is the part of vm.Manager the builder uses.
 type Machines interface {
 	Create(ctx context.Context, id string, s vm.Spec) (vm.Machine, error)
@@ -164,18 +173,21 @@ func (b *Builder) Build(ctx context.Context, br loops.Brief) (change.Candidate, 
 	if err != nil {
 		return change.Candidate{}, err
 	}
-	id := Prefix + newID()
+	id := BuildPrefix + newID()
 	start := time.Now()
-	cand, err := b.run(ctx, id, ns, brief)
-	b.logJob(id, br, start, err)
-	return cand, err
+	files, err := b.run(ctx, id, ns, brief)
+	b.logJob(id, string(br.Hypothesis.Signal), start, err)
+	if err != nil {
+		return change.Candidate{}, err
+	}
+	return change.Candidate{Source: change.Local, Origin: "loop1", Files: files}, nil
 }
 
 // logJob writes one count-only line per job: signal, outcome, tokens and
 // time, never brief or candidate content (potency R1 on #126, BOARD
 // W3-builder-tune), so the first jobs' numbers can retune JobTokens and
 // Timeout.
-func (b *Builder) logJob(id string, br loops.Brief, start time.Time, err error) {
+func (b *Builder) logJob(id, signal string, start time.Time, err error) {
 	var tokens int64
 	if b.cfg.Meter != nil {
 		tokens = b.cfg.Meter.Usage(id).Tokens
@@ -195,11 +207,11 @@ func (b *Builder) logJob(id string, br loops.Brief, start time.Time, err error) 
 	if b.cfg.Meter != nil && tokens >= b.cfg.JobTokens && err != nil {
 		outcome += " (token cap)"
 	}
-	b.cfg.Logf("loopbuild: job %s %s: outcome %s, tokens %d, %s", id, br.Hypothesis.Signal, outcome, tokens, time.Since(start).Round(time.Second))
+	b.cfg.Logf("loopbuild: job %s %s: outcome %s, tokens %d, %s", id, signal, outcome, tokens, time.Since(start).Round(time.Second))
 }
 
-// run is one job on machine id.
-func (b *Builder) run(ctx context.Context, id, ns string, brief []byte) (change.Candidate, error) {
+// run is one job on machine id: the files of its one candidate.
+func (b *Builder) run(ctx context.Context, id, ns string, brief []byte) (map[string][]byte, error) {
 	s := &session{b: b, id: id, ns: ns, brief: brief, done: make(chan struct{})}
 	b.mu.Lock()
 	b.sessions[id] = s
@@ -213,11 +225,11 @@ func (b *Builder) run(ctx context.Context, id, ns string, brief []byte) (change.
 		Argv: b.cfg.Argv, Env: b.cfg.Env, Label: vm.Private,
 	})
 	if err != nil {
-		return change.Candidate{}, fmt.Errorf("%w: %v", ErrMachineUp, err)
+		return nil, fmt.Errorf("%w: %v", ErrMachineUp, err)
 	}
 	defer b.destroy(id)
 	if err := b.isClean(m); err != nil {
-		return change.Candidate{}, err
+		return nil, err
 	}
 	tick := time.NewTicker(b.cfg.Poll)
 	defer tick.Stop()
@@ -226,23 +238,23 @@ func (b *Builder) run(ctx context.Context, id, ns string, brief []byte) (change.
 		case <-s.done:
 			files := s.end()
 			if files == nil {
-				return change.Candidate{}, ErrNoResult
+				return nil, ErrNoResult
 			}
-			return change.Candidate{Source: change.Local, Origin: "loop1", Files: files}, nil
+			return files, nil
 		case <-ctx.Done():
 			if files := s.end(); files != nil {
-				return change.Candidate{Source: change.Local, Origin: "loop1", Files: files}, nil
+				return files, nil
 			}
-			return change.Candidate{}, ctx.Err()
+			return nil, ctx.Err()
 		case <-tick.C:
 			m, err := b.cfg.Machines.Get(id)
 			if err != nil {
 				s.end()
-				return change.Candidate{}, ErrNoResult
+				return nil, ErrNoResult
 			}
 			if err := b.isClean(m); err != nil {
 				s.end()
-				return change.Candidate{}, err
+				return nil, err
 			}
 			if m.State != vm.Running {
 				// Preempted for higher-class work (RES-1): continue when

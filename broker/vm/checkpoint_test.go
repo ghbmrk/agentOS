@@ -199,12 +199,11 @@ func TestPE7SleepCheckpointSurvivesARestart(t *testing.T) {
 func TestPE7FailedSleepLeavesNoCheckpoint(t *testing.T) {
 	e := newEnv(t, 4096)
 	e.create("agent", admission.Foreground, 1600)
-	block := filepath.Join(e.cfg.StateDir, "machines", "agent", "meta.json.tmp")
-	must(t, os.MkdirAll(filepath.Join(block, "x"), 0o700))
+	unblock := failSave(filepath.Join(e.cfg.StateDir, "machines", "agent", "meta.json"))
 	if _, err := e.m.CheckpointAndStop(bg, "agent"); err == nil {
 		t.Fatal("a sleep whose machine record failed to save reported success")
 	}
-	must(t, os.RemoveAll(block))
+	unblock()
 	if got := e.m.Snapshots("agent"); len(got) != 0 {
 		t.Fatalf("snapshots %v left by a failed sleep", ids(got))
 	}

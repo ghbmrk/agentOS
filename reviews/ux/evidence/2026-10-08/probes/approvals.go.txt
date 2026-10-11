@@ -1,0 +1,82 @@
+package main
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/binary"
+	"fmt"
+	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/owner"
+	"strings"
+	"time"
+)
+
+type engine struct{}
+
+func (*engine) Stop(context.Context) (journal.StopReport, error) { return journal.StopReport{}, nil }
+func (*engine) Resume() error                                    { return nil }
+func (*engine) Stopped() bool                                    { return false }
+func (*engine) List() []journal.Status                           { return nil }
+
+type agent struct{ msgs []string }
+
+func (a *agent) Deliver(_ context.Context, text string, _ bool) error {
+	a.msgs = append(a.msgs, text)
+	return nil
+}
+func totp(seed []byte, t time.Time) string {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], uint64(t.Unix()/30))
+	h := hmac.New(sha1.New, seed)
+	h.Write(b[:])
+	s := h.Sum(nil)
+	o := s[len(s)-1] & 15
+	return fmt.Sprintf("%06d", (binary.BigEndian.Uint32(s[o:o+4])&0x7fffffff)%1000000)
+}
+func main() {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	num := "+15550000001"
+	seed := []byte("12345678901234567890")
+	carrier := modem.NewCarrier()
+	box := carrier.Line("+15550000100")
+	a := &agent{}
+	ch, err := owner.New(owner.Config{Owner: num, Engine: &engine{}, Store: &owner.MemStore{}, Modem: box, Agent: a, Secrets: owner.Secrets{TOTPSeed: seed}, Now: func() time.Time { return now }, Location: time.UTC, ReplyLimit: 1000})
+	if err != nil {
+		panic(err)
+	}
+	for _, msg := range []string{"Draft the supplier email", "Use the revised Friday date", totp(seed, now), "RUN"} {
+		display := msg
+		if msg == totp(seed, now) {
+			display = "<synthetic current generator code>"
+		}
+		fmt.Printf("OWNER %s\nBOX %q\n", display, ch.Handle(ctx, num, msg))
+	}
+	fmt.Printf("DELIVERED TASKS %q\n", a.msgs)
+	items := make([]owner.Item, 10)
+	for i := range items {
+		items[i] = owner.Item{Ref: fmt.Sprint(i + 1), Object: fmt.Sprintf("invoice %02d Friday delivery confirmation", i+1), Recipient: "recipient@example.test", Facts: owner.Facts{Verb: "send", RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}}
+	}
+	id, err := ch.Request(items, 15*time.Minute)
+	if err != nil {
+		panic(err)
+	}
+	log := carrier.Log()
+	fmt.Printf("BATCH %s\n", log[len(log)-1].Text)
+	for i := 0; i < 2; i++ {
+		fmt.Printf("MORE %d %q\n", i+1, ch.Handle(ctx, num, "MORE "+id))
+	}
+	for _, msg := range []string{"The source code has 1234 lines and the build passed.", "The source code compiles and the build passed."} {
+		before := len(carrier.Log())
+		if err := ch.Notify(msg); err != nil {
+			panic(err)
+		}
+		out := carrier.Log()[before:]
+		for _, s := range out {
+			fmt.Printf("NOTIFY INPUT %q\nOUTPUT %q\n", msg, s.Text)
+		}
+	}
+	fmt.Printf("TRUNCATION STRING PRESENT: %v\n", strings.Contains(ch.Handle(ctx, num, "MORE "+id)[0], "Rest on"))
+}

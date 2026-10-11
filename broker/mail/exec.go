@@ -16,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/verb"
 )
 
 var _ journal.Executor = (*Adapter)(nil)
@@ -24,14 +25,18 @@ var _ journal.Executor = (*Adapter)(nil)
 // the message, its state before, and what the agent set (ADP-2: the
 // broker journals the prior state with each one). Undo reads it back.
 type Change struct {
-	Op      string   `json:"op"`
-	Record  string   `json:"record"`
-	Sender  string   `json:"sender,omitempty"`
-	From    string   `json:"from"`         // folder before
-	To      string   `json:"to,omitempty"` // folder after, if moved
-	Before  []string `json:"before,omitempty"`
-	Added   []string `json:"added,omitempty"`
-	Removed []string `json:"removed,omitempty"`
+	Op     string `json:"op"`
+	Record string `json:"record"`
+	Sender string `json:"sender,omitempty"`
+	From   string `json:"from"` // folder before
+	// Validity and UID identify the message in From as the effect found
+	// it (SR3-5): with From, its remote identity.
+	Validity uint32   `json:"validity,omitempty"`
+	UID      uint32   `json:"uid,omitempty"`
+	To       string   `json:"to,omitempty"` // folder after, if moved
+	Before   []string `json:"before,omitempty"`
+	Added    []string `json:"added,omitempty"`
+	Removed  []string `json:"removed,omitempty"`
 	// Alert marks an effect on a message the alert guard caught that ran
 	// all the same (a label or star), for the digest's guard hits.
 	Alert bool `json:"alert,omitempty"`
@@ -64,12 +69,41 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 	case OpDeliver:
 		return a.deliver(ctx, in, attempt, p)
 	}
+	// An organize acts only when every Escalate since the last Execute
+	// judged the same message and agreed on whether hiding it escalated,
+	// acts only on that message, and hides an alert only if they
+	// escalated it (SR3-5-f1a). The judgements are consumed whatever
+	// happens, so another attempt is judged again by its own recheck.
+	// Trash and spam are checked the same way (SR3-5-f2a).
+	pn, agreed := a.takePin(in.ID)
 	pl, err := a.planOrganize(ctx, o, p)
 	if err != nil {
 		return notApplied(err)
 	}
+	if !agreed || pl.msg.Ref() != pn.ref || pl.hides && pl.alert && !pn.alert {
+		return notApplied(errChanged)
+	}
+	out := a.organize(ctx, o, pl)
+	if o.Verb == verb.Organize && out.Result == journal.ResultUnknown {
+		a.keepJudged(in.ID, attempt, pn)
+	}
+	return out
+}
+
+// errChanged: the message an organize would act on is not the one its
+// approval judged, or now hides an alert the approval did not escalate.
+var errChanged = errors.New("mail: changed since approval")
+
+// organize performs a planned organize, trash or spam effect.
+func (a *Adapter) organize(ctx context.Context, o Op, pl plan) journal.Outcome {
 	ch := Change{Op: o.Name, Record: pl.msg.MessageID, Sender: pl.msg.From, From: pl.msg.Folder,
-		Before: sorted(pl.msg.Flags), Alert: pl.alert && !pl.hides}
+		Validity: pl.msg.Validity, UID: pl.msg.UID, Before: sorted(pl.msg.Flags), Alert: pl.alert && !pl.hides}
+	// Each mutation acts on the message planOrganize read and guarded,
+	// by its full identity: if the folder was rebuilt since, the store
+	// refuses (ErrValidity) before acting, and nothing is retried by the
+	// old UID. Refused before any change, the effect did not happen; a
+	// later attempt resolves the record again through the gate.
+	changed := false
 	for _, f := range pl.add {
 		if !has(pl.msg.Flags, f) {
 			ch.Added = append(ch.Added, f)
@@ -81,9 +115,10 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 		}
 	}
 	if len(ch.Added)+len(ch.Removed) > 0 {
-		if err := a.cfg.Store.SetFlags(ctx, pl.msg.Folder, pl.msg.UID, ch.Added, ch.Removed); err != nil {
-			return unknown(err)
+		if err := a.cfg.Store.SetFlags(ctx, pl.msg.Ref(), ch.Added, ch.Removed); err != nil {
+			return unknownUnless(err, changed)
 		}
+		changed = true
 	}
 	if pl.to != "" {
 		if strings.HasPrefix(pl.to, Namespace) {
@@ -91,8 +126,8 @@ func (a *Adapter) Execute(ctx context.Context, in journal.Intent, attempt int) j
 				return unknown(err)
 			}
 		}
-		if err := a.cfg.Store.Move(ctx, pl.msg.Folder, pl.msg.UID, pl.to); err != nil {
-			return unknown(err)
+		if err := a.cfg.Store.Move(ctx, pl.msg.Ref(), pl.to); err != nil {
+			return unknownUnless(err, changed)
 		}
 		ch.To = pl.to
 	}
@@ -135,6 +170,21 @@ func (a *Adapter) Reconcile(ctx context.Context, in journal.Intent, attempt int)
 	if err != nil {
 		return unknown(err)
 	}
+	if o.Verb == verb.Organize {
+		// Reconcile judges the message the attempt was pinned to, and
+		// never reports as done hiding an alert that no judgement
+		// escalated: without a pin (a restart) that is unknown, never a
+		// fresh Execute (SR3-5-f1b).
+		pn, pinned := a.takeJudged(in.ID, attempt)
+		if pinned && pl.msg.Ref() != pn.ref {
+			if err := a.movedFrom(ctx, pn, pl.msg); err != nil {
+				return unknown(err)
+			}
+		}
+		if o.Hides && pl.alert && !(pinned && pn.alert) {
+			return unknown(errChanged)
+		}
+	}
 	done := pl.to == "" || pl.to == pl.msg.Folder
 	for _, f := range pl.add {
 		done = done && has(pl.msg.Flags, f)
@@ -143,9 +193,27 @@ func (a *Adapter) Reconcile(ctx context.Context, in journal.Intent, attempt int)
 		done = done && !has(pl.msg.Flags, f)
 	}
 	if done {
-		return succeeded(Change{Op: o.Name, Record: pl.msg.MessageID, Sender: pl.msg.From, From: pl.msg.Folder, Reconciled: true})
+		return succeeded(Change{Op: o.Name, Record: pl.msg.MessageID, Sender: pl.msg.From, From: pl.msg.Folder,
+			Validity: pl.msg.Validity, UID: pl.msg.UID, Reconciled: true})
 	}
 	return notApplied(errors.New("mail: the message is not in the state the effect sets"))
+}
+
+// movedFrom checks that m, found by Message-ID, can be the pinned
+// message after its move: it is in the pinned target, and the pinned Ref
+// no longer holds a message.
+func (a *Adapter) movedFrom(ctx context.Context, pn pin, m Message) error {
+	if pn.to == "" || m.Folder != pn.to {
+		return errChanged
+	}
+	ms, err := a.cfg.Store.Fetch(ctx, pn.ref.Folder, pn.ref.Validity, []uint32{pn.ref.UID})
+	if err != nil {
+		return err
+	}
+	if len(ms) > 0 {
+		return errChanged
+	}
+	return nil
 }
 
 func (a *Adapter) draft(ctx context.Context, in journal.Intent, attempt int, p map[string]string) journal.Outcome {
@@ -263,7 +331,7 @@ func (a *Adapter) deliver(ctx context.Context, in journal.Intent, attempt int, p
 		body = AgentFirstLine + "\n\n" + body
 	case FromBox:
 	default:
-		return notApplied(errors.New("mail: a delivery is from the agent or the box"))
+		return notApplied(errors.New("mail: a delivery is neither agent-written nor a broker notice"))
 	}
 	body += "\n\n-- \n" + DeliverFooter
 	id := a.messageID(in.ID, attempt)
@@ -373,12 +441,28 @@ func notApplied(err error) journal.Outcome {
 	return journal.Outcome{Result: journal.ResultNotApplied, Evidence: reason(err)}
 }
 
+// unknownUnless is a mutation's failure: not applied when the store
+// refused a stale identity before anything changed, else unknown. A
+// refusal after flags changed says so, since ErrValidity's own wording
+// claims nothing changed.
+func unknownUnless(err error, changed bool) journal.Outcome {
+	switch {
+	case errors.Is(err, ErrValidity) && !changed:
+		return notApplied(err)
+	case errors.Is(err, ErrValidity):
+		return journal.Outcome{Result: journal.ResultUnknown, Evidence: errValidityAfterFlags}
+	}
+	return unknown(err)
+}
+
+const errValidityAfterFlags = "mail: the folder was rebuilt after the labels were changed; the move did not happen"
+
 func unknown(err error) journal.Outcome {
 	return journal.Outcome{Result: journal.ResultUnknown, Evidence: reason(err)}
 }
 
 func reason(err error) string {
-	for _, e := range []error{ErrNotFound, ErrTarget, ErrAccount, ErrOp} {
+	for _, e := range []error{ErrNotFound, ErrTarget, ErrAccount, ErrOp, ErrValidity} {
 		if errors.Is(err, e) {
 			return e.Error()
 		}

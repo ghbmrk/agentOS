@@ -334,3 +334,98 @@ func TestWithdrawnDriveReleaseKeepsGateHeld(t *testing.T) {
 		t.Fatalf("status %q", s)
 	}
 }
+
+const waitText = " AI and accounts can be connected after that."
+
+// REQ: UPD-3, CH-21
+// An unexpected scheduling error is not "updating": STATUS and Hold say the
+// update could not be started. The error is returned; the gate stays held.
+func TestUnexpectedScheduleErrorIsNotSaidToBeUpdating(t *testing.T) {
+	r := newRig(t, 1)
+	r.m.Add(2, update.ChannelStable, false)
+	boom := errors.New("boom")
+	r.app.err = boom
+	if err := r.g.Step(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("err %v", err)
+	}
+	r.held("schedule error")
+	if s, want := r.g.Status(), "First start: update 2 could not be started. I will try again."+waitText; s != want {
+		t.Fatalf("status %q", s)
+	}
+	want := "firstboot: I am updating first: update 2 could not be started, so AI and accounts stay closed while I try again"
+	if h := r.g.Hold().Error(); h != want {
+		t.Fatalf("hold %q", h)
+	}
+}
+
+// REQ: UPD-3, CH-21
+// With several failing mirrors STATUS reflects all of them, whatever the
+// order; a single kind of failure keeps its own text.
+func TestSeveralFailingMirrorsAreAllReflected(t *testing.T) {
+	gone := update.DirSource(filepath.Join(t.TempDir(), "gone"))
+	const mixed = "First start: one update server's answer could not be verified and another could not be reached, so I cannot tell I am current. I will try again." + waitText
+	const unverified = "First start: the update server's answer could not be verified, so I cannot tell I am current. I will try again." + waitText
+	const unreached = "First start: I could not reach the update server. I will try again." + waitText
+	for _, tc := range []struct {
+		name string
+		src  func(r *rig) []update.Source
+		want string
+	}{
+		{"unverified then unreachable", func(r *rig) []update.Source { return []update.Source{r.m.Source(), gone} }, mixed},
+		{"unreachable then unverified", func(r *rig) []update.Source { return []update.Source{gone, r.m.Source()} }, mixed},
+		{"all unverified", func(r *rig) []update.Source { return []update.Source{r.m.Source(), r.m.Source()} }, unverified},
+		{"all unreachable", func(r *rig) []update.Source { return []update.Source{gone, gone} }, unreached},
+	} {
+		r := newRig(t, 1)
+		r.now = r.now.Add(60 * 24 * time.Hour) // the mirror's metadata is expired
+		r.mirror = tc.src(r)
+		r.step()
+		r.held(tc.name)
+		if s := r.g.Status(); s != tc.want {
+			t.Fatalf("%s: status %q", tc.name, s)
+		}
+	}
+}
+
+// REQ: UPD-3, CH-21
+// After a fallback, Hold and Status give the same wait.
+func TestFallbackHoldAndStatusAgree(t *testing.T) {
+	r := newRig(t, 1)
+	r.m.Add(2, update.ChannelStable, false)
+	r.app.fellBack[2] = true
+	r.step()
+	r.held("fell back")
+	const wait = "AI and accounts stay closed until a newer update is out"
+	if h := r.g.Hold().Error(); h != "firstboot: I am updating first: "+wait {
+		t.Fatalf("hold %q", h)
+	}
+	if s, want := r.g.Status(), "First start: update 2 did not start cleanly, so I went back to the version I shipped with. "+wait+"."; s != want {
+		t.Fatalf("status %q", s)
+	}
+}
+
+// REQ: UPD-3, CH-21
+// The other held texts stay as they were.
+func TestOtherHeldTextsUnchanged(t *testing.T) {
+	r := newRig(t, 1)
+	if s, want := r.g.Status(), "First start: checking for updates before AI and accounts can be connected."; s != want {
+		t.Fatalf("starting %q", s)
+	}
+	r.online = false
+	r.step()
+	if s, want := r.g.Status(), "First start: I am offline, so I run the version I shipped with. I will update when I am next online."+waitText; s != want {
+		t.Fatalf("offline %q", s)
+	}
+	if h, want := r.g.Hold().Error(), "firstboot: I am updating first: I am offline and have not updated yet; AI and accounts can be connected once I am online and updated"; h != want {
+		t.Fatalf("offline hold %q", h)
+	}
+	r.online = true
+	r.m.Add(2, update.ChannelStable, false)
+	r.step()
+	if s, want := r.g.Status(), "First start: updating to version 2. I will restart once."+waitText; s != want {
+		t.Fatalf("installing %q", s)
+	}
+	if h, want := r.g.Hold().Error(), "firstboot: I am updating first: AI and accounts can be connected when the update finishes"; h != want {
+		t.Fatalf("installing hold %q", h)
+	}
+}

@@ -3,6 +3,7 @@ package loops
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -37,6 +38,13 @@ func (b *hookBuilder) Build(ctx context.Context, br Brief) (change.Candidate, er
 // refund hypothesis on goals mX1 and mX2, and a pay one on mY.
 func requeueRig(t *testing.T) (*Learn, *hookBuilder) {
 	t.Helper()
+	return requeueRigOn(t, nil)
+}
+
+// requeueRigOn is requeueRig with the pipeline wrap returns in place of
+// the rig's own (nil: the rig's own).
+func requeueRigOn(t *testing.T, wrap func(Pipeline) Pipeline) (*Learn, *hookBuilder) {
+	t.Helper()
 	r := newRig(t)
 	h := r.harvester()
 	for i := range 8 {
@@ -46,7 +54,11 @@ func requeueRig(t *testing.T) (*Learn, *hookBuilder) {
 	r.failing("x2", "owner:mX2", "refund")
 	r.failing("y", "owner:mY", "pay")
 	b := &hookBuilder{builder: builder{files: map[string][]byte{"procedures/mail": []byte("v2")}}}
-	l, err := NewLearn(LearnConfig{Pipeline: r.p, Journal: r.eng, Harvest: h, Builder: b, MinHeldOut: 1, Backoff: time.Hour})
+	var p Pipeline = r.p
+	if wrap != nil {
+		p = wrap(p)
+	}
+	l, err := NewLearn(LearnConfig{Pipeline: p, Journal: r.eng, Harvest: h, Builder: b, MinHeldOut: 1, Backoff: time.Hour})
 	must(t, err)
 	return l, b
 }
@@ -161,8 +173,15 @@ func TestAForgetBeforeTheBuildStartsRequeuesIt(t *testing.T) {
 	}
 	job, _ := nextBuild(t, l, b)
 	l.ForgetGoal("owner:mX1")
+	builds := 0
+	b.during = func(Brief) { builds++ }
 	if res := job.Run(context.Background()); !errors.Is(res.Err, ErrRequeued) {
 		t.Fatalf("a forget before the build began: %v; want ErrRequeued", res.Err)
+	}
+	b.during = nil
+	if builds != 0 {
+		// W3-forget-b2 f2: a job that cancelled itself builds nothing.
+		t.Fatalf("a requeued job still built (%d builds)", builds)
 	}
 	l.mu.Lock()
 	tried, waits := l.tried[refundKey], !l.notBefore[refundKey].IsZero()
@@ -173,5 +192,104 @@ func TestAForgetBeforeTheBuildStartsRequeuesIt(t *testing.T) {
 	job, built := nextBuild(t, l, b)
 	if job.Run(context.Background()); built() != refundKey {
 		t.Fatal("the requeued build is not offered again at once")
+	}
+}
+
+// refundBuild runs Loop 1's jobs until the refund build has begun, and
+// returns its result; b.during sees each build as it begins.
+func refundBuild(t *testing.T, l *Learn, b *hookBuilder, ctx func() context.Context) Result {
+	t.Helper()
+	during, began := b.during, ""
+	defer func() { b.during = during }()
+	b.during = func(br Brief) {
+		began = br.Hypothesis.Key
+		if during != nil {
+			during(br)
+		}
+	}
+	for range 5 { // the pay build may come first
+		job, _ := nextBuild(t, l, b)
+		if res := job.Run(ctx()); began == refundKey {
+			return res
+		}
+	}
+	t.Fatal("the refund build never came")
+	return Result{}
+}
+
+// W3-forget-b2 f3: a build whose context ended for another reason (the
+// scheduler preempted it) and whose goal is then forgotten is requeued
+// too, though its cause is not ErrRequeued: the post-build check reads
+// the forget itself.
+func TestAForgetAfterAPreemptionStillRequeues(t *testing.T) {
+	l, b := requeueRig(t)
+	var stop context.CancelFunc
+	b.during = func(br Brief) {
+		if br.Hypothesis.Key == refundKey {
+			stop() // preempted: the job's ctx ends first
+			l.ForgetGoal("owner:mX1")
+		}
+	}
+	res := refundBuild(t, l, b, func() context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		stop = cancel
+		return ctx
+	})
+	b.during = nil
+	if !errors.Is(res.Err, ErrRequeued) {
+		t.Fatalf("preempted, then forgotten: %v; want ErrRequeued", res.Err)
+	}
+	l.mu.Lock()
+	tried, asks := l.tried[refundKey], l.asks[refundKey]
+	l.mu.Unlock()
+	if tried != 0 || asks != 0 {
+		t.Fatalf("left tried=%d asks=%d", tried, asks)
+	}
+}
+
+// forgetOnPropose answers the refund candidate "waiting on the owner",
+// and the owner forgets its goal just after it reached them.
+type forgetOnPropose struct {
+	Pipeline
+	l     *Learn
+	asked int
+}
+
+func (p *forgetOnPropose) Propose(ctx context.Context, c change.Candidate) (change.Report, error) {
+	if !slices.Contains(c.Goals, "owner:mX1") {
+		return p.Pipeline.Propose(ctx, c)
+	}
+	p.asked++
+	p.l.ForgetGoal("owner:mX1")
+	return change.Report{State: change.StateAwaitingOwner}, nil
+}
+
+// W3-forget-b2 f1 (L3 on #321): a forget that lands after the proposal
+// reached the owner, while the job still runs, requeues the rebuild at
+// once, as a forget after the job does, and counts that ask the same way,
+// so forgets never let a hypothesis ask more than MaxAsks times.
+func TestAForgetAfterTheProposalReachedTheOwnerCountsTheAsk(t *testing.T) {
+	fp := &forgetOnPropose{}
+	l, b := requeueRigOn(t, func(p Pipeline) Pipeline { fp.Pipeline = p; return fp })
+	fp.l = l
+	if res := refundBuild(t, l, b, context.Background); !errors.Is(res.Err, ErrRequeued) {
+		t.Fatalf("forgotten after the ask: %v; want ErrRequeued", res.Err)
+	}
+	l.mu.Lock()
+	tried, asks, waits := l.tried[refundKey], l.asks[refundKey], !l.notBefore[refundKey].IsZero()
+	l.mu.Unlock()
+	if tried != 0 || waits || asks != 1 {
+		t.Fatalf("tried=%d backoff %v asks=%d; want 0, false, 1", tried, waits, asks)
+	}
+	// Each further forget after an ask rebuilds at once, until MaxAsks.
+	for range 4 {
+		job, ok := l.Next(context.Background(), true)
+		if !ok || job.Name != "candidate" {
+			break
+		}
+		job.Run(context.Background())
+	}
+	if fp.asked != l.cfg.MaxAsks {
+		t.Fatalf("the owner was asked %d times; MaxAsks is %d", fp.asked, l.cfg.MaxAsks)
 	}
 }

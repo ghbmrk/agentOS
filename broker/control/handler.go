@@ -205,6 +205,7 @@ func (h *Handler) deliver(ctx context.Context, cmd Command) bool {
 
 const helpText = "Commands: STOP pauses all actions. RESUME restarts them (needs a texted code). " +
 	"STATUS. YES or NO answers a request, e.g. YES 1 3 <code>. UNDO <id>. MORE <id>. " +
+	"NAME shows my name; NAME <new name> changes it. " +
 	"Start a task with PUBLIC to mark it public. Anything else goes to your agent."
 
 const unlockText = "This needs an unlocked session. Send a code from your code generator. STOP works without one."

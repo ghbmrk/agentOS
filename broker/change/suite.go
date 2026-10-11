@@ -1,10 +1,14 @@
 package change
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -88,6 +92,10 @@ func splitKey(c Case) string {
 var (
 	ErrProvenance = errors.New("change: case has no owner outcome behind it")
 	ErrDuplicate  = errors.New("change: case already in the suite")
+	// ErrConflict comes wrapped with ErrDuplicate when the case under that
+	// ID differs from the one added in input, expect, finding or kind: it
+	// is another case, not this one again (P3-4b-1b item 2).
+	ErrConflict = errors.New("change: a different case holds that id")
 )
 
 // AddTaskCase adds a case from a real task. The intent it names must carry
@@ -146,6 +154,22 @@ func (p *Pipeline) AddSecurityCase(c Case) error {
 	return p.addCase(c)
 }
 
+// Digests are digests of the active tree and of the whole suite (every
+// case, as stored). Equal digests mean a candidate would be graded the
+// same, so Loop 2 holds a fix request a deterministic rejection answered
+// until one of them changes (P3-4b-5, S22).
+func (p *Pipeline) Digests() (tree, suite string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := sha256.New()
+	for _, id := range slices.Sorted(maps.Keys(p.st.Cases)) {
+		b, _ := json.Marshal(p.st.Cases[id])
+		fmt.Fprintf(h, "%d:%s%d:", len(id), id, len(b))
+		h.Write(b)
+	}
+	return p.st.Active.Hash(), hex.EncodeToString(h.Sum(nil))
+}
+
 // SecurityCount is how many security cases the suite holds. It only grows
 // (LOOP-10).
 func (p *Pipeline) SecurityCount() int {
@@ -158,6 +182,31 @@ func (p *Pipeline) SecurityCount() int {
 		}
 	}
 	return n
+}
+
+// LinkedHold answers every security case linked to finding from the active
+// tree alone: linked is how many there are, hold whether each one passes.
+// A linked case that is not a tree rule cannot be answered without a run,
+// so it never holds (fail closed). Loop 2 closes a reported finding whose
+// cases all hold as cleared (P3-4b-1b item 1).
+func (p *Pipeline) LinkedHold(finding string) (linked int, hold bool) {
+	if finding == "" {
+		return 0, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	hold = true
+	for _, c := range p.st.Cases {
+		if !c.Security || c.Finding != finding {
+			continue
+		}
+		linked++
+		out, ok := AnswerTreeRule(p.st.Active, c.Input)
+		if !ok || !bytes.Equal(out, c.Expect) {
+			hold = false
+		}
+	}
+	return linked, linked > 0 && hold
 }
 
 // ForgetGoal removes every task case harvested from goal and saves the
@@ -207,7 +256,7 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 	p.dropOldBasesLocked(tree.Hash())
 	if err := p.saveLocked(); err != nil {
 		if rerr := p.reloadLocked(); rerr != nil {
-			p.broken = fmt.Errorf("change: state cannot be saved (%v) or reloaded (%v); restart needed", err, rerr)
+			p.markBroken(err, rerr)
 		}
 		return nil, err
 	}
@@ -232,7 +281,11 @@ func (p *Pipeline) LearnedFrom(goal string) int {
 func (p *Pipeline) addCase(c Case) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, dup := p.st.Cases[c.ID]; dup {
+	if old, dup := p.st.Cases[c.ID]; dup {
+		if !bytes.Equal(old.Input, c.Input) || !bytes.Equal(old.Expect, c.Expect) ||
+			old.Finding != c.Finding || old.Security != c.Security {
+			return fmt.Errorf("%w: %w", ErrDuplicate, ErrConflict)
+		}
 		return ErrDuplicate
 	}
 	next := p.st.copyCases()

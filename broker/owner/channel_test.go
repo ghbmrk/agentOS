@@ -568,7 +568,7 @@ func TestLongBatchFitsThreeSegmentsAndPointsToMore(t *testing.T) {
 	if !strings.Contains(text, "MORE "+id) || !strings.Contains(text, "12 items") {
 		t.Fatalf("long batch: %q", text)
 	}
-	if got := r.say("MORE " + id); !strings.Contains(got, "Rest on the box's Wi-Fi page") {
+	if got := r.say("MORE " + id); !strings.Contains(got, "Rest on my Wi-Fi page") {
 		t.Fatalf("MORE overflow: %q", got)
 	}
 }

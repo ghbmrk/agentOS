@@ -59,7 +59,7 @@ func TestForgetGoalUndoesWhatWasLearnedFromIt(t *testing.T) {
 	if undone == nil || undone.Reverted != WhyForgotten {
 		t.Fatalf("forgotten adoption: %+v", undone)
 	}
-	want := "Undid " + rep.Short + ": it was learned from a task you asked the box to forget."
+	want := "Undid " + rep.Short + ": it was learned from a task you asked me to forget."
 	if d := strings.Join(e.p.Digest(), "\n"); !strings.Contains(d, want) {
 		t.Fatalf("digest %q lacks %q", d, want)
 	}
