@@ -55,6 +55,7 @@ open journal.Engine.List
 open journal.Engine.Trail
 open journal.Engine.Between
 open journal.Engine.StatusBetween
+open journal.Engine.RecordsAfter
 open journal.Engine.Stopped
 open journal.FileStore.ReadAll
 open journal.MemStore.ReadAll
