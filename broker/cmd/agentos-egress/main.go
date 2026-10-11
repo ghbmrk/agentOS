@@ -40,6 +40,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -498,7 +499,7 @@ func initCmd(args []string, out io.Writer) error {
 	if _, err := os.Lstat(*keysPath); err == nil {
 		return fmt.Errorf("%s already exists; a vault is already set up here", *keysPath)
 	}
-	if err := writeFileAtomic(*statePath, []byte("{}")); err != nil {
+	if err := durable.WriteFile(*statePath, []byte("{}"), 0o600); err != nil {
 		return err
 	}
 	if err := sealNew(*vaultPath, *keysPath, pass, seed, *setup); err != nil {
@@ -549,29 +550,17 @@ func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
 	}
 	v.Close()
 	if err == nil {
-		err = os.Rename(vt, vaultPath)
+		err = durable.Rename(vt, vaultPath)
 	}
 	if err == nil {
-		err = os.Rename(kt, keysPath)
+		err = durable.Rename(kt, keysPath)
 	}
 	if err != nil {
 		os.Remove(vt)
 		os.Remove(kt)
 		return err
 	}
-	return syncDir(filepath.Dir(keysPath))
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	serr := d.Sync()
-	if err := d.Close(); serr == nil {
-		serr = err
-	}
-	return serr
+	return nil
 }
 
 func b32() *base32.Encoding { return base32.StdEncoding.WithPadding(base32.NoPadding) }

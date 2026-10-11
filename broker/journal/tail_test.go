@@ -4,8 +4,19 @@ package journal
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
+
+// after reads RecordsAfter(seq) and fails the test on a read error.
+func after(t *testing.T, e *Engine, seq uint64) []Record {
+	t.Helper()
+	recs, err := e.RecordsAfter(seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recs
+}
 
 // The tail a projection replays after its snapshot is exactly the records
 // after the snapshot's sequence number, and it survives a restart.
@@ -20,7 +31,7 @@ func TestRecordsAfterIsTheTailAfterASequenceNumber(t *testing.T) {
 		t.Fatalf("trail has %d records, want 3", len(all))
 	}
 	for seq := uint64(0); seq <= 4; seq++ {
-		got := e.RecordsAfter(seq)
+		got := after(t, e, seq)
 		want := 3 - int(min(seq, 3))
 		if len(got) != want {
 			t.Fatalf("RecordsAfter(%d) has %d records, want %d", seq, len(got), want)
@@ -32,23 +43,49 @@ func TestRecordsAfterIsTheTailAfterASequenceNumber(t *testing.T) {
 		}
 	}
 	// The caller's copy is its own.
-	got := e.RecordsAfter(0)
+	got := after(t, e, 0)
 	got[0].ID = "changed"
-	if e.RecordsAfter(0)[0].ID != "a" {
+	if after(t, e, 0)[0].ID != "a" {
 		t.Fatal("RecordsAfter shares the engine's records")
 	}
 	e2 := mustOpen(t, st, newPolicy(), newService())
-	if r := e2.RecordsAfter(2); len(r) != 1 || r[0].ID != "c" {
+	if r := after(t, e2, 2); len(r) != 1 || r[0].ID != "c" {
 		t.Fatalf("after restart RecordsAfter(2) = %+v", r)
+	}
+}
+
+// failingRead is a store whose whole-journal read fails once armed.
+type failingRead struct {
+	Store
+	fail bool
+}
+
+func (f *failingRead) ReadAll() ([]byte, error) {
+	if f.fail {
+		return nil, errors.New("read failed")
+	}
+	return f.Store.ReadAll()
+}
+
+// An unreadable journal is an error, not an empty tail, so a projection
+// never takes it for "nothing new" or for an empty journal.
+func TestRecordsAfterReturnsTheReadError(t *testing.T) {
+	st := &failingRead{Store: &MemStore{}}
+	e := mustOpen(t, st, newPolicy(), newService())
+	must(e.Submit(intent("a", "mail")))
+	st.fail = true
+	if recs, err := e.RecordsAfter(0); err == nil {
+		t.Fatalf("RecordsAfter on an unreadable journal = %+v, nil", recs)
 	}
 }
 
 // A caller that changes the intent in a returned record, in place, does not
 // change what the engine dispatches: projections and Trail readers get deep
-// copies (L3 on PR #722).
+// copies (L3 on PR #722). Both decode the journal afresh on main since
+// SIM-bound (#720); the test keeps that property from regressing.
 func TestReturnedRecordsDoNotAliasTheDispatchedIntent(t *testing.T) {
 	for name, read := range map[string]func(*Engine) []Record{
-		"RecordsAfter": func(e *Engine) []Record { return e.RecordsAfter(0) },
+		"RecordsAfter": func(e *Engine) []Record { return after(t, e, 0) },
 		"Trail":        (*Engine).Trail,
 	} {
 		t.Run(name, func(t *testing.T) {

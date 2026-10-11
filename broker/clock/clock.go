@@ -37,12 +37,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // State is the outcome of one check.
@@ -897,43 +898,13 @@ func (g *Guard) saveLocked() {
 	if v.Restricted {
 		v.Skew, v.Since = g.status.Skew, g.status.Since
 	}
-	if err := writeAtomic(g.cfg.StatePath, v); err != nil {
+	b, err := json.Marshal(v)
+	if err == nil {
+		err = durable.WriteFile(g.cfg.StatePath, b, 0o600)
+	}
+	if err != nil {
 		g.cfg.Logf("clock: state not saved: %v", err)
 	}
-}
-
-// writeAtomic writes v to path through a synced temporary file, renamed
-// into place, and syncs the directory so the rename survives power loss.
-func writeAtomic(path string, v saved) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".clock-*")
-	if err != nil {
-		return err
-	}
-	_, werr := tmp.Write(b)
-	if serr := tmp.Sync(); werr == nil {
-		werr = serr
-	}
-	if cerr := tmp.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr == nil {
-		werr = os.Rename(tmp.Name(), path)
-	}
-	if werr != nil {
-		_ = os.Remove(tmp.Name())
-		return werr
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }
 
 // maxOffset is the largest hardware-clock offset from UTC learned: time

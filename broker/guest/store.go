@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // store keeps unanswered owner messages on the broker's disk, so a broker
@@ -136,29 +137,5 @@ func (s *store) save() error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(s.path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return durable.WriteFile(s.path, b, 0o600)
 }

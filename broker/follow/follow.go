@@ -19,11 +19,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clock"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/maintain"
@@ -121,37 +121,7 @@ func (x *Executor) setUnsent(text string) error {
 		}
 		return nil
 	}
-	return writeAtomic(x.cfg.Pending, []byte(text))
-}
-
-// writeAtomic replaces path with b so a crash leaves the old or the new
-// file, never part of one.
-func writeAtomic(path string, b []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".pending-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return durable.WriteFile(x.cfg.Pending, []byte(text), 0o600)
 }
 
 func (x *Executor) options(now time.Time) update.Options {

@@ -43,7 +43,9 @@ type Projection interface {
 
 // Source is the journal as a projection reads it. *journal.Engine is one.
 type Source interface {
-	RecordsAfter(seq uint64) []journal.Record
+	// RecordsAfter returns the records after seq, oldest first, or the
+	// error reading the journal.
+	RecordsAfter(seq uint64) ([]journal.Record, error)
 }
 
 // Store keeps at most one snapshot per projection name.
@@ -111,19 +113,26 @@ func New(store Store, every uint64, ps ...Projection) (*Projector, error) {
 // Boot restores each projection from its latest usable snapshot and
 // replays the journal tail after it, or replays from empty. It returns the
 // report and any error saving a snapshot; a failed save leaves every
-// projection current.
+// projection current. If the journal cannot be read Boot returns the error
+// and no report: an empty projection is never presented as current.
 func (pr *Projector) Boot(src Source) (Report, error) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	rep := make(Report, len(pr.views))
 	var errs []error
 	for i, v := range pr.views {
-		from, tail, why := pr.restore(v, src)
+		from, tail, why, err := pr.restore(v, src)
+		if err != nil {
+			return nil, fmt.Errorf("projection %s: read journal: %w", v.p.Name(), err)
+		}
 		if why != "" {
 			if err := v.p.Restore(nil, 0); err != nil {
 				return nil, fmt.Errorf("projection %s: reset: %w", v.p.Name(), err)
 			}
-			from, tail, v.anchor = 0, src.RecordsAfter(0), ""
+			if tail, err = src.RecordsAfter(0); err != nil {
+				return nil, fmt.Errorf("projection %s: read journal: %w", v.p.Name(), err)
+			}
+			from, v.anchor = 0, ""
 		}
 		v.offset, v.snapAt, v.purge = from, from, false
 		rep[i] = Boot{Name: v.p.Name(), From: from, Fallback: why}
@@ -133,48 +142,59 @@ func (pr *Projector) Boot(src Source) (Report, error) {
 }
 
 // restore loads v's snapshot and returns its offset and the records after
-// it, or a reason it cannot be used. "" with offset 0 means no snapshot.
-func (pr *Projector) restore(v *view, src Source) (uint64, []journal.Record, string) {
+// it, or a reason it cannot be used. "" with offset 0 means no snapshot. A
+// non-nil error means the journal could not be read.
+func (pr *Projector) restore(v *view, src Source) (uint64, []journal.Record, string, error) {
 	v.anchor = ""
 	b, err := pr.store.Load(v.p.Name())
 	if err != nil {
 		if isNotExist(err) {
-			return 0, src.RecordsAfter(0), ""
+			recs, err := src.RecordsAfter(0)
+			return 0, recs, "", err
 		}
-		return 0, nil, "load: " + err.Error()
+		return 0, nil, "load: " + err.Error(), nil
 	}
 	h, data, err := decode(b)
 	if err != nil {
-		return 0, nil, err.Error()
+		return 0, nil, err.Error(), nil
 	}
 	if h.Name != v.p.Name() {
-		return 0, nil, fmt.Sprintf("snapshot names %q", h.Name)
+		return 0, nil, fmt.Sprintf("snapshot names %q", h.Name), nil
 	}
 	if h.Seq == 0 {
-		return 0, nil, "snapshot at offset 0"
+		return 0, nil, "snapshot at offset 0", nil
 	}
-	recs := src.RecordsAfter(h.Seq - 1)
+	recs, err := src.RecordsAfter(h.Seq - 1)
+	if err != nil {
+		return 0, nil, "", err
+	}
 	if len(recs) == 0 {
-		return 0, nil, fmt.Sprintf("snapshot at %d is beyond the journal", h.Seq)
+		return 0, nil, fmt.Sprintf("snapshot at %d is beyond the journal", h.Seq), nil
 	}
 	if anchor(recs[0]) != h.Anchor {
-		return 0, nil, fmt.Sprintf("snapshot at %d does not match the journal record there", h.Seq)
+		return 0, nil, fmt.Sprintf("snapshot at %d does not match the journal record there", h.Seq), nil
 	}
 	if err := v.p.Restore(data, h.Seq); err != nil {
-		return 0, nil, "restore: " + err.Error()
+		return 0, nil, "restore: " + err.Error(), nil
 	}
 	v.anchor = h.Anchor
-	return h.Seq, recs[1:], ""
+	return h.Seq, recs[1:], "", nil
 }
 
 // Sync applies the records written since the last Sync or Boot and saves
-// snapshots that are due.
+// snapshots that are due. If the journal cannot be read, each projection
+// stays at its offset and Sync returns the error.
 func (pr *Projector) Sync(src Source) error {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	var errs []error
 	for _, v := range pr.views {
-		errs = append(errs, pr.apply(v, src.RecordsAfter(v.offset)))
+		recs, err := src.RecordsAfter(v.offset)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("projection %s: read journal: %w", v.p.Name(), err))
+			continue
+		}
+		errs = append(errs, pr.apply(v, recs))
 	}
 	return errors.Join(errs...)
 }

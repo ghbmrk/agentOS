@@ -96,11 +96,21 @@ func state(t *testing.T, p Projection) string {
 	return string(b)
 }
 
+// after reads src.RecordsAfter(seq) and fails the test on a read error.
+func after(t *testing.T, src Source, seq uint64) []journal.Record {
+	t.Helper()
+	recs, err := src.RecordsAfter(seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recs
+}
+
 // fromEmpty builds a projection from the whole journal with no snapshot.
 func fromEmpty(t *testing.T, src Source, name string) string {
 	t.Helper()
 	p := newTally(name)
-	for _, r := range src.RecordsAfter(0) {
+	for _, r := range after(t, src, 0) {
 		p.Apply(r)
 	}
 	return state(t, p)
@@ -176,7 +186,7 @@ func generated(t *testing.T, seed int64, n int) (*journal.Engine, *journal.MemSt
 func TestPropertySnapshotPlusTailEqualsReplayFromEmpty(t *testing.T) {
 	for seed := int64(1); seed <= 60; seed++ {
 		e, _, rng := generated(t, seed, 80)
-		recs := e.RecordsAfter(0)
+		recs := after(t, e, 0)
 		want := fromEmpty(t, e, "t")
 		for range 5 {
 			k := rng.Intn(len(recs) + 1)
@@ -192,7 +202,7 @@ func TestPropertySnapshotPlusTailEqualsReplayFromEmpty(t *testing.T) {
 			if err := b.Restore(snap, uint64(k)); err != nil {
 				t.Fatalf("seed %d cut %d: restore: %v", seed, k, err)
 			}
-			for _, r := range e.RecordsAfter(uint64(k)) {
+			for _, r := range after(t, e, uint64(k)) {
 				b.Apply(r)
 			}
 			if got := state(t, b); got != want {
@@ -363,7 +373,7 @@ func TestBootStartsFromTheLatestSnapshot(t *testing.T) {
 	if _, err := pr.Boot(e); err != nil {
 		t.Fatal(err)
 	}
-	end := uint64(len(e.RecordsAfter(0)))
+	end := uint64(len(after(t, e, 0)))
 	p := newTally("t")
 	pr, _ = New(st, 1, p)
 	rep, err := pr.Boot(e)
@@ -580,5 +590,72 @@ func TestNewRefusesBadNames(t *testing.T) {
 	}
 	if _, err := New(&MemStore{}, 0, newTally("a")); err == nil {
 		t.Fatal("New accepted a zero period")
+	}
+}
+
+// flakySource fails every read once armed.
+type flakySource struct {
+	Source
+	fail bool
+}
+
+func (f *flakySource) RecordsAfter(seq uint64) ([]journal.Record, error) {
+	if f.fail {
+		return nil, errors.New("read failed")
+	}
+	return f.Source.RecordsAfter(seq)
+}
+
+// An unreadable journal never passes for an empty one (OP-4: the journal is
+// the source of truth). Boot fails rather than present an empty projection
+// as current, with or without a snapshot, and Sync reports the error and
+// leaves the projection at its offset, so the next Sync catches up.
+func TestUnreadableJournalIsAnErrorNotAnEmptyTail(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	e := open(t, &journal.MemStore{}, rng)
+	for range 20 {
+		step(e, rng, 20)
+	}
+	src := &flakySource{Source: e, fail: true}
+	st := &MemStore{}
+	pr, _ := New(st, 1, newTally("t"))
+	if rep, err := pr.Boot(src); err == nil {
+		t.Fatalf("boot without a snapshot on an unreadable journal = %+v, nil", rep)
+	}
+
+	src.fail = false
+	p := newTally("t")
+	pr, _ = New(st, 1, p)
+	if _, err := pr.Boot(src); err != nil {
+		t.Fatal(err)
+	}
+	src.fail = true
+	pr, _ = New(st, 1, newTally("t"))
+	if rep, err := pr.Boot(src); err == nil {
+		t.Fatalf("boot from a snapshot on an unreadable journal = %+v, nil", rep)
+	}
+
+	pr, _ = New(st, 1, p)
+	src.fail = false
+	if _, err := pr.Boot(src); err != nil {
+		t.Fatal(err)
+	}
+	before := state(t, p)
+	for range 10 {
+		step(e, rng, 20)
+	}
+	src.fail = true
+	if err := pr.Sync(src); err == nil {
+		t.Fatal("sync on an unreadable journal reported nothing")
+	}
+	if state(t, p) != before {
+		t.Fatal("a failed sync changed the projection")
+	}
+	src.fail = false
+	if err := pr.Sync(src); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := state(t, p), fromEmpty(t, e, "t"); got != want {
+		t.Fatal("projection not current once the journal reads again")
 	}
 }

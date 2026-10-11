@@ -226,6 +226,48 @@ class CONV0Test(unittest.TestCase):
         self.assertEqual(self.repo([("2026-10-09T23:00:00-04:00", row),
                                     ("2026-10-12T09:00:00-04:00", "| N-2 | plain | — | queued |\n")]), [])
 
+    def merged(self, resolution=""):
+        """A branch off an old base adds a file; main adds BOARD row O-1 (2026-10-09); the branch merges main
+        on 2026-10-12, adding `resolution` to BOARD.md in the merge commit. Returns the lint problems."""
+        row = "| O-1 | old (release, tier A) | — | queued (release) |\n"
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            def git(*a, date, check=True):
+                subprocess.run(["git", "-C", d, *a], check=check, capture_output=True,
+                               env={**self.ENV, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date})
+            git("init", "-q", "-b", "main", date="2026-10-01T00:00:00-04:00")
+            readme = GOOD["README.md"].replace("| [BOARD.md](BOARD.md) |", "| [BOARD.md](BOARD.md) |\n| [SPEC.md](SPEC.md) |")
+            for name, text in {**GOOD, "README.md": readme, "SPEC.md": "x\n"}.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(text)
+            board = HEAD + "| A-1 | [a](briefs/A-1.md) | — | in review (#1) |\n"
+            (root / "BOARD.md").write_text(board)
+            git("add", ".", date="2026-10-01T00:00:00-04:00")
+            git("commit", "-qm", "base", date="2026-10-01T00:00:00-04:00")
+            git("checkout", "-qb", "feat", date="2026-10-01T00:00:00-04:00")
+            (root / "note.txt").write_text("n")
+            git("add", ".", date="2026-10-11T09:00:00-04:00")
+            git("commit", "-qm", "feat", date="2026-10-11T09:00:00-04:00")
+            git("checkout", "-q", "main", date="2026-10-09T09:00:00-04:00")
+            (root / "BOARD.md").write_text(board + row)
+            git("add", ".", date="2026-10-09T09:00:00-04:00")
+            git("commit", "-qm", "row", date="2026-10-09T09:00:00-04:00")
+            git("checkout", "-q", "feat", date="2026-10-12T09:00:00-04:00")
+            git("merge", "-q", "--no-ff", "--no-commit", "main", date="2026-10-12T09:00:00-04:00")
+            (root / "BOARD.md").write_text(board + row + resolution)
+            git("add", ".", date="2026-10-12T09:00:00-04:00")
+            git("commit", "-qm", "merge main", date="2026-10-12T09:00:00-04:00")
+            return doclint.lint(root)
+
+    def test_a_row_merged_in_from_main_keeps_the_date_it_first_landed(self):
+        # A branch that merges main must not date main's older rows by the merge commit.
+        self.assertEqual(self.merged(), [])
+
+    def test_a_row_first_added_in_a_merge_resolution_is_still_checked(self):
+        got = self.merged("| N-1 | thing (release, tier A) | — | queued (release) |\n")
+        self.assertEqual(len(got), 1)
+        self.assertIn("BOARD.md: N-1", got[0])
+
     def test_rows_that_do_not_say_release_are_not_checked(self):
         self.assertEqual(self.repo([("2026-10-11T09:00:00-04:00", "| N-1 | the first release needs it | — | queued |\n")]), [])
 
