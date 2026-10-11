@@ -59,8 +59,9 @@ func (m *Manager) CheckpointAndStop(ctx context.Context, id string) (Snapshot, e
 		err = serr
 	}
 	if err != nil {
-		// The machine is stopped, but the sleep failed: its checkpoint
-		// is withdrawn, so the wake that follows resumes cold.
+		// The sleep failed: its checkpoint is withdrawn, so the wake
+		// that follows resumes cold. A guest that could not be killed
+		// stays Running and keeps its admission.
 		m.withdrawLocked(mc, s.ID, prev)
 		mc.mu.Unlock()
 		return Snapshot{}, err

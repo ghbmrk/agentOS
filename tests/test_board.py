@@ -18,6 +18,10 @@ import board  # noqa: E402
 import board_migrate  # noqa: E402
 from metrics import STATES  # noqa: E402
 
+# The live docs/LANES.md names whichever teams exist today; these tests pin a synthetic one.
+import re  # noqa: E402
+board.LANE = re.compile(r"\blane (teamb)\b")
+
 BOARD = """# BOARD
 
 Intro prose.
@@ -28,7 +32,7 @@ Section prose.
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| A-1 | [Pilot](briefs/A-1.md) | — | building (C; lane claude2) |
+| A-1 | [Pilot](briefs/A-1.md) | — | building (C; lane teamb) |
 | A-2 | [Done](briefs/A-2.md) | A-1 | merged (#1) |
 | A-3 | [Spec diff](briefs/A-3.md) | — | queued (B; Mark approves) |
 
@@ -79,7 +83,7 @@ class SchemaTest(unittest.TestCase):
 
     def test_labels_index_the_row(self):
         by_id = {board.issue_id(i): set(i["labels"]) for i in issues()}
-        self.assertEqual(by_id["A-1"], {board.MARKER, "state:building", "tier:C", "lane:claude2"})
+        self.assertEqual(by_id["A-1"], {board.MARKER, "state:building", "tier:C", "lane:teamb"})
         self.assertEqual(by_id["A-3"], {board.MARKER, "state:queued", "tier:B", "lane:primary", "gate:mark"})
         self.assertEqual(by_id["W-1"], {board.MARKER, "state:in review", "tier:A", "lane:primary", "class:release"})
         self.assertEqual(by_id["W-3"], {board.MARKER, "state:escalated", "lane:primary"})
@@ -106,7 +110,7 @@ class RoundTripTest(unittest.TestCase):
         planned = issues()
         a1 = next(i for i in planned if board.issue_id(i) == "A-1")
         a1["labels"] = [x for x in a1["labels"] if not x.startswith("state:")] + ["state:in review"]
-        self.assertIn("| A-1 | [Pilot](briefs/A-1.md) | — | in review (C; lane claude2) |", board.render(BOARD, planned))
+        self.assertIn("| A-1 | [Pilot](briefs/A-1.md) | — | in review (C; lane teamb) |", board.render(BOARD, planned))
 
     def test_an_issue_marked_terminal_leaves_the_board(self):
         planned = issues()
