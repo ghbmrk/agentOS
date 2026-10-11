@@ -195,7 +195,12 @@ func TestTheMailboxIsServedOnItsOwnSocket(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	_, srv, sock := mailRig(t)
 	path, tp := relay(t, sock)
-	c := mailsock.NewClient(path)
+	cl := mailsock.NewClient(path)
+	_, gen, err := cl.Account(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := cl.Pin(gen)
 	direct, err := imapsmtp.New(imapsmtp.Config{IMAP: srv.IMAP, SMTP: srv.SMTP, IMAPSec: imapsmtp.Plain, SMTPSec: imapsmtp.Plain,
 		From: mailtest.User, Credential: func(context.Context) (imapsmtp.Login, error) {
 			return imapsmtp.Login{User: mailtest.User, Secret: mailtest.Password}, nil
@@ -392,5 +397,43 @@ func TestAStoreHeldAcrossAChangeLogsInAsNoOne(t *testing.T) {
 				t.Fatalf("logins %v, submitted %d", l, len(s))
 			}
 		})
+	}
+}
+
+// TestTheMailAccountNamesItsGeneration (MAIL-gen): the generation the mail
+// socket serves is stable while the settings are, and differs for every
+// setting a replacement account can change, so a request bound to the old
+// account is refused by mailsock.
+func TestTheMailAccountNamesItsGeneration(t *testing.T) {
+	r, srv, _ := mailRig(t)
+	gen := func() string {
+		t.Helper()
+		a, err := r.c.mailSource()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a.Generation
+	}
+	first := gen()
+	if first == "" || first != gen() {
+		t.Fatalf("generation %q is empty or not stable", first)
+	}
+	base := mailSettings{Address: mailtest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}
+	seen := map[string]string{first: "first"}
+	for name, s := range map[string]mailSettings{
+		"address":  {Address: "other@example.test", IMAP: srv.IMAP, SMTP: srv.SMTP},
+		"imap":     {Address: base.Address, IMAP: srv.SMTP, SMTP: srv.SMTP},
+		"smtp":     {Address: base.Address, IMAP: srv.IMAP, SMTP: srv.IMAP},
+		"starttls": {Address: base.Address, IMAP: srv.IMAP, SMTP: srv.SMTP, StartTLS: true},
+		"user":     {Address: base.Address, IMAP: srv.IMAP, SMTP: srv.SMTP, User: "someone"},
+	} {
+		if err := r.c.setMail(s, mailtest.Password); err != nil {
+			t.Fatal(err)
+		}
+		g := gen()
+		if was, dup := seen[g]; dup {
+			t.Errorf("%s change keeps the generation of %s", name, was)
+		}
+		seen[g] = name
 	}
 }
