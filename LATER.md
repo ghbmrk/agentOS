@@ -707,6 +707,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SIM-check l1 | SIM-check (`recheck`): quality notes (`quality` record Evidence) are neither erased by `Erase` nor judged as content by CAP-3; establish whether a note can carry a deleted source's content |
 | SIM-check l2 | SIM-check: OP-3's predicate sees only revocation by `GrantRef`; pauses and expiry are not journal facts until SIM-cap |
 | SIM-check l3 | SIM-check (`recheck`): fuzz "Cleared" still trusts the target's own PASS lines (SIM brief goal, not in its change list) |
+| SIM-check l4 | SIM-check L3 (`recheck`): OP-3 counts a revocation only once its observation says `succeeded`, so a dispatch under the grant between the revoke's dispatch and its observation, or after a revoke that ended `unknown`, passes; widen with SIM-cap |
+| SIM-check l5 | SIM-check L3: each owner STATUS now runs a full journal read for the check note, on top of SIM-bound l1's read; fold into SIM-bound l1 / SIM-proj |
 
 ## Reuse candidates
 | ID | Component | Why |
