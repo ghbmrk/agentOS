@@ -153,6 +153,20 @@ func (n *loop2Notify) send(text string, urgent bool) {
 	}
 }
 
+// clear texts the owner a loops "Cleared" text as an update that the
+// hold sends only while the guard says its keys are still clear
+// (PACE-1).
+func (n *loop2Notify) clear(text string, keys []string) {
+	ch := n.ch.Load()
+	if ch == nil {
+		log.Printf("loop2: owner notice not sent: owner channel not attached")
+		return
+	}
+	if err := ch.PostAbout(ownerch.ClassUpdate, text, keys); err != nil {
+		log.Printf("loop2: owner notice not sent: %v", err)
+	}
+}
+
 // post sends text to the owner in class.
 func (n *loop2Notify) post(class ownerch.Class, text string) error {
 	ch := n.ch.Load()

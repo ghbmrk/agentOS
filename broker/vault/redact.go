@@ -32,8 +32,17 @@ type pattern struct {
 
 // NewRedactor builds a redactor for values. Empty values are ignored.
 func NewRedactor(values [][]byte) *Redactor {
-	r := &Redactor{}
+	return (&Redactor{}).With(values...)
+}
+
+// With returns a redactor that matches everything r matches and values
+// too. r is unchanged.
+func (r *Redactor) With(values ...[]byte) *Redactor {
 	seen := map[string]bool{}
+	for _, p := range r.pats {
+		seen[string(p.b)] = true
+	}
+	r = &Redactor{pats: append([]pattern(nil), r.pats...), maxLen: r.maxLen}
 	add := func(p string, fold bool) {
 		if len(p) < 4 || seen[p] {
 			return

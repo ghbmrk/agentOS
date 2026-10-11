@@ -133,11 +133,14 @@ func carries(r Record) bool {
 // rewriteErased rewrites the journal with erased intents' content removed
 // from every record. Records keep their sequence numbers and times, and
 // replaying the result gives the same state. A failed rewrite breaks the
-// engine, as a failed append does. Caller holds mu (or is Open).
+// engine, as a failed append does: RecErased is already committed, so a
+// retry would skip the intent and report success with its content still on
+// disk. Caller holds mu (or is Open).
 func (e *Engine) rewriteErased() error {
 	recs, err := e.readJournal()
 	if err != nil {
-		return err
+		e.broken = fmt.Errorf("%w: erase read: %v", ErrBroken, err)
+		return e.broken
 	}
 	erased := erasedIDs(recs)
 	var buf []byte
@@ -154,7 +157,8 @@ func (e *Engine) rewriteErased() error {
 		}
 		line, err := encodeRecord(r)
 		if err != nil {
-			return err
+			e.broken = fmt.Errorf("%w: erase encode: %v", ErrBroken, err)
+			return e.broken
 		}
 		buf = append(buf, line...)
 	}

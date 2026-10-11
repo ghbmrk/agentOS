@@ -756,11 +756,33 @@ func (e *Engine) InUse(account, action string, since time.Time) []Use {
 // effects and broker-state changes (OP-5). It reads the journal, not
 // memory, and is nil if the journal cannot be read.
 func (e *Engine) Trail() []Record {
-	recs, err := e.readJournal()
+	recs, err := e.ReadTrail()
 	if err != nil {
 		return nil
 	}
 	return recs
+}
+
+// ReadTrail is Trail with the read error, for a caller that must tell an
+// unreadable journal from an empty one (journal/check).
+func (e *Engine) ReadTrail() ([]Record, error) { return e.readJournal() }
+
+// RecordsAfter returns the journal records with a sequence number greater
+// than seq, oldest first. Records are numbered from 1 with no gaps, so a
+// projection that has applied through seq reads its tail here (SIM-proj).
+// Like Trail it decodes the journal afresh, so the records share nothing
+// with the intents the engine dispatches. Unlike Trail it returns the read
+// error, so a projection never mistakes an unreadable journal for an empty
+// tail.
+func (e *Engine) RecordsAfter(seq uint64) ([]Record, error) {
+	recs, err := e.readJournal()
+	if err != nil {
+		return nil, err
+	}
+	if seq >= uint64(len(recs)) {
+		return nil, nil
+	}
+	return recs[seq:], nil
 }
 
 // Fenced returns the intents on account that the last restart left

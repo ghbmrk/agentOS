@@ -498,3 +498,75 @@ func TestRunDeliversOnPublish(t *testing.T) {
 		t.Fatal("Run did not deliver a published event")
 	}
 }
+
+type failingRewrite struct {
+	recall.MemStore
+	fail bool
+}
+
+func (f *failingRewrite) Rewrite(data []byte) error {
+	if f.fail {
+		return errors.New("disk full")
+	}
+	return f.MemStore.Rewrite(data)
+}
+
+// A Forget whose rewrite fails stays pending: the retry erases the
+// content or reports the error, never returns nil with it still in the log
+// (P3-3-erase a).
+func TestForgetRetryAfterFailedRewrite(t *testing.T) {
+	log := &failingRewrite{}
+	st := stores{log, &recall.MemStore{}}
+	slow := &recorder{fail: 100}
+	b := mustOpen(t, st, []Trigger{{Name: "slow", Start: slow.start}})
+	mustPublish(t, b, Event{Kind: File, Ref: "/secret.txt", Body: "pangolin"})
+	src := testKeyer.SourceID(string(File), "", "/secret.txt")
+	log.fail = true
+	if err := b.Forget(src); err == nil {
+		t.Fatal("failed rewrite not reported")
+	}
+	log.fail = false
+	err := b.Forget(src)
+	data, _ := log.ReadAll()
+	if strings.Contains(string(data), "pangolin") {
+		t.Fatalf("retry returned %v with the content still in the log", err)
+	}
+}
+
+// A seen line a crash tore is cut off at Open, so the next ID is not
+// appended onto it and lost; after compaction and restart the event is
+// still recognised (P3-3-erase c).
+func TestTornSeenLineDoesNotLoseNextID(t *testing.T) {
+	st := mem()
+	r := &recorder{}
+	ts := []Trigger{{Name: "r", Start: r.start}}
+	b := mustOpen(t, st, ts)
+	mustPublish(t, b, Event{Kind: File, Ref: "/a", Version: "1"})
+	b.Pump(ctx)
+	// A crash cuts off a seen line part-way.
+	if err := st.seen.Append([]byte(`{"id":"evt-tor`)); err != nil {
+		t.Fatal(err)
+	}
+	b = mustOpen(t, st, ts)
+	ev := Event{Kind: File, Ref: "/b", Version: "1", Body: "okapi"}
+	mustPublish(t, b, ev)
+	b.Pump(ctx)
+	if r.count() != 2 {
+		t.Fatalf("deliveries: %d", r.count())
+	}
+	// The settled event leaves the log.
+	if err := b.Forget(testKeyer.SourceID(string(File), "", "/none")); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := st.log.ReadAll(); strings.Contains(string(data), "okapi") {
+		t.Fatal("test needs the settled event compacted away")
+	}
+	b = mustOpen(t, st, ts)
+	if _, fresh := mustPublish(t, b, ev); fresh {
+		t.Fatal("a seen event was taken as new after a torn seen line")
+	}
+	b.Pump(ctx)
+	if r.count() != 2 {
+		t.Fatalf("event redelivered: %d deliveries", r.count())
+	}
+}
