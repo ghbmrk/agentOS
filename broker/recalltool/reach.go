@@ -1039,4 +1039,4 @@ func (r *Reach) loc() *time.Location {
 // Needed reports a deleted item some lineage still holds: its tombstone
 // must outlive the prune policy (Index.KeepTombstones), so nothing derived
 // from it comes back and the reach is replayed at each start.
-func (r *Reach) Needed(id string) bool { return len(r.Prov.Holders(id)) > 0 }
+func (r *Reach) Needed(id string) bool { return len(r.Prov.Holders(id)) > 0 || r.Prov.Head(id) }
