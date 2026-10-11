@@ -25,7 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// REQ: ADP-2, OP-3, CH-11, CH-16, M9, M18, ARC-2
+// REQ: ADP-2, OP-3, CH-11, CH-16, M9, M18, ARC-2, CRED-1, M19
 
 // The mail account behind a test vault socket: the mailtest double, the
 // IMAP and SMTP store over it, and mailsock serving it, so the adapter
@@ -92,7 +92,7 @@ func mailBox(t *testing.T) (*mailtest.Server, mailsock.Account) {
 		t.Fatal(err)
 	}
 	srv.AddFolder("Receipts", "")
-	return srv, mailsock.Account{Store: st, Address: mailtest.User}
+	return srv, mailsock.Account{Store: st, Address: mailtest.User, Generation: "gen-1"}
 }
 
 // mailOwner is the owner channel as the gate uses it.
@@ -202,6 +202,16 @@ func newMailRig(t *testing.T, red journal.Redactor) *mailRig {
 	r.v = &mailVault{}
 	r.v.set(r.acct, nil)
 	r.sock = serveMail(t, r.v.source)
+	r.boot(red)
+	r.grant(grants.Spec{Account: mailAccount, Executor: mail.Tool, Ops: mail.Declared()})
+	return r
+}
+
+// boot builds the wrapper, gate and engine over the rig's journal file, as
+// the daemon does at start; restart calls it again on the same file.
+func (r *mailRig) boot(red journal.Redactor) {
+	t := r.t
+	t.Helper()
 	r.l = newLateMail()
 	r.l.tune = func(c *mail.Config) {
 		in := c.InUse
@@ -245,11 +255,18 @@ func newMailRig(t *testing.T, red journal.Redactor) *mailRig {
 	}
 	r.own = &mailOwner{reqs: map[string][]owner.Item{}, now: r.now}
 	r.g.Attach(r.eng, r.own)
-	r.grant(grants.Spec{Account: mailAccount, Executor: mail.Tool, Ops: mail.Declared()})
-	return r
 }
 
 func identity(s string) string { return s }
+
+// restart stops the daemon's pieces and builds them again over the same
+// journal file, with the owner's in-memory decisions and the wrapper's
+// generation record gone, as after a daemon restart.
+func (r *mailRig) restart() {
+	r.t.Helper()
+	r.st.Close()
+	r.boot(identity)
+}
 
 func (r *mailRig) now() time.Time {
 	r.mu.Lock()
@@ -273,7 +290,7 @@ func (r *mailRig) hookCalls() int {
 func (r *mailRig) bind() {
 	r.t.Helper()
 	c := mailsock.NewClient(r.sock)
-	if s := r.l.poll(context.Background(), r.eng, c, c, r.now); s != "mail: connected" {
+	if s := r.l.poll(context.Background(), r.eng, c, r.now); s != "mail: connected" {
 		r.t.Fatalf("bind: %s", s)
 	}
 }
@@ -412,7 +429,7 @@ func TestMailUnboundRefuses(t *testing.T) {
 	}
 	// The mutant "register the adapter before daemon.Run, with no
 	// engine" is refused: no adapter exists before the journal does.
-	if err := r.l.bind(nil, r.acct.Store, mailtest.User, r.now); !errors.Is(err, errMailNoJournal) || r.l.adapter() != nil {
+	if err := r.l.bind(nil, r.acct.Store, mailtest.User, "", r.now); !errors.Is(err, errMailNoJournal) || r.l.adapter() != nil {
 		t.Fatalf("bind without the journal: %v", err)
 	}
 	if r.hookCalls() != 0 {
@@ -593,7 +610,7 @@ func TestMailPollStates(t *testing.T) {
 	r := newMailRig(t, identity)
 	ctx := context.Background()
 	c := mailsock.NewClient(r.sock)
-	poll := func() string { return r.l.poll(ctx, r.eng, c, c, r.now) }
+	poll := func() string { return r.l.poll(ctx, r.eng, c, r.now) }
 	if s := poll(); s != "mail: connected" || r.l.adapter() == nil {
 		t.Fatalf("connect: %s", s)
 	}
@@ -614,10 +631,10 @@ func TestMailPollStates(t *testing.T) {
 		t.Fatalf("removed: %s", s)
 	}
 	gone := mailsock.NewClient(filepath.Join(t.TempDir(), "none.sock"))
-	if s := r.l.poll(ctx, r.eng, gone, gone, r.now); !strings.Contains(s, "did not answer") || r.l.adapter() != nil {
+	if s := r.l.poll(ctx, r.eng, gone, r.now); !strings.Contains(s, "did not answer") || r.l.adapter() != nil {
 		t.Fatalf("unreachable: %s", s)
 	}
-	if err := r.l.bind(r.eng, r.acct.Store, "", r.now); err == nil {
+	if err := r.l.bind(r.eng, r.acct.Store, "", "", r.now); err == nil {
 		t.Fatal("bound with no address")
 	}
 }
@@ -750,5 +767,144 @@ func TestMailDigestAndUndo(t *testing.T) {
 	r.advance(7*24*time.Hour + time.Minute)
 	if got := strings.Join(d.Owner().Handle(ctx, ownerNum, "UNDO "+undo), "\n"); !strings.Contains(got, "past its undo window") {
 		t.Fatalf("UNDO past the window: %q", got)
+	}
+}
+
+// TestMailPollRebindsOnANewGeneration (MAIL-gen): a mailbox replaced under
+// the same address is a new binding, and the store the old adapter holds
+// is refused from then on, so an approved intent cannot run against it.
+func TestMailPollRebindsOnANewGeneration(t *testing.T) {
+	r := newMailRig(t, identity)
+	ctx := context.Background()
+	c := mailsock.NewClient(r.sock)
+	if s := r.l.poll(ctx, r.eng, c, r.now); s != "mail: connected" {
+		t.Fatal(s)
+	}
+	_, gen, err := c.Account(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, old := r.l.adapter(), c.Pin(gen)
+	if _, err := old.Folders(ctx); err != nil {
+		t.Fatalf("before the switch: %v", err)
+	}
+	r.acct.Generation = "replaced"
+	r.v.set(r.acct, nil)
+	if _, err := old.Folders(ctx); !errors.Is(err, mailsock.ErrNotConnected) {
+		t.Fatalf("old store after the switch: %v", err)
+	}
+	if s := r.l.poll(ctx, r.eng, c, r.now); s != "mail: connected" || r.l.adapter() == a {
+		t.Fatalf("rebind: %s (rebound: %v)", s, r.l.adapter() != a)
+	}
+	if s := r.l.poll(ctx, r.eng, c, r.now); s != "mail: connected" || r.l.adapter() == a {
+		t.Fatalf("again: %s", s)
+	}
+}
+
+// switchMailbox replaces the vault's account with a second mailbox under
+// the same address and a new generation, holding the same message, and
+// polls so the binder rebinds to it.
+func (r *mailRig) switchMailbox(id string) *mailtest.Server {
+	r.t.Helper()
+	srv2, acct2 := mailBox(r.t)
+	acct2.Generation = "gen-2"
+	srv2.Deliver("INBOX", "From: Shop <deals@shop.example>\nTo: "+mailtest.User+"\nSubject: Autumn sale 1\n"+
+		"Date: Mon, 05 Oct 2026 08:00:00 +0000\nMessage-ID: "+id+"\nContent-Type: text/plain; charset=utf-8\n\nTwenty percent off boots.\n")
+	r.v.set(acct2, nil)
+	c := mailsock.NewClient(r.sock)
+	if s := r.l.poll(context.Background(), r.eng, c, r.now); s != "mail: connected" {
+		r.t.Fatalf("rebind: %s", s)
+	}
+	return srv2
+}
+
+// TestMailApprovalDoesNotCrossAccountGenerations (MAIL-gen B1): an intent
+// authorized, or approved by the owner, under one mailbox is not run,
+// executed or reconciled on a mailbox the address was rebound to.
+func TestMailApprovalDoesNotCrossAccountGenerations(t *testing.T) {
+	for _, asked := range []bool{false, true} {
+		name := "authorized"
+		if asked {
+			name = "asked"
+		}
+		t.Run(name, func(t *testing.T) {
+			r := newMailRig(t, identity)
+			r.l.undoable = !asked
+			r.bind()
+			ctx := context.Background()
+			id := r.news(1, "shop.example")
+			in := r.intent(mail.OpArchive, mailAccount, id)
+			if _, err := r.g.Submit(in); err != nil {
+				t.Fatal(err)
+			}
+			st, _ := r.g.Authorize(ctx, in.ID)
+			if asked && st.State != journal.Pending {
+				t.Fatalf("authorize: %s %q", st.State, st.Permission.Reason)
+			}
+			if !asked && st.State != journal.Authorized {
+				t.Fatalf("authorize: %s %q", st.State, st.Permission.Reason)
+			}
+			srv2 := r.switchMailbox(id)
+			if asked {
+				r.decideAll(true) // approved under gen-1, decided on gen-2
+			}
+			st, _ = r.g.Dispatch(ctx, in.ID)
+			if st, _ = r.eng.Get(in.ID); st.State == journal.Succeeded {
+				t.Fatalf("ran on the new mailbox: %s %q", st.State, st.Permission.Reason)
+			}
+			if f, _, _ := srv2.Find(id); f != "INBOX" {
+				t.Fatalf("the new mailbox's message moved to %s", f)
+			}
+			if out := r.l.Execute(ctx, in, 1); out.Result != journal.ResultNotApplied {
+				t.Fatalf("execute: %+v", out)
+			}
+			if out := r.l.Reconcile(ctx, in, 1); out.Result != journal.ResultUnknown {
+				t.Fatalf("reconcile: %+v", out)
+			}
+			if f, _, _ := srv2.Find(id); f != "INBOX" {
+				t.Fatalf("the new mailbox's message moved to %s", f)
+			}
+		})
+	}
+}
+
+// TestMailRestartDoesNotRunWhatWasAskedBefore (MAIL-gen M19): an intent
+// held for the owner's answer under one mailbox is not run on a mailbox
+// the address was rebound to across a daemon restart; the owner's answer
+// lives in memory only, so the restart cancels it.
+func TestMailRestartDoesNotRunWhatWasAskedBefore(t *testing.T) {
+	r := newMailRig(t, identity)
+	r.l.undoable = false
+	r.bind()
+	ctx := context.Background()
+	id := r.news(1, "shop.example")
+	in := r.intent(mail.OpArchive, mailAccount, id)
+	if _, err := r.g.Submit(in); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.g.Authorize(ctx, in.ID); st.State != journal.Pending {
+		t.Fatalf("authorize: %s %q", st.State, st.Permission.Reason)
+	}
+	srv1 := r.srv
+	srv2 := r.switchMailbox(id)
+	r.restart()
+	r.l.undoable = false
+	r.bind()
+	r.g.Dispatch(ctx, in.ID)
+	if st, _ := r.eng.Get(in.ID); st.State == journal.Succeeded {
+		t.Fatalf("ran across the restart: %s", st.State)
+	}
+	for n, srv := range map[string]*mailtest.Server{"old": srv1, "new": srv2} {
+		if f, _, _ := srv.Find(id); f != "INBOX" {
+			t.Fatalf("the %s mailbox's message moved to %s", n, f)
+		}
+	}
+}
+
+// TestMailGenKeepCoversApprovalWindow (MAIL-gen M19): the wrapper keeps an
+// intent's generation at least as long as an approval stays fresh.
+func TestMailGenKeepCoversApprovalWindow(t *testing.T) {
+	if genKeep < grants.DefaultFresh {
+		t.Fatalf("genKeep %s is shorter than the approval window %s", genKeep, grants.DefaultFresh)
 	}
 }
