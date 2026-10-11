@@ -172,7 +172,7 @@ func TestBetweenBoundsByTime(t *testing.T) {
 // breaks the engine, so a retry cannot skip the now-erased intent and
 // report success while its content is still on disk (P3-3-erase b).
 func TestEraseReadFailureIsNotRetriedAsSuccess(t *testing.T) {
-	st := &failingRead{}
+	st := &eraseFailingRead{}
 	e := mustOpen(t, st, newPolicy(), newService())
 	must(e.Submit(canaryIntent("a", "guest:L")))
 	st.fail = true
@@ -192,12 +192,12 @@ func TestEraseReadFailureIsNotRetriedAsSuccess(t *testing.T) {
 	}
 }
 
-type failingRead struct {
+type eraseFailingRead struct {
 	MemStore
 	fail bool
 }
 
-func (f *failingRead) ReadAll() ([]byte, error) {
+func (f *eraseFailingRead) ReadAll() ([]byte, error) {
 	if f.fail {
 		return nil, errors.New("read error")
 	}
