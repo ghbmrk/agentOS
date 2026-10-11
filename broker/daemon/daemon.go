@@ -176,7 +176,7 @@ type PageSocket struct {
 	// the page (OSS-10, follow.Executor.Describe): the page's request is
 	// then submitted to the gate as a follow intent, which the broker
 	// executor named grants.FollowExecutor must run. Nil refuses both ops.
-	DescribeRoot func(ctx context.Context, root []byte) (localapi.RootSummary, error)
+	DescribeRoot func(ctx context.Context, root []byte, chain [][]byte) (localapi.RootSummary, error)
 	// Forget, when set, lists the owner's recent tasks on the page and
 	// asks to forget one through FORGET's own ask (W3-forget-b3r); nil
 	// refuses both ops.

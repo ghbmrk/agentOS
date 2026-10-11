@@ -8,7 +8,6 @@ import (
 	"log"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/digestqueue"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	ownerch "github.com/ghbmrk/agentos/broker/owner"
 )
@@ -798,16 +798,7 @@ func prepareDigestDir(dir string) error {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
-	tmps, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
-	if err != nil {
-		return err
-	}
-	for _, t := range tmps {
-		if err := os.Remove(t); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	}
-	return nil
+	return durable.SweepTemp(dir)
 }
 
 // downStore is a store that does not open, for a digest directory

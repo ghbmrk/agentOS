@@ -279,3 +279,15 @@ func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResul
 	}
 	return ExecResult{ExitCode: 127, Stderr: []byte("not found\n")}, nil
 }
+
+// failSave makes every save of path fail until the returned func is called.
+func failSave(path string) func() {
+	real := writeFile
+	writeFile = func(p string, b []byte, perm os.FileMode) error {
+		if p == path {
+			return errors.New("synthetic save failure")
+		}
+		return real(p, b, perm)
+	}
+	return func() { writeFile = real }
+}

@@ -199,8 +199,12 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 // note about a failed step snapshot as its own content item, so a JSON
 // result stays whole (SR2-3s).
 func (m *machine) result(text string, isErr bool) map[string]any {
-	if !isErr && m.folds != nil {
-		text = m.folds.Hand(m.id, text)
+	if !isErr {
+		// Insignificant whitespace only. Strings, keys, and number text stay.
+		text = compactJSON(text)
+		if m.folds != nil {
+			text = m.folds.Hand(m.id, text)
+		}
 	}
 	res := toolResult(text, isErr)
 	if n := m.takeNote(); n != "" {
