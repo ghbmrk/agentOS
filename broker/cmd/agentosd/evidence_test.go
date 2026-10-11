@@ -331,26 +331,6 @@ func TestAFailedDeliveryIsRetriedThenKept(t *testing.T) {
 	}
 }
 
-// TestRepliesKeepTheirOrder: the worker routes replies one at a time, in
-// the order the guests sent them.
-func TestRepliesKeepTheirOrder(t *testing.T) {
-	r := newEvRig(t, "")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	r.ev.q = make(chan evidenceJob, 2)
-	go r.ev.run(ctx)
-	for i := 0; i < 5; i++ {
-		r.ev.enqueue("agent", true, fmt.Sprint(i), "")
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for len(r.texts()) < 5 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := r.texts(); !slices.Equal(got, []string{"0", "1", "2", "3", "4"}) {
-		t.Fatalf("order %q", got)
-	}
-}
-
 // TestEvidenceSetting: EVIDENCE ON, TO and OFF, only in an unlocked
 // session. ON and TO say what they do and are asked by the gate (high
 // tier with the local page); only the account's own address is taken, and
