@@ -83,6 +83,7 @@ func boot(t *testing.T, dir string) *broker {
 		cancel()
 		t.Fatal(err)
 	}
+	checkJournal(t, d.Engine())
 	mtr, err := meter.Open(meter.Config{Path: filepath.Join(dir, "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap})
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +129,7 @@ func TestA9OfflineScenario(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	t.Cleanup(func() { os.RemoveAll(dir) }) // after checkJournal, which reads the journal here
 	owner := filepath.Join(dir, "run", daemon.OwnerSocket)
 
 	b := boot(t, dir)
@@ -171,7 +172,7 @@ func TestCH2GuestFloodLeavesStopWorking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	t.Cleanup(func() { os.RemoveAll(dir) }) // after checkJournal, which reads the journal here
 	b := boot(t, dir)
 	defer b.stop()
 	gdir, err := b.plane.Open("m1")
