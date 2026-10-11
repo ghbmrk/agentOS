@@ -307,19 +307,22 @@ func TestAFixtureThatWritesGrantsFails(t *testing.T) {
 }
 
 // An allow line covers only the package it names: one written for another
-// package leaves the fixture's call flagged, and one written for the
+// package leaves each fixture flagged, and one written for the
 // fixture clears it, so the first result is the scoping and not a broken
 // allow.
 func TestAnAllowLineCoversOnlyItsPackage(t *testing.T) {
-	const fixture = "core/testdata/writesgrants"
-	for _, c := range []struct {
-		pkg  string
-		want int
-	}{{"control", 1}, {fixture, 0}} {
-		l := readList(t)
-		l.allow[c.pkg] = append(l.allow[c.pkg], "grants.Gate.Decide")
-		if found := writePaths(t, l, "./"+fixture); len(found) != c.want {
-			t.Errorf("allow %s grants.Gate.Decide: want %d finding(s) on the fixture, got %q", c.pkg, c.want, found)
+	// writesgrants calls the write path; decidesgrants reaches it through an
+	// interface, which writePaths checks separately.
+	for _, fixture := range []string{"core/testdata/writesgrants", "core/testdata/decidesgrants"} {
+		for _, c := range []struct {
+			pkg  string
+			want int
+		}{{"control", 1}, {fixture, 0}} {
+			l := readList(t)
+			l.allow[c.pkg] = append(l.allow[c.pkg], "grants.Gate.Decide")
+			if found := writePaths(t, l, "./"+fixture); len(found) != c.want {
+				t.Errorf("%s, allow %s grants.Gate.Decide: want %d finding(s), got %q", fixture, c.pkg, c.want, found)
+			}
 		}
 	}
 }
