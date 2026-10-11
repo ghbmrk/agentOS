@@ -92,7 +92,7 @@ Checks run cheapest first; each stage sees only what passed the one before. A PR
 | 3. L3 review | all | fresh session per PR (or per small batch of tier-C PRs); strongest model for tier A | diff, cited IDs, the brief | verdict in the PR (format below) | accept |
 | 4. Lens screen | A, B | fresh session per bundle | §4 checklist below | `reviews/<lens>/` | no blocker open |
 | 4a. Security section | A | separate fresh session, strongest model | the same | `reviews/security/` | signed |
-| 5. Merge | all | the PR's author team (§7) | — | — | stages above passed |
+| 5. Merge | all | the PR's author team (§7); on the peer subscriptions, any coordinator | — | — | stages above passed |
 
 Never a standing reviewer session: the one long-lived reviewer cost 27% of the first week.
 
@@ -106,6 +106,8 @@ Never a standing reviewer session: the one long-lived reviewer cost 27% of the f
 The second line is `Record: PR #N · package <ID> · head <SHA>`, same format as lens records.
 
 Each fix-list point cites a requirement ID or a concrete defect and carries its class (§2). METRICS counts causes per week, so L4 can tell whether to fix the spec, the briefs, the builders or the reviewers.
+
+The verdict comment's last line states the PR's next step and the reviews still owed (for example `Next: merge on green CI; owed: none`), so the comment alone tells a cold session what happens next (§5, §7).
 
 **Lens screen checklist.** The coordinator starts one fresh session per bundle: the tier A and B PRs that passed L3 when the screen starts, at least daily while any PR waits, from every team.
 
@@ -131,6 +133,7 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 - **Coordinator.** It routes, and merges (§4 stage 5) in its own turn, batching merge-ready PRs; investigation goes to a thread, so its context stays flat. A separate merge session would add a cold start. Its replacement is up to the harness, so there is no recycle rule.
 - **Chat posts.** Per thread: one acknowledgement, one result, one blocker reply; progress goes in the status checklist. Each post is another call at full context, and a thread reply probably also wakes the coordinator (inferred).
 - **Hand-off packet** when a session must continue elsewhere (20k tokens or less): the task and its BOARD ID; the failing check and its output, trimmed; the files that matter, with paths; what was tried and why it failed; the next step. Never a transcript.
+- **Live state lives on GitHub; handoff/CURRENT.md is the durable map.** Every review verdict comment ends with the PR's next step and the reviews still owed, so a cold coordinator on either subscription rebuilds in-flight state from open PRs, their latest verdict comments, check runs and BOARD.md. CURRENT.md holds the rebuild steps, standing decisions and a dated snapshot; edit it only when a standing decision changes, never per batch. A session needs no one to tell it to hand off: the packet above is written at the 150k-and-idle trigger, and anything else is already on GitHub.
 - **Models.** Tier-A authoring and tier-A reviews use the strongest model. Mechanical subagent work uses Haiku under 100k tokens (it costs 5x above). Judgement subagent work uses Sonnet. Where PLAN.md §4's initial routing table differs, this line wins.
 - **Pilots** of a cheaper route run as a BOARD row with the measures that judge them, and the result goes to DECISIONS.md.
 - **Sonnet pilot (from 2026-10-08, through the 2026-10-13 reset):** every tier B and C builder session runs on Sonnet 5.5: the coordinator starts it with that model, choosing the tier from the brief's declared scope; tier A stays on the strongest model. Before opening its PR the builder runs `tools/risk_tier.py`; if it prints A, the builder stops and writes a hand-off packet, and the coordinator continues the work in a strongest-model session. Each PR's Budget section names its builder model. Judge on PRs merged from 2026-10-08 to the 2026-10-13 reset against those merged the week before 2026-10-08: first-pass L3 accept, L3 rounds per merged PR and `Defect:` lines within 7 days of merge, counted by hand from the `Builder model:` lines (METRICS.md does not split by model); usage per merged PR from METRICS.md, the 2026-10-11 week against the 2026-10-04 week, noting the latter carries three pilot days, which narrows any gap. Keep Sonnet for B/C if none is worse; otherwise revert. The result is recorded in DECISIONS.md.
@@ -165,32 +168,34 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 
 METRICS.md (generated daily by `.github/workflows/metrics.yml`, once CONV-0 lands) carries first-pass L3 accept, L3 rounds and causes per merged PR, usage per merged PR, defects after merge and CI flakes, and the convergence measures of D-086: open PRs and `building` rows by age, follow-up rows created per merged PR by source review, and rows promoted from later to release. Usage comes from the manual readings in LEDGER.md, the only hand-kept input; Mark adds a reading when he chooses. Session-level spend (cache-write share, cold starts per merged PR, spend by role) is measured by the weekly cost routine outside the repository; any figure from it that drives a decision is copied into LEDGER.md with its date before anyone relies on it. Targets: first-pass accept rising toward 50%; L3 rounds per merged PR falling toward 1.5; cold starts per merged PR falling; follow-up rows per merged PR under 0.5; nothing idle past the §5 limit. Guard: if promotions from later to release or `Defect:` lines run above their baseline two weeks in a row, D-086's narrower release class is reverted. The earlier target of a cache-write share under 20% assumed reads at 0.1x; at 0.05x a session must reread its context about 160 times before writes fall to a fifth of input cost, so it was dropped (D-092).
 
-## 7. Working in parallel: a second subscription or another coding agent
+## 7. Working in parallel: two subscriptions as equal peers, or another coding agent
 
-Extra capacity (a second subscription, a teammate's agent, or another vendor's coding agent) multiplies progress only if the teams never build the same thing and never disagree about what is true. The design:
+Extra capacity (a second subscription, a teammate's agent, or another vendor's coding agent) multiplies progress only if the teams never build the same thing and never disagree about what is true. Mark's two Claude subscriptions are equal peers (2026-10-10): neither is the main one. Whichever has usage coordinates, builds, reviews and merges under the same rules; a session on either reads the newest file in handoff/ and carries on. The design:
 
-**One source of truth: the repository.** Chat history and any team's private memory are not sources of truth; a decision that matters is written to DECISIONS.md before anyone relies on it.
+**One source of truth: the repository.** Chat history and any team's private memory are not sources of truth; a decision that matters is written to DECISIONS.md before anyone relies on it. A cold session on either subscription resumes from the newest handoff/ file plus GitHub.
 
-**Disjoint lanes.** Each team owns whole subsystems behind stable interfaces, listed in docs/LANES.md. A team changes files only inside its lane. A change that must cross a lane boundary is an interface change: it goes as a PR to the owning team, or as an issue labelled `lane:<name>` if it needs their design.
+**No lane restriction between the two subscriptions.** Either may build any row. The lanes in docs/LANES.md apply only to a team that is not one of Mark's Claude subscriptions (another vendor's agent, a teammate), and a lane there is a safety boundary, not a ranking.
 
-**Claims on BOARD.md.** A team claims a row by a PR or commit to main that sets the row's state to `building` and its owner to the team name, before any work. A row with an owner belongs to that team until its state changes. Two claims on one row: the earlier merged one wins and the other stops.
+**Claims on BOARD.md.** A team claims a row by a PR or commit to main that sets the row's state to `building` and its owner to the team name, before any work. A row with an owner belongs to that team until its state changes. Two claims on one row: the earlier merged one wins and the other stops. Branch stems carry the team only when more than one team is active: `pkg/<team>-<id>-<slug>`.
 
-**Every team merges its own PRs; GitHub enforces the gates.** A PR merges only when its head contains current main and the required checks passed on that head (ruleset on main), and when its diff equals the diff its L3 accept recorded (`tools/premerge.py`). The merging team calls the merge with the head SHA, so a later push makes the merge fail. A PR's author team is its only pusher and its merger; a PR into another lane is merged by that lane's owner, who requests changes rather than pushing. Branch stems carry the team: `pkg/<team>-<id>-<slug>`.
+**Every team merges its own PRs; GitHub enforces the gates.** A PR merges only when its head contains current main and the required checks passed on that head (ruleset on main), and when its diff equals the diff its L3 accept recorded (`tools/premerge.py`). The merging team calls the merge with the head SHA, so a later push makes the merge fail. Mark's two subscriptions are one team of equal peers (D-099): any coordinator on either merges a PR of that team when every required review accepts the current head, CI is green and it merges cleanly (§3, §4; the project merge rule). Any other team is its PRs' only pusher and merger; a PR into another lane is merged by that lane's owner, who requests changes rather than pushing. Nobody pushes to another team's branch. Branch stems carry the team: `pkg/<team>-<id>-<slug>`.
 
-**Each team runs the whole pipeline on its own PRs.** Stages 1–4a (§4) run on the author team's subscription, in fresh sessions. Every L3 verdict and lens record names the head it reviewed (`head <SHA>`).
+**Each team runs the whole pipeline on its own PRs.** Stages 1–4a (§4) run on the author team's subscription, in fresh sessions; each PR gets a fresh L3 review (§4 stage 3) in a new session, never the PR's builder session. The lens screen on tier A and B PRs follows §4; a tier C PR merges on an L3 accept and green CI (§4 stages 4-5). Every L3 verdict and lens record names the head it reviewed (`head <SHA>`).
 
-**IDs never collide.** The primary team numbers decisions `D-NNN`; every other team uses `D-<team>-NNN` and prefixes the BOARD rows it creates (claude2: `C2-`). Each team appends only to its own section of BOARD.md, LATER.md and DECISIONS.md. doclint fails on a duplicate ID.
+**Every review verdict comment ends with the PR's next step and the reviews still owed**, so GitHub stays the live handoff and handoff/CURRENT.md only holds standing decisions and a dated snapshot.
+
+**IDs never collide.** The peer team numbers decisions `D-NNN`; every other team uses `D-<team>-NNN` and prefixes the BOARD rows it creates (claude2: `C2-`). Each team appends only to its own section of BOARD.md, LATER.md and DECISIONS.md. doclint fails on a duplicate ID.
 
 **Ownership moves by hand-off or takeover.** A hand-off is a `handoff` issue (the §5 packet) accepted by a claim PR. A row whose owner shows no activity on it for 24 hours may be claimed by a PR citing the last activity. A team continuing another team's PR branches from its head and opens a new PR; it never pushes to the old branch.
 
 **GitHub is the bus.** PRs and issues carry everything between teams: claims, interface requests, blockers, review verdicts. No team needs access to another team's chat, sessions or memory.
 
-**Hand-off to a new team** is one onboarding PR from the primary team that adds the team's lane and an onboarding section to docs/LANES.md: the BOARD rows in its lane with their state, and the interfaces it may call. The new team's first session reads only that PR plus README.md's reading order for its role.
+**Hand-off to a new team** is one onboarding PR that adds the team's lane and an onboarding section to docs/LANES.md: the BOARD rows in its lane with their state, and the interfaces it may call. The new team's first session reads only that PR plus README.md's reading order for its role.
 
-**Credentials stay with their owner.** No team shares a subscription login, token or key with another, in the repo or anywhere else. Each team runs on its own account.
+**Credentials stay with their owner.** No team shares a subscription login, token or key with another, in the repo or anywhere else. Each subscription runs on its own account.
 
 **Terms.** Anthropic subscriptions may be used only through Claude Code and claude.ai; a second Claude subscription for the same person needs its terms checked before purchase. OpenAI's Codex CLI on a ChatGPT plan is OpenAI's own tool and fine on its own account. AGENTS.md is the entry point Codex reads.
 
-**Chat coordination.** Each team's coordinator follows the coordinator chat layout in §5 (standing threads, merge rule, asks as cards, verified blockers).
+**Chat coordination.** Each coordinator follows the coordinator chat layout in §5 (standing threads, merge rule, asks as cards, verified blockers).
 
-Lanes, and each team's onboarding record, are in docs/LANES.md.
+Lanes for other teams, and each team's onboarding record, are in docs/LANES.md.
