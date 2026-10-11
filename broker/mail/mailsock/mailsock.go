@@ -65,7 +65,10 @@ const (
 )
 
 type request struct {
-	Op       string    `json:"op"`
+	Op string `json:"op"`
+	// Gen is the account generation the caller bound to. The vault process
+	// refuses a request whose Gen is not the account it serves now (MAIL-gen).
+	Gen      string    `json:"gen,omitempty"`
 	Folder   string    `json:"folder,omitempty"`
 	Validity uint32    `json:"validity,omitempty"`
 	UIDs     []uint32  `json:"uids,omitempty"`
@@ -83,6 +86,7 @@ type request struct {
 type reply struct {
 	Error    string         `json:"error,omitempty"`
 	Address  string         `json:"address,omitempty"`
+	Gen      string         `json:"gen,omitempty"`
 	Folders  []mail.Folder  `json:"folders,omitempty"`
 	Validity uint32         `json:"validity,omitempty"`
 	UIDs     []uint32       `json:"uids,omitempty"`
@@ -91,9 +95,12 @@ type reply struct {
 
 // Account is the mailbox the vault process serves: a Store holding the
 // credential, and the owner's address, the only one Submit sends as.
+// Generation names these settings: it changes whenever the account is
+// replaced or reconfigured, and a request bound to another one is refused.
 type Account struct {
-	Store   mail.Store
-	Address string
+	Store      mail.Store
+	Address    string
+	Generation string
 }
 
 // Source returns the account for one call. It fails with ErrNotConnected
@@ -137,6 +144,11 @@ func call(ctx context.Context, req request, src Source) (reply, error) {
 	if err != nil {
 		return reply{}, err
 	}
+	// A bound request meets the account it was approved against or none:
+	// the check is on the same account value the call then uses (MAIL-gen).
+	if req.Op != "address" && req.Gen != acct.Generation {
+		return reply{}, ErrNotConnected
+	}
 	s := acct.Store
 	var rep reply
 	switch req.Op {
@@ -146,7 +158,7 @@ func call(ctx context.Context, req request, src Source) (reply, error) {
 		if acct.Address == "" {
 			return reply{}, ErrNotConnected
 		}
-		rep.Address = acct.Address
+		rep.Address, rep.Gen = acct.Address, acct.Generation
 	case "folders":
 		rep.Folders, err = s.Folders(ctx)
 	case "uids":
@@ -275,6 +287,22 @@ func (c *Client) Address(ctx context.Context) (string, error) {
 	return rep.Address, err
 }
 
+// Account returns the owner's address and the generation of the account
+// that holds it, with Address's errors.
+func (c *Client) Account(ctx context.Context) (address, generation string, err error) {
+	rep, err := c.do(ctx, request{Op: "address"})
+	if err == nil && rep.Address == "" {
+		err = ErrNotConnected
+	}
+	return rep.Address, rep.Gen, err
+}
+
+// Pin returns a Store whose every call carries generation gen, so it is
+// refused with ErrNotConnected once the vault process serves another
+// account. An adapter takes its Store from Pin(gen) for the generation it
+// checked, never from a Client, which asks for the account of the moment.
+func (c *Client) Pin(gen string) mail.Store { return pinned{c, gen} }
+
 func (c *Client) Folders(ctx context.Context) ([]mail.Folder, error) {
 	rep, err := c.do(ctx, request{Op: "folders"})
 	return rep.Folders, err
@@ -317,5 +345,61 @@ func (c *Client) Append(ctx context.Context, folder string, flags []string, date
 
 func (c *Client) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 	_, err := c.do(ctx, request{Op: "submit", Rcpt: rcpt, Raw: raw})
+	return err
+}
+
+// pinned is a mail.Store over c bound to one account generation.
+type pinned struct {
+	c   *Client
+	gen string
+}
+
+func (p pinned) do(ctx context.Context, req request) (reply, error) {
+	req.Gen = p.gen
+	return p.c.do(ctx, req)
+}
+
+func (p pinned) Folders(ctx context.Context) ([]mail.Folder, error) {
+	rep, err := p.do(ctx, request{Op: "folders"})
+	return rep.Folders, err
+}
+
+func (p pinned) UIDs(ctx context.Context, folder string) (uint32, []uint32, error) {
+	rep, err := p.do(ctx, request{Op: "uids", Folder: folder})
+	return rep.Validity, rep.UIDs, err
+}
+
+func (p pinned) Fetch(ctx context.Context, folder string, validity uint32, uids []uint32) ([]mail.Message, error) {
+	rep, err := p.do(ctx, request{Op: "fetch", Folder: folder, Validity: validity, UIDs: uids})
+	return rep.Messages, err
+}
+
+func (p pinned) Find(ctx context.Context, folder, id string) ([]mail.Message, error) {
+	rep, err := p.do(ctx, request{Op: "find", Folder: folder, ID: id})
+	return rep.Messages, err
+}
+
+func (p pinned) SetFlags(ctx context.Context, m mail.Ref, add, remove []string) error {
+	_, err := p.do(ctx, request{Op: "set_flags", Ref: m, Add: add, Remove: remove})
+	return err
+}
+
+func (p pinned) Move(ctx context.Context, m mail.Ref, to string) error {
+	_, err := p.do(ctx, request{Op: "move", Ref: m, To: to})
+	return err
+}
+
+func (p pinned) Ensure(ctx context.Context, folder string) error {
+	_, err := p.do(ctx, request{Op: "ensure", Folder: folder})
+	return err
+}
+
+func (p pinned) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) error {
+	_, err := p.do(ctx, request{Op: "append", Folder: folder, Flags: flags, Date: date, Raw: raw})
+	return err
+}
+
+func (p pinned) Submit(ctx context.Context, rcpt []string, raw []byte) error {
+	_, err := p.do(ctx, request{Op: "submit", Rcpt: rcpt, Raw: raw})
 	return err
 }

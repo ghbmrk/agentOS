@@ -406,3 +406,65 @@ func TestAPanicCostsOnlyItsCall(t *testing.T) {
 		t.Fatal("panic value crossed the socket")
 	}
 }
+
+// switching is a Source whose account can be replaced between calls, as
+// the vault process's is when the owner sets up a different mailbox.
+type switching struct {
+	mu  sync.Mutex
+	now mailsock.Account
+}
+
+func (s *switching) set(a mailsock.Account) { s.mu.Lock(); s.now = a; s.mu.Unlock() }
+func (s *switching) source() (mailsock.Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.now, nil
+}
+
+func withGen(a mailsock.Source, gen string) mailsock.Account {
+	acct, _ := a()
+	acct.Generation = gen
+	return acct
+}
+
+// TestSwitchedMailboxRefusesBoundCalls (MAIL-gen, CRED-1, ADP-2): a store
+// bound to one generation of the account is refused with ErrNotConnected
+// once the vault process serves another, even one with the same address,
+// and the second mailbox is untouched.
+func TestSwitchedMailboxRefusesBoundCalls(t *testing.T) {
+	first, second := mailtest.Start(t), mailtest.Start(t)
+	sw := &switching{}
+	sw.set(withGen(account(t, first), "gen-1"))
+	path, _ := serve(t, sw.source)
+	c := mailsock.NewClient(path)
+	_, gen, err := c.Account(ctx)
+	if err != nil || gen != "gen-1" {
+		t.Fatalf("account: %q %v", gen, err)
+	}
+	bound := c.Pin(gen)
+	raw := []byte("From: " + me + "\r\nTo: friend@example.test\r\nSubject: hi\r\n\r\nhello\r\n")
+	r := mail.Ref{Folder: "INBOX", Validity: 1, UID: 1}
+	calls := map[string]func() error{
+		"append":    func() error { return bound.Append(ctx, "Drafts", nil, time.Now(), raw) },
+		"ensure":    func() error { return bound.Ensure(ctx, "Archive") },
+		"set flags": func() error { return bound.SetFlags(ctx, r, []string{mail.Seen}, nil) },
+		"move":      func() error { return bound.Move(ctx, r, "Archive") },
+		"submit":    func() error { return bound.Submit(ctx, []string{"friend@example.test"}, raw) },
+		"folders":   func() error { _, err := bound.Folders(ctx); return err },
+	}
+	if err := calls["ensure"](); err != nil {
+		t.Fatalf("before the switch: %v", err)
+	}
+	sw.set(withGen(account(t, second), "gen-2"))
+	for name, call := range calls {
+		if err := call(); !errors.Is(err, mailsock.ErrNotConnected) {
+			t.Errorf("%s after the switch: %v", name, err)
+		}
+	}
+	if n, l := len(second.Submitted()), len(second.Logins()); n != 0 || l != 0 {
+		t.Fatalf("the second mailbox saw %d submissions and %d logins", n, l)
+	}
+	if _, _, err := c.Pin("gen-2").UIDs(ctx, "INBOX"); err != nil {
+		t.Fatalf("a store bound to the new generation: %v", err)
+	}
+}

@@ -719,6 +719,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | PACE-1 f2 | Builder: `ToldCleared` is marked when the cleared line is queued, not when the owner hears it, so a dropped stale clear still counts as told; the return was texted as `Back`, so the owner is not left on a false all-clear |
 | PACE-1 f3 | Builder: two true "Cleared" texts for one key (one held, one later) can both send; redundant, never false |
 | PACE-1 f4 | Builder `recheck`: the hook check and the modem send are not atomic, and an urgent pass with cleared lines sends without revalidation; both windows are sub-second and the urgent return follows any stale clear |
+| RECOVERY-trim | `recheck`. `broker/recovery/backuplog.go` saveLog trims to the newest 200 entries, and the old-key note reads only kept entries, so trimming can forget copies made under an earlier key. Condition for W6's brief: never trim entries whose key is not the current one while `KeyChangedAt` is set. Low; unwired |
+| WATCH-deleted | `recheck`. `broker/mail/watch.go` saves the cursor before it calls `Deleted`, so a failed or crashed deletion never retries. Wiring precondition (also in `broker/mail/ASSUMPTIONS.md` M7): keep pending deletions durable until acknowledged |
 
 ## Reuse candidates
 | ID | Component | Why |

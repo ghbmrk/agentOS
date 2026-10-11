@@ -25,7 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// REQ: ADP-2, OP-3, CH-11, CH-16, M9, M18, ARC-2
+// REQ: ADP-2, OP-3, CH-11, CH-16, M9, M18, ARC-2, CRED-1
 
 // The mail account behind a test vault socket: the mailtest double, the
 // IMAP and SMTP store over it, and mailsock serving it, so the adapter
@@ -273,7 +273,7 @@ func (r *mailRig) hookCalls() int {
 func (r *mailRig) bind() {
 	r.t.Helper()
 	c := mailsock.NewClient(r.sock)
-	if s := r.l.poll(context.Background(), r.eng, c, c, r.now); s != "mail: connected" {
+	if s := r.l.poll(context.Background(), r.eng, c, r.now); s != "mail: connected" {
 		r.t.Fatalf("bind: %s", s)
 	}
 }
@@ -412,7 +412,7 @@ func TestMailUnboundRefuses(t *testing.T) {
 	}
 	// The mutant "register the adapter before daemon.Run, with no
 	// engine" is refused: no adapter exists before the journal does.
-	if err := r.l.bind(nil, r.acct.Store, mailtest.User, r.now); !errors.Is(err, errMailNoJournal) || r.l.adapter() != nil {
+	if err := r.l.bind(nil, r.acct.Store, mailtest.User, "", r.now); !errors.Is(err, errMailNoJournal) || r.l.adapter() != nil {
 		t.Fatalf("bind without the journal: %v", err)
 	}
 	if r.hookCalls() != 0 {
@@ -593,7 +593,7 @@ func TestMailPollStates(t *testing.T) {
 	r := newMailRig(t, identity)
 	ctx := context.Background()
 	c := mailsock.NewClient(r.sock)
-	poll := func() string { return r.l.poll(ctx, r.eng, c, c, r.now) }
+	poll := func() string { return r.l.poll(ctx, r.eng, c, r.now) }
 	if s := poll(); s != "mail: connected" || r.l.adapter() == nil {
 		t.Fatalf("connect: %s", s)
 	}
@@ -614,10 +614,10 @@ func TestMailPollStates(t *testing.T) {
 		t.Fatalf("removed: %s", s)
 	}
 	gone := mailsock.NewClient(filepath.Join(t.TempDir(), "none.sock"))
-	if s := r.l.poll(ctx, r.eng, gone, gone, r.now); !strings.Contains(s, "did not answer") || r.l.adapter() != nil {
+	if s := r.l.poll(ctx, r.eng, gone, r.now); !strings.Contains(s, "did not answer") || r.l.adapter() != nil {
 		t.Fatalf("unreachable: %s", s)
 	}
-	if err := r.l.bind(r.eng, r.acct.Store, "", r.now); err == nil {
+	if err := r.l.bind(r.eng, r.acct.Store, "", "", r.now); err == nil {
 		t.Fatal("bound with no address")
 	}
 }
@@ -750,5 +750,32 @@ func TestMailDigestAndUndo(t *testing.T) {
 	r.advance(7*24*time.Hour + time.Minute)
 	if got := strings.Join(d.Owner().Handle(ctx, ownerNum, "UNDO "+undo), "\n"); !strings.Contains(got, "past its undo window") {
 		t.Fatalf("UNDO past the window: %q", got)
+	}
+}
+
+// TestMailPollRebindsOnANewGeneration (MAIL-gen): a mailbox replaced under
+// the same address is a new binding, and the store the old adapter holds
+// is refused from then on, so an approved intent cannot run against it.
+func TestMailPollRebindsOnANewGeneration(t *testing.T) {
+	r := newMailRig(t, identity)
+	ctx := context.Background()
+	c := mailsock.NewClient(r.sock)
+	if s := r.l.poll(ctx, r.eng, c, r.now); s != "mail: connected" {
+		t.Fatal(s)
+	}
+	a, old := r.l.adapter(), c.Pin("")
+	if _, err := old.Folders(ctx); err != nil {
+		t.Fatalf("before the switch: %v", err)
+	}
+	r.acct.Generation = "replaced"
+	r.v.set(r.acct, nil)
+	if _, err := old.Folders(ctx); !errors.Is(err, mailsock.ErrNotConnected) {
+		t.Fatalf("old store after the switch: %v", err)
+	}
+	if s := r.l.poll(ctx, r.eng, c, r.now); s != "mail: connected" || r.l.adapter() == a {
+		t.Fatalf("rebind: %s (rebound: %v)", s, r.l.adapter() != a)
+	}
+	if s := r.l.poll(ctx, r.eng, c, r.now); s != "mail: connected" || r.l.adapter() == a {
+		t.Fatalf("again: %s", s)
 	}
 }

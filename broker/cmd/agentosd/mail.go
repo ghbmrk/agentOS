@@ -50,6 +50,7 @@ var (
 type mailBound struct {
 	a    *mail.Adapter
 	addr string // as the vault process reported it
+	gen  string // the account generation the adapter's store is bound to
 }
 
 type lateMail struct {
@@ -104,7 +105,7 @@ func evidenceReadable(red journal.Redactor) bool {
 // bind builds the adapter over store for the account at address, with
 // its organize bound counted from eng for this account alone (M18), and
 // makes it the one l serves.
-func (l *lateMail) bind(eng *journal.Engine, store mail.Store, address string, now func() time.Time) error {
+func (l *lateMail) bind(eng *journal.Engine, store mail.Store, address, gen string, now func() time.Time) error {
 	if eng == nil {
 		return errMailNoJournal
 	}
@@ -118,7 +119,7 @@ func (l *lateMail) bind(eng *journal.Engine, store mail.Store, address string, n
 	if err != nil {
 		return err
 	}
-	l.b.Store(&mailBound{a: a, addr: address})
+	l.b.Store(&mailBound{a: a, addr: address, gen: gen})
 	return nil
 }
 
@@ -190,21 +191,25 @@ func (l *lateMail) Main() (string, string) {
 	return a.Address(), l.account
 }
 
+// mailAddresser reports the account the vault process serves now, and
+// pins a store to one of its generations: a bound adapter's calls then
+// fail once the owner sets up another mailbox (MAIL-gen).
 type mailAddresser interface {
-	Address(context.Context) (string, error)
+	Account(context.Context) (address, generation string, err error)
+	Pin(generation string) mail.Store
 }
 
 // run keeps l bound to the account the vault process serves, asking every
-// tick: bound once it reports an address (again if the address changes),
+// tick: bound once it reports an address (again if the address or the account generation changes),
 // unbound when none is set up. While the vault is locked or does not
 // answer, l stays as it was: a bound adapter's own calls then fail, so its
 // guard denies and nothing is organized. Only changes of state are logged.
-func (l *lateMail) run(ctx context.Context, eng *journal.Engine, src mailAddresser, store mail.Store, now func() time.Time, every time.Duration, logf func(string, ...any)) {
+func (l *lateMail) run(ctx context.Context, eng *journal.Engine, src mailAddresser, now func() time.Time, every time.Duration, logf func(string, ...any)) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	state := ""
 	for {
-		if s := l.poll(ctx, eng, src, store, now); s != state {
+		if s := l.poll(ctx, eng, src, now); s != state {
 			state = s
 			logf("%s", s)
 		}
@@ -217,16 +222,16 @@ func (l *lateMail) run(ctx context.Context, eng *journal.Engine, src mailAddress
 }
 
 // poll is one tick of run; it returns the state's log line.
-func (l *lateMail) poll(ctx context.Context, eng *journal.Engine, src mailAddresser, store mail.Store, now func() time.Time) string {
+func (l *lateMail) poll(ctx context.Context, eng *journal.Engine, src mailAddresser, now func() time.Time) string {
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	addr, err := src.Address(cctx)
+	addr, gen, err := src.Account(cctx)
 	switch {
 	case err == nil:
-		if b := l.b.Load(); b != nil && b.addr == addr {
+		if b := l.b.Load(); b != nil && b.addr == addr && b.gen == gen {
 			return "mail: connected"
 		}
-		if err := l.bind(eng, store, addr, now); err != nil {
+		if err := l.bind(eng, src.Pin(gen), addr, gen, now); err != nil {
 			l.unbind()
 			return fmt.Sprintf("mail: the account could not be used (%v); organize is refused", err)
 		}
@@ -445,7 +450,7 @@ func (s *mailSource) Ack(_ context.Context, snap digestqueue.Snapshot) error {
 // changes stay in the journal.
 func wireMail(ctx context.Context, l *lateMail, d *daemon.Daemon, socket, learnDir string, dg *digestBox, digestDir string, now func() time.Time) {
 	c := mailsock.NewClient(socket)
-	go l.run(ctx, d.Engine(), c, c, now, mailPoll, log.Printf)
+	go l.run(ctx, d.Engine(), c, now, mailPoll, log.Printf)
 	key, err := readValuesKey(filepath.Join(learnDir, "values.key"))
 	if err != nil {
 		log.Printf("mail: no UNDO or digest line for mail changes: %v", err)
