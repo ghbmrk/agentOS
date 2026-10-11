@@ -19,8 +19,8 @@ import (
 // (journal.Engine).
 type Journal interface {
 	Between(origin string, from, until time.Time) []string
+	StatusBetween(origin string, from, until time.Time) []journal.Status
 	Erase(ids []string) (erased, held []string, err error)
-	Get(id string) (journal.Status, error)
 }
 
 // Machines is the part of the VM manager deletion reaches (vm.Manager,
@@ -709,12 +709,7 @@ func (r *Reach) actions(lineage string, since, until time.Time) int {
 		return 0
 	}
 	n := 0
-	for _, id := range r.Journal.Between("guest:"+lineage, since, until) {
-		st, err := r.Journal.Get(id)
-		if err != nil {
-			n++ // unknown: count it, so the owner is asked
-			continue
-		}
+	for _, st := range r.Journal.StatusBetween("guest:"+lineage, since, until) {
 		switch st.State {
 		case journal.Succeeded, journal.InFlight, journal.OutcomeUnknown:
 			n++
