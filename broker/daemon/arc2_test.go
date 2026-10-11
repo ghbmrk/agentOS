@@ -23,16 +23,18 @@ var controlPath = map[string][]string{
 	"journal": {},
 	// The durable-write helper (SIM-fs) every package may import: file
 	// calls only, held to the control path's rules here.
-	"durable":   {},
-	"control":   {"journal"},
-	"admission": {},
-	"sockets":   {},
-	"cgroup":    {},
-	"budget":    {"admission", "cgroup"}, // RES-2 component budget (P2-5)
-	"accel":     {"admission"},           // RES-3 discovery from sysfs (P2-5)
-	"owner":     {"boxname", "control", "journal", "modem"},
-	"modem":     {},
-	"boxname":   {}, // CH-21 name check, for NAME
+	"durable": {},
+	// The journal checker (SIM-check): pure predicates over records.
+	"journal/check": {"journal"},
+	"control":       {"journal"},
+	"admission":     {},
+	"sockets":       {},
+	"cgroup":        {},
+	"budget":        {"admission", "cgroup"}, // RES-2 component budget (P2-5)
+	"accel":         {"admission"},           // RES-3 discovery from sysfs (P2-5)
+	"owner":         {"boxname", "control", "journal", "modem"},
+	"modem":         {},
+	"boxname":       {}, // CH-21 name check, for NAME
 	// The modem bridge's contract and agentosd's end of it (P2-3w): types
 	// and an in-process queue; the bridge's client is bridgeclient.
 	"bridgeproto": {},
@@ -51,7 +53,7 @@ var controlPath = map[string][]string{
 	// Reversible forms (REV-3) are declarations the gate validates: pure
 	// data, held to the control path's rules.
 	"reversible": {"journal", "verb"},
-	"daemon":     {"journal", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv"},
+	"daemon":     {"journal", "journal/check", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
