@@ -17,7 +17,7 @@ func TestOfflineFirstBootSaysSoAndHoldsAI(t *testing.T) {
 	r.hooks.progress = Progress{Phase: "offline"}
 	r.hooks.mu.Unlock()
 	page := r.get("/setup")
-	for _, want := range []string{"offline (setup can continue)", "version it shipped with", "updates when it is next online"} {
+	for _, want := range []string{"offline (setup can continue)", "version I shipped with", "update when I am next online"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("offline page lacks %q: %s", want, page)
 		}
@@ -44,7 +44,7 @@ func TestUpdatingFirstBootSaysSo(t *testing.T) {
 	r.hooks.progress = Progress{Phase: "updating", Online: true}
 	r.hooks.mu.Unlock()
 	page := r.get("/setup")
-	if !strings.Contains(page, "updating (setup can continue)") || !strings.Contains(page, "The box is updating to the latest version first") {
+	if !strings.Contains(page, "updating (setup can continue)") || !strings.Contains(page, "I am updating to the latest version first") {
 		t.Fatalf("updating page: %s", page)
 	}
 }

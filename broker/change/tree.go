@@ -165,6 +165,26 @@ var namespaces = map[string]Class{
 	"budget":   ClassGovernance,
 }
 
+// loopKeys is the closed list of config keys that govern the loops
+// (P3-4b, LOOP-10 (c) and (e)): a candidate that sets one, or leaves its
+// file unreadable, carries authority whatever the rest of the file does.
+// No tree file uses these yet; the list fixes their meaning before one
+// does, so a fix can never turn loop 2 or its grading off or down.
+var loopKeys = map[string]map[string]string{
+	"config/loops.json": {
+		"off":    "turns loop 2 off or down",
+		"secure": "turns loop 2 off or down",
+	},
+	"config/loop2.json": {
+		"checks":          "disables a loop 2 check",
+		"not_run":         "disables a loop 2 check",
+		"every":           "turns loop 2 off or down",
+		"max_pauses":      "turns loop 2 off or down",
+		"fixtures_live":   "turns fixture grading off or down",
+		"fixture_grading": "turns fixture grading off or down",
+	},
+}
+
 func classOf(p string) Class {
 	if c, ok := namespaces[namespace(p)]; ok {
 		return c

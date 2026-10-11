@@ -165,7 +165,7 @@ var (
 // List is the worker tools' descriptions.
 func (t *Tools) List() []map[string]any {
 	return []map[string]any{
-		{"name": toolCreate, "description": "Start a worker machine: a sandboxed machine with no agent, no network and no broker tools, built from the base image, that you drive with the other worker_ tools. It runs on your admission class and the memory you ask for; the box refuses it when there is no room. It holds your data label: a worker made by a private machine is private. Smaller workers fit more: on the smallest box 7 fit beside you at 256 MiB, 8 at 192 MiB; worker_fit says how many fit now.",
+		{"name": toolCreate, "description": "Start a worker machine: a sandboxed machine with no agent, no network and no broker tools, built from the base image, that you drive with the other worker_ tools. It runs on your admission class and the memory you ask for; the host refuses it when there is no room. It holds your data label: a worker made by a private machine is private. Smaller workers fit more: on the smallest box 7 fit beside you at 256 MiB, 8 at 192 MiB; worker_fit says how many fit now.",
 			"inputSchema": obj(map[string]any{"name": pName, "mem_mb": map[string]any{"type": "number", "description": fmt.Sprintf("Memory budget in MiB; default %d, at most %d.", DefaultMemMB, t.MaxMemMB)}}, "name")},
 		{"name": toolExec, "description": "Run a command in a worker, as root from /, and wait for it. Returns exit_code, stdout, stderr (each capped), truncated and timed_out. A non-zero exit is a result, not an error. " +
 			"To move a directory tree, send a tar archive as stdin_base64 to [\"tar\", \"-x\", \"-C\", \"/dir\"], or read one back with [\"tar\", \"-c\", \"-C\", \"/dir\", \".\"] and output_base64.",
@@ -191,7 +191,7 @@ func (t *Tools) List() []map[string]any {
 		{"name": toolFork, "description": "Checkpoint a worker and start one new worker per name from it, memory included; each is admitted on its own budget, and either all start or none do. With up_to_fit, only as many as fit now start (in the order named) and the rest come back as skipped.",
 			"inputSchema": obj(map[string]any{"name": pName, "into": strList,
 				"up_to_fit": map[string]any{"type": "boolean", "description": "Start only as many forks as fit (see worker_fit)."}}, "name", "into")},
-		{"name": toolFit, "description": "How many more workers of mem_mb fit now, from the box's free memory (measured and as budgeted for your class, rounded down, refreshed every few seconds) and your worker cap. Use it to pick how many approaches to try in parallel; 0 means try them one at a time.",
+		{"name": toolFit, "description": "How many more workers of mem_mb fit now, from the host's free memory (measured and as budgeted for your class, rounded down, refreshed every few seconds) and your worker cap. Use it to pick how many approaches to try in parallel; 0 means try them one at a time.",
 			"inputSchema": obj(map[string]any{"mem_mb": map[string]any{"type": "integer", "description": fmt.Sprintf("Memory per worker in MiB; default %d.", DefaultMemMB)}})},
 		{"name": toolKeep, "description": "Keep the winner of a fork: destroy every other worker forked from the same snapshot as this one. The worker it was forked from, and your other workers, stay.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},

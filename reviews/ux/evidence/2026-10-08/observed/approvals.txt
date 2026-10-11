@@ -1,0 +1,17 @@
+OWNER Draft the supplier email
+BOX ["Locked. Your message is held for 15 min. Send a code from your code generator."]
+OWNER Use the revised Friday date
+BOX ["Locked. A message was already waiting, so both were dropped. Send your message with a code from your code generator at the end."]
+OWNER <synthetic current generator code>
+BOX ["Unlocked until Oct 15 12:00."]
+OWNER RUN
+BOX ["Nothing is held."]
+DELIVERED TASKS []
+BATCH J8: 10 items. 1 send invoice 01 Friday delivery confirmation to recipient@example.test, cannot be undone. 2 send invoice 02 Friday delivery confirmation to recipient@example.test, cannot be undone. 3 send invoice 03 Friday delivery confirmation to recipient@example.test, cannot be undone. Items 4-10: MORE J8. Expires 12:15. Reply YES J8 813140 for all, YES J8 1 2 813140 for some (the rest are denied), or NO J8.
+MORE 1 ["J8: 1 send invoice 01 Friday delivery confirmation to recipient@example.test, cannot be undone. 2 send invoice 02 Friday delivery confirmation to recipient@example.test, cannot be undone. 3 send invoice 03 Friday delivery confirmation to recipient@example.test, cannot be undone. 4 send invoice 04 Friday delivery confirmation to recipient@example.test, cannot be undone. Rest on the box's Wi-Fi page."]
+MORE 2 ["J8: 1 send invoice 01 Friday delivery confirmation to recipient@example.test, cannot be undone. 2 send invoice 02 Friday delivery confirmation to recipient@example.test, cannot be undone. 3 send invoice 03 Friday delivery confirmation to recipient@example.test, cannot be undone. 4 send invoice 04 Friday delivery confirmation to recipient@example.test, cannot be undone. Rest on the box's Wi-Fi page."]
+NOTIFY INPUT "The source code has 1234 lines and the build passed."
+OUTPUT "A message was held back because it may contain a code or key. Read it on the box's Wi-Fi page."
+NOTIFY INPUT "The source code compiles and the build passed."
+OUTPUT "Agent: The source code compiles and the build passed."
+TRUNCATION STRING PRESENT: true

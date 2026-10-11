@@ -226,24 +226,40 @@ func (s *Store) UIDs(ctx context.Context, folder string) (uint32, []uint32, erro
 	return validity, uids, err
 }
 
-// Fetch reads messages with BODY.PEEK, so none is marked read.
-func (s *Store) Fetch(ctx context.Context, folder string, uids []uint32) ([]mail.Message, error) {
+// Fetch reads messages with BODY.PEEK, so none is marked read, only
+// while folder still has the UID validity the UIDs were listed under.
+func (s *Store) Fetch(ctx context.Context, folder string, validity uint32, uids []uint32) ([]mail.Message, error) {
 	if len(uids) == 0 {
 		return nil, nil
 	}
 	var out []mail.Message
 	err := s.session(ctx, func(c *client.Client) error {
-		if _, err := c.Select(folder, true); err != nil {
+		if err := selectAt(c, folder, true, validity); err != nil {
 			return err
 		}
 		var err error
-		out, err = s.fetch(c, folder, uids)
+		out, err = s.fetch(c, folder, validity, uids)
 		return err
 	})
 	return out, err
 }
 
-func (s *Store) fetch(c *client.Client, folder string, uids []uint32) ([]mail.Message, error) {
+// selectAt selects folder and refuses (mail.ErrValidity) unless its UID
+// validity is the expected one: under another validity the UIDs the
+// caller holds may name other messages. The check and what follows run
+// in this one selected session.
+func selectAt(c *client.Client, folder string, readOnly bool, validity uint32) error {
+	st, err := c.Select(folder, readOnly)
+	if err != nil {
+		return err
+	}
+	if validity == 0 || st.UidValidity != validity {
+		return mail.ErrValidity
+	}
+	return nil
+}
+
+func (s *Store) fetch(c *client.Client, folder string, validity uint32, uids []uint32) ([]mail.Message, error) {
 	set := new(imap.SeqSet)
 	set.AddNum(uids...)
 	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, s.cfg.MaxFetch}}
@@ -264,7 +280,7 @@ func (s *Store) fetch(c *client.Client, folder string, uids []uint32) ([]mail.Me
 		if err != nil {
 			msg = mail.Message{}
 		}
-		msg.Folder, msg.UID, msg.Flags = folder, m.Uid, append([]string(nil), m.Flags...)
+		msg.Folder, msg.Validity, msg.UID, msg.Flags = folder, validity, m.Uid, append([]string(nil), m.Flags...)
 		out = append(out, msg)
 	}
 	return out, <-done
@@ -275,7 +291,8 @@ func (s *Store) fetch(c *client.Client, folder string, uids []uint32) ([]mail.Me
 func (s *Store) Find(ctx context.Context, folder, id string) ([]mail.Message, error) {
 	var out []mail.Message
 	err := s.session(ctx, func(c *client.Client) error {
-		if _, err := c.Select(folder, true); err != nil {
+		st, err := c.Select(folder, true)
+		if err != nil {
 			return err
 		}
 		crit := imap.NewSearchCriteria()
@@ -284,7 +301,7 @@ func (s *Store) Find(ctx context.Context, folder, id string) ([]mail.Message, er
 		if err != nil || len(uids) == 0 {
 			return err
 		}
-		ms, err := s.fetch(c, folder, uids)
+		ms, err := s.fetch(c, folder, st.UidValidity, uids)
 		for _, m := range ms {
 			if m.MessageID == id {
 				out = append(out, m)
@@ -295,14 +312,15 @@ func (s *Store) Find(ctx context.Context, folder, id string) ([]mail.Message, er
 	return out, err
 }
 
-// SetFlags adds and removes flags on one message.
-func (s *Store) SetFlags(ctx context.Context, folder string, uid uint32, add, remove []string) error {
+// SetFlags adds and removes flags on one message, only while its folder
+// has the UID validity m was read under.
+func (s *Store) SetFlags(ctx context.Context, m mail.Ref, add, remove []string) error {
 	return s.session(ctx, func(c *client.Client) error {
-		if _, err := c.Select(folder, false); err != nil {
+		if err := selectAt(c, m.Folder, false, m.Validity); err != nil {
 			return err
 		}
 		set := new(imap.SeqSet)
-		set.AddNum(uid)
+		set.AddNum(m.UID)
 		for _, x := range []struct {
 			op    imap.FlagsOp
 			flags []string
@@ -324,17 +342,18 @@ func (s *Store) SetFlags(ctx context.Context, folder string, uid uint32, add, re
 
 // Move moves one message. Servers without MOVE are refused rather than
 // emulated with COPY, flag and EXPUNGE: an EXPUNGE would also remove
-// anything else the owner had marked deleted in that folder.
-func (s *Store) Move(ctx context.Context, from string, uid uint32, to string) error {
+// anything else the owner had marked deleted in that folder. Like
+// SetFlags it acts only under the UID validity m was read under.
+func (s *Store) Move(ctx context.Context, m mail.Ref, to string) error {
 	return s.session(ctx, func(c *client.Client) error {
 		if ok, _ := c.Support("MOVE"); !ok {
 			return errors.New("imapsmtp: the server does not support MOVE")
 		}
-		if _, err := c.Select(from, false); err != nil {
+		if err := selectAt(c, m.Folder, false, m.Validity); err != nil {
 			return err
 		}
 		set := new(imap.SeqSet)
-		set.AddNum(uid)
+		set.AddNum(m.UID)
 		// UID MOVE itself, never go-imap's COPY, STORE and EXPUNGE
 		// fallback.
 		st, err := c.Execute(&commands.Uid{Cmd: &commands.Move{SeqSet: set, Mailbox: to}}, nil)

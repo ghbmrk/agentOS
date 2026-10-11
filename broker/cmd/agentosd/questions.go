@@ -156,6 +156,16 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 	return nil
 }
 
+// start is open, logging a failure and recording it for STATUS (OP-9
+// C9): the owner channel failing to take questions must not take the box
+// down; the tools are then not offered and replies are task chat.
+func (q *questions) start(ctx context.Context, d *daemon.Daemon, pre *preempter, cfg questionConfig, caps *capState) {
+	if err := q.open(ctx, d, pre, cfg); err != nil {
+		log.Printf("owner questions disabled: %v", err)
+		caps.questionsOff.Store(true)
+	}
+}
+
 // wire gives the daemon the answer hook and the STATUS clock line; call
 // it before daemon.Run.
 func (q *questions) wire(cfg *daemon.Config) {

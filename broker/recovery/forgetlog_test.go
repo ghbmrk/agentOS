@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -98,6 +99,33 @@ func restoredGoals(t *testing.T, rk RecoveryKey, dst string) []string {
 	return gs
 }
 
+// noKeyIn fails if raw holds any of keys, raw or in any encoding JSON or a
+// careless writer would use, or has a field beyond the log's own.
+func noKeyIn(t *testing.T, raw []byte, keys map[string][]byte) {
+	t.Helper()
+	for name, k := range keys {
+		if len(k) == 0 {
+			t.Fatalf("%s: empty, so nothing is checked", name)
+		}
+		for _, enc := range []string{string(k), hex.EncodeToString(k), base64.StdEncoding.EncodeToString(k),
+			base64.RawStdEncoding.EncodeToString(k), base64.URLEncoding.EncodeToString(k),
+			base64.RawURLEncoding.EncodeToString(k)} {
+			if bytes.Contains(raw, []byte(enc)) {
+				t.Fatalf("copy holds the %s", name)
+			}
+		}
+	}
+	var top map[string]json.RawMessage
+	must(t, json.Unmarshal(raw, &top))
+	for f := range top {
+		switch f {
+		case "format", "id", "host", "base", "anchor_seq", "mac", "entries":
+		default:
+			t.Fatalf("copy has a field %q beyond the log's own", f)
+		}
+	}
+}
+
 func TestForgetLogAppendIsAuthenticatedAndAnchored(t *testing.T) {
 	x := newBox(t)
 	pc := newPCCounter("host-a")
@@ -118,10 +146,10 @@ func TestForgetLogAppendIsAuthenticatedAndAnchored(t *testing.T) {
 	if l.head() != n || n != pc.max || n < 42 {
 		t.Fatalf("head %d, counter %d", l.head(), n)
 	}
-	// The copy names goals only: no key, no record content.
-	if bytes.Contains(cp, []byte(hex.EncodeToString(forgetKey(x.rk)))) {
-		t.Fatal("copy holds its key")
-	}
+	// The copy names goals only: no key, no record content (W3-forget-b1
+	// f5: JSON writes []byte as base64, so each encoding is looked for).
+	noKeyIn(t, cp, map[string][]byte{"log key": forgetKey(x.rk), "recovery key": x.rk.b[:],
+		"vault key": kv.Key, "counter auth": kv.Auth})
 	// Another recovery key's derivation does not authenticate it.
 	other, err := testGen(nil)
 	must(t, err)

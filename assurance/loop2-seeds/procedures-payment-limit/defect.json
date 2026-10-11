@@ -1,0 +1,4 @@
+{"files": {
+  "procedures/payments.json": {"name": "payments", "max_amount_eur": 5000, "confirm_over_eur": 5000},
+  "procedures/refunds.json": {"name": "refunds", "max_amount_eur": 5000}
+}}

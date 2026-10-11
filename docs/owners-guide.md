@@ -1,6 +1,6 @@
 # AgentOS owner's guide
 
-This guide answers common questions about your box. This part covers your PC.
+This guide answers common questions about your box. This part covers your PC and the daily digest.
 
 ## Starting AgentOS on your PC
 
@@ -36,3 +36,7 @@ This is Windows' key, not the recovery key on your AgentOS card.
 - **Work or school PC:** ask your IT department for the key.
 
 After you type the key once, Windows starts normally again.
+
+## Your daily digest
+
+Each morning at 8:00 the box texts you one short digest, even on a quiet day, when it says there is nothing else to report. If your phone was off or out of signal, the box keeps trying for the rest of that day and the next. If the box cannot tell whether a digest reached you, it never sends it twice; the next digest says so instead. If the box cannot read its own digest records, it sends you one short line saying so that day, and STATUS shows it until it is fixed. Reply STATUS any time for more.

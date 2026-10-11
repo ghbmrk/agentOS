@@ -42,6 +42,8 @@ type itemView struct {
 	Verb, Object, Detail, Amount, Undo string
 	Unverified                         bool
 	Recipients                         []string
+	// Terms is a grant's complete rule, one field per line (SR3-3).
+	Terms []owner.Term
 	// Odd: a field holds a character outside plain ASCII, shown as its
 	// code point.
 	Odd bool
@@ -141,7 +143,7 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 	case "":
 		return a.Text, ""
 	case localapi.RefusedTooMany:
-		return "", "Too many tries on the box's Wi-Fi in the last day, so approving here is paused for up to 24 hours. Deny still works here, and NO by text."
+		return "", "Too many tries on my Wi-Fi in the last day, so approving here is paused for up to 24 hours. Deny still works here, and NO by text."
 	case localapi.RefusedWrongCode:
 		wrong = true
 		if a.Text != "" {
@@ -164,7 +166,7 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 }
 
 // unreachableText: agentosd did not answer, so nothing was decided (UX-2wb-1).
-const unreachableText = "The box isn't answering right now. Nothing was approved or denied. Reload to try again."
+const unreachableText = "I can't answer right now. Nothing was approved or denied. Reload to try again."
 
 const stalePage = "This page is out of date. Check the request below and answer again."
 
@@ -249,6 +251,13 @@ func (s *Server) requestView(rq owner.LocalRequest, sess string) requestView {
 			return shown
 		}
 		iv.Verb, iv.Object, iv.Detail, iv.Amount = show(it.Facts.Verb), show(it.Object), show(it.Detail), show(it.Amount)
+		ts, ok := it.Terms.List()
+		if !ok {
+			ts = []owner.Term{{Label: "Rule", Value: "could not be read; deny this request"}}
+		}
+		for _, t := range ts {
+			iv.Terms = append(iv.Terms, owner.Term{Label: show(t.Label), Value: show(t.Value)})
+		}
 		if it.Recipient != "" {
 			// Split as the text counts them; only the separator's one
 			// space is dropped.

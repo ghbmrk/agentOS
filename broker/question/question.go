@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/guesterr"
 )
 
@@ -408,31 +408,7 @@ func (b *Book) persist() error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(b.cfg.Path), ".questions-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), b.cfg.Path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(b.cfg.Path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return durable.WriteFile(b.cfg.Path, raw, 0o600)
 }
 
 // save persists after a change that has already taken effect (a text
@@ -778,7 +754,9 @@ func (b *Book) Ask(ctx context.Context, asker, req string, s Spec) (Status, erro
 	if err := b.persist(); err != nil {
 		b.qs = b.qs[:len(b.qs)-1]
 		b.mu.Unlock()
-		return Status{}, err
+		// The os error names the store path. The guest must not see it.
+		b.cfg.Logf("question: persist: %v", err)
+		return Status{}, errors.New("the broker could not store that question; retry")
 	}
 	b.mu.Unlock()
 	b.sendDue(ctx)

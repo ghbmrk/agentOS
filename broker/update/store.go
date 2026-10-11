@@ -16,9 +16,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
 	"github.com/theupdateframework/go-tuf/v2/metadata/trustedmetadata"
 )
@@ -55,9 +57,9 @@ var (
 	// ErrExpired: metadata has expired, so the mirror may be frozen (online only).
 	ErrExpired = errors.New("update metadata has expired")
 	// ErrRollback: metadata older than what the box already trusts.
-	ErrRollback = errors.New("update metadata is older than what this box trusts")
+	ErrRollback = errors.New("update metadata is older than the metadata already trusted")
 	// ErrWeakThreshold: the root or targets role needs fewer keys than the box's floor.
-	ErrWeakThreshold = errors.New("update metadata threshold is below this box's floor")
+	ErrWeakThreshold = errors.New("update metadata threshold is below the trusted floor")
 	// ErrDriveTooOld: offline, the drive's root expired more than
 	// MaxOfflineRootAge ago; the owner sees DriveTooOldNotice.
 	ErrDriveTooOld = errors.New("drive's update is too old to trust offline")
@@ -88,7 +90,7 @@ func classify(err error) error {
 
 // OfflineNotice is what the box tells the owner after installing from a
 // drive (UPD-8). P2-2 and the owner channel show it.
-const OfflineNotice = "Update installed from a drive without a freshness check. The box will check it the next time it is online."
+const OfflineNotice = "Update installed from a drive without a freshness check. I will check it the next time I am online."
 
 // DriveTooOldNotice is what the owner sees when a drive's update is refused
 // for age (Mark, 2026-10-05). The same text accompanies the tier-4 override.
@@ -100,7 +102,7 @@ const MaxOfflineRootAge = 180 * 24 * time.Hour
 
 // NotConfirmedNotice is what the owner sees when an online check finds the
 // release installed from a drive missing from the fresh metadata.
-const NotConfirmedNotice = "The update installed from a drive is not in the latest signed release list. It may have been withdrawn; the box will offer the current release."
+const NotConfirmedNotice = "The update installed from a drive is not in the latest signed release list. It may have been withdrawn; I will offer the current release."
 
 // Options for one check.
 type Options struct {
@@ -143,6 +145,39 @@ type Options struct {
 //	root.json, timestamp.json, snapshot.json, seen_keys.json, installed.json
 type Store struct {
 	Dir string
+	// Anchor, when set, is a monotonic counter outside the store that
+	// also records the first outside listing (SR3-6f-2a): the vault
+	// process's TPM NV counter on this PC. nil behaves as before.
+	Anchor Anchor
+}
+
+// Anchor is a monotonic counter kept off the store's files. Read returns
+// its value; Raise brings it to 1 or more and leaves it there, so a
+// second Raise changes nothing. Neither ever lowers it.
+type Anchor interface {
+	Read() (uint64, error)
+	Raise() error
+}
+
+// ErrNoAnchor is an anchor's answer on a PC that has no counter to give
+// (no TPM): the store then behaves as with no anchor, and Anchored says
+// so for STATUS.
+var ErrNoAnchor = errors.New("update: no anchor on this PC")
+
+// Anchored reports whether the outside record is anchored off the store.
+// A nil anchor, or one answering ErrNoAnchor, is not; an anchor that
+// cannot be read returns its error.
+func (s *Store) Anchored() (bool, error) {
+	if s.Anchor == nil {
+		return false, nil
+	}
+	if _, err := s.Anchor.Read(); err != nil {
+		if errors.Is(err, ErrNoAnchor) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Installed is the box's current release.
@@ -187,7 +222,7 @@ func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 	if _, err := os.Stat(s.p("root.json")); err == nil {
 		return nil, errors.New("update store already initialised")
 	}
-	if err := writeAtomic(s.p("root.json"), root, 0o600); err != nil {
+	if err := durable.WriteFile(s.p("root.json"), root, 0o600); err != nil {
 		return nil, err
 	}
 	return s, s.writeInstalled(Installed{Version: installed})
@@ -207,7 +242,7 @@ func (s *Store) Installed() (Installed, error) {
 
 func (s *Store) writeInstalled(in Installed) error {
 	b, _ := json.Marshal(in)
-	return writeAtomic(s.p("installed.json"), b, 0o600)
+	return durable.WriteFile(s.p("installed.json"), b, 0o600)
 }
 
 // File is one target file a verified release names.
@@ -239,9 +274,13 @@ type Verified struct {
 	// security fix is among those it supersedes (Result.SecurityFix).
 	coversFix bool
 	security  bool // set only by WithAttestations
+	// attested: WithAttestations counted an independent pass, so the
+	// release's admission rested on the attestor policy (SR3-6f-4).
+	attested bool
 	// The store that checked it, and the root and targets versions it
 	// trusted then: Stage refuses it once either moved (L3 on #133).
 	storeDir       string
+	storeAnchor    Anchor
 	rootVersion    int64
 	targetsVersion int64
 	// rootSHA256 is the trusted root's digest: after a switch to a fork
@@ -313,7 +352,7 @@ func (v *Verified) Security() bool { return v.ok() && v.security && v.policyCurr
 // attestor policy is still the one v was checked under. A store that
 // cannot be read fails closed.
 func (v *Verified) policyCurrent() error {
-	cur, err := (&Store{Dir: v.storeDir}).policy()
+	cur, err := (&Store{Dir: v.storeDir, Anchor: v.storeAnchor}).policy()
 	if err != nil || cur != v.policy {
 		return ErrPolicyMoved
 	}
@@ -321,13 +360,15 @@ func (v *Verified) policyCurrent() error {
 }
 
 // WithAttestations returns a copy whose Security reflects
-// SecurityAutoStage(atts, own). An unsealed v gives nil.
+// SecurityAutoStage(atts, own), and which Stage binds to the attestor
+// policy when any independent pass counted. An unsealed v gives nil.
 func (v *Verified) WithAttestations(atts [][]byte, own ed25519.PublicKey) *Verified {
 	if !v.ok() {
 		return nil
 	}
 	c := *v
 	c.security = v.SecurityAutoStage(atts, own) == nil
+	c.attested = v.IndependentPasses(atts, own) > 0
 	return &c
 }
 
@@ -388,10 +429,7 @@ func (v *Verified) Fetch(src Source, targetPath, dst string) error {
 	if n != f.Length || hex.EncodeToString(h.Sum(nil)) != f.SHA256 {
 		return fmt.Errorf("%w: %s does not match its signed hash", ErrBadRepository, targetPath)
 	}
-	if err := os.Rename(tmp.Name(), dst); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(dst))
+	return durable.Rename(tmp.Name(), dst)
 }
 
 // Result of a check.
@@ -565,7 +603,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		if err := s.writeSeenKeys(seen); err != nil {
 			return Result{}, err
 		}
-		if err := writeAtomic(s.p("root.json"), rootBytes, 0o600); err != nil {
+		if err := durable.WriteFile(s.p("root.json"), rootBytes, 0o600); err != nil {
 			return Result{}, err
 		}
 		res.RootRotatedTo = tm.Root.Signed.Version
@@ -622,11 +660,11 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 
 	// All metadata checked: save what the next check must not go below.
 	if tsBytes != nil {
-		if err := writeAtomic(s.p("timestamp.json"), tsBytes, 0o600); err != nil {
+		if err := durable.WriteFile(s.p("timestamp.json"), tsBytes, 0o600); err != nil {
 			return Result{}, err
 		}
 	}
-	if err := writeAtomic(s.p("snapshot.json"), snapBytes, 0o600); err != nil {
+	if err := durable.WriteFile(s.p("snapshot.json"), snapBytes, 0o600); err != nil {
 		return Result{}, err
 	}
 
@@ -638,7 +676,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 	proto.maintainers, proto.operated = seen, attestors
 
 	var versions []int64
-	proto.storeDir, proto.rootVersion, proto.targetsVersion = s.Dir, tm.Root.Signed.Version, targets.Signed.Version
+	proto.storeDir, proto.storeAnchor, proto.rootVersion, proto.targetsVersion = s.Dir, s.Anchor, tm.Root.Signed.Version, targets.Signed.Version
 	proto.rootSHA256 = Digest(rootBytes)
 	for p := range targets.Signed.Targets {
 		if n, ok := releaseVersion(p); ok && n > installed.Version {
@@ -753,7 +791,7 @@ func (s *Store) noteAttestors(allow, interim []ed25519.PublicKey, v *Verified) (
 		}
 	}
 	if outside {
-		if err := writeAtomic(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
+		if err := s.recordOutside(); err != nil {
 			return false, err
 		}
 	}
@@ -788,19 +826,63 @@ func (s *Store) writeAllowList(allowed, pinned map[string]bool) error {
 	if b, err := os.ReadFile(s.p(allowListFile)); err == nil && string(b) == d {
 		return nil
 	}
-	return writeAtomic(s.p(allowListFile), []byte(d), 0o600)
+	return durable.WriteFile(s.p(allowListFile), []byte(d), 0o600)
 }
 
+// recordOutside raises the anchor, then writes outsideFile. A failed
+// Raise still writes the file, so the store is never weaker than without
+// an anchor, and returns the Raise error (SR3-6f-2a). The caller holds the
+// lock.
+func (s *Store) recordOutside() error {
+	var raised error
+	if s.Anchor != nil {
+		if err := s.Anchor.Raise(); err != nil && !errors.Is(err, ErrNoAnchor) {
+			raised = fmt.Errorf("update: raise the outside-attestor anchor: %w", err)
+		}
+	}
+	if err := durable.WriteFile(s.p(outsideFile), []byte("1\n"), 0o600); err != nil {
+		return err
+	}
+	return raised
+}
+
+// outsideListed reports whether an outside attestor was ever listed: the
+// file exists or the anchor reads 1 or more. The anchor is read even when
+// the file exists, so one that cannot be read is always an error and every
+// caller fails closed; ErrNoAnchor (a PC with no TPM) leaves the file
+// alone deciding, and is logged once.
 func (s *Store) outsideListed() (bool, error) {
 	_, err := os.Stat(s.p(outsideFile))
-	if err == nil {
-		return true, nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
 	}
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+	listed := err == nil
+	if s.Anchor == nil {
+		return listed, nil
 	}
-	return false, err
+	n, err := s.Anchor.Read()
+	switch {
+	case errors.Is(err, ErrNoAnchor):
+		if !noAnchorLogged.Swap(true) {
+			log.Print("update: interim attestation is not anchored on this PC (no TPM)")
+		}
+		return listed, nil
+	case err != nil:
+		return false, fmt.Errorf("update: read the outside-attestor anchor: %w", err)
+	}
+	if listed && n == 0 {
+		// A record from before the anchor (or an anchor defined after
+		// it): carry it into the anchor, so deleting the file later
+		// changes nothing. The file already answers listed, so a failed
+		// Raise only waits for the next read.
+		if err := s.Anchor.Raise(); err != nil && !errors.Is(err, ErrNoAnchor) {
+			log.Printf("update: raise the outside-attestor anchor: %v", err)
+		}
+	}
+	return listed || n >= 1, nil
 }
+
+var noAnchorLogged atomic.Bool
 
 // policy is the store's attestor policy digest: the noted allow-list and
 // whether an outside attestor was ever listed (or a fork followed). The
@@ -837,7 +919,7 @@ func (s *Store) writeSeenKeys(seen map[string]bool) error {
 	}
 	sort.Strings(list)
 	b, _ := json.Marshal(list)
-	return writeAtomic(s.p("seen_keys.json"), b, 0o600)
+	return durable.WriteFile(s.p("seen_keys.json"), b, 0o600)
 }
 
 // operatedAttestors reads the signed list of maintainer-operated attestor
@@ -994,7 +1076,8 @@ func (s *Store) Stage(v *Verified) error {
 	}
 	// The commit point for attestation authority: under the lock that
 	// NoteAttestors takes, so a narrowing it returned from is seen here.
-	if v.security {
+	// An ordinary release admitted on passes is bound too (SR3-6f-4).
+	if v.security || v.attested {
 		if err := v.policyCurrent(); err != nil {
 			return err
 		}
@@ -1008,7 +1091,7 @@ func (s *Store) Stage(v *Verified) error {
 	}
 	b, _ := json.Marshal(Staged{Version: v.release.Version, UsrRootHash: v.release.UsrRootHash,
 		ManifestPath: v.manifest.Path, ManifestSHA256: v.manifest.SHA256, Fresh: v.fresh})
-	return writeAtomic(s.p("staged.json"), b, 0o600)
+	return durable.WriteFile(s.p("staged.json"), b, 0o600)
 }
 
 // Staged reads the staged release; ok is false when none is staged.
@@ -1107,7 +1190,7 @@ func (s *Store) removeStaged() error {
 	if err := os.Remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncDir(s.Dir)
+	return durable.SyncDir(s.Dir)
 }
 
 // DropStaged forgets the staged release after a fallback. Nothing else in

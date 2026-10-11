@@ -157,6 +157,9 @@ type EnrollConfirmRequest struct {
 var (
 	ErrEnrolled     = errors.New("code generator already enrolled")
 	ErrNoEnrollment = errors.New("no enrollment waiting for confirmation")
+	// ErrEnrollNotOpen means setup mode never opened enrollment on this
+	// vault (P2-2w c2 r1): setup cannot finish on it.
+	ErrEnrollNotOpen = errors.New("code-generator enrollment not open")
 )
 
 // Enroll asks the vault process for a new code-generator seed, made in
@@ -186,7 +189,8 @@ func (v *Verifier) ConfirmEnroll(code string) (bool, error) {
 
 // SealEnroll closes enrollment for good at setup's finish (L3 on #367).
 // ErrNoEnrollment means no seed was confirmed since the last Enroll;
-// ErrEnrolled that enrollment is already closed.
+// ErrEnrolled that setup already sealed it; ErrEnrollNotOpen that setup
+// never opened it.
 func (v *Verifier) SealEnroll() error {
 	var res struct{}
 	return v.enrollCall("/enroll/seal", nil, &res)
@@ -205,6 +209,8 @@ func (v *Verifier) enrollCall(path string, body []byte, res any) error {
 		return ErrVaultLocked
 	case http.StatusGone:
 		return ErrEnrolled
+	case http.StatusPreconditionFailed:
+		return ErrEnrollNotOpen
 	case http.StatusConflict:
 		return ErrNoEnrollment
 	case http.StatusTooManyRequests:

@@ -1,0 +1,5 @@
+{
+  "target": {"kind": "grant", "name": "cloud-route", "label": "the cloud model route"},
+  "subject": "private-route",
+  "detail": "private work may use a cloud model route"
+}

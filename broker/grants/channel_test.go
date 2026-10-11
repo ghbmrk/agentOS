@@ -22,6 +22,15 @@ import (
 // the modem simulator: a grant approved with a code-generator code and
 // the local page, a send approved with its texted code, an auto-reply the
 // owner undoes, and a pre-allowance paused by text.
+// unpaced is owner state with the loosest pacing the owner can set (20
+// texts an hour, approval and agent texts urgent), for tests about the
+// gate rather than CH-15's pacing (W5-Dc-r1a).
+func unpaced() *owner.MemStore {
+	st := &owner.MemStore{}
+	st.Save(owner.State{Pacing: owner.Pacing{PerHour: owner.MaxTextsPerHour, Urgent: []owner.Class{owner.ClassApproval, owner.ClassAgent}}})
+	return st
+}
+
 func TestOwnerChannelEndToEnd(t *testing.T) {
 	const ownerNum, boxNum = "+15550000001", "+15550000002"
 	seed := []byte("synthetic-totp-seed-0001") // synthetic canary, not a credential
@@ -30,7 +39,7 @@ func TestOwnerChannelEndToEnd(t *testing.T) {
 	carrier.SetClock(r.now)
 	box, phone := carrier.Line(boxNum), carrier.Line(ownerNum)
 	ch, err := owner.New(owner.Config{
-		Owner: ownerNum, Modem: box, Engine: r.eng, Secrets: owner.Secrets{TOTPSeed: seed}, Store: &owner.MemStore{},
+		Owner: ownerNum, Modem: box, Engine: r.eng, Secrets: owner.Secrets{TOTPSeed: seed}, Store: unpaced(),
 		Limits: owner.Limits{AmountLimit: 50000}, Location: time.UTC, Now: r.now,
 		Decide: r.g.Decide, Narrow: r.g.Narrow,
 	})
@@ -133,7 +142,7 @@ func TestRestartReissuesThroughTheChannel(t *testing.T) {
 	carrier := modem.NewCarrier()
 	carrier.SetClock(r.now)
 	box, phone := carrier.Line(boxNum), carrier.Line(ownerNum)
-	state := &owner.MemStore{}
+	state := unpaced()
 	var ch *owner.Channel
 	open := func() {
 		r.openWith(func() Owner {

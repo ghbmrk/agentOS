@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,9 @@ func (f *fakeVMs) Create(_ context.Context, id string, s vm.Spec) (vm.Machine, e
 	dir, err := f.svc.Open(id)
 	if err != nil {
 		return vm.Machine{}, err
+	}
+	if err := onlySocket(dir); err != nil {
+		panic(err) // the builder turns a start error into an empty result
 	}
 	m := vm.Machine{ID: id, Spec: s, Label: s.Label, State: vm.Running}
 	f.mu.Lock()
@@ -975,4 +979,18 @@ func TestCoalescedIntoParkedJobHasNoArtifact(t *testing.T) {
 	if o := r.outcomes()[1]; o.Result != "coalesced" || o.Artifact != "" {
 		t.Fatalf("outcome %+v", o)
 	}
+}
+
+// onlySocket fails unless dir holds the broker socket and nothing else:
+// the guest sees dir at vm.ServicesMount, and runsc --host-uds=open lets
+// it connect to any socket there (ARC-6 "nothing else").
+func onlySocket(dir string) error {
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	if len(es) != 1 || es[0].Name() != Socket || es[0].Type()&fs.ModeSocket == 0 {
+		return fmt.Errorf("services directory %s holds %v, want only the socket %s", dir, es, Socket)
+	}
+	return nil
 }

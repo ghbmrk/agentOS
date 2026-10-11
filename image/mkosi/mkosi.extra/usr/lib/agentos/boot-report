@@ -1,0 +1,5 @@
+#!/bin/sh
+# One console line after the boot is blessed (or not): what CI's boot test reads.
+st=$(/usr/lib/systemd/systemd-bless-boot status 2>&1)
+root=$(findmnt -bno SIZE /)
+echo "agentos-boot: bless=$st root_bytes=$root"

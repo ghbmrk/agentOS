@@ -18,9 +18,9 @@ import (
 // The agent machine's STATUS lines (UX-56-1): fixed words only; raw errors
 // go to the log.
 const (
-	agentWaiting = "Agent: starting, waiting for memory."
-	agentFailed  = "Agent: starting, last try failed."
-	agentNotSet  = "Agent: not set up; the box needs an update or a restart."
+	agentWaiting = "Your agent is starting, waiting for memory."
+	agentFailed  = "Your agent is starting; the last try failed."
+	agentNotSet  = "Your agent is not set up; I need an update or a restart."
 )
 
 // liveMachines is the part of the machine manager that keeps the owner's

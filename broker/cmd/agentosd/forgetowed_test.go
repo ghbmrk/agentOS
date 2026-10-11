@@ -533,3 +533,148 @@ func TestARetriedForgetWhoseTextDoesNotSendStaysOwed(t *testing.T) {
 		t.Fatalf("texts %q", again.texts)
 	}
 }
+
+// countStore fails its first fail saves and records what it holds; it is
+// safe from the retry's goroutine.
+type countStore struct {
+	mu   sync.Mutex
+	fail int
+	mem  change.MemStore
+}
+
+func (s *countStore) Load() ([]byte, error) { return s.mem.Load() }
+func (s *countStore) Save(b []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail > 0 {
+		s.fail--
+		return errors.New("disk full")
+	}
+	return s.mem.Save(b)
+}
+
+func (s *countStore) holds(goal string) bool {
+	b, _ := s.mem.Load()
+	return strings.Contains(string(b), `"`+goal+`"`)
+}
+
+// W3-forget-b4 S3 (Security 4a on #425, F4): the owner is told while the
+// done text is still owed on disk, and it is dropped only after, so a
+// crash between the two repeats the text rather than losing it (mutant
+// M4, drop before the send, fails here).
+func TestTheDoneTextIsToldBeforeItIsDropped(t *testing.T) {
+	store := &countStore{}
+	r := restartRig(t, store)
+	var atSend []bool
+	r.f.tell = func(string) error { atSend = append(atSend, store.holds("owner:a")); return nil }
+	if out := r.f.Execute(context.Background(), forgetIntent("1.1.1", "owner:a"), 1); out.Result != journal.ResultSucceeded {
+		t.Fatalf("execute: %+v", out)
+	}
+	if len(atSend) != 1 || !atSend[0] {
+		t.Fatalf("owed on disk at the send: %v", atSend)
+	}
+	if store.holds("owner:a") {
+		t.Fatal("still owed after the send")
+	}
+}
+
+// W3-forget-b4 S2 (Security 4a on #425; UX-182-3): an owed save that fails
+// in Execute is saved again by the retry before the forget can finish, so
+// the done text is on disk when it is told.
+func TestAFailedOwedSaveIsRetriedBeforeTheDoneText(t *testing.T) {
+	store := &countStore{fail: 1} // Execute's owed save fails
+	r := restartRig(t, store)
+	r.fail = 1 // the forget's save fails; the retry's holds
+	var atSend []bool
+	r.f.tell = func(string) error { atSend = append(atSend, store.holds("owner:a")); return nil }
+	done := make(chan struct{})
+	r.f.retried = func() { close(done) }
+	r.f.Execute(context.Background(), forgetIntent("1.1.1", "owner:a"), 1)
+	<-done
+	if len(atSend) != 1 || !atSend[0] {
+		t.Fatalf("owed on disk at the send: %v", atSend)
+	}
+	if store.holds("owner:a") {
+		t.Fatal("still owed after the send")
+	}
+}
+
+// W3-forget-b4 S2: an owed save that fails in Execute, then a retry cut
+// off by a crash, still leaves the done text owed for the next start.
+func TestAFailedOwedSaveThenACrashIsStillTold(t *testing.T) {
+	store := &countStore{fail: 1}
+	r := restartRig(t, store)
+	r.fail = 5 // Execute's forget fails, then the retry's pass does too
+	var sleeps atomic.Int32
+	r.f.sleep = func(context.Context, time.Duration) bool { return sleeps.Add(1) == 1 } // then shutdown
+	done := make(chan struct{})
+	r.f.retried = func() { close(done) }
+	since := time.Date(2026, 10, 5, 13, 2, 0, 0, time.UTC)
+	r.f.Execute(context.Background(), forgetIntent(fmt.Sprintf("1.1.%d", since.UnixNano()), "owner:a"), 1)
+	<-done
+	again := restart(t, &store.mem, map[string]bool{"owner:a": true})
+	again.f.finishOwed(context.Background())
+	if strings.Join(again.texts, "|") != "Your task from Mon 5 Oct 13:02 is forgotten now."+forgetBackups {
+		t.Fatalf("texts %q", again.texts)
+	}
+}
+
+// W3-forget-b4 S1 (Security 4a on #425): an unreadable owed file is kept
+// aside, then replaced by the fresh file owing forgetOwedLost, so the path
+// never holds nothing. If that save fails, the bad file is still in place
+// and the next start repeats it, so the owner is still told.
+func TestAnUnreadableOwedFileIsReplacedNotRemoved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "forget-owed.json")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	disk := change.FileStore{Path: path}
+	if g := openOwedFile(failSave{disk}, path).goals(); len(g) != 1 || g[0] != owedLostKey {
+		t.Fatalf("owed %v", g)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != "{" {
+		t.Fatalf("after a failed save the path holds %q %v", b, err)
+	}
+	if st, err := os.Stat(path + ".bad"); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("not kept aside: %v %v", st, err)
+	}
+	// The next start: the save holds, and the file owes the notice.
+	if g := openOwedFile(disk, path).goals(); len(g) != 1 || g[0] != owedLostKey {
+		t.Fatalf("owed %v", g)
+	}
+	next, err := openForgetOwed(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := next.goals(); len(g) != 1 || g[0] != owedLostKey {
+		t.Fatalf("on disk %v", g)
+	}
+	if b, err := os.ReadFile(path + ".bad"); err != nil || string(b) != "{" {
+		t.Fatalf("aside %q %v", b, err)
+	}
+}
+
+// W3-forget-b4 S1: if the bad file cannot be kept aside, the fresh file
+// still replaces it and the owner is still owed the notice.
+func TestAnUnreadableOwedFileNotKeptAsideIsStillReplaced(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "forget-owed.json")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(path+".bad", "x"), 0o700); err != nil { // blocks the aside
+		t.Fatal(err)
+	}
+	disk := change.FileStore{Path: path}
+	if g := openOwedFile(disk, path).goals(); len(g) != 1 || g[0] != owedLostKey {
+		t.Fatalf("owed %v", g)
+	}
+	next, err := openForgetOwed(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := next.goals(); len(g) != 1 || g[0] != owedLostKey {
+		t.Fatalf("on disk %v", g)
+	}
+}

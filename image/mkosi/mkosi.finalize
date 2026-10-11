@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Refuse an image tree that carries per-install state (HW-1) or socket files (V15).
+
+mkosi runs this as the last step before it writes the partitions, with the tree in $BUILDROOT.
+Every drive gets the same image, so anything generated during the build (a machine ID, a random
+seed, a host key, the snakeoil TLS key) would be shared by every box, and owner state belongs only
+on that owner's drive. A planted socket file could look like a broker socket inside a guest.
+Usage outside mkosi: mkosi.finalize ROOT"""
+import os
+import pathlib
+import stat
+import sys
+
+# Files that systemd, dbus, OpenSSH or ssl-cert generate per install. Must not exist in the image.
+GENERATED = ("var/lib/systemd/random-seed", "var/lib/systemd/credential.secret",
+             "var/lib/dbus/machine-id", "etc/ssh/ssh_host_*", "etc/ssl/private/*",
+             "etc/credstore*/*", "var/lib/systemd/credential*/*")
+# Owner configuration and broker state. Created on the drive at onboarding, never in the image.
+OWNER_DIRS = ("etc/agentos", "var/lib/agentos")
+# Content scan: where build-generated keys land. /usr is package content, the same for everyone.
+SCAN = ("etc", "var", "root", "home", "srv", "opt", "boot", "efi")
+KEY_MARKERS = (b"PRIVATE KEY-----", b"PGP PRIVATE KEY BLOCK", b"AGE-SECRET-KEY-")
+# Larger files are not content-scanned (key files are small); the OpenClaw guest under /usr is
+# package content from pinned sources and is covered only by the socket check.
+SCAN_MAX = 1 << 20
+
+
+def violations(root):
+    root = pathlib.Path(root)
+    out = []
+    mid = root / "etc/machine-id"
+    if mid.is_file() and mid.read_text().strip() not in ("", "uninitialized"):
+        out.append("etc/machine-id: holds an ID; must be empty or 'uninitialized'")
+    for pat in GENERATED:
+        for f in sorted(root.glob(pat)):
+            if f.is_file() and not f.is_symlink():
+                out.append("%s: generated per install; must not ship" % f.relative_to(root))
+    for d in OWNER_DIRS:
+        p = root / d
+        if d == "etc/agentos" and p.exists():
+            out.append("etc/agentos: owner configuration; written at onboarding only")
+        elif d == "var/lib/agentos" and p.is_dir() and any(p.iterdir()):
+            out.append("var/lib/agentos: broker state; must be empty")
+    # LOOP-7's state: agentosd creates it on the box and gives it to the fuzz user (agentosd L7-6).
+    if os.path.lexists(root / "var/lib/agentos-fuzz"):
+        out.append("var/lib/agentos-fuzz: fuzz state; created on the box, never shipped")
+    for dirpath, dirnames, filenames in os.walk(root):
+        for n in dirnames + filenames:
+            p = os.path.join(dirpath, n)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            rel = os.path.relpath(p, root)
+            if stat.S_ISSOCK(st.st_mode):
+                out.append("%s: socket file (V15)" % rel)
+            elif (stat.S_ISREG(st.st_mode) and st.st_size <= SCAN_MAX
+                  and rel.split(os.sep, 1)[0] in SCAN and has_key(p)):
+                out.append("%s: private key material" % rel)
+    return out
+
+
+def has_key(path):
+    try:
+        with open(path, "rb") as f:
+            data = f.read(SCAN_MAX)
+    except OSError:
+        return False
+    return any(m in data for m in KEY_MARKERS)
+
+
+def main():
+    root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BUILDROOT")
+    if not root:
+        sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")
+    v = violations(root)
+    for line in v:
+        print("image check: " + line)
+    if v:
+        sys.exit("image check: %d problem(s); the image must hold no per-install secret or socket file" % len(v))
+    print("image check: clean")
+
+
+if __name__ == "__main__":
+    main()

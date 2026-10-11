@@ -1,0 +1,5 @@
+{
+  "target": {"kind": "executor", "name": "web", "label": "the web browsing machine"},
+  "subject": "mail-in-web-context",
+  "detail": "mail bodies may reach the context of a machine that reads the web"
+}

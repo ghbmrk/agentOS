@@ -74,7 +74,7 @@ func (d machineDisk) set(c *vm.Config) { c.Quota, c.NoQuota = d.q, d.off }
 func quotaNote(off bool, err error) string {
 	switch {
 	case errors.Is(err, quota.ErrUnsupported):
-		return "Agent machines are off: this box's disk can't limit what each one writes."
+		return "Agent machines are off: my disk can't limit what each one writes."
 	case err != nil:
 		return "Agent machines are off: their disk space could not be set up."
 	case off:

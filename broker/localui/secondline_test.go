@@ -195,7 +195,7 @@ func TestTheSecondLineIsSetUpAndItsRealmConfirmedOnTheWiFiPage(t *testing.T) {
 		t.Fatalf("stored %+v", fl.settings)
 	}
 	p = r.get("/second-line/")
-	if !strings.Contains(p, "Waiting for the box to sign in to your provider") || !strings.Contains(p, `http-equiv="refresh"`) {
+	if !strings.Contains(p, "Waiting for me to sign in to your provider") || !strings.Contains(p, `http-equiv="refresh"`) {
 		t.Fatalf("waiting page:\n%s", p)
 	}
 	if strings.Contains(p, sipCanary) {
@@ -467,7 +467,7 @@ func TestASlowRegistrationSaysWhatToCheck(t *testing.T) {
 		t.Fatal("the slow line before 2 minutes")
 	}
 	r.advance(time.Second)
-	if p := html.UnescapeString(r.get("/second-line/")); !strings.Contains(p, still) || !strings.Contains(p, "Waiting for the box to sign in") {
+	if p := html.UnescapeString(r.get("/second-line/")); !strings.Contains(p, still) || !strings.Contains(p, "Waiting for me to sign in") {
 		t.Fatalf("no slow line at 2 minutes:\n%s", p)
 	}
 }

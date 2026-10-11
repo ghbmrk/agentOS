@@ -61,6 +61,8 @@ type fakeHooks struct {
 	finishes  int
 	onConfirm func() // runs inside ConfirmCode, for races
 	finishErr error  // returned by Finish after the owner channel exists
+	// unavailable: the vault's enrollment was never opened for setup.
+	unavailable bool
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -88,6 +90,9 @@ func (f *fakeHooks) EnrollCode() (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.enrolls++
+	if f.unavailable {
+		return "", ErrCodesUnavailable
+	}
 	if f.seed != nil {
 		return "", ErrCodesEnrolled
 	}
@@ -105,6 +110,8 @@ func (f *fakeHooks) ConfirmCode(code string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch {
+	case f.unavailable:
+		return false, ErrCodesUnavailable
 	case f.seed != nil:
 		return false, ErrCodesEnrolled
 	case f.pending == nil:

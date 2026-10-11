@@ -172,7 +172,7 @@ func TestAnthropicResponseTranslation(t *testing.T) {
 		c.Usage.Details.CachedTokens != 3000 {
 		t.Fatalf("usage %+v", c.Usage)
 	}
-	if u != (Usage{Input: 412, Output: 57, CacheRead: 3000, CacheWrite: 200, Reported: true, Complete: true, OutputChars: 51}) {
+	if !reflect.DeepEqual(u, Usage{Input: 412, Output: 57, CacheRead: 3000, CacheWrite: 200, Reported: true, Complete: true, OutputChars: 51}) {
 		t.Fatalf("reported usage %+v", u)
 	}
 }
@@ -269,7 +269,7 @@ func TestAnthropicStreamTranslation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u != (Usage{Input: 25, Output: 32, CacheRead: 1800, Reported: true, Complete: true, OutputChars: 29}) {
+	if !reflect.DeepEqual(u, Usage{Input: 25, Output: 32, CacheRead: 1800, Reported: true, Complete: true, OutputChars: 29}) {
 		t.Fatalf("reported usage %+v", u)
 	}
 	a := reassemble(t, out.Bytes())

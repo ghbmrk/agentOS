@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // The owner's way out of a restore held for want of an anchor or of a log
@@ -17,16 +19,17 @@ import (
 // "never". agentosd reads and answers it here without importing recovery
 // (the vault process's alone); recovery/testdata/confirm-v1.json pins the
 // format for both sides. The texts hold dates only, never what was
-// forgotten. Sending them while agentosd is held, and starting once
-// released, is the held mode's wiring (b1-7).
+// forgotten. held.go sends them while agentosd is held, and starts it once
+// released (W3-forget-b1-7).
 const (
-	heldUnanchored = "Restore on hold: this new PC can't check your forget list."
+	heldUnanchored = "Restore on hold: this PC can't check your forget list."
 	heldMissing    = "Restore on hold: this backup was made before your agent kept a forget list."
 	heldAsk        = "When did you last have your agent forget something?"
 	heldLater      = "Later than all of these"
 	heldNever      = "Never"
 	heldWrong      = "Restore stays on hold: this backup is older than your last forget, so it could bring back what you had forgotten."
 	heldNoNewer    = "Restore a newer backup, or from your old drive, instead."
+	heldRetry      = "If you picked by mistake, restore this backup again to answer again."
 	heldReleased   = "Restore confirmed. Your agent starts again shortly."
 	heldDateFmt    = "2 Jan 2006"
 )
@@ -140,9 +143,11 @@ func askText(q heldQuestion) string {
 }
 
 // wrongText tells the owner the restore stays held, and offers the newest
-// newer backup the restore found, if any (D-071).
+// newer backup the restore found, if any (D-071). With none, it names how
+// to answer again: restoring this backup writes its question afresh
+// (recovery writeQuestion), the same dates and an open question (#436 UX).
 func wrongText(q heldQuestion) string {
-	next := heldNoNewer
+	next := heldNoNewer + " " + heldRetry
 	if len(q.Newer) > 0 {
 		b := q.Newer[0]
 		next = "Restore your newer backup from " + b.Created.Local().Format(heldDateFmt) + " on " + plainName(b.Destination) + " instead."
@@ -241,42 +246,9 @@ func answerHeld(dir, msg string) (string, bool, error) {
 	return heldReleased, true, nil
 }
 
-// writeSynced replaces path with raw through a synced temporary file, so a
-// crash leaves the old file or the new one, and syncs the directory so
-// the new one stays.
-func writeSynced(path string, raw []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".restore-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err := f.Write(raw); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(path))
-}
-
-// syncDir makes dir's entries durable, as recovery's writeAtomic does; a
-// variable so a test can watch the order.
-var syncDir = func(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	serr := d.Sync()
-	if err := d.Close(); serr == nil {
-		serr = err
-	}
-	return serr
-}
+// writeSynced and syncDir make the answer durable (OP-4); variables so a
+// test can watch the order of directory syncs or fail one.
+var (
+	writeSynced = func(path string, raw []byte) error { return durable.WriteFile(path, raw, 0o600) }
+	syncDir     = durable.SyncDir
+)

@@ -35,6 +35,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/cgroup"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/quota"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
 )
@@ -286,11 +287,15 @@ var (
 	ErrConflict = errors.New("vm: merge conflict")
 	ErrImage    = errors.New("vm: snapshots are of different images")
 	ErrRevoked  = errors.New("vm: admission was withdrawn before the machine started")
-	// ErrExecNotStarted and ErrExecFailed are a command the runtime
-	// failed to run: before it started, or after, so it may have run.
-	// Neither names a path; the runtime's messages are in its own log
-	// (SR2-3j).
+	// ErrExecNotStarted, ErrExecNoProgram and ErrExecFailed are a
+	// command the runtime failed to run: before it started (a retry may
+	// work), before it started because its program was not found or
+	// cannot be loaded (a retry fails the same way, SR2-3p), or a failure
+	// the runtime does not show was before the start, so it may have run
+	// (SR2-3q). None names a path; the runtime's messages are in its own
+	// log (SR2-3j).
 	ErrExecNotStarted = errors.New("vm: the command did not start")
+	ErrExecNoProgram  = errors.New("vm: the command did not start: its program was not found or cannot run")
 	ErrExecFailed     = errors.New("vm: the runtime failed after the command started; it may have run")
 	// ErrPreempted: the machine was preempted while an operation held it,
 	// and what it was writing is discarded.
@@ -1866,24 +1871,11 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFile(path, b, 0o600)
 }
+
+// writeFile is durable.WriteFile; a variable so a test can fail one save.
+var writeFile = durable.WriteFile
 
 func readJSON(path string, v any) error {
 	b, err := os.ReadFile(path)

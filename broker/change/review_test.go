@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -75,7 +76,7 @@ func TestStagedImages(t *testing.T) {
 		t.Fatal(r)
 	}
 	d := e.p.Digest()
-	if len(d) != 1 || !strings.HasPrefix(d[0], "Staged update 40; it starts at the next restart.") {
+	if len(d) != 1 || !strings.HasPrefix(d[0], "Staged update 40; I will install it when I am free.") {
 		t.Fatalf("staged digest: %q", d)
 	}
 	if err := e.p.ConfirmStaged(r.ID); err != nil {
@@ -92,7 +93,7 @@ func TestStagedImages(t *testing.T) {
 	if got := string(e.p.Files("host-image")["host-image/release"]); got != update.Digest([]byte("a")) {
 		t.Fatal("fallback did not restore the previous release")
 	}
-	if d := e.p.Digest(); len(d) != 1 || d[0] != "Undid "+r2.Short+": the update did not start cleanly, so the box kept the previous one." {
+	if d := e.p.Digest(); len(d) != 1 || d[0] != "Undid "+r2.Short+": the update did not start cleanly, so I kept the previous one." {
 		t.Fatalf("fallback digest: %q", d)
 	}
 }
@@ -182,8 +183,11 @@ func TestFailStop(t *testing.T) {
 	e.p.mu.Lock()
 	e.p.props["cX"] = &proposal{base: e.p.st.Active.Hash(), next: e.p.st.Active.clone(), report: Report{Basis: BasisStanding}}
 	e.p.mu.Unlock()
-	if o := e.p.Execute(bg, journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}, 1); o.Result != journal.ResultNotApplied {
+	if o := e.p.Execute(bg, journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}, 1); o.Result != journal.ResultNotApplied || o.Evidence != "state not saved" || strings.Contains(o.Evidence, "/var/") {
 		t.Fatal(o)
+	}
+	if o := e.p.Execute(bg, journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}, 1); o.Evidence != "state cannot be saved; restart needed" || strings.Contains(o.Evidence, "/var/") {
+		t.Fatalf("later evidence %q", o.Evidence)
 	}
 	if err := e.p.healthy(); err == nil {
 		t.Fatal("not broken after save and reload failed")
@@ -193,20 +197,50 @@ func TestFailStop(t *testing.T) {
 	}
 }
 
+type pathTarget struct{}
+
+func (pathTarget) Current() (Tree, error) { return nil, nil }
+func (pathTarget) Apply(Tree) error {
+	return &fs.PathError{Op: "open", Path: "/var/lib/agentos/skills", Err: fs.ErrPermission}
+}
+
+// An activation failure can name a host path. The journal evidence does not.
+func TestActivationErrorNamesNoHostPath(t *testing.T) {
+	e := newEnv(t, func(c *Config) {
+		c.Targets = map[string]Target{"skills": pathTarget{}}
+	})
+	e.p.mu.Lock()
+	e.p.props["cX"] = &proposal{
+		base:   e.p.st.Active.Hash(),
+		next:   e.p.st.Active.clone(),
+		edits:  []Edit{{Path: "skills/greet"}},
+		report: Report{Basis: BasisStanding},
+	}
+	e.p.mu.Unlock()
+	o := e.p.Execute(bg, journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}, 1)
+	if o.Result != journal.ResultNotApplied || o.Evidence != "not applied" || strings.Contains(o.Evidence, "/var/") {
+		t.Fatal(o)
+	}
+}
+
 type flakyStore struct {
 	*MemStore
 	failSave, failLoad bool
+	loadPath           bool // the load error names a path, as FileStore's does
 }
 
 func (f *flakyStore) Save(b []byte) error {
 	if f.failSave {
-		return errors.New("save failed")
+		return errors.New("save /var/lib/agentos/change/state.json: permission denied")
 	}
 	return f.MemStore.Save(b)
 }
 
 func (f *flakyStore) Load() ([]byte, error) {
 	if f.failLoad {
+		if f.loadPath {
+			return nil, &fs.PathError{Op: "open", Path: "/var/lib/agentos/change/state.json", Err: fs.ErrNotExist}
+		}
 		return nil, errors.New("load failed")
 	}
 	return f.MemStore.Load()
@@ -277,7 +311,7 @@ func TestNotEvaluatedImage(t *testing.T) {
 	if r.State != StateAwaitingOwner || r.NotEvaluated == 0 || r.HeldOut != 0 {
 		t.Fatalf("image: %+v", r)
 	}
-	if ask, _ := e.p.Ask(r.ID); !strings.Contains(ask, "Not tested on this box.") {
+	if ask, _ := e.p.Ask(r.ID); !strings.Contains(ask, "Not tested here.") {
 		t.Fatalf("ask: %q", ask)
 	}
 }
@@ -430,7 +464,7 @@ func TestRecheckContinuesPastFailedRevert(t *testing.T) {
 		}
 	}
 	d := e.p.Digest()
-	if len(d) == 0 || !strings.HasPrefix(d[len(d)-1], "The box could not re-test its learned changes") {
+	if len(d) == 0 || !strings.HasPrefix(d[len(d)-1], "I could not re-test my learned changes") {
 		t.Fatalf("outages not surfaced: %q", d)
 	}
 }
@@ -466,5 +500,49 @@ func TestStopHoldsAutoRevert(t *testing.T) {
 	}
 	if string(e.p.Files("skills")["skills/greet"]) != "hello" {
 		t.Fatal("reverted during STOP")
+	}
+}
+
+// Logf carries a fixed class only (PE5), so a target or store error that
+// names a host path reaches neither the journal nor the log.
+func TestHostPathNotLogged(t *testing.T) {
+	var logged []string
+	e := newEnv(t, func(c *Config) {
+		c.Targets = map[string]Target{"skills": pathTarget{}}
+		c.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
+	})
+	put := func() {
+		e.p.mu.Lock()
+		e.p.props["cX"] = &proposal{
+			base:   e.p.st.Active.Hash(),
+			next:   e.p.st.Active.clone(),
+			edits:  []Edit{{Path: "skills/greet"}},
+			report: Report{Basis: BasisStanding},
+		}
+		e.p.mu.Unlock()
+	}
+	adopt := journal.Intent{ID: "chg:cX:adopt", Action: ActionAdopt, GrantRef: BasisStanding}
+	put()
+	if o := e.p.Execute(bg, adopt, 1); o.Result != journal.ResultNotApplied {
+		t.Fatal(o)
+	}
+	// Save and reload both fail: the save line and the broken line.
+	e.p.cfg.Targets = nil
+	bad := &flakyStore{MemStore: e.store, failSave: true, failLoad: true, loadPath: true}
+	e.p.cfg.Store = bad
+	put()
+	if o := e.p.Execute(bg, adopt, 1); o.Evidence != "state not saved" {
+		t.Fatal(o)
+	}
+	if len(logged) < 3 {
+		t.Fatalf("logged %q", logged)
+	}
+	for _, l := range logged {
+		if strings.Contains(l, "/var/") || strings.Contains(l, "agentos") {
+			t.Fatalf("log line names a host path: %q", l)
+		}
+	}
+	if !strings.Contains(logged[0], "permission denied") {
+		t.Fatalf("activation line lost its class: %q", logged[0])
 	}
 }

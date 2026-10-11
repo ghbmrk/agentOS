@@ -1,0 +1,110 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/localui"
+)
+
+type hooks struct {
+	p                       localui.Progress
+	ps                      []localui.Provider
+	starts, joins, finishes int
+}
+
+func (h *hooks) Progress() localui.Progress         { return h.p }
+func (h *hooks) Networks() []string                 { return []string{"Synthetic Home"} }
+func (h *hooks) JoinNetwork(string, string) error   { h.joins++; return nil }
+func (h *hooks) BoxNumber() string                  { return "+15550000100" }
+func (h *hooks) HostInfo() string                   { return "Synthetic Host, 8 GB" }
+func (h *hooks) Send(string, string) error          { return nil }
+func (h *hooks) EnrollCode() (string, error)        { return "", localui.ErrCodesEnrolled }
+func (h *hooks) ConfirmCode(string) (bool, error)   { return true, nil }
+func (h *hooks) TrustHost(bool) error               { return nil }
+func (h *hooks) Providers() []localui.Provider      { return h.ps }
+func (h *hooks) ConnectAPIKey(string, string) error { return nil }
+func (h *hooks) StartDeviceCode(string) (string, string, error) {
+	h.starts++
+	return "https://provider.example.test/device", "SYNTHETIC-1234", nil
+}
+func (h *hooks) SetPrivateOK(string, bool) error { return nil }
+func (h *hooks) AlreadySetUp() bool              { return false }
+func (h *hooks) Finish(string) error             { h.finishes++; return nil }
+
+type rig struct {
+	s      *localui.Server
+	h      *hooks
+	now    time.Time
+	cookie string
+}
+
+func newRig(h *hooks) *rig {
+	r := &rig{h: h, now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC), cookie: strings.Repeat("a", 64)}
+	sum := sha256.Sum256([]byte(r.cookie))
+	st := &localui.MemStore{}
+	st.Save(localui.SetupState{Network: true, Owner: "+15550000001", Device: hex.EncodeToString(sum[:]), Codes: true, Recovery: true, Host: true, HostTrusted: true})
+	var err error
+	r.s, err = localui.New(localui.Config{AP: localui.APConfig{Iface: "wlan0", Uplink: "eth0", Addr: netip.MustParsePrefix("10.42.0.1/24"), SSID: "Synthetic-UX", Password: "SYNTHETIC-TEST-WIFI"}, Hooks: h, Store: st, Now: func() time.Time { return r.now }})
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+func (r *rig) req(method, path string, v url.Values) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, "http://10.42.0.1"+path, strings.NewReader(v.Encode()))
+	req.RemoteAddr = "10.42.0.23:51000"
+	req.AddCookie(&http.Cookie{Name: "agentos_setup", Value: r.cookie})
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	r.s.ServeHTTP(w, req)
+	return w
+}
+func save(dir, name string, w *httptest.ResponseRecorder) {
+	if err := os.WriteFile(filepath.Join(dir, name+".html"), w.Body.Bytes(), 0644); err != nil {
+		panic(err)
+	}
+}
+func main() {
+	dir := os.Args[1]
+	ready := localui.Progress{Phase: "ready", Online: true, Updated: true}
+	h := &hooks{p: ready, ps: []localui.Provider{{ID: "synthetic-plan", Name: "Synthetic Plan", DeviceCode: true}}}
+	r := newRig(h)
+	before := r.req("GET", "/setup", nil)
+	save(dir, "provider-before", before)
+	r.req("POST", "/setup/ai-device", url.Values{"provider": {"synthetic-plan"}})
+	r.now = r.now.Add(24 * time.Hour)
+	after := r.req("GET", "/setup", nil)
+	save(dir, "provider-after-24h", after)
+	results := map[string]any{"initial_provider_challenge": map[string]any{"http_status": before.Code, "start_form_visible": strings.Contains(before.Body.String(), "action=\"/setup/ai-device\""), "empty_provider_link": strings.Contains(before.Body.String(), "<a href=\"\"></a>"), "empty_provider_code": strings.Contains(before.Body.String(), "enter <span class=\"mono\"></span>")}, "provider_challenge_24h": map[string]any{"http_status": after.Code, "same_code_visible": strings.Contains(after.Body.String(), "SYNTHETIC-1234"), "start_form_visible": strings.Contains(after.Body.String(), "action=\"/setup/ai-device\""), "start_calls": h.starts}}
+	offline := &hooks{p: localui.Progress{Phase: "offline"}}
+	r2 := newRig(offline)
+	off := r2.req("GET", "/setup", nil)
+	save(dir, "offline-after-pairing", off)
+	posted := r2.req("POST", "/setup/network", url.Values{"ssid": {"Synthetic Replacement"}, "password": {"SYNTHETIC-PASSWORD"}})
+	results["network_after_pairing"] = map[string]any{"page_status": off.Code, "network_form_visible": strings.Contains(off.Body.String(), "action=\"/setup/network\""), "repair_post_status": posted.Code, "repair_join_calls": offline.joins}
+	noProviders := &hooks{p: ready}
+	r3 := newRig(noProviders)
+	empty := r3.req("GET", "/setup", nil)
+	save(dir, "no-cloud-providers", empty)
+	results["no_cloud_providers"] = map[string]any{"page_status": empty.Code, "local_only_choice": strings.Contains(empty.Body.String(), "Local only"), "finish_calls": noProviders.finishes}
+	blocked := &hooks{p: localui.Progress{Phase: "updating", Online: true}}
+	r4 := newRig(blocked)
+	blockedPage := r4.req("GET", "/setup", nil)
+	save(dir, "update-blocked", blockedPage)
+	results["update_wait"] = map[string]any{"generic_update_copy": strings.Contains(blockedPage.Body.String(), "updating to the latest version first"), "refresh_10s": strings.Contains(blockedPage.Body.String(), "http-equiv=\"refresh\" content=\"10\"")}
+	results["all_set_without_accounts_or_private_route"] = localui.AllSetText(nil, false)
+	b, _ := json.MarshalIndent(results, "", "  ")
+	fmt.Println(string(b))
+	os.WriteFile(filepath.Join(dir, "probe-results.json"), b, 0644)
+}

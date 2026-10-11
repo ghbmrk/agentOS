@@ -1,0 +1,13 @@
+// Probe-only build shim. These Linux socket operations must never be called.
+// HTTP rendering calls localui.Server.ServeHTTP directly through httptest.
+package sockets
+
+import (
+	"net"
+	"os"
+)
+
+func peerUID(net.Conn) (int, bool)    { panic("Linux socket operation outside probe scope") }
+func PeerUID(net.Conn) (int, bool)    { panic("Linux socket operation outside probe scope") }
+func fileUID(os.FileInfo) (int, bool) { panic("Linux socket operation outside probe scope") }
+func lockDir(string) (func(), error)  { panic("Linux socket operation outside probe scope") }

@@ -60,14 +60,14 @@ type choiceValue struct {
 // The plain notices. Each says the drive is the only copy and what that
 // means; the variant says why.
 const (
-	NoticeUnchosen = "This drive is the only copy of your box. If it is lost or fails, everything on it is gone. To keep a copy, choose a backup on the box's Wi-Fi page: a second drive, or storage you already have."
-	NoticeNone     = "You chose no backup, so this drive is the only copy of your box. If it is lost or fails, everything on it is gone. You can choose a backup any time on the box's Wi-Fi page."
+	NoticeUnchosen = "This drive is the only copy of your box. If it is lost or fails, everything on it is gone. To keep a copy, choose a backup on my Wi-Fi page: a second drive, or storage you already have."
+	NoticeNone     = "You chose no backup, so this drive is the only copy of your box. If it is lost or fails, everything on it is gone. You can choose a backup any time on my Wi-Fi page."
 	noticeNoneYet  = "No backup has been checked yet, so this drive is still the only copy of your box. If it is lost or fails, everything on it is gone. Backups go to %s."
-	NoticeOldCard  = "Your existing backups open only with your old card. Back up now on the box's Wi-Fi page so your current card can restore the box."
+	NoticeOldCard  = "Your existing backups open only with your old card. Back up now on my Wi-Fi page so your current card can restore me."
 	// NoticeUnfinished: a rotation is owed, so backups are refused.
-	NoticeUnfinished = "Securing the box after a card change is not finished, so backups are paused and this drive is the only copy your current card restores. Finish it on the box's Wi-Fi page."
+	NoticeUnfinished = "Securing me after a card change is not finished, so backups are paused and this drive is the only copy your current card restores. Finish it on my Wi-Fi page."
 	// NoticeUnreadable: the box cannot read its backup records.
-	NoticeUnreadable = "The box can't read its backup records, so it can't tell whether you have a backup. Treat this drive as the only copy until you back up again on the box's Wi-Fi page."
+	NoticeUnreadable = "I can't read my backup records, so I can't tell whether you have a backup. Treat this drive as the only copy until you back up again on my Wi-Fi page."
 )
 
 // How often the digest repeats the notice: weekly while no backup is

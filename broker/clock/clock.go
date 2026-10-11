@@ -37,12 +37,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // State is the outcome of one check.
@@ -146,7 +147,7 @@ const (
 )
 
 // AgreeText tells the owner a restriction or hold has ended.
-const AgreeText = "The box clock agrees with the phone network again. Time checks are back to normal."
+const AgreeText = "My clock agrees with the phone network again. Time checks are back to normal."
 
 // AgreeLastText is the all-clear once the day's alerts are used up, so a
 // later disagreement the box does not text about is not a surprise.
@@ -155,7 +156,7 @@ const AgreeLastText = AgreeText + LastSuffix
 // DisagreeText is the owner text for a disagreement of skew (at most two
 // text segments). It names what the wiring does while restricted (K7).
 func DisagreeText(skew time.Duration) string {
-	t := fmt.Sprintf("The box clock and the phone network's time differ by %s, so the box is playing safe: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual.", about(skew))
+	t := fmt.Sprintf("My clock and the phone network's time differ by %s, so I am playing safe: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual.", about(skew))
 	if zoneLike(skew) {
 		t += " A whole-hour difference is often a time-zone error on one side."
 	}
@@ -164,19 +165,19 @@ func DisagreeText(skew time.Duration) string {
 
 // HoldEndText ends a hold that no carrier time confirmed either way: the
 // box clock is back in line with the box's own count.
-const HoldEndText = "The box clock is back in line with the box's own count of time. Time checks are back to normal."
+const HoldEndText = "My clock is back in line with my own count of time. Time checks are back to normal."
 
 // LastSuffix ends the all-clear that uses up the day's alerts.
-const LastSuffix = " If it happens again today the box won't text; send STATUS to check."
+const LastSuffix = " If it happens again today I won't text; send STATUS to check."
 
 // StateLostText is the alert when the saved clock check could not be read
 // at start, so a restriction it may have held is kept.
-const StateLostText = "The box couldn't read its saved clock check, so it is playing safe until the phone network's time confirms the clock: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual."
+const StateLostText = "I couldn't read my saved clock check, so I am playing safe until the phone network's time confirms the clock: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual."
 
 // HeldText is the owner text when the box clock jumps with no phone-network
 // time to confirm it.
 func HeldText(jump time.Duration) string {
-	return fmt.Sprintf("The box clock jumped by %s and no phone-network time confirms it, so the box keeps its own count of time until it can check. Nothing to do.", about(jump))
+	return fmt.Sprintf("My clock jumped by %s and no phone-network time confirms it, so I keep my own count of time until I can check. Nothing to do.", about(jump))
 }
 
 // zoneLike reports a skew within a minute of a whole number of quarter
@@ -897,43 +898,13 @@ func (g *Guard) saveLocked() {
 	if v.Restricted {
 		v.Skew, v.Since = g.status.Skew, g.status.Since
 	}
-	if err := writeAtomic(g.cfg.StatePath, v); err != nil {
+	b, err := json.Marshal(v)
+	if err == nil {
+		err = durable.WriteFile(g.cfg.StatePath, b, 0o600)
+	}
+	if err != nil {
 		g.cfg.Logf("clock: state not saved: %v", err)
 	}
-}
-
-// writeAtomic writes v to path through a synced temporary file, renamed
-// into place, and syncs the directory so the rename survives power loss.
-func writeAtomic(path string, v saved) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".clock-*")
-	if err != nil {
-		return err
-	}
-	_, werr := tmp.Write(b)
-	if serr := tmp.Sync(); werr == nil {
-		werr = serr
-	}
-	if cerr := tmp.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr == nil {
-		werr = os.Rename(tmp.Name(), path)
-	}
-	if werr != nil {
-		_ = os.Remove(tmp.Name())
-		return werr
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }
 
 // maxOffset is the largest hardware-clock offset from UTC learned: time

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,25 @@ type Urgent interface {
 func urgent(src Source) bool {
 	u, ok := src.(Urgent)
 	return ok && u.Urgent()
+}
+
+// Measured is a source that says whether its return can be measured yet.
+// Loop 2's passes find nothing on a clean box, so until it carries a
+// finding to containment its return is unmeasured, not zero, and it keeps
+// the explore share (LOOP-3, P3-4b item 7).
+type Measured interface {
+	Measured() bool
+}
+
+// unmeasuredLocked are the loops with a source that reports unmeasured.
+func (s *Scheduler) unmeasuredLocked() map[Loop]bool {
+	out := map[Loop]bool{}
+	for _, src := range s.cfg.Sources {
+		if m, ok := src.(Measured); ok && !m.Measured() {
+			out[src.Loop()] = true
+		}
+	}
+	return out
 }
 
 // Digester is a source with lines for the owner's digest.
@@ -414,9 +434,10 @@ func (s *Scheduler) order(set Settings) []Source {
 	defer s.mu.Unlock()
 	now := s.cfg.Now()
 	s.decayLocked(now)
+	unmeasured := s.unmeasuredLocked()
 	best := 0.0
-	for _, m := range s.loops {
-		if r := m.ret(); m.runs > 0 && r > best {
+	for l, m := range s.loops {
+		if r := m.ret(); m.runs > 0 && !unmeasured[l] && r > best {
 			best = r
 		}
 	}
@@ -433,7 +454,7 @@ func (s *Scheduler) order(set Settings) []Source {
 			continue
 		}
 		share := 1.0 // unmeasured: explore
-		if m.runs > 0 {
+		if m.runs > 0 && !unmeasured[l] {
 			share = s.cfg.MinShare
 			if best > 0 {
 				share = math.Max(m.ret()/best, s.cfg.MinShare)
@@ -564,9 +585,10 @@ func (s *Scheduler) Share() map[Loop]float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.cfg.Now()
+	unmeasured := s.unmeasuredLocked()
 	best := 0.0
-	for _, m := range s.loops {
-		if r := m.ret(); m.runs > 0 && r > best {
+	for l, m := range s.loops {
+		if r := m.ret(); m.runs > 0 && !unmeasured[l] && r > best {
 			best = r
 		}
 	}
@@ -579,12 +601,37 @@ func (s *Scheduler) Share() map[Loop]float64 {
 		switch {
 		case !set.On(l) || (now.Before(m.parked) && !urgentNow[l]):
 			out[l] = 0
-		case m.runs == 0:
+		case m.runs == 0 || unmeasured[l]:
 			out[l] = 1
 		case best == 0:
 			out[l] = s.cfg.MinShare
 		default:
 			out[l] = math.Max(m.ret()/best, s.cfg.MinShare)
+		}
+	}
+	return out
+}
+
+// Shares is Share in words, for STATUS: "off" while off or parked,
+// "unmeasured" while a loop has no measured return, else its share.
+func (s *Scheduler) Shares() map[Loop]string {
+	share := s.Share()
+	s.mu.Lock()
+	unmeasured := s.unmeasuredLocked()
+	runs := map[Loop]int{}
+	for l, m := range s.loops {
+		runs[l] = m.runs
+	}
+	s.mu.Unlock()
+	out := map[Loop]string{}
+	for l, v := range share {
+		switch {
+		case v == 0:
+			out[l] = "off"
+		case runs[l] == 0 || unmeasured[l]:
+			out[l] = "unmeasured"
+		default:
+			out[l] = strconv.FormatFloat(v, 'f', 2, 64)
 		}
 	}
 	return out

@@ -1,0 +1,1 @@
+{"tree_rule": [{"path": "procedures/payments.json", "pointer": "/confirm_over_eur", "op": "le", "value": 20}]}

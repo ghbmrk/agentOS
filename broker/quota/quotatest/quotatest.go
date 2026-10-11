@@ -6,11 +6,13 @@
 package quotatest
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 // Kinds are the file systems with project quotas Dir tries, in order.
@@ -73,15 +75,23 @@ func On(t testing.TB, kind string, mb int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if out, err := exec.Command(mkfs[0], append(mkfs[1:], img)...).CombinedOutput(); err != nil {
+	if out, err := command(mkfs[0], append(mkfs[1:], img)...).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("%s: %v: %s", mkfs[0], err, out)
 	}
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", err
 	}
-	if out, err := exec.Command("mount", "-o", opts, img, dir).CombinedOutput(); err != nil {
+	if out, err := command("mount", "-o", opts, img, dir).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("mount %s: %v: %s", kind, err, out)
 	}
-	t.Cleanup(func() { exec.Command("umount", "-l", dir).Run() })
+	t.Cleanup(func() { command("umount", "-l", dir).Run() })
 	return dir, nil
+}
+
+// toolPath is all of mkfs's, mount's and umount's environment
+// (P3-4b-3r-env-r8b): they find their helpers there and need nothing else.
+const toolPath = "PATH=/usr/sbin:/usr/bin:/sbin:/bin"
+
+func command(name string, args ...string) *childproc.Cmd {
+	return childproc.Command(context.Background(), childproc.NewEnv(toolPath), childproc.Options{}, name, args...)
 }

@@ -1,0 +1,1 @@
+{"tree_rule": [{"path": "context/browse.json", "pointer": "/select", "op": "subset", "value": ["pages", "search"]}]}

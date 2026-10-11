@@ -1,0 +1,5 @@
+{"tree_rule": [
+  {"path": "procedures/payments.json", "pointer": "/name", "op": "eq", "value": "payments"},
+  {"path": "procedures/payments.json", "pointer": "/legacy", "op": "absent"},
+  {"path": "procedures/payments.json", "pointer": "/max_amount_eur", "op": "le", "value": 50}
+]}

@@ -135,6 +135,45 @@ const (
 type State struct {
 	OwnerLine  string `json:"owner_line"`
 	SecondLine string `json:"second_line,omitempty"`
+	// ICCID is the serial of the SIM in the owner line's modem while the
+	// line is swapped or unbound, normalized (NormICCID); empty when there
+	// is no SIM or it cannot be read. agentosd records it as the owner
+	// line's only once the owner confirms it on the local page with a code
+	// (P2-2w d2b, CH-19).
+	ICCID string `json:"iccid,omitempty"`
+}
+
+// MaxICCID bounds a SIM serial: ITU-T E.118 allows 19 to 22 characters.
+const MaxICCID = 22
+
+// NormICCID drops spaces and uppercases a SIM serial's hex pad, as the
+// bridge compares serials.
+func NormICCID(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		if c != ' ' {
+			out = append(out, c)
+		}
+	}
+	return string(out)
+}
+
+// ValidICCID says s is a normalized SIM serial: 1 to MaxICCID characters
+// of 0-9 and A-F.
+func ValidICCID(s string) bool {
+	if s == "" || len(s) > MaxICCID {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !(s[i] >= '0' && s[i] <= '9' || s[i] >= 'A' && s[i] <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // StateEvery is how often the bridge sends its state when nothing changed.

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/hint"
 )
 
@@ -143,10 +144,10 @@ func (b *Builder) Send(day string, batch [][]byte) error {
 			}
 		}
 		// Batch directories are named by day, so they sort by day.
-		if err := os.Rename(tmp, filepath.Join(b.queueDir(), day)); err != nil {
+		if err := os.Rename(tmp, filepath.Join(b.queueDir(), day)); err != nil { // durable:exempt synced through the fault seam (dirSync), C14
 			return err
 		}
-		if err := syncDir(b.queueDir()); err != nil {
+		if err := faultFn(nil).dirSync(b.queueDir()); err != nil {
 			return err
 		}
 	}
@@ -272,13 +273,10 @@ func writeFileWith(fault faultFn, path string, data []byte) error {
 	if err := fault.hit("rename", path); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := os.Rename(tmp, path); err != nil { // durable:exempt synced through the fault seam (dirSync), C14
 		return err
 	}
-	if err := fault.hit("syncdir", filepath.Dir(path)); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(path))
+	return fault.dirSync(filepath.Dir(path))
 }
 
 // writeSynced creates path with data and syncs it.
@@ -294,11 +292,7 @@ func writeSynced(fault faultFn, path string, data []byte) error {
 		f.Close()
 		return err
 	}
-	err = fault.hit("sync", path)
-	if err == nil {
-		err = f.Sync()
-	}
-	if err != nil {
+	if err := fault.fileSync(f); err != nil {
 		f.Close()
 		return err
 	}
@@ -316,19 +310,37 @@ func (f faultFn) hit(op, path string) error {
 	return f(op, path)
 }
 
+// syncFile and syncDirFn make the package's only fsyncs, called only
+// through fileSync and dirSync. Tests replace them with recorders that call
+// the originals, so a test sees the syncs that ran, not only the hook
+// (SR3-8-f2).
+var (
+	syncFile  = (*os.File).Sync
+	syncDirFn = durable.SyncDir
+)
+
+// fileSync runs the hook, then syncs file. Every durable file sync goes
+// through here.
+func (f faultFn) fileSync(file *os.File) error {
+	if err := f.hit("sync", file.Name()); err != nil {
+		return err
+	}
+	return syncFile(file)
+}
+
+// dirSync runs the hook, then syncs dir. Every durable directory sync goes
+// through here.
+func (f faultFn) dirSync(dir string) error {
+	if err := f.hit("syncdir", dir); err != nil {
+		return err
+	}
+	return syncDirFn(dir)
+}
+
 func readJSON(path string, v any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	return json.Unmarshal(data, v)
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }

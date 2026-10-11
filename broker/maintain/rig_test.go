@@ -42,6 +42,25 @@ type proposer struct {
 	// lapsed holds proposal IDs the pipeline dropped unanswered; Lapsed
 	// reports each once, as change.Pipeline does.
 	lapsed map[string]bool
+	// adoptions is what Adoptions returns, as change.Pipeline does.
+	adoptions []change.Adoption
+}
+
+func (p *proposer) Adoptions() []change.Adoption {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]change.Adoption(nil), p.adoptions...)
+}
+
+// adopt records adoption id as the pipeline would, edited by f.
+func (p *proposer) adopt(id string, f func(*change.Adoption)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := change.Adoption{ID: id, Staged: true}
+	if f != nil {
+		f(&a)
+	}
+	p.adoptions = append(p.adoptions, a)
 }
 
 func (p *proposer) Lapsed(id string) bool {
@@ -105,6 +124,8 @@ type rig struct {
 	attestor ed25519.PrivateKey
 	allow    []ed25519.PublicKey
 	interim  []ed25519.PublicKey
+	attErr   error // the attestor source's read error
+	noSource bool  // Config.Attestors nil
 	own      ed25519.PrivateKey
 	mirrors  []update.Source
 	settings loops.Settings
@@ -174,21 +195,26 @@ func newRig(t *testing.T) *rig {
 
 func (r *rig) newLoop() *Loop3 {
 	r.t.Helper()
-	l, err := New(Config{
+	cfg := Config{
 		Store:   r.store,
 		Mirrors: func() []update.Source { return r.mirrors },
 		Online:  func() bool { return r.online },
 		Attestations: func(context.Context, string) ([][]byte, error) {
 			return r.atts, nil
 		},
-		OwnKey:           r.own.Public().(ed25519.PublicKey),
-		Attestors:        r.allow,
-		InterimAttestors: r.interim,
-		Pipeline:         r.p,
-		Settings:         func() loops.Settings { return r.settings },
-		State:            r.state,
-		Now:              r.clk.now,
-	})
+		OwnKey:   r.own.Public().(ed25519.PublicKey),
+		Pipeline: r.p,
+		Settings: func() loops.Settings { return r.settings },
+		State:    r.state,
+		Now:      r.clk.now,
+	}
+	if !r.noSource {
+		// Read at each call, as the owner's setting is.
+		cfg.Attestors = func() ([]ed25519.PublicKey, []ed25519.PublicKey, error) {
+			return r.allow, r.interim, r.attErr
+		}
+	}
+	l, err := New(cfg)
 	if err != nil {
 		r.t.Fatal(err)
 	}

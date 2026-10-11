@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -110,20 +112,42 @@ func newHarness(t *testing.T, replies map[string]any, file string, timeout time.
 	t.Setenv("AGENTOS_PARENT_CANARY", "parentEnvCanaryZq81")
 	exe, _ := os.Executable()
 	g, err := Start(context.Background(), Config{
-		Driver:    []string{exe, "-test.run=^$"},
+		Driver: wrapDriver(t, []string{exe, "-test.run=^$"}, append([]string{"BROWSER_FAKE_DRIVER=1", "BROWSER_FAKE_LOG=" + log,
+			"BROWSER_FAKE_REPLIES=" + string(raw), "BROWSER_FAKE_WS=" + ws,
+			"BROWSER_FAKE_FILE=" + file}, env...)),
 		Origins:   []string{"https://shop.example.test"},
 		Workspace: ws,
 		Scrub:     vault.NewRedactor([][]byte{[]byte("vaultCanarySessionV4lt"), []byte("pw-canary-short")}),
 		Timeout:   timeout,
-		Env: append([]string{"BROWSER_FAKE_DRIVER=1", "BROWSER_FAKE_LOG=" + log,
-			"BROWSER_FAKE_REPLIES=" + string(raw), "BROWSER_FAKE_WS=" + ws,
-			"BROWSER_FAKE_FILE=" + file}, env...),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { g.Close() })
 	return &harness{g: g, log: log, ws: ws}
+}
+
+// wrapDriver returns a driver argv that sets env, NAME=value pairs, and
+// runs argv: the fakes' settings are test-only keys, so they travel in
+// the driver, not in Config.Env, which childproc's allowlist holds to the
+// keys a real driver needs (P3-4b-3r-env-r8b).
+func wrapDriver(t *testing.T, argv, env []string) []string {
+	t.Helper()
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+	sh := "#!/bin/sh\n"
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		sh += "export " + k + "=" + q(v) + "\n"
+	}
+	sh += "exec"
+	for _, a := range argv {
+		sh += " " + q(a)
+	}
+	w := filepath.Join(t.TempDir(), "driver")
+	if err := os.WriteFile(w, []byte(sh+" \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return []string{w}
 }
 
 func (h *harness) do(t *testing.T, raw string) Result {
@@ -169,6 +193,55 @@ func TestGateForwardsOnlyTheCanonicalRequest(t *testing.T) {
 	got := h.received(t)
 	if len(got) != 1 || got[0] != `{"v":0,"verb":"type","ref":"e3","text":"kettle","submit":false}` {
 		t.Fatalf("driver received %v", got)
+	}
+}
+
+// REQ: CRED-1
+//
+// P3-4b-3r-env-r8b: the driver starts through childproc with exactly
+// PATH, HOME (its workspace) and LANG, plus Config.Env, which is empty
+// here: the fake's own settings come from its wrapper.
+func TestDriverGetsExactlyItsEnvironment(t *testing.T) {
+	t.Setenv("AGENTOS_OWNER", "+15550100999") // synthetic
+	h := newHarness(t, nil, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	b, _ := os.ReadFile(h.log)
+	line, _, _ := strings.Cut(string(b), "\n")
+	env, ok := strings.CutPrefix(line, "ENV ")
+	if !ok {
+		t.Fatalf("no ENV line: %q", line)
+	}
+	var got []string
+	for _, kv := range strings.Split(env, "\x00") {
+		// The wrapper's shell sets PWD and the fake's settings itself.
+		if !strings.HasPrefix(kv, "PWD=") && !strings.HasPrefix(kv, "BROWSER_FAKE_") {
+			got = append(got, kv)
+		}
+	}
+	sort.Strings(got)
+	if want := []string{"HOME=" + h.ws, "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin"}; !slices.Equal(got, want) {
+		t.Fatalf("driver env %q, want %q", got, want)
+	}
+}
+
+// REQ: CRED-1
+//
+// A Config.Env key not on childproc's allowlist refuses the configuration:
+// the driver never starts.
+func TestAConfiguredKeyNotAllowlistedIsRefused(t *testing.T) {
+	ran := filepath.Join(t.TempDir(), "ran")
+	_, err := Start(context.Background(), Config{
+		Driver:    []string{"/bin/sh", "-c", "touch " + ran},
+		Origins:   []string{"https://shop.example.test"},
+		Workspace: filepath.Join(t.TempDir(), "ws"),
+		Env:       []string{"LD_PRELOAD=/x.so"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "LD_PRELOAD is not allowlisted") {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(ran); err == nil {
+		t.Fatal("the driver ran")
 	}
 }
 

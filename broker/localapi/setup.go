@@ -30,13 +30,17 @@ const (
 	// ErrSetupClosed: setup's finish is recorded, or its record cannot be
 	// read; nothing reopens it but recovery.
 	ErrSetupClosed = "setup closed"
-	// ErrEnrolled: the vault holds a sealed code-generator seed (or never
-	// opened setup's enrollment), so setup shows none.
+	// ErrEnrolled: the vault holds the code-generator seed this setup
+	// confirmed, already sealed, so setup shows none and finish accepts it.
 	ErrEnrolled = "enrolled"
+	// ErrEnrollUnavailable: this box cannot finish setup: its vault never
+	// opened setup's enrollment, or holds a seal setup's record has no
+	// confirmation for (P2-2w c2 r1). Nothing on the page fixes it.
+	ErrEnrollUnavailable = "enrollment unavailable"
 	// ErrNoEnrollment: no seed waits for confirmation; show a new link.
 	ErrNoEnrollment = "no enrollment"
 	// ErrNotEnrolled: Finish with no seed confirmed since the last new
-	// one, or on a vault whose enrollment is closed.
+	// one.
 	ErrNotEnrolled = "not enrolled"
 )
 

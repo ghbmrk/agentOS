@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/corpus"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -497,3 +499,49 @@ func TestLearningBusyCause(t *testing.T) {
 type yield struct{}
 
 func (yield) Preempt(string) error { return nil }
+
+// REQ: LOOP-7, LOOP-9
+//
+// P3-4b-4c-corpus: the guard agentosd builds replays the corpus built into
+// the binary through the in-process closed checks, in Loop 2's slot after
+// the passive pass, once per corpusEvery; a clean run reports nothing and
+// fails nothing.
+func TestTheGuardReplaysTheEmbeddedCorpus(t *testing.T) {
+	lp := openFuzzLearning(t, "")
+	items, err := corpus.Items()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := lp.corpus
+	if p == nil || p.Every() != corpusEvery || !reflect.DeepEqual(p.Items, items) || len(p.Checks) != 2 ||
+		p.Checks[0].Name != corpus.CodeFilter || p.Checks[1].Name != corpus.CommitmentFilter {
+		t.Fatalf("corpus probe %+v", p)
+	}
+	for _, c := range p.Checks {
+		if c.Deliver != nil {
+			t.Fatalf("%s goes through a guest", c.Name)
+		}
+	}
+	ctx := context.Background()
+	var ran []string
+	for {
+		job, ok := lp.guard.Next(ctx, false)
+		if !ok {
+			break
+		}
+		ran = append(ran, job.Name)
+		res := job.Run(ctx)
+		if job.Name == "probe:corpus" && (res.Err != nil || res.Value != 0) {
+			t.Fatalf("clean corpus run: %+v", res)
+		}
+		if len(ran) > 3 {
+			t.Fatalf("jobs %q", ran)
+		}
+	}
+	if !slices.Contains(ran, "probe:corpus") {
+		t.Fatalf("the guard ran %q, no corpus replay", ran)
+	}
+	if len(lp.guard.Evidence()) != 0 || strings.Contains(lp.guard.Status(), "corpus") {
+		t.Fatalf("a clean run reported: %q %+v", lp.guard.Status(), lp.guard.Evidence())
+	}
+}

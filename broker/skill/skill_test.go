@@ -146,8 +146,14 @@ func TestRunStopsWhereAssumptionFails(t *testing.T) {
 	}
 	fx = &fakeFX{err: errors.New("down")}
 	res = Run(context.Background(), sk, "r4", args("to", `"ann@example.test"`, "week", `41`), fx)
-	if res.Stopped.Step != 1 || len(res.Remaining) != 3 {
+	if res.Stopped.Step != 1 || len(res.Remaining) != 3 || res.Stopped.Why != "the broker did not take the request: down" {
 		t.Fatalf("broker error: %+v", res)
+	}
+	canary := "/var/lib/agentos/journal/log"
+	fx = &fakeFX{err: errors.New("open " + canary + ": permission denied")}
+	res = Run(context.Background(), sk, "r5", args("to", `"ann@example.test"`, "week", `41`), fx)
+	if res.Stopped == nil || strings.Contains(res.Stopped.Why, canary) || strings.Contains(res.Stopped.Why, "/var/") || res.Stopped.Why != "the broker did not take the request" {
+		t.Fatalf("path in why: %+v", res.Stopped)
 	}
 }
 

@@ -16,7 +16,7 @@ type Auth struct {
 }
 
 // ErrNotAuthorized is a tier-4 action without the owner's authority.
-var ErrNotAuthorized = errors.New("recovery: needs an approval code and confirmation on the box's Wi-Fi page, or the recovery key")
+var ErrNotAuthorized = errors.New("recovery: needs an approval code and confirmation on the local Wi-Fi page, or the recovery key")
 
 func (a Auth) check(b *Box) error {
 	if a.Recovery.Valid() {

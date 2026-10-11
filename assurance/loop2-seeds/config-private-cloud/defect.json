@@ -1,0 +1,1 @@
+{"files": {"config/privacy.json": {"name": "default", "version": 1, "private_routes": ["local", "cloud"], "fallback": "cloud"}}}

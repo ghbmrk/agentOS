@@ -121,6 +121,34 @@ func TestHandlerPanicIsAnErrorNotACrash(t *testing.T) {
 	}
 }
 
+// A handler that stops its own server still gets its reply out, on a plain
+// or a HangupOps request: the stop closes the connection after the reply
+// is written, not under it.
+func TestAHandlerThatStopsTheServerStillAnswers(t *testing.T) {
+	for _, op := range []string{"plain", "watched"} {
+		dir := filepath.Join(t.TempDir(), "run")
+		s := &Server{Dir: dir}
+		ctx, cancel := context.WithCancel(context.Background())
+		stop := func(context.Context, Peer, json.RawMessage) (any, error) {
+			cancel()
+			time.Sleep(20 * time.Millisecond) // let the stop race the reply
+			return "bye", nil
+		}
+		err := s.Start(ctx, Endpoint{Name: "o.sock", Peer: Peer{Kind: "owner"},
+			Ops: map[string]Handler{op: stop}, HangupOps: map[string]bool{"watched": true}})
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		r := call(t, filepath.Join(dir, "o.sock"), `{"op":"`+op+`"}`)
+		cancel()
+		s.Wait()
+		if !r.OK {
+			t.Fatalf("%s got %+v", op, r)
+		}
+	}
+}
+
 func TestStaleSocketFileIsReplacedAndRemovedOnStop(t *testing.T) {
 	dir, _ := os.MkdirTemp("", "sk")
 	defer os.RemoveAll(dir)

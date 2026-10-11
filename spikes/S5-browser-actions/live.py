@@ -27,7 +27,8 @@ def owner_login(url, fields, submit, state_path):
     """Stand-in for the owner's live-view login: outside the protocol, never logged."""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        b = p.chromium.launch(executable_path=CHROME)
+        px = os.environ.get("S5_PROXY") or os.environ.get("HTTPS_PROXY")
+        b = p.chromium.launch(executable_path=CHROME, **({"proxy": {"server": px}} if px else {}))
         c = b.new_context()
         pg = c.new_page()
         pg.goto(url)
@@ -98,17 +99,22 @@ def govuk(s):
     s.look()
     s.do("click", ref=s.ref("button", "Continue"))
     s.look()
-    s.do("click", ref=s.ref("radio", "Tourism"))
-    s.do("click", ref=s.ref("button", "Continue"))
-    s.look()
-    if "radio" in s.snap["snapshot"]:  # duration question on some paths
-        s.do("click", ref=s.ref("radio", "6 months or less"))
+    # The checker asks a variable number of radio questions; answer each by its heading.
+    answers = [("coming to the UK", "Tourism"), ("how long|stay", "6 months or less")]
+    seen = []
+    for _ in range(8):
+        h = re.search(r'heading "([^"]+)" \[level=1\]', s.snap["snapshot"])
+        title = h.group(1) if h else ""
+        seen.append(title)
+        if "radio" not in s.snap["snapshot"]:
+            break
+        name = next((a for pat, a in answers if re.search(pat, title, re.I)), "No")
+        s.do("click", ref=s.ref("radio", f"^{re.escape(name)}"))
         s.do("click", ref=s.ref("button", "Continue"))
         s.look()
-    heading = re.search(r'heading "(You[^"]*visa[^"]*)"', s.snap["snapshot"])
-    if not heading:
-        raise StepFailed("no outcome heading")
-    return {"check": heading.group(1)}
+    if not re.search(r"visa|permission|eta|entry", seen[-1], re.I):
+        raise StepFailed(f"no outcome heading; questions: {seen}")
+    return {"check": f"outcome '{seen[-1][:60]}' after {len(seen) - 1} questions"}
 
 
 def saucedemo(s):
@@ -146,7 +152,7 @@ def herokuapp(s):
     out.append("dropdown")
     s.do("navigate", url=base + "/download")
     s.look()
-    res = s.do("download", ref=s.ref("link", r"\.(txt|json|png|jpg|pdf)$"))
+    res = s.do("download", ref=s.ref("link", r"^test\.txt$"))
     out.append(f"download {res['bytes']} B")
     s.do("navigate", url=base + "/shadowdom")
     if "My default text" not in s.look()["snapshot"] and "Let's have some different text" not in s.snap["snapshot"]:
@@ -184,17 +190,24 @@ def herokuapp_gaps(s):
 
 
 def github(s):
-    s.do("navigate", url="https://github.com/microsoft/playwright")
+    s.do("navigate", url="https://github.com/ghbmrk/agentOS")
     s.look()
-    s.do("click", ref=s.ref("link", "^Issues"))
+    s.do("click", ref=s.ref("link", "^Pull requests"))
+    s.look()
+    time.sleep(3)  # the PR list renders client-side after load
     snap = s.look()["snapshot"]
-    first = re.search(r'link "([^"]{10,})" \[ref=\w+\][^\n]*\n\s+- /url: /microsoft/playwright/issues/\d+', snap)
+    first = re.search(r'link "([^"]{10,})"[^\n]*\n\s+- /url: (?:https://github.com)?/ghbmrk/agentOS/pull/\d+', snap)
     if not first:
-        raise StepFailed("no issue link in snapshot")
-    s.do("navigate", url="https://github.com/microsoft/playwright/blob/main/README.md")
+        raise StepFailed("no pull request link in snapshot")
+    s.do("navigate", url="https://github.com/ghbmrk/agentOS/blob/main/README.md")
     s.look()
-    res = s.do("download", ref=s.ref("link", "Download raw"))
-    return {"check": f"first issue '{first.group(1)[:40]}'; README raw {res['bytes']} B"}
+    # The "Download raw file" button did not produce a download event in the 2026-10-09 run
+    # (it is script-driven); the "Raw" link navigates to the second declared origin instead.
+    s.do("click", ref=s.ref("link", "^Raw$"))
+    s.look()
+    if "raw.githubusercontent.com" not in s.snap["url"]:
+        raise StepFailed(f"raw link landed on {s.snap['url']}")
+    return {"check": f"first PR '{first.group(1)[:40]}'; raw README on {s.snap['url'].split('/')[2]}"}
 
 
 SITES = {

@@ -213,7 +213,9 @@ func (p *Plane) DeliverOwner(machine, text string, public bool) (string, error) 
 	rand.Read(b[:])
 	msg := &ownerMsg{ID: hex.EncodeToString(b[:]), Text: text}
 	if err := m.box.put(msg); err != nil {
-		return "", err
+		// The store error names the inbox path. Callers may log or text it.
+		p.cfg.Logf("guest %s: inbox store: %v", machine, err)
+		return "", errors.New("guest: the message was not stored")
 	}
 	// New work has arrived: the lineage no longer serves its last
 	// answered message (G14). Messages still held open keep their claim.

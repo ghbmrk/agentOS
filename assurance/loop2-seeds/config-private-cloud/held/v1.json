@@ -1,0 +1,1 @@
+{"tree_rule": [{"path": "config/privacy.json", "pointer": "/fallback", "op": "absent"}]}
