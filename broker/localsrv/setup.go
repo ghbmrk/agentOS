@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
@@ -120,30 +120,7 @@ func (f FileRecord) Save(r SetupRecord) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(f.Path), ".setup-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), f.Path); err != nil {
-		return err
-	}
-	if d, err := os.Open(filepath.Dir(f.Path)); err == nil {
-		d.Sync()
-		d.Close()
-	}
-	return nil
+	return durable.WriteFile(f.Path, b, 0o600)
 }
 
 var phoneRe = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
