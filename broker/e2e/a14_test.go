@@ -182,6 +182,7 @@ func TestA14CanaryThroughTheGuestSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkJournal(t, eng)
 	ms := &machines{private: map[string]bool{}}
 	tee := &teeAuditor{next: &egress.JournalAuditor{Journal: eng}, reasons: map[[2]string]bool{}}
 	proxy, err := egress.New(egress.Config{

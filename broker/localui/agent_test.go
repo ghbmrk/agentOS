@@ -30,7 +30,8 @@ func (stillOwner) LocalSignIn(string) (time.Time, uint64, error) {
 	return time.Time{}, 0, owner.ErrWrongCode
 }
 func (stillOwner) LocalStop(context.Context) error                          { return nil }
-func (stillOwner) LocalResume(uint64) (string, error)                       { return "", nil }
+func (stillOwner) StopGen() int64                                           { return 0 }
+func (stillOwner) LocalResume(uint64, int64) (string, error)                { return "", nil }
 func (stillOwner) LocalRequests() []owner.LocalRequest                      { return nil }
 func (stillOwner) LocalWaiting() string                                     { return "" }
 func (stillOwner) LocalStatusLines() string                                 { return "" }
