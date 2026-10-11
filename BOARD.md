@@ -155,6 +155,15 @@ Primary lane; from an external review's points 2 to 6, checked against main at 9
 | A10-T1 | Owner-minutes trial (A10, H6): the same H6 tasks on AgentOS, OpenClaw alone and a provider CLI, owner-minutes and outcomes measured over the same period | Mark sets the trial time | queued (needs Mark) |
 | LRN-1 | [No adoption bonus without a measured gain](briefs/LRN-1.md) | — | in review (tier A) |
 
+## Local devices (D-069)
+
+The home-network boundary is release work (A14); device features follow the first release (LATER.md, A16).
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| DEV-net-a | [Home-network address policy and egress proxy](briefs/DEV-net-a.md) | P1-3, D-069 spec diff merged | queued (release; A14, G2; tier A) |
+| DEV-net-b | [Home-network boundary on the remaining dialers and inbound](briefs/DEV-net-b.md) | DEV-net-a | queued (release; A14, G2; tier A) |
+
 ## Phase 0: harness and risk spikes
 
 | ID | Package | Needs | State |
