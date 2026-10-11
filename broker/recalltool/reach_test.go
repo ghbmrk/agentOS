@@ -52,6 +52,16 @@ func (j *fakeJournal) Between(origin string, from, until time.Time) []string {
 	return out
 }
 
+func (j *fakeJournal) StatusBetween(origin string, from, until time.Time) []journal.Status {
+	var out []journal.Status
+	for _, id := range j.Between(origin, from, until) {
+		st, _ := j.Get(id)
+		st.Intent.ID = id
+		out = append(out, st)
+	}
+	return out
+}
+
 func (j *fakeJournal) Erase(ids []string) (erased, held []string, err error) {
 	for _, id := range ids {
 		switch {
