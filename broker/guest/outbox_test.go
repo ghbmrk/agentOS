@@ -152,9 +152,9 @@ func TestDEL1StoreFailureLeavesTheMessagePending(t *testing.T) {
 	r := outboxRig(t, path, "", &wakes)
 	r.client("m1")
 	id := r.hand("m1", "book the dentist")
-	// The store writes through path.tmp: a directory there fails it,
-	// even for root.
-	if err := os.Mkdir(path+".tmp", 0o700); err != nil {
+	// A directory at the store's path fails the rename, even for root.
+	os.Remove(path)
+	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if code, _ := r.do("m1", "POST", "/owner/reply", reply(id, "booked")); code != 503 {
@@ -163,7 +163,7 @@ func TestDEL1StoreFailureLeavesTheMessagePending(t *testing.T) {
 	if !r.p.OwnerPending("m1") || len(r.p.PendingReplies()) != 0 || wakes.Load() != 0 {
 		t.Fatal("a reply that was not stored was taken")
 	}
-	os.Remove(path + ".tmp")
+	os.Remove(path)
 	if code, _ := r.do("m1", "POST", "/owner/reply", reply(id, "booked")); code != 204 {
 		t.Fatalf("retry: %d", code)
 	}
