@@ -21,6 +21,8 @@ const (
 	agentWaiting = "Your agent is starting, waiting for memory."
 	agentFailed  = "Your agent is starting; the last try failed."
 	agentNotSet  = "Your agent is not set up; I need an update or a restart."
+	// repliesWaiting: the guest plane's reply outbox is full (DEL-1e).
+	repliesWaiting = "Your agent's replies are waiting to be sent."
 )
 
 // liveMachines is the part of the machine manager that keeps the owner's
