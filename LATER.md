@@ -59,6 +59,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
 |---|---|
+| RECALL-prov-L1 | `recall_search`/`Given` never checks `Reads`/`ReadsAll` (only `recall_note` does), and the check uses `>` where `>=` is meant. Bound the read set where it grows. Found in #1046 L3. |
+| RECALL-prov-L2 | `prepare` embeds an anchor's empty text; a real embedder (RECALL-EMB) may surface anchors in searches. Skip vectors for anchors or filter them in `Search`. Found in #1046 L3. |
+| RECALL-prov-L3 | An owner relabel of a note to public is blocked by the anchor's label, which never falls. Found in #1046 L3. |
 | CAP-13b | CAP-13b compute-host service (Mac first; OS-agnostic). Owner computer as CAP-13 compute host serving model passes / larger local main-route model (SPEC line 86, CAP-13, HW-4; untrusted inference service, no credentials, per SPEC line 162). Install: one Terminal command copied from the box's local page (no app store, no notarization); service auto-starts; pairs via a one-time code from the box page + one owner tap; used automatically when reachable, fallback to box models otherwise; Ethernet or same Wi-Fi. Acceptance: install once, plug in, one tap, used automatically. Out of scope stays: agent workers on the Mac and macOS app executors (SPEC line 584). Related: BOARD CAP-13a |
 | FRZ-oss | Open-source bridge (broker/cleanroom, hint, pubid, pubsend; A12, G5): no new rows or follow-ups until G2 passes (D-098). BOARD rows OSS-6s-b, OSS-6m, OSS-6j, OSS-6i, OSS-6p, OSS-6a, OSS-7c and OSS-5t read `frozen`. Safe only while nothing publishes: if publication is wired on a box, OSS-7c is a blocker again (D-088). Revive with the acceptance test it serves |
 | FRZ-line2 | Second line as an owner-held SIP account (broker/sipsign, smsapi, sendrules, secondline, sipline; ADP-12): no new rows until an A-test needs it (D-098); no queued BOARD row today |

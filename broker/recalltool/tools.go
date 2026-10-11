@@ -9,9 +9,9 @@
 //     machine first (recall R1).
 //   - recall_note stores the agent's own note. The broker sets its kind
 //     (agent), its label from the machine's label (K4), its receipt time
-//     (K9), and its DerivedFrom from everything the machine's lineage has
-//     been given (K2b), so deleting a source deletes notes made after it
-//     was read. Nothing the guest sends sets any of these.
+//     (K9), and its DerivedFrom from one anchor item standing for what the
+//     machine's lineage has been given (K2b), so deleting a source
+//     deletes notes made after it was read. Nothing the guest sends sets any of these.
 //
 // Results reach the guest only through recall.Render: untrusted content
 // with its source, never instructions, no scores.
@@ -51,9 +51,10 @@ type Config struct {
 
 // Tools implements guest.Tools.
 type Tools struct {
-	cfg  Config
-	mu   sync.Mutex
-	rate map[string]*bucket
+	cfg    Config
+	mu     sync.Mutex
+	noteMu sync.Mutex
+	rate   map[string]*bucket
 }
 
 // New checks cfg.
@@ -248,7 +249,9 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 			_, ok := t.cfg.Index.Get(t.cfg.Index.SourceID("agent", "", l+"/"+k))
 			return ok
 		}
-		if err := t.cfg.Prov.Reserve(lineage, a.Key, exists); err != nil {
+		t.noteMu.Lock() // check to record is one step, so caps cannot overshoot
+		defer t.noteMu.Unlock()
+		if err := t.cfg.Prov.Check(lineage, a.Key, exists); err != nil {
 			if errors.Is(err, ErrLimit) {
 				return "", true, guesterr.New("this agent has saved or read as much as notes allow; delete old notes or ask the owner")
 			}
@@ -271,6 +274,9 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 				Source: recall.Source{Kind: "agent", Ref: lineage + "/" + a.Key, Seen: now, DerivedFrom: from},
 				Label:  label, Text: a.Text, Facts: facts, Received: now,
 			})
+		}
+		if err == nil {
+			err = t.cfg.Prov.Noted(lineage, a.Key)
 		}
 		if errors.Is(err, recall.ErrDeleted) {
 			// #59 security B1: a lineage that read a deleted record

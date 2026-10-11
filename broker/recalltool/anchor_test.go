@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/recall"
 )
 
 // derivedTotal counts the DerivedFrom entries the index holds for lineage
@@ -152,7 +155,7 @@ func compacted(t *testing.T, r *rig) *Provenance {
 // Caps are refused before the note is stored, with a plain error.
 func TestNoteLimitsFailClosed(t *testing.T) {
 	r := newRig(t).fast()
-	r.prov.SetLimits(Limits{Notes: 3, NotesAll: 4, Anchors: 2, AnchorsAll: 100})
+	r.prov.SetLimits(Limits{Notes: 3, NotesAll: 4})
 	note := func(l, k string) error {
 		_, err := r.call("m-"+l, l, "recall_note", map[string]any{"key": k, "text": "x"})
 		return err
@@ -185,24 +188,164 @@ func TestNoteLimitsFailClosed(t *testing.T) {
 	if err := note("c", "k0"); err != nil {
 		t.Fatalf("a deleted note should free a place: %v", err)
 	}
-	// Anchors: each note after new reads makes one, up to the cap.
-	r2 := newRig(t).fast()
-	r2.prov.SetLimits(Limits{Anchors: 2})
-	var errs int
-	for i := 0; i < 4; i++ {
-		r2.call("m", "root", "recall_search", map[string]any{"query": "shed note", "scope": "owner", "limit": 100})
-		if _, err := r2.call("m", "root", "recall_note", map[string]any{"key": fmt.Sprintf("n%d", i), "text": fmt.Sprintf("shed note %d", i)}); err != nil {
-			errs++
-		}
-	}
-	if _, _, an := r2.prov.Size("root"); an != 2 || errs == 0 {
-		t.Fatalf("anchors %d, refused %d", an, errs)
-	}
 	// Reads: a lineage past the read cap makes no notes.
 	r3 := newRig(t).fast()
 	r3.prov.SetLimits(Limits{Reads: 1})
 	r3.call("m", "root", "recall_search", map[string]any{"query": "shed", "scope": "owner"})
 	if _, err := r3.call("m", "root", "recall_note", map[string]any{"key": "n", "text": "x"}); err == nil {
 		t.Fatal("read cap")
+	}
+}
+
+// durable is a rig whose index sits on a kept directory and a pinned clock,
+// so the tests can reopen it and age tombstones.
+type durable struct {
+	*rig
+	dir   *recall.MemDir
+	clock time.Time
+}
+
+func (d *durable) open(t *testing.T) {
+	t.Helper()
+	k, _ := recall.NewKeyer(key())
+	ix, err := recall.Open(d.dir, recall.WithKeyer(k), recall.WithLabeler(d.lab), recall.WithClock(func() time.Time { return d.clock }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix.KeepTombstones((&Reach{Prov: d.prov}).Needed)
+	d.ix = ix
+	d.tl, _ = New(Config{Index: ix, Prov: d.prov, Label: d.lab.str, Burst: 1 << 20, Now: func() time.Time { return d.clock }})
+}
+
+func newDurable(t *testing.T) *durable {
+	t.Helper()
+	r := newRig(t)
+	d := &durable{rig: r, dir: recall.NewMemDir(), clock: time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)}
+	d.open(t)
+	for _, it := range []recall.Item{
+		{Source: recall.Source{Kind: "mail", Account: "owner@example.test", Ref: "<m1@x>"}, Text: "invoice from acme for the garden shed", Received: d.clock},
+		{Source: recall.Source{Kind: "web", Ref: "https://shed.example.test/"}, Label: recall.Public, Text: "garden shed prices", Received: d.clock},
+	} {
+		if _, err := d.ix.Ingest(it); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return d
+}
+
+func (d *durable) notes(t *testing.T, n int, prefix string) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		d.call("m", "root", "recall_search", map[string]any{"query": "shed note", "scope": "owner", "limit": 100})
+		if _, err := d.call("m", "root", "recall_note", map[string]any{"key": fmt.Sprintf("%s%d", prefix, i), "text": fmt.Sprintf("shed note %d", i)}); err != nil {
+			t.Fatalf("note %s%d: %v", prefix, i, err)
+		}
+	}
+}
+
+func (d *durable) alive(key string) bool {
+	_, ok := d.ix.Get(d.ix.SourceID("agent", "", "root/"+key))
+	return ok
+}
+
+// B1: the owner deletes a source; once the tombstone prune policy has run,
+// the lineage still makes no note derived from it, also after a reopen.
+func TestAnchorTombstoneSurvivesPrune(t *testing.T) {
+	d := newDurable(t)
+	d.call("m", "root", "recall_search", map[string]any{"query": "invoice", "scope": "owner"})
+	d.notes(t, 2, "a")
+	if _, err := d.ix.Delete(d.ix.SourceID("mail", "owner@example.test", "<m1@x>")); err != nil {
+		t.Fatal(err)
+	}
+	d.clock = d.clock.Add(40 * 24 * time.Hour)
+	if _, err := d.ix.PruneTombstones(30 * 24 * time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	for pass := 0; pass < 2; pass++ {
+		if _, err := d.call("m", "root", "recall_note", map[string]any{"key": fmt.Sprintf("after%d", pass), "text": "z"}); err == nil {
+			t.Fatalf("pass %d: a note derived from a deleted source was accepted after the prune", pass)
+		}
+		d.open(t) // and again from disk
+	}
+}
+
+// B2: the chain collapses at its length cap, so a long-lived lineage keeps
+// making notes, and both the old and the new notes still cascade.
+func TestChainCollapsesAndStillCascades(t *testing.T) {
+	d := newDurable(t)
+	d.prov.SetLimits(Limits{Anchors: 3})
+	d.call("m", "root", "recall_search", map[string]any{"query": "invoice", "scope": "owner"})
+	d.notes(t, 12, "n")
+	if d.prov.chainLen["root"] > 3 {
+		t.Fatalf("chain %d longer than its cap", d.prov.chainLen["root"])
+	}
+	for _, p := range []*Provenance{d.prov, reopen(t, d.rig), compacted(t, d.rig)} {
+		if p.chainLen["root"] != d.prov.chainLen["root"] || p.anchor["root"] != d.prov.anchor["root"] {
+			t.Fatalf("chain state lost: %d %d", p.chainLen["root"], d.prov.chainLen["root"])
+		}
+	}
+	if _, err := d.ix.Delete(d.ix.SourceID("mail", "owner@example.test", "<m1@x>")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		if d.alive(fmt.Sprintf("n%d", i)) {
+			t.Fatalf("n%d survived the deletion of a source read before it", i)
+		}
+	}
+}
+
+// B3: a refused note writes nothing, and a note whose ingest fails leaves
+// no key behind; the journal compacts from write().
+func TestRefusedNotesLeaveNoTrace(t *testing.T) {
+	d := newDurable(t)
+	d.prov.SetLimits(Limits{Notes: 1})
+	d.notes(t, 1, "k")
+	before := d.prov.lines
+	for i := 0; i < 50; i++ {
+		if _, err := d.call("m", "root", "recall_note", map[string]any{"key": fmt.Sprintf("x%d", i), "text": "y"}); err == nil {
+			t.Fatal("cap not enforced")
+		}
+	}
+	if d.prov.lines != before {
+		t.Fatalf("refused notes grew the journal: %d -> %d", before, d.prov.lines)
+	}
+	d2 := newDurable(t)
+	d2.call("m", "root", "recall_search", map[string]any{"query": "invoice", "scope": "owner"})
+	d2.ix.Delete(d2.ix.SourceID("mail", "owner@example.test", "<m1@x>"))
+	if _, err := d2.call("m", "root", "recall_note", map[string]any{"key": "z", "text": "y"}); err == nil {
+		t.Fatal("note from a deleted source accepted")
+	}
+	if _, _, _ = d2.prov.Size("root"); d2.prov.notes["root"]["z"] {
+		t.Fatal("a failed note left its key")
+	}
+	d3 := newDurable(t)
+	mail := d3.ix.SourceID("mail", "owner@example.test", "<m1@x>")
+	for i := 0; i < 200; i++ {
+		d3.prov.Given("root", []string{mail}, d3.clock)
+		d3.prov.Forget("root", mail)
+	}
+	if d3.prov.lines > 100 {
+		t.Fatalf("journal never compacts: %d lines", d3.prov.lines)
+	}
+}
+
+// R2: a source deleted several anchors back, after the index is reopened
+// from its segments and after the provenance journal compacts.
+func TestCascadeAfterReopenAndCompaction(t *testing.T) {
+	d := newDurable(t)
+	d.call("m", "root", "recall_search", map[string]any{"query": "invoice", "scope": "owner"})
+	d.notes(t, 5, "n") // several anchors after the read of the mail
+	d.prov = compacted(t, d.rig)
+	d.open(t)
+	if _, err := d.ix.Delete(d.ix.SourceID("mail", "owner@example.test", "<m1@x>")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if d.alive(fmt.Sprintf("n%d", i)) {
+			t.Fatalf("n%d survived", i)
+		}
+	}
+	if _, err := d.call("m", "root", "recall_note", map[string]any{"key": "after", "text": "z"}); err == nil {
+		t.Fatal("note accepted after the source was deleted")
 	}
 }
