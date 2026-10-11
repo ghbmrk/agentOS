@@ -4,7 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // recordOwnerSIM records an adopted SIM as the owner line's in
@@ -32,34 +33,6 @@ func recordOwnerSIM(path string) func(iccid string) error {
 		if err != nil {
 			return err
 		}
-		dir := filepath.Dir(path)
-		tmp, err := os.CreateTemp(dir, ".roles-*")
-		if err != nil {
-			return err
-		}
-		defer os.Remove(tmp.Name())
-		if _, err := tmp.Write(out); err != nil {
-			tmp.Close()
-			return err
-		}
-		if err := tmp.Chmod(0o644); err != nil {
-			tmp.Close()
-			return err
-		}
-		if err := tmp.Sync(); err != nil {
-			tmp.Close()
-			return err
-		}
-		if err := tmp.Close(); err != nil {
-			return err
-		}
-		if err := os.Rename(tmp.Name(), path); err != nil {
-			return err
-		}
-		if d, err := os.Open(dir); err == nil {
-			d.Sync()
-			d.Close()
-		}
-		return nil
+		return durable.WriteFile(path, out, 0o644)
 	}
 }

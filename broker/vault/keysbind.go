@@ -93,7 +93,7 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 		return err
 	}
 	cur, cerr := readKeys(v.keysPath)
-	if err := writeAtomic(v.keysPath+nextSuffix, raw); err != nil {
+	if err := writeFile(v.keysPath+nextSuffix, raw, 0o600); err != nil {
 		return err
 	}
 	v.nextKeys = raw
@@ -123,7 +123,7 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 func (v *Vault) finishKeys() error {
 	next := v.nextKeys
 	if cur, err := readFile(v.keysPath); err != nil || !bytes.Equal(cur, next) {
-		if err := writeAtomic(v.keysPath, next); err != nil {
+		if err := writeFile(v.keysPath, next, 0o600); err != nil {
 			return err
 		}
 	}

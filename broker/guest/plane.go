@@ -38,6 +38,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/fold"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 )
@@ -130,6 +131,7 @@ type Plane struct {
 	mu    sync.Mutex
 	ms    map[string]*machine
 	store *store
+	folds *fold.Store
 }
 
 type machine struct {
@@ -145,6 +147,7 @@ type machine struct {
 	box     *inbox
 	steps   stepper
 	rate    bucket
+	folds   *fold.Store
 	conns   atomic.Int64 // connections the server holds open
 }
 
@@ -195,7 +198,7 @@ func New(cfg Config) (*Plane, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Plane{cfg: cfg, ms: map[string]*machine{}, store: st}, nil
+	return &Plane{cfg: cfg, ms: map[string]*machine{}, store: st, folds: &fold.Store{}}, nil
 }
 
 // Open starts serving machine id and returns its services directory. It is
@@ -224,7 +227,7 @@ func (p *Plane) Open(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	m := &machine{id: id, dir: dir, slot: make(chan struct{}, p.cfg.MaxConns), box: newInbox(id, p.store)}
+	m := &machine{id: id, dir: dir, slot: make(chan struct{}, p.cfg.MaxConns), box: newInbox(id, p.store), folds: p.folds}
 	m.rate = bucket{tokens: float64(p.cfg.SubmitBurst), last: time.Now()}
 	m.ln = newLimitListener(l, p.cfg.MaxOpenConns)
 	m.srv = &http.Server{
@@ -263,6 +266,9 @@ func (p *Plane) close(id string, forget bool) {
 	m.box.close(forget)
 	m.srv.Close()
 	os.RemoveAll(m.dir)
+	if forget {
+		p.folds.Drop(id) // a later machine under this ID must not read them
+	}
 	if l := m.lineage.Load(); forget && l != nil && !p.lineageOpen(*l) {
 		p.store.setGoal(*l, "", time.Time{}) // the lineage is gone; so is its goal
 	}

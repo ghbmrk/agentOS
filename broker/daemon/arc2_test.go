@@ -20,7 +20,10 @@ import (
 // egress package lives outside this list; wiring it into the control path
 // fails this test.
 var controlPath = map[string][]string{
-	"journal":   {},
+	"journal": {},
+	// The durable-write helper (SIM-fs) every package may import: file
+	// calls only, held to the control path's rules here.
+	"durable":   {},
 	"control":   {"journal"},
 	"admission": {},
 	"sockets":   {},
@@ -125,8 +128,12 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"guest": {[]string{"fold", "guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// fold keeps an oversized tool result for the machine that produced it
+	// and hands back a stand-in. It stores bytes in memory. No network,
+	// no process, no model.
+	"fold": {nil, forbiddenStd},
 	// modelroute forwards to the vault process over its Unix socket and
 	// reports usage to the meter; never the vault or the proxy. It
 	// journals the denials that come back (modelroute.Journal), coalesced
@@ -257,7 +264,7 @@ func checkImports(t *testing.T, pkg string, allowed, forbidden, exceptions []str
 			p, _ := strconv.Unquote(im.Path.Value)
 			switch {
 			case strings.HasPrefix(p, module):
-				if !contains(allowed, strings.TrimPrefix(p, module)) {
+				if !contains(allowed, strings.TrimPrefix(p, module)) && p != module+"durable" {
 					t.Errorf("%s imports %s, outside the control path", f, p)
 				}
 			case strings.Contains(strings.SplitN(p, "/", 2)[0], "."):

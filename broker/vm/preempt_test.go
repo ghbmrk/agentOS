@@ -260,13 +260,11 @@ func TestRES1SnapshotFailingToSaveTheMachinePublishesNothing(t *testing.T) {
 	e.create("exp", admission.Experiment, 1500)
 	keep, err := e.m.Checkpoint(bg, "exp")
 	must(t, err)
-	// A directory where the record's temporary file goes makes the save fail.
-	block := filepath.Join(e.cfg.StateDir, "machines", "exp", "meta.json.tmp")
-	must(t, os.MkdirAll(filepath.Join(block, "x"), 0o700))
+	unblock := failSave(filepath.Join(e.cfg.StateDir, "machines", "exp", "meta.json"))
 	if _, err := e.m.Checkpoint(bg, "exp"); err == nil {
 		t.Fatal("snapshot whose machine record failed to save reported success")
 	}
-	must(t, os.RemoveAll(block))
+	unblock()
 	if got := e.m.Snapshots("exp"); len(got) != 1 || got[0].ID != keep.ID {
 		t.Fatalf("snapshots %v, want only %s", ids(got), keep.ID)
 	}

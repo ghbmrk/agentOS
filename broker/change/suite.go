@@ -256,7 +256,7 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 	p.dropOldBasesLocked(tree.Hash())
 	if err := p.saveLocked(); err != nil {
 		if rerr := p.reloadLocked(); rerr != nil {
-			p.broken = fmt.Errorf("change: state cannot be saved (%v) or reloaded (%v); restart needed", err, rerr)
+			p.markBroken(err, rerr)
 		}
 		return nil, err
 	}
