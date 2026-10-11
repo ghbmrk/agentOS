@@ -853,14 +853,18 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 			}
 		}
 	}
-	if err == nil {
-		// Only a guest known dead stops counting against the reserve.
-		m.uncommitDisk(mc)
+	if err != nil {
+		// Not known dead: it stays Running, so its memory and disk stay
+		// counted and a retry kills it again rather than reading it as
+		// stopped (a preemption would otherwise report a live guest dead).
+		return err
 	}
+	// Only a guest known dead stops counting against the reserve.
+	m.uncommitDisk(mc)
 	if mc.State == Running {
 		mc.State = Stopped
 	}
-	return err
+	return nil
 }
 
 func (m *Manager) get(id string) (*machine, error) {
@@ -1235,8 +1239,9 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 		mc.Label = maxLabel(mc.Label, s.Label)
 		err = m.restartLocked(ctx, mc, &s)
 	}
+	live := mc.State == Running // a guest that could not be killed
 	mc.mu.Unlock()
-	if err != nil {
+	if err != nil && !live {
 		m.cfg.Admit.Release(id)
 	}
 	return err
@@ -1245,7 +1250,8 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 // restartLocked stops a machine and starts it from s (nil: its image). The
 // disk for restoring s is reserved before the machine is stopped, so a full
 // disk refuses the restart and leaves the machine as it was. On other
-// failures the machine is left Stopped and the caller releases admission.
+// failures the machine is left Stopped (Running if it could not be killed)
+// and the caller releases admission unless it is still Running.
 func (m *Manager) restartLocked(ctx context.Context, mc *machine, s *Snapshot) error {
 	if s == nil {
 		h, err := m.reserveSeed(mc)
@@ -1271,8 +1277,10 @@ func (m *Manager) restartHeld(ctx context.Context, mc *machine, s *Snapshot) err
 		err = m.startFrom(ctx, mc, s)
 	}
 	if err != nil {
-		m.stopRuntime(ctx, mc)
-		mc.State = Stopped
+		// A guest that could not be killed stays Running.
+		if m.stopRuntime(ctx, mc) == nil {
+			mc.State = Stopped
+		}
 		m.saveMachine(mc)
 	}
 	return err
@@ -1687,8 +1695,9 @@ func (m *Manager) Rebuild(ctx context.Context, id string) error {
 	if err == nil {
 		err = m.restartLocked(ctx, mc, nil)
 	}
+	live := mc.State == Running // a guest that could not be killed
 	mc.mu.Unlock()
-	if err != nil {
+	if err != nil && !live {
 		m.cfg.Admit.Release(id)
 	}
 	return err
