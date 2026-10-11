@@ -107,7 +107,7 @@ func TestLocalAttemptsAreBounded(t *testing.T) {
 // stronger proof than CH-11's texted code, so no further code is asked.
 func TestLocalStopAndResume(t *testing.T) {
 	r := newRig(t, nil)
-	if msg, err := r.ch.LocalResume(r.ch.LocalStatus().Locks); err != nil || msg != "Not stopped. Nothing to resume." {
+	if msg, err := r.ch.LocalResume(r.ch.LocalStatus().Locks, r.ch.StopGen()); err != nil || msg != "Not stopped. Nothing to resume." {
 		t.Fatalf("resume while running: %q %v", msg, err)
 	}
 	if err := r.ch.LocalStop(context.Background()); err != nil {
@@ -118,7 +118,7 @@ func TestLocalStopAndResume(t *testing.T) {
 	}
 	// A texted RESUME code issued before is void after a local resume.
 	r.say("RESUME")
-	msg, err := r.ch.LocalResume(r.ch.LocalStatus().Locks)
+	msg, err := r.ch.LocalResume(r.ch.LocalStatus().Locks, r.ch.StopGen())
 	if err != nil || !strings.HasPrefix(msg, "Resumed.") || r.eng.Stopped() {
 		t.Fatalf("local resume: %q %v", msg, err)
 	}

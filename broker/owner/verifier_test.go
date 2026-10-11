@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// REQ: CH-2, CH-4, CH-18, CRED-8
+// REQ: CH-2, CH-4, CH-18, CRED-8, STOP-gen
 
 // fakeVerifier stands in for the vault process: it holds the seed, spends
 // each matched step, and keeps its own last step, which an unlock of the
@@ -395,5 +395,62 @@ func TestRefusedUnlockProofIsNotCounted(t *testing.T) {
 	case m := <-r.phone.Inbox():
 		t.Fatalf("owner texted: %q", m.Text)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// STOP-gen (CH-2): one STOP generation spans the text and local channels.
+// A text STOP that lands between a local RESUME's arrival and its commit
+// (the sign-in code check) is not undone by it.
+func TestTextStopDuringALocalResumeIsNotLifted(t *testing.T) {
+	r := newRig(t, nil)
+	r.say("STOP")
+	locks, gen := r.ch.LocalStatus().Locks, r.ch.StopGen() // /resume arrives
+	r.say("STOP")                                          // during its code check
+	msg, err := r.ch.LocalResume(locks, gen)
+	if err != nil || !strings.Contains(msg, "A STOP arrived") || !r.eng.Stopped() {
+		t.Fatalf("local resume: %q %v, stopped %v", msg, err, r.eng.Stopped())
+	}
+	// A resume that arrives after the STOP still works.
+	if _, err := r.ch.LocalResume(locks, r.ch.StopGen()); err != nil || r.eng.Stopped() {
+		t.Fatalf("fresh local resume: %v, stopped %v", err, r.eng.Stopped())
+	}
+}
+
+// A local-page STOP during a texted RESUME's code check is not lifted by
+// that RESUME either.
+func TestLocalStopDuringATextResumeIsNotLifted(t *testing.T) {
+	r, f := newVerifierRig(t)
+	ctx := context.Background()
+	r.ch.codes.st.LowLocked = true
+	r.say("STOP")
+	r.say("RESUME")
+	f.mu.Lock()
+	f.block = make(chan error)
+	f.mu.Unlock()
+	n := f.calls()
+	done := make(chan string)
+	code := r.totp()
+	go func() { done <- strings.Join(r.ch.Handle(ctx, ownerNum, "RESUME "+code), " | ") }()
+	for dl := time.Now().Add(5 * time.Second); f.calls() == n; time.Sleep(time.Millisecond) {
+		if time.Now().After(dl) {
+			t.Fatal("the texted RESUME never reached the code check")
+		}
+	}
+	if err := r.ch.LocalStop(ctx); err != nil { // mid-check
+		t.Fatal(err)
+	}
+	select {
+	case f.block <- nil:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the code check was not waiting")
+	}
+	var got string
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the texted RESUME never answered")
+	}
+	if !strings.Contains(got, "A STOP arrived while the code was checked") || !r.eng.Stopped() {
+		t.Fatalf("%q, stopped %v", got, r.eng.Stopped())
 	}
 }

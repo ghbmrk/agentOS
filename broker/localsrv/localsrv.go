@@ -35,7 +35,10 @@ type Owner interface {
 	// (owner.ErrLocked), so a lock is checked where RESUME commits.
 	LocalSignIn(code string) (until time.Time, locks uint64, err error)
 	LocalStop(ctx context.Context) error
-	LocalResume(locks uint64) (string, error)
+	// StopGen is read when a RESUME arrives; LocalResume refuses to lift
+	// a STOP counted after it (CH-2).
+	StopGen() int64
+	LocalResume(locks uint64, gen int64) (string, error)
 	LocalRequests() []owner.LocalRequest
 	LocalAnswer(id, sum string, approve bool, code string) (string, error)
 	LocalWaiting() string
@@ -275,6 +278,7 @@ func (s *Server) line(context.Context) (any, error) {
 }
 
 func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	gen := s.cfg.Owner.StopGen()
 	var in localapi.Resume
 	err := decode(args, &in)
 	ses, ok := s.live(in.Token)
@@ -307,7 +311,7 @@ func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		}
 		s.refresh(in.Token)
 	}
-	t, err := s.cfg.Owner.LocalResume(ses.locks)
+	t, err := s.cfg.Owner.LocalResume(ses.locks, gen)
 	switch {
 	case errors.Is(err, owner.ErrLocked):
 		s.drop(in.Token)
