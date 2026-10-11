@@ -1,0 +1,447 @@
+package netguard
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/netip"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+// ErrDenied is wrapped by every refusal.
+var ErrDenied = errors.New("netguard: destination refused")
+
+// DeniedError says which address was refused and why. It carries no name
+// resolved from a guest request beyond what the caller already holds.
+type DeniedError struct {
+	Addr   netip.Addr
+	Reason string
+}
+
+func (e *DeniedError) Error() string {
+	return fmt.Sprintf("netguard: destination refused: %s (%s)", e.Addr, e.Reason)
+}
+
+func (e *DeniedError) Is(target error) bool { return target == ErrDenied }
+
+// Purpose says why a dial is made. The zero value gets no exception: it is
+// what every agent request and every ordinary component dial carries.
+type Purpose int
+
+const (
+	// PurposeNone has no exception.
+	PurposeNone Purpose = iota
+	// PurposeDNS is the broker's resolver talking to the currently
+	// assigned resolver (DEV-2 exception 1).
+	PurposeDNS
+	// PurposeModelCall is a routed model call to a declared inference
+	// operation (CAP-13, and a pinned private hosted route, CAP-9). It
+	// reaches only compute and hosted pins.
+	PurposeModelCall
+	// PurposeDevice is a device executor reaching its own devices (DEV-1).
+	// A hook only: no device executor exists yet.
+	PurposeDevice
+	// PurposeBackup is the owner-pinned backup target (BAK-1). A hook only.
+	PurposeBackup
+)
+
+// PinKind says which exception a pin serves.
+type PinKind int
+
+const (
+	PinCompute PinKind = iota + 1 // a compute host's declared endpoint (CAP-13)
+	PinHosted                     // an owner-pinned private hosted route (CAP-9)
+	PinDevice                     // a device executor's own device (DEV-1)
+	PinBackup                     // an owner-pinned backup target (BAK-1)
+)
+
+func (k PinKind) purpose() Purpose {
+	switch k {
+	case PinCompute, PinHosted:
+		return PurposeModelCall
+	case PinDevice:
+		return PurposeDevice
+	case PinBackup:
+		return PurposeBackup
+	}
+	return PurposeNone
+}
+
+// Pin is one allowed exception: a destination matched on its pinned
+// address or its name, and always on the SHA-256 of its TLS public key
+// (SubjectPublicKeyInfo). A rebound name passes the address check and then
+// fails the handshake, before any request byte is sent.
+type Pin struct {
+	Kind PinKind
+	Name string         // host name, matched case-insensitively; may be empty
+	Addr netip.AddrPort // pinned address; may be the zero value
+	Key  [32]byte       // required
+}
+
+func (p Pin) validate() error {
+	if p.Kind < PinCompute || p.Kind > PinBackup {
+		return errors.New("netguard: pin kind unknown")
+	}
+	if p.Name == "" && !p.Addr.IsValid() {
+		return errors.New("netguard: pin needs a name or an address")
+	}
+	if p.Key == ([32]byte{}) {
+		return errors.New("netguard: pin needs a key hash")
+	}
+	return nil
+}
+
+// Network is what the broker has learned about the home network. Learn
+// replaces the whole set.
+type Network struct {
+	// Prefixes are the uplink's and the access point's prefixes. A global
+	// IPv6 prefix longer than /56 is widened to its enclosing /56.
+	Prefixes []netip.Prefix
+	// Gateway is the learned default gateway.
+	Gateway netip.Addr
+	// External is the router's external address, where NAT-PMP or PCP
+	// reports it.
+	External netip.Addr
+	// Resolver is the currently assigned resolver (DHCP or RDNSS). Learned,
+	// not pinned: a rogue DHCP or RA can move it, which is why every answer
+	// is still checked at connect time.
+	Resolver netip.Addr
+}
+
+// DenyEvent is one refusal, for the caller's journal.
+type DenyEvent struct {
+	Addr    netip.Addr
+	Port    uint16
+	Purpose Purpose
+	Reason  string
+}
+
+// Resolver is the part of *net.Resolver the policy uses.
+type Resolver interface {
+	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
+// Config configures New. The zero value is a working policy with only the
+// IANA registries.
+type Config struct {
+	// Resolver resolves names; nil means net.DefaultResolver.
+	Resolver Resolver
+	// Source, when set, is read by Refresh to learn the network.
+	Source func() (Network, error)
+	// OnDeny, when set, is called for each refusal.
+	OnDeny func(DenyEvent)
+	// Connect, when set, replaces the final connect to a checked literal
+	// address. It is a test seam: production leaves it nil.
+	Connect func(ctx context.Context, network, addr string) (net.Conn, error)
+	// Timeout bounds one connect; zero means 30 seconds.
+	Timeout time.Duration
+}
+
+// Policy is the address policy. It is safe for concurrent use.
+type Policy struct {
+	res     Resolver
+	source  func() (Network, error)
+	onDeny  func(DenyEvent)
+	timeout time.Duration
+
+	// connect dials a checked literal address; tests replace it.
+	connect func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	mu   sync.RWMutex
+	net  Network
+	pins []Pin
+}
+
+// New returns a policy.
+func New(cfg Config) *Policy {
+	p := &Policy{res: cfg.Resolver, source: cfg.Source, onDeny: cfg.OnDeny, timeout: cfg.Timeout}
+	if p.res == nil {
+		p.res = net.DefaultResolver
+	}
+	if p.timeout <= 0 {
+		p.timeout = 30 * time.Second
+	}
+	p.connect = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return p.Dialer().DialContext(ctx, network, addr)
+	}
+	if cfg.Connect != nil {
+		p.connect = cfg.Connect
+	}
+	return p
+}
+
+// Learn replaces the learned network.
+func (p *Policy) Learn(n Network) {
+	out := Network{Gateway: n.Gateway.WithZone(""), External: n.External.WithZone(""), Resolver: n.Resolver.WithZone("")}
+	for _, pf := range n.Prefixes {
+		if !pf.IsValid() {
+			continue
+		}
+		a := pf.Addr().WithZone("")
+		bits := pf.Bits()
+		if a.Is4In6() {
+			a, bits = a.Unmap(), bits-96
+			if bits < 0 {
+				continue
+			}
+		}
+		if a.Is6() && bits > 56 {
+			bits = 56
+		}
+		out.Prefixes = append(out.Prefixes, netip.PrefixFrom(a, bits).Masked())
+	}
+	p.mu.Lock()
+	p.net = out
+	p.mu.Unlock()
+}
+
+// Refresh reads Config.Source and learns the result. A failed read keeps
+// what was learned before.
+func (p *Policy) Refresh() error {
+	if p.source == nil {
+		return errors.New("netguard: no source")
+	}
+	n, err := p.source()
+	if err != nil {
+		return err
+	}
+	p.Learn(n)
+	return nil
+}
+
+// Watch refreshes on each event until ctx ends: the broker sends one on
+// every address or route change.
+func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-events:
+			if !ok {
+				return
+			}
+			_ = p.Refresh()
+		}
+	}
+}
+
+// SetPins replaces the pinned exceptions.
+func (p *Policy) SetPins(pins []Pin) error {
+	cp := make([]Pin, len(pins))
+	for i, pin := range pins {
+		if err := pin.validate(); err != nil {
+			return err
+		}
+		pin.Name = strings.ToLower(strings.TrimSuffix(pin.Name, "."))
+		if pin.Addr.IsValid() {
+			pin.Addr = netip.AddrPortFrom(pin.Addr.Addr().Unmap().WithZone(""), pin.Addr.Port())
+		}
+		cp[i] = pin
+	}
+	p.mu.Lock()
+	p.pins = cp
+	p.mu.Unlock()
+	return nil
+}
+
+type reqKey struct{}
+
+type request struct {
+	purpose Purpose
+	name    string
+}
+
+// WithPurpose says why the dials made with ctx are made.
+func WithPurpose(ctx context.Context, pu Purpose) context.Context {
+	r, _ := ctx.Value(reqKey{}).(request)
+	r.purpose = pu
+	return context.WithValue(ctx, reqKey{}, r)
+}
+
+func withName(ctx context.Context, name string) context.Context {
+	r, _ := ctx.Value(reqKey{}).(request)
+	r.name = name
+	return context.WithValue(ctx, reqKey{}, r)
+}
+
+func requestOf(ctx context.Context) request {
+	r, _ := ctx.Value(reqKey{}).(request)
+	return r
+}
+
+// Check decides one connection. proto is "tcp" or "udp".
+//
+// The four exceptions (DEV-2), each only as stated:
+//  1. PurposeDNS: the currently assigned resolver, port 53, tcp or udp.
+//  2. a compute host's declared endpoint (PinCompute), reached by a routed
+//     model call;
+//  3. a device executor's own device (PinDevice), by PurposeDevice;
+//  4. an owner-pinned backup target (PinBackup, PurposeBackup) or private
+//     hosted route (PinHosted, a routed model call).
+//
+// A pin matches on its address or its name; the key pin is checked at the
+// handshake (TLSConfig). No other purpose, and no agent request that is not
+// a routed model call, reaches any of them.
+func (p *Policy) Check(ctx context.Context, a netip.Addr, port uint16, proto string) error {
+	r := requestOf(ctx)
+	a = a.WithZone("")
+	if a.Is4In6() {
+		a = a.Unmap()
+	}
+	err := p.check(r, a, port, proto)
+	if err != nil && p.onDeny != nil {
+		var de *DeniedError
+		reason := err.Error()
+		if errors.As(err, &de) {
+			reason = de.Reason
+		}
+		p.onDeny(DenyEvent{Addr: a, Port: port, Purpose: r.purpose, Reason: reason})
+	}
+	return err
+}
+
+func (p *Policy) check(r request, a netip.Addr, port uint16, proto string) error {
+	if !a.IsValid() {
+		return &DeniedError{a, "unparsable address"}
+	}
+	p.mu.RLock()
+	n, pins := p.net, p.pins
+	p.mu.RUnlock()
+
+	if r.purpose == PurposeDNS {
+		if (proto == "tcp" || proto == "udp") && port == 53 && n.Resolver.IsValid() && a == n.Resolver {
+			return nil
+		}
+	} else {
+		for _, pin := range pins {
+			if pin.Kind.purpose() != r.purpose {
+				continue
+			}
+			if (pin.Name != "" && pin.Name == r.name) || (pin.Addr.IsValid() && pin.Addr == netip.AddrPortFrom(a, port)) {
+				return nil
+			}
+		}
+	}
+
+	for _, f := range forms(a) {
+		if why, bad := Special(f); bad {
+			return &DeniedError{a, why}
+		}
+		for _, pf := range n.Prefixes {
+			if pf.Contains(f) {
+				return &DeniedError{a, "home network prefix " + pf.String()}
+			}
+		}
+		if n.Gateway.IsValid() && f == n.Gateway {
+			return &DeniedError{a, "gateway"}
+		}
+		if n.External.IsValid() && f == n.External {
+			return &DeniedError{a, "router external address"}
+		}
+	}
+	return nil
+}
+
+func protoOf(network string) string {
+	switch {
+	case strings.HasPrefix(network, "tcp"):
+		return "tcp"
+	case strings.HasPrefix(network, "udp"):
+		return "udp"
+	}
+	return network
+}
+
+// control is the net.Dialer hook: it checks the address actually being
+// connected.
+func (p *Policy) control(ctx context.Context, network, address string, _ syscall.RawConn) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return &DeniedError{netip.Addr{}, "unparsable address"}
+	}
+	return p.Check(ctx, ap.Addr(), ap.Port(), protoOf(network))
+}
+
+// Dialer returns a net.Dialer whose ControlContext hook is the policy.
+func (p *Policy) Dialer() *net.Dialer {
+	return &net.Dialer{Timeout: p.timeout, ControlContext: p.control}
+}
+
+// DialContext is the dial function every outbound transport uses (an
+// http.Transport's DialContext, a TLS or SMTP client's dial). It resolves
+// the name, refuses the dial if any answer is refused, then connects to a
+// literal address through Dialer, so the check runs on the address
+// actually connected. Nothing is cached: a name that answers differently
+// the next time is checked again.
+func (p *Policy) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	pn, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("netguard: port %q is not a number", port)
+	}
+	proto := protoOf(network)
+	var ips []netip.Addr
+	if ip, err := netip.ParseAddr(host); err == nil {
+		ips = []netip.Addr{ip}
+	} else {
+		ctx = withName(ctx, strings.ToLower(strings.TrimSuffix(host, ".")))
+		lookup := "ip"
+		if strings.HasSuffix(network, "4") {
+			lookup = "ip4"
+		} else if strings.HasSuffix(network, "6") {
+			lookup = "ip6"
+		}
+		if ips, err = p.res.LookupNetIP(ctx, lookup, host); err != nil {
+			return nil, err
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("netguard: %s resolved to nothing", host)
+	}
+	for _, ip := range ips {
+		if err := p.Check(ctx, ip, uint16(pn), proto); err != nil {
+			return nil, err
+		}
+	}
+	var last error
+	for _, ip := range ips {
+		c, err := p.connect(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return c, nil
+		}
+		last = err
+	}
+	return nil, last
+}
+
+// CheckRedirect is an http.Client's CheckRedirect: a redirect to a literal
+// private address, or off http(s), is refused before any dial. A redirect
+// to a name is checked when it is dialed.
+func (p *Policy) CheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("netguard: too many redirects")
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return &DeniedError{netip.Addr{}, "redirect off http"}
+	}
+	if ip, err := netip.ParseAddr(req.URL.Hostname()); err == nil {
+		port := uint16(80)
+		if req.URL.Scheme == "https" {
+			port = 443
+		}
+		if n, err := strconv.ParseUint(req.URL.Port(), 10, 16); err == nil {
+			port = uint16(n)
+		}
+		return p.Check(req.Context(), ip, port, "tcp")
+	}
+	return nil
+}

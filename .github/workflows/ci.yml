@@ -56,6 +56,8 @@ jobs:
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
         run: python tools/doclint.py
+      - name: Every broker dialer is hooked into the home-network address guard (DEV-2)
+        run: python tools/netguardcheck.py
       - name: BOARD.md round-trips through its work-item issues (SIM-repo-1)
         run: python tools/board.py check
       - name: BOARD.md rows equal the live work-item issues (SIM-repo-2)
