@@ -763,6 +763,24 @@ func (e *Engine) Trail() []Record {
 	return recs
 }
 
+// RecordsAfter returns the journal records with a sequence number greater
+// than seq, oldest first. Records are numbered from 1 with no gaps, so a
+// projection that has applied through seq reads its tail here (SIM-proj).
+// Like Trail it decodes the journal afresh, so the records share nothing
+// with the intents the engine dispatches. Unlike Trail it returns the read
+// error, so a projection never mistakes an unreadable journal for an empty
+// tail.
+func (e *Engine) RecordsAfter(seq uint64) ([]Record, error) {
+	recs, err := e.readJournal()
+	if err != nil {
+		return nil, err
+	}
+	if seq >= uint64(len(recs)) {
+		return nil, nil
+	}
+	return recs[seq:], nil
+}
+
 // Fenced returns the intents on account that the last restart left
 // unresolved and that still are; dispatch on the account waits for them.
 func (e *Engine) Fenced(account string) []string {
