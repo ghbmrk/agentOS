@@ -61,7 +61,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
 |---|---|
-| RECALL-prov-L1 | `recall_search`/`Given` never checks `Reads`/`ReadsAll` (only `recall_note` does), and the check uses `>` where `>=` is meant. Bound the read set where it grows. Found in #1046 L3. |
 | RECALL-prov-L2 | `prepare` embeds an anchor's empty text; a real embedder (RECALL-EMB) may surface anchors in searches. Skip vectors for anchors or filter them in `Search`. Found in #1046 L3. |
 | RECALL-prov-L3 | An owner relabel of a note to public is blocked by the anchor's label, which never falls. Found in #1046 L3. |
 | CAP-13b | CAP-13b (later): Mac compute host recipe. Add a macOS section to the owner's guide covering a standard local model server plus a TLS front end from a mature component (CAP-13 MAY ship a ready-made one). The box discovers the server, pins its key fingerprint, and the owner adds it as a tier-4 action (CH-3). Nothing is installed on the Mac by AgentOS. |

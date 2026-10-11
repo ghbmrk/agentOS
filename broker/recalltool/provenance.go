@@ -652,6 +652,10 @@ type Limits struct {
 // broker to ten times each.
 var DefaultLimits = Limits{Notes: 1000, NotesAll: 10000, Reads: 20000, ReadsAll: 200000}
 
+// readsFloorDiv: a lineage reading at most Reads/readsFloorDiv items is never
+// refused for the broker-wide read total, only for its own cap.
+const readsFloorDiv = 10
+
 // ErrLimit means a note was refused for a limit.
 var ErrLimit = errors.New("recalltool: provenance limit reached")
 
@@ -694,7 +698,10 @@ func sum[V any](m map[string]V, n func(V) int) int {
 func (p *Provenance) Check(lineage, key string, exists func(lineage, key string) bool) error {
 	p.mu.Lock()
 	lm := p.lim()
-	if len(p.sets[lineage]) > lm.Reads || sum(p.sets, func(s map[string]time.Time) int { return len(s) }) > lm.ReadsAll {
+	// The global read bound refuses only a lineage above its protected
+	// floor, so lineages that read much cannot turn off notes for the rest
+	// (RECALL-prov-L1, security S-R1).
+	if n := len(p.sets[lineage]); n > lm.Reads || (n > lm.Reads/readsFloorDiv && sum(p.sets, func(s map[string]time.Time) int { return len(s) }) > lm.ReadsAll) {
 		p.mu.Unlock()
 		return ErrLimit
 	}
@@ -816,4 +823,31 @@ func (p *Provenance) Size(lineage string) (reads, notes, anchors int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.sets[lineage]), len(p.notes[lineage]), p.anchors[lineage]
+}
+
+// ReadsFull lists the lineages whose reads are past the per-lineage cap, so
+// they make no notes until the owner starts their memory over (Reach.Renew).
+func (p *Provenance) ReadsFull() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for _, l := range sortedKeys(p.sets) {
+		if len(p.sets[l]) > p.lim().Reads {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// firstRead is when lineage was first given an item it still holds.
+func (p *Provenance) firstRead(lineage string) (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var first time.Time
+	for _, t := range p.sets[lineage] {
+		if first.IsZero() || t.Before(first) {
+			first = t
+		}
+	}
+	return first, !first.IsZero()
 }

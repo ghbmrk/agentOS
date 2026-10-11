@@ -253,7 +253,7 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		defer t.noteMu.Unlock()
 		if err := t.cfg.Prov.Check(lineage, a.Key, exists); err != nil {
 			if errors.Is(err, ErrLimit) {
-				return "", true, guesterr.New("this agent has saved or read as much as notes allow; delete old notes or ask the owner")
+				return "", true, guesterr.New("this agent has saved or read as much as notes allow; reuse an existing note key, or ask the owner to start this agent's memory over")
 			}
 			t.cfg.Logf("recall %s: reserve: %v", machine, err)
 			return "", true, guesterr.New("broker could not store the note")
@@ -267,7 +267,7 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 			})
 		})
 		if errors.Is(err, ErrLimit) {
-			return "", true, guesterr.New("this agent has saved or read as much as notes allow; delete old notes or ask the owner")
+			return "", true, guesterr.New("this agent has saved or read as much as notes allow; reuse an existing note key, or ask the owner to start this agent's memory over")
 		}
 		if err == nil {
 			_, err = t.cfg.Index.Ingest(recall.Item{
