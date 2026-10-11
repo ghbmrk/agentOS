@@ -712,6 +712,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CRED-12 l1 | `recheck`. PR #1027 lens: the journal records each computer-use retry's result; a per-site retry success rate could feed OWN-19's effort components as an avoided-interruption count. Do it when the brief is expanded |
 | CRED-12 l2 | `recheck`. PR #1027 lens: "computer use" also names the desktop worker's work in A13's Cross-app list; leave both unless owners confuse them |
 | CRED-12 l3 | PR #1027 lens and L3: offer the per-site retry off once at adoption, or default it off, for a site whose adapter recipe says its terms forbid automation, if such an adapter field ever exists |
+| P3-3-erase l1 | `recheck`. PR #1034 L3 (6110177109): `journal.Engine.Erase` with several IDs. If id2's `commit` fails before `Append` (validate or encode error, which does not set `broken`), `rewriteErased` is skipped; a later `Erase([id1])` sees `erased` empty and returns nil while id1's content stays on disk until the next erase or `Open`. No realistic trigger found (the records are constant-reason transitions that `validate` accepts). Fix: run `rewriteErased` on the error path whenever `erased` is non-empty |
+| P3-3-erase l2 | PR #1034 Potency lens (6111112791): a transient read error during the erase rewrite leaves the journal engine broken until the daemon restarts; nothing outside `broker/journal` handles `ErrBroken`, so every journaled effect stops until then. Fail-closed is right (CAP-3) and a failed append already behaves the same way. Possible follow-ups: a bounded in-process reopen, or a STATUS cause (OP-9) for a broken journal |
 
 ## Reuse candidates
 | ID | Component | Why |
