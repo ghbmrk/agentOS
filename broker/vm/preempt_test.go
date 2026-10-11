@@ -337,3 +337,65 @@ func TestRES1FailedKillOnRestartKeepsTheAdmission(t *testing.T) {
 		})
 	}
 }
+
+// A preemption that kills a held machine without its lock tells admission
+// the memory is free. If the runtime cleanup under the lock then fails, the
+// machine is still recorded preempted: left Running with no admission, a
+// rebuild would start a guest admission does not count (L3 B1 on #1043).
+func TestRES1LocklessKillThenFailedCleanupIsPreempted(t *testing.T) {
+	e := newEnv(t, 2000)
+	e.create("exp", admission.Experiment, 1500)
+	mc, err := e.m.get("exp")
+	must(t, err)
+	mc.mu.Lock() // an operation holds the machine
+	e.create("call", admission.Foreground, 1000)
+	if _, ok := e.rt.memOf("exp"); ok {
+		t.Fatal("experiment still running after preemption returned")
+	}
+	e.rt.mu.Lock()
+	e.rt.failKill = errors.New("fake: runtime cleanup failed")
+	e.rt.mu.Unlock()
+	mc.mu.Unlock()
+	waitState(t, e, "exp", Preempted)
+
+	if err := e.m.Rebuild(bg, "exp"); err == nil {
+		t.Fatal("rebuild started the experiment on memory the foreground holds")
+	}
+	if _, ok := e.rt.memOf("exp"); ok {
+		t.Fatal("a guest admission does not count is running")
+	}
+}
+
+// A resume whose start fails and whose cleanup kill fails leaves the guest
+// running: its admission is kept (L3 B2 on #1043).
+func TestRES1FailedKillOnResumeKeepsTheAdmission(t *testing.T) {
+	e := newEnv(t, 2000)
+	e.create("exp", admission.Experiment, 1500)
+	must(t, e.m.Preempt("exp"))
+	waitState(t, e, "exp", Preempted)
+	e.adm.Release("exp") // as admission does after a preemption
+
+	// The resumed guest starts, its save fails, and the cleanup kill fails.
+	meta := filepath.Join(e.cfg.StateDir, "machines", "exp", "meta.json")
+	real := writeFile
+	writeFile = func(p string, b []byte, perm os.FileMode) error {
+		if p == meta {
+			e.rt.mu.Lock()
+			e.rt.refuseKill = errors.New("fake: kill refused")
+			e.rt.mu.Unlock()
+			return errors.New("synthetic save failure")
+		}
+		return real(p, b, perm)
+	}
+	defer func() { writeFile = real }()
+
+	if err := e.m.Resume(bg, "exp"); err == nil {
+		t.Fatal("resume reported success; its save failed")
+	}
+	if _, ok := e.rt.memOf("exp"); !ok {
+		t.Fatal("fake: the resumed guest should still be running")
+	}
+	if _, err := e.m.Create(bg, "call", Spec{Image: "base", Class: admission.Foreground, MemMB: 1000}); err == nil {
+		t.Fatal("foreground admitted on the memory of a guest still running")
+	}
+}

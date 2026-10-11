@@ -1311,8 +1311,9 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 	if err == nil {
 		err = m.restartLocked(ctx, mc, keepLayer)
 	}
+	live := mc.State == Running // a guest that could not be killed
 	mc.mu.Unlock()
-	if err != nil {
+	if err != nil && !live {
 		m.cfg.Admit.Release(id)
 	}
 	return err
@@ -1748,7 +1749,7 @@ func (m *Manager) Preempt(id string) error {
 	mc.preempting.Store(true)
 	if mc.mu.TryLock() {
 		defer mc.mu.Unlock()
-		return m.preemptLocked(mc)
+		return m.preemptLocked(mc, false)
 	}
 	// The completion is scheduled even if the kill fails: once the holding
 	// operation lets go, the machine is stopped under its lock and
@@ -1761,7 +1762,7 @@ func (m *Manager) Preempt(id string) error {
 	go func() {
 		mc.mu.Lock()
 		defer mc.mu.Unlock()
-		if err := m.preemptLocked(mc); err != nil {
+		if err := m.preemptLocked(mc, kerr == nil); err != nil {
 			log.Printf("vm: %s: finishing preemption: %v", mc.ID, err)
 		}
 	}()
@@ -1769,8 +1770,11 @@ func (m *Manager) Preempt(id string) error {
 }
 
 // preemptLocked stops mc and records it as preempted. Called with mc.mu
-// held and mc.preempting set; it clears preempting.
-func (m *Manager) preemptLocked(mc *machine) error {
+// held and mc.preempting set; it clears preempting. killed says its memory
+// was already released without the lock and admission told so: then it is
+// recorded preempted even if the runtime cleanup fails, because a machine
+// left Running with no admission could be restarted uncounted.
+func (m *Manager) preemptLocked(mc *machine, killed bool) error {
 	defer mc.preempting.Store(false)
 	if mc.State != Running {
 		// Admitted but not started yet: it must not start now.
@@ -1780,11 +1784,14 @@ func (m *Manager) preemptLocked(mc *machine) error {
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.KillTimeout)
 	defer cancel()
 	m.cfg.Runtime.Pause(ctx, mc.ID) // stop its CPU use now; the kill follows
-	if err := m.stopRuntime(ctx, mc); err != nil {
+	err := m.stopRuntime(ctx, mc)
+	if err != nil && !killed {
 		return err
 	}
+	// After a failed cleanup the disk stays committed: only the memory is
+	// known released.
 	mc.State = Preempted
-	return m.saveMachine(mc)
+	return errors.Join(err, m.saveMachine(mc))
 }
 
 // kill releases a machine's memory without its lock: it empties the

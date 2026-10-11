@@ -4,7 +4,7 @@ Board section: Phase 1 (P1-4 rows). Owner-approved finding 9 of the 2026-10-11 c
 
 **Defect: P1-4.** `stopRuntime` (broker/vm/vm.go) set a Running machine Stopped even when the runtime or cgroup kill failed, though it kept the disk committed because the guest was not known dead. A later `Preempt` then saw a machine that was not Running, took the "admitted but not started" branch and returned nil, so admission (RES-2) treated the guest as dead and handed its memory reservation to the next machine while the guest could still be running. The same failure let a failed parking stop (worker.go) and a failed rollback or rebuild release the machine's admission.
 
-Fix: on a failed kill, `stopRuntime` leaves the state unchanged, so a Running guest stays Running and counted, and a retried preemption kills again or returns the error. `restartHeld` no longer forces Stopped after a failed kill, and `Rollback` and `Rebuild` keep the admission of a machine still Running.
+Fix: on a failed kill, `stopRuntime` leaves the state unchanged, so a Running guest stays Running and counted, and a retried preemption kills again or returns the error. `restartHeld` no longer forces Stopped after a failed kill, and `Rollback`, `Rebuild` and `Resume` keep the admission of a machine still Running. A lockless preemption whose kill succeeded records the machine Preempted even if the later runtime cleanup fails (L3 B1 on #1043).
 
 **Requirements:** RES-1, RES-2. No new IDs.
 
