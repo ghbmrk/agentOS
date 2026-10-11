@@ -167,3 +167,39 @@ func TestBetweenBoundsByTime(t *testing.T) {
 		t.Fatalf("open-ended: %s", got)
 	}
 }
+
+// A rewrite that cannot read the journal after RecErased is committed
+// breaks the engine, so a retry cannot skip the now-erased intent and
+// report success while its content is still on disk (P3-3-erase b).
+func TestEraseReadFailureIsNotRetriedAsSuccess(t *testing.T) {
+	st := &eraseFailingRead{}
+	e := mustOpen(t, st, newPolicy(), newService())
+	must(e.Submit(canaryIntent("a", "guest:L")))
+	st.fail = true
+	if _, _, err := e.Erase([]string{"a"}); err == nil {
+		t.Fatal("failed read not reported")
+	}
+	st.fail = false
+	_, _, err := e.Erase([]string{"a"})
+	data, _ := st.ReadAll()
+	if err == nil && strings.Contains(string(data), "zebracorn-a") {
+		t.Fatal("retry reported success while the content is still on disk")
+	}
+	e2 := mustOpen(t, st, newPolicy(), newService())
+	data, _ = st.ReadAll()
+	if strings.Contains(string(data), "zebracorn-a") || len(e2.Erased()) != 1 {
+		t.Fatal("open did not finish the erase")
+	}
+}
+
+type eraseFailingRead struct {
+	MemStore
+	fail bool
+}
+
+func (f *eraseFailingRead) ReadAll() ([]byte, error) {
+	if f.fail {
+		return nil, errors.New("read error")
+	}
+	return f.MemStore.ReadAll()
+}
