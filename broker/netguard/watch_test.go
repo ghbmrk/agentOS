@@ -97,3 +97,81 @@ func TestQuickLearnKeepsExternalWhileGatewayUnchanged(t *testing.T) {
 		t.Fatalf("the external address was forgotten: %v", err)
 	}
 }
+
+// A second event is not queued behind the first event's slow full read: on
+// an IPv6 RA the route event's quick read misses the address and the address
+// event's quick read has it (DEV-2).
+func TestWatchSecondEventIsNotQueuedBehindSlowRead(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	old := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
+	next := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24"), netip.MustParsePrefix("8.8.8.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
+	var slow atomic.Bool
+	var quicks atomic.Int32
+	p := New(Config{
+		Source: func() (Network, error) {
+			if slow.Load() {
+				<-release
+			}
+			return old, nil
+		},
+		Quick: func() (Network, error) {
+			if quicks.Add(1) == 1 {
+				return old, nil // the route event: the address is not there yet
+			}
+			return next, nil
+		},
+	})
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	slow.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ev := make(chan struct{})
+	go p.Watch(ctx, ev)
+	ev <- struct{}{}
+	ev <- struct{}{}
+	probe := netip.MustParseAddr("8.8.8.9")
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if errors.Is(p.Check(context.Background(), probe, 443, "tcp"), ErrDenied) {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("the second event waited behind the first event's slow read")
+}
+
+// A full read that began before the change never overwrites the newer quick
+// learn when it returns late (a poll read racing a netlink event).
+func TestStaleFullReadDoesNotOverwriteNewerLearn(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	old := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
+	next := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24"), netip.MustParsePrefix("8.8.8.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
+	var calls atomic.Int32
+	p := New(Config{
+		Source: func() (Network, error) {
+			if calls.Add(1) == 1 {
+				close(started)
+				<-release // the poll read: local part already ran on the old network
+			}
+			return old, nil
+		},
+		Quick: func() (Network, error) { return next, nil },
+	})
+	done := make(chan struct{})
+	go func() { _ = p.Refresh(); close(done) }()
+	<-started
+	p.quickLearn() // the netlink event
+	probe := netip.MustParseAddr("8.8.8.9")
+	if err := p.Check(context.Background(), probe, 443, "tcp"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("after the event: %v", err)
+	}
+	close(release)
+	<-done
+	if err := p.Check(context.Background(), probe, 443, "tcp"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("the stale poll read re-allowed the new prefix: %v", err)
+	}
+}

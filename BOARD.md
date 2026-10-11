@@ -161,10 +161,11 @@ The home-network boundary is release work (A14); device features follow the firs
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| DEV-net-a | [Home-network address policy and egress proxy](briefs/DEV-net-a.md) | P1-3, D-069 spec diff merged | queued (release; DEV-2, A14, G2; tier A) |
-| DEV-net-b | [Home-network boundary on the remaining dialers and inbound](briefs/DEV-net-b.md) | DEV-net-a | in review (dialers merged in #1051; inbound rules ride the DEV-net-d PR) |
-| DEV-net-c | [Wire the egress process to the address guard](briefs/DEV-net-c.md) | DEV-net-a | queued (release; DEV-2, A14, G2; tier A) |
+| DEV-net-a | [Home-network address policy and egress proxy](briefs/DEV-net-a.md) | P1-3, D-069 spec diff merged | merged (#1049) |
+| DEV-net-b | [Home-network boundary on the remaining dialers and inbound](briefs/DEV-net-b.md) | DEV-net-a | in review (dialers merged in #1051; the inbound rule set renders in #1052; acceptance 3, a home-network host cannot open a connection to any box port, stays open until DEV-net-e loads it) |
+| DEV-net-c | [Wire the egress process to the address guard](briefs/DEV-net-c.md) | DEV-net-a | merged (#1051) |
 | DEV-net-d | [Inbound rules, owner pins, event refresh, SIP dialer](briefs/DEV-net-d.md) | DEV-net-b, DEV-net-c | in review (release; DEV-2, A14, G2; tier A) |
+| DEV-net-e | [Load the inbound rules, owner pin entry, SIP guard hardening](briefs/DEV-net-e.md) | DEV-net-d | queued (release; DEV-2, A14, CAP-13, BAK-1; tier A) |
 
 ## Phase 0: harness and risk spikes
 

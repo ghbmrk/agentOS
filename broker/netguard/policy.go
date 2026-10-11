@@ -163,7 +163,10 @@ type Policy struct {
 
 	mu   sync.RWMutex
 	net  Network
+	gen  uint64 // bumped by each Learn; a full read older than this is stale
 	pins []Pin
+
+	quickMu sync.Mutex // one quick read-and-learn at a time
 }
 
 // New returns a policy.
@@ -209,26 +212,55 @@ func (p *Policy) Learn(n Network) {
 	}
 	p.mu.Lock()
 	p.net = out
+	p.gen++
 	p.mu.Unlock()
 }
 
 // Refresh reads Config.Source and learns the result. A failed read keeps
-// what was learned before.
+// what was learned before. A read that began before a later Learn (a quick
+// read on an event, or another refresh) is stale: it never replaces the
+// newer set, and only its external address is kept, while the gateway is the
+// one now learned.
 func (p *Policy) Refresh() error {
 	if p.source == nil {
 		return errors.New("netguard: no source")
 	}
+	p.mu.RLock()
+	gen := p.gen
+	p.mu.RUnlock()
 	n, err := p.source()
 	if err != nil {
 		return err
 	}
+	p.mu.Lock()
+	if p.gen != gen {
+		if ext := n.External.WithZone("").Unmap(); ext.IsValid() && n.Gateway.WithZone("").Unmap() == p.net.Gateway {
+			p.net.External = ext
+		}
+		p.mu.Unlock()
+		return nil
+	}
+	p.mu.Unlock()
 	p.Learn(n)
 	return nil
 }
 
 // Watch refreshes on each event until ctx ends: the broker sends one on
-// every address or route change.
+// every address or route change. Each event applies the quick read at once;
+// the full read (which may wait on the router) runs single-flight on its own
+// goroutine, so a later event is never queued behind it.
 func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
+	kick := make(chan struct{}, 1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-kick:
+				_ = p.Refresh()
+			}
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -238,7 +270,10 @@ func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
 				return
 			}
 			p.quickLearn()
-			_ = p.Refresh()
+			select {
+			case kick <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
@@ -250,6 +285,8 @@ func (p *Policy) quickLearn() {
 	if p.quick == nil {
 		return
 	}
+	p.quickMu.Lock()
+	defer p.quickMu.Unlock()
 	n, err := p.quick()
 	if err != nil {
 		return

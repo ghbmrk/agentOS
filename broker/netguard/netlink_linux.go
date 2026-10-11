@@ -4,6 +4,7 @@ package netguard
 
 import (
 	"context"
+	"log"
 
 	"golang.org/x/sys/unix"
 )
@@ -41,6 +42,9 @@ func WatchNetlink(ctx context.Context) (<-chan struct{}, error) {
 				if err == unix.ENOBUFS { // overflow: something changed
 					notify(out)
 					continue
+				}
+				if ctx.Err() == nil {
+					log.Printf("netguard: netlink feed ended, polling only: %v", err)
 				}
 				return
 			}
