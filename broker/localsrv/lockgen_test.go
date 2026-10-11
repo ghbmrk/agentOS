@@ -2,6 +2,7 @@ package localsrv
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -284,7 +285,7 @@ func TestTextStopDuringALocalResumeCodeCheckStaysStopped(t *testing.T) {
 	g.advance(localapi.FreshFor)
 	g.own = stopInSignIn{g.ch, t}
 	out, err := g.call(localapi.OpResume, localapi.Resume{Token: tok, Code: g.code()})
-	if !g.eng.Stopped() {
+	if ans, _ := out.(localapi.Answered); !g.eng.Stopped() || !strings.Contains(ans.Text, "A STOP arrived") {
 		t.Fatalf("a text STOP during the code check was undone: %+v %v", out, err)
 	}
 }
