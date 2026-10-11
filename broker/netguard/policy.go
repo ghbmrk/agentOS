@@ -136,6 +136,11 @@ type Config struct {
 	Resolver Resolver
 	// Source, when set, is read by Refresh to learn the network.
 	Source func() (Network, error)
+	// Quick, when set, is a read that never waits on the network (for
+	// example Sources.ReadLocal). Watch applies it at once on each event,
+	// before the full Source read, so a new prefix is refused within the
+	// event and not after a slow router lookup.
+	Quick func() (Network, error)
 	// OnDeny, when set, is called for each refusal.
 	OnDeny func(DenyEvent)
 	// Connect, when set, replaces the final connect to a checked literal
@@ -149,6 +154,7 @@ type Config struct {
 type Policy struct {
 	res     Resolver
 	source  func() (Network, error)
+	quick   func() (Network, error)
 	onDeny  func(DenyEvent)
 	timeout time.Duration
 
@@ -162,7 +168,7 @@ type Policy struct {
 
 // New returns a policy.
 func New(cfg Config) *Policy {
-	p := &Policy{res: cfg.Resolver, source: cfg.Source, onDeny: cfg.OnDeny, timeout: cfg.Timeout}
+	p := &Policy{res: cfg.Resolver, source: cfg.Source, quick: cfg.Quick, onDeny: cfg.OnDeny, timeout: cfg.Timeout}
 	if p.res == nil {
 		p.res = p.Resolver()
 	}
@@ -231,9 +237,35 @@ func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
 			if !ok {
 				return
 			}
+			p.quickLearn()
 			_ = p.Refresh()
 		}
 	}
+}
+
+// quickLearn applies the Quick read, if there is one. A failed read keeps
+// what was learned before, and the router's external address and the
+// resolver stay while the gateway is unchanged and the quick read has none.
+func (p *Policy) quickLearn() {
+	if p.quick == nil {
+		return
+	}
+	n, err := p.quick()
+	if err != nil {
+		return
+	}
+	p.mu.RLock()
+	old := p.net
+	p.mu.RUnlock()
+	if n.Gateway.IsValid() && n.Gateway.Unmap() == old.Gateway {
+		if !n.External.IsValid() {
+			n.External = old.External
+		}
+		if !n.Resolver.IsValid() {
+			n.Resolver = old.Resolver
+		}
+	}
+	p.Learn(n)
 }
 
 // SetPins replaces the pinned exceptions.

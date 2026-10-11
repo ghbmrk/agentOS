@@ -103,6 +103,37 @@ class Check(unittest.TestCase):
         with self.assertRaises(SystemExit):
             t.run("broker/a/a.go\n")
 
+    def test_sip_client_without_a_guarded_dialer_fails(self):
+        # A SIP user agent dials through its own transport: importing the guard
+        # is not enough, the transport must be given the guard's dialer.
+        t = self.tree()
+        t.go("broker/sip/line.go", f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA() }}\n")
+        out = t.run()
+        self.assertEqual(len(out), 1)
+        self.assertIn("broker/sip/line.go", out[0])
+        self.assertIn("SIP", out[0])
+
+    def test_sip_client_with_the_guarded_dialer_passes(self):
+        t = self.tree()
+        t.go("broker/sip/line.go", f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA(); _ = g.Dialer(); _ = sip.TransportTCP{{DialerCreate: nil}} }}\n")
+        self.assertEqual(t.run(), [])
+
+    def test_sip_client_that_only_imports_the_guard_still_fails(self):
+        t = self.tree()
+        t.go("broker/sip/line.go", f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA(); _ = netguard.New }}\n")
+        self.assertEqual(len(t.run()), 1)
+
+    def test_sip_in_a_test_file_or_vendor_is_exempt(self):
+        t = self.tree()
+        t.go("broker/sip/line_test.go", "func f() { sipgo.NewUA() }\n")
+        t.go("broker/vendor/x/ua.go", "func f() { sipgo.NewUA() }\n")
+        self.assertEqual(t.run(), [])
+
+    def test_sip_client_can_be_allowlisted_with_a_reason(self):
+        t = self.tree()
+        t.go("broker/sim/sim.go", "func f() { sipgo.NewUA() }\n")
+        self.assertEqual(t.run("broker/sim/sim.go a test simulator on loopback\n"), [])
+
     def test_the_repository_is_clean(self):
         r = subprocess.run([sys.executable, str(ROOT / "tools" / "netguardcheck.py")], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)

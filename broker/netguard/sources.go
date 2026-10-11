@@ -44,6 +44,34 @@ var resolvConfs = []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf
 // gateway does not answer). A read that finds no non-loopback interface
 // prefix fails, so the last learned set stays.
 func (s *Sources) Read() (Network, error) {
+	n, err := s.ReadLocal()
+	if err != nil || !n.Gateway.IsValid() {
+		return n, err
+	}
+	ext := s.External
+	if ext == nil {
+		ext = ExternalAddr
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	a, err := ext(ctx, n.Gateway)
+	cancel()
+	s.mu.Lock()
+	if err == nil && a.IsValid() {
+		s.lastExt = a.Unmap()
+	} else if s.lastGW != n.Gateway {
+		s.lastExt = netip.Addr{}
+	}
+	s.lastGW = n.Gateway
+	n.External = s.lastExt
+	s.mu.Unlock()
+	return n, nil
+}
+
+// ReadLocal is Read without the router: interface prefixes, gateway and
+// resolver from the host alone, never blocking on the network. The external
+// address is the last one read while the gateway is unchanged, else empty.
+// A change event applies it at once, before the full Read completes.
+func (s *Sources) ReadLocal() (Network, error) {
 	addrs := s.Addrs
 	if addrs == nil {
 		addrs = net.InterfaceAddrs
@@ -77,24 +105,11 @@ func (s *Sources) Read() (Network, error) {
 			}
 		}
 	}
-	if n.Gateway.IsValid() {
-		ext := s.External
-		if ext == nil {
-			ext = ExternalAddr
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		a, err := ext(ctx, n.Gateway)
-		cancel()
-		s.mu.Lock()
-		if err == nil && a.IsValid() {
-			s.lastExt = a.Unmap()
-		} else if s.lastGW != n.Gateway {
-			s.lastExt = netip.Addr{}
-		}
-		s.lastGW = n.Gateway
+	s.mu.Lock()
+	if n.Gateway.IsValid() && s.lastGW == n.Gateway {
 		n.External = s.lastExt
-		s.mu.Unlock()
 	}
+	s.mu.Unlock()
 	return n, nil
 }
 

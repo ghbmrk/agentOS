@@ -149,3 +149,35 @@ func TestStubResolverIsNotLearned(t *testing.T) {
 		t.Fatal("loopback DNS allowed")
 	}
 }
+
+// ReadLocal reads the same network as Read without asking the router, and
+// keeps the last external address while the gateway is unchanged.
+func TestReadLocalSkipsTheRouterAndKeepsTheLastExternal(t *testing.T) {
+	asked := 0
+	s := &Sources{
+		Addrs: func() ([]net.Addr, error) {
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.77"), Mask: net.CIDRMask(24, 32)}}, nil
+		},
+		ReadFile: func(p string) ([]byte, error) {
+			if p == "/proc/net/route" {
+				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\n"), nil
+			}
+			return nil, errors.New("absent")
+		},
+		External: func(context.Context, netip.Addr) (netip.Addr, error) {
+			asked++
+			return netip.MustParseAddr("8.8.8.8"), nil
+		},
+	}
+	n, err := s.ReadLocal()
+	if err != nil || asked != 0 || n.External.IsValid() {
+		t.Fatalf("local read: %+v %v asked=%d", n, err, asked)
+	}
+	if _, err := s.Read(); err != nil || asked != 1 {
+		t.Fatalf("full read: %v asked=%d", err, asked)
+	}
+	n, _ = s.ReadLocal()
+	if n.External != netip.MustParseAddr("8.8.8.8") || asked != 1 {
+		t.Fatalf("external not kept: %+v asked=%d", n, asked)
+	}
+}
