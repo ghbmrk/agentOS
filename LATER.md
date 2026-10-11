@@ -701,6 +701,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SIM-repo-2 l5 | PR #738 L3 delta (recheck): a direct push to main skips the PR-only board step: push a branch with board.GENERATED dropped, dispatch `ci.yml` there (the step runs only on `pull_request` and `bot/board`), fast-forward main; `board.yml` fails red once and later bases constrain nothing. Run the step on `workflow_dispatch` too, with `origin/main` as the base; the PR-only TRACE guard has the same class |
 | SIM-repo-2 l6 | PR #738 L3 delta: `board.yml`'s `$BEFORE` guard fails open if `git show "$BEFORE:BOARD.md"` errors; unreachable while main's ruleset keeps `non_fast_forward` |
 | SIM-repo-2 l7 | PR #738 Security 4a: `board.yml`'s header says main requires status checks and the bot PR auto-merges once green; neither holds until the stage-2 ruleset is live; reword in SIM-repo-2b or when stage 2 lands |
+| CRED-12 l1 | `recheck`. PR #1027 lens: the journal records each computer-use retry's result; a per-site retry success rate could feed OWN-19's effort components as an avoided-interruption count. Do it when the brief is expanded |
+| CRED-12 l2 | `recheck`. PR #1027 lens: "computer use" also names the desktop worker's work in A13's Cross-app list; leave both unless owners confuse them |
+| CRED-12 l3 | PR #1027 lens and L3: offer the per-site retry off once at adoption, or default it off, for a site whose adapter recipe says its terms forbid automation, if such an adapter field ever exists |
 
 ## Reuse candidates
 | ID | Component | Why |
