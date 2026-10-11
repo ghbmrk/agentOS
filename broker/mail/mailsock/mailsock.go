@@ -146,7 +146,9 @@ func call(ctx context.Context, req request, src Source) (reply, error) {
 	}
 	// A bound request meets the account it was approved against or none:
 	// the check is on the same account value the call then uses (MAIL-gen).
-	if req.Op != "address" && req.Gen != acct.Generation {
+	// An account with no generation binds nothing, so it is refused too: a
+	// vault that does not name its account must not turn the check off.
+	if req.Op != "address" && (acct.Generation == "" || req.Gen != acct.Generation) {
 		return reply{}, ErrNotConnected
 	}
 	s := acct.Store
@@ -291,7 +293,7 @@ func (c *Client) Address(ctx context.Context) (string, error) {
 // that holds it, with Address's errors.
 func (c *Client) Account(ctx context.Context) (address, generation string, err error) {
 	rep, err := c.do(ctx, request{Op: "address"})
-	if err == nil && rep.Address == "" {
+	if err == nil && (rep.Address == "" || rep.Gen == "") {
 		err = ErrNotConnected
 	}
 	return rep.Address, rep.Gen, err

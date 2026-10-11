@@ -25,6 +25,9 @@ var ctx = context.Background()
 
 const me = mailtest.User
 
+// testGen is the generation the test accounts name (MAIL-gen).
+const testGen = "gen-test"
+
 // frames records what crossed the socket: each request and each reply.
 type frames struct {
 	mu       sync.Mutex
@@ -114,7 +117,9 @@ func account(t *testing.T, srv *mailtest.Server) mailsock.Source {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return func() (mailsock.Account, error) { return mailsock.Account{Store: st, Address: me}, nil }
+	return func() (mailsock.Account, error) {
+		return mailsock.Account{Store: st, Address: me, Generation: testGen}, nil
+	}
 }
 
 func news(srv *mailtest.Server, folder, id, from string) {
@@ -145,7 +150,7 @@ func alertUntouched(t *testing.T, srv *mailtest.Server) {
 func TestClientRefusesAStaleValidity(t *testing.T) {
 	srv := mailtest.Start(t)
 	path, _ := serve(t, account(t, srv))
-	c := mailsock.NewClient(path)
+	c := bound(t, path)
 	news(srv, "INBOX", "<news-0@shop.example>", "deals@shop.example")
 	ms, err := c.Find(ctx, "INBOX", "<news-0@shop.example>")
 	if err != nil || len(ms) != 1 || ms[0].Validity == 0 {
@@ -207,7 +212,7 @@ func TestAdapterOverTheClientNeverMutatesAReplacedUID(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := mailtest.Start(t)
 			path, _ := serve(t, account(t, srv))
-			b := &between{Store: mailsock.NewClient(path)}
+			b := &between{Store: bound(t, path)}
 			now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
 			a, err := mail.New(mail.Config{Account: "mail", Address: me, Store: b,
 				InUse: func(string, time.Time) []journal.Use { return nil },
@@ -259,7 +264,7 @@ func nine(s mail.Store) []error {
 // ErrNotConnected, and no reply carries more than that.
 func TestNotConnected(t *testing.T) {
 	path, f := serve(t, func() (mailsock.Account, error) { return mailsock.Account{}, mailsock.ErrNotConnected })
-	for i, err := range nine(mailsock.NewClient(path)) {
+	for i, err := range nine(mailsock.NewClient(path).Pin("any")) {
 		if !errors.Is(err, mailsock.ErrNotConnected) {
 			t.Errorf("method %d: %v", i, err)
 		}
@@ -279,7 +284,7 @@ func TestNotConnected(t *testing.T) {
 // not there are told apart from a missing account.
 func TestLockedAndUnreachable(t *testing.T) {
 	path, _ := serve(t, func() (mailsock.Account, error) { return mailsock.Account{}, mailsock.ErrLocked })
-	for i, err := range nine(mailsock.NewClient(path)) {
+	for i, err := range nine(mailsock.NewClient(path).Pin("any")) {
 		if !errors.Is(err, mailsock.ErrLocked) {
 			t.Errorf("locked, method %d: %v", i, err)
 		}
@@ -296,7 +301,7 @@ func TestLockedAndUnreachable(t *testing.T) {
 func TestServerWordsDoNotCross(t *testing.T) {
 	srv := mailtest.Start(t)
 	path, f := serve(t, account(t, srv))
-	c := mailsock.NewClient(path)
+	c := bound(t, path)
 	srv.FailList("INBOX", true)
 	srv.FailSMTP(true)
 	if _, _, err := c.UIDs(ctx, "INBOX"); !errors.Is(err, mailsock.ErrFailed) {
@@ -307,6 +312,9 @@ func TestServerWordsDoNotCross(t *testing.T) {
 		t.Fatalf("submit: %v", err)
 	}
 	for _, r := range f.replies() {
+		if r == `{"address":"`+me+`","gen":"`+testGen+`"}`+"\n" {
+			continue // the binding call, not a refused one
+		}
 		if r != `{"error":"failed"}`+"\n" {
 			t.Errorf("reply %q", r)
 		}
@@ -321,7 +329,7 @@ func TestServerWordsDoNotCross(t *testing.T) {
 func TestSubmitSendsOnlyAsTheAccount(t *testing.T) {
 	srv := mailtest.Start(t)
 	path, _ := serve(t, account(t, srv))
-	c := mailsock.NewClient(path)
+	c := bound(t, path)
 	body := "To: friend@example.test\r\nSubject: hi\r\n\r\nhello\r\n"
 	for _, h := range []string{
 		"From: ceo@example.test\r\n",
@@ -466,5 +474,40 @@ func TestSwitchedMailboxRefusesBoundCalls(t *testing.T) {
 	}
 	if _, _, err := c.Pin("gen-2").UIDs(ctx, "INBOX"); err != nil {
 		t.Fatalf("a store bound to the new generation: %v", err)
+	}
+}
+
+// bound is a client pinned to the generation the server reports, the way
+// the binder pins the adapter's Store.
+func bound(t *testing.T, path string) mail.Store {
+	t.Helper()
+	c := mailsock.NewClient(path)
+	_, gen, err := c.Account(ctx)
+	if err != nil {
+		t.Fatalf("account: %v", err)
+	}
+	return c.Pin(gen)
+}
+
+// TestEmptyGenerationFailsClosed: a call that carries no generation, or
+// an account that has none, is refused rather than matched by equality
+// of two empty strings (MAIL-gen R1).
+func TestEmptyGenerationFailsClosed(t *testing.T) {
+	srv := mailtest.Start(t)
+	path, _ := serve(t, account(t, srv))
+	if _, err := mailsock.NewClient(path).Pin("").Folders(ctx); !errors.Is(err, mailsock.ErrNotConnected) {
+		t.Fatalf("empty pin: %v", err)
+	}
+	none, _ := serve(t, func() (mailsock.Account, error) {
+		a, err := account(t, srv)()
+		a.Generation = ""
+		return a, err
+	})
+	c := mailsock.NewClient(none)
+	if _, _, err := c.Account(ctx); !errors.Is(err, mailsock.ErrNotConnected) {
+		t.Fatalf("account with no generation: %v", err)
+	}
+	if _, err := c.Pin("").Folders(ctx); !errors.Is(err, mailsock.ErrNotConnected) {
+		t.Fatalf("empty both sides: %v", err)
 	}
 }

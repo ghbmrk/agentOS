@@ -56,6 +56,9 @@ type mailBound struct {
 type lateMail struct {
 	account string
 	b       atomic.Pointer[mailBound]
+	// gens: the generation each intent was first seen under (B1).
+	mu   sync.Mutex
+	gens map[string]genStamp
 	// undoable: the journal keeps organize evidence readable, so the
 	// digest's UNDO can restore it (ADP-2). Without that every organize
 	// effect is asked (wire).
@@ -132,38 +135,86 @@ func (l *lateMail) adapter() *mail.Adapter {
 	return nil
 }
 
+// errMailGen refuses an intent whose authorization was made under another
+// mail account generation than the one now bound (MAIL-gen B1).
+var errMailGen = errors.New("mail: the mail account changed since this was authorized")
+
+type genStamp struct {
+	gen string
+	at  time.Time
+}
+
+// genKeep is how long an intent's generation is remembered; approvals
+// expire long before (grants.DefaultFresh).
+const genKeep = 24 * time.Hour
+
+// stamp ties intent id to the generation of b: the first call records it
+// and later calls report whether it still matches. An id with no record
+// (the daemon restarted) takes the current generation: that residual is
+// M19's.
+func (l *lateMail) stamp(id string, b *mailBound) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	for k, v := range l.gens {
+		if now.Sub(v.at) > genKeep {
+			delete(l.gens, k)
+		}
+	}
+	if l.gens == nil {
+		l.gens = map[string]genStamp{}
+	}
+	if v, ok := l.gens[id]; ok {
+		return v.gen == b.gen
+	}
+	l.gens[id] = genStamp{gen: b.gen, at: now}
+	return true
+}
+
 func (l *lateMail) Execute(ctx context.Context, in journal.Intent, attempt int) journal.Outcome {
-	a := l.adapter()
-	if a == nil {
+	b := l.b.Load()
+	if b == nil {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: errMailUnbound.Error()}
 	}
-	return a.Execute(ctx, in, attempt)
+	if !l.stamp(in.ID, b) {
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: errMailGen.Error()}
+	}
+	return b.a.Execute(ctx, in, attempt)
 }
 
 func (l *lateMail) Reconcile(ctx context.Context, in journal.Intent, attempt int) journal.Outcome {
-	a := l.adapter()
-	if a == nil {
+	b := l.b.Load()
+	if b == nil {
 		return journal.Outcome{Result: journal.ResultUnknown, Evidence: errMailUnbound.Error()}
 	}
-	return a.Reconcile(ctx, in, attempt)
+	if !l.stamp(in.ID, b) {
+		return journal.Outcome{Result: journal.ResultUnknown, Evidence: errMailGen.Error()}
+	}
+	return b.a.Reconcile(ctx, in, attempt)
 }
 
 func (l *lateMail) Verify(ctx context.Context, in journal.Intent) (grants.Verified, error) {
-	a := l.adapter()
-	if a == nil {
+	b := l.b.Load()
+	if b == nil {
 		return grants.Verified{}, errMailUnbound
 	}
-	return a.Verify(ctx, in)
+	if !l.stamp(in.ID, b) {
+		return grants.Verified{}, errMailGen
+	}
+	return b.a.Verify(ctx, in)
 }
 
 // Escalate is the adapter's guard. An organize effect whose evidence the
 // journal cannot read back has no UNDO, so it is asked (ADP-2).
 func (l *lateMail) Escalate(ctx context.Context, in journal.Intent) (grants.Escalation, error) {
-	a := l.adapter()
-	if a == nil {
+	b := l.b.Load()
+	if b == nil {
 		return grants.Escalation{}, errMailUnbound
 	}
-	e, err := a.Escalate(ctx, in)
+	if !l.stamp(in.ID, b) {
+		return grants.Escalation{}, errMailGen
+	}
+	e, err := b.a.Escalate(ctx, in)
 	if err == nil && !l.undoable && !e.Held && mail.Declared()[in.Action] == verb.Organize {
 		e.Ask = true
 		if e.Reason == "" {
