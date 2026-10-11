@@ -3,6 +3,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue builds each queued PR on a gh-readonly-queue/ branch and waits for
+  # these same checks; without this trigger a queued PR never gets them and stalls.
+  # PR-only steps (BOARD, TRACE.md, risk tier) stay skipped: the PR run already did them.
+  merge_group:
   # trace.yml and metrics.yml dispatch it on their bot branches: PRs opened with
   # GITHUB_TOKEN start no pull_request runs, and main requires these checks.
   workflow_dispatch:
