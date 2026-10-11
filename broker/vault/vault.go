@@ -21,9 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // KeySize is the data key length: AES-256.
@@ -305,53 +306,13 @@ func (v *Vault) write(anchors []Anchor) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(v.path, raw)
+	return writeFile(v.path, raw, 0o600)
 }
 
-// afterRename lets tests fail writeAtomic after the new file is in place,
-// as a failed directory sync would.
-var afterRename = func(path string) error { return nil }
-
-// writeAtomic replaces path with raw, mode 0600: a crash leaves either the
-// old file or the new one.
-func writeAtomic(path string, raw []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".vault-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
-	if err := afterRename(path); err != nil {
-		return err
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	serr := d.Sync()
-	if err := d.Close(); serr == nil {
-		serr = err
-	}
-	return serr
-}
+// writeFile replaces a vault file, mode 0600: a crash leaves either the old
+// file or the new one. A variable so tests can fail it after the new file
+// is in place, as a failed directory sync would.
+var writeFile = durable.WriteFile
 
 func newAEAD(key []byte) (cipher.AEAD, error) {
 	if len(key) != KeySize {

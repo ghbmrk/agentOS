@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -495,7 +496,7 @@ func settleForgetLog(v *vault.Vault, rk RecoveryKey, tmp string, lay Layout, opt
 		} else if err := os.Remove(path + ConfirmSuffix); err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
-		return pending, writeAtomic(path+PendingSuffix, []byte(pending+"\n"+PendingNotice(pending)+"\n"))
+		return pending, durable.WriteFile(path+PendingSuffix, []byte(pending+"\n"+PendingNotice(pending)+"\n"), 0o600)
 	}
 	for _, sfx := range []string{PendingSuffix, ConfirmSuffix} {
 		if err := os.Remove(path + sfx); err != nil && !os.IsNotExist(err) {
@@ -506,7 +507,7 @@ func settleForgetLog(v *vault.Vault, rk RecoveryKey, tmp string, lay Layout, opt
 	if err != nil {
 		return "", err
 	}
-	return "", writeAtomic(path, enc)
+	return "", durable.WriteFile(path, enc, 0o600)
 }
 
 // PendingNotice is the owner's text for a pending restore (CH-12: GSM-7,

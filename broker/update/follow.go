@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
 	"github.com/theupdateframework/go-tuf/v2/metadata/trustedmetadata"
 )
@@ -591,7 +592,7 @@ func (s *Store) follow(root []byte, approved, name string, o Options, admit func
 	// a switch back must meet, so a crash after it narrows.
 	if name != "" {
 		if _, err := os.Stat(s.p(sourceFile)); errors.Is(err, os.ErrNotExist) {
-			if err := writeAtomic(s.p(projectFile), cur, 0o600); err != nil {
+			if err := durable.WriteFile(s.p(projectFile), cur, 0o600); err != nil {
 				return err
 			}
 		} else if err != nil {
@@ -610,13 +611,13 @@ func (s *Store) follow(root []byte, approved, name string, o Options, admit func
 		src = Followed{Name: name, Since: now.UTC(), RootSHA256: sum.RootSHA256, Fingerprint: sum.Keys[metadata.ROOT][0]}
 	}
 	b, _ := json.Marshal(marker{Root: sum.RootSHA256, Source: src})
-	if err := writeAtomic(s.p(followFile), b, 0o600); err != nil {
+	if err := durable.WriteFile(s.p(followFile), b, 0o600); err != nil {
 		return err
 	}
 	if err := step("root"); err != nil {
 		return err
 	}
-	if err := writeAtomic(s.p("root.json"), root, 0o600); err != nil {
+	if err := durable.WriteFile(s.p("root.json"), root, 0o600); err != nil {
 		return err
 	}
 	return s.finishFollow(src)
@@ -650,7 +651,7 @@ func (s *Store) finishFollow(src Followed) error {
 		}
 	} else {
 		b, _ := json.Marshal(src)
-		if err := writeAtomic(s.p(sourceFile), b, 0o600); err != nil {
+		if err := durable.WriteFile(s.p(sourceFile), b, 0o600); err != nil {
 			return err
 		}
 	}
@@ -660,7 +661,7 @@ func (s *Store) finishFollow(src Followed) error {
 	if err := os.Remove(s.p(followFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncDir(s.Dir)
+	return durable.SyncDir(s.Dir)
 }
 
 // settle completes or forgets a switch a crash interrupted. The caller
@@ -691,5 +692,5 @@ func (s *Store) settle() error {
 	if err := os.Remove(s.p(followFile)); err != nil {
 		return err
 	}
-	return syncDir(s.Dir)
+	return durable.SyncDir(s.Dir)
 }
