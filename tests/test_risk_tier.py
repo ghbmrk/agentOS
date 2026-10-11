@@ -36,6 +36,8 @@ class RiskTierTest(unittest.TestCase):
             "broker/loop7/loop7.go": "A",
             # REQ: OP-2 (W5-Db DB-1: Begin is the single gate on digest sends).
             "broker/digestqueue/queue.go": "A",
+            # REQ: OP-3 (SIM-sim L3 #727: the harness is what assures the journal).
+            "broker/sim/world.go": "A",
             "broker/recall/index.go": "B",
             "broker/newpkg/x.go": "B",
             "guest/openclaw/Dockerfile": "B",

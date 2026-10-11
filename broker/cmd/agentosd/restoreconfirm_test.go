@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/recovery"
 )
@@ -358,9 +359,7 @@ func TestAnAnswerIsDurableBeforeItReturns(t *testing.T) {
 	type seen struct{ log, marker bool }
 	record := func(t *testing.T, dir string, fail int) *[]seen {
 		var got []seen
-		real := syncDir
-		t.Cleanup(func() { syncDir = real })
-		syncDir = func(d string) error {
+		hookSyncs(t, func(d string) error {
 			if d != dir {
 				t.Fatalf("synced %s, not the state dir", d)
 			}
@@ -370,8 +369,8 @@ func TestAnAnswerIsDurableBeforeItReturns(t *testing.T) {
 			if len(got) == fail {
 				return errors.New("synthetic sync failure")
 			}
-			return real(d)
-		}
+			return durable.SyncDir(d)
+		})
 		return &got
 	}
 	t.Run("right", func(t *testing.T) {
@@ -404,4 +403,19 @@ func TestAnAnswerIsDurableBeforeItReturns(t *testing.T) {
 			t.Fatalf("released %v on a failed sync: %v", released, err)
 		}
 	})
+}
+
+// hookSyncs routes every directory sync of an answer through fn: those
+// answerHeld makes itself and the one ending each writeSynced.
+func hookSyncs(t *testing.T, fn func(string) error) {
+	t.Helper()
+	ws, sd := writeSynced, syncDir
+	t.Cleanup(func() { writeSynced, syncDir = ws, sd })
+	syncDir = fn
+	writeSynced = func(path string, raw []byte) error {
+		if err := durable.WriteFile(path, raw, 0o600); err != nil {
+			return err
+		}
+		return fn(filepath.Dir(path))
+	}
 }

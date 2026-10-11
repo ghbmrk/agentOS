@@ -220,13 +220,13 @@ func TestOSS6sA6CrashBeforeTheLedgerRecords(t *testing.T) {
 	g.w.during = nil
 	// The crash: the ledger as it was while the transport held the frame.
 	must(t, os.WriteFile(path, snap, 0o600))
-	must(t, os.WriteFile(filepath.Join(g.dir, ".pubsend-123"), []byte("half"), 0o600))
+	must(t, os.WriteFile(filepath.Join(g.dir, ".durable-123"), []byte("half"), 0o600))
 	g.reopen(t)
 	must(t, g.s.Flush())
 	if len(g.w.frames) != 2 || !bytes.Equal(g.w.frames[0], g.w.frames[1]) {
 		t.Fatalf("%d frames after the crash, or they differ", len(g.w.frames))
 	}
-	if _, err := os.Stat(filepath.Join(g.dir, ".pubsend-123")); err == nil {
+	if _, err := os.Stat(filepath.Join(g.dir, ".durable-123")); err == nil {
 		t.Fatal("a crash's temporary file was left")
 	}
 	must(t, g.s.Publish(dayN(0), a))
@@ -349,7 +349,8 @@ func TestOSS6sA8ImportFence(t *testing.T) {
 		}
 		for _, p := range strings.Fields(string(out)) {
 			if strings.HasPrefix(p, "github.com/ghbmrk/agentos/broker/") &&
-				p != "github.com/ghbmrk/agentos/broker/pubid" && p != "github.com/ghbmrk/agentos/broker/pubsend" {
+				p != "github.com/ghbmrk/agentos/broker/pubid" && p != "github.com/ghbmrk/agentos/broker/pubsend" &&
+				p != "github.com/ghbmrk/agentos/broker/durable" { // a stdlib-only leaf (durable.TestLeaf)
 				t.Errorf("%s links %s", pkg, p)
 			}
 			if p == "net" || strings.HasPrefix(p, "net/") || p == "os/exec" || p == "crypto/tls" {

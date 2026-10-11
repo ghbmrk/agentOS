@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/childproc"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/quota"
 	"github.com/ghbmrk/agentos/broker/vm"
 	"github.com/ghbmrk/agentos/broker/vm/overlay"
@@ -203,7 +204,7 @@ func keepConsole(r io.ReadCloser, path string, limit int64) {
 		for b := buf[:n]; len(b) > 0; {
 			if size >= limit {
 				f.Close()
-				os.Rename(path, path+".1")
+				durable.Rename(path, path+".1") // best effort: on failure the size check below stops the log
 				if !open() {
 					io.Copy(io.Discard, r)
 					return
