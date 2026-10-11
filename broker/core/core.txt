@@ -57,6 +57,11 @@ open journal.Engine.Between
 open journal.Engine.StatusBetween
 open journal.Engine.RecordsAfter
 open journal.Engine.Stopped
+# journal/check (#726): ReadTrail decodes the journal through the store's
+# ReadAll and returns the read error; Narrowing is a pure predicate on an
+# intent's account and action.
+open journal.Engine.ReadTrail
+open journal.Narrowing
 open journal.FileStore.ReadAll
 open journal.MemStore.ReadAll
 open grants.Gate.Get
