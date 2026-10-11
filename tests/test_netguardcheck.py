@@ -49,10 +49,22 @@ class Check(unittest.TestCase):
 
     def test_each_dial_form_is_found(self):
         for form in ("net.Dial(\"tcp\", a)", "tls.Dial(\"tcp\", a, nil)", "smtp.DialTLS(a)", "&http.Transport{}",
-                     "http.DefaultClient.Do(r)", "http.Get(u)", "net.DialTimeout(\"tcp\", a, 1)"):
+                     "http.DefaultClient.Do(r)", "http.Get(u)", "(&http.Client{}).Get(u)", "new(http.Client)",
+                     "&net.Resolver{PreferGo: true, Dial: dial}", "net.DialTimeout(\"tcp\", a, 1)"):
             t = self.tree()
             t.go("broker/a/a.go", f"func f() {{ {form} }}\n")
             self.assertEqual(len(t.run()), 1, form)
+
+    def test_client_naming_its_transport_is_judged_by_the_transport(self):
+        t = self.tree()
+        t.go("broker/a/a.go", "func f() { c := &http.Client{Timeout: 1, Transport: tr}; _ = c }\n")
+        self.assertEqual(t.run(), [])
+        t = self.tree()
+        t.go("broker/a/a.go", "func f() { c := &http.Client{Timeout: 1}; _ = c }\n")
+        self.assertEqual(len(t.run()), 1)
+        t = self.tree()
+        t.go("broker/a/a.go", "type s struct{ c *http.Client }\nfunc f(c *http.Client) {}\n")
+        self.assertEqual(t.run(), [])
 
     def test_hooked_file_passes(self):
         t = self.tree()

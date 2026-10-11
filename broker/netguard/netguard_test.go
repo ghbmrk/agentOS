@@ -456,3 +456,22 @@ func selfSigned(t *testing.T) tls.Certificate {
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: k}
 }
+
+// A learned address in v4-mapped form must refuse the plain v4 address Check sees.
+func TestLearnUnmapsGatewayExternalResolver(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		n    Network
+		addr string
+	}{
+		{"gateway", Network{Gateway: netip.MustParseAddr("::ffff:85.1.1.1")}, "85.1.1.1"},
+		{"external", Network{External: netip.MustParseAddr("::ffff:85.1.1.2")}, "85.1.1.2"},
+		{"resolver", Network{Resolver: netip.MustParseAddr("::ffff:85.1.1.3")}, "85.1.1.3"},
+	} {
+		p, _ := guarded(&seqResolver{answers: [][]string{{"8.8.8.8"}}}, nil)
+		p.Learn(tc.n)
+		if err := p.Check(context.Background(), netip.MustParseAddr(tc.addr), 443, "tcp"); !errors.Is(err, ErrDenied) {
+			t.Errorf("%s: %s must be refused, got %v", tc.name, tc.addr, err)
+		}
+	}
+}

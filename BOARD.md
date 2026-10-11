@@ -163,6 +163,7 @@ The home-network boundary is release work (A14); device features follow the firs
 |---|---|---|---|
 | DEV-net-a | [Home-network address policy and egress proxy](briefs/DEV-net-a.md) | P1-3, D-069 spec diff merged | queued (release; DEV-2, A14, G2; tier A) |
 | DEV-net-b | [Home-network boundary on the remaining dialers and inbound](briefs/DEV-net-b.md) | DEV-net-a | queued (release; DEV-2, A14, G2; tier A) |
+| DEV-net-c | [Wire the egress process to the address guard](briefs/DEV-net-c.md) | DEV-net-a | queued (release; DEV-2, A14, G2; tier A) |
 
 ## Phase 0: harness and risk spikes
 

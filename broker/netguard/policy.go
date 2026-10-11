@@ -178,7 +178,7 @@ func New(cfg Config) *Policy {
 
 // Learn replaces the learned network.
 func (p *Policy) Learn(n Network) {
-	out := Network{Gateway: n.Gateway.WithZone(""), External: n.External.WithZone(""), Resolver: n.Resolver.WithZone("")}
+	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), External: n.External.WithZone("").Unmap(), Resolver: n.Resolver.WithZone("").Unmap()}
 	for _, pf := range n.Prefixes {
 		if !pf.IsValid() {
 			continue
@@ -343,6 +343,9 @@ func (p *Policy) check(r request, a netip.Addr, port uint16, proto string) error
 		}
 		if n.External.IsValid() && f == n.External {
 			return &DeniedError{a, "router external address"}
+		}
+		if n.Resolver.IsValid() && f == n.Resolver {
+			return &DeniedError{a, "the learned resolver is reachable only for names (port 53)"}
 		}
 	}
 	return nil

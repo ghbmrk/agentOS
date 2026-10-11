@@ -4,3 +4,4 @@
 broker/smsapi/upstream.go SMS provider client dials with a plain net.Dialer; DEV-net-b
 broker/mail/imapsmtp/imapsmtp.go IMAP and SMTP dials use a plain net.Dialer; DEV-net-b
 broker/skill/server.go webhook step falls back to http.DefaultClient; DEV-net-b
+broker/cmd/agentos-guest-bridge/main.go runs inside the guest, not on the box; its http.Client reaches the box gateway from the guest, outside the box egress policy (permanent exemption)

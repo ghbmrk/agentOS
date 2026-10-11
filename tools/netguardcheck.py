@@ -2,7 +2,7 @@
 """Fail when a broker dialer is not hooked into the home-network address guard (DEV-2).
 
 Every non-test Go file under broker/ that opens a network connection (net.Dialer, net.Dial*,
-tls.Dial*, smtp.Dial*, an http.Transport, http.DefaultClient/DefaultTransport, http.Get/Post/Head)
+tls.Dial*, smtp.Dial*, an http.Transport, an http.Client or net.Resolver value (a *pointer* type is a reference, not a construction), http.DefaultClient/DefaultTransport, http.Get/Post/Head)
 must import broker/netguard, or be listed in tools/netguard_allow.txt with a reason. Unix-socket
 dials are exempt, as is testdata/ (guest programs). The allowlist is a debt list: an entry whose
 file is gone, now imports the guard, or no longer has an unhooked dial fails the check, so it
@@ -22,7 +22,8 @@ import sys
 GUARD = '"github.com/ghbmrk/agentos/broker/netguard"'
 DIAL = re.compile(
     r"\bnet\.Dialer\b|\bnet\.Dial(?:Timeout|TCP|UDP|IP)?\(|\btls\.Dial(?:WithDialer)?\(|\bsmtp\.Dial|"
-    r"\bhttp\.Transport\b|\bhttp\.Default(?:Client|Transport)\b|\bhttp\.(?:Get|Post|Head|PostForm)\("
+    r"\bhttp\.Transport\b|\bhttp\.Default(?:Client|Transport)\b|\bhttp\.(?:Get|Post|Head|PostForm)\(|"
+    r"(?<!\*)\bhttp\.Client\b|(?<!\*)\bnet\.Resolver\b"
 )
 WINDOW = 4  # lines after a match searched for "unix"
 
@@ -34,7 +35,12 @@ def sites(path):
     for i, line in enumerate(lines):
         if line.lstrip().startswith("//") or not DIAL.search(line):
             continue
-        if any('"unix"' in l for l in lines[i : i + WINDOW + 1]):
+        near = lines[i : i + WINDOW + 1]
+        if any('"unix"' in l for l in near):
+            continue
+        # A client that names its Transport is judged by that Transport, which is its own site.
+        if re.search(r"\bhttp\.Client\b", line) and not re.search(r"\bhttp\.Client\b\s*\{\s*\}", line) \
+                and any(re.search(r"\bTransport\s*:", l) for l in near):
             continue
         out.append(i + 1)
     return out

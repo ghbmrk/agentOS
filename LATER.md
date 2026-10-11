@@ -52,7 +52,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W5a-resume | A14 (security) | Per-grant resume needs a fresh bound code; Security R2 |
 | W5b | A7, A11 | Loop 3 update checks as a scheduler source |
 | W5c | A12 | Clean-room builder in the scheduler |
-| DEV-net-a, DEV-net-b | A14 (DEV-2, REV-5) | Home-network boundary on every outbound path; latent until ARC-6 (d) is served, and a precondition for serving it (D-069) |
+| DEV-net-a, DEV-net-b, DEV-net-c | A14 (DEV-2, REV-5) | Home-network boundary on every outbound path; latent until ARC-6 (d) is served, and a precondition for serving it (D-069) |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
 | P3-4b-4c-dedupe | A1 (owner texts; UX on #589 classed it release under §2's stricter rule, for Mark to demote to later if no acceptance test needs it) | `Guard.batch` and the digest repeat one identical line per corpus item, so a weakened check gives the owner ten identical lines |
@@ -813,6 +813,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | EGRESS-cap f1 | `recheck`. Finding 10 on 75d68c4: the proxy's `Cap` is called a hard ceiling but is not one: `admit` checks and `charge` adds later, so concurrent requests can all pass the last request slot, and response bytes are charged only after streaming ends. Production sets no caps, so it is a library contract gap; before caps are wired, reserve the request in `admit` and enforce bytes while streaming, or stop calling them hard |
 | EGRESS-rot-1 l1 | PR #1041 L3 (6110508976): in `TestRotatedKeyIsRedactedWhenEchoed` the `X-Echo` header half of the assertion is vacuous. `X-Echo` is not in `baseResponseHeaders` (`adapter.go:144`) and the OpenAI adapter does not forward it, so only the body echo is exercised. Header redaction goes through the same `red`, so this is not a false pass of the fix. Echoing through `X-Request-Id` would cover headers too |
 | EGRESS-rot-1 l2 | PR #1041 L3 (6110508976): `broker/vault` has no direct unit test that `With` keeps the receiver's patterns and leaves the receiver unchanged. The mutant that starts from an empty redactor is killed only indirectly, from `egress` (`TestResponsesNeverCarryTheKey`) |
+| DEV-net-a l1 | PR #1049 L3: a pin that has an address but no key cannot be passed to `TLSConfig`, so an address-only pin has no handshake check; decide whether address-only pins are allowed or `TLSConfig` takes them |
+| DEV-net-a l2 | PR #1049 L3: a name pin matches any port and skips the deny list for that name; match the port too and keep the deny list for the resolved address |
+| DEV-net-a l3 | PR #1049 L3: `tools/netguardcheck.py` misses aliased `net` imports and `ListenUDP`/`WriteToUDP`, exempts any dial with `"unix"` within 4 lines, and sipline carries its own check |
 
 ## Reuse candidates
 | ID | Component | Why |
