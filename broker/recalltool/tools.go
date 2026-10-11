@@ -243,11 +243,35 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 			label = recall.Public // K4: from the machine, never the guest
 		}
 		now := t.cfg.Now()
-		_, err := t.cfg.Index.Ingest(recall.Item{
-			Source: recall.Source{Kind: "agent", Ref: lineage + "/" + a.Key, Seen: now,
-				DerivedFrom: t.cfg.Prov.Of(lineage)},
-			Label: label, Text: a.Text, Facts: facts, Received: now,
+		// Limits first, before anything is stored (W3).
+		exists := func(l, k string) bool {
+			_, ok := t.cfg.Index.Get(t.cfg.Index.SourceID("agent", "", l+"/"+k))
+			return ok
+		}
+		if err := t.cfg.Prov.Reserve(lineage, a.Key, exists); err != nil {
+			if errors.Is(err, ErrLimit) {
+				return "", true, guesterr.New("this agent has saved or read as much as notes allow; delete old notes or ask the owner")
+			}
+			t.cfg.Logf("recall %s: reserve: %v", machine, err)
+			return "", true, guesterr.New("broker could not store the note")
+		}
+		// One anchor item stands for everything the lineage has read, so
+		// the note's own cost does not grow with it.
+		from, err := t.cfg.Prov.Anchor(lineage, func(seq int, derived []string) (string, error) {
+			return t.cfg.Index.Ingest(recall.Item{
+				Source: recall.Source{Kind: "agent", Ref: fmt.Sprintf("%s/_anchor/%d", lineage, seq), Seen: now, DerivedFrom: derived},
+				Label:  label, Received: now,
+			})
 		})
+		if errors.Is(err, ErrLimit) {
+			return "", true, guesterr.New("this agent has saved or read as much as notes allow; delete old notes or ask the owner")
+		}
+		if err == nil {
+			_, err = t.cfg.Index.Ingest(recall.Item{
+				Source: recall.Source{Kind: "agent", Ref: lineage + "/" + a.Key, Seen: now, DerivedFrom: from},
+				Label:  label, Text: a.Text, Facts: facts, Received: now,
+			})
+		}
 		if errors.Is(err, recall.ErrDeleted) {
 			// #59 security B1: a lineage that read a deleted record
 			// derives no note from it, even after the owner keeps it.
