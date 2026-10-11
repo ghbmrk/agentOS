@@ -86,8 +86,15 @@ type Config struct {
 	Meter *meter.Meter
 	// OwnerReply receives a guest's reply to an owner message. It is
 	// guest-written text: the owner channel filters it before it goes out
-	// (CH-19). Nil drops replies.
+	// (CH-19). Nil drops replies. It is told each reply once, after the
+	// reply is recorded; a crash before it returns loses the reply, so a
+	// broker that must not lose one sets Replies instead.
 	OwnerReply func(machine string, rep Reply)
+	// Replies, if set, is called after each new reply is written to the
+	// store's outbox, where it waits until its consumer reads it with
+	// PendingReplies and removes it with ReplyDone (DEL-1b). OwnerReply is
+	// then not called. Without InboxPath the outbox is in memory only.
+	Replies func()
 	// Logf reports broker-side faults (a failed snapshot). Nil is silent.
 	Logf func(format string, args ...any)
 	// MaxConns caps one machine's concurrent requests; default 8.
