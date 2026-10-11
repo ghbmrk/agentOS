@@ -259,3 +259,32 @@ func TestSignInRefreshAndResumeWithoutALock(t *testing.T) {
 		t.Fatalf("session after refresh: %v", err)
 	}
 }
+
+// stopInSignIn texts a STOP while the sign-in's code is being checked, as
+// an owner's STOP can land mid-check, then signs in.
+type stopInSignIn struct {
+	*owner.Channel
+	t *testing.T
+}
+
+func (s stopInSignIn) LocalSignIn(code string) (time.Time, uint64, error) {
+	s.t.Helper()
+	s.Channel.Handle(context.Background(), "+15550000002", "STOP")
+	return s.Channel.LocalSignIn(code)
+}
+
+// REQ: CH-2, STOP-gen
+// A local RESUME that began before a texted STOP does not lift it, even
+// though the sign-in code check came between: the server reads the STOP
+// generation on arrival, before LocalSignIn (moving that read after
+// LocalSignIn makes this test fail).
+func TestTextStopDuringALocalResumeCodeCheckStaysStopped(t *testing.T) {
+	g := newGenRig(t)
+	tok := g.signIn()
+	g.advance(localapi.FreshFor)
+	g.own = stopInSignIn{g.ch, t}
+	out, err := g.call(localapi.OpResume, localapi.Resume{Token: tok, Code: g.code()})
+	if !g.eng.Stopped() {
+		t.Fatalf("a text STOP during the code check was undone: %+v %v", out, err)
+	}
+}

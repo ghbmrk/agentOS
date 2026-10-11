@@ -431,14 +431,26 @@ func TestLocalStopDuringATextResumeIsNotLifted(t *testing.T) {
 	done := make(chan string)
 	code := r.totp()
 	go func() { done <- strings.Join(r.ch.Handle(ctx, ownerNum, "RESUME "+code), " | ") }()
-	for f.calls() == n {
-		time.Sleep(time.Millisecond)
+	for dl := time.Now().Add(5 * time.Second); f.calls() == n; time.Sleep(time.Millisecond) {
+		if time.Now().After(dl) {
+			t.Fatal("the texted RESUME never reached the code check")
+		}
 	}
 	if err := r.ch.LocalStop(ctx); err != nil { // mid-check
 		t.Fatal(err)
 	}
-	f.block <- nil
-	if got := <-done; !strings.Contains(got, "A STOP arrived while the code was checked") || !r.eng.Stopped() {
+	select {
+	case f.block <- nil:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the code check was not waiting")
+	}
+	var got string
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the texted RESUME never answered")
+	}
+	if !strings.Contains(got, "A STOP arrived while the code was checked") || !r.eng.Stopped() {
 		t.Fatalf("%q, stopped %v", got, r.eng.Stopped())
 	}
 }
