@@ -29,16 +29,28 @@ func (e *Engine) Since(origin string, since time.Time) []string {
 // Between lists the intents submitted with origin at or after from and,
 // unless until is zero, before until, oldest first.
 func (e *Engine) Between(origin string, from, until time.Time) []string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	var out []string
-	for _, id := range e.order {
-		en := e.intents[id]
-		if en.intent.Origin == origin && !en.submitted.Before(from) && (until.IsZero() || en.submitted.Before(until)) {
-			out = append(out, id)
+	e.each(func(en *entry) {
+		if en.between(origin, from, until) {
+			out = append(out, en.intent.ID)
 		}
-	}
+	})
 	return out
+}
+
+// StatusBetween is Between with each intent's status, read in one pass.
+func (e *Engine) StatusBetween(origin string, from, until time.Time) []Status {
+	var out []Status
+	e.each(func(en *entry) {
+		if en.between(origin, from, until) {
+			out = append(out, en.status())
+		}
+	})
+	return out
+}
+
+func (en *entry) between(origin string, from, until time.Time) bool {
+	return en.intent.Origin == origin && !en.submitted.Before(from) && (until.IsZero() || en.submitted.Before(until))
 }
 
 // Erase removes the content of the given intents (see above) and rewrites
@@ -51,6 +63,12 @@ func (e *Engine) Erase(ids []string) (erased, held []string, err error) {
 	if e.broken != nil {
 		return nil, nil, e.broken
 	}
+	// Evicted denials come back for the erase, and stay until it is done.
+	if err := e.rehydrate(ids); err != nil {
+		return nil, nil, err
+	}
+	e.pinned = true
+	defer func() { e.pinned = false; e.trim() }()
 	for _, id := range ids {
 		en := e.intents[id]
 		if en == nil || en.erased {
@@ -80,15 +98,26 @@ func (e *Engine) Erase(ids []string) (erased, held []string, err error) {
 	return erased, held, e.rewriteErased()
 }
 
-// unerased reports whether a written record still carries content of an
-// erased intent. Caller holds mu (or is Open).
-func (e *Engine) unerased() bool {
-	for _, r := range e.records {
-		if en := e.intents[r.ID]; en != nil && en.erased && carries(r) {
+// unerased reports whether a record still carries content of an intent
+// the journal records as erased.
+func unerased(recs []Record) bool {
+	erased := erasedIDs(recs)
+	for _, r := range recs {
+		if erased[r.ID] && carries(r) {
 			return true
 		}
 	}
 	return false
+}
+
+func erasedIDs(recs []Record) map[string]bool {
+	out := map[string]bool{}
+	for _, r := range recs {
+		if r.Type == RecErased {
+			out[r.ID] = true
+		}
+	}
+	return out
 }
 
 func carries(r Record) bool {
@@ -106,10 +135,14 @@ func carries(r Record) bool {
 // replaying the result gives the same state. A failed rewrite breaks the
 // engine, as a failed append does. Caller holds mu (or is Open).
 func (e *Engine) rewriteErased() error {
+	recs, err := e.readJournal()
+	if err != nil {
+		return err
+	}
+	erased := erasedIDs(recs)
 	var buf []byte
-	recs := make([]Record, len(e.records))
-	for i, r := range e.records {
-		if en := e.intents[r.ID]; en != nil && en.erased && carries(r) {
+	for _, r := range recs {
+		if erased[r.ID] && carries(r) {
 			if r.Intent != nil {
 				in := *r.Intent
 				in.Params, in.Preconditions = nil, nil
@@ -124,26 +157,22 @@ func (e *Engine) rewriteErased() error {
 			return err
 		}
 		buf = append(buf, line...)
-		recs[i] = r
 	}
 	if err := e.store.Rewrite(buf); err != nil {
 		e.broken = fmt.Errorf("%w: erase rewrite: %v", ErrBroken, err)
 		return e.broken
 	}
-	e.records = recs
 	return nil
 }
 
 // Erased lists erased intents, sorted (for reports and tests).
 func (e *Engine) Erased() []string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	var out []string
-	for id, en := range e.intents {
+	e.each(func(en *entry) {
 		if en.erased {
-			out = append(out, id)
+			out = append(out, en.intent.ID)
 		}
-	}
+	})
 	sort.Strings(out)
 	return out
 }
