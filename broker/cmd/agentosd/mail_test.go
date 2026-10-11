@@ -202,6 +202,16 @@ func newMailRig(t *testing.T, red journal.Redactor) *mailRig {
 	r.v = &mailVault{}
 	r.v.set(r.acct, nil)
 	r.sock = serveMail(t, r.v.source)
+	r.boot(red)
+	r.grant(grants.Spec{Account: mailAccount, Executor: mail.Tool, Ops: mail.Declared()})
+	return r
+}
+
+// boot builds the wrapper, gate and engine over the rig's journal file, as
+// the daemon does at start; restart calls it again on the same file.
+func (r *mailRig) boot(red journal.Redactor) {
+	t := r.t
+	t.Helper()
 	r.l = newLateMail()
 	r.l.tune = func(c *mail.Config) {
 		in := c.InUse
@@ -245,11 +255,18 @@ func newMailRig(t *testing.T, red journal.Redactor) *mailRig {
 	}
 	r.own = &mailOwner{reqs: map[string][]owner.Item{}, now: r.now}
 	r.g.Attach(r.eng, r.own)
-	r.grant(grants.Spec{Account: mailAccount, Executor: mail.Tool, Ops: mail.Declared()})
-	return r
 }
 
 func identity(s string) string { return s }
+
+// restart stops the daemon's pieces and builds them again over the same
+// journal file, with the owner's in-memory decisions and the wrapper's
+// generation record gone, as after a daemon restart.
+func (r *mailRig) restart() {
+	r.t.Helper()
+	r.st.Close()
+	r.boot(identity)
+}
 
 func (r *mailRig) now() time.Time {
 	r.mu.Lock()
@@ -848,5 +865,46 @@ func TestMailApprovalDoesNotCrossAccountGenerations(t *testing.T) {
 				t.Fatalf("the new mailbox's message moved to %s", f)
 			}
 		})
+	}
+}
+
+// TestMailRestartDoesNotRunWhatWasAskedBefore (MAIL-gen M19): an intent
+// held for the owner's answer under one mailbox is not run on a mailbox
+// the address was rebound to across a daemon restart; the owner's answer
+// lives in memory only, so the restart cancels it.
+func TestMailRestartDoesNotRunWhatWasAskedBefore(t *testing.T) {
+	r := newMailRig(t, identity)
+	r.l.undoable = false
+	r.bind()
+	ctx := context.Background()
+	id := r.news(1, "shop.example")
+	in := r.intent(mail.OpArchive, mailAccount, id)
+	if _, err := r.g.Submit(in); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.g.Authorize(ctx, in.ID); st.State != journal.Pending {
+		t.Fatalf("authorize: %s %q", st.State, st.Permission.Reason)
+	}
+	srv1 := r.srv
+	srv2 := r.switchMailbox(id)
+	r.restart()
+	r.l.undoable = false
+	r.bind()
+	r.g.Dispatch(ctx, in.ID)
+	if st, _ := r.eng.Get(in.ID); st.State == journal.Succeeded {
+		t.Fatalf("ran across the restart: %s", st.State)
+	}
+	for n, srv := range map[string]*mailtest.Server{"old": srv1, "new": srv2} {
+		if f, _, _ := srv.Find(id); f != "INBOX" {
+			t.Fatalf("the %s mailbox's message moved to %s", n, f)
+		}
+	}
+}
+
+// TestMailGenKeepCoversApprovalWindow (MAIL-gen M19): the wrapper keeps an
+// intent's generation at least as long as an approval stays fresh.
+func TestMailGenKeepCoversApprovalWindow(t *testing.T) {
+	if genKeep < grants.DefaultFresh {
+		t.Fatalf("genKeep %s is shorter than the approval window %s", genKeep, grants.DefaultFresh)
 	}
 }
