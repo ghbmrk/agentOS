@@ -690,6 +690,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SIM-cases-stop | recheck. L3 on #723 point 5: STOP and urgent texts must not wait behind blocked storage (#282, #303, #305, #309, #331, #347, #348, #353, #373); briefs/SIM-cases.md assigns it to SIM-owner-hold, whose review should confirm every path |
 | ADP-8 l1 | PR #208 UX lens (recheck): once ADP-8b wires `Mismatch` in, a blocked adapter needs an OP-9 STATUS line in owner words naming the operation and the fix; `mismatch.go` has no owner text today |
 | ADP-8 l2 | PR #208 Potency lens: `Mismatch` reports only the first mismatching operation, so each demo cycle surfaces one fix |
+| SIM-sd l1 | PR #714 L3 (34e114e): OP-12 lists STATUS lines both as `owner.inform` intents and as a projection over them; say which |
+| SIM-sd l2 | PR #714 L3 (34e114e), `recheck` for SIM-outcome: LOOP-3's "above noise" has no measure |
+| SIM-sd l3 | PR #714 L3 (34e114e): CAP-3's "a missing or unreadable key store fails closed" does not say whether replay halts or records read as erased; settle in SIM-shred |
 | SIM-fs l1 | PR #718 L3 (6098161841), `recheck`: `TestNoBareRename` does not match the `(*os.Root).Rename` method form; `broker/cmd/agentos-guest-bridge/tree.go:166` renames that way with no file or dir fsync (not a listed SIM-fs site; the next tree sync re-fetches what a crash loses). Extend the grep or route the site through `durable` when the guest bridge is next touched |
 | ADP-8 l3 | PR #696 Security 4a: #208's UX and Potency lens verdicts are a PR comment only, not files under reviews/ux/ and reviews/potency/ |
 | SIM-fs l1 | PR #718 UX lens (recheck): the localui pairing saves (`setup.go` 626, 712) and localsrv saves now return `durable.ErrDirSync` where the old code ignored it, so on a state volume that cannot fsync a directory every pairing retry fails with no step that helps; the state is written (fails safe). Add a step to the pairing error text if such a volume appears |
@@ -704,7 +707,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CRED-12 l1 | `recheck`. PR #1027 lens: the journal records each computer-use retry's result; a per-site retry success rate could feed OWN-19's effort components as an avoided-interruption count. Do it when the brief is expanded |
 | CRED-12 l2 | `recheck`. PR #1027 lens: "computer use" also names the desktop worker's work in A13's Cross-app list; leave both unless owners confuse them |
 | CRED-12 l3 | PR #1027 lens and L3: offer the per-site retry off once at adoption, or default it off, for a site whose adapter recipe says its terms forbid automation, if such an adapter field ever exists |
-| PMERGE-1 l1 | `recheck`: Mark applies main's ruleset (strict required checks `checks`, `broker`, `machines`, `hostcheck`), the `lane:*` and `handoff` labels and the claude2 collaborator; until then the up-to-date gate of OPERATING §7 is not enforced. PMERGE-1 has no BOARD row or brief; its ID lives here and in D-096 |
+| PMERGE-1 l1 | `recheck`: Mark applies main's ruleset (strict required checks `checks`, `broker`, `machines`, `hostcheck`), the `lane:*` and `handoff` labels and the claude2 collaborator; until then the up-to-date gate of OPERATING §7 is not enforced. PMERGE-1 has no BOARD row or brief; its ID lives here and in D-098 |
 
 ## Reuse candidates
 | ID | Component | Why |
