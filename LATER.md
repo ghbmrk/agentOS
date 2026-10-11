@@ -26,6 +26,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | UPD-b | A1, A14 (UPD-3) | Update before accounts connect |
 | CH-20w | A15 (CH-20) | Evidence delivery through the vault-held mail adapter |
 | CRED-4b | A5, A13 | Credentialed browser executor; sessions only in the vault process |
+| ADP-14-get | A5, A13 (CRED-4b) | Gates credentialed browsing shipping: GET links with side effects (unsubscribe, confirm) reached by `navigate` bypass the method-based gate; BOARD row ADP-14-get |
 | ADP-8 | A13 (ADP-8) | Mislabelled-draft check blocks adoption |
 | ADP-5 | A13 | Desktop executor and kiosk-escape test; blocked on CRED-4b |
 | OSS-6j | A12 (OSS-6, DEP-2) | L3 on #330: the pull job is repository automation, not a service |
@@ -88,7 +89,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W3-off-a | STATUS wording goes dynamic; polish |
 | W3-implicit | Potency C2 outcome label; refinement of attention optimizer |
 | W8 | Owner builds; no brief, no A-test names it |
-| ADP-14-get | GET links with side effects reached by `navigate` on recipe sites; recipe gate covers state-changing methods first |
 | ADP-14-undo-fail | A failed `UNDO` reply gives site, reference and deadline and opens a task; UNDO success path is enough for A13 |
 | ADP-14-offer | After repeated approved submits on one unknown site, offer its private-derived draft for adoption; cuts approvals, not needed for A13 |
 | ADP-14-cred6 | Recipes declare their site's CRED-6 screens, undeclared ones trigger ADP-7 repair; CRED-6 already applies without a recipe |
@@ -714,6 +714,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SIM-repo-2 l5 | PR #738 L3 delta (recheck): a direct push to main skips the PR-only board step: push a branch with board.GENERATED dropped, dispatch `ci.yml` there (the step runs only on `pull_request` and `bot/board`), fast-forward main; `board.yml` fails red once and later bases constrain nothing. Run the step on `workflow_dispatch` too, with `origin/main` as the base; the PR-only TRACE guard has the same class |
 | SIM-repo-2 l6 | PR #738 L3 delta: `board.yml`'s `$BEFORE` guard fails open if `git show "$BEFORE:BOARD.md"` errors; unreachable while main's ruleset keeps `non_fast_forward` |
 | SIM-repo-2 l7 | PR #738 Security 4a: `board.yml`'s header says main requires status checks and the bot PR auto-merges once green; neither holds until the stage-2 ruleset is live; reword in SIM-repo-2b or when stage 2 lands |
+| JOURNAL-lock | `recheck`. The journal `FileStore` flocks the journal inode, and `Rewrite` closes the old fd after the rename, so a second engine that opened the path just before the rename can lock the orphaned inode and both run. Fix: lock a sidecar file, as recall does. Narrow: one engine runs per broker (Mark approved, 2026-10-11) |
+| OP-8-wording | OP-8's "spend cap" can read as money, but the meter counts calls and tokens, and per-route pricing is unbuilt (route ASSUMPTIONS R10). Reword the STATUS label, or the SPEC, to say budget or limit; a SPEC change needs an L1 spec-diff (Mark approved, 2026-10-11) |
+| SIM-core l6 | `recheck`. PR #715 L3 delta (comment 6109855530) and Security (comment 6109907105 pt 4): the interface pass sees only interfaces declared in non-core packages of this module. It misses (a) stdlib or other external interfaces (`io.Closer`, `io.Writer`, `http.Handler`) that a non-core package accepts and wiring fills with a core type, (b) a non-core struct embedding a core type, which promotes its write paths, and (c) constraints with type terms. All need wiring (tier A) to hand over a core value. Fix: flag embedded core types in non-core packages and walk interface types in non-core signatures |
+| SIM-core l7 | `recheck`. PR #715 Security (comment 6109907105 pt 3): `allow recall journal.FileStore.Append` and `Rewrite` are marked "shape only" but also permit direct calls, so if wiring hands recall the journal's own `FileStore`, recall can `Rewrite` the journal. Add a `shape` allow kind that covers interface satisfaction but not calls; same class as l1 |
 | CRED-12 l1 | `recheck`. PR #1027 lens: the journal records each computer-use retry's result; a per-site retry success rate could feed OWN-19's effort components as an avoided-interruption count. Do it when the brief is expanded |
 | CRED-12 l2 | `recheck`. PR #1027 lens: "computer use" also names the desktop worker's work in A13's Cross-app list; leave both unless owners confuse them |
 | RECALL-eval | `recheck`. Recall has no ranking-quality test, so changes to how `broker/recall` Search ranks results (RRF fusion in place of the 0.6/0.4 weighted sum, source-tier boost, a relationship graph; ideas from garrytan/gbrain, whose benchmark is whole-system and unverified) cannot be judged. First step if recall quality is ever reported as a problem: an on-box held-out recall suite built like CHG-1 from owner outcomes (owner corrections of answers that used recall hits), synthetic canaries only in the repo. GBrain itself is not adopted: separate TS/Postgres service with its own vault/connectors, duplicates broker custody (CAP-3, CRED-1). |

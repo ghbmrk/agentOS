@@ -64,6 +64,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-outcome | [One revisable outcome record per goal](briefs/SIM.md#sim-outcome-one-revisable-outcome-record-tier-a) | SIM-sd | queued (A) |
 | SIM-erase | [Forget once, in the journal](briefs/SIM.md#sim-erase-forget-once-in-the-journal-tier-a) | SIM-sd, SIM-proj, SIM-check, SIM-cases | queued (A) |
 | SIM-core | [Trusted core is a named list; CI import check; core = tier A](briefs/SIM.md#sim-core-the-trusted-core-is-a-named-list-tier-a) | — | queued (brief ready; tier A) |
+| SIM-core-allow-tier | `tools/risk_tier.py` rates every package named on a `broker/core/core.txt` `allow` line tier A, or `recall` and `recalltool` join `TIER_A_BROKER`. Invariant: core write paths are tier A (D-095, ARC-1). Failure path: `recalltool` is tier B and holds `journal.Engine.Erase` and `grants.Gate.Withdraw`/`Authorize`; a tier B PR widens its use of `Erase` without authorize, gets no Security section, and the core check still passes (release, tier A; Security on #715 pt 2, comment 6109907105) | SIM-core | queued (A) |
 | SIM-shred | [Forget by deleting a per-subject key; reaches backups and snapshots](briefs/SIM.md#sim-shred-forget-by-deleting-a-per-subject-key-tier-a) | SIM-erase, SIM-proj, SIM-sd | queued (A) |
 | SIM-policy | [Policy as data with one match-and-compare evaluator](briefs/SIM.md#sim-policy-policy-as-data-one-evaluator-tier-a) | SIM-outcome, SIM-pull, SIM-core | queued (A) |
 | SIM-cap | [Capability grants scoped per intent](briefs/SIM.md#sim-cap-capability-grants-scoped-per-intent-tier-a) | SIM-core, SIM-check, SIM-policy | queued (A) |
@@ -613,6 +614,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | CAP-2t | Reach fixture test (CAP-2; brief to write) | CRED-4b part 2 | queued (B) |
 | CRED-11a | Hand-off verbs between executors (CRED-11; brief to write; lane claude2) | CRED-4b part 2 | queued (A) |
 | ADP-14a | Web recipes (ADP-14; brief to write; lane claude2) | CRED-4b part 2, ADP-8 | queued (A) |
+| ADP-14-get | Credentialed browsing is gated on GET links with side effects: a `navigate` to an unsubscribe or confirm link on a recipe site changes state and bypasses the method-based recipe gate, so the gate also holds a GET that matches a state-changing link pattern (ADP-14, CRED-4b). Acceptance test: A13/A5 run where a credentialed `navigate` to a synthetic `/unsubscribe?token=…` URL is held for the owner like a POST and never sent unasked; failure path: the GET is fetched and the account is unsubscribed. Gates credentialed browsing shipping (release; tier A; lane claude2; promoted from LATER ADP-14-get) | ADP-14a, CRED-4b part 2 | queued (A) |
 | ADP-15a | One desktop over separate executors (ADP-15; brief to write; lane claude2) | CRED-11a, ADP-5 | queued (A) |
 | ADP-16a | Suite executor (ADP-16; brief to write; lane claude2) | ADP-5 | queued (A) |
 | UPD-7t | Soak plus attestations test and marker (UPD-7; brief to write) | — | queued (C) |
