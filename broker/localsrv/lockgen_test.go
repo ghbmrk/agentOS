@@ -150,12 +150,15 @@ func (f ownerFunc) LocalGridCell() string          { return f().LocalGridCell() 
 func (f ownerFunc) LocalSignIn(c string) (time.Time, uint64, error) {
 	return f().LocalSignIn(c)
 }
-func (f ownerFunc) LocalStop(ctx context.Context) error      { return f().LocalStop(ctx) }
-func (f ownerFunc) LocalResume(locks uint64) (string, error) { return f().LocalResume(locks) }
-func (f ownerFunc) LocalRequests() []owner.LocalRequest      { return f().LocalRequests() }
-func (f ownerFunc) LocalWaiting() string                     { return f().LocalWaiting() }
-func (f ownerFunc) LocalStatusLines() string                 { return f().LocalStatusLines() }
-func (f ownerFunc) UnlockPeriod() time.Duration              { return f().UnlockPeriod() }
+func (f ownerFunc) LocalStop(ctx context.Context) error { return f().LocalStop(ctx) }
+func (f ownerFunc) StopGen() int64                      { return f().StopGen() }
+func (f ownerFunc) LocalResume(locks uint64, gen int64) (string, error) {
+	return f().LocalResume(locks, gen)
+}
+func (f ownerFunc) LocalRequests() []owner.LocalRequest { return f().LocalRequests() }
+func (f ownerFunc) LocalWaiting() string                { return f().LocalWaiting() }
+func (f ownerFunc) LocalStatusLines() string            { return f().LocalStatusLines() }
+func (f ownerFunc) UnlockPeriod() time.Duration         { return f().UnlockPeriod() }
 func (f ownerFunc) LocalAnswer(id, sum string, a bool, c string) (string, error) {
 	return f().LocalAnswer(id, sum, a, c)
 }
@@ -215,9 +218,9 @@ func TestRefreshOverlappingALockDoesNotResume(t *testing.T) {
 // after the server's token check, as a concurrent RequireUnlock can.
 type lockFirst struct{ *owner.Channel }
 
-func (l lockFirst) LocalResume(locks uint64) (string, error) {
+func (l lockFirst) LocalResume(locks uint64, gen int64) (string, error) {
 	_ = l.Channel.RequireUnlock()
-	return l.Channel.LocalResume(locks)
+	return l.Channel.LocalResume(locks, gen)
 }
 
 // Acceptance 2, commit point: a fresh session's code-free RESUME checks
