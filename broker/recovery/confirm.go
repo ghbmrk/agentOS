@@ -9,6 +9,8 @@ import (
 	"io"
 	"sort"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // The owner's way out of a restore held for want of an anchor
@@ -230,5 +232,5 @@ func writeQuestion(path string, f confirmFile) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(path+ConfirmSuffix, enc)
+	return durable.WriteFile(path+ConfirmSuffix, enc, 0o600)
 }

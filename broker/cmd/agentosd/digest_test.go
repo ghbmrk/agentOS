@@ -15,6 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/digestqueue"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/modemlink"
@@ -713,7 +714,7 @@ func TestPrepareDigestDir(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	tmp := filepath.Join(dir, "queue.json.tmp")
+	tmp := filepath.Join(dir, durable.TempPrefix+"queue")
 	if err := os.WriteFile(tmp, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}

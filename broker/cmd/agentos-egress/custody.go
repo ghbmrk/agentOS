@@ -12,12 +12,12 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -630,7 +630,7 @@ func (c *custody) persist(next unlockState) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(c.statePath, raw); err != nil {
+	if err := durable.WriteFile(c.statePath, raw, 0o600); err != nil {
 		return err
 	}
 	c.st = next
@@ -1126,44 +1126,6 @@ func (a apiKeysOnly) Secret(name string) (vault.Secret, bool) {
 }
 
 func (a apiKeysOnly) Redactor() (*vault.Redactor, error) { return a.v.Redactor() }
-
-// writeFileAtomic replaces path with raw, mode 0600, fsynced, so a crash
-// leaves the old file or the new one.
-func writeFileAtomic(path string, raw []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".state-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	serr := d.Sync()
-	if err := d.Close(); serr == nil {
-		serr = err
-	}
-	return serr
-}
 
 // bootTrusted tries this PC's trusted-host slot once at start, so a
 // trusted PC restarts unattended (CRED-8). Anything else leaves the vault

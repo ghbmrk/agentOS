@@ -21,6 +21,9 @@ import (
 // fails this test.
 var controlPath = map[string][]string{
 	"journal": {},
+	// The durable-write helper (SIM-fs) every package may import: file
+	// calls only, held to the control path's rules here.
+	"durable": {},
 	// The journal checker (SIM-check): pure predicates over records.
 	"journal/check": {"journal"},
 	"control":       {"journal"},
@@ -263,7 +266,7 @@ func checkImports(t *testing.T, pkg string, allowed, forbidden, exceptions []str
 			p, _ := strconv.Unquote(im.Path.Value)
 			switch {
 			case strings.HasPrefix(p, module):
-				if !contains(allowed, strings.TrimPrefix(p, module)) {
+				if !contains(allowed, strings.TrimPrefix(p, module)) && p != module+"durable" {
 					t.Errorf("%s imports %s, outside the control path", f, p)
 				}
 			case strings.Contains(strings.SplitN(p, "/", 2)[0], "."):
