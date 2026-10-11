@@ -1,0 +1,7 @@
+# Files with a network dialer that is not yet hooked into broker/netguard (DEV-2).
+# One per line: path, then the reason. DEV-net-b hooks each and empties this list; the
+# check fails on an entry that is stale. Do not add a new entry: hook the dialer instead.
+broker/smsapi/upstream.go SMS provider client dials with a plain net.Dialer; DEV-net-b
+broker/mail/imapsmtp/imapsmtp.go IMAP and SMTP dials use a plain net.Dialer; DEV-net-b
+broker/skill/server.go webhook step falls back to http.DefaultClient; DEV-net-b
+broker/cmd/agentos-guest-bridge/main.go guest code (ARC-7): runs inside the agent machine, not on the box; its only non-socket client posts to the guest runtime's own inbound API at 127.0.0.1:18789 inside the guest (main.go:52), outside the box egress policy (permanent exemption)

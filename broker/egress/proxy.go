@@ -30,12 +30,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -85,9 +85,14 @@ type Config struct {
 	Vault  Secrets
 	Audit  Auditor
 	// Transport sends upstream requests; nil means a fresh http.Transport
-	// with no proxy from the environment and bounded connect, handshake,
-	// and response-header waits.
+	// with no proxy from the environment, bounded connect, handshake, and
+	// response-header waits, and every dial and handshake owned by Guard.
+	// A caller-supplied Transport must dial through a netguard policy too
+	// (DEV-2); tools/netguardcheck.py checks the repo's own dialers.
 	Transport http.RoundTripper
+	// Guard is the home-network address policy (DEV-2) the default
+	// Transport uses; nil means a policy with only the IANA registries.
+	Guard *netguard.Policy
 	// MaxBody caps request bodies; zero means DefaultMaxBody.
 	MaxBody int64
 	// MaxConcurrent caps one machine's requests in flight; zero means
@@ -119,6 +124,7 @@ type Proxy struct {
 	grants   map[string]map[string]bool
 	vault    Secrets
 	rt       http.RoundTripper
+	rtModel  http.RoundTripper // the default transport's second pool, for inference operations
 	audit    Auditor
 	maxBody  int64
 	maxConc  int
@@ -197,13 +203,25 @@ func New(cfg Config) (*Proxy, error) {
 		}
 	}
 	if p.rt == nil {
-		p.rt = &http.Transport{
-			DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
-			ForceAttemptHTTP2:     true,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Minute,
-			IdleConnTimeout:       90 * time.Second,
+		g := cfg.Guard
+		if g == nil {
+			g = netguard.New(netguard.Config{})
 		}
+		// Two pools, so a connection a model call made to a pinned host is
+		// never reused by a request that has no exception (DEV-2).
+		mk := func() *http.Transport {
+			return &http.Transport{
+				DialContext:           g.DialContext,
+				TLSClientConfig:       g.TLSConfig(nil),
+				ForceAttemptHTTP2:     true,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 10 * time.Minute,
+				IdleConnTimeout:       90 * time.Second,
+			}
+		}
+		p.rt, p.rtModel = mk(), mk()
+	} else {
+		p.rtModel = p.rt
 	}
 	if p.maxBody <= 0 {
 		p.maxBody = DefaultMaxBody
@@ -305,6 +323,13 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		w.Header().Set(DeniedHeader, "1")
 		http.Error(w, "egress denied: "+reason, status)
 	}
+	// The proxy never tunnels: a CONNECT would be a dial to any address the
+	// guest names (DEV-2).
+	if r.Method == http.MethodConnect {
+		ev.Path = ""
+		deny(http.StatusForbidden, "CONNECT not supported")
+		return
+	}
 	red, err := p.vault.Redactor()
 	if err != nil {
 		deny(http.StatusServiceUnavailable, "vault unavailable")
@@ -381,7 +406,14 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 	// inject a key it does not know. Redact the key actually sent.
 	red = red.With([]byte(sec.Reveal()))
 
-	up, err := http.NewRequestWithContext(r.Context(), op.Method, "https://"+a.Host+upPath, bytes.NewReader(body))
+	// Only a routed model call to a declared inference operation may reach
+	// a pinned compute host or hosted route; nothing else gets a network
+	// exception (DEV-2).
+	ctx := r.Context()
+	if op.Inference {
+		ctx = netguard.WithPurpose(ctx, netguard.PurposeModelCall)
+	}
+	up, err := http.NewRequestWithContext(ctx, op.Method, "https://"+a.Host+upPath, bytes.NewReader(body))
 	if err != nil {
 		deny(http.StatusBadRequest, "bad request")
 		return
@@ -400,7 +432,17 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 	up.Header.Set(a.Inject.Header, a.Inject.Prefix+sec.Reveal())
 
 	p.charge(machine, 1, int64(len(body)))
-	resp, err := p.rt.RoundTrip(up)
+	rt := p.rt
+	if op.Inference {
+		rt = p.rtModel
+	}
+	resp, err := rt.RoundTrip(up)
+	if errors.Is(err, netguard.ErrDenied) {
+		// The destination is a home-network address, or a pinned host
+		// whose key changed: refused, journaled, and no request sent.
+		deny(http.StatusForbidden, "destination refused by the home-network address policy")
+		return
+	}
 	if err != nil {
 		ev.Allowed, ev.Status, ev.Reason = true, http.StatusBadGateway, "upstream unreachable"
 		audit.Egress(ev)
