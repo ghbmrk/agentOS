@@ -130,7 +130,9 @@ type Resolver interface {
 // Config configures New. The zero value is a working policy with only the
 // IANA registries.
 type Config struct {
-	// Resolver resolves names; nil means net.DefaultResolver.
+	// Resolver resolves names; nil means the policy's own resolver
+	// (Policy.Resolver), which asks only the learned resolver (DEV-2), so
+	// the system resolver is never used.
 	Resolver Resolver
 	// Source, when set, is read by Refresh to learn the network.
 	Source func() (Network, error)
@@ -162,7 +164,7 @@ type Policy struct {
 func New(cfg Config) *Policy {
 	p := &Policy{res: cfg.Resolver, source: cfg.Source, onDeny: cfg.OnDeny, timeout: cfg.Timeout}
 	if p.res == nil {
-		p.res = net.DefaultResolver
+		p.res = p.Resolver()
 	}
 	if p.timeout <= 0 {
 		p.timeout = 30 * time.Second
@@ -179,6 +181,9 @@ func New(cfg Config) *Policy {
 // Learn replaces the learned network.
 func (p *Policy) Learn(n Network) {
 	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), External: n.External.WithZone("").Unmap(), Resolver: n.Resolver.WithZone("").Unmap()}
+	if out.Resolver.IsLoopback() || out.Resolver.IsUnspecified() {
+		out.Resolver = netip.Addr{}
+	}
 	for _, pf := range n.Prefixes {
 		if !pf.IsValid() {
 			continue
@@ -315,9 +320,13 @@ func (p *Policy) check(r request, a netip.Addr, port uint16, proto string) error
 	p.mu.RUnlock()
 
 	if r.purpose == PurposeDNS {
+		// Exception 1 is the only DNS destination: a name resolves through
+		// the assigned resolver or not at all, so another port-53 address
+		// (public ones included) is refused here, not left to the deny list.
 		if (proto == "tcp" || proto == "udp") && port == 53 && n.Resolver.IsValid() && a == n.Resolver {
 			return nil
 		}
+		return &DeniedError{a, "names resolve only through the assigned resolver on port 53"}
 	} else {
 		for _, pin := range pins {
 			if pin.Kind.purpose() != r.purpose {

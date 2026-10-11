@@ -20,6 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
@@ -181,6 +182,10 @@ func loadState(path string) (unlockState, error) {
 // the vault is held but nothing is served. No right code within ttl, or a
 // lock, discards the key. Only an open vault serves the model route.
 type custody struct {
+	// guard is the process's home-network address policy (DEV-2): the
+	// model proxy, the texting provider and the mail servers dial through
+	// it. Nil only in tests, where each dial falls back to the registries.
+	guard *netguard.Policy
 	// keysPath, if set, is the keys file; while it exists the state file
 	// must too.
 	keysPath string

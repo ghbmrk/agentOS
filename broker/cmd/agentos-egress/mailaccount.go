@@ -230,7 +230,7 @@ func (c *custody) mailSource() (mailsock.Account, error) {
 	if user == "" {
 		user = rec.Address
 	}
-	st, err := imapsmtp.New(imapsmtp.Config{IMAP: rec.IMAP, SMTP: rec.SMTP, IMAPSec: imapSec, SMTPSec: smtpSec, From: rec.Address,
+	st, err := imapsmtp.New(imapsmtp.Config{IMAP: rec.IMAP, SMTP: rec.SMTP, IMAPSec: imapSec, SMTPSec: smtpSec, From: rec.Address, Guard: c.guard,
 		Credential: func(context.Context) (imapsmtp.Login, error) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
