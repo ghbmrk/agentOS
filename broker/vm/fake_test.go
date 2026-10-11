@@ -20,16 +20,17 @@ import (
 // restore from a cold start. The guest's file writes go straight into the
 // machine's upper layer, as they would through the overlay mount.
 type fakeRuntime struct {
-	mu       sync.Mutex
-	running  map[string]Launch
-	paused   map[string]bool
-	mem      map[string]int
-	launches []Launch
-	kills    int
-	failNext error
-	failKill error           // Kill's error, after it kills
-	onPause  func(id string) // runs as the guest is paused
-	onCkpt   func(id string) // runs during a memory checkpoint
+	mu         sync.Mutex
+	running    map[string]Launch
+	paused     map[string]bool
+	mem        map[string]int
+	launches   []Launch
+	kills      int
+	failNext   error
+	failKill   error           // Kill's error, after it kills
+	refuseKill error           // Kill's error, before it kills: the guest lives on
+	onPause    func(id string) // runs as the guest is paused
+	onCkpt     func(id string) // runs during a memory checkpoint
 }
 
 func newFake() *fakeRuntime {
@@ -111,6 +112,9 @@ func (f *fakeRuntime) Checkpoint(_ context.Context, id, image string) error {
 func (f *fakeRuntime) Kill(_ context.Context, l Launch) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.refuseKill != nil {
+		return f.refuseKill
+	}
 	if _, ok := f.running[l.ID]; ok {
 		f.kills++
 	}
