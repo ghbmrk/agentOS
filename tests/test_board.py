@@ -293,6 +293,71 @@ class CliTest(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
 
 
+class FreezeTest(unittest.TestCase):
+    """D-098: a frozen row carries the `frozen` label, and check --repo fails when they disagree."""
+    FROZEN = "queued (frozen until G2, LATER FRZ-fuzz, D-098)"
+
+    def test_a_frozen_row_carries_the_frozen_label(self):
+        self.assertIn("frozen", board.LABELS)
+        row = {"id": "F-1", "section": "Harness", "cells": ["Fuzz it (release)", "—"], "state": "queued",
+               "rest": self.FROZEN[len("queued"):]}
+        self.assertIn("frozen", board.issue(row)["labels"])
+        self.assertIn("class:release", board.issue(row)["labels"])
+        self.assertNotIn("frozen", board.issue(dict(row, rest=""))["labels"])
+
+    def test_check_repo_fails_when_the_frozen_label_and_the_state_disagree(self):
+        text = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.") \
+                   .replace("| — | queued (B; Mark approves) |", f"| — | {self.FROZEN} |")
+        items = opened(issues(text))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(board.main(["check", "--repo", "o/r"], read=lambda: text, fetch=github(items)), 0)
+        for drop, add in ((["frozen"], []), ([], ["frozen"])):
+            drifted = [dict(i, labels=[x for x in i["labels"] if x not in drop] + (add if "A-1" in i["title"] else []))
+                       for i in items]
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                self.assertEqual(board.main(["check", "--repo", "o/r"], read=lambda: text, fetch=github(drifted)), 1)
+            self.assertIn("frozen", err.getvalue())
+
+
+class ArchiveTest(unittest.TestCase):
+    """D23: once the base's board is generated, the archives are frozen and the retired files stay gone."""
+
+    def run_archive(self, base, changed=(), present=()):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "base.md").write_text(base)
+            for name in present:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text("x")
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                code = board.main(["archive", "--base", str(root / "base.md"), "--changed", *changed],
+                                  read=lambda: "", root=root)
+            return code, err.getvalue()
+
+    def test_archives_are_frozen_once_the_base_is_generated(self):
+        generated = board.GENERATED + "\n" + LIVE
+        self.assertEqual(self.run_archive(generated, ["BOARD.md", "tools/x.py"])[0], 0)
+        for path in board.ARCHIVED:
+            code, err = self.run_archive(generated, ["BOARD.md", path])
+            self.assertEqual(code, 1, path)
+            self.assertIn(path, err)
+        for path in board.RETIRED:
+            code, err = self.run_archive(generated, present=[path])
+            self.assertEqual(code, 1, path)
+            self.assertIn(path, err)
+
+    def test_before_the_migration_the_archive_check_is_inert(self):
+        self.assertEqual(self.run_archive(LIVE, list(board.ARCHIVED), present=board.RETIRED)[0], 0)
+
+    def test_ci_runs_the_archive_check_on_every_pull_request(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIn("board.py archive --base", ci)
+        self.assertIn("git diff --no-renames --name-only HEAD^1 HEAD", ci)
+
+
 class RateLimitTest(unittest.TestCase):
     def test_wait_follows_the_response(self):
         self.assertEqual(board.rate_limit_wait(403, {"retry-after": "30"}, 0), 30)

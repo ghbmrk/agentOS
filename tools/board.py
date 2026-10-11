@@ -8,6 +8,8 @@ One issue per live BOARD row. The issue is the record; its labels are the querya
   class:<class>    blocker, release or later (OPERATING §2); release rows as RELEASE_STATE and RELEASE_CLASS find them; later by hand
   lane:<team>      the docs/LANES.md team that builds it; primary unless the row names another
   gate:mark        merge waits on Mark beyond the reviews ("Mark approves", "owner to confirm")
+  frozen           D-098's scope freeze ("frozen until G2" in its state): never started, whatever its
+                   class; the one label besides state: that check --repo reads back
 A `decision` issue (not a work item) is an action only Mark can take; it replaced docs/MARK-QUEUE.md.
 The title is "<ID>: <package text>" and is the row's key. The body carries the row itself in a
 fenced `board-row` JSON block: its section heading, its middle cells and the text after the
@@ -31,6 +33,10 @@ the GENERATED line and its rows come from the live issues, never from hand edits
                                  and this one does not, so a PR cannot switch the check off
   board.py render [--repo o/r]   print BOARD.md from the planned issues, or from GitHub's
                                  issues and PRs (GITHUB_TOKEN); PR disagreements go to stderr
+  board.py archive --base FILE --changed PATH...
+                                 once the base's BOARD.md carries the GENERATED line: fail if a
+                                 changed path is an archive (ARCHIVED) or a retired file (RETIRED)
+                                 exists again, so a stray LATER.md edit cannot merge into the archive
 """
 import argparse
 import difflib
@@ -55,6 +61,9 @@ COLLABORATORS = ("OWNER", "MEMBER", "COLLABORATOR")
 ID = r"[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*(?: [a-z][A-Za-z0-9]*)*"  # "P2-2w c3 r1" too
 BLOCK = re.compile(r"```board-row\n(.*?)\n```", re.S)
 TIER = re.compile(r"\btier ([ABC])\b|\(([ABC])[;)]")
+FROZEN = re.compile(r"\bfrozen until G2\b")
+ARCHIVED = ("docs/BOARD-HISTORY.md", "docs/LATER-HISTORY.md")
+RETIRED = ("LATER.md", "docs/MARK-QUEUE.md")
 GATE = re.compile(r"\bMark approves\b|\bowner to confirm\b|\bwithout Mark\b|\bMark's approval\b")
 
 
@@ -84,6 +93,7 @@ LABELS = {
     **{f"class:{c}": f"Finding class: {c} (OPERATING §2)" for c in ("blocker", "release", "later")},
     **{f"lane:{lane}": f"Built in the {lane} lane (docs/LANES.md)" for lane in LANES},
     "gate:mark": "Merge waits on Mark beyond the reviews",
+    "frozen": "Frozen by D-098 until G2: do not start, whatever its class",
     "decision": "A question or action waiting on Mark (replaces docs/MARK-QUEUE.md)",
 }
 
@@ -150,6 +160,8 @@ def issue(row):
     labels.append(f"lane:{lane.group(1) if lane else 'primary'}")
     if GATE.search(f"{text} {state_cell}"):
         labels.append("gate:mark")
+    if FROZEN.search(state_cell):
+        labels.append("frozen")
     block = json.dumps({"section": row["section"], "cells": row["cells"], "rest": row["rest"]},
                        ensure_ascii=False, indent=1)
     return {"title": f"{row['id']}: {_plain(row['cells'][0])}"[:256], "labels": labels,
@@ -223,6 +235,25 @@ def render(skeleton, items):
             for row in sorted(by_section.get(section, []), key=lambda r: r["number"]):
                 out.append("| " + " | ".join([row["id"], *row["cells"], row["state"] + row["rest"]]) + " |")
     return "\n".join(out) + ("\n" if skeleton.endswith("\n") else "")
+
+
+def frozen_drift(items):
+    """Issues whose `frozen` label disagrees with their state text (D-098)."""
+    out = []
+    for item in items:
+        row = row_of(item)
+        state = row["state"] + row["rest"]
+        if bool(FROZEN.search(state)) != ("frozen" in _names(item["labels"])):
+            out.append(f"issue #{item['number']} {row['id']}: the frozen label and the state {state!r} disagree (D-098)")
+    return out
+
+
+def archive(base, changed, root):
+    """Problems with the frozen archives once the base's board is generated (D23)."""
+    if GENERATED not in base:
+        return []
+    return ([f"{p} is archived and frozen (D23); change the work-item issues instead" for p in changed if p in ARCHIVED]
+            + [f"{p} was retired by SIM-repo-2b (D23); file an issue instead" for p in RETIRED if (root / p).exists()])
 
 
 def live(text):
@@ -315,12 +346,19 @@ def work_items(fetch, repo):
     return items
 
 
-def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github):
+def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, root=ROOT):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("command", choices=("check", "render"))
+    ap.add_argument("command", choices=("check", "render", "archive"))
     ap.add_argument("--repo", help="owner/name: render from its issues and PRs instead of the plan")
     ap.add_argument("--base", metavar="FILE", help="the base branch's BOARD.md: once it carries the GENERATED line, so must this one")
+    ap.add_argument("--changed", nargs="*", default=[], metavar="PATH", help="archive: the paths the PR changes")
     args = ap.parse_args(argv)
+    if args.command == "archive":
+        if not args.base:
+            ap.error("archive needs --base")
+        problems = archive(pathlib.Path(args.base).read_text(), args.changed, root)
+        print(*(f"board: {p}" for p in problems), sep="\n", file=sys.stderr)
+        return 1 if problems else 0
     text = read()
     if args.base and GENERATED in pathlib.Path(args.base).read_text() and GENERATED not in text:
         print("board: BOARD.md drops the GENERATED line its base carries; its rows come from the issues"
@@ -340,6 +378,10 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github):
                                             f"rendered from {args.repo}", lineterm="")
                 print(f"board: BOARD.md differs from the live issues; run tools/board.py render --repo {args.repo}"
                       " > BOARD.md, or wait for the board workflow:", *diff, sep="\n", file=sys.stderr)
+                return 1
+            drift = frozen_drift(items)
+            if drift:
+                print(*(f"board: {d}" for d in drift), sep="\n", file=sys.stderr)
                 return 1
             print(f"board: BOARD.md equals the {len(items)} live issues of {args.repo}")
             return 0

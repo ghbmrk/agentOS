@@ -39,7 +39,7 @@ Read in this order and stop when you have what you need. Token counts are approx
 | Builder (L2) | CLAUDE.md; your `briefs/<ID>.md`; the SPEC.md sections for the IDs it cites; the touched package's `ASSUMPTIONS.md` | 3k + brief + cited sections |
 | Reviewer (L3) | CLAUDE.md; OPERATING §2–4; the diff; the cited SPEC.md IDs; the brief | 5k + diff |
 | Lens screen | OPERATING §4 checklist; active DECISIONS rows; the lens READMEs; the bundle's diffs | 10k + diffs |
-| Coordinator (L1) | CLAUDE.md; OPERATING; BOARD.md; `class:release` and `decision` issues; recent DECISIONS rows | 15k |
+| Coordinator (L1) | CLAUDE.md; OPERATING; BOARD.md; `class:release` (not `frozen`) and `decision` issues; recent DECISIONS rows | 15k |
 | Another team | AGENTS.md; CLAUDE.md; docs/LANES.md (your lane); OPERATING §7; then the builder row above | 6k + builder |
 
 No license has been chosen yet; all rights reserved until one is (spec OSS-12).
