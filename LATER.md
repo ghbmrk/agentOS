@@ -714,6 +714,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CRED-12 l1 | `recheck`. PR #1027 lens: the journal records each computer-use retry's result; a per-site retry success rate could feed OWN-19's effort components as an avoided-interruption count. Do it when the brief is expanded |
 | CRED-12 l2 | `recheck`. PR #1027 lens: "computer use" also names the desktop worker's work in A13's Cross-app list; leave both unless owners confuse them |
 | CRED-12 l3 | PR #1027 lens and L3: offer the per-site retry off once at adoption, or default it off, for a site whose adapter recipe says its terms forbid automation, if such an adapter field ever exists |
+| PACE-1 f1 | Builder `recheck`: MORE overflow lines (`s.more`) are not revalidated, so a cleared line pushed to MORE can be read after its finding returned, and then "Cleared: X" is the last text the owner read though X is open (L3 on #708); it needs the owner to ask for MORE after the urgent return |
+| PACE-1 f2 | Builder: `ToldCleared` is marked when the cleared line is queued, not when the owner hears it, so a dropped stale clear still counts as told; the return was texted as `Back`, so the owner is not left on a false all-clear |
+| PACE-1 f3 | Builder: two true "Cleared" texts for one key (one held, one later) can both send; redundant, never false |
+| PACE-1 f4 | Builder `recheck`: the hook check and the modem send are not atomic, and an urgent pass with cleared lines sends without revalidation; both windows are sub-second and the urgent return follows any stale clear |
 
 ## Reuse candidates
 | ID | Component | Why |

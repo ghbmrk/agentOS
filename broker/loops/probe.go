@@ -109,7 +109,7 @@ func (s *Guard) runProbe(ctx context.Context, p Probe) Result {
 			closed = append(closed, rec)
 		}
 	}
-	lines := s.closeTextLocked(closed)
+	lines, keys := s.closeTextLocked(closed)
 	if s.st.ProbeLast == nil {
 		s.st.ProbeLast = map[Check]time.Time{}
 	}
@@ -122,9 +122,7 @@ func (s *Guard) runProbe(ctx context.Context, p Probe) Result {
 	serr := s.saveLocked()
 	s.mu.Unlock()
 	s.reportMu.Unlock()
-	if text := s.batch(lines); text != "" {
-		s.cfg.Notify(text, false)
-	}
+	s.tellCleared(lines, keys)
 	return Result{Value: float64(n), Err: errors.Join(append(errs, serr)...)}
 }
 
