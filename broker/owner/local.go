@@ -345,13 +345,21 @@ func (c *Channel) lockAlertsLocked(locked bool, now time.Time) []string {
 	return alerts
 }
 
+// StopGen counts STOPs from every channel. A local RESUME reads it when
+// the request arrives and commits only if it has not moved.
+func (c *Channel) StopGen() int64 { return c.stops.Load() }
+
 // LocalStop is STOP from the local UI. Like STOP by text it needs no code,
 // since its worst case is a pause (CH-3).
 func (c *Channel) LocalStop(ctx context.Context) error {
-	c.mu.Lock()
-	c.resume = nil
-	c.mu.Unlock()
+	// Like stopNow it never waits on mu behind a code check (CH-2); the
+	// count voids an issued RESUME code, so c.resume needs no clearing.
+	// One STOP generation for both channels (CH-2): counted with the
+	// stop under stopMu, so a RESUME that began earlier cannot undo it.
+	c.stopMu.Lock()
+	c.stops.Add(1)
 	_, err := c.cfg.Engine.Stop(ctx)
+	c.stopMu.Unlock()
 	if err != nil && !c.cfg.Engine.Stopped() {
 		return err
 	}
@@ -366,8 +374,9 @@ var ErrLocked = errors.New("owner: session locked since sign-in")
 // texted code CH-11 asks for, so no further code is needed. locks is the
 // count that sign-in returned: any session lock since refuses with
 // ErrLocked, checked where the resume commits (SR3-1). A texted RESUME
-// code issued earlier is voided.
-func (c *Channel) LocalResume(locks uint64) (string, error) {
+// code issued earlier is voided. gen is StopGen as read when the request
+// arrived: a STOP since, by any channel, wins (CH-2).
+func (c *Channel) LocalResume(locks uint64, gen int64) (string, error) {
 	// c.mu spans the resume and the fresh windows, so no release slips
 	// between them (L3 on #76), as on the text path.
 	c.mu.Lock()
@@ -379,7 +388,10 @@ func (c *Channel) LocalResume(locks uint64) (string, error) {
 	if !c.cfg.Engine.Stopped() {
 		return "Not stopped. Nothing to resume.", nil
 	}
-	if err := c.cfg.Engine.Resume(); err != nil {
+	switch err := c.resumeUnlessStopped(gen); {
+	case err == errStoppedMeanwhile:
+		return stoppedMeanwhile, nil
+	case err != nil:
 		return "", fmt.Errorf("owner: resume failed to record, still stopped: %w", err)
 	}
 	return "Resumed. Stopped actions may now run." + c.rewindowLocked(c.cfg.Now()), nil
