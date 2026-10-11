@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"net"
 	"net/netip"
 	"os"
@@ -40,8 +41,8 @@ var resolvConfs = []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf
 // default gateway from the kernel routing tables, the resolver from the
 // DHCP- or RA-written resolv.conf, and the router's external address from
 // NAT-PMP (kept from the last read while the gateway is unchanged and the
-// gateway does not answer). A read that finds no interface fails, so the
-// last learned set stays.
+// gateway does not answer). A read that finds no non-loopback interface
+// prefix fails, so the last learned set stays.
 func (s *Sources) Read() (Network, error) {
 	addrs := s.Addrs
 	if addrs == nil {
@@ -57,6 +58,9 @@ func (s *Sources) Read() (Network, error) {
 	}
 	var n Network
 	n.Prefixes = Prefixes(as)
+	if len(n.Prefixes) == 0 {
+		return Network{}, errors.New("netguard: no non-loopback interface address")
+	}
 	if b, err := read("/proc/net/route"); err == nil {
 		n.Gateway = Gateway4(string(b))
 	}
@@ -192,7 +196,9 @@ func Gateway6(table string) netip.Addr {
 }
 
 // Nameserver returns the first usable nameserver in resolv.conf text. A
-// zoned address loses its zone. The unspecified address is not usable.
+// unspecified, loopback (the systemd-resolved stub) and link-local
+// (undialable without its zone) entries are skipped, so the next entry is
+// tried.
 func Nameserver(conf string) netip.Addr {
 	sc := bufio.NewScanner(strings.NewReader(conf))
 	for sc.Scan() {
@@ -204,10 +210,11 @@ func Nameserver(conf string) netip.Addr {
 		if err != nil {
 			continue
 		}
-		a = a.WithZone("").Unmap()
-		if !a.IsUnspecified() {
-			return a
+		a = a.Unmap()
+		if a.IsUnspecified() || a.IsLoopback() || a.IsLinkLocalUnicast() {
+			continue
 		}
+		return a
 	}
 	return netip.Addr{}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"testing"
 )
 
@@ -35,7 +36,10 @@ func TestGateway6(t *testing.T) {
 func TestNameserver(t *testing.T) {
 	cases := map[string]string{
 		"# c\nnameserver 0.0.0.0\nnameserver 192.168.1.53\n": "192.168.1.53",
-		"nameserver fe80::1%eth0\n":                          "fe80::1",
+		"nameserver fe80::1%eth0\nnameserver 192.168.1.1\n":  "192.168.1.1",
+		"nameserver fe80::1%eth0\n":                          "",
+		"nameserver 127.0.0.53\n":                            "",
+		"nameserver ::1\nnameserver 10.0.0.2\n":              "10.0.0.2",
 		"nameserver ::ffff:192.168.1.9\n":                    "192.168.1.9",
 		"search home\n":                                      "",
 	}
@@ -103,5 +107,45 @@ func TestSourcesReadLearnsAndKeepsExternalOnFailure(t *testing.T) {
 	s.Addrs = func() ([]net.Addr, error) { return nil, errors.New("no netlink") }
 	if _, err := s.Read(); err == nil {
 		t.Fatal("a read with no interfaces must fail so the last learned set stays")
+	}
+}
+
+// REQ: DEV-2
+func TestReadFailsWithoutAnInterfacePrefix(t *testing.T) {
+	s := &Sources{
+		Addrs: func() ([]net.Addr, error) {
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)}}, nil
+		},
+		ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist },
+	}
+	if _, err := s.Read(); err == nil {
+		t.Fatal("a loopback-only list must not replace the learned set")
+	}
+}
+
+// REQ: DEV-2
+func TestStubResolverIsNotLearned(t *testing.T) {
+	s := &Sources{
+		Addrs: func() ([]net.Addr, error) {
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.7"), Mask: net.CIDRMask(24, 32)}}, nil
+		},
+		ReadFile: func(f string) ([]byte, error) {
+			switch f {
+			case "/run/systemd/resolve/resolv.conf":
+				return []byte("# No DNS servers known.\n"), nil
+			case "/etc/resolv.conf":
+				return []byte("nameserver 127.0.0.53\n"), nil
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+	n, err := s.Read()
+	if err != nil || n.Resolver.IsValid() {
+		t.Fatalf("%v %v", n.Resolver, err)
+	}
+	p := New(Config{})
+	p.Learn(Network{Resolver: netip.MustParseAddr("127.0.0.53")})
+	if p.Check(WithPurpose(context.Background(), PurposeDNS), netip.MustParseAddr("127.0.0.53"), 53, "udp") == nil {
+		t.Fatal("loopback DNS allowed")
 	}
 }
