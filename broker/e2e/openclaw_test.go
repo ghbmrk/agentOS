@@ -262,6 +262,7 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkJournal(t, eng)
 	mtr, err := meter.Open(meter.Config{
 		Path: filepath.Join(dir, "meter.json"), MachineCap: meter.DefaultMachineCap, OverallCap: meter.DefaultOverallCap,
 	})
