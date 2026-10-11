@@ -50,6 +50,11 @@ type Operation struct {
 	// Refused lists response statuses by which the provider refuses the
 	// login (an account restriction). One stops the route (CRED-5t).
 	Refused []int
+	// Inference marks a model-inference call: the only request an agent
+	// makes that may reach a compute host's or a private hosted route's
+	// pinned address (DEV-2, CAP-13). Every other operation gets no
+	// network exception.
+	Inference bool
 }
 
 // The broker's closed verb list (ADP-2), from package verb. An adapter maps
@@ -102,7 +107,7 @@ func OpenAI(credential string) Adapter {
 		Credential: credential,
 		Inject:     Injection{Header: "Authorization", Prefix: "Bearer "},
 		Operations: []Operation{{
-			Name: "chat.completions", Verb: VerbRead, Method: "POST", Path: "/v1/chat/completions",
+			Name: "chat.completions", Verb: VerbRead, Inference: true, Method: "POST", Path: "/v1/chat/completions",
 			Body: &BodyRule{
 				DenyKeys:       []string{"background"},
 				PublicMayFetch: true,
@@ -125,7 +130,7 @@ func Anthropic(credential string) Adapter {
 		Credential: credential,
 		Inject:     Injection{Header: "X-Api-Key"},
 		Operations: []Operation{{
-			Name: "messages", Verb: VerbRead, Method: "POST", Path: "/v1/messages",
+			Name: "messages", Verb: VerbRead, Inference: true, Method: "POST", Path: "/v1/messages",
 			Body: &BodyRule{
 				DenyKeys:       []string{"background"},
 				PublicMayFetch: true,
