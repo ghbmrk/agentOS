@@ -46,22 +46,33 @@ const (
 const noteEnrolled = "A new code generator was enrolled at setup; codes from any earlier one no longer work."
 
 var (
-	errEnrolled     = uerr(http.StatusGone, "the code generator is already enrolled; a new one needs the recovery key")
+	errEnrolled = uerr(http.StatusGone, "the code generator is already enrolled; a new one needs the recovery key")
+	// errNotOpen: setup mode never opened enrollment on this vault, or an
+	// entry it keeps is of the wrong kind (P2-2w c2 r1). Apart from
+	// errEnrolled, so setup can tell the owner it cannot finish here.
+	errNotOpen      = uerr(http.StatusPreconditionFailed, "setup did not open code-generator enrollment on this vault")
 	errNoEnrollment = uerr(http.StatusConflict, "no code generator is waiting for confirmation")
 	errNotConfirmed = uerr(http.StatusConflict, "no code generator was confirmed since the last enrollment")
 )
 
-// enrolledLocked reports whether enrollment is closed: sealed, never opened
-// by setup mode, or holding an entry of the wrong kind. Caller holds mu
-// with the vault open.
-func (c *custody) enrolledLocked() bool {
+// closedLocked reports whether enrollment is closed: errEnrolled when
+// setup's seal is written (only sealEnroll writes it), errNotOpen when
+// setup mode never opened it or an entry is of the wrong kind, nil when
+// open. Caller holds mu with the vault open.
+func (c *custody) closedLocked() error {
 	for _, e := range c.v.List() {
 		if e.Name == EnrolledName {
-			return true
+			if e.Kind != KindEnrolled {
+				return errNotOpen
+			}
+			return errEnrolled
 		}
 	}
-	return !hasKind(c.v, SetupOpenName, KindSetupOpen) ||
-		hasOtherKind(c.v, PendingSeedName, vault.KindTOTPSeed)
+	if !hasKind(c.v, SetupOpenName, KindSetupOpen) ||
+		hasOtherKind(c.v, PendingSeedName, vault.KindTOTPSeed) {
+		return errNotOpen
+	}
+	return nil
 }
 
 // enroll makes a fresh seed in the vault, replacing any pending one, and
@@ -73,8 +84,8 @@ func (c *custody) enroll() (string, error) {
 	if c.ph != open {
 		return "", errLocked
 	}
-	if c.enrolledLocked() {
-		return "", errEnrolled
+	if err := c.closedLocked(); err != nil {
+		return "", err
 	}
 	seed := make([]byte, 20)
 	if _, err := rand.Read(seed); err != nil {
@@ -102,8 +113,8 @@ func (c *custody) confirmEnroll(code string) (bool, error) {
 	if c.ph != open {
 		return false, errLocked
 	}
-	if c.enrolledLocked() {
-		return false, errEnrolled
+	if err := c.closedLocked(); err != nil {
+		return false, err
 	}
 	pending, ok := c.v.Secret(PendingSeedName)
 	if !ok {
@@ -153,8 +164,8 @@ func (c *custody) sealEnroll() error {
 	if c.ph != open {
 		return errLocked
 	}
-	if c.enrolledLocked() {
-		return errEnrolled
+	if err := c.closedLocked(); err != nil {
+		return err
 	}
 	if _, ok := c.v.Secret(PendingSeedName); ok || !hasKind(c.v, ConfirmedName, KindConfirmed) {
 		return errNotConfirmed

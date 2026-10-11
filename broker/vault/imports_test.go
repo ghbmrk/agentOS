@@ -41,13 +41,13 @@ func TestOnlyEgressImportsVault(t *testing.T) {
 			if p == vaultPkg && !vaultImporters[pkg] {
 				t.Errorf("%s imports the vault; only %v may", path, vaultImporters)
 			}
-			if pkg == "vault" && ((p == "net" || strings.HasPrefix(p, "net/") && p != "net/url") || p == "os/exec" || strings.HasPrefix(p, "github.com/ghbmrk/agentos/broker/")) {
+			if pkg == "vault" && ((p == "net" || strings.HasPrefix(p, "net/") && p != "net/url") || p == "os/exec" || strings.HasPrefix(p, "github.com/ghbmrk/agentos/broker/") && p != durablePkg) {
 				t.Errorf("vault imports %s; it must stay a leaf with no I/O but its file", p)
 			}
 			// Argon2id (CRED-8) is the one third-party import: the Go
 			// project's own x/crypto, pinned in go.sum, rather than
 			// hand-rolled key derivation.
-			if pkg == "vault" && strings.Contains(strings.SplitN(p, "/", 2)[0], ".") && p != "golang.org/x/crypto/argon2" {
+			if pkg == "vault" && strings.Contains(strings.SplitN(p, "/", 2)[0], ".") && p != "golang.org/x/crypto/argon2" && p != durablePkg {
 				t.Errorf("vault imports third-party %s; only golang.org/x/crypto/argon2 is allowed", p)
 			}
 		}
@@ -95,3 +95,7 @@ func TestOnlyRecoveryCallsRebase(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// durablePkg is the one broker package the vault imports: it writes the
+// vault's own file and imports only the standard library (durable.TestLeaf).
+const durablePkg = "github.com/ghbmrk/agentos/broker/durable"

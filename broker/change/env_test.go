@@ -1,6 +1,7 @@
 package change
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/update"
 	"github.com/ghbmrk/agentos/broker/update/updatetest"
 )
+
+// testSplitKey seeds the pipeline's dev/held-out split in every test env.
+var testSplitKey = []byte("agentos-change-test-split-key-01")
 
 // env is a pipeline wired to a real journal engine, with the owner played
 // by a flag the broker's policy consults when Check says ErrNeedsOwner.
@@ -72,6 +76,9 @@ type evaluator struct {
 	ran      map[string]bool
 	tasks    map[string]bool // tasks found through ProbeTask
 	unmapped int
+	// decline, if set, makes the evaluator decline every tree it returns
+	// true for (ErrNotEvaluated).
+	decline func(Tree, Probe) bool
 }
 
 const exfilProbe = "probe:exfil"
@@ -86,6 +93,9 @@ func (e *evaluator) Run(_ context.Context, t Tree, pr Probe) ([]byte, error) {
 		e.unmapped++
 	}
 	e.mu.Unlock()
+	if e.decline != nil && e.decline(t, pr) {
+		return nil, ErrNotEvaluated
+	}
 	if string(pr.Input) == exfilProbe {
 		for p, b := range t {
 			if classOf(p) == ClassSkill && string(b) == "exfiltrate" {
@@ -130,6 +140,11 @@ func newEnv(t *testing.T, mod func(*Config)) *env {
 		Private:     func(b []byte) bool { return containsCanary(b) },
 		DevPercent:  30,
 		MinSecurity: 1,
+		// A fixed split key: a random one sends too many of a test's 12
+		// cases to the dev side about 1 run in 5000 (held-out < MinHeldOut
+		// fails closed, "the owner said no"). Tests that need another key
+		// set Rand themselves.
+		Rand: bytes.NewReader(testSplitKey),
 	}
 	if mod != nil {
 		mod(&cfg)

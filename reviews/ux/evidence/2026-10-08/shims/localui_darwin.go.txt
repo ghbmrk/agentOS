@@ -1,0 +1,11 @@
+// Probe-only compile shim. Linux listener tests are outside this probe.
+package localui
+
+import (
+	"context"
+	"net"
+)
+
+func listenOn(context.Context, string, string) (net.Listener, error) {
+	panic("Linux listener outside probe scope")
+}

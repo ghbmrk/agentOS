@@ -38,11 +38,11 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/skill"
 )
 
@@ -70,12 +70,9 @@ func main() {
 	}
 	go http.Serve(l, routes(broker, *tree))
 
-	var child *exec.Cmd
+	var child *childproc.Cmd
 	if args := flag.Args(); len(args) > 0 {
-		child = exec.Command(args[0], args[1:]...)
-		child.Env = append(os.Environ(), "OPENCLAW_GATEWAY_TOKEN="+token)
-		child.Stdout, child.Stderr = os.Stdout, os.Stderr
-		if err := child.Start(); err != nil {
+		if child, err = startRuntime(args, token); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -89,10 +86,35 @@ func main() {
 	go func() {
 		s := <-sig
 		if child != nil {
-			child.Process.Signal(s)
+			child.Signal(s)
 		}
 	}()
 	reap(child)
+}
+
+// runtimeVars are the variables the runtime gets from the bridge's own
+// environment, by name: PATH (the OCI spec's) and each one
+// guest/openclaw/launch.json sets. Anything else the bridge was given
+// stays with it (P3-4b-3r-env).
+var runtimeVars = []string{
+	"PATH", "HOME",
+	"OPENCLAW_CONFIG_PATH", "OPENCLAW_CONFIG_READONLY", "OPENCLAW_NO_AUTO_UPDATE",
+	"OPENCLAW_DISABLE_BONJOUR", "OPENCLAW_CLAWHUB_URL", "DO_NOT_TRACK",
+}
+
+// startRuntime starts the guest runtime, through childproc, with
+// runtimeVars and the gateway token as its whole environment. Each key is
+// on childproc's allowlist for this reason: they run in the guest, where
+// no AGENTOS_* variable exists.
+func startRuntime(args []string, token string) (*childproc.Cmd, error) {
+	env := []string{"OPENCLAW_GATEWAY_TOKEN=" + token}
+	for _, k := range runtimeVars {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	child := childproc.Command(context.Background(), childproc.NewEnv(env...), childproc.Options{Stdout: os.Stdout, Stderr: os.Stderr}, args[0], args[1:]...)
+	return child, child.Start()
 }
 
 // routes forwards the guest's requests to the broker and serves the
@@ -114,7 +136,7 @@ func routes(broker *http.Client, tree string) http.Handler {
 }
 
 // reap waits for every child, as PID 1 must, and exits with the runtime.
-func reap(child *exec.Cmd) {
+func reap(child *childproc.Cmd) {
 	for {
 		var ws syscall.WaitStatus
 		pid, err := syscall.Wait4(-1, &ws, 0, nil)
@@ -127,7 +149,7 @@ func reap(child *exec.Cmd) {
 			}
 			os.Exit(1)
 		}
-		if child != nil && pid == child.Process.Pid {
+		if child != nil && pid == child.Pid() {
 			log.Printf("runtime exited: %v", ws)
 			os.Exit(ws.ExitStatus())
 		}

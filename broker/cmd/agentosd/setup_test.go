@@ -160,10 +160,12 @@ func TestSetupModeFailsClosed(t *testing.T) {
 	}
 }
 
-// K17: the vault's refusals reach setup as localsrv's sentinels.
+// K17: the vault's refusals reach setup as localsrv's sentinels; "never
+// opened" stays apart from "sealed" (P2-2w c2 r1).
 func TestTheVaultsEnrollRefusalsMap(t *testing.T) {
 	for in, want := range map[error]error{
 		modelroute.ErrEnrolled:                                 localsrv.EnrollClosed,
+		modelroute.ErrEnrollNotOpen:                            localsrv.EnrollNotOpen,
 		modelroute.ErrNoEnrollment:                             localsrv.EnrollNone,
 		&modelroute.VerifyError{Kind: modelroute.VerifyPaused}: localsrv.EnrollPaused,
 	} {

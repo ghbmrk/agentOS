@@ -1,0 +1,13 @@
+{
+  "code_revision": "c34f2f4b2e9db7ceb8ee71a7a8b8a63a5a7948a1",
+  "go_version": "go1.26.8",
+  "platform": "darwin/arm64",
+  "date": "2026-10-08",
+  "runner_invoked_from": "a directory outside the repository",
+  "exit_code": 0,
+  "observations_reproduced": 12,
+  "observations_checked": 12,
+  "existing_setup_tests_passed": 4,
+  "linux_socket_and_listener_shims": "panic-only; no shim function executed",
+  "approvals_output": "original capture retained; generated request IDs/codes vary on replay"
+}

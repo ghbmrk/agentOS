@@ -177,7 +177,7 @@ func TestHW8ChronyConfig(t *testing.T) {
 // package os/exec on this ground).
 func TestOnlyChronycIsExecuted(t *testing.T) {
 	launchers := map[string]bool{
-		"exec.Command": true, "exec.CommandContext": true, "os.StartProcess": true,
+		"childproc.Command": true, "exec.Command": true, "exec.CommandContext": true, "os.StartProcess": true,
 		"syscall.ForkExec": true, "syscall.Exec": true, "syscall.StartProcess": true,
 	}
 	files, _ := filepath.Glob("*.go")
@@ -195,7 +195,7 @@ func TestOnlyChronycIsExecuted(t *testing.T) {
 		// not be imported under another (L3 on #177).
 		for _, im := range f.Imports {
 			switch strings.Trim(im.Path.Value, `"`) {
-			case "os/exec", "os", "syscall", "golang.org/x/sys/unix":
+			case "os/exec", "os", "syscall", "golang.org/x/sys/unix", "github.com/ghbmrk/agentos/broker/childproc":
 				if im.Name != nil {
 					t.Errorf("%s imports %s as %s", path, im.Path.Value, im.Name.Name)
 				}
@@ -215,11 +215,11 @@ func TestOnlyChronycIsExecuted(t *testing.T) {
 				return true
 			}
 			n++
-			if path != "chrony.go" || id.Name+"."+sel.Sel.Name != "exec.CommandContext" || len(call.Args) < 2 {
+			if path != "chrony.go" || id.Name+"."+sel.Sel.Name != "childproc.Command" || len(call.Args) < 4 {
 				t.Errorf("%s: process started at %s", path, fs.Position(call.Pos()))
 				return true
 			}
-			if a, ok := call.Args[1].(*ast.Ident); !ok || a.Name != "chronyc" {
+			if a, ok := call.Args[3].(*ast.Ident); !ok || a.Name != "chronyc" {
 				t.Errorf("%s: starts something other than chronyc", fs.Position(call.Pos()))
 			}
 			return true

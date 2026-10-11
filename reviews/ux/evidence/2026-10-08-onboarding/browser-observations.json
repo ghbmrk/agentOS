@@ -1,0 +1,26 @@
+{
+  "record_kind": "manually recorded browser observations; not a browser rerunner",
+  "source_base": "e19274c36f7c2d81ad72d01b796aaa1eb36ba549",
+  "surface": "Codex in-app browser",
+  "viewport_css_pixels": {"width": 390, "height": 844},
+  "observations": [
+    {
+      "fixture": "number-code-sent.html",
+      "label": "Code texted to +15550000001",
+      "isVisible": false,
+      "containing_details_open": false
+    },
+    {
+      "fixture": "api-error.html",
+      "private_checkbox_checked": true,
+      "api_key_input_empty": true
+    },
+    {
+      "fixture": "host-error.html",
+      "not_mine_checkbox_checked": false,
+      "error_text": "Could not save. Try again."
+    }
+  ],
+  "document_title_for_all_observed_fixtures": "AgentOS",
+  "scope": "Static rendered synthetic fixture inspection only. No real phone, SMS, authenticator, network join, provider connection, host trust or hardware effect was exercised."
+}

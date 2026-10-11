@@ -301,8 +301,8 @@ func (c *Channel) moreLocked(id string) string {
 			continue
 		}
 		next := fmt.Sprintf(" %d %s.", i+1, c.itemLine(it))
-		if !fits(b.String() + next + " Rest on the box's Wi-Fi page.") {
-			b.WriteString(" Rest on the box's Wi-Fi page.")
+		if !fits(b.String() + next + " Rest on my Wi-Fi page.") {
+			b.WriteString(" Rest on my Wi-Fi page.")
 			break
 		}
 		b.WriteString(next)

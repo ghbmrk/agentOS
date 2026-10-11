@@ -236,7 +236,7 @@ func (s *Server) vaultTry(r *http.Request) string {
 	case len(mine) >= VaultTriesPerHour:
 		return "Too many tries from this phone. Try again after " + at(mine[0].Add(time.Hour)) + "."
 	case !exempt && len(all) >= VaultTriesAllPerHour:
-		return "Too many tries on the box's Wi-Fi. Try again after " + at(all[0].Add(time.Hour)) + "."
+		return "Too many tries on my Wi-Fi. Try again after " + at(all[0].Add(time.Hour)) + "."
 	}
 	s.vaultTries[ip] = append(mine, now)
 	if !exempt {
@@ -361,7 +361,7 @@ func (s *Server) vaultPage(w http.ResponseWriter, r *http.Request, errText strin
 		case st.SecureBoot:
 			v.Boot = "Secure Boot settings on this PC changed. If you updated firmware, unlock with your card to keep this PC trusted."
 		default:
-			v.Boot = "This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure."
+			v.Boot = "This PC started me in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure."
 		}
 	}
 	s.mu.Lock()
@@ -436,7 +436,7 @@ func (s *Server) vaultPassphrase(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxPhotoBytes+64<<10)
 	mr, err := r.MultipartReader()
 	if err != nil {
-		s.vaultPage(w, r, "The box could not read that form. Try again.")
+		s.vaultPage(w, r, "I could not read that form. Try again.")
 		return
 	}
 	var photo []byte
@@ -570,11 +570,11 @@ func scanText(err error) string {
 	case errors.Is(err, ErrManyQR):
 		return "That photo holds more than one passphrase-like code. Take a photo of the vault passphrase code alone."
 	case errors.Is(err, ErrPhotoSize):
-		return "That photo is too large for the box. Type the passphrase words, or use a lower-resolution photo."
+		return "That photo is too large for me. Type the passphrase words, or use a lower-resolution photo."
 	case errors.Is(err, ErrScanBusy):
-		return "The box is reading another photo. Try again in a moment."
+		return "I am reading another photo. Try again in a moment."
 	}
-	return "The box cannot read that file. Take a photo (JPEG or PNG), or type the words."
+	return "I cannot read that file. Take a photo (JPEG or PNG), or type the words."
 }
 
 // vaultText turns a vault process refusal into the page's line. Its
@@ -583,11 +583,11 @@ func scanText(err error) string {
 func vaultText(err error) string {
 	var ve *VaultError
 	if !errors.As(err, &ve) {
-		return "The box is not answering yet. Wait a moment and try again."
+		return "I can't answer yet. Wait a moment and try again."
 	}
 	switch ve.Msg {
 	case "the passphrase does not open this vault":
-		return "Those words do not open this box. Check them against your card, or take the photo again."
+		return "Those words do not unlock me. Check them against your card, or take the photo again."
 	case "a passphrase change was interrupted; try your new passphrase":
 		return "A passphrase change was interrupted. Try your new passphrase, or your old one if that fails."
 	case "wait a moment before trying again":
@@ -595,7 +595,7 @@ func vaultText(err error) string {
 	}
 	m := strings.TrimSpace(ve.Msg)
 	if m == "" {
-		return "The box refused that. Try again."
+		return "I refused that. Try again."
 	}
 	r, n := utf8.DecodeRuneInString(m)
 	m = string(unicode.ToUpper(r)) + m[n:]

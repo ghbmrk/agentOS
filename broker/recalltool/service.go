@@ -44,7 +44,10 @@ type ServiceConfig struct {
 	// Notify tells the owner an approved rollback is done (the owner
 	// channel's Notify).
 	Notify func(text string) error
-	Logf   func(format string, args ...any)
+	// OnTakenBack is Reach.OnTakenBack: a take-back Retry finished goes
+	// to the caller instead of Notify (RCH-3).
+	OnTakenBack func(lineage string, since time.Time)
+	Logf        func(format string, args ...any)
 }
 
 // Service is recall wired for the broker: the index, the event bus that
@@ -112,7 +115,7 @@ func OpenService(cfg ServiceConfig) (*Service, error) {
 		return fail(err)
 	}
 	s.Reach = &Reach{Prov: s.Prov, Journal: cfg.Journal, Machines: cfg.Machines, Cases: cfg.Cases,
-		Deleted: s.Index.Deleted, Ask: cfg.Ask, Notify: cfg.Notify, Location: cfg.Location, Logf: cfg.Logf}
+		Deleted: s.Index.Deleted, Ask: cfg.Ask, Notify: cfg.Notify, OnTakenBack: cfg.OnTakenBack, Location: cfg.Location, Logf: cfg.Logf}
 	s.Index.KeepTombstones(s.Reach.Needed)
 	// Registering replays every tombstone, so a reach a crash cut short
 	// runs again (CAP-3).
@@ -289,6 +292,15 @@ func (l *LateExecutor) Handled(since time.Time) (handled, ok bool) {
 		return r.Handled(since)
 	}
 	return false, false
+}
+
+// TakeBackOf is Reach.TakeBackOf once recall is open; ok false before
+// (RCH-1).
+func (l *LateExecutor) TakeBackOf(since time.Time) (st TakeBackState, ok bool) {
+	if r := l.r.Load(); r != nil {
+		return r.TakeBackOf(since)
+	}
+	return TakeBackNone, false
 }
 
 // TakeBack is Reach.TakeBack once recall is open; before, ErrNotOpen,

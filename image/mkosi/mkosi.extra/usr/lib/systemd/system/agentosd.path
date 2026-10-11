@@ -1,0 +1,10 @@
+# Starts the broker as soon as onboarding writes its settings, without a reboot (UX-41-1).
+[Unit]
+Description=AgentOS broker settings
+
+[Path]
+PathExists=/etc/agentos/agentosd.env
+Unit=agentosd.service
+
+[Install]
+WantedBy=paths.target

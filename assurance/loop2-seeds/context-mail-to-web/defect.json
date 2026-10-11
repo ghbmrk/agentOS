@@ -1,0 +1,4 @@
+{"files": {
+  "context/web.json": {"select": ["pages", "mail-bodies"]},
+  "context/browse.json": {"select": ["pages", "search", "mail-bodies"]}
+}}

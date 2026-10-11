@@ -237,7 +237,14 @@ func (r *run) failed(err error) {
 }
 
 // Run replays probe c on tree t and returns the guest's reply.
+//
+// A tree-rule probe (P3-4b) is answered from t alone, before anything
+// else: it reads only tree files, so it needs no machine, no recording and
+// no model, and it is evaluable in every namespace, untested ones too.
 func (e *Evaluator) Run(ctx context.Context, t change.Tree, c change.Probe) ([]byte, error) {
+	if out, ok := change.AnswerTreeRule(t, c.Input); ok {
+		return out, nil
+	}
 	for _, ns := range e.untestedNamespaces() {
 		if !sameFiles(inNamespace(t, ns), e.cfg.Active(ns)) {
 			return nil, fmt.Errorf("%w: %s", ErrNotEvaluated, ns)

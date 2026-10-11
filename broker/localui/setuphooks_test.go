@@ -101,6 +101,49 @@ func TestASealedVaultSkipsTheKey(t *testing.T) {
 	}
 }
 
+// ONB-3, CRED-8 (P2-2w c2 r1): through agentosd, a vault whose enrollment
+// setup never opened makes the codes step say the box cannot finish setup;
+// it offers no Continue, no key and no "already set up". A vault that
+// stops answering for setup after the codes step makes finish say the
+// same, not "Try again".
+func TestAVaultThatCannotFinishSetupSaysSo(t *testing.T) {
+	via := func(r *rig) {
+		s := localsrv.NewSetup(localsrv.SetupConfig{Record: localsrv.FileRecord{Path: filepath.Join(t.TempDir(), "setup.json")},
+			Enroll:   vaultEnroller{r.hooks},
+			Progress: func() localapi.SetupProgress { p := r.hooks.Progress(); return localapi.SetupProgress(p) },
+			Finished: func(string) {}, Now: r.clock})
+		r.via = viaAgentosd{r.hooks, AgentosdSetup{InProcess(s.Ops())}}
+		r.srv = r.open(&MemStore{})
+	}
+	r := newRig(t)
+	via(r)
+	r.hooks.mu.Lock()
+	r.hooks.unavailable = true
+	r.hooks.mu.Unlock()
+	page := r.toCodes()
+	if !strings.Contains(page, cannotFinish) || strings.Contains(page, "already set up") ||
+		strings.Contains(page, `name="enrolled"`) || strings.Contains(page, "secret=") {
+		t.Fatalf("codes step on a vault never opened: %s", page)
+	}
+	for _, f := range []url.Values{{"enrolled": {"1"}}, {"code": {"123456"}}} {
+		r.post("/setup/codes", f)
+		if r.srv.setup.st.Codes || r.setupErr() != cannotFinish {
+			t.Fatalf("%v: codes %v, said %q", f, r.srv.setup.st.Codes, r.setupErr())
+		}
+	}
+
+	r = newRig(t)
+	via(r)
+	r.runSetupToAI()
+	r.hooks.mu.Lock()
+	r.hooks.unavailable = true
+	r.hooks.mu.Unlock()
+	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}, "private": {"1"}})
+	if r.srv.setup.done() || r.hooks.finished != "" || r.setupErr() != cannotFinish {
+		t.Fatalf("finish on a vault not open: done %v, said %q", r.srv.setup.done(), r.setupErr())
+	}
+}
+
 func decodeSecret(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := b32.DecodeString(s)
@@ -127,6 +170,9 @@ func (v vaultEnroller) ConfirmEnroll(code string) (bool, error) {
 func (v vaultEnroller) SealEnroll() error {
 	v.f.mu.Lock()
 	defer v.f.mu.Unlock()
+	if v.f.unavailable {
+		return localsrv.EnrollNotOpen
+	}
 	if v.f.seed == nil {
 		return localsrv.EnrollNone
 	}
@@ -139,6 +185,8 @@ func vaultSentinel(err error) error {
 		return localsrv.EnrollClosed
 	case errors.Is(err, ErrNoCodeEnrollment):
 		return localsrv.EnrollNone
+	case errors.Is(err, ErrCodesUnavailable):
+		return localsrv.EnrollNotOpen
 	}
 	return err
 }

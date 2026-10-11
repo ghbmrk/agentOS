@@ -50,7 +50,13 @@ func TestOSS9UnlistedReportsAreNeverAuthority(t *testing.T) {
 	if n := res.Release.IndependentPasses([][]byte{pass(t, f.root[0], res.Release)}, nil); n != 0 {
 		t.Fatalf("a signing key counted as an attestor: %d", n)
 	}
-	// One listed independent report is what it takes.
+	// One listed independent report is what it takes, under the policy
+	// the release was checked by (the checks above moved it, SR3-6f-4).
+	res, err = f.check(Options{Attestors: f.attestors(listed)})
+	if err != nil || res.Release == nil {
+		t.Fatal(res.Release, err)
+	}
+	v = res.Release
 	if n := v.IndependentPasses(append(atts, pass(t, listed, v)), nil); n != 1 {
 		t.Fatalf("the listed report counted %d", n)
 	}

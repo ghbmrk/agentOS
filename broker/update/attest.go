@@ -319,8 +319,10 @@ func (v *Verified) passes(atts [][]byte, own ed25519.PublicKey, f func(fp string
 // (see above)
 // with a valid, passing, fast-channel attestation for exactly this
 // release. own is this box's key and may be nil.
+// It is 0 once the attestor policy changed since the check (SR3-6f-4), as
+// for SecurityAutoStage: a removed attestor's pass no longer counts.
 func (v *Verified) IndependentPasses(atts [][]byte, own ed25519.PublicKey) int {
-	if !v.ok() {
+	if !v.ok() || v.policyCurrent() != nil {
 		return 0
 	}
 	n := 0
@@ -368,6 +370,9 @@ func (v *Verified) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error
 	if !v.ok() {
 		return ErrNotChecked
 	}
+	if err := v.policyCurrent(); err != nil {
+		return err
+	}
 	if !v.release.Security && !v.coversFix {
 		return errors.New("not a security fix")
 	}
@@ -381,7 +386,8 @@ func (v *Verified) SecurityAutoStage(atts [][]byte, own ed25519.PublicKey) error
 // project's own test box (Options.InterimAttestors) and never held an
 // outside attestor, so the digest can say the fix was checked by the
 // project rather than an outside attestor.
-func (v *Verified) InterimAttestation() bool { return v.ok() && v.interim }
+// It is false once the attestor policy changed since the check (SR3-6).
+func (v *Verified) InterimAttestation() bool { return v.ok() && v.interim && v.policyCurrent() == nil }
 
 // Evidence is who passed a release, for the owner's text (OSS-9): listed
 // independent attestors (IndependentPasses), and maintainer-operated ones

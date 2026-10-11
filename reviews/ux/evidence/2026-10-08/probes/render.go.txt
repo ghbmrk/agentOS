@@ -1,0 +1,82 @@
+// Read-only synthetic HTML capture through the production local UI handler.
+// Reproduce with ../run.sh; the runner supplies a temporary output directory.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/localui"
+	"github.com/ghbmrk/agentos/broker/owner"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type source struct{ stopped, long bool }
+
+func (s source) Call(_ context.Context, op string, _ any, out any) error {
+	var value any
+	object := "Quarterly report"
+	if s.long {
+		object = "report_" + strings.Repeat("a", 180) + ".pdf"
+	}
+	switch op {
+	case localapi.OpStatus:
+		value = localapi.Status{Stopped: s.stopped, Unlocked: true, UnlockDays: 7}
+	case localapi.OpSession:
+		value = localapi.Session{Token: strings.Repeat("a", 2*localapi.TokenBytes), Until: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
+	case localapi.OpGridCell:
+		value = localapi.Text{Text: "B4"}
+	case localapi.OpRequests:
+		value = localapi.Requests{Requests: []owner.LocalRequest{
+			{ID: "A1", Sum: "synthetic-request-one", By: "14:15", Items: []owner.Item{{Object: object, Recipient: "finance@example.test", UndoWindow: 0, Facts: owner.Facts{Verb: "send"}}}},
+			{ID: "A2", Sum: "synthetic-request-two", By: "14:16", Items: []owner.Item{{Object: "Corrected report", Recipient: "reviewer@example.test", UndoWindow: 0, Facts: owner.Facts{Verb: "send"}}}},
+		}}
+	default:
+		value = map[string]any{}
+	}
+	if out == nil {
+		return nil
+	}
+	b, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
+}
+func main() {
+	dir := os.Args[1]
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		panic(err)
+	}
+	s, err := localui.New(localui.Config{AP: localui.APConfig{Iface: "fixture0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, Now: func() time.Time { return time.Date(2026, 10, 8, 14, 0, 0, 0, time.UTC) }, Rand: strings.NewReader(strings.Repeat("x", 64))})
+	if err != nil {
+		panic(err)
+	}
+	for _, f := range []struct {
+		name, path      string
+		signed, stopped bool
+	}{{"status", "/status", true, false}, {"stopped", "/status", true, true}, {"unlock", "/unlock", false, false}, {"approvals", "/approvals/", true, false}, {"home", "/home", true, false}, {"approvals-long", "/approvals/", true, false}} {
+		s.SetOwner(source{stopped: f.stopped, long: f.name == "approvals-long"})
+		req := httptest.NewRequest("GET", "http://10.42.0.1"+f.path, nil)
+		req.RemoteAddr = "10.42.0.23:50000"
+		if f.signed {
+			req.AddCookie(&http.Cookie{Name: "agentos_session", Value: strings.Repeat("a", 2*localapi.TokenBytes)})
+		}
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			panic(fmt.Sprintf("%s: %d", f.name, rec.Code))
+		}
+		if err := os.WriteFile(filepath.Join(dir, f.name+".html"), rec.Body.Bytes(), 0644); err != nil {
+			panic(err)
+		}
+		fmt.Printf("%s: HTTP %d, %d bytes\n", f.name, rec.Code, rec.Body.Len())
+	}
+}

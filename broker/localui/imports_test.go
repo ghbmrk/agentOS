@@ -12,16 +12,39 @@ import (
 // UI's own process links it: neither agentosd (ARC-2) nor the vault
 // process may contain gozxing, its x/text and x/xerrors (the standard
 // library's own vendor/golang.org/x/text copy is not ours), or this
-// package (#50 security C2, L15).
+// package (#50 security C2, L15). The vault process serves the mailbox
+// (egress K18), whose IMAP client and message types bring x/text in, so
+// there x/text may enter only through those two importers: any other
+// importer, the decoder's included, fails. agentosd links mail for the
+// organize adapter (SR3-mail-w2 W2-f), so there mail alone may bring it.
 func TestDaemonAndVaultProcessLinkNoScanner(t *testing.T) {
-	for _, cmd := range []string{"../cmd/agentosd", "../cmd/agentos-egress"} {
-		out, err := exec.Command("go", "list", "-deps", cmd).CombinedOutput()
+	textVia := map[string]map[string]bool{
+		"../cmd/agentosd": {
+			"github.com/ghbmrk/agentos/broker/mail": true,
+		},
+		"../cmd/agentos-egress": {
+			"github.com/emersion/go-imap/utf7":      true,
+			"github.com/ghbmrk/agentos/broker/mail": true,
+		},
+	}
+	for cmd, via := range textVia {
+		out, err := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}{{range .Imports}} {{.}}{{end}}", cmd).CombinedOutput()
 		if err != nil {
 			t.Fatalf("go list %s: %v\n%s", cmd, err, out)
 		}
-		for _, p := range strings.Fields(string(out)) {
-			if strings.Contains(p, "gozxing") || strings.HasSuffix(p, "/broker/localui") || strings.HasPrefix(p, "golang.org/x/text") || strings.HasPrefix(p, "golang.org/x/xerrors") {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			f := strings.Fields(line)
+			p := f[0]
+			if strings.Contains(p, "gozxing") || strings.HasSuffix(p, "/broker/localui") || strings.HasPrefix(p, "golang.org/x/xerrors") {
 				t.Errorf("%s links %s", cmd, p)
+			}
+			if strings.HasPrefix(p, "golang.org/x/text") || via[p] {
+				continue
+			}
+			for _, imp := range f[1:] {
+				if strings.HasPrefix(imp, "golang.org/x/text") {
+					t.Errorf("%s links %s through %s", cmd, imp, p)
+				}
 			}
 		}
 	}

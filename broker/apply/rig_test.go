@@ -3,6 +3,8 @@ package apply
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +29,24 @@ type activator struct {
 	pending    bool // the new slot booted, health check not run yet
 	installErr error
 	abandoned  int
+	onInstall  func() // runs after a successful Install
+	abandonErr error
+	onAbandon  func() // runs after a successful Abandon
+	// onBooted runs once, after Booted answers; onRestart runs once,
+	// before the restart. Both run outside the activator's lock.
+	onBooted   func()
+	onRestart  func()
+	restartErr error
+	bootedErr  error
+}
+
+// once takes and clears the hook *f under the activator's lock.
+func (a *activator) once(f *func()) func() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g := *f
+	*f = nil
+	return g
 }
 
 func (a *activator) Install(_ context.Context, v *update.Verified) error {
@@ -41,20 +61,35 @@ func (a *activator) Install(_ context.Context, v *update.Verified) error {
 	}
 	a.installed = append(a.installed, m.Version)
 	a.next = m.UsrRootHash
+	if a.onInstall != nil {
+		a.onInstall()
+	}
 	return nil
 }
 
 func (a *activator) Abandon(context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.abandonErr != nil {
+		return a.abandonErr
+	}
 	a.abandoned++
 	a.next = a.boot.UsrRootHash
+	if a.onAbandon != nil {
+		a.onAbandon()
+	}
 	return nil
 }
 
 func (a *activator) Restart(context.Context) error {
+	if f := a.once(&a.onRestart); f != nil {
+		f()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.restartErr != nil {
+		return a.restartErr
+	}
 	a.restarts++
 	a.boot.ID = "boot" + string(rune('0'+a.restarts))
 	switch {
@@ -70,28 +105,102 @@ func (a *activator) Restart(context.Context) error {
 
 func (a *activator) Booted(context.Context) (Boot, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.boot, nil
+	b, err := a.boot, a.bootedErr
+	a.mu.Unlock()
+	if f := a.once(&a.onBooted); f != nil {
+		f()
+	}
+	return b, err
 }
 
-// pipeline is the change pipeline's staged-adoption hooks.
+// pipeline is the change pipeline's staged-adoption hooks, with their
+// contract (SR3-4): settling an adoption again the same way is a success
+// that changes nothing, the other way is refused. confirmErr and failErr
+// fail the next call with no effect. calls logs every call, refused or
+// not; onConfirm runs after a ConfirmStaged that succeeded.
 type pipeline struct {
-	mu        sync.Mutex
-	confirmed []string
-	failed    []string
+	mu         sync.Mutex
+	confirmed  []string
+	failed     []string
+	confirmErr error
+	failErr    error
+	calls      []string
+	onConfirm  func()
+	dropped    []string
+	dropErr    error
+	// reverted: the pipeline's own reverts, by adoption, with their why.
+	reverted map[string]string
+}
+
+// recheck is the pipeline's Recheck failing adoption id for security: it
+// asks the applier to withdraw, then reverts the adoption itself.
+func (r *rig) recheck(id string) error {
+	if err := r.a.Withdraw(id, WhySecurity); err != nil {
+		return err
+	}
+	r.pipe.mu.Lock()
+	defer r.pipe.mu.Unlock()
+	if r.pipe.reverted == nil {
+		r.pipe.reverted = map[string]string{}
+	}
+	r.pipe.reverted[id] = change.WhySecurity
+	return nil
 }
 
 func (p *pipeline) ConfirmStaged(ref string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.confirmed = append(p.confirmed, ref)
+	p.calls = append(p.calls, "confirm "+ref)
+	if err := p.confirmErr; err != nil {
+		p.confirmErr = nil
+		return err
+	}
+	if slices.Contains(p.failed, ref) {
+		return errors.New("fell back")
+	}
+	if !slices.Contains(p.confirmed, ref) {
+		p.confirmed = append(p.confirmed, ref)
+	}
+	if f := p.onConfirm; f != nil {
+		f()
+	}
+	return nil
+}
+
+func (p *pipeline) StageDropped(_ context.Context, ref string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, "drop "+ref)
+	if err := p.dropErr; err != nil {
+		p.dropErr = nil
+		return err
+	}
+	if slices.Contains(p.confirmed, ref) {
+		return fmt.Errorf("change: %s is %w", ref, change.ErrNotStaged)
+	}
+	if _, ok := p.reverted[ref]; ok {
+		return nil // the revert ran first: nothing to do
+	}
+	if !slices.Contains(p.dropped, ref) {
+		p.dropped = append(p.dropped, ref)
+	}
 	return nil
 }
 
 func (p *pipeline) StageFailed(_ context.Context, ref string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.failed = append(p.failed, ref)
+	p.calls = append(p.calls, "fail "+ref)
+	if err := p.failErr; err != nil {
+		p.failErr = nil
+		return err
+	}
+	if slices.Contains(p.confirmed, ref) {
+		return errors.New("confirmed")
+	}
+	if !slices.Contains(p.failed, ref) {
+		p.failed = append(p.failed, ref)
+	}
 	return nil
 }
 
@@ -105,22 +214,34 @@ func (c *clock) add(d time.Duration) { c.mu.Lock(); defer c.mu.Unlock(); c.t = c
 
 // policy is the journal policy: the applier's Check for its intents, as
 // the grants gate will delegate meta.release to it.
-type policy struct{ a *Applier }
+// atDispatch, if set, runs once after the dispatch check passed.
+type policy struct {
+	a          *Applier
+	atDispatch func()
+}
 
 func (p *policy) Check(ctx context.Context, ph journal.Phase, in journal.Intent) error {
 	if in.Executor == Executor {
-		return p.a.Check(ctx, ph, in)
+		err := p.a.Check(ctx, ph, in)
+		if f := p.atDispatch; err == nil && ph == journal.PhaseDispatch && f != nil {
+			p.atDispatch = nil
+			f()
+		}
+		return err
 	}
 	return nil
 }
 
 type rig struct {
-	t        *testing.T
-	clk      *clock
-	act      *activator
-	act0     Activator // the activator the applier uses; nil: act
-	pipe     *pipeline
-	store    *update.Store
+	t     *testing.T
+	clk   *clock
+	act   *activator
+	act0  Activator // the activator the applier uses; nil: act
+	pipe  *pipeline
+	store *update.Store
+	// mirror: when set, store checks every release the rig makes from it,
+	// so a next release stages too.
+	mirror   *updatetest.Mirror
 	state    *change.MemStore
 	eng      *journal.Engine
 	pol      *policy
@@ -129,7 +250,18 @@ type rig struct {
 	excluded func(time.Time) bool
 	talk     time.Time
 	stopped  bool
-	a        *Applier
+	// atBusy runs once, when the applier next asks whether the box is
+	// working; never set while Status may run (it asks under its lock).
+	atBusy func()
+	a      *Applier
+}
+
+func (r *rig) isWorking() bool {
+	if f := r.atBusy; f != nil {
+		r.atBusy = nil
+		f()
+	}
+	return r.working
 }
 
 const oldHash = "11"
@@ -152,6 +284,14 @@ func newRig(t *testing.T) *rig {
 // checked it.
 func (r *rig) release(v int64, security bool) *update.Verified {
 	r.t.Helper()
+	if r.mirror != nil {
+		r.mirror.Add(v, update.ChannelStable, security)
+		res, err := r.store.Check(r.mirror.Source(), update.Options{})
+		if err != nil || res.Release == nil {
+			r.t.Fatalf("check %d: %v %v", v, res.Release, err)
+		}
+		return res.Release
+	}
 	rel, st := updatetest.Box(r.t, v, security, map[string][]byte{"host-image/entry.conf": []byte("entry"), "host-image/usr.img": []byte("usr")})
 	if r.store == nil {
 		r.store = st
@@ -168,7 +308,7 @@ func (r *rig) restart() {
 		act = r.act0
 	}
 	a, err := New(Config{Journal: r.eng, Activator: act, Store: r.store, Pipeline: r.pipe, State: r.state,
-		InCall: func() bool { return r.inCall }, Working: func() bool { return r.working },
+		InCall: func() bool { return r.inCall }, Working: r.isWorking,
 		Excluded: func(t time.Time) bool { return r.excluded != nil && r.excluded(t) },
 		LastTalk: func() time.Time { return r.talk },
 		Stopped:  func() bool { return r.stopped },

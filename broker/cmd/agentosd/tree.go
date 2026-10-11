@@ -117,7 +117,7 @@ var (
 func (t *liveTree) List() []map[string]any {
 	return []map[string]any{{
 		"name": toolTree,
-		"description": "Fetch the box's adopted procedures, skills and context (the managed tree). " +
+		"description": "Fetch the adopted procedures, skills and context (the managed tree). " +
 			"Pass the version you hold to learn whether it changed. Only a machine that has had owner data gets it.",
 		"inputSchema": map[string]any{
 			"type":       "object",

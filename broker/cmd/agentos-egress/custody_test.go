@@ -581,12 +581,12 @@ func TestWrongPassphrasesAreToldNotCounted(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		try()
 	}
-	if got := notes(); len(got) != 1 || got[0] != "wrong vault passphrase tried on the box's Wi-Fi" {
+	if got := notes(); len(got) != 1 || got[0] != "wrong vault passphrase tried on my Wi-Fi" {
 		t.Fatalf("notes: %q", got)
 	}
 	r.clk.add(WrongPassNoteEvery)
 	try()
-	if got := notes(); len(got) != 2 || got[1] != "wrong vault passphrase tried on the box's Wi-Fi (4 more since the last notice)" {
+	if got := notes(); len(got) != 2 || got[1] != "wrong vault passphrase tried on my Wi-Fi (4 more since the last notice)" {
 		t.Fatalf("notes: %q", got)
 	}
 	// Still no lockout: the right passphrase opens the pending unlock,
@@ -597,7 +597,7 @@ func TestWrongPassphrasesAreToldNotCounted(t *testing.T) {
 	if r.phase() != pending {
 		t.Fatalf("phase %v", r.phase())
 	}
-	if !slices.Contains(r.notes, "2 more wrong vault passphrases were tried on the box's Wi-Fi since the last notice") {
+	if !slices.Contains(r.notes, "2 more wrong vault passphrases were tried on my Wi-Fi since the last notice") {
 		t.Fatalf("burst not flushed: %q", r.notes)
 	}
 }
@@ -616,7 +616,7 @@ func TestNewPassphraseSupersedesPendingUnlock(t *testing.T) {
 	if second == first || r.phase() != pending {
 		t.Fatalf("supersede: %q %v", second, r.phase())
 	}
-	if !slices.Contains(r.notes, "The box unlock was started over with your card; the earlier one was cancelled.") {
+	if !slices.Contains(r.notes, "The unlock was started over with your card; the earlier one was cancelled.") {
 		t.Fatalf("owner not told: %q", r.notes)
 	}
 	if err := r.c.confirm(first, r.code()); err != errNotPending {
@@ -727,7 +727,7 @@ func TestSupersedeNoticesCoalesce(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		r.unlock(t)
 	}
-	if n := count("The box unlock was started over"); n != 1 {
+	if n := count("The unlock was started over"); n != 1 {
 		t.Fatalf("started-over notes: %d %q", n, r.notes)
 	}
 	if n := count("vault passphrase accepted"); n != 1 {
@@ -742,7 +742,7 @@ func TestSupersedeNoticesCoalesce(t *testing.T) {
 	if err := r.c.confirm(tk, r.code()); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(r.notes, "The box unlock was started over once more before it was unlocked.") {
+	if !slices.Contains(r.notes, "The unlock was started over once more before it was unlocked.") {
 		t.Fatalf("burst total not told: %q", r.notes)
 	}
 }
@@ -816,7 +816,7 @@ func TestInterruptedChangeRefusal(t *testing.T) {
 	if _, err := r.c.unlock("old passphrase"); err != errChangeInterrupted {
 		t.Fatalf("interrupted change: %v", err)
 	}
-	if len(r.notes) != 1 || r.notes[0] != "wrong vault passphrase tried on the box's Wi-Fi" {
+	if len(r.notes) != 1 || r.notes[0] != "wrong vault passphrase tried on my Wi-Fi" {
 		t.Fatalf("notes %q", r.notes)
 	}
 	if r.phase() != locked {

@@ -16,6 +16,7 @@ type fakeLine struct {
 	last             modemlink.Outage
 	others, timedOut int
 	dropped          bool
+	sim, ends        string
 }
 
 func (f fakeLine) OwnerLineNote() string        { return f.note }
@@ -23,6 +24,7 @@ func (f fakeLine) LastOutage() modemlink.Outage { return f.last }
 func (f fakeLine) Others() int                  { return f.others }
 func (f fakeLine) TimedOut() int                { return f.timedOut }
 func (f fakeLine) Dropped() bool                { return f.dropped }
+func (f fakeLine) SIM() (string, string)        { return f.sim, f.ends }
 
 // P2-2w d2a: the page's line is the modem link's note, last outage and
 // counts; before any outage ended there is none to show.

@@ -49,10 +49,19 @@ const (
 	// a code like any grant (W5a-resume).
 	OpPaused    = "page_paused"
 	OpAskResume = "page_ask_resume"
+	// OpSIM adopts the SIM the page showed as the owner line's (P2-2w
+	// d2b): always with a code-generator code or the asked grid cell
+	// (CH-19), since it re-opens the owner channel on that SIM's line.
+	OpSIM = "page_sim"
+	// OpForgetTasks lists the owner's recent tasks as FORGET does;
+	// OpForget asks to forget one by its goal ID, and the owner then
+	// approves it with a code like any forget (W3-forget-b3r, CAP-3).
+	OpForgetTasks = "page_forget_tasks"
+	OpForget      = "page_forget"
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -73,10 +82,15 @@ const (
 	// owner's name for it in bytes (40 characters of up to 4 bytes).
 	MaxRoot       = 64 << 10
 	MaxFollowName = 160
+	// MaxRootChain bounds the other root files brought with one, the
+	// rotation chain a switch back walks (update.MaxRootRotations).
+	MaxRootChain = 64
 	// DigestLen is a shown root's digest: SHA-256, lowercase hex.
 	DigestLen = 64
 	// MaxPause bounds a pause's intent ID (grants.Grant.Pause).
 	MaxPause = 128
+	// MaxGoal bounds a task's goal ID (OpForget).
+	MaxGoal = 128
 )
 
 // Status is the box's state as the page shows it before sign-in: fixed
@@ -136,6 +150,26 @@ type Line struct {
 	Others   int  `json:"others,omitempty"`
 	TimedOut int  `json:"timed_out,omitempty"`
 	Dropped  bool `json:"dropped,omitempty"`
+	// SIM names a SIM in the owner line's modem the owner may adopt as the
+	// owner line's, while the line is swapped or unbound (P2-2w d2b): an
+	// opaque tag of SIMLen lowercase hex, never the serial. SIMEnds is the
+	// serial's last four digits, as printed on the SIM's card.
+	SIM     string `json:"sim,omitempty"`
+	SIMEnds string `json:"sim_ends,omitempty"`
+}
+
+// SIMLen is a SIM tag's length.
+const SIMLen = 16
+
+// AdoptSIM adopts the SIM the page showed under SIM as the owner line's,
+// with a code-generator code or the asked grid cell. Its reply is an
+// Answered: RefusedCodeNeeded without a code, RefusedChanged when the
+// modem no longer has that SIM or the line is no longer swapped or
+// unbound.
+type AdoptSIM struct {
+	Token string `json:"token"`
+	SIM   string `json:"sim"`
+	Code  string `json:"code,omitempty"`
 }
 
 // Outage is a stretch when the owner line could not be used: Missed
@@ -201,9 +235,13 @@ type Requests struct {
 }
 
 // FollowRoot is a root the owner brought to follow, exactly as published.
+// Chain is the other root files brought with it: the project's rotations
+// a switch back walks to Root (OSS-10w-r), each at most MaxRoot, at most
+// MaxRootChain of them.
 type FollowRoot struct {
-	Token string `json:"token"`
-	Root  []byte `json:"root"`
+	Token string   `json:"token"`
+	Root  []byte   `json:"root"`
+	Chain [][]byte `json:"chain,omitempty"`
 }
 
 // RootSummary is what following a root means, as the page shows it before
@@ -217,8 +255,9 @@ type RootSummary struct {
 	Digest     string              `json:"digest,omitempty"`
 	Refusal    string              `json:"refusal,omitempty"`
 	Reason     string              `json:"reason,omitempty"`
-	// Project: the root has the project's own root keys, as the image
-	// ships them, so the page may offer switching back (WF1).
+	// Project: the root is the project's own, admitted from the project
+	// root the box last trusted (or the shipped one) by itself or through
+	// a chain of root files, so the page may offer switching back (WF1).
 	Project bool `json:"project,omitempty"`
 }
 
@@ -257,6 +296,28 @@ type PausedGrant struct {
 // Paused are the paused grants, by ID.
 type Paused struct {
 	Grants []PausedGrant `json:"grants"`
+}
+
+// ForgetTask is a recent task as the page lists it: its goal ID, its date,
+// and the label FORGET shows (the clipped text of a task the owner
+// texted, else only when it came; security C2 on W3-forget).
+type ForgetTask struct {
+	ID    string `json:"id"`
+	Date  string `json:"date"`
+	Label string `json:"label"`
+}
+
+// ForgetTasks are the owner's recent tasks, newest first; none while the
+// owner's session is locked (Locked).
+type ForgetTasks struct {
+	Tasks  []ForgetTask `json:"tasks,omitempty"`
+	Locked bool         `json:"locked,omitempty"`
+}
+
+// Forget asks to forget the task with goal ID ID.
+type Forget struct {
+	Token string `json:"token"`
+	ID    string `json:"id"`
 }
 
 // AskResume asks to resume Grant from Pause, as the page showed it.

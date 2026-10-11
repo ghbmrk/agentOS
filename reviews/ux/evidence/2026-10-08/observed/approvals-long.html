@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>AgentOS</title>
+<style>
+:root { --fg: #111; --bg: #fff; --muted: #555; --line: #ccc; --accent: #0a58ca; --bad: #b00020; }
+@media (prefers-color-scheme: dark) { :root { --fg: #eee; --bg: #121212; --muted: #aaa; --line: #444; --accent: #6ea8fe; --bad: #ff6b81; } }
+body { font: 17px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); margin: 0; padding: 16px; max-width: 34em; }
+h1 { font-size: 1.4em; margin: .2em 0 .6em; } h2 { font-size: 1.1em; }
+.muted { color: var(--muted); font-size: .9em; } .err { color: var(--bad); } .ok { font-weight: 600; }
+input[type=text], input[type=password], input[type=tel], select { font: inherit; width: 100%; box-sizing: border-box; padding: .6em; margin: .3em 0 .8em; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+button, .button { font: inherit; display: inline-block; padding: .7em 1.2em; border-radius: 8px; border: 0; background: var(--accent); color: #fff; text-decoration: none; margin: .2em 0; }
+button.plain { background: none; color: var(--accent); padding: .4em 0; }
+.stop { background: var(--bad); }
+.qr { width: 220px; height: 220px; display: block; margin: .6em 0; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
+form { margin: .6em 0 1.2em; }
+.card { border-top: 1px solid var(--line); padding-top: .4em; }
+</style></head><body>
+<h1>Approvals</h1>
+
+<section class="card"><h2>A1 <span class="muted">Answer before 14:15</span></h2>
+
+<p><b>send</b> report_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf</p>
+<p>To 1 recipient, exactly as the action uses them:</p><ul><li class="mono">finance@example.test</li></ul>
+
+<p class="muted">Cannot be undone.</p>
+<form method="post" action="/approvals/"><input type="hidden" name="id" value="A1"><input type="hidden" name="tok" value="2669cdde0f3573f7979f4d3be6fceedc94ffe0f768defa8d355e8d1c6d05de40"><input type="hidden" name="sum" value="synthetic-request-one">
+<p>Approving lets your agent send report_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf.</p>
+<label>Code from your code generator (not the one I texted), to approve<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
+<button name="answer" value="approve">Approve</button> <button name="answer" value="deny" class="stop">Deny</button></form></section>
+<section class="card"><h2>A2 <span class="muted">Answer before 14:16</span></h2>
+
+<p><b>send</b> Corrected report</p>
+<p>To 1 recipient, exactly as the action uses them:</p><ul><li class="mono">reviewer@example.test</li></ul>
+
+<p class="muted">Cannot be undone.</p>
+<form method="post" action="/approvals/"><input type="hidden" name="id" value="A2"><input type="hidden" name="tok" value="903da1c0c2045f12464012dca747fff5bf45097653f3aca3b8406e52eb73a077"><input type="hidden" name="sum" value="synthetic-request-two">
+<p>Approving lets your agent send Corrected report.</p>
+<label>Code from your code generator (not the one I texted), to approve<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
+<button name="answer" value="approve">Approve</button> <button name="answer" value="deny" class="stop">Deny</button></form></section>
+
+<p class="muted">Each answer here is texted to you.</p>
+<p><a href="/home">More</a> · <a href="/status">Status</a></p>
+<p class="muted">Box page: <span class="mono">http://10.42.0.1/</span></p></body></html>

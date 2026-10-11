@@ -1,6 +1,6 @@
 package main
 
-// REQ: OSS-10, CH-3
+// REQ: OSS-10, CH-3, UPD-8
 
 import (
 	"context"
@@ -99,7 +99,7 @@ func TestOSS10w2FollowSettingFlags(t *testing.T) {
 	}
 
 	// Before the clock guard runs, nothing is described.
-	if sum, err := cfg.PageSocket.DescribeRoot(context.Background(), b); err == nil || sum.Digest != "" || sum.Reason != "" {
+	if sum, err := cfg.PageSocket.DescribeRoot(context.Background(), b, nil); err == nil || sum.Digest != "" || sum.Reason != "" {
 		t.Fatalf("described without a clock guard: %+v %v", sum, err)
 	}
 	// With no owner channel the alert fails and is held (STATUS shows it).
@@ -194,10 +194,49 @@ func TestOSS10w2DescribeProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if sum, err := s.describe(ctx, b); err != nil || !sum.Project {
+	if sum, err := s.describe(ctx, b, nil); err != nil || !sum.Project {
 		t.Fatalf("shipped root: %+v %v", sum, err)
 	}
-	if sum, err := s.describe(ctx, followRoot(t)); err != nil || sum.Project || sum.Digest == "" {
+	if sum, err := s.describe(ctx, followRoot(t), nil); err != nil || sum.Project || sum.Digest == "" {
 		t.Fatalf("fork root: %+v %v", sum, err)
+	}
+}
+
+// OSS-10w-r: the page's bound on brought root files is the updater's, and
+// describe hands the executor the chain (one over the bound is refused).
+func TestOSS10wrDescribePassesTheChain(t *testing.T) {
+	if localapi.MaxRootChain != update.MaxRootRotations {
+		t.Fatalf("page bound %d, updater bound %d", localapi.MaxRootChain, update.MaxRootRotations)
+	}
+	shipped := filepath.Join(t.TempDir(), "root.json")
+	b := followRoot(t)
+	if err := os.WriteFile(shipped, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "box")
+	if _, err := update.InitStore(dir, b, 0); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	g, err := clock.New(clock.Config{
+		Synced:  func() (bool, error) { return true, nil },
+		Carrier: func(context.Context) (time.Time, error) { return now, nil },
+		Now:     func() time.Time { return now },
+		Elapsed: func() time.Duration { return time.Hour },
+		BootID:  func() string { return "boot" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Check(context.Background())
+	s, err := newFollowSetting(dir, shipped, func() *clock.Guard { return g })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.describe(context.Background(), b, make([][]byte, update.MaxRootRotations+1)); err == nil {
+		t.Fatal("a chain over the bound reached no check")
+	}
+	if sum, err := s.describe(context.Background(), b, [][]byte{b}); err != nil || !sum.Project {
+		t.Fatalf("%+v %v", sum, err)
 	}
 }

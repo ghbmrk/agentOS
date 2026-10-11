@@ -40,6 +40,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -103,6 +104,33 @@ func (g grants) Set(v string) error {
 	return nil
 }
 
+// withGrants sets c's fields that follow the grants: the proxy it builds
+// over an open vault, and whether a model provider is granted (OP-9 C2).
+func withGrants(c *custody, g grants) *custody {
+	c.build = func(v *vault.Vault) (*egress.Proxy, error) { return newProxy(v, g, nil) }
+	c.granted = modelGranted(g)
+	return c
+}
+
+// modelProviders are the providers the model router serves.
+func modelProviders() []route.Provider { return []route.Provider{route.OpenAI(), route.Anthropic()} }
+
+// modelGranted reports whether some machine has a model provider granted:
+// an adapter the router serves (newRouter). Without one the agent has no
+// model route at all (OP-9 C2, A11's no-grant cause).
+func modelGranted(g grants) bool {
+	for _, as := range g {
+		for _, a := range as {
+			for _, p := range modelProviders() {
+				if a == p.Name() {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // adapters are the built-in relays. Their credentials are vault entries of
 // kind api_key named after the adapter.
 func adapters() []egress.Adapter {
@@ -142,7 +170,7 @@ func builderGrants(g grants, from string) (grants, error) {
 		return out, nil
 	}
 	if strings.HasPrefix(from, modelroute.BuilderPrefix) || strings.HasPrefix(from, modelroute.EvalPrefix) {
-		return nil, fmt.Errorf("-builder-from %s: name the agent machine whose grants builders use", from)
+		return nil, fmt.Errorf("-builder-from %s: name the owner's agent machine, whose grants builders use", from)
 	}
 	if len(g[from]) == 0 {
 		return nil, fmt.Errorf("-builder-from %s: that machine has no -grant", from)
@@ -167,7 +195,7 @@ func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderF
 	// -eval-from names an agent machine: never a builder's grants key or a
 	// replay machine (security R1 on #126).
 	if strings.HasPrefix(evalFrom, modelroute.BuilderPrefix) || strings.HasPrefix(evalFrom, modelroute.EvalPrefix) {
-		return nil, nil, fmt.Errorf("-eval-from %s: name the agent machine whose grants replay uses", evalFrom)
+		return nil, nil, fmt.Errorf("-eval-from %s: name the owner's agent machine, whose grants replay uses", evalFrom)
 	}
 	for m := range g {
 		if strings.HasPrefix(m, modelroute.EvalPrefix) {
@@ -187,7 +215,7 @@ func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderF
 
 func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
 	return route.New(route.Config{
-		Providers: []route.Provider{route.OpenAI(), route.Anthropic()},
+		Providers: modelProviders(),
 		Rule:      rule,
 		Granted: func(machine, provider string) bool {
 			for _, a := range g[grantsKey(machine)] {
@@ -276,8 +304,8 @@ func serveCmd(args []string) error {
 	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7); adoptions may only reorder its routes")
 	routingPath := fs.String("routing-state", "", "the adopted routing rule, kept across restarts (W3); default routing.json beside the keys")
 	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
-	builderFrom := fs.String("builder-from", "", "the agent machine whose model grants Loop 1's builder machines (lb-) use, always as private data (W3-builder); empty (the default) gives builders no model access")
-	evalFrom := fs.String("eval-from", "", "the agent machine whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
+	builderFrom := fs.String("builder-from", "", "the owner's agent machine, whose model grants Loop 1's builder machines (lb-) use, always as private data (W3-builder); empty (the default) gives builders no model access")
+	evalFrom := fs.String("eval-from", "", "the owner's agent machine, whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
 	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")
@@ -335,19 +363,18 @@ func serveCmd(args []string) error {
 	if *polPath == "" {
 		*polPath = filepath.Join(filepath.Dir(*keysPath), "vault.pcrpolicy")
 	}
-	c, err := newCustody(&custody{
+	c, err := newCustody(withGrants(&custody{
 		keysPath: *keysPath,
 		open: func(p string) (*vault.Vault, error) {
 			return vault.OpenSealed(*vaultPath, *keysPath, vault.Passphrase(p))
 		},
-		build:     func(v *vault.Vault) (*egress.Proxy, error) { return newProxy(v, g, nil) },
 		ttl:       *ttl,
 		now:       time.Now,
 		notify:    func(s string) { log.Print(s) },
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 		owner:     *ownerNumber,
-	})
+	}, g))
 	if err != nil {
 		return err
 	}
@@ -362,6 +389,14 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	mailLn, err := serveMail(*run, c, *brokerUID)
+	if err != nil {
+		for _, s := range srvs {
+			s.Close()
+		}
+		return err
+	}
+	defer mailLn.Close()
 	if *modemUID >= 0 {
 		sign, err := serveSign(*run, c, *modemUID)
 		if err != nil {
@@ -462,9 +497,9 @@ func initCmd(args []string, out io.Writer) error {
 	// The unlock state goes in place before the keys make the vault
 	// openable, so serve can require it (newCustody).
 	if _, err := os.Lstat(*keysPath); err == nil {
-		return fmt.Errorf("%s already exists; this box already has a vault", *keysPath)
+		return fmt.Errorf("%s already exists; a vault is already set up here", *keysPath)
 	}
-	if err := writeFileAtomic(*statePath, []byte("{}")); err != nil {
+	if err := durable.WriteFile(*statePath, []byte("{}"), 0o600); err != nil {
 		return err
 	}
 	if err := sealNew(*vaultPath, *keysPath, pass, seed, *setup); err != nil {
@@ -494,7 +529,7 @@ func statePathFor(keysPath string) string {
 // so init reports it for removal rather than leaving the owner stuck.
 func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
 	if _, err := os.Lstat(keysPath); err == nil {
-		return fmt.Errorf("%s already exists; this box already has a vault", keysPath)
+		return fmt.Errorf("%s already exists; a vault is already set up here", keysPath)
 	}
 	if _, err := os.Lstat(vaultPath); err == nil {
 		return fmt.Errorf("%s exists without its keys file (an earlier init did not finish); it cannot be opened: remove it and run init again", vaultPath)
@@ -515,29 +550,17 @@ func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
 	}
 	v.Close()
 	if err == nil {
-		err = os.Rename(vt, vaultPath)
+		err = durable.Rename(vt, vaultPath)
 	}
 	if err == nil {
-		err = os.Rename(kt, keysPath)
+		err = durable.Rename(kt, keysPath)
 	}
 	if err != nil {
 		os.Remove(vt)
 		os.Remove(kt)
 		return err
 	}
-	return syncDir(filepath.Dir(keysPath))
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	serr := d.Sync()
-	if err := d.Close(); serr == nil {
-		serr = err
-	}
-	return serr
+	return nil
 }
 
 func b32() *base32.Encoding { return base32.StdEncoding.WithPadding(base32.NoPadding) }
@@ -603,7 +626,7 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 		} else if st["updated"] == true {
 			fmt.Fprintln(out, "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.")
 		} else {
-			fmt.Fprintln(out, "This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
+			fmt.Fprintln(out, "This PC started me in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
 		}
 		// Never ticked by default: updated and secure_boot come from
 		// files on the drive, not from a verified release's measured
@@ -692,8 +715,8 @@ func trustCmd(args []string, in io.Reader, out io.Writer) error {
 	code, _ := r.ReadString('\n')
 	var pin string
 	if *withPIN {
-		fmt.Fprintln(out, "With a PIN, the box won't restart by itself after a power cut until you enter the PIN.")
-		fmt.Fprintln(out, "This also locks this PC's TPM reset to the box until you turn the PIN off.")
+		fmt.Fprintln(out, "With a PIN, I won't restart by myself after a power cut until you enter the PIN.")
+		fmt.Fprintln(out, "This also locks this PC's TPM reset to me until you turn the PIN off.")
 		fmt.Fprint(out, "New boot PIN: ")
 		pin, _ = r.ReadString('\n')
 		pin = strings.TrimSpace(pin)

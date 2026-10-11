@@ -1,0 +1,1 @@
+{"tree_rule": [{"path": "procedures/refunds.json", "pointer": "/max_amount_eur", "op": "le", "value": 50}]}

@@ -1,0 +1,5 @@
+{
+  "target": {"kind": "grant", "name": "payments", "label": "card payments"},
+  "subject": "payment-limit",
+  "detail": "a payment procedure may spend far over the owner's limit"
+}

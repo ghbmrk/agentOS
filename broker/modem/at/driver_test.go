@@ -592,7 +592,7 @@ func TestSIMNetworkAndSignalAreReportedInPlainWords(t *testing.T) {
 			want       string
 		}{
 			{3, 15, "The carrier refused the SIM. Check it is activated."},
-			{2, 99, "No mobile signal here. Move the box nearer a window."},
+			{2, 99, "No mobile signal here. Move me nearer a window."},
 			{2, 12, "Looking for the mobile network."},
 			{5, 12, "Connected to a partner network (roaming), signal 2 of 4."},
 			// LTE registered for texts only, or for emergency calls only.

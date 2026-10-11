@@ -22,7 +22,7 @@ func TestStrictForEmptyClasses(t *testing.T) {
 		}
 	}
 	if strictFor(Upstream, []Class{ClassHostImage}).heldOut {
-		t.Fatal("an image may still be not evaluated on this box")
+		t.Fatal("an image may still be not evaluated here")
 	}
 }
 

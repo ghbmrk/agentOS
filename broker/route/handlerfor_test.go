@@ -17,7 +17,7 @@ func (r *rig) doFor(t *testing.T, machine, label string, audit func(Decision)) *
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(simpleChat))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	r.router.HandlerFor(machine, label, r.px.HandlerFor(machine, label, r), audit).ServeHTTP(w, req)
+	r.router.HandlerFor(machine, label, r.px.HandlerFor(machine, label, r), audit).ServeHTTP(w, anyAttempt(req))
 	return w
 }
 

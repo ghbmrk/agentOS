@@ -1,0 +1,10 @@
+=== RUN   TestSetupMinimumPath
+--- PASS: TestSetupMinimumPath (0.00s)
+=== RUN   TestSetupResumesAfterRestart
+--- PASS: TestSetupResumesAfterRestart (0.00s)
+=== RUN   TestOnlyThePairedPhoneContinuesSetup
+--- PASS: TestOnlyThePairedPhoneContinuesSetup (0.00s)
+=== RUN   TestCardCodePairingIsClaimedWithThePageCode
+--- PASS: TestCardCodePairingIsClaimedWithThePageCode (0.00s)
+PASS
+ok  	github.com/ghbmrk/agentos/broker/localui	0.303s

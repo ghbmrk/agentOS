@@ -333,8 +333,8 @@ func TestOwnerLineNoteForTheLocalPage(t *testing.T) {
 	}
 	for st, want := range map[string]string{
 		bridgeproto.StateDown:    "I can't reach my phone modem. Check it's plugged in.",
-		bridgeproto.StateSwapped: "The SIM in my phone modem changed. Texts to and from you are paused until you confirm it on my Wi-Fi page.",
-		bridgeproto.StateUnbound: "My phone modem has no SIM, or its number isn't set up. Set it up on my Wi-Fi page.",
+		bridgeproto.StateSwapped: "The SIM in my phone modem changed, and I can't read it. Texts to and from you are paused. Check the SIM is in properly.",
+		bridgeproto.StateUnbound: "My phone modem has no SIM I can read. Put the SIM for my number in it.",
 	} {
 		call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: st}, nil)
 		if n := l.OwnerLineNote(); n != want {
@@ -545,5 +545,89 @@ func TestATextOfferedAgainMinutesLaterIsTakenOnce(t *testing.T) {
 	case m := <-l.Inbox():
 		t.Fatalf("taken twice: %+v", m)
 	default:
+	}
+}
+
+const newSIM = "89012600000000012345"
+
+// P2-2w d2b, UX U-B1 (P2-3w carry): a swapped or unbound line with a SIM
+// the bridge can read says so and points below, at the page's control;
+// the page is told only a tag and the serial's last four digits, never
+// the serial (the local UI is treated as compromised).
+func TestASIMToConfirmIsOfferedBelow(t *testing.T) {
+	l, _ := rig(t)
+	if tag, ends := l.SIM(); tag != "" || ends != "" {
+		t.Fatalf("a SIM offered while ok: %q %q", tag, ends)
+	}
+	for st, want := range map[string]string{
+		bridgeproto.StateSwapped: "The SIM in my phone modem changed. Texts to and from you are paused until you confirm it below.",
+		bridgeproto.StateUnbound: "My phone modem's SIM isn't set up as my number yet. Set it up below.",
+	} {
+		call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: st, ICCID: newSIM}, nil)
+		if n := l.OwnerLineNote(); n != want {
+			t.Errorf("%s: %q", st, n)
+		}
+		tag, ends := l.SIM()
+		if ends != "2345" || len(tag) != 16 || strings.Contains(tag, "2345") {
+			t.Errorf("%s: SIM() = %q, %q", st, tag, ends)
+		}
+	}
+	// An ok line, or a down one, offers nothing, whatever it carries.
+	for _, st := range []string{bridgeproto.StateOK, bridgeproto.StateDown} {
+		call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: st, ICCID: newSIM}, nil)
+		if tag, _ := l.SIM(); tag != "" {
+			t.Errorf("%s: a SIM offered", st)
+		}
+	}
+	// A serial that is not one is refused, as any bad state is.
+	if err := call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateSwapped, ICCID: "8901 x"}, nil); err == nil {
+		t.Fatal("a malformed serial was taken")
+	}
+}
+
+// P2-2w d2b, CH-19: adopting records exactly the serial the bridge
+// reported, and only for the tag the page showed: a SIM changed since, or
+// a line no longer swapped or unbound, is refused and nothing is recorded.
+func TestAdoptRecordsOnlyTheShownSIM(t *testing.T) {
+	var got []string
+	clk := &clock{t: time.Date(2026, 10, 5, 13, 5, 0, 0, time.UTC)}
+	l := New(Config{Owner: ownerNum, Now: clk.now, Record: func(iccid string) error { got = append(got, iccid); return nil }})
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateSwapped, ICCID: newSIM}, nil)
+	tag, _ := l.SIM()
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateSwapped, ICCID: "89012600000000099999"}, nil)
+	if err := l.Adopt(tag); !errors.Is(err, ErrStale) {
+		t.Fatalf("adopt after the SIM changed: %v", err)
+	}
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateSwapped, ICCID: newSIM}, nil)
+	if err := l.Adopt(""); !errors.Is(err, ErrStale) {
+		t.Fatalf("adopt with no tag: %v", err)
+	}
+	if err := l.Adopt(tag); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if len(got) != 1 || got[0] != newSIM {
+		t.Fatalf("recorded %q", got)
+	}
+	// Until the bridge opens the new SIM, the page says it is under way and
+	// offers nothing more.
+	if n := l.OwnerLineNote(); n != "Setting up the SIM ending in 2345 as my number. Texts with you start again within a minute." {
+		t.Fatalf("note after adopting: %q", n)
+	}
+	if tag, _ := l.SIM(); tag != "" {
+		t.Fatal("a SIM offered again after adopting")
+	}
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	if err := l.Adopt(tag); !errors.Is(err, ErrStale) {
+		t.Fatalf("adopt on an ok line: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("recorded %q", got)
+	}
+	// A box without a recorder refuses.
+	l2, _ := rig(t)
+	call(t, l2, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateUnbound, ICCID: newSIM}, nil)
+	tag2, _ := l2.SIM()
+	if err := l2.Adopt(tag2); err == nil || errors.Is(err, ErrStale) {
+		t.Fatalf("adopt with no recorder: %v", err)
 	}
 }

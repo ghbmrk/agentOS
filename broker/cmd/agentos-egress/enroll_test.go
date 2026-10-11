@@ -313,15 +313,18 @@ func TestEnrollOverTheVerifySocket(t *testing.T) {
 // from plain `init`, from REC-3's re-enroll or from before c1 has no
 // setup-open entry, so a taken-over agentosd cannot swap the owner's seed
 // for one it holds (CRED-8, CH-6).
+//
+// P2-2w c2 r1: such a vault answers "not open" (412), apart from "sealed"
+// (410), so setup can tell the owner it cannot finish on this box.
 func TestEnrollIsClosedOutsideSetupMode(t *testing.T) {
 	r := openRig(t)
-	if _, err := r.c.enroll(); err != errEnrolled {
+	if _, err := r.c.enroll(); err != errNotOpen {
 		t.Fatalf("enroll without setup mode: %v", err)
 	}
-	if _, err := r.c.confirmEnroll(r.code()); err != errEnrolled {
+	if _, err := r.c.confirmEnroll(r.code()); err != errNotOpen {
 		t.Fatalf("confirm without setup mode: %v", err)
 	}
-	if err := r.c.sealEnroll(); err != errEnrolled {
+	if err := r.c.sealEnroll(); err != errNotOpen {
 		t.Fatalf("seal without setup mode: %v", err)
 	}
 	if _, ok := r.c.v.Secret(PendingSeedName); ok {
@@ -359,5 +362,55 @@ func TestEnrollIsClosedOutsideSetupMode(t *testing.T) {
 		if printed := strings.Contains(out.String(), "otpauth://"); printed == setup {
 			t.Fatalf("init -setup=%v: seed printed %v", setup, printed)
 		}
+	}
+}
+
+// P2-2w c2 r1 (L3 on #367): "sealed by setup" and "not open" are told
+// apart over the socket, and only a seal entry of its own kind counts as
+// sealed; anything else in its place is not open, never sealed.
+func TestNotOpenIsAnsweredApartFromSealed(t *testing.T) {
+	r := openRig(t)
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	}()
+	v := modelroute.NewVerifier(filepath.Join(run, VerifySocket))
+	if _, err := v.Enroll(); err != modelroute.ErrEnrollNotOpen {
+		t.Fatalf("enroll on a vault never opened: %v", err)
+	}
+	if _, err := v.ConfirmEnroll("000000"); err != modelroute.ErrEnrollNotOpen {
+		t.Fatalf("confirm on a vault never opened: %v", err)
+	}
+	if err := v.SealEnroll(); err != modelroute.ErrEnrollNotOpen {
+		t.Fatalf("seal on a vault never opened: %v", err)
+	}
+
+	// A seal entry of the wrong kind, beside an open entry, is not a seal.
+	if err := r.c.v.Put(SetupOpenName, KindSetupOpen, []byte(synthetic(t, "open-"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.v.Put(EnrolledName, KindSetupOpen, []byte(synthetic(t, "mark-"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Enroll(); err != modelroute.ErrEnrollNotOpen {
+		t.Fatalf("enroll beside a wrong-kind seal: %v", err)
+	}
+	if err := r.c.v.Delete(EnrolledName); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.putMark(EnrolledName, KindEnrolled); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Enroll(); err != modelroute.ErrEnrolled {
+		t.Fatalf("enroll on a sealed vault: %v", err)
+	}
+	if err := v.SealEnroll(); err != modelroute.ErrEnrolled {
+		t.Fatalf("seal on a sealed vault: %v", err)
 	}
 }
