@@ -18,7 +18,8 @@ func TestOSS6PubidReachesNoOwnerStoreOrNetwork(t *testing.T) {
 		t.Fatalf("go list: %v\n%s", err, out)
 	}
 	for _, p := range strings.Fields(string(out)) {
-		if strings.HasPrefix(p, "github.com/ghbmrk/agentos/broker/") && p != "github.com/ghbmrk/agentos/broker/pubid" {
+		if strings.HasPrefix(p, "github.com/ghbmrk/agentos/broker/") && p != "github.com/ghbmrk/agentos/broker/pubid" &&
+			p != "github.com/ghbmrk/agentos/broker/durable" { // a stdlib-only leaf (durable.TestLeaf)
 			t.Errorf("pubid links %s", p)
 		}
 		if p == "net" || strings.HasPrefix(p, "net/") || p == "os/exec" || p == "crypto/tls" {

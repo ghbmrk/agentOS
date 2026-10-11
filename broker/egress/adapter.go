@@ -43,6 +43,13 @@ type Operation struct {
 	Method string
 	Path   string
 	Body   *BodyRule
+	// Response, when set, makes the operation a credential exchange (a
+	// broker-held route's token refresh, CRED-5): its response is
+	// forwarded only in this shape, with credentials swapped.
+	Response *ResponseRule
+	// Refused lists response statuses by which the provider refuses the
+	// login (an account restriction). One stops the route (CRED-5t).
+	Refused []int
 }
 
 // The broker's closed verb list (ADP-2), from package verb. An adapter maps
@@ -182,6 +189,11 @@ func (a Adapter) validate() error {
 		}
 		if _, err := splitPath(op.Path); err != nil {
 			return fmt.Errorf("adapter %s: operation %s: %v", a.Name, op.Name, err)
+		}
+		for _, s := range op.Refused {
+			if s < 400 || s > 599 {
+				return fmt.Errorf("adapter %s: operation %s: refusal status %d is not an error", a.Name, op.Name, s)
+			}
 		}
 	}
 	inject := http.CanonicalHeaderKey(a.Inject.Header)
