@@ -377,6 +377,9 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		deny(http.StatusServiceUnavailable, "credential not in vault")
 		return
 	}
+	// The redactor was built at request start; a rotation since then would
+	// inject a key it does not know. Redact the key actually sent.
+	red = red.With([]byte(sec.Reveal()))
 
 	up, err := http.NewRequestWithContext(r.Context(), op.Method, "https://"+a.Host+upPath, bytes.NewReader(body))
 	if err != nil {
