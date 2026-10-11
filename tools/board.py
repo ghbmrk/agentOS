@@ -62,7 +62,7 @@ def _lanes():
     if path.is_file():
         for line in path.read_text().splitlines():
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if line.startswith("|") and len(cells) == 3 and cells[1] not in ("Team", "---"):
+            if line.startswith("|") and len(cells) >= 3 and cells[1] not in ("Team", "---"):
                 teams.append(cells[1].split()[0])
     return tuple(teams) or ("primary",)
 
