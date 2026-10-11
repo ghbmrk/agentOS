@@ -232,7 +232,7 @@ func writeRPC(w http.ResponseWriter, id json.RawMessage, result any, code int, m
 // MCPEffects calls the broker's effect_request tool over MCP. URL is the
 // broker's /mcp endpoint as the guest reaches it.
 type MCPEffects struct {
-	Client *http.Client
+	Client *http.Client // required: nil refuses the request
 	URL    string
 	seq    atomic.Int64
 }
@@ -250,11 +250,12 @@ func (m *MCPEffects) Request(ctx context.Context, e Effect) (State, error) {
 		return State{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	c := m.Client
-	if c == nil {
-		c = http.DefaultClient
+	// No default client: http.DefaultClient would dial the network
+	// unhooked (DEV-2). The caller names the client that reaches the broker.
+	if m.Client == nil {
+		return State{}, errors.New("no client for the broker")
 	}
-	resp, err := c.Do(req)
+	resp, err := m.Client.Do(req)
 	if err != nil {
 		return State{}, err
 	}

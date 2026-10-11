@@ -89,7 +89,7 @@ func TestUnknownHostUnlockThenModelRoute(t *testing.T) {
 		statePath: filepath.Join(dir, "state", "unlock.json"),
 		open:      func(p string) (*vault.Vault, error) { return vault.OpenSealed(vp, kp, vault.Passphrase(p)) },
 		build: func(v *vault.Vault) (*egress.Proxy, error) {
-			return newProxy(v, map[string][]string{"agent": {"openai"}}, tr)
+			return newProxy(v, map[string][]string{"agent": {"openai"}}, tr, nil)
 		},
 		ttl:    15 * time.Minute,
 		now:    clk.now,

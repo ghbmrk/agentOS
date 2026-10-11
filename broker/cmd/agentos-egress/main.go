@@ -43,6 +43,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/smsapi"
@@ -107,7 +108,7 @@ func (g grants) Set(v string) error {
 // withGrants sets c's fields that follow the grants: the proxy it builds
 // over an open vault, and whether a model provider is granted (OP-9 C2).
 func withGrants(c *custody, g grants) *custody {
-	c.build = func(v *vault.Vault) (*egress.Proxy, error) { return newProxy(v, g, nil) }
+	c.build = func(v *vault.Vault) (*egress.Proxy, error) { return newProxy(v, g, nil, c.guard) }
 	c.granted = modelGranted(g)
 	return c
 }
@@ -138,8 +139,10 @@ func adapters() []egress.Adapter {
 }
 
 // newProxy builds the proxy over an open vault. tr is nil outside tests.
-func newProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper) (*egress.Proxy, error) {
+// guard is the process's address policy (netGuard); nil only in tests.
+func newProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper, guard *netguard.Policy) (*egress.Proxy, error) {
 	return egress.New(egress.Config{
+		Guard:     guard,
 		Adapters:  adapters(),
 		Grants:    g,
 		Vault:     apiKeysOnly{v},
@@ -363,7 +366,14 @@ func serveCmd(args []string) error {
 	if *polPath == "" {
 		*polPath = filepath.Join(filepath.Dir(*keysPath), "vault.pcrpolicy")
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	guard, err := netGuard(ctx, &netguard.Sources{}, netWatchEvery)
+	if err != nil {
+		return err
+	}
 	c, err := newCustody(withGrants(&custody{
+		guard:    guard,
 		keysPath: *keysPath,
 		open: func(p string) (*vault.Vault, error) {
 			return vault.OpenSealed(*vaultPath, *keysPath, vault.Passphrase(p))
@@ -382,8 +392,6 @@ func serveCmd(args []string) error {
 	if _, err := egress.New(egress.Config{Adapters: adapters(), Grants: g, Vault: emptyVault{}, Audit: noAudit{}}); err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	ro := &routing{base: base, rt: rt, ev: ev, path: *routingPath}
 	srvs, err := serve(*run, c, rt, ev, ro, *brokerUID, *unlockUID)
 	if err != nil {
