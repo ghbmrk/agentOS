@@ -1,5 +1,5 @@
 """Tests for tools/board.py and tools/board_migrate.py: work items as GitHub issues, BOARD.md
-generated from them (SIM-repo-1, briefs/SIM.md).
+generated from them (SIM-repo-1 and SIM-repo-2, briefs/SIM.md).
 
 No SPEC requirement IDs: process tooling (CLAUDE.md, OPERATING). All data is synthetic.
 """
@@ -8,6 +8,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -49,6 +50,21 @@ LIVE = BOARD.replace("| A-2 | [Done](briefs/A-2.md) | A-1 | merged (#1) |\n", ""
 def issues(text=BOARD):
     """The planned issues, numbered in board order as the migration creates them."""
     return [dict(i, number=n) for n, i in enumerate(board.plan(text), start=100)]
+
+
+def opened(items, by="OWNER"):
+    """Issues as GitHub returns them: with the opener's association to the repository."""
+    return [dict(i, author_association=by) for i in items]
+
+
+def github(items, prs=()):
+    def fetch(path):
+        if path.startswith("/repos/o/r/issues"):
+            return items
+        if path.startswith("/repos/o/r/pulls"):
+            return list(prs)
+        raise AssertionError(path)
+    return fetch
 
 
 class SchemaTest(unittest.TestCase):
@@ -121,6 +137,13 @@ class RoundTripTest(unittest.TestCase):
         with self.assertRaises(ValueError):  # two issues for one ID
             board.render(BOARD, planned)
 
+    def test_a_board_row_block_that_is_not_an_object_is_refused(self):
+        for block in ("[1, 2]", '"text"', "3", "null"):
+            planned = issues()
+            planned[0]["body"] = f"x\n\n```board-row\n{block}\n```\n"
+            with self.assertRaisesRegex(ValueError, "issue #100: board-row block"):
+                board.render(BOARD, planned)
+
     def test_body_text_cannot_leave_its_cell(self):
         def refused(field, value):
             planned = issues()
@@ -186,7 +209,7 @@ class CliTest(unittest.TestCase):
     def test_render_from_github_uses_issues_and_prs(self):
         def fetch(path):
             if path.startswith("/repos/o/r/issues"):
-                return issues() + [{"number": 5, "title": "a pull", "labels": [], "body": "", "pull_request": {}}]
+                return opened(issues()) + [{"number": 5, "title": "a pull", "labels": [], "body": "", "pull_request": {}}]
             if path.startswith("/repos/o/r/pulls"):
                 return [{"number": 20, "title": "A-3: spec", "state": "open", "merged_at": None}]
             raise AssertionError(path)
@@ -196,10 +219,127 @@ class CliTest(unittest.TestCase):
         self.assertEqual((code, out.getvalue()), (0, LIVE))
         self.assertIn("A-3: state queued but PR #20 is open", err.getvalue())
 
+    def run_repo(self, *args, text, items, prs=()):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = board.main([*args, "--repo", "o/r"], read=lambda: text, fetch=github(items, prs))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_only_collaborators_issues_place_rows(self):
+        fake = board.issue({"id": "X-1", "section": "Harness", "cells": ["Fake", "—"],
+                                    "state": "queued", "rest": ""})
+        for by in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", None):
+            outsider = dict(fake, number=999, author_association=by)
+            code, out, err = self.run_repo("render", text=BOARD, items=opened(issues()) + [outsider])
+            self.assertEqual((code, out), (0, LIVE), by)
+            self.assertIn("issue #999: ignored, not opened by a collaborator", err)
+        for by in board.COLLABORATORS:
+            code, out, _ = self.run_repo("render", text=BOARD, items=opened(issues()) + opened([dict(fake, number=999)], by))
+            self.assertIn("| X-1 | Fake |", out, by)
+
+    def test_check_repo_compares_a_generated_board_with_the_live_issues(self):
+        generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
+        self.assertEqual(self.run_repo("check", text=generated, items=opened(issues(generated)))[0], 0)
+        # A hand edit that round-trips through its own planned issues, which plain check accepts,
+        # fails against the live issues.
+        edited = generated.replace("| A-1 | [Pilot](briefs/A-1.md) | — | building", "| A-1 | [Pilot](briefs/A-1.md) | — | in review")
+        self.assertEqual(self.run_tool("check", text=edited)[0], 0)
+        code, _, err = self.run_repo("check", text=edited, items=opened(issues(generated)))
+        self.assertEqual(code, 1)
+        self.assertIn("differs from the live issues", err)
+        self.assertIn("+| A-1 | [Pilot](briefs/A-1.md) | — | building", err)
+        # An issue the committed file lacks fails too, and an outsider's issue cannot pass or fail it.
+        extra = board.issue({"id": "X-1", "section": "Harness", "cells": ["New", "—"], "state": "queued", "rest": ""})
+        self.assertEqual(self.run_repo("check", text=generated, items=opened(issues(generated) + [dict(extra, number=999)]))[0], 1)
+        self.assertEqual(self.run_repo("check", text=generated,
+                                       items=opened(issues(generated)) + opened([dict(extra, number=999)], "NONE"))[0], 0)
+
+    def test_a_board_cannot_drop_the_generated_line_its_base_carries(self):
+        # Generated-ness comes from the base branch: a PR that deletes the line and hand-edits a
+        # row would otherwise fall back to the round trip and pass.
+        generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
+        dropped = LIVE.replace("| A-1 | [Pilot](briefs/A-1.md) | — | building", "| A-1 | [Pilot](briefs/A-1.md) | — | in review")
+        self.assertEqual(self.run_tool("check", text=dropped)[0], 0)
+        with tempfile.TemporaryDirectory() as d:
+            base, plain = pathlib.Path(d, "base.md"), pathlib.Path(d, "plain.md")
+            base.write_text(generated)
+            plain.write_text(LIVE)
+            code, _, err = self.run_repo("check", "--base", str(base), text=dropped, items=opened(issues(generated)))
+            self.assertEqual(code, 1)
+            self.assertIn("drops the GENERATED line", err)
+            self.assertEqual(self.run_repo("check", "--base", str(base), text=generated, items=opened(issues(generated)))[0], 0)
+            # Before the migration, and when the PR adds the line, the base does not constrain it.
+            self.assertEqual(self.run_repo("check", "--base", str(plain), text=BOARD, items=[])[0], 0)
+            self.assertEqual(self.run_repo("check", "--base", str(plain), text=generated, items=opened(issues(generated)))[0], 0)
+
+    def test_board_workflow_and_ci_recognise_the_generated_line(self):
+        workflow = (ROOT / ".github" / "workflows" / "board.yml").read_text()
+        needle = workflow.split("grep -qF '")[1].split("'")[0]
+        self.assertTrue(board.GENERATED.startswith(needle))
+        # Both take generated-ness from the base: ci.yml from the PR's base (or main for
+        # bot/board), board.yml from main before the push.
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIn('board.py check --repo "$GITHUB_REPOSITORY" --base', ci)
+        self.assertIn("HEAD^1:BOARD.md", ci)
+        self.assertIn('git show "$BEFORE:BOARD.md"', workflow)
+        self.assertIn("github.event.before", workflow)
+
+    def test_check_repo_before_the_migration_is_the_round_trip(self):
+        self.assertEqual(self.run_repo("check", text=BOARD, items=[])[0], 0)
+        self.assertEqual(self.run_repo("check", text=BOARD.replace("| — | queued", "|  —  | queued"), items=[])[0], 1)
+
     def test_committed_board_passes_check(self):
         run = subprocess.run([sys.executable, str(ROOT / "tools" / "board.py"), "check"],
                              cwd=ROOT, capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stderr)
+
+
+class RateLimitTest(unittest.TestCase):
+    def test_wait_follows_the_response(self):
+        self.assertEqual(board.rate_limit_wait(403, {"retry-after": "30"}, 0), 30)
+        self.assertEqual(board.rate_limit_wait(429, {"retry-after": "5"}, 0), 5)
+        self.assertEqual(board.rate_limit_wait(403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1100"}, 1000), 101)
+        self.assertEqual(board.rate_limit_wait(429, {}, 0), 60)
+        self.assertIsNone(board.rate_limit_wait(403, {}, 0))  # a permission refusal is not retried
+        self.assertIsNone(board.rate_limit_wait(404, {"retry-after": "1"}, 0))
+
+    def test_call_retries_a_rate_limited_request_then_returns(self):
+        import email.message
+        import urllib.error
+
+        def refused(code, **headers):
+            msg = email.message.Message()
+            for k, v in headers.items():
+                msg[k.replace("_", "-")] = v
+            return urllib.error.HTTPError("https://api.github.com/x", code, "limited", msg, io.BytesIO(b"{}"))
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        answers = [refused(403, retry_after="7"), refused(429, retry_after="2"), Response(b'{"ok": 1}')]
+
+        def urlopen(req):
+            a = answers.pop(0)
+            if isinstance(a, Exception):
+                raise a
+            return a
+        slept = []
+        original, board.urllib.request.urlopen = board.urllib.request.urlopen, urlopen
+        try:
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(board.call("req", sleep=slept.append, now=lambda: 0), {"ok": 1})
+                answers[:] = [refused(403)]
+                with self.assertRaises(urllib.error.HTTPError):
+                    board.call("req", sleep=slept.append, now=lambda: 0)
+                answers[:] = [refused(429, retry_after="1")] * 3
+                with self.assertRaises(urllib.error.HTTPError):
+                    board.call("req", sleep=slept.append, now=lambda: 0, tries=3)
+        finally:
+            board.urllib.request.urlopen = original
+        self.assertEqual(slept, [7, 2, 1, 1])
 
 
 class MigrateTest(unittest.TestCase):
@@ -211,20 +351,28 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual((code, calls), (0, []))
         self.assertIn("dry run: 4 issues", out.getvalue())
         self.assertIn("round trip: ok", out.getvalue())
+        self.assertIn("4 notifications, one per issue", out.getvalue())
 
     def test_apply_creates_labels_then_issues_in_board_order_and_skips_existing(self):
-        calls = []
+        calls, paused = [], []
+        live = {i["title"].split(":")[0]: dict(i, number=n) for n, i in enumerate(board.plan(BOARD), start=1)}
+        repo = [live["A-3"]]
 
         def api(method, path, payload=None):
             calls.append((method, path, payload))
             if method == "GET" and path.startswith("/repos/o/r/labels"):
                 return [{"name": "state:queued"}]
             if method == "GET" and path.startswith("/repos/o/r/issues"):
-                return [{"number": 7, "title": "A-3: Spec diff", "labels": [{"name": board.MARKER}]}]
+                return opened(sorted(repo, key=lambda i: i["number"]))
+            if method == "POST" and path == "/repos/o/r/issues":
+                repo.append(live[payload["title"].split(":")[0]])
             return {}
-        with redirect_stdout(io.StringIO()):
-            code = board_migrate.main(["--apply", "--repo", "o/r"], read=lambda: BOARD, api=api)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board_migrate.main(["--apply", "--repo", "o/r"], read=lambda: BOARD, api=api, pause=paused.append)
         self.assertEqual(code, 0)
+        self.assertIn("read back: every live row has one issue", out.getvalue())
+        self.assertEqual(paused, [1, 1])  # between the three new issues
         made = [c[2]["name"] for c in calls if c[:2] == ("POST", "/repos/o/r/labels")]
         self.assertNotIn("state:queued", made)
         self.assertEqual(set(made) | {"state:queued"}, set(board.LABELS))
@@ -232,6 +380,16 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(created, ["A-1", "W-1", "W-3"])
         first_issue = next(n for n, c in enumerate(calls) if c[:2] == ("POST", "/repos/o/r/issues"))
         self.assertTrue(all(c[:2] != ("POST", "/repos/o/r/labels") for c in calls[first_issue:]))
+
+    def test_apply_fails_when_the_issues_do_not_read_back_as_the_board(self):
+        def api(method, path, payload=None):
+            if method == "GET" and path.startswith("/repos/o/r/issues"):
+                return []  # nothing reads back: the creates did not land, or not as collaborator issues
+            return [] if method == "GET" else {}
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+            code = board_migrate.main(["--apply", "--repo", "o/r"], read=lambda: BOARD, api=api, pause=lambda s: None)
+        self.assertEqual(code, 1)
+        self.assertIn("do not render BOARD.md's live rows", err.getvalue())
 
     def test_apply_needs_a_repo(self):
         with redirect_stderr(io.StringIO()):

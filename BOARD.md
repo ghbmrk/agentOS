@@ -66,9 +66,10 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-shred | [Forget by deleting a per-subject key; reaches backups and snapshots](briefs/SIM.md#sim-shred-forget-by-deleting-a-per-subject-key-tier-a) | SIM-erase, SIM-proj, SIM-sd | queued (A) |
 | SIM-policy | [Policy as data with one match-and-compare evaluator](briefs/SIM.md#sim-policy-policy-as-data-one-evaluator-tier-a) | SIM-outcome, SIM-pull, SIM-core | queued (A) |
 | SIM-cap | [Capability grants scoped per intent](briefs/SIM.md#sim-cap-capability-grants-scoped-per-intent-tier-a) | SIM-core, SIM-check, SIM-policy | queued (A) |
-| SIM-sim | [Deterministic simulation of the broker, judged by SIM-check](briefs/SIM.md#sim-sim-deterministic-simulation-of-the-broker-tier-a) | SIM-check (second half) | queued (brief ready; tier A) |
-| SIM-repo-1 | [Work items as GitHub issues; BOARD generated; migration dry run](briefs/SIM.md#sim-repo-1-work-items-as-github-issues-board-generated-tier-a) | — | in review (tier A) |
-| SIM-repo-2 | [Migrate; METRICS generated; doclint board rules retired](briefs/SIM.md#sim-repo-2-migrate-generate-metrics-and-trace-retire-doclints-board-rules-tier-a) | SIM-repo-1 | queued (A) |
+| SIM-sim | [Deterministic simulation of the broker, judged by SIM-check](briefs/SIM.md#sim-sim-deterministic-simulation-of-the-broker-tier-a) | SIM-check (second half) | building (first half: harness, PR pending; tier A) |
+| SIM-repo-1 | [Work items as GitHub issues; BOARD generated; migration dry run](briefs/SIM.md#sim-repo-1-work-items-as-github-issues-board-generated-tier-a) | — | merged (#721) |
+| SIM-repo-2 | [Collaborator-only work items; CI and board.yml enforce the generated board; safe migration](briefs/SIM.md#sim-repo-2-migrate-generate-metrics-and-trace-retire-doclints-board-rules-tier-a) | SIM-repo-1 | in review (A; #738) |
+| SIM-repo-2b | [Migrate; BOARD history archived; LATER and MARK-QUEUE as labels; doclint board rules retired](briefs/SIM.md#sim-repo-2-migrate-generate-metrics-and-trace-retire-doclints-board-rules-tier-a) | SIM-repo-2, Mark's tap on the migration card, stage-2 main ruleset live (required `checks`, strict; #738 Security 4a) | queued (A; Mark approves) |
 
 ## Security and architecture review (2026-10-08)
 
@@ -387,6 +388,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | ADP-8 | [Adapter mismatch check and the §11 adapter path](briefs/ADP-8.md) | P3-1, P2-7 | in review (#208: mismatch check only; wiring and ADP-6 are ADP-8b) |
 | ADP-8b | [Wire the demo mismatch check into §11 adoption](briefs/ADP-8b.md): call `Mismatch` on adoption, set `Outbound` from observed egress, ADP-6 half, end-to-end A13 test (release, tier A, A13; L3, Potency and Security on #208) | ADP-8 | queued |
 | ADP-5 | [Desktop-app executor, Linux](briefs/ADP-5.md) | CRED-4b | queued (blocked on CRED-4b; lane claude2) |
+| CRED-12 | [Computer-use retry before the owner: a failed executor step is retried once with OS-level input in the same browser, without automation markers, before it reaches the owner](briefs/CRED-12.md) (stub; Mark's decision 2026-10-10; tier A) | CRED-4b part 2, ADP-5, ADP-14a; spec-diff on this PR | queued (A; blocked on CRED-4b part 2) |
 | OSS-6 | [Publication identity](briefs/OSS-6.md) | P4-1, P4-4 | merged (#163, 8a67351) |
 | OSS-6s | [Publication sender](briefs/OSS-6s.md) | OSS-6 | dropped (split into OSS-6s-a and OSS-6s-b on #325) |
 | OSS-6s-a | [Constant daily batch, idempotent ledger, cover send](briefs/OSS-6s-a.md) | OSS-6 | merged (6790cf4; #411) |
@@ -609,3 +611,14 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | ADP-15a | One desktop over separate executors (ADP-15; brief to write; lane claude2) | CRED-11a, ADP-5 | queued (A) |
 | ADP-16a | Suite executor (ADP-16; brief to write; lane claude2) | ADP-5 | queued (A) |
 | UPD-7t | Soak plus attestations test and marker (UPD-7; brief to write) | — | queued (C) |
+| CH-5v | [Live calls and codes on calls](briefs/CH-5v.md) (CH-5, CH-17; stub; simulator slice first, hardware qualification on S2) | S2, P2-3w | queued (A) |
+| CAP-4c | [Calendar as an event source](briefs/CAP-4c.md) (CAP-4; stub; read-only adapter first) | P3-3 | queued (A) |
+
+## Outside-the-box limits (2026-10-10)
+
+Promoted by Mark on 2026-10-10 ("Can just become a row", "Just bypass gap list"; Questions thread), so the D-086 scope freeze (SPEC §14) is met by his explicit promotion. SPEC has no requirement yet; the brief carries the proposed text for a later spec-diff PR that Mark approves.
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| PAYCAP-1 | [A spending limit set outside the box: the box pays with one card whose limit the owner's bank enforces, a backstop that holds if the broker is compromised](briefs/PAYCAP-1.md) (stub; no friction in normal use; declines reach the owner as a digest line) | — | queued (A) |
+| PAYCAP-2 | [An optional Link agent-wallet payment adapter: one spend request and one-time card per purchase, approval as a state so Stripe's announced limits only make it instant; Step 0 checks that the API is open to self-hosted apps, its regions and merchant coverage](briefs/PAYCAP-2.md) (stub; failures are digest lines with a checkout-link fallback) | PAYCAP-1 | queued (A) |
