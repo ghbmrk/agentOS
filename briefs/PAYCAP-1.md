@@ -9,7 +9,7 @@ Board section: Outside-the-box limits (2026-10-10).
 No card provider is named in SPEC, the row or the tests (a named provider is a dependency and a security risk, Mark, 2026-10-10).
 
 **Intended UX.**
-1. No setup step. The card is asked for just in time, the first time a task needs to pay (as SPEC's setup step 8 does for other grants); ONB-3 is unchanged.
+1. Upfront, optional, not on the minimum path. The card is offered on the optional setup screen after "All set" (**Set up** or **Later**); if skipped, it is asked for just in time, the first time a task needs to pay (SPEC step 8). Mark's decision (2026-10-10, Questions thread): just-in-time setup is for rarely used credentials; frequently used ones such as payment are set up together, upfront. One optional setup screen comes right after "All set" (SPEC step 7), listing frequently used accounts; payments come first (the bank-limited card), and other common accounts can join later. Each gets **Set up** or **Later**, as the optional mailbox does (SPEC.md:309). Anything skipped falls back to step 8 just-in-time (SPEC.md:310). The ONB-3 minimum path (SPEC.md:312) is unchanged. This touches ONB-1/ONB-3 and steps 7 and 8, so it joins the CH-10 change in the owed spec-diff PR that Mark approves; SPEC.md is not edited here.
 2. The Wi-Fi page offers "Use a card with a spending limit set by your bank" (recommended), or "my own card" with the one line "no limit outside the box". The owner enters the number and the limit, then confirms with an approval code (a CH-10 high-risk grant). Card details are entered only there, never by text (CH-6).
 3. A text confirms the card's last four digits and the limit.
 4. Day to day nothing changes.

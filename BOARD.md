@@ -388,6 +388,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | ADP-8 | [Adapter mismatch check and the §11 adapter path](briefs/ADP-8.md) | P3-1, P2-7 | in review (#208: mismatch check only; wiring and ADP-6 are ADP-8b) |
 | ADP-8b | [Wire the demo mismatch check into §11 adoption](briefs/ADP-8b.md): call `Mismatch` on adoption, set `Outbound` from observed egress, ADP-6 half, end-to-end A13 test (release, tier A, A13; L3, Potency and Security on #208) | ADP-8 | queued |
 | ADP-5 | [Desktop-app executor, Linux](briefs/ADP-5.md) | CRED-4b | queued (blocked on CRED-4b; lane claude2) |
+| CRED-12 | [Computer-use retry before the owner: a failed executor step is retried once with OS-level input in the same browser, without automation markers, before it reaches the owner](briefs/CRED-12.md) (stub; Mark's decision 2026-10-10; tier A) | CRED-4b part 2, ADP-5, ADP-14a; spec-diff on this PR | queued (A; blocked on CRED-4b part 2) |
 | OSS-6 | [Publication identity](briefs/OSS-6.md) | P4-1, P4-4 | merged (#163, 8a67351) |
 | OSS-6s | [Publication sender](briefs/OSS-6s.md) | OSS-6 | dropped (split into OSS-6s-a and OSS-6s-b on #325) |
 | OSS-6s-a | [Constant daily batch, idempotent ledger, cover send](briefs/OSS-6s-a.md) | OSS-6 | merged (6790cf4; #411) |
@@ -620,3 +621,4 @@ Promoted by Mark on 2026-10-10 ("Can just become a row", "Just bypass gap list";
 | ID | Package | Needs | State |
 |---|---|---|---|
 | PAYCAP-1 | [A spending limit set outside the box: the box pays with one card whose limit the owner's bank enforces, a backstop that holds if the broker is compromised](briefs/PAYCAP-1.md) (stub; no friction in normal use; declines reach the owner as a digest line) | — | queued (A) |
+| PAYCAP-2 | [An optional Link agent-wallet payment adapter: one spend request and one-time card per purchase, approval as a state so Stripe's announced limits only make it instant; Step 0 checks that the API is open to self-hosted apps, its regions and merchant coverage](briefs/PAYCAP-2.md) (stub; failures are digest lines with a checkout-link fallback) | PAYCAP-1 | queued (A) |
