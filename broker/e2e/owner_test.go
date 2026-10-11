@@ -83,7 +83,7 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	t.Cleanup(func() { os.RemoveAll(dir) }) // after checkJournal, which reads the journal here
 	carrier := modem.NewCarrier()
 	box, phone := carrier.Line("+15550000100"), carrier.Line(ownerNumber)
 	seed := []byte("synthetic-totp-seed-for-tests-01")

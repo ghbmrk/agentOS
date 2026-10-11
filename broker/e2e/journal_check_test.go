@@ -17,7 +17,11 @@ import (
 func checkJournal(t *testing.T, eng *journal.Engine) {
 	t.Helper()
 	t.Cleanup(func() {
-		for _, v := range check.Engine(eng, false) {
+		vs, err := check.Engine(eng, false)
+		if err != nil {
+			t.Errorf("journal check could not run: %v", err)
+		}
+		for _, v := range vs {
 			t.Errorf("journal check: %s", v)
 		}
 	})

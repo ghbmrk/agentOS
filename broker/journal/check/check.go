@@ -9,6 +9,7 @@ package check
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 )
@@ -78,21 +79,33 @@ func run(rules []Rule, recs []journal.Record, o Options) []Violation {
 
 // Engine judges a running engine's journal, with the engine's own status as
 // a view. live is false only for an engine that is just opened and idle.
-func Engine(e *journal.Engine, live bool) []Violation {
-	return Journal(e.Trail(), Options{Live: live, Views: []View{EngineView{e}}})
+// A journal that cannot be read is an error, never a clean result.
+func Engine(e *journal.Engine, live bool) ([]Violation, error) {
+	recs, err := e.ReadTrail()
+	if err != nil {
+		return nil, err
+	}
+	return Journal(recs, Options{Live: live, Views: []View{EngineView{e}}}), nil
 }
 
 // Note returns a STATUS note source: one line naming the first violation
-// and how many there are, or "" while the journal is clean.
+// and how many there are, a line saying the check could not run when the
+// journal cannot be read, or "" while the journal is clean.
 func Note(e *journal.Engine) func() string {
 	return func() string {
-		v := Engine(e, true)
+		v, err := Engine(e, true)
+		if err != nil {
+			return "Journal check could not run: the journal could not be read (" + oneLine(err.Error()) + ")"
+		}
 		if len(v) == 0 {
 			return ""
 		}
 		return fmt.Sprintf("Journal check failed (%s): %d violation(s), first %s", v[0].Rule, len(v), v[0])
 	}
 }
+
+// oneLine keeps a STATUS note to one line.
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // EngineView is the engine's status of each intent.
 type EngineView struct{ E *journal.Engine }

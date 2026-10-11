@@ -129,7 +129,7 @@ func TestA9OfflineScenario(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	t.Cleanup(func() { os.RemoveAll(dir) }) // after checkJournal, which reads the journal here
 	owner := filepath.Join(dir, "run", daemon.OwnerSocket)
 
 	b := boot(t, dir)
@@ -172,7 +172,7 @@ func TestCH2GuestFloodLeavesStopWorking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	t.Cleanup(func() { os.RemoveAll(dir) }) // after checkJournal, which reads the journal here
 	b := boot(t, dir)
 	defer b.stop()
 	gdir, err := b.plane.Open("m1")

@@ -8,6 +8,8 @@ package check
 // REQ: OP-3, OP-4, OP-5, CAP-3
 
 import (
+	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -223,7 +225,7 @@ func TestCatchesAPolicyThatSkipsTheRecheck(t *testing.T) {
 		for i := 0; i < 300; i++ {
 			w.step()
 		}
-		for _, v := range Engine(w.eng, true) {
+		for _, v := range mustEngine(t, w.eng, true) {
 			if v.Rule == "OP-3" && strings.Contains(v.Detail, "revoked") {
 				found = true
 			}
@@ -243,12 +245,12 @@ func TestPropertyHonestEngineNeverViolates(t *testing.T) {
 		w := newWorld(t, seed, honest)
 		for i := 0; i < 60; i++ {
 			w.step()
-			if v := Engine(w.eng, true); len(v) > 0 {
+			if v := mustEngine(t, w.eng, true); len(v) > 0 {
 				t.Fatalf("seed %d step %d: live: %v", seed, i, v)
 			}
 			if w.rng.Intn(8) == 0 {
 				w.restart()
-				if v := Engine(w.eng, false); len(v) > 0 {
+				if v := mustEngine(t, w.eng, false); len(v) > 0 {
 					t.Fatalf("seed %d step %d: at rest: %v", seed, i, v)
 				}
 				data, _ := w.mem.ReadAll()
@@ -273,11 +275,75 @@ func TestNoteIsEmptyWhenCleanAndNamesTheRuleOtherwise(t *testing.T) {
 		t.Fatalf("clean journal noted %q", n)
 	}
 	w = newWorld(t, 7, lax)
-	for i := 0; i < 400 && len(Engine(w.eng, true)) == 0; i++ {
+	for i := 0; i < 400 && len(mustEngine(t, w.eng, true)) == 0; i++ {
 		w.step()
 	}
 	n := Note(w.eng)()
 	if !strings.HasPrefix(n, "Journal check failed (OP-3)") || strings.Contains(n, "\n") {
 		t.Fatalf("note %q", n)
 	}
+}
+
+func mustEngine(t *testing.T, e *journal.Engine, live bool) []Violation {
+	t.Helper()
+	v, err := Engine(e, live)
+	if err != nil {
+		t.Fatalf("journal check could not run: %v", err)
+	}
+	return v
+}
+
+// failingRead is a store whose reads fail on demand, as a disk can.
+type failingRead struct {
+	*journal.MemStore
+	err error
+}
+
+func (s *failingRead) ReadAll() ([]byte, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.MemStore.ReadAll()
+}
+
+// An unreadable journal is never judged clean (OP-5): the trail it cannot
+// read would hide every violation, so the check says it could not run.
+func TestUnreadableJournalIsNotReportedClean(t *testing.T) {
+	w := newWorld(t, 7, lax)
+	for i := 0; i < 400 && len(mustEngine(t, w.eng, true)) == 0; i++ {
+		w.step()
+	}
+	data, _ := w.mem.ReadAll()
+	st := &failingRead{MemStore: &journal.MemStore{}}
+	if err := st.Rewrite(data); err != nil {
+		t.Fatal(err)
+	}
+	e, err := journal.Open(st, w.pol, w.execs, func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mustEngine(t, e, true)) == 0 {
+		t.Fatal("reopened journal lost its violation")
+	}
+	cannotRun := func(why string) {
+		t.Helper()
+		if v, err := Engine(e, true); err == nil {
+			t.Fatalf("%s: check ran and found %d violation(s)", why, len(v))
+		}
+		n := Note(e)()
+		if !strings.HasPrefix(n, "Journal check could not run") || strings.Contains(n, "\n") {
+			t.Fatalf("%s: note %q", why, n)
+		}
+	}
+
+	st.err = errors.New("read journal.log:\ninput/output error")
+	cannotRun("I/O error")
+
+	st.err = nil
+	bad := append([]byte(nil), data...)
+	bad[bytes.IndexByte(bad, '\n')/2] ^= 1 // a corrupt complete first line
+	if err := st.Rewrite(bad); err != nil {
+		t.Fatal(err)
+	}
+	cannotRun("corrupt line")
 }
