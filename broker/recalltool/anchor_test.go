@@ -5,6 +5,7 @@ package recalltool
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -269,28 +270,150 @@ func TestAnchorTombstoneSurvivesPrune(t *testing.T) {
 	}
 }
 
-// B2: the chain collapses at its length cap, so a long-lived lineage keeps
-// making notes, and both the old and the new notes still cascade.
-func TestChainCollapsesAndStillCascades(t *testing.T) {
+// B2: a long-lived lineage keeps making notes on one unbroken chain, and
+// both the early and the late notes still cascade, also after a reopen and a
+// compaction.
+func TestLongChainStillCascades(t *testing.T) {
 	d := newDurable(t)
-	d.prov.SetLimits(Limits{Anchors: 3})
 	d.call("m", "root", "recall_search", map[string]any{"query": "invoice", "scope": "owner"})
-	d.notes(t, 12, "n")
-	if d.prov.chainLen["root"] > 3 {
-		t.Fatalf("chain %d longer than its cap", d.prov.chainLen["root"])
-	}
-	for _, p := range []*Provenance{d.prov, reopen(t, d.rig), compacted(t, d.rig)} {
-		if p.chainLen["root"] != d.prov.chainLen["root"] || p.anchor["root"] != d.prov.anchor["root"] {
-			t.Fatalf("chain state lost: %d %d", p.chainLen["root"], d.prov.chainLen["root"])
+	d.notes(t, 70, "n")
+	for _, p := range []*Provenance{reopen(t, d.rig), compacted(t, d.rig)} {
+		if p.anchor["root"] != d.prov.anchor["root"] || p.anchors["root"] != d.prov.anchors["root"] {
+			t.Fatalf("chain state lost: %q %d", p.anchor["root"], p.anchors["root"])
 		}
 	}
 	if _, err := d.ix.Delete(d.ix.SourceID("mail", "owner@example.test", "<m1@x>")); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 12; i++ {
+	for i := 0; i < 70; i++ {
 		if d.alive(fmt.Sprintf("n%d", i)) {
 			t.Fatalf("n%d survived the deletion of a source read before it", i)
 		}
+	}
+}
+
+// R1': what the broker keeps for a lineage is linear in the lineage's reads
+// whatever the notes do. A lineage with a large read set that then makes
+// many one-read notes used to re-copy the whole set each time its chain
+// restarted (about reads squared over the chain length).
+func TestProvenanceStaysLinearInReads(t *testing.T) {
+	p, err := OpenProvenance(&recall.MemStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	var first []string
+	for i := 0; i < 1000; i++ {
+		first = append(first, fmt.Sprintf("r%d", i))
+	}
+	if err := p.Given("root", first, at); err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for i := 0; i < 300; i++ {
+		if err := p.Given("root", []string{fmt.Sprintf("new%d", i)}, at.Add(time.Duration(i+1)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.Anchor("root", func(seq int, derived []string) (string, error) {
+			total += len(derived)
+			return fmt.Sprintf("a%d", seq), nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reads, _, anchors := p.Size("root")
+	if total > 2*(reads+anchors) {
+		t.Fatalf("anchors name %d sources for %d reads and %d anchors", total, reads, anchors)
+	}
+}
+
+// counting wraps a store and counts the rewrites and the bytes they write.
+type counting struct {
+	*recall.MemStore
+	rewrites, bytes int
+}
+
+func (c *counting) Rewrite(b []byte) error {
+	c.rewrites++
+	c.bytes += len(b)
+	return c.MemStore.Rewrite(b)
+}
+
+// N1: a lineage that keeps reading does not rewrite the whole journal on
+// nearly every search: a rewrite waits until the journal has doubled since
+// the last one.
+func TestCompactionIsAmortised(t *testing.T) {
+	st := &counting{MemStore: &recall.MemStore{}}
+	p, err := OpenProvenance(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 600; i++ {
+		if err := p.Given("root", []string{fmt.Sprintf("r%d", i)}, at.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st.rewrites > 12 {
+		t.Fatalf("%d rewrites (%d bytes) for 600 reads", st.rewrites, st.bytes)
+	}
+}
+
+// N2: at a note cap, a note check and the tombstone prune run together
+// without a lock-order deadlock (the check asks the index with no broker
+// lock held; the prune asks the broker while holding the index).
+func TestNoteCheckAndPruneDoNotDeadlock(t *testing.T) {
+	d := newDurable(t)
+	d.prov.SetLimits(Limits{Notes: 1})
+	d.notes(t, 1, "k")
+	var ids []string
+	for i := 0; i < 50; i++ {
+		ref := fmt.Sprintf("https://gone.example.test/%d", i)
+		if _, err := d.ix.Ingest(recall.Item{Source: recall.Source{Kind: "web", Ref: ref}, Label: recall.Public, Text: "gone", Received: d.clock}); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, d.ix.SourceID("web", "", ref))
+	}
+	if err := d.prov.Given("other", ids, d.clock); err != nil { // so the prune keeps asking
+		t.Fatal(err)
+	}
+	if _, err := d.ix.Delete(ids...); err != nil {
+		t.Fatal(err)
+	}
+	d.clock = d.clock.Add(40 * 24 * time.Hour)
+	exists := func(l, k string) bool {
+		_, ok := d.ix.Get(d.ix.SourceID("agent", "", l+"/"+k))
+		return ok
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				if err := d.prov.Check("root", "new", exists); err == nil {
+					t.Error("cap not enforced")
+					return
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				if _, err := d.ix.PruneTombstones(30 * 24 * time.Hour); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+		wg.Wait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("deadlock: Check and PruneTombstones")
 	}
 }
 

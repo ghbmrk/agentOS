@@ -35,17 +35,21 @@ type Provenance struct {
 	// items, each derived from the one before and from what was read since,
 	// so a note derives from one item whatever the lineage has read.
 	// anchor is the newest; covered the IDs it stands for (its chain holds
-	// them); anchors counts those made (it numbers them); chainLen is how
-	// many the current chain holds, for its rebuild; gen changes when the
-	// chain is dropped.
-	anchor   map[string]string
-	covered  map[string]map[string]bool
-	anchors  map[string]int
-	chainLen map[string]int
-	gen      map[string]int
-	notes    map[string]map[string]bool // lineage -> note keys made
-	lines    int
-	limits   Limits
+	// them); anchors counts those made (it numbers them); gen changes when
+	// the chain is dropped. A chain never restarts on its own: each anchor
+	// names the one before and only the reads since, so what a lineage keeps
+	// is linear in its reads (an anchor needs a new read).
+	anchor  map[string]string
+	covered map[string]map[string]bool
+	anchors map[string]int
+	gen     map[string]int
+	notes   map[string]map[string]bool // lineage -> note keys made
+	lines   int
+	// base is how many lines the record held after the last rewrite (or
+	// when opened): the next rewrite waits until it has doubled, so a rewrite
+	// costs no more than the appends that earned it.
+	base   int
+	limits Limits
 
 	anchorMu sync.Mutex // one anchoring at a time; never held by hooks
 }
@@ -71,10 +75,8 @@ type provRecord struct {
 	Anchor string `json:"a,omitempty"`
 	Seq    int    `json:"seq,omitempty"`
 	// Collapse, with Anchor: the anchor starts a chain and stands for IDs
-	// alone (it derives from the reads, not the anchor before); Chain is
-	// the chain's length (compaction; 0 means 1).
+	// alone (it is the first, or follows a dropped chain).
 	Collapse bool `json:"c,omitempty"`
-	Chain    int  `json:"ch,omitempty"`
 	// Note: a note key the lineage made; with Forget, one that is gone.
 	Note string `json:"n,omitempty"`
 }
@@ -83,7 +85,7 @@ type provRecord struct {
 // broker's state directory; unreadable lines are skipped).
 func OpenProvenance(store recall.Store) (*Provenance, error) {
 	p := &Provenance{store: store, sets: map[string]map[string]time.Time{}, resets: map[string]map[int64]Reset{}, takeBacks: map[string]map[int64]bool{}, backs: map[string]map[int64]Reset{},
-		anchor: map[string]string{}, covered: map[string]map[string]bool{}, anchors: map[string]int{}, chainLen: map[string]int{}, gen: map[string]int{}, notes: map[string]map[string]bool{}}
+		anchor: map[string]string{}, covered: map[string]map[string]bool{}, anchors: map[string]int{}, gen: map[string]int{}, notes: map[string]map[string]bool{}}
 	data, err := store.ReadAll()
 	if err != nil {
 		return nil, err
@@ -95,7 +97,7 @@ func OpenProvenance(store recall.Store) (*Provenance, error) {
 			p.apply(r)
 		}
 	}
-	p.lines = len(lines)
+	p.lines, p.base = len(lines), len(lines)
 	if torn {
 		if err := p.compact(); err != nil {
 			return nil, err
@@ -127,14 +129,6 @@ func (p *Provenance) apply(r provRecord) {
 			p.anchor[r.Lineage] = r.Anchor
 			if r.Collapse || p.covered[r.Lineage] == nil {
 				p.covered[r.Lineage] = map[string]bool{}
-			}
-			switch {
-			case r.Chain > 0:
-				p.chainLen[r.Lineage] = r.Chain
-			case r.Collapse:
-				p.chainLen[r.Lineage] = 1
-			default:
-				p.chainLen[r.Lineage]++
 			}
 			for _, id := range r.IDs {
 				p.covered[r.Lineage][id] = true
@@ -218,7 +212,6 @@ func (p *Provenance) drop(lineage string, ids []string) {
 func (p *Provenance) dropChain(lineage string) {
 	delete(p.anchor, lineage)
 	delete(p.covered, lineage)
-	delete(p.chainLen, lineage)
 	p.gen[lineage]++
 }
 
@@ -260,20 +253,12 @@ func (p *Provenance) write(r provRecord) error {
 	return nil
 }
 
-// maybeCompact rewrites the record when it holds far more lines than the
-// state it stands for, so no write path (a refused or repeated record
+// maybeCompact rewrites the record when it holds twice the lines the last
+// rewrite left (and over 64), so no write path (a refused or repeated record
 // included) grows the file without end. Best effort: a failed rewrite
 // leaves the record as it was. Called with mu held.
 func (p *Provenance) maybeCompact() {
-	live := 0
-	for _, s := range p.sets {
-		live += len(s)
-	}
-	notes := 0
-	for _, n := range p.notes {
-		notes += len(n)
-	}
-	if p.lines > 64 && p.lines > 2*(len(p.sets)+live/64+notes+len(p.anchors)+1) {
+	if p.lines > 64 && p.lines > 2*p.base {
 		_ = p.compact()
 	}
 }
@@ -359,7 +344,7 @@ func (p *Provenance) compact() error {
 			ids = append(ids, id)
 		}
 		sort.Strings(ids)
-		b, err := json.Marshal(provRecord{Lineage: l, Anchor: p.anchor[l], IDs: ids, Seq: p.anchors[l], Collapse: p.anchor[l] != "", Chain: p.chainLen[l]})
+		b, err := json.Marshal(provRecord{Lineage: l, Anchor: p.anchor[l], IDs: ids, Seq: p.anchors[l], Collapse: p.anchor[l] != ""})
 		if err != nil {
 			return err
 		}
@@ -409,7 +394,7 @@ func (p *Provenance) compact() error {
 	if err := p.store.Rewrite(buf); err != nil {
 		return err
 	}
-	p.lines = n
+	p.lines, p.base = n, n
 	return nil
 }
 
@@ -661,14 +646,11 @@ func sortedKeys[V any](m map[string]V) []string {
 type Limits struct {
 	Notes, NotesAll int // note keys per lineage, and in all
 	Reads, ReadsAll int // items a lineage has read, and in all
-	// Anchors is how many anchors a chain holds before the next one starts
-	// a new chain from the reads, so a chain stays short.
-	Anchors int
 }
 
 // DefaultLimits keeps a lineage to 1000 notes and 20,000 read items, the
-// broker to ten times each, and a chain to 64 anchors.
-var DefaultLimits = Limits{Notes: 1000, NotesAll: 10000, Reads: 20000, ReadsAll: 200000, Anchors: 64}
+// broker to ten times each.
+var DefaultLimits = Limits{Notes: 1000, NotesAll: 10000, Reads: 20000, ReadsAll: 200000}
 
 // ErrLimit means a note was refused for a limit.
 var ErrLimit = errors.New("recalltool: provenance limit reached")
@@ -681,7 +663,7 @@ func (p *Provenance) SetLimits(l Limits) {
 	for _, f := range []struct {
 		dst *int
 		v   int
-	}{{&d.Notes, l.Notes}, {&d.NotesAll, l.NotesAll}, {&d.Reads, l.Reads}, {&d.ReadsAll, l.ReadsAll}, {&d.Anchors, l.Anchors}} {
+	}{{&d.Notes, l.Notes}, {&d.NotesAll, l.NotesAll}, {&d.Reads, l.Reads}, {&d.ReadsAll, l.ReadsAll}} {
 		if f.v > 0 {
 			*f.dst = f.v
 		}
@@ -711,28 +693,47 @@ func sum[V any](m map[string]V, n func(V) int) int {
 // caller records the key with Noted once the note is stored.
 func (p *Provenance) Check(lineage, key string, exists func(lineage, key string) bool) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	lm := p.lim()
 	if len(p.sets[lineage]) > lm.Reads || sum(p.sets, func(s map[string]time.Time) int { return len(s) }) > lm.ReadsAll {
+		p.mu.Unlock()
 		return ErrLimit
 	}
 	if p.notes[lineage][key] {
+		p.mu.Unlock()
 		return nil
 	}
 	count := func(m map[string]bool) int { return len(m) }
-	if len(p.notes[lineage]) >= lm.Notes || sum(p.notes, count) >= lm.NotesAll {
-		for _, l := range sortedKeys(p.notes) {
-			for _, k := range sortedKeys(p.notes[l]) {
-				if !exists(l, k) {
-					if err := p.write(provRecord{Lineage: l, Note: k, Forget: true}); err != nil {
-						return err
-					}
-				}
+	if len(p.notes[lineage]) < lm.Notes && sum(p.notes, count) < lm.NotesAll {
+		p.mu.Unlock()
+		return nil
+	}
+	// At a limit. exists asks the index, which takes its own lock (and its
+	// prune hooks take mu), so it runs with mu released.
+	type nk struct{ l, k string }
+	var keys []nk
+	for _, l := range sortedKeys(p.notes) {
+		for _, k := range sortedKeys(p.notes[l]) {
+			keys = append(keys, nk{l, k})
+		}
+	}
+	p.mu.Unlock()
+	var gone []nk
+	for _, n := range keys {
+		if !exists(n.l, n.k) {
+			gone = append(gone, n)
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, n := range gone {
+		if p.notes[n.l][n.k] {
+			if err := p.write(provRecord{Lineage: n.l, Note: n.k, Forget: true}); err != nil {
+				return err
 			}
 		}
-		if len(p.notes[lineage]) >= lm.Notes || sum(p.notes, count) >= lm.NotesAll {
-			return ErrLimit
-		}
+	}
+	if len(p.notes[lineage]) >= lm.Notes || sum(p.notes, count) >= lm.NotesAll {
+		return ErrLimit
 	}
 	return nil
 }
@@ -766,23 +767,20 @@ func (p *Provenance) Head(id string) bool {
 // nothing. Reads since the last anchor, with that anchor, go into a new one
 // that mk builds (it returns the item's ID); the note's cost does not
 // grow with the lineage's history, and deleting any source read deletes the
-// anchors that follow it and so the notes (K2b, recall R6). When the chain
-// reaches its length limit, the new anchor derives from all the reads
-// instead and starts a chain: the chain stays short, and the older anchors,
-// with the notes made on them, keep what they derived from.
+// anchors that follow it and so the notes (K2b, recall R6). An anchor holds
+// at least one new read, so a lineage's anchors and what they name stay
+// linear in its reads.
 func (p *Provenance) Anchor(lineage string, mk func(seq int, derived []string) (string, error)) ([]string, error) {
 	p.anchorMu.Lock()
 	defer p.anchorMu.Unlock()
 	p.mu.Lock()
-	var delta, all []string
+	var delta []string
 	for id := range p.sets[lineage] {
-		all = append(all, id)
 		if !p.covered[lineage][id] {
 			delta = append(delta, id)
 		}
 	}
 	prev, gen, made := p.anchor[lineage], p.gen[lineage], p.anchors[lineage]
-	collapse := prev != "" && p.chainLen[lineage] >= p.lim().Anchors
 	p.mu.Unlock()
 	if len(delta) == 0 {
 		if prev == "" {
@@ -792,11 +790,7 @@ func (p *Provenance) Anchor(lineage string, mk func(seq int, derived []string) (
 	}
 	sort.Strings(delta)
 	derived := delta
-	switch {
-	case collapse:
-		sort.Strings(all)
-		derived, delta = all, all
-	case prev != "":
+	if prev != "" {
 		derived = append([]string{prev}, delta...)
 	}
 	id, err := mk(made+1, derived)
@@ -808,7 +802,7 @@ func (p *Provenance) Anchor(lineage string, mk func(seq int, derived []string) (
 	if p.gen[lineage] != gen {
 		return nil, errChanged
 	}
-	if err := p.write(provRecord{Lineage: lineage, Anchor: id, IDs: delta, Seq: made + 1, Collapse: collapse || prev == ""}); err != nil {
+	if err := p.write(provRecord{Lineage: lineage, Anchor: id, IDs: delta, Seq: made + 1, Collapse: prev == ""}); err != nil {
 		return nil, err
 	}
 	return []string{id}, nil
