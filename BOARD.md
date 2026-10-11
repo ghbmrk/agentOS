@@ -56,7 +56,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-fs | [One durable-write helper; every rename dir-synced, vm metadata included](briefs/SIM.md#sim-fs-one-durable-write-helper-used-everywhere-tier-a) | — | queued (brief ready; tier A) |
 | SIM-bound | [Bounded broker memory under deny-all; STOP reads an index](briefs/SIM.md#sim-bound-bounded-broker-memory-and-stop-without-a-history-walk-tier-a) | — | queued (brief ready; tier A) |
 | SIM-sd | [L1 spec diff: one log, owner messages as intents, one outcome, learning off until it wins](briefs/SIM.md#sim-sd-l1-spec-diff-for-one-log-mark-approves) | — | queued (B; Mark approves) |
-| SIM-check | [One journal invariant checker: test, CI and runtime](briefs/SIM.md#sim-check-one-journal-invariant-checker-tier-a) | — | queued (brief ready; tier A) |
+| SIM-check | [One journal invariant checker: test, CI and runtime](briefs/SIM.md#sim-check-one-journal-invariant-checker-tier-a) | — | in review (tier A) |
 | SIM-proj | [Journal snapshots and a projection API](briefs/SIM.md#sim-proj-journal-snapshots-and-a-projection-api-tier-a) | — | in review (tier A) |
 | SIM-owner-hold | [Owner texts are intents; the pacer hold becomes a projection](briefs/SIM.md#sim-owner-hold-owner-texts-are-intents-the-pacer-hold-becomes-a-projection-tier-a) | SIM-sd, SIM-proj, SIM-cases, DEL-1, #708 (PACE-1) | queued (A) |
 | SIM-pull | [STATUS is the owner's view; only urgent texts pushed; digest deleted](briefs/SIM.md#sim-pull-status-is-the-owners-view-only-urgent-texts-are-pushed-tier-a) | SIM-owner-hold, SIM-sd, SIM-cases | queued (A) |
@@ -64,6 +64,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-outcome | [One revisable outcome record per goal](briefs/SIM.md#sim-outcome-one-revisable-outcome-record-tier-a) | SIM-sd | queued (A) |
 | SIM-erase | [Forget once, in the journal](briefs/SIM.md#sim-erase-forget-once-in-the-journal-tier-a) | SIM-sd, SIM-proj, SIM-check, SIM-cases | queued (A) |
 | SIM-core | [Trusted core is a named list; CI import check; core = tier A](briefs/SIM.md#sim-core-the-trusted-core-is-a-named-list-tier-a) | — | queued (brief ready; tier A) |
+| SIM-core-allow-tier | `tools/risk_tier.py` rates every package named on a `broker/core/core.txt` `allow` line tier A, or `recall` and `recalltool` join `TIER_A_BROKER`. Invariant: core write paths are tier A (D-095, ARC-1). Failure path: `recalltool` is tier B and holds `journal.Engine.Erase` and `grants.Gate.Withdraw`/`Authorize`; a tier B PR widens its use of `Erase` without authorize, gets no Security section, and the core check still passes (release, tier A; Security on #715 pt 2, comment 6109907105) | SIM-core | queued (A) |
 | SIM-shred | [Forget by deleting a per-subject key; reaches backups and snapshots](briefs/SIM.md#sim-shred-forget-by-deleting-a-per-subject-key-tier-a) | SIM-erase, SIM-proj, SIM-sd | queued (A) |
 | SIM-policy | [Policy as data with one match-and-compare evaluator](briefs/SIM.md#sim-policy-policy-as-data-one-evaluator-tier-a) | SIM-outcome, SIM-pull, SIM-core | queued (A) |
 | SIM-cap | [Capability grants scoped per intent](briefs/SIM.md#sim-cap-capability-grants-scoped-per-intent-tier-a) | SIM-core, SIM-check, SIM-policy | queued (A) |
@@ -389,6 +390,7 @@ Gaps found by comparing the build plan (§3) and spec v0.12 with this board, TRA
 | CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued |
 | CH-20a | [Bounded attachments in `mail.deliver`](briefs/CH-20a.md) | CH-20w | queued (needs security review) |
 | CH-20m | [MORE for a redirected reply](briefs/CH-20m.md) | CH-20w | queued |
+| STOP-gen | [A RESUME in flight can undo a newer STOP across the local and text channels (CH-2)](briefs/STOP-gen.md) | — | in review |
 | CRED-4b | [Credentialed browser executor in the broker](briefs/CRED-4b.md) | S5 fixture suite | building (claude2; part 1 in review, #300; part 2 per K1-K14) |
 | ADP-8 | [Adapter mismatch check and the §11 adapter path](briefs/ADP-8.md) | P3-1, P2-7 | in review (#208: mismatch check only; wiring and ADP-6 are ADP-8b) |
 | ADP-8b | [Wire the demo mismatch check into §11 adoption](briefs/ADP-8b.md): call `Mismatch` on adoption, set `Outbound` from observed egress, ADP-6 half, end-to-end A13 test (release, tier A, A13; L3, Potency and Security on #208) | ADP-8 | queued |
@@ -614,6 +616,7 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | CAP-2t | Reach fixture test (CAP-2; brief to write) | CRED-4b part 2 | queued (B) |
 | CRED-11a | Hand-off verbs between executors (CRED-11; brief to write; lane claude2) | CRED-4b part 2 | queued (A) |
 | ADP-14a | Web recipes (ADP-14; brief to write; lane claude2) | CRED-4b part 2, ADP-8 | queued (A) |
+| ADP-14-get | Credentialed browsing is gated on GET links with side effects: a `navigate` to an unsubscribe or confirm link on a recipe site changes state and bypasses the method-based recipe gate, so the gate also holds a GET that matches a state-changing link pattern (ADP-14, CRED-4b). Acceptance test: A13/A5 run where a credentialed `navigate` to a synthetic `/unsubscribe?token=…` URL is held for the owner like a POST and never sent unasked; failure path: the GET is fetched and the account is unsubscribed. Gates credentialed browsing shipping (release; tier A; lane claude2; promoted from LATER ADP-14-get) | ADP-14a, CRED-4b part 2 | queued (A) |
 | ADP-15a | One desktop over separate executors (ADP-15; brief to write; lane claude2) | CRED-11a, ADP-5 | queued (A) |
 | ADP-16a | Suite executor (ADP-16; brief to write; lane claude2) | ADP-5 | queued (A) |
 | UPD-7t | Soak plus attestations test and marker (UPD-7; brief to write) | — | queued (C) |

@@ -60,7 +60,7 @@ func TestLocalSignInReportsItsOwnLockGeneration(t *testing.T) {
 	if st.Unlocked || st.Locks != before+1 {
 		t.Fatalf("after lock: %+v", st)
 	}
-	if _, err := r.ch.LocalResume(got.locks); !errors.Is(err, ErrLocked) {
+	if _, err := r.ch.LocalResume(got.locks, r.ch.StopGen()); !errors.Is(err, ErrLocked) {
 		t.Fatalf("RESUME under the old generation: %v", err)
 	}
 	if !r.eng.Stopped() {
@@ -71,7 +71,7 @@ func TestLocalSignInReportsItsOwnLockGeneration(t *testing.T) {
 	if err != nil || locks != st.Locks {
 		t.Fatalf("new sign-in: locks %d, %v", locks, err)
 	}
-	if msg, err := r.ch.LocalResume(locks); err != nil || r.eng.Stopped() {
+	if msg, err := r.ch.LocalResume(locks, r.ch.StopGen()); err != nil || r.eng.Stopped() {
 		t.Fatalf("RESUME after a new sign-in: %q %v", msg, err)
 	}
 }

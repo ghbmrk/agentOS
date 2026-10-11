@@ -756,12 +756,16 @@ func (e *Engine) InUse(account, action string, since time.Time) []Use {
 // effects and broker-state changes (OP-5). It reads the journal, not
 // memory, and is nil if the journal cannot be read.
 func (e *Engine) Trail() []Record {
-	recs, err := e.readJournal()
+	recs, err := e.ReadTrail()
 	if err != nil {
 		return nil
 	}
 	return recs
 }
+
+// ReadTrail is Trail with the read error, for a caller that must tell an
+// unreadable journal from an empty one (journal/check).
+func (e *Engine) ReadTrail() ([]Record, error) { return e.readJournal() }
 
 // RecordsAfter returns the journal records with a sequence number greater
 // than seq, oldest first. Records are numbered from 1 with no gaps, so a
