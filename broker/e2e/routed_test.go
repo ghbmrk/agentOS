@@ -83,6 +83,7 @@ func TestOP8RoutedCallsSettleFromProviderUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkJournal(t, eng)
 	ms := &machines{private: map[string]bool{}}
 	public := func(string) string { return route.LabelPublic }
 	proxy, err := egress.New(egress.Config{
