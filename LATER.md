@@ -717,6 +717,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | PACE-1 f3 | Builder: two true "Cleared" texts for one key (one held, one later) can both send; redundant, never false |
 | PACE-1 f4 | Builder `recheck`: the hook check and the modem send are not atomic, and an urgent pass with cleared lines sends without revalidation; both windows are sub-second and the urgent return follows any stale clear |
 | EGRESS-cap f1 | `recheck`. Finding 10 on 75d68c4: the proxy's `Cap` is called a hard ceiling but is not one: `admit` checks and `charge` adds later, so concurrent requests can all pass the last request slot, and response bytes are charged only after streaming ends. Production sets no caps, so it is a library contract gap; before caps are wired, reserve the request in `admit` and enforce bytes while streaming, or stop calling them hard |
+| EGRESS-rot-1 l1 | PR #1041 L3 (6110508976): in `TestRotatedKeyIsRedactedWhenEchoed` the `X-Echo` header half of the assertion is vacuous. `X-Echo` is not in `baseResponseHeaders` (`adapter.go:144`) and the OpenAI adapter does not forward it, so only the body echo is exercised. Header redaction goes through the same `red`, so this is not a false pass of the fix. Echoing through `X-Request-Id` would cover headers too |
+| EGRESS-rot-1 l2 | PR #1041 L3 (6110508976): `broker/vault` has no direct unit test that `With` keeps the receiver's patterns and leaves the receiver unchanged. The mutant that starts from an empty redactor is killed only indirectly, from `egress` (`TestResponsesNeverCarryTheKey`) |
 
 ## Reuse candidates
 | ID | Component | Why |
