@@ -14,6 +14,10 @@
 // per-boot reserve of ReserveTries instead of that shared allowance, so a
 // client on the access point that burns each boot's shared try never
 // locks out the sticker holder (K8, R3 of the #1067 review).
+//
+// Both the code's verifier and its first groups' verifier are Argon2id at
+// the cost in KDF, so a stranger probing the prefix online pays one
+// derivation per post, and a disk read pays one per guess offline (K2, K9).
 package claim
 
 import (
@@ -28,6 +32,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"golang.org/x/crypto/argon2"
 )
 
 // Store persists the claim state (change.FileStore, change.MemStore).
@@ -74,17 +80,48 @@ const ReserveTries = 3
 // PrefixSymbols is the sticker's first two groups (40 bits).
 const PrefixSymbols = 8
 
-// PrefixTag is the bytes of the prefix hash the disk keeps. A full hash
-// would let a disk read search the code's two halves apart (2^40 each);
-// a 16-bit tag rules out all but 1 in 2^16 prefixes and leaves the code's
-// search nearly whole (K2, K9).
-const PrefixTag = 2
+// verifierSize is each verifier's length. The prefix verifier is as long
+// as the code's: a short tag would let a client without the sticker find a
+// prefix that reaches the reserve online (N1 of the #1080 review).
+const verifierSize = 32
+
+// KDF is the Argon2id cost of the code's verifiers, kept in the state.
+type KDF struct {
+	Time      uint32 `json:"time"`
+	MemoryKiB uint32 `json:"memory_kib"`
+	Threads   uint8  `json:"threads"`
+}
+
+// productionKDF is 64 MiB, three passes, four lanes: about 75 ms per
+// derivation on a 4-core cloud host, and 50 to 100 ms on the controller
+// (Ryzen 5 7640HS, 32 GB). A try makes one derivation, or two when the
+// code starts with the sticker's first groups.
+var productionKDF = KDF{Time: 3, MemoryKiB: 64 << 10, Threads: 4}
+
+// sealKDF is the cost Seal gives a new state; kdfFloor is the least Open
+// accepts, so a state cannot make a guess cheap. Tests lower both;
+// nothing else may.
+var sealKDF, kdfFloor = productionKDF, productionKDF
+
+// kdfCeiling bounds what a state can make the box spend on one try.
+var kdfCeiling = KDF{Time: 16, MemoryKiB: 1 << 20, Threads: 16}
+
+func (k *KDF) within(lo, hi KDF) bool {
+	return k != nil && k.Time >= lo.Time && k.Time <= hi.Time && k.MemoryKiB >= lo.MemoryKiB &&
+		k.MemoryKiB <= hi.MemoryKiB && k.Threads >= lo.Threads && k.Threads <= hi.Threads && k.Threads > 0
+}
+
+// derive is one verifier: Argon2id of the domain and s under salt.
+var derive = func(k KDF, salt []byte, domain, s string) []byte {
+	return argon2.IDKey([]byte(domain+"\x00"+s), salt, k.Time, k.MemoryKiB, k.Threads, verifierSize)
+}
 
 // state is everything the claim keeps on disk. It holds no secret: the
-// code only as a salted hash, removed at the claim, and the claimant's
-// token only as a hash.
+// code only as a salted Argon2id verifier, removed at the claim, and the
+// claimant's token only as a hash.
 type state struct {
 	Salt     []byte `json:"salt,omitempty"`
+	KDF      *KDF   `json:"kdf,omitempty"`
 	Verifier []byte `json:"verifier,omitempty"`
 	Claimed  bool   `json:"claimed"`
 	Owner    []byte `json:"owner,omitempty"`
@@ -95,9 +132,9 @@ type state struct {
 	Locks int `json:"locks"`
 	// LockedBoot is the kernel boot the screen locked in; "" when open.
 	LockedBoot string `json:"locked_boot,omitempty"`
-	// Prefix is a PrefixTag-byte tag of the code's first PrefixSymbols
-	// symbols (salted, its own domain). A state sealed without it has no
-	// reserve.
+	// Prefix is the verifier of the code's first PrefixSymbols symbols
+	// (same salt and cost, its own domain). A state sealed without it has
+	// no reserve.
 	Prefix []byte `json:"prefix,omitempty"`
 	// Reserve counts the reserve's wrong codes in boot ReserveBoot.
 	Reserve     int    `json:"reserve"`
@@ -193,12 +230,13 @@ func Seal(st Store, code string, r io.Reader, journal func(string)) error {
 	if len(c) != CodeSymbols || strings.Trim(c, alphabet) != "" {
 		return errors.New("claim: not a claim code")
 	}
-	s := state{Salt: make([]byte, 16)}
+	k := sealKDF
+	s := state{Salt: make([]byte, 16), KDF: &k}
 	if _, err := io.ReadFull(r, s.Salt); err != nil {
 		return err
 	}
-	s.Verifier = verifier(s.Salt, c)
-	s.Prefix = prefixVerifier(s.Salt, c[:PrefixSymbols])
+	s.Verifier = s.verifier(c)
+	s.Prefix = s.prefixVerifier(c[:PrefixSymbols])
 	b, err := json.Marshal(s)
 	if err != nil {
 		return err
@@ -212,20 +250,12 @@ func Seal(st Store, code string, r io.Reader, journal func(string)) error {
 	return nil
 }
 
-func verifier(salt []byte, code string) []byte {
-	h := sha256.New()
-	h.Write([]byte("agentos claim v1\x00"))
-	h.Write(salt)
-	h.Write([]byte(code))
-	return h.Sum(nil)
+func (s *state) verifier(code string) []byte {
+	return derive(*s.KDF, s.Salt, "agentos claim v2", code)
 }
 
-func prefixVerifier(salt []byte, prefix string) []byte {
-	h := sha256.New()
-	h.Write([]byte("agentos claim prefix v1\x00"))
-	h.Write(salt)
-	h.Write([]byte(prefix))
-	return h.Sum(nil)[:PrefixTag]
+func (s *state) prefixVerifier(prefix string) []byte {
+	return derive(*s.KDF, s.Salt, "agentos claim prefix v2", prefix)
 }
 
 func tokenHash(tok string) []byte {
@@ -264,8 +294,13 @@ func Open(cfg Config) (*Claim, error) {
 	if err := json.Unmarshal(b, &c.st); err != nil {
 		return nil, fmt.Errorf("claim: state: %w", err)
 	}
-	if !c.st.Claimed && len(c.st.Verifier) != sha256.Size {
+	if !c.st.Claimed && len(c.st.Verifier) != verifierSize {
 		return nil, errors.New("claim: state holds neither a code nor a claim")
+	}
+	if !c.st.Claimed && !c.st.KDF.within(kdfFloor, kdfCeiling) {
+		// A state from before the KDF, or one that would make a guess
+		// cheap or a try ruinous: reinstall and reseal.
+		return nil, errors.New("claim: state's code cost is out of bounds")
 	}
 	if c.st.LockedBoot != "" && c.st.LockedBoot != boot {
 		c.st.LockedBoot = ""
@@ -330,7 +365,7 @@ func (c *Claim) Status() Status {
 
 // reserveLeft is the reserve's tries left this boot.
 func (c *Claim) reserveLeft() int {
-	if len(c.st.Prefix) != PrefixTag {
+	if len(c.st.Prefix) != verifierSize {
 		return 0
 	}
 	if c.st.ReserveBoot != c.boot {
@@ -358,11 +393,16 @@ func (c *Claim) Try(code string) (string, error) {
 		return "", ErrLocked
 	}
 	n := Normalize(code)
-	got := verifier(c.st.Salt, n)
-	right := subtle.ConstantTimeCompare(got, c.st.Verifier) == 1
-	if c.reserveLeft() > 0 && len(n) >= PrefixSymbols &&
-		subtle.ConstantTimeCompare(prefixVerifier(c.st.Salt, n[:PrefixSymbols]), c.st.Prefix) == 1 {
-		if right {
+	// The prefix is checked only while the reserve has tries. A miss there
+	// rules the code out without its own derivation; each derivation is
+	// the online cost of a post (K9).
+	prefixChecked, prefixRight := false, false
+	if c.reserveLeft() > 0 && len(n) >= PrefixSymbols {
+		prefixChecked = true
+		prefixRight = subtle.ConstantTimeCompare(c.st.prefixVerifier(n[:PrefixSymbols]), c.st.Prefix) == 1
+	}
+	if prefixRight {
+		if subtle.ConstantTimeCompare(c.st.verifier(n), c.st.Verifier) == 1 {
 			return c.claim()
 		}
 		if c.st.ReserveBoot != c.boot {
@@ -383,6 +423,7 @@ func (c *Claim) Try(code string) (string, error) {
 		c.journal(EventRefused)
 		return "", ErrLocked
 	}
+	right := !prefixChecked && subtle.ConstantTimeCompare(c.st.verifier(n), c.st.Verifier) == 1
 	if !right {
 		allow := c.allowed()
 		c.st.Wrong++

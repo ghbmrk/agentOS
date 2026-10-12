@@ -26,29 +26,15 @@ type box struct {
 
 func newBox(t *testing.T) (*box, string) {
 	t.Helper()
-	for {
-		b := &box{t: t, st: change.FileStore{Path: filepath.Join(t.TempDir(), "claim.json")}, boot: "boot-1"}
-		code, err := NewCode(nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := Seal(b.st, code, nil, nil); err != nil {
-			t.Fatal(err)
-		}
-		// The prefix tag is 16 bits: skip the 1 box in 2^16 whose
-		// wrongCode would land in the sticker holder's reserve.
-		raw, err := b.st.Load()
-		if err != nil {
-			t.Fatal(err)
-		}
-		var s state
-		if err := json.Unmarshal(raw, &s); err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(prefixVerifier(s.Salt, Normalize(wrongCode(code))[:PrefixSymbols]), s.Prefix) {
-			return b, code
-		}
+	b := &box{t: t, st: change.FileStore{Path: filepath.Join(t.TempDir(), "claim.json")}, boot: "boot-1"}
+	code, err := NewCode(nil)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := Seal(b.st, code, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	return b, code
 }
 
 // start opens the claim as the daemon does on each start.
@@ -320,7 +306,7 @@ func TestNearMissCodesRefused(t *testing.T) {
 			t.Fatal("no code with the same first verifier byte found")
 		}
 		try := random()
-		if try == n || verifier(st.Salt, try)[0] != st.Verifier[0] {
+		if try == n || st.verifier(try)[0] != st.Verifier[0] {
 			continue
 		}
 		if err := tryFresh(t, sealed, try); !errors.Is(err, ErrWrongCode) {

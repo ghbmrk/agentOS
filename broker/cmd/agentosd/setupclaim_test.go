@@ -217,9 +217,12 @@ func TestALostClaimStateRoutesToReinstall(t *testing.T) {
 		if w := p.do(t, cs2.ui, "POST", "/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}}); w.Code != http.StatusForbidden {
 			t.Fatalf("setup post: %d", w.Code)
 		}
-		if w := p.do(t, cs2.ui, "POST", "/claim", url.Values{"code": {b.code}}); w.Code != http.StatusConflict || len(w.Result().Cookies()) != 0 {
+		w := p.do(t, cs2.ui, "POST", "/claim", url.Values{"code": {b.code}})
+		if w.Code != http.StatusConflict || len(w.Result().Cookies()) != 0 {
 			t.Fatalf("claim on a reinstall box: %d", w.Code)
 		}
+		reinstallOnly(t, "POST /claim", w.Body.String())
+		reinstallOnly(t, "GET /claim", p.do(t, cs2.ui, "GET", "/claim", nil).Body.String())
 	}
 	err := setupCall(t, cs2.m)(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil)
 	if err == nil || !strings.Contains(err.Error(), errCardPending) {
@@ -230,6 +233,15 @@ func TestALostClaimStateRoutesToReinstall(t *testing.T) {
 	}
 	if cs2.f.vault.resets != 0 || cs.f.vault.resets != resets {
 		t.Fatal("a reinstall box reset its vault")
+	}
+}
+
+// reinstallOnly checks a reinstall box's claim page says only "already
+// claimed, reinstall me" (R4), never that a phone continues setup.
+func reinstallOnly(t *testing.T, what, body string) {
+	t.Helper()
+	if !strings.Contains(body, "I am already claimed. To set me up again, reinstall me.") || strings.Contains(body, "Setup continues") || strings.Contains(body, "<form") {
+		t.Fatalf("%s on a reinstall box: %s", what, body)
 	}
 }
 
