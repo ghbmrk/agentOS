@@ -470,7 +470,7 @@ func (k *Keeper) client() *http.Client {
 // Check runs one round: it asks the holder whether it holds a secret and
 // hands one if not. handed reports whether it did.
 func (k *Keeper) Check(ctx context.Context) (handed bool, err error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", "http://holder.localhost/state", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", "http://localhost/state", nil)
 	resp, err := k.client().Do(req)
 	if err != nil {
 		return false, err
@@ -493,7 +493,7 @@ func (k *Keeper) Check(ctx context.Context) (handed bool, err error) {
 			s[i] = 0
 		}
 	}()
-	req, _ = http.NewRequestWithContext(ctx, "PUT", "http://holder.localhost/secret", bytes.NewReader(s))
+	req, _ = http.NewRequestWithContext(ctx, "PUT", "http://localhost/secret", bytes.NewReader(s))
 	resp, err = k.client().Do(req)
 	if err != nil {
 		return false, err
