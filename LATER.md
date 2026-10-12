@@ -169,7 +169,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | OP9-status-a l5 | UX 5 on #525: C11 stands on every box until W5b, so a daily digest would repeat "Update checks: not running; nothing to do"; DIG-1 is dropped; SIM-pull (STATUS and urgent notifications, no digest) decides how lines with no owner step are shown |
 | OP9-status-a l6 | UX 6 on #525: "Routing: learning cannot change how work is routed here" is the least plain line; say "Learning cannot change which model does which work" |
 | DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR. DOC-7 left it: the inferred rows are not recorded and the clone history is shallow, so they cannot be told from the other SHA rows |
-| DOC-3 f2 | L3 on #356: D-041 (license) has date `Pending`, not ISO; set it when the license is chosen |
 | DOC-7 f1 | `tools/doclint.py` exempts D-062, D-087, D-088 and D-089 from the D-056 limit: its Decision cell is 352 characters with no `decisions/D-062.md` link; move the long text out when the coordinator next amends DECISIONS (decisions are not edited in place) |
 | CRED-5 f5 | L3 point 5 on #328: restore "only" in the broker-held use set so it is closed on its own; state precedence between unconfirmed broker-held and worker-held when terms are silent on proxies but require the provider's sign-in flow |
 | CRED-4b f1 | L3 on #300 (#9): the browser gate passes the raw `cfg.Origins` to the driver, not the canonical keys (`gate.go:99`) |

@@ -7,7 +7,6 @@ Questions and actions only Mark can take, one line each, answerable in one word,
 | # | Question | Recommendation | Source |
 |---|---|---|---|
 | Q2 | Approve CONV-4's revised spec diff (#633) once the 2026-10-09 fix-list (D-087) is pushed? | yes, after reading the revised diff | CONV-4 |
-| Q4 | Choose the licence (D-041; OSS-12 needs it before first public release, with upstream OpenClaw notices kept)? | Apache-2.0 if OpenClaw's own licence allows it (not yet checked) | CONV-5 |
 
 ## Actions
 
