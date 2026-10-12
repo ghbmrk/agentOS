@@ -52,7 +52,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| SIM-gate | [Merge gate compares content, not patch-ids](briefs/SIM.md#sim-gate-the-merge-gate-compares-content-not-patch-ids-tier-c) | #692 | queued (fix lands in #692; C) |
+| SIM-gate | [Merge gate compares content, not patch-ids](briefs/SIM.md#sim-gate-the-merge-gate-compares-content-not-patch-ids-tier-c) | #692 | merged (#692, 9c51a73) |
 | SIM-fs | [One durable-write helper; every rename dir-synced, vm metadata included](briefs/SIM.md#sim-fs-one-durable-write-helper-used-everywhere-tier-a) | — | queued (brief ready; tier A) |
 | SIM-bound | [Bounded broker memory under deny-all; STOP reads an index](briefs/SIM.md#sim-bound-bounded-broker-memory-and-stop-without-a-history-walk-tier-a) | — | queued (brief ready; tier A) |
 | SIM-sd | [L1 spec diff: one log, owner messages as intents, one outcome, learning off until it wins](briefs/SIM.md#sim-sd-l1-spec-diff-for-one-log-mark-approves) | — | queued (B; Mark approves) |
@@ -700,3 +700,10 @@ Promoted by Mark on 2026-10-10 ("Can just become a row", "Just bypass gap list";
 |---|---|---|---|
 | PAYCAP-1 | [A spending limit set outside the box: the box pays with one card whose limit the owner's bank enforces, a backstop that holds if the broker is compromised](briefs/PAYCAP-1.md) (stub; no friction in normal use; declines reach the owner as a digest line) | — | queued (A) |
 | PAYCAP-2 | [An optional Link agent-wallet payment adapter: one spend request and one-time card per purchase, approval as a state so Stripe's announced limits only make it instant; Step 0 checks that the API is open to self-hosted apps, its regions and merchant coverage](briefs/PAYCAP-2.md) (stub; failures are digest lines with a checkout-link fallback) | PAYCAP-1 | queued (A) |
+
+## claude2
+
+Per-team section (OPERATING §7): the claude2 team appends only here; its IDs are prefixed `C2-` or `D-claude2-`.
+
+| ID | Package | Needs | State |
+|---|---|---|---|

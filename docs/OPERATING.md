@@ -92,7 +92,7 @@ Checks run cheapest first; each stage sees only what passed the one before. A PR
 | 3. L3 review | all | fresh session per PR (or per small batch of tier-C PRs); strongest model for tier A | diff, cited IDs, the brief | verdict in the PR (format below) | accept |
 | 4. Lens screen | A, B | fresh session per bundle | §4 checklist below | `reviews/<lens>/` | no blocker open |
 | 4a. Security section | A | separate fresh session, strongest model | the same | `reviews/security/` | signed |
-| 5. Merge | all | any coordinator on a peer subscription (§7) | — | — | stages above passed |
+| 5. Merge | all | the PR's author team (§7); on the peer subscriptions, any coordinator | — | — | stages above passed |
 
 Never a standing reviewer session: the one long-lived reviewer cost 27% of the first week.
 
@@ -102,6 +102,8 @@ Never a standing reviewer session: the one long-lived reviewer cost 27% of the f
 - `brief-gap`: the brief left out something the package needed.
 - `defect`: the code breaks a cited requirement or an invariant.
 - `scope`: the review asks for something outside the cited IDs; such points are `release` or `later` (§2), not blockers, and the verdict should normally have been accept.
+
+The second line is `Record: PR #N · package <ID> · head <SHA>`, same format as lens records.
 
 Each fix-list point cites a requirement ID or a concrete defect and carries its class (§2). METRICS counts causes per week, so L4 can tell whether to fix the spec, the briefs, the builders or the reviewers.
 
@@ -176,11 +178,15 @@ Extra capacity (a second subscription, a teammate's agent, or another vendor's c
 
 **Claims on BOARD.md.** A team claims a row by a PR or commit to main that sets the row's state to `building` and its owner to the team name, before any work. A row with an owner belongs to that team until its state changes. Two claims on one row: the earlier merged one wins and the other stops. Branch stems carry the team only when more than one team is active: `pkg/<team>-<id>-<slug>`.
 
-**Merge rule is the same for everyone.** Any coordinator on a peer subscription merges a PR when every required review accepts the current head, CI is green and it merges cleanly (§3, §4; the project merge rule). Teams outside the two subscriptions open PRs and do not merge. Nobody pushes to another team's branch.
+**Every team merges its own PRs; GitHub enforces the gates.** A PR merges only when its head contains current main and the required checks passed on that head (ruleset on main), and when its diff equals the diff its L3 accept recorded (`tools/premerge.py`). The merging team calls the merge with the head SHA, so a later push makes the merge fail. Mark's two subscriptions are one team of equal peers (D-099): any coordinator on either merges a PR of that team when every required review accepts the current head, CI is green and it merges cleanly (§3, §4; the project merge rule). Any other team is its PRs' only pusher and merger; a PR into another lane is merged by that lane's owner, who requests changes rather than pushing. Nobody pushes to another team's branch. Branch stems carry the team: `pkg/<team>-<id>-<slug>`.
 
-**Each PR gets a fresh L3 review (§4 stage 3) in a new session**, on whichever subscription has usage; the reviewer is never the PR's builder session. The lens screen on tier A and B PRs follows §4; a tier C PR merges on an L3 accept and green CI (§4 stages 4-5).
+**Each team runs the whole pipeline on its own PRs.** Stages 1–4a (§4) run on the author team's subscription, in fresh sessions; each PR gets a fresh L3 review (§4 stage 3) in a new session, never the PR's builder session. The lens screen on tier A and B PRs follows §4; a tier C PR merges on an L3 accept and green CI (§4 stages 4-5). Every L3 verdict and lens record names the head it reviewed (`head <SHA>`).
 
 **Every review verdict comment ends with the PR's next step and the reviews still owed**, so GitHub stays the live handoff and handoff/CURRENT.md only holds standing decisions and a dated snapshot.
+
+**IDs never collide.** The peer team numbers decisions `D-NNN`; every other team uses `D-<team>-NNN` and prefixes the BOARD rows it creates (claude2: `C2-`). Each team appends only to its own section of BOARD.md, LATER.md and DECISIONS.md. doclint fails on a duplicate ID.
+
+**Ownership moves by hand-off or takeover.** A hand-off is a `handoff` issue (the §5 packet) accepted by a claim PR. A row whose owner shows no activity on it for 24 hours may be claimed by a PR citing the last activity. A team continuing another team's PR branches from its head and opens a new PR; it never pushes to the old branch.
 
 **GitHub is the bus.** PRs and issues carry everything between teams: claims, interface requests, blockers, review verdicts. No team needs access to another team's chat, sessions or memory.
 
