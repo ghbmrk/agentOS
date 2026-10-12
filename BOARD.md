@@ -267,7 +267,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7, DEV-net-g | queued (#41 merged the older image; #175 is the unmerged rebuild: per-drive ID check in the initrd, `DevicePolicy=closed`; branch `pkg/p2-1-image-build-6izuf9` kept) |
+| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7, DEV-net-g | queued (#41 merged the older image; #175 is the unmerged rebuild: per-drive ID check in the initrd, `DevicePolicy=closed`; branch `pkg/p2-1-image-build-6izuf9` kept; the loader drives the access point only through `localui.APLoader` (Start with every AP interface before any station join; `localui` L34, DEV-net-h); its `AccessPoint.Stop` returns nil when no access point runs; its `APHost` bounds each nft/systemctl run with its own timeout) |
 | P2-grants | [Grants and approval policy](briefs/P2-grants.md) | P1-7 | merged (a390f03; broker/grants) |
 | P2-rev3 | [Reversible conversions](briefs/P2-rev3.md) | P2-grants | merged (04be62e; broker/reversible) |
 | P2-gr8 | [GR8 fix: approval used up inside the dispatch commit](briefs/P2-gr8.md) | P2-rev3 | merged (a390f03; broker/grants) |

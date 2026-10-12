@@ -28,15 +28,17 @@ type APLoader struct {
 	AP   AccessPoint
 	Host APHost
 
-	mu      sync.Mutex
-	started bool
-	up      string           // the interface running the access point
-	failed  map[string]error // interfaces whose BringDown last failed
+	mu     sync.Mutex
+	named  map[string]bool  // interfaces a Start brought down, or tried to
+	up     string           // the interface running the access point
+	failed map[string]error // interfaces whose BringDown last failed
 }
 
 // Start runs BringDown for each interface, idempotent whether or not it was
-// up. It must succeed for an interface before Station takes it; one whose
-// BringDown fails stays refused until a Down succeeds for it.
+// up. Up and Station refuse an interface no Start named, since its
+// exemption state is unknown. BringDown must succeed for an interface
+// before Station takes it; one whose BringDown fails stays refused until a
+// Down succeeds for it.
 func (l *APLoader) Start(ctx context.Context, ifaces ...string) error {
 	if len(ifaces) == 0 {
 		return errors.New("localui: the loader's Start names no access point interface")
@@ -45,25 +47,30 @@ func (l *APLoader) Start(ctx context.Context, ifaces ...string) error {
 	defer l.mu.Unlock()
 	if l.failed == nil {
 		l.failed = map[string]error{}
+		l.named = map[string]bool{}
 	}
 	var errs []error
 	for _, iface := range ifaces {
+		if _, err := ExemptUnit(iface); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		l.named[iface] = true
 		errs = append(errs, l.bringDown(ctx, iface))
 	}
-	l.started = true
 	return errors.Join(errs...)
 }
 
-// Up brings the access point up on cfg.Iface. It refuses before Start,
-// while an access point is up, and while any other interface's BringDown
+// Up brings the access point up on cfg.Iface. It refuses an interface no
+// Start named, while an access point is up, and while any other interface's BringDown
 // last failed. If BringUp fails, the loader runs BringDown again, and an
 // interface it cannot bring down stays refused for Station and blocks Up
 // on any other.
 func (l *APLoader) Up(ctx context.Context, cfg APConfig) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if !l.started {
-		return errors.New("localui: the loader has not brought its access point interfaces down yet")
+	if !l.named[cfg.Iface] {
+		return notNamed(cfg.Iface)
 	}
 	if l.up != "" {
 		return fmt.Errorf("localui: the access point is already up on %s", l.up)
@@ -105,21 +112,25 @@ func (l *APLoader) Down(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// Station runs join, which puts iface into station mode, only after Start,
-// while iface is not running the access point and its last BringDown
+// Station runs join, which puts iface into station mode, only after a
+// Start named iface, while iface is not running the access point and its last BringDown
 // succeeded.
 func (l *APLoader) Station(ctx context.Context, iface string, join func(context.Context) error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	switch {
-	case !l.started:
-		return errors.New("localui: the loader has not brought its access point interfaces down yet")
+	case !l.named[iface]:
+		return notNamed(iface)
 	case iface == l.up:
 		return fmt.Errorf("localui: %s runs the access point", iface)
 	case l.failed[iface] != nil:
 		return fmt.Errorf("localui: %s may still be exempt, so it does not join a network: %w", iface, l.failed[iface])
 	}
 	return join(ctx)
+}
+
+func notNamed(iface string) error {
+	return fmt.Errorf("localui: the loader's Start has not brought %s down, so it may still be exempt", iface)
 }
 
 // bringDown runs BringDown for iface and records whether it failed. A

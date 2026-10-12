@@ -191,7 +191,7 @@ func TestLoaderStartFailureBlocksTheStationJoin(t *testing.T) {
 func TestLoaderNeverJoinsAStationOnAnExemptInterface(t *testing.T) {
 	h := newNetHost()
 	l, _ := newLoader(h)
-	if err := l.Start(context.Background(), "wlan0"); err != nil {
+	if err := l.Start(context.Background(), "wlan0", "wlan1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.Up(context.Background(), apCfg("wlan0")); err != nil {
@@ -333,5 +333,50 @@ func TestLoaderStartChecksItsInterfaces(t *testing.T) {
 	}
 	if err := l.Start(context.Background(), "wl;x"); err == nil || !strings.Contains(err.Error(), "wl;x") {
 		t.Fatalf("Start(wl;x): %v", err)
+	}
+}
+
+// DEV-net-h (a), (b): an interface Start did not name has an unknown
+// exemption state. A loader that died with the access point up on wlan2
+// left it exempt; Start("wlan0") never brings wlan2 down, so Station and
+// Up refuse wlan2 and touch neither the host nor the join.
+func TestLoaderRefusesAnInterfaceStartDidNotName(t *testing.T) {
+	h := newNetHost()
+	dead, _ := newLoader(h)
+	if err := dead.Start(context.Background(), "wlan2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dead.Up(context.Background(), apCfg("wlan2")); err != nil {
+		t.Fatal(err)
+	}
+
+	l, _ := newLoader(h)
+	if err := l.Start(context.Background(), "wlan0"); err != nil {
+		t.Fatal(err)
+	}
+	n := len(h.log)
+	if err := l.Station(context.Background(), "wlan2", noJoin(t)); err == nil || !strings.Contains(err.Error(), "wlan2") {
+		t.Fatalf("station join on wlan2 after Start(wlan0): %v", err)
+	}
+	if err := l.Up(context.Background(), apCfg("wlan2")); err == nil || !strings.Contains(err.Error(), "wlan2") {
+		t.Fatalf("bring-up on wlan2 after Start(wlan0): %v", err)
+	}
+	if len(h.log) != n {
+		t.Fatalf("the host was touched for an unnamed interface: %q", h.log[n:])
+	}
+
+	// A later Start that names wlan2 brings it down, and it may then join.
+	if err := l.Start(context.Background(), "wlan2"); err != nil {
+		t.Fatal(err)
+	}
+	if h.exempt["wlan2"] {
+		t.Fatalf("after Start(wlan2): exempt %v", h.exempt)
+	}
+	joined := false
+	if err := l.Station(context.Background(), "wlan2", func(context.Context) error { joined = true; return nil }); err != nil || !joined {
+		t.Fatalf("station join on wlan2 after Start(wlan2): %v", err)
+	}
+	if err := l.Station(context.Background(), "wlan0", func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("wlan0 lost its Start: %v", err)
 	}
 }
