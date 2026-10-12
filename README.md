@@ -42,4 +42,4 @@ Read in this order and stop when you have what you need. Token counts are approx
 | Coordinator (L1) | CLAUDE.md; OPERATING; BOARD.md; `class:release` (not `frozen`) and `decision` issues; recent DECISIONS rows | 15k |
 | Another team | AGENTS.md; CLAUDE.md; docs/LANES.md (your lane); OPERATING §7; then the builder row above | 6k + builder |
 
-No license has been chosen yet; all rights reserved until one is (spec OSS-12).
+Licensed under the Apache License 2.0 (see LICENSE and NOTICE; D-041, spec OSS-12).

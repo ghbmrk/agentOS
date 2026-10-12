@@ -28,7 +28,7 @@ Classes: **buildable now** (cloud-buildable; dependencies are in Needs), **stand
 | ADP-14 | stand-in | Web recipes against an S5 fixture site and a demo environment. Needs CRED-4b and ADP-8. | ADP-14a |
 | ADP-15 | stand-in | Composited desktop over fixture executors. Needs CRED-11a and ADP-5. | ADP-15a |
 | ADP-16 | stand-in | Suite executor with fixture apps of one account. Needs ADP-5. | ADP-16a |
-| OSS-12 | environment-blocked | Waits on Mark's licence choice (D-041, date `Pending`). No class fits a decision; the blocker is named instead. Upstream-notice preservation is checkable now and rides the first row that ships a LICENSE. | MARK-QUEUE Q4 |
+| OSS-12 | environment-blocked | Mark chose Apache-2.0 on 2026-10-12 (D-041); LICENSE and NOTICE landed with it. Upstream-notice preservation is checkable now. | D-041 |
 | RES-5 | buildable now | Pool tracker and reserve admission against S8 stub CLIs. | RES-5a |
 | UPD-7 | buildable now | Soak plus attestations, no project-run rollout. Likely already exercised by M6's tests in `broker/maintain`; first step is to add the `REQ: UPD-7` marker, then fill any gap. | UPD-7t |
 | UPD-9 | buildable now | Held security fix put to the owner. Wiring (`maintain.Loop3`) is W5b's; the D3 and O2 registrations are OP9-status-b's, or W5b's if -b has not (briefs/OP9-status.md, line "Update checks (C11)", IDs OP-9, UPD-9). | W5b (existing) |
