@@ -689,6 +689,9 @@ func main() {
 		ev.mail = mw
 	}
 	ev.wire(&cfg)
+	// RENEW (CAP-3): the owner starts a full agent memory over, by name,
+	// only on the gate's approval.
+	(&ownerRenew{r: recallExec, now: time.Now}).wire(&cfg)
 	// Changing where updates come from (OSS-10): on the clock guard's
 	// Latest, which questions.open starts; until then nothing is followed.
 	fs, err := newFollowSetting(updateStore, shippedRoot, qs.g.Load)

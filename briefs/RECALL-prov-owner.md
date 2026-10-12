@@ -16,3 +16,5 @@ Board section: Phase 3: compounding.
 **Not in scope.** Aged storage for reads; changing `Renew` itself.
 
 **Usage estimate:** 60k tokens (tier A).
+
+**Built** (RECALL-prov-owner PR): owner command RENEW / RENEW n in `broker/cmd/agentosd/renew.go`; `Reach.Full`, `AskRenew` and the renew path of `Execute` in `broker/recalltool/renew.go`. Assumptions: recalltool RN1-RN3, agentosd RW1-RW2.
