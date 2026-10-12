@@ -898,6 +898,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CTRL-card-rot l6 | PR #1090 UX delta: every rotated part is owed now, so the rotation start page (CTRL-card-rot-wire) should preselect the owed parts or name them in owner words. The `ErrRotationOwed` text ("recovery: ... also replace wifi") is not owner-facing |
 | CTRL-card-rot l7 | PR #1090 UX delta: the card display's three 410 texts say "my box page", but SPEC CH-21 and voice V5 name it "my Wi-Fi page", as `card/display.go`'s 403 and `render.go` already do. Sweep all three together |
 | PROJ-read l1 | PR #1095 L3/lens: one journal read is now shared by every projection, so the pointer fields of `journal.Record` (`Intent` with its `Params` map, `Egress`, `Sleep`) are shared across views, and a mutating `Apply` would mislead later views. The contract is in the `Projection.Apply` doc and ASSUMPTIONS P8, and no projection mutates today. With the first production projection (SIM-owner-hold), add a test helper that fails if `Apply` changes its record. |
+| PMERGE-1 S-l1 | PR #692 Security lens: the hand-off issue template (`.github/ISSUE_TEMPLATE/handoff.md`) has no "no secrets" line (public repo: no tokens, keys, passphrases or owner data; redact logs), and secret scanning is off on this public repo (Mark's setting) |
+| PMERGE-1 S-l2 | `recheck`. PR #692 Security lens: `tools/premerge.py` is a call the merger makes, not a required GitHub check, so under D-100 a non-peer team's merge rests on its own call. Recheck when a lane is next onboarded |
 
 ## claude2
 
