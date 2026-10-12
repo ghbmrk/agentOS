@@ -111,7 +111,7 @@ func prep(c prepConfig) (err error) {
 	if err := writeSticker(c.Out, code); err != nil {
 		return err
 	}
-	logf("wrote %s: write box.raw to the box's SSD, print sticker.html at 100%%, then delete the directory", c.Out)
+	logf("wrote %s: run agentos-seller write with box.raw, print sticker.html at 100%%, then delete the directory", c.Out)
 	return nil
 }
 
