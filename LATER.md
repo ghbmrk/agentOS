@@ -826,6 +826,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | DEV-net-c l1 | PR #1051 L3: netguard learns only the first usable nameserver, with no failover to the next |
 | DEV-net-c l2 | PR #1051 L3: no owner-facing line when no resolver is learned (names fail closed silently) |
 | DEV-net-c l3 | PR #1051 L3 delta: `Sources.Read` counts link-local and VM-bridge prefixes, so an uplink-down read with only those still replaces the learned set (moot while nothing routes out) |
+| DEV-net-e l1 | PR #1055 L3: `unpin` spends the approval code before checking that the label exists (`netpins.go`), though N12 says a refusal is checked before the code is spent; costs the owner one code, not exploitable |
+| DEV-net-e l2 | `recheck`. PR #1055 L3: the CI step running `tests/test_inbound_netns.py` under sudo passes if both tests skip (no root, ip or nft); make it fail on skip |
+| DEV-net-e l3 | PR #1055 L3: if the image adopts NetworkManager for the AP or station (P2-2w), `NetworkManager.service` needs the same `Requires=`/`After=agentos-inbound.service` drop-in as systemd-networkd |
+| DEV-net-e l4 | PR #1055 UX lens: `agentos-egress unpin` prints nothing on success; say which pin was removed |
 
 ## Reuse candidates
 | ID | Component | Why |
