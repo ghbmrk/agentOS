@@ -25,6 +25,7 @@ core vault
 core sockets
 core egress
 core holder
+core checker
 core childproc
 core verb
 core guest
@@ -35,6 +36,7 @@ wiring daemon
 wiring cmd/agentosd
 wiring cmd/agentos-egress
 wiring cmd/agentos-holder
+wiring cmd/agentos-checker
 wiring cmd/agentos-a8scan
 
 # The one way in: an intent goes to the journal. The gate's Submit is the

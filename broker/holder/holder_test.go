@@ -122,6 +122,7 @@ func TestShapeOutsideTheDeclarationGetsNoLogin(t *testing.T) {
 		"undeclared path": req("POST", "/v1/other", "{}"),
 		"wrong method":    req("GET", "/v1/messages", ""),
 		"non-read verb":   req("POST", "/v1/send", "{}"),
+		"query string":    req("POST", "/v1/messages?model=other", "{}"),
 		"unknown host":    func() *http.Request { r := req("POST", "/v1/messages", "{}"); r.Host = "other.example"; return r }(),
 		"extra header": func() *http.Request {
 			r := req("POST", "/v1/messages", "{}")
