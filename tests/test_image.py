@@ -49,6 +49,18 @@ def write(root, rel, text="", mode=0o644):
     return f
 
 
+# The image's no-dump files (IMG-nodump): copied from mkosi.extra into a test tree.
+NODUMP = ("usr/lib/systemd/coredump.conf.d/50-agentos-nodump.conf",
+          "usr/lib/systemd/system.conf.d/50-agentos-nodump.conf",
+          "usr/lib/sysctl.d/99-agentos-nodump.conf",
+          "usr/lib/systemd/system/agentosd.service")
+
+
+def nodump(root):
+    for rel in NODUMP:
+        write(root, rel, (MK / "mkosi.extra" / rel).read_text())
+
+
 class TreeCheckTest(unittest.TestCase):
     """HW-1: the image holds no per-install secret; V15: no socket files."""
 
@@ -59,6 +71,7 @@ class TreeCheckTest(unittest.TestCase):
         write(self.root, "etc/hostname", "agentos\n")
         write(self.root, "usr/lib/agentos/agentosd", "\x7fELF", 0o755)
         (self.root / "var/lib/agentos").mkdir(parents=True)
+        nodump(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -227,6 +240,9 @@ class ReleaseTest(unittest.TestCase):
             finish.manifest("7", "cd" * 32, name, text, {})
 
 
+SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
+
+
 def stub(d, name, body):
     write(d, name, "#!/bin/sh\n" + body + "\n", 0o755)
 
@@ -248,6 +264,8 @@ class HealthTest(unittest.TestCase):
         (self.lib / "images/openclaw/opt/openclaw").mkdir(parents=True)
         write(self.lib, "guest/launch.json", "{}")
         write(self.root, "proc/cmdline", "console=ttyS0 rw quiet usrhash=%s\n" % H)
+        write(self.root, "proc/swaps", SWAPS_HEADER)
+        write(self.root, "proc/sys/kernel/core_pattern", "|/usr/bin/false\n")
         ev = self.root / "sys/firmware/efi/efivars"
         ev.mkdir(parents=True)
         (ev / "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(b"\x06\x00\x00\x00\x01")
@@ -276,6 +294,7 @@ class HealthTest(unittest.TestCase):
         self.assertIn("agentos-health: PASS", r.stdout)
         self.assertIn("secure_boot=on", r.stdout)
         self.assertIn("inbound=drop", r.stdout)
+        self.assertIn("swap=off dumps=off", r.stdout)
 
     def test_secure_boot_off_is_reported_not_failed(self):
         (self.root / "sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(
@@ -299,6 +318,13 @@ class HealthTest(unittest.TestCase):
             "guest image missing": lambda: (self.lib / "images/openclaw/opt/openclaw").rmdir(),
             "inbound rules not loaded": lambda: stub(self.bin, "nft", "echo 'No such file or directory' >&2; exit 1"),
             "inbound chain ends in accept": lambda: self.nft("accept"),
+            # IMG-nodump (HW-1): a swap device or a core dump that lands on disk is never blessed.
+            "swap active": lambda: write(self.root, "proc/swaps", SWAPS_HEADER +
+                                         "/dev/sda4  partition\t1048572\t0\t-2\n"),
+            "swaps unreadable": lambda: (self.root / "proc/swaps").unlink(),
+            "core dumps to a file": lambda: write(self.root, "proc/sys/kernel/core_pattern", "core\n"),
+            "core dumps to systemd-coredump": lambda: write(
+                self.root, "proc/sys/kernel/core_pattern", "|/usr/lib/systemd/systemd-coredump %P %u\n"),
         }
         for name, breakit in cases.items():
             with self.subTest(name):
@@ -642,6 +668,107 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("/usr/lib/agentos/agentosd", u["Service"]["ExecStart"])
 
 
+class NoDumpTest(unittest.TestCase):
+    """IMG-nodump (security S1 on #1060): the Owner Card passphrase is a Go string that cannot be
+    zeroed (card C13), so no crash may write the broker's memory to disk and no heap page may be
+    swapped out. Core dumps are discarded and the image has no swap; the build fails otherwise."""
+    # REQ: HW-1
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        nodump(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def v(self):
+        return " | ".join(check.violations(self.root))
+
+    def test_shipped_files_say_what_the_check_needs(self):
+        extra = MK / "mkosi.extra"
+        self.assertEqual(ini(extra / NODUMP[0])["Coredump"]["Storage"], "none")
+        self.assertEqual(ini(extra / NODUMP[1])["Manager"]["DefaultLimitCORE"], "0")
+        self.assertEqual(ini(extra / NODUMP[3])["Service"]["LimitCORE"], "0")
+        self.assertEqual(check.sysctl(self.root, "kernel.core_pattern"), "|/usr/bin/false")
+        self.assertEqual(check.sysctl(self.root, "fs.suid_dumpable"), "0")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_removing_any_dump_setting_fails_the_build(self):
+        for rel, needle in zip(NODUMP, ("Storage=none", "DefaultLimitCORE=0", "kernel.core_pattern",
+                                        "LimitCORE=0")):
+            with self.subTest(rel=rel):
+                f = self.root / rel
+                text = f.read_text()
+                f.write_text("".join(ln for ln in text.splitlines(True) if needle not in ln))
+                self.assertIn(rel.rsplit("/", 1)[-1], self.v())
+                f.unlink()
+                self.assertIn(rel.rsplit("/", 1)[-1], self.v())
+                f.write_text(text)
+                self.assertEqual(check.violations(self.root), [])
+
+    def test_a_later_file_cannot_turn_dumps_back_on(self):
+        # systemd reads drop-ins in file-name order, /etc over /usr/lib; the last value wins.
+        cases = (
+            ("etc/systemd/coredump.conf.d/zz.conf", "[Coredump]\nStorage=external\n", "Storage"),
+            ("usr/lib/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=infinity\n", "DefaultLimitCORE"),
+            ("etc/systemd/system/agentosd.service.d/zz.conf", "[Service]\nLimitCORE=infinity\n", "LimitCORE"),
+            ("usr/lib/sysctl.d/99-zz.conf", "kernel.core_pattern = core\n", "core_pattern"),
+            # systemd-coredump's own file, if a package ever adds it, sorts before ours.
+            ("etc/sysctl.d/99-agentos-nodump.conf", "fs.suid_dumpable=2\n", "core_pattern"),
+        )
+        for rel, text, needle in cases:
+            with self.subTest(rel=rel):
+                f = write(self.root, rel, text)
+                self.assertIn(needle, self.v())
+                f.unlink()
+        write(self.root, "usr/lib/sysctl.d/50-coredump.conf",
+              "kernel.core_pattern=|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_no_swap_in_the_tree(self):
+        cases = (
+            ("etc/fstab", "/dev/sda4 none swap sw 0 0\n"),
+            ("etc/fstab", "# comment\nUUID=x / ext4 defaults 0 1\n/swapfile none swap defaults 0 0\n"),
+            ("etc/systemd/system/swapfile.swap", "[Swap]\nWhat=/swapfile\n"),
+            ("usr/lib/systemd/system/dev-sda4.swap", "[Swap]\nWhat=/dev/sda4\n"),
+            ("usr/lib/systemd/system-generators/zram-generator", "#!/bin/sh\n"),
+            ("swapfile", "x"),
+        )
+        for rel, text in cases:
+            with self.subTest(rel=rel):
+                f = write(self.root, rel, text)
+                self.assertIn("swap", self.v())
+                f.unlink()
+        write(self.root, "etc/fstab", "# no swap here\nUUID=x / ext4 defaults 0 1\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_no_swap_partition_and_generators_off(self):
+        # Built disk: no partition carries the swap type, and gpt-auto and fstab make no swap
+        # units (systemd.swap=0), so a swap partition added to the drive later is never used.
+        for d in (MK / "mkosi.repart", MK / "mkosi.extra/usr/lib/repart.d"):
+            for f in sorted(d.glob("*.conf")):
+                with self.subTest(f=f.name):
+                    self.assertNotEqual(ini(f)["Partition"]["Type"], "swap")
+        args = ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"].split()
+        self.assertIn("systemd.swap=0", args)
+        entry = ENTRY % H
+        self.assertIn("systemd.swap=0", finish.swap_violations([], entry)[0])
+        entry = entry.replace("rw quiet", "rw quiet systemd.swap=0")
+        table = [{"type": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"}, {"type": "4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709"}]
+        self.assertEqual(finish.swap_violations(table, entry), [])
+        swap = table + [{"type": "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F", "node": "agentos.raw4"}]
+        self.assertIn("swap partition", " ".join(finish.swap_violations(swap, entry)))
+        self.assertIn("systemd.swap=0", " ".join(finish.swap_violations(
+            table, entry.replace("systemd.swap=0", "systemd.swap=0 systemd.swap=1"))))
+
+    def test_boot_test_expects_the_runtime_check(self):
+        # The booted image reports swap and core dumps off in the health line, so CI shows them on
+        # a real boot, not only in this tree check.
+        self.assertIn("swap=off dumps=off", (IMG / "ci_boot.sh").read_text())
+
+
 def fuzz_targets(broker):
     """(pkg, name) for every Go fuzz target in broker's *_test.go files, skipping raw strings
     (a generated source in a test, like loop7's planted target, is not a target) and testdata."""
@@ -734,6 +861,7 @@ class FuzzConfineTest(unittest.TestCase):
 
     def test_the_image_does_not_ship_the_fuzz_state(self):
         with tempfile.TemporaryDirectory() as d:
+            nodump(pathlib.Path(d))
             self.assertEqual(check.violations(d), [])
             os.makedirs(os.path.join(d, "var/lib/agentos-fuzz"))
             self.assertEqual(check.violations(d), ["var/lib/agentos-fuzz: fuzz state; created on the box, never shipped"])
