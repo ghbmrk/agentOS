@@ -9,10 +9,6 @@ Index of the live work packages, one row per open `work-item` issue. Each row li
 | ID | Package | Needs | State |
 |---|---|---|---|
 | PILOT-S | [Sonnet builder pilot](briefs/PILOT-S.md) | — | building (2026-10-08 through the 2026-10-13 reset, D-060) |
-| DOC-4 | [Per-file review records; no shared run tables](briefs/DOC-4.md) | DOC-1, DOC-2 | building |
-| DOC-7 | [LATER records sweep](briefs/DOC-7.md) | DOC-2, DOC-4 | in review (C; D-048 exception, owner to confirm) |
-| SR3 | [Register the security and architecture review](briefs/SR3.md) | DOC-3 | in review (Codex proposal to primary; documentation only) |
-| HK-1 | [depaudit self-test flake fix](briefs/HK-1.md) | — | in review |
 | CODEX-1 | [Intake of Codex drafts for implementation](briefs/CODEX-1.md) | — | in review (C; records only) |
 | CONV-1 | Convergence rules: release test, `recheck`, tooling and depth rule, idle limit, Mark queue ([D-086](decisions/D-086.md)) | — | in review (C; docs only) |
 | CONV-0 | [Convergence measures, daily metrics, ledger staleness](briefs/CONV-0.md) | CONV-1 | queued (C) |
@@ -46,8 +42,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-policy | [Policy as data with one match-and-compare evaluator](briefs/SIM.md#sim-policy-policy-as-data-one-evaluator-tier-a) | SIM-outcome, SIM-pull, SIM-core | queued (A) |
 | SIM-cap | [Capability grants scoped per intent](briefs/SIM.md#sim-cap-capability-grants-scoped-per-intent-tier-a) | SIM-core, SIM-check, SIM-policy | queued (A) |
 | SIM-sim | [Deterministic simulation of the broker, judged by SIM-check](briefs/SIM.md#sim-sim-deterministic-simulation-of-the-broker-tier-a) | SIM-check (second half) | building (first half: harness, PR pending; tier A) |
-| SIM-repo-2 | [Collaborator-only work items; CI and board.yml enforce the generated board; safe migration](briefs/SIM.md) | SIM-repo-1 | in review (A; #738) |
-| SIM-repo-2b | [Migrate; BOARD history archived; LATER and MARK-QUEUE as labels; doclint board rules retired](briefs/SIM.md) | SIM-repo-2, Mark's tap on the migration card, stage-2 main ruleset live (required `checks`, strict; #738 Security 4a) | queued (A; Mark approves) |
+| SIM-repo-2b | [Migrate; BOARD history archived; LATER and MARK-QUEUE as labels; doclint board rules retired](briefs/SIM.md) | SIM-repo-2, Mark's tap on the migration card, stage-2 main ruleset live (required `checks`, strict; #738 Security 4a) | in review (A; Mark approves) |
 | SIM-split-b | [CH-4 checker process; holders need a checker-verified code for high-risk acts](briefs/SIM.md#sim-split-b-the-ch-4-checker-process-tier-a) | SIM-split | building (A) |
 | SIM-split-refresh | [Refreshed tokens persist through the unlock step](briefs/SIM.md#sim-split-refresh-refreshed-tokens-persist-through-the-unlock-step-tier-a) | SIM-split-wire | queued (A) |
 | SIM-split-wire | [Production wiring: custody leaves egress, a Keeper per holder, the checker holds the seed](briefs/SIM.md#sim-split-wire-production-wiring-for-holders-and-the-checker-tier-a) | SIM-split-b | queued (A) |
@@ -388,7 +383,6 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W7 | [Compiled skills in live use](briefs/W7.md) | `suite.go` split, #52 merged | compiled-skills thread | queued (blocked) |
 | W8 | [Owner builds](briefs/W8.md) | P2-4f | — | queued (blocked) |
 | CH-20w | [Evidence delivery](briefs/CH-20w.md) | CH-20 merged; P2-6m wired into the vault process | — | queued (blocked on mail wiring) |
-| PACE-1 | [Held cleared text revalidated at send](briefs/PACE-1.md): a loops "Cleared" text held by the owner pacer is sent after the urgent "It is back" that superseded it, leaving the owner on a false all-clear; held texts carry the cleared keys they speak for and the pacer drops one the guard no longer holds true (OWN-4, CH-15) (tier A, architecture review finding 3) | W5-Dc-r1b | Next build item B | building |
 
 ## Uncovered requirement IDs (CONV-5, [triage](docs/conv-5-uncovered.md))
 
