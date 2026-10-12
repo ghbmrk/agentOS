@@ -38,7 +38,6 @@ type rotWire struct {
 	gen  *card.Card // the generated card, as the owner reads it
 	now  time.Time
 	done *Done
-	err  error // sticky: once part is in effect, every retry says so
 	log  []string
 }
 
@@ -87,9 +86,6 @@ func cardParts(ps []Part) card.Parts {
 }
 
 func (w *rotWire) provision(c *card.Card) error {
-	if w.err != nil {
-		return w.err
-	}
 	next := Card{WiFiName: c.WiFiName, WiFiPassword: c.WiFiPassword, SetupSecret: c.SetupSecret, SetupCode: c.SetupCode,
 		VaultPassphrase: c.VaultPassphrase, GridSeed: bytes.Clone(c.GridSeed), RecoveryKey: c.RecoveryKey}
 	d, err := w.p.Commit(w.x.b, next, w.now)
@@ -101,8 +97,7 @@ func (w *rotWire) provision(c *card.Card) error {
 		return fmt.Errorf("%w: %w", card.ErrDiscard, err)
 	case errors.Is(err, ErrCardNotStored):
 		w.done = &d
-		w.err = fmt.Errorf("%w: %w", card.ErrInEffect, err)
-		return w.err
+		return fmt.Errorf("%w: %w", card.ErrInEffect, err)
 	}
 	return err
 }
@@ -302,8 +297,10 @@ func TestAnAbortedRotationKeepsTheOldKey(t *testing.T) {
 }
 
 // A crash after the new recovery slot is written leaves exactly one
-// valid key (the new one), no key text on disk, and the display kept:
-// it may not be cancelled or discarded, since the owner needs that card.
+// valid key (the new one) and no key text on disk. The owner confirmed
+// from their copy, which now opens the drive, so the display erases its
+// copy and refuses cancel; a retry cannot revive it, and the next
+// rotation, made with the new key, finishes the owed parts.
 func TestACrashMidRotationLeavesOneValidKey(t *testing.T) {
 	x := newBox(t)
 	w := x.rotateOnDisplay([]Part{PartRecovery}, Proof{Recovery: x.rk})
@@ -324,14 +321,11 @@ func TestACrashMidRotationLeavesOneValidKey(t *testing.T) {
 	if w.done == nil || w.done.RecoveryKey != w.gen.RecoveryKey {
 		t.Fatal("the key in effect was not reported")
 	}
-	if _, err := w.d.Page(); err != nil {
-		t.Fatalf("display erased while its key is in effect: %v", err)
+	if _, err := w.d.Page(); !errors.Is(err, card.ErrDisplayGone) {
+		t.Fatalf("display kept after a confirmed partial write: %v", err)
 	}
 	if err := w.cancel(); !errors.Is(err, card.ErrInEffect) {
 		t.Fatalf("cancel with the key in effect: %v", err)
-	}
-	if _, err := w.d.Page(); err != nil {
-		t.Fatalf("display erased by cancel: %v", err)
 	}
 	if x.opens(x.rk) || !x.opens(nk) {
 		t.Fatal("after the crash, not exactly the new key opens")
@@ -343,10 +337,20 @@ func TestACrashMidRotationLeavesOneValidKey(t *testing.T) {
 	}
 	x.noKeyText(x.card.RecoveryKey, w.gen.RecoveryKey)
 
-	// Restart: the display is gone with the process; the drive alone has
-	// one valid key, which proves the rotation that finishes the owed parts.
-	w.d, w.p = nil, nil
+	// The fault clears and the owner confirms again: the real Pending is
+	// used up and the display is erased, so nothing changes.
 	crashPoint = func(string) error { return nil }
+	if err := w.d.ConfirmAnswers(w.answers(true)); !errors.Is(err, card.ErrDisplayGone) {
+		t.Fatalf("retry after a partial write: %v", err)
+	}
+	if _, err := w.p.Commit(x.b, Card{RecoveryKey: w.gen.RecoveryKey}, w.now); !errors.Is(err, ErrPendingLapsed) {
+		t.Fatalf("Pending after a partial write: %v", err)
+	}
+	if w.d.Confirmed() || x.opens(x.rk) || !x.opens(nk) {
+		t.Fatal("a retry changed the outcome of the partial write")
+	}
+
+	// The next rotation, with the new key as proof, finishes the owed parts.
 	w2 := x.rotateOnDisplay([]Part{PartRecovery}, Proof{Recovery: nk})
 	must(t, w2.d.ConfirmAnswers(w2.answers(true)))
 	if _, ok := RotationUnfinished(x.b); ok {

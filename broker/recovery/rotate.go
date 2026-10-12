@@ -206,8 +206,9 @@ var ErrPendingLapsed = errors.New("recovery: this new card has lapsed; nothing c
 var ErrNextCard = errors.New("recovery: the new card does not match the parts being replaced")
 
 // ErrCardNotStored is returned with the parts of a rotated card that are
-// already in effect when a later step failed: the caller must still show
-// that card, or the owner loses the new values.
+// already in effect when a later step failed. The owner confirmed that
+// card from their copy before Commit ran, so the copy is the card to keep;
+// the rotation is used up, and a new one made with it finishes the rest.
 var ErrCardNotStored = errors.New("recovery: part of the new card is in effect but was not saved; print it now")
 
 // Proof is what opens the drive now, for rewriting its slots: the current

@@ -28,13 +28,16 @@ var ErrDisplayGone = errors.New("card: I keep no copy of the card")
 var ErrDiscard = errors.New("card: this card can no longer take effect")
 
 // ErrInEffect, wrapped in a Provision error, says part of the card took
-// effect before a later step failed (a rotation's partial write): the
-// display keeps its copy, as for any failure, and no longer offers to
-// cancel, since the owner's current card no longer opens everything.
+// effect before a later step failed (a rotation's partial write). The
+// owner has just typed values back from their copy, and a retry cannot
+// finish (the rotation is used up), so the display erases its copy, as
+// after a full confirm, and refuses a later cancel: the new card is the
+// one to keep, and a new rotation made with it finishes the rest.
 var ErrInEffect = errors.New("card: part of this card is already in effect")
 
-// inEffectProblem is the page's note once part of the card is in effect.
-const inEffectProblem = "Part of this new card is already in effect, but I could not finish. Keep your printed or saved copy and confirm again."
+// inEffectProblem is the page's note once part of the card is in effect:
+// it names the one step that finishes the rotation (CH-12).
+const inEffectProblem = "Part of your new card is already in effect, but I could not finish. Use your printed or saved copy of the new card from now on, and start a new card from my box page with it to finish."
 
 // Parts are the card secrets a rotation replaces (REC-4).
 type Parts struct{ WiFi, Setup, Passphrase, Grid, Recovery bool }
@@ -110,6 +113,7 @@ const (
 	EventShown     = "owner card: generated and shown"
 	EventMismatch  = "owner card: confirm did not match"
 	EventProvFail  = "owner card: provisioning failed; card kept on display"
+	EventInEffect  = "owner card: confirmed, partly in effect, display copy erased"
 	EventConfirmed = "owner card: confirmed, provisioned, display copy erased"
 	EventDiscarded = "owner card: discarded unconfirmed, display copy erased"
 )
@@ -237,9 +241,9 @@ func (d *Display) pageLocked(problem string) ([]byte, error) {
 	var ctl bytes.Buffer
 	v := struct {
 		Prompt, Problem    string
-		Rotate, InEffect   bool
+		Rotate             bool
 		Word, Group, Check bool
-	}{d.Prompt(), problem, d.rotate, d.inEffect, d.word >= 0, d.group >= 0, d.check != checkNone}
+	}{d.Prompt(), problem, d.rotate, d.word >= 0, d.group >= 0, d.check != checkNone}
 	if err := controlsTmpl.Execute(&ctl, v); err != nil {
 		return nil, err
 	}
@@ -256,8 +260,8 @@ func (d *Display) pageLocked(problem string) ([]byte, error) {
 // Confirm checks the typed word and group against the card, ignoring
 // case, spaces and dashes. A mismatch returns ErrNotConfirmed and keeps
 // the display. A match provisions; if that fails the display stays and
-// the error is returned (unless it wraps ErrDiscard, which erases the
-// display); otherwise the display copy is erased.
+// the error is returned, unless it wraps ErrDiscard or ErrInEffect, which
+// erase the display; otherwise the display copy is erased.
 func (d *Display) Confirm(word, group string) error {
 	return d.ConfirmAnswers(Answers{Word: word, Group: group})
 }
@@ -296,14 +300,15 @@ func (d *Display) ConfirmAnswers(a Answers) error {
 	}
 	if err := d.provision(d.c); err != nil {
 		switch {
-		case errors.Is(err, ErrDiscard) && !d.inEffect:
-			d.discardLocked()
+		case errors.Is(err, ErrInEffect):
+			// Confirmed from the owner's copy, which is now the card in
+			// effect; a retry cannot finish, so keep nothing.
+			d.inEffect = true
+			d.eraseLocked()
+			d.journal(EventInEffect)
 		case errors.Is(err, ErrDiscard):
-			// Part of it is in effect: never erase it unconfirmed.
-			d.journal(EventProvFail)
-			return fmt.Errorf("card: provisioning: %w: %w", ErrInEffect, err)
+			d.discardLocked()
 		default:
-			d.inEffect = d.inEffect || errors.Is(err, ErrInEffect)
 			d.journal(EventProvFail)
 		}
 		return fmt.Errorf("card: provisioning: %w", err)
@@ -316,8 +321,8 @@ func (d *Display) ConfirmAnswers(a Answers) error {
 
 // Discard erases the display copy without provisioning: an aborted
 // rotation, whose new values never take effect. Later calls do nothing.
-// Once part of the card is in effect (ErrInEffect) it refuses, returning
-// ErrInEffect, and the display stays.
+// Once part of the card is in effect it refuses, returning ErrInEffect:
+// the rotation can no longer be cancelled.
 func (d *Display) Discard() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -413,7 +418,7 @@ func (d *Display) Handler(paired func(*http.Request) bool, next string) http.Han
 			}
 			if d.rotate && r.PostFormValue("cancel") == "1" {
 				if d.Discard() != nil {
-					d.servePage(w, http.StatusConflict, inEffectProblem)
+					d.gone(w)
 					return
 				}
 				http.Redirect(w, r, next, http.StatusSeeOther)
@@ -423,9 +428,7 @@ func (d *Display) Handler(paired func(*http.Request) bool, next string) http.Han
 			switch {
 			case err == nil:
 				http.Redirect(w, r, next, http.StatusSeeOther)
-			case errors.Is(err, ErrInEffect):
-				d.servePage(w, http.StatusInternalServerError, inEffectProblem)
-			case errors.Is(err, ErrDisplayGone), errors.Is(err, ErrDiscard):
+			case errors.Is(err, ErrDisplayGone), errors.Is(err, ErrDiscard), errors.Is(err, ErrInEffect):
 				d.gone(w)
 			case errors.Is(err, ErrNotConfirmed):
 				d.servePage(w, http.StatusUnprocessableEntity, "That did not match your card. Check the word and group and type them again.")
@@ -482,8 +485,12 @@ func (d *Display) servePage(w http.ResponseWriter, code int, problem string) {
 
 func (d *Display) gone(w http.ResponseWriter) {
 	d.mu.Lock()
-	discarded := d.discarded
+	discarded, inEffect := d.discarded, d.inEffect
 	d.mu.Unlock()
+	if inEffect {
+		http.Error(w, inEffectProblem, http.StatusGone)
+		return
+	}
 	if discarded {
 		http.Error(w, "This new card was cancelled and erased; your current card stays in effect. Start again from my box page.", http.StatusGone)
 		return
@@ -506,7 +513,7 @@ var controlsTmpl = template.Must(template.New("controls").Parse(`
 <div class="noprint" style="font-family:system-ui,sans-serif;border:2px solid #000;padding:4mm;margin:4mm">
 <style>@media print{.noprint{display:none}}</style>
 <h1>{{if .Rotate}}Your new card parts{{else}}Your Owner Card{{end}}</h1>
-<p><b>Print it now, or save it.</b> I keep no copy once you confirm.{{if and .Rotate (not .InEffect)}} Until you confirm, your current card stays in effect.{{end}} Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
+<p><b>Print it now, or save it.</b> I keep no copy once you confirm.{{if .Rotate}} Until you confirm, your current card stays in effect.{{end}} Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
 <p><button type="button" onclick="window.print()">Print</button> <a href="?save=1">Save as a file</a></p>
 <form method="post">
 <p>{{.Prompt}}</p>
@@ -517,7 +524,7 @@ var controlsTmpl = template.Must(template.New("controls").Parse(`
 {{end}}
 <button type="submit">Confirm</button></p>
 </form>
-{{if and .Rotate (not .InEffect)}}<form method="post"><input type="hidden" name="cancel" value="1"><p><button type="submit">Cancel: keep my current card</button></p></form>
+{{if .Rotate}}<form method="post"><input type="hidden" name="cancel" value="1"><p><button type="submit">Cancel: keep my current card</button></p></form>
 {{end}}
 </div>
 `))

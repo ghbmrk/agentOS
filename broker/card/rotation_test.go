@@ -278,44 +278,48 @@ func TestRotationDiscard(t *testing.T) {
 	}
 }
 
-// Once part of a new card is in effect, the display keeps it until the
-// owner confirms: cancel is refused and no longer offered, and a later
-// lapse does not erase it.
-func TestRotationInEffectIsNeverDiscarded(t *testing.T) {
+// Once part of a new card is in effect, the owner has confirmed from
+// their copy and the rotation is used up (Pending lapses after a partial
+// write), so the display erases its copy, names the step that finishes
+// (CH-12), and refuses cancel; retries never revive it.
+func TestRotationInEffectErasesAndNamesTheNextStep(t *testing.T) {
 	p := Parts{Passphrase: true, Recovery: true}
 	x := newRotRig(t, p)
 	x.fail = fmt.Errorf("slot written, card not stored: %w", ErrInEffect)
-	if err := x.d.ConfirmAnswers(x.rotAnswers(p)); !errors.Is(err, ErrInEffect) {
+	right := x.rotAnswers(p)
+	if err := x.d.ConfirmAnswers(right); !errors.Is(err, ErrInEffect) {
 		t.Fatalf("partial provision: %v", err)
+	}
+	// From here the provisioner behaves like a used Pending: it lapses.
+	x.fail = fmt.Errorf("pending lapsed: %w", ErrDiscard)
+	if _, err := x.d.Page(); !errors.Is(err, ErrDisplayGone) {
+		t.Fatalf("display kept after a confirmed partial provision: %v", err)
+	}
+	if x.d.Confirmed() {
+		t.Fatal("a partial provision reported as confirmed")
+	}
+	if !contains(x.log, EventInEffect) || contains(x.log, EventDiscarded) {
+		t.Fatalf("journal: %q", x.log)
 	}
 	if err := x.d.Discard(); !errors.Is(err, ErrInEffect) {
 		t.Fatalf("discard after a partial provision: %v", err)
 	}
-	page, err := x.d.Page()
-	if err != nil || bytes.Contains(page, []byte(`name="cancel"`)) || bytes.Contains(page, []byte("current card stays in effect")) {
-		t.Fatalf("page after a partial provision: %v", err)
+	if err := x.d.ConfirmAnswers(right); !errors.Is(err, ErrDisplayGone) {
+		t.Fatalf("retry after a partial provision: %v", err)
 	}
 	h := x.d.Handler(paired, "/home")
-	if w := do(t, h, "POST", "/rotate/card", url.Values{"cancel": {"1"}}, true, nil); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "already in effect") {
-		t.Fatalf("cancel POST: %d", w.Code)
-	}
-	right := x.rotAnswers(p)
-	if w := do(t, h, "POST", "/rotate/card", url.Values{"word": {right.Word}, "group": {right.Group}}, true, nil); w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "already in effect") {
-		t.Fatalf("retry POST: %d", w.Code)
-	}
-	x.fail = fmt.Errorf("pending lapsed: %w", ErrDiscard)
-	if err := x.d.ConfirmAnswers(right); !errors.Is(err, ErrInEffect) {
-		t.Fatalf("lapse after a partial provision: %v", err)
-	}
-	if _, err := x.d.Page(); err != nil {
-		t.Fatalf("display erased unconfirmed with part in effect: %v", err)
-	}
-	x.fail = nil
-	if err := x.d.ConfirmAnswers(right); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := x.d.Page(); !errors.Is(err, ErrDisplayGone) {
-		t.Fatalf("display kept after confirming: %v", err)
+	for _, f := range []url.Values{nil, {"cancel": {"1"}}, {"word": {right.Word}, "group": {right.Group}}} {
+		method := "POST"
+		if f == nil {
+			method = "GET"
+		}
+		w := do(t, h, method, "/rotate/card", f, true, nil)
+		b := w.Body.String()
+		if w.Code != http.StatusGone || !strings.Contains(b, "already in effect") || !strings.Contains(b, "start a new card") ||
+			strings.Contains(b, "confirm again") || strings.Contains(b, "current card stays in effect") ||
+			strings.Contains(b, x.gen.RecoveryKey) {
+			t.Fatalf("%s %v after a partial provision: %d %q", method, f, w.Code, b)
+		}
 	}
 }
 
