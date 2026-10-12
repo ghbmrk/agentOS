@@ -224,13 +224,18 @@ form { margin: .6em 0 1.2em; }
 
 {{define "claimbox"}}{{template "head" ""}}
 <h1>Claim AgentOS</h1>
-{{if .Claimed}}<p>I am already claimed. Setup continues on the phone that claimed me. To claim me again, reinstall me.</p>
+{{if .Reinstall}}<p>I am already claimed. To set me up again, reinstall me.</p>
+{{else if .Claimed}}<p>I am already claimed. Setup continues on the phone that claimed me. To claim me again, reinstall me.</p>
 {{else if .Locked}}<p class="err">Too many wrong codes. Restart me (turn me off and on again), then type the code again.</p>
+{{if gt .Reserve 0}}<p>If you hold my sticker, type its whole code exactly as printed: I still take it now.</p>
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{template "claimform" .}}{{end}}
 {{else}}<p>Scan or type the claim code from the sticker on my box, then press Claim. It proves you have my box in hand.</p>
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
-<form method="post" action="/claim"><label>Claim code<input type="text" name="code" value="{{.Code}}" placeholder="XXXX-XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Claim</button></form>
+{{template "claimform" .}}
 <p class="muted">{{.TriesLeft}} wrong {{if eq .TriesLeft 1}}code{{else}}codes{{end}} left before I lock this page until I restart.</p>{{end}}
 {{template "foot"}}{{end}}
+{{define "claimform"}}<form method="post" action="/claim"><label>Claim code<input type="text" name="code" value="{{.Code}}" placeholder="XXXX-XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Claim</button></form>{{end}}
 {{define "notready"}}{{template "head" "30"}}
 <h1>AgentOS</h1>
 <p>I'm not ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.</p>
