@@ -114,7 +114,7 @@ const (
 	renewFailed  = "Not renewed: I couldn't start %s's memory over. Send RENEW to try again."
 	// renewStaleEvidence closes an approval an earlier renewal or a
 	// deletion's reach made moot.
-	renewStaleEvidence = "nothing reset: the agent's memory is no longer full"
+	renewStaleEvidence = "nothing reset: that agent's memory is no longer full"
 )
 
 // executeRenew runs an approved renewal: Renew's take-back, if the
