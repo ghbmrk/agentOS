@@ -1,4 +1,7 @@
-# LATER: first-release critical path and backlog
+# LATER history: the first-release critical path and backlog as of 2026-10-10
+
+Archived by SIM-repo-2b from LATER.md as main held it when SIM-repo-2b merged: fbdd71b plus every row main added before that merge. Those rows stay here rather than becoming issues, like the 628 backlog rows, and the pre-release sweep reads them here (OPERATING §2). Frozen from that merge: `board.py archive` fails a PR that edits this file (D24). A finding's class now lives on its issue: `class:release` or `class:later` on a `work-item` issue, and a new later finding is an issue labelled `class:later` (OPERATING §2). Rows below that had an open BOARD row carry that class label on their issue; the three Release rows that had none became BOARD rows. The text below is LATER.md's, unchanged.
+
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary
@@ -900,12 +903,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | PROJ-read l1 | PR #1095 L3/lens: one journal read is now shared by every projection, so the pointer fields of `journal.Record` (`Intent` with its `Params` map, `Egress`, `Sleep`) are shared across views, and a mutating `Apply` would mislead later views. The contract is in the `Projection.Apply` doc and ASSUMPTIONS P8, and no projection mutates today. With the first production projection (SIM-owner-hold), add a test helper that fails if `Apply` changes its record. |
 | PMERGE-1 S-l1 | PR #692 Security lens: the hand-off issue template (`.github/ISSUE_TEMPLATE/handoff.md`) has no "no secrets" line (public repo: no tokens, keys, passphrases or owner data; redact logs), and secret scanning is off on this public repo (Mark's setting) |
 | PMERGE-1 S-l2 | `recheck`. PR #692 Security lens: `tools/premerge.py` is a call the merger makes, not a required GitHub check, so under D-100 a non-peer team's merge rests on its own call. Recheck when a lane is next onboarded |
-| CAP-15 l1 | PR #1028 lens: refused-connection journal entries in an analysis worker carry target-controlled destination strings; quote and length-cap them (journal-injection theme from #67) and add it to the CAP-15a failure-path test. Settle in the CAP-15a brief expansion (briefs/CAP-15.md) |
-| CAP-15 l2 | PR #1028 lens: CAP-15's "a saved capture is analysed only if it is of the box's own traffic" has no stated check; say it is provenance from the broker's own capture store, or drop the claim. Settle in the CAP-15a brief expansion (briefs/CAP-15.md) |
-| CAP-15 l3 | PR #1028 L3: a gray-area approval "per use or per service" (D-107) has no expiry or scope bound, and what a revocation does to a running task is unspecified. Settle in the CAP-15a brief expansion (briefs/CAP-15.md), consistent with GRAY-sd |
-| CAP-15 l4 | PR #1028 lens: D-107's index row says it already covers CRED-5 unconfirmed routes, while CAP-11 still reads "once its terms allow" until GRAY-sd lands. Align when GRAY-sd merges |
-| CAP-15 l5 | PR #1028 L3: D-107's index row says "clear illegality stays out" and does not mention a clear licence bar (CAP-15 does, so the spec is consistent). Align the wording when D-107 is next touched |
-| CAP-15 l6 | PR #1028 delta L3: §17 risk 27 says the legal limits rest on "the guest's judgment". Update it when GRAY-sd moves the clear-illegality and clear-licence-bar floor to the broker's closed class list |
 
 ## claude2
 

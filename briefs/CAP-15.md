@@ -1,6 +1,6 @@
 # CAP-15: Analysis workers
 
-Board section: Backlog refill (rows CAP-15a and CAP-15b, next to CRED-12).
+Board section: Backlog refill (rows CAP-15a, #1146, and CAP-15b, #1147).
 
 **Why.** Mark decided (2026-10-11, Ask anything thread, D-106): "Yes to all (seems only additive with no hit to security or UX); helpful also with owners software they have or buy or use to reconstruct it if necessary to be more useful." The toolkit is REA (github.com/morluto/rea, MIT, npm `rea-agents`), an MCP server for reverse engineering. The spec text is CAP-15 in SPEC.md §10, added by the spec-diff PR that carries this stub; this brief is a stub until a package starts.
 
@@ -18,9 +18,9 @@ Board section: Backlog refill (rows CAP-15a and CAP-15b, next to CRED-12).
 
 **Off-gate.** Not release acceptance. If D-096's scope freeze merges, these rows start after G2.
 
-**Open for the expansion (later items from the #1028 reviews; LATER.md CAP-15 l1–l3):**
-- Refused-connection journal entries carry target-controlled destination strings: quote and length-cap them, and cover that in the failure-path test above (CAP-15 l1).
-- A saved network capture is analysed only if it is the box's own traffic: state the check (provenance from the broker's own capture store) or drop the claim (CAP-15 l2).
-- A gray-area approval per use or per service: set its expiry and scope, and what revoking it does to a running task, consistent with GRAY-sd (CAP-15 l3).
+**Open for the expansion (later items from the #1028 reviews; issues #1149, #1150, #1151):**
+- Refused-connection journal entries carry target-controlled destination strings: quote and length-cap them, and cover that in the failure-path test above (CAP-15 l1, #1149).
+- A saved network capture is analysed only if it is the box's own traffic: state the check (provenance from the broker's own capture store) or drop the claim (CAP-15 l2, #1150).
+- A gray-area approval per use or per service: set its expiry and scope, and what revoking it does to a running task, consistent with GRAY-sd (CAP-15 l3, #1151).
 
 **Scope:** to be set when the brief is expanded.
