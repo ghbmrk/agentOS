@@ -22,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem/secondline"
 	"github.com/ghbmrk/agentos/broker/modem/sipline"
 	"github.com/ghbmrk/agentos/broker/modem/sipsim"
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/sipsign"
 )
 
@@ -73,7 +74,8 @@ func provider(t *testing.T) *sipsim.Provider {
 
 func config(p *sipsim.Provider, s sipline.Signer) sipline.Config {
 	return sipline.Config{Server: p.Addr, Domain: domain, User: user, Number: sipNum,
-		TLS: &tls.Config{RootCAs: p.Roots}, Signer: s, FramePace: time.Millisecond}
+		TLS: &tls.Config{RootCAs: p.Roots}, Signer: s, FramePace: time.Millisecond,
+		Guard: sipline.ReachLoopback(netguard.New(netguard.Config{}))}
 }
 
 func vault(p *sipsim.Provider) *signer {

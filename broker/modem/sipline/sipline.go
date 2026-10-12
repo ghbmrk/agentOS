@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
+	"github.com/gobwas/ws"
 
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modem/secondline"
@@ -73,11 +75,10 @@ type Config struct {
 	// PL1 on #102): Send goes through it instead of SIP MESSAGE, and the
 	// line polls it for incoming texts. Calls stay on SIP.
 	Texts Texts
-	// Guard is the home-network address policy (DEV-2). When set, every
-	// signaling connection and the provider-name lookup go through it: a
-	// private, loopback or home-network address is refused and journaled
-	// by its OnDeny. The broker always sets it; nil is for tests whose
-	// simulated provider listens on loopback.
+	// Guard is the home-network address policy (DEV-2), and is required:
+	// every signaling connection, every call's audio address and the
+	// provider-name lookup go through it, so a private, loopback or
+	// home-network address is refused and journaled by its OnDeny.
 	Guard *netguard.Policy
 }
 
@@ -98,6 +99,7 @@ const NoCallsText = "This number can't take calls. Please text this number inste
 var (
 	ErrConfig   = errors.New("sipline: Server, Domain, User, Number and Signer are required")
 	ErrInsecure = errors.New("sipline: the provider's certificate must be verified")
+	ErrNoGuard  = errors.New("sipline: a network guard is required")
 	ErrNumber   = errors.New("sipline: not a phone number")
 	ErrBusy     = errors.New("sipline: a call is already in progress")
 	ErrClosed   = errors.New("sipline: line closed")
@@ -195,11 +197,33 @@ type Line struct {
 
 var errClipLimit = errors.New("sipline: no-calls clip limit reached")
 
+// guardDialer and guardCheck are how the line reaches its guard; tests
+// swap them so a simulated provider on loopback is reachable while every
+// other address still goes through the guard (export_test.go).
+var (
+	guardDialer = (*netguard.Policy).Dialer
+	guardCheck  = (*netguard.Policy).Check
+)
+
+// media checks a call's audio address with the guard: an SDP answer or
+// offer can name any address, so RTP is held to the same policy as a
+// connect.
+func (l *Line) media(a *net.UDPAddr) error {
+	ip, ok := netip.AddrFromSlice(a.IP)
+	if !ok {
+		return ErrMediaAddress
+	}
+	return guardCheck(l.cfg.Guard, context.Background(), ip.Unmap(), uint16(a.Port), "udp")
+}
+
 var _ secondline.Account = (*Line)(nil)
 
 // Open registers the account. It fails if the provider cannot be reached
 // over verified TLS or refuses the registration.
 func Open(ctx context.Context, cfg Config) (*Line, error) {
+	if cfg.Guard == nil {
+		return nil, ErrNoGuard
+	}
 	if cfg.Server == "" || cfg.Domain == "" || cfg.User == "" || cfg.Number == "" || cfg.Signer == nil {
 		return nil, ErrConfig
 	}
@@ -231,22 +255,27 @@ func Open(ctx context.Context, cfg Config) (*Line, error) {
 	}
 	uaOpts := []sipgo.UserAgentOption{sipgo.WithUserAgent("agentos"), sipgo.WithUserAgentHostname(cfg.Domain), sipgo.WithUserAgenTLSConfig(tc),
 		sipgo.WithUserAgentTransactionLayerOptions(sip.WithTransactionLayerLogger(quiet))}
-	tlOpts := []sip.TransportLayerOption{sip.WithTransportLayerLogger(quiet)}
-	if cfg.Guard != nil {
-		// The transports dial through the guard's dialer (its Control
-		// hook checks each connect address), and the provider name is
-		// looked up only through the guard's resolver.
-		dial := func(laddr net.Addr) net.Dialer {
-			d := *cfg.Guard.Dialer()
-			d.LocalAddr = laddr
-			return d
-		}
-		tlOpts = append(tlOpts, sip.WithTransportLayerTransports(sip.TransportsConfig{
-			TCP: &sip.TransportTCP{DialerCreate: dial},
-			TLS: &sip.TransportTLS{TransportTCP: &sip.TransportTCP{DialerCreate: dial}},
-		}))
-		uaOpts = append(uaOpts, sipgo.WithUserAgentDNSResolver(cfg.Guard.Resolver()))
+	// The transports dial through the guard's dialer (its Control hook
+	// checks each connect address), and the provider name is looked up
+	// only through the guard's resolver. Every request the line sends is
+	// pinned to TLS (request) and dialogs keep their INVITE's transport;
+	// WS dials through the guard too. sipgo's UDP and WSS transports have
+	// no dial hook, which is why nothing the line sends selects them
+	// (ASSUMPTIONS SL15).
+	dial := func(laddr net.Addr) net.Dialer {
+		d := *guardDialer(cfg.Guard)
+		d.LocalAddr = laddr
+		return d
 	}
+	tlOpts := []sip.TransportLayerOption{sip.WithTransportLayerLogger(quiet), sip.WithTransportLayerTransports(sip.TransportsConfig{
+		TCP: &sip.TransportTCP{DialerCreate: dial},
+		TLS: &sip.TransportTLS{TransportTCP: &sip.TransportTCP{DialerCreate: dial}},
+		WS: &sip.TransportWS{DialerCreate: func(laddr net.Addr) ws.Dialer {
+			d := dial(laddr)
+			return ws.Dialer{Protocols: sip.WebSocketProtocols, NetDial: d.DialContext}
+		}},
+	})}
+	uaOpts = append(uaOpts, sipgo.WithUserAgentDNSResolver(cfg.Guard.Resolver()))
 	uaOpts = append(uaOpts, sipgo.WithUserAgentTransportLayerOptions(tlOpts...))
 	ua, err := sipgo.NewUA(uaOpts...)
 	if err != nil {
@@ -667,7 +696,11 @@ func (l *Line) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	p, contact := l.provider, l.contact
 	l.mu.Unlock()
 	theirs, err := parseOffer(req.Body(), p != nil && (p.IsLoopback() || p.IsPrivate()))
+	if err == nil {
+		err = l.media(theirs.addr)
+	}
 	if err != nil {
+		clear(theirs.key)
 		decline()
 		return
 	}
