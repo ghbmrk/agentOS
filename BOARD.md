@@ -173,7 +173,7 @@ Queued by the coordinator after #1054 (D-102) merged; each row is a release find
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| CTRL-spike | [M6 Ultra spikes: USB-stick boot with no key press, USB4 networking, Wi-Fi access-point mode](briefs/CTRL-spike.md) | Mark: hardware (M6 Ultra unit) | queued (release; A1; tier C; waits on the unit) |
+| CTRL-spike | [M6 Ultra spikes: USB-stick boot with no key press, USB4 networking, Wi-Fi access-point mode](briefs/CTRL-spike.md) | Mark: hardware (M6 Ultra unit) | queued (release; HW-13, HW-12, CH-7, A1; tier C; waits on the unit) |
 | CTRL-card | [First-boot Owner Card: the box generates it, the phone shows it, the display copy is erased](briefs/CTRL-card.md) | P2-2 | queued (release; HW-1, REC-4; tier A) |
 | CTRL-claim | [Claim flow for a preloaded box: a one-time sticker code, one claim, no secret before it](briefs/CTRL-claim.md) | CTRL-card | queued (release; HW-10, A1; tier A) |
 | CTRL-uki | [Preloaded self-check rooted in signed code, so a seller's modified initrd cannot pass its own check](briefs/CTRL-uki.md) | CTRL-claim, P2-1 | queued (release; HW-10, HW-5a, A1; tier A; SPEC risk 26 wording fixed by CTRL-text) |
@@ -185,7 +185,7 @@ Queued by the coordinator after #1054 (D-102) merged; each row is a release find
 | HELPER-a | [Adding a helper: tier-4 'add helper' action, enrolment and the plain-words page](briefs/HELPER-a.md) | ROUTE-1, NET-seg | queued (release; ONB-10, HW-11; tier A) |
 | HELPER-b | [Helper app for Windows: background service, Wake-on-LAN start without a login, GPU pause when a game starts](briefs/HELPER-b.md) | HELPER-a | queued (release; HW-11, A1; tier B) |
 | HELPER-c | [Helper app for macOS: same service and pause rules on a Mac](briefs/HELPER-c.md) | HELPER-b | queued (release; HW-11, HW-7; tier B) |
-| CTRL-text | [Drive-era text and A8 reworked for the internal-SSD controller; risk 26 and §8.1 step 5 wording](briefs/CTRL-text.md) | — | queued (release; A8; tier B; spec-diff, Mark approves) |
+| CTRL-text | [Drive-era text and A8 reworked for the internal-SSD controller; risk 26 and §8.1 step 5 wording](briefs/CTRL-text.md) | — | queued (release; HW-11, HW-5a, A8; tier B; spec-diff, Mark approves) |
 
 ## Phase 0: harness and risk spikes
 
