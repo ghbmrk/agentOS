@@ -67,8 +67,10 @@ func APTableLoad(cfg APConfig) (string, error) {
 // unit or the access point fails, the interface is taken out of the set
 // again and the error returned, so the box never runs an access point the
 // inbound drop would silently cut off, and never leaves an interface
-// exempt with no access point behind it. The P2-1 loader calls this in
-// place of ap.Start, and BringDown in place of ap.Stop.
+// exempt with no access point behind it. Its teardown runs on
+// context.WithoutCancel(ctx) (DEV-net-h d). The P2-1 loader calls it
+// through APLoader.Up in place of ap.Start, and BringDown through
+// APLoader.Down in place of ap.Stop.
 func BringUp(ctx context.Context, ap AccessPoint, cfg APConfig, h APHost) error {
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -84,13 +86,15 @@ func BringUp(ctx context.Context, ap AccessPoint, cfg APConfig, h APHost) error 
 	if err := h.Nft(ctx, load); err != nil {
 		return fmt.Errorf("localui: agentos_ap did not load, access point not started: %w", err)
 	}
+	// The teardown runs even if the caller's context is done (DEV-net-h d).
+	down := context.WithoutCancel(ctx)
 	if err := h.StartUnit(ctx, unit); err != nil {
 		return errors.Join(fmt.Errorf("localui: %s failed, access point not started: %w", unit, err),
-			unexempt(ctx, cfg.Iface, unit, h))
+			unexempt(down, cfg.Iface, unit, h))
 	}
 	if err := ap.Start(ctx, cfg); err != nil {
 		return errors.Join(fmt.Errorf("localui: access point did not start: %w", err),
-			unexempt(ctx, cfg.Iface, unit, h))
+			unexempt(down, cfg.Iface, unit, h))
 	}
 	return nil
 }
@@ -99,12 +103,16 @@ func BringUp(ctx context.Context, ap AccessPoint, cfg APConfig, h APHost) error 
 // inbound exempt set, and then unloads agentos_ap (DEV-net-g b). The
 // removal runs even if ap.Stop fails: with the access point gone, the
 // interface (on a single radio, the one that next joins the home Wi-Fi)
-// falls back to the inbound drop.
+// falls back to the inbound drop. It runs on context.WithoutCancel(ctx), so
+// a caller shutting down still finishes it (DEV-net-h d). Callers go
+// through APLoader, which keeps an interface whose BringDown failed out of
+// station mode.
 func BringDown(ctx context.Context, ap AccessPoint, iface string, h APHost) error {
 	unit, err := ExemptUnit(iface)
 	if err != nil {
 		return err
 	}
+	ctx = context.WithoutCancel(ctx)
 	var errs []error
 	if err := ap.Stop(); err != nil {
 		errs = append(errs, fmt.Errorf("localui: access point stop: %w", err))
