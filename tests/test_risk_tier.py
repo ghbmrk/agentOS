@@ -23,6 +23,7 @@ class RiskTierTest(unittest.TestCase):
             "assurance/canary-targets.json": "A",
             "tools/canary.py": "A",
             "tools/risk_tier.py": "A",
+            "tools/ci_scope.py": "A",
             "broker/mail/deliver.go": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",
