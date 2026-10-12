@@ -8,8 +8,7 @@ Mark's two Claude subscriptions are equal peers (2026-10-10): neither is primary
 
 | Lane | Team | Label | Prefix | Paths |
 |---|---|---|---|---|
-| executors and adoption (A13) | claude2 (Claude Code, second subscription) | `lane:claude2` | `C2-`, `D-claude2-` | `broker/browser/`, `broker/desktop/`, `broker/adopt/` (new packages), `spikes/S5-browser-actions/`, and only the BOARD.md rows CRED-4b, ADP-5, ADP-8 (and S5's live run if its network policy allows) |
-| everything else | Mark's two Claude subscriptions (equal peers, D-099) | `lane:primary` | none (`D-NNN`) | all other paths |
+| none | peers (Mark's two Claude subscriptions, D-099) | none | none (`D-NNN`) | all paths |
 
 A lane is added by an onboarding PR for each other team (another vendor's agent, a teammate). The claude2 lane of 2026-10-07 (broker/browser, broker/desktop, broker/adopt, spikes/S5-browser-actions, rows CRED-4b, ADP-5, ADP-8) is lifted: those paths and rows are open to either subscription, with claims on BOARD.md as usual.
 
