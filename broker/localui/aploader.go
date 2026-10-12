@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 )
@@ -14,13 +15,17 @@ import (
 //
 //   - Start brings down each interface the loader may run the access point
 //     on, before any bring-up or station join (a): a loader that died with
-//     the access point up left it exempt and agentos_ap loaded.
+//     the access point up left it exempt and agentos_ap loaded. It first
+//     brings down the interface agentos_ap holds, if Start does not name
+//     it, so a dead loader's radio is not left exempt with no table
+//     (DEV-net-i).
 //   - Station refuses an interface whose BringDown last failed, or that runs
 //     the access point (b): on a single radio it would join the home Wi-Fi
 //     still exempt.
-//   - Up refuses while another interface is up or its BringDown last failed
-//     (c): BringUp(wl1) replaces agentos_ap, so wl0 would stay exempt with no
-//     table and every box port open to its network.
+//   - Up refuses while another interface is up, its BringDown last failed,
+//     or agentos_ap holds it (c): BringUp(wl1) replaces agentos_ap, so wl0
+//     would stay exempt with no table and every box port open to its
+//     network.
 //   - BringUp and BringDown run their teardown on context.WithoutCancel (d).
 //
 // Its methods are serialised; Station holds the lock for the join.
@@ -35,8 +40,12 @@ type APLoader struct {
 }
 
 // Start runs BringDown for each interface, idempotent whether or not it was
-// up. Up and Station refuse an interface no Start named, since its
-// exemption state is unknown. BringDown must succeed for an interface
+// up. Before them it runs BringDown for the interface agentos_ap holds, if
+// any, without naming it: a loader that died with the access point up on a
+// radio this list leaves out left that radio exempt (DEV-net-i). If that
+// BringDown fails, the radio blocks Up on any other interface until a Down
+// succeeds for it. Up and Station refuse an interface no Start named, since
+// its exemption state is unknown. BringDown must succeed for an interface
 // before Station takes it; one whose BringDown fails stays refused until a
 // Down succeeds for it.
 func (l *APLoader) Start(ctx context.Context, ifaces ...string) error {
@@ -50,6 +59,13 @@ func (l *APLoader) Start(ctx context.Context, ifaces ...string) error {
 		l.named = map[string]bool{}
 	}
 	var errs []error
+	held, err := l.Host.APTableIface(context.WithoutCancel(ctx))
+	switch {
+	case err != nil:
+		errs = append(errs, fmt.Errorf("localui: cannot read which interface agentos_ap holds: %w", err))
+	case held != "" && !slices.Contains(ifaces, held):
+		errs = append(errs, l.bringDown(ctx, held))
+	}
 	for _, iface := range ifaces {
 		if _, err := ExemptUnit(iface); err != nil {
 			errs = append(errs, err)
@@ -62,8 +78,9 @@ func (l *APLoader) Start(ctx context.Context, ifaces ...string) error {
 }
 
 // Up brings the access point up on cfg.Iface. It refuses an interface no
-// Start named, while an access point is up, and while any other interface's BringDown
-// last failed. If BringUp fails, the loader runs BringDown again, and an
+// Start named, while an access point is up, while any other interface's BringDown
+// last failed, and while agentos_ap holds another interface or cannot be
+// read. If BringUp fails, the loader runs BringDown again, and an
 // interface it cannot bring down stays refused for Station and blocks Up
 // on any other.
 func (l *APLoader) Up(ctx context.Context, cfg APConfig) error {
@@ -79,6 +96,16 @@ func (l *APLoader) Up(ctx context.Context, cfg APConfig) error {
 		if iface != cfg.Iface {
 			return fmt.Errorf("localui: %s may still be exempt, so %s cannot run the access point", iface, cfg.Iface)
 		}
+	}
+	// BringUp replaces agentos_ap, so a table held for another interface
+	// (one a Start could not bring down or read) would leave that
+	// interface exempt with none (DEV-net-i).
+	held, err := l.Host.APTableIface(context.WithoutCancel(ctx))
+	if err != nil {
+		return fmt.Errorf("localui: cannot read which interface agentos_ap holds, so %s cannot run the access point: %w", cfg.Iface, err)
+	}
+	if held != "" && held != cfg.Iface {
+		return fmt.Errorf("localui: agentos_ap holds %s, which may still be exempt, so %s cannot run the access point", held, cfg.Iface)
 	}
 	if err := BringUp(ctx, l.AP, cfg, l.Host); err != nil {
 		return errors.Join(err, l.bringDown(ctx, cfg.Iface))
