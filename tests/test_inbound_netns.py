@@ -7,6 +7,7 @@
 # the router's global source passes). Needs root, ip and nft; skipped otherwise. CI runs it under
 # sudo in the checks job. Addresses are documentation ranges (RFC 5737, RFC 3849).
 # REQ: DEV-2, DEV-net-e
+import ipaddress
 import os
 import pathlib
 import shutil
@@ -124,7 +125,7 @@ class InboundOnAHomeNetwork(unittest.TestCase):
     def global6(self):
         out = sh("ip", "-6", "-o", "addr", "show", "dev", "eth0", "scope", "global", ns=BOX).stdout
         for f in out.split():
-            if f.startswith(PREFIX):
+            if "/" in f and ipaddress.ip_interface(f).network == ipaddress.ip_network(PREFIX + "/64"):
                 return f.split("/")[0]
         return None
 
