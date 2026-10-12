@@ -180,7 +180,7 @@ The home-network boundary is release work (A14); device features follow the firs
 
 ## Controller and helper system (D-102)
 
-Queued by the coordinator after #1054 (D-102) merged; each row is a release finding from that PR's body and reviews. Ordered by dependency. Details are in the briefs. [D-104](decisions/D-104.md): one working controller passes G1 on the M6 Ultra first; rows marked "after G1" (seller self-check, flasher, routing to helpers, workstation segment, workstations, helper apps) wait for it and are outside the first release (A17, G7).
+Queued by the coordinator after #1054 (D-102) merged; each row is a release finding from that PR's body and reviews. Ordered by dependency. Details are in the briefs. [D-104](decisions/D-104.md): G1 (the controller's boot, phone control and one useful model-backed task, on the one M6 Ultra) comes first; rows marked "after G1" (seller self-check, flasher, routing to helpers, workstation segment, workstations, helper apps) wait for it, and each is built when it solves a measured limitation (A17, G7). This is staging, not a finding that those features are unnecessary.
 
 | ID | Package | Needs | State |
 |---|---|---|---|
