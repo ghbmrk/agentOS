@@ -863,3 +863,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CTRL-card l3 | PR #1060 UX lens: the screenshot warning should also cover saving the card file into a cloud-synced folder |
 | DEV-net-f l1 | PR #1063 L3/UX lens: `localui.BringUp` returns an error naming the systemd unit (`agentos-ap-exempt@<if>.service`); the P2-1 `agentos_ap` loader must map it to fixed owner text (CH-12), never pass it through |
 | SIM-split-fix l3 | PR #1061 L3: `broker/holder/ASSUMPTIONS.md` H-10 calls the egress-label residual a "release finding" while it is filed as SIM-split-fix l2 (later, recheck); align the wording when a package next edits H-10 |
+| IMG-nodump l1 | PR #1068 L3: the `finish_image.main` call to `swap_violations` has no test (reverting it survives); the repart and mkosi.conf tests still catch a swap partition and a missing `systemd.swap=0` |
+| IMG-nodump l2 | PR #1068 L3: `ProcessSizeMax=0` in the coredump drop-in is not checked (dropping it survives); it is redundant with `Storage=none` and the discard pipe |
+| IMG-nodump l3 | PR #1068 L3: `mkosi.finalize` `ini_last` fails closed on an unparseable drop-in, but no test plants one (reverting it to a skip survives); `core_pattern` still discards every dump |
+| IMG-nodump l4 | `recheck`. PR #1068 L3: `finish_image` does not reject `crashkernel=` in the boot entry; kdump has no package today, but if it were added, a vmcore holding the broker's memory would land in /var/crash |
