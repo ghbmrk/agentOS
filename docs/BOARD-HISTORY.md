@@ -1,6 +1,6 @@
 # BOARD history
 
-Archived by SIM-repo-2b on 2026-10-10 from BOARD.md at fbdd71b: the merged and dropped rows, under the section headings and prose they sat in. Frozen; nothing updates it. Live work items are GitHub issues labelled `work-item`, and BOARD.md is generated from them (tools/board.py). Earlier states of every row are in BOARD.md's git history.
+Archived by SIM-repo-2b on 2026-10-10 from BOARD.md at fbdd71b: the merged and dropped rows, under the section headings and prose they sat in. The last section holds the rows main finished after fbdd71b and before SIM-repo-2b merged. Frozen; nothing updates it. Live work items are GitHub issues labelled `work-item`, and BOARD.md is generated from them (tools/board.py). Earlier states of every row are in BOARD.md's git history.
 
 ## Harness and operating model
 
@@ -329,3 +329,25 @@ Built packages reach the running box through small wiring PRs, in this order. A 
 | W9 | [Questions in the guest plane](briefs/W9.md) | P3-8 merged, #68 merged | — | merged (f38aeed8) |
 | W9a | [Questions follow-ups (#95)](briefs/W9a.md) | W9 | Next build item A (part 2) | merged (#125 (part 2; part 1 #98)) |
 
+## Finished on main after fbdd71b
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+| PROJ-read | [Projection Sync and Boot do one shared journal read, not one full decode per view](briefs/PROJ-read.md) | SIM-proj | merged (#1095, ce27c67) |
+| SIM-split | [One key-holder process per account; separate CH-4 checker](briefs/SIM.md#sim-split-one-key-holder-process-per-account-and-a-separate-checker-tier-a) | SIM-core, SIM-check | merged part 1 (#1053); rest in rows below (A) |
+| CI-docs | [Records-only changes get a light CI path](briefs/CI-docs.md) | — | merged (#1084, 29399db) |
+| DEV-net-a | [Home-network address policy and egress proxy](briefs/DEV-net-a.md) | P1-3, D-069 spec diff merged | merged (#1049) |
+| DEV-net-b | [Home-network boundary on the remaining dialers and inbound](briefs/DEV-net-b.md) | DEV-net-a | merged (dialers #1051, inbound rule set #1052; DEV-net-e loads it at boot for acceptance 3) |
+| DEV-net-c | [Wire the egress process to the address guard](briefs/DEV-net-c.md) | DEV-net-a | merged (#1051) |
+| DEV-net-d | [Inbound rules, owner pins, event refresh, SIP dialer](briefs/DEV-net-d.md) | DEV-net-b, DEV-net-c | merged (#1052) |
+| DEV-net-f | [The access point's interface joins the inbound exempt set](briefs/DEV-net-f.md) | DEV-net-e | merged (#1063) |
+| DEV-net-g | [The access point's exempt entry never outlives or precedes its drop table](briefs/DEV-net-g.md) | DEV-net-f | merged (#1075) |
+| DEV-net-h | [The P2-1 loader never leaves a stale access-point exemption](briefs/DEV-net-h.md) | DEV-net-g | merged (#1079, ba6ff8f) |
+| DEV-net-i | [The access point loader's start-up cleanup covers every wireless interface](briefs/DEV-net-i.md) | DEV-net-h | merged (#1082, a6726dd) |
+| CTRL-card | [First-boot Owner Card: the box generates it, the phone shows it, the display copy is erased](briefs/CTRL-card.md) | P2-2 | merged (#1060, ddb25b0) |
+| CTRL-card-wire | [Wire the Owner Card into the localui setup page and first boot; the finish path calls Hold()](briefs/CTRL-card-f.md) | CTRL-card | merged (#1073, 020597a) |
+| LABEL-durable | A raised REV-5 label is saved before higher-label data is released: `vm.RaiseLabel` and every in-place raise (worker exec and deletion, merge, rollback, ForgetSince reset) put the label back in memory when the save fails, so a retry saves again and a restart never finds private data under a saved public label (external finding approved by Mark 2026-10-12, source-confirmed at b01ba42 and 5430d14) | — | merged (#1087, 07c8d87) |
+| CTRL-card-rot | [Recovery-key rotation shows its key on card.Display: the same confirm-then-erase](briefs/CTRL-card-f.md) | CTRL-card | merged (#1090, 843a2dc) |
+| CTRL-claim | [Claim flow for a preloaded box: a one-time sticker code, one claim, no secret before it](briefs/CTRL-claim.md) | CTRL-card | merged (#1067, 74d2b93) |
+| CTRL-claim-tier | [Put broker/claim in the tier A lists (risk_tier.py and OPERATING §3)](briefs/CTRL-claim-f.md) | CTRL-claim | merged (#1074, 8e1a5f6) |
+| CTRL-claim-wire | [Wire the claim into agentosd first boot; a per-boot floor the owner can beat; no claim code on a box with state never routes to the flasher](briefs/CTRL-claim-f.md) | CTRL-claim, CTRL-claim-tier | merged (#1080, 906955a) |
