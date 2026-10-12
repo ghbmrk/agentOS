@@ -4,7 +4,9 @@
 [Unit]
 Description=AgentOS broker
 ConditionPathExists=/etc/agentos/agentosd.env
-After=local-fs.target network.target
+# Never without the inbound drop (DEV-net-e 2a): if it failed to load, the broker does not start.
+Requires=agentos-inbound.service
+After=local-fs.target network.target agentos-inbound.service
 
 [Service]
 EnvironmentFile=/etc/agentos/agentosd.env

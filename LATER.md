@@ -53,6 +53,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W5b | A7, A11 | Loop 3 update checks as a scheduler source |
 | W5c | A12 | Clean-room builder in the scheduler |
 | DEV-net-a, DEV-net-b, DEV-net-c | A14 (DEV-2, REV-5) | Home-network boundary on every outbound path; latent until ARC-6 (d) is served, and a precondition for serving it (D-069) |
+| CTRL-card, CTRL-claim, CTRL-uki, FLASH-1, ROUTE-1, NET-seg, WS-image, WS-rest, HELPER-a, HELPER-b, HELPER-c, CTRL-spike, CTRL-text | A1, A8, A14 (HW-9–HW-13, REV-6, ONB-10) | Controller and helper system (D-102): release findings of #1054; BOARD section "Controller and helper system" |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
 | P3-4b-4c-dedupe | A1 (owner texts; UX on #589 classed it release under §2's stricter rule, for Mark to demote to later if no acceptance test needs it) | `Guard.batch` and the digest repeat one identical line per corpus item, so a weakened check gives the owner ten identical lines |
@@ -61,6 +62,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 ## Later (backlog; do not start before first release)
 | ID | Why it can wait |
 |---|---|
+| D-102 / D-044 | `decisions/D-102.md` says D-044 stays "for a moved SSD" but HW-8's scope names stick-booted PCs and helper-app hosts. Align the two and mark the D-044 row "narrowed by D-102" (folded into CTRL-text when it is scheduled). Found in #1054 L3. |
+| HW-11 key storage | HW-11 says helpers hold no credential yet keep short-lived mTLS keys. State that the keys are memory-only, or exempt them (recheck; folded into CTRL-text). Found in #1054 L3 and the combined lens pass. |
+| §8.1 step 5 | "Tear off the recovery sheet" assumes the card was printed; an owner who saved it has no sheet. Reword with the drive-text rework (recheck; CTRL-text). Found in #1054 delta L3. |
+| stale drive wording | HW-8 ("AgentOS Drive"), HW-8a, §3.1 item 3, §3.3/HW-6, risk 1, A8, ONB-7 and REC-4 still describe the drive-era controller (recheck; the release row CTRL-text carries the fix). Found in #1054 L3. |
 | RECALL-prov-L2 | `prepare` embeds an anchor's empty text; a real embedder (RECALL-EMB) may surface anchors in searches. Skip vectors for anchors or filter them in `Search`. Found in #1046 L3. |
 | RECALL-prov-L3 | An owner relabel of a note to public is blocked by the anchor's label, which never falls. Found in #1046 L3. |
 | RECALL-prov-L1 l1 | PR #1050 L3 (6114400383): a lineage just under its read cap (19 of 20) is refused a search with 2 fresh results, but `Provenance.ReadsFull` (`>= Reads`) does not list it, so the owner command (RECALL-prov-owner) would not show it; and the refusal never suggests asking for fewer results, which would still work. Give the refusal its own text when room remains, or list lineages within one search's maximum of the cap |
@@ -831,6 +836,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | DEV-net-c l1 | PR #1051 L3: netguard learns only the first usable nameserver, with no failover to the next |
 | DEV-net-c l2 | PR #1051 L3: no owner-facing line when no resolver is learned (names fail closed silently) |
 | DEV-net-c l3 | PR #1051 L3 delta: `Sources.Read` counts link-local and VM-bridge prefixes, so an uplink-down read with only those still replaces the learned set (moot while nothing routes out) |
+| DEV-net-e l1 | PR #1055 L3: `unpin` spends the approval code before checking that the label exists (`netpins.go`), though N12 says a refusal is checked before the code is spent; costs the owner one code, not exploitable |
+| DEV-net-e l2 | `recheck`. PR #1055 L3: the CI step running `tests/test_inbound_netns.py` under sudo passes if both tests skip (no root, ip or nft); make it fail on skip |
+| DEV-net-e l3 | PR #1055 L3: if the image adopts NetworkManager for the AP or station (P2-2w), `NetworkManager.service` needs the same `Requires=`/`After=agentos-inbound.service` drop-in as systemd-networkd |
+| DEV-net-e l4 | PR #1055 UX lens: `agentos-egress unpin` prints nothing on success; say which pin was removed |
 
 ## Reuse candidates
 | ID | Component | Why |
@@ -840,7 +849,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | HOST-1d | cryptsetup / LUKS2 | Vault-keyed disk encryption without custom crypto |
 | SR2-4i | systemd resource control (IOWeight=, CPUWeight=) | Sets io.weight and cpu.weight per slice; add iocost QoS on the image |
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
-| DEV-net-b | Stale nil-guard comments at `broker/mail/imapsmtp/imapsmtp.go:65` and `broker/smsapi/service.go:44` | Found in PR #1051's L3 |
+| DEV-net-b l1 | Stale nil-guard comments at `broker/mail/imapsmtp/imapsmtp.go:65` and `broker/smsapi/service.go:44` | Found in PR #1051's L3 |
+| CTRL-spike-r | `check.py` counts any iperf3 retransmit as a stall and takes the requested rather than the measured duration; `probe.py ap` asserts SAE-only and isolation from its own config, not the running AP (recheck) | Found in PR #1058's L3; check at the hardware run |
 | SIM-split-b l1 | `recheck`. PR #1057 L3: `checker.Act` covers host, method, wire path and body but not the forwarded request headers; today's declared headers do not change the act, but a declared header that selects a target (an idempotency or organization header) would not be bound |
 | SIM-split-b l2 | PR #1057 L3: `checker.ApprovalTTL` is fixed at 15 minutes while the CH-10 code lifetime is an owner setting (default 15); wiring should pass the owner's value |
 | SIM-split-b l3 | PR #1057 L3: `broker/procguard` has only a `_linux.go` file while its test is untagged, so `go test ./...` on a non-Linux host fails to build that package |
