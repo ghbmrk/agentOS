@@ -62,6 +62,10 @@ func (h *fakeHost) step(s string) error {
 	return nil
 }
 func (h *fakeHost) Nft(ctx context.Context, script string) error { return h.step(nftStep(script)) }
+
+// APTableIface reports agentos_ap as not loaded, so BringDown unloads it
+// as before (DEV-net-i; the netHost tests cover the read).
+func (h *fakeHost) APTableIface(ctx context.Context) (string, error) { return "", nil }
 func (h *fakeHost) StartUnit(ctx context.Context, unit string) error {
 	return h.step("start " + unit)
 }

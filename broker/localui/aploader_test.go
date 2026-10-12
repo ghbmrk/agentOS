@@ -67,6 +67,13 @@ func (h *netHost) Nft(ctx context.Context, script string) error {
 	return nil
 }
 
+func (h *netHost) APTableIface(ctx context.Context) (string, error) {
+	if err := h.step(ctx, "nft list agentos_ap"); err != nil {
+		return "", err
+	}
+	return h.apFor, nil
+}
+
 func (h *netHost) StartUnit(ctx context.Context, unit string) error {
 	if err := h.step(ctx, "start "+unit); err != nil {
 		return err
@@ -338,8 +345,9 @@ func TestLoaderStartChecksItsInterfaces(t *testing.T) {
 
 // DEV-net-h (a), (b): an interface Start did not name has an unknown
 // exemption state. A loader that died with the access point up on wlan2
-// left it exempt; Start("wlan0") never brings wlan2 down, so Station and
-// Up refuse wlan2 and touch neither the host nor the join.
+// left it exempt; Start("wlan0") brings wlan2 down (DEV-net-i) but does
+// not name it, so Station and Up refuse wlan2 and touch neither the host
+// nor the join.
 func TestLoaderRefusesAnInterfaceStartDidNotName(t *testing.T) {
 	h := newNetHost()
 	dead, _ := newLoader(h)
@@ -378,5 +386,141 @@ func TestLoaderRefusesAnInterfaceStartDidNotName(t *testing.T) {
 	}
 	if err := l.Station(context.Background(), "wlan0", func(context.Context) error { return nil }); err != nil {
 		t.Fatalf("wlan0 lost its Start: %v", err)
+	}
+}
+
+// REQ: DEV-net-i
+
+// deadOn leaves h as a loader that died with the access point up on iface
+// leaves it: iface exempt and agentos_ap loaded for it.
+func deadOn(t *testing.T, h *netHost, iface string) {
+	t.Helper()
+	dead, _ := newLoader(h)
+	if err := dead.Start(context.Background(), iface); err != nil {
+		t.Fatal(err)
+	}
+	if err := dead.Up(context.Background(), apCfg(iface)); err != nil {
+		t.Fatal(err)
+	}
+	if !h.exempt[iface] || h.apFor != iface {
+		t.Fatalf("setup: exempt %v, agentos_ap for %q", h.exempt, h.apFor)
+	}
+}
+
+// DEV-net-i, A14: a loader that died with the access point up on wlan2
+// restarts with Start("wlan0"). No interface may be left exempt without
+// agentos_ap: before DEV-net-i, BringDown(wlan0) unloaded wlan2's table
+// and left wlan2 exempt, every box port open to its network.
+func TestLoaderStartLeavesNoUnnamedRadioExemptWithoutItsTable(t *testing.T) {
+	h := newNetHost()
+	deadOn(t, h, "wlan2")
+	l, _ := newLoader(h)
+	if err := l.Start(context.Background(), "wlan0"); err != nil {
+		t.Fatal(err)
+	}
+	if open := h.open(); len(open) != 0 {
+		t.Fatalf("after Start(wlan0): %v exempt with no agentos_ap (log %q)", open, h.log)
+	}
+	if h.exempt["wlan2"] || h.apFor != "" {
+		t.Fatalf("after Start(wlan0): exempt %v, agentos_ap for %q", h.exempt, h.apFor)
+	}
+	// wlan0 can now run the access point, and wlan2 is still not the
+	// loader's: it was brought down, not named.
+	if err := l.Up(context.Background(), apCfg("wlan0")); err != nil {
+		t.Fatal(err)
+	}
+	if open := h.open(); len(open) != 0 {
+		t.Fatalf("after Up(wlan0): %v exempt with no agentos_ap", open)
+	}
+	if err := l.Station(context.Background(), "wlan2", noJoin(t)); err == nil {
+		t.Fatal("wlan2 joined as a station though no Start named it")
+	}
+}
+
+// DEV-net-i: BringDown unloads agentos_ap only when its drop names the
+// interface being brought down (or nothing is loaded); otherwise the
+// table stays with the interface it holds.
+func TestBringDownKeepsAnotherInterfacesTable(t *testing.T) {
+	h := newNetHost()
+	deadOn(t, h, "wlan2")
+	var log []string
+	if err := BringDown(context.Background(), &fakeAP{log: &log}, "wlan0", h); err != nil {
+		t.Fatal(err)
+	}
+	if !h.exempt["wlan2"] || h.apFor != "wlan2" {
+		t.Fatalf("BringDown(wlan0) touched wlan2: exempt %v, agentos_ap for %q", h.exempt, h.apFor)
+	}
+	if err := BringDown(context.Background(), &fakeAP{log: &log}, "wlan2", h); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.exempt) != 0 || h.apFor != "" {
+		t.Fatalf("BringDown(wlan2): exempt %v, agentos_ap for %q", h.exempt, h.apFor)
+	}
+}
+
+// DEV-net-i: if the stale radio cannot be brought down, Start says so,
+// agentos_ap stays with it, and no other interface may run the access
+// point (its BringUp would replace wlan2's table). Down retries it.
+func TestLoaderStartFailureOnAnUnnamedRadioBlocksBringUp(t *testing.T) {
+	h := newNetHost()
+	deadOn(t, h, "wlan2")
+	h.fail["nft unexempt wlan2"] = true
+	h.fail["stop agentos-ap-exempt@wlan2.service"] = true
+	l, _ := newLoader(h)
+	if err := l.Start(context.Background(), "wlan0"); err == nil || !strings.Contains(err.Error(), "wlan2") {
+		t.Fatalf("Start hid wlan2's failed BringDown: %v", err)
+	}
+	if open := h.open(); len(open) != 0 {
+		t.Fatalf("%v exempt with no agentos_ap (agentos_ap for %q)", open, h.apFor)
+	}
+	if err := l.Up(context.Background(), apCfg("wlan0")); err == nil {
+		t.Fatal("wlan0 ran the access point while wlan2 may be exempt")
+	}
+	if len(h.open()) != 0 {
+		t.Fatalf("refused bring-up opened %v", h.open())
+	}
+	delete(h.fail, "nft unexempt wlan2")
+	delete(h.fail, "stop agentos-ap-exempt@wlan2.service")
+	if err := l.Down(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.exempt) != 0 || h.apFor != "" {
+		t.Fatalf("after Down: exempt %v, agentos_ap for %q", h.exempt, h.apFor)
+	}
+	if err := l.Up(context.Background(), apCfg("wlan0")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// DEV-net-i: when the host cannot say which interface agentos_ap holds,
+// nothing unloads it, and the interfaces stay refused.
+func TestUnreadableAPTableIsKept(t *testing.T) {
+	h := newNetHost()
+	deadOn(t, h, "wlan2")
+	h.fail["nft list agentos_ap"] = true
+	l, _ := newLoader(h)
+	if err := l.Start(context.Background(), "wlan0"); err == nil {
+		t.Fatal("Start hid an unreadable agentos_ap")
+	}
+	if h.apFor != "wlan2" || len(h.open()) != 0 {
+		t.Fatalf("agentos_ap went while unreadable: exempt %v, agentos_ap for %q", h.exempt, h.apFor)
+	}
+	if err := l.Station(context.Background(), "wlan0", noJoin(t)); err == nil {
+		t.Fatal("wlan0 joined though its BringDown could not finish")
+	}
+	if err := l.Up(context.Background(), apCfg("wlan0")); err == nil {
+		t.Fatal("wlan0 ran the access point though agentos_ap could not be read")
+	}
+	// The read works again, but agentos_ap still holds wlan2: Up refuses
+	// until a Start brings wlan2 down.
+	delete(h.fail, "nft list agentos_ap")
+	if err := l.Up(context.Background(), apCfg("wlan0")); err == nil || !strings.Contains(err.Error(), "wlan2") {
+		t.Fatalf("wlan0 ran the access point while agentos_ap held wlan2: %v (open %v)", err, h.open())
+	}
+	if err := l.Start(context.Background(), "wlan0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Up(context.Background(), apCfg("wlan0")); err != nil || len(h.open()) != 0 {
+		t.Fatalf("Up(wlan0) after a clean Start: %v, open %v", err, h.open())
 	}
 }
