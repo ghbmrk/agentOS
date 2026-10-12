@@ -10,7 +10,7 @@ How AgentOS is built for the most progress per weekly limit at the same quality.
 | How it is phased | PLAN.md |
 | Rules | CLAUDE.md |
 | Procedures and reasons | this file |
-| Live state | BOARD.md (index), LATER.md (release vs later), docs/LANES.md (team lanes) |
+| Live state | `work-item` issues (state, tier, class and lane as labels; BOARD.md is rendered from them by tools/board.py), `decision` issues (actions only Mark can take), docs/LANES.md (team lanes) |
 | One package's work | `briefs/<ID>.md`, linked from its BOARD row |
 | Records | DECISIONS.md, `reviews/`, each package's `ASSUMPTIONS.md` |
 | Generated | TRACE.md, METRICS.md |
@@ -52,18 +52,18 @@ Every finding (L3, lens, CI soak, an agent's own observation) gets one class at 
 | Class | Meaning | Where it goes |
 |---|---|---|
 | **blocker** | Breaks a requirement the PR cites, or an invariant. | Fixed in the same PR before merge. |
-| **release** | Needed to pass an acceptance test in SPEC §15 (A1–A15) or an invariant, but not in this PR's scope. The finding names that test or invariant and one failure path: what goes wrong without it. | A new BOARD.md row, named in the PR's Findings line. |
-| **later** | Anything else: polish, hardening beyond the spec, nice-to-have wording. | One line in LATER.md. No package is started for it before the first release ships. |
+| **release** | Needed to pass an acceptance test in SPEC §15 (A1–A15) or an invariant, but not in this PR's scope. The finding names that test or invariant and one failure path: what goes wrong without it. | A new `work-item` issue labelled `class:release`, named in the PR's Findings line. |
+| **later** | Anything else: polish, hardening beyond the spec, nice-to-have wording. | An issue labelled `class:later` (one line). No package is started for it before the first release ships. |
 
-The PR's Findings line also names every LATER.md row the PR removes, including a row outside its brief's scope that it strikes; the reviewer checks the line against the diff.
+The PR's Findings line also names every `class:later` issue the PR closes, including one outside its brief's scope; the reviewer checks the line against the diff.
 
 Security findings on tier-A broker paths are never `later` unless they are purely wording. On assurance tooling (`tools/depaudit*`, `tools/canary*`, `assurance/`), a finding is `release` only if it can make the tool report a pass on a real violation (a false pass); the tool's messages, diagnostics and remedy text are `later`. When unsure between blocker and release, pick blocker. When unsure between release and later, class it `later` with the tag `recheck` and say so (D-086).
 
 - **Follow-up depth.** A finding raised on a follow-up of a follow-up (a row whose source is itself a review finding on a follow-up row) is `later` unless it is a blocker on the cited IDs, a false pass, or an exploit path.
-- **One review, one package.** The release findings from one PR's reviews go into one follow-up brief, with one BOARD row per finding grouped under it, not one package each.
-- **Pre-release sweep.** Before the first release ships, one session re-reads every `recheck` line and every tier-A `later` line in LATER.md and promotes any that now block an acceptance test.
+- **One review, one package.** The release findings from one PR's reviews go into one follow-up brief, with one `work-item` issue per finding grouped under it, not one package each.
+- **Pre-release sweep.** Before the first release ships, one session re-reads every `recheck` and every tier-A `class:later` issue (and the archived docs/LATER-HISTORY.md) and promotes any that now block an acceptance test.
 
-LATER.md also holds the critical-path audit of BOARD.md: each open row is marked release or later. The coordinator does not start `later` rows. A row moves to release only with the acceptance test it now blocks.
+The critical-path audit of the board lives on the issues: each open row's issue carries `class:release` or `class:later` (the 2026-10-10 audit is in docs/LATER-HISTORY.md). The coordinator does not start `later` rows, nor rows labelled `frozen`: D-098's freeze, which `board.py` sets from the row's "frozen until G2" state and `check --repo` holds to it. A row moves to release, by relabelling its issue, only with the acceptance test it now blocks.
 
 ## 3. Risk tiers
 
@@ -73,7 +73,7 @@ Review depth follows risk, decided mechanically from the paths a change touches.
 |---|---|---|
 | **A** | broker packages holding credentials, isolation, effects, owner auth, update and supply chain (vault, tpmseal, egress, grants, verb, journal, reversible, sockets, guest, vm, workers, cgroup, owner, control, card, claim, firstboot, modem*, localapi/localsrv/localui, cleanroom, hint, pubid, attest, update, apply, change, replay, sim, sipsign, smsapi, sendrules, clock, recovery, hostdisk, hostchange, vendor, mail, plus the wiring in daemon and cmd), `broker/go.mod`, `broker/go.sum`, `assurance/`, `tools/canary*`, `tools/depaudit*`, `tools/risk_tier*`, `tools/ci_scope*`; `image/` except its top-level `*.md`; `.github/` (workflows build the image, gate merges and push to main); `.claude/` (agent permissions); the guest's build inputs (`guest/*/build-rootfs.sh`, `package.json`, `package-lock.json`, `launch.json`, `guest/openclaw/openclaw.json5`); any `*.service`, `*.socket` or `*.timer`, and any `*.conf` under a `systemd` directory, outside `spikes/` | CI, L3 on the strongest model with a threat check, lens screen with a separate Security section, Security re-sign on later deltas |
 | **B** | other `broker/` packages, the rest of `guest/`, SPEC.md (which also needs Mark through an L1 spec-diff PR), and any path no rule names, so a new top-level directory gets a lens pass until it is classed | CI, L3, one combined lens pass |
-| **C** | only the explicit list: top-level `*.md` other than SPEC.md (BOARD, LATER, DECISIONS, LEDGER, METRICS, TRACE among them), `docs/`, `briefs/`, `reviews/`, `decisions/`, `spikes/`, `tests/`, `tools/` outside the tier-A prefixes, `image/*.md` | CI, L3; no lens screen |
+| **C** | only the explicit list: top-level `*.md` other than SPEC.md (BOARD, DECISIONS, LEDGER, METRICS, TRACE among them), `docs/`, `briefs/`, `reviews/`, `decisions/`, `spikes/`, `tests/`, `tools/` outside the tier-A prefixes, `image/*.md` | CI, L3; no lens screen |
 
 A new broker package that holds credentials or gates effects is added to `TIER_A_BROKER` in the same PR that creates it. A renamed tier-A package fails `tests/test_risk_tier.py` until the list is updated.
 
@@ -140,8 +140,9 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 
 - **Idle limit:** a PR or `building` row with no activity for 48 hours is finished, handed off with a packet, or returned to `queued` with its PR closed (branch kept). No draft is exempt: drafts held under CODEX-1 follow the same rule (D-098, replacing D-086 item 7's exemption). The one exception is the W5-D drafts that D-095 keeps open as reference: they are exempt from this limit and from the cap until SIM-cases lists their cases, and follow both after that.
 - **PR cap:** at most about 10 open PRs per lane (docs/LANES.md), drafts included (the W5-D reference drafts excepted, see the idle limit). Over the cap, the lane finishes, hands off or returns to `queued` its oldest idle PR before opening another; the coordinator does the closing, branches kept (D-098). METRICS.md follows once WIP-1 lands.
-- **Scope freeze (D-098):** until G2 passes, no new rows or follow-ups for the open-source bridge, the second line, fuzz in the loop or learning sources beyond one; LATER rows FRZ-oss, FRZ-line2, FRZ-fuzz and FRZ-learn list them. A new row names the G1 or G2 test it serves or is `later`.
-- **Questions for Mark** go to docs/MARK-QUEUE.md, one line each, answerable in one word, with a recommendation. Mark answers the queue in one sitting; an answered line moves to DECISIONS.md.
+- **Scope freeze (D-098):** until G2 passes, no new rows or follow-ups for the open-source bridge, the second line, fuzz in the loop or learning sources beyond one; LATER rows FRZ-oss, FRZ-line2, FRZ-fuzz and FRZ-learn (now in docs/LATER-HISTORY.md) list them. Their open rows read "frozen until G2" and carry the `frozen` label, whatever their class; nobody starts one, and lifting the freeze is a state edit on each issue after G2. A new row names the G1 or G2 test it serves or is `later`.
+- **Board migration for open PRs (SIM-repo-2b).** Once SIM-repo-2b merges, BOARD.md is generated and LATER.md and docs/MARK-QUEUE.md are gone, so an open PR that edits them fails `check --repo` or `archive`. The coordinator merges SIM-repo-2b straight after its last main refresh, then routes each such PR (at the merge: #1028 and #1034 edit BOARD.md; #1029 and #1033 edit BOARD.md and LATER.md) to its builder, who at the next refresh: (1) takes main's BOARD.md and LATER-HISTORY, dropping the PR's edits to them; (2) makes each dropped BOARD row change on its `work-item` issue (state label, board-row block, a new issue for a new row); (3) files each dropped LATER row as an issue labelled `class:later` (or `class:release` with its acceptance test); (4) waits for board.yml's bot/board PR to merge; (5) merges main again so `check --repo` passes, and pushes. A PR with no builder thread gets one from the coordinator for this.
+- **Questions for Mark** go to the coordinator, who asks each on a Decisions card: one question, answerable with a tap, with a recommendation; an answer that sets policy moves to DECISIONS.md. Actions only Mark can take (hardware, accounts, readings) are issues labelled `decision`, closed when done.
 
 **Coordinator chat layout** (token rules for any team's coordinator; Mark, 2026-10-09 and 2026-10-10). A chat-based project runs on these rules; a second subscription's team (§7) follows them in its own project.
 
@@ -176,7 +177,7 @@ Extra capacity (a second subscription, a teammate's agent, or another vendor's c
 
 **No lane restriction between the two subscriptions.** Either may build any row. The lanes in docs/LANES.md apply only to a team that is not one of Mark's Claude subscriptions (another vendor's agent, a teammate), and a lane there is a safety boundary, not a ranking.
 
-**Claims on BOARD.md.** A team claims a row by a PR or commit to main that sets the row's state to `building` and its owner to the team name, before any work. A row with an owner belongs to that team until its state changes. Two claims on one row: the earlier merged one wins and the other stops. Branch stems carry the team only when more than one team is active: `pkg/<team>-<id>-<slug>`.
+**Claims on BOARD.md.** A team claims a row by setting its `work-item` issue's label to `state:building` and naming the team in the issue, before any work; BOARD.md follows through board.yml, never a hand edit. A row with an owner belongs to that team until its state changes. Two claims on one row: the claim whose `state:building` label event comes first on the issue's timeline wins and the other stops. Branch stems carry the team only when more than one team is active: `pkg/<team>-<id>-<slug>`.
 
 **Every team merges its own PRs; GitHub enforces the gates.** A PR merges only when its head contains current main and the required checks passed on that head (ruleset on main), and when its diff equals the diff its L3 accept recorded (`tools/premerge.py`). The merging team calls the merge with the head SHA, so a later push makes the merge fail. Mark's two subscriptions are one team of equal peers (D-099): any coordinator on either merges a PR of that team when every required review accepts the current head, CI is green and it merges cleanly (§3, §4; the project merge rule). Any other team is its PRs' only pusher and merger; a PR into another lane is merged by that lane's owner, who requests changes rather than pushing. Nobody pushes to another team's branch. Branch stems carry the team: `pkg/<team>-<id>-<slug>`.
 
@@ -184,7 +185,7 @@ Extra capacity (a second subscription, a teammate's agent, or another vendor's c
 
 **Every review verdict comment ends with the PR's next step and the reviews still owed**, so GitHub stays the live handoff and handoff/CURRENT.md only holds standing decisions and a dated snapshot.
 
-**IDs never collide.** The peer team numbers decisions `D-NNN`; every other team uses `D-<team>-NNN` and prefixes the BOARD rows it creates (claude2: `C2-`). Each team appends only to its own section of BOARD.md, LATER.md and DECISIONS.md. doclint fails on a duplicate ID.
+**IDs never collide.** The peer team numbers decisions `D-NNN`; every other team uses `D-<team>-NNN` and prefixes the BOARD rows it creates (claude2: `C2-`). Each team appends only to its own section of DECISIONS.md, and adds BOARD rows only as `work-item` issues. doclint fails on a duplicate ID.
 
 **Ownership moves by hand-off or takeover.** A hand-off is a `handoff` issue (the §5 packet) accepted by a claim PR. A row whose owner shows no activity on it for 24 hours may be claimed by a PR citing the last activity. A team continuing another team's PR branches from its head and opens a new PR; it never pushes to the old branch.
 

@@ -1,4 +1,7 @@
-# LATER: first-release critical path and backlog
+# LATER history: the first-release critical path and backlog as of 2026-10-10
+
+Archived by SIM-repo-2b from LATER.md as main held it when SIM-repo-2b merged: fbdd71b plus every row main added before that merge. Those rows stay here rather than becoming issues, like the 628 backlog rows, and the pre-release sweep reads them here (OPERATING §2). Frozen from that merge: `board.py archive` fails a PR that edits this file (D24). A finding's class now lives on its issue: `class:release` or `class:later` on a `work-item` issue, and a new later finding is an issue labelled `class:later` (OPERATING §2). Rows below that had an open BOARD row carry that class label on their issue; the three Release rows that had none became BOARD rows. The text below is LATER.md's, unchanged.
+
 Generated 2026-10-07 by the COST thread's audit; the coordinator updates it. Rows marked LATER are not started until the first release ships (DECISIONS D-048). Promote a row by moving it to "Release" with the acceptance test it now blocks.
 
 ## Summary

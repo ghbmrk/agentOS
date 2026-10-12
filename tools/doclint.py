@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Checks that the operating documents stay consistent (BOARD row DOC-2).
 
-  BOARD.md      every table row's last cell starts with a state metrics.py counts, and every
-                brief it links exists
   README.md     the Documents table lists every top-level and docs/ markdown file, and every
                 file it links exists
   rule files    no /mnt paths (local paths of one machine, unreadable by other agents)
@@ -12,14 +10,10 @@
                 head or main SHA)
   DECISIONS.md  a Decision cell over 300 characters links decisions/D-NNN.md (D-056); links resolve
   ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md
-  BOARD.md      a row added on or after RELEASE_FROM whose state says `release` (or whose package
-                says `(release`) names an acceptance test or invariant (D-085, CONV-0-5)
-  BOARD.md      no two rows share an ID; no state says `blocked on <ID>` for a merged row
-  LATER.md      a Release or Later row's ID is not a merged or dropped BOARD row (shared open IDs and
-                finding suffixes such as `X-1 l1` are fine); no text says an ID "has no board row"
-                while BOARD has one (DOC-5)
   briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4, and
-                none keeps its own `**State:**` line (BOARD.md is authoritative)
+                none keeps its own `**State:**` line (state lives on the work-item issue)
+
+BOARD.md is generated from the work-item issues (tools/board.py), so its rows are checked there, not here.
 
 Usage: python3 tools/doclint.py [repo root]. Prints one line per problem; exits 1 if any.
 """
@@ -28,10 +22,8 @@ import re
 import subprocess
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from metrics import STATES, _rows  # noqa: E402
 
-RULE_FILES = ("CLAUDE.md", "AGENTS.md", "README.md", "BOARD.md", "docs/OPERATING.md", "docs/LANES.md")
+RULE_FILES = ("CLAUDE.md", "AGENTS.md", "README.md", "docs/OPERATING.md", "docs/LANES.md")
 BRIEF_TOKENS = 20_000
 OPERATING_REF = re.compile(r"OPERATING(?:\.md)?\s*§\s*(\d+)(?:\s*[–-]\s*(\d+))?")
 RECORD_FROM = "2026-10-09"
@@ -41,92 +33,7 @@ STATE_LINE = re.compile(r"^\*\*State:\*\*")
 RECORD_FILE = re.compile(r"(\d{4}-\d\d-\d\d)-.+\.md$")
 RECORD_FIELDS = (re.compile(r"\bPRs? (?:#\d+|none)\b"), re.compile(r"\bpackages? \S"),
                  re.compile(r"\b(?:heads?|main) [0-9a-f]{7,40}\b"))
-RELEASE_FROM = "2026-10-10"
-RELEASE_STATE = re.compile(r"\brelease\b")
-RELEASE_CLASS = re.compile(r"\(release\b")
-ACCEPTANCE = re.compile(r"\bInvariant\b|\bTest[A-Z]\w+")
-SPEC_ID = re.compile(r"\b[A-Z][A-Z0-9]*-\d+[a-z]?\b")
-NO_ROW = re.compile(r"(?<![\w-])([A-Z][A-Za-z0-9]*-[A-Za-z0-9]+)\b[^.|\n]{0,80}?\b(?:has|have) no (?:board row|row of its own)")
-BLOCKED_ON = re.compile(r"\bblocked on ([A-Z][A-Za-z0-9]*-[A-Za-z0-9]+)(?![\w-])")
 LINK = re.compile(r"\]\(([^)#\s]+)")
-
-
-def board(root):
-    text = (root / "BOARD.md").read_text()
-    for cells in _rows(text, "| ID |"):
-        if not cells[-1].startswith(STATES):
-            yield f"BOARD.md: {cells[0]}: state {cells[-1]!r} does not start with one of {', '.join(STATES)}"
-        for link in LINK.findall(" ".join(cells)):
-            if link.startswith("briefs/") and not (root / link).is_file():
-                yield f"BOARD.md: {cells[0]}: links missing {link}"
-
-
-def contradictions(root):
-    """BOARD and LATER claims that contradict each other (DOC-5); merge state from GitHub is DOC-6's."""
-    text = (root / "BOARD.md").read_text()
-    states, seen = {}, set()
-    for cells in _rows(text, "| State |"):
-        if cells[0] in seen:
-            yield f"BOARD.md: duplicate row ID {cells[0]}"
-        seen.add(cells[0])
-        states.setdefault(cells[0], cells[-1])
-    for cells in _rows(text, "| State |"):
-        for target in BLOCKED_ON.findall(cells[-1]):
-            if states.get(target, "").startswith("merged"):
-                yield f"BOARD.md: {cells[0]}: blocked on {target}, which is merged"
-    later = root / "LATER.md"
-    for name, body in (("BOARD.md", text), ("LATER.md", later.read_text() if later.is_file() else "")):
-        for target in dict.fromkeys(NO_ROW.findall(body)):
-            if target in states:
-                yield f"{name}: {target} has a BOARD row but the text says it has no board row"
-    if later.is_file():
-        for cells in _rows(later.read_text(), "| ID |"):
-            state = states.get(cells[0], "")
-            for done in ("merged", "dropped"):
-                if state.startswith(done):
-                    yield f"LATER.md: {cells[0]}: the BOARD row is {done}; remove the LATER row"
-
-
-def board_added(root):
-    """{row ID: date of the earliest commit that added it}; None without usable history.
-    Every commit is walked and a merge is diffed against its first parent: main's rows first appear at their
-    own earlier commit (a plain --first-parent log would date them by a merge of main), and a row born in a
-    merge's conflict resolution is dated by the merge."""
-    try:
-        if _git(root, "rev-parse", "--is-shallow-repository").strip() != "false":
-            return None  # a grafted tip would date every row as new
-        log = _git(root, "log", "--diff-merges=first-parent", "--reverse", "-p", "--format=%x01%cI", "--", "BOARD.md")
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    added, date = {}, None
-    for line in log.splitlines():
-        if line.startswith("\x01"):
-            date = line[1:]
-        elif line.startswith("+| "):
-            added.setdefault(line[1:].strip("| ").split(" |")[0].strip(), date)
-    return added
-
-
-def _git(root, *args):
-    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout
-
-
-def release_rows(root):
-    rows = [c for c in _rows((root / "BOARD.md").read_text(), "| ID |")
-            if RELEASE_STATE.search(c[-1]) or RELEASE_CLASS.search(" ".join(c[1:-1]))]
-    added = board_added(root) if rows else None
-    if not added:
-        return
-    spec = root / "SPEC.md"
-    spec_ids = set(SPEC_ID.findall(spec.read_text())) if spec.is_file() else set()
-    for cells in rows:
-        when = added.get(cells[0])
-        if when is None or when[:10] < RELEASE_FROM:
-            continue
-        text = " ".join(cells[1:])
-        if not (ACCEPTANCE.search(text) or spec_ids & set(SPEC_ID.findall(text))):
-            yield (f"BOARD.md: {cells[0]}: a release row added {when[:10]} names no acceptance test or invariant "
-                   "(a SPEC requirement ID, `Invariant`, or `TestName`; D-085)")
 
 
 def readme(root):
@@ -165,7 +72,7 @@ def briefs(root):
     for path in sorted((root / "briefs").glob("*.md")):
         for n, line in enumerate(path.read_text().splitlines(), 1):
             if STATE_LINE.match(line):
-                yield f"briefs/{path.name}:{n}: `**State:**` line; BOARD.md is the only record of state"
+                yield f"briefs/{path.name}:{n}: `**State:**` line; state lives on the work-item issue"
         tokens = len(path.read_text()) // 4
         if tokens > BRIEF_TOKENS:
             yield f"briefs/{path.name}: ~{tokens} tokens, over the {BRIEF_TOKENS} cap; split the package"
@@ -251,7 +158,7 @@ def markdown_files(root):
 def lint(root):
     root = pathlib.Path(root)
     files = markdown_files(root)
-    return [*board(root), *contradictions(root), *release_rows(root), *readme(root), *rule_files(root), *operating_refs(root, files),
+    return [*readme(root), *rule_files(root), *operating_refs(root, files),
             *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files)]
 
 

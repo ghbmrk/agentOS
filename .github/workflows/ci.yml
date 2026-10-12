@@ -106,6 +106,14 @@ jobs:
             git show origin/main:BOARD.md > "$RUNNER_TEMP/base-BOARD.md"
           fi
           python tools/board.py check --repo "$GITHUB_REPOSITORY" --base "$RUNNER_TEMP/base-BOARD.md"
+      - name: Archived status files stay frozen (SIM-repo-2b, D23)
+        # Once the base BOARD.md is generated, no PR edits docs/BOARD-HISTORY.md or
+        # docs/LATER-HISTORY.md, or brings back LATER.md or docs/MARK-QUEUE.md.
+        if: github.event_name == 'pull_request'
+        run: |
+          git show HEAD^1:BOARD.md > "$RUNNER_TEMP/base-BOARD.md"
+          python tools/board.py archive --base "$RUNNER_TEMP/base-BOARD.md" \
+            --changed $(git diff --no-renames --name-only HEAD^1 HEAD)
       - name: PR leaves TRACE.md to trace.yml
         if: github.event_name == 'pull_request'
         # HEAD is the PR's test merge (base^1, branch^2). Three dots compare the branch with
