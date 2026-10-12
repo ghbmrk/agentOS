@@ -861,3 +861,4 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CTRL-card l1 | PR #1060 builder finding: the Owner Card render still says "drive" in places where it should say box (wording only) |
 | CTRL-card l2 | `recheck`. PR #1060 UX lens: a restart before the confirm makes a new card while the owner may already hold a printed one; the page should say a card printed before a restart is void |
 | CTRL-card l3 | PR #1060 UX lens: the screenshot warning should also cover saving the card file into a cloud-synced folder |
+| SIM-split-fix l3 | PR #1061 L3: `broker/holder/ASSUMPTIONS.md` H-10 calls the egress-label residual a "release finding" while it is filed as SIM-split-fix l2 (later, recheck); align the wording when a package next edits H-10 |
