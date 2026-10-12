@@ -53,7 +53,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W5b | A7, A11 | Loop 3 update checks as a scheduler source |
 | W5c | A12 | Clean-room builder in the scheduler |
 | DEV-net-a, DEV-net-b, DEV-net-c | A14 (DEV-2, REV-5) | Home-network boundary on every outbound path; latent until ARC-6 (d) is served, and a precondition for serving it (D-069) |
-| DEV-net-i | A14 (DEV-2 In) | APLoader start-up cleanup covers every wireless interface: Start cleans only named interfaces and BringDown unloads agentos_ap whichever interface holds it, so a dead loader's wlan2 stays exempt with no table; from #1079 R2 |
 | CTRL-card, CTRL-claim, CTRL-uki, FLASH-1, ROUTE-1, NET-seg, WS-image, WS-rest, HELPER-a, HELPER-b, HELPER-c, CTRL-spike, CTRL-text | A1, A8, A14 (HW-9–HW-13, REV-6, ONB-10) | Controller and helper system (D-102): release findings of #1054; BOARD section "Controller and helper system" |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |
@@ -876,3 +875,4 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CTRL-card-wire l2 | PR #1073 L3/Security: a `SetupState` saved before the card was wired, with `Recovery=true`, skips the card step on the page and lets `host`/`ai` (including `ConnectAPIKey`) run while the card is held; finish is still refused, and no production box has such a state |
 | DEV-net-h l1 | PR #1079 L3/UX lens: `localui.APLoader` refuses a station join or bring-up with internal text ("<if> may still be exempt, so it does not join a network"); the P2-1 loader maps it to fixed owner text and a retry (CH-12), with `DEV-net-f l1` |
 | DEV-net-h l2 | `recheck`. PR #1079 L3/Security: defense in depth for a loader that bypasses `APLoader`; `ap-exempt` could refuse when `inet agentos_inbound exempt` already holds another `phy80211` interface (agent-machine links are not wireless), so two access-point exemptions cannot coexist even if `BringUp` is called directly |
+| DEV-net-i l1 | `recheck`. PR #1082 L3 (A14, DEV-2 In): a Go parser in localui for `nft list chain inet agentos_ap input`, giving APTableIface's result ("" only when nft reports the table absent), with a netns test against a real listing, so the P2-1 APHost cannot map an nft failure to "absent" (P2-1) |
