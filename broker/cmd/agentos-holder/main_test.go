@@ -2,6 +2,9 @@ package main
 
 import (
 	"io"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -21,6 +24,19 @@ func TestParseRefusesWhatAHolderCannotKeep(t *testing.T) {
 	} {
 		if _, err := parse(args, io.Discard); err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// A holder never runs as one of its peers: the uid check would admit
+// anything under its own uid (SIM-split R3).
+func TestRunRefusesItsPeerUID(t *testing.T) {
+	me := strconv.Itoa(os.Getuid())
+	other := strconv.Itoa(os.Getuid() + 1)
+	for _, uids := range [][]string{{me, other}, {other, me}} {
+		args := []string{"-dir", t.TempDir(), "-credential", "k", "-adapter", "openai", "-request-uid", uids[0], "-hand-uid", uids[1]}
+		if err := run(args, io.Discard); err == nil || !strings.Contains(err.Error(), "peer uid") {
+			t.Errorf("uids %v: %v", uids, err)
 		}
 	}
 }
