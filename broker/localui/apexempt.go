@@ -46,8 +46,11 @@ type APHost interface {
 	// StopUnit stops a unit, running its ExecStop.
 	StopUnit(ctx context.Context, unit string) error
 	// APTableIface names the interface agentos_ap's input chain drops
-	// (NftRules' `iifname "<if>" drop`), or "" when agentos_ap is not
-	// loaded (DEV-net-i).
+	// (NftRules' `iifname "<if>" drop`), read as ap-exempt reads it (`nft
+	// list chain inet agentos_ap input`, exact line). It returns "" only
+	// when nft reports the table absent, and an error for any other nft
+	// failure or a chain without exactly one such line: an error read as ""
+	// would let BringDown unload another radio's table (DEV-net-i).
 	APTableIface(ctx context.Context) (string, error)
 }
 
