@@ -189,6 +189,21 @@ func New(cfg Config) *Policy {
 
 // Learn replaces the learned network.
 func (p *Policy) Learn(n Network) {
+	out := normalise(n)
+	p.mu.Lock()
+	p.learnLocked(out)
+	p.mu.Unlock()
+}
+
+// learnLocked stores a normalised network and bumps the generation; p.mu is
+// held for writing.
+func (p *Policy) learnLocked(out Network) {
+	p.net = out
+	p.gen++
+}
+
+// normalise drops zones, unmaps, and caps IPv6 prefixes at /56.
+func normalise(n Network) Network {
 	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), External: n.External.WithZone("").Unmap(), Resolver: n.Resolver.WithZone("").Unmap()}
 	if out.Resolver.IsLoopback() || out.Resolver.IsUnspecified() {
 		out.Resolver = netip.Addr{}
@@ -210,10 +225,7 @@ func (p *Policy) Learn(n Network) {
 		}
 		out.Prefixes = append(out.Prefixes, netip.PrefixFrom(a, bits).Masked())
 	}
-	p.mu.Lock()
-	p.net = out
-	p.gen++
-	p.mu.Unlock()
+	return out
 }
 
 // Refresh reads Config.Source and learns the result. A failed read keeps
@@ -232,18 +244,27 @@ func (p *Policy) Refresh() error {
 	if err != nil {
 		return err
 	}
+	out := normalise(n)
+	if refreshGapHook != nil {
+		refreshGapHook()
+	}
+	// The generation check and the store are one critical section, so a
+	// Learn can never land between them.
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.gen != gen {
-		if ext := n.External.WithZone("").Unmap(); ext.IsValid() && n.Gateway.WithZone("").Unmap() == p.net.Gateway {
-			p.net.External = ext
+		if out.External.IsValid() && out.Gateway == p.net.Gateway {
+			p.net.External = out.External
 		}
-		p.mu.Unlock()
 		return nil
 	}
-	p.mu.Unlock()
-	p.Learn(n)
+	p.learnLocked(out)
 	return nil
 }
+
+// refreshGapHook, when set by a test, runs after a full read returns and
+// before Refresh takes the lock to check the generation and store.
+var refreshGapHook func()
 
 // Watch refreshes on each event until ctx ends: the broker sends one on
 // every address or route change. Each event applies the quick read at once;

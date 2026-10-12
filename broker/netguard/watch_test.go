@@ -175,3 +175,23 @@ func TestStaleFullReadDoesNotOverwriteNewerLearn(t *testing.T) {
 		t.Fatalf("the stale poll read re-allowed the new prefix: %v", err)
 	}
 }
+
+// A quick learn that lands after a full read's generation check but before
+// its store still wins: the check and the store are one critical section.
+func TestQuickLearnInRefreshGapIsNotOverwritten(t *testing.T) {
+	old := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
+	next := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24"), netip.MustParsePrefix("8.8.8.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
+	p := New(Config{
+		Source: func() (Network, error) { return old, nil },
+		Quick:  func() (Network, error) { return next, nil },
+	})
+	refreshGapHook = p.quickLearn // the netlink event, in the gap if there is one
+	t.Cleanup(func() { refreshGapHook = nil })
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	probe := netip.MustParseAddr("8.8.8.9")
+	if err := p.Check(context.Background(), probe, 443, "tcp"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("the stale poll read re-allowed the new prefix: %v", err)
+	}
+}
