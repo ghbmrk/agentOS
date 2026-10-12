@@ -31,13 +31,19 @@ var ErrDiscard = errors.New("card: this card can no longer take effect")
 // effect before a later step failed (a rotation's partial write). The
 // owner has just typed values back from their copy, and a retry cannot
 // finish (the rotation is used up), so the display erases its copy, as
-// after a full confirm, and refuses a later cancel: the new card is the
-// one to keep, and a new rotation made with it finishes the rest.
+// after a full confirm, and refuses a later cancel: the owner keeps the
+// new card and the current one, and a new rotation, started with either
+// card's factor that opens the drive, finishes the rest.
 var ErrInEffect = errors.New("card: part of this card is already in effect")
 
 // inEffectProblem is the page's note once part of the card is in effect:
-// it names the one step that finishes the rotation (CH-12).
-const inEffectProblem = "Part of your new card is already in effect, but I could not finish. Use your printed or saved copy of the new card from now on, and start a new card from my box page with it to finish."
+// it names the one step that finishes the rotation (CH-12). It holds in
+// every partial state: some parts may still be the current card's (the
+// Wi-Fi password, setup secret and grid take effect last, and a failed
+// recovery-key write leaves the old key in effect), so the owner keeps
+// both cards and finishes with whichever one opens the drive; the next
+// rotation must replace every part this one rotated (#1090 review F3).
+const inEffectProblem = "Part of your new card is already in effect, but I could not finish. Keep the new card, and your current one if you still have it. Finish now: start a new card from my box page, using the passphrase or recovery key from whichever card works."
 
 // Parts are the card secrets a rotation replaces (REC-4).
 type Parts struct{ WiFi, Setup, Passphrase, Grid, Recovery bool }

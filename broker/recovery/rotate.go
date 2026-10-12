@@ -207,8 +207,9 @@ var ErrNextCard = errors.New("recovery: the new card does not match the parts be
 
 // ErrCardNotStored is returned with the parts of a rotated card that are
 // already in effect when a later step failed. The owner confirmed that
-// card from their copy before Commit ran, so the copy is the card to keep;
-// the rotation is used up, and a new one made with it finishes the rest.
+// card from their copy before Commit ran, so they keep it, and the old
+// card too: parts not yet written are still the old card's. The rotation
+// is used up, and the next one must replace every part it rotated.
 var ErrCardNotStored = errors.New("recovery: part of the new card is in effect but was not saved; print it now")
 
 // Proof is what opens the drive now, for rewriting its slots: the current
@@ -376,7 +377,8 @@ func GridCheck(seed []byte) string {
 // point last, with a note that devices must rejoin, and after a new grid
 // clears spent cells (EndSession). If a step fails after the first slot
 // is rewritten, Commit returns the parts already in effect with
-// ErrCardNotStored. Rotation protects only against copies made
+// ErrCardNotStored, and every rotated part stays owed in the rotation
+// marker, so the next rotation must replace them all. Rotation protects only against copies made
 // afterwards: a drive copy or backup taken earlier still opens with the
 // old passphrase or recovery key (CRED-8).
 //
@@ -425,12 +427,19 @@ func (p *Pending) Commit(b *Box, next Card, now time.Time) (Done, error) {
 			slots = append(slots, q)
 		}
 	}
-	// Everything this commit owes once its first slot is written: the
-	// slots, a lost card's setup secret and grid, and the re-encryption.
+	// Everything this commit owes once its first slot is written: every
+	// rotated part, since Wi-Fi, setup and grid take effect only at
+	// storeCard after the slots, so a finishing rotation must replace them
+	// too (#1090 review F3); a lost card's setup secret and grid; and the
+	// re-encryption.
 	lost := proof.lost()
-	owes := append([]Part(nil), slots...)
+	owes := p.Parts()
 	if lost {
-		owes = append(owes, PartSetup, PartGrid)
+		for _, q := range []Part{PartSetup, PartGrid} {
+			if !containsPart(owes, q) {
+				owes = append(owes, q)
+			}
+		}
 	}
 	if p.parts[PartRecovery] {
 		owes = append(owes, PartRefresh)
@@ -453,6 +462,9 @@ func (p *Pending) Commit(b *Box, next Card, now time.Time) (Done, error) {
 		if len(proof.Passphrase) > 0 {
 			proof.Passphrase = []byte(next.VaultPassphrase)
 			defer wipe(proof.Passphrase)
+		}
+		if err := crashPoint("passphrase-slot"); err != nil {
+			return fail(err)
 		}
 	}
 	if p.parts[PartRecovery] {

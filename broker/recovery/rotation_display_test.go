@@ -29,7 +29,9 @@ import (
 // rotWire joins a Pending rotation to a card.Display as the rotation page
 // does: the display generates and shows the new parts, its provisioner
 // commits them, a lapsed rotation discards the display, and a partial
-// write keeps it (the owner must still hold what is in effect).
+// write erases it as a full confirm does (the owner has just confirmed
+// from their copy, and the used-up Pending cannot be retried), mapped to
+// card.ErrInEffect so the page refuses cancel and says how to finish.
 type rotWire struct {
 	t    *testing.T
 	x    *box
@@ -361,6 +363,117 @@ func TestACrashMidRotationLeavesOneValidKey(t *testing.T) {
 		t.Fatal("after finishing, not exactly the newest key opens")
 	}
 	x.noKeyText(x.card.RecoveryKey, w.gen.RecoveryKey, w2.gen.RecoveryKey)
+}
+
+// A partial write leaves the Wi-Fi password, setup secret and grid as
+// the current card's, since they are stored only after the slots. Every
+// rotated part stays owed, so the next rotation must replace them all and
+// the new card's Wi-Fi password cannot be dropped by a narrower one
+// (#1090 review F3).
+func TestAPartialWriteOwesEveryRotatedPart(t *testing.T) {
+	x := newBox(t)
+	w := x.rotateOnDisplay([]Part{PartWiFi, PartSetup, PartGrid, PartRecovery}, Proof{Recovery: x.rk})
+	nk := w.newKey()
+	crashed := errors.New("crash")
+	crashPoint = func(step string) error {
+		if step == "enroll-marked" {
+			return crashed
+		}
+		return nil
+	}
+	t.Cleanup(func() { crashPoint = func(string) error { return nil } })
+	if err := w.d.ConfirmAnswers(w.answers(true)); !errors.Is(err, card.ErrInEffect) || !errors.Is(err, crashed) {
+		t.Fatalf("confirm through a crash: %v", err)
+	}
+	crashPoint = func(string) error { return nil }
+	if x.opens(x.rk) || !x.opens(nk) {
+		t.Fatal("after the crash, not exactly the new key opens")
+	}
+	cur, err := x.b.LoadCard()
+	must(t, err)
+	if cur.WiFiPassword != x.card.WiFiPassword || cur.SetupSecret != x.card.SetupSecret || !bytes.Equal(cur.GridSeed, x.card.GridSeed) {
+		t.Fatal("Wi-Fi, setup or grid took effect before the slots finished")
+	}
+	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[wifi setup grid recovery refresh]" {
+		t.Fatalf("owed after a partial write: %v %v", parts, ok)
+	}
+	// A rotation that leaves out Wi-Fi, setup or grid is refused.
+	for _, parts := range [][]Part{
+		{PartRecovery},
+		{PartSetup, PartGrid, PartRecovery},
+		{PartWiFi, PartGrid, PartRecovery},
+		{PartWiFi, PartSetup, PartRecovery},
+	} {
+		if _, err := BeginRotate(x.b, parts, Auth{Code: true, Local: true}, Proof{Recovery: nk}, t0); !errors.Is(err, ErrRotationOwed) {
+			t.Fatalf("rotating %v while Wi-Fi, setup and grid are owed: %v", parts, err)
+		}
+	}
+
+	// The finishing rotation covers them all, and its new values take
+	// effect: the Wi-Fi password the owner now holds is the box's.
+	w2 := x.rotateOnDisplay([]Part{PartWiFi, PartSetup, PartGrid, PartRecovery}, Proof{Recovery: nk})
+	must(t, w2.d.ConfirmAnswers(w2.answers(true)))
+	if _, ok := RotationUnfinished(x.b); ok {
+		t.Fatal("marker left after the finishing rotation")
+	}
+	cur, err = x.b.LoadCard()
+	must(t, err)
+	if cur.WiFiPassword != w2.gen.WiFiPassword || cur.SetupSecret != w2.gen.SetupSecret || cur.SetupCode != w2.gen.SetupCode ||
+		!bytes.Equal(cur.GridSeed, w2.gen.GridSeed) {
+		t.Fatal("the finishing rotation's Wi-Fi, setup or grid is not in effect")
+	}
+	if x.opens(nk) || !x.opens(w2.newKey()) {
+		t.Fatal("after finishing, not exactly the newest key opens")
+	}
+}
+
+// The passphrase slot is written, then the recovery-key write fails: the
+// new passphrase and the old recovery key open the drive, the new
+// recovery key does not. Both stay owed, and the owner finishes with the
+// old card's recovery key (#1090 review F3).
+func TestAFailedRecoveryWriteKeepsTheOldRecoveryKey(t *testing.T) {
+	x := newBox(t)
+	w := x.rotateOnDisplay([]Part{PartPassphrase, PartRecovery}, Proof{Recovery: x.rk})
+	nk := w.newKey()
+	failed := errors.New("recovery slot write failed")
+	crashPoint = func(step string) error {
+		if step == "passphrase-slot" {
+			return failed
+		}
+		return nil
+	}
+	t.Cleanup(func() { crashPoint = func(string) error { return nil } })
+	if err := w.d.ConfirmAnswers(w.answers(true)); !errors.Is(err, card.ErrInEffect) || !errors.Is(err, failed) {
+		t.Fatalf("confirm through a failed recovery write: %v", err)
+	}
+	crashPoint = func(string) error { return nil }
+	if w.done == nil || w.done.VaultPassphrase != w.gen.VaultPassphrase || w.done.RecoveryKey != "" {
+		t.Fatal("the parts in effect were not reported")
+	}
+	if _, err := w.d.Page(); !errors.Is(err, card.ErrDisplayGone) {
+		t.Fatalf("display kept after a confirmed partial write: %v", err)
+	}
+	if !x.opens(x.rk) || x.opens(nk) {
+		t.Fatal("after the failed recovery write, the old recovery key does not open or the new one does")
+	}
+	v, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, vault.Passphrase(w.gen.VaultPassphrase))
+	must(t, err)
+	v.Close()
+	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[passphrase recovery refresh]" {
+		t.Fatalf("owed after the failed recovery write: %v %v", parts, ok)
+	}
+	// The new card's recovery key proves nothing; the old one does.
+	if _, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: nk}, t0); err == nil {
+		t.Fatal("a rotation started with the new card's unwritten recovery key")
+	}
+	w2 := x.rotateOnDisplay([]Part{PartPassphrase, PartRecovery}, Proof{Recovery: x.rk})
+	must(t, w2.d.ConfirmAnswers(w2.answers(true)))
+	if _, ok := RotationUnfinished(x.b); ok {
+		t.Fatal("marker left after the finishing rotation")
+	}
+	if x.opens(x.rk) || x.opens(nk) || !x.opens(w2.newKey()) {
+		t.Fatal("after finishing, not exactly the newest key opens")
+	}
 }
 
 // The old display path is gone: Pending no longer makes or holds a card,

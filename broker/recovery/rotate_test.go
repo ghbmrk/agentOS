@@ -198,9 +198,10 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	}
 	// The unfinished rotation is recorded: no backup is sealed to the
 	// key it was replacing until a rotation covering it completes.
-	// What the lost-card rotation owes: both slots, the setup secret and
-	// grid the lost card carries, and the re-encryption.
-	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[passphrase recovery setup grid refresh]" {
+	// What the lost-card rotation owes: every part it rotated (the Wi-Fi
+	// password, setup secret and grid were never stored; #1090 review F3),
+	// and the re-encryption.
+	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[wifi setup passphrase grid recovery refresh]" {
 		t.Fatalf("unfinished rotation not recorded: %v %v", parts, ok)
 	}
 	var buf bytes.Buffer
@@ -209,7 +210,7 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	}
 	// A rotation that leaves out an owed part is refused, so the lost
 	// card's grid and setup secret cannot stay valid (L3 F3 on #64).
-	for _, parts := range [][]Part{{PartWiFi}, {PartPassphrase, PartRecovery}} {
+	for _, parts := range [][]Part{{PartWiFi}, {PartPassphrase, PartRecovery}, {PartPassphrase, PartRecovery, PartSetup, PartGrid}} {
 		if _, err := x.rotate(parts, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}); !errors.Is(err, ErrRotationOwed) {
 			t.Fatalf("rotating %v while parts are owed: %v", parts, err)
 		}
@@ -217,12 +218,12 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	// Nor does Refresh pay what the slots owe.
 	_, err = Refresh(x.b, Auth{Code: true, Local: true}, x.rk, []byte(nc.VaultPassphrase), nil, t0)
 	must(t, err)
-	if parts, _ := RotationUnfinished(x.b); fmt.Sprint(parts) != "[passphrase recovery setup grid]" {
+	if parts, _ := RotationUnfinished(x.b); fmt.Sprint(parts) != "[wifi setup passphrase grid recovery]" {
 		t.Fatalf("after Refresh: %v", parts)
 	}
 	// Finishing it clears the marker, and backups resume under the new key.
 	// The finishing rotation has the card, but shows the lost-card notes.
-	fin, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0)
+	fin, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid, PartWiFi}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0)
 	must(t, err)
 	if !fin.Lost() {
 		t.Fatal("a rotation finishing a lost-card one is not shown as lost")

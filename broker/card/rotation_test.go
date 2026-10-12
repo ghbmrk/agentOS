@@ -315,7 +315,11 @@ func TestRotationInEffectErasesAndNamesTheNextStep(t *testing.T) {
 		}
 		w := do(t, h, method, "/rotate/card", f, true, nil)
 		b := w.Body.String()
+		// Not every part need be in effect (#1090 review F3): the text
+		// keeps both cards and finishes with whichever one works.
 		if w.Code != http.StatusGone || !strings.Contains(b, "already in effect") || !strings.Contains(b, "start a new card") ||
+			!strings.Contains(b, "Keep the new card, and your current one") || !strings.Contains(b, "whichever card works") ||
+			strings.Contains(b, "from now on") ||
 			strings.Contains(b, "confirm again") || strings.Contains(b, "current card stays in effect") ||
 			strings.Contains(b, x.gen.RecoveryKey) {
 			t.Fatalf("%s %v after a partial provision: %d %q", method, f, w.Code, b)
