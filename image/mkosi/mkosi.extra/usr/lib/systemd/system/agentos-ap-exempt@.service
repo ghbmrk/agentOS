@@ -1,8 +1,9 @@
-# The access point's interface joins the inbound exempt set (DEV-net-f; DEV-2, CH-7). The
-# access point's bring-up requires agentos-ap-exempt@<iface>.service and starts after it, so a
-# failed add fails bring-up. It requires the inbound table, so it never runs before the table is
-# loaded, and is bound to the interface: it stops when the interface goes and runs again when a
-# recreated one is brought up. Stopping it removes nothing; the drop is never opened by deletion.
+# The access point's interface is in the inbound exempt set only while the access point runs
+# (DEV-net-f, DEV-net-g; DEV-2, CH-7). The access point's bring-up loads agentos_ap for the
+# interface, then requires agentos-ap-exempt@<iface>.service and starts after it, so a failed add
+# fails bring-up. It requires the inbound table, so it never runs before the table is loaded, and
+# is bound to the interface. Stopping it, when the access point stops or the interface goes, takes
+# the interface out of the set again; removal closes the interface and never opens the drop.
 [Unit]
 Description=Let the access point %I through the inbound firewall
 Documentation=file:/usr/lib/agentos/ap-exempt
@@ -14,4 +15,5 @@ After=agentos-inbound.service sys-subsystem-net-devices-%i.device
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/lib/agentos/ap-exempt %I
+ExecStop=/usr/lib/agentos/ap-exempt --remove %I
 StandardOutput=journal+console

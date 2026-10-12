@@ -329,3 +329,24 @@ func TestInboundImageFileIsTheDefault(t *testing.T) {
 		t.Errorf("%s differs from InboundRules(Inbound{}); regenerate it.\ngot:\n%s\nwant:\n%s", imageRules, got, want)
 	}
 }
+
+// REQ: DEV-2, DEV-net-g
+func TestInboundExemptRemoveIsAnIdempotentDelete(t *testing.T) {
+	got, err := InboundExemptRemove("ap0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The add makes the delete succeed when the element is already gone, in
+	// one transaction, so a second removal is not an error and nothing else
+	// in the set (agent-machine links) is touched.
+	want := "add element inet agentos_inbound exempt { \"ap0\" }\n" +
+		"delete element inet agentos_inbound exempt { \"ap0\" }\n"
+	if got != want {
+		t.Fatalf("got\n%s\nwant\n%s", got, want)
+	}
+	for _, bad := range []string{"", "lo", "wl;x", "wl\"x", "abcdefghijklmnop"} {
+		if s, err := InboundExemptRemove(bad); err == nil {
+			t.Errorf("%q accepted: %q", bad, s)
+		}
+	}
+}

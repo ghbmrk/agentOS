@@ -337,25 +337,37 @@ class HealthTest(unittest.TestCase):
 
 
 class ApExemptTest(unittest.TestCase):
-    """DEV-net-f (DEV-2, CH-7): the access point's interface, and only it, joins the inbound
-    exempt set; any failure fails bring-up and never touches the table otherwise."""
-    # REQ: DEV-2, CH-7, DEV-net-f
+    """DEV-net-f, DEV-net-g (DEV-2, CH-7): the access point's interface, and only it, joins the
+    inbound exempt set, only while agentos_ap holds it, and leaves the set when the access point
+    stops; any failure fails and never touches the table otherwise."""
+    # REQ: DEV-2, CH-7, DEV-net-f, DEV-net-g
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         t = pathlib.Path(self.tmp.name)
         self.bin, self.sys, self.log = t / "bin", t / "sys", t / "nft.log"
         (self.sys / "class/net/wlap0/phy80211").mkdir(parents=True)
+        (self.sys / "class/net/wlan1/phy80211").mkdir(parents=True)
         (self.sys / "class/net/eth0").mkdir(parents=True)
         self.nft()
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def nft(self, fail=""):
-        # Logs each call; FAIL names the verb ("list", "add", "get") that fails.
-        stub(self.bin, "nft", 'echo "$*" >>"%s"; [ "$1" = "%s" ] && { echo "nft: $1 failed" >&2; exit 1; }; '
-                              'exit 0' % (self.log, fail or "none"))
+    def nft(self, fail="", ap="wlap0", members='"lo"'):
+        # Logs each call, and the script of "nft -f -"; FAIL names the call ("list set",
+        # "list chain", "add", "get", "-f") that fails. "list chain" prints agentos_ap's input chain
+        # for AP, as nft prints it (absent when AP is empty); "list set" prints MEMBERS.
+        stub(self.bin, "nft", r"""echo "$*" >>"%(log)s"
+[ "$1" = -f ] && sed 's/^/  /' >>"%(log)s"
+case "$1 $2" in "%(fail)s" | "%(fail)s "*) echo "nft: $1 failed" >&2; exit 1 ;; esac
+case "$1 $2" in
+"list chain") [ -n "%(ap)s" ] || exit 1
+  printf '\t\tiifname "%(ap)s" udp dport { 53, 67 } accept\n\t\tiifname "%(ap)s" drop\n'
+  printf '\t\tiifname != "%(ap)s" tcp dport 80 ip daddr 10.42.0.1 drop\n' ;;
+"list set") echo "elements = { %(members)s }" ;;
+esac
+exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.replace('"', '\\"')))
 
     def run_exempt(self, *args):
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_SYSFS=str(self.sys))
@@ -371,12 +383,13 @@ class ApExemptTest(unittest.TestCase):
         self.assertIn("agentos-ap-exempt: OK wlap0", r.stdout)
         self.assertEqual(self.calls(), [
             "list set inet agentos_inbound exempt",
+            "list chain inet agentos_ap input",
             'add element inet agentos_inbound exempt { "wlap0" }',
             'get element inet agentos_inbound exempt { "wlap0" }',
         ])
 
     def test_failures_fail_bring_up_and_never_open_the_table(self):
-        for verb in ("list", "add", "get"):
+        for verb in ("list set", "list chain", "add", "get"):
             with self.subTest(failing=verb):
                 self.log.unlink(missing_ok=True)
                 self.nft(verb)
@@ -386,13 +399,71 @@ class ApExemptTest(unittest.TestCase):
                 self.assertIn("stays closed", r.stdout)
                 for c in self.calls():
                     self.assertNotRegex(c, r"^(-f|delete|destroy|flush|replace|insert|reset)\b")
-                if verb == "list":
-                    self.assertEqual(len(self.calls()), 1, "added to a table that is not loaded")
+                if verb.startswith("list"):
+                    self.assertFalse([c for c in self.calls() if c.startswith("add")],
+                                     "added with %s failing" % verb)
+
+    def test_only_the_loaders_access_point_is_admitted(self):
+        # DEV-net-g (a), (c), acceptance 4: an interface is added only while agentos_ap ends its
+        # input chain in a drop for that interface, so a second radio the loader did not create
+        # as the access point (wlan1), or the access point before agentos_ap loads, stays dropped.
+        for iface, ap in (("wlan1", "wlap0"), ("wlap0", ""), ("wlap0", "wlap00"), ("wlap0", "wlap")):
+            with self.subTest(iface=iface, agentos_ap=ap):
+                self.log.unlink(missing_ok=True)
+                self.nft(ap=ap)
+                r = self.run_exempt(iface)
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("agentos_ap is not loaded for %s" % iface, r.stdout)
+                self.assertFalse([c for c in self.calls() if c.startswith("add")])
 
     def test_only_a_wireless_interface_is_added(self):
         # The uplink, a tether or a second NIC is not wireless; bad names never reach nft.
-        for args in (("eth0",), ("usb0",), ("",), ("wlap0;x",), ("a" * 16,), ("-f",), ("../wlap0",),
+        for args in (("eth0",), ("usb0",), ("",), ("lo",), ("wlap0;x",), ("a" * 16,), ("-f",), ("../wlap0",),
                      ("wlap0", "eth0"), ()):
+            with self.subTest(args=args):
+                self.log.unlink(missing_ok=True)
+                r = self.run_exempt(*args)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn("agentos-ap-exempt: FAIL", r.stdout)
+                self.assertEqual(self.calls(), [])
+
+    def test_remove_takes_the_interface_out_and_checks_it_is_gone(self):
+        # DEV-net-g (b): one add-then-delete transaction, so a second stop is not an error and no
+        # other element is touched, then a check. The interface need not exist any more (gone).
+        for iface in ("wlap0", "gone0"):
+            with self.subTest(iface=iface):
+                self.log.unlink(missing_ok=True)
+                r = self.run_exempt("--remove", iface)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("agentos-ap-exempt: OK removed %s" % iface, r.stdout)
+                self.assertEqual(self.calls(), [
+                    "list set inet agentos_inbound exempt",
+                    "-f -",
+                    '  add element inet agentos_inbound exempt { "%s" }' % iface,
+                    '  delete element inet agentos_inbound exempt { "%s" }' % iface,
+                    "list set inet agentos_inbound exempt",
+                ])
+
+    def test_a_failed_remove_says_so(self):
+        cases = {"list set": dict(fail="list set"), "-f": dict(fail="-f"),
+                 "still there": dict(members='"lo", "wlap0"')}
+        for name, kw in cases.items():
+            with self.subTest(name):
+                self.log.unlink(missing_ok=True)
+                self.nft(**kw)
+                r = self.run_exempt("--remove", "wlap0")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("agentos-ap-exempt: FAIL", r.stdout)
+                self.assertIn("may still be exempt", r.stdout)
+                for c in self.calls():
+                    self.assertNotRegex(c, r"^ *(destroy|flush|replace|insert|reset|delete (table|chain|set|rule))\b")
+        # A similar name in the set is not the interface.
+        self.nft(members='"lo", "wlap00"')
+        self.assertEqual(self.run_exempt("--remove", "wlap0").returncode, 0)
+
+    def test_remove_refuses_names_that_are_not_an_access_point(self):
+        for args in (("--remove", "lo"), ("--remove", ""), ("--remove", "wl;x"), ("--remove", "-f"),
+                     ("--remove",), ("--remove", "wlap0", "eth0")):
             with self.subTest(args=args):
                 self.log.unlink(missing_ok=True)
                 r = self.run_exempt(*args)
@@ -405,14 +476,15 @@ class ApExemptTest(unittest.TestCase):
         unit, svc = u["Unit"], u["Service"]
         self.assertIn("agentos-inbound.service", unit["Requires"].split())
         self.assertIn("agentos-inbound.service", unit["After"].split())
-        # Bound to the interface: it stops when the interface goes and runs again on the next
-        # bring-up of a recreated one.
+        # Bound to the interface: it stops, and so removes it, when the interface goes, and runs
+        # again on the next bring-up of a recreated one.
         self.assertEqual(unit["BindsTo"], "sys-subsystem-net-devices-%i.device")
         self.assertIn("sys-subsystem-net-devices-%i.device", unit["After"].split())
         self.assertEqual(svc["Type"], "oneshot")
         self.assertEqual(svc["RemainAfterExit"], "yes")
         self.assertEqual(svc["ExecStart"], "/usr/lib/agentos/ap-exempt %I")
-        self.assertNotIn("ExecStop", svc)
+        # DEV-net-g (b): stopping the access point takes its interface out of the set.
+        self.assertEqual(svc["ExecStop"], "/usr/lib/agentos/ap-exempt --remove %I")
         f = MK / "mkosi.extra/usr/lib/agentos/ap-exempt"
         self.assertTrue(f.stat().st_mode & stat.S_IXUSR)
 
