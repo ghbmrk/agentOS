@@ -128,6 +128,56 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 **Requirement IDs.** CRED-4, CRED-5, CRED-7, ADP-10, CH-4, CH-10, ARC-1. **Acceptance.** A synthetic canary secret is readable only in its account's holder (checked by process); a request the holder's shape rejects never gets a login; a canary login and a refreshed canary token never appear in egress memory or traffic; a high-risk act without a checker-verified code is refused; restart re-hands every secret and the mail, SMS, SIP and proxy paths still pass their tests; a canary secret of account B in account A's response and in a journaled record is redacted by egress, and egress memory holds only keyed hashes of it, never the value. **Usage estimate.** Under 140k tokens; split the checker off if the holder split alone exceeds half. Tier A.
 
+## SIM-split-b: the CH-4 checker process (tier A)
+
+**Needs.** SIM-split part 1 (#1053, the holders).
+
+**Change.** A separate `agentos-checker` process holds the CH-4 seed and the spent-step state. Over a verify socket (broker side) it checks the owner's code once and records one-time approvals, each bound to the hash of one exact request (host, method, escaped path, body) and expiring after 15 minutes. Over a redeem socket (holder side) a holder spends that approval before it releases a login for an irreversible or secret-class verb (CH-10); without it the act is refused. Both binaries refuse to run under a uid they serve and set themselves non-dumpable. Fixes #1053's R3 (binary hardening) and R4 (query-string test).
+
+**Known gap (state in the PR).** A generator code is bound to time, not content, so a compromised broker could reuse a fresh code within its window; paper-grid cells do not have this gap.
+
+**Requirement IDs.** CH-4, CH-10, ARC-1, CRED-1, ADP-10. **Acceptance.** A high-risk act without a checker-verified code is refused; an approval covers one exact request once; a spent step survives restart; wrong codes pause the checker. Tier A.
+
+## SIM-split-wire: production wiring for holders and the checker (tier A)
+
+**Needs.** SIM-split-b.
+
+**Change.** The unlock step's custody leaves egress: one Keeper per holder hands each account's secret to its holder, and egress runs with the hash Redaction and the Holders map and no vault (CRED-1). The CH-4 seed and the pending enrol seed move out of custody to the checker and are re-handed after re-enrol; the broker's code check goes to the checker's verify socket, and the unlock step's last-spent step and the checker's are one store. The broker computes each act over the exact bytes egress forwards, and `checker.Act` opens in `broker/core/core.txt` for it. Low-tier and pre-allowed irreversible acts get an explicit path that the journal records.
+
+**Requirement IDs.** CRED-1, CRED-4, CH-4, CH-10, ARC-1. **Acceptance.** On a booted box, egress memory holds no canary secret and no vault key; a high-risk act passes only with a checker-verified code over its exact bytes. **Failure path.** Egress keeps the vault open in production, so one egress bug still reaches every account. Tier A.
+
+## SIM-split-msg: mail, SMS and SIP through holders (tier A)
+
+**Needs.** SIM-split-wire.
+
+**Change.** Mail (`mailaccount.go`), SMS (`smsaccount.go`) and SIP (`sipaccount.go`) stop reading secrets from the vault and hand their requests to the account's holder, which injects the login and opens the upstream connection.
+
+**Requirement IDs.** CRED-1, ADP-10. **Acceptance.** A canary mail, SMS or SIP password never appears in egress memory or traffic; the existing mail, SMS and SIP tests pass. **Failure path.** The per-account SIP password stays in egress, so an egress bug leaks every SIP login. Tier A.
+
+## SIM-split-refresh: refreshed tokens persist through the unlock step (tier A)
+
+**Needs.** SIM-split-wire.
+
+**Change.** When a holder swaps a token-refresh response back to placeholders, the new token goes to the unlock step, which writes it to the vault and re-hands it, so a restart does not fall back to the expired token.
+
+**Requirement IDs.** CRED-5. **Acceptance.** After a refresh and a restart, the holder uses the refreshed canary token, and the token never passes through egress. **Failure path.** A refreshed token lives only in holder memory; after a restart the account fails login until the owner re-enters it. Tier A.
+
+## SIM-split-check: the secret-isolation predicate (tier A)
+
+**Needs.** SIM-split-wire, SIM-check.
+
+**Change.** SIM-check gains the predicate "no secret appears in any process except its account's holder" and runs it in its test, CI and runtime forms.
+
+**Requirement IDs.** CRED-1, ARC-1. **Acceptance.** A fixture that copies a canary secret into egress memory fails the predicate. **Failure path.** A later change re-opens the vault in egress and no test notices. Tier A.
+
+## SIM-split-fix: #1053 review findings (tier A)
+
+**Needs.** SIM-split-wire for item 1.
+
+**Change.** (1) R1, H-4: egress holds the hash key next to the window hashes, so a short mail or SIP secret can be brute-forced from egress memory. Before production wiring, set an entropy floor per value class or record a DECISIONS row accepting the class. (2) R2, H-3: the holder re-applies the op's BodyRule (ADP-10) itself rather than trusting egress, without narrowing what public machines may send. R3 (binary hardening) and R4 (query-string test) are fixed in SIM-split-b. (3) #1057 S1: `checker.Act` names no account, and every holder uid shares one redeem socket, so the act binds the account (credential name) and a holder redeems only acts for its own account. (4) #1057 S2: a test that `checker.Redeemer` reports any status but 204 and 403 as an error, so the holder refuses.
+
+**Requirement IDs.** CRED-1, CRED-7, ADP-10, CH-10. **Acceptance.** A short canary secret has no recoverable hash in egress, or a DECISIONS row names its class; a body carrying `mcp_servers` or `web_search_options` is refused by the holder even when egress forwards it; an approval for account A's act is refused by account B's holder for the same bytes; a redeem answered 500 sends nothing. **Failure path.** A compromised egress sends `mcp_servers` with a real login attached. Tier A.
+
 ## SIM-outer: outer limits held by the provider (L1 spec diff, Mark approves)
 
 **Change to SPEC.** Extend CRED-5 item 3 (narrowest login for worker-held routes) to every broker-held account: (1) OAuth scopes limited to what the enabled loops use, asked on the same consent screen as today; a loop needing a new permission asks once, when the owner turns it on. (2) Provider or card spend limits and provider rate limits set at about 2x the box's own cap (OP-8) and above the broker's per-hour bounds, so the broker's caps trip first in normal use and a provider refusal is itself the alarm: the broker texts that a provider refused what its own cap allowed, and pauses. (3) A provider with no narrow scope or limit is stated once in STATUS.

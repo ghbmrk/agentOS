@@ -9,7 +9,9 @@
 // exchange response in the holder (CRED-5), and redacts its own secret
 // from everything it returns (CRED-7). The unlock step hands it the secret
 // on the hand socket, and hands it again when the holder restarts empty
-// (Keeper). Nothing on either socket ever reads the secret back.
+// (Keeper). Nothing on either socket ever reads the secret back. An
+// irreversible operation is served only once the CH-4 checker approved
+// that exact request (Config.Redeem, package checker).
 package holder
 
 import (
@@ -23,15 +25,16 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/checker"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/sockets"
 	"github.com/ghbmrk/agentos/broker/vault"
+	"github.com/ghbmrk/agentos/broker/verb"
 )
 
 // The holder's two sockets, by file name in its run directory. Each admits
@@ -52,6 +55,7 @@ const (
 	ErrNoSecret    = "no-secret"   // nothing handed yet; nothing sent
 	ErrDenied      = "denied"      // the address policy refused the destination
 	ErrUnreachable = "unreachable" // the provider could not be reached
+	ErrUnapproved  = "unapproved"  // a high-risk act the checker has not approved; nothing sent
 )
 
 // maxSecret caps a handed secret, in bytes.
@@ -71,6 +75,11 @@ type Config struct {
 	Swapper egress.Swapper
 	// MaxBody caps a request body; zero means egress.DefaultMaxBody.
 	MaxBody int64
+	// Redeem spends the CH-4 checker's approval for an act
+	// (checker.Redeemer). An irreversible or secret operation is served
+	// only when it returns true for the exact request; with no Redeem the
+	// holder serves reads only.
+	Redeem func(ctx context.Context, act string) (bool, error)
 }
 
 // Holder keeps one account's login.
@@ -80,6 +89,7 @@ type Holder struct {
 	rtModel http.RoundTripper
 	swapper egress.Swapper
 	maxBody int64
+	redeem  func(ctx context.Context, act string) (bool, error)
 
 	mu     sync.RWMutex
 	secret []byte
@@ -90,7 +100,7 @@ func New(cfg Config) (*Holder, error) {
 	if len(cfg.Adapters) == 0 {
 		return nil, errors.New("holder: no adapter")
 	}
-	h := &Holder{byHost: map[string]egress.Adapter{}, rt: cfg.Transport, swapper: cfg.Swapper, maxBody: cfg.MaxBody}
+	h := &Holder{byHost: map[string]egress.Adapter{}, rt: cfg.Transport, swapper: cfg.Swapper, maxBody: cfg.MaxBody, redeem: cfg.Redeem}
 	cred := cfg.Adapters[0].Credential
 	for _, a := range cfg.Adapters {
 		if err := a.Validate(); err != nil {
@@ -171,7 +181,16 @@ func (h *Holder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op, ok := a.Match(r.Method, r.URL.Path)
-	if !ok || op.Verb != egress.VerbRead || !h.headersDeclared(a, r.Header) {
+	if !ok || !h.headersDeclared(a, r.Header) {
+		refuse(w, http.StatusForbidden, ErrRefused)
+		return
+	}
+	// Reads are served on the declaration alone. A high-risk verb needs
+	// the checker's approval for this exact request, below; anything else
+	// (draft, organize, an unknown verb) is not the holder's to serve.
+	class, known := verb.ClassOf(op.Verb)
+	highRisk := known && (class == verb.Irreversible || class == verb.Secret)
+	if op.Verb != egress.VerbRead && !(highRisk && h.redeem != nil) {
 		refuse(w, http.StatusForbidden, ErrRefused)
 		return
 	}
@@ -184,6 +203,20 @@ func (h *Holder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil || int64(len(body)) > h.maxBody {
 		refuse(w, http.StatusForbidden, ErrRefused)
 		return
+	}
+	// The approval is spent on the act as sent: host, method, the path on
+	// the wire and the body, so a code approves this request and no other
+	// (CH-4, CH-10).
+	if highRisk {
+		approved, err := h.redeem(r.Context(), checker.Act(a.Host, op.Method, r.URL.EscapedPath(), body))
+		if err != nil {
+			refuse(w, http.StatusServiceUnavailable, ErrUnapproved)
+			return
+		}
+		if !approved {
+			refuse(w, http.StatusForbidden, ErrUnapproved)
+			return
+		}
 	}
 
 	ctx := r.Context()
@@ -361,41 +394,7 @@ func (h *Holder) Serve(reqs, hand net.Listener) error {
 
 // Listen opens a unix socket at path that admits only peer uid; every
 // other connection is closed unread. A stale socket file is replaced.
-func Listen(path string, uid int) (net.Listener, error) {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		return nil, err
-	}
-	ln.(*net.UnixListener).SetUnlinkOnClose(true)
-	// The uid check, not the mode, admits the peer; the run directory
-	// keeps the path unlistable.
-	if err := os.Chmod(path, 0o666); err != nil {
-		ln.Close()
-		return nil, err
-	}
-	return peerListener{ln, uid}, nil
-}
-
-type peerListener struct {
-	net.Listener
-	uid int
-}
-
-func (l peerListener) Accept() (net.Conn, error) {
-	for {
-		c, err := l.Listener.Accept()
-		if err != nil {
-			return nil, err
-		}
-		if uid, ok := sockets.PeerUID(c); ok && uid == l.uid {
-			return c, nil
-		}
-		c.Close()
-	}
-}
+func Listen(path string, uid int) (net.Listener, error) { return sockets.ListenPeers(path, uid) }
 
 func unixTransport(socket string) *http.Transport {
 	return &http.Transport{

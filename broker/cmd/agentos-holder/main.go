@@ -3,12 +3,16 @@
 // in a shape the account's adapters declare (package holder).
 //
 //	agentos-holder -dir /run/agentos-holder/openai -credential openai \
-//	    -adapter openai -request-uid 991 -hand-uid 992
+//	    -adapter openai -request-uid 991 -hand-uid 992 \
+//	    -checker /run/agentos-checker/redeem.sock
 //
 // It listens on dir/request.sock for egress (request-uid) and on
 // dir/hand.sock for the unlock step (hand-uid), and starts empty: the
 // unlock step's keeper hands it the login, and hands it again after a
-// restart. Adapters whose operations exchange credentials need a swapper
+// restart. With -checker it also serves the adapters' irreversible
+// operations, each only once the CH-4 checker approved that exact request;
+// without it, reads only. It refuses to run as either peer uid and makes
+// itself non-dumpable. Adapters whose operations exchange credentials need a swapper
 // the holder does not have yet, and are refused.
 package main
 
@@ -25,9 +29,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/checker"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/holder"
 	"github.com/ghbmrk/agentos/broker/netguard"
+	"github.com/ghbmrk/agentos/broker/procguard"
 )
 
 const netWatchEvery = time.Minute
@@ -54,7 +60,7 @@ func (l *list) Set(v string) error { *l = append(*l, v); return nil }
 
 // config is a parsed command line.
 type config struct {
-	dir                 string
+	dir, checker        string
 	adapters            []egress.Adapter
 	requestUID, handUID int
 }
@@ -68,6 +74,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.dir, "dir", "", "run directory for the two sockets")
 	fs.Var(&names, "adapter", "an adapter to serve (repeatable)")
 	fs.IntVar(&c.requestUID, "request-uid", -1, "uid of egress, the only peer on request.sock")
+	fs.StringVar(&c.checker, "checker", "", "the CH-4 checker's redeem socket; without it, reads only")
 	fs.IntVar(&c.handUID, "hand-uid", -1, "uid of the unlock step, the only peer on hand.sock")
 	if err := fs.Parse(args); err != nil {
 		return c, err
@@ -101,11 +108,18 @@ func run(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err := procguard.Isolate(c.requestUID, c.handUID); err != nil {
+		return err
+	}
+	var redeem func(context.Context, string) (bool, error)
+	if c.checker != "" {
+		redeem = checker.Redeemer(c.checker)
+	}
 	guard, err := netGuard(context.Background())
 	if err != nil {
 		return err
 	}
-	h, err := holder.New(holder.Config{Adapters: c.adapters, Guard: guard})
+	h, err := holder.New(holder.Config{Adapters: c.adapters, Guard: guard, Redeem: redeem})
 	if err != nil {
 		return err
 	}
