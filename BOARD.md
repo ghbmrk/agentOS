@@ -174,7 +174,8 @@ The home-network boundary is release work (A14); device features follow the firs
 | DEV-net-e | [Load the inbound rules, owner pin entry, SIP guard hardening](briefs/DEV-net-e.md) | DEV-net-d | in review (release; DEV-2, A14, CAP-13, BAK-1; tier A) |
 | DEV-net-f | [The access point's interface joins the inbound exempt set](briefs/DEV-net-f.md) | DEV-net-e | merged (#1063) |
 | DEV-net-g | [The access point's exempt entry never outlives or precedes its drop table](briefs/DEV-net-g.md) | DEV-net-f | merged (#1075) |
-| DEV-net-h | [The P2-1 loader never leaves a stale access-point exemption](briefs/DEV-net-h.md) | DEV-net-g | building (release; DEV-2, A14; tier A; from #1075 R1; `localui.APLoader` for the P2-1 loader) |
+| DEV-net-h | [The P2-1 loader never leaves a stale access-point exemption](briefs/DEV-net-h.md) | DEV-net-g | merged (#1079, ba6ff8f) |
+| DEV-net-i | The access point loader's start-up cleanup covers every wireless interface, not only the ones it is told about (brief to write) | DEV-net-h | queued (release; DEV-2, A14; tier A; from #1079 R2: `APLoader.Start` runs `BringDown` only for the caller's list, and `BringDown` unloads `agentos_ap` whatever interface it holds, so a loader restarting with a different list after dying with the access point up on `wlan2` leaves `wlan2` exempt with no table and every box port open to its network; fix: `Start` takes its list from the host's `phy80211` interfaces, or the teardown removes every wireless element of `exempt`, or `BringDown` unloads `agentos_ap` only when its drop line names the interface; acceptance: a test that `Start` with a stale exemption on an unnamed radio leaves no interface exempt without `agentos_ap`) |
 
 ## Controller and helper system (D-102)
 
