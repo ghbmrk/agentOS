@@ -659,3 +659,280 @@ func TestUnreadableJournalIsAnErrorNotAnEmptyTail(t *testing.T) {
 		t.Fatal("projection not current once the journal reads again")
 	}
 }
+
+// One shared journal read per Sync and per Boot (PROJ-read): the journal
+// engine decodes the whole store on every RecordsAfter, so a read per view
+// would cost P full decodes for P views.
+//
+// Brief IDs: PROJ-read-1, PROJ-read-2, PROJ-read-3
+
+// countingSource counts RecordsAfter calls and fails the call numbered
+// failAt (1-based; 0 never fails).
+type countingSource struct {
+	Source
+	calls  int
+	failAt int
+}
+
+func (c *countingSource) RecordsAfter(seq uint64) ([]journal.Record, error) {
+	c.calls++
+	if c.calls == c.failAt {
+		return nil, errors.New("read failed")
+	}
+	return c.Source.RecordsAfter(seq)
+}
+
+// seqLog is a test projection that logs every sequence number applied, so
+// a test can see a record applied twice or skipped.
+type seqLog struct {
+	name string
+	Seqs []uint64 `json:"seqs"`
+}
+
+func (s *seqLog) Name() string              { return s.name }
+func (s *seqLog) Apply(r journal.Record)    { s.Seqs = append(s.Seqs, r.Seq) }
+func (s *seqLog) Snapshot() ([]byte, error) { return json.Marshal(s) }
+func (s *seqLog) Restore(data []byte, _ uint64) error {
+	s.Seqs = nil
+	if data == nil {
+		return nil
+	}
+	return json.Unmarshal(data, s)
+}
+
+// contiguous fails the test unless seqs is exactly 1..n.
+func contiguous(t *testing.T, name string, seqs []uint64, n int) {
+	t.Helper()
+	if len(seqs) != n {
+		t.Fatalf("%s applied %d records, want %d: %v", name, len(seqs), n, seqs)
+	}
+	for i, s := range seqs {
+		if s != uint64(i+1) {
+			t.Fatalf("%s applied %v, want 1..%d", name, seqs, n)
+		}
+	}
+}
+
+// PROJ-read-1: one Sync over three views reads the journal once, and each
+// view ends where a replay from empty ends.
+func TestSyncReadsTheJournalOnce(t *testing.T) {
+	e, _, rng := generated(t, 11, 30)
+	ps := []*tally{newTally("a"), newTally("b"), newTally("c")}
+	pr, err := New(&MemStore{}, 4, ps[0], ps[1], ps[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pr.Boot(e); err != nil {
+		t.Fatal(err)
+	}
+	for range 25 {
+		step(e, rng, 30)
+	}
+	src := &countingSource{Source: e}
+	if err := pr.Sync(src); err != nil {
+		t.Fatal(err)
+	}
+	if src.calls != 1 {
+		t.Fatalf("Sync over 3 views made %d journal reads, want 1", src.calls)
+	}
+	for _, p := range ps {
+		if got, want := state(t, p), fromEmpty(t, e, p.name); got != want {
+			t.Fatalf("%s after sync\n%s\nfrom empty\n%s", p.name, got, want)
+		}
+	}
+
+	// No new records: still one read, nothing applied, no error.
+	before := state(t, ps[0])
+	src.calls = 0
+	if err := pr.Sync(src); err != nil {
+		t.Fatal(err)
+	}
+	if src.calls != 1 || state(t, ps[0]) != before {
+		t.Fatalf("idle Sync: %d reads, changed=%v", src.calls, state(t, ps[0]) != before)
+	}
+}
+
+// PROJ-read-1: views at different offsets share one read, and each applies
+// exactly its own tail: no record twice, none skipped.
+func TestSyncAppliesEachViewItsOwnTail(t *testing.T) {
+	e, _, _ := generated(t, 12, 40)
+	recs := after(t, e, 0)
+	n := len(recs)
+	cuts := []int{0, 7, n / 2, n}
+	var logs []*seqLog
+	var ps []Projection
+	for i := range cuts {
+		l := &seqLog{name: fmt.Sprintf("v%d", i)}
+		logs, ps = append(logs, l), append(ps, l)
+	}
+	pr, err := New(&MemStore{}, 1000, ps...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, k := range cuts {
+		if err := pr.apply(pr.views[i], recs[:k]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := &countingSource{Source: e}
+	if err := pr.Sync(src); err != nil {
+		t.Fatal(err)
+	}
+	if src.calls != 1 {
+		t.Fatalf("Sync made %d journal reads, want 1", src.calls)
+	}
+	for _, l := range logs {
+		contiguous(t, l.name, l.Seqs, n)
+	}
+}
+
+// PROJ-read-3: a read error leaves every view at its offset, whatever
+// offset each was at, and the next Sync catches all of them up.
+func TestFailedSharedReadLeavesEveryViewAtItsOffset(t *testing.T) {
+	e, _, _ := generated(t, 13, 30)
+	recs := after(t, e, 0)
+	n := len(recs)
+	a, b := &seqLog{name: "a"}, &seqLog{name: "b"}
+	pr, err := New(&MemStore{}, 1000, a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pr.apply(pr.views[1], recs[:5]); err != nil {
+		t.Fatal(err)
+	}
+	src := &countingSource{Source: e, failAt: 1}
+	if err := pr.Sync(src); err == nil {
+		t.Fatal("Sync on an unreadable journal reported nothing")
+	}
+	if len(a.Seqs) != 0 || len(b.Seqs) != 5 || pr.views[0].offset != 0 || pr.views[1].offset != 5 {
+		t.Fatalf("failed Sync moved a view: a=%v b=%v", a.Seqs, b.Seqs)
+	}
+	if err := pr.Sync(src); err != nil {
+		t.Fatal(err)
+	}
+	contiguous(t, "a", a.Seqs, n)
+	contiguous(t, "b", b.Seqs, n)
+}
+
+// snapshotsAt boots a projector holding only a fresh tally named name
+// against e, so the store keeps its snapshot at e's current head.
+func snapshotsAt(t *testing.T, st Store, e *journal.Engine, name string) {
+	t.Helper()
+	pr, err := New(st, 1, newTally(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pr.Boot(e); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// PROJ-read-2: a boot from a mix of snapshots at different offsets and a
+// view added since the last boot (no snapshot) stays within one read for
+// the fresh views plus one for the snapshotted ones, and every view ends
+// where a replay from empty ends.
+func TestBootWithMixedSnapshotsStaysWithinTheReadBound(t *testing.T) {
+	rng := rand.New(rand.NewSource(14))
+	e := open(t, &journal.MemStore{}, rng)
+	st := &MemStore{}
+	for range 15 {
+		step(e, rng, 40)
+	}
+	snapshotsAt(t, st, e, "a")
+	for range 15 {
+		step(e, rng, 40)
+	}
+	snapshotsAt(t, st, e, "b")
+	for range 10 {
+		step(e, rng, 40)
+	}
+	cases := map[string]struct {
+		names     []string
+		damage    string // snapshot name to corrupt the anchor of, or ""
+		maxReads  int
+		restored  map[string]bool
+		fallbacks map[string]bool
+	}{
+		"all snapshotted":         {names: []string{"a", "b"}, maxReads: 1, restored: map[string]bool{"a": true, "b": true}},
+		"one view added":          {names: []string{"a", "b", "c"}, maxReads: 2, restored: map[string]bool{"a": true, "b": true}},
+		"all fresh":               {names: []string{"c", "d"}, maxReads: 1},
+		"one snapshot mismatched": {names: []string{"a", "b"}, damage: "a", maxReads: 2, restored: map[string]bool{"b": true}, fallbacks: map[string]bool{"a": true}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			cst := &MemStore{files: map[string][]byte{}}
+			for k, v := range st.files {
+				cst.files[k] = append([]byte(nil), v...)
+			}
+			if c.damage != "" {
+				cst.files[c.damage] = reseal(t, cst.files[c.damage], func(h *header) { h.Anchor = "x" })
+			}
+			var ps []*tally
+			var vs []Projection
+			for _, n := range c.names {
+				p := newTally(n)
+				ps, vs = append(ps, p), append(vs, p)
+			}
+			pr, err := New(cst, 1000, vs...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := &countingSource{Source: e}
+			rep, err := pr.Boot(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if src.calls > c.maxReads {
+				t.Fatalf("Boot made %d journal reads, want at most %d", src.calls, c.maxReads)
+			}
+			for i, p := range ps {
+				if got, want := state(t, p), fromEmpty(t, e, p.name); got != want {
+					t.Fatalf("%s after boot\n%s\nfrom empty\n%s", p.name, got, want)
+				}
+				if (rep[i].From > 0) != c.restored[p.name] || (rep[i].Fallback != "") != c.fallbacks[p.name] {
+					t.Fatalf("%s report %+v", p.name, rep[i])
+				}
+			}
+		})
+	}
+}
+
+// PROJ-read-3: when the second Boot read (the replay from empty after a
+// snapshot is refused) fails, Boot returns the error and no report.
+func TestBootFailsWhenTheFallbackReadFails(t *testing.T) {
+	e, _, _ := generated(t, 15, 30)
+	st := &MemStore{}
+	snapshotsAt(t, st, e, "a")
+	snapshotsAt(t, st, e, "b")
+	st.files["a"] = reseal(t, st.files["a"], func(h *header) { h.Anchor = "x" })
+	pr, err := New(st, 1000, newTally("a"), newTally("b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &countingSource{Source: e, failAt: 2}
+	if rep, err := pr.Boot(src); err == nil {
+		t.Fatalf("Boot with a failed fallback read = %+v, nil", rep)
+	}
+}
+
+// An empty journal: Boot and Sync each read it at most once and leave
+// every view empty, with no error and no snapshot.
+func TestEmptyJournalBootAndSync(t *testing.T) {
+	e := open(t, &journal.MemStore{}, rand.New(rand.NewSource(16)))
+	st := &MemStore{}
+	a, b := &seqLog{name: "a"}, &seqLog{name: "b"}
+	pr, err := New(st, 1, a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &countingSource{Source: e}
+	if _, err := pr.Boot(src); err != nil {
+		t.Fatal(err)
+	}
+	if err := pr.Sync(src); err != nil {
+		t.Fatal(err)
+	}
+	if src.calls > 2 || len(a.Seqs)+len(b.Seqs) != 0 || len(st.files) != 0 {
+		t.Fatalf("empty journal: %d reads, a=%v b=%v, %d snapshots", src.calls, a.Seqs, b.Seqs, len(st.files))
+	}
+}
