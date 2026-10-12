@@ -1,0 +1,350 @@
+// Package claim is a preloaded box's claim (HW-10): the seller writes a
+// one-time claim code to the box and prints it on a sticker; the first
+// phone to present it claims the box, the code is then burned, and every
+// later attempt is refused with "already claimed". The code unlocks
+// nothing: no secret exists before the claim (HW-1), and the first-boot
+// path generates the Owner Card only after it (firstboot.ClaimedCard).
+//
+// Wrong codes are counted on disk before the answer goes out; after
+// MaxWrong of them the claim screen locks until the box itself restarts
+// (a new kernel boot), so a daemon restart or a crash never resets it, and
+// each lock halves the tries the next boot allows (ASSUMPTIONS.md K3).
+package claim
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"sync"
+)
+
+// Store persists the claim state (change.FileStore, change.MemStore).
+type Store interface {
+	Load() ([]byte, error)
+	Save([]byte) error
+}
+
+// The claim's refusals. Their text is the claim screen's (CH-21).
+var (
+	ErrAlreadyClaimed = errors.New("claim: I am already claimed")
+	ErrWrongCode      = errors.New("claim: that is not my claim code")
+	ErrLocked         = errors.New("claim: too many wrong codes; restart me to try again")
+	ErrNoCode         = errors.New("claim: I hold no claim code")
+)
+
+// MaxWrong is the wrong codes the first boot allows before the screen locks.
+const MaxWrong = 5
+
+// CodeSymbols is the claim code's length: 16 symbols of 5 bits (80 bits),
+// printed in four groups of four.
+const CodeSymbols = 16
+
+// alphabet is the Owner Card's (broker/card C1): no I, O, 0 or 1.
+const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// Journal events. Fixed strings and counts only: never the typed code.
+const (
+	EventSealed   = "claim: code sealed by the seller flow"
+	EventClaimed  = "claim: box claimed; code burned"
+	EventAgain    = "claim: refused, already claimed"
+	EventWrong    = "claim: wrong code"
+	EventLocked   = "claim: screen locked after wrong codes"
+	EventRefused  = "claim: refused while locked"
+	EventUnlocked = "claim: screen unlocked by a restart"
+)
+
+// state is everything the claim keeps on disk. It holds no secret: the
+// code only as a salted hash, removed at the claim, and the claimant's
+// token only as a hash.
+type state struct {
+	Salt     []byte `json:"salt,omitempty"`
+	Verifier []byte `json:"verifier,omitempty"`
+	Claimed  bool   `json:"claimed"`
+	Owner    []byte `json:"owner,omitempty"`
+	// Wrong counts wrong codes since the screen last unlocked; Total all
+	// of them. Locks counts locks, so each boot after one allows fewer.
+	Wrong int `json:"wrong"`
+	Total int `json:"total"`
+	Locks int `json:"locks"`
+	// LockedBoot is the kernel boot the screen locked in; "" when open.
+	LockedBoot string `json:"locked_boot,omitempty"`
+}
+
+// Config configures Open. Store is required.
+type Config struct {
+	Store Store
+	// BootID names the current kernel boot; KernelBootID when nil. A lock
+	// lifts only when it changes.
+	BootID func() (string, error)
+	// Journal records attempts (fixed strings with counts).
+	Journal func(event string)
+	// Rand makes the claimant's token; crypto/rand.Reader when nil.
+	Rand io.Reader
+}
+
+// Claim is the box's claim state.
+type Claim struct {
+	mu      sync.Mutex
+	st      state
+	store   Store
+	journal func(string)
+	rand    io.Reader
+	boot    string
+	// stuck is set when a wrong count could not be saved: the screen
+	// stays locked for this process (fail closed).
+	stuck bool
+}
+
+// KernelBootID reads Linux's boot_id, which changes on every boot.
+func KernelBootID() (string, error) {
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(string(b))
+	if id == "" {
+		return "", errors.New("claim: empty boot_id")
+	}
+	return id, nil
+}
+
+// NewCode makes a claim code for the seller flow, grouped XXXX-XXXX-XXXX-XXXX.
+func NewCode(r io.Reader) (string, error) {
+	if r == nil {
+		r = rand.Reader
+	}
+	var sb strings.Builder
+	buf := make([]byte, 1)
+	for i := 0; i < CodeSymbols; {
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return "", err
+		}
+		// 256 is a multiple of 32: no bias.
+		if i > 0 && i%4 == 0 {
+			sb.WriteByte('-')
+		}
+		sb.WriteByte(alphabet[buf[0]%32])
+		i++
+	}
+	return sb.String(), nil
+}
+
+// Normalize is the typed code as the box compares it: upper case, without
+// spaces or dashes.
+func Normalize(s string) string {
+	s = strings.ToUpper(s)
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case ' ', '-', '\t':
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// Seal is the seller flow's write: the box keeps the code as a salted
+// hash only. It refuses a box that already holds a claim state.
+func Seal(st Store, code string, r io.Reader, journal func(string)) error {
+	if r == nil {
+		r = rand.Reader
+	}
+	if b, err := st.Load(); err != nil {
+		return err
+	} else if b != nil {
+		return errors.New("claim: I already hold a claim state")
+	}
+	c := Normalize(code)
+	if len(c) != CodeSymbols || strings.Trim(c, alphabet) != "" {
+		return errors.New("claim: not a claim code")
+	}
+	s := state{Salt: make([]byte, 16)}
+	if _, err := io.ReadFull(r, s.Salt); err != nil {
+		return err
+	}
+	s.Verifier = verifier(s.Salt, c)
+	b, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	if err := st.Save(b); err != nil {
+		return err
+	}
+	if journal != nil {
+		journal(EventSealed)
+	}
+	return nil
+}
+
+func verifier(salt []byte, code string) []byte {
+	h := sha256.New()
+	h.Write([]byte("agentos claim v1\x00"))
+	h.Write(salt)
+	h.Write([]byte(code))
+	return h.Sum(nil)
+}
+
+func tokenHash(tok string) []byte {
+	h := sha256.Sum256([]byte("agentos claimant v1\x00" + tok))
+	return h[:]
+}
+
+// Open loads the claim state. ErrNoCode means the box was never sealed
+// (the download path, HW-10, which pairs by the flasher's QR instead). A
+// lock from an earlier boot lifts here.
+func Open(cfg Config) (*Claim, error) {
+	if cfg.Store == nil {
+		return nil, errors.New("claim: no store")
+	}
+	if cfg.BootID == nil {
+		cfg.BootID = KernelBootID
+	}
+	if cfg.Journal == nil {
+		cfg.Journal = func(string) {}
+	}
+	if cfg.Rand == nil {
+		cfg.Rand = rand.Reader
+	}
+	boot, err := cfg.BootID()
+	if err != nil {
+		return nil, fmt.Errorf("claim: boot id: %w", err)
+	}
+	b, err := cfg.Store.Load()
+	if err != nil {
+		return nil, err
+	}
+	if b == nil {
+		return nil, ErrNoCode
+	}
+	c := &Claim{store: cfg.Store, journal: cfg.Journal, rand: cfg.Rand, boot: boot}
+	if err := json.Unmarshal(b, &c.st); err != nil {
+		return nil, fmt.Errorf("claim: state: %w", err)
+	}
+	if !c.st.Claimed && len(c.st.Verifier) != sha256.Size {
+		return nil, errors.New("claim: state holds neither a code nor a claim")
+	}
+	if c.st.LockedBoot != "" && c.st.LockedBoot != boot {
+		c.st.LockedBoot = ""
+		c.st.Wrong = 0
+		if err := c.save(); err != nil {
+			return nil, err
+		}
+		c.journal(EventUnlocked)
+	}
+	return c, nil
+}
+
+func (c *Claim) save() error {
+	b, err := json.Marshal(c.st)
+	if err != nil {
+		return err
+	}
+	return c.store.Save(b)
+}
+
+// allowed is the wrong codes this boot allows: MaxWrong, halved per lock,
+// at least one.
+func (c *Claim) allowed() int {
+	n := MaxWrong
+	for i := 0; i < c.st.Locks && n > 1; i++ {
+		n /= 2
+	}
+	return n
+}
+
+func (c *Claim) lockedLocked() bool { return c.stuck || c.st.LockedBoot != "" }
+
+// Status is what the claim screen shows.
+type Status struct {
+	Claimed bool
+	Locked  bool
+	// TriesLeft is the wrong codes still allowed before the screen locks.
+	TriesLeft int
+}
+
+// Status reports the claim's state.
+func (c *Claim) Status() Status {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := Status{Claimed: c.st.Claimed, Locked: !c.st.Claimed && c.lockedLocked()}
+	if !s.Claimed && !s.Locked {
+		s.TriesLeft = c.allowed() - c.st.Wrong
+	}
+	return s
+}
+
+// Claimed reports whether the box is claimed.
+func (c *Claim) Claimed() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.st.Claimed }
+
+// Try presents a code. The right code on an unclaimed, unlocked box
+// claims it: the code is burned and the returned token names the phone
+// that claimed it (Claimant). The claim is saved before Try returns; if
+// the save fails the box stays unclaimed.
+func (c *Claim) Try(code string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.st.Claimed {
+		c.journal(EventAgain)
+		return "", ErrAlreadyClaimed
+	}
+	if c.lockedLocked() {
+		c.journal(EventRefused)
+		return "", ErrLocked
+	}
+	got := verifier(c.st.Salt, Normalize(code))
+	if subtle.ConstantTimeCompare(got, c.st.Verifier) != 1 {
+		allow := c.allowed()
+		c.st.Wrong++
+		c.st.Total++
+		locked := c.st.Wrong >= allow
+		if locked {
+			c.st.LockedBoot = c.boot
+			c.st.Locks++
+		}
+		// The count is on disk before the answer goes out, so a crash or
+		// a daemon restart never gives tries back.
+		if err := c.save(); err != nil {
+			c.stuck = true
+			c.journal(EventLocked)
+			return "", fmt.Errorf("%w (%v)", ErrLocked, err)
+		}
+		c.journal(fmt.Sprintf("%s (%d of %d, %d in all)", EventWrong, c.st.Wrong, allow, c.st.Total))
+		if locked {
+			c.journal(EventLocked)
+			return "", ErrLocked
+		}
+		return "", ErrWrongCode
+	}
+	tb := make([]byte, 32)
+	if _, err := io.ReadFull(c.rand, tb); err != nil {
+		return "", err
+	}
+	tok := hex.EncodeToString(tb)
+	prev := c.st
+	c.st = state{Claimed: true, Owner: tokenHash(tok), Total: prev.Total, Locks: prev.Locks}
+	if err := c.save(); err != nil {
+		c.st = prev
+		return "", err
+	}
+	c.journal(EventClaimed)
+	return tok, nil
+}
+
+// Claimant reports whether tok is the token of the phone that claimed the
+// box.
+func (c *Claim) Claimant(tok string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.st.Claimed || len(tok) != 64 {
+		return false
+	}
+	return subtle.ConstantTimeCompare(tokenHash(tok), c.st.Owner) == 1
+}

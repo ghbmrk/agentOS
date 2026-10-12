@@ -185,7 +185,7 @@ Queued by the coordinator after #1054 (D-102) merged; each row is a release find
 | CTRL-card-wire | [Wire the Owner Card into the localui setup page and first boot; the finish path calls Hold()](briefs/CTRL-card-f.md) | CTRL-card | queued (release; HW-1, ONB-7, A1 test 2; tier A; from #1060) |
 | CTRL-card-rot | [Recovery-key rotation shows its key on card.Display: the same confirm-then-erase](briefs/CTRL-card-f.md) | CTRL-card | queued (release; REC-4, HW-1; tier A; from #1060) |
 | IMG-nodump | [Image: no core dumps, swap off or encrypted, so the passphrase string never reaches disk (S1)](briefs/CTRL-card-f.md) | CTRL-card | queued (release; HW-1 test 1, A1; tier A; from #1060 S1) |
-| CTRL-claim | [Claim flow for a preloaded box: a one-time sticker code, one claim, no secret before it](briefs/CTRL-claim.md) | CTRL-card | queued (release; HW-10, A1; tier A) |
+| CTRL-claim | [Claim flow for a preloaded box: a one-time sticker code, one claim, no secret before it](briefs/CTRL-claim.md) | CTRL-card | building (release; HW-10, A1; tier A) |
 | CTRL-uki | [Preloaded self-check rooted in signed code, so a seller's modified initrd cannot pass its own check](briefs/CTRL-uki.md) | CTRL-claim, P2-1 | queued (release; HW-10, HW-5a, A1; tier A; SPEC risk 26 wording fixed by CTRL-text) |
 | FLASH-1 | [Signed flasher for Windows, Mac and Linux: verify the signature, write the stick, show the pairing QR](briefs/FLASH-1.md) | CTRL-claim | queued (release; HW-10, A1; tier A) |
 | ROUTE-1 | [Broker label routing: private content to the controller and workstations only, helper apps cleared only](briefs/ROUTE-1.md) | — | queued (release; REV-6, REV-5; tier A) |
