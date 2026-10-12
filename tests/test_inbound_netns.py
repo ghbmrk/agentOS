@@ -7,11 +7,16 @@
 # the router's global source passes). Needs root, ip and nft; skipped otherwise. CI runs it under
 # sudo in the checks job. Addresses are documentation ranges (RFC 5737, RFC 3849).
 # REQ: DEV-2, DEV-net-e
+#
+# AccessPointThroughTheDrop adds the access point (DEV-net-f): a third namespace plays the owner's
+# phone on ap0, the box's access-point link, which agentos-ap-exempt puts in the inbound exempt set.
+# REQ: CH-7, DEV-net-f
 import ipaddress
 import os
 import pathlib
 import shutil
 import subprocess
+import tempfile
 import time
 import unittest
 
@@ -166,6 +171,123 @@ class InboundOnAHomeNetwork(unittest.TestCase):
         # Reaching the router's global address needs its neighbour advertisement, which it sends
         # from that global address.
         self.assertTrue(reaches(BOX, ROUTER6), "box cannot reach the router over IPv6")
+
+AP_EXEMPT = ROOT / "image/mkosi/mkosi.extra/usr/lib/agentos/ap-exempt"
+PHONE = "agentos-t-phone"
+
+
+@unittest.skipUnless(os.geteuid() == 0 and shutil.which("ip") and shutil.which("nft"),
+                     "needs root, ip and nft")
+class AccessPointThroughTheDrop(unittest.TestCase):
+    """The box's own Wi-Fi joins the exempt set; the uplink and an unnamed link stay dropped."""
+
+    def setUp(self):
+        self.procs = []
+        self.addCleanup(self.cleanup)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        # A stand-in /sys: only ap0 is a wireless interface (the veth links are not).
+        self.sysfs = pathlib.Path(tmp.name)
+        (self.sysfs / "class/net/ap0/phy80211").mkdir(parents=True)
+        for ns in (BOX, HOME, PHONE):
+            sh("ip", "netns", "add", ns)
+            sh("ip", "link", "set", "lo", "up", ns=ns)
+        for box, peer_ns, peer, v4 in (("eth0", HOME, "h0", "192.0.2"), ("usb0", HOME, "h1", "198.51.100")):
+            self.link(box, peer_ns, peer, v4)
+        self.link("ap0", PHONE, "p0", "203.0.113")
+        self.listen(BOX)
+
+    def link(self, box, peer_ns, peer, v4):
+        sh("ip", "link", "add", box, "netns", BOX, "type", "veth", "peer", "name", peer, "netns", peer_ns)
+        for ns, dev, host in ((BOX, box, 1), (peer_ns, peer, 2)):
+            sh("ip", "addr", "add", "%s.%d/24" % (v4, host), "dev", dev, ns=ns)
+            sh("ip", "link", "set", dev, "up", ns=ns)
+
+    def listen(self, ns):
+        p = subprocess.Popen(["ip", "netns", "exec", ns, "python3", "-c", LISTEN, "4"])
+        self.procs.append(p)
+        for _ in range(50):
+            if sh("ss", "-Htln", "sport = :%d" % PORT, ns=ns, check=False).stdout.strip():
+                return
+            time.sleep(0.1)
+        self.fail("listener in %s did not start" % ns)
+
+    def cleanup(self):
+        for p in self.procs:
+            p.kill()
+            p.wait()
+        for ns in (BOX, HOME, PHONE):
+            sh("ip", "netns", "del", ns, check=False)
+
+    def load(self):
+        r = sh("nft", "-f", str(RULES), ns=BOX, check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def exempt(self, iface):
+        env = dict(os.environ, AGENTOS_SYSFS=str(self.sysfs))
+        return subprocess.run(["ip", "netns", "exec", BOX, "sh", str(AP_EXEMPT), iface], env=env,
+                              capture_output=True, text=True)
+
+    def exempt_set(self):
+        return sh("nft", "list", "set", "inet", "agentos_inbound", "exempt", ns=BOX).stdout
+
+    def assert_home_shut_out(self):
+        # A14: no home-network host opens a connection to a box port, on the uplink or an unnamed link.
+        for addr in ("192.0.2.1", "198.51.100.1"):
+            with self.subTest(home_to=addr):
+                self.assertFalse(reaches(HOME, addr), "a home host reached box port %d at %s" % (PORT, addr))
+
+    def test_the_phone_reaches_the_box_only_on_the_access_point(self):
+        self.assertTrue(reaches(PHONE, "203.0.113.1"), "control: phone cannot reach the box before the rules")
+        self.load()
+        # Before bring-up adds it, the drop is final: the phone joins but the page never loads.
+        self.assertFalse(reaches(PHONE, "203.0.113.1"))
+        r = self.exempt("ap0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("agentos-ap-exempt: OK ap0", r.stdout)
+        self.assertTrue(reaches(PHONE, "203.0.113.1"), "the phone on the access point cannot reach the box")
+        self.assert_home_shut_out()
+        self.assertIn('"ap0"', self.exempt_set())
+        for other in ("eth0", "usb0"):
+            self.assertNotIn('"%s"' % other, self.exempt_set())
+        # The same phone, on the same link, under a name that is not the access point's: dropped.
+        sh("ip", "link", "set", "ap0", "down", ns=BOX)
+        sh("ip", "link", "set", "ap0", "name", "wl9", ns=BOX)
+        sh("ip", "link", "set", "wl9", "up", ns=BOX)
+        self.assertFalse(reaches(PHONE, "203.0.113.1"), "a non-exempt interface admitted the phone")
+
+    def test_a_recreated_access_point_is_let_through_again(self):
+        self.load()
+        self.assertEqual(self.exempt("ap0").returncode, 0)
+        self.assertTrue(reaches(PHONE, "203.0.113.1"))
+        sh("ip", "link", "del", "ap0", ns=BOX)
+        self.link("ap0", PHONE, "p0", "203.0.113")
+        # Bring-up runs again for the new interface; adding a member twice is not an error.
+        r = self.exempt("ap0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(reaches(PHONE, "203.0.113.1"), "the recreated access point is not let through")
+        self.assertEqual(self.exempt_set().count('"ap0"'), 1)
+        self.assert_home_shut_out()
+
+    def test_bring_up_fails_closed(self):
+        # No table: bring-up fails and creates nothing (it never loads or opens rules itself).
+        r = self.exempt("ap0")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("agentos-ap-exempt: FAIL", r.stdout)
+        self.assertEqual(sh("nft", "list", "ruleset", ns=BOX).stdout.strip(), "")
+        # With the table: the uplink and an unnamed link are not wireless, so they are refused,
+        # and the table is left exactly as it was.
+        self.load()
+        before = sh("nft", "list", "ruleset", ns=BOX).stdout
+        for iface in ("eth0", "usb0", "lo0", "ap0;x", ""):
+            with self.subTest(iface=iface):
+                r = self.exempt(iface)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn("agentos-ap-exempt: FAIL", r.stdout)
+        self.assertEqual(sh("nft", "list", "ruleset", ns=BOX).stdout, before)
+        self.assert_home_shut_out()
+        self.assertFalse(reaches(PHONE, "203.0.113.1"))
+
 
 if __name__ == "__main__":
     unittest.main()
