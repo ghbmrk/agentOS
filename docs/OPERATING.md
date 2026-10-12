@@ -159,7 +159,7 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 
 **Package records.**
 
-- **Brief** (`briefs/<ID>.md`): what the builder reads. Goal, requirement IDs, declared file scope, dependencies, the usage estimate, and anything the coordinator learned that the builder needs, including the "Recurring kinds" each lens README lists for the touched area, as acceptance criteria. 20k tokens or less. The BOARD row links it and stays one line.
+- **Brief** (`briefs/<ID>.md`): what the builder reads. Goal, requirement IDs, declared file scope, dependencies, the usage estimate, and anything the coordinator learned that the builder needs, including the "Recurring kinds" each lens README lists for the touched area, as acceptance criteria. A brief for code that runs across a lifecycle (first boot, restart, update, recovery, removal) states up front the outcomes at each stage and a test matrix of stage by outcome, and names one integration owner: the one package that wires the pieces into the running path and owns that matrix. Pieces split across packages without that owner each pass alone and fail together (the DEV-net-f, g, h, i chain, waste review 2026-10-12). 20k tokens or less. The BOARD row links it and stays one line.
 - **Assumptions** (`<package>/ASSUMPTIONS.md`): what the package's code rests on, one table row each: `# | Assumption | Spec basis | If it changes`. The builder writes it; reviewers check the code against it. When an assumption is settled, it becomes a SPEC.md change or a DECISIONS row and its line is struck through with the pointer. Keep it under about 3k words; past that, the package is probably two.
 
 ## 6. Weekly measures

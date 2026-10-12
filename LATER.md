@@ -21,7 +21,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | S2 | A1, A3 | Modem SMS and voice; waits on Mark's modems |
 | P2-4-hw | A8 | Real-TPM trusted-host run; risk 14 |
 | OP9-status | A11 (OP-9) | STATUS names every capability that is off or can't run; briefs/OP9-status.md, split into -a and -b |
-| DIG-1 | A3 (CH-15), OP-9 | Daily digest sender reading every `Digest()` source; nothing sends a digest today; brief to be written |
 | P3-4b-4 | LOOP-7 (D-067) | Continuous canary rounds, published corpora, scripted tamper and exhaustion probes; same basis as P3-4b-3 |
 | UPD-b | A1, A14 (UPD-3) | Update before accounts connect |
 | CH-20w | A15 (CH-20) | Evidence delivery through the vault-held mail adapter |
