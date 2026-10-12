@@ -178,3 +178,38 @@ func TestNewRequiresAHolderForEveryAdapterWithoutTheVault(t *testing.T) {
 		t.Fatal("vault beside holders accepted")
 	}
 }
+
+// The proxy tells a holder the calling machine's label, so the holder can
+// hold the body to the same rule (ADP-10). Only "public" is said; a guest's
+// own claim never reaches the holder, and a private machine's request
+// carries no label.
+func TestProxyTellsTheHolderTheLabel(t *testing.T) {
+	fh := &fakeHolder{reply: holderReply(200, http.Header{"Content-Type": {"application/json"}}, `{}`)}
+	labels := map[string]string{"pub": LabelPublic, "priv": "private"}
+	p, err := New(Config{
+		Adapters:  []Adapter{OpenAI("openai-key")},
+		Grants:    map[string][]string{"pub": {"openai"}, "priv": {"openai"}},
+		Label:     func(m string) string { return labels[m] },
+		Redaction: hashed(t, synthetic(t, "sk-canary-")),
+		Holders:   map[string]http.RoundTripper{"openai-key": fh},
+		Audit:     &auditLog{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []string{"pub", "priv"} {
+		r := chat("/openai/v1/chat/completions")
+		r.Header.Set(LabelHeader, LabelPublic)
+		w := httptest.NewRecorder()
+		p.Handler(m).ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("%s: %d %s", m, w.Code, w.Body)
+		}
+	}
+	if got := fh.seen[0].Header.Values(LabelHeader); len(got) != 1 || got[0] != LabelPublic {
+		t.Fatalf("public machine's label: %q", got)
+	}
+	if got := fh.seen[1].Header.Values(LabelHeader); len(got) != 0 {
+		t.Fatalf("private machine's request carried a label: %q", got)
+	}
+}
