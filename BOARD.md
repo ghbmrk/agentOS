@@ -175,7 +175,7 @@ The home-network boundary is release work (A14); device features follow the firs
 | DEV-net-f | [The access point's interface joins the inbound exempt set](briefs/DEV-net-f.md) | DEV-net-e | merged (#1063) |
 | DEV-net-g | [The access point's exempt entry never outlives or precedes its drop table](briefs/DEV-net-g.md) | DEV-net-f | merged (#1075) |
 | DEV-net-h | [The P2-1 loader never leaves a stale access-point exemption](briefs/DEV-net-h.md) | DEV-net-g | merged (#1079, ba6ff8f) |
-| DEV-net-i | [The access point loader's start-up cleanup covers every wireless interface](briefs/DEV-net-i.md) | DEV-net-h | building (pkg/dev-net-i-bge325; release; DEV-2, A14; tier A; from #1079 R2) |
+| DEV-net-i | [The access point loader's start-up cleanup covers every wireless interface](briefs/DEV-net-i.md) | DEV-net-h | merged (#1082, a6726dd) |
 
 ## Controller and helper system (D-102)
 
