@@ -73,6 +73,35 @@ func NewCardStep(st Store, cfg card.DisplayConfig) (*CardStep, error) {
 	return s, nil
 }
 
+// ResetUnlatched runs reset unless st's latch says the card was
+// confirmed. A start runs it before NewCardStep (or NewClaimedCard): a
+// restart between provisioning and the latch left a vault made from a
+// card nobody confirmed, and the new card this start shows must not meet
+// it (ASSUMPTIONS.md F10). A latch it cannot read stops the start and
+// resets nothing.
+func ResetUnlatched(st Store, reset func() error) error {
+	if st == nil || reset == nil {
+		return errors.New("firstboot: incomplete card reset config")
+	}
+	b, err := st.Load()
+	if err != nil {
+		return err
+	}
+	var cs cardState
+	if b != nil {
+		if err := json.Unmarshal(b, &cs); err != nil {
+			return fmt.Errorf("firstboot: card state: %w", err)
+		}
+	}
+	if cs.Confirmed {
+		return nil
+	}
+	if err := reset(); err != nil {
+		return fmt.Errorf("firstboot: resetting an unconfirmed card's vault: %w", err)
+	}
+	return nil
+}
+
 // Display is the card's display for the local page: nil when the card was
 // confirmed on an earlier start.
 func (s *CardStep) Display() *card.Display { return s.d }

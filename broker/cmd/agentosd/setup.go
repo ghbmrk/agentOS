@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -26,7 +29,29 @@ type setupMode struct {
 	OwnerState string // the owner channel's state file
 	Enroll     localsrv.Enroller
 	Progress   func() localapi.SetupProgress
+
+	// The first-boot Owner Card step (HW-1): setup does not finish until
+	// the owner has confirmed the card. Card makes the vault from it;
+	// CardStore keeps the step's latch; CardDisplay configures the card
+	// (its Provision is Card's); Show hands the step to the setup page.
+	Card        cardProvisioner
+	CardStore   firstboot.Store
+	CardDisplay card.DisplayConfig
+	Show        func(*firstboot.CardStep)
 }
+
+// cardProvisioner makes what the box keeps of the Owner Card (vault slots
+// and stored values, recovery.Provision). Provision accepts a retry with
+// the same card; Reset removes what a provision left from a card whose
+// confirm never latched (firstboot ASSUMPTIONS F10).
+type cardProvisioner interface {
+	Provision(*card.Card) error
+	Reset() error
+}
+
+// errCardPending is setup finish's refusal while the Owner Card is
+// unconfirmed.
+const errCardPending = "card pending"
 
 // errOwnedWithoutRecord: the owner channel has state but setup's record is
 // missing; setup stays closed rather than letting the page pick an owner.
@@ -51,9 +76,21 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	if m.Enroll == nil {
 		return "", errors.New("setup: no -owner and no -owner-verify: the code generator cannot be enrolled")
 	}
+	step, err := m.cardStep()
+	if err != nil {
+		return "", err
+	}
 	finished := make(chan string, 1)
 	s := localsrv.NewSetup(localsrv.SetupConfig{Record: m.Record, Enroll: m.Enroll, Progress: m.Progress,
 		Finished: func(owner string) { finished <- owner }})
+	ops := s.Ops()
+	finish := ops[localapi.OpSetupFinish]
+	ops[localapi.OpSetupFinish] = func(ctx context.Context, p sockets.Peer, args json.RawMessage) (any, error) {
+		if step.Hold() != nil {
+			return nil, sockets.Code(errCardPending)
+		}
+		return finish(ctx, p, args)
+	}
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()
 	srv := &sockets.Server{Dir: m.Dir}
@@ -65,7 +102,7 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		PeerGID:     m.Page.GID,
 		MaxConns:    8,
 		IdleTimeout: 30 * time.Second,
-		Ops:         s.Ops(),
+		Ops:         ops,
 	}); err != nil {
 		return "", err
 	}
@@ -78,6 +115,26 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	stop()
 	srv.Wait()
 	return owner, err
+}
+
+// cardStep starts the Owner Card step on a box with no owner. A vault a
+// start made from a card whose confirm never latched is removed first, so
+// the new card this start shows never meets it.
+func (m setupMode) cardStep() (*firstboot.CardStep, error) {
+	if m.Card == nil || m.CardStore == nil || m.Show == nil {
+		return nil, errors.New("setup: no Owner Card provisioner: setup cannot finish without the owner's card")
+	}
+	if err := firstboot.ResetUnlatched(m.CardStore, m.Card.Reset); err != nil {
+		return nil, err
+	}
+	cfg := m.CardDisplay
+	cfg.Provision = m.Card.Provision
+	step, err := firstboot.NewCardStep(m.CardStore, cfg)
+	if err != nil {
+		return nil, err
+	}
+	m.Show(step)
+	return step, nil
 }
 
 // enroller is the vault process's enrollment (egress K17) as setup sees
