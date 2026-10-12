@@ -172,6 +172,7 @@ The home-network boundary is release work (A14); device features follow the firs
 | DEV-net-c | [Wire the egress process to the address guard](briefs/DEV-net-c.md) | DEV-net-a | merged (#1051) |
 | DEV-net-d | [Inbound rules, owner pins, event refresh, SIP dialer](briefs/DEV-net-d.md) | DEV-net-b, DEV-net-c | merged (#1052) |
 | DEV-net-e | [Load the inbound rules, owner pin entry, SIP guard hardening](briefs/DEV-net-e.md) | DEV-net-d | in review (release; DEV-2, A14, CAP-13, BAK-1; tier A) |
+| DEV-net-f | [The access point's interface joins the inbound exempt set](briefs/DEV-net-f.md) | DEV-net-e | queued (release; DEV-2, CH-7, A1; tier A; from #1055 R1) |
 
 ## Controller and helper system (D-102)
 
