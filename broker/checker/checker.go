@@ -72,12 +72,15 @@ type PausedError struct{ Until time.Time }
 
 func (e *PausedError) Error() string { return "checker: too many wrong codes; checks are paused" }
 
-// Act names one request a holder sends upstream: the digest of its host,
+// Act names one request a holder sends upstream: the digest of the account
+// whose login sends it (its credential name), and the request's host,
 // method, path and body, each length-prefixed so no split of one field
-// into the next gives the same act.
-func Act(host, method, path string, body []byte) string {
+// into the next gives the same act. Every holder shares one redeem socket,
+// so the account is what keeps one account's approval from being spent by
+// another's holder for the same bytes.
+func Act(account, host, method, path string, body []byte) string {
 	h := sha256.New()
-	for _, f := range [][]byte{[]byte(host), []byte(method), []byte(path), body} {
+	for _, f := range [][]byte{[]byte(account), []byte(host), []byte(method), []byte(path), body} {
 		var n [8]byte
 		binary.BigEndian.PutUint64(n[:], uint64(len(f)))
 		h.Write(n[:])
@@ -389,7 +392,8 @@ func unixClient(socket string) *http.Client {
 }
 
 // Redeemer returns a key holder's client for the redeem socket: true means
-// the act's approval was spent for this request.
+// the act's approval was spent for this request. Only 204 is a yes and
+// only 403 a no; any other answer is an error, which the holder refuses.
 func Redeemer(socket string) func(ctx context.Context, act string) (bool, error) {
 	hc := unixClient(socket)
 	return func(ctx context.Context, act string) (bool, error) {

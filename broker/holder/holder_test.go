@@ -34,14 +34,21 @@ func canary(t *testing.T, prefix string) string {
 
 // upstream stands in for the provider: it records what the holder sent.
 type upstream struct {
-	mu    sync.Mutex
-	seen  []*http.Request
-	reply func(r *http.Request) (*http.Response, error)
+	mu     sync.Mutex
+	seen   []*http.Request
+	bodies []string
+	reply  func(r *http.Request) (*http.Response, error)
 }
 
 func (u *upstream) RoundTrip(r *http.Request) (*http.Response, error) {
+	var body []byte
+	if r.Body != nil {
+		body, _ = io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
 	u.mu.Lock()
 	u.seen = append(u.seen, r)
+	u.bodies = append(u.bodies, string(body))
 	u.mu.Unlock()
 	return u.reply(r)
 }
