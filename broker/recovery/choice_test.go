@@ -176,9 +176,9 @@ func TestOlderBackupsDoNotCountAfterTheRecoveryKeyChanges(t *testing.T) {
 	if n, _ := OnlyCopyNotice(x.b); n != "" {
 		t.Fatalf("notice: %q", n)
 	}
-	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Recovery: x.rk}, Proof{}, testGen, nil, t0)
+	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Recovery: x.rk}, Proof{}, t0)
 	must(t, err)
-	_, err = p.Commit(x.b, p.answer, t0)
+	_, err = p.Commit(x.b, newParts(p), t0)
 	must(t, err)
 	if n, _ := OnlyCopyNotice(x.b); n != NoticeOldCard {
 		t.Fatalf("notice after the key change: %q", n)
@@ -197,9 +197,9 @@ func TestABackupSealedToTheOldKeyNeverCountsWhateverItsTime(t *testing.T) {
 	var buf bytes.Buffer
 	rc, err := BackupSum(x.b, x.roots(), &buf, t0.Add(24*time.Hour)) // clock ahead
 	must(t, err)
-	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Recovery: x.rk}, Proof{}, testGen, nil, t0)
+	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Recovery: x.rk}, Proof{}, t0)
 	must(t, err)
-	_, err = p.Commit(x.b, p.answer, t0)
+	_, err = p.Commit(x.b, newParts(p), t0)
 	must(t, err)
 	e, err := RecordBackup(x.b, "USB stick A", rc, bytes.NewReader(buf.Bytes()))
 	must(t, err)

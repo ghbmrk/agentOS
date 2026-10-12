@@ -133,31 +133,47 @@ func storeCard(b *Box, c Card) error {
 // confirm they saved it.
 const PendingTTL = 30 * time.Minute
 
-// Pending is a rotation generated but not yet in effect (REC-4). The local
-// page shows Card() with a "Save card" download and asks for Prompt; the
-// rotation takes effect only when the owner types that value back from
-// the saved card (Commit), so the drive never runs on a card the owner
-// does not hold. It lapses after PendingTTL or three wrong answers.
+// Pending is a rotation authorized but not yet in effect (REC-4). It
+// holds no card: the new values are generated, shown and confirmed by a
+// card.Display in rotation mode (confirm-then-erase, HW-1), whose
+// Provision step passes them to Commit, so the drive never runs on a
+// card the owner has not typed back from. A cancelled display calls
+// Cancel. It lapses after PendingTTL.
 type Pending struct {
-	// Prompt says which value of the new card to type back.
-	Prompt string
-
-	mu      sync.Mutex
-	parts   map[Part]bool
-	next    Card
-	proof   Proof
-	answer  string
-	expires time.Time
-	wrong   int
-	done    bool
+	mu       sync.Mutex
+	parts    map[Part]bool
+	wifiName string
+	proof    Proof
+	expires  time.Time
+	done     bool
 	// lostMark: an unfinished lost-card rotation this one finishes.
 	lostMark bool
 }
 
-// Card is the new card to save and print. Secrets not being rotated are
-// blank: the vault does not hold the passphrase or recovery key, and the
-// owner keeps those parts of the old card.
-func (p *Pending) Card() Card { return p.next }
+// Parts is what the rotation replaces, in AllParts order, for the
+// display's rotation parts.
+func (p *Pending) Parts() []Part {
+	var out []Part
+	for _, q := range AllParts {
+		if p.parts[q] {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// WiFiName is the box's access point name, which a rotation keeps and
+// the display prints beside a new Wi-Fi password. It is not secret.
+func (p *Pending) WiFiName() string { return p.wifiName }
+
+// Cancel ends a rotation the owner did not confirm: nothing changed, and
+// the typed passphrase is wiped. Commit afterwards is ErrPendingLapsed.
+func (p *Pending) Cancel() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.done = true
+	p.lapse()
+}
 
 // ErrLostCardParts is a lost-card rotation that keeps a factor or the
 // setup secret the lost card carries, or the grid, whose seed an earlier
@@ -181,16 +197,19 @@ const LostCardWiFiNote = "Whoever finds your card could join my Wi-Fi. Your devi
 // rewraps that slot, so it must be proved too.
 var ErrNeedPassphrase = errors.New("recovery: replacing the recovery key also needs the vault passphrase from the card")
 
-// ErrPendingLapsed is a rotation that expired, was used, or was answered
-// wrong three times. Nothing changed; start again.
+// ErrPendingLapsed is a rotation that expired, was used, or was
+// cancelled. Nothing changed; start again.
 var ErrPendingLapsed = errors.New("recovery: this new card has lapsed; nothing changed, start again")
 
-// ErrConfirm is a typed-back value that does not match the new card.
-var ErrConfirm = errors.New("recovery: that does not match the new card; check the saved copy")
+// ErrNextCard is a new card for Commit that does not carry exactly the
+// rotated parts. Nothing changed, and the rotation stays pending.
+var ErrNextCard = errors.New("recovery: the new card does not match the parts being replaced")
 
 // ErrCardNotStored is returned with the parts of a rotated card that are
-// already in effect when a later step failed: the caller must still show
-// that card, or the owner loses the new values.
+// already in effect when a later step failed. The owner confirmed that
+// card from their copy before Commit ran, so they keep it, and the old
+// card too: parts not yet written are still the old card's. The rotation
+// is used up, and the next one must replace every part it rotated.
 var ErrCardNotStored = errors.New("recovery: part of the new card is in effect but was not saved; print it now")
 
 // Proof is what opens the drive now, for rewriting its slots: the current
@@ -221,12 +240,13 @@ func (p Proof) factor() vault.Factor {
 // lost reports a proof without the current card.
 func (p Proof) lost() bool { return !p.Recovery.Valid() && len(p.Passphrase) == 0 && p.Host != nil }
 
-// BeginRotate generates replacements for the chosen card secrets (REC-4).
+// BeginRotate authorizes replacing the chosen card secrets (REC-4); the
+// new values come from the rotation display (Commit).
 // It is a tier-4 action (CH-3). Rewriting the passphrase or recovery slot
 // needs proof that opens the drive now; when the card is lost (proved by
 // the host), both the passphrase and the recovery key must be among the
 // parts. An empty proof takes the recovery key in auth.
-func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, gen Generator, r io.Reader, now time.Time) (*Pending, error) {
+func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, now time.Time) (*Pending, error) {
 	if err := auth.check(b); err != nil {
 		return nil, err
 	}
@@ -288,51 +308,39 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, gen Generator, r 
 	if err != nil {
 		return nil, err
 	}
-	fresh, err := gen(r)
-	if err != nil {
-		return nil, err
-	}
-	next := Card{WiFiName: cur.WiFiName}
-	if set[PartWiFi] {
-		next.WiFiPassword = fresh.WiFiPassword
-	}
-	if set[PartSetup] {
-		next.SetupSecret, next.SetupCode = fresh.SetupSecret, fresh.SetupCode
-	}
-	if set[PartPassphrase] {
-		next.VaultPassphrase = fresh.VaultPassphrase
-	}
-	if set[PartGrid] {
-		next.GridSeed = append([]byte(nil), fresh.GridSeed...)
-	}
-	if set[PartRecovery] {
-		if _, err := ParseRecoveryKey(fresh.RecoveryKey); err != nil {
-			return nil, err
-		}
-		next.RecoveryKey = fresh.RecoveryKey
-	}
 	// Pending keeps its own copy of a typed passphrase, wiped when done.
 	proof.Passphrase = append([]byte(nil), proof.Passphrase...)
-	p := &Pending{parts: set, next: next, proof: proof, expires: now.Add(PendingTTL), lostMark: lostMark}
-	switch {
-	case set[PartRecovery]:
-		p.Prompt = "Type the last group of the new recovery key."
-		p.answer = next.RecoveryKey[strings.LastIndexByte(next.RecoveryKey, '-')+1:]
-	case set[PartPassphrase]:
-		p.Prompt = "Type the last word of the new vault passphrase."
-		p.answer = next.VaultPassphrase[strings.LastIndexByte(next.VaultPassphrase, ' ')+1:]
-	case set[PartWiFi]:
-		p.Prompt = "Type the last four characters of the new Wi-Fi password."
-		w := strings.ReplaceAll(next.WiFiPassword, "-", "")
-		p.answer = w[len(w)-4:]
-	case set[PartSetup]:
-		p.Prompt = "Type the new setup code."
-		p.answer = next.SetupCode
-	default:
-		p.Prompt = "Type the check code printed under the new grid."
-		p.answer = GridCheck(next.GridSeed)
+	return &Pending{parts: set, wifiName: cur.WiFiName, proof: proof, expires: now.Add(PendingTTL), lostMark: lostMark}, nil
+}
+
+// checkNext reports whether next carries a well-formed value for each
+// rotated part and nothing for the others (the Wi-Fi name is ignored:
+// the box keeps its own).
+func (p *Pending) checkNext(next Card) error {
+	has := map[Part]bool{
+		PartWiFi:       next.WiFiPassword != "",
+		PartSetup:      next.SetupSecret != "" || next.SetupCode != "",
+		PartPassphrase: next.VaultPassphrase != "",
+		PartGrid:       len(next.GridSeed) > 0,
+		PartRecovery:   next.RecoveryKey != "",
 	}
-	return p, nil
+	for _, q := range AllParts {
+		if has[q] != p.parts[q] {
+			return fmt.Errorf("%w: %s", ErrNextCard, q)
+		}
+	}
+	if p.parts[PartSetup] && (next.SetupSecret == "" || next.SetupCode == "") {
+		return fmt.Errorf("%w: %s", ErrNextCard, PartSetup)
+	}
+	if p.parts[PartWiFi] && len(strings.ReplaceAll(next.WiFiPassword, "-", "")) < 4 {
+		return fmt.Errorf("%w: %s", ErrNextCard, PartWiFi)
+	}
+	if p.parts[PartRecovery] {
+		if _, err := ParseRecoveryKey(next.RecoveryKey); err != nil {
+			return fmt.Errorf("%w: %s", ErrNextCard, PartRecovery)
+		}
+	}
+	return nil
 }
 
 // hasSlot reports whether the drive has a slot of kind; an unreadable
@@ -361,23 +369,16 @@ func GridCheck(seed []byte) string {
 	return string(out)
 }
 
-func normalizeTyped(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == ' ' || r == '-' || r == '\t' || r == '\n' || r == '\r' {
-			return -1
-		}
-		return r
-	}, strings.ToUpper(s))
-}
-
-// Commit puts the rotation into effect once the owner types back the
-// prompted value. The passphrase and recovery slots are rewritten first,
+// Commit puts next, the new values the rotation display generated, into
+// effect; the display calls it from its Provision step, once the owner
+// has typed back values from the saved card (HW-1). The passphrase and recovery slots are rewritten first,
 // then the backup key (bound to the new recovery slot), then the card's
 // stored values. The caller applies a new Wi-Fi password to the access
 // point last, with a note that devices must rejoin, and after a new grid
 // clears spent cells (EndSession). If a step fails after the first slot
 // is rewritten, Commit returns the parts already in effect with
-// ErrCardNotStored. Rotation protects only against copies made
+// ErrCardNotStored, and every rotated part stays owed in the rotation
+// marker, so the next rotation must replace them all. Rotation protects only against copies made
 // afterwards: a drive copy or backup taken earlier still opens with the
 // old passphrase or recovery key (CRED-8).
 //
@@ -389,19 +390,15 @@ func normalizeTyped(s string) string {
 // page shows Done.Enrollment until ConfirmEnrollment accepts a code from
 // it, and the caller ends the owner channel's session. A passphrase change with the card in hand does not
 // re-encrypt (arbitrator ruling on #45).
-func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
+func (p *Pending) Commit(b *Box, next Card, now time.Time) (Done, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.done || p.wrong >= 3 || now.After(p.expires) {
+	if p.done || now.After(p.expires) {
 		p.lapse()
 		return Done{}, ErrPendingLapsed
 	}
-	if !hmac.Equal([]byte(normalizeTyped(typed)), []byte(normalizeTyped(p.answer))) {
-		p.wrong++
-		if p.wrong >= 3 {
-			p.lapse()
-		}
-		return Done{}, ErrConfirm
+	if err := p.checkNext(next); err != nil {
+		return Done{}, err
 	}
 	p.done = true
 	defer p.lapse()
@@ -430,12 +427,19 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 			slots = append(slots, q)
 		}
 	}
-	// Everything this commit owes once its first slot is written: the
-	// slots, a lost card's setup secret and grid, and the re-encryption.
+	// Everything this commit owes once its first slot is written: every
+	// rotated part, since Wi-Fi, setup and grid take effect only at
+	// storeCard after the slots, so a finishing rotation must replace them
+	// too (#1090 review F3); a lost card's setup secret and grid; and the
+	// re-encryption.
 	lost := proof.lost()
-	owes := append([]Part(nil), slots...)
+	owes := p.Parts()
 	if lost {
-		owes = append(owes, PartSetup, PartGrid)
+		for _, q := range []Part{PartSetup, PartGrid} {
+			if !containsPart(owes, q) {
+				owes = append(owes, q)
+			}
+		}
 	}
 	if p.parts[PartRecovery] {
 		owes = append(owes, PartRefresh)
@@ -450,18 +454,21 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 		}
 	}
 	if p.parts[PartPassphrase] {
-		if err := b.V.Rekey(proof.factor(), vault.Passphrase(p.next.VaultPassphrase)); err != nil {
+		if err := b.V.Rekey(proof.factor(), vault.Passphrase(next.VaultPassphrase)); err != nil {
 			return fail(err)
 		}
 		wrote = true
-		in.VaultPassphrase = p.next.VaultPassphrase
+		in.VaultPassphrase = next.VaultPassphrase
 		if len(proof.Passphrase) > 0 {
-			proof.Passphrase = []byte(p.next.VaultPassphrase)
+			proof.Passphrase = []byte(next.VaultPassphrase)
 			defer wipe(proof.Passphrase)
+		}
+		if err := crashPoint("passphrase-slot"); err != nil {
+			return fail(err)
 		}
 	}
 	if p.parts[PartRecovery] {
-		nk, err := ParseRecoveryKey(p.next.RecoveryKey)
+		nk, err := ParseRecoveryKey(next.RecoveryKey)
 		if err != nil {
 			return fail(err)
 		}
@@ -469,7 +476,7 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 			return fail(err)
 		}
 		wrote = true
-		in.RecoveryKey = p.next.RecoveryKey
+		in.RecoveryKey = next.RecoveryKey
 		if err := storeBackupKey(b, nk); err != nil {
 			// The old backup key no longer matches the recovery slot, so
 			// Backup refuses until it is rewritten (backupKey).
@@ -484,7 +491,7 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 		owner := []vault.Factor{Factor(nk)}
 		switch {
 		case p.parts[PartPassphrase]:
-			owner = append(owner, vault.Passphrase(p.next.VaultPassphrase))
+			owner = append(owner, vault.Passphrase(next.VaultPassphrase))
 		case len(proof.Passphrase) > 0:
 			owner = append(owner, vault.Passphrase(string(proof.Passphrase)))
 		}
@@ -496,13 +503,13 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 	}
 	stored := cur
 	if p.parts[PartWiFi] {
-		stored.WiFiPassword = p.next.WiFiPassword
+		stored.WiFiPassword = next.WiFiPassword
 	}
 	if p.parts[PartSetup] {
-		stored.SetupSecret, stored.SetupCode = p.next.SetupSecret, p.next.SetupCode
+		stored.SetupSecret, stored.SetupCode = next.SetupSecret, next.SetupCode
 	}
 	if p.parts[PartGrid] {
-		stored.GridSeed = p.next.GridSeed
+		stored.GridSeed = next.GridSeed
 	}
 	if err := storeCard(b, stored); err != nil {
 		return fail(err)
@@ -517,7 +524,7 @@ func (p *Pending) Commit(b *Box, typed string, now time.Time) (Done, error) {
 	if err := clearRotation(b, finished); err != nil {
 		return fail(err)
 	}
-	in.WiFiPassword, in.SetupSecret, in.SetupCode, in.GridSeed = p.next.WiFiPassword, p.next.SetupSecret, p.next.SetupCode, p.next.GridSeed
+	in.WiFiPassword, in.SetupSecret, in.SetupCode, in.GridSeed = next.WiFiPassword, next.SetupSecret, next.SetupCode, next.GridSeed
 	done.Card = in
 	return done, nil
 }

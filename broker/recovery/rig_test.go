@@ -175,13 +175,49 @@ func openAt(t *testing.T, dst string, rk RecoveryKey) *Box {
 	return b
 }
 
-// rotate generates and commits a rotation, typing back the prompted value.
+// rotate begins and commits a rotation with newParts, as the rotation
+// display does once the owner confirms.
 func (x *box) rotate(parts []Part, auth Auth, proof Proof) (Done, error) {
-	p, err := BeginRotate(x.b, parts, auth, proof, testGen, nil, t0)
+	p, err := BeginRotate(x.b, parts, auth, proof, t0)
 	if err != nil {
 		return Done{}, err
 	}
-	return p.Commit(x.b, p.answer, t0)
+	return p.Commit(x.b, newParts(p), t0)
+}
+
+// newParts is a fresh testGen card carrying only p's parts, as the
+// rotation display hands it to Commit.
+func newParts(p *Pending) Card {
+	c, err := testGen(nil)
+	if err != nil {
+		panic(err)
+	}
+	return trimParts(*c, p.Parts())
+}
+
+// trimParts blanks the parts of c not in parts.
+func trimParts(c Card, parts []Part) Card {
+	set := map[Part]bool{}
+	for _, q := range parts {
+		set[q] = true
+	}
+	out := Card{WiFiName: c.WiFiName}
+	if set[PartWiFi] {
+		out.WiFiPassword = c.WiFiPassword
+	}
+	if set[PartSetup] {
+		out.SetupSecret, out.SetupCode = c.SetupSecret, c.SetupCode
+	}
+	if set[PartPassphrase] {
+		out.VaultPassphrase = c.VaultPassphrase
+	}
+	if set[PartGrid] {
+		out.GridSeed = c.GridSeed
+	}
+	if set[PartRecovery] {
+		out.RecoveryKey = c.RecoveryKey
+	}
+	return out
 }
 
 // dataKey unwraps the recovery slot from the file format alone, for the
