@@ -1,0 +1,47 @@
+AgentOS
+Copyright 2026 Mark Bond and AgentOS contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+It includes or runs the third-party software below. Each component keeps its
+own licence; the full texts for the Go dependencies are in
+broker/vendor/<module path>/LICENSE.
+
+Guest agent runtime (not modified, not bundled in this repository)
+- OpenClaw, MIT License, Copyright (c) 2026 OpenClaw Foundation.
+  AgentOS runs it unmodified as a guest (SPEC ARC-3). Verified against
+  https://github.com/openclaw/openclaw LICENSE on 2026-10-12. Any image that
+  ships it must carry its copyright and permission notice.
+
+Apache License 2.0 dependencies (broker/vendor)
+- github.com/google/go-tpm
+- github.com/google/go-containerregistry
+- github.com/opencontainers/go-digest
+- github.com/sigstore/sigstore
+- github.com/sigstore/protobuf-specs
+- github.com/theupdateframework/go-tuf/v2
+- google.golang.org/genproto/googleapis/api
+
+  The go-tuf NOTICE file reads:
+
+    Copyright 2024 The Update Framework Authors
+    
+    Apache 2.0 License
+    Copyright 2024 The Apache Software Foundation
+    
+    This product includes software developed at
+    The Apache Software Foundation (/).
+    
+    SPDX-License-Identifier: Apache-2.0
+
+MIT dependencies (broker/vendor)
+- github.com/emersion/go-imap, go-message, go-sasl, go-textwrapper
+- github.com/gobwas/httphead, pool, ws
+- github.com/icholy/digest
+- github.com/makiuchi-d/gozxing
+- github.com/pion/logging, randutil, rtcp, rtp, sdp/v3, srtp/v3, transport/v5
+- github.com/secure-systems-lab/go-securesystemslib
+
+BSD-style dependencies (broker/vendor)
+- github.com/emiago/sipgo (BSD 2-Clause)
+- github.com/google/uuid, golang.org/x/{crypto,sync,sys,term,text,xerrors},
+  google.golang.org/protobuf, rsc.io/qr (BSD 3-Clause)
