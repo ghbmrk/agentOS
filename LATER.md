@@ -53,6 +53,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W5b | A7, A11 | Loop 3 update checks as a scheduler source |
 | W5c | A12 | Clean-room builder in the scheduler |
 | DEV-net-a, DEV-net-b, DEV-net-c | A14 (DEV-2, REV-5) | Home-network boundary on every outbound path; latent until ARC-6 (d) is served, and a precondition for serving it (D-069) |
+| DEV-net-h | A14 (DEV-2 In) | P2-1 loader contract for BringUp/BringDown: BringDown at loader start, no station join after a failed BringDown, one AP at a time (or ap-exempt refuses a second non-lo element), teardown on an uncancellable context; from #1075 R1 |
 | CTRL-card, CTRL-claim, CTRL-uki, FLASH-1, ROUTE-1, NET-seg, WS-image, WS-rest, HELPER-a, HELPER-b, HELPER-c, CTRL-spike, CTRL-text | A1, A8, A14 (HW-9–HW-13, REV-6, ONB-10) | Controller and helper system (D-102): release findings of #1054; BOARD section "Controller and helper system" |
 | W6 | A8 (REC-1–3) | Recovery into vault process and local UI |
 | W7 | A10, A15 (CAP-4–6) | Compiled skills live; attention optimizer; blocked |

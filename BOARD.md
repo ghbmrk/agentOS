@@ -173,7 +173,8 @@ The home-network boundary is release work (A14); device features follow the firs
 | DEV-net-d | [Inbound rules, owner pins, event refresh, SIP dialer](briefs/DEV-net-d.md) | DEV-net-b, DEV-net-c | merged (#1052) |
 | DEV-net-e | [Load the inbound rules, owner pin entry, SIP guard hardening](briefs/DEV-net-e.md) | DEV-net-d | in review (release; DEV-2, A14, CAP-13, BAK-1; tier A) |
 | DEV-net-f | [The access point's interface joins the inbound exempt set](briefs/DEV-net-f.md) | DEV-net-e | merged (#1063) |
-| DEV-net-g | [The access point's exempt entry never outlives or precedes its drop table](briefs/DEV-net-g.md) | DEV-net-f | building (A; release; DEV-2, A14; from #1063 R1; must merge before the P2-1 loader wires BringUp) |
+| DEV-net-g | [The access point's exempt entry never outlives or precedes its drop table](briefs/DEV-net-g.md) | DEV-net-f | merged (#1075) |
+| DEV-net-h | [The P2-1 loader never leaves a stale access-point exemption](briefs/DEV-net-h.md) | DEV-net-g | queued (release; DEV-2, A14; tier A; from #1075 R1; fold into P2-1's loader acceptance if P2-1 wires BringUp first) |
 
 ## Controller and helper system (D-102)
 
