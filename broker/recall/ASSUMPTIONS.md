@@ -43,4 +43,5 @@ Status: see [recalltool W8](../recalltool/ASSUMPTIONS.md).
 - **K7.** The recall broker tool defaults public machines to `PublicOnly`, so a search does not raise them unless the agent asks for owner data.
 - **K8.** The broker prunes tombstones only with the 30-day policy; `PruneTombstones` refuses anything under `MinTombstoneAge` (24 h).
 - **K9.** Direct `Ingest` callers pass `Received` as the time they fetched the content. A zero receipt time is stored as now but refused for a deleted source, and `IndexInto` refuses an event without one.
+- **K10.** The `Labeler` reports a machine private only once that label is saved: `raise` skips `Raise` when `Label` already reads private, so a label raised in memory but not on disk would release owner data that a restart then holds under the old public label. The broker's labeler (`vm.Manager.RaiseLabel`) puts the label back when its save fails (LABEL-durable).
 - **Public items' metadata.** Considered and left: public web items keep `Account` and `Ref`, since a public item's URL is its content. If watched-URL lists turn out to be sensitive, the watcher should label those events private.

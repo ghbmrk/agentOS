@@ -924,8 +924,24 @@ func (m *Manager) RaiseLabel(id string, l Label) error {
 	if l < mc.Label {
 		return fmt.Errorf("vm: %s: a label only rises (REV-5)", id)
 	}
+	return m.raiseLocked(mc, l)
+}
+
+// raiseLocked sets mc's label to l and saves it. A failed save puts the
+// label back in memory too, so a label held in memory is always the saved
+// one: a caller that reads it as already raised never skips a save that
+// failed, and a restart never finds data of a higher label under the
+// lower one saved (LABEL-durable). Called with mc.mu held and l not below
+// mc.Label.
+func (m *Manager) raiseLocked(mc *machine, l Label) error {
+	prev := mc.Label
 	mc.Label = l
-	return m.saveMachine(mc)
+	if err := m.saveMachine(mc); err != nil {
+		mc.Label = prev
+		mc.label.Store(uint32(prev))
+		return err
+	}
+	return nil
 }
 
 // Label returns a machine's data label (REV-5).
@@ -1634,10 +1650,13 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	if err := writeJSON(filepath.Join(dir, "meta.json"), out); err != nil {
 		return fail(err)
 	}
+	// The label is saved before the merged files reach dst's layer.
+	if err := m.raiseLocked(dm, out.Label); err != nil {
+		return fail(err)
+	}
 	m.mu.Lock()
 	m.snaps[out.ID] = out
 	m.mu.Unlock()
-	dm.Label = out.Label
 	dm.Last = out.ID
 	if err := m.restartHeld(ctx, dm, &out); err != nil {
 		return Snapshot{}, true, err
