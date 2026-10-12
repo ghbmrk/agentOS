@@ -34,7 +34,7 @@ func TestEveryCardSecretRotatesAloneAsATier4Action(t *testing.T) {
 	for _, p := range AllParts {
 		x := newBox(t)
 		for _, a := range []Auth{{}, {Code: true}, {Local: true}, {Recovery: mustKey(t)}} {
-			if _, err := BeginRotate(x.b, []Part{p}, a, Proof{Recovery: x.rk}, testGen, nil, t0); !errors.Is(err, ErrNotAuthorized) {
+			if _, err := BeginRotate(x.b, []Part{p}, a, Proof{Recovery: x.rk}, t0); !errors.Is(err, ErrNotAuthorized) {
 				t.Fatalf("auth %+v: %v", a, err)
 			}
 		}
@@ -82,7 +82,7 @@ func TestEveryCardSecretRotatesAloneAsATier4Action(t *testing.T) {
 func TestReplacingAFactorNeedsAFactorThatOpensTheDrive(t *testing.T) {
 	x := newBox(t)
 	for _, proof := range []Proof{{}, {Recovery: mustKey(t)}, {Passphrase: []byte("not the passphrase at all")}} {
-		if _, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, proof, testGen, nil, t0); err == nil {
+		if _, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, proof, t0); err == nil {
 			t.Fatalf("rotated with %+v", proof)
 		}
 	}
@@ -103,49 +103,63 @@ func TestReplacingAFactorNeedsAFactorThatOpensTheDrive(t *testing.T) {
 	must(t, err)
 }
 
-// Nothing changes until the owner types a value back from the saved card.
+// Nothing changes until the display hands Commit the confirmed card; a
+// card that does not carry exactly the rotated parts changes nothing and
+// leaves the rotation pending.
 func TestRotationTakesEffectOnlyWhenTheOwnerHasTheNewCard(t *testing.T) {
 	x := newBox(t)
 	keys, _ := os.ReadFile(x.b.KeysPath)
-	p, err := BeginRotate(x.b, AllParts, Auth{Recovery: x.rk}, Proof{}, testGen, nil, t0)
+	p, err := BeginRotate(x.b, AllParts, Auth{Recovery: x.rk}, Proof{}, t0)
 	must(t, err)
-	if !strings.Contains(p.Prompt, "recovery key") {
-		t.Fatalf("prompt: %q", p.Prompt)
+	if fmt.Sprint(p.Parts()) != fmt.Sprint(AllParts) || p.WiFiName() != x.card.WiFiName {
+		t.Fatalf("pending parts %v, Wi-Fi name kept %v", p.Parts(), p.WiFiName() == x.card.WiFiName)
 	}
-	now, _ := os.ReadFile(x.b.KeysPath)
-	stored, _ := x.b.LoadCard()
-	if !bytes.Equal(keys, now) || stored.WiFiPassword != x.card.WiFiPassword {
-		t.Fatal("generating a card changed the drive")
-	}
-	for i := 0; i < 2; i++ {
-		if _, err := p.Commit(x.b, "WRONG", t0); !errors.Is(err, ErrConfirm) {
-			t.Fatalf("wrong answer: %v", err)
+	unchanged := func(what string) {
+		t.Helper()
+		now, _ := os.ReadFile(x.b.KeysPath)
+		stored, _ := x.b.LoadCard()
+		if !bytes.Equal(keys, now) || stored.WiFiPassword != x.card.WiFiPassword {
+			t.Fatalf("%s changed the drive", what)
 		}
 	}
-	nc, err := p.Commit(x.b, strings.ToLower(p.answer), t0.Add(time.Minute))
-	must(t, err)
-	if !strings.HasSuffix(nc.RecoveryKey, p.answer) {
-		t.Fatal("typed back the wrong group")
+	unchanged("beginning a rotation")
+	next := newParts(p)
+	bad := map[string]Card{
+		"a missing part":      trimParts(next, []Part{PartWiFi, PartSetup, PartPassphrase, PartGrid}),
+		"a malformed key":     func() Card { c := next; c.RecoveryKey = "NOT-A-KEY"; return c }(),
+		"a half setup secret": func() Card { c := next; c.SetupCode = ""; return c }(),
 	}
-	if _, err := p.Commit(x.b, p.answer, t0); !errors.Is(err, ErrPendingLapsed) {
+	for name, c := range bad {
+		if _, err := p.Commit(x.b, c, t0); !errors.Is(err, ErrNextCard) {
+			t.Fatalf("%s: %v", name, err)
+		}
+		unchanged(name)
+	}
+	nc, err := p.Commit(x.b, next, t0.Add(time.Minute))
+	must(t, err)
+	if nc.RecoveryKey != next.RecoveryKey || nc.WiFiName != x.card.WiFiName {
+		t.Fatal("committed card is not the one confirmed")
+	}
+	if _, err := p.Commit(x.b, next, t0); !errors.Is(err, ErrPendingLapsed) {
 		t.Fatalf("committed twice: %v", err)
 	}
-	// Three wrong answers, or the time limit, discard it.
+	// A card carrying a part not being rotated is refused too.
 	nk, _ := ParseRecoveryKey(nc.RecoveryKey)
-	q, err := BeginRotate(x.b, []Part{PartGrid}, Auth{Recovery: nk}, Proof{}, testGen, nil, t0)
+	q, err := BeginRotate(x.b, []Part{PartGrid}, Auth{Recovery: nk}, Proof{}, t0)
 	must(t, err)
-	if q.answer != GridCheck(q.Card().GridSeed) {
-		t.Fatal("grid-only rotation is not confirmed by the grid's check code")
+	extra := newParts(q)
+	extra.WiFiPassword = next.WiFiPassword
+	if _, err := q.Commit(x.b, extra, t0); !errors.Is(err, ErrNextCard) {
+		t.Fatalf("extra part: %v", err)
 	}
-	for i := 0; i < 3; i++ {
-		q.Commit(x.b, "WRONG", t0)
+	// Cancel, or the time limit, discards it.
+	q.Cancel()
+	if _, err := q.Commit(x.b, newParts(q), t0); !errors.Is(err, ErrPendingLapsed) {
+		t.Fatalf("after cancel: %v", err)
 	}
-	if _, err := q.Commit(x.b, q.answer, t0); !errors.Is(err, ErrPendingLapsed) {
-		t.Fatalf("after three wrong: %v", err)
-	}
-	r, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Recovery: nk}, Proof{}, testGen, nil, t0)
+	r, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Recovery: nk}, Proof{}, t0)
 	must(t, err)
-	if _, err := r.Commit(x.b, r.answer, t0.Add(PendingTTL+time.Second)); !errors.Is(err, ErrPendingLapsed) {
+	if _, err := r.Commit(x.b, newParts(r), t0.Add(PendingTTL+time.Second)); !errors.Is(err, ErrPendingLapsed) {
 		t.Fatalf("after the time limit: %v", err)
 	}
 }
@@ -169,13 +183,14 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	x := newBox(t)
 	orig, _ := os.ReadFile(x.b.KeysPath)
 	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid, PartWiFi}, Auth{Code: true, Local: true},
-		Proof{Host: func() vault.Factor { return failing{Factor(x.rk), x.b.KeysPath, orig} }}, testGen, nil, t0)
+		Proof{Host: func() vault.Factor { return failing{Factor(x.rk), x.b.KeysPath, orig} }}, t0)
 	must(t, err)
-	nc, err := p.Commit(x.b, p.answer, t0)
+	next := newParts(p)
+	nc, err := p.Commit(x.b, next, t0)
 	if !errors.Is(err, ErrCardNotStored) {
 		t.Fatalf("partial rotation: %v", err)
 	}
-	if nc.VaultPassphrase != p.Card().VaultPassphrase || nc.RecoveryKey != "" || nc.WiFiPassword != "" {
+	if nc.VaultPassphrase != next.VaultPassphrase || nc.RecoveryKey != "" || nc.WiFiPassword != "" {
 		t.Fatal("returned card does not match what is in effect")
 	}
 	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, vault.Passphrase(nc.VaultPassphrase)); err != nil {
@@ -207,12 +222,12 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	}
 	// Finishing it clears the marker, and backups resume under the new key.
 	// The finishing rotation has the card, but shows the lost-card notes.
-	fin, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, testGen, nil, t0)
+	fin, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0)
 	must(t, err)
 	if !fin.Lost() {
 		t.Fatal("a rotation finishing a lost-card one is not shown as lost")
 	}
-	nc2, err := fin.Commit(x.b, fin.answer, t0)
+	nc2, err := fin.Commit(x.b, newParts(fin), t0)
 	nc = nc2
 	must(t, err)
 	if _, ok := RotationUnfinished(x.b); ok {
@@ -256,28 +271,34 @@ func TestTheRotationMarkerPrecedesTheFirstSlotWrite(t *testing.T) {
 	x := newBox(t)
 	var armed, missing bool
 	proof := Proof{Host: func() vault.Factor { return markerCheck{Factor(x.rk), x.b, x.rk, &armed, &missing} }}
-	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, proof, testGen, nil, t0)
+	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, proof, t0)
 	must(t, err)
 	armed = true
-	_, err = p.Commit(x.b, p.answer, t0)
+	_, err = p.Commit(x.b, newParts(p), t0)
 	must(t, err)
 	if missing {
 		t.Fatal("a slot write ran before the rotation marker existed")
 	}
 }
 
-// A typed passphrase is wiped once the rotation commits or lapses.
+// A typed passphrase is wiped once the rotation commits, lapses or is
+// cancelled.
 func TestPendingWipesTheTypedPassphrase(t *testing.T) {
 	x := newBox(t)
 	x.withPassphrase()
 	typed := []byte(x.card.VaultPassphrase)
-	p, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{Passphrase: typed}, testGen, nil, t0)
+	p, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{Passphrase: typed}, t0)
 	must(t, err)
 	held := p.proof.Passphrase
-	for i := 0; i < 3; i++ {
-		p.Commit(x.b, "WRONG", t0)
-	}
+	p.Cancel()
 	if p.proof.Passphrase != nil || bytes.Count(held, []byte{0}) != len(held) {
+		t.Fatal("cancelled rotation kept the passphrase")
+	}
+	q, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{Passphrase: typed}, t0)
+	must(t, err)
+	held = q.proof.Passphrase
+	q.Commit(x.b, newParts(q), t0.Add(PendingTTL+time.Second))
+	if q.proof.Passphrase != nil || bytes.Count(held, []byte{0}) != len(held) {
 		t.Fatal("lapsed rotation kept the passphrase")
 	}
 }
@@ -364,7 +385,7 @@ func TestTheVaultHoldsNeitherTheRecoveryKeyNorThePassphrase(t *testing.T) {
 	nk, _ := ParseRecoveryKey(nc.RecoveryKey)
 	var bad [][]byte
 	for _, v := range []string{x.card.RecoveryKey, x.card.VaultPassphrase, nc.RecoveryKey, nc.VaultPassphrase} {
-		bad = append(bad, []byte(v), []byte(normalizeTyped(v)))
+		bad = append(bad, []byte(v), []byte(compact(v)))
 	}
 	bad = append(bad, x.rk.b[:], nk.b[:])
 	for _, e := range x.b.V.List() {
@@ -429,4 +450,15 @@ func TestCardSecretsAreRedactedFromAgentOutput(t *testing.T) {
 	if s, ok := x.b.V.Secret(CardName + "-wifi"); !ok || s.Reveal() != nc.WiFiPassword {
 		t.Fatal("card part entry not updated")
 	}
+}
+
+// compact is a card value as typed without spaces or dashes, in upper
+// case: another form a leaked factor could take.
+func compact(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == ' ' || r == '-' {
+			return -1
+		}
+		return r
+	}, strings.ToUpper(s))
 }
