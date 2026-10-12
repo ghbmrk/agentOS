@@ -136,6 +136,11 @@ type Config struct {
 	Resolver Resolver
 	// Source, when set, is read by Refresh to learn the network.
 	Source func() (Network, error)
+	// Quick, when set, is a read that never waits on the network (for
+	// example Sources.ReadLocal). Watch applies it at once on each event,
+	// before the full Source read, so a new prefix is refused within the
+	// event and not after a slow router lookup.
+	Quick func() (Network, error)
 	// OnDeny, when set, is called for each refusal.
 	OnDeny func(DenyEvent)
 	// Connect, when set, replaces the final connect to a checked literal
@@ -149,6 +154,7 @@ type Config struct {
 type Policy struct {
 	res     Resolver
 	source  func() (Network, error)
+	quick   func() (Network, error)
 	onDeny  func(DenyEvent)
 	timeout time.Duration
 
@@ -157,12 +163,15 @@ type Policy struct {
 
 	mu   sync.RWMutex
 	net  Network
+	gen  uint64 // bumped by each Learn; a full read older than this is stale
 	pins []Pin
+
+	quickMu sync.Mutex // one quick read-and-learn at a time
 }
 
 // New returns a policy.
 func New(cfg Config) *Policy {
-	p := &Policy{res: cfg.Resolver, source: cfg.Source, onDeny: cfg.OnDeny, timeout: cfg.Timeout}
+	p := &Policy{res: cfg.Resolver, source: cfg.Source, quick: cfg.Quick, onDeny: cfg.OnDeny, timeout: cfg.Timeout}
 	if p.res == nil {
 		p.res = p.Resolver()
 	}
@@ -180,6 +189,21 @@ func New(cfg Config) *Policy {
 
 // Learn replaces the learned network.
 func (p *Policy) Learn(n Network) {
+	out := normalise(n)
+	p.mu.Lock()
+	p.learnLocked(out)
+	p.mu.Unlock()
+}
+
+// learnLocked stores a normalised network and bumps the generation; p.mu is
+// held for writing.
+func (p *Policy) learnLocked(out Network) {
+	p.net = out
+	p.gen++
+}
+
+// normalise drops zones, unmaps, and caps IPv6 prefixes at /56.
+func normalise(n Network) Network {
 	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), External: n.External.WithZone("").Unmap(), Resolver: n.Resolver.WithZone("").Unmap()}
 	if out.Resolver.IsLoopback() || out.Resolver.IsUnspecified() {
 		out.Resolver = netip.Addr{}
@@ -201,28 +225,63 @@ func (p *Policy) Learn(n Network) {
 		}
 		out.Prefixes = append(out.Prefixes, netip.PrefixFrom(a, bits).Masked())
 	}
-	p.mu.Lock()
-	p.net = out
-	p.mu.Unlock()
+	return out
 }
 
 // Refresh reads Config.Source and learns the result. A failed read keeps
-// what was learned before.
+// what was learned before. A read that began before a later Learn (a quick
+// read on an event, or another refresh) is stale: it never replaces the
+// newer set, and only its external address is kept, while the gateway is the
+// one now learned.
 func (p *Policy) Refresh() error {
 	if p.source == nil {
 		return errors.New("netguard: no source")
 	}
+	p.mu.RLock()
+	gen := p.gen
+	p.mu.RUnlock()
 	n, err := p.source()
 	if err != nil {
 		return err
 	}
-	p.Learn(n)
+	out := normalise(n)
+	if refreshGapHook != nil {
+		refreshGapHook()
+	}
+	// The generation check and the store are one critical section, so a
+	// Learn can never land between them.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.gen != gen {
+		if out.External.IsValid() && out.Gateway == p.net.Gateway {
+			p.net.External = out.External
+		}
+		return nil
+	}
+	p.learnLocked(out)
 	return nil
 }
 
+// refreshGapHook, when set by a test, runs after a full read returns and
+// before Refresh takes the lock to check the generation and store.
+var refreshGapHook func()
+
 // Watch refreshes on each event until ctx ends: the broker sends one on
-// every address or route change.
+// every address or route change. Each event applies the quick read at once;
+// the full read (which may wait on the router) runs single-flight on its own
+// goroutine, so a later event is never queued behind it.
 func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
+	kick := make(chan struct{}, 1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-kick:
+				_ = p.Refresh()
+			}
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -231,9 +290,40 @@ func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
 			if !ok {
 				return
 			}
-			_ = p.Refresh()
+			p.quickLearn()
+			select {
+			case kick <- struct{}{}:
+			default:
+			}
 		}
 	}
+}
+
+// quickLearn applies the Quick read, if there is one. A failed read keeps
+// what was learned before, and the router's external address and the
+// resolver stay while the gateway is unchanged and the quick read has none.
+func (p *Policy) quickLearn() {
+	if p.quick == nil {
+		return
+	}
+	p.quickMu.Lock()
+	defer p.quickMu.Unlock()
+	n, err := p.quick()
+	if err != nil {
+		return
+	}
+	p.mu.RLock()
+	old := p.net
+	p.mu.RUnlock()
+	if n.Gateway.IsValid() && n.Gateway.Unmap() == old.Gateway {
+		if !n.External.IsValid() {
+			n.External = old.External
+		}
+		if !n.Resolver.IsValid() {
+			n.Resolver = old.Resolver
+		}
+	}
+	p.Learn(n)
 }
 
 // SetPins replaces the pinned exceptions.

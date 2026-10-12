@@ -33,6 +33,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modem/secondline"
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/sipsign"
 	"github.com/ghbmrk/agentos/broker/smsapi"
 )
@@ -72,6 +73,12 @@ type Config struct {
 	// PL1 on #102): Send goes through it instead of SIP MESSAGE, and the
 	// line polls it for incoming texts. Calls stay on SIP.
 	Texts Texts
+	// Guard is the home-network address policy (DEV-2). When set, every
+	// signaling connection and the provider-name lookup go through it: a
+	// private, loopback or home-network address is refused and journaled
+	// by its OnDeny. The broker always sets it; nil is for tests whose
+	// simulated provider listens on loopback.
+	Guard *netguard.Policy
 }
 
 // Texts is the vault process's texting socket (smsapi.Client).
@@ -222,9 +229,26 @@ func Open(ctx context.Context, cfg Config) (*Line, error) {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	ua, err := sipgo.NewUA(sipgo.WithUserAgent("agentos"), sipgo.WithUserAgentHostname(cfg.Domain), sipgo.WithUserAgenTLSConfig(tc),
-		sipgo.WithUserAgentTransportLayerOptions(sip.WithTransportLayerLogger(quiet)),
-		sipgo.WithUserAgentTransactionLayerOptions(sip.WithTransactionLayerLogger(quiet)))
+	uaOpts := []sipgo.UserAgentOption{sipgo.WithUserAgent("agentos"), sipgo.WithUserAgentHostname(cfg.Domain), sipgo.WithUserAgenTLSConfig(tc),
+		sipgo.WithUserAgentTransactionLayerOptions(sip.WithTransactionLayerLogger(quiet))}
+	tlOpts := []sip.TransportLayerOption{sip.WithTransportLayerLogger(quiet)}
+	if cfg.Guard != nil {
+		// The transports dial through the guard's dialer (its Control
+		// hook checks each connect address), and the provider name is
+		// looked up only through the guard's resolver.
+		dial := func(laddr net.Addr) net.Dialer {
+			d := *cfg.Guard.Dialer()
+			d.LocalAddr = laddr
+			return d
+		}
+		tlOpts = append(tlOpts, sip.WithTransportLayerTransports(sip.TransportsConfig{
+			TCP: &sip.TransportTCP{DialerCreate: dial},
+			TLS: &sip.TransportTLS{TransportTCP: &sip.TransportTCP{DialerCreate: dial}},
+		}))
+		uaOpts = append(uaOpts, sipgo.WithUserAgentDNSResolver(cfg.Guard.Resolver()))
+	}
+	uaOpts = append(uaOpts, sipgo.WithUserAgentTransportLayerOptions(tlOpts...))
+	ua, err := sipgo.NewUA(uaOpts...)
 	if err != nil {
 		return nil, err
 	}

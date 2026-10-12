@@ -596,6 +596,7 @@ func (c *custody) serve(v *vault.Vault) error {
 		c.timer = nil
 	}
 	v.OnWarn(c.notify)
+	c.applyPins(v)
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
 	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
@@ -1052,6 +1053,7 @@ func (c *custody) discard() {
 		c.timer.Stop()
 		c.timer = nil
 	}
+	c.clearPins()
 	if c.v != nil {
 		c.v.Close()
 	}

@@ -823,6 +823,9 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | DEV-net-a l1 | PR #1049 L3 (6113924968): a pin with an address and a key but no name never passes `TLSConfig` through `http.Transport`. The transport sets `ServerName` to the IP literal, so `tlspin.go:63` is skipped, chain verification runs, and the pin fails closed (not open); fix when an address pin first serves HTTPS |
 | DEV-net-a l2 | `recheck`. PR #1049 L3 (6113924968): a name pin matches on any port and skips every deny check for that name, loopback included. The key pin still stops a rebound name at the handshake, but only after the TCP connection and the ClientHello have reached the rebound host; consider matching the declared port and keeping the deny list for the resolved address |
 | DEV-net-a l3 | PR #1049 L3 (6113924968, 6114138194): `tools/netguardcheck.py` misses aliased `net` imports (`gonet.Dial`) and `net.ListenUDP`/`WriteToUDP` senders, and exempts any dial with `"unix"` within 4 lines; sipline carries its own public-unicast check (`media.go:93`), not the shared policy. The Transport rule (`netguardcheck.py:41-43`) also skips `&http.Client{Transport: nil}`, a `Transport:` wrapper around a nil base (both fall back to `DefaultTransport`), and a bare client with an unrelated `Transport:` key within 4 lines. None of these forms is in the tree today, and the runtime guard does not depend on the lint |
+| DEV-net-c l1 | PR #1051 L3: netguard learns only the first usable nameserver, with no failover to the next |
+| DEV-net-c l2 | PR #1051 L3: no owner-facing line when no resolver is learned (names fail closed silently) |
+| DEV-net-c l3 | PR #1051 L3 delta: `Sources.Read` counts link-local and VM-bridge prefixes, so an uplink-down read with only those still replaces the learned set (moot while nothing routes out) |
 
 ## Reuse candidates
 | ID | Component | Why |
@@ -832,7 +835,4 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | HOST-1d | cryptsetup / LUKS2 | Vault-keyed disk encryption without custom crypto |
 | SR2-4i | systemd resource control (IOWeight=, CPUWeight=) | Sets io.weight and cpu.weight per slice; add iocost QoS on the image |
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
-| DEV-net-c | netguard learns only the first usable nameserver, with no failover to the next | Found in PR #1051's L3 |
-| DEV-net-c | No owner-facing line when no resolver is learned (names fail closed silently) | Found in PR #1051's L3 |
 | DEV-net-b | Stale nil-guard comments at `broker/mail/imapsmtp/imapsmtp.go:65` and `broker/smsapi/service.go:44` | Found in PR #1051's L3 |
-| DEV-net-c | `Sources.Read` counts link-local and VM-bridge prefixes, so an uplink-down read with only those still replaces the learned set (moot while nothing routes out) | Found in PR #1051's L3 delta |

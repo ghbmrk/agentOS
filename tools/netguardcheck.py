@@ -3,7 +3,8 @@
 
 Every non-test Go file under broker/ that opens a network connection (net.Dialer, net.Dial*,
 tls.Dial*, smtp.Dial*, an http.Transport, an http.Client or net.Resolver value (a *pointer* type is a reference, not a construction), http.DefaultClient/DefaultTransport, http.Get/Post/Head)
-must import broker/netguard, or be listed in tools/netguard_allow.txt with a reason. Unix-socket
+must import broker/netguard, or be listed in tools/netguard_allow.txt with a reason. A SIP user agent (sipgo.NewUA) must also hand its transport the guard's dialer (DialerCreate), not
+merely import the guard. Unix-socket
 dials are exempt, as is testdata/ (guest programs). The allowlist is a debt list: an entry whose
 file is gone, now imports the guard, or no longer has an unhooked dial fails the check, so it
 cannot go stale. DEV-net-b empties it.
@@ -25,6 +26,9 @@ DIAL = re.compile(
     r"\bhttp\.Transport\b|\bhttp\.Default(?:Client|Transport)\b|\bhttp\.(?:Get|Post|Head|PostForm)\(|"
     r"(?<!\*)\bhttp\.Client\b|(?<!\*)\bnet\.Resolver\b"
 )
+# A SIP user agent opens its own connections through a transport layer, so importing the guard does
+# not hook it: the file must also give the transport the guard's dialer (DialerCreate).
+SIP_CLIENT = re.compile(r"\bsipgo\.NewUA\(")
 WINDOW = 4  # lines after a match searched for "unix"
 
 
@@ -71,6 +75,13 @@ def check(root, allow_file):
     for f in sorted((root / "broker").rglob("*.go")):
         rel = f.relative_to(root).as_posix()
         if "/vendor/" in rel or "/testdata/" in rel or rel.endswith("_test.go") or rel.startswith("broker/netguard/"):
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        if any(SIP_CLIENT.search(l) for l in text.split("\n") if not l.lstrip().startswith("//")) \
+                and not ("DialerCreate" in text and GUARD in text):
+            if rel not in allow:
+                problems.append(f"{rel}: SIP client built without a guarded dialer (give the transport layer netguard.Policy's dialer through DialerCreate)")
+            seen.add(rel)
             continue
         found = sites(f)
         if not found:

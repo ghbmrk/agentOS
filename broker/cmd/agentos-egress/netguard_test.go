@@ -105,3 +105,62 @@ func TestEgressProcessGuardFollowsTheNetwork(t *testing.T) {
 	}
 	t.Fatal("the new external address was not learned within the interval")
 }
+
+// A kernel address or route event applies the new network within the event,
+// with the poll interval far away (DEV-2).
+func TestEgressProcessGuardFollowsNetlinkEvents(t *testing.T) {
+	f := &fakeNet{}
+	f.set(gw1, "8.8.8.8")
+	ev := make(chan struct{}, 1)
+	prev := netEvents
+	netEvents = func(context.Context) (<-chan struct{}, error) { return ev, nil }
+	defer func() { netEvents = prev }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g, err := netGuard(ctx, f.sources(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.set(gw1, "9.9.9.9")
+	ev <- struct{}{}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if errors.Is(g.Check(context.Background(), netip.MustParseAddr("9.9.9.9"), 443, "tcp"), netguard.ErrDenied) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the event did not apply the new network")
+}
+
+// Where netlink cannot be opened the poll still applies and the failure is
+// logged.
+func TestEgressProcessGuardKeepsPollWithoutNetlink(t *testing.T) {
+	var buf bytes.Buffer
+	prevLog := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prevLog)
+	prev := netEvents
+	netEvents = func(context.Context) (<-chan struct{}, error) { return nil, errors.New("no socket") }
+	defer func() { netEvents = prev }()
+	f := &fakeNet{}
+	f.set(gw1, "8.8.8.8")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g, err := netGuard(ctx, f.sources(), 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.set(gw1, "9.9.9.9")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if errors.Is(g.Check(context.Background(), netip.MustParseAddr("9.9.9.9"), 443, "tcp"), netguard.ErrDenied) {
+			if !strings.Contains(buf.String(), "netlink") {
+				t.Fatalf("the netlink failure was not logged: %q", buf.String())
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the poll did not apply the new network")
+}
