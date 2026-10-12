@@ -69,9 +69,10 @@ TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
 # risk_tier itself is A: CI runs the PR's own copy, so an edit to it decides its own tier.
 # image/ builds what ships (image/fuzz-targets.json too: build.sh installs it as
 # the release's fuzz manifest, so it is not test-only); .github/ builds the image,
-# gates merges and pushes to main; .claude/ holds agent permissions.
+# gates merges and pushes to main; .claude/ holds agent permissions; tools/ci_scope
+# decides which CI jobs a change skips (CI-docs).
 TIER_A_PREFIXES = (
-    "assurance/", "tools/canary", "tools/depaudit", "tools/risk_tier",
+    "assurance/", "tools/canary", "tools/depaudit", "tools/risk_tier", "tools/ci_scope",
     "image/", ".github/", ".claude/",
 )
 # guest/<name>/<file>: what the guest runs or installs.
