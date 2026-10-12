@@ -5,7 +5,11 @@ mkosi runs this as the last step before it writes the partitions, with the tree 
 Every drive gets the same image, so anything generated during the build (a machine ID, a random
 seed, a host key, the snakeoil TLS key) would be shared by every box, and owner state belongs only
 on that owner's drive. A planted socket file could look like a broker socket inside a guest.
+It also refuses a tree that could write the broker's memory to disk (IMG-nodump): the Owner Card
+passphrase is a Go string that cannot be zeroed (card C13), so core dumps must be discarded and
+there must be no swap.
 Usage outside mkosi: mkosi.finalize ROOT"""
+import configparser
 import os
 import pathlib
 import stat
@@ -23,6 +27,16 @@ KEY_MARKERS = (b"PRIVATE KEY-----", b"PGP PRIVATE KEY BLOCK", b"AGE-SECRET-KEY-"
 # Larger files are not content-scanned (key files are small); the OpenClaw guest under /usr is
 # package content from pinned sources and is covered only by the socket check.
 SCAN_MAX = 1 << 20
+# IMG-nodump: what each setting must end up as, after every file systemd reads.
+CORE_PATTERN = "|/usr/bin/false"
+NODUMP_SYSCTL = "usr/lib/sysctl.d/99-agentos-nodump.conf"
+# The card-holding service. localui is not in the image yet; DefaultLimitCORE=0 covers it.
+CARD_UNIT = "agentosd.service"
+# Precedence low to high: a file in a later directory replaces one of the same name in an earlier.
+CONF_DIRS = ("usr/lib", "lib", "usr/local/lib", "etc")
+UNIT_DIRS = ("usr/lib/systemd/system", "lib/systemd/system", "usr/local/lib/systemd/system",
+             "etc/systemd/system")
+SWAP_GENERATORS = ("zram-generator", "systemd-zram-generator")
 
 
 def violations(root):
@@ -57,6 +71,114 @@ def violations(root):
             elif (stat.S_ISREG(st.st_mode) and st.st_size <= SCAN_MAX
                   and rel.split(os.sep, 1)[0] in SCAN and has_key(p)):
                 out.append("%s: private key material" % rel)
+    return out + dump_violations(root) + swap_violations(root)
+
+
+def dropins(root, dirs):
+    """The files systemd reads from DIRS (relative, lowest precedence first) in its order: by file
+    name, a later directory's file replacing an earlier one's of the same name."""
+    by_name = {}
+    for d in dirs:
+        p = root / d
+        if p.is_dir():
+            for f in p.glob("*.conf"):
+                by_name[f.name] = f
+    return [by_name[n] for n in sorted(by_name)]
+
+
+def ini_last(files, section, key):
+    """The value systemd ends up with for SECTION.KEY across FILES in order: the last assignment
+    wins, and an empty one resets it. None if never set."""
+    val = None
+    for f in files:
+        p = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
+        p.optionxform = str
+        try:
+            p.read(f)
+        except configparser.Error:
+            # A file systemd may read but this check cannot: never pass on it.
+            return "unreadable %s" % f.name
+        if p.has_option(section, key):
+            val = p.get(section, key).strip() or None
+    return val
+
+
+def main_conf(root, name):
+    """systemd's NAME.conf and its NAME.conf.d drop-ins, in the order systemd reads them."""
+    files = [root / d / "systemd" / name for d in ("usr/lib", "etc") if (root / d / "systemd" / name).is_file()]
+    return files + dropins(root, ["%s/systemd/%s.d" % (d, name) for d in CONF_DIRS])
+
+
+def sysctl(root, key):
+    """The value systemd-sysctl sets for KEY: sysctl.d files by name (/etc shadowing the same name
+    elsewhere), then /etc/sysctl.conf; the last assignment wins. None if never set."""
+    root = pathlib.Path(root)
+    files = dropins(root, ["%s/sysctl.d" % d for d in CONF_DIRS])
+    if (root / "etc/sysctl.conf").is_file():
+        files.append(root / "etc/sysctl.conf")
+    val = None
+    for f in files:
+        for ln in f.read_text(errors="replace").splitlines():
+            ln = ln.strip().lstrip("-")
+            if not ln or ln[0] in "#;" or "=" not in ln:
+                continue
+            k, v = (x.strip() for x in ln.split("=", 1))
+            if k.replace("/", ".") == key:
+                val = v
+    return val
+
+
+def dump_violations(root):
+    """IMG-nodump: core dumps are discarded, for every process and for the card's service."""
+    out = []
+    storage = ini_last(main_conf(root, "coredump.conf"), "Coredump", "Storage")
+    if storage != "none":
+        out.append("50-agentos-nodump.conf: coredump Storage is %s; must be none" % storage)
+    limit = ini_last(main_conf(root, "system.conf"), "Manager", "DefaultLimitCORE")
+    if limit not in ("0", "0:0"):
+        out.append("50-agentos-nodump.conf: DefaultLimitCORE is %s; must be 0" % limit)
+    unit = None
+    for d in UNIT_DIRS:
+        if (root / d / CARD_UNIT).is_file():
+            unit = root / d / CARD_UNIT
+    if unit is None:
+        out.append("%s: missing; the card-holding service must set LimitCORE=0" % CARD_UNIT)
+    else:
+        files = [unit] + dropins(root, ["%s/%s.d" % (d, n) for d in UNIT_DIRS for n in ("service", CARD_UNIT)])
+        limit = ini_last(files, "Service", "LimitCORE")
+        if limit not in ("0", "0:0"):
+            out.append("%s: LimitCORE is %s; must be 0" % (CARD_UNIT, limit))
+    pattern = sysctl(root, "kernel.core_pattern")
+    if pattern != CORE_PATTERN:
+        out.append("%s: kernel.core_pattern is %s; must be %s" % (NODUMP_SYSCTL.rsplit("/", 1)[-1], pattern, CORE_PATTERN))
+    suid = sysctl(root, "fs.suid_dumpable")
+    if suid != "0":
+        out.append("%s: fs.suid_dumpable is %s; must be 0" % (NODUMP_SYSCTL.rsplit("/", 1)[-1], suid))
+    return out
+
+
+def swap_violations(root):
+    """IMG-nodump: nothing in the tree turns on swap (the partition table and systemd.swap=0 are
+    checked by finish_image.py)."""
+    out = []
+    fstab = root / "etc/fstab"
+    if fstab.is_file():
+        for ln in fstab.read_text(errors="replace").splitlines():
+            f = ln.split()
+            if f and not f[0].startswith("#") and len(f) >= 3 and f[2] == "swap":
+                out.append("etc/fstab: swap entry %s" % f[0])
+    for d in UNIT_DIRS + ("run/systemd/system",):
+        p = root / d
+        if p.is_dir():
+            for f in sorted(p.rglob("*.swap")):
+                out.append("%s: swap unit" % f.relative_to(root))
+    for d in ("usr/lib", "lib", "etc", "usr/local/lib"):
+        for g in SWAP_GENERATORS:
+            if os.path.lexists(root / d / "systemd/system-generators" / g):
+                out.append("%s/systemd/system-generators/%s: makes zram swap" % (d, g))
+    for n in ("swapfile", "swap.img", "var/swapfile", "var/swap"):
+        if os.path.lexists(root / n):
+            out.append("%s: swap file" % n)
     return out
 
 
