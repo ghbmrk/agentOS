@@ -1251,8 +1251,11 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	}
 	mc.mu.Lock()
 	err = claimLocked(mc)
+	if err == nil && s.Label > mc.Label {
+		// Saved before the snapshot's content reaches the layer (LABEL-durable).
+		err = m.raiseLocked(mc, s.Label)
+	}
 	if err == nil {
-		mc.Label = maxLabel(mc.Label, s.Label)
 		err = m.restartLocked(ctx, mc, &s)
 	}
 	live := mc.State == Running // a guest that could not be killed

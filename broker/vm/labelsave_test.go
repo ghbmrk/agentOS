@@ -131,3 +131,63 @@ func TestLabelDurableMergeSavesTheLabelFirst(t *testing.T) {
 		t.Fatal("after a restart p holds private content under a public label")
 	}
 }
+
+// privateSnapOfDestroyed leaves a private snapshot of a destroyed machine
+// "a" holding file x, and a new public machine created under the same ID:
+// Destroy keeps snapshots, and a machine's own ID puts them in its lineage.
+func (e *env) privateSnapOfDestroyed() Snapshot {
+	e.create("a", admission.Accepted, 500)
+	must(e.t, e.m.RaiseLabel("a", Private))
+	e.guestWrite("a", "x", "canary-private")
+	s, err := e.m.Checkpoint(bg, "a")
+	must(e.t, err)
+	must(e.t, e.m.Destroy(bg, "a"))
+	e.create("a", admission.Accepted, 500)
+	if l := e.labelOf("a"); l != Public {
+		e.t.Fatalf("re-created machine is %s, want public", l)
+	}
+	return s
+}
+
+// noPrivateUnderPublic checks a's label stayed public, in memory and after
+// a restart, with none of the private snapshot's content in its layer.
+func (e *env) noPrivateUnderPublic() {
+	e.t.Helper()
+	if l := e.labelOf("a"); l != Public {
+		e.t.Fatalf("label %s in memory after a failed save, want the saved public", l)
+	}
+	if got := e.guestRead("a", "x"); got != "" {
+		e.t.Fatalf("a's layer holds the private snapshot's file %q under its public label", got)
+	}
+	e.open()
+	if l := e.labelOf("a"); l != Public {
+		e.t.Fatalf("label %s after a restart, want public", l)
+	}
+	if got := e.guestRead("a", "x"); got != "" {
+		e.t.Fatal("after a restart a holds private content under a public label")
+	}
+}
+
+func TestLabelDurableRollbackSavesTheLabelFirst(t *testing.T) {
+	e := newEnv(t, 8192)
+	s := e.privateSnapOfDestroyed()
+	unblock := e.failPrivateSave("a")
+	if err := e.m.Rollback(bg, "a", s.ID); err == nil {
+		t.Fatal("a rollback whose private label failed to save reported success")
+	}
+	unblock()
+	e.noPrivateUnderPublic()
+}
+
+func TestLabelDurableForgetSinceSavesTheLabelFirst(t *testing.T) {
+	e := newEnv(t, 8192)
+	s := e.privateSnapOfDestroyed()
+	mc, err := e.m.Get("a")
+	must(t, err)
+	unblock := e.failPrivateSave("a")
+	if err := e.m.ForgetSince(bg, mc.Lineage, s.Taken.Add(time.Second)); err == nil {
+		t.Fatal("a reset whose private label failed to save reported success")
+	}
+	unblock()
+	e.noPrivateUnderPublic()
+}
