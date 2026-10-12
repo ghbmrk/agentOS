@@ -187,6 +187,29 @@ func TestRecallProvOwnerYesRenews(t *testing.T) {
 	}
 }
 
+// A YES that arrives after the lineage stopped being full (the cap was
+// raised between the ask and the answer) changes nothing and says so.
+func TestRecallProvOwnerYesOnALineageNoLongerFullIsStale(t *testing.T) {
+	x := newRenewRig(t)
+	if err := x.reach.AskRenew(context.Background(), "root"); err != nil {
+		t.Fatal(err)
+	}
+	x.r.prov.SetLimits(Limits{Reads: 5})
+	if full(x.reach, "root") {
+		t.Fatalf("root still full after raising the cap: %v", x.reach.Full())
+	}
+	x.ask.answer("yes")
+	if len(x.vm.calls) != 0 {
+		t.Fatalf("outdated YES touched machines: %v", x.vm.calls)
+	}
+	if n, _, _ := x.r.prov.Size("root"); n != 2 {
+		t.Fatalf("outdated YES changed reads: root holds %d", n)
+	}
+	if len(x.told) != 1 || x.told[0] != "Nothing to do: root's memory is no longer full." {
+		t.Fatalf("told %q", x.told)
+	}
+}
+
 func TestRecallProvOwnerYesWhenTheResetFailsIsCarried(t *testing.T) {
 	x := newRenewRig(t)
 	if err := x.reach.AskRenew(context.Background(), "root"); err != nil {

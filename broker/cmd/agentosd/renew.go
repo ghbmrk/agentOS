@@ -38,6 +38,7 @@ const (
 	renewNotOpen = "I can't renew an agent's memory yet: memory is not open."
 	renewRefused = "I couldn't ask to renew that agent's memory. Try again."
 	renewHelp    = "RENEW: start a full agent memory over."
+	renewUsage   = "Send RENEW to list agents whose memory is full, then RENEW and a number from that list."
 )
 
 // renewer is recall's side (recalltool.LateExecutor).
@@ -54,7 +55,8 @@ type ownerRenew struct {
 	listAt time.Time
 }
 
-// parseRenew reads RENEW (n 0) or RENEW n.
+// parseRenew reads RENEW (n 0) or RENEW n; RENEW and one other word
+// that is not a list number is n -1, answered with the usage.
 func parseRenew(msg string) (n int, ok bool) {
 	f := strings.Fields(strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
@@ -71,7 +73,7 @@ func parseRenew(msg string) (n int, ok bool) {
 	if v, err := strconv.Atoi(f[1]); err == nil && v > 0 && len(f[1]) <= 2 {
 		return v, true
 	}
-	return 0, false
+	return -1, true
 }
 
 // renewName shows a lineage by its agent's name: letters, digits, - and
@@ -98,6 +100,9 @@ func (o *ownerRenew) Text(ctx context.Context, msg string, unlocked bool) (strin
 	n, ok := parseRenew(msg)
 	if !ok || !unlocked {
 		return "", false
+	}
+	if n < 0 {
+		return renewUsage, true
 	}
 	now := o.now()
 	o.mu.Lock()

@@ -102,10 +102,20 @@ func TestRecallProvOwnerRenewStaleAndErrors(t *testing.T) {
 	if r, _ := o.Text(context.Background(), "RENEW", true); r != renewNone {
 		t.Fatalf("empty = %q", r)
 	}
-	for _, m := range []string{"RENEWAL", "RENEW 0", "RENEW 123", "RENEW ALL", "please renew"} {
+	for _, m := range []string{"RENEWAL", "please renew", "RENEW the cache now"} {
 		if _, ok := o.Text(context.Background(), m, true); ok {
 			t.Fatalf("%q taken", m)
 		}
+	}
+	// A RENEW with a word or number that is not a list entry gets the
+	// usage, not a pass to the agent as chat.
+	for _, m := range []string{"RENEW 0", "RENEW 123", "renew all"} {
+		if r, ok := o.Text(context.Background(), m, true); !ok || r != renewUsage {
+			t.Fatalf("%q = %q %v, want usage", m, r, ok)
+		}
+	}
+	if _, ok := o.Text(context.Background(), "RENEW ALL", false); ok {
+		t.Fatal("RENEW ALL taken in a locked session")
 	}
 }
 
