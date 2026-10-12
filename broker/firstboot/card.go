@@ -14,8 +14,11 @@ import (
 var ErrCardPending = errors.New("firstboot: I am waiting for you to save your Owner Card")
 
 // cardState is the card step's latch, the only thing it keeps on disk.
+// Preloaded marks a box that held a claim code (Begin): it survives the
+// confirm, so a box that loses its claim state never looks bare (R4).
 type cardState struct {
 	Confirmed bool `json:"card_confirmed"`
+	Preloaded bool `json:"preloaded,omitempty"`
 }
 
 // CardStep is the first-boot Owner Card step (HW-1): on each start until
@@ -55,7 +58,7 @@ func NewCardStep(st Store, cfg card.DisplayConfig) (*CardStep, error) {
 		if err := prov(c); err != nil {
 			return err
 		}
-		b, err := json.Marshal(cardState{Confirmed: true})
+		b, err := json.Marshal(cardState{Confirmed: true, Preloaded: cs.Preloaded})
 		if err != nil {
 			return err
 		}

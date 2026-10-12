@@ -59,7 +59,7 @@ def core_list(path=CORE_LIST):
 TIER_A_BROKER = {
     "apply", "attest", "bridgeclient", "bridgeproto", "browser", "card", "cgroup", "change",
     "claim", "cleanroom", "core", "clock", "cmd", "control", "corpus", "daemon", "digestqueue",
-    "egress", "grants", "guest", "hint", "hostchange", "hostdisk", "journal", "localapi",
+    "egress", "firstboot", "grants", "guest", "hint", "hostchange", "hostdisk", "journal", "localapi",
     "localsrv", "localui", "loop7", "loops", "machprobe", "mail", "modelroute", "modem",
     "modemlink", "owner", "probecmd", "pubid", "recovery", "replay", "reversible", "sendrules",
     "sim", "sipsign", "smsapi", "sockets", "sockprobe", "tpmseal", "update", "vault", "vendor",
