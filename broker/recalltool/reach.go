@@ -387,6 +387,22 @@ func (r *Reach) TakeBack(ctx context.Context, lineage string, since time.Time, a
 	return nil
 }
 
+// Renew is the owner's control for a lineage whose reads reached the cap
+// (Provenance.ReadsFull): the owner approves taking it back to before its
+// first read still held, which forgets every read since (the machines went
+// back, so none of it is in them) and with them the chain, so the lineage
+// can make notes again. Notes already made stay, and still go when a
+// source they derive from is deleted (their DerivedFrom is in the index).
+// It costs the lineage's work since that read, so the owner decides: a
+// caller calls it only on the owner's approval. Nothing to renew is nil.
+func (r *Reach) Renew(ctx context.Context, lineage string) error {
+	first, ok := r.Prov.firstRead(lineage)
+	if !ok {
+		return nil
+	}
+	return r.TakeBack(ctx, lineage, first, true)
+}
+
 // takeBack runs the reset once; a reset recorded since means the machines
 // are back. Once they are, the take-back is marked done (approved or
 // not) so it is never repeated, and TakeBackOf reports it done once its
@@ -1039,4 +1055,4 @@ func (r *Reach) loc() *time.Location {
 // Needed reports a deleted item some lineage still holds: its tombstone
 // must outlive the prune policy (Index.KeepTombstones), so nothing derived
 // from it comes back and the reach is replayed at each start.
-func (r *Reach) Needed(id string) bool { return len(r.Prov.Holders(id)) > 0 }
+func (r *Reach) Needed(id string) bool { return len(r.Prov.Holders(id)) > 0 || r.Prov.Head(id) }

@@ -37,11 +37,15 @@ type APConfig struct {
 // AccessPoint is the hardware seam: a driver brings up the access point,
 // its DHCP and DNS, and the firewall from the configurations below. The
 // real driver lands with the image (P2-1) and is tested on hardware (A1,
-// A6); tests use the pure configuration functions.
+// A6); tests use the pure configuration functions. Callers start it
+// through APLoader, whose BringUp first lets its interface through the
+// inbound firewall (DEV-net-f, DEV-net-h).
 type AccessPoint interface {
 	Start(ctx context.Context, cfg APConfig) error
 	// SetPassthrough turns ONB-5 passthrough on once an uplink exists.
 	SetPassthrough(on bool, uplink string) error
+	// Stop returns nil when no access point runs: APLoader.Start runs
+	// BringDown, and so Stop, on a box that may never have run one.
 	Stop() error
 }
 

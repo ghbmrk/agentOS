@@ -17,7 +17,7 @@ Each fact has one home; other files point to it rather than restate it ([docs/OP
 | [docs/OPERATING.md](docs/OPERATING.md) | procedures | The reasons and procedures behind the rules: triage, risk tiers, review pipeline, sessions, parallel teams. | L1, Mark decides |
 | [BOARD.md](BOARD.md) | generated | Index of live work packages, rendered from the `work-item` issues by tools/board.py; change an issue, not a row. | board.yml |
 | `briefs/<ID>.md` | state | One package's brief: goal, IDs, scope, dependencies, estimate. | L1 |
-| [docs/LANES.md](docs/LANES.md) | state | Which team owns which paths; onboarding records. | primary team |
+| [docs/LANES.md](docs/LANES.md) | state | Which team owns which paths; onboarding records. | either peer subscription |
 | [docs/conv-3-triage.md](docs/conv-3-triage.md) | state | Class of every open PR (merge-ready, finish, parts bin, superseded, stale) and the close list (Q3, D-090). | CONV-3, then L1 |
 | [docs/conv-5-uncovered.md](docs/conv-5-uncovered.md) | state | What blocks each requirement ID TRACE.md lists as uncovered, and the BOARD rows that close them. | CONV-5 builder, L1 |
 | [DECISIONS.md](DECISIONS.md) | record | Decisions as `D-NNN` rows with date, status and source; long reasoning in `decisions/D-NNN.md`. | L1, Mark |

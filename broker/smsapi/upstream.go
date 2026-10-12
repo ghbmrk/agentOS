@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // MaxResponse bounds a provider's reply; a longer one is refused unread
@@ -31,8 +33,14 @@ const MaxPages = 10
 // NewHTTPClient is the vault process's client for the provider: TLS 1.2
 // or later against the system's roots (no RootCAs override), no proxy, no
 // redirects followed, and bounded time.
-func NewHTTPClient() *http.Client {
-	return newHTTPClient(&tls.Config{MinVersion: tls.VersionTLS12}, (&net.Dialer{Timeout: 10 * time.Second}).DialContext)
+//
+// Every dial goes through g, the home-network address policy (DEV-2); nil
+// means netguard.New with only the IANA registries.
+func NewHTTPClient(g *netguard.Policy) *http.Client {
+	if g == nil {
+		g = netguard.New(netguard.Config{Timeout: 10 * time.Second})
+	}
+	return newHTTPClient(&tls.Config{MinVersion: tls.VersionTLS12}, g.DialContext)
 }
 
 // newHTTPClient is NewHTTPClient with the TLS settings and dialer given;

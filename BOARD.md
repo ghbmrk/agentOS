@@ -94,6 +94,20 @@ Primary lane; from an external review's points 2 to 6, checked against main at 9
 | LRN-1 | [No adoption bonus without a measured gain](briefs/LRN-1.md) | — | in review (tier A) |
 | DEL-1-f1 | A deletion reaches owner replies waiting in the guest outbox: the forget fan (CAP-3) removes or redacts a deleted machine's or task's outbox entries, which today stay until sent; failure path: delete while replies are waiting to be sent (release, tier A; #709 Findings, brief to write) | DEL-1 | queued (needs brief) |
 
+## Local devices (D-069)
+
+The home-network boundary is release work (A14); device features follow the first release ([docs/LATER-HISTORY.md](docs/LATER-HISTORY.md), A16).
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+
+## Controller and helper system (D-102)
+
+Queued by the coordinator after #1054 (D-102) merged; each row is a release finding from that PR's body and reviews. Ordered by dependency. Details are in the briefs.
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+
 ## Phase 0: harness and risk spikes
 
 | ID | Package | Needs | State |

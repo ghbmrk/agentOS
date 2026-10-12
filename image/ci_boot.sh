@@ -68,7 +68,7 @@ D=$W/disk.raw
 copy "$D"
 before=$(stat -c %s "$IMG")
 boot "$W/console.log" "$D"
-for want in "agentos-health: PASS secure_boot=on usr=verity" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
+for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
 	has "$W/console.log" "$want"
 done
 # Root started at its 1G minimum inside an image of $before bytes; the drive gained 2G.
