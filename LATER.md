@@ -851,3 +851,8 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
 | DEV-net-b l1 | Stale nil-guard comments at `broker/mail/imapsmtp/imapsmtp.go:65` and `broker/smsapi/service.go:44` | Found in PR #1051's L3 |
 | CTRL-spike-r | `check.py` counts any iperf3 retransmit as a stall and takes the requested rather than the measured duration; `probe.py ap` asserts SAE-only and isolation from its own config, not the running AP (recheck) | Found in PR #1058's L3; check at the hardware run |
+| SIM-split-b l1 | `recheck`. PR #1057 L3: `checker.Act` covers host, method, wire path and body but not the forwarded request headers; today's declared headers do not change the act, but a declared header that selects a target (an idempotency or organization header) would not be bound |
+| SIM-split-b l2 | PR #1057 L3: `checker.ApprovalTTL` is fixed at 15 minutes while the CH-10 code lifetime is an owner setting (default 15); wiring should pass the owner's value |
+| SIM-split-b l3 | PR #1057 L3: `broker/procguard` has only a `_linux.go` file while its test is untagged, so `go test ./...` on a non-Linux host fails to build that package |
+| SIM-split-b l4 | PR #1057 Potency lens: the holder now serves irreversible and secret verbs with an approval, but draft and organize still cannot route through a holder (narrows SIM-split-a l4) |
+| SIM-split-b l5 | PR #1057 UX lens: the approval is spent before the provider is reached, so a send that fails upstream needs a fresh owner code; wiring should say so in the retry prompt rather than ask silently |
