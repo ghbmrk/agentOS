@@ -107,7 +107,7 @@ func TestSetupWaitsForClaim(t *testing.T) {
 	// after a restart.
 	r.reopen()
 	r.otherPhone()
-	if w := r.do("GET", "/setup", nil); w.Code != 403 || !strings.Contains(w.Body.String(), "already claimed") {
+	if w := r.do("GET", "/setup", nil); w.Code != 403 || !strings.Contains(w.Body.String(), "already claimed") || !strings.Contains(w.Body.String(), "Setup continues on the phone that claimed me") {
 		t.Fatalf("other phone's setup page: %d %s", w.Code, w.Body.String())
 	}
 	if w := r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}}); w.Code != 403 {

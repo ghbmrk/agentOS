@@ -74,6 +74,12 @@ const ReserveTries = 3
 // PrefixSymbols is the sticker's first two groups (40 bits).
 const PrefixSymbols = 8
 
+// PrefixTag is the bytes of the prefix hash the disk keeps. A full hash
+// would let a disk read search the code's two halves apart (2^40 each);
+// a 16-bit tag rules out all but 1 in 2^16 prefixes and leaves the code's
+// search nearly whole (K2, K9).
+const PrefixTag = 2
+
 // state is everything the claim keeps on disk. It holds no secret: the
 // code only as a salted hash, removed at the claim, and the claimant's
 // token only as a hash.
@@ -89,8 +95,9 @@ type state struct {
 	Locks int `json:"locks"`
 	// LockedBoot is the kernel boot the screen locked in; "" when open.
 	LockedBoot string `json:"locked_boot,omitempty"`
-	// Prefix verifies the code's first PrefixSymbols symbols (salted, its
-	// own domain). A state sealed without it has no reserve.
+	// Prefix is a PrefixTag-byte tag of the code's first PrefixSymbols
+	// symbols (salted, its own domain). A state sealed without it has no
+	// reserve.
 	Prefix []byte `json:"prefix,omitempty"`
 	// Reserve counts the reserve's wrong codes in boot ReserveBoot.
 	Reserve     int    `json:"reserve"`
@@ -218,7 +225,7 @@ func prefixVerifier(salt []byte, prefix string) []byte {
 	h.Write([]byte("agentos claim prefix v1\x00"))
 	h.Write(salt)
 	h.Write([]byte(prefix))
-	return h.Sum(nil)
+	return h.Sum(nil)[:PrefixTag]
 }
 
 func tokenHash(tok string) []byte {
@@ -301,6 +308,10 @@ type Status struct {
 	// at most; 0 when the state has no reserve or the screen is stuck).
 	// While it is above 0 a locked screen still takes the sticker's code.
 	Reserve int
+	// Reinstall marks a box whose claim state is lost: no phone holds its
+	// setup, so its screens say only "reinstall me" (firstboot's
+	// RouteReinstall). Claim never sets it.
+	Reinstall bool
 }
 
 // Status reports the claim's state.
@@ -319,7 +330,7 @@ func (c *Claim) Status() Status {
 
 // reserveLeft is the reserve's tries left this boot.
 func (c *Claim) reserveLeft() int {
-	if len(c.st.Prefix) != sha256.Size {
+	if len(c.st.Prefix) != PrefixTag {
 		return 0
 	}
 	if c.st.ReserveBoot != c.boot {

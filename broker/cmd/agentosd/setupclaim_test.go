@@ -207,8 +207,11 @@ func TestALostClaimStateRoutesToReinstall(t *testing.T) {
 	}
 	for _, p := range []*phone{owner, {ip: "10.42.0.77:52000"}} {
 		for _, path := range []string{"/setup", "/setup/approvals", "/setup/card"} {
-			if w := p.do(t, cs2.ui, "GET", path, nil); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "already claimed") {
+			w := p.do(t, cs2.ui, "GET", path, nil)
+			if body := w.Body.String(); w.Code != http.StatusForbidden || !strings.Contains(body, "already claimed") || !strings.Contains(body, "reinstall me") {
 				t.Fatalf("GET %s: %d", path, w.Code)
+			} else if strings.Contains(body, "Setup continues") { // R4: no phone holds this setup
+				t.Fatalf("GET %s on a reinstall box points at a claiming phone: %s", path, body)
 			}
 		}
 		if w := p.do(t, cs2.ui, "POST", "/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}}); w.Code != http.StatusForbidden {

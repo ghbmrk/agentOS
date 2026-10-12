@@ -3,6 +3,7 @@ package claim
 // REQ: HW-10, HW-1
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -96,6 +97,9 @@ func TestTheReserveIsPerBootAndBounded(t *testing.T) {
 	}
 	b.boot = "boot-2"
 	c = b.start()
+	if st := c.Status(); st.Reserve != ReserveTries {
+		t.Fatalf("a new boot did not refill the reserve: %+v", st)
+	}
 	for i := 0; i < ReserveTries; i++ {
 		if _, err := c.Try(ownerTypo(code)); !errors.Is(err, ErrWrongCode) {
 			t.Fatalf("new boot's typo %d: %v", i, err)
@@ -131,5 +135,24 @@ func TestUnsavableReserveCountLocks(t *testing.T) {
 	}
 	if _, err := c.Try(code); !errors.Is(err, ErrLocked) {
 		t.Fatalf("right code after an unsaved count: %v", err)
+	}
+}
+
+// The disk keeps only a PrefixTag-byte tag of the prefix hash, so a disk
+// read cannot split the code into two halves searchable offline (K2, K9):
+// a tag rules out all but 1 in 2^16 prefixes, leaving the full code's
+// search nearly whole.
+func TestThePrefixTagIsShort(t *testing.T) {
+	b, _ := newBox(t)
+	raw, err := b.st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s state
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	if PrefixTag != 2 || len(s.Prefix) != PrefixTag {
+		t.Fatalf("prefix tag is %d bytes", len(s.Prefix))
 	}
 }

@@ -126,7 +126,7 @@ func Begin(cfg BoxConfig) (*FirstBoot, error) {
 // everyone, a claimant to no one, no card.
 type reinstall struct{}
 
-func (reinstall) Status() claim.Status { return claim.Status{Claimed: true} }
+func (reinstall) Status() claim.Status { return claim.Status{Claimed: true, Reinstall: true} }
 func (reinstall) Claim(string) (string, error) {
 	return "", claim.ErrAlreadyClaimed
 }
