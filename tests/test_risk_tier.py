@@ -41,6 +41,8 @@ class RiskTierTest(unittest.TestCase):
             # REQ: HW-10 (CTRL-claim-tier, #1067 R1: the lockout and one-claim rule)
             "broker/claim/claim.go": "A",
             "broker/claim/claim_test.go": "A",
+            # REQ: HW-10 (CTRL-claim-wire: first boot routes the claim and the card)
+            "broker/firstboot/start.go": "A",
             "broker/recall/index.go": "B",
             "broker/newpkg/x.go": "B",
             "guest/openclaw/Dockerfile": "B",
@@ -204,7 +206,7 @@ class RiskTierTest(unittest.TestCase):
         missing = [p for p in sorted(rt.TIER_A_BROKER) if not (ROOT / "broker" / p).is_dir()]
         self.assertEqual(missing, [])
 
-    # REQ: HW-10 (CTRL-claim-tier: OPERATING §3 and TIER_A_BROKER agree on claim)
+    # REQ: HW-10 (CTRL-claim-tier, CTRL-claim-wire: OPERATING §3 and TIER_A_BROKER agree on claim and firstboot)
     def test_operating_tier_a_list_agrees_with_tier_a_broker(self):
         text = (ROOT / "docs" / "OPERATING.md").read_text()
         row = next(l for l in text.splitlines() if l.startswith("| **A** |"))
@@ -215,6 +217,8 @@ class RiskTierTest(unittest.TestCase):
             names.update(n.rstrip("*") for n in item.split("/"))
         self.assertIn("claim", names)
         self.assertIn("claim", rt.TIER_A_BROKER)
+        self.assertIn("firstboot", names)
+        self.assertIn("firstboot", rt.TIER_A_BROKER)
         # Every package OPERATING names as tier A is tier A in the tool
         # (modem* covers modem and modemlink).
         not_a = [n for n in sorted(names)
