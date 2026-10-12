@@ -84,6 +84,20 @@ func (c Inbound) Validate() error {
 // "nft add element inet agentos_inbound exempt { <iface> }".
 const InboundExemptSet = "exempt"
 
+// InboundExemptRemove renders the nft script that takes iface out of the
+// exempt set (DEV-2, DEV-net-g): an add then a delete in one transaction,
+// so it succeeds whether or not iface is still there, and touches no other
+// element. It refuses "lo", which the set always holds, and any name
+// ifaceRe refuses. Removing an access point's interface closes it: the
+// interface falls to this table's drop.
+func InboundExemptRemove(iface string) (string, error) {
+	if !ifaceRe.MatchString(iface) || iface == "lo" {
+		return "", fmt.Errorf("netguard: %q is not an exempt interface", iface)
+	}
+	el := fmt.Sprintf("inet %s %s { %q }", InboundTable, InboundExemptSet, iface)
+	return "add element " + el + "\ndelete element " + el + "\n", nil
+}
+
 // InboundRules renders the nftables ruleset that drops every connection the
 // home network opens to a box port (DEV-2 In), on every interface: one the
 // box has not named yet (a USB tether, a second NIC) is dropped too. It
