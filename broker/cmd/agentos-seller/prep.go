@@ -2,16 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/hostdisk"
 )
@@ -110,7 +111,7 @@ func prep(c prepConfig) (err error) {
 	if err := writeSticker(c.Out, code); err != nil {
 		return err
 	}
-	logf("wrote %s: print sticker.html at 100%%, then delete the directory", c.Out)
+	logf("wrote %s: write box.raw to the box's SSD, print sticker.html at 100%%, then delete the directory", c.Out)
 	return nil
 }
 
@@ -163,12 +164,19 @@ func (e entry) String() string { return e.mode + " " + e.uid + ":" + e.gid }
 
 func (e entry) dir() bool { return strings.HasPrefix(e.mode, "04") }
 
+// tool runs debugfs or e2fsck with only a fixed PATH and LANG, never this
+// process's environment (childproc).
+func tool(o childproc.Options, name string, args ...string) *childproc.Cmd {
+	env := childproc.NewEnv("PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C")
+	return childproc.Command(context.Background(), env, o, name, args...)
+}
+
 func fsSpec(image string, off int64) string { return fmt.Sprintf("%s?offset=%d", image, off) }
 
 // lookup finds p in the file system through its parent's listing. debugfs
 // exits 0 for a missing path, so a missing entry is an empty listing.
 func lookup(image string, off int64, p string) (entry, bool, error) {
-	out, err := exec.Command("debugfs", "-R", "ls -p "+path.Dir(p), fsSpec(image, off)).Output()
+	out, err := tool(childproc.Options{}, "debugfs", "-R", "ls -p "+path.Dir(p), fsSpec(image, off)).Output()
 	if err != nil {
 		return entry{}, false, fmt.Errorf("debugfs: %w", err)
 	}
@@ -230,9 +238,9 @@ func sealInto(box string, off int64, tmpDir string, state []byte, dirExists bool
 		"sif "+claim.StatePath+" mode 0100600",
 		"sif "+claim.StatePath+" uid 0",
 		"sif "+claim.StatePath+" gid 0")
-	cmd := exec.Command("debugfs", "-w", "-f", "-", fsSpec(box, off))
-	cmd.Dir = tmpDir // write reads stateTemp relative to here
-	cmd.Stdin = strings.NewReader(strings.Join(cmds, "\n") + "\n")
+	// write reads stateTemp relative to Dir.
+	cmd := tool(childproc.Options{Dir: tmpDir, Stdin: strings.NewReader(strings.Join(cmds, "\n") + "\n")},
+		"debugfs", "-w", "-f", "-", fsSpec(box, off))
 	// debugfs exits 0 when a command fails; checkSealed reads it all back.
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("debugfs: %v: %s", err, out)
@@ -256,14 +264,14 @@ func checkSealed(box string, off int64, state []byte, code string, dirExisted bo
 			return fmt.Errorf("%s was not written as %s", p, w)
 		}
 	}
-	got, err := exec.Command("debugfs", "-R", "cat "+claim.StatePath, fsSpec(box, off)).Output()
+	got, err := tool(childproc.Options{}, "debugfs", "-R", "cat "+claim.StatePath, fsSpec(box, off)).Output()
 	if err != nil {
 		return fmt.Errorf("debugfs: %w", err)
 	}
 	if !bytes.Equal(got, state) {
 		return fmt.Errorf("%s does not read back as written", claim.StatePath)
 	}
-	if out, err := exec.Command("e2fsck", "-fn", fsSpec(box, off)).CombinedOutput(); err != nil {
+	if out, err := tool(childproc.Options{}, "e2fsck", "-fn", fsSpec(box, off)).CombinedOutput(); err != nil {
 		return fmt.Errorf("e2fsck after sealing: %v: %s", err, out)
 	}
 	// Open a copy as the box will, and claim it with the sticker's code.

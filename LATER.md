@@ -840,7 +840,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | DEV-net-e l2 | `recheck`. PR #1055 L3: the CI step running `tests/test_inbound_netns.py` under sudo passes if both tests skip (no root, ip or nft); make it fail on skip |
 | DEV-net-e l3 | PR #1055 L3: if the image adopts NetworkManager for the AP or station (P2-2w), `NetworkManager.service` needs the same `Requires=`/`After=agentos-inbound.service` drop-in as systemd-networkd |
 | DEV-net-e l4 | PR #1055 UX lens: `agentos-egress unpin` prints nothing on success; say which pin was removed |
-| SELLER-prep-1 l1 | `recheck`. Nothing signs the raw image file: `agentos-seller` trusts a main-built CI image by its SHA256SUMS only (I8, C3; the `/usr` verity hash is signed in the UKI, the root partition is not). A signed raw image and its check belong with FLASH-1 |
 
 ## Reuse candidates
 | ID | Component | Why |
