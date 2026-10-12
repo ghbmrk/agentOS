@@ -18,4 +18,9 @@ Board section: Backlog refill (rows CAP-15a and CAP-15b, next to CRED-12).
 
 **Off-gate.** Not release acceptance. If D-096's scope freeze merges, these rows start after G2.
 
+**Open for the expansion (later items from the #1028 reviews; LATER.md CAP-15 l1–l3):**
+- Refused-connection journal entries carry target-controlled destination strings: quote and length-cap them, and cover that in the failure-path test above (CAP-15 l1).
+- A saved network capture is analysed only if it is the box's own traffic: state the check (provenance from the broker's own capture store) or drop the claim (CAP-15 l2).
+- A gray-area approval per use or per service: set its expiry and scope, and what revoking it does to a running task, consistent with GRAY-sd (CAP-15 l3).
+
 **Scope:** to be set when the brief is expanded.
