@@ -850,3 +850,4 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SR2-4i | systemd resource control (IOWeight=, CPUWeight=) | Sets io.weight and cpu.weight per slice; add iocost QoS on the image |
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
 | DEV-net-b l1 | Stale nil-guard comments at `broker/mail/imapsmtp/imapsmtp.go:65` and `broker/smsapi/service.go:44` | Found in PR #1051's L3 |
+| CTRL-spike-r | `check.py` counts any iperf3 retransmit as a stall and takes the requested rather than the measured duration; `probe.py ap` asserts SAE-only and isolation from its own config, not the running AP (recheck) | Found in PR #1058's L3; check at the hardware run |
