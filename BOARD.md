@@ -183,7 +183,7 @@ Queued by the coordinator after #1054 (D-102) merged; each row is a release find
 |---|---|---|---|
 | CTRL-spike | [M6 Ultra spikes: USB-stick boot with no key press, USB4 networking, Wi-Fi access-point mode](briefs/CTRL-spike.md) | Mark: hardware (M6 Ultra unit) | queued (release; HW-13, HW-12, CH-7, A1; tier C; harness merged in #1058, the hardware run waits on the unit) |
 | CTRL-card | [First-boot Owner Card: the box generates it, the phone shows it, the display copy is erased](briefs/CTRL-card.md) | P2-2 | merged (#1060, ddb25b0) |
-| CTRL-card-wire | [Wire the Owner Card into the localui setup page and first boot; the finish path calls Hold()](briefs/CTRL-card-f.md) | CTRL-card | queued (release; HW-1, ONB-7, A1 test 2; tier A; from #1060) |
+| CTRL-card-wire | [Wire the Owner Card into the localui setup page and first boot; the finish path calls Hold()](briefs/CTRL-card-f.md) | CTRL-card | building (release; HW-1, ONB-7, A1 test 2; tier A; from #1060) |
 | CTRL-card-rot | [Recovery-key rotation shows its key on card.Display: the same confirm-then-erase](briefs/CTRL-card-f.md) | CTRL-card | queued (release; REC-4, HW-1; tier A; from #1060) |
 | IMG-nodump | [Image: no core dumps, swap off or encrypted, so the passphrase string never reaches disk (S1)](briefs/CTRL-card-f.md) | CTRL-card | queued (release; HW-1 test 1, A1; tier A; from #1060 S1) |
 | CTRL-claim | [Claim flow for a preloaded box: a one-time sticker code, one claim, no secret before it](briefs/CTRL-claim.md) | CTRL-card | building (release; HW-10, A1; tier A) |
