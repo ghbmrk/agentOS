@@ -209,6 +209,8 @@ type rig struct {
 	via Hooks
 	// owned, when set, is the server's Owner Card step.
 	owned OwnerCard
+	// rot, when set, is the server's card rotation.
+	rot RotationCard
 }
 
 func newRig(t *testing.T) *rig {
@@ -231,7 +233,7 @@ func (r *rig) open(st SetupStore) *Server {
 	if r.via != nil {
 		h = r.via
 	}
-	s, err := New(Config{AP: testAP(), Hooks: h, SetupSecret: r.card.SetupSecret, Store: st, Card: r.owned,
+	s, err := New(Config{AP: testAP(), Hooks: h, SetupSecret: r.card.SetupSecret, Store: st, Card: r.owned, Rotation: r.rot,
 		Defaults: "spend cap $20 a day; payments need approval.", Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
 		r.t.Fatal(err)
