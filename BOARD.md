@@ -52,7 +52,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| SIM-gate | [Merge gate compares content, not patch-ids](briefs/SIM.md#sim-gate-the-merge-gate-compares-content-not-patch-ids-tier-c) | #692 | queued (fix lands in #692; C) |
+| SIM-gate | [Merge gate compares content, not patch-ids](briefs/SIM.md#sim-gate-the-merge-gate-compares-content-not-patch-ids-tier-c) | #692 | merged (#692, 9c51a73) |
 | SIM-fs | [One durable-write helper; every rename dir-synced, vm metadata included](briefs/SIM.md#sim-fs-one-durable-write-helper-used-everywhere-tier-a) | — | queued (brief ready; tier A) |
 | SIM-bound | [Bounded broker memory under deny-all; STOP reads an index](briefs/SIM.md#sim-bound-bounded-broker-memory-and-stop-without-a-history-walk-tier-a) | — | queued (brief ready; tier A) |
 | SIM-sd | [L1 spec diff: one log, owner messages as intents, one outcome, learning off until it wins](briefs/SIM.md#sim-sd-l1-spec-diff-for-one-log-mark-approves) | — | queued (B; Mark approves) |
