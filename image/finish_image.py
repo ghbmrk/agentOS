@@ -17,6 +17,8 @@ import subprocess
 import sys
 
 ESP = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+# Linux swap (IMG-nodump): the broker's memory holds the Owner Card passphrase (card C13).
+SWAP_GUID = "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f"
 TRIES = 3
 # No menu: boot the default entry at once (a held key still shows it on a PC with a screen).
 # No editor: anyone at the keyboard could otherwise drop usrhash= or add init=/bin/sh (Type #1
@@ -56,6 +58,17 @@ def esp_violations(paths, entry):
                   if p not in allowed and not any(re.fullmatch(a, p) for a in ESP_ALLOWED))
 
 
+def swap_violations(partitions, entry):
+    """No swap on the built disk (IMG-nodump): no partition of the swap type, and the entry turns
+    off swap units (its last systemd.swap= is 0). partitions: sfdisk -J's list."""
+    out = ["swap partition %s" % p.get("node", "?") for p in partitions if p["type"].lower() == SWAP_GUID]
+    vals = re.findall(r"(?:^|\s)systemd\.swap=(\S*)", " ".join(
+        ln.split(None, 1)[1] for ln in entry.splitlines() if re.match(r"options\s", ln)))
+    if not vals or vals[-1] not in ("0", "no", "false", "off"):
+        out.append("boot entry does not set systemd.swap=0")
+    return out
+
+
 def manifest(version, roothash, entry_name, entry_text, files, boot=None):
     """The release (UPD-1a): /usr verity root hash plus the boot entry that mounts it, and the
     sha256 of the kernel and initrd that entry boots."""
@@ -78,8 +91,12 @@ def verify_usr(data, tree, roothash):
         raise ValueError("/usr does not verify against usrhash=%s" % roothash)
 
 
+def partition_table(img):
+    return json.loads(subprocess.check_output(["sfdisk", "-J", img]))["partitiontable"]
+
+
 def esp_offset(img):
-    t = json.loads(subprocess.check_output(["sfdisk", "-J", img]))["partitiontable"]
+    t = partition_table(img)
     p = next(p for p in t["partitions"] if p["type"].lower() == ESP)
     return p["start"] * t.get("sectorsize", 512)
 
@@ -112,6 +129,9 @@ def main(out, version):
     bad = esp_violations(paths, text)
     if bad:
         sys.exit("ESP holds files outside the allowlist (HW-1): %s" % bad)
+    bad = swap_violations(partition_table(str(img))["partitions"], text)
+    if bad:
+        sys.exit("image could swap or keep the broker's memory (IMG-nodump): %s" % bad)
     boot = {}
     for p in boot_files(text):
         data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
