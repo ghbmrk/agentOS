@@ -31,6 +31,12 @@ type claimView struct {
 	TriesLeft int
 	Locked    bool
 	Claimed   bool
+	// Reserve is the sticker holder's tries left this boot: while above
+	// 0 a locked page still takes the sticker's code (claim.ReserveTries).
+	Reserve int
+	// Reinstall drops "setup continues on the phone that claimed me":
+	// the box lost its claim state, so no phone holds its setup.
+	Reinstall bool
 }
 
 // claimGate keeps setup behind the box's claim: before it every setup
@@ -57,7 +63,7 @@ func (s *Server) claimGate(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	w.WriteHeader(http.StatusForbidden)
-	s.render(w, "claimbox", claimView{Claimed: true})
+	s.render(w, "claimbox", claimView{Claimed: true, Reinstall: s.cfg.Claim.Status().Reinstall})
 	return true
 }
 
@@ -122,5 +128,5 @@ func (s *Server) claimPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) claimView() claimView {
 	st := s.cfg.Claim.Status()
-	return claimView{TriesLeft: st.TriesLeft, Locked: st.Locked, Claimed: st.Claimed}
+	return claimView{TriesLeft: st.TriesLeft, Locked: st.Locked, Claimed: st.Claimed, Reserve: st.Reserve, Reinstall: st.Reinstall}
 }
