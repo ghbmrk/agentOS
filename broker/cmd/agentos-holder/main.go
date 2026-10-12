@@ -33,7 +33,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/holder"
 	"github.com/ghbmrk/agentos/broker/netguard"
-	"github.com/ghbmrk/agentos/broker/sockets"
+	"github.com/ghbmrk/agentos/broker/procguard"
 )
 
 const netWatchEvery = time.Minute
@@ -108,7 +108,7 @@ func run(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := sockets.Isolate(c.requestUID, c.handUID); err != nil {
+	if err := procguard.Isolate(c.requestUID, c.handUID); err != nil {
 		return err
 	}
 	var redeem func(context.Context, string) (bool, error)

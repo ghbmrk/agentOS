@@ -27,7 +27,7 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/checker"
-	"github.com/ghbmrk/agentos/broker/sockets"
+	"github.com/ghbmrk/agentos/broker/procguard"
 )
 
 func main() {
@@ -102,7 +102,7 @@ func run(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := sockets.Isolate(c.peers()...); err != nil {
+	if err := procguard.Isolate(c.peers()...); err != nil {
 		return err
 	}
 	chk, err := checker.New(checker.Config{StatePath: c.state})

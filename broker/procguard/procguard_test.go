@@ -1,4 +1,4 @@
-package sockets
+package procguard
 
 import (
 	"os"

@@ -1,4 +1,7 @@
-package sockets
+// Package procguard hardens a process that serves peer sockets apart from
+// its callers. It sits outside sockets so agentosd, which imports sockets,
+// does not link the prctl calls (daemon inference check).
+package procguard
 
 import (
 	"fmt"
@@ -15,11 +18,11 @@ func Isolate(peers ...int) error {
 	me := os.Getuid()
 	for _, p := range peers {
 		if p == me {
-			return fmt.Errorf("sockets: running as peer uid %d; run as a uid of its own", me)
+			return fmt.Errorf("procguard: running as peer uid %d; run as a uid of its own", me)
 		}
 	}
 	if _, _, e := syscall.RawSyscall6(syscall.SYS_PRCTL, syscall.PR_SET_DUMPABLE, 0, 0, 0, 0, 0); e != 0 {
-		return fmt.Errorf("sockets: set non-dumpable: %w", e)
+		return fmt.Errorf("procguard: set non-dumpable: %w", e)
 	}
 	return nil
 }
