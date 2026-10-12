@@ -31,6 +31,9 @@ type claimView struct {
 	TriesLeft int
 	Locked    bool
 	Claimed   bool
+	// Reserve is the sticker holder's tries left this boot: while above
+	// 0 a locked page still takes the sticker's code (claim.ReserveTries).
+	Reserve int
 }
 
 // claimGate keeps setup behind the box's claim: before it every setup
@@ -122,5 +125,5 @@ func (s *Server) claimPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) claimView() claimView {
 	st := s.cfg.Claim.Status()
-	return claimView{TriesLeft: st.TriesLeft, Locked: st.Locked, Claimed: st.Claimed}
+	return claimView{TriesLeft: st.TriesLeft, Locked: st.Locked, Claimed: st.Claimed, Reserve: st.Reserve}
 }
