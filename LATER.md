@@ -21,7 +21,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | S2 | A1, A3 | Modem SMS and voice; waits on Mark's modems |
 | P2-4-hw | A8 | Real-TPM trusted-host run; risk 14 |
 | OP9-status | A11 (OP-9) | STATUS names every capability that is off or can't run; briefs/OP9-status.md, split into -a and -b |
-| DIG-1 | A3 (CH-15), OP-9 | Daily digest sender reading every `Digest()` source; nothing sends a digest today; brief to be written |
 | P3-4b-4 | LOOP-7 (D-067) | Continuous canary rounds, published corpora, scripted tamper and exhaustion probes; same basis as P3-4b-3 |
 | UPD-b | A1, A14 (UPD-3) | Update before accounts connect |
 | CH-20w | A15 (CH-20) | Evidence delivery through the vault-held mail adapter |
@@ -166,7 +165,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | OP9-status-a l2 | L3 L2 on #525: with the guest plane failing and no worker image set, STATUS gives both "Agent and worker tools: off" and "Worker tools: not set up" (opposite fixes, against OP-9's "exactly one"); clear `workersOff` in `agentOff(agentNoMachines)` or skip the C10 line while C1 names worker tools |
 | OP9-status-a l3 | Security 3 on #525: `ownerWorded` runs only in tests; fine while every line is a constant, but if one is ever formatted, call `capLines.check` at start or fail the test that enumerates producers |
 | OP9-status-a l4 | UX 4 on #525: a STATUS in the first minute, before `agentos-egress` is up, says "restart the box" (cached up to a minute), which does not help; fixed in effect by CRED-5f's modelroute state |
-| OP9-status-a l5 | UX 5 on #525: C11 stands on every box until W5b, so a daily digest would repeat "Update checks: not running; nothing to do"; the DIG-1 brief says how lines with no owner step are paced, decided by Mark together with Q1 |
+| OP9-status-a l5 | UX 5 on #525: C11 stands on every box until W5b, so a daily digest would repeat "Update checks: not running; nothing to do"; DIG-1 is dropped; SIM-pull (STATUS and urgent notifications, no digest) decides how lines with no owner step are shown |
 | OP9-status-a l6 | UX 6 on #525: "Routing: learning cannot change how work is routed here" is the least plain line; say "Learning cannot change which model does which work" |
 | DOC-3 f1 | L3 on #356: the SHAs on rows inferred as merged name the last commit touching the package, not its merge; relabel as "last touched" or cite the PR. DOC-7 left it: the inferred rows are not recorded and the clone history is shallow, so they cannot be told from the other SHA rows |
 | DOC-3 f2 | L3 on #356: D-041 (license) has date `Pending`, not ISO; set it when the license is chosen |
@@ -493,7 +492,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | W5-Db l1 | L3 9 on #565: W5-Da-r1 to r4 stay `queued (folded into …)`; a `folded` board state, or removing folded rows, would keep BOARD queries from double-counting them |
 | W5-Db l2 | L3 delta on #565: DC-4 says `capLines.add` puts a STATUS line under the `capLineTexts` wording test, but `capLineTexts()` (`capoff.go`) is a hand-kept list; W5-Dc appends its new constants there, and the brief should say so if edited again |
 | W5-Db l3 | L3 delta on #565: W5-Dc covers only CH-15's "always sent" clause (pacing and quiet hours are W5-Dc-r1), but a `REQ: CH-15` marker shows CH-15 covered in TRACE.md; W5-Dc's PR states the partial coverage on its trace table |
-| W5-Dc l1 | #592: the DC-8 outage latch is in memory only when the state store also fails (a restart may resend that day); digest length against `control.MaxText` is bounded by DIG-1's sources (render refuses, never cuts; status lines capped at 3); no digest without `-modem-bridge` |
+| W5-Dc l1 | #592: the DC-8 outage latch is in memory only when the state store also fails (a restart may resend that day); digest length against `control.MaxText` (render refuses, never cuts; status lines capped at 3) ends with the digest under SIM-pull, DIG-1 being dropped; no digest without `-modem-bridge` |
 | W5-Dc l2 | #592 (L3 6080106973 later 3): `digestOwedStatus` says "the one due today", but a day still owed after midnight is not collected again until 08:00, so the line is stale overnight; no content is lost (the next collection takes the pending generations) |
 | W5-Dc l3 | #592 (security 6080263349 pt 3, L3 6080272656 pt 3): test potency; two mutants survive the digest tests: `forget` not dropping a held reference on success, and `load` dropping the in-memory union (a hold kept only in memory). Add tests that kill both (the first is killed by W5-Dc-r12 HF-1) |
 | W5-Dc l4 | L3 5 on #603: W5-Dc-r7's whole-batch redaction of an Unknown batch is a reading CAP-3 supports, not one SPEC states; the brief now says so and has the builder record it in digestqueue ASSUMPTIONS; an L1 spec-diff may state it if Mark wants it fixed in SPEC |

@@ -198,15 +198,19 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 ## SIM-policy: policy as data, one evaluator (tier A)
 
-**Needs.** SIM-outcome, SIM-pull, SIM-core.
+**Needs.** SIM-owner-hold, SIM-pull, SIM-outcome, SIM-core. It starts after all of them merge (waste review, 2026-10-12): they settle which policies survive, and a policy layer built earlier would encode constants that they delete.
 
-**Change.** Urgent classes, quiet hours, pacing allowances, adoption rules (what counts as a gain, whether a tie adopts) and retry policies become declarative records evaluated by one small deterministic evaluator inside the core. The evaluator only matches fields and compares thresholds: no loops, no user-defined functions, no I/O. A policy change is itself a journaled intent, needing owner approval and revertible. The constants these replace (for example in `loops/loop1.go`, `owner/pacer.go`, `grants`) are deleted.
+**Step 1, typed settings in one place.** First move every constant listed below into one typed settings record, with one default, journaled changes and one test per constant. That record alone may be the whole package.
+
+**Gate on the evaluator.** Build the match-and-compare evaluator below only if the PR shows both of these: (a) a demonstrated need that typed settings cannot meet, such as an owner-visible policy that settings cannot express; and (b) net code deletion, meaning the evaluator plus its records are smaller than the code they replace. If either is missing, the package ends at step 1, and the evaluator becomes a `later` line.
+
+**Change (only past the gate).** Urgent classes, quiet hours, pacing allowances, adoption rules (what counts as a gain, whether a tie adopts) and retry policies become declarative records evaluated by one small deterministic evaluator inside the core. The evaluator only matches fields and compares thresholds: no loops, no user-defined functions, no I/O. A policy change is itself a journaled intent, needing owner approval and revertible. The constants these replace (for example in `loops/loop1.go`, `owner/pacer.go`, `grants`) are deleted.
 
 **Requirement IDs.** OP-5, CHG-1, CH-15, LOOP-3. **Acceptance.** Each replaced constant has a test showing identical decisions from the default policy record; a policy change without approval is refused; reverting a policy intent restores earlier decisions; the evaluator's grammar test rejects any construct beyond match and compare. **Usage estimate.** Under 140k tokens. Tier A.
 
 ## SIM-cap: capability grants scoped per intent (tier A)
 
-**Needs.** SIM-core, SIM-check, SIM-policy.
+**Needs.** SIM-core, SIM-check, SIM-policy (step 1 is enough; SIM-cap does not need the evaluator).
 
 **Change.** A grant names the intent (action, subject, bounds, expiry) it authorizes, instead of standing authority per account or tool. The broker mints the capability at authorize and checks it at dispatch (OP-3). A capability cannot be widened by its holder, and it is spent or expires with its intent. Standing per-account grants become policies (SIM-policy) that mint capabilities, or are deleted where nothing uses them.
 
