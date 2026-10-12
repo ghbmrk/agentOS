@@ -26,6 +26,7 @@ import (
 	"github.com/emersion/go-sasl"
 
 	"github.com/ghbmrk/agentos/broker/mail"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // Login is an account credential as the vault hands it over: a password
@@ -60,6 +61,9 @@ type Config struct {
 	From             string        // the envelope sender, the owner's address
 	Timeout          time.Duration // per operation (default 60 s)
 	MaxFetch         int           // bytes read per message (default 256 KiB)
+	// Guard is the home-network address policy every dial goes through
+	// (DEV-2). Nil means netguard.New with only the IANA registries.
+	Guard *netguard.Policy
 }
 
 // Store is a mail.Store over IMAP and SMTP.
@@ -95,7 +99,25 @@ func New(cfg Config) (*Store, error) {
 	if cfg.MaxFetch == 0 {
 		cfg.MaxFetch = 256 << 10
 	}
+	if cfg.Guard == nil {
+		cfg.Guard = netguard.New(netguard.Config{})
+	}
 	return &Store{cfg: cfg}, nil
+}
+
+// dial connects to addr. A Plain connection is a literal loopback address
+// (New refused any other), which is the box itself, not the home network;
+// it dials without a name lookup. Every other connection goes through the
+// address policy, which resolves, checks every answer and checks the
+// address connected (DEV-2).
+func (s *Store) dial(ctx context.Context, addr string, sec Security) (net.Conn, error) {
+	if sec == Plain {
+		if !loopback(addr) {
+			return nil, ErrInsecure
+		}
+		return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	}
+	return s.cfg.Guard.DialContext(ctx, "tcp", addr)
 }
 
 func loopback(addr string) bool {
@@ -122,8 +144,7 @@ func (s *Store) tlsConfig(addr string) *tls.Config {
 func (s *Store) session(ctx context.Context, f func(c *client.Client) error) error {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
-	d := &net.Dialer{}
-	conn, err := d.DialContext(ctx, "tcp", s.cfg.IMAP)
+	conn, err := s.dial(ctx, s.cfg.IMAP, s.cfg.IMAPSec)
 	if err != nil {
 		return err
 	}
@@ -395,8 +416,7 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
-	d := &net.Dialer{}
-	conn, err := d.DialContext(ctx, "tcp", s.cfg.SMTP)
+	conn, err := s.dial(ctx, s.cfg.SMTP, s.cfg.SMTPSec)
 	if err != nil {
 		return err
 	}

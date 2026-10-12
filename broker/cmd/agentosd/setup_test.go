@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/bridgeclient"
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -56,7 +58,21 @@ func (v *setupVault) SealEnroll() error {
 	return nil
 }
 
+// newSetupMode is a setup mode whose Owner Card was confirmed on an
+// earlier start, so only approval codes stand before finish
+// (setupcard_test.go covers the card).
 func newSetupMode(t *testing.T) setupMode {
+	t.Helper()
+	m := newBareSetupMode(t)
+	latch := &change.MemStore{}
+	if err := latch.Save([]byte(`{"card_confirmed":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	m.withCard(&cardFixture{vault: &cardVault{dir: filepath.Dir(m.OwnerState)}, steps: make(chan *firstboot.CardStep, 1)}, latch)
+	return m
+}
+
+func newBareSetupMode(t *testing.T) setupMode {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "as")
 	if err != nil {

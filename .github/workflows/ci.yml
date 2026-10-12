@@ -3,6 +3,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue builds each queued PR on a gh-readonly-queue/ branch and waits for
+  # these same checks; without this trigger a queued PR never gets them and stalls.
+  # PR-only steps (BOARD, TRACE.md, risk tier) stay skipped: the PR run already did them.
+  merge_group:
   # trace.yml and metrics.yml dispatch it on their bot branches: PRs opened with
   # GITHUB_TOKEN start no pull_request runs, and main requires these checks.
   workflow_dispatch:
@@ -20,10 +24,22 @@ env:
   GOTOOLCHAIN: local
 # Every job has a 30-minute timeout: a whole run takes about 4 minutes, and a
 # hung job would otherwise hold one of the few runners for GitHub's 6h default.
+# A records-only change (CI-docs; the set is tools/ci_scope.py's) runs only the document
+# checks: checks skips its Go, unit-test and network steps and runs the tests of the
+# document tools instead; broker, machines and hostcheck are skipped, which main's
+# ruleset counts as passing. The code is main's, which main's own run tested.
+# checks always runs (!cancelled()), and the other jobs run unless scope says exactly
+# 'true', so a failed scope job means full CI, never a skipped required check.
 jobs:
+  scope:
+    uses: ./.github/workflows/scope.yml
   checks:
+    needs: scope
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      RECORDS: ${{ needs.scope.outputs.records }}
     permissions:
       contents: read
       issues: read # board.py check --repo reads the work-item issues
@@ -38,20 +54,36 @@ jobs:
           python-version: "3.12"
       # The harness tests build the broker.
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        if: env.RECORDS != 'true'
         with:
           go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
+        if: env.RECORDS != 'true'
         run: |
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Unit tests
+        if: env.RECORDS != 'true'
         run: python -m unittest discover -s tests -v
+      - name: Document tool tests (records-only change; CI-docs)
+        # The tests that read record files (test_board reads BOARD.md) and test the tools
+        # the steps below run.
+        if: env.RECORDS == 'true'
+        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier -v
+      - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
+        if: env.RECORDS != 'true'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q nftables iproute2
+          sudo python3 -m unittest tests.test_inbound_netns -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
         run: python tools/doclint.py
+      - name: Every broker dialer is hooked into the home-network address guard (DEV-2)
+        if: env.RECORDS != 'true'
+        run: python tools/netguardcheck.py
       - name: BOARD.md round-trips through its work-item issues (SIM-repo-1)
         run: python tools/board.py check
       - name: BOARD.md rows equal the live work-item issues (SIM-repo-2)
@@ -86,6 +118,8 @@ jobs:
         if: github.event_name == 'pull_request'
         run: python tools/risk_tier.py --markdown --git HEAD^1 HEAD^2 >> "$GITHUB_STEP_SUMMARY"
   broker:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -139,6 +173,8 @@ jobs:
             python3 ../tools/fuzzrun.py --pkg "./${t%%:*}" --target "${t#*:}" --budget 20s || exit 1
           done
   machines:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
     # Agent-machine lifecycle against the real kernel (P1-4): cgroup v2,
     # overlayfs, and gVisor. Needs root, so it runs the root-only tests too.
     runs-on: ubuntu-latest
@@ -231,6 +267,8 @@ jobs:
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -v -timeout 20m ./floor
   hostcheck:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
     # The host-untouched check (HOST-1e; A1, HW-8) on a QEMU/OVMF/swtpm host
     # with a Windows-like second disk, booting the stand-in guest until P2-1's
     # image boots here. Each QEMU process also has the harness's own timeout.

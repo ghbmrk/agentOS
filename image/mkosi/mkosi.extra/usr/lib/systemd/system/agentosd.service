@@ -4,7 +4,9 @@
 [Unit]
 Description=AgentOS broker
 ConditionPathExists=/etc/agentos/agentosd.env
-After=local-fs.target network.target
+# Never without the inbound drop (DEV-net-e 2a): if it failed to load, the broker does not start.
+Requires=agentos-inbound.service
+After=local-fs.target network.target agentos-inbound.service
 
 [Service]
 EnvironmentFile=/etc/agentos/agentosd.env
@@ -15,6 +17,9 @@ Delegate=yes
 # No child gains privileges through a setuid or file-capability binary (agentosd L7-6): runsc
 # keeps root's full set, and fuzz children never regain what their jail took (LOOP-7).
 NoNewPrivileges=yes
+# The Owner Card passphrase lives in this process's memory and cannot be zeroed (card C13): it
+# never dumps core (IMG-nodump; the image also discards dumps and has no swap).
+LimitCORE=0
 # Only on the drive this PC booted (drive-id: no other disk carries the boot partition's GUID).
 ExecStartPre=/usr/lib/agentos/drive-id check
 ExecStart=/usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} -modem-uid ${AGENTOS_MODEM_UID} \

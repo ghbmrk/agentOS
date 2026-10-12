@@ -398,7 +398,7 @@ func serveSMS(dir string, c *custody, modemUID int) (*http.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	srv := newServer(smsapi.Handler(&smsapi.Service{Store: smsStore{c}, HTTP: c.smsHTTP, Now: c.now, Polled: c.smsPolled,
+	srv := newServer(smsapi.Handler(&smsapi.Service{Store: smsStore{c}, HTTP: c.smsHTTP, Guard: c.guard, Now: c.now, Polled: c.smsPolled,
 		Missed: c.smsMissed}))
 	srv.ReadTimeout = 10 * time.Second
 	go srv.Serve(ln)

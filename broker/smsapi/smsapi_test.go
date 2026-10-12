@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // REQ: ADP-12, CRED-1
@@ -696,7 +698,7 @@ func TestEachInboundCheckHolds(t *testing.T) {
 // The production client is TLS 1.2 or later, with no proxy and no
 // redirects followed.
 func TestTheProductionClientIsPinned(t *testing.T) {
-	c := NewHTTPClient()
+	c := NewHTTPClient(nil)
 	tr, ok := c.Transport.(*http.Transport)
 	if !ok || tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 || tr.Proxy != nil || tr.TLSClientConfig.RootCAs != nil {
 		t.Fatalf("transport %+v", tr)
@@ -852,3 +854,33 @@ func TestCallsSpendTheBudgetAndHaveTheirOwnCap(t *testing.T) {
 		t.Fatalf("call past the day: %v", err)
 	}
 }
+
+// REQ: DEV-2, REV-5, ARC-6
+// The production client dials through the guard: a provider name answering
+// at a private address, alone or among public ones, is refused unconnected.
+func TestTheProductionClientRefusesPrivateAnswers(t *testing.T) {
+	for _, ans := range [][]netip.Addr{
+		{netip.MustParseAddr("192.168.1.20")},
+		{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("10.0.0.9")},
+	} {
+		var dialed atomic.Int32
+		g := netguard.New(netguard.Config{
+			Resolver: ipAnswers(ans),
+			Connect: func(context.Context, string, string) (net.Conn, error) {
+				dialed.Add(1)
+				return nil, errors.New("synthetic")
+			},
+		})
+		req, _ := http.NewRequest("GET", "https://sms.example/v1", nil)
+		if _, err := NewHTTPClient(g).Do(req); !errors.Is(err, netguard.ErrDenied) {
+			t.Fatalf("%v: %v", ans, err)
+		}
+		if dialed.Load() != 0 {
+			t.Fatal("a refused answer was connected")
+		}
+	}
+}
+
+type ipAnswers []netip.Addr
+
+func (a ipAnswers) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) { return a, nil }

@@ -222,6 +222,20 @@ form { margin: .6em 0 1.2em; }
 <p><a href="/approvals/">Approvals</a> · <a href="/home">More</a> · <a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
 
+{{define "claimbox"}}{{template "head" ""}}
+<h1>Claim AgentOS</h1>
+{{if .Reinstall}}<p>I am already claimed. To set me up again, reinstall me.</p>
+{{else if .Claimed}}<p>I am already claimed. Setup continues on the phone that claimed me. To claim me again, reinstall me.</p>
+{{else if .Locked}}<p class="err">Too many wrong codes. Restart me (turn me off and on again), then type the code again.</p>
+{{if gt .Reserve 0}}<p>If you hold my sticker, type its whole code exactly as printed: I still take it now.</p>
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{template "claimform" .}}{{end}}
+{{else}}<p>Scan or type the claim code from the sticker on my box, then press Claim. It proves you have my box in hand.</p>
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{template "claimform" .}}
+<p class="muted">{{.TriesLeft}} wrong {{if eq .TriesLeft 1}}code{{else}}codes{{end}} left before I lock this page until I restart.</p>{{end}}
+{{template "foot"}}{{end}}
+{{define "claimform"}}<form method="post" action="/claim"><label>Claim code<input type="text" name="code" value="{{.Code}}" placeholder="XXXX-XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Claim</button></form>{{end}}
 {{define "notready"}}{{template "head" "30"}}
 <h1>AgentOS</h1>
 <p>I'm not ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.</p>
@@ -300,19 +314,24 @@ form { margin: .6em 0 1.2em; }
 <p class="mono">{{.OTPSecret}}</p>
 <form method="post" action="/setup/codes"><label>Type the 6-digit code it shows<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Confirm</button></form>
 {{end}}
+{{else if eq .Step "card"}}
+<h2>4. Owner Card</h2>
+<p>Your Owner Card holds your vault passphrase and recovery key. Print it or save it, then type the word and group I ask for. Once you confirm, I keep no copy of it.</p>
+<p><a class="button" href="/setup/card">Show my Owner Card</a></p>
+
 {{else if eq .Step "recovery"}}
-<h2>4. Recovery sheet</h2>
+<h2>5. Recovery sheet</h2>
 <p>Tear the recovery key sheet off your card and store it somewhere safe, apart from the drive. You will rarely need it.</p>
 <form method="post" action="/setup/recovery"><label><input type="checkbox" name="stored" value="1"> I stored the recovery sheet</label><br><button>Continue</button></form>
 
 {{else if eq .Step "host"}}
-<h2>5. This PC</h2>
+<h2>6. This PC</h2>
 <p>This PC becomes your box's trusted PC, so it restarts by itself after a power cut.</p>
 <form method="post" action="/setup/host"><label><input type="checkbox" name="not_mine" value="1"> This is not my PC</label><br><button>Continue</button></form>
 {{with .Defaults}}<p class="muted">Defaults: {{.}} Change them any time by text or here.</p>{{end}}
 
 {{else if eq .Step "ai"}}
-<h2>6. Connect AI</h2>
+<h2>7. Connect AI</h2>
 {{if not .Progress.Updated}}{{if eq .Progress.Phase "offline"}}<p>I am offline, so I am running the version I shipped with. I update when I am next online, and this step opens after that.</p>
 {{else}}<p>I am updating to the latest version first. This step opens when it finishes.</p>{{end}}
 {{else}}<p class="muted">One is enough. You can add more later.</p>

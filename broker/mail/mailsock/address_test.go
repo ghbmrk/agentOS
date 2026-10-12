@@ -22,7 +22,7 @@ func TestAddressNamesOnlyTheAccountsAddress(t *testing.T) {
 	if err != nil || got != me {
 		t.Fatalf("address %q %v", got, err)
 	}
-	if reps := f.replies(); len(reps) != 1 || strings.TrimSpace(reps[0]) != `{"address":"`+me+`"}` {
+	if reps := f.replies(); len(reps) != 1 || strings.TrimSpace(reps[0]) != `{"address":"`+me+`","gen":"`+testGen+`"}` {
 		t.Fatalf("replies %q", reps)
 	}
 	if len(srv.Logins()) != 0 {

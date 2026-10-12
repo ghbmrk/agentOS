@@ -274,6 +274,8 @@ func (u *setup) stepLocked(p Progress) string {
 		return "number"
 	case !u.st.Codes:
 		return "codes"
+	case !u.st.Recovery && u.cardHeld():
+		return "card"
 	case !u.st.Recovery:
 		return "recovery"
 	case !u.st.Host:
@@ -328,6 +330,9 @@ func (u *setup) phone(w http.ResponseWriter, r *http.Request, issue bool) string
 
 func (u *setup) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup", u.page)
+	if u.s.cfg.Card != nil {
+		mux.HandleFunc("/setup/card", u.card)
+	}
 	for path, f := range map[string]func(*http.Request, string) error{
 		"/setup/network":     u.network,
 		"/setup/number":      u.number,
@@ -871,6 +876,9 @@ func (u *setup) recovery(r *http.Request, _ string) error {
 	if !u.st.Codes {
 		return errors.New("Add approval codes first.")
 	}
+	if u.cardHeld() {
+		return errCardFirst
+	}
 	return u.save(func(s *SetupState) { s.Recovery = true })
 }
 
@@ -983,6 +991,13 @@ func (u *setup) maybeFinish() {
 	who := u.st.Owner
 	u.mu.Unlock()
 	defer func() { u.mu.Lock(); u.finishing = false; u.mu.Unlock() }()
+	if u.cardHeld() {
+		// HW-1: the box finishes only once the owner holds the card.
+		u.mu.Lock()
+		u.err[u.st.Device] = errCardFirst.Error()
+		u.mu.Unlock()
+		return
+	}
 	connected := false
 	for _, p := range u.s.cfg.Hooks.Providers() {
 		connected = connected || p.Connected

@@ -49,6 +49,18 @@ def write(root, rel, text="", mode=0o644):
     return f
 
 
+# The image's no-dump files (IMG-nodump): copied from mkosi.extra into a test tree.
+NODUMP = ("usr/lib/systemd/coredump.conf.d/50-agentos-nodump.conf",
+          "usr/lib/systemd/system.conf.d/50-agentos-nodump.conf",
+          "usr/lib/sysctl.d/99-agentos-nodump.conf",
+          "usr/lib/systemd/system/agentosd.service")
+
+
+def nodump(root):
+    for rel in NODUMP:
+        write(root, rel, (MK / "mkosi.extra" / rel).read_text())
+
+
 class TreeCheckTest(unittest.TestCase):
     """HW-1: the image holds no per-install secret; V15: no socket files."""
 
@@ -59,6 +71,7 @@ class TreeCheckTest(unittest.TestCase):
         write(self.root, "etc/hostname", "agentos\n")
         write(self.root, "usr/lib/agentos/agentosd", "\x7fELF", 0o755)
         (self.root / "var/lib/agentos").mkdir(parents=True)
+        nodump(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -227,6 +240,9 @@ class ReleaseTest(unittest.TestCase):
             finish.manifest("7", "cd" * 32, name, text, {})
 
 
+SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
+
+
 def stub(d, name, body):
     write(d, name, "#!/bin/sh\n" + body + "\n", 0o755)
 
@@ -244,12 +260,21 @@ class HealthTest(unittest.TestCase):
         stub(self.lib, "agentosd", "exit 0")
         stub(self.lib, "drive-id", "exit 0")
         stub(self.lib, "runsc", 'echo "runsc version release-20260928.0"')
+        self.nft("drop")
         (self.lib / "images/openclaw/opt/openclaw").mkdir(parents=True)
         write(self.lib, "guest/launch.json", "{}")
         write(self.root, "proc/cmdline", "console=ttyS0 rw quiet usrhash=%s\n" % H)
+        write(self.root, "proc/swaps", SWAPS_HEADER)
+        write(self.root, "proc/sys/kernel/core_pattern", "|/usr/bin/false\n")
         ev = self.root / "sys/firmware/efi/efivars"
         ev.mkdir(parents=True)
         (ev / "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(b"\x06\x00\x00\x00\x01")
+
+    def nft(self, last):
+        # The loaded input chain, as "nft list chain" prints it, ending in LAST.
+        stub(self.bin, "nft", '[ "$*" = "list chain inet agentos_inbound input" ] || exit 1; '
+                              'printf "table inet agentos_inbound {\\n\\tchain input {\\n\\t\\tiifname @exempt accept\\n'
+                              '\\t\\t%s\\n\\t}\\n}\\n"' % last)
 
     def findmnt(self, source, options):
         stub(self.bin, "findmnt", 'case "$2" in SOURCE) echo "%s" ;; *) echo "%s" ;; esac' % (source, options))
@@ -268,6 +293,8 @@ class HealthTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("agentos-health: PASS", r.stdout)
         self.assertIn("secure_boot=on", r.stdout)
+        self.assertIn("inbound=drop", r.stdout)
+        self.assertIn("swap=off dumps=off", r.stdout)
 
     def test_secure_boot_off_is_reported_not_failed(self):
         (self.root / "sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(
@@ -289,6 +316,15 @@ class HealthTest(unittest.TestCase):
             "broker broken": lambda: stub(self.lib, "agentosd", "exit 2"),
             "runsc broken": lambda: stub(self.lib, "runsc", "exit 1"),
             "guest image missing": lambda: (self.lib / "images/openclaw/opt/openclaw").rmdir(),
+            "inbound rules not loaded": lambda: stub(self.bin, "nft", "echo 'No such file or directory' >&2; exit 1"),
+            "inbound chain ends in accept": lambda: self.nft("accept"),
+            # IMG-nodump (HW-1): a swap device or a core dump that lands on disk is never blessed.
+            "swap active": lambda: write(self.root, "proc/swaps", SWAPS_HEADER +
+                                         "/dev/sda4  partition\t1048572\t0\t-2\n"),
+            "swaps unreadable": lambda: (self.root / "proc/swaps").unlink(),
+            "core dumps to a file": lambda: write(self.root, "proc/sys/kernel/core_pattern", "core\n"),
+            "core dumps to systemd-coredump": lambda: write(
+                self.root, "proc/sys/kernel/core_pattern", "|/usr/lib/systemd/systemd-coredump %P %u\n"),
         }
         for name, breakit in cases.items():
             with self.subTest(name):
@@ -298,6 +334,171 @@ class HealthTest(unittest.TestCase):
                 r = self.run_health()
                 self.assertEqual(r.returncode, 1, name)
                 self.assertIn("agentos-health: FAIL", r.stdout)
+
+
+class ApExemptTest(unittest.TestCase):
+    """DEV-net-f, DEV-net-g (DEV-2, CH-7): the access point's interface, and only it, joins the
+    inbound exempt set, only while agentos_ap holds it, and leaves the set when the access point
+    stops; any failure fails and never touches the table otherwise."""
+    # REQ: DEV-2, CH-7, DEV-net-f, DEV-net-g
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.bin, self.sys, self.log = t / "bin", t / "sys", t / "nft.log"
+        (self.sys / "class/net/wlap0/phy80211").mkdir(parents=True)
+        (self.sys / "class/net/wlan1/phy80211").mkdir(parents=True)
+        (self.sys / "class/net/eth0").mkdir(parents=True)
+        self.nft()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def nft(self, fail="", ap="wlap0", members='"lo"'):
+        # Logs each call, and the script of "nft -f -"; FAIL names the call ("list set",
+        # "list chain", "add", "get", "-f") that fails. "list chain" prints agentos_ap's input chain
+        # for AP, as nft prints it (absent when AP is empty); "list set" prints MEMBERS.
+        stub(self.bin, "nft", r"""echo "$*" >>"%(log)s"
+[ "$1" = -f ] && sed 's/^/  /' >>"%(log)s"
+case "$1 $2" in "%(fail)s" | "%(fail)s "*) echo "nft: $1 failed" >&2; exit 1 ;; esac
+case "$1 $2" in
+"list chain") [ -n "%(ap)s" ] || exit 1
+  printf '\t\tiifname "%(ap)s" udp dport { 53, 67 } accept\n\t\tiifname "%(ap)s" drop\n'
+  printf '\t\tiifname != "%(ap)s" tcp dport 80 ip daddr 10.42.0.1 drop\n' ;;
+"list set") echo "elements = { %(members)s }" ;;
+esac
+exit 0""" % dict(log=self.log, fail=fail or "none", ap=ap, members=members.replace('"', '\\"')))
+
+    def run_exempt(self, *args):
+        env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_SYSFS=str(self.sys))
+        return subprocess.run(["sh", str(MK / "mkosi.extra/usr/lib/agentos/ap-exempt"), *args], env=env,
+                              capture_output=True, text=True)
+
+    def calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_adds_the_access_point_then_checks_it_is_there(self):
+        r = self.run_exempt("wlap0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("agentos-ap-exempt: OK wlap0", r.stdout)
+        self.assertEqual(self.calls(), [
+            "list set inet agentos_inbound exempt",
+            "list chain inet agentos_ap input",
+            'add element inet agentos_inbound exempt { "wlap0" }',
+            'get element inet agentos_inbound exempt { "wlap0" }',
+        ])
+
+    def test_failures_fail_bring_up_and_never_open_the_table(self):
+        for verb in ("list set", "list chain", "add", "get"):
+            with self.subTest(failing=verb):
+                self.log.unlink(missing_ok=True)
+                self.nft(verb)
+                r = self.run_exempt("wlap0")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("agentos-ap-exempt: FAIL", r.stdout)
+                self.assertIn("stays closed", r.stdout)
+                for c in self.calls():
+                    self.assertNotRegex(c, r"^(-f|delete|destroy|flush|replace|insert|reset)\b")
+                if verb.startswith("list"):
+                    self.assertFalse([c for c in self.calls() if c.startswith("add")],
+                                     "added with %s failing" % verb)
+
+    def test_only_the_loaders_access_point_is_admitted(self):
+        # DEV-net-g (a), (c), acceptance 4: an interface is added only while agentos_ap ends its
+        # input chain in a drop for that interface, so a second radio the loader did not create
+        # as the access point (wlan1), or the access point before agentos_ap loads, stays dropped.
+        for iface, ap in (("wlan1", "wlap0"), ("wlap0", ""), ("wlap0", "wlap00"), ("wlap0", "wlap")):
+            with self.subTest(iface=iface, agentos_ap=ap):
+                self.log.unlink(missing_ok=True)
+                self.nft(ap=ap)
+                r = self.run_exempt(iface)
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("agentos_ap is not loaded for %s" % iface, r.stdout)
+                self.assertFalse([c for c in self.calls() if c.startswith("add")])
+
+    def test_only_a_wireless_interface_is_added(self):
+        # The uplink, a tether or a second NIC is not wireless; bad names never reach nft.
+        for args in (("eth0",), ("usb0",), ("",), ("lo",), ("wlap0;x",), ("a" * 16,), ("-f",), ("../wlap0",),
+                     ("wlap0", "eth0"), ()):
+            with self.subTest(args=args):
+                self.log.unlink(missing_ok=True)
+                r = self.run_exempt(*args)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn("agentos-ap-exempt: FAIL", r.stdout)
+                self.assertEqual(self.calls(), [])
+
+    def test_remove_takes_the_interface_out_and_checks_it_is_gone(self):
+        # DEV-net-g (b): one add-then-delete transaction, so a second stop is not an error and no
+        # other element is touched, then a check. The interface need not exist any more (gone).
+        for iface in ("wlap0", "gone0"):
+            with self.subTest(iface=iface):
+                self.log.unlink(missing_ok=True)
+                r = self.run_exempt("--remove", iface)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("agentos-ap-exempt: OK removed %s" % iface, r.stdout)
+                self.assertEqual(self.calls(), [
+                    "list set inet agentos_inbound exempt",
+                    "-f -",
+                    '  add element inet agentos_inbound exempt { "%s" }' % iface,
+                    '  delete element inet agentos_inbound exempt { "%s" }' % iface,
+                    "list set inet agentos_inbound exempt",
+                ])
+
+    def test_a_failed_remove_says_so(self):
+        cases = {"list set": dict(fail="list set"), "-f": dict(fail="-f"),
+                 "still there": dict(members='"lo", "wlap0"')}
+        for name, kw in cases.items():
+            with self.subTest(name):
+                self.log.unlink(missing_ok=True)
+                self.nft(**kw)
+                r = self.run_exempt("--remove", "wlap0")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("agentos-ap-exempt: FAIL", r.stdout)
+                self.assertIn("may still be exempt", r.stdout)
+                for c in self.calls():
+                    self.assertNotRegex(c, r"^ *(destroy|flush|replace|insert|reset|delete (table|chain|set|rule))\b")
+        # A similar name in the set is not the interface.
+        self.nft(members='"lo", "wlap00"')
+        self.assertEqual(self.run_exempt("--remove", "wlap0").returncode, 0)
+
+    def test_remove_refuses_names_that_are_not_an_access_point(self):
+        for args in (("--remove", "lo"), ("--remove", ""), ("--remove", "wl;x"), ("--remove", "-f"),
+                     ("--remove",), ("--remove", "wlap0", "eth0")):
+            with self.subTest(args=args):
+                self.log.unlink(missing_ok=True)
+                r = self.run_exempt(*args)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn("agentos-ap-exempt: FAIL", r.stdout)
+                self.assertEqual(self.calls(), [])
+
+    def test_unit_orders_after_the_inbound_table_and_follows_the_interface(self):
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-ap-exempt@.service")
+        unit, svc = u["Unit"], u["Service"]
+        self.assertIn("agentos-inbound.service", unit["Requires"].split())
+        self.assertIn("agentos-inbound.service", unit["After"].split())
+        # Bound to the interface: it stops, and so removes it, when the interface goes, and runs
+        # again on the next bring-up of a recreated one.
+        self.assertEqual(unit["BindsTo"], "sys-subsystem-net-devices-%i.device")
+        self.assertIn("sys-subsystem-net-devices-%i.device", unit["After"].split())
+        self.assertEqual(svc["Type"], "oneshot")
+        self.assertEqual(svc["RemainAfterExit"], "yes")
+        self.assertEqual(svc["ExecStart"], "/usr/lib/agentos/ap-exempt %I")
+        # DEV-net-g (b): stopping the access point takes its interface out of the set.
+        self.assertEqual(svc["ExecStop"], "/usr/lib/agentos/ap-exempt --remove %I")
+        f = MK / "mkosi.extra/usr/lib/agentos/ap-exempt"
+        self.assertTrue(f.stat().st_mode & stat.S_IXUSR)
+
+    def test_network_manager_needs_the_inbound_drop_first(self):
+        # LATER DEV-net-e l3: if the image adopts NetworkManager, it must require the drop as
+        # systemd-networkd does.
+        pkgs = ini(MK / "mkosi.conf")["Content"]["Packages"].split()
+        f = MK / "mkosi.extra/usr/lib/systemd/system/NetworkManager.service.d/agentos-inbound.conf"
+        if "network-manager" not in pkgs:
+            self.assertFalse(f.exists())
+            return
+        d = ini(f)["Unit"]
+        self.assertIn("agentos-inbound.service", d["Requires"].split())
+        self.assertIn("agentos-inbound.service", d["After"].split())
 
 
 class FallbackTest(unittest.TestCase):
@@ -573,6 +774,32 @@ class ConfigTest(unittest.TestCase):
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("enable agentos-health.service", preset)
 
+    def test_inbound_rules_load_before_any_listener_and_fail_closed(self):
+        # DEV-net-e 2a (DEV-2 In): the drop loads before the network comes up, and nothing that
+        # listens or brings a link up starts without it.
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-inbound.service")
+        self.assertEqual(u["Unit"]["DefaultDependencies"], "no")
+        self.assertIn("network-pre.target", u["Unit"]["Before"].split())
+        self.assertIn("network-pre.target", u["Unit"]["Wants"].split())
+        self.assertEqual(u["Service"]["Type"], "oneshot")
+        self.assertEqual(u["Service"]["RemainAfterExit"], "yes")
+        self.assertEqual(u["Service"]["ExecStart"], "/usr/sbin/nft -f /usr/lib/agentos/inbound.nft")
+        self.assertEqual(u["Install"]["WantedBy"], "sysinit.target")
+        self.assertTrue((MK / "mkosi.extra/usr/lib/agentos/inbound.nft").is_file())
+        for unit in ("agentosd.service", "systemd-networkd.service", "systemd-resolved.service"):
+            with self.subTest(unit):
+                f = MK / "mkosi.extra/usr/lib/systemd/system" / unit
+                if unit != "agentosd.service":
+                    f = f.parent / (unit + ".d") / "agentos-inbound.conf"
+                d = ini(f)["Unit"]
+                self.assertIn("agentos-inbound.service", d["Requires"].split())
+                self.assertIn("agentos-inbound.service", d["After"].split())
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().split("\n")
+        self.assertIn("enable agentos-inbound.service", preset)
+        # Debian's nftables.service flushes the whole ruleset from /etc/nftables.conf.
+        self.assertIn("disable nftables.service", preset)
+        self.assertIn("nftables", ini(MK / "mkosi.conf")["Content"]["Packages"].split())
+
     def test_root_is_locked(self):
         self.assertEqual(ini(MK / "mkosi.conf")["Content"]["RootPassword"], "hashed:!")
 
@@ -604,6 +831,107 @@ class ConfigTest(unittest.TestCase):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Unit"]["ConditionPathExists"], "/etc/agentos/agentosd.env")
         self.assertIn("/usr/lib/agentos/agentosd", u["Service"]["ExecStart"])
+
+
+class NoDumpTest(unittest.TestCase):
+    """IMG-nodump (security S1 on #1060): the Owner Card passphrase is a Go string that cannot be
+    zeroed (card C13), so no crash may write the broker's memory to disk and no heap page may be
+    swapped out. Core dumps are discarded and the image has no swap; the build fails otherwise."""
+    # REQ: HW-1
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        nodump(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def v(self):
+        return " | ".join(check.violations(self.root))
+
+    def test_shipped_files_say_what_the_check_needs(self):
+        extra = MK / "mkosi.extra"
+        self.assertEqual(ini(extra / NODUMP[0])["Coredump"]["Storage"], "none")
+        self.assertEqual(ini(extra / NODUMP[1])["Manager"]["DefaultLimitCORE"], "0")
+        self.assertEqual(ini(extra / NODUMP[3])["Service"]["LimitCORE"], "0")
+        self.assertEqual(check.sysctl(self.root, "kernel.core_pattern"), "|/usr/bin/false")
+        self.assertEqual(check.sysctl(self.root, "fs.suid_dumpable"), "0")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_removing_any_dump_setting_fails_the_build(self):
+        for rel, needle in zip(NODUMP, ("Storage=none", "DefaultLimitCORE=0", "kernel.core_pattern",
+                                        "LimitCORE=0")):
+            with self.subTest(rel=rel):
+                f = self.root / rel
+                text = f.read_text()
+                f.write_text("".join(ln for ln in text.splitlines(True) if needle not in ln))
+                self.assertIn(rel.rsplit("/", 1)[-1], self.v())
+                f.unlink()
+                self.assertIn(rel.rsplit("/", 1)[-1], self.v())
+                f.write_text(text)
+                self.assertEqual(check.violations(self.root), [])
+
+    def test_a_later_file_cannot_turn_dumps_back_on(self):
+        # systemd reads drop-ins in file-name order, /etc over /usr/lib; the last value wins.
+        cases = (
+            ("etc/systemd/coredump.conf.d/zz.conf", "[Coredump]\nStorage=external\n", "Storage"),
+            ("usr/lib/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=infinity\n", "DefaultLimitCORE"),
+            ("etc/systemd/system/agentosd.service.d/zz.conf", "[Service]\nLimitCORE=infinity\n", "LimitCORE"),
+            ("usr/lib/sysctl.d/99-zz.conf", "kernel.core_pattern = core\n", "core_pattern"),
+            # systemd-coredump's own file, if a package ever adds it, sorts before ours.
+            ("etc/sysctl.d/99-agentos-nodump.conf", "fs.suid_dumpable=2\n", "core_pattern"),
+        )
+        for rel, text, needle in cases:
+            with self.subTest(rel=rel):
+                f = write(self.root, rel, text)
+                self.assertIn(needle, self.v())
+                f.unlink()
+        write(self.root, "usr/lib/sysctl.d/50-coredump.conf",
+              "kernel.core_pattern=|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_no_swap_in_the_tree(self):
+        cases = (
+            ("etc/fstab", "/dev/sda4 none swap sw 0 0\n"),
+            ("etc/fstab", "# comment\nUUID=x / ext4 defaults 0 1\n/swapfile none swap defaults 0 0\n"),
+            ("etc/systemd/system/swapfile.swap", "[Swap]\nWhat=/swapfile\n"),
+            ("usr/lib/systemd/system/dev-sda4.swap", "[Swap]\nWhat=/dev/sda4\n"),
+            ("usr/lib/systemd/system-generators/zram-generator", "#!/bin/sh\n"),
+            ("swapfile", "x"),
+        )
+        for rel, text in cases:
+            with self.subTest(rel=rel):
+                f = write(self.root, rel, text)
+                self.assertIn("swap", self.v())
+                f.unlink()
+        write(self.root, "etc/fstab", "# no swap here\nUUID=x / ext4 defaults 0 1\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_no_swap_partition_and_generators_off(self):
+        # Built disk: no partition carries the swap type, and gpt-auto and fstab make no swap
+        # units (systemd.swap=0), so a swap partition added to the drive later is never used.
+        for d in (MK / "mkosi.repart", MK / "mkosi.extra/usr/lib/repart.d"):
+            for f in sorted(d.glob("*.conf")):
+                with self.subTest(f=f.name):
+                    self.assertNotEqual(ini(f)["Partition"]["Type"], "swap")
+        args = ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"].split()
+        self.assertIn("systemd.swap=0", args)
+        entry = ENTRY % H
+        self.assertIn("systemd.swap=0", finish.swap_violations([], entry)[0])
+        entry = entry.replace("rw quiet", "rw quiet systemd.swap=0")
+        table = [{"type": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"}, {"type": "4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709"}]
+        self.assertEqual(finish.swap_violations(table, entry), [])
+        swap = table + [{"type": "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F", "node": "agentos.raw4"}]
+        self.assertIn("swap partition", " ".join(finish.swap_violations(swap, entry)))
+        self.assertIn("systemd.swap=0", " ".join(finish.swap_violations(
+            table, entry.replace("systemd.swap=0", "systemd.swap=0 systemd.swap=1"))))
+
+    def test_boot_test_expects_the_runtime_check(self):
+        # The booted image reports swap and core dumps off in the health line, so CI shows them on
+        # a real boot, not only in this tree check.
+        self.assertIn("swap=off dumps=off", (IMG / "ci_boot.sh").read_text())
 
 
 def fuzz_targets(broker):
@@ -698,6 +1026,7 @@ class FuzzConfineTest(unittest.TestCase):
 
     def test_the_image_does_not_ship_the_fuzz_state(self):
         with tempfile.TemporaryDirectory() as d:
+            nodump(pathlib.Path(d))
             self.assertEqual(check.violations(d), [])
             os.makedirs(os.path.join(d, "var/lib/agentos-fuzz"))
             self.assertEqual(check.violations(d), ["var/lib/agentos-fuzz: fuzz state; created on the box, never shipped"])

@@ -64,7 +64,8 @@ func (f *fakeOwner) LocalStop(context.Context) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeOwner) LocalResume(locks uint64) (string, error) {
+func (f *fakeOwner) StopGen() int64 { return 0 }
+func (f *fakeOwner) LocalResume(locks uint64, _ int64) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if locks != f.locks {
@@ -535,8 +536,10 @@ func TestChannelFailuresAreFixedCodes(t *testing.T) {
 
 type failing struct{ *fakeOwner }
 
-func (f *failing) LocalStop(context.Context) error    { return errors.New("journal: /var/lib/x") }
-func (f *failing) LocalResume(uint64) (string, error) { return "", errors.New("journal: /var/lib/x") }
+func (f *failing) LocalStop(context.Context) error { return errors.New("journal: /var/lib/x") }
+func (f *failing) LocalResume(uint64, int64) (string, error) {
+	return "", errors.New("journal: /var/lib/x")
+}
 func (f *failing) LocalSignIn(string) (time.Time, uint64, error) {
 	return time.Time{}, 0, errors.New("state: /var/lib/x")
 }

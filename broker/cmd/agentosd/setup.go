@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -26,7 +27,22 @@ type setupMode struct {
 	OwnerState string // the owner channel's state file
 	Enroll     localsrv.Enroller
 	Progress   func() localapi.SetupProgress
+
+	// Card starts the first-boot Owner Card step (HW-1) and returns its
+	// hold: setup does not finish while Hold reports the card unconfirmed.
+	// agentosd links no card code (ARC-2: the card's page is served over
+	// net/http), so the step is built with the page and handed in here; a
+	// nil Card fails closed.
+	Card func() (cardHold, error)
 }
+
+// cardHold is the Owner Card step as setup's finish sees it
+// (firstboot.CardStep): Hold is nil once the owner has confirmed the card.
+type cardHold interface{ Hold() error }
+
+// errCardPending is setup finish's refusal while the Owner Card is
+// unconfirmed.
+const errCardPending = "card pending"
 
 // errOwnedWithoutRecord: the owner channel has state but setup's record is
 // missing; setup stays closed rather than letting the page pick an owner.
@@ -51,9 +67,21 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	if m.Enroll == nil {
 		return "", errors.New("setup: no -owner and no -owner-verify: the code generator cannot be enrolled")
 	}
+	step, err := m.cardStep()
+	if err != nil {
+		return "", err
+	}
 	finished := make(chan string, 1)
 	s := localsrv.NewSetup(localsrv.SetupConfig{Record: m.Record, Enroll: m.Enroll, Progress: m.Progress,
 		Finished: func(owner string) { finished <- owner }})
+	ops := s.Ops()
+	finish := ops[localapi.OpSetupFinish]
+	ops[localapi.OpSetupFinish] = func(ctx context.Context, p sockets.Peer, args json.RawMessage) (any, error) {
+		if step.Hold() != nil {
+			return nil, sockets.Code(errCardPending)
+		}
+		return finish(ctx, p, args)
+	}
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()
 	srv := &sockets.Server{Dir: m.Dir}
@@ -65,7 +93,7 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		PeerGID:     m.Page.GID,
 		MaxConns:    8,
 		IdleTimeout: 30 * time.Second,
-		Ops:         s.Ops(),
+		Ops:         ops,
 	}); err != nil {
 		return "", err
 	}
@@ -78,6 +106,21 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	stop()
 	srv.Wait()
 	return owner, err
+}
+
+// cardStep starts the Owner Card step on a box with no owner.
+func (m setupMode) cardStep() (cardHold, error) {
+	if m.Card == nil {
+		return nil, errors.New("setup: no Owner Card step: setup cannot finish without the owner's card")
+	}
+	step, err := m.Card()
+	if err != nil {
+		return nil, err
+	}
+	if step == nil {
+		return nil, errors.New("setup: the Owner Card step did not start")
+	}
+	return step, nil
 }
 
 // enroller is the vault process's enrollment (egress K17) as setup sees

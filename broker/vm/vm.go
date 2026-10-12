@@ -853,14 +853,18 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 			}
 		}
 	}
-	if err == nil {
-		// Only a guest known dead stops counting against the reserve.
-		m.uncommitDisk(mc)
+	if err != nil {
+		// Not known dead: it stays Running, so its memory and disk stay
+		// counted and a retry kills it again rather than reading it as
+		// stopped (a preemption would otherwise report a live guest dead).
+		return err
 	}
+	// Only a guest known dead stops counting against the reserve.
+	m.uncommitDisk(mc)
 	if mc.State == Running {
 		mc.State = Stopped
 	}
-	return err
+	return nil
 }
 
 func (m *Manager) get(id string) (*machine, error) {
@@ -920,8 +924,24 @@ func (m *Manager) RaiseLabel(id string, l Label) error {
 	if l < mc.Label {
 		return fmt.Errorf("vm: %s: a label only rises (REV-5)", id)
 	}
+	return m.raiseLocked(mc, l)
+}
+
+// raiseLocked sets mc's label to l and saves it. A failed save puts the
+// label back in memory too, so a label held in memory is always the saved
+// one: a caller that reads it as already raised never skips a save that
+// failed, and a restart never finds data of a higher label under the
+// lower one saved (LABEL-durable). Called with mc.mu held and l not below
+// mc.Label.
+func (m *Manager) raiseLocked(mc *machine, l Label) error {
+	prev := mc.Label
 	mc.Label = l
-	return m.saveMachine(mc)
+	if err := m.saveMachine(mc); err != nil {
+		mc.Label = prev
+		mc.label.Store(uint32(prev))
+		return err
+	}
+	return nil
 }
 
 // Label returns a machine's data label (REV-5).
@@ -1231,12 +1251,16 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	}
 	mc.mu.Lock()
 	err = claimLocked(mc)
+	if err == nil && s.Label > mc.Label {
+		// Saved before the snapshot's content reaches the layer (LABEL-durable).
+		err = m.raiseLocked(mc, s.Label)
+	}
 	if err == nil {
-		mc.Label = maxLabel(mc.Label, s.Label)
 		err = m.restartLocked(ctx, mc, &s)
 	}
+	live := mc.State == Running // a guest that could not be killed
 	mc.mu.Unlock()
-	if err != nil {
+	if err != nil && !live {
 		m.cfg.Admit.Release(id)
 	}
 	return err
@@ -1245,7 +1269,8 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 // restartLocked stops a machine and starts it from s (nil: its image). The
 // disk for restoring s is reserved before the machine is stopped, so a full
 // disk refuses the restart and leaves the machine as it was. On other
-// failures the machine is left Stopped and the caller releases admission.
+// failures the machine is left Stopped (Running if it could not be killed)
+// and the caller releases admission unless it is still Running.
 func (m *Manager) restartLocked(ctx context.Context, mc *machine, s *Snapshot) error {
 	if s == nil {
 		h, err := m.reserveSeed(mc)
@@ -1271,8 +1296,10 @@ func (m *Manager) restartHeld(ctx context.Context, mc *machine, s *Snapshot) err
 		err = m.startFrom(ctx, mc, s)
 	}
 	if err != nil {
-		m.stopRuntime(ctx, mc)
-		mc.State = Stopped
+		// A guest that could not be killed stays Running.
+		if m.stopRuntime(ctx, mc) == nil {
+			mc.State = Stopped
+		}
 		m.saveMachine(mc)
 	}
 	return err
@@ -1303,8 +1330,9 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 	if err == nil {
 		err = m.restartLocked(ctx, mc, keepLayer)
 	}
+	live := mc.State == Running // a guest that could not be killed
 	mc.mu.Unlock()
-	if err != nil {
+	if err != nil && !live {
 		m.cfg.Admit.Release(id)
 	}
 	return err
@@ -1625,10 +1653,13 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	if err := writeJSON(filepath.Join(dir, "meta.json"), out); err != nil {
 		return fail(err)
 	}
+	// The label is saved before the merged files reach dst's layer.
+	if err := m.raiseLocked(dm, out.Label); err != nil {
+		return fail(err)
+	}
 	m.mu.Lock()
 	m.snaps[out.ID] = out
 	m.mu.Unlock()
-	dm.Label = out.Label
 	dm.Last = out.ID
 	if err := m.restartHeld(ctx, dm, &out); err != nil {
 		return Snapshot{}, true, err
@@ -1687,8 +1718,9 @@ func (m *Manager) Rebuild(ctx context.Context, id string) error {
 	if err == nil {
 		err = m.restartLocked(ctx, mc, nil)
 	}
+	live := mc.State == Running // a guest that could not be killed
 	mc.mu.Unlock()
-	if err != nil {
+	if err != nil && !live {
 		m.cfg.Admit.Release(id)
 	}
 	return err
@@ -1739,7 +1771,7 @@ func (m *Manager) Preempt(id string) error {
 	mc.preempting.Store(true)
 	if mc.mu.TryLock() {
 		defer mc.mu.Unlock()
-		return m.preemptLocked(mc)
+		return m.preemptLocked(mc, false)
 	}
 	// The completion is scheduled even if the kill fails: once the holding
 	// operation lets go, the machine is stopped under its lock and
@@ -1752,7 +1784,7 @@ func (m *Manager) Preempt(id string) error {
 	go func() {
 		mc.mu.Lock()
 		defer mc.mu.Unlock()
-		if err := m.preemptLocked(mc); err != nil {
+		if err := m.preemptLocked(mc, kerr == nil); err != nil {
 			log.Printf("vm: %s: finishing preemption: %v", mc.ID, err)
 		}
 	}()
@@ -1760,8 +1792,11 @@ func (m *Manager) Preempt(id string) error {
 }
 
 // preemptLocked stops mc and records it as preempted. Called with mc.mu
-// held and mc.preempting set; it clears preempting.
-func (m *Manager) preemptLocked(mc *machine) error {
+// held and mc.preempting set; it clears preempting. killed says its memory
+// was already released without the lock and admission told so: then it is
+// recorded preempted even if the runtime cleanup fails, because a machine
+// left Running with no admission could be restarted uncounted.
+func (m *Manager) preemptLocked(mc *machine, killed bool) error {
 	defer mc.preempting.Store(false)
 	if mc.State != Running {
 		// Admitted but not started yet: it must not start now.
@@ -1771,11 +1806,14 @@ func (m *Manager) preemptLocked(mc *machine) error {
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.KillTimeout)
 	defer cancel()
 	m.cfg.Runtime.Pause(ctx, mc.ID) // stop its CPU use now; the kill follows
-	if err := m.stopRuntime(ctx, mc); err != nil {
+	err := m.stopRuntime(ctx, mc)
+	if err != nil && !killed {
 		return err
 	}
+	// After a failed cleanup the disk stays committed: only the memory is
+	// known released.
 	mc.State = Preempted
-	return m.saveMachine(mc)
+	return errors.Join(err, m.saveMachine(mc))
 }
 
 // kill releases a machine's memory without its lock: it empties the

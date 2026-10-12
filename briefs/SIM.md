@@ -14,7 +14,7 @@ Board section: Simplification (2026-10-10). Decision: D-095. Analysis: the simpl
 
 The verb is the intent lifecycle: intent, authorized, dispatched, observed, settled, judged.
 
-**Order.** Wave 0 fixes foundation defects and needs no spec change. Wave 1: SIM-check, SIM-proj and SIM-cases need no spec change and can start at once; SIM-owner-hold, SIM-pull, SIM-outcome and SIM-erase need SIM-sd. Wave 2 migrates consumers and deletes the duplicates. Wave 3 (Mark, 2026-10-10: "urgently pursue all simplifications") turns the former LATER ideas into packages: SIM-shred, SIM-policy, SIM-cap, SIM-sim and SIM-repo-1/2. SIM-repo-1 and SIM-sim's harness need nothing and start with wave 0; the others start when their Needs merge. Each package is one session; tier A packages run on the strongest model.
+**Order.** Wave 0 fixes foundation defects and needs no spec change. Wave 1: SIM-check, SIM-proj and SIM-cases need no spec change and can start at once; SIM-owner-hold, SIM-pull, SIM-outcome and SIM-erase need SIM-sd. Wave 2 migrates consumers and deletes the duplicates. Wave 3 (Mark, 2026-10-10: "urgently pursue all simplifications") turns the former LATER ideas into packages: SIM-shred, SIM-policy, SIM-cap, SIM-sim, SIM-split, SIM-outer and SIM-repo-1/2. SIM-repo-1 and SIM-sim's harness need nothing and start with wave 0; the others start when their Needs merge. Each package is one session; tier A packages run on the strongest model.
 
 **Rule for every package.** Deletion is the deliverable as much as the addition: each PR lists the lines, files and BOARD rows it retires. A package that adds a durable format outside the journal is rejected unless SIM-sd lists it as a documented cache.
 
@@ -116,6 +116,76 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 **Requirement IDs.** ARC-1. **Acceptance.** A fixture package that writes grants directly fails the check; `risk_tier.py` rates a core file A and a non-core broker file B. **Usage estimate.** Small, under 60k tokens. Tier A: it changes `tools/risk_tier.py` and `.github/`, both tier A paths.
 
+## SIM-split: one key-holder process per account, and a separate checker (tier A)
+
+**Needs.** SIM-core (its list names the holder, not all of egress); SIM-check (item 3 adds its predicate).
+
+**Fact.** `agentos-egress` (about 12.4k lines in `broker/cmd/agentos-egress`) opens the whole vault and reads every secret: proxy injection and the CRED-7 redactor (`broker/egress/proxy.go:375`, `:308`), and in `broker/cmd/agentos-egress/` mail (`mailaccount.go:178`), SMS (`smsaccount.go:170`), SIP (`sipaccount.go:199-200`, the per-account SIP password) and TPM policy keys (`trusted.go:706`). Today egress redacts every vault value from every proxied response and the journaled path (`proxy.go:308`, `:313`, `:455`, `:470`), which CRED-7 requires. A bug anywhere in it reaches every account.
+
+**Change.** (1) A small unlock step derives the vault key and hands each account's secret to that account's holder, a process under its own uid that has only that secret and speaks a closed request shape (ADP-10). Egress, mail, SMS and SIP keep their logic but hold no secrets; they hand the holder a request it checks, and the holder injects the login, opens the upstream TLS connection itself, swaps a token-refresh response back to placeholders (CRED-5, ADP-10), and redacts its own secret from the response (CRED-7), so no login passes through egress in either direction. Keys tied to no account stay with the unlock step, which holds only these: the TPM policy keys, the recall identity key (`custody.go:708`), the update anchor (`custody.go:788`) and the recovery factors (`broker/recovery/`); the CH-4 seed (`custody.go:549`, `:670`; pending seed `enroll.go:119`) goes to the checker. Each holder redacts only its own secret, which would narrow CRED-7 (a provider B key echoed in provider A's response would pass), so egress keeps a redactor that holds no plaintext: the unlock step gives it keyed hashes of a fixed-length window of each vault value (a value shorter than the window is hashed whole), and it redacts any matching span on every response and journaled path, so all values stay redacted on every path and CRED-7 is met as written. Holders and the checker are broker processes (ARC-1). This extends the CRED-4 / ADP-5 executor pattern to the vault. (2) The CH-4 code seed moves out of the broker into a separate checker process; before releasing a login for a high-risk act (CH-10) the holder consults the checker. No SPEC change and no owner-visible change; the vault still unlocks once at boot. (3) SIM-core's list gains the holder and the checker as core packages; SIM-check gains the predicate "no secret appears in any process except its account's holder".
+
+**Known gap (state in the PR).** A generator code is bound to time, not content, so a compromised broker could reuse a fresh code within its window; paper-grid cells do not have this gap.
+
+**Requirement IDs.** CRED-4, CRED-5, CRED-7, ADP-10, CH-4, CH-10, ARC-1. **Acceptance.** A synthetic canary secret is readable only in its account's holder (checked by process); a request the holder's shape rejects never gets a login; a canary login and a refreshed canary token never appear in egress memory or traffic; a high-risk act without a checker-verified code is refused; restart re-hands every secret and the mail, SMS, SIP and proxy paths still pass their tests; a canary secret of account B in account A's response and in a journaled record is redacted by egress, and egress memory holds only keyed hashes of it, never the value. **Usage estimate.** Under 140k tokens; split the checker off if the holder split alone exceeds half. Tier A.
+
+## SIM-split-b: the CH-4 checker process (tier A)
+
+**Needs.** SIM-split part 1 (#1053, the holders).
+
+**Change.** A separate `agentos-checker` process holds the CH-4 seed and the spent-step state. Over a verify socket (broker side) it checks the owner's code once and records one-time approvals, each bound to the hash of one exact request (host, method, escaped path, body) and expiring after 15 minutes. Over a redeem socket (holder side) a holder spends that approval before it releases a login for an irreversible or secret-class verb (CH-10); without it the act is refused. Both binaries refuse to run under a uid they serve and set themselves non-dumpable. Fixes #1053's R3 (binary hardening) and R4 (query-string test).
+
+**Known gap (state in the PR).** A generator code is bound to time, not content, so a compromised broker could reuse a fresh code within its window; paper-grid cells do not have this gap.
+
+**Requirement IDs.** CH-4, CH-10, ARC-1, CRED-1, ADP-10. **Acceptance.** A high-risk act without a checker-verified code is refused; an approval covers one exact request once; a spent step survives restart; wrong codes pause the checker. Tier A.
+
+## SIM-split-wire: production wiring for holders and the checker (tier A)
+
+**Needs.** SIM-split-b.
+
+**Change.** The unlock step's custody leaves egress: one Keeper per holder hands each account's secret to its holder, and egress runs with the hash Redaction and the Holders map and no vault (CRED-1). The CH-4 seed and the pending enrol seed move out of custody to the checker and are re-handed after re-enrol; the broker's code check goes to the checker's verify socket, and the unlock step's last-spent step and the checker's are one store. The broker computes each act over the exact bytes egress forwards, and `checker.Act` opens in `broker/core/core.txt` for it. Low-tier and pre-allowed irreversible acts get an explicit path that the journal records. Each holder gets `-public-fetch` from the owner's per-login choice to let public machines use provider-side fetch, and a test pins the flag off by default (#1061 P1: the default-on mutant survives; without the flag, public machines lose provider-side tools through holders).
+
+**Requirement IDs.** CRED-1, CRED-4, CH-4, CH-10, ARC-1. **Acceptance.** On a booted box, egress memory holds no canary secret and no vault key; a high-risk act passes only with a checker-verified code over its exact bytes. **Failure path.** Egress keeps the vault open in production, so one egress bug still reaches every account. Tier A.
+
+## SIM-split-msg: mail, SMS and SIP through holders (tier A)
+
+**Needs.** SIM-split-wire.
+
+**Change.** Mail (`mailaccount.go`), SMS (`smsaccount.go`) and SIP (`sipaccount.go`) stop reading secrets from the vault and hand their requests to the account's holder, which injects the login and opens the upstream connection.
+
+**Requirement IDs.** CRED-1, ADP-10. **Acceptance.** A canary mail, SMS or SIP password never appears in egress memory or traffic; the existing mail, SMS and SIP tests pass. **Failure path.** The per-account SIP password stays in egress, so an egress bug leaks every SIP login. Tier A.
+
+## SIM-split-refresh: refreshed tokens persist through the unlock step (tier A)
+
+**Needs.** SIM-split-wire.
+
+**Change.** When a holder swaps a token-refresh response back to placeholders, the new token goes to the unlock step, which writes it to the vault and re-hands it, so a restart does not fall back to the expired token.
+
+**Requirement IDs.** CRED-5. **Acceptance.** After a refresh and a restart, the holder uses the refreshed canary token, and the token never passes through egress. **Failure path.** A refreshed token lives only in holder memory; after a restart the account fails login until the owner re-enters it. Tier A.
+
+## SIM-split-check: the secret-isolation predicate (tier A)
+
+**Needs.** SIM-split-wire, SIM-check.
+
+**Change.** SIM-check gains the predicate "no secret appears in any process except its account's holder" and runs it in its test, CI and runtime forms.
+
+**Requirement IDs.** CRED-1, ARC-1. **Acceptance.** A fixture that copies a canary secret into egress memory fails the predicate. **Failure path.** A later change re-opens the vault in egress and no test notices. Tier A.
+
+## SIM-split-fix: #1053 review findings (tier A)
+
+**Needs.** SIM-split-wire for item 1.
+
+**Change.** (1) R1, H-4: egress holds the hash key next to the window hashes, so a short mail or SIP secret can be brute-forced from egress memory. Before production wiring, set an entropy floor per value class or record a DECISIONS row accepting the class. (2) R2, H-3: the holder re-applies the op's BodyRule (ADP-10) itself rather than trusting egress, without narrowing what public machines may send. R3 (binary hardening) and R4 (query-string test) are fixed in SIM-split-b. (3) #1057 S1: `checker.Act` names no account, and every holder uid shares one redeem socket, so the act binds the account (credential name) and a holder redeems only acts for its own account. (4) #1057 S2: a test that `checker.Redeemer` reports any status but 204 and 403 as an error, so the holder refuses.
+
+**Requirement IDs.** CRED-1, CRED-7, ADP-10, CH-10. **Acceptance.** A short canary secret has no recoverable hash in egress, or a DECISIONS row names its class; a body carrying `mcp_servers` or `web_search_options` is refused by the holder even when egress forwards it; an approval for account A's act is refused by account B's holder for the same bytes; a redeem answered 500 sends nothing. **Failure path.** A compromised egress sends `mcp_servers` with a real login attached. Tier A.
+
+## SIM-outer: outer limits held by the provider (L1 spec diff, Mark approves)
+
+**Change to SPEC.** Extend CRED-5 item 3 (narrowest login for worker-held routes) to every broker-held account: (1) OAuth scopes limited to what the enabled loops use, asked on the same consent screen as today; a loop needing a new permission asks once, when the owner turns it on. (2) Provider or card spend limits and provider rate limits set at about 2x the box's own cap (OP-8) and above the broker's per-hour bounds, so the broker's caps trip first in normal use and a provider refusal is itself the alarm: the broker texts that a provider refused what its own cap allowed, and pauses. (3) A provider with no narrow scope or limit is stated once in STATUS.
+
+**Limit.** Bounds the worst case at about 2x the cap, not a hard guarantee where a provider offers no limit or scope. Owner notices it only on a clearly malicious act, plus one setup step per provider.
+
+**Requirement IDs.** CRED-5, OP-8. **Acceptance.** Mark approves the diff. doclint and trace pass. **Usage estimate.** Small, under 40k tokens. Tier B.
+
 ## SIM-shred: forget by deleting a per-subject key (tier A)
 
 **Needs.** SIM-erase, SIM-proj; SIM-sd item 7.
@@ -128,15 +198,19 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 ## SIM-policy: policy as data, one evaluator (tier A)
 
-**Needs.** SIM-outcome, SIM-pull, SIM-core.
+**Needs.** SIM-owner-hold, SIM-pull, SIM-outcome, SIM-core. It starts after all of them merge (waste review, 2026-10-12): they settle which policies survive, and a policy layer built earlier would encode constants that they delete.
 
-**Change.** Urgent classes, quiet hours, pacing allowances, adoption rules (what counts as a gain, whether a tie adopts) and retry policies become declarative records evaluated by one small deterministic evaluator inside the core. The evaluator only matches fields and compares thresholds: no loops, no user-defined functions, no I/O. A policy change is itself a journaled intent, needing owner approval and revertible. The constants these replace (for example in `loops/loop1.go`, `owner/pacer.go`, `grants`) are deleted.
+**Step 1, typed settings in one place.** First move every constant listed below into one typed settings record, with one default, journaled changes and one test per constant. That record alone may be the whole package.
+
+**Gate on the evaluator.** Build the match-and-compare evaluator below only if the PR shows both of these: (a) a demonstrated need that typed settings cannot meet, such as an owner-visible policy that settings cannot express; and (b) net code deletion, meaning the evaluator plus its records are smaller than the code they replace. If either is missing, the package ends at step 1, and the evaluator becomes a `later` line.
+
+**Change (only past the gate).** Urgent classes, quiet hours, pacing allowances, adoption rules (what counts as a gain, whether a tie adopts) and retry policies become declarative records evaluated by one small deterministic evaluator inside the core. The evaluator only matches fields and compares thresholds: no loops, no user-defined functions, no I/O. A policy change is itself a journaled intent, needing owner approval and revertible. The constants these replace (for example in `loops/loop1.go`, `owner/pacer.go`, `grants`) are deleted.
 
 **Requirement IDs.** OP-5, CHG-1, CH-15, LOOP-3. **Acceptance.** Each replaced constant has a test showing identical decisions from the default policy record; a policy change without approval is refused; reverting a policy intent restores earlier decisions; the evaluator's grammar test rejects any construct beyond match and compare. **Usage estimate.** Under 140k tokens. Tier A.
 
 ## SIM-cap: capability grants scoped per intent (tier A)
 
-**Needs.** SIM-core, SIM-check, SIM-policy.
+**Needs.** SIM-core, SIM-check, SIM-policy (step 1 is enough; SIM-cap does not need the evaluator).
 
 **Change.** A grant names the intent (action, subject, bounds, expiry) it authorizes, instead of standing authority per account or tool. The broker mints the capability at authorize and checks it at dispatch (OP-3). A capability cannot be widened by its holder, and it is spent or expires with its intent. Standing per-account grants become policies (SIM-policy) that mint capabilities, or are deleted where nothing uses them.
 
