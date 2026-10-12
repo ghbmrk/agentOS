@@ -87,7 +87,11 @@ class InboundOnAHomeNetwork(unittest.TestCase):
                 sh("ip", "addr", "add", "%s.%d/24" % (v4, host), "dev", dev, ns=ns)
                 sh("ip", "link", "set", dev, "up", ns=ns)
         if IPV6:
-            sh("sysctl", "-qw", "net.ipv6.conf.eth0.accept_ra=1", ns=BOX)
+            # A runner whose new namespaces inherit forwarding=1 would ignore router
+            # advertisements at accept_ra=1; 2 takes them either way, as a host does.
+            sh("sysctl", "-qw", "net.ipv6.conf.eth0.forwarding=0", ns=BOX)
+            sh("sysctl", "-qw", "net.ipv6.conf.eth0.accept_ra=2", ns=BOX)
+            sh("sysctl", "-qw", "net.ipv6.conf.eth0.autoconf=1", ns=BOX)
             sh("ip", "-6", "addr", "add", ROUTER6 + "/64", "dev", "h0", "nodad", ns=HOME)
         self.listen(BOX)
         self.listen(HOME)
@@ -144,13 +148,19 @@ class InboundOnAHomeNetwork(unittest.TestCase):
     @unittest.skipUnless(IPV6, "kernel without IPv6")
     def test_the_box_keeps_ipv6_and_drops_it_inbound(self):
         self.load()
-        sh("python3", "-c", ADVERTISE, "h0", ns=HOME)
-        for _ in range(50):
+        # Advertise once a second, as a router does after a link comes up, so an advertisement
+        # sent before the box's link was ready does not decide the test.
+        for i in range(100):
+            if i % 10 == 0:
+                sh("python3", "-c", ADVERTISE, "h0", ns=HOME)
             if self.global6():
                 break
             time.sleep(0.1)
         addr6 = self.global6()
-        self.assertIsNotNone(addr6, "the box got no global IPv6 address from the router advertisement")
+        self.assertIsNotNone(addr6, "the box got no global IPv6 address from the router advertisement:\n"
+                             + sh("ip", "-6", "addr", "show", "dev", "eth0", ns=BOX).stdout
+                             + sh("sysctl", "net.ipv6.conf.eth0", ns=BOX, check=False).stdout
+                             + sh("nft", "list", "ruleset", ns=BOX).stdout)
         self.assertFalse(reaches(HOME, addr6), "a home host reached box port %d at %s" % (PORT, addr6))
         # Reaching the router's global address needs its neighbour advertisement, which it sends
         # from that global address.
