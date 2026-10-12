@@ -19,8 +19,10 @@ import (
 // daemon (cmd/agentosd) is on the ARC-2 control path and may not. The
 // recovery package (P2-8) runs inside the vault process, and agentos-a8scan
 // is A8's audit tool run by hand on a drive; recovery's imports test keeps
-// every other package from importing it.
-var vaultImporters = map[string]bool{"egress": true, "cmd/agentos-egress": true, "recovery": true, "cmd/agentos-a8scan": true}
+// every other package from importing it. A key holder (SIM-split) holds one
+// account's login and redacts it with the vault's redactor; only egress's
+// uid reaches its request socket.
+var vaultImporters = map[string]bool{"egress": true, "cmd/agentos-egress": true, "recovery": true, "cmd/agentos-a8scan": true, "holder": true}
 
 const vaultPkg = "github.com/ghbmrk/agentos/broker/vault"
 

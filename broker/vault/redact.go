@@ -43,15 +43,30 @@ func (r *Redactor) With(values ...[]byte) *Redactor {
 		seen[string(p.b)] = true
 	}
 	r = &Redactor{pats: append([]pattern(nil), r.pats...), maxLen: r.maxLen}
+	for _, p := range encodings(values) {
+		if seen[string(p.b)] {
+			continue
+		}
+		seen[string(p.b)] = true
+		r.pats = append(r.pats, p)
+		if len(p.b) > r.maxLen {
+			r.maxLen = len(p.b)
+		}
+	}
+	return r
+}
+
+// encodings returns every form of values a redactor matches, without
+// duplicates. Forms shorter than 4 bytes are dropped.
+func encodings(values [][]byte) []pattern {
+	var out []pattern
+	seen := map[string]bool{}
 	add := func(p string, fold bool) {
 		if len(p) < 4 || seen[p] {
 			return
 		}
 		seen[p] = true
-		r.pats = append(r.pats, pattern{b: []byte(p), fold: fold})
-		if len(p) > r.maxLen {
-			r.maxLen = len(p)
-		}
+		out = append(out, pattern{b: []byte(p), fold: fold})
 	}
 	for _, v := range values {
 		if len(v) == 0 {
@@ -72,7 +87,7 @@ func (r *Redactor) With(values ...[]byte) *Redactor {
 			add(string(js[1:len(js)-1]), false)
 		}
 	}
-	return r
+	return out
 }
 
 // alignedBase64 returns the run of base64 characters that encodes v, and
@@ -153,9 +168,14 @@ func (r *Redactor) earliest(b []byte) (at, n int) {
 // writes; Close writes them. Close does not close w.
 func (r *Redactor) Writer(w io.Writer) *Writer { return &Writer{r: r, w: w} }
 
+// scanner is what a Writer streams through: Redactor or HashRedactor.
+type scanner interface {
+	scan(out, b []byte, final bool) (_, rest []byte)
+}
+
 // Writer is a redacting stream writer.
 type Writer struct {
-	r   *Redactor
+	r   scanner
 	w   io.Writer
 	buf []byte
 }
