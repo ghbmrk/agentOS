@@ -796,6 +796,7 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | DEL-1 l3 | PR #709 lens (comment 6109585632): the outbox bound (64) is shared across all machines, so one machine's backlog makes other machines' replies wait or get a 503; owner messages bound it, so a guest cannot cause it alone. Revisit with DEL-sd sizing |
 | DEL-1 l4 | PR #709 lens (comment 6109585632): `refused` lives only in memory, so after a restart with a full outbox STATUS does not show "replies are waiting" until a guest is refused again; the drain on start usually clears the outbox first |
 | CRED-12 l3 | PR #1027 lens and L3: offer the per-site retry off once at adoption, or default it off, for a site whose adapter recipe says its terms forbid automation, if such an adapter field ever exists |
+| PMERGE-1 l1 | `recheck`: Mark applies main's ruleset (strict required checks `checks`, `broker`, `machines`, `hostcheck`), the `lane:*` and `handoff` labels and the claude2 collaborator; until then the up-to-date gate of OPERATING §7 is not enforced. PMERGE-1 has no BOARD row or brief; its ID lives here and in D-100 |
 | P3-3-erase l1 | `recheck`. PR #1034 L3 (6110177109): `journal.Engine.Erase` with several IDs. If id2's `commit` fails before `Append` (validate or encode error, which does not set `broken`), `rewriteErased` is skipped; a later `Erase([id1])` sees `erased` empty and returns nil while id1's content stays on disk until the next erase or `Open`. No realistic trigger found (the records are constant-reason transitions that `validate` accepts). Fix: run `rewriteErased` on the error path whenever `erased` is non-empty |
 | P3-3-erase l2 | PR #1034 Potency lens (6111112791): a transient read error during the erase rewrite leaves the journal engine broken until the daemon restarts; nothing outside `broker/journal` handles `ErrBroken`, so every journaled effect stops until then. Fail-closed is right (CAP-3) and a failed append already behaves the same way. Possible follow-ups: a bounded in-process reopen, or a STATUS cause (OP-9) for a broken journal |
 | SIM-check l1 | SIM-check (`recheck`): quality notes (`quality` record Evidence) are neither erased by `Erase` nor judged as content by CAP-3; establish whether a note can carry a deleted source's content |
@@ -897,3 +898,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | CTRL-card-rot l6 | PR #1090 UX delta: every rotated part is owed now, so the rotation start page (CTRL-card-rot-wire) should preselect the owed parts or name them in owner words. The `ErrRotationOwed` text ("recovery: ... also replace wifi") is not owner-facing |
 | CTRL-card-rot l7 | PR #1090 UX delta: the card display's three 410 texts say "my box page", but SPEC CH-21 and voice V5 name it "my Wi-Fi page", as `card/display.go`'s 403 and `render.go` already do. Sweep all three together |
 | PROJ-read l1 | PR #1095 L3/lens: one journal read is now shared by every projection, so the pointer fields of `journal.Record` (`Intent` with its `Params` map, `Egress`, `Sleep`) are shared across views, and a mutating `Apply` would mislead later views. The contract is in the `Projection.Apply` doc and ASSUMPTIONS P8, and no projection mutates today. With the first production projection (SIM-owner-hold), add a test helper that fails if `Apply` changes its record. |
+
+## claude2
+
+Per-team section (OPERATING §7): the claude2 team appends only here; its IDs are prefixed `C2-` or `D-claude2-`.
+
+| ID | Why it can wait |
+|---|---|
