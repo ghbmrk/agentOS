@@ -158,7 +158,7 @@ Primary lane; from an external review's points 2 to 6, checked against main at 9
 | RT-2 | Risk-tier follow-ups from PR #705's reviews (brief to write): CI and reviewers compute the tier with the base branch's `tools/risk_tier.py`, not the PR's own copy (invariant: a PR cannot edit the rules that set its review depth; failure: a PR drops `image/` from the A list and edits a unit, and both runs print B); `tools/hostcheck*` to A (HOST-1e; failure: a C PR allow-lists a real host change and the HW-8 check reports it as disclosed) | RT-1 | queued |
 | UX-INV | Owner-effort inventory: script one week of owner traffic and count texts and taps per task for MORE paging, withheld replies (CH-19, CH-20p), a retry that loses the owner's earlier choice, quiet hours and pacing (W5-Dc-r1) and digest sources (DIG-1); each step over budget becomes a row (brief to write) | DIG-1 | queued |
 | REV-CHK | Sweep `reviews/*/README.md` for finding kinds seen on two or more PRs without a lint rule, test or CI check (CLAUDE.md, OPERATING §4); one row per gap (brief to write) | — | queued |
-| CI-docs | [Records-only changes get a light CI path](briefs/CI-docs.md) | — | building (claude; tier A) |
+| CI-docs | [Records-only changes get a light CI path](briefs/CI-docs.md) | — | in review (#1084; tier A) |
 | A10-T1 | Owner-minutes trial (A10, H6): the same H6 tasks on AgentOS, OpenClaw alone and a provider CLI, owner-minutes and outcomes measured over the same period | Mark sets the trial time | queued (needs Mark) |
 | LRN-1 | [No adoption bonus without a measured gain](briefs/LRN-1.md) | — | in review (tier A) |
 
