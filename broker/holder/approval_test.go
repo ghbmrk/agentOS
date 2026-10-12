@@ -72,7 +72,7 @@ func TestHighRiskActNeedsACheckerVerifiedCode(t *testing.T) {
 	up := &upstream{reply: answer(200, nil, "{}")}
 	h := approvingHolder(t, up, func(_ context.Context, act string) (bool, error) { return c.Redeem(act), nil })
 	body := `{"to":"canary@example.invalid"}`
-	act := checker.Act("plan.example", "POST", "/v1/send", []byte(body))
+	act := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(body))
 
 	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden || w.Header().Get(ErrorHeader) != ErrUnapproved {
 		t.Fatalf("no code: %d %q", w.Code, w.Header().Get(ErrorHeader))
@@ -87,7 +87,7 @@ func TestHighRiskActNeedsACheckerVerifiedCode(t *testing.T) {
 	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden {
 		t.Fatalf("wrong code: %d", w.Code)
 	}
-	other := checker.Act("plan.example", "POST", "/v1/send", []byte(`{"to":"other@example.invalid"}`))
+	other := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(`{"to":"other@example.invalid"}`))
 	if _, ok, err := c.Verify(totp(seed, time.Now()), 0, true, []string{other}); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
@@ -165,7 +165,7 @@ func TestHolderRedeemsOverTheCheckerSocket(t *testing.T) {
 	up := &upstream{reply: answer(200, nil, "{}")}
 	h := approvingHolder(t, up, checker.Redeemer(filepath.Join(dir, checker.RedeemSocket)))
 	body := `{"to":"canary@example.invalid"}`
-	act := checker.Act("plan.example", "POST", "/v1/send", []byte(body))
+	act := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(body))
 	if _, ok, err := checker.VerifyClient(filepath.Join(dir, checker.VerifySocket)).VerifyTOTP(totp(seed, time.Now()), 0, true, act); !ok || err != nil {
 		t.Fatalf("verify: %v %v", ok, err)
 	}
