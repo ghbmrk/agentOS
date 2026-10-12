@@ -42,6 +42,11 @@ type Store interface {
 	Save([]byte) error
 }
 
+// StatePath is where a preloaded box keeps its claim state: the seller
+// flow (agentos-seller) writes it into the image root-owned 0600, and the
+// box opens it there with change.FileStore.
+const StatePath = "/var/lib/agentos/claim.json"
+
 // The claim's refusals. Their text is the claim screen's (CH-21).
 var (
 	ErrAlreadyClaimed = errors.New("claim: I am already claimed")
