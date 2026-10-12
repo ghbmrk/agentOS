@@ -65,7 +65,7 @@ const (
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		log.Fatal("usage: agentos-egress init|serve|unlock|put|trust|untrust|hosts [flags]")
+		log.Fatal("usage: agentos-egress init|serve|unlock|put|trust|untrust|hosts|pin|unpin|pins [flags]")
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
@@ -84,6 +84,12 @@ func main() {
 		err = untrustCmd(args, os.Stdin)
 	case "hosts":
 		err = hostsCmd(args, os.Stdout)
+	case "pin":
+		err = pinCmd(args, os.Stdin, os.Stdout)
+	case "unpin":
+		err = unpinCmd(args, os.Stdin)
+	case "pins":
+		err = pinsCmd(args, os.Stdout)
 	default:
 		err = fmt.Errorf("unknown command %q", cmd)
 	}
@@ -757,6 +763,88 @@ func untrustCmd(args []string, in io.Reader) error {
 	}
 	if status != http.StatusNoContent {
 		return fmt.Errorf("untrust: %v", res["error"])
+	}
+	return nil
+}
+
+// pinKinds is the owner's wording for each pin kind: what may reach it.
+var pinKinds = map[string]string{
+	"backup":  "backups",
+	"hosted":  "model calls to your hosted route",
+	"compute": "model calls to your compute host",
+}
+
+// pinCmd pins an endpoint the owner chose (DEV-2, BAK-1, CAP-13), reading
+// a code-generator code from in. The same -label again is the re-pin: when
+// the endpoint's key changed, its connections are refused until then.
+func pinCmd(args []string, in io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("pin", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	label := fs.String("label", "", "your name for this pin: lower-case letters, digits, '-'")
+	kind := fs.String("kind", "", "backup, hosted or compute")
+	name := fs.String("name", "", "the endpoint's host name, if it has one")
+	addr := fs.String("addr", "", "the endpoint's address as ip:port, if fixed")
+	key := fs.String("key", "", "SHA-256 of the endpoint's TLS public key, in hex")
+	fs.Parse(args)
+	fmt.Fprint(out, "Code-generator code: ")
+	code, _ := bufio.NewReader(io.LimitReader(in, maxUnlockBody)).ReadString('\n')
+	res, status, err := post(unixClient(filepath.Join(*run, UnlockSocket)), "/pin", map[string]string{
+		"code": strings.TrimSpace(code), "label": *label, "kind": *kind, "name": *name, "addr": *addr, "key": strings.ToLower(*key)})
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("pin: %v", res["error"])
+	}
+	where := strings.Trim(*name+" "+*addr, " ")
+	short := *key
+	if len(short) > 16 {
+		short = short[:16]
+	}
+	if res["replaced"] == true {
+		fmt.Fprintf(out, "Re-pinned %s: %s may reach %s with key %s…; the old key no longer works.\n", *label, pinKinds[*kind], where, short)
+	} else {
+		fmt.Fprintf(out, "Pinned %s: %s may reach %s with key %s….\n", *label, pinKinds[*kind], where, short)
+	}
+	return nil
+}
+
+// unpinCmd removes the pin -label, reading a code-generator code from in.
+func unpinCmd(args []string, in io.Reader) error {
+	fs := flag.NewFlagSet("unpin", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	label := fs.String("label", "", "the pin's label, as pins prints it")
+	fs.Parse(args)
+	code, _ := bufio.NewReader(io.LimitReader(in, maxUnlockBody)).ReadString('\n')
+	res, status, err := post(unixClient(filepath.Join(*run, UnlockSocket)), "/unpin", map[string]string{"code": strings.TrimSpace(code), "label": *label})
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return fmt.Errorf("unpin: %v", res["error"])
+	}
+	return nil
+}
+
+// pinsCmd lists the owner pins.
+func pinsCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("pins", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	fs.Parse(args)
+	res, status, err := get(unixClient(filepath.Join(*run, UnlockSocket)), "/pins")
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("pins: %v", res["error"])
+	}
+	pins, _ := res["pins"].([]any)
+	if len(pins) == 0 {
+		fmt.Fprintln(out, "No pinned endpoints.")
+	}
+	for _, p := range pins {
+		m, _ := p.(map[string]any)
+		fmt.Fprintf(out, "%v\t%v\t%v %v\tkey %v\n", m["label"], m["kind"], m["name"], m["addr"], m["key"])
 	}
 	return nil
 }
