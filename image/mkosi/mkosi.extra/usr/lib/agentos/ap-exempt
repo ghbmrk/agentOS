@@ -1,0 +1,26 @@
+#!/bin/sh
+# Let the access point's interface through the inbound drop (DEV-net-f; DEV-2, CH-7).
+# agentos-inbound.service drops every connection to a box port on every interface not in the
+# agentos_inbound table's exempt set, and that drop is final, so the owner's phone on the box's
+# Wi-Fi reaches the local page only once its interface is in the set; CH-9's agentos_ap table
+# governs it from then on. Run by agentos-ap-exempt@<iface>.service at each access-point
+# bring-up, which fails if this does.
+# Only a wireless interface is added: the uplink, a USB tether or a second NIC stays dropped.
+# On any failure it says so and exits non-zero; it never loads, flushes or deletes rules, so a
+# failure leaves the drop as it was and the access point closed. The set matches by name, so a
+# recreated interface of the same name is admitted; bring-up adds it again regardless.
+# AGENTOS_SYSFS exists for tests/test_image.py and tests/test_inbound_netns.py.
+S=${AGENTOS_SYSFS:-/sys}
+fail() { echo "agentos-ap-exempt: FAIL $*; the access point stays closed"; exit 1; }
+
+[ $# -eq 1 ] || fail "usage: ap-exempt <interface>"
+i=$1
+case $i in
+'' | -* | *[!a-zA-Z0-9_.-]*) fail "\"$i\" is not an interface name" ;;
+esac
+[ ${#i} -le 15 ] || fail "\"$i\" is not an interface name"
+[ -d "$S/class/net/$i/phy80211" ] || fail "$i is not a wireless interface"
+nft list set inet agentos_inbound exempt >/dev/null || fail "the inbound rules are not loaded"
+nft add element inet agentos_inbound exempt "{ \"$i\" }" || fail "could not add $i to the inbound exempt set"
+nft get element inet agentos_inbound exempt "{ \"$i\" }" >/dev/null || fail "$i is not in the inbound exempt set"
+echo "agentos-ap-exempt: OK $i"

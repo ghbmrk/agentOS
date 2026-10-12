@@ -336,6 +336,99 @@ class HealthTest(unittest.TestCase):
                 self.assertIn("agentos-health: FAIL", r.stdout)
 
 
+class ApExemptTest(unittest.TestCase):
+    """DEV-net-f (DEV-2, CH-7): the access point's interface, and only it, joins the inbound
+    exempt set; any failure fails bring-up and never touches the table otherwise."""
+    # REQ: DEV-2, CH-7, DEV-net-f
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.bin, self.sys, self.log = t / "bin", t / "sys", t / "nft.log"
+        (self.sys / "class/net/wlap0/phy80211").mkdir(parents=True)
+        (self.sys / "class/net/eth0").mkdir(parents=True)
+        self.nft()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def nft(self, fail=""):
+        # Logs each call; FAIL names the verb ("list", "add", "get") that fails.
+        stub(self.bin, "nft", 'echo "$*" >>"%s"; [ "$1" = "%s" ] && { echo "nft: $1 failed" >&2; exit 1; }; '
+                              'exit 0' % (self.log, fail or "none"))
+
+    def run_exempt(self, *args):
+        env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_SYSFS=str(self.sys))
+        return subprocess.run(["sh", str(MK / "mkosi.extra/usr/lib/agentos/ap-exempt"), *args], env=env,
+                              capture_output=True, text=True)
+
+    def calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_adds_the_access_point_then_checks_it_is_there(self):
+        r = self.run_exempt("wlap0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("agentos-ap-exempt: OK wlap0", r.stdout)
+        self.assertEqual(self.calls(), [
+            "list set inet agentos_inbound exempt",
+            'add element inet agentos_inbound exempt { "wlap0" }',
+            'get element inet agentos_inbound exempt { "wlap0" }',
+        ])
+
+    def test_failures_fail_bring_up_and_never_open_the_table(self):
+        for verb in ("list", "add", "get"):
+            with self.subTest(failing=verb):
+                self.log.unlink(missing_ok=True)
+                self.nft(verb)
+                r = self.run_exempt("wlap0")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("agentos-ap-exempt: FAIL", r.stdout)
+                self.assertIn("stays closed", r.stdout)
+                for c in self.calls():
+                    self.assertNotRegex(c, r"^(-f|delete|destroy|flush|replace|insert|reset)\b")
+                if verb == "list":
+                    self.assertEqual(len(self.calls()), 1, "added to a table that is not loaded")
+
+    def test_only_a_wireless_interface_is_added(self):
+        # The uplink, a tether or a second NIC is not wireless; bad names never reach nft.
+        for args in (("eth0",), ("usb0",), ("",), ("wlap0;x",), ("a" * 16,), ("-f",), ("../wlap0",),
+                     ("wlap0", "eth0"), ()):
+            with self.subTest(args=args):
+                self.log.unlink(missing_ok=True)
+                r = self.run_exempt(*args)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn("agentos-ap-exempt: FAIL", r.stdout)
+                self.assertEqual(self.calls(), [])
+
+    def test_unit_orders_after_the_inbound_table_and_follows_the_interface(self):
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-ap-exempt@.service")
+        unit, svc = u["Unit"], u["Service"]
+        self.assertIn("agentos-inbound.service", unit["Requires"].split())
+        self.assertIn("agentos-inbound.service", unit["After"].split())
+        # Bound to the interface: it stops when the interface goes and runs again on the next
+        # bring-up of a recreated one.
+        self.assertEqual(unit["BindsTo"], "sys-subsystem-net-devices-%i.device")
+        self.assertIn("sys-subsystem-net-devices-%i.device", unit["After"].split())
+        self.assertEqual(svc["Type"], "oneshot")
+        self.assertEqual(svc["RemainAfterExit"], "yes")
+        self.assertEqual(svc["ExecStart"], "/usr/lib/agentos/ap-exempt %I")
+        self.assertNotIn("ExecStop", svc)
+        f = MK / "mkosi.extra/usr/lib/agentos/ap-exempt"
+        self.assertTrue(f.stat().st_mode & stat.S_IXUSR)
+
+    def test_network_manager_needs_the_inbound_drop_first(self):
+        # LATER DEV-net-e l3: if the image adopts NetworkManager, it must require the drop as
+        # systemd-networkd does.
+        pkgs = ini(MK / "mkosi.conf")["Content"]["Packages"].split()
+        f = MK / "mkosi.extra/usr/lib/systemd/system/NetworkManager.service.d/agentos-inbound.conf"
+        if "network-manager" not in pkgs:
+            self.assertFalse(f.exists())
+            return
+        d = ini(f)["Unit"]
+        self.assertIn("agentos-inbound.service", d["Requires"].split())
+        self.assertIn("agentos-inbound.service", d["After"].split())
+
+
 class FallbackTest(unittest.TestCase):
     """UPD-1 (L3 blockers on #41): a failed health check reboots into the next counted try, with no
     owner action; at no tries left it reboots into the previous release if the drive has one, and
