@@ -76,16 +76,28 @@ func newCardSetup(t *testing.T) (setupMode, *cardFixture) {
 	return m, f
 }
 
+// withCard hands setup a card step built as the page's process builds it:
+// a vault left by a confirm that never latched is reset first (firstboot
+// ASSUMPTIONS F10), then the step starts and goes to the page.
 func (m *setupMode) withCard(f *cardFixture, st firstboot.Store) {
-	m.Card, m.CardStore = f.vault, st
-	m.CardDisplay = card.DisplayConfig{Generate: func(r io.Reader) (*card.Card, error) {
-		c, err := card.Generate(r)
-		if err == nil {
-			f.shown = *c
+	m.Card = func() (cardHold, error) {
+		if err := firstboot.ResetUnlatched(st, f.vault.Reset); err != nil {
+			return nil, err
 		}
-		return c, err
-	}}
-	m.Show = func(s *firstboot.CardStep) { f.steps <- s }
+		s, err := firstboot.NewCardStep(st, card.DisplayConfig{Provision: f.vault.Provision,
+			Generate: func(r io.Reader) (*card.Card, error) {
+				c, err := card.Generate(r)
+				if err == nil {
+					f.shown = *c
+				}
+				return c, err
+			}})
+		if err != nil {
+			return nil, err
+		}
+		f.steps <- s
+		return s, nil
+	}
 }
 
 // confirm answers the step's display from the copy of the shown card.
@@ -286,21 +298,21 @@ func TestAnOwnedBoxNeverResetsTheVault(t *testing.T) {
 	}
 }
 
-// Setup without the card step refuses to start, and resets nothing when
-// the latch cannot be read.
+// Setup without the card step refuses to start, and a step that cannot
+// start (here a latch that cannot be read, which resets nothing) stops
+// setup before it serves.
 func TestSetupWithoutTheCardFailsClosed(t *testing.T) {
-	for name, edit := range map[string]func(*setupMode){
-		"no provisioner": func(m *setupMode) { m.Card = nil },
-		"no latch":       func(m *setupMode) { m.CardStore = nil },
-		"no page":        func(m *setupMode) { m.Show = nil },
-		"corrupt latch": func(m *setupMode) {
+	for name, edit := range map[string]func(*setupMode, *cardFixture){
+		"no card step": func(m *setupMode, f *cardFixture) { m.Card = nil },
+		"no step":      func(m *setupMode, f *cardFixture) { m.Card = func() (cardHold, error) { return nil, nil } },
+		"corrupt latch": func(m *setupMode, f *cardFixture) {
 			st := &change.MemStore{}
 			st.Save([]byte("{"))
-			m.CardStore = st
+			m.withCard(f, st)
 		},
 	} {
 		m, f := newCardSetup(t)
-		edit(&m)
+		edit(&m, f)
 		if _, err := m.run(context.Background()); err == nil {
 			t.Fatalf("%s: setup started", name)
 		}

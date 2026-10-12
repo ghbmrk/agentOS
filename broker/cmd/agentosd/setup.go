@@ -8,9 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -30,24 +28,17 @@ type setupMode struct {
 	Enroll     localsrv.Enroller
 	Progress   func() localapi.SetupProgress
 
-	// The first-boot Owner Card step (HW-1): setup does not finish until
-	// the owner has confirmed the card. Card makes the vault from it;
-	// CardStore keeps the step's latch; CardDisplay configures the card
-	// (its Provision is Card's); Show hands the step to the setup page.
-	Card        cardProvisioner
-	CardStore   firstboot.Store
-	CardDisplay card.DisplayConfig
-	Show        func(*firstboot.CardStep)
+	// Card starts the first-boot Owner Card step (HW-1) and returns its
+	// hold: setup does not finish while Hold reports the card unconfirmed.
+	// agentosd links no card code (ARC-2: the card's page is served over
+	// net/http), so the step is built with the page and handed in here; a
+	// nil Card fails closed.
+	Card func() (cardHold, error)
 }
 
-// cardProvisioner makes what the box keeps of the Owner Card (vault slots
-// and stored values, recovery.Provision). Provision accepts a retry with
-// the same card; Reset removes what a provision left from a card whose
-// confirm never latched (firstboot ASSUMPTIONS F10).
-type cardProvisioner interface {
-	Provision(*card.Card) error
-	Reset() error
-}
+// cardHold is the Owner Card step as setup's finish sees it
+// (firstboot.CardStep): Hold is nil once the owner has confirmed the card.
+type cardHold interface{ Hold() error }
 
 // errCardPending is setup finish's refusal while the Owner Card is
 // unconfirmed.
@@ -117,23 +108,18 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	return owner, err
 }
 
-// cardStep starts the Owner Card step on a box with no owner. A vault a
-// start made from a card whose confirm never latched is removed first, so
-// the new card this start shows never meets it.
-func (m setupMode) cardStep() (*firstboot.CardStep, error) {
-	if m.Card == nil || m.CardStore == nil || m.Show == nil {
-		return nil, errors.New("setup: no Owner Card provisioner: setup cannot finish without the owner's card")
+// cardStep starts the Owner Card step on a box with no owner.
+func (m setupMode) cardStep() (cardHold, error) {
+	if m.Card == nil {
+		return nil, errors.New("setup: no Owner Card step: setup cannot finish without the owner's card")
 	}
-	if err := firstboot.ResetUnlatched(m.CardStore, m.Card.Reset); err != nil {
-		return nil, err
-	}
-	cfg := m.CardDisplay
-	cfg.Provision = m.Card.Provision
-	step, err := firstboot.NewCardStep(m.CardStore, cfg)
+	step, err := m.Card()
 	if err != nil {
 		return nil, err
 	}
-	m.Show(step)
+	if step == nil {
+		return nil, errors.New("setup: the Owner Card step did not start")
+	}
 	return step, nil
 }
 
