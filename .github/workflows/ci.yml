@@ -52,6 +52,10 @@ jobs:
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Unit tests
         run: python -m unittest discover -s tests -v
+      - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q nftables iproute2
+          sudo python3 -m unittest tests.test_inbound_netns -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
