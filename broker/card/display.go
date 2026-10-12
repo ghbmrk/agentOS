@@ -20,7 +20,7 @@ var ErrNotConfirmed = errors.New("card: the word or group did not match the card
 
 // ErrDisplayGone is what the display returns after the confirm step erased
 // its copy of the card.
-var ErrDisplayGone = errors.New("card: the box keeps no copy of the card")
+var ErrDisplayGone = errors.New("card: I keep no copy of the card")
 
 // DisplayConfig configures NewDisplay. Provision is required.
 type DisplayConfig struct {
