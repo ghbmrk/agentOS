@@ -70,7 +70,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-split-msg | [Mail, SMS and SIP through holders](briefs/SIM.md#sim-split-msg-mail-sms-and-sip-through-holders-tier-a) | SIM-split-wire | queued (A) |
 | SIM-split-refresh | [Refreshed tokens persist through the unlock step](briefs/SIM.md#sim-split-refresh-refreshed-tokens-persist-through-the-unlock-step-tier-a) | SIM-split-wire | queued (A) |
 | SIM-split-check | [Predicate: no secret outside its account's holder](briefs/SIM.md#sim-split-check-the-secret-isolation-predicate-tier-a) | SIM-split-wire, SIM-check | queued (A) |
-| SIM-split-fix | [#1053 and #1057 findings: short-secret hashes (H-4), holder re-applies BodyRule (H-3), approvals bound to the account](briefs/SIM.md#sim-split-fix-1053-review-findings-tier-a) | SIM-split-wire | queued (A) |
+| SIM-split-fix | [#1053 and #1057 findings: short-secret hashes (H-4), holder re-applies BodyRule (H-3), approvals bound to the account](briefs/SIM.md#sim-split-fix-1053-review-findings-tier-a) | SIM-split-wire | building (A) |
 | SIM-outer | [L1 spec diff: narrow provider scopes, provider limits at ~2x the box cap](briefs/SIM.md#sim-outer-outer-limits-held-by-the-provider-l1-spec-diff-mark-approves) | — | queued (B; Mark approves) |
 | SIM-core-allow-tier | `tools/risk_tier.py` rates every package named on a `broker/core/core.txt` `allow` line tier A, or `recall` and `recalltool` join `TIER_A_BROKER`. Invariant: core write paths are tier A (D-095, ARC-1). Failure path: `recalltool` is tier B and holds `journal.Engine.Erase` and `grants.Gate.Withdraw`/`Authorize`; a tier B PR widens its use of `Erase` without authorize, gets no Security section, and the core check still passes (release, tier A; Security on #715 pt 2, comment 6109907105) | SIM-core | queued (A) |
 | SIM-shred | [Forget by deleting a per-subject key; reaches backups and snapshots](briefs/SIM.md#sim-shred-forget-by-deleting-a-per-subject-key-tier-a) | SIM-erase, SIM-proj, SIM-sd | queued (A) |
@@ -181,7 +181,10 @@ Queued by the coordinator after #1054 (D-102) merged; each row is a release find
 | ID | Package | Needs | State |
 |---|---|---|---|
 | CTRL-spike | [M6 Ultra spikes: USB-stick boot with no key press, USB4 networking, Wi-Fi access-point mode](briefs/CTRL-spike.md) | Mark: hardware (M6 Ultra unit) | queued (release; HW-13, HW-12, CH-7, A1; tier C; harness merged in #1058, the hardware run waits on the unit) |
-| CTRL-card | [First-boot Owner Card: the box generates it, the phone shows it, the display copy is erased](briefs/CTRL-card.md) | P2-2 | building (release; HW-1, REC-4; tier A) |
+| CTRL-card | [First-boot Owner Card: the box generates it, the phone shows it, the display copy is erased](briefs/CTRL-card.md) | P2-2 | merged (#1060, ddb25b0) |
+| CTRL-card-wire | [Wire the Owner Card into the localui setup page and first boot; the finish path calls Hold()](briefs/CTRL-card-f.md) | CTRL-card | queued (release; HW-1, ONB-7, A1 test 2; tier A; from #1060) |
+| CTRL-card-rot | [Recovery-key rotation shows its key on card.Display: the same confirm-then-erase](briefs/CTRL-card-f.md) | CTRL-card | queued (release; REC-4, HW-1; tier A; from #1060) |
+| IMG-nodump | [Image: no core dumps, swap off or encrypted, so the passphrase string never reaches disk (S1)](briefs/CTRL-card-f.md) | CTRL-card | queued (release; HW-1 test 1, A1; tier A; from #1060 S1) |
 | CTRL-claim | [Claim flow for a preloaded box: a one-time sticker code, one claim, no secret before it](briefs/CTRL-claim.md) | CTRL-card | building (release; HW-10, A1; tier A) |
 | CTRL-uki | [Preloaded self-check rooted in signed code, so a seller's modified initrd cannot pass its own check](briefs/CTRL-uki.md) | CTRL-claim, P2-1 | queued (release; HW-10, HW-5a, A1; tier A; SPEC risk 26 wording fixed by CTRL-text) |
 | FLASH-1 | [Signed flasher for Windows, Mac and Linux: verify the signature, write the stick, show the pairing QR](briefs/FLASH-1.md) | CTRL-claim | queued (release; HW-10, A1; tier A) |

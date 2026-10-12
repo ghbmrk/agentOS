@@ -856,6 +856,16 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SIM-split-b l3 | PR #1057 L3: `broker/procguard` has only a `_linux.go` file while its test is untagged, so `go test ./...` on a non-Linux host fails to build that package |
 | SIM-split-b l4 | PR #1057 Potency lens: the holder now serves irreversible and secret verbs with an approval, but draft and organize still cannot route through a holder (narrows SIM-split-a l4) |
 | SIM-split-b l5 | PR #1057 UX lens: the approval is spent before the provider is reached, so a send that fails upstream needs a fresh owner code; wiring should say so in the retry prompt rather than ask silently |
+| SIM-split-fix l1 | PR SIM-split-fix: every holder uid shares `redeem.sock` and the checker does not map uid to account, so a compromised holder can spend (deny) another account's approval, never use it; per-uid account binding in the checker would close it |
+| SIM-split-fix l2 | recheck. PR SIM-split-fix: the holder trusts egress's `Agentos-Label: public` for a login opened with `-public-fetch`, so a compromised egress gets public-machine fetch on that login; SIM-split-wire should have the broker attest the label per request |
 | CTRL-card l1 | PR #1060 builder finding: the Owner Card render still says "drive" in places where it should say box (wording only) |
 | CTRL-card l2 | `recheck`. PR #1060 UX lens: a restart before the confirm makes a new card while the owner may already hold a printed one; the page should say a card printed before a restart is void |
 | CTRL-card l3 | PR #1060 UX lens: the screenshot warning should also cover saving the card file into a cloud-synced folder |
+| DEV-net-f l1 | PR #1063 L3/UX lens: `localui.BringUp` returns an error naming the systemd unit (`agentos-ap-exempt@<if>.service`); the P2-1 `agentos_ap` loader must map it to fixed owner text (CH-12), never pass it through |
+| SIM-split-fix l3 | PR #1061 L3: `broker/holder/ASSUMPTIONS.md` H-10 calls the egress-label residual a "release finding" while it is filed as SIM-split-fix l2 (later, recheck); align the wording when a package next edits H-10 |
+| IMG-nodump l1 | PR #1068 L3: the `finish_image.main` call to `swap_violations` has no test (reverting it survives); the repart and mkosi.conf tests still catch a swap partition and a missing `systemd.swap=0` |
+| IMG-nodump l2 | PR #1068 L3: `ProcessSizeMax=0` in the coredump drop-in is not checked (dropping it survives); it is redundant with `Storage=none` and the discard pipe |
+| IMG-nodump l3 | PR #1068 L3: `mkosi.finalize` `ini_last` fails closed on an unparseable drop-in, but no test plants one (reverting it to a skip survives); `core_pattern` still discards every dump |
+| IMG-nodump l4 | `recheck`. PR #1068 L3: `finish_image` does not reject `crashkernel=` in the boot entry; kdump has no package today, but if it were added, a vmcore holding the broker's memory would land in /var/crash |
+| CTRL-claim l1 | `recheck`. PR #1067 builder finding: a claimant who loses the claiming phone before the Owner Card exists must reinstall, as no recovery secret exists yet (claim K6) |
+| CTRL-claim l2 | PR #1067 UX/Potency lens: halving the claim allowance per lock (5, 2, 1) costs a power cycle per typo after the third lock and buys no margin against an 80-bit code; a fixed per-boot allowance would also blunt the R3 denial |

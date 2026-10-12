@@ -40,4 +40,9 @@ esac
 # whose rules cannot load is never blessed, so the previous one boots instead.
 last=$(nft list chain inet agentos_inbound input 2>/dev/null | grep -v '^[[:space:]]*}*[[:space:]]*$' | tail -n 1)
 [ "$(echo $last)" = drop ] || fail "inbound firewall not loaded"
-echo "agentos-health: PASS secure_boot=$sb usr=verity inbound=drop"
+# Nothing can write the broker's memory to disk (IMG-nodump): the Owner Card passphrase in it
+# cannot be zeroed (card C13). The build checks the same; this proves it on the running box.
+[ -r "$R/proc/swaps" ] || fail "swap state unreadable"
+[ "$(sed 1d "$R/proc/swaps" | grep -c .)" = 0 ] || fail "swap is active"
+[ "$(cat "$R/proc/sys/kernel/core_pattern" 2>/dev/null)" = "|/usr/bin/false" ] || fail "core dumps are not discarded"
+echo "agentos-health: PASS secure_boot=$sb usr=verity inbound=drop swap=off dumps=off"

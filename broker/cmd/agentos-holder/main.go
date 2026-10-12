@@ -63,6 +63,7 @@ type config struct {
 	dir, checker        string
 	adapters            []egress.Adapter
 	requestUID, handUID int
+	publicFetch         bool
 }
 
 func parse(args []string, stderr io.Writer) (config, error) {
@@ -76,6 +77,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&c.requestUID, "request-uid", -1, "uid of egress, the only peer on request.sock")
 	fs.StringVar(&c.checker, "checker", "", "the CH-4 checker's redeem socket; without it, reads only")
 	fs.IntVar(&c.handUID, "hand-uid", -1, "uid of the unlock step, the only peer on hand.sock")
+	fs.BoolVar(&c.publicFetch, "public-fetch", false, "the owner lets public machines use provider-side fetch with this login; without it, every body is held to the strict form")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -119,7 +121,7 @@ func run(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	h, err := holder.New(holder.Config{Adapters: c.adapters, Guard: guard, Redeem: redeem})
+	h, err := holder.New(holder.Config{Adapters: c.adapters, Guard: guard, Redeem: redeem, PublicFetch: c.publicFetch})
 	if err != nil {
 		return err
 	}
