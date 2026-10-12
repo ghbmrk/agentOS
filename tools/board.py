@@ -73,7 +73,7 @@ def _lanes():
     if path.is_file():
         for line in path.read_text().splitlines():
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if line.startswith("|") and len(cells) == 3 and cells[1] not in ("Team", "---"):
+            if line.startswith("|") and len(cells) >= 3 and cells[1] not in ("Team", "---"):
                 teams.append(cells[1].split()[0])
     return tuple(teams) or ("primary",)
 
@@ -249,11 +249,11 @@ def frozen_drift(items):
 
 
 def archive(base, changed, root):
-    """Problems with the frozen archives once the base's board is generated (D23)."""
+    """Problems with the frozen archives once the base's board is generated (D24)."""
     if GENERATED not in base:
         return []
-    return ([f"{p} is archived and frozen (D23); change the work-item issues instead" for p in changed if p in ARCHIVED]
-            + [f"{p} was retired by SIM-repo-2b (D23); file an issue instead" for p in RETIRED if (root / p).exists()])
+    return ([f"{p} is archived and frozen (D24); change the work-item issues instead" for p in changed if p in ARCHIVED]
+            + [f"{p} was retired by SIM-repo-2b (D24); file an issue instead" for p in RETIRED if (root / p).exists()])
 
 
 def live(text):

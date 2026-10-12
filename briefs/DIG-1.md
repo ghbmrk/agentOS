@@ -1,5 +1,7 @@
 # DIG-1: The daily digest reads every `Digest()` source (CH-15, OP-9)
 
+**Retired 2026-10-12** (waste review, approved by Mark). SPEC CH-15 has had no digest since D-097, and SIM-pull deletes the digest code. Do not build this brief. The delivery and recovery cases it relied on are listed in [SIM-cases](SIM-cases.md). Owner-volume questions go to UX-INV under SIM-pull.
+
 Board section: Phase 3 (row DIG-1); brief written 2026-10-09 by the coordinator after the owner-benefit review (point 3). It replaces the pointer to `briefs/OP9-status.md#split`, whose constraints it carries over (OP9-status l.57, 69, 135).
 
 **Tier:** A (`broker/cmd`). Strongest model. About 90k tokens. If the adapter for consuming sources (DIG-1c) runs over, split it out as DIG-1b and ship DIG-1a/b/d first.

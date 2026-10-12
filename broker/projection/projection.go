@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -34,6 +35,9 @@ import (
 // Restore(nil, 0) resets to empty. Restore(data, offset) loads a Snapshot
 // taken after applying records 1..offset; it returns an error if data is
 // unusable, and the caller then resets and replays in full.
+//
+// Apply must not modify the record it is given: one journal read is shared
+// by every projection (PROJ-read), so a change would reach the others.
 type Projection interface {
 	Name() string
 	Apply(journal.Record)
@@ -115,13 +119,30 @@ func New(store Store, every uint64, ps ...Projection) (*Projector, error) {
 // report and any error saving a snapshot; a failed save leaves every
 // projection current. If the journal cannot be read Boot returns the error
 // and no report: an empty projection is never presented as current.
+//
+// Boot reads the journal once, from the lowest offset any view needs, and
+// once more from the first record only if a snapshot it planned to use is
+// refused against the journal (PROJ-read-2).
 func (pr *Projector) Boot(src Source) (Report, error) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
+	if len(pr.views) == 0 {
+		return Report{}, nil
+	}
+	snaps := make([]stored, len(pr.views))
+	lo := ^uint64(0)
+	for i, v := range pr.views {
+		snaps[i] = pr.load(v)
+		lo = min(lo, snaps[i].needs())
+	}
+	rd := &shared{src: src}
+	if _, err := rd.RecordsAfter(lo); err != nil {
+		return nil, fmt.Errorf("projection: read journal: %w", err)
+	}
 	rep := make(Report, len(pr.views))
 	var errs []error
 	for i, v := range pr.views {
-		from, tail, why, err := pr.restore(v, src)
+		from, tail, why, err := pr.restore(v, snaps[i], rd)
 		if err != nil {
 			return nil, fmt.Errorf("projection %s: read journal: %w", v.p.Name(), err)
 		}
@@ -129,7 +150,7 @@ func (pr *Projector) Boot(src Source) (Report, error) {
 			if err := v.p.Restore(nil, 0); err != nil {
 				return nil, fmt.Errorf("projection %s: reset: %w", v.p.Name(), err)
 			}
-			if tail, err = src.RecordsAfter(0); err != nil {
+			if tail, err = rd.RecordsAfter(0); err != nil {
 				return nil, fmt.Errorf("projection %s: read journal: %w", v.p.Name(), err)
 			}
 			from, v.anchor = 0, ""
@@ -141,29 +162,64 @@ func (pr *Projector) Boot(src Source) (Report, error) {
 	return rep, errors.Join(errs...)
 }
 
-// restore loads v's snapshot and returns its offset and the records after
-// it, or a reason it cannot be used. "" with offset 0 means no snapshot. A
-// non-nil error means the journal could not be read.
-func (pr *Projector) restore(v *view, src Source) (uint64, []journal.Record, string, error) {
-	v.anchor = ""
+// stored is a projection's stored snapshot as Boot found it: a decoded
+// header and data, or why it cannot be used. why "" with no header means
+// there is none.
+type stored struct {
+	h    header
+	data []byte
+	why  string
+}
+
+// usable reports whether the snapshot passed every check that needs no
+// journal read.
+func (s stored) usable() bool { return s.why == "" && s.h.Seq > 0 }
+
+// needs returns the offset after which this view's boot reads the journal:
+// the record before the snapshot's, whose successor carries the anchor to
+// check, or 0 for a replay from empty.
+func (s stored) needs() uint64 {
+	if s.usable() {
+		return s.h.Seq - 1
+	}
+	return 0
+}
+
+// load reads and checks v's stored snapshot without reading the journal.
+func (pr *Projector) load(v *view) stored {
 	b, err := pr.store.Load(v.p.Name())
 	if err != nil {
 		if isNotExist(err) {
-			recs, err := src.RecordsAfter(0)
-			return 0, recs, "", err
+			return stored{}
 		}
-		return 0, nil, "load: " + err.Error(), nil
+		return stored{why: "load: " + err.Error()}
 	}
 	h, data, err := decode(b)
 	if err != nil {
-		return 0, nil, err.Error(), nil
+		return stored{why: err.Error()}
 	}
 	if h.Name != v.p.Name() {
-		return 0, nil, fmt.Sprintf("snapshot names %q", h.Name), nil
+		return stored{why: fmt.Sprintf("snapshot names %q", h.Name)}
 	}
 	if h.Seq == 0 {
-		return 0, nil, "snapshot at offset 0", nil
+		return stored{why: "snapshot at offset 0"}
 	}
+	return stored{h: h, data: data}
+}
+
+// restore restores v from s and returns its offset and the records after
+// it, or a reason it cannot be used. "" with offset 0 means no snapshot. A
+// non-nil error means the journal could not be read.
+func (pr *Projector) restore(v *view, s stored, src Source) (uint64, []journal.Record, string, error) {
+	v.anchor = ""
+	if !s.usable() {
+		if s.why != "" {
+			return 0, nil, s.why, nil
+		}
+		recs, err := src.RecordsAfter(0)
+		return 0, recs, "", err
+	}
+	h := s.h
 	recs, err := src.RecordsAfter(h.Seq - 1)
 	if err != nil {
 		return 0, nil, "", err
@@ -174,27 +230,63 @@ func (pr *Projector) restore(v *view, src Source) (uint64, []journal.Record, str
 	if anchor(recs[0]) != h.Anchor {
 		return 0, nil, fmt.Sprintf("snapshot at %d does not match the journal record there", h.Seq), nil
 	}
-	if err := v.p.Restore(data, h.Seq); err != nil {
+	if err := v.p.Restore(s.data, h.Seq); err != nil {
 		return 0, nil, "restore: " + err.Error(), nil
 	}
 	v.anchor = h.Anchor
 	return h.Seq, recs[1:], "", nil
 }
 
+// shared is a Source that serves every read from one read of src, and
+// reads src again only for an offset below the one it holds. The journal
+// engine decodes the whole store on each read, so a read per view would
+// cost a full decode per view (PROJ-read).
+type shared struct {
+	src  Source
+	from uint64
+	recs []journal.Record
+	read bool
+}
+
+func (s *shared) RecordsAfter(seq uint64) ([]journal.Record, error) {
+	if !s.read || seq < s.from {
+		recs, err := s.src.RecordsAfter(seq)
+		if err != nil {
+			return nil, err
+		}
+		s.from, s.recs, s.read = seq, recs, true
+	}
+	return since(s.recs, seq), nil
+}
+
+// since returns the records in recs, oldest first, with a sequence number
+// greater than seq.
+func since(recs []journal.Record, seq uint64) []journal.Record {
+	return recs[sort.Search(len(recs), func(i int) bool { return recs[i].Seq > seq }):]
+}
+
 // Sync applies the records written since the last Sync or Boot and saves
-// snapshots that are due. If the journal cannot be read, each projection
-// stays at its offset and Sync returns the error.
+// snapshots that are due. It reads the journal once, from the lowest
+// offset among the projections, and applies each its own tail of that read
+// (PROJ-read-1). If the journal cannot be read, each projection stays at its
+// offset and Sync returns the error.
 func (pr *Projector) Sync(src Source) error {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
+	if len(pr.views) == 0 {
+		return nil
+	}
+	lo := pr.views[0].offset
+	for _, v := range pr.views[1:] {
+		lo = min(lo, v.offset)
+	}
+	recs, err := src.RecordsAfter(lo)
+	if err != nil {
+		return fmt.Errorf("projection: read journal: %w", err)
+	}
 	var errs []error
 	for _, v := range pr.views {
-		recs, err := src.RecordsAfter(v.offset)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("projection %s: read journal: %w", v.p.Name(), err))
-			continue
-		}
-		errs = append(errs, pr.apply(v, recs))
+		errs = append(errs, pr.apply(v, since(recs, v.offset)))
 	}
 	return errors.Join(errs...)
 }

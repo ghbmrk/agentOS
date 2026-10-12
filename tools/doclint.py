@@ -131,7 +131,7 @@ def decisions(root):
 
 def assumption_ids(root, files):
     for name in files:
-        if pathlib.PurePosixPath(name).name != "ASSUMPTIONS.md":
+        if name != "DECISIONS.md" and pathlib.PurePosixPath(name).name != "ASSUMPTIONS.md":
             continue
         seen, in_table = {}, False
         for n, line in enumerate((root / name).read_text().splitlines(), 1):

@@ -22,6 +22,50 @@ var ErrNotConfirmed = errors.New("card: the word or group did not match the card
 // its copy of the card.
 var ErrDisplayGone = errors.New("card: I keep no copy of the card")
 
+// ErrDiscard, wrapped in a Provision error, says the card can no longer
+// take effect (a rotation that lapsed): the display erases its copy
+// instead of keeping it for a retry.
+var ErrDiscard = errors.New("card: this card can no longer take effect")
+
+// ErrInEffect, wrapped in a Provision error, says part of the card took
+// effect before a later step failed (a rotation's partial write). The
+// owner has just typed values back from their copy, and a retry cannot
+// finish (the rotation is used up), so the display erases its copy, as
+// after a full confirm, and refuses a later cancel: the owner keeps the
+// new card and the current one, and a new rotation, started with either
+// card's factor that opens the drive, finishes the rest.
+var ErrInEffect = errors.New("card: part of this card is already in effect")
+
+// inEffectProblem is the page's note once part of the card is in effect:
+// it names the one step that finishes the rotation (CH-12). It holds in
+// every partial state: some parts may still be the current card's (the
+// Wi-Fi password, setup secret and grid take effect last, and a failed
+// recovery-key write leaves the old key in effect), so the owner keeps
+// both cards and finishes with whichever one opens the drive; the next
+// rotation must replace every part this one rotated (#1090 review F3).
+const inEffectProblem = "Part of your new card is already in effect, but I could not finish. Keep the new card, and your current one if you still have it. Finish now: start a new card from my box page, using the passphrase or recovery key from whichever card works."
+
+// Parts are the card secrets a rotation replaces (REC-4).
+type Parts struct{ WiFi, Setup, Passphrase, Grid, Recovery bool }
+
+func (p Parts) any() bool { return p.WiFi || p.Setup || p.Passphrase || p.Grid || p.Recovery }
+
+// Answers are the values typed back from the printed or saved card. Word
+// and Group are a passphrase word and a recovery key group; Check is the
+// one value a rotation that replaces neither asks for instead.
+type Answers struct{ Word, Group, Check string }
+
+// checkKind is the value a rotation without a new passphrase or recovery
+// key asks for.
+type checkKind int
+
+const (
+	checkNone  checkKind = iota
+	checkWiFi            // last four symbols of the Wi-Fi password
+	checkSetup           // the setup code
+	checkGrid            // the grid check code
+)
+
 // DisplayConfig configures NewDisplay. Provision is required.
 type DisplayConfig struct {
 	// Rand is the box's randomness; crypto/rand.Reader when nil. Every
@@ -38,21 +82,36 @@ type DisplayConfig struct {
 	// Journal records the step's events. It is passed fixed event strings
 	// only, never card text.
 	Journal func(event string)
+	// Rotate, when set, makes a rotation display (REC-4): the card carries
+	// new values for these parts only (the rest are blank, the Wi-Fi name
+	// kept), the sheet shows only them, and the confirm asks for a word
+	// of a new passphrase, a group of a new recovery key, or else one
+	// check value of the new parts.
+	Rotate *Parts
+	// WiFiName is the box's current access point name, which a rotation
+	// keeps and prints beside a new Wi-Fi password; needed when Rotate
+	// has WiFi.
+	WiFiName string
 }
 
-// Display is one Owner Card the box generated (at first boot, HW-1, or for
-// a full rotation, REC-4), shown to the paired phone until the owner
-// confirms one passphrase word and one recovery key group from the printed
-// or saved card. Then the box provisions from it and erases its copy.
+// Display is one Owner Card the box generated (at first boot, HW-1, or the
+// new parts of a rotation, REC-4), shown to the paired phone until the
+// owner confirms values typed from the printed or saved card: one
+// passphrase word and one recovery key group at first boot. Then the box
+// provisions from it and erases its copy.
 type Display struct {
 	mu        sync.Mutex
 	c         *Card
 	sheet     []byte // the printable card (HTML)
-	word      int    // 0-based passphrase word asked for
-	group     int    // 0-based recovery key group asked for
+	word      int    // 0-based passphrase word asked for; -1 for none
+	group     int    // 0-based recovery key group asked for; -1 for none
+	check     checkKind
+	rotate    bool
 	provision func(*Card) error
 	journal   func(string)
 	confirmed bool
+	discarded bool
+	inEffect  bool
 }
 
 // Journal events. Fixed strings: no card text ever reaches the journal.
@@ -60,7 +119,9 @@ const (
 	EventShown     = "owner card: generated and shown"
 	EventMismatch  = "owner card: confirm did not match"
 	EventProvFail  = "owner card: provisioning failed; card kept on display"
+	EventInEffect  = "owner card: confirmed, partly in effect, display copy erased"
 	EventConfirmed = "owner card: confirmed, provisioned, display copy erased"
+	EventDiscarded = "owner card: discarded unconfirmed, display copy erased"
 )
 
 // NewDisplay generates a card from the box's randomness and prepares its
@@ -78,17 +139,44 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 	if cfg.Journal == nil {
 		cfg.Journal = func(string) {}
 	}
+	if cfg.Rotate != nil && !cfg.Rotate.any() {
+		return nil, errors.New("card: a rotation needs at least one part")
+	}
+	if cfg.Rotate != nil && cfg.Rotate.WiFi && cfg.WiFiName == "" {
+		return nil, errors.New("card: a Wi-Fi rotation needs the current Wi-Fi name")
+	}
 	c, err := cfg.Generate(cfg.Rand)
 	if err != nil {
 		return nil, err
 	}
-	sheet, err := HTML(c)
-	if err != nil {
+	// The whole card is validated before a rotation keeps only its parts.
+	if err := c.Validate(); err != nil {
 		wipeCard(c)
 		return nil, err
 	}
-	d := &Display{c: c, sheet: sheet, provision: cfg.Provision, journal: cfg.Journal}
-	if d.word, err = uniform(cfg.Rand, PassphraseWords); err == nil {
+	d := &Display{c: c, word: -1, group: -1, provision: cfg.Provision, journal: cfg.Journal}
+	ask := Parts{Passphrase: true, Recovery: true}
+	if cfg.Rotate != nil {
+		ask, d.rotate = *cfg.Rotate, true
+		keepParts(c, ask)
+		c.WiFiName = cfg.WiFiName
+		switch {
+		case ask.Passphrase || ask.Recovery:
+		case ask.WiFi:
+			d.check = checkWiFi
+		case ask.Setup:
+			d.check = checkSetup
+		default:
+			d.check = checkGrid
+		}
+		d.sheet, err = rotationHTML(c, ask)
+	} else {
+		d.sheet, err = HTML(c)
+	}
+	if err == nil && ask.Passphrase {
+		d.word, err = uniform(cfg.Rand, PassphraseWords)
+	}
+	if err == nil && ask.Recovery {
 		d.group, err = uniform(cfg.Rand, recoveryGroups)
 	}
 	if err != nil {
@@ -99,13 +187,49 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 	return d, nil
 }
 
+// keepParts blanks every secret of c a rotation of p does not replace.
+func keepParts(c *Card, p Parts) {
+	if !p.WiFi {
+		c.WiFiPassword = ""
+	}
+	if !p.Setup {
+		c.SetupSecret, c.SetupCode = "", ""
+	}
+	if !p.Passphrase {
+		c.VaultPassphrase = ""
+	}
+	if !p.Grid {
+		wipe(c.GridSeed)
+		c.GridSeed = nil
+	}
+	if !p.Recovery {
+		c.RecoveryKey = ""
+	}
+}
+
 // Asks is the passphrase word and recovery key group (1-based) the
-// confirm step asks for. The positions are not secret.
+// confirm step asks for; 0 is one it does not ask for. The positions are
+// not secret.
 func (d *Display) Asks() (word, group int) { return d.word + 1, d.group + 1 }
 
 // Prompt asks the owner for the confirm values.
 func (d *Display) Prompt() string {
-	return fmt.Sprintf("Type word %d of your vault passphrase and group %d of your recovery key.", d.word+1, d.group+1)
+	if !d.rotate {
+		return fmt.Sprintf("Type word %d of your vault passphrase and group %d of your recovery key.", d.word+1, d.group+1)
+	}
+	switch {
+	case d.word >= 0 && d.group >= 0:
+		return fmt.Sprintf("Type word %d of your new vault passphrase and group %d of your new recovery key.", d.word+1, d.group+1)
+	case d.word >= 0:
+		return fmt.Sprintf("Type word %d of your new vault passphrase.", d.word+1)
+	case d.group >= 0:
+		return fmt.Sprintf("Type group %d of your new recovery key.", d.group+1)
+	case d.check == checkWiFi:
+		return "Type the last four characters of your new Wi-Fi password."
+	case d.check == checkSetup:
+		return "Type your new setup code."
+	}
+	return "Type the check code printed under your new grid."
 }
 
 // Page is the display page: the card with print, save and confirm
@@ -121,7 +245,12 @@ func (d *Display) pageLocked(problem string) ([]byte, error) {
 		return nil, ErrDisplayGone
 	}
 	var ctl bytes.Buffer
-	if err := controlsTmpl.Execute(&ctl, struct{ Prompt, Problem string }{d.Prompt(), problem}); err != nil {
+	v := struct {
+		Prompt, Problem    string
+		Rotate             bool
+		Word, Group, Check bool
+	}{d.Prompt(), problem, d.rotate, d.word >= 0, d.group >= 0, d.check != checkNone}
+	if err := controlsTmpl.Execute(&ctl, v); err != nil {
 		return nil, err
 	}
 	i := bytes.Index(d.sheet, []byte("<body>"))
@@ -137,30 +266,85 @@ func (d *Display) pageLocked(problem string) ([]byte, error) {
 // Confirm checks the typed word and group against the card, ignoring
 // case, spaces and dashes. A mismatch returns ErrNotConfirmed and keeps
 // the display. A match provisions; if that fails the display stays and
-// the error is returned; otherwise the display copy is erased.
+// the error is returned, unless it wraps ErrDiscard or ErrInEffect, which
+// erase the display; otherwise the display copy is erased.
 func (d *Display) Confirm(word, group string) error {
+	return d.ConfirmAnswers(Answers{Word: word, Group: group})
+}
+
+// ConfirmAnswers is Confirm with every value a display may ask for; the
+// ones it does not ask for are ignored.
+func (d *Display) ConfirmAnswers(a Answers) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.c == nil {
 		return ErrDisplayGone
 	}
-	wantW := []byte(NormalizePassphrase(strings.Fields(d.c.VaultPassphrase)[d.word]))
-	wantG := []byte(Normalize(strings.Split(d.c.RecoveryKey, "-")[d.group]))
-	gotW, gotG := []byte(NormalizePassphrase(word)), []byte(Normalize(group))
-	ok := subtle.ConstantTimeCompare(gotW, wantW) & subtle.ConstantTimeCompare(gotG, wantG)
-	wipe(wantW, wantG, gotW, gotG)
+	ok := 1
+	match := func(got, want []byte) {
+		ok &= subtle.ConstantTimeCompare(got, want)
+		wipe(got, want)
+	}
+	if d.word >= 0 {
+		match([]byte(NormalizePassphrase(a.Word)), []byte(NormalizePassphrase(strings.Fields(d.c.VaultPassphrase)[d.word])))
+	}
+	if d.group >= 0 {
+		match([]byte(Normalize(a.Group)), []byte(Normalize(strings.Split(d.c.RecoveryKey, "-")[d.group])))
+	}
+	switch d.check {
+	case checkWiFi:
+		w := Normalize(d.c.WiFiPassword)
+		match([]byte(Normalize(a.Check)), []byte(w[len(w)-4:]))
+	case checkSetup:
+		match([]byte(Normalize(a.Check)), []byte(Normalize(d.c.SetupCode)))
+	case checkGrid:
+		match([]byte(Normalize(a.Check)), []byte(GridCheck(d.c.GridSeed)))
+	}
 	if ok != 1 {
 		d.journal(EventMismatch)
 		return ErrNotConfirmed
 	}
 	if err := d.provision(d.c); err != nil {
-		d.journal(EventProvFail)
+		switch {
+		case errors.Is(err, ErrInEffect):
+			// Confirmed from the owner's copy, which is now the card in
+			// effect; a retry cannot finish, so keep nothing.
+			d.inEffect = true
+			d.eraseLocked()
+			d.journal(EventInEffect)
+		case errors.Is(err, ErrDiscard):
+			d.discardLocked()
+		default:
+			d.journal(EventProvFail)
+		}
 		return fmt.Errorf("card: provisioning: %w", err)
 	}
 	d.confirmed = true
 	d.eraseLocked()
 	d.journal(EventConfirmed)
 	return nil
+}
+
+// Discard erases the display copy without provisioning: an aborted
+// rotation, whose new values never take effect. Later calls do nothing.
+// Once part of the card is in effect it refuses, returning ErrInEffect:
+// the rotation can no longer be cancelled.
+func (d *Display) Discard() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.inEffect {
+		return ErrInEffect
+	}
+	if d.c != nil {
+		d.discardLocked()
+	}
+	return nil
+}
+
+func (d *Display) discardLocked() {
+	d.discarded = true
+	d.eraseLocked()
+	d.journal(EventDiscarded)
 }
 
 // Confirmed reports whether the owner confirmed and the box provisioned.
@@ -209,7 +393,8 @@ const maxForm = 4 << 10
 
 // Handler serves the display to the paired phone only (paired reports it):
 // GET shows the page, GET ?save=1 downloads the bare card, POST confirms
-// and redirects to next. After the confirm every request gets 410. The
+// and redirects to next; on a rotation display a POST with cancel=1
+// discards it and redirects to next. After the confirm every request gets 410. The
 // local UI mounts it behind its own address checks.
 func (d *Display) Handler(paired func(*http.Request) bool, next string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -237,12 +422,20 @@ func (d *Display) Handler(paired func(*http.Request) bool, next string) http.Han
 				http.Error(w, "Bad form.", http.StatusBadRequest)
 				return
 			}
-			err := d.Confirm(r.PostFormValue("word"), r.PostFormValue("group"))
+			if d.rotate && r.PostFormValue("cancel") == "1" {
+				if d.Discard() != nil {
+					d.gone(w)
+					return
+				}
+				http.Redirect(w, r, next, http.StatusSeeOther)
+				return
+			}
+			err := d.ConfirmAnswers(Answers{Word: r.PostFormValue("word"), Group: r.PostFormValue("group"), Check: r.PostFormValue("check")})
 			switch {
 			case err == nil:
 				http.Redirect(w, r, next, http.StatusSeeOther)
-			case errors.Is(err, ErrDisplayGone):
-				gone(w)
+			case errors.Is(err, ErrDisplayGone), errors.Is(err, ErrDiscard), errors.Is(err, ErrInEffect):
+				d.gone(w)
 			case errors.Is(err, ErrNotConfirmed):
 				d.servePage(w, http.StatusUnprocessableEntity, "That did not match your card. Check the word and group and type them again.")
 			default:
@@ -263,14 +456,18 @@ func (d *Display) serveGet(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	if d.c == nil {
 		d.mu.Unlock()
-		gone(w)
+		d.gone(w)
 		return
 	}
 	b := bytes.Clone(d.sheet)
 	d.mu.Unlock()
 	defer wipe(b)
+	name := "agentos-owner-card.html"
+	if d.rotate {
+		name = "agentos-new-card-parts.html"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="agentos-owner-card.html"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	w.Write(b)
 }
 
@@ -279,7 +476,7 @@ func (d *Display) servePage(w http.ResponseWriter, code int, problem string) {
 	b, err := d.pageLocked(problem)
 	d.mu.Unlock()
 	if errors.Is(err, ErrDisplayGone) {
-		gone(w)
+		d.gone(w)
 		return
 	}
 	if err != nil {
@@ -292,7 +489,18 @@ func (d *Display) servePage(w http.ResponseWriter, code int, problem string) {
 	w.Write(b)
 }
 
-func gone(w http.ResponseWriter) {
+func (d *Display) gone(w http.ResponseWriter) {
+	d.mu.Lock()
+	discarded, inEffect := d.discarded, d.inEffect
+	d.mu.Unlock()
+	if inEffect {
+		http.Error(w, inEffectProblem, http.StatusGone)
+		return
+	}
+	if discarded {
+		http.Error(w, "This new card was cancelled and erased; your current card stays in effect. Start again from my box page.", http.StatusGone)
+		return
+	}
 	http.Error(w, "You confirmed your Owner Card, so I keep no copy of it. If you lose it, you can replace it with a new card from my box page.", http.StatusGone)
 }
 
@@ -310,15 +518,19 @@ func sameOrigin(r *http.Request) bool {
 var controlsTmpl = template.Must(template.New("controls").Parse(`
 <div class="noprint" style="font-family:system-ui,sans-serif;border:2px solid #000;padding:4mm;margin:4mm">
 <style>@media print{.noprint{display:none}}</style>
-<h1>Your Owner Card</h1>
-<p><b>Print it now, or save it.</b> I keep no copy once you confirm. Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
+<h1>{{if .Rotate}}Your new card parts{{else}}Your Owner Card{{end}}</h1>
+<p><b>Print it now, or save it.</b> I keep no copy once you confirm.{{if .Rotate}} Until you confirm, your current card stays in effect.{{end}} Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
 <p><button type="button" onclick="window.print()">Print</button> <a href="?save=1">Save as a file</a></p>
 <form method="post">
 <p>{{.Prompt}}</p>
 {{if .Problem}}<p role="alert"><b>{{.Problem}}</b></p>{{end}}
-<p><label>Word <input name="word" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
-<label>Group <input name="group" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
+<p>{{if .Word}}<label>Word <input name="word" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+{{end}}{{if .Group}}<label>Group <input name="group" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
+{{end}}{{if .Check}}<label>Check <input name="check" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
+{{end}}
 <button type="submit">Confirm</button></p>
 </form>
+{{if .Rotate}}<form method="post"><input type="hidden" name="cancel" value="1"><p><button type="submit">Cancel: keep my current card</button></p></form>
+{{end}}
 </div>
 `))

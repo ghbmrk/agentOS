@@ -82,6 +82,12 @@ func (m *Manager) forgetMachine(ctx context.Context, mc *machine, since time.Tim
 	mc.lockEndingExec()
 	defer mc.mu.Unlock()
 	target := m.restoreTarget(mc, since)
+	if target != nil && target.Label > mc.Label {
+		// Saved before the target's content reaches the layer (LABEL-durable).
+		if err := m.raiseLocked(mc, target.Label); err != nil {
+			return err
+		}
+	}
 	if mc.State == Running {
 		// Running is admitted already; restart on that admission.
 		if err := m.restartLocked(ctx, mc, target); err != nil {
