@@ -858,3 +858,6 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | SIM-split-b l5 | PR #1057 UX lens: the approval is spent before the provider is reached, so a send that fails upstream needs a fresh owner code; wiring should say so in the retry prompt rather than ask silently |
 | SIM-split-fix l1 | PR SIM-split-fix: every holder uid shares `redeem.sock` and the checker does not map uid to account, so a compromised holder can spend (deny) another account's approval, never use it; per-uid account binding in the checker would close it |
 | SIM-split-fix l2 | recheck. PR SIM-split-fix: the holder trusts egress's `Agentos-Label: public` for a login opened with `-public-fetch`, so a compromised egress gets public-machine fetch on that login; SIM-split-wire should have the broker attest the label per request |
+| CTRL-card l1 | PR #1060 builder finding: the Owner Card render still says "drive" in places where it should say box (wording only) |
+| CTRL-card l2 | `recheck`. PR #1060 UX lens: a restart before the confirm makes a new card while the owner may already hold a printed one; the page should say a card printed before a restart is void |
+| CTRL-card l3 | PR #1060 UX lens: the screenshot warning should also cover saving the card file into a cloud-synced folder |
