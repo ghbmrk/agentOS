@@ -309,19 +309,24 @@ form { margin: .6em 0 1.2em; }
 <p class="mono">{{.OTPSecret}}</p>
 <form method="post" action="/setup/codes"><label>Type the 6-digit code it shows<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Confirm</button></form>
 {{end}}
+{{else if eq .Step "card"}}
+<h2>4. Owner Card</h2>
+<p>Your Owner Card holds your vault passphrase and recovery key. Print it or save it, then type the word and group I ask for. Once you confirm, I keep no copy of it.</p>
+<p><a class="button" href="/setup/card">Show my Owner Card</a></p>
+
 {{else if eq .Step "recovery"}}
-<h2>4. Recovery sheet</h2>
+<h2>5. Recovery sheet</h2>
 <p>Tear the recovery key sheet off your card and store it somewhere safe, apart from the drive. You will rarely need it.</p>
 <form method="post" action="/setup/recovery"><label><input type="checkbox" name="stored" value="1"> I stored the recovery sheet</label><br><button>Continue</button></form>
 
 {{else if eq .Step "host"}}
-<h2>5. This PC</h2>
+<h2>6. This PC</h2>
 <p>This PC becomes your box's trusted PC, so it restarts by itself after a power cut.</p>
 <form method="post" action="/setup/host"><label><input type="checkbox" name="not_mine" value="1"> This is not my PC</label><br><button>Continue</button></form>
 {{with .Defaults}}<p class="muted">Defaults: {{.}} Change them any time by text or here.</p>{{end}}
 
 {{else if eq .Step "ai"}}
-<h2>6. Connect AI</h2>
+<h2>7. Connect AI</h2>
 {{if not .Progress.Updated}}{{if eq .Progress.Phase "offline"}}<p>I am offline, so I am running the version I shipped with. I update when I am next online, and this step opens after that.</p>
 {{else}}<p>I am updating to the latest version first. This step opens when it finishes.</p>{{end}}
 {{else}}<p class="muted">One is enough. You can add more later.</p>

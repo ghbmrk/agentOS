@@ -60,8 +60,13 @@ type Config struct {
 	// claim code from the box's sticker at /claim, then continues only on
 	// the phone that typed it.
 	Claim BoxClaim
-	Now   func() time.Time
-	Rand  io.Reader
+	// Card, when set, is the first-boot Owner Card step (HW-1,
+	// firstboot.CardStep): after approval codes setup shows the card at
+	// /setup/card to the phone that paired, and neither the recovery
+	// step nor finish runs while Card.Hold() refuses. It needs Hooks.
+	Card OwnerCard
+	Now  func() time.Time
+	Rand io.Reader
 }
 
 // Server is the local UI.
@@ -120,6 +125,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if (cfg.Hooks == nil) != (cfg.Store == nil) {
 		return nil, errors.New("localui: hooks and store go together")
+	}
+	if cfg.Card != nil && cfg.Hooks == nil {
+		return nil, errors.New("localui: the Owner Card step needs setup hooks")
 	}
 	if cfg.SecondLine != nil && cfg.Vault == nil {
 		return nil, errors.New("localui: the second line needs the vault socket")
