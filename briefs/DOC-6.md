@@ -1,5 +1,7 @@
 # DOC-6: BOARD state follows merges automatically
 
+**Retired 2026-10-12** (waste review, approved by Mark). #743 (SIM-repo-2b) replaces it: BOARD.md is generated from issues, so row state follows merges without this workflow. Do not build this brief.
+
 Board section: Owner-benefit review (2026-10-09). Finding from the 2026-10-09 owner-benefit review (point 4): BOARD said P2-1 was "in review (#41)" after #41 merged, and IMG-1, UPD-b3 and HOST-1a part 2 stayed "blocked on P2-1". 31 BOARD rows are `in review` at 9b4bf8a; nothing checks them against GitHub. Mark's choice, 2026-10-09: **the post-merge workflow may commit to main, as `trace.yml` does.**
 
 **Tier:** A (`.github/workflows/`, under RT-1; until RT-1 merges, declare A by hand). Strongest model. About 50k tokens.

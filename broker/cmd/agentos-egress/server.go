@@ -499,6 +499,49 @@ func unlockHandler(c *custody) http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// Owner pins (DEV-2, BAK-1, CAP-13): tier 4, like /trust. /pin with
+	// an existing label is the re-pin.
+	mux.HandleFunc("/pin", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Code  string `json:"code"`
+			Label string `json:"label"`
+			pinRecord
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		replaced, err := c.pin(req.Code, req.Label, req.pinRecord)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, http.StatusOK, map[string]any{"label": req.Label, "replaced": replaced})
+	})
+	mux.HandleFunc("/unpin", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Code  string `json:"code"`
+			Label string `json:"label"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		if err := c.unpin(req.Code, req.Label); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/pins", func(w http.ResponseWriter, r *http.Request) {
+		p, err := c.pins()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if p == nil {
+			p = []pinInfo{}
+		}
+		reply(w, http.StatusOK, map[string]any{"pins": p})
+	})
 	mux.HandleFunc("/lock", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)

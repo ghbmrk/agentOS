@@ -20,6 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
@@ -181,6 +182,10 @@ func loadState(path string) (unlockState, error) {
 // the vault is held but nothing is served. No right code within ttl, or a
 // lock, discards the key. Only an open vault serves the model route.
 type custody struct {
+	// guard is the process's home-network address policy (DEV-2): the
+	// model proxy, the texting provider and the mail servers dial through
+	// it. Nil only in tests, where each dial falls back to the registries.
+	guard *netguard.Policy
 	// keysPath, if set, is the keys file; while it exists the state file
 	// must too.
 	keysPath string
@@ -591,6 +596,7 @@ func (c *custody) serve(v *vault.Vault) error {
 		c.timer = nil
 	}
 	v.OnWarn(c.notify)
+	c.applyPins(v)
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
 	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
@@ -1047,6 +1053,7 @@ func (c *custody) discard() {
 		c.timer.Stop()
 		c.timer = nil
 	}
+	c.clearPins()
 	if c.v != nil {
 		c.v.Close()
 	}
@@ -1319,13 +1326,23 @@ func (c *custody) tier4(code string) (*vault.Vault, error) {
 	if c.host == nil {
 		return nil, errNoTPM
 	}
-	if err := c.checkCode(code, c.now()); err != nil {
-		if strings.HasPrefix(err.Error(), "wrong code") {
-			c.notify("wrong code for a trusted-host change")
-		}
+	if err := c.approvedLocked(code, "a trusted-host change"); err != nil {
 		return nil, err
 	}
 	return c.v, nil
+}
+
+// approvedLocked checks a tier-4 approval code (used once; a wrong one
+// counts toward the cap) and tells the owner of a wrong code for what.
+// The caller holds c.mu and has checked the vault is open.
+func (c *custody) approvedLocked(code, what string) error {
+	if err := c.checkCode(code, c.now()); err != nil {
+		if strings.HasPrefix(err.Error(), "wrong code") {
+			c.notify("wrong code for " + what)
+		}
+		return err
+	}
+	return nil
 }
 
 // MinPINLen is the shortest boot PIN, in characters (arbitrator, #42).

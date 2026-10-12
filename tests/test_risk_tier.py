@@ -23,6 +23,7 @@ class RiskTierTest(unittest.TestCase):
             "assurance/canary-targets.json": "A",
             "tools/canary.py": "A",
             "tools/risk_tier.py": "A",
+            "tools/ci_scope.py": "A",
             "broker/mail/deliver.go": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",
@@ -38,6 +39,11 @@ class RiskTierTest(unittest.TestCase):
             "broker/digestqueue/queue.go": "A",
             # REQ: OP-3 (SIM-sim L3 #727: the harness is what assures the journal).
             "broker/sim/world.go": "A",
+            # REQ: HW-10 (CTRL-claim-tier, #1067 R1: the lockout and one-claim rule)
+            "broker/claim/claim.go": "A",
+            "broker/claim/claim_test.go": "A",
+            # REQ: HW-10 (CTRL-claim-wire: first boot routes the claim and the card)
+            "broker/firstboot/start.go": "A",
             "broker/recall/index.go": "B",
             "broker/newpkg/x.go": "B",
             "guest/openclaw/Dockerfile": "B",
@@ -200,6 +206,58 @@ class RiskTierTest(unittest.TestCase):
         # A renamed package must not silently drop to tier B.
         missing = [p for p in sorted(rt.TIER_A_BROKER) if not (ROOT / "broker" / p).is_dir()]
         self.assertEqual(missing, [])
+
+    # REQ: HW-10 (CTRL-claim-tier, CTRL-claim-wire: OPERATING §3 and TIER_A_BROKER agree on claim and firstboot)
+    def test_operating_tier_a_list_agrees_with_tier_a_broker(self):
+        text = (ROOT / "docs" / "OPERATING.md").read_text()
+        row = next(l for l in text.splitlines() if l.startswith("| **A** |"))
+        listed = row.split("(", 1)[1].split(")", 1)[0]
+        listed = listed.split(", plus ", 1)[0]
+        names = set()
+        for item in listed.split(", "):
+            names.update(n.rstrip("*") for n in item.split("/"))
+        self.assertIn("claim", names)
+        self.assertIn("claim", rt.TIER_A_BROKER)
+        self.assertIn("firstboot", names)
+        self.assertIn("firstboot", rt.TIER_A_BROKER)
+        # Every package OPERATING names as tier A is tier A in the tool
+        # (modem* covers modem and modemlink).
+        not_a = [n for n in sorted(names)
+                 if rt.tier_of("broker/" + n + "/x.go")[0] != "A"]
+        self.assertEqual(not_a, [])
+
+    # REQ: ARC-1 (SIM-core: the trusted core is the list in broker/core/core.txt)
+    def test_core_list_rates_core_and_wiring_a(self):
+        core, wiring = rt.core_list()
+        self.assertIn("journal", core)
+        self.assertIn("cmd/agentosd", wiring)
+        cases = {
+            # core packages that no other rule makes A
+            "broker/childproc/childproc.go": "A",
+            "broker/meter/meter.go": "A",
+            "broker/guesterr/guesterr.go": "A",
+            # the list and its check decide what is core
+            "broker/core/core.txt": "A",
+            "broker/core/core_test.go": "A",
+            # a broker package in neither the core nor TIER_A_BROKER
+            "broker/attention/attention.go": "B",
+        }
+        for path, want in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(rt.tier_of(path)[0], want)
+        for pkg in sorted(core | wiring):
+            with self.subTest(pkg=pkg):
+                self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")
+                self.assertTrue((ROOT / "broker" / pkg).is_dir(), pkg)
+
+    def test_core_list_unreadable_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = pathlib.Path(d) / "core.txt"
+            bad.write_text("core journal\nkernel vault\n")
+            with self.assertRaises(SystemExit):
+                rt.core_list(bad)
+            with self.assertRaises(SystemExit):
+                rt.core_list(pathlib.Path(d) / "missing.txt")
 
     def test_markdown_output(self):
         buf = io.StringIO()

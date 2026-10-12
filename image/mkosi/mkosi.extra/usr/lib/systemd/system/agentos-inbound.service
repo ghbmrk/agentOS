@@ -1,0 +1,20 @@
+# The inbound drop (DEV-2 In, DEV-net-e 2a): no home-network host opens a connection to a box port,
+# on any interface but loopback and those another table governs (netguard ASSUMPTIONS N13). It loads
+# before network-pre.target, so before any link is configured or anything listens, and fails closed:
+# agentosd, systemd-networkd and systemd-resolved require it, so none starts if the load fails, and
+# the health check then keeps the release from being blessed. nft -f loads the file atomically.
+[Unit]
+Description=AgentOS inbound firewall
+Documentation=file:/usr/lib/agentos/inbound.nft
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /usr/lib/agentos/inbound.nft
+
+[Install]
+WantedBy=sysinit.target

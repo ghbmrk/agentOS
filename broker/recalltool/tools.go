@@ -9,9 +9,9 @@
 //     machine first (recall R1).
 //   - recall_note stores the agent's own note. The broker sets its kind
 //     (agent), its label from the machine's label (K4), its receipt time
-//     (K9), and its DerivedFrom from everything the machine's lineage has
-//     been given (K2b), so deleting a source deletes notes made after it
-//     was read. Nothing the guest sends sets any of these.
+//     (K9), and its DerivedFrom from one anchor item standing for what the
+//     machine's lineage has been given (K2b), so deleting a source
+//     deletes notes made after it was read. Nothing the guest sends sets any of these.
 //
 // Results reach the guest only through recall.Render: untrusted content
 // with its source, never instructions, no scores.
@@ -51,9 +51,10 @@ type Config struct {
 
 // Tools implements guest.Tools.
 type Tools struct {
-	cfg  Config
-	mu   sync.Mutex
-	rate map[string]*bucket
+	cfg    Config
+	mu     sync.Mutex
+	noteMu sync.Mutex
+	rate   map[string]*bucket
 }
 
 // New checks cfg.
@@ -201,6 +202,9 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 		}
 		// Durable before the guest sees anything (K2b).
 		if err := t.cfg.Prov.Given(lineage, ids, t.cfg.Now()); err != nil {
+			if errors.Is(err, ErrReadLimit) {
+				return "", true, guesterr.New("this agent has read as much as it may; ask the owner to start this agent's memory over")
+			}
 			t.cfg.Logf("recall %s: provenance: %v", machine, err)
 			return "", true, guesterr.New("broker could not serve recall now; retry")
 		}
@@ -243,11 +247,40 @@ func (t *Tools) Call(ctx context.Context, machine, lineage, name string, raw jso
 			label = recall.Public // K4: from the machine, never the guest
 		}
 		now := t.cfg.Now()
-		_, err := t.cfg.Index.Ingest(recall.Item{
-			Source: recall.Source{Kind: "agent", Ref: lineage + "/" + a.Key, Seen: now,
-				DerivedFrom: t.cfg.Prov.Of(lineage)},
-			Label: label, Text: a.Text, Facts: facts, Received: now,
+		// Limits first, before anything is stored (W3).
+		exists := func(l, k string) bool {
+			_, ok := t.cfg.Index.Get(t.cfg.Index.SourceID("agent", "", l+"/"+k))
+			return ok
+		}
+		t.noteMu.Lock() // check to record is one step, so caps cannot overshoot
+		defer t.noteMu.Unlock()
+		if err := t.cfg.Prov.Check(lineage, a.Key, exists); err != nil {
+			if errors.Is(err, ErrLimit) {
+				return "", true, guesterr.New("this agent has as many notes as it may; reuse an existing note key, or ask the owner to delete old notes")
+			}
+			t.cfg.Logf("recall %s: reserve: %v", machine, err)
+			return "", true, guesterr.New("broker could not store the note")
+		}
+		// One anchor item stands for everything the lineage has read, so
+		// the note's own cost does not grow with it.
+		from, err := t.cfg.Prov.Anchor(lineage, func(seq int, derived []string) (string, error) {
+			return t.cfg.Index.Ingest(recall.Item{
+				Source: recall.Source{Kind: "agent", Ref: fmt.Sprintf("%s/_anchor/%d", lineage, seq), Seen: now, DerivedFrom: derived},
+				Label:  label, Received: now,
+			})
 		})
+		if errors.Is(err, ErrLimit) {
+			return "", true, guesterr.New("this agent has as many notes as it may; reuse an existing note key, or ask the owner to delete old notes")
+		}
+		if err == nil {
+			_, err = t.cfg.Index.Ingest(recall.Item{
+				Source: recall.Source{Kind: "agent", Ref: lineage + "/" + a.Key, Seen: now, DerivedFrom: from},
+				Label:  label, Text: a.Text, Facts: facts, Received: now,
+			})
+		}
+		if err == nil {
+			err = t.cfg.Prov.Noted(lineage, a.Key)
+		}
 		if errors.Is(err, recall.ErrDeleted) {
 			// #59 security B1: a lineage that read a deleted record
 			// derives no note from it, even after the owner keeps it.

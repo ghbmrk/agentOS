@@ -1,5 +1,8 @@
+enable agentos-inbound.service
 enable agentos-health.service
 enable agentos-boot-report.service
 enable agentosd.service
 enable agentosd.path
 enable agentos-drive-id.service
+# Debian's nftables.service runs /etc/nftables.conf, which flushes the whole ruleset.
+disable nftables.service

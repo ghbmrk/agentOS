@@ -56,8 +56,17 @@ type Config struct {
 	// socket (egress K13); its page is served at /second-line/ behind
 	// sign-in (ADP-12, P2-3c). It needs Vault.
 	SecondLine SecondLine
-	Now        func() time.Time
-	Rand       io.Reader
+	// Claim, when set, is the box's claim (HW-10): setup waits for the
+	// claim code from the box's sticker at /claim, then continues only on
+	// the phone that typed it.
+	Claim BoxClaim
+	// Card, when set, is the first-boot Owner Card step (HW-1,
+	// firstboot.CardStep): after approval codes setup shows the card at
+	// /setup/card to the phone that paired, and neither the recovery
+	// step nor finish runs while Card.Hold() refuses. It needs Hooks.
+	Card OwnerCard
+	Now  func() time.Time
+	Rand io.Reader
 }
 
 // Server is the local UI.
@@ -116,6 +125,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if (cfg.Hooks == nil) != (cfg.Store == nil) {
 		return nil, errors.New("localui: hooks and store go together")
+	}
+	if cfg.Card != nil && cfg.Hooks == nil {
+		return nil, errors.New("localui: the Owner Card step needs setup hooks")
 	}
 	if cfg.SecondLine != nil && cfg.Vault == nil {
 		return nil, errors.New("localui: the second line needs the vault socket")
@@ -186,6 +198,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/box.vcf", s.contact)
 	if s.cfg.Vault != nil {
 		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
+	}
+	if s.cfg.Claim != nil {
+		s.mux.HandleFunc("/claim", s.claimPage)
 	}
 	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
 	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))
@@ -267,6 +282,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost && !s.sameOrigin(r) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	if s.claimGate(w, r) {
 		return
 	}
 	s.mux.ServeHTTP(w, r)
