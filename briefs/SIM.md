@@ -174,9 +174,9 @@ The verb is the intent lifecycle: intent, authorized, dispatched, observed, sett
 
 **Needs.** SIM-split-wire for item 1.
 
-**Change.** (1) R1, H-4: egress holds the hash key next to the window hashes, so a short mail or SIP secret can be brute-forced from egress memory. Before production wiring, set an entropy floor per value class or record a DECISIONS row accepting the class. (2) R2, H-3: the holder re-applies the op's BodyRule (ADP-10) itself rather than trusting egress, without narrowing what public machines may send. R3 (binary hardening) and R4 (query-string test) are fixed in SIM-split-b.
+**Change.** (1) R1, H-4: egress holds the hash key next to the window hashes, so a short mail or SIP secret can be brute-forced from egress memory. Before production wiring, set an entropy floor per value class or record a DECISIONS row accepting the class. (2) R2, H-3: the holder re-applies the op's BodyRule (ADP-10) itself rather than trusting egress, without narrowing what public machines may send. R3 (binary hardening) and R4 (query-string test) are fixed in SIM-split-b. (3) #1057 S1: `checker.Act` names no account, and every holder uid shares one redeem socket, so the act binds the account (credential name) and a holder redeems only acts for its own account. (4) #1057 S2: a test that `checker.Redeemer` reports any status but 204 and 403 as an error, so the holder refuses.
 
-**Requirement IDs.** CRED-1, CRED-7, ADP-10. **Acceptance.** A short canary secret has no recoverable hash in egress, or a DECISIONS row names its class; a body carrying `mcp_servers` or `web_search_options` is refused by the holder even when egress forwards it. **Failure path.** A compromised egress sends `mcp_servers` with a real login attached. Tier A.
+**Requirement IDs.** CRED-1, CRED-7, ADP-10, CH-10. **Acceptance.** A short canary secret has no recoverable hash in egress, or a DECISIONS row names its class; a body carrying `mcp_servers` or `web_search_options` is refused by the holder even when egress forwards it; an approval for account A's act is refused by account B's holder for the same bytes; a redeem answered 500 sends nothing. **Failure path.** A compromised egress sends `mcp_servers` with a real login attached. Tier A.
 
 ## SIM-outer: outer limits held by the provider (L1 spec diff, Mark approves)
 
