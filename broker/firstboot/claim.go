@@ -84,6 +84,15 @@ func (c *ClaimedCard) Card() *CardStep {
 	return s
 }
 
+// Display is the card step's display for the local page: nil before the
+// claim and after the confirm (localui.OwnerCard).
+func (c *ClaimedCard) Display() *card.Display {
+	if s := c.Card(); s != nil {
+		return s.Display()
+	}
+	return nil
+}
+
 // Hold returns ErrUnclaimed until the claim, then the card step's Hold.
 func (c *ClaimedCard) Hold() error {
 	if !c.cl.Claimed() {

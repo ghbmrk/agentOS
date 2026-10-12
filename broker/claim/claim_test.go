@@ -130,8 +130,9 @@ func TestRacingClaimsOneWins(t *testing.T) {
 }
 
 // Acceptance 3: a wrong code is refused and counted; MaxWrong wrong codes
-// lock the screen, and the lock holds, the right code included, until
-// the box restarts. A daemon restart (same kernel boot) does not lift it
+// lock the screen, and the lock holds until the box restarts for every
+// code not starting with the sticker's first groups (the sticker holder's
+// reserve is reserve_test.go). A daemon restart (same kernel boot) does not lift it
 // (the #1056 hint: the lockout persists across restarts).
 func TestWrongCodesLockUntilBoxRestarts(t *testing.T) {
 	b, code := newBox(t)
@@ -152,15 +153,15 @@ func TestWrongCodesLockUntilBoxRestarts(t *testing.T) {
 	if _, err := c.Try(wrongCode(code)); !errors.Is(err, ErrLocked) {
 		t.Fatalf("last wrong code: %v", err)
 	}
-	if _, err := c.Try(code); !errors.Is(err, ErrLocked) {
-		t.Fatalf("right code while locked: %v", err)
+	if _, err := c.Try(wrongCode(code)); !errors.Is(err, ErrLocked) {
+		t.Fatalf("a code while locked: %v", err)
 	}
 	c = b.start() // daemon restart, same boot
 	if st := c.Status(); !st.Locked {
 		t.Fatal("daemon restart lifted the lock")
 	}
-	if _, err := c.Try(code); !errors.Is(err, ErrLocked) {
-		t.Fatalf("right code after daemon restart: %v", err)
+	if _, err := c.Try(wrongCode(code)); !errors.Is(err, ErrLocked) {
+		t.Fatalf("a code after daemon restart: %v", err)
 	}
 	wrongs := 0
 	for _, e := range b.journal {
@@ -305,7 +306,7 @@ func TestNearMissCodesRefused(t *testing.T) {
 			t.Fatal("no code with the same first verifier byte found")
 		}
 		try := random()
-		if try == n || verifier(st.Salt, try)[0] != st.Verifier[0] {
+		if try == n || st.verifier(try)[0] != st.Verifier[0] {
 			continue
 		}
 		if err := tryFresh(t, sealed, try); !errors.Is(err, ErrWrongCode) {
@@ -387,7 +388,7 @@ func TestUnreadableStateKeepsLock(t *testing.T) {
 		t.Fatal("boot id error: Open rewrote the state")
 	}
 	c := b.start() // still boot-1: the lock holds
-	if _, err := c.Try(code); !errors.Is(err, ErrLocked) {
-		t.Fatalf("right code after the failed opens: %v", err)
+	if _, err := c.Try(wrongCode(code)); !errors.Is(err, ErrLocked) || !c.Status().Locked {
+		t.Fatalf("a code after the failed opens: %v", err)
 	}
 }
