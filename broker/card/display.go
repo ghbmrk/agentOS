@@ -133,7 +133,7 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 		return nil, errors.New("card: a rotation needs at least one part")
 	}
 	if cfg.Rotate != nil && cfg.Rotate.WiFi && cfg.WiFiName == "" {
-		return nil, errors.New("card: a Wi-Fi rotation needs the box's Wi-Fi name")
+		return nil, errors.New("card: a Wi-Fi rotation needs the current Wi-Fi name")
 	}
 	c, err := cfg.Generate(cfg.Rand)
 	if err != nil {
