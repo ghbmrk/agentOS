@@ -99,6 +99,112 @@ func HTML(c *Card) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+// rotationHTML renders the new parts of a rotated card (REC-4): only the
+// sections of the parts in p, each the same as on the full card, with a
+// line that every other part stays as on the current card.
+func rotationHTML(c *Card, p Parts) ([]byte, error) {
+	v := rotView{view: view{Card: c, BoxPage: BoxPage}, Parts: p}
+	var err error
+	if p.WiFi {
+		if v.WiFiQR, err = QRSVG(WiFiQR(c.WiFiName, c.WiFiPassword)); err != nil {
+			return nil, err
+		}
+	}
+	if p.Passphrase {
+		if v.PassQR, err = QRSVG(c.VaultPassphrase); err != nil {
+			return nil, err
+		}
+	}
+	if p.Grid {
+		v.GridCols = []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"}
+		v.GridCheck = GridCheck(c.GridSeed)
+		labels := owner.GridLabels()
+		for r := 0; r < 10; r++ {
+			row := gridRow{Row: r + 1}
+			for _, l := range labels[r*10 : r*10+10] {
+				row.Cells = append(row.Cells, owner.GridCell(c.GridSeed, l))
+			}
+			v.Grid = append(v.Grid, row)
+		}
+	}
+	var b bytes.Buffer
+	if err := rotationTmpl.Execute(&b, v); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+type rotView struct {
+	view
+	Parts Parts
+}
+
+var rotationTmpl = template.Must(template.New("rotation").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>AgentOS new card parts</title>
+<style>
+@page { margin: 12mm; }
+body { font-family: system-ui, sans-serif; color: #000; background: #fff; margin: 0; }
+.sheet { page-break-after: always; break-after: page; padding: 4mm; }
+.sheet:last-child { page-break-after: auto; break-after: auto; }
+.card { border: 1px dashed #000; padding: 6mm; margin-bottom: 6mm; }
+h1 { font-size: 18pt; margin: 0 0 3mm; } h2 { font-size: 13pt; margin: 0 0 2mm; }
+.row { display: flex; gap: 6mm; align-items: flex-start; }
+.qr { width: 38mm; height: 38mm; flex: none; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12pt; letter-spacing: .04em; }
+.big { font-size: 15pt; font-weight: 600; }
+.note { font-size: 9pt; }
+table { border-collapse: collapse; } td, th { border: 1px solid #000; padding: 1mm 1.5mm; }
+.grid td { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10pt; text-align: center; }
+</style></head><body>
+
+<section class="sheet">
+<div class="card">
+<h1>AgentOS Owner Card: new parts</h1>
+<p class="note">These replace the same parts of your Owner Card. The parts not on this page stay as on your current card. Keep it like a passport, apart from the drive.</p>
+</div>
+{{if .Parts.WiFi}}<div class="card"><div class="row">
+{{.WiFiQR}}
+<div><h2>Box Wi-Fi</h2>
+<p>Name: <span class="mono big">{{.WiFiName}}</span><br>
+Password: <span class="mono big">{{.WiFiPassword}}</span></p>
+<p class="note">Your devices will need the new password. Box page: <span class="mono">{{.BoxPage}}</span></p></div>
+</div></div>
+{{end}}{{if .Parts.Setup}}<div class="card">
+<h2>Setup code</h2>
+<p><span class="mono big">{{.SetupCode}}</span> <span class="note">(text it to your box if the setup page asks)</span></p>
+<h2>Reset secret</h2>
+<p class="note">Only for re-running setup after a reset.</p>
+<p class="mono">{{.SetupSecret}}</p>
+</div>
+{{end}}{{if .Parts.Passphrase}}<div class="card">
+<h2>Vault passphrase</h2>
+<div class="row">
+{{.PassQR}}
+<div><p class="mono big">{{.VaultPassphrase}}</p>
+<p class="note">Only for starting me on a PC I do not know. Never send it by text or say it on a call.
+I cannot print this again; keep the card.</p></div>
+</div>
+</div>
+{{end}}</section>
+{{if .Parts.Grid}}
+<section class="sheet">
+<h1>Approval code grid</h1>
+<p class="note">Tear off and keep apart from me and from this card. Each cell works once.</p>
+<table class="grid"><tr><th></th>{{range .GridCols}}<th>{{.}}</th>{{end}}</tr>
+{{range .Grid}}<tr><th>{{.Row}}</th>{{range .Cells}}<td>{{.}}</td>{{end}}</tr>
+{{end}}</table>
+<p class="note">Grid check code: <span class="mono">{{.GridCheck}}</span> (I may ask for it after a new grid).</p>
+</section>
+{{end}}{{if .Parts.Recovery}}
+<section class="sheet">
+<h1>Recovery key</h1>
+<p class="note">Tear off and store somewhere safe, apart from the drive and the grid. It restores your box onto new hardware and replaces a lost phone or number. I cannot print this again, so keep this sheet.</p>
+<p class="mono big">{{.RecoveryKey}}</p>
+</section>
+{{end}}</body></html>
+`))
+
 var cardTmpl = template.Must(template.New("card").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>AgentOS Owner Card</title>

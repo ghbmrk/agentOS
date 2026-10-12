@@ -65,8 +65,12 @@ type Config struct {
 	// /setup/card to the phone that paired, and neither the recovery
 	// step nor finish runs while Card.Hold() refuses. It needs Hooks.
 	Card OwnerCard
-	Now  func() time.Time
-	Rand io.Reader
+	// Rotation, when set, is the box's card rotation (REC-4): a waiting
+	// rotation's new parts are shown at /rotate/card to a signed-in phone
+	// until the owner confirms or cancels them.
+	Rotation RotationCard
+	Now      func() time.Time
+	Rand     io.Reader
 }
 
 // Server is the local UI.
@@ -201,6 +205,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Claim != nil {
 		s.mux.HandleFunc("/claim", s.claimPage)
+	}
+	if s.cfg.Rotation != nil {
+		s.mux.Handle("/rotate/card", s.signedIn(http.HandlerFunc(s.rotationCard)))
 	}
 	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
 	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))
