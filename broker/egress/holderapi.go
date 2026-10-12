@@ -27,6 +27,16 @@ func (a Adapter) ForwardedResponseHeaders() []string {
 	return append(append([]string(nil), baseResponseHeaders...), a.ResponseHeaders...)
 }
 
+// LabelHeader carries the calling machine's REV-5 label from the proxy to
+// a holder, so the holder can apply the body rule itself. The proxy sets
+// it only to LabelPublic, only on a request to a holder, and never
+// forwards a guest's own.
+const LabelHeader = "Agentos-Label"
+
+// Apply holds body to the rule, as the proxy does, and returns the
+// encoding to send.
+func (b *BodyRule) Apply(body []byte, public bool) ([]byte, error) { return b.apply(body, public) }
+
 // RefusesLogin reports whether status is one the operation declares as the
 // provider refusing the login (CRED-5t).
 func (op Operation) RefusesLogin(status int) bool { return op.refused(status) }

@@ -80,6 +80,12 @@ type Config struct {
 	// only when it returns true for the exact request; with no Redeem the
 	// holder serves reads only.
 	Redeem func(ctx context.Context, act string) (bool, error)
+	// PublicFetch says the owner lets machines labelled public use
+	// provider-side fetch with this login (REV-5). Without it the holder
+	// holds every body to the strict form, whatever label egress claims;
+	// with it, a body egress labels public gets the public form, as in
+	// the proxy (ADP-10).
+	PublicFetch bool
 }
 
 // Holder keeps one account's login.
@@ -90,6 +96,8 @@ type Holder struct {
 	swapper egress.Swapper
 	maxBody int64
 	redeem  func(ctx context.Context, act string) (bool, error)
+	account string
+	public  bool
 
 	mu     sync.RWMutex
 	secret []byte
@@ -100,8 +108,9 @@ func New(cfg Config) (*Holder, error) {
 	if len(cfg.Adapters) == 0 {
 		return nil, errors.New("holder: no adapter")
 	}
-	h := &Holder{byHost: map[string]egress.Adapter{}, rt: cfg.Transport, swapper: cfg.Swapper, maxBody: cfg.MaxBody, redeem: cfg.Redeem}
+	h := &Holder{byHost: map[string]egress.Adapter{}, rt: cfg.Transport, swapper: cfg.Swapper, maxBody: cfg.MaxBody, redeem: cfg.Redeem, public: cfg.PublicFetch}
 	cred := cfg.Adapters[0].Credential
+	h.account = cred
 	for _, a := range cfg.Adapters {
 		if err := a.Validate(); err != nil {
 			return nil, fmt.Errorf("holder: %v", err)
@@ -204,11 +213,21 @@ func (h *Holder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusForbidden, ErrRefused)
 		return
 	}
-	// The approval is spent on the act as sent: host, method, the path on
-	// the wire and the body, so a code approves this request and no other
-	// (CH-4, CH-10).
+	// The holder holds the body to the operation's rule itself rather than
+	// trusting egress to have done so, and sends its own encoding (ADP-10).
+	// The rule is idempotent, so a body egress checked passes unchanged.
+	if op.Body != nil {
+		public := h.public && r.Header.Get(egress.LabelHeader) == egress.LabelPublic
+		if body, err = op.Body.Apply(body, public); err != nil {
+			refuse(w, http.StatusForbidden, ErrRefused)
+			return
+		}
+	}
+	// The approval is spent on the act as sent: this holder's account,
+	// host, method, the path on the wire and the body, so a code approves
+	// this request through this login and no other (CH-4, CH-10).
 	if highRisk {
-		approved, err := h.redeem(r.Context(), checker.Act(a.Host, op.Method, r.URL.EscapedPath(), body))
+		approved, err := h.redeem(r.Context(), checker.Act(h.account, a.Host, op.Method, r.URL.EscapedPath(), body))
 		if err != nil {
 			refuse(w, http.StatusServiceUnavailable, ErrUnapproved)
 			return
@@ -327,7 +346,7 @@ func stream(w http.ResponseWriter, body io.Reader, red *vault.Redactor) {
 // headersDeclared reports whether every request header is one the proxy
 // forwards for a, and the only encoding asked for is identity.
 func (h *Holder) headersDeclared(a egress.Adapter, hdr http.Header) bool {
-	ok := map[string]bool{"Content-Length": true, "Accept-Encoding": true}
+	ok := map[string]bool{"Content-Length": true, "Accept-Encoding": true, egress.LabelHeader: true}
 	for _, k := range a.ForwardedRequestHeaders() {
 		ok[http.CanonicalHeaderKey(k)] = true
 	}
