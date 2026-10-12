@@ -24,6 +24,7 @@ core grants
 core vault
 core sockets
 core egress
+core holder
 core childproc
 core verb
 core guest
@@ -33,6 +34,7 @@ core guesterr
 wiring daemon
 wiring cmd/agentosd
 wiring cmd/agentos-egress
+wiring cmd/agentos-holder
 wiring cmd/agentos-a8scan
 
 # The one way in: an intent goes to the journal. The gate's Submit is the
@@ -67,6 +69,7 @@ open journal.MemStore.ReadAll
 open grants.Gate.Get
 open grants.Gate.List
 open vault.Redactor.Redact
+open vault.HashRedactor.Redact
 
 # Sanctioned interfaces: the only way to start a child process, to build
 # guest-visible error text, to name a verb, and to meter a model call.

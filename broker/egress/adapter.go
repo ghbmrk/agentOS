@@ -164,6 +164,11 @@ func forbiddenHeader(canonical string) bool {
 		return true
 	}
 	l := strings.ToLower(canonical)
+	// The broker's own signals (DeniedHeader, HolderDropHeader) never come
+	// from a provider.
+	if strings.Contains(l, "agentos") {
+		return true
+	}
 	for _, w := range credentialWords {
 		if strings.Contains(l, w) {
 			return true
