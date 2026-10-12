@@ -173,7 +173,7 @@ Queued by the coordinator after #1054 (D-102) merged; each row is a release find
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| CTRL-spike | [M6 Ultra spikes: USB-stick boot with no key press, USB4 networking, Wi-Fi access-point mode](briefs/CTRL-spike.md) | Mark: hardware (M6 Ultra unit) | queued (release; HW-13, HW-12, CH-7, A1; tier C; waits on the unit) |
+| CTRL-spike | [M6 Ultra spikes: USB-stick boot with no key press, USB4 networking, Wi-Fi access-point mode](briefs/CTRL-spike.md) | Mark: hardware (M6 Ultra unit) | building (release; HW-13, HW-12, CH-7, A1; tier C; waits on the unit) |
 | CTRL-card | [First-boot Owner Card: the box generates it, the phone shows it, the display copy is erased](briefs/CTRL-card.md) | P2-2 | queued (release; HW-1, REC-4; tier A) |
 | CTRL-claim | [Claim flow for a preloaded box: a one-time sticker code, one claim, no secret before it](briefs/CTRL-claim.md) | CTRL-card | queued (release; HW-10, A1; tier A) |
 | CTRL-uki | [Preloaded self-check rooted in signed code, so a seller's modified initrd cannot pass its own check](briefs/CTRL-uki.md) | CTRL-claim, P2-1 | queued (release; HW-10, HW-5a, A1; tier A; SPEC risk 26 wording fixed by CTRL-text) |
