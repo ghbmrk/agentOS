@@ -462,6 +462,10 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 	}
 	if holder != nil {
 		rt = holder
+		up.Header.Del(LabelHeader)
+		if labelOf() == LabelPublic {
+			up.Header.Set(LabelHeader, LabelPublic)
+		}
 	} else {
 		up.Header.Set(a.Inject.Header, a.Inject.Prefix+sec.Reveal())
 	}

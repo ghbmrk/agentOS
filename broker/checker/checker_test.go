@@ -66,7 +66,7 @@ func newChecker(t *testing.T, clk *clock) (*Checker, string) {
 }
 
 func act(t *testing.T, body string) string {
-	return Act("bank.example", "POST", "/v1/pay", []byte(body))
+	return Act("bank-login", "bank.example", "POST", "/v1/pay", []byte(body))
 }
 
 // Nothing verifies before the seed is handed: no seed, no approval.
@@ -204,15 +204,17 @@ func TestVerifyHonoursAfter(t *testing.T) {
 	}
 }
 
-// Act binds every part of the request the holder sends.
+// Act binds every part of the request the holder sends, and the account
+// whose login sends it (CH-10).
 func TestActBindsTheWholeRequest(t *testing.T) {
-	base := Act("bank.example", "POST", "/v1/pay", []byte(`{"to":"a"}`))
+	base := Act("bank-login", "bank.example", "POST", "/v1/pay", []byte(`{"to":"a"}`))
 	for name, a := range map[string]string{
-		"host":   Act("bank2.example", "POST", "/v1/pay", []byte(`{"to":"a"}`)),
-		"method": Act("bank.example", "PUT", "/v1/pay", []byte(`{"to":"a"}`)),
-		"path":   Act("bank.example", "POST", "/v1/pay2", []byte(`{"to":"a"}`)),
-		"body":   Act("bank.example", "POST", "/v1/pay", []byte(`{"to":"b"}`)),
-		"split":  Act("bank.example", "POST/v1", "/pay", []byte(`{"to":"a"}`)),
+		"host":   Act("bank-login", "bank2.example", "POST", "/v1/pay", []byte(`{"to":"a"}`)),
+		"method": Act("bank-login", "bank.example", "PUT", "/v1/pay", []byte(`{"to":"a"}`)),
+		"path":   Act("bank-login", "bank.example", "POST", "/v1/pay2", []byte(`{"to":"a"}`)),
+		"body":   Act("bank-login", "bank.example", "POST", "/v1/pay", []byte(`{"to":"b"}`)),
+		"split":  Act("bank-login", "bank.example", "POST/v1", "/pay", []byte(`{"to":"a"}`)),
+		"account": Act("bank-login-b", "bank.example", "POST", "/v1/pay", []byte(`{"to":"a"}`)),
 	} {
 		if a == base {
 			t.Errorf("%s does not change the act", name)
@@ -378,5 +380,31 @@ func TestClientReportsRefusals(t *testing.T) {
 	var p *PausedError
 	if _, _, err := vc.VerifyTOTP(totp(seed, clk.now()), 0, true); !errors.As(err, &p) || !p.Until.After(clk.now()) {
 		t.Fatalf("paused: %v", err)
+	}
+}
+
+// The holder's client reports approval only on 204: a 403 is no approval,
+// and any other answer (a 200, a 400, a 500, a redirect) is an error, so
+// the holder refuses rather than reading a broken checker as a yes (CH-10).
+func TestRedeemerTrustsOnly204(t *testing.T) {
+	dir, err := os.MkdirTemp("", "chk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	a := act(t, "{}")
+	for _, status := range []int{200, 201, 202, 302, 400, 404, 500, 503} {
+		path := filepath.Join(dir, fmt.Sprintf("r%d.sock", status))
+		ln, err := Listen(path, os.Getuid())
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) })}
+		go srv.Serve(ln)
+		ok, err := Redeemer(path)(context.Background(), a)
+		srv.Close()
+		if ok || err == nil {
+			t.Errorf("redeem answered %d: approved %v, err %v", status, ok, err)
+		}
 	}
 }
