@@ -56,8 +56,12 @@ type Config struct {
 	// socket (egress K13); its page is served at /second-line/ behind
 	// sign-in (ADP-12, P2-3c). It needs Vault.
 	SecondLine SecondLine
-	Now        func() time.Time
-	Rand       io.Reader
+	// Claim, when set, is the box's claim (HW-10): setup waits for the
+	// claim code from the box's sticker at /claim, then continues only on
+	// the phone that typed it.
+	Claim BoxClaim
+	Now   func() time.Time
+	Rand  io.Reader
 }
 
 // Server is the local UI.
@@ -187,6 +191,9 @@ func (s *Server) routes() {
 	if s.cfg.Vault != nil {
 		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
 	}
+	if s.cfg.Claim != nil {
+		s.mux.HandleFunc("/claim", s.claimPage)
+	}
 	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
 	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))
 	s.Mount("/paused", "Paused", http.HandlerFunc(s.paused))
@@ -267,6 +274,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost && !s.sameOrigin(r) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	if s.claimGate(w, r) {
 		return
 	}
 	s.mux.ServeHTTP(w, r)
