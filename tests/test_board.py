@@ -1,5 +1,5 @@
-"""Tests for tools/board.py and tools/board_migrate.py: work items as GitHub issues, BOARD.md
-generated from them (SIM-repo-1 and SIM-repo-2, briefs/SIM.md).
+"""Tests for tools/board.py: work items as GitHub issues, BOARD.md generated from them
+(SIM-repo-1 and SIM-repo-2, briefs/SIM.md; tools/board_migrate.py ran once and was deleted).
 
 No SPEC requirement IDs: process tooling (CLAUDE.md, OPERATING). All data is synthetic.
 """
@@ -15,7 +15,6 @@ from contextlib import redirect_stderr, redirect_stdout
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import board  # noqa: E402
-import board_migrate  # noqa: E402
 from metrics import STATES  # noqa: E402
 
 # The live docs/LANES.md names whichever teams exist today; these tests pin a synthetic one.
@@ -298,6 +297,71 @@ class CliTest(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
 
 
+class FreezeTest(unittest.TestCase):
+    """D-098: a frozen row carries the `frozen` label, and check --repo fails when they disagree."""
+    FROZEN = "queued (frozen until G2, LATER FRZ-fuzz, D-098)"
+
+    def test_a_frozen_row_carries_the_frozen_label(self):
+        self.assertIn("frozen", board.LABELS)
+        row = {"id": "F-1", "section": "Harness", "cells": ["Fuzz it (release)", "—"], "state": "queued",
+               "rest": self.FROZEN[len("queued"):]}
+        self.assertIn("frozen", board.issue(row)["labels"])
+        self.assertIn("class:release", board.issue(row)["labels"])
+        self.assertNotIn("frozen", board.issue(dict(row, rest=""))["labels"])
+
+    def test_check_repo_fails_when_the_frozen_label_and_the_state_disagree(self):
+        text = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.") \
+                   .replace("| — | queued (B; Mark approves) |", f"| — | {self.FROZEN} |")
+        items = opened(issues(text))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(board.main(["check", "--repo", "o/r"], read=lambda: text, fetch=github(items)), 0)
+        for drop, add in ((["frozen"], []), ([], ["frozen"])):
+            drifted = [dict(i, labels=[x for x in i["labels"] if x not in drop] + (add if "A-1" in i["title"] else []))
+                       for i in items]
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                self.assertEqual(board.main(["check", "--repo", "o/r"], read=lambda: text, fetch=github(drifted)), 1)
+            self.assertIn("frozen", err.getvalue())
+
+
+class ArchiveTest(unittest.TestCase):
+    """D23: once the base's board is generated, the archives are frozen and the retired files stay gone."""
+
+    def run_archive(self, base, changed=(), present=()):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "base.md").write_text(base)
+            for name in present:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text("x")
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                code = board.main(["archive", "--base", str(root / "base.md"), "--changed", *changed],
+                                  read=lambda: "", root=root)
+            return code, err.getvalue()
+
+    def test_archives_are_frozen_once_the_base_is_generated(self):
+        generated = board.GENERATED + "\n" + LIVE
+        self.assertEqual(self.run_archive(generated, ["BOARD.md", "tools/x.py"])[0], 0)
+        for path in board.ARCHIVED:
+            code, err = self.run_archive(generated, ["BOARD.md", path])
+            self.assertEqual(code, 1, path)
+            self.assertIn(path, err)
+        for path in board.RETIRED:
+            code, err = self.run_archive(generated, present=[path])
+            self.assertEqual(code, 1, path)
+            self.assertIn(path, err)
+
+    def test_before_the_migration_the_archive_check_is_inert(self):
+        self.assertEqual(self.run_archive(LIVE, list(board.ARCHIVED), present=board.RETIRED)[0], 0)
+
+    def test_ci_runs_the_archive_check_on_every_pull_request(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIn("board.py archive --base", ci)
+        self.assertIn("git diff --no-renames --name-only HEAD^1 HEAD", ci)
+
+
 class RateLimitTest(unittest.TestCase):
     def test_wait_follows_the_response(self):
         self.assertEqual(board.rate_limit_wait(403, {"retry-after": "30"}, 0), 30)
@@ -345,59 +409,16 @@ class RateLimitTest(unittest.TestCase):
             board.urllib.request.urlopen = original
         self.assertEqual(slept, [7, 2, 1, 1])
 
-
-class MigrateTest(unittest.TestCase):
-    def test_dry_run_is_the_default_and_writes_nothing(self):
-        calls = []
-        out = io.StringIO()
-        with redirect_stdout(out):
-            code = board_migrate.main([], read=lambda: BOARD, api=lambda *a: calls.append(a))
-        self.assertEqual((code, calls), (0, []))
-        self.assertIn("dry run: 4 issues", out.getvalue())
-        self.assertIn("round trip: ok", out.getvalue())
-        self.assertIn("4 notifications, one per issue", out.getvalue())
-
-    def test_apply_creates_labels_then_issues_in_board_order_and_skips_existing(self):
-        calls, paused = [], []
-        live = {i["title"].split(":")[0]: dict(i, number=n) for n, i in enumerate(board.plan(BOARD), start=1)}
-        repo = [live["A-3"]]
-
-        def api(method, path, payload=None):
-            calls.append((method, path, payload))
-            if method == "GET" and path.startswith("/repos/o/r/labels"):
-                return [{"name": "state:queued"}]
-            if method == "GET" and path.startswith("/repos/o/r/issues"):
-                return opened(sorted(repo, key=lambda i: i["number"]))
-            if method == "POST" and path == "/repos/o/r/issues":
-                repo.append(live[payload["title"].split(":")[0]])
-            return {}
-        out = io.StringIO()
-        with redirect_stdout(out):
-            code = board_migrate.main(["--apply", "--repo", "o/r"], read=lambda: BOARD, api=api, pause=paused.append)
-        self.assertEqual(code, 0)
-        self.assertIn("read back: every live row has one issue", out.getvalue())
-        self.assertEqual(paused, [1, 1])  # between the three new issues
-        made = [c[2]["name"] for c in calls if c[:2] == ("POST", "/repos/o/r/labels")]
-        self.assertNotIn("state:queued", made)
-        self.assertEqual(set(made) | {"state:queued"}, set(board.LABELS))
-        created = [c[2]["title"].split(":")[0] for c in calls if c[:2] == ("POST", "/repos/o/r/issues")]
-        self.assertEqual(created, ["A-1", "W-1", "W-3"])
-        first_issue = next(n for n, c in enumerate(calls) if c[:2] == ("POST", "/repos/o/r/issues"))
-        self.assertTrue(all(c[:2] != ("POST", "/repos/o/r/labels") for c in calls[first_issue:]))
-
-    def test_apply_fails_when_the_issues_do_not_read_back_as_the_board(self):
-        def api(method, path, payload=None):
-            if method == "GET" and path.startswith("/repos/o/r/issues"):
-                return []  # nothing reads back: the creates did not land, or not as collaborator issues
-            return [] if method == "GET" else {}
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
-            code = board_migrate.main(["--apply", "--repo", "o/r"], read=lambda: BOARD, api=api, pause=lambda s: None)
-        self.assertEqual(code, 1)
-        self.assertIn("do not render BOARD.md's live rows", err.getvalue())
-
-    def test_apply_needs_a_repo(self):
-        with redirect_stderr(io.StringIO()):
-            self.assertEqual(board_migrate.main(["--apply"], read=lambda: BOARD, api=lambda *a: None), 2)
+    def test_a_write_sends_its_payload_as_json(self):
+        # GitHub answers a POST without a JSON content type with 415 (seen on the first --apply).
+        import os
+        from unittest import mock
+        sent = []
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "canary-not-a-token"}), \
+                mock.patch.object(board, "call", lambda req: sent.append(req) or {}):
+            board.github("/repos/o/r/labels", "POST", {"name": "decision"})
+        self.assertEqual(sent[0].get_header("Content-type"), "application/json")
+        self.assertEqual(json.loads(sent[0].data), {"name": "decision"})
 
 
 if __name__ == "__main__":
