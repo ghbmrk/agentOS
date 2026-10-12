@@ -9,6 +9,7 @@ require (
 	github.com/emersion/go-message v0.15.0
 	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21
 	github.com/emiago/sipgo v1.5.0
+	github.com/gobwas/ws v1.3.2
 	github.com/google/go-tpm v0.9.8
 	github.com/icholy/digest v1.1.0
 	github.com/makiuchi-d/gozxing v0.1.1
@@ -27,7 +28,6 @@ require (
 	github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
-	github.com/gobwas/ws v1.3.2 // indirect
 	github.com/google/go-containerregistry v0.20.7 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect

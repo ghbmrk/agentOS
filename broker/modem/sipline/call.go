@@ -161,6 +161,9 @@ func (c *call) run(off offer) {
 	p := c.l.provider
 	c.l.mu.Unlock()
 	ans, err := parseAnswer(d.InviteResponse.Body(), p != nil && (p.IsLoopback() || p.IsPrivate()))
+	if err == nil {
+		err = c.l.media(ans.addr)
+	}
 	var tx *srtp.Context
 	if err == nil {
 		tx, err = Context(off.key)

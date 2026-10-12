@@ -244,12 +244,19 @@ class HealthTest(unittest.TestCase):
         stub(self.lib, "agentosd", "exit 0")
         stub(self.lib, "drive-id", "exit 0")
         stub(self.lib, "runsc", 'echo "runsc version release-20260928.0"')
+        self.nft("drop")
         (self.lib / "images/openclaw/opt/openclaw").mkdir(parents=True)
         write(self.lib, "guest/launch.json", "{}")
         write(self.root, "proc/cmdline", "console=ttyS0 rw quiet usrhash=%s\n" % H)
         ev = self.root / "sys/firmware/efi/efivars"
         ev.mkdir(parents=True)
         (ev / "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(b"\x06\x00\x00\x00\x01")
+
+    def nft(self, last):
+        # The loaded input chain, as "nft list chain" prints it, ending in LAST.
+        stub(self.bin, "nft", '[ "$*" = "list chain inet agentos_inbound input" ] || exit 1; '
+                              'printf "table inet agentos_inbound {\\n\\tchain input {\\n\\t\\tiifname @exempt accept\\n'
+                              '\\t\\t%s\\n\\t}\\n}\\n"' % last)
 
     def findmnt(self, source, options):
         stub(self.bin, "findmnt", 'case "$2" in SOURCE) echo "%s" ;; *) echo "%s" ;; esac' % (source, options))
@@ -268,6 +275,7 @@ class HealthTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("agentos-health: PASS", r.stdout)
         self.assertIn("secure_boot=on", r.stdout)
+        self.assertIn("inbound=drop", r.stdout)
 
     def test_secure_boot_off_is_reported_not_failed(self):
         (self.root / "sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(
@@ -289,6 +297,8 @@ class HealthTest(unittest.TestCase):
             "broker broken": lambda: stub(self.lib, "agentosd", "exit 2"),
             "runsc broken": lambda: stub(self.lib, "runsc", "exit 1"),
             "guest image missing": lambda: (self.lib / "images/openclaw/opt/openclaw").rmdir(),
+            "inbound rules not loaded": lambda: stub(self.bin, "nft", "echo 'No such file or directory' >&2; exit 1"),
+            "inbound chain ends in accept": lambda: self.nft("accept"),
         }
         for name, breakit in cases.items():
             with self.subTest(name):
@@ -572,6 +582,32 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(f["Service"]["ExecStart"], "/usr/lib/agentos/fallback")
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("enable agentos-health.service", preset)
+
+    def test_inbound_rules_load_before_any_listener_and_fail_closed(self):
+        # DEV-net-e 2a (DEV-2 In): the drop loads before the network comes up, and nothing that
+        # listens or brings a link up starts without it.
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-inbound.service")
+        self.assertEqual(u["Unit"]["DefaultDependencies"], "no")
+        self.assertIn("network-pre.target", u["Unit"]["Before"].split())
+        self.assertIn("network-pre.target", u["Unit"]["Wants"].split())
+        self.assertEqual(u["Service"]["Type"], "oneshot")
+        self.assertEqual(u["Service"]["RemainAfterExit"], "yes")
+        self.assertEqual(u["Service"]["ExecStart"], "/usr/sbin/nft -f /usr/lib/agentos/inbound.nft")
+        self.assertEqual(u["Install"]["WantedBy"], "sysinit.target")
+        self.assertTrue((MK / "mkosi.extra/usr/lib/agentos/inbound.nft").is_file())
+        for unit in ("agentosd.service", "systemd-networkd.service", "systemd-resolved.service"):
+            with self.subTest(unit):
+                f = MK / "mkosi.extra/usr/lib/systemd/system" / unit
+                if unit != "agentosd.service":
+                    f = f.parent / (unit + ".d") / "agentos-inbound.conf"
+                d = ini(f)["Unit"]
+                self.assertIn("agentos-inbound.service", d["Requires"].split())
+                self.assertIn("agentos-inbound.service", d["After"].split())
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().split("\n")
+        self.assertIn("enable agentos-inbound.service", preset)
+        # Debian's nftables.service flushes the whole ruleset from /etc/nftables.conf.
+        self.assertIn("disable nftables.service", preset)
+        self.assertIn("nftables", ini(MK / "mkosi.conf")["Content"]["Packages"].split())
 
     def test_root_is_locked(self):
         self.assertEqual(ini(MK / "mkosi.conf")["Content"]["RootPassword"], "hashed:!")

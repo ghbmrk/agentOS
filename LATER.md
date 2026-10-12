@@ -836,6 +836,10 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | DEV-net-c l1 | PR #1051 L3: netguard learns only the first usable nameserver, with no failover to the next |
 | DEV-net-c l2 | PR #1051 L3: no owner-facing line when no resolver is learned (names fail closed silently) |
 | DEV-net-c l3 | PR #1051 L3 delta: `Sources.Read` counts link-local and VM-bridge prefixes, so an uplink-down read with only those still replaces the learned set (moot while nothing routes out) |
+| DEV-net-e l1 | PR #1055 L3: `unpin` spends the approval code before checking that the label exists (`netpins.go`), though N12 says a refusal is checked before the code is spent; costs the owner one code, not exploitable |
+| DEV-net-e l2 | `recheck`. PR #1055 L3: the CI step running `tests/test_inbound_netns.py` under sudo passes if both tests skip (no root, ip or nft); make it fail on skip |
+| DEV-net-e l3 | PR #1055 L3: if the image adopts NetworkManager for the AP or station (P2-2w), `NetworkManager.service` needs the same `Requires=`/`After=agentos-inbound.service` drop-in as systemd-networkd |
+| DEV-net-e l4 | PR #1055 UX lens: `agentos-egress unpin` prints nothing on success; say which pin was removed |
 
 ## Reuse candidates
 | ID | Component | Why |
@@ -845,5 +849,5 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | HOST-1d | cryptsetup / LUKS2 | Vault-keyed disk encryption without custom crypto |
 | SR2-4i | systemd resource control (IOWeight=, CPUWeight=) | Sets io.weight and cpu.weight per slice; add iocost QoS on the image |
 | UPD-b | systemd-sysupdate (S7 stack) | First-boot update-before-trust already fits the chosen image stack |
-| DEV-net-b | Stale nil-guard comments at `broker/mail/imapsmtp/imapsmtp.go:65` and `broker/smsapi/service.go:44` | Found in PR #1051's L3 |
+| DEV-net-b l1 | Stale nil-guard comments at `broker/mail/imapsmtp/imapsmtp.go:65` and `broker/smsapi/service.go:44` | Found in PR #1051's L3 |
 | CTRL-spike-r | `check.py` counts any iperf3 retransmit as a stall and takes the requested rather than the measured duration; `probe.py ap` asserts SAE-only and isolation from its own config, not the running AP (recheck) | Found in PR #1058's L3; check at the hardware run |

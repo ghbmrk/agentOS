@@ -1326,13 +1326,23 @@ func (c *custody) tier4(code string) (*vault.Vault, error) {
 	if c.host == nil {
 		return nil, errNoTPM
 	}
-	if err := c.checkCode(code, c.now()); err != nil {
-		if strings.HasPrefix(err.Error(), "wrong code") {
-			c.notify("wrong code for a trusted-host change")
-		}
+	if err := c.approvedLocked(code, "a trusted-host change"); err != nil {
 		return nil, err
 	}
 	return c.v, nil
+}
+
+// approvedLocked checks a tier-4 approval code (used once; a wrong one
+// counts toward the cap) and tells the owner of a wrong code for what.
+// The caller holds c.mu and has checked the vault is open.
+func (c *custody) approvedLocked(code, what string) error {
+	if err := c.checkCode(code, c.now()); err != nil {
+		if strings.HasPrefix(err.Error(), "wrong code") {
+			c.notify("wrong code for " + what)
+		}
+		return err
+	}
+	return nil
 }
 
 // MinPINLen is the shortest boot PIN, in characters (arbitrator, #42).
