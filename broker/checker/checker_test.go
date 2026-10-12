@@ -209,11 +209,11 @@ func TestVerifyHonoursAfter(t *testing.T) {
 func TestActBindsTheWholeRequest(t *testing.T) {
 	base := Act("bank-login", "bank.example", "POST", "/v1/pay", []byte(`{"to":"a"}`))
 	for name, a := range map[string]string{
-		"host":   Act("bank-login", "bank2.example", "POST", "/v1/pay", []byte(`{"to":"a"}`)),
-		"method": Act("bank-login", "bank.example", "PUT", "/v1/pay", []byte(`{"to":"a"}`)),
-		"path":   Act("bank-login", "bank.example", "POST", "/v1/pay2", []byte(`{"to":"a"}`)),
-		"body":   Act("bank-login", "bank.example", "POST", "/v1/pay", []byte(`{"to":"b"}`)),
-		"split":  Act("bank-login", "bank.example", "POST/v1", "/pay", []byte(`{"to":"a"}`)),
+		"host":    Act("bank-login", "bank2.example", "POST", "/v1/pay", []byte(`{"to":"a"}`)),
+		"method":  Act("bank-login", "bank.example", "PUT", "/v1/pay", []byte(`{"to":"a"}`)),
+		"path":    Act("bank-login", "bank.example", "POST", "/v1/pay2", []byte(`{"to":"a"}`)),
+		"body":    Act("bank-login", "bank.example", "POST", "/v1/pay", []byte(`{"to":"b"}`)),
+		"split":   Act("bank-login", "bank.example", "POST/v1", "/pay", []byte(`{"to":"a"}`)),
 		"account": Act("bank-login-b", "bank.example", "POST", "/v1/pay", []byte(`{"to":"a"}`)),
 	} {
 		if a == base {
