@@ -867,3 +867,5 @@ No security-fix row (SR2-* or SR3-*) is classed Later. P2-1 (host image) merged 
 | IMG-nodump l2 | PR #1068 L3: `ProcessSizeMax=0` in the coredump drop-in is not checked (dropping it survives); it is redundant with `Storage=none` and the discard pipe |
 | IMG-nodump l3 | PR #1068 L3: `mkosi.finalize` `ini_last` fails closed on an unparseable drop-in, but no test plants one (reverting it to a skip survives); `core_pattern` still discards every dump |
 | IMG-nodump l4 | `recheck`. PR #1068 L3: `finish_image` does not reject `crashkernel=` in the boot entry; kdump has no package today, but if it were added, a vmcore holding the broker's memory would land in /var/crash |
+| CTRL-claim l1 | `recheck`. PR #1067 builder finding: a claimant who loses the claiming phone before the Owner Card exists must reinstall, as no recovery secret exists yet (claim K6) |
+| CTRL-claim l2 | PR #1067 UX/Potency lens: halving the claim allowance per lock (5, 2, 1) costs a power cycle per typo after the third lock and buys no margin against an 80-bit code; a fixed per-boot allowance would also blunt the R3 denial |
