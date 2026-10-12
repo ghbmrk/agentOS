@@ -36,7 +36,7 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | CONV-1 | Convergence rules: release test, `recheck`, tooling and depth rule, idle limit, Mark queue ([D-086](decisions/D-086.md)) | — | in review (C; docs only) |
 | WIP-1 | Open-PR cap and no draft exemption: at most about 10 open PRs per lane, CODEX-1 drafts count and age out under the 48-hour rule ([D-098](decisions/D-098.md)) | CONV-0 | dropped (rule in force in CLAUDE.md by D-098; its `tools/metrics.py` follow-up moved to MET-1, waste review 2026-10-12) |
 | CONV-0 | [Convergence measures, daily metrics, ledger staleness](briefs/CONV-0.md) | CONV-1 | merged (#632, 7ce5124; follow-up #716) |
-| CONV-2 | [Re-audit open BOARD rows against the release test](briefs/CONV-2.md) | CONV-1 | queued (C) |
+| CONV-2 | [Re-audit open BOARD rows against the release test and the G1/G2 test](briefs/CONV-2.md): one pass for D-086 and D-098, absorbs LATER FRZ-refile; 223 queued, 0 escalated on 116b4b8 (2026-10-12) | CONV-1 | queued (C) |
 | CONV-3 | [Triage the open PR inventory](briefs/CONV-3.md) | CONV-1 | queued (C; closes nothing without Mark) |
 | CONV-4 | [One batched spec diff, then scope freeze](briefs/CONV-4.md) | — | queued (B; Mark approves) |
 | CONV-5 | [Triage the 24 uncovered requirement IDs](briefs/CONV-5.md) | — | queued (C) |
