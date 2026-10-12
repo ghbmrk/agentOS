@@ -36,9 +36,9 @@ func TestOlderBackupsAreNamedAndDeletedOnlyWithApproval(t *testing.T) {
 		t.Fatalf("note before any key change: %q", n)
 	}
 
-	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Recovery: x.rk}, Proof{}, testGen, nil, t0)
+	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Recovery: x.rk}, Proof{}, t0)
 	must(t, err)
-	_, err = p.Commit(x.b, p.answer, t0)
+	_, err = p.Commit(x.b, newParts(p), t0)
 	must(t, err)
 	want := "Backups made before 2026-10-05 still open with your old card. Delete them from Home NAS and USB stick A once the new backup is done."
 	if n, _ := OldBackupsNote(x.b); n != want {
