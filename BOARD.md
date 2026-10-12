@@ -34,13 +34,13 @@ Index of work packages, one line each. Each row links its brief in `briefs/<ID>.
 | DEP-8-r1 | [depaudit](briefs/DEP-8.md#dep-8-r1): an NSS failure (`getpwall()`/`getgrall()` raising, or `getpwuid_r`/`getgrgid_r` returning EIO or EAGAIN) gets its own remedy, "fix the NSS source, then retry", through a distinct exception subclass as `UnparsableLine` does, not "replace it"; a test asserts the remedy text, not only the reason (release, tier A, DEP-8e; UX lens on #596 point 1, comment 6080618700) | DEP-6-r1 | merged 0db122e (#608) |
 | CODEX-1 | [Intake of Codex drafts for implementation](briefs/CODEX-1.md) | — | in review (C; records only) |
 | CONV-1 | Convergence rules: release test, `recheck`, tooling and depth rule, idle limit, Mark queue ([D-086](decisions/D-086.md)) | — | in review (C; docs only) |
-| WIP-1 | Open-PR cap and no draft exemption: at most about 10 open PRs per lane, CODEX-1 drafts count and age out under the 48-hour rule ([D-098](decisions/D-098.md)). Follow-up: `tools/metrics.py` still removes CODEX-1 held drafts from the stale list (`held_drafts`, `stale_prs`) and does not count open PRs per lane; change both and add tests | CONV-0 | queued (C) |
-| CONV-0 | [Convergence measures, daily metrics, ledger staleness](briefs/CONV-0.md) | CONV-1 | queued (C) |
+| WIP-1 | Open-PR cap and no draft exemption: at most about 10 open PRs per lane, CODEX-1 drafts count and age out under the 48-hour rule ([D-098](decisions/D-098.md)) | CONV-0 | dropped (rule in force in CLAUDE.md by D-098; its `tools/metrics.py` follow-up moved to MET-1, waste review 2026-10-12) |
+| CONV-0 | [Convergence measures, daily metrics, ledger staleness](briefs/CONV-0.md) | CONV-1 | merged (#632, 7ce5124; follow-up #716) |
 | CONV-2 | [Re-audit open BOARD rows against the release test](briefs/CONV-2.md) | CONV-1 | queued (C) |
 | CONV-3 | [Triage the open PR inventory](briefs/CONV-3.md) | CONV-1 | queued (C; closes nothing without Mark) |
 | CONV-4 | [One batched spec diff, then scope freeze](briefs/CONV-4.md) | — | queued (B; Mark approves) |
 | CONV-5 | [Triage the 24 uncovered requirement IDs](briefs/CONV-5.md) | — | queued (C) |
-| CONV-6 | [Turn recurring finding kinds into checks](briefs/CONV-6.md) | CONV-1 | queued (tier per check) |
+| CONV-6 | [Turn recurring finding kinds into checks](briefs/CONV-6.md); REV-CHK's sweep is its CONV-6-1 | CONV-1 | queued (tier per check) |
 | CI-SOAK-f1 | [Fixtures independent of umask and tmpfs](briefs/CI-SOAK-f1.md) | — | merged (8c49dc5; #563) |
 | H8 | [Deterministic split entropy for change fixtures](briefs/H8.md) | — | merged (9358360; #564) |
 | H6 | [A10 trial collector](briefs/H6.md) | — | merged (464736c; #561) |
@@ -57,10 +57,11 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-bound | [Bounded broker memory under deny-all; STOP reads an index](briefs/SIM.md#sim-bound-bounded-broker-memory-and-stop-without-a-history-walk-tier-a) | — | queued (brief ready; tier A) |
 | SIM-sd | [L1 spec diff: one log, owner messages as intents, one outcome, learning off until it wins](briefs/SIM.md#sim-sd-l1-spec-diff-for-one-log-mark-approves) | — | queued (B; Mark approves) |
 | SIM-check | [One journal invariant checker: test, CI and runtime](briefs/SIM.md#sim-check-one-journal-invariant-checker-tier-a) | — | in review (tier A) |
-| SIM-proj | [Journal snapshots and a projection API](briefs/SIM.md#sim-proj-journal-snapshots-and-a-projection-api-tier-a) | — | in review (tier A) |
+| SIM-proj | [Journal snapshots and a projection API](briefs/SIM.md#sim-proj-journal-snapshots-and-a-projection-api-tier-a) | — | merged (#722, 97543be) |
+| PROJ-read | [Projection Sync and Boot do one shared journal read, not one full decode per view](briefs/PROJ-read.md) | SIM-proj | queued (release; OP-11, A4; tier A; before SIM-owner-hold wires Sync; waste review 2026-10-12) |
 | SIM-owner-hold | [Owner texts are intents; the pacer hold becomes a projection](briefs/SIM.md#sim-owner-hold-owner-texts-are-intents-the-pacer-hold-becomes-a-projection-tier-a) | SIM-sd, SIM-proj, SIM-cases, DEL-1, #708 (PACE-1) | queued (A) |
 | SIM-pull | [STATUS is the owner's view; only urgent texts pushed; digest deleted](briefs/SIM.md#sim-pull-status-is-the-owners-view-only-urgent-texts-are-pushed-tier-a) | SIM-owner-hold, SIM-sd, SIM-cases | queued (A) |
-| SIM-cases | [W5-D drafts' crash, ack and forget cases become tests against main](briefs/SIM.md#sim-cases-w5-d-cases-become-tests-against-main-tier-a); [list](briefs/SIM-cases.md) | — | in review (tier A) |
+| SIM-cases | [W5-D drafts' crash, ack and forget cases become tests against main](briefs/SIM.md#sim-cases-w5-d-cases-become-tests-against-main-tier-a); [list](briefs/SIM-cases.md) | — | merged (#723, d941ea4) |
 | SIM-outcome | [One revisable outcome record per goal](briefs/SIM.md#sim-outcome-one-revisable-outcome-record-tier-a) | SIM-sd | queued (A) |
 | SIM-erase | [Forget once, in the journal](briefs/SIM.md#sim-erase-forget-once-in-the-journal-tier-a) | SIM-sd, SIM-proj, SIM-check, SIM-cases | queued (A) |
 | SIM-core | [Trusted core is a named list; CI import check; core = tier A](briefs/SIM.md#sim-core-the-trusted-core-is-a-named-list-tier-a) | — | queued (brief ready; tier A) |
@@ -74,7 +75,7 @@ Make SPEC §9 literally true: the journal is the only durable state, everything 
 | SIM-outer | [L1 spec diff: narrow provider scopes, provider limits at ~2x the box cap](briefs/SIM.md#sim-outer-outer-limits-held-by-the-provider-l1-spec-diff-mark-approves) | — | queued (B; Mark approves) |
 | SIM-core-allow-tier | `tools/risk_tier.py` rates every package named on a `broker/core/core.txt` `allow` line tier A, or `recall` and `recalltool` join `TIER_A_BROKER`. Invariant: core write paths are tier A (D-095, ARC-1). Failure path: `recalltool` is tier B and holds `journal.Engine.Erase` and `grants.Gate.Withdraw`/`Authorize`; a tier B PR widens its use of `Erase` without authorize, gets no Security section, and the core check still passes (release, tier A; Security on #715 pt 2, comment 6109907105) | SIM-core | queued (A) |
 | SIM-shred | [Forget by deleting a per-subject key; reaches backups and snapshots](briefs/SIM.md#sim-shred-forget-by-deleting-a-per-subject-key-tier-a) | SIM-erase, SIM-proj, SIM-sd | queued (A) |
-| SIM-policy | [Policy as data with one match-and-compare evaluator](briefs/SIM.md#sim-policy-policy-as-data-one-evaluator-tier-a) | SIM-outcome, SIM-pull, SIM-core | queued (A) |
+| SIM-policy | [Typed settings in one place; an evaluator only on demonstrated need and net deletion](briefs/SIM.md#sim-policy-policy-as-data-one-evaluator-tier-a) | SIM-owner-hold, SIM-pull, SIM-outcome, SIM-core | queued (A; after its Needs, waste review 2026-10-12) |
 | SIM-cap | [Capability grants scoped per intent](briefs/SIM.md#sim-cap-capability-grants-scoped-per-intent-tier-a) | SIM-core, SIM-check, SIM-policy | queued (A) |
 | SIM-sim | [Deterministic simulation of the broker, judged by SIM-check](briefs/SIM.md#sim-sim-deterministic-simulation-of-the-broker-tier-a) | SIM-check (second half) | building (first half: harness, PR pending; tier A) |
 | SIM-repo-1 | [Work items as GitHub issues; BOARD generated; migration dry run](briefs/SIM.md#sim-repo-1-work-items-as-github-issues-board-generated-tier-a) | — | merged (#721) |
@@ -141,7 +142,7 @@ Primary lane; remediation is unclaimed. [Review record](reviews/security/2026-10
 
 ## Owner-benefit review (2026-10-09)
 
-Primary lane; from an external review's points 2 to 6, checked against main at 9b4bf8a and planned with Mark on 2026-10-09 (an uncertain SMS is flagged, not resent; the board-sync workflow may commit to main). Suggested order: RT-1, DEL-sd, DEL-1, DOC-5, DIG-1, DEL-2, DOC-6, MET-1, IMG-5.
+Primary lane; from an external review's points 2 to 6, checked against main at 9b4bf8a and planned with Mark on 2026-10-09 (an uncertain SMS is flagged, not resent; the board-sync workflow may commit to main). Suggested order: RT-1, DEL-sd, DEL-1, DOC-5, DEL-2, MET-1, IMG-5 (DIG-1 and DOC-6 dropped 2026-10-12).
 
 | ID | Package | Needs | State |
 |---|---|---|---|
@@ -151,13 +152,14 @@ Primary lane; from an external review's points 2 to 6, checked against main at 9
 | DEL-1 | [An accepted owner reply survives a crash: persist before 204, idempotent reply, guest retries what it holds](briefs/DEL-1.md) | DEL-sd opened | in review (#709; tier A) |
 | DEL-1-f1 | A deletion reaches owner replies waiting in the guest outbox: the forget fan (CAP-3) removes or redacts a deleted machine's or task's outbox entries, which today stay until sent; failure path: delete while replies are waiting to be sent (release, tier A; #709 Findings, brief to write) | DEL-1 | queued (needs brief) |
 | DEL-2 | [Send outcomes for owner replies: retry known-unsent, flag uncertain, stable email intent](briefs/DEL-2.md) | DEL-1 | queued (brief ready; tier A) |
-| DOC-5 | [doclint catches BOARD and LATER contradictions](briefs/DOC-5.md) | — | in review (#703) |
-| DOC-6 | [BOARD state follows merges automatically](briefs/DOC-6.md) | DOC-5 | queued (brief ready; tier A) |
-| MET-1 | [Metrics measure matching periods and stay current](briefs/MET-1.md) | — | queued (brief ready) |
+| DOC-5 | [doclint catches BOARD and LATER contradictions](briefs/DOC-5.md) | — | merged (#703, 2de089d) |
+| DOC-6 | [BOARD state follows merges automatically](briefs/DOC-6.md) | DOC-5 | dropped (superseded by #743, SIM-repo-2b: BOARD generated from issues; waste review 2026-10-12) |
+| MET-1 | [Metrics measure matching periods; held drafts and open PRs per lane](briefs/MET-1.md) | CONV-0 | queued (C; narrowed 2026-10-12: CONV-0 made the run daily, WIP-1's follow-up folded in) |
 | IMG-5 | Retroactive tier-A review of `image/` as merged at tier C (P2-1 #41 and later image PRs): Security lens with an explicit threat check on the boot chain, verity layout and the systemd units' privileges; findings become rows (brief to write) | RT-1 | queued |
 | RT-2 | Risk-tier follow-ups from PR #705's reviews (brief to write): CI and reviewers compute the tier with the base branch's `tools/risk_tier.py`, not the PR's own copy (invariant: a PR cannot edit the rules that set its review depth; failure: a PR drops `image/` from the A list and edits a unit, and both runs print B); `tools/hostcheck*` to A (HOST-1e; failure: a C PR allow-lists a real host change and the HW-8 check reports it as disclosed) | RT-1 | queued |
-| UX-INV | Owner-effort inventory: script one week of owner traffic and count texts and taps per task for MORE paging, withheld replies (CH-19, CH-20p), a retry that loses the owner's earlier choice, quiet hours and pacing (W5-Dc-r1) and digest sources (DIG-1); each step over budget becomes a row (brief to write) | DIG-1 | queued |
-| REV-CHK | Sweep `reviews/*/README.md` for finding kinds seen on two or more PRs without a lint rule, test or CI check (CLAUDE.md, OPERATING §4); one row per gap (brief to write) | — | queued |
+| UX-INV | Owner-effort inventory: script one week of owner traffic and count texts and taps per task for MORE paging, withheld replies (CH-19, CH-20p), a retry that loses the owner's earlier choice, quiet hours and pacing (W5-Dc-r1), and STATUS reads and urgent texts (SIM-pull); each step over budget becomes a row (brief to write) | SIM-pull | queued |
+| REV-CHK | Sweep `reviews/*/README.md` for finding kinds seen on two or more PRs without a lint rule, test or CI check (CLAUDE.md, OPERATING §4); one row per gap | — | dropped (folded into CONV-6 as CONV-6-1, waste review 2026-10-12) |
+| CI-docs | [Records-only changes get a light CI path](briefs/CI-docs.md) | — | merged (#1084, 29399db) |
 | A10-T1 | Owner-minutes trial (A10, H6): the same H6 tasks on AgentOS, OpenClaw alone and a provider CLI, owner-minutes and outcomes measured over the same period | Mark sets the trial time | queued (needs Mark) |
 | LRN-1 | [No adoption bonus without a measured gain](briefs/LRN-1.md) | — | in review (tier A) |
 
@@ -179,7 +181,7 @@ The home-network boundary is release work (A14); device features follow the firs
 
 ## Controller and helper system (D-102)
 
-Queued by the coordinator after #1054 (D-102) merged; each row is a release finding from that PR's body and reviews. Ordered by dependency. Details are in the briefs.
+Queued by the coordinator after #1054 (D-102) merged; each row is a release finding from that PR's body and reviews. Ordered by dependency. Details are in the briefs. [D-104](decisions/D-104.md): G1 (the controller's boot, phone control and one useful model-backed task, on the one M6 Ultra) comes first; rows marked "after G1" (seller self-check, flasher, routing to helpers, workstation segment, workstations, helper apps) wait for it, and each is built when it solves a measured limitation (A17, G7). This is staging, not a finding that those features are unnecessary.
 
 | ID | Package | Needs | State |
 |---|---|---|---|
@@ -187,21 +189,22 @@ Queued by the coordinator after #1054 (D-102) merged; each row is a release find
 | CTRL-card | [First-boot Owner Card: the box generates it, the phone shows it, the display copy is erased](briefs/CTRL-card.md) | P2-2 | merged (#1060, ddb25b0) |
 | CTRL-card-wire | [Wire the Owner Card into the localui setup page and first boot; the finish path calls Hold()](briefs/CTRL-card-f.md) | CTRL-card | merged (#1073, 020597a) |
 | CTRL-card-vaultop | Vault-process op: provision the vault from the confirmed Owner Card and reset a half-made vault (F10), so agentosd `main` can hand setup mode a real card step. Conditions from the #1073 Security review: (S1) the reset is callable only from setup mode after the record and owner-state checks, and refuses once a seed was sealed at finish; (S2) provision-from-card carries the step-3 code seed into the card's vault, and the unlatched reset discards the seed with the vault | CTRL-card-wire | queued (release; HW-1 test 2, ONB-7, A1; tier A; from #1073) |
-| CTRL-card-sock | Card display, `Hold()` and `card pending` as localapi ops built in agentos-localui, so the page and agentosd share one hold across `localui.sock`; the page says a card printed before a restart is void (LATER CTRL-card l2) | CTRL-card-vaultop, P2-2w c4 | queued (release; HW-1 test 2, A1; tier A; from #1073) |
+| CTRL-card-sock | Card display, `Hold()` and `card pending` as localapi ops built in agentos-localui, so the page and agentosd share one hold across `localui.sock`; the page says a card printed before a restart is void (LATER CTRL-card l2); the step it builds is `firstboot.Begin`'s `Card`, and its `Claim` goes to the page's `localui.Config.Claim`, so a preloaded box keeps the claim gate and a box that lost its claim state keeps the reinstall route (never `NewCardStep` directly; #1080 Potency P1, HW-10 acceptance 1 and 2); the page process bounds `/claim` posts (a small queue on the claim's Argon2id derivations, answering 503 "busy, try again" past it) and never calls `Claim` for a request whose context is done, so a flood on the access point delays the owner but cannot burn the code without delivering the claimant cookie; extend claim K9's residual to say so and test a flood of concurrent posts (#1080 Security R2, HW-10 R3) | CTRL-card-vaultop, P2-2w c4 | queued (release; HW-1 test 2, HW-10, A1; tier A; from #1073, #1080 P1) |
+| LABEL-durable | A raised REV-5 label is saved before higher-label data is released: `vm.RaiseLabel` and every in-place raise (worker exec and deletion, merge, rollback, ForgetSince reset) put the label back in memory when the save fails, so a retry saves again and a restart never finds private data under a saved public label (external finding approved by Mark 2026-10-12, source-confirmed at b01ba42 and 5430d14) | — | merged (#1087, 07c8d87) |
 | CTRL-card-rot | [Recovery-key rotation shows its key on card.Display: the same confirm-then-erase](briefs/CTRL-card-f.md) | CTRL-card | queued (release; REC-4, HW-1; tier A; from #1060) |
 | IMG-nodump | [Image: no core dumps, swap off or encrypted, so the passphrase string never reaches disk (S1)](briefs/CTRL-card-f.md) | CTRL-card | queued (release; HW-1 test 1, A1; tier A; from #1060 S1) |
-| CTRL-claim | [Claim flow for a preloaded box: a one-time sticker code, one claim, no secret before it](briefs/CTRL-claim.md) | CTRL-card | building (release; HW-10, A1; tier A) |
-| CTRL-claim-tier | [Put broker/claim in the tier A lists (risk_tier.py and OPERATING §3)](briefs/CTRL-claim-f.md) | CTRL-claim | building (release; HW-10 acceptance 3; tier A; from #1067 R1; sequence before CTRL-claim-wire, not in parallel) |
-| CTRL-claim-wire | [Wire the claim into agentosd first boot; a per-boot floor the owner can beat; no claim code on a box with state never routes to the flasher](briefs/CTRL-claim-f.md) | CTRL-claim, CTRL-claim-tier | building (release; HW-10 acceptance 1 and 2, HW-1; tier A; from #1067 R2, R3, R4; shares the first-boot call site with CTRL-card-wire, so sequence, not parallel). Also add `firstboot` to TIER_A_BROKER in tools/risk_tier.py (claim gate in broker/firstboot/claim.go; #379 Security pt 3, #1074 review finding 1). |
-| CTRL-uki | [Preloaded self-check rooted in signed code, so a seller's modified initrd cannot pass its own check](briefs/CTRL-uki.md) | CTRL-claim, P2-1 | queued (release; HW-10, HW-5a, A1; tier A; SPEC risk 26 wording fixed by CTRL-text) |
-| FLASH-1 | [Signed flasher for Windows, Mac and Linux: verify the signature, write the stick, show the pairing QR](briefs/FLASH-1.md) | CTRL-claim | queued (release; HW-10, A1; tier A) |
-| ROUTE-1 | [Broker label routing: private content to the controller and workstations only, helper apps cleared only](briefs/ROUTE-1.md) | — | queued (release; REV-6, REV-5; tier A) |
-| NET-seg | [Private workstation segment on port 2 and mutual TLS between the controller and every helper](briefs/NET-seg.md) | DEV-net-e, ROUTE-1 | queued (release; HW-12, HW-11; tier A) |
-| WS-image | [Workstation image: the signed image installs on a dedicated machine and loads GPU drivers under Secure Boot](briefs/WS-image.md) | CTRL-uki, NET-seg | queued (release; HW-9, HW-11; tier A) |
-| WS-rest | [Nothing private at rest on a workstation: no private text in swap, caches or dumps](briefs/WS-rest.md) | WS-image | queued (release; HW-11, Invariant C; tier A) |
-| HELPER-a | [Adding a helper: tier-4 'add helper' action, enrolment and the plain-words page](briefs/HELPER-a.md) | ROUTE-1, NET-seg | queued (release; ONB-10, HW-11; tier A) |
-| HELPER-b | [Helper app for Windows: background service, Wake-on-LAN start without a login, GPU pause when a game starts](briefs/HELPER-b.md) | HELPER-a | queued (release; HW-11, A1; tier B) |
-| HELPER-c | [Helper app for macOS: same service and pause rules on a Mac](briefs/HELPER-c.md) | HELPER-b | queued (release; HW-11, HW-7; tier B) |
+| CTRL-claim | [Claim flow for a preloaded box: a one-time sticker code, one claim, no secret before it](briefs/CTRL-claim.md) | CTRL-card | merged (#1067, 74d2b93) |
+| CTRL-claim-tier | [Put broker/claim in the tier A lists (risk_tier.py and OPERATING §3)](briefs/CTRL-claim-f.md) | CTRL-claim | merged (#1074, 8e1a5f6) |
+| CTRL-claim-wire | [Wire the claim into agentosd first boot; a per-boot floor the owner can beat; no claim code on a box with state never routes to the flasher](briefs/CTRL-claim-f.md) | CTRL-claim, CTRL-claim-tier | merged (#1080, 906955a) |
+| CTRL-uki | [Preloaded self-check rooted in signed code, so a seller's modified initrd cannot pass its own check](briefs/CTRL-uki.md) | CTRL-claim, P2-1, G1 | queued (after G1, D-104; HW-10, HW-5a, A1; tier A; SPEC risk 26 wording fixed by CTRL-text) |
+| FLASH-1 | [Signed flasher for Windows, Mac and Linux: verify the signature, write the stick, show the pairing QR](briefs/FLASH-1.md) | CTRL-claim, G1 | queued (after G1, D-104; HW-10, A1; tier A) |
+| ROUTE-1 | [Broker label routing: private content to the controller and workstations only, helper apps cleared only](briefs/ROUTE-1.md) | G1 | queued (after G1, D-104; REV-6, REV-5; tier A) |
+| NET-seg | [Private workstation segment on port 2 and mutual TLS between the controller and every helper](briefs/NET-seg.md) | DEV-net-e, ROUTE-1, G1 | queued (after G1, D-104; HW-12, HW-11; tier A) |
+| WS-image | [Workstation image: the signed image installs on a dedicated machine and loads GPU drivers under Secure Boot](briefs/WS-image.md) | CTRL-uki, NET-seg, G1 | queued (after G1, D-104; HW-9, HW-11; tier A) |
+| WS-rest | [Nothing private at rest on a workstation: no private text in swap, caches or dumps](briefs/WS-rest.md) | WS-image, G1 | queued (after G1, D-104; HW-11, Invariant C; tier A) |
+| HELPER-a | [Adding a helper: tier-4 'add helper' action, enrolment and the plain-words page](briefs/HELPER-a.md) | ROUTE-1, NET-seg, G1 | queued (after G1, D-104; ONB-10, HW-11; tier A) |
+| HELPER-b | [Helper app for Windows: background service, Wake-on-LAN start without a login, GPU pause when a game starts](briefs/HELPER-b.md) | HELPER-a, G1 | queued (after G1, D-104; HW-11, A1; tier B) |
+| HELPER-c | [Helper app for macOS: same service and pause rules on a Mac](briefs/HELPER-c.md) | HELPER-b, G1 | queued (after G1, D-104; HW-11, HW-7; tier B) |
 | CTRL-text | [Drive-era text and A8 reworked for the internal-SSD controller; risk 26 and §8.1 step 5 wording](briefs/CTRL-text.md) | — | queued (release; HW-11, HW-5a, A8; tier B; spec-diff, Mark approves) |
 
 ## Phase 0: harness and risk spikes
@@ -313,7 +316,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 | OP9-status | [OP-9: STATUS names every capability that is off or can't run; split into -a and -b](briefs/OP9-status.md) | P3-2, P3-4 | queued |
 | OP9-status-a | [OP-9 capability-line registry for STATUS and the digest; lines for every silent off case; A11 learning-cause test](briefs/OP9-status.md#op9-status-a-registry-and-the-silent-cases) | P3-2, P3-4 | merged (#525, 38c5f1c) |
 | OP9-status-b | [OP-9 fix clauses on existing off lines; loop 2 wording; owner choices and the LOOP-3 loop-shares line](briefs/OP9-status.md#op9-status-b-fix-clauses-loop-lines-and-owner-choices) | OP9-status-a, P3-4b-1b, P3-4b-5 | queued (tier A; scope extended by #525 records: worker tools named under H1/H2 lines, plainLine keeps apostrophes; also, from the #532 L3 (comment 6074799003): `capState.recallWired` (broker `capoff.go`) is called only from tests, so C7's "Memory across tasks: off" line can never show in production; wire it) |
-| DIG-1 | [Daily digest sender (CH-15) reading every Digest() source, OP-9 lines included, with a test that no `Digest()` goes unwired](briefs/DIG-1.md) | W5, OP9-status-a, W5-Db, W5-Dc (#592) | queued (brief ready; tier A) |
+| DIG-1 | [Daily digest sender (CH-15) reading every Digest() source, OP-9 lines included, with a test that no `Digest()` goes unwired](briefs/DIG-1.md) | W5, OP9-status-a, W5-Db, W5-Dc (#592) | dropped (CH-15 has no digest since D-097 and SIM-pull deletes it; delivery and recovery cases live in SIM-cases; waste review 2026-10-12) |
 | P3-4b-3 | [LOOP-7 off-the-shelf: socket and action-protocol fuzz targets, in-guest socket probe](briefs/P3-4b.md#p3-4b-3-loop-7-fuzzing-and-socket-probes) | P3-4b-1b | merged (#523, 58a6994) |
 | P3-4b-4a | [LOOP-7 off-the-shelf: probe findings through `Report`, continuous canary rounds, published injection corpora](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-1b | merged (#515, afd66a7) |
 | P3-4b-4b | [LOOP-7 off-the-shelf: tamper and exhaustion probes, and corpus replay through a real guest channel (both need the in-machine rig). Owed check (second occurrence, Security #515 f4 after #523 f5): move `broker/loops`, `broker/probecmd` and `broker/corpus` to tier A in `tools/risk_tier.py` (`TIER_A_BROKER`) with `test_risk_tier.py` pins. Corpus replay split to P3-4b-4d (size)](briefs/P3-4b.md#p3-4b-4-loop-7-canary-rounds-corpora-tamper-and-exhaustion-probes) | P3-4b-4a | merged (#548; 8a31dc9) |
