@@ -172,7 +172,8 @@ The home-network boundary is release work (A14); device features follow the firs
 | DEV-net-c | [Wire the egress process to the address guard](briefs/DEV-net-c.md) | DEV-net-a | merged (#1051) |
 | DEV-net-d | [Inbound rules, owner pins, event refresh, SIP dialer](briefs/DEV-net-d.md) | DEV-net-b, DEV-net-c | merged (#1052) |
 | DEV-net-e | [Load the inbound rules, owner pin entry, SIP guard hardening](briefs/DEV-net-e.md) | DEV-net-d | in review (release; DEV-2, A14, CAP-13, BAK-1; tier A) |
-| DEV-net-f | [The access point's interface joins the inbound exempt set](briefs/DEV-net-f.md) | DEV-net-e | queued (release; DEV-2, CH-7, A1; tier A; from #1055 R1) |
+| DEV-net-f | [The access point's interface joins the inbound exempt set](briefs/DEV-net-f.md) | DEV-net-e | merged (#1063) |
+| DEV-net-g | [The access point's exempt entry never outlives or precedes its drop table](briefs/DEV-net-g.md) | DEV-net-f | queued (release; DEV-2, A14; tier A; from #1063 R1; must merge before the P2-1 loader wires BringUp) |
 
 ## Controller and helper system (D-102)
 
@@ -186,6 +187,8 @@ Queued by the coordinator after #1054 (D-102) merged; each row is a release find
 | CTRL-card-rot | [Recovery-key rotation shows its key on card.Display: the same confirm-then-erase](briefs/CTRL-card-f.md) | CTRL-card | queued (release; REC-4, HW-1; tier A; from #1060) |
 | IMG-nodump | [Image: no core dumps, swap off or encrypted, so the passphrase string never reaches disk (S1)](briefs/CTRL-card-f.md) | CTRL-card | queued (release; HW-1 test 1, A1; tier A; from #1060 S1) |
 | CTRL-claim | [Claim flow for a preloaded box: a one-time sticker code, one claim, no secret before it](briefs/CTRL-claim.md) | CTRL-card | building (release; HW-10, A1; tier A) |
+| CTRL-claim-tier | [Put broker/claim in the tier A lists (risk_tier.py and OPERATING §3)](briefs/CTRL-claim-f.md) | CTRL-claim | queued (release; HW-10 acceptance 3; tier A; from #1067 R1; sequence before CTRL-claim-wire, not in parallel) |
+| CTRL-claim-wire | [Wire the claim into agentosd first boot; a per-boot floor the owner can beat; no claim code on a box with state never routes to the flasher](briefs/CTRL-claim-f.md) | CTRL-claim, CTRL-claim-tier | queued (release; HW-10 acceptance 1 and 2, HW-1; tier A; from #1067 R2, R3, R4; shares the first-boot call site with CTRL-card-wire, so sequence, not parallel) |
 | CTRL-uki | [Preloaded self-check rooted in signed code, so a seller's modified initrd cannot pass its own check](briefs/CTRL-uki.md) | CTRL-claim, P2-1 | queued (release; HW-10, HW-5a, A1; tier A; SPEC risk 26 wording fixed by CTRL-text) |
 | FLASH-1 | [Signed flasher for Windows, Mac and Linux: verify the signature, write the stick, show the pairing QR](briefs/FLASH-1.md) | CTRL-claim | queued (release; HW-10, A1; tier A) |
 | ROUTE-1 | [Broker label routing: private content to the controller and workstations only, helper apps cleared only](briefs/ROUTE-1.md) | — | queued (release; REV-6, REV-5; tier A) |
@@ -263,7 +266,7 @@ Started before spec v0.12 on parts unlikely to change; each package lists its sp
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7 | queued (#41 merged the older image; #175 is the unmerged rebuild: per-drive ID check in the initrd, `DevicePolicy=closed`; branch `pkg/p2-1-image-build-6izuf9` kept) |
+| P2-1 | [Device image](briefs/P2-1.md) | P1-7, S7, DEV-net-g | queued (#41 merged the older image; #175 is the unmerged rebuild: per-drive ID check in the initrd, `DevicePolicy=closed`; branch `pkg/p2-1-image-build-6izuf9` kept) |
 | P2-grants | [Grants and approval policy](briefs/P2-grants.md) | P1-7 | merged (a390f03; broker/grants) |
 | P2-rev3 | [Reversible conversions](briefs/P2-rev3.md) | P2-grants | merged (04be62e; broker/reversible) |
 | P2-gr8 | [GR8 fix: approval used up inside the dispatch commit](briefs/P2-gr8.md) | P2-rev3 | merged (a390f03; broker/grants) |
