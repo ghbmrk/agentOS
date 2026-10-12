@@ -4,9 +4,12 @@ package claim
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	mrand "math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -226,5 +229,165 @@ func TestOpenUnsealedAndSealTwice(t *testing.T) {
 	}
 	if err := Seal(st, code, nil, nil); err == nil {
 		t.Fatal("resealed a sealed box")
+	}
+}
+
+// tryFresh presents one code to a box opened from sealed, so each try
+// meets a fresh count and the lockout never masks the compare.
+func tryFresh(t *testing.T, sealed []byte, code string) error {
+	t.Helper()
+	ms := &change.MemStore{}
+	if err := ms.Save(sealed); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Open(Config{Store: ms, BootID: func() (string, error) { return "boot-1", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Try(code)
+	return err
+}
+
+// Acceptance 3: a near miss is a wrong code. Only the whole code, every
+// symbol, claims the box (B1 of the #1067 review).
+func TestNearMissCodesRefused(t *testing.T) {
+	b, code := newBox(t)
+	sealed, err := b.st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := Normalize(code)
+	other := func(r byte) byte {
+		i := strings.IndexByte(alphabet, r)
+		return alphabet[(i+1)%len(alphabet)]
+	}
+	misses := map[string]string{
+		"last symbol changed": n[:CodeSymbols-1] + string(other(n[CodeSymbols-1])),
+		"15-symbol prefix":    n[:CodeSymbols-1],
+		"12-symbol prefix":    n[:12],
+		"one extra symbol":    n + "A",
+		"code twice":          n + n,
+		"empty":               "",
+	}
+	for i := 0; i < CodeSymbols; i++ {
+		m := []byte(n)
+		m[i] = other(m[i])
+		misses["symbol "+strconv.Itoa(i+1)+" changed"] = string(m)
+	}
+	for name, try := range misses {
+		if err := tryFresh(t, sealed, try); !errors.Is(err, ErrWrongCode) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// A few hundred random wrong codes, and one whose verifier shares its
+	// first byte with the right code's, so a short compare cannot pass.
+	var st state
+	if err := json.Unmarshal(sealed, &st); err != nil {
+		t.Fatal(err)
+	}
+	rng := mrand.New(mrand.NewSource(1067))
+	random := func() string {
+		s := make([]byte, CodeSymbols)
+		for i := range s {
+			s[i] = alphabet[rng.Intn(len(alphabet))]
+		}
+		return string(s)
+	}
+	for i := 0; i < 300; i++ {
+		if try := random(); try != n {
+			if err := tryFresh(t, sealed, try); !errors.Is(err, ErrWrongCode) {
+				t.Fatalf("random code %d: %v", i, err)
+			}
+		}
+	}
+	for i := 0; ; i++ {
+		if i > 1<<16 {
+			t.Fatal("no code with the same first verifier byte found")
+		}
+		try := random()
+		if try == n || verifier(st.Salt, try)[0] != st.Verifier[0] {
+			continue
+		}
+		if err := tryFresh(t, sealed, try); !errors.Is(err, ErrWrongCode) {
+			t.Fatalf("code sharing the first verifier byte: %v", err)
+		}
+		break
+	}
+	if err := tryFresh(t, sealed, code); err != nil {
+		t.Fatalf("right code: %v", err)
+	}
+}
+
+// lockedBox is a box whose screen locked in boot-1, and its state bytes.
+func lockedBox(t *testing.T) (*box, string, []byte) {
+	t.Helper()
+	b, code := newBox(t)
+	c := b.start()
+	for i := 0; i < MaxWrong; i++ {
+		c.Try(wrongCode(code))
+	}
+	if !c.Status().Locked {
+		t.Fatal("not locked")
+	}
+	raw, err := b.st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b, code, raw
+}
+
+type loadFail struct{ change.MemStore }
+
+func (*loadFail) Load() ([]byte, error) { return nil, errors.New("read error") }
+
+// Acceptance 3: a state the box cannot read is never an unclaimed or
+// unlocked box. Open fails, not ErrNoCode, and the lock on disk stays
+// (B2 of the #1067 review).
+func TestUnreadableStateKeepsLock(t *testing.T) {
+	b, code, raw := lockedBox(t)
+	boot2 := func() (string, error) { return "boot-2", nil }
+	refused := func(name string, err error) {
+		t.Helper()
+		if err == nil || errors.Is(err, ErrNoCode) {
+			t.Fatalf("%s: Open gave %v", name, err)
+		}
+	}
+
+	_, err := Open(Config{Store: &loadFail{}, BootID: boot2})
+	refused("read error", err)
+	_, err = Open(Config{Store: change.FileStore{Path: t.TempDir()}, BootID: boot2})
+	refused("state path is a directory", err)
+
+	partly := bytes.Replace(raw, []byte(`"wrong":`+strconv.Itoa(MaxWrong)), []byte(`"wrong":"`+strconv.Itoa(MaxWrong)+`"`), 1)
+	if bytes.Equal(partly, raw) {
+		t.Fatal("test setup: wrong count not found in state")
+	}
+	for name, bad := range map[string][]byte{
+		"empty":          {},
+		"truncated":      raw[:len(raw)/2],
+		"garbage":        []byte("\x00\xffclaim"),
+		"null":           []byte("null"),
+		"empty object":   []byte("{}"),
+		"partly decoded": partly,
+	} {
+		fs := change.FileStore{Path: filepath.Join(t.TempDir(), "claim.json")}
+		if err := os.WriteFile(fs.Path, bad, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Open(Config{Store: fs, BootID: boot2})
+		refused(name, err)
+		if got, _ := os.ReadFile(fs.Path); !bytes.Equal(got, bad) {
+			t.Fatalf("%s: Open rewrote the state", name)
+		}
+	}
+
+	_, err = Open(Config{Store: b.st, BootID: func() (string, error) { return "", errors.New("no boot_id") }})
+	refused("boot id error", err)
+	if got, _ := b.st.Load(); !bytes.Equal(got, raw) {
+		t.Fatal("boot id error: Open rewrote the state")
+	}
+	c := b.start() // still boot-1: the lock holds
+	if _, err := c.Try(code); !errors.Is(err, ErrLocked) {
+		t.Fatalf("right code after the failed opens: %v", err)
 	}
 }
