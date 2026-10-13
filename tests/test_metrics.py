@@ -146,7 +146,10 @@ class ComputeTest(unittest.TestCase):
         self.assertAlmostEqual(w1["pace"], 100 * (5 * 24 + 12) / (7 * 24), places=3)
         w2 = self.weeks["2026-10-11"]
         self.assertEqual(w2["reqs"], 10)
-        self.assertAlmostEqual(w2["usage_per_req"], 0.3)
+        # MET-1a: the 3% reading (10-11 07:00) predates the week's only TRACE snapshot (12:00), so only
+        # the carried-over count (30, as before the week) applies: 0 requirements, no ratio.
+        self.assertIsNone(w2["usage_per_req"])
+        self.assertEqual(w1["reading_at"], "2026-10-09T18:00")
         # The week before has a reading but no covered requirements: no ratio, not a divide error.
         self.assertIsNone(self.weeks["2026-09-27"]["usage_per_req"])
 
@@ -234,7 +237,7 @@ class FreezeTest(unittest.TestCase):
         raw["runs"].append({"workflow": "ci", "sha": "e", "at": "2026-10-06T10:00:00Z", "conclusions": ["failure", "success"]})
         later = metrics.render(metrics.compute(raw), raw, first)
         self.assertIn("1/3", row(later, "2026-10-04"))
-        # The current week was recorded "(to date)", so it still recomputes.
+        # The current week was recorded as "(current, ...)", so it still recomputes.
         raw["runs"].append({"workflow": "ci", "sha": "f", "at": "2026-10-11T14:00:00Z", "conclusions": ["failure", "success"]})
         later = metrics.render(metrics.compute(raw), raw, first)
         self.assertIn("50% (1/2)", row(later, "2026-10-11"))
@@ -359,7 +362,7 @@ class SinceTest(unittest.TestCase):
     def test_cutoff_follows_the_last_closed_recorded_week(self):
         raw = raw_fixture()
         md = metrics.render(metrics.compute(raw), raw)
-        # 2026-10-04 is the last closed week; 2026-10-11 is "(to date)". 10-11 06:00 UTC-4 = 10:00Z.
+        # 2026-10-04 is the last closed week; 2026-10-11 is "(current, ...)". 10-11 06:00 UTC-4 = 10:00Z.
         self.assertEqual(metrics._since(md, TZ), "2026-10-11T10:00:00Z")
         self.assertIsNone(metrics._since(None, TZ))
         # Old PRs (verdicts not collected) are not reported as missing a verdict.
@@ -417,11 +420,79 @@ def conv_raw():
             {"number": 11, "merged_at": None, "state": "open", "draft": True, "updated_at": "2026-10-01T00:00:00Z", "body": ""},
             {"number": 12, "merged_at": None, "state": "open", "draft": True, "updated_at": "2026-10-01T00:00:00Z", "body": ""},
             {"number": 13, "merged_at": None, "state": "open", "draft": False, "updated_at": "2026-10-01T00:00:00Z", "body": ""},
-            {"number": 14, "merged_at": None, "state": "open", "draft": False, "updated_at": "2026-10-20T00:00:00Z", "body": ""},
+            {"number": 14, "merged_at": None, "state": "open", "draft": False, "updated_at": "2026-10-20T00:00:00Z", "body": "",
+             "labels": ["lane:codex"]},
             {"number": 15, "merged_at": None, "state": "closed", "draft": False, "updated_at": "2026-10-01T00:00:00Z", "body": ""},
         ],
-        "held": [11, 13],
     }
+
+
+def met_raw(now="2026-10-08T12:00:00+00:00"):
+    """Week 2026-10-04: usage reading on day 2 (10-06), TRACE snapshots on day 2 and day 5."""
+    return {
+        "now": now, "tz_hours": -4, "runs": [], "pulls": [], "phases": [["P0", "10%", "x"]],
+        "board": [{"at": "2026-10-05T12:00:00-04:00", "states": {"A": "queued"}}],
+        "trace": [{"at": "2026-10-03T12:00:00-04:00", "covered": 5},
+                  {"at": "2026-10-06T08:00:00-04:00", "covered": 8},    # day 2, before the reading
+                  {"at": "2026-10-09T12:00:00-04:00", "covered": 20}],  # day 5
+        "readings": [{"at": "2026-10-06T10:00", "all": 30.0, "fable": 10.0}],
+    }
+
+
+class MatchedWindowsTest(unittest.TestCase):
+    # Brief ID MET-1a (local, not in SPEC.md)
+    def test_ratio_uses_the_requirement_count_at_the_reading(self):
+        w = {x["week"]: x for x in metrics.compute(met_raw("2026-10-12T12:00:00+00:00"))}["2026-10-04"]
+        self.assertEqual(w["reqs"], 15)               # week total, to the day-5 snapshot
+        self.assertEqual(w["reqs_at_reading"], 3)     # 8 at the reading minus 5 before the week
+        self.assertAlmostEqual(w["usage_per_req"], 10.0)
+        self.assertEqual(w["reading_at"], "2026-10-06T10:00")
+
+    # Brief ID MET-1a (local, not in SPEC.md)
+    def test_table_shows_the_reading_time_beside_the_ratio(self):
+        raw = met_raw("2026-10-12T12:00:00+00:00")
+        md = metrics.render(metrics.compute(raw), raw)
+        self.assertIn("| 10.00 pts (reading 2026-10-06 10:00) |", md)
+
+    # Brief ID MET-1a (local, not in SPEC.md)
+    def test_no_trace_snapshot_at_or_before_the_reading_gives_no_ratio(self):
+        raw = met_raw("2026-10-12T12:00:00+00:00")
+        raw["readings"][0]["at"] = "2026-10-02T10:00"
+        raw["readings"].append({"at": "2026-10-05T10:00", "all": 20.0, "fable": 5.0})
+        w = {x["week"]: x for x in metrics.compute(raw)}["2026-10-04"]
+        self.assertEqual(w["reqs_at_reading"], 0)     # carried-over count only
+        self.assertIsNone(w["usage_per_req"])
+
+
+class StalenessLabelTest(unittest.TestCase):
+    row = staticmethod(lambda md: next(l for l in md.splitlines() if l.startswith("| 2026-10-04")))
+
+    # Brief ID MET-1b (local, not in SPEC.md)
+    def test_current_week_names_the_reading_and_the_age_of_the_newest_input(self):
+        # Newest input is the day-5 TRACE snapshot, 10-09 16:00Z; now is 41 h later.
+        raw = met_raw("2026-10-11T09:00:00+00:00")
+        md = metrics.render(metrics.compute(raw), raw)
+        self.assertIn("| 2026-10-04 (current, reading 2026-10-06 10:00; newest input 41 h old) |", self.row(md))
+        self.assertNotIn("(to date)", md)
+
+    # Brief ID MET-1b (local, not in SPEC.md)
+    def test_no_age_label_within_36_hours(self):
+        for now, tail in (("2026-10-11T04:00:00+00:00", ")"), ("2026-10-10T04:00:00+00:00", ")")):
+            raw = met_raw(now)
+            self.assertIn("(current, reading 2026-10-06 10:00)", self.row(metrics.render(metrics.compute(raw), raw)), now)
+        raw = met_raw("2026-10-11T04:00:01+00:00")  # 36 h and 1 s after the 10-09 16:00Z snapshot
+        self.assertIn("newest input 36 h old", self.row(metrics.render(metrics.compute(raw), raw)))
+
+    # Brief ID MET-1b (local, not in SPEC.md)
+    def test_current_week_without_a_reading_says_so(self):
+        raw = met_raw("2026-10-08T12:00:00+00:00")
+        raw["readings"] = []
+        self.assertIn("(current, no reading", self.row(metrics.render(metrics.compute(raw), raw)))
+
+    # Brief ID MET-1b (local, not in SPEC.md)
+    def test_closed_weeks_carry_no_age_label(self):
+        raw = met_raw("2026-10-20T12:00:00+00:00")
+        self.assertIn("| 2026-10-04 |", self.row(metrics.render(metrics.compute(raw), raw)))
 
 
 class ConvergenceColumnsTest(unittest.TestCase):
@@ -463,11 +534,19 @@ class ConvergenceColumnsTest(unittest.TestCase):
         self.assertAlmostEqual(self.weeks["2026-10-11"]["followups_per_pr"], 1.0)
         self.assertIsNone(self.weeks["2026-10-18"]["followups_per_pr"])  # no PR merged: not 0
 
-    def test_stale_open_prs_skip_held_drafts_only(self):
-        # #10 untouched 3.5 days; #11 held draft (excluded); #12 unheld draft; #13 held but not a draft;
-        # #14 fresh; #15 closed.
-        self.assertEqual(self.weeks["2026-10-18"]["stale"], [10, 12, 13])
+    # Brief ID MET-1e (local, not in SPEC.md)
+    def test_stale_open_prs_include_held_drafts(self):
+        # #10 untouched 3.5 days; #11 and #12 drafts untouched; #13 untouched; #14 fresh; #15 closed.
+        self.assertEqual(self.weeks["2026-10-18"]["stale"], [10, 11, 12, 13])
         self.assertIsNone(self.weeks["2026-10-11"]["stale"])  # only knowable at run time
+
+    # Brief ID MET-1e (local, not in SPEC.md)
+    def test_open_prs_are_counted_per_lane_against_the_cap(self):
+        self.assertEqual(self.weeks["2026-10-18"]["lanes"], {"codex": 1, "peers": 4})
+        self.assertIsNone(self.weeks["2026-10-11"]["lanes"])
+        md = metrics.render(metrics.compute(self.raw), self.raw)
+        row = next(l for l in md.splitlines() if l.startswith("| 2026-10-18"))
+        self.assertIn("| codex 1, peers 4 (cap about 10) |", row)
 
     def test_columns_that_cannot_be_computed_print_n_a_never_zero(self):
         raw = conv_raw()
@@ -476,12 +555,11 @@ class ConvergenceColumnsTest(unittest.TestCase):
         for p in raw["pulls"]:
             for k in ("state", "draft", "updated_at"):
                 p.pop(k, None)
-        del raw["held"]
         md = metrics.render(metrics.compute(raw), raw)
         row = next(l for l in md.splitlines() if l.startswith("| 2026-10-18"))
         cells = [c.strip() for c in row.strip("|").split("|")]
         i = metrics.COLUMNS.index
-        for col in ("Follow-up rows added", "Follow-ups per merged PR", "Promotions later to release", "Stale PRs (48 h)"):
+        for col in ("Follow-up rows added", "Follow-ups per merged PR", "Promotions later to release", "Stale PRs (48 h)", "Open PRs by lane"):
             self.assertEqual(cells[i(col)], "n/a", col)
         self.assertEqual(cells[i("Open BOARD rows")], "3")
 
@@ -556,20 +634,13 @@ class LedgerStaleTest(unittest.TestCase):
         self.assertIn("no reading", self.first_line("2026-10-10T10:00:00+00:00", []))
 
 
-class HeldAndCollectTest(unittest.TestCase):
+class CollectPullsTest(unittest.TestCase):
     # REQ CONV-0-1
-    def test_held_drafts_come_from_the_held_table_only(self):
-        text = ("## Queue\n\n| Item | Draft |\n|---|---|\n| X | #1 |\n\n"
-                "## Held (draft stays open)\n\n| Item | Draft | Why held |\n|---|---|---|\n"
-                "| A | #405 | note #9 |\n| B | #387, #390 | stack |\n| C | #263→#435 stack, incl. #274 | x |\n| D | own drafts | y |\n\n"
-                "## After\n\n| Item | Draft |\n|---|---|\n| Z | #2 |\n")
-        self.assertEqual(metrics.held_drafts(text), [263, 274, 387, 390, 405, 435])
-
     def test_collected_pulls_carry_state_draft_and_update_time(self):
         def api(repo, path, token):
             if path.startswith("pulls?"):
                 return [{"number": 7, "state": "open", "draft": True, "updated_at": "2026-10-05T00:00:00Z",
-                         "merged_at": None, "body": None}] if "page=1&" in path + "&" else []
+                         "merged_at": None, "body": None, "labels": [{"name": "lane:codex"}]}] if "page=1&" in path + "&" else []
             if path.startswith("actions/runs?"):
                 return {"workflow_runs": []}
             raise AssertionError(path)
@@ -580,6 +651,7 @@ class HeldAndCollectTest(unittest.TestCase):
         finally:
             metrics._api = orig
         self.assertEqual((pulls[0]["state"], pulls[0]["draft"], pulls[0]["updated_at"]), ("open", True, "2026-10-05T00:00:00Z"))
+        self.assertEqual(pulls[0]["labels"], ["lane:codex"])
 
 
 class GitFlagsTest(unittest.TestCase):
