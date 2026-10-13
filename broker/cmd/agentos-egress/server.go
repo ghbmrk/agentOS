@@ -568,6 +568,7 @@ func unlockHandler(c *custody) http.Handler {
 	smsRoutes(mux, c, read, reply, fail)
 	mailRoutes(mux, c, read, reply, fail)
 	rotationRoutes(mux, c, read, reply, fail)
+	cardRoutes(mux, c, read, reply, fail)
 	return mux
 }
 
