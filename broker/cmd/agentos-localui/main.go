@@ -16,7 +16,8 @@
 // firstboot.Begin here (#1115): the claim gate of a preloaded box, the
 // reinstall route of one that lost its claim state, and the Owner Card
 // step, whose provision and reset go over the unlock socket and whose
-// confirm the page reports to agentosd before finish.
+// confirm the page reports to agentosd before finish. Without that
+// socket an open setup fails closed: the page exits and serves no step.
 package main
 
 import (
@@ -113,25 +114,9 @@ const agentosdWait = 30 * time.Second
 type boxFiles struct{ VaultSock, Claim, Latch string }
 
 func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) error {
-	// New asks agentosd whether setup is open and takes no answer as
-	// closed, so it waits until agentosd's socket accepts.
-	if err := awaitSocket(ctx, sock, agentosdWait); err != nil {
+	cfg, err := prepare(ctx, cfg, sock, fb)
+	if err != nil {
 		return err
-	}
-	// An owned box never runs the first boot: its reset could remove a
-	// vault in use. Without the unlock socket there is no card step and
-	// agentosd's finish stays held (card pending): fail closed.
-	if fb.VaultSock != "" && cfg.Hooks != nil && !cfg.Hooks.AlreadySetUp() {
-		if err := awaitSocket(ctx, fb.VaultSock, agentosdWait); err != nil {
-			return err
-		}
-		void := &localui.CodesVoid{}
-		box := localui.CardBox(localui.NewUnlockClient(fb.VaultSock), change.FileStore{Path: fb.Claim},
-			change.FileStore{Path: fb.Latch}, void)
-		var err error
-		if cfg, _, err = withFirstBoot(cfg, box, void); err != nil {
-			return err
-		}
 	}
 	s, err := localui.New(cfg)
 	if err != nil {
@@ -153,6 +138,36 @@ func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) erro
 		return err
 	}
 	return nil
+}
+
+// errNoVault: setup is open but the page has no unlock socket, so it could
+// run neither the claim gate (HW-10) nor the card step (HW-1).
+var errNoVault = errors.New("setup is open and -vault-sock is unset: no claim gate or card step can run")
+
+// prepare waits for agentosd and, while setup is open, runs the first
+// boot. An owned box never runs it: its reset could remove a vault in use.
+// An open setup without the unlock socket fails closed, serving no step:
+// the claim gate of a preloaded box runs only with the first boot.
+func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) (localui.Config, error) {
+	// New asks agentosd whether setup is open and takes no answer as
+	// closed, so it waits until agentosd's socket accepts.
+	if err := awaitSocket(ctx, sock, agentosdWait); err != nil {
+		return cfg, err
+	}
+	if cfg.Hooks == nil || cfg.Hooks.AlreadySetUp() {
+		return cfg, nil
+	}
+	if fb.VaultSock == "" {
+		return cfg, errNoVault
+	}
+	if err := awaitSocket(ctx, fb.VaultSock, agentosdWait); err != nil {
+		return cfg, err
+	}
+	void := &localui.CodesVoid{}
+	box := localui.CardBox(localui.NewUnlockClient(fb.VaultSock), change.FileStore{Path: fb.Claim},
+		change.FileStore{Path: fb.Latch}, void)
+	cfg, _, err := withFirstBoot(cfg, box, void)
+	return cfg, err
 }
 
 // awaitSocket returns once the Unix socket at path accepts a connection,

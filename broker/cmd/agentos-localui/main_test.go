@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	mrand "math/rand"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -242,6 +244,112 @@ func TestThePageRunsTheFirstBoot(t *testing.T) {
 		}
 		if w := get(t, cfg, "/setup"); w.Code != http.StatusOK {
 			t.Fatalf("/setup on a downloaded box: %d %q", w.Code, w.Header().Get("Location"))
+		}
+	})
+}
+
+// shortDir is a temp dir short enough for a unix socket path.
+func shortDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("", "lu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return d
+}
+
+// listenSock is agentosd's socket for awaitSocket: it accepts and hangs up.
+func listenSock(t *testing.T, path string) {
+	t.Helper()
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+}
+
+// fakeVault is the vault process's unlock socket; it counts the requests
+// it is sent and answers each as a reset that remade nothing.
+func fakeVault(t *testing.T, path string, calls *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"remade":false}`)
+	}))
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+}
+
+// Security B1 on #1226 (HW-10): run()'s preparation, as the unit starts
+// the page. A sealed claim state at -claim-state gates /setup; an open
+// setup without -vault-sock fails closed; an owned box never resets.
+func TestRunGatesSetupOnTheClaim(t *testing.T) {
+	dir := shortDir(t)
+	sock, vsock := filepath.Join(dir, "a.sock"), filepath.Join(dir, "u.sock")
+	listenSock(t, sock)
+	var calls atomic.Int32
+	fakeVault(t, vsock, &calls)
+	base := func(h localui.Hooks) localui.Config {
+		cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, sock, "")
+		cfg.Hooks = h
+		return cfg
+	}
+
+	t.Run("sealed", func(t *testing.T) {
+		st := &change.MemStore{}
+		if err := claim.Seal(st, "CANA-RYCL-AXMC-KDE2", mrand.New(mrand.NewSource(3)), nil); err != nil {
+			t.Fatal(err)
+		}
+		b, err := st.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cs := filepath.Join(dir, "claim.json")
+		if err := os.WriteFile(cs, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := prepare(context.Background(), base(openSetup), sock,
+			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch.json")})
+		if err != nil || cfg.Claim == nil {
+			t.Fatalf("err %v, claim %v", err, cfg.Claim)
+		}
+		if w := get(t, cfg, "/setup"); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/claim" {
+			t.Fatalf("/setup on a sealed box: %d %q", w.Code, w.Header().Get("Location"))
+		}
+	})
+
+	t.Run("no vault socket", func(t *testing.T) {
+		if _, err := prepare(context.Background(), base(openSetup), sock, boxFiles{Claim: filepath.Join(dir, "claim.json")}); !errors.Is(err, errNoVault) {
+			t.Fatalf("err %v", err)
+		}
+		if err := run(context.Background(), base(openSetup), sock, boxFiles{}); !errors.Is(err, errNoVault) {
+			t.Fatalf("run serves a setup with no claim gate: %v", err)
+		}
+	})
+
+	t.Run("owned", func(t *testing.T) {
+		before := calls.Load()
+		owned := localui.AgentosdSetup{Owner: localui.InProcess{}}
+		cfg, err := prepare(context.Background(), base(owned), sock,
+			boxFiles{VaultSock: vsock, Claim: filepath.Join(dir, "none.json"), Latch: filepath.Join(dir, "none-latch.json")})
+		if err != nil || cfg.Claim != nil || cfg.Card != nil || calls.Load() != before {
+			t.Fatalf("err %v, claim %v, card %v, vault calls %d", err, cfg.Claim, cfg.Card, calls.Load()-before)
 		}
 	})
 }
