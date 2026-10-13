@@ -43,7 +43,6 @@ func TestNetlinkEventsAreAddressRouteAndLinkChanges(t *testing.T) {
 // (which may wait on the router) is still running.
 func TestWatchEventLearnsNewPrefixBeforeSlowRefresh(t *testing.T) {
 	release := make(chan struct{})
-	defer close(release)
 	old := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
 	next := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24"), netip.MustParsePrefix("8.8.8.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
 	var slow atomic.Bool
@@ -66,9 +65,11 @@ func TestWatchEventLearnsNewPrefixBeforeSlowRefresh(t *testing.T) {
 	}
 	slow.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ev := make(chan struct{}, 1)
-	go p.Watch(ctx, ev)
+	watched := make(chan struct{})
+	go func() { p.Watch(ctx, ev); close(watched) }()
+	// End the slow read before the next test runs: it writes refreshGapHook.
+	defer func() { close(release); cancel(); <-watched }()
 	ev <- struct{}{}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -103,7 +104,6 @@ func TestQuickLearnKeepsExternalWhileGatewayUnchanged(t *testing.T) {
 // event's quick read has it (DEV-2).
 func TestWatchSecondEventIsNotQueuedBehindSlowRead(t *testing.T) {
 	release := make(chan struct{})
-	defer close(release)
 	old := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
 	next := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24"), netip.MustParsePrefix("8.8.8.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
 	var slow atomic.Bool
@@ -127,9 +127,11 @@ func TestWatchSecondEventIsNotQueuedBehindSlowRead(t *testing.T) {
 	}
 	slow.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ev := make(chan struct{})
-	go p.Watch(ctx, ev)
+	watched := make(chan struct{})
+	go func() { p.Watch(ctx, ev); close(watched) }()
+	// End the slow read before the next test runs: it writes refreshGapHook.
+	defer func() { close(release); cancel(); <-watched }()
 	ev <- struct{}{}
 	ev <- struct{}{}
 	probe := netip.MustParseAddr("8.8.8.9")
