@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/recovery"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -53,6 +54,9 @@ var (
 	errNotOpen      = uerr(http.StatusPreconditionFailed, "setup did not open code-generator enrollment on this vault")
 	errNoEnrollment = uerr(http.StatusConflict, "no code generator is waiting for confirmation")
 	errNotConfirmed = uerr(http.StatusConflict, "no code generator was confirmed since the last enrollment")
+	// errCardRequired: the open vault holds no Owner Card entry, so no card
+	// made it (HW-1, A1). agentosd tells the owner "card pending".
+	errCardRequired = uerr(http.StatusPreconditionRequired, "the open vault was not made from a provisioned Owner Card")
 )
 
 // closedLocked reports whether enrollment is closed: errEnrolled when
@@ -172,6 +176,11 @@ func (c *custody) sealEnroll() error {
 	}
 	if _, ok := c.v.Secret(PendingSeedName); ok || !hasKind(c.v, ConfirmedName, KindConfirmed) {
 		return errNotConfirmed
+	}
+	// Only the vault knows whether a card made it: the page's latch can
+	// be stale after a remade vault, or forged (CTRL-card-sock s2).
+	if _, ok := c.v.Secret(recovery.CardName); !ok {
+		return errCardRequired
 	}
 	// The state file's mark before the seal, so a locked vault process
 	// never resets a vault whose seal it wrote (cardvault.go).
