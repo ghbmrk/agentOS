@@ -99,6 +99,8 @@ func (c *custody) provisionCard(card recovery.Card) error {
 		return errInternal
 	}
 	old.Close()
+	// The setup key opens nothing in the card's vault (keysbind); it goes.
+	c.dropSetupKey()
 	c.notify("vault made from the Owner Card")
 	return nil
 }
@@ -166,33 +168,44 @@ func (c *custody) buildCardVault(vt, kt string, card recovery.Card) error {
 // and the code-generator seed with it (F10). It is refused once finish
 // sealed the seed, open or locked, and on an open vault outside setup
 // mode. A vault no card made (the setup vault before the card step) is
-// kept: there is nothing of a card's to discard, so it is a no-op.
+// kept: there is nothing of a card's to discard, so it is a no-op. In
+// setup mode the removed vault is replaced by a fresh setup vault
+// (resetCardRemade).
 func (c *custody) resetCard() error {
+	_, err := c.resetCardRemade()
+	return err
+}
+
+// resetCardRemade is resetCard, also reporting whether it made a fresh
+// setup vault: in setup mode, before the seal, the removed vault is
+// replaced by one as `init -setup` makes (setupopen.go), so step 3 and
+// the next card's provision can run (HW-1 test 2, F10).
+func (c *custody) resetCardRemade() (bool, error) {
 	c.rot.mu.Lock()
 	defer c.rot.mu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.st.Sealed {
-		return errSealedReset
+		return false, errSealedReset
 	}
 	if c.ph == opening {
-		return errBusy
+		return false, errBusy
 	}
 	if c.v != nil {
 		switch err := c.closedLocked(); {
 		case errors.Is(err, errEnrolled):
-			return errSealedReset
+			return false, errSealedReset
 		case err != nil:
-			return err
+			return false, err
 		}
 		if _, ok := c.v.Secret(recovery.CardName); !ok && !c.st.Provisioned {
-			return nil
+			return false, nil
 		}
 	} else if !c.st.Provisioned {
-		return nil
+		return false, nil
 	}
 	if c.vaultPath == "" || c.keysPath == "" {
-		return errInternal
+		return false, errInternal
 	}
 	c.gen++
 	c.rot.drop()
@@ -200,16 +213,22 @@ func (c *custody) resetCard() error {
 	c.discard()
 	for _, p := range []string{c.keysPath, c.vaultPath, c.keysPath + cardTemp, c.vaultPath + cardTemp} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return errInternal
+			return false, errInternal
 		}
 	}
 	next := c.st
 	next.Provisioned = false
 	if err := c.persist(next); err != nil {
-		return errInternal
+		return false, errInternal
 	}
 	c.notify("the vault made from an unconfirmed Owner Card was removed")
-	return nil
+	if !c.st.Setup {
+		return false, nil
+	}
+	if err := c.remakeSetupLocked(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // syncMarksLocked brings the state file's marks up to the vault it
@@ -264,8 +283,13 @@ func cardRoutes(mux *http.ServeMux, c *custody, read func(http.ResponseWriter, *
 		if !read(w, r, &req) {
 			return
 		}
-		if err := c.resetCard(); err != nil {
+		remade, err := c.resetCardRemade()
+		if err != nil {
 			fail(w, err)
+			return
+		}
+		if remade {
+			reply(w, http.StatusOK, map[string]any{"ok": true, "remade": true})
 			return
 		}
 		reply(w, http.StatusOK, map[string]any{"ok": true})

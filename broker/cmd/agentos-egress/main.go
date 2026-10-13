@@ -45,6 +45,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/recovery"
 	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -430,6 +431,7 @@ func serveCmd(args []string) error {
 		}
 		srvs = append(srvs, sms)
 	}
+	c.startSetup()
 	c.bootTrusted()
 	ph, _ := c.status()
 	log.Printf("vault process up, vault %s; sockets in %s", ph, *run)
@@ -488,6 +490,8 @@ func serve(dir string, c *custody, rt *route.Router, ev *evalRoute, ro *routing,
 // initCmd creates a sealed vault: a generated passphrase (100 bits) in the
 // passphrase slot and a fresh code-generator seed inside the vault. It
 // prints both once, as the Owner Card does (P2-2 prints the real card).
+// With -setup it prints nothing secret: the setup vault opens with the
+// setup key (startSetup) until the card's provision replaces it.
 func initCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	vaultPath := fs.String("vault", defaultVault, "sealed vault file to create")
@@ -514,17 +518,32 @@ func initCmd(args []string, out io.Writer) error {
 	if _, err := os.Lstat(*keysPath); err == nil {
 		return fmt.Errorf("%s already exists; a vault is already set up here", *keysPath)
 	}
+	if *setup {
+		// Setup mode (CTRL-setup-open): no passphrase exists before the
+		// claim (HW-10). The setup vault opens with a setup key the vault
+		// process keeps root-only beside the keys; the card's provision
+		// replaces the vault and removes the key.
+		if err := durable.WriteFile(*statePath, []byte(`{"setup":true}`), 0o600); err != nil {
+			return err
+		}
+		rk, err := writeSetupKey(*keysPath)
+		if err != nil {
+			return err
+		}
+		defer rk.Wipe()
+		if err := sealNew(*vaultPath, *keysPath, recovery.Factor(rk), seed, true); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "Setup vault made. Setup shows the code generator; the Owner Card holds the passphrase.")
+		return nil
+	}
 	if err := durable.WriteFile(*statePath, []byte("{}"), 0o600); err != nil {
 		return err
 	}
-	if err := sealNew(*vaultPath, *keysPath, pass, seed, *setup); err != nil {
+	if err := sealNew(*vaultPath, *keysPath, vault.Passphrase(pass), seed, false); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Vault passphrase: %s\n", pass)
-	if *setup {
-		fmt.Fprintln(out, "Setup shows the code generator. Keep the passphrase offline. It is shown once.")
-		return nil
-	}
 	secret := b32().EncodeToString(seed)
 	fmt.Fprintf(out, "Code generator:   otpauth://totp/AgentOS?secret=%s&issuer=AgentOS\n", secret)
 	fmt.Fprintln(out, "Keep both offline. They are shown once.")
@@ -536,13 +555,33 @@ func statePathFor(keysPath string) string {
 	return filepath.Join(filepath.Dir(keysPath), "unlock.json")
 }
 
+// setupKeyFor is the setup key's file, beside the keys file. It exists
+// only in setup mode, before the card's provision or finish's seal.
+func setupKeyFor(keysPath string) string {
+	return filepath.Join(filepath.Dir(keysPath), "setup.key")
+}
+
+// writeSetupKey makes a fresh setup key and writes it, root-only, where
+// the vault process looks for it at start.
+func writeSetupKey(keysPath string) (recovery.RecoveryKey, error) {
+	rk, err := recovery.NewRecoveryKey(nil)
+	if err != nil {
+		return rk, err
+	}
+	if err := durable.WriteFile(setupKeyFor(keysPath), []byte(rk.Text()), 0o600); err != nil {
+		rk.Wipe()
+		return rk, err
+	}
+	return rk, nil
+}
+
 // sealNew builds the vault and keys under temporary names, stores the seed
 // (and, in setup mode, the entry that opens enrollment once, K17),
 // and only then renames them into place, keys last: the keys file is what
 // makes a vault openable, so a crash leaves either nothing usable or a
 // complete vault. A vault file without its keys file can never be opened,
 // so init reports it for removal rather than leaving the owner stuck.
-func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
+func sealNew(vaultPath, keysPath string, f vault.Factor, seed []byte, setup bool) error {
 	if _, err := os.Lstat(keysPath); err == nil {
 		return fmt.Errorf("%s already exists; a vault is already set up here", keysPath)
 	}
@@ -552,7 +591,7 @@ func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
 	vt, kt := vaultPath+".init", keysPath+".init"
 	os.Remove(vt)
 	os.Remove(kt)
-	v, err := vault.CreateSealed(vt, kt, vault.Passphrase(pass))
+	v, err := vault.CreateSealed(vt, kt, f)
 	if err != nil {
 		return err
 	}

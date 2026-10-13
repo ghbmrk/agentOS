@@ -164,6 +164,10 @@ type unlockState struct {
 	// Provisioned is set while the vault on disk was made from an Owner
 	// Card (cardvault.go).
 	Provisioned bool `json:"provisioned,omitempty"`
+	// Setup is set by `init -setup` and never cleared: the box was made in
+	// setup mode, so until Sealed the vault process opens or remakes the
+	// setup vault (setupopen.go).
+	Setup bool `json:"setup,omitempty"`
 }
 
 // loadState reads the state file. A missing file is a fresh start; an
