@@ -507,7 +507,8 @@ func main() {
 	if cfg.OwnerNumber == "" {
 		up := newUplink()
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
-			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock}
+			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock,
+			Card: pageCardStep}
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
 		}

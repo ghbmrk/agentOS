@@ -62,15 +62,17 @@ type pausedError struct{ until time.Time }
 func (e *pausedError) Error() string { return "too many wrong codes; checks are paused" }
 
 // unlockErr is an error safe to show on the unlock socket, with its HTTP
-// status.
+// status. reason, when set, is a stable word the page acts on, so it never
+// routes on a status that several refusals share.
 type unlockErr struct {
 	msg    string
 	status int
+	reason string
 }
 
 func (e *unlockErr) Error() string { return e.msg }
 
-func uerr(status int, msg string) *unlockErr { return &unlockErr{msg, status} }
+func uerr(status int, msg string) *unlockErr { return &unlockErr{msg: msg, status: status} }
 
 var (
 	errBusy            = uerr(http.StatusConflict, "an unlock is already in progress or the vault is open")
