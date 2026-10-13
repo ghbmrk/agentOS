@@ -27,6 +27,12 @@ const (
 	// once the helper does: success when it joined or saved the network,
 	// ErrNotJoined otherwise. It is answered within JoinTimeout.
 	OpSetupJoin = "page_setup_join"
+	// OpSetupCard reports the page's Owner Card step (HW-1, #1115): the
+	// page builds, shows and latches the card (agentosd links no card
+	// code, ARC-2), and reports here before finish that the card is
+	// confirmed and provisioned. agentosd's setup mode serves it beside
+	// SetupOps, and finish answers ErrCardPending until it is reported.
+	OpSetupCard = "page_setup_card"
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
@@ -54,6 +60,9 @@ const (
 	// is configured. The page shows its one network error for all of
 	// them (Security L8.4).
 	ErrNotJoined = "not joined"
+	// ErrCardPending: finish before the page reported the Owner Card
+	// confirmed (OpSetupCard).
+	ErrCardPending = "card pending"
 )
 
 // JoinTimeout bounds one OpSetupJoin call from the page. agentosd's own
@@ -112,6 +121,12 @@ type Join struct {
 // String and GoString keep the password out of logs.
 func (Join) String() string   { return "[home Wi-Fi join]" }
 func (Join) GoString() string { return "[home Wi-Fi join]" }
+
+// SetupCard is the page's report of its Owner Card step: Confirmed once
+// the card is confirmed and provisioned. Confirmed false is refused.
+type SetupCard struct {
+	Confirmed bool `json:"confirmed"`
+}
 
 // Finish carries the owner's number, E.164.
 type Finish struct {

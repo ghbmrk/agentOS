@@ -80,7 +80,18 @@ func (s *Server) claimPage(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet, http.MethodHead:
 	case http.MethodPost:
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
-		tok, err := s.cfg.Claim.Claim(r.PostFormValue("code"))
+		typed := r.PostFormValue("code")
+		release, ok := s.claimTurn(r)
+		if !ok {
+			w.Header().Set("Retry-After", "5")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			v := s.claimView()
+			v.Err = claimBusy
+			s.render(w, "claimbox", v)
+			return
+		}
+		tok, err := s.cfg.Claim.Claim(typed)
+		release()
 		if tok != "" {
 			http.SetCookie(w, &http.Cookie{Name: claimCookie, Value: tok, Path: "/", MaxAge: int(SetupCookieFor.Seconds()),
 				HttpOnly: true, SameSite: http.SameSiteStrictMode})
@@ -124,6 +135,36 @@ func (s *Server) claimPage(w http.ResponseWriter, r *http.Request) {
 		v.Code = c
 	}
 	s.render(w, "claimbox", v)
+}
+
+// claimQueue is how many claim posts may wait while one runs: each try
+// is an Argon2id derivation (claim K9), so a flood of posts beyond it is
+// answered busy at once rather than queued behind the owner's.
+const claimQueue = 4
+
+const claimBusy = "I am busy checking codes. Try again in a moment."
+
+// claimTurn waits for this post's turn to run Claim. It refuses at once
+// when claimQueue posts already wait, and refuses a post whose request
+// ended before its turn came, so Claim never runs for a phone that left.
+func (s *Server) claimTurn(r *http.Request) (release func(), ok bool) {
+	select {
+	case s.claimWait <- struct{}{}:
+	default:
+		return nil, false
+	}
+	select {
+	case s.claimRun <- struct{}{}:
+	case <-r.Context().Done():
+		<-s.claimWait
+		return nil, false
+	}
+	if r.Context().Err() != nil {
+		<-s.claimRun
+		<-s.claimWait
+		return nil, false
+	}
+	return func() { <-s.claimRun; <-s.claimWait }, true
 }
 
 func (s *Server) claimView() claimView {
