@@ -27,6 +27,10 @@ const (
 	// once the helper does: success when it joined or saved the network,
 	// ErrNotJoined otherwise. It is answered within JoinTimeout.
 	OpSetupJoin = "page_setup_join"
+	// OpSetupNetworks lists the home networks in range from agentosd's
+	// netjoin helper (P2-2w c4b): no args, Networks out. It answers an
+	// empty list when the helper has none or cannot be asked.
+	OpSetupNetworks = "page_setup_networks"
 	// OpSetupCard reports the page's Owner Card step (HW-1, #1115): the
 	// page builds, shows and latches the card (agentosd links no card
 	// code, ARC-2), and reports here before finish that the card is
@@ -36,7 +40,7 @@ const (
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
-var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish, OpSetupJoin}
+var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish, OpSetupJoin, OpSetupNetworks}
 
 // Setup's fixed refusals, beside ErrBadArgs, ErrLimited and ErrFailed.
 const (
@@ -78,6 +82,10 @@ const (
 	MinPassword = 8
 	MaxPassword = 64
 )
+
+// MaxNetworks bounds OpSetupNetworks' list; each name is at most MaxSSID
+// bytes.
+const MaxNetworks = 20
 
 // MaxEnrollLink bounds an enrollment link (otpauth URI) in bytes.
 const MaxEnrollLink = 512
@@ -121,6 +129,12 @@ type Join struct {
 // String and GoString keep the password out of logs.
 func (Join) String() string   { return "[home Wi-Fi join]" }
 func (Join) GoString() string { return "[home Wi-Fi join]" }
+
+// Networks is OpSetupNetworks' answer: home network names, strongest
+// first. Names only (CRED-1).
+type Networks struct {
+	SSIDs []string `json:"ssids"`
+}
 
 // SetupCard is the page's report of its Owner Card step: Confirmed once
 // the card is confirmed and provisioned. Confirmed false is refused.
