@@ -110,6 +110,7 @@ func (x *setupCardRig) enrollCodes(t *testing.T) {
 // seal is setup's finish: the confirmed seed is sealed.
 func (x *setupCardRig) seal(t *testing.T) {
 	t.Helper()
+	ensureCard(t, x.c)
 	if err := x.c.sealEnroll(); err != nil {
 		t.Fatal(err)
 	}
@@ -430,5 +431,17 @@ func TestTheCodesRefusalCarriesAReason(t *testing.T) {
 	}
 	if _, ok := out["reason"]; ok {
 		t.Fatalf("errNotOpen carries a reason: %v", out)
+	}
+}
+
+// ensureCard stands in for the card step's provision where a test is not
+// about the card: the open vault holds a card entry, as finish needs.
+func ensureCard(t *testing.T, c *custody) {
+	t.Helper()
+	if _, ok := c.v.Secret(recovery.CardName); ok {
+		return
+	}
+	if err := c.v.Put(recovery.CardName, recovery.KindCard, []byte(synthetic(t, "card-"))); err != nil {
+		t.Fatal(err)
 	}
 }

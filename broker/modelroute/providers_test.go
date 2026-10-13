@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// REQ: CRED-5, CAP-9, CRED-1
+// REQ: CRED-5, CAP-9, CRED-1, HW-1, A1
 
 // fakeVault serves the verify socket with one fixed status and body, and
 // keeps the last request it was sent.
@@ -112,6 +112,22 @@ func TestSetupKeyRequestRedacts(t *testing.T) {
 	for _, s := range []string{fmt.Sprint(r), fmt.Sprintf("%v %+v %#v %s", r, r, r, r)} {
 		if strings.Contains(s, "canary") {
 			t.Fatalf("printed: %s", s)
+		}
+	}
+}
+
+// HW-1, A1 (CTRL-card-sock s2): the vault process's seal refusal for want
+// of an Owner Card (428) is its own error, apart from the not-open (412),
+// sealed (410) and nothing-confirmed (409) answers.
+func TestSealEnrollMapsTheCardRefusalApart(t *testing.T) {
+	var status atomic.Int32
+	var body, last atomic.Value
+	body.Store(`{}`)
+	v := fakeVault(t, &status, &body, &last)
+	for st, want := range map[int32]error{428: ErrCardRequired, 412: ErrEnrollNotOpen, 410: ErrEnrolled, 409: ErrNoEnrollment, 200: nil} {
+		status.Store(st)
+		if err := v.SealEnroll(); err != want {
+			t.Fatalf("seal %d: %v", st, err)
 		}
 	}
 }
