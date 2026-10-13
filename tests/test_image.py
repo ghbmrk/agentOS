@@ -944,7 +944,7 @@ class NoDumpTest(unittest.TestCase):
         # time (mkosi passes Environment= to systemd-repart's mkfs) and is mounted with prjquota
         # (gpt-auto honours rootflags=). finish_image.py checks both on the built disk.
         c = ini(MK / "mkosi.conf")["Content"]
-        self.assertIn('SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-O quota,project', c["Environment"].split("\n"))
+        self.assertIn('SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project', c["Environment"].split("\n"))
         self.assertIn("rootflags=prjquota", c["KernelCommandLine"].split())
         self.assertEqual(ini(MK / "mkosi.repart/30-root.conf")["Partition"]["Format"], "ext4")
         entry = (ENTRY % H).replace("rw quiet", "rw quiet rootflags=prjquota")
@@ -977,7 +977,7 @@ class NoDumpTest(unittest.TestCase):
                 fs = pathlib.Path(d) / "root.ext4"
                 with open(fs, "wb") as f:
                     f.truncate(32 << 20)
-                subprocess.run(["mkfs.ext4", "-q", "-F", "-O", "quota,project", str(fs)], check=True)
+                subprocess.run(["mkfs.ext4", "-q", "-F", "-Oquota,project", str(fs)], check=True)
                 img = pathlib.Path(d) / "real.raw"
                 img.write_bytes(bytes(8 * 512) + fs.read_bytes()[:8192])
                 self.assertEqual(finish.quota_violations(str(img), table, entry), [])
