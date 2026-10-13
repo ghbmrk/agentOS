@@ -205,6 +205,11 @@ type ownerForget struct {
 	// whenOpen, if set, runs resumeAgent once recall opens
 	// (LateExecutor.OnOpen); nil when recall is off.
 	whenOpen func()
+	// resume, if set, starts resumeAgent for an item 2 Reconcile found
+	// after the boot's resume may already have run (#1370): whenOpen when
+	// recall is configured, else a resume that tells the owner it is
+	// owed. Set before startup reconcile runs.
+	resume func()
 	// resuming serializes resumeAgent: recall's open runs every queued
 	// OnOpen together, and each run must see the take-backs the one
 	// before it did (Handled), so none is taken back or told twice.
@@ -1224,6 +1229,11 @@ func (f *ownerForget) Reconcile(_ context.Context, in journal.Intent, _ int) jou
 		f.mu.Lock()
 		f.interrupted = append(f.interrupted, in.ID)
 		f.mu.Unlock()
+		// Startup reconcile runs in the background, so recall may have
+		// opened, and its resume run, before this item was found (#1370).
+		if f.resume != nil {
+			f.resume()
+		}
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "approved; interrupted by a restart; resumed when recall opens"}
 	}
 	if goal := grants.ForgetGoal(in.ID); goal != "" && f.forgotten != nil && f.forgotten(goal) {

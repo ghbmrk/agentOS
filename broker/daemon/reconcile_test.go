@@ -15,7 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/journal"
 )
 
-// REQ: OP-4
+// REQ: OP-4, CH-12
 
 const actionLoopsOn = "meta.loops.on" // loops.ActionOn
 
@@ -167,6 +167,9 @@ func TestOP4StartupReconcileReleasesTheBrokerAccount(t *testing.T) {
 		if st, err := loopsOn(t, d, "loops:on:1"); err != nil || st.State != journal.Succeeded {
 			t.Fatalf("applied=%v: LOOPS ON after reconcile: %s %v", applied, st.State, err)
 		}
+		if r := strings.Join(text(t, dir, owner, "STATUS"), "\n"); strings.Contains(r, "Not confirmed") {
+			t.Fatalf("applied=%v: STATUS after reconcile: %q", applied, r)
+		}
 		f.mu.Lock()
 		ran := append([]string(nil), f.ran...)
 		f.mu.Unlock()
@@ -200,6 +203,11 @@ func TestOP4UncertainOutcomeStaysFencedAndStopAnswers(t *testing.T) {
 	}
 	if _, err := loopsOn(t, d, "loops:on:1"); !errors.Is(err, journal.ErrUnreconciled) {
 		t.Fatalf("LOOPS ON while the outcome is unknown: %v", err)
+	}
+	// STATUS says what is not confirmed, in the owner's words (#1373).
+	const held = "Not confirmed since the restart: whether a setting change went through."
+	if r := strings.Join(text(t, dir, owner, "STATUS"), "\n"); !strings.Contains(r, held) || strings.Contains(r, "loops:") {
+		t.Fatalf("STATUS while fenced: %q", r)
 	}
 	if r := text(t, dir, owner, "STOP"); len(r) == 0 || !strings.Contains(strings.ToLower(strings.Join(r, " ")), "stop") {
 		t.Fatalf("STOP while fenced: %q", r)

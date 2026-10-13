@@ -13,7 +13,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// REQ: LOOP-0, CH-10, CH-11, OP-5, CHG-1
+// REQ: LOOP-0, CH-10, CH-11, OP-5, CHG-1, OP-4, CH-12
 //
 // What the grants gate and the owner channel use: the sentinel the gate
 // recognizes, the broker-rendered line for a budget raise, the owner text
@@ -198,6 +198,13 @@ func TestPluralLoopNamesReadAsPlural(t *testing.T) {
 // intent that needs the owner pending.
 type pending struct{ Journal }
 
+// fenced is the journal while a restart fence holds the broker account.
+type fenced struct{ Journal }
+
+func (fenced) Dispatch(context.Context, string) (journal.Status, error) {
+	return journal.Status{}, fmt.Errorf("%w: %s", journal.ErrUnreconciled, journal.BrokerAccount)
+}
+
 func (pending) Submit(in journal.Intent) (journal.Status, error) {
 	return journal.Status{Intent: in, State: journal.Pending}, nil
 }
@@ -247,6 +254,12 @@ func TestAFailedSettingSaysWhy(t *testing.T) {
 	}
 	r.s.cfg.Sharing = nil
 	if got, _ := r.s.Text(ctx, "STOP SHARING", true); got != "Sharing is not available yet." {
+		t.Fatalf("%q", got)
+	}
+	// A restart fence does not lift by trying later: the reply says it is
+	// on hold and where to see it (OP-4, CH-12; #1373).
+	r.s.Attach(fenced{r.eng})
+	if got, _ := r.s.Text(ctx, "LOOPS OFF", true); got != fencedReply {
 		t.Fatalf("%q", got)
 	}
 	r.s.cfg.Journal = nil

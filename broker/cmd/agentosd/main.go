@@ -729,6 +729,12 @@ func main() {
 		lp.forgetOwner.whenOpen = func() {
 			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
 		}
+		// One startup reconcile finds after recall opened resumes too
+		// (#1370); set before daemon.Run starts reconcile.
+		lp.forgetOwner.resume = lp.forgetOwner.whenOpen
+	} else if lp != nil {
+		// Recall off: the owner is told it is owed (W3-forget-b2c).
+		lp.forgetOwner.resume = func() { go lp.forgetOwner.resumeAgent(ctx) }
 	}
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
