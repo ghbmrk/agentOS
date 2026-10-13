@@ -16,8 +16,7 @@ import (
 // next call without a restart.
 
 // providerList is the providers with whether a key is held and whether
-// private data is allowed, never a key (CRED-1). It needs an open vault
-// and no open setup.
+// private data is allowed, never a key (CRED-1). It needs an open vault.
 func (c *custody) providerList() ([]modelroute.SetupProvider, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

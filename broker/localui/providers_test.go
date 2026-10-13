@@ -109,7 +109,7 @@ func TestTheOwnerChangesAProvidersPrivateAnswerOnTheLocalPage(t *testing.T) {
 	}
 	p := html.UnescapeString(r.get("/providers/"))
 	for _, want := range []string{"OpenAI: connected", "OpenAI may not see your private data", "Anthropic: not connected",
-		`name="code"`, "Tasks that need your mail or files wait until you allow a provider that is connected."} {
+		`name="code"`, "Tasks that need your mail or files can't run until you allow a provider that is connected."} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("page lacks %q:\n%s", want, p)
 		}
@@ -132,7 +132,7 @@ func TestTheOwnerChangesAProvidersPrivateAnswerOnTheLocalPage(t *testing.T) {
 	if w.Code != http.StatusOK || !fp.allowed("openai") {
 		t.Fatalf("withdrawn without confirmation: %d", w.Code)
 	}
-	for _, want := range []string{"Stop OpenAI seeing your private data? Tasks that need your mail or files wait until you allow a provider again.",
+	for _, want := range []string{"Stop OpenAI seeing your private data? Tasks that need your mail or files can't run until you allow a provider again.",
 		`name="confirm" value="1"`, `name="provider" value="openai"`, `href="/providers/">Cancel</a>`} {
 		if !strings.Contains(b, want) {
 			t.Fatalf("confirmation lacks %q:\n%s", want, b)
@@ -205,7 +205,7 @@ func TestTheSetupPrivateBoxSaysWhatUntickedMeans(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := html.UnescapeString(b.String())
-	if !strings.Contains(p, "Unticked, tasks that need your mail or files wait until you allow a provider on the AI providers page.") {
+	if !strings.Contains(p, "Unticked, tasks that need your mail or files can't run until you allow a provider on the AI providers page.") {
 		t.Fatalf("box line:\n%s", p)
 	}
 	if strings.Contains(p, "checked") {
