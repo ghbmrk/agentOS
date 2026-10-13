@@ -293,6 +293,63 @@ class RiskTierTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 rt.core_list(pathlib.Path(d) / "missing.txt")
 
+    # CTRL-lane-gate (#1300; a work item with no SPEC row, so no REQ marker): CI runs
+    # `risk_tier.py --git BASE HEAD --pr-branch B --pr-title T` on every PR.
+    def test_lane_gate_holds_codex_prs_to_tier_c(self):
+        script = ROOT / "tools" / "risk_tier.py"
+        with tempfile.TemporaryDirectory() as d:
+            def git(*args):
+                subprocess.run(["git", "-C", d, *args], check=True, capture_output=True)
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "t@example.invalid")
+            git("config", "user.name", "t")
+            pathlib.Path(d, "README.md").write_text("x\n")
+            git("add", ".")
+            git("commit", "-qm", "base")
+
+            def change(branch, path):
+                git("checkout", "-q", "-b", branch, "main")
+                f = pathlib.Path(d, path)
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("change\n")
+                git("add", ".")
+                git("commit", "-qm", branch)
+
+            def gate(branch, title):
+                return subprocess.run(
+                    [sys.executable, "-I", str(script), "--git", "main", branch,
+                     "--pr-branch", branch, "--pr-title", title],
+                    cwd=d, capture_output=True, text=True)
+
+            change("pkg/codex-CX-b-x", "broker/notapkg/x.go")      # tier B
+            change("pkg/codex-CX-a-x", ".github/workflows/x.yml")  # tier A
+            change("pkg/codex-CX-c-x", "docs/x.md")                # tier C
+            change("claude/b-x", "broker/notapkg/y.go")            # tier B, peer branch
+            cases = [
+                ("pkg/codex-CX-b-x", "CX-b: x", 1),
+                ("pkg/codex-CX-a-x", "CX-a: x", 1),
+                ("pkg/codex-CX-c-x", "CX-c: x", 0),
+                ("claude/b-x", "P-1: x", 0),
+                # A CX- title puts the PR in the lane whatever its branch.
+                ("claude/b-x", "CX-b: x", 1),
+            ]
+            for branch, title, want in cases:
+                with self.subTest(branch=branch, title=title):
+                    r = gate(branch, title)
+                    self.assertEqual(r.returncode, want, r.stdout + r.stderr)
+                    if want:
+                        self.assertIn("codex lane is limited to tier C", r.stderr)
+
+    def test_lane_of(self):
+        self.assertEqual(rt.lane_of("pkg/codex-CX-name-case-1", ""), "codex")
+        self.assertEqual(rt.lane_of("", " CX-name-case: x"), "codex")
+        self.assertIsNone(rt.lane_of("pkg/ctrl-lane-gate-w7vxj3", "CTRL-lane-gate: x"))
+        self.assertIsNone(rt.lane_of("claude/x", "X: codex"))
+        self.assertIsNone(rt.lane_of(None, None))
+        self.assertTrue(rt.lane_gate("pkg/codex-x", "", "C")[0])
+        self.assertFalse(rt.lane_gate("pkg/codex-x", "", "B")[0])
+        self.assertTrue(rt.lane_gate("claude/x", "", "A")[0])
+
     def test_markdown_output(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
