@@ -170,7 +170,16 @@ func (c *custody) sealEnroll() error {
 	if _, ok := c.v.Secret(PendingSeedName); ok || !hasKind(c.v, ConfirmedName, KindConfirmed) {
 		return errNotConfirmed
 	}
-	// The seal first: once it is written enrollment is closed, whatever
+	// The state file's mark before the seal, so a locked vault process
+	// never resets a vault whose seal it wrote (cardvault.go).
+	if !c.st.Sealed {
+		next := c.st
+		next.Sealed = true
+		if err := c.persist(next); err != nil {
+			return errInternal
+		}
+	}
+	// Then the seal: once it is written enrollment is closed, whatever
 	// a crash leaves of the entries after it.
 	if err := c.putMark(EnrolledName, KindEnrolled); err != nil {
 		return err
