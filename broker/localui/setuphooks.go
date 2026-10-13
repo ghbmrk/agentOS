@@ -124,3 +124,20 @@ func (AgentosdSetup) SetPrivateOK(string, bool) error    { return errNotServed }
 func (AgentosdSetup) StartDeviceCode(string) (string, string, error) {
 	return "", "", errNotServed
 }
+
+// CardFinish is AgentosdSetup with the page's Owner Card step (HW-1,
+// #1115): Finish reports a confirmed card to agentosd, whose finish holds
+// until it is (card pending); a held card is not reported.
+type CardFinish struct {
+	AgentosdSetup
+	Card interface{ Hold() error }
+}
+
+func (c CardFinish) Finish(owner string) error {
+	if c.Card != nil && c.Card.Hold() == nil {
+		if err := c.call(localapi.OpSetupCard, localapi.SetupCard{Confirmed: true}, nil); err != nil {
+			return err
+		}
+	}
+	return c.AgentosdSetup.Finish(owner)
+}
