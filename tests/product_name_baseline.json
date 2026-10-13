@@ -59,6 +59,12 @@
     "15cc88e14d99383b1dc64d05fb3678cb18566d78810c1c5f5f63d83716ce7911": 1,
     "c9dbb6526542bf2541a21b90d043c769c6d9af243692106155a95f2d82fa6ba2": 1
   },
+  "briefs/CTRL-claim-ap.md": {
+    "b988a804af834c925ebb80b3c5b3f42619335a63f5845a73153c3ae1fb2d60b4": 1
+  },
+  "briefs/P2-6m.md": {
+    "ea73e50d722f2056b6ab0e0b27aabb5932a67a8a91b5ad774e531d8fc6c8ff95": 1
+  },
   "broker/boxname/ASSUMPTIONS.md": {
     "c977535e2e402e0d2a9f0499bf4f4db3e4e153a8a9f69e78d8be075e32fd300a": 1
   },
@@ -403,6 +409,10 @@
   },
   "image/mkosi/mkosi.extra/usr/lib/sysusers.d/agentos-fuzz.conf": {
     "8de690a7215558f9fa6ee0a987da4a531fbd54e4eab4aefcc8cdf520acf689de": 1
+  },
+  "reviews/potency/2026-10-05-organize-verb.md": {
+    "8dcaeff13f3998318b5631521a14eba462e1e50d5c0ba9b73bd81f2ea14c2efd": 1,
+    "b6b42fd3a6c011845d3775509518d951a48f12feed7ec2f8d4730df636642503": 1
   },
   "reviews/ux/2026-10-08-lens-bundle-a.md": {
     "5921d7bab3edb9bddf0bef1e1b5badb9062dcd2742706085e2dc2b526564319f": 1

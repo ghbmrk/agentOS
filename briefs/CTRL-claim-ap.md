@@ -14,7 +14,7 @@ The sticker QR opens `http://10.42.0.1/claim` on the box's own Wi-Fi, but `local
 
 ## Options
 
-- **Sticker password (built; recommended).** The seller seals a per-box setup network (name `agentOS-Setup-XXXX`, an 80-bit password in the claim code's format) beside the claim state and prints it on the sticker with a Wi-Fi QR. WPA3-SAE (CH-7) with the box's client isolation; nobody without the sticker joins. About two more touches (scan the Wi-Fi QR, join).
+- **Sticker password (built; recommended).** The seller seals a per-box setup network (name `AgentOS-Setup-XXXX`, an 80-bit password in the claim code's format) beside the claim state and prints it on the sticker with a Wi-Fi QR. WPA3-SAE (CH-7) with the box's client isolation; nobody without the sticker joins. About two more touches (scan the Wi-Fi QR, join).
 - **Open setup network.** An open network that serves only the claim and setup pages. No extra touches, but anyone in range reaches the claim page and can burn the shared lockout count (the reserve, claim K9, still lets the sticker holder in), and the setup traffic is unencrypted over the air.
 
 Mark decides; the safer option is built meanwhile.
