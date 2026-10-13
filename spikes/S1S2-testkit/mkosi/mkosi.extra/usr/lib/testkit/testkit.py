@@ -1,4 +1,4 @@
-"""AgentOS S1/S2 test kit: runs once per boot, screenless.
+"""agentOS S1/S2 test kit: runs once per boot, screenless.
 
 Two boot entries share one kernel and /usr and differ only in `agentos.tk=`:
   rollback (+2 tries, sorts first): probe the PC, then reboot WITHOUT blessing the entry;
