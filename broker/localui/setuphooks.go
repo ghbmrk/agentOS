@@ -15,11 +15,12 @@ import (
 // process (egress K17) and only passes through this page.
 //
 // JoinNetwork goes through agentosd to its netjoin helper (P2-2w c3;
-// Security L8). BoxNumber, Send and PairTexts go through agentosd to the
-// modem bridge (P2-2w c4c; §8.1, CH-12): agentosd sends only setup's fixed
-// texts and passes on only PAIR texts. Networks, HostInfo, TrustHost and
-// the provider hooks are not served by agentosd yet: they answer nothing
-// or an error, so the steps that need them wait.
+// Security L8), and Networks asks it for the networks in range (P2-2w
+// c4b). BoxNumber, Send and PairTexts go through agentosd to the modem
+// bridge (P2-2w c4c; §8.1, CH-12): agentosd sends only setup's fixed texts
+// and passes on only PAIR texts. HostInfo, TrustHost and the provider
+// hooks are not served by agentosd yet: they answer nothing or an error,
+// so the steps that need them wait.
 type AgentosdSetup struct{ Owner Owner }
 
 var errNotServed = errors.New("localui: not served by agentosd yet")
@@ -44,6 +45,16 @@ func (a AgentosdSetup) Wait(ctx context.Context, every time.Duration) error {
 		case <-time.After(every):
 		}
 	}
+}
+
+// Networks is the home networks agentosd's helper sees, or none: an
+// error or a list over the bound gives the typed-name step.
+func (a AgentosdSetup) Networks() []string {
+	var n localapi.Networks
+	if a.call(localapi.OpSetupNetworks, nil, &n) != nil || len(n.SSIDs) == 0 || len(n.SSIDs) > localapi.MaxNetworks {
+		return nil
+	}
+	return n.SSIDs
 }
 
 func (a AgentosdSetup) Progress() Progress {
@@ -115,7 +126,6 @@ func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
 	return a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
 }
 
-func (AgentosdSetup) Networks() []string                 { return nil }
 func (AgentosdSetup) HostInfo() string                   { return "" }
 func (AgentosdSetup) TrustHost(bool) error               { return errNotServed }
 func (AgentosdSetup) Providers() []Provider              { return nil }

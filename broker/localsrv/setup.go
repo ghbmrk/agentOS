@@ -32,6 +32,7 @@ type Setup struct {
 	closed  bool
 	enrolls []time.Time
 	joins   []time.Time
+	scans   []time.Time
 	texts   []time.Time
 }
 
@@ -53,6 +54,9 @@ type SetupConfig struct {
 	// otherwise. Nil Join answers every join with ErrNotJoined. The
 	// password goes nowhere else: not the record, not an error, not a log.
 	Join func(ctx context.Context, ssid, password string) error
+	// Networks lists the home networks the helper sees (P2-2w c4b).
+	// Nil Networks, or an error, answers an empty list.
+	Networks func(ctx context.Context) ([]string, error)
 	// Line is the owner line's modem bridge while setup runs (P2-2w c4c;
 	// modemlink.SetupLine); nil answers that setup cannot text.
 	Line SetupLine
@@ -88,6 +92,10 @@ const EnrollsPerMinute = 6
 // JoinsPerMinute bounds join tries: each one writes NetworkManager's
 // stored connection (Security L6.4).
 const JoinsPerMinute = 6
+
+// ScansPerMinute bounds network lists: each one has the helper read
+// NetworkManager's access points.
+const ScansPerMinute = 20
 
 // SetupRecord is setup's durable record. It holds no secret.
 type SetupRecord struct {
@@ -181,6 +189,7 @@ func (s *Setup) Ops() map[string]sockets.Handler {
 		localapi.OpSetupConfirm:  s.open(s.confirm),
 		localapi.OpSetupFinish:   s.open(s.finish),
 		localapi.OpSetupJoin:     s.open(s.join),
+		localapi.OpSetupNetworks: s.open(s.networks),
 		localapi.OpSetupLine:     s.open(s.line),
 		localapi.OpSetupSend:     s.open(s.send),
 		localapi.OpSetupInbound:  s.open(s.inbound),
@@ -269,6 +278,27 @@ func (s *Setup) join(ctx context.Context, _ sockets.Peer, args json.RawMessage) 
 		return nil, errNotJoined
 	}
 	return struct{}{}, nil
+}
+
+// networks relays the helper's list of home networks (P2-2w c4b). Past
+// ScansPerMinute, with no helper or on its error, the list is empty: the
+// page then takes a typed name.
+func (s *Setup) networks(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	if err := decode(args, &struct{}{}); err != nil {
+		return nil, err
+	}
+	none := localapi.Networks{SSIDs: []string{}}
+	if s.cfg.Networks == nil || !s.allow(&s.scans, ScansPerMinute) {
+		return none, nil
+	}
+	l, err := s.cfg.Networks(ctx)
+	if err != nil || l == nil {
+		return none, nil
+	}
+	if len(l) > localapi.MaxNetworks {
+		l = l[:localapi.MaxNetworks]
+	}
+	return localapi.Networks{SSIDs: l}, nil
 }
 
 func (s *Setup) confirm(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
