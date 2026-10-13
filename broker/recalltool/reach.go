@@ -743,6 +743,11 @@ func (r *Reach) Execute(ctx context.Context, in journal.Intent, _ int) journal.O
 	if in.Action != journal.ActionRecallRollback || in.Origin != Origin || in.Account != journal.BrokerAccount || lineage == "" || err != nil {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "malformed recall rollback"}
 	}
+	// The owner's renewal of a full lineage (renew.go) has its own
+	// staleness rule: no deleted item is involved.
+	if renew, _ := in.Params["renew"].(bool); renew {
+		return r.executeRenew(ctx, lineage, since)
+	}
 	if r.Machines == nil {
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + "machines not wired"}
 	}
