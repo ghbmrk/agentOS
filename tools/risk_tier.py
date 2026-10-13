@@ -61,7 +61,7 @@ TIER_A_BROKER = {
     "claim", "cleanroom", "core", "clock", "cmd", "control", "corpus", "daemon", "digestqueue",
     "egress", "firstboot", "grants", "guest", "hint", "hostchange", "hostdisk", "journal", "localapi",
     "localsrv", "localui", "loop7", "loops", "machprobe", "mail", "modelroute", "modem",
-    "modemlink", "owner", "probecmd", "pubid", "recovery", "replay", "reversible", "sendrules",
+    "modemlink", "netjoin", "owner", "probecmd", "pubid", "recovery", "replay", "reversible", "sendrules",
     "sim", "sipsign", "smsapi", "sockets", "sockprobe", "tpmseal", "update", "vault", "vendor",
     "verb", "vm", "workers",
 }
