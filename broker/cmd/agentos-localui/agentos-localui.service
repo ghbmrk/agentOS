@@ -1,10 +1,12 @@
 # agentOS Wi-Fi page (P2-2w). Installed by the image (P2-1, image/build.sh)
 # to /usr/lib/systemd/system/. It decodes untrusted forms and photos from any
-# phone on the access point, so it runs as its own user with no secret and
-# no authority: agentosd's localui.sock decides every owner action
-# (Security L1, L5 on the P2-2w plan), and the vault process's unlock.sock
-# every vault step. Its only state is a preloaded box's claim state (salted
-# verifiers, HW-10) and the Owner Card step's latch (#1270).
+# phone on the access point, so it runs as its own user, with no key and
+# none of the broker's or the vault's state: agentosd's localui.sock decides
+# every owner action (Security L1, L5 on the P2-2w plan), and the vault
+# process's unlock.sock every vault step. It does hold one authority: on a
+# preloaded box it keeps the claim state (salted verifiers of the sticker
+# codes, HW-10) and checks the claim against it, and it keeps the Owner Card
+# step's latch (#1270). Both live in its own state directory.
 [Unit]
 Description=agentOS Wi-Fi page
 After=agentosd.service agentos-egress.service
@@ -62,6 +64,9 @@ MemoryMax=512M
 RestrictAddressFamilies=AF_UNIX AF_INET
 IPAddressDeny=any
 IPAddressAllow=10.42.0.0/24
+# None of the broker's state (L18): localui-claim, outside this mask, moves
+# the claim state to the page's own directory, which stays writable.
+TemporaryFileSystem=/var/lib/agentos:ro
 # The claim and the card step pass codes through this process (IMG-nodump).
 LimitCORE=0
 

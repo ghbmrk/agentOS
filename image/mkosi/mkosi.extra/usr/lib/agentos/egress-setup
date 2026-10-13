@@ -24,5 +24,7 @@ if ! setpriv --reuid=agentos-egress --regid=agentos-egress --clear-groups \
 	exit 0
 fi
 if [ "${1:-}" = --restart ]; then
+	# Not under the lock: the restart waits for the vault process's own egress-setup, which takes it.
+	exec 9>&-
 	systemctl try-restart agentos-egress.service
 fi

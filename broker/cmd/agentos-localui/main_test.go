@@ -405,7 +405,21 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
 	}
-	if _, ok := set["TemporaryFileSystem"]; ok {
-		t.Error("the page's state directory is hidden: it cannot record the claim or the latch")
+	// Security B2 on #1302: the broker's state stays hidden (L18), and nothing hides or freezes the
+	// page's own state or the vault's sockets, which the page must write and reach.
+	if got := set["TemporaryFileSystem"]; strings.Join(got, "|") != "/var/lib/agentos:ro" {
+		t.Errorf("TemporaryFileSystem = %q, want /var/lib/agentos:ro", got)
+	}
+	for _, k := range []string{"TemporaryFileSystem", "InaccessiblePaths", "ReadOnlyPaths"} {
+		for _, v := range set[k] {
+			for _, f := range strings.Fields(v) {
+				p := strings.TrimSuffix(strings.TrimLeft(f, "-+"), ":ro")
+				for _, need := range []string{"/var/lib/agentos-localui", "/run/agentos-egress", "/run/agentos"} {
+					if p == need || strings.HasPrefix(need, strings.TrimSuffix(p, "/")+"/") {
+						t.Errorf("%s=%s covers %s", k, v, need)
+					}
+				}
+			}
+		}
 	}
 }

@@ -11,7 +11,9 @@ import os
 import re
 import pathlib
 import socket
+import shutil
 import stat
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -935,6 +937,51 @@ class NoDumpTest(unittest.TestCase):
         self.assertIn("systemd.swap=0", " ".join(finish.swap_violations(
             table, entry.replace("systemd.swap=0", "systemd.swap=0 systemd.swap=1"))))
 
+    def test_root_has_project_quotas(self):
+        # REQ: RES-4
+        # agentosd caps each machine's disk with project quotas (broker/quota); without them
+        # quota.Open fails and agent machines stay off. The root ext4 gets the features at build
+        # time (mkosi passes Environment= to systemd-repart's mkfs) and is mounted with prjquota
+        # (gpt-auto honours rootflags=). finish_image.py checks both on the built disk.
+        c = ini(MK / "mkosi.conf")["Content"]
+        self.assertIn('SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-O quota,project', c["Environment"].split("\n"))
+        self.assertIn("rootflags=prjquota", c["KernelCommandLine"].split())
+        self.assertEqual(ini(MK / "mkosi.repart/30-root.conf")["Partition"]["Format"], "ext4")
+        entry = (ENTRY % H).replace("rw quiet", "rw quiet rootflags=prjquota")
+        sb = bytearray(1024)
+        struct.pack_into("<H", sb, 0x38, 0xEF53)
+        struct.pack_into("<I", sb, 0x64, 0x0100 | 0x2000)
+        struct.pack_into("<I", sb, 0x26C, 12)
+        with tempfile.TemporaryDirectory() as d:
+            def disk(super_block):
+                img = pathlib.Path(d) / "disk.raw"
+                img.write_bytes(bytes(8 * 512 + 1024) + bytes(super_block) + bytes(2048))
+                return str(img)
+            table = {"sectorsize": 512, "partitions": [
+                {"type": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B", "start": 2},
+                {"type": "4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709", "start": 8}]}
+            self.assertEqual(finish.quota_violations(disk(sb), table, entry), [])
+            self.assertIn("rootflags=prjquota", " ".join(finish.quota_violations(disk(sb), table, ENTRY % H)))
+            self.assertIn("rootflags=prjquota", " ".join(finish.quota_violations(
+                disk(sb), table, entry.replace("rootflags=prjquota", "rootflags=prjquota rootflags=noquota"))))
+            for off, val, why in ((0x64, 0x2000, "quota"), (0x64, 0x0100, "project"), (0x26C, 0, "project quota inode"),
+                                  (0x38, 0, "ext4")):
+                bad = bytearray(sb)
+                struct.pack_into("<H" if off == 0x38 else "<I", bad, off, val)
+                with self.subTest(why):
+                    self.assertIn(why, " ".join(finish.quota_violations(disk(bad), table, entry)))
+            self.assertIn("root partition", " ".join(finish.quota_violations(
+                disk(sb), {"partitions": table["partitions"][:1]}, entry)))
+            if shutil.which("mkfs.ext4"):
+                # The real thing: mkfs.ext4 with the options the build passes.
+                fs = pathlib.Path(d) / "root.ext4"
+                with open(fs, "wb") as f:
+                    f.truncate(32 << 20)
+                subprocess.run(["mkfs.ext4", "-q", "-F", "-O", "quota,project", str(fs)], check=True)
+                img = pathlib.Path(d) / "real.raw"
+                img.write_bytes(bytes(8 * 512) + fs.read_bytes()[:8192])
+                self.assertEqual(finish.quota_violations(str(img), table, entry), [])
+
     def test_boot_test_expects_the_runtime_check(self):
         # The booted image reports swap and core dumps off in the health line, so CI shows them on
         # a real boot, not only in this tree check.
@@ -971,6 +1018,17 @@ def exec_args(unit):
     if words[0] == "/usr/lib/agentos/with-uids":
         words = words[1:]
     return words
+
+
+def settings(unit):
+    """A unit's KEY=VALUE lines as KEY -> every value in order (systemd repeats keys)."""
+    out = {}
+    for l in unit.read_text().replace("\\\n", " ").splitlines():
+        l = l.strip()
+        if l and not l.startswith(("#", "[")):
+            k, _, v = l.partition("=")
+            out.setdefault(k, []).append(v)
+    return out
 
 
 def arg(words, name):
@@ -1017,6 +1075,27 @@ class SetupServicesTest(unittest.TestCase):
         # CAP-9: no provider is allowed private data by the image, and no machine is granted a model.
         self.assertNotIn("-private-ok", words)
         self.assertNotIn("-grant", words)
+
+    def test_the_vault_process_is_sandboxed(self):
+        # Security B1 on #1302: at least the page's and the modem bridge's sandbox, and the TPM the
+        # only device. Each line is pinned, so deleting one fails here.
+        got = settings(UNITS / "agentos-egress.service")
+        for k, want in {
+            "CapabilityBoundingSet": [""], "NoNewPrivileges": ["yes"], "ProtectSystem": ["strict"],
+            "ProtectHome": ["yes"], "PrivateTmp": ["yes"], "ProtectKernelTunables": ["yes"],
+            "ProtectKernelModules": ["yes"], "ProtectKernelLogs": ["yes"], "ProtectControlGroups": ["yes"],
+            "ProtectClock": ["yes"], "ProtectHostname": ["yes"], "RestrictNamespaces": ["yes"],
+            "RestrictRealtime": ["yes"], "RestrictSUIDSGID": ["yes"], "LockPersonality": ["yes"],
+            "MemoryDenyWriteExecute": ["yes"], "SystemCallArchitectures": ["native"],
+            "SystemCallFilter": ["@system-service", "~@privileged @resources"], "UMask": ["0077"],
+            "ProtectProc": ["invisible"], "ProcSubset": ["pid"], "PrivateIPC": ["yes"], "RemoveIPC": ["yes"],
+            "DevicePolicy": ["closed"], "DeviceAllow": ["/dev/tpmrm0 rw"],
+            "RestrictAddressFamilies": ["AF_UNIX AF_INET AF_INET6 AF_NETLINK"],
+            "ExecStartPre": ["+/usr/lib/agentos/drive-id check", "+/usr/lib/agentos/egress-setup"],
+            "AmbientCapabilities": [], "PrivateDevices": [],
+        }.items():
+            with self.subTest(k):
+                self.assertEqual(got.get(k, []), want)
 
     def test_the_vault_process_s_flags_exist(self):
         defined = flags("agentos-egress")
@@ -1185,6 +1264,27 @@ class EgressSetupTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(log, "")
 
+    def test_the_vault_is_made_under_the_lock_and_restarted_outside_it(self):
+        # Two runs (the path unit's and a start's) never make the vault at once, and the restart
+        # does not wait on a vault process start that waits on this run's lock (Security on #1302).
+        lock = self.root / "run/agentos-egress-setup.lock"
+        probe = 'if flock -n "%s" true; then echo "%s free"; else echo "%s held"; fi >>"%s"'
+        stub(self.root / "usr/lib/agentos", "agentos-egress",
+             (probe % (lock, "init", "init", self.log)) + '\n: >"%s"' % (self.root / "var/lib/agentos-egress/vault.keys"))
+        stub(self.bin, "systemctl", probe % (lock, "restart", "restart", self.log))
+        write(self.root, "var/lib/agentos-localui/claim.json", "{}")
+        r, log = self.run_setup("--restart")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("init held", log)
+        self.assertIn("restart free", log)
+
+    def test_only_a_bounded_claim_is_read(self):
+        stub(self.root / "usr/lib/agentos", "agentos-egress", 'wc -c <"$4" >>"%s"' % self.log)
+        write(self.root, "var/lib/agentos-localui/claim.json", "x" * 70000)
+        r, log = self.run_setup()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(log.splitlines()[-1].strip(), "65536")
+
     def test_an_unclaimed_box_waits(self):
         write(self.root, "var/lib/agentos-localui/claim.json", "{}")
         self.egress(1)
@@ -1231,6 +1331,21 @@ class LocaluiClaimTest(unittest.TestCase):
         write(self.root, "var/lib/agentos-localui/claim.json", "claimed")
         self.assertEqual(self.run_claim(), "")
         self.assertEqual((self.root / "var/lib/agentos-localui/claim.json").read_text(), "claimed")
+
+    def test_a_link_is_never_followed(self):
+        # A link planted at either end must not have root chown or move what it points at.
+        target = write(self.root, "elsewhere", "other", 0o600)
+        (self.root / "var/lib/agentos").mkdir(parents=True)
+        (self.root / "var/lib/agentos/claim.json").symlink_to(target)
+        self.assertEqual(self.run_claim(), "")
+        self.assertTrue((self.root / "var/lib/agentos/claim.json").is_symlink())
+        self.assertFalse(os.path.lexists(self.root / "var/lib/agentos-localui/claim.json"))
+        (self.root / "var/lib/agentos/claim.json").unlink()
+        write(self.root, "var/lib/agentos/claim.json", "sealed")
+        (self.root / "var/lib/agentos-localui/claim.json").symlink_to(self.root / "nowhere")
+        self.assertEqual(self.run_claim(), "")
+        self.assertTrue((self.root / "var/lib/agentos/claim.json").exists())
+        self.assertTrue((self.root / "var/lib/agentos-localui/claim.json").is_symlink())
 
     def test_nothing_to_move(self):
         self.assertEqual(self.run_claim(), "")

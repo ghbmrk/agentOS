@@ -25,7 +25,7 @@ func TestTheImageRuleLoads(t *testing.T) {
 			t.Errorf("no route to %s", p.Name())
 		}
 	}
-	if _, _, err := modelRouting(rule, grants{"agent": {"anthropic", "openai"}}, nil, "", ""); err != nil {
+	if _, _, err := modelRouting(rule, grants{"agent": {"anthropic", "openai"}}, nil, nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 }

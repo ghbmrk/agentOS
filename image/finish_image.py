@@ -13,12 +13,17 @@ import hashlib
 import json
 import pathlib
 import re
+import struct
 import subprocess
 import sys
 
 ESP = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 # Linux swap (IMG-nodump): the broker's memory holds the Owner Card passphrase (card C13).
 SWAP_GUID = "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f"
+# The x86-64 root (30-root.conf, Type=root). agentosd caps each machine's disk with project quotas
+# (RES-4, broker/quota), which need the ext4 quota and project features and the prjquota mount.
+ROOT_GUID = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709"
+EXT4_MAGIC, RO_COMPAT_QUOTA, RO_COMPAT_PROJECT = 0xEF53, 0x0100, 0x2000
 TRIES = 3
 # No menu: boot the default entry at once (a held key still shows it on a PC with a screen).
 # No editor: anyone at the keyboard could otherwise drop usrhash= or add init=/bin/sh (Type #1
@@ -58,14 +63,47 @@ def esp_violations(paths, entry):
                   if p not in allowed and not any(re.fullmatch(a, p) for a in ESP_ALLOWED))
 
 
+def entry_args(entry, name):
+    """Every value of the entry's kernel argument NAME=, in order."""
+    return re.findall(r"(?:^|\s)%s=(\S*)" % re.escape(name), " ".join(
+        ln.split(None, 1)[1] for ln in entry.splitlines() if re.match(r"options\s", ln)))
+
+
 def swap_violations(partitions, entry):
     """No swap on the built disk (IMG-nodump): no partition of the swap type, and the entry turns
     off swap units (its last systemd.swap= is 0). partitions: sfdisk -J's list."""
     out = ["swap partition %s" % p.get("node", "?") for p in partitions if p["type"].lower() == SWAP_GUID]
-    vals = re.findall(r"(?:^|\s)systemd\.swap=(\S*)", " ".join(
-        ln.split(None, 1)[1] for ln in entry.splitlines() if re.match(r"options\s", ln)))
+    vals = entry_args(entry, "systemd.swap")
     if not vals or vals[-1] not in ("0", "no", "false", "off"):
         out.append("boot entry does not set systemd.swap=0")
+    return out
+
+
+def quota_violations(img, table, entry):
+    """Project quotas on the built root (RES-4): one ext4 root partition whose superblock has the
+    quota and project features and a project quota inode, and an entry whose last rootflags=
+    includes prjquota. table: sfdisk -J's partition table."""
+    out = []
+    roots = [p for p in table["partitions"] if p["type"].lower() == ROOT_GUID]
+    if len(roots) != 1:
+        out.append("expected one root partition, found %d" % len(roots))
+    else:
+        with open(img, "rb") as f:
+            f.seek(roots[0]["start"] * table.get("sectorsize", 512) + 1024)
+            sb = f.read(1024)
+        if len(sb) < 1024 or struct.unpack_from("<H", sb, 0x38)[0] != EXT4_MAGIC:
+            out.append("root is not ext4")
+        else:
+            ro = struct.unpack_from("<I", sb, 0x64)[0]
+            if not ro & RO_COMPAT_QUOTA:
+                out.append("root ext4 lacks the quota feature")
+            if not ro & RO_COMPAT_PROJECT:
+                out.append("root ext4 lacks the project feature")
+            if not struct.unpack_from("<I", sb, 0x26C)[0]:
+                out.append("root ext4 has no project quota inode")
+    flags = entry_args(entry, "rootflags")
+    if not flags or "prjquota" not in flags[-1].split(","):
+        out.append("boot entry does not mount root with rootflags=prjquota")
     return out
 
 
@@ -132,6 +170,9 @@ def main(out, version):
     bad = swap_violations(partition_table(str(img))["partitions"], text)
     if bad:
         sys.exit("image could swap or keep the broker's memory (IMG-nodump): %s" % bad)
+    bad = quota_violations(str(img), partition_table(str(img)), text)
+    if bad:
+        sys.exit("agent machines would have no disk quota (RES-4): %s" % bad)
     boot = {}
     for p in boot_files(text):
         data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
