@@ -38,6 +38,12 @@ import (
 // process) so that a begin that got no answer can still be cancelled by
 // it. #1175 UX review U-R1: while a replaced code generator is not yet
 // confirmed, the start page offers to show it again with the recovery key.
+//
+// #1316: the committed result can carry the new code generator's seed, so
+// it is the confirming session's alone (bound to a hash of its token), it
+// expires with the rotation's confirm window, and the enroll and show
+// pages clear it, as does Start; a commit answered after any of these
+// stores none.
 
 // RotationVault is the vault process's rotation ops on the unlock socket;
 // UnlockClient is the real one.
@@ -94,6 +100,10 @@ type RotationResult struct {
 // the vault's data.
 const commitTimeout = 2 * time.Minute
 
+// resultTTL bounds a committed result when the vault process gave no
+// confirm window; it is recovery.PendingTTL.
+const resultTTL = 30 * time.Minute
+
 // Rotation is the box's card rotation (RotationCard) over the vault
 // process. Lock order: a display's lock before mu; mu is never held while
 // calling into a display.
@@ -102,17 +112,39 @@ type Rotation struct {
 	Generate func(io.Reader) (*card.Card, error)
 	// Journal records the display's fixed events; optional.
 	Journal func(event string)
+	// Now is the clock; time.Now when nil.
+	Now func() time.Time
 
 	v       RotationVault
 	startMu sync.Mutex // serializes Start
-	mu      sync.Mutex
-	d       *card.Display
-	// res is the last commit's result, shown once on the done page.
-	res *RotationResult
+	// postMu serializes the display's posts, so that provision, which runs
+	// within one, knows its confirmer. Lock order: postMu, then the
+	// display's lock, then mu.
+	postMu    sync.Mutex
+	confirmer string // under postMu: the posting session's tokenKey
+	mu        sync.Mutex
+	d         *card.Display
+	// until is the waiting rotation's confirm window.
+	until time.Time
+	// gen counts what voids a commit's result: a start, an enroll or a
+	// show. A commit stores its result only if gen held across it.
+	gen uint64
+	// res is the last commit's result, shown once on the done page to
+	// resOwner (a tokenKey) until resUntil.
+	res      *RotationResult
+	resOwner string
+	resUntil time.Time
 }
 
 // NewRotation returns the box's card rotation over v.
 func NewRotation(v RotationVault) *Rotation { return &Rotation{v: v} }
+
+func (r *Rotation) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
 
 // Display implements RotationCard.
 func (r *Rotation) Display() *card.Display {
@@ -128,7 +160,8 @@ func (r *Rotation) Start(ctx context.Context, b RotationBegin) error {
 	defer r.startMu.Unlock()
 	r.mu.Lock()
 	old := r.d
-	r.d, r.res = nil, nil
+	r.d = nil
+	r.voidLocked()
 	r.mu.Unlock()
 	if old != nil {
 		// A card in effect cannot be cancelled; the vault process has
@@ -153,6 +186,10 @@ func (r *Rotation) Start(ctx context.Context, b RotationBegin) error {
 		r.cancel(id)
 		return err
 	}
+	until := st.Expires
+	if max := r.now().Add(resultTTL); until.IsZero() || until.After(max) {
+		until = max
+	}
 	parts := st.Parts
 	d, err := card.NewDisplay(card.DisplayConfig{Generate: r.Generate, Journal: r.Journal, Rotate: &parts,
 		WiFiName:  st.WiFiName,
@@ -163,15 +200,19 @@ func (r *Rotation) Start(ctx context.Context, b RotationBegin) error {
 		return err
 	}
 	r.mu.Lock()
-	r.d = d
+	r.d, r.until = d, until
 	r.mu.Unlock()
 	return nil
 }
 
 // provision is the display's provisioner: it commits the shown parts in
 // the vault process (#1090 R1) under the display's rotation ID (S-R1). It
-// runs with the display locked.
+// runs with the display locked, and within serveCard's post with postMu
+// held; otherwise it has no confirmer and its result shows to none.
 func (r *Rotation) provision(id string, c *card.Card) error {
+	r.mu.Lock()
+	gen := r.gen
+	r.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
 	res, err := r.v.CommitRotation(ctx, id, *c)
@@ -179,7 +220,9 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	switch {
 	case err == nil:
 		r.mu.Lock()
-		r.res = &res
+		if r.gen == gen && r.confirmer != "" {
+			r.res, r.resOwner, r.resUntil = &res, r.confirmer, r.until
+		}
 		r.mu.Unlock()
 		return nil
 	case errors.As(err, &ve) && ve.Status == http.StatusGone:
@@ -208,12 +251,57 @@ func (r *Rotation) cancel(id string) {
 	_ = r.v.CancelRotation(ctx, id)
 }
 
-// takeResult returns the last commit's result once.
-func (r *Rotation) takeResult() *RotationResult {
+// serveCard serves the display d to the session posting r, with the
+// display's own checks (signedIn is the session check); a post holds
+// postMu so that provision binds the result to its session.
+func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) bool, next string, w http.ResponseWriter, r *http.Request) {
+	h := d.Handler(signedIn, next)
+	if r.Method != http.MethodPost {
+		h.ServeHTTP(w, r)
+		return
+	}
+	rot.postMu.Lock()
+	defer rot.postMu.Unlock()
+	rot.confirmer = ""
+	if tok := cookieToken(r); tok != "" {
+		rot.confirmer = tokenKey(tok)
+	}
+	defer func() { rot.confirmer = "" }()
+	h.ServeHTTP(w, r)
+}
+
+// voidLocked drops the result and voids any commit still waiting for its
+// answer (#1316). It runs with mu held.
+func (r *Rotation) voidLocked() {
+	r.gen++
+	r.res, r.resOwner, r.resUntil = nil, "", time.Time{}
+}
+
+// void is voidLocked under mu.
+func (r *Rotation) void() {
+	r.mu.Lock()
+	r.voidLocked()
+	r.mu.Unlock()
+}
+
+// takeResult returns the last commit's result once, to the session that
+// confirmed it, within its window (#1316); to another session, nil.
+func (r *Rotation) takeResult(req *http.Request) *RotationResult {
+	tok := cookieToken(req)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.res == nil {
+		return nil
+	}
+	if !r.now().Before(r.resUntil) {
+		r.res, r.resOwner, r.resUntil = nil, "", time.Time{}
+		return nil
+	}
+	if tok == "" || r.resOwner != tokenKey(tok) {
+		return nil
+	}
 	res := r.res
-	r.res = nil
+	r.res, r.resOwner, r.resUntil = nil, "", time.Time{}
 	return res
 }
 
@@ -473,7 +561,7 @@ func vaultRefusal(err error) (int, string) {
 // rotateDone shows the committed rotation's notes and new code generator
 // once; later visits go home.
 func (s *Server) rotateDone(w http.ResponseWriter, r *http.Request, rot *Rotation) {
-	res := rot.takeResult()
+	res := rot.takeResult(r)
 	if res == nil {
 		http.Redirect(w, r, "/home", http.StatusSeeOther)
 		return
@@ -490,6 +578,7 @@ func (s *Server) rotateDone(w http.ResponseWriter, r *http.Request, rot *Rotatio
 }
 
 func (s *Server) rotateEnroll(w http.ResponseWriter, r *http.Request, rot *Rotation) {
+	rot.void() // #1316: the unfetched result goes, and any late commit's
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	ok, err := rot.v.ConfirmEnrollment(ctx, r.PostFormValue("code"))
@@ -509,6 +598,7 @@ func (s *Server) rotateEnroll(w http.ResponseWriter, r *http.Request, rot *Rotat
 }
 
 func (s *Server) rotateShow(w http.ResponseWriter, r *http.Request, rot *Rotation) {
+	rot.void() // #1316: as rotateEnroll
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	uri, err := rot.v.ShowEnrollment(ctx, r.PostFormValue("recovery"))
