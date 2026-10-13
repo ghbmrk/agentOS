@@ -18,10 +18,12 @@ type fakeAP struct {
 	log      *[]string
 	started  bool
 	startErr error
+	cfg      APConfig // the configuration the last Start was given
 }
 
 func (f *fakeAP) Start(ctx context.Context, cfg APConfig) error {
 	*f.log = append(*f.log, "ap start "+cfg.Iface)
+	f.cfg = cfg
 	if f.startErr != nil {
 		return f.startErr
 	}
