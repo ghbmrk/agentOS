@@ -38,6 +38,11 @@ const OwnerSocket = "owner.sock"
 // owner out (CH-2). The bridge opens a connection per message (B11).
 var ownerIdle = 60 * time.Second
 
+// settleWait and settleMaxWait pace startup reconciliation (OP-4): asked
+// again after settleWait while evidence is unavailable, doubling to
+// settleMaxWait.
+var settleWait, settleMaxWait = 2 * time.Second, 5 * time.Minute
+
 // GuestSocket is the socket file handed to agent machine id.
 func GuestSocket(id string) string { return "guest-" + id + ".sock" }
 
@@ -441,6 +446,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		go serveOwner(ctx, ch, cfg.Modem != nil)
 	}
 	go gate.Run(ctx, 0)
+	// A restart fences each account an in-flight effect may have landed on
+	// (OP-4). Evidence from the executors lifts it: one crash mid-dispatch
+	// must not hold the broker account forever. Nothing is re-executed.
+	go eng.SettleUnknown(ctx, settleWait, settleMaxWait)
 	go func() {
 		srv.Wait()
 		store.Close()

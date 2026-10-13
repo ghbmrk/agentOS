@@ -481,6 +481,40 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 	return rep
 }
 
+// reconcileRound bounds one round of SettleUnknown, so an executor whose
+// service hangs is asked again rather than holding the round forever.
+const reconcileRound = time.Minute
+
+// SettleUnknown runs Reconcile until no outcome_unknown attempt is left or
+// ctx ends, waiting wait after the first unresolved round and doubling up
+// to maxWait (OP-4). It only gathers evidence, so no effect runs again: an
+// executor that cannot tell what happened answers unknown and its account
+// stays fenced, and one whose service is down is asked again on the next
+// round. It returns the last round's report.
+func (e *Engine) SettleUnknown(ctx context.Context, wait, maxWait time.Duration) ReconcileReport {
+	if wait <= 0 {
+		wait = time.Millisecond
+	}
+	for {
+		rctx, cancel := context.WithTimeout(ctx, reconcileRound)
+		rep := e.Reconcile(rctx)
+		cancel()
+		if len(rep.Unresolved) == 0 || ctx.Err() != nil {
+			return rep
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return rep
+		case <-t.C:
+		}
+		if wait *= 2; wait > maxWait {
+			wait = maxWait
+		}
+	}
+}
+
 // Resolve records evidence about an attempt from outside the executor, such
 // as the owner confirming what happened. Only succeeded or not_applied
 // resolve an attempt; unknown is not evidence (OP-2).
