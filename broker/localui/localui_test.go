@@ -63,7 +63,7 @@ type fakeHooks struct {
 	finishErr error  // returned by Finish after the owner channel exists
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
-	noTexts     bool // the box cannot text: BoxNumber answers ""
+	noTexts     bool // the box cannot text: BoxNumber answers "", false
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -75,13 +75,13 @@ func (f *fakeHooks) JoinNetwork(ssid, pw string) error {
 	f.progress.Online = true
 	return nil
 }
-func (f *fakeHooks) BoxNumber() string {
+func (f *fakeHooks) BoxNumber() (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.noTexts {
-		return ""
+		return "", false
 	}
-	return boxNum
+	return boxNum, true
 }
 func (f *fakeHooks) HostInfo() string { return "GEEKOM Air12, 8 GB" }
 func (f *fakeHooks) Send(to, text string) error {

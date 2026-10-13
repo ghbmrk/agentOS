@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -127,6 +128,7 @@ func TestOnlyPairTextsReachSetup(t *testing.T) {
 	}{
 		{setupPhone, "hello", false},
 		{"BANK", "PAIR ABCD", true},
+		{setupPhone, "PAIR ABCD", true}, // a sender name that reads as a number
 		{"12345", "PAIR ABCD", false},
 		{setupPhone, "PAIRING", false},
 		{setupPhone, "pair abcd-12", false},
@@ -151,9 +153,18 @@ func TestOnlyPairTextsReachSetup(t *testing.T) {
 }
 
 func TestSetupInboundIsBounded(t *testing.T) {
-	s := modemlink.NewSetup(modemlink.SetupConfig{})
+	now := time.Unix(1_800_000_000, 0)
+	var mu sync.Mutex
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	s := modemlink.NewSetup(modemlink.SetupConfig{Now: clock})
 	okLine(t, s)
-	for i := range modemlink.InboundPerMinute + 5 {
+	for i := range modemlink.MaxSetupInbound + 5 {
+		if i > 0 && i%modemlink.SetupInboundPerMinute == 0 { // a new minute's texts
+			mu.Lock()
+			now = now.Add(time.Minute)
+			mu.Unlock()
+			okLine(t, s)
+		}
 		if err := setupCall(t, s, bridgeproto.OpInbound, bridgeproto.Inbound{Line: bridgeproto.LineOwner, ID: string(rune('A' + i)), From: setupPhone, Text: "PAIR ABCD"}, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -169,6 +180,61 @@ func TestSetupInboundIsBounded(t *testing.T) {
 	}
 	if n != modemlink.MaxSetupInbound {
 		t.Fatalf("%d texts waited", n)
+	}
+}
+
+// Only an unbound line's serial is recorded: a SIM the bridge reports
+// swapped, down or ok is not the box's unclaimed SIM (ST4).
+func TestSetupRecordsOnlyAnUnboundSIM(t *testing.T) {
+	var got []string
+	s := modemlink.NewSetup(modemlink.SetupConfig{Record: func(iccid string) error { got = append(got, iccid); return nil }})
+	for _, st := range []string{bridgeproto.StateSwapped, bridgeproto.StateDown, bridgeproto.StateOK} {
+		setupCall(t, s, bridgeproto.OpState, bridgeproto.State{OwnerLine: st, ICCID: setupSIM}, nil)
+	}
+	if len(got) != 0 {
+		t.Fatalf("recorded %q from a line that was not unbound", got)
+	}
+	setupCall(t, s, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateUnbound, ICCID: setupSIM}, nil)
+	if len(got) != 1 {
+		t.Fatalf("recorded %q", got)
+	}
+}
+
+// At most SetupInboundPerMinute PAIR texts are kept a minute, even when
+// the page takes each at once (ST2); the next minute takes more.
+func TestSetupInboundIsCappedPerMinute(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var mu sync.Mutex
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	s := modemlink.NewSetup(modemlink.SetupConfig{Now: clock})
+	okLine(t, s)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	kept := func(id int) bool {
+		t.Helper()
+		if err := setupCall(t, s, bridgeproto.OpInbound, bridgeproto.Inbound{Line: bridgeproto.LineOwner, ID: fmt.Sprint(id), From: setupPhone, Text: "PAIR ABCD"}, nil); err != nil {
+			t.Fatal(err)
+		}
+		short, stop := context.WithTimeout(ctx, 20*time.Millisecond)
+		defer stop()
+		_, _, ok := s.Next(short)
+		return ok
+	}
+	n := 0
+	for i := range modemlink.SetupInboundPerMinute + 3 {
+		if kept(i) {
+			n++
+		}
+	}
+	if n != modemlink.SetupInboundPerMinute || modemlink.SetupInboundPerMinute != 5 {
+		t.Fatalf("%d texts kept in a minute, cap %d", n, modemlink.SetupInboundPerMinute)
+	}
+	mu.Lock()
+	now = now.Add(time.Minute)
+	mu.Unlock()
+	okLine(t, s)
+	if !kept(100) {
+		t.Fatal("no text kept the next minute")
 	}
 }
 

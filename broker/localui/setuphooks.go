@@ -125,15 +125,18 @@ func (AgentosdSetup) StartDeviceCode(string) (string, string, error) {
 	return "", "", errNotServed
 }
 
-// BoxNumber is the box's own number while agentosd answers the modem line
-// can text; "" otherwise, and the number step says pairing is not
-// available yet.
-func (a AgentosdSetup) BoxNumber() string {
+// BoxNumber answers whether agentosd's modem line can text, and the box's
+// own number when the line reports one; a SIM that texts without
+// reporting its number answers "", true.
+func (a AgentosdSetup) BoxNumber() (string, bool) {
 	var l localapi.SetupLine
-	if a.call(localapi.OpSetupLine, nil, &l) != nil || !l.Ready || !phoneRe.MatchString(l.Number) {
-		return ""
+	if a.call(localapi.OpSetupLine, nil, &l) != nil || !l.Ready {
+		return "", false
 	}
-	return l.Number
+	if !phoneRe.MatchString(l.Number) {
+		return "", true
+	}
+	return l.Number, true
 }
 
 // Send has agentosd text one of setup's fixed texts. It waits up to

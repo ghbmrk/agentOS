@@ -21,7 +21,7 @@ import (
 //
 // There is no owner yet, so no number is trusted: only texts that start
 // with PAIR are passed on (anyone else's never reach the page), at most
-// InboundPerMinute a minute and MaxSetupInbound waiting. The SIM the
+// SetupInboundPerMinute a minute and MaxSetupInbound waiting. The SIM the
 // bridge finds while setup runs is recorded as the owner line's (Record),
 // once: it is the box's own SIM, and the owner pairs with its number.
 type SetupLine struct {
@@ -55,6 +55,10 @@ type SetupConfig struct {
 
 // MaxSetupInbound caps the PAIR texts waiting for the page.
 const MaxSetupInbound = 8
+
+// SetupInboundPerMinute caps the PAIR texts setup keeps a minute (ST2):
+// a pairing needs one, so a flood from anyone cannot fill the page.
+const SetupInboundPerMinute = 5
 
 // ErrNotSent is a setup text that did not go: no usable line, the bridge
 // reported a failure, or no result came within SendWait.
@@ -200,7 +204,7 @@ func (s *SetupLine) inbound(_ context.Context, _ sockets.Peer, args json.RawMess
 		}
 	}
 	s.inTimes = kept
-	if len(kept) >= InboundPerMinute {
+	if len(kept) >= SetupInboundPerMinute {
 		return struct{}{}, nil // taken and dropped: no one waits on it
 	}
 	select {

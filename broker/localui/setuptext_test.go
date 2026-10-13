@@ -22,13 +22,19 @@ import (
 // textLine is agentosd's modem line in setup mode (modemlink.SetupLine):
 // it sends what localsrv lets through and holds the PAIR texts that came.
 type textLine struct {
-	mu    sync.Mutex
-	sent  [][2]string
-	inbox chan [2]string
+	mu       sync.Mutex
+	noNumber bool // the SIM texts but does not report its number
+	sent     [][2]string
+	inbox    chan [2]string
 }
 
-func (l *textLine) Ready() bool    { return true }
-func (l *textLine) Number() string { return boxNum }
+func (l *textLine) Ready() bool { return true }
+func (l *textLine) Number() string {
+	if l.noNumber {
+		return ""
+	}
+	return boxNum
+}
 func (l *textLine) Send(_ context.Context, to, text string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -62,15 +68,15 @@ func (l *textLine) texts(t *testing.T, n int) [][2]string {
 // viaLine is the page with the box's number and texts served by agentosd.
 type viaLine struct{ viaAgentosd }
 
-func (v viaLine) BoxNumber() string          { return v.a.BoxNumber() }
+func (v viaLine) BoxNumber() (string, bool)  { return v.a.BoxNumber() }
 func (v viaLine) HostInfo() string           { return v.a.HostInfo() }
 func (v viaLine) Send(to, text string) error { return v.a.Send(to, text) }
 
 // textRig is a rig whose setup texts go through agentosd's setup ops
 // (localsrv), which send only setup's fixed texts.
-func textRig(t *testing.T) (*rig, *textLine, AgentosdSetup) {
+func textRig(t *testing.T, noNumber ...bool) (*rig, *textLine, AgentosdSetup) {
 	r := newRig(t)
-	line := &textLine{inbox: make(chan [2]string, 4)}
+	line := &textLine{inbox: make(chan [2]string, 4), noNumber: len(noNumber) > 0 && noNumber[0]}
 	s := localsrv.NewSetup(localsrv.SetupConfig{Record: localsrv.FileRecord{Path: filepath.Join(t.TempDir(), "setup.json")},
 		Enroll:   vaultEnroller{r.hooks},
 		Progress: func() localapi.SetupProgress { p := r.hooks.Progress(); return localapi.SetupProgress(p) },
@@ -104,6 +110,25 @@ func TestTheNumberStepSaysPlainlyWhenTheBoxCannotText(t *testing.T) {
 	page = html.UnescapeString(r.get("/setup"))
 	if strings.Contains(page, "not available yet") || !strings.Contains(page, "sms:"+boxNum) {
 		t.Fatalf("number step once the box can text: %s", page)
+	}
+}
+
+// ONB-6, CH-12 (UX B1 on #1269): a SIM that texts but does not report
+// its own number still pairs: the number step says why the owner cannot
+// text first and opens the number entry, which texts the setup code.
+func TestTheNumberStepOffersNumberEntryWhenTheBoxDoesNotKnowItsNumber(t *testing.T) {
+	r, line, _ := textRig(t, true)
+	page := html.UnescapeString(r.get("/setup"))
+	if strings.Contains(page, "not available yet") || strings.Contains(page, "sms:") || strings.Contains(page, "I sent it") ||
+		!strings.Contains(page, "I do not know my own number yet") ||
+		!strings.Contains(page, "<details open>") || !strings.Contains(page, `action="/setup/number"`) {
+		t.Fatalf("number step with no box number: %s", page)
+	}
+	if w := r.post("/setup/number", url.Values{"number": {ownerNum}}); w.Code >= 400 || r.setupErr() != "" {
+		t.Fatalf("number: %d %q", w.Code, r.setupErr())
+	}
+	if got := line.texts(t, 1); got[0][0] != ownerNum || !strings.HasPrefix(got[0][1], "AgentOS setup code: ") {
+		t.Fatalf("setup code text %q", got[0])
 	}
 }
 

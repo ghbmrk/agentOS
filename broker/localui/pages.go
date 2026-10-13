@@ -283,16 +283,17 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "number"}}
 <h2>2. Text your box</h2>
-{{if not .BoxNumber}}<p>Pairing is not available yet: I cannot send texts right now. Reload this page to try again.</p>
-{{else}}{{if .SMSLink}}<p><a class="button" href="{{.SMSLink}}">Text my box</a></p>
+{{if not .CanText}}<p>Pairing is not available yet: I cannot send texts right now. Reload this page to try again.</p>
+{{else}}{{if not .SMSLink}}<p>I do not know my own number yet, so you cannot text me first. Enter your number and I will text you a code.</p>
+{{else}}<p><a class="button" href="{{.SMSLink}}">Text my box</a></p>
 <p class="muted">Your messages app opens with my number and a code filled in. Press Send, then come back here.</p>
 <p class="muted">Or text <span class="mono">PAIR {{.PairCode}}</span> to <span class="mono">{{.BoxNumber}}</span>. The setup code on your card works too.</p>
 <p><a href="/box.vcf">Save my number as a contact</a></p>{{end}}
-<details><summary>Enter your number instead</summary>
+<details{{if not .SMSLink}} open{{end}}><summary>Enter your number{{if .SMSLink}} instead{{end}}</summary>
 <form method="post" action="/setup/number"><label>Your mobile number<input type="tel" name="number" placeholder="+1 555 010 0000" autocomplete="tel"></label><button>Text me a code</button></form>
 {{if .NumTo}}<form method="post" action="/setup/number-code"><label>Code texted to {{.NumTo}}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Confirm</button></form>{{end}}
 </details>
-<p><a href="/setup">I sent it</a></p>{{end}}
+{{if .SMSLink}}<p><a href="/setup">I sent it</a></p>{{end}}{{end}}
 {{if .Rejoin}}<h2>Home Wi-Fi again</h2>
 {{template "wifi" .Networks}}{{end}}
 
