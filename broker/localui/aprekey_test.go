@@ -195,6 +195,17 @@ func TestRekeyReportsAnAccessPointThatWillNotStop(t *testing.T) {
 	if ap.cfg.Password == rotatedPW {
 		t.Fatal("Rekey started the access point after a failed Stop")
 	}
+	// Up with the new password is refused too: hostapd may still run on
+	// wlan0, so the loader would track an access point it did not start,
+	// and a same-password Rekey would then pass.
+	c := apCfg("wlan0")
+	c.Password = rotatedPW
+	if err := l.Up(context.Background(), c); err == nil || !strings.Contains(err.Error(), "wlan0") {
+		t.Fatalf("Up after a failed Stop: %v", err)
+	}
+	if err := l.Rekey(context.Background(), rotatedPW); err == nil {
+		t.Fatal("Rekey to the password Up was given returned nil after a failed Stop")
+	}
 	// A Down that still cannot stop it keeps Rekey refusing.
 	if err := l.Down(context.Background()); err == nil {
 		t.Fatal("Down hid a failed Stop")
@@ -211,8 +222,6 @@ func TestRekeyReportsAnAccessPointThatWillNotStop(t *testing.T) {
 	if err := l.Rekey(context.Background(), rotatedPW); err != nil {
 		t.Fatalf("Rekey after a clean Down: %v", err)
 	}
-	c := apCfg("wlan0")
-	c.Password = rotatedPW
 	if err := l.Up(context.Background(), c); err != nil || ap.cfg.Password != rotatedPW {
 		t.Fatalf("Up with the new password: %v", err)
 	}

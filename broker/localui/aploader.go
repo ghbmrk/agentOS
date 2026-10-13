@@ -23,7 +23,7 @@ import (
 //   - Station refuses an interface whose BringDown last failed, or that runs
 //     the access point (b): on a single radio it would join the home Wi-Fi
 //     still exempt.
-//   - Up refuses while another interface is up, its BringDown last failed,
+//   - Up refuses while another interface is up, any BringDown last failed,
 //     or agentos_ap holds it (c): BringUp(wl1) replaces agentos_ap, so wl0
 //     would stay exempt with no table and every box port open to its
 //     network.
@@ -82,8 +82,8 @@ func (l *APLoader) Start(ctx context.Context, ifaces ...string) error {
 }
 
 // Up brings the access point up on cfg.Iface. It refuses an interface no
-// Start named, while an access point is up, while any other interface's BringDown
-// last failed, and while agentos_ap holds another interface or cannot be
+// Start named, while an access point is up, while any interface's BringDown
+// last failed (its own included: hostapd may still run there), and while agentos_ap holds another interface or cannot be
 // read. If BringUp fails, the loader runs BringDown again, and an
 // interface it cannot bring down stays refused for Station and blocks Up
 // on any other.
@@ -112,8 +112,11 @@ func (l *APLoader) Up(ctx context.Context, cfg APConfig) error {
 func (l *APLoader) Rekey(ctx context.Context, password string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := l.stuck(); err != nil {
+		return err
+	}
 	if l.up == "" {
-		return l.stuck()
+		return nil
 	}
 	cfg := l.cfg
 	cfg.Password = password
@@ -138,10 +141,11 @@ func (l *APLoader) upLocked(ctx context.Context, cfg APConfig) error {
 	if l.up != "" {
 		return fmt.Errorf("localui: the access point is already up on %s", l.up)
 	}
+	if err := l.failed[cfg.Iface]; err != nil {
+		return fmt.Errorf("localui: %s did not come down, so an access point with the old password may still run there: %w", cfg.Iface, err)
+	}
 	for iface := range l.failed {
-		if iface != cfg.Iface {
-			return fmt.Errorf("localui: %s may still be exempt, so %s cannot run the access point", iface, cfg.Iface)
-		}
+		return fmt.Errorf("localui: %s may still be exempt, so %s cannot run the access point", iface, cfg.Iface)
 	}
 	// BringUp replaces agentos_ap, so a table held for another interface
 	// (one a Start could not bring down or read) would leave that
