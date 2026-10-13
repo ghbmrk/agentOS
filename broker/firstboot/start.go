@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/claim"
@@ -29,13 +30,17 @@ const (
 // step.
 var ErrReinstall = errors.New("firstboot: I am already claimed; reinstall me to set me up again")
 
-// BoxConfig configures Begin. Every field is required but Card's optional
-// ones.
+// BoxConfig configures Begin. Every field is required but SetupNet and
+// Card's optional ones.
 type BoxConfig struct {
 	// Claim opens the claim state; its Store is the seller flow's.
 	Claim claim.Config
 	// Latch is the card step's latch.
 	Latch Store
+	// SetupNet holds the seller's setup network (claim.SetupNetPath): the
+	// Wi-Fi the phone joins before the card exists. Nil on an image that
+	// keeps none, which serves no network before the card.
+	SetupNet Store
 	// Reset removes a vault made from a card nobody confirmed
 	// (ResetUnlatched).
 	Reset func() error
@@ -64,15 +69,75 @@ type FirstBoot struct {
 	Claim ClaimScreen
 	// Card is the card step.
 	Card CardHold
+
+	setup Store
+	mu    sync.Mutex
+	net   *claim.SetupNet // nil once burned, or when the box has none
+}
+
+// Network is the Wi-Fi the access point serves before the Owner Card
+// exists: the sticker's setup network until the card is confirmed (§8.1
+// step 4), nil after it and on a box that has none. Once the card step no
+// longer holds it burns the setup file, so the seller's copy of the
+// password opens nothing on a set-up box (CTRL-claim-ap). The loader
+// calls it each time it brings the access point up; nil means the card's
+// network. A burn that fails returns the error and still no network.
+func (f *FirstBoot) Network() (*claim.SetupNet, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.net == nil {
+		return nil, nil
+	}
+	if f.Card.Hold() != nil {
+		n := *f.net
+		return &n, nil
+	}
+	if err := f.setup.Save(nil); err != nil {
+		return nil, fmt.Errorf("firstboot: burning the setup network: %w", err)
+	}
+	f.net = nil
+	return nil, nil
+}
+
+// loadSetupNet reads the setup network, nil when st is nil or empty (a
+// burned file is empty). A file that does not parse is an error.
+func loadSetupNet(st Store) (*claim.SetupNet, error) {
+	if st == nil {
+		return nil, nil
+	}
+	b, err := st.Load()
+	if err != nil {
+		return nil, fmt.Errorf("firstboot: setup network: %w", err)
+	}
+	if len(b) == 0 {
+		return nil, nil
+	}
+	n, err := claim.ParseSetupNet(b)
+	if err != nil {
+		return nil, err
+	}
+	return &n, nil
 }
 
 // Begin picks the start's route and builds its steps. It reads the latch
 // first: a latch it cannot read stops the start and resets nothing. A box
 // whose claim state opens is marked preloaded on the latch before
 // anything else, so losing the claim state later routes to reinstall,
-// never to the download path's pairing (ASSUMPTIONS.md F15). An owned box
-// never reaches Begin (agentosd checks its record first).
+// never to the download path's pairing (ASSUMPTIONS.md F15). A setup
+// network on a confirmed box is burned before anything else; a setup
+// network without a claim state marks a sealed box too, so it routes to
+// reinstall (F16). An owned box never reaches Begin (agentosd checks its
+// record first).
 func Begin(cfg BoxConfig) (*FirstBoot, error) {
+	fb, err := begin(cfg)
+	if err != nil {
+		return nil, err
+	}
+	fb.setup = cfg.SetupNet
+	return fb, nil
+}
+
+func begin(cfg BoxConfig) (*FirstBoot, error) {
 	if cfg.Latch == nil || cfg.Reset == nil || cfg.Claim.Store == nil {
 		return nil, errors.New("firstboot: incomplete first-boot config")
 	}
@@ -86,10 +151,20 @@ func Begin(cfg BoxConfig) (*FirstBoot, error) {
 			return nil, fmt.Errorf("firstboot: card state: %w", err)
 		}
 	}
+	net, err := loadSetupNet(cfg.SetupNet)
+	if err != nil {
+		return nil, err
+	}
+	if cs.Confirmed && net != nil {
+		if err := cfg.SetupNet.Save(nil); err != nil {
+			return nil, fmt.Errorf("firstboot: burning the setup network: %w", err)
+		}
+		net = nil
+	}
 	cl, err := claim.Open(cfg.Claim)
 	switch {
-	case errors.Is(err, claim.ErrNoCode) && cs.Preloaded:
-		return &FirstBoot{Route: RouteReinstall, Claim: reinstall{}, Card: reinstall{}}, nil
+	case errors.Is(err, claim.ErrNoCode) && (cs.Preloaded || net != nil):
+		return &FirstBoot{Route: RouteReinstall, Claim: reinstall{}, Card: reinstall{}, net: net}, nil
 	case errors.Is(err, claim.ErrNoCode):
 		if err := ResetUnlatched(cfg.Latch, cfg.Reset); err != nil {
 			return nil, err
@@ -119,7 +194,7 @@ func Begin(cfg BoxConfig) (*FirstBoot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &FirstBoot{Route: RouteClaim, Claim: c, Card: c}, nil
+	return &FirstBoot{Route: RouteClaim, Claim: c, Card: c, net: net}, nil
 }
 
 // reinstall is RouteReinstall's claim screen and card step: claimed to
