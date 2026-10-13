@@ -63,7 +63,8 @@ type fakeHooks struct {
 	finishErr error  // returned by Finish after the owner channel exists
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
-	noTexts     bool // the box cannot text: BoxNumber answers "", false
+	noTexts     bool  // the box cannot text: BoxNumber answers "", false
+	keyErr      error // ConnectAPIKey's answer when set; nothing is stored
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -158,6 +159,9 @@ func (f *fakeHooks) AlreadySetUp() bool { f.mu.Lock(); defer f.mu.Unlock(); retu
 func (f *fakeHooks) ConnectAPIKey(id, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.keyErr != nil {
+		return f.keyErr
+	}
 	if f.keys == nil {
 		f.keys = map[string]string{}
 	}
