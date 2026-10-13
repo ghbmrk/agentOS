@@ -254,6 +254,9 @@ type custody struct {
 	// modelTransport is the proxy's upstream transport; nil outside
 	// tests.
 	modelTransport http.RoundTripper
+	// keyCheck sends setup's key checks (setupKey); nil outside tests,
+	// where each check gets the proxy's default transport over guard.
+	keyCheck http.RoundTripper
 
 	mu sync.Mutex
 	// smsFailSince is when the texting account's polls started failing

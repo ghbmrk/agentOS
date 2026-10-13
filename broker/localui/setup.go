@@ -211,6 +211,23 @@ var (
 	ErrCodesUnavailable = errors.New("code-generator enrollment unavailable")
 )
 
+// The vault process's answers to an API key, as Hooks report them
+// (ONB-3, #1265). The page shows each its own text.
+var (
+	// ErrKeyRefused: the provider did not accept the key when the vault
+	// process checked it.
+	ErrKeyRefused = errors.New("the provider did not accept the key")
+	// ErrKeyUnchecked: the vault process could not reach the provider to
+	// check the key, so it did not store it.
+	ErrKeyUnchecked = errors.New("the key could not be checked with the provider")
+	// ErrKeysLimited: too many keys were tried in the last minute.
+	ErrKeysLimited = errors.New("too many keys tried")
+	// ErrKeyNotTaken: the vault process does not take this provider or key.
+	ErrKeyNotTaken = errors.New("the vault does not take that provider or key")
+	// ErrSetupClosed: setup is closed, so no step can store a key.
+	ErrSetupClosed = errors.New("setup is closed")
+)
+
 // replaceCodesNote is the codes step's note after the vault voided the code
 // generator entry (F10, #1210 R1). It is GSM-7, like the page's texts.
 const replaceCodesNote = "I had to make your approval codes again. In your phone's code generator, delete the old AgentOS entry, then add the new one below."
@@ -1015,9 +1032,29 @@ func (u *setup) aiKey(r *http.Request, _ string) error {
 		return err
 	}
 	if err := u.s.cfg.Hooks.ConnectAPIKey(id, key); err != nil {
-		return errors.New("The provider did not accept that key.")
+		return errors.New(keyErrText(err))
 	}
 	return nil
+}
+
+// keyErrText is the page's text for a key the vault did not store: only a
+// key the provider refused is blamed on the provider (U-2, #1265).
+func keyErrText(err error) string {
+	switch {
+	case errors.Is(err, ErrKeyRefused):
+		return "The provider did not accept that key."
+	case errors.Is(err, ErrKeyUnchecked):
+		return "I could not reach the provider to check that key, so I did not save it. Try again in a minute."
+	case errors.Is(err, ErrKeysLimited):
+		return "Too many keys tried in the last minute. Wait a minute and try again."
+	case errors.Is(err, ErrKeyNotTaken):
+		return "Paste the API key from your provider's page."
+	case errors.Is(err, ErrSetupClosed):
+		return errSetupDone.Error()
+	case errors.Is(err, ErrCodesUnavailable):
+		return cannotFinish
+	}
+	return "Could not save the key. Try again."
 }
 
 func (u *setup) aiDevice(r *http.Request, _ string) error {

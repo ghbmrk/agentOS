@@ -366,6 +366,84 @@ func TestRunGatesSetupOnTheClaim(t *testing.T) {
 	})
 }
 
+// #1270 (CTRL-card-sock s1): on the image the page reaches the vault
+// process's unlock socket and keeps its claim state and the card step's
+// latch in its own state directory, which localui-claim fills from the
+// seller's sealed claim at the first start; it never dumps core, since
+// the claim verifiers and codes pass through it (IMG-nodump).
+// REQ: HW-10, HW-1, CRED-9
+func TestTheUnitWiresTheSetupFiles(t *testing.T) {
+	b, err := os.ReadFile("agentos-localui.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := map[string][]string{}
+	var exec []string
+	for _, l := range strings.Split(strings.ReplaceAll(string(b), "\\\n", " "), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "[") {
+			continue
+		}
+		k, v, _ := strings.Cut(l, "=")
+		set[k] = append(set[k], v)
+		if k == "ExecStart" {
+			exec = strings.Fields(v)
+		}
+	}
+	arg := func(name string) string {
+		for i, w := range exec {
+			if w == "-"+name && i+1 < len(exec) {
+				return exec[i+1]
+			}
+		}
+		return ""
+	}
+	for name, want := range map[string]string{
+		"vault-sock":  "/run/agentos-egress/unlock.sock",
+		"claim-state": "/var/lib/agentos-localui/claim.json",
+		"card-latch":  "/var/lib/agentos-localui/card-latch.json",
+	} {
+		if got := arg(name); got != want {
+			t.Errorf("-%s = %q, want %q", name, got, want)
+		}
+	}
+	for k, want := range map[string][]string{
+		"StateDirectory":     {"agentos-localui"},
+		"StateDirectoryMode": {"0700"},
+		"LimitCORE":          {"0"},
+		"ExecStartPre":       {"+/usr/lib/agentos/localui-claim"},
+	} {
+		if got := set[k]; strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	// B3 on #1302: other processes stay invisible, but not ProcSubset=pid, which hides
+	// /proc/sys/kernel/random/boot_id: claim.Open reads it, and the page would fail at every start.
+	if got := set["ProtectProc"]; strings.Join(got, "|") != "invisible" {
+		t.Errorf("ProtectProc = %q, want invisible", got)
+	}
+	if got := set["ProcSubset"]; len(got) != 0 {
+		t.Errorf("ProcSubset = %q: it hides the boot_id the claim reads", got)
+	}
+	// Security B2 on #1302: the broker's state stays hidden (L18), and nothing hides or freezes the
+	// page's own state or the vault's sockets, which the page must write and reach.
+	if got := set["TemporaryFileSystem"]; strings.Join(got, "|") != "/var/lib/agentos:ro" {
+		t.Errorf("TemporaryFileSystem = %q, want /var/lib/agentos:ro", got)
+	}
+	for _, k := range []string{"TemporaryFileSystem", "InaccessiblePaths", "ReadOnlyPaths"} {
+		for _, v := range set[k] {
+			for _, f := range strings.Fields(v) {
+				p := strings.TrimSuffix(strings.TrimLeft(f, "-+"), ":ro")
+				for _, need := range []string{"/var/lib/agentos-localui", "/run/agentos-egress", "/run/agentos"} {
+					if p == need || strings.HasPrefix(need, strings.TrimSuffix(p, "/")+"/") {
+						t.Errorf("%s=%s covers %s", k, v, need)
+					}
+				}
+			}
+		}
+	}
+}
+
 // The page still answers PAIR texts once its hooks carry the card step:
 // run starts PairTexts on any hooks that have it (P2-2w c4c with #1115).
 // REQ: CH-12, ONB-6

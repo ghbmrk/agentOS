@@ -1,0 +1,3 @@
+# The TPM is the vault process's (CRED-8: a trusted host unseals the vault's boot slot). Only the
+# resource manager's node, so the kernel shares it safely; the raw /dev/tpm0 stays root's.
+SUBSYSTEM=="tpmrm", KERNEL=="tpmrm[0-9]*", GROUP="agentos-egress", MODE="0660"

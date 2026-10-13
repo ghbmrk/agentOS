@@ -25,6 +25,10 @@ type Adapter struct {
 	// fixed allowlists. Credential-bearing names are refused.
 	RequestHeaders  []string
 	ResponseHeaders []string
+	// KeyCheck, when set, is the one call setup makes with a pasted key
+	// before the vault stores it (CheckKey). It is not an operation: no
+	// guest can send it.
+	KeyCheck *KeyCheck
 }
 
 // Injection writes the credential as Header: Prefix + value.
@@ -116,6 +120,7 @@ func OpenAI(credential string) Adapter {
 				StreamUsage:    true,
 			},
 		}},
+		KeyCheck: &KeyCheck{Path: "/v1/models"},
 	}
 }
 
@@ -138,6 +143,7 @@ func Anthropic(credential string) Adapter {
 			},
 		}},
 		RequestHeaders: []string{"Anthropic-Version"},
+		KeyCheck:       &KeyCheck{Path: "/v1/models", Headers: map[string]string{"Anthropic-Version": "2023-06-01"}},
 	}
 }
 
@@ -211,6 +217,16 @@ func (a Adapter) validate() error {
 		c := http.CanonicalHeaderKey(h)
 		if forbiddenHeader(c) || c == inject {
 			return fmt.Errorf("adapter %s: may not forward header %s", a.Name, c)
+		}
+	}
+	if kc := a.KeyCheck; kc != nil {
+		if _, err := splitPath(kc.Path); err != nil || strings.ContainsAny(kc.Path, "{}") {
+			return fmt.Errorf("adapter %s: key check path %q must be literal", a.Name, kc.Path)
+		}
+		for h := range kc.Headers {
+			if c := http.CanonicalHeaderKey(h); forbiddenHeader(c) || c == inject {
+				return fmt.Errorf("adapter %s: key check may not send header %s", a.Name, c)
+			}
 		}
 	}
 	return nil
