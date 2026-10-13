@@ -338,7 +338,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	// The journal check rides STATUS as a note: silent while the journal
 	// keeps the floor invariants, one line naming the rule when it does not.
 	// A restart fence startup reconcile has not lifted rides it too (#1373).
-	notes := append([]func() string{check.Note(eng), unconfirmedNote(eng)}, cfg.Notes...)
+	notes := append(append([]func() string{check.Note(eng)}, unconfirmedNotes(eng)...), cfg.Notes...)
 	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notes: notes,
 		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	handle := h.Handle

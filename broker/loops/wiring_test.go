@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,6 +206,14 @@ func (fenced) Dispatch(context.Context, string) (journal.Status, error) {
 	return journal.Status{}, fmt.Errorf("%w: %s", journal.ErrUnreconciled, journal.BrokerAccount)
 }
 
+// held is the journal while the same change, sent this boot, is not
+// confirmed (A2): a hold, not a restart fence.
+type held struct{ Journal }
+
+func (held) Dispatch(_ context.Context, id string) (journal.Status, error) {
+	return journal.Status{}, &journal.HeldError{ID: id, BlockedBy: "loops:earlier"}
+}
+
 func (pending) Submit(in journal.Intent) (journal.Status, error) {
 	return journal.Status{Intent: in, State: journal.Pending}, nil
 }
@@ -260,6 +269,12 @@ func TestAFailedSettingSaysWhy(t *testing.T) {
 	// on hold and where to see it (OP-4, CH-12; #1373).
 	r.s.Attach(fenced{r.eng})
 	if got, _ := r.s.Text(ctx, "LOOPS OFF", true); got != fencedReply {
+		t.Fatalf("%q", got)
+	}
+	// A same-effect hold also matches ErrUnreconciled, but no restart is
+	// involved and STATUS does not list it (S5 on #1382).
+	r.s.Attach(held{r.eng})
+	if got, _ := r.s.Text(ctx, "LOOPS OFF", true); got != heldReply || strings.Contains(got, "restart") || strings.Contains(got, "STATUS") {
 		t.Fatalf("%q", got)
 	}
 	r.s.cfg.Journal = nil

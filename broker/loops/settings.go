@@ -396,6 +396,7 @@ func (s *Scheduler) Text(ctx context.Context, msg string, unlocked bool) (reply 
 	prev := s.Settings().Updates
 	err := s.Set(ctx, r)
 	var no refused
+	var held *journal.HeldError
 	switch {
 	case err == nil:
 		reply := Confirm(r, s.Settings())
@@ -424,6 +425,10 @@ func (s *Scheduler) Text(ctx context.Context, msg string, unlocked bool) (reply 
 		return "Sharing is not available yet.", true
 	case errors.As(err, &no):
 		return "Not allowed: " + no.reason + ".", true
+	case errors.As(err, &held):
+		// The same change, sent this boot, is not confirmed: no restart
+		// and nothing in STATUS (S5 on #1382).
+		return heldReply, true
 	case errors.Is(err, journal.ErrUnreconciled):
 		return fencedReply, true
 	default:
@@ -433,8 +438,13 @@ func (s *Scheduler) Text(ctx context.Context, msg string, unlocked bool) (reply 
 
 // fencedReply answers a setting a restart fence holds (OP-4): trying again
 // works only once the box confirms the earlier change, which STATUS shows
-// while it is pending (#1373).
-const fencedReply = "Settings are on hold: a change from before the restart is not confirmed yet. Send this again once STATUS no longer lists it."
+// while it is pending (#1373). In the box's own voice (CH-21).
+const fencedReply = "I'm holding settings until I can confirm a change from before the restart. Send this again once STATUS no longer lists it."
+
+// heldReply answers a setting held behind the same change whose outcome
+// is not known yet (journal.HeldError, OP-2): no restart is involved and
+// STATUS does not list it (S5 on #1382).
+const heldReply = "I'm holding this setting: the same change is already under way and not confirmed yet. Try again later."
 
 // Narrows reports that msg is a loop setting a locked session takes: the
 // owner channel runs it at once instead of holding it for the unlock.

@@ -142,6 +142,26 @@ func TestOP4UnconfirmedAfterMissedRounds(t *testing.T) {
 	if len(e.Unconfirmed(2)) != 0 {
 		t.Fatal("shown before two missed rounds")
 	}
+	// Only restart-fenced intents are listed: one pending, one authorized
+	// and one this boot left outcome_unknown are not "since the restart"
+	// (Security S3 on #1382).
+	svc.mode = func(key string) execMode {
+		if key == AttemptKey("u", 1) {
+			return modeTimeout
+		}
+		return modeOK
+	}
+	must(e.Submit(intent("p", "other")))
+	must(e.Submit(intent("q", "other")))
+	must(e.Authorize(ctx, "q"))
+	must(e.Submit(intent("u", "other")))
+	must(e.Authorize(ctx, "u"))
+	if s, _ := e.Dispatch(ctx, "u"); s.State != OutcomeUnknown {
+		t.Fatalf("u is %s", s.State)
+	}
+	if got := e.Unconfirmed(1); len(got) != 1 || got[0].ID != "a" {
+		t.Fatalf("with open intents beside the fenced one: %+v", got)
+	}
 	e.SettleUnknown(ctx, time.Millisecond, time.Millisecond)
 	if got := e.Unconfirmed(1); len(got) != 0 {
 		t.Fatalf("after settling: %+v", got)

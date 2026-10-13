@@ -167,7 +167,7 @@ func TestOP4StartupReconcileReleasesTheBrokerAccount(t *testing.T) {
 		if st, err := loopsOn(t, d, "loops:on:1"); err != nil || st.State != journal.Succeeded {
 			t.Fatalf("applied=%v: LOOPS ON after reconcile: %s %v", applied, st.State, err)
 		}
-		if r := strings.Join(text(t, dir, owner, "STATUS"), "\n"); strings.Contains(r, "Not confirmed") {
+		if r := strings.Join(text(t, dir, owner, "STATUS"), "\n"); strings.Contains(r, "cannot yet confirm") {
 			t.Fatalf("applied=%v: STATUS after reconcile: %q", applied, r)
 		}
 		f.mu.Lock()
@@ -205,7 +205,7 @@ func TestOP4UncertainOutcomeStaysFencedAndStopAnswers(t *testing.T) {
 		t.Fatalf("LOOPS ON while the outcome is unknown: %v", err)
 	}
 	// STATUS says what is not confirmed, in the owner's words (#1373).
-	const held = "Not confirmed since the restart: whether a setting change went through."
+	const held = " I cannot yet confirm a setting change from before the restart. " + unconfirmedWait
 	if r := strings.Join(text(t, dir, owner, "STATUS"), "\n"); !strings.Contains(r, held) || strings.Contains(r, "loops:") {
 		t.Fatalf("STATUS while fenced: %q", r)
 	}

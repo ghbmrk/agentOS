@@ -723,18 +723,18 @@ func main() {
 		retries = spare.Retries
 	}
 	steps := newStepNotes(&cfg.Notes)
-	if lp != nil && recallDir != "" && verifier != nil {
-		// An approved item 2 that finds recall not open yet waits for it
-		// (#327 L3 B-3); set before the daemon serves the owner.
-		lp.forgetOwner.whenOpen = func() {
-			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+	// FORGET's item 2s a restart interrupted resume once recall opens
+	// (#327 L3 B-3), including one startup reconcile finds late (#1370);
+	// with recall off the owner is told they cannot, once boot setup is
+	// done (Security S1 on #1382). Wired before the daemon serves the
+	// owner and starts reconcile; resumeBoot runs at the end of setup.
+	var resumeBoot func()
+	if lp != nil {
+		var onOpen func(func())
+		if recallDir != "" && verifier != nil {
+			onOpen = recallExec.OnOpen
 		}
-		// One startup reconcile finds after recall opened resumes too
-		// (#1370); set before daemon.Run starts reconcile.
-		lp.forgetOwner.resume = lp.forgetOwner.whenOpen
-	} else if lp != nil {
-		// Recall off: the owner is told it is owed (W3-forget-b2c).
-		lp.forgetOwner.resume = func() { go lp.forgetOwner.resumeAgent(ctx) }
+		resumeBoot = lp.forgetOwner.wireResume(ctx, onOpen)
 	}
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
@@ -884,17 +884,17 @@ func main() {
 	// The recall identity key is vault-held (recall K5): recall opens once
 	// the vault process can hand it over.
 	// FORGET's item 2s a restart interrupted resume once recall opens;
-	// with recall off they cannot, and the owner is told so.
+	// with recall off they cannot, and the owner is told so (wireResume).
 	if recallDir != "" && verifier != nil {
-		if lp != nil {
-			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+		if resumeBoot != nil {
+			resumeBoot()
 		}
 		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
 	} else {
 		recallExec.Off()
 		caps.recallWired(false)
-		if lp != nil {
-			go lp.forgetOwner.resumeAgent(ctx)
+		if resumeBoot != nil {
+			resumeBoot()
 		}
 	}
 	if line != nil {

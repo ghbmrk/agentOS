@@ -206,9 +206,8 @@ type ownerForget struct {
 	// (LateExecutor.OnOpen); nil when recall is off.
 	whenOpen func()
 	// resume, if set, starts resumeAgent for an item 2 Reconcile found
-	// after the boot's resume may already have run (#1370): whenOpen when
-	// recall is configured, else a resume that tells the owner it is
-	// owed. Set before startup reconcile runs.
+	// after the boot's resume may already have run (#1370). Set only by
+	// wireResume, before startup reconcile runs.
 	resume func()
 	// resuming serializes resumeAgent: recall's open runs every queued
 	// OnOpen together, and each run must see the take-backs the one
@@ -1240,6 +1239,44 @@ func (f *ownerForget) Reconcile(_ context.Context, in journal.Intent, _ int) jou
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "tombstoned; finished at start"}
 	}
 	return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "no tombstone"}
+}
+
+// wireResume sets how an interrupted item 2 is resumed and returns the
+// boot's own resume, which main calls once boot setup is done: the gate,
+// the owner channel and the agent machine attached. onOpen is recall's
+// LateExecutor.OnOpen when recall is configured, nil when it is off.
+//
+// Recall on: whenOpen, resume and the boot's resume each queue a run for
+// recall's open, which comes after boot setup (#1370). Recall off: a run
+// Reconcile starts waits for the boot's resume (Security S1 on #1382).
+// Startup reconcile starts inside daemon.Run, before boot setup, and a run
+// then would judge item 2 without the gate or the agent, tell the owner
+// something false, and drain the queue the boot's resume reads, so the
+// owner would never hear that it cannot be done (forgetAgentNotOpen).
+// resumeAgent's queue makes one of the two runs tell it, once.
+func (f *ownerForget) wireResume(ctx context.Context, onOpen func(func())) (boot func()) {
+	run := func() { go f.resumeAgent(ctx) }
+	if onOpen != nil {
+		f.whenOpen = func() { onOpen(run) }
+		f.resume = f.whenOpen
+		return f.whenOpen
+	}
+	f.whenOpen = nil
+	booted := make(chan struct{})
+	f.resume = func() {
+		go func() {
+			select {
+			case <-booted:
+				f.resumeAgent(ctx)
+			case <-ctx.Done():
+			}
+		}()
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(booted) })
+		run()
+	}
 }
 
 // owedForget is a forget whose done text is owed: when the task was from
