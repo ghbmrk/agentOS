@@ -1,6 +1,6 @@
 # Operating model
 
-How AgentOS is built for the most progress per weekly limit at the same quality. CLAUDE.md holds the rules, one line each; this file holds the procedures and the reasons behind them. Decided by Mark on 2026-10-07 (DECISIONS.md, COST-1).
+How agentOS is built for the most progress per weekly limit at the same quality. CLAUDE.md holds the rules, one line each; this file holds the procedures and the reasons behind them. Decided by Mark on 2026-10-07 (DECISIONS.md, COST-1).
 
 **Where facts live.** Each fact has one home, chosen by its kind; other files point to it and never restate it. README.md has the full document map and a reading order per role.
 

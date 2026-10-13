@@ -1,4 +1,4 @@
-# Rules for agents building AgentOS
+# Rules for agents building agentOS
 
 Read SPEC.md for what to build and PLAN.md for how. This file is the working contract for builder (L2) and reviewer (L3) agents: rules only, one line each. docs/OPERATING.md gives the procedures and reasons behind them, and README.md maps every document and gives each role its reading order.
 

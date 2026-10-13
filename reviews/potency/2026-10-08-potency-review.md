@@ -8,7 +8,7 @@ Record: PR none · package POTENCY · head 7b753eb
 
 ## Main assessment
 
-AgentOS's strongest advantage is the combination of persistent execution, private memory, multiple sources of intelligence, explicit authority, and improvements tested against the owner's actual work. Its potential comes from completing that cycle repeatedly: a task produces a useful result, the owner accepts or corrects it, and the next similar task takes less effort.
+agentOS's strongest advantage is the combination of persistent execution, private memory, multiple sources of intelligence, explicit authority, and improvements tested against the owner's actual work. Its potential comes from completing that cycle repeatedly: a task produces a useful result, the owner accepts or corrects it, and the next similar task takes less effort.
 
 The most valuable next step is to make one such cycle work end to end and measure it. More model routes, workers or learned artifacts are useful only when they improve that result. The repository already has substantial machinery: a real recall index, effect journal, worker lifecycle, held-out change pipeline, replay evaluator, compiler and managed-tree delivery. Several constraints below are at the seams between these components.
 
@@ -193,7 +193,7 @@ Use the existing A10/H6 design and a broad mix of recurring work. The following 
 | Recovery and quota exhaustion | Same task resumes or truthfully waits without repeated effects | P1, P2, P7 |
 
 1. Freeze a small synthetic pilot to validate the harness, then owner-selected recurring tasks for benefit. Predeclare task identities, starting state, account/grant policy, model/image versions, acceptance predicates, repeat count, workload mix, gain threshold and regression margins.
-2. Compare AgentOS, unmodified OpenClaw and a direct provider CLI on the same permitted inputs, accounts and host profile. Counterbalance order and reset source/workspace state; report missing capabilities instead of silently changing tasks. Keep first-use and repeat-use separate. The direct CLI is a real capable baseline, not an artificially weakened chatbot.
+2. Compare agentOS, unmodified OpenClaw and a direct provider CLI on the same permitted inputs, accounts and host profile. Counterbalance order and reset source/workspace state; report missing capabilities instead of silently changing tasks. Keep first-use and repeat-use separate. The direct CLI is a real capable baseline, not an artificially weakened chatbot.
 3. Measure all owner-active effort, including setup, clarification, review, correction and recovery. Count rejected/reworked attempts in effort per accepted task, and show acceptance/abandonment alongside the ratio. Preserve wall time separately; report tails, not only a successful-run median.
 4. Keep resource units separate: API dollars, tokens, plan pool units, local compute time and peak memory. Include all retries, branch work, discarded candidates and cascade calls. More unused quota consumed is not itself a benefit.
 5. Preserve security/UX gates: no unauthorized effects, disclosures or credentials surfaced; no duplicate effects or stale approvals; no lost edits; no unreported unknown results; preserved STOP/foreground latency; no rise in routine prompts or suggestion burden. These are test conditions, not proof that a finite test set eliminates every vulnerability.
@@ -220,7 +220,7 @@ No change to an invariant or owner authority is recommended. New task-continuati
 - Using model confidence or another model's favorable review as an authority decision or a replacement for deterministic qualification.
 - Letting more workers violate headroom, quotas, foreground responsiveness or STOP. Qualify real workload concurrency rather than maximizing worker count.
 - Giving router-applied passes invisible access to recall or adding generated instructions to a private call. Scope reduction to content already present.
-- Buying potency by introducing an AgentOS service, relay, remote fleet or consumer-inference UI route. Main's dependency/custody contracts remain authoritative; separate substrate/spec proposals are pending, not silently adopted here.
+- Buying potency by introducing an agentOS service, relay, remote fleet or consumer-inference UI route. Main's dependency/custody contracts remain authoritative; separate substrate/spec proposals are pending, not silently adopted here.
 - Restarting the owner-deferred active Loop 2 testing. This review does not reverse D-040.
 - Rebuilding W4 delivery, the recall engine, fork/keep primitives, the H6 collector or the W5 outbox. Extend the missing seams rather than duplicate working or actively reviewed components.
 
