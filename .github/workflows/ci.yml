@@ -123,22 +123,10 @@ jobs:
           echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main after merge. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
           exit 1
       - name: Risk tier (docs/OPERATING.md §3)
+        # Advisory summary only. The lane limit (docs/LANES.md) is enforced in lane-gate.yml,
+        # which runs the base copy on pull_request_target so a PR cannot edit it away.
         if: github.event_name == 'pull_request'
         run: python tools/risk_tier.py --markdown --git HEAD^1 HEAD^2 >> "$GITHUB_STEP_SUMMARY"
-      - name: Lane gate (docs/LANES.md; CTRL-lane-gate)
-        # A PR in a lane with a tier limit (codex: tier C) fails when the change exceeds it.
-        # It runs the base commit's risk_tier.py (with the base's core list), so a PR cannot
-        # loosen the gate or the classifier for itself. A base from before the gate existed
-        # runs the PR's copy, which the PR's own review covers.
-        if: github.event_name == 'pull_request'
-        env:
-          PR_BRANCH: ${{ github.head_ref }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          git worktree add --detach "$RUNNER_TEMP/base" HEAD^1
-          gate="$RUNNER_TEMP/base/tools/risk_tier.py"
-          grep -q -- '--pr-branch' "$gate" || gate=tools/risk_tier.py
-          python3 -I "$gate" --git HEAD^1 HEAD^2 --pr-branch "$PR_BRANCH" --pr-title "$PR_TITLE"
   broker:
     needs: scope
     if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
