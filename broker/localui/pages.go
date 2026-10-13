@@ -310,6 +310,7 @@ form { margin: .6em 0 1.2em; }
 {{else if eq .Step "codes"}}
 <p class="muted">Paired with your number {{.Paired}}.</p>{{template "restart" false}}
 <h2>3. Add approval codes</h2>
+{{with .Replace}}<p class="err">{{.}}</p>{{end}}
 {{if .CodesUnavailable}}
 {{else if .CodesEnrolled}}<p>Approval codes are already set up. If you no longer have the code generator, replace it with your recovery key after setup.</p>
 <form method="post" action="/setup/codes"><input type="hidden" name="enrolled" value="1"><button>Continue</button></form>
@@ -324,6 +325,7 @@ form { margin: .6em 0 1.2em; }
 {{else if eq .Step "card"}}
 <h2>4. Owner Card</h2>
 <p>Your Owner Card holds your vault passphrase and recovery key. Print it or save it, then type the word and group I ask for. Once you confirm, I keep no copy of it.</p>
+<p class="muted">{{.CardRestart}}</p>
 <p><a class="button" href="/setup/card">Show my Owner Card</a></p>
 
 {{else if eq .Step "recovery"}}

@@ -121,12 +121,15 @@ type SetupState struct {
 	// once the owner's number is known, only that phone continues setup.
 	// "" with an owner set means the pairing came by the card's setup
 	// code and the phone has yet to claim setup with the texted page code.
-	Device      string `json:"device,omitempty"`
-	Codes       bool   `json:"codes"`
-	Recovery    bool   `json:"recovery"`
-	Host        bool   `json:"host"`
-	HostTrusted bool   `json:"host_trusted"`
-	Done        bool   `json:"done"`
+	Device string `json:"device,omitempty"`
+	Codes  bool   `json:"codes"`
+	// ReplaceCodes: the code generator entry was voided (F10, CodesVoid),
+	// so the codes step says to replace the old entry until it completes.
+	ReplaceCodes bool `json:"replace_codes,omitempty"`
+	Recovery     bool `json:"recovery"`
+	Host         bool `json:"host"`
+	HostTrusted  bool `json:"host_trusted"`
+	Done         bool `json:"done"`
 }
 
 // SetupStore persists SetupState.
@@ -204,6 +207,14 @@ var (
 	// recorded), so no step on this page can.
 	ErrCodesUnavailable = errors.New("code-generator enrollment unavailable")
 )
+
+// replaceCodesNote is the codes step's note after the vault voided the code
+// generator entry (F10, #1210 R1). It is GSM-7, like the page's texts.
+const replaceCodesNote = "I had to make your approval codes again. In your phone's code generator, delete the old AgentOS entry, then add the new one below."
+
+// cardRestartNote is the card step's note (LATER CTRL-card l2): a box that
+// restarts before the confirm makes a new card.
+const cardRestartNote = "If I restart before you confirm, I make a new card: a card printed or saved before the restart is void. Only the card I show now counts."
 
 // cannotFinish is what the page says on ErrCodesUnavailable.
 const cannotFinish = "I cannot finish setup: I cannot add approval codes. Ask whoever installed my software to prepare me for setup again."
@@ -365,6 +376,7 @@ func (u *setup) routes(mux *http.ServeMux) {
 				return
 			}
 			key := u.phone(w, r, false)
+			u.voidCodes()
 			u.mu.Lock()
 			ok := key != "" && (u.mayLocked(key) || path == "/setup/claim" || path == "/setup/restart")
 			u.mu.Unlock()
@@ -414,9 +426,13 @@ type setupView struct {
 	// CodesShown: the link was shown already; the step asks for its code
 	// and offers a new one.
 	CodesShown bool
-	Defaults   string
-	Providers  []Provider
-	Device     map[string][2]string
+	// Replace is replaceCodesNote while ReplaceCodes is set; CardRestart
+	// is cardRestartNote.
+	Replace     string
+	CardRestart string
+	Defaults    string
+	Providers   []Provider
+	Device      map[string][2]string
 	// Refresh reloads the page only while it waits on the box and has
 	// nothing to type into (ONB-4).
 	Refresh string
@@ -435,6 +451,7 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Setup could not start. Reload the page.", http.StatusInternalServerError)
 		return
 	}
+	u.voidCodes()
 	p := u.s.cfg.Hooks.Progress()
 	if u.stepIs("ai") {
 		u.maybeFinish()
@@ -455,6 +472,10 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 	}
 	v.Err = u.err[key]
 	delete(u.err, key)
+	v.CardRestart = cardRestartNote
+	if u.st.ReplaceCodes {
+		v.Replace = replaceCodesNote
+	}
 	if p.NeverOnline {
 		v.Note = neverOnlineNote
 		if u.st.Owner != "" {
@@ -891,7 +912,25 @@ func (u *setup) codes(r *http.Request, _ string) error {
 		// Setup started over while the code was checked.
 		return errors.New("Start this step again.")
 	}
-	return u.save(func(s *SetupState) { s.Codes = true })
+	return u.save(func(s *SetupState) { s.Codes, s.ReplaceCodes = true, false })
+}
+
+// voidCodes takes CodesVoid: when the vault voided the code generator
+// entry, step 3 is not done until a new code is confirmed, and its link is
+// shown afresh. It reports whether it took a mark.
+func (u *setup) voidCodes() bool {
+	if !u.s.cfg.CodesVoid.Take() {
+		return false
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.shown = false
+	if err := u.save(func(s *SetupState) { s.Codes, s.ReplaceCodes = false, true }); err != nil && !u.st.Done {
+		// Held in memory regardless, so this start cannot pass the
+		// card step on a void code generator.
+		u.st.Codes, u.st.ReplaceCodes = false, true
+	}
+	return true
 }
 
 func (u *setup) recovery(r *http.Request, _ string) error {

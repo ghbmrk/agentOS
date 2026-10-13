@@ -42,6 +42,12 @@ const (
 	// the box and starts with PAIR, and answers it, or nothing. Each text
 	// is answered once; the page offers it to setup (§8.1 pairing).
 	OpSetupInbound = "page_setup_inbound"
+	// OpSetupCard reports the page's Owner Card step (HW-1, #1115): the
+	// page builds, shows and latches the card (agentosd links no card
+	// code, ARC-2), and reports here before finish that the card is
+	// confirmed and provisioned. agentosd's setup mode serves it beside
+	// SetupOps, and finish answers ErrCardPending until it is reported.
+	OpSetupCard = "page_setup_card"
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
@@ -73,6 +79,9 @@ const (
 	// ErrNotSent: the text did not go: no usable line, the bridge
 	// reported a failure, or no result came in time.
 	ErrNotSent = "not sent"
+	// ErrCardPending: finish before the page reported the Owner Card
+	// confirmed (OpSetupCard).
+	ErrCardPending = "card pending"
 )
 
 // Setup's text waits. agentosd's own wait for the bridge ends sooner
@@ -158,6 +167,12 @@ type Join struct {
 // String and GoString keep the password out of logs.
 func (Join) String() string   { return "[home Wi-Fi join]" }
 func (Join) GoString() string { return "[home Wi-Fi join]" }
+
+// SetupCard is the page's report of its Owner Card step: Confirmed once
+// the card is confirmed and provisioned. Confirmed false is refused.
+type SetupCard struct {
+	Confirmed bool `json:"confirmed"`
+}
 
 // Finish carries the owner's number, E.164.
 type Finish struct {
