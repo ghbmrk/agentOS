@@ -376,7 +376,11 @@ func unlockHandler(c *custody) http.Handler {
 		if !errors.As(err, &ue) {
 			ue = errInternal
 		}
-		reply(w, ue.status, map[string]string{"error": ue.msg})
+		out := map[string]string{"error": ue.msg}
+		if ue.reason != "" {
+			out["reason"] = ue.reason
+		}
+		reply(w, ue.status, out)
 	}
 	read := func(w http.ResponseWriter, r *http.Request, v any) bool {
 		if r.Method != http.MethodPost {

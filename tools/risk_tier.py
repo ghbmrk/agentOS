@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Risk tier of a change, decided by the paths it touches (docs/OPERATING.md §3).
 
-  A  the trusted core and its wiring (broker/core/core.txt), credentials,
+  A  the trusted core, its wiring and the packages allowed its write paths
+     (broker/core/core.txt), credentials,
      isolation, irreversible effects, update and supply chain,
      the image and its systemd units, the guest's build inputs, CI workflows
      and agent permissions: L3 review on the session's model with an explicit
@@ -26,31 +27,38 @@ import pathlib
 import subprocess
 import sys
 
-# The trusted core (ARC-1, D-095): `core <pkg>` and `wiring <pkg>` lines name
-# directories under broker/ that are tier A. broker/core/core_test.go keeps
-# write paths into the core inside it, so the list and the check are one file.
+# The trusted core (ARC-1, D-095): `core <pkg>`, `wiring <pkg>` and
+# `allow <pkg> ...` lines name directories under broker/ that are tier A; a
+# package an allow line lets call a core write path is itself a write path.
+# broker/core/core_test.go keeps write paths into the core inside it, so the
+# list and the check are one file.
 CORE_LIST = pathlib.Path(__file__).resolve().parent.parent / "broker" / "core" / "core.txt"
 
 
 @functools.lru_cache(maxsize=None)
 def core_list(path=CORE_LIST):
-    """Return (core, wiring) package sets from the core list; exit if unreadable."""
+    """Return (core, wiring, allowed) package sets from the core list; exit if unreadable."""
     try:
         text = path.read_text()
     except OSError as e:
         sys.exit(f"risk_tier: cannot read the core list: {e}")
-    core, wiring = set(), set()
+    core, wiring, allowed = set(), set(), set()
     for n, line in enumerate(text.splitlines(), 1):
         w = line.split()
-        if not w or w[0].startswith("#") or w[0] in ("open", "allow"):
+        if not w or w[0].startswith("#"):
             continue
         if w[0] in ("core", "wiring") and len(w) == 2:
             (core if w[0] == "core" else wiring).add(w[1])
+        elif w[0] == "open" and len(w) == 2:
+            pass
+        elif w[0] == "allow" and len(w) > 4 and w[3] == "--":
+            # The same grammar broker/core/core_test.go reads.
+            allowed.add(w[1])
         else:
             sys.exit(f"risk_tier: {path}:{n}: unreadable line {line.strip()!r}")
     if not core:
         sys.exit(f"risk_tier: {path} names no core package")
-    return core, wiring
+    return core, wiring, allowed
 
 
 # broker/ packages that hold credentials, enforce isolation, gate effects,
@@ -108,8 +116,8 @@ def tier_of(path):
     if parts[0] == "broker" and len(parts) > 2 and parts[1] in TIER_A_BROKER:
         return "A", "broker/" + parts[1] + "/"
     if parts[0] == "broker":
-        core, wiring = core_list()
-        for pkg in sorted(core | wiring):
+        core, wiring, allowed = core_list()
+        for pkg in sorted(core | wiring | allowed):
             if p.startswith("broker/" + pkg + "/"):
                 return "A", "core list: broker/" + pkg + "/"
     if parts[0] == "guest" and len(parts) == 3 and name in TIER_A_GUEST_FILES:

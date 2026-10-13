@@ -76,7 +76,7 @@ func TestNeverOnlineNote(t *testing.T) {
 			t.Fatalf("note lacks %q: %q", w, before)
 		}
 	}
-	if !strings.Contains(page, `action="/setup/network"`) || !strings.Contains(page, "<option>Neighbor</option>") {
+	if !strings.Contains(page, `action="/setup/network"`) || !strings.Contains(page, `<option value="Neighbor">Neighbor</option>`) {
 		t.Fatalf("no rejoin form on the number step: %s", page)
 	}
 	r.post("/setup/network", url.Values{"ssid": {"Neighbor"}, "password": {"home-pass"}})

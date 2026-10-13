@@ -15,11 +15,11 @@ import (
 // process (egress K17) and only passes through this page.
 //
 // JoinNetwork goes through agentosd to its netjoin helper (P2-2w c3;
-// Security L8). Providers, ConnectAPIKey and SetPrivateOK go through
-// agentosd to the vault process (P2-2w c4e; CRED-5, CAP-9). Networks,
-// BoxNumber, HostInfo, Send, TrustHost and StartDeviceCode are not served
-// by agentosd yet: they answer nothing or an error, so the steps that need
-// them wait.
+// Security L8), and Networks asks it for the networks in range (P2-2w
+// c4b). Providers, ConnectAPIKey and SetPrivateOK go through agentosd to
+// the vault process (P2-2w c4e; CRED-5, CAP-9). BoxNumber, HostInfo, Send,
+// TrustHost and StartDeviceCode are not served by agentosd yet: they answer
+// nothing or an error, so the steps that need them wait.
 type AgentosdSetup struct{ Owner Owner }
 
 var errNotServed = errors.New("localui: not served by agentosd yet")
@@ -44,6 +44,16 @@ func (a AgentosdSetup) Wait(ctx context.Context, every time.Duration) error {
 		case <-time.After(every):
 		}
 	}
+}
+
+// Networks is the home networks agentosd's helper sees, or none: an
+// error or a list over the bound gives the typed-name step.
+func (a AgentosdSetup) Networks() []string {
+	var n localapi.Networks
+	if a.call(localapi.OpSetupNetworks, nil, &n) != nil || len(n.SSIDs) == 0 || len(n.SSIDs) > localapi.MaxNetworks {
+		return nil
+	}
+	return n.SSIDs
 }
 
 func (a AgentosdSetup) Progress() Progress {
@@ -115,7 +125,6 @@ func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
 	return a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
 }
 
-func (AgentosdSetup) Networks() []string        { return nil }
 func (AgentosdSetup) BoxNumber() string         { return "" }
 func (AgentosdSetup) HostInfo() string          { return "" }
 func (AgentosdSetup) Send(string, string) error { return errNotServed }
@@ -149,4 +158,21 @@ func (a AgentosdSetup) SetPrivateOK(id string, ok bool) error {
 
 func (AgentosdSetup) StartDeviceCode(string) (string, string, error) {
 	return "", "", errNotServed
+}
+
+// CardFinish is AgentosdSetup with the page's Owner Card step (HW-1,
+// #1115): Finish reports a confirmed card to agentosd, whose finish holds
+// until it is (card pending); a held card is not reported.
+type CardFinish struct {
+	AgentosdSetup
+	Card interface{ Hold() error }
+}
+
+func (c CardFinish) Finish(owner string) error {
+	if c.Card != nil && c.Card.Hold() == nil {
+		if err := c.call(localapi.OpSetupCard, localapi.SetupCard{Confirmed: true}, nil); err != nil {
+			return err
+		}
+	}
+	return c.AgentosdSetup.Finish(owner)
 }
