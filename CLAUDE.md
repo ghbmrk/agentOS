@@ -26,7 +26,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - A kind of finding seen on a second PR becomes a lint rule, test or CI check in the next package that touches the area, listed in the lens README (OPERATING §4).
 
 ## Budget (reasons: OPERATING §1, §5)
-- The only hard limit is the subscription (usage credits off). Target: ~100% of the weekly limit used by each reset, paced evenly at ~14% a day so it never runs out early (Mark, 2026-10-04); these are targets: spend where the next unit of work has clear value, don't idle to stay on pace, and don't spend just because budget remains.
+- The only hard limit is the subscription (usage credits off). No daily budget ceiling and no pacing target: "14% a day shouldn't be a ceiling. No ceiling as long as not wasteful" (Mark, 2026-10-13 12:40Z). Spend only on non-wasteful work: spend where the next unit of work has clear value, don't idle, and don't spend just because budget remains.
 - Near a session-window limit, finish the current step cleanly; start heavy new work after the reset.
 - Keep contexts small: brief + touched files. Summarize CI logs instead of pasting them.
 - Cold starts cost most: on 5.5 models a cache write costs 40x a cache read. Per merged PR, minimise sessions started, wakes after >1h idle, model switches and compactions (OPERATING §1, §5).
