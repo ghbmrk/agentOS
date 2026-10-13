@@ -408,3 +408,27 @@ func TestResetKeepsTheSetupVaultNoCardMade(t *testing.T) {
 		t.Fatalf("the setup vault was removed: %v", err)
 	}
 }
+
+// F10, #1115: the page routes the owner back to step 3 on the provision
+// refusal for an unconfirmed code generator, so that refusal carries a
+// stable reason. Other 412s (no setup-open entry, errNotOpen) carry none,
+// so the page never routes on the status alone.
+func TestTheCodesRefusalCarriesAReason(t *testing.T) {
+	x := newInitSetupRig(t)
+	code, out := x.call(http.MethodPost, "/card/provision", provisionBody(newCard(t)))
+	if code != http.StatusPreconditionFailed || out["reason"] != reasonCodesUnconfirmed {
+		t.Fatalf("provision before step 3: %d %v", code, out)
+	}
+	if out["error"] != errCodesUnconfirmed.Error() {
+		t.Fatalf("message: %v", out["error"])
+	}
+	y := newSetupCardRig(t, false)
+	y.open(t)
+	code, out = y.call(http.MethodPost, "/card/provision", provisionBody(newCard(t)))
+	if code != http.StatusPreconditionFailed {
+		t.Fatalf("not in setup mode: %d %v", code, out)
+	}
+	if _, ok := out["reason"]; ok {
+		t.Fatalf("errNotOpen carries a reason: %v", out)
+	}
+}

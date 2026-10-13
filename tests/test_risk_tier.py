@@ -44,7 +44,7 @@ class RiskTierTest(unittest.TestCase):
             "broker/claim/claim_test.go": "A",
             # REQ: HW-10 (CTRL-claim-wire: first boot routes the claim and the card)
             "broker/firstboot/start.go": "A",
-            "broker/recall/index.go": "B",
+            "broker/attention/attention.go": "B",
             "broker/newpkg/x.go": "B",
             "guest/openclaw/Dockerfile": "B",
             "guest/openclaw/src/x.ts": "B",
@@ -86,9 +86,9 @@ class RiskTierTest(unittest.TestCase):
             "guest/builder/launch.json",
             "guest/builder/build-rootfs.sh",
             "broker/cmd/agentos-modem/agentos-modem.service",
-            "broker/recall/systemd/x.conf",
-            "broker/recall/x.socket",
-            "broker/recall/x.timer",
+            "broker/attention/systemd/x.conf",
+            "broker/attention/x.socket",
+            "broker/attention/x.timer",
         ]
         for path in paths:
             with self.subTest(path=path):
@@ -197,7 +197,7 @@ class RiskTierTest(unittest.TestCase):
             self.assertEqual(rt.tier_of(n)[0], "A", n)
 
     def test_highest_tier_wins(self):
-        tier, why = rt.tier_of_change(["docs/a.md", "broker/recall/x.go", "broker/vault/y.go"])
+        tier, why = rt.tier_of_change(["docs/a.md", "broker/attention/x.go", "broker/vault/y.go"])
         self.assertEqual((tier, why), ("A", ["broker/vault/y.go"]))
         self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/route/r.go"])[0], "B")
         self.assertEqual(rt.tier_of_change([]), ("C", []))
@@ -233,7 +233,7 @@ class RiskTierTest(unittest.TestCase):
 
     # REQ: ARC-1 (SIM-core: the trusted core is the list in broker/core/core.txt)
     def test_core_list_rates_core_and_wiring_a(self):
-        core, wiring = rt.core_list()
+        core, wiring, _ = rt.core_list()
         self.assertIn("journal", core)
         self.assertIn("cmd/agentosd", wiring)
         cases = {
@@ -254,6 +254,35 @@ class RiskTierTest(unittest.TestCase):
             with self.subTest(pkg=pkg):
                 self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")
                 self.assertTrue((ROOT / "broker" / pkg).is_dir(), pkg)
+
+    # REQ: ARC-1 (SIM-core-allow-tier: a package an allow line lets call a
+    # core write path is itself a core write path, so it is tier A)
+    def test_allow_line_packages_are_a(self):
+        allowed = rt.core_list()[2]
+        # recalltool holds journal.Engine.Erase and grants.Gate.Withdraw/Authorize.
+        self.assertIn("recall", allowed)
+        self.assertIn("recalltool", allowed)
+        for path in ("broker/recall/recall.go", "broker/recalltool/tool.go"):
+            with self.subTest(path=path):
+                self.assertEqual(rt.tier_of(path), ("A", "core list: " + path.rsplit("/", 1)[0] + "/"))
+        for pkg in sorted(allowed):
+            with self.subTest(pkg=pkg):
+                self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")
+                self.assertTrue((ROOT / "broker" / pkg).is_dir(), pkg)
+
+    def test_allow_line_parsing_matches_core_test(self):
+        # Same grammar as broker/core/core_test.go: allow <pkg> <symbol> -- <reason>.
+        with tempfile.TemporaryDirectory() as d:
+            ok = pathlib.Path(d) / "ok.txt"
+            ok.write_text("core journal\nallow newpkg journal.Engine.Erase -- a reason\n")
+            self.assertEqual(rt.core_list(ok)[2], {"newpkg"})
+            for line in ("allow newpkg journal.Engine.Erase",
+                         "allow newpkg journal.Engine.Erase --",
+                         "allow newpkg journal.Engine.Erase because it must"):
+                bad = pathlib.Path(d) / "bad.txt"
+                bad.write_text("core journal\n" + line + "\n")
+                with self.subTest(line=line), self.assertRaises(SystemExit):
+                    rt.core_list(bad)
 
     def test_core_list_unreadable_fails(self):
         with tempfile.TemporaryDirectory() as d:
