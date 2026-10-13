@@ -96,6 +96,12 @@ const (
 	// ErrCardPending: finish before the page reported the Owner Card
 	// confirmed (OpSetupCard).
 	ErrCardPending = "card pending"
+	// ErrKeyRefused: the provider did not accept the API key when the
+	// vault process checked it (ONB-3); nothing was stored.
+	ErrKeyRefused = "key refused"
+	// ErrKeyUnchecked: the vault process could not check the API key with
+	// its provider; nothing was stored.
+	ErrKeyUnchecked = "key unchecked"
 )
 
 // Setup's text waits. agentosd's own wait for the bridge ends sooner
@@ -206,6 +212,11 @@ type Finish struct {
 // MaxAPIKey bounds a provider API key in bytes; a key is printable ASCII
 // with no spaces, as the proxy sends it in a header.
 const MaxAPIKey = 512
+
+// APIKeyTimeout bounds one OpSetupAPIKey call from the page: the vault
+// process checks the key with its provider first (ONB-3), and agentosd's
+// own wait for the vault ends sooner (Security L8.4).
+const APIKeyTimeout = 15 * time.Second
 
 // APIKeysPerMinute limits OpSetupAPIKey; past it the op answers
 // ErrLimited.

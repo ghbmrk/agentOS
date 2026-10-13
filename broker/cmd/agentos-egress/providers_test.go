@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/route"
@@ -277,5 +280,131 @@ func TestTheRouterFollowsSetupsPrivateAnswer(t *testing.T) {
 	n := hits.Load()
 	if code := call(); code != http.StatusForbidden || hits.Load() != n {
 		t.Fatalf("locked: %d", code)
+	}
+}
+
+// keyCheckRT is a provider for setup's key check: a function of the
+// request.
+type keyCheckRT func(*http.Request) (*http.Response, error)
+
+func (f keyCheckRT) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// providerAnswers is a provider that answers every key check status.
+func providerAnswers(status int) keyCheckRT {
+	return func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	}
+}
+
+// #1265 (ONB-3, CRED-5): setup checks a pasted key with its provider
+// before the vault stores it. A key the provider refuses answers 403 and
+// stores nothing; a check that gets no answer about the key answers 502
+// and stores nothing; only an accepted key is stored. The check is the
+// adapter's declared one, bounded by modelroute.SetupKeyCheckWait.
+func TestSetupKeyIsCheckedWithItsProvider(t *testing.T) {
+	r := providerRig(t)
+	r.c.confirm(r.unlock(t), r.code())
+	stored := func() bool { return hasKind(r.c.v, "openai", vault.KindAPIKey) }
+
+	for _, c := range []struct {
+		rt   http.RoundTripper
+		want int
+	}{
+		{providerAnswers(http.StatusUnauthorized), http.StatusForbidden},
+		{providerAnswers(http.StatusForbidden), http.StatusForbidden},
+		{providerAnswers(http.StatusTooManyRequests), http.StatusBadGateway},
+		{providerAnswers(http.StatusInternalServerError), http.StatusBadGateway},
+		{keyCheckRT(func(*http.Request) (*http.Response, error) { return nil, errors.New("no route") }), http.StatusBadGateway},
+	} {
+		r.c.keyCheck = c.rt
+		key := synthetic(t, "sk-canary-")
+		w := setupCall(t, r.c, "POST", "/setup/providers/key", keyBody("openai", key))
+		if w.Code != c.want || stored() {
+			t.Fatalf("want %d: got %d %s, stored %v", c.want, w.Code, w.Body, stored())
+		}
+		if strings.Contains(w.Body.String(), key) {
+			t.Fatalf("answer carries the key: %s", w.Body)
+		}
+	}
+
+	key := synthetic(t, "sk-canary-")
+	var sent []*http.Request
+	r.c.keyCheck = keyCheckRT(func(req *http.Request) (*http.Response, error) {
+		sent = append(sent, req)
+		d, ok := req.Context().Deadline()
+		if !ok || time.Until(d) > modelroute.SetupKeyCheckWait {
+			t.Errorf("key check unbounded: %v %v", d, ok)
+		}
+		return providerAnswers(http.StatusOK)(req)
+	})
+	if w := setupCall(t, r.c, "POST", "/setup/providers/key", keyBody("openai", key)); w.Code != http.StatusOK {
+		t.Fatalf("accepted key: %d %s", w.Code, w.Body)
+	}
+	if len(sent) != 1 || sent[0].URL.String() != "https://api.openai.com/v1/models" || sent[0].Header.Get("Authorization") != "Bearer "+key {
+		t.Fatalf("key check sent %v", sent)
+	}
+	if got, ok := r.c.v.Secret("openai"); !ok || got.Reveal() != key {
+		t.Fatal("accepted key not stored")
+	}
+
+	// A key the vault would refuse is never sent to the provider.
+	sent = nil
+	if w := setupCall(t, r.c, "POST", "/setup/providers/key", keyBody("openai", "sk bad")); w.Code != http.StatusBadRequest || len(sent) != 0 {
+		t.Fatalf("bad key: %d, sent %d", w.Code, len(sent))
+	}
+}
+
+// The check runs without custody's lock, so the owner channel's code
+// checks and a lock are not held up by a slow provider, and the vault is
+// asked again before the key is stored: a vault locked during the check
+// stores nothing.
+func TestSetupKeyCheckHoldsNoLock(t *testing.T) {
+	r := providerRig(t)
+	r.c.confirm(r.unlock(t), r.code())
+	r.c.keyCheck = keyCheckRT(func(req *http.Request) (*http.Response, error) {
+		done := make(chan struct{})
+		go func() { r.c.lock(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("lock waited on the key check")
+		}
+		return providerAnswers(http.StatusOK)(req)
+	})
+	if w := setupCall(t, r.c, "POST", "/setup/providers/key", keyBody("openai", synthetic(t, "sk-canary-"))); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("locked during the check: %d %s", w.Code, w.Body)
+	}
+	v, err := vault.Open(r.path, r.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	if hasKind(v, "openai", vault.KindAPIKey) {
+		t.Fatal("stored a key after the vault locked")
+	}
+}
+
+// The verifier names each answer: refused, unchecked.
+func TestSetupKeyAnswersThroughTheVerifier(t *testing.T) {
+	r := providerRig(t)
+	run := filepath.Join(t.TempDir(), "run")
+	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, s := range srvs {
+			s.Close()
+		}
+	}()
+	v := modelroute.NewVerifier(filepath.Join(run, VerifySocket))
+	r.c.confirm(r.unlock(t), r.code())
+	r.c.keyCheck = providerAnswers(http.StatusUnauthorized)
+	if err := v.SetupAPIKey("openai", synthetic(t, "sk-canary-")); err != modelroute.ErrKeyRefused {
+		t.Fatalf("refused: %v", err)
+	}
+	r.c.keyCheck = providerAnswers(http.StatusServiceUnavailable)
+	if err := v.SetupAPIKey("openai", synthetic(t, "sk-canary-")); err != modelroute.ErrKeyUnchecked {
+		t.Fatalf("unchecked: %v", err)
 	}
 }

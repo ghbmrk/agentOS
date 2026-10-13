@@ -132,6 +132,8 @@ func TestSetupKeysAreCheckedAndRefusalsFixed(t *testing.T) {
 	}{
 		{EnrollClosed, localapi.ErrEnrollUnavailable},
 		{EnrollNotOpen, localapi.ErrEnrollUnavailable},
+		{KeyRefused, localapi.ErrKeyRefused},     // ONB-3: the provider said no
+		{KeyUnchecked, localapi.ErrKeyUnchecked}, // the provider could not be asked
 		{errors.New("vault: " + canaryKey), localapi.ErrFailed},
 	} {
 		f.err = c.err
