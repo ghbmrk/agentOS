@@ -610,6 +610,9 @@ var otpSecretRe = regexp.MustCompile(`^[A-Z2-7]{16,64}$`)
 
 func (u *setup) network(r *http.Request, _ string) error {
 	ssid, pw := r.PostFormValue("ssid"), r.PostFormValue("password")
+	if o := r.PostFormValue("other"); o != "" {
+		ssid = o // a name typed because the list missed it
+	}
 	u.mu.Lock()
 	paired := u.st.Owner != ""
 	u.mu.Unlock()

@@ -27,7 +27,7 @@ func TestPageOpsAreDisjointFromOtherSockets(t *testing.T) {
 			}
 		}
 	}
-	if len(seen) != 25 {
+	if len(seen) != 26 {
 		t.Fatalf("%d ops", len(seen))
 	}
 }
