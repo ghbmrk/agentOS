@@ -11,7 +11,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/localui"
 )
 
-// REQ: ARC-2, CH-9
+// REQ: ARC-2, CH-9, REC-4
 
 // Security L6 on the P2-2w plan: the page's process is given no setup
 // hooks, so nothing pairs or enrolls in it until setup moves into
