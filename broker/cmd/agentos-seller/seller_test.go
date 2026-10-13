@@ -222,7 +222,7 @@ func dump(t *testing.T, img string, off int64, path string) []byte {
 	return b
 }
 
-var codeRe = regexp.MustCompile(`[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}`)
+var codeLineRe = regexp.MustCompile(`(?m)^AgentOS claim code: ([A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4})$`)
 
 // Acceptance 1: an image that fails a check gets no box image and no
 // sticker.
@@ -230,8 +230,10 @@ func TestPrepRefuses(t *testing.T) {
 	needTools(t)
 	good := standardDisk(t, rootTree)
 	held := map[string]string{"var/lib/agentos/claim.json": `{"salt":"AAAA"}`}
+	heldNet := map[string]string{"var/lib/agentos/setup-net.json": `{}`}
 	for k, v := range rootTree {
 		held[k] = v
+		heldNet[k] = v
 	}
 	cases := map[string]func() (string, string){
 		"checksum mismatch": func() (string, string) {
@@ -263,6 +265,9 @@ func TestPrepRefuses(t *testing.T) {
 		},
 		"already holds a claim state": func() (string, string) {
 			return writeImage(t, standardDisk(t, held))
+		},
+		"already holds a setup network": func() (string, string) {
+			return writeImage(t, standardDisk(t, heldNet))
 		},
 		"no /var/lib": func() (string, string) {
 			return writeImage(t, standardDisk(t, map[string]string{"etc/hostname": "x\n"}))
@@ -320,8 +325,9 @@ func TestPrepSealsOneState(t *testing.T) {
 		}
 	}
 	want := map[string]bool{
-		"/var/lib/agentos 040700 0:0":   true,
-		claim.StatePath + " 100600 0:0": true,
+		"/var/lib/agentos 040700 0:0":      true,
+		claim.StatePath + " 100600 0:0":    true,
+		claim.SetupNetPath + " 100600 0:0": true,
 	}
 	if len(added) != len(want) {
 		t.Fatalf("added %v, want %v", added, want)
@@ -339,10 +345,11 @@ func TestPrepSealsOneState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code := codeRe.FindString(string(txt))
-	if code == "" {
+	m := codeLineRe.FindStringSubmatch(string(txt))
+	if m == nil {
 		t.Fatalf("no code in sticker.txt: %q", txt)
 	}
+	code := m[1]
 
 	st := &change.MemStore{}
 	if err := st.Save(dump(t, box, off, claim.StatePath)); err != nil {
@@ -419,6 +426,36 @@ func TestPrepSealsOneState(t *testing.T) {
 	}
 	if !bytes.Contains(html, []byte(qr)) {
 		t.Fatal("sticker.html lacks the claim QR")
+	}
+
+	// The setup network the phone joins before the card exists (CH-7, §8.1
+	// step 4): sealed beside the claim state, root-owned 0600, and printed
+	// on the sticker as its name, password and Wi-Fi QR.
+	net, err := claim.ParseSetupNet(dump(t, box, off, claim.SetupNetPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if net.Password == code || claim.Normalize(net.Password)[:claim.PrefixSymbols] == claim.Normalize(code)[:claim.PrefixSymbols] {
+		t.Fatal("the setup password is the claim code")
+	}
+	wq, err := card.QRSVG(card.WiFiQR(net.SSID, net.Password))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range [][]byte{[]byte(wq), []byte(net.SSID), []byte(net.Password)} {
+		if !bytes.Contains(html, want) {
+			t.Fatalf("sticker.html lacks %.60q", want)
+		}
+	}
+	for _, want := range []string{"Wi-Fi network: " + net.SSID + "\n", "Wi-Fi password: " + net.Password + "\n"} {
+		if !strings.Contains(string(txt), want) {
+			t.Fatalf("sticker.txt lacks %q: %q", want, txt)
+		}
+	}
+	// The password is on the box only in the setup file (SAE needs it in
+	// the clear), never in the claim state.
+	if bytes.Contains(dump(t, box, off, claim.StatePath), []byte(claim.Normalize(net.Password))) {
+		t.Fatal("the claim state holds the setup password")
 	}
 
 	// A second prep of the prepared image is refused: it holds a state.
