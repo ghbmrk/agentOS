@@ -46,20 +46,30 @@ func (c *custody) setupProviders() ([]modelroute.SetupProvider, error) {
 	if err := c.setupOpen(); err != nil {
 		return nil, err
 	}
+	return c.providersLocked(), nil
+}
+
+// providersLocked lists the built-in providers. Caller holds mu with the
+// vault open.
+func (c *custody) providersLocked() []modelroute.SetupProvider {
 	var out []modelroute.SetupProvider
 	for _, a := range adapters() {
-		name := providerNames[a.Name]
-		if name == "" {
-			name = a.Name
-		}
 		out = append(out, modelroute.SetupProvider{
 			ID:        a.Name,
-			Name:      name,
+			Name:      providerName(a.Name),
 			Connected: hasKind(c.v, a.Credential, vault.KindAPIKey),
 			PrivateOK: hasKind(c.v, PrivateOKPrefix+a.Name, KindPrivateOK),
 		})
 	}
-	return out, nil
+	return out
+}
+
+// providerName is the provider's name for the owner.
+func providerName(id string) string {
+	if n := providerNames[id]; n != "" {
+		return n
+	}
+	return id
 }
 
 // setupKey stores key as provider's API key, with put's rules, and only a
@@ -90,20 +100,10 @@ func (c *custody) setupPrivate(provider string, ok bool) error {
 	if err := c.setupOpen(); err != nil {
 		return err
 	}
-	if _, known := adapterNamed(provider); !known {
-		return errBadCredential
+	if err := c.privateMarkOK(provider); err != nil {
+		return err
 	}
-	name := PrivateOKPrefix + provider
-	if hasOtherKind(c.v, name, KindPrivateOK) {
-		return errBadCredential
-	}
-	if ok {
-		return c.putMark(name, KindPrivateOK)
-	}
-	if err := c.v.Delete(name); err != nil {
-		return c.putErr(err)
-	}
-	return nil
+	return c.setPrivateLocked(provider, ok)
 }
 
 // privateAllowed is the router's PrivateAllowed check (CAP-9): true only

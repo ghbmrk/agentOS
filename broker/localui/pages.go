@@ -261,7 +261,29 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/setup/restart"><label>Reset secret, from your card's recovery sheet<input type="text" name="secret" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Start over</button></form></details>
 {{else}}<form method="post" action="/setup/restart"><button class="plain">Start setup over</button></form>{{end}}{{end}}
 
-{{define "private"}}<label><input type="checkbox" name="private" value="1"> {{.Name}} may see your private data (mail, files) to do tasks.</label><br>{{end}}
+{{define "private"}}<label><input type="checkbox" name="private" value="1"> {{.Name}} may see your private data (mail, files) to do tasks.</label><br>
+<span class="muted">Unticked, tasks that need your mail or files wait until you allow a provider on the AI providers page.</span><br>{{end}}
+
+{{define "providers"}}{{template "head" .Refresh}}
+<h1>AI providers</h1>
+{{if .Down}}<p>I am still starting. This page reloads by itself.</p>
+{{else if .Locked}}<p>I am locked, so I can't read or change the AI providers. <a href="/unlock/vault">Unlock me</a>, then come back here.</p>
+{{else}}
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{with .Withdrawing}}<p>Stop {{.Name}} seeing your private data? Tasks that need your mail or files wait until you allow a provider again.</p>
+<form method="post" action="/providers/"><input type="hidden" name="step" value="withdraw"><input type="hidden" name="provider" value="{{.ID}}"><input type="hidden" name="confirm" value="1"><button class="stop">Stop</button></form>
+<p><a href="/providers/">Cancel</a></p>
+{{else}}
+<p class="muted">Tasks that need your mail or files wait until you allow a provider that is connected.</p>
+{{range .Providers}}<h3>{{.Name}}: {{if .Connected}}connected{{else}}not connected{{end}}</h3>
+{{if .PrivateOK}}<p>{{.Name}} may see your private data (mail, files) to do tasks.</p>
+<form method="post" action="/providers/"><input type="hidden" name="step" value="withdraw"><input type="hidden" name="provider" value="{{.ID}}"><button class="stop">Stop {{.Name}} seeing it</button></form>
+{{else}}<p>{{.Name}} may not see your private data.</p>
+<form method="post" action="/providers/"><input type="hidden" name="step" value="allow"><input type="hidden" name="provider" value="{{.ID}}"><label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Allow {{.Name}}</button></form>
+{{end}}{{end}}
+<p class="muted">I text you when this changes.</p>
+{{end}}{{end}}
+{{template "foot"}}{{end}}
 
 {{define "wifi"}}<form method="post" action="/setup/network">
 <label>Your home Wi-Fi{{if .}}<select name="ssid">{{range .}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
