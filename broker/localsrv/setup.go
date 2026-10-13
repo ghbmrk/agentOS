@@ -34,6 +34,7 @@ type Setup struct {
 	joins   []time.Time
 	keys    []time.Time
 	scans   []time.Time
+	texts   []time.Time
 }
 
 // SetupConfig configures a Setup.
@@ -60,7 +61,10 @@ type SetupConfig struct {
 	// Networks lists the home networks the helper sees (P2-2w c4b).
 	// Nil Networks, or an error, answers an empty list.
 	Networks func(ctx context.Context) ([]string, error)
-	Now      func() time.Time
+	// Line is the owner line's modem bridge while setup runs (P2-2w c4c;
+	// modemlink.SetupLine); nil answers that setup cannot text.
+	Line SetupLine
+	Now  func() time.Time
 }
 
 // Enroller is the vault process's code-generator enrollment (egress K17).
@@ -194,6 +198,9 @@ func (s *Setup) Ops() map[string]sockets.Handler {
 		localapi.OpSetupFinish:   s.open(s.finish),
 		localapi.OpSetupJoin:     s.open(s.join),
 		localapi.OpSetupNetworks: s.open(s.networks),
+		localapi.OpSetupLine:     s.open(s.line),
+		localapi.OpSetupSend:     s.open(s.send),
+		localapi.OpSetupInbound:  s.open(s.inbound),
 
 		localapi.OpSetupProviders: s.open(s.providers),
 		localapi.OpSetupAPIKey:    s.open(s.apiKey),

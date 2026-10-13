@@ -431,3 +431,15 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 		}
 	}
 }
+
+// The page still answers PAIR texts once its hooks carry the card step:
+// run starts PairTexts on any hooks that have it (P2-2w c4c with #1115).
+// REQ: CH-12, ONB-6
+func TestCardHooksStillPairTexts(t *testing.T) {
+	var h localui.Hooks = localui.CardFinish{AgentosdSetup: openSetup}
+	if _, ok := h.(interface {
+		PairTexts(context.Context, *localui.Server, time.Duration)
+	}); !ok {
+		t.Fatal("CardFinish hooks do not start the PAIR text loop")
+	}
+}

@@ -136,6 +136,14 @@ func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) erro
 		return err
 	}
 	s.SetOwner(localui.Socket{Path: sock})
+	// PAIR texts that reach the box come through agentosd while setup is
+	// open (P2-2w c4c; §8.1 pairing).
+	// AgentosdSetup has it, and so does CardFinish, which embeds it.
+	if a, ok := cfg.Hooks.(interface {
+		PairTexts(context.Context, *localui.Server, time.Duration)
+	}); ok {
+		go a.PairTexts(ctx, s, 5*time.Second)
+	}
 	ln, err := localui.Listen(ctx, cfg.AP, cfg.Port)
 	if err != nil {
 		return err
