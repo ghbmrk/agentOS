@@ -24,8 +24,8 @@ GVISOR_SHA512=c8d3a9fd4d4c4f5b8ff213caa4517356be128d18659ec4cde37828fe797f61a972
 mkdir -p "$OUT"
 STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"
 
-# The broker and the vault process, static and path-free.
-for cmd in agentosd agentos-egress; do
+# The broker, the vault process and the Wi-Fi page, static and path-free.
+for cmd in agentosd agentos-egress agentos-localui; do
 	(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
 		-o "$STAGE/usr/lib/agentos/$cmd" "./cmd/$cmd")
 done
@@ -65,6 +65,8 @@ rm -rf "$OUT/gvisor.tar.bz2" "$OUT/gvisor"
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"
 # How agentosd starts the agent machine (W1): its -agent-launch default.
 install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/guest/launch.json"
+# The page's unit lives beside its command (localui ASSUMPTIONS L26).
+install -D -m 0644 "$REPO/broker/cmd/agentos-localui/agentos-localui.service" "$STAGE/usr/lib/systemd/system/agentos-localui.service"
 chmod -R u+w,go-w "$STAGE"
 
 $MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build
