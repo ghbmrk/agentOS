@@ -353,3 +353,59 @@ func TestRunGatesSetupOnTheClaim(t *testing.T) {
 		}
 	})
 }
+
+// #1270 (CTRL-card-sock s1): on the image the page reaches the vault
+// process's unlock socket and keeps its claim state and the card step's
+// latch in its own state directory, which localui-claim fills from the
+// seller's sealed claim at the first start; it never dumps core, since
+// the claim verifiers and codes pass through it (IMG-nodump).
+// REQ: HW-10, HW-1, CRED-9
+func TestTheUnitWiresTheSetupFiles(t *testing.T) {
+	b, err := os.ReadFile("agentos-localui.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := map[string][]string{}
+	var exec []string
+	for _, l := range strings.Split(strings.ReplaceAll(string(b), "\\\n", " "), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "[") {
+			continue
+		}
+		k, v, _ := strings.Cut(l, "=")
+		set[k] = append(set[k], v)
+		if k == "ExecStart" {
+			exec = strings.Fields(v)
+		}
+	}
+	arg := func(name string) string {
+		for i, w := range exec {
+			if w == "-"+name && i+1 < len(exec) {
+				return exec[i+1]
+			}
+		}
+		return ""
+	}
+	for name, want := range map[string]string{
+		"vault-sock":  "/run/agentos-egress/unlock.sock",
+		"claim-state": "/var/lib/agentos-localui/claim.json",
+		"card-latch":  "/var/lib/agentos-localui/card-latch.json",
+	} {
+		if got := arg(name); got != want {
+			t.Errorf("-%s = %q, want %q", name, got, want)
+		}
+	}
+	for k, want := range map[string][]string{
+		"StateDirectory":     {"agentos-localui"},
+		"StateDirectoryMode": {"0700"},
+		"LimitCORE":          {"0"},
+		"ExecStartPre":       {"+/usr/lib/agentos/localui-claim"},
+	} {
+		if got := set[k]; strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	if _, ok := set["TemporaryFileSystem"]; ok {
+		t.Error("the page's state directory is hidden: it cannot record the claim or the latch")
+	}
+}

@@ -1,0 +1,49 @@
+# The vault process (agentos-egress serve): it holds the vault and the API keys, and it is the only
+# path from this box to a model provider (ARC-1, ARC-6, CRED-9). agentosd reaches it on model.sock,
+# verify.sock and routing.sock, the Wi-Fi page on unlock.sock, all in /run/agentos-egress (#1249).
+# Until the page records the claim there is no vault: the process serves its sockets, and
+# egress-setup makes the setup vault (init -setup) before a start and when the claim is recorded.
+[Unit]
+Description=agentOS vault process
+# Never without the inbound drop (DEV-net-e 2a), and up before the broker and the page.
+Requires=agentos-inbound.service
+After=local-fs.target network-online.target agentos-inbound.service
+Wants=network-online.target
+Before=agentosd.service agentos-localui.service
+
+[Service]
+User=agentos-egress
+Group=agentos-egress
+# The vault, its key slots, unlock state and adopted routing rule: the vault user's only.
+StateDirectory=agentos-egress
+StateDirectoryMode=0700
+# Its sockets: each one admits only its peer's uid (SO_PEERCRED).
+RuntimeDirectory=agentos-egress
+RuntimeDirectoryMode=0711
+# Only on the drive this PC booted, as the broker (drive-id).
+ExecStartPre=+/usr/lib/agentos/drive-id check
+ExecStartPre=+/usr/lib/agentos/egress-setup
+# agentosd runs as root; the page has its own user. No machine is granted a model and no provider
+# is allowed private data here: the owner grants them at setup (CAP-9).
+ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-egress serve -broker-uid 0 \
+        -unlock-uid @uid:agentos-localui -rule /usr/lib/agentos/egress/rule.json
+Restart=on-failure
+RestartSec=5
+# The API keys and the vault passphrase live in this process's memory (IMG-nodump).
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0077
+# No PrivateDevices: the TPM (/dev/tpmrm0, group agentos-egress) is how a trusted host opens the
+# vault (CRED-8). No IP filter: providers are reached from here, and netlink watches the routes.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

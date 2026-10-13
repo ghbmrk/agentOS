@@ -1,0 +1,28 @@
+#!/bin/sh
+# Makes the setup vault (agentos-egress init -setup, CTRL-setup-open) once the Wi-Fi page has
+# recorded the claim (#1249). init refuses an unclaimed box, so this runs before every vault process
+# start and whenever the page's claim state changes (agentos-egress-setup.path); with --restart it
+# restarts the vault process when this run made the vault, so it opens it.
+# Root never parses the page's file (HW-10): the page's user reads it, the vault's user checks it.
+# AGENTOS_HEALTH_ROOT exists for tests/test_image.py.
+set -eu
+R=${AGENTOS_HEALTH_ROOT:-}
+keys=$R/var/lib/agentos-egress/vault.keys
+claim=$R/var/lib/agentos-localui/claim.json
+exec 9>"$R/run/agentos-egress-setup.lock"
+flock 9
+if [ -e "$keys" ] || [ ! -f "$claim" ] || [ ! -d "$R/var/lib/agentos-egress" ]; then
+	exit 0
+fi
+tmp=$(mktemp -d -p "$R/run" agentos-egress-setup.XXXXXX)
+trap 'rm -rf "$tmp"' EXIT
+setpriv --reuid=agentos-localui --regid=agentos-localui --clear-groups head -c 65536 "$claim" >"$tmp/claim.json"
+chown agentos-egress:agentos-egress "$tmp" "$tmp/claim.json"
+if ! setpriv --reuid=agentos-egress --regid=agentos-egress --clear-groups \
+	"$R/usr/lib/agentos/agentos-egress" init -setup -claim "$tmp/claim.json"; then
+	echo "egress-setup: no setup vault yet (the box is not claimed)"
+	exit 0
+fi
+if [ "${1:-}" = --restart ]; then
+	systemctl try-restart agentos-egress.service
+fi

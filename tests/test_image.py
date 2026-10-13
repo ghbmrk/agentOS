@@ -49,16 +49,21 @@ def write(root, rel, text="", mode=0o644):
     return f
 
 
-# The image's no-dump files (IMG-nodump): copied from mkosi.extra into a test tree.
+# The image's no-dump files (IMG-nodump): copied into a test tree from mkosi.extra, except the
+# page's unit, which image/build.sh installs from its command's directory.
 NODUMP = ("usr/lib/systemd/coredump.conf.d/50-agentos-nodump.conf",
           "usr/lib/systemd/system.conf.d/50-agentos-nodump.conf",
           "usr/lib/sysctl.d/99-agentos-nodump.conf",
-          "usr/lib/systemd/system/agentosd.service")
+          "usr/lib/systemd/system/agentosd.service",
+          "usr/lib/systemd/system/agentos-egress.service",
+          "usr/lib/systemd/system/agentos-localui.service")
+NODUMP_SRC = {"usr/lib/systemd/system/agentos-localui.service":
+              ROOT / "broker/cmd/agentos-localui/agentos-localui.service"}
 
 
 def nodump(root):
     for rel in NODUMP:
-        write(root, rel, (MK / "mkosi.extra" / rel).read_text())
+        write(root, rel, NODUMP_SRC.get(rel, MK / "mkosi.extra" / rel).read_text())
 
 
 class TreeCheckTest(unittest.TestCase):
@@ -827,9 +832,10 @@ class ConfigTest(unittest.TestCase):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Service"]["NoNewPrivileges"], "yes")
 
-    def test_broker_waits_for_onboarding(self):
+    def test_broker_reads_onboarding_s_settings(self):
+        # It no longer waits for them (SetupServicesTest): a preloaded box starts it in setup mode.
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
-        self.assertEqual(u["Unit"]["ConditionPathExists"], "/etc/agentos/agentosd.env")
+        self.assertEqual(u["Service"]["EnvironmentFile"], "-/etc/agentos/agentosd.env")
         self.assertIn("/usr/lib/agentos/agentosd", u["Service"]["ExecStart"])
 
 
@@ -855,14 +861,15 @@ class NoDumpTest(unittest.TestCase):
         extra = MK / "mkosi.extra"
         self.assertEqual(ini(extra / NODUMP[0])["Coredump"]["Storage"], "none")
         self.assertEqual(ini(extra / NODUMP[1])["Manager"]["DefaultLimitCORE"], "0")
-        self.assertEqual(ini(extra / NODUMP[3])["Service"]["LimitCORE"], "0")
+        for rel in NODUMP[3:]:
+            self.assertEqual(ini(NODUMP_SRC.get(rel, extra / rel))["Service"]["LimitCORE"], "0")
         self.assertEqual(check.sysctl(self.root, "kernel.core_pattern"), "|/usr/bin/false")
         self.assertEqual(check.sysctl(self.root, "fs.suid_dumpable"), "0")
         self.assertEqual(check.violations(self.root), [])
 
     def test_removing_any_dump_setting_fails_the_build(self):
         for rel, needle in zip(NODUMP, ("Storage=none", "DefaultLimitCORE=0", "kernel.core_pattern",
-                                        "LimitCORE=0")):
+                                        "LimitCORE=0", "LimitCORE=0", "LimitCORE=0")):
             with self.subTest(rel=rel):
                 f = self.root / rel
                 text = f.read_text()
@@ -932,6 +939,302 @@ class NoDumpTest(unittest.TestCase):
         # The booted image reports swap and core dumps off in the health line, so CI shows them on
         # a real boot, not only in this tree check.
         self.assertIn("swap=off dumps=off", (IMG / "ci_boot.sh").read_text())
+
+
+UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
+AGENTOS_LIB = MK / "mkosi.extra/usr/lib/agentos"
+PAGE_UNIT = ROOT / "broker/cmd/agentos-localui/agentos-localui.service"
+
+
+def flags(cmd):
+    """The flag names a Go command under broker/cmd defines (flag.X or a FlagSet's fs.X)."""
+    out = set()
+    for f in (ROOT / "broker/cmd" / cmd).glob("*.go"):
+        if not f.name.endswith("_test.go"):
+            out |= set(re.findall(r'\b(?:flag|fs)\.\w+\(\s*(?:&?[\w.]+,\s*)?"([\w-]+)"', f.read_text()))
+    return out
+
+
+def flag_default(cmd, name):
+    """NAME's default string in broker/cmd/CMD, or None."""
+    for f in (ROOT / "broker/cmd" / cmd).glob("*.go"):
+        if not f.name.endswith("_test.go"):
+            m = re.search(r'\b(?:flag|fs)\.String(?:Var)?\(\s*(?:&[\w.]+,\s*)?"%s",\s*"([^"]*)"' % re.escape(name), f.read_text())
+            if m:
+                return m.group(1)
+    return None
+
+
+def exec_args(unit):
+    """A unit's ExecStart as its words, with with-uids taken off the front."""
+    words = ini(unit)["Service"]["ExecStart"].replace("\\\n", " ").split()
+    if words[0] == "/usr/lib/agentos/with-uids":
+        words = words[1:]
+    return words
+
+
+def arg(words, name):
+    i = words.index("-" + name)
+    return words[i + 1]
+
+
+class SetupServicesTest(unittest.TestCase):
+    """#1249 (with P-3) and #1270: a fresh M6 Ultra image starts every setup service. The vault
+    process (agentos-egress) has a unit and a default routing rule for the guest's model class; the
+    setup page reaches the vault and keeps its claim state and latch where it can write them; the
+    broker starts before onboarding has written anything; and every uid the three pass each other
+    names a user the image creates."""
+    # REQ: ARC-1, ARC-6, CRED-8, CRED-9, HW-1, HW-10, CAP-9
+
+    def test_every_setup_service_is_enabled(self):
+        preset = (UNITS.parent / "system-preset/50-agentos.preset").read_text().split("\n")
+        for unit in ("agentosd.service", "agentos-egress.service", "agentos-localui.service",
+                     "agentos-egress-setup.path"):
+            with self.subTest(unit):
+                self.assertIn("enable " + unit, preset)
+
+    def test_the_vault_process_runs_as_its_own_user_and_is_the_only_path_out(self):
+        u = ini(UNITS / "agentos-egress.service")
+        s = u["Service"]
+        self.assertEqual((s["User"], s["Group"]), ("agentos-egress", "agentos-egress"))
+        self.assertEqual((s["StateDirectory"], s["StateDirectoryMode"]), ("agentos-egress", "0700"))
+        self.assertEqual((s["RuntimeDirectory"], s["RuntimeDirectoryMode"]), ("agentos-egress", "0711"))
+        self.assertEqual((s["LimitCORE"], s["NoNewPrivileges"]), ("0", "yes"))
+        self.assertEqual(s["Restart"], "on-failure")
+        # Only the vault process reaches providers: no IP filter, and the inbound drop is up first.
+        self.assertNotIn("IPAddressDeny", s)
+        self.assertIn("agentos-inbound.service", u["Unit"]["Requires"].split())
+        for after in ("agentos-inbound.service", "network-online.target"):
+            self.assertIn(after, u["Unit"]["After"].split())
+        for before in ("agentosd.service", "agentos-localui.service"):
+            self.assertIn(before, u["Unit"]["Before"].split())
+        # The TPM (CRED-8) must stay visible: PrivateDevices would hide /dev/tpmrm0.
+        self.assertNotEqual(s.get("PrivateDevices"), "yes")
+        words = exec_args(UNITS / "agentos-egress.service")
+        self.assertEqual(words[:2], ["/usr/lib/agentos/agentos-egress", "serve"])
+        self.assertEqual(arg(words, "broker-uid"), "0")  # agentosd runs as root
+        self.assertEqual(arg(words, "unlock-uid"), "@uid:agentos-localui")
+        # CAP-9: no provider is allowed private data by the image, and no machine is granted a model.
+        self.assertNotIn("-private-ok", words)
+        self.assertNotIn("-grant", words)
+
+    def test_the_vault_process_s_flags_exist(self):
+        defined = flags("agentos-egress")
+        for unit, cmd in ((UNITS / "agentos-egress.service", "agentos-egress"),
+                          (UNITS / "agentosd.service", "agentosd"), (PAGE_UNIT, "agentos-localui")):
+            with self.subTest(unit.name):
+                used = [w[1:] for w in exec_args(unit) if re.fullmatch(r"-[a-z][\w-]*", w)]
+                self.assertTrue(used)
+                self.assertEqual(sorted(set(used) - flags(cmd)), [])
+        self.assertIn("rule", defined)
+
+    def test_every_socket_is_where_its_clients_look(self):
+        run = "/run/" + ini(UNITS / "agentos-egress.service")["Service"]["RuntimeDirectory"]
+        self.assertEqual(flag_default("agentos-egress", "run"), None)  # defaultRun, a constant
+        self.assertIn('defaultRun  = "%s"' % run, (ROOT / "broker/cmd/agentos-egress/main.go").read_text())
+        for name, sock in (("egress", "model.sock"), ("owner-verify", "verify.sock"), ("routing", "routing.sock")):
+            with self.subTest(name):
+                self.assertEqual(flag_default("agentosd", name), "%s/%s" % (run, sock))
+        page = exec_args(PAGE_UNIT)
+        self.assertEqual(arg(page, "vault-sock"), run + "/unlock.sock")
+        self.assertEqual(arg(page, "sock"), "/run/agentos/localui.sock")
+        state = "/var/lib/" + ini(UNITS / "agentos-egress.service")["Service"]["StateDirectory"]
+        main = (ROOT / "broker/cmd/agentos-egress/main.go").read_text()
+        self.assertIn('defaultKeys  = "%s/vault.keys"' % state, main)
+        self.assertIn('defaultVault = "%s/vault"' % state, main)
+
+    def test_the_default_rule_routes_the_guest_s_model_class_to_both_providers(self):
+        rule_path = arg(exec_args(UNITS / "agentos-egress.service"), "rule")
+        rule = json.loads((MK / "mkosi.extra" / rule_path.lstrip("/")).read_text())
+        guest = re.search(r"^MODEL=\$\{MODEL:-([\w.-]+)\}", (ROOT / "guest/openclaw/build-rootfs.sh").read_text(), re.M)
+        self.assertEqual(guest.group(1), "broker-default")
+        self.assertEqual(flag_default("agentos-builder", "model"), guest.group(1))
+        self.assertEqual(list(rule), [guest.group(1)])
+        routes = rule[guest.group(1)]
+        self.assertEqual(sorted(r["provider"] for r in routes), ["anthropic", "openai"])
+        for r in routes:
+            self.assertEqual(sorted(r), ["model", "provider"])
+            self.assertRegex(r["model"], r"^[a-z0-9][\w.-]*$")
+
+    def test_the_machine_names_agree(self):
+        # The guest's task chat goes to agentosd's -agent-machine; the vault process grants models by
+        # machine name, so where it names one too (PR #1280's -agent-machine) the two must match.
+        broker = flag_default("agentosd", "agent-machine")
+        self.assertEqual(broker, "agent")
+        units = {u: exec_args(UNITS / u) for u in ("agentosd.service", "agentos-egress.service")}
+        names = {u: arg(w, "agent-machine") if "-agent-machine" in w else None for u, w in units.items()}
+        self.assertIn(names["agentosd.service"], (None, broker))
+        if "agent-machine" in flags("agentos-egress"):
+            self.assertEqual(names["agentos-egress.service"] or flag_default("agentos-egress", "agent-machine"),
+                             names["agentosd.service"] or broker)
+        else:
+            self.assertIsNone(names["agentos-egress.service"])
+
+    def test_the_image_creates_every_service_user(self):
+        lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf").read_text().splitlines()
+        users = sorted(l.split()[1] for l in lines if l.strip() and not l.startswith("#") and l.split()[0] == "u")
+        self.assertEqual(users, ["agentos-egress", "agentos-localui", "agentos-modem"])
+        page = ini(PAGE_UNIT)["Service"]
+        self.assertEqual((page["User"], page["Group"]), ("agentos-localui", "agentos-localui"))
+        for unit in (UNITS / "agentosd.service", UNITS / "agentos-egress.service"):
+            for w in exec_args(unit):
+                if w.startswith("@uid:"):
+                    self.assertIn(w[len("@uid:"):], users)
+
+    def test_with_uids_swaps_user_names_for_uids(self):
+        prog = str(AGENTOS_LIB / "with-uids")
+        out = subprocess.run([prog, "echo", "-a", "@uid:root", "x@uid:root"], capture_output=True, text=True, check=True)
+        self.assertEqual(out.stdout, "-a 0 x@uid:root\n")
+        bad = subprocess.run([prog, "echo", "@uid:agentos-no-such-user"], capture_output=True, text=True)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertEqual(bad.stdout, "")
+        self.assertIn("agentos-no-such-user", bad.stderr)
+
+    def test_the_broker_starts_before_onboarding(self):
+        # A preloaded box (D-105) has no /etc/agentos until setup: agentosd starts in setup mode.
+        u = ini(UNITS / "agentosd.service")
+        self.assertNotIn("ConditionPathExists", u["Unit"])
+        self.assertEqual(u["Service"]["EnvironmentFile"], "-/etc/agentos/agentosd.env")
+        self.assertEqual(u["Service"]["Environment"], "AGENTOS_OWNER=")
+        words = exec_args(UNITS / "agentosd.service")
+        self.assertEqual(arg(words, "modem-uid"), "@uid:agentos-modem")
+        self.assertEqual(arg(words, "localui-uid"), "@uid:agentos-localui")
+        self.assertIn("agentos-egress.service", u["Unit"]["Wants"].split())
+        self.assertIn("agentos-egress.service", u["Unit"]["After"].split())
+        page = ini(PAGE_UNIT)["Unit"]
+        self.assertIn("agentos-egress.service", page["Wants"].split())
+        self.assertIn("agentos-egress.service", page["After"].split())
+
+    def test_the_tpm_is_the_vault_process_s(self):
+        rules = (MK / "mkosi.extra/usr/lib/udev/rules.d/60-agentos-tpm.rules").read_text()
+        self.assertIn('SUBSYSTEM=="tpmrm", KERNEL=="tpmrm[0-9]*", GROUP="agentos-egress", MODE="0660"', rules)
+
+    def test_the_build_ships_the_page(self):
+        build = (IMG / "build.sh").read_text()
+        self.assertRegex(build, r"for cmd in [^;]*\bagentos-localui\b")
+        self.assertRegex(build, r'install -D -m 0644 "\$REPO/broker/cmd/agentos-localui/agentos-localui.service" '
+                                r'"\$STAGE/usr/lib/systemd/system/agentos-localui.service"')
+
+    def test_the_setup_vault_is_made_when_the_page_records_the_claim(self):
+        p = ini(UNITS / "agentos-egress-setup.path")
+        self.assertEqual(p["Path"]["PathChanged"], "/var/lib/agentos-localui/claim.json")
+        self.assertEqual(p["Path"]["Unit"], "agentos-egress-setup.service")
+        s = ini(UNITS / "agentos-egress-setup.service")
+        self.assertEqual(s["Service"]["Type"], "oneshot")
+        self.assertEqual(s["Service"]["ExecStart"], "/usr/lib/agentos/egress-setup --restart")
+        self.assertIn("+/usr/lib/agentos/egress-setup", ini(UNITS / "agentos-egress.service")["Service"]["ExecStartPre"])
+
+
+class EgressSetupTest(unittest.TestCase):
+    """egress-setup makes the setup vault (init -setup) once the page has recorded the claim, as the
+    vault user and from a copy the page user read, so root never parses the page's file (HW-10)."""
+    # REQ: HW-10, CRED-9
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.bin, self.root, self.log = t / "bin", t / "root", t / "log"
+        (self.root / "run").mkdir(parents=True)
+        (self.root / "var/lib/agentos-egress").mkdir(parents=True)
+        # setpriv drops its options and runs the command; chown and systemctl only log.
+        stub(self.bin, "setpriv", 'echo "setpriv $*" >>"%s"\nwhile [ "${1#--}" != "$1" ]; do shift; done\nexec "$@"' % self.log)
+        stub(self.bin, "chown", 'echo "chown $*" >>"%s"' % self.log)
+        stub(self.bin, "systemctl", 'echo "systemctl $*" >>"%s"' % self.log)
+        self.egress(0)
+
+    def egress(self, code):
+        stub(self.root / "usr/lib/agentos", "agentos-egress",
+             'echo "egress $* $(cat "$4")" >>"%s"\n[ %d -ne 0 ] || : >"%s"\nexit %d'
+             % (self.log, code, self.root / "var/lib/agentos-egress/vault.keys", code))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_setup(self, *args):
+        env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_HEALTH_ROOT=str(self.root))
+        r = subprocess.run([str(AGENTOS_LIB / "egress-setup")] + list(args), env=env, capture_output=True, text=True)
+        log = self.log.read_text() if self.log.exists() else ""
+        if self.log.exists():
+            self.log.unlink()
+        return r, log
+
+    def test_nothing_before_the_page_has_a_claim_state(self):
+        r, log = self.run_setup()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("egress", log)
+
+    def test_the_vault_is_made_from_a_copy_as_the_vault_user(self):
+        write(self.root, "var/lib/agentos-localui/claim.json", '{"synthetic":"canary"}')
+        r, log = self.run_setup()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = log.splitlines()
+        self.assertTrue(lines[0].startswith("setpriv --reuid=agentos-localui --regid=agentos-localui --clear-groups "), log)
+        made = [l for l in lines if l.startswith("egress ")]
+        self.assertEqual(len(made), 1, log)
+        self.assertRegex(made[0], r'^egress init -setup -claim %s/run/[^ ]+/claim.json \{"synthetic":"canary"\}$' % re.escape(str(self.root)))
+        self.assertIn("setpriv --reuid=agentos-egress --regid=agentos-egress --clear-groups ", log)
+        self.assertNotIn("systemctl", log)
+        self.assertEqual([p.name for p in (self.root / "run").iterdir() if p.is_dir()], [])  # the copy is gone
+
+    def test_restart_only_when_this_run_made_the_vault(self):
+        write(self.root, "var/lib/agentos-localui/claim.json", "{}")
+        r, log = self.run_setup("--restart")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("systemctl try-restart agentos-egress.service", log)
+        r, log = self.run_setup("--restart")  # the keys exist now
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(log, "")
+
+    def test_an_unclaimed_box_waits(self):
+        write(self.root, "var/lib/agentos-localui/claim.json", "{}")
+        self.egress(1)
+        r, log = self.run_setup("--restart")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("egress init -setup", log)
+        self.assertNotIn("systemctl", log)
+        self.assertFalse((self.root / "var/lib/agentos-egress/vault.keys").exists())
+
+
+class LocaluiClaimTest(unittest.TestCase):
+    """localui-claim hands the page the claim state the seller sealed into the broker's root-only
+    directory (D-105), once, so the page can record the claim and the card step's latch (#1270)."""
+    # REQ: HW-10, HW-1
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.bin, self.root, self.log = t / "bin", t / "root", t / "log"
+        (self.root / "var/lib/agentos-localui").mkdir(parents=True)
+        stub(self.bin, "chown", 'echo "chown $*" >>"%s"' % self.log)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_claim(self):
+        env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_HEALTH_ROOT=str(self.root))
+        r = subprocess.run([str(AGENTOS_LIB / "localui-claim")], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log = self.log.read_text() if self.log.exists() else ""
+        if self.log.exists():
+            self.log.unlink()
+        return log
+
+    def test_the_seller_s_claim_moves_to_the_page(self):
+        write(self.root, "var/lib/agentos/claim.json", "sealed", 0o600)
+        log = self.run_claim()
+        self.assertEqual(log, "chown agentos-localui:agentos-localui %s/var/lib/agentos/claim.json\n" % self.root)
+        self.assertFalse((self.root / "var/lib/agentos/claim.json").exists())
+        self.assertEqual((self.root / "var/lib/agentos-localui/claim.json").read_text(), "sealed")
+
+    def test_the_page_s_own_state_is_kept(self):
+        write(self.root, "var/lib/agentos/claim.json", "sealed")
+        write(self.root, "var/lib/agentos-localui/claim.json", "claimed")
+        self.assertEqual(self.run_claim(), "")
+        self.assertEqual((self.root / "var/lib/agentos-localui/claim.json").read_text(), "claimed")
+
+    def test_nothing_to_move(self):
+        self.assertEqual(self.run_claim(), "")
+        self.assertFalse((self.root / "var/lib/agentos-localui/claim.json").exists())
 
 
 def fuzz_targets(broker):
