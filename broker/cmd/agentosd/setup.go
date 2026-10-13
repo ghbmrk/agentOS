@@ -81,6 +81,7 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	finished := make(chan string, 1)
 	s := localsrv.NewSetup(localsrv.SetupConfig{Record: m.Record, Enroll: m.Enroll, Progress: m.Progress,
 		Join:     joiner(m.NetJoin, m.Seen),
+		Networks: scanner(m.NetJoin),
 		Finished: func(owner string) { finished <- owner }})
 	ops := s.Ops()
 	finish := ops[localapi.OpSetupFinish]
@@ -169,6 +170,15 @@ func enrollErr(err error) error {
 // errNotJoined is every join that did not end joined or saved. It
 // carries nothing of the request (CRED-1).
 var errNotJoined = errors.New("setup: the home network was not joined")
+
+// scanner is setup's list of home networks from the netjoin helper's
+// socket (P2-2w c4b); nil with no socket.
+func scanner(path string) func(context.Context) ([]string, error) {
+	if path == "" {
+		return nil
+	}
+	return netjoin.Client{Path: path}.Networks
+}
 
 // joiner is setup's join through the netjoin helper's socket: joined and
 // saved succeed, every other answer or no answer is errNotJoined. With no
