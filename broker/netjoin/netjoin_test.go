@@ -429,7 +429,23 @@ func serve(t *testing.T, j *Joiner, uid int) string {
 	return filepath.Join(dir, Socket)
 }
 
+// raw sends one request line and reads the answer. The server frees a
+// connection's slot only after its handler returns, which can be just after
+// the client has read the answer, so a refusal for too many connections
+// right after an earlier request is retried for up to a second.
 func raw(t *testing.T, path string, line []byte) sockets.Response {
+	t.Helper()
+	for range 100 {
+		if r := raw1(t, path, line); r.Error != string(sockets.ErrTooMany) {
+			return r
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the socket stayed full")
+	return sockets.Response{}
+}
+
+func raw1(t *testing.T, path string, line []byte) sockets.Response {
 	t.Helper()
 	c, err := net.Dial("unix", path)
 	if err != nil {
