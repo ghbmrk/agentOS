@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/daemon"
@@ -49,7 +50,39 @@ type cardHold interface{ Hold() error }
 
 // errCardPending is setup finish's refusal while the Owner Card is
 // unconfirmed.
-const errCardPending = "card pending"
+const errCardPending = localapi.ErrCardPending
+
+// pageCard is the Owner Card step's hold when the step runs in
+// agentos-localui (#1115): the page builds, shows and latches the card and
+// reports it confirmed with OpSetupCard just before finish. The report
+// holds for this process only; the page reports again before each finish.
+type pageCard struct {
+	mu        sync.Mutex
+	confirmed bool
+}
+
+func pageCardStep() (cardHold, error) { return &pageCard{}, nil }
+
+func (c *pageCard) Hold() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.confirmed {
+		return errors.New("setup: the page has not reported the Owner Card confirmed")
+	}
+	return nil
+}
+
+// report is OpSetupCard: only a report of a confirmed card is taken.
+func (c *pageCard) report(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var r localapi.SetupCard
+	if json.Unmarshal(args, &r) != nil || !r.Confirmed {
+		return nil, sockets.Code(localapi.ErrBadArgs)
+	}
+	c.mu.Lock()
+	c.confirmed = true
+	c.mu.Unlock()
+	return nil, nil
+}
 
 // errOwnedWithoutRecord: the owner channel has state but setup's record is
 // missing; setup stays closed rather than letting the page pick an owner.
@@ -90,6 +123,9 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 			return nil, sockets.Code(errCardPending)
 		}
 		return finish(ctx, p, args)
+	}
+	if pc, ok := step.(*pageCard); ok {
+		ops[localapi.OpSetupCard] = pc.report
 	}
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()

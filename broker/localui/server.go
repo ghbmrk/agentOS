@@ -65,6 +65,10 @@ type Config struct {
 	// /setup/card to the phone that paired, and neither the recovery
 	// step nor finish runs while Card.Hold() refuses. It needs Hooks.
 	Card OwnerCard
+	// CodesVoid, when set, is marked by the card step's vault answers
+	// that void the code generator entry (F10, CardBox): setup then sends
+	// the owner back to the codes step with a note to replace the entry.
+	CodesVoid *CodesVoid
 	// Rotation, when set, is the box's card rotation (REC-4): a waiting
 	// rotation's new parts are shown at /rotate/card to a signed-in phone
 	// until the owner confirms or cancels them.
@@ -103,6 +107,9 @@ type Server struct {
 	vaultOpener string
 	// scanning admits one photo upload at a time.
 	scanning chan struct{}
+	// claimWait holds a slot for each claim post running or waiting
+	// (claimQueue + 1); claimRun admits one at a time (claimTurn).
+	claimWait, claimRun chan struct{}
 	// vaultTries and vaultAll are the unlock attempts in the last hour,
 	// per phone address and in all (vaultTry).
 	vaultTries map[string][]time.Time
@@ -147,7 +154,8 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Port != 80 {
 		host = net.JoinHostPort(host, strconv.Itoa(cfg.Port))
 	}
-	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), pages: pagesFor(host), scanning: make(chan struct{}, 1)}
+	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), pages: pagesFor(host), scanning: make(chan struct{}, 1),
+		claimWait: make(chan struct{}, claimQueue+1), claimRun: make(chan struct{}, 1)}
 	s.formKey = make([]byte, 32)
 	if _, err := io.ReadFull(cfg.Rand, s.formKey); err != nil {
 		return nil, err
