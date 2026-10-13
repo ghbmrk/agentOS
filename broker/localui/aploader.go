@@ -97,7 +97,11 @@ func (l *APLoader) Up(ctx context.Context, cfg APConfig) error {
 // rotation commit (REC-4), so the phone joins with the new card. The SSID
 // and interface stay; the access point comes back WPA3-SAE only, with MFP
 // required (CH-7). With no access point up it does nothing: the next Up
-// takes the stored password from its caller. A password Validate refuses,
+// takes the stored password from its caller. But while any interface's
+// BringDown last failed, Rekey returns an error instead: hostapd may still
+// run there with the old password, which a rotation presumes lost, so a
+// retry is never told it is gone. A Down that succeeds clears it. A
+// password Validate refuses,
 // or the one already in use, leaves the access point untouched. The
 // restart drops every client, so the caller applies it only after the
 // commit's reply has reached the phone.
@@ -109,7 +113,7 @@ func (l *APLoader) Rekey(ctx context.Context, password string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.up == "" {
-		return nil
+		return l.stuck()
 	}
 	cfg := l.cfg
 	cfg.Password = password
@@ -197,6 +201,25 @@ func (l *APLoader) Station(ctx context.Context, iface string, join func(context.
 		return fmt.Errorf("localui: %s may still be exempt, so it does not join a network: %w", iface, l.failed[iface])
 	}
 	return join(ctx)
+}
+
+// stuck reports the interfaces whose BringDown last failed, in order, as
+// the reason a Rekey with no access point up cannot say the old password
+// is off the air. The caller holds l.mu.
+func (l *APLoader) stuck() error {
+	if len(l.failed) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(l.failed))
+	for iface := range l.failed {
+		names = append(names, iface)
+	}
+	sort.Strings(names)
+	errs := make([]error, 0, len(names))
+	for _, iface := range names {
+		errs = append(errs, fmt.Errorf("localui: %s did not come down, so an access point with the old password may still run there: %w", iface, l.failed[iface]))
+	}
+	return errors.Join(errs...)
 }
 
 func notNamed(iface string) error {
