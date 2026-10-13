@@ -134,6 +134,11 @@ type Config struct {
 	// PrivateOK names the providers the owner allowed for private data
 	// when connecting them (CAP-9). None by default.
 	PrivateOK map[string]bool
+	// PrivateAllowed reports whether the owner allowed provider for
+	// private data where PrivateOK does not: the answer given at setup and
+	// held in the vault (P2-2w c4e), asked on each call so it follows the
+	// vault. Nil allows none beyond PrivateOK.
+	PrivateAllowed func(provider string) bool
 	// Label returns a machine's REV-5 data label; nil means every machine
 	// is private.
 	Label func(machine string) string
@@ -536,7 +541,7 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 	)
 	for _, rt := range routes {
 		p := r.providers[rt.Provider]
-		if !r.cfg.Granted(machine, rt.Provider) || (private && !r.cfg.PrivateOK[rt.Provider]) {
+		if !r.cfg.Granted(machine, rt.Provider) || (private && !r.privateOK(rt.Provider)) {
 			continue
 		}
 		if r.cfg.Withdrawn != nil {
@@ -657,6 +662,11 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 	default:
 		fail(http.StatusBadRequest, "invalid_request_error", "unsupported", fmt.Sprintf("no permitted route can serve this request: %q", unsupportedWhy))
 	}
+}
+
+// privateOK reports whether provider may receive a private call (CAP-9).
+func (r *Router) privateOK(provider string) bool {
+	return r.cfg.PrivateOK[provider] || (r.cfg.PrivateAllowed != nil && r.cfg.PrivateAllowed(provider))
 }
 
 // withdrawn reports whether RouteWithdrawn is still to be told of

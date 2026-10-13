@@ -32,7 +32,7 @@ func TestBuilderMachinesTakeBuilderFromsGrantsAsPrivate(t *testing.T) {
 	rule := route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}}
 	// Security R1 on #126: -eval-from never names builders' grants.
 	for _, from := range []string{"lb-", "lb-x", "eval-x"} {
-		if _, _, err := modelRouting(rule, grants{"agent": {"openai"}}, nil, "agent", from); err == nil {
+		if _, _, err := modelRouting(rule, grants{"agent": {"openai"}}, nil, nil, "agent", from); err == nil {
 			t.Fatalf("-eval-from %s was accepted", from)
 		}
 	}
@@ -54,7 +54,7 @@ func TestBuilderMachinesTakeBuilderFromsGrantsAsPrivate(t *testing.T) {
 	} {
 		// The same setup run uses, so the router sees the builder's
 		// grants (L3 MUST 1 on #126).
-		g, rt, err := modelRouting(rule, grants{"agent": {"openai"}}, tc.privateOK, tc.from, "")
+		g, rt, err := modelRouting(rule, grants{"agent": {"openai"}}, tc.privateOK, nil, tc.from, "")
 		if err != nil {
 			t.Fatal(err)
 		}
