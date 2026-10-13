@@ -2,9 +2,9 @@
 
 Board section: Phase 0: harness and risk spikes. Source: UX lens on #566 (release, row #813). Tier B, one string and its tests; expect well under the checkpoint.
 
-**Why.** `modelLocked` (broker/cmd/agentosd/capoff.go:52) ends "unlock it on the local page." Every other owner-facing line says "my Wi-Fi page" (broker/maintain, broker/loops), and SPEC names it so: "Open my Wi-Fi page" (CH, first-person rule) and "the Wi-Fi page" throughout. "The local page" is the developer's name for it (SPEC OWN-12 uses it as prose, not as owner text). The owner sees two names for one page.
+**Why.** `modelLocked` (broker/cmd/agentosd/capoff.go:52) ends "unlock it on the local page." Every other owner-facing line says "my Wi-Fi page" (broker/maintain, broker/loops), and SPEC names it so: "Open my Wi-Fi page" (CH-21, first-person rule) and "the Wi-Fi page" throughout. "The local page" is the developer's name for it (SPEC OWN-12 uses it as prose, not as owner text). The owner sees two names for one page.
 
-**Requirements:** OP-9 (C2 line), CH-8 (the box speaks in the first person; owner lines name the Wi-Fi page).
+**Requirements:** OP-9 (C2 line), CH-21 (the box speaks in the first person; owner lines name the Wi-Fi page).
 
 **Change.**
 - `modelLocked` becomes `Model: the vault is locked, so your agent cannot think or learn; unlock it on my Wi-Fi page.` Keep it inside `ownerWorded` (no apostrophes).
