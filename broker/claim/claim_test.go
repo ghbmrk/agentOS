@@ -392,3 +392,39 @@ func TestUnreadableStateKeepsLock(t *testing.T) {
 		t.Fatalf("a code after the failed opens: %v", err)
 	}
 }
+
+// CTRL-setup-open-r2 (HW-10): the vault process asks whether the box is
+// claimed before it makes the setup vault. The answer reads the state
+// without changing it: no state is ErrNoCode, a sealed box is unclaimed
+// until the claim, and an unreadable state is an error, never a claim.
+func TestClaimedReadsTheStateWithoutWriting(t *testing.T) {
+	missing := change.FileStore{Path: filepath.Join(t.TempDir(), "claim.json")}
+	if ok, err := Claimed(missing); ok || !errors.Is(err, ErrNoCode) {
+		t.Fatalf("no state: %v %v", ok, err)
+	}
+	b, code := newBox(t)
+	before, err := os.ReadFile(b.st.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := Claimed(b.st); ok || err != nil {
+		t.Fatalf("sealed: %v %v", ok, err)
+	}
+	if after, _ := os.ReadFile(b.st.Path); !bytes.Equal(before, after) {
+		t.Fatal("Claimed wrote the state")
+	}
+	if _, err := b.start().Try(code); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := Claimed(b.st); !ok || err != nil {
+		t.Fatalf("claimed: %v %v", ok, err)
+	}
+	for _, bad := range []string{"{", `{"claimed":false}`, "null"} {
+		if err := os.WriteFile(b.st.Path, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := Claimed(b.st); ok || err == nil {
+			t.Fatalf("state %q: %v %v", bad, ok, err)
+		}
+	}
+}

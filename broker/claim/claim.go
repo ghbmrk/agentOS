@@ -268,6 +268,33 @@ func tokenHash(tok string) []byte {
 	return h[:]
 }
 
+// Claimed reports whether the box whose claim state is st is claimed,
+// without changing the state (Open may lift a lock). ErrNoCode means the
+// box was never sealed (the download path); a state that holds neither a
+// code nor a claim is an error. The vault process's `init -setup` asks
+// this before making the setup vault, so no secret exists before the
+// claim (HW-10).
+func Claimed(st Store) (bool, error) {
+	if st == nil {
+		return false, errors.New("claim: no store")
+	}
+	b, err := st.Load()
+	if err != nil {
+		return false, err
+	}
+	if b == nil {
+		return false, ErrNoCode
+	}
+	var s state
+	if err := json.Unmarshal(b, &s); err != nil {
+		return false, fmt.Errorf("claim: state: %w", err)
+	}
+	if !s.Claimed && len(s.Verifier) != verifierSize {
+		return false, errors.New("claim: state holds neither a code nor a claim")
+	}
+	return s.Claimed, nil
+}
+
 // Open loads the claim state. ErrNoCode means the box was never sealed
 // (the download path, HW-10, which pairs by the flasher's QR instead). A
 // lock from an earlier boot lifts here.

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/recovery"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -24,11 +26,22 @@ func newInitSetupRig(t *testing.T) *setupCardRig {
 	dir := t.TempDir()
 	x := &setupCardRig{vp: filepath.Join(dir, "vault"), kp: filepath.Join(dir, "vault.keys")}
 	x.fastRig = &fastRig{clk: &clock{t: time.Unix(1_800_000_000, 0)}, path: x.vp, state: filepath.Join(dir, "unlock.json")}
-	if err := initCmd([]string{"-vault", x.vp, "-keys", x.kp, "-setup"}, &strings.Builder{}); err != nil {
+	if err := initCmd([]string{"-vault", x.vp, "-keys", x.kp, "-claim", claimedBox(t, dir), "-setup"}, &strings.Builder{}); err != nil {
 		t.Fatal(err)
 	}
 	x.start(t)
 	return x
+}
+
+// claimedBox is the claim state of a box whose owner has claimed it, in
+// dir; its path is init's -claim.
+func claimedBox(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "claim.json")
+	if err := os.WriteFile(p, []byte(`{"claimed":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // start is the vault process starting over the same files.
@@ -67,7 +80,8 @@ func TestInitSetupKeepsASetupKeyAndPrintsNoSecret(t *testing.T) {
 	dir := t.TempDir()
 	vp, kp := filepath.Join(dir, "vault"), filepath.Join(dir, "vault.keys")
 	var out strings.Builder
-	if err := initCmd([]string{"-vault", vp, "-keys", kp, "-setup"}, &out); err != nil {
+	cp := claimedBox(t, dir)
+	if err := initCmd([]string{"-vault", vp, "-keys", kp, "-claim", cp, "-setup"}, &out); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "passphrase:") || strings.Contains(out.String(), "otpauth://") {
@@ -89,7 +103,7 @@ func TestInitSetupKeepsASetupKeyAndPrintsNoSecret(t *testing.T) {
 		t.Fatalf("state: %+v", st)
 	}
 	// A second init over the same box is refused and leaves the key.
-	if err := initCmd([]string{"-vault", vp, "-keys", kp, "-setup"}, &out); err == nil {
+	if err := initCmd([]string{"-vault", vp, "-keys", kp, "-claim", cp, "-setup"}, &out); err == nil {
 		t.Fatal("init ran twice")
 	}
 	if _, err := vault.OpenSealed(vp, kp, recovery.Factor(setupKey(t, kp))); err != nil {
@@ -326,4 +340,131 @@ func TestNoRemakeOutsideUnsealedSetup(t *testing.T) {
 		t.Fatalf("sealed reset: %d", code)
 	}
 	absent(t, setupKeyFor(y.kp))
+}
+
+// HW-10, claim K5 (R2 on #1203): init -setup makes nothing before the
+// claim. A sealed box nobody has claimed, a box with no claim state (fail
+// closed: the download path's pairing gate is not built) and an unreadable
+// state are refused before any file is written; once the owner's phone
+// has claimed the box, init -setup makes the setup vault.
+func TestInitSetupWaitsForTheClaim(t *testing.T) {
+	dir := t.TempDir()
+	vp, kp := filepath.Join(dir, "vault"), filepath.Join(dir, "vault.keys")
+	cp := filepath.Join(dir, "claim.json")
+	run := func() error {
+		return initCmd([]string{"-vault", vp, "-keys", kp, "-claim", cp, "-setup"}, &strings.Builder{})
+	}
+	none := func(when string) {
+		t.Helper()
+		for _, p := range []string{vp, kp, setupKeyFor(kp), statePathFor(kp), vp + ".init", kp + ".init"} {
+			if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s: %s exists", when, p)
+			}
+		}
+	}
+	if err := run(); err == nil {
+		t.Fatal("init -setup ran with no claim state")
+	}
+	none("no claim state")
+	for _, bad := range []string{"{", "null", `{"claimed":false}`} {
+		if err := os.WriteFile(cp, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := run(); err == nil {
+			t.Fatalf("init -setup ran over claim state %q", bad)
+		}
+		none(bad)
+	}
+	st := change.FileStore{Path: cp}
+	code, err := claim.NewCode(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(cp); err != nil {
+		t.Fatal(err)
+	}
+	if err := claim.Seal(st, code, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(); err == nil {
+		t.Fatal("init -setup ran before the claim")
+	}
+	none("sealed, unclaimed")
+	cl, err := claim.Open(claim.Config{Store: st, BootID: func() (string, error) { return "boot-1", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cl.Try(code); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(); err != nil {
+		t.Fatalf("init -setup after the claim: %v", err)
+	}
+	if _, err := vault.OpenSealed(vp, kp, recovery.Factor(setupKey(t, kp))); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// HW-1 test 2, ONB-7, F10 (R1 on #1203): the card's provision needs a code
+// generator confirmed on this vault, so a remade setup vault, whose seed
+// nobody was shown, never carries into a card's vault. The refusal
+// writes nothing; after step 3 again the next card provisions.
+func TestProvisionWaitsForAConfirmedCodeGenerator(t *testing.T) {
+	// A fresh setup vault: no code generator yet.
+	x := newInitSetupRig(t)
+	if code, out := x.call(http.MethodPost, "/card/provision", provisionBody(newCard(t))); code != http.StatusPreconditionFailed {
+		t.Fatalf("provision before step 3: %d %v", code, out)
+	}
+	// Enrolled but not confirmed.
+	if _, err := x.c.enroll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.c.provisionCard(newCard(t)); !errors.Is(err, errCodesUnconfirmed) {
+		t.Fatalf("provision with a pending seed: %v", err)
+	}
+	// Confirmed, then a newer seed handed out: the vault's seed is not
+	// the one the phone now shows.
+	x.enrollCodes(t)
+	if _, err := x.c.enroll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.c.provisionCard(newCard(t)); !errors.Is(err, errCodesUnconfirmed) {
+		t.Fatalf("provision after a re-enroll: %v", err)
+	}
+
+	// The issue's path: card 1, a reset that remakes the setup vault,
+	// card 2, then a restart.
+	y := newInitSetupRig(t)
+	key := setupKey(t, y.kp)
+	y.enrollCodes(t)
+	old := y.seed
+	if err := y.c.provisionCard(newCard(t)); err != nil {
+		t.Fatal(err)
+	}
+	y.c.lock()
+	y.start(t)
+	if code, out := y.call(http.MethodPost, "/card/reset", map[string]any{}); code != http.StatusOK || out["remade"] != true {
+		t.Fatalf("reset: %d %v", code, out)
+	}
+	card2 := newCard(t)
+	code, out := y.call(http.MethodPost, "/card/provision", provisionBody(card2))
+	if code != http.StatusPreconditionFailed || out["error"] != errCodesUnconfirmed.Error() {
+		t.Fatalf("card 2 on the remade vault: %d %v", code, out)
+	}
+	absent(t, y.vp+cardTemp, y.kp+cardTemp)
+	if st := readState(t, y.state); st.Provisioned || st.Sealed || !st.Setup {
+		t.Fatalf("state after the refusal: %+v", st)
+	}
+	y.c.lock()
+	y.start(t)
+	remadeSetup(t, y, old, key)
+	if _, err := vault.OpenSealed(y.vp, y.kp, vault.Passphrase(card2.VaultPassphrase)); err == nil {
+		t.Fatal("card 2 opens the vault")
+	}
+	// Step 3 again, then card 2.
+	y.enrollCodes(t)
+	if err := y.c.provisionCard(card2); err != nil {
+		t.Fatalf("card 2 after step 3: %v", err)
+	}
+	y.seal(t)
 }

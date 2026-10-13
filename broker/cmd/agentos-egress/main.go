@@ -40,6 +40,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -498,9 +500,26 @@ func initCmd(args []string, out io.Writer) error {
 	keysPath := fs.String("keys", defaultKeys, "key slots file to create")
 	statePath := fs.String("state", "", "unlock state to create; default unlock.json beside the keys")
 	setup := fs.Bool("setup", false, "setup mode: open code-generator enrollment once and leave the seed hand-out to setup (image boxes)")
+	claimPath := fs.String("claim", claim.StatePath, "with -setup: the box's claim state; the setup vault is made only once the box is claimed")
 	fs.Parse(args)
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
+	}
+	if *setup {
+		// No secret exists before the claim (HW-10, claim K5; R2 on
+		// #1203): the setup key and seed are made only on a claimed box,
+		// before anything is drawn or written. A box with no claim state
+		// (the download path, whose pairing gate is not built) is refused.
+		ok, err := claim.Claimed(change.FileStore{Path: *claimPath})
+		if errors.Is(err, claim.ErrNoCode) {
+			return fmt.Errorf("init -setup: %s holds no claim state; the setup vault is made only on a claimed box", *claimPath)
+		}
+		if err != nil {
+			return fmt.Errorf("init -setup: %w", err)
+		}
+		if !ok {
+			return errors.New("init -setup: the box is not claimed yet; the setup vault is made only after the claim")
+		}
 	}
 	pass, err := newPassphrase()
 	if err != nil {

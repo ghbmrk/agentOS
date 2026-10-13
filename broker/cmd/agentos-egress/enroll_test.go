@@ -343,7 +343,7 @@ func TestEnrollIsClosedOutsideSetupMode(t *testing.T) {
 		vp, kp := filepath.Join(dir, "vault"), filepath.Join(dir, "vault.keys")
 		args := []string{"-vault", vp, "-keys", kp}
 		if setup {
-			args = append(args, "-setup")
+			args = append(args, "-claim", claimedBox(t, dir), "-setup")
 		}
 		var out strings.Builder
 		if err := initCmd(args, &out); err != nil {
