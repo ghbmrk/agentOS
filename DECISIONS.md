@@ -111,10 +111,18 @@ One row per decision, newest last. Status is `active` or `superseded by D-NNN`; 
 | D-107 | 2026-10-11 | active | Gray areas are available, not banned: an action of unclear legality or terms is offered and runs only on the owner's approval (per use or service) after a plain-words risk statement; journaled, revocable; clear illegality stays out. Covers CAP-15, ADP-14/CRED-12 site terms, CRED-5 unconfirmed routes | Mark, Ask anything thread, 2026-10-11 ("Gray areas should go to owner to opt in vs being arbitrarily disallowed"; "Unclear is default in with owner approval required") |
 | D-108 | 2026-10-13 | active | The broker takes `github.com/godbus/dbus/v5` v5.1.0 to talk to NetworkManager over the system bus, used only by `cmd/agentos-netjoin` (P2-2w c3). It is accepted despite the near-zero-dependencies rule because it is BSD-2-licensed, has no dependencies of its own, is vendored (DEP-1), and NetworkManager has no other API that keeps the PSK off a command line (Security L8.5). ([full](decisions/D-108.md)) | P2-2w c3 brief (briefs/P2-2w-c3.md) |
 | D-109 | 2026-10-13 | active | The ~14%/day pace in D-028 is not a ceiling: no daily budget ceiling as long as spend is not wasteful; the subscription stays the only hard limit | Mark, project Questions thread, 2026-10-13 12:40Z ("14% a day shouldn't be a ceiling. No ceiling as long as not wasteful") |
+| D-110 | 2026-10-13 | active | Codex lane (docs/LANES.md), `lane:codex`, rows `CX-`, decisions `D-codex-NNN`; tier-C hygiene only (issue titles and labels, product-name text, board tooling fixes a CX row names outside `.github/`), never a change `tools/risk_tier.py` rates A or B; calls, never changes, `broker/`; max 3 open PRs | Mark, project Questions thread, 2026-10-13 14:04:06Z (cmsg_01R63S2yrPkq32thy8WQCuvDRo7sj6aFGVrx9YSSHwBD3T, "Tier c hygiene works; give me the prompt") |
 
 ## claude2
 
 Per-team section (OPERATING §7): the claude2 team appends only here; its IDs are prefixed `C2-` or `D-claude2-`.
+
+| ID | Date | Status | Decision | Source |
+|---|---|---|---|---|
+
+## codex
+
+Per-team section (OPERATING §7): the codex team appends only here; its IDs are prefixed `CX-` or `D-codex-`.
 
 | ID | Date | Status | Decision | Source |
 |---|---|---|---|---|
