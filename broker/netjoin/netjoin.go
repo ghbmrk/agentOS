@@ -11,7 +11,11 @@
 // package's Client, never links it.
 package netjoin
 
-import "time"
+import (
+	"time"
+	"unicode"
+	"unicode/utf8"
+)
 
 // The one connection the helper writes (L8.4).
 const (
@@ -22,8 +26,29 @@ const (
 // Socket is the helper's socket, in its runtime directory.
 const Socket = "netjoin.sock"
 
-// OpJoin is the helper's one op: Request in, Answer out.
+// OpJoin is the helper's write: Request in, Answer out.
 const OpJoin = "join"
+
+// OpScan is the helper's read (P2-2w c4b): no args in, Networks out. It
+// reads the access points NetworkManager already knows, requests no scan
+// and writes nothing, so it needs no polkit action.
+const OpScan = "scan"
+
+// MaxNetworks is the most names a scan answers. ScanWait bounds the
+// helper's reads; ScanTimeout bounds agentosd's call to the helper and is
+// longer, and both sit inside the setup page's 10 second call.
+const (
+	MaxNetworks = 20
+	ScanWait    = 3 * time.Second
+	ScanTimeout = 4 * time.Second
+)
+
+// Networks is OpScan's result: the home network names in range, strongest
+// first, each Showable and listed once. It carries names only: no BSSID,
+// frequency, strength or security (CRED-1).
+type Networks struct {
+	SSIDs []string `json:"ssids"`
+}
 
 // Wait is how long the helper watches for the connection to come up after
 // the write (L8.4: at most 40 seconds). CallTimeout bounds agentosd's call
@@ -134,4 +159,21 @@ func ConnectionSettings(ssid, psk string) Settings {
 		"ipv4": {"method": "auto"},
 		"ipv6": {"method": "auto"},
 	}
+}
+
+// Showable reports whether an access point's SSID may be listed: 1 to 32
+// bytes of UTF-8 with no control or format character. A hidden network's
+// empty or all-NUL SSID is not, nor is a name that could rewrite how the
+// page draws its neighbours (a bidi override); such a network can still be
+// typed.
+func Showable(ssid []byte) bool {
+	if len(ssid) < 1 || len(ssid) > 32 || !utf8.Valid(ssid) {
+		return false
+	}
+	for _, r := range string(ssid) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return false
+		}
+	}
+	return true
 }

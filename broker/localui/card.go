@@ -1,6 +1,7 @@
 package localui
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 
@@ -35,8 +36,38 @@ func (u *setup) card(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/setup", http.StatusSeeOther)
 		return
 	}
-	d.Handler(u.paired, "/setup").ServeHTTP(w, r)
+	h := d.Handler(u.paired, "/setup")
+	if r.Method != http.MethodPost || u.s.cfg.CodesVoid == nil {
+		h.ServeHTTP(w, r)
+		return
+	}
+	// A confirm whose provision voided the code generator (F10) goes
+	// back to setup's codes step rather than the retry page; the display
+	// keeps the card for the confirm after it.
+	rec := &cardReply{h: http.Header{}, code: http.StatusOK}
+	h.ServeHTTP(rec, r)
+	if u.voidCodes() {
+		http.Redirect(w, r, "/setup", http.StatusSeeOther)
+		return
+	}
+	for k, v := range rec.h {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(rec.code)
+	w.Write(rec.body.Bytes())
 }
+
+// cardReply holds the card display's answer to a POST until setup knows
+// whether the provision voided the code generator.
+type cardReply struct {
+	h    http.Header
+	code int
+	body bytes.Buffer
+}
+
+func (c *cardReply) Header() http.Header         { return c.h }
+func (c *cardReply) WriteHeader(code int)        { c.code = code }
+func (c *cardReply) Write(b []byte) (int, error) { return c.body.Write(b) }
 
 // paired reports whether r comes from the phone that paired, while setup
 // is open.
