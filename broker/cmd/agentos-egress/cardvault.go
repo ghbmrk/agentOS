@@ -27,9 +27,15 @@ var (
 	errSealedReset = uerr(http.StatusGone, "setup finished and the code generator is sealed; the vault is never reset")
 	// errCodesUnconfirmed: no code generator was confirmed on this vault
 	// since its last enroll, as after a remade setup vault (R1 on #1203).
-	// Setup goes back to step 3 before the card.
-	errCodesUnconfirmed = uerr(http.StatusPreconditionFailed, "no code generator is confirmed on this vault; set up the code generator again before the card")
+	// Setup goes back to step 3 before the card; the page routes there on
+	// its reason (#1115).
+	errCodesUnconfirmed = &unlockErr{status: http.StatusPreconditionFailed, reason: reasonCodesUnconfirmed,
+		msg: "no code generator is confirmed on this vault; set up the code generator again before the card"}
 )
+
+// reasonCodesUnconfirmed is errCodesUnconfirmed's reason on the unlock
+// socket (localui.ReasonCodesUnconfirmed).
+const reasonCodesUnconfirmed = "codes_unconfirmed"
 
 // provisionCard makes the card's vault from the open setup vault: a new
 // vault under a fresh data key, sealed with the card's passphrase and

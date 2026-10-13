@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	mrand "math/rand"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -12,10 +16,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/claim"
+	"github.com/ghbmrk/agentos/broker/firstboot"
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localui"
+	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: ARC-2, CH-9, REC-4, ONB-3
+// REQ: ARC-2, CH-9, REC-4, ONB-3, HW-1, HW-10
 
 // P2-2w c4: the page runs setup over agentosd's localui.sock, which
 // serves setup's ops only until finish (Security L6), and keeps its
@@ -141,4 +150,98 @@ func TestTheUnitIsHardened(t *testing.T) {
 	if memoryLimit >= 512<<20 {
 		t.Error("the heap's soft limit is not under MemoryMax")
 	}
+}
+
+// openSetup is agentosd's localui.sock while setup is open: progress
+// answers, so the page is not set up.
+var openSetup = localui.AgentosdSetup{Owner: localui.InProcess{
+	localapi.OpSetupProgress: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+		return localapi.SetupProgress{Phase: "ready"}, nil
+	}}}
+
+// beginBox is the page's first boot over files in dir, with a reset the
+// test counts in place of the vault process's /card/reset.
+func beginBox(t *testing.T, dir string, resets *int) (localui.Config, firstboot.Route) {
+	t.Helper()
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "")
+	cfg.Hooks = openSetup
+	void := &localui.CodesVoid{}
+	box := localui.CardBox(localui.NewUnlockClient(filepath.Join(dir, "none.sock")),
+		change.FileStore{Path: filepath.Join(dir, "claim.json")}, change.FileStore{Path: filepath.Join(dir, "latch.json")}, void)
+	box.Reset = func() error { *resets++; return nil }
+	cfg, route, err := withFirstBoot(cfg, box, void)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Hooks.(localui.CardFinish); !ok || cfg.Card == nil || cfg.CodesVoid != void {
+		t.Fatalf("route %s: hooks %T, card %v", route, cfg.Hooks, cfg.Card)
+	}
+	return cfg, route
+}
+
+// get asks the page for path as a phone on the box's Wi-Fi.
+func get(t *testing.T, cfg localui.Config, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	s, err := localui.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "http://10.42.0.1"+path, nil)
+	req.RemoteAddr = "10.42.0.23:51000"
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	return w
+}
+
+// Brief test 5 (HW-10, HW-1): Begin in the page's wiring. A claim state
+// sealed the way agentos-seller seals it (claim.Seal, then the bytes at
+// claim.StatePath) routes to claim and gates /setup; a preloaded latch
+// with no claim state routes to reinstall; neither routes to download.
+func TestThePageRunsTheFirstBoot(t *testing.T) {
+	t.Run("claim", func(t *testing.T) {
+		dir := t.TempDir()
+		st := &change.MemStore{}
+		if err := claim.Seal(st, "CANA-RYCL-AXMC-KDE2", mrand.New(mrand.NewSource(3)), nil); err != nil {
+			t.Fatal(err)
+		}
+		b, err := st.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "claim.json"), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var resets int
+		cfg, route := beginBox(t, dir, &resets)
+		if route != firstboot.RouteClaim || cfg.Claim == nil || resets != 1 {
+			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
+		}
+		if w := get(t, cfg, "/setup"); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/claim" {
+			t.Fatalf("/setup before the claim: %d %q", w.Code, w.Header().Get("Location"))
+		}
+	})
+	t.Run("reinstall", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "latch.json"), []byte(`{"card_confirmed":false,"preloaded":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var resets int
+		cfg, route := beginBox(t, dir, &resets)
+		if route != firstboot.RouteReinstall || cfg.Claim == nil || resets != 0 {
+			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
+		}
+		if body := get(t, cfg, "/claim").Body.String(); !strings.Contains(body, "To set me up again, reinstall me.") {
+			t.Fatalf("no reinstall text: %s", body)
+		}
+	})
+	t.Run("download", func(t *testing.T) {
+		var resets int
+		cfg, route := beginBox(t, t.TempDir(), &resets)
+		if route != firstboot.RouteDownload || cfg.Claim != nil || resets != 1 {
+			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
+		}
+		if w := get(t, cfg, "/setup"); w.Code != http.StatusOK {
+			t.Fatalf("/setup on a downloaded box: %d %q", w.Code, w.Header().Get("Location"))
+		}
+	})
 }

@@ -1,0 +1,82 @@
+package localui
+
+import (
+	"context"
+	"errors"
+	"sync"
+
+	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/claim"
+	"github.com/ghbmrk/agentos/broker/firstboot"
+)
+
+// ReasonCodesUnconfirmed is the vault process's reason on /card/provision's
+// refusal for a code generator nobody confirmed (egress K21): the setup
+// vault was made anew, so the owner sets up the code generator again (F10).
+const ReasonCodesUnconfirmed = "codes_unconfirmed"
+
+// ErrCodesUnconfirmed is wrapped by an UnlockClient error whose reply
+// carries ReasonCodesUnconfirmed.
+var ErrCodesUnconfirmed = errors.New("vault: no code generator is confirmed")
+
+// CodesVoid is set when the vault's code generator entry no longer counts
+// (F10, #1210 R1): a card provision refused with ReasonCodesUnconfirmed, or
+// a card reset that made the setup vault anew. Setup takes it and sends
+// the owner back to the codes step.
+type CodesVoid struct {
+	mu  sync.Mutex
+	set bool
+}
+
+// Set marks the code generator void.
+func (v *CodesVoid) Set() {
+	v.mu.Lock()
+	v.set = true
+	v.mu.Unlock()
+}
+
+// Take reports whether the code generator was marked void since the last
+// Take, and clears the mark.
+func (v *CodesVoid) Take() bool {
+	if v == nil {
+		return false
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	was := v.set
+	v.set = false
+	return was
+}
+
+// CardBox is the page's first-boot config (#1115): the card step's
+// provision and the unconfirmed card's reset go to the vault process over
+// the unlock socket (egress K21, K22), and either answer that voids the
+// code generator sets void. claimStore holds the claim state a seller
+// sealed (claim.StatePath); latch is the card step's latch.
+func CardBox(u *UnlockClient, claimStore claim.Store, latch firstboot.Store, void *CodesVoid) firstboot.BoxConfig {
+	return firstboot.BoxConfig{
+		Claim: claim.Config{Store: claimStore},
+		Latch: latch,
+		Reset: func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
+			defer cancel()
+			remade, err := u.ResetCard(ctx)
+			if remade {
+				void.Set()
+			}
+			return err
+		},
+		Card: card.DisplayConfig{Provision: func(c *card.Card) error {
+			// A background context with a limit, as the rotation's
+			// commit (L38): a phone that drops mid-provision cannot cut
+			// a slot write short.
+			ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
+			defer cancel()
+			err := u.ProvisionCard(ctx, c)
+			if errors.Is(err, ErrCodesUnconfirmed) {
+				void.Set()
+			}
+			return err
+		}},
+	}
+}

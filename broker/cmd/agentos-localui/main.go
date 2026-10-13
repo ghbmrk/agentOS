@@ -11,6 +11,12 @@
 // localui.sock's setup ops, which agentosd serves only until setup's
 // finish, and keeps setup's state in memory only (L18), so a restart of
 // the page starts the steps over.
+//
+// With the vault process's unlock socket, a box whose setup is open runs
+// firstboot.Begin here (#1115): the claim gate of a preloaded box, the
+// reinstall route of one that lost its claim state, and the Owner Card
+// step, whose provision and reset go over the unlock socket and whose
+// confirm the page reports to agentosd before finish.
 package main
 
 import (
@@ -28,6 +34,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/claim"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localui"
 )
 
@@ -37,9 +46,12 @@ const memoryLimit = 384 << 20
 
 func main() {
 	var sock, vaultSock, iface, addr string
+	var fb boxFiles
 	var port int
 	flag.StringVar(&sock, "sock", "/run/agentos/localui.sock", "agentosd's localui.sock (agentosd -localui-uid)")
 	flag.StringVar(&vaultSock, "vault-sock", "", "the vault process's unlock socket, for the unknown-host unlock page; empty: not served")
+	flag.StringVar(&fb.Claim, "claim-state", claim.StatePath, "a preloaded box's claim state, as its seller sealed it (HW-10)")
+	flag.StringVar(&fb.Latch, "card-latch", "/var/lib/agentos/card-latch.json", "the Owner Card step's latch (HW-1)")
 	flag.StringVar(&iface, "iface", "wlan0", "the access point's interface")
 	flag.StringVar(&addr, "addr", "10.42.0.1/24", "the Wi-Fi page's address on the access point, with the subnet's length")
 	flag.IntVar(&port, "port", localui.UIPort, "TCP port")
@@ -52,7 +64,8 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock), sock); err != nil {
+	fb.VaultSock = vaultSock
+	if err := run(ctx, config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock), sock, fb); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -73,15 +86,52 @@ func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Confi
 	return cfg
 }
 
+// withFirstBoot runs firstboot.Begin and gives the page its steps: the
+// claim screen (nil on the download route), the card step, and the
+// report of its confirm before agentosd's finish.
+func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.CodesVoid) (localui.Config, firstboot.Route, error) {
+	fb, err := firstboot.Begin(box)
+	if err != nil {
+		return cfg, "", err
+	}
+	if fb.Claim != nil {
+		cfg.Claim = fb.Claim
+	}
+	cfg.Card, cfg.CodesVoid = fb.Card, void
+	if h, ok := cfg.Hooks.(localui.AgentosdSetup); ok {
+		cfg.Hooks = localui.CardFinish{AgentosdSetup: h, Card: fb.Card}
+	}
+	return cfg, fb.Route, nil
+}
+
 // agentosdWait bounds the wait for agentosd's socket; past it the page
 // exits and its unit restarts it.
 const agentosdWait = 30 * time.Second
 
-func run(ctx context.Context, cfg localui.Config, sock string) error {
+// boxFiles is what the page's first boot reads: the vault process's
+// unlock socket, the claim state and the card step's latch.
+type boxFiles struct{ VaultSock, Claim, Latch string }
+
+func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) error {
 	// New asks agentosd whether setup is open and takes no answer as
 	// closed, so it waits until agentosd's socket accepts.
 	if err := awaitSocket(ctx, sock, agentosdWait); err != nil {
 		return err
+	}
+	// An owned box never runs the first boot: its reset could remove a
+	// vault in use. Without the unlock socket there is no card step and
+	// agentosd's finish stays held (card pending): fail closed.
+	if fb.VaultSock != "" && cfg.Hooks != nil && !cfg.Hooks.AlreadySetUp() {
+		if err := awaitSocket(ctx, fb.VaultSock, agentosdWait); err != nil {
+			return err
+		}
+		void := &localui.CodesVoid{}
+		box := localui.CardBox(localui.NewUnlockClient(fb.VaultSock), change.FileStore{Path: fb.Claim},
+			change.FileStore{Path: fb.Latch}, void)
+		var err error
+		if cfg, _, err = withFirstBoot(cfg, box, void); err != nil {
+			return err
+		}
 	}
 	s, err := localui.New(cfg)
 	if err != nil {
