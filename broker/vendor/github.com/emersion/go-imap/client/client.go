@@ -114,22 +114,33 @@ func (c *Client) registerHandler(h responses.Handler) {
 
 func (c *Client) handle(resp imap.Resp) error {
 	c.handlersLocker.Lock()
+	// agentos: deferred so a handler's panic, recovered in reader, does
+	// not leave the lock held for the call's Logout.
+	defer c.handlersLocker.Unlock()
 	for i := len(c.handlers) - 1; i >= 0; i-- {
 		if err := c.handlers[i].Handle(resp); err != responses.ErrUnhandled {
 			if err == errUnregisterHandler {
 				c.handlers = append(c.handlers[:i], c.handlers[i+1:]...)
 				err = nil
 			}
-			c.handlersLocker.Unlock()
 			return err
 		}
 	}
-	c.handlersLocker.Unlock()
 	return responses.ErrUnhandled
 }
 
 func (c *Client) reader() {
 	defer close(c.loggedOut)
+	// agentos: a panic while parsing or handling a server response (a
+	// hostile or broken server) closes the connection and ends the
+	// reader, so the in-flight command fails with errClosed instead of
+	// the panic ending the process.
+	defer func() {
+		if r := recover(); r != nil {
+			c.ErrorLog.Println("imap/client: panic handling a response; connection closed")
+			c.conn.Close()
+		}
+	}()
 	// Loop while connected.
 	for {
 		connected, err := c.readOnce()
