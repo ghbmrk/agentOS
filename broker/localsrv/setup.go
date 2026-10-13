@@ -31,6 +31,7 @@ type Setup struct {
 	rec     SetupRecord
 	closed  bool
 	enrolls []time.Time
+	joins   []time.Time
 }
 
 // SetupConfig configures a Setup.
@@ -46,7 +47,12 @@ type SetupConfig struct {
 	// Finished is called once, after finish is recorded, with the owner's
 	// number. It must not block.
 	Finished func(owner string)
-	Now      func() time.Time
+	// Join has the netjoin helper join the home Wi-Fi (P2-2w c3;
+	// Security L8): nil when it joined or saved the network, an error
+	// otherwise. Nil Join answers every join with ErrNotJoined. The
+	// password goes nowhere else: not the record, not an error, not a log.
+	Join func(ctx context.Context, ssid, password string) error
+	Now  func() time.Time
 }
 
 // Enroller is the vault process's code-generator enrollment (egress K17).
@@ -74,6 +80,10 @@ var (
 
 // EnrollsPerMinute bounds new seeds: each enroll writes one to the vault.
 const EnrollsPerMinute = 6
+
+// JoinsPerMinute bounds join tries: each one writes NetworkManager's
+// stored connection (Security L6.4).
+const JoinsPerMinute = 6
 
 // SetupRecord is setup's durable record. It holds no secret.
 type SetupRecord struct {
@@ -131,6 +141,7 @@ var (
 	errNoEnrollment = sockets.Code(localapi.ErrNoEnrollment)
 	errNotEnrolled  = sockets.Code(localapi.ErrNotEnrolled)
 	errUnavailable  = sockets.Code(localapi.ErrEnrollUnavailable)
+	errNotJoined    = sockets.Code(localapi.ErrNotJoined)
 )
 
 // NewSetup reads the record; one that cannot be read closes setup.
@@ -165,6 +176,7 @@ func (s *Setup) Ops() map[string]sockets.Handler {
 		localapi.OpSetupEnroll:   s.open(s.enroll),
 		localapi.OpSetupConfirm:  s.open(s.confirm),
 		localapi.OpSetupFinish:   s.open(s.finish),
+		localapi.OpSetupJoin:     s.open(s.join),
 	}
 }
 
@@ -190,21 +202,9 @@ func (s *Setup) enroll(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	if err := decode(args, &struct{}{}); err != nil {
 		return nil, err
 	}
-	now := s.cfg.Now()
-	s.mu.Lock()
-	kept := s.enrolls[:0]
-	for _, t := range s.enrolls {
-		if now.Sub(t) < time.Minute {
-			kept = append(kept, t)
-		}
-	}
-	s.enrolls = kept
-	if len(s.enrolls) >= EnrollsPerMinute {
-		s.mu.Unlock()
+	if !s.allow(&s.enrolls, EnrollsPerMinute) {
 		return nil, errLimited
 	}
-	s.enrolls = append(s.enrolls, now)
-	s.mu.Unlock()
 	uri, err := s.cfg.Enroll.Enroll()
 	if err != nil {
 		// A refused enroll replaced nothing, so a confirmation recorded
@@ -222,6 +222,46 @@ func (s *Setup) enroll(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 		return nil, errFailed
 	}
 	return localapi.EnrollLink{URI: uri}, nil
+}
+
+// allow counts one try in *tries unless n were made in the last minute.
+func (s *Setup) allow(tries *[]time.Time, n int) bool {
+	now := s.cfg.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := (*tries)[:0]
+	for _, t := range *tries {
+		if now.Sub(t) < time.Minute {
+			kept = append(kept, t)
+		}
+	}
+	*tries = kept
+	if len(kept) >= n {
+		return false
+	}
+	*tries = append(kept, now)
+	return true
+}
+
+// join hands the home network to the helper (P2-2w c3). agentosd checks
+// the shape only (Security L8.8); the helper checks the exact rule. No
+// lock is held across the call, which can take up to the helper's wait.
+func (s *Setup) join(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var a localapi.Join
+	if err := decode(args, &a); err != nil {
+		return nil, err
+	}
+	if !s.allow(&s.joins, JoinsPerMinute) {
+		return nil, errLimited
+	}
+	if len(a.SSID) == 0 || len(a.SSID) > localapi.MaxSSID ||
+		len(a.Password) < localapi.MinPassword || len(a.Password) > localapi.MaxPassword {
+		return nil, errBadArgs
+	}
+	if s.cfg.Join == nil || s.cfg.Join(ctx, a.SSID, a.Password) != nil {
+		return nil, errNotJoined
+	}
+	return struct{}{}, nil
 }
 
 func (s *Setup) confirm(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
