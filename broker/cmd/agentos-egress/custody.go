@@ -1107,6 +1107,12 @@ func (c *custody) put(name string, value []byte) error {
 	if c.ph != open {
 		return errLocked
 	}
+	return c.putKeyLocked(name, value)
+}
+
+// putKeyLocked is put's store, shared with setup's (setupKey). Caller
+// holds mu with the vault open.
+func (c *custody) putKeyLocked(name string, value []byte) error {
 	if !adapterCredential(name) || hasOtherKind(c.v, name, vault.KindAPIKey) {
 		return errBadCredential
 	}

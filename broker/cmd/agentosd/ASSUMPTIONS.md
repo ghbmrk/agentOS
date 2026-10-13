@@ -228,3 +228,9 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 |---|---|---|---|
 | RW1 | **RENEW lists, RENEW n asks.** RENEW is a settings hook (`cfg.Settings`, chained ahead of earlier ones) taken only in an unlocked owner session; locked, it is not taken, so the channel asks for the unlock (CH-21). It lists up to 9 lineages from recall's `Full`, numbered, by agent name (the root machine the broker chose), clipped to 16 characters and shown as "agent" if anything but letters, digits, `-` and `_` appears, so no guest text reaches the owner. RENEW n picks only from the list sent in the last 10 minutes; the lineage asked about is the broker's own, never the owner's or a guest's text. The ask's question is the notice, so RENEW n sends no reply of its own when asked. | CAP-3, CH-21 | — |
 | RW2 | **The owner's answer is the gate's.** RENEW n only asks (`AskRenew`); the take-back runs from recall's executor on the gate's approval (recalltool RN1, RN2). | CAP-3 | — |
+
+## Setup's AI providers (P2-2w c4e)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| PV1 | **The enroller is also setup's providers.** `enroller` (the vault process over `verify.sock`) implements `localsrv.Providers`, so setup serves `page_setup_providers`, `page_setup_api_key` and `page_setup_private_ok` only while setup is open. Every provider takes an API key; none offers device code until c4e2. The key is a call argument and is never kept or logged here (CRED-1). The vault's 400 maps to `localsrv.ProviderRefused` (`bad args`), 410 and 412 as enrollment's do. | CRED-5, CAP-9, ONB-3, CRED-1 | egress K23. |
