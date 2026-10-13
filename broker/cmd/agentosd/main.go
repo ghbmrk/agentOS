@@ -509,6 +509,12 @@ func main() {
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
 			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock,
 			Card: pageCardStep}
+		if modemBridge {
+			// The box texts its setup and pairing texts on its own line
+			// (P2-2w c4c), and records the SIM it finds as that line's.
+			m.Line = modemlink.NewSetup(modemlink.SetupConfig{Record: recordOwnerSIM(*modemRoles)})
+			m.ModemUID, m.ModemGID = &cfg.ModemUID, cfg.ModemGID
+		}
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
 		}

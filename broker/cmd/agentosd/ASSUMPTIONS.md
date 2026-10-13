@@ -234,3 +234,12 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|
 | PV1 | **The enroller is also setup's providers.** `enroller` (the vault process over `verify.sock`) implements `localsrv.Providers`, so setup serves `page_setup_providers`, `page_setup_api_key` and `page_setup_private_ok` only while setup is open. Every provider takes an API key; none offers device code until c4e2. The key is a call argument and is never kept or logged here (CRED-1). The vault's 400 maps to `localsrv.ProviderRefused` (`bad args`), 410 and 412 as enrollment's do. | CRED-5, CAP-9, ONB-3, CRED-1 | egress K23. |
+
+## Box number and texts in setup (P2-2w c4c)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| ST1 | **owner.sock serves the setup line, to the bridge only, until finish.** With the modem bridge on, setup mode serves `modemlink.SetupLine`'s bridge ops on `owner.sock` (the bridge's uid only, same modes as the owner channel's, in the same `Start` call as `localui.sock` since the directory is locked once) and `page_setup_line`, `page_setup_send`, `page_setup_inbound` on `localui.sock`. Setup mode refuses to start with the bridge on and no modem uid. Once finish is recorded, every setup op is refused, across restarts. | CH-1, CH-12, ONB-6 | — |
+| ST2 | **No number is trusted before the owner pairs.** Only texts from a valid, non-named number whose first word is PAIR reach the page; everything else is taken and dropped. At most 5 a minute are kept (`modemlink.SetupInboundPerMinute`), and 8 wait (`MaxSetupInbound`). The page offers each to `Server.OfferText`, whose pairing code is the check. | CH-12, §8.1 | — |
+| ST3 | **The box texts only setup's fixed texts, capped.** `page_setup_send` sends only `localapi.SetupText` texts to an E.164 number, at most 5 a minute and 20 an hour whoever asks, so a compromised page cannot spend the SIM on anything else. It answers within 45 s; agentosd waits 40 s for the bridge. | CH-12, CH-1 | — |
+| ST4 | **The SIM found during setup is the owner line's, once (TOFU).** While setup runs and no SIM is recorded, the first serial the bridge reports as unbound is written to the roles file, and the bridge opens it at its next try. A SIM swapped during setup is not re-adopted; after setup the existing confirm-with-a-code path (P2-2w d2b) applies. | ADP-12, CH-1 | Re-adopt in setup if field use shows swaps. |
