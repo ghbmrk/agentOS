@@ -59,8 +59,20 @@
     "15cc88e14d99383b1dc64d05fb3678cb18566d78810c1c5f5f63d83716ce7911": 1,
     "c9dbb6526542bf2541a21b90d043c769c6d9af243692106155a95f2d82fa6ba2": 1
   },
+  "briefs/CH-21.md": {
+    "8e8d95d98c2b80b85d2bf53628fbc0a5758c9978b605c13593e59a1f6fc6329a": 1
+  },
+  "briefs/CH-21a.md": {
+    "f4918b36aebff8c7e28825e851f8a663a9264dbd9264f58685c7b4ad6532edb5": 1
+  },
+  "briefs/CH-21b.md": {
+    "bcb98df6d2ac3b50f3b2db4ad2a2f9cb1d6d8c0302f070ef71a89506d0d6f0ee": 1
+  },
   "briefs/CH-21e.md": {
     "746c3e5331712da85dc63019a78ba9c152676324aa77e4618666b04e7b689c52": 1
+  },
+  "briefs/CTRL-card-sock.md": {
+    "c43c2288e5fcfdf530ffe23b570ec951f9ae1b9652bc8226063f6fefad78ef43": 1
   },
   "briefs/CTRL-claim-ap.md": {
     "b988a804af834c925ebb80b3c5b3f42619335a63f5845a73153c3ae1fb2d60b4": 1
@@ -420,6 +432,17 @@
   "reviews/potency/2026-10-05-organize-verb.md": {
     "8dcaeff13f3998318b5631521a14eba462e1e50d5c0ba9b73bd81f2ea14c2efd": 1,
     "b6b42fd3a6c011845d3775509518d951a48f12feed7ec2f8d4730df636642503": 1
+  },
+  "reviews/security/2026-10-08-lens-bundle-a.md": {
+    "7227a860d69ec0a034c860f474611cc321d8610531dd0a843b840c1f0d6a94d3": 1,
+    "ba6519e612849710358702a7b83e5fa01859981145701d4d10d41af94861b197": 1
+  },
+  "reviews/security/2026-10-08-pr370.md": {
+    "1835e56464aec078dc91a2d7e6b2575c87d6ba8e5d90c3c83e2b6f2b2458e08d": 1
+  },
+  "reviews/security/2026-10-09-pr462.md": {
+    "44079e791e490dfec5c1295832be2baee258bb4a9cce7306d5f0ce3a2dc69903": 1,
+    "c3baf680726c4ee577bf8b8ac9af579a773c59bac7ae2d1d69d6f05c3f2c8d3e": 1
   },
   "reviews/ux/2026-10-08-lens-bundle-a.md": {
     "5921d7bab3edb9bddf0bef1e1b5badb9062dcd2742706085e2dc2b526564319f": 1
