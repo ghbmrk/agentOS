@@ -114,18 +114,17 @@ func (c *Client) registerHandler(h responses.Handler) {
 
 func (c *Client) handle(resp imap.Resp) error {
 	c.handlersLocker.Lock()
-	// agentos: deferred so a handler's panic, recovered in reader, does
-	// not leave the lock held for the call's Logout.
-	defer c.handlersLocker.Unlock()
 	for i := len(c.handlers) - 1; i >= 0; i-- {
 		if err := c.handlers[i].Handle(resp); err != responses.ErrUnhandled {
 			if err == errUnregisterHandler {
 				c.handlers = append(c.handlers[:i], c.handlers[i+1:]...)
 				err = nil
 			}
+			c.handlersLocker.Unlock()
 			return err
 		}
 	}
+	c.handlersLocker.Unlock()
 	return responses.ErrUnhandled
 }
 

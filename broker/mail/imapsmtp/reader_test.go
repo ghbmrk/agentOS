@@ -16,27 +16,36 @@ import (
 // hostile is a raw IMAP server that logs in, selects any folder with
 // UID validity 7 and answers a UID FETCH with fetch's bytes, after which
 // it closes the connection when hangup is set, else holds it open. It
-// stands in for a hostile or broken mail host (SR3-mail-k18).
-func hostile(t testing.TB, fetch string, hangup bool) string {
+// stands in for a hostile or broken mail host (SR3-mail-k18). Each
+// conversation's end ("eof" when the client closed the connection,
+// "logout" or "hangup") is sent on the returned channel if there is room.
+func hostile(t testing.TB, fetch string, hangup bool) (string, <-chan string) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
+	ended := make(chan string, 4)
 	go func() {
 		for {
 			c, err := l.Accept()
 			if err != nil {
 				return
 			}
-			go converse(c, fetch, hangup)
+			go func() {
+				end := converse(c, fetch, hangup)
+				select {
+				case ended <- end:
+				default:
+				}
+			}()
 		}
 	}()
-	return l.Addr().String()
+	return l.Addr().String(), ended
 }
 
-func converse(c net.Conn, fetch string, hangup bool) {
+func converse(c net.Conn, fetch string, hangup bool) string {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(30 * time.Second))
 	w := bufio.NewWriter(c)
@@ -46,11 +55,11 @@ func converse(c net.Conn, fetch string, hangup bool) {
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
-			return
+			return "eof"
 		}
 		f := strings.Fields(line)
 		if len(f) < 2 {
-			return
+			return "short"
 		}
 		tag, cmd := f[0], strings.ToUpper(f[1])
 		switch {
@@ -61,11 +70,11 @@ func converse(c net.Conn, fetch string, hangup bool) {
 		case cmd == "UID" && len(f) > 2 && strings.ToUpper(f[2]) == "FETCH":
 			say(fetch)
 			if hangup {
-				return
+				return "hangup"
 			}
 		case cmd == "LOGOUT":
 			say("* BYE bye\r\n" + tag + " OK done\r\n")
-			return
+			return "logout"
 		default:
 			say(tag + " BAD unknown\r\n")
 		}
@@ -98,14 +107,21 @@ const childEnv = "AGENTOS_K18_CHILD"
 // guard the panic is reported here instead of ending this test binary:
 // with the guard the call returns an error and the process lives. The
 // server holds the connection open, so the error comes from the guard,
-// not from EOF, and well inside the store's own timeout.
+// not from EOF, and well inside the store's own timeout. The guard also
+// closes the connection: the server reads EOF, not a LOGOUT sent on a
+// connection the client would otherwise leave open.
 func TestReaderPanicFailsTheCall(t *testing.T) {
 	if os.Getenv(childEnv) == "1" {
 		return
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestReaderPanicChild$", "-test.v")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReaderPanicChild$", "-test.v")
 	cmd.Env = append(os.Environ(), childEnv+"=1")
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("the child hung after the hostile reply:\n%s", tail(string(out), 1500))
+	}
 	if err != nil || strings.Contains(string(out), "panic:") {
 		t.Fatalf("the reader goroutine's panic ended the process: %v\n%s", err, tail(string(out), 1500))
 	}
@@ -118,7 +134,8 @@ func TestReaderPanicChild(t *testing.T) {
 	if os.Getenv(childEnv) != "1" {
 		t.Skip("run by TestReaderPanicFailsTheCall")
 	}
-	s := hostileStore(t, hostile(t, bareFetch, false), 30*time.Second)
+	addr, ended := hostile(t, bareFetch, false)
+	s := hostileStore(t, addr, 30*time.Second)
 	start := time.Now()
 	_, err := s.Fetch(context.Background(), "INBOX", 7, []uint32{1})
 	if err == nil {
@@ -126,6 +143,14 @@ func TestReaderPanicChild(t *testing.T) {
 	}
 	if d := time.Since(start); d > 10*time.Second {
 		t.Fatalf("the call took %v: it waited out a timeout instead of failing on the guard", d)
+	}
+	select {
+	case end := <-ended:
+		if end != "eof" {
+			t.Fatalf("the server saw %q, want the client to close the connection (eof)", end)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the connection was left open after the guarded panic")
 	}
 	t.Logf("k18: call failed: %v", err)
 }
@@ -138,9 +163,10 @@ func tail(s string, n int) string {
 }
 
 // FuzzIMAPReplies (T2): whatever a server sends in answer to a UID
-// FETCH, the call ends in an error and the process lives. The server
-// closes after its bytes, so no stream can complete the command (it
-// cannot know the tag), and the timeout bounds any that stall.
+// FETCH, the process lives. The server closes after its bytes, so no
+// stream can complete the command (it cannot know the tag) and the error
+// check only guards against a reply taken for success; it is not a check
+// that replies are parsed correctly. The timeout bounds any that stall.
 func FuzzIMAPReplies(f *testing.F) {
 	for _, s := range []string{
 		bareFetch,
@@ -164,7 +190,8 @@ func FuzzIMAPReplies(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, stream string) {
-		s := hostileStore(t, hostile(t, stream, true), 3*time.Second)
+		addr, _ := hostile(t, stream, true)
+		s := hostileStore(t, addr, 3*time.Second)
 		if _, err := s.Fetch(context.Background(), "INBOX", 7, []uint32{1}); err == nil {
 			t.Fatalf("stream %q was answered as success", stream)
 		}
