@@ -59,8 +59,11 @@ var (
 // setup's seal is written (only sealEnroll writes it), errNotOpen when
 // setup mode never opened it or an entry is of the wrong kind, nil when
 // open. Caller holds mu with the vault open.
-func (c *custody) closedLocked() error {
-	for _, e := range c.v.List() {
+func (c *custody) closedLocked() error { return enrollClosed(c.v) }
+
+// enrollClosed is closedLocked for any open vault v.
+func enrollClosed(v *vault.Vault) error {
+	for _, e := range v.List() {
 		if e.Name == EnrolledName {
 			if e.Kind != KindEnrolled {
 				return errNotOpen
@@ -68,8 +71,8 @@ func (c *custody) closedLocked() error {
 			return errEnrolled
 		}
 	}
-	if !hasKind(c.v, SetupOpenName, KindSetupOpen) ||
-		hasOtherKind(c.v, PendingSeedName, vault.KindTOTPSeed) {
+	if !hasKind(v, SetupOpenName, KindSetupOpen) ||
+		hasOtherKind(v, PendingSeedName, vault.KindTOTPSeed) {
 		return errNotOpen
 	}
 	return nil
@@ -187,6 +190,8 @@ func (c *custody) sealEnroll() error {
 	if c.v.Delete(SetupOpenName) != nil || c.v.Delete(ConfirmedName) != nil {
 		return errInternal
 	}
+	// The setup key opens nothing once sealed (setupopen.go).
+	c.dropSetupKey()
 	c.notify(noteEnrolled)
 	return nil
 }
