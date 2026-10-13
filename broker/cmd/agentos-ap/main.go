@@ -57,7 +57,7 @@ func main() {
 	var c config
 	var addr, dir string
 	flag.StringVar(&c.Iface, "iface", "wlan0", "the radio that serves the setup network")
-	flag.StringVar(&addr, "addr", "10.42.0.1/24", "the box's address on the access point, with the subnet's length")
+	flag.StringVar(&addr, "addr", "10.42.0.1/24", "my address on the access point, with the subnet's length")
 	flag.StringVar(&c.Latch, "card-latch", "/var/lib/agentos-localui/card-latch.json", "the Owner Card step's latch (the page's)")
 	flag.StringVar(&c.Setup, "setup-net", claim.SetupNetPath, "the setup network the seller sealed (HW-10)")
 	flag.StringVar(&c.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "agentosd's owner state; present once setup has finished")
