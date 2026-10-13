@@ -189,6 +189,14 @@ type custody struct {
 	// keysPath, if set, is the keys file; while it exists the state file
 	// must too.
 	keysPath string
+	// vaultPath is the sealed vault file, for Owner Card rotation
+	// (rotation.go); empty serves no rotation.
+	vaultPath string
+	// afterFunc arms the pending rotation's timer; nil is time.AfterFunc.
+	// Only tests set it.
+	afterFunc func(time.Duration, func()) func() bool
+	// rot is the pending Owner Card rotation (rotation.go).
+	rot rotation
 	// open decrypts the vault with a passphrase (vault.OpenSealed).
 	open func(passphrase string) (*vault.Vault, error)
 	// build makes the egress proxy over an open vault.
@@ -1029,6 +1037,12 @@ func (c *custody) lockedOut(now time.Time) (time.Time, bool) {
 // lock discards the key and cancels an unlock in flight. A derivation
 // still running keeps the phase at opening until it returns.
 func (c *custody) lock() {
+	// The pending card rotation holds the typed passphrase and the open
+	// vault: it goes first (lock order rotation.mu, then mu).
+	c.rot.mu.Lock()
+	defer c.rot.mu.Unlock()
+	c.rot.drop()
+	c.rot.box = nil
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.gen++

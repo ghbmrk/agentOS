@@ -92,6 +92,12 @@ type DisplayConfig struct {
 	// keeps and prints beside a new Wi-Fi password; needed when Rotate
 	// has WiFi.
 	WiFiName string
+	// Discarded, when set, runs once when the display discards an
+	// unconfirmed card: the page's cancel, or a provisioner's ErrDiscard.
+	// A rotation's wire cancels the vault's pending rotation here, so the
+	// typed passphrase it holds goes at once (#1090 review R2, CRED-1).
+	// It runs with the display locked and must not call back into it.
+	Discarded func()
 }
 
 // Display is one Owner Card the box generated (at first boot, HW-1, or the
@@ -109,6 +115,7 @@ type Display struct {
 	rotate    bool
 	provision func(*Card) error
 	journal   func(string)
+	discardFn func()
 	confirmed bool
 	discarded bool
 	inEffect  bool
@@ -154,7 +161,7 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 		wipeCard(c)
 		return nil, err
 	}
-	d := &Display{c: c, word: -1, group: -1, provision: cfg.Provision, journal: cfg.Journal}
+	d := &Display{c: c, word: -1, group: -1, provision: cfg.Provision, journal: cfg.Journal, discardFn: cfg.Discarded}
 	ask := Parts{Passphrase: true, Recovery: true}
 	if cfg.Rotate != nil {
 		ask, d.rotate = *cfg.Rotate, true
@@ -345,6 +352,9 @@ func (d *Display) discardLocked() {
 	d.discarded = true
 	d.eraseLocked()
 	d.journal(EventDiscarded)
+	if d.discardFn != nil {
+		d.discardFn()
+	}
 }
 
 // Confirmed reports whether the owner confirmed and the box provisioned.
