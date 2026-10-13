@@ -396,8 +396,9 @@ func (r *rig) runSetupToAI() {
 	r.hooks.mu.Lock()
 	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
 	r.hooks.mu.Unlock()
-	if p := r.get("/setup"); !strings.Contains(p, `name="private" value="1" checked`) {
-		t.Fatalf("no private-data question, ticked: %s", p)
+	// CAP-9: the private-data question is asked, unticked (default no).
+	if p := r.get("/setup"); !strings.Contains(p, `name="private" value="1">`) || strings.Contains(p, `name="private" value="1" checked`) {
+		t.Fatalf("no private-data question, or ticked by default: %s", p)
 	}
 }
 

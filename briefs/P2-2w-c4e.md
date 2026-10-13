@@ -26,7 +26,7 @@ Board section: Backlog refill (2026-10-05); work item #1222. Split from P2-2w c4
 - `broker/localapi/setup.go`: three ops added to `SetupOps` and their types; `localapi_test.go` (the op count). The vault's refusals map to the existing codes.
 - `broker/localsrv/`: `setup.go` (a `Providers` field on `SetupConfig` and the three ops), a new `setupproviders.go` (the handlers) and a new `setupproviders_test.go`.
 - `broker/cmd/agentosd/setup.go` (the enroller also serves providers), a new `setupproviders_test.go`, `capoff_test.go` (the OP-9 guard now asks a box past setup), and `ASSUMPTIONS.md`.
-- `broker/localui/setuphooks.go` (the provider hooks only), a new `setupproviders_test.go`, and `ASSUMPTIONS.md` (L42).
+- `broker/localui/setuphooks.go` (the provider hooks only), a new `setupproviders_test.go`, and `ASSUMPTIONS.md` (L42); `pages.go` (the private-data box starts unticked, Security S-B1) and `localui_test.go` (its expectation).
 
 ## What to build
 
@@ -39,7 +39,7 @@ Board section: Backlog refill (2026-10-05); work item #1222. Split from P2-2w c4
 2. **Router.** `route.Config.PrivateAllowed func(provider) bool` is checked when `PrivateOK` is false. The vault process passes a check that is true only while the vault is open and holds that adapter's marker. A locked vault allows nothing private, which is the fail-closed side.
 3. **Client.** `modelroute.Verifier` gets `SetupProviders`, `SetupAPIKey` and `SetupPrivateOK`, with the enroll errors.
 4. **agentosd.** `localsrv.SetupConfig.Providers` serves `page_setup_providers`, `page_setup_api_key` and `page_setup_private_ok` while setup is open. API keys are bounded at 512 bytes and printable, and limited to 10 a minute. agentosd's enroller implements the interface over the verify socket.
-5. **Page.** `AgentosdSetup.Providers`, `ConnectAPIKey` and `SetPrivateOK` call those ops. `StartDeviceCode` still answers `errNotServed`.
+5. **Page.** `AgentosdSetup.Providers`, `ConnectAPIKey` and `SetPrivateOK` call those ops. The private-data box starts unticked (CAP-9's default no). `StartDeviceCode` still answers `errNotServed`.
 
 ## Acceptance tests
 
@@ -58,7 +58,7 @@ Run tests with `-race`.
 
 ## Out of scope
 
-c4e2 above; checking a key against the provider before storing it; the page's private-data default (it is ticked; CAP-9 says default no for plans and hosted models); the eval route's static `PrivateOK`; changing a provider's answer after setup.
+c4e2 above; checking a key against the provider before storing it; the eval route's static `PrivateOK`; changing a provider's answer after setup.
 
 ## Estimate
 
