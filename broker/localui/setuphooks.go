@@ -16,9 +16,10 @@ import (
 //
 // JoinNetwork goes through agentosd to its netjoin helper (P2-2w c3;
 // Security L8), and Networks asks it for the networks in range (P2-2w
-// c4b). BoxNumber, HostInfo, Send, TrustHost and the provider hooks are
-// not served by agentosd yet: they answer nothing or an error, so the
-// steps that need them wait.
+// c4b). Providers, ConnectAPIKey and SetPrivateOK go through agentosd to
+// the vault process (P2-2w c4e; CRED-5, CAP-9). BoxNumber, HostInfo, Send,
+// TrustHost and StartDeviceCode are not served by agentosd yet: they answer
+// nothing or an error, so the steps that need them wait.
 type AgentosdSetup struct{ Owner Owner }
 
 var errNotServed = errors.New("localui: not served by agentosd yet")
@@ -124,13 +125,37 @@ func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
 	return a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
 }
 
-func (AgentosdSetup) BoxNumber() string                  { return "" }
-func (AgentosdSetup) HostInfo() string                   { return "" }
-func (AgentosdSetup) Send(string, string) error          { return errNotServed }
-func (AgentosdSetup) TrustHost(bool) error               { return errNotServed }
-func (AgentosdSetup) Providers() []Provider              { return nil }
-func (AgentosdSetup) ConnectAPIKey(string, string) error { return errNotServed }
-func (AgentosdSetup) SetPrivateOK(string, bool) error    { return errNotServed }
+func (AgentosdSetup) BoxNumber() string         { return "" }
+func (AgentosdSetup) HostInfo() string          { return "" }
+func (AgentosdSetup) Send(string, string) error { return errNotServed }
+func (AgentosdSetup) TrustHost(bool) error      { return errNotServed }
+
+// Providers lists the vault's providers. An error lists none, so the AI
+// step offers nothing and setup does not finish (ONB-3).
+func (a AgentosdSetup) Providers() []Provider {
+	var ps localapi.SetupProviders
+	if err := a.call(localapi.OpSetupProviders, nil, &ps); err != nil {
+		return nil
+	}
+	out := make([]Provider, 0, len(ps.Providers))
+	for _, p := range ps.Providers {
+		out = append(out, Provider{ID: p.ID, Name: p.Name, APIKey: p.APIKey, DeviceCode: p.DeviceCode, Connected: p.Connected, PrivateOK: p.PrivateOK})
+	}
+	return out
+}
+
+// ConnectAPIKey passes the key to agentosd, which passes it to the vault
+// process; the page keeps nothing (CRED-1, CRED-5).
+func (a AgentosdSetup) ConnectAPIKey(id, key string) error {
+	return a.call(localapi.OpSetupAPIKey, localapi.APIKey{Provider: id, Key: key}, nil)
+}
+
+// SetPrivateOK records the owner's private-data answer in the vault, where
+// the router reads it (CAP-9).
+func (a AgentosdSetup) SetPrivateOK(id string, ok bool) error {
+	return a.call(localapi.OpSetupPrivateOK, localapi.PrivateOK{Provider: id, OK: ok}, nil)
+}
+
 func (AgentosdSetup) StartDeviceCode(string) (string, string, error) {
 	return "", "", errNotServed
 }
