@@ -27,12 +27,12 @@ body { font-family: sans-serif; margin: 0 }
 .net { font: 3.4mm monospace; margin-top: 1mm }
 </style></head>
 <body><div class="sticker">
-<div class="step">1. Join the box's Wi-Fi</div>
+<div class="step">1. Join this Wi-Fi</div>
 {{.WiFiQR}}
 <div class="net">{{.SSID}}</div>
 <div class="code">{{.Password}}</div>
 <div class="hint">Scan, or join network {{.SSID}} with this password.</div>
-<div class="step">2. Claim the box</div>
+<div class="step">2. Claim this AgentOS box</div>
 {{.QR}}
 <div class="code">{{.Code}}</div>
 <div class="hint">Claim this AgentOS box: scan, or open {{.Page}} and type the code.</div>
