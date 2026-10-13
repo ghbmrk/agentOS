@@ -2,6 +2,8 @@ package localui
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -27,15 +29,27 @@ import (
 // (R2, CRED-1) the display's discard (the page's cancel, a replacing start,
 // a lapse) cancels the vault process's Pending, which also lapses by its
 // own timer at recovery.PendingTTL.
+//
+// #1175 security review S-R1: every rotation carries a random ID that
+// Start draws and the vault process echoes; commit and cancel carry it,
+// and the vault process answers 410 to one naming another rotation, so a
+// late commit cannot land under a newer rotation and a stale display's
+// discard cannot drop a newer one. The page draws the ID (not the vault
+// process) so that a begin that got no answer can still be cancelled by
+// it. #1175 UX review U-R1: while a replaced code generator is not yet
+// confirmed, the start page offers to show it again with the recovery key.
 
 // RotationVault is the vault process's rotation ops on the unlock socket;
 // UnlockClient is the real one.
 type RotationVault interface {
 	BeginRotation(ctx context.Context, b RotationBegin) (RotationStarted, error)
-	CommitRotation(ctx context.Context, c card.Card) (RotationResult, error)
-	CancelRotation(ctx context.Context) error
+	CommitRotation(ctx context.Context, id string, c card.Card) (RotationResult, error)
+	CancelRotation(ctx context.Context, id string) error
 	ConfirmEnrollment(ctx context.Context, code string) (bool, error)
 	ShowEnrollment(ctx context.Context, recoveryKey string) (string, error)
+	// EnrollmentPending reports a replaced code generator whose first
+	// code has not been typed yet.
+	EnrollmentPending(ctx context.Context) (bool, error)
 }
 
 // RotationBegin is the owner's request: the parts to replace and the
@@ -43,10 +57,19 @@ type RotationVault interface {
 // current recovery key, replaces it. Passphrase is the current vault
 // passphrase, needed to replace the passphrase or the recovery key. PIN
 // is this PC's boot PIN, for a recovery key rotation on a PC trusted with
-// one.
+// one. ID names the rotation (S-R1); Start draws it.
 type RotationBegin struct {
-	Code, Recovery, Passphrase, PIN string
-	Parts                           card.Parts
+	ID, Code, Recovery, Passphrase, PIN string
+	Parts                               card.Parts
+}
+
+// newRotationID is a fresh rotation ID: 32 hex digits from crypto/rand.
+func newRotationID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // RotationStarted is the vault process's held rotation.
@@ -112,15 +135,31 @@ func (r *Rotation) Start(ctx context.Context, b RotationBegin) error {
 		// already dropped its rotation then.
 		_ = old.Discard()
 	}
-	st, err := r.v.BeginRotation(ctx, b)
+	id, err := newRotationID()
 	if err != nil {
+		return err
+	}
+	b.ID = id
+	st, err := r.v.BeginRotation(ctx, b)
+	var ve *VaultError
+	switch {
+	case err == nil:
+	case errors.As(err, &ve) && ve.Status < http.StatusInternalServerError:
+		return err // refused: the vault process holds nothing for id
+	default:
+		// No answer, or a failure in the vault process: it may hold a
+		// rotation for id, or begin it later. Cancel it by its ID; the
+		// vault process refuses a begin it already saw cancelled (S-R1).
+		r.cancel(id)
 		return err
 	}
 	parts := st.Parts
 	d, err := card.NewDisplay(card.DisplayConfig{Generate: r.Generate, Journal: r.Journal, Rotate: &parts,
-		WiFiName: st.WiFiName, Provision: r.provision, Discarded: r.cancel})
+		WiFiName:  st.WiFiName,
+		Provision: func(c *card.Card) error { return r.provision(id, c) },
+		Discarded: func() { r.cancel(id) }})
 	if err != nil {
-		r.cancel()
+		r.cancel(id)
 		return err
 	}
 	r.mu.Lock()
@@ -130,11 +169,12 @@ func (r *Rotation) Start(ctx context.Context, b RotationBegin) error {
 }
 
 // provision is the display's provisioner: it commits the shown parts in
-// the vault process (#1090 R1). It runs with the display locked.
-func (r *Rotation) provision(c *card.Card) error {
+// the vault process (#1090 R1) under the display's rotation ID (S-R1). It
+// runs with the display locked.
+func (r *Rotation) provision(id string, c *card.Card) error {
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
-	res, err := r.v.CommitRotation(ctx, *c)
+	res, err := r.v.CommitRotation(ctx, id, *c)
 	var ve *VaultError
 	switch {
 	case err == nil:
@@ -153,18 +193,19 @@ func (r *Rotation) provision(c *card.Card) error {
 	// stored the card, and a retry would then get 410 and erase a card in
 	// effect. The owner keeps both cards (card.ErrInEffect's text) and the
 	// vault's rotation, if still waiting, is dropped (#1090 R2).
-	r.cancel()
+	r.cancel(id)
 	return fmt.Errorf("%w: %v", card.ErrInEffect, err)
 }
 
-// cancel drops the vault process's pending rotation (#1090 R2). It runs
-// from the display's discard, with the display locked.
-func (r *Rotation) cancel() {
+// cancel drops the vault process's pending rotation id (#1090 R2, S-R1);
+// a newer rotation stays. It runs from the display's discard, with the
+// display locked.
+func (r *Rotation) cancel(id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	// On failure the vault process's own timer still drops it at
 	// recovery.PendingTTL.
-	_ = r.v.CancelRotation(ctx)
+	_ = r.v.CancelRotation(ctx, id)
 }
 
 // takeResult returns the last commit's result once.
@@ -210,20 +251,25 @@ func partList(p card.Parts) []string {
 // BeginRotation implements RotationVault.
 func (u *UnlockClient) BeginRotation(ctx context.Context, b RotationBegin) (RotationStarted, error) {
 	var out struct {
+		ID       string   `json:"id"`
 		Parts    []string `json:"parts"`
 		WiFiName string   `json:"wifi_name"`
 		Lost     bool     `json:"lost"`
 		Expires  string   `json:"expires"`
 	}
 	err := u.do(ctx, http.MethodPost, "/rotate/begin", struct {
+		ID         string   `json:"id"`
 		Code       string   `json:"code"`
 		Recovery   string   `json:"recovery"`
 		Passphrase string   `json:"passphrase"`
 		PIN        string   `json:"pin"`
 		Parts      []string `json:"parts"`
-	}{b.Code, b.Recovery, b.Passphrase, b.PIN, partList(b.Parts)}, &out)
+	}{b.ID, b.Code, b.Recovery, b.Passphrase, b.PIN, partList(b.Parts)}, &out)
 	if err != nil {
 		return RotationStarted{}, err
+	}
+	if out.ID != b.ID {
+		return RotationStarted{}, errors.New("vault: the rotation begun is not the one asked for")
 	}
 	st := RotationStarted{WiFiName: out.WiFiName, Lost: out.Lost}
 	for _, n := range out.Parts {
@@ -237,20 +283,21 @@ func (u *UnlockClient) BeginRotation(ctx context.Context, b RotationBegin) (Rota
 
 // CommitRotation implements RotationVault. The body carries the new
 // parts; do clears its encoding after the send.
-func (u *UnlockClient) CommitRotation(ctx context.Context, c card.Card) (RotationResult, error) {
+func (u *UnlockClient) CommitRotation(ctx context.Context, id string, c card.Card) (RotationResult, error) {
 	var out struct {
 		Notes      []string `json:"notes"`
 		Retrust    int      `json:"retrust"`
 		Enrollment string   `json:"enrollment"`
 	}
 	err := u.do(ctx, http.MethodPost, "/rotate/commit", struct {
+		ID              string `json:"id"`
 		WiFiPassword    string `json:"wifi_password,omitempty"`
 		SetupSecret     string `json:"setup_secret,omitempty"`
 		SetupCode       string `json:"setup_code,omitempty"`
 		VaultPassphrase string `json:"vault_passphrase,omitempty"`
 		GridSeed        []byte `json:"grid_seed,omitempty"`
 		RecoveryKey     string `json:"recovery_key,omitempty"`
-	}{c.WiFiPassword, c.SetupSecret, c.SetupCode, c.VaultPassphrase, c.GridSeed, c.RecoveryKey}, &out)
+	}{id, c.WiFiPassword, c.SetupSecret, c.SetupCode, c.VaultPassphrase, c.GridSeed, c.RecoveryKey}, &out)
 	if err != nil {
 		return RotationResult{}, err
 	}
@@ -258,8 +305,19 @@ func (u *UnlockClient) CommitRotation(ctx context.Context, c card.Card) (Rotatio
 }
 
 // CancelRotation implements RotationVault.
-func (u *UnlockClient) CancelRotation(ctx context.Context) error {
-	return u.do(ctx, http.MethodPost, "/rotate/cancel", struct{}{}, nil)
+func (u *UnlockClient) CancelRotation(ctx context.Context, id string) error {
+	return u.do(ctx, http.MethodPost, "/rotate/cancel", struct {
+		ID string `json:"id"`
+	}{id}, nil)
+}
+
+// EnrollmentPending implements RotationVault.
+func (u *UnlockClient) EnrollmentPending(ctx context.Context) (bool, error) {
+	var out struct {
+		Pending bool `json:"enrollment_pending"`
+	}
+	err := u.do(ctx, http.MethodPost, "/rotate/status", struct{}{}, &out)
+	return out.Pending, err
 }
 
 // ConfirmEnrollment implements RotationVault.
@@ -293,6 +351,9 @@ type rotateView struct {
 	QR    template.HTML
 	// Enroll: show the code form for a new code generator.
 	Enroll bool
+	// Pending: on the start page, a replaced code generator is not yet
+	// confirmed, so offer to show it again (U-R1).
+	Pending bool
 }
 
 func init() {
@@ -300,13 +361,16 @@ func init() {
 {{if .Done}}<h1>Card parts replaced</h1>
 {{with .Err}}<p class="err">{{.}}</p>{{end}}{{with .Msg}}<p class="ok">{{.}}</p>{{end}}
 {{range .Notes}}<p>{{.}}</p>{{end}}
-{{if .QR}}<p>Scan this into your code generator app, then type the code it shows. It is shown once; your recovery key shows it again.</p><div class="qr">{{.QR}}</div>{{end}}
+{{if .QR}}<p>Scan this into your code generator app, then type the code it shows. It is shown once here; until you confirm it, Replace Owner Card parts on Home shows it again with your new recovery key.</p><div class="qr">{{.QR}}</div>{{end}}
 {{if .Enroll}}<form method="post" action="/rotate/enroll"><label>Code from the new generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Confirm</button></form>
 <details><summary>Show the code generator again</summary><form method="post" action="/rotate/show"><label>Recovery key<input type="password" name="recovery" autocomplete="off"></label><button>Show</button></form></details>{{end}}
 <p><a href="/home">Home</a></p>
 {{else}}<h1>Replace Owner Card parts</h1>
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
-<p>I make new values for the parts you choose and show them for you to print. Nothing changes until you confirm the new card.</p>
+{{if .Pending}}<h2>Show the new code generator</h2>
+<p>Your new code generator is not confirmed yet. Type your recovery key to show it again, scan it, then type the code it shows.</p>
+<form method="post" action="/rotate/show"><label>Recovery key<input type="password" name="recovery" autocomplete="off"></label><button>Show the new code generator</button></form>
+{{end}}<p>I make new values for the parts you choose and show them for you to print. Nothing changes until you confirm the new card.</p>
 <form method="post" action="/rotate/">
 <p><label><input type="checkbox" name="parts" value="wifi"> Wi-Fi password</label><br>
 <label><input type="checkbox" name="parts" value="setup"> Setup secret and code generator</label><br>
@@ -346,7 +410,7 @@ func (s *Server) rotatePages(rot *Rotation) http.Handler {
 func (s *Server) rotateStart(w http.ResponseWriter, r *http.Request, rot *Rotation) {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-		s.render(w, "rotate", rotateView{})
+		s.render(w, "rotate", rotateView{Pending: enrollmentPending(r.Context(), rot)})
 		return
 	case http.MethodPost:
 	default:
@@ -382,6 +446,15 @@ func (s *Server) rotateStart(w http.ResponseWriter, r *http.Request, rot *Rotati
 		return
 	}
 	http.Redirect(w, r, "/rotate/card", http.StatusSeeOther)
+}
+
+// enrollmentPending asks the vault process whether a replaced code
+// generator waits for its first code; no answer shows no offer.
+func enrollmentPending(ctx context.Context, rot *Rotation) bool {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ok, err := rot.v.EnrollmentPending(ctx)
+	return err == nil && ok
 }
 
 // vaultRefusal is the status and owner-facing reason for a vault
