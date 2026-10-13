@@ -264,7 +264,7 @@ form { margin: .6em 0 1.2em; }
 {{define "private"}}<label><input type="checkbox" name="private" value="1" checked> {{.Name}} may see your private data (mail, files) to do tasks. Recommended.</label><br>{{end}}
 
 {{define "wifi"}}<form method="post" action="/setup/network">
-<label>Your home Wi-Fi{{if .}}<select name="ssid">{{range .}}<option>{{.}}</option>{{end}}</select></label>
+<label>Your home Wi-Fi{{if .}}<select name="ssid">{{range .}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
 <label>Not listed? Type its name<input type="text" name="other" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false">{{else}}<input type="text" name="ssid" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false" required>{{end}}</label>
 <label>Its password<input type="text" name="password" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
 <button>Join</button>

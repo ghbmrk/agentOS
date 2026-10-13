@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -22,7 +24,7 @@ import (
 func TestNetworkStepListsNetworksAndTakesATypedName(t *testing.T) {
 	r := newRig(t)
 	page := r.get("/setup")
-	for _, w := range []string{`<select name="ssid">`, "<option>Home</option>", "<option>Neighbor</option>", `name="other"`} {
+	for _, w := range []string{`<select name="ssid">`, `<option value="Home">Home</option>`, `<option value="Neighbor">Neighbor</option>`, `name="other"`} {
 		if !strings.Contains(page, w) {
 			t.Fatalf("network step lacks %q: %s", w, page)
 		}
@@ -65,5 +67,31 @@ func TestAgentosdNetworksCarriesTheList(t *testing.T) {
 	}
 	if got := answer(localapi.Networks{SSIDs: many}, nil).Networks(); got != nil {
 		t.Fatalf("an over-long list gave %d names", len(got))
+	}
+}
+
+// spaced lists names a browser would strip or collapse as option text.
+type spaced struct{ *fakeHooks }
+
+func (spaced) Networks() []string { return []string{" Lead", "Trail ", "Two  Spaces"} }
+
+// UX B1: each option's value is the exact name, so leading, trailing and
+// double spaces survive the form (the browser strips and collapses option
+// text that has no value).
+func TestNetworkStepJoinsTheExactListedName(t *testing.T) {
+	for _, name := range (spaced{}).Networks() {
+		r := newRig(t)
+		r.via = spaced{r.hooks}
+		r.srv = r.open(&MemStore{})
+		page := r.get("/setup")
+		m := regexp.MustCompile(`<option value="([^"]*)">` + regexp.QuoteMeta(html.EscapeString(name)) + `</option>`).FindStringSubmatch(page)
+		if m == nil {
+			t.Fatalf("no valued option for %q: %s", name, page)
+		}
+		picked := html.UnescapeString(m[1])
+		r.post("/setup/network", url.Values{"ssid": {picked}, "other": {""}, "password": {"home-pass"}})
+		if r.hooks.joined != name {
+			t.Fatalf("joined %q, want %q", r.hooks.joined, name)
+		}
 	}
 }
