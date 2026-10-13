@@ -269,10 +269,13 @@ var refreshGapHook func()
 // Watch refreshes on each event until ctx ends: the broker sends one on
 // every address or route change. Each event applies the quick read at once;
 // the full read (which may wait on the router) runs single-flight on its own
-// goroutine, so a later event is never queued behind it.
+// goroutine, so a later event is never queued behind it. When ctx ends,
+// Watch returns only after that goroutine has, so no full read outlives it.
 func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
 	kick := make(chan struct{}, 1)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			select {
 			case <-ctx.Done():
@@ -285,6 +288,7 @@ func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
+			<-done
 			return
 		case _, ok := <-events:
 			if !ok {
