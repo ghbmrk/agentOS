@@ -22,7 +22,7 @@ const joinCanary = "CANARY-localui-psk-8c2"
 func TestJoinNetworkCallsAgentosd(t *testing.T) {
 	var got localapi.Join
 	var left time.Duration
-	a := AgentosdSetup{InProcess{localapi.OpSetupJoin: func(ctx context.Context, _ sockets.Peer, b json.RawMessage) (any, error) {
+	a := AgentosdSetup{Owner: InProcess{localapi.OpSetupJoin: func(ctx context.Context, _ sockets.Peer, b json.RawMessage) (any, error) {
 		d, _ := ctx.Deadline()
 		left = time.Until(d)
 		return struct{}{}, json.Unmarshal(b, &got)
@@ -45,7 +45,7 @@ func TestJoinNetworkCallsAgentosd(t *testing.T) {
 // A refusal is an error the page shows as its one network error, and
 // carries no password.
 func TestJoinNetworkRefusalIsAnError(t *testing.T) {
-	a := AgentosdSetup{InProcess{localapi.OpSetupJoin: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+	a := AgentosdSetup{Owner: InProcess{localapi.OpSetupJoin: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 		return nil, sockets.Code(localapi.ErrNotJoined)
 	}}}
 	err := a.JoinNetwork("home", joinCanary)
@@ -56,7 +56,7 @@ func TestJoinNetworkRefusalIsAnError(t *testing.T) {
 	if strings.Contains(err.Error(), joinCanary) {
 		t.Fatal("the password is in the error")
 	}
-	if err := (AgentosdSetup{InProcess{}}).JoinNetwork("home", joinCanary); err == nil || strings.Contains(err.Error(), joinCanary) {
+	if err := (AgentosdSetup{Owner: InProcess{}}).JoinNetwork("home", joinCanary); err == nil || strings.Contains(err.Error(), joinCanary) {
 		t.Fatalf("an agentosd without the op gave %v", err)
 	}
 }

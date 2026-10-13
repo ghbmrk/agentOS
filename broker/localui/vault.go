@@ -97,6 +97,10 @@ type wireStatus struct {
 	KeptTrusted bool `json:"kept_trusted"`
 
 	ChangeUnfinished bool `json:"change_unfinished"`
+
+	// Host and NoTPM answer the setup host step (/setup/host).
+	Host  string `json:"host"`
+	NoTPM bool   `json:"no_tpm"`
 }
 
 func (w wireStatus) status() VaultStatus {
@@ -603,4 +607,16 @@ func vaultText(err error) string {
 		m += "."
 	}
 	return m
+}
+
+// SetupTrust saves setup's host step in the vault process (HostTrust).
+func (u *UnlockClient) SetupTrust(ctx context.Context, trusted bool) (string, error) {
+	w, err := u.call(ctx, http.MethodPost, "/setup/host", map[string]bool{"trusted": trusted})
+	if err != nil {
+		if w.NoTPM {
+			return "", ErrNoTrustChip
+		}
+		return "", err
+	}
+	return w.Host, nil
 }

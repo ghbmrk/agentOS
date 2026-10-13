@@ -1,8 +1,14 @@
 package localui
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"math"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -15,10 +21,29 @@ import (
 // process (egress K17) and only passes through this page.
 //
 // JoinNetwork goes through agentosd to its netjoin helper (P2-2w c3;
-// Security L8). Networks, BoxNumber, HostInfo, Send, TrustHost and the
+// Security L8). TrustHost goes to the vault process (P2-2w c4d), and
+// HostInfo reads the PC's own names. Networks, BoxNumber, Send and the
 // provider hooks are not served by agentosd yet: they answer nothing or an
 // error, so the steps that need them wait.
-type AgentosdSetup struct{ Owner Owner }
+type AgentosdSetup struct {
+	Owner Owner
+	// Vault saves the host step in the vault process; nil: not served.
+	Vault HostTrust
+	// Root is where HostInfo finds /sys and /proc; "" is "/".
+	Root string
+}
+
+// HostTrust is the vault process's setup host step (egress /setup/host):
+// trusted makes this PC a trusted host, or takes back a slot an earlier
+// answer saved. It answers the PC's name, and ErrNoTrustChip on a PC
+// without a TPM. UnlockClient is the real one.
+type HostTrust interface {
+	SetupTrust(ctx context.Context, trusted bool) (string, error)
+}
+
+// ErrNoTrustChip: this PC has no TPM, so it cannot be a trusted host;
+// setup can go on only with "This is not my PC".
+var ErrNoTrustChip = errors.New("this PC has no TPM")
 
 var errNotServed = errors.New("localui: not served by agentosd yet")
 
@@ -115,12 +140,86 @@ func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
 
 func (AgentosdSetup) Networks() []string                 { return nil }
 func (AgentosdSetup) BoxNumber() string                  { return "" }
-func (AgentosdSetup) HostInfo() string                   { return "" }
 func (AgentosdSetup) Send(string, string) error          { return errNotServed }
-func (AgentosdSetup) TrustHost(bool) error               { return errNotServed }
 func (AgentosdSetup) Providers() []Provider              { return nil }
 func (AgentosdSetup) ConnectAPIKey(string, string) error { return errNotServed }
 func (AgentosdSetup) SetPrivateOK(string, bool) error    { return errNotServed }
 func (AgentosdSetup) StartDeviceCode(string) (string, string, error) {
 	return "", "", errNotServed
+}
+
+// TrustHost saves setup's host step in the vault process, which allows it
+// with no code only between the code generator's confirmation and finish
+// (§8.1, CRED-9).
+func (a AgentosdSetup) TrustHost(trusted bool) error {
+	if a.Vault == nil {
+		return errNotServed
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+	_, err := a.Vault.SetupTrust(ctx, trusted)
+	return err
+}
+
+// HostInfo names the PC for the pairing reply (§8.1, "I'm running on
+// [host, RAM]"): the firmware's vendor and product names (DMI) and the
+// RAM the kernel sees, rounded up to whole GB. Both are readable by
+// any user and secret to no one, so the page reads them itself.
+func (a AgentosdSetup) HostInfo() string {
+	root := a.Root
+	if root == "" {
+		root = "/"
+	}
+	dmi := func(f string) string {
+		b, err := os.ReadFile(filepath.Join(root, "sys/class/dmi/id", f))
+		if err != nil {
+			return ""
+		}
+		v := strings.TrimSpace(string(b))
+		switch strings.ToLower(v) {
+		case "to be filled by o.e.m.", "default string", "system manufacturer", "system product name", "not applicable", "none":
+			return ""
+		}
+		return v
+	}
+	vendor, product := dmi("sys_vendor"), dmi("product_name")
+	name := product
+	if vendor != "" && !strings.HasPrefix(strings.ToLower(product), strings.ToLower(vendor)) {
+		name = strings.TrimSpace(vendor + " " + product)
+	}
+	// The reply cuts the host at 40 characters; the name gives way so
+	// the RAM stays.
+	name = gsmSafe(name, 34)
+	gb := memGB(filepath.Join(root, "proc/meminfo"))
+	switch {
+	case gb == 0:
+		return name
+	case name == "":
+		return "a PC with " + strconv.Itoa(gb) + " GB"
+	}
+	return name + ", " + strconv.Itoa(gb) + " GB"
+}
+
+// memGB is MemTotal in /proc/meminfo rounded up to whole GB, or 0: the
+// kernel sees a little less than is fitted (firmware and graphics keep
+// some), so rounding up names what was sold.
+func memGB(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fs := strings.Fields(sc.Text())
+		if len(fs) != 3 || fs[0] != "MemTotal:" || fs[2] != "kB" {
+			continue
+		}
+		kb, err := strconv.ParseUint(fs[1], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return int(math.Ceil(float64(kb) / (1 << 20)))
+	}
+	return 0
 }

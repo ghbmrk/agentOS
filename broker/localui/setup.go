@@ -906,6 +906,9 @@ func (u *setup) recovery(r *http.Request, _ string) error {
 	return u.save(func(s *SetupState) { s.Recovery = true })
 }
 
+// errNoTrustChip is the host step's text for a PC without a TPM (CH-12).
+var errNoTrustChip = errors.New(`This PC has no security chip, so it cannot restart your box by itself. Tick "This is not my PC" to continue.`)
+
 // host makes this PC trusted by default; "not my PC" opts out. The default
 // is allowed only after code enrollment on this page (§8.1, CH-3).
 func (u *setup) host(r *http.Request, _ string) error {
@@ -917,6 +920,9 @@ func (u *setup) host(r *http.Request, _ string) error {
 		return errors.New("Finish the earlier steps first.")
 	}
 	if err := u.s.cfg.Hooks.TrustHost(trusted); err != nil {
+		if errors.Is(err, ErrNoTrustChip) {
+			return errNoTrustChip
+		}
 		return errors.New("Could not save. Try again.")
 	}
 	u.mu.Lock()

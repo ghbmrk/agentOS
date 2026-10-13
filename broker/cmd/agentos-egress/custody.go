@@ -1384,6 +1384,12 @@ func (c *custody) trust(code, pin string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return c.trustThis(v, pin)
+}
+
+// trustThis seals a slot for this PC on the open vault v, with the boot
+// PIN if pin is set, once trust or setupHost has approved it.
+func (c *custody) trustThis(v *vault.Vault, pin string) (string, error) {
 	// The counter first: a PC is never trusted without it (V6). A PC
 	// whose counter went (ErrCounterMissing) gets a new one here.
 	if err := c.host.anchor(v); err != nil {
@@ -1411,6 +1417,55 @@ func (c *custody) trust(code, pin string) (string, error) {
 		c.notify("this PC is now a trusted host: " + name)
 	}
 	return name, nil
+}
+
+// setupHost saves setup's host step (§8.1): trusted makes this PC a
+// trusted host, as trust does but with no code; !trusted ("this is not my
+// PC") removes the slot an earlier answer saved for it. The code is not
+// needed only in setup's window, after the owner confirmed the code
+// generator on the box's own Wi-Fi page and before finish seals
+// enrollment: that confirmation and this request arriving on the local
+// UI's socket are CH-3's approval code plus local confirmation. Outside
+// the window it is refused, and trust needs a code (CRED-9).
+func (c *custody) setupHost(trusted bool) (string, error) {
+	c.mu.Lock()
+	if c.ph != open {
+		c.mu.Unlock()
+		return "", errLocked
+	}
+	if err := c.closedLocked(); err != nil {
+		c.mu.Unlock()
+		return "", err
+	}
+	if _, ok := c.v.Secret(PendingSeedName); ok || !hasKind(c.v, ConfirmedName, KindConfirmed) {
+		c.mu.Unlock()
+		return "", errNotConfirmed
+	}
+	v := c.v
+	c.mu.Unlock()
+	if trusted {
+		if c.host == nil {
+			return "", errNoTPM
+		}
+		return c.trustThis(v, "")
+	}
+	if c.host == nil {
+		return "", nil
+	}
+	hosts, err := c.host.list()
+	if err != nil {
+		return "", errInternal
+	}
+	for _, h := range hosts {
+		if !h.This {
+			continue
+		}
+		if _, err := c.host.remove(v, h.ID); err != nil {
+			return "", errInternal
+		}
+		c.notify("a trusted host was removed")
+	}
+	return "", nil
 }
 
 // untrust removes the trusted host with the given id (CRED-9).

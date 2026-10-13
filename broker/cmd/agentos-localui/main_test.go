@@ -73,6 +73,21 @@ func TestTheVaultSocketWiresTheCardRotation(t *testing.T) {
 	}
 }
 
+// CRED-9, §8.1: setup's host step goes to the same socket, where the
+// vault process allows it only between the code generator's confirmation
+// and finish; without the socket the step is not served.
+func TestTheVaultSocketServesSetupsHostStep(t *testing.T) {
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock")
+	h, ok := cfg.Hooks.(localui.AgentosdSetup)
+	if c, isClient := h.Vault.(*localui.UnlockClient); !ok || !isClient || c != cfg.Vault {
+		t.Fatalf("hooks %#v", cfg.Hooks)
+	}
+	cfg = config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "")
+	if h := cfg.Hooks.(localui.AgentosdSetup); h.Vault != nil || h.TrustHost(true) == nil {
+		t.Fatalf("hooks %#v", cfg.Hooks)
+	}
+}
+
 // Security L5: net/http's error log, which can quote a client's bytes,
 // goes nowhere.
 func TestTheServerLogsNothingARequestCarries(t *testing.T) {
