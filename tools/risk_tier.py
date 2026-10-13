@@ -20,6 +20,8 @@ Usage:
   tools/risk_tier.py PATH...            tier of the listed paths
   tools/risk_tier.py --git BASE [HEAD]  tier of `git diff --name-only BASE...HEAD`
   --markdown                            print a short table (for a CI step summary)
+  --pr-branch BRANCH --pr-title TITLE   lane gate: exit 1 if the PR belongs to a lane
+                                        (docs/LANES.md) whose tier limit the change exceeds
 """
 import argparse
 import functools
@@ -92,6 +94,40 @@ TIER_B_PREFIXES = ("broker/", "guest/")
 # Explicit tier C. Top-level *.md other than SPEC.md and image/*.md are C by
 # rule in tier_of; everything here is checked after the tier-A rules.
 TIER_C_PREFIXES = ("docs/", "briefs/", "reviews/", "decisions/", "spikes/", "tests/", "tools/")
+
+# Lane gate (CTRL-lane-gate, D-110): a lane that is not one of the peer Claude
+# subscriptions is held to a tier limit in docs/LANES.md. A PR is in the lane when
+# its head branch has the lane's stem or its title starts with the lane's row
+# prefix. CI runs the base commit's copy of this file, so a PR cannot loosen the
+# gate or the classifier it is judged by.
+LANES = {
+    # lane: (branch stem, title prefix, highest tier allowed)
+    "codex": ("pkg/codex-", "CX-", "C"),
+}
+
+
+def lane_of(branch, title):
+    """Return the lane a PR's head branch or title puts it in, or None."""
+    for lane, (stem, prefix, _) in sorted(LANES.items()):
+        if (branch or "").startswith(stem) or (title or "").lstrip().startswith(prefix):
+            return lane
+    return None
+
+
+def lane_gate(branch, title, tier):
+    """Return (ok, message) for a PR of the given tier."""
+    lane = lane_of(branch, title)
+    if lane is None:
+        return True, "lane gate: not a lane PR"
+    limit = LANES[lane][2]
+    if tier >= limit:  # "A" < "B" < "C"
+        return True, f"lane gate: {lane} PR at tier {tier}, within its limit {limit}"
+    return False, (
+        f"lane gate: the {lane} lane is limited to tier {limit} (docs/LANES.md), "
+        f"and this change is tier {tier}. Drop the files listed above and send them "
+        "to the peers as a lane:primary issue."
+    )
+
 
 REASONS = {
     "A": "credentials, isolation, effects, update or supply chain",
@@ -171,7 +207,10 @@ def main(argv=None):
     ap.add_argument("paths", nargs="*")
     ap.add_argument("--git", nargs="+", metavar="REF")
     ap.add_argument("--markdown", action="store_true")
+    ap.add_argument("--pr-branch")
+    ap.add_argument("--pr-title")
     a = ap.parse_args(argv)
+    gate = a.pr_branch is not None or a.pr_title is not None
     paths = changed_paths(a.git[0], a.git[1] if len(a.git) > 1 else "HEAD") if a.git else a.paths
     tier, why = tier_of_change(paths)
     if a.markdown:
@@ -185,6 +224,11 @@ def main(argv=None):
         print(tier)
         for p in why:
             print(f"  {p}")
+    if gate:
+        ok, msg = lane_gate(a.pr_branch, a.pr_title, tier)
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        if not ok:
+            return 1
     return 0
 
 
