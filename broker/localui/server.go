@@ -692,7 +692,7 @@ const (
 func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
 	n := ""
 	if s.cfg.Hooks != nil {
-		n = s.cfg.Hooks.BoxNumber()
+		n, _ = s.cfg.Hooks.BoxNumber()
 	}
 	if !phoneRe.MatchString(n) {
 		http.NotFound(w, r)
