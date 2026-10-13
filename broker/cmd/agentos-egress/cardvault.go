@@ -25,6 +25,10 @@ const cardTemp = ".card"
 var (
 	errCardOther   = uerr(http.StatusConflict, "this vault was made from another Owner Card; reset setup to start again")
 	errSealedReset = uerr(http.StatusGone, "setup finished and the code generator is sealed; the vault is never reset")
+	// errCodesUnconfirmed: no code generator was confirmed on this vault
+	// since its last enroll, as after a remade setup vault (R1 on #1203).
+	// Setup goes back to step 3 before the card.
+	errCodesUnconfirmed = uerr(http.StatusPreconditionFailed, "no code generator is confirmed on this vault; set up the code generator again before the card")
 )
 
 // provisionCard makes the card's vault from the open setup vault: a new
@@ -57,6 +61,13 @@ func (c *custody) provisionCard(card recovery.Card) error {
 	}
 	if _, ok := c.v.Secret(recovery.CardName); ok {
 		return c.sameCardLocked(card, rk)
+	}
+	// Only a seed the owner's phone confirmed carries into the card's
+	// vault, as only one seals (sealEnroll): a remade setup vault's seed
+	// was shown to nobody, and a card's vault that held it would open
+	// with codes nobody can make.
+	if _, ok := c.v.Secret(PendingSeedName); ok || !hasKind(c.v, ConfirmedName, KindConfirmed) {
+		return errCodesUnconfirmed
 	}
 	// The mark goes first: a vault process stopped after the swap still
 	// knows, locked, that its vault was made from a card (resetCard).
