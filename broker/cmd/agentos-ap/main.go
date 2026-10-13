@@ -8,8 +8,13 @@
 // brings one up or joins a network on it. It then brings the access point
 // up on -iface with the setup network, unless the Owner Card step has
 // confirmed or the box is owned, when it burns the setup network instead
-// (firstboot.SetupNetwork). At shutdown, or when hostapd or dnsmasq dies,
-// it brings the access point down; the unit restarts it after a death.
+// (firstboot.SetupNetwork). A radio that appears late (its driver loads
+// after the loader starts) is waited for. While it serves, it reads the
+// latch and the owner state again every -poll: at the confirm, or once the
+// box is owned, it brings the access point down and then burns the setup
+// network, and serves nothing until it restarts. At shutdown, or when
+// hostapd or dnsmasq dies, it brings the access point down; the unit
+// restarts it after a death.
 //
 // It runs as root: it loads nftables, starts the exempt unit and gives the
 // radio its address. It reads the page's latch, which the page can write,
@@ -29,6 +34,7 @@ import (
 	"path/filepath"
 	"slices"
 	"syscall"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
@@ -47,6 +53,9 @@ type config struct {
 	Latch, Setup, OwnerState string
 	// SysClassNet lists the interfaces; a wireless one has phy80211.
 	SysClassNet string
+	// Poll is how often it looks for a late radio and, while it serves,
+	// for the confirm or the owner state.
+	Poll time.Duration
 }
 
 // maxLatch bounds what is read of the latch; the page writes a few
@@ -62,6 +71,7 @@ func main() {
 	flag.StringVar(&c.Setup, "setup-net", claim.SetupNetPath, "the setup network the seller sealed (HW-10)")
 	flag.StringVar(&c.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "agentosd's owner state; present once setup has finished")
 	flag.StringVar(&c.SysClassNet, "sys-class-net", "/sys/class/net", "where the kernel lists network interfaces")
+	flag.DurationVar(&c.Poll, "poll", 2*time.Second, "how often I look for a late radio and, while serving, for the confirm")
 	flag.StringVar(&dir, "dir", "/run/agentos-ap", "where hostapd's and dnsmasq's configuration lives while the access point runs")
 	flag.Parse()
 	log.SetFlags(0)
@@ -79,33 +89,17 @@ func main() {
 	}
 }
 
-// run brings every radio down, serves the setup network on c.Iface if the
-// box still has one, and holds it until ctx ends or exited fires.
+// run brings every radio down, waits for c.Iface if it has not appeared,
+// serves the setup network on it if the box still has one, and holds it
+// until ctx ends, exited fires, or the card is confirmed or the box owned.
 func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-chan struct{}) error {
-	radios, err := wireless(c.SysClassNet)
-	if err != nil {
+	if err := waitForIface(ctx, c, l); err != nil {
 		return err
 	}
-	if len(radios) == 0 {
-		log.Print("agentos-ap: no wireless interface; serving nothing")
-		<-ctx.Done()
+	if ctx.Err() != nil {
 		return nil
 	}
-	if err := l.Start(ctx, radios...); err != nil {
-		return err
-	}
-	if !slices.Contains(radios, c.Iface) {
-		log.Printf("agentos-ap: no wireless interface %s; every radio is down and none serves", c.Iface)
-		<-ctx.Done()
-		return nil
-	}
-	latch, err := readLatch(c.Latch)
-	if err != nil {
-		return err
-	}
-	_, err = os.Lstat(c.OwnerState)
-	owned := !errors.Is(err, os.ErrNotExist)
-	n, err := firstboot.SetupNetwork(latch, owned, change.FileStore{Path: c.Setup})
+	n, err := setupNetwork(c, change.FileStore{Path: c.Setup})
 	if err != nil {
 		return err
 	}
@@ -118,12 +112,99 @@ func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-cha
 		return err
 	}
 	log.Printf("agentos-ap: serving the setup network on %s", c.Iface)
-	select {
-	case <-ctx.Done():
-		return l.Down(context.Background())
-	case <-exited():
-		return errors.Join(errors.New("an access point child exited"), l.Down(context.Background()))
+	tick := time.NewTicker(c.Poll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return l.Down(context.Background())
+		case <-exited():
+			return errors.Join(errors.New("an access point child exited"), l.Down(context.Background()))
+		case <-tick.C:
+		}
+		// The burn brings the access point down first, so the sticker's
+		// network is off the air before its file is emptied.
+		down := false
+		n, err := setupNetwork(c, downFirst{FileStore: change.FileStore{Path: c.Setup}, down: func() error {
+			down = true
+			return l.Down(context.Background())
+		}})
+		if err != nil {
+			if !down {
+				err = errors.Join(err, l.Down(context.Background()))
+			}
+			return err
+		}
+		if n == nil {
+			if !down {
+				// No burn ran: the file was emptied under it.
+				if err := l.Down(context.Background()); err != nil {
+					return err
+				}
+			}
+			log.Print("agentos-ap: the card is confirmed or I am owned; the setup network is down and burned")
+			<-ctx.Done()
+			return nil
+		}
 	}
+}
+
+// waitForIface brings down every radio and waits for c.Iface to be one,
+// bringing down each radio that appears meanwhile, until ctx ends.
+func waitForIface(ctx context.Context, c config, l *localui.APLoader) error {
+	var down []string
+	logged := false
+	for {
+		radios, err := wireless(c.SysClassNet)
+		if err != nil {
+			return err
+		}
+		if fresh := slices.DeleteFunc(slices.Clone(radios), func(r string) bool { return slices.Contains(down, r) }); len(fresh) > 0 {
+			if err := l.Start(ctx, fresh...); err != nil {
+				return err
+			}
+			down = append(down, fresh...)
+		}
+		if slices.Contains(radios, c.Iface) {
+			return nil
+		}
+		if !logged {
+			log.Printf("agentos-ap: no wireless interface %s yet; every radio is down and none serves", c.Iface)
+			logged = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(c.Poll):
+		}
+	}
+}
+
+// setupNetwork reads the latch and the owner state and asks
+// firstboot.SetupNetwork, which burns through setup on a confirmed or
+// owned box. An owner state it cannot stat counts as owned.
+func setupNetwork(c config, setup firstboot.Store) (*claim.SetupNet, error) {
+	latch, err := readLatch(c.Latch)
+	if err != nil {
+		return nil, err
+	}
+	_, err = os.Lstat(c.OwnerState)
+	owned := !errors.Is(err, os.ErrNotExist)
+	return firstboot.SetupNetwork(latch, owned, setup)
+}
+
+// downFirst is the setup file, whose burn first brings the access point
+// down.
+type downFirst struct {
+	change.FileStore
+	down func() error
+}
+
+func (d downFirst) Save(b []byte) error {
+	if err := d.down(); err != nil {
+		return err
+	}
+	return d.FileStore.Save(b)
 }
 
 // wireless lists the interfaces in sysClassNet that have a radio, sorted.
