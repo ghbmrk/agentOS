@@ -172,3 +172,57 @@ func TestRekeyStopsWhenBringDownFails(t *testing.T) {
 		t.Fatal("Station took an interface whose BringDown failed")
 	}
 }
+
+// REC-4, DEV-net-h: if hostapd will not stop, the access point may still
+// run with the old password, which a rotation presumes lost. Rekey reports
+// it, and so does every retry until a Down succeeds; it never returns nil
+// while the old password may be on the air (#1193).
+func TestRekeyReportsAnAccessPointThatWillNotStop(t *testing.T) {
+	l, ap, _ := upLoader(t)
+	old := ap.cfg.Password
+	ap.stopErr = errors.New("hostapd will not stop")
+	if err := l.Rekey(context.Background(), rotatedPW); err == nil {
+		t.Fatal("Rekey hid a failed Stop")
+	}
+	if !ap.started || ap.cfg.Password != old {
+		t.Fatalf("fake: started %v, password %q", ap.started, ap.cfg.Password)
+	}
+	for i := 0; i < 2; i++ {
+		if err := l.Rekey(context.Background(), rotatedPW); err == nil || !strings.Contains(err.Error(), "wlan0") {
+			t.Fatalf("retry %d: Rekey returned %v while the old password may still be on the air", i+1, err)
+		}
+	}
+	if ap.cfg.Password == rotatedPW {
+		t.Fatal("Rekey started the access point after a failed Stop")
+	}
+	// Up with the new password is refused too: hostapd may still run on
+	// wlan0, so the loader would track an access point it did not start,
+	// and a same-password Rekey would then pass.
+	c := apCfg("wlan0")
+	c.Password = rotatedPW
+	if err := l.Up(context.Background(), c); err == nil || !strings.Contains(err.Error(), "wlan0") {
+		t.Fatalf("Up after a failed Stop: %v", err)
+	}
+	if err := l.Rekey(context.Background(), rotatedPW); err == nil {
+		t.Fatal("Rekey to the password Up was given returned nil after a failed Stop")
+	}
+	// A Down that still cannot stop it keeps Rekey refusing.
+	if err := l.Down(context.Background()); err == nil {
+		t.Fatal("Down hid a failed Stop")
+	}
+	if err := l.Rekey(context.Background(), rotatedPW); err == nil {
+		t.Fatal("Rekey returned nil after a failed Down")
+	}
+	// Once a Down succeeds, the access point is off and Rekey is a no-op
+	// again; the next Up takes the new password.
+	ap.stopErr = nil
+	if err := l.Down(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Rekey(context.Background(), rotatedPW); err != nil {
+		t.Fatalf("Rekey after a clean Down: %v", err)
+	}
+	if err := l.Up(context.Background(), c); err != nil || ap.cfg.Password != rotatedPW {
+		t.Fatalf("Up with the new password: %v", err)
+	}
+}
