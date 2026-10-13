@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -127,17 +128,64 @@ func withGrants(c *custody, g grants, agent string) *custody {
 	return c
 }
 
-// checkAgentMachine checks -agent-machine: a machine name, never a
-// builder's or a replay machine's, whose grants come from -builder-from
-// and -eval-from. Empty is allowed and grants by flags only.
+// reservedPrefixes are the machine-name prefixes the broker gives its own
+// machines: builders (lb-), eval replays (eval-), workers (wk-) and clean
+// rooms (cr-). The test pins them to vm.WorkerPrefix and cleanroom.Prefix,
+// which this binary does not import.
+var reservedPrefixes = []string{modelroute.BuilderPrefix, modelroute.EvalPrefix, "wk-", "cr-"}
+
+// checkAgentMachine checks -agent-machine: a machine name, never one with
+// a broker-reserved prefix (reservedPrefixes); builders and replay
+// machines take their grants from -builder-from and -eval-from. Empty is
+// allowed and grants by flags only.
 func checkAgentMachine(m string) error {
 	if m == "" {
 		return nil
 	}
-	if !machineRE.MatchString(m) || strings.HasPrefix(m, modelroute.BuilderPrefix) || strings.HasPrefix(m, modelroute.EvalPrefix) {
+	reserved := slices.ContainsFunc(reservedPrefixes, func(p string) bool { return strings.HasPrefix(m, p) })
+	if !machineRE.MatchString(m) || reserved {
 		return fmt.Errorf("-agent-machine %s: name the owner's agent machine", m)
 	}
 	return nil
+}
+
+// agentFlag declares -agent-machine. Its default names the agent machine
+// of a stock install, so a provider key stored at setup grants it with no
+// flag (CRED-5f-mr-grant).
+func agentFlag(fs *flag.FlagSet) *string {
+	return fs.String("agent-machine", "agent", "the owner's agent machine, to which a provider key stored at setup grants that provider (CRED-5f-mr-grant); empty grants by -grant only")
+}
+
+// modelWiring is serve's model path over the flags: the router asks the
+// hook whether a stored key grants a machine, and the hook answers from
+// the custody bound to the agent machine (CRED-5f-mr-grant). The router
+// is built before custody; the hook also answers setup's private-data
+// marks once custody exists (P2-2w c4e).
+type modelWiring struct {
+	g     grants
+	rt    *route.Router
+	agent string
+	hook  *privateHook
+}
+
+// wireModel checks the agent machine and builds the router over the
+// flags' grants, asking the hook for stored-key grants.
+func wireModel(rule route.Rule, g grants, pok map[string]bool, agent, builderFrom, evalFrom string) (*modelWiring, error) {
+	if err := checkAgentMachine(agent); err != nil {
+		return nil, err
+	}
+	hook := new(privateHook)
+	g, rt, err := modelRouting(rule, g, pok, hook.allowed, hook.granted, builderFrom, evalFrom)
+	if err != nil {
+		return nil, err
+	}
+	return &modelWiring{g: g, rt: rt, agent: agent, hook: hook}, nil
+}
+
+// bind makes serve's custody over the wiring's grants and agent machine
+// and binds the hook to it.
+func (w *modelWiring) bind(c *custody) (*custody, error) {
+	return serveCustody(c, w.g, w.agent, w.hook)
 }
 
 // serveCustody makes serve's custody over the flags' grants and agent
@@ -362,7 +410,7 @@ func serveCmd(args []string) error {
 	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
 	builderFrom := fs.String("builder-from", "", "the owner's agent machine, whose model grants Loop 1's builder machines (lb-) use, always as private data (W3-builder); empty (the default) gives builders no model access")
 	evalFrom := fs.String("eval-from", "", "the owner's agent machine, whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
-	agent := fs.String("agent-machine", "agent", "the owner's agent machine, to which a provider key stored at setup grants that provider (CRED-5f-mr-grant); empty grants by -grant only")
+	agent := agentFlag(fs)
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
 	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")
@@ -370,9 +418,6 @@ func serveCmd(args []string) error {
 	fs.Parse(args)
 	pcrs, err := parsePCRs(*pcrList)
 	if err != nil {
-		return err
-	}
-	if err := checkAgentMachine(*agent); err != nil {
 		return err
 	}
 	rule, err := readRule(*rulePath)
@@ -392,13 +437,11 @@ func serveCmd(args []string) error {
 	if rule, err = startRule(base, *routingPath); err != nil {
 		log.Printf("routing: starting from -rule: %v", err)
 	}
-	// The router is built before custody; the hook answers setup's
-	// private-data marks once custody exists (P2-2w c4e).
-	var hook privateHook
-	g, rt, err := modelRouting(rule, g, pok, hook.allowed, hook.granted, *builderFrom, *evalFrom)
+	mw, err := wireModel(rule, g, pok, *agent, *builderFrom, *evalFrom)
 	if err != nil {
 		return err
 	}
+	g, rt := mw.g, mw.rt
 	var ev *evalRoute
 	if *evalFrom != "" {
 		ps, err := readPrices(*pricesPath)
@@ -432,7 +475,7 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	c, err := serveCustody(&custody{
+	c, err := mw.bind(&custody{
 		guard:     guard,
 		keysPath:  *keysPath,
 		vaultPath: *vaultPath,
@@ -445,7 +488,7 @@ func serveCmd(args []string) error {
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 		owner:     *ownerNumber,
-	}, g, *agent, &hook)
+	})
 	if err != nil {
 		return err
 	}

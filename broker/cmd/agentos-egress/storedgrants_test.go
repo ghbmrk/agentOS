@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"flag"
 	"io"
 	"net"
 	"net/http"
@@ -14,8 +15,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/cleanroom"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/route"
+	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 // REQ: CRED-5, A11, OP-9, CAP-9, CRED-1
@@ -64,16 +67,25 @@ func reflector(t *testing.T) (http.RoundTripper, func() []string) {
 func TestAStoredKeyGrantsTheAgentMachine(t *testing.T) {
 	tr, got := reflector(t)
 	r := providerRig(t)
-	agentKeyed(r, tr)
-	var hook privateHook
-	hook.c.Store(r.c)
-	_, rt, err := modelRouting(route.Rule{
+	r.c.modelTransport = tr
+	// serveCmd's own wiring, over its default -agent-machine and no
+	// -grant: the router and custody both come from wireModel (R1).
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	agent := agentFlag(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	mw, err := wireModel(route.Rule{
 		"default": {{Provider: "openai", Model: "gpt-test"}},
 		"claude":  {{Provider: "anthropic", Model: "claude-test"}},
-	}, grants{}, map[string]bool{"openai": true, "anthropic": true}, hook.allowed, hook.granted, "", "")
+	}, grants{}, map[string]bool{"openai": true, "anthropic": true}, *agent, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if r.c, err = mw.bind(r.c); err != nil {
+		t.Fatal(err)
+	}
+	rt := mw.rt
 	run := filepath.Join(t.TempDir(), "run")
 	srvs, err := serve(run, r.c, rt, nil, nil, os.Getuid(), os.Getuid())
 	if err != nil {
@@ -264,7 +276,14 @@ func TestCheckAgentMachine(t *testing.T) {
 			t.Errorf("%q: %v", m, err)
 		}
 	}
-	for _, m := range []string{modelroute.BuilderPrefix + "1", modelroute.EvalPrefix + "1", "Agent", "-x", "a/b"} {
+	// Every broker-reserved prefix is refused, pinned to the packages
+	// that reserve them (S2).
+	for _, p := range []string{modelroute.BuilderPrefix, modelroute.EvalPrefix, vm.BuilderPrefix, vm.EvalPrefix, vm.WorkerPrefix, cleanroom.Prefix} {
+		if err := checkAgentMachine(p + "1"); err == nil {
+			t.Errorf("reserved prefix %q accepted", p)
+		}
+	}
+	for _, m := range []string{"Agent", "-x", "a/b"} {
 		if err := checkAgentMachine(m); err == nil {
 			t.Errorf("%q accepted", m)
 		}
