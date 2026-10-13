@@ -500,7 +500,7 @@ func initCmd(args []string, out io.Writer) error {
 	keysPath := fs.String("keys", defaultKeys, "key slots file to create")
 	statePath := fs.String("state", "", "unlock state to create; default unlock.json beside the keys")
 	setup := fs.Bool("setup", false, "setup mode: open code-generator enrollment once and leave the seed hand-out to setup (image boxes)")
-	claimPath := fs.String("claim", claim.StatePath, "with -setup: the box's claim state; the setup vault is made only once the box is claimed")
+	claimPath := fs.String("claim", claim.StatePath, "with -setup: the claim state; the setup vault is made only after the claim")
 	fs.Parse(args)
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
@@ -518,7 +518,7 @@ func initCmd(args []string, out io.Writer) error {
 			return fmt.Errorf("init -setup: %w", err)
 		}
 		if !ok {
-			return errors.New("init -setup: the box is not claimed yet; the setup vault is made only after the claim")
+			return errors.New("init -setup: not claimed yet; the setup vault is made only after the claim")
 		}
 	}
 	pass, err := newPassphrase()
