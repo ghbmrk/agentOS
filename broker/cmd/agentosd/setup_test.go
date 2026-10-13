@@ -18,7 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 )
 
-// REQ: ARC-2, CH-10, ONB-3, CRED-8
+// REQ: ARC-2, CH-10, ONB-3, CRED-8, HW-1, A1
 
 // A synthetic enrollment link: not a seed anyone holds.
 const setupCanary = "otpauth://totp/AgentOS:AgentOS?secret=CANARYCANARYCANARY22&issuer=AgentOS"
@@ -185,6 +185,7 @@ func TestTheVaultsEnrollRefusalsMap(t *testing.T) {
 		modelroute.ErrEnrolled:                                 localsrv.EnrollClosed,
 		modelroute.ErrEnrollNotOpen:                            localsrv.EnrollNotOpen,
 		modelroute.ErrNoEnrollment:                             localsrv.EnrollNone,
+		modelroute.ErrCardRequired:                             localsrv.EnrollCardRequired,
 		&modelroute.VerifyError{Kind: modelroute.VerifyPaused}: localsrv.EnrollPaused,
 	} {
 		if got := enrollErr(in); !errors.Is(got, want) {
