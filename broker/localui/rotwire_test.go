@@ -21,7 +21,9 @@ type fakeRotVault struct {
 	mu        sync.Mutex
 	begun     []RotationBegin
 	committed []card.Card
-	cancels   int
+	commitIDs []string
+	cancelIDs []string
+	pending   bool
 	enrolled  []string
 	shown     []string
 	beginErr  error
@@ -39,21 +41,28 @@ func (f *fakeRotVault) BeginRotation(_ context.Context, b RotationBegin) (Rotati
 	return RotationStarted{Parts: b.Parts, WiFiName: "AgentOS-TEST"}, nil
 }
 
-func (f *fakeRotVault) CommitRotation(_ context.Context, c card.Card) (RotationResult, error) {
+func (f *fakeRotVault) CommitRotation(_ context.Context, id string, c card.Card) (RotationResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.committed = append(f.committed, c)
+	f.commitIDs = append(f.commitIDs, id)
 	if f.commitErr != nil {
 		return RotationResult{}, f.commitErr
 	}
 	return f.result, nil
 }
 
-func (f *fakeRotVault) CancelRotation(context.Context) error {
+func (f *fakeRotVault) CancelRotation(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.cancels++
+	f.cancelIDs = append(f.cancelIDs, id)
 	return nil
+}
+
+func (f *fakeRotVault) EnrollmentPending(context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pending, nil
 }
 
 func (f *fakeRotVault) ConfirmEnrollment(_ context.Context, code string) (bool, error) {
@@ -73,7 +82,7 @@ func (f *fakeRotVault) ShowEnrollment(_ context.Context, rk string) (string, err
 func (f *fakeRotVault) n() (begun, committed, cancels int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.begun), len(f.committed), f.cancels
+	return len(f.begun), len(f.committed), len(f.cancelIDs)
 }
 
 // wireRig is a set-up, signed-in box whose card rotation is the real
@@ -262,5 +271,78 @@ func TestRotationStartRefusals(t *testing.T) {
 	x.post("/signout", url.Values{})
 	if w := x.do("GET", "/rotate/", nil); w.Code != http.StatusSeeOther || !strings.HasPrefix(w.Header().Get("Location"), "/unlock") {
 		t.Fatalf("signed out: %d %s", w.Code, w.Header().Get("Location"))
+	}
+}
+
+// #1175 security S-R1: each rotation's begin names a fresh ID, and its
+// commit and its display's discard carry that ID, even when a newer
+// rotation has replaced it, so the vault process can refuse a stale one.
+func TestRotationOpsCarryTheBegunID(t *testing.T) {
+	x := newWireRig(t)
+	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RK"}})
+	first := x.r.Display()
+	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RK"}})
+	a, b := x.v.begun[0].ID, x.v.begun[1].ID
+	if len(a) != 32 || len(b) != 32 || a == b {
+		t.Fatalf("rotation IDs %q %q", a, b)
+	}
+	if len(x.v.cancelIDs) != 1 || x.v.cancelIDs[0] != a {
+		t.Fatalf("the replaced rotation was cancelled as %v, want %s", x.v.cancelIDs, a)
+	}
+	_ = first.Discard() // a stale display's discard names its own rotation
+	if x.v.cancelIDs[len(x.v.cancelIDs)-1] == b {
+		t.Fatal("a stale display's discard named the newer rotation")
+	}
+	if err := x.r.Display().ConfirmAnswers(card.Answers{Group: x.group().Get("group")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(x.v.commitIDs) != 1 || x.v.commitIDs[0] != b {
+		t.Fatalf("commit carried %v, want %s", x.v.commitIDs, b)
+	}
+}
+
+// #1175 security S-R1: a begin that got no answer (or a vault failure)
+// may still be held or arrive late, so the page cancels it by its ID; a
+// begin the vault process refused holds nothing and is not cancelled.
+func TestRotationBeginWithNoAnswerIsCancelled(t *testing.T) {
+	for _, e := range []error{errors.New("synthetic: connection reset"), &VaultError{http.StatusBadGateway, "internal error"}} {
+		x := newWireRig(t)
+		x.v.beginErr = e
+		if err := x.r.Start(context.Background(), RotationBegin{Recovery: "SYNTH-RK", Parts: card.Parts{WiFi: true}}); err == nil {
+			t.Fatal("start succeeded")
+		}
+		if len(x.v.cancelIDs) != 1 || x.v.cancelIDs[0] != x.v.begun[0].ID {
+			t.Fatalf("%v: cancels %v for begin %s", e, x.v.cancelIDs, x.v.begun[0].ID)
+		}
+	}
+	x := newWireRig(t)
+	x.v.beginErr = &VaultError{http.StatusForbidden, "wrong code"}
+	_ = x.r.Start(context.Background(), RotationBegin{Code: "000000", Parts: card.Parts{WiFi: true}})
+	if len(x.v.cancelIDs) != 0 {
+		t.Fatal("a refused begin was cancelled")
+	}
+}
+
+// #1175 UX U-R1: while a replaced code generator waits for its first
+// code, the start page offers to show it again with the recovery key, and
+// the done page points there.
+func TestRotationStartPageOffersTheUnconfirmedCodeGenerator(t *testing.T) {
+	x := newWireRig(t)
+	if p := x.get("/rotate/"); strings.Contains(p, "Show the new code generator") {
+		t.Fatal("offered with nothing to show")
+	}
+	x.v.pending = true
+	p := x.get("/rotate/")
+	if !strings.Contains(p, "Show the new code generator") || !strings.Contains(p, `action="/rotate/show"`) {
+		t.Fatalf("no show form: %s", p)
+	}
+	if w := x.post("/rotate/show", url.Values{"recovery": {"SYNTH-RK"}}); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "<svg") || !strings.Contains(w.Body.String(), `action="/rotate/enroll"`) {
+		t.Fatalf("show: %d", w.Code)
+	}
+	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RK"}})
+	x.v.result = RotationResult{Enrollment: "otpauth://totp/AgentOS?secret=CANARYSEEDBBBBBB"}
+	x.post("/rotate/card", x.group())
+	if done := x.get("/rotate/done"); !strings.Contains(done, "Replace Owner Card parts on Home shows it again") {
+		t.Fatalf("done page: %s", done)
 	}
 }

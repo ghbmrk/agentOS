@@ -7,8 +7,10 @@
 // plan). It listens on the access point's address and interface only
 // (Security L5) and logs no request or form field.
 //
-// It serves no setup until setup moves into agentosd (P2-2w c; Security
-// L6): a box agentosd does not serve yet gets a fixed not-ready page.
+// Setup runs through agentosd (P2-2w c4; Security L6): the page asks
+// localui.sock's setup ops, which agentosd serves only until setup's
+// finish, and keeps setup's state in memory only (L18), so a restart of
+// the page starts the steps over.
 package main
 
 import (
@@ -17,6 +19,7 @@ import (
 	"flag"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -49,17 +52,19 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, config(localui.APConfig{Iface: iface, Addr: ap}, port, vaultSock), sock); err != nil {
+	if err := run(ctx, config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock), sock); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// config is the page's configuration: agentosd's socket, and no setup
-// hooks (Security L6). The vault process's unlock socket serves both the
-// unlock page and the Owner Card rotation (REC-4); ARC-2 keeps the card's
-// display here, not in agentosd.
-func config(ap localui.APConfig, port int, vaultSock string) localui.Config {
-	cfg := localui.Config{AP: ap, Port: port}
+// config is the page's configuration: setup through agentosd's socket
+// with an in-memory store (P2-2w c4), and no setup secret (Security L6).
+// The vault process's unlock socket serves both the unlock page and the
+// Owner Card rotation (REC-4); ARC-2 keeps the card's display here, not
+// in agentosd.
+func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Config {
+	cfg := localui.Config{AP: ap, Port: port,
+		Hooks: localui.AgentosdSetup{Owner: localui.Socket{Path: sock}}, Store: &localui.MemStore{}}
 	if vaultSock != "" {
 		client := localui.NewUnlockClient(vaultSock)
 		cfg.Vault = client
@@ -68,7 +73,16 @@ func config(ap localui.APConfig, port int, vaultSock string) localui.Config {
 	return cfg
 }
 
+// agentosdWait bounds the wait for agentosd's socket; past it the page
+// exits and its unit restarts it.
+const agentosdWait = 30 * time.Second
+
 func run(ctx context.Context, cfg localui.Config, sock string) error {
+	// New asks agentosd whether setup is open and takes no answer as
+	// closed, so it waits until agentosd's socket accepts.
+	if err := awaitSocket(ctx, sock, agentosdWait); err != nil {
+		return err
+	}
 	s, err := localui.New(cfg)
 	if err != nil {
 		return err
@@ -89,6 +103,25 @@ func run(ctx context.Context, cfg localui.Config, sock string) error {
 		return err
 	}
 	return nil
+}
+
+// awaitSocket returns once the Unix socket at path accepts a connection,
+// or an error after wait.
+func awaitSocket(ctx context.Context, path string, wait time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	var d net.Dialer
+	for {
+		c, err := d.DialContext(ctx, "unix", path)
+		if err == nil {
+			return c.Close()
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("agentosd's socket does not accept connections")
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // newHTTPServer bounds slow clients and logs nothing a request carries

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/recovery"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -342,15 +343,23 @@ func TestEnrollIsClosedOutsideSetupMode(t *testing.T) {
 		vp, kp := filepath.Join(dir, "vault"), filepath.Join(dir, "vault.keys")
 		args := []string{"-vault", vp, "-keys", kp}
 		if setup {
-			args = append(args, "-setup")
+			args = append(args, "-claim", claimedBox(t, dir), "-setup")
 		}
 		var out strings.Builder
 		if err := initCmd(args, &out); err != nil {
 			t.Fatal(err)
 		}
-		_, rest, _ := strings.Cut(out.String(), "Vault passphrase: ")
-		pass, _, _ := strings.Cut(rest, "\n")
-		v, err := vault.OpenSealed(vp, kp, vault.Passphrase(pass))
+		// The setup vault opens with the setup key, not a printed
+		// passphrase (CTRL-setup-open, HW-10).
+		var f vault.Factor
+		if setup {
+			f = recovery.Factor(setupKey(t, kp))
+		} else {
+			_, rest, _ := strings.Cut(out.String(), "Vault passphrase: ")
+			pass, _, _ := strings.Cut(rest, "\n")
+			f = vault.Passphrase(pass)
+		}
+		v, err := vault.OpenSealed(vp, kp, f)
 		if err != nil {
 			t.Fatal(err)
 		}

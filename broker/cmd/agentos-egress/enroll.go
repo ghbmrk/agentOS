@@ -59,8 +59,11 @@ var (
 // setup's seal is written (only sealEnroll writes it), errNotOpen when
 // setup mode never opened it or an entry is of the wrong kind, nil when
 // open. Caller holds mu with the vault open.
-func (c *custody) closedLocked() error {
-	for _, e := range c.v.List() {
+func (c *custody) closedLocked() error { return enrollClosed(c.v) }
+
+// enrollClosed is closedLocked for any open vault v.
+func enrollClosed(v *vault.Vault) error {
+	for _, e := range v.List() {
 		if e.Name == EnrolledName {
 			if e.Kind != KindEnrolled {
 				return errNotOpen
@@ -68,8 +71,8 @@ func (c *custody) closedLocked() error {
 			return errEnrolled
 		}
 	}
-	if !hasKind(c.v, SetupOpenName, KindSetupOpen) ||
-		hasOtherKind(c.v, PendingSeedName, vault.KindTOTPSeed) {
+	if !hasKind(v, SetupOpenName, KindSetupOpen) ||
+		hasOtherKind(v, PendingSeedName, vault.KindTOTPSeed) {
 		return errNotOpen
 	}
 	return nil
@@ -170,7 +173,16 @@ func (c *custody) sealEnroll() error {
 	if _, ok := c.v.Secret(PendingSeedName); ok || !hasKind(c.v, ConfirmedName, KindConfirmed) {
 		return errNotConfirmed
 	}
-	// The seal first: once it is written enrollment is closed, whatever
+	// The state file's mark before the seal, so a locked vault process
+	// never resets a vault whose seal it wrote (cardvault.go).
+	if !c.st.Sealed {
+		next := c.st
+		next.Sealed = true
+		if err := c.persist(next); err != nil {
+			return errInternal
+		}
+	}
+	// Then the seal: once it is written enrollment is closed, whatever
 	// a crash leaves of the entries after it.
 	if err := c.putMark(EnrolledName, KindEnrolled); err != nil {
 		return err
@@ -178,6 +190,8 @@ func (c *custody) sealEnroll() error {
 	if c.v.Delete(SetupOpenName) != nil || c.v.Delete(ConfirmedName) != nil {
 		return errInternal
 	}
+	// The setup key opens nothing once sealed (setupopen.go).
+	c.dropSetupKey()
 	c.notify(noteEnrolled)
 	return nil
 }

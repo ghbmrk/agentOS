@@ -109,7 +109,7 @@ func TestNoSecretBeforeClaim(t *testing.T) {
 	if rnd.n != 0 || cb.generated != 0 {
 		t.Fatalf("before the claim the box drew %d random bytes and made %d cards", rnd.n, cb.generated)
 	}
-	for _, f := range []string{"egress/vault", "egress/vault.keys", "var/lib/agentos/firstboot-card.json"} {
+	for _, f := range []string{"egress/vault", "egress/vault.keys", "egress/setup.key", "egress/unlock.json", "var/lib/agentos/firstboot-card.json"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s exists before the claim", f)
 		}

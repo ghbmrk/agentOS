@@ -207,6 +207,11 @@ class RiskTierTest(unittest.TestCase):
         missing = [p for p in sorted(rt.TIER_A_BROKER) if not (ROOT / "broker" / p).is_dir()]
         self.assertEqual(missing, [])
 
+    # REQ: ONB-3 (P2-2w c3: netjoin writes the home Wi-Fi PSK, so it is tier A)
+    def test_netjoin_is_tier_a(self):
+        self.assertIn("netjoin", rt.TIER_A_BROKER)
+        self.assertEqual(rt.tier_of("broker/netjoin/join.go")[0], "A")
+
     # REQ: HW-10 (CTRL-claim-tier, CTRL-claim-wire: OPERATING §3 and TIER_A_BROKER agree on claim and firstboot)
     def test_operating_tier_a_list_agrees_with_tier_a_broker(self):
         text = (ROOT / "docs" / "OPERATING.md").read_text()

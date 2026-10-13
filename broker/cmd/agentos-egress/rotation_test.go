@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base32"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/url"
@@ -29,6 +30,7 @@ type cardRig struct {
 	card  recovery.Card
 	box   *recovery.Box // a second view of the drive, for checks
 	call  func(method, path string, body any) (int, map[string]any)
+	id    string // the latest begun rotation's ID (S-R1)
 	tmu   sync.Mutex
 	fires []func()
 	ttls  []time.Duration
@@ -123,13 +125,29 @@ func (x *cardRig) stored(t *testing.T, rk recovery.RecoveryKey) recovery.Card {
 	return c
 }
 
+// newRotationID is a rotation ID as the page draws one (S-R1).
+func newRotationID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// begin starts a rotation; a body naming no ID gets a fresh one, which
+// commit and cancel then carry.
 func (x *cardRig) begin(t *testing.T, body map[string]any) (int, map[string]any) {
 	t.Helper()
+	if _, ok := body["id"]; !ok {
+		body["id"] = newRotationID()
+	}
+	x.id, _ = body["id"].(string)
 	return x.call("POST", "/rotate/begin", body)
 }
 
 func (x *cardRig) commit(t *testing.T, next rotateCommit) (int, map[string]any) {
 	t.Helper()
+	if next.ID == "" {
+		next.ID = x.id
+	}
 	return x.call("POST", "/rotate/commit", next)
 }
 
@@ -254,7 +272,7 @@ func TestRotateCommitOutcomes(t *testing.T) {
 
 func (x *cardRig) cancel(t *testing.T) int {
 	t.Helper()
-	code, _ := x.call("POST", "/rotate/cancel", map[string]any{})
+	code, _ := x.call("POST", "/rotate/cancel", map[string]any{"id": x.id})
 	return code
 }
 
@@ -311,6 +329,7 @@ func TestRotateTimerAndLockDropThePendingRotation(t *testing.T) {
 func TestRotateRecoveryKeyReturnsTheEnrollment(t *testing.T) {
 	x := newCardRig(t)
 	x.open(t)
+	x.wantPending(t, false)
 	if code, out := x.begin(t, map[string]any{"recovery": "AAAA-BBBB", "parts": []string{"recovery"}}); code != http.StatusForbidden {
 		t.Fatalf("malformed key: %d %v", code, out)
 	}
@@ -335,7 +354,8 @@ func TestRotateRecoveryKeyReturnsTheEnrollment(t *testing.T) {
 	if string(seed) == string(x.seed) {
 		t.Fatal("the code generator was not replaced")
 	}
-	_ = x.stored(t, nk) // the new key opens the drive
+	x.wantPending(t, true) // #1175 UX U-R1: the page can offer the show form
+	_ = x.stored(t, nk)    // the new key opens the drive
 	if _, err := vault.OpenSealed(x.c.vaultPath, x.c.keysPath, recovery.Factor(x.rk)); err == nil {
 		t.Fatal("the old recovery key still opens the drive")
 	}
@@ -351,6 +371,7 @@ func TestRotateRecoveryKeyReturnsTheEnrollment(t *testing.T) {
 	if code, out := x.call("POST", "/rotate/enroll", map[string]any{"code": totp(seed, x.clk.now())}); code != http.StatusOK || out["confirmed"] != true {
 		t.Fatalf("enroll: %d %v", code, out)
 	}
+	x.wantPending(t, false)
 	if code, _ := x.call("POST", "/rotate/enroll", map[string]any{"code": totp(seed, x.clk.now())}); code != http.StatusConflict {
 		t.Fatalf("enroll again: %d", code)
 	}
@@ -422,8 +443,95 @@ func TestRotateWithoutACard(t *testing.T) {
 	if err := r.c.confirm(tk, r.code()); err != nil {
 		t.Fatal(err)
 	}
-	code, out := handlerCall(t, r.c)("POST", "/rotate/begin", map[string]any{"code": r.next(), "parts": []string{"wifi"}})
+	code, out := handlerCall(t, r.c)("POST", "/rotate/begin", map[string]any{"id": newRotationID(), "code": r.next(), "parts": []string{"wifi"}})
 	if code != http.StatusConflict {
 		t.Fatalf("no card: %d %v", code, out)
+	}
+}
+
+// wantPending checks /rotate/status: whether a replaced code generator
+// waits for its first code (#1175 UX U-R1).
+func (x *cardRig) wantPending(t *testing.T, want bool) {
+	t.Helper()
+	code, out := x.call("POST", "/rotate/status", map[string]any{})
+	if code != http.StatusOK || out["enrollment_pending"] != want {
+		t.Fatalf("status: %d %v, want enrollment_pending %v", code, out, want)
+	}
+}
+
+// #1175 security S-R1: commit and cancel carry the ID their begin named.
+// A late commit or a stale cancel from an older rotation answers 410 and
+// leaves the newer rotation waiting; a cancel that arrived before its own
+// begin keeps that begin from dropping the newer one.
+func TestRotateOpsCarryTheirRotationID(t *testing.T) {
+	x := newCardRig(t)
+	x.open(t)
+	for _, id := range []any{nil, "", "short", strings.Repeat("G", 32), strings.Repeat("A", 32)} {
+		body := map[string]any{"code": x.next(), "parts": []string{"wifi"}}
+		if id != nil {
+			body["id"] = id
+		}
+		code, _ := x.call("POST", "/rotate/begin", body)
+		if code != http.StatusBadRequest {
+			t.Fatalf("begin with id %v: %d", id, code)
+		}
+	}
+	if code, _ := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi"}}); code != http.StatusOK {
+		t.Fatal("begin A")
+	}
+	a := x.id
+	code, out := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi"}})
+	if code != http.StatusOK || out["id"] != x.id {
+		t.Fatalf("begin B: %d %v", code, out)
+	}
+	b := x.id
+	late := nextWiFiGrid(t)
+	late.ID, late.GridSeed = a, nil
+	if code, _ := x.commit(t, late); code != http.StatusGone {
+		t.Fatalf("late commit: %d", code)
+	}
+	if code, _ := x.commit(t, rotateCommit{ID: strings.Repeat("0", 32), WiFiPassword: synthetic(t, "wifi-next-")}); code != http.StatusGone {
+		t.Fatalf("unknown id commit: %d", code)
+	}
+	if code, _ := x.call("POST", "/rotate/cancel", map[string]any{"id": a}); code != http.StatusGone {
+		t.Fatalf("stale cancel: %d", code)
+	}
+	if code, _ := x.call("POST", "/rotate/cancel", map[string]any{}); code != http.StatusGone {
+		t.Fatalf("cancel without id: %d", code)
+	}
+	if got := x.stored(t, x.rk); got.WiFiPassword != x.card.WiFiPassword {
+		t.Fatal("a stale op changed the card")
+	}
+	// B still waits, and its own commit lands B's values.
+	next := rotateCommit{ID: b, WiFiPassword: synthetic(t, "wifi-next-")}
+	if code, out := x.commit(t, next); code != http.StatusOK {
+		t.Fatalf("commit B: %d %v", code, out)
+	}
+	if got := x.stored(t, x.rk); got.WiFiPassword != next.WiFiPassword {
+		t.Fatal("B's commit did not land")
+	}
+
+	// The page gave up on begin D and cancelled it before D arrived; C
+	// is waiting. D must not drop C.
+	if code, _ := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi"}}); code != http.StatusOK {
+		t.Fatal("begin C")
+	}
+	c := x.id
+	d := newRotationID()
+	if code, _ := x.call("POST", "/rotate/cancel", map[string]any{"id": d}); code != http.StatusGone {
+		t.Fatalf("early cancel: %d", code)
+	}
+	if code, out := x.begin(t, map[string]any{"id": d, "code": x.next(), "parts": []string{"wifi"}}); code != http.StatusGone {
+		t.Fatalf("begin after its cancel: %d %v", code, out)
+	}
+	x.c.rot.mu.Lock()
+	still := x.c.rot.p != nil && x.c.rot.id == c
+	x.c.rot.mu.Unlock()
+	if !still {
+		t.Fatal("a cancelled begin dropped the waiting rotation")
+	}
+	x.id = c
+	if code := x.cancel(t); code != http.StatusNoContent {
+		t.Fatalf("cancel C: %d", code)
 	}
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,14 @@ import (
 // shows it to print), 400 for a card that does not fit (kept for a
 // retry). (R2, CRED-1) the Pending holds the typed vault passphrase, so it
 // is dropped on cancel, on lock, and by a timer at recovery.PendingTTL.
+//
+// #1175 security review S-R1: commit and cancel carry the rotation ID the
+// begin was made with, so a late commit or a stale cancel cannot act on a
+// newer rotation: a mismatch answers 410 and leaves the waiting Pending
+// alone. The page draws the ID (32 hex digits from crypto/rand) and the
+// begin echoes it, so the page can cancel a begin that got no answer; an
+// ID cancelled before its begin arrived is remembered (dead), and that
+// late begin is refused before it drops anything.
 
 // rotation is the vault process's one pending rotation. Lock order:
 // rotation.mu before custody.mu; Commit runs under rotation.mu alone,
@@ -41,6 +51,47 @@ type rotation struct {
 	// re-encryption; kept only with p.
 	pin  string
 	stop func() bool
+	// id is the waiting rotation's ID; set only with p.
+	id string
+	// dead are IDs cancelled while not waiting (most recent last), so a
+	// begin arriving after its own cancel is refused.
+	dead []string
+}
+
+// maxDead bounds rotation.dead: the page cancels at most one begin it
+// gave up on per start.
+const maxDead = 16
+
+// rotationID reports an ID of the form the page draws: 32 lowercase hex
+// digits.
+func rotationID(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !('0' <= s[i] && s[i] <= '9' || 'a' <= s[i] && s[i] <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// mine reports whether id names the waiting rotation. The caller holds
+// r.mu.
+func (r *rotation) mine(id string) bool {
+	return r.p != nil && rotationID(id) && subtle.ConstantTimeCompare([]byte(id), []byte(r.id)) == 1
+}
+
+// bury remembers an ID cancelled while not waiting. The caller holds
+// r.mu.
+func (r *rotation) bury(id string) {
+	if !rotationID(id) || slices.Contains(r.dead, id) {
+		return
+	}
+	if len(r.dead) == maxDead {
+		r.dead = slices.Delete(r.dead, 0, 1)
+	}
+	r.dead = append(r.dead, id)
 }
 
 // drop cancels the pending rotation, wiping its typed passphrase. The
@@ -52,12 +103,14 @@ func (r *rotation) drop() {
 	if r.stop != nil {
 		r.stop()
 	}
-	r.p, r.pin, r.stop = nil, "", nil
+	r.p, r.pin, r.stop, r.id = nil, "", nil, ""
 }
 
 // rotateCommit is the new card's rotated parts, as the display sends
 // them; the Wi-Fi name never changes, so it is not sent.
 type rotateCommit struct {
+	// ID is the rotation's ID, from its begin.
+	ID              string `json:"id"`
 	WiFiPassword    string `json:"wifi_password,omitempty"`
 	SetupSecret     string `json:"setup_secret,omitempty"`
 	SetupCode       string `json:"setup_code,omitempty"`
@@ -76,6 +129,8 @@ var (
 	errNoRotation      = uerr(http.StatusGone, "no new card is waiting; nothing changed, start again")
 	errRotationLapsed  = uerr(http.StatusGone, "this new card has lapsed; nothing changed, start again")
 	errRotationParts   = uerr(http.StatusBadRequest, "choose the card parts to replace: wifi, setup, passphrase, grid, recovery")
+	errRotationID      = uerr(http.StatusBadRequest, "this request names no rotation; start again")
+	errRotationGone    = uerr(http.StatusGone, "this new card was cancelled; nothing changed, start again")
 	errWrongRecovery   = uerr(http.StatusForbidden, "that recovery key does not open this drive")
 	errRotationProof   = uerr(http.StatusForbidden, "replacing the passphrase or recovery key needs the current one from the card")
 	errRotationPass    = uerr(http.StatusForbidden, "that vault passphrase does not open the drive; check it against the card")
@@ -122,6 +177,8 @@ func (c *custody) still() bool {
 }
 
 type rotateBegin struct {
+	// ID names the rotation for its commit and cancel (S-R1).
+	ID string `json:"id"`
 	// Code is a tier-4 approval code (CH-3); Recovery, the current
 	// recovery key, replaces it.
 	Code     string   `json:"code"`
@@ -140,6 +197,9 @@ type rotateBegin struct {
 func (c *custody) beginRotation(req rotateBegin) (*recovery.Pending, error) {
 	if n := utf8.RuneCountInString(req.PIN); req.PIN != "" && (n < MinPINLen || n > 64) {
 		return nil, errBadPIN
+	}
+	if !rotationID(req.ID) {
+		return nil, errRotationID
 	}
 	if len(req.Parts) == 0 {
 		return nil, errRotationParts
@@ -161,6 +221,11 @@ func (c *custody) beginRotation(req rotateBegin) (*recovery.Pending, error) {
 	r := &c.rot
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if slices.Contains(r.dead, req.ID) {
+		// The page gave up on this begin and cancelled it: it must not
+		// drop a newer rotation, nor hold a passphrase nobody will use.
+		return nil, errRotationGone
+	}
 	r.drop()
 	b, err := c.rotBox()
 	if err != nil {
@@ -210,7 +275,7 @@ func (c *custody) beginRotation(req rotateBegin) (*recovery.Pending, error) {
 	default:
 		return nil, errInternal
 	}
-	r.p = p
+	r.p, r.id = p, req.ID
 	if set[recovery.PartRecovery] {
 		r.pin = req.PIN
 	}
@@ -229,16 +294,17 @@ func (c *custody) beginRotation(req rotateBegin) (*recovery.Pending, error) {
 }
 
 // commitRotation stores the new card's parts through the pending
-// rotation. Only a card that does not fit keeps the rotation for a
-// retry; every other outcome drops it.
+// rotation named by next.ID. Only a card that does not fit keeps the
+// rotation for a retry; every other outcome drops it. A commit for any
+// other rotation answers 410 and leaves the waiting one alone (S-R1).
 func (c *custody) commitRotation(next rotateCommit) (recovery.Done, []recovery.Part, bool, error) {
 	r := &c.rot
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	p := r.p
-	if p == nil {
+	if !r.mine(next.ID) {
 		return recovery.Done{}, nil, false, errNoRotation
 	}
+	p := r.p
 	if !c.still() {
 		r.drop()
 		return recovery.Done{}, nil, false, errNoRotation
@@ -271,12 +337,31 @@ func (c *custody) commitRotation(next rotateCommit) (recovery.Done, []recovery.P
 	return done, parts, lost, nil
 }
 
-// cancelRotation drops the pending rotation, if any (the display's
-// cancel, #1090 R2).
-func (c *custody) cancelRotation() {
-	c.rot.mu.Lock()
-	defer c.rot.mu.Unlock()
-	c.rot.drop()
+// cancelRotation drops the pending rotation named id (the display's
+// cancel, #1090 R2). Any other ID leaves the waiting rotation alone,
+// answers 410 and is remembered, so its begin, if still on the way, is
+// refused (S-R1).
+func (c *custody) cancelRotation(id string) error {
+	r := &c.rot
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.mine(id) {
+		r.bury(id)
+		return errNoRotation
+	}
+	r.drop()
+	return nil
+}
+
+// enrollmentPending reports a replaced code generator not yet confirmed,
+// for the page to offer showing it again (#1175 UX U-R1). A locked vault
+// or one with no Owner Card has none to show.
+func (c *custody) enrollmentPending() bool {
+	b, err := c.enrollBox()
+	if err != nil {
+		return false
+	}
+	return recovery.EnrollmentPending(b)
 }
 
 // enrollBox is the box for the code-generator ops after a rotation.
@@ -343,7 +428,7 @@ func rotationRoutes(mux *http.ServeMux, c *custody, read func(http.ResponseWrite
 		for _, q := range p.Parts() {
 			parts = append(parts, string(q))
 		}
-		reply(w, http.StatusOK, map[string]any{"parts": parts, "wifi_name": p.WiFiName(), "lost": p.Lost(),
+		reply(w, http.StatusOK, map[string]any{"id": req.ID, "parts": parts, "wifi_name": p.WiFiName(), "lost": p.Lost(),
 			"expires": c.now().Add(recovery.PendingTTL).UTC().Format(time.RFC3339)})
 	})
 	mux.HandleFunc("/rotate/commit", func(w http.ResponseWriter, r *http.Request) {
@@ -367,12 +452,24 @@ func rotationRoutes(mux *http.ServeMux, c *custody, read func(http.ResponseWrite
 		reply(w, http.StatusOK, out)
 	})
 	mux.HandleFunc("/rotate/cancel", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID string `json:"id"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		if err := c.cancelRotation(req.ID); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/rotate/status", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{}
 		if !read(w, r, &req) {
 			return
 		}
-		c.cancelRotation()
-		w.WriteHeader(http.StatusNoContent)
+		reply(w, http.StatusOK, map[string]any{"enrollment_pending": c.enrollmentPending()})
 	})
 	mux.HandleFunc("/rotate/enroll", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

@@ -14,9 +14,10 @@ import (
 // enrollment it saw the vault confirm. The code seed is made in the vault
 // process (egress K17) and only passes through this page.
 //
-// Networks, BoxNumber, HostInfo, Send, TrustHost and the provider hooks
-// are not served by agentosd yet: they answer nothing or an error, so the
-// steps that need them wait.
+// JoinNetwork goes through agentosd to its netjoin helper (P2-2w c3;
+// Security L8). Networks, BoxNumber, HostInfo, Send, TrustHost and the
+// provider hooks are not served by agentosd yet: they answer nothing or an
+// error, so the steps that need them wait.
 type AgentosdSetup struct{ Owner Owner }
 
 var errNotServed = errors.New("localui: not served by agentosd yet")
@@ -49,11 +50,11 @@ func (a AgentosdSetup) Progress() Progress {
 		return Progress{Phase: "booting"}
 	}
 	switch p.Phase {
-	case "booting", "updating", "ready":
+	case "booting", "updating", "offline", "ready":
 	default:
 		return Progress{Phase: "booting"}
 	}
-	return Progress{Phase: p.Phase, Updated: p.Updated, Online: p.Online}
+	return Progress{Phase: p.Phase, Updated: p.Updated, Online: p.Online, NeverOnline: p.NeverOnline}
 }
 
 func (a AgentosdSetup) EnrollCode() (string, error) {
@@ -103,8 +104,16 @@ func (a AgentosdSetup) Finish(owner string) error {
 	return err
 }
 
+// JoinNetwork has agentosd's helper write the home Wi-Fi connection. It
+// waits up to localapi.JoinTimeout, longer than agentosd's own call to the
+// helper (Security L8.4); any error shows the page's one network error.
+func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), localapi.JoinTimeout)
+	defer cancel()
+	return a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
+}
+
 func (AgentosdSetup) Networks() []string                 { return nil }
-func (AgentosdSetup) JoinNetwork(string, string) error   { return errNotServed }
 func (AgentosdSetup) BoxNumber() string                  { return "" }
 func (AgentosdSetup) HostInfo() string                   { return "" }
 func (AgentosdSetup) Send(string, string) error          { return errNotServed }

@@ -118,13 +118,11 @@ const MaxSessions = 16
 const cookieName = "agentos_session"
 
 // New returns a Server. It refuses an access point configuration that
-// could expose the UI beyond the box's Wi-Fi (CH-9).
+// could expose the UI beyond the box's Wi-Fi (CH-9). The page never
+// reads the access point's name or password, so only ValidateServe
+// applies, with or without setup (P2-2w c4).
 func New(cfg Config) (*Server, error) {
-	validate := cfg.AP.Validate
-	if cfg.Hooks == nil {
-		validate = cfg.AP.ValidateServe
-	}
-	if err := validate(); err != nil {
+	if err := cfg.AP.ValidateServe(); err != nil {
 		return nil, err
 	}
 	if (cfg.Hooks == nil) != (cfg.Store == nil) {

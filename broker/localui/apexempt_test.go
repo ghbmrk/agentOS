@@ -18,10 +18,13 @@ type fakeAP struct {
 	log      *[]string
 	started  bool
 	startErr error
+	stopErr  error    // Stop fails and leaves the access point running
+	cfg      APConfig // the configuration the last Start was given
 }
 
 func (f *fakeAP) Start(ctx context.Context, cfg APConfig) error {
 	*f.log = append(*f.log, "ap start "+cfg.Iface)
+	f.cfg = cfg
 	if f.startErr != nil {
 		return f.startErr
 	}
@@ -31,6 +34,9 @@ func (f *fakeAP) Start(ctx context.Context, cfg APConfig) error {
 func (f *fakeAP) SetPassthrough(on bool, uplink string) error { return nil }
 func (f *fakeAP) Stop() error {
 	*f.log = append(*f.log, "ap stop")
+	if f.stopErr != nil {
+		return f.stopErr
+	}
 	f.started = false
 	return nil
 }

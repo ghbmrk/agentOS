@@ -359,7 +359,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
 	var diskQuota, sleepHoursFlag string
-	var builderImage, builderLaunch, keptPath, setupRecord string
+	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var digestDir, mailSocket string
@@ -394,6 +394,7 @@ func main() {
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
+	flag.StringVar(&netjoinSock, "netjoin-sock", "", "the netjoin helper's socket (agentos-netjoin, P2-2w c3): setup's network step writes the home Wi-Fi through it; empty, that step answers not joined")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
@@ -504,8 +505,9 @@ func main() {
 	// setup's ops are served until its finish is recorded, and the owner's
 	// number then comes from the record, on this start and every later one.
 	if cfg.OwnerNumber == "" {
+		up := newUplink()
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
-			OwnerState: cfg.OwnerState, Progress: setupProgress}
+			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock}
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
 		}

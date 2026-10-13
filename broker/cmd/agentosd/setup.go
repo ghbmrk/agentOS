@@ -12,6 +12,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/netjoin"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -27,6 +28,12 @@ type setupMode struct {
 	OwnerState string // the owner channel's state file
 	Enroll     localsrv.Enroller
 	Progress   func() localapi.SetupProgress
+	// NetJoin is the netjoin helper's socket (P2-2w c3; Security L8);
+	// empty, the page's network step answers its one error.
+	NetJoin string
+	// Seen is told each join's answer (the uplink's never-online wait,
+	// P2-2w c4); nil is told nothing.
+	Seen func(netjoin.Code)
 
 	// Card starts the first-boot Owner Card step (HW-1) and returns its
 	// hold: setup does not finish while Hold reports the card unconfirmed.
@@ -73,6 +80,7 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	}
 	finished := make(chan string, 1)
 	s := localsrv.NewSetup(localsrv.SetupConfig{Record: m.Record, Enroll: m.Enroll, Progress: m.Progress,
+		Join:     joiner(m.NetJoin, m.Seen),
 		Finished: func(owner string) { finished <- owner }})
 	ops := s.Ops()
 	finish := ops[localapi.OpSetupFinish]
@@ -158,8 +166,27 @@ func enrollErr(err error) error {
 	return err
 }
 
-// setupProgress is what setup's pages show while agentosd runs setup: the
-// box is up. The first-boot update and uplink checks are not wired yet.
-func setupProgress() localapi.SetupProgress {
-	return localapi.SetupProgress{Phase: "ready", Updated: true, Online: true}
+// errNotJoined is every join that did not end joined or saved. It
+// carries nothing of the request (CRED-1).
+var errNotJoined = errors.New("setup: the home network was not joined")
+
+// joiner is setup's join through the netjoin helper's socket: joined and
+// saved succeed, every other answer or no answer is errNotJoined. With no
+// socket it is nil, and localsrv answers not joined. seen, if set, is
+// told each answer.
+func joiner(path string, seen func(netjoin.Code)) func(context.Context, string, string) error {
+	if path == "" {
+		return nil
+	}
+	c := netjoin.Client{Path: path}
+	return func(ctx context.Context, ssid, password string) error {
+		code, err := c.Join(ctx, ssid, password)
+		if err == nil && seen != nil {
+			seen(code)
+		}
+		if err == nil && (code == netjoin.Joined || code == netjoin.Saved) {
+			return nil
+		}
+		return errNotJoined
+	}
 }

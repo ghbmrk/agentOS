@@ -32,7 +32,18 @@ type Progress struct {
 	// Online is true when the box has an uplink. Ethernet makes the
 	// network step a no-op.
 	Online bool
+	// NeverOnline: the home Wi-Fi was saved but the box has not got
+	// online with it (netjoin L8.4, P2-2w c4). Setup continues with a
+	// note.
+	NeverOnline bool
 }
+
+// The never-online notes (CH-12): before pairing the owner can still
+// rejoin, after it only Ethernet helps.
+const (
+	neverOnlineNote       = "I saved your home Wi-Fi but have not got online with it. Setup can continue. Check the Wi-Fi name and password below and join again, or plug in an Ethernet cable."
+	neverOnlinePairedNote = "I saved your home Wi-Fi but have not got online with it. Setup can continue, and AI waits until I am online. Plug in an Ethernet cable to get online now."
+)
 
 // Provider is an AI provider setup can connect (§8.1 step 6).
 type Provider struct {
@@ -376,9 +387,13 @@ func (u *setup) routes(mux *http.ServeMux) {
 }
 
 type setupView struct {
-	Step      string
-	Progress  Progress
-	Err       string
+	Step     string
+	Progress Progress
+	Err      string
+	// Note is the never-online note; Rejoin adds the network form to
+	// the number step.
+	Note      string
+	Rejoin    bool
 	Networks  []string
 	BoxNumber string
 	SMSLink   template.URL
@@ -438,6 +453,12 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 	}
 	v.Err = u.err[key]
 	delete(u.err, key)
+	if p.NeverOnline {
+		v.Note = neverOnlineNote
+		if u.st.Owner != "" {
+			v.Note = neverOnlinePairedNote
+		}
+	}
 	if u.st.Owner != "" {
 		v.Paired = mask(u.st.Owner)
 	}
@@ -475,6 +496,9 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 	case "number":
 		v.BoxNumber = u.s.cfg.Hooks.BoxNumber()
 		v.SMSLink = smsLink(v.BoxNumber, "PAIR "+v.PairCode)
+		if p.NeverOnline {
+			v.Rejoin, v.Networks = true, u.s.cfg.Hooks.Networks()
+		}
 	case "codes":
 		if v.CodesShown {
 			break

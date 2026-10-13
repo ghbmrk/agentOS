@@ -511,11 +511,12 @@ func TestUnreadableAPTableIsKept(t *testing.T) {
 	if err := l.Up(context.Background(), apCfg("wlan0")); err == nil {
 		t.Fatal("wlan0 ran the access point though agentos_ap could not be read")
 	}
-	// The read works again, but agentos_ap still holds wlan2: Up refuses
-	// until a Start brings wlan2 down.
+	// The read works again, but wlan0's BringDown has not finished and
+	// agentos_ap still holds wlan2: Up refuses until a Start brings both
+	// down.
 	delete(h.fail, "nft list agentos_ap")
-	if err := l.Up(context.Background(), apCfg("wlan0")); err == nil || !strings.Contains(err.Error(), "wlan2") {
-		t.Fatalf("wlan0 ran the access point while agentos_ap held wlan2: %v (open %v)", err, h.open())
+	if err := l.Up(context.Background(), apCfg("wlan0")); err == nil || !strings.Contains(err.Error(), "wlan0 did not come down") {
+		t.Fatalf("wlan0 ran the access point before its BringDown finished: %v (open %v)", err, h.open())
 	}
 	if err := l.Start(context.Background(), "wlan0"); err != nil {
 		t.Fatal(err)
