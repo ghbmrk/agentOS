@@ -263,18 +263,22 @@ form { margin: .6em 0 1.2em; }
 
 {{define "private"}}<label><input type="checkbox" name="private" value="1" checked> {{.Name}} may see your private data (mail, files) to do tasks. Recommended.</label><br>{{end}}
 
+{{define "wifi"}}<form method="post" action="/setup/network">
+<label>Your home Wi-Fi{{if .}}<select name="ssid">{{range .}}<option>{{.}}</option>{{end}}</select>{{else}}<input type="text" name="ssid" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false" required>{{end}}</label>
+<label>Its password<input type="text" name="password" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+<button>Join</button>
+</form>
+{{end}}
+
 {{define "setup"}}{{template "head" .Refresh}}
 <h1>Set up AgentOS</h1>
 <p class="muted">Box: {{phase .Progress.Phase}}</p>
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{with .Note}}<p class="err" id="uplink">{{.}}</p>{{end}}
 
 {{if eq .Step "network"}}
 <h2>1. Home network</h2>
-<form method="post" action="/setup/network">
-<label>Your home Wi-Fi<select name="ssid">{{range .Networks}}<option>{{.}}</option>{{end}}</select></label>
-<label>Its password<input type="text" name="password" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-<button>Join</button>
-</form>
+{{template "wifi" .Networks}}
 <form method="post" action="/setup/network"><input type="hidden" name="ethernet" value="1"><button class="plain">I plugged in an Ethernet cable</button></form>
 
 {{else if eq .Step "number"}}
@@ -288,6 +292,8 @@ form { margin: .6em 0 1.2em; }
 {{if .NumTo}}<form method="post" action="/setup/number-code"><label>Code texted to {{.NumTo}}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Confirm</button></form>{{end}}
 </details>
 <p><a href="/setup">I sent it</a></p>
+{{if .Rejoin}}<h2>Home Wi-Fi again</h2>
+{{template "wifi" .Networks}}{{end}}
 
 {{else if eq .Step "claim"}}
 <h2>2. Text your box</h2>

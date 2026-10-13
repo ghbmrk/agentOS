@@ -75,10 +75,13 @@ const MaxEnrollLink = 512
 
 // SetupProgress is the box's boot progress as setup shows it (ONB-4).
 type SetupProgress struct {
-	// Phase is "booting", "updating" or "ready".
+	// Phase is "booting", "updating", "offline" or "ready".
 	Phase   string `json:"phase"`
 	Updated bool   `json:"updated"`
 	Online  bool   `json:"online"`
+	// NeverOnline: the last join was saved (netjoin L8.4) and the box has
+	// had no uplink for a while since (P2-2w c4).
+	NeverOnline bool `json:"never_online,omitempty"`
 }
 
 // EnrollLink is a new seed's otpauth link, shown once.

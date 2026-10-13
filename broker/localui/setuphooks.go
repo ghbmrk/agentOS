@@ -50,11 +50,11 @@ func (a AgentosdSetup) Progress() Progress {
 		return Progress{Phase: "booting"}
 	}
 	switch p.Phase {
-	case "booting", "updating", "ready":
+	case "booting", "updating", "offline", "ready":
 	default:
 		return Progress{Phase: "booting"}
 	}
-	return Progress{Phase: p.Phase, Updated: p.Updated, Online: p.Online}
+	return Progress{Phase: p.Phase, Updated: p.Updated, Online: p.Online, NeverOnline: p.NeverOnline}
 }
 
 func (a AgentosdSetup) EnrollCode() (string, error) {
