@@ -94,7 +94,7 @@ func TestTheNumberStepSaysPlainlyWhenTheBoxCannotText(t *testing.T) {
 	r.get("/setup")
 	r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"home-pass"}})
 	page := r.get("/setup")
-	if !strings.Contains(page, "Pairing is not available yet: this box cannot text right now.") ||
+	if !strings.Contains(page, "Pairing is not available yet: I cannot send texts right now.") ||
 		strings.Contains(page, "sms:") || strings.Contains(page, `action="/setup/number"`) || strings.Contains(page, "I sent it") {
 		t.Fatalf("number step with no texts: %s", page)
 	}

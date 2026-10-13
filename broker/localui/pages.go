@@ -283,7 +283,7 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "number"}}
 <h2>2. Text your box</h2>
-{{if not .BoxNumber}}<p>Pairing is not available yet: this box cannot text right now. Reload this page to try again.</p>
+{{if not .BoxNumber}}<p>Pairing is not available yet: I cannot send texts right now. Reload this page to try again.</p>
 {{else}}{{if .SMSLink}}<p><a class="button" href="{{.SMSLink}}">Text my box</a></p>
 <p class="muted">Your messages app opens with my number and a code filled in. Press Send, then come back here.</p>
 <p class="muted">Or text <span class="mono">PAIR {{.PairCode}}</span> to <span class="mono">{{.BoxNumber}}</span>. The setup code on your card works too.</p>
