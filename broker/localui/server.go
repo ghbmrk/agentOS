@@ -73,8 +73,14 @@ type Config struct {
 	// rotation's new parts are shown at /rotate/card to a signed-in phone
 	// until the owner confirms or cancels them.
 	Rotation RotationCard
-	Now      func() time.Time
-	Rand     io.Reader
+	// Station, when set, reports whether the box has a Wi-Fi device
+	// beside the access point that can join a home network
+	// (StationDevice). Without one a saved home Wi-Fi never comes
+	// online, so the never-online note names Ethernet only and offers no
+	// rejoin (CH-12; P2-2w c4 r1). Nil assumes one.
+	Station func() bool
+	Now     func() time.Time
+	Rand    io.Reader
 }
 
 // Server is the local UI.
