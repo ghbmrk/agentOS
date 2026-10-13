@@ -34,12 +34,15 @@ func main() {
 	// The numbers default from the environment (the unit's EnvironmentFile),
 	// so they are not on the command line for any process to read.
 	flag.StringVar(&boxNumber, "box-number", os.Getenv("BOX_NUMBER"), "the owner line's own number, E.164 (AT+CNUM is tried when empty); default $BOX_NUMBER")
-	flag.StringVar(&ownerNumber, "owner-number", os.Getenv("OWNER_NUMBER"), "the owner's number, E.164; default $OWNER_NUMBER")
+	flag.StringVar(&ownerNumber, "owner-number", os.Getenv("OWNER_NUMBER"), "the owner's number, E.164 (empty on a box with no owner yet, while setup pairs over this line); default $OWNER_NUMBER")
 	flag.StringVar(&countryCode, "country-code", os.Getenv("COUNTRY_CODE"), "the home country code, as in 1 or 44; default $COUNTRY_CODE")
 	flag.StringVar(&sysRoot, "sys-root", "/", "root of sysfs and procfs, for finding the modem")
 	flag.Parse()
-	if ownerNumber == "" || countryCode == "" {
-		log.Fatal("the owner's number and country code are required (OWNER_NUMBER, COUNTRY_CODE)")
+	// With no owner's number (a box in setup, P2-2w c4c) no text counts as
+	// the owner's: each is deleted as it is read and offered once, and
+	// agentosd's setup takes only PAIR texts.
+	if countryCode == "" {
+		log.Fatal("the home country code is required (COUNTRY_CODE)")
 	}
 	log.SetFlags(0)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
