@@ -1,0 +1,14 @@
+# guest/codex assumptions (S8-W1 defensive half, #807)
+
+What the Codex provider worker's managed config and tool sandbox rest on. Nothing here is wired into
+agentosd yet: the CLI is not installed or pinned, and no worker rootfs is built. #809 measures the
+pinned CLI against each row; the containment test with the real CLI is Mark's supervised session (D-064).
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| C1 | The pinned Codex CLI reads `/etc/codex/managed_config.toml` as managed config that a user config cannot override, and these key names do what their names say: `web_search = "disabled"`, `[tools] web_search`, `[features] web_search_request`, `web_search_cached`, `image_generation`; `model_provider` with `[model_providers.<id>] base_url`, `wire_api`, `requires_openai_auth`; `check_for_update_on_startup`; `[analytics]`/`[feedback] enabled`; `[otel] exporter`; `[history] persistence`; `approval_policy`, `sandbox_mode`, `[sandbox_workspace_write]`, `[shell_environment_policy] inherit`. Taken from the S8 spike (`spikes/S8-provider-workers/codex_provider.toml`) and the CLI's public config docs, not measured against a pinned version. A key the CLI ignores fails open, which is why #1014's request-body check, not this file, is the enforcement for hosted tools. | CRED-5, CAP-11 | #809 records the key names the pinned CLI reads and which hosted tool types it still sends; tests/test_codex_worker.py's REQUIRED table follows. |
+| C2 | The CLI honours `CODEX_REFRESH_TOKEN_URL_OVERRIDE` and `CODEX_HOME` from its environment (launch.json). | CRED-5 | #809; the forwarder (#1014) refuses an undeclared refresh host either way. |
+| C3 | Every tool command the CLI runs can be prefixed with `agentos-toolsh`. How the pinned CLI is made to do that (its own Linux sandbox off and an exec wrapper, or a shell override) is not measured here; until it is, the sandbox protects nothing at run time. | CRED-5, A14 | The remaining #807 half wires it and the supervised containment test checks it with the real CLI. |
+| C4 | The egress socket and any other path socket the worker gets live under `/run`, which agentos-toolsh hides with a tmpfs. Path sockets are not scoped by the network namespace; abstract ones are. | CRED-5, A14 | Add the new directory to the wrapper's tmpfs list and refusal list, and to the test's stub worker. |
+| C5 | bubblewrap is in the worker rootfs at `/usr/bin/bwrap` and works inside the worker's gVisor sandbox (user, net, pid and mount namespaces; `--disable-userns` needs bwrap 0.8). Tested only on a Linux host as root (CI runs it under sudo). | A14 | If runsc refuses a namespace bwrap needs, the tool sandbox moves to a nested runsc or the worker's own seccomp/landlock, measured the same way. |
+| C6 | The workspace is a directory outside `/`, `/run`, `/tmp`, `/var/tmp`, `/proc`, `/dev`, `/sys`, `/etc` and CODEX_HOME; the wrapper refuses those. | A14 | Change the refusal list with the workspace path. |

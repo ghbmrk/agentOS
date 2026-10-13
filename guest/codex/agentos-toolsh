@@ -1,0 +1,55 @@
+#!/bin/sh
+# agentos-toolsh: the prefix the Codex worker runs every tool command under (S8-W1, CRED-5).
+#   agentos-toolsh <command> [args...]
+# The CLI reaches its provider only through the in-worker forwarder on loopback and the egress
+# socket under /run/agentos, and holds a placeholder auth.json in CODEX_HOME; the egress proxy
+# swaps in the owner's login. A tool command (model-directed) must reach none of them, or it could
+# spend the owner's plan. So the command runs in a bwrap sandbox with:
+#   - its own network namespace (only its own lo: no forwarder port, no abstract sockets);
+#   - /run, /tmp, /var/tmp and CODEX_HOME replaced by empty tmpfs (path sockets are not scoped
+#     by the network namespace, so the socket directory must be hidden by a mount);
+#   - the rest of the filesystem read-only, the working directory (the task's workspace) writable;
+#   - its own pid, ipc, uts, cgroup and user namespaces, all capabilities dropped and no nested
+#     user namespaces, so it cannot undo the mounts; a fresh /proc and /dev;
+#   - an empty environment apart from PATH, HOME (the workspace) and LANG.
+# It refuses a working directory that would re-expose a hidden path or make the root writable.
+set -eu
+
+BWRAP=/usr/bin/bwrap
+CODEX_HOME=/var/lib/agentos-codex
+
+refuse() {
+	echo "agentos-toolsh: refusing: $*" >&2
+	exit 126
+}
+
+[ "$#" -gt 0 ] || refuse "no command"
+cwd=$(pwd -P) || refuse "no working directory"
+case "$cwd" in
+/ | /run | /run/* | /var/run | /var/run/* | /tmp | /tmp/* | /var/tmp | /var/tmp/* | \
+	/proc | /proc/* | /dev | /dev/* | /sys | /sys/* | /etc | /etc/* | \
+	"$CODEX_HOME" | "$CODEX_HOME"/*)
+	refuse "working directory $cwd is hidden or system"
+	;;
+esac
+
+if [ -d "$CODEX_HOME" ]; then
+	set -- --tmpfs "$CODEX_HOME" --bind "$cwd" "$cwd" -- "$@"
+else
+	set -- --bind "$cwd" "$cwd" -- "$@"
+fi
+
+exec "$BWRAP" \
+	--unshare-all --unshare-user --disable-userns \
+	--cap-drop ALL \
+	--die-with-parent --new-session \
+	--ro-bind / / \
+	--proc /proc --dev /dev \
+	--tmpfs /run \
+	--tmpfs /tmp --tmpfs /var/tmp \
+	--clearenv \
+	--setenv PATH /usr/local/bin:/usr/bin:/bin \
+	--setenv HOME "$cwd" \
+	--setenv LANG C.UTF-8 \
+	--chdir "$cwd" \
+	"$@"
