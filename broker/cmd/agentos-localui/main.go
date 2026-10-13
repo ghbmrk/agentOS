@@ -66,7 +66,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	fb.VaultSock = vaultSock
-	if err := run(ctx, config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock), sock, fb); err != nil {
+	cfg := config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock)
+	cfg.Station = station(sysClassNet, iface)
+	if err := run(ctx, cfg, sock, fb); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -85,6 +87,17 @@ func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Confi
 		cfg.Rotation = localui.NewRotation(client)
 	}
 	return cfg
+}
+
+// sysClassNet is the kernel's list of network interfaces; the unit's
+// sandbox leaves it readable.
+const sysClassNet = "/sys/class/net"
+
+// station reports, each time setup asks, whether a Wi-Fi device other
+// than the access point's can join the home network (P2-2w c4 r1): one
+// may appear after boot, such as a USB adapter.
+func station(netClass, iface string) func() bool {
+	return func() bool { return localui.StationDevice(netClass, iface) }
 }
 
 // withFirstBoot runs firstboot.Begin and gives the page its steps: the

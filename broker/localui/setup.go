@@ -39,7 +39,9 @@ type Progress struct {
 }
 
 // The never-online notes (CH-12): before pairing the owner can still
-// rejoin, after it only Ethernet helps.
+// rejoin, after it only Ethernet helps. With no station device (#936)
+// a rejoin cannot help either, so the Ethernet note shows before
+// pairing too (P2-2w c4 r1).
 const (
 	neverOnlineNote       = "I saved your home Wi-Fi but have not got online with it. Setup can continue. Check the Wi-Fi name and password below and join again, or plug in an Ethernet cable."
 	neverOnlinePairedNote = "I saved your home Wi-Fi but have not got online with it. Setup can continue, and AI waits until I am online. Plug in an Ethernet cable to get online now."
@@ -478,9 +480,10 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 	if u.st.ReplaceCodes {
 		v.Replace = replaceCodesNote
 	}
+	noStation := p.NeverOnline && u.s.cfg.Station != nil && !u.s.cfg.Station()
 	if p.NeverOnline {
 		v.Note = neverOnlineNote
-		if u.st.Owner != "" {
+		if u.st.Owner != "" || noStation {
 			v.Note = neverOnlinePairedNote
 		}
 	}
@@ -524,7 +527,7 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		if ok && phoneRe.MatchString(n) {
 			v.BoxNumber, v.SMSLink = n, smsLink(n, "PAIR "+v.PairCode)
 		}
-		if p.NeverOnline {
+		if p.NeverOnline && !noStation {
 			v.Rejoin, v.Networks = true, u.s.cfg.Hooks.Networks()
 		}
 	case "codes":

@@ -95,7 +95,7 @@ func modelState(c *custody, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.granted, Open: c.model() != nil})
+	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.modelGrantedNow(), Open: c.model() != nil})
 }
 
 // evalRoute is the model access of replay machines (LOOP-5, replay K1).
@@ -661,8 +661,12 @@ func verifyHandler(c *custody) http.Handler {
 			enrollHandler(c, w, r)
 			return
 		}
+		if (r.Method == http.MethodGet && r.URL.Path == "/setup/providers") || (r.Method == http.MethodPost && (r.URL.Path == "/setup/providers/key" || r.URL.Path == "/setup/providers/private")) {
+			setupProvidersHandler(c, w, r)
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal or /update-anchor/raise, or GET /second-line, /second-line/texts or /update-anchor, only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal, /setup/providers/key, /setup/providers/private or /update-anchor/raise, or GET /second-line, /second-line/texts, /setup/providers or /update-anchor, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest

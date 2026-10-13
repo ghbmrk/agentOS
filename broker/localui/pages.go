@@ -261,7 +261,7 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/setup/restart"><label>Reset secret, from your card's recovery sheet<input type="text" name="secret" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Start over</button></form></details>
 {{else}}<form method="post" action="/setup/restart"><button class="plain">Start setup over</button></form>{{end}}{{end}}
 
-{{define "private"}}<label><input type="checkbox" name="private" value="1" checked> {{.Name}} may see your private data (mail, files) to do tasks. Recommended.</label><br>{{end}}
+{{define "private"}}<label><input type="checkbox" name="private" value="1"> {{.Name}} may see your private data (mail, files) to do tasks.</label><br>{{end}}
 
 {{define "wifi"}}<form method="post" action="/setup/network">
 <label>Your home Wi-Fi{{if .}}<select name="ssid">{{range .}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>

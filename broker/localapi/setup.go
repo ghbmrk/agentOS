@@ -30,6 +30,15 @@ const (
 	// once the helper does: success when it joined or saved the network,
 	// ErrNotJoined otherwise. It is answered within JoinTimeout.
 	OpSetupJoin = "page_setup_join"
+	// OpSetupProviders lists the AI providers the vault process serves,
+	// whether each holds a key, and the owner's private-data answer
+	// (P2-2w c4e; CRED-5, CAP-9).
+	OpSetupProviders = "page_setup_providers"
+	// OpSetupAPIKey stores one provider API key in the vault. agentosd
+	// passes it on and keeps nothing (CRED-1).
+	OpSetupAPIKey = "page_setup_api_key"
+	// OpSetupPrivateOK records whether a provider may see private data.
+	OpSetupPrivateOK = "page_setup_private_ok"
 	// OpSetupNetworks lists the home networks in range from agentosd's
 	// netjoin helper (P2-2w c4b): no args, Networks out. It answers an
 	// empty list when the helper has none or cannot be asked.
@@ -55,7 +64,8 @@ const (
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
-var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish, OpSetupJoin, OpSetupNetworks,
+var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish, OpSetupJoin,
+	OpSetupProviders, OpSetupAPIKey, OpSetupPrivateOK, OpSetupNetworks,
 	OpSetupLine, OpSetupSend, OpSetupInbound}
 
 // Setup's fixed refusals, beside ErrBadArgs, ErrLimited and ErrFailed.
@@ -191,6 +201,46 @@ type SetupCard struct {
 // Finish carries the owner's number, E.164.
 type Finish struct {
 	Owner string `json:"owner"`
+}
+
+// MaxAPIKey bounds a provider API key in bytes; a key is printable ASCII
+// with no spaces, as the proxy sends it in a header.
+const MaxAPIKey = 512
+
+// APIKeysPerMinute limits OpSetupAPIKey; past it the op answers
+// ErrLimited.
+const APIKeysPerMinute = 10
+
+// SetupProvider is one AI provider as setup shows it. DeviceCode is false
+// until plan sign-in at setup is served (c4e2).
+type SetupProvider struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	APIKey     bool   `json:"api_key"`
+	DeviceCode bool   `json:"device_code"`
+	Connected  bool   `json:"connected"`
+	PrivateOK  bool   `json:"private_ok"`
+}
+
+// SetupProviders is OpSetupProviders' answer.
+type SetupProviders struct {
+	Providers []SetupProvider `json:"providers"`
+}
+
+// APIKey carries one provider API key to the vault (CRED-5).
+type APIKey struct {
+	Provider string `json:"provider"`
+	Key      string `json:"key"`
+}
+
+// String and GoString keep the key out of logs.
+func (APIKey) String() string   { return "[provider API key]" }
+func (APIKey) GoString() string { return "[provider API key]" }
+
+// PrivateOK carries the owner's private-data answer for one provider.
+type PrivateOK struct {
+	Provider string `json:"provider"`
+	OK       bool   `json:"ok"`
 }
 
 // SetupLine is whether setup can text, and the box's own number, E.164
