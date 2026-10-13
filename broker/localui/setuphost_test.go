@@ -43,20 +43,25 @@ func TestHostInfoNamesThePCAndItsRAM(t *testing.T) {
 	for _, c := range []struct{ vendor, product, mem, want string }{
 		{"GEEKOM\n", "Air12\n", memTotal8, "GEEKOM Air12, 8 GB"},
 		{"GEEKOM", "GEEKOM Air12", memTotal8, "GEEKOM Air12, 8 GB"},
-		{"Intel(R) Client Systems", "NUC13ANHi5", "MemTotal: 32617000 kB\n", "Intel(R) Client Systems NUC13ANHi5, 32 GB"},
+		{"Intel(R) Client Systems", "NUC13ANHi5", "MemTotal: 32617000 kB\n", "NUC13ANHi5, 32 GB"},
+		{"Intel(R) Client Systems", "NUC13ANHi5", "MemTotal: 8000000 kB\n", "Intel(R) Client Systems NUC13ANHi5, 8 GB"},
+		{"Not Specified", "System Version", "MemTotal: 16000000 kB\n", "a PC with 16 GB"},
+		{"Very Long Vendor Name Incorporated Worldwide", "", "MemTotal: 66000000 kB\n", "Very Long Vendor Name Incorporate, 63 GB"},
 		{"To Be Filled By O.E.M.", "Default string", memTotal8, "a PC with 8 GB"},
 		{"", "", memTotal8, "a PC with 8 GB"},
 		{"GEEKOM", "Air12", "", "GEEKOM Air12"},
 		{"GEEKOM", "Air12", "MemTotal: lots\n", "GEEKOM Air12"},
 		{"", "", "", ""},
-		{"Very Long Vendor Name Incorporated Worldwide", "Model 9000 Ultra Max Pro", memTotal8, "Very Long Vendor Name Incorporated, 8 GB"},
+		{"Very Long Vendor Name Incorporated Worldwide", "Model 9000 Ultra Max Pro", memTotal8, "Model 9000 Ultra Max Pro, 8 GB"},
+		{"", "An Exceedingly Long Product Name For A Mini PC", "MemTotal: 130000000 kB\n", "An Exceedingly Long Product Name, 124 GB"},
 	} {
 		got := AgentosdSetup{Root: fakeRoot(t, c.vendor, c.product, c.mem)}.HostInfo()
 		if got != c.want {
 			t.Errorf("%q %q: %q, want %q", c.vendor, c.product, got, c.want)
 		}
-		if reply := pairedText(got); !strings.Contains(reply, "8 GB") && strings.Contains(c.want, "8 GB") {
-			t.Errorf("RAM cut from the pairing reply: %q", reply)
+		// The whole name and RAM reach the pairing reply, uncut.
+		if got != "" && !strings.Contains(pairedText(got), got) {
+			t.Errorf("cut from the pairing reply: %q", pairedText(got))
 		}
 	}
 }

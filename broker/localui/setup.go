@@ -669,8 +669,11 @@ func (s *Server) OfferText(from, text string) (reply string, handled bool) {
 	return reply, true
 }
 
+// hostMax is the most of the pairing reply the PC's name and RAM take.
+const hostMax = 40
+
 func pairedText(host string) string {
-	host = gsmSafe(host, 40)
+	host = gsmSafe(host, hostMax)
 	if host == "" {
 		host = "this PC"
 	}

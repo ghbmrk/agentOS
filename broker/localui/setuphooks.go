@@ -177,27 +177,35 @@ func (a AgentosdSetup) HostInfo() string {
 		}
 		v := strings.TrimSpace(string(b))
 		switch strings.ToLower(v) {
-		case "to be filled by o.e.m.", "default string", "system manufacturer", "system product name", "not applicable", "none":
+		case "to be filled by o.e.m.", "o.e.m.", "oem", "default string", "system manufacturer", "system product name",
+			"system version", "not specified", "not applicable", "type1productconfigid", "none":
 			return ""
 		}
 		return v
 	}
 	vendor, product := dmi("sys_vendor"), dmi("product_name")
-	name := product
-	if vendor != "" && !strings.HasPrefix(strings.ToLower(product), strings.ToLower(vendor)) {
-		name = strings.TrimSpace(vendor + " " + product)
+	ram := ""
+	if gb := memGB(filepath.Join(root, "proc/meminfo")); gb > 0 {
+		ram = ", " + strconv.Itoa(gb) + " GB"
 	}
-	// The reply cuts the host at 40 characters; the name gives way so
-	// the RAM stays.
-	name = gsmSafe(name, 34)
-	gb := memGB(filepath.Join(root, "proc/meminfo"))
+	// The reply cuts the host at hostMax characters; the name gives way so
+	// the RAM stays: the vendor goes first, then the product's tail.
+	room := hostMax - len(ram)
+	name := gsmSafe(product, room)
+	if vendor != "" && !strings.HasPrefix(strings.ToLower(product), strings.ToLower(vendor)) {
+		if full := gsmSafe(vendor+" "+product, hostMax); len(full) <= room {
+			name = full
+		} else if name == "" {
+			name = gsmSafe(vendor, room)
+		}
+	}
 	switch {
-	case gb == 0:
+	case ram == "":
 		return name
 	case name == "":
-		return "a PC with " + strconv.Itoa(gb) + " GB"
+		return "a PC with" + strings.TrimPrefix(ram, ",")
 	}
-	return name + ", " + strconv.Itoa(gb) + " GB"
+	return name + ram
 }
 
 // memGB is MemTotal in /proc/meminfo rounded up to whole GB, or 0: the

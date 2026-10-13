@@ -1452,17 +1452,20 @@ func (c *custody) setupHost(trusted bool) (string, error) {
 	if c.host == nil {
 		return "", nil
 	}
-	hosts, err := c.host.list()
+	// Fail closed: a TPM that cannot name this PC leaves "not mine"
+	// unsaved while any TPM slot remains, since that slot may be this PC's.
+	me, err := c.host.self()
+	if err != nil {
+		if hosts, lerr := c.host.list(); lerr != nil || len(hosts) > 0 {
+			return "", errInternal
+		}
+		return "", nil
+	}
+	n, err := c.host.remove(v, me)
 	if err != nil {
 		return "", errInternal
 	}
-	for _, h := range hosts {
-		if !h.This {
-			continue
-		}
-		if _, err := c.host.remove(v, h.ID); err != nil {
-			return "", errInternal
-		}
+	if n > 0 {
 		c.notify("a trusted host was removed")
 	}
 	return "", nil

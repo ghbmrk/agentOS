@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/vault"
+	"github.com/google/go-tpm/tpm2/transport"
 )
 
 // REQ: CRED-9, A1
@@ -101,16 +103,41 @@ func TestSetupHostNotMineRemovesThisPC(t *testing.T) {
 	if _, err := r.c.setupHost(false); err != nil || r.tpmSlots(t) != 0 {
 		t.Fatalf("not mine with no slot: %v, %d", err, r.tpmSlots(t))
 	}
+	if r.noted("a trusted host was removed") {
+		t.Fatal("the owner is told of a removal that did not happen")
+	}
 	if _, err := r.c.setupHost(true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.c.setupHost(false); err != nil || r.tpmSlots(t) != 0 {
 		t.Fatalf("not mine after trust: %v, %d slots", err, r.tpmSlots(t))
 	}
+	if !r.noted("a trusted host was removed") {
+		t.Fatal("the owner is not told this PC's trust was taken back")
+	}
 	bootGood(r.tpm)
 	r.start(t, r.tpm)
 	if r.phase() != locked {
 		t.Fatal("a PC the owner said is not theirs restarts unattended")
+	}
+}
+
+// "Not mine" fails closed: when this PC's TPM cannot say which slot is
+// its own, the answer is not saved, rather than reported saved while the
+// slot an earlier answer made still opens the vault unattended (L3 B2).
+func TestSetupHostNotMineFailsClosedWhenTheTPMIsSilent(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	r.inSetup(t, true)
+	if _, err := r.c.setupHost(true); err != nil {
+		t.Fatal(err)
+	}
+	r.c.host.(*tpmHost).openTPM = func() (transport.TPMCloser, error) { return nil, errors.New("tpm: device busy") }
+	if _, err := r.c.setupHost(false); err == nil {
+		t.Fatal("not mine saved while the slot stays")
+	}
+	if r.tpmSlots(t) != 1 {
+		t.Fatalf("%d slots", r.tpmSlots(t))
 	}
 }
 
