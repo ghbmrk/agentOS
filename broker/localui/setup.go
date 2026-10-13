@@ -68,8 +68,11 @@ type Hooks interface {
 	// JoinNetwork joins a home Wi-Fi network. The password is the home
 	// network's, typed here, and goes nowhere else.
 	JoinNetwork(ssid, password string) error
-	// BoxNumber is the SIM's number, e.g. +15550000100.
-	BoxNumber() string
+	// BoxNumber is the SIM's number, e.g. +15550000100, and whether the
+	// box can text (P2-2w c4c). While it cannot, the number step says
+	// pairing is not available yet; while it can but the SIM does not
+	// report its number (""), the step offers only the number entry.
+	BoxNumber() (number string, canText bool)
 	// HostInfo names the PC for the pairing reply, e.g. "GEEKOM Air12, 8 GB".
 	HostInfo() string
 	// Send texts from the box's number (broker templates only).
@@ -410,6 +413,7 @@ type setupView struct {
 	Rejoin    bool
 	Networks  []string
 	BoxNumber string
+	CanText   bool
 	SMSLink   template.URL
 	PairCode  string
 	NumTo     string
@@ -518,8 +522,11 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 	case "network":
 		v.Networks = u.s.cfg.Hooks.Networks()
 	case "number":
-		v.BoxNumber = u.s.cfg.Hooks.BoxNumber()
-		v.SMSLink = smsLink(v.BoxNumber, "PAIR "+v.PairCode)
+		n, ok := u.s.cfg.Hooks.BoxNumber()
+		v.CanText = ok
+		if ok && phoneRe.MatchString(n) {
+			v.BoxNumber, v.SMSLink = n, smsLink(n, "PAIR "+v.PairCode)
+		}
 		if p.NeverOnline && !noStation {
 			v.Rejoin, v.Networks = true, u.s.cfg.Hooks.Networks()
 		}
