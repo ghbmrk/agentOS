@@ -440,7 +440,7 @@ def met_raw(now="2026-10-08T12:00:00+00:00"):
 
 
 class MatchedWindowsTest(unittest.TestCase):
-    # REQ: MET-1a
+    # Brief ID MET-1a (local, not in SPEC.md)
     def test_ratio_uses_the_requirement_count_at_the_reading(self):
         w = {x["week"]: x for x in metrics.compute(met_raw("2026-10-12T12:00:00+00:00"))}["2026-10-04"]
         self.assertEqual(w["reqs"], 15)               # week total, to the day-5 snapshot
@@ -448,13 +448,13 @@ class MatchedWindowsTest(unittest.TestCase):
         self.assertAlmostEqual(w["usage_per_req"], 10.0)
         self.assertEqual(w["reading_at"], "2026-10-06T10:00")
 
-    # REQ: MET-1a
+    # Brief ID MET-1a (local, not in SPEC.md)
     def test_table_shows_the_reading_time_beside_the_ratio(self):
         raw = met_raw("2026-10-12T12:00:00+00:00")
         md = metrics.render(metrics.compute(raw), raw)
         self.assertIn("| 10.00 pts (reading 2026-10-06 10:00) |", md)
 
-    # REQ: MET-1a
+    # Brief ID MET-1a (local, not in SPEC.md)
     def test_no_trace_snapshot_at_or_before_the_reading_gives_no_ratio(self):
         raw = met_raw("2026-10-12T12:00:00+00:00")
         raw["readings"][0]["at"] = "2026-10-02T10:00"
@@ -467,7 +467,7 @@ class MatchedWindowsTest(unittest.TestCase):
 class StalenessLabelTest(unittest.TestCase):
     row = staticmethod(lambda md: next(l for l in md.splitlines() if l.startswith("| 2026-10-04")))
 
-    # REQ: MET-1b
+    # Brief ID MET-1b (local, not in SPEC.md)
     def test_current_week_names_the_reading_and_the_age_of_the_newest_input(self):
         # Newest input is the day-5 TRACE snapshot, 10-09 16:00Z; now is 41 h later.
         raw = met_raw("2026-10-11T09:00:00+00:00")
@@ -475,7 +475,7 @@ class StalenessLabelTest(unittest.TestCase):
         self.assertIn("| 2026-10-04 (current, reading 2026-10-06 10:00; newest input 41 h old) |", self.row(md))
         self.assertNotIn("(to date)", md)
 
-    # REQ: MET-1b
+    # Brief ID MET-1b (local, not in SPEC.md)
     def test_no_age_label_within_36_hours(self):
         for now, tail in (("2026-10-11T04:00:00+00:00", ")"), ("2026-10-10T04:00:00+00:00", ")")):
             raw = met_raw(now)
@@ -483,13 +483,13 @@ class StalenessLabelTest(unittest.TestCase):
         raw = met_raw("2026-10-11T04:00:01+00:00")  # 36 h and 1 s after the 10-09 16:00Z snapshot
         self.assertIn("newest input 36 h old", self.row(metrics.render(metrics.compute(raw), raw)))
 
-    # REQ: MET-1b
+    # Brief ID MET-1b (local, not in SPEC.md)
     def test_current_week_without_a_reading_says_so(self):
         raw = met_raw("2026-10-08T12:00:00+00:00")
         raw["readings"] = []
         self.assertIn("(current, no reading", self.row(metrics.render(metrics.compute(raw), raw)))
 
-    # REQ: MET-1b
+    # Brief ID MET-1b (local, not in SPEC.md)
     def test_closed_weeks_carry_no_age_label(self):
         raw = met_raw("2026-10-20T12:00:00+00:00")
         self.assertIn("| 2026-10-04 |", self.row(metrics.render(metrics.compute(raw), raw)))
@@ -534,13 +534,13 @@ class ConvergenceColumnsTest(unittest.TestCase):
         self.assertAlmostEqual(self.weeks["2026-10-11"]["followups_per_pr"], 1.0)
         self.assertIsNone(self.weeks["2026-10-18"]["followups_per_pr"])  # no PR merged: not 0
 
-    # REQ: MET-1e
+    # Brief ID MET-1e (local, not in SPEC.md)
     def test_stale_open_prs_include_held_drafts(self):
         # #10 untouched 3.5 days; #11 and #12 drafts untouched; #13 untouched; #14 fresh; #15 closed.
         self.assertEqual(self.weeks["2026-10-18"]["stale"], [10, 11, 12, 13])
         self.assertIsNone(self.weeks["2026-10-11"]["stale"])  # only knowable at run time
 
-    # REQ: MET-1e
+    # Brief ID MET-1e (local, not in SPEC.md)
     def test_open_prs_are_counted_per_lane_against_the_cap(self):
         self.assertEqual(self.weeks["2026-10-18"]["lanes"], {"codex": 1, "peers": 4})
         self.assertIsNone(self.weeks["2026-10-11"]["lanes"])
