@@ -30,8 +30,8 @@ SCAN_MAX = 1 << 20
 # IMG-nodump: what each setting must end up as, after every file systemd reads.
 CORE_PATTERN = "|/usr/bin/false"
 NODUMP_SYSCTL = "usr/lib/sysctl.d/99-agentos-nodump.conf"
-# The card-holding service. localui is not in the image yet; DefaultLimitCORE=0 covers it.
-CARD_UNIT = "agentosd.service"
+# The services that hold the card's passphrase, the vault's keys or the claim's codes in memory.
+CARD_UNITS = ("agentosd.service", "agentos-egress.service", "agentos-localui.service")
 # Precedence low to high: a file in a later directory replaces one of the same name in an earlier.
 CONF_DIRS = ("usr/lib", "lib", "usr/local/lib", "etc")
 UNIT_DIRS = ("usr/lib/systemd/system", "lib/systemd/system", "usr/local/lib/systemd/system",
@@ -58,6 +58,10 @@ def violations(root):
     # LOOP-7's state: agentosd creates it on the box and gives it to the fuzz user (agentosd L7-6).
     if os.path.lexists(root / "var/lib/agentos-fuzz"):
         out.append("var/lib/agentos-fuzz: fuzz state; created on the box, never shipped")
+    # The vault and the page's claim state: their units create them on the box (#1249, #1270).
+    for d, what in (("var/lib/agentos-egress", "vault state"), ("var/lib/agentos-localui", "claim state")):
+        if os.path.lexists(root / d):
+            out.append("%s: %s; created on the box, never shipped" % (d, what))
     for dirpath, dirnames, filenames in os.walk(root):
         for n in dirnames + filenames:
             p = os.path.join(dirpath, n)
@@ -137,17 +141,18 @@ def dump_violations(root):
     limit = ini_last(main_conf(root, "system.conf"), "Manager", "DefaultLimitCORE")
     if limit not in ("0", "0:0"):
         out.append("50-agentos-nodump.conf: DefaultLimitCORE is %s; must be 0" % limit)
-    unit = None
-    for d in UNIT_DIRS:
-        if (root / d / CARD_UNIT).is_file():
-            unit = root / d / CARD_UNIT
-    if unit is None:
-        out.append("%s: missing; the card-holding service must set LimitCORE=0" % CARD_UNIT)
-    else:
-        files = [unit] + dropins(root, ["%s/%s.d" % (d, n) for d in UNIT_DIRS for n in ("service", CARD_UNIT)])
+    for name in CARD_UNITS:
+        unit = None
+        for d in UNIT_DIRS:
+            if (root / d / name).is_file():
+                unit = root / d / name
+        if unit is None:
+            out.append("%s: missing; a secret-holding service must set LimitCORE=0" % name)
+            continue
+        files = [unit] + dropins(root, ["%s/%s.d" % (d, n) for d in UNIT_DIRS for n in ("service", name)])
         limit = ini_last(files, "Service", "LimitCORE")
         if limit not in ("0", "0:0"):
-            out.append("%s: LimitCORE is %s; must be 0" % (CARD_UNIT, limit))
+            out.append("%s: LimitCORE is %s; must be 0" % (name, limit))
     pattern = sysctl(root, "kernel.core_pattern")
     if pattern != CORE_PATTERN:
         out.append("%s: kernel.core_pattern is %s; must be %s" % (NODUMP_SYSCTL.rsplit("/", 1)[-1], pattern, CORE_PATTERN))
