@@ -202,8 +202,10 @@ func grantsKey(machine string) string {
 
 // modelRouting checks the grants, adds the builders' (builderGrants), and
 // builds the router over the result, in that order, so the router sees
-// every grant it serves (L3 MUST 1 on #126).
-func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderFrom, evalFrom string) (grants, *route.Router, error) {
+// every grant it serves (L3 MUST 1 on #126). allowed is the vault's
+// private-data answer from setup (privateHook), checked when privateOK
+// is false; nil adds none.
+func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, allowed func(string) bool, builderFrom, evalFrom string) (grants, *route.Router, error) {
 	// -eval-from names an agent machine: never a builder's grants key or a
 	// replay machine (security R1 on #126).
 	if strings.HasPrefix(evalFrom, modelroute.BuilderPrefix) || strings.HasPrefix(evalFrom, modelroute.EvalPrefix) {
@@ -218,7 +220,7 @@ func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderF
 	if err != nil {
 		return nil, nil, err
 	}
-	rt, err := newRouter(rule, g, privateOK)
+	rt, err := newPrivateRouter(rule, g, privateOK, allowed)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -226,6 +228,10 @@ func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderF
 }
 
 func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
+	return newPrivateRouter(rule, g, privateOK, nil)
+}
+
+func newPrivateRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool, allowed func(string) bool) (*route.Router, error) {
 	return route.New(route.Config{
 		Providers: modelProviders(),
 		Rule:      rule,
@@ -237,7 +243,8 @@ func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool
 			}
 			return false
 		},
-		PrivateOK: privateOK,
+		PrivateOK:      privateOK,
+		PrivateAllowed: allowed,
 		Upstream: func(string) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
@@ -344,7 +351,10 @@ func serveCmd(args []string) error {
 	if rule, err = startRule(base, *routingPath); err != nil {
 		log.Printf("routing: starting from -rule: %v", err)
 	}
-	g, rt, err := modelRouting(rule, g, pok, *builderFrom, *evalFrom)
+	// The router is built before custody; the hook answers setup's
+	// private-data marks once custody exists (P2-2w c4e).
+	var hook privateHook
+	g, rt, err := modelRouting(rule, g, pok, hook.allowed, *builderFrom, *evalFrom)
 	if err != nil {
 		return err
 	}
@@ -398,6 +408,7 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	hook.c.Store(c)
 	// Fail at start on a bad grant rather than at the first unlock.
 	if _, err := egress.New(egress.Config{Adapters: adapters(), Grants: g, Vault: emptyVault{}, Audit: noAudit{}}); err != nil {
 		return err
