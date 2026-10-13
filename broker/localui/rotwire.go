@@ -146,8 +146,15 @@ func (r *Rotation) provision(c *card.Card) error {
 		return fmt.Errorf("%w: %s", card.ErrDiscard, ve.Msg)
 	case errors.As(err, &ve) && ve.Status == http.StatusConflict:
 		return fmt.Errorf("%w: %s", card.ErrInEffect, ve.Msg)
+	case errors.As(err, &ve) && ve.Status < http.StatusInternalServerError:
+		return err // refused before anything was written; kept for a retry
 	}
-	return err
+	// No answer, or a failure in the vault process: the commit may have
+	// stored the card, and a retry would then get 410 and erase a card in
+	// effect. The owner keeps both cards (card.ErrInEffect's text) and the
+	// vault's rotation, if still waiting, is dropped (#1090 R2).
+	r.cancel()
+	return fmt.Errorf("%w: %v", card.ErrInEffect, err)
 }
 
 // cancel drops the vault process's pending rotation (#1090 R2). It runs

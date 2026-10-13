@@ -226,6 +226,24 @@ func TestRotationProvisionerMapsTheVaultsRefusals(t *testing.T) {
 	}
 }
 
+// A commit whose outcome the page cannot know (the answer was lost, or the
+// vault process failed) is treated as in effect: the owner keeps the new
+// card and the current one, and a retry cannot answer 410 for a card the
+// vault process stored and so erase it. The vault's rotation is dropped.
+func TestRotationCommitWithNoAnswerIsInEffect(t *testing.T) {
+	for _, e := range []error{errors.New("synthetic: connection reset"), &VaultError{http.StatusInternalServerError, "internal error"}} {
+		x := newWireRig(t)
+		x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RK"}})
+		x.v.commitErr = e
+		if err := x.r.Display().ConfirmAnswers(card.Answers{Group: x.group().Get("group")}); !errors.Is(err, card.ErrInEffect) {
+			t.Fatalf("%v: %v", e, err)
+		}
+		if _, _, n := x.v.n(); n != 1 {
+			t.Fatalf("%v: the vault's rotation was not dropped: %d", e, n)
+		}
+	}
+}
+
 // A refused start shows the vault process's reason on the form and makes
 // no display; the page needs sign-in.
 func TestRotationStartRefusals(t *testing.T) {

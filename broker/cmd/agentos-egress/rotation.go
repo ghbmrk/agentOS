@@ -72,7 +72,7 @@ func (n rotateCommit) card() recovery.Card {
 }
 
 var (
-	errNoCard          = uerr(http.StatusConflict, "this box keeps no Owner Card, so there is nothing to rotate")
+	errNoCard          = uerr(http.StatusConflict, "I keep no Owner Card, so there is nothing to rotate")
 	errNoRotation      = uerr(http.StatusGone, "no new card is waiting; nothing changed, start again")
 	errRotationLapsed  = uerr(http.StatusGone, "this new card has lapsed; nothing changed, start again")
 	errRotationParts   = uerr(http.StatusBadRequest, "choose the card parts to replace: wifi, setup, passphrase, grid, recovery")
