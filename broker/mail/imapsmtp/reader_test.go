@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/emersion/go-imap/client"
 )
 
 // hostile is a raw IMAP server that logs in, selects any folder with
@@ -166,7 +168,10 @@ func tail(s string, n int) string {
 // FETCH, the process lives. The server closes after its bytes, so no
 // stream can complete the command (it cannot know the tag) and the error
 // check only guards against a reply taken for success; it is not a check
-// that replies are parsed correctly. The timeout bounds any that stall.
+// that replies are parsed correctly. The deadline bounds any that stall.
+// It runs Store.Fetch's own steps (selectAt, then fetch) on a go-imap
+// client over net.Pipe rather than a dialed socket: LOOP-7 replays this
+// target in a jail whose network namespace has no usable loopback.
 func FuzzIMAPReplies(f *testing.F) {
 	for _, s := range []string{
 		bareFetch,
@@ -189,10 +194,26 @@ func FuzzIMAPReplies(f *testing.F) {
 	} {
 		f.Add(s)
 	}
+	s := hostileStore(f, "127.0.0.1:1", 3*time.Second)
 	f.Fuzz(func(t *testing.T, stream string) {
-		addr, _ := hostile(t, stream, true)
-		s := hostileStore(t, addr, 3*time.Second)
-		if _, err := s.Fetch(context.Background(), "INBOX", 7, []uint32{1}); err == nil {
+		cl, sv := net.Pipe()
+		go converse(sv, stream, true)
+		cl.SetDeadline(time.Now().Add(3 * time.Second))
+		c, err := client.New(cl)
+		if err != nil {
+			cl.Close()
+			t.Fatalf("greeting: %v", err)
+		}
+		c.ErrorLog = quiet{}
+		defer c.Logout()
+		defer cl.Close()
+		if err := c.Login("canary-user", "canary-secret"); err != nil {
+			t.Fatalf("login: %v", err)
+		}
+		if err := selectAt(c, "INBOX", true, 7); err != nil {
+			t.Fatalf("select: %v", err)
+		}
+		if _, err := s.fetch(c, "INBOX", 7, []uint32{1}); err == nil {
 			t.Fatalf("stream %q was answered as success", stream)
 		}
 	})
