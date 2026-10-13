@@ -14,7 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: ARC-2, ONB-3, ONB-6, CRED-8
+// REQ: ARC-2, ONB-3, ONB-6, CRED-8, HW-1, A1
 
 // A synthetic enrollment link: not a seed anyone holds.
 const canaryLink = "otpauth://totp/AgentOS:AgentOS?secret=CANARYCANARYCANARY22&issuer=AgentOS"
@@ -435,5 +435,28 @@ func TestThePageServerServesNoSetupOp(t *testing.T) {
 		if _, ok := ops[op]; ok {
 			t.Errorf("page server serves %s", op)
 		}
+	}
+}
+
+// HW-1, A1 (CTRL-card-sock s2): a vault that refuses the seal for want of
+// an Owner Card holds finish at "card pending", records nothing, and
+// finishes once the vault takes the seal.
+func TestFinishIsHeldWhenTheVaultHoldsNoCard(t *testing.T) {
+	r := newSetupRig(t)
+	if err := (FileRecord{Path: r.path}).Save(SetupRecord{Enrolled: true}); err != nil {
+		t.Fatal(err)
+	}
+	r.start()
+	r.vault.err = EnrollCardRequired
+	r.vault.pending, r.vault.confirmed = 0, true
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); code(err) != localapi.ErrCardPending {
+		t.Fatalf("finish %v", err)
+	}
+	if _, ok := r.s.Owner(); ok || len(r.finished) != 0 || r.s.Closed() {
+		t.Fatal("finish recorded without a card")
+	}
+	r.vault.err = nil
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); err != nil {
+		t.Fatalf("finish with a card %v", err)
 	}
 }
