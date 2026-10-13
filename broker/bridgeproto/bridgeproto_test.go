@@ -59,3 +59,16 @@ func TestICCIDIsNormalizedAndBounded(t *testing.T) {
 		}
 	}
 }
+
+func TestABoxNumberIsE164(t *testing.T) {
+	for _, s := range []string{"+15550000100", "+4915550001", "+1234567"} {
+		if !ValidNumber(s) {
+			t.Errorf("ValidNumber(%q) = false", s)
+		}
+	}
+	for _, s := range []string{"", "+", "15550000100", "+05550000100", "+123456", "+1234567890123456", "+1555 0000100", "+1555000010a"} {
+		if ValidNumber(s) {
+			t.Errorf("ValidNumber(%q) = true", s)
+		}
+	}
+}

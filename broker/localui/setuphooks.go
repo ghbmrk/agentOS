@@ -17,9 +17,11 @@ import (
 // JoinNetwork goes through agentosd to its netjoin helper (P2-2w c3;
 // Security L8), and Networks asks it for the networks in range (P2-2w
 // c4b). Providers, ConnectAPIKey and SetPrivateOK go through agentosd to
-// the vault process (P2-2w c4e; CRED-5, CAP-9). BoxNumber, HostInfo, Send,
-// TrustHost and StartDeviceCode are not served by agentosd yet: they answer
-// nothing or an error, so the steps that need them wait.
+// the vault process (P2-2w c4e; CRED-5, CAP-9). BoxNumber, Send and
+// PairTexts go through agentosd to the modem bridge (P2-2w c4c; §8.1,
+// CH-12): agentosd sends only setup's fixed texts and passes on only PAIR
+// texts. HostInfo, TrustHost and StartDeviceCode are not served by agentosd
+// yet: they answer nothing or an error, so the steps that need them wait.
 type AgentosdSetup struct{ Owner Owner }
 
 var errNotServed = errors.New("localui: not served by agentosd yet")
@@ -125,10 +127,8 @@ func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
 	return a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
 }
 
-func (AgentosdSetup) BoxNumber() string         { return "" }
-func (AgentosdSetup) HostInfo() string          { return "" }
-func (AgentosdSetup) Send(string, string) error { return errNotServed }
-func (AgentosdSetup) TrustHost(bool) error      { return errNotServed }
+func (AgentosdSetup) HostInfo() string     { return "" }
+func (AgentosdSetup) TrustHost(bool) error { return errNotServed }
 
 // Providers lists the vault's providers. An error lists none, so the AI
 // step offers nothing and setup does not finish (ONB-3).
@@ -158,6 +158,57 @@ func (a AgentosdSetup) SetPrivateOK(id string, ok bool) error {
 
 func (AgentosdSetup) StartDeviceCode(string) (string, string, error) {
 	return "", "", errNotServed
+}
+
+// BoxNumber answers whether agentosd's modem line can text, and the box's
+// own number when the line reports one; a SIM that texts without
+// reporting its number answers "", true.
+func (a AgentosdSetup) BoxNumber() (string, bool) {
+	var l localapi.SetupLine
+	if a.call(localapi.OpSetupLine, nil, &l) != nil || !l.Ready {
+		return "", false
+	}
+	if !phoneRe.MatchString(l.Number) {
+		return "", true
+	}
+	return l.Number, true
+}
+
+// Send has agentosd text one of setup's fixed texts. It waits up to
+// localapi.SetupSendTimeout, longer than agentosd's own wait for the
+// bridge (Security L8.4).
+func (a AgentosdSetup) Send(to, text string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), localapi.SetupSendTimeout)
+	defer cancel()
+	return a.Owner.Call(ctx, localapi.OpSetupSend, localapi.SetupSend{To: to, Text: text}, nil)
+}
+
+// PairTexts offers each PAIR text that reaches the box to s (OfferText)
+// and texts back its reply, until ctx ends or agentosd answers that setup
+// is closed (§8.1 pairing). A text that arrives while it is not running is
+// not offered again: the owner texts again.
+func (a AgentosdSetup) PairTexts(ctx context.Context, s *Server, retry time.Duration) {
+	for ctx.Err() == nil {
+		var in localapi.SetupInbound
+		cctx, cancel := context.WithTimeout(ctx, localapi.SetupInboundWait+callTimeout)
+		err := a.Owner.Call(cctx, localapi.OpSetupInbound, nil, &in)
+		cancel()
+		switch {
+		case refused(err, localapi.ErrSetupClosed):
+			return
+		case err != nil:
+			select {
+			case <-ctx.Done():
+			case <-time.After(retry):
+			}
+			continue
+		case in.From == "":
+			continue
+		}
+		if reply, _ := s.OfferText(in.From, in.Text); reply != "" {
+			a.Send(in.From, reply) // a reply that did not go: the page still shows the step
+		}
+	}
 }
 
 // CardFinish is AgentosdSetup with the page's Owner Card step (HW-1,
