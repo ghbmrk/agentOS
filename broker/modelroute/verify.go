@@ -160,6 +160,9 @@ var (
 	// ErrEnrollNotOpen means setup mode never opened enrollment on this
 	// vault (P2-2w c2 r1): setup cannot finish on it.
 	ErrEnrollNotOpen = errors.New("code-generator enrollment not open")
+	// ErrCardRequired means the open vault holds no Owner Card entry, so
+	// setup cannot seal it (HW-1, A1).
+	ErrCardRequired = errors.New("vault not made from an Owner Card")
 )
 
 // Enroll asks the vault process for a new code-generator seed, made in
@@ -190,7 +193,7 @@ func (v *Verifier) ConfirmEnroll(code string) (bool, error) {
 // SealEnroll closes enrollment for good at setup's finish (L3 on #367).
 // ErrNoEnrollment means no seed was confirmed since the last Enroll;
 // ErrEnrolled that setup already sealed it; ErrEnrollNotOpen that setup
-// never opened it.
+// never opened it; ErrCardRequired that no Owner Card made the vault.
 func (v *Verifier) SealEnroll() error {
 	var res struct{}
 	return v.enrollCall("/enroll/seal", nil, &res)
@@ -213,6 +216,8 @@ func (v *Verifier) enrollCall(path string, body []byte, res any) error {
 		return ErrEnrollNotOpen
 	case http.StatusConflict:
 		return ErrNoEnrollment
+	case http.StatusPreconditionRequired:
+		return ErrCardRequired
 	case http.StatusTooManyRequests:
 		until, err := time.Parse(time.RFC3339, resp.Header.Get(HeaderPausedUntil))
 		if err != nil {
