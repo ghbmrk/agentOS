@@ -2,6 +2,7 @@ package localui
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"slices"
@@ -27,6 +28,8 @@ import (
 //     would stay exempt with no table and every box port open to its
 //     network.
 //   - BringUp and BringDown run their teardown on context.WithoutCancel (d).
+//   - Rekey restarts a running access point with a rotated Wi-Fi password
+//     (REC-4), under the same rules.
 //
 // Its methods are serialised; Station holds the lock for the join.
 type APLoader struct {
@@ -36,6 +39,7 @@ type APLoader struct {
 	mu     sync.Mutex
 	named  map[string]bool  // interfaces a Start brought down, or tried to
 	up     string           // the interface running the access point
+	cfg    APConfig         // what the access point on up runs with
 	failed map[string]error // interfaces whose BringDown last failed
 }
 
@@ -86,6 +90,44 @@ func (l *APLoader) Start(ctx context.Context, ifaces ...string) error {
 func (l *APLoader) Up(ctx context.Context, cfg APConfig) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.upLocked(ctx, cfg)
+}
+
+// Rekey restarts the running access point with password, after a Wi-Fi
+// rotation commit (REC-4), so the phone joins with the new card. The SSID
+// and interface stay; the access point comes back WPA3-SAE only, with MFP
+// required (CH-7). With no access point up it does nothing: the next Up
+// takes the stored password from its caller. A password Validate refuses,
+// or the one already in use, leaves the access point untouched. The
+// restart drops every client, so the caller applies it only after the
+// commit's reply has reached the phone.
+//
+// If the bring-down fails, the access point is not brought up again
+// (DEV-net-h c). If the bring-up fails, it stays down: the old password,
+// which a rotation presumes lost, is never brought back.
+func (l *APLoader) Rekey(ctx context.Context, password string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.up == "" {
+		return nil
+	}
+	cfg := l.cfg
+	cfg.Password = password
+	cfg.WPA2 = false
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if !l.cfg.WPA2 && subtle.ConstantTimeCompare([]byte(password), []byte(l.cfg.Password)) == 1 {
+		return nil
+	}
+	if err := l.bringDown(ctx, l.up); err != nil {
+		return fmt.Errorf("localui: the access point did not come down, so it does not restart with the new password: %w", err)
+	}
+	return l.upLocked(ctx, cfg)
+}
+
+// upLocked is Up with l.mu held.
+func (l *APLoader) upLocked(ctx context.Context, cfg APConfig) error {
 	if !l.named[cfg.Iface] {
 		return notNamed(cfg.Iface)
 	}
@@ -111,6 +153,7 @@ func (l *APLoader) Up(ctx context.Context, cfg APConfig) error {
 		return errors.Join(err, l.bringDown(ctx, cfg.Iface))
 	}
 	l.up = cfg.Iface
+	l.cfg = cfg
 	return nil
 }
 
@@ -135,7 +178,7 @@ func (l *APLoader) Down(ctx context.Context) error {
 	for _, iface := range names {
 		errs = append(errs, l.bringDown(ctx, iface))
 	}
-	l.up = ""
+	l.up, l.cfg = "", APConfig{}
 	return errors.Join(errs...)
 }
 
@@ -169,7 +212,7 @@ func (l *APLoader) bringDown(ctx context.Context, iface string) error {
 	}
 	err := BringDown(ctx, l.AP, iface, l.Host)
 	if l.up == iface {
-		l.up = ""
+		l.up, l.cfg = "", APConfig{}
 	}
 	if err != nil {
 		l.failed[iface] = err
