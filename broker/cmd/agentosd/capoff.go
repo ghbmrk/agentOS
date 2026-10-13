@@ -49,7 +49,7 @@ const (
 	// the local page's API-key step (TestModelNoGrantNamesAServedStep).
 	modelNoGrant = "Model: no AI plan or key connected, so no agent can think or learn; a later box version adds this."
 	// C2: the vault is not open, so the model route serves nothing.
-	modelLocked = "Model: the vault is locked, so your agent cannot think or learn; unlock it on the local page."
+	modelLocked = "Model: the vault is locked, so your agent cannot think or learn; unlock it on my Wi-Fi page."
 	// C7: no recall directory or vault verifier.
 	recallOffLine = "Memory across tasks: off here; " + fixUpdate + "."
 	// C9: the question book or the box clock did not open.

@@ -650,3 +650,19 @@ func TestModelNoGrantNamesAServedStep(t *testing.T) {
 		t.Fatalf("adding a key is served now; name where in %q", fix)
 	}
 }
+
+// REQ: OP-9
+// One name for the box's page in owner lines (CH-21): the Wi-Fi page, never
+// the developer's "local page"; a line that sends the owner to a page names
+// "my Wi-Fi page".
+func TestOwnerLinesNameTheWiFiPage(t *testing.T) {
+	for _, l := range capLineTexts() {
+		low := strings.ToLower(l)
+		if strings.Contains(low, "local page") {
+			t.Errorf("%q calls the box's page \"the local page\"", l)
+		}
+		if strings.Contains(low, " page") && !strings.Contains(l, "my Wi-Fi page") {
+			t.Errorf("%q sends the owner to a page without naming \"my Wi-Fi page\"", l)
+		}
+	}
+}
