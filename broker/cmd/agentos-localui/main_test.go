@@ -405,6 +405,14 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
 	}
+	// B3 on #1302: other processes stay invisible, but not ProcSubset=pid, which hides
+	// /proc/sys/kernel/random/boot_id: claim.Open reads it, and the page would fail at every start.
+	if got := set["ProtectProc"]; strings.Join(got, "|") != "invisible" {
+		t.Errorf("ProtectProc = %q, want invisible", got)
+	}
+	if got := set["ProcSubset"]; len(got) != 0 {
+		t.Errorf("ProcSubset = %q: it hides the boot_id the claim reads", got)
+	}
 	// Security B2 on #1302: the broker's state stays hidden (L18), and nothing hides or freezes the
 	// page's own state or the vault's sockets, which the page must write and reach.
 	if got := set["TemporaryFileSystem"]; strings.Join(got, "|") != "/var/lib/agentos:ro" {

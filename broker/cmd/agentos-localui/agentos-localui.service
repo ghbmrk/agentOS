@@ -51,8 +51,10 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 UMask=0077
+# No other process's /proc entries. ProcSubset=pid is left off: the claim
+# reads the boot's id from /proc/sys/kernel/random/boot_id, which that would
+# hide, and the page would fail at every start (B3 on #1302).
 ProtectProc=invisible
-ProcSubset=pid
 PrivateIPC=yes
 RemoveIPC=yes
 

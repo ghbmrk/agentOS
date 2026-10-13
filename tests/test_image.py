@@ -17,6 +17,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 IMG = ROOT / "image"
@@ -982,6 +983,39 @@ class NoDumpTest(unittest.TestCase):
                 img.write_bytes(bytes(8 * 512) + fs.read_bytes()[:8192])
                 self.assertEqual(finish.quota_violations(str(img), table, entry), [])
 
+    def test_main_refuses_a_disk_without_quotas(self):
+        # REQ: RES-4
+        # finish_image.main() itself runs the quota check on the built disk and stops the release:
+        # the checks above pass alone even if main never calls it (P/UX on #1302).
+        calls = []
+
+        def quota(img, table, entry):
+            calls.append((img, table, entry))
+            return ["root ext4 lacks the project feature"]
+
+        class Proc:
+            @staticmethod
+            def check_output(*a, **k):
+                return "::/loader/entries/a.conf\n"
+
+            @staticmethod
+            def run(*a, **k):
+                return None
+
+        entry = ENTRY % H
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.multiple(finish, subprocess=Proc, esp_offset=lambda img: 0,
+                                             counted_entry=lambda src, v: ("a+3.conf", entry),
+                                             esp_violations=lambda paths, text: [],
+                                             swap_violations=lambda parts, text: [],
+                                             partition_table=lambda img: {"partitions": []},
+                                             quota_violations=quota):
+            with self.assertRaises(SystemExit) as e:
+                finish.main(d, "1.0")
+        self.assertIn("RES-4", str(e.exception.code))
+        self.assertIn("project feature", str(e.exception.code))
+        self.assertEqual(calls, [(str(pathlib.Path(d) / "agentos_1.0.raw"), {"partitions": []}, entry)])
+
     def test_boot_test_expects_the_runtime_check(self):
         # The booted image reports swap and core dumps off in the health line, so CI shows them on
         # a real boot, not only in this tree check.
@@ -1088,11 +1122,13 @@ class SetupServicesTest(unittest.TestCase):
             "RestrictRealtime": ["yes"], "RestrictSUIDSGID": ["yes"], "LockPersonality": ["yes"],
             "MemoryDenyWriteExecute": ["yes"], "SystemCallArchitectures": ["native"],
             "SystemCallFilter": ["@system-service", "~@privileged @resources"], "UMask": ["0077"],
-            "ProtectProc": ["invisible"], "ProcSubset": ["pid"], "PrivateIPC": ["yes"], "RemoveIPC": ["yes"],
+            "ProtectProc": ["invisible"], "PrivateIPC": ["yes"], "RemoveIPC": ["yes"],
             "DevicePolicy": ["closed"], "DeviceAllow": ["/dev/tpmrm0 rw"],
             "RestrictAddressFamilies": ["AF_UNIX AF_INET AF_INET6 AF_NETLINK"],
             "ExecStartPre": ["+/usr/lib/agentos/drive-id check", "+/usr/lib/agentos/egress-setup"],
             "AmbientCapabilities": [], "PrivateDevices": [],
+            # Not ProcSubset=pid: netguard learns the gateway from /proc/net/route (B3 on #1302).
+            "ProcSubset": [],
         }.items():
             with self.subTest(k):
                 self.assertEqual(got.get(k, []), want)
