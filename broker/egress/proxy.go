@@ -133,6 +133,13 @@ type Config struct {
 	// why (a Reason constant); required when any operation declares a
 	// Response or Refused statuses. It is called once per stop.
 	RouteFailed func(adapter, reason string)
+	// Granted, if set, grants per request what Grants does not: it is
+	// asked with the calling machine itself, never the grants entry a
+	// replay machine borrows, and the adapter, only when no static grant
+	// covers them, and its answer may change while the proxy serves (the
+	// vault process grants a key stored at setup, CRED-5f-mr-grant). Nil
+	// grants nothing beyond Grants.
+	Granted func(machine, adapter string) bool
 }
 
 // LabelPublic is the REV-5 label under which a machine may use
@@ -144,6 +151,7 @@ type Proxy struct {
 	labelOf  func(string) string
 	adapters map[string]Adapter
 	grants   map[string]map[string]bool
+	granted  func(machine, adapter string) bool
 	vault    Secrets
 	holders  map[string]http.RoundTripper
 	redact   func() (Redactor, error)
@@ -181,6 +189,7 @@ func New(cfg Config) (*Proxy, error) {
 	p := &Proxy{
 		adapters: map[string]Adapter{},
 		grants:   map[string]map[string]bool{},
+		granted:  cfg.Granted,
 		vault:    cfg.Vault,
 		holders:  cfg.Holders,
 		redact:   cfg.Redaction,
@@ -373,7 +382,7 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		return
 	}
 	ev.Adapter = a.Name
-	if !p.grants[grantsOf][a.Name] {
+	if !p.grants[grantsOf][a.Name] && (p.granted == nil || !p.granted(machine, a.Name)) {
 		deny(http.StatusForbidden, "adapter not granted to this machine")
 		return
 	}

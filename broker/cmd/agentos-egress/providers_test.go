@@ -243,7 +243,7 @@ func TestSetupProvidersThroughTheVerifier(t *testing.T) {
 func TestTheRouterFollowsSetupsPrivateAnswer(t *testing.T) {
 	var hook privateHook
 	_, rt, err := modelRouting(route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}},
-		grants{"agent": {"openai"}}, nil, hook.allowed, "", "")
+		grants{"agent": {"openai"}}, nil, hook.allowed, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
