@@ -88,7 +88,7 @@ This keeps every PACT check: signature, `aud`, lifetime and `client_id == iss`. 
 | For | Question | Recommendation |
 |---|---|---|
 | Mark (spec boundary) | Under SPEC §2, is a public-keys-only file on the owner's existing third-party account (option A) an Optional dependency, or a forbidden "public domain"? | **Hold; no ruling yet.** Nothing in the release needs PACT. Option A's value also depends on an open Provider that does not yet exist (§3). Revisit when the LATER.md trigger fires. |
-| Mark (outward-facing) | Send the §6 proposal upstream as an issue on openpactprotocol/openpactprotocol? | **Yes, if Mark wants AgentOS to take part eventually.** It is the only route that needs no exception to §2. It is not sent from this session, because publishing is Mark's call. |
+| Mark (outward-facing) | Send the §6 proposal upstream as an issue on openpactprotocol/openpactprotocol? | **Yes, if Mark wants agentOS to take part eventually.** It is the only route that needs no exception to §2. It is not sent from this session, because publishing is Mark's call. |
 
 ## 8. Design record if PACT is adopted later (threat model and SPEC v0.12 mapping)
 
@@ -96,7 +96,7 @@ Kept so a later package starts from here. None of it is built. All rows are [Inf
 
 ### 8.1 Threats
 
-| Threat | PACT's own control | What remains | AgentOS control it would need |
+| Threat | PACT's own control | What remains | agentOS control it would need |
 |---|---|---|---|
 | Token theft | The delegation token alone is useless: §5.5 needs a valid PA JWT whose `iss` equals `client_id` [Fact]. | The token is not bound to the key (no DPoP). Stealing both the token and the signing key is full use. A refresh token is long-lived. | The signing key, delegation token and refresh token stay in the vault only (CRED-1, ARC-1). The egress proxy **mints** a fresh PA JWT per request and injects both headers (ADP-10). Minting is a new kind of injection; today's proxy injects stored values (`broker/egress` E1–E3). CRED-7 redacts all three. |
 | Confused deputy between businesses | The delegation token's `aud` is one Brand's interface URL [Fact]. | The PA JWT's `aud` is per **Provider**, so one JWT is valid for every Brand on that Provider for up to 300 s. The Provider's own audience string might collide with another Provider's. | Refuse to register the same audience for two Providers. Keep the PA JWT lifetime short (60 s or less) with a fresh `jti`. Bind each declared operation to one interface URL. |
