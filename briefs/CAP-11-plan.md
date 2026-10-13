@@ -1,6 +1,6 @@
 # CAP-11-plan: provider-agent route for a worker-held plan (Claude Code first)
 
-Board section: Release rows carried from LATER.md (2026-10-10). Source: the plan-login chain (Mark chose "Plan login" for the first box, 2026-10-13); CRED-5b's "CAP-11 plan-route code (S8)" dependency. Tier A (modelroute, vm, egress wiring). Fifth in the chain #808 → #807 → #1015 → #1014 → this → #1264.
+Board section: Release rows carried from LATER.md (2026-10-10). Source: work item #1314; the plan-login chain (Mark chose "Plan login" for the first box, 2026-10-13); CRED-5b's "CAP-11 plan-route code (S8)" dependency. Tier A (modelroute, vm, egress wiring). Fifth in the chain #808 → #807 → #1015 → #1014 → this → #1264.
 
 **Why.** A guest can route single model calls over an API key (CAP-9) but cannot hand a whole subtask to the owner's plan. CAP-11 makes a provider's official agent CLI a route type, added by declaration, run headless inside a worker. Nothing at current main declares, starts or returns from a provider agent. The 2026-10-07 draft branch `pkg/cap-11-12-resources-draft` (commit fc2e31b, `broker/provagent/declare.go`; 5d2a29d, `broker/planquota/admit.go`) has a declaration schema and a pool gate with no merge base on main: reuse the schema where it still fits, credit the branch, and leave the resources tool to CAP-12a.
 
