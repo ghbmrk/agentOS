@@ -23,6 +23,19 @@ type Providers interface {
 // ProviderRefused: the vault refused the provider or the key (400).
 var ProviderRefused = errors.New("provider refused")
 
+// KeyRefused: the provider did not accept the key when the vault checked
+// it (ONB-3). KeyUnchecked: the vault could not check it. Neither stored
+// the key.
+var (
+	KeyRefused   = errors.New("key refused by the provider")
+	KeyUnchecked = errors.New("key not checked with the provider")
+)
+
+var (
+	errKeyRefused   = sockets.Code(localapi.ErrKeyRefused)
+	errKeyUnchecked = sockets.Code(localapi.ErrKeyUnchecked)
+)
+
 // providers lists the vault's providers; nil Providers lists none.
 func (s *Setup) providers(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	if err := decode(args, &struct{}{}); err != nil {
@@ -79,10 +92,15 @@ func (s *Setup) privateOK(_ context.Context, _ sockets.Peer, args json.RawMessag
 }
 
 // providerErr maps the vault's refusal to a fixed code: a refused
-// provider or key is bad args, a vault whose setup is closed cannot take
+// provider or key is bad args, a key the provider refused or could not
+// check has its own code, a vault whose setup is closed cannot take
 // providers here, and anything else failed.
 func (s *Setup) providerErr(err error) error {
 	switch {
+	case errors.Is(err, KeyRefused):
+		return errKeyRefused
+	case errors.Is(err, KeyUnchecked):
+		return errKeyUnchecked
 	case errors.Is(err, ProviderRefused):
 		return errBadArgs
 	case errors.Is(err, EnrollClosed), errors.Is(err, EnrollNotOpen):

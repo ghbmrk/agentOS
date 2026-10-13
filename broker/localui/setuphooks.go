@@ -3,6 +3,7 @@ package localui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -145,9 +146,28 @@ func (a AgentosdSetup) Providers() []Provider {
 }
 
 // ConnectAPIKey passes the key to agentosd, which passes it to the vault
-// process; the page keeps nothing (CRED-1, CRED-5).
+// process; the page keeps nothing (CRED-1, CRED-5). The vault checks the
+// key with its provider first (ONB-3), so the call waits up to
+// localapi.APIKeyTimeout, longer than agentosd waits for the vault
+// (Security L8.4). Each refusal is named as the page's error, beside the
+// code agentosd answered.
 func (a AgentosdSetup) ConnectAPIKey(id, key string) error {
-	return a.call(localapi.OpSetupAPIKey, localapi.APIKey{Provider: id, Key: key}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), localapi.APIKeyTimeout)
+	defer cancel()
+	err := a.Owner.Call(ctx, localapi.OpSetupAPIKey, localapi.APIKey{Provider: id, Key: key}, nil)
+	for code, named := range map[string]error{
+		localapi.ErrKeyRefused:        ErrKeyRefused,
+		localapi.ErrKeyUnchecked:      ErrKeyUnchecked,
+		localapi.ErrLimited:           ErrKeysLimited,
+		localapi.ErrBadArgs:           ErrKeyNotTaken,
+		localapi.ErrSetupClosed:       ErrSetupClosed,
+		localapi.ErrEnrollUnavailable: ErrCodesUnavailable,
+	} {
+		if refused(err, code) {
+			return fmt.Errorf("%w (%w)", named, err)
+		}
+	}
+	return err
 }
 
 // SetPrivateOK records the owner's private-data answer in the vault, where

@@ -268,6 +268,12 @@ func (e enroller) SetPrivateOK(provider string, ok bool) error {
 }
 
 func providerErr(err error) error {
+	switch {
+	case errors.Is(err, modelroute.ErrKeyRefused):
+		return localsrv.KeyRefused
+	case errors.Is(err, modelroute.ErrKeyUnchecked):
+		return localsrv.KeyUnchecked
+	}
 	if errors.Is(err, modelroute.ErrSetupRefused) {
 		return localsrv.ProviderRefused
 	}

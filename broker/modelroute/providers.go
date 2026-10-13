@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 // SetupProvider is one built-in provider as setup's AI step sees it
@@ -48,6 +49,23 @@ type SetupPrivateRequest struct {
 // entry, or the key is not one the vault stores.
 var ErrSetupRefused = errors.New("the vault process refused the provider or key")
 
+// ErrKeyRefused means the provider did not accept the key when the vault
+// process checked it (ONB-3); nothing was stored.
+var ErrKeyRefused = errors.New("the provider did not accept the key")
+
+// ErrKeyUnchecked means the vault process could not check the key with
+// the provider (no answer, or an answer that is neither yes nor no);
+// nothing was stored.
+var ErrKeyUnchecked = errors.New("the key could not be checked with the provider")
+
+// The key check's waits (Security L8.4: each caller waits longer than the
+// one it calls). The vault process gives the provider SetupKeyCheckWait;
+// SetupAPIKey waits SetupAPIKeyTimeout for the vault process.
+const (
+	SetupKeyCheckWait  = 8 * time.Second
+	SetupAPIKeyTimeout = SetupKeyCheckWait + 2*time.Second
+)
+
 // SetupProviders lists the built-in providers. It fails as Enroll does
 // when setup's enrollment is not open (ErrEnrolled, ErrEnrollNotOpen) or
 // the vault is locked (ErrVaultLocked).
@@ -64,11 +82,15 @@ func (v *Verifier) SetupProviders() ([]SetupProvider, error) {
 	return res.Providers, nil
 }
 
-// SetupAPIKey stores key as provider's API key in the vault.
+// SetupAPIKey has the vault process check key with provider and store it
+// as provider's API key. A key the provider refuses is ErrKeyRefused; one
+// that could not be checked is ErrKeyUnchecked.
 func (v *Verifier) SetupAPIKey(provider, key string) error {
 	body, _ := json.Marshal(SetupKeyRequest{Provider: provider, Key: key})
 	var res struct{}
-	return v.setupCall(http.MethodPost, "/setup/providers/key", body, &res)
+	c := *v.c
+	c.Timeout = SetupAPIKeyTimeout
+	return (&Verifier{c: &c}).setupCall(http.MethodPost, "/setup/providers/key", body, &res)
 }
 
 // SetupPrivateOK records whether provider may receive private data.
@@ -100,6 +122,10 @@ func (v *Verifier) setupCall(method, path string, body []byte, res any) error {
 		return ErrEnrollNotOpen
 	case http.StatusBadRequest:
 		return ErrSetupRefused
+	case http.StatusForbidden:
+		return ErrKeyRefused
+	case http.StatusBadGateway:
+		return ErrKeyUnchecked
 	default:
 		return fmt.Errorf("setup providers: vault process answered %s", resp.Status)
 	}
