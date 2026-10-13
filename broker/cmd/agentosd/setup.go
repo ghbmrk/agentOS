@@ -80,8 +80,9 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	}
 	finished := make(chan string, 1)
 	s := localsrv.NewSetup(localsrv.SetupConfig{Record: m.Record, Enroll: m.Enroll, Progress: m.Progress,
-		Join:     joiner(m.NetJoin, m.Seen),
-		Finished: func(owner string) { finished <- owner }})
+		Join:      joiner(m.NetJoin, m.Seen),
+		Providers: providersOf(m.Enroll),
+		Finished:  func(owner string) { finished <- owner }})
 	ops := s.Ops()
 	finish := ops[localapi.OpSetupFinish]
 	ops[localapi.OpSetupFinish] = func(ctx context.Context, p sockets.Peer, args json.RawMessage) (any, error) {
@@ -164,6 +165,43 @@ func enrollErr(err error) error {
 		return localsrv.EnrollPaused
 	}
 	return err
+}
+
+// providersOf is the vault process's provider setup when the enroller
+// also serves it (P2-2w c4e); otherwise nil, and setup lists none.
+func providersOf(e localsrv.Enroller) localsrv.Providers {
+	p, _ := e.(localsrv.Providers)
+	return p
+}
+
+// Providers lists the vault's built-in providers. Each takes an API key
+// at setup; plan sign-in at setup (device code) is not served yet.
+func (e enroller) Providers() ([]localapi.SetupProvider, error) {
+	ps, err := e.v.SetupProviders()
+	if err != nil {
+		return nil, providerErr(err)
+	}
+	out := make([]localapi.SetupProvider, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, localapi.SetupProvider{ID: p.ID, Name: p.Name, APIKey: true, Connected: p.Connected, PrivateOK: p.PrivateOK})
+	}
+	return out, nil
+}
+
+// PutAPIKey passes key to the vault process and keeps nothing (CRED-1).
+func (e enroller) PutAPIKey(provider, key string) error {
+	return providerErr(e.v.SetupAPIKey(provider, key))
+}
+
+func (e enroller) SetPrivateOK(provider string, ok bool) error {
+	return providerErr(e.v.SetupPrivateOK(provider, ok))
+}
+
+func providerErr(err error) error {
+	if errors.Is(err, modelroute.ErrSetupRefused) {
+		return localsrv.ProviderRefused
+	}
+	return enrollErr(err)
 }
 
 // errNotJoined is every join that did not end joined or saved. It

@@ -32,6 +32,7 @@ type Setup struct {
 	closed  bool
 	enrolls []time.Time
 	joins   []time.Time
+	keys    []time.Time
 }
 
 // SetupConfig configures a Setup.
@@ -52,7 +53,10 @@ type SetupConfig struct {
 	// otherwise. Nil Join answers every join with ErrNotJoined. The
 	// password goes nowhere else: not the record, not an error, not a log.
 	Join func(ctx context.Context, ssid, password string) error
-	Now  func() time.Time
+	// Providers is the vault process's provider setup (P2-2w c4e). Nil
+	// lists no provider and refuses every key.
+	Providers Providers
+	Now       func() time.Time
 }
 
 // Enroller is the vault process's code-generator enrollment (egress K17).
@@ -177,6 +181,10 @@ func (s *Setup) Ops() map[string]sockets.Handler {
 		localapi.OpSetupConfirm:  s.open(s.confirm),
 		localapi.OpSetupFinish:   s.open(s.finish),
 		localapi.OpSetupJoin:     s.open(s.join),
+
+		localapi.OpSetupProviders: s.open(s.providers),
+		localapi.OpSetupAPIKey:    s.open(s.apiKey),
+		localapi.OpSetupPrivateOK: s.open(s.privateOK),
 	}
 }
 

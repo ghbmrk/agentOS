@@ -137,8 +137,10 @@ type rigOpts struct {
 	grants    map[string][]string
 	labels    map[string]string
 	privateOK map[string]bool
-	cap       egress.Cap
-	maxOut    int
+	// privateAllowed is Config.PrivateAllowed (P2-2w c4e).
+	privateAllowed func(string) bool
+	cap            egress.Cap
+	maxOut         int
 }
 
 func newRig(t *testing.T, o rigOpts) *rig {
@@ -204,6 +206,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 			return false
 		},
 		PrivateOK:       o.privateOK,
+		PrivateAllowed:  o.privateAllowed,
 		MaxOutputTokens: o.maxOut,
 		Label:           label,
 		Upstream:        px.Handler,
