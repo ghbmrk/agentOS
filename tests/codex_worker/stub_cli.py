@@ -12,7 +12,7 @@ import sys
 SOCK = "/run/agentos/egress.sock"
 AUTH = "/var/lib/agentos-codex/auth.json"
 TOOLSH = "/usr/local/bin/agentos-toolsh"
-STUB_TOOL = pathlib.Path(__file__).resolve().parent / "stub_tool.py"
+STUB_TOOL = "/var/lib/agentos-stub-tool.py"  # mounted there by the test
 
 
 def reaches(family, addr):
@@ -38,7 +38,7 @@ def main():
         "auth": auth,
         "env": os.environ.get("AGENTOS_SYNTHETIC_CANARY") == canary,
     }
-    r = subprocess.run([TOOLSH, sys.executable, "-I", str(STUB_TOOL), str(port)],
+    r = subprocess.run([TOOLSH, sys.executable, "-I", STUB_TOOL, str(port)],
                        capture_output=True, text=True, timeout=30)
     try:
         tool = json.loads(r.stdout)

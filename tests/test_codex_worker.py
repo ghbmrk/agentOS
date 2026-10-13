@@ -28,6 +28,7 @@ CONFIG = CODEX / "managed_config.toml"
 TOOLSH = CODEX / "agentos-toolsh"
 LAUNCH = CODEX / "launch.json"
 STUB_CLI = ROOT / "tests/codex_worker/stub_cli.py"
+STUB_TOOL = ROOT / "tests/codex_worker/stub_tool.py"
 BWRAP = "/usr/bin/bwrap"
 FORWARDER = "http://127.0.0.1:18432"
 CODEX_HOME = "/var/lib/agentos-codex"
@@ -261,6 +262,9 @@ class ToolSandboxTest(unittest.TestCase):
             "--tmpfs", "/var/lib", "--bind", str(self.codex_home), CODEX_HOME,
             "--bind", str(self.work), "/var/lib/agentos-work",
             "--ro-bind", str(toolsh), "/usr/local/bin/agentos-toolsh",
+            # A system path: the tool runs without CAP_DAC_OVERRIDE, so it cannot
+            # traverse a 0750 home such as the CI runner's checkout.
+            "--ro-bind", str(STUB_TOOL), "/var/lib/agentos-stub-tool.py",
             "--chdir", "/var/lib/agentos-work",
             "--setenv", "AGENTOS_SYNTHETIC_CANARY", self.canary,
             "--", sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
