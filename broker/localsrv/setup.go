@@ -82,6 +82,9 @@ var (
 	EnrollNotOpen = errors.New("enrollment not open")
 	// EnrollNone: no seed waits for confirmation (409).
 	EnrollNone = errors.New("no enrollment waiting")
+	// EnrollCardRequired: the vault holds no Owner Card (428); finish
+	// answers "card pending".
+	EnrollCardRequired = errors.New("vault has no Owner Card")
 	// EnrollPaused: too many wrong codes for now (429).
 	EnrollPaused = errors.New("enrollment paused")
 )
@@ -153,6 +156,7 @@ var (
 	errNoEnrollment = sockets.Code(localapi.ErrNoEnrollment)
 	errNotEnrolled  = sockets.Code(localapi.ErrNotEnrolled)
 	errUnavailable  = sockets.Code(localapi.ErrEnrollUnavailable)
+	errCardPending  = sockets.Code(localapi.ErrCardPending)
 	errNotJoined    = sockets.Code(localapi.ErrNotJoined)
 )
 
@@ -392,6 +396,9 @@ func (s *Setup) finish(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	case errors.Is(err, EnrollNotOpen):
 		s.mu.Unlock()
 		return nil, errUnavailable
+	case errors.Is(err, EnrollCardRequired):
+		s.mu.Unlock()
+		return nil, errCardPending
 	case errors.Is(err, EnrollNone):
 		err := s.setEnrolledLocked(false)
 		s.mu.Unlock()
