@@ -208,6 +208,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Rotation != nil {
 		s.mux.Handle("/rotate/card", s.signedIn(http.HandlerFunc(s.rotationCard)))
+		if rot, ok := s.cfg.Rotation.(*Rotation); ok {
+			s.Mount("/rotate", "Replace Owner Card parts", s.rotatePages(rot))
+		}
 	}
 	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
 	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))

@@ -23,5 +23,10 @@ func (s *Server) rotationCard(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/home", http.StatusSeeOther)
 		return
 	}
-	d.Handler(s.isSignedIn, "/home").ServeHTTP(w, r)
+	next := "/home"
+	if _, ok := s.cfg.Rotation.(*Rotation); ok {
+		// The vault process's rotation: its result shows once there.
+		next = "/rotate/done"
+	}
+	d.Handler(s.isSignedIn, next).ServeHTTP(w, r)
 }

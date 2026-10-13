@@ -379,8 +379,9 @@ func serveCmd(args []string) error {
 		return err
 	}
 	c, err := newCustody(withGrants(&custody{
-		guard:    guard,
-		keysPath: *keysPath,
+		guard:     guard,
+		keysPath:  *keysPath,
+		vaultPath: *vaultPath,
 		open: func(p string) (*vault.Vault, error) {
 			return vault.OpenSealed(*vaultPath, *keysPath, vault.Passphrase(p))
 		},

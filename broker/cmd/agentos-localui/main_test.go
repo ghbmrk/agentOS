@@ -18,11 +18,20 @@ import (
 // agentosd.
 func TestThePageGetsNoSetupHooks(t *testing.T) {
 	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "")
-	if cfg.Hooks != nil || cfg.Store != nil || cfg.SetupSecret != "" || cfg.SecondLine != nil || cfg.Vault != nil {
+	if cfg.Hooks != nil || cfg.Store != nil || cfg.SetupSecret != "" || cfg.SecondLine != nil || cfg.Vault != nil || cfg.Rotation != nil {
 		t.Fatalf("config %+v", cfg)
 	}
 	if _, err := localui.New(cfg); err != nil {
 		t.Fatalf("no Wi-Fi password is needed to serve the page: %v", err)
+	}
+}
+
+// REC-4: with the vault process's socket the page serves the Owner Card
+// rotation over that same socket (ARC-2: the display lives here).
+func TestTheVaultSocketWiresTheCardRotation(t *testing.T) {
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/unlock.sock")
+	if _, ok := cfg.Rotation.(*localui.Rotation); !ok || cfg.Vault == nil {
+		t.Fatalf("config %+v", cfg)
 	}
 }
 
