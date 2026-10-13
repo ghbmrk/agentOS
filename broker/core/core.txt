@@ -39,6 +39,9 @@ wiring cmd/agentos-egress
 wiring cmd/agentos-holder
 wiring cmd/agentos-checker
 wiring cmd/agentos-a8scan
+# The home Wi-Fi helper (P2-2w c3): a separate root binary that serves its
+# own socket to agentosd only (Security L8.1), like the other helpers above.
+wiring cmd/agentos-netjoin
 
 # The one way in: an intent goes to the journal. The gate's Submit is the
 # same call behind the gate's refusal of broker-reserved intent IDs.
