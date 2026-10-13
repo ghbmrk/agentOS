@@ -115,11 +115,40 @@ func (g grants) Set(v string) error {
 }
 
 // withGrants sets c's fields that follow the grants: the proxy it builds
-// over an open vault, and whether a model provider is granted (OP-9 C2).
-func withGrants(c *custody, g grants) *custody {
-	c.build = func(v *vault.Vault) (*egress.Proxy, error) { return newProxy(v, g, nil, c.guard) }
+// over an open vault, whether a model provider is granted by a flag
+// (OP-9 C2), and the agent machine a stored key grants its provider to
+// (storedGrant, CRED-5f-mr-grant); "" grants by flags only.
+func withGrants(c *custody, g grants, agent string) *custody {
+	c.agent = agent
+	c.build = func(v *vault.Vault) (*egress.Proxy, error) {
+		return newGrantedProxy(v, g, c.modelTransport, c.guard, c.storedGrant)
+	}
 	c.granted = modelGranted(g)
 	return c
+}
+
+// checkAgentMachine checks -agent-machine: a machine name, never a
+// builder's or a replay machine's, whose grants come from -builder-from
+// and -eval-from. Empty is allowed and grants by flags only.
+func checkAgentMachine(m string) error {
+	if m == "" {
+		return nil
+	}
+	if !machineRE.MatchString(m) || strings.HasPrefix(m, modelroute.BuilderPrefix) || strings.HasPrefix(m, modelroute.EvalPrefix) {
+		return fmt.Errorf("-agent-machine %s: name the owner's agent machine", m)
+	}
+	return nil
+}
+
+// serveCustody makes serve's custody over the flags' grants and agent
+// machine, and binds the router's hook to it (privateHook).
+func serveCustody(c *custody, g grants, agent string, hook *privateHook) (*custody, error) {
+	c, err := newCustody(withGrants(c, g, agent))
+	if err != nil {
+		return nil, err
+	}
+	hook.c.Store(c)
+	return c, nil
 }
 
 // modelProviders are the providers the model router serves.
@@ -150,7 +179,14 @@ func adapters() []egress.Adapter {
 // newProxy builds the proxy over an open vault. tr is nil outside tests.
 // guard is the process's address policy (netGuard); nil only in tests.
 func newProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper, guard *netguard.Policy) (*egress.Proxy, error) {
+	return newGrantedProxy(v, g, tr, guard, nil)
+}
+
+// newGrantedProxy is newProxy with stored, the grants a stored key gives
+// (storedGrant), asked per request where g grants nothing; nil adds none.
+func newGrantedProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper, guard *netguard.Policy, stored func(machine, adapter string) bool) (*egress.Proxy, error) {
 	return egress.New(egress.Config{
+		Granted:   stored,
 		Guard:     guard,
 		Adapters:  adapters(),
 		Grants:    g,
@@ -204,8 +240,9 @@ func grantsKey(machine string) string {
 // builds the router over the result, in that order, so the router sees
 // every grant it serves (L3 MUST 1 on #126). allowed is the vault's
 // private-data answer from setup (privateHook), checked when privateOK
-// is false; nil adds none.
-func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, allowed func(string) bool, builderFrom, evalFrom string) (grants, *route.Router, error) {
+// is false; stored is the grant a key stored at setup gives (privateHook,
+// storedGrant), checked when g grants nothing; nil adds none of either.
+func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, allowed func(string) bool, stored func(machine, provider string) bool, builderFrom, evalFrom string) (grants, *route.Router, error) {
 	// -eval-from names an agent machine: never a builder's grants key or a
 	// replay machine (security R1 on #126).
 	if strings.HasPrefix(evalFrom, modelroute.BuilderPrefix) || strings.HasPrefix(evalFrom, modelroute.EvalPrefix) {
@@ -220,7 +257,7 @@ func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, allowed 
 	if err != nil {
 		return nil, nil, err
 	}
-	rt, err := newPrivateRouter(rule, g, privateOK, allowed)
+	rt, err := newPrivateRouter(rule, g, privateOK, allowed, stored)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -228,10 +265,10 @@ func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, allowed 
 }
 
 func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
-	return newPrivateRouter(rule, g, privateOK, nil)
+	return newPrivateRouter(rule, g, privateOK, nil, nil)
 }
 
-func newPrivateRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool, allowed func(string) bool) (*route.Router, error) {
+func newPrivateRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool, allowed func(string) bool, stored func(machine, provider string) bool) (*route.Router, error) {
 	return route.New(route.Config{
 		Providers: modelProviders(),
 		Rule:      rule,
@@ -241,7 +278,7 @@ func newPrivateRouter(rule route.Rule, g map[string][]string, privateOK map[stri
 					return true
 				}
 			}
-			return false
+			return stored != nil && stored(machine, provider)
 		},
 		PrivateOK:      privateOK,
 		PrivateAllowed: allowed,
@@ -325,6 +362,7 @@ func serveCmd(args []string) error {
 	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
 	builderFrom := fs.String("builder-from", "", "the owner's agent machine, whose model grants Loop 1's builder machines (lb-) use, always as private data (W3-builder); empty (the default) gives builders no model access")
 	evalFrom := fs.String("eval-from", "", "the owner's agent machine, whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
+	agent := fs.String("agent-machine", "agent", "the owner's agent machine, to which a provider key stored at setup grants that provider (CRED-5f-mr-grant); empty grants by -grant only")
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
 	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")
@@ -332,6 +370,9 @@ func serveCmd(args []string) error {
 	fs.Parse(args)
 	pcrs, err := parsePCRs(*pcrList)
 	if err != nil {
+		return err
+	}
+	if err := checkAgentMachine(*agent); err != nil {
 		return err
 	}
 	rule, err := readRule(*rulePath)
@@ -354,7 +395,7 @@ func serveCmd(args []string) error {
 	// The router is built before custody; the hook answers setup's
 	// private-data marks once custody exists (P2-2w c4e).
 	var hook privateHook
-	g, rt, err := modelRouting(rule, g, pok, hook.allowed, *builderFrom, *evalFrom)
+	g, rt, err := modelRouting(rule, g, pok, hook.allowed, hook.granted, *builderFrom, *evalFrom)
 	if err != nil {
 		return err
 	}
@@ -391,7 +432,7 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	c, err := newCustody(withGrants(&custody{
+	c, err := serveCustody(&custody{
 		guard:     guard,
 		keysPath:  *keysPath,
 		vaultPath: *vaultPath,
@@ -404,11 +445,10 @@ func serveCmd(args []string) error {
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 		owner:     *ownerNumber,
-	}, g))
+	}, g, *agent, &hook)
 	if err != nil {
 		return err
 	}
-	hook.c.Store(c)
 	// Fail at start on a bad grant rather than at the first unlock.
 	if _, err := egress.New(egress.Config{Adapters: adapters(), Grants: g, Vault: emptyVault{}, Audit: noAudit{}}); err != nil {
 		return err
