@@ -12,6 +12,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/netjoin"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -27,6 +28,9 @@ type setupMode struct {
 	OwnerState string // the owner channel's state file
 	Enroll     localsrv.Enroller
 	Progress   func() localapi.SetupProgress
+	// NetJoin is the netjoin helper's socket (P2-2w c3; Security L8);
+	// empty, the page's network step answers its one error.
+	NetJoin string
 
 	// Card starts the first-boot Owner Card step (HW-1) and returns its
 	// hold: setup does not finish while Hold reports the card unconfirmed.
@@ -73,6 +77,7 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	}
 	finished := make(chan string, 1)
 	s := localsrv.NewSetup(localsrv.SetupConfig{Record: m.Record, Enroll: m.Enroll, Progress: m.Progress,
+		Join:     joiner(m.NetJoin),
 		Finished: func(owner string) { finished <- owner }})
 	ops := s.Ops()
 	finish := ops[localapi.OpSetupFinish]
@@ -156,6 +161,27 @@ func enrollErr(err error) error {
 		return localsrv.EnrollPaused
 	}
 	return err
+}
+
+// errNotJoined is every join that did not end joined or saved. It
+// carries nothing of the request (CRED-1).
+var errNotJoined = errors.New("setup: the home network was not joined")
+
+// joiner is setup's join through the netjoin helper's socket: joined and
+// saved succeed, every other answer or no answer is errNotJoined. With no
+// socket it is nil, and localsrv answers not joined.
+func joiner(path string) func(context.Context, string, string) error {
+	if path == "" {
+		return nil
+	}
+	c := netjoin.Client{Path: path}
+	return func(ctx context.Context, ssid, password string) error {
+		code, err := c.Join(ctx, ssid, password)
+		if err == nil && (code == netjoin.Joined || code == netjoin.Saved) {
+			return nil
+		}
+		return errNotJoined
+	}
 }
 
 // setupProgress is what setup's pages show while agentosd runs setup: the
