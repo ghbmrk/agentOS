@@ -48,6 +48,6 @@ func unconfirmedNote(eng *journal.Engine) func() string {
 			}
 		}
 		return "Not confirmed since the restart: whether " + strings.Join(what, ", ") +
-			" went through. Some changes wait while the box keeps checking; nothing is needed from you."
+			" went through. Some changes wait while I keep checking; nothing is needed from you."
 	}
 }

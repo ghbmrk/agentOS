@@ -327,7 +327,7 @@ func (x *Executor) Reconcile(ctx context.Context, in journal.Intent, _ int) jour
 		return journal.Outcome{Result: journal.ResultUnknown, Evidence: err.Error()}
 	}
 	if d != digest && src.Name != name {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "the box trusts neither that root nor that source now"}
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "I trust neither that root nor that source now"}
 	}
 	if d != digest || src.Name != name {
 		return journal.Outcome{Result: journal.ResultUnknown, Evidence: "I do not trust that root under that name"}
