@@ -505,8 +505,9 @@ func main() {
 	// setup's ops are served until its finish is recorded, and the owner's
 	// number then comes from the record, on this start and every later one.
 	if cfg.OwnerNumber == "" {
+		up := newUplink()
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
-			OwnerState: cfg.OwnerState, Progress: setupProgress, NetJoin: netjoinSock}
+			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock}
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
 		}

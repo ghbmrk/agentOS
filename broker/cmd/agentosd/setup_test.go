@@ -82,7 +82,9 @@ func newBareSetupMode(t *testing.T) setupMode {
 	gid := os.Getgid()
 	return setupMode{Dir: filepath.Join(dir, "run"), Page: &daemon.PageSocket{UID: os.Getuid(), GID: &gid},
 		Record: localsrv.FileRecord{Path: filepath.Join(dir, "setup.json")}, OwnerState: filepath.Join(dir, "owner.json"),
-		Enroll: &setupVault{}, Progress: setupProgress}
+		Enroll: &setupVault{}, Progress: func() localapi.SetupProgress {
+			return localapi.SetupProgress{Phase: "ready", Updated: true, Online: true}
+		}}
 }
 
 // Security L6: agentosd serves setup's ops on localui.sock until finish is

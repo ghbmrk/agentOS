@@ -1,24 +1,35 @@
 package main
 
 import (
+	"context"
 	"io"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/localui"
 )
 
-// REQ: ARC-2, CH-9, REC-4
+// REQ: ARC-2, CH-9, REC-4, ONB-3
 
-// Security L6 on the P2-2w plan: the page's process is given no setup
-// hooks, so nothing pairs or enrolls in it until setup moves into
-// agentosd.
-func TestThePageGetsNoSetupHooks(t *testing.T) {
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "")
-	if cfg.Hooks != nil || cfg.Store != nil || cfg.SetupSecret != "" || cfg.SecondLine != nil || cfg.Vault != nil || cfg.Rotation != nil {
+// P2-2w c4: the page runs setup over agentosd's localui.sock, which
+// serves setup's ops only until finish (Security L6), and keeps its
+// state in memory only (L18). It holds no setup secret and no Wi-Fi
+// password.
+func TestThePageRunsSetupThroughAgentosd(t *testing.T) {
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "")
+	if h, ok := cfg.Hooks.(localui.AgentosdSetup); !ok || h.Owner != (localui.Socket{Path: "/run/agentos/localui.sock"}) {
+		t.Fatalf("hooks %#v", cfg.Hooks)
+	}
+	if _, ok := cfg.Store.(*localui.MemStore); !ok {
+		t.Fatalf("store %#v", cfg.Store)
+	}
+	if cfg.SetupSecret != "" || cfg.Card != nil || cfg.SecondLine != nil || cfg.Vault != nil || cfg.Rotation != nil || cfg.AP.Password != "" {
 		t.Fatalf("config %+v", cfg)
 	}
 	if _, err := localui.New(cfg); err != nil {
@@ -26,10 +37,37 @@ func TestThePageGetsNoSetupHooks(t *testing.T) {
 	}
 }
 
+// The page waits for agentosd's socket before it asks whether setup is
+// open, so a page that starts first does not close setup for its life.
+func TestThePageWaitsForAgentosd(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "localui.sock")
+	if err := awaitSocket(context.Background(), sock, 300*time.Millisecond); err == nil {
+		t.Fatal("no socket, no error")
+	}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		ln, err := net.Listen("unix", sock)
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { ln.Close() })
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	if err := awaitSocket(context.Background(), sock, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // REC-4: with the vault process's socket the page serves the Owner Card
 // rotation over that same socket (ARC-2: the display lives here).
 func TestTheVaultSocketWiresTheCardRotation(t *testing.T) {
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/unlock.sock")
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock")
 	if _, ok := cfg.Rotation.(*localui.Rotation); !ok || cfg.Vault == nil {
 		t.Fatalf("config %+v", cfg)
 	}
