@@ -1,6 +1,9 @@
 package localapi
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
 
 // Setup's ops on localui.sock (P2-2w c2; Security L6 on the P2-2w plan;
 // ONB-3, ONB-6, CRED-8). agentosd serves them only on a box with no
@@ -27,10 +30,23 @@ const (
 	// once the helper does: success when it joined or saved the network,
 	// ErrNotJoined otherwise. It is answered within JoinTimeout.
 	OpSetupJoin = "page_setup_join"
+	// OpSetupLine answers whether setup can text and the box's own number
+	// (P2-2w c4c; §8.1, CH-12): Ready while the modem bridge reports the
+	// line usable, Number when the bridge knows it.
+	OpSetupLine = "page_setup_line"
+	// OpSetupSend has the box text one of setup's fixed texts (SetupText)
+	// to a number, and answers once the bridge reports it sent, or
+	// ErrNotSent. It is answered within SetupSendTimeout.
+	OpSetupSend = "page_setup_send"
+	// OpSetupInbound waits up to SetupInboundWait for a text that reached
+	// the box and starts with PAIR, and answers it, or nothing. Each text
+	// is answered once; the page offers it to setup (§8.1 pairing).
+	OpSetupInbound = "page_setup_inbound"
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
-var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish, OpSetupJoin}
+var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish, OpSetupJoin,
+	OpSetupLine, OpSetupSend, OpSetupInbound}
 
 // Setup's fixed refusals, beside ErrBadArgs, ErrLimited and ErrFailed.
 const (
@@ -54,7 +70,37 @@ const (
 	// is configured. The page shows its one network error for all of
 	// them (Security L8.4).
 	ErrNotJoined = "not joined"
+	// ErrNotSent: the text did not go: no usable line, the bridge
+	// reported a failure, or no result came in time.
+	ErrNotSent = "not sent"
 )
+
+// Setup's text waits. agentosd's own wait for the bridge ends sooner
+// than the page's call (Security L8.4: each caller waits longer than the
+// one it calls); an inbound wait ends before the socket's idle timeout.
+const (
+	SetupSendWait    = 40 * time.Second
+	SetupSendTimeout = SetupSendWait + 5*time.Second
+	SetupInboundWait = 20 * time.Second
+)
+
+// SetupTextsPerHour caps the texts setup sends in an hour, whoever asks:
+// the page is not trusted to bound what the box's SIM spends.
+const SetupTextsPerHour = 20
+
+// setupTexts are the only texts setup sends (localui's number step,
+// claim and PAIR replies), so the page cannot have the box's SIM send
+// anything else. The product name's case is matched either way.
+var setupTexts = regexp.MustCompile(`^(?:` +
+	`[Aa]gentOS setup code: [0-9]{6}\. Type it on the setup page\.` +
+	`|[Aa]gentOS page code: [0-9]{6}\. Type it on the setup page\.` +
+	`|[Aa]gentOS is running on this PC\. This is your box's number; save it as [Aa]gentOS\.(?: Page code: [0-9]{6}\.)?` +
+	`|That pairing code did not match\. Check the setup page\.` +
+	`|Could not save your number\. Try again\.` +
+	`)$`)
+
+// SetupText says text is one of setup's fixed texts.
+func SetupText(text string) bool { return setupTexts.MatchString(text) }
 
 // JoinTimeout bounds one OpSetupJoin call from the page. agentosd's own
 // call to the helper ends sooner (Security L8.4: each caller waits longer
@@ -117,3 +163,29 @@ func (Join) GoString() string { return "[home Wi-Fi join]" }
 type Finish struct {
 	Owner string `json:"owner"`
 }
+
+// SetupLine is whether setup can text, and the box's own number, E.164
+// ("" when the bridge does not know it).
+type SetupLine struct {
+	Ready  bool   `json:"ready"`
+	Number string `json:"number,omitempty"`
+}
+
+// SetupSend is one fixed text (SetupText) to a number, E.164.
+type SetupSend struct {
+	To   string `json:"to"`
+	Text string `json:"text"`
+}
+
+// SetupInbound is a PAIR text that reached the box: From is E.164, both
+// empty when none came in the wait.
+type SetupInbound struct {
+	From string `json:"from,omitempty"`
+	Text string `json:"text,omitempty"`
+}
+
+// String and GoString keep numbers and texts out of logs.
+func (SetupSend) String() string      { return "[setup text]" }
+func (SetupSend) GoString() string    { return "[setup text]" }
+func (SetupInbound) String() string   { return "[setup inbound text]" }
+func (SetupInbound) GoString() string { return "[setup inbound text]" }

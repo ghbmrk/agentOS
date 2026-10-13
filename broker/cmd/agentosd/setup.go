@@ -8,10 +8,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/bridgeproto"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/netjoin"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
@@ -34,6 +36,14 @@ type setupMode struct {
 	// Seen is told each join's answer (the uplink's never-online wait,
 	// P2-2w c4); nil is told nothing.
 	Seen func(netjoin.Code)
+	// Line is the owner line's modem bridge while setup runs (P2-2w c4c;
+	// §8.1 pairing, CH-12): setup serves its ops on owner.sock to the
+	// bridge's uid (ModemUID, ModemGID) only, and only until finish, so
+	// the page can read the box's number, send setup's fixed texts and
+	// take PAIR texts. Nil serves no owner.sock: setup cannot text.
+	Line     *modemlink.SetupLine
+	ModemUID *int
+	ModemGID *int
 
 	// Card starts the first-boot Owner Card step (HW-1) and returns its
 	// hold: setup does not finish while Hold reports the card unconfirmed.
@@ -79,9 +89,13 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		return "", err
 	}
 	finished := make(chan string, 1)
-	s := localsrv.NewSetup(localsrv.SetupConfig{Record: m.Record, Enroll: m.Enroll, Progress: m.Progress,
+	cfg := localsrv.SetupConfig{Record: m.Record, Enroll: m.Enroll, Progress: m.Progress,
 		Join:     joiner(m.NetJoin, m.Seen),
-		Finished: func(owner string) { finished <- owner }})
+		Finished: func(owner string) { finished <- owner }}
+	if m.Line != nil {
+		cfg.Line = m.Line // a nil *SetupLine would be a non-nil interface
+	}
+	s := localsrv.NewSetup(cfg)
 	ops := s.Ops()
 	finish := ops[localapi.OpSetupFinish]
 	ops[localapi.OpSetupFinish] = func(ctx context.Context, p sockets.Peer, args json.RawMessage) (any, error) {
@@ -90,11 +104,8 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		}
 		return finish(ctx, p, args)
 	}
-	sctx, stop := context.WithCancel(ctx)
-	defer stop()
-	srv := &sockets.Server{Dir: m.Dir}
 	uid := m.Page.UID
-	if err := srv.Start(sctx, sockets.Endpoint{
+	eps := []sockets.Endpoint{{
 		Name:        localapi.Socket,
 		Peer:        sockets.Peer{Kind: "localui"},
 		PeerUID:     &uid,
@@ -102,7 +113,27 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		MaxConns:    8,
 		IdleTimeout: 30 * time.Second,
 		Ops:         ops,
-	}); err != nil {
+		HangupOps:   map[string]bool{localapi.OpSetupInbound: true},
+	}}
+	if m.Line != nil {
+		if m.ModemUID == nil {
+			return "", errors.New("setup: a modem line with no -modem-uid: nothing may serve owner.sock")
+		}
+		eps = append(eps, sockets.Endpoint{
+			Name:        daemon.OwnerSocket,
+			Peer:        sockets.Peer{Kind: "owner"},
+			PeerUID:     m.ModemUID,
+			PeerGID:     m.ModemGID,
+			MaxConns:    8,
+			IdleTimeout: heldIdle,
+			Ops:         m.Line.Ops(),
+			HangupOps:   map[string]bool{bridgeproto.OpOutbox: true},
+		})
+	}
+	sctx, stop := context.WithCancel(ctx)
+	defer stop()
+	srv := &sockets.Server{Dir: m.Dir}
+	if err := srv.Start(sctx, eps...); err != nil {
 		return "", err
 	}
 	var owner string

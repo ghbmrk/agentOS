@@ -32,6 +32,7 @@ type Setup struct {
 	closed  bool
 	enrolls []time.Time
 	joins   []time.Time
+	texts   []time.Time
 }
 
 // SetupConfig configures a Setup.
@@ -52,6 +53,9 @@ type SetupConfig struct {
 	// otherwise. Nil Join answers every join with ErrNotJoined. The
 	// password goes nowhere else: not the record, not an error, not a log.
 	Join func(ctx context.Context, ssid, password string) error
+	// Line is the owner line's modem bridge while setup runs (P2-2w c4c;
+	// modemlink.SetupLine); nil answers that setup cannot text.
+	Line SetupLine
 	Now  func() time.Time
 }
 
@@ -177,6 +181,9 @@ func (s *Setup) Ops() map[string]sockets.Handler {
 		localapi.OpSetupConfirm:  s.open(s.confirm),
 		localapi.OpSetupFinish:   s.open(s.finish),
 		localapi.OpSetupJoin:     s.open(s.join),
+		localapi.OpSetupLine:     s.open(s.line),
+		localapi.OpSetupSend:     s.open(s.send),
+		localapi.OpSetupInbound:  s.open(s.inbound),
 	}
 }
 

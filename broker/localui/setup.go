@@ -66,7 +66,9 @@ type Hooks interface {
 	// JoinNetwork joins a home Wi-Fi network. The password is the home
 	// network's, typed here, and goes nowhere else.
 	JoinNetwork(ssid, password string) error
-	// BoxNumber is the SIM's number, e.g. +15550000100.
+	// BoxNumber is the SIM's number, e.g. +15550000100, while the box can
+	// text; "" while it cannot, and the number step then says pairing is
+	// not available yet (P2-2w c4c).
 	BoxNumber() string
 	// HostInfo names the PC for the pairing reply, e.g. "GEEKOM Air12, 8 GB".
 	HostInfo() string
@@ -494,8 +496,9 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 	case "network":
 		v.Networks = u.s.cfg.Hooks.Networks()
 	case "number":
-		v.BoxNumber = u.s.cfg.Hooks.BoxNumber()
-		v.SMSLink = smsLink(v.BoxNumber, "PAIR "+v.PairCode)
+		if n := u.s.cfg.Hooks.BoxNumber(); phoneRe.MatchString(n) {
+			v.BoxNumber, v.SMSLink = n, smsLink(n, "PAIR "+v.PairCode)
+		}
 		if p.NeverOnline {
 			v.Rejoin, v.Networks = true, u.s.cfg.Hooks.Networks()
 		}

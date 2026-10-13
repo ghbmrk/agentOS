@@ -88,6 +88,11 @@ func run(ctx context.Context, cfg localui.Config, sock string) error {
 		return err
 	}
 	s.SetOwner(localui.Socket{Path: sock})
+	// PAIR texts that reach the box come through agentosd while setup is
+	// open (P2-2w c4c; §8.1 pairing).
+	if a, ok := cfg.Hooks.(localui.AgentosdSetup); ok {
+		go a.PairTexts(ctx, s, 5*time.Second)
+	}
 	ln, err := localui.Listen(ctx, cfg.AP, cfg.Port)
 	if err != nil {
 		return err

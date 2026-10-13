@@ -15,9 +15,11 @@ import (
 // process (egress K17) and only passes through this page.
 //
 // JoinNetwork goes through agentosd to its netjoin helper (P2-2w c3;
-// Security L8). Networks, BoxNumber, HostInfo, Send, TrustHost and the
-// provider hooks are not served by agentosd yet: they answer nothing or an
-// error, so the steps that need them wait.
+// Security L8). BoxNumber, Send and PairTexts go through agentosd to the
+// modem bridge (P2-2w c4c; §8.1, CH-12): agentosd sends only setup's fixed
+// texts and passes on only PAIR texts. Networks, HostInfo, TrustHost and
+// the provider hooks are not served by agentosd yet: they answer nothing
+// or an error, so the steps that need them wait.
 type AgentosdSetup struct{ Owner Owner }
 
 var errNotServed = errors.New("localui: not served by agentosd yet")
@@ -114,13 +116,59 @@ func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
 }
 
 func (AgentosdSetup) Networks() []string                 { return nil }
-func (AgentosdSetup) BoxNumber() string                  { return "" }
 func (AgentosdSetup) HostInfo() string                   { return "" }
-func (AgentosdSetup) Send(string, string) error          { return errNotServed }
 func (AgentosdSetup) TrustHost(bool) error               { return errNotServed }
 func (AgentosdSetup) Providers() []Provider              { return nil }
 func (AgentosdSetup) ConnectAPIKey(string, string) error { return errNotServed }
 func (AgentosdSetup) SetPrivateOK(string, bool) error    { return errNotServed }
 func (AgentosdSetup) StartDeviceCode(string) (string, string, error) {
 	return "", "", errNotServed
+}
+
+// BoxNumber is the box's own number while agentosd answers the modem line
+// can text; "" otherwise, and the number step says pairing is not
+// available yet.
+func (a AgentosdSetup) BoxNumber() string {
+	var l localapi.SetupLine
+	if a.call(localapi.OpSetupLine, nil, &l) != nil || !l.Ready || !phoneRe.MatchString(l.Number) {
+		return ""
+	}
+	return l.Number
+}
+
+// Send has agentosd text one of setup's fixed texts. It waits up to
+// localapi.SetupSendTimeout, longer than agentosd's own wait for the
+// bridge (Security L8.4).
+func (a AgentosdSetup) Send(to, text string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), localapi.SetupSendTimeout)
+	defer cancel()
+	return a.Owner.Call(ctx, localapi.OpSetupSend, localapi.SetupSend{To: to, Text: text}, nil)
+}
+
+// PairTexts offers each PAIR text that reaches the box to s (OfferText)
+// and texts back its reply, until ctx ends or agentosd answers that setup
+// is closed (§8.1 pairing). A text that arrives while it is not running is
+// not offered again: the owner texts again.
+func (a AgentosdSetup) PairTexts(ctx context.Context, s *Server, retry time.Duration) {
+	for ctx.Err() == nil {
+		var in localapi.SetupInbound
+		cctx, cancel := context.WithTimeout(ctx, localapi.SetupInboundWait+callTimeout)
+		err := a.Owner.Call(cctx, localapi.OpSetupInbound, nil, &in)
+		cancel()
+		switch {
+		case refused(err, localapi.ErrSetupClosed):
+			return
+		case err != nil:
+			select {
+			case <-ctx.Done():
+			case <-time.After(retry):
+			}
+			continue
+		case in.From == "":
+			continue
+		}
+		if reply, _ := s.OfferText(in.From, in.Text); reply != "" {
+			a.Send(in.From, reply) // a reply that did not go: the page still shows the step
+		}
+	}
 }
