@@ -23,10 +23,11 @@ func (s *Server) rotationCard(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/home", http.StatusSeeOther)
 		return
 	}
-	next := "/home"
-	if _, ok := s.cfg.Rotation.(*Rotation); ok {
-		// The vault process's rotation: its result shows once there.
-		next = "/rotate/done"
+	if rot, ok := s.cfg.Rotation.(*Rotation); ok {
+		// The vault process's rotation: its result shows once there, to
+		// the confirming session (#1316).
+		rot.serveCard(d, s.isSignedIn, "/rotate/done", w, r)
+		return
 	}
-	d.Handler(s.isSignedIn, next).ServeHTTP(w, r)
+	d.Handler(s.isSignedIn, "/home").ServeHTTP(w, r)
 }
