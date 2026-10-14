@@ -225,7 +225,7 @@ func TestTheProvidersPageShowsAProviderTheBoxsConfigurationAllows(t *testing.T) 
 	fp.mu.Unlock()
 	r.signIn()
 	p := html.UnescapeString(r.get("/providers/"))
-	if !strings.Contains(p, "OpenAI may see your private data (mail, files) to do tasks. This box's configuration allows it, so it can't be withdrawn here.") {
+	if !strings.Contains(p, "OpenAI may see your private data (mail, files) to do tasks. My configuration allows it, so it can't be withdrawn here.") {
 		t.Fatalf("page lacks the configuration line:\n%s", p)
 	}
 	if strings.Contains(p, "Stop OpenAI seeing it") || strings.Contains(p, "OpenAI may not see") || strings.Contains(p, "Allow OpenAI") {

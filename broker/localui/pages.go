@@ -276,7 +276,7 @@ form { margin: .6em 0 1.2em; }
 {{else}}
 {{if .NoneAllowed}}<p class="muted">Tasks that need your mail or files can't run until you allow a provider that is connected.</p>{{end}}
 {{range .Providers}}<h3>{{.Name}}: {{if .Connected}}connected{{else}}not connected{{end}}</h3>
-{{if .PrivateByConfig}}<p>{{.Name}} may see your private data (mail, files) to do tasks. This box's configuration allows it, so it can't be withdrawn here.</p>
+{{if .PrivateByConfig}}<p>{{.Name}} may see your private data (mail, files) to do tasks. My configuration allows it, so it can't be withdrawn here.</p>
 {{else if .PrivateOK}}<p>{{.Name}} may see your private data (mail, files) to do tasks.</p>
 <form method="post" action="/providers/"><input type="hidden" name="step" value="withdraw"><input type="hidden" name="provider" value="{{.ID}}"><button class="stop">Stop {{.Name}} seeing it</button></form>
 {{else}}<p>{{.Name}} may not see your private data.</p>

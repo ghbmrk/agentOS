@@ -29,7 +29,7 @@ func (c *custody) providerList() ([]modelroute.SetupProvider, error) {
 
 // errPrivateByConfig: a withdraw removed the owner's marker, but this
 // box's -private-ok flag still allows the provider private data (#1420).
-var errPrivateByConfig = uerr(http.StatusConflict, "this box's configuration allows this provider private data, so it can't be withdrawn here")
+var errPrivateByConfig = uerr(http.StatusConflict, "my configuration allows this provider private data, so it can't be withdrawn here")
 
 // putPrivate records the owner's answer for provider: ok allows private
 // data with the code's approval, !ok withdraws it with none. A withdraw
