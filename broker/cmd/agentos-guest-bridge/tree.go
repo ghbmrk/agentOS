@@ -74,26 +74,10 @@ func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (st
 		return version, fmt.Errorf("broker answer: %v", err)
 	}
 	if !ans.Unchanged && ans.Version == "" {
-		// The broker folds any tool result over 8 KiB into a stand-in
-		// (package fold), which unmarshals here as a tree with no files.
-		// Read the full answer back; anything else without a version is
-		// not a tree, and mirroring it would delete the whole tree.
-		var in struct {
-			Folded bool   `json:"folded"`
-			ID     string `json:"id"`
-		}
-		if json.Unmarshal([]byte(text), &in) == nil && in.Folded && in.ID != "" {
-			if text, err = callTool(ctx, broker, "result_read", map[string]string{"id": in.ID}); err != nil {
-				return version, fmt.Errorf("folded tree: %v", err)
-			}
-			ans = treeAnswer{}
-			if err := json.Unmarshal([]byte(text), &ans); err != nil {
-				return version, fmt.Errorf("folded tree: %v", err)
-			}
-		}
-		if ans.Unchanged || ans.Version == "" {
-			return version, errors.New("broker answer: no tree version; nothing changed")
-		}
+		// Not a tree: mirroring it would delete the whole tree. The broker
+		// never folds managed_tree (guest.TreeTool), so a fold stand-in is
+		// refused here too.
+		return version, errors.New("broker answer: no tree version; nothing changed")
 	}
 	if ans.Unchanged {
 		if ans.Version != version {
