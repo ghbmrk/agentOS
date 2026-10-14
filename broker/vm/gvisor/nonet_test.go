@@ -35,11 +35,8 @@ func TestAGuestCannotDial(t *testing.T) {
 	}
 	var spec struct {
 		Annotations map[string]string
-		Mounts      []struct {
-			Destination, Type, Source string
-			Options                   []string
-		}
-		Linux struct {
+		Mounts      []bundleMount
+		Linux       struct {
 			Namespaces []struct{ Type, Path string }
 		}
 	}
@@ -72,8 +69,8 @@ func TestAGuestCannotDial(t *testing.T) {
 	services := 0
 	for _, m := range spec.Mounts {
 		switch {
-		case m.Destination == "/proc" && m.Type == "proc", m.Destination == "/tmp" && m.Type == "tmpfs":
-		case m.Destination == vm.ServicesMount && m.Source == l.Services && slices.Contains(m.Options, "ro"):
+		case !isBind(m) && (m.Destination == "/proc" && m.Type == "proc" || m.Destination == "/tmp" && m.Type == "tmpfs"):
+		case isBind(m) && m.Destination == vm.ServicesMount && m.Source == l.Services && slices.Contains(m.Options, "ro"):
 			services++
 		default:
 			t.Fatalf("bundle binds a host path into the guest: %+v", m)
@@ -93,8 +90,8 @@ func TestAGuestCannotDial(t *testing.T) {
 		noNetwork(t, args)
 		// open: the guest may connect to a host socket it can see. create
 		// or all would also let it bind host sockets (ARC-6 "nothing else").
-		if uds := lastFlag(args, "host-uds"); uds != "open" {
-			t.Fatalf("%s: runsc --host-uds is %q, want open: %q", sub, uds, args)
+		if err := hostUDSOpen(args); err != nil {
+			t.Fatalf("%s: %v", sub, err)
 		}
 	}
 }
