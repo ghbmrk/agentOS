@@ -1,9 +1,11 @@
 package localui
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
 // RotationCard is a waiting card rotation (REC-4) as the page sees it: the
@@ -26,8 +28,17 @@ func (s *Server) rotationCard(w http.ResponseWriter, r *http.Request) {
 	if rot, ok := s.cfg.Rotation.(*Rotation); ok {
 		// The vault process's rotation: its result shows once there, to
 		// the confirming session (#1316).
-		rot.serveCard(d, s.isSignedIn, "/rotate/done", w, r)
+		rot.serveCard(d, s.isSignedIn, s.rotateAPNet, "/rotate/done", w, r)
 		return
 	}
 	d.Handler(s.isSignedIn, "/home").ServeHTTP(w, r)
+}
+
+// rotateAPNet hands a committed rotation's Wi-Fi network to agentosd as
+// the confirming session, which writes it for the access point (#1191).
+// The commit has already stood, so the hand-off is not bound to the
+// request's own context.
+func (s *Server) rotateAPNet(r *http.Request, ssid, password string) error {
+	return s.call(context.Background(), localapi.OpRotateAPNet,
+		localapi.RotateAPNet{Token: cookieToken(r), SSID: ssid, Password: password}, nil)
 }

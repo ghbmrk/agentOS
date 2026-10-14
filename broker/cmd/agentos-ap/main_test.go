@@ -19,6 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/localui"
 )
 
@@ -634,4 +635,67 @@ func TestTheCardsPasswordIsNotLogged(t *testing.T) {
 	if strings.Contains(buf.String(), cardNet.Password) || !strings.Contains(buf.String(), "card's network") {
 		t.Fatalf("log: %q", buf.String())
 	}
+}
+
+// #1191, REC-4: a card rotation of the Wi-Fi password keeps the network's
+// name and replaces its password in the file (agentosd's durable rename).
+// The access point goes down before it comes up with the new password,
+// and no start after that, a restart included, serves the old one.
+func TestARotatedPasswordReplacesTheOldOnTheAir(t *testing.T) {
+	b := newBox(t, "wlan0")
+	b.reportCardNet(t)
+	os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600)
+	cancel, done := b.runAsync(t)
+	waitFor(t, func() bool { return b.startedCount() == 1 })
+	assertCardNet(t, b, b.startedAt(0))
+	var mu sync.Mutex
+	var startsAtStop []int
+	b.ap.mu.Lock()
+	b.ap.onStop = func() { n := b.startedCount(); mu.Lock(); startsAtStop = append(startsAtStop, n); mu.Unlock() }
+	b.ap.mu.Unlock()
+	rotated := apnet.Network{SSID: cardNet.SSID, Password: "QRST-UVWX-YZ23-4567"}
+	m, err := rotated.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := durable.WriteFile(b.cfg.APNet, m, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.startedCount() == 2 })
+	time.Sleep(5 * b.cfg.Poll)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if len(startsAtStop) == 0 || startsAtStop[0] != 1 {
+		t.Fatalf("the old password was not brought down before the new came up (starts at each Stop: %v)", startsAtStop)
+	}
+	mu.Unlock()
+	if n := b.startedCount(); n != 2 {
+		t.Fatalf("%d starts, want the card's then the rotated", n)
+	}
+	served := func(c localui.APConfig) {
+		t.Helper()
+		if c.SSID != rotated.SSID || c.Password != rotated.Password || c.WPA2 {
+			t.Fatalf("served %q (WPA2 %v) without the rotated password", c.SSID, c.WPA2)
+		}
+		conf, err := localui.HostapdConf(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(conf, cardNet.Password) || !strings.Contains(conf, "sae_password="+rotated.Password+"\n") ||
+			!strings.Contains(conf, "wpa_key_mgmt=SAE\n") || !strings.Contains(conf, "ieee80211w=2\n") {
+			t.Fatal("hostapd's configuration does not serve only the rotated password, WPA3-SAE with MFP")
+		}
+	}
+	served(b.startedAt(1))
+
+	cancel, done = b.runAsync(t)
+	waitFor(t, func() bool { return b.startedCount() == 3 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	served(b.startedAt(2))
 }
