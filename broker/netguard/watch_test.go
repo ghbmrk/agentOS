@@ -252,3 +252,98 @@ func TestRefreshInQuickGapKeepsNewerExternal(t *testing.T) {
 		t.Fatalf("the router's new external address is dialable: %v", err)
 	}
 }
+
+// A quick read that lands in a full read's gap, after the full read has
+// asked the router and found a newer external address, does not stop that
+// address from being learned: the quick read keeps the old learned address,
+// and the stale full read then stores its own external address because the
+// gateway is unchanged (#1492, the mirror of
+// TestRefreshInQuickGapKeepsNewerExternal).
+func TestQuickInRefreshGapKeepsNewerExternal(t *testing.T) {
+	oldExt, newExt := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+	ext := oldExt
+	s := &Sources{
+		Addrs: func() ([]net.Addr, error) {
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.77"), Mask: net.CIDRMask(24, 32)}}, nil
+		},
+		ReadFile: func(f string) ([]byte, error) {
+			if f == "/proc/net/route" {
+				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\n"), nil
+			}
+			return nil, errors.New("absent")
+		},
+		External: func(context.Context, netip.Addr) (netip.Addr, error) { return ext, nil },
+	}
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	ext = newExt // the router's WAN address changes
+	refreshGapHook = p.quickLearn
+	t.Cleanup(func() { refreshGapHook = nil })
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.RLock()
+	got := p.net.External
+	p.mu.RUnlock()
+	if got != newExt {
+		t.Fatalf("external after the full read = %v, want %v", got, newExt)
+	}
+	if err := p.Check(context.Background(), newExt, 443, "tcp"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("the router's new external address is dialable: %v", err)
+	}
+}
+
+// When the gateway changes, a quick read never carries the previous
+// network's external address over: it takes its own (from Sources.ReadLocal,
+// empty unless the last full read was on this gateway). On a flip-back
+// (G1, then G2, then G1 again) G2's router address is not kept as G1's, and
+// the next full read learns and refuses G1's own.
+func TestQuickLearnGatewayChangeDropsOldExternal(t *testing.T) {
+	e1, e2 := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+	g1, g2 := netip.MustParseAddr("192.168.1.1"), netip.MustParseAddr("192.168.2.1")
+	gw, ext := "0101A8C0", e1
+	s := &Sources{
+		Addrs: func() ([]net.Addr, error) {
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.77"), Mask: net.CIDRMask(16, 32)}}, nil
+		},
+		ReadFile: func(f string) ([]byte, error) {
+			if f == "/proc/net/route" {
+				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t" + gw + "\t0003\t0\t0\t100\t00000000\n"), nil
+			}
+			return nil, errors.New("absent")
+		},
+		External: func(context.Context, netip.Addr) (netip.Addr, error) { return ext, nil },
+	}
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	learned := func() Network {
+		p.mu.RLock()
+		defer p.mu.RUnlock()
+		return p.net
+	}
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	gw, ext = "0102A8C0", e2 // to G2
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if n := learned(); n.Gateway != g2 || n.External != e2 {
+		t.Fatalf("after the G2 read: gateway %v external %v, want %v %v", n.Gateway, n.External, g2, e2)
+	}
+	gw, ext = "0101A8C0", e1 // back to G1
+	p.quickLearn()
+	if n := learned(); n.Gateway != g1 || n.External.IsValid() {
+		t.Fatalf("after the quick read back on G1: gateway %v external %v, want %v and none (G2's address is not G1's)", n.Gateway, n.External, g1)
+	}
+	if err := p.Check(context.Background(), e2, 443, "tcp"); err != nil {
+		t.Fatalf("G2's router address is still refused on G1: %v", err)
+	}
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Check(context.Background(), e1, 443, "tcp"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("G1's router address is dialable after the full read: %v", err)
+	}
+}
