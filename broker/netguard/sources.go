@@ -27,9 +27,39 @@ type Sources struct {
 	// means ExternalAddr (NAT-PMP).
 	External func(ctx context.Context, gateway netip.Addr) (netip.Addr, error)
 
-	mu      sync.Mutex
-	lastGW  netip.Addr
-	lastExt netip.Addr
+	mu   sync.Mutex
+	exts []gatewayExternal // most recently read first, at most maxGatewayExternals
+}
+
+// gatewayExternal is the router's external address last read on a gateway.
+type gatewayExternal struct {
+	gw, ext netip.Addr
+}
+
+// maxGatewayExternals bounds how many gateways' external addresses Sources
+// keeps. A forgotten gateway is read again like a new one.
+const maxGatewayExternals = 8
+
+// externalLocked returns the external address last read on gw; s.mu is held.
+func (s *Sources) externalLocked(gw netip.Addr) netip.Addr {
+	for _, e := range s.exts {
+		if e.gw == gw {
+			return e.ext
+		}
+	}
+	return netip.Addr{}
+}
+
+// rememberLocked records ext as gw's and makes gw the most recent, dropping
+// the least recently read gateway past the bound; s.mu is held.
+func (s *Sources) rememberLocked(gw, ext netip.Addr) {
+	out := []gatewayExternal{{gw, ext}}
+	for _, e := range s.exts {
+		if e.gw != gw && len(out) < maxGatewayExternals {
+			out = append(out, e)
+		}
+	}
+	s.exts = out
 }
 
 // resolvConfs are read in order; the first with a usable nameserver wins.
@@ -40,8 +70,8 @@ var resolvConfs = []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf
 // Read learns the network now: prefixes from the interface addresses, the
 // default gateway from the kernel routing tables, the resolver from the
 // DHCP- or RA-written resolv.conf, and the router's external address from
-// NAT-PMP (kept from the last read while the gateway is unchanged and the
-// gateway does not answer). A read that finds no non-loopback interface
+// NAT-PMP (when the gateway does not answer, the last address read on that
+// gateway, else none). A read that finds no non-loopback interface
 // prefix fails, so the last learned set stays.
 func (s *Sources) Read() (Network, error) {
 	n, err := s.ReadLocal()
@@ -57,20 +87,20 @@ func (s *Sources) Read() (Network, error) {
 	cancel()
 	s.mu.Lock()
 	if err == nil && a.IsValid() {
-		s.lastExt = a.Unmap()
-	} else if s.lastGW != n.Gateway {
-		s.lastExt = netip.Addr{}
+		s.rememberLocked(n.Gateway, a.Unmap())
+	} else if e := s.externalLocked(n.Gateway); e.IsValid() {
+		s.rememberLocked(n.Gateway, e)
 	}
-	s.lastGW = n.Gateway
-	n.External = s.lastExt
+	n.External = s.externalLocked(n.Gateway)
 	s.mu.Unlock()
 	return n, nil
 }
 
 // ReadLocal is Read without the router: interface prefixes, gateway and
 // resolver from the host alone, never blocking on the network. The external
-// address is the last one read while the gateway is unchanged, else empty.
-// A change event applies it at once, before the full Read completes.
+// address is the last one read on this gateway, else empty, so a return to a
+// known gateway refuses that router's address at once. A change event
+// applies it before the full Read completes.
 func (s *Sources) ReadLocal() (Network, error) {
 	addrs := s.Addrs
 	if addrs == nil {
@@ -106,8 +136,8 @@ func (s *Sources) ReadLocal() (Network, error) {
 		}
 	}
 	s.mu.Lock()
-	if n.Gateway.IsValid() && s.lastGW == n.Gateway {
-		n.External = s.lastExt
+	if n.Gateway.IsValid() {
+		n.External = s.externalLocked(n.Gateway)
 	}
 	s.mu.Unlock()
 	return n, nil
