@@ -237,10 +237,29 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
+	return c.post(class, agentText(text), true)
+}
+
+// NotifyNow is Notify for agent-derived text that starts a deadline when
+// it is sent, such as an owner question whose wait begins at its text
+// (CAP-10). It is never held: a held text would return nil while its
+// deadline ran (#989, #1563). The caller paces it instead, keeping quiet
+// hours (Quiet) and reserving the CH-15 budget (grants.Gate.Reserve)
+// before calling. A text sent counts toward the hour.
+func (c *Channel) NotifyNow(text string) error {
+	if c.cfg.Modem == nil {
+		return errors.New("owner: no modem")
+	}
+	return c.sendCounted(agentText(text))
+}
+
+// agentText discloses agent-derived text, prefixes it with AgentPrefix
+// unless it was withheld, and fits it to one text.
+func agentText(text string) string {
 	if text = Disclose(text); text != Hidden {
 		text = AgentPrefix + text
 	}
-	return c.post(class, control.Fit(text), true)
+	return control.Fit(text)
 }
 
 // sendCounted sends text to the owner and, if it went, counts it.
@@ -423,6 +442,15 @@ func (c *Channel) Quiet(t time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.quietLocked(t)
+}
+
+// QuietHours reports whether the owner has set quiet hours at all, for a
+// caller that cannot read the time to ask Quiet.
+func (c *Channel) QuietHours() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p := c.codes.st.Pacing
+	return p.QuietFrom != p.QuietTo
 }
 
 func (c *Channel) quietLocked(t time.Time) bool {

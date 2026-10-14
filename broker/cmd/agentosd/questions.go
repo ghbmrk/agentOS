@@ -130,8 +130,18 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 		return err
 	}
 	b, err := question.New(question.Config{
-		Send: ch.Notify,
+		// Never held: a question's wait starts at its text, so the book
+		// paces it itself, keeping quiet hours and reserving the CH-15
+		// budget before sending (#1563). An agent class the owner made
+		// urgent ignores quiet hours, as Notify did.
+		Send: ch.NotifyNow,
 		Now:  guard.Now,
+		Quiet: func(t time.Time) bool {
+			return !ch.Urgent(owner.ClassAgent) && ch.Quiet(t)
+		},
+		QuietHours: func() bool {
+			return !ch.Urgent(owner.ClassAgent) && ch.QuietHours()
+		},
 		Reveal: func(machine string) error {
 			m := pre.m.Load()
 			if m == nil {
