@@ -49,23 +49,27 @@ func (c *custody) setupOpen() error {
 }
 
 // setupProviders lists each built-in adapter, whether the vault holds its
-// key and the owner's private-data answer. It never reads a key's value.
+// key and the owner's saved private-data answer, never the -private-ok
+// flag: setup's box defaults to that answer, and saving it records a
+// lasting owner answer (D-115, Security S1 on #1588). It never reads a
+// key's value.
 func (c *custody) setupProviders() ([]modelroute.SetupProvider, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.setupOpen(); err != nil {
 		return nil, err
 	}
-	return c.providersLocked(), nil
+	return c.providersLocked(false), nil
 }
 
-// providersLocked lists the built-in providers. A provider's private
-// answer is the router's (route.go privateOK): its -private-ok flag or
-// the owner's marker (#1420). Caller holds mu with the vault open.
-func (c *custody) providersLocked() []modelroute.SetupProvider {
+// providersLocked lists the built-in providers. With withFlag, a
+// provider's private answer is the router's (route.go privateOK): its
+// -private-ok flag or the owner's marker (#1420); without, the marker
+// only. Caller holds mu with the vault open.
+func (c *custody) providersLocked(withFlag bool) []modelroute.SetupProvider {
 	var out []modelroute.SetupProvider
 	for _, a := range adapters() {
-		flag := c.privateFlags[a.Name]
+		flag := withFlag && c.privateFlags[a.Name]
 		out = append(out, modelroute.SetupProvider{
 			ID:              a.Name,
 			Name:            providerName(a.Name),

@@ -229,14 +229,32 @@ func TestTheListSaysWhenThisBoxsConfigurationAllowsPrivateData(t *testing.T) {
 	if p := list()["anthropic"]; !p.PrivateOK || !p.PrivateByConfig {
 		t.Fatalf("after the refused withdraw: %+v", p)
 	}
-	// Setup's list reports the same answer.
-	r.c.mu.Lock()
-	ps := r.c.providersLocked()
-	r.c.mu.Unlock()
-	for _, p := range ps {
-		if p.ID == "anthropic" && (!p.PrivateOK || !p.PrivateByConfig) {
-			t.Fatalf("setup's list: %+v", p)
+}
+
+// Security S1 on #1588 (CAP-9, REV-6; D-115): setup's list reports the
+// owner's saved answer only, never the -private-ok flag, since setup's
+// box defaults to it and saving the box records a lasting owner yes.
+func TestSetupsListIgnoresThePrivateFlag(t *testing.T) {
+	r := openRig(t)
+	r.c.privateFlags = map[string]bool{"anthropic": true}
+	setupList := func() map[string]modelroute.SetupProvider {
+		t.Helper()
+		r.c.mu.Lock()
+		defer r.c.mu.Unlock()
+		out := map[string]modelroute.SetupProvider{}
+		for _, p := range r.c.providersLocked(false) {
+			out[p.ID] = p
 		}
+		return out
+	}
+	if p := setupList()["anthropic"]; p.PrivateOK || p.PrivateByConfig {
+		t.Fatalf("setup's list with only the flag: %+v", p)
+	}
+	if err := r.c.putPrivate("anthropic", true, r.next()); err != nil {
+		t.Fatal(err)
+	}
+	if p := setupList()["anthropic"]; !p.PrivateOK || p.PrivateByConfig {
+		t.Fatalf("setup's list with the owner's yes: %+v", p)
 	}
 }
 

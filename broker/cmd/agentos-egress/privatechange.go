@@ -16,14 +16,15 @@ import (
 // next call without a restart.
 
 // providerList is the providers with whether a key is held and whether
-// private data is allowed, never a key (CRED-1). It needs an open vault.
+// private data is allowed, by the flag or the marker as the router asks,
+// never a key (CRED-1). It needs an open vault.
 func (c *custody) providerList() ([]modelroute.SetupProvider, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ph != open {
 		return nil, errLocked
 	}
-	return c.providersLocked(), nil
+	return c.providersLocked(true), nil
 }
 
 // errPrivateByConfig: a withdraw removed the owner's marker, but this
