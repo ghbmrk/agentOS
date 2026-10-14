@@ -545,6 +545,41 @@ func TestRestartServesTheCardsNetwork(t *testing.T) {
 	}
 }
 
+// A new card reported after the confirm (a reset card is a new card)
+// replaces the network: the access point goes down before the new one
+// comes up, never a Rekey (#1185).
+func TestANewNetworkAfterTheConfirmGoesDownThenUp(t *testing.T) {
+	b := newBox(t, "wlan0")
+	b.reportCardNet(t)
+	os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600)
+	cancel, done := b.runAsync(t)
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { return b.startedCount() == 1 })
+	assertCardNet(t, b, b.startedAt(0))
+	var mu sync.Mutex
+	var startsAtStop []int
+	b.ap.mu.Lock()
+	b.ap.onStop = func() { n := b.startedCount(); mu.Lock(); startsAtStop = append(startsAtStop, n); mu.Unlock() }
+	b.ap.mu.Unlock()
+	next := apnet.Network{SSID: "AgentOS-ZZ99", Password: "ZZZZ-YYYY-XXXX-WWWW"}
+	m, err := next.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b.cfg.APNet, m, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.startedCount() == 2 })
+	if got := b.startedAt(1); got.SSID != next.SSID || got.Password != next.Password {
+		t.Fatalf("served %q, want the new card's network", got.SSID)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(startsAtStop) == 0 || startsAtStop[0] != 1 {
+		t.Fatalf("the old network was not brought down before the new came up (starts at each Stop: %v)", startsAtStop)
+	}
+}
+
 // A box with no setup network (one the owner set up from a download)
 // serves nothing until the card is confirmed, then the card's network.
 func TestABoxWithNoSetupNetworkServesTheCardsAtTheConfirm(t *testing.T) {
@@ -574,8 +609,10 @@ func TestAMalformedCardNetworkFails(t *testing.T) {
 	b := newBox(t, "wlan0")
 	os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600)
 	os.WriteFile(b.cfg.APNet, []byte(`{"ssid":"AgentOS-AB2C","password":"short"}`), 0o600)
-	if err := b.run(context.Background()); err == nil {
-		t.Fatal("run took a malformed card network")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := b.run(ctx); err == nil || ctx.Err() != nil {
+		t.Fatalf("run took a malformed card network: %v", err)
 	}
 	if b.startedCount() != 0 {
 		t.Fatal("served a malformed card network")

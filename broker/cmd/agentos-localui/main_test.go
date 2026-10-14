@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	mrand "math/rand"
 	"net"
@@ -482,5 +485,39 @@ func TestTheCardStepReportsTheCardsNetwork(t *testing.T) {
 	calls = nil
 	if err := withCardNet(nil, box).Card.Provision(c); err != nil || fmt.Sprint(calls) != "[provision]" {
 		t.Fatalf("without agentosd: %v, calls %v", err, calls)
+	}
+}
+
+// Production wiring (#1185): withFirstBoot hands firstboot.Begin the box
+// wrapped by withCardNet, so the page's card step reports the network
+// before it provisions.
+func TestFirstBootWiresTheCardNetwork(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wired := false
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "withFirstBoot" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok || len(c.Args) != 1 {
+				return true
+			}
+			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Begin" {
+				if in, ok := c.Args[0].(*ast.CallExpr); ok {
+					if id, ok := in.Fun.(*ast.Ident); ok && id.Name == "withCardNet" {
+						wired = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	if !wired {
+		t.Fatal("withFirstBoot does not pass firstboot.Begin the box through withCardNet")
 	}
 }
