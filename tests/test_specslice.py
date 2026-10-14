@@ -170,3 +170,42 @@ class PacketTest(Repo):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealSpecTest(unittest.TestCase):
+    """Blocks of the real SPEC.md are whole: no indented text is left behind after a blank line."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = (pathlib.Path(__file__).resolve().parent.parent / "SPEC.md").read_text()
+        cls.table = specslice.parse(cls.text)
+
+    def test_blocks_continue_across_blank_lines(self):
+        tails = {
+            "HW-8": "the box MUST NOT mention",
+            "CRED-5": "non-interactive mode takes the brief",
+            "CRED-8": "The owner MAY replace the passphrase",
+            "CHG-6": "Each adoption is journaled",
+        }
+        for rid, tail in tails.items():
+            with self.subTest(rid):
+                self.assertIn(tail, self.table[rid][1])
+
+    def test_every_slice_is_its_whole_block(self):
+        lines = self.text.split("\n")
+        for rid, (_chain, block) in self.table.items():
+            first = block.split("\n")[0]
+            if first.lstrip().startswith("|"):
+                continue
+            start = lines.index(first)
+            end = start + len(block.split("\n"))
+            self.assertEqual(lines[start:end], block.split("\n"), rid)
+            item = specslice.ITEM.match(first)
+            base = len(item.group(1)) if item else 0
+            for nxt in lines[end:]:
+                if not nxt.strip():
+                    continue
+                if (specslice.HEADING.match(nxt) or nxt.lstrip().startswith("```")
+                        or specslice.ID_DEF.search(nxt) or len(nxt) - len(nxt.lstrip()) <= base):
+                    break
+                self.fail(f"{rid}: indented text left out of the slice: {nxt[:60]!r}")

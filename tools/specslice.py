@@ -46,13 +46,21 @@ def parse(spec_text):
         if not line.lstrip().startswith("|"):
             item = ITEM.match(line)
             indent = len(item.group(1)) if item else None
+            base = indent or 0
             for nxt in lines[i + 1:]:
-                if not nxt.strip() or HEADING.match(nxt) or nxt.lstrip().startswith("```") or ID_DEF.search(nxt):
+                if not nxt.strip():
+                    block.append(nxt)  # kept only if a deeper-indented line follows
+                    continue
+                if HEADING.match(nxt) or nxt.lstrip().startswith("```") or ID_DEF.search(nxt):
+                    break
+                if not block[-1].strip() and len(nxt) - len(nxt.lstrip()) <= base:
                     break
                 m = ITEM.match(nxt)
                 if indent is not None and m and len(m.group(1)) <= indent:
                     break
                 block.append(nxt)
+            while not block[-1].strip():
+                block.pop()
         for rid in ids:
             out.setdefault(rid, ([c[1] for c in chain], "\n".join(block)))
     return out

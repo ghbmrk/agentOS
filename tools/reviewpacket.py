@@ -13,7 +13,7 @@ Usage:
   tools/reviewpacket.py 1234                 a PR number (REST via gh api; commits fetched if absent)
   tools/reviewpacket.py origin/main..HEAD    a range
   options: --id PKG-ID (brief name; default: first word of the PR title or head commit subject)
-           --out FILE (default reviewpacket-<head7>.md)  --root DIR
+           --out FILE (default: reviewpacket-<head7>.md in the system temp dir)  --root DIR
 """
 import argparse
 import json
@@ -21,6 +21,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import specslice  # noqa: E402
@@ -154,7 +155,7 @@ def main(argv=None):
         head = sh(root, "git", "rev-parse", "--verify", f"{m.group(2)}^{{commit}}").stdout.strip()
         label = args.target
     text = build(root, base, head, label, title, body, args.id)
-    out = pathlib.Path(args.out or f"reviewpacket-{head[:7]}.md")
+    out = pathlib.Path(args.out or pathlib.Path(tempfile.gettempdir()) / f"reviewpacket-{head[:7]}.md")
     out.write_text(text)
     print(out)
     return 0
