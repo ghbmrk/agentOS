@@ -325,3 +325,21 @@ func TestCardFormatsRedacted(t *testing.T) {
 		}
 	}
 }
+
+// #1185: at the confirm the box's Wi-Fi switches to the card's, so the
+// first card's page tells the phone to rejoin with the card's Wi-Fi QR
+// code before it confirms. A rotation's page does not: the switch is the
+// first card's only.
+func TestTheCardPageSaysToRejoinWithTheCardsWiFi(t *testing.T) {
+	const rejoin = "join that Wi-Fi with your card's Wi-Fi QR code"
+	x := newRig(t)
+	body := do(t, x.d.Handler(paired, "/setup"), "GET", "/card", nil, true, nil).Body.String()
+	at, confirm := strings.Index(body, rejoin), strings.Index(body, `type="submit">Confirm`)
+	if at < 0 || confirm < 0 || at > confirm {
+		t.Fatalf("the rejoin text is missing or after the confirm (%d, %d)", at, confirm)
+	}
+	y := newRotRig(t, Parts{WiFi: true})
+	if body := do(t, y.d.Handler(paired, "/home"), "GET", "/rotate/card", nil, true, nil).Body.String(); strings.Contains(body, rejoin) {
+		t.Fatal("a rotation's page tells the phone to rejoin")
+	}
+}
