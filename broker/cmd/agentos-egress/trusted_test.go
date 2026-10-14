@@ -1162,13 +1162,35 @@ func TestPINEnrollAfterTheSlotIsDecidedKeepsTheLockout(t *testing.T) {
 	r := newPCRig(t)
 	r.unknownHostUnlock(t)
 	defer vault.InjectSealFault(errors.New("input/output error"))()
-	if _, err := r.c.trust(r.code(), "246810"); !errors.Is(err, errHostSlotDecided) {
+	r.notes = nil
+	if _, err := r.c.trust(r.code(), "246810"); !errors.Is(err, errHostSlotDecidedPIN) {
 		t.Fatalf("enroll after the seal: %v", err)
+	}
+	// The owner channel records that the PC became trusted (#1557 review).
+	if len(r.notes) != 1 || !strings.Contains(r.notes[0], "trusted host") || !strings.Contains(r.notes[0], "did not finish") {
+		t.Fatalf("owner not told the PC is trusted: %q", r.notes)
 	}
 	if r.lockoutEntry() == "" {
 		t.Fatal("lockout authorization dropped though the PIN slot was decided")
 	}
 	if err := r.tpm.ThiefLockReset(); err == nil {
 		t.Fatal("empty lockout password resets the PIN guess counter: the lockout was released")
+	}
+}
+
+// REQ: CRED-8, HW-1
+
+// Without a PIN the decided path reports the plain message and still tells
+// the owner channel.
+func TestEnrollWithoutPINAfterTheSlotIsDecided(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	defer vault.InjectSealFault(errors.New("input/output error"))()
+	r.notes = nil
+	if _, err := r.c.trust(r.code(), ""); !errors.Is(err, errHostSlotDecided) {
+		t.Fatalf("enroll after the seal: %v", err)
+	}
+	if len(r.notes) != 1 || !strings.Contains(r.notes[0], "did not finish") {
+		t.Fatalf("owner not told: %q", r.notes)
 	}
 }

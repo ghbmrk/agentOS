@@ -456,3 +456,42 @@ func TestSlotChangeErrorAfterTheSealIsTyped(t *testing.T) {
 		t.Fatalf("staged write before the seal: %v", err)
 	}
 }
+
+// REQ: CRED-8, REC-4, HW-1
+// A failed seal write (the vault file itself) is before the decision, so
+// the change is not decided and is not typed so.
+func TestSlotChangeWhoseSealFailsIsNotTyped(t *testing.T) {
+	v, vp, _ := openWithPassphrase(t)
+	writeFile = func(p string, raw []byte, perm os.FileMode) error {
+		if p == vp {
+			return errors.New("no space left on device")
+		}
+		return durable.WriteFile(p, raw, perm)
+	}
+	t.Cleanup(func() { writeFile = durable.WriteFile })
+	alpha := newHost("alpha")
+	err := v.AddSlot(alpha, sameHost(alpha))
+	if err == nil || errors.Is(err, ErrSlotDecided) {
+		t.Fatalf("seal write that failed: %v", err)
+	}
+}
+
+// InjectSealFault fails a slot change after its seal, typed, and restore
+// puts back the fault that was set before it.
+func TestInjectSealFault(t *testing.T) {
+	outer := errors.New("outer")
+	restoreOuter := InjectSealFault(outer)
+	restoreInner := InjectSealFault(errors.New("inner"))
+	restoreInner()
+	v, _, _ := openWithPassphrase(t)
+	alpha := newHost("alpha")
+	if err := v.AddSlot(alpha, sameHost(alpha)); !errors.Is(err, ErrSlotDecided) || !errors.Is(err, outer) {
+		t.Fatalf("after restoring the inner fault: %v", err)
+	}
+	restoreOuter()
+	v, _, _ = openWithPassphrase(t)
+	beta := newHost("beta")
+	if err := v.AddSlot(beta, sameHost(beta)); err != nil {
+		t.Fatalf("after restoring the outer fault: %v", err)
+	}
+}

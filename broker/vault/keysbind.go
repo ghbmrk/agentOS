@@ -117,7 +117,11 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 	if cerr == nil && passphraseChanged(cur, kf) {
 		v.unfinished = false
 	}
-	if err := crashPoint(crashKeysSealed); err != nil {
+	err = crashPoint(crashKeysSealed)
+	if err == nil {
+		err = injectedSealFault()
+	}
+	if err != nil {
 		return fmt.Errorf("%w: %w", ErrSlotDecided, err)
 	}
 	if err := v.finishKeys(); err != nil {
