@@ -87,6 +87,7 @@ class RiskTierTest(unittest.TestCase):
             "guest/builder/build-rootfs.sh",
             "guest/codex/agentos-toolsh",
             "guest/codex/managed_config.toml",
+            "guest/codex/requirements.toml",
             "guest/codex/launch.json",
             "broker/cmd/agentos-modem/agentos-modem.service",
             "broker/attention/systemd/x.conf",
