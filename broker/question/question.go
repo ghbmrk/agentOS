@@ -881,11 +881,15 @@ func (b *Book) sendDue(ctx context.Context) {
 	defer b.sendMu.Unlock()
 	for {
 		// A cancelled ctx is not a restricted clock: Now fails with
-		// ctx.Err, and texting then would give no deadline (#1564).
+		// ctx.Err, and texting then would give no deadline (#1564). The
+		// ctx can end during Now, so it is checked again after.
 		if ctx.Err() != nil {
 			return
 		}
 		now, err := b.cfg.Now(ctx)
+		if ctx.Err() != nil {
+			return
+		}
 		trusted := err == nil
 		if b.waitsQuiet(now, trusted) {
 			return
@@ -1190,6 +1194,9 @@ func (b *Book) dateLocked(e *entry, now time.Time, m time.Duration) bool {
 // ones with their wait instead of a time (PQ4).
 func (b *Book) Tick(ctx context.Context) {
 	now, err := b.cfg.Now(ctx)
+	if ctx.Err() != nil { // a cancelled ctx is not a restricted clock (#1564)
+		return
+	}
 	if err != nil {
 		b.tickRestricted()
 		b.sendDue(ctx)

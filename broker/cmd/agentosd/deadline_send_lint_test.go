@@ -27,8 +27,16 @@ var deadlineSenders = map[string]string{"question.Config": "Send"}
 // nonHolding is the owner channel's never-held send path for agent text.
 var nonHolding = map[string]bool{"NotifyNow": true}
 
+// selfPacing names, per config type, the fields through which the sender
+// paces itself and the agentosd helper each must call: without them a
+// non-holding send would text in the owner's quiet hours (M9-M11).
+var selfPacing = map[string]map[string]string{
+	"question.Config": {"Quiet": "questionQuiet", "QuietHours": "questionQuietHours"},
+}
+
 // TestDeadlineTextsNeverUseTheHoldingPath checks every deadline sender
-// in agentosd's non-test files is wired to a non-holding send.
+// in agentosd's non-test files is wired to a non-holding send and paces
+// itself through the tested quiet-hours helpers.
 func TestDeadlineTextsNeverUseTheHoldingPath(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -66,6 +74,7 @@ func TestDeadlineTextsNeverUseTheHoldingPath(t *testing.T) {
 				return true
 			}
 			found++
+			checkPacing(t, fset, lit, pkg.Name+"."+sel.Sel.Name)
 			for _, el := range lit.Elts {
 				kv, ok := el.(*ast.KeyValueExpr)
 				if !ok {
@@ -86,5 +95,34 @@ func TestDeadlineTextsNeverUseTheHoldingPath(t *testing.T) {
 	}
 	if found == 0 {
 		t.Fatal("no deadline sender found; the lint is checking nothing")
+	}
+}
+
+// checkPacing reports each self-pacing field of lit that is unset or not
+// a call to its helper.
+func checkPacing(t *testing.T, fset *token.FileSet, lit *ast.CompositeLit, typ string) {
+	t.Helper()
+	for field, helper := range selfPacing[typ] {
+		set := false
+		for _, el := range lit.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			if key, ok := kv.Key.(*ast.Ident); !ok || key.Name != field {
+				continue
+			}
+			set = true
+			var fn *ast.Ident
+			if call, ok := kv.Value.(*ast.CallExpr); ok {
+				fn, _ = call.Fun.(*ast.Ident)
+			}
+			if fn == nil || fn.Name != helper {
+				t.Errorf("%s: %s.%s is not %s(...)", fset.Position(kv.Pos()), typ, field, helper)
+			}
+		}
+		if !set {
+			t.Errorf("%s: %s.%s not set", fset.Position(lit.Pos()), typ, field)
+		}
 	}
 }

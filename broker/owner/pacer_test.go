@@ -658,8 +658,9 @@ func TestRestartTextIsNeverHeld(t *testing.T) {
 
 // REQ: CH-15, CAP-10 (#1563)
 // NotifyNow is the send path for texts that start a deadline (an owner
-// question): it is never held, even in quiet hours behind a held text,
-// and every text sent counts toward the hour.
+// question): it is never held. In quiet hours or with no allowance left
+// it refuses with ErrPaced (unless the agent class is urgent); otherwise
+// it goes at once, even behind a held text, and counts toward the hour.
 func TestNotifyNowSendsAtOnceAndCounts(t *testing.T) {
 	r := pacedRig(t, quiet22to7(), 23, 0)
 	if !r.ch.QuietHours() {
@@ -674,8 +675,19 @@ func TestNotifyNowSendsAtOnceAndCounts(t *testing.T) {
 	if len(r.held()) != 1 {
 		t.Fatalf("held %d, want the Notify text", len(r.held()))
 	}
+	// In quiet hours NotifyNow refuses rather than holds (#1563 R2).
+	if err := r.ch.NotifyNow("Q1 asks: which time?"); !errors.Is(err, ErrPaced) {
+		t.Fatalf("NotifyNow in quiet hours: %v, want ErrPaced", err)
+	}
+	if got := r.sentTexts(); len(got) != 0 || len(r.held()) != 1 {
+		t.Fatalf("NotifyNow in quiet hours sent %q, held %d", got, len(r.held()))
+	}
+
+	// After quiet hours it goes at once, ahead of the held text, and
+	// counts toward the hour.
+	r.advance(9 * time.Hour)
 	before := r.ch.Allowance(r.clock())
-	if err := r.ch.NotifyNow("Q1 asks: which time? Answer by 23:30."); err != nil {
+	if err := r.ch.NotifyNow("Q1 asks: which time? Answer by 8:30."); err != nil {
 		t.Fatal(err)
 	}
 	got := r.sentTexts()
@@ -687,6 +699,29 @@ func TestNotifyNowSendsAtOnceAndCounts(t *testing.T) {
 	}
 	if len(r.held()) != 1 {
 		t.Fatalf("NotifyNow changed the hold: %d texts", len(r.held()))
+	}
+
+	// With the allowance spent it refuses, sending and holding nothing.
+	for r.ch.Allowance(r.clock()) > 0 {
+		if err := r.ch.NotifyNow("Q2 asks: which day?"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.sentTexts()
+	if err := r.ch.NotifyNow("Q3 asks: which room?"); !errors.Is(err, ErrPaced) {
+		t.Fatalf("NotifyNow at allowance 0: %v, want ErrPaced", err)
+	}
+	if got := r.sentTexts(); len(got) != 0 || len(r.held()) != 1 {
+		t.Fatalf("NotifyNow at allowance 0 sent %q, held %d", got, len(r.held()))
+	}
+
+	// URGENT AGENT ON sends it in quiet hours.
+	u := pacedRig(t, Pacing{QuietFrom: 22 * 60, QuietTo: 7 * 60, Urgent: []Class{ClassAgent}}, 23, 0)
+	if err := u.ch.NotifyNow("Q4 asks: which time?"); err != nil {
+		t.Fatal(err)
+	}
+	if got := u.sentTexts(); len(got) != 1 {
+		t.Fatalf("urgent agent NotifyNow sent %q, want one text", got)
 	}
 
 	none := newRig(t, nil)

@@ -134,14 +134,10 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 		// paces it itself, keeping quiet hours and reserving the CH-15
 		// budget before sending (#1563). An agent class the owner made
 		// urgent ignores quiet hours, as Notify did.
-		Send: ch.NotifyNow,
-		Now:  guard.Now,
-		Quiet: func(t time.Time) bool {
-			return !ch.Urgent(owner.ClassAgent) && ch.Quiet(t)
-		},
-		QuietHours: func() bool {
-			return !ch.Urgent(owner.ClassAgent) && ch.QuietHours()
-		},
+		Send:       ch.NotifyNow,
+		Now:        guard.Now,
+		Quiet:      questionQuiet(ch),
+		QuietHours: questionQuietHours(ch),
 		Reveal: func(machine string) error {
 			m := pre.m.Load()
 			if m == nil {
@@ -164,6 +160,29 @@ func (q *questions) open(ctx context.Context, d *daemon.Daemon, pre *preempter, 
 	go func() { defer q.run.Done(); guard.Run(ctx) }()
 	go func() { defer q.run.Done(); b.Run(ctx, 30*time.Second) }()
 	return nil
+}
+
+// quietSource is the owner channel's view of quiet hours.
+type quietSource interface {
+	Urgent(owner.Class) bool
+	Quiet(time.Time) bool
+	QuietHours() bool
+}
+
+// questionQuiet holds a question in the owner's quiet hours unless the
+// owner made agent texts urgent (QH-5, #1563).
+func questionQuiet(ch quietSource) func(time.Time) bool {
+	return func(t time.Time) bool {
+		return !ch.Urgent(owner.ClassAgent) && ch.Quiet(t)
+	}
+}
+
+// questionQuietHours is questionQuiet for a caller that cannot read the
+// time: whether any quiet hours could hold a question.
+func questionQuietHours(ch quietSource) func() bool {
+	return func() bool {
+		return !ch.Urgent(owner.ClassAgent) && ch.QuietHours()
+	}
 }
 
 // start is open, logging a failure and recording it for STATUS (OP-9

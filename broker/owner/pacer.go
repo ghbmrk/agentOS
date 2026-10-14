@@ -240,17 +240,36 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	return c.post(class, agentText(text), true)
 }
 
+// ErrPaced is NotifyNow's refusal in quiet hours or past the allowance.
+var ErrPaced = errors.New("owner: quiet hours or no texts left this hour")
+
 // NotifyNow is Notify for agent-derived text that starts a deadline when
 // it is sent, such as an owner question whose wait begins at its text
 // (CAP-10). It is never held: a held text would return nil while its
-// deadline ran (#989, #1563). The caller paces it instead, keeping quiet
-// hours (Quiet) and reserving the CH-15 budget (grants.Gate.Reserve)
+// deadline ran (#989, #1563). Unless the agent class is urgent, it
+// returns ErrPaced in quiet hours or with no allowance left, checked and
+// sent under pmu so a concurrent post cannot spend the last text first;
+// the caller keeps the text and tries later. The caller still reserves
+// the CH-15 budget it shares with approval requests (grants.Gate.Reserve)
 // before calling. A text sent counts toward the hour.
 func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	return c.sendCounted(agentText(text))
+	text = agentText(text)
+	if c.Urgent(ClassAgent) {
+		return c.sendCounted(text)
+	}
+	c.pmu.Lock()
+	defer c.pmu.Unlock()
+	now := c.cfg.Now()
+	c.mu.Lock()
+	paced := c.quietLocked(now) || c.allowanceLocked(now) == 0
+	c.mu.Unlock()
+	if paced {
+		return ErrPaced
+	}
+	return c.sendCounted(text)
 }
 
 // agentText discloses agent-derived text, prefixes it with AgentPrefix

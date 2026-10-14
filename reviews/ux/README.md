@@ -24,6 +24,7 @@ Finding kinds CI now catches; the screen no longer looks for them by hand (OPERA
 |---|---|---|
 | CH-12 "a problem text names a step that cannot work" (UX run 2, #327, #423; #409 U6), for the held-restore texts only | `TestHeldOwnerTextsNameOnlyStepsThatWork` (broker/cmd/agentosd/held_test.go): each text a held box can send names only steps that work in its state, is GSM-7 within three segments, and lists exactly the replies taken. Other owner texts are still screened by hand. | W3-forget-b1-7 |
 | "Finding text names an identifier, or alarms with no step" (#523, #515) | `TestFindingTextsNameNoIdentifiersAndNeverAlarmWithoutAStep` (broker/loops/ownertext_test.go): every check's owner line and cleared line, in each containment state, is GSM-7 within three segments; an urgent line names a pause or a reply and a line naming one is urgent; LOOP-7 lines built from hostile subjects show no Go identifier, path or hex run. `TestThePlainNameMapCoversEveryLoop7Subject` keeps the plain-name map complete. | P3-4b-3c |
+| "A deadline-bearing text goes through the holding path, so its wait runs on a text the owner has not seen" (#989, #1563) | `TestDeadlineTextsNeverUseTheHoldingPath` (broker/cmd/agentosd/deadline_send_lint_test.go): every `question.Config` in agentosd sends through `owner.Channel.NotifyNow`, which never holds, and paces itself through `questionQuiet` and `questionQuietHours`, which `TestQuestionQuietWiring` checks keep quiet hours unless agent texts are urgent. | QUESTION-send-unheld |
 
 ## Spec-wide runs
 

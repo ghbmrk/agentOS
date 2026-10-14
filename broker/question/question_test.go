@@ -817,6 +817,66 @@ func TestAnswerDatesAQuestionTextedWhileRestricted(t *testing.T) {
 }
 
 // REQ: CAP-10, CH-15 (#1564)
+// An answer that comes after the wait of a question texted while the
+// clock was restricted, but before any tick dated it, is too late: the
+// question defaults, as if the deadline had been set at the text.
+func TestLateAnswerToAQuestionTextedWhileRestricted(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Quiet = nil })
+	r.set(func() { r.restricted = true })
+	st := r.ask("lin1", "q1", slot())
+	if len(r.texts()) != 1 || !st.Deadline.IsZero() {
+		t.Fatalf("texts %q status %+v, want one text with no deadline yet", r.texts(), st)
+	}
+	r.set(func() { r.restricted = false })
+	r.advance(31 * time.Minute)
+	if reply, ok := r.answer(st.ID + " 9:00"); !ok || !strings.HasPrefix(reply, "Too late for "+st.ID) {
+		t.Fatalf("answer reply %q ok=%v, want Too late", reply, ok)
+	}
+	got := r.status("lin1", "q1")
+	if got.State != Defaulted {
+		t.Fatalf("status %+v, want Defaulted", got)
+	}
+}
+
+// REQ: CAP-10, CH-15 (#1564)
+// The ctx can end while Now runs, which then fails with ctx.Err. That is
+// not a restricted clock either: nothing is texted.
+func TestContextCancelledDuringNowTextsNothing(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Quiet = nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	now, calls := r.cfg.Now, 0
+	r.cfg.Now = func(c context.Context) (time.Time, error) {
+		if c == ctx {
+			calls++
+			if calls == 2 {
+				cancel()
+				return time.Time{}, c.Err()
+			}
+		}
+		return now(c)
+	}
+	r.open()
+	if _, err := r.b.Ask(ctx, "lin1", "q1", slot()); err != nil {
+		t.Fatal(err)
+	}
+	if calls < 2 {
+		t.Fatalf("Now called %d times on the ask's ctx, want the send's call too", calls)
+	}
+	if len(r.texts()) != 0 {
+		t.Fatalf("texted after the ctx ended during Now: %q", r.texts())
+	}
+	r.b.Tick(ctx)
+	if len(r.texts()) != 0 {
+		t.Fatalf("Tick on an ended ctx texted %q", r.texts())
+	}
+	r.b.Tick(context.Background())
+	got := r.status("lin1", "q1")
+	if len(r.texts()) != 1 || got.State != Waiting || got.Deadline.IsZero() {
+		t.Fatalf("after a live tick: texts %q status %+v, want one text with a deadline", r.texts(), got)
+	}
+}
+
+// REQ: CAP-10, CH-15 (#1564)
 // A cancelled ctx makes the clock guard's Now fail with ctx.Err. That is
 // not a restricted clock: nothing is texted on it, since the text would
 // carry no deadline. The next tick texts the question with a real one.
