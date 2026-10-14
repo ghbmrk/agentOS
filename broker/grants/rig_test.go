@@ -170,6 +170,9 @@ type fakeExec struct {
 	evidence map[string]string
 	// block holds an intent's attempts until its channel is closed.
 	block map[string]chan struct{}
+	// entered, when set, gets an intent's ID once its attempt has read its
+	// block and is about to park on it (sent without blocking).
+	entered chan string
 	// notDone: a check of the intent proves its attempt was not done;
 	// otherwise a check cannot tell.
 	notDone map[string]bool
@@ -178,8 +181,13 @@ type fakeExec struct {
 func (e *fakeExec) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	e.mu.Lock()
 	b := e.block[in.ID]
+	entered := e.entered
 	e.mu.Unlock()
 	if b != nil {
+		select {
+		case entered <- in.ID:
+		default:
+		}
 		<-b
 	}
 	e.mu.Lock()

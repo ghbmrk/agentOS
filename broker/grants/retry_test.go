@@ -38,6 +38,8 @@ func killedSend(t *testing.T, notDone bool) *rig {
 	t.Cleanup(func() { close(hold) })
 	r.exec.mu.Lock()
 	r.exec.block = map[string]chan struct{}{"agent/s1": hold}
+	r.exec.entered = make(chan string, 4)
+	entered := r.exec.entered
 	r.exec.mu.Unlock()
 	if st := r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042", "template": "invoice"}, "sam@example.com"); st.State != journal.Pending {
 		t.Fatalf("send: %s %q", st.State, st.Permission.Reason)
@@ -47,6 +49,13 @@ func killedSend(t *testing.T, notDone bool) *rig {
 	r.g.Decide(owner.Decision{Request: req, Item: 1, Ref: "agent/s1", Approved: true, Why: "owner"})
 	for st := r.state("agent/s1"); len(st.Attempts) == 0; st = r.state("agent/s1") {
 		time.Sleep(time.Millisecond)
+	}
+	// The pre-kill attempt must be parked on hold before block is cleared,
+	// or it reads a nil block, runs, and leaks into the restarted counts.
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pre-kill attempt never reached Execute")
 	}
 	// The kill: the restarted broker reads the journal as it was.
 	data, err := r.store.ReadAll()
@@ -59,6 +68,7 @@ func killedSend(t *testing.T, notDone bool) *rig {
 	}
 	r.exec.mu.Lock()
 	r.exec.block = nil
+	r.exec.entered = nil
 	r.exec.notDone = map[string]bool{"agent/s1": notDone}
 	r.exec.mu.Unlock()
 	r.open()
