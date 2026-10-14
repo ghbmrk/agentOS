@@ -1,6 +1,6 @@
 """CX-name-case: reject new capitalized product text while old exclusions are swept.
 
-The baseline records hashes of existing lines, not permission for more occurrences.
+Only lines a branch adds are checked (merge base with origin/main). The baseline records hashes of existing lines, not permission for more occurrences.
 It can shrink as open PRs and peer-owned paths are corrected. Paths, identifiers,
 historical quotations and generated records retain their existing spelling.
 """
@@ -25,6 +25,37 @@ def fingerprints(text):
     )
 
 
+def git(*args):
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True)
+
+
+def whole_tree():
+    out = {}
+    for name in git("ls-files", "-z").stdout.decode().split("\0"):
+        try:
+            out[name] = (ROOT / name).read_text() if name else ""
+        except (OSError, UnicodeError):
+            continue
+    return out
+
+
+def added_lines():
+    """Added lines per file since the merge base with origin/main; None if unavailable."""
+    base = git("merge-base", "HEAD", "origin/main")
+    if base.returncode:
+        return None
+    diff = git("diff", "-U0", "--no-color", base.stdout.decode().strip(), "HEAD")
+    if diff.returncode:
+        return None
+    out, name = {}, None
+    for line in diff.stdout.decode(errors="replace").splitlines():
+        if line.startswith("+++ "):
+            name = line[6:] if line.startswith("+++ b/") else None
+        elif name and line.startswith("+"):
+            out[name] = out.get(name, "") + line[1:] + "\n"
+    return out
+
+
 class ProductNameTest(unittest.TestCase):
     def test_new_product_text_fails(self):
         baseline = fingerprints("# " + OLD_NAME)
@@ -40,22 +71,20 @@ class ProductNameTest(unittest.TestCase):
     def test_deleting_legacy_text_passes(self):
         self.assertFalse(fingerprints("agentOS") - fingerprints(OLD_NAME))
 
-    def test_tracked_text_has_no_new_capitalized_product_name(self):
+    def test_changed_lines_have_no_new_capitalized_product_name(self):
+        """Only lines this branch adds count: drift arriving from main is not its fault.
+
+        Baseline still absolves moved legacy lines. Without origin/main (shallow
+        checkout) the whole tree is checked against the baseline instead.
+        """
         baseline = json.loads(BASELINE.read_text())
-        paths = subprocess.check_output(
-            ["git", "ls-files", "-z"], cwd=ROOT
-        ).decode().split("\0")
-        failures = []
-        for name in paths:
-            if not name:
-                continue
-            try:
-                text = (ROOT / name).read_text()
-            except (OSError, UnicodeError):
-                continue
-            extra = fingerprints(text) - collections.Counter(baseline.get(name, {}))
-            if extra:
-                failures.append(name)
+        added = added_lines()
+        if added is None:
+            added = whole_tree()
+        failures = [
+            name for name, text in added.items()
+            if fingerprints(text) - collections.Counter(baseline.get(name, {}))
+        ]
         self.assertEqual(failures, [], "Use agentOS in new product text: " + ", ".join(failures))
 
 
