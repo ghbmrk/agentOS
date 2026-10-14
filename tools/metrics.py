@@ -264,8 +264,19 @@ def collect_github(repo, token, since=None):
         verdicts = causes = None
         if p.get("merged_at") and (since is None or p["merged_at"] >= since):
             reviews = list(_pages(repo, f"pulls/{p['number']}/reviews", token))
-            reviews.sort(key=lambda r: r.get("submitted_at") or "")
-            l3 = [r.get("body") for r in reviews if trusted_review(r) and is_l3(r.get("body"))]
+            # A verdict posted as a conversation comment counts too, but only with a
+            # `Verdict:` line, so an incidental "L3" mention is not read as one.
+            notes = [{"submitted_at": c.get("created_at"), "body": c.get("body"),
+                      "author_association": c.get("author_association")}
+                     for c in _pages(repo, f"issues/{p['number']}/comments", token)
+                     if VERDICT_LINE.search(c.get("body") or "")]
+            reviews = sorted(reviews + notes, key=lambda r: r.get("submitted_at") or "")
+            l3, seen = [], set()
+            for r in reviews:
+                b = r.get("body")
+                if trusted_review(r) and is_l3(b) and (b.strip(), r.get("submitted_at")) not in seen:
+                    seen.add((b.strip(), r.get("submitted_at")))
+                    l3.append(b)
             verdicts = [v for v in map(verdict, l3) if v]
             # A non-accept verdict without a Cause line counts as "none" so the gap shows.
             causes = [cause(b) or "none" for b in l3 if verdict(b) in ("fix-list", "reject")]
