@@ -297,7 +297,7 @@ def conf_files(root, dirs, suffix=".conf", kmod=False):
             if name in seen:
                 continue
             f = Conf(root, path + "/" + name, bad)
-            if kmod and not os.path.islink(os.path.join(root, f.rel)):
+            if kmod:  # lstat: a link, dangling or not, is kept and refused when read
                 try:
                     if stat.S_ISDIR(os.lstat(os.path.join(root, f.rel)).st_mode):
                         continue

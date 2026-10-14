@@ -2033,6 +2033,13 @@ class ConfFilesTest(unittest.TestCase):
                 f = link(self.root, rel, target)
                 self.assertIn("%s is a link to %s;" % (rel, target), self.v())
                 f.unlink()
+        # A linked unit directory is refused where the secret-holding units are looked up, too.
+        shutil.rmtree(self.root / "usr/local/lib/systemd/system")
+        f = link(self.root, "usr/local/lib/systemd/system", "/var/tmp/us")
+        self.assertIn("usr/local/lib/systemd/system: unreadable (usr/local/lib/systemd/system is a link to /var/tmp/us;"
+                      " the tree check reads only a regular file or a mask", self.v())
+        self.assertIn("the tree check never passes a unit directory it cannot read", self.v())
+        f.unlink()
         self.assertEqual(check.violations(self.root), [])
 
     def test_a_mask_is_still_read_as_nothing(self):
