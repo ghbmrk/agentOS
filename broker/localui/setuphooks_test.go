@@ -4,6 +4,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"encoding/base32"
+	"encoding/json"
 	"errors"
 	"html"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
 var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -383,5 +385,46 @@ func TestThePageWaitsForAgentosd(t *testing.T) {
 	closed := InProcess{localapi.OpSetupProgress: nil}
 	if err := (AgentosdSetup{Owner: closed}).Wait(context.Background(), time.Millisecond); err != nil {
 		t.Fatalf("a refusal is an answer: %v", err)
+	}
+}
+
+// #1554 Potency R1 (M14) and UX R5: the adapter carries agentosd's owed
+// answer to the page, and maps agentosd's answer-owed refusal of finish to
+// ErrAnswerOwed.
+func TestTheAdapterCarriesAnOwedAnswer(t *testing.T) {
+	no := false
+	a := AgentosdSetup{Owner: InProcess{
+		localapi.OpSetupProviders: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return localapi.SetupProviders{Providers: []localapi.SetupProvider{{ID: "anthropic", APIKey: true, Owed: &no}, {ID: "openai", APIKey: true}}}, nil
+		},
+		localapi.OpSetupFinish: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return nil, sockets.Code(localapi.ErrAnswerOwed)
+		},
+	}}
+	ps := a.Providers()
+	if len(ps) != 2 || ps[0].Owed == nil || *ps[0].Owed || ps[1].Owed != nil {
+		t.Fatalf("owed answers not carried: %+v", ps)
+	}
+	if err := a.Finish(ownerNum); !errors.Is(err, ErrAnswerOwed) {
+		t.Fatalf("finish answered %v", err)
+	}
+}
+
+// owedFinish stands in for agentosd refusing finish for an owed answer
+// the page has not adopted (#1554 UX R5).
+type owedFinish struct{ *fakeHooks }
+
+func (owedFinish) Finish(string) error { return ErrAnswerOwed }
+
+// #1554 UX R5: finish refused for an owed answer tells the owner why and
+// what to do.
+func TestARefusedFinishForAnOwedAnswerSaysSo(t *testing.T) {
+	r := newRig(t)
+	r.via = owedFinish{r.hooks}
+	r.srv = r.open(&MemStore{})
+	r.runSetupToAI()
+	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}, "private": {"1"}})
+	if r.srv.setup.done() || r.setupErr() != answerOwed {
+		t.Fatalf("done %v, said %q", r.srv.setup.done(), r.setupErr())
 	}
 }

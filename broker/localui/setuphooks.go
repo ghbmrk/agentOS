@@ -136,11 +136,15 @@ func (a AgentosdSetup) AlreadySetUp() bool {
 
 // Finish records the owner's number with agentosd, which closes setup for
 // good and starts the owner channel. A vault that cannot finish setup's
-// enrollment answers ErrCodesUnavailable.
+// enrollment answers ErrCodesUnavailable, and a private-content answer
+// agentosd still owes the vault answers ErrAnswerOwed.
 func (a AgentosdSetup) Finish(owner string) error {
 	err := a.call(localapi.OpSetupFinish, localapi.Finish{Owner: owner}, nil)
 	if refused(err, localapi.ErrEnrollUnavailable) {
 		return ErrCodesUnavailable
+	}
+	if refused(err, localapi.ErrAnswerOwed) {
+		return ErrAnswerOwed
 	}
 	return err
 }
@@ -160,8 +164,9 @@ func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
 	return err
 }
 
-// Providers lists the vault's providers. An error lists none, so the AI
-// step offers nothing and setup does not finish (ONB-3).
+// Providers lists the vault's providers, each with the answer agentosd
+// holds as owed (#1544). An error lists none, so the AI step offers
+// nothing and setup does not finish (ONB-3).
 func (a AgentosdSetup) Providers() []Provider {
 	var ps localapi.SetupProviders
 	if err := a.call(localapi.OpSetupProviders, nil, &ps); err != nil {
@@ -169,7 +174,7 @@ func (a AgentosdSetup) Providers() []Provider {
 	}
 	out := make([]Provider, 0, len(ps.Providers))
 	for _, p := range ps.Providers {
-		out = append(out, Provider{ID: p.ID, Name: p.Name, APIKey: p.APIKey, DeviceCode: p.DeviceCode, Connected: p.Connected, PrivateOK: p.PrivateOK})
+		out = append(out, Provider{ID: p.ID, Name: p.Name, APIKey: p.APIKey, DeviceCode: p.DeviceCode, Connected: p.Connected, PrivateOK: p.PrivateOK, Owed: p.Owed})
 	}
 	return out
 }

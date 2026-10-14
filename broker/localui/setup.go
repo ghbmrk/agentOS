@@ -58,6 +58,9 @@ type Provider struct {
 	// (CAP-9, REV-6). Asked once at connection: ticked by default on a
 	// plan sign-in, unticked on an API key (D-115).
 	PrivateOK bool
+	// Owed: the answer agentosd recorded as owed to the vault and the
+	// vault has not confirmed (#1544), or nil.
+	Owed *bool
 }
 
 // privateBox is one form's private-content question as the page shows it.
@@ -144,7 +147,8 @@ type SetupState struct {
 	// the vault did not record (#1467). It is set when the save fails and
 	// cleared once an answer for that provider is saved, so setup does not
 	// finish with the provider keeping an older answer. It lasts only as
-	// long as the SetupStore does.
+	// long as the SetupStore does; agentosd's owed record (#1544) restores
+	// it after a restart and holds finish on its own.
 	Unsaved map[string]bool `json:"unsaved,omitempty"`
 	Done    bool            `json:"done"`
 }
@@ -230,6 +234,11 @@ var (
 // reports it (#1429).
 var ErrWiFiUnavailable = errors.New("Wi-Fi join unavailable")
 
+// ErrAnswerOwed: agentosd holds an owner's private-content answer the
+// vault has not confirmed, so it will not finish setup (#1544), as Finish
+// reports it.
+var ErrAnswerOwed = errors.New("a private-content answer is not saved yet")
+
 // noWiFiJoin is the network step's error when the box cannot join Wi-Fi:
 // no station device beside the access point, or ErrWiFiUnavailable. It
 // names the network step's Ethernet button rather than the password
@@ -266,6 +275,10 @@ const cardRestartNote = "If I restart before you confirm, I make a new card: a c
 
 // cannotFinish is what the page says on ErrCodesUnavailable.
 const cannotFinish = "I cannot finish setup: I cannot add approval codes. Ask whoever installed my software to prepare me for setup again."
+
+// answerOwed is what the page says on ErrAnswerOwed (#1554 UX R5): a
+// reload adopts the owed answer as a hold and asks the question again.
+const answerOwed = "Your answer about private content was not saved yet. Reload this page to answer again."
 
 var errElsewhere = errors.New("Setup is continuing on the phone that texted me.")
 
@@ -1308,6 +1321,22 @@ func (u *setup) maybeFinish() {
 	who := u.st.Owner
 	u.mu.Unlock()
 	defer func() { u.mu.Lock(); u.finishing = false; u.mu.Unlock() }()
+	// agentosd keeps each answer owed to the vault in its own record,
+	// which outlives this page's store (#1544): adopt it as a hold, so a
+	// page restart after a failed save shows the retry. finishing keeps AI
+	// posts out meanwhile, so no save races the list.
+	ps := u.s.cfg.Hooks.Providers()
+	u.mu.Lock()
+	for _, p := range ps {
+		if _, held := u.st.Unsaved[p.ID]; p.Owed != nil && !held {
+			u.holdLocked(p.ID, p.Owed) // a hold the store fails to save still holds
+		}
+	}
+	held := len(u.st.Unsaved) > 0
+	u.mu.Unlock()
+	if held {
+		return
+	}
 	if u.cardHeld() {
 		// HW-1: the box finishes only once the owner holds the card.
 		u.mu.Lock()
@@ -1316,7 +1345,7 @@ func (u *setup) maybeFinish() {
 		return
 	}
 	connected := false
-	for _, p := range u.s.cfg.Hooks.Providers() {
+	for _, p := range ps {
 		connected = connected || p.Connected
 	}
 	if !connected {
@@ -1324,8 +1353,11 @@ func (u *setup) maybeFinish() {
 	}
 	if err := u.s.cfg.Hooks.Finish(who); err != nil && !u.s.cfg.Hooks.AlreadySetUp() {
 		msg := "Could not finish setup. Try again."
-		if errors.Is(err, ErrCodesUnavailable) {
+		switch {
+		case errors.Is(err, ErrCodesUnavailable):
 			msg = cannotFinish
+		case errors.Is(err, ErrAnswerOwed):
+			msg = answerOwed
 		}
 		u.mu.Lock()
 		u.err[u.st.Device] = msg
