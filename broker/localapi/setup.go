@@ -28,6 +28,7 @@ const (
 	// OpSetupJoin has agentosd's netjoin helper write the home Wi-Fi
 	// connection (P2-2w c3; Security L8 on the P2-2w plan) and answers
 	// once the helper does: success when it joined or saved the network,
+	// ErrJoinUnavailable when the box cannot join Wi-Fi at all, and
 	// ErrNotJoined otherwise. It is answered within JoinTimeout.
 	OpSetupJoin = "page_setup_join"
 	// OpSetupProviders lists the AI providers the vault process serves,
@@ -94,10 +95,14 @@ const (
 	// one.
 	ErrNotEnrolled = "not enrolled"
 	// ErrNotJoined: the helper did not join or save the network (wrong
-	// password, not in range, busy, refused, or an error), or no helper
-	// is configured. The page shows its one network error for all of
-	// them (Security L8.4).
+	// password, not in range, busy or refused), or no helper is
+	// configured. The page shows its one network error for all of them
+	// (Security L8.4).
 	ErrNotJoined = "not joined"
+	// ErrJoinUnavailable: the helper answered failed, a D-Bus or
+	// NetworkManager error such as NetworkManager being absent, so no
+	// password can help. The page points to Ethernet instead (#1429).
+	ErrJoinUnavailable = "join unavailable"
 	// ErrNotSent: the text did not go: no usable line, the bridge
 	// reported a failure, or no result came in time.
 	ErrNotSent = "not sent"

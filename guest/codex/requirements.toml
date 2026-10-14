@@ -1,0 +1,28 @@
+# Requirements for the Codex provider worker (S8-W1, CRED-5 broker-held). The image installs it as
+# /etc/codex/requirements.toml next to managed_config.toml (#807 wiring). Unlike managed config,
+# lower layers (CODEX_HOME/config.toml, the command line) cannot relax or extend what this file
+# sets: measured against Codex CLI 0.162.1 (guest/codex/ASSUMPTIONS.md C1, C12).
+
+# Tools cannot read CODEX_HOME, where the CLI keeps the placeholder login, its session logs and its
+# state. Everything under it is denied except tmp/, where the CLI puts the helpers (arg0 links) its
+# tools need to run. The patterns spell "anything not named tmp" because the deny list has no
+# exceptions: [!t]* covers names not starting with t, t[!m]* and tm[!p]* the near misses, tmp?*
+# longer names, and t the one-letter name; each has a /** twin for what lies below it.
+# A literal directory entry is not used: listing a directory as well as a glob that covers it makes
+# the CLI's bwrap fail to start. Limits (C12): the list is expanded when a tool starts, so a file
+# the CLI creates later is readable until the next tool call, and names stay listable.
+[permissions.filesystem]
+deny_read = [
+  "/var/lib/agentos-codex/[!t]*",
+  "/var/lib/agentos-codex/[!t]*/**",
+  "/var/lib/agentos-codex/t[!m]*",
+  "/var/lib/agentos-codex/t[!m]*/**",
+  "/var/lib/agentos-codex/tm[!p]*",
+  "/var/lib/agentos-codex/tm[!p]*/**",
+  "/var/lib/agentos-codex/tmp?*",
+  "/var/lib/agentos-codex/tmp?*/**",
+  "/var/lib/agentos-codex/t",
+]
+
+# MCP servers: an allowlist, and empty. A lower layer's [mcp_servers.<name>] is refused.
+[mcp_servers]

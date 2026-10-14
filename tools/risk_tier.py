@@ -91,6 +91,7 @@ TIER_A_GUEST_FILES = {"build-rootfs.sh", "package.json", "package-lock.json", "l
 TIER_A_GUEST_PATHS = {
     "guest/openclaw/openclaw.json5",
     "guest/codex/agentos-toolsh", "guest/codex/managed_config.toml",
+    "guest/codex/requirements.toml",
 }
 UNIT_SUFFIXES = (".service", ".socket", ".timer")
 TIER_B_FILES = {"SPEC.md"}
