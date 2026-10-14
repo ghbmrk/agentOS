@@ -5,6 +5,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -157,33 +159,140 @@ func TestSendReceiptOtherCodesAreUnknown(t *testing.T) {
 // The proof behind CodeRecipient => not sent, pinned against drift: in
 // production the bridge emits CodeRecipient only for a non-owner item, before
 // calling the modem, or by mapping at.ErrNumber, which only Dial returns, never
-// Send. If either file changes these, re-prove and update ASSUMPTIONS.md.
+// Send. Every non-test file of both packages is scanned, so a new file cannot
+// move either use out of sight. If this fails, re-prove and update
+// ASSUMPTIONS.md.
 func TestRecipientCodeOnlyBeforeModemSend(t *testing.T) {
-	uses := func(path, ident string) map[string]int {
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, nil, 0)
+	at := pkgFuncs(t, "../modem/at")
+	bridge := pkgFuncs(t, "../modem/bridge")
+	if got := identUses(at, "ErrNumber"); len(got) != 1 || got["Dial"] == 0 {
+		t.Fatalf("at.ErrNumber returned outside Dial: %v", got)
+	}
+	if got := callsOf(at, "Dial"); len(got) != 0 {
+		t.Fatalf("at calls Dial, so ErrNumber may reach Send: %v", got)
+	}
+	if got := identUses(bridge, "CodeRecipient"); len(got) != 2 || got["outbox"] != 1 || got["codeOf"] != 1 {
+		t.Fatalf("bridge emits CodeRecipient elsewhere: %v", got)
+	}
+	outbox := bridge["outbox"]
+	var assign, send token.Pos
+	var sendGuarded bool
+	var walk func(n ast.Node, guarded bool)
+	walk = func(n ast.Node, guarded bool) {
+		ast.Inspect(n, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.IfStmt:
+				if n.Init != nil {
+					walk(n.Init, guarded)
+				}
+				walk(n.Cond, guarded)
+				walk(n.Body, guarded || mentions(n.Cond, "LineOwner"))
+				if n.Else != nil {
+					walk(n.Else, guarded)
+				}
+				return false
+			case *ast.AssignStmt:
+				for _, r := range n.Rhs {
+					if sel, ok := r.(*ast.SelectorExpr); ok && sel.Sel.Name == "CodeRecipient" {
+						assign = n.Pos()
+					}
+				}
+			case *ast.CallExpr:
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Send" {
+					if send != token.NoPos {
+						t.Fatal("outbox sends twice")
+					}
+					send, sendGuarded = n.Pos(), guarded
+				}
+			}
+			return true
+		})
+	}
+	walk(outbox.Body, false)
+	if assign == token.NoPos || send == token.NoPos || assign > send || !sendGuarded {
+		t.Fatalf("outbox no longer sets CodeRecipient before an owner-line-only m.Send (assign %v, send %v, guarded %v)", assign, send, sendGuarded)
+	}
+}
+
+// pkgFuncs parses every non-test Go file in dir and returns its functions by
+// name. Each file goes through parser.ParseFile: parser.ParseDir is deprecated
+// and would add nothing here.
+func pkgFuncs(t *testing.T, dir string) map[string]*ast.FuncDecl {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	fns := map[string]*ast.FuncDecl{}
+	for _, e := range ents {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		in := map[string]int{}
 		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			ast.Inspect(fn, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Ident); ok && id.Name == ident {
-					in[fn.Name.Name]++
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				key := fn.Name.Name
+				if fns[key] != nil {
+					key = name + ":" + key // same name on two receivers
 				}
-				return true
-			})
+				fns[key] = fn
+			}
 		}
-		return in
 	}
-	if got := uses("../modem/at/driver.go", "ErrNumber"); len(got) != 1 || got["Dial"] == 0 {
-		t.Fatalf("at.ErrNumber returned outside Dial: %v", got)
+	if len(fns) == 0 {
+		t.Fatalf("no functions found in %s", dir)
 	}
-	if got := uses("../modem/bridge/bridge.go", "CodeRecipient"); len(got) != 2 || got["outbox"] != 1 || got["codeOf"] != 1 {
-		t.Fatalf("bridge emits CodeRecipient elsewhere: %v", got)
+	return fns
+}
+
+// identUses counts ident in each function's body and signature.
+func identUses(fns map[string]*ast.FuncDecl, ident string) map[string]int {
+	in := map[string]int{}
+	for name, fn := range fns {
+		if n := countIdent(fn, ident); n > 0 {
+			in[name] = n
+		}
 	}
+	return in
+}
+
+// callsOf names the functions that call a method or function called callee.
+func callsOf(fns map[string]*ast.FuncDecl, callee string) []string {
+	var in []string
+	for name, fn := range fns {
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				switch f := c.Fun.(type) {
+				case *ast.Ident:
+					if f.Name == callee {
+						in = append(in, name)
+					}
+				case *ast.SelectorExpr:
+					if f.Sel.Name == callee {
+						in = append(in, name)
+					}
+				}
+			}
+			return true
+		})
+	}
+	return in
+}
+
+func mentions(n ast.Node, ident string) bool { return countIdent(n, ident) > 0 }
+
+func countIdent(n ast.Node, ident string) int {
+	c := 0
+	ast.Inspect(n, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && id.Name == ident {
+			c++
+		}
+		return true
+	})
+	return c
 }
