@@ -1377,6 +1377,19 @@ class ConfigTest(unittest.TestCase):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Service"]["ExecStartPre"], "/usr/lib/agentos/drive-id check")
 
+    def test_the_modem_roles_directory_exists_before_the_bridge_starts(self):
+        # G1-e2e: agentosd records the SIM setup binds in agentos-modem's roles file, and the bridge
+        # sees it only through its bind of the roles directory, which it skips when the directory is
+        # missing. agentosd's unit makes the directory before the bridge's starts (After=).
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]
+        self.assertEqual(u["StateDirectory"], "agentos/modem")
+        roles = re.search(r'"modem-roles", "([^"]+)"', (ROOT / "broker/cmd/agentosd/main.go").read_text()).group(1)
+        self.assertEqual(os.path.dirname(roles), "/var/lib/agentos/modem")
+        m = ini(ROOT / "broker/cmd/agentos-modem/agentos-modem.service")
+        self.assertIn("agentosd.service", m["Unit"]["After"].split())
+        self.assertEqual(m["Service"]["BindReadOnlyPaths"], "-/var/lib/agentos/modem")
+        self.assertIn("-roles " + roles, m["Service"]["ExecStart"])
+
     def test_nothing_writes_the_hardware_clock(self):
         # L3 SHOULD on #41 (HW-8, HOST-1b): timesyncd's sync turns on the kernel's 11-minute RTC
         # update. chrony with rtcsync off comes with HOST-1b; until then the image has no time sync.

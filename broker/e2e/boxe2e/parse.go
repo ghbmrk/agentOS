@@ -67,6 +67,22 @@ func smsLink(page []byte) (num, code string, ok bool) {
 	return m[1], m[2], true
 }
 
+// lineState names which of the text-your-box step's three forms the page
+// shows, from fixed wording only, so a failure can say why no link came
+// without quoting the page.
+func lineState(page []byte) string {
+	s := string(page)
+	switch {
+	case strings.Contains(s, "I cannot send texts right now"):
+		return "cannot-text"
+	case strings.Contains(s, "I do not know my own number yet"):
+		return "number-unknown"
+	case strings.Contains(s, `href="sms:`):
+		return "link"
+	}
+	return "other"
+}
+
 // otpSeed reads the code generator's secret from its enrollment link.
 func otpSeed(page []byte) ([]byte, error) {
 	m := otpRe.FindStringSubmatch(html.UnescapeString(string(page)))

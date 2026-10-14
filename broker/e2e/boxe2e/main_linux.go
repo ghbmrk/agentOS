@@ -301,6 +301,17 @@ func claimDiag(code string) string {
 		redactLog(string(logs), 12, code, claim.Normalize(code)))
 }
 
+// modemDiag says why setup cannot text: the bridge's and agentosd's unit
+// states and their last log lines. The pairing code is not known yet, and
+// the numbers and SIM serial are the simulator's synthetic ones.
+func modemDiag() string {
+	units, _ := command("systemctl", "show", "agentos-modem.service", "agentosd.service",
+		"-p", "ActiveState,SubState,NRestarts,Result", "--value").Output()
+	logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager", "-n", "20",
+		"-u", "agentos-modem.service", "-u", "agentosd.service").Output()
+	return fmt.Sprintf("diag: units=%s log: %s", oneLine(string(units)), redactLog(string(logs), 12))
+}
+
 // page is the phone's view of /setup now.
 func (d *driver) page() ([]byte, error) {
 	st, loc, b, err := d.get("/setup")
@@ -360,12 +371,14 @@ func (d *driver) smsPair() error {
 	}
 	phone := d.carrier.Line(phoneNum)
 	var num, code string
+	var last []byte
 	tookNetwork := false
 	if err := until(3*time.Minute, func() (bool, error) {
 		b, err := d.page()
 		if err != nil {
 			return false, err
 		}
+		last = b
 		var ok bool
 		if num, code, ok = smsLink(b); ok {
 			return true, nil
@@ -378,7 +391,7 @@ func (d *driver) smsPair() error {
 		}
 		return false, fmt.Errorf("no text link %s", where(b))
 	}); err != nil {
-		return err
+		return fmt.Errorf("%w; line=%s %s", err, lineState(last), modemDiag())
 	}
 	if num != boxNum {
 		return errors.New("the page shows a number other than the simulated SIM's")

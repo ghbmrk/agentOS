@@ -127,3 +127,16 @@ func TestHeadingIsSanitized(t *testing.T) {
 		}
 	}
 }
+
+func TestLineState(t *testing.T) {
+	for page, want := range map[string]string{
+		`<h2>2. Text your box</h2><p>Pairing is not available yet: I cannot send texts right now. Reload this page to try again.</p>`: "cannot-text",
+		`<h2>2. Text your box</h2><p>I do not know my own number yet, so you cannot text me first.</p>`:                               "number-unknown",
+		`<h2>2. Text your box</h2><p><a class="button" href="sms:+15550000100?&amp;body=PAIR%20123456">Text my box</a></p>`:           "link",
+		`<h2>1. Home network</h2>`: "other",
+	} {
+		if got := lineState([]byte(page)); got != want {
+			t.Errorf("lineState(%q) = %q, want %q", page, got, want)
+		}
+	}
+}
