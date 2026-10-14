@@ -273,6 +273,15 @@ func (s *Server) requestView(rq owner.LocalRequest, sess string) requestView {
 		default:
 			iv.Undo = "Cannot be undone."
 		}
+		switch {
+		case !it.Sent.IsZero():
+			// A repeat of a send known to have gone (confirm repeats,
+			// D-116).
+			iv.Undo = "Already sent " + it.Sent.In(s.cfg.Now().Location()).Format("15:04 Jan 2") + ". Approve only to send it again. " + iv.Undo
+		case !it.Retried.IsZero():
+			// An owner retry of an effect that may have gone (OP-2).
+			iv.Undo = "Tried before and may have gone: this may make it happen twice. " + iv.Undo
+		}
 		v.Items = append(v.Items, iv)
 	}
 	if len(v.Items) == 1 {

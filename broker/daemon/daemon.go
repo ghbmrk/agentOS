@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
-	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -189,8 +188,9 @@ type PageSocket struct {
 	// refuses both ops.
 	Forget PageForget
 	// RotateAPNet writes a rotated card's Wi-Fi network for agentos-ap
-	// (REC-4, #1191); nil refuses the op.
-	RotateAPNet func(apnet.Network) error
+	// (REC-4, #1191), taking it from the vault process's hold of the
+	// latest Wi-Fi commit (#1522); nil refuses the op.
+	RotateAPNet func() error
 }
 
 // PageForget is FORGET as the page serves it; unlocked is whether the
@@ -219,7 +219,22 @@ type Daemon struct {
 	owner  *ownerch.Channel
 	srv    *sockets.Server
 	adm    *admission.Controller
+	retry  *retrier
 	done   chan struct{}
+}
+
+// RetryWaiting lists what RETRY offers (OP-2): the parked effects, whose
+// outcome stayed unknown, then the effects a check proved were not done
+// and whose resend was refused (journal.Engine.NotResent). The digest
+// names the same list.
+func (d *Daemon) RetryWaiting() []journal.ParkedIntent { return d.retry.waiting() }
+
+// OnRetryRefused sets f to run when an owner retry of an unclear effect
+// is refused (OP-2c), so the effect is listed again in the next digest.
+func (d *Daemon) OnRetryRefused(f func()) {
+	d.retry.mu.Lock()
+	d.retry.onRefused = f
+	d.retry.mu.Unlock()
 }
 
 // redactAll journals no free text at all until the vault (P1-3) supplies a
@@ -347,17 +362,21 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	handle := h.Handle
 	var ch *ownerch.Channel
+	rt := newRetrier(ctx, eng, gate)
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
 			Machines: machines, Notes: notes, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
-			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
+			Decide: rt.decide(gate.Decide), Narrow: gate.Narrow, Reissue: gate.Reissue, Retry: rt.items,
 			Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Narrows: cfg.Narrows, Answer: cfg.Answer,
 		}); err != nil {
 			store.Close()
 			return nil, err
 		}
 		handle = ch.Handle
+		rt.mu.Lock()
+		rt.inform = ch.Inform
+		rt.mu.Unlock()
 	}
 	// Attach before the owner channel boots: Boot's restart decisions, its
 	// re-issue hand-over (grants GR10), and every guest effect go through
@@ -447,15 +466,18 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		store.Close()
 		return nil, err
 	}
-	d := &Daemon{engine: eng, gate: gate, store: store, srv: srv, adm: adm, owner: ch, done: make(chan struct{})}
+	d := &Daemon{engine: eng, gate: gate, store: store, srv: srv, adm: adm, owner: ch, retry: rt, done: make(chan struct{})}
 	if ch != nil {
 		go serveOwner(ctx, ch, cfg.Modem != nil)
 	}
 	go gate.Run(ctx, 0)
 	// A restart fences each account an in-flight effect may have landed on
 	// (OP-4). Evidence from the executors lifts it: one crash mid-dispatch
-	// must not hold the broker account forever. Nothing is re-executed.
-	go eng.SettleUnknown(ctx, settleWait, settleMaxWait)
+	// must not hold the broker account forever. Nothing is re-executed
+	// unless a check or the service's idempotency key makes it safe; what
+	// stays unclear is parked for the digest and rechecked each round
+	// (OP-2).
+	go settleLoop(ctx, eng, settleEvery, gate.Dispatch)
 	go func() {
 		srv.Wait()
 		store.Close()

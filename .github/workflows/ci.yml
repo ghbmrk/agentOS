@@ -82,6 +82,12 @@ jobs:
         run: |
           sudo apt-get install -y -q bubblewrap
           sudo AGENTOS_REQUIRE_BWRAP=1 python3 -m unittest tests.test_codex_worker -v
+      - name: Codex worker rootfs from the pinned CLI (S8-W1, #807)
+        if: env.RECORDS != 'true'
+        # Downloads the pinned @openai/codex tarball, checks npm's integrity hash, builds the
+        # rootfs and checks its contents, with codex doctor in a namespace (sudo: the runner may bar
+        # unprivileged user namespaces). Nothing runs under runsc here (#809 measures that).
+        run: sudo AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
@@ -175,6 +181,10 @@ jobs:
         env:
           AGENTOS_REQUIRE_SWTPM: "1"
         run: go test -race -count=1 ./...
+      - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
+        # The search is sequential, so the race detector finds nothing in it and
+        # the race step skips it; here it runs at the bounds A19 states.
+        run: go test -count=1 -timeout 20m -run '^TestOP2(SameEffectModel|Model.*)$' -v ./journal
       - name: Fuzz the socket and action-protocol decoders, 20s per target (LOOP-7, P3-4b-3)
         # Each target already ran its seeds and planted-decoder control above;
         # this fuzzes past the seeds. The long runs are in soak.yml. tools/fuzzrun.py

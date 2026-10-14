@@ -56,6 +56,10 @@ type rotation struct {
 	// dead are IDs cancelled while not waiting (most recent last), so a
 	// begin arriving after its own cancel is refused.
 	dead []string
+	// wifi is the network the latest Wi-Fi commit put in effect, for
+	// agentosd to take once over the verify socket (#1522). drop leaves
+	// it: a commit drops its rotation and then holds this.
+	wifi *heldWiFi
 }
 
 // maxDead bounds rotation.dead: the page cancels at most one begin it
@@ -227,6 +231,7 @@ func (c *custody) beginRotation(req rotateBegin) (*recovery.Pending, error) {
 		return nil, errRotationGone
 	}
 	r.drop()
+	r.wifi = nil
 	b, err := c.rotBox()
 	if err != nil {
 		return nil, err
@@ -309,7 +314,14 @@ func (c *custody) commitRotation(next rotateCommit) (recovery.Done, []recovery.P
 		r.drop()
 		return recovery.Done{}, nil, false, errNoRotation
 	}
-	parts, lost := p.Parts(), p.Lost()
+	parts, lost, ssid := p.Parts(), p.Lost(), p.WiFiName()
+	// Both a clean commit and one that stopped after a slot (409) show
+	// the new card as in effect, so both hold its Wi-Fi network.
+	hold := func() {
+		if slices.Contains(parts, recovery.PartWiFi) {
+			r.wifi = &heldWiFi{ssid: ssid, password: next.WiFiPassword, until: c.now().Add(wifiHold)}
+		}
+	}
 	done, err := p.Commit(r.box, next.card(), c.now())
 	switch {
 	case err == nil:
@@ -320,6 +332,7 @@ func (c *custody) commitRotation(next rotateCommit) (recovery.Done, []recovery.P
 		return recovery.Done{}, nil, false, errRotationLapsed
 	case errors.Is(err, recovery.ErrCardNotStored):
 		r.drop()
+		hold()
 		c.notify(noteRotationPartly)
 		return recovery.Done{}, nil, false, errCardInEffect
 	default:
@@ -329,12 +342,40 @@ func (c *custody) commitRotation(next rotateCommit) (recovery.Done, []recovery.P
 		return recovery.Done{}, nil, false, errNoRotation
 	}
 	r.drop()
+	hold()
 	names := make([]string, len(parts))
 	for i, q := range parts {
 		names[i] = string(q)
 	}
 	c.notify("the Owner Card was replaced on the local page: " + strings.Join(names, ", "))
 	return done, parts, lost, nil
+}
+
+// heldWiFi is a committed rotation's Wi-Fi network, waiting for
+// agentosd to write it to ap-net.json (#1522).
+type heldWiFi struct {
+	ssid, password string
+	until          time.Time
+}
+
+// wifiHold is how long a committed Wi-Fi network waits for agentosd. The
+// page hands off right after the commit's reply, so minutes are ample.
+const wifiHold = 5 * time.Minute
+
+// takeRotatedWiFi gives the network the latest Wi-Fi commit put in
+// effect, once, and only while it has not lapsed: it is agentosd's
+// one-shot permit to rewrite ap-net.json (#1522), so a page session alone
+// cannot change the access point's network.
+func (c *custody) takeRotatedWiFi() (ssid, password string, ok bool) {
+	r := &c.rot
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w := r.wifi
+	r.wifi = nil
+	if w == nil || c.now().After(w.until) {
+		return "", "", false
+	}
+	return w.ssid, w.password, true
 }
 
 // cancelRotation drops the pending rotation named id (the display's
