@@ -2313,6 +2313,37 @@ class UplinkTest(unittest.TestCase):
         self.assertIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
         self.assertIn('has "$W/console-reboot.log" "agentos-uplink: none"', s)
 
+    def g1_verdict(self, done):
+        s = (IMG / "ci_boot.sh").read_text()
+        fn = re.search(r"^g1_verdict\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        with tempfile.TemporaryDirectory() as d:
+            log = pathlib.Path(d) / "done.log"
+            log.write_text(done)
+            return subprocess.run(["bash", "-c", fn + 'g1_verdict "$1"', "-", str(log)],
+                                  capture_output=True, text=True, check=True).stdout
+
+    def test_g1_is_proven_only_with_no_expected_failure(self):
+        # Security review of #1705, finding 3: a green e2e check with expected failures is not the
+        # G1 freeze-lift run (tools/ASSUMPTIONS.md D27), so the console says which it was.
+        self.assertEqual(self.g1_verdict("agentos-e2e: DONE pass=9 fail=0 xfail=0 xpass=0 blocked=0\r\n"),
+                         "agentos-e2e: G1 PROVEN\n")
+        for done, want in (
+                ("agentos-e2e: DONE pass=6 fail=0 xfail=1 xpass=0 blocked=2\n", "xfail=1 blocked=2"),
+                ("agentos-e2e: DONE pass=8 fail=0 xfail=0 xpass=0 blocked=1\n", "xfail=0 blocked=1"),
+                ("agentos-e2e: DONE pass=8 fail=1 xfail=0 xpass=0 blocked=0\n", "xfail=0 blocked=0"),
+                ("agentos-e2e: DONE pass=8 fail=0 xfail=0 xpass=1 blocked=0\n", "xfail=0 blocked=0"),
+                ("agentos-e2e: DONE pass=0 fail=0 xfail=0 xpass=0 blocked=0\n", "xfail=0 blocked=0"),
+                ("", "xfail=? blocked=?")):
+            self.assertEqual(self.g1_verdict(done), "agentos-e2e: G1 NOT PROVEN %s\n" % want, done)
+
+    def test_the_e2e_run_prints_its_g1_verdict_without_changing_the_check(self):
+        s = (IMG / "ci_boot.sh").read_text()
+        e2e = s[s.index('if [ -n "${E2E:-}" ]; then'):]
+        self.assertIn('\tg1_verdict "$W/e2e-done.log"\n', e2e)
+        self.assertIn('has "$W/e2e-done.log" " fail=0 "', e2e)
+        self.assertIn('has "$W/e2e-done.log" " xpass=0 "', e2e)
+        self.assertNotIn('has "$W/e2e-done.log" " xfail=0 "', e2e)
+
 
 class SetupServicesTest(unittest.TestCase):
     """#1249 (with P-3) and #1270: a fresh M6 Ultra image starts every setup service. The vault

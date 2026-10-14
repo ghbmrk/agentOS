@@ -456,7 +456,13 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 // ExecStartPre of the page it ran under the page's
 // TemporaryFileSystem=/var/lib/agentos:ro, which systemd applies to `+`
 // commands too, never saw the sealed file, and the box never showed the
-// claim screen.
+// claim screen. The page Requires= the hand-over, not Wants=: with Wants=
+// a failed move still started the page with no claim state, and a
+// preloaded box served setup without the sticker code. Requires= keeps a
+// download box or an already-moved claim working, because systemd does not
+// fail a Requires= dependent when the hand-over's ConditionPathExists= is
+// false (systemd.unit(5), Requires=: "failing condition checks ... do not
+// cause the start job of a unit with a Requires= dependency on it to fail").
 // REQ: HW-10
 func TestTheClaimHandOverRunsOutsideThePagesMask(t *testing.T) {
 	keys := func(name string) map[string][]string {
@@ -496,10 +502,13 @@ func TestTheClaimHandOverRunsOutsideThePagesMask(t *testing.T) {
 		t.Errorf("hand-over Before = %q, want agentos-localui.service", h["Before"])
 	}
 	p := keys("agentos-localui.service")
-	for _, k := range []string{"Wants", "After"} {
+	for _, k := range []string{"Requires", "After"} {
 		if !has(p[k], "agentos-localui-claim.service") {
 			t.Errorf("page %s = %q, want agentos-localui-claim.service", k, p[k])
 		}
+	}
+	if has(p["Wants"], "agentos-localui-claim.service") {
+		t.Errorf("page Wants = %q: a failed hand-over must stop the page, so it belongs in Requires only", p["Wants"])
 	}
 }
 

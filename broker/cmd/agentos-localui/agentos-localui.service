@@ -10,8 +10,12 @@
 [Unit]
 Description=agentOS Wi-Fi page
 After=agentosd.service agentos-egress.service agentos-localui-claim.service
-Requires=agentosd.service
-Wants=agentos-egress.service agentos-localui-claim.service
+# Requires=, not Wants=, on the claim hand-over: if the move fails, the page
+# must not start without its claim state, or a preloaded box would serve
+# setup without the sticker code. A hand-over skipped by its condition
+# (already moved, or a download box) still counts as success.
+Requires=agentosd.service agentos-localui-claim.service
+Wants=agentos-egress.service
 
 [Service]
 User=agentos-localui
