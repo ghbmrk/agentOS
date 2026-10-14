@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // Store is the vault process's side of the HTTP account.
@@ -36,9 +38,12 @@ const MinPollGap = 10 * time.Second
 // Service sends and fetches texts for the modem bridge.
 type Service struct {
 	Store Store
-	// HTTP is the provider client; nil is NewHTTPClient().
+	// HTTP is the provider client; nil is NewHTTPClient(Guard).
 	HTTP *http.Client
-	Now  func() time.Time
+	// Guard is the home-network address policy the default client dials
+	// through (DEV-2); nil means the IANA registries only.
+	Guard *netguard.Policy
+	Now   func() time.Time
 	// Polled, if set, hears each poll's outcome at the provider: nil, or
 	// ErrRefused, ErrLimited or ErrUnreachable. Polls that never reach
 	// the provider (locked, no account, too soon) are not reported.
@@ -71,7 +76,7 @@ func (s *Service) upstream() (upstream, error) {
 	if s.client == nil {
 		s.client = s.HTTP
 		if s.client == nil {
-			s.client = NewHTTPClient()
+			s.client = NewHTTPClient(s.Guard)
 		}
 	}
 	hc := s.client

@@ -2,11 +2,13 @@
 """L4 metrics: writes METRICS.md, one row per plan week (PLAN.md §2 L4, §5).
 
 Sources, all re-read in full on every run so METRICS.md is regenerated, never appended:
-  git, first-parent history of --ref   TRACE.md covered count; BOARD.md package states
+  git, first-parent history of --ref   TRACE.md covered count; BOARD.md package states (the
+                                       hand-kept board up to SIM-repo-2b, the generated one since)
   LEDGER.md                            usage readings (weekly %, all models and Fable only); phase table
   GitHub API                           PRs: L3 verdicts in collaborators' reviews, `Defect: <ID>`
                                        lines in bodies; this repository's own Actions runs and
-                                       their attempts (CI flakes)
+                                       their attempts (CI flakes); `state:` labels added to
+                                       work-item issues (package states between board renders)
 GitHub drops Actions runs after its retention window; a value already in METRICS.md is kept
 when the source no longer has data for that week.
 
@@ -45,6 +47,7 @@ OPEN_STATES = ("queued", "building", "in review", "escalated")
 DECISION = dt.date(2026, 10, 9)
 STALE_HOURS = 48
 LEDGER_STALE_HOURS = 36
+LANE_CAP = 10
 FOLLOWUP_ID = re.compile(r"-[frl]\d+$")
 CITES_REVIEW = re.compile(r"\b(?:L3|Security|UX\d*|Potency|lens|review)\b")
 CITES_LATER = re.compile(r"\bLATER(?:\.md)?\s+(?:line\s+)?[A-Z][A-Za-z0-9]*-[\w-]*")
@@ -138,13 +141,6 @@ def board_flags(text):
     return out
 
 
-def held_drafts(text):
-    """PR numbers in the Draft column of briefs/CODEX-1.md's "Held" table."""
-    section = text.split("\n## Held", 1)[-1].split("\n## ", 1)[0] if "\n## Held" in text else ""
-    return sorted({int(n) for cells in _rows(section, "| Item |") if len(cells) > 1
-                   for n in re.findall(r"#(\d+)", cells[1])})
-
-
 def _pct(cell):
     m = re.match(r"\s*(\d+(?:\.\d+)?)\s*%", cell)
     return float(m.group(1)) if m else None
@@ -214,9 +210,33 @@ def _api(repo, path, token):
         time.sleep(2 ** attempt * 5)
 
 
+WORK_ITEM_TITLE = re.compile(r"([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*(?: [a-z][A-Za-z0-9]*)*): ")
+
+
+def collect_states(repo, token):
+    """[{at, id, state}] for every `state:` label added to a work-item issue (tools/board.py).
+    The generated BOARD.md only shows a package while it is open, and a state held between two
+    board renders never reaches its history, so escalations and reviews are also counted here."""
+    out = []
+    for e in _pages(repo, "issues/events", token):
+        issue, label = e.get("issue") or {}, (e.get("label") or {}).get("name", "")
+        names = {x["name"] for x in issue.get("labels", [])}
+        m = WORK_ITEM_TITLE.match(issue.get("title", ""))
+        if e.get("event") == "labeled" and label.startswith("state:") and "work-item" in names and m \
+                and "pull_request" not in issue:
+            out.append({"at": e["created_at"], "id": m.group(1), "state": label[len("state:"):]})
+    out.sort(key=lambda x: (x["at"], x["id"]))
+    return out
+
+
+def _open_week(cell):
+    """A recorded week label still open: "(current, ...)", or "(to date)" as recorded before MET-1."""
+    return "(current" in cell or "(to date)" in cell
+
+
 def _since(previous_md, tz):
     """UTC start of the week after the last closed week METRICS.md already records."""
-    closed = [k for k, cells in _previous(previous_md).items() if "(to date)" not in cells[0]]
+    closed = [k for k, cells in _previous(previous_md).items() if not _open_week(cells[0])]
     if not closed:
         return None
     start = dt.datetime.strptime(max(closed), "%Y-%m-%d").replace(hour=6, tzinfo=tz) + dt.timedelta(days=7)
@@ -252,6 +272,7 @@ def collect_github(repo, token, since=None):
         pulls.append({"number": p["number"], "merged_at": p.get("merged_at"),
                       "state": p.get("state"), "draft": bool(p.get("draft")), "updated_at": p.get("updated_at"),
                       "body": p.get("body") or "", "verdicts": verdicts,
+                      "labels": [l["name"] for l in p.get("labels") or []],
                       "causes": causes})
     runs = []
     # No query filter: GitHub caps any filtered runs listing (status, created, ...) at 1,000
@@ -312,14 +333,24 @@ def convergence(raw, tz, a, b):
 
 
 def stale_prs(raw, tz):
-    """Open PRs untouched for STALE_HOURS at run time, minus drafts held in briefs/CODEX-1.md."""
-    if raw.get("held") is None or not any(p.get("state") for p in raw["pulls"]):
+    """Open PRs untouched for STALE_HOURS at run time; held drafts count like any other (D-098)."""
+    if not any(p.get("state") for p in raw["pulls"]):
         return None
     cutoff = _when(raw["now"], tz) - dt.timedelta(hours=STALE_HOURS)
-    held = set(raw["held"])
     return sorted(p["number"] for p in raw["pulls"]
-                  if p.get("state") == "open" and p.get("updated_at") and _when(p["updated_at"], tz) < cutoff
-                  and not (p.get("draft") and p["number"] in held))
+                  if p.get("state") == "open" and p.get("updated_at") and _when(p["updated_at"], tz) < cutoff)
+
+
+def open_by_lane(raw):
+    """{lane: open PR count} from each PR's `lane:<name>` label (docs/LANES.md); no label is the peers' lane."""
+    if not any(p.get("state") for p in raw["pulls"]):
+        return None
+    out = {}
+    for p in raw["pulls"]:
+        if p.get("state") == "open":
+            lane = next((l[5:] for l in p.get("labels", []) if l.startswith("lane:")), "peers")
+            out[lane] = out.get(lane, 0) + 1
+    return out
 
 
 def baseline(raw):
@@ -342,10 +373,12 @@ def compute(raw):
     for key in ("trace", "board", "readings", "runs"):
         weeks |= {wk(x["at"]) for x in raw[key]}
     weeks |= {wk(p["merged_at"]) for p in raw["pulls"] if p.get("merged_at")}
+    weeks |= {wk(x["at"]) for x in raw.get("states", [])}
 
     out = []
     base = baseline(raw)
     stale_now = stale_prs(raw, tz)
+    lanes_now = open_by_lane(raw)
     for start in sorted(weeks):
         end = start + dt.timedelta(days=7)
         inside = lambda s: start <= _when(s, tz) < end
@@ -359,6 +392,11 @@ def compute(raw):
         readings = [x for x in raw["readings"] if inside(x["at"])]
         last = max(readings, key=lambda x: (x["all"] or 0, x["at"]), default=None)
         usage_all = last["all"] if last else None
+        # MET-1a: requirements are counted at the reading's own time, not at the week's end.
+        at_reading = max((x for x in raw["trace"] if _when(x["at"], tz) <= _when(last["at"], tz)),
+                         key=lambda x: _when(x["at"], tz), default=None) if last else None
+        reqs_at_reading = ((at_reading["covered"] if at_reading else 0)
+                           - (covered_start["covered"] if covered_start else 0)) if last else None
         pace = None
         if last:
             pace = 100 * (_when(last["at"], tz) - start).total_seconds() / (7 * 86400)
@@ -371,6 +409,10 @@ def compute(raw):
             if upto(snap["at"]):
                 ever_esc |= {k for k, v in snap["states"].items() if v == "escalated"}
                 ever_rev |= {k for k, v in snap["states"].items() if v in REACHED_REVIEW}
+        for x in raw.get("states", []):  # raw data saved before SIM-repo-2b has none
+            if upto(x["at"]):
+                ever_esc |= {x["id"]} if x["state"] == "escalated" else set()
+                ever_rev |= {x["id"]} if x["state"] in REACHED_REVIEW else set()
 
         groups = {}
         for r in raw["runs"]:
@@ -391,7 +433,14 @@ def compute(raw):
             "usage_all": usage_all,
             "usage_fable": last["fable"] if last else None,
             "pace": pace,
-            "usage_per_req": usage_all / reqs if usage_all is not None and reqs > 0 else None,
+            "reading_at": last["at"] if last else None,
+            "reqs_at_reading": reqs_at_reading,
+            "usage_per_req": usage_all / reqs_at_reading if usage_all is not None and reqs_at_reading > 0 else None,
+            # MET-1b: the newest input of any kind, to show how old the row's data is.
+            "newest_input": max((x["at"] for k in ("trace", "board", "readings") for x in raw[k]
+                                 if upto(x["at"]) and _when(x["at"], tz) <= _when(raw["now"], tz)),
+                                key=lambda s: _when(s, tz), default=None),
+            "age_hours": None,
             "first_pass_ok": sum(p["verdicts"][0] == "accept" for p in judged),
             "first_pass_n": len(judged),
             "rounds": sum(len(p["verdicts"]) for p in judged),
@@ -405,12 +454,15 @@ def compute(raw):
             "flaky": flaky,
             "runs": n_runs,
         })
+        if out[-1]["current"] and out[-1]["newest_input"]:
+            out[-1]["age_hours"] = (_when(raw["now"], tz) - _when(out[-1]["newest_input"], tz)).total_seconds() / 3600
         conv = convergence(raw, tz, start, end)
         judged_week = start.date() > DECISION  # the decision's own week is half baseline
         out[-1].update({
             "open_rows": conv["open_rows"], "followups": conv["followups"],
             "followups_per_pr": conv["followups_per_pr"], "promotions": conv["promotions"],
             "stale": stale_now if out[-1]["current"] else None,
+            "lanes": lanes_now if out[-1]["current"] else None,
             "red": {k for k, v in (("promotions", conv["promotions"]), ("defects", len(conv["defects"])))
                     if judged_week and v is not None and base[k] is not None and v > base[k]},
         })
@@ -421,13 +473,13 @@ def compute(raw):
 
 # Columns sourced from the GitHub API: frozen once a closed week has been recorded, so
 # later edits, deleted reviews or expired runs cannot rewrite a finished week.
-FROZEN = (5, 7, 8, 9, 11, 16)
+FROZEN = (5, 7, 8, 9, 11, 16, 17)
 COLUMNS = [
     "Week starting", "Usage all / Fable", "On-pace mark", "Reqs newly covered", "Usage per req",
     "First-pass L3 accept", "Escalation rate (cum.)", "Defects after merge", "CI flake rate",
     "L3 rounds per merged PR", "Usage per merged PR", "L3 causes",
     "Open BOARD rows", "Follow-up rows added", "Follow-ups per merged PR", "Promotions later to release",
-    "Stale PRs (48 h)",
+    "Stale PRs (48 h)", "Open PRs by lane",
 ]
 
 
@@ -435,15 +487,25 @@ def _ratio(k, n):
     return f"{round(100 * k / n)}% ({k}/{n})" if n else NONE
 
 
+def _week_label(w):
+    """Closed weeks print the date; the current week names its reading and, past 36 h, the age of its newest input."""
+    if not w["current"]:
+        return w["week"]
+    note = f"reading {w['reading_at'].replace('T', ' ')}" if w["reading_at"] else "no reading"
+    if w["age_hours"] is not None and w["age_hours"] > LEDGER_STALE_HOURS:
+        note += f"; newest input {int(w['age_hours'])} h old"
+    return f"{w['week']} (current, {note})"
+
+
 def _cells(w):
     red = lambda key: " red" if key in w["red"] else ""
     n = lambda v: NA if v is None else str(v)
     return [
-        w["week"] + (" (to date)" if w["current"] else ""),
+        _week_label(w),
         f"{w['usage_all']:g}% / {w['usage_fable']:g}%" if w["usage_all"] is not None else NONE,
         f"{w['pace']:.0f}%" if w["pace"] is not None else NONE,
         str(w["reqs"]),
-        f"{w['usage_per_req']:.2f} pts" if w["usage_per_req"] is not None else NONE,
+        f"{w['usage_per_req']:.2f} pts (reading {w['reading_at'].replace('T', ' ')})" if w["usage_per_req"] is not None else NONE,
         _ratio(w["first_pass_ok"], w["first_pass_n"]),
         _ratio(w["escalated"], w["reviewed"]),
         (f"{len(w['defects'])} ({', '.join(w['defects'])})" if w["defects"] else ("0" if w["merged"] else NONE))
@@ -457,6 +519,8 @@ def _cells(w):
         NA if w["followups_per_pr"] is None else f"{w['followups_per_pr']:.1f}",
         n(w["promotions"]) + red("promotions") if w["promotions"] is not None else NA,
         NA if w["stale"] is None else str(len(w["stale"])),
+        NA if w["lanes"] is None else
+        ", ".join(f"{k} {v}" for k, v in sorted(w["lanes"].items())) + f" (cap about {LANE_CAP})",
     ]
 
 
@@ -499,7 +563,7 @@ def render(weeks, raw, previous_md=None):
         if prev and len(prev) < len(cells):
             prev = prev + [NONE] * (len(cells) - len(prev))  # recorded before later columns were appended
         if prev and len(prev) == len(cells):
-            closed = not w["current"] and "(to date)" not in prev[0]
+            closed = not w["current"] and not _open_week(prev[0])
             cells = [o if (c in (NONE, NA) and o not in (NONE, NA)) or (closed and i in FROZEN) else c
                      for i, (c, o) in enumerate(zip(cells, prev))]
         lines.append("| " + " | ".join(cells) + " |")
@@ -529,11 +593,14 @@ def render(weeks, raw, previous_md=None):
         "Spend by model tier is approximated by this all-models / Fable-only split.",
         "- **On-pace mark**: the share of the week elapsed at that reading. Usage at the mark is on pace for ~100% at reset.",
         "- **Reqs newly covered**: growth of TRACE.md's covered count on main that week.",
-        "- **Usage per req**: weekly-limit points per newly covered requirement ID. "
-        "Stands in for tokens per merged requirement until tokens are metered.",
+        "- **Usage per req**: weekly-limit points per requirement ID covered at the time of the reading "
+        "(TRACE.md's last snapshot at or before the reading, minus the count before the week); the reading's time is shown "
+        "beside it. Stands in for tokens per merged requirement until tokens are metered.",
+        "- **Current week label**: the time of the week's highest usage reading; past 36 hours it adds the age of the "
+        "newest input (reading, TRACE.md or BOARD.md snapshot) relative to \"Data as of\".",
         "- **First-pass L3 accept**: PRs merged that week whose first review with a verdict "
         "(an L3 review stating `Verdict: accept|fix-list|reject`, or the verdict on its first line) was accept.",
-        "- **Escalation rate**: packages ever `escalated` on BOARD.md over packages that ever reached "
+        "- **Escalation rate**: packages ever `escalated` on BOARD.md or by a work-item issue's state label over packages that ever reached "
         "`in review`, `merged` or `escalated`, up to that week.",
         "- **Defects after merge**: `Defect: <package ID>` lines in the bodies of PRs merged that week "
         "(a fix to code already merged; see the PR template).",
@@ -550,8 +617,10 @@ def render(weeks, raw, previous_md=None):
         "- **Follow-up rows added**: rows first seen on BOARD.md that week whose ID ends `-f<N>`, `-r<N>` or `-l<N>`, "
         "or whose package text says `(release` and cites a review. **Per merged PR**: that count over PRs merged that week.",
         "- **Promotions later to release**: rows first seen that week whose text cites a LATER.md line (`LATER <ID>`).",
-        "- **Stale PRs (48 h)**: open PRs with no update for 48 hours at run time, leaving out draft PRs listed under "
-        "Held in briefs/CODEX-1.md; counted for the current week only.",
+        "- **Stale PRs (48 h)**: open PRs, held drafts included (D-098), with no update for 48 hours at run time; "
+        "counted for the current week only.",
+        "- **Open PRs by lane**: open PRs per lane (a `lane:<name>` label, docs/LANES.md; no label is the peers) "
+        "against a cap of about 10; current week only.",
         "- **red** / **n/a**: red marks a week above the D-085 baseline; `n/a` means the data to compute a column is "
         "absent (never printed as 0).",
         "- **Closed weeks**: once a finished week is recorded, its L3, defect and flake cells are kept as "
@@ -592,7 +661,6 @@ def main(argv=None):
         raw = json.loads(pathlib.Path(args.raw).read_text())
     else:
         trace, board = git_history(root, args.ref)
-        codex = root / "briefs" / "CODEX-1.md"
         ledger = (root / "LEDGER.md").read_text()
         tz = dt.timezone(dt.timedelta(hours=TZ_HOURS))
         pulls, runs = collect_github(args.repo, os.environ.get("GITHUB_TOKEN"), _since(previous, tz))
@@ -601,7 +669,7 @@ def main(argv=None):
             "tz_hours": TZ_HOURS, "trace": trace, "board": board,
             "readings": ledger_readings(ledger), "phases": ledger_phases(ledger),
             "pulls": pulls, "runs": runs,
-            "held": held_drafts(codex.read_text()) if codex.is_file() else None,
+            "states": collect_states(args.repo, os.environ.get("GITHUB_TOKEN")),
         }
         if args.raw_out:
             pathlib.Path(args.raw_out).write_text(json.dumps(raw, indent=1, sort_keys=True))

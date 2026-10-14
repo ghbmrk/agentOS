@@ -20,6 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
@@ -61,15 +62,17 @@ type pausedError struct{ until time.Time }
 func (e *pausedError) Error() string { return "too many wrong codes; checks are paused" }
 
 // unlockErr is an error safe to show on the unlock socket, with its HTTP
-// status.
+// status. reason, when set, is a stable word the page acts on, so it never
+// routes on a status that several refusals share.
 type unlockErr struct {
 	msg    string
 	status int
+	reason string
 }
 
 func (e *unlockErr) Error() string { return e.msg }
 
-func uerr(status int, msg string) *unlockErr { return &unlockErr{msg, status} }
+func uerr(status int, msg string) *unlockErr { return &unlockErr{msg: msg, status: status} }
 
 var (
 	errBusy            = uerr(http.StatusConflict, "an unlock is already in progress or the vault is open")
@@ -156,6 +159,21 @@ func (p phase) String() string { return [...]string{"locked", "opening", "pendin
 type unlockState struct {
 	Wrong    []int64 `json:"wrong"`
 	LastStep int64   `json:"last_step"`
+	// Sealed is set before finish seals the code generator, and never
+	// cleared: the Owner Card's reset reads it while the vault is locked
+	// (cardvault.go).
+	Sealed bool `json:"sealed,omitempty"`
+	// Provisioned is set while the vault on disk was made from an Owner
+	// Card (cardvault.go).
+	Provisioned bool `json:"provisioned,omitempty"`
+	// Setup is set by `init -setup` and never cleared: the box was made in
+	// setup mode, so until Sealed the vault process opens or remakes the
+	// setup vault (setupopen.go).
+	Setup bool `json:"setup,omitempty"`
+	// Keyed is set while the vault last opened held a model provider's
+	// API key, never the key (syncKeyedLocked): the model state reads it
+	// while the vault is locked, and nothing routes on it.
+	Keyed bool `json:"keyed,omitempty"`
 }
 
 // loadState reads the state file. A missing file is a fresh start; an
@@ -181,9 +199,21 @@ func loadState(path string) (unlockState, error) {
 // the vault is held but nothing is served. No right code within ttl, or a
 // lock, discards the key. Only an open vault serves the model route.
 type custody struct {
+	// guard is the process's home-network address policy (DEV-2): the
+	// model proxy, the texting provider and the mail servers dial through
+	// it. Nil only in tests, where each dial falls back to the registries.
+	guard *netguard.Policy
 	// keysPath, if set, is the keys file; while it exists the state file
 	// must too.
 	keysPath string
+	// vaultPath is the sealed vault file, for Owner Card rotation
+	// (rotation.go); empty serves no rotation.
+	vaultPath string
+	// afterFunc arms the pending rotation's timer; nil is time.AfterFunc.
+	// Only tests set it.
+	afterFunc func(time.Duration, func()) func() bool
+	// rot is the pending Owner Card rotation (rotation.go).
+	rot rotation
 	// open decrypts the vault with a passphrase (vault.OpenSealed).
 	open func(passphrase string) (*vault.Vault, error)
 	// build makes the egress proxy over an open vault.
@@ -213,6 +243,20 @@ type custody struct {
 	// granted: some machine has a model provider granted (modelGranted),
 	// for the broker's model state (OP-9 C2). Set before serving.
 	granted bool
+	// agent is the agent machine a stored key grants its provider to
+	// (storedGrant, -agent-machine); "" grants by -grant only.
+	agent string
+	// flagGrants are the model providers a -grant flag grants on some
+	// machine, and privateFlags those -private-ok allows private data,
+	// for the model state's private (privateGrantedNow). Set before
+	// serving.
+	flagGrants, privateFlags map[string]bool
+	// modelTransport is the proxy's upstream transport; nil outside
+	// tests.
+	modelTransport http.RoundTripper
+	// keyCheck sends setup's key checks (setupKey); nil outside tests,
+	// where each check gets the proxy's default transport over guard.
+	keyCheck http.RoundTripper
 
 	mu sync.Mutex
 	// smsFailSince is when the texting account's polls started failing
@@ -591,6 +635,9 @@ func (c *custody) serve(v *vault.Vault) error {
 		c.timer = nil
 	}
 	v.OnWarn(c.notify)
+	c.applyPins(v)
+	c.syncMarksLocked(v)
+	c.syncKeyedLocked(v)
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
 	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
@@ -1023,6 +1070,12 @@ func (c *custody) lockedOut(now time.Time) (time.Time, bool) {
 // lock discards the key and cancels an unlock in flight. A derivation
 // still running keeps the phase at opening until it returns.
 func (c *custody) lock() {
+	// The pending card rotation holds the typed passphrase and the open
+	// vault: it goes first (lock order rotation.mu, then mu).
+	c.rot.mu.Lock()
+	defer c.rot.mu.Unlock()
+	c.rot.drop()
+	c.rot.box = nil
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.gen++
@@ -1047,6 +1100,7 @@ func (c *custody) discard() {
 		c.timer.Stop()
 		c.timer = nil
 	}
+	c.clearPins()
 	if c.v != nil {
 		c.v.Close()
 	}
@@ -1072,6 +1126,12 @@ func (c *custody) put(name string, value []byte) error {
 	if c.ph != open {
 		return errLocked
 	}
+	return c.putKeyLocked(name, value)
+}
+
+// putKeyLocked is put's store, shared with setup's (setupKey). Caller
+// holds mu with the vault open.
+func (c *custody) putKeyLocked(name string, value []byte) error {
 	if !adapterCredential(name) || hasOtherKind(c.v, name, vault.KindAPIKey) {
 		return errBadCredential
 	}
@@ -1082,6 +1142,7 @@ func (c *custody) put(name string, value []byte) error {
 		}
 		return errBadCredential
 	}
+	c.syncKeyedLocked(c.v)
 	return nil
 }
 
@@ -1319,13 +1380,23 @@ func (c *custody) tier4(code string) (*vault.Vault, error) {
 	if c.host == nil {
 		return nil, errNoTPM
 	}
-	if err := c.checkCode(code, c.now()); err != nil {
-		if strings.HasPrefix(err.Error(), "wrong code") {
-			c.notify("wrong code for a trusted-host change")
-		}
+	if err := c.approvedLocked(code, "a trusted-host change"); err != nil {
 		return nil, err
 	}
 	return c.v, nil
+}
+
+// approvedLocked checks a tier-4 approval code (used once; a wrong one
+// counts toward the cap) and tells the owner of a wrong code for what.
+// The caller holds c.mu and has checked the vault is open.
+func (c *custody) approvedLocked(code, what string) error {
+	if err := c.checkCode(code, c.now()); err != nil {
+		if strings.HasPrefix(err.Error(), "wrong code") {
+			c.notify("wrong code for " + what)
+		}
+		return err
+	}
+	return nil
 }
 
 // MinPINLen is the shortest boot PIN, in characters (arbitrator, #42).

@@ -1,0 +1,19 @@
+#!/usr/sbin/nft -f
+# Generated from broker/netguard InboundRules(Inbound{}); TestInboundImageFileIsTheDefault
+# checks it. agentos-inbound.service loads it before any network or listener (DEV-net-e 2a).
+table inet agentos_inbound {
+  set exempt {
+    type ifname
+    elements = { "lo" }
+  }
+  chain input {
+    type filter hook input priority filter; policy accept;
+    iifname @exempt accept
+    ct state established,related accept
+    ip6 saddr fe80::/10 ip6 hoplimit 255 icmpv6 type nd-router-advert accept
+    ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept
+    udp sport 67 udp dport 68 accept
+    ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+    drop
+  }
+}

@@ -42,7 +42,10 @@ type Engine struct {
 	stopped bool
 	// fence maps an account to the intents left unresolved by the last
 	// restart. Dispatch on the account waits until it is empty (OP-4).
-	fence  map[string]map[string]bool
+	fence map[string]map[string]bool
+	// missed counts the SettleUnknown rounds in a row that left a fenced
+	// intent unresolved; Unconfirmed reads it (#1373).
+	missed int
 	broken error
 }
 
@@ -481,6 +484,47 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 	return rep
 }
 
+// reconcileRound bounds one round of SettleUnknown, so an executor whose
+// service hangs is asked again rather than holding the round forever.
+const reconcileRound = time.Minute
+
+// SettleUnknown runs Reconcile until no outcome_unknown attempt is left or
+// ctx ends, waiting wait after the first unresolved round and doubling up
+// to maxWait (OP-4). It only gathers evidence, so no effect runs again: an
+// executor that cannot tell what happened answers unknown and its account
+// stays fenced, and one whose service is down is asked again on the next
+// round. It returns the last round's report.
+func (e *Engine) SettleUnknown(ctx context.Context, wait, maxWait time.Duration) ReconcileReport {
+	if wait <= 0 {
+		wait = time.Millisecond
+	}
+	for {
+		rctx, cancel := context.WithTimeout(ctx, reconcileRound)
+		rep := e.Reconcile(rctx)
+		cancel()
+		e.mu.Lock()
+		if len(rep.Unresolved) == 0 {
+			e.missed = 0
+		} else {
+			e.missed++
+		}
+		e.mu.Unlock()
+		if len(rep.Unresolved) == 0 || ctx.Err() != nil {
+			return rep
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return rep
+		case <-t.C:
+		}
+		if wait *= 2; wait > maxWait {
+			wait = maxWait
+		}
+	}
+}
+
 // Resolve records evidence about an attempt from outside the executor, such
 // as the owner confirming what happened. Only succeeded or not_applied
 // resolve an attempt; unknown is not evidence (OP-2).
@@ -756,11 +800,33 @@ func (e *Engine) InUse(account, action string, since time.Time) []Use {
 // effects and broker-state changes (OP-5). It reads the journal, not
 // memory, and is nil if the journal cannot be read.
 func (e *Engine) Trail() []Record {
-	recs, err := e.readJournal()
+	recs, err := e.ReadTrail()
 	if err != nil {
 		return nil
 	}
 	return recs
+}
+
+// ReadTrail is Trail with the read error, for a caller that must tell an
+// unreadable journal from an empty one (journal/check).
+func (e *Engine) ReadTrail() ([]Record, error) { return e.readJournal() }
+
+// RecordsAfter returns the journal records with a sequence number greater
+// than seq, oldest first. Records are numbered from 1 with no gaps, so a
+// projection that has applied through seq reads its tail here (SIM-proj).
+// Like Trail it decodes the journal afresh, so the records share nothing
+// with the intents the engine dispatches. Unlike Trail it returns the read
+// error, so a projection never mistakes an unreadable journal for an empty
+// tail.
+func (e *Engine) RecordsAfter(seq uint64) ([]Record, error) {
+	recs, err := e.readJournal()
+	if err != nil {
+		return nil, err
+	}
+	if seq >= uint64(len(recs)) {
+		return nil, nil
+	}
+	return recs[seq:], nil
 }
 
 // Fenced returns the intents on account that the last restart left
@@ -773,6 +839,28 @@ func (e *Engine) Fenced(account string) []string {
 		out = append(out, id)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// Unconfirmed lists the intents the last restart fenced that are still
+// unresolved once SettleUnknown has asked for their evidence at least
+// rounds times in a row, oldest first, so STATUS can say what is not
+// confirmed (#1373). It is empty before then: a fence the first evidence
+// lifts is never shown. Parameters and preconditions are left out.
+func (e *Engine) Unconfirmed(rounds int) []Intent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.missed < rounds {
+		return nil
+	}
+	var out []Intent
+	for _, en := range bySeq(e.open) {
+		if e.fence[en.intent.Account][en.intent.ID] {
+			in := en.intent
+			in.Params, in.Preconditions = nil, nil
+			out = append(out, in)
+		}
+	}
 	return out
 }
 

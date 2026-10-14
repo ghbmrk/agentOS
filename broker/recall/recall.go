@@ -121,7 +121,8 @@ type Preference struct {
 }
 
 // Labeler reads and raises agent machines' data labels (REV-5). Raise must
-// have taken effect (egress narrowed) before it returns nil.
+// have taken effect (egress narrowed) and been saved before it returns nil,
+// and Label reads private only for a label that is saved (K10).
 type Labeler interface {
 	Label(machine string) Label
 	Raise(machine string) error

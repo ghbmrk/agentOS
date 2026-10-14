@@ -69,7 +69,7 @@ func serveModelGrants(t *testing.T, rt *route.Router, ev *evalRoute, g map[strin
 	}
 	r := newFastRig(t, true)
 	r.c.build = func(v *vault.Vault) (*egress.Proxy, error) {
-		return newProxy(v, g, tr)
+		return newProxy(v, g, tr, nil)
 	}
 	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
 		t.Fatal(err)

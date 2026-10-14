@@ -27,6 +27,9 @@ type ModelState struct {
 	Granted bool `json:"granted"`
 	// Open: the vault is open, so the model route serves.
 	Open bool `json:"open"`
+	// Private: a granted provider may receive private data (CAP-9), so
+	// tasks that need the owner's mail or files can run (#1266).
+	Private bool `json:"private,omitempty"`
 }
 
 // maxState bounds the vault process's state answer.

@@ -6,7 +6,7 @@ Board section: Harness and operating model. Decision: D-086; CLAUDE.md reviewer 
 
 ## Requirements
 
-- **CONV-6-1** Sweep `reviews/` records dated 2026-10-07 or later for finding kinds seen on two or more PRs; add any missing to the matching lens README's "Recurring kinds" table.
+- **CONV-6-1** (also covers the former REV-CHK row, folded in 2026-10-12) Sweep `reviews/` records dated 2026-10-07 or later for finding kinds seen on two or more PRs; add any missing to the matching lens README's "Recurring kinds" table.
 - **CONV-6-2** For each recurring kind whose owner package has not started, build the check named in the README (lint rule, test or CI step), with a test that fails on a synthetic instance of the kind and passes on main.
 - **CONV-6-3** Move each built kind to "Checks that replaced findings" with its check and package ID.
 - **CONV-6-4** Briefs written after a check lands list the remaining recurring kinds for their area as acceptance criteria (OPERATING §5).

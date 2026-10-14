@@ -138,7 +138,7 @@ func TestWithGrantsSetsTheGrantState(t *testing.T) {
 		{grants{}, false},
 		{grants{"agent": {"openai"}}, true},
 	} {
-		got := withGrants(&custody{}, c.g)
+		got := withGrants(&custody{}, c.g, "agent")
 		if got.granted != c.want || got.build == nil {
 			t.Errorf("%v: granted %v, build set %v", c.g, got.granted, got.build != nil)
 		}

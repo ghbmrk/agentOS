@@ -1,14 +1,18 @@
 #!/bin/sh
 # Boot a COPY of the image in QEMU the way a PC would: OVMF with Microsoft keys and Secure Boot on,
-# swtpm TPM 2.0, no network, a drive larger than the image (root grows into it). Read the console
+# swtpm TPM 2.0, a drive larger than the image (root grows into it). Read the console
 # until the boot report appears, then check it: health passed under Secure Boot, the entry was
-# blessed, and root grew. virtio disk, not emulated USB: S7 saw QEMU's usb-storage corrupt reads.
+# blessed, and root grew; the first boot has a cable in (QEMU user networking) and reports its
+# DHCP lease (P2-1, #1416), and the host probes the inbound drop through QEMU's port forwards
+# (probe_inbound.py); the later boots have no network. virtio disk, not emulated USB: S7
+# saw QEMU's usb-storage corrupt reads.
 # Then the per-drive GUIDs (drive-id, L3 MUST on #41): the first boot gave the drive its own disk,
 # ESP and root GUIDs; the drive boots again on them; and a PC with two fresh copies attached (every
 # GUID shared) fails the health check, so that boot is never blessed and reboots into its next try.
 # Usage: ci_boot.sh IMAGE [WORKDIR]. Console logs: WORKDIR/console.log, console-reboot.log,
 # console-two-drives.log.
 set -eu
+HERE=$(dirname "$(realpath "$0")")
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/agentos-boot}"); mkdir -p "$W"
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
 
@@ -32,13 +36,16 @@ boot() {
 		-drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
 		-drive if=pflash,format=raw,unit=1,file="$t/vars.fd" \
 		-chardev socket,id=chrtpm,path="$t/sock" -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 \
-		$drives -display none -serial file:"$log" -nic none &
+		$drives -display none -serial file:"$log" -nic "${NIC:-none}" &
 	QEMU=$!
 	end=$(( $(date +%s) + ${TMO:-1800} ))
 	while kill -0 $QEMU 2>/dev/null && [ "$(date +%s)" -lt "$end" ]; do
 		grep -aq "${UNTIL:-agentos-boot:\|agentos-health: FAIL}" "$log" 2>/dev/null && break
 		sleep 5
 	done
+	# With PROBE set, the booted box's ports are probed through QEMU's forwards while it runs.
+	# shellcheck disable=SC2086 # $PROBE is a list of HOSTPORT:GUESTPORT words.
+	[ -z "${PROBE:-}" ] || python3 "$HERE/probe_inbound.py" $PROBE >"$log.probe" 2>&1 || true
 	sleep 2; kill $QEMU 2>/dev/null || true; wait $QEMU 2>/dev/null || true
 	echo "--- $(basename "$log")"
 	grep -a "agentos-\|Secure Boot\|verity\|Failed" "$log" | tail -40 || true
@@ -67,9 +74,19 @@ EOF
 D=$W/disk.raw
 copy "$D"
 before=$(stat -c %s "$IMG")
-boot "$W/console.log" "$D"
-for want in "agentos-health: PASS secure_boot=on usr=verity" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
+# Forwards from the host to box ports 22, 80, 443 and 18789: each must be dropped (I11, I19).
+NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789" \
+	PROBE="18022:22 18080:80 18443:443 18789:18789" boot "$W/console.log" "$D"
+for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
 	has "$W/console.log" "$want"
+done
+# The wired uplink took a lease on the first boot; the reboot, with no cable, did not wait for one.
+has "$W/console.log" "agentos-uplink: "
+hasnt "$W/console.log" "agentos-uplink: none"
+# The host's connections through the forwards reach the box's leased address and get no answer.
+cat "$W/console.log.probe" 2>/dev/null || true
+for port in 22 80 443 18789; do
+	has "$W/console.log.probe" "agentos-probe: $port dropped"
 done
 # Root started at its 1G minimum inside an image of $before bytes; the drive gained 2G.
 root=$(grep -ao "agentos-boot: .*root_bytes=[0-9]*" "$W/console.log" | sed 's/.*root_bytes=//' | tail -1)
@@ -95,6 +112,7 @@ done
 boot "$W/console-reboot.log" "$D"
 has "$W/console-reboot.log" "agentos-health: PASS secure_boot=on usr=verity"
 hasnt "$W/console-reboot.log" "agentos-drive-id: assigned"
+has "$W/console-reboot.log" "agentos-uplink: none"
 
 # Two fresh copies on one PC: the boot drive is ambiguous, so health fails and nothing is assigned.
 copy "$W/two-a.raw"; copy "$W/two-b.raw"

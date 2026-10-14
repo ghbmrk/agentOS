@@ -55,7 +55,7 @@ func TestALostCardRotationReencrypts(t *testing.T) {
 	lostParts := []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}
 	for i := 2; i < len(lostParts); i++ {
 		kept := append(append([]Part(nil), lostParts[:i]...), lostParts[i+1:]...)
-		if _, err := BeginRotate(x.b, kept, Auth{Code: true, Local: true}, tpm, testGen, nil, t0); !errors.Is(err, ErrLostCardParts) {
+		if _, err := BeginRotate(x.b, kept, Auth{Code: true, Local: true}, tpm, t0); !errors.Is(err, ErrLostCardParts) {
 			t.Fatalf("lost card kept %s: %v", lostParts[i], err)
 		}
 	}
@@ -126,7 +126,7 @@ func TestARecoveryKeyRotationReencrypts(t *testing.T) {
 func TestARecoveryKeyRotationNeedsThePassphraseSlotProved(t *testing.T) {
 	x := newBox(t)
 	x.withPassphrase()
-	if _, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, testGen, nil, t0); !errors.Is(err, ErrNeedPassphrase) {
+	if _, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0); !errors.Is(err, ErrNeedPassphrase) {
 		t.Fatalf("recovery-key rotation without the passphrase: %v", err)
 	}
 	old := x.snapshot()
@@ -322,7 +322,7 @@ func TestAMistypedPassphraseChangesNothing(t *testing.T) {
 	x := newBox(t)
 	x.withPassphrase()
 	keys, _ := os.ReadFile(x.b.KeysPath)
-	if _, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk, Passphrase: []byte("tulip orbit mosaic typo")}, testGen, nil, t0); !errors.Is(err, ErrWrongPassphrase) {
+	if _, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk, Passphrase: []byte("tulip orbit mosaic typo")}, t0); !errors.Is(err, ErrWrongPassphrase) {
 		t.Fatalf("mistyped passphrase: %v", err)
 	}
 	if _, err := Refresh(x.b, Auth{Code: true, Local: true}, x.rk, []byte("tulip orbit mosaic typo"), nil, t0); !errors.Is(err, ErrWrongPassphrase) {

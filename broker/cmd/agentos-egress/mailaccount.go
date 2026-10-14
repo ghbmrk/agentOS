@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -58,6 +60,15 @@ type mailSettings struct {
 	SMTP     string `json:"smtp"` // host:port
 	StartTLS bool   `json:"starttls,omitempty"`
 	User     string `json:"user,omitempty"` // sign-in name; empty is Address
+}
+
+// generation names these settings for mail.sock: a request bound to
+// another account's generation is refused (MAIL-gen). It covers every
+// field, so a replacement that keeps the address still changes it.
+func (s mailSettings) generation() string {
+	b, _ := json.Marshal(s)
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:16])
 }
 
 func (s mailSettings) check() error {
@@ -219,7 +230,7 @@ func (c *custody) mailSource() (mailsock.Account, error) {
 	if user == "" {
 		user = rec.Address
 	}
-	st, err := imapsmtp.New(imapsmtp.Config{IMAP: rec.IMAP, SMTP: rec.SMTP, IMAPSec: imapSec, SMTPSec: smtpSec, From: rec.Address,
+	st, err := imapsmtp.New(imapsmtp.Config{IMAP: rec.IMAP, SMTP: rec.SMTP, IMAPSec: imapSec, SMTPSec: smtpSec, From: rec.Address, Guard: c.guard,
 		Credential: func(context.Context) (imapsmtp.Login, error) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -232,7 +243,7 @@ func (c *custody) mailSource() (mailsock.Account, error) {
 	if err != nil {
 		return mailsock.Account{}, mailsock.ErrFailed
 	}
-	return mailsock.Account{Store: st, Address: rec.Address}, nil
+	return mailsock.Account{Store: st, Address: rec.Address, Generation: rec.generation()}, nil
 }
 
 // serveMail opens mail.sock in dir for the broker's uid and serves it

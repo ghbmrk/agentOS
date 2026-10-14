@@ -1,0 +1,10 @@
+# Makes the setup vault as soon as the Wi-Fi page records the claim (#1249), without a reboot.
+[Unit]
+Description=agentOS setup vault on claim
+
+[Path]
+PathChanged=/var/lib/agentos-localui/claim.json
+Unit=agentos-egress-setup.service
+
+[Install]
+WantedBy=paths.target

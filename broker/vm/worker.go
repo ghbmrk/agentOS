@@ -197,8 +197,7 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 		return ExecResult{}, fmt.Errorf("%w: %s is %s", ErrState, id, mc.State)
 	}
 	if c.As > mc.Label {
-		mc.Label = c.As
-		if err := m.saveMachine(mc); err != nil {
+		if err := m.raiseLocked(mc, c.As); err != nil {
 			return ExecResult{}, err
 		}
 	}
@@ -411,8 +410,7 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 // running worker and left it stopped.
 func (m *Manager) deleteLocked(ctx context.Context, mc *machine, d Deletion) (DeleteReport, bool, error) {
 	if d.As > mc.Label {
-		mc.Label = d.As
-		if err := m.saveMachine(mc); err != nil {
+		if err := m.raiseLocked(mc, d.As); err != nil {
 			return DeleteReport{}, false, err
 		}
 	}

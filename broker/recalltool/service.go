@@ -244,7 +244,29 @@ func (l *LateExecutor) Execute(ctx context.Context, in journal.Intent, n int) jo
 	if r := l.r.Load(); r != nil {
 		return r.Execute(ctx, in, n)
 	}
+	// A renewal is not carried: nothing is recorded owed before recall
+	// opens, so the owner sends RENEW again.
+	if renew, _ := in.Params["renew"].(bool); renew {
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "renewal: recall is not open yet"}
+	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + "recall is not open yet"}
+}
+
+// Full is Reach.Full once recall is open; nil before.
+func (l *LateExecutor) Full() []string {
+	if r := l.r.Load(); r != nil {
+		return r.Full()
+	}
+	return nil
+}
+
+// AskRenew is Reach.AskRenew once recall is open; before, ErrNotOpen,
+// and nothing is asked.
+func (l *LateExecutor) AskRenew(ctx context.Context, lineage string) error {
+	if r := l.r.Load(); r != nil {
+		return r.AskRenew(ctx, lineage)
+	}
+	return ErrNotOpen
 }
 
 // Contained is Reach.Contained once recall is open. Before (the vault is
