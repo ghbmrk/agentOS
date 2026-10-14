@@ -31,8 +31,22 @@ type Dir interface {
 	// Append adds data to segment n (creating it) and returns the offset it
 	// was written at.
 	Append(n uint32, data []byte) (int64, error)
+	// Rewrite returns an error wrapping ErrReplaced when data did replace
+	// the segment but the rewrite is unfinished (not yet durable, or the
+	// segment could not be reopened): reads then see data or fail, never
+	// the old layout, and the caller retries.
 	Rewrite(n uint32, data []byte) error
 }
+
+// ErrReplaced marks a Rewrite error after the new data replaced the
+// segment, so the caller must follow the new layout (#1318).
+var ErrReplaced = errors.New("recall: segment replaced, rewrite unfinished")
+
+// Seams for tests that fail a segment write or reopen.
+var (
+	writeSegment = durable.WriteFile
+	openSegment  = os.OpenFile
+)
 
 // DirStore is a Dir in a directory readable by its owner only: meta.jsonl
 // (a FileStore) and seg-NNNNNNNN.jsonl files. Segment rewrites write a
@@ -103,7 +117,7 @@ func (d *DirStore) file(n uint32, create bool) (*os.File, error) {
 	if create {
 		flag |= os.O_CREATE
 	}
-	f, err := os.OpenFile(d.segPath(n), flag, 0o600)
+	f, err := openSegment(d.segPath(n), flag, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -174,21 +188,26 @@ func (d *DirStore) Rewrite(n uint32, data []byte) error {
 		}
 		return durable.SyncDir(d.path)
 	}
-	werr := durable.WriteFile(p, data, 0o600)
+	werr := writeSegment(p, data, 0o600)
 	if werr != nil && !errors.Is(werr, durable.ErrDirSync) {
 		return werr
 	}
 	// The old handle now points at an unlinked file: swap it even when
-	// only the directory sync failed.
+	// only the directory sync failed. The new file is whole, so an earlier
+	// failed reopen no longer stands.
 	if f := d.segs[n]; f != nil {
 		f.Close()
 		delete(d.segs, n)
 	}
+	delete(d.broken, n)
 	if _, err := d.file(n, false); err != nil {
 		d.broken[n] = fmt.Errorf("recall: segment reopen after rewrite: %w", err)
-		return d.broken[n]
+		return fmt.Errorf("%w: %w", ErrReplaced, d.broken[n])
 	}
-	return werr
+	if werr != nil {
+		return fmt.Errorf("%w: %w", ErrReplaced, werr)
+	}
+	return nil
 }
 
 // Close releases the files and the lock.
