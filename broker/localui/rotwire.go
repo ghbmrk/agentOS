@@ -219,12 +219,12 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
 	res, err := r.v.CommitRotation(ctx, id, *c)
+	r.mu.Lock()
+	wifi := r.wifi
+	r.mu.Unlock()
 	var ve *VaultError
 	switch {
 	case err == nil:
-		r.mu.Lock()
-		wifi := r.wifi
-		r.mu.Unlock()
 		if c.WiFiPassword != "" {
 			res = withWiFiNote(res, handOffWiFi(wifi, c))
 		}
@@ -237,6 +237,11 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	case errors.As(err, &ve) && ve.Status == http.StatusGone:
 		return fmt.Errorf("%w: %s", card.ErrDiscard, ve.Msg)
 	case errors.As(err, &ve) && ve.Status == http.StatusConflict:
+		// The owner keeps this card (card.ErrInEffect): its Wi-Fi goes on
+		// the air, so a lost old card stops joining (#1191).
+		if c.WiFiPassword != "" {
+			handOffWiFi(wifi, c)
+		}
 		return fmt.Errorf("%w: %s", card.ErrInEffect, ve.Msg)
 	case errors.As(err, &ve) && ve.Status < http.StatusInternalServerError:
 		return err // refused before anything was written; kept for a retry
@@ -246,13 +251,16 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	// effect. The owner keeps both cards (card.ErrInEffect's text) and the
 	// vault's rotation, if still waiting, is dropped (#1090 R2).
 	r.cancel(id)
+	if c.WiFiPassword != "" {
+		handOffWiFi(wifi, c)
+	}
 	return fmt.Errorf("%w: %v", card.ErrInEffect, err)
 }
 
-// handOffWiFi has agentosd write the committed card's Wi-Fi network for
-// the access point (#1191), only after the vault process committed it: a
-// card that may not be in effect leaves the old password on the air. It
-// reports whether the access point switches.
+// handOffWiFi has agentosd write the card's Wi-Fi network for the access
+// point (#1191), once the vault process committed the card or may have
+// (card.ErrInEffect: the owner keeps it); a card it refused leaves the old
+// password on the air. It reports whether the access point switches.
 func handOffWiFi(wifi func(ssid, password string) error, c *card.Card) bool {
 	return wifi != nil && wifi(c.WiFiName, c.WiFiPassword) == nil
 }

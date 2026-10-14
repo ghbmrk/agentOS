@@ -69,15 +69,34 @@ func TestRotationOfTheWiFiPasswordThatCannotSwitchSaysSo(t *testing.T) {
 	}
 }
 
-// #1191: nothing is handed off unless the vault process committed a new
-// Wi-Fi password: not for a refusal, a card in effect, no answer, or a
-// rotation without the Wi-Fi part (whose confirm page has no warning).
-func TestRotationHandsOffOnlyACommittedWiFiPassword(t *testing.T) {
+// #1191: a card that may be in effect (409, or no answer from the vault
+// process) is the card the owner keeps, so its Wi-Fi password goes on the
+// air too: the old password, perhaps on a lost card, must not stay.
+func TestRotationHandsOffAWiFiPasswordThatMayBeInEffect(t *testing.T) {
 	for name, commitErr := range map[string]error{
-		"gone":      &VaultError{Status: http.StatusGone, Msg: "cancelled"},
 		"in effect": &VaultError{Status: http.StatusConflict, Msg: "in effect"},
-		"refused":   &VaultError{Status: http.StatusBadRequest, Msg: "bad"},
 		"no answer": errors.New("synthetic: no answer"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			x := newWireRig(t)
+			x.v.commitErr = commitErr
+			x.start(t, url.Values{"parts": {"wifi", "recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+			x.post("/rotate/card", x.group())
+			nets := x.nets()
+			if len(nets) != 1 || nets[0] != (apnet.Network{SSID: "AgentOS-TEST", Password: x.gen.WiFiPassword}) {
+				t.Fatalf("handed off %d networks, or another one", len(nets))
+			}
+		})
+	}
+}
+
+// #1191: nothing is handed off when the vault process refused the card
+// before writing any of it (410, 400), nor for a rotation without the
+// Wi-Fi part (whose confirm page has no warning).
+func TestRotationHandsOffNoRefusedWiFiPassword(t *testing.T) {
+	for name, commitErr := range map[string]error{
+		"gone":    &VaultError{Status: http.StatusGone, Msg: "cancelled"},
+		"refused": &VaultError{Status: http.StatusBadRequest, Msg: "bad"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			x := newWireRig(t)
