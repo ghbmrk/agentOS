@@ -28,6 +28,7 @@
 # control). The box still reaches the router. Also needs unshare and systemd-networkd.
 # REQ: DEV-2, DEV-net-e, ONB-3
 import configparser
+import errno
 import fcntl
 import ipaddress
 import os
@@ -624,7 +625,11 @@ class BootProbeOverIPv6(unittest.TestCase):
                 self.buf += data
                 while len(self.buf) >= 4 and len(self.buf) >= 4 + struct.unpack("!I", self.buf[:4])[0]:
                     n = struct.unpack("!I", self.buf[:4])[0]
-                    os.write(self.tap, self.buf[4:4 + n])
+                    try:
+                        os.write(self.tap, self.buf[4:4 + n])
+                    except OSError as e:  # EIO while the link is down: the frame is lost, as on a wire
+                        if e.errno != errno.EIO:
+                            raise
                     self.buf = self.buf[4 + n:]
 
     def probe(self):
