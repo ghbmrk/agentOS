@@ -156,6 +156,9 @@ type Channel struct {
 	ctrl *control.Handler
 
 	mu       sync.Mutex
+	sends    sync.WaitGroup // texts started after a local reply (textAfterReply)
+	sendTail chan struct{}  // closed when the latest textAfterReply batch finishes; keeps batches in order
+	sendMu   sync.Mutex     // guards sendTail
 	codes    codes
 	open     map[string]*request
 	reqN     uint64 // requests opened, for their order

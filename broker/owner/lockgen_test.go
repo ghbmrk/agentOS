@@ -3,8 +3,10 @@ package owner
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/modem"
 )
@@ -73,5 +75,34 @@ func TestLocalSignInReportsItsOwnLockGeneration(t *testing.T) {
 	}
 	if msg, err := r.ch.LocalResume(locks, r.ch.StopGen()); err != nil || r.eng.Stopped() {
 		t.Fatalf("RESUME after a new sign-in: %q %v", msg, err)
+	}
+}
+
+// UX-2wb-1: LocalSignIn returns while its sign-in text is still in the modem,
+// so the page's 10 s call limit is not spent on a 220 s send; the text goes
+// once the modem lets it.
+func TestLocalSignInRepliesBeforeItsTextIsSent(t *testing.T) {
+	r := newRig(t, nil)
+	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
+	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
+	r.ch = r.open()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := r.ch.LocalSignIn(r.totp())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sign-in waited for the modem")
+	}
+	<-held.entered
+	close(held.let)
+	r.ch.WaitSends()
+	if m := <-r.phone.Inbox(); !strings.Contains(m.Text, "Wi-Fi") {
+		t.Fatalf("sign-in text %q", m.Text)
 	}
 }

@@ -188,3 +188,31 @@ func TestNoTriesLeftShowBeforeSignIn(t *testing.T) {
 		}
 	}
 }
+
+// An answer that gets no reply is not reported as undecided: it may have
+// taken effect, and the page says so (UX-2wb-1).
+func TestAnAnswerWithNoReplyDoesNotClaimNothingHappened(t *testing.T) {
+	if strings.Contains(answerUnreachableText, "Nothing was") || answerUnreachableText == unreachableText {
+		t.Fatalf("answer wording %q", answerUnreachableText)
+	}
+	s, err := New(Config{AP: testAP()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := strings.Repeat("ab", localapi.TokenBytes)
+	s.SetOwner(InProcess{
+		localapi.OpSession: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return localapi.Session{Token: tok, Until: time.Now().Add(time.Hour)}, nil
+		},
+		localapi.OpAnswer: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return nil, sockets.ErrFailed
+		},
+	})
+	sess, sum := "sess", strings.Repeat("0", 64)
+	_, refusal := s.answer(context.Background(), tok, sess, map[string][]string{
+		"id": {"Q2"}, "sum": {sum}, "tok": {s.formToken(sess, "Q2", sum)}, "answer": {"deny"},
+	})
+	if refusal != answerUnreachableText {
+		t.Fatalf("answer with no reply: %q", refusal)
+	}
+}

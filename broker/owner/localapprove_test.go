@@ -407,6 +407,7 @@ func TestWrongPageCodesThatLockAreTexted(t *testing.T) {
 	for i := 0; i < WrongToLock; i++ {
 		r.ch.LocalAnswer(ids[i/2], r.sum(ids[i/2]), true, fmt.Sprintf("%06d", i))
 	}
+	r.ch.WaitSends()
 	var all []string
 	for {
 		select {
@@ -463,6 +464,7 @@ func TestManyWrongPageCodesTellTheLockAndChallengeOnce(t *testing.T) {
 			t.Fatalf("wrong %d: %v", i, err)
 		}
 	}
+	r.ch.WaitSends()
 	var locks, challenges int
 	for {
 		select {

@@ -112,6 +112,42 @@ func (c *Channel) sendSignIns(text string, n, m int, now time.Time) {
 	})
 }
 
+// textAfterReply texts the alerts and the sign-in text after the caller has
+// its answer. A send takes up to the modem's 220 s, and the page gives up on
+// the call after 10 s, so a send before the reply made the page say nothing
+// was decided about a request that was (UX-2wb-1). The note behind the
+// sign-in text is saved before this runs, so a send that never completes is
+// retried by the next Tick; the alerts are best effort, as before. Batches
+// run one after another in call order. Called
+// without c.mu.
+func (c *Channel) textAfterReply(alerts []string, signIn string, n, m int, now time.Time) {
+	if len(alerts) == 0 && signIn == "" {
+		return
+	}
+	done := make(chan struct{})
+	c.sendMu.Lock()
+	prev := c.sendTail
+	c.sendTail = done
+	c.sendMu.Unlock()
+	c.sends.Add(1)
+	go func() {
+		defer c.sends.Done()
+		defer close(done)
+		if prev != nil {
+			<-prev
+		}
+		for _, a := range alerts {
+			_ = c.alert(a)
+		}
+		if signIn != "" {
+			c.sendSignIns(signIn, n, m, now)
+		}
+	}()
+}
+
+// WaitSends returns once every text started by textAfterReply has finished.
+func (c *Channel) WaitSends() { c.sends.Wait() }
+
 // wrongLocalLocked records a wrong local code for the digest and returns
 // the texts it calls for: one on the first wrong code of a bound window, and
 // one when the bound is used up (arbitrator ruling on #32).
@@ -297,12 +333,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, locks uint64, err e
 		alerts = append(alerts, c.wrongLocalLocked(now)...)
 	}
 	c.mu.Unlock()
-	for _, a := range alerts {
-		c.alert(a)
-	}
-	if signIn != "" {
-		c.sendSignIns(signIn, signIns, answers, now)
-	}
+	c.textAfterReply(alerts, signIn, signIns, answers, now)
 	switch {
 	case err != nil:
 		return time.Time{}, 0, err
@@ -610,12 +641,7 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 	}
 	c.mu.Unlock()
 	c.decide(decided)
-	for _, a := range alerts {
-		_ = c.alert(a)
-	}
-	if text != "" {
-		c.sendSignIns(text, ns, na, now)
-	}
+	c.textAfterReply(alerts, text, ns, na, now)
 	if err != nil {
 		return msg, err
 	}
