@@ -593,10 +593,13 @@ class InitrdBluetoothTest(unittest.TestCase):
         k = "lib/modules/6.12.111+deb13-amd64/kernel/"
         for m in ("drivers/bluetooth/btusb.ko.xz", "drivers/bluetooth/btmtk.ko.xz", "drivers/bluetooth/hci_uart.ko.xz",
                   "drivers/platform/x86/toshiba_bluetooth.ko.xz", "net/bluetooth/bluetooth.ko.xz",
-                  "net/bluetooth/rfcomm/rfcomm.ko.xz", "updates/btusb.ko", "extra/btmtk.ko.zst"):
+                  "net/bluetooth/rfcomm/rfcomm.ko.xz", "updates/btusb.ko", "extra/btmtk.ko.zst",
+                  # rsi_91x depends on btrsi, and mkosi adds a kept module's dependencies back.
+                  "drivers/net/wireless/rsi/rsi_91x.ko.xz", "drivers/net/wireless/rsi/rsi_usb.ko.xz"):
             with self.subTest(m):
                 self.assertTrue(rx.search(k + m))
-                self.assertTrue(finish.bluetooth_violations(["usr/" + k + m]))
+                if "/rsi/" not in m:
+                    self.assertTrue(finish.bluetooth_violations(["usr/" + k + m]))
         for m in ("fs/btrfs/btrfs.ko.xz", "drivers/media/pci/bt8xx/bt878.ko.xz", "drivers/nvme/host/nvme.ko.xz",
                   "drivers/net/wireless/mediatek/mt76/mt7921/mt7921e.ko.xz", "drivers/usb/host/xhci-pci.ko.xz",
                   "drivers/md/dm-verity.ko.xz"):
