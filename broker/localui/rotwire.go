@@ -122,9 +122,10 @@ type Rotation struct {
 	// display's lock, then mu.
 	postMu    sync.Mutex
 	confirmer string // under postMu: the posting session's tokenKey
-	// wifi, under postMu and mu, hands a committed Wi-Fi password to
-	// agentosd with the posting session's token (#1191).
-	wifi func(ssid, password string) error
+	// wifi, under postMu and mu, has agentosd put a committed Wi-Fi
+	// password on the air with the posting session's token (#1191); the
+	// network comes from the vault process, not the page (#1522).
+	wifi func() error
 	mu   sync.Mutex
 	d    *card.Display
 	// until is the waiting rotation's confirm window.
@@ -239,10 +240,7 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	case errors.As(err, &ve) && ve.Status == http.StatusConflict:
 		// The owner keeps this card (card.ErrInEffect): its Wi-Fi goes on
 		// the air, so a lost old card stops joining (#1191).
-		if c.WiFiPassword != "" {
-			handOffWiFi(wifi, c)
-		}
-		return fmt.Errorf("%w: %s", card.ErrInEffect, ve.Msg)
+		return inEffect(fmt.Errorf("%w: %s", card.ErrInEffect, ve.Msg), wifi, c)
 	case errors.As(err, &ve) && ve.Status < http.StatusInternalServerError:
 		return err // refused before anything was written; kept for a retry
 	}
@@ -251,18 +249,28 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	// effect. The owner keeps both cards (card.ErrInEffect's text) and the
 	// vault's rotation, if still waiting, is dropped (#1090 R2).
 	r.cancel(id)
-	if c.WiFiPassword != "" {
-		handOffWiFi(wifi, c)
+	return inEffect(fmt.Errorf("%w: %v", card.ErrInEffect, err), wifi, c)
+}
+
+// wifiKeptInEffect is the note an in-effect card's page adds when its
+// Wi-Fi password could not go on the air (#1523, CH-12).
+const wifiKeptInEffect = "My Wi-Fi may still use your old card's password: I could not switch it. Join it with your old card for now; the new card you start replaces the Wi-Fi password too."
+
+// inEffect hands off the Wi-Fi of a card the owner keeps (err wraps
+// card.ErrInEffect) and, when that fails, adds the note that says so.
+func inEffect(err error, wifi func() error, c *card.Card) error {
+	if c.WiFiPassword == "" || handOffWiFi(wifi, c) {
+		return err
 	}
-	return fmt.Errorf("%w: %v", card.ErrInEffect, err)
+	return &card.Noted{Err: err, Note: wifiKeptInEffect}
 }
 
 // handOffWiFi has agentosd write the card's Wi-Fi network for the access
 // point (#1191), once the vault process committed the card or may have
 // (card.ErrInEffect: the owner keeps it); a card it refused leaves the old
 // password on the air. It reports whether the access point switches.
-func handOffWiFi(wifi func(ssid, password string) error, c *card.Card) bool {
-	return wifi != nil && wifi(c.WiFiName, c.WiFiPassword) == nil
+func handOffWiFi(wifi func() error, c *card.Card) bool {
+	return c.WiFiPassword != "" && wifi != nil && wifi() == nil
 }
 
 // withWiFiNote adds to a committed rotation's notes what its Wi-Fi does.
@@ -290,7 +298,7 @@ func (r *Rotation) cancel(id string) {
 // display's own checks (signedIn is the session check); a post holds
 // postMu so that provision binds the result to its session. wifi hands a
 // committed Wi-Fi password to agentosd as that session (#1191).
-func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) bool, wifi func(r *http.Request, ssid, password string) error, next string, w http.ResponseWriter, r *http.Request) {
+func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) bool, wifi func(r *http.Request) error, next string, w http.ResponseWriter, r *http.Request) {
 	h := d.Handler(signedIn, next)
 	if r.Method != http.MethodPost {
 		h.ServeHTTP(w, r)
@@ -301,13 +309,13 @@ func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) boo
 	rot.confirmer = ""
 	if tok := cookieToken(r); tok != "" {
 		rot.confirmer = tokenKey(tok)
-		rot.setWiFi(func(ssid, password string) error { return wifi(r, ssid, password) })
+		rot.setWiFi(func() error { return wifi(r) })
 	}
 	defer func() { rot.confirmer = ""; rot.setWiFi(nil) }()
 	h.ServeHTTP(w, r)
 }
 
-func (rot *Rotation) setWiFi(f func(ssid, password string) error) {
+func (rot *Rotation) setWiFi(f func() error) {
 	rot.mu.Lock()
 	rot.wifi = f
 	rot.mu.Unlock()
