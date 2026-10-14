@@ -2216,6 +2216,12 @@ class TmpfilesTest(unittest.TestCase):
               "x /tmp/systemd-private-%b-*\nd %t/agentos 0750\n"
               "w /sys/kernel/mm/ksm/run - - - - 0\nf /etc/sysctl.d/x.conf\nr /run/sysctlx.d\n")
         self.assertEqual(check.violations(self.root), [])
+        # The image already holds /etc/mtab, so the line's own path resolves into /proc.
+        os.symlink("../proc/self/mounts", os.path.join(self.root, "etc/mtab"))
+        self.assertEqual(check.violations(self.root), [])
+        # Any other line through the existing /etc/mtab link still reaches /proc.
+        for ln in ("f /etc/mtab", "w /etc/mtab - - - - x", "L+ /etc/mtab - - - - /proc/self/root"):
+            self.assertTrue(self.refused(ln + "\n"), ln)
 
     def test_proc_sys_writes_are_refused(self):
         for ln in ("w /proc/sys/net/ipv4/ip_forward - - - - 1", "w+ /proc/sys/net/ipv4/ip_forward - - - - 1",

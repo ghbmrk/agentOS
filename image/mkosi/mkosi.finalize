@@ -844,13 +844,16 @@ def tmpfiles_violations(root):
                 continue
             (typ, path, *_), arg = tmpfiles_words(ln) if len(tmpfiles_words(ln)[0]) >= 2 else ([ln, ""], "")
             path = tmpfiles_expand(path)
-            bad = tmpfiles_hits(root, path)
-            if not bad and typ.startswith("L") and arg not in ("", "-"):
+            target = None
+            if typ.startswith("L") and arg not in ("", "-"):
                 target = tmpfiles_expand(tmpfiles_words(arg, 1)[0][0] if tmpfiles_words(arg, 1)[0] else arg)
                 if not target.startswith("/"):
                     target = path.rsplit("/", 1)[0] + "/" + target
-                bad = (path_parts(path), path_parts(target)) not in TMPFILES_LINKS and \
-                    tmpfiles_hits(root, target, ancestor=True)
+                # The image already holds Debian's links, so the path itself resolves through them;
+                # (re)creating the same link writes nothing through it.
+                if (path_parts(path), path_parts(target)) in TMPFILES_LINKS:
+                    continue
+            bad = tmpfiles_hits(root, path) or (target is not None and tmpfiles_hits(root, target, ancestor=True))
             if bad:
                 out.append("%s: line %d: %s; it could set a sysctl outside sysctl.d (#1530)" % (f.rel, n, ln[:120]))
     return out
