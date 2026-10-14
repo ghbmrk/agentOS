@@ -64,7 +64,7 @@ class Repo(unittest.TestCase):
         self.base = git(self.root, "rev-parse", "HEAD")
         git(self.root, "checkout", "-qb", "pkg/PK-1-x")
         (self.root / "tests").mkdir()
-        (self.root / "tests" / "t.py").write_text("# REQ: CC-1a\nx = 1\n")
+        (self.root / "tests" / "t.py").write_text("# " + "REQ" + ": CC-1a\nx = 1\n")
         git(self.root, "add", "-A")
         git(self.root, "commit", "-qm", "PK-1: add test")
         self.head = git(self.root, "rev-parse", "HEAD")
@@ -132,7 +132,7 @@ class PacketTest(Repo):
         self.assertIn("- **AA-2** Second rule", text)
         self.assertIn("| **BB-1** | Row one |", text)
         self.assertIn("**CC-1a** A paragraph block", text)  # cited by REQ marker in the diff
-        self.assertIn("+# REQ: CC-1a", text)
+        self.assertIn("+# REQ" + ": CC-1a", text)
         self.assertIn("ZZ-9", text)  # reported as not defined in SPEC
         self.assertNotIn("**AA-1** First", text)
 
