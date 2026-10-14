@@ -44,16 +44,26 @@ func (noEffects) Get(string) (journal.Status, error) {
 }
 
 // treeTool serves managed_tree as agentosd's liveTree answers it, or a
-// fixed text in its place.
+// fixed text in its place, and the agent's own tool "big", whose every
+// answer is over fold.Max and so is held as a fold record.
 type treeTool struct {
 	mu   sync.Mutex
 	ans  treeAnswer
 	text string
+	n    int
 }
 
-func (*treeTool) List() []map[string]any { return []map[string]any{{"name": "managed_tree"}} }
+func (*treeTool) List() []map[string]any {
+	return []map[string]any{{"name": "managed_tree"}, {"name": "big"}}
+}
 
 func (f *treeTool) Call(_ context.Context, _, _, name string, args json.RawMessage) (string, bool, error) {
+	if name == "big" {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.n++
+		return fmt.Sprintf("%d:%s", f.n, strings.Repeat("x", 64<<10)), true, nil
+	}
 	if name != "managed_tree" {
 		return "", false, nil
 	}
@@ -102,10 +112,10 @@ func bigTree() map[string][]byte {
 	return files
 }
 
-// TREE-fold-wipe (#1437): a managed tree over 8 KiB reaches the bridge
-// folded. The bridge reads the full answer back with result_read and
-// applies it; the seeded file stays, and the next poll is unchanged.
-func TestBridgeAppliesATreeTheBrokerFolded(t *testing.T) {
+// TREE-fold-wipe (#1437), TREE-fold-evict (#1461): a managed tree over
+// 8 KiB reaches the bridge whole and is applied; the seeded file stays,
+// and the next poll is unchanged.
+func TestBridgeAppliesATreeOverFoldMax(t *testing.T) {
 	files := bigTree()
 	b, _ := json.Marshal(treeAnswer{Version: "v1", Files: files})
 	if len(b) <= fold.Max {
@@ -134,13 +144,75 @@ func TestBridgeAppliesATreeTheBrokerFolded(t *testing.T) {
 	}
 }
 
-// An answer with no version that is not a readable fold (its record
-// evicted, or not a tree at all) is refused: nothing is deleted.
+// agentFold calls the agent's tool "big" and returns its fold record's ID.
+func agentFold(t *testing.T, c *http.Client) string {
+	t.Helper()
+	text, err := callTool(context.Background(), c, "big", map[string]string{})
+	var in fold.StandIn
+	if err != nil || json.Unmarshal([]byte(text), &in) != nil || !in.Folded || in.ID == "" {
+		t.Fatalf("agent fold: %.80s %v", text, err)
+	}
+	return in.ID
+}
+
+// agentReads reports whether the agent can still read fold record id.
+func agentReads(c *http.Client, id string) bool {
+	text, err := callTool(context.Background(), c, "result_read", map[string]string{"id": id})
+	return err == nil && strings.Contains(text, strings.Repeat("x", 64<<10))
+}
+
+// TREE-fold-evict (#1461, Security S1 and Potency P-1 on #1449): a sync
+// that keeps failing refetches the whole tree on every poll. Over 40
+// polls, an agent fold recorded before them stays readable.
+func TestAFailingTreeSyncKeepsTheAgentsFolds(t *testing.T) {
+	tool := &treeTool{ans: treeAnswer{Version: "v1", Files: bigTree()}}
+	c := planeClient(t, tool)
+	id := agentFold(t, c)
+	// The tree directory is a regular file, so every mirror fails.
+	dir := filepath.Join(t.TempDir(), "tree")
+	os.WriteFile(dir, []byte("not a directory"), 0o644)
+	for i := range 40 {
+		if v, err := syncOnce(context.Background(), c, dir, ""); err == nil || v != "" {
+			t.Fatalf("poll %d: %q %v", i, v, err)
+		}
+	}
+	if !agentReads(c, id) {
+		t.Fatal("40 failing tree polls evicted the agent's folded result")
+	}
+}
+
+// TREE-fold-evict (#1461, Potency P-2 on #1449): with the agent's fold
+// store full (32 records, 2 MiB), a 2 MiB tree change keeps every one of
+// the agent's records readable.
+func TestALargeTreeChangeKeepsTheAgentsFolds(t *testing.T) {
+	files := map[string][]byte{"skills/big.json": []byte(strings.Repeat("s", 2<<20))}
+	tool := &treeTool{ans: treeAnswer{Version: "v2", Files: files}}
+	c := planeClient(t, tool)
+	var ids []string
+	for range 32 {
+		ids = append(ids, agentFold(t, c))
+	}
+	dir := t.TempDir()
+	if v, err := syncOnce(context.Background(), c, dir, "v1"); err != nil || v != "v2" {
+		t.Fatalf("sync: %q %v", v, err)
+	}
+	if got := read(t, filepath.Join(dir, "skills/big.json")); len(got) != 2<<20 {
+		t.Fatalf("tree file: %d bytes", len(got))
+	}
+	for i, id := range ids {
+		if !agentReads(c, id) {
+			t.Fatalf("agent record %d of 32 evicted by the tree change", i)
+		}
+	}
+}
+
+// An answer with no version is not a tree, whether a fold stand-in or
+// anything else, and is refused: nothing is deleted.
 func TestBridgeRefusesATreeAnswerWithNoVersion(t *testing.T) {
 	for name, text := range map[string]string{
-		"evicted fold": `{"folded":true,"id":"gone","bytes":20000,"sha256":"00","head":"{"}`,
-		"no version":   `{"files":{}}`,
-		"empty":        `{}`,
+		"fold stand-in": `{"folded":true,"id":"gone","bytes":20000,"sha256":"00","head":"{"}`,
+		"no version":    `{"files":{}}`,
+		"empty":         `{}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := planeClient(t, &treeTool{text: text})
