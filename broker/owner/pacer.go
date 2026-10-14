@@ -224,11 +224,15 @@ func (c *Channel) postHeld(class Class, h HeldText) error {
 		c.mu.Unlock()
 		return err
 	}
+	// Counted in the same step as the check, so no concurrent send can
+	// spend the last text first (#1638).
+	at := c.reserveLocked(now)
 	c.mu.Unlock()
 	if !c.stillCurrent(h) {
+		c.unreserve(at)
 		return nil
 	}
-	return c.sendCounted(text)
+	return c.sendReserved(at, text)
 }
 
 // NotifyAs is Notify with a caller-chosen class, for agent-derived text
@@ -248,8 +252,8 @@ var ErrPaced = errors.New("owner: quiet hours or no texts left this hour")
 // (CAP-10). It is never held: a held text would return nil while its
 // deadline ran (#989, #1563). Unless the agent class is urgent, it
 // returns ErrPaced in quiet hours or with no allowance left, checked and
-// sent under pmu so a concurrent post cannot spend the last text first;
-// the caller keeps the text and tries later. The caller still reserves
+// counted in one step before it is sent, so no concurrent send can spend
+// the last text first (#1638); the caller keeps the text and tries later. The caller still reserves
 // the CH-15 budget it shares with approval requests (grants.Gate.Reserve)
 // before calling. A text sent counts toward the hour.
 func (c *Channel) NotifyNow(text string) error {
@@ -264,12 +268,13 @@ func (c *Channel) NotifyNow(text string) error {
 	defer c.pmu.Unlock()
 	now := c.cfg.Now()
 	c.mu.Lock()
-	paced := c.quietLocked(now) || c.allowanceLocked(now) == 0
-	c.mu.Unlock()
-	if paced {
+	if c.quietLocked(now) || c.allowanceLocked(now) == 0 {
+		c.mu.Unlock()
 		return ErrPaced
 	}
-	return c.sendCounted(text)
+	at := c.reserveLocked(now)
+	c.mu.Unlock()
+	return c.sendReserved(at, text)
 }
 
 // agentText discloses agent-derived text, prefixes it with AgentPrefix
@@ -281,22 +286,53 @@ func agentText(text string) string {
 	return control.Fit(text)
 }
 
-// sendCounted sends text to the owner and, if it went, counts it.
+// sendCounted counts text toward the hour, sends it to the owner, and
+// uncounts it if the send failed.
 func (c *Channel) sendCounted(text string) error {
+	return c.sendReserved(c.reserve(), text)
+}
+
+// sendReserved sends text, already counted at at, and uncounts it if the
+// send failed.
+func (c *Channel) sendReserved(at time.Time, text string) error {
 	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
+		c.unreserve(at)
 		return err
 	}
-	c.countSent()
 	return nil
 }
 
-// countSent counts one unsolicited text sent now toward the hour. The
-// count is kept even if saving it fails.
-func (c *Channel) countSent() {
+// reserve is reserveLocked for a caller without c.mu.
+func (c *Channel) reserve() time.Time {
 	now := c.cfg.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.reserveLocked(now)
+}
+
+// reserveLocked counts one unsolicited text toward the hour before it is
+// sent, so a send running beside it sees the text spent (CH-15, #1638),
+// and returns the time it counted. The count is kept even if saving it
+// fails. The caller uncounts it with unreserve if the text does not go.
+func (c *Channel) reserveLocked(now time.Time) time.Time {
 	_ = c.saveLocked(func(s *State) { s.Sent = append(recentSends(s.Sent, now), now) })
+	return now
+}
+
+// unreserve takes back the count reserveLocked made at at, for a text
+// that was not sent.
+func (c *Channel) unreserve(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.saveLocked(func(s *State) {
+		for i := len(s.Sent) - 1; i >= 0; i-- {
+			if s.Sent[i].Equal(at) {
+				// A copy, as saveLocked may apply f twice.
+				s.Sent = slices.Delete(slices.Clone(s.Sent), i, i+1)
+				return
+			}
+		}
+	})
 }
 
 // saveLocked commits f; if the save fails, it still applies f in memory
@@ -388,7 +424,18 @@ func (c *Channel) releasePaced() error {
 			return nil
 		}
 		text, n, dropped := packHeld(st.HeldDropped, send)
-		if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
+		// The Current hook ran without c.mu, so a send beside this
+		// release may have spent the hour since the check above: check
+		// again and count the text in one step before it goes (#1638).
+		now = c.cfg.Now()
+		c.mu.Lock()
+		if c.quietLocked(now) || c.allowanceLocked(now) == 0 {
+			c.mu.Unlock()
+			return nil
+		}
+		at := c.reserveLocked(now)
+		c.mu.Unlock()
+		if err := c.sendReserved(at, text); err != nil {
 			return err
 		}
 		c.mu.Lock()
@@ -404,7 +451,6 @@ func (c *Channel) releasePaced() error {
 			}
 			s.Held = keep
 			s.HeldDropped -= dropped
-			s.Sent = append(recentSends(s.Sent, now), now)
 		})
 		c.mu.Unlock()
 		if err != nil {
