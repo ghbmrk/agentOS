@@ -1,11 +1,13 @@
 # The in-image end-to-end run's first half (#1688), passed like agentos-e2e.service as an SMBIOS
 # credential on the e2e boot only. It seals a fresh claim code where a preloaded box keeps it before
-# any agentOS service starts, as the seller does before the box ships, so the box boots as a
-# preloaded one. The code goes to root's tmpfs for agentos-e2e.service, never to the console.
+# the setup page's first start, as the seller does before the box ships, so the box boots as a
+# preloaded one. It is not ordered before agentosd or egress: delaying them pushes their drive-id
+# check past the first boot's drive-id assign, which fails them for the rest of that boot (#1716).
+# The code goes to root's tmpfs for agentos-e2e.service, never to the console.
 [Unit]
 Description=agentOS end-to-end run: seal the claim code (CI only)
 After=systemd-tmpfiles-setup.service
-Before=agentosd.service agentos-egress.service agentos-localui.service
+Before=agentos-localui.service
 
 [Service]
 Type=oneshot

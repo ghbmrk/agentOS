@@ -231,7 +231,7 @@ func until(limit time.Duration, f func() (bool, error)) error {
 // root's only, on the boot's tmpfs, removed once read.
 const codeFile = "/run/agentos-e2e/claim-code"
 
-// seal runs before any agentOS service starts (agentos-e2e-seal.service):
+// seal runs before the setup page's first start (agentos-e2e-seal.service):
 // it seals a fresh claim code where a preloaded box keeps it, as the
 // seller does before the box ships, so the page's first start moves it
 // in (localui-claim) and the box boots as a preloaded one.
