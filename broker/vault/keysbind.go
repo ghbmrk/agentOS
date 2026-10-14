@@ -99,7 +99,9 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 	v.nextKeys = raw
 	if err := v.save(); err != nil {
 		// The staged file stays: save can fail after the vault file
-		// landed (a failed directory sync), and then the drive needs it.
+		// landed (an error after the rename other than a failed
+		// directory sync, which save counts as stored), and then the
+		// drive needs it.
 		// A leftover copy is inert (stagedKeys, dropStaleStaged).
 		v.nextKeys = nil
 		return err

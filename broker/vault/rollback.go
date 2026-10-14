@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // Rollback protection (V6). The vault key does not change when a secret is
@@ -204,7 +206,7 @@ func (v *Vault) Anchor(c Counter) error {
 		i := v.find(c.Host())
 		prev := v.anchors[i]
 		v.anchors[i] = Anchor{Host: prev.Host, Pending: true}
-		if werr := v.write(v.anchors); werr != nil {
+		if werr := v.landed(v.write(v.anchors)); werr != nil {
 			v.anchors[i] = prev
 			return werr
 		}
@@ -218,7 +220,7 @@ func (v *Vault) Anchor(c Counter) error {
 	if i < 0 {
 		v.anchors = append(v.anchors, Anchor{Host: c.Host(), Pending: true})
 		i = len(v.anchors) - 1
-		if err := v.write(v.anchors); err != nil {
+		if err := v.landed(v.write(v.anchors)); err != nil {
 			v.anchors = v.anchors[:i]
 			return err
 		}
@@ -231,7 +233,7 @@ func (v *Vault) Anchor(c Counter) error {
 		// later write would carry it, and a copy taken meanwhile would
 		// adopt the counter once one is made.
 		next := append(append([]Anchor(nil), v.anchors[:i]...), v.anchors[i+1:]...)
-		if werr := v.write(next); werr == nil {
+		if werr := v.landed(v.write(next)); werr == nil {
 			v.anchors = next
 		}
 		return fmt.Errorf("vault: rollback counter: %w", err)
@@ -280,10 +282,18 @@ func (v *Vault) advance() error {
 	}
 	next := append([]Anchor(nil), v.anchors...)
 	next[v.bound].Count = n + 1
-	if err := v.write(next); err != nil {
+	err = v.write(next)
+	if err != nil && !errors.Is(err, durable.ErrDirSync) {
 		return err
 	}
 	v.anchors = next
+	if err != nil {
+		// The file landed but its directory sync failed (#1472). The
+		// counter stays: the file is one ahead, which the next bind or
+		// write finishes, and if a power cut undoes the rename the file
+		// before still binds instead of reading as an old copy.
+		return v.landed(err)
+	}
 	if err := v.counter.Increment(a.Ref, v.counterAuth); err != nil && v.warn != nil {
 		// The file is one ahead, which the next bind or write finishes;
 		// until then the file before this write still binds.
@@ -346,7 +356,7 @@ func (v *Vault) Rebase(recovery Factor) (dropped int, err error) {
 	v.nextKeys = raw
 	err = v.ensureID()
 	if err == nil {
-		err = v.write(nil)
+		err = v.landed(v.write(nil))
 	}
 	if err != nil {
 		v.id, v.counterAuth, v.anchors, v.counter, v.bound, v.nextKeys = id, auth, anchors, counter, bound, nil
