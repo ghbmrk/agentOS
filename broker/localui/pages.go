@@ -261,7 +261,7 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/setup/restart"><label>Reset secret, from your card's recovery sheet<input type="text" name="secret" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Start over</button></form></details>
 {{else}}<form method="post" action="/setup/restart"><button class="plain">Start setup over</button></form>{{end}}{{end}}
 
-{{define "private"}}<label><input type="checkbox" name="private" value="1"> {{.Name}} may see your private data (mail, files) to do tasks.</label><br>
+{{define "private"}}<label><input type="checkbox" name="private" value="1"{{if .Checked}} checked{{end}}> Let {{.Name}} see your private content: mail, documents, chats, and anything made from them. Your passwords and keys are never shown to it.</label><br>
 <span class="muted">Unticked, tasks that need your mail or files can't run until you allow a provider on the AI providers page.</span><br>{{end}}
 
 {{define "providers"}}{{template "head" .Refresh}}
@@ -274,7 +274,7 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/providers/"><input type="hidden" name="step" value="withdraw"><input type="hidden" name="provider" value="{{.ID}}"><input type="hidden" name="confirm" value="1"><button class="stop">Stop</button></form>
 <p><a href="/providers/">Cancel</a></p>
 {{else}}
-<p class="muted">Tasks that need your mail or files can't run until you allow a provider that is connected.</p>
+{{if .NoneAllowed}}<p class="muted">Tasks that need your mail or files can't run until you allow a provider that is connected.</p>{{end}}
 {{range .Providers}}<h3>{{.Name}}: {{if .Connected}}connected{{else}}not connected{{end}}</h3>
 {{if .PrivateOK}}<p>{{.Name}} may see your private data (mail, files) to do tasks.</p>
 <form method="post" action="/providers/"><input type="hidden" name="step" value="withdraw"><input type="hidden" name="provider" value="{{.ID}}"><button class="stop">Stop {{.Name}} seeing it</button></form>
@@ -370,8 +370,8 @@ form { margin: .6em 0 1.2em; }
 {{else}}<p class="muted">One is enough. You can add more later.</p>
 {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>
 {{if not .Connected}}
-{{if .DeviceCode}}{{with index $.Device .ID}}<p>Open <a href="{{index . 0}}">{{index . 0}}</a> and enter <span class="mono">{{index . 1}}</span>.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" .}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
-{{if .APIKey}}<form method="post" action="/setup/ai-key"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" .}}<label>Or paste an API key<input type="password" name="key" autocomplete="off"></label><button class="plain">Save key</button></form>{{end}}
+{{if .DeviceCode}}{{$d := index $.Device .ID}}{{if index $d 0}}<p>Open <a href="{{index $d 0}}">{{index $d 0}}</a> and enter <span class="mono">{{index $d 1}}</span>.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Plan .ID)}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
+{{if .APIKey}}<form method="post" action="/setup/ai-key"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Key .ID)}}<label>Or paste an API key<input type="password" name="key" autocomplete="off"></label><button class="plain">Save key</button></form>{{end}}
 {{end}}{{end}}{{end}}
 {{end}}
 {{template "foot"}}{{end}}
