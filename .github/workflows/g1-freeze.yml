@@ -1,11 +1,13 @@
 name: g1-freeze
 # G1-freeze (#1687): until G1-e2e (#1688) passes in QEMU, a PR that touches paths outside
 # the G1 list (tools/g1_scope.txt) fails, unless it was opened before the list's `since`
-# time, is an `exempt-pr` line, or changes only records. It runs on pull_request_target, so
+# time (and its timeline shows no reopen, force-push or retarget since then, #1717), is an
+# `exempt-pr` line, or changes only records. It runs on pull_request_target, so
 # the workflow file, tools/g1_scope.py and the list are the BASE commit's: a PR cannot widen
 # the list, flip the switch, move `since` or exempt itself, and no PR code runs in this job.
 # A plain Re-run replays the old event (old base); a push or title/body edit re-reads it. The PR head is only fetched
 # as git objects for `git diff --name-only`; it is never checked out, imported or executed.
+# The PR's timeline is read with a read-only token and handed to the script as event/time data.
 # A base without tools/g1_scope.py (before #1687 merges) passes: there is no freeze yet.
 # Main must require the `g1-freeze` check for a failure to block a merge (a ruleset change).
 # The freeze lifts through `freeze off` in tools/g1_scope.txt, not by editing this file.
@@ -21,6 +23,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      issues: read # the PR's timeline (#1717)
+      pull-requests: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -33,8 +37,18 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_CREATED: ${{ github.event.pull_request.created_at }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ ! -f tools/g1_scope.py ]; then echo "g1 freeze: not active on this base"; exit 0; fi
+          # The base copy decides: one older than #1717 takes no timeline and keeps its own rules.
+          timeline=()
+          if grep -q -- "--timeline" tools/g1_scope.py; then
+            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/timeline" \
+              --jq '.[] | [(.event // ""), (.created_at // "")] | @tsv' > "$RUNNER_TEMP/timeline.tsv"
+            timeline=(--timeline "$RUNNER_TEMP/timeline.tsv")
+          fi
           git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head"
           git cat-file -e "$HEAD_SHA^{commit}"
-          python3 -I tools/g1_scope.py --git "$BASE_SHA" "$HEAD_SHA" --pr "$PR_NUMBER" --pr-created "$PR_CREATED"
+          python3 -I tools/g1_scope.py --git "$BASE_SHA" "$HEAD_SHA" --pr "$PR_NUMBER" --pr-created "$PR_CREATED" \
+            "${timeline[@]}"
