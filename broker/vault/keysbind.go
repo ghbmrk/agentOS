@@ -98,9 +98,10 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 	}
 	v.nextKeys = raw
 	if err := v.save(); err != nil {
-		// The staged file stays: save can fail after the vault file
-		// landed (a failed directory sync), and then the drive needs it.
-		// A leftover copy is inert (stagedKeys, dropStaleStaged).
+		// save fails only before the vault file lands (a landed write
+		// whose directory sync failed counts as stored), so the drive
+		// does not need the staged file. It stays because a leftover
+		// copy is inert (stagedKeys, dropStaleStaged).
 		v.nextKeys = nil
 		return err
 	}
