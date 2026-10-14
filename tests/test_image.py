@@ -2064,11 +2064,13 @@ class ConfFilesTest(unittest.TestCase):
                 with self.subTest(rel=rel, target=target):
                     f = link(self.root, rel, target)
                     want = "%s: unreadable (%s is a link to %s;" % (rel, rel, target)
-                    self.assertIn(want, self.v())
-                    t = write(self.root, "var/tmp/" + rel[4:], body)
-                    self.assertIn(want, self.v())
-                    t.unlink()
-                    f.unlink()
+                    try:
+                        self.assertIn(want, self.v())
+                        t = write(self.root, "var/tmp/" + rel[4:], body)
+                        self.assertIn(want, self.v())
+                        t.unlink()
+                    finally:
+                        f.unlink()
             # A mask still reads as nothing.
             with self.subTest(rel=rel, target="/dev/null"):
                 f = link(self.root, rel, "/dev/null")
@@ -2158,8 +2160,10 @@ class ConfFilesTest(unittest.TestCase):
             with self.subTest(rel=rel, target=target):
                 f = link(self.root, rel, target)
                 want = "%s: a link to %s, inside /%s, which anyone on the box can write" % (rel, target, under)
-                self.assertIn(want, self.v())
-                f.unlink()
+                try:
+                    self.assertIn(want, self.v())
+                finally:
+                    f.unlink()
         # The delta 4 repro: the unit, and the wants link that enables it, which reaches it too.
         link(self.root, "etc/systemd/system/x.service", "/var/tmp/x.service")
         w = link(self.root, "etc/systemd/system/multi-user.target.wants/x.service", "../x.service")
