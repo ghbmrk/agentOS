@@ -234,7 +234,7 @@ func (d *driver) claim() error {
 		}
 		return st == http.StatusSeeOther && loc == "/claim", fmt.Errorf("GET / %d %q", st, loc)
 	}); err != nil {
-		return err
+		return fmt.Errorf("%w; %s", err, claimDiag(code))
 	}
 	st, loc, err := d.post("/claim", url.Values{"code": {code}})
 	if err != nil {
@@ -247,6 +247,24 @@ func (d *driver) claim() error {
 		return fmt.Errorf("claim state after the claim: claimed=%v err=%v", ok, err)
 	}
 	return nil
+}
+
+// claimDiag says why the page shows no claim screen: where the sealed
+// claim state is, the page's unit state, and its last log lines, with
+// the claim code cut out.
+func claimDiag(code string) string {
+	where := func(p string) string {
+		if _, err := os.Lstat(p); err != nil {
+			return "absent"
+		}
+		return "present"
+	}
+	unit, _ := exec.Command("systemctl", "show", "agentos-localui.service",
+		"-p", "ActiveState,SubState,NRestarts,Result", "--value").Output()
+	logs, _ := exec.Command("journalctl", "-b", "-o", "cat", "--no-pager", "-n", "20",
+		"-u", "agentos-localui.service", "-u", "agentosd.service", "-u", "agentos-egress.service").Output()
+	return fmt.Sprintf("diag: sealed=%s moved=%s unit=%s log: %s", where(claim.StatePath), where(claimDst),
+		oneLine(string(unit)), redactLog(string(logs), 12, code, claim.Normalize(code)))
 }
 
 // page is the phone's view of /setup now.

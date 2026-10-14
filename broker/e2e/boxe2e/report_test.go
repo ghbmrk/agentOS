@@ -59,3 +59,21 @@ func TestReportUnexpectedFailureFailsTheRun(t *testing.T) {
 		t.Fatalf("an expected failure failed the run: %s", out.String())
 	}
 }
+
+// A failed step's diagnostics quote service logs: any secret the driver
+// holds is cut out of them, and each log line is kept short.
+func TestRedactLog(t *testing.T) {
+	got := redactLog("start\nclaim ABCD-EFGH typed\n"+strings.Repeat("x", 300), 3, "ABCD-EFGH", "")
+	if strings.Contains(got, "ABCD-EFGH") {
+		t.Fatalf("secret left in %q", got)
+	}
+	if !strings.Contains(got, "start | claim [redacted] typed | ") {
+		t.Fatalf("lines not joined: %q", got)
+	}
+	if len(got) > 3*(logLineMax+3) {
+		t.Fatalf("long line kept: %d bytes", len(got))
+	}
+	if got := redactLog("a\nb\nc\nd", 2); got != "c | d" {
+		t.Fatalf("last lines: %q", got)
+	}
+}

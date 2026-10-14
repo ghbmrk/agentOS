@@ -57,3 +57,27 @@ func (r *report) done() {
 func (r *report) failed() bool { return r.n["fail"] > 0 || r.n["xpass"] > 0 }
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// logLineMax bounds each service log line a diagnostic quotes.
+const logLineMax = 160
+
+// redactLog keeps a log's last n lines, each cut to logLineMax bytes with
+// every non-empty secret replaced, joined on one line for the console.
+func redactLog(log string, n int, secrets ...string) string {
+	for _, s := range secrets {
+		if s != "" {
+			log = strings.ReplaceAll(log, s, "[redacted]")
+		}
+	}
+	lines := strings.Split(strings.TrimSpace(log), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	for i, l := range lines {
+		if l = oneLine(l); len(l) > logLineMax {
+			l = l[:logLineMax]
+		}
+		lines[i] = l
+	}
+	return strings.Join(lines, " | ")
+}
