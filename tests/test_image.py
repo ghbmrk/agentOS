@@ -586,6 +586,23 @@ class InitrdBluetoothTest(unittest.TestCase):
             with self.subTest(bad):
                 self.assertEqual(finish.bluetooth_violations(finish.cpio_names(newc(KMODS + [bad]))), [bad])
 
+    def test_kernel_modules_initrd_excludes_every_bluetooth_module(self):
+        # mkosi v24.3 (kmod.filter_kernel_modules) joins the regexes with | and re.search()es each
+        # module path below usr/. Paths from the kernel-modules initrd of CI's build of #1509.
+        rx = re.compile("|".join(ini(MK / "mkosi.conf")["Content"]["KernelModulesInitrdExclude"].split()))
+        k = "lib/modules/6.12.111+deb13-amd64/kernel/"
+        for m in ("drivers/bluetooth/btusb.ko.xz", "drivers/bluetooth/btmtk.ko.xz", "drivers/bluetooth/hci_uart.ko.xz",
+                  "drivers/platform/x86/toshiba_bluetooth.ko.xz", "net/bluetooth/bluetooth.ko.xz",
+                  "net/bluetooth/rfcomm/rfcomm.ko.xz", "updates/btusb.ko", "extra/btmtk.ko.zst"):
+            with self.subTest(m):
+                self.assertTrue(rx.search(k + m))
+                self.assertTrue(finish.bluetooth_violations(["usr/" + k + m]))
+        for m in ("fs/btrfs/btrfs.ko.xz", "drivers/media/pci/bt8xx/bt878.ko.xz", "drivers/nvme/host/nvme.ko.xz",
+                  "drivers/net/wireless/mediatek/mt76/mt7921/mt7921e.ko.xz", "drivers/usb/host/xhci-pci.ko.xz",
+                  "drivers/md/dm-verity.ko.xz"):
+            with self.subTest(m):
+                self.assertFalse(rx.search(k + m))
+
     def test_only_the_inert_target_is_allowed(self):
         self.assertEqual(finish.BT_ALLOWED, ("usr/lib/systemd/system/bluetooth.target",
                                              "usr/lib/systemd/user/bluetooth.target"))
