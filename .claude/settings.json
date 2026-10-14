@@ -6,7 +6,9 @@
   "permissions": {
     "allow": [
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(spikes/S8-live/run.sh:*)"
     ]
   }
 }
+
