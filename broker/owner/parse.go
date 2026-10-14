@@ -7,7 +7,7 @@ import (
 )
 
 // reply is an owner message that answers the owner channel: RESUME, YES,
-// NO, UNDO, or MORE with their arguments (CH-11, CH-13). Like every control
+// NO, UNDO, MORE, or RETRY with their arguments (CH-11, CH-13). Like every control
 // word it counts only as the whole message, ignoring case and punctuation.
 type reply struct {
 	word  string
@@ -31,7 +31,7 @@ func fields(msg string) []string {
 // parseReply reports whether msg is one of the owner channel's words.
 //
 //	YES [id] [item...] [code]   NO [id] [item...]
-//	UNDO id   MORE id   RUN
+//	UNDO id   MORE id   RUN   RETRY
 //	RESUME [code]   RESUME token code   UNLOCK [token code]
 //	PAUSE grant   REVOKE grant
 //
@@ -59,7 +59,7 @@ func parseReply(msg string) (reply, bool) {
 			return r, true
 		}
 		return reply{}, false
-	case "RUN":
+	case "RUN", "RETRY":
 		if len(args) == 0 {
 			return r, true
 		}
