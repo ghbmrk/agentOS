@@ -9,8 +9,10 @@
 # radio its address, and starts hostapd and dnsmasq (dnsmasq drops to its
 # own user). It reads the page's latch, which the page can write, without
 # following a link and only so far. At the Owner Card confirm, or once the
-# box is owned, it brings the access point down and then burns the setup
-# network in /var/lib/agentos.
+# box is owned, it brings the access point down, burns the setup network in
+# /var/lib/agentos, and brings it up with the card's network, which the page
+# reported through agentosd to /var/lib/agentos/ap-net.json (#1185). It
+# serves the card's network at every later start.
 [Unit]
 Description=agentOS access point loader
 # The inbound drop is in place before any radio is brought up.
@@ -21,12 +23,13 @@ Before=agentos-localui.service
 
 [Service]
 ExecStart=/usr/lib/agentos/agentos-ap -iface wlan0 -addr 10.42.0.1/24 \
-        -card-latch /var/lib/agentos-localui/card-latch.json
+        -card-latch /var/lib/agentos-localui/card-latch.json \
+        -ap-net /var/lib/agentos/ap-net.json
 # A dead hostapd or dnsmasq fails the run; the restart brings every radio
 # down and serves again.
 Restart=always
 RestartSec=5
-# hostapd.conf holds the setup network's password (CH-7) while it runs.
+# hostapd.conf holds the served network's password (CH-7) while it runs.
 RuntimeDirectory=agentos-ap
 RuntimeDirectoryMode=0700
 # The setup network's password passes through this process (IMG-nodump).

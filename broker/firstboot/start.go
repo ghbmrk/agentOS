@@ -152,6 +152,22 @@ func SetupNetwork(latch []byte, owned bool, setup Store) (*claim.SetupNet, error
 	return net, nil
 }
 
+// CardConfirmed says whether the card step's latch records the card
+// confirmed: agentos-ap serves the card's network from then on (#1185).
+// The latch is page-writable, so a forged one only serves the network the
+// page itself wrote (ASSUMPTIONS.md). An empty latch is unconfirmed; one
+// that does not parse is an error.
+func CardConfirmed(latch []byte) (bool, error) {
+	if len(latch) == 0 {
+		return false, nil
+	}
+	var cs cardState
+	if err := json.Unmarshal(latch, &cs); err != nil {
+		return false, fmt.Errorf("firstboot: card state: %w", err)
+	}
+	return cs.Confirmed, nil
+}
+
 // Begin picks the start's route and builds its steps. It reads the latch
 // first: a latch it cannot read stops the start and resets nothing. A box
 // whose claim state opens is marked preloaded on the latch before

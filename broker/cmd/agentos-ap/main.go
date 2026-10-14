@@ -5,16 +5,18 @@
 // It drives the access point only through localui.APLoader (DEV-net-h):
 // at start it brings down every wireless interface, which also takes back
 // one a dead loader left exempt from the inbound drop, before anything
-// brings one up or joins a network on it. It then brings the access point
-// up on -iface with the setup network, unless the Owner Card step has
-// confirmed or the box is owned, when it burns the setup network instead
-// (firstboot.SetupNetwork). A radio that appears late (its driver loads
-// after the loader starts) is waited for. While it serves, it reads the
-// latch and the owner state again every -poll: at the confirm, or once the
-// box is owned, it brings the access point down and then burns the setup
-// network, and serves nothing until it restarts. At shutdown, or when
-// hostapd or dnsmasq dies, it brings the access point down; the unit
-// restarts it after a death.
+// brings one up or joins a network on it. A radio that appears late (its
+// driver loads after the loader starts) is waited for. It then serves on
+// -iface the setup network until the Owner Card step confirms or the box
+// is owned, and from then on the card's network (#1185), which the page
+// reports through agentosd before the confirm latches (-ap-net). It reads
+// the latch, the owner state and both files again every -poll. At the
+// confirm it brings the access point down, burns the setup network
+// (firstboot.SetupNetwork), and brings it up with the card's network:
+// Down then Up, never Rekey, so the phone rejoins with the card's Wi-Fi QR
+// code. Both networks are WPA3-SAE only (CH-7). A box with neither serves
+// nothing until it has one. At shutdown, or when hostapd or dnsmasq dies,
+// it brings the access point down; the unit restarts it after a death.
 //
 // It runs as root: it loads nftables, starts the exempt unit and gives the
 // radio its address. It reads the page's latch, which the page can write,
@@ -36,6 +38,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/firstboot"
@@ -53,6 +56,9 @@ type config struct {
 	Latch, Setup, OwnerState string
 	// SysClassNet lists the interfaces; a wireless one has phy80211.
 	SysClassNet string
+	// APNet is the card's network, which the page reports through
+	// agentosd before the confirm (#1185); root's, mode 0600.
+	APNet string
 	// Poll is how often it looks for a late radio and, while it serves,
 	// for the confirm or the owner state.
 	Poll time.Duration
@@ -71,6 +77,7 @@ func main() {
 	flag.StringVar(&c.Setup, "setup-net", claim.SetupNetPath, "the setup network the seller sealed (HW-10)")
 	flag.StringVar(&c.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "agentosd's owner state; present once setup has finished")
 	flag.StringVar(&c.SysClassNet, "sys-class-net", "/sys/class/net", "where the kernel lists network interfaces")
+	flag.StringVar(&c.APNet, "ap-net", apnet.Path, "the card's Wi-Fi network, served once the card is confirmed")
 	flag.DurationVar(&c.Poll, "poll", 2*time.Second, "how often I look for a late radio and, while serving, for the confirm")
 	flag.StringVar(&dir, "dir", "/run/agentos-ap", "where hostapd's and dnsmasq's configuration lives while the access point runs")
 	flag.Parse()
@@ -90,8 +97,10 @@ func main() {
 }
 
 // run brings every radio down, waits for c.Iface if it has not appeared,
-// serves the setup network on it if the box still has one, and holds it
-// until ctx ends, exited fires, or the card is confirmed or the box owned.
+// and then serves on it whichever network the box should (want) until ctx
+// ends or exited fires. It looks again every c.Poll: a change of network
+// brings the access point down before the next comes up (#1185), so the
+// setup network is off the air, and burned, before the card's appears.
 func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-chan struct{}) error {
 	if err := waitForIface(ctx, c, l); err != nil {
 		return err
@@ -99,54 +108,109 @@ func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-cha
 	if ctx.Err() != nil {
 		return nil
 	}
-	n, err := setupNetwork(c, change.FileStore{Path: c.Setup})
-	if err != nil {
-		return err
+	var up *served // what the access point serves; nil while it is down
+	down := func() error {
+		up = nil
+		return l.Down(context.Background())
 	}
-	if n == nil {
-		log.Print("agentos-ap: no setup network to serve")
-		<-ctx.Done()
-		return nil
-	}
-	if err := l.Up(ctx, localui.APConfig{Iface: c.Iface, Addr: c.Addr, SSID: n.SSID, Password: n.Password}); err != nil {
-		return err
-	}
-	log.Printf("agentos-ap: serving the setup network on %s", c.Iface)
 	tick := time.NewTicker(c.Poll)
 	defer tick.Stop()
+	logged := false
 	for {
-		select {
-		case <-ctx.Done():
-			return l.Down(context.Background())
-		case <-exited():
-			return errors.Join(errors.New("an access point child exited"), l.Down(context.Background()))
-		case <-tick.C:
-		}
-		// The burn brings the access point down first, so the sticker's
-		// network is off the air before its file is emptied.
-		down := false
-		n, err := setupNetwork(c, downFirst{FileStore: change.FileStore{Path: c.Setup}, down: func() error {
-			down = true
-			return l.Down(context.Background())
-		}})
+		w, err := want(c, l, &up)
 		if err != nil {
-			if !down {
-				err = errors.Join(err, l.Down(context.Background()))
+			if up != nil {
+				err = errors.Join(err, down())
 			}
 			return err
 		}
-		if n == nil {
-			if !down {
-				// No burn ran: the file was emptied under it.
-				if err := l.Down(context.Background()); err != nil {
+		if w != up && (w == nil || up == nil || *w != *up) {
+			if up != nil {
+				if err := down(); err != nil {
 					return err
 				}
 			}
-			log.Print("agentos-ap: the card is confirmed or I am owned; the setup network is down and burned")
-			<-ctx.Done()
-			return nil
+			if w != nil {
+				if err := l.Up(ctx, localui.APConfig{Iface: c.Iface, Addr: c.Addr, SSID: w.SSID, Password: w.Password}); err != nil {
+					return errors.Join(err, l.Down(context.Background()))
+				}
+				up = w
+				log.Printf("agentos-ap: serving the %s on %s", w.name, c.Iface)
+			}
+			logged = false
+		}
+		if up == nil && !logged {
+			log.Print("agentos-ap: no network to serve yet")
+			logged = true
+		}
+		var gone <-chan struct{}
+		if up != nil {
+			gone = exited()
+		}
+		select {
+		case <-ctx.Done():
+			if up == nil {
+				return nil
+			}
+			return down()
+		case <-gone:
+			return errors.Join(errors.New("an access point child exited"), down())
+		case <-tick.C:
 		}
 	}
+}
+
+// served is a network the access point serves; name says which, for the
+// log, which never holds the password (ARC-1).
+type served struct {
+	name, SSID, Password string
+}
+
+// want is the network the box should serve: the sticker's setup network
+// until the Owner Card step confirms or the box is owned, then the card's
+// (#1185), which the page reported before the confirm latched. Burning
+// the setup network brings the access point down first (downFirst), and
+// clears *up to say so. A box with neither serves nothing.
+func want(c config, l *localui.APLoader, up **served) (*served, error) {
+	n, err := setupNetwork(c, downFirst{FileStore: change.FileStore{Path: c.Setup}, down: func() error {
+		*up = nil
+		return l.Down(context.Background())
+	}})
+	if err != nil {
+		return nil, err
+	}
+	if n != nil {
+		return &served{name: "setup network", SSID: n.SSID, Password: n.Password}, nil
+	}
+	owned, err := ownedOrConfirmed(c)
+	if err != nil || !owned {
+		return nil, err
+	}
+	b, err := os.ReadFile(c.APNet)
+	if errors.Is(err, os.ErrNotExist) || err == nil && len(b) == 0 {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("card network: %w", err)
+	}
+	cn, err := apnet.Parse(b)
+	if err != nil {
+		return nil, fmt.Errorf("card network: %w", err)
+	}
+	return &served{name: "card's network", SSID: cn.SSID, Password: cn.Password}, nil
+}
+
+// ownedOrConfirmed says whether the box is owned or its card confirmed,
+// read as setupNetwork reads them.
+func ownedOrConfirmed(c config) (bool, error) {
+	if owned(c) {
+		return true, nil
+	}
+	latch, err := readLatch(c.Latch)
+	if err != nil {
+		return false, err
+	}
+	return firstboot.CardConfirmed(latch)
 }
 
 // waitForIface brings down every radio and waits for c.Iface to be one,
@@ -188,9 +252,14 @@ func setupNetwork(c config, setup firstboot.Store) (*claim.SetupNet, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = os.Lstat(c.OwnerState)
-	owned := !errors.Is(err, os.ErrNotExist)
-	return firstboot.SetupNetwork(latch, owned, setup)
+	return firstboot.SetupNetwork(latch, owned(c), setup)
+}
+
+// owned says whether agentosd's owner state is there. One it cannot stat
+// counts as owned.
+func owned(c config) bool {
+	_, err := os.Lstat(c.OwnerState)
+	return !errors.Is(err, os.ErrNotExist)
 }
 
 // downFirst is the setup file, whose burn first brings the access point

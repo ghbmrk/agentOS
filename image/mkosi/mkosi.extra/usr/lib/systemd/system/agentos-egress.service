@@ -6,9 +6,11 @@
 [Unit]
 Description=agentOS vault process
 # Never without the inbound drop (DEV-net-e 2a), and up before the broker and the page.
+# No wait for an uplink (#1416): with a cable in but no lease, or none at all, network-online
+# would hold this unit, and the page after it, for wait-online's whole timeout. The policy learns
+# the home network from netlink and its poll, not at start.
 Requires=agentos-inbound.service
-After=local-fs.target network-online.target agentos-inbound.service
-Wants=network-online.target
+After=local-fs.target agentos-inbound.service
 Before=agentosd.service agentos-localui.service
 
 [Service]
