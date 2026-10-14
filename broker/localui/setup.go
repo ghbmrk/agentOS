@@ -218,6 +218,20 @@ var (
 	ErrCodesUnavailable = errors.New("code-generator enrollment unavailable")
 )
 
+// ErrWiFiUnavailable: the box cannot join Wi-Fi at all (no
+// NetworkManager, or another error no password can fix), as JoinNetwork
+// reports it (#1429).
+var ErrWiFiUnavailable = errors.New("Wi-Fi join unavailable")
+
+// noWiFiJoin is the network step's error when the box cannot join Wi-Fi:
+// no station device beside the access point, or ErrWiFiUnavailable. It
+// names the network step's Ethernet button rather than the password
+// (#1429, UX U-1 on #1407).
+const (
+	ethernetButton = "I plugged in an Ethernet cable"
+	noWiFiJoin     = "I cannot join Wi-Fi yet. Plug in an Ethernet cable, then tap \"" + ethernetButton + "\"."
+)
+
 // The vault process's answers to an API key, as Hooks report them
 // (ONB-3, #1265). The page shows each its own text.
 var (
@@ -671,7 +685,12 @@ func (u *setup) network(r *http.Request, _ string) error {
 		if ssid == "" {
 			return errors.New("Choose your home Wi-Fi.")
 		}
-		if err := u.s.cfg.Hooks.JoinNetwork(ssid, pw); err != nil {
+		if u.s.cfg.Station != nil && !u.s.cfg.Station() {
+			return errors.New(noWiFiJoin)
+		}
+		if err := u.s.cfg.Hooks.JoinNetwork(ssid, pw); errors.Is(err, ErrWiFiUnavailable) {
+			return errors.New(noWiFiJoin)
+		} else if err != nil {
 			return errors.New("Could not join that Wi-Fi. Check the password and try again.")
 		}
 	} else if !u.s.cfg.Hooks.Progress().Online {

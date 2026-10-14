@@ -23,8 +23,11 @@ var agentNamespaces = []string{"procedures", "skills", "context"}
 // service.
 const toolTree = guest.TreeTool
 
-// maxTreeSend bounds one managed_tree answer. A tree past it is not sent
-// at all, so a guest never runs half of one.
+// maxTreeSend bounds the files of one managed_tree answer, so a tree far
+// past the bound is refused before it is encoded on every poll. It is not
+// the bound itself: the guest plane refuses any answer longer than
+// guest.MaxTreeAnswer on the wire, so a guest never runs half of a tree
+// (TREE-answer-bound, #1487).
 const maxTreeSend = 4 << 20
 
 // liveTree is the live agent's copy of the managed tree (W4): the change
@@ -114,17 +117,9 @@ var (
 	errTreeNotReady error = guesterr.New("the managed tree is not ready; keep the one you have")
 )
 
-func (t *liveTree) List() []map[string]any {
-	return []map[string]any{{
-		"name": toolTree,
-		"description": "Fetch the adopted procedures, skills and context (the managed tree). " +
-			"Pass the version you hold to learn whether it changed. Only a machine that has had owner data gets it.",
-		"inputSchema": map[string]any{
-			"type":       "object",
-			"properties": map[string]any{"version": map[string]any{"type": "string"}},
-		},
-	}}
-}
+// List is empty: managed_tree is the bridge's tool, called by name, and
+// an agent that called it would get the whole tree inline (#1488 L-1).
+func (t *liveTree) List() []map[string]any { return nil }
 
 func (t *liveTree) Call(_ context.Context, machine, _, name string, args json.RawMessage) (string, bool, error) {
 	if name != toolTree {
