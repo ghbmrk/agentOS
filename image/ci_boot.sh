@@ -9,8 +9,11 @@
 # Then the per-drive GUIDs (drive-id, L3 MUST on #41): the first boot gave the drive its own disk,
 # ESP and root GUIDs; the drive boots again on them; and a PC with two fresh copies attached (every
 # GUID shared) fails the health check, so that boot is never blessed and reboots into its next try.
+# With E2E set to a directory holding a static box-e2e (broker/e2e/boxe2e), a fourth boot on a
+# fresh copy runs the end-to-end setup run inside the box (#1688): e2e/ holds its unit and drop-ins,
+# passed as SMBIOS credentials, which systemd honours only in a VM, so the image itself is unchanged.
 # Usage: ci_boot.sh IMAGE [WORKDIR]. Console logs: WORKDIR/console.log, console-reboot.log,
-# console-two-drives.log.
+# console-two-drives.log, console-e2e.log.
 set -eu
 HERE=$(dirname "$(realpath "$0")")
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/agentos-boot}"); mkdir -p "$W"
@@ -30,13 +33,13 @@ boot() {
 		i=$((i + 1)); idx=; [ $i -eq 1 ] && idx=,bootindex=1
 		drives="$drives -drive if=none,id=d$i,format=raw,file=$d -device virtio-blk-pci,drive=d$i$idx"
 	done
-	# shellcheck disable=SC2086 # $drives is a list of QEMU arguments; the paths have no spaces.
+	# shellcheck disable=SC2086 # $drives and $EXTRA are lists of QEMU arguments without spaces.
 	qemu-system-x86_64 -machine q35,smm=on -accel $ACCEL -cpu max -smp 4 -m 4096 \
 		-global driver=cfi.pflash01,property=secure,value=on \
 		-drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
 		-drive if=pflash,format=raw,unit=1,file="$t/vars.fd" \
 		-chardev socket,id=chrtpm,path="$t/sock" -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 \
-		$drives -display none -serial file:"$log" -nic "${NIC:-none}" &
+		$drives -display none -serial file:"$log" -nic "${NIC:-none}" ${EXTRA:-} &
 	QEMU=$!
 	end=$(( $(date +%s) + ${TMO:-1800} ))
 	while kill -0 $QEMU 2>/dev/null && [ "$(date +%s)" -lt "$end" ]; do
@@ -124,4 +127,39 @@ hasnt "$W/console-two-drives.log" "agentos-drive-id: assigned"
 # The failed check reboots into the entry's next try without anyone at the PC (UPD-1).
 has "$W/console-two-drives.log" "agentos-fallback: health check failed, 2 tries left on this boot entry; rebooting"
 rm -f "$W/two-a.raw" "$W/two-b.raw"
+
+# Prints "agentos-e2e: G1 PROVEN" only when the DONE line in $1 has pass>0 and fail, xfail, xpass
+# and blocked all 0; otherwise "agentos-e2e: G1 NOT PROVEN xfail=N blocked=M".
+g1_verdict() {
+	awk '{ gsub(/\r/, ""); for (i = 1; i <= NF; i++) if (split($i, kv, "=") == 2) n[kv[1]] = kv[2] }
+	END {
+		if (n["pass"] + 0 > 0 && n["fail"] == "0" && n["xfail"] == "0" && n["xpass"] == "0" && n["blocked"] == "0")
+			print "agentos-e2e: G1 PROVEN"
+		else
+			printf "agentos-e2e: G1 NOT PROVEN xfail=%s blocked=%s\n", (n["xfail"] == "" ? "?" : n["xfail"]), (n["blocked"] == "" ? "?" : n["blocked"])
+	}' "$1"
+}
+
+# The end-to-end run on a fresh copy with a cable in. Each step prints one line: PASS, FAIL,
+# XFAIL(#issue) for a step on the expected-failure list, XPASS for one of those that passed (so the
+# list is pruned), or BLOCKED after an earlier failure; then a DONE line with the counts.
+if [ -n "${E2E:-}" ]; then
+	cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(base64 -w0 "$HERE/e2e/$2")"; }
+	copy "$W/e2e.raw"
+	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)" \
+		NIC="user,model=virtio-net-pci" UNTIL="agentos-e2e: DONE\|agentos-health: FAIL" boot "$W/console-e2e.log" "$W/e2e.raw"
+	grep -a "agentos-e2e: " "$W/console-e2e.log" || true
+	has "$W/console-e2e.log" "agentos-e2e: DONE"
+	# The counts on the DONE line too, so a FAIL line split or lost on the console cannot pass.
+	grep -a "agentos-e2e: DONE" "$W/console-e2e.log" | tail -n1 >"$W/e2e-done.log" || true
+	has "$W/e2e-done.log" " fail=0 "
+	has "$W/e2e-done.log" " xpass=0 "
+	hasnt "$W/console-e2e.log" "agentos-e2e: FAIL"
+	hasnt "$W/console-e2e.log" "agentos-e2e: XPASS"
+	# The G1 freeze lifts only on a run whose DONE line reads fail=0 xfail=0 blocked=0
+	# (tools/ASSUMPTIONS.md D27). A green check with expected failures is not that run, so the
+	# verdict gets its own line; it does not change whether the check passes.
+	g1_verdict "$W/e2e-done.log"
+	rm -f "$W/e2e.raw" "$W/e2e-done.log"
+fi
 exit $fail
