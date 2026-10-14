@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/update"
 )
@@ -542,7 +543,17 @@ func (p *Pipeline) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return p.cfg.Store.Save(b)
+	err = p.cfg.Store.Save(b)
+	if errors.Is(err, durable.ErrDirSync) {
+		// The new state is published and a restart loads it, so it is
+		// applied; only a power cut before the next save could undo it
+		// (#1320).
+		if p.cfg.Logf != nil {
+			p.cfg.Logf("change: state saved, but a power cut before the next save could undo it")
+		}
+		return nil
+	}
+	return err
 }
 
 // Files returns the active files in a namespace.
