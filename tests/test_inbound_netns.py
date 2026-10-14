@@ -41,7 +41,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 RULES = ROOT / "image/mkosi/mkosi.extra/usr/lib/agentos/inbound.nft"
 BOX, HOME = "agentos-t-box", "agentos-t-home"
 PORT = 18789
-# Some sandboxes run a kernel without IPv6; the IPv6 half then skips. CI's runners have it.
+# Some sandboxes run a kernel without IPv6; the IPv6 half then skips. CI's runners have it, and CI
+# sets AGENTOS_REQUIRE_IPV6=1 so that a runner without it fails instead of skipping (#1479).
 IPV6 = os.path.isdir("/proc/sys/net/ipv6")
 PREFIX = "2001:db8:1::"
 ROUTER6 = PREFIX + "2"
@@ -91,6 +92,17 @@ def sh(*args, ns=None, check=True):
 
 def reaches(ns, addr, port=PORT):
     return sh("python3", "-c", CONNECT, addr, str(port), ns=ns, check=False).returncode == 0
+
+
+class IPv6Present(unittest.TestCase):
+    # REQ: DEV-2
+    def test_ipv6_is_here_when_required(self):
+        # The IPv6 inbound and privacy assertions only run with IPv6; where it is required, its
+        # absence is a failure, never a quiet skip.
+        if os.environ.get("AGENTOS_REQUIRE_IPV6") == "1":
+            self.assertTrue(IPV6, "AGENTOS_REQUIRE_IPV6=1 but the kernel has no IPv6")
+        elif not IPV6:
+            self.skipTest("kernel without IPv6")
 
 
 @unittest.skipUnless(os.geteuid() == 0 and shutil.which("ip") and shutil.which("nft"),

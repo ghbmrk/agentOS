@@ -46,6 +46,18 @@ last=$(nft list chain inet agentos_inbound input 2>/dev/null | grep -v '^[[:spac
 [ "$(sed 1d "$R/proc/swaps" | grep -c .)" = 0 ] || fail "swap is active"
 [ "$(cat "$R/proc/sys/kernel/core_pattern" 2>/dev/null)" = "|/usr/bin/false" ] || fail "core dumps are not discarded"
 # The box routes nothing (#1478): the inbound drop has no forward hook, so forwarding must be off.
-[ "$(cat "$R/proc/sys/net/ipv4/ip_forward" 2>/dev/null)" = 0 ] &&
-	[ "$(cat "$R/proc/sys/net/ipv6/conf/all/forwarding" 2>/dev/null)" = 0 ] || fail "forwarding is on"
+# IPv4 forwards by input device, so every device's switch counts, and "default" (what a new device
+# starts with); an unreadable or missing switch fails. Kernels from 6.17 also force IPv6 forwarding
+# per device.
+for f in "$R/proc/sys/net/ipv4/ip_forward" "$R"/proc/sys/net/ipv4/conf/*/forwarding \
+	"$R"/proc/sys/net/ipv6/conf/*/forwarding; do
+	[ "$(cat "$f" 2>/dev/null)" = 0 ] || fail "forwarding is on (${f#"$R"})"
+done
+for f in "$R"/proc/sys/net/ipv6/conf/*/force_forwarding; do
+	[ ! -e "$f" ] || [ "$(cat "$f" 2>/dev/null)" = 0 ] || fail "forwarding is on (${f#"$R"})"
+done
+for f in "$R/proc/sys/net/ipv4/conf/default/forwarding" "$R/proc/sys/net/ipv6/conf/all/forwarding" \
+	"$R/proc/sys/net/ipv6/conf/default/forwarding"; do
+	[ -e "$f" ] || fail "forwarding state unreadable (${f#"$R"})"
+done
 echo "agentos-health: PASS secure_boot=$sb usr=verity inbound=drop swap=off dumps=off forward=off"

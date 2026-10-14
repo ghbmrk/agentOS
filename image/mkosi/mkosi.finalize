@@ -14,10 +14,10 @@ forward hook, so the wired uplink file is the only live .network file and no net
 forwarding on. And it refuses a tree that tells the LAN about the box (#1479): the uplink sends no
 hostname and uses addresses without the MAC, and resolved answers no LLMNR or multicast DNS.
 Usage outside mkosi: mkosi.finalize ROOT"""
-import configparser
 import fnmatch
 import os
 import pathlib
+import re
 import stat
 import sys
 
@@ -63,9 +63,21 @@ NETWORK_DIRS = ("lib/systemd/network", "usr/lib/systemd/network", "usr/local/lib
 # The only .network file the image may run (#1478); anything else (Debian's 80-* container, VM and
 # ad-hoc files) must be removed or masked.
 UPLINK = "20-agentos-uplink.network"
-# [Network] keys that must be unset or "no" in a live .network file: forwarding, and name answering
-# on the LAN.
-NETWORK_OFF = ("IPMasquerade", "IPForward", "IPv4Forwarding", "IPv6Forwarding", "MulticastDNS", "LLMNR")
+# [Network] keys that must be unset or "no" in the uplink: forwarding, answering or advertising on
+# the LAN (names, proxy ARP/NDP, router advertisements, a DHCP server, LLDP).
+NETWORK_OFF = ("IPMasquerade", "IPForward", "IPv4Forwarding", "IPv6Forwarding", "MulticastDNS", "LLMNR",
+               "IPv4ProxyARP", "IPv6ProxyNDP", "IPv6SendRA", "DHCPServer", "EmitLLDP")
+# Keys the uplink must not set at all: each tells the LAN what the box is (#1479), or (a proxy NDP
+# address) turns proxy NDP on.
+UPLINK_UNSET = (("Network", "IPv6ProxyNDPAddress"), ("DHCPv4", "VendorClassIdentifier"),
+                ("DHCPv4", "UserClass"), ("DHCPv4", "MUDURL"), ("DHCPv6", "UserClass"),
+                ("DHCPv6", "VendorClass"), ("DHCPv6", "MUDURL"), ("LLDP", "MUDURL"))
+# sysctl keys that turn routing on; with any glob, a sysctl.d key matching one of these counts.
+FORWARD_SYSCTLS = tuple("net.%s.%s" % (v, k) for v, keys in (
+    ("ipv4", ("ip_forward", "conf.all.forwarding", "conf.default.forwarding", "conf.eth0.forwarding")),
+    ("ipv6", ("conf.all.forwarding", "conf.default.forwarding", "conf.eth0.forwarding",
+              "conf.eth0.force_forwarding"))) for k in keys)
+FORWARD_KEY = re.compile(r"net\.ipv[46]\.(ip_forward|conf\..+\.(force_)?forwarding)$")
 # What the uplink must say so the LAN learns nothing about the box (#1479): every box's hostname is
 # "agentos", and an EUI-64 address carries the MAC.
 UPLINK_PRIVACY = (("DHCPv4", "SendHostname", "no"), ("DHCPv6", "SendHostname", "no"),
@@ -124,20 +136,43 @@ def dropins(root, dirs):
     return [by_name[n] for n in sorted(by_name)]
 
 
+def unit_lines(f):
+    """(section, key, value) for each assignment in F, parsed as systemd parses unit and .conf files:
+    leading and trailing whitespace is dropped, a line starting with # or ; is a comment, and only a
+    trailing backslash continues a line (an indented line is a line of its own)."""
+    section, cont = None, None
+    # A continued last line still counts: the empty sentinel ends it.
+    for ln in f.read_text(errors="replace").splitlines() + [""]:
+        ln = ln.strip()
+        if ln[:1] in ("#", ";"):
+            continue
+        if ln.endswith("\\"):
+            cont = (cont or "") + ln[:-1] + " "
+            continue
+        if cont is not None:
+            ln, cont = (cont + ln).strip(), None
+        if not ln:
+            continue
+        if ln.startswith("[") and ln.endswith("]"):
+            section = ln[1:-1]
+        elif "=" in ln and section is not None:
+            k, v = ln.split("=", 1)
+            yield section, k.strip(), v.strip()
+
+
 def ini_last(files, section, key):
     """The value systemd ends up with for SECTION.KEY across FILES in order: the last assignment
     wins, and an empty one resets it. None if never set."""
     val = None
     for f in files:
-        p = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
-        p.optionxform = str
         try:
-            p.read(f)
-        except configparser.Error:
+            lines = list(unit_lines(f))
+        except OSError:
             # A file systemd may read but this check cannot: never pass on it.
             return "unreadable %s" % f.name
-        if p.has_option(section, key):
-            val = p.get(section, key).strip() or None
+        for s, k, v in lines:
+            if (s, k) == (section, key):
+                val = v or None
     return val
 
 
@@ -147,23 +182,27 @@ def main_conf(root, name):
     return files + dropins(root, ["%s/systemd/%s.d" % (d, name) for d in CONF_DIRS])
 
 
-def sysctl(root, key):
-    """The value systemd-sysctl sets for KEY: sysctl.d files by name (/etc shadowing the same name
-    elsewhere), then /etc/sysctl.conf; the last assignment wins. None if never set."""
+def sysctl_all(root):
+    """What systemd-sysctl sets, key by key: sysctl.d files by name (/etc shadowing the same name
+    elsewhere), then /etc/sysctl.conf; the last assignment to a key wins. Keys keep any glob."""
     root = pathlib.Path(root)
     files = dropins(root, ["%s/sysctl.d" % d for d in CONF_DIRS])
     if (root / "etc/sysctl.conf").is_file():
         files.append(root / "etc/sysctl.conf")
-    val = None
+    vals = {}
     for f in files:
         for ln in f.read_text(errors="replace").splitlines():
             ln = ln.strip().lstrip("-")
             if not ln or ln[0] in "#;" or "=" not in ln:
                 continue
             k, v = (x.strip() for x in ln.split("=", 1))
-            if k.replace("/", ".") == key:
-                val = v
-    return val
+            vals[k.replace("/", ".")] = v
+    return vals
+
+
+def sysctl(root, key):
+    """The value systemd-sysctl sets for KEY. None if never set."""
+    return sysctl_all(root).get(key)
 
 
 def dump_violations(root):
@@ -312,6 +351,10 @@ def network_violations(root):
             v = ini_last([up], "Network", key)
             if v not in (None, "no"):
                 out.append("%s: %s is %s; must be unset or no" % (UPLINK, key, v))
+        for section, key in UPLINK_UNSET:
+            v = ini_last([up], section, key)
+            if v is not None:
+                out.append("%s: [%s] %s is %s; must be unset" % (UPLINK, section, key, v))
         for section, key, want in UPLINK_PRIVACY:
             v = ini_last([up], section, key)
             if v != want:
@@ -321,6 +364,9 @@ def network_violations(root):
         v = ini_last(conf, "Network", key)
         if v not in (None, "no"):
             out.append("networkd.conf: %s is %s; must be unset or no" % (key, v))
+    for k, v in sorted(sysctl_all(root).items()):
+        if v != "0" and (FORWARD_KEY.match(k) or any(fnmatch.fnmatchcase(f, k) for f in FORWARD_SYSCTLS)):
+            out.append("sysctl.d: %s is %s; forwarding must stay 0" % (k, v))
     return out
 
 

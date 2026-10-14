@@ -189,6 +189,90 @@ class TreeCheckTest(unittest.TestCase):
         write(self.root, "etc/systemd/networkd.conf.d/50-x.conf", "[Network]\nIPv4Forwarding=yes\n")
         self.assertIn("IPv4Forwarding", " ".join(check.violations(self.root)))
 
+    # REQ: DEV-2, CH-9
+    def test_indented_key_is_still_read(self):
+        # systemd strips leading whitespace, so an indented line is an assignment of its own, not a
+        # continuation of the line above it.
+        base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        write(self.root, UPLINK_REL, base.replace("DHCP=yes\n", "DHCP=yes\n    IPMasquerade=both\n"))
+        self.assertIn("IPMasquerade is both", " ".join(check.violations(self.root)))
+        # A trailing backslash does continue a line, up to the end of the file.
+        write(self.root, UPLINK_REL, base + "\n[Network]\nIPForward=\\\nyes")
+        self.assertIn("IPForward is yes", " ".join(check.violations(self.root)))
+        # A comment is never an assignment.
+        write(self.root, UPLINK_REL, base + "\n[Network]\n# IPForward=yes\n; IPMasquerade=both\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: DEV-2, CH-9
+    def test_uplink_answers_and_advertises_nothing(self):
+        # Proxy ARP or NDP, router advertisements, a DHCP server or LLDP would make the box answer
+        # or advertise on the LAN; class and MUD identifiers tell the LAN what it is.
+        base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        for section, line in (("Network", "EmitLLDP=nearest-bridge"), ("Network", "IPv4ProxyARP=yes"),
+                              ("Network", "IPv6ProxyNDP=yes"), ("Network", "IPv6ProxyNDPAddress=2001:db8::1"),
+                              ("Network", "IPv6SendRA=yes"), ("Network", "DHCPServer=yes"),
+                              ("DHCPv4", "VendorClassIdentifier=agentos"), ("DHCPv4", "UserClass=agentos"),
+                              ("DHCPv4", "MUDURL=https://example.invalid/mud"),
+                              ("DHCPv6", "VendorClass=agentos"), ("DHCPv6", "UserClass=agentos"),
+                              ("DHCPv6", "MUDURL=https://example.invalid/mud"),
+                              ("LLDP", "MUDURL=https://example.invalid/mud")):
+            with self.subTest(line):
+                write(self.root, UPLINK_REL, base + "\n[%s]\n%s\n" % (section, line))
+                self.assertIn(line.split("=")[0], " ".join(check.violations(self.root)))
+        write(self.root, UPLINK_REL, base + "\n[Network]\nEmitLLDP=no\nIPv6SendRA=no\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: DEV-2, CH-9
+    def test_each_privacy_setting_is_required(self):
+        # #1479: removing or flipping any one privacy line fails the build.
+        base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        for section, line, flipped in (("[IPv6AcceptRA]", "Token=prefixstable", "Token=eui64"),
+                                       ("[Network]", "IPv6PrivacyExtensions=yes", "IPv6PrivacyExtensions=no"),
+                                       ("[DHCPv4]", "SendHostname=no", "SendHostname=yes"),
+                                       ("[DHCPv6]", "SendHostname=no", "SendHostname=yes")):
+            old = "%s\n%s\n" % (section, line) if section.startswith("[DHCP") else line + "\n"
+            self.assertIn(old, base)
+            key = line.split("=")[0]
+            for new in (old.replace(line, flipped), old.replace(line + "\n", "")):
+                with self.subTest(section=section, new=new):
+                    write(self.root, UPLINK_REL, base.replace(old, new))
+                    self.assertIn("%s %s is" % (section, key), " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2, CH-9
+    def test_network_links_are_live_unless_to_dev_null(self):
+        # A link to a real .network file runs it. The check takes only a link to /dev/null as a mask:
+        # networkd skips some other links too, and refusing those errs safe.
+        real = write(self.root, "usr/lib/agentos/80-x.network", DISTRO_NETWORKS["80-container-ve.network"])
+        link = self.root / "etc/systemd/network/80-x.network"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(real)
+        self.assertIn("80-x.network: live", " ".join(check.violations(self.root)))
+        link.unlink()
+        empty = write(self.root, "usr/lib/agentos/empty", "")
+        for target in (str(empty), "/dev/zero", "/dev/null/../null", "../../../dev/null"):
+            with self.subTest(target):
+                link.symlink_to(target)
+                self.assertFalse(check.masked(link))
+                self.assertIn("80-x.network: live", " ".join(check.violations(self.root)))
+                link.unlink()
+        link.symlink_to("/dev/null")
+        self.assertTrue(check.masked(link))
+
+    # REQ: DEV-2, CH-9
+    def test_sysctl_forwarding_stays_off(self):
+        # #1478: a sysctl.d file may not turn routing on, for one device, a glob, or all of them.
+        for line in ("net.ipv4.ip_forward = 1", "net.ipv4.conf.eth0.forwarding=1", "net/ipv4/conf/all/forwarding=1",
+                     "net.ipv4.conf.*.forwarding = 1", "-net.ipv6.conf.all.forwarding = 1",
+                     "net.ipv6.conf.default.forwarding=1", "net.ipv6.conf.eth0.force_forwarding=1",
+                     "net.ipv4.conf.e*.forwarding=1"):
+            with self.subTest(line):
+                f = write(self.root, "etc/sysctl.d/90-x.conf", line + "\n")
+                self.assertIn("forwarding must stay 0", " ".join(check.violations(self.root)))
+                f.unlink()
+        write(self.root, "usr/lib/sysctl.d/50-x.conf", "net.ipv4.ip_forward = 1\n")
+        write(self.root, "etc/sysctl.d/90-x.conf", "net.ipv4.ip_forward = 0\nnet.ipv4.conf.all.forwarding=0\n")
+        self.assertEqual(check.violations(self.root), [])
+
     # REQ: DEV-2
     def test_resolved_answers_nothing_on_the_lan(self):
         # #1479: resolved's LLMNR and multicast DNS send single-label lookups onto the LAN, where any
@@ -477,7 +561,10 @@ class HealthTest(unittest.TestCase):
         write(self.root, "proc/swaps", SWAPS_HEADER)
         write(self.root, "proc/sys/kernel/core_pattern", "|/usr/bin/false\n")
         write(self.root, "proc/sys/net/ipv4/ip_forward", "0\n")
-        write(self.root, "proc/sys/net/ipv6/conf/all/forwarding", "0\n")
+        for v in ("ipv4", "ipv6"):
+            for dev in ("all", "default", "lo", "eth0"):
+                write(self.root, "proc/sys/net/%s/conf/%s/forwarding" % (v, dev), "0\n")
+        write(self.root, "proc/sys/net/ipv6/conf/eth0/force_forwarding", "0\n")
         ev = self.root / "sys/firmware/efi/efivars"
         ev.mkdir(parents=True)
         (ev / "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(b"\x06\x00\x00\x00\x01")
@@ -508,6 +595,12 @@ class HealthTest(unittest.TestCase):
         self.assertIn("inbound=drop", r.stdout)
         self.assertIn("swap=off dumps=off", r.stdout)
         self.assertIn("forward=off", r.stdout)
+
+    def test_kernel_without_forced_forwarding_passes(self):
+        # Kernels before 6.17 have no force_forwarding switch; its absence is not a failure.
+        (self.root / "proc/sys/net/ipv6/conf/eth0/force_forwarding").unlink()
+        r = self.run_health()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_secure_boot_off_is_reported_not_failed(self):
         (self.root / "sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(
@@ -542,6 +635,15 @@ class HealthTest(unittest.TestCase):
             "ipv4 forwarding on": lambda: write(self.root, "proc/sys/net/ipv4/ip_forward", "1\n"),
             "ipv6 forwarding on": lambda: write(self.root, "proc/sys/net/ipv6/conf/all/forwarding", "1\n"),
             "forwarding unreadable": lambda: (self.root / "proc/sys/net/ipv4/ip_forward").unlink(),
+            # IPv4 forwards by input device: ip_forward=0 with one device's switch on still routes.
+            "ipv4 eth0 forwarding on": lambda: write(self.root, "proc/sys/net/ipv4/conf/eth0/forwarding", "1\n"),
+            "ipv4 default forwarding on": lambda: write(self.root, "proc/sys/net/ipv4/conf/default/forwarding", "1\n"),
+            "ipv4 all forwarding on": lambda: write(self.root, "proc/sys/net/ipv4/conf/all/forwarding", "1\n"),
+            "ipv6 default forwarding on": lambda: write(self.root, "proc/sys/net/ipv6/conf/default/forwarding", "1\n"),
+            "ipv6 eth0 forwarding on": lambda: write(self.root, "proc/sys/net/ipv6/conf/eth0/forwarding", "1\n"),
+            "ipv6 eth0 forced forwarding": lambda: write(self.root, "proc/sys/net/ipv6/conf/eth0/force_forwarding", "1\n"),
+            "ipv4 device switches unreadable": lambda: shutil.rmtree(self.root / "proc/sys/net/ipv4/conf"),
+            "ipv6 default unreadable": lambda: (self.root / "proc/sys/net/ipv6/conf/default/forwarding").unlink(),
         }
         for name, breakit in cases.items():
             with self.subTest(name):
