@@ -170,6 +170,9 @@ type fakeExec struct {
 	evidence map[string]string
 	// block holds an intent's attempts until its channel is closed.
 	block map[string]chan struct{}
+	// notDone: a check of the intent proves its attempt was not done;
+	// otherwise a check cannot tell.
+	notDone map[string]bool
 }
 
 func (e *fakeExec) Execute(_ context.Context, in journal.Intent, _ int) journal.Outcome {
@@ -196,7 +199,12 @@ func (e *fakeExec) Execute(_ context.Context, in journal.Intent, _ int) journal.
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "done:" + in.ID}
 }
 
-func (e *fakeExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
+func (e *fakeExec) Reconcile(_ context.Context, in journal.Intent, _ int) journal.Outcome {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.notDone[in.ID] {
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not sent"}
+	}
 	return journal.Outcome{Result: journal.ResultUnknown}
 }
 

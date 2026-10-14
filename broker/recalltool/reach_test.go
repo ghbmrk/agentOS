@@ -22,11 +22,15 @@ type fakeJournal struct {
 	erased    map[string]bool
 	inFlight  map[string]bool
 	denied    map[string]bool
+	status    map[string]journal.Status // the engine's own status, when set
 }
 
 func (j *fakeJournal) Get(id string) (journal.Status, error) {
 	if _, ok := j.submitted[id]; !ok {
 		return journal.Status{}, errors.New("unknown")
+	}
+	if st, ok := j.status[id]; ok {
+		return st, nil
 	}
 	switch {
 	case j.inFlight[id]:
@@ -64,8 +68,9 @@ func (j *fakeJournal) StatusBetween(origin string, from, until time.Time) []jour
 
 func (j *fakeJournal) Erase(ids []string) (erased, held []string, err error) {
 	for _, id := range ids {
+		st, _ := j.Get(id)
 		switch {
-		case j.inFlight[id]:
+		case st.State == journal.InFlight || st.State == journal.OutcomeUnknown:
 			held = append(held, id)
 		case !j.erased[id]:
 			j.erased[id] = true
@@ -940,5 +945,64 @@ func TestProvenanceResetMarks(t *testing.T) {
 	p3, _ := OpenProvenance(st)
 	if got := strings.Join(p3.Of("l"), ","); got != "after,before" || len(p3.Resets("l")) != 0 {
 		t.Fatalf("after finish: %s %v", got, p3.Resets("l"))
+	}
+}
+
+// unclearRefused leaves attempt 1 unknown and refuses every later one.
+type unclearRefused struct{}
+
+func (unclearRefused) Execute(_ context.Context, _ journal.Intent, n int) journal.Outcome {
+	if n == 1 {
+		return journal.Outcome{Result: journal.ResultUnknown}
+	}
+	return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "refused"}
+}
+
+func (unclearRefused) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultUnknown}
+}
+
+type allowEffects struct{}
+
+func (allowEffects) Check(context.Context, journal.Phase, journal.Intent) error { return nil }
+
+// unclearStatus is the journal's status of a send whose owner's retry the
+// service refused while its parked first try is still unknown.
+func unclearStatus(t *testing.T) journal.Status {
+	t.Helper()
+	ctx := context.Background()
+	e, err := journal.Open(&journal.MemStore{}, allowEffects{}, map[string]journal.Executor{"x": unclearRefused{}}, func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := journal.Intent{ID: "unclear", Origin: "guest:root", Account: "mail", Action: "send", Executor: "x"}
+	if _, err := e.Submit(in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Authorize(ctx, "unclear"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = e.Dispatch(ctx, "unclear")
+	for i := 0; i < 12; i++ {
+		e.Reconcile(ctx)
+	}
+	st, err := e.Retry(ctx, "unclear", 1)
+	if err != nil || st.Unclear() != 1 {
+		t.Fatalf("retry: %+v %v", st, err)
+	}
+	return st
+}
+
+// B9 (CAP-3, OP-2): a send whose owner's retry did not go while its
+// parked first try may have gone is work the agent did: the owner is
+// asked before its machines go back, and the reset does not erase it
+// unasked.
+func TestCAP3SendThatMayHaveGoneIsWork(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["unclear"] = read.Add(time.Second)
+	x.j.status = map[string]journal.Status{"unclear": unclearStatus(t)}
+	x.del(t, x.mail)
+	if len(x.ask.asked) != 1 || len(x.vm.calls) != 0 || x.j.erased["unclear"] {
+		t.Fatalf("asked %v, reset %v, erased %v", x.ask.asked, x.vm.calls, x.j.erased)
 	}
 }

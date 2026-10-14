@@ -63,20 +63,26 @@ func TestOP4SettleUnknownRetriesUnavailableEvidence(t *testing.T) {
 	}
 }
 
-// Evidence that never settles keeps the account fenced until ctx ends.
+// Evidence that never settles keeps the account fenced while the broker
+// asks again, and after parkAfter checks the effect is parked for the
+// digest: the fence lifts, and the effect is never executed again (OP-2).
 func TestOP4SettleUnknownKeepsUncertainEffectsFenced(t *testing.T) {
 	svc := newService()
 	st := crashedAfterEffect(t, svc)
 	f := &flakyEvidence{plainExec: plainExec{svc}, down: 1 << 30}
 	e := mustOpen(t, st, newPolicy(), f)
-	c, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-	defer cancel()
-	rep := e.SettleUnknown(c, time.Millisecond, 5*time.Millisecond)
-	if len(rep.Unresolved) != 1 || f.asked < 2 {
-		t.Fatalf("report %+v after %d asks", rep, f.asked)
+	if rep := e.Reconcile(ctx); len(rep.Unresolved) != 1 || len(rep.Parked) != 0 {
+		t.Fatalf("first check: %+v", rep)
 	}
 	if got := e.Fenced("acct"); len(got) != 1 {
 		t.Fatalf("fence = %v", got)
+	}
+	rep := e.SettleUnknown(ctx, time.Millisecond, 5*time.Millisecond)
+	if len(rep.Unresolved) != 0 || len(rep.Parked) != 1 || f.asked != parkAfter {
+		t.Fatalf("report %+v after %d asks", rep, f.asked)
+	}
+	if got := e.Fenced("acct"); len(got) != 0 {
+		t.Fatalf("fence after parking = %v", got)
 	}
 	if svc.executeCount() != 1 {
 		t.Fatalf("executes %d: the effect ran again", svc.executeCount())
