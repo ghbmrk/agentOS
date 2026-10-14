@@ -69,6 +69,8 @@ type fakeHooks struct {
 	joins       int    // JoinNetwork calls
 	deviceErr   error  // StartDeviceCode's answer when set
 	deviceLink  string // StartDeviceCode's link when set
+	privateErr  error  // SetPrivateOK's answer when set; nothing is recorded
+	privates    int    // SetPrivateOK calls
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -157,6 +159,10 @@ func (f *fakeHooks) Providers() []Provider {
 func (f *fakeHooks) SetPrivateOK(id string, ok bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.privates++
+	if f.privateErr != nil {
+		return f.privateErr
+	}
 	if f.private == nil {
 		f.private = map[string]bool{}
 	}

@@ -184,7 +184,8 @@ func (v *Vault) Put(name, kind string, value []byte) error {
 }
 
 // PutMany stores or replaces several secrets in one write: the vault, in
-// memory and on the drive, holds all of them or none. Values that must be
+// memory and on the drive, holds all of them or none. A write that fails
+// only at the directory sync has landed, so it counts as stored (#1472). Values that must be
 // redacted together, such as an Owner Card and its parts, go in one call,
 // so no failure or crash between writes leaves one of them unredacted
 // (CRED-7).
@@ -306,15 +307,32 @@ func (v *Vault) Close() error {
 // save seals the whole vault and replaces the file atomically: a crash
 // leaves either the old file or the new one. With a counter bound, the
 // file carries the counter's next value and the counter advances after
-// the write (rollback.go). Caller holds mu.
+// the write (rollback.go). A failed directory sync after the rename
+// returns nil with a warning (landed). Caller holds mu.
 func (v *Vault) save() error {
 	if err := v.ensureID(); err != nil {
 		return err
 	}
 	if v.counter == nil {
-		return v.write(v.anchors)
+		return v.landed(v.write(v.anchors))
 	}
 	return v.advance()
+}
+
+// landed treats a write that failed only at the directory sync as done
+// (#1472): the new file is in place and is what the vault reads, so memory
+// must keep matching it. Rolling memory back would leave the old values
+// in memory, and the next save would write them back over the new ones.
+// The owner is warned that a power cut before the next change could still
+// undo this one. Any other error is returned as it is.
+func (v *Vault) landed(err error) error {
+	if !errors.Is(err, durable.ErrDirSync) {
+		return err
+	}
+	if v.warn != nil {
+		v.warn("this change is saved, but a power cut before the next change could undo it")
+	}
+	return nil
 }
 
 // write seals the entries with anchors and replaces the file. Caller holds
