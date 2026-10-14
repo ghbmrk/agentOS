@@ -68,33 +68,53 @@ def esp_violations(paths, entry):
                   if p not in allowed and not any(re.fullmatch(a, p) for a in ESP_ALLOWED))
 
 
+def options_line(entry):
+    """The entry's kernel command line: systemd-boot joins every options line, indented or not."""
+    return " ".join(ln.split(None, 1)[1] for ln in entry.splitlines()
+                    if re.match(r"\s*options\s", ln) and len(ln.split(None, 1)) > 1)
+
+
 def entry_args(entry, name):
     """Every value of the entry's kernel argument NAME=, in order."""
-    return re.findall(r"(?:^|\s)%s=(\S*)" % re.escape(name), " ".join(
-        ln.split(None, 1)[1] for ln in entry.splitlines() if re.match(r"options\s", ln)))
+    return re.findall(r"(?:^|\s)%s=(\S*)" % re.escape(name), options_line(entry))
 
 
 # The command-line credentials the image ships (mkosi.conf): emergency and rescue mode run the
 # fallback (I4). Any other credential could carry sysctl.extra or tmpfiles.extra (#1530).
 SHIPPED_CREDENTIALS = ("systemd.unit-dropin.emergency.service", "systemd.unit-dropin.rescue.service")
+MKOSI_CONF = pathlib.Path(__file__).resolve().parent / "mkosi" / "mkosi.conf"
+
+
+def config_cmdline(conf=MKOSI_CONF):
+    """The words of mkosi.conf's KernelCommandLine= and its indented continuation lines."""
+    words, on = [], False
+    for ln in pathlib.Path(conf).read_text().splitlines():
+        if ln.startswith("KernelCommandLine="):
+            on, ln = True, ln.split("=", 1)[1]
+        elif not (on and ln[:1].isspace() and ln.strip()):
+            on = False
+            continue
+        words += ln.split()
+    return words
 
 
 def cmdline_words(entry):
     """The entry's kernel command line split as the kernel's next_arg splits it: on whitespace
     outside double quotes. Quotes are dropped from each word, which errs safe: a word is checked
     as the bare text either the kernel or systemd could take from it."""
-    line = " ".join(ln.split(None, 1)[1] for ln in entry.splitlines()
-                    if re.match(r"options\s", ln) and len(ln.split(None, 1)) > 1)
-    return [w.replace('"', "") for w in re.findall(r'(?:[^\s"]|"[^"]*"?)+', line)]
+    return [w.replace('"', "") for w in re.findall(r'(?:[^\s"]|"[^"]*"?)+', options_line(entry))]
 
 
-def cmdline_violations(entry):
-    """#1530: nothing on the command line sets a sysctl. The kernel writes every sysctl.<key>= or
-    sysctl/<key>= argument at boot (Linux 5.8+); systemd-sysctl and systemd-tmpfiles read the
-    sysctl.extra and tmpfiles.extra credentials, which PID 1 takes from systemd.set_credential= and
-    systemd.set_credential_binary=. Names are compared as systemd compares them (- and _ alike, an
-    rd. prefix for the initrd) and case-blind, which errs safe; only the shipped credentials pass."""
-    out = []
+def cmdline_violations(entry, conf=MKOSI_CONF):
+    """#1530: the command line is an allowlist. mkosi v24.3 writes exactly usrhash=<root hash> and
+    mkosi.conf's KernelCommandLine words (finalize_cmdline), so every other word is refused: an
+    unknown word reaches PID 1 as an argument or environment variable, and systemd.run=, init= or a
+    sysctl.<key>= could turn forwarding on while sysctl.d is clean. Some words are refused even when
+    mkosi.conf lists them: sysctl.<key>= and sysctl/<key>= (the kernel writes them at boot, Linux
+    5.8+), systemd.run and init (PID 1 runs them), and any credential but the shipped ones, which
+    could carry sysctl.extra or tmpfiles.extra. Names are compared as systemd compares them (- and _
+    alike, an rd. prefix for the initrd) and case-blind, which errs safe."""
+    allowed, out = set(config_cmdline(conf)), []
     for w in cmdline_words(entry):
         key, _, val = w.partition("=")
         k = key.lower().replace("-", "_")
@@ -102,10 +122,14 @@ def cmdline_violations(entry):
             k = k[3:]
         if k.startswith(("sysctl.", "sysctl/")):
             out.append("%s: the kernel sets sysctls from the command line" % key)
-        elif k in ("systemd.set_credential", "systemd.set_credential_binary"):
-            name = val.split(":", 1)[0]
-            if name not in SHIPPED_CREDENTIALS:
-                out.append("%s=%s: only the shipped credentials %s may be set" % (key, name, ", ".join(SHIPPED_CREDENTIALS)))
+        elif k.startswith(("systemd.run", "init", "rdinit")):
+            out.append("%s: PID 1 would run it" % key)
+        elif k in ("systemd.set_credential", "systemd.set_credential_binary") and \
+                val.split(":", 1)[0] not in SHIPPED_CREDENTIALS:
+            out.append("%s=%s: only the shipped credentials %s may be set"
+                       % (key, val.split(":", 1)[0], ", ".join(SHIPPED_CREDENTIALS)))
+        elif w not in allowed and not re.fullmatch(r"usrhash=[0-9a-f]{64}", w):
+            out.append("%s: not in mkosi.conf's KernelCommandLine; add it there" % w[:80])
     return out
 
 
@@ -307,7 +331,7 @@ def main(out, version):
         sys.exit("ESP holds files outside the allowlist (HW-1): %s" % bad)
     bad = cmdline_violations(text)
     if bad:
-        sys.exit("boot entry sets a sysctl outside sysctl.d (#1530): %s" % bad)
+        sys.exit("boot entry has a kernel argument outside the allowlist (#1530): %s" % bad)
     bad = swap_violations(partition_table(str(img))["partitions"], text)
     if bad:
         sys.exit("image could swap or keep the broker's memory (IMG-nodump): %s" % bad)

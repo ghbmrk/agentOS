@@ -588,6 +588,27 @@ class TreeCheckTest(unittest.TestCase):
         write_b(self.root, b"etc/modprobe.d/00-bt.conf", b"install\tbt-usb \\\n  /bin/false \t\ninstall btmtk  /usr/bin/false\n")
         self.assertEqual(check.violations(self.root), [])
 
+    # REQ: CH-7, HW-10
+    def test_no_install_line_loads_bluetooth_another_way(self):
+        # Security R2 on #1543: another module's install or remove command can load btusb past its
+        # own install line (modprobe -i skips install lines; insmod never reads them).
+        for line in (b"install snd_x /sbin/modprobe --ignore-install btusb",
+                     b"install snd_x /sbin/modprobe --ignore-install snd_x; /sbin/modprobe -i x",
+                     b"install snd_x modprobe -qi snd_y", b"install snd_x modprobe --ignore-i snd_y",
+                     b"install snd_x modprobe --ignore-install=1 snd_y",
+                     b"install snd_x /sbin/insmod /lib/modules/x/bt.ko", b"install snd_x insmod y.ko",
+                     b"remove snd_x /sbin/modprobe BTMTK", b"install btusb /bin/false; modprobe btusb",
+                     b"install snd_x sh -c 'modprobe btusb'"):
+            with self.subTest(line):
+                write_b(self.root, b"usr/lib/modprobe.d/zz-x.conf", line + b"\n")
+                self.assertIn("could load Bluetooth", " ".join(check.violations(self.root)))
+        for line in (b"install snd_x /sbin/modprobe --ignore-remove snd_x", b"install snd_x /bin/true",
+                     b"install snd_x modprobe -q snd_y --first-time", b"blacklist btusb",
+                     b"install snd_x modprobe --ignore- snd_y"):
+            with self.subTest(ok=line):
+                write_b(self.root, b"usr/lib/modprobe.d/zz-x.conf", line + b"\n")
+                self.assertEqual(check.violations(self.root), [])
+
     def test_kmod_reader(self):
         # REQ: CH-7, HW-10
         self.assertEqual(check.kmod_lines(b"a \\\nb\\c\\\\\nd\0e\nf\\"), [b"a bc\\", b"d", b"f\xff"])
@@ -1662,10 +1683,13 @@ class NoDumpTest(unittest.TestCase):
         # REQ: DEV-2, CH-9 (#1530)
         # The kernel writes sysctl.<key>= arguments at boot, and systemd-sysctl and systemd-tmpfiles
         # read the sysctl.extra and tmpfiles.extra credentials PID 1 takes from the command line, so
-        # either could turn forwarding on while sysctl.d is clean. The shipped line passes.
+        # either could turn forwarding on while sysctl.d is clean. The line is an allowlist: what
+        # mkosi v24.3 writes (usrhash= then mkosi.conf's words) passes, and nothing else does.
         args = ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"]
-        entry = (ENTRY % H).replace("rw quiet", " ".join(args.split()))
+        self.assertEqual(finish.config_cmdline(), args.split())
+        entry = (ENTRY % H).replace("console=tty0 console=ttyS0 rw quiet", "usrhash=%s %s" % (H, " ".join(args.split())))
         self.assertEqual(finish.cmdline_violations(entry), [])
+        self.assertEqual(finish.cmdline_violations(entry.replace("options", "  options")), [])
         self.assertEqual(len(re.findall("set_credential", entry)), 2)
         cred = "systemd.set_credential%s=%s:bmV0LmlwdjQuaXBfZm9yd2FyZD0xCg=="
         for bad in ("sysctl.net.ipv4.ip_forward=1", "sysctl/net/ipv4/ip_forward=1", "rd.sysctl.kernel.x=1",
@@ -1673,14 +1697,33 @@ class NoDumpTest(unittest.TestCase):
                     cred % ("", "sysctl.extra"), cred % ("_binary", "sysctl.extra"),
                     cred % ("_binary", "tmpfiles.extra"), cred % ("-binary", "sysctl.extra"),
                     "rd." + cred % ("", "sysctl.extra"), cred % ("", "systemd.unit-dropin.emergency.service2"),
-                    cred % ("", '"sysctl.extra'), "systemd.set_credential=sysctl.extra"):
+                    cred % ("", '"sysctl.extra'), "systemd.set_credential=sysctl.extra",
+                    # Security R3: anything else PID 1 or the kernel acts on.
+                    "systemd.run=/bin/sh", "rd.systemd.run=/bin/sh", "systemd.run_success_action=none",
+                    "init=/bin/sh", "rdinit=/bin/sh", "sysctlx=1", "kernel.sysctl=1",
+                    "systemd.setenv=sysctl.x=1", "emergency", "--", "usrhash=" + H[:63],
+                    "usrhash=%s" % H.upper(), '"quiet systemd.run=/bin/sh"',
+                    "systemd.set_credential_binary=systemd.unit-dropin.rescue.service:W1NlcnZpY2VdCg==",
+                    cred % ("", "systemd.unit-dropin.emergency.service")):
             with self.subTest(bad=bad):
                 self.assertNotEqual(finish.cmdline_violations(entry.replace("quiet", "quiet " + bad)), [])
-        for ok in ("sysctlx=1", "kernel.sysctl=1", "systemd.setenv=sysctl.x=1"):
-            with self.subTest(ok=ok):
-                self.assertEqual(finish.cmdline_violations(entry.replace("quiet", "quiet " + ok)), [])
-        # systemd-boot joins every options line; a bare one adds nothing.
-        self.assertNotEqual(finish.cmdline_violations(entry + "options \noptions\tsysctl.kernel.x=1\n"), [])
+        # A refused word is refused even when mkosi.conf lists it; a listed word passes.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        conf = pathlib.Path(tmp.name) / "mkosi.conf"
+        conf.write_text("[Content]\nKernelCommandLine=quiet systemd.run=/bin/sh\n  init=/bin/sh x=1 rdinit=/s rd.systemd.run=/s\nHostname=y\n")
+        self.assertEqual(finish.config_cmdline(conf), ["quiet", "systemd.run=/bin/sh", "init=/bin/sh", "x=1",
+                                                       "rdinit=/s", "rd.systemd.run=/s"])
+        one = "options quiet x=1 %s\n"
+        self.assertEqual(finish.cmdline_violations(one % "", conf), [])
+        for bad in ("systemd.run=/bin/sh", "init=/bin/sh", "rdinit=/s", "rd.systemd.run=/s", "Hostname=y", "rw"):
+            with self.subTest(listed=bad):
+                self.assertNotEqual(finish.cmdline_violations(one % bad, conf), [])
+        # systemd-boot joins every options line, indented or not; a bare one adds nothing.
+        for extra in ("options \noptions\tsysctl.kernel.x=1\n", "\toptions systemd.run=/bin/sh\n"):
+            with self.subTest(extra=extra):
+                self.assertNotEqual(finish.cmdline_violations(entry + extra), [])
+        self.assertEqual(finish.entry_args(entry + " options systemd.swap=1\n", "systemd.swap"), ["0", "1"])
         # main() runs it on the entry it writes, and fails the build.
 
         class Proc:
@@ -2182,10 +2225,44 @@ class ConfFilesTest(unittest.TestCase):
                               % RESOLVED_REL])
 
 
+# Lines like Debian trixie's own tmpfiles.d (debian.conf, var.conf, etc.conf, systemd.conf,
+# provision.conf), each of which must pass the tmpfiles check (#1530).
+TMPFILES_PASS = ("d /run/user 0755 root root -", "L /var/run - - - - ../run", "L+ /var/run - - - - /run",
+                 "L+ /etc/mtab   -    -    -    -  ../proc/self/mounts", "x /tmp/systemd-private-%b-*",
+                 "d %t/agentos 0750", "d /run/systemd/netif 0755 - - -", "f^ /etc/hosts - - - - network.hosts",
+                 "r /run/sysctlx.d", "L /etc/y - - - - /run/agentos", "C! /etc/pam.d - - - -",
+                 "L /etc/os-release - - - - ../usr/lib/os-release")
+AGENTOS_TMPFILES = MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf"
+# #1543 reviews at bf7e5d3: B1 (C+ on an ancestor of /run/sysctl.d), B2 (a stock link with more
+# after its target, which systemd takes raw), B3 (/etc/sysctl.d and /etc/sysctl.conf) and R1 (every
+# other directory the tree check reads), plus /sys and ".." paths. Each must be refused.
+TMPFILES_PROBES = (
+    "w /proc/sys/net/ipv4/ip_forward - - - - 1",
+    "C+ /run - - - - /usr/share/x", "C+ %t - - - - /usr/share/x", "C+ /var/run - - - - /usr/share/x",
+    "C+ / - - - - /usr/share/x", "C /run/systemd - - - - /usr/share/x",
+    "L+ /var/run - - - - ../run /../../proc/sys", "L+ /etc/mtab - - - - ../proc/self/mounts junk",
+    'L+ /var/run - - - - "../run"', "L+ /var/run - - - - ../run\\x20",
+    "f /etc/sysctl.d/zz.conf - - - - net.ipv4.ip_forward=1", "w /etc/sysctl.d/99-x.conf - - - - x",
+    "L /etc/sysctl.d/zz.conf - - - - /usr/share/x/f.conf", "C /etc/sysctl.d/zz.conf - - - - /usr/share/x/f",
+    "C /etc/sysctl.d - - - - /usr/share/x/sysctl.d", "f /etc/sysctl.conf", "d /etc/sysctl.d",
+    "r /etc/sysctl.d/99-sysctl.conf", "L /etc/z - - - - /etc/sysctl.d",
+    "C /etc/z - - - - /etc/sysctl.d", "C /usr/share/z - - - - /etc/modprobe.d", "L /etc/z - - - - /x /../proc/sys",
+    'L /etc/z - - - - "/proc/sys"',
+    "f /etc/modprobe.d/00-bt.conf - - - - install btusb /sbin/modprobe --ignore-install btusb",
+    "f /run/modprobe.d/x.conf", "f /etc/systemd/network/10-x.network",
+    "f /etc/systemd/resolved.conf.d/x.conf", "f /etc/systemd/resolved.conf",
+    "f /etc/systemd/system/agentosd.service.d/x.conf", "L /etc/systemd/system/x.service - - - - /dev/null",
+    "f /etc/tmpfiles.d/y.conf", "f /usr/lib/firmware/mediatek/x.bin", "f /etc/fstab",
+    "w /sys/kernel/x - - - - 1", "w /sys/kernel/mm/ksm/run - - - - 0",
+    "w /var/run/../proc/sys/x - - - - 1", "f /var/lock/../sysctl.d/x.conf", "f /usr/lib/../../x",
+    "f /etc/systemd/*/x.conf", "f /etc/sysctl.?/x.conf")
+
+
 class TmpfilesTest(unittest.TestCase):
-    """#1530: systemd-tmpfiles runs before systemd-sysctl and can write /proc/sys or create
-    /run/sysctl.d, which the sysctl check never reads. Each refused line here would set a sysctl
-    outside sysctl.d."""
+    """#1530: systemd-tmpfiles runs before systemd-sysctl and kmod, and can write /proc/sys or
+    create, copy, link or remove the configuration the tree check reads (/etc/sysctl.d, /run/sysctl.d,
+    modprobe.d, networkd, unit drop-ins, ...). Each refused line here could change what the box runs
+    without the build seeing it."""
     # REQ: DEV-2, CH-9
 
     def setUp(self):
@@ -2210,11 +2287,8 @@ class TmpfilesTest(unittest.TestCase):
             f.unlink()
 
     def test_debian_lines_pass(self):
-        write(self.root, "usr/lib/tmpfiles.d/debian.conf",
-              "# comment\n\nd /run/user 0755 root root -\nL /var/run - - - - ../run\n"
-              "L+ /var/run - - - - /run\nL+ /etc/mtab   -    -    -    -  ../proc/self/mounts\n"
-              "x /tmp/systemd-private-%b-*\nd %t/agentos 0750\n"
-              "w /sys/kernel/mm/ksm/run - - - - 0\nf /etc/sysctl.d/x.conf\nr /run/sysctlx.d\n")
+        write(self.root, "usr/lib/tmpfiles.d/debian.conf", "# comment\n\n" + "\n".join(TMPFILES_PASS) + "\n")
+        write(self.root, "usr/lib/tmpfiles.d/agentos.conf", AGENTOS_TMPFILES.read_text())
         self.assertEqual(check.violations(self.root), [])
         # The image already holds /etc/mtab, so the line's own path resolves into /proc.
         os.symlink("../proc/self/mounts", os.path.join(self.root, "etc/mtab"))
@@ -2222,6 +2296,20 @@ class TmpfilesTest(unittest.TestCase):
         # Any other line through the existing /etc/mtab link still reaches /proc.
         for ln in ("f /etc/mtab", "w /etc/mtab - - - - x", "L+ /etc/mtab - - - - /proc/self/root"):
             self.assertTrue(self.refused(ln + "\n"), ln)
+
+    def test_review_probes_are_refused(self):
+        for ln in TMPFILES_PROBES:
+            self.assertTrue(self.refused(ln + "\n"), ln)
+        # A link already in a target dir makes its target one too (Debian's 99-sysctl.conf).
+        write(self.root, "etc/sysctl.conf", "")
+        link(self.root, "etc/sysctl.d/98-x.conf", "/usr/share/x/f.conf")
+        self.assertTrue(self.refused("f /usr/share/x/f.conf - - - - net.ipv4.ip_forward=1\n"))
+        self.assertFalse(self.refused("f /usr/share/x/g.conf\n"))
+        # A link with no target names /usr/share/factory/<path>, which may itself be a link to a target.
+        link(self.root, "usr/share/factory/etc/q", "/proc/sys")
+        self.assertTrue(self.refused("L /etc/q\n"))
+        self.assertTrue(self.refused("L /etc/q - - - - -\n"))
+        self.assertFalse(self.refused("L /etc/r\n"))
 
     def test_proc_sys_writes_are_refused(self):
         for ln in ("w /proc/sys/net/ipv4/ip_forward - - - - 1", "w+ /proc/sys/net/ipv4/ip_forward - - - - 1",
@@ -2399,6 +2487,87 @@ class SystemdDiffTest(unittest.TestCase):
                     with self.subTest(tree=i, family=name):
                         mine = [os.fsencode(f.rel) for f in ours(pathlib.Path(tmp))]
                         self.assertEqual(mine, self.systemd_list(tmp, name))
+
+
+class TmpfilesDiffTest(unittest.TestCase):
+    """#1530: the tmpfiles check against systemd-tmpfiles itself. Each line (Debian's, the image's,
+    every review probe) runs through the real `systemd-tmpfiles --root=TREE --create` on a scratch
+    tree that passes the tree check, never the host. A line the check passes must leave every path
+    the box reads configuration from (GUARDED) as it was, and the tree must still pass the whole
+    check after it."""
+    # REQ: DEV-2, CH-9
+    # Probes that systemd-tmpfiles really turns into a write to a guarded path, so the oracle can fail.
+    WRITES = ("C+ /run - - - - /usr/share/x", "w /proc/sys/net/ipv4/ip_forward - - - - 1",
+              "f /etc/sysctl.d/zz.conf - - - - net.ipv4.ip_forward=1",
+              "L /etc/sysctl.d/zz.conf - - - - /usr/share/x/f.conf",
+              "f /etc/modprobe.d/00-bt.conf - - - - install btusb /sbin/modprobe --ignore-install btusb",
+              "f /etc/systemd/network/10-x.network", "w /sys/kernel/x - - - - 1")
+
+    def tree(self, tmp):
+        root = pathlib.Path(tmp)
+        write(root, "etc/machine-id", "uninitialized\n")
+        nodump(root)
+        radio(root)
+        uplink(root)
+        (root / "run").mkdir()
+        link(root, "var/run", "../run")
+        write(root, "proc/sys/net/ipv4/ip_forward", "0\n")
+        write(root, "sys/kernel/x", "0\n")
+        write(root, "sys/kernel/mm/ksm/run", "0\n")
+        write(root, "usr/share/x/sysctl.d/99-x.conf", "net.ipv4.ip_forward=1\n")
+        write(root, "usr/share/x/f.conf", "net.ipv4.ip_forward=1\n")
+        write(root, "etc/sysctl.conf", "")
+        link(root, "etc/sysctl.d/99-sysctl.conf", "../sysctl.conf")
+        return root
+
+    # What the box reads that a tmpfiles.d line could change, listed here apart from the check's own
+    # TMPFILES_TARGETS so that a target dropped there shows here.
+    GUARDED = ("proc", "sys", "etc/sysctl.conf", "etc/fstab", "usr/lib/firmware") + tuple(
+        "%s/%s" % (top, n) for top in ("etc", "usr/local/lib", "usr/lib", "lib", "run")
+        for n in ("sysctl.d", "modprobe.d", "tmpfiles.d", "systemd/network", "systemd/system",
+                  "systemd/system.control", "systemd/system.attached", "systemd/system.conf",
+                  "systemd/system.conf.d", "systemd/coredump.conf", "systemd/coredump.conf.d",
+                  "systemd/networkd.conf", "systemd/networkd.conf.d", "systemd/resolved.conf",
+                  "systemd/resolved.conf.d"))
+
+    def snapshot(self, root):
+        out = {}
+        for t in self.GUARDED:
+            top = os.path.join(root, t)
+            for p in [top] + [os.path.join(d, n) for d, ds, fs in os.walk(top) for n in ds + fs]:
+                rel = os.path.relpath(p, root)
+                if os.path.islink(p):
+                    out[rel] = ("link", os.readlink(p))
+                elif os.path.isfile(p):
+                    out[rel] = ("file", pathlib.Path(p).read_bytes())
+                elif os.path.isdir(p):
+                    out[rel] = ("dir",)
+        return out
+
+    def test_passed_lines_change_nothing_guarded(self):
+        tool = reference_tool(self, "systemd-tmpfiles")
+        lines = TMPFILES_PASS + tuple(ln for ln in AGENTOS_TMPFILES.read_text().splitlines()
+                                      if ln and not ln.startswith("#")) + TMPFILES_PROBES
+        changed = set()
+        for ln in lines:
+            with self.subTest(line=ln), tempfile.TemporaryDirectory() as tmp:
+                root = self.tree(tmp)
+                self.assertEqual(check.violations(root), [])
+                write(root, "usr/lib/tmpfiles.d/x.conf", ln + "\n")
+                passed = not check.tmpfiles_violations(root)
+                before = self.snapshot(tmp)
+                # --root keeps every path inside the scratch tree; the exit code is the line's own
+                # business (a missing user or credential), what it did to the tree is the test.
+                subprocess.run([tool, "--root=" + tmp, "--create"], capture_output=True, timeout=60)
+                if self.snapshot(tmp) != before:
+                    changed.add(ln)
+                self.assertEqual(passed, ln not in TMPFILES_PROBES)
+                if passed:
+                    self.assertNotIn(ln, changed)
+                    (root / "usr/lib/tmpfiles.d/x.conf").unlink()
+                    self.assertEqual(check.violations(root), [])
+        for ln in self.WRITES:
+            self.assertIn(ln, changed, "systemd-tmpfiles did not write through %r; the oracle is vacuous" % ln)
 
 
 class KmodDiffTest(unittest.TestCase):

@@ -98,6 +98,11 @@ LONG_LINE_MAX = 1 << 20
 # Where the booted box mounts something of its own (devtmpfs, proc, sysfs, tmpfs): a link into one
 # reaches what the box makes, not the image, and nothing the tree puts there is read.
 BOX_MOUNTS = ("dev", "proc", "sys", "run", "tmp")
+# The systemd configuration this check reads, by its name under each configuration directory.
+READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control",
+             "systemd/system.attached") + tuple("systemd/%s%s" % (n, d) for n in
+                                                ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
+                                                for d in ("", ".d"))
 
 
 def violations(root):
@@ -518,12 +523,9 @@ def stray_violations(root):
     box mounts a tmpfs over it) and a split-/usr /lib (systemd 257 reads only /usr/lib; trixie's /lib
     is a link to it). Checking such a file as if it were read would let it hide one that is."""
     out, root = [], str(root)
-    conf = ["sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control", "systemd/system.attached"]
-    conf += ["systemd/%s%s" % (n, d) for n in ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
-             for d in ("", ".d")]
-    places = [("run", n, "/run is a tmpfs on the box") for n in conf + ["modprobe.d"]]
+    places = [("run", n, "/run is a tmpfs on the box") for n in READ_CONF + ("modprobe.d",)]
     if not os.path.islink(os.path.join(root, "lib")):
-        places += [("lib", n, "systemd 257 does not read a split-/usr /lib") for n in conf]
+        places += [("lib", n, "systemd 257 does not read a split-/usr /lib") for n in READ_CONF]
     for top, n, why in places:
         base = os.path.join(root, top, n)
         if os.path.islink(base) or os.path.isfile(base):
@@ -668,22 +670,44 @@ def kmod_underscores(name):
     return bytes(out)
 
 
-def kmod_installs(data):
+def kmod_installs(data, kinds=(b"install",)):
     """(module pattern, command) of each install line kmod 34's kmod_config_parse takes from DATA,
     in order. Words split on space and tab only; a line whose first byte is # is a comment; the
-    command is the rest of the line after the one byte that ends the pattern."""
+    command is the rest of the line after the one byte that ends the pattern. KINDS widens it to
+    remove lines, whose command has the same form."""
     out = []
     for ln in kmod_lines(data):
         if ln[:1] in (b"", b"#"):
             continue
         cmd, pos = kmod_token(ln, 0)
-        if cmd != b"install":
+        if cmd not in kinds:
             continue
         name, pos = kmod_token(ln, pos)
         name = kmod_underscores(name) if name is not None else None
         if name is not None and pos < len(ln):
             out.append((name, ln[pos:]))
     return out
+
+
+def bypass_reason(command):
+    """Why an install or remove COMMAND could load a blocked module past its own install line, or
+    None. Any line's command can: modprobe -i (--ignore-install) skips install lines, insmod never
+    reads them, and a command naming the module loads it some other way. Matched as plain text,
+    case-blind, with any short option cluster holding i counted as -i, which errs safe. A command
+    that builds the name at run time (shell quoting, variables) is not seen; the after-boot check
+    (I20) covers that."""
+    text = command.decode(errors="replace").lower()
+    for m in BLOCKED_MODULES:
+        if m in text:
+            return "something naming %s" % m
+    for w in re.split(r"[^a-z0-9_./=-]+", text):
+        opt = w.split("=", 1)[0]
+        # getopt_long takes any unambiguous prefix: --ignore-i, but not --ignore- (or --ignore-remove).
+        if len(opt) >= 10 and "--ignore-install".startswith(opt) or re.fullmatch(r"-[a-z0-9]*i[a-z0-9]*", w):
+            return "modprobe %s" % w
+        if w.rsplit("/", 1)[-1] == "insmod":
+            return "insmod"
+    return None
 
 
 def bluetooth_violations(root):
@@ -698,6 +722,11 @@ def bluetooth_violations(root):
         except OSError as e:
             out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror))
             continue
+        for name, command in kmod_installs(data, (b"install", b"remove")):
+            why = bypass_reason(command)
+            if why:
+                out.append("%s: install/remove %s runs %s; it could load Bluetooth past its install line (#1528)"
+                           % (f.rel, name.decode(errors="backslashreplace"), why))
         for name, command in kmod_installs(data):
             if b"[" in name or b"\\" in name:
                 out.append("%s: install %s: a pattern with [ or \\ is not modelled; name the module"
@@ -710,12 +739,20 @@ def bluetooth_violations(root):
                   % (m, m, REFUSE[0]) for m in BLOCKED_MODULES if first.get(m) not in REFUSE]
 
 
-# Where a tmpfiles.d line could set a sysctl (#1530): /proc/sys itself (all of /proc, which errs
-# safe), and /run/sysctl.d, which systemd-sysctl reads (its CONF_PATHS) and the tree check cannot.
-TMPFILES_TARGETS = (("proc",), ("run", "sysctl.d"), ("var", "run", "sysctl.d"))
-# Debian's own link lines (debian.conf): /var/run is /run, and /etc/mtab names the mount table, a
-# file, so no later line can reach /proc/sys through it. Any other link to or above a target is refused.
-TMPFILES_LINKS = ((["var", "run"], ["run"]), (["etc", "mtab"], ["proc", "self", "mounts"]))
+# What a tmpfiles.d line must not touch (#1530): /proc and /sys, and every file and directory this
+# check reads, in each directory systemd or kmod reads it from (/run included: the tree check
+# cannot see what tmpfiles puts there at boot). systemd-tmpfiles runs before systemd-sysctl, and the
+# root file system is writable, so a line that writes, copies, links, removes or cleans any of
+# these changes what the box runs without the build seeing it.
+TMPFILES_TARGETS = (("proc",), ("sys",), ("etc", "sysctl.conf"), ("etc", "fstab"), ("usr", "lib", "firmware"),
+                    ("lib", "firmware")) + tuple(tuple(("%s/%s" % (top, n)).split("/"))
+                                                 for top in ("etc", "usr/local/lib", "usr/lib", "lib", "run")
+                                                 for n in READ_CONF + ("modprobe.d",))
+# Debian's own lines that touch one (debian.conf, var.conf), as whole lines with runs of blanks
+# collapsed: /var/run is /run, and /etc/mtab names the mount table, a file. Nothing else is exempt.
+TMPFILES_STOCK = ("L /var/run - - - - ../run", "L+ /var/run - - - - ../run", "L /var/run - - - - /run",
+                  "L+ /var/run - - - - /run", "L /etc/mtab - - - - ../proc/self/mounts",
+                  "L+ /etc/mtab - - - - ../proc/self/mounts")
 # systemd-tmpfiles 257.13's path specifiers for the system manager (src/tmpfiles/tmpfiles.c); the
 # others expand to names without a slash.
 TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",
@@ -816,22 +853,40 @@ def tree_glob(root, parts):
     return found
 
 
-def tmpfiles_hits(root, path, ancestor=False):
-    """Whether a tmpfiles.d PATH can reach a TMPFILES_TARGETS path: as written, or through the
-    image's links."""
-    parts = path_parts(path)
+def tmpfiles_targets(root):
+    """TMPFILES_TARGETS, and every path a link in one of them names in the image (Debian's
+    /etc/sysctl.d/99-sysctl.conf is a link to /etc/sysctl.conf)."""
+    out = list(TMPFILES_TARGETS)
+    for t in TMPFILES_TARGETS:
+        for dirpath, dirnames, filenames in os.walk(os.path.join(root, *t)):
+            for n in dirnames + filenames:
+                p = os.path.join(dirpath, n)
+                if os.path.islink(p):
+                    rel, to = os.path.relpath(dirpath, root), os.readlink(p)
+                    out.append(tuple(tree_resolve(root, path_parts(to if to.startswith("/") else rel + "/" + to))))
+    return out
+
+
+def tmpfiles_hits(root, parts, targets):
+    """Whether tmpfiles.d path components PARTS can be one of TARGETS, or above or below one: as
+    written (with systemd-tmpfiles' /var/run to /run rewrite), or through the image's links."""
+    if parts[:2] == ["var", "run"]:
+        parts = ["run"] + parts[2:]
     names = [parts] + [tree_resolve(root, g) for g in tree_glob(root, parts)]
-    return any(glob_reaches(n, t, ancestor) for n in names for t in TMPFILES_TARGETS)
+    return any(glob_reaches(n, t, ancestor=True) for n in names for t in targets)
 
 
 def tmpfiles_violations(root):
-    """#1530: systemd-tmpfiles runs before systemd-sysctl and can write /proc/sys (w, w+) or create
-    /run/sysctl.d/*.conf (f, F, w, C, L, ...), which the sysctl check never sees. Every line of
+    """#1530: systemd-tmpfiles runs before systemd-sysctl and kmod, and can write /proc/sys or create,
+    copy, link or remove the configuration this check reads (TMPFILES_TARGETS). Every line of
     tmpfiles.d (conf_files, read as systemd-tmpfiles 257.13 reads lines: they end at LF, CR or NUL,
-    # starts a comment) whose path, specifiers expanded and links in the image followed, can be
-    one of those is refused, whatever its type; so is a link (L) whose target can be one of them or
-    above one, but for Debian's own links (TMPFILES_LINKS)."""
+    # starts a comment) whose path, specifiers expanded and links in the image followed, is one of
+    those, above one or below one is refused, whatever its type; so is a link (L) whose target and a
+    copy (C) whose source is, taken both as systemd takes it (the rest of the line, as written) and
+    unquoted. A path with a ".." component is refused (systemd refuses it too). Only Debian's own
+    lines (TMPFILES_STOCK) are exempt, matched whole."""
     out, root = [], str(root)
+    targets = tmpfiles_targets(root)
     for f in conf_files(root, conf_paths("tmpfiles.d")):
         try:
             data = f.read_bytes()
@@ -840,22 +895,23 @@ def tmpfiles_violations(root):
             continue
         for n, raw in enumerate(re.split(rb"[\n\r\x00]", data), 1):
             ln = os.fsdecode(raw).strip(" \t")
-            if not ln or ln.startswith("#"):
+            if not ln or ln.startswith("#") or re.sub(r"[ \t]+", " ", ln) in TMPFILES_STOCK:
                 continue
             (typ, path, *_), arg = tmpfiles_words(ln) if len(tmpfiles_words(ln)[0]) >= 2 else ([ln, ""], "")
             path = tmpfiles_expand(path)
-            target = None
-            if typ.startswith("L") and arg not in ("", "-"):
-                target = tmpfiles_expand(tmpfiles_words(arg, 1)[0][0] if tmpfiles_words(arg, 1)[0] else arg)
-                if not target.startswith("/"):
-                    target = path.rsplit("/", 1)[0] + "/" + target
-                # The image already holds Debian's links, so the path itself resolves through them;
-                # (re)creating the same link writes nothing through it.
-                if (path_parts(path), path_parts(target)) in TMPFILES_LINKS:
-                    continue
-            bad = tmpfiles_hits(root, path) or (target is not None and tmpfiles_hits(root, target, ancestor=True))
-            if bad:
-                out.append("%s: line %d: %s; it could set a sysctl outside sysctl.d (#1530)" % (f.rel, n, ln[:120]))
+            names = [path]
+            if typ[:1] in ("L", "C"):
+                words = tmpfiles_words(arg, 1)[0]
+                for a in {arg, words[0] if words else arg}:
+                    a = tmpfiles_expand(a)
+                    if a in ("", "-"):
+                        a = "/usr/share/factory/" + path
+                    names.append(a if a.startswith("/") else path.rsplit("/", 1)[0] + "/" + a)
+            if ".." in path.split("/"):
+                out.append("%s: line %d: %s; a path with a '..' component (#1530)" % (f.rel, n, ln[:120]))
+            elif any(tmpfiles_hits(root, path_parts(p), targets) for p in names):
+                out.append("%s: line %d: %s; it reaches /proc, /sys or configuration the tree check reads (#1530)"
+                           % (f.rel, n, ln[:120]))
     return out
 
 
