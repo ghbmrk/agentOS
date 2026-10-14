@@ -95,7 +95,7 @@ func modelState(c *custody, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.modelGrantedNow(), Open: c.model() != nil})
+	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.modelGrantedNow(), Open: c.model() != nil, Private: c.privateGrantedNow()})
 }
 
 // evalRoute is the model access of replay machines (LOOP-5, replay K1).
@@ -569,6 +569,7 @@ func unlockHandler(c *custody) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	secondLineRoutes(mux, c, read, reply, fail)
+	providerRoutes(mux, c, read, reply, fail)
 	smsRoutes(mux, c, read, reply, fail)
 	mailRoutes(mux, c, read, reply, fail)
 	rotationRoutes(mux, c, read, reply, fail)
