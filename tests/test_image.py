@@ -2212,7 +2212,8 @@ class TmpfilesTest(unittest.TestCase):
     def test_debian_lines_pass(self):
         write(self.root, "usr/lib/tmpfiles.d/debian.conf",
               "# comment\n\nd /run/user 0755 root root -\nL /var/run - - - - ../run\n"
-              "L+ /var/run - - - - /run\nx /tmp/systemd-private-%b-*\nd %t/agentos 0750\n"
+              "L+ /var/run - - - - /run\nL+ /etc/mtab   -    -    -    -  ../proc/self/mounts\n"
+              "x /tmp/systemd-private-%b-*\nd %t/agentos 0750\n"
               "w /sys/kernel/mm/ksm/run - - - - 0\nf /etc/sysctl.d/x.conf\nr /run/sysctlx.d\n")
         self.assertEqual(check.violations(self.root), [])
 
@@ -2248,7 +2249,9 @@ class TmpfilesTest(unittest.TestCase):
 
     def test_links_to_a_target_or_above_are_refused(self):
         for ln in ("L /etc/y - - - - /run", "L /etc/y - - - - /proc/sys", "L /etc/y - - - - ../proc",
-                   "L+ /etc/y - - - - %t", "L /run/x - - - - sysctl.d", "L /etc/y - - - - /"):
+                   "L+ /etc/y - - - - %t", "L /run/x - - - - sysctl.d", "L /etc/y - - - - /",
+                   "L /etc/y - - - - /proc/self/mounts", "L /etc/mtab - - - - /proc/self/root",
+                   "L /etc/mtab - - - - /proc/self"):
             self.assertTrue(self.refused(ln + "\n"), ln)
         self.assertFalse(self.refused("L /etc/y - - - - /run/agentos\n"))
 

@@ -713,6 +713,9 @@ def bluetooth_violations(root):
 # Where a tmpfiles.d line could set a sysctl (#1530): /proc/sys itself (all of /proc, which errs
 # safe), and /run/sysctl.d, which systemd-sysctl reads (its CONF_PATHS) and the tree check cannot.
 TMPFILES_TARGETS = (("proc",), ("run", "sysctl.d"), ("var", "run", "sysctl.d"))
+# Debian's own link lines (debian.conf): /var/run is /run, and /etc/mtab names the mount table, a
+# file, so no later line can reach /proc/sys through it. Any other link to or above a target is refused.
+TMPFILES_LINKS = ((["var", "run"], ["run"]), (["etc", "mtab"], ["proc", "self", "mounts"]))
 # systemd-tmpfiles 257.13's path specifiers for the system manager (src/tmpfiles/tmpfiles.c); the
 # others expand to names without a slash.
 TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",
@@ -827,7 +830,7 @@ def tmpfiles_violations(root):
     tmpfiles.d (conf_files, read as systemd-tmpfiles 257.13 reads lines: they end at LF, CR or NUL,
     # starts a comment) whose path, specifiers expanded and links in the image followed, can be
     one of those is refused, whatever its type; so is a link (L) whose target can be one of them or
-    above one, but for Debian's /var/run -> /run."""
+    above one, but for Debian's own links (TMPFILES_LINKS)."""
     out, root = [], str(root)
     for f in conf_files(root, conf_paths("tmpfiles.d")):
         try:
@@ -846,7 +849,7 @@ def tmpfiles_violations(root):
                 target = tmpfiles_expand(tmpfiles_words(arg, 1)[0][0] if tmpfiles_words(arg, 1)[0] else arg)
                 if not target.startswith("/"):
                     target = path.rsplit("/", 1)[0] + "/" + target
-                bad = (path_parts(path) != ["var", "run"] or path_parts(target) != ["run"]) and \
+                bad = (path_parts(path), path_parts(target)) not in TMPFILES_LINKS and \
                     tmpfiles_hits(root, target, ancestor=True)
             if bad:
                 out.append("%s: line %d: %s; it could set a sysctl outside sysctl.d (#1530)" % (f.rel, n, ln[:120]))
