@@ -3,7 +3,8 @@
 # swtpm TPM 2.0, a drive larger than the image (root grows into it). Read the console
 # until the boot report appears, then check it: health passed under Secure Boot, the entry was
 # blessed, and root grew; the first boot has a cable in (QEMU user networking) and reports its
-# DHCP lease (P2-1, #1416), the later boots have no network. virtio disk, not emulated USB: S7
+# DHCP lease (P2-1, #1416), and the host probes the inbound drop through QEMU's port forwards
+# (probe_inbound.py); the later boots have no network. virtio disk, not emulated USB: S7
 # saw QEMU's usb-storage corrupt reads.
 # Then the per-drive GUIDs (drive-id, L3 MUST on #41): the first boot gave the drive its own disk,
 # ESP and root GUIDs; the drive boots again on them; and a PC with two fresh copies attached (every
@@ -11,6 +12,7 @@
 # Usage: ci_boot.sh IMAGE [WORKDIR]. Console logs: WORKDIR/console.log, console-reboot.log,
 # console-two-drives.log.
 set -eu
+HERE=$(dirname "$(realpath "$0")")
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/agentos-boot}"); mkdir -p "$W"
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
 
@@ -41,6 +43,9 @@ boot() {
 		grep -aq "${UNTIL:-agentos-boot:\|agentos-health: FAIL}" "$log" 2>/dev/null && break
 		sleep 5
 	done
+	# With PROBE set, the booted box's ports are probed through QEMU's forwards while it runs.
+	# shellcheck disable=SC2086 # $PROBE is a list of HOSTPORT:GUESTPORT words.
+	[ -z "${PROBE:-}" ] || python3 "$HERE/probe_inbound.py" $PROBE >"$log.probe" 2>&1 || true
 	sleep 2; kill $QEMU 2>/dev/null || true; wait $QEMU 2>/dev/null || true
 	echo "--- $(basename "$log")"
 	grep -a "agentos-\|Secure Boot\|verity\|Failed" "$log" | tail -40 || true
@@ -69,13 +74,20 @@ EOF
 D=$W/disk.raw
 copy "$D"
 before=$(stat -c %s "$IMG")
-NIC=user,model=virtio-net-pci boot "$W/console.log" "$D"
+# Forwards from the host to box ports 22, 80, 443 and 18789: each must be dropped (I11, I19).
+NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789" \
+	PROBE="18022:22 18080:80 18443:443 18789:18789" boot "$W/console.log" "$D"
 for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
 	has "$W/console.log" "$want"
 done
 # The wired uplink took a lease on the first boot; the reboot, with no cable, did not wait for one.
 has "$W/console.log" "agentos-uplink: "
 hasnt "$W/console.log" "agentos-uplink: none"
+# The host's connections through the forwards reach the box's leased address and get no answer.
+cat "$W/console.log.probe" 2>/dev/null || true
+for port in 22 80 443 18789; do
+	has "$W/console.log.probe" "agentos-probe: $port dropped"
+done
 # Root started at its 1G minimum inside an image of $before bytes; the drive gained 2G.
 root=$(grep -ao "agentos-boot: .*root_bytes=[0-9]*" "$W/console.log" | sed 's/.*root_bytes=//' | tail -1)
 if [ -n "$root" ] && [ "$root" -gt $((2 * 1024 * 1024 * 1024)) ]; then

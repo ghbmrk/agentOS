@@ -23,8 +23,9 @@
 # advertisements), the box side on the [Network] section the image ships in
 # 20-agentos-uplink.network (its [Match] names eth0 here, since the shipped one leaves out veth
 # links on purpose). The box takes its lease and its IPv6 address with the drop loaded first, as
-# the image orders networkd after agentos-inbound; no home host opens a box port at either address,
-# and the box still reaches the router. Also needs unshare and systemd-networkd.
+# the image orders networkd after agentos-inbound; no home host opens a box port at either address
+# or at the box's IPv6 link-local address, and each address opens once the drop is gone (the
+# control). The box still reaches the router. Also needs unshare and systemd-networkd.
 # REQ: DEV-2, DEV-net-e, ONB-3
 import configparser
 import ipaddress
@@ -527,6 +528,10 @@ class UplinkByNetworkd(unittest.TestCase):
         targets = [addr4]
         if IPV6:
             targets.append(self.wait_for("-6", PREFIX + "/64"))
+            # The box's link-local address: any host on the same link can aim at it without a lease
+            # or a router (review, Security release 1).
+            ll = sh("ip", "-6", "-o", "addr", "show", "dev", "eth0", "scope", "link", ns=BOX).stdout.split()
+            targets.append(next(f for f in ll if f.startswith("fe80:")).split("/")[0] + "%h0")
         for addr in targets:
             with self.subTest(home_to=addr):
                 self.assertFalse(reaches(HOME, addr), "a home host reached box port %d at %s" % (PORT, addr))
@@ -534,9 +539,12 @@ class UplinkByNetworkd(unittest.TestCase):
         self.assertTrue(reaches(BOX, ROUTER4), "box cannot reach the router over IPv4:\n" + self.logs())
         if IPV6:
             self.assertTrue(reaches(BOX, ROUTER6), "box cannot reach the router over IPv6:\n" + self.logs())
-        # Potency: with the drop gone, the same home host reaches the box at its leased address.
+        # Potency: with the drop gone, the same home host reaches the box at every address it was
+        # shut out of, IPv6 global and link-local included.
         sh("nft", "delete", "table", "inet", "agentos_inbound", ns=BOX)
-        self.assertTrue(reaches(HOME, addr4), "control: the test cannot see the drop")
+        for addr in targets:
+            with self.subTest(control=addr):
+                self.assertTrue(reaches(HOME, addr), "control: the test cannot see the drop at " + addr)
 
 
 if __name__ == "__main__":

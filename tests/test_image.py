@@ -15,7 +15,9 @@ import shutil
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 import unittest.mock
 
@@ -1115,8 +1117,10 @@ class UplinkTest(unittest.TestCase):
         self.assertIn("agentos-inbound.service", d["Requires"].split())
         self.assertIn("agentos-inbound.service", d["After"].split())
 
-    def report(self, links, addr="192.0.2.10/24"):
-        # Runs boot-report on a stand-in /sys/class/net; ip answers addr for any link.
+    def report(self, links, addr="192.0.2.10/24", on_sleep=""):
+        # Runs boot-report on a stand-in /sys/class/net; ip answers addr for any link. A carrier of
+        # None leaves the file out, as the kernel's carrier read fails while a link is down; on_sleep
+        # runs (with $NET set) at each sleep, so a test can plug the cable in late.
         with tempfile.TemporaryDirectory() as t:
             t = pathlib.Path(t)
             net, log = t / "net", t / "log"
@@ -1124,14 +1128,15 @@ class UplinkTest(unittest.TestCase):
                 d = net / name
                 d.mkdir(parents=True)
                 (d / "type").write_text("1\n")
-                (d / "carrier").write_text("%d\n" % carrier)
+                if carrier is not None:
+                    (d / "carrier").write_text("%d\n" % carrier)
                 if kind != "virtual":
                     (d / "device").mkdir()
                 if kind == "wlan":
                     (d / "wireless").mkdir()
             stub(t, "ip", 'echo "$*" >>"%s"; [ -n "%s" ] && echo "2: $4    inet %s brd 192.0.2.255 scope global $4"'
                  % (log, addr, addr))
-            stub(t, "sleep", 'echo "sleep $*" >>"%s"' % log)
+            stub(t, "sleep", 'echo "sleep $*" >>"%s"; NET="%s"; %s' % (log, net, on_sleep or ":"))
             stub(t, "findmnt", "echo 1073741824")
             stub(t, "systemd-bless-boot", "echo good")
             script = (AGENTOS_LIB / "boot-report").read_text().replace(
@@ -1148,21 +1153,76 @@ class UplinkTest(unittest.TestCase):
         self.assertEqual(lines[0], "agentos-uplink: enp1s0 192.0.2.10/24")
         self.assertTrue(lines[1].startswith("agentos-boot: bless=good"), lines)
 
-    def test_boot_report_does_not_wait_without_a_cable(self):
-        # The radio and virtual links never count; an unplugged port is not waited for.
+    def test_boot_report_waits_briefly_without_a_cable(self):
+        # The radio and virtual links never count; an unplugged port gets about 5 s for carrier, no more.
         out, calls = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 0)])
         self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
-        self.assertNotIn("sleep", calls)
+        self.assertIn("sleep", calls)
+        self.assertLessEqual(calls.count("sleep"), 5)
         self.assertNotIn("ip ", calls)
+
+    def test_boot_report_waits_for_carrier_on_a_cold_nic(self):
+        # Review P-2: on a cold boot the NIC can still be negotiating when the report runs. Carrier
+        # unreadable, then 0, then 1: the lease is still reported.
+        flip = ('n=$(grep -c sleep "$NET/../log"); [ "$n" = 2 ] && echo 0 >"$NET/enp1s0/carrier"; '
+                '[ "$n" = 3 ] && echo 1 >"$NET/enp1s0/carrier"; :')
+        out, calls = self.report([("enp1s0", "ether", None)], on_sleep=flip)
+        self.assertEqual(out.splitlines()[0], "agentos-uplink: enp1s0 192.0.2.10/24")
+        self.assertEqual(calls.count("sleep"), 3)
 
     def test_boot_report_gives_up_on_a_lease_that_never_comes(self):
         out, calls = self.report([("enp1s0", "ether", 1)], addr="")
         self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
         self.assertLessEqual(calls.count("sleep"), 30)
 
+    def probe(self, mode):
+        # One probe through probe_inbound.py against a local stand-in for QEMU's forwarded port:
+        # "silent" completes the handshake and never answers (a guest that drops the SYN, as
+        # QEMU's user network accepts the host's connection itself), "closes" accepts and closes (a
+        # guest that answered, with a reset or from a listener), "none" listens nowhere.
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        if mode == "none":
+            srv.close()
+        else:
+            srv.listen(4)
+        stop = threading.Event()
+        def serve():
+            while mode == "closes" and not stop.is_set():
+                srv.settimeout(0.2)
+                try:
+                    c, _ = srv.accept()
+                    c.close()
+                except OSError:
+                    pass
+        t = threading.Thread(target=serve)
+        t.start()
+        try:
+            return subprocess.run([sys.executable, str(IMG / "probe_inbound.py"), "--wait", "1", "%d:22" % port],
+                                  check=True, capture_output=True, text=True, timeout=30).stdout
+        finally:
+            stop.set()
+            t.join()
+            srv.close()
+
+    def test_drop_probe_tells_a_silent_guest_from_an_answer(self):
+        # Review, Security release 1: the booted image's drop is probed through QEMU's hostfwd.
+        self.assertEqual(self.probe("silent"), "agentos-probe: 22 dropped\n")
+        self.assertEqual(self.probe("closes"), "agentos-probe: 22 answered\n")
+        self.assertEqual(self.probe("none"), "agentos-probe: 22 error\n")
+
+    def test_boot_test_probes_the_drop_on_the_booted_image(self):
+        s = (IMG / "ci_boot.sh").read_text()
+        for guest in (22, 80, 443, 18789):
+            fwd = "%d:%d" % (18000 + guest % 1000, guest)
+            self.assertTrue("hostfwd=tcp:127.0.0.1:%d-:%d" % (18000 + guest % 1000, guest) in s, fwd)
+            self.assertTrue(fwd in re.search(r'PROBE="([^"]*)" boot "\$W/console.log"', s).group(1), fwd)
+        self.assertTrue("for port in 22 80 443 18789; do\n\thas \"$W/console.log.probe\" \"agentos-probe: $port dropped\"" in s)
+
     def test_boot_test_plugs_in_a_cable_once(self):
         s = (IMG / "ci_boot.sh").read_text()
-        self.assertIn("NIC=user,model=virtio-net-pci boot", s)
+        self.assertIn('NIC="user,model=virtio-net-pci,', s)
         self.assertIn('-nic "${NIC:-none}"', s)
         self.assertIn('has "$W/console.log" "agentos-uplink: "', s)
         self.assertIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
