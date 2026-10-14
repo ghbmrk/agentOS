@@ -28,6 +28,11 @@ type RetryLine struct {
 // now, or that its verifier cannot read, is shown unverified and so high
 // risk. object names, in fixed words, a broker-account effect, which has
 // no recipient and no verifier.
+//
+// For an effect a check proved was not done (p.NotDone) the line is the
+// effect's ordinary ask at the tier its facts give: it cannot go twice,
+// so it carries no "may go twice" warning and money is not raised to
+// MoneyRetry beyond what CH-10 gives it.
 func (g *Gate) RetryItem(ctx context.Context, p journal.ParkedIntent, object string) RetryLine {
 	in := p.Intent
 	var l RetryLine
@@ -44,6 +49,9 @@ func (g *Gate) RetryItem(ctx context.Context, p journal.ParkedIntent, object str
 	default:
 		it := approvalItem(in, in.Action, verb.Irreversible, Verified{}, false)
 		l = RetryLine{Shown: it, Base: it}
+	}
+	if p.NotDone {
+		return l
 	}
 	l.Shown.Retried = p.Dispatched
 	if l.Shown.Facts.HasAmount || l.Shown.Amount != "" {
@@ -96,6 +104,20 @@ var ErrRetryNotConfirmed = errors.New("grants: the retry was not approved on the
 // attempt; it is spent once the retry ends. page reports that a local
 // line was approved on the page showing it.
 func (g *Gate) Retry(ctx context.Context, id string, parked int, l RetryLine, page bool) (journal.Status, error) {
+	return g.approved(id, l, page, func(eng *journal.Engine) (journal.Status, error) { return eng.Retry(ctx, id, parked) })
+}
+
+// Resend sends intent id again on the owner's approval of l, after a
+// check proved its attempt n was not done and the engine's own resend
+// was refused (journal.Engine.NotResent, OP-2). The approval is recorded
+// and spent as for Retry.
+func (g *Gate) Resend(ctx context.Context, id string, n int, l RetryLine, page bool) (journal.Status, error) {
+	return g.approved(id, l, page, func(eng *journal.Engine) (journal.Status, error) { return eng.Resend(ctx, id, n) })
+}
+
+// approved runs run with the owner's approval of l recorded for id, as
+// Decide records an answered ask, and spends it after.
+func (g *Gate) approved(id string, l RetryLine, page bool, run func(*journal.Engine) (journal.Status, error)) (journal.Status, error) {
 	if l.Local && !page {
 		return journal.Status{}, ErrRetryNotConfirmed
 	}
@@ -111,5 +133,5 @@ func (g *Gate) Retry(ctx context.Context, id string, parked int, l RetryLine, pa
 	}
 	g.mu.Unlock()
 	defer g.spend(id)
-	return eng.Retry(ctx, id, parked)
+	return run(eng)
 }

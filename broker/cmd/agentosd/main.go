@@ -767,8 +767,9 @@ func main() {
 		if o := d.Owner(); o != nil {
 			dg.cfg.Inform = o.Inform
 		}
-		// Effects left unclear and parked rather than retried (OP-2).
-		if src, err := newUnclearSource(d.Engine().Parked, change.FileStore{Path: filepath.Join(digestDir, "unclear-digest.json")}); err != nil {
+		// Effects left unclear and parked rather than retried, and
+		// effects proved not done whose resend was refused (OP-2).
+		if src, err := newUnclearSource(d.RetryWaiting, change.FileStore{Path: filepath.Join(digestDir, "unclear-digest.json")}); err != nil {
 			log.Printf("digest: no line for unclear effects: %v", err)
 		} else {
 			if dg.cfg.Sources == nil {

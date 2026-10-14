@@ -219,6 +219,12 @@ type Daemon struct {
 	done   chan struct{}
 }
 
+// RetryWaiting lists what RETRY offers (OP-2): the parked effects, whose
+// outcome stayed unknown, then the effects a check proved were not done
+// and whose resend was refused (journal.Engine.NotResent). The digest
+// names the same list.
+func (d *Daemon) RetryWaiting() []journal.ParkedIntent { return d.retry.waiting() }
+
 // OnRetryRefused sets f to run when an owner retry of an unclear effect
 // is refused (OP-2c), so the effect is listed again in the next digest.
 func (d *Daemon) OnRetryRefused(f func()) {

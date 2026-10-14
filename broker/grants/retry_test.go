@@ -17,6 +17,19 @@ import (
 // check settles it, so it is parked.
 func parkedSend(t *testing.T) (*rig, journal.ParkedIntent) {
 	t.Helper()
+	r := killedSend(t, false)
+	ps := r.eng.Parked()
+	if len(ps) != 1 || ps[0].Intent.ID != "agent/s1" {
+		t.Fatalf("parked %+v", ps)
+	}
+	return r, ps[0]
+}
+
+// killedSend kills the broker while an approved invoice send to sam runs
+// and settles it after the restart. notDone: the check proves the send was
+// not done; otherwise no check can tell.
+func killedSend(t *testing.T, notDone bool) *rig {
+	t.Helper()
 	ctx := context.Background()
 	r := newRig(t, nil)
 	r.grant(mailGrant())
@@ -46,14 +59,56 @@ func parkedSend(t *testing.T) (*rig, journal.ParkedIntent) {
 	}
 	r.exec.mu.Lock()
 	r.exec.block = nil
+	r.exec.notDone = map[string]bool{"agent/s1": notDone}
 	r.exec.mu.Unlock()
 	r.open()
 	r.eng.SettleUnknown(ctx, 0, 0)
-	ps := r.eng.Parked()
-	if len(ps) != 1 || ps[0].Intent.ID != "agent/s1" {
+	return r
+}
+
+// P1b (OP-2): the broker restarts after an approved send was dispatched,
+// and the check proves it did not go. The engine's own resend is refused,
+// because the owner's approval lived in memory, so the send is listed as
+// not resent instead of dropped. Its RETRY line is the ordinary verified
+// ask at the tier its facts give, with no "may go twice", and the owner's
+// approval sends it once; a parked-effect retry does not.
+func TestOP2NotDoneSendIsOfferedAgainAfterARestart(t *testing.T) {
+	ctx := context.Background()
+	r := killedSend(t, true)
+	if ps := r.eng.Parked(); len(ps) != 0 {
 		t.Fatalf("parked %+v", ps)
 	}
-	return r, ps[0]
+	ns := r.eng.NotResent()
+	if len(ns) != 1 || ns[0].Intent.ID != "agent/s1" || !ns[0].NotDone || r.exec.runs("agent/s1") != 0 {
+		t.Fatalf("not resent %+v, ran %d", ns, r.exec.runs("agent/s1"))
+	}
+	l := r.g.RetryItem(ctx, ns[0], "an email")
+	it := l.Shown
+	if it.Object != "invoice 1042" || it.Recipient != "sam@example.com" || it.Amount != "$120.00" || !it.Retried.IsZero() {
+		t.Fatalf("resend line %+v", it)
+	}
+	if it.Facts.Kind == owner.MoneyRetry || it.Facts != l.Base.Facts {
+		t.Fatalf("resend tier: shown %+v, base %+v", it.Facts, l.Base.Facts)
+	}
+	if _, err := r.g.Retry(ctx, "agent/s1", ns[0].Attempt, l, false); !errors.Is(err, journal.ErrState) || r.exec.runs("agent/s1") != 0 {
+		t.Fatalf("parked retry of a not-done send: %v, ran %d", err, r.exec.runs("agent/s1"))
+	}
+	st, err := r.g.Resend(ctx, "agent/s1", ns[0].Attempt, l, false)
+	if err != nil || st.State != journal.Succeeded || r.exec.runs("agent/s1") != 1 {
+		t.Fatalf("resend: %s %v, ran %d", st.State, err, r.exec.runs("agent/s1"))
+	}
+	if ns := r.eng.NotResent(); len(ns) != 0 {
+		t.Fatalf("still listed %+v", ns)
+	}
+	r.g.mu.Lock()
+	_, left := r.g.decided["agent/s1"]
+	r.g.mu.Unlock()
+	if left {
+		t.Fatal("the resend's approval was not spent")
+	}
+	if _, err := r.g.Resend(ctx, "agent/s1", ns[0].Attempt, l, false); !errors.Is(err, journal.ErrState) || r.exec.runs("agent/s1") != 1 {
+		t.Fatalf("second resend: %v, ran %d", err, r.exec.runs("agent/s1"))
+	}
 }
 
 // A retry is asked from the effect's verified line, never from fixed

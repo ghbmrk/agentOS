@@ -72,7 +72,7 @@ func TestOP2ParkedAttemptIsNeverKeyRetried(t *testing.T) {
 		t.Fatalf("Reconcile key-retried a parked attempt: executes %v", svc.executes)
 	}
 	// keyRetry on its own.
-	if out := e.keyRetry(ctx, "a", 1, exec); out.Result != ResultUnknown || svc.executeCount() != 1 {
+	if out, _ := e.keyRetry(ctx, "a", 1, exec); out.Result != ResultUnknown || svc.executeCount() != 1 {
 		t.Fatalf("keyRetry ran a parked attempt: %+v, executes %v", out, svc.executes)
 	}
 	// validate on its own.

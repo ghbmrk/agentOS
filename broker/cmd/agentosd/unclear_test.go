@@ -83,3 +83,26 @@ func TestOP2DigestNamesUnclearEffectsOnce(t *testing.T) {
 		t.Fatalf("new park: %+v %v", snap, err)
 	}
 }
+
+// An effect a check proved was not done, whose resend was refused, is
+// named too (R4, P1b): it did not go, RETRY sends it, and it cannot go
+// twice, so the line does not say it may.
+func TestOP2DigestNamesRefusedResends(t *testing.T) {
+	ctx := context.Background()
+	waiting := []journal.ParkedIntent{
+		{Intent: journal.Intent{ID: "m1/r1", Executor: "mail", Recipients: []string{"canary@example.invalid"}}, Attempt: 1, Seq: 7,
+			Dispatched: time.Date(2026, 10, 13, 14, 2, 0, 0, time.UTC), NotDone: true},
+	}
+	src, err := newUnclearSource(func() []journal.ParkedIntent { return waiting }, &change.MemStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.loc = time.UTC
+	snap, err := src.Peek(ctx)
+	if err != nil || snap == nil || snap.Generation != 7<<relistBits || len(snap.Lines) != 1 {
+		t.Fatalf("snapshot %+v %v", snap, err)
+	}
+	if l := snap.Lines[0]; l != "An email first tried 14:02 Oct 13 did not go; not resent. Text RETRY to send it." {
+		t.Fatalf("line %q", l)
+	}
+}

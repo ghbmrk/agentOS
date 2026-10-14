@@ -152,7 +152,11 @@ type Outcome struct {
 // (intent, attempt), unless the executor reports that its service honours
 // the attempt's idempotency key (KeyHonouring); AttemptKey gives that key.
 // Reconcile asks the service what happened to an attempt, returning
-// ResultUnknown when the service cannot tell.
+// ResultUnknown when the service cannot tell. ResultNotApplied from
+// Reconcile must mean the attempt can never take effect later, not that
+// it is not found yet: the engine then sends the effect again as a new
+// attempt, under a new key, so a late landing would be a second effect
+// (OP-2).
 type Executor interface {
 	Execute(ctx context.Context, in Intent, attempt int) Outcome
 	Reconcile(ctx context.Context, in Intent, attempt int) Outcome
@@ -255,6 +259,10 @@ const (
 	// owner asked for it, knowing the effect may happen twice.
 	DispatchOwner = "owner"
 )
+
+// SourceReconcile is the evidence source of a check through the same tool
+// that settled an unknown outcome (Engine.Reconcile).
+const SourceReconcile = "reconcile"
 
 // Cancel records a cancellation request made by STOP.
 type Cancel struct {

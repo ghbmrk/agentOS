@@ -22,10 +22,13 @@ const unclearLineMax = 64
 // unclearSource is the digest's source for effects whose outcome stayed
 // unknown and that the broker parked rather than retried (OP-2b): one line
 // for each, saying when it was first tried, that it was not retried and
-// that RETRY may send it twice. Its generation is the newest park record's
-// sequence number shifted by relistBits, so the digest names the list again
-// once something new is parked, or once Relist asks for it (an owner retry
-// was refused, OP-2c).
+// that RETRY may send it twice. It also names each effect a check proved
+// was not done but whose resend was refused (journal NotResent, OP-2 step
+// 2): it did not go, and RETRY sends it, with no warning that it may go
+// twice. Its generation is the newest such record's sequence number
+// shifted by relistBits, so the digest names the list again once
+// something new is listed, or once Relist asks for it (an owner retry was
+// refused, OP-2c).
 type unclearSource struct {
 	parked func() []journal.ParkedIntent
 	store  change.Store
@@ -62,13 +65,16 @@ func newUnclearSource(parked func() []journal.ParkedIntent, store change.Store) 
 	return s, nil
 }
 
-// unclearLine is the digest line for one parked effect, in the owner's
+// unclearLine is the digest line for one waiting effect, in the owner's
 // words (CH-12: no internal parts), with when it was first tried.
-func unclearLine(executor string, first time.Time, loc *time.Location) string {
-	w := daemon.EffectWord(executor)
+func unclearLine(p journal.ParkedIntent, loc *time.Location) string {
+	w := daemon.EffectWord(p.Intent.Executor)
 	w = strings.ToUpper(w[:1]) + w[1:]
-	if !first.IsZero() {
-		w += " first tried " + first.In(loc).Format("15:04 Jan 2")
+	if !p.Dispatched.IsZero() {
+		w += " first tried " + p.Dispatched.In(loc).Format("15:04 Jan 2")
+	}
+	if p.NotDone {
+		return w + " did not go; not resent. Text RETRY to send it."
 	}
 	return w + " may not have gone; not retried. Text RETRY to try again; it may go twice."
 }
@@ -93,7 +99,7 @@ func (s *unclearSource) Peek(context.Context) (*digestqueue.Snapshot, error) {
 	}
 	lines := make([]string, 0, len(ps))
 	for _, p := range ps {
-		lines = append(lines, unclearLine(p.Intent.Executor, p.Dispatched, s.loc))
+		lines = append(lines, unclearLine(p, s.loc))
 	}
 	snap, err := digestqueue.NewSnapshot(unclearDigestSource, gen, lines, nil)
 	return &snap, err

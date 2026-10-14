@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -42,17 +44,37 @@ const retryRefPrefix = "retry:"
 // retryMax is the most parked effects one RETRY asks about.
 const retryMax = 20
 
-func retryRef(p journal.ParkedIntent) string {
-	return retryRefPrefix + p.Intent.ID + ":" + strconv.Itoa(p.Attempt)
+// retryRef is the ref of one ask about p: "retry:<id>:<attempt>:<nonce>".
+// The nonce is new for every ask, so each request the owner is sent has
+// its own ref, and a decision on one request touches only the line that
+// request showed (CH-12, OP-3): approving an older request never runs a
+// newer line, and an older request's NO or expiry never drops a newer
+// one's.
+func retryRef(p journal.ParkedIntent, nonce string) string {
+	return retryRefPrefix + p.Intent.ID + ":" + strconv.Itoa(p.Attempt) + ":" + nonce
 }
 
-// parseRetryRef returns the intent ID and parked attempt a retry ref names.
+// newNonce is a fresh retry-ask nonce.
+func newNonce() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // crypto/rand does not fail on Linux
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// parseRetryRef returns the intent ID and attempt a retry ref names.
 func parseRetryRef(ref string) (id string, attempt int, ok bool) {
 	rest, ok := strings.CutPrefix(ref, retryRefPrefix)
 	if !ok {
 		return "", 0, false
 	}
 	i := strings.LastIndexByte(rest, ':')
+	if i <= 0 || i == len(rest)-1 {
+		return "", 0, false
+	}
+	rest = rest[:i]
+	i = strings.LastIndexByte(rest, ':')
 	if i <= 0 {
 		return "", 0, false
 	}
@@ -72,42 +94,71 @@ func EffectWord(executor string) string {
 	return "an action"
 }
 
-// retrier lists the parked effects for RETRY and runs an approved retry
-// (OP-2c). Each item is the effect's own verified line, as the gate would
-// ask it now (grants.RetryItem), so its tier is the one its facts give and
-// money takes a code-generator code; the owner is texted how the retry
-// ended, and a refused one is listed again in the next digest.
+// retrier lists the parked effects, and the effects a check proved were
+// not done but that were not sent again, for RETRY, and runs an approved
+// retry (OP-2c). Each item is the effect's own verified line, as the gate
+// would ask it now (grants.RetryItem), so its tier is the one its facts
+// give and a parked payment takes a code-generator code; the owner is
+// texted how the retry ended, and a refused one is listed again in the
+// next digest.
 type retrier struct {
 	ctx  context.Context
 	eng  *journal.Engine
 	gate *grants.Gate
+	// line builds the line asked about, and send runs an approved one:
+	// the gate's RetryItem, and its Retry or (for a not-done effect)
+	// Resend. Tests replace them.
+	line func(context.Context, journal.ParkedIntent, string) grants.RetryLine
+	send func(ctx context.Context, a retryAsk, page bool) (journal.Status, error)
 
 	running sync.WaitGroup // retries started by decide
 
 	mu        sync.Mutex
-	lines     map[string]grants.RetryLine
+	lines     map[string]retryAsk // by ref, which is unique to one ask
 	inform    func(string) error
 	onRefused func()
 }
 
-func newRetrier(ctx context.Context, eng *journal.Engine, gate *grants.Gate) *retrier {
-	return &retrier{ctx: ctx, eng: eng, gate: gate, lines: map[string]grants.RetryLine{}}
+// retryAsk is one effect the owner was asked to retry, as asked.
+type retryAsk struct {
+	id      string
+	attempt int
+	line    grants.RetryLine
+	notDone bool // a check proved attempt did not go (journal.NotResent)
 }
 
-// items lists the parked effects as owner-channel items (Config Retry),
-// at most retryMax, and keeps the line each asks about.
+func newRetrier(ctx context.Context, eng *journal.Engine, gate *grants.Gate) *retrier {
+	r := &retrier{ctx: ctx, eng: eng, gate: gate, lines: map[string]retryAsk{}, line: gate.RetryItem}
+	r.send = func(ctx context.Context, a retryAsk, page bool) (journal.Status, error) {
+		if a.notDone {
+			return gate.Resend(ctx, a.id, a.attempt, a.line, page)
+		}
+		return gate.Retry(ctx, a.id, a.attempt, a.line, page)
+	}
+	return r
+}
+
+// waiting lists the effects RETRY may offer: the parked ones, then those
+// a check proved were not done and that were not sent again.
+func (r *retrier) waiting() []journal.ParkedIntent {
+	return append(r.eng.Parked(), r.eng.NotResent()...)
+}
+
+// items lists the waiting effects as owner-channel items (Config Retry),
+// at most retryMax, and keeps the line each asks about under a ref new
+// to this ask.
 func (r *retrier) items() []ownerch.Item {
-	ps := r.eng.Parked()
+	ps := r.waiting()
 	if len(ps) > retryMax {
 		ps = ps[:retryMax]
 	}
 	items := make([]ownerch.Item, 0, len(ps))
-	lines := make(map[string]grants.RetryLine, len(ps))
+	lines := make(map[string]retryAsk, len(ps))
 	for _, p := range ps {
-		l := r.gate.RetryItem(r.ctx, p, EffectWord(p.Intent.Executor))
-		ref := retryRef(p)
+		l := r.line(r.ctx, p, EffectWord(p.Intent.Executor))
+		ref := retryRef(p, newNonce())
 		l.Shown.Ref = ref
-		lines[ref] = l
+		lines[ref] = retryAsk{id: p.Intent.ID, attempt: p.Attempt, line: l, notDone: p.NotDone}
 		items = append(items, l.Shown)
 	}
 	r.mu.Lock()
@@ -119,10 +170,11 @@ func (r *retrier) items() []ownerch.Item {
 }
 
 // decide wraps the gate's Decide hook: an approved retry item runs the
-// retry for the attempt the owner was asked about, off the owner
-// channel's goroutine; a declined, expired or restart-dropped one does
-// nothing (the effect stays parked), and every other decision goes to
-// next.
+// retry of the line that request showed, for the attempt it asked about,
+// off the owner channel's goroutine; a declined, expired or
+// restart-dropped one does nothing (the effect stays waiting), and every
+// other decision goes to next. Each ref is one ask's own, so a decision
+// on one request never runs or drops another request's line.
 func (r *retrier) decide(next func(ownerch.Decision)) func(ownerch.Decision) {
 	return func(d ownerch.Decision) {
 		if !strings.HasPrefix(d.Ref, retryRefPrefix) {
@@ -131,25 +183,25 @@ func (r *retrier) decide(next func(ownerch.Decision)) func(ownerch.Decision) {
 		}
 		id, n, ok := parseRetryRef(d.Ref)
 		r.mu.Lock()
-		l, known := r.lines[d.Ref]
+		a, known := r.lines[d.Ref]
 		delete(r.lines, d.Ref)
 		r.mu.Unlock()
-		if !ok || !d.Approved || !known {
+		if !ok || !d.Approved || !known || a.id != id || a.attempt != n {
 			return
 		}
-		page := d.Page && d.Sum == ownerch.ItemSum(l.Shown)
+		page := d.Page && d.Sum == ownerch.ItemSum(a.line.Shown)
 		r.running.Add(1)
 		go func() {
 			defer r.running.Done()
-			r.run(d.Request, id, n, l, page)
+			r.run(d.Request, a, page)
 		}()
 	}
 }
 
 // run retries and texts the owner how it ended.
-func (r *retrier) run(req, id string, n int, l grants.RetryLine, page bool) {
-	st, err := r.gate.Retry(r.ctx, id, n, l, page)
-	what := l.Shown.Object
+func (r *retrier) run(req string, a retryAsk, page bool) {
+	st, err := r.send(r.ctx, a, page)
+	what := a.line.Shown.Object
 	var text string
 	switch {
 	case err == nil && st.State == journal.Succeeded:
