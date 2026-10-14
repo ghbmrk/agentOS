@@ -95,7 +95,7 @@ func modelState(c *custody, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.granted, Open: c.model() != nil})
+	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.modelGrantedNow(), Open: c.model() != nil, Private: c.privateGrantedNow()})
 }
 
 // evalRoute is the model access of replay machines (LOOP-5, replay K1).
@@ -569,6 +569,7 @@ func unlockHandler(c *custody) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	secondLineRoutes(mux, c, read, reply, fail)
+	providerRoutes(mux, c, read, reply, fail)
 	smsRoutes(mux, c, read, reply, fail)
 	mailRoutes(mux, c, read, reply, fail)
 	rotationRoutes(mux, c, read, reply, fail)
@@ -661,8 +662,12 @@ func verifyHandler(c *custody) http.Handler {
 			enrollHandler(c, w, r)
 			return
 		}
+		if (r.Method == http.MethodGet && r.URL.Path == "/setup/providers") || (r.Method == http.MethodPost && (r.URL.Path == "/setup/providers/key" || r.URL.Path == "/setup/providers/private")) {
+			setupProvidersHandler(c, w, r)
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal or /update-anchor/raise, or GET /second-line, /second-line/texts or /update-anchor, only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal, /setup/providers/key, /setup/providers/private or /update-anchor/raise, or GET /second-line, /second-line/texts, /setup/providers or /update-anchor, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest
@@ -720,7 +725,7 @@ func enrollHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	case err == errLocked:
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
-	case err == errEnrolled, err == errNotOpen, err == errNoEnrollment, err == errNotConfirmed:
+	case err == errEnrolled, err == errNotOpen, err == errNoEnrollment, err == errNotConfirmed, err == errCardRequired:
 		http.Error(w, err.Error(), err.(*unlockErr).status)
 		return
 	case errors.As(err, &paused):

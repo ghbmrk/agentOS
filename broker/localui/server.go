@@ -56,6 +56,11 @@ type Config struct {
 	// socket (egress K13); its page is served at /second-line/ behind
 	// sign-in (ADP-12, P2-3c). It needs Vault.
 	SecondLine SecondLine
+	// Providers, when set, is the provider routes on the same socket
+	// (#1266); the AI providers page is served at /providers/ behind
+	// sign-in, where the owner changes a provider's private-data answer
+	// after setup (CAP-9, CH-3). It needs Vault.
+	Providers Providers
 	// Claim, when set, is the box's claim (HW-10): setup waits for the
 	// claim code from the box's sticker at /claim, then continues only on
 	// the phone that typed it.
@@ -73,8 +78,14 @@ type Config struct {
 	// rotation's new parts are shown at /rotate/card to a signed-in phone
 	// until the owner confirms or cancels them.
 	Rotation RotationCard
-	Now      func() time.Time
-	Rand     io.Reader
+	// Station, when set, reports whether the box has a Wi-Fi device
+	// beside the access point that can join a home network
+	// (StationDevice). Without one a saved home Wi-Fi never comes
+	// online, so the never-online note names Ethernet only and offers no
+	// rejoin (CH-12; P2-2w c4 r1). Nil assumes one.
+	Station func() bool
+	Now     func() time.Time
+	Rand    io.Reader
 }
 
 // Server is the local UI.
@@ -140,6 +151,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.SecondLine != nil && cfg.Vault == nil {
 		return nil, errors.New("localui: the second line needs the vault socket")
+	}
+	if cfg.Providers != nil && cfg.Vault == nil {
+		return nil, errors.New("localui: the providers page needs the vault socket")
 	}
 	if cfg.Port == 0 {
 		cfg.Port = UIPort
@@ -224,6 +238,9 @@ func (s *Server) routes() {
 	s.Mount("/forget", "Forget a task", http.HandlerFunc(s.forgetPage))
 	if s.cfg.SecondLine != nil {
 		s.Mount("/second-line", "Second line", http.HandlerFunc(s.secondLine))
+	}
+	if s.cfg.Providers != nil {
+		s.Mount("/providers", "AI providers", http.HandlerFunc(s.providers))
 	}
 	if s.setup != nil {
 		s.setup.routes(s.mux)
@@ -686,7 +703,7 @@ const (
 func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
 	n := ""
 	if s.cfg.Hooks != nil {
-		n = s.cfg.Hooks.BoxNumber()
+		n, _ = s.cfg.Hooks.BoxNumber()
 	}
 	if !phoneRe.MatchString(n) {
 		http.NotFound(w, r)

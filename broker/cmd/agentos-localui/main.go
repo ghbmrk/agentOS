@@ -66,7 +66,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	fb.VaultSock = vaultSock
-	if err := run(ctx, config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock), sock, fb); err != nil {
+	cfg := config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock)
+	cfg.Station = station(sysClassNet, iface)
+	if err := run(ctx, cfg, sock, fb); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -74,7 +76,7 @@ func main() {
 // config is the page's configuration: setup through agentosd's socket
 // with an in-memory store (P2-2w c4), and no setup secret (Security L6).
 // The vault process's unlock socket serves both the unlock page and the
-// Owner Card rotation (REC-4); ARC-2 keeps the card's display here, not
+// Owner Card rotation (REC-4) and the AI providers page; ARC-2 keeps the card's display here, not
 // in agentosd.
 func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Config {
 	cfg := localui.Config{AP: ap, Port: port,
@@ -83,15 +85,29 @@ func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Confi
 		client := localui.NewUnlockClient(vaultSock)
 		cfg.Vault = client
 		cfg.Rotation = localui.NewRotation(client)
+		// The AI providers page: the owner's private-data answer after
+		// setup (#1266).
+		cfg.Providers = client
 	}
 	return cfg
+}
+
+// sysClassNet is the kernel's list of network interfaces; the unit's
+// sandbox leaves it readable.
+const sysClassNet = "/sys/class/net"
+
+// station reports, each time setup asks, whether a Wi-Fi device other
+// than the access point's can join the home network (P2-2w c4 r1): one
+// may appear after boot, such as a USB adapter.
+func station(netClass, iface string) func() bool {
+	return func() bool { return localui.StationDevice(netClass, iface) }
 }
 
 // withFirstBoot runs firstboot.Begin and gives the page its steps: the
 // claim screen (nil on the download route), the card step, and the
 // report of its confirm before agentosd's finish.
 func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.CodesVoid) (localui.Config, firstboot.Route, error) {
-	fb, err := firstboot.Begin(box)
+	fb, err := firstboot.Begin(withCardNet(cfg.Hooks, box))
 	if err != nil {
 		return cfg, "", err
 	}
@@ -103,6 +119,15 @@ func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.Co
 		cfg.Hooks = localui.CardFinish{AgentosdSetup: h, Card: fb.Card}
 	}
 	return cfg, fb.Route, nil
+}
+
+// withCardNet has the card step report the card's network to agentosd
+// before the confirm latches, for agentos-ap to serve at it (#1185).
+func withCardNet(hooks localui.Hooks, box firstboot.BoxConfig) firstboot.BoxConfig {
+	if h, ok := hooks.(localui.AgentosdSetup); ok && box.Card.Provision != nil {
+		box.Card.Provision = localui.ServeCardNet(box.Card.Provision, h)
+	}
+	return box
 }
 
 // agentosdWait bounds the wait for agentosd's socket; past it the page
@@ -123,6 +148,14 @@ func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) erro
 		return err
 	}
 	s.SetOwner(localui.Socket{Path: sock})
+	// PAIR texts that reach the box come through agentosd while setup is
+	// open (P2-2w c4c; §8.1 pairing).
+	// AgentosdSetup has it, and so does CardFinish, which embeds it.
+	if a, ok := cfg.Hooks.(interface {
+		PairTexts(context.Context, *localui.Server, time.Duration)
+	}); ok {
+		go a.PairTexts(ctx, s, 5*time.Second)
+	}
 	ln, err := localui.Listen(ctx, cfg.AP, cfg.Port)
 	if err != nil {
 		return err

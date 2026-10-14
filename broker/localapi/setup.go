@@ -1,6 +1,9 @@
 package localapi
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
 
 // Setup's ops on localui.sock (P2-2w c2; Security L6 on the P2-2w plan;
 // ONB-3, ONB-6, CRED-8). agentosd serves them only on a box with no
@@ -25,22 +28,54 @@ const (
 	// OpSetupJoin has agentosd's netjoin helper write the home Wi-Fi
 	// connection (P2-2w c3; Security L8 on the P2-2w plan) and answers
 	// once the helper does: success when it joined or saved the network,
+	// ErrJoinUnavailable when the box cannot join Wi-Fi at all, and
 	// ErrNotJoined otherwise. It is answered within JoinTimeout.
 	OpSetupJoin = "page_setup_join"
+	// OpSetupProviders lists the AI providers the vault process serves,
+	// whether each holds a key, and the owner's private-data answer
+	// (P2-2w c4e; CRED-5, CAP-9).
+	OpSetupProviders = "page_setup_providers"
+	// OpSetupAPIKey stores one provider API key in the vault. agentosd
+	// passes it on and keeps nothing (CRED-1).
+	OpSetupAPIKey = "page_setup_api_key"
+	// OpSetupPrivateOK records whether a provider may see private data.
+	OpSetupPrivateOK = "page_setup_private_ok"
 	// OpSetupNetworks lists the home networks in range from agentosd's
 	// netjoin helper (P2-2w c4b): no args, Networks out. It answers an
 	// empty list when the helper has none or cannot be asked.
 	OpSetupNetworks = "page_setup_networks"
+	// OpSetupLine answers whether setup can text and the box's own number
+	// (P2-2w c4c; §8.1, CH-12): Ready while the modem bridge reports the
+	// line usable, Number when the bridge knows it.
+	OpSetupLine = "page_setup_line"
+	// OpSetupSend has the box text one of setup's fixed texts (SetupText)
+	// to a number, and answers once the bridge reports it sent, or
+	// ErrNotSent. It is answered within SetupSendTimeout.
+	OpSetupSend = "page_setup_send"
+	// OpSetupInbound waits up to SetupInboundWait for a text that reached
+	// the box and starts with PAIR, and answers it, or nothing. Each text
+	// is answered once; the page offers it to setup (§8.1 pairing).
+	OpSetupInbound = "page_setup_inbound"
 	// OpSetupCard reports the page's Owner Card step (HW-1, #1115): the
 	// page builds, shows and latches the card (agentosd links no card
 	// code, ARC-2), and reports here before finish that the card is
 	// confirmed and provisioned. agentosd's setup mode serves it beside
 	// SetupOps, and finish answers ErrCardPending until it is reported.
 	OpSetupCard = "page_setup_card"
+	// OpSetupAPNet reports the card's Wi-Fi name and password before the
+	// confirm latches (CTRL-claim-ap u1, #1185): agentosd writes them
+	// root-only (apnet.Path, ARC-1) and agentos-ap serves that network at
+	// the confirm and every later start, in place of the setup network.
+	// Only a network the card prints is taken (ErrBadArgs); a report
+	// replaces the last, as a reset card makes a new one. It is served
+	// beside OpSetupCard.
+	OpSetupAPNet = "page_setup_ap_net"
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
-var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish, OpSetupJoin, OpSetupNetworks}
+var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish, OpSetupJoin,
+	OpSetupProviders, OpSetupAPIKey, OpSetupPrivateOK, OpSetupNetworks,
+	OpSetupLine, OpSetupSend, OpSetupInbound}
 
 // Setup's fixed refusals, beside ErrBadArgs, ErrLimited and ErrFailed.
 const (
@@ -60,14 +95,54 @@ const (
 	// one.
 	ErrNotEnrolled = "not enrolled"
 	// ErrNotJoined: the helper did not join or save the network (wrong
-	// password, not in range, busy, refused, or an error), or no helper
-	// is configured. The page shows its one network error for all of
-	// them (Security L8.4).
+	// password, not in range, busy or refused), or no helper is
+	// configured. The page shows its one network error for all of them
+	// (Security L8.4).
 	ErrNotJoined = "not joined"
+	// ErrJoinUnavailable: the helper answered failed, a D-Bus or
+	// NetworkManager error such as NetworkManager being absent, so no
+	// password can help. The page points to Ethernet instead (#1429).
+	ErrJoinUnavailable = "join unavailable"
+	// ErrNotSent: the text did not go: no usable line, the bridge
+	// reported a failure, or no result came in time.
+	ErrNotSent = "not sent"
 	// ErrCardPending: finish before the page reported the Owner Card
 	// confirmed (OpSetupCard).
 	ErrCardPending = "card pending"
+	// ErrKeyRefused: the provider did not accept the API key when the
+	// vault process checked it (ONB-3); nothing was stored.
+	ErrKeyRefused = "key refused"
+	// ErrKeyUnchecked: the vault process could not check the API key with
+	// its provider; nothing was stored.
+	ErrKeyUnchecked = "key unchecked"
 )
+
+// Setup's text waits. agentosd's own wait for the bridge ends sooner
+// than the page's call (Security L8.4: each caller waits longer than the
+// one it calls); an inbound wait ends before the socket's idle timeout.
+const (
+	SetupSendWait    = 40 * time.Second
+	SetupSendTimeout = SetupSendWait + 5*time.Second
+	SetupInboundWait = 20 * time.Second
+)
+
+// SetupTextsPerHour caps the texts setup sends in an hour, whoever asks:
+// the page is not trusted to bound what the box's SIM spends.
+const SetupTextsPerHour = 20
+
+// setupTexts are the only texts setup sends (localui's number step,
+// claim and PAIR replies), so the page cannot have the box's SIM send
+// anything else. The product name's case is matched either way.
+var setupTexts = regexp.MustCompile(`^(?:` +
+	`[Aa]gentOS setup code: [0-9]{6}\. Type it on the setup page\.` +
+	`|[Aa]gentOS page code: [0-9]{6}\. Type it on the setup page\.` +
+	`|[Aa]gentOS is running on this PC\. This is your box's number; save it as [Aa]gentOS\.(?: Page code: [0-9]{6}\.)?` +
+	`|That pairing code did not match\. Check the setup page\.` +
+	`|Could not save your number\. Try again\.` +
+	`)$`)
+
+// SetupText says text is one of setup's fixed texts.
+func SetupText(text string) bool { return setupTexts.MatchString(text) }
 
 // JoinTimeout bounds one OpSetupJoin call from the page. agentosd's own
 // call to the helper ends sooner (Security L8.4: each caller waits longer
@@ -142,7 +217,89 @@ type SetupCard struct {
 	Confirmed bool `json:"confirmed"`
 }
 
+// SetupAPNet is the card's Wi-Fi network (OpSetupAPNet). The password is
+// the access point's (CRED-1): it goes only to agentos-ap's file.
+type SetupAPNet struct {
+	SSID     string `json:"ssid"`
+	Password string `json:"password"`
+}
+
+// String and GoString keep the password out of logs.
+func (SetupAPNet) String() string   { return "[card Wi-Fi network]" }
+func (SetupAPNet) GoString() string { return "[card Wi-Fi network]" }
+
 // Finish carries the owner's number, E.164.
 type Finish struct {
 	Owner string `json:"owner"`
 }
+
+// MaxAPIKey bounds a provider API key in bytes; a key is printable ASCII
+// with no spaces, as the proxy sends it in a header.
+const MaxAPIKey = 512
+
+// APIKeyTimeout bounds one OpSetupAPIKey call from the page: the vault
+// process checks the key with its provider first (ONB-3), and agentosd's
+// own wait for the vault ends sooner (Security L8.4).
+const APIKeyTimeout = 15 * time.Second
+
+// APIKeysPerMinute limits OpSetupAPIKey; past it the op answers
+// ErrLimited.
+const APIKeysPerMinute = 10
+
+// SetupProvider is one AI provider as setup shows it. DeviceCode is false
+// until plan sign-in at setup is served (c4e2).
+type SetupProvider struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	APIKey     bool   `json:"api_key"`
+	DeviceCode bool   `json:"device_code"`
+	Connected  bool   `json:"connected"`
+	PrivateOK  bool   `json:"private_ok"`
+}
+
+// SetupProviders is OpSetupProviders' answer.
+type SetupProviders struct {
+	Providers []SetupProvider `json:"providers"`
+}
+
+// APIKey carries one provider API key to the vault (CRED-5).
+type APIKey struct {
+	Provider string `json:"provider"`
+	Key      string `json:"key"`
+}
+
+// String and GoString keep the key out of logs.
+func (APIKey) String() string   { return "[provider API key]" }
+func (APIKey) GoString() string { return "[provider API key]" }
+
+// PrivateOK carries the owner's private-data answer for one provider.
+type PrivateOK struct {
+	Provider string `json:"provider"`
+	OK       bool   `json:"ok"`
+}
+
+// SetupLine is whether setup can text, and the box's own number, E.164
+// ("" when the bridge does not know it).
+type SetupLine struct {
+	Ready  bool   `json:"ready"`
+	Number string `json:"number,omitempty"`
+}
+
+// SetupSend is one fixed text (SetupText) to a number, E.164.
+type SetupSend struct {
+	To   string `json:"to"`
+	Text string `json:"text"`
+}
+
+// SetupInbound is a PAIR text that reached the box: From is E.164, both
+// empty when none came in the wait.
+type SetupInbound struct {
+	From string `json:"from,omitempty"`
+	Text string `json:"text,omitempty"`
+}
+
+// String and GoString keep numbers and texts out of logs.
+func (SetupSend) String() string      { return "[setup text]" }
+func (SetupSend) GoString() string    { return "[setup text]" }
+func (SetupInbound) String() string   { return "[setup inbound text]" }
+func (SetupInbound) GoString() string { return "[setup inbound text]" }

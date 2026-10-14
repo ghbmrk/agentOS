@@ -13,6 +13,9 @@ import (
 // opcode 0 through its NAT-PMP compatibility (RFC 6887 Appendix A).
 const natpmpPort = 5351
 
+// natpmpDeadline bounds the wait for the router's answer to one request.
+const natpmpDeadline = 2 * time.Second
+
 // ExternalAddr asks the learned gateway for the router's external address:
 // the one NAT-PMP request the broker sends, opcode 0 only. It is not a
 // connection under the DEV-2 rule. The box never sends a PCP MAP or PEER
@@ -28,7 +31,7 @@ func externalAddr(ctx context.Context, gw netip.AddrPort) (netip.Addr, error) {
 		return netip.Addr{}, err
 	}
 	defer c.Close()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(natpmpDeadline)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl
 	}

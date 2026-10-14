@@ -135,8 +135,9 @@ func TestW4OversizeTreeIsNotSent(t *testing.T) {
 	}
 }
 
-// G15: the guest socket lists the question tools and managed_tree, and
-// each name goes to its own set.
+// G15: the guest socket lists the question tools, and each name goes to
+// its own set. managed_tree is served but not listed: it is the bridge's
+// tool, not the agent's (#1488 L-1).
 func TestToolSetServesEachSet(t *testing.T) {
 	lt := newLiveTree(t.Logf)
 	lt.label = labels(map[string]vm.Label{"agent": vm.Private})
@@ -147,7 +148,7 @@ func TestToolSetServesEachSet(t *testing.T) {
 	for _, tl := range set.List() {
 		names[tl["name"].(string)] = true
 	}
-	if !names[toolTree] || !names["owner_question"] {
+	if names[toolTree] || !names["owner_question"] {
 		t.Fatalf("listed %v", names)
 	}
 	if _, ok, err := set.Call(context.Background(), "agent", "lin", toolTree, nil); !ok || err != nil {

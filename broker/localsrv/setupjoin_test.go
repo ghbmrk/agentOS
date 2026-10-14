@@ -3,6 +3,7 @@ package localsrv
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -38,7 +39,15 @@ func TestJoinHandsTheNetworkToTheHelper(t *testing.T) {
 	if strings.Contains(err.Error(), canaryPSK) {
 		t.Fatal("the helper's error reached the page")
 	}
-	// No helper configured: the same refusal.
+	// #1429: a helper that cannot join Wi-Fi at all is its own refusal,
+	// still without the password.
+	r.now = r.now.Add(time.Minute)
+	r.joinErr = fmt.Errorf("helper: failed %s: %w", canaryPSK, JoinUnavailable)
+	err = r.call(localapi.OpSetupJoin, localapi.Join{SSID: "home", Password: canaryPSK}, nil)
+	if code(err) != localapi.ErrJoinUnavailable || strings.Contains(err.Error(), canaryPSK) {
+		t.Fatalf("an unavailable join answered %v", err)
+	}
+	// No helper configured: the same refusal as not joined.
 	r.s.cfg.Join = nil
 	if err := r.call(localapi.OpSetupJoin, localapi.Join{SSID: "home", Password: canaryPSK}, nil); code(err) != localapi.ErrNotJoined {
 		t.Fatalf("no helper answered %v", err)

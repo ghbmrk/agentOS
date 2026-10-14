@@ -42,7 +42,10 @@ type Engine struct {
 	stopped bool
 	// fence maps an account to the intents left unresolved by the last
 	// restart. Dispatch on the account waits until it is empty (OP-4).
-	fence  map[string]map[string]bool
+	fence map[string]map[string]bool
+	// missed counts the SettleUnknown rounds in a row that left a fenced
+	// intent unresolved; Unconfirmed reads it (#1373).
+	missed int
 	broken error
 }
 
@@ -481,6 +484,47 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 	return rep
 }
 
+// reconcileRound bounds one round of SettleUnknown, so an executor whose
+// service hangs is asked again rather than holding the round forever.
+const reconcileRound = time.Minute
+
+// SettleUnknown runs Reconcile until no outcome_unknown attempt is left or
+// ctx ends, waiting wait after the first unresolved round and doubling up
+// to maxWait (OP-4). It only gathers evidence, so no effect runs again: an
+// executor that cannot tell what happened answers unknown and its account
+// stays fenced, and one whose service is down is asked again on the next
+// round. It returns the last round's report.
+func (e *Engine) SettleUnknown(ctx context.Context, wait, maxWait time.Duration) ReconcileReport {
+	if wait <= 0 {
+		wait = time.Millisecond
+	}
+	for {
+		rctx, cancel := context.WithTimeout(ctx, reconcileRound)
+		rep := e.Reconcile(rctx)
+		cancel()
+		e.mu.Lock()
+		if len(rep.Unresolved) == 0 {
+			e.missed = 0
+		} else {
+			e.missed++
+		}
+		e.mu.Unlock()
+		if len(rep.Unresolved) == 0 || ctx.Err() != nil {
+			return rep
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return rep
+		case <-t.C:
+		}
+		if wait *= 2; wait > maxWait {
+			wait = maxWait
+		}
+	}
+}
+
 // Resolve records evidence about an attempt from outside the executor, such
 // as the owner confirming what happened. Only succeeded or not_applied
 // resolve an attempt; unknown is not evidence (OP-2).
@@ -795,6 +839,28 @@ func (e *Engine) Fenced(account string) []string {
 		out = append(out, id)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// Unconfirmed lists the intents the last restart fenced that are still
+// unresolved once SettleUnknown has asked for their evidence at least
+// rounds times in a row, oldest first, so STATUS can say what is not
+// confirmed (#1373). It is empty before then: a fence the first evidence
+// lifts is never shown. Parameters and preconditions are left out.
+func (e *Engine) Unconfirmed(rounds int) []Intent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.missed < rounds {
+		return nil
+	}
+	var out []Intent
+	for _, en := range bySeq(e.open) {
+		if e.fence[en.intent.Account][en.intent.ID] {
+			in := en.intent
+			in.Params, in.Preconditions = nil, nil
+			out = append(out, in)
+		}
+	}
 	return out
 }
 

@@ -115,18 +115,19 @@ func storeCard(b *Box, c Card) error {
 	}
 	// Each stored secret is also its own entry, so the vault's redactor,
 	// which matches whole values, covers it in agent-bound output (CRED-7).
-	for name, v := range map[string]string{"wifi": c.WiFiPassword, "setup": c.SetupSecret} {
-		if len(v) < vault.MinValueLen {
-			return fmt.Errorf("recovery: card %s too short", name)
+	// The card and its parts go in one write, so no failure or crash
+	// between writes leaves a card secret that no entry matches (#1440).
+	items := []vault.Item{{Name: CardName, Kind: KindCard, Value: enc}}
+	for _, part := range []struct{ name, v string }{{"wifi", c.WiFiPassword}, {"setup", c.SetupSecret}} {
+		if len(part.v) < vault.MinValueLen {
+			return fmt.Errorf("recovery: card %s too short", part.name)
 		}
-		if _, _, err := reserved(b.V, CardName+"-"+name, KindCardPart); err != nil {
+		if _, _, err := reserved(b.V, CardName+"-"+part.name, KindCardPart); err != nil {
 			return err
 		}
-		if err := b.V.Put(CardName+"-"+name, KindCardPart, []byte(v)); err != nil {
-			return err
-		}
+		items = append(items, vault.Item{Name: CardName + "-" + part.name, Kind: KindCardPart, Value: []byte(part.v)})
 	}
-	return b.V.Put(CardName, KindCard, enc)
+	return b.V.PutMany(items)
 }
 
 // PendingTTL bounds how long a generated card waits for the owner to

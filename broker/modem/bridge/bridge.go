@@ -32,6 +32,8 @@ type Caller interface {
 type Owner interface {
 	modem.Modem
 	ICCID() string
+	// Number is the box's own number, E.164 ("" when unknown).
+	Number() string
 	// Ack deletes a text agentosd has taken (at.Config.KeepUntilAck).
 	Ack(ref string) error
 	Done() <-chan struct{}
@@ -80,11 +82,11 @@ func Run(ctx context.Context, cfg Config) error {
 	go b.report(ctx)
 	for ctx.Err() == nil {
 		m, st, iccid := b.open(ctx)
-		b.set(st, iccid)
+		b.set(st, iccid, number(m))
 		if m != nil {
 			b.serve(ctx, m)
 			m.Close()
-			b.set(bridgeproto.StateDown, "")
+			b.set(bridgeproto.StateDown, "", "")
 		}
 		select {
 		case <-ctx.Done():
@@ -99,6 +101,7 @@ type runner struct {
 	mu      sync.Mutex
 	state   string
 	iccid   string // the SIM seen while swapped or unbound
+	number  string // the box's own number while ok
 	changed chan struct{}
 }
 
@@ -145,6 +148,14 @@ func (b *runner) open(ctx context.Context) (Owner, string, string) {
 	return m, bridgeproto.StateOK, ""
 }
 
+// number is an open modem's own number when it is a valid one.
+func number(m Owner) string {
+	if m == nil || !bridgeproto.ValidNumber(m.Number()) {
+		return ""
+	}
+	return m.Number()
+}
+
 func sameICCID(a, b string) bool { return bridgeproto.NormICCID(a) == bridgeproto.NormICCID(b) }
 
 // serial is a SIM's serial as reported, "" when it is not one.
@@ -155,10 +166,10 @@ func serial(iccid string) string {
 	return ""
 }
 
-func (b *runner) set(st, iccid string) {
+func (b *runner) set(st, iccid, number string) {
 	b.mu.Lock()
-	changed := b.state != st || b.iccid != iccid
-	b.state, b.iccid = st, iccid
+	changed := b.state != st || b.iccid != iccid || b.number != number
+	b.state, b.iccid, b.number = st, iccid, number
 	ch := b.changed
 	b.mu.Unlock()
 	if changed {
@@ -182,7 +193,7 @@ func (b *runner) report(ctx context.Context) {
 	defer t.Stop()
 	for {
 		b.mu.Lock()
-		st := bridgeproto.State{OwnerLine: b.state, ICCID: b.iccid}
+		st := b.stateLocked()
 		b.mu.Unlock()
 		// A report agentosd did not hear is sent again soon, not at the
 		// next StateEvery: agentosd may have restarted and read the line
@@ -235,11 +246,19 @@ func (b *runner) serve(runCtx context.Context, m Owner) {
 	}
 }
 
+// stateLocked is the state to report; b.mu is held.
+func (b *runner) stateLocked() bridgeproto.State {
+	return bridgeproto.State{OwnerLine: b.state, ICCID: b.iccid, Number: b.number}
+}
+
 // reportOK tells agentosd the owner line is ok, again until it is heard;
 // false once ctx is done.
 func (b *runner) reportOK(ctx context.Context) bool {
+	b.mu.Lock()
+	st := bridgeproto.State{OwnerLine: bridgeproto.StateOK, Number: b.number}
+	b.mu.Unlock()
 	for wait := b.cfg.InboundRetry; ; wait = min(2*wait, b.cfg.Retry) {
-		if b.cfg.Agentosd.Call(ctx, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil) == nil {
+		if b.cfg.Agentosd.Call(ctx, bridgeproto.OpState, st, nil) == nil {
 			return true
 		}
 		select {

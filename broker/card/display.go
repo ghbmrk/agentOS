@@ -254,9 +254,9 @@ func (d *Display) pageLocked(problem string) ([]byte, error) {
 	var ctl bytes.Buffer
 	v := struct {
 		Prompt, Problem    string
-		Rotate             bool
+		Rotate, RotateWiFi bool
 		Word, Group, Check bool
-	}{d.Prompt(), problem, d.rotate, d.word >= 0, d.group >= 0, d.check != checkNone}
+	}{d.Prompt(), problem, d.rotate, d.rotate && d.c.WiFiPassword != "", d.word >= 0, d.group >= 0, d.check != checkNone}
 	if err := controlsTmpl.Execute(&ctl, v); err != nil {
 		return nil, err
 	}
@@ -531,7 +531,9 @@ var controlsTmpl = template.Must(template.New("controls").Parse(`
 <h1>{{if .Rotate}}Your new card parts{{else}}Your Owner Card{{end}}</h1>
 <p><b>Print it now, or save it.</b> I keep no copy once you confirm.{{if .Rotate}} Until you confirm, your current card stays in effect.{{end}} Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
 <p><button type="button" onclick="window.print()">Print</button> <a href="?save=1">Save as a file</a></p>
-<form method="post">
+{{if not .Rotate}}<p><b>When you confirm, my Wi-Fi becomes the one on your card.</b> If this page stops loading, join that Wi-Fi with your card's Wi-Fi QR code, or its name and password, then reload this page.</p>
+{{end}}{{if .RotateWiFi}}<p><b>When you confirm, my Wi-Fi switches to the new password on this card.</b> Your phone drops off it: rejoin with this card's Wi-Fi QR code, then open my box page again.</p>
+{{end}}<form method="post">
 <p>{{.Prompt}}</p>
 {{if .Problem}}<p role="alert"><b>{{.Problem}}</b></p>{{end}}
 <p>{{if .Word}}<label>Word <input name="word" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
