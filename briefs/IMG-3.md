@@ -9,3 +9,7 @@ Forced-fail fallback boot in CI: boot the image with health forced to fail and c
 **Gate:** skip (tooling)
 
 **State on the board before the 2026-10-08 index split:** queued
+
+## Scope
+
+`image/ci_boot.sh`, `image/mkosi/mkosi.extra/usr/lib/agentos/health`, `image/mkosi/mkosi.extra/usr/lib/agentos/fallback`, `.github/workflows/image.yml`, `image/ASSUMPTIONS.md`. Tier A. Shares `image/` and `image.yml` with IMG-1, IMG-2, IMG-4.

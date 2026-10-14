@@ -7,3 +7,7 @@ Argon2id tuned to about 1 s on the N95 (HW-4); A8 trusted-host run on a real TPM
 **Needs:** **Mark: hardware**
 
 **State on the board before the 2026-10-08 index split:** queued
+
+## Scope
+
+No repo scope until hardware: the Argon2id parameters in `broker/vault/**` change only after the N95 run Mark supplies. Not startable.

@@ -9,3 +9,7 @@ Evidence delivery (CH-20): the vault process runs the mail adapter with its reda
 **Owner:** —
 
 **State on the board before the 2026-10-08 index split:** queued, blocked on mail wiring
+
+## Scope
+
+`broker/cmd/agentosd/evidence.go`, `broker/cmd/agentosd/digest.go`, `broker/mail/**` (`mail.Config.Redact`, `Declared`, `Delivery`, `Box` wiring only), `broker/cmd/agentosd/main.go` wiring and their tests, `broker/cmd/agentos-guest-bridge/**` for the `summary` pass-through. Tier A. Blocked on its precondition (mail wiring into the vault process).

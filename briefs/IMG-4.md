@@ -9,3 +9,7 @@ After onboarding runs in CI: check the broker's cgroups exist under `agentosd.se
 **Gate:** security
 
 **State on the board before the 2026-10-08 index split:** queued
+
+## Scope
+
+`image/mkosi/mkosi.extra/usr/lib/systemd/system/agentosd.service`, `image/ci_boot.sh`, `broker/cgroup/cgroup.go` (read only unless a limit is missing), `.github/workflows/image.yml`, `image/ASSUMPTIONS.md`. Tier A. Shares `image/` and `image.yml` with IMG-1 to IMG-3.
