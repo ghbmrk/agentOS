@@ -160,7 +160,10 @@ func (m *Manager) ForkSiblings(id string) (string, []string, error) {
 // is held by a command, snapshot or start), without waiting.
 func (m *Manager) TryGet(id string) (Machine, bool) {
 	mc, err := m.get(id)
-	if err != nil || !mc.mu.TryLock() || mc.unlessGone() != nil {
+	if err != nil {
+		return Machine{}, false
+	}
+	if busy, err := mc.tryLockLive(); busy || err != nil {
 		return Machine{}, false
 	}
 	defer mc.mu.Unlock()
@@ -280,10 +283,11 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	}
 	// A worker whose lock is held is in use (a command runs): parking
 	// would wait out the command, so it is refused instead.
-	if !mc.mu.TryLock() {
+	busy, err := mc.tryLockLive()
+	if busy {
 		return Snapshot{}, fmt.Errorf("%w: %s", ErrBusy, id)
 	}
-	if err := mc.unlessGone(); err != nil {
+	if err != nil {
 		return Snapshot{}, err
 	}
 	if mc.State != Running {

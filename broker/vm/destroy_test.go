@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -130,6 +131,35 @@ func TestRES2StaleHandleAfterDestroyTouchesNothing(t *testing.T) {
 	if !errors.Is(err, ErrUnknown) {
 		t.Fatalf("restart of the destroyed machine: %v, want ErrUnknown", err)
 	}
+	// Each guard on its own: the record, the claim and the start refuse
+	// the old handle, and Resume's fallback to a rebuild (the ID's layer
+	// gone) goes through the handle, not the ID.
+	meta := filepath.Join(e.cfg.StateDir, "machines", "exp", "meta.json")
+	before, err := os.ReadFile(meta)
+	must(t, err)
+	old.mu.Lock()
+	if err := e.m.saveMachine(old); !errors.Is(err, ErrUnknown) {
+		t.Errorf("saving the destroyed machine's record: %v, want ErrUnknown", err)
+	}
+	if err := claimLocked(old); !errors.Is(err, ErrUnknown) {
+		t.Errorf("claiming the destroyed machine: %v, want ErrUnknown", err)
+	}
+	if err := e.m.startFrom(context.Background(), old, keepLayer); !errors.Is(err, ErrUnknown) {
+		t.Errorf("starting the destroyed machine: %v, want ErrUnknown", err)
+	}
+	old.mu.Unlock()
+	if after, err := os.ReadFile(meta); err != nil || !bytes.Equal(after, before) {
+		t.Errorf("the new machine's record was rewritten: %s (%v)", after, err)
+	}
+	upper := e.m.launch(old).Upper
+	must(t, os.Rename(upper, upper+".aside"))
+	if err := e.m.resumeOf(context.Background(), old); !errors.Is(err, ErrUnknown) {
+		t.Errorf("resume of the destroyed machine with no layer: %v, want ErrUnknown", err)
+	}
+	must(t, os.Rename(upper+".aside", upper))
+	if w, err := e.m.Get("exp"); err != nil || w.Starts != 1 {
+		t.Errorf("the new machine was restarted: %+v (%v)", w, err)
+	}
 	e.m.release(old)
 	e.m.unreserve(old)
 	if got := e.adm.Snapshot().Running; len(got) != 1 {
@@ -145,37 +175,91 @@ func TestRES2StaleHandleAfterDestroyTouchesNothing(t *testing.T) {
 
 // An operation whose lookup found a machine that is destroyed and replaced
 // under the same ID before it takes the lock acts on neither: the new
-// machine's layer, record and label stay as they were (security B1 on
-// #1575). The old worker was private and of one lineage; the new one is
-// public and of another, so a write through the old handle would show.
+// machine's layer, record, label, admission and guest stay as they were
+// (security B1 and S1 on #1575). The old worker was private and of one
+// lineage; the new one is public and of another, so a write through the
+// old handle would show. ForgetSince and a dropped snapshot reach the old
+// handle without a lookup, so they run it after the replacement directly.
 func TestRES2StaleHandleLeavesSameIDSuccessorAlone(t *testing.T) {
 	const id = "wk-a"
-	ops := map[string]func(e *env, old *machine) error{
-		"destroy": func(e *env, _ *machine) error { return e.m.Destroy(bg, id) },
-		"raise":   func(e *env, _ *machine) error { return e.m.RaiseLabel(id, Private) },
-		"delete": func(e *env, _ *machine) error {
+	type op struct {
+		// sleep puts the old machine to sleep first, for a wake.
+		sleep bool
+		// direct: the handle is held from before the replacement, not
+		// looked up across it.
+		direct bool
+		// stale holds the old handle's lock across the call, as Prune's
+		// read does, so Preempt cannot take it.
+		stale bool
+		want  error // nil: no error
+		run   func(t *testing.T, e *env, old *machine, snap Snapshot) error
+	}
+	ops := map[string]op{
+		"destroy": {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error { return e.m.Destroy(bg, id) }},
+		"raise":   {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error { return e.m.RaiseLabel(id, Private) }},
+		"delete": {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error {
 			_, err := e.m.DeleteFiles(bg, id, Deletion{Paths: []string{"/keep"}, As: Private})
 			return err
-		},
-		"exec": func(e *env, _ *machine) error {
+		}},
+		"exec": {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error {
 			_, err := e.m.Exec(bg, id, Command{Argv: []string{"true"}, As: Private}, time.Second)
 			return err
-		},
-		"checkpoint": func(e *env, _ *machine) error { _, err := e.m.Checkpoint(bg, id); return err },
-		"sleep":      func(e *env, _ *machine) error { _, err := e.m.CheckpointAndStop(bg, id); return err },
-		"park":       func(e *env, _ *machine) error { _, err := e.m.Park(bg, id); return err },
+		}},
+		"checkpoint": {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error { _, err := e.m.Checkpoint(bg, id); return err }},
+		"sleep": {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error {
+			_, err := e.m.CheckpointAndStop(bg, id)
+			return err
+		}},
+		"park": {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error { _, err := e.m.Park(bg, id); return err }},
+		// Reads: a retired record is not answered as the ID's.
+		"get":   {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error { _, err := e.m.Get(id); return err }},
+		"label": {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error { _, err := e.m.Label(id); return err }},
+		"tryget": {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error {
+			if w, ok := e.m.TryGet(id); ok {
+				return fmt.Errorf("answered the retired record %+v", w)
+			}
+			return ErrUnknown
+		}},
+		"rollback": {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, s Snapshot) error { return e.m.Rollback(bg, id, s.ID) }},
+		// Preempt's kill goes without the lock, by the ID's cgroup or
+		// sandbox: it must not reach the new machine (S1a).
+		"preempt": {stale: true, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error { return e.m.Preempt(id) }},
+		// A wake through the old handle neither restores the predecessor's
+		// checkpoint nor drops it: it is the destroyed machine's, kept
+		// until pruned (S1b).
+		"wake": {sleep: true, want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, s Snapshot) error {
+			w, err := e.m.ResumeFromCheckpoint(bg, id, s.ID)
+			if w != (Wake{}) {
+				t.Errorf("wake through the old handle: %+v", w)
+			}
+			if _, serr := e.m.Snapshot(s.ID); serr != nil {
+				t.Errorf("the destroyed machine's sleep checkpoint went with a stale wake: %v", serr)
+			}
+			return err
+		}},
 		// ForgetSince listed the old machine before the destroy.
-		"forget": func(e *env, old *machine) error { return e.m.forgetMachine(bg, old, time.Time{}) },
+		"forget": {direct: true, run: func(t *testing.T, e *env, old *machine, _ Snapshot) error {
+			return e.m.forgetMachine(bg, old, time.Time{})
+		}},
+		// ResumeFromCheckpoint's or Fork's drop of a snapshot it took.
+		"drop": {direct: true, run: func(t *testing.T, e *env, old *machine, s Snapshot) error {
+			e.m.dropSnapshot(old, s.ID, "")
+			return nil
+		}},
 	}
-	for name, op := range ops {
+	for name, o := range ops {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t, 4096)
 			a1 := e.create("a1", admission.Experiment, 500)
 			a2 := e.create("a2", admission.Experiment, 500)
 			_, err := e.m.CreateWorker(bg, id, a1.Lineage, workerSpec(Private))
 			must(t, err)
-			_, err = e.m.Checkpoint(bg, id)
+			snap, err := e.m.Checkpoint(bg, id)
 			must(t, err)
+			if o.sleep {
+				snap, err = e.m.CheckpointAndStop(bg, id)
+				must(t, err)
+			}
 			old, err := e.m.get(id)
 			must(t, err)
 			meta := filepath.Join(e.cfg.StateDir, "machines", id, "meta.json")
@@ -188,8 +272,12 @@ func TestRES2StaleHandleLeavesSameIDSuccessorAlone(t *testing.T) {
 				b, err := os.ReadFile(meta)
 				must(t, err)
 				before = b
+				if o.stale {
+					old.mu.Lock()
+					go func() { time.Sleep(50 * time.Millisecond); old.mu.Unlock() }()
+				}
 			}
-			if name == "forget" {
+			if o.direct {
 				replace()
 			} else {
 				e.m.afterGet = func(string) {
@@ -197,11 +285,16 @@ func TestRES2StaleHandleLeavesSameIDSuccessorAlone(t *testing.T) {
 					replace()
 				}
 			}
-			if err := op(e, old); name != "forget" && !errors.Is(err, ErrUnknown) {
-				t.Errorf("%s through the old handle: %v, want ErrUnknown", name, err)
+			err = o.run(t, e, old, snap)
+			if o.want == nil && err != nil || o.want != nil && !errors.Is(err, o.want) {
+				t.Errorf("%s through the old handle: %v, want %v", name, err, o.want)
 			}
 			if before == nil {
 				t.Fatal("the operation never looked the machine up")
+			}
+			if o.stale {
+				old.mu.Lock() // the stale holder let go
+				old.mu.Unlock()
 			}
 			if after, err := os.ReadFile(meta); err != nil || !bytes.Equal(after, before) {
 				t.Errorf("%s rewrote the new machine's record: %s (%v)", name, after, err)
@@ -218,9 +311,318 @@ func TestRES2StaleHandleLeavesSameIDSuccessorAlone(t *testing.T) {
 			if _, ok := e.adm.Snapshot().Running[id]; !ok {
 				t.Errorf("%s took the new machine's admission", name)
 			}
-			if w, err := e.m.Get(id); err != nil || w.Lineage != a2.Lineage {
+			if w, err := e.m.Get(id); err != nil || w.Lineage != a2.Lineage || w.State != Running {
 				t.Errorf("new machine's record %+v (%v)", w, err)
 			}
 		})
 	}
+}
+
+// A machine given a destroyed machine's ID cannot roll back to, or merge
+// against, the old machine's snapshots: they are of another life, even
+// when the lineage is the same, as for a worker recreated for one agent
+// (#1561, security S1b on #1575). Before, any snapshot with the ID passed.
+func TestRES2SuccessorCannotUseAPredecessorsSnapshots(t *testing.T) {
+	t.Run("agent", func(t *testing.T) {
+		e := newEnv(t, 4096)
+		e.create("exp", admission.Experiment, 500)
+		e.guestWrite("exp", "who", "predecessor")
+		s, err := e.m.Checkpoint(bg, "exp")
+		must(t, err)
+		must(t, e.m.Destroy(bg, "exp"))
+		e.create("exp", admission.Experiment, 500)
+		e.guestWrite("exp", "who", "successor")
+		if err := e.m.Rollback(bg, "exp", s.ID); !errors.Is(err, ErrLineage) {
+			t.Errorf("rollback to the predecessor's snapshot: %v, want ErrLineage", err)
+		}
+		if got := e.guestRead("exp", "who"); got != "successor" {
+			t.Errorf("who = %q, want the successor's", got)
+		}
+	})
+	t.Run("worker-same-lineage", func(t *testing.T) {
+		e := newEnv(t, 4096)
+		a1 := e.create("a1", admission.Experiment, 500)
+		_, err := e.m.CreateWorker(bg, "wk-a", a1.Lineage, workerSpec(Public))
+		must(t, err)
+		e.guestWrite("wk-a", "who", "predecessor")
+		s, err := e.m.Checkpoint(bg, "wk-a")
+		must(t, err)
+		must(t, e.m.Destroy(bg, "wk-a"))
+		_, err = e.m.CreateWorker(bg, "wk-a", a1.Lineage, workerSpec(Public))
+		must(t, err)
+		e.guestWrite("wk-a", "who", "successor")
+		if err := e.m.Rollback(bg, "wk-a", s.ID); !errors.Is(err, ErrLineage) {
+			t.Errorf("rollback to the predecessor's snapshot in the same lineage: %v, want ErrLineage", err)
+		}
+		if got := e.guestRead("wk-a", "who"); got != "successor" {
+			t.Errorf("who = %q, want the successor's", got)
+		}
+	})
+	t.Run("merge", func(t *testing.T) {
+		e := newEnv(t, 4096)
+		e.create("a1", admission.Experiment, 500)
+		_, err := e.m.Fork(bg, "a1", []string{"b1"})
+		must(t, err)
+		e.guestWrite("b1", "f", "fork's")
+		must(t, e.m.Destroy(bg, "a1"))
+		e.create("a1", admission.Experiment, 500)
+		e.guestWrite("a1", "who", "successor")
+		if _, err := e.m.Merge(bg, "a1", "b1"); !errors.Is(err, ErrLineage) {
+			t.Errorf("merge of the predecessor's fork into the successor: %v, want ErrLineage", err)
+		}
+		if got := e.guestRead("a1", "f"); got != "" {
+			t.Errorf("the predecessor's fork merged into the successor: f = %q", got)
+		}
+		if w, err := e.m.Get("a1"); err != nil || w.State != Running {
+			t.Errorf("successor %+v (%v), want running", w, err)
+		}
+	})
+	t.Run("wake", func(t *testing.T) {
+		// A wake of the successor with its predecessor's sleep checkpoint
+		// is cold, and leaves that checkpoint for Prune: it is another
+		// machine's.
+		e := newEnv(t, 4096)
+		e.create("exp", admission.Experiment, 500)
+		s, err := e.m.CheckpointAndStop(bg, "exp")
+		must(t, err)
+		must(t, e.m.Destroy(bg, "exp"))
+		e.create("exp", admission.Experiment, 500)
+		_, err = e.m.CheckpointAndStop(bg, "exp")
+		must(t, err)
+		w, err := e.m.ResumeFromCheckpoint(bg, "exp", s.ID)
+		must(t, err)
+		if w != (Wake{Cold: ColdNotSleep}) {
+			t.Errorf("wake with the predecessor's checkpoint: %+v, want cold: %s", w, ColdNotSleep)
+		}
+		if _, err := e.m.Snapshot(s.ID); err != nil {
+			t.Errorf("the predecessor's sleep checkpoint was dropped: %v", err)
+		}
+	})
+	t.Run("merge-stale-destination", func(t *testing.T) {
+		// Merge looked dst up, then dst was destroyed and replaced: the old
+		// handle is refused as gone, before its state is even read.
+		e := newEnv(t, 4096)
+		e.create("a1", admission.Experiment, 500)
+		_, err := e.m.Fork(bg, "a1", []string{"b1"})
+		must(t, err)
+		e.guestWrite("b1", "f", "fork's")
+		e.m.afterGet = func(id string) {
+			if id != "a1" {
+				return
+			}
+			e.m.afterGet = nil
+			must(t, e.m.Destroy(bg, "a1"))
+			e.create("a1", admission.Experiment, 500)
+		}
+		if _, err := e.m.Merge(bg, "a1", "b1"); !errors.Is(err, ErrUnknown) {
+			t.Errorf("merge into a destination destroyed after its lookup: %v, want ErrUnknown", err)
+		}
+		if got := e.guestRead("a1", "f"); got != "" {
+			t.Errorf("merged into the successor: f = %q", got)
+		}
+	})
+}
+
+// A wake that checked the old machine, which is then destroyed and
+// replaced under its ID by a preempted machine, neither restores nor
+// resumes the new one: the restore and the cold resume go through the
+// handle it checked (security S1b on #1575).
+func TestRES2WakeActsOnlyOnTheMachineItChecked(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("exp", admission.Experiment, 500)
+	s, err := e.m.CheckpointAndStop(bg, "exp")
+	must(t, err)
+	e.m.afterCheck = func(string) {
+		e.m.afterCheck = nil
+		must(t, e.m.Destroy(bg, "exp"))
+		e.create("exp", admission.Experiment, 500)
+		must(t, e.m.Preempt("exp"))
+		e.adm.Release("exp")
+		waitState(t, e, "exp", Preempted)
+		e.guestWrite("exp", "who", "successor")
+	}
+	w, err := e.m.ResumeFromCheckpoint(bg, "exp", s.ID)
+	if w.Restored || !errors.Is(err, ErrUnknown) {
+		t.Errorf("wake after the checks: %+v, %v; want not restored, ErrUnknown", w, err)
+	}
+	if got, err := e.m.Get("exp"); err != nil || got.State != Preempted {
+		t.Errorf("successor %+v (%v), want left preempted", got, err)
+	}
+	if _, ok := e.rt.memOf("exp"); ok {
+		t.Error("the successor was started")
+	}
+	if got := e.guestRead("exp", "who"); got != "successor" {
+		t.Errorf("who = %q, want the successor's", got)
+	}
+}
+
+// A fork reserved, then destroyed and replaced under its ID while the
+// source is paused for the fork's checkpoint: the fork fails, and its
+// cleanup leaves the new machine alone (security P-B1 on #1575).
+func TestRES2ForkCleanupLeavesASameIDSuccessorAlone(t *testing.T) {
+	e := newEnv(t, 4096)
+	a1 := e.create("a1", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", a1.Lineage, workerSpec(Public))
+	must(t, err)
+	replaced := make(chan error, 1)
+	fired := false
+	e.rt.onPause = func(id string) {
+		if fired || id != "wk-a" {
+			return
+		}
+		fired = true
+		go func() {
+			if err := e.m.Destroy(bg, "wk-b"); err != nil {
+				replaced <- err
+				return
+			}
+			_, err := e.m.CreateWorker(bg, "wk-b", a1.Lineage, workerSpec(Public))
+			replaced <- err
+		}()
+		time.Sleep(200 * time.Millisecond) // the replacement runs as far as the runtime's lock
+	}
+	if _, err := e.m.Fork(bg, "wk-a", []string{"wk-b"}); !errors.Is(err, ErrUnknown) {
+		t.Errorf("fork whose new machine was destroyed: %v, want ErrUnknown", err)
+	}
+	must(t, <-replaced)
+	e.guestWrite("wk-b", "keep", "successor's")
+	if _, ok := e.rt.memOf("wk-b"); !ok {
+		t.Error("the fork's cleanup stopped the successor")
+	}
+	if w, err := e.m.Get("wk-b"); err != nil || w.State != Running || w.ForkBase != "" {
+		t.Errorf("successor %+v (%v), want running, not a fork", w, err)
+	}
+	if _, ok := e.adm.Snapshot().Running["wk-b"]; !ok {
+		t.Error("the fork's cleanup took the successor's admission")
+	}
+}
+
+// ForgetSince keeps track of the machines it reset by instance, not ID: a
+// machine destroyed and replaced under one ID of the lineage while the
+// reset runs is a new machine, and is reset in its own right (security B1
+// on #1575). Keyed by ID, the replacement passed as already done and kept
+// what it wrote.
+func TestRES2ForgetSinceResetsASameIDSuccessorInItsOwnRight(t *testing.T) {
+	e := newEnv(t, 4096)
+	a1 := e.create("a1", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a", a1.Lineage, workerSpec(Public))
+	must(t, err)
+	since := time.Now()
+	replaced := false
+	e.rt.onStart = func(id string) {
+		// a1 restarting from its image, under its lock, as it is reset.
+		if replaced || id != "a1" {
+			return
+		}
+		replaced = true
+		must(t, e.m.Destroy(bg, "wk-a"))
+		_, err := e.m.CreateWorker(bg, "wk-a", a1.Lineage, workerSpec(Public))
+		must(t, err)
+		e.guestWrite("wk-a", "since", "written after since")
+	}
+	must(t, e.m.ForgetSince(bg, a1.Lineage, since))
+	if !replaced {
+		t.Fatal("a1 was never restarted")
+	}
+	if got := e.guestRead("wk-a", "since"); got != "" {
+		t.Errorf("the replacement kept what it wrote after since: %q", got)
+	}
+	if _, ok := e.rt.memOf("wk-a"); !ok {
+		t.Error("the replacement is not running")
+	}
+}
+
+// hookAdmit runs hook as each admission is asked for, before admission.
+type hookAdmit struct {
+	*admission.Controller
+	hook func(id string)
+}
+
+func (h *hookAdmit) Admit(r admission.Request) (admission.Decision, error) {
+	if h.hook != nil {
+		h.hook(r.ID)
+	}
+	return h.Controller.Admit(r)
+}
+
+// Fork and Merge take their checkpoint of the handle they checked, and
+// Fork's rollback destroys the forks it started by handle, so a machine
+// destroyed and replaced under one of those IDs part-way is never
+// snapshotted, merged from or destroyed in their place (security P-L1 on
+// #1575).
+func TestRES2ForkAndMergeActOnlyOnTheMachinesTheyChecked(t *testing.T) {
+	t.Run("fork-source", func(t *testing.T) {
+		e := newEnv(t, 4096)
+		h := &hookAdmit{Controller: e.adm}
+		e.cfg.Admit = h
+		e.open()
+		e.create("a1", admission.Experiment, 500)
+		h.hook = func(id string) {
+			// The fork is being admitted: its source was checked already.
+			if id != "b1" {
+				return
+			}
+			h.hook = nil
+			must(t, e.m.Destroy(bg, "a1"))
+			e.create("a1", admission.Experiment, 500)
+		}
+		if _, err := e.m.Fork(bg, "a1", []string{"b1"}); !errors.Is(err, ErrUnknown) {
+			t.Errorf("fork of a source destroyed after its checks: %v, want ErrUnknown", err)
+		}
+		if w, err := e.m.Get("a1"); err != nil || w.Last != "" {
+			t.Errorf("the successor was checkpointed for the fork: %+v (%v)", w, err)
+		}
+		if _, err := e.m.Get("b1"); !errors.Is(err, ErrUnknown) {
+			t.Errorf("a fork was left: %v", err)
+		}
+	})
+	t.Run("fork-rollback", func(t *testing.T) {
+		e := newEnv(t, 4096)
+		e.create("a1", admission.Experiment, 500)
+		fired := false
+		e.rt.onStart = func(id string) {
+			// b1 started; b2 is starting. b1 is destroyed and replaced,
+			// then b2's start fails, so the fork rolls back what it started.
+			if fired || id != "b2" {
+				return
+			}
+			fired = true
+			must(t, e.m.Destroy(bg, "b1"))
+			e.create("b1", admission.Experiment, 500)
+			e.rt.mu.Lock()
+			e.rt.failNext = errors.New("synthetic start failure")
+			e.rt.mu.Unlock()
+		}
+		if _, err := e.m.Fork(bg, "a1", []string{"b1", "b2"}); err == nil {
+			t.Fatal("fork whose second start failed reported success")
+		}
+		if !fired {
+			t.Fatal("b2 never started")
+		}
+		if w, err := e.m.Get("b1"); err != nil || w.State != Running || w.ForkBase != "" {
+			t.Errorf("the fork's rollback reached the successor b1: %+v (%v)", w, err)
+		}
+		if _, ok := e.rt.memOf("b1"); !ok {
+			t.Error("the fork's rollback stopped the successor b1")
+		}
+	})
+	t.Run("merge-source", func(t *testing.T) {
+		e := newEnv(t, 4096)
+		e.create("a1", admission.Experiment, 500)
+		_, err := e.m.Fork(bg, "a1", []string{"b1"})
+		must(t, err)
+		e.m.afterCheck = func(id string) {
+			// Merge checked b1's containment and fork point.
+			e.m.afterCheck = nil
+			must(t, e.m.Destroy(bg, id))
+			e.create(id, admission.Experiment, 500)
+			e.guestWrite(id, "f", "not a fork of a1")
+		}
+		if _, err := e.m.Merge(bg, "a1", "b1"); !errors.Is(err, ErrUnknown) {
+			t.Errorf("merge from a source destroyed after its checks: %v, want ErrUnknown", err)
+		}
+		if got := e.guestRead("a1", "f"); got != "" {
+			t.Errorf("a machine that is not a1's fork merged into it: f = %q", got)
+		}
+	})
 }
