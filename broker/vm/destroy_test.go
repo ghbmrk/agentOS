@@ -77,23 +77,41 @@ func TestRES2DestroyRacingRestartAdmissionLeavesNothing(t *testing.T) {
 			destroyed := make(chan error, 1)
 			go func() { destroyed <- e.m.Destroy(bg, "exp") }()
 			// The order pinned: the admission is asked before the destroy
-			// and granted after Destroy holds the machine's lock. Destroy
-			// waits on it (admitMu), retires the machine, and only then
-			// can the restart take the lock, which it must refuse.
-			for mc.mu.TryLock() {
+			// and granted only once Destroy holds the machine's lock and
+			// has either returned or stayed blocked a while. Destroy waits
+			// on it (admitMu), retires the machine, and only then can the
+			// restart take the lock, which it must refuse. Without
+			// admitMu, Destroy returns first and the late grant stays
+			// counted (L3 B1, potency P1 on #1575).
+			var derr error
+			done := false
+			for !done && mc.mu.TryLock() {
 				mc.mu.Unlock()
-				time.Sleep(time.Millisecond)
+				select {
+				case derr = <-destroyed:
+					done = true
+				case <-time.After(time.Millisecond):
+				}
+			}
+			if !done {
+				select {
+				case derr = <-destroyed:
+					done = true
+				case <-time.After(300 * time.Millisecond):
+				}
 			}
 			close(g.gate)
 			if err := <-opErr; !errors.Is(err, ErrUnknown) {
 				t.Errorf("%s racing destroy: %v, want ErrUnknown", name, err)
 			}
-			select {
-			case err := <-destroyed:
-				must(t, err)
-			case <-time.After(5 * time.Second):
-				t.Fatal("destroy did not finish")
+			if !done {
+				select {
+				case derr = <-destroyed:
+				case <-time.After(5 * time.Second):
+					t.Fatal("destroy did not finish")
+				}
 			}
+			must(t, derr)
 			if _, ok := e.rt.memOf("exp"); ok {
 				t.Errorf("%s brought the destroyed machine back", name)
 			}
@@ -223,7 +241,7 @@ func TestRES2StaleHandleLeavesSameIDSuccessorAlone(t *testing.T) {
 		"rollback": {want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, s Snapshot) error { return e.m.Rollback(bg, id, s.ID) }},
 		// Preempt's kill goes without the lock, by the ID's cgroup or
 		// sandbox: it must not reach the new machine (S1a).
-		"preempt": {stale: true, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error { return e.m.Preempt(id) }},
+		"preempt": {stale: true, want: ErrUnknown, run: func(t *testing.T, e *env, _ *machine, _ Snapshot) error { return e.m.Preempt(id) }},
 		// A wake through the old handle neither restores the predecessor's
 		// checkpoint nor drops it: it is the destroyed machine's, kept
 		// until pruned (S1b).
@@ -759,4 +777,91 @@ func TestRES2ForkAndMergeActOnlyOnTheMachinesTheyChecked(t *testing.T) {
 			t.Errorf("a machine that is not a1's fork merged into it: f = %q", got)
 		}
 	})
+}
+
+// Admission picked a victim by ID, and Preempt looked it up; then the
+// victim was destroyed and a new machine admitted under its ID. Preempt
+// must not report the destroyed machine as preempted, or admission drops
+// the successor's entry and it runs uncounted (security B1 on #1575). In
+// "held" the old handle's lock is held, so Preempt kills without it.
+func TestRES2PreemptOfADestroyedVictimKeepsTheSuccessorCounted(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		name := "trylock"
+		if held {
+			name = "held"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, 2500)
+			e.create("y", admission.Experiment, 1000)
+			e.create("v", admission.Experiment, 1000)
+			old, err := e.m.get("v")
+			must(t, err)
+			replaced := false
+			e.m.afterGet = func(id string) {
+				if id != "v" {
+					return
+				}
+				e.m.afterGet = nil
+				must(t, e.m.Destroy(bg, "v"))
+				e.create("v", admission.Experiment, 500)
+				replaced = true
+				if held {
+					old.mu.Lock()
+					go func() { time.Sleep(50 * time.Millisecond); old.mu.Unlock() }()
+				}
+			}
+			e.create("x", admission.Foreground, 1000) // preempts v, the newest experiment
+			if !replaced {
+				t.Fatal("admission never preempted v")
+			}
+			old.mu.Lock() // the stale holder let go
+			old.mu.Unlock()
+			if _, ok := e.adm.Snapshot().Running["v"]; !ok {
+				t.Errorf("the successor v runs uncounted: admission %v", e.adm.Snapshot().Running)
+			}
+			if w, err := e.m.Get("v"); err != nil || w.State != Running {
+				t.Errorf("successor v: %+v (%v), want running", w, err)
+			}
+		})
+	}
+}
+
+// DeleteFiles restarts the worker it deleted from through its handle: a
+// worker destroyed and recreated under the same name meanwhile is left as
+// it is (L3 B2 on #1575, V38 rule 2).
+func TestRES2DeleteFilesLeavesASameIDSuccessorAlone(t *testing.T) {
+	const id = "wk-a"
+	e := newEnv(t, 4096)
+	a1 := e.create("a1", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, id, a1.Lineage, workerSpec(Private))
+	must(t, err)
+	_, err = e.m.Park(bg, id)
+	must(t, err)
+	e.guestWrite(id, "f", "old")
+	replaced := false
+	e.m.afterCheck = func(string) {
+		e.m.afterCheck = nil
+		must(t, e.m.Destroy(bg, id))
+		_, err := e.m.CreateWorker(bg, id, a1.Lineage, workerSpec(Private))
+		must(t, err)
+		_, err = e.m.Park(bg, id)
+		must(t, err)
+		replaced = true
+	}
+	rep, err := e.m.DeleteFiles(bg, id, Deletion{Paths: []string{"/f"}, As: Private})
+	if !replaced {
+		t.Fatal("DeleteFiles never reached the check")
+	}
+	if rep.Restarted {
+		t.Errorf("DeleteFiles reports restarting the successor (err %v)", err)
+	}
+	if w, err := e.m.Get(id); err != nil || w.State == Running {
+		t.Errorf("successor %+v (%v), want it left stopped", w, err)
+	}
+	if _, ok := e.rt.memOf(id); ok {
+		t.Error("DeleteFiles started the successor")
+	}
+	if _, ok := e.adm.Snapshot().Running[id]; ok {
+		t.Error("DeleteFiles admitted the successor")
+	}
 }

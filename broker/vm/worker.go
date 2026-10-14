@@ -407,12 +407,15 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 	if stopped {
 		m.release(mc)
 	}
+	if h := m.afterCheck; h != nil {
+		h(id)
+	}
 	// A preempted worker waits for its own resume, not a deletion's
 	// (security R2 on #166). Admission may have no room now, or STOP may
 	// have come meanwhile; the worker then stays stopped and the deletion
 	// still stands (security F1 on #166).
 	if err == nil && !rep.Over && was == Stopped && !held(d) {
-		rep.Restarted = m.Resume(ctx, id) == nil
+		rep.Restarted = m.resumeOf(ctx, mc) == nil // the handle: never a same-ID successor (L3 B2 on #1575)
 	}
 	return rep, err
 }

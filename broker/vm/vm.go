@@ -438,8 +438,8 @@ type Manager struct {
 	// afterGet, set only by tests, runs between a lookup and the caller
 	// locking what it found: where a destroy can retire the handle.
 	afterGet func(id string)
-	// afterCheck, set only by tests, runs where ResumeFromCheckpoint or
-	// Merge has checked a machine and not yet acted on it.
+	// afterCheck, set only by tests, runs where ResumeFromCheckpoint,
+	// Merge or DeleteFiles has checked a machine and not yet acted on it.
 	afterCheck func(id string)
 
 	diskMu   sync.Mutex // serializes disk reservations
@@ -1969,7 +1969,9 @@ func (m *Manager) destroy(ctx context.Context, mc *machine) error {
 // path, so its time does not grow with what the guest wrote: the machine's
 // layer stays on disk and Resume restarts it there. Memory since the last
 // full checkpoint is lost. Preempting a machine that is not running is a
-// no-op.
+// no-op. A handle Destroy retired after the lookup is refused with
+// ErrUnknown, never reported preempted: admission would then drop the
+// entry of a new machine given the ID (security B1 on #1575).
 //
 // Preemption never waits for an operation already holding the machine (a
 // checkpoint or a fork takes seconds, longer than the frozen target): it
@@ -1984,6 +1986,13 @@ func (m *Manager) Preempt(id string) error {
 	mc.preempting.Store(true)
 	if mc.mu.TryLock() {
 		defer mc.mu.Unlock()
+		if mc.gone {
+			// Destroyed since the lookup: its admission is released, and
+			// the ID may be a new machine's now, which admission must not
+			// drop as if this one had yielded (security B1 on #1575).
+			mc.preempting.Store(false)
+			return fmt.Errorf("%w: machine %s", ErrUnknown, id)
+		}
 		return m.preemptLocked(mc, false)
 	}
 	// The completion is scheduled even if the kill fails: once the holding
@@ -1996,9 +2005,10 @@ func (m *Manager) Preempt(id string) error {
 	live, kerr := m.killLive(mc)
 	if !live {
 		// Destroyed since the lookup: Destroy stopped it and released its
-		// admission, and its ID may be a new machine's now.
+		// admission, and its ID may be a new machine's now, so this is no
+		// preemption admission may count (security B1 on #1575).
 		mc.preempting.Store(false)
-		return nil
+		return fmt.Errorf("%w: machine %s", ErrUnknown, id)
 	}
 	go func() {
 		mc.mu.Lock()

@@ -56,10 +56,13 @@ var plainLocks = map[string]struct {
 	"Manager.Prune":                {2, "reads ForkBase and Last to keep more; unpublishes only snapshots it listed by their own records"},
 	"Manager.ResumeFromCheckpoint": {1, "a state read after a failed restore; a retired machine reads Stopped and resumeOf refuses it"},
 
-	// Preempt never waits on the lock. A retired machine is Stopped, so
-	// preemptLocked only marks it revoked; the kill without the lock goes
-	// through killLive, which refuses a retired handle.
-	"Manager.Preempt": {2, "TryLock, and the deferred completion: preemptLocked on a retired (Stopped) machine only marks it revoked; the kill is killLive's"},
+	// Preempt never waits on the lock. Under TryLock a retired machine is
+	// refused with ErrUnknown, so admission never counts it preempted; the
+	// kill without the lock goes through killLive, which refuses a retired
+	// handle the same way. The deferred completion runs only after a live
+	// kill, and on a machine retired since, preemptLocked only marks it
+	// revoked.
+	"Manager.Preempt": {2, "TryLock refuses a retired machine with ErrUnknown, not success, so admission keeps a same-ID successor's entry; the deferred completion follows a live kill, and on a since-retired (Stopped) machine only marks it revoked"},
 }
 
 // TestMachineLockOnlyThroughLockLive type-checks package vm's non-test
