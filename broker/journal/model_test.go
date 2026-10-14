@@ -51,10 +51,12 @@ import (
 //   - I5 (confirm repeats, D-116): a request whose effect is known to
 //     have gone under another request (in the window, which the fixed
 //     clock always is) is dispatched only after the owner's confirmation
-//     of it, a "confirm" step. The model's policy asks it as the gate
-//     does (grants recentRepeat), from the engine's InUse (Use.Went); an
-//     erased success names no record and asks nothing, so a dispatch
-//     after the success was erased is exempt.
+//     of it given after that success: a "confirm" step, or an "approve"
+//     of a request asked after it went. The model's policy asks it as the
+//     gate does (grants recentRepeat, decision.covers), from the engine's
+//     InUse (Use.Went, Use.Known); an approval given before the rival
+//     went does not confirm it (Security B10 on #1433), and an erased
+//     success still counts (Security R23).
 //
 // Rivalry itself (rivals) is restated from the journal, not read from the
 // engine's fields.
@@ -121,7 +123,9 @@ func (x *mExec) Reconcile(_ context.Context, in Intent, n int) Outcome {
 }
 
 // mPolicy allows everything but the intents a step denies and, with
-// confirm set, a repeat the owner has not confirmed (mRepeat).
+// confirm set, a repeat the owner has not confirmed since its rival went
+// (mRepeat): as the gate's decision.covers, an approval given before the
+// rival went did not see the repeat (Security B10 on #1433).
 type mPolicy struct {
 	mu        sync.Mutex
 	deny      map[string]bool
@@ -133,13 +137,15 @@ type mPolicy struct {
 func (p *mPolicy) Check(_ context.Context, _ Phase, in Intent) error {
 	p.mu.Lock()
 	deny, e := p.deny[in.ID], p.e
-	ask := p.confirm && p.confirmed[in.ID] == 0
+	ask, c := p.confirm, p.confirmed[in.ID]
 	p.mu.Unlock()
 	if deny {
 		return errors.New("refused")
 	}
-	if ask && e != nil && mRepeat(e, in) {
-		return errors.New("needs the owner's confirmation")
+	if ask && e != nil {
+		if w := mRepeat(e, in); w != 0 && c < w {
+			return errors.New("needs the owner's confirmation")
+		}
 	}
 	return nil
 }
@@ -150,15 +156,24 @@ const mRepeatWindow = 24 * time.Hour
 // mRepeat is the gate's confirm-repeats rule (grants recentRepeat) for
 // the model, whose intents all name the same record, recipients and
 // body: another request on in's account and action known to have gone
-// within the window, not erased.
-func mRepeat(e *Engine, in Intent) bool {
+// within the window (Use.Known), erased or not (an erased one cannot be
+// told apart, Security R23 on #1433). It returns the journal seq at which
+// the last of them was known to have gone, or 0: an owner's yes given at
+// or after it saw the repeat.
+func mRepeat(e *Engine, in Intent) uint64 {
 	since := mNow.Add(-mRepeatWindow)
+	var w uint64
 	for _, u := range e.InUse(in.Account, in.Action, since) {
-		if u.Intent.ID != in.ID && u.Started && !u.Erased && !u.Went.IsZero() && !u.Went.Before(since) {
-			return true
+		if u.Intent.ID == in.ID || !u.Started || u.Went.IsZero() || u.Known.Before(since) {
+			continue
 		}
+		e.mu.Lock()
+		if en := e.intents[u.Intent.ID]; en != nil && en.wentSeq > w {
+			w = en.wentSeq
+		}
+		e.mu.Unlock()
 	}
-	return false
+	return w
 }
 
 // mState is one node of the search: what survives between steps.
@@ -276,7 +291,7 @@ func cloneEngine(t *testing.T, e *Engine, pol Policy, execs map[string]Executor)
 		intents: map[string]*entry{}, open: map[string]*entry{}, byEffect: map[string][]*entry{},
 		denied: append([]string(nil), e.denied...), cold: map[coldKey]coldVal{}, shapeIx: map[coldShape]uint32{},
 		stopped: e.stopped, fence: map[string]map[string]bool{}, missed: e.missed, checks: map[string]int{},
-		redispatching: map[string]bool{}, newest: e.newest}
+		redispatching: map[string]bool{}, newest: e.newest, lingering: map[string]*entry{}}
 	cp := map[*entry]*entry{}
 	for id, en := range e.intents {
 		n := *en
@@ -289,6 +304,9 @@ func cloneEngine(t *testing.T, e *Engine, pol Policy, execs map[string]Executor)
 	}
 	for id, en := range e.open {
 		c.open[id] = cp[en]
+	}
+	for id, en := range e.lingering {
+		c.lingering[id] = cp[en]
 	}
 	for k, b := range e.byEffect {
 		for _, en := range b {
@@ -349,15 +367,16 @@ type mModel struct {
 // never for a narrowing one (which may always go again).
 func (m *mModel) confirm() bool { return !m.narrow }
 
-// confirmedAt reports whether the node's policy has id confirmed.
-func (m *mModel) confirmedAt(e *Engine, id string) bool {
+// confirmedAt is the journal seq of the owner's last yes on id (an
+// approval or a confirmation), or 0.
+func (m *mModel) confirmedAt(e *Engine, id string) uint64 {
 	pol, ok := e.policy.(*mPolicy)
 	if !ok {
-		return false
+		return 0
 	}
 	pol.mu.Lock()
 	defer pol.mu.Unlock()
-	return pol.confirmed[id] != 0
+	return pol.confirmed[id]
 }
 
 func (m *mModel) intent(id string) Intent {
@@ -391,7 +410,16 @@ func (m *mModel) steps(e *Engine) []mStep {
 		all := []mMode{mOK, mRefuse, mDropAck, mTimeout}
 		switch en.state {
 		case Pending:
-			add("approve "+id, func(r *mRun) error { _, err := r.e.Authorize(ctx, id); return err })
+			// An ordinary approval, offered before a rival went as
+			// after: the owner's yes on the line as it is now, which
+			// confirms only the repeats it showed (Security B10).
+			add("approve "+id, func(r *mRun) error {
+				if m.confirm() {
+					r.pol.confirmed[id] = r.e.seq
+				}
+				_, err := r.e.Authorize(ctx, id)
+				return err
+			})
 			add("deny "+id, func(r *mRun) error {
 				r.pol.deny[id] = true
 				_, err := r.e.Authorize(ctx, id)
@@ -448,7 +476,7 @@ func (m *mModel) steps(e *Engine) []mStep {
 		}
 		// The owner confirms a repeat the policy asks about (I5).
 		if m.confirm() && !en.erased && (en.state == Pending || en.state == Authorized || en.state == NotApplied || en.retryable()) &&
-			e.intents[id] != nil && mRepeat(e, en.intent) && !m.confirmedAt(e, id) {
+			e.intents[id] != nil && mRepeat(e, en.intent) > m.confirmedAt(e, id) {
 			add("confirm "+id, func(r *mRun) error {
 				r.pol.confirmed[id] = r.e.seq
 				return nil
@@ -672,10 +700,14 @@ func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
 		for _, q := range s.log {
 			at := f[q.id].disp[q.n-1]
 			for pid, p := range f {
-				if pid == q.id || p.went == 0 || p.went > at || (p.erased != 0 && p.erased < at) {
+				if pid == q.id || p.went == 0 || p.went > at {
 					continue
 				}
-				if c := s.confirmed[q.id]; c == 0 || c > at {
+				// The owner's yes must come after p went and before the
+				// dispatch: one given earlier did not see the repeat
+				// (Security B10 on #1433). An erased p still counts
+				// (Security R23).
+				if c := s.confirmed[q.id]; c == 0 || c > at || c < p.went {
 					fail("I5", "%s attempt %d applied (by %s) after %s was known to have gone, without the owner's confirmation", q.id, q.n, q.via, pid)
 				}
 			}
@@ -723,9 +755,9 @@ func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
 	if len(e.intents) > 0 {
 		fr := restore(t, s, true)
 		fr.x.next, fr.x.via = mOK, "probe"
-		fr.pol.confirmed["p"] = 1 // the owner confirms it, if asked (I5)
 		in := m.intent("p")
 		must(fr.e.Submit(in))
+		fr.pol.confirmed["p"] = fr.e.seq // the owner confirms it, if asked (I5)
 		must(fr.e.Authorize(ctx, "p"))
 		st, err := fr.e.Dispatch(ctx, "p")
 		var se *SupersededError

@@ -159,14 +159,18 @@ func TestReleaseLeavesARequestMadeAfterTheEffectWent(t *testing.T) {
 	}
 }
 
-// I5 at a pinned path: after a went, a repeat b the owner has not
-// confirmed is refused at its dispatch and never applied; confirmed, it
-// goes.
+// I5 at a pinned path: b approved before a went did not see the repeat
+// (Security B10 on #1433), so after a went b is refused at its dispatch
+// and never applied; approved or confirmed after a went, it goes.
 func TestModelRepeatGoesOnlyOnceConfirmed(t *testing.T) {
 	m := mModel{ids: []string{"a", "b"}}
-	r := m.walk(t, []string{"submit a", "approve a", "dispatch a ok", "submit b", "approve b"})
+	r := m.walk(t, []string{"submit a", "approve a", "submit b", "approve b", "dispatch a ok", "dispatch b ok"})
 	if st := r.e.intents["b"].state; st != Denied || len(r.x.log) != 1 {
-		t.Fatalf("unconfirmed repeat: b %s, applied %+v", st, r.x.log)
+		t.Fatalf("repeat approved before the send went: b %s, applied %+v", st, r.x.log)
+	}
+	r = m.walk(t, []string{"submit a", "approve a", "dispatch a ok", "submit b", "approve b", "dispatch b ok"})
+	if st := r.e.intents["b"].state; st != Succeeded || len(r.x.log) != 2 {
+		t.Fatalf("repeat approved after the send went: b %s, applied %+v", st, r.x.log)
 	}
 	r = m.walk(t, []string{"submit a", "approve a", "dispatch a ok", "submit b", "confirm b", "approve b", "dispatch b ok"})
 	if st := r.e.intents["b"].state; st != Succeeded || len(r.x.log) != 2 {

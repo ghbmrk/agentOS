@@ -30,6 +30,10 @@ type Engine struct {
 	// with history (CH-2). Records live only in the journal.
 	intents map[string]*entry
 	open    map[string]*entry
+	// lingering holds the succeeded intents (not open) with an earlier
+	// attempt still unknown or in flight, which STOP cancels too
+	// (Security R22 on #1433), so that too reads no history.
+	lingering map[string]*entry
 	// byEffect indexes intents by effect fingerprint, so the same-effect
 	// checks every dispatch makes (sameEffect, duplicateOf) read only the
 	// intents with that effect, not every hot one (CH-2).
@@ -125,9 +129,12 @@ type entry struct {
 	provedSeq        uint64
 	wentSeq          uint64
 	// wentAt is when the attempt that wentSeq observed was last
-	// dispatched: when the effect is known to have gone (InUse, the
-	// gate's confirm-repeats rule, D-116).
-	wentAt time.Time
+	// dispatched: when the effect went (InUse, the gate's confirm-repeats
+	// rule, D-116). knownAt is when that record was made: when the
+	// success became known, which for an unknown outcome a check or the
+	// owner settles may be days later (Security B11 on #1433).
+	wentAt  time.Time
+	knownAt time.Time
 }
 
 // Option configures Open.
@@ -160,6 +167,7 @@ func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor
 		pinned:  true,
 
 		byEffect:      map[string][]*entry{},
+		lingering:     map[string]*entry{},
 		redispatching: map[string]bool{},
 	}
 	for _, o := range opts {
@@ -1268,22 +1276,25 @@ func (e *Engine) Stop(ctx context.Context) (StopReport, error) {
 	}
 	var jobs []job
 	for _, en := range bySeq(e.open) {
-		id := en.intent.ID
-		switch en.state {
-		case Authorized, NotApplied:
-			if !narrowing(en.intent) {
-				rep.Held = append(rep.Held, id)
+		if (en.state == Authorized || en.state == NotApplied) && !narrowing(en.intent) {
+			rep.Held = append(rep.Held, en.intent.ID)
+		}
+	}
+	// Every attempt that may still take effect is cancelled and its
+	// intent reported: an unclear intent's parked attempt, each later one
+	// still in flight or unknown (Security R18 on #1433), and an earlier
+	// attempt still unknown of an intent a later attempt (the owner's
+	// retry) settled as succeeded, which has left the open set (Security
+	// R22 on #1433).
+	for _, en := range append(bySeq(e.open), bySeq(e.lingering)...) {
+		n := len(jobs)
+		for _, a := range en.attempts {
+			if a.Result == ResultUnknown || a.Result == ResultInFlight {
+				jobs = append(jobs, job{en.intent, a.N})
 			}
-		case InFlight, OutcomeUnknown:
-			// Every attempt that may still take effect is cancelled: an
-			// unclear intent's parked attempt, and each later one still
-			// in flight or unknown (Security R18 on #1433).
-			rep.Unresolved = append(rep.Unresolved, id)
-			for _, a := range en.attempts {
-				if a.Result == ResultUnknown || a.Result == ResultInFlight {
-					jobs = append(jobs, job{en.intent, a.N})
-				}
-			}
+		}
+		if len(jobs) > n || en.state == InFlight || en.state == OutcomeUnknown {
+			rep.Unresolved = append(rep.Unresolved, en.intent.ID)
 		}
 	}
 	e.mu.Unlock()
@@ -1448,6 +1459,11 @@ type Use struct {
 	// unless one of its attempts was observed succeeded: a known success
 	// (the gate's confirm-repeats rule, D-116).
 	Went time.Time
+	// Known is when that success became known: the later of Went and
+	// when the journal recorded the observation, so a success a check
+	// proves a day after its dispatch counts from the proof (Security
+	// B11 on #1433). Zero when Went is.
+	Known time.Time
 	// Tried is when the attempt that may still take effect (in flight or
 	// unknown) was first dispatched, zero for any other state: for an
 	// unclear intent, its parked try, not the owner's retry that did not
@@ -1464,7 +1480,10 @@ type Use struct {
 //   - its latest attempt in flight or outcome_unknown: held until evidence
 //     resolves it (OP-2), whatever its age;
 //   - its latest attempt succeeded: charged to the window it was
-//     dispatched in, so counted while that is at or after since.
+//     dispatched in, so counted while that is at or after since, and
+//     also while its success became known at or after since (Use.Known):
+//     a success proved late counts from its proof, which only counts
+//     more (Security B11 on #1433).
 //
 // An attempt that did not apply releases its place; a retry takes one
 // again when it is dispatched.
@@ -1483,10 +1502,11 @@ func (e *Engine) InUse(account, action string, since time.Time) []Use {
 			// An unclear intent (its owner's retry did not go, an earlier
 			// parked try may have) is outcome_unknown: started (B9).
 			out = append(out, Use{Intent: en.intent, Started: true, Erased: en.erased, Dispatched: en.dispatched,
-				Went: en.wentAt, Tried: en.outstanding().Dispatched})
+				Went: en.wentAt, Known: en.known(), Tried: en.outstanding().Dispatched})
 		case Succeeded:
-			if !en.dispatched.Before(since) {
-				out = append(out, Use{Intent: en.intent, Started: true, Erased: en.erased, Dispatched: en.dispatched, Went: en.wentAt})
+			if !en.dispatched.Before(since) || !en.known().Before(since) {
+				out = append(out, Use{Intent: en.intent, Started: true, Erased: en.erased, Dispatched: en.dispatched,
+					Went: en.wentAt, Known: en.known()})
 			}
 		}
 	}
@@ -1773,6 +1793,11 @@ func (e *Engine) apply(r Record) {
 	default:
 		e.open[r.ID] = en
 	}
+	if en.state == Succeeded && en.mayStillTakeEffect() {
+		e.lingering[r.ID] = en
+	} else {
+		delete(e.lingering, r.ID)
+	}
 	if en.state == Denied && was != Denied {
 		e.denied = append(e.denied, r.ID)
 	}
@@ -1956,6 +1981,7 @@ func (en *entry) apply(r Record) {
 			if r.Attempt == len(en.attempts) {
 				en.wentAt = en.dispatched
 			}
+			en.knownAt = r.At
 		}
 		en.state = en.derive()
 	case RecCancel:
@@ -1976,6 +2002,29 @@ func (en *entry) apply(r Record) {
 			en.fp, en.efp = r.FP, r.EFP
 		}
 	}
+}
+
+// known is when the intent's success became known (Use.Known): the later
+// of the dispatch of the attempt that went and the record observing it,
+// zero if none went.
+func (en *entry) known() time.Time {
+	if en.wentSeq == 0 {
+		return time.Time{}
+	}
+	if en.knownAt.After(en.wentAt) {
+		return en.knownAt
+	}
+	return en.wentAt
+}
+
+// mayStillTakeEffect reports an attempt still in flight or unknown.
+func (en *entry) mayStillTakeEffect() bool {
+	for _, a := range en.attempts {
+		if a.Result == ResultUnknown || a.Result == ResultInFlight {
+			return true
+		}
+	}
+	return false
 }
 
 // latest is the intent's last attempt, or nil before its first.

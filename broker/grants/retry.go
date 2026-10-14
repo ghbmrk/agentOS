@@ -21,6 +21,9 @@ type RetryLine struct {
 	Base owner.Item
 	// Local: the line is approved only on the local page.
 	Local bool
+	// rep is what Shown says of the same send under other requests:
+	// the approval covers only those (decision.covers, Security B10).
+	rep repeat
 }
 
 // RetryItem is the line for an owner retry of parked intent p. It is
@@ -42,7 +45,7 @@ func (g *Gate) RetryItem(ctx context.Context, p journal.ParkedIntent, object str
 	v := g.evaluate(ctx, journal.PhaseDispatch, in)
 	switch {
 	case v.kind == ask || v.kind == autoReply:
-		l = RetryLine{Shown: v.shown(), Base: v.item, Local: v.local}
+		l = RetryLine{Shown: v.shown(), Base: v.item, Local: v.local, rep: v.rep}
 	case v.kind == allow && in.Account == journal.BrokerAccount:
 		it := owner.Item{Ref: in.ID, Object: object, Facts: owner.Facts{Verb: "Retry", NoRecipient: true}}
 		l = RetryLine{Shown: it, Base: it}
@@ -130,7 +133,7 @@ func (g *Gate) approved(id string, l RetryLine, page bool, run func(*journal.Eng
 	}
 	g.mu.Lock()
 	eng := g.eng
-	g.decided[id] = decision{approved: true, why: "owner", asked: true, at: g.cfg.Now(), item: l.Base, local: l.Local, tries: tries}
+	g.decided[id] = decision{approved: true, why: "owner", asked: true, at: g.cfg.Now(), item: l.Base, rep: l.rep, local: l.Local, tries: tries}
 	if l.Local {
 		g.confirmed[id] = true
 	}
@@ -188,13 +191,26 @@ func (g *Gate) sentSince(ctx context.Context, p journal.ParkedIntent) bool {
 // account's verifier reads them, or as the intent names them (case
 // folded) when the verifier is missing or cannot read it.
 func (g *Gate) sendKey(ctx context.Context, in journal.Intent) (string, []string) {
+	k := g.sendID(ctx, in)
+	return k.rec, k.rcpt
+}
+
+// sendKeyed is sendKey with the record's thread (Verified.Thread), which
+// only a verifier gives.
+type sendKeyed struct {
+	rec    string
+	rcpt   []string
+	thread []string
+}
+
+func (g *Gate) sendID(ctx context.Context, in journal.Intent) sendKeyed {
 	if vf := g.cfg.Verifiers[in.Account]; vf != nil {
 		if v, err := vf.Verify(ctx, in); err == nil && v.Record != "" {
-			return v.Record, fold(v.Recipients)
+			return sendKeyed{v.Record, fold(v.Recipients), v.Thread}
 		}
 	}
 	rec, _ := in.Params[ParamRecord].(string)
-	return rec, fold(in.Recipients)
+	return sendKeyed{rec: rec, rcpt: fold(in.Recipients)}
 }
 
 func fold(rs []string) []string {
