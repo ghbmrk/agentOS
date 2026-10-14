@@ -473,7 +473,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
-		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid}
+		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid, RotateAPNet: rotateAPNet(apNetPath)}
 	}
 	// A restore the forget log's check held opens nothing on the restored
 	// tree: no recall, no agent machines (W3-forget-b1; security C3). The
