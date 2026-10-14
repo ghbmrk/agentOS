@@ -2298,8 +2298,9 @@ TMPFILES_PROBES = (
     "f /etc/systemd/system-generators/x 0755 - - - #!/bin/sh",
     "L /etc/systemd/system-generators/zram-generator - - - - /usr/lib/x/zram",
     "f /etc/agentos/modem.env - - - - COUNTRY_CODE=1", "f /lib/firmware/x.bin")
-# One probe per guarded name, under /etc and /run (#1543 P/UX B2).
-TMPFILES_PROBES += tuple("f /%s/%s/x" % (top, n) for top in ("etc", "run") for n in GUARDED_NAMES)
+# One probe per guarded name, under each configuration directory (#1543 P/UX B2). /usr is read-only
+# on the box and trixie's /lib is /usr/lib, but the check guards them anyway.
+TMPFILES_PROBES += tuple("f /%s/%s/x" % (top, n) for top in ("etc", "run", "usr/local/lib", "lib") for n in GUARDED_NAMES)
 
 
 class TmpfilesTest(unittest.TestCase):
@@ -2690,6 +2691,9 @@ class TmpfilesAllowTest(unittest.TestCase):
                 (base + "d /var/lib/agentos 0700 root root\n", "not on"),
                 (base.rstrip("\n") + "\rf /etc/sysctl.d/x.conf\n", "f /etc/sysctl.d/x.conf"),
                 (base.rstrip("\n") + "\0f /etc/sysctl.d/x.conf\n", "f /etc/sysctl.d/x.conf"),
+                # CR and NUL end a line, so a comment cannot hide the line after them.
+                (base + "# x\rw /proc/sys/x - - - - 1\n", "w /proc/sys/x"),
+                (base + "# x\0w /proc/sys/x - - - - 1\n", "w /proc/sys/x"),
                 (base + "L /opt/q - - - - /var/run/../etc/sysctl.d\nf /opt/q/99-x.conf - - - - net.ipv4.ip_forward=1\n",
                  "f /opt/q/99-x.conf")):
             with self.subTest(body=body):
@@ -2776,9 +2780,6 @@ class CredstoreTest(unittest.TestCase):
             for n in mkosi:
                 write(root, "usr/lib/credstore/" + n, "x")
             self.assertEqual(check.violations(root), [])
-            # Trixie's /lib is a link to /usr/lib: its store is the same one, walked once.
-            link(root, "lib", "usr/lib")
-            self.assertEqual(check.violations(root), [])
             # The names are allowed in /usr/lib only.
             for d in ("etc/credstore", "usr/lib/credstore.encrypted"):
                 with self.subTest(store=d):
@@ -2798,6 +2799,9 @@ class CredstoreTest(unittest.TestCase):
                         p.unlink()
                         if p.parent != root / d:
                             p.parent.rmdir()
+            # Trixie's /lib is a link to /usr/lib: its store is the same one, walked once.
+            link(root, "lib", "usr/lib")
+            self.assertEqual(check.violations(root), [])
             # An allowlisted file passes; a store that is itself a link or a file does not.
             write(root, "usr/lib/credstore/agentos.x", "x")
             with unittest.mock.patch.object(check, "CREDSTORE_ALLOWED", check.CREDSTORE_ALLOWED + ("usr/lib/credstore/agentos.x",)):
