@@ -7,17 +7,25 @@ import (
 )
 
 // report writes one console line per step, in the form ci_boot.sh reads:
-// PASS, FAIL, XFAIL(#issue) for a failure the expected-failure list names,
-// XPASS for a listed step that passed (the list is stale), and BLOCKED for
+// PASS, FAIL, XFAIL(#issue) for a failure whose error carries the text the
+// expected-failure list gives for that step (any other error from a listed
+// step is FAIL), XPASS for a listed step that passed (the list is stale), and BLOCKED for
 // the steps after the first failure, which do not run.
 type report struct {
 	w       io.Writer
-	xfail   map[string]int
+	xfail   map[string]expectedFailure
 	blocker string
 	n       map[string]int
 }
 
-func newReport(w io.Writer, xfail map[string]int) *report {
+// expectedFailure is a known failure: its work-item issue and the text its
+// error must carry, so a different failure of the same step is not hidden.
+type expectedFailure struct {
+	issue int
+	want  string
+}
+
+func newReport(w io.Writer, xfail map[string]expectedFailure) *report {
 	return &report{w: w, xfail: xfail, n: map[string]int{}}
 }
 
@@ -32,15 +40,16 @@ func (r *report) step(name string, run func() error) {
 		return
 	}
 	err := run()
-	issue, expected := r.xfail[name]
+	ef, listed := r.xfail[name]
+	expected := listed && err != nil && strings.Contains(err.Error(), ef.want)
 	switch {
-	case err == nil && expected:
-		r.line("xpass", fmt.Sprintf("XPASS %s expected to fail (#%d) but passed", name, issue))
+	case err == nil && listed:
+		r.line("xpass", fmt.Sprintf("XPASS %s expected to fail (#%d) but passed", name, ef.issue))
 	case err == nil:
 		r.line("pass", "PASS "+name)
 	case expected:
 		r.blocker = name
-		r.line("xfail", fmt.Sprintf("XFAIL(#%d) %s %s", issue, name, oneLine(err.Error())))
+		r.line("xfail", fmt.Sprintf("XFAIL(#%d) %s %s", ef.issue, name, oneLine(err.Error())))
 	default:
 		r.blocker = name
 		r.line("fail", "FAIL "+name+" "+oneLine(err.Error()))

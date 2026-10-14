@@ -128,15 +128,16 @@ hasnt "$W/console-two-drives.log" "agentos-drive-id: assigned"
 has "$W/console-two-drives.log" "agentos-fallback: health check failed, 2 tries left on this boot entry; rebooting"
 rm -f "$W/two-a.raw" "$W/two-b.raw"
 
-# Prints "agentos-e2e: G1 PROVEN" only when the DONE line in $1 has pass>0 and fail, xfail, xpass
-# and blocked all 0; otherwise "agentos-e2e: G1 NOT PROVEN xfail=N blocked=M".
+# Prints "ci_boot: G1 PROVEN" (a prefix only the host script uses; the guest console is never given it,
+# and the run fails if the console shows the verdict text) only when the DONE line in $1 has pass>0 and fail, xfail, xpass
+# and blocked all 0; otherwise "ci_boot: G1 NOT PROVEN xfail=N blocked=M".
 g1_verdict() {
 	awk '{ gsub(/\r/, ""); for (i = 1; i <= NF; i++) if (split($i, kv, "=") == 2) n[kv[1]] = kv[2] }
 	END {
 		if (n["pass"] + 0 > 0 && n["fail"] == "0" && n["xfail"] == "0" && n["xpass"] == "0" && n["blocked"] == "0")
-			print "agentos-e2e: G1 PROVEN"
+			print "ci_boot: G1 PROVEN"
 		else
-			printf "agentos-e2e: G1 NOT PROVEN xfail=%s blocked=%s\n", (n["xfail"] == "" ? "?" : n["xfail"]), (n["blocked"] == "" ? "?" : n["blocked"])
+			printf "ci_boot: G1 NOT PROVEN xfail=%s blocked=%s\n", (n["xfail"] == "" ? "?" : n["xfail"]), (n["blocked"] == "" ? "?" : n["blocked"])
 	}' "$1"
 }
 
@@ -156,9 +157,13 @@ if [ -n "${E2E:-}" ]; then
 	has "$W/e2e-done.log" " xpass=0 "
 	hasnt "$W/console-e2e.log" "agentos-e2e: FAIL"
 	hasnt "$W/console-e2e.log" "agentos-e2e: XPASS"
+	# The verdict is the host's alone: a guest line that fakes it fails the run.
+	hasnt "$W/console-e2e.log" "G1 PROVEN"
+	hasnt "$W/console-e2e.log" "G1 NOT PROVEN"
 	# The G1 freeze lifts only on a run whose DONE line reads fail=0 xfail=0 blocked=0
 	# (tools/ASSUMPTIONS.md D27). A green check with expected failures is not that run, so the
-	# verdict gets its own line; it does not change whether the check passes.
+	# verdict gets its own host-only line in this job's log (not the console artifact); it does not
+	# change whether the check passes.
 	g1_verdict "$W/e2e-done.log"
 	rm -f "$W/e2e.raw" "$W/e2e-done.log"
 fi

@@ -2326,15 +2326,16 @@ class UplinkTest(unittest.TestCase):
         # Security review of #1705, finding 3: a green e2e check with expected failures is not the
         # G1 freeze-lift run (tools/ASSUMPTIONS.md D27), so the console says which it was.
         self.assertEqual(self.g1_verdict("agentos-e2e: DONE pass=9 fail=0 xfail=0 xpass=0 blocked=0\r\n"),
-                         "agentos-e2e: G1 PROVEN\n")
+                         "ci_boot: G1 PROVEN\n")
         for done, want in (
                 ("agentos-e2e: DONE pass=6 fail=0 xfail=1 xpass=0 blocked=2\n", "xfail=1 blocked=2"),
+                ("agentos-e2e: DONE pass=8 fail=0 xfail=1 xpass=0 blocked=0\n", "xfail=1 blocked=0"),
                 ("agentos-e2e: DONE pass=8 fail=0 xfail=0 xpass=0 blocked=1\n", "xfail=0 blocked=1"),
                 ("agentos-e2e: DONE pass=8 fail=1 xfail=0 xpass=0 blocked=0\n", "xfail=0 blocked=0"),
                 ("agentos-e2e: DONE pass=8 fail=0 xfail=0 xpass=1 blocked=0\n", "xfail=0 blocked=0"),
                 ("agentos-e2e: DONE pass=0 fail=0 xfail=0 xpass=0 blocked=0\n", "xfail=0 blocked=0"),
                 ("", "xfail=? blocked=?")):
-            self.assertEqual(self.g1_verdict(done), "agentos-e2e: G1 NOT PROVEN %s\n" % want, done)
+            self.assertEqual(self.g1_verdict(done), "ci_boot: G1 NOT PROVEN %s\n" % want, done)
 
     def test_the_e2e_run_prints_its_g1_verdict_without_changing_the_check(self):
         s = (IMG / "ci_boot.sh").read_text()
@@ -2343,6 +2344,10 @@ class UplinkTest(unittest.TestCase):
         self.assertIn('has "$W/e2e-done.log" " fail=0 "', e2e)
         self.assertIn('has "$W/e2e-done.log" " xpass=0 "', e2e)
         self.assertNotIn('has "$W/e2e-done.log" " xfail=0 "', e2e)
+        # REQ: HW-10. The verdict prefix is the host's alone, and a console that carries the verdict
+        # text (a guest spoof) fails the run.
+        self.assertNotIn("agentos-e2e: G1", e2e)
+        self.assertIn('\thasnt "$W/console-e2e.log" "G1 PROVEN"\n', e2e)
 
 
 class SetupServicesTest(unittest.TestCase):
