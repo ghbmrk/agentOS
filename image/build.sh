@@ -24,8 +24,9 @@ GVISOR_SHA512=c8d3a9fd4d4c4f5b8ff213caa4517356be128d18659ec4cde37828fe797f61a972
 mkdir -p "$OUT"
 STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"
 
-# The broker, the vault process and the Wi-Fi page, static and path-free.
-for cmd in agentosd agentos-egress agentos-localui; do
+# The broker, the vault process, the Wi-Fi page, the access point loader,
+# the modem bridge and the home Wi-Fi helper, static and path-free.
+for cmd in agentosd agentos-egress agentos-localui agentos-ap agentos-modem agentos-netjoin; do
 	(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
 		-o "$STAGE/usr/lib/agentos/$cmd" "./cmd/$cmd")
 done
@@ -65,8 +66,15 @@ rm -rf "$OUT/gvisor.tar.bz2" "$OUT/gvisor"
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"
 # How agentosd starts the agent machine (W1): its -agent-launch default.
 install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/guest/launch.json"
-# The page's unit lives beside its command (localui ASSUMPTIONS L26).
+# Each setup service's unit lives beside its command (localui ASSUMPTIONS L26).
 install -D -m 0644 "$REPO/broker/cmd/agentos-localui/agentos-localui.service" "$STAGE/usr/lib/systemd/system/agentos-localui.service"
+install -D -m 0644 "$REPO/broker/cmd/agentos-ap/agentos-ap.service" "$STAGE/usr/lib/systemd/system/agentos-ap.service"
+install -D -m 0644 "$REPO/broker/cmd/agentos-modem/agentos-modem.service" "$STAGE/usr/lib/systemd/system/agentos-modem.service"
+install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/agentos-netjoin.service" "$STAGE/usr/lib/systemd/system/agentos-netjoin.service"
+# The home Wi-Fi helper's NetworkManager grant, and the rule that gives
+# qualified modems' nodes to the bridge's user.
+install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/50-agentos-netjoin.rules" "$STAGE/usr/share/polkit-1/rules.d/50-agentos-netjoin.rules"
+install -D -m 0644 "$REPO/broker/modem/at/udev/71-agentos-modem.rules" "$STAGE/usr/lib/udev/rules.d/71-agentos-modem.rules"
 chmod -R u+w,go-w "$STAGE"
 
 $MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build
