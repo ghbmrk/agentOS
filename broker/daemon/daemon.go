@@ -347,7 +347,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
 			Machines: machines, Notes: notes, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
-			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
+			Decide: retryDecide(ctx, eng, gate.Decide), Narrow: gate.Narrow, Reissue: gate.Reissue, Retry: retryItems(eng),
 			Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Narrows: cfg.Narrows, Answer: cfg.Answer,
 		}); err != nil {
 			store.Close()
@@ -449,8 +449,11 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	go gate.Run(ctx, 0)
 	// A restart fences each account an in-flight effect may have landed on
 	// (OP-4). Evidence from the executors lifts it: one crash mid-dispatch
-	// must not hold the broker account forever. Nothing is re-executed.
-	go eng.SettleUnknown(ctx, settleWait, settleMaxWait)
+	// must not hold the broker account forever. Nothing is re-executed
+	// unless a check or the service's idempotency key makes it safe; what
+	// stays unclear is parked for the digest and rechecked each round
+	// (OP-2).
+	go settleLoop(ctx, eng, settleEvery)
 	go func() {
 		srv.Wait()
 		store.Close()

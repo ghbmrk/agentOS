@@ -32,6 +32,9 @@ type crashLoops struct {
 	down      int             // Reconcile answers unknown this many more times
 	uncertain bool            // Reconcile can never tell
 	asked     int
+	// stall, if set, holds every Reconcile after the third until it
+	// closes, so a test sees the fence before parking (OP-2) lifts it.
+	stall chan struct{}
 }
 
 func (c *crashLoops) Execute(ctx context.Context, in journal.Intent, n int) journal.Outcome {
@@ -45,6 +48,11 @@ func (c *crashLoops) Execute(ctx context.Context, in journal.Intent, n int) jour
 
 func (c *crashLoops) Reconcile(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	c.mu2.Lock()
+	if c.stall != nil && c.asked >= 3 {
+		c.mu2.Unlock()
+		<-c.stall
+		c.mu2.Lock()
+	}
 	defer c.mu2.Unlock()
 	c.asked++
 	if c.uncertain || c.down > 0 {
@@ -188,9 +196,9 @@ func TestOP4UncertainOutcomeStaysFencedAndStopAnswers(t *testing.T) {
 	fastSettle(t)
 	crashed := crashMidLoopsOff(t)
 	dir := t.TempDir()
-	f := &crashLoops{uncertain: true}
+	f := &crashLoops{uncertain: true, stall: make(chan struct{})}
 	cancel, d := startLoops(t, dir, crashed, f)
-	defer func() { cancel(); d.Wait() }()
+	defer func() { close(f.stall); cancel(); d.Wait() }()
 	deadline := time.Now().Add(5 * time.Second)
 	for f.askedCount() < 3 {
 		if time.Now().After(deadline) {

@@ -24,6 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/digestqueue"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localsrv"
@@ -765,6 +766,15 @@ func main() {
 	if dg != nil {
 		if o := d.Owner(); o != nil {
 			dg.cfg.Inform = o.Inform
+		}
+		// Effects left unclear and parked rather than retried (OP-2).
+		if src, err := newUnclearSource(d.Engine().Parked, change.FileStore{Path: filepath.Join(digestDir, "unclear-digest.json")}); err != nil {
+			log.Printf("digest: no line for unclear effects: %v", err)
+		} else {
+			if dg.cfg.Sources == nil {
+				dg.cfg.Sources = map[string]digestqueue.Source{}
+			}
+			dg.cfg.Sources[unclearDigestSource] = src
 		}
 		go dg.run(ctx)
 	}

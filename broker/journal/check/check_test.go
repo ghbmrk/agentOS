@@ -5,7 +5,7 @@ package check
 // from; a checker with that predicate dropped accepts the counterexample, so
 // no predicate is dead weight.
 //
-// REQ: OP-3, OP-4, OP-5, CAP-3
+// REQ: OP-2, OP-3, OP-4, OP-5, CAP-3
 
 import (
 	"bytes"
@@ -37,6 +37,20 @@ func (t *trail) disp(id string, n int) *trail {
 }
 func (t *trail) obs(id string, n int, res journal.Result) *trail {
 	return t.add(journal.Record{Type: journal.RecObserved, ID: id, Attempt: n, Result: res, Source: "executor"})
+}
+
+func (t *trail) dispBy(id string, n int, source string) *trail {
+	return t.add(journal.Record{Type: journal.RecDispatched, ID: id, Attempt: n, Source: source})
+}
+func (t *trail) park(id string, n int) *trail {
+	return t.add(journal.Record{Type: journal.RecParked, ID: id, Attempt: n})
+}
+
+// unknownX extends p with an intent x whose first attempt ended unknown.
+func unknownX(p []journal.Record) *trail {
+	t := &trail{recs: p}
+	t.sub(effect("x")).rec(journal.RecAuthorized, "x").disp("x", 1).obs("x", 1, journal.ResultUnknown)
+	return t
 }
 
 // effect is a plain intent with content that erasure must remove.
@@ -111,6 +125,36 @@ var counterexamples = map[string][]func(p []journal.Record) ([]journal.Record, O
 			t := &trail{recs: p}
 			t.sub(effect("x")).rec(journal.RecAuthorized, "x").disp("x", 1).obs("x", 1, journal.ResultUnknown)
 			t.disp("x", 2).obs("x", 2, journal.ResultSucceeded)
+			return t.recs, Options{}
+		},
+		func(p []journal.Record) ([]journal.Record, Options) { // owner retry of an intent never parked (OP-2)
+			t := unknownX(p)
+			t.dispBy("x", 2, journal.DispatchOwner).obs("x", 2, journal.ResultSucceeded)
+			return t.recs, Options{}
+		},
+		func(p []journal.Record) ([]journal.Record, Options) { // key retry after parking (OP-2)
+			t := unknownX(p)
+			t.park("x", 1).dispBy("x", 1, journal.DispatchKey).obs("x", 1, journal.ResultSucceeded)
+			return t.recs, Options{}
+		},
+		func(p []journal.Record) ([]journal.Record, Options) { // key retry under a new attempt number (OP-2)
+			t := unknownX(p)
+			t.dispBy("x", 2, journal.DispatchKey).obs("x", 2, journal.ResultSucceeded)
+			return t.recs, Options{}
+		},
+		func(p []journal.Record) ([]journal.Record, Options) { // parked while in flight (OP-2)
+			t := &trail{recs: p}
+			t.sub(effect("x")).rec(journal.RecAuthorized, "x").disp("x", 1).park("x", 1).obs("x", 1, journal.ResultUnknown)
+			return t.recs, Options{}
+		},
+		func(p []journal.Record) ([]journal.Record, Options) { // parked twice (OP-2)
+			t := unknownX(p)
+			t.park("x", 1).park("x", 1)
+			return t.recs, Options{}
+		},
+		func(p []journal.Record) ([]journal.Record, Options) { // a dispatch source nobody defined (OP-2)
+			t := unknownX(p)
+			t.park("x", 1).dispBy("x", 2, "agent").obs("x", 2, journal.ResultSucceeded)
 			return t.recs, Options{}
 		},
 		func(p []journal.Record) ([]journal.Record, Options) { // settled twice
@@ -346,4 +390,28 @@ func TestUnreadableJournalIsNotReportedClean(t *testing.T) {
 		t.Fatal(err)
 	}
 	cannotRun("corrupt line")
+}
+
+// The three ways OP-2 lets an unknown attempt move on are clean: a key
+// retry of the same attempt, parking, and the owner's retry of a parked one.
+func TestOP2SettlePathsAreClean(t *testing.T) {
+	p := grown(t, 7)
+	for name, build := range map[string]func() []journal.Record{
+		"key retry": func() []journal.Record {
+			return unknownX(p).dispBy("x", 1, journal.DispatchKey).obs("x", 1, journal.ResultSucceeded).recs
+		},
+		"parked at rest": func() []journal.Record {
+			return unknownX(p).park("x", 1).recs
+		},
+		"owner retry": func() []journal.Record {
+			return unknownX(p).park("x", 1).dispBy("x", 2, journal.DispatchOwner).obs("x", 2, journal.ResultSucceeded).recs
+		},
+		"key retry unknown again, then parked": func() []journal.Record {
+			return unknownX(p).dispBy("x", 1, journal.DispatchKey).obs("x", 1, journal.ResultUnknown).park("x", 1).recs
+		},
+	} {
+		if v := Journal(build(), Options{}); len(v) != 0 {
+			t.Errorf("%s: %v", name, v)
+		}
+	}
 }

@@ -147,13 +147,23 @@ type Outcome struct {
 	Evidence string
 }
 
-// Executor performs effects. Execute may be called at most once per
-// (intent, attempt); AttemptKey gives a stable idempotency key for it.
+// Executor performs effects. Execute is called at most once per
+// (intent, attempt), unless the executor reports that its service honours
+// the attempt's idempotency key (KeyHonouring); AttemptKey gives that key.
 // Reconcile asks the service what happened to an attempt, returning
 // ResultUnknown when the service cannot tell.
 type Executor interface {
 	Execute(ctx context.Context, in Intent, attempt int) Outcome
 	Reconcile(ctx context.Context, in Intent, attempt int) Outcome
+}
+
+// KeyHonouring is implemented by executors that can say whether their
+// service honours the attempt's idempotency key (AttemptKey): executing the
+// same key twice applies the effect at most once. Only then may the engine
+// execute an attempt whose outcome is unknown again, with the same key
+// (OP-2). An executor without it never gets a second call for an attempt.
+type KeyHonouring interface {
+	HonoursKey(in Intent) bool
 }
 
 // Canceller is implemented by executors whose service supports cancelling an
@@ -212,7 +222,21 @@ type Attempt struct {
 	Source   string   `json:"source,omitempty"`
 	Evidence string   `json:"evidence,omitempty"`
 	Cancels  []Cancel `json:"cancels,omitempty"`
+	// Parked says the attempt's outcome stayed unknown and the engine
+	// stopped trying to settle it: it is in the daily digest, and only
+	// the owner can ask for it to run again (OP-2, D-116).
+	Parked bool `json:"parked,omitempty"`
 }
+
+// Sources of a RecDispatched record other than an ordinary dispatch.
+const (
+	// DispatchKey re-executes an attempt whose outcome is unknown with the
+	// same idempotency key, because the executor's service honours it.
+	DispatchKey = "key"
+	// DispatchOwner starts a new attempt of a parked intent because the
+	// owner asked for it, knowing the effect may happen twice.
+	DispatchOwner = "owner"
+)
 
 // Cancel records a cancellation request made by STOP.
 type Cancel struct {

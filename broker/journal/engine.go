@@ -46,6 +46,10 @@ type Engine struct {
 	// missed counts the SettleUnknown rounds in a row that left a fenced
 	// intent unresolved; Unconfirmed reads it (#1373).
 	missed int
+	// checks counts, per intent, the checks in a row that left its
+	// unknown outcome unknown; at parkAfter the intent is parked (OP-2).
+	// It is memory only: a restart starts the count again.
+	checks map[string]int
 	broken error
 }
 
@@ -94,6 +98,7 @@ type entry struct {
 	dispatched time.Time // when the latest RecDispatched was journaled
 	submitted  time.Time // when RecSubmitted was journaled
 	erased     bool      // RecErased: params and evidence removed
+	parkedSeq  uint64    // of the latest RecParked
 }
 
 // Option configures Open.
@@ -122,6 +127,7 @@ func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor
 		cold:    map[coldKey]coldVal{},
 		shapeIx: map[coldShape]uint32{},
 		fence:   map[string]map[string]bool{},
+		checks:  map[string]int{},
 		pinned:  true,
 	}
 	for _, o := range opts {
@@ -163,7 +169,7 @@ func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor
 		}
 	}
 	for _, en := range bySeq(e.open) {
-		if en.state == OutcomeUnknown {
+		if en.state == OutcomeUnknown && !en.parked() {
 			if e.fence[en.intent.Account] == nil {
 				e.fence[en.intent.Account] = map[string]bool{}
 			}
@@ -441,26 +447,41 @@ func (e *Engine) Waiting() []Wait {
 	return out
 }
 
-// ReconcileReport lists intents reconciliation resolved and those it could
-// not.
+// ReconcileReport lists intents reconciliation resolved, those it could
+// not, and those it parked in this round. A parked intent is checked again
+// on later rounds but is not unresolved: the engine has stopped trying to
+// settle it (OP-2).
 type ReconcileReport struct {
 	Resolved   []string
 	Unresolved []string
+	Parked     []string
 }
 
-// Reconcile asks each executor for evidence about every outcome_unknown
-// attempt. It only reads from services, so it runs even while stopped.
+// parkAfter is how many checks in a row may leave an outcome unknown
+// before the intent is parked for the daily digest. At the daemon's
+// settle pacing that is about thirteen minutes (OP-2, D-116).
+const parkAfter = 10
+
+// Reconcile settles every outcome_unknown attempt in the order OP-2 sets:
+// it checks through the same tool (the executor's Reconcile); if the check
+// cannot tell and the executor's service honours the idempotency key, it
+// executes the same attempt again under the same key; and once parkAfter
+// checks in a row have left the outcome unknown, it parks the intent for
+// the daily digest. It never starts a new attempt and never asks the
+// owner. Checks only read from services, so they run even while stopped;
+// a key retry is a dispatch and does not.
 func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 	e.mu.Lock()
 	type job struct {
-		in   Intent
-		n    int
-		exec Executor
+		in     Intent
+		n      int
+		exec   Executor
+		parked bool
 	}
 	var jobs []job
 	for _, en := range bySeq(e.open) {
 		if en.state == OutcomeUnknown {
-			jobs = append(jobs, job{en.intent, en.attempts[len(en.attempts)-1].N, e.execs[en.intent.Executor]})
+			jobs = append(jobs, job{en.intent, en.latest().N, e.execs[en.intent.Executor], en.parked()})
 		}
 	}
 	e.mu.Unlock()
@@ -471,17 +492,240 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 		if j.exec != nil {
 			out = safeCall(func() Outcome { return j.exec.Reconcile(ctx, j.in, j.n) })
 		}
-		if out.Result == ResultUnknown {
-			rep.Unresolved = append(rep.Unresolved, j.in.ID)
-			continue
+		if out.Result == ResultUnknown && !j.parked {
+			out = e.keyRetry(ctx, j.in.ID, j.n, j.exec)
 		}
-		if _, err := e.Resolve(j.in.ID, j.n, out, "reconcile"); err != nil {
-			rep.Unresolved = append(rep.Unresolved, j.in.ID)
-			continue
+		switch {
+		case out.Result == ResultSucceeded || out.Result == ResultNotApplied:
+			if _, err := e.Resolve(j.in.ID, j.n, out, "reconcile"); err != nil && !e.settled(j.in.ID, j.n) {
+				if !j.parked {
+					rep.Unresolved = append(rep.Unresolved, j.in.ID)
+				}
+				continue
+			}
+			e.forget(j.in.ID)
+			rep.Resolved = append(rep.Resolved, j.in.ID)
+		case j.parked:
+			// Checked again; still unclear. It stays in the digest.
+		default:
+			if e.park(j.in.ID, j.n) {
+				rep.Parked = append(rep.Parked, j.in.ID)
+			} else {
+				rep.Unresolved = append(rep.Unresolved, j.in.ID)
+			}
 		}
-		rep.Resolved = append(rep.Resolved, j.in.ID)
 	}
 	return rep
+}
+
+// settled reports whether attempt n of id already has evidence, as when a
+// key retry observed it itself.
+func (e *Engine) settled(id string, n int) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	en, err := e.lookup(id, false)
+	if err != nil {
+		return false
+	}
+	a := en.attempt(n)
+	return a != nil && (a.Result == ResultSucceeded || a.Result == ResultNotApplied)
+}
+
+// forget drops id's check count.
+func (e *Engine) forget(id string) {
+	e.mu.Lock()
+	delete(e.checks, id)
+	e.mu.Unlock()
+}
+
+// park counts one more check that left attempt n of id unknown, and parks
+// the intent once parkAfter checks in a row have. It reports whether it
+// parked the intent now.
+func (e *Engine) park(id string, n int) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	en, err := e.lookup(id, false)
+	if err != nil || en.state != OutcomeUnknown || en.parked() || en.latest().N != n {
+		return false
+	}
+	e.checks[id]++
+	if e.checks[id] < parkAfter {
+		return false
+	}
+	if err := e.commit(Record{Type: RecParked, ID: id, Attempt: n,
+		Reason: "no check through the same tool, and no idempotency key, settled it"}); err != nil {
+		return false
+	}
+	delete(e.checks, id)
+	return true
+}
+
+// keyRetry executes attempt n of id again under the same idempotency key,
+// if the executor reports that its service honours the key and the
+// attempt may be dispatched now: not stopped, no same-effect intent ahead
+// of it, and the policy's dispatch recheck passes (OP-3). A refused or
+// skipped retry journals nothing and returns unknown; the outcome of a
+// retry that ran is journaled here and returned.
+func (e *Engine) keyRetry(ctx context.Context, id string, n int, exec Executor) Outcome {
+	unknown := Outcome{Result: ResultUnknown}
+	kh, ok := exec.(KeyHonouring)
+	if !ok {
+		return unknown
+	}
+	e.mu.Lock()
+	en, err := e.lookup(id, false)
+	if err != nil {
+		e.mu.Unlock()
+		return unknown
+	}
+	in := en.intent
+	e.mu.Unlock()
+	if !safeBool(func() bool { return kh.HonoursKey(in) }) {
+		return unknown
+	}
+	_, err = e.rechecked(ctx, id, func(en *entry) (Record, error) {
+		last := en.latest()
+		if en.state != OutcomeUnknown || last == nil || last.Parked || last.N != n {
+			return Record{}, ErrState
+		}
+		return Record{Type: RecDispatched, ID: id, Attempt: n, Source: DispatchKey}, e.mayDispatch(en)
+	})
+	if err != nil {
+		return unknown
+	}
+	out := safeCall(func() Outcome { return exec.Execute(ctx, in, n) })
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.commit(Record{Type: RecObserved, ID: id, Attempt: n, Result: out.Result,
+		Source: "executor", Evidence: out.Evidence}); err != nil {
+		return unknown
+	}
+	return out
+}
+
+// mayDispatch checks, with e.mu held, what every dispatch of en needs
+// beyond its own state: no STOP and no restart fence on its account
+// (narrowing intents excepted), no same-effect intent unresolved ahead of
+// it (OP-2), and a registered executor.
+func (e *Engine) mayDispatch(en *entry) error {
+	exempt := narrowing(en.intent)
+	if e.stopped && !exempt {
+		return ErrStopped
+	}
+	for fid := range e.fence[en.intent.Account] {
+		if fid != en.intent.ID && !exempt {
+			return fmt.Errorf("%w: %s", ErrUnreconciled, en.intent.Account)
+		}
+	}
+	if oid := e.duplicateOf(en); oid != "" {
+		return &HeldError{ID: en.intent.ID, BlockedBy: oid}
+	}
+	if _, ok := e.execs[en.intent.Executor]; !ok {
+		return fmt.Errorf("%w: %q", ErrNoExecutor, en.intent.Executor)
+	}
+	return nil
+}
+
+// rechecked runs the policy's dispatch recheck for id without the lock,
+// and commits the record build returns only if build still passes after
+// the check and nothing was journaled while it ran. A failed recheck is
+// ErrRecheck and journals nothing: the intent keeps its unknown outcome.
+// It returns the record committed and the intent as it was then.
+func (e *Engine) rechecked(ctx context.Context, id string, build func(*entry) (Record, error)) (Intent, error) {
+	for try := 0; ; try++ {
+		e.mu.Lock()
+		en, err := e.lookup(id, false)
+		if err == nil {
+			_, err = build(en)
+		}
+		if err != nil {
+			e.mu.Unlock()
+			return Intent{}, err
+		}
+		seq, in := e.seq, en.intent
+		e.mu.Unlock()
+
+		perr := e.policy.Check(ctx, PhaseDispatch, in)
+
+		e.mu.Lock()
+		if e.seq != seq {
+			e.mu.Unlock()
+			if try >= maxRechecks {
+				return Intent{}, ErrBusy
+			}
+			continue
+		}
+		if perr != nil {
+			e.mu.Unlock()
+			return Intent{}, fmt.Errorf("%w: %v", ErrRecheck, perr)
+		}
+		rec, err := build(en)
+		if err == nil {
+			err = e.commit(rec)
+		}
+		e.mu.Unlock()
+		return in, err
+	}
+}
+
+// Retry runs a parked intent again because the owner asked for it (OP-2):
+// a new attempt, under a new idempotency key, so the effect may happen
+// twice; the owner's request says so. It needs what any dispatch needs (no
+// STOP, no restart fence on the account, no same-effect intent unresolved
+// ahead of it, and the policy's dispatch recheck), and a refusal journals
+// nothing, so the intent stays parked. parked is the attempt the owner
+// was asked about (ParkedIntent.Attempt): an approval of an older request
+// does not retry an attempt that was itself a retry.
+func (e *Engine) Retry(ctx context.Context, id string, parked int) (Status, error) {
+	var n int
+	in, err := e.rechecked(ctx, id, func(en *entry) (Record, error) {
+		if en.state != OutcomeUnknown || !en.parked() || en.latest().N != parked {
+			return Record{}, fmt.Errorf("%w: %s attempt %d is %s and not parked", ErrState, id, parked, en.state)
+		}
+		n = len(en.attempts) + 1
+		return Record{Type: RecDispatched, ID: id, Attempt: n, Source: DispatchOwner}, e.mayDispatch(en)
+	})
+	if err != nil {
+		return Status{}, err
+	}
+	exec := e.execs[in.Executor]
+	out := safeCall(func() Outcome { return exec.Execute(ctx, in, n) })
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.commit(Record{Type: RecObserved, ID: id, Attempt: n, Result: out.Result,
+		Source: "executor", Evidence: out.Evidence}); err != nil {
+		return Status{}, err
+	}
+	en, err := e.lookup(id, false)
+	if err != nil {
+		return Status{}, err
+	}
+	return en.status(), nil
+}
+
+// ParkedIntent is an intent whose outcome stayed unknown and that the
+// engine no longer tries to settle: the daily digest lists it, and the
+// owner may ask to retry it (OP-2).
+type ParkedIntent struct {
+	Intent  Intent // parameters and preconditions left out
+	Attempt int    // the parked attempt
+	Seq     uint64 // of the RecParked record
+}
+
+// Parked lists the parked intents, oldest first.
+func (e *Engine) Parked() []ParkedIntent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []ParkedIntent
+	for _, en := range bySeq(e.open) {
+		if en.state != OutcomeUnknown || !en.parked() {
+			continue
+		}
+		in := en.intent
+		in.Params, in.Preconditions = nil, nil
+		out = append(out, ParkedIntent{Intent: in, Attempt: en.latest().N, Seq: en.parkedSeq})
+	}
+	return out
 }
 
 // reconcileRound bounds one round of SettleUnknown, so an executor whose
@@ -973,11 +1217,31 @@ func (e *Engine) validate(r Record) error {
 		if e.stopped && !narrowing(en.intent) {
 			return fmt.Errorf("%s: dispatched while stopped", r.ID)
 		}
-		if en.state != Authorized && en.state != NotApplied {
-			return fmt.Errorf("%s: dispatched from %s", r.ID, en.state)
+		last := en.latest()
+		switch r.Source {
+		case "":
+			if en.state != Authorized && en.state != NotApplied {
+				return fmt.Errorf("%s: dispatched from %s", r.ID, en.state)
+			}
+			if r.Attempt != len(en.attempts)+1 {
+				return fmt.Errorf("%s: attempt %d, want %d", r.ID, r.Attempt, len(en.attempts)+1)
+			}
+		case DispatchKey:
+			// The same attempt again, under the same idempotency key.
+			if en.state != OutcomeUnknown || last == nil || last.Parked || r.Attempt != last.N {
+				return fmt.Errorf("%s: key retry of attempt %d from %s", r.ID, r.Attempt, en.state)
+			}
+		case DispatchOwner:
+			if en.state != OutcomeUnknown || last == nil || !last.Parked || r.Attempt != len(en.attempts)+1 {
+				return fmt.Errorf("%s: owner retry as attempt %d from %s", r.ID, r.Attempt, en.state)
+			}
+		default:
+			return fmt.Errorf("%s: dispatch source %q", r.ID, r.Source)
 		}
-		if r.Attempt != len(en.attempts)+1 {
-			return fmt.Errorf("%s: attempt %d, want %d", r.ID, r.Attempt, len(en.attempts)+1)
+	case RecParked:
+		last := en.latest()
+		if en.state != OutcomeUnknown || last == nil || last.Parked || r.Attempt != last.N {
+			return fmt.Errorf("%s: parked attempt %d from %s", r.ID, r.Attempt, en.state)
 		}
 	case RecObserved:
 		a := en.attempt(r.Attempt)
@@ -1034,7 +1298,7 @@ func (e *Engine) apply(r Record) {
 	en := e.intents[r.ID]
 	was := en.state
 	en.apply(r)
-	if r.Type == RecObserved && r.Result != ResultUnknown {
+	if (r.Type == RecObserved && r.Result != ResultUnknown) || r.Type == RecParked {
 		if f := e.fence[en.intent.Account]; f != nil {
 			delete(f, r.ID)
 		}
@@ -1198,7 +1462,14 @@ func (en *entry) apply(r Record) {
 	case RecDispatched:
 		en.state = InFlight
 		en.dispatched = r.At
-		en.attempts = append(en.attempts, Attempt{N: r.Attempt, Result: ResultInFlight})
+		if r.Source == DispatchKey {
+			en.attempt(r.Attempt).Result = ResultInFlight
+		} else {
+			en.attempts = append(en.attempts, Attempt{N: r.Attempt, Result: ResultInFlight})
+		}
+	case RecParked:
+		en.attempt(r.Attempt).Parked = true
+		en.parkedSeq = r.Seq
 	case RecObserved:
 		a := en.attempt(r.Attempt)
 		a.Result, a.Source, a.Evidence = r.Result, r.Source, r.Evidence
@@ -1225,6 +1496,15 @@ func (en *entry) apply(r Record) {
 	}
 }
 
+// latest is the intent's last attempt, or nil before its first.
+func (en *entry) latest() *Attempt { return en.attempt(len(en.attempts)) }
+
+// parked reports whether the intent's last attempt is parked (OP-2).
+func (en *entry) parked() bool {
+	a := en.latest()
+	return a != nil && a.Parked
+}
+
 func (en *entry) attempt(n int) *Attempt {
 	if n < 1 || n > len(en.attempts) {
 		return nil
@@ -1240,6 +1520,16 @@ func (en *entry) status() Status {
 		atts[i] = a
 	}
 	return Status{Intent: in, State: en.state, Permission: en.permission, Attempts: atts, Quality: en.quality}
+}
+
+// safeBool runs an executor hook that answers yes or no. A panic is no.
+func safeBool(f func() bool) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	return f()
 }
 
 // safeCall runs an executor method. A panic or a result that is not
