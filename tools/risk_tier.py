@@ -75,6 +75,12 @@ TIER_A_BROKER = {
     "sim", "sipsign", "smsapi", "sockets", "sockprobe", "tpmseal", "update", "vault", "vendor",
     "verb", "vm", "workers",
 }
+# CRED-1 custody (RECALL-canary-5): recall's scrubber and the event bus that runs
+# it decide what authentication material reaches the recall index and the event
+# log. They are A on their own rule, checked after the core list so its reason
+# still shows first; recall's core-list allow lines are "shape only" and may go.
+# tests/test_risk_tier_custody.py fails on a scrubber or redactor outside tier A.
+TIER_A_CUSTODY = {"events", "recall"}
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
 # risk_tier itself is A: CI runs the PR's own copy, so an edit to it decides its own tier.
 # image/ builds what ships (image/fuzz-targets.json too: build.sh installs it as
@@ -161,6 +167,8 @@ def tier_of(path):
         for pkg in sorted(core | wiring | allowed):
             if p.startswith("broker/" + pkg + "/"):
                 return "A", "core list: broker/" + pkg + "/"
+        if len(parts) > 2 and parts[1] in TIER_A_CUSTODY:
+            return "A", "CRED-1 custody: broker/" + parts[1] + "/"
     if parts[0] == "guest" and len(parts) == 3 and name in TIER_A_GUEST_FILES:
         return "A", "guest/*/" + name
     if p in TIER_A_GUEST_PATHS:
