@@ -73,6 +73,7 @@ func (openAI) Stream(dst io.Writer, flush func(), src io.Reader, _ string, inclu
 	sc := bufio.NewScanner(src)
 	sc.Buffer(make([]byte, 64<<10), 8<<20)
 	var u Usage
+	wrote := false
 	for sc.Scan() {
 		data, ok := strings.CutPrefix(sc.Text(), "data:")
 		if !ok {
@@ -86,13 +87,19 @@ func (openAI) Stream(dst io.Writer, flush func(), src io.Reader, _ string, inclu
 			return u, err
 		}
 		var c struct {
-			Usage   *oaUsage `json:"usage"`
+			Usage   *oaUsage        `json:"usage"`
+			Error   json.RawMessage `json:"error"`
 			Choices []struct {
 				Delta oaDelta `json:"delta"`
 			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(data), &c); err != nil {
 			return u, fmt.Errorf("provider stream: %v", err)
+		}
+		// An error before anything reached the guest leaves the stream
+		// unstarted, so the router can still fail over.
+		if len(c.Error) > 0 && string(c.Error) != "null" && !wrote {
+			return u, errNotStarted
 		}
 		for _, ch := range c.Choices {
 			u.OutputChars += ch.Delta.chars()
@@ -105,6 +112,7 @@ func (openAI) Stream(dst io.Writer, flush func(), src io.Reader, _ string, inclu
 				continue
 			}
 		}
+		wrote = true
 		if _, err := fmt.Fprintf(dst, "data: %s\n\n", data); err != nil {
 			return u, err
 		}

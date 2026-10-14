@@ -16,7 +16,8 @@ builds on two runners, boots one build under Secure Boot in QEMU, and compares t
 | `mkosi/mkosi.finalize` | Fails the build on per-install state or socket files (HW-1, V15) |
 | `mkosi/mkosi.extra/` | Health check gating boot-complete, boot report, broker unit, root growth |
 | `finish_image.py` | Counted boot entry, `/usr` verified against the entry's `usrhash=`, release manifest |
-| `ci_boot.sh` | QEMU boot with OVMF Secure Boot and swtpm; checks health, blessing, root growth |
+| `ci_boot.sh` | QEMU boot with OVMF Secure Boot and swtpm; checks health, blessing, root growth, the wired lease and the inbound drop |
+| `probe_inbound.py` | Probes box ports through QEMU's host forwards for `ci_boot.sh`: dropped, answered or error |
 
 Outputs in OUT: `agentos_V.raw` (the drive), `agentos_V.usr.raw` and `.usr-verity.raw` (the
 release's `/usr`), `agentos_V+3.conf` (its boot entry), `agentos_V.release.json`, the package

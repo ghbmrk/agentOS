@@ -7,11 +7,18 @@ seed, a host key, the snakeoil TLS key) would be shared by every box, and owner 
 on that owner's drive. A planted socket file could look like a broker socket inside a guest.
 It also refuses a tree that could write the broker's memory to disk (IMG-nodump): the Owner Card
 passphrase is a Go string that cannot be zeroed (card C13), so core dumps must be discarded and
-there must be no swap.
+there must be no swap. And it refuses a tree without the controller radio's firmware (#1415), since
+the setup network cannot come up without it, or one that lets the same chip's Bluetooth half load.
+It refuses a tree whose networkd could forward or masquerade (#1478): the inbound drop has no
+forward hook, so the wired uplink file is the only live .network file, it holds exactly the shipped
+keys, and no networkd setting turns forwarding on. And it refuses a tree that tells the LAN about the box (#1479): the uplink sends no
+hostname and uses addresses without the MAC, and resolved answers no LLMNR or multicast DNS.
 Usage outside mkosi: mkosi.finalize ROOT"""
-import configparser
+import errno
+import fnmatch
 import os
 import pathlib
+import re
 import stat
 import sys
 
@@ -30,13 +37,67 @@ SCAN_MAX = 1 << 20
 # IMG-nodump: what each setting must end up as, after every file systemd reads.
 CORE_PATTERN = "|/usr/bin/false"
 NODUMP_SYSCTL = "usr/lib/sysctl.d/99-agentos-nodump.conf"
-# The card-holding service. localui is not in the image yet; DefaultLimitCORE=0 covers it.
-CARD_UNIT = "agentosd.service"
-# Precedence low to high: a file in a later directory replaces one of the same name in an earlier.
-CONF_DIRS = ("usr/lib", "lib", "usr/local/lib", "etc")
+# The services that hold the card's passphrase, the vault's keys, the claim's codes or the setup
+# network's password in memory.
+CARD_UNITS = ("agentosd.service", "agentos-egress.service", "agentos-localui.service", "agentos-ap.service")
+# systemd 257.13's search path for its configuration files, highest precedence first: CONF_PATHS
+# (src/basic/constants.h) without /run, which the box mounts a tmpfs over, so nothing the tree puts
+# there is read (stray_violations refuses it). Split-/usr /lib is not searched by 257 at all.
+def conf_paths(n):
+    return ("etc/" + n, "usr/local/lib/" + n, "usr/lib/" + n)
+
+
+# The system manager's unit search path in the image, highest precedence first (lookup_paths_init
+# in src/libsystemd/sd-path/path-lookup.c, without its /run entries).
+UNIT_PATHS = ("etc/systemd/system.control", "etc/systemd/system", "etc/systemd/system.attached",
+              "usr/local/lib/systemd/system", "usr/lib/systemd/system")
+# Where swap units are looked for (any precedence).
 UNIT_DIRS = ("usr/lib/systemd/system", "lib/systemd/system", "usr/local/lib/systemd/system",
              "etc/systemd/system")
 SWAP_GENERATORS = ("zram-generator", "systemd-zram-generator")
+# The M6 Ultra's RZ616 (MT7922) radio (#1415): the files mt7921e requests (MT7922_FIRMWARE_WM and
+# MT7922_ROM_PATCH in the kernel's mt792x.h), from firmware-mediatek (non-free-firmware).
+RADIO_FIRMWARE = ("usr/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+                  "usr/lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin")
+# The kernel's firmware loader also tries these suffixes (Debian's kernel enables both).
+FIRMWARE_SUFFIXES = ("", ".xz", ".zst")
+# The same chip's Bluetooth half, which nothing uses: these modules must never load (#1415).
+BLOCKED_MODULES = ("btusb", "btmtk")
+# kmod 34's modprobe.d directories (default_config_paths in libkmod/libkmod.c), highest precedence
+# first, without /run (a tmpfs on the box).
+MODPROBE_DIRS = ("etc/modprobe.d", "usr/local/lib/modprobe.d", "usr/lib/modprobe.d", "lib/modprobe.d")
+REFUSE = ("/bin/false", "/usr/bin/false")
+# The only .network file the image may run (#1478); anything else (Debian's 80-* container, VM and
+# ad-hoc files) must be removed or masked.
+UPLINK = "20-agentos-uplink.network"
+# The uplink's every assignment, as (section, key): value (#1496). The live uplink must hold exactly
+# these, each once: an allowlist, since networkd also honours old spellings (ProxyARP=, [DHCP]),
+# generic DHCP options (SendOption=) and list keys (a second Token=) that a denylist misses. With
+# them nothing forwards, answers or advertises on the LAN (#1478), the box sends no hostname (every
+# box is "agentos") and its IPv6 addresses carry no MAC (#1479).
+UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Network", "DHCP"): "yes",
+               ("Network", "IPv6PrivacyExtensions"): "yes", ("DHCPv4", "SendHostname"): "no",
+               ("DHCPv6", "SendHostname"): "no", ("IPv6AcceptRA", "Token"): "prefixstable"}
+# sysctl leaves that turn routing on (#1478). systemd-sysctl expands a glob key per component against
+# /proc/sys, so a key counts when its first component is "net" or a glob and its last is one of these
+# or a glob (#1497). Any glob counts, not only one that matches: glibc's glob takes [^x] as a negated
+# class and Python's fnmatch does not. Components are taken after systemd's normalisation (#1508).
+FORWARD_LEAVES = ("ip_forward", "forwarding", "force_forwarding")
+GLOB = re.compile(r"[*?\[]")
+# In a glob key (one holding *, ? or [), systemd-sysctl's glob() also takes a backslash as an escape
+# and {a,b} as alternatives (GLOB_BRACE, which can span a "/"), so either makes the whole key count.
+GLOB_ESCAPE = re.compile(r"[\\{]")
+# systemd's read_line ends a sysctl.d line at LF, CR or NUL; Python's splitlines also splits at
+# \x0b, \x0c, \x1c-\x1e, U+0085, U+2028 and U+2029. The check refuses every such byte, any other
+# control byte and a BOM rather than model them (#1508).
+SYSCTL_BAD_BYTES = re.compile(rb"[\x00-\x08\x0a-\x1f\x7f]|\xc2\x85|\xe2\x80[\xa8\xa9]|\xef\xbb\xbf")
+# systemd's LONG_LINE_MAX: read_line fails on a line of this many bytes or more (the length check
+# comes before the end-of-line check), and systemd-sysctl and config_parse stop reading the file
+# there (#1508).
+LONG_LINE_MAX = 1 << 20
+# Where the booted box mounts something of its own (devtmpfs, proc, sysfs, tmpfs): a link into one
+# reaches what the box makes, not the image, and nothing the tree puts there is read.
+BOX_MOUNTS = ("dev", "proc", "sys", "run", "tmp")
 
 
 def violations(root):
@@ -58,6 +119,10 @@ def violations(root):
     # LOOP-7's state: agentosd creates it on the box and gives it to the fuzz user (agentosd L7-6).
     if os.path.lexists(root / "var/lib/agentos-fuzz"):
         out.append("var/lib/agentos-fuzz: fuzz state; created on the box, never shipped")
+    # The vault and the page's claim state: their units create them on the box (#1249, #1270).
+    for d, what in (("var/lib/agentos-egress", "vault state"), ("var/lib/agentos-localui", "claim state")):
+        if os.path.lexists(root / d):
+            out.append("%s: %s; created on the box, never shipped" % (d, what))
     for dirpath, dirnames, filenames in os.walk(root):
         for n in dirnames + filenames:
             p = os.path.join(dirpath, n)
@@ -71,19 +136,189 @@ def violations(root):
             elif (stat.S_ISREG(st.st_mode) and st.st_size <= SCAN_MAX
                   and rel.split(os.sep, 1)[0] in SCAN and has_key(p)):
                 out.append("%s: private key material" % rel)
-    return out + dump_violations(root) + swap_violations(root)
+    return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
+            + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
+            + resolved_violations(root) + stray_violations(root))
 
 
-def dropins(root, dirs):
-    """The files systemd reads from DIRS (relative, lowest precedence first) in its order: by file
-    name, a later directory's file replacing an earlier one's of the same name."""
-    by_name = {}
+class Conf:
+    """A configuration file as the booted box reads it: REL is its path in the tree (its directory
+    resolved inside the image, then its name), and every link on the way is followed inside the
+    image, never on the build host (#1508)."""
+
+    def __init__(self, root, rel, error=None):
+        self.root, self.rel, self.error = root, rel, error
+        self.name = rel.rsplit("/", 1)[-1]
+
+    def __repr__(self):
+        return "Conf(%r)" % self.rel
+
+    def is_link(self):
+        return os.path.islink(os.path.join(self.root, self.rel))
+
+    def resolve(self):
+        """(in-image path, lstat) as tree_chase gives them; raises OSError as it does."""
+        if self.error:
+            raise OSError(errno.EACCES, self.error)
+        return tree_chase(self.root, self.rel)
+
+    def identity(self):
+        """What fstat would name: a device and inode, or a path the box mounts at boot."""
+        path, st = self.resolve()
+        return path if st is None else (st.st_dev, st.st_ino)
+
+    def read_bytes(self):
+        """What systemd reads. A dangling link reads as nothing (every reader here skips a file that
+        is not there), and so does a link to /dev/null. OSError where systemd's read fails, or where
+        the link reaches what the box mounts at boot rather than the image."""
+        try:
+            path, st = self.resolve()
+        except FileNotFoundError:
+            return b""
+        if st is None:
+            if path == "/dev/null":
+                return b""
+            raise OSError(errno.EXDEV, "it resolves to %s, which the box mounts at boot" % path)
+        if stat.S_ISDIR(st.st_mode):
+            raise IsADirectoryError(errno.EISDIR, "a directory")
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file")
+        with open(os.path.join(self.root, path), "rb") as f:
+            return f.read()
+
+    def read_text(self, errors="replace"):
+        return self.read_bytes().decode(errors=errors)
+
+
+def hidden_or_backup(name):
+    """systemd 257.13's hidden_or_backup_file (src/basic/path-util.c), which FOREACH_DIRENT skips."""
+    if name.startswith(".") or name in ("lost+found", "aquota.user", "aquota.group") or name.endswith("~"):
+        return True
+    return "." in name and name.rsplit(".", 1)[1] in (
+        "rpmnew", "rpmsave", "rpmorig", "dpkg-old", "dpkg-new", "dpkg-tmp", "dpkg-dist", "dpkg-bak",
+        "dpkg-backup", "dpkg-remove", "ucf-new", "ucf-old", "ucf-dist", "swp", "bak", "old", "new")
+
+
+def conf_files(root, dirs, suffix=".conf", kmod=False):
+    """The files systemd reads from DIRS (relative to ROOT, highest precedence first), in its order:
+    systemd 257.13's conf_files_list_strv(suffix, root, flags=0, dirs) (src/shared/conf-files.c),
+    which every reader checked here calls with flags 0. Each directory is resolved inside the image
+    (chase_and_opendir; one that is missing or not a directory is skipped). In it, a hidden or
+    backup name (hidden_or_backup) or one without SUFFIX is skipped, and so is a name an earlier
+    directory already gave. Nothing is stat'ed, so a link to /dev/null, an empty file, a dangling
+    link or a directory still takes its name: that is how a file is masked. The list is sorted by
+    name as bytes (path_compare_filename is strcmp), not as Python strings.
+    KMOD: kmod 34's conf_files_list (libkmod/libkmod-config.c) instead, which skips only names
+    starting with "." and drops (without taking the name) an entry it cannot stat or that is a
+    directory, and reads a non-directory in DIRS as a file of its own."""
+    root = str(root)
+    seen, out = set(), []
     for d in dirs:
-        p = root / d
-        if p.is_dir():
-            for f in p.glob("*.conf"):
-                by_name[f.name] = f
-    return [by_name[n] for n in sorted(by_name)]
+        try:
+            path, st = tree_chase(root, d)
+        except OSError:
+            continue
+        if st is None:
+            out.append(Conf(root, d, "%s resolves to %s, which the box mounts at boot" % (d, path)))
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            if kmod and d.rsplit("/", 1)[-1] not in seen:
+                seen.add(d.rsplit("/", 1)[-1])
+                out.append(Conf(root, path))
+            continue
+        for name in os.listdir(os.path.join(root, path)):
+            if (name.startswith(".") if kmod else hidden_or_backup(name)) or not name.endswith(suffix):
+                continue
+            if name in seen:
+                continue
+            f = Conf(root, path + "/" + name)
+            if kmod:
+                try:
+                    p, fst = f.resolve()
+                except OSError:
+                    continue
+                if fst is not None and stat.S_ISDIR(fst.st_mode):
+                    continue
+            seen.add(name)
+            out.append(f)
+    return sorted(out, key=lambda f: os.fsencode(f.name))
+
+
+class Unparsable(Exception):
+    """A line where systemd's config_parse fails, and so stops reading."""
+
+
+WHITESPACE = b" \t\n\r"
+BOM = b"\xef\xbb\xbf"
+
+
+def utf8_valid(b):
+    """systemd 257.13's utf8_is_valid: strict UTF-8 without surrogates or noncharacters."""
+    try:
+        s = b.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return not any(0xFDD0 <= ord(c) <= 0xFDEF or (ord(c) & 0xFFFE) == 0xFFFE for c in s)
+
+
+def config_lines(data):
+    """(section, key, value) for each assignment systemd 257.13's config_parse reads from DATA
+    (src/shared/conf-parser.c, with parse_line): lines are read with read_line, a line starting
+    (after whitespace) with # or ; is a comment even inside a continuation, one BOM is dropped, a
+    line ending in an unescaped backslash continues into the next (the backslash becomes a space),
+    and each logical line is stripped of space, tab, CR and LF. Raises Unparsable wherever
+    config_parse fails: NUL or CR (read_line ends a line there; refused rather than modelled), a
+    line of LONG_LINE_MAX bytes or more, invalid UTF-8, or a bad section header. systemd stops
+    reading at such a line, so the check never reads past it."""
+    if b"\0" in data or b"\r" in data:
+        raise Unparsable("NUL or CR byte")
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    out, section, cont, bom_seen = [], None, None, False
+
+    def parse_line(n, ln, section):
+        ln = ln.strip(WHITESPACE)
+        if not ln:
+            return section
+        if not utf8_valid(ln):
+            raise Unparsable("line %d: invalid UTF-8" % n)
+        if ln[:1] == b"[":
+            if ln[-1:] != b"]":
+                raise Unparsable("line %d: invalid section header" % n)
+            name = ln[1:-1]
+            if any(0 < c < 0x20 or c in b"\"'\\\x7f" for c in name):
+                raise Unparsable("line %d: bad characters in section header" % n)
+            return name.decode()
+        e = ln.find(b"=")
+        if section is not None and e > 0:
+            out.append((section, ln[:e].strip(WHITESPACE).decode(), ln[e + 1:].strip(WHITESPACE).decode()))
+        return section
+
+    for n, buf in enumerate(lines, 1):
+        if len(buf) >= LONG_LINE_MAX:
+            raise Unparsable("line %d is 1 MiB or longer" % n)
+        if buf.lstrip(WHITESPACE)[:1] in (b"#", b";"):
+            continue
+        ln = buf
+        if not bom_seen and buf.startswith(BOM):
+            ln, bom_seen = buf[3:], True
+        if cont is not None:
+            if len(cont) + len(ln) > LONG_LINE_MAX:
+                raise Unparsable("line %d: continued line too long" % n)
+            p = cont + ln
+        else:
+            p = ln
+        escaped = False
+        for c in p:
+            escaped = not escaped and c == 0x5c
+        if escaped:
+            cont = p[:-1] + b" "
+            continue
+        section, cont = parse_line(n, p, section), None
+    if cont is not None:
+        parse_line(len(lines) + 1, cont, section)
+    return out
 
 
 def ini_last(files, section, key):
@@ -91,41 +326,113 @@ def ini_last(files, section, key):
     wins, and an empty one resets it. None if never set."""
     val = None
     for f in files:
-        p = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
-        p.optionxform = str
         try:
-            p.read(f)
-        except configparser.Error:
-            # A file systemd may read but this check cannot: never pass on it.
-            return "unreadable %s" % f.name
-        if p.has_option(section, key):
-            val = p.get(section, key).strip() or None
+            lines = config_lines(f.read_bytes())
+        except (OSError, Unparsable) as e:
+            # A file systemd may read only in part, or not at all: never pass on it.
+            return "unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e)
+        for s, k, v in lines:
+            if (s, k) == (section, key):
+                val = v or None
     return val
 
 
 def main_conf(root, name):
-    """systemd's NAME.conf and its NAME.conf.d drop-ins, in the order systemd reads them."""
-    files = [root / d / "systemd" / name for d in ("usr/lib", "etc") if (root / d / "systemd" / name).is_file()]
-    return files + dropins(root, ["%s/systemd/%s.d" % (d, name) for d in CONF_DIRS])
+    """systemd/NAME and its NAME.d drop-ins, as systemd 257.13's
+    config_parse_standard_file_with_dropins reads them (config_parse_many_files): only the first
+    NAME that opens (in /etc, then /usr/local/lib, then /usr/lib; a link to /dev/null counts) is
+    read, and not at all when it is one of the drop-ins; then the drop-ins, in conf_files order."""
+    dropins = conf_files(root, conf_paths("systemd/%s.d" % name))
+    ids = set()
+    for f in dropins:
+        try:
+            ids.add(f.identity())
+        except OSError:
+            pass
+    for rel in conf_paths("systemd/" + name):
+        main = Conf(str(root), rel)
+        try:
+            if main.identity() in ids:
+                break
+        except FileNotFoundError:
+            continue
+        except OSError:
+            pass
+        return [main] + dropins
+    return dropins
+
+
+def sysctl_files(root):
+    """The files systemd-sysctl 257.13 reads, in its order: conf_files over sysctl.d. It never reads
+    /etc/sysctl.conf itself, only through a sysctl.d entry such as Debian's 99-sysctl.conf link."""
+    return conf_files(root, conf_paths("sysctl.d"))
+
+
+def sysctl_normalize(k):
+    """systemd 257.13's sysctl_normalize (src/basic/sysctl-util.c): if the key's first separator is a
+    dot, dots and slashes swap; then path_simplify drops empty and "." components (and ".." right
+    after a leading "/"), and the leading "/" goes. So "/net/ipv4/ip_forward/" and
+    ".net.ipv4.ip_forward" are both net/ipv4/ip_forward."""
+    seps = [i for i in (k.find("."), k.find("/")) if i >= 0]
+    if seps and k[min(seps)] == ".":
+        i = min(seps)
+        k = k[:i] + k[i:].translate(str.maketrans("./", "/."))
+    parts, absolute = [], k.startswith("/")
+    for c in k.split("/"):
+        if c in ("", ".") or (c == ".." and absolute and not parts):
+            continue
+        parts.append(c)
+    return "/".join(parts)
+
+
+def sysctl_all(root):
+    """What systemd-sysctl 257.13 sets, key by key, as src/sysctl/sysctl.c reads it: lines end at LF, CR or
+    NUL and lose leading and trailing space and tab; # and ; start comments; in an assignment a
+    leading "-" only ignores errors; a "-key" line with no "=" unsets KEY (an earlier assignment to
+    it is dropped); keys are normalised (sysctl_normalize) and the last assignment to a key wins.
+    Keys keep any glob. A value of None means the key is unset."""
+    vals = {}
+    for f in sysctl_files(root):
+        try:
+            data = f.read_bytes()
+        except OSError:
+            continue  # sysctl_byte_violations refuses it
+        for raw in re.split(rb"[\n\r\x00]", data):
+            if len(raw) >= LONG_LINE_MAX:
+                break  # read_line fails, and systemd-sysctl stops reading this file
+            ln = raw.strip(b" \t\n\r").decode(errors="replace")
+            if not ln or ln[0] in "#;":
+                continue
+            if "=" in ln:
+                k, v = (ln[1:] if ln[0] == "-" else ln).split("=", 1)
+                vals[sysctl_normalize(k.strip(" \t\n\r"))] = v.strip(" \t\n\r")
+            elif ln[0] == "-":
+                vals[sysctl_normalize(ln[1:].strip(" \t\n\r"))] = None
+    return vals
 
 
 def sysctl(root, key):
-    """The value systemd-sysctl sets for KEY: sysctl.d files by name (/etc shadowing the same name
-    elsewhere), then /etc/sysctl.conf; the last assignment wins. None if never set."""
-    root = pathlib.Path(root)
-    files = dropins(root, ["%s/sysctl.d" % d for d in CONF_DIRS])
-    if (root / "etc/sysctl.conf").is_file():
-        files.append(root / "etc/sysctl.conf")
-    val = None
-    for f in files:
-        for ln in f.read_text(errors="replace").splitlines():
-            ln = ln.strip().lstrip("-")
-            if not ln or ln[0] in "#;" or "=" not in ln:
-                continue
-            k, v = (x.strip() for x in ln.split("=", 1))
-            if k.replace("/", ".") == key:
-                val = v
-    return val
+    """The value systemd-sysctl sets for KEY. None if never set."""
+    return sysctl_all(root).get(sysctl_normalize(key))
+
+
+def sysctl_byte_violations(root):
+    """#1508: sysctl.d lines this check and systemd-sysctl could split differently, or that stop
+    systemd-sysctl reading the file. They feed both the forwarding check and kernel.core_pattern
+    (IMG-nodump)."""
+    out = []
+    for f in sysctl_files(root):
+        try:
+            data = f.read_bytes()
+        except OSError as e:
+            out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror))
+            continue
+        for n, ln in enumerate(data.split(b"\n"), 1):
+            if SYSCTL_BAD_BYTES.search(ln):
+                out.append("%s: line %d: NUL, CR, control, BOM or Unicode line-break character" % (f.rel, n))
+            if len(ln) >= LONG_LINE_MAX:
+                out.append("%s: line %d is 1 MiB or longer; systemd-sysctl stops reading the file there" % (f.rel, n))
+    return out
 
 
 def dump_violations(root):
@@ -137,23 +444,95 @@ def dump_violations(root):
     limit = ini_last(main_conf(root, "system.conf"), "Manager", "DefaultLimitCORE")
     if limit not in ("0", "0:0"):
         out.append("50-agentos-nodump.conf: DefaultLimitCORE is %s; must be 0" % limit)
-    unit = None
-    for d in UNIT_DIRS:
-        if (root / d / CARD_UNIT).is_file():
-            unit = root / d / CARD_UNIT
-    if unit is None:
-        out.append("%s: missing; the card-holding service must set LimitCORE=0" % CARD_UNIT)
-    else:
-        files = [unit] + dropins(root, ["%s/%s.d" % (d, n) for d in UNIT_DIRS for n in ("service", CARD_UNIT)])
-        limit = ini_last(files, "Service", "LimitCORE")
-        if limit not in ("0", "0:0"):
-            out.append("%s: LimitCORE is %s; must be 0" % (CARD_UNIT, limit))
+    out += card_unit_violations(root)
     pattern = sysctl(root, "kernel.core_pattern")
     if pattern != CORE_PATTERN:
         out.append("%s: kernel.core_pattern is %s; must be %s" % (NODUMP_SYSCTL.rsplit("/", 1)[-1], pattern, CORE_PATTERN))
     suid = sysctl(root, "fs.suid_dumpable")
     if suid != "0":
         out.append("%s: fs.suid_dumpable is %s; must be 0" % (NODUMP_SYSCTL.rsplit("/", 1)[-1], suid))
+    return out
+
+
+def unit_dropin_names(name):
+    """The names whose .d directories hold drop-ins for unit NAME (dropin.c's unit_file_find_dirs):
+    NAME, then each "-" prefix of it, longest first (foo-bar-baz.service: foo-bar-.service,
+    foo-.service). The units checked here are not templates."""
+    prefix, typ = name.rsplit(".", 1)
+    chopped = False
+    while True:
+        dash = prefix.rfind("-")
+        if dash <= 0:
+            return [name]
+        if dash + 1 < len(prefix) or chopped:
+            prefix = prefix[:dash + 1]
+            break
+        prefix, chopped = prefix[:dash], True
+    return [name] + unit_dropin_names(prefix + "." + typ)
+
+
+def card_unit_violations(root):
+    """IMG-nodump: each secret-holding service's unit, with every drop-in systemd 257.13 applies to
+    it, sets LimitCORE=0. The unit is the first UNIT_PATHS entry of its name; its drop-ins are
+    conf_files over NAME.d and each prefix's .d in every unit directory, then service.d
+    (unit_file_find_dropin_paths in src/shared/dropin.c). A link as the unit, or a link elsewhere
+    that makes another name an alias of it (whose drop-ins then apply too), is refused rather than
+    modelled."""
+    out, root = [], str(root)
+    dirs = []
+    for d in UNIT_PATHS:
+        try:
+            path, st = tree_chase(root, d)
+        except OSError:
+            continue
+        if st is not None and stat.S_ISDIR(st.st_mode):
+            dirs.append(path)
+    for d in dirs:
+        for n in sorted(os.listdir(os.path.join(root, d))):
+            if n in CARD_UNITS or not os.path.islink(os.path.join(root, d, n)):
+                continue
+            try:
+                target = tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1]
+            except OSError:
+                continue
+            if target in CARD_UNITS:
+                out.append("%s/%s: an alias of %s; the tree check does not model unit aliases" % (d, n, target))
+    for name in CARD_UNITS:
+        unit = next((Conf(root, d + "/" + name) for d in dirs if os.path.lexists(os.path.join(root, d, name))), None)
+        if unit is None:
+            out.append("%s: missing; a secret-holding service must set LimitCORE=0" % name)
+            continue
+        if unit.is_link():
+            out.append("%s: a link; the tree check reads only a regular unit file" % unit.rel)
+            continue
+        files = [unit] + conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
+                                    + ["%s/service.d" % d for d in UNIT_PATHS])
+        limit = ini_last(files, "Service", "LimitCORE")
+        if limit not in ("0", "0:0"):
+            out.append("%s: LimitCORE is %s; must be 0" % (name, limit))
+    return out
+
+
+def stray_violations(root):
+    """#1508: configuration the tree holds where the box never reads it from the image: /run (the
+    box mounts a tmpfs over it) and a split-/usr /lib (systemd 257 reads only /usr/lib; trixie's /lib
+    is a link to it). Checking such a file as if it were read would let it hide one that is."""
+    out, root = [], str(root)
+    conf = ["sysctl.d", "systemd/network", "systemd/system", "systemd/system.control", "systemd/system.attached"]
+    conf += ["systemd/%s%s" % (n, d) for n in ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
+             for d in ("", ".d")]
+    places = [("run", n, "/run is a tmpfs on the box") for n in conf + ["modprobe.d"]]
+    if not os.path.islink(os.path.join(root, "lib")):
+        places += [("lib", n, "systemd 257 does not read a split-/usr /lib") for n in conf]
+    for top, n, why in places:
+        base = os.path.join(root, top, n)
+        if os.path.islink(base) or os.path.isfile(base):
+            out.append("%s/%s: %s; the image ships nothing there" % (top, n, why))
+        for dirpath, dirnames, filenames in os.walk(base):
+            for f in sorted(dirnames + filenames):
+                p = os.path.join(dirpath, f)
+                if not os.path.isdir(p) or os.path.islink(p):
+                    out.append("%s: %s; the image ships nothing there" % (os.path.relpath(p, root), why))
     return out
 
 
@@ -180,6 +559,197 @@ def swap_violations(root):
         if os.path.lexists(root / n):
             out.append("%s: swap file" % n)
     return out
+
+
+def tree_chase(root, rel, hops=40):
+    """REL resolved as the booted image resolves it (systemd's chase with the image as root):
+    symlinks are followed inside ROOT, an absolute target from ROOT and never from the build host,
+    and '..' stops at ROOT. Returns (in-image path, lstat of it). A path that enters one of
+    BOX_MOUNTS returns ("/" + that path, None) without looking at the tree. Raises
+    FileNotFoundError if a step is missing, and OSError if links loop or a step is not a directory."""
+    parts, cur = [x for x in rel.split("/") if x], []
+    st = os.lstat(root)
+    while parts:
+        name = parts.pop(0)
+        if name in (".", ".."):
+            if name == ".." and cur:
+                cur.pop()
+            continue
+        if not cur and name in BOX_MOUNTS:
+            return "/" + "/".join([name] + parts), None
+        p = os.path.join(root, *cur, name)
+        st = os.lstat(p)
+        if stat.S_ISLNK(st.st_mode):
+            hops -= 1
+            if hops < 0:
+                raise OSError(errno.ELOOP, "too many levels of links", p)
+            target = os.readlink(p)
+            if target.startswith("/"):
+                cur = []
+            parts = [x for x in target.split("/") if x] + parts
+            continue
+        if parts and not stat.S_ISDIR(st.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", p)
+        cur.append(name)
+    return "/".join(cur), st
+
+
+def tree_stat(root, rel):
+    """lstat REL as the booted image sees it (tree_chase). None if any step is missing, loops, is
+    not a directory, or is one the box mounts at boot."""
+    try:
+        return tree_chase(str(root), rel)[1]
+    except OSError:
+        return None
+
+
+def radio_violations(root):
+    """#1415: without these files the controller has no wlan0 and agentos-ap serves no setup network.
+    Each must be a non-empty regular file in the tree (a link to one counts)."""
+    out = []
+    for rel in RADIO_FIRMWARE:
+        found = (tree_stat(root, rel + sfx) for sfx in FIRMWARE_SUFFIXES)
+        if not any(st and stat.S_ISREG(st.st_mode) and st.st_size > 0 for st in found):
+            out.append("%s: missing or empty; the controller's radio needs firmware-mediatek" % rel)
+    return out
+
+
+def bluetooth_violations(root):
+    """#1415: firmware-mediatek also lets the MT7922's Bluetooth half come up. kmod uses the first
+    install line for a module, reading the files conf_files(kmod=True) lists; that line must refuse
+    the load."""
+    first, out = {}, []
+    for f in conf_files(root, MODPROBE_DIRS, kmod=True):
+        try:
+            text = f.read_text()
+        except OSError as e:
+            out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror))
+            continue
+        for ln in text.splitlines():
+            w = ln.split(None, 2)
+            if len(w) == 3 and w[0] == "install":
+                for m in BLOCKED_MODULES:
+                    if fnmatch.fnmatchcase(m, w[1].replace("-", "_")):
+                        first.setdefault(m, w[2].strip())
+    return out + ["modprobe.d: %s is not blocked (install %s %s); the image ships no Bluetooth"
+                  % (m, m, REFUSE[0]) for m in BLOCKED_MODULES if first.get(m) not in REFUSE]
+
+
+def byte_violations(f):
+    """#1496: lines this check and systemd could split or join differently. systemd continues a
+    line ending in a backslash (unless escaped) and ends one at NUL or CR; Python's splitlines also
+    splits at \\x0b, \\x0c, \\x1c-\\x1e and U+0085. The files the image ships are plain ASCII, so
+    anything else is refused rather than modelled, and so is a line of LONG_LINE_MAX bytes or more,
+    where config_parse stops reading."""
+    out = []
+    try:
+        data = f.read_bytes()
+    except OSError as e:
+        return ["%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror)]
+    for n, ln in enumerate(data.split(b"\n"), 1):
+        if len(ln) >= LONG_LINE_MAX:
+            out.append("%s: line %d is 1 MiB or longer; systemd stops reading the file there" % (f.name, n))
+        if any(b < 0x20 or b > 0x7e for b in ln):
+            out.append("%s: line %d: control, NUL, BOM or non-ASCII byte" % (f.name, n))
+        if ln.rstrip(b" ").endswith(b"\\"):
+            out.append("%s: line %d ends in a backslash (a continued line)" % (f.name, n))
+    return out
+
+
+def uplink_violations(up):
+    """#1496: the uplink holds exactly UPLINK_KEYS, each assigned once. Every other line is blank,
+    a comment or a section header; byte_violations refuses what would make systemd read the lines
+    differently from this split."""
+    out, seen, section = byte_violations(up), {}, None
+    try:
+        text = up.read_text()
+    except OSError:
+        return out
+    for n, ln in enumerate(text.split("\n"), 1):
+        ln = ln.strip()
+        if not ln or ln[0] in "#;":
+            continue
+        if ln.startswith("[") and ln.endswith("]"):
+            section = ln[1:-1]
+        elif section is not None and "=" in ln:
+            k, v = ln.split("=", 1)
+            seen.setdefault((section, k.strip()), []).append(v.strip())
+        else:
+            out.append("%s: line %d: neither a section nor an assignment in one" % (UPLINK, n))
+    for (s, k), vals in sorted(seen.items()):
+        if (s, k) not in UPLINK_KEYS:
+            out.append("%s: [%s] %s is %s; not a key the image ships" % (UPLINK, s, k, vals[-1]))
+        elif len(vals) > 1:
+            out.append("%s: [%s] %s is set %d times; must be set once" % (UPLINK, s, k, len(vals)))
+    for (s, k), want in sorted(UPLINK_KEYS.items()):
+        v = seen.get((s, k), [None])[0]
+        if v != want:
+            out.append("%s: [%s] %s is %s; must be %s" % (UPLINK, s, k, v, want))
+    return out
+
+
+def forward_key(k):
+    """#1478, #1497, #1508: whether sysctl key K (normalised by sysctl_normalize, globs kept) can set
+    a forwarding key. A ".." component never writes (systemd refuses the path) but counts anyway:
+    refusing it errs safe."""
+    if GLOB.search(k) and GLOB_ESCAPE.search(k):
+        return True
+    parts = k.split("/")
+    first, last = parts[0], parts[-1]
+    return ((first == "net" or bool(GLOB.search(first)) or ".." in parts)
+            and (last in FORWARD_LEAVES or bool(GLOB.search(last))))
+
+
+def network_violations(root):
+    """#1478: the effective .network set is the uplink alone, nothing changes it, and neither it nor
+    networkd.conf turns on forwarding or LAN name answering; #1479: the uplink keeps the box private.
+    The set is conf_files over systemd/network, as networkd's network_load lists it; network_load_one
+    skips a file that reads as nothing (an empty file, a link to /dev/null, a dangling link), and
+    applies conf_files over NAME.d to the rest."""
+    out, live = [], {}
+    for f in conf_files(root, conf_paths("systemd/network"), ".network"):
+        try:
+            if f.read_bytes() == b"":
+                continue
+        except OSError:
+            pass  # live as far as the check knows: refused below
+        live[f.name] = f
+    for n in sorted(set(live) - {UPLINK}):
+        out.append("%s: live .network file; only %s may run (mask or remove it)" % (live[n].rel, UPLINK))
+    up = live.get(UPLINK)
+    if up is None:
+        out.append("%s: missing or masked; the wired uplink needs it" % UPLINK)
+    elif up.is_link():
+        out.append("%s: a link; the tree check reads only a regular file" % up.rel)
+    else:
+        out += uplink_violations(up)
+    for n in sorted(live):
+        for f in conf_files(root, conf_paths("systemd/network/%s.d" % n)):
+            try:
+                if f.read_bytes() == b"":
+                    continue
+            except OSError:
+                pass
+            out.append("%s: networkd drop-in; the image's .network files are not changed" % f.rel)
+    conf = main_conf(root, "networkd.conf")
+    for f in conf:
+        out += byte_violations(f)
+    for key in ("IPv4Forwarding", "IPv6Forwarding"):
+        v = ini_last(conf, "Network", key)
+        if v not in (None, "no"):
+            out.append("networkd.conf: %s is %s; must be unset or no" % (key, v))
+    for k, v in sorted(sysctl_all(root).items()):
+        if v is not None and v != "0" and forward_key(k):
+            out.append("sysctl.d: %s is %s; forwarding must stay 0" % (k, v))
+    return out
+
+
+def resolved_violations(root):
+    """#1479: resolved neither answers nor sends LLMNR or multicast DNS on the LAN."""
+    conf = main_conf(root, "resolved.conf")
+    return [m for f in conf for m in byte_violations(f)] + [
+        "50-agentos-uplink.conf: resolved %s is %s; must be no" % (key, v)
+        for key in ("LLMNR", "MulticastDNS") for v in [ini_last(conf, "Resolve", key)] if v != "no"]
 
 
 def has_key(path):
