@@ -322,7 +322,9 @@ func scanner(path string) func(context.Context) ([]string, error) {
 }
 
 // joiner is setup's join through the netjoin helper's socket: joined and
-// saved succeed, every other answer or no answer is errNotJoined. With no
+// saved succeed, failed (a D-Bus or NetworkManager error, such as no
+// NetworkManager) is localsrv.JoinUnavailable (#1429), and every other
+// answer or no answer is errNotJoined. With no
 // socket it is nil, and localsrv answers not joined. seen, if set, is
 // told each answer.
 func joiner(path string, seen func(netjoin.Code)) func(context.Context, string, string) error {
@@ -335,8 +337,13 @@ func joiner(path string, seen func(netjoin.Code)) func(context.Context, string, 
 		if err == nil && seen != nil {
 			seen(code)
 		}
-		if err == nil && (code == netjoin.Joined || code == netjoin.Saved) {
+		switch {
+		case err != nil:
+			return errNotJoined
+		case code == netjoin.Joined, code == netjoin.Saved:
 			return nil
+		case code == netjoin.Failed:
+			return localsrv.JoinUnavailable
 		}
 		return errNotJoined
 	}

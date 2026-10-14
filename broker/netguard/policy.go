@@ -165,6 +165,10 @@ type Policy struct {
 	net  Network
 	gen  uint64 // bumped by each Learn; a full read older than this is stale
 	pins []Pin
+	// hold, while non-nil, is closed when the learned gateway's external
+	// address is known: a quick read moved to a gateway with none read yet,
+	// and public destinations wait for that gateway's full read (#1517).
+	hold chan struct{}
 
 	quickMu sync.Mutex // one quick read-and-learn at a time
 }
@@ -192,7 +196,21 @@ func (p *Policy) Learn(n Network) {
 	out := normalise(n)
 	p.mu.Lock()
 	p.learnLocked(out)
+	p.releaseLocked()
 	p.mu.Unlock()
+}
+
+// externalHold bounds how long a public destination waits for a new
+// gateway's full read: past the NAT-PMP timeout of a full read already in
+// flight and of the one queued behind it. A test shortens it.
+var externalHold = 7 * time.Second
+
+// releaseLocked ends the hold, if any; p.mu is held for writing.
+func (p *Policy) releaseLocked() {
+	if p.hold != nil {
+		close(p.hold)
+		p.hold = nil
+	}
 }
 
 // learnLocked stores a normalised network and bumps the generation; p.mu is
@@ -250,15 +268,21 @@ func (p *Policy) Refresh() error {
 	}
 	// The generation check and the store are one critical section, so a
 	// Learn can never land between them.
+	// A full read of the learned gateway ends the hold whether or not the
+	// router answered: a silent router has no address to learn.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.gen != gen {
-		if out.External.IsValid() && out.Gateway == p.net.Gateway {
-			p.net.External = out.External
+		if out.Gateway == p.net.Gateway {
+			if out.External.IsValid() {
+				p.net.External = out.External
+			}
+			p.releaseLocked()
 		}
 		return nil
 	}
 	p.learnLocked(out)
+	p.releaseLocked()
 	return nil
 }
 
@@ -304,8 +328,13 @@ func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
 }
 
 // quickLearn applies the Quick read, if there is one. A failed read keeps
-// what was learned before, and the router's external address and the
-// resolver stay while the gateway is unchanged and the quick read has none.
+// what was learned before. While the gateway is unchanged the router's
+// external address is always the one learned, never the quick read's copy
+// (which may predate a newer full read), and the resolver stays when the
+// quick read has none. On a new gateway the quick read's own external
+// address (the last one read on that gateway) applies; with none, public
+// destinations are held until that gateway's full read stores (fail closed,
+// bounded by externalHold).
 func (p *Policy) quickLearn() {
 	if p.quick == nil {
 		return
@@ -316,19 +345,40 @@ func (p *Policy) quickLearn() {
 	if err != nil {
 		return
 	}
-	p.mu.RLock()
-	old := p.net
-	p.mu.RUnlock()
-	if n.Gateway.IsValid() && n.Gateway.Unmap() == old.Gateway {
-		if !n.External.IsValid() {
-			n.External = old.External
-		}
-		if !n.Resolver.IsValid() {
-			n.Resolver = old.Resolver
-		}
+	if quickGapHook != nil {
+		quickGapHook()
 	}
-	p.Learn(n)
+	// The merge with what is learned and the store are one critical section,
+	// so a full read can never store a newer external address between them.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	old := p.net
+	if quickLockedHook != nil {
+		quickLockedHook()
+	}
+	out := normalise(n)
+	if out.Gateway.IsValid() && out.Gateway == old.Gateway {
+		out.External = old.External
+		if !out.Resolver.IsValid() {
+			out.Resolver = old.Resolver
+		}
+	} else if out.Gateway.IsValid() && !out.External.IsValid() && p.source != nil {
+		if p.hold == nil {
+			p.hold = make(chan struct{})
+		}
+	} else {
+		p.releaseLocked()
+	}
+	p.learnLocked(out)
 }
+
+// quickGapHook, when set by a test, runs after a quick read returns and
+// before quickLearn takes the lock to merge and store.
+var quickGapHook func()
+
+// quickLockedHook, when set by a test, runs inside quickLearn's critical
+// section, right after it reads what is learned.
+var quickLockedHook func()
 
 // SetPins replaces the pinned exceptions.
 func (p *Policy) SetPins(pins []Pin) error {
@@ -393,7 +443,7 @@ func (p *Policy) Check(ctx context.Context, a netip.Addr, port uint16, proto str
 	if a.Is4In6() {
 		a = a.Unmap()
 	}
-	err := p.check(r, a, port, proto)
+	err := p.check(ctx, r, a, port, proto)
 	if err != nil && p.onDeny != nil {
 		var de *DeniedError
 		reason := err.Error()
@@ -405,12 +455,37 @@ func (p *Policy) Check(ctx context.Context, a netip.Addr, port uint16, proto str
 	return err
 }
 
-func (p *Policy) check(r request, a netip.Addr, port uint16, proto string) error {
+func (p *Policy) check(ctx context.Context, r request, a netip.Addr, port uint16, proto string) error {
+	var deadline <-chan time.Time
+	for {
+		hold, err := p.checkOnce(r, a, port, proto)
+		if hold == nil {
+			return err
+		}
+		if deadline == nil {
+			t := time.NewTimer(externalHold)
+			defer t.Stop()
+			deadline = t.C
+		}
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			return &DeniedError{a, "the router's external address on this gateway is not learned yet"}
+		case <-deadline:
+			return &DeniedError{a, "the router's external address on this gateway is not learned yet"}
+		}
+	}
+}
+
+// checkOnce decides a against what is learned now. A destination every
+// rule allows while a hold is on is not decided: checkOnce returns the hold
+// to wait on, since it may be the router's not-yet-learned external address.
+func (p *Policy) checkOnce(r request, a netip.Addr, port uint16, proto string) (chan struct{}, error) {
 	if !a.IsValid() {
-		return &DeniedError{a, "unparsable address"}
+		return nil, &DeniedError{a, "unparsable address"}
 	}
 	p.mu.RLock()
-	n, pins := p.net, p.pins
+	n, pins, hold := p.net, p.pins, p.hold
 	p.mu.RUnlock()
 
 	if r.purpose == PurposeDNS {
@@ -418,40 +493,40 @@ func (p *Policy) check(r request, a netip.Addr, port uint16, proto string) error
 		// the assigned resolver or not at all, so another port-53 address
 		// (public ones included) is refused here, not left to the deny list.
 		if (proto == "tcp" || proto == "udp") && port == 53 && n.Resolver.IsValid() && a == n.Resolver {
-			return nil
+			return nil, nil
 		}
-		return &DeniedError{a, "names resolve only through the assigned resolver on port 53"}
+		return nil, &DeniedError{a, "names resolve only through the assigned resolver on port 53"}
 	} else {
 		for _, pin := range pins {
 			if pin.Kind.purpose() != r.purpose {
 				continue
 			}
 			if (pin.Name != "" && pin.Name == r.name) || (pin.Addr.IsValid() && pin.Addr == netip.AddrPortFrom(a, port)) {
-				return nil
+				return nil, nil
 			}
 		}
 	}
 
 	for _, f := range forms(a) {
 		if why, bad := Special(f); bad {
-			return &DeniedError{a, why}
+			return nil, &DeniedError{a, why}
 		}
 		for _, pf := range n.Prefixes {
 			if pf.Contains(f) {
-				return &DeniedError{a, "home network prefix " + pf.String()}
+				return nil, &DeniedError{a, "home network prefix " + pf.String()}
 			}
 		}
 		if n.Gateway.IsValid() && f == n.Gateway {
-			return &DeniedError{a, "gateway"}
+			return nil, &DeniedError{a, "gateway"}
 		}
 		if n.External.IsValid() && f == n.External {
-			return &DeniedError{a, "router external address"}
+			return nil, &DeniedError{a, "router external address"}
 		}
 		if n.Resolver.IsValid() && f == n.Resolver {
-			return &DeniedError{a, "the learned resolver is reachable only for names (port 53)"}
+			return nil, &DeniedError{a, "the learned resolver is reachable only for names (port 53)"}
 		}
 	}
-	return nil
+	return hold, nil
 }
 
 func protoOf(network string) string {

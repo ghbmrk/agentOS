@@ -66,8 +66,12 @@ type fakeHooks struct {
 	unavailable bool
 	noTexts     bool   // the box cannot text: BoxNumber answers "", false
 	keyErr      error  // ConnectAPIKey's answer when set; nothing is stored
+	joinErr     error  // JoinNetwork's answer when set; nothing is joined
+	joins       int    // JoinNetwork calls
 	deviceErr   error  // StartDeviceCode's answer when set
 	deviceLink  string // StartDeviceCode's link when set
+	privateErr  error  // SetPrivateOK's answer when set; nothing is recorded
+	privates    int    // SetPrivateOK calls
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -75,6 +79,10 @@ func (f *fakeHooks) Networks() []string { return []string{"Home", "Neighbor"} }
 func (f *fakeHooks) JoinNetwork(ssid, pw string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.joins++
+	if f.joinErr != nil {
+		return f.joinErr
+	}
 	f.joined = ssid
 	f.progress.Online = true
 	return nil
@@ -152,6 +160,10 @@ func (f *fakeHooks) Providers() []Provider {
 func (f *fakeHooks) SetPrivateOK(id string, ok bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.privates++
+	if f.privateErr != nil {
+		return f.privateErr
+	}
 	if f.private == nil {
 		f.private = map[string]bool{}
 	}

@@ -139,7 +139,13 @@ type SetupState struct {
 	Recovery     bool `json:"recovery"`
 	Host         bool `json:"host"`
 	HostTrusted  bool `json:"host_trusted"`
-	Done         bool `json:"done"`
+	// Unsaved maps a provider to the owner's private-content answer that
+	// the vault did not record (#1467). It is set when the save fails and
+	// cleared once an answer for that provider is saved, so setup does not
+	// finish with the provider keeping an older answer. It lasts only as
+	// long as the SetupStore does.
+	Unsaved map[string]bool `json:"unsaved,omitempty"`
+	Done    bool            `json:"done"`
 }
 
 // SetupStore persists SetupState.
@@ -218,6 +224,20 @@ var (
 	ErrCodesUnavailable = errors.New("code-generator enrollment unavailable")
 )
 
+// ErrWiFiUnavailable: the box cannot join Wi-Fi at all (no
+// NetworkManager, or another error no password can fix), as JoinNetwork
+// reports it (#1429).
+var ErrWiFiUnavailable = errors.New("Wi-Fi join unavailable")
+
+// noWiFiJoin is the network step's error when the box cannot join Wi-Fi:
+// no station device beside the access point, or ErrWiFiUnavailable. It
+// names the network step's Ethernet button rather than the password
+// (#1429, UX U-1 on #1407).
+const (
+	ethernetButton = "I plugged in an Ethernet cable"
+	noWiFiJoin     = "I cannot join Wi-Fi yet. Plug in an Ethernet cable, then tap \"" + ethernetButton + "\"."
+)
+
 // The vault process's answers to an API key, as Hooks report them
 // (ONB-3, #1265). The page shows each its own text.
 var (
@@ -293,10 +313,13 @@ type setup struct {
 	answer    map[string]bool
 	err       map[string]string // per phone
 	finishing bool
+	// busy is the providers with an AI post in flight: one at a time
+	// each, none while Finish runs, and no Finish while any is (#1467).
+	busy map[string]bool
 }
 
 func newSetup(s *Server, st SetupState) *setup {
-	return &setup{s: s, st: st, pair: map[string]string{}, device: map[string][2]string{}, answer: map[string]bool{}, err: map[string]string{}}
+	return &setup{s: s, st: st, pair: map[string]string{}, device: map[string][2]string{}, answer: map[string]bool{}, err: map[string]string{}, busy: map[string]bool{}}
 }
 
 func (u *setup) done() bool { u.mu.Lock(); defer u.mu.Unlock(); return u.st.Done }
@@ -398,6 +421,7 @@ func (u *setup) routes(mux *http.ServeMux) {
 		"/setup/host":        u.host,
 		"/setup/ai-key":      u.aiKey,
 		"/setup/ai-device":   u.aiDevice,
+		"/setup/ai-private":  u.aiPrivate,
 		"/setup/restart":     u.restart,
 	} {
 		path, f := path, f
@@ -468,6 +492,9 @@ type setupView struct {
 	// Plan and Key are each provider's private-content box on its plan
 	// sign-in and API key forms.
 	Plan, Key map[string]privateBox
+	// Unsaved is the retry box of each provider whose answer did not
+	// save (#1467).
+	Unsaved map[string]*privateBox
 	// Refresh reloads the page only while it waits on the box and has
 	// nothing to type into (ONB-4).
 	Refresh string
@@ -597,11 +624,14 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		}
 	case "ai":
 		v.Providers = u.s.cfg.Hooks.Providers()
-		v.Plan, v.Key = map[string]privateBox{}, map[string]privateBox{}
+		v.Plan, v.Key, v.Unsaved = map[string]privateBox{}, map[string]privateBox{}, map[string]*privateBox{}
 		u.mu.Lock()
 		for _, pr := range v.Providers {
 			v.Plan[pr.ID] = u.boxLocked("ai-device", pr)
 			v.Key[pr.ID] = u.boxLocked("ai-key", pr)
+			if ok, held := u.st.Unsaved[pr.ID]; held {
+				v.Unsaved[pr.ID] = &privateBox{Name: pr.Name, Checked: ok}
+			}
 		}
 		u.mu.Unlock()
 		if !p.Updated {
@@ -671,7 +701,12 @@ func (u *setup) network(r *http.Request, _ string) error {
 		if ssid == "" {
 			return errors.New("Choose your home Wi-Fi.")
 		}
-		if err := u.s.cfg.Hooks.JoinNetwork(ssid, pw); err != nil {
+		if u.s.cfg.Station != nil && !u.s.cfg.Station() {
+			return errors.New(noWiFiJoin)
+		}
+		if err := u.s.cfg.Hooks.JoinNetwork(ssid, pw); errors.Is(err, ErrWiFiUnavailable) {
+			return errors.New(noWiFiJoin)
+		} else if err != nil {
 			return errors.New("Could not join that Wi-Fi. Check the password and try again.")
 		}
 	} else if !u.s.cfg.Hooks.Progress().Online {
@@ -1051,20 +1086,83 @@ func (u *setup) keepAnswer(r *http.Request, form, id string) {
 	u.mu.Unlock()
 }
 
+// errUnsaved is the page's text for a private-content answer that did not
+// save.
+var errUnsaved = errors.New("Could not save. Try again.")
+
 // privateOK records the owner's CAP-9 answer for a provider once its form
-// went through, never before (U-4).
+// went through, never before (U-4), and releases the provider's hold. A
+// failed save keeps the box as the owner left it and holds setup open on
+// the answer (#1467).
 func (u *setup) privateOK(r *http.Request, form, id string) error {
+	ok := r.PostFormValue("private") != ""
+	if err := u.s.cfg.Hooks.SetPrivateOK(id, ok); err != nil {
+		u.keepAnswer(r, form, id)
+		u.mu.Lock()
+		u.holdLocked(id, &ok)
+		u.mu.Unlock()
+		return errUnsaved
+	}
 	u.mu.Lock()
+	defer u.mu.Unlock()
 	delete(u.answer, form+" "+id)
-	u.mu.Unlock()
-	if err := u.s.cfg.Hooks.SetPrivateOK(id, r.PostFormValue("private") != ""); err != nil {
-		return errors.New("Could not save. Try again.")
+	if err := u.holdLocked(id, nil); err != nil {
+		return errUnsaved
 	}
 	return nil
 }
 
+// holdLocked sets provider id's unsaved answer to *ok, or clears it when
+// ok is nil, in the setup record (#1467). A hold the store fails to save
+// still holds in memory; a clear the store fails to save does not clear.
+// Caller holds u.mu.
+func (u *setup) holdLocked(id string, ok *bool) error {
+	if _, held := u.st.Unsaved[id]; !held && ok == nil {
+		return nil
+	}
+	m := make(map[string]bool, len(u.st.Unsaved)+1) // save copies the state shallowly
+	for k, v := range u.st.Unsaved {
+		m[k] = v
+	}
+	if ok == nil {
+		delete(m, id)
+	} else {
+		m[id] = *ok
+	}
+	if len(m) == 0 {
+		m = nil
+	}
+	err := u.save(func(s *SetupState) { s.Unsaved = m })
+	if err != nil && ok != nil && !u.st.Done {
+		u.st.Unsaved = m
+	}
+	return err
+}
+
+// begin claims provider id for one AI post, or refuses while another post
+// for it is in flight or Finish runs; end releases it.
+func (u *setup) begin(id string) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	switch {
+	case u.st.Done:
+		return errSetupDone
+	case u.finishing:
+		return errors.New("Setup is finishing. Reload the page.")
+	case u.busy[id]:
+		return errors.New("I am still saving your last answer for this provider. Reload the page in a moment.")
+	}
+	u.busy[id] = true
+	return nil
+}
+
+func (u *setup) end(id string) { u.mu.Lock(); delete(u.busy, id); u.mu.Unlock() }
+
 // aiKey takes an API key typed on this page, never by text (§8.1 step 6).
 // The key goes to the vault hook and is not kept, echoed, or logged.
+// A no is saved before the key and a yes after it, so a failure or a
+// restart at any point leaves the provider with no wider answer than the
+// owner gave: a no that fails stores no key (#1467).
 func (u *setup) aiKey(r *http.Request, _ string) error {
 	if err := u.aiReady(); err != nil {
 		return err
@@ -1073,11 +1171,43 @@ func (u *setup) aiKey(r *http.Request, _ string) error {
 	if !u.providerHas(id, func(p Provider) bool { return p.APIKey }) || key == "" || len(key) > 512 || !printable(key) {
 		return errors.New("Paste the API key from your provider's page.")
 	}
+	if err := u.begin(id); err != nil {
+		return err
+	}
+	defer u.end(id)
+	if r.PostFormValue("private") == "" {
+		if err := u.privateOK(r, "ai-key", id); err != nil {
+			return err
+		}
+	}
 	if err := u.s.cfg.Hooks.ConnectAPIKey(id, key); err != nil {
 		u.keepAnswer(r, "ai-key", id)
 		return errors.New(keyErrText(err))
 	}
+	if r.PostFormValue("private") == "" {
+		return nil
+	}
 	return u.privateOK(r, "ai-key", id)
+}
+
+// aiPrivate retries the private-content answer of a provider held by
+// Unsaved, with the box alone (#1467).
+func (u *setup) aiPrivate(r *http.Request, _ string) error {
+	if err := u.aiReady(); err != nil {
+		return err
+	}
+	id := r.PostFormValue("provider")
+	u.mu.Lock()
+	_, held := u.st.Unsaved[id]
+	u.mu.Unlock()
+	if !held {
+		return errors.New("Choose a provider.")
+	}
+	if err := u.begin(id); err != nil {
+		return err
+	}
+	defer u.end(id)
+	return u.privateOK(r, "ai-private", id)
 }
 
 // keyErrText is the page's text for a key the vault did not store: only a
@@ -1108,6 +1238,10 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 	if !u.providerHas(id, func(p Provider) bool { return p.DeviceCode }) {
 		return errors.New("Choose a provider.")
 	}
+	if err := u.begin(id); err != nil {
+		return err
+	}
+	defer u.end(id)
 	link, code, err := u.s.cfg.Hooks.StartDeviceCode(id)
 	if err == nil {
 		if pu, perr := url.Parse(link); perr != nil || pu.Scheme != "https" {
@@ -1119,6 +1253,9 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 		return errors.New("Could not start sign-in with that provider. Try again.")
 	}
 	if err := u.privateOK(r, "ai-device", id); err != nil {
+		u.mu.Lock()
+		delete(u.device, id) // no link while the answer is unsaved
+		u.mu.Unlock()
 		return err
 	}
 	u.mu.Lock()
@@ -1142,7 +1279,8 @@ func (u *setup) providerHas(id string, f func(Provider) bool) bool {
 // called at most once at a time, and not again once it succeeded.
 func (u *setup) maybeFinish() {
 	u.mu.Lock()
-	if !u.st.Host || u.st.Done || u.finishing {
+	// An unsaved answer, or an AI post in flight, holds setup open (#1467).
+	if !u.st.Host || u.st.Done || u.finishing || len(u.st.Unsaved) > 0 || len(u.busy) > 0 {
 		u.mu.Unlock()
 		return
 	}

@@ -1,7 +1,10 @@
 # Managed config for the Codex provider worker (S8-W1, CRED-5 broker-held, CAP-11). The image
-# installs it as /etc/codex/managed_config.toml, read-only to the CLI's tools. Key names are
-# assumed, not yet measured against the pinned CLI: guest/codex/ASSUMPTIONS.md, and #809 checks
-# them. tests/test_codex_worker.py fails if any hosted tool is left on or the route is unpinned.
+# installs it as /etc/codex/managed_config.toml, read-only to the CLI's tools. Measured against
+# Codex CLI 0.162.1 (guest/codex/ASSUMPTIONS.md C1): this layer beats CODEX_HOME/config.toml and
+# the command line key by key, but tables deep-merge, so a lower layer can still ADD keys inside a
+# table. So every safety setting here is a value a lower layer cannot extend, and the settings a
+# lower layer could extend (read limits, MCP servers) live in requirements.toml instead, which
+# lower layers cannot relax. tests/test_codex_worker.py fails if any pin here is dropped.
 # TOML puts every key after a [table] header into that table, so top-level keys come first.
 
 # The only route out: the in-worker forwarder (#1014), which relays to the egress socket, where
@@ -10,15 +13,20 @@ model_provider = "agentos"
 
 # Hosted tools off: tools OpenAI runs on its side when the request asks for them ride inside the
 # one declared responses request, so the endpoint list cannot stop them. #1014's request-body
-# check is the enforcement; this keeps a correct CLI from tripping it. No MCP servers.
+# check is the enforcement; this keeps a correct CLI from tripping it. MCP servers are blocked by
+# the empty allowlist in requirements.toml.
 web_search = "disabled"
 
 # No update checks (CAP-11: versions change only through image updates).
 check_for_update_on_startup = false
 
-# Headless; tools write only the workspace and have no network. agentos-toolsh is the boundary
-# that hides the forwarder's port, the socket directory and CODEX_HOME; these settings keep the
-# CLI's own sandbox consistent with it.
+# No program runs when a turn ends: an empty list here replaces any notify a lower layer sets.
+notify = []
+
+# Headless; tools write only the workspace and have no network. The CLI's own sandbox (bwrap with
+# a seccomp filter) plus the deny_read list in requirements.toml is the tool boundary (C3, C12);
+# agentos-toolsh is the reference and fallback for it. No permission profile is set here: a
+# lower layer deep-merges into one (C13).
 approval_policy = "never"
 sandbox_mode = "workspace-write"
 
@@ -27,11 +35,27 @@ name = "agentOS forwarder"
 base_url = "http://127.0.0.1:18432/backend-api/codex"
 wire_api = "responses"
 requires_openai_auth = true
+# HTTP only: the forwarder relays declared HTTP requests, not a WebSocket upgrade (C10).
+supports_websockets = false
 
 [tools]
 web_search = false
 
+# Everything that loads code or reaches a service the forwarder does not declare is off (C9).
+# web_search_request and web_search_cached are deprecated in 0.162.1 and the CLI logs that; the
+# pins stay so an older or newer CLI that still reads them keeps them off.
 [features]
+hooks = false
+plugins = false
+remote_plugin = false
+plugin_sharing = false
+apps = false
+browser_use = false
+browser_use_external = false
+computer_use = false
+multi_agent = false
+skill_mcp_dependency_install = false
+in_app_updates = false
 web_search_request = false
 web_search_cached = false
 image_generation = false
@@ -49,11 +73,31 @@ exporter = "none"
 [history]
 persistence = "none"
 
+# Tools write the workspace only: no extra roots, and neither $TMPDIR nor /tmp is made writable.
+# A lower layer's writable_roots replaces nothing here, but a managed one would (measured: a
+# managed root of CODEX_HOME lets a tool write it), so each value is pinned in the test.
 [sandbox_workspace_write]
 network_access = false
 writable_roots = []
 exclude_tmpdir_env_var = true
 exclude_slash_tmp = true
 
+# Tools get PATH from the CLI's environment, HOME and TMPDIR from `set` below, and nothing else;
+# the CLI adds a few variables of its own (CODEX_*, LANG, pagers). include_only also filters what a
+# lower layer adds with `set`, so LD_PRELOAD and the like cannot be injected (#1455). A lower
+# layer's HOME or TMPDIR loses to the managed value, key by key. "core", not "none": with "none"
+# tools get no system PATH and cannot run basic commands (measured).
 [shell_environment_policy]
-inherit = "none"
+inherit = "core"
+include_only = ["PATH", "HOME", "TMPDIR"]
+
+# HOME and TMPDIR point at the workspace, the only place a tool can write: without them mktemp and
+# `git config --global` fail, since /tmp is read-only in the CLI's sandbox (measured, C15).
+[shell_environment_policy.set]
+HOME = "/var/lib/agentos-work"
+TMPDIR = "/var/lib/agentos-work"
+
+# The workspace is never trusted: a lower layer cannot mark it trusted and so load project
+# config or instructions from files a tool wrote.
+[projects."/var/lib/agentos-work"]
+trust_level = "untrusted"
