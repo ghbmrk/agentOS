@@ -1,0 +1,14 @@
+# The in-image end-to-end run (#1688). Never part of the image: ci_boot.sh's e2e boot passes this
+# unit to systemd as an SMBIOS credential (systemd.extra-unit.*), which systemd honours only in a
+# VM, and the driver arrives on a read-only 9p share. Results go to the serial console.
+[Unit]
+Description=agentOS end-to-end run (CI only)
+After=agentosd.service agentos-egress.service agentos-localui.service agentos-modem.service
+
+[Service]
+Type=oneshot
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/bin/mkdir -p /run/agentos-e2e/share
+ExecStart=/bin/mount -t 9p -o trans=virtio,version=9p2000.L,ro e2e /run/agentos-e2e/share
+ExecStart=/run/agentos-e2e/share/box-e2e
