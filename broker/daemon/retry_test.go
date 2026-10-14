@@ -569,3 +569,62 @@ func TestOP2RefusedRetryOfAParkedSendSaysTheFirstTryMayHaveGone(t *testing.T) {
 		t.Fatalf("parked %+v, want attempt 2 first tried %v", ps, first.Attempts[0].Dispatched)
 	}
 }
+
+// unknownThenOK leaves attempt 1 unknown for good; every later attempt
+// goes through.
+type unknownThenOK struct{}
+
+func (unknownThenOK) Execute(_ context.Context, _ journal.Intent, n int) journal.Outcome {
+	if n == 1 {
+		return journal.Outcome{Result: journal.ResultUnknown}
+	}
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "sent"}
+}
+
+func (unknownThenOK) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultUnknown}
+}
+
+// L14 (Potency/UX/L3 round 7 on #1433): the owner's retry of a parked send
+// goes through while the parked first try is still unknown. The owner is
+// told it went, and it is not listed again: the effect went, so an
+// earlier unknown try is no longer in doubt for RETRY.
+func TestOP2OwnerRetryThatWentIsNotListedAgain(t *testing.T) {
+	ctx := context.Background()
+	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{"x": unknownThenOK{}}, func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := journal.Intent{ID: "a", Origin: "guest:agent", Account: "mail", Action: "send", Params: map[string]any{"record": "inv-1042"}, Executor: "x"}
+	if _, err := eng.Submit(in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Authorize(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Dispatch(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		eng.Reconcile(ctx)
+	}
+	if ps := eng.Parked(); len(ps) != 1 {
+		t.Fatalf("parked %+v", ps)
+	}
+	var got string
+	relisted := 0
+	r := &retrier{ctx: ctx, lines: map[string]retryAsk{},
+		send: func(ctx context.Context, a retryAsk, _ bool) (journal.Status, error) {
+			return eng.Retry(ctx, a.id, a.attempt)
+		},
+		inform:    func(s string) error { got = s; return nil },
+		onRefused: func() { relisted++ }}
+	r.run("B3", retryAsk{id: "a", attempt: 1, line: grants.RetryLine{Shown: ownerch.Item{Object: "invoice 1042"}}}, false)
+	if want := "Retry B3: invoice 1042 went through."; got != want {
+		t.Fatalf("owner text %q, want %q", got, want)
+	}
+	st, _ := eng.Get("a")
+	if st.State != journal.Succeeded || st.Attempts[0].Result != journal.ResultUnknown || relisted != 0 || len(eng.Parked()) != 0 {
+		t.Fatalf("a: %+v; relisted %d; parked %+v", st, relisted, eng.Parked())
+	}
+}

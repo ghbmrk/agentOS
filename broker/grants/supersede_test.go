@@ -134,11 +134,12 @@ func TestOP2SendRequestedAfterTheResendWentIsANewSend(t *testing.T) {
 		t.Fatalf("resend: %+v %v", st, err)
 	}
 	req := resubmit(t, r, "agent/s2", invoice1042(), "sam@example.com")
-	// U12: the ask says the same send was tried already, and when.
+	// Confirm repeats (D-116): the ask says the same send was already
+	// sent, and when, at the tier its facts give.
 	s1 := r.state("agent/s1")
 	went := s1.Attempts[len(s1.Attempts)-1].Dispatched
-	if _, items := r.own.last(t); len(items) != 1 || !items[0].Retried.Equal(went) {
-		t.Fatalf("s2's ask %+v, want it marked as tried at %v", items, went)
+	if _, items := r.own.last(t); len(items) != 1 || !items[0].Sent.Equal(went) || !items[0].Retried.IsZero() || items[0].Facts.Kind == owner.MoneyRetry {
+		t.Fatalf("s2's ask %+v, want it marked as sent at %v", items, went)
 	}
 	r.g.Decide(owner.Decision{Request: req, Item: 1, Ref: "agent/s2", Approved: true, Why: "owner"})
 	waitFor(t, r, "agent/s2", journal.Succeeded)
@@ -147,7 +148,7 @@ func TestOP2SendRequestedAfterTheResendWentIsANewSend(t *testing.T) {
 	}
 	// Another invoice to the same recipient is not marked.
 	resubmit(t, r, "agent/s3", map[string]any{"record": "inv-1043", "template": "invoice"}, "sam@example.com")
-	if _, items := r.own.last(t); len(items) != 1 || !items[0].Retried.IsZero() {
+	if _, items := r.own.last(t); len(items) != 1 || !items[0].Retried.IsZero() || !items[0].Sent.IsZero() {
 		t.Fatalf("s3's ask %+v is marked", items)
 	}
 }

@@ -641,25 +641,46 @@ type verdict struct {
 	local bool
 	hold  bool // waits for the local page without texting the owner
 	reply *owner.AutoReply
-	// sent, when set, is when the same send under another request went
-	// or may have gone, recently (recentlySent, U12). Like note, it is
-	// shown but not part of what the dispatch recheck compares.
-	sent time.Time
+	// rep is the same send under another request: one known to have gone
+	// within repeatWindow, or one that may have gone (recentRepeat,
+	// D-116 confirm repeats). Like note, it is shown but not part of what
+	// the dispatch recheck compares.
+	rep repeat
 }
+
+// repeat is what an ask says of the same send under other requests
+// (recentRepeat).
+type repeat struct {
+	// sent is when the first of them known to have gone within
+	// repeatWindow was sent, or zero.
+	sent time.Time
+	// tried is when the first of them that may still take effect (in
+	// flight, or unknown, an unclear one's parked try included) was
+	// first tried, at any age, or zero.
+	tried time.Time
+}
+
+func (r repeat) zero() bool { return r.sent.IsZero() && r.tried.IsZero() }
 
 // shown is the item as the owner is asked it.
 func (v verdict) shown() owner.Item { return v.marked(withNote(v.item, v.note)) }
 
-// marked is it with v.sent's mark: the line warns "may go twice, first
-// tried <when the same send went>", and money takes the code generator,
-// as an owner retry does (MoneyRetry).
+// marked is it with v.rep's marks. A send known to have gone: the line
+// says it was already sent and when, and asks whether to send it again
+// (Sent); its tier is the one its facts give (CH-10), so money above the
+// owner-set limit takes the code generator and money under it a texted
+// code. A send that may have gone: the line warns "may go twice, first
+// tried <when>" (Retried), and money takes the code generator, as an
+// owner retry does (MoneyRetry).
 func (v verdict) marked(it owner.Item) owner.Item {
-	if v.sent.IsZero() {
-		return it
+	if !v.rep.sent.IsZero() {
+		it.Sent = v.rep.sent
 	}
-	it.Retried = v.sent
-	if it.Facts.HasAmount || it.Amount != "" {
-		it.Facts.Kind = owner.MoneyRetry
+	if !v.rep.tried.IsZero() {
+		it.Retried = v.rep.tried
+		if it.Facts.HasAmount || it.Amount != "" {
+			it.Facts.Kind = owner.MoneyRetry
+		}
 	}
 	return it
 }
@@ -816,6 +837,13 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 				}
 				continue
 			}
+			// Confirm repeats (D-116): a pre-allowed send, an
+			// auto-reply included, that repeats one known to have gone
+			// in the last 24h, or one that may have gone, is asked of
+			// the owner instead of sent unseen.
+			if rep := g.recentRepeat(ctx, in); !rep.zero() {
+				return verdict{kind: ask, item: item, rep: rep}
+			}
 			if r.Spec.Rule.Reply {
 				body, _ := in.Params[ParamBody].(string)
 				return verdict{kind: autoReply, item: item, reply: &owner.AutoReply{
@@ -824,45 +852,68 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 			return verdict{kind: allow}
 		}
 		if queued > 0 {
-			return verdict{kind: ask, item: item, note: queuedNote(queued, in.Action), sent: g.recentlySent(ctx, in)}
+			return verdict{kind: ask, item: item, note: queuedNote(queued, in.Action), rep: g.recentRepeat(ctx, in)}
 		}
 	}
-	return verdict{kind: ask, item: item, sent: g.recentlySent(ctx, in)}
+	return verdict{kind: ask, item: item, rep: g.recentRepeat(ctx, in)}
 }
 
-// sentWindow is how far back an ask looks for the same send under another
-// request (recentlySent).
-const sentWindow = 24 * time.Hour
+// repeatWindow is how long after a send is known to have gone the same
+// send under another request needs the owner's confirmation (D-116).
+const repeatWindow = 24 * time.Hour
 
-// recentlySent returns when another request sending the same record to
-// the same recipients as in (sendKey, as sentSince compares) went within
-// sentWindow, or may have gone (in flight or unknown, at any age), or
-// zero. A request made after the effect went is a new send (journal
-// rule (b), B8), so the owner may approve it; the ask then says the same
-// send was tried already, so a resubmission by an agent that missed the
-// first one's success is not approved blind (U12). An erased send names
-// no record and marks nothing here.
-func (g *Gate) recentlySent(ctx context.Context, in journal.Intent) time.Time {
+// recentRepeat returns what the owner must be told of other requests
+// making the same send as in: on its account and action, the same record
+// to the same recipients (sendKey, as sentSince compares) with the same
+// body (ParamBody, empty when the action has none), so a reply that says
+// something new in a thread is a new send, while an identical one is a
+// repeat. It returns when the first of them known
+// to have gone within repeatWindow went, and when the first of them that
+// may still take effect was first tried (in flight or unknown, at any
+// age; for an unclear one its parked try, journal Use.Tried).
+//
+// Confirm repeats (Mark, D-116, 2026-10-14): under journal rule (b) a
+// request made after the effect went is a new send, so the owner may
+// approve it, but one within repeatWindow of a known success never goes
+// unseen: evaluateEffect asks the owner even under a pre-allowance, and
+// the ask says it was already sent and when. A send that may have gone
+// is marked "may go twice" (UX U12). An erased send names no record and
+// marks nothing here.
+func (g *Gate) recentRepeat(ctx context.Context, in journal.Intent) repeat {
 	g.mu.Lock()
 	eng := g.eng
 	g.mu.Unlock()
 	if eng == nil {
-		return time.Time{}
+		return repeat{}
 	}
 	rec, rcpt := g.sendKey(ctx, in)
 	if rec == "" {
-		return time.Time{}
+		return repeat{}
 	}
-	var at time.Time
-	for _, u := range eng.InUse(in.Account, in.Action, g.cfg.Now().Add(-sentWindow)) {
+	body, _ := in.Params[ParamBody].(string)
+	since := g.cfg.Now().Add(-repeatWindow)
+	var r repeat
+	first := func(at *time.Time, t time.Time) {
+		if !t.IsZero() && (at.IsZero() || t.Before(*at)) {
+			*at = t
+		}
+	}
+	for _, u := range eng.InUse(in.Account, in.Action, since) {
 		if !u.Started || u.Erased || u.Intent.ID == in.ID {
 			continue
 		}
-		if r2, c2 := g.sendKey(ctx, u.Intent); r2 == rec && sameSet(c2, rcpt) && u.Dispatched.After(at) {
-			at = u.Dispatched
+		if b2, _ := u.Intent.Params[ParamBody].(string); b2 != body {
+			continue
 		}
+		if r2, c2 := g.sendKey(ctx, u.Intent); r2 != rec || !sameSet(c2, rcpt) {
+			continue
+		}
+		if !u.Went.Before(since) {
+			first(&r.sent, u.Went)
+		}
+		first(&r.tried, u.Tried)
 	}
-	return at
+	return r
 }
 
 // detailMax is the owner line's Detail width (owner.Item.line).

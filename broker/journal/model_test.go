@@ -47,7 +47,14 @@ import (
 //     is outstanding and STOP is off, some dispatch, resend, retry or
 //     release still makes progress; and an authorized request whose
 //     effect went under a rival after it was made is answered (denied)
-//     by the settle loop's Release (R15).
+//     by the settle loop's Release (R15);
+//   - I5 (confirm repeats, D-116): a request whose effect is known to
+//     have gone under another request (in the window, which the fixed
+//     clock always is) is dispatched only after the owner's confirmation
+//     of it, a "confirm" step. The model's policy asks it as the gate
+//     does (grants recentRepeat), from the engine's InUse (Use.Went); an
+//     erased success names no record and asks nothing, so a dispatch
+//     after the success was erased is exempt.
 //
 // Rivalry itself (rivals) is restated from the journal, not read from the
 // engine's fields.
@@ -113,19 +120,45 @@ func (x *mExec) Reconcile(_ context.Context, in Intent, n int) Outcome {
 	return Outcome{Result: ResultNotApplied, Evidence: "not found"}
 }
 
-// mPolicy allows everything but the intents a step denies.
+// mPolicy allows everything but the intents a step denies and, with
+// confirm set, a repeat the owner has not confirmed (mRepeat).
 type mPolicy struct {
-	mu   sync.Mutex
-	deny map[string]bool
+	mu        sync.Mutex
+	deny      map[string]bool
+	confirm   bool
+	confirmed map[string]uint64
+	e         *Engine
 }
 
 func (p *mPolicy) Check(_ context.Context, _ Phase, in Intent) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.deny[in.ID] {
+	deny, e := p.deny[in.ID], p.e
+	ask := p.confirm && p.confirmed[in.ID] == 0
+	p.mu.Unlock()
+	if deny {
 		return errors.New("refused")
 	}
+	if ask && e != nil && mRepeat(e, in) {
+		return errors.New("needs the owner's confirmation")
+	}
 	return nil
+}
+
+// mRepeatWindow is grants' repeatWindow.
+const mRepeatWindow = 24 * time.Hour
+
+// mRepeat is the gate's confirm-repeats rule (grants recentRepeat) for
+// the model, whose intents all name the same record, recipients and
+// body: another request on in's account and action known to have gone
+// within the window, not erased.
+func mRepeat(e *Engine, in Intent) bool {
+	since := mNow.Add(-mRepeatWindow)
+	for _, u := range e.InUse(in.Account, in.Action, since) {
+		if u.Intent.ID != in.ID && u.Started && !u.Erased && !u.Went.IsZero() && !u.Went.Before(since) {
+			return true
+		}
+	}
+	return false
 }
 
 // mState is one node of the search: what survives between steps.
@@ -137,6 +170,11 @@ type mState struct {
 	applied map[string]bool
 	log     []mApply
 	path    []string
+	// confirm: the policy asks the owner to confirm a repeat (mRepeat);
+	// confirmed holds, for each intent the owner confirmed, the journal's
+	// seq when they did.
+	confirm   bool
+	confirmed map[string]uint64
 }
 
 // key is the node's identity for the search: what the engine's decisions
@@ -147,7 +185,7 @@ func (s *mState) key(e *Engine) string {
 	var seqs []uint64
 	ens := bySeq(e.intents)
 	for _, en := range ens {
-		for _, q := range []uint64{en.seq, en.firstDispatchSeq, en.provedSeq, en.wentSeq} {
+		for _, q := range []uint64{en.seq, en.firstDispatchSeq, en.provedSeq, en.wentSeq, s.confirmed[en.intent.ID]} {
 			if q != 0 {
 				seqs = append(seqs, q)
 			}
@@ -161,8 +199,8 @@ func (s *mState) key(e *Engine) string {
 		return sort.Search(len(seqs), func(i int) bool { return seqs[i] >= q })
 	}
 	for _, en := range ens {
-		fmt.Fprintf(&b, "%s:%s:%v:%d,%d,%d,%d[", en.intent.ID, en.state, en.erased,
-			rank(en.seq), rank(en.firstDispatchSeq), rank(en.provedSeq), rank(en.wentSeq))
+		fmt.Fprintf(&b, "%s:%s:%v:%d,%d,%d,%d,%d[", en.intent.ID, en.state, en.erased,
+			rank(en.seq), rank(en.firstDispatchSeq), rank(en.provedSeq), rank(en.wentSeq), rank(s.confirmed[en.intent.ID]))
 		for _, a := range en.attempts {
 			fmt.Fprintf(&b, "%s/%s/%v ", a.Result, a.Source, a.Parked)
 		}
@@ -205,10 +243,14 @@ func restore(t *testing.T, s *mState, keepFence bool) *mRun {
 	for k, v := range s.applied {
 		x.applied[k] = v
 	}
-	pol := &mPolicy{deny: map[string]bool{}}
+	pol := &mPolicy{deny: map[string]bool{}, confirm: s.confirm, confirmed: map[string]uint64{}}
+	for k, v := range s.confirmed {
+		pol.confirmed[k] = v
+	}
 	execs := map[string]Executor{"svc": x}
 	if keepFence && s.eng != nil {
 		e, st := cloneEngine(t, s.eng, pol, execs)
+		pol.e = e
 		return &mRun{e: e, x: x, pol: pol, st: st}
 	}
 	st := &MemStore{data: bytes.Clone(s.journal)}
@@ -216,6 +258,7 @@ func restore(t *testing.T, s *mState, keepFence bool) *mRun {
 	if err != nil {
 		t.Fatalf("%v: open: %v", s.path, err)
 	}
+	pol.e = e
 	return &mRun{e: e, x: x, pol: pol, st: st}
 }
 
@@ -263,7 +306,10 @@ func cloneEngine(t *testing.T, e *Engine, pol Policy, execs map[string]Executor)
 
 func (r *mRun) snapshot(path []string) *mState {
 	s := &mState{eng: r.e, journal: bytes.Clone(r.st.data), fence: map[string][]string{}, applied: map[string]bool{},
-		log: append([]mApply(nil), r.x.log...), path: path}
+		log: append([]mApply(nil), r.x.log...), path: path, confirm: r.pol.confirm, confirmed: map[string]uint64{}}
+	for k, v := range r.pol.confirmed {
+		s.confirmed[k] = v
+	}
 	for a, ids := range r.e.fence {
 		for id := range ids {
 			s.fence[a] = append(s.fence[a], id)
@@ -296,6 +342,22 @@ type mModel struct {
 	// owner adds the owner's own steps: STOP, RESUME and evidence on an
 	// unknown attempt (Resolve).
 	owner bool
+}
+
+// confirm reports whether the configuration's policy asks the owner to
+// confirm repeats: the gate does for a widening effect on an account,
+// never for a narrowing one (which may always go again).
+func (m *mModel) confirm() bool { return !m.narrow }
+
+// confirmedAt reports whether the node's policy has id confirmed.
+func (m *mModel) confirmedAt(e *Engine, id string) bool {
+	pol, ok := e.policy.(*mPolicy)
+	if !ok {
+		return false
+	}
+	pol.mu.Lock()
+	defer pol.mu.Unlock()
+	return pol.confirmed[id] != 0
 }
 
 func (m *mModel) intent(id string) Intent {
@@ -384,6 +446,14 @@ func (m *mModel) steps(e *Engine) []mStep {
 			modes("resend", []mMode{mOK, mRefuse, mTimeout}, "resend",
 				func(r *mRun) error { _, err := r.e.Resend(ctx, id, n); return err })
 		}
+		// The owner confirms a repeat the policy asks about (I5).
+		if m.confirm() && !en.erased && (en.state == Pending || en.state == Authorized || en.state == NotApplied || en.retryable()) &&
+			e.intents[id] != nil && mRepeat(e, en.intent) && !m.confirmedAt(e, id) {
+			add("confirm "+id, func(r *mRun) error {
+				r.pol.confirmed[id] = r.e.seq
+				return nil
+			})
+		}
 		// Erase is offered on any intent: one that may still take
 		// effect must be held, not erased (B9).
 		if !en.erased {
@@ -413,7 +483,7 @@ func (m *mModel) steps(e *Engine) []mStep {
 // distinct states it reached.
 func (m *mModel) run(t *testing.T) int {
 	t.Helper()
-	start := &mState{fence: map[string][]string{}, applied: map[string]bool{}}
+	start := &mState{fence: map[string][]string{}, applied: map[string]bool{}, confirm: m.confirm(), confirmed: map[string]uint64{}}
 	seen := map[string]bool{start.key(restore(t, start, true).e): true}
 	level := []*mState{start}
 	for d := 0; d < m.depth && len(level) > 0; d++ {
@@ -455,9 +525,11 @@ func (m *mModel) run(t *testing.T) int {
 type mFacts struct {
 	seq, firstDispatch, went uint64
 	// proved is the seq of the first record that proved an attempt not
-	// applied; disp the seq of each attempt's (first) dispatch.
+	// applied; disp the seq of each attempt's (first) dispatch; erased
+	// the seq of its erasure.
 	proved uint64
 	disp   []uint64
+	erased uint64
 }
 
 // rivalsOracle: some intent z was proved not applied before at (the
@@ -540,6 +612,10 @@ func (m *mModel) follow(t *testing.T, parent, s *mState) {
 			if rec.Result == ResultSucceeded && f.went == 0 {
 				f.went = rec.Seq
 			}
+		case RecErased:
+			if f.erased == 0 {
+				f.erased = rec.Seq
+			}
 		}
 		if rec.ID != "" {
 			s.facts[rec.ID] = f
@@ -590,6 +666,21 @@ func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
 			}
 		}
 	}
+	// I5: a repeat of an effect known to have gone is dispatched only
+	// after the owner confirmed it.
+	if m.confirm() {
+		for _, q := range s.log {
+			at := f[q.id].disp[q.n-1]
+			for pid, p := range f {
+				if pid == q.id || p.went == 0 || p.went > at || (p.erased != 0 && p.erased < at) {
+					continue
+				}
+				if c := s.confirmed[q.id]; c == 0 || c > at {
+					fail("I5", "%s attempt %d applied (by %s) after %s was known to have gone, without the owner's confirmation", q.id, q.n, q.via, pid)
+				}
+			}
+		}
+	}
 	// I2.
 	listed := map[string]bool{}
 	for _, p := range append(e.NotResent(), e.Parked()...) {
@@ -632,6 +723,7 @@ func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
 	if len(e.intents) > 0 {
 		fr := restore(t, s, true)
 		fr.x.next, fr.x.via = mOK, "probe"
+		fr.pol.confirmed["p"] = 1 // the owner confirms it, if asked (I5)
 		in := m.intent("p")
 		must(fr.e.Submit(in))
 		must(fr.e.Authorize(ctx, "p"))
@@ -733,11 +825,14 @@ func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
 // narrows it, and, with the owner's STOP, RESUME and evidence added, for
 // two intents of each. Two intents to depth 10 reach the erase of an
 // unclear intent and a resubmission after it (B9, depth 9); three to
-// depth 9 dispatch all three. Under the race detector every depth is
-// modelRaceCut less (2 intents still reach B9 there). MODEL_DEPTH (a
-// number added to every depth) sets a deeper run; MODEL_ONLY runs the
-// configurations whose name contains it.
+// depth 9 dispatch all three. It is skipped under the race detector
+// (modelRace): CI's broker job runs it without -race, at these bounds,
+// in its own step. MODEL_DEPTH (a number added to every depth) sets a
+// deeper run; MODEL_ONLY runs the configurations whose name contains it.
 func TestOP2SameEffectModel(t *testing.T) {
+	if modelRace {
+		t.Skip("sequential search: run without -race (CI's model step)")
+	}
 	more, _ := strconv.Atoi(os.Getenv("MODEL_DEPTH"))
 	// The search keeps every level's nodes live; collecting less often
 	// halves its time.
@@ -751,7 +846,7 @@ func TestOP2SameEffectModel(t *testing.T) {
 		{ids: []string{"a", "b"}, narrow: true, owner: true, depth: 9},
 	} {
 		m := m
-		m.depth += more - modelRaceCut
+		m.depth += more
 		name := fmt.Sprintf("%d intents, narrowing %v, owner %v, depth %d", len(m.ids), m.narrow, m.owner, m.depth)
 		if only := os.Getenv("MODEL_ONLY"); only != "" && !strings.Contains(name, only) {
 			continue
@@ -769,7 +864,7 @@ func TestOP2SameEffectModel(t *testing.T) {
 // invariants after each step as the search does.
 func (m *mModel) replay(t *testing.T, path []string) {
 	t.Helper()
-	s := &mState{fence: map[string][]string{}, applied: map[string]bool{}}
+	s := &mState{fence: map[string][]string{}, applied: map[string]bool{}, confirm: m.confirm(), confirmed: map[string]uint64{}}
 	for _, name := range path {
 		r := restore(t, s, true)
 		var st *mStep

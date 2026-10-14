@@ -175,6 +175,12 @@ var counterexamples = map[string][]func(p []journal.Record) ([]journal.Record, O
 			t.add(journal.Record{Type: journal.RecRecheckFailed, ID: "x", Reason: "erased"})
 			return t.recs, Options{}
 		},
+		func(p []journal.Record) ([]journal.Record, Options) { // refused while an attempt is still in flight (B9; Security X10 on #1433)
+			t := &trail{recs: p}
+			t.sub(effect("x")).rec(journal.RecAuthorized, "x").disp("x", 1)
+			t.add(journal.Record{Type: journal.RecRecheckFailed, ID: "x", Reason: "erased"})
+			return t.recs, Options{Live: true}
+		},
 		func(p []journal.Record) ([]journal.Record, Options) { // settled twice
 			t := &trail{recs: p}
 			t.sub(effect("x")).rec(journal.RecAuthorized, "x").disp("x", 1).obs("x", 1, journal.ResultSucceeded)

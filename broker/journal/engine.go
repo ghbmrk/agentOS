@@ -124,6 +124,10 @@ type entry struct {
 	firstDispatchSeq uint64
 	provedSeq        uint64
 	wentSeq          uint64
+	// wentAt is when the attempt that wentSeq observed was last
+	// dispatched: when the effect is known to have gone (InUse, the
+	// gate's confirm-repeats rule, D-116).
+	wentAt time.Time
 }
 
 // Option configures Open.
@@ -1271,10 +1275,15 @@ func (e *Engine) Stop(ctx context.Context) (StopReport, error) {
 				rep.Held = append(rep.Held, id)
 			}
 		case InFlight, OutcomeUnknown:
-			// An unclear intent's cancel is for its parked attempt, the
-			// one that may still take effect.
+			// Every attempt that may still take effect is cancelled: an
+			// unclear intent's parked attempt, and each later one still
+			// in flight or unknown (Security R18 on #1433).
 			rep.Unresolved = append(rep.Unresolved, id)
-			jobs = append(jobs, job{en.intent, en.outstanding().N})
+			for _, a := range en.attempts {
+				if a.Result == ResultUnknown || a.Result == ResultInFlight {
+					jobs = append(jobs, job{en.intent, a.N})
+				}
+			}
 		}
 	}
 	e.mu.Unlock()
@@ -1435,6 +1444,15 @@ type Use struct {
 	Erased bool
 	// Dispatched is when its latest attempt was dispatched (zero if none).
 	Dispatched time.Time
+	// Went is when the attempt known to have gone was dispatched, zero
+	// unless one of its attempts was observed succeeded: a known success
+	// (the gate's confirm-repeats rule, D-116).
+	Went time.Time
+	// Tried is when the attempt that may still take effect (in flight or
+	// unknown) was first dispatched, zero for any other state: for an
+	// unclear intent, its parked try, not the owner's retry that did not
+	// go (Security R19 on #1433).
+	Tried time.Time
 }
 
 // InUse returns the intents on account with action that hold a place
@@ -1464,10 +1482,11 @@ func (e *Engine) InUse(account, action string, since time.Time) []Use {
 		case InFlight, OutcomeUnknown:
 			// An unclear intent (its owner's retry did not go, an earlier
 			// parked try may have) is outcome_unknown: started (B9).
-			out = append(out, Use{Intent: en.intent, Started: true, Erased: en.erased, Dispatched: en.dispatched})
+			out = append(out, Use{Intent: en.intent, Started: true, Erased: en.erased, Dispatched: en.dispatched,
+				Went: en.wentAt, Tried: en.outstanding().Dispatched})
 		case Succeeded:
 			if !en.dispatched.Before(since) {
-				out = append(out, Use{Intent: en.intent, Started: true, Erased: en.erased, Dispatched: en.dispatched})
+				out = append(out, Use{Intent: en.intent, Started: true, Erased: en.erased, Dispatched: en.dispatched, Went: en.wentAt})
 			}
 		}
 	}
@@ -1931,6 +1950,12 @@ func (en *entry) apply(r Record) {
 		}
 		if r.Result == ResultSucceeded && en.wentSeq == 0 {
 			en.wentSeq = r.Seq
+			// The latest attempt's dispatch time includes a same-key
+			// retry of it; an earlier attempt has only its own.
+			en.wentAt = a.Dispatched
+			if r.Attempt == len(en.attempts) {
+				en.wentAt = en.dispatched
+			}
 		}
 		en.state = en.derive()
 	case RecCancel:

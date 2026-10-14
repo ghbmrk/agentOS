@@ -249,6 +249,12 @@ func (c *Channel) renderLocked(r *request) string {
 		if it.Unverified {
 			pre = "UNVERIFIED: "
 		}
+		if !it.Sent.IsZero() {
+			// A repeat of a send known to have gone (confirm repeats,
+			// D-116): the notice says so and asks.
+			return fmt.Sprintf("%s: %s%s \"%s\" was already sent %s. Send it again? Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
+		}
 		if !it.Retried.IsZero() {
 			// An owner retry (OP-2): the notice warns of a duplicate and
 			// names no recipient, which the page shows.

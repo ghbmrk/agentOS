@@ -176,6 +176,15 @@ func TestBoundAskNamesQueuedPerRecord(t *testing.T) {
 				if st := send(id, "inv-r"); st.State != want {
 					t.Fatalf("%s: %s %q, want %s", id, st.State, st.Permission.Reason, want)
 				}
+				if want == journal.Succeeded {
+					// A send of inv-r that went makes the next one a
+					// repeat the owner confirms (D-116). Erased, it names
+					// no record, so it is no repeat but still holds its
+					// place on every record (SR3-2-f3).
+					if er, _, err := r.eng.Erase([]string{id}); err != nil || len(er) != 1 {
+						t.Fatalf("erase %s: %v %v", id, er, err)
+					}
+				}
 			}
 			// Queued on another record: within the day, not this record.
 			if st := send("agent/o1", "inv-o"); st.State != journal.Authorized {

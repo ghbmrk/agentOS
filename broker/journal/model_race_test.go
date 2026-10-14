@@ -2,8 +2,8 @@
 
 package journal
 
-// modelRaceCut is how many levels TestOP2SameEffectModel drops under the
-// race detector. The search is sequential, so the detector finds nothing
-// in it, and at full depth it takes minutes and gigabytes there; the
-// plain run (go test without -race) keeps the full bounds.
-const modelRaceCut = 1
+// modelRace: TestOP2SameEffectModel is skipped under the race detector.
+// The search is sequential, so the detector finds nothing in it, and at
+// its bounds it takes minutes and gigabytes there; CI runs it without
+// -race at full depth in its own step (Potency P11, L3 L12 on #1433).
+const modelRace = true

@@ -2,5 +2,5 @@
 
 package journal
 
-// modelRaceCut: see model_race_test.go.
-const modelRaceCut = 0
+// modelRace: see model_race_test.go.
+const modelRace = false
