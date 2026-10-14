@@ -125,6 +125,7 @@ func withGrants(c *custody, g grants, agent string) *custody {
 		return newGrantedProxy(v, g, c.modelTransport, c.guard, c.storedGrant)
 	}
 	c.granted = modelGranted(g)
+	c.flagGrants = flagGrantsOf(g)
 	return c
 }
 
@@ -166,6 +167,8 @@ type modelWiring struct {
 	rt    *route.Router
 	agent string
 	hook  *privateHook
+	// pok is -private-ok, for the model state (privateGrantedNow).
+	pok map[string]bool
 }
 
 // wireModel checks the agent machine and builds the router over the
@@ -179,12 +182,13 @@ func wireModel(rule route.Rule, g grants, pok map[string]bool, agent, builderFro
 	if err != nil {
 		return nil, err
 	}
-	return &modelWiring{g: g, rt: rt, agent: agent, hook: hook}, nil
+	return &modelWiring{g: g, rt: rt, agent: agent, hook: hook, pok: pok}, nil
 }
 
 // bind makes serve's custody over the wiring's grants and agent machine
 // and binds the hook to it.
 func (w *modelWiring) bind(c *custody) (*custody, error) {
+	c.privateFlags = w.pok
 	return serveCustody(c, w.g, w.agent, w.hook)
 }
 

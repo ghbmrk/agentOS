@@ -294,6 +294,42 @@ func TestForgetItem2ResumesAfterARestart(t *testing.T) {
 	}
 }
 
+// REQ: CAP-3, OP-4
+// #1370 (Security R1 on #1325): startup reconcile runs in the background,
+// so it can reach an interrupted item 2 after recall has opened, or with
+// recall off after the boot's resume ran. Reconcile then starts the resume
+// itself, so the take-back is not lost until the next boot; with recall
+// off the owner is told it is owed.
+func TestForgetItem2ReconciledAfterRecallOpened(t *testing.T) {
+	for _, off := range []bool{false, true} {
+		r := newForgetRig(t)
+		w := &fakeWork{worked: true, ok: true}
+		if off {
+			w.err = recalltool.ErrNotOpen
+		}
+		r.withAgent(w)
+		r.task("owner:a", "pay the gas bill", r.now.Add(-time.Hour), viaSMS)
+		r.say("FORGET LAST")
+		r.gate.st = map[string]journal.State{r.gate.got[0].ID: journal.Succeeded}
+		r.texts = nil
+		// The boot's resume (recall's OnOpen, or the recall-off start) has
+		// already run and found nothing.
+		r.f.resumeAgent(context.Background())
+		resumes := 0
+		r.f.resume = func() { resumes++; r.f.resumeAgent(context.Background()) }
+		if out := r.f.Reconcile(context.Background(), r.gate.got[1], 1); out.Result != journal.ResultSucceeded {
+			t.Fatalf("off %v: %+v", off, out)
+		}
+		want, backs := forgetAgentDone, 1
+		if off {
+			want, backs = forgetAgentNotOpen, 0
+		}
+		if resumes != 1 || len(w.backs) != backs || len(r.texts) != 1 || r.texts[0] != want {
+			t.Fatalf("off %v: %d resumes, took back %v, told %q", off, resumes, w.backs, r.texts)
+		}
+	}
+}
+
 // With no item 2 (the agent had not worked since the task), item 1's YES
 // also takes the agent back, without asking, if it still has not worked;
 // work since the ask is kept and the done text says the agent may hold
