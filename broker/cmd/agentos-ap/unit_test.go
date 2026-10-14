@@ -60,7 +60,7 @@ func TestTheUnitIsBounded(t *testing.T) {
 		}
 	}
 	for _, p := range hidden {
-		if strings.Contains(p, "owner.json") || strings.Contains(p, "setup-net") {
+		if strings.Contains(p, "owner.json") || strings.Contains(p, "setup-net") || strings.Contains(p, "ap-net") {
 			t.Errorf("hides %s, which the loader reads or burns", p)
 		}
 	}
