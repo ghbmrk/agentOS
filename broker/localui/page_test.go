@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 )
@@ -20,14 +19,15 @@ func (r *rig) page(o localsrv.Owner) Owner {
 }
 
 // rotateAPNet stands in for agentosd's writer of a rotated card's Wi-Fi
-// network (#1191): it records the network, or fails with wifiErr.
-func (r *rig) rotateAPNet(n apnet.Network) error {
+// network (#1191), which takes the network from the vault process
+// (#1522): it counts the hand-offs, or fails with wifiErr.
+func (r *rig) rotateAPNet() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.wifiErr != nil {
 		return r.wifiErr
 	}
-	r.wifiNets = append(r.wifiNets, n)
+	r.handOffs++
 	return nil
 }
 
