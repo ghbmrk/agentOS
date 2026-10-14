@@ -752,10 +752,14 @@ TMPFILES_DIRS = conf_paths("tmpfiles.d") + ("lib/tmpfiles.d",)
 TMPFILES_ALLOW = "tmpfiles.allow"
 # The credential store directories systemd 257 reads (ImportCredential= in systemd-sysctl and
 # systemd-tmpfiles takes sysctl.* and tmpfiles.* from them), with /usr/local/lib and a split-/usr /lib
-# for safety. Nothing may ship in them unless named here (#1543 Security B3); the image needs none.
+# for safety. Nothing may ship in them unless named here (#1543 Security B3). The image needs the
+# four mkosi writes from mkosi.conf's Locale=, Keymap=, Timezone= and RootPassword= (CI build of #1543
+# at fc5981d): a credential's name is what PID 1 and ImportCredential= match on, so none of these
+# can be read as sysctl.* or tmpfiles.*.
 CREDSTORE_DIRS = tuple("%s/%s" % (top, n) for top in ("etc", "run", "usr/local/lib", "usr/lib", "lib")
                        for n in ("credstore", "credstore.encrypted"))
-CREDSTORE_ALLOWED = ()
+CREDSTORE_ALLOWED = ("usr/lib/credstore/firstboot.keymap", "usr/lib/credstore/firstboot.locale",
+                     "usr/lib/credstore/firstboot.timezone", "usr/lib/credstore/passwd.hashed-password.root")
 # What a tmpfiles.d line must not touch (#1530), as defence in depth behind the allowlist: /proc and
 # /sys; every file and directory this check reads, in each directory systemd or kmod reads it from
 # (/run included: the tree check cannot see what tmpfiles puts there at boot); the generator
@@ -1038,9 +1042,10 @@ TMPFILES_ALLOW_HEADER = """\
 
 def credstore_violations(root):
     """#1543 Security B3: systemd-sysctl and systemd-tmpfiles import sysctl.* and tmpfiles.*
-    credentials from the credential store, so nothing ships there (CREDSTORE_ALLOWED names any
-    exception; there is none). A store that is a link or a file is refused too."""
-    out, root = [], str(root)
+    credentials from the credential store, so nothing ships there but what CREDSTORE_ALLOWED names.
+    A store that is a link or a file is refused too. A store reached through a linked parent (trixie's
+    /lib is /usr/lib) is walked once, under the path it resolves to."""
+    out, root, seen = [], str(root), set()
     for d in CREDSTORE_DIRS:
         top = os.path.join(root, d)
         if not os.path.lexists(top):
@@ -1048,6 +1053,16 @@ def credstore_violations(root):
         if os.path.islink(top) or not os.path.isdir(top):
             out.append("%s: a link or file where the credential store is; nothing ships there" % d)
             continue
+        try:
+            path, st = tree_chase(root, d)
+            d = d if st is None else path  # under /run, which the box mounts: as it is in the tree
+        except OSError as e:
+            out.append("%s: unresolvable (%s); the tree check never passes a store it cannot read" % (d, e.strerror))
+            continue
+        if d in seen:
+            continue
+        seen.add(d)
+        top = os.path.join(root, d)
         for dirpath, dirnames, filenames in os.walk(top):
             for n in sorted(dirnames + filenames):
                 p = os.path.join(dirpath, n)

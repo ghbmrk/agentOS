@@ -2760,17 +2760,31 @@ class TmpfilesAllowTest(unittest.TestCase):
 class CredstoreTest(unittest.TestCase):
     """#1543 Security B3: systemd-sysctl and systemd-tmpfiles import sysctl.* and tmpfiles.*
     credentials from the credential store, so a file shipped there could turn forwarding on while
-    sysctl.d and tmpfiles.d are clean. Nothing ships there; the image needs no exception."""
+    sysctl.d and tmpfiles.d are clean. Nothing ships there but the four credentials mkosi writes from
+    mkosi.conf, named in CREDSTORE_ALLOWED."""
     # REQ: DEV-2, CH-9, HW-1
     STORES = tuple("%s/%s" % (top, n) for top in ("etc", "run", "usr/lib") for n in ("credstore", "credstore.encrypted"))
 
     def test_nothing_in_a_credential_store(self):
-        self.assertEqual(check.CREDSTORE_ALLOWED, ())
+        # mkosi's own: Locale=, Keymap=, Timezone= and RootPassword= (CI build of #1543 at fc5981d).
+        mkosi = ("firstboot.keymap", "firstboot.locale", "firstboot.timezone", "passwd.hashed-password.root")
+        self.assertEqual(check.CREDSTORE_ALLOWED, tuple("usr/lib/credstore/" + n for n in mkosi))
         with tempfile.TemporaryDirectory() as tmp:
             root = clean_tree(tmp)
             for d in self.STORES + ("usr/local/lib/credstore",):
                 (root / d).mkdir(parents=True)
+            for n in mkosi:
+                write(root, "usr/lib/credstore/" + n, "x")
             self.assertEqual(check.violations(root), [])
+            # Trixie's /lib is a link to /usr/lib: its store is the same one, walked once.
+            link(root, "lib", "usr/lib")
+            self.assertEqual(check.violations(root), [])
+            # The names are allowed in /usr/lib only.
+            for d in ("etc/credstore", "usr/lib/credstore.encrypted"):
+                with self.subTest(store=d):
+                    f = write(root, d + "/firstboot.locale", "x")
+                    self.assertIn(d + "/firstboot.locale: in a credential store", " | ".join(check.violations(root)))
+                    f.unlink()
             for d in self.STORES:
                 for rel, make in (("sysctl.extra", lambda p: p.write_text("net.ipv4.ip_forward=1\n")),
                                   ("sub/tmpfiles.extra", lambda p: p.write_text("w /proc/sys/x - - - - 1\n")),
@@ -2786,7 +2800,7 @@ class CredstoreTest(unittest.TestCase):
                             p.parent.rmdir()
             # An allowlisted file passes; a store that is itself a link or a file does not.
             write(root, "usr/lib/credstore/agentos.x", "x")
-            with unittest.mock.patch.object(check, "CREDSTORE_ALLOWED", ("usr/lib/credstore/agentos.x",)):
+            with unittest.mock.patch.object(check, "CREDSTORE_ALLOWED", check.CREDSTORE_ALLOWED + ("usr/lib/credstore/agentos.x",)):
                 self.assertEqual(check.credstore_violations(root), [])
             self.assertNotEqual(check.credstore_violations(root), [])
             (root / "usr/lib/credstore/agentos.x").unlink()
