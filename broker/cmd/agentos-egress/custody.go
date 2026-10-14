@@ -1076,6 +1076,7 @@ func (c *custody) lock() {
 	defer c.rot.mu.Unlock()
 	c.rot.drop()
 	c.rot.box = nil
+	c.rot.wifi = nil
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.gen++
