@@ -82,6 +82,9 @@ class CheckTest(unittest.TestCase):
             self.assertTrue(run(["broker/voice/v.go"], pr=1500, created=BEFORE, history=f"{event}\t{AFTER}\n")[0])
             # Before the freeze began, the same event is part of the in-flight work.
             self.assertTrue(run(["broker/voice/v.go"], pr=1600, created=BEFORE, history=f"{event}\t{BEFORE}\n")[0])
+            # An earlier event before the freeze does not hide a later one after it.
+            later = f"reopened\t{BEFORE}\n{event}\t{AFTER}\n"
+            self.assertFalse(run(["broker/voice/v.go"], pr=1600, created=BEFORE, history=later)[0], event)
         # Plain pushes, reviews, comments and closes keep it: the work finishes.
         quiet = f"committed\t\nreviewed\t\ncommented\t{AFTER}\nclosed\t{AFTER}\nlabeled\t{AFTER}\n"
         self.assertTrue(run(["broker/voice/v.go"], pr=1600, created=BEFORE, history=quiet)[0])
