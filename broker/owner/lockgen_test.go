@@ -11,7 +11,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem"
 )
 
-// REQ: CH-7, CH-11, CH-18, ARC-2, UX-2wb-1
+// REQ: CH-7, CH-11, CH-18, ARC-2
+// Also serves the UX-2wb-1 finding (no SPEC ID).
 
 // heldModem holds every text until let is closed, telling entered of the
 // first one: a notification still in delivery.

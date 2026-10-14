@@ -18,7 +18,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: ARC-2, CH-7, UX-2wb-1
+// REQ: ARC-2, CH-7
+// Also serves the UX-2wb-1 finding (no SPEC ID).
 
 type stillOwner struct{}
 
