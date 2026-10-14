@@ -72,10 +72,14 @@ def nodump(root):
         write(root, rel, NODUMP_SRC.get(rel, MK / "mkosi.extra" / rel).read_text())
 
 
+BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
+
+
 def radio(root):
-    # Stand-ins for firmware-mediatek's MT7922 files (#1415).
+    # Stand-ins for firmware-mediatek's MT7922 files (#1415), and the image's Bluetooth block.
     for rel in check.RADIO_FIRMWARE:
         write(root, rel, "fw")
+    write(root, BT_BLOCK, (MK / "mkosi.extra" / BT_BLOCK).read_text())
 
 
 class TreeCheckTest(unittest.TestCase):
@@ -159,6 +163,73 @@ class TreeCheckTest(unittest.TestCase):
             f.unlink()
             self.assertIn(rel, " ".join(check.violations(self.root)))
             write(self.root, rel, "fw")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_names_are_the_ones_mt7921e_requests(self):
+        # MT7922_FIRMWARE_WM and MT7922_ROM_PATCH in the kernel's mt792x.h. Pinned literally: the
+        # same package ships MT7961 files, so a wrong name here would still build.
+        self.assertEqual(check.RADIO_FIRMWARE, (
+            "usr/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+            "usr/lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin"))
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_must_be_a_nonempty_file_in_the_tree(self):
+        # An empty file, a directory, a dangling link, a loop, or a link whose absolute target exists
+        # only on the build host is no firmware on the booted box.
+        rel = check.RADIO_FIRMWARE[0]
+        f = self.root / rel
+        host = write(pathlib.Path(self.tmp.name + "-host"), "fw.bin", "fw")
+        self.addCleanup(shutil.rmtree, self.tmp.name + "-host")
+        cases = {
+            "empty": lambda: f.write_bytes(b""),
+            "directory": lambda: f.mkdir(),
+            "dangling": lambda: f.symlink_to("missing.bin"),
+            "loop": lambda: f.symlink_to(f.name),
+            "host target": lambda: f.symlink_to(host),
+            "escapes the tree": lambda: f.symlink_to("../" * 12 + str(host).lstrip("/")),
+        }
+        for name, make in cases.items():
+            with self.subTest(name):
+                if f.is_symlink() or f.is_file():
+                    f.unlink()
+                elif f.is_dir():
+                    f.rmdir()
+                make()
+                self.assertIn(rel, " ".join(check.violations(self.root)))
+        f.unlink()
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_links_resolve_inside_the_tree(self):
+        # Debian's firmware packages link some names to others; an absolute target means the image's.
+        rel = check.RADIO_FIRMWARE[0]
+        f = self.root / rel
+        write(self.root, "usr/lib/firmware/mediatek/real.bin", "fw")
+        for target in ("real.bin", "/usr/lib/firmware/mediatek/real.bin", "/lib/firmware/mediatek/real.bin"):
+            with self.subTest(target):
+                f.unlink()
+                f.symlink_to(target)
+                if target.startswith("/lib/"):
+                    (self.root / "lib").symlink_to("usr/lib")
+                self.assertEqual(check.violations(self.root), [])
+
+    # REQ: CH-7, HW-10
+    def test_bluetooth_must_stay_blocked(self):
+        # The MT7922's Bluetooth half (btusb, btmtk) would come up from the same package; nothing in
+        # the spec uses it, so the image blocks both modules (#1415 security R1).
+        (self.root / BT_BLOCK).unlink()
+        v = " ".join(check.violations(self.root))
+        self.assertIn("btusb", v)
+        self.assertIn("btmtk", v)
+        # An earlier install line for the module wins in kmod, so a drop-in sorted first undoes it.
+        write(self.root, BT_BLOCK, (MK / "mkosi.extra" / BT_BLOCK).read_text())
+        write(self.root, "etc/modprobe.d/00-bt.conf", "install btusb /sbin/modprobe --ignore-install btusb\n")
+        self.assertIn("btusb", " ".join(check.violations(self.root)))
+        # The same file name in /etc replaces the image's file.
+        (self.root / "etc/modprobe.d/00-bt.conf").unlink()
+        write(self.root, "etc/modprobe.d/" + BT_BLOCK.rsplit("/", 1)[1], "# emptied\n")
+        self.assertIn("btmtk", " ".join(check.violations(self.root)))
+        (self.root / "etc/modprobe.d" / BT_BLOCK.rsplit("/", 1)[1]).unlink()
         self.assertEqual(check.violations(self.root), [])
 
     def test_compressed_radio_firmware_counts(self):
