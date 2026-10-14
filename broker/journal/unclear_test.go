@@ -336,3 +336,28 @@ func TestOP2FenceLiftsWhenARetryIsProvedNotDoneBehindAParkedTry(t *testing.T) {
 		t.Fatalf("fenced after the check: %v", f)
 	}
 }
+
+// An intent the owner's evidence shows went by its parked first try,
+// while the owner's retry of it is itself parked, is not offered for
+// RETRY again: nothing would send it (mayDispatch), so the offer could
+// only be refused.
+func TestOP2ParkedRetryOfAnIntentThatWentIsNotOffered(t *testing.T) {
+	r := restore(t, &mState{fence: map[string][]string{}, applied: map[string]bool{}}, true)
+	must(r.e.Submit(intent("a", "mail")))
+	must(r.e.Authorize(ctx, "a"))
+	r.x.next = mDropAck
+	_, _ = r.e.Dispatch(ctx, "a")
+	r.e.park("a", 1, true)
+	r.x.next = mTimeout
+	must(r.e.Retry(ctx, "a", 1))
+	must(r.e.Resolve("a", 1, Outcome{Result: ResultSucceeded, Evidence: "statement"}, "owner"))
+	if !r.e.park("a", 2, true) {
+		t.Fatal("attempt 2 not parked")
+	}
+	if ps := r.e.Parked(); len(ps) != 0 {
+		t.Fatalf("parked %+v", ps)
+	}
+	if _, err := r.e.Retry(ctx, "a", 2); !errors.Is(err, ErrState) {
+		t.Fatalf("retry: %v", err)
+	}
+}
