@@ -54,7 +54,7 @@ var All = []Change{
 
 // Headings of the owner's guide sections this package pins.
 const (
-	StartHeading          = "Starting AgentOS on your PC"
-	ChangesHeading        = "What AgentOS changes on your PC"
+	StartHeading          = "Starting agentOS on your PC"
+	ChangesHeading        = "What agentOS changes on your PC"
 	RecoveryPromptHeading = "If Windows asks for a recovery key"
 )
