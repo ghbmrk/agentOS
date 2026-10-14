@@ -376,6 +376,8 @@ intent { id, goal_id, origin(authenticated), action, exact params/recipients/vis
   3. Otherwise neither retry nor interrupt the owner: the item goes in the daily digest (e.g. "Invoice 42: unclear if paid; not retried.").
 
   The owner MAY ask to retry a digest item. That request needs a low-tier texted code (CH-10), and its confirmation warns that the effect may happen twice. Acceptance: killing the broker between intent and outcome, once for a mail send and once for a payment stub, gives no second effect unless a check passes or the owner asks (D-116).
+
+  A request made after an effect is known to have gone is a new send, but an identical repeat (the same record to the same recipients by the same action) within 24 hours of that success MUST NOT go out without the owner's explicit confirmation, even under a pre-allowance (ADP-9) or an auto-reply rule (ADP-11): the broker asks at the tier the verified facts give (CH-10), the request says when it was already sent and asks whether to send it again, and a request declined or left to expire does not go.
 - **OP-3** Authority, recipients, preconditions, and reservations MUST be rechecked immediately before dispatch.
 - **OP-4** Restart = replay the journal. Unresolved intents are reconciled before new dispatch on that account.
 - **OP-5** Grants, budget changes, trusted-host changes, release activations, and skill adoptions are themselves intents: one audit trail, one recovery rule.
