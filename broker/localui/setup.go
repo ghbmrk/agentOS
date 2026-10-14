@@ -139,7 +139,12 @@ type SetupState struct {
 	Recovery     bool `json:"recovery"`
 	Host         bool `json:"host"`
 	HostTrusted  bool `json:"host_trusted"`
-	Done         bool `json:"done"`
+	// Unsaved maps a provider to the owner's private-content answer from
+	// an API key form whose answer is not yet recorded (#1467). It is set
+	// before the key is stored and cleared once the answer is, so setup
+	// does not finish with the provider keeping an older answer.
+	Unsaved map[string]bool `json:"unsaved,omitempty"`
+	Done    bool            `json:"done"`
 }
 
 // SetupStore persists SetupState.
@@ -412,6 +417,7 @@ func (u *setup) routes(mux *http.ServeMux) {
 		"/setup/host":        u.host,
 		"/setup/ai-key":      u.aiKey,
 		"/setup/ai-device":   u.aiDevice,
+		"/setup/ai-private":  u.aiPrivate,
 		"/setup/restart":     u.restart,
 	} {
 		path, f := path, f
@@ -482,6 +488,9 @@ type setupView struct {
 	// Plan and Key are each provider's private-content box on its plan
 	// sign-in and API key forms.
 	Plan, Key map[string]privateBox
+	// Unsaved is the retry box of each provider whose answer did not
+	// save after its key was stored (#1467).
+	Unsaved map[string]*privateBox
 	// Refresh reloads the page only while it waits on the box and has
 	// nothing to type into (ONB-4).
 	Refresh string
@@ -611,11 +620,14 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		}
 	case "ai":
 		v.Providers = u.s.cfg.Hooks.Providers()
-		v.Plan, v.Key = map[string]privateBox{}, map[string]privateBox{}
+		v.Plan, v.Key, v.Unsaved = map[string]privateBox{}, map[string]privateBox{}, map[string]*privateBox{}
 		u.mu.Lock()
 		for _, pr := range v.Providers {
 			v.Plan[pr.ID] = u.boxLocked("ai-device", pr)
 			v.Key[pr.ID] = u.boxLocked("ai-key", pr)
+			if ok, held := u.st.Unsaved[pr.ID]; held {
+				v.Unsaved[pr.ID] = &privateBox{Name: pr.Name, Checked: ok}
+			}
 		}
 		u.mu.Unlock()
 		if !p.Updated {
@@ -1070,16 +1082,48 @@ func (u *setup) keepAnswer(r *http.Request, form, id string) {
 	u.mu.Unlock()
 }
 
+// errUnsaved is the page's text for a private-content answer that did not
+// save.
+var errUnsaved = errors.New("Could not save. Try again.")
+
 // privateOK records the owner's CAP-9 answer for a provider once its form
-// went through, never before (U-4).
+// went through, never before (U-4), and then releases the provider's hold.
+// A failed save keeps the box as the owner left it.
 func (u *setup) privateOK(r *http.Request, form, id string) error {
-	u.mu.Lock()
-	delete(u.answer, form+" "+id)
-	u.mu.Unlock()
 	if err := u.s.cfg.Hooks.SetPrivateOK(id, r.PostFormValue("private") != ""); err != nil {
-		return errors.New("Could not save. Try again.")
+		u.keepAnswer(r, form, id)
+		return errUnsaved
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	delete(u.answer, form+" "+id)
+	if err := u.holdLocked(id, nil); err != nil {
+		return errUnsaved
 	}
 	return nil
+}
+
+// holdLocked sets provider id's unsaved answer to *ok, or clears it when
+// ok is nil, in the saved setup state (#1467). Caller holds u.mu.
+func (u *setup) holdLocked(id string, ok *bool) error {
+	if _, held := u.st.Unsaved[id]; !held && ok == nil {
+		return nil
+	}
+	return u.save(func(s *SetupState) {
+		m := make(map[string]bool, len(s.Unsaved)+1) // save copies s shallowly
+		for k, v := range s.Unsaved {
+			m[k] = v
+		}
+		if ok == nil {
+			delete(m, id)
+		} else {
+			m[id] = *ok
+		}
+		if len(m) == 0 {
+			m = nil
+		}
+		s.Unsaved = m
+	})
 }
 
 // aiKey takes an API key typed on this page, never by text (§8.1 step 6).
@@ -1092,11 +1136,55 @@ func (u *setup) aiKey(r *http.Request, _ string) error {
 	if !u.providerHas(id, func(p Provider) bool { return p.APIKey }) || key == "" || len(key) > 512 || !printable(key) {
 		return errors.New("Paste the API key from your provider's page.")
 	}
+	// Hold setup open before the key is stored: a page load racing this
+	// post, or a restart between storing the key and recording the
+	// answer, then cannot finish setup with an older answer (#1467).
+	ok := r.PostFormValue("private") != ""
+	u.mu.Lock()
+	prev, had := u.st.Unsaved[id]
+	err := u.holdLocked(id, &ok)
+	u.mu.Unlock()
+	if err != nil {
+		u.keepAnswer(r, "ai-key", id)
+		return errUnsaved
+	}
 	if err := u.s.cfg.Hooks.ConnectAPIKey(id, key); err != nil {
+		// No key stored, so no answer is owed: put the hold back as it
+		// was. If that save fails the hold stays and the retry clears it.
+		u.mu.Lock()
+		if had {
+			u.holdLocked(id, &prev)
+		} else {
+			u.holdLocked(id, nil)
+		}
+		u.mu.Unlock()
 		u.keepAnswer(r, "ai-key", id)
 		return errors.New(keyErrText(err))
 	}
 	return u.privateOK(r, "ai-key", id)
+}
+
+// aiPrivate retries the private-content answer of a provider held by
+// Unsaved, with the box alone: the key is already stored (#1467).
+func (u *setup) aiPrivate(r *http.Request, _ string) error {
+	if err := u.aiReady(); err != nil {
+		return err
+	}
+	id, ok := r.PostFormValue("provider"), r.PostFormValue("private") != ""
+	u.mu.Lock()
+	_, held := u.st.Unsaved[id]
+	var err error
+	if held {
+		err = u.holdLocked(id, &ok) // the retry's box is the answer owed now
+	}
+	u.mu.Unlock()
+	if !held {
+		return errors.New("Choose a provider.")
+	}
+	if err != nil {
+		return errUnsaved
+	}
+	return u.privateOK(r, "ai-private", id)
 }
 
 // keyErrText is the page's text for a key the vault did not store: only a
@@ -1138,6 +1226,9 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 		return errors.New("Could not start sign-in with that provider. Try again.")
 	}
 	if err := u.privateOK(r, "ai-device", id); err != nil {
+		u.mu.Lock()
+		delete(u.device, id) // no link while the answer is unsaved
+		u.mu.Unlock()
 		return err
 	}
 	u.mu.Lock()
@@ -1161,7 +1252,8 @@ func (u *setup) providerHas(id string, f func(Provider) bool) bool {
 // called at most once at a time, and not again once it succeeded.
 func (u *setup) maybeFinish() {
 	u.mu.Lock()
-	if !u.st.Host || u.st.Done || u.finishing {
+	// An answer owed after a key was stored holds setup open (#1467).
+	if !u.st.Host || u.st.Done || u.finishing || len(u.st.Unsaved) > 0 {
 		u.mu.Unlock()
 		return
 	}
