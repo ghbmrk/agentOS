@@ -25,17 +25,20 @@ body { font-family: sans-serif; margin: 0 }
 .hint { font-size: 2.6mm; margin-top: 1mm }
 .step { font: bold 3mm sans-serif; margin-top: 3mm }
 .net { font: 3.4mm monospace; margin-top: 1mm }
+.label { font: 2.8mm sans-serif; margin-top: 2mm }
 </style></head>
 <body><div class="sticker">
 <div class="step">1. Join this Wi-Fi</div>
 {{.WiFiQR}}
 <div class="net">{{.SSID}}</div>
+<div class="label">Wi-Fi password</div>
 <div class="code">{{.Password}}</div>
 <div class="hint">Scan, or join network {{.SSID}} with this password.</div>
 <div class="step">2. Claim this AgentOS box</div>
 {{.QR}}
+<div class="label">Claim code</div>
 <div class="code">{{.Code}}</div>
-<div class="hint">Claim this AgentOS box: scan, or open {{.Page}} and type the code.</div>
+<div class="hint">Claim this AgentOS box: scan, or open {{.Page}} and type the claim code.</div>
 </div></body></html>
 `))
 
