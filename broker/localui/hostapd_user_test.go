@@ -1,6 +1,6 @@
 package localui
 
-// REQ: ARC-1, CRED-1, CH-7, DEV-net-h
+// REQ: ARC-1, CRED-1, CH-7
 
 import (
 	"context"
@@ -39,7 +39,7 @@ func TestHostapdChildRunsAsItsOwnUser(t *testing.T) {
 	report := filepath.Join(bin, "report")
 	script := `#!/bin/sh
 {
-grep -E '^(Uid|Gid|Groups|CapInh|CapPrm|CapEff|CapAmb):' /proc/self/status
+grep -E '^(Uid|Gid|Groups|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs):' /proc/self/status
 cat "$1" >/dev/null 2>&1 && echo "conf readable" || echo "conf unreadable"
 cat "$(dirname "$1")/dnsmasq.conf" >/dev/null 2>&1 && echo "dnsmasq.conf readable" || echo "dnsmasq.conf unreadable"
 touch "$(dirname "$1")/planted" 2>/dev/null && echo "dir writable" || echo "dir unwritable"
@@ -89,9 +89,13 @@ exec sleep 30
 		"CapPrm": "0000000000003000",
 		"CapEff": "0000000000003000",
 		"CapAmb": "0000000000003000",
+		// Nothing it execs can regain more: the bounding set holds the
+		// two alone and no_new_privs stops setuid and file capabilities.
+		"CapBnd":     "0000000000003000",
+		"NoNewPrivs": "1",
 	} {
 		if v, ok := got[k]; !ok || v != want {
-			t.Errorf("hostapd's %s = %q, want %q (NET_ADMIN and NET_RAW only)", k, v, want)
+			t.Errorf("hostapd's %s = %q, want %q (NET_ADMIN and NET_RAW only, no_new_privs)", k, v, want)
 		}
 	}
 	for _, want := range []string{"conf readable", "dnsmasq.conf unreadable", "dir unwritable"} {

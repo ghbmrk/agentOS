@@ -17,9 +17,11 @@
 # serves the card's network at every later start.
 [Unit]
 Description=agentOS access point loader
-# The inbound drop is in place before any radio is brought up.
+# The inbound drop is in place before any radio is brought up, and the
+# secrets it hides below exist when it starts: the masks cover only paths
+# that exist then (a restart covers later ones).
 Requires=agentos-inbound.service
-After=agentos-inbound.service
+After=agentos-inbound.service agentos-egress.service agentosd.service
 # The page listens on the access point's address.
 Before=agentos-localui.service
 
@@ -43,12 +45,13 @@ LimitCORE=0
 
 # The radio and its address, the firewall (CAP_NET_ADMIN), hostapd's raw
 # sockets, dnsmasq's ports, dnsmasq's and hostapd's drops to their own
-# users (hostapd keeps ambient NET_ADMIN and NET_RAW, nothing else),
+# users (hostapd keeps ambient NET_ADMIN and NET_RAW, nothing else, and
+# CAP_SETPCAP drops the rest from its bounding set),
 # stopping the children, and reading the page's latch in the page's 0700
 # directory (CAP_DAC_READ_SEARCH). Not CAP_DAC_OVERRIDE: everything it
 # writes (/run/agentos-ap, the setup file) is root's in root's
 # directories. Not CAP_CHOWN: it gives hostapd.conf to a group it is in.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH CAP_SETPCAP
 NoNewPrivileges=yes
 # Everything is read-only, the page's latch included, but the setup
 # file's directory: the burn is a durable rename beside the file, so a

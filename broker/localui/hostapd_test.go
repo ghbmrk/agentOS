@@ -27,7 +27,7 @@ func hostapdRig(t *testing.T, hostapdBody, dnsmasqBody string) (*Hostapd, string
 	hp, _ := stub(t, "hostapd", hostapdBody)
 	dp, _ := stub(t, "dnsmasq", dnsmasqBody)
 	ip, ipLog := stub(t, "ip", "")
-	return &Hostapd{HostapdPath: hp, DnsmasqPath: dp, IPPath: ip, Dir: filepath.Join(t.TempDir(), "ap"),
+	return &Hostapd{AsCaller: true, HostapdPath: hp, DnsmasqPath: dp, IPPath: ip, Dir: filepath.Join(t.TempDir(), "ap"),
 		Ready: 2 * time.Second, Settle: 100 * time.Millisecond, StopWait: 2 * time.Second}, ipLog
 }
 
@@ -97,7 +97,7 @@ func TestHostapdDnsmasqKeepsNoLeaseFile(t *testing.T) {
 	hp, _ := stub(t, "hostapd", hostapdUp)
 	dp, dLog := stub(t, "dnsmasq", dnsmasqRuns)
 	ip, _ := stub(t, "ip", "")
-	h := &Hostapd{HostapdPath: hp, DnsmasqPath: dp, IPPath: ip, Dir: filepath.Join(t.TempDir(), "ap"),
+	h := &Hostapd{AsCaller: true, HostapdPath: hp, DnsmasqPath: dp, IPPath: ip, Dir: filepath.Join(t.TempDir(), "ap"),
 		Ready: 2 * time.Second, Settle: 100 * time.Millisecond, StopWait: 2 * time.Second}
 	if err := h.Start(context.Background(), testAPConfig()); err != nil {
 		t.Fatal(err)
@@ -166,6 +166,48 @@ func TestHostapdRefusesAnInvalidConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(ipLog); err == nil {
 		t.Fatal("an invalid config ran ip")
+	}
+}
+
+// A Hostapd with no user of its own would run hostapd as the caller, root
+// on the box, where it passes egress's uid-0 broker check (#1426): Start
+// refuses it before anything runs, unless a test opts in with AsCaller.
+func TestHostapdRefusesNoUser(t *testing.T) {
+	h, ipLog := hostapdRig(t, hostapdUp, dnsmasqRuns)
+	h.AsCaller = false
+	if err := h.Start(context.Background(), testAPConfig()); err == nil {
+		h.Stop()
+		t.Fatal("Start with no User returned nil")
+	}
+	if _, err := os.Stat(ipLog); err == nil {
+		t.Fatal("Start with no User ran ip")
+	}
+}
+
+// Both configuration files are written afresh, never through a link that
+// a writer of the directory planted (mode 0600, or 0640 for hostapd's group).
+func TestWriteConfRefusesALink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(dir, "dnsmasq.conf")
+	if err := os.Symlink(target, conf); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConf(conf, "fresh\n", nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep" {
+		t.Fatalf("wrote through the link: target holds %q", b)
+	}
+	fi, err := os.Lstat(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("dnsmasq.conf is %v, want a regular file, mode 0600", fi.Mode())
 	}
 }
 

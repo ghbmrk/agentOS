@@ -255,7 +255,7 @@ jobs:
         run: |
           go test -c -o /tmp/localui.test ./localui
           sudo setpriv --no-new-privs --groups 61426 --inh-caps=-all \
-            --bounding-set=-all,+net_admin,+net_raw,+net_bind_service,+setuid,+setgid,+kill,+dac_read_search \
+            --bounding-set=-all,+net_admin,+net_raw,+net_bind_service,+setuid,+setgid,+kill,+dac_read_search,+setpcap \
             env AGENTOS_REQUIRE_APUSER=1 /tmp/localui.test -test.count=1 -test.v \
             -test.run '^TestHostapdChildRunsAsItsOwnUser$'
       - name: Fuzz leaf memory peaks (P3-4b-3r-confine-r1)

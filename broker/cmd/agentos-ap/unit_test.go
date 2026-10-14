@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: DEV-net-h, CH-7
+// REQ: ARC-1, DEV-net-h, CH-7
 
 // The loader runs as root, so its unit bounds what root keeps: the
 // network, firewall and child capabilities only (no CAP_DAC_OVERRIDE), a
@@ -31,9 +31,10 @@ func TestTheUnitIsBounded(t *testing.T) {
 		set[k] = append(set[k], v)
 	}
 	for k, want := range map[string][]string{
-		"Requires":               {"agentos-inbound.service"},
-		"After":                  {"agentos-inbound.service"},
-		"CapabilityBoundingSet":  {"CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH"},
+		"Requires": {"agentos-inbound.service"},
+		// The secrets it hides exist before it starts (#1426).
+		"After":                  {"agentos-inbound.service agentos-egress.service agentosd.service"},
+		"CapabilityBoundingSet":  {"CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH CAP_SETPCAP"},
 		"NoNewPrivileges":        {"yes"},
 		"ProtectSystem":          {"strict"},
 		"ReadWritePaths":         {"/var/lib/agentos"},
