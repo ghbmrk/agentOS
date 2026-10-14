@@ -167,18 +167,22 @@ class ListTest(unittest.TestCase):
 
     def test_every_entry_exists(self):  # G1-freeze-f
         _, allow, frozen = g.parse_list(LIST)
+        # broker/provagent/ is listed ahead of #1314 (CAP-11-plan), which creates it.
+        new = {"broker/provagent/"}
         for e in allow + frozen:
-            self.assertTrue((ROOT / e).exists(), f"{e} names nothing in the repo")
+            if e not in new:
+                self.assertTrue((ROOT / e).exists(), f"{e} names nothing in the repo")
 
     def test_frozen_paths_stay_out(self):  # G1-freeze-a
         for p in ("broker/voice/v.go", "broker/cmd/agentos-builder/main.go", "guest/builder/x",
                   "spikes/S10-pact/x", "broker/loops/x.go", "broker/newpkg/x.go", "newdir/x",
-                  # One model route (D-104): the Codex worker and the Anthropic adapter freeze.
-                  "guest/codex/x", "broker/route/anthropic.go", "broker/route/testdata/anthropic_stream.sse"):
+                  # One model route (D-104, ChatGPT plan): the API-key adapters freeze.
+                  "broker/route/anthropic.go", "broker/route/testdata/anthropic_stream.sse",
+                  "broker/route/openai.go", "broker/route/testdata/openai_stream.sse"):
             self.assertFalse(g.check([p], LIST)[0], p)
         for p in ("broker/localui/x.go", "broker/cmd/agentosd/main.go", "image/build.sh",
                   "guest/openclaw/x", "spikes/CTRL-spike/x", "tools/g1_scope.txt", "SPEC.md",
-                  "broker/route/openai.go", "broker/route/route.go"):
+                  "guest/codex/x", "broker/provagent/x.go", "broker/route/route.go"):
             self.assertTrue(g.check([p], LIST)[0], p)
 
     def test_list_covers_the_g1_binaries_imports(self):  # G1-freeze-f

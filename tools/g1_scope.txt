@@ -14,13 +14,14 @@
 # guest bridge, the seller tool (D-105), the checker (CH-4) and clock-boot and hostdisk
 # (HW-8). The drift test fails when a G1 binary starts importing a package not named here.
 #
-# One model route (D-104; Mark 2026-10-14 18:12Z and 18:23Z, "It should be ChatGPT as
-# Claude won't work as guest"): G1's model-backed task uses the OpenAI API-key route through
-# agentos-egress (broker/route/openai.go), the OpenAI route that works today. Other routes
-# freeze with their rows: the Anthropic adapter's own files (broker/route/anthropic*), the
-# worker-held Codex CLI (guest/codex/) and the plan routes (#1377-#1380). Code the adapters
-# share (broker/egress, broker/route/route.go, broker/meter, cmd/agentos-egress) stays
-# listed, so a path list cannot hold the Anthropic half of it; the frozen rows' labels do.
+# One model route (D-104; Mark 2026-10-14 19:35Z, "ChatGPT plan" on Decisions card
+# cmsg_01R63S2yrPkq32thy8WQCuvDFt5XhL8peUFCaddWFQZ4YR): G1's model-backed task runs on the
+# owner's ChatGPT plan through the Codex provider worker, broker-held (D-061, D-114, D-117).
+# Wiring it is G1 work: the plan-login chain #807 -> #1015 -> #1014 -> #1314 -> #1264, enabled
+# by #809. So guest/codex/ and broker/provagent/ (new in #1314) are listed. The API-key
+# adapters' own files (broker/route/openai*, broker/route/anthropic*) freeze, so broker/route/
+# is listed file by file; the code they share with the guest's chat path stays listed. The
+# Grok, Muse and Claude plan routes (#1378-#1380) freeze with their rows.
 
 freeze on
 
@@ -49,8 +50,10 @@ allow README.md
 allow SPEC.md
 allow TRACE.md
 
-# The image, the guest it carries, and the controller spike D-104 keeps on the G1 path.
+# The image, the guests it carries (openclaw, and the Codex worker for the one model route),
+# and the controller spike D-104 keeps on the G1 path.
 allow image/
+allow guest/codex/
 allow guest/openclaw/
 allow spikes/CTRL-spike/
 
@@ -120,12 +123,13 @@ allow broker/netguard/
 allow broker/netjoin/
 allow broker/owner/
 allow broker/procguard/
+allow broker/provagent/
 allow broker/question/
 allow broker/quota/
 allow broker/recovery/
 allow broker/replay/
 allow broker/reversible/
-# broker/route/ file by file: the Anthropic adapter's own files stay frozen (one model route).
+# broker/route/ file by file: the API-key adapters' own files stay frozen (one model route).
 allow broker/route/ASSUMPTIONS.md
 allow broker/route/chat.go
 allow broker/route/cred5f_test.go
@@ -133,16 +137,11 @@ allow broker/route/failed_test.go
 allow broker/route/guest.go
 allow broker/route/handlerfor_test.go
 allow broker/route/onechoice_test.go
-allow broker/route/openai.go
-allow broker/route/openai_test.go
 allow broker/route/privateallowed_test.go
 allow broker/route/route.go
 allow broker/route/route_test.go
 allow broker/route/testdata/README.md
 allow broker/route/testdata/chat_request.json
-allow broker/route/testdata/openai_completion.json
-allow broker/route/testdata/openai_insufficient_quota.json
-allow broker/route/testdata/openai_stream.sse
 allow broker/routerule/
 allow broker/sendrules/
 allow broker/sipsign/
