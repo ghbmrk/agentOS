@@ -159,15 +159,30 @@ type Scheduler struct {
 	cfg  Config
 	wake chan struct{}
 
-	mu          sync.Mutex
-	st          state
-	loops       map[Loop]*measure
-	cancel      context.CancelCauseFunc
-	runningLoop Loop
-	done        chan struct{}
-	preempted   bool
-	evaluating  atomic.Bool
-	last        time.Time // when spent was last decayed
+	mu         sync.Mutex
+	st         state
+	loops      map[Loop]*measure
+	cur        *runCtl // the running unit, nil when none
+	evaluating atomic.Bool
+	last       time.Time // when spent was last decayed
+}
+
+// runCtl is one run's own cancel: its watcher, Preempt and a setting that
+// turns its loop off act on it alone, so a watcher that outlives its run
+// cannot cancel the next one (#1236). preempted is guarded by
+// Scheduler.mu.
+type runCtl struct {
+	loop      Loop
+	cancel    context.CancelCauseFunc
+	done      chan struct{}
+	preempted bool
+}
+
+// stopLocked cancels the run and marks it preempted: it is offered again
+// and not measured.
+func (r *runCtl) stopLocked(cause error) {
+	r.preempted = true
+	r.cancel(cause)
 }
 
 // measure is a loop's measured return (LOOP-3), kept in memory: after a
@@ -304,19 +319,18 @@ var ErrSlowYield = errors.New("loops: work did not yield within the preemption t
 // The work is offered again once the box is spare.
 func (s *Scheduler) Preempt() error {
 	s.mu.Lock()
-	done := s.done
-	if done != nil {
-		s.preempted = true
-		s.cancelLocked(s.cause())
+	r := s.cur
+	if r != nil {
+		r.stopLocked(s.cause())
 	}
 	s.mu.Unlock()
-	if done == nil {
+	if r == nil {
 		return nil
 	}
 	t := time.NewTimer(s.cfg.YieldTarget)
 	defer t.Stop()
 	select {
-	case <-done:
+	case <-r.done:
 		return nil
 	case <-t.C:
 		return ErrSlowYield
@@ -344,12 +358,6 @@ func (s *Scheduler) cause() error {
 		return change.ErrOwnerWork
 	}
 	return nil
-}
-
-func (s *Scheduler) cancelLocked(cause error) {
-	if s.cancel != nil {
-		s.cancel(cause)
-	}
 }
 
 // Run drives the scheduler until ctx ends.
@@ -498,9 +506,16 @@ func (s *Scheduler) decayLocked(now time.Time) {
 // parked candidate (change.ErrParked), which ran nothing.
 func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted, parked bool) {
 	jctx, cancel := context.WithCancelCause(ctx)
-	done := make(chan struct{})
+	r := &runCtl{loop: l, cancel: cancel, done: make(chan struct{})}
 	s.mu.Lock()
-	s.cancel, s.runningLoop, s.done, s.preempted = cancel, l, done, false
+	s.cur = r
+	// tick read the settings before it picked this job: a setting that
+	// turned its loop off since then stops it before it starts (#1236).
+	// Execute cancels whatever s.cur holds once the setting is in place,
+	// so between them no unit outlives LOOPS OFF.
+	if set := s.st.Settings; set.Off || set.Paused[l] {
+		r.stopLocked(change.ErrOwnerStop)
+	}
 	s.mu.Unlock()
 	before, _ := s.cfg.Spare.Overall()
 	start := s.cfg.Now()
@@ -516,8 +531,7 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted, park
 			case <-t.C:
 				if s.cfg.Busy() || s.cfg.Stopped() {
 					s.mu.Lock()
-					s.preempted = true
-					s.cancelLocked(s.cause())
+					r.stopLocked(s.cause())
 					s.mu.Unlock()
 					return
 				}
@@ -537,8 +551,8 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted, park
 	// A requeued unit is offered again at once, unmeasured (W3-forget-b2).
 	requeued := errors.Is(res.Err, ErrRequeued)
 	s.mu.Lock()
-	preempted := s.preempted || interrupted || requeued
-	s.cancel, s.runningLoop, s.done = nil, "", nil
+	preempted := r.preempted || interrupted || requeued
+	s.cur = nil
 	m := s.loops[l]
 	m.spent += cost
 	m.parkedEval = parked
@@ -561,7 +575,7 @@ func (s *Scheduler) run(ctx context.Context, l Loop, job Job) (interrupted, park
 	}
 	s.mu.Unlock()
 	cancel(nil)
-	close(done)
+	close(r.done)
 	if res.Err != nil && !parked && !requeued {
 		s.cfg.Logf("loops: %s %s: %v", l, job.Name, res.Err)
 	}
