@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tomllib
 import unittest
 
@@ -446,7 +447,8 @@ class ToolSandboxTest(unittest.TestCase):
         self.fwd = _Forwarder(str(self.run_dir / "egress.sock"))
         self.addCleanup(self.fwd.close)
 
-    def worker(self, *command, toolsh=TOOLSH, codex_home=True, chdir=WORK, extra=()):
+    def worker(self, *command, toolsh=TOOLSH, codex_home=True, chdir=WORK, extra=(),
+               deadline=60):
         argv = [
             BWRAP, "--dev-bind", "/", "/",
             "--tmpfs", "/run", "--bind", str(self.run_dir), "/run/agentos",
@@ -463,14 +465,45 @@ class ToolSandboxTest(unittest.TestCase):
             "--setenv", "AGENTOS_SYNTHETIC_CANARY", self.canary,
             "--", *command,
         ]
-        return subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        # Its own session, so a stall kills the whole tree; subprocess.run would kill only bwrap.
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             start_new_session=True)
+        try:
+            out, err = p.communicate(timeout=deadline)
+        except subprocess.TimeoutExpired as stalled:
+            self.fail(self.stall_report(p, deadline, stalled))
+        return subprocess.CompletedProcess(argv, p.returncode, out.decode(errors="replace"),
+                                           err.decode(errors="replace"))
 
-    def script(self, body, toolsh=TOOLSH, extra=()):
+    @staticmethod
+    def stall_report(p, deadline, stalled):
+        """Kill a stalled worker's tree and say what it was doing (#1542)."""
+        try:
+            ps = subprocess.run(["ps", "-eo", "pid,ppid,sid,stat,etime,args"],
+                                capture_output=True, text=True, timeout=10).stdout
+            ps = "\n".join(line for line in ps.splitlines()[1:]
+                           if "bwrap" in line or "stub" in line or "agentos" in line)
+        except (OSError, subprocess.SubprocessError) as e:
+            ps = f"(no process listing: {e})"
+        os.killpg(p.pid, 9)
+        try:
+            _, err = p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            # A process outside the session still holds the pipes; report what was read.
+            err = stalled.stderr or b""
+            p.kill()
+        err = err.decode(errors="replace") if isinstance(err, bytes) else err
+        return (f"worker stalled past its {deadline}s deadline\n"
+                f"--- its stderr so far ---\n{err[-4000:]}\n"
+                f"--- processes still running then ---\n{ps}")
+
+    def script(self, body, toolsh=TOOLSH, extra=(), deadline=60):
         """Run a shell script as the CLI inside the stub worker."""
         s = self.tmp / "cli.sh"
         s.write_text(body)
         return self.worker("/bin/sh", "/var/lib/agentos-cli.sh", toolsh=toolsh,
-                           extra=("--ro-bind", str(s), "/var/lib/agentos-cli.sh", *extra))
+                           extra=("--ro-bind", str(s), "/var/lib/agentos-cli.sh", *extra),
+                           deadline=deadline)
 
     def mutant(self, name, *edits):
         """A copy of agentos-toolsh with each (old, new) edit applied once."""
@@ -723,6 +756,25 @@ echo "func=$?"
         tool = self.run_worker(toolsh=bad, extra=pidns)["tool"]
         self.assertFalse(tool["exit"] == 0 and tool["fds"] == [],
                          "the $$ mutant must leak descriptors or refuse")
+
+    # REQ: CRED-5, A14
+    def test_a_stalled_worker_fails_with_a_diagnosis_and_leaves_nothing_running(self):
+        # #1542: a worker that outruns its deadline must fail the test with what it was doing
+        # and what was still running, not a bare TimeoutExpired, and must not leave its tree
+        # (here a grandchild holding the output pipes, in a pid namespace) behind.
+        marker = "agentos-stall-" + secrets.token_hex(4)
+        body = (f'echo "{marker} phase" >&2\n'
+                f'{sys.executable} -I -c "import time; time.sleep(300)" {marker} 300 &\nwait\n')
+        start = time.monotonic()
+        with self.assertRaises(AssertionError) as caught:
+            self.script(body, extra=("--unshare-pid",), deadline=3)
+        self.assertLess(time.monotonic() - start, 30, "the deadline must bound the run")
+        report = str(caught.exception)
+        self.assertIn("stalled past its 3s deadline", report)
+        self.assertIn(marker + " phase", report, "the worker's stderr so far must be in it")
+        self.assertIn(marker + " 300", report, "what was still running must be in it")
+        ps = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+        self.assertNotIn(marker, ps, "the stalled tree must be killed")
 
 PRELOAD_C = r"""
 #include <fcntl.h>
