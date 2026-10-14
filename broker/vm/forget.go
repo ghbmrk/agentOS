@@ -36,14 +36,17 @@ func (m *Manager) ForgetSince(ctx context.Context, lineage string, since time.Ti
 		return errors.New("vm: ForgetSince needs a lineage")
 	}
 	var errs []error
-	done := map[string]bool{}
+	// Keyed by machine, not ID: a machine destroyed and replaced under the
+	// same ID meanwhile is a new machine, reset in its own right if it is
+	// of the lineage (security B1 on #1575).
+	done := map[*machine]bool{}
 	for {
 		// Repeat until no new machine joined the lineage meanwhile (a fork
 		// started from a checkpoint taken before its source was reset).
 		var next []*machine
 		m.mu.Lock()
 		for id, mc := range m.machines {
-			if mc.Lineage == lineage && !done[id] && !strings.HasPrefix(id, EvalPrefix) {
+			if mc.Lineage == lineage && !done[mc] && !strings.HasPrefix(id, EvalPrefix) {
 				next = append(next, mc)
 			}
 		}
@@ -52,7 +55,7 @@ func (m *Manager) ForgetSince(ctx context.Context, lineage string, since time.Ti
 			break
 		}
 		for _, mc := range next {
-			done[mc.ID] = true
+			done[mc] = true
 			if err := m.forgetMachine(ctx, mc, since); err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", mc.ID, err))
 			}
@@ -75,11 +78,15 @@ func (m *Manager) forgetMachine(ctx context.Context, mc *machine, since time.Tim
 		// As Rollback: a failed restart leaves the machine stopped, and its
 		// admission goes, outside the machine's lock.
 		if stopped {
-			m.cfg.Admit.Release(mc.ID)
+			m.release(mc)
 		}
 	}()
 	// Erasure never waits behind a worker's command (security F1 on #146).
-	mc.lockEndingExec()
+	if err := mc.lockEndingExecLive(); err != nil {
+		// Destroyed since it was listed: nothing of it is left to reset,
+		// and its snapshots are the lineage sweep's.
+		return nil
+	}
 	defer mc.mu.Unlock()
 	target := m.restoreTarget(mc, since)
 	if target != nil && target.Label > mc.Label {
@@ -112,7 +119,10 @@ func (m *Manager) forgetMachine(ctx context.Context, mc *machine, since time.Tim
 		errs = append(errs, err)
 	}
 	for _, s := range m.Snapshots(mc.ID) {
-		if !s.Taken.Before(since) {
+		// Only its own: an earlier machine of its ID, of another lineage
+		// maybe, keeps its snapshots (a surviving fork's base among them);
+		// those of this lineage go in ForgetSince's lineage sweep.
+		if ownSnap(mc, s) && !s.Taken.Before(since) {
 			if err := m.removeSnapshot(s.ID); err != nil {
 				errs = append(errs, err)
 			}

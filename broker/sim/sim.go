@@ -299,10 +299,12 @@ func (s *sim) resolve() {
 		return
 	}
 	st, err := s.eng.Get(id)
-	if err != nil || len(st.Attempts) == 0 {
+	// The attempt the intent waits on: the latest, or the parked one an
+	// owner's retry that did not go left behind (Status.Unclear).
+	n := st.Outstanding()
+	if err != nil || n == 0 {
 		return
 	}
-	n := st.Attempts[len(st.Attempts)-1].N
 	out := journal.Outcome{Result: journal.ResultNotApplied, Evidence: "owner checked"}
 	if st.Intent.Account != journal.BrokerAccount {
 		out.Result = s.svc.truth(id, n)
