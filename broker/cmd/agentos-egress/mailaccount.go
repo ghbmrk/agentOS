@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -39,14 +41,14 @@ var (
 	errMailAddress      = uerr(http.StatusBadRequest, "Enter the mailbox's own address, like you@example.com, with no name around it.")
 	errMailServer       = uerr(http.StatusBadRequest, "Enter each server as name:port, like imap.example.com:993 and smtp.example.com:465, from your provider's settings page.")
 	errMailUser         = uerr(http.StatusBadRequest, "Enter the sign-in name on one line, or leave it empty to sign in with the address.")
-	errMailOtherKind    = uerr(http.StatusBadRequest, "The box already holds a different credential under this name. Remove the mail account first, then set it up again.")
+	errMailOtherKind    = uerr(http.StatusBadRequest, "I already hold a different credential under this name. Remove the mail account first, then set it up again.")
 	errWeakMailPassword = uerr(http.StatusBadRequest, "Paste the mailbox password or app password from your provider, 12 to 256 characters on one line.")
 )
 
 // Owner notices when the account changes, as for the second line.
 const (
-	noteMailReplaced = "The mail account was replaced on the box's Wi-Fi page."
-	noteMailRemoved  = "The mail account was removed on the box's Wi-Fi page."
+	noteMailReplaced = "The mail account was replaced on my Wi-Fi page."
+	noteMailRemoved  = "The mail account was removed on my Wi-Fi page."
 )
 
 // mailSettings is the account as the owner enters it. IMAP is implicit
@@ -58,6 +60,15 @@ type mailSettings struct {
 	SMTP     string `json:"smtp"` // host:port
 	StartTLS bool   `json:"starttls,omitempty"`
 	User     string `json:"user,omitempty"` // sign-in name; empty is Address
+}
+
+// generation names these settings for mail.sock: a request bound to
+// another account's generation is refused (MAIL-gen). It covers every
+// field, so a replacement that keeps the address still changes it.
+func (s mailSettings) generation() string {
+	b, _ := json.Marshal(s)
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:16])
 }
 
 func (s mailSettings) check() error {
@@ -219,7 +230,7 @@ func (c *custody) mailSource() (mailsock.Account, error) {
 	if user == "" {
 		user = rec.Address
 	}
-	st, err := imapsmtp.New(imapsmtp.Config{IMAP: rec.IMAP, SMTP: rec.SMTP, IMAPSec: imapSec, SMTPSec: smtpSec, From: rec.Address,
+	st, err := imapsmtp.New(imapsmtp.Config{IMAP: rec.IMAP, SMTP: rec.SMTP, IMAPSec: imapSec, SMTPSec: smtpSec, From: rec.Address, Guard: c.guard,
 		Credential: func(context.Context) (imapsmtp.Login, error) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -232,7 +243,7 @@ func (c *custody) mailSource() (mailsock.Account, error) {
 	if err != nil {
 		return mailsock.Account{}, mailsock.ErrFailed
 	}
-	return mailsock.Account{Store: st, Address: rec.Address}, nil
+	return mailsock.Account{Store: st, Address: rec.Address, Generation: rec.generation()}, nil
 }
 
 // serveMail opens mail.sock in dir for the broker's uid and serves it

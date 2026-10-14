@@ -38,6 +38,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/fold"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 )
@@ -85,8 +86,15 @@ type Config struct {
 	Meter *meter.Meter
 	// OwnerReply receives a guest's reply to an owner message. It is
 	// guest-written text: the owner channel filters it before it goes out
-	// (CH-19). Nil drops replies.
+	// (CH-19). Nil drops replies. It is told each reply once, after the
+	// reply is recorded; a crash before it returns loses the reply, so a
+	// broker that must not lose one sets Replies instead.
 	OwnerReply func(machine string, rep Reply)
+	// Replies, if set, is called after each new reply is written to the
+	// store's outbox, where it waits until its consumer reads it with
+	// PendingReplies and removes it with ReplyDone (DEL-1b). OwnerReply is
+	// then not called. Without InboxPath the outbox is in memory only.
+	Replies func()
 	// Logf reports broker-side faults (a failed snapshot). Nil is silent.
 	Logf func(format string, args ...any)
 	// MaxConns caps one machine's concurrent requests; default 8.
@@ -130,6 +138,7 @@ type Plane struct {
 	mu    sync.Mutex
 	ms    map[string]*machine
 	store *store
+	folds *fold.Store
 }
 
 type machine struct {
@@ -145,6 +154,7 @@ type machine struct {
 	box     *inbox
 	steps   stepper
 	rate    bucket
+	folds   *fold.Store
 	conns   atomic.Int64 // connections the server holds open
 }
 
@@ -195,7 +205,7 @@ func New(cfg Config) (*Plane, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Plane{cfg: cfg, ms: map[string]*machine{}, store: st}, nil
+	return &Plane{cfg: cfg, ms: map[string]*machine{}, store: st, folds: &fold.Store{}}, nil
 }
 
 // Open starts serving machine id and returns its services directory. It is
@@ -224,7 +234,7 @@ func (p *Plane) Open(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	m := &machine{id: id, dir: dir, slot: make(chan struct{}, p.cfg.MaxConns), box: newInbox(id, p.store)}
+	m := &machine{id: id, dir: dir, slot: make(chan struct{}, p.cfg.MaxConns), box: newInbox(id, p.store), folds: p.folds}
 	m.rate = bucket{tokens: float64(p.cfg.SubmitBurst), last: time.Now()}
 	m.ln = newLimitListener(l, p.cfg.MaxOpenConns)
 	m.srv = &http.Server{
@@ -263,6 +273,9 @@ func (p *Plane) close(id string, forget bool) {
 	m.box.close(forget)
 	m.srv.Close()
 	os.RemoveAll(m.dir)
+	if forget {
+		p.folds.Drop(id) // a later machine under this ID must not read them
+	}
 	if l := m.lineage.Load(); forget && l != nil && !p.lineageOpen(*l) {
 		p.store.setGoal(*l, "", time.Time{}) // the lineage is gone; so is its goal
 	}

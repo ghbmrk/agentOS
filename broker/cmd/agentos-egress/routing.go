@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/route"
 )
@@ -131,7 +132,7 @@ func (ro *routing) set(next route.Rule) error {
 		if err != nil {
 			return err
 		}
-		if err := writeFileAtomic(ro.path, b); err != nil {
+		if err := durable.WriteFile(ro.path, b, 0o600); err != nil {
 			return err
 		}
 	}

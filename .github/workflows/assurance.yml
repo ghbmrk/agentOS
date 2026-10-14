@@ -27,7 +27,13 @@ env:
 # Every job has a 30-minute timeout: a whole run takes about 4 minutes, and a
 # hung job would otherwise hold one of the few runners for GitHub's 6h default.
 jobs:
+  # CI-docs: a records-only change (tools/ci_scope.py) skips both scans, which read no
+  # record document; the daily schedule always runs them in full.
+  scope:
+    uses: ./.github/workflows/scope.yml
   canary:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -77,6 +83,8 @@ jobs:
           path: loop2-*.json
           if-no-files-found: ignore
   dependency-audit:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

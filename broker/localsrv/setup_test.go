@@ -14,7 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: ARC-2, ONB-3, ONB-6, CRED-8
+// REQ: ARC-2, ONB-3, ONB-6, CRED-8, HW-1, A1
 
 // A synthetic enrollment link: not a seed anyone holds.
 const canaryLink = "otpauth://totp/AgentOS:AgentOS?secret=CANARYCANARYCANARY22&issuer=AgentOS"
@@ -92,6 +92,10 @@ type setupRig struct {
 	now      time.Time
 	finished []string
 	s        *Setup
+	// joins records each SSID and password the helper was handed;
+	// joinErr is its answer.
+	joins   [][2]string
+	joinErr error
 }
 
 func newSetupRig(t *testing.T) *setupRig {
@@ -109,7 +113,11 @@ func (r *setupRig) start() {
 			return localapi.SetupProgress{Phase: "ready", Updated: true, Online: true}
 		},
 		Finished: func(owner string) { r.finished = append(r.finished, owner) },
-		Now:      func() time.Time { return r.now },
+		Join: func(_ context.Context, ssid, password string) error {
+			r.joins = append(r.joins, [2]string{ssid, password})
+			return r.joinErr
+		},
+		Now: func() time.Time { return r.now },
 	})
 }
 
@@ -169,6 +177,8 @@ func TestSetupOpsAreRefusedForGoodOnceFinishIsRecorded(t *testing.T) {
 		localapi.OpSetupEnroll:   nil,
 		localapi.OpSetupConfirm:  localapi.Confirm{Code: good},
 		localapi.OpSetupFinish:   localapi.Finish{Owner: "+15550100199"},
+		localapi.OpSetupJoin:     localapi.Join{SSID: "home", Password: canaryPSK},
+		localapi.OpSetupSend:     localapi.SetupSend{To: "+15550100199", Text: "That pairing code did not match. Check the setup page."},
 	}
 	check := func(when string) {
 		for _, op := range localapi.SetupOps {
@@ -183,8 +193,8 @@ func TestSetupOpsAreRefusedForGoodOnceFinishIsRecorded(t *testing.T) {
 	if got, ok := r.s.Owner(); !ok || got != "+15550100100" {
 		t.Fatalf("owner %q %v", got, ok)
 	}
-	if len(r.finished) != 1 || r.vault.enrolls != 1 || r.vault.confirms != 1 {
-		t.Fatalf("finished %v, enrolls %d, confirms %d", r.finished, r.vault.enrolls, r.vault.confirms)
+	if len(r.finished) != 1 || r.vault.enrolls != 1 || r.vault.confirms != 1 || len(r.joins) != 0 {
+		t.Fatalf("finished %v, enrolls %d, confirms %d, joins %d", r.finished, r.vault.enrolls, r.vault.confirms, len(r.joins))
 	}
 	b, _ := os.ReadFile(r.path)
 	if strings.Contains(string(b), "CANARY") {
@@ -425,5 +435,28 @@ func TestThePageServerServesNoSetupOp(t *testing.T) {
 		if _, ok := ops[op]; ok {
 			t.Errorf("page server serves %s", op)
 		}
+	}
+}
+
+// HW-1, A1 (CTRL-card-sock s2): a vault that refuses the seal for want of
+// an Owner Card holds finish at "card pending", records nothing, and
+// finishes once the vault takes the seal.
+func TestFinishIsHeldWhenTheVaultHoldsNoCard(t *testing.T) {
+	r := newSetupRig(t)
+	if err := (FileRecord{Path: r.path}).Save(SetupRecord{Enrolled: true}); err != nil {
+		t.Fatal(err)
+	}
+	r.start()
+	r.vault.err = EnrollCardRequired
+	r.vault.pending, r.vault.confirmed = 0, true
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); code(err) != localapi.ErrCardPending {
+		t.Fatalf("finish %v", err)
+	}
+	if _, ok := r.s.Owner(); ok || len(r.finished) != 0 || r.s.Closed() {
+		t.Fatal("finish recorded without a card")
+	}
+	r.vault.err = nil
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); err != nil {
+		t.Fatalf("finish with a card %v", err)
 	}
 }

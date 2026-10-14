@@ -25,6 +25,10 @@ type Adapter struct {
 	// fixed allowlists. Credential-bearing names are refused.
 	RequestHeaders  []string
 	ResponseHeaders []string
+	// KeyCheck, when set, is the one call setup makes with a pasted key
+	// before the vault stores it (CheckKey). It is not an operation: no
+	// guest can send it.
+	KeyCheck *KeyCheck
 }
 
 // Injection writes the credential as Header: Prefix + value.
@@ -43,6 +47,18 @@ type Operation struct {
 	Method string
 	Path   string
 	Body   *BodyRule
+	// Response, when set, makes the operation a credential exchange (a
+	// broker-held route's token refresh, CRED-5): its response is
+	// forwarded only in this shape, with credentials swapped.
+	Response *ResponseRule
+	// Refused lists response statuses by which the provider refuses the
+	// login (an account restriction). One stops the route (CRED-5t).
+	Refused []int
+	// Inference marks a model-inference call: the only request an agent
+	// makes that may reach a compute host's or a private hosted route's
+	// pinned address (DEV-2, CAP-13). Every other operation gets no
+	// network exception.
+	Inference bool
 }
 
 // The broker's closed verb list (ADP-2), from package verb. An adapter maps
@@ -95,7 +111,7 @@ func OpenAI(credential string) Adapter {
 		Credential: credential,
 		Inject:     Injection{Header: "Authorization", Prefix: "Bearer "},
 		Operations: []Operation{{
-			Name: "chat.completions", Verb: VerbRead, Method: "POST", Path: "/v1/chat/completions",
+			Name: "chat.completions", Verb: VerbRead, Inference: true, Method: "POST", Path: "/v1/chat/completions",
 			Body: &BodyRule{
 				DenyKeys:       []string{"background"},
 				PublicMayFetch: true,
@@ -104,6 +120,7 @@ func OpenAI(credential string) Adapter {
 				StreamUsage:    true,
 			},
 		}},
+		KeyCheck: &KeyCheck{Path: "/v1/models"},
 	}
 }
 
@@ -118,7 +135,7 @@ func Anthropic(credential string) Adapter {
 		Credential: credential,
 		Inject:     Injection{Header: "X-Api-Key"},
 		Operations: []Operation{{
-			Name: "messages", Verb: VerbRead, Method: "POST", Path: "/v1/messages",
+			Name: "messages", Verb: VerbRead, Inference: true, Method: "POST", Path: "/v1/messages",
 			Body: &BodyRule{
 				DenyKeys:       []string{"background"},
 				PublicMayFetch: true,
@@ -126,6 +143,7 @@ func Anthropic(credential string) Adapter {
 			},
 		}},
 		RequestHeaders: []string{"Anthropic-Version"},
+		KeyCheck:       &KeyCheck{Path: "/v1/models", Headers: map[string]string{"Anthropic-Version": "2023-06-01"}},
 	}
 }
 
@@ -152,6 +170,11 @@ func forbiddenHeader(canonical string) bool {
 		return true
 	}
 	l := strings.ToLower(canonical)
+	// The broker's own signals (DeniedHeader, HolderDropHeader) never come
+	// from a provider.
+	if strings.Contains(l, "agentos") {
+		return true
+	}
 	for _, w := range credentialWords {
 		if strings.Contains(l, w) {
 			return true
@@ -183,12 +206,27 @@ func (a Adapter) validate() error {
 		if _, err := splitPath(op.Path); err != nil {
 			return fmt.Errorf("adapter %s: operation %s: %v", a.Name, op.Name, err)
 		}
+		for _, s := range op.Refused {
+			if s < 400 || s > 599 {
+				return fmt.Errorf("adapter %s: operation %s: refusal status %d is not an error", a.Name, op.Name, s)
+			}
+		}
 	}
 	inject := http.CanonicalHeaderKey(a.Inject.Header)
 	for _, h := range append(append([]string(nil), a.RequestHeaders...), a.ResponseHeaders...) {
 		c := http.CanonicalHeaderKey(h)
 		if forbiddenHeader(c) || c == inject {
 			return fmt.Errorf("adapter %s: may not forward header %s", a.Name, c)
+		}
+	}
+	if kc := a.KeyCheck; kc != nil {
+		if _, err := splitPath(kc.Path); err != nil || strings.ContainsAny(kc.Path, "{}") {
+			return fmt.Errorf("adapter %s: key check path %q must be literal", a.Name, kc.Path)
+		}
+		for h := range kc.Headers {
+			if c := http.CanonicalHeaderKey(h); forbiddenHeader(c) || c == inject {
+				return fmt.Errorf("adapter %s: key check may not send header %s", a.Name, c)
+			}
 		}
 	}
 	return nil

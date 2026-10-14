@@ -22,6 +22,8 @@ spec version could force a change.
 | A14 | **A refusal's guest text (SR2-3j).** A policy refusal whose error has its own `GuestText() string` method (guesterr.Safe, matched structurally so journal imports no broker package) is journaled as the record's `guest` and replayed as `Permission.GuestReason`; a wrapped one is not. `Reason` stays the owner's full text. Journals written before SR2-3j have no `guest`, so their denials show the guest a ref. |
 | A15 | **Places in use (SR3-2).** `InUse(account, action, since)` lists the intents that hold a place in a rate window starting at `since`: an `authorized` intent not yet dispatched (a reservation, any age, `Started` false); an `in_flight` or `outcome_unknown` one (started, any age, until `Resolve` settles it, OP-2); and a `succeeded` one whose latest `dispatched` record is at or after `since` (started). `not_applied` and `denied` hold none, and a retry is charged from its own dispatch. The dispatch time is replayed from the journal, so places survive a restart (OP-4). `AuthorizedSince` stays for `broker/mail`, which still counts by authorization time (SR3-2 finding, release). | ADP-9, OP-2, OP-3, OP-4 | Charge by authorization time again only if queues cannot outlive a window. |
 | A16 | **An erased use is marked (SR3-2-f3).** `Use.Erased` is set for a `succeeded` intent erased under CAP-3 (A12), from the entry's erased flag, which the `erased` record sets on apply and replay (and the rewritten journal keeps), so it survives `Open` and the erase rewrite. Only `succeeded` uses can carry it: `Erase` takes only finished intents, and `denied` holds no place. The flag is additive; callers that ignore it (broker/mail) see the same uses as before. The record key is not kept among the fields erasure keeps: it names a record of the deleted source, which CAP-3 removes, so the gate counts an erased use against every record instead (grants GR33). | CAP-3, ADP-9, OP-4 | Keep `ParamRecord` after erasure only if a record key is shown not to be content under CAP-3. |
+| A17 | **The tail for projections (SIM-proj).** `RecordsAfter(seq)` returns the records with a sequence number above `seq`, or the error reading the journal. Like `Trail` (since SIM-bound, #720) it decodes the journal afresh, so a caller that changes a returned record in place cannot change what is dispatched (L3 on #722). Records are numbered from 1 with no gaps and an erase rewrite keeps every number, so a projection that has applied through `seq` reads exactly its tail. The engine does not call projection code (broker/projection P7). | OP-4 | None expected. |
+| A18 | **Startup settles restart fences (JRN-startup-reconcile, #1319; follow-ups #1370 to #1373).** `SettleUnknown(ctx, wait, maxWait)` runs `Reconcile` until no `outcome_unknown` attempt is left or ctx ends; `broker/daemon` starts it in the background at `Run` (agentosd), waiting 2s after the first unresolved round and doubling to 5m, each round bounded by a minute. It only gathers evidence: an executor that answers unknown keeps its account fenced (A2) and is asked again, and nothing is executed again, not even an intent found `not_applied` (daemon `TestOP4StartupReconcileNeverExecutes` stands in a fake for every executor name agentosd registers and fails on any `Execute`; it proves the engine's settle path never executes, not that a real executor's `Reconcile` does not act, which the audit below covers). Every registered `Reconcile` was audited at #1371 and acts only in these ways, all of which repeat harmlessly at each start: follow's `TrustedRoot` finishes or forgets a switch a crash cut short (its own store) and tells the owner again; forget queues the interrupted item and starts the agent's resume (#1370), which runs once: with recall on it waits for recall's open and `Handled` stops a second take-back; with recall off it waits for the boot's own resume, after the gate, the owner channel and the agent are attached, and the queue it drains tells the owner once (`wireResume`, Security S1 on #1382); recall's late mail executor stamps its bookkeeping. The rest read state only (loops, apply, change, mail, recall rollback, grants gate). A new executor whose `Reconcile` sends, pays or deletes would repeat that at every start. Follow answers `not_applied` when the box trusts neither the intent's root nor its source, so an intent a later follow superseded is recorded `not_applied` too, which is harmless because a held root lives in memory only (#1372); a switch that landed and was then rotated by the update client before the first round stays `unknown`, and fenced. A fence evidence cannot lift stays: STATUS names what is unconfirmed after one missed round (`Unconfirmed`, restart-fenced intents only), and a fenced setting says it is on hold; a setting held behind the same change sent this boot (`HeldError`) gets its own reply, which names no restart (#1373). No owner path settles one yet: `Resolve` refuses unknown and has no owner caller, and an owner YES/NO resolve needs a SPEC diff (OP-2, CH-11). | OP-4, OP-2 | Stop retrying an executor that can never tell only if the retry load is shown to matter; add the owner resolve through `Resolve` once SPEC allows it. |
 
 Expected in v0.12 from spike S4: **OP-8**, metering model egress per agent machine.
 It needs nothing new from this package: raising a limit is a budget-change
@@ -47,9 +49,28 @@ intent (`ActionBudgetChange`, OP-5), which the engine already handles.
   exclusive `flock`, so two engines cannot write one journal.
 - **Size limits.** Intents over 64 KiB are rejected; free text over 4 KiB is cut
   and tagged with a SHA-256 of the whole.
-- **Not yet here:** journal compaction (records are kept in memory and the
-  file grows without bound), and a hash chain for tamper evidence. Both can be
-  added without changing the record format's meaning.
+- **Bounded memory for refusals (SIM-bound).** The engine keeps no per-record
+  history in memory: the journal file is the history, and `Trail` reads it.
+  Settled denials past the newest `hotDenials` (1024) leave the in-memory
+  index. What stays of each is 36 bytes: a 16-byte SHA-256 prefix of
+  its id, a 16-byte prefix of its fingerprint, and the index of its shape
+  (goal, origin, account, action, executor, refusal texts and phase), each
+  distinct shape kept once. `Get`, an OP-1
+  resubmission, and a refused `Authorize`, `Dispatch` or `Resolve` of an
+  evicted denial answer from that, with no journal read;
+  `Get` then omits params, recipients and the other free-form fields, which
+  `List`, `Between`, `StatusBetween` and `Trail` still return. Rated denials and ones
+  with attempts are not evicted. `List`, `Between`, `StatusBetween`, `Trail`
+  and the owner-side rehydration (`RecordQuality`, `Erase`) read the whole
+  journal, and the store holds its mutex
+  for that read, so a STOP arriving meanwhile waits for it to finish.
+- **STOP reads an index.** `open` holds the unsettled intents (pending, held,
+  outcome unknown); `Stop`, `Waiting`, `Reconcile` and `GuestActive` walk it,
+  so their work does not grow with the settled history.
+- **Not yet here:** journal compaction (the file grows without bound and
+  `Open` replays all of it), eviction of settled successes, and a hash chain
+  for tamper evidence. All can be added without changing the record format's
+  meaning.
 
 ## Notes for P1-2 (broker skeleton)
 

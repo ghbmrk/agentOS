@@ -1,6 +1,7 @@
 """Tests for tools/metrics.py, the L4 metrics harness (PLAN.md §2 L4, §5).
 
-No requirement IDs: PLAN.md tooling, not SPEC.md behaviour. All data is synthetic.
+No SPEC requirement IDs: PLAN.md tooling, not SPEC.md behaviour. The CONV-0 classes claim the
+brief's IDs (briefs/CONV-0.md). All data is synthetic.
 """
 import datetime as dt
 import pathlib
@@ -145,7 +146,10 @@ class ComputeTest(unittest.TestCase):
         self.assertAlmostEqual(w1["pace"], 100 * (5 * 24 + 12) / (7 * 24), places=3)
         w2 = self.weeks["2026-10-11"]
         self.assertEqual(w2["reqs"], 10)
-        self.assertAlmostEqual(w2["usage_per_req"], 0.3)
+        # MET-1a: the 3% reading (10-11 07:00) predates the week's only TRACE snapshot (12:00), so only
+        # the carried-over count (30, as before the week) applies: 0 requirements, no ratio.
+        self.assertIsNone(w2["usage_per_req"])
+        self.assertEqual(w1["reading_at"], "2026-10-09T18:00")
         # The week before has a reading but no covered requirements: no ratio, not a divide error.
         self.assertIsNone(self.weeks["2026-09-27"]["usage_per_req"])
 
@@ -162,6 +166,15 @@ class ComputeTest(unittest.TestCase):
         self.assertEqual((self.weeks["2026-10-04"]["escalated"], self.weeks["2026-10-04"]["reviewed"]), (1, 2))
         # B left escalated, but it was escalated once; C and D reached merged.
         self.assertEqual((self.weeks["2026-10-11"]["escalated"], self.weeks["2026-10-11"]["reviewed"]), (1, 4))
+
+    def test_issue_state_labels_count_escalations_the_generated_board_never_showed(self):
+        # SIM-repo-2b: E is escalated and back in review between two board renders, so only
+        # its issue's label events show it; old raw data without "states" still computes.
+        raw = raw_fixture()
+        raw["states"] = [{"at": "2026-10-12T10:00:00Z", "id": "E", "state": "escalated"},
+                         {"at": "2026-10-12T11:00:00Z", "id": "E", "state": "in review"}]
+        week = {w["week"]: w for w in metrics.compute(raw)}["2026-10-11"]
+        self.assertEqual((week["escalated"], week["reviewed"]), (2, 5))
 
     def test_causes_tally_judged_prs_and_tolerate_old_data(self):
         self.assertEqual(self.weeks["2026-10-04"]["causes"], ["brief-gap"])
@@ -191,7 +204,7 @@ class RenderTest(unittest.TestCase):
         row = lambda md: next(l for l in md.splitlines() if l.startswith("| 2026-10-04 |"))
         self.assertEqual(row(again), row(first))
         self.assertIn("1/3", row(again))
-        self.assertTrue(row(first).endswith("| brief-gap 1 |"))
+        self.assertIn("| brief-gap 1 |", row(first))
 
     def test_rows_recorded_before_the_causes_column_keep_their_frozen_cells(self):
         raw = raw_fixture()
@@ -224,7 +237,7 @@ class FreezeTest(unittest.TestCase):
         raw["runs"].append({"workflow": "ci", "sha": "e", "at": "2026-10-06T10:00:00Z", "conclusions": ["failure", "success"]})
         later = metrics.render(metrics.compute(raw), raw, first)
         self.assertIn("1/3", row(later, "2026-10-04"))
-        # The current week was recorded "(to date)", so it still recomputes.
+        # The current week was recorded as "(current, ...)", so it still recomputes.
         raw["runs"].append({"workflow": "ci", "sha": "f", "at": "2026-10-11T14:00:00Z", "conclusions": ["failure", "success"]})
         later = metrics.render(metrics.compute(raw), raw, first)
         self.assertIn("50% (1/2)", row(later, "2026-10-11"))
@@ -282,6 +295,29 @@ class CollectTest(unittest.TestCase):
         self.assertEqual(next(p for p in pulls if p["number"] == 7)["verdicts"], ["accept"])
 
 
+class StatesTest(unittest.TestCase):
+    def test_collect_states_keeps_state_labels_added_to_work_item_issues(self):
+        item = {"title": "SIM-x: Thing", "labels": [{"name": "work-item"}, {"name": "state:queued"}]}
+        events = [
+            {"event": "labeled", "created_at": "2", "label": {"name": "state:escalated"}, "issue": item},
+            {"event": "labeled", "created_at": "1", "label": {"name": "state:queued"}, "issue": item},
+            {"event": "unlabeled", "created_at": "3", "label": {"name": "state:queued"}, "issue": item},
+            {"event": "labeled", "created_at": "4", "label": {"name": "tier:A"}, "issue": item},
+            {"event": "labeled", "created_at": "5", "label": {"name": "state:merged"},
+             "issue": dict(item, labels=[{"name": "bug"}])},  # not a work item
+            {"event": "labeled", "created_at": "6", "label": {"name": "state:merged"},
+             "issue": dict(item, pull_request={})},
+        ]
+        orig = metrics._api
+        metrics._api = lambda repo, path, token: events if path.endswith("page=1") else []
+        try:
+            got = metrics.collect_states("o/r", None)
+        finally:
+            metrics._api = orig
+        self.assertEqual(got, [{"at": "1", "id": "SIM-x", "state": "queued"},
+                               {"at": "2", "id": "SIM-x", "state": "escalated"}])
+
+
 class TrustTest(unittest.TestCase):
     """Security review 2, finding 8: on a public repository anyone can post a review or run
     a fork's CI, so only collaborators' reviews and this repository's own runs count."""
@@ -326,7 +362,7 @@ class SinceTest(unittest.TestCase):
     def test_cutoff_follows_the_last_closed_recorded_week(self):
         raw = raw_fixture()
         md = metrics.render(metrics.compute(raw), raw)
-        # 2026-10-04 is the last closed week; 2026-10-11 is "(to date)". 10-11 06:00 UTC-4 = 10:00Z.
+        # 2026-10-04 is the last closed week; 2026-10-11 is "(current, ...)". 10-11 06:00 UTC-4 = 10:00Z.
         self.assertEqual(metrics._since(md, TZ), "2026-10-11T10:00:00Z")
         self.assertIsNone(metrics._since(None, TZ))
         # Old PRs (verdicts not collected) are not reported as missing a verdict.
@@ -353,7 +389,299 @@ class GitHistoryTest(unittest.TestCase):
             trace, board = metrics.git_history(root, "HEAD")
             self.assertEqual([t["covered"] for t in trace], [3, 5])
             self.assertEqual(trace[1]["at"], "2026-10-06T12:00:00-04:00")
-            self.assertEqual(board, [{"at": "2026-10-05T12:00:00-04:00", "states": {"P1-1": "building"}}])
+            self.assertEqual(board, [{"at": "2026-10-05T12:00:00-04:00", "states": {"P1-1": "building"}, "flags": {}}])
+
+
+def conv_raw():
+    """Synthetic data for D-085's convergence columns. Local time is UTC-4, so the baseline
+    windows are 2026-09-25..10-02 and 10-02..10-09 (the two weeks before 2026-10-09)."""
+    return {
+        "now": "2026-10-20T12:00:00+00:00", "tz_hours": -4, "trace": [], "readings": [],
+        "phases": [["P0", "10%", "x"]], "runs": [],
+        "board": [
+            {"at": "2026-09-28T12:00:00-04:00", "states": {"A": "merged"}, "flags": {}},
+            {"at": "2026-10-05T12:00:00-04:00", "states": {"A": "merged", "B": "queued", "B-f1": "queued"},
+             "flags": {"B-f1": "f"}},
+            {"at": "2026-10-07T12:00:00-04:00",
+             "states": {"A": "merged", "B": "queued", "B-f1": "queued", "C": "queued"}, "flags": {"B-f1": "f", "C": "p"}},
+            {"at": "2026-10-12T12:00:00-04:00",
+             "states": {"A": "merged", "B": "building", "B-f1": "in review", "C": "escalated", "D": "queued", "E": "queued", "F": "dropped"},
+             "flags": {"B-f1": "f", "C": "p", "D": "f", "E": "p", "F": "fp"}},
+            {"at": "2026-10-19T12:00:00-04:00",
+             "states": {"A": "merged", "B": "merged", "B-f1": "merged", "C": "merged", "D": "queued", "E": "queued", "F": "dropped", "G": "queued"},
+             "flags": {"B-f1": "f", "C": "p", "D": "f", "E": "p", "F": "fp", "G": "p"}},
+        ],
+        "pulls": [
+            {"number": 1, "merged_at": "2026-09-30T10:00:00Z", "body": "", "verdicts": ["accept"]},
+            {"number": 2, "merged_at": "2026-10-06T10:00:00Z", "body": "Defect: A", "verdicts": ["accept"]},
+            {"number": 3, "merged_at": "2026-10-13T10:00:00Z", "body": "", "verdicts": ["accept"]},
+            {"number": 4, "merged_at": "2026-10-14T10:00:00Z", "body": "", "verdicts": ["accept"]},
+            {"number": 10, "merged_at": None, "state": "open", "draft": False, "updated_at": "2026-10-17T00:00:00Z", "body": ""},
+            {"number": 11, "merged_at": None, "state": "open", "draft": True, "updated_at": "2026-10-01T00:00:00Z", "body": ""},
+            {"number": 12, "merged_at": None, "state": "open", "draft": True, "updated_at": "2026-10-01T00:00:00Z", "body": ""},
+            {"number": 13, "merged_at": None, "state": "open", "draft": False, "updated_at": "2026-10-01T00:00:00Z", "body": ""},
+            {"number": 14, "merged_at": None, "state": "open", "draft": False, "updated_at": "2026-10-20T00:00:00Z", "body": "",
+             "labels": ["lane:codex"]},
+            {"number": 15, "merged_at": None, "state": "closed", "draft": False, "updated_at": "2026-10-01T00:00:00Z", "body": ""},
+        ],
+    }
+
+
+def met_raw(now="2026-10-08T12:00:00+00:00"):
+    """Week 2026-10-04: usage reading on day 2 (10-06), TRACE snapshots on day 2 and day 5."""
+    return {
+        "now": now, "tz_hours": -4, "runs": [], "pulls": [], "phases": [["P0", "10%", "x"]],
+        "board": [{"at": "2026-10-05T12:00:00-04:00", "states": {"A": "queued"}}],
+        "trace": [{"at": "2026-10-03T12:00:00-04:00", "covered": 5},
+                  {"at": "2026-10-06T08:00:00-04:00", "covered": 8},    # day 2, before the reading
+                  {"at": "2026-10-09T12:00:00-04:00", "covered": 20}],  # day 5
+        "readings": [{"at": "2026-10-06T10:00", "all": 30.0, "fable": 10.0}],
+    }
+
+
+class MatchedWindowsTest(unittest.TestCase):
+    # Brief ID MET-1a (local, not in SPEC.md)
+    def test_ratio_uses_the_requirement_count_at_the_reading(self):
+        w = {x["week"]: x for x in metrics.compute(met_raw("2026-10-12T12:00:00+00:00"))}["2026-10-04"]
+        self.assertEqual(w["reqs"], 15)               # week total, to the day-5 snapshot
+        self.assertEqual(w["reqs_at_reading"], 3)     # 8 at the reading minus 5 before the week
+        self.assertAlmostEqual(w["usage_per_req"], 10.0)
+        self.assertEqual(w["reading_at"], "2026-10-06T10:00")
+
+    # Brief ID MET-1a (local, not in SPEC.md)
+    def test_table_shows_the_reading_time_beside_the_ratio(self):
+        raw = met_raw("2026-10-12T12:00:00+00:00")
+        md = metrics.render(metrics.compute(raw), raw)
+        self.assertIn("| 10.00 pts (reading 2026-10-06 10:00) |", md)
+
+    # Brief ID MET-1a (local, not in SPEC.md)
+    def test_no_trace_snapshot_at_or_before_the_reading_gives_no_ratio(self):
+        raw = met_raw("2026-10-12T12:00:00+00:00")
+        raw["readings"][0]["at"] = "2026-10-02T10:00"
+        raw["readings"].append({"at": "2026-10-05T10:00", "all": 20.0, "fable": 5.0})
+        w = {x["week"]: x for x in metrics.compute(raw)}["2026-10-04"]
+        self.assertEqual(w["reqs_at_reading"], 0)     # carried-over count only
+        self.assertIsNone(w["usage_per_req"])
+
+
+class StalenessLabelTest(unittest.TestCase):
+    row = staticmethod(lambda md: next(l for l in md.splitlines() if l.startswith("| 2026-10-04")))
+
+    # Brief ID MET-1b (local, not in SPEC.md)
+    def test_current_week_names_the_reading_and_the_age_of_the_newest_input(self):
+        # Newest input is the day-5 TRACE snapshot, 10-09 16:00Z; now is 41 h later.
+        raw = met_raw("2026-10-11T09:00:00+00:00")
+        md = metrics.render(metrics.compute(raw), raw)
+        self.assertIn("| 2026-10-04 (current, reading 2026-10-06 10:00; newest input 41 h old) |", self.row(md))
+        self.assertNotIn("(to date)", md)
+
+    # Brief ID MET-1b (local, not in SPEC.md)
+    def test_no_age_label_within_36_hours(self):
+        for now, tail in (("2026-10-11T04:00:00+00:00", ")"), ("2026-10-10T04:00:00+00:00", ")")):
+            raw = met_raw(now)
+            self.assertIn("(current, reading 2026-10-06 10:00)", self.row(metrics.render(metrics.compute(raw), raw)), now)
+        raw = met_raw("2026-10-11T04:00:01+00:00")  # 36 h and 1 s after the 10-09 16:00Z snapshot
+        self.assertIn("newest input 36 h old", self.row(metrics.render(metrics.compute(raw), raw)))
+
+    # Brief ID MET-1b (local, not in SPEC.md)
+    def test_current_week_without_a_reading_says_so(self):
+        raw = met_raw("2026-10-08T12:00:00+00:00")
+        raw["readings"] = []
+        self.assertIn("(current, no reading", self.row(metrics.render(metrics.compute(raw), raw)))
+
+    # Brief ID MET-1b (local, not in SPEC.md)
+    def test_closed_weeks_carry_no_age_label(self):
+        raw = met_raw("2026-10-20T12:00:00+00:00")
+        self.assertIn("| 2026-10-04 |", self.row(metrics.render(metrics.compute(raw), raw)))
+
+
+class ConvergenceColumnsTest(unittest.TestCase):
+    # REQ CONV-0-1
+    def setUp(self):
+        self.raw = conv_raw()
+        self.weeks = {w["week"]: w for w in metrics.compute(self.raw)}
+
+    def test_flags_mark_follow_up_ids_release_follow_ups_and_promotions(self):
+        board = (
+            "| ID | Package | Needs | State |\n|---|---|---|---|\n"
+            "| DEP-3-r1 | fix (release, tier A; L3 on #562 point 1) | x | building |\n"
+            "| SR3-4-f4 | y | x | queued |\n"
+            "| P3-4b-env-l1 | y | x | queued |\n"
+            "| X-1 | thing (release, tier A; Security 4a point 1) | x | queued |\n"
+            "| X-2 | thing (release, tier A; spec A4) | x | queued |\n"
+            "| X-3 | promotes LATER SR3-4f-2 l4 (release) | x | queued |\n"
+            "| X-4 | Which rows the first release needs is LATER.md. | x | queued |\n"
+            "| X-5 | plain | x | queued |\n"
+        )
+        self.assertEqual(metrics.board_flags(board), {
+            "DEP-3-r1": "f", "SR3-4-f4": "f", "P3-4b-env-l1": "f", "X-1": "f", "X-3": "p"})
+
+    def test_open_rows_count_queued_building_in_review_escalated(self):
+        # Week of 10-11 ends with B building, B-f1 in review, C escalated, D and E queued; A merged, F dropped.
+        self.assertEqual(self.weeks["2026-10-11"]["open_rows"], 5)
+        self.assertEqual(self.weeks["2026-10-18"]["open_rows"], 3)
+
+    def test_follow_ups_and_promotions_count_rows_first_seen_that_week(self):
+        w = self.weeks["2026-10-11"]
+        self.assertEqual((w["followups"], w["promotions"]), (2, 2))  # D, F follow-ups; E, F promotions
+        self.assertEqual(self.weeks["2026-10-04"]["followups"], 1)
+        self.assertEqual(self.weeks["2026-10-04"]["promotions"], 1)
+        self.assertEqual(self.weeks["2026-10-18"]["promotions"], 1)
+        self.assertEqual(self.weeks["2026-10-18"]["followups"], 0)
+
+    def test_follow_ups_per_merged_pr(self):
+        self.assertEqual(self.weeks["2026-10-11"]["merged"], 2)
+        self.assertAlmostEqual(self.weeks["2026-10-11"]["followups_per_pr"], 1.0)
+        self.assertIsNone(self.weeks["2026-10-18"]["followups_per_pr"])  # no PR merged: not 0
+
+    # Brief ID MET-1e (local, not in SPEC.md)
+    def test_stale_open_prs_include_held_drafts(self):
+        # #10 untouched 3.5 days; #11 and #12 drafts untouched; #13 untouched; #14 fresh; #15 closed.
+        self.assertEqual(self.weeks["2026-10-18"]["stale"], [10, 11, 12, 13])
+        self.assertIsNone(self.weeks["2026-10-11"]["stale"])  # only knowable at run time
+
+    # Brief ID MET-1e (local, not in SPEC.md)
+    def test_open_prs_are_counted_per_lane_against_the_cap(self):
+        self.assertEqual(self.weeks["2026-10-18"]["lanes"], {"codex": 1, "peers": 4})
+        self.assertIsNone(self.weeks["2026-10-11"]["lanes"])
+        md = metrics.render(metrics.compute(self.raw), self.raw)
+        row = next(l for l in md.splitlines() if l.startswith("| 2026-10-18"))
+        self.assertIn("| codex 1, peers 4 (cap about 10) |", row)
+
+    def test_columns_that_cannot_be_computed_print_n_a_never_zero(self):
+        raw = conv_raw()
+        for snap in raw["board"]:
+            del snap["flags"]
+        for p in raw["pulls"]:
+            for k in ("state", "draft", "updated_at"):
+                p.pop(k, None)
+        md = metrics.render(metrics.compute(raw), raw)
+        row = next(l for l in md.splitlines() if l.startswith("| 2026-10-18"))
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        i = metrics.COLUMNS.index
+        for col in ("Follow-up rows added", "Follow-ups per merged PR", "Promotions later to release", "Stale PRs (48 h)", "Open PRs by lane"):
+            self.assertEqual(cells[i(col)], "n/a", col)
+        self.assertEqual(cells[i("Open BOARD rows")], "3")
+
+
+class BaselineAndGuardTest(unittest.TestCase):
+    # REQ CONV-0-2
+    def render(self, raw):
+        return metrics.render(metrics.compute(raw), raw)
+
+    def test_baseline_is_the_mean_of_the_two_weeks_before_the_decision(self):
+        base = metrics.baseline(conv_raw())
+        self.assertAlmostEqual(base["promotions"], 0.5)   # 0 and 1
+        self.assertAlmostEqual(base["defects"], 0.5)      # 0 and 1
+        self.assertAlmostEqual(base["followups"], 0.5)
+        self.assertIsNone(base["stale"])                  # a point-in-time figure with no history
+        md = self.render(conv_raw())
+        self.assertIn("## Baseline", md)
+        self.assertRegex(md, r"\| Promotions later to release \| 0\.5 \|")
+
+    def test_windows_before_the_first_board_commit_count_as_zero_not_unknown(self):
+        raw = conv_raw()
+        raw["board"] = raw["board"][3:]  # history starts after the baseline windows
+        base = metrics.baseline(raw)
+        self.assertEqual((base["open_rows"], base["followups"], base["promotions"]), (0, 0, 0))
+
+    def test_week_above_baseline_is_red_and_two_in_a_row_trip_the_guard(self):
+        md = self.render(conv_raw())
+        row = lambda wk: next(l for l in md.splitlines() if l.startswith(f"| {wk}"))
+        self.assertIn("2 red", row("2026-10-11"))   # promotions 2 > 0.5
+        self.assertIn("1 red", row("2026-10-18"))   # promotions 1 > 0.5
+        self.assertNotIn("red", row("2026-10-04"))  # the decision's own week is not judged
+        self.assertIn("D-085 guard tripped: revert the release-class rule (decisions/D-085.md)", md)
+
+    def test_one_red_week_or_a_gap_does_not_trip_the_guard(self):
+        raw = conv_raw()
+        raw["board"][-1]["flags"].pop("G")
+        raw["board"][-1]["flags"]["F"] = "f"   # the last week adds no promotion
+        md = self.render(raw)
+        self.assertIn("2 red", next(l for l in md.splitlines() if l.startswith("| 2026-10-11")))
+        self.assertNotIn("guard tripped", md)
+
+    def test_defects_above_baseline_are_red_too(self):
+        raw = conv_raw()
+        for n in (3, 4):
+            raw["pulls"][n - 1]["body"] = "Defect: A\nDefect: B"
+        md = self.render(raw)
+        self.assertIn("(A, A, B, B) red", next(l for l in md.splitlines() if l.startswith("| 2026-10-11")))
+
+
+class LedgerStaleTest(unittest.TestCase):
+    # REQ CONV-0-4
+    def first_line(self, now, readings):
+        raw = conv_raw()
+        raw["now"], raw["readings"] = now, readings
+        return metrics.render(metrics.compute(raw), raw).splitlines()[0]
+
+    def test_reading_over_36_hours_old_is_named_on_the_first_line(self):
+        # 2026-10-04 19:50 local is 23:50Z; 36 h later is 10-06 11:50Z.
+        line = self.first_line("2026-10-06T12:00:00+00:00", [{"at": "2026-10-04T19:50", "all": 23.0, "fable": 11.0}])
+        self.assertIn("LEDGER.md", line)
+        self.assertIn("2026-10-04 19:50", line)
+        self.assertIn("36 hours", line)
+
+    def test_fresh_reading_or_exactly_36_hours_leaves_the_heading_first(self):
+        r = [{"at": "2026-10-04T19:50", "all": 23.0, "fable": 11.0}]
+        self.assertTrue(self.first_line("2026-10-06T11:50:00+00:00", r).startswith("# METRICS"))
+        self.assertTrue(self.first_line("2026-10-05T12:00:00+00:00", r).startswith("# METRICS"))
+
+    def test_newest_reading_counts_and_no_reading_is_stale(self):
+        r = [{"at": "2026-10-04T10:00", "all": 1.0, "fable": 0.0}, {"at": "2026-10-09T10:00", "all": 2.0, "fable": 0.0}]
+        self.assertTrue(self.first_line("2026-10-10T10:00:00+00:00", r).startswith("# METRICS"))
+        self.assertIn("no reading", self.first_line("2026-10-10T10:00:00+00:00", []))
+
+
+class CollectPullsTest(unittest.TestCase):
+    # REQ CONV-0-1
+    def test_collected_pulls_carry_state_draft_and_update_time(self):
+        def api(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"number": 7, "state": "open", "draft": True, "updated_at": "2026-10-05T00:00:00Z",
+                         "merged_at": None, "body": None, "labels": [{"name": "lane:codex"}]}] if "page=1&" in path + "&" else []
+            if path.startswith("actions/runs?"):
+                return {"workflow_runs": []}
+            raise AssertionError(path)
+        orig = metrics._api
+        metrics._api = api
+        try:
+            pulls, _ = metrics.collect_github("o/r", None)
+        finally:
+            metrics._api = orig
+        self.assertEqual((pulls[0]["state"], pulls[0]["draft"], pulls[0]["updated_at"]), ("open", True, "2026-10-05T00:00:00Z"))
+        self.assertEqual(pulls[0]["labels"], ["lane:codex"])
+
+
+class GitFlagsTest(unittest.TestCase):
+    # REQ CONV-0-1
+    def test_history_snapshots_carry_flags(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid", "PATH": "/usr/bin:/bin"}
+            subprocess.run(["git", "-C", d, "init", "-q", "-b", "main"], check=True, capture_output=True, env=env)
+            (root / "BOARD.md").write_text("| ID | Package | Needs | State |\n|---|---|---|---|\n| P-1-r1 | J | x | queued |\n")
+            subprocess.run(["git", "-C", d, "add", "."], check=True, capture_output=True, env=env)
+            subprocess.run(["git", "-C", d, "commit", "-qm", "one"], check=True, capture_output=True, env=env)
+            _, board = metrics.git_history(root, "HEAD")
+            self.assertEqual(board[0]["flags"], {"P-1-r1": "f"})
+
+
+class WorkflowTest(unittest.TestCase):
+    # REQ CONV-0-3
+    def test_runs_daily_from_main_only_with_the_same_permissions(self):
+        text = (pathlib.Path(__file__).resolve().parent.parent / ".github/workflows/metrics.yml").read_text()
+        crons = [l.split('"')[1] for l in text.splitlines() if l.strip().startswith("- cron:")]
+        self.assertEqual(len(crons), 1)
+        minute, hour, dom, month, dow = crons[0].split()
+        self.assertEqual((dom, month, dow), ("*", "*", "*"))  # every day, not Sundays only
+        self.assertIn("workflow_dispatch:", text)
+        self.assertIn("if: github.ref == 'refs/heads/main'", text)
+        self.assertEqual(text.count("contents: write"), 1)  # only the commit job writes
+        self.assertIn("pull-requests: read", text)
+        self.assertIn("actions: read", text)
 
 
 if __name__ == "__main__":

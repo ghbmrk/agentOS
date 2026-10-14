@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -55,6 +57,9 @@ func (f *machines) Create(_ context.Context, id string, s vm.Spec) (vm.Machine, 
 	f.mu.Unlock()
 	dir, err := f.services.Open(id)
 	if err != nil {
+		return vm.Machine{}, err
+	}
+	if err := onlySocket(dir); err != nil {
 		return vm.Machine{}, err
 	}
 	if f.guest != nil {
@@ -691,4 +696,18 @@ func TestAJobAtItsTokenCapSaysSo(t *testing.T) {
 		}
 	}
 	t.Fatalf("no job line in %q", lines)
+}
+
+// onlySocket fails unless dir holds the broker socket and nothing else:
+// the guest sees dir at vm.ServicesMount, and runsc --host-uds=open lets
+// it connect to any socket there (ARC-6 "nothing else").
+func onlySocket(dir string) error {
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	if len(es) != 1 || es[0].Name() != Socket || es[0].Type()&fs.ModeSocket == 0 {
+		return fmt.Errorf("services directory %s holds %v, want only the socket %s", dir, es, Socket)
+	}
+	return nil
 }

@@ -38,11 +38,11 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/skill"
 )
 
@@ -70,7 +70,7 @@ func main() {
 	}
 	go http.Serve(l, routes(broker, *tree))
 
-	var child *exec.Cmd
+	var child *childproc.Cmd
 	if args := flag.Args(); len(args) > 0 {
 		if child, err = startRuntime(args, token); err != nil {
 			log.Fatal(err)
@@ -86,7 +86,7 @@ func main() {
 	go func() {
 		s := <-sig
 		if child != nil {
-			child.Process.Signal(s)
+			child.Signal(s)
 		}
 	}()
 	reap(child)
@@ -102,18 +102,18 @@ var runtimeVars = []string{
 	"OPENCLAW_DISABLE_BONJOUR", "OPENCLAW_CLAWHUB_URL", "DO_NOT_TRACK",
 }
 
-// startRuntime starts the guest runtime with runtimeVars and the gateway
-// token as its whole environment.
-func startRuntime(args []string, token string) (*exec.Cmd, error) {
+// startRuntime starts the guest runtime, through childproc, with
+// runtimeVars and the gateway token as its whole environment. Each key is
+// on childproc's allowlist for this reason: they run in the guest, where
+// no AGENTOS_* variable exists.
+func startRuntime(args []string, token string) (*childproc.Cmd, error) {
 	env := []string{"OPENCLAW_GATEWAY_TOKEN=" + token}
 	for _, k := range runtimeVars {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
 		}
 	}
-	child := exec.Command(args[0], args[1:]...)
-	child.Env = env
-	child.Stdout, child.Stderr = os.Stdout, os.Stderr
+	child := childproc.Command(context.Background(), childproc.NewEnv(env...), childproc.Options{Stdout: os.Stdout, Stderr: os.Stderr}, args[0], args[1:]...)
 	return child, child.Start()
 }
 
@@ -136,7 +136,7 @@ func routes(broker *http.Client, tree string) http.Handler {
 }
 
 // reap waits for every child, as PID 1 must, and exits with the runtime.
-func reap(child *exec.Cmd) {
+func reap(child *childproc.Cmd) {
 	for {
 		var ws syscall.WaitStatus
 		pid, err := syscall.Wait4(-1, &ws, 0, nil)
@@ -149,7 +149,7 @@ func reap(child *exec.Cmd) {
 			}
 			os.Exit(1)
 		}
-		if child != nil && pid == child.Process.Pid {
+		if child != nil && pid == child.Pid() {
 			log.Printf("runtime exited: %v", ws)
 			os.Exit(ws.ExitStatus())
 		}
@@ -157,7 +157,8 @@ func reap(child *exec.Cmd) {
 }
 
 // owner moves owner messages from the broker into the guest and answers
-// back. Failures wait and retry: an unanswered message is handed out again.
+// back. Failures wait and retry: an unanswered message is handed out again,
+// and an answer is posted until the broker has stored it.
 func owner(broker *http.Client, gateway, model, token string) {
 	for {
 		if err := ownerOnce(broker, gateway, model, token); err != nil {
@@ -192,19 +193,35 @@ func ownerOnce(broker *http.Client, gateway, model, token string) error {
 			break
 		}
 		log.Printf("owner message %s: %v; retrying", msg.ID, err)
-		time.Sleep(wait)
+		sleep(wait)
 	}
+	// The answer is kept until the broker has it (DEL-1d): a network error
+	// or any other status (503: not stored yet; 429: the machine has too
+	// many requests in flight) is retried with the same body, never by
+	// asking the model again. 204, 404 and 409 are final: stored, never
+	// handed to this machine, or already answered. So is 400, which the
+	// same body can never pass (an answer over the 64 KiB reply limit):
+	// retrying it would stall every later owner message.
 	out, _ := json.Marshal(map[string]string{"id": msg.ID, "text": answer})
-	resp, err = broker.Post("http://broker.localhost/owner/reply", "application/json", bytes.NewReader(out))
-	if err != nil {
-		return err
+	for wait := time.Second; ; wait = min(2*wait, 30*time.Second) {
+		resp, err = broker.Post("http://broker.localhost/owner/reply", "application/json", bytes.NewReader(out))
+		if err == nil {
+			resp.Body.Close()
+			switch resp.StatusCode {
+			case http.StatusNoContent:
+				return nil
+			case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict:
+				return fmt.Errorf("reply %s: %s", msg.ID, resp.Status)
+			}
+			err = fmt.Errorf("%s", resp.Status)
+		}
+		log.Printf("owner reply %s: %v; retrying", msg.ID, err)
+		sleep(wait)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("reply: %s", resp.Status)
-	}
-	return nil
 }
+
+// sleep waits between retries; tests replace it.
+var sleep = time.Sleep
 
 // ask sends one owner message to the guest's inbound API and returns its
 // answer text.

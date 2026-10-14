@@ -20,15 +20,25 @@ import (
 // egress package lives outside this list; wiring it into the control path
 // fails this test.
 var controlPath = map[string][]string{
-	"journal":   {},
-	"control":   {"journal"},
-	"admission": {},
-	"sockets":   {},
-	"cgroup":    {},
-	"budget":    {"admission", "cgroup"}, // RES-2 component budget (P2-5)
-	"accel":     {"admission"},           // RES-3 discovery from sysfs (P2-5)
-	"owner":     {"control", "journal", "modem"},
-	"modem":     {},
+	"journal": {},
+	// The durable-write helper (SIM-fs) every package may import: file
+	// calls only, held to the control path's rules here.
+	"durable": {},
+	// The journal checker (SIM-check): pure predicates over records.
+	"journal/check": {"journal"},
+	"control":       {"journal"},
+	"admission":     {},
+	"sockets":       {},
+	"cgroup":        {},
+	"budget":        {"admission", "cgroup"}, // RES-2 component budget (P2-5)
+	"accel":         {"admission"},           // RES-3 discovery from sysfs (P2-5)
+	"owner":         {"boxname", "control", "journal", "modem"},
+	"modem":         {},
+	"boxname":       {}, // CH-21 name check, for NAME
+	// The card's Wi-Fi network file (#1185): agentosd writes what the page
+	// reports for agentos-ap to serve; standard library only, so agentosd
+	// still links neither card nor claim.
+	"apnet": {},
 	// The modem bridge's contract and agentosd's end of it (P2-3w): types
 	// and an in-process queue; the bridge's client is bridgeclient.
 	"bridgeproto": {},
@@ -37,7 +47,7 @@ var controlPath = map[string][]string{
 	// serves the page's ops on the owner channel; the local UI, which
 	// decodes untrusted photos, stays in its own process (L15).
 	"localapi": {"owner"},
-	"localsrv": {"localapi", "owner", "sockets"},
+	"localsrv": {"apnet", "localapi", "owner", "sockets"},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
 	// Verifier interface. Its refusals' guest text is guesterr's (SR2-3j),
@@ -47,7 +57,7 @@ var controlPath = map[string][]string{
 	// Reversible forms (REV-3) are declarations the gate validates: pure
 	// data, held to the control path's rules.
 	"reversible": {"journal", "verb"},
-	"daemon":     {"journal", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv"},
+	"daemon":     {"journal", "journal/check", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv", "apnet"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
@@ -94,7 +104,7 @@ var controlPath = map[string][]string{
 	// mail imports golang.org/x/text, so like clock it has no entry below
 	// and is held by TestAgentosdLinksNoInference, which holds mailsock to
 	// the unix dial modelroute makes.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control", "mail", "mail/mailsock", "verb"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -112,7 +122,7 @@ var machinePlane = map[string]struct {
 }{
 	"vm":         {[]string{"admission", "cgroup", "vm/overlay", "quota"}, forbiddenStd},
 	"vm/overlay": {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
-	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota"}, []string{"net", "net/http", "net/rpc", "net/smtp", "plugin", "unsafe", "C"}},
+	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota", "childproc"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 }
 
 // The guest plane serves each machine's ARC-6 socket (P1-7). STOP,
@@ -124,8 +134,12 @@ var guestPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"guest": {[]string{"guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
+	"guest": {[]string{"fold", "guesterr", "journal", "meter"}, []string{"os/exec", "plugin", "unsafe", "C"}},
 	"meter": {nil, []string{"net", "os/exec", "plugin", "unsafe", "C"}},
+	// fold keeps an oversized tool result for the machine that produced it
+	// and hands back a stand-in. It stores bytes in memory. No network,
+	// no process, no model.
+	"fold": {nil, forbiddenStd},
 	// modelroute forwards to the vault process over its Unix socket and
 	// reports usage to the meter; never the vault or the proxy. It
 	// journals the denials that come back (modelroute.Journal), coalesced
@@ -256,7 +270,7 @@ func checkImports(t *testing.T, pkg string, allowed, forbidden, exceptions []str
 			p, _ := strconv.Unquote(im.Path.Value)
 			switch {
 			case strings.HasPrefix(p, module):
-				if !contains(allowed, strings.TrimPrefix(p, module)) {
+				if !contains(allowed, strings.TrimPrefix(p, module)) && p != module+"durable" {
 					t.Errorf("%s imports %s, outside the control path", f, p)
 				}
 			case strings.Contains(strings.SplitN(p, "/", 2)[0], "."):

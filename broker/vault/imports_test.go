@@ -19,8 +19,10 @@ import (
 // daemon (cmd/agentosd) is on the ARC-2 control path and may not. The
 // recovery package (P2-8) runs inside the vault process, and agentos-a8scan
 // is A8's audit tool run by hand on a drive; recovery's imports test keeps
-// every other package from importing it.
-var vaultImporters = map[string]bool{"egress": true, "cmd/agentos-egress": true, "recovery": true, "cmd/agentos-a8scan": true}
+// every other package from importing it. A key holder (SIM-split) holds one
+// account's login and redacts it with the vault's redactor; only egress's
+// uid reaches its request socket.
+var vaultImporters = map[string]bool{"egress": true, "cmd/agentos-egress": true, "recovery": true, "cmd/agentos-a8scan": true, "holder": true}
 
 const vaultPkg = "github.com/ghbmrk/agentos/broker/vault"
 
@@ -41,13 +43,13 @@ func TestOnlyEgressImportsVault(t *testing.T) {
 			if p == vaultPkg && !vaultImporters[pkg] {
 				t.Errorf("%s imports the vault; only %v may", path, vaultImporters)
 			}
-			if pkg == "vault" && ((p == "net" || strings.HasPrefix(p, "net/") && p != "net/url") || p == "os/exec" || strings.HasPrefix(p, "github.com/ghbmrk/agentos/broker/")) {
+			if pkg == "vault" && ((p == "net" || strings.HasPrefix(p, "net/") && p != "net/url") || p == "os/exec" || strings.HasPrefix(p, "github.com/ghbmrk/agentos/broker/") && p != durablePkg) {
 				t.Errorf("vault imports %s; it must stay a leaf with no I/O but its file", p)
 			}
 			// Argon2id (CRED-8) is the one third-party import: the Go
 			// project's own x/crypto, pinned in go.sum, rather than
 			// hand-rolled key derivation.
-			if pkg == "vault" && strings.Contains(strings.SplitN(p, "/", 2)[0], ".") && p != "golang.org/x/crypto/argon2" {
+			if pkg == "vault" && strings.Contains(strings.SplitN(p, "/", 2)[0], ".") && p != "golang.org/x/crypto/argon2" && p != durablePkg {
 				t.Errorf("vault imports third-party %s; only golang.org/x/crypto/argon2 is allowed", p)
 			}
 		}
@@ -95,3 +97,7 @@ func TestOnlyRecoveryCallsRebase(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// durablePkg is the one broker package the vault imports: it writes the
+// vault's own file and imports only the standard library (durable.TestLeaf).
+const durablePkg = "github.com/ghbmrk/agentos/broker/durable"

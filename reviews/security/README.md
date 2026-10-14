@@ -33,6 +33,8 @@ Weekly runs over all of `main` until 2026-10-07, when the batched lens screen re
 
 Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory (tier-B combined passes are in `../combined/`), in filename order, so there is no run number to pick. Each opens with a `Record:` line giving PR, package and head SHA; `tools/doclint.py` checks it on files dated 2026-10-09 or later. No run rows are appended to this README, so open PRs do not conflict on it; recurring kinds and the checks that replaced them still are (DOC-4, docs/OPERATING.md §4).
 
+**Requested reviews** (indexed by this list, not by a PR): [2026-10-08-architecture-review.md](2026-10-08-architecture-review.md) (SR3 intake, requested by Mark).
+
 ## Recurring kinds (to become checks)
 
 | Kind | Seen on | Check to add | Owner package |
@@ -42,3 +44,4 @@ Per-PR and per-bundle records are the files `YYYY-MM-DD-*.md` in this directory 
 | A root-side or host-side file operation follows a link the guest or the fuzz uid planted | #584 (P3-4b-4c-nofollow, P3-4b-4c-symlink), #588 (F16, P3-4b-3r-confine-r5) | a test per operation that plants a link out of the tree and asserts the outside file is neither read nor replaced, run against the reverted path-based call | the next package that touches `machprobe` or `loop7` |
 | Code that decides finding closure or containment is not tier A | #523 (f5), #515 (f4) | `loops`, `probecmd`, `corpus`, `loop7` in `TIER_A_BROKER`, pinned in `tests/test_risk_tier.py` | P3-4b-4b (done: enforced by `tools/risk_tier.py` since #548; loop7 tier A added at the Security 4a blocker) |
 | A confinement brief lists the namespaces or flags to set instead of the property they must give, so one the property needs is missing and review finds it | #628 (`CLONE_NEWUSER` is what keeps the quota from being retagged by its owner and was in no brief; a POSIX queue made through `/dev/mqueue` escapes the brief's "private IPC", BOARD P3-4b-3r-confine-mq) | the brief states the property and the threat it answers ("a hostile child cannot retag its tree; it leaves nothing in a host namespace"), and a test checks each, so a missing flag fails a test instead of waiting for review; a flag the property needs that the brief omits is a `brief-gap` cause (OPERATING §4), named on the Findings line | the next confine brief |
+| Raw error text formatted into a fixed-class `Logf` (PE5), so a host path reaches the log | #210 (state-save and broken lines), #212 (activation line) | an AST test in `broker/change` failing when an `error` value, or a call on one, is a `cfg.Logf` argument | the release row for #697's "fixed sentence per class at `Apply`" finding |

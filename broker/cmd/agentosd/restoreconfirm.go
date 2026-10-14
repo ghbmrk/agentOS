@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // The owner's way out of a restore held for want of an anchor or of a log
@@ -244,42 +246,9 @@ func answerHeld(dir, msg string) (string, bool, error) {
 	return heldReleased, true, nil
 }
 
-// writeSynced replaces path with raw through a synced temporary file, so a
-// crash leaves the old file or the new one, and syncs the directory so
-// the new one stays.
-func writeSynced(path string, raw []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".restore-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err := f.Write(raw); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(path))
-}
-
-// syncDir makes dir's entries durable, as recovery's writeAtomic does; a
-// variable so a test can watch the order.
-var syncDir = func(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	serr := d.Sync()
-	if err := d.Close(); serr == nil {
-		serr = err
-	}
-	return serr
-}
+// writeSynced and syncDir make the answer durable (OP-4); variables so a
+// test can watch the order of directory syncs or fail one.
+var (
+	writeSynced = func(path string, raw []byte) error { return durable.WriteFile(path, raw, 0o600) }
+	syncDir     = durable.SyncDir
+)

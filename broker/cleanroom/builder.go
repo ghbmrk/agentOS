@@ -493,7 +493,7 @@ func (b *Builder) park(j *job, kind, reason string) error {
 	b.qmu.Lock()
 	err := os.MkdirAll(b.parkDir(), 0o700)
 	if err == nil {
-		err = os.Rename(j.path, filepath.Join(b.parkDir(), filepath.Base(j.path)))
+		err = os.Rename(j.path, filepath.Join(b.parkDir(), filepath.Base(j.path))) // durable:exempt synced through the fault seam (dirSync), C14
 	}
 	if err == nil {
 		faultFn(nil).dirSync(filepath.Dir(j.path))

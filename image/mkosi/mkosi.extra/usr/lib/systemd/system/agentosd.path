@@ -1,4 +1,5 @@
-# Starts the broker as soon as onboarding writes its settings, without a reboot (UX-41-1).
+# Starts the broker, if it is not running, as soon as onboarding writes its settings (UX-41-1).
+# The broker no longer waits for them: on a preloaded box it starts in setup mode (#1249).
 [Unit]
 Description=AgentOS broker settings
 

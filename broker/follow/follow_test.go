@@ -113,6 +113,8 @@ func (c *fakeClock) Latest(context.Context) (time.Time, clock.Status) {
 type rig struct {
 	t       *testing.T
 	shipped []byte
+	// pk are the shipped root's root keys.
+	pk      []ed25519.PrivateKey
 	fork    []byte
 	store   *update.Store
 	clk     *fakeClock
@@ -123,7 +125,8 @@ type rig struct {
 
 func newRig(t *testing.T) *rig {
 	r := &rig{t: t, clk: &fakeClock{at: time.Now().Add(time.Hour)}}
-	r.shipped = rootOf(t, newKey(t), newKey(t))
+	r.pk = []ed25519.PrivateKey{newKey(t), newKey(t)}
+	r.shipped = rootOf(t, r.pk[0], r.pk[1])
 	r.fork = rootOf(t, newKey(t), newKey(t))
 	st, err := update.InitStore(filepath.Join(t.TempDir(), "box"), r.shipped, 0)
 	if err != nil {
@@ -214,14 +217,14 @@ func TestOSS10wRefusesARootThePageDoesNotHold(t *testing.T) {
 func TestOSS10wSwitchingBackNeedsTheShippedRootKeys(t *testing.T) {
 	r := newRig(t)
 	if out := r.run(grants.FollowIntent("a1", "", r.describe(r.fork))); out.Result != journal.ResultNotApplied ||
-		!strings.Contains(out.Evidence, "project's own root keys") || !r.trusts(r.shipped) {
+		!strings.Contains(out.Evidence, "project's own root") || !r.trusts(r.shipped) {
 		t.Fatalf("a fork's root as the project's: %+v", out)
 	}
 	fake := forged(t, r.shipped)
 	// TUF accepts such a root (key IDs are labels); only the key material
 	// tells it from the project's.
 	if out := r.run(grants.FollowIntent("a2", "", r.describe(fake))); out.Result != journal.ResultNotApplied ||
-		!strings.Contains(out.Evidence, "project's own root keys") {
+		!strings.Contains(out.Evidence, "project's own root") {
 		t.Fatalf("a root claiming the shipped key IDs: %+v", out)
 	}
 	if !r.trusts(r.shipped) || len(r.alerts) != 0 {
@@ -245,13 +248,13 @@ func TestOSS10wSwitchingBackNeedsTheShippedRootKeys(t *testing.T) {
 // a root Execute would admit it for, judged the same way.
 func TestOSS10w2ProjectIsKnownAtDescribe(t *testing.T) {
 	r := newRig(t)
-	if !r.x.Project(r.describe(r.shipped)) {
+	if !r.x.Project(context.Background(), r.describe(r.shipped)) {
 		t.Fatal("the shipped root is not the project's")
 	}
-	if r.x.Project(r.describe(r.fork)) || r.x.Project(r.describe(forged(t, r.shipped))) {
+	if r.x.Project(context.Background(), r.describe(r.fork)) || r.x.Project(context.Background(), r.describe(forged(t, r.shipped))) {
 		t.Fatal("a fork's root, or one claiming the shipped key IDs, read as the project's")
 	}
-	if r.x.Project(strings.Repeat("ab", 32)) {
+	if r.x.Project(context.Background(), strings.Repeat("ab", 32)) {
 		t.Fatal("a root not held read as the project's")
 	}
 }
@@ -382,28 +385,56 @@ func TestOSS10wReconcileAfterARestart(t *testing.T) {
 		t.Fatalf("alerts %q", r.alerts)
 	}
 	digest, _, _ := grants.FollowOf(in.ID)
-	for _, other := range []journal.Intent{
-		grants.FollowIntent("a2", "Other Name", digest),
-		grants.FollowIntent("a3", "Acme Fork", r.describe(rootOf(t, newKey(t), newKey(t)))),
-		grants.FollowIntent("a4", "", r.describe(r.shipped)),
+	for _, other := range []struct {
+		in   journal.Intent
+		want journal.Result
+	}{
+		// The same root under another name, or another root under the
+		// same name (the root may have rotated since): unknown.
+		{grants.FollowIntent("a2", "Other Name", digest), journal.ResultUnknown},
+		{grants.FollowIntent("a3", "Acme Fork", r.describe(rootOf(t, newKey(t), newKey(t)))), journal.ResultUnknown},
+		// Neither the root nor the source: the switch back never landed.
+		{grants.FollowIntent("a4", "", r.describe(r.shipped)), journal.ResultNotApplied},
 	} {
 		r.alerts = nil
-		if out := fresh.Reconcile(context.Background(), other, 2); out.Result != journal.ResultUnknown || len(r.alerts) != 0 {
-			t.Fatalf("%s: %+v %q", other.ID, out, r.alerts)
+		if out := fresh.Reconcile(context.Background(), other.in, 2); out.Result != other.want || len(r.alerts) != 0 {
+			t.Fatalf("%s: %+v %q", other.in.ID, out, r.alerts)
 		}
 	}
 }
 
-// failingStore fails FollowRoot after (written) or instead of the real
+// REQ: OP-4, G1
+// #1372 (L3/UX R1 on #1325): power pulled before the switch was written
+// leaves the old root and the old source. Reconcile answers not applied,
+// so the broker account's fence lifts instead of holding every setting
+// for good; nothing runs and the owner is not alerted. A re-dispatch finds
+// nothing held (the held root lives in memory) and is not applied either.
+func TestOSS10wReconcileBeforeTheSwitchIsNotApplied(t *testing.T) {
+	r := newRig(t)
+	in := grants.FollowIntent("a1", "Acme Fork", r.describe(r.fork))
+	fresh := r.with(r.store)
+	out := fresh.Reconcile(context.Background(), in, 1)
+	if out.Result != journal.ResultNotApplied || len(r.alerts) != 0 || !r.trusts(r.shipped) {
+		t.Fatalf("reconcile %+v %q", out, r.alerts)
+	}
+	if src, _ := r.store.Following(); src != (update.Followed{}) {
+		t.Fatalf("source %+v", src)
+	}
+	if out := fresh.Execute(context.Background(), in, 2); out.Result != journal.ResultNotApplied || !r.trusts(r.shipped) || len(r.alerts) != 0 {
+		t.Fatalf("re-dispatch %+v", out)
+	}
+}
+
+// failingStore fails FollowFork after (written) or instead of the real
 // switch, and can fail reading the trusted root.
 type failingStore struct {
 	*update.Store
 	written, unreadable bool
 }
 
-func (s failingStore) FollowRoot(root []byte, approved, name string, o update.Options) error {
+func (s failingStore) FollowFork(root []byte, links [][]byte, shipped []byte, approved, name string, o update.Options) error {
 	if s.written {
-		if err := s.Store.FollowRoot(root, approved, name, o); err != nil {
+		if err := s.Store.FollowFork(root, links, shipped, approved, name, o); err != nil {
 			return err
 		}
 	}

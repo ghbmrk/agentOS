@@ -2,6 +2,9 @@ import contextlib
 import io
 import pathlib
 import sys
+import os
+import subprocess
+import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
@@ -20,6 +23,7 @@ class RiskTierTest(unittest.TestCase):
             "assurance/canary-targets.json": "A",
             "tools/canary.py": "A",
             "tools/risk_tier.py": "A",
+            "tools/ci_scope.py": "A",
             "broker/mail/deliver.go": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",
@@ -33,13 +37,20 @@ class RiskTierTest(unittest.TestCase):
             "broker/loop7/loop7.go": "A",
             # REQ: OP-2 (W5-Db DB-1: Begin is the single gate on digest sends).
             "broker/digestqueue/queue.go": "A",
-            "broker/recall/index.go": "B",
+            # REQ: OP-3 (SIM-sim L3 #727: the harness is what assures the journal).
+            "broker/sim/world.go": "A",
+            # REQ: HW-10 (CTRL-claim-tier, #1067 R1: the lockout and one-claim rule)
+            "broker/claim/claim.go": "A",
+            "broker/claim/claim_test.go": "A",
+            # REQ: HW-10 (CTRL-claim-wire: first boot routes the claim and the card)
+            "broker/firstboot/start.go": "A",
+            "broker/attention/attention.go": "B",
             "broker/newpkg/x.go": "B",
             "guest/openclaw/Dockerfile": "B",
+            "guest/openclaw/src/x.ts": "B",
             "SPEC.md": "B",
             "docs/owners-guide.md": "C",
             "tools/trace.py": "C",
-            ".github/workflows/ci.yml": "C",
             "spikes/S8-provider-workers/README.md": "C",
             "BOARD.md": "C",
         }
@@ -47,8 +58,150 @@ class RiskTierTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(rt.tier_of(path)[0], want)
 
+    # RT-1a (briefs/RT-1.md; a local ID with no SPEC row, so no REQ marker)
+    def test_image_ci_and_guest_build_paths_are_a(self):
+        # Each path brief RT-1 lists under "Today", at the tier RT-1a gives it.
+        paths = [
+            "image/build.sh",
+            "image/finish_image.py",
+            "image/ci_boot.sh",
+            "image/fuzz-targets.json",
+            "image/mkosi/mkosi.conf",
+            "image/mkosi/mkosi.finalize",
+            "image/mkosi/mkosi.repart/10-root.conf",
+            "image/mkosi/mkosi.extra/usr/lib/systemd/system/agentosd.service",
+            "image/mkosi/mkosi.extra/usr/lib/systemd/system/agentos-health.service",
+            "image/mkosi/mkosi.extra/usr/lib/systemd/system/agentos-fallback.service",
+            "image/mkosi/mkosi.extra/usr/lib/systemd/system/agentos-drive-id.service",
+            "image/mkosi/mkosi.extra/usr/lib/systemd/system/agentos-boot-report.service",
+            ".github/workflows/image.yml",
+            ".github/workflows/ci.yml",
+            ".github/pull_request_template.md",
+            ".claude/settings.json",
+            "guest/openclaw/package-lock.json",
+            "guest/openclaw/package.json",
+            "guest/openclaw/build-rootfs.sh",
+            "guest/openclaw/openclaw.json5",
+            "guest/openclaw/launch.json",
+            "guest/builder/launch.json",
+            "guest/builder/build-rootfs.sh",
+            "guest/codex/agentos-toolsh",
+            "guest/codex/managed_config.toml",
+            "guest/codex/requirements.toml",
+            "guest/codex/launch.json",
+            "broker/cmd/agentos-modem/agentos-modem.service",
+            "broker/attention/systemd/x.conf",
+            "broker/attention/x.socket",
+            "broker/attention/x.timer",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(rt.tier_of(path)[0], "A")
+        # Under spikes/, a unit file is a sketch, not something the image runs.
+        self.assertEqual(rt.tier_of("spikes/S1/systemd/x.service")[0], "C")
+
+    # RT-1a (briefs/RT-1.md; a local ID with no SPEC row, so no REQ marker)
+    def test_every_image_file_and_unit_in_the_tree_is_a(self):
+        # Walks the tree, so a new image file or unit cannot slip in below A.
+        found = []
+        for dirpath, dirs, files in os.walk(ROOT):
+            rel = pathlib.Path(dirpath).relative_to(ROOT)
+            dirs[:] = [d for d in dirs if not (rel == pathlib.Path(".") and d in (".git", "spikes"))]
+            for f in files:
+                p = (rel / f).as_posix()
+                in_mkosi = p.startswith("image/mkosi/")
+                unit = f.endswith((".service", ".socket", ".timer")) or (
+                    "systemd" in rel.parts and f.endswith(".conf"))
+                if in_mkosi or unit:
+                    found.append(p)
+        self.assertIn("image/mkosi/mkosi.extra/usr/lib/systemd/system/agentosd.service", found)
+        self.assertIn("broker/cmd/agentos-localui/agentos-localui.service", found)
+        below = [p for p in found if rt.tier_of(p)[0] != "A"]
+        self.assertEqual(below, [])
+
+    # RT-1b (briefs/RT-1.md; a local ID with no SPEC row, so no REQ marker)
+    def test_explicit_c_list_and_unmatched_default_b(self):
+        cases = {
+            "newdir/x": "B",
+            "newdir/x.md": "B",
+            ".gitignore": "B",
+            "docs/x.md": "C",
+            "briefs/x.md": "C",
+            "reviews/l3/README.md": "C",
+            "decisions/D-001.md": "C",
+            "tests/test_x.py": "C",
+            "tools/trace.py": "C",
+            "tools/ASSUMPTIONS.md": "C",
+            "image/README.md": "C",
+            "image/ASSUMPTIONS.md": "C",
+            "README.md": "C",
+            "LATER.md": "C",
+            "CLAUDE.md": "C",
+            "LEDGER.md": "C",
+            "METRICS.md": "C",
+            "TRACE.md": "C",
+            "SPEC.md": "B",
+            # A .md below the top level of image/ is not documentation-only.
+            "image/mkosi/x.md": "A",
+        }
+        for path, want in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(rt.tier_of(path)[0], want)
+
+    # RT-1a (briefs/RT-1.md; a local ID with no SPEC row, so no REQ marker)
+    def test_moving_a_tier_a_file_out_keeps_tier_a(self):
+        with tempfile.TemporaryDirectory() as d:
+            def git(*args):
+                subprocess.run(["git", "-C", d, *args], check=True, capture_output=True)
+            git("init", "-q")
+            git("config", "user.email", "t@example.invalid")
+            git("config", "user.name", "t")
+            os.makedirs(os.path.join(d, "image"))
+            with open(os.path.join(d, "image", "build.sh"), "w") as f:
+                f.write("echo build\n" * 20)
+            git("add", ".")
+            git("commit", "-qm", "base")
+            os.makedirs(os.path.join(d, "docs"))
+            git("mv", "image/build.sh", "docs/build.sh")
+            git("commit", "-qm", "move")
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                paths = rt.changed_paths("HEAD~1", "HEAD")
+            finally:
+                os.chdir(cwd)
+        self.assertIn("image/build.sh", paths)
+        self.assertEqual(rt.tier_of_change(paths)[0], "A")
+
+    def test_paths_git_would_quote_keep_tier_a(self):
+        # git diff quotes names with non-ASCII bytes, quotes, tabs, backslashes
+        # or newlines; the quoted form would match no A prefix and fall to B.
+        names = ["image/mkosi/\u00e9", "image/a\tb", "image/a\\b", '.github/workflows/a"b.yml', "image/build\nx.sh"]
+        with tempfile.TemporaryDirectory() as d:
+            def git(*args):
+                subprocess.run(["git", "-C", d, *args], check=True, capture_output=True)
+            git("init", "-q")
+            git("config", "user.email", "t@example.invalid")
+            git("config", "user.name", "t")
+            git("commit", "-q", "--allow-empty", "-m", "base")
+            for n in names:
+                os.makedirs(os.path.join(d, os.path.dirname(n)), exist_ok=True)
+                with open(os.path.join(d, n), "w") as f:
+                    f.write("x\n")
+            git("add", ".")
+            git("commit", "-qm", "add")
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                paths = rt.changed_paths("HEAD~1", "HEAD")
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(sorted(paths), sorted(names))
+        for n in names:
+            self.assertEqual(rt.tier_of(n)[0], "A", n)
+
     def test_highest_tier_wins(self):
-        tier, why = rt.tier_of_change(["docs/a.md", "broker/recall/x.go", "broker/vault/y.go"])
+        tier, why = rt.tier_of_change(["docs/a.md", "broker/attention/x.go", "broker/vault/y.go"])
         self.assertEqual((tier, why), ("A", ["broker/vault/y.go"]))
         self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/route/r.go"])[0], "B")
         self.assertEqual(rt.tier_of_change([]), ("C", []))
@@ -57,6 +210,149 @@ class RiskTierTest(unittest.TestCase):
         # A renamed package must not silently drop to tier B.
         missing = [p for p in sorted(rt.TIER_A_BROKER) if not (ROOT / "broker" / p).is_dir()]
         self.assertEqual(missing, [])
+
+    # REQ: ONB-3 (P2-2w c3: netjoin writes the home Wi-Fi PSK, so it is tier A)
+    def test_netjoin_is_tier_a(self):
+        self.assertIn("netjoin", rt.TIER_A_BROKER)
+        self.assertEqual(rt.tier_of("broker/netjoin/join.go")[0], "A")
+
+    # REQ: HW-10 (CTRL-claim-tier, CTRL-claim-wire: OPERATING §3 and TIER_A_BROKER agree on claim and firstboot)
+    def test_operating_tier_a_list_agrees_with_tier_a_broker(self):
+        text = (ROOT / "docs" / "OPERATING.md").read_text()
+        row = next(l for l in text.splitlines() if l.startswith("| **A** |"))
+        listed = row.split("(", 1)[1].split(")", 1)[0]
+        listed = listed.split(", plus ", 1)[0]
+        names = set()
+        for item in listed.split(", "):
+            names.update(n.rstrip("*") for n in item.split("/"))
+        self.assertIn("claim", names)
+        self.assertIn("claim", rt.TIER_A_BROKER)
+        self.assertIn("firstboot", names)
+        self.assertIn("firstboot", rt.TIER_A_BROKER)
+        # Every package OPERATING names as tier A is tier A in the tool
+        # (modem* covers modem and modemlink).
+        not_a = [n for n in sorted(names)
+                 if rt.tier_of("broker/" + n + "/x.go")[0] != "A"]
+        self.assertEqual(not_a, [])
+
+    # REQ: ARC-1 (SIM-core: the trusted core is the list in broker/core/core.txt)
+    def test_core_list_rates_core_and_wiring_a(self):
+        core, wiring, _ = rt.core_list()
+        self.assertIn("journal", core)
+        self.assertIn("cmd/agentosd", wiring)
+        cases = {
+            # core packages that no other rule makes A
+            "broker/childproc/childproc.go": "A",
+            "broker/meter/meter.go": "A",
+            "broker/guesterr/guesterr.go": "A",
+            # the list and its check decide what is core
+            "broker/core/core.txt": "A",
+            "broker/core/core_test.go": "A",
+            # a broker package in neither the core nor TIER_A_BROKER
+            "broker/attention/attention.go": "B",
+        }
+        for path, want in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(rt.tier_of(path)[0], want)
+        for pkg in sorted(core | wiring):
+            with self.subTest(pkg=pkg):
+                self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")
+                self.assertTrue((ROOT / "broker" / pkg).is_dir(), pkg)
+
+    # REQ: ARC-1 (SIM-core-allow-tier: a package an allow line lets call a
+    # core write path is itself a core write path, so it is tier A)
+    def test_allow_line_packages_are_a(self):
+        allowed = rt.core_list()[2]
+        # recalltool holds journal.Engine.Erase and grants.Gate.Withdraw/Authorize.
+        self.assertIn("recall", allowed)
+        self.assertIn("recalltool", allowed)
+        for path in ("broker/recall/recall.go", "broker/recalltool/tool.go"):
+            with self.subTest(path=path):
+                self.assertEqual(rt.tier_of(path), ("A", "core list: " + path.rsplit("/", 1)[0] + "/"))
+        for pkg in sorted(allowed):
+            with self.subTest(pkg=pkg):
+                self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")
+                self.assertTrue((ROOT / "broker" / pkg).is_dir(), pkg)
+
+    def test_allow_line_parsing_matches_core_test(self):
+        # Same grammar as broker/core/core_test.go: allow <pkg> <symbol> -- <reason>.
+        with tempfile.TemporaryDirectory() as d:
+            ok = pathlib.Path(d) / "ok.txt"
+            ok.write_text("core journal\nallow newpkg journal.Engine.Erase -- a reason\n")
+            self.assertEqual(rt.core_list(ok)[2], {"newpkg"})
+            for line in ("allow newpkg journal.Engine.Erase",
+                         "allow newpkg journal.Engine.Erase --",
+                         "allow newpkg journal.Engine.Erase because it must"):
+                bad = pathlib.Path(d) / "bad.txt"
+                bad.write_text("core journal\n" + line + "\n")
+                with self.subTest(line=line), self.assertRaises(SystemExit):
+                    rt.core_list(bad)
+
+    def test_core_list_unreadable_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = pathlib.Path(d) / "core.txt"
+            bad.write_text("core journal\nkernel vault\n")
+            with self.assertRaises(SystemExit):
+                rt.core_list(bad)
+            with self.assertRaises(SystemExit):
+                rt.core_list(pathlib.Path(d) / "missing.txt")
+
+    # CTRL-lane-gate (#1300; a work item with no SPEC row, so no REQ marker): CI runs
+    # `risk_tier.py --git BASE HEAD --pr-branch B --pr-title T` on every PR.
+    def test_lane_gate_holds_codex_prs_to_tier_c(self):
+        script = ROOT / "tools" / "risk_tier.py"
+        with tempfile.TemporaryDirectory() as d:
+            def git(*args):
+                subprocess.run(["git", "-C", d, *args], check=True, capture_output=True)
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "t@example.invalid")
+            git("config", "user.name", "t")
+            pathlib.Path(d, "README.md").write_text("x\n")
+            git("add", ".")
+            git("commit", "-qm", "base")
+
+            def change(branch, path):
+                git("checkout", "-q", "-b", branch, "main")
+                f = pathlib.Path(d, path)
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("change\n")
+                git("add", ".")
+                git("commit", "-qm", branch)
+
+            def gate(branch, title):
+                return subprocess.run(
+                    [sys.executable, "-I", str(script), "--git", "main", branch,
+                     "--pr-branch", branch, "--pr-title", title],
+                    cwd=d, capture_output=True, text=True)
+
+            change("pkg/codex-CX-b-x", "broker/notapkg/x.go")      # tier B
+            change("pkg/codex-CX-a-x", ".github/workflows/x.yml")  # tier A
+            change("pkg/codex-CX-c-x", "docs/x.md")                # tier C
+            change("claude/b-x", "broker/notapkg/y.go")            # tier B, peer branch
+            cases = [
+                ("pkg/codex-CX-b-x", "CX-b: x", 1),
+                ("pkg/codex-CX-a-x", "CX-a: x", 1),
+                ("pkg/codex-CX-c-x", "CX-c: x", 0),
+                ("claude/b-x", "P-1: x", 0),
+                # A CX- title puts the PR in the lane whatever its branch.
+                ("claude/b-x", "CX-b: x", 1),
+            ]
+            for branch, title, want in cases:
+                with self.subTest(branch=branch, title=title):
+                    r = gate(branch, title)
+                    self.assertEqual(r.returncode, want, r.stdout + r.stderr)
+                    if want:
+                        self.assertIn("codex lane is limited to tier C", r.stderr)
+
+    def test_lane_of(self):
+        self.assertEqual(rt.lane_of("pkg/codex-CX-name-case-1", ""), "codex")
+        self.assertEqual(rt.lane_of("", " CX-name-case: x"), "codex")
+        self.assertIsNone(rt.lane_of("pkg/ctrl-lane-gate-w7vxj3", "CTRL-lane-gate: x"))
+        self.assertIsNone(rt.lane_of("claude/x", "X: codex"))
+        self.assertIsNone(rt.lane_of(None, None))
+        self.assertTrue(rt.lane_gate("pkg/codex-x", "", "C")[0])
+        self.assertFalse(rt.lane_gate("pkg/codex-x", "", "B")[0])
+        self.assertTrue(rt.lane_gate("claude/x", "", "A")[0])
 
     def test_markdown_output(self):
         buf = io.StringIO()

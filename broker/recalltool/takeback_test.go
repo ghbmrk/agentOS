@@ -5,6 +5,7 @@ package recalltool
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -257,6 +258,104 @@ func TestCAP3HandledSeesARecordedTakeBack(t *testing.T) {
 	}
 }
 
+// actingMachines is fakeMachines with an agent that acts on its own
+// goroutine, as a guest does: it takes no lock of Reach's. act runs the
+// agent once, after the first plan is read, and waits for it, so the work
+// lands between the caller's Work and its TakeBack.
+type actingMachines struct {
+	*fakeMachines
+	mu      sync.Mutex
+	changes int
+	act     func()
+}
+
+func (m *actingMachines) Plan(lineage string, since time.Time) (Plan, error) {
+	m.mu.Lock()
+	p, act := m.fakeMachines.plan, m.act
+	p.Changes += m.changes
+	m.act = nil
+	m.mu.Unlock()
+	if act != nil {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			act()
+		}()
+		defer func() { <-done }()
+	}
+	return p, nil
+}
+
+// W3-forget-b2b f1 (Security 327-1): a take-back not approved re-checks
+// the work under the lock that serializes it, so work done between the
+// caller's check and the take-back is never rolled back unasked (CAP-3).
+func TestCAP3ATakeBackNotApprovedRechecksTheWork(t *testing.T) {
+	x, read := newReachRig(t)
+	if worked, ok := x.reach.Work("root", read); !ok || worked {
+		t.Fatalf("no work yet: %v %v", worked, ok)
+	}
+	x.j.submitted["late"] = read.Add(time.Second) // the agent acts
+	err := x.reach.TakeBack(context.Background(), "root", read, false)
+	if !errors.Is(err, ErrWorked) || len(x.vm.calls) != 0 || x.j.erased["late"] {
+		t.Fatalf("work since the check: %v, machines %v erased %v", err, x.vm.calls, x.j.erased)
+	}
+	if x.reach.Owed() || len(x.r.prov.Resets("root")) != 0 {
+		t.Fatal("a refused take-back left something owed")
+	}
+	// Approved, the owner settled the work: it goes ahead.
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 1 {
+		t.Fatalf("approved: %v machines %v", err, x.vm.calls)
+	}
+}
+
+// The same race with the agent on its own goroutine, run under -race: the
+// files it changes after the caller's check stop the take-back.
+func TestCAP3ATakeBackNotApprovedLosesNoConcurrentWork(t *testing.T) {
+	x, read := newReachRig(t)
+	m := &actingMachines{fakeMachines: x.vm}
+	m.act = func() {
+		m.mu.Lock()
+		m.changes++
+		m.mu.Unlock()
+	}
+	x.reach.Machines = m
+	if worked, ok := x.reach.Work("root", read); !ok || worked {
+		t.Fatalf("the check ran before the agent acted: %v %v", worked, ok)
+	}
+	if err := x.reach.TakeBack(context.Background(), "root", read, false); !errors.Is(err, ErrWorked) || len(x.vm.calls) != 0 {
+		t.Fatalf("concurrent work: %v machines %v", err, x.vm.calls)
+	}
+}
+
+// W3-forget-b2b e (#327 L3 r5 #3): an approved take-back that finds an
+// unfinished reset from the same time does not repeat it, and is marked,
+// so once Retry has finished the reset a later boot still sees it handled
+// and takes nothing back again.
+func TestCAP3AnApprovedTakeBackOnAnUnfinishedResetIsMarked(t *testing.T) {
+	x, read := newReachRig(t)
+	x.j.submitted["late"] = read.Add(time.Second)
+	if err := x.r.prov.MarkReset("root", Reset{Since: read, At: x.clock, Until: x.clock}); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 0 {
+		t.Fatalf("take-back on the reset: %v machines %v", err, x.vm.calls)
+	}
+	if err := x.reach.Retry(context.Background()); err != nil || len(x.r.prov.Resets("root")) != 0 {
+		t.Fatalf("Retry: %v resets %v", err, x.r.prov.Resets("root"))
+	}
+	again, err := OpenProvenance(x.r.prst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.reach.Prov = again
+	if handled, ok := x.reach.Handled(read); !ok || !handled {
+		t.Fatalf("after a restart: handled %v %v", handled, ok)
+	}
+	if err := x.reach.TakeBack(context.Background(), "root", read, true); err != nil || len(x.vm.calls) != 0 || x.reach.Owed() {
+		t.Fatalf("again after a restart: %v machines %v owed %v", err, x.vm.calls, x.reach.Owed())
+	}
+}
+
 // failOnly fails the appends whose 1-based numbers are in fail (a write
 // lost to a transient error), and accepts the rest.
 type failOnly struct {
@@ -340,8 +439,13 @@ func TestRCH1TakeBackStateIsDoneOnlyOnceItsReachIsFinished(t *testing.T) {
 // is: its state is what agentBackWithoutAsking's done text reads (RCH-5).
 func TestRCH1AnUnaskedTakeBackIsDoneOnlyOnceFinished(t *testing.T) {
 	x, read := newReachRig(t)
-	x.j.submitted["late"] = read.Add(time.Second)
-	x.j.inFlight["late"] = true
+	// The agent's work lands while the machines go back, after the take-back's
+	// own re-check (ASSUMPTIONS W13), so the take-back stays unasked and the
+	// reach waits on the in-flight intent.
+	x.vm.during = func() {
+		x.j.submitted["late"] = read.Add(time.Second)
+		x.j.inFlight["late"] = true
+	}
 	if err := x.reach.TakeBack(context.Background(), "root", read, false); err != nil {
 		t.Fatal(err)
 	}
