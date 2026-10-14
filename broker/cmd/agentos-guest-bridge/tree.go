@@ -63,21 +63,66 @@ func syncTree(ctx context.Context, broker *http.Client, dir string, every time.D
 // syncOnce fetches the tree unless it is still version, and writes it.
 // It returns the version now held.
 func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (string, error) {
-	args, _ := json.Marshal(map[string]string{"version": version})
-	body, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-		"params": map[string]any{"name": "managed_tree", "arguments": json.RawMessage(args)},
-	})
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://broker.localhost/mcp", bytes.NewReader(body))
+	text, err := callTool(ctx, broker, "managed_tree", map[string]string{"version": version})
 	if err != nil {
 		return version, err
+	}
+	var ans treeAnswer
+	if err := json.Unmarshal([]byte(text), &ans); err != nil {
+		return version, fmt.Errorf("broker answer: %v", err)
+	}
+	if !ans.Unchanged && ans.Version == "" {
+		// The broker folds any tool result over 8 KiB into a stand-in
+		// (package fold), which unmarshals here as a tree with no files.
+		// Read the full answer back; anything else without a version is
+		// not a tree, and mirroring it would delete the whole tree.
+		var in struct {
+			Folded bool   `json:"folded"`
+			ID     string `json:"id"`
+		}
+		if json.Unmarshal([]byte(text), &in) == nil && in.Folded && in.ID != "" {
+			if text, err = callTool(ctx, broker, "result_read", map[string]string{"id": in.ID}); err != nil {
+				return version, fmt.Errorf("folded tree: %v", err)
+			}
+			ans = treeAnswer{}
+			if err := json.Unmarshal([]byte(text), &ans); err != nil {
+				return version, fmt.Errorf("folded tree: %v", err)
+			}
+		}
+		if ans.Unchanged || ans.Version == "" {
+			return version, errors.New("broker answer: no tree version; nothing changed")
+		}
+	}
+	if ans.Unchanged {
+		if ans.Version != version {
+			// Not ours: an unchanged answer never wipes the tree.
+			return version, errors.New("broker answer: unchanged, but not the version held")
+		}
+		return version, nil
+	}
+	if err := mirror(dir, ans.Files); err != nil {
+		return version, err
+	}
+	return ans.Version, nil
+}
+
+// callTool calls the broker tool name and returns its result's text.
+func callTool(ctx context.Context, broker *http.Client, name string, args any) (string, error) {
+	a, _ := json.Marshal(args)
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": name, "arguments": json.RawMessage(a)},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://broker.localhost/mcp", bytes.NewReader(body))
+	if err != nil {
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := broker.Do(req)
 	if err != nil {
-		return version, err
+		return "", err
 	}
 	defer resp.Body.Close()
 	var out struct {
@@ -92,31 +137,17 @@ func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (st
 		} `json:"error"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxTreeAnswer)).Decode(&out); err != nil {
-		return version, fmt.Errorf("broker answer: %v", err)
+		return "", fmt.Errorf("broker answer: %v", err)
 	}
 	switch {
 	case out.Error != nil:
-		return version, errors.New(out.Error.Message)
+		return "", errors.New(out.Error.Message)
 	case out.Result == nil || len(out.Result.Content) == 0:
-		return version, errors.New("empty broker answer")
+		return "", errors.New("empty broker answer")
 	case out.Result.IsError:
-		return version, errors.New(out.Result.Content[0].Text)
+		return "", errors.New(out.Result.Content[0].Text)
 	}
-	var ans treeAnswer
-	if err := json.Unmarshal([]byte(out.Result.Content[0].Text), &ans); err != nil {
-		return version, fmt.Errorf("broker answer: %v", err)
-	}
-	if ans.Unchanged {
-		if ans.Version != version {
-			// Not ours: an unchanged answer never wipes the tree.
-			return version, errors.New("broker answer: unchanged, but not the version held")
-		}
-		return version, nil
-	}
-	if err := mirror(dir, ans.Files); err != nil {
-		return version, err
-	}
-	return ans.Version, nil
+	return out.Result.Content[0].Text, nil
 }
 
 // mirror makes dir's tree namespaces hold exactly files. Every path is
