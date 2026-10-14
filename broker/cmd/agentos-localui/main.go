@@ -107,7 +107,7 @@ func station(netClass, iface string) func() bool {
 // claim screen (nil on the download route), the card step, and the
 // report of its confirm before agentosd's finish.
 func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.CodesVoid) (localui.Config, firstboot.Route, error) {
-	fb, err := firstboot.Begin(box)
+	fb, err := firstboot.Begin(withCardNet(cfg.Hooks, box))
 	if err != nil {
 		return cfg, "", err
 	}
@@ -119,6 +119,15 @@ func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.Co
 		cfg.Hooks = localui.CardFinish{AgentosdSetup: h, Card: fb.Card}
 	}
 	return cfg, fb.Route, nil
+}
+
+// withCardNet has the card step report the card's network to agentosd
+// before the confirm latches, for agentos-ap to serve at it (#1185).
+func withCardNet(hooks localui.Hooks, box firstboot.BoxConfig) firstboot.BoxConfig {
+	if h, ok := hooks.(localui.AgentosdSetup); ok && box.Card.Provision != nil {
+		box.Card.Provision = localui.ServeCardNet(box.Card.Provision, h)
+	}
+	return box
 }
 
 // agentosdWait bounds the wait for agentosd's socket; past it the page

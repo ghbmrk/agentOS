@@ -21,7 +21,7 @@ var agentNamespaces = []string{"procedures", "skills", "context"}
 // toolTree is the broker tool through which a guest fetches the live
 // managed tree (W4). It is a broker tool over MCP (ARC-6 (b)), not a new
 // service.
-const toolTree = "managed_tree"
+const toolTree = guest.TreeTool
 
 // maxTreeSend bounds one managed_tree answer. A tree past it is not sent
 // at all, so a guest never runs half of one.

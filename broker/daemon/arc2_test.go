@@ -35,6 +35,10 @@ var controlPath = map[string][]string{
 	"owner":         {"boxname", "control", "journal", "modem"},
 	"modem":         {},
 	"boxname":       {}, // CH-21 name check, for NAME
+	// The card's Wi-Fi network file (#1185): agentosd writes what the page
+	// reports for agentos-ap to serve; standard library only, so agentosd
+	// still links neither card nor claim.
+	"apnet": {},
 	// The modem bridge's contract and agentosd's end of it (P2-3w): types
 	// and an in-process queue; the bridge's client is bridgeclient.
 	"bridgeproto": {},
@@ -100,7 +104,7 @@ var controlPath = map[string][]string{
 	// mail imports golang.org/x/text, so like clock it has no entry below
 	// and is held by TestAgentosdLinksNoInference, which holds mailsock to
 	// the unix dial modelroute makes.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control", "mail", "mail/mailsock", "verb", "netjoin"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
