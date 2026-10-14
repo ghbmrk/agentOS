@@ -385,15 +385,43 @@ func TestOSS10wReconcileAfterARestart(t *testing.T) {
 		t.Fatalf("alerts %q", r.alerts)
 	}
 	digest, _, _ := grants.FollowOf(in.ID)
-	for _, other := range []journal.Intent{
-		grants.FollowIntent("a2", "Other Name", digest),
-		grants.FollowIntent("a3", "Acme Fork", r.describe(rootOf(t, newKey(t), newKey(t)))),
-		grants.FollowIntent("a4", "", r.describe(r.shipped)),
+	for _, other := range []struct {
+		in   journal.Intent
+		want journal.Result
+	}{
+		// The same root under another name, or another root under the
+		// same name (the root may have rotated since): unknown.
+		{grants.FollowIntent("a2", "Other Name", digest), journal.ResultUnknown},
+		{grants.FollowIntent("a3", "Acme Fork", r.describe(rootOf(t, newKey(t), newKey(t)))), journal.ResultUnknown},
+		// Neither the root nor the source: the switch back never landed.
+		{grants.FollowIntent("a4", "", r.describe(r.shipped)), journal.ResultNotApplied},
 	} {
 		r.alerts = nil
-		if out := fresh.Reconcile(context.Background(), other, 2); out.Result != journal.ResultUnknown || len(r.alerts) != 0 {
-			t.Fatalf("%s: %+v %q", other.ID, out, r.alerts)
+		if out := fresh.Reconcile(context.Background(), other.in, 2); out.Result != other.want || len(r.alerts) != 0 {
+			t.Fatalf("%s: %+v %q", other.in.ID, out, r.alerts)
 		}
+	}
+}
+
+// REQ: OP-4, G1
+// #1372 (L3/UX R1 on #1325): power pulled before the switch was written
+// leaves the old root and the old source. Reconcile answers not applied,
+// so the broker account's fence lifts instead of holding every setting
+// for good; nothing runs and the owner is not alerted. A re-dispatch finds
+// nothing held (the held root lives in memory) and is not applied either.
+func TestOSS10wReconcileBeforeTheSwitchIsNotApplied(t *testing.T) {
+	r := newRig(t)
+	in := grants.FollowIntent("a1", "Acme Fork", r.describe(r.fork))
+	fresh := r.with(r.store)
+	out := fresh.Reconcile(context.Background(), in, 1)
+	if out.Result != journal.ResultNotApplied || len(r.alerts) != 0 || !r.trusts(r.shipped) {
+		t.Fatalf("reconcile %+v %q", out, r.alerts)
+	}
+	if src, _ := r.store.Following(); src != (update.Followed{}) {
+		t.Fatalf("source %+v", src)
+	}
+	if out := fresh.Execute(context.Background(), in, 2); out.Result != journal.ResultNotApplied || !r.trusts(r.shipped) || len(r.alerts) != 0 {
+		t.Fatalf("re-dispatch %+v", out)
 	}
 }
 

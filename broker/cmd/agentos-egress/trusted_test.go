@@ -121,7 +121,7 @@ func (r *pcRig) start(t *testing.T, pc *swtpm.TPM) {
 			return vault.OpenSealed(r.vault, r.keys, cardFactor{})
 		},
 		build: func(v *vault.Vault) (*egress.Proxy, error) {
-			return newProxy(v, map[string][]string{"agent": {"openai"}}, nil)
+			return newProxy(v, map[string][]string{"agent": {"openai"}}, nil, nil)
 		},
 		host:      host,
 		ttl:       15 * time.Minute,

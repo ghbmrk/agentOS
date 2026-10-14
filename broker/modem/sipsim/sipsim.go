@@ -467,12 +467,25 @@ func (c *Call) Hangup(ctx context.Context) error { return c.d.Bye(ctx) }
 
 // Answer answers with SRTP and the payload type pt, decrypting what the
 // line sends into Heard.
-func (c *Call) Answer(pt int) error { return c.answer(pt, true) }
+func (c *Call) Answer(pt int) error { return c.answer(pt, true, Answer{}) }
 
 // AnswerPlain answers without SRTP, as a provider without it would.
-func (c *Call) AnswerPlain() error { return c.answer(sipline.PCMU, false) }
+func (c *Call) AnswerPlain() error { return c.answer(sipline.PCMU, false, Answer{}) }
 
-func (c *Call) answer(pt int, secure bool) error {
+// Answer is what a hostile provider can put in an SRTP answer.
+type Answer struct {
+	// Media is the c= address the audio is aimed at (default 127.0.0.1).
+	Media string
+	// Headers are extra "Name: value" header lines on the 200 OK, such as
+	// a Contact or Record-Route naming another transport.
+	Headers []string
+}
+
+// AnswerWith answers with SRTP as Answer does, under a's address and
+// headers.
+func (c *Call) AnswerWith(pt int, a Answer) error { return c.answer(pt, true, a) }
+
+func (c *Call) answer(pt int, secure bool, a Answer) error {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		return err
@@ -481,7 +494,14 @@ func (c *Call) answer(pt int, secure bool) error {
 	c.media = conn
 	c.mu.Unlock()
 	port := conn.LocalAddr().(*net.UDPAddr).Port
-	sdp := fmt.Sprintf("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n")
+	media, family := "127.0.0.1", "IP4"
+	if a.Media != "" {
+		media = a.Media
+		if strings.Contains(media, ":") {
+			family = "IP6"
+		}
+	}
+	sdp := fmt.Sprintf("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN %s %s\r\nt=0 0\r\n", family, media)
 	if secure {
 		k := make([]byte, 30)
 		_, _ = rand.Read(k)
@@ -522,7 +542,12 @@ func (c *Call) answer(pt int, secure bool) error {
 			c.mu.Unlock()
 		}
 	}()
-	if err := c.d.RespondSDP([]byte(sdp)); err != nil {
+	res := sip.NewSDPResponseFromRequest(c.d.InviteRequest, []byte(sdp))
+	for _, h := range a.Headers {
+		name, value, _ := strings.Cut(h, ":")
+		res.AppendHeader(sip.NewHeader(strings.TrimSpace(name), strings.TrimSpace(value)))
+	}
+	if err := c.d.WriteResponse(res); err != nil {
 		select {
 		case <-c.Done():
 			// The line hung up at once (as it does on an answer it
@@ -656,8 +681,12 @@ func (p *Provider) RingLine(ctx context.Context, from, user string, o Ring) (*Li
 		_, _ = rand.Read(key)
 		crypto = fmt.Sprintf("a=crypto:%s %s inline:%s\r\n", o.Tag, sipline.Suite, base64.StdEncoding.EncodeToString(key))
 	}
-	body := fmt.Sprintf("v=0\r\no=- 0 0 IN IP4 %s\r\ns=-\r\nc=IN IP4 %s\r\nt=0 0\r\nm=audio %d %s %s\r\n%s",
-		o.Addr, o.Addr, conn.LocalAddr().(*net.UDPAddr).Port, proto, strings.Join(pts, " "), crypto)
+	family := "IP4"
+	if strings.Contains(o.Addr, ":") {
+		family = "IP6"
+	}
+	body := fmt.Sprintf("v=0\r\no=- 0 0 IN %s %s\r\ns=-\r\nc=IN %s %s\r\nt=0 0\r\nm=audio %d %s %s\r\n%s",
+		family, o.Addr, family, o.Addr, conn.LocalAddr().(*net.UDPAddr).Port, proto, strings.Join(pts, " "), crypto)
 	contact := sip.ContactHeader{Address: sip.Uri{Scheme: "sip", User: from, Host: p.Domain}}
 	req.AppendHeader(&contact)
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))

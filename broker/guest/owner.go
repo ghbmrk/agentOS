@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,13 @@ import (
 // a preemption, a rebuild, a rollback, or a broker restart), never just
 // because the guest is slow (G5). Unanswered messages are kept on disk
 // (Config.InboxPath), so a broker restart does not drop them.
+//
+// A reply is on disk before the guest hears 204: the message leaves the
+// inbox in the same write that records the reply (DEL-1a). With
+// Config.Replies set the reply waits in the store's outbox until its
+// consumer calls ReplyDone, so a crash before it is handed on loses
+// nothing (DEL-1b). A reply is applied once: the same reply again is a
+// 204 that changes nothing, a different one a 409 (DEL-1c).
 
 const (
 	inboxSize    = 32
@@ -40,6 +48,23 @@ type Reply struct {
 	ID      string `json:"id"`
 	Text    string `json:"text"`
 	Summary string `json:"summary,omitempty"`
+}
+
+// PendingReply is a reply the broker acknowledged and has not yet handed
+// on: Config.Replies' consumer reads them with PendingReplies, oldest
+// first. Private is false only for a machine labelled public when the
+// reply arrived.
+type PendingReply struct {
+	Machine string    `json:"machine"`
+	Private bool      `json:"private"`
+	At      time.Time `json:"at"`
+	Reply
+	Hash string `json:"hash"`
+}
+
+func replyHash(r Reply) string {
+	h := sha256.Sum256([]byte(r.Text + "\x00" + r.Summary))
+	return hex.EncodeToString(h[:])
 }
 
 // MaxSummary bounds a reply's summary.
@@ -74,8 +99,18 @@ type inbox struct {
 
 func newInbox(machine string, st *store) *inbox {
 	b := &inbox{machine: machine, store: st, wake: make(chan struct{})}
+	stale := false
 	for _, m := range st.load(machine) {
+		// A message whose reply is already recorded is answered, whatever
+		// the inbox says: it is not handed out again.
+		if _, ok := st.answered(machine, m.ID); ok {
+			stale = true
+			continue
+		}
 		b.msgs = append(b.msgs, &ownerMsg{ID: m.ID, Text: m.Text})
+	}
+	if stale {
+		_ = b.persist(b.msgs)
 	}
 	b.stored = len(b.msgs) > 0
 	return b
@@ -152,20 +187,34 @@ func (b *inbox) handed() []string {
 	return ids
 }
 
-func (b *inbox) answer(id string) bool {
+// answer records rep as the reply to its message and returns the HTTP
+// status for the guest, and whether the reply is new. keep holds it in
+// the outbox for a consumer.
+func (b *inbox) answer(rep PendingReply, keep bool) (int, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for i, m := range b.msgs {
-		if m.ID == id {
-			next := append(append([]*ownerMsg(nil), b.msgs[:i]...), b.msgs[i+1:]...)
-			// The answer goes out even if the store cannot be written;
-			// the message may then be handed out again after a restart.
-			_ = b.persist(next)
-			b.msgs = next
-			return true
+	if h, ok := b.store.answered(b.machine, rep.ID); ok {
+		if h == rep.Hash {
+			return http.StatusNoContent, false, nil
 		}
+		return http.StatusConflict, false, nil
 	}
-	return false
+	for i, m := range b.msgs {
+		if m.ID != rep.ID {
+			continue
+		}
+		next := append(append([]*ownerMsg(nil), b.msgs[:i]...), b.msgs[i+1:]...)
+		out := make([]storedMsg, len(next))
+		for j, m := range next {
+			out[j] = storedMsg{ID: m.ID, Text: m.Text}
+		}
+		if err := b.store.accept(b.machine, out, rep, keep); err != nil {
+			return http.StatusServiceUnavailable, false, err
+		}
+		b.msgs = next
+		return http.StatusNoContent, true, nil
+	}
+	return http.StatusNotFound, false, nil
 }
 
 // requeue hands every unanswered message out again: the machine restarted,
@@ -286,10 +335,6 @@ func (p *Plane) ownerReply(m *machine, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad reply", http.StatusBadRequest)
 		return
 	}
-	if !m.box.answer(rep.ID) {
-		http.Error(w, "no such pending message", http.StatusNotFound)
-		return
-	}
 	rep.Summary = strings.Join(strings.Fields(rep.Summary), " ")
 	if len(rep.Summary) > MaxSummary {
 		cut := MaxSummary
@@ -298,15 +343,55 @@ func (p *Plane) ownerReply(m *machine, w http.ResponseWriter, r *http.Request) {
 		}
 		rep.Summary = rep.Summary[:cut]
 	}
-	if p.cfg.OwnerReply != nil {
-		p.cfg.OwnerReply(m.id, rep)
+	label := ""
+	if p.cfg.Label != nil {
+		label = p.cfg.Label(m.id)
+	}
+	pr := PendingReply{Machine: m.id, Private: label != "public", At: p.cfg.Now(), Reply: rep, Hash: replyHash(rep)}
+	keep := p.cfg.Replies != nil
+	code, fresh, err := m.box.answer(pr, keep)
+	switch {
+	case errors.Is(err, errOutboxFull):
+		p.cfg.Logf("guest %s: reply outbox full (%d waiting); the guest will retry", m.id, MaxOutbox)
+		http.Error(w, "replies waiting; retry", code)
+		return
+	case err != nil:
+		p.cfg.Logf("guest %s: inbox store: %v", m.id, err)
+		http.Error(w, "reply not stored; retry", code)
+		return
+	case code == http.StatusConflict:
+		http.Error(w, "message already answered differently", code)
+		return
+	case code == http.StatusNotFound:
+		http.Error(w, "no such pending message", code)
+		return
+	}
+	if fresh {
+		if keep {
+			p.cfg.Replies()
+		} else if p.cfg.OwnerReply != nil {
+			p.cfg.OwnerReply(m.id, rep)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// PendingReplies returns the replies acknowledged and not yet handed on,
+// oldest first (DEL-1b). Only Config.Replies' consumer leaves any.
+func (p *Plane) PendingReplies() []PendingReply { return p.store.pending() }
+
+// ReplyDone removes machine's reply to message id from the outbox: its
+// consumer has handed it on. An error means the removal may not survive a
+// restart, so the reply may be handed on again.
+func (p *Plane) ReplyDone(machine, id string) error { return p.store.retire(machine, id) }
+
+// RepliesWaiting reports that a guest's reply was refused because the
+// outbox is full, until the consumer next removes one (DEL-1e).
+func (p *Plane) RepliesWaiting() bool { return p.store.waiting() }
+
 // OwnerAgent delivers the owner's task chat to one machine's guest: the
 // control handler's Agent (control.Agent). The guest's answer comes back
-// through Config.OwnerReply.
+// through Config.Replies or Config.OwnerReply.
 type OwnerAgent struct {
 	Plane   *Plane
 	Machine string

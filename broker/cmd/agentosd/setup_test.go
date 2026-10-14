@@ -10,13 +10,15 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/bridgeclient"
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 )
 
-// REQ: ARC-2, CH-10, ONB-3, CRED-8
+// REQ: ARC-2, CH-10, ONB-3, CRED-8, HW-1, A1
 
 // A synthetic enrollment link: not a seed anyone holds.
 const setupCanary = "otpauth://totp/AgentOS:AgentOS?secret=CANARYCANARYCANARY22&issuer=AgentOS"
@@ -56,7 +58,21 @@ func (v *setupVault) SealEnroll() error {
 	return nil
 }
 
+// newSetupMode is a setup mode whose Owner Card was confirmed on an
+// earlier start, so only approval codes stand before finish
+// (setupcard_test.go covers the card).
 func newSetupMode(t *testing.T) setupMode {
+	t.Helper()
+	m := newBareSetupMode(t)
+	latch := &change.MemStore{}
+	if err := latch.Save([]byte(`{"card_confirmed":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	m.withCard(&cardFixture{vault: &cardVault{dir: filepath.Dir(m.OwnerState)}, steps: make(chan *firstboot.CardStep, 1)}, latch)
+	return m
+}
+
+func newBareSetupMode(t *testing.T) setupMode {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "as")
 	if err != nil {
@@ -66,7 +82,9 @@ func newSetupMode(t *testing.T) setupMode {
 	gid := os.Getgid()
 	return setupMode{Dir: filepath.Join(dir, "run"), Page: &daemon.PageSocket{UID: os.Getuid(), GID: &gid},
 		Record: localsrv.FileRecord{Path: filepath.Join(dir, "setup.json")}, OwnerState: filepath.Join(dir, "owner.json"),
-		Enroll: &setupVault{}, Progress: setupProgress}
+		Enroll: &setupVault{}, Progress: func() localapi.SetupProgress {
+			return localapi.SetupProgress{Phase: "ready", Updated: true, Online: true}
+		}}
 }
 
 // Security L6: agentosd serves setup's ops on localui.sock until finish is
@@ -167,6 +185,7 @@ func TestTheVaultsEnrollRefusalsMap(t *testing.T) {
 		modelroute.ErrEnrolled:                                 localsrv.EnrollClosed,
 		modelroute.ErrEnrollNotOpen:                            localsrv.EnrollNotOpen,
 		modelroute.ErrNoEnrollment:                             localsrv.EnrollNone,
+		modelroute.ErrCardRequired:                             localsrv.EnrollCardRequired,
 		&modelroute.VerifyError{Kind: modelroute.VerifyPaused}: localsrv.EnrollPaused,
 	} {
 		if got := enrollErr(in); !errors.Is(got, want) {

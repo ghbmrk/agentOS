@@ -16,6 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/localui"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -99,7 +100,7 @@ func reachableModel(t *testing.T) *modelProbe {
 	return newModelProbe(serveFakeVault(t, filepath.Join(shortDir(t), "m.sock"), modelOn).sock)
 }
 
-var modelOn = modelroute.ModelState{Granted: true, Open: true}
+var modelOn = modelroute.ModelState{Granted: true, Open: true, Private: true}
 
 // fakeVault stands in for the vault process on its model socket: it
 // answers the broker's state probe with st. Stopping it leaves the socket
@@ -622,6 +623,8 @@ func TestModelLinesFollowTheVaultProcess(t *testing.T) {
 	step("no grant, locked", modelNoGrant)
 	f.set(modelroute.ModelState{Granted: true})
 	step("granted, locked", modelLocked)
+	f.set(modelroute.ModelState{Granted: true, Open: true})
+	step("granted, open, no provider may see private data", modelNoPrivate)
 	f.set(modelOn)
 	step("granted, open", "")
 	f.stop()
@@ -634,14 +637,37 @@ func TestModelLinesFollowTheVaultProcess(t *testing.T) {
 	step("grant withdrawn", modelNoGrant)
 }
 
+// REQ: CAP-9, OP-9
+// #1266 (P-2 on #1280): with the vault open and a provider granted but
+// none allowed private data, STATUS says the agent cannot do most tasks
+// and names where the owner allows one: the local page's AI providers
+// page, served past setup.
+func TestModelNoPrivateNamesTheLocalPage(t *testing.T) {
+	if got := modelLine(modelroute.ModelState{Reachable: true, Granted: true, Open: true}); got != modelNoPrivate {
+		t.Fatalf("got %q", got)
+	}
+	if got := modelLine(modelroute.ModelState{Reachable: true, Granted: true, Open: true, Private: true}); got != "" {
+		t.Fatalf("allowed: %q", got)
+	}
+	// A locked vault says so first: unlocking comes before allowing.
+	if got := modelLine(modelroute.ModelState{Reachable: true, Granted: true}); got != modelLocked {
+		t.Fatalf("locked: %q", got)
+	}
+	if !strings.Contains(modelNoPrivate, "private data") || !strings.HasSuffix(modelNoPrivate, "allow one on the local page.") {
+		t.Fatalf("line: %q", modelNoPrivate)
+	}
+}
+
 // REQ: OP-9, A11
 // OP-9 (UX blocker on #566, a CH-12 repeat): the no-grant line's fix
-// names only a step the box serves. agentosd does not serve the local
-// page's API-key step yet (localui.AgentosdSetup.ConnectAPIKey), so the
-// line names no page and says a later box version adds it. When the step
-// is served this fails, and the line must name where the owner adds one.
+// names only a step the box serves. Since P2-2w c4e the page's API-key
+// step is served during setup only; the line shows on a box past setup,
+// whose agentosd serves no setup op, so the line names no page and says a
+// later box version adds it. When agentosd serves the step past setup
+// this fails, and the line must name where the owner adds one.
 func TestModelNoGrantNamesAServedStep(t *testing.T) {
-	served := localui.AgentosdSetup{}.ConnectAPIKey("openai", "sk-synthetic-not-a-key") == nil
+	pastSetup := localui.AgentosdSetup{Owner: localui.InProcess(localsrv.New(localsrv.Config{}).Ops())}
+	served := pastSetup.ConnectAPIKey("openai", "sk-synthetic-not-a-key") == nil
 	_, fix, _ := strings.Cut(modelNoGrant, "; ")
 	switch {
 	case !served && (strings.Contains(fix, "page") || !strings.Contains(fix, "later box version")):

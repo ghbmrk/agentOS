@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -35,7 +36,10 @@ type Owner interface {
 	// (owner.ErrLocked), so a lock is checked where RESUME commits.
 	LocalSignIn(code string) (until time.Time, locks uint64, err error)
 	LocalStop(ctx context.Context) error
-	LocalResume(locks uint64) (string, error)
+	// StopGen is read when a RESUME arrives; LocalResume refuses to lift
+	// a STOP counted after it (CH-2).
+	StopGen() int64
+	LocalResume(locks uint64, gen int64) (string, error)
 	LocalRequests() []owner.LocalRequest
 	LocalAnswer(id, sum string, approve bool, code string) (string, error)
 	LocalWaiting() string
@@ -80,6 +84,9 @@ type Config struct {
 	// op.
 	ForgetTasks func(unlocked bool) localapi.ForgetTasks
 	Forget      func(ctx context.Context, goal string, unlocked bool) string
+	// RotateAPNet writes a rotated card's Wi-Fi network for agentos-ap
+	// (#1191), given only a network a card prints. Nil refuses the op.
+	RotateAPNet func(apnet.Network) error
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -144,6 +151,8 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpSIM:         s.adoptSIM,
 		localapi.OpForgetTasks: s.forgetTasks,
 		localapi.OpForget:      s.forget,
+		// A rotated Wi-Fi password needs a session (#1191).
+		localapi.OpRotateAPNet: s.rotateAPNet,
 	}
 }
 
@@ -275,6 +284,7 @@ func (s *Server) line(context.Context) (any, error) {
 }
 
 func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	gen := s.cfg.Owner.StopGen()
 	var in localapi.Resume
 	err := decode(args, &in)
 	ses, ok := s.live(in.Token)
@@ -307,7 +317,7 @@ func (s *Server) resume(_ context.Context, _ sockets.Peer, args json.RawMessage)
 		}
 		s.refresh(in.Token)
 	}
-	t, err := s.cfg.Owner.LocalResume(ses.locks)
+	t, err := s.cfg.Owner.LocalResume(ses.locks, gen)
 	switch {
 	case errors.Is(err, owner.ErrLocked):
 		s.drop(in.Token)
@@ -537,6 +547,28 @@ func (s *Server) forget(ctx context.Context, _ sockets.Peer, args json.RawMessag
 		return nil, errFailed
 	}
 	return localapi.Text{Text: s.cfg.Forget(ctx, in.ID, st.Unlocked)}, nil
+}
+
+// rotateAPNet hands a committed card rotation's Wi-Fi network to
+// agentos-ap's file (REC-4, #1191). The page holds the network only
+// because it showed the new card; agentosd takes only a card's shape
+// (apnet.Validate), and the hook keeps the name the box already serves.
+// The arguments carry the access point's password (CRED-1): nothing here
+// logs them.
+func (s *Server) rotateAPNet(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.RotateAPNet
+	err := decode(args, &in)
+	if _, ok := s.live(in.Token); !ok {
+		return nil, errUnauthorized
+	}
+	n := apnet.Network{SSID: in.SSID, Password: in.Password}
+	if err != nil || n.Validate() != nil {
+		return nil, errBadArgs
+	}
+	if s.cfg.RotateAPNet == nil || s.cfg.RotateAPNet(n) != nil {
+		return nil, errFailed
+	}
+	return struct{}{}, nil
 }
 
 func lowerHex(v string, n int) bool {

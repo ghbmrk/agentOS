@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -108,12 +109,13 @@ func (r *fastRig) build(t *testing.T) {
 			return vault.Open(path, key)
 		},
 		build: func(v *vault.Vault) (*egress.Proxy, error) {
-			return newProxy(v, map[string][]string{"agent": {"openai"}}, nil)
+			return newProxy(v, map[string][]string{"agent": {"openai"}}, nil, nil)
 		},
 		ttl:       15 * time.Minute,
 		now:       r.clk.now,
 		notify:    func(s string) { r.notes = append(r.notes, s) },
 		statePath: r.state,
+		keyCheck:  providerAnswers(http.StatusOK),
 	})
 	if err != nil {
 		t.Fatal(err)

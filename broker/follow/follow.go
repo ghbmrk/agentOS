@@ -304,7 +304,11 @@ func (x *Executor) Execute(ctx context.Context, in journal.Intent, _ int) journa
 // Reconcile reports a switch done when the box trusts the root the intent
 // approved, under the intent's name, and alerts again (at least once). It
 // reads the box's own trusted root, not the held one: after a restart
-// nothing is held.
+// nothing is held. TrustedRoot first completes or forgets a switch a crash
+// interrupted, so when the box trusts neither the intent's root nor its
+// source, the switch did not happen: the fence on the broker account holds
+// every other switch, and a root rotation keeps the source (#1372). When
+// only one of them matches, it cannot tell, and answers unknown.
 func (x *Executor) Reconcile(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
 	digest, name, why := parse(in)
 	if why != "" {
@@ -319,7 +323,13 @@ func (x *Executor) Reconcile(ctx context.Context, in journal.Intent, _ int) jour
 		return journal.Outcome{Result: journal.ResultUnknown, Evidence: err.Error()}
 	}
 	src, err := x.cfg.Store.Following()
-	if err != nil || d != digest || src.Name != name {
+	if err != nil {
+		return journal.Outcome{Result: journal.ResultUnknown, Evidence: err.Error()}
+	}
+	if d != digest && src.Name != name {
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "I trust neither that root nor that source now"}
+	}
+	if d != digest || src.Name != name {
 		return journal.Outcome{Result: journal.ResultUnknown, Evidence: "I do not trust that root under that name"}
 	}
 	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "now following root " + digest + x.alert(ctx, name, x.latest(ctx))}
