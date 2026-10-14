@@ -282,12 +282,19 @@ type postInside struct {
 	r      *rig
 	inKey  url.Values
 	inDone url.Values
+	path   string // inKey's route; "" is /setup/ai-key
+	inErr  string // the setup error inKey's post left
 }
 
 func (h *postInside) ConnectAPIKey(id, key string) error {
 	if f := h.inKey; f != nil {
 		h.inKey = nil
-		h.r.post("/setup/ai-key", f)
+		path := h.path
+		if path == "" {
+			path = "/setup/ai-key"
+		}
+		h.r.post(path, f)
+		h.inErr = h.r.setupErr()
 	}
 	return h.fakeHooks.ConnectAPIKey(id, key)
 }
@@ -392,5 +399,86 @@ func TestAIStepNeedsTheHostStep(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// #1545 (#1534 R-L1): the retry route and the device route take their
+// turn too. Each posts while an ai-key post for the same provider is in
+// flight; the second post is refused and records nothing, so it cannot
+// record an answer the first one then overrides.
+func TestRetryAndDevicePostsWaitTheirTurn(t *testing.T) {
+	t.Run("ai-private", func(t *testing.T) {
+		r := newRig(t)
+		h := &postInside{fakeHooks: r.hooks, r: r, path: "/setup/ai-private",
+			inKey: url.Values{"provider": {"anthropic"}}}
+		r.via = h
+		r.srv = r.open(&MemStore{})
+		r.runSetupToAI()
+		r.failPrivate(true) // hold anthropic, so the retry route is open
+		r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}})
+		r.failPrivate(false)
+		n := r.hooks.privates
+		r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}, "private": {"1"}})
+		if r.hooks.privates != n+1 || !r.hooks.private["anthropic"] {
+			t.Fatalf("the retry during a key post went through: %d answers", r.hooks.privates-n)
+		}
+		if !strings.Contains(h.inErr, "still saving") {
+			t.Fatalf("the retry was not refused: %q", h.inErr)
+		}
+	})
+	t.Run("ai-device", func(t *testing.T) {
+		r := newRig(t)
+		h := &postInside{fakeHooks: r.hooks, r: r, path: "/setup/ai-device",
+			inKey: url.Values{"provider": {"anthropic"}, "private": {"1"}}}
+		r.via = h
+		r.srv = r.open(&MemStore{})
+		r.runSetupToAI()
+		r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}})
+		if r.hooks.privates != 1 || r.hooks.private["anthropic"] {
+			t.Fatalf("the sign-in during a key post went through: %d answers", r.hooks.privates)
+		}
+		if !strings.Contains(h.inErr, "still saving") {
+			t.Fatalf("the sign-in was not refused: %q", h.inErr)
+		}
+		r.srv.setup.mu.Lock()
+		_, link := r.srv.setup.device["anthropic"]
+		r.srv.setup.mu.Unlock()
+		if link {
+			t.Fatal("the refused sign-in kept a link")
+		}
+	})
+}
+
+// #1544 (#1534 S2): a plan sign-in connects the provider with yes, then
+// the owner's no fails to save, then the page restarts and loses its
+// hold. agentosd still owes the no, so the restarted page holds setup
+// open with the owner's unticked box, and finishes only once a retry
+// saves the no.
+func TestARestartKeepsAnOwedNo(t *testing.T) {
+	r := newRig(t)
+	st := &MemStore{}
+	r.srv = r.open(st)
+	r.runSetupToAI()
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}, "private": {"1"}})
+	r.failPrivate(true)
+	r.hooks.mu.Lock()
+	r.hooks.connected = true // the owner finishes signing in on the provider's site
+	r.hooks.mu.Unlock()
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}})
+	kept, _ := st.Load()
+	kept.Unsaved = nil // the page's store did not survive
+	r.srv = r.open(&MemStore{s: kept})
+	page := r.get("/setup")
+	if r.srv.setup.done() || r.hooks.finishes != 0 || !r.hooks.private["anthropic"] {
+		t.Fatal("restart finished setup on the old yes")
+	}
+	f, ok := setupForms(t, page)["ai-private anthropic"]
+	if !ok || strings.Contains(f, "checked") {
+		t.Fatalf("no retry after the restart, or the owner's no came back ticked:\n%s", page)
+	}
+	r.failPrivate(false)
+	r.post("/setup/ai-private", url.Values{"provider": {"anthropic"}})
+	if !r.srv.setup.done() || r.hooks.finishes != 1 || r.hooks.private["anthropic"] {
+		t.Fatal("setup did not finish with the owner's no")
 	}
 }

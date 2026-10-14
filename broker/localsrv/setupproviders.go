@@ -51,6 +51,14 @@ func (s *Setup) providers(_ context.Context, _ sockets.Peer, args json.RawMessag
 	if ps == nil {
 		ps = []localapi.SetupProvider{}
 	}
+	s.mu.Lock()
+	for i := range ps {
+		ps[i].Owed = nil // only the record says what is owed
+		if ok, owed := s.rec.Owed[ps[i].ID]; owed {
+			ps[i].Owed = &ok
+		}
+	}
+	s.mu.Unlock()
 	return localapi.SetupProviders{Providers: ps}, nil
 }
 
@@ -77,6 +85,13 @@ func (s *Setup) apiKey(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	return struct{}{}, nil
 }
 
+// privateOK records the owner's private-data answer for a provider the
+// vault lists (CAP-9). The answer is owed in the setup record before the
+// vault is asked and cleared once the vault records it (#1544), so a
+// failure or a restart of the page or of agentosd at any point leaves
+// finish waiting for the answer: a record that cannot take the answer
+// asks the vault nothing, and a clear that cannot be written answers
+// failed with the answer still owed.
 func (s *Setup) privateOK(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var a localapi.PrivateOK
 	if err := decode(args, &a); err != nil {
@@ -85,8 +100,47 @@ func (s *Setup) privateOK(_ context.Context, _ sockets.Peer, args json.RawMessag
 	if a.Provider == "" || s.cfg.Providers == nil {
 		return nil, errBadArgs
 	}
-	if err := s.cfg.Providers.SetPrivateOK(a.Provider, a.OK); err != nil {
+	s.answer.Lock()
+	defer s.answer.Unlock()
+	// Only a provider the vault lists can be owed, so a stray id cannot
+	// hold setup open for good.
+	ps, err := s.cfg.Providers.Providers()
+	if err != nil {
 		return nil, s.providerErr(err)
+	}
+	listed := false
+	for _, p := range ps {
+		listed = listed || p.ID == a.Provider
+	}
+	if !listed {
+		return nil, errBadArgs
+	}
+	s.mu.Lock()
+	before, wasOwed := s.rec.Owed[a.Provider]
+	err = s.setOwedLocked(a.Provider, &a.OK)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.cfg.Providers.SetPrivateOK(a.Provider, a.OK); err != nil {
+		if errors.Is(err, ProviderRefused) {
+			// The vault took nothing: what was owed before is owed again.
+			// A restore that cannot be written leaves this answer owed,
+			// which still holds finish.
+			restore := &before
+			if !wasOwed {
+				restore = nil
+			}
+			s.mu.Lock()
+			s.setOwedLocked(a.Provider, restore)
+			s.mu.Unlock()
+		}
+		return nil, s.providerErr(err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.setOwedLocked(a.Provider, nil); err != nil {
+		return nil, err
 	}
 	return struct{}{}, nil
 }
@@ -121,4 +175,31 @@ func keyShaped(k string) bool {
 		}
 	}
 	return true
+}
+
+// setOwedLocked writes provider p's owed answer as *ok, or clears it when
+// ok is nil, to the record, and keeps it in memory only once written. A
+// closed setup owes nothing more. Caller holds s.mu.
+func (s *Setup) setOwedLocked(p string, ok *bool) error {
+	if s.closed {
+		return errSetupClosed
+	}
+	next := s.rec
+	next.Owed = make(map[string]bool, len(s.rec.Owed)+1)
+	for k, v := range s.rec.Owed {
+		next.Owed[k] = v
+	}
+	if ok == nil {
+		delete(next.Owed, p)
+	} else {
+		next.Owed[p] = *ok
+	}
+	if len(next.Owed) == 0 {
+		next.Owed = nil
+	}
+	if s.cfg.Record.Save(next) != nil {
+		return errFailed
+	}
+	s.rec = next
+	return nil
 }

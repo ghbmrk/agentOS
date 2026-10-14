@@ -19,6 +19,7 @@ type fakeProviders struct {
 	keys    map[string]string
 	private map[string]bool
 	err     error
+	privErr error // SetPrivateOK's answer when set; nothing is recorded
 	calls   int
 }
 
@@ -50,6 +51,12 @@ func (f *fakeProviders) SetPrivateOK(provider string, ok bool) error {
 	f.calls++
 	if f.err != nil {
 		return f.err
+	}
+	if f.privErr != nil {
+		return f.privErr
+	}
+	if provider != "openai" && provider != "anthropic" {
+		return ProviderRefused
 	}
 	f.private[provider] = ok
 	return nil

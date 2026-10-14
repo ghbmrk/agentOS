@@ -27,6 +27,9 @@ import (
 type Setup struct {
 	cfg SetupConfig
 
+	// answer serializes private-data answers, so an owed answer is
+	// cleared only by the call that owed it (#1544).
+	answer  sync.Mutex
 	mu      sync.Mutex
 	rec     SetupRecord
 	closed  bool
@@ -113,6 +116,12 @@ type SetupRecord struct {
 	Enrolled bool   `json:"enrolled"`
 	Finished bool   `json:"finished"`
 	Owner    string `json:"owner,omitempty"`
+	// Owed maps a provider the vault lists to the owner's private-data
+	// answer that the vault has not confirmed (#1544, CAP-9). It is
+	// written before the vault is asked and cleared once the vault
+	// records the answer; finish waits while any answer is owed, so setup
+	// never finishes with the vault keeping an older, wider answer.
+	Owed map[string]bool `json:"owed,omitempty"`
 }
 
 // RecordStore persists SetupRecord.
@@ -164,6 +173,7 @@ var (
 	errCardPending  = sockets.Code(localapi.ErrCardPending)
 	errNotJoined    = sockets.Code(localapi.ErrNotJoined)
 	errNoJoin       = sockets.Code(localapi.ErrJoinUnavailable)
+	errAnswerOwed   = sockets.Code(localapi.ErrAnswerOwed)
 )
 
 // JoinUnavailable: the box cannot join Wi-Fi at all, so the page should
@@ -405,6 +415,10 @@ func (s *Setup) finish(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	if !s.rec.Enrolled {
 		s.mu.Unlock()
 		return nil, errNotEnrolled
+	}
+	if len(s.rec.Owed) > 0 {
+		s.mu.Unlock()
+		return nil, errAnswerOwed
 	}
 	// The vault seals only a confirmation made since its last enroll. A
 	// closed vault after a confirmation with no enroll since is this

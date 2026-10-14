@@ -57,6 +57,9 @@ type Provider struct {
 	// (CAP-9, REV-6). Asked once at connection: ticked by default on a
 	// plan sign-in, unticked on an API key (D-115).
 	PrivateOK bool
+	// Owed: the answer agentosd recorded as owed to the vault and the
+	// vault has not confirmed (#1544), or nil.
+	Owed *bool
 }
 
 // privateBox is one form's private-content question as the page shows it.
@@ -143,7 +146,8 @@ type SetupState struct {
 	// the vault did not record (#1467). It is set when the save fails and
 	// cleared once an answer for that provider is saved, so setup does not
 	// finish with the provider keeping an older answer. It lasts only as
-	// long as the SetupStore does.
+	// long as the SetupStore does; agentosd's owed record (#1544) restores
+	// it after a restart and holds finish on its own.
 	Unsaved map[string]bool `json:"unsaved,omitempty"`
 	Done    bool            `json:"done"`
 }
@@ -1288,6 +1292,22 @@ func (u *setup) maybeFinish() {
 	who := u.st.Owner
 	u.mu.Unlock()
 	defer func() { u.mu.Lock(); u.finishing = false; u.mu.Unlock() }()
+	// agentosd keeps each answer owed to the vault in its own record,
+	// which outlives this page's store (#1544): adopt it as a hold, so a
+	// page restart after a failed save shows the retry. finishing keeps AI
+	// posts out meanwhile, so no save races the list.
+	ps := u.s.cfg.Hooks.Providers()
+	u.mu.Lock()
+	for _, p := range ps {
+		if _, held := u.st.Unsaved[p.ID]; p.Owed != nil && !held {
+			u.holdLocked(p.ID, p.Owed) // a hold the store fails to save still holds
+		}
+	}
+	held := len(u.st.Unsaved) > 0
+	u.mu.Unlock()
+	if held {
+		return
+	}
 	if u.cardHeld() {
 		// HW-1: the box finishes only once the owner holds the card.
 		u.mu.Lock()
@@ -1296,7 +1316,7 @@ func (u *setup) maybeFinish() {
 		return
 	}
 	connected := false
-	for _, p := range u.s.cfg.Hooks.Providers() {
+	for _, p := range ps {
 		connected = connected || p.Connected
 	}
 	if !connected {

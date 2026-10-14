@@ -23,7 +23,9 @@ const (
 	// sealed only by finish, and a new seed voids it.
 	OpSetupConfirm = "page_setup_confirm"
 	// OpSetupFinish has the vault seal the confirmed seed, records the
-	// owner's number and closes setup for good.
+	// owner's number and closes setup for good. While an owner's
+	// private-data answer is owed to the vault it answers ErrAnswerOwed
+	// and seals nothing (#1544).
 	OpSetupFinish = "page_setup_finish"
 	// OpSetupJoin has agentosd's netjoin helper write the home Wi-Fi
 	// connection (P2-2w c3; Security L8 on the P2-2w plan) and answers
@@ -39,6 +41,9 @@ const (
 	// passes it on and keeps nothing (CRED-1).
 	OpSetupAPIKey = "page_setup_api_key"
 	// OpSetupPrivateOK records whether a provider may see private data.
+	// agentosd records the answer as owed before it asks the vault and
+	// clears it once the vault confirms (#1544), so a page restart
+	// cannot finish setup past an answer the vault did not take.
 	OpSetupPrivateOK = "page_setup_private_ok"
 	// OpSetupNetworks lists the home networks in range from agentosd's
 	// netjoin helper (P2-2w c4b): no args, Networks out. It answers an
@@ -115,6 +120,10 @@ const (
 	// ErrKeyUnchecked: the vault process could not check the API key with
 	// its provider; nothing was stored.
 	ErrKeyUnchecked = "key unchecked"
+	// ErrAnswerOwed: finish while an owner's private-data answer is owed
+	// to the vault (#1544): the answer was recorded with agentosd but the
+	// vault has not confirmed it. The page shows the retry.
+	ErrAnswerOwed = "answer owed"
 )
 
 // Setup's text waits. agentosd's own wait for the bridge ends sooner
@@ -255,6 +264,11 @@ type SetupProvider struct {
 	DeviceCode bool   `json:"device_code"`
 	Connected  bool   `json:"connected"`
 	PrivateOK  bool   `json:"private_ok"`
+	// Owed is the owner's private-data answer agentosd recorded for this
+	// provider and the vault has not confirmed (#1544), or nil. agentosd
+	// sets it from its own setup record, never from the vault's list, and
+	// finish waits while any answer is owed.
+	Owed *bool `json:"owed,omitempty"`
 }
 
 // SetupProviders is OpSetupProviders' answer.

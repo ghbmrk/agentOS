@@ -138,8 +138,9 @@ func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
 func (AgentosdSetup) HostInfo() string     { return "" }
 func (AgentosdSetup) TrustHost(bool) error { return errNotServed }
 
-// Providers lists the vault's providers. An error lists none, so the AI
-// step offers nothing and setup does not finish (ONB-3).
+// Providers lists the vault's providers, each with the answer agentosd
+// holds as owed (#1544). An error lists none, so the AI step offers
+// nothing and setup does not finish (ONB-3).
 func (a AgentosdSetup) Providers() []Provider {
 	var ps localapi.SetupProviders
 	if err := a.call(localapi.OpSetupProviders, nil, &ps); err != nil {
@@ -147,7 +148,7 @@ func (a AgentosdSetup) Providers() []Provider {
 	}
 	out := make([]Provider, 0, len(ps.Providers))
 	for _, p := range ps.Providers {
-		out = append(out, Provider{ID: p.ID, Name: p.Name, APIKey: p.APIKey, DeviceCode: p.DeviceCode, Connected: p.Connected, PrivateOK: p.PrivateOK})
+		out = append(out, Provider{ID: p.ID, Name: p.Name, APIKey: p.APIKey, DeviceCode: p.DeviceCode, Connected: p.Connected, PrivateOK: p.PrivateOK, Owed: p.Owed})
 	}
 	return out
 }
