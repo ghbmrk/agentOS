@@ -792,6 +792,24 @@ func TestStreamErrorBeforeFirstByteFailsOver(t *testing.T) {
 	}
 }
 
+// An OpenAI error chunk before any output fails over like Anthropic's
+// early error event (ROUTE-openai-early-error).
+func TestOpenAIStreamErrorBeforeFirstByteFailsOver(t *testing.T) {
+	r := newRig(t, rigOpts{rule: Rule{"default": {
+		{Provider: "openai", Model: "gpt-fixture"}, {Provider: "anthropic", Model: "claude-fixture"},
+	}}})
+	early := "data: " + strings.TrimSpace(string(fixture(t, "openai_insufficient_quota.json"))) + "\n\n"
+	r.up.set(hostOpenAI, serveFixture(200, "text/event-stream", []byte(early)))
+	r.up.set(hostAnthropic, serveFixture(200, "text/event-stream", fixture(t, "anthropic_stream.sse")))
+	w := r.do(t, "m1", `{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if a := reassemble(t, w.Body.Bytes()); w.Code != 200 || !a.done || a.text != "Hello, world" || strings.Contains(w.Body.String(), "insufficient_quota") {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if st := r.router.Stats()["openai/gpt-fixture"]; st.Failovers != 1 {
+		t.Fatalf("stats %+v", st)
+	}
+}
+
 // Three routes with mixed outcomes: each exhausted one is passed over in
 // order, and the first that answers serves.
 func TestMixedOutcomesAcrossThreeRoutes(t *testing.T) {
