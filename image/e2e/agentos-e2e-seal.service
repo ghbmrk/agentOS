@@ -7,7 +7,7 @@
 [Unit]
 Description=agentOS end-to-end run: seal the claim code (CI only)
 After=systemd-tmpfiles-setup.service
-Before=agentos-localui.service
+Before=agentos-localui-claim.service agentos-localui.service
 
 [Service]
 Type=oneshot

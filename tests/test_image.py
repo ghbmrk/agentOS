@@ -2633,6 +2633,17 @@ class LocaluiClaimTest(unittest.TestCase):
         self.assertFalse((self.root / "var/lib/agentos/claim.json").exists())
         self.assertEqual((self.root / "var/lib/agentos-localui/claim.json").read_text(), "sealed")
 
+    def test_the_page_s_directory_is_made_before_its_first_start(self):
+        # #1688: agentos-localui-claim.service runs before the page's StateDirectory= exists.
+        (self.root / "var/lib/agentos-localui").rmdir()
+        write(self.root, "var/lib/agentos/claim.json", "sealed", 0o600)
+        log = self.run_claim()
+        d = self.root / "var/lib/agentos-localui"
+        self.assertEqual(log, "chown agentos-localui:agentos-localui %s\nchown agentos-localui:agentos-localui %s\n"
+                         % (d, self.root / "var/lib/agentos/claim.json"))
+        self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
+        self.assertEqual((d / "claim.json").read_text(), "sealed")
+
     def test_the_page_s_own_state_is_kept(self):
         write(self.root, "var/lib/agentos/claim.json", "sealed")
         write(self.root, "var/lib/agentos-localui/claim.json", "claimed")

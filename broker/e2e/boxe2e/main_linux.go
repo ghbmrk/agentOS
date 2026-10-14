@@ -233,8 +233,9 @@ const codeFile = "/run/agentos-e2e/claim-code"
 
 // seal runs before the setup page's first start (agentos-e2e-seal.service):
 // it seals a fresh claim code where a preloaded box keeps it, as the
-// seller does before the box ships, so the page's first start moves it
-// in (localui-claim) and the box boots as a preloaded one.
+// seller does before the box ships, so agentos-localui-claim.service
+// moves it in before the page's first start and the box boots as a
+// preloaded one.
 func seal() error {
 	code, err := claim.NewCode(rand.Reader)
 	if err != nil {
@@ -256,9 +257,6 @@ func (d *driver) claim() error {
 		return err
 	}
 	code := string(b)
-	if err := handOver(); err != nil {
-		return err
-	}
 	if err := until(2*time.Minute, func() (bool, error) {
 		st, loc, _, err := d.get("/")
 		if err != nil {
@@ -281,29 +279,6 @@ func (d *driver) claim() error {
 	return nil
 }
 
-// handOver makes sure the page has the sealed claim state. On the e2e
-// boot the page's first start can run localui-claim before the seal
-// unit writes the file (#1688, ASSUMPTIONS E3), which a seller's box,
-// sealed before its first boot, never meets. Then the driver prints when
-// each ran and restarts the page, whose next start moves the file in as
-// the first start would have; if localui-claim is broken it still does
-// not, and the claim step fails.
-func handOver() error {
-	if _, err := os.Lstat(claimDst); err == nil {
-		return nil
-	}
-	if _, err := os.Lstat(claim.StatePath); err != nil {
-		return nil
-	}
-	seal, _ := command("systemctl", "show", "agentos-e2e-seal.service",
-		"-p", "ExecMainExitTimestampMonotonic", "--value").Output()
-	page, _ := command("systemctl", "show", "agentos-localui.service",
-		"-p", "InactiveExitTimestampMonotonic", "--value").Output()
-	fmt.Println("agentos-e2e: NOTE claim state not moved at the page's first start (seal done at " +
-		oneLine(string(seal)) + "us, page started at " + oneLine(string(page)) + "us); restarting the page")
-	return run("systemctl", "restart", "agentos-localui.service")
-}
-
 // claimDiag says why the page shows no claim screen: where the sealed
 // claim state is, the page's unit state, and its last log lines, with
 // the claim code cut out.
@@ -316,10 +291,14 @@ func claimDiag(code string) string {
 	}
 	unit, _ := command("systemctl", "show", "agentos-localui.service",
 		"-p", "ActiveState,SubState,NRestarts,Result", "--value").Output()
+	hand, _ := command("systemctl", "show", "agentos-localui-claim.service",
+		"-p", "ActiveState,Result,ConditionResult", "--value").Output()
 	logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager", "-n", "20",
-		"-u", "agentos-localui.service", "-u", "agentosd.service", "-u", "agentos-egress.service").Output()
-	return fmt.Sprintf("diag: sealed=%s moved=%s unit=%s log: %s", where(claim.StatePath), where(claimDst),
-		oneLine(string(unit)), redactLog(string(logs), 12, code, claim.Normalize(code)))
+		"-u", "agentos-localui-claim.service", "-u", "agentos-localui.service",
+		"-u", "agentosd.service", "-u", "agentos-egress.service").Output()
+	return fmt.Sprintf("diag: sealed=%s moved=%s hand-over=%s unit=%s log: %s", where(claim.StatePath),
+		where(claimDst), oneLine(string(hand)), oneLine(string(unit)),
+		redactLog(string(logs), 12, code, claim.Normalize(code)))
 }
 
 // page is the phone's view of /setup now.
