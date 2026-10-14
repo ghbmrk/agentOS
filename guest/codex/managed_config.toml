@@ -59,6 +59,16 @@ in_app_updates = false
 web_search_request = false
 web_search_cached = false
 image_generation = false
+# On by default in 0.162.1 and not needed by a headless turn; each can start a process or reach a
+# service outside the tool sandbox (C14). tests/test_codex_rootfs.py checks that codex doctor
+# lists none of them as enabled, so a pin bump that adds a default-on flag shows up there.
+daemon_auto_start = false
+workspace_dependencies = false
+system_proxy_fallback = false
+in_app_browser = false
+browser_use_full_cdp_access = false
+tool_suggest = false
+guardian_approval = false
 
 # No telemetry, feedback upload or saved history.
 [analytics]

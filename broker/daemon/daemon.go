@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
-	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -189,8 +188,9 @@ type PageSocket struct {
 	// refuses both ops.
 	Forget PageForget
 	// RotateAPNet writes a rotated card's Wi-Fi network for agentos-ap
-	// (REC-4, #1191); nil refuses the op.
-	RotateAPNet func(apnet.Network) error
+	// (REC-4, #1191), taking it from the vault process's hold of the
+	// latest Wi-Fi commit (#1522); nil refuses the op.
+	RotateAPNet func() error
 }
 
 // PageForget is FORGET as the page serves it; unlocked is whether the
