@@ -236,17 +236,20 @@ func dispatchGranted(recs []journal.Record, _ Options) []Violation {
 }
 
 // attemptsSettle (OP-4, OP-2): attempts are numbered in order, a new one
-// starts only after the last was shown not applied or, for a parked one,
-// the owner asked, an unknown attempt runs again only under its own key
-// and before it is parked, each observation follows the attempt's
-// lifecycle, and at rest every attempt is settled or explicitly unknown.
+// starts only once every earlier one was shown not applied or, when the
+// owner asked to retry, is parked with its outcome unknown, an unknown
+// attempt runs again only under its own key and before it is parked, an
+// intent one of whose attempts may still have gone is never refused (an
+// erase or a recheck would drop its hold, B9), each observation follows
+// the attempt's lifecycle, and at rest every attempt is settled or
+// explicitly unknown.
 func attemptsSettle(recs []journal.Record, o Options) []Violation {
 	var out []Violation
 	ins := submitted(recs)
 	att := map[string][]journal.Result{}
-	var order []string          // intents in order of first dispatch
-	last := map[string]uint64{} // seq of each intent's open dispatch
-	parked := map[string]bool{} // intents whose latest attempt is parked
+	var order []string                  // intents in order of first dispatch
+	last := map[string]uint64{}         // seq of each intent's open dispatch
+	parked := map[string]map[int]bool{} // each intent's parked attempts
 	for _, r := range recs {
 		if ins[r.ID] == nil {
 			continue
@@ -264,10 +267,20 @@ func attemptsSettle(recs []journal.Record, o Options) []Violation {
 				bad("parked attempt %d, want the latest (%d)", r.Attempt, n)
 			case as[n-1] != journal.ResultUnknown:
 				bad("parked attempt %d, which is %s", r.Attempt, as[n-1])
-			case parked[r.ID]:
+			case parked[r.ID][r.Attempt]:
 				bad("parked attempt %d twice", r.Attempt)
 			default:
-				parked[r.ID] = true
+				if parked[r.ID] == nil {
+					parked[r.ID] = map[int]bool{}
+				}
+				parked[r.ID][r.Attempt] = true
+			}
+		case journal.RecRecheckFailed:
+			for i, res := range as {
+				if res == journal.ResultUnknown || res == journal.ResultInFlight {
+					bad("refused while attempt %d may have gone (%s)", i+1, res)
+					break
+				}
 			}
 		case journal.RecDispatched:
 			switch r.Source {
@@ -279,8 +292,8 @@ func attemptsSettle(recs []journal.Record, o Options) []Violation {
 					bad("key retry of attempt %d, want the latest (%d)", r.Attempt, n)
 					continue
 				}
-				if as[n-1] != journal.ResultUnknown || parked[r.ID] {
-					bad("key retry of attempt %d, which is %s%s", r.Attempt, as[n-1], parkedWord(parked[r.ID]))
+				if as[n-1] != journal.ResultUnknown || parked[r.ID][n] {
+					bad("key retry of attempt %d, which is %s%s", r.Attempt, as[n-1], parkedWord(parked[r.ID][n]))
 					continue
 				}
 				as[n-1] = journal.ResultInFlight
@@ -288,8 +301,13 @@ func attemptsSettle(recs []journal.Record, o Options) []Violation {
 				continue
 			case journal.DispatchOwner:
 				// OP-2: a new attempt after an unknown one only when the
-				// owner asked to retry a parked intent.
-				if !parked[r.ID] {
+				// owner asked to retry a parked intent: its latest
+				// attempt, or an earlier one whose retry did not go.
+				open := false
+				for i, res := range as {
+					open = open || res == journal.ResultUnknown && parked[r.ID][i+1]
+				}
+				if !open {
 					bad("owner retry of an intent that is not parked")
 				}
 			case "":
@@ -300,14 +318,16 @@ func attemptsSettle(recs []journal.Record, o Options) []Violation {
 				bad("attempt %d, want %d", r.Attempt, len(as)+1)
 				continue
 			}
-			if n := len(as); n > 0 && as[n-1] != journal.ResultNotApplied &&
-				!(r.Source == journal.DispatchOwner && parked[r.ID] && as[n-1] == journal.ResultUnknown) {
-				bad("attempt %d started while attempt %d is %s", r.Attempt, n, as[n-1])
+			for i, res := range as {
+				if res != journal.ResultNotApplied &&
+					!(r.Source == journal.DispatchOwner && parked[r.ID][i+1] && res == journal.ResultUnknown) {
+					bad("attempt %d started while attempt %d is %s", r.Attempt, i+1, res)
+					break
+				}
 			}
 			if len(as) == 0 {
 				order = append(order, r.ID)
 			}
-			parked[r.ID] = false
 			att[r.ID] = append(as, journal.ResultInFlight)
 			last[r.ID] = r.Seq
 		case journal.RecObserved:

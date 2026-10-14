@@ -504,3 +504,68 @@ func TestOP2SettleLoopReleasesAHeldResubmission(t *testing.T) {
 		t.Fatalf("b: %+v; ran %v", st, x.ran)
 	}
 }
+
+// unclearRefuse leaves attempt 1 unknown for good and refuses every later
+// attempt.
+type unclearRefuse struct{}
+
+func (unclearRefuse) Execute(_ context.Context, _ journal.Intent, n int) journal.Outcome {
+	if n == 1 {
+		return journal.Outcome{Result: journal.ResultUnknown}
+	}
+	return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "refused"}
+}
+
+func (unclearRefuse) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultUnknown}
+}
+
+// R13, U14 (OP-2, CH-12): the service refuses the owner's retry of a
+// parked send while the first try is still unknown. The owner is not told
+// it did not go, since the first try may have; it stays parked, listed
+// with the parked try's time, and the digest lists it again.
+func TestOP2RefusedRetryOfAParkedSendSaysTheFirstTryMayHaveGone(t *testing.T) {
+	ctx := context.Background()
+	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{"x": unclearRefuse{}}, func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := journal.Intent{ID: "a", Origin: "guest:agent", Account: "mail", Action: "send", Params: map[string]any{"record": "inv-1042"}, Executor: "x"}
+	if _, err := eng.Submit(in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Authorize(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := eng.Dispatch(ctx, "a")
+	for i := 0; i < 12; i++ {
+		eng.Reconcile(ctx)
+	}
+	if ps := eng.Parked(); len(ps) != 1 {
+		t.Fatalf("parked %+v", ps)
+	}
+	var got string
+	relisted := 0
+	r := &retrier{ctx: ctx, lines: map[string]retryAsk{},
+		send: func(ctx context.Context, a retryAsk, _ bool) (journal.Status, error) {
+			return eng.Retry(ctx, a.id, a.attempt)
+		},
+		inform:    func(s string) error { got = s; return nil },
+		onRefused: func() { relisted++ }}
+	r.run("B3", retryAsk{id: "a", attempt: 1, line: grants.RetryLine{Shown: ownerch.Item{Object: "invoice 1042"}}}, false)
+	want := "Retry B3: this try of invoice 1042 did not go, but the first try may still have gone. I keep checking. Text RETRY to try again; it may go twice."
+	if got != want {
+		t.Fatalf("owner text %q, want %q", got, want)
+	}
+	if relisted != 1 {
+		t.Fatalf("relisted %d times", relisted)
+	}
+	st, _ := eng.Get("a")
+	if st.State != journal.OutcomeUnknown || st.Unclear() != 1 {
+		t.Fatalf("a: %+v", st)
+	}
+	ps := eng.Parked()
+	if len(ps) != 1 || ps[0].Attempt != 2 || !ps[0].Dispatched.Equal(first.Attempts[0].Dispatched) {
+		t.Fatalf("parked %+v, want attempt 2 first tried %v", ps, first.Attempts[0].Dispatched)
+	}
+}

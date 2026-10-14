@@ -217,6 +217,11 @@ func (r *retrier) run(req string, a retryAsk, page bool) {
 		text = fmt.Sprintf("Retry %s: nothing was sent. %s %s as another request, so it was not sent again.", req, capital(what), supersededHow(superseded.Rival))
 	case err == nil && st.State == journal.Succeeded:
 		text = fmt.Sprintf("Retry %s: %s went through.", req, what)
+	case err == nil && st.Unclear() != 0:
+		// The service refused this try, but the parked first try may
+		// still have gone (journal Status.Unclear): never "did not go"
+		// (CH-12). It stays parked and is listed again.
+		text = fmt.Sprintf("Retry %s: this try of %s did not go, but the first try may still have gone. I keep checking. Text RETRY to try again; it may go twice.", req, what)
 	case err == nil && (st.State == journal.NotApplied || st.State == journal.Denied):
 		text = fmt.Sprintf("Retry %s: %s did not go.", req, what)
 	case err == nil && st.State == journal.OutcomeUnknown:
@@ -229,7 +234,7 @@ func (r *retrier) run(req string, a retryAsk, page bool) {
 	r.mu.Lock()
 	inform, refused := r.inform, r.onRefused
 	r.mu.Unlock()
-	if err != nil && superseded == nil && refused != nil {
+	if (err != nil && superseded == nil || err == nil && st.Unclear() != 0) && refused != nil {
 		refused()
 	}
 	if inform != nil {

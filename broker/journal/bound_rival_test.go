@@ -299,7 +299,9 @@ func TestOP2RefusedRetryLeavesTheParkedAttemptUnresolved(t *testing.T) {
 	if !e.park("a", 1, true) {
 		t.Fatal("a not parked")
 	}
-	if s, err := e.Retry(ctx, "a", 1); err != nil || s.State != NotApplied {
+	// The retry did not go, but attempt 1 may have: a stays
+	// outcome_unknown (B9), and Unclear names the parked attempt.
+	if s, err := e.Retry(ctx, "a", 1); err != nil || s.State != OutcomeUnknown || s.Unclear() != 1 || s.Outstanding() != 1 {
 		t.Fatalf("retry of a: %+v %v", s, err)
 	}
 	if _, err := e.Dispatch(ctx, "a"); !errors.Is(err, ErrState) {
@@ -471,7 +473,7 @@ func TestOP2NotDoneRetryOfAParkedAttemptIsNotResent(t *testing.T) {
 	if rep := e.Reconcile(ctx); len(rep.Redispatched) != 0 {
 		t.Fatalf("report %+v", rep)
 	}
-	if s := must(e.Get("a")); s.State != NotApplied || len(s.Attempts) != 2 {
+	if s := must(e.Get("a")); s.State != OutcomeUnknown || s.Unclear() != 1 || len(s.Attempts) != 2 {
 		t.Fatalf("a: %+v", s)
 	}
 	if ns := e.NotResent(); len(ns) != 0 {

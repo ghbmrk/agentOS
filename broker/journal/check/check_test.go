@@ -163,6 +163,18 @@ var counterexamples = map[string][]func(p []journal.Record) ([]journal.Record, O
 			t.park("x", 1).dispBy("x", 2, "agent").obs("x", 2, journal.ResultSucceeded)
 			return t.recs, Options{}
 		},
+		func(p []journal.Record) ([]journal.Record, Options) { // a plain dispatch after the owner's retry did not go, while the parked try may have (B9)
+			t := unknownX(p)
+			t.park("x", 1).dispBy("x", 2, journal.DispatchOwner).obs("x", 2, journal.ResultNotApplied)
+			t.disp("x", 3).obs("x", 3, journal.ResultSucceeded)
+			return t.recs, Options{}
+		},
+		func(p []journal.Record) ([]journal.Record, Options) { // refused (an erase's recheck) while the parked try may have gone (B9)
+			t := unknownX(p)
+			t.park("x", 1).dispBy("x", 2, journal.DispatchOwner).obs("x", 2, journal.ResultNotApplied)
+			t.add(journal.Record{Type: journal.RecRecheckFailed, ID: "x", Reason: "erased"})
+			return t.recs, Options{}
+		},
 		func(p []journal.Record) ([]journal.Record, Options) { // settled twice
 			t := &trail{recs: p}
 			t.sub(effect("x")).rec(journal.RecAuthorized, "x").disp("x", 1).obs("x", 1, journal.ResultSucceeded)
@@ -411,6 +423,10 @@ func TestOP2SettlePathsAreClean(t *testing.T) {
 		},
 		"owner retry": func() []journal.Record {
 			return unknownX(p).park("x", 1).dispBy("x", 2, journal.DispatchOwner).obs("x", 2, journal.ResultSucceeded).recs
+		},
+		"owner retry refused, then retried again while the parked try is unknown": func() []journal.Record {
+			return unknownX(p).park("x", 1).dispBy("x", 2, journal.DispatchOwner).obs("x", 2, journal.ResultNotApplied).
+				dispBy("x", 3, journal.DispatchOwner).obs("x", 3, journal.ResultSucceeded).recs
 		},
 		"key retry unknown again, then parked": func() []journal.Record {
 			return unknownX(p).dispBy("x", 1, journal.DispatchKey).obs("x", 1, journal.ResultUnknown).park("x", 1).recs

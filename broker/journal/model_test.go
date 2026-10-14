@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,9 +23,12 @@ import (
 // saying so or not), restart, checks through the same tool (proving the
 // attempt applied or not, with the engine's resend allowed, refused by
 // the recheck, or itself unclear), parking, the owner's RETRY of a parked
-// or a not-done intent, the settle loop's release of a held resubmission,
-// and erase, for an effect that widens authority and for one that only
-// narrows it. After every step it checks:
+// or a not-done intent, the owner's own evidence on any unknown attempt
+// (Resolve), the settle loop's release of a held resubmission or of a
+// request whose effect went, erase (the owner's or a recall reset's, on
+// any intent, held or not), and STOP and RESUME, for an effect that
+// widens authority and for one that only narrows it. After every step it
+// checks:
 //
 //   - I1: the effect never applies twice through two rivals unless the
 //     second was submitted after the first was known to have succeeded,
@@ -37,9 +43,11 @@ import (
 //     intent or a restart fence);
 //   - I3: no permanent block: a request for the effect made now is never
 //     refused as superseded, and a narrowing intent never is at all;
-//   - I4: no deadlock: while something waits to go and no approval or
-//     check is outstanding, some dispatch, resend, retry or release still
-//     makes progress.
+//   - I4: no deadlock: while something waits to go, no approval or check
+//     is outstanding and STOP is off, some dispatch, resend, retry or
+//     release still makes progress; and an authorized request whose
+//     effect went under a rival after it was made is answered (denied)
+//     by the settle loop's Release (R15).
 //
 // Rivalry itself (rivals) is restated from the journal, not read from the
 // engine's fields.
@@ -168,6 +176,7 @@ func (s *mState) key(e *Engine) string {
 	for _, a := range accts {
 		fmt.Fprintf(&b, "|f%s=%v", a, s.fence[a])
 	}
+	fmt.Fprintf(&b, "|s%v", e.stopped)
 	keys := make([]string, 0, len(s.applied))
 	for k := range s.applied {
 		keys = append(keys, k)
@@ -284,6 +293,9 @@ type mModel struct {
 	ids    []string
 	narrow bool
 	depth  int
+	// owner adds the owner's own steps: STOP, RESUME and evidence on an
+	// unknown attempt (Resolve).
+	owner bool
 }
 
 func (m *mModel) intent(id string) Intent {
@@ -326,7 +338,24 @@ func (m *mModel) steps(e *Engine) []mStep {
 		case Authorized, NotApplied:
 			modes("dispatch", all, "dispatch", func(r *mRun) error { _, err := r.e.Dispatch(ctx, id); return err })
 		}
-		if en.state == OutcomeUnknown || en.unclear() != 0 {
+		// The owner's evidence on any unknown attempt, true to the
+		// service (Resolve), as a parked or an earlier one may be
+		// settled while a later one is still open.
+		for _, a := range en.attempts {
+			if !m.owner || a.Result != ResultUnknown {
+				continue
+			}
+			k := a.N
+			add(fmt.Sprintf("resolve %s#%d", id, k), func(r *mRun) error {
+				res := ResultNotApplied
+				if r.x.applied[AttemptKey(id, k)] {
+					res = ResultSucceeded
+				}
+				_, err := r.e.Resolve(id, k, Outcome{Result: res, Evidence: "owner"}, "owner")
+				return err
+			})
+		}
+		if en.state == OutcomeUnknown {
 			n := en.latest().N
 			// A check tells the truth; if the attempt did not apply, the
 			// engine's resend is allowed (and goes or is unclear) or
@@ -355,9 +384,18 @@ func (m *mModel) steps(e *Engine) []mStep {
 			modes("resend", []mMode{mOK, mRefuse, mTimeout}, "resend",
 				func(r *mRun) error { _, err := r.e.Resend(ctx, id, n); return err })
 		}
-		if !en.erased && en.state != InFlight && en.state != OutcomeUnknown {
+		// Erase is offered on any intent: one that may still take
+		// effect must be held, not erased (B9).
+		if !en.erased {
 			add("erase "+id, func(r *mRun) error { _, _, err := r.e.Erase([]string{id}); return err })
 		}
+	}
+	switch {
+	case !m.owner:
+	case e.stopped:
+		add("resume", func(r *mRun) error { return r.e.Resume() })
+	default:
+		add("stop", func(r *mRun) error { _, err := r.e.Stop(ctx); return err })
 	}
 	for _, md := range []mMode{mOK, mTimeout} {
 		md := md
@@ -416,14 +454,19 @@ func (m *mModel) run(t *testing.T) int {
 // mFacts is what the journal says of one intent, restated for the oracle.
 type mFacts struct {
 	seq, firstDispatch, went uint64
-	proved                   bool
+	// proved is the seq of the first record that proved an attempt not
+	// applied; disp the seq of each attempt's (first) dispatch.
+	proved uint64
+	disp   []uint64
 }
 
-// rivalsOracle: some intent z was proved not applied, and each of a and b
-// is z or was requested after z was first dispatched.
-func rivalsOracle(f map[string]mFacts, a, b string) bool {
+// rivalsOracle: some intent z was proved not applied before at (the
+// dispatch that applied the later of the two), and each of a and b is z
+// or was requested after z was first dispatched. Evidence that came only
+// after the second went (the owner's, say) cannot have told the engine.
+func rivalsOracle(f map[string]mFacts, a, b string, at uint64) bool {
 	for zid, z := range f {
-		if !z.proved || z.firstDispatch == 0 {
+		if z.proved == 0 || z.proved > at || z.firstDispatch == 0 {
 			continue
 		}
 		ok := func(x string) bool { return x == zid || f[x].seq > z.firstDispatch }
@@ -435,10 +478,10 @@ func rivalsOracle(f map[string]mFacts, a, b string) bool {
 }
 
 // unclearOracle reports an intent with an attempt that may still take
-// effect: in flight or unknown, and the intent neither went nor was
-// dropped by the owner.
+// effect: in flight or unknown, and the intent did not go. A denied or
+// erased intent counts: denying it does not stop an attempt that went.
 func unclearOracle(en *entry) bool {
-	if en.state == Succeeded || en.state == Denied {
+	if en.state == Succeeded {
 		return false
 	}
 	for _, a := range en.attempts {
@@ -487,8 +530,13 @@ func (m *mModel) follow(t *testing.T, parent, s *mState) {
 			if f.firstDispatch == 0 {
 				f.firstDispatch = rec.Seq
 			}
+			if rec.Attempt > len(f.disp) {
+				f.disp = append(append([]uint64(nil), f.disp...), rec.Seq)
+			}
 		case RecObserved:
-			f.proved = f.proved || rec.Result == ResultNotApplied
+			if rec.Result == ResultNotApplied && f.proved == 0 {
+				f.proved = rec.Seq
+			}
 			if rec.Result == ResultSucceeded && f.went == 0 {
 				f.went = rec.Seq
 			}
@@ -536,7 +584,7 @@ func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
 					continue
 				}
 				known := f[p.id].went
-				if rivalsOracle(f, p.id, q.id) && (known == 0 || f[q.id].seq < known) {
+				if rivalsOracle(f, p.id, q.id, f[q.id].disp[q.n-1]) && (known == 0 || f[q.id].seq < known) {
 					fail("I1", "rivals %s and %s both applied; %s was requested before %s was known to have gone", p.id, q.id, q.id, p.id)
 				}
 			}
@@ -556,7 +604,9 @@ func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
 		switch {
 		case o == nil:
 			fail("I2", "%s was proved not done and is neither offered nor held back", id)
-		case o.wentSeq != 0 && en.seq < o.wentSeq, o.state == Pending, o.state == InFlight, o.state == OutcomeUnknown:
+		case o.wentSeq != 0 && en.seq < o.wentSeq, o.state == Pending, o.unresolved():
+		case o.state == Authorized && e.stopped:
+			// STOP holds the release until RESUME.
 		case o.state == Authorized:
 			fr := restore(t, s, true)
 			fr.x.next, fr.x.via = mOK, "release"
@@ -593,25 +643,8 @@ func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
 	}
 
 	// I4.
-	var waiting []*entry
-	for _, id := range m.ids {
-		en := e.intents[id]
-		if en == nil {
-			continue
-		}
-		if en.state == Pending || (en.state == OutcomeUnknown && !en.parked()) {
-			return // an approval or the parking of a check is still to come
-		}
-		if en.state != Authorized && en.state != NotApplied && !en.retryable() {
-			continue
-		}
-		if o := e.sameEffect(en); o != nil && o.wentSeq != 0 && en.seq < o.wentSeq {
-			continue // the effect went; this one is answered
-		}
-		waiting = append(waiting, en)
-	}
-	if len(waiting) == 0 {
-		return
+	if e.stopped {
+		return // STOP holds everything until the owner's RESUME
 	}
 	try := func(f func(*mRun)) bool {
 		fr := restore(t, s, true)
@@ -620,10 +653,63 @@ func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
 		f(fr)
 		return len(fr.st.data) != before
 	}
+	// R15: a request whose effect went under a rival after it was made is
+	// answered by Release, not left authorized.
+	var answered []string
+	for _, id := range m.ids {
+		en := e.intents[id]
+		if en == nil || en.state != Authorized || len(e.fence[en.intent.Account]) > 0 {
+			continue
+		}
+		if o := e.sameEffect(en); o != nil && o.wentSeq != 0 && en.seq < o.wentSeq {
+			answered = append(answered, id)
+		}
+	}
+	if len(answered) > 0 {
+		fr := restore(t, s, true)
+		fr.x.next, fr.x.via = mOK, "release"
+		fr.e.Release(ctx, fr.e.Dispatch)
+		for _, id := range answered {
+			if st := fr.e.intents[id].state; st != Denied {
+				fail("I4", "%s stays %s after Release although its effect went", id, st)
+			}
+		}
+	}
+	var waiting []*entry
+	for _, id := range m.ids {
+		en := e.intents[id]
+		if en == nil {
+			continue
+		}
+		if en.state == Pending || (en.state == OutcomeUnknown && (!en.parked() || en.wentSeq != 0)) {
+			// An approval or the parking of a check is still to come, or
+			// an intent that went waits only on the check of a later
+			// attempt (no RETRY sends it again).
+			return
+		}
+		if en.state != Authorized && en.state != NotApplied && !en.retryable() || en.wentSeq != 0 {
+			continue // nothing to send: not waiting, or it went
+		}
+		if o := e.sameEffect(en); o != nil && o.wentSeq != 0 && en.seq < o.wentSeq && en.state != Authorized {
+			continue // the effect went; this one is answered when repeated
+		}
+		waiting = append(waiting, en)
+	}
+	if len(waiting) == 0 {
+		return
+	}
 	if try(func(fr *mRun) { fr.e.Release(ctx, fr.e.Dispatch) }) {
 		return
 	}
-	for _, en := range waiting {
+	// Every intent that could go is tried, not only those counted as
+	// waiting (R15 hid behind that).
+	var cands []*entry
+	for _, id := range m.ids {
+		if en := e.intents[id]; en != nil && (en.state == Authorized || en.state == NotApplied || en.retryable()) {
+			cands = append(cands, en)
+		}
+	}
+	for _, en := range cands {
 		id, n := en.intent.ID, en.latest()
 		if (en.state == Authorized || en.state == NotApplied) && try(func(fr *mRun) { _, _ = fr.e.Dispatch(ctx, id) }) {
 			return
@@ -644,15 +730,32 @@ func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
 
 // TestOP2SameEffectModel runs the search for an effect that widens
 // authority, with two and with three intents, and for one that only
-// narrows it. The depths keep it to a few seconds.
+// narrows it, and, with the owner's STOP, RESUME and evidence added, for
+// two intents of each. Two intents to depth 10 reach the erase of an
+// unclear intent and a resubmission after it (B9, depth 9); three to
+// depth 9 dispatch all three. Under the race detector every depth is
+// modelRaceCut less (2 intents still reach B9 there). MODEL_DEPTH (a
+// number added to every depth) sets a deeper run; MODEL_ONLY runs the
+// configurations whose name contains it.
 func TestOP2SameEffectModel(t *testing.T) {
+	more, _ := strconv.Atoi(os.Getenv("MODEL_DEPTH"))
+	// The search keeps every level's nodes live; collecting less often
+	// halves its time.
+	old := debug.SetGCPercent(300)
+	t.Cleanup(func() { debug.SetGCPercent(old) })
 	for _, m := range []mModel{
-		{ids: []string{"a", "b"}, depth: 8},
-		{ids: []string{"a", "b", "c"}, depth: 7},
-		{ids: []string{"a", "b"}, narrow: true, depth: 8},
+		{ids: []string{"a", "b"}, depth: 10},
+		{ids: []string{"a", "b", "c"}, depth: 9},
+		{ids: []string{"a", "b"}, narrow: true, depth: 10},
+		{ids: []string{"a", "b"}, owner: true, depth: 9},
+		{ids: []string{"a", "b"}, narrow: true, owner: true, depth: 9},
 	} {
 		m := m
-		name := fmt.Sprintf("%d intents, narrowing %v, depth %d", len(m.ids), m.narrow, m.depth)
+		m.depth += more - modelRaceCut
+		name := fmt.Sprintf("%d intents, narrowing %v, owner %v, depth %d", len(m.ids), m.narrow, m.owner, m.depth)
+		if only := os.Getenv("MODEL_ONLY"); only != "" && !strings.Contains(name, only) {
+			continue
+		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			start := time.Now()
@@ -660,4 +763,50 @@ func TestOP2SameEffectModel(t *testing.T) {
 			t.Logf("%d states in %v", n, time.Since(start))
 		})
 	}
+}
+
+// replay runs one path of the search by its step names, checking the
+// invariants after each step as the search does.
+func (m *mModel) replay(t *testing.T, path []string) {
+	t.Helper()
+	s := &mState{fence: map[string][]string{}, applied: map[string]bool{}}
+	for _, name := range path {
+		r := restore(t, s, true)
+		var st *mStep
+		for _, c := range m.steps(r.e) {
+			if c.name == name {
+				c := c
+				st = &c
+				break
+			}
+		}
+		if st == nil {
+			t.Fatalf("%v: no step %q", s.path, name)
+		}
+		r2 := restore(t, s, !st.restart)
+		_ = st.do(r2)
+		ns := r2.snapshot(append(append([]string(nil), s.path...), name))
+		m.follow(t, s, ns)
+		m.check(t, r2, ns)
+		s = ns
+	}
+}
+
+// B9: the erase of an intent whose owner's retry the service refused
+// while its parked first try may have gone (unclear) must hold it, not
+// deny it; otherwise a resubmission goes too, and the effect may go
+// twice. The search reaches this at depth 9; the path is pinned here.
+func TestOP2ModelErasedUnclearIntentStillHoldsItsEffect(t *testing.T) {
+	m := mModel{ids: []string{"a", "b"}}
+	m.replay(t, []string{"submit a", "approve a", "dispatch a dropack", "park a", "retry a refuse",
+		"erase a", "submit b", "approve b", "dispatch b ok"})
+}
+
+// R15: b, authorized, is held back by c, which went after b was made;
+// the settle loop's Release answers b (denied), rather than leaving it
+// authorized until someone dispatches it.
+func TestOP2ModelRivalIsAnsweredOnceTheEffectWent(t *testing.T) {
+	m := mModel{ids: []string{"a", "b", "c"}}
+	m.replay(t, []string{"submit a", "approve a", "dispatch a refuse", "submit b", "approve b",
+		"submit c", "approve c", "dispatch c ok"})
 }

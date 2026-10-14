@@ -287,6 +287,32 @@ type Status struct {
 	Quality    Quality
 }
 
+// Unclear returns the attempt an outcome_unknown intent waits on when its
+// latest attempt, the owner's retry of a parked one, did not go: the
+// parked attempt, which may still have gone. It is 0 otherwise. Such an
+// intent is outcome_unknown like any other whose effect may have gone, so
+// a reader that goes by State treats it as such; Unclear only tells the
+// owner which try is in doubt and that the retry itself did not go.
+func (s Status) Unclear() int {
+	if s.State != OutcomeUnknown {
+		return 0
+	}
+	return unclearOf(s.Attempts)
+}
+
+// Outstanding returns the number of the attempt an in_flight or
+// outcome_unknown intent waits on (the latest, or Unclear), or 0: the
+// attempt evidence such as Engine.Resolve settles.
+func (s Status) Outstanding() int {
+	if s.State != InFlight && s.State != OutcomeUnknown || len(s.Attempts) == 0 {
+		return 0
+	}
+	if n := s.Unclear(); n != 0 {
+		return n
+	}
+	return s.Attempts[len(s.Attempts)-1].N
+}
+
 var (
 	ErrInvalid      = errors.New("journal: invalid intent")
 	ErrConflict     = errors.New("journal: same intent ID with different parameters")

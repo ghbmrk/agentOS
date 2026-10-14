@@ -641,10 +641,28 @@ type verdict struct {
 	local bool
 	hold  bool // waits for the local page without texting the owner
 	reply *owner.AutoReply
+	// sent, when set, is when the same send under another request went
+	// or may have gone, recently (recentlySent, U12). Like note, it is
+	// shown but not part of what the dispatch recheck compares.
+	sent time.Time
 }
 
 // shown is the item as the owner is asked it.
-func (v verdict) shown() owner.Item { return withNote(v.item, v.note) }
+func (v verdict) shown() owner.Item { return v.marked(withNote(v.item, v.note)) }
+
+// marked is it with v.sent's mark: the line warns "may go twice, first
+// tried <when the same send went>", and money takes the code generator,
+// as an owner retry does (MoneyRetry).
+func (v verdict) marked(it owner.Item) owner.Item {
+	if v.sent.IsZero() {
+		return it
+	}
+	it.Retried = v.sent
+	if it.Facts.HasAmount || it.Amount != "" {
+		it.Facts.Kind = owner.MoneyRetry
+	}
+	return it
+}
 
 // reissued is the item a restart re-sends for an ask whose shown item had
 // digest sum: v's item with the queued note the owner was sent, which may
@@ -659,7 +677,7 @@ func (v verdict) reissued(sum, action string) (owner.Item, bool) {
 		if n > 0 {
 			note = queuedNote(n, action)
 		}
-		if it := withNote(v.item, note); owner.ItemSum(it) == sum {
+		if it := v.marked(withNote(v.item, note)); owner.ItemSum(it) == sum {
 			return it, true
 		}
 	}
@@ -806,10 +824,45 @@ func (g *Gate) evaluateEffect(ctx context.Context, phase journal.Phase, in journ
 			return verdict{kind: allow}
 		}
 		if queued > 0 {
-			return verdict{kind: ask, item: item, note: queuedNote(queued, in.Action)}
+			return verdict{kind: ask, item: item, note: queuedNote(queued, in.Action), sent: g.recentlySent(ctx, in)}
 		}
 	}
-	return verdict{kind: ask, item: item}
+	return verdict{kind: ask, item: item, sent: g.recentlySent(ctx, in)}
+}
+
+// sentWindow is how far back an ask looks for the same send under another
+// request (recentlySent).
+const sentWindow = 24 * time.Hour
+
+// recentlySent returns when another request sending the same record to
+// the same recipients as in (sendKey, as sentSince compares) went within
+// sentWindow, or may have gone (in flight or unknown, at any age), or
+// zero. A request made after the effect went is a new send (journal
+// rule (b), B8), so the owner may approve it; the ask then says the same
+// send was tried already, so a resubmission by an agent that missed the
+// first one's success is not approved blind (U12). An erased send names
+// no record and marks nothing here.
+func (g *Gate) recentlySent(ctx context.Context, in journal.Intent) time.Time {
+	g.mu.Lock()
+	eng := g.eng
+	g.mu.Unlock()
+	if eng == nil {
+		return time.Time{}
+	}
+	rec, rcpt := g.sendKey(ctx, in)
+	if rec == "" {
+		return time.Time{}
+	}
+	var at time.Time
+	for _, u := range eng.InUse(in.Account, in.Action, g.cfg.Now().Add(-sentWindow)) {
+		if !u.Started || u.Erased || u.Intent.ID == in.ID {
+			continue
+		}
+		if r2, c2 := g.sendKey(ctx, u.Intent); r2 == rec && sameSet(c2, rcpt) && u.Dispatched.After(at) {
+			at = u.Dispatched
+		}
+	}
+	return at
 }
 
 // detailMax is the owner line's Detail width (owner.Item.line).
