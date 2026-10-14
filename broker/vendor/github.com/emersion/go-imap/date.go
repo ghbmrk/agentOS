@@ -8,9 +8,13 @@ import (
 
 // Date and time layouts.
 // Dovecot adds a leading zero to dates:
-//   https://github.com/dovecot/core/blob/4fbd5c5e113078e72f29465ccc96d44955ceadc2/src/lib-imap/imap-date.c#L166
+//
+//	https://github.com/dovecot/core/blob/4fbd5c5e113078e72f29465ccc96d44955ceadc2/src/lib-imap/imap-date.c#L166
+//
 // Cyrus adds a leading space to dates:
-//   https://github.com/cyrusimap/cyrus-imapd/blob/1cb805a3bffbdf829df0964f3b802cdc917e76db/lib/times.c#L543
+//
+//	https://github.com/cyrusimap/cyrus-imapd/blob/1cb805a3bffbdf829df0964f3b802cdc917e76db/lib/times.c#L543
+//
 // GMail doesn't support leading spaces in dates used in SEARCH commands.
 const (
 	// Defined in RFC 3501 as date-text on page 83.
