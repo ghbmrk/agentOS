@@ -1,0 +1,142 @@
+# G1 list (G1-freeze, #1687): the paths a PR may touch until G1-e2e (#1688) passes in QEMU.
+# Read by tools/g1_scope.py; the g1-freeze workflow uses the base commit's copy.
+#
+#   freeze on|off       the single switch. Lift the freeze with a PR that changes it to
+#                       `off` and cites the passing #1688 QEMU run.
+#   allow PATH          a PR may touch PATH: a trailing "/" means everything below it,
+#                       otherwise the one file.
+#   frozen-import DIR/  a broker package G1 binaries import but the list freezes anyway
+#                       (Mark's Tight choice: learning code serves A11/A12, not G1). The
+#                       drift test in tests/test_g1_scope.py accepts these as imports.
+#
+# The broker entries are every package the G1 binaries import (`go list -deps`, see
+# G1_BINARIES in tests/test_g1_scope.py): the image's six binaries (image/build.sh), the
+# guest bridge, the seller tool (D-105), the checker (CH-4) and clock-boot and hostdisk
+# (HW-8). The drift test fails when a G1 binary starts importing a package not named here.
+
+freeze on
+
+# Project machinery and records.
+allow .claude/
+allow .github/
+allow assurance/
+allow briefs/
+allow decisions/
+allow docs/
+allow handoff/
+allow reviews/
+allow tests/
+allow tools/
+allow .gitignore
+allow AGENTS.md
+allow BOARD.md
+allow CLAUDE.md
+allow DECISIONS.md
+allow LEDGER.md
+allow LICENSE
+allow METRICS.md
+allow NOTICE
+allow PLAN.md
+allow README.md
+allow SPEC.md
+allow TRACE.md
+
+# The image, the guest it carries, and the controller spike D-104 keeps on the G1 path.
+allow image/
+allow guest/openclaw/
+allow guest/codex/
+allow spikes/CTRL-spike/
+
+# Broker module files, shared trees and the G1 end-to-end tests.
+allow broker/go.mod
+allow broker/go.sum
+allow broker/core/
+allow broker/e2e/
+allow broker/hostchange/
+allow broker/third_party/
+allow broker/vendor/
+
+# G1 binaries.
+allow broker/cmd/agentos-ap/
+allow broker/cmd/agentos-checker/
+allow broker/cmd/agentos-clock-boot/
+allow broker/cmd/agentos-egress/
+allow broker/cmd/agentos-guest-bridge/
+allow broker/cmd/agentos-hostdisk/
+allow broker/cmd/agentos-localui/
+allow broker/cmd/agentos-modem/
+allow broker/cmd/agentos-netjoin/
+allow broker/cmd/agentos-seller/
+allow broker/cmd/agentosd/
+
+# Packages the G1 binaries import.
+allow broker/accel/
+allow broker/admission/
+allow broker/apnet/
+allow broker/apply/
+allow broker/attest/
+allow broker/boxname/
+allow broker/bridgeclient/
+allow broker/bridgeproto/
+allow broker/budget/
+allow broker/card/
+allow broker/cgroup/
+allow broker/change/
+allow broker/checker/
+allow broker/childproc/
+allow broker/claim/
+allow broker/clock/
+allow broker/control/
+allow broker/daemon/
+allow broker/digestqueue/
+allow broker/durable/
+allow broker/egress/
+allow broker/events/
+allow broker/firstboot/
+allow broker/fold/
+allow broker/follow/
+allow broker/grants/
+allow broker/guest/
+allow broker/guesterr/
+allow broker/hostdisk/
+allow broker/journal/
+allow broker/localapi/
+allow broker/localsrv/
+allow broker/localui/
+allow broker/mail/
+allow broker/maintain/
+allow broker/meter/
+allow broker/modelroute/
+allow broker/modem/
+allow broker/modemlink/
+allow broker/netguard/
+allow broker/netjoin/
+allow broker/owner/
+allow broker/procguard/
+allow broker/question/
+allow broker/quota/
+allow broker/recovery/
+allow broker/replay/
+allow broker/reversible/
+allow broker/route/
+allow broker/routerule/
+allow broker/sendrules/
+allow broker/sipsign/
+allow broker/smsapi/
+allow broker/sockets/
+allow broker/tpmseal/
+allow broker/update/
+allow broker/vault/
+allow broker/verb/
+allow broker/vm/
+allow broker/workers/
+
+# Imported by agentosd but frozen (Tight).
+frozen-import broker/compile/
+frozen-import broker/corpus/
+frozen-import broker/loop7/
+frozen-import broker/loopbuild/
+frozen-import broker/loops/
+frozen-import broker/recall/
+frozen-import broker/recalltool/
+frozen-import broker/skill/

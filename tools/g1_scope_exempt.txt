@@ -1,0 +1,99 @@
+# G1-freeze exemptions (#1687): written by `tools/g1_scope.py --snapshot` at merge prep.
+# `pr N`: open when the freeze merged. `issue N ID`: in state:building when the freeze
+# merged; its PR is recognised by a pkg/N- branch or a title starting with ID.
+# Hand edits are reviewed like the list; the check reads the base copy.
+pr 418
+pr 739
+pr 741
+pr 1030
+pr 1031
+pr 1032
+pr 1241
+pr 1305
+pr 1307
+pr 1308
+pr 1336
+pr 1433
+pr 1543
+pr 1572
+pr 1575
+pr 1576
+pr 1577
+pr 1580
+pr 1581
+pr 1583
+pr 1584
+pr 1585
+pr 1587
+pr 1588
+pr 1589
+pr 1590
+pr 1592
+pr 1594
+pr 1600
+pr 1601
+pr 1607
+pr 1612
+pr 1614
+pr 1637
+pr 1641
+pr 1649
+pr 1651
+pr 1652
+pr 1654
+pr 1655
+pr 1656
+pr 1658
+pr 1662
+pr 1673
+pr 1674
+pr 1683
+pr 1684
+pr 1686
+pr 1694
+issue 744 PILOT-S
+issue 773 SIM-sim
+issue 782 SR3-6-f3
+issue 793 RT-1
+issue 807 S8-W1
+issue 813 CRED-5f-mr-page
+issue 882 RECALL-canary-2
+issue 893 CRED-4b
+issue 897 OSS-6s-a-f
+issue 919 P2-2w
+issue 937 SR2-3j
+issue 938 SR2-3m
+issue 939 SR2-3k
+issue 946 CH-21a
+issue 959 PE3
+issue 962 W3
+issue 965 W3-forget
+issue 966 W3-forget-b
+issue 969 W3-forget-b1-7
+issue 990 W5-Db-r1
+issue 1101 SIM-split-b
+issue 1106 SIM-split-fix
+issue 1109 MAIL-gen
+issue 1110 EGRESS-rot-1
+issue 1129 P1-4-killfail
+issue 1131 A14-r1
+issue 1135 RECALL-prov
+issue 1136 RECALL-prov-L1
+issue 1236 LOOPS-off-race
+issue 1254 SR3-mail-k18b
+issue 1261 CX-issue-states
+issue 1262 CX-name-case
+issue 1300 CTRL-lane-gate
+issue 1318 RECALL-compact-dirsync
+issue 1320 LOOPS-settings-dirsync
+issue 1513 IMG-initrd-xz-trailing
+issue 1514 IMG-initrd-bt-plan
+issue 1542 CODEX-pidns-flake
+issue 1551 IMG-bt-bypass
+issue 1561 VM-destroy-retire
+issue 1562 TREE-undo-invalidate
+issue 1636 PREMERGE-base-merge-noise
+issue 1638 PACE-allowance-race
+issue 1681 CTX-slice
+issue 1687 G1-freeze
+issue 1688 G1-e2e
