@@ -9,9 +9,17 @@
 // directory, which is never mounted into a guest: the guest sees only its
 // merged root, so it cannot read, change, or delete its snapshots (REV-1).
 //
-// Locking: the manager never calls admission while holding a machine's
-// lock, and Preempt takes only the victim's lock, so admission and the
-// manager cannot deadlock whichever side starts.
+// Locking: a machine's mu is taken before its admitMu, and admitMu before
+// admission's own lock (Destroy holds all three in that order). Admission's
+// lock is a leaf: Admit lets it go before it calls Preempt, and Preempt only
+// TryLocks the victim's mu, scheduling the rest for when the holder lets
+// go, so admission never waits on a machine's lock and the manager and
+// admission cannot deadlock whichever side starts. admit itself takes
+// admitMu only after the caller has let mu go.
+//
+// A handle is good for one machine's life: every operation that looks a
+// machine up and then locks it refuses the handle once Destroy retired it
+// (lockLive), since its ID may name a new machine by then.
 package vm
 
 import (
@@ -363,6 +371,30 @@ func (mc *machine) lockEndingExec() {
 	}
 }
 
+// lockLive takes mc's lock and refuses, unlocked, a handle Destroy retired
+// meanwhile: its ID may name a new machine now, whose layer, files and
+// record the handle's paths reach (security B1 on #1575).
+func (mc *machine) lockLive() error {
+	mc.mu.Lock()
+	return mc.unlessGone()
+}
+
+// lockEndingExecLive is lockLive by way of lockEndingExec.
+func (mc *machine) lockEndingExecLive() error {
+	mc.lockEndingExec()
+	return mc.unlessGone()
+}
+
+// unlessGone, with mc's lock held, lets it go and returns ErrUnknown if
+// mc was destroyed; otherwise it keeps the lock and returns nil.
+func (mc *machine) unlessGone() error {
+	if mc.gone {
+		mc.mu.Unlock()
+		return fmt.Errorf("%w: machine %s", ErrUnknown, mc.ID)
+	}
+	return nil
+}
+
 // Manager is safe for concurrent use.
 type Manager struct {
 	cfg Config
@@ -371,6 +403,10 @@ type Manager struct {
 	machines map[string]*machine
 	snaps    map[string]Snapshot
 	seq      int
+
+	// afterGet, set only by tests, runs between a lookup and the caller
+	// locking what it found: where a destroy can retire the handle.
+	afterGet func(id string)
 
 	diskMu   sync.Mutex // serializes disk reservations
 	diskHeld int64      // bytes reserved for copies in progress
@@ -907,10 +943,13 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 
 func (m *Manager) get(id string) (*machine, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	mc, ok := m.machines[id]
+	m.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("%w: machine %s", ErrUnknown, id)
+	}
+	if h := m.afterGet; h != nil {
+		h(id)
 	}
 	return mc, nil
 }
@@ -921,7 +960,9 @@ func (m *Manager) Get(id string) (Machine, error) {
 	if err != nil {
 		return Machine{}, err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return Machine{}, err
+	}
 	defer mc.mu.Unlock()
 	return mc.Machine, nil
 }
@@ -957,7 +998,9 @@ func (m *Manager) RaiseLabel(id string, l Label) error {
 	if err != nil {
 		return err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return err
+	}
 	defer mc.mu.Unlock()
 	if l < mc.Label {
 		return fmt.Errorf("vm: %s: a label only rises (REV-5)", id)
@@ -988,7 +1031,9 @@ func (m *Manager) Label(id string) (Label, error) {
 	if err != nil {
 		return 0, err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return 0, err
+	}
 	defer mc.mu.Unlock()
 	return mc.Label, nil
 }
@@ -1020,10 +1065,18 @@ func (m *Manager) take(ctx context.Context, id string, t Tier) (Snapshot, error)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	mc.mu.Lock()
+	return m.takeOf(ctx, mc, t)
+}
+
+// takeOf is take for a handle the caller holds already, so a check it made
+// on that machine still holds for the snapshot taken.
+func (m *Manager) takeOf(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
+	if err := mc.lockLive(); err != nil {
+		return Snapshot{}, err
+	}
 	defer mc.mu.Unlock()
 	if mc.State != Running {
-		return Snapshot{}, fmt.Errorf("%w: %s is %s", ErrState, id, mc.State)
+		return Snapshot{}, fmt.Errorf("%w: %s is %s", ErrState, mc.ID, mc.State)
 	}
 	return m.takeLocked(ctx, mc, t)
 }
@@ -1275,7 +1328,9 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	if err != nil {
 		return err
 	}
-	mc.lockEndingExec()
+	if err := mc.lockEndingExecLive(); err != nil {
+		return err
+	}
 	if !inLineage(mc, s) {
 		mc.mu.Unlock()
 		return fmt.Errorf("%w: %s, %s", ErrLineage, id, snapID)
@@ -1420,7 +1475,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 			return Snapshot{}, fmt.Errorf("vm: bad machine id %q", f)
 		}
 	}
-	src.mu.Lock()
+	if err := src.lockLive(); err != nil {
+		return Snapshot{}, err
+	}
 	spec, label, lineage := src.Spec, src.Label, src.Lineage
 	src.mu.Unlock()
 	if lineage == "" {
@@ -1467,7 +1524,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	src.mu.Lock()
 	prevLast := src.Last
 	src.mu.Unlock()
-	s, err := m.take(ctx, id, Full)
+	// Taken of src itself: a new machine given the ID meanwhile is not
+	// what the forks were labelled and lineaged from.
+	s, err := m.takeOf(ctx, src, Full)
 	if err != nil {
 		undo()
 		return Snapshot{}, err
@@ -1492,14 +1551,14 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		if err == nil {
 			err = m.startFrom(ctx, mc, &s)
 		}
-		if err != nil {
+		if err != nil && !mc.gone {
 			m.stopRuntime(ctx, mc)
 			os.RemoveAll(m.machineDir(mc.ID))
 		}
 		mc.mu.Unlock()
 		if err != nil {
 			for _, done := range reserved[:i] {
-				m.Destroy(ctx, done.ID)
+				m.destroy(ctx, done)
 			}
 			undo()
 			return Snapshot{}, err
@@ -1515,7 +1574,9 @@ func (m *Manager) dropSnapshot(mc *machine, id, prev string) {
 	delete(m.snaps, id)
 	m.mu.Unlock()
 	os.RemoveAll(m.snapDir(id))
-	mc.mu.Lock()
+	if mc.lockLive() != nil {
+		return
+	}
 	if mc.Last == id {
 		mc.Last = prev
 		m.saveMachine(mc)
@@ -1582,14 +1643,17 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 	if m.contained(sm) {
 		return Snapshot{}, fmt.Errorf("%w (%s)", ErrContained, src)
 	}
-	sm.mu.Lock()
+	if err := sm.lockLive(); err != nil {
+		return Snapshot{}, err
+	}
 	baseID := sm.ForkBase
 	sm.mu.Unlock()
 	base, err := m.Snapshot(baseID)
 	if err != nil || base.Machine != dst {
 		return Snapshot{}, fmt.Errorf("%w: %s was not forked from %s", ErrLineage, src, dst)
 	}
-	ss, err := m.Step(ctx, src)
+	// Taken of sm itself, which the containment and fork-point checks read.
+	ss, err := m.takeOf(ctx, sm, FS)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -1597,7 +1661,9 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 	if err != nil {
 		return Snapshot{}, err
 	}
-	dm.mu.Lock()
+	if err := dm.lockLive(); err != nil {
+		return Snapshot{}, err
+	}
 	out, restarted, err := m.mergeLocked(ctx, dm, base, ss)
 	dm.mu.Unlock()
 	if err != nil && restarted {
@@ -1778,12 +1844,17 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	mc.lockEndingExec()
-	if mc.gone {
-		mc.mu.Unlock()
-		return fmt.Errorf("%w: machine %s", ErrUnknown, id)
+	return m.destroy(ctx, mc)
+}
+
+// destroy is Destroy for a handle the caller holds; a handle already
+// retired is refused, so a new machine given its ID is left alone.
+func (m *Manager) destroy(ctx context.Context, mc *machine) error {
+	id := mc.ID
+	if err := mc.lockEndingExecLive(); err != nil {
+		return err
 	}
-	err = m.stopRuntime(ctx, mc)
+	err := m.stopRuntime(ctx, mc)
 	if err == nil {
 		err = os.RemoveAll(m.machineDir(id))
 	}
@@ -1903,7 +1974,12 @@ func (m *Manager) Machines() []string {
 	return out
 }
 
+// saveMachine writes mc's record, with mc's lock held. A destroyed
+// machine's record is never written: its directory may be a new machine's.
 func (m *Manager) saveMachine(mc *machine) error {
+	if mc.gone {
+		return fmt.Errorf("%w: machine %s", ErrUnknown, mc.ID)
+	}
 	mc.label.Store(uint32(mc.Label))
 	return writeJSON(filepath.Join(m.machineDir(mc.ID), "meta.json"), mc.Machine)
 }

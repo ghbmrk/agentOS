@@ -28,7 +28,9 @@ func (m *Manager) CheckpointAndStop(ctx context.Context, id string) (Snapshot, e
 	if err != nil {
 		return Snapshot{}, err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return Snapshot{}, err
+	}
 	if mc.State != Running {
 		st := mc.State
 		mc.mu.Unlock()

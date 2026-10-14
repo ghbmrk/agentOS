@@ -160,7 +160,7 @@ func (m *Manager) ForkSiblings(id string) (string, []string, error) {
 // is held by a command, snapshot or start), without waiting.
 func (m *Manager) TryGet(id string) (Machine, bool) {
 	mc, err := m.get(id)
-	if err != nil || !mc.mu.TryLock() {
+	if err != nil || !mc.mu.TryLock() || mc.unlessGone() != nil {
 		return Machine{}, false
 	}
 	defer mc.mu.Unlock()
@@ -188,7 +188,9 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	if err != nil {
 		return ExecResult{}, err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return ExecResult{}, err
+	}
 	defer mc.mu.Unlock()
 	if mc.State == Preempted {
 		return ExecResult{}, fmt.Errorf("%w: %s", ErrPreempted, id)
@@ -280,6 +282,9 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	// would wait out the command, so it is refused instead.
 	if !mc.mu.TryLock() {
 		return Snapshot{}, fmt.Errorf("%w: %s", ErrBusy, id)
+	}
+	if err := mc.unlessGone(); err != nil {
+		return Snapshot{}, err
 	}
 	if mc.State != Running {
 		mc.mu.Unlock()
@@ -382,7 +387,9 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 	}
 	// A command in the worker ends: the deletion stops the worker anyway
 	// (L3 nit on #166).
-	mc.lockEndingExec()
+	if err := mc.lockEndingExecLive(); err != nil {
+		return DeleteReport{}, err
+	}
 	was := mc.State
 	rep, stopped, err := m.deleteLocked(ctx, mc, d)
 	mc.mu.Unlock()
