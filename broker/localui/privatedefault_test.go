@@ -1,6 +1,7 @@
 package localui
 
 import (
+	"errors"
 	"html"
 	"net/url"
 	"regexp"
@@ -99,5 +100,58 @@ func TestTheProvidersIntroShowsOnlyWhenNoneIsAllowed(t *testing.T) {
 	fp.mu.Unlock()
 	if p := html.UnescapeString(r.get("/providers/")); !strings.Contains(p, intro) {
 		t.Fatalf("only an unconnected provider allowed, intro missing:\n%s", p)
+	}
+}
+
+// R1 (#1436 review): a yes given on the plan sign-in is not undone by
+// saving a key for the same provider with the box as the page shows it.
+func TestAKeyAfterThePlanKeepsTheProvidersYes(t *testing.T) {
+	r := newRig(t)
+	r.runSetupToAI()
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}, "private": {"1"}})
+	if !r.hooks.private["anthropic"] {
+		t.Fatal("plan sign-in did not record yes")
+	}
+	f, ok := setupForms(t, r.get("/setup"))["ai-key anthropic"]
+	if !ok {
+		t.Fatal("no key form for the provider after its plan sign-in")
+	}
+	v := url.Values{"provider": {"anthropic"}, "key": {apiCanary}}
+	if strings.Contains(f, `name="private" value="1" checked>`) {
+		v.Set("private", "1")
+	}
+	r.post("/setup/ai-key", v)
+	if !r.hooks.private["anthropic"] {
+		t.Fatalf("saving a key undid the plan's yes; key box was:\n%s", f)
+	}
+}
+
+// L2 (#1436 review): a device-code start that fails, or hands back a link
+// that isn't https, records no answer, shows no link, and leaves an
+// unticked box unticked.
+func TestAFailedDeviceStartRecordsNothing(t *testing.T) {
+	for name, set := range map[string]func(*fakeHooks){
+		"error":   func(h *fakeHooks) { h.deviceErr = errors.New("provider down") },
+		"http://": func(h *fakeHooks) { h.deviceLink = "http://example.invalid/device" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			r.runSetupToAI()
+			r.hooks.mu.Lock()
+			set(r.hooks)
+			r.hooks.mu.Unlock()
+			r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}})
+			if _, ok := r.hooks.private["anthropic"]; ok {
+				t.Fatal("answer recorded for a sign-in that never started")
+			}
+			page := r.get("/setup")
+			if strings.Contains(page, "example.invalid/device") || strings.Contains(page, "WXYZ-1234") {
+				t.Fatalf("link or code shown for a failed start:\n%s", page)
+			}
+			f, ok := setupForms(t, page)["ai-device anthropic"]
+			if !ok || !strings.Contains(f, `name="private" value="1">`) || strings.Contains(f, "checked") {
+				t.Fatalf("form gone, or the owner's unticked box came back ticked:\n%s", f)
+			}
+		})
 	}
 }

@@ -1036,7 +1036,9 @@ func (u *setup) aiReady() error {
 func (u *setup) boxLocked(form string, p Provider) privateBox {
 	checked, ok := u.answer[form+" "+p.ID]
 	if !ok {
-		checked = form == "ai-device"
+		// A yes already given for this provider holds on every route, so
+		// saving a key after a plan sign-in doesn't undo it (R1).
+		checked = form == "ai-device" || p.PrivateOK
 	}
 	return privateBox{Name: p.Name, Checked: checked}
 }
