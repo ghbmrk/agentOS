@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -78,10 +79,10 @@ func newLoginRig(t *testing.T) *loginRig {
 	return r
 }
 
-// store lands c as the sign-in or a refresh would: through the swap.
+// store lands c as the owner's sign-in does: through the sign-in swap.
 func (r *loginRig) store(t *testing.T, worker string, c canaryLogin) map[string]string {
 	t.Helper()
-	phs, commit, err := r.logins.ForWorker("codex", worker).Swap("codex", c.creds())
+	phs, commit, err := r.logins.ForSignIn("codex", worker).Swap("codex", c.creds())
 	if err != nil {
 		t.Fatalf("swap: %v", err)
 	}
@@ -390,14 +391,14 @@ func TestRemovingThePlanLeavesNoEntryAndNoCanary(t *testing.T) {
 func TestSwapNeedsAnAccountID(t *testing.T) {
 	r := newLoginRig(t)
 	bare := map[string]string{"access_token": synthetic(t, "a"), "refresh_token": synthetic(t, "r"), "id_token": fakeJWT(map[string]any{"sub": "x"}) + ".s"}
-	if _, _, err := r.logins.ForWorker("codex", "pw-a").Swap("codex", bare); err == nil {
+	if _, _, err := r.logins.ForSignIn("codex", "pw-a").Swap("codex", bare); err == nil {
 		t.Fatal("swap accepted a login with no account ID")
 	}
 	if len(r.v.List()) != 0 {
 		t.Fatal("vault written")
 	}
 	// Error text never echoes a value.
-	_, _, err := r.logins.ForWorker("codex", "pw-a").Swap("codex", bare)
+	_, _, err := r.logins.ForSignIn("codex", "pw-a").Swap("codex", bare)
 	for _, v := range bare {
 		if strings.Contains(err.Error(), v) {
 			t.Fatal("error echoes a credential")
@@ -534,4 +535,37 @@ func TestSeedLandsInCodexHome(t *testing.T) {
 		}
 	}
 	t.Fatalf("launch.json env %v lacks %s", l.Env, want)
+}
+
+// Threat (Security, #1747): a process in one provider worker signs in to
+// its own account through the forwarder. A worker's swap only refreshes
+// the stored login: with none stored it cannot create one, and a response
+// naming another account cannot replace the owner's, so no other worker's
+// placeholder ever resolves to the intruder's tokens.
+func TestAWorkerCannotSetThePlanAccount(t *testing.T) {
+	r := newLoginRig(t)
+	intruder := newCanaryLogin(t)
+	if _, _, err := r.logins.ForWorker("codex", "pw-evil").Swap("codex", intruder.creds()); !errors.Is(err, ErrNotRefresh) {
+		t.Fatalf("a worker's sign-in with no login stored: err = %v, want ErrNotRefresh", err)
+	}
+	if len(r.v.List()) != 0 {
+		t.Fatal("a worker's sign-in became the box's login")
+	}
+
+	owner := newCanaryLogin(t)
+	held := r.store(t, "pw-owner", owner)
+	if _, _, err := r.logins.ForWorker("codex", "pw-evil").Swap("codex", intruder.creds()); !errors.Is(err, ErrNotRefresh) {
+		t.Fatalf("a worker's sign-in to another account: err = %v, want ErrNotRefresh", err)
+	}
+	if v := r.entry(t); v["account_id"] != owner.account || v["access_token"] != owner.access {
+		t.Fatal("a worker replaced the owner's login")
+	}
+	if v, ok := r.logins.Resolve("codex", "pw-owner", held["access_token"]); !ok || v != owner.access {
+		t.Fatal("the owner's worker no longer resolves to the owner's login")
+	}
+	for _, s := range intruder.all() {
+		if strings.Contains(fmt.Sprint(r.entry(t)), s) {
+			t.Fatal("the intruder's tokens reached the vault")
+		}
+	}
 }

@@ -25,6 +25,9 @@ import (
 var (
 	ErrVaultLocked = errors.New("vault-locked")
 	ErrNoLogin     = errors.New("no plan login stored")
+	// ErrNotRefresh refuses a worker's swap that would create the login or
+	// change its account: only the owner's sign-in does that (ForSignIn).
+	ErrNotRefresh = errors.New("plan login: only the owner's sign-in sets the account")
 )
 
 // LoginKind is the vault kind of a plan login entry.
@@ -83,15 +86,27 @@ func (p *PlanLogins) load(provider string) (map[string]string, LoginStore, error
 	return m, st, nil
 }
 
-// ForWorker returns the Swapper for one worker's refresh and sign-in
-// responses. Its placeholders belong to that worker alone.
+// ForWorker returns the Swapper for one worker's refresh responses. Its
+// placeholders belong to that worker alone. It only refreshes the stored
+// login: a response with no login stored, or naming another account, is
+// refused (ErrNotRefresh), so a process in one worker that signs in to its
+// own account cannot become the box's login.
 func (p *PlanLogins) ForWorker(provider, worker string) Swapper {
 	return &workerSwapper{p: p, provider: provider, worker: worker}
+}
+
+// ForSignIn returns the Swapper for the owner's sign-in in a fresh worker
+// (the sign-in flow the owner starts, ONB step 6). It may create the login
+// or replace it with another account's. Its caller is that owner-started
+// flow alone; a worker's own traffic gets ForWorker.
+func (p *PlanLogins) ForSignIn(provider, worker string) Swapper {
+	return &workerSwapper{p: p, provider: provider, worker: worker, signIn: true}
 }
 
 type workerSwapper struct {
 	p                *PlanLogins
 	provider, worker string
+	signIn           bool
 }
 
 func rnd() string {
@@ -183,6 +198,11 @@ func (s *workerSwapper) Swap(adapter string, creds map[string]string) (map[strin
 	}
 	if acct == "" {
 		return nil, nil, errors.New("plan login: no account ID")
+	}
+	// A worker only refreshes: with no login stored, cur has no account, so
+	// this refuses a worker's first sign-in as well as an account change.
+	if !s.signIn && acct != cur["account_id"] {
+		return nil, nil, ErrNotRefresh
 	}
 	next["account_id"] = acct
 	val, err := json.Marshal(next)
