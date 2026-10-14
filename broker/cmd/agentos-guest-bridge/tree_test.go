@@ -337,3 +337,63 @@ func TestBridgeUndoAcrossAFileToDirectorySwap(t *testing.T) {
 		t.Fatalf("UNDO left skills/x as %v, %q", fi, read(t, filepath.Join(dir, "skills/x")))
 	}
 }
+
+// TREE-clearway-symlink (#1630, #1572 Security S-1; CHG-6, ARC-7): a
+// symlink anywhere on a file's path, the namespace and the file itself
+// included, is refused and left. One that stays inside the tree directory
+// is no exception: it must not let a sync remove or write a directory
+// outside skills, procedures and context.
+func TestBridgeRefusesASymlinkOnTheWayOfAFile(t *testing.T) {
+	for _, tc := range []struct{ name, link, file string }{
+		{"ancestor", "skills/l", "skills/l/keep"},
+		{"deep ancestor", "skills/d/l", "skills/d/l/keep"},
+		{"namespace", "skills", "skills/keep"},
+		{"the file itself", "skills/keep", "skills/keep"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// other is inside the tree directory but outside every namespace.
+			other := filepath.Join(dir, "other")
+			os.MkdirAll(filepath.Join(other, "keep"), 0o755)
+			os.WriteFile(filepath.Join(other, "keep", "f"), []byte("mine"), 0o644)
+			if tc.link != "skills" {
+				os.MkdirAll(filepath.Join(dir, "skills/d"), 0o755)
+			}
+			target, _ := filepath.Rel(filepath.Dir(filepath.Join(dir, tc.link)), other)
+			if err := os.Symlink(target, filepath.Join(dir, tc.link)); err != nil {
+				t.Fatal(err)
+			}
+			f := &fakeTree{ans: treeAnswer{Version: "v1", Files: map[string][]byte{tc.file: []byte("new")}}}
+			v, err := syncOnce(context.Background(), f.serve(t), dir, "")
+			if err == nil || v != "" {
+				t.Fatalf("synced through a symlink: %q %v", v, err)
+			}
+			if fi, err := os.Lstat(filepath.Join(dir, tc.link)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("the symlink %s was not left: %v", tc.link, err)
+			}
+			if read(t, filepath.Join(other, "keep", "f")) != "mine" {
+				t.Fatal("the sync removed a directory outside the namespaces")
+			}
+			if ents, _ := os.ReadDir(other); len(ents) != 1 {
+				t.Fatalf("the sync wrote outside the namespaces: %d entries", len(ents))
+			}
+		})
+	}
+}
+
+// A symlink on the path of a file whose content is already right is refused
+// too: the tree directory must be a copy of the tree, and a link there is
+// not.
+func TestBridgeRefusesASymlinkEvenWhenTheContentMatches(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "other"), 0o755)
+	os.WriteFile(filepath.Join(dir, "other", "keep"), []byte("same"), 0o644)
+	os.MkdirAll(filepath.Join(dir, "skills"), 0o755)
+	if err := os.Symlink("../other", filepath.Join(dir, "skills", "l")); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeTree{ans: treeAnswer{Version: "v1", Files: map[string][]byte{"skills/l/keep": []byte("same")}}}
+	if _, err := syncOnce(context.Background(), f.serve(t), dir, ""); err == nil {
+		t.Fatal("accepted a symlink on the path")
+	}
+}

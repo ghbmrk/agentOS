@@ -167,6 +167,9 @@ func mirror(dir string, files map[string][]byte) error {
 	}
 	defer root.Close()
 	for p, b := range files {
+		if err := refuseLinks(root, p); err != nil {
+			return err
+		}
 		if old, err := root.ReadFile(p); err == nil && bytes.Equal(old, b) {
 			continue
 		}
@@ -217,9 +220,33 @@ func mirror(dir string, files map[string][]byte) error {
 	return nil
 }
 
+// refuseLinks fails if any component of the file p, from its namespace
+// down to p itself, is a symlink. The os.Root follows one that stays inside
+// the tree directory, so without this check a link such as skills/l ->
+// ../other would let a write or a removal land in other, outside the
+// namespaces. A component that does not exist yet is not a link, and
+// nothing below it exists either.
+func refuseLinks(root *os.Root, p string) error {
+	var path []string
+	for a := p; a != "."; a = filepath.Dir(a) {
+		path = append(path, a)
+	}
+	for i := len(path) - 1; i >= 0; i-- {
+		fi, err := root.Lstat(path[i])
+		if err != nil {
+			return nil
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("tree path %q: %q is a symlink; left in place", p, path[i])
+		}
+	}
+	return nil
+}
+
 // clearWay removes what an earlier tree left in the way of the file p: a
-// regular file where p needs a directory, or a directory at p itself. A
-// symlink is left, so the write fails rather than follow it.
+// regular file where p needs a directory, or a directory at p itself. The
+// caller has checked with refuseLinks that no symlink lies on p's path, so
+// the Lstat and RemoveAll here act on the path they name.
 func clearWay(root *os.Root, p string) error {
 	ns, _, _ := strings.Cut(p, "/")
 	var up []string
