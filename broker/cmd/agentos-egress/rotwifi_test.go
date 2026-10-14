@@ -161,3 +161,59 @@ func TestTheRotatedWiFiRouteIsNarrow(t *testing.T) {
 		}
 	}
 }
+
+// Sec R1 / P-1 on #1614: only a commit that put the new card in effect
+// holds its Wi-Fi network. A commit for another rotation, a card that
+// does not fit, a lapsed rotation, a vault no longer open, and a commit
+// that failed before any slot was written all leave nothing to take.
+func TestACommitThatDidNotTakeEffectHoldsNoWiFi(t *testing.T) {
+	x := newCardRig(t)
+	x.open(t)
+	v := x.verifier(t)
+	begin := func() {
+		t.Helper()
+		x.clk.add(30 * time.Second)
+		if code, out := x.begin(t, map[string]any{"code": x.next(), "parts": []string{"wifi"}}); code != http.StatusOK {
+			t.Fatalf("begin: %d %v", code, out)
+		}
+	}
+	none := func(what string, code, want int) {
+		t.Helper()
+		if code != want {
+			t.Fatalf("%s: %d, want %d", what, code, want)
+		}
+		if _, err := v.TakeRotatedWiFi(); !errors.Is(err, modelroute.ErrNoRotatedWiFi) {
+			t.Fatalf("%s left a permit: %v", what, err)
+		}
+	}
+
+	begin()
+	code, _ := x.commit(t, rotateCommit{ID: newRotationID(), WiFiPassword: synthetic(t, "wifi-next-")})
+	none("another rotation's ID", code, http.StatusGone)
+
+	code, _ = x.commit(t, rotateCommit{WiFiPassword: synthetic(t, "wifi-next-"), GridSeed: nextWiFiGrid(t).GridSeed})
+	none("a card that does not fit", code, http.StatusBadRequest)
+
+	x.clk.add(recovery.PendingTTL + time.Second)
+	code, _ = x.commit(t, rotateCommit{WiFiPassword: synthetic(t, "wifi-next-")})
+	none("a lapsed rotation", code, http.StatusGone)
+
+	begin()
+	x.c.lock()
+	x.clk.add(30 * time.Second)
+	x.open(t)
+	code, _ = x.commit(t, rotateCommit{WiFiPassword: synthetic(t, "wifi-next-")})
+	none("a vault locked since the begin", code, http.StatusGone)
+
+	// Long enough for the card's shape, too short for the vault's own
+	// entry: the commit fails at the store, before anything was written,
+	// and the rotation is spent.
+	begin()
+	code, _ = x.commit(t, rotateCommit{WiFiPassword: "short-wifi"})
+	none("a commit that wrote nothing", code, http.StatusGone)
+	code, _ = x.commit(t, rotateCommit{WiFiPassword: synthetic(t, "wifi-next-")})
+	none("the spent rotation", code, http.StatusGone)
+	if got := x.stored(t, x.rk); got.WiFiPassword != x.card.WiFiPassword {
+		t.Fatal("a failed commit changed the card")
+	}
+}
