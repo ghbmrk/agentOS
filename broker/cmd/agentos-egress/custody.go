@@ -99,7 +99,10 @@ var (
 	errBootChanged  = uerr(http.StatusConflict, "This PC started me in a way it hasn't before. Unlock with your passphrase and a code.")
 	errNoSuchHost   = uerr(http.StatusNotFound, "no trusted host with that id")
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
-	errLockoutOwned = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so I can't protect a boot PIN here. Trust this PC without a PIN instead.")
+	// errHostSlotDecided: the slot change was decided before it failed, so
+	// the PC is trusted (VAULT-slot-decided, #1557).
+	errHostSlotDecided = uerr(http.StatusInternalServerError, "this PC is now trusted, but saving it did not finish; it finishes when the vault next opens")
+	errLockoutOwned    = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so I can't protect a boot PIN here. Trust this PC without a PIN instead.")
 
 	// Rollback (V6): the drive's vault is older than this PC's counter.
 	errRolledBack = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
@@ -1430,6 +1433,9 @@ func (c *custody) trust(code, pin string) (string, error) {
 	name, err := c.host.enroll(v, pin)
 	if errors.Is(err, tpmseal.ErrLockoutOwned) {
 		return "", errLockoutOwned
+	}
+	if errors.Is(err, vault.ErrSlotDecided) {
+		return "", errHostSlotDecided
 	}
 	if err != nil {
 		return "", errHostNotSaved

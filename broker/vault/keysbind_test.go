@@ -425,3 +425,34 @@ func TestRekeySaveFailsAfterRenameKeepsStagedFile(t *testing.T) {
 	}
 	w.Close()
 }
+
+// REQ: CRED-8, REC-4, HW-1
+
+// VAULT-slot-decided (#1557): an error from a slot change after the next
+// keys file was sealed is typed vault.ErrSlotDecided, so a caller knows the
+// change took effect; an error before the seal is not.
+func TestSlotChangeErrorAfterTheSealIsTyped(t *testing.T) {
+	// A crash after the seal.
+	v, _, _ := openWithPassphrase(t)
+	crashAt(t, 1)
+	alpha := newHost("alpha")
+	if err := v.AddSlot(alpha, sameHost(alpha)); !errors.Is(err, ErrSlotDecided) {
+		t.Fatalf("crash after the seal: %v", err)
+	}
+	// A failed directory sync of the keys file after the seal.
+	v, _, kp := openWithPassphrase(t)
+	dirSyncFails(t, kp)
+	beta := newHost("beta")
+	err := v.AddSlot(beta, sameHost(beta))
+	if !errors.Is(err, ErrSlotDecided) || !errors.Is(err, durable.ErrDirSync) {
+		t.Fatalf("keys file dir sync after the seal: %v", err)
+	}
+	// A failed write of the staged copy happens before the seal.
+	v, _, kp = openWithPassphrase(t)
+	dirSyncFails(t, kp+nextSuffix)
+	gamma := newHost("gamma")
+	err = v.AddSlot(gamma, sameHost(gamma))
+	if err == nil || errors.Is(err, ErrSlotDecided) {
+		t.Fatalf("staged write before the seal: %v", err)
+	}
+}

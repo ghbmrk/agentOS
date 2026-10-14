@@ -463,3 +463,23 @@ func compact(s string) string {
 		return r
 	}, strings.ToUpper(s))
 }
+
+// REQ: REC-4, HW-1
+
+// VAULT-slot-decided (#1557): a Rekey that errors after its slot is decided
+// has changed the factor, so the rotation reports what is in effect
+// (ErrCardNotStored, the keep-both path) and not that nothing changed.
+func TestRotationWhoseSlotIsDecidedReportsWhatIsInEffect(t *testing.T) {
+	x := newBox(t)
+	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0)
+	must(t, err)
+	defer vault.InjectSealFault(errors.New("input/output error"))()
+	next := newParts(p)
+	nc, err := p.Commit(x.b, next, t0)
+	if !errors.Is(err, ErrCardNotStored) || !errors.Is(err, vault.ErrSlotDecided) {
+		t.Fatalf("rotation with a decided slot: %v", err)
+	}
+	if nc.RecoveryKey != next.RecoveryKey {
+		t.Fatal("returned card does not carry the recovery key now in effect")
+	}
+}

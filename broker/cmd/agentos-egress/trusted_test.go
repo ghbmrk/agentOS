@@ -1152,3 +1152,23 @@ func TestLegacyPINOffLeavesTheDASettings(t *testing.T) {
 		t.Fatalf("lockout %q, notes %q", r.lockoutEntry(), r.notes)
 	}
 }
+
+// REQ: CRED-8, HW-1
+
+// VAULT-slot-decided (#1557): when the PIN slot is already decided and the
+// slot change then reports an error, the enrollment keeps the lockout
+// hierarchy it took; the PIN slot that landed depends on it.
+func TestPINEnrollAfterTheSlotIsDecidedKeepsTheLockout(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	defer vault.InjectSealFault(errors.New("input/output error"))()
+	if _, err := r.c.trust(r.code(), "246810"); !errors.Is(err, errHostSlotDecided) {
+		t.Fatalf("enroll after the seal: %v", err)
+	}
+	if r.lockoutEntry() == "" {
+		t.Fatal("lockout authorization dropped though the PIN slot was decided")
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("empty lockout password resets the PIN guess counter: the lockout was released")
+	}
+}
