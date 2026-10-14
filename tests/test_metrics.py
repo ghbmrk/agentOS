@@ -724,27 +724,35 @@ class CommentVerdictTest(unittest.TestCase):
         self.assertEqual(p["verdicts"], ["fix-list", "accept"])
         self.assertEqual(p["causes"], ["defect"])
 
+    def test_same_verdict_as_review_and_comment_counts_once(self):
+        body = "Verdict: accept\nL3 review at abc123."
+        rev = [{"body": body, "submitted_at": "2026-10-05T00:30:00Z", "author_association": "OWNER"}]
+        com = [{"body": body + "\n", "created_at": "2026-10-05T00:31:00Z", "author_association": "OWNER"}]
+        p, _ = self._collect(rev, com)
+        self.assertEqual(p["verdicts"], ["accept"])
+
     def test_comment_only_pr_is_not_no_verdict(self):
-        com = [{"body": "L3 review. Verdict: accept.", "created_at": "t", "author_association": "COLLABORATOR"}]
+        com = [{"body": "Verdict: accept\nL3 review.", "created_at": "t", "author_association": "COLLABORATOR"}]
         p, _ = self._collect([], com)
         self.assertEqual(p["verdicts"], ["accept"])
 
     def test_untrusted_and_incidental_comments_do_not_count(self):
         com = [{"body": "L3 review. Verdict: reject.", "created_at": "1", "author_association": "NONE"},
                {"body": "L3 is owed; accept it once CI is green", "created_at": "2", "author_association": "OWNER"},
+               {"body": "L3 verdict: accept, merging", "created_at": "4", "author_association": "OWNER"},
                {"body": "Verdict: accept (lens, no tier tag)", "created_at": "3", "author_association": "OWNER"}]
         p, _ = self._collect([], com)
         self.assertEqual(p["verdicts"], [])
 
     def test_comments_are_paginated(self):
         com = [{"body": "chatter", "created_at": "%03d" % i, "author_association": "OWNER"} for i in range(100)]
-        com.append({"body": "L3. Verdict: accept.", "created_at": "999", "author_association": "OWNER"})
+        com.append({"body": "Verdict: accept\nL3.", "created_at": "999", "author_association": "OWNER"})
         p, calls = self._collect([], com)
         self.assertEqual(p["verdicts"], ["accept"])
         self.assertIn("issues/7/comments?per_page=100&page=2", calls)
 
     def test_comments_of_pulls_merged_before_the_cutoff_are_not_fetched(self):
-        com = [{"body": "L3. Verdict: accept.", "created_at": "1", "author_association": "OWNER"}]
+        com = [{"body": "Verdict: accept\nL3.", "created_at": "1", "author_association": "OWNER"}]
         p, calls = self._collect([], com, since="2026-10-06T00:00:00Z")
         self.assertIsNone(p["verdicts"])
         self.assertFalse([c for c in calls if c.startswith("issues/")])
