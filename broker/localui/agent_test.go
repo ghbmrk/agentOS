@@ -18,7 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: ARC-2, CH-7
+// REQ: ARC-2, CH-7, UX-2wb-1
 
 type stillOwner struct{}
 
