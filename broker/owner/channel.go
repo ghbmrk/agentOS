@@ -150,7 +150,7 @@ type Channel struct {
 	cfg  Config
 	ctrl *control.Handler
 
-	mu       sync.Mutex
+	mu       holdMutex
 	codes    codes
 	open     map[string]*request
 	reqN     uint64 // requests opened, for their order
@@ -195,7 +195,19 @@ type Channel struct {
 	// pmu orders the pacer's non-urgent Post and Release (pacer.go), so
 	// held texts leave the hold once and in order. It is taken before mu.
 	pmu sync.Mutex
+	// checkedIn and countedIn are the holds of mu in which the hour's
+	// allowance was last checked and a text last counted, so a test can
+	// pin a paced check and its count to one hold (#1638).
+	checkedIn, countedIn uint64
 }
+
+// holdMutex is a sync.Mutex that numbers its holds.
+type holdMutex struct {
+	sync.Mutex
+	holds uint64
+}
+
+func (m *holdMutex) Lock() { m.Mutex.Lock(); m.holds++ }
 
 var _ control.Auth = (*Channel)(nil)
 

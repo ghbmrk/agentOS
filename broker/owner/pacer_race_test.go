@@ -2,6 +2,7 @@ package owner
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -19,10 +20,15 @@ type gatedModem struct {
 	entered chan struct{}
 	open    chan struct{}
 	fail    error
+	// failAfter, when set, runs inside a failing Send, before it returns.
+	failAfter func()
 }
 
 func (g *gatedModem) Send(to, text string) error {
 	if g.fail != nil {
+		if g.failAfter != nil {
+			g.failAfter()
+		}
 		return g.fail
 	}
 	first := false
@@ -168,29 +174,47 @@ func TestReleaseRechecksBeforeItSends(t *testing.T) {
 }
 
 // REQ: CH-15 (#1638)
-// A text counted before its send is uncounted when the send fails or the
-// text is dropped as no longer true, so neither spends the allowance.
-func TestFailedOrDroppedSendIsUncounted(t *testing.T) {
-	r, g, open := raceRig(t, 2)
-	open()
-	g.fail = modem.ErrDown
-	for name, send := range map[string]func() error{
-		"urgent":     func() error { return r.ch.Post(ClassSecurity, "Security alert.") },
-		"post":       func() error { return r.ch.Post(ClassUpdate, "An update.") },
-		"notify-now": func() error { return r.ch.NotifyNow("Q1 asks: which time?") },
-		"request": func() error {
+// A text counted before its send is uncounted when the modem proves it
+// was not sent (modem.ErrNotSent) or it is dropped as no longer true, so
+// neither spends the allowance. A failure that may hide a text that went
+// (modem.ErrDown alone: no receipt) keeps the count (security R2 on #1686).
+func TestOnlyUnsentTextIsUncounted(t *testing.T) {
+	sends := map[string]func(r *rig) error{
+		"urgent":     func(r *rig) error { return r.ch.Post(ClassSecurity, "Security alert.") },
+		"post":       func(r *rig) error { return r.ch.Post(ClassUpdate, "An update.") },
+		"notify-now": func(r *rig) error { return r.ch.NotifyNow("Q1 asks: which time?") },
+		"request": func(r *rig) error {
 			_, err := r.ch.Request([]Item{lowItem("m0")}, 0)
 			return err
 		},
-	} {
-		if err := send(); err == nil {
-			t.Fatalf("%s: nil error from a down modem", name)
-		}
-		if a := r.ch.Allowance(r.clock()); a != 2 {
-			t.Fatalf("%s: allowance %d after a failed send, want 2", name, a)
+		"auto-reply": func(r *rig) error {
+			_, err := r.ch.QueueAutoReply(AutoReply{Ref: "t1", Recipients: []string{"bob@example.test"}, Body: "Thanks, got it."})
+			return err
+		},
+	}
+	for _, c := range []struct {
+		name  string
+		fail  error
+		spent int
+	}{{"not-sent", modem.ErrNotSent, 0}, {"maybe-sent", modem.ErrDown, 1}} {
+		fail, spent := c.fail, c.spent
+		for name, send := range sends {
+			t.Run(name+"/"+c.name, func(t *testing.T) {
+				r, g, open := raceRig(t, 2)
+				open()
+				g.fail = fail
+				err := send(r)
+				if name != "auto-reply" && err == nil {
+					t.Fatal("nil error from a failed send")
+				}
+				if a := r.ch.Allowance(r.clock()); a != 2-spent {
+					t.Fatalf("allowance %d after a failed send, want %d", a, 2-spent)
+				}
+			})
 		}
 	}
-	g.fail = nil
+	r, _, open := raceRig(t, 2)
+	open()
 	r.ch.SetCurrent(func([]string) bool { return false })
 	if err := r.ch.PostAbout(ClassUpdate, "Cleared.", []string{"k"}); err != nil {
 		t.Fatal(err)
@@ -200,5 +224,180 @@ func TestFailedOrDroppedSendIsUncounted(t *testing.T) {
 	}
 	if a := r.ch.Allowance(r.clock()); a != 2 {
 		t.Fatalf("allowance %d after a dropped text, want 2", a)
+	}
+}
+
+// REQ: CH-15 (#1638)
+// Each paced send checks the allowance and counts its text in one hold
+// of the lock, so no send beside it can spend the last text in between
+// (P/UX/L3 on #1686: an unlock between the two survived the other tests).
+func TestPacedCheckAndCountShareOneHold(t *testing.T) {
+	for name, send := range map[string]func(r *rig) error{
+		"post":       func(r *rig) error { return r.ch.Post(ClassUpdate, "An update.") },
+		"notify-now": func(r *rig) error { return r.ch.NotifyNow("Q1 asks: which time?") },
+		"release": func(r *rig) error {
+			r.ch.mu.Lock()
+			r.ch.codes.st.Held = []HeldText{{Text: "Held.", Class: ClassUpdate, At: r.clock()}}
+			r.ch.mu.Unlock()
+			return r.ch.Release()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, _, open := raceRig(t, 2)
+			open()
+			if err := send(r); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.sentTexts(); len(got) != 1 {
+				t.Fatalf("sent %q, want one text", got)
+			}
+			r.ch.mu.Lock()
+			checked, counted := r.ch.checkedIn, r.ch.countedIn
+			r.ch.mu.Unlock()
+			if counted == 0 || checked != counted {
+				t.Fatalf("checked in hold %d, counted in hold %d: want one hold", checked, counted)
+			}
+		})
+	}
+}
+
+// REQ: CH-15 (#1638)
+// Two sends that count at once both stay counted. A send that read the
+// clock before the lock could count an earlier time than a send that
+// counted while it waited; the later stamp then read as a clock step back
+// and was dropped, so two texts went with one counted (security B1 on
+// #1686). Here a concurrent urgent send runs inside each clock read of
+// the send under test, at a later time.
+func TestConcurrentCountsAreAllKept(t *testing.T) {
+	sends := map[string]func(r *rig) error{
+		"urgent":     func(r *rig) error { return r.ch.Post(ClassSecurity, "First alert.") },
+		"post":       func(r *rig) error { return r.ch.Post(ClassUpdate, "An update.") },
+		"notify-now": func(r *rig) error { return r.ch.NotifyNow("Q1 asks: which time?") },
+		"release": func(r *rig) error {
+			r.ch.mu.Lock()
+			r.ch.codes.st.Held = []HeldText{{Text: "Held.", Class: ClassUpdate, At: r.clock()}}
+			r.ch.mu.Unlock()
+			return r.ch.Release()
+		},
+	}
+	for name, send := range sends {
+		reads := skewRun(t, send, 0)
+		for k := 1; k <= reads; k++ {
+			t.Run(fmt.Sprintf("%s/read%d", name, k), func(t *testing.T) { skewRun(t, send, k) })
+		}
+	}
+}
+
+// skewRun runs send on a fresh channel allowed 5 texts an hour. At the
+// k-th clock read, it moves the clock a second on and runs an urgent
+// send beside it, letting it finish first unless send holds the lock,
+// and returns the time read before the move. It then checks both texts
+// went and both are counted. It returns how many clock reads send made.
+func skewRun(t *testing.T, send func(*rig) error, k int) int {
+	t.Helper()
+	st := &MemStore{}
+	if err := st.Save(State{Pacing: Pacing{PerHour: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	r := newRig(t, st)
+	var (
+		mu    sync.Mutex
+		armed bool
+		reads int
+		other chan error
+	)
+	r.edit = func(c *Config) {
+		c.Now = func() time.Time {
+			mu.Lock()
+			if !armed {
+				mu.Unlock()
+				return r.clock()
+			}
+			reads++
+			fire := reads == k
+			if fire {
+				armed = false
+			}
+			mu.Unlock()
+			now := r.clock()
+			if fire {
+				r.advance(time.Second)
+				other = make(chan error, 1)
+				go func() { other <- r.ch.Post(ClassSecurity, "Second alert.") }()
+				select {
+				case err := <-other:
+					other <- err
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+			return now
+		}
+	}
+	r.ch = r.open()
+	mu.Lock()
+	armed = true
+	mu.Unlock()
+	if err := send(r); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	armed = false
+	n := reads
+	mu.Unlock()
+	if k == 0 {
+		return n
+	}
+	if other == nil {
+		t.Fatalf("send made %d clock reads, fewer than %d", n, k)
+	}
+	if err := <-other; err != nil {
+		t.Fatal(err)
+	}
+	if got := r.sentTexts(); len(got) != 2 {
+		t.Fatalf("sent %q, want two texts", got)
+	}
+	if a := r.ch.Allowance(r.clock()); a != 3 {
+		t.Fatalf("allowance %d after two texts of 5, want 3", a)
+	}
+	return n
+}
+
+// REQ: CH-15 (#1638)
+// A text counts toward the hour from when its send returned, not from
+// when it was counted before the send: one that waited two minutes in the
+// modem still spends the allowance 59 minutes after it went (security R3
+// on #1686).
+func TestCountRunsFromTheSend(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		fail error
+	}{{"sent", nil}, {"maybe-sent", modem.ErrDown}} {
+		t.Run(c.name, func(t *testing.T) {
+			r, g, open := raceRig(t, 1)
+			g.fail = c.fail
+			if c.fail != nil {
+				g.failAfter = func() { r.advance(2 * time.Minute) }
+			}
+			wait := func() error { return nil }
+			if c.fail == nil {
+				wait = inFlight(t, g, func() error { return r.ch.Post(ClassSecurity, "Security alert.") })
+				r.advance(2 * time.Minute)
+				open()
+			} else {
+				open()
+				_ = r.ch.Post(ClassSecurity, "Security alert.")
+			}
+			if err := wait(); err != nil {
+				t.Fatal(err)
+			}
+			r.advance(59 * time.Minute)
+			if a := r.ch.Allowance(r.clock()); a != 0 {
+				t.Fatalf("allowance %d 59 minutes after the send, want 0", a)
+			}
+			r.advance(2 * time.Minute)
+			if a := r.ch.Allowance(r.clock()); a != 1 {
+				t.Fatalf("allowance %d an hour after the send, want 1", a)
+			}
+		})
 	}
 }

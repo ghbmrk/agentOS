@@ -10,6 +10,7 @@ package modem
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 	"unicode/utf16"
@@ -47,6 +48,11 @@ type Modem interface {
 
 // ErrDown is returned by a line whose modem is unplugged or offline.
 var ErrDown = errors.New("modem: line is down")
+
+// ErrNotSent is ErrDown for a text that provably never reached a modem,
+// so a sender that counted it may uncount it. Any other error from Send
+// may hide a text that went (owner pacer, #1638).
+var ErrNotSent = fmt.Errorf("%w: the text was not sent", ErrDown)
 
 // Carrier is a simulated mobile network.
 type Carrier struct {
@@ -135,7 +141,7 @@ func (l *Line) Send(to, text string) error {
 	down := l.down
 	l.mu.Unlock()
 	if down {
-		return ErrDown
+		return ErrNotSent
 	}
 	l.c.deliver(SMS{From: l.number, To: to, Text: text})
 	return nil

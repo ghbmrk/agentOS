@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/control"
+	"github.com/ghbmrk/agentos/broker/modem"
 )
 
 // The pacer holds unsolicited texts to the owner in quiet hours and past
@@ -208,9 +209,11 @@ func (c *Channel) postHeld(class Class, h HeldText) error {
 	// Older held texts go first. A failed release leaves them held, and
 	// this one then waits behind them.
 	_ = c.releasePaced()
-	now := c.cfg.Now()
 	wait := len(h.Subjects) > 0 && c.current.Load() == nil
 	c.mu.Lock()
+	// Read under c.mu, so a text counted beside this one is never later
+	// than now and dropped from the count as a clock step back (#1638).
+	now := c.cfg.Now()
 	st := &c.codes.st
 	if wait || len(st.Held) > 0 || st.HeldDropped > 0 || c.quietLocked(now) || c.allowanceLocked(now) == 0 {
 		err := c.codes.commit(func(s *State) {
@@ -266,8 +269,8 @@ func (c *Channel) NotifyNow(text string) error {
 	}
 	c.pmu.Lock()
 	defer c.pmu.Unlock()
-	now := c.cfg.Now()
 	c.mu.Lock()
+	now := c.cfg.Now()
 	if c.quietLocked(now) || c.allowanceLocked(now) == 0 {
 		c.mu.Unlock()
 		return ErrPaced
@@ -292,29 +295,58 @@ func (c *Channel) sendCounted(text string) error {
 	return c.sendReserved(c.reserve(), text)
 }
 
-// sendReserved sends text, already counted at at, and uncounts it if the
-// send failed.
+// sendReserved sends text, already counted at at, and settles the count.
 func (c *Channel) sendReserved(at time.Time, text string) error {
-	if err := c.cfg.Modem.Send(c.cfg.Owner, text); err != nil {
-		c.unreserve(at)
-		return err
-	}
-	return nil
+	err := c.cfg.Modem.Send(c.cfg.Owner, text)
+	c.settle(at, err)
+	return err
 }
 
-// reserve is reserveLocked for a caller without c.mu.
-func (c *Channel) reserve() time.Time {
-	now := c.cfg.Now()
+// settle ends the count made at at once its send returned err. A text
+// that provably did not go (modem.ErrNotSent) is uncounted. Any other
+// outcome may have sent it, so it stays counted, moved to now: a send can
+// wait minutes in the modem's queue, and the text spends the hour from
+// when it went, not from when it was counted.
+func (c *Channel) settle(at time.Time, err error) {
+	if errors.Is(err, modem.ErrNotSent) {
+		c.unreserve(at)
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.reserveLocked(now)
+	now := c.cfg.Now()
+	if !now.After(at) {
+		return
+	}
+	_ = c.saveLocked(func(s *State) {
+		for i := len(s.Sent) - 1; i >= 0; i-- {
+			if s.Sent[i].Equal(at) {
+				// A copy, as saveLocked may apply f twice.
+				s.Sent = slices.Clone(s.Sent)
+				s.Sent[i] = now
+				return
+			}
+		}
+	})
+}
+
+// reserve is reserveLocked for a caller without c.mu. It reads the clock
+// under c.mu, as every caller of reserveLocked must, so the stamps of
+// concurrent sends are in order and none is dropped from the count as a
+// clock step back (#1638).
+func (c *Channel) reserve() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reserveLocked(c.cfg.Now())
 }
 
 // reserveLocked counts one unsolicited text toward the hour before it is
 // sent, so a send running beside it sees the text spent (CH-15, #1638),
 // and returns the time it counted. The count is kept even if saving it
 // fails. The caller uncounts it with unreserve if the text does not go.
+// now is read under the same hold of c.mu.
 func (c *Channel) reserveLocked(now time.Time) time.Time {
+	c.countedIn = c.mu.holds
 	_ = c.saveLocked(func(s *State) { s.Sent = append(recentSends(s.Sent, now), now) })
 	return now
 }
@@ -377,8 +409,8 @@ func (c *Channel) Release() error {
 // releasePaced is Release with c.pmu held.
 func (c *Channel) releasePaced() error {
 	for {
-		now := c.cfg.Now()
 		c.mu.Lock()
+		now := c.cfg.Now()
 		st := c.codes.st
 		if (len(st.Held) == 0 && st.HeldDropped == 0) || c.quietLocked(now) || c.allowanceLocked(now) == 0 {
 			c.mu.Unlock()
@@ -427,8 +459,8 @@ func (c *Channel) releasePaced() error {
 		// The Current hook ran without c.mu, so a send beside this
 		// release may have spent the hour since the check above: check
 		// again and count the text in one step before it goes (#1638).
-		now = c.cfg.Now()
 		c.mu.Lock()
+		now = c.cfg.Now()
 		if c.quietLocked(now) || c.allowanceLocked(now) == 0 {
 			c.mu.Unlock()
 			return nil
@@ -548,6 +580,7 @@ func (c *Channel) Allowance(now time.Time) int {
 }
 
 func (c *Channel) allowanceLocked(now time.Time) int {
+	c.checkedIn = c.mu.holds
 	n := c.codes.st.Pacing.perHour() - len(recentSends(c.codes.st.Sent, now))
 	if n < 0 {
 		return 0
