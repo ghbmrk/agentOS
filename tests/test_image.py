@@ -1995,10 +1995,14 @@ class ConfFilesTest(unittest.TestCase):
         link(self.root, "etc/sysctl.d/99-x.conf", "/run/agentos/x.conf")
         self.assertIn("etc/sysctl.d/99-x.conf: unreadable (it resolves to /run/agentos/x.conf", self.v())
         d.unlink()
-        if os.geteuid() != 0:
-            f = write(self.root, "etc/sysctl.d/99-x.conf", "net.ipv4.ip_forward=1\n", mode=0o000)
-            self.assertIn("etc/sysctl.d/99-x.conf: unreadable", self.v())
-            f.chmod(0o644)
+        # Only a build without root's DAC override (CI's checks job) can see a mode-000 file fail.
+        f = write(self.root, "etc/sysctl.d/99-x.conf", "net.ipv4.ip_forward=1\n", mode=0o000)
+        try:
+            f.read_bytes()
+        except PermissionError:
+            self.assertIn("etc/sysctl.d/99-x.conf: unreadable (Permission denied)", self.v())
+        f.chmod(0o644)
+        f.unlink()
         # Unreadable through the same code path, whoever runs it.
         with unittest.mock.patch.object(check.Conf, "read_bytes", side_effect=PermissionError(13, "Permission denied")):
             self.assertIn("99-agentos-nodump.conf: unreadable (Permission denied)",
