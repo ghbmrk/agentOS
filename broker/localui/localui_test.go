@@ -63,8 +63,10 @@ type fakeHooks struct {
 	finishErr error  // returned by Finish after the owner channel exists
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
-	noTexts     bool  // the box cannot text: BoxNumber answers "", false
-	keyErr      error // ConnectAPIKey's answer when set; nothing is stored
+	noTexts     bool   // the box cannot text: BoxNumber answers "", false
+	keyErr      error  // ConnectAPIKey's answer when set; nothing is stored
+	deviceErr   error  // StartDeviceCode's answer when set
+	deviceLink  string // StartDeviceCode's link when set
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -172,8 +174,14 @@ func (f *fakeHooks) ConnectAPIKey(id, key string) error {
 func (f *fakeHooks) StartDeviceCode(id string) (string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.deviceErr != nil {
+		return "", "", f.deviceErr
+	}
 	if f.device {
 		f.connected = true // the owner finishes on the provider's site
+	}
+	if f.deviceLink != "" {
+		return f.deviceLink, "WXYZ-1234", nil
 	}
 	return "https://example.invalid/device", "WXYZ-1234", nil
 }
@@ -408,8 +416,9 @@ func (r *rig) runSetupToAI() {
 	r.hooks.mu.Lock()
 	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
 	r.hooks.mu.Unlock()
-	// CAP-9: the private-data question is asked, unticked (default no).
-	if p := r.get("/setup"); !strings.Contains(p, `name="private" value="1">`) || strings.Contains(p, `name="private" value="1" checked`) {
+	// CAP-9: the private-data question is asked, unticked on an API key
+	// (D-115: ticked only on a plan sign-in, privatedefault_test.go).
+	if p := setupForms(t, r.get("/setup"))["ai-key openai"]; !strings.Contains(p, `name="private" value="1">`) || strings.Contains(p, "checked") {
 		t.Fatalf("no private-data question, or ticked by default: %s", p)
 	}
 }

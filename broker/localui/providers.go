@@ -53,6 +53,9 @@ type providersView struct {
 	Providers    []ProviderStatus
 	// Withdrawing is the provider the page asks about before withdrawing.
 	Withdrawing *ProviderStatus
+	// NoneAllowed: no connected provider may see private content, so
+	// the page says tasks that need it can't run (U-5).
+	NoneAllowed bool
 	Err         string
 	Refresh     string
 }
@@ -125,8 +128,11 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "providers", v)
 		return
 	}
-	v.Providers = ps
+	v.Providers, v.NoneAllowed = ps, true
 	for i := range ps {
+		if ps[i].Connected && ps[i].PrivateOK {
+			v.NoneAllowed = false
+		}
 		if ps[i].ID == withdraw && ps[i].PrivateOK {
 			v.Withdrawing = &ps[i]
 		}
