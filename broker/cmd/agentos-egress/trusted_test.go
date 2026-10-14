@@ -1161,36 +1161,27 @@ func TestLegacyPINOffLeavesTheDASettings(t *testing.T) {
 func TestPINEnrollAfterTheSlotIsDecidedKeepsTheLockout(t *testing.T) {
 	r := newPCRig(t)
 	r.unknownHostUnlock(t)
-	defer vault.InjectSealFault(errors.New("input/output error"))()
-	r.notes = nil
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
 	if _, err := r.c.trust(r.code(), "246810"); !errors.Is(err, errHostSlotDecidedPIN) {
 		t.Fatalf("enroll after the seal: %v", err)
 	}
-	// The owner channel records that the PC became trusted (#1557 review).
-	if len(r.notes) != 1 || !strings.Contains(r.notes[0], "trusted host") || !strings.Contains(r.notes[0], "did not finish") {
-		t.Fatalf("owner not told the PC is trusted: %q", r.notes)
+	restore()
+	// The PC is trusted, so the owner is told so (CRED-9).
+	if len(r.notes) == 0 || !strings.Contains(r.notes[len(r.notes)-1], "trusted host, with a boot PIN (saving not finished)") {
+		t.Fatalf("no owner notice for a decided enroll: %q", r.notes)
 	}
 	if r.lockoutEntry() == "" {
 		t.Fatal("lockout authorization dropped though the PIN slot was decided")
 	}
+	// The text's step: trust again finishes it, with one host listed.
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatalf("trust again after a decided enroll: %v", err)
+	}
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 {
+		t.Fatalf("hosts after trust again: %v, %v", hosts, err)
+	}
 	if err := r.tpm.ThiefLockReset(); err == nil {
 		t.Fatal("empty lockout password resets the PIN guess counter: the lockout was released")
-	}
-}
-
-// REQ: CRED-8, HW-1
-
-// Without a PIN the decided path reports the plain message and still tells
-// the owner channel.
-func TestEnrollWithoutPINAfterTheSlotIsDecided(t *testing.T) {
-	r := newPCRig(t)
-	r.unknownHostUnlock(t)
-	defer vault.InjectSealFault(errors.New("input/output error"))()
-	r.notes = nil
-	if _, err := r.c.trust(r.code(), ""); !errors.Is(err, errHostSlotDecided) {
-		t.Fatalf("enroll after the seal: %v", err)
-	}
-	if len(r.notes) != 1 || !strings.Contains(r.notes[0], "did not finish") {
-		t.Fatalf("owner not told: %q", r.notes)
 	}
 }

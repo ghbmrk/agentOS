@@ -100,12 +100,9 @@ var (
 	errNoSuchHost   = uerr(http.StatusNotFound, "no trusted host with that id")
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
 	// errHostSlotDecided: the slot change was decided before it failed, so
-	// the PC is trusted (VAULT-slot-decided, #1557). Trusting again is safe
-	// and finishes it now.
-	errHostSlotDecided = uerr(http.StatusInternalServerError, "this PC is now trusted, but saving it did not finish, so the trusted-hosts list may not show it yet. Trust this PC again to finish now, or it finishes when the vault next opens")
-	// errHostSlotDecidedPIN adds what a boot PIN changes: it is set, but
-	// asked for only once the save has finished.
-	errHostSlotDecidedPIN = uerr(http.StatusInternalServerError, "this PC is now trusted with the boot PIN you set, but saving it did not finish, so the trusted-hosts list may not show it yet. Trust this PC again to finish now, with the same PIN, or it finishes when the vault next opens")
+	// the PC is trusted (VAULT-slot-decided, #1557).
+	errHostSlotDecided    = uerr(http.StatusInternalServerError, "This PC is trusted, but I could not finish saving that. It finishes the next time I start; to finish it now, run trust again. Until then it may not show in the list.")
+	errHostSlotDecidedPIN = uerr(http.StatusInternalServerError, "This PC is trusted and its boot PIN is now needed at power-on, but I could not finish saving that. It finishes the next time I start; to finish it now, run trust again. Until then it may not show in the list.")
 	errLockoutOwned       = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so I can't protect a boot PIN here. Trust this PC without a PIN instead.")
 
 	// Rollback (V6): the drive's vault is older than this PC's counter.
@@ -1439,12 +1436,12 @@ func (c *custody) trust(code, pin string) (string, error) {
 		return "", errLockoutOwned
 	}
 	if errors.Is(err, vault.ErrSlotDecided) {
-		// The PC is trusted all the same: the owner channel says so.
+		// The PC is trusted all the same, so the owner hears of it (CRED-9).
 		if pin != "" {
-			c.notify("this PC is now a trusted host, with a boot PIN, but saving it did not finish")
+			c.notify("this PC is now a trusted host, with a boot PIN (saving not finished)")
 			return "", errHostSlotDecidedPIN
 		}
-		c.notify("this PC is now a trusted host, but saving it did not finish")
+		c.notify("this PC is now a trusted host (saving not finished)")
 		return "", errHostSlotDecided
 	}
 	if err != nil {

@@ -548,3 +548,28 @@ func TestRotationSlotPartsDecidedAndUndecided(t *testing.T) {
 		})
 	}
 }
+
+// REQ: REC-4, HW-1
+
+// The passphrase half of the same fix: a passphrase Rekey that errors after
+// its slot is decided has changed the passphrase, so the card returned
+// carries the new one and the vault opens with it.
+func TestPassphraseRotationWhoseSlotIsDecidedReportsWhatIsInEffect(t *testing.T) {
+	x := newBox(t)
+	x.withPassphrase()
+	p, err := BeginRotate(x.b, []Part{PartPassphrase}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0)
+	must(t, err)
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	next := newParts(p)
+	nc, err := p.Commit(x.b, next, t0)
+	restore()
+	if !errors.Is(err, ErrCardNotStored) || !errors.Is(err, vault.ErrSlotDecided) {
+		t.Fatalf("passphrase rotation with a decided slot: %v", err)
+	}
+	if nc.VaultPassphrase != next.VaultPassphrase {
+		t.Fatal("returned card does not carry the passphrase now in effect")
+	}
+	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, vault.Passphrase(nc.VaultPassphrase)); err != nil {
+		t.Fatalf("vault does not open with the passphrase now in effect: %v", err)
+	}
+}
