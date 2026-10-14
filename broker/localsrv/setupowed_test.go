@@ -351,3 +351,89 @@ func TestTheProvidersListOwesOnlyWhatTheRecordOwes(t *testing.T) {
 		t.Fatalf("the vault's claim is owed: %v", *o)
 	}
 }
+
+// sealedProviders answers EnrollClosed once the vault is sealed, as the
+// vault's provider ops do (K17).
+type sealedProviders struct {
+	*fakeProviders
+	v *fakeVault
+}
+
+func (p *sealedProviders) Providers() ([]localapi.SetupProvider, error) {
+	if p.v.sealed {
+		return nil, EnrollClosed
+	}
+	return p.fakeProviders.Providers()
+}
+
+func (p *sealedProviders) SetPrivateOK(provider string, ok bool) error {
+	if p.v.sealed {
+		return EnrollClosed
+	}
+	return p.fakeProviders.SetPrivateOK(provider, ok)
+}
+
+// #1554 delta S-1: finish seals the vault but its finished record fails
+// to save. The sealed vault lists nothing, so a private answer posted
+// after that is refused as unavailable and left unowed, an answer owed
+// by then cannot reach any provider, and the next finish closes setup
+// instead of answering answer owed for good (ONB-3). The vault keeps the
+// answers it took before the seal (CAP-9).
+func TestASealWhoseFinishedSaveFailedDoesNotWedgeFinish(t *testing.T) {
+	r, f := providersRig(t)
+	rec := &failRecord{FileRecord: FileRecord{Path: r.path}}
+	r.s.cfg.Record = rec
+	r.s.cfg.Providers = &sealedProviders{fakeProviders: f, v: r.vault}
+	r.enrollAndConfirm()
+	if err := r.call(localapi.OpSetupPrivateOK, localapi.PrivateOK{Provider: "anthropic", OK: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	rec.fail = true
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: ownerNumber}, nil); code(err) != localapi.ErrFailed {
+		t.Fatalf("finish with an unwritable record answered %v", err)
+	}
+	if !r.vault.sealed || len(r.finished) != 0 {
+		t.Fatal("the vault is not sealed, or setup finished unsaved")
+	}
+	rec.fail = false
+
+	// A no posted after the seal reaches no provider and is not owed.
+	if err := r.call(localapi.OpSetupPrivateOK, localapi.PrivateOK{Provider: "anthropic"}, nil); code(err) != localapi.ErrEnrollUnavailable {
+		t.Fatalf("an answer to a sealed vault answered %v", err)
+	}
+	if len(recordOwed(r)) != 0 || !f.private["anthropic"] {
+		t.Fatalf("a refused answer is owed, or the vault's yes changed: %v", recordOwed(r))
+	}
+
+	// An answer owed by then (its restore could not be written) holds
+	// nothing: the sealed vault lists no provider to owe it to.
+	no := false
+	r.s.mu.Lock()
+	err := r.s.setOwedLocked("anthropic", &no)
+	r.s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: ownerNumber}, nil); err != nil {
+		t.Fatalf("finish after the seal answered %v", err)
+	}
+	if len(r.finished) != 1 || !f.private["anthropic"] {
+		t.Fatal("setup did not finish, or the vault's yes changed")
+	}
+}
+
+// A list that fails for any other reason still owes: finish cannot tell.
+func TestAFailedListStillHoldsFinish(t *testing.T) {
+	r, f := providersRig(t)
+	r.enrollAndConfirm()
+	f.err = errors.New("vault down")
+	if err := r.call(localapi.OpSetupPrivateOK, localapi.PrivateOK{Provider: "anthropic"}, nil); code(err) != localapi.ErrFailed {
+		t.Fatalf("a down vault answered %v", err)
+	}
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: ownerNumber}, nil); code(err) != localapi.ErrAnswerOwed {
+		t.Fatalf("finish with the list down answered %v", err)
+	}
+	if r.vault.sealed || len(r.finished) != 0 {
+		t.Fatal("finish sealed or finished with an answer owed")
+	}
+}
