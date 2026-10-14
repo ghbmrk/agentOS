@@ -789,3 +789,140 @@ func TestAStoreFailureDoesNotNameThePath(t *testing.T) {
 		t.Fatalf("a failed store kept the question: %v", err)
 	}
 }
+
+// REQ: CAP-10 (#1564)
+// A question texted while the clock was restricted has no deadline until
+// a trusted time dates it. An answer that arrives at a trusted time
+// before the next tick dates it from the monotonic clock; a zero deadline
+// never reads as passed, so the answer is taken, not defaulted.
+func TestAnswerDatesAQuestionTextedWhileRestricted(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Quiet = nil })
+	r.set(func() { r.restricted = true })
+	st := r.ask("lin1", "q1", slot())
+	if len(r.texts()) != 1 {
+		t.Fatalf("texts %q, want the question texted while restricted", r.texts())
+	}
+	if st.State != Waiting || !st.Deadline.IsZero() {
+		t.Fatalf("restricted status %+v, want Waiting with no deadline yet", st)
+	}
+	r.set(func() { r.restricted = false })
+	r.advance(5 * time.Minute)
+	if reply, ok := r.answer(st.ID + " 9:00"); !ok || strings.Contains(strings.ToLower(reply), "late") {
+		t.Fatalf("answer reply %q ok=%v, want it taken", reply, ok)
+	}
+	got := r.status("lin1", "q1")
+	if got.State != Answered || got.Answer != "9:00" {
+		t.Fatalf("status %+v, want Answered 9:00", got)
+	}
+}
+
+// REQ: CAP-10, CH-15 (#1564)
+// An answer that comes after the wait of a question texted while the
+// clock was restricted, but before any tick dated it, is too late: the
+// question defaults, as if the deadline had been set at the text.
+func TestLateAnswerToAQuestionTextedWhileRestricted(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Quiet = nil })
+	r.set(func() { r.restricted = true })
+	st := r.ask("lin1", "q1", slot())
+	if len(r.texts()) != 1 || !st.Deadline.IsZero() {
+		t.Fatalf("texts %q status %+v, want one text with no deadline yet", r.texts(), st)
+	}
+	r.set(func() { r.restricted = false })
+	r.advance(31 * time.Minute)
+	if reply, ok := r.answer(st.ID + " 9:00"); !ok || !strings.HasPrefix(reply, "Too late for "+st.ID) {
+		t.Fatalf("answer reply %q ok=%v, want Too late", reply, ok)
+	}
+	got := r.status("lin1", "q1")
+	if got.State != Defaulted {
+		t.Fatalf("status %+v, want Defaulted", got)
+	}
+}
+
+// REQ: CAP-10, CH-15 (#1564)
+// The ctx can end while Now runs, which then fails with ctx.Err. That is
+// not a restricted clock either: nothing is texted.
+func TestContextCancelledDuringNowTextsNothing(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Quiet = nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	now, calls := r.cfg.Now, 0
+	r.cfg.Now = func(c context.Context) (time.Time, error) {
+		if c == ctx {
+			calls++
+			if calls == 2 {
+				cancel()
+				return time.Time{}, c.Err()
+			}
+		}
+		return now(c)
+	}
+	r.open()
+	if _, err := r.b.Ask(ctx, "lin1", "q1", slot()); err != nil {
+		t.Fatal(err)
+	}
+	if calls < 2 {
+		t.Fatalf("Now called %d times on the ask's ctx, want the send's call too", calls)
+	}
+	if len(r.texts()) != 0 {
+		t.Fatalf("texted after the ctx ended during Now: %q", r.texts())
+	}
+	r.b.Tick(ctx)
+	if len(r.texts()) != 0 {
+		t.Fatalf("Tick on an ended ctx texted %q", r.texts())
+	}
+	r.b.Tick(context.Background())
+	got := r.status("lin1", "q1")
+	if len(r.texts()) != 1 || got.State != Waiting || got.Deadline.IsZero() {
+		t.Fatalf("after a live tick: texts %q status %+v, want one text with a deadline", r.texts(), got)
+	}
+}
+
+// REQ: CAP-10, CH-15 (#1564)
+// A cancelled ctx makes the clock guard's Now fail with ctx.Err. That is
+// not a restricted clock: nothing is texted on it, since the text would
+// carry no deadline. The next tick texts the question with a real one.
+func TestCancelledContextTextsNothing(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Quiet = nil })
+	now := r.cfg.Now
+	r.cfg.Now = func(ctx context.Context) (time.Time, error) {
+		if err := ctx.Err(); err != nil {
+			return time.Time{}, err
+		}
+		return now(ctx)
+	}
+	r.open()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	st, err := r.b.Ask(ctx, "lin1", "q1", slot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.texts()) != 0 {
+		t.Fatalf("texted on a cancelled ctx: %q", r.texts())
+	}
+	if st.State != Held {
+		t.Fatalf("status %+v, want Held", st)
+	}
+	r.b.Tick(context.Background())
+	if len(r.texts()) != 1 {
+		t.Fatalf("texts after tick %q, want the question", r.texts())
+	}
+	got := r.status("lin1", "q1")
+	if got.State != Waiting || !got.Deadline.Equal(r.clock.Add(30*time.Minute)) {
+		t.Fatalf("status %+v, want Waiting with the deadline 30m from the text", got)
+	}
+}
+
+// REQ: CH-15 (#1563)
+// With the owner's quiet hours wired, a restricted clock holds questions
+// only when the owner set quiet hours; with none set, they go out with
+// their wait (PQ4).
+func TestRestrictedClockHoldsOnlyForQuietHoursSet(t *testing.T) {
+	for _, set := range []bool{false, true} {
+		r := newRig(t, func(c *Config) { c.QuietHours = func() bool { return set } })
+		r.set(func() { r.restricted = true })
+		r.ask("lin1", "q1", slot())
+		if sent := len(r.texts()) == 1; sent == set {
+			t.Errorf("quiet hours set=%v: texts %q", set, r.texts())
+		}
+	}
+}
