@@ -147,6 +147,12 @@ func (c *Client) reader() {
 			c.ErrorLog.Println("error reading response:", err)
 		}
 		if !connected {
+			// agentos: a read error (not a parse error) leaves the stream
+			// unusable, so close it as the panic guard does, instead of
+			// leaving it open for the next command (SR3-mail-k18b).
+			if err != nil {
+				c.conn.Close()
+			}
 			return
 		}
 	}

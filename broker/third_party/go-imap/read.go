@@ -141,7 +141,22 @@ type Reader struct {
 
 	brackets   int
 	inRespCode bool
+
+	// agentos: depth counts the lists ReadList is inside (SR3-mail-k18b).
+	depth int
 }
+
+// agentos: maxListDepth bounds list nesting. ReadList and ReadFields
+// recurse once per level, so a reply of nothing but "(" overflowed the
+// reader goroutine's stack, a fatal error no recover catches. Real
+// replies nest a few levels (BODYSTRUCTURE of a deep multipart a few
+// dozen). Exceeding it is not a parse error, so the client's reader
+// stops instead of resyncing in the middle of a hostile reply.
+const maxListDepth = 100
+
+// ErrListTooDeep is returned by ReadList for lists nested deeper than
+// maxListDepth.
+var ErrListTooDeep = errors.New("imap: list nested too deep")
 
 func (r *Reader) ReadSp() error {
 	char, _, err := r.ReadRune()
@@ -181,7 +196,9 @@ func (r *Reader) ReadCrlf() (err error) {
 func (r *Reader) ReadAtom() (interface{}, error) {
 	r.brackets = 0
 
-	var atom string
+	// agentos: a Builder, not string +=, which copied the whole atom per
+	// rune: an endless atom cost quadratic time (SR3-mail-k18b).
+	var atom strings.Builder
 	for {
 		char, _, err := r.ReadRune()
 		if err != nil {
@@ -212,16 +229,16 @@ func (r *Reader) ReadAtom() (interface{}, error) {
 			r.brackets++
 		}
 
-		atom += string(char)
+		atom.WriteRune(char)
 	}
 
 	r.UnreadRune()
 
-	if atom == nilAtom {
+	if atom.String() == nilAtom {
 		return nil, nil
 	}
 
-	return atom, nil
+	return atom.String(), nil
 }
 
 func (r *Reader) ReadLiteral() (Literal, error) {
@@ -261,11 +278,17 @@ func (r *Reader) ReadLiteral() (Literal, error) {
 	}
 
 	// Read literal
-	b := make([]byte, n)
-	if _, err := io.ReadFull(r, b); err != nil {
+	// agentos: read what arrives rather than allocating the declared size
+	// up front, so a literal declared as 4 GB costs memory only for the
+	// bytes the server actually sends (SR3-mail-k18b).
+	b := new(bytes.Buffer)
+	if m, err := io.CopyN(b, r, int64(n)); err != nil {
+		if err == io.EOF && m < int64(n) {
+			err = io.ErrUnexpectedEOF
+		}
 		return nil, err
 	}
-	return bytes.NewBuffer(b), nil
+	return b, nil
 }
 
 func (r *Reader) ReadQuotedString() (string, error) {
@@ -369,6 +392,14 @@ func (r *Reader) ReadList() (fields []interface{}, err error) {
 		err = newParseError("list doesn't start with an open parenthesis")
 		return
 	}
+
+	// agentos: bound the recursion (SR3-mail-k18b).
+	if r.depth >= maxListDepth {
+		err = ErrListTooDeep
+		return
+	}
+	r.depth++
+	defer func() { r.depth-- }()
 
 	fields, err = r.ReadFields()
 	if err != nil {

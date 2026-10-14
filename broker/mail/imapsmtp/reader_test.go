@@ -194,6 +194,7 @@ func FuzzIMAPReplies(f *testing.F) {
 	} {
 		f.Add(s)
 	}
+	f.Add("* 1 FETCH (UID 1 BODY[] " + strings.Repeat("(", 5000)) // deeper than the list bound (SR3-mail-k18b)
 	s := hostileStore(f, "127.0.0.1:1", 3*time.Second)
 	f.Fuzz(func(t *testing.T, stream string) {
 		cl, sv := net.Pipe()
