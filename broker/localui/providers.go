@@ -20,11 +20,14 @@ type Providers interface {
 
 // ProviderStatus is one built-in provider as the vault process reports
 // it (modelroute.SetupProvider).
+// PrivateByConfig: the box's configuration allows it private data, so
+// the page cannot withdraw it (#1420).
 type ProviderStatus struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Connected bool   `json:"connected"`
-	PrivateOK bool   `json:"private_ok"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Connected       bool   `json:"connected"`
+	PrivateOK       bool   `json:"private_ok"`
+	PrivateByConfig bool   `json:"private_by_config"`
 }
 
 // ProviderList implements Providers.
@@ -133,7 +136,7 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 		if ps[i].Connected && ps[i].PrivateOK {
 			v.NoneAllowed = false
 		}
-		if ps[i].ID == withdraw && ps[i].PrivateOK {
+		if ps[i].ID == withdraw && ps[i].PrivateOK && !ps[i].PrivateByConfig {
 			v.Withdrawing = &ps[i]
 		}
 	}

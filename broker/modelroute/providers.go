@@ -13,12 +13,16 @@ import (
 
 // SetupProvider is one built-in provider as setup's AI step sees it
 // (P2-2w c4e; CRED-5, CAP-9): whether the vault holds its API key and the
-// owner's private-data answer. It never carries the key.
+// owner's private-data answer. It never carries the key. PrivateOK is
+// whether private data may go to it: the owner's marker or the vault
+// process's -private-ok flag, as the router asks (#1420). PrivateByConfig
+// says the flag allows it, which no page can withdraw.
 type SetupProvider struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Connected bool   `json:"connected"`
-	PrivateOK bool   `json:"private_ok"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Connected       bool   `json:"connected"`
+	PrivateOK       bool   `json:"private_ok"`
+	PrivateByConfig bool   `json:"private_by_config,omitempty"`
 }
 
 // SetupProviderList is the vault process's answer to GET /setup/providers.

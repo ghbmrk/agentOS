@@ -59,16 +59,19 @@ func (c *custody) setupProviders() ([]modelroute.SetupProvider, error) {
 	return c.providersLocked(), nil
 }
 
-// providersLocked lists the built-in providers. Caller holds mu with the
-// vault open.
+// providersLocked lists the built-in providers. A provider's private
+// answer is the router's (route.go privateOK): its -private-ok flag or
+// the owner's marker (#1420). Caller holds mu with the vault open.
 func (c *custody) providersLocked() []modelroute.SetupProvider {
 	var out []modelroute.SetupProvider
 	for _, a := range adapters() {
+		flag := c.privateFlags[a.Name]
 		out = append(out, modelroute.SetupProvider{
-			ID:        a.Name,
-			Name:      providerName(a.Name),
-			Connected: hasKind(c.v, a.Credential, vault.KindAPIKey),
-			PrivateOK: hasKind(c.v, PrivateOKPrefix+a.Name, KindPrivateOK),
+			ID:              a.Name,
+			Name:            providerName(a.Name),
+			Connected:       hasKind(c.v, a.Credential, vault.KindAPIKey),
+			PrivateOK:       flag || hasKind(c.v, PrivateOKPrefix+a.Name, KindPrivateOK),
+			PrivateByConfig: flag,
 		})
 	}
 	return out
