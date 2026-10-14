@@ -318,9 +318,13 @@ func TestToolErrorsNameNoHostPath(t *testing.T) {
 	for _, tl := range list.Result.Tools {
 		served[tl.Name] = true
 	}
-	// Every family agentosd registers is listed: the effect, question,
-	// managed-tree, recall and worker tools.
-	for _, n := range []string{"effect_request", "effect_status", question.ToolAsk, question.ToolStatus, toolTree, "recall_search", "recall_note", "owner_preferences", "worker_create", "worker_exec", "worker_destroy"} {
+	// Every family agentosd registers for the agent is listed: the effect,
+	// question, recall and worker tools. managed_tree is the bridge's and
+	// is not (#1488 L-1).
+	if served[toolTree] {
+		t.Fatalf("%s listed: %v", toolTree, served)
+	}
+	for _, n := range []string{"effect_request", "effect_status", question.ToolAsk, question.ToolStatus, "recall_search", "recall_note", "owner_preferences", "worker_create", "worker_exec", "worker_destroy"} {
 		if !served[n] {
 			t.Fatalf("%s not listed: %v", n, served)
 		}
