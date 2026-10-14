@@ -153,6 +153,10 @@ func HostapdConf(c APConfig) (string, error) {
 	// Clients cannot reach each other (CH-7).
 	line("ap_isolate", 1)
 	line("max_num_sta", 8)
+	// The module logger names client MAC addresses: nothing to the journal
+	// or standard output. AP-ENABLED, which Hostapd waits for, is not from it.
+	line("logger_syslog", 0)
+	line("logger_stdout", 0)
 	return b.String(), nil
 }
 
