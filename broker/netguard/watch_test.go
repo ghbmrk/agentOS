@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -21,21 +23,70 @@ func nlmsg(typ uint16) []byte {
 	return b
 }
 
-// Only address, route and link changes are events; the rest of what the
-// kernel sends on the groups is not.
-func TestNetlinkEventsAreAddressRouteAndLinkChanges(t *testing.T) {
+// neighmsg is one RTM_NEWNEIGH/RTM_DELNEIGH message for dst (an ndmsg of
+// family fam, then an NDA_LLADDR and an NDA_DST attribute).
+func neighmsg(typ uint16, fam byte, dst []byte) []byte {
+	nd := make([]byte, 12)
+	nd[0] = fam
+	attr := func(t uint16, v []byte) []byte {
+		a := make([]byte, (4+len(v)+3)&^3)
+		binary.NativeEndian.PutUint16(a[0:], uint16(4+len(v)))
+		binary.NativeEndian.PutUint16(a[2:], t)
+		copy(a[4:], v)
+		return a
+	}
+	body := append(append(nd, attr(2, []byte{2, 0, 0, 0, 0, 0x0b})...), attr(1, dst)...)
+	b := make([]byte, syscall.NLMSG_HDRLEN, syscall.NLMSG_HDRLEN+len(body))
+	b = append(b, body...)
+	binary.NativeEndian.PutUint32(b[0:], uint32(len(b)))
+	binary.NativeEndian.PutUint16(b[4:], typ)
+	return b
+}
+
+// Address, route and link changes are events, and so is a change to the
+// IPv4 default gateway's neighbour entry (a router swapped behind the same
+// address with no link event at the box, #1536); the rest of what the
+// kernel sends on the groups is not, and another host's neighbour entry
+// does not even read the route table.
+func TestNetlinkEventsAreAddressRouteLinkAndGatewayNeighbourChanges(t *testing.T) {
+	gw := netip.MustParseAddr("192.168.1.1")
+	asked := 0
+	gateway := func() netip.Addr { asked++; return gw }
 	for _, typ := range []uint16{syscall.RTM_NEWADDR, syscall.RTM_DELADDR, syscall.RTM_NEWROUTE, syscall.RTM_DELROUTE, syscall.RTM_NEWLINK, syscall.RTM_DELLINK} {
-		if !netlinkChange(nlmsg(typ)) {
+		if !netlinkChange(nlmsg(typ), gateway) {
 			t.Fatalf("type %d is a network change", typ)
 		}
 	}
-	for _, typ := range []uint16{syscall.NLMSG_DONE, syscall.NLMSG_NOOP, syscall.RTM_NEWNEIGH} {
-		if netlinkChange(nlmsg(typ)) {
+	for _, typ := range []uint16{syscall.NLMSG_DONE, syscall.NLMSG_NOOP, syscall.RTM_NEWNEIGH, syscall.RTM_GETNEIGH} {
+		if netlinkChange(nlmsg(typ), gateway) {
 			t.Fatalf("type %d is not a network change", typ)
 		}
 	}
-	if netlinkChange([]byte{1, 2, 3}) {
+	if netlinkChange([]byte{1, 2, 3}, gateway) {
 		t.Fatal("a truncated message is not a change")
+	}
+	if asked != 0 {
+		t.Fatalf("the gateway was read %d times for messages with no neighbour address", asked)
+	}
+	for _, typ := range []uint16{syscall.RTM_NEWNEIGH, syscall.RTM_DELNEIGH} {
+		if !netlinkChange(neighmsg(typ, syscall.AF_INET, []byte{192, 168, 1, 1}), gateway) {
+			t.Fatalf("type %d on the gateway's entry is a network change", typ)
+		}
+		if netlinkChange(neighmsg(typ, syscall.AF_INET, []byte{192, 168, 1, 9}), gateway) {
+			t.Fatalf("type %d on another host's entry is not a network change", typ)
+		}
+	}
+	v6 := netip.MustParseAddr("fe80::1").As16()
+	if netlinkChange(neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET6, v6[:]), gateway) {
+		t.Fatal("an IPv6 neighbour entry is not a network change")
+	}
+	two := append(neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET, []byte{192, 168, 1, 9}), neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET, []byte{192, 168, 1, 8})...)
+	asked = 0
+	if netlinkChange(two, gateway) || asked != 1 {
+		t.Fatalf("one read of other hosts' entries asked the gateway %d times", asked)
+	}
+	if netlinkChange(neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET, []byte{192, 168, 1, 1}), func() netip.Addr { return netip.Addr{} }) {
+		t.Fatal("a neighbour entry with no default gateway is not a network change")
 	}
 }
 
@@ -356,21 +407,38 @@ func TestQuickLearnGatewayChangeDropsOldExternal(t *testing.T) {
 // when ext is nil.
 type gwSources struct {
 	gw     atomic.Value // string, /proc/net/route hex
+	mac    atomic.Value // string, the gateway's MAC in /proc/net/arp; unset or "" is no entry
+	dev    atomic.Value // string, the default route's interface; unset is eth0
+	down   atomic.Bool  // the interface addresses cannot be read
 	answer chan netip.Addr
 	ext    func(ctx context.Context) (netip.Addr, error)
+}
+
+func (g *gwSources) iface() string {
+	if d, _ := g.dev.Load().(string); d != "" {
+		return d
+	}
+	return "eth0"
 }
 
 func (g *gwSources) sources() *Sources {
 	return &Sources{
 		Addrs: func() ([]net.Addr, error) {
+			if g.down.Load() {
+				return nil, errors.New("interfaces unreadable")
+			}
 			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.77"), Mask: net.CIDRMask(16, 32)}}, nil
 		},
 		ReadFile: func(f string) ([]byte, error) {
 			switch f {
 			case "/proc/net/route":
-				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t" + g.gw.Load().(string) + "\t0003\t0\t0\t100\t00000000\n"), nil
+				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n" + g.iface() + "\t00000000\t" + g.gw.Load().(string) + "\t0003\t0\t0\t100\t00000000\n"), nil
 			case "/etc/resolv.conf":
 				return []byte("nameserver 192.168.1.53\n"), nil
+			case "/proc/net/arp":
+				if m, _ := g.mac.Load().(string); m != "" {
+					return []byte(arpTable(g.gw.Load().(string), m, g.iface())), nil
+				}
 			}
 			return nil, errors.New("absent")
 		},
@@ -520,8 +588,9 @@ func TestStaleFullReadOnNewGatewayEndsHold(t *testing.T) {
 	}
 }
 
-// externalHold must outlast two full reads' router waits (the one in flight
-// and the one queued behind it), or the hold refuses on a healthy router.
+// externalHold must outlast one full read's two router requests (the first,
+// and the one to the gateway it ended on), or the hold refuses on a healthy
+// router.
 func TestExternalHoldOutlastsTwoRouterReads(t *testing.T) {
 	for _, d := range []time.Duration{externalReadTimeout, natpmpDeadline} {
 		if externalHold <= 2*d {
@@ -654,4 +723,397 @@ func waitDenied(t *testing.T, p *Policy, a netip.Addr) {
 		}
 	}
 	t.Fatalf("%v never refused as the router's address", a)
+}
+
+// arpTable is /proc/net/arp text with one complete entry on dev for the
+// gateway (route-table hex) at mac.
+func arpTable(gwHex, mac, dev string) string {
+	v, _ := strconv.ParseUint(gwHex, 16, 32)
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], uint32(v))
+	return "IP address       HW type     Flags       HW address            Mask     Device\n" +
+		netip.AddrFrom4(b).String() + "      0x1         0x2         " + mac + "     *        " + dev + "\n"
+}
+
+// A different router behind the same gateway address is a new gateway: the
+// quick read after the move (a new MAC in the neighbour table, or none yet
+// after a link flap flushed it) does not carry the previous router's
+// external address over, so public destinations wait for the new router's
+// full read, and the new router's address it learns is refused (#1536).
+func TestSameGatewayNewRouterHoldsPublicUntilFullRead(t *testing.T) {
+	for _, tc := range []struct{ name, macB string }{
+		{"new MAC", "02:00:00:00:00:0b"},
+		{"neighbour entry flushed", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eA, eB := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+			public := netip.MustParseAddr("1.1.1.1")
+			g := &gwSources{answer: make(chan netip.Addr, 1)}
+			g.gw.Store("0101A8C0")
+			g.mac.Store("02:00:00:00:00:0a")
+			s := g.sources()
+			p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+			g.answer <- eA
+			if err := p.Refresh(); err != nil {
+				t.Fatal(err)
+			}
+			g.mac.Store(tc.macB) // router B, same gateway address
+			p.quickLearn()
+			held := make(chan error, 2)
+			go func() { held <- p.Check(context.Background(), eB, 443, "tcp") }()
+			go func() { held <- p.Check(context.Background(), public, 443, "tcp") }()
+			select {
+			case err := <-held:
+				t.Fatalf("a public destination was decided before router B's full read: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			g.mac.Store("02:00:00:00:00:0b") // the NAT-PMP request resolves B
+			g.answer <- eB
+			if err := p.Refresh(); err != nil {
+				t.Fatal(err)
+			}
+			var denied, allowed int
+			for i := 0; i < 2; i++ {
+				select {
+				case err := <-held:
+					if errors.Is(err, ErrDenied) {
+						denied++
+					} else if err == nil {
+						allowed++
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("a held dial did not go ahead after the full read stored")
+				}
+			}
+			if denied != 1 || allowed != 1 {
+				t.Fatalf("after router B's full read: %d refused, %d allowed; want B's address refused and the public one allowed", denied, allowed)
+			}
+		})
+	}
+}
+
+// holdOpen reports whether public destinations are held.
+func holdOpen(p *Policy) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.hold != nil
+}
+
+// A full read the gateway changes under (another address, the same address
+// with another router's MAC, or the entry flushed and then resolved to
+// another router) asks the router it ended on, with or without a change
+// event: public destinations stay held until that router answers, never on
+// the first router's answer, and the router's address it learns is refused
+// (#1536).
+func TestFullReadAcrossGatewayChangeAsksTheEndRouter(t *testing.T) {
+	for _, tc := range []struct{ name, gw, mac, resolved string }{
+		{"new address", "0102A8C0", "02:00:00:00:00:0b", ""},
+		{"same address, new MAC", "0101A8C0", "02:00:00:00:00:0b", ""},
+		{"entry flushed", "0101A8C0", "", "02:00:00:00:00:0b"},
+	} {
+		for _, event := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, event %v", tc.name, event), func(t *testing.T) {
+				eA, eB := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+				g := &gwSources{}
+				g.gw.Store("0101A8C0")
+				g.mac.Store("02:00:00:00:00:0a")
+				s := g.sources()
+				p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+				g.ext = func(context.Context) (netip.Addr, error) { return eA, nil }
+				if err := p.Refresh(); err != nil {
+					t.Fatal(err)
+				}
+				calls := 0
+				held := make(chan error, 1)
+				g.ext = func(context.Context) (netip.Addr, error) {
+					calls++
+					switch calls {
+					case 1: // router A answers, then the gateway changes
+						g.gw.Store(tc.gw)
+						g.mac.Store(tc.mac)
+						if event {
+							p.quickLearn()
+							if !holdOpen(p) {
+								t.Error("no hold after the event")
+							}
+						}
+						return eA, nil
+					case 2: // the request to the end gateway
+						if tc.resolved != "" {
+							g.mac.Store(tc.resolved)
+							if event {
+								p.quickLearn()
+							}
+						}
+						if event {
+							if !holdOpen(p) {
+								t.Error("the first router's answer ended the hold")
+							}
+							go func() { held <- p.Check(context.Background(), eB, 443, "tcp") }()
+							select {
+							case err := <-held:
+								t.Errorf("router B's address was decided before B answered: %v", err)
+							case <-time.After(100 * time.Millisecond):
+							}
+						} else {
+							p.mu.RLock()
+							n := p.net
+							p.mu.RUnlock()
+							if n.External != eA || n.GatewayMAC != "02:00:00:00:00:0a" {
+								t.Errorf("router A's network changed with no event: %+v", n)
+							}
+						}
+						return eB, nil
+					}
+					t.Errorf("router asked %d times", calls)
+					return netip.Addr{}, errors.New("no answer")
+				}
+				if err := p.Refresh(); err != nil {
+					t.Fatal(err)
+				}
+				if calls != 2 {
+					t.Fatalf("router asked %d times, want 2", calls)
+				}
+				p.mu.RLock()
+				n := p.net
+				p.mu.RUnlock()
+				if n.External != eB || holdOpen(p) {
+					t.Fatalf("after the end router's answer: %+v, hold %v", n, holdOpen(p))
+				}
+				if event {
+					select {
+					case err := <-held:
+						if !errors.Is(err, ErrDenied) {
+							t.Fatalf("held check on router B's address: %v", err)
+						}
+					case <-time.After(2 * time.Second):
+						t.Fatal("the held check was never decided")
+					}
+				}
+				if err := p.Check(context.Background(), eB, 443, "tcp"); !errors.Is(err, ErrDenied) {
+					t.Fatalf("router B's address is dialable: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// A full read the gateway changes under twice returns ErrGatewayMoved with
+// the network it ended on, and nothing is filed. With no event, the policy
+// applies that network as a quick read would: a never-seen gateway holds
+// public destinations, and the next full read ends the hold.
+func TestFullReadMovedTwiceHoldsUntilNextRead(t *testing.T) {
+	eA, e3 := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+	g := &gwSources{}
+	g.gw.Store("0101A8C0")
+	s := g.sources()
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	g.ext = func(context.Context) (netip.Addr, error) { return eA, nil }
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	gws := []string{"0102A8C0", "0103A8C0"}
+	g.ext = func(context.Context) (netip.Addr, error) {
+		g.gw.Store(gws[0])
+		gws = gws[1:]
+		return eA, nil
+	}
+	if err := p.Refresh(); !errors.Is(err, ErrGatewayMoved) {
+		t.Fatalf("a read moved under twice: %v", err)
+	}
+	p.mu.RLock()
+	n := p.net
+	p.mu.RUnlock()
+	if n.Gateway != netip.MustParseAddr("192.168.3.1") || n.External.IsValid() || !holdOpen(p) {
+		t.Fatalf("after the double move: %+v, hold %v", n, holdOpen(p))
+	}
+	if ln, _ := s.ReadLocal(); ln.External.IsValid() {
+		t.Fatalf("an answer was filed under the end gateway: %v", ln.External)
+	}
+	g.ext = func(context.Context) (netip.Addr, error) { return e3, nil }
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if holdOpen(p) {
+		t.Fatal("the next full read did not end the hold")
+	}
+	if err := p.Check(context.Background(), e3, 443, "tcp"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("G3's router address is dialable: %v", err)
+	}
+}
+
+// The worker follows a full read that returned ErrGatewayMoved with another
+// at once, without waiting for an event or a poll.
+func TestWatchRereadsAfterGatewayMoved(t *testing.T) {
+	var calls atomic.Int32
+	again := make(chan struct{}, 1)
+	p := New(Config{Source: func() (Network, error) {
+		n := Network{Prefixes: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}, Gateway: netip.MustParseAddr("192.168.1.1")}
+		if calls.Add(1) == 1 {
+			return n, ErrGatewayMoved
+		}
+		select {
+		case again <- struct{}{}:
+		default:
+		}
+		return n, nil
+	}})
+	ev := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.WatchEventsEvery(ctx, ev, time.Hour); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	ev <- struct{}{}
+	select {
+	case <-again:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no full read after ErrGatewayMoved (%d reads)", calls.Load())
+	}
+}
+
+// A full read that read router A's answer is stale if router B replaced A
+// behind the same address before it stored: A's address is not given to B
+// and B's hold stays open (#1536).
+func TestStaleFullReadOfOldRouterKeepsNewRoutersHold(t *testing.T) {
+	eA := netip.MustParseAddr("8.8.8.8")
+	g := &gwSources{}
+	g.gw.Store("0101A8C0")
+	g.mac.Store("02:00:00:00:00:0a")
+	s := g.sources()
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	g.ext = func(context.Context) (netip.Addr, error) { return eA, nil }
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	refreshGapHook = func() {
+		g.mac.Store("02:00:00:00:00:0b")
+		p.quickLearn()
+	}
+	t.Cleanup(func() { refreshGapHook = nil })
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.RLock()
+	n := p.net
+	p.mu.RUnlock()
+	if n.External.IsValid() || !holdOpen(p) {
+		t.Fatalf("router A's stale read applied to router B: %+v, hold %v", n, holdOpen(p))
+	}
+}
+
+// The policy keys the gateway on its interface too: after an answer read on
+// ppp0 with no neighbour entry, the same address on wlan0 with no entry is a
+// new gateway. The quick read does not carry ppp0's router address over;
+// public destinations are held until wlan0's full read, and the router
+// address that read learns is refused (#1536).
+func TestPolicyGatewayKeyedByInterface(t *testing.T) {
+	eA, eB := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+	g := &gwSources{}
+	g.gw.Store("0101A8C0")
+	g.dev.Store("ppp0")
+	g.ext = func(context.Context) (netip.Addr, error) { return eA, nil }
+	s := g.sources()
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	g.dev.Store("wlan0")
+	p.quickLearn()
+	p.mu.RLock()
+	n := p.net
+	p.mu.RUnlock()
+	if !holdOpen(p) || n.GatewayDev != "wlan0" || n.External.IsValid() {
+		t.Fatalf("wlan0 at ppp0's gateway address with no entry: %+v, hold %v; want ppp0's %v dropped and a hold", n, holdOpen(p), eA)
+	}
+	held := make(chan error, 2)
+	go func() { held <- p.Check(context.Background(), eA, 443, "tcp") }()
+	go func() { held <- p.Check(context.Background(), eB, 443, "tcp") }()
+	select {
+	case err := <-held:
+		t.Fatalf("a public destination was decided before wlan0's full read: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	g.ext = func(context.Context) (netip.Addr, error) { return eB, nil }
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-held:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a held dial did not go ahead after the full read stored")
+		}
+	}
+	if err := p.Check(context.Background(), eB, 443, "tcp"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("wlan0's router address is dialable: %v", err)
+	}
+	if err := p.Check(context.Background(), eA, 443, "tcp"); err != nil {
+		t.Fatalf("ppp0's router address on wlan0: %v, want an ordinary public destination", err)
+	}
+}
+
+// A full read that returns ErrGatewayMoved after a newer quick read learned
+// the network is stale: its end network does not replace the newer one.
+func TestMovedFullReadDoesNotOverwriteNewerLearn(t *testing.T) {
+	pfx := []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
+	g1 := Network{Prefixes: pfx, Gateway: netip.MustParseAddr("192.168.1.1"), External: netip.MustParseAddr("8.8.8.8")}
+	g3 := Network{Prefixes: pfx, Gateway: netip.MustParseAddr("192.168.3.1")}
+	p := New(Config{
+		Source: func() (Network, error) { return g3, ErrGatewayMoved },
+		Quick:  func() (Network, error) { return g1, nil },
+	})
+	p.Learn(g1)
+	refreshGapHook = func() { p.quickLearn() }
+	t.Cleanup(func() { refreshGapHook = nil })
+	if err := p.Refresh(); !errors.Is(err, ErrGatewayMoved) {
+		t.Fatalf("refresh: %v", err)
+	}
+	p.mu.RLock()
+	n := p.net
+	p.mu.RUnlock()
+	if n.Gateway != g1.Gateway || n.External != g1.External || holdOpen(p) {
+		t.Fatalf("a stale moved read replaced the newer learn: %+v, hold %v", n, holdOpen(p))
+	}
+}
+
+// On an IPv6-only uplink the router request to the link-local gateway fails
+// at once, so a gateway change holds public destinations only until that
+// failed full read, which ends the hold: they are then allowed, not refused.
+func TestIPv6OnlyGatewayChangeHoldEndsAtFailedRead(t *testing.T) {
+	z := "00000000000000000000000000000000"
+	var gw atomic.Value
+	gw.Store("fe800000000000000000000000000001")
+	s := &Sources{
+		Addrs: func() ([]net.Addr, error) {
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("2001:db8::77"), Mask: net.CIDRMask(64, 128)}}, nil
+		},
+		ReadFile: func(f string) ([]byte, error) {
+			switch f {
+			case "/proc/net/route":
+				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"), nil
+			case "/proc/net/ipv6_route":
+				return []byte(z + " 00 " + z + " 00 " + gw.Load().(string) + " 00000400 00000001 00000000 00000003 eth0\n"), nil
+			}
+			return nil, syscall.ENOENT
+		},
+		External: func(context.Context, netip.Addr) (netip.Addr, error) { return netip.Addr{}, syscall.EINVAL },
+	}
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	gw.Store("fe800000000000000000000000000002")
+	p.quickLearn()
+	if !holdOpen(p) {
+		t.Fatal("no hold on the new IPv6 gateway")
+	}
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if holdOpen(p) {
+		t.Fatal("the failed full read did not end the hold")
+	}
+	if err := p.Check(context.Background(), netip.MustParseAddr("2001:4860::8888"), 443, "tcp"); err != nil {
+		t.Fatalf("a public destination after the failed read: %v", err)
+	}
 }
