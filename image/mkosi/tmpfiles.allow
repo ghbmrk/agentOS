@@ -1,0 +1,13 @@
+# Every tmpfiles.d line the image may ship (#1530, #1543), one per line: the file's path in the image
+# tree, a tab, and the line exactly as systemd-tmpfiles reads it (leading and trailing blanks
+# dropped; blank lines and comments are not listed). mkosi.finalize fails the build on any line not
+# here, wherever it is; the guarded-path check in mkosi.finalize runs as well.
+# To regenerate after a reviewed package update or an edit to mkosi.extra's tmpfiles.d: the failed
+# build prints each new line as "entry: <file><TAB><line>" (the image workflow also shows them as an
+# annotation); check each one, then add it here. With the image tree at hand:
+#   python3 image/mkosi/mkosi.finalize --tmpfiles-allowlist ROOT > image/mkosi/tmpfiles.allow
+usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos 0700 root root -
+usr/lib/tmpfiles.d/agentos.conf	a+ /var/lib/agentos - - - - u:agentos-fuzz:---
+usr/lib/tmpfiles.d/agentos.conf	a+ /tmp - - - - u:agentos-fuzz:---
+usr/lib/tmpfiles.d/agentos.conf	a+ /var/tmp - - - - u:agentos-fuzz:---
+usr/lib/tmpfiles.d/agentos.conf	a+ /dev/shm - - - - u:agentos-fuzz:---

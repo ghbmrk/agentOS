@@ -13,7 +13,9 @@ It refuses a tree whose networkd could forward or masquerade (#1478): the inboun
 forward hook, so the wired uplink file is the only live .network file, it holds exactly the shipped
 keys, and no networkd setting turns forwarding on. And it refuses a tree that tells the LAN about the box (#1479): the uplink sends no
 hostname and uses addresses without the MAC, and resolved answers no LLMNR or multicast DNS.
-Usage outside mkosi: mkosi.finalize ROOT"""
+Every tmpfiles.d line must be on tmpfiles.allow, and nothing may ship in a credential store (#1543).
+Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT prints the
+allowlist for a tree."""
 import errno
 import fnmatch
 import os
@@ -143,7 +145,8 @@ def violations(root):
                 out.append("%s: private key material" % rel)
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
-            + resolved_violations(root) + tmpfiles_violations(root) + stray_violations(root))
+            + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
+            + credstore_violations(root) + stray_violations(root))
 
 
 class Conf:
@@ -739,15 +742,33 @@ def bluetooth_violations(root):
                   % (m, m, REFUSE[0]) for m in BLOCKED_MODULES if first.get(m) not in REFUSE]
 
 
-# What a tmpfiles.d line must not touch (#1530): /proc and /sys, and every file and directory this
-# check reads, in each directory systemd or kmod reads it from (/run included: the tree check
-# cannot see what tmpfiles puts there at boot). systemd-tmpfiles runs before systemd-sysctl, and the
-# root file system is writable, so a line that writes, copies, links, removes or cleans any of
-# these changes what the box runs without the build seeing it.
+# tmpfiles.d as systemd-tmpfiles 257.13 lists it (conf_files, highest precedence first), with a
+# split-/usr /lib as well, which stray_violations refuses anyway. /run/tmpfiles.d is read on the box
+# too, but /run is a tmpfs there, so tmpfiles_allow_violations refuses anything the tree puts in it.
+TMPFILES_DIRS = conf_paths("tmpfiles.d") + ("lib/tmpfiles.d",)
+# #1543: every tmpfiles.d line the image ships must be on this allowlist, keyed by the file it is in.
+# It is generated from the stock build (see the file's header for how), so a package update or an
+# edit that adds or changes a line fails the build until someone reviews the line and adds it.
+TMPFILES_ALLOW = "tmpfiles.allow"
+# The credential store directories systemd 257 reads (ImportCredential= in systemd-sysctl and
+# systemd-tmpfiles takes sysctl.* and tmpfiles.* from them), with /usr/local/lib and a split-/usr /lib
+# for safety. Nothing may ship in them unless named here (#1543 Security B3); the image needs none.
+CREDSTORE_DIRS = tuple("%s/%s" % (top, n) for top in ("etc", "run", "usr/local/lib", "usr/lib", "lib")
+                       for n in ("credstore", "credstore.encrypted"))
+CREDSTORE_ALLOWED = ()
+# What a tmpfiles.d line must not touch (#1530), as defence in depth behind the allowlist: /proc and
+# /sys; every file and directory this check reads, in each directory systemd or kmod reads it from
+# (/run included: the tree check cannot see what tmpfiles puts there at boot); the generator
+# directories (zram, #1543 Security R1), the credential stores (B3), owner configuration, and the
+# ESP mount points with their loader entries (B2: systemd-boot joins every options line).
+# systemd-tmpfiles runs before systemd-sysctl, and the root file system is writable, so a line that
+# writes, copies, links, removes or cleans any of these changes what the box runs without the build
+# seeing it. This is a list of refused paths, so it cannot see what a chain of lines builds; the
+# allowlist above is what holds the line set fixed.
 TMPFILES_TARGETS = (("proc",), ("sys",), ("etc", "sysctl.conf"), ("etc", "fstab"), ("usr", "lib", "firmware"),
-                    ("lib", "firmware")) + tuple(tuple(("%s/%s" % (top, n)).split("/"))
-                                                 for top in ("etc", "usr/local/lib", "usr/lib", "lib", "run")
-                                                 for n in READ_CONF + ("modprobe.d",))
+                    ("lib", "firmware"), ("etc", "agentos"), ("efi",), ("boot",)) + tuple(
+    tuple(("%s/%s" % (top, n)).split("/")) for top in ("etc", "usr/local/lib", "usr/lib", "lib", "run")
+    for n in READ_CONF + ("modprobe.d", "systemd/system-generators", "credstore", "credstore.encrypted"))
 # Debian's own lines that touch one (debian.conf, var.conf), as whole lines with runs of blanks
 # collapsed: /var/run is /run, and /etc/mtab names the mount table, a file. Nothing else is exempt.
 TMPFILES_STOCK = ("L /var/run - - - - ../run", "L+ /var/run - - - - ../run", "L /var/run - - - - /run",
@@ -883,11 +904,13 @@ def tmpfiles_violations(root):
     # starts a comment) whose path, specifiers expanded and links in the image followed, is one of
     those, above one or below one is refused, whatever its type; so is a link (L) whose target and a
     copy (C) whose source is, taken both as systemd takes it (the rest of the line, as written) and
-    unquoted. A path with a ".." component is refused (systemd refuses it too). Only Debian's own
-    lines (TMPFILES_STOCK) are exempt, matched whole."""
+    unquoted. A path with a ".." component is refused (systemd refuses it too), and so is a link
+    target or copy source with one (#1543 Security B1: path_parts pops ".." before links resolve, so
+    "/var/run/../etc" would read as /etc while the box takes /run/../etc). Only Debian's own lines
+    (TMPFILES_STOCK) are exempt, matched whole."""
     out, root = [], str(root)
     targets = tmpfiles_targets(root)
-    for f in conf_files(root, conf_paths("tmpfiles.d")):
+    for f in conf_files(root, TMPFILES_DIRS):
         try:
             data = f.read_bytes()
         except OSError as e:
@@ -899,19 +922,130 @@ def tmpfiles_violations(root):
                 continue
             (typ, path, *_), arg = tmpfiles_words(ln) if len(tmpfiles_words(ln)[0]) >= 2 else ([ln, ""], "")
             path = tmpfiles_expand(path)
-            names = [path]
+            names, sources = [path], []
             if typ[:1] in ("L", "C"):
                 words = tmpfiles_words(arg, 1)[0]
                 for a in {arg, words[0] if words else arg}:
                     a = tmpfiles_expand(a)
+                    sources.append(a)
                     if a in ("", "-"):
                         a = "/usr/share/factory/" + path
                     names.append(a if a.startswith("/") else path.rsplit("/", 1)[0] + "/" + a)
             if ".." in path.split("/"):
                 out.append("%s: line %d: %s; a path with a '..' component (#1530)" % (f.rel, n, ln[:120]))
+            elif any(".." in a.split("/") for a in sources):
+                out.append("%s: line %d: %s; a link target or copy source with a '..' component (#1543)"
+                           % (f.rel, n, ln[:120]))
             elif any(tmpfiles_hits(root, path_parts(p), targets) for p in names):
                 out.append("%s: line %d: %s; it reaches /proc, /sys or configuration the tree check reads (#1530)"
                            % (f.rel, n, ln[:120]))
+    return out
+
+
+def tmpfiles_lines(data):
+    """(line number, line) of each line systemd-tmpfiles 257.13 acts on in DATA: lines end at LF, CR
+    or NUL, lose leading and trailing space and tab, and a blank line or one starting with # is
+    skipped. The line is otherwise exactly as written: the allowlist compares it whole."""
+    for n, raw in enumerate(re.split(rb"[\n\r\x00]", data), 1):
+        ln = os.fsdecode(raw).strip(" \t")
+        if ln and not ln.startswith("#"):
+            yield n, ln
+
+
+def tmpfiles_allow_path():
+    """Where tmpfiles.allow is: beside this script, or under $SRCDIR when mkosi runs it (mkosi v24.3
+    mounts the script alone at /work/finalize and the configuration directory at /work/src)."""
+    for d in (os.path.dirname(os.path.abspath(__file__)), os.environ.get("SRCDIR")):
+        if d and os.path.isfile(os.path.join(d, TMPFILES_ALLOW)):
+            return os.path.join(d, TMPFILES_ALLOW)
+    return None
+
+
+def tmpfiles_allowed(path=None):
+    """The allowlist as a set of (file, line): each entry line of tmpfiles.allow is the file's path
+    in the tree, a tab, and the line exactly as tmpfiles_lines gives it. None if the file is missing."""
+    path = path or tmpfiles_allow_path()
+    if path is None:
+        return None
+    out = set()
+    with open(path, encoding="utf-8", errors="surrogateescape") as f:
+        for ln in f.read().split("\n"):
+            if ln.strip() and not ln.startswith("#"):
+                rel, _, line = ln.partition("\t")
+                out.add((rel, line.strip(" \t")))
+    return out
+
+
+def tmpfiles_entries(root):
+    """(file, line number, line) of every tmpfiles.d line the box would act on, in conf_files order
+    over TMPFILES_DIRS (a name in a higher directory replaces the same name lower down), or
+    (file, None, error) for a file that cannot be read."""
+    for f in conf_files(str(root), TMPFILES_DIRS):
+        try:
+            data = f.read_bytes()
+        except OSError as e:
+            yield f.rel, None, e.strerror
+            continue
+        for n, ln in tmpfiles_lines(data):
+            yield f.rel, n, ln
+
+
+def tmpfiles_allow_violations(root, allowed=None):
+    """#1543: every tmpfiles.d line in the tree is on the allowlist (tmpfiles.allow), exactly and
+    under its own file. Anything under /run/tmpfiles.d is refused outright: /run is a tmpfs on the
+    box. Each refusal ends in the entry that would allow the line, for review."""
+    allowed = tmpfiles_allowed() if allowed is None else allowed
+    if allowed is None:
+        return ["%s: missing; every tmpfiles.d line must be on it (#1543)" % TMPFILES_ALLOW]
+    out = []
+    base = os.path.join(str(root), "run", "tmpfiles.d")
+    if os.path.lexists(base):
+        out.append("run/tmpfiles.d: not on the tmpfiles.d allowlist; /run is a tmpfs on the box (#1543)")
+    for rel, n, ln in tmpfiles_entries(root):
+        if n is None:
+            out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (rel, ln))
+        elif (rel, ln) not in allowed:
+            out.append("%s line %d: not on the tmpfiles.d allowlist (%s, #1543); entry: %s\t%s"
+                       % (rel, n, TMPFILES_ALLOW, rel, ln))
+    return out
+
+
+def tmpfiles_allowlist_text(root):
+    """tmpfiles.allow for the tree at ROOT: its header, then one entry per line the tree holds."""
+    return TMPFILES_ALLOW_HEADER + "".join("%s\t%s\n" % (rel, ln) for rel, n, ln in tmpfiles_entries(root)
+                                           if n is not None)
+
+
+TMPFILES_ALLOW_HEADER = """\
+# Every tmpfiles.d line the image may ship (#1530, #1543), one per line: the file's path in the image
+# tree, a tab, and the line exactly as systemd-tmpfiles reads it (leading and trailing blanks
+# dropped; blank lines and comments are not listed). mkosi.finalize fails the build on any line not
+# here, wherever it is; the guarded-path check in mkosi.finalize runs as well.
+# To regenerate after a reviewed package update or an edit to mkosi.extra's tmpfiles.d: the failed
+# build prints each new line as "entry: <file><TAB><line>" (the image workflow also shows them as an
+# annotation); check each one, then add it here. With the image tree at hand:
+#   python3 image/mkosi/mkosi.finalize --tmpfiles-allowlist ROOT > image/mkosi/tmpfiles.allow
+"""
+
+
+def credstore_violations(root):
+    """#1543 Security B3: systemd-sysctl and systemd-tmpfiles import sysctl.* and tmpfiles.*
+    credentials from the credential store, so nothing ships there (CREDSTORE_ALLOWED names any
+    exception; there is none). A store that is a link or a file is refused too."""
+    out, root = [], str(root)
+    for d in CREDSTORE_DIRS:
+        top = os.path.join(root, d)
+        if not os.path.lexists(top):
+            continue
+        if os.path.islink(top) or not os.path.isdir(top):
+            out.append("%s: a link or file where the credential store is; nothing ships there" % d)
+            continue
+        for dirpath, dirnames, filenames in os.walk(top):
+            for n in sorted(dirnames + filenames):
+                p = os.path.join(dirpath, n)
+                rel = os.path.relpath(p, root)
+                if (os.path.islink(p) or not os.path.isdir(p)) and rel not in CREDSTORE_ALLOWED:
+                    out.append("%s: in a credential store; it could carry sysctl.extra or tmpfiles.extra" % rel)
     return out
 
 
@@ -1042,6 +1176,9 @@ def has_key(path):
 
 
 def main():
+    if sys.argv[1:2] == ["--tmpfiles-allowlist"] and len(sys.argv) == 3:
+        sys.stdout.write(tmpfiles_allowlist_text(sys.argv[2]))
+        return
     root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BUILDROOT")
     if not root:
         sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")

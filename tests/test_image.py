@@ -1719,6 +1719,20 @@ class NoDumpTest(unittest.TestCase):
         for bad in ("systemd.run=/bin/sh", "init=/bin/sh", "rdinit=/s", "rd.systemd.run=/s", "Hostname=y", "rw"):
             with self.subTest(listed=bad):
                 self.assertNotEqual(finish.cmdline_violations(one % bad, conf), [])
+        # #1543 P/UX B1: one listed word per rule that refuses it anyway (the sysctl branch, the
+        # credential branch, _binary, lower(), - read as _, rd., quote stripping), so a refactor that
+        # drops any of them fails here. Each word is in the scratch mkosi.conf, and refused by its rule.
+        for bad in ("sysctl.net.ipv4.ip_forward=1", "SYSCTL.net.ipv4.ip_forward=1", '"sysctl.net.ipv4.ip_forward=1"',
+                    "rd.sysctl.net.ipv4.ip_forward=1", cred % ("", "sysctl.extra"), cred % ("_binary", "tmpfiles.extra"),
+                    "SYSTEMD.SET_CREDENTIAL=sysctl.extra:eA==", cred % ("-binary", "sysctl.extra"),
+                    "systemd.set-credential=sysctl.extra:eA==", "rd." + cred % ("", "sysctl.extra")):
+            with self.subTest(listed=bad):
+                conf.write_text("[Content]\nKernelCommandLine=quiet x=1 %s\n" % bad)
+                self.assertIn(bad, finish.config_cmdline(conf))
+                self.assertEqual(finish.cmdline_violations(one % "", conf), [])
+                v = finish.cmdline_violations(one % bad, conf)
+                self.assertEqual(len(v), 1, v)
+                self.assertNotIn("not in mkosi.conf", v[0])
         # systemd-boot joins every options line, indented or not; a bare one adds nothing.
         for extra in ("options \noptions\tsysctl.kernel.x=1\n", "\toptions systemd.run=/bin/sh\n"):
             with self.subTest(extra=extra):
@@ -2228,11 +2242,20 @@ class ConfFilesTest(unittest.TestCase):
 # Lines like Debian trixie's own tmpfiles.d (debian.conf, var.conf, etc.conf, systemd.conf,
 # provision.conf), each of which must pass the tmpfiles check (#1530).
 TMPFILES_PASS = ("d /run/user 0755 root root -", "L /var/run - - - - ../run", "L+ /var/run - - - - /run",
+                 "L+ /var/run - - - - ../run", "L /var/run - - - - /run", "L /etc/mtab - - - - ../proc/self/mounts",
                  "L+ /etc/mtab   -    -    -    -  ../proc/self/mounts", "x /tmp/systemd-private-%b-*",
                  "d %t/agentos 0750", "d /run/systemd/netif 0755 - - -", "f^ /etc/hosts - - - - network.hosts",
                  "r /run/sysctlx.d", "L /etc/y - - - - /run/agentos", "C! /etc/pam.d - - - -",
-                 "L /etc/os-release - - - - ../usr/lib/os-release")
+                 "L /etc/os-release - - - - /usr/lib/os-release")
 AGENTOS_TMPFILES = MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf"
+# What the box reads that a tmpfiles.d line could change, by name under each configuration
+# directory, listed here apart from the check's own TMPFILES_TARGETS so that a name dropped there
+# shows here (#1543 P/UX B2).
+GUARDED_NAMES = ("sysctl.d", "modprobe.d", "tmpfiles.d", "systemd/network", "systemd/system",
+                 "systemd/system.control", "systemd/system.attached", "systemd/system.conf",
+                 "systemd/system.conf.d", "systemd/coredump.conf", "systemd/coredump.conf.d",
+                 "systemd/networkd.conf", "systemd/networkd.conf.d", "systemd/resolved.conf",
+                 "systemd/resolved.conf.d", "systemd/system-generators", "credstore", "credstore.encrypted")
 # #1543 reviews at bf7e5d3: B1 (C+ on an ancestor of /run/sysctl.d), B2 (a stock link with more
 # after its target, which systemd takes raw), B3 (/etc/sysctl.d and /etc/sysctl.conf) and R1 (every
 # other directory the tree check reads), plus /sys and ".." paths. Each must be refused.
@@ -2255,7 +2278,22 @@ TMPFILES_PROBES = (
     "f /etc/tmpfiles.d/y.conf", "f /usr/lib/firmware/mediatek/x.bin", "f /etc/fstab",
     "w /sys/kernel/x - - - - 1", "w /sys/kernel/mm/ksm/run - - - - 0",
     "w /var/run/../proc/sys/x - - - - 1", "f /var/lock/../sysctl.d/x.conf", "f /usr/lib/../../x",
-    "f /etc/systemd/*/x.conf", "f /etc/sysctl.?/x.conf")
+    "f /etc/systemd/*/x.conf", "f /etc/sysctl.?/x.conf",
+    # #1543 Security delta at 4b636bf. B1: ".." in a link target, then a write through the link (a
+    # chain the one-line differential test could not see). B2: an options line appended to the ESP's
+    # boot entry. B3: the credential stores. R1: the generators and owner configuration.
+    "L /opt/q - - - - /var/run/../etc/sysctl.d\nf /opt/q/99-x.conf - - - - net.ipv4.ip_forward=1",
+    "L /opt/q - - - - /var/run/../etc/sysctl.d", "L /opt/q - - - - ../var/run/../etc",
+    "C /opt/q - - - - /usr/share/x/../../../etc/sysctl.d",
+    "w+ /efi/loader/entries/*.conf - - - - \\noptions sysctl.net.ipv4.ip_forward=1",
+    "f /efi/loader/entries/agentos_z.conf - - - - options x", "w+ /boot/loader/entries/x.conf - - - - x",
+    "f /etc/credstore/sysctl.extra - - - - net.ipv4.ip_forward=1",
+    "f /run/credstore.encrypted/tmpfiles.extra", "f /usr/lib/credstore/sysctl.extra",
+    "f /etc/systemd/system-generators/x 0755 - - - #!/bin/sh",
+    "L /etc/systemd/system-generators/zram-generator - - - - /usr/lib/x/zram",
+    "f /etc/agentos/modem.env - - - - COUNTRY_CODE=1", "f /lib/firmware/x.bin")
+# One probe per guarded name, under /etc and /run (#1543 P/UX B2).
+TMPFILES_PROBES += tuple("f /%s/%s/x" % (top, n) for top in ("etc", "run") for n in GUARDED_NAMES)
 
 
 class TmpfilesTest(unittest.TestCase):
@@ -2275,6 +2313,10 @@ class TmpfilesTest(unittest.TestCase):
         (self.root / "run").mkdir()
         (self.root / "proc").mkdir()
         link(self.root, "var/run", "/run")
+        # These tests are of the guarded-path check; TmpfilesAllowTest is the allowlist's.
+        patch = unittest.mock.patch.object(check, "tmpfiles_allow_violations", return_value=[])
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -2348,6 +2390,13 @@ class TmpfilesTest(unittest.TestCase):
                    "L /etc/mtab - - - - /proc/self"):
             self.assertTrue(self.refused(ln + "\n"), ln)
         self.assertFalse(self.refused("L /etc/y - - - - /run/agentos\n"))
+        # Any ".." in a link target or copy source is refused, even a harmless one (#1543 Security B1):
+        # the check walks it without links, the box with them. Only TMPFILES_STOCK's lines are exempt.
+        for ln in ("L /etc/os-release - - - - ../usr/lib/os-release", "C /opt/x - - - - /usr/share/../share/y",
+                   'L /opt/q - - - - "/var/run/../etc"', "L /opt/q - - - - /var/run/..",
+                   "L /opt/q - - - - %t/../etc"):
+            self.assertTrue(self.refused(ln + "\n"), ln)
+        self.assertFalse(self.refused("L /opt/q - - - - /usr/share/..x\n"))
 
     def test_unreadable_and_run_tmpfiles_are_refused(self):
         d = self.root / "usr/lib/tmpfiles.d/x.conf"
@@ -2445,9 +2494,10 @@ class ReferenceToolTest(unittest.TestCase):
 class SystemdDiffTest(unittest.TestCase):
     """#1508: conf_files and main_conf against systemd's own listing, `systemd-analyze cat-config
     --root=TREE`, over trees built to split them (hidden and backup names, byte order, override and
-    masking across directories, linked directories, a split-/usr /lib). Skipped only when
-    systemd-analyze is absent; GitHub's ubuntu-latest runners have it (systemd 255, whose
-    conf-files.c listing is the same as 257.13's)."""
+    masking across directories, linked directories, a split-/usr /lib). Without systemd-analyze it
+    skips, unless AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI sets it), where it fails instead and
+    ReferenceDiffsRanTest fails on any skip; GitHub's ubuntu-latest runners have it (systemd 255,
+    whose conf-files.c listing is the same as 257.13's)."""
     # REQ: DEV-2, CH-9, C13
 
     FAMILIES = (("sysctl.d", check.sysctl_files),
@@ -2490,18 +2540,22 @@ class SystemdDiffTest(unittest.TestCase):
 
 
 class TmpfilesDiffTest(unittest.TestCase):
-    """#1530: the tmpfiles check against systemd-tmpfiles itself. Each line (Debian's, the image's,
-    every review probe) runs through the real `systemd-tmpfiles --root=TREE --create` on a scratch
-    tree that passes the tree check, never the host. A line the check passes must leave every path
+    """#1530: the guarded-path check against systemd-tmpfiles itself. Each case (Debian's lines,
+    the image's, every review probe; a probe may be several lines, so a chain of lines is one case)
+    is one tmpfiles.d file run through the real `systemd-tmpfiles --root=TREE --create` on a scratch
+    tree that passes the tree check, never the host. A file the check passes must leave every path
     the box reads configuration from (GUARDED) as it was, and the tree must still pass the whole
-    check after it."""
+    check after it. The allowlist (TmpfilesAllowTest) is the main guard; this is its backstop."""
     # REQ: DEV-2, CH-9
     # Probes that systemd-tmpfiles really turns into a write to a guarded path, so the oracle can fail.
     WRITES = ("C+ /run - - - - /usr/share/x", "w /proc/sys/net/ipv4/ip_forward - - - - 1",
               "f /etc/sysctl.d/zz.conf - - - - net.ipv4.ip_forward=1",
               "L /etc/sysctl.d/zz.conf - - - - /usr/share/x/f.conf",
               "f /etc/modprobe.d/00-bt.conf - - - - install btusb /sbin/modprobe --ignore-install btusb",
-              "f /etc/systemd/network/10-x.network", "w /sys/kernel/x - - - - 1")
+              "f /etc/systemd/network/10-x.network", "w /sys/kernel/x - - - - 1",
+              "L /opt/q - - - - /var/run/../etc/sysctl.d\nf /opt/q/99-x.conf - - - - net.ipv4.ip_forward=1",
+              "w+ /efi/loader/entries/*.conf - - - - \\noptions sysctl.net.ipv4.ip_forward=1",
+              "f /etc/credstore/sysctl.extra - - - - net.ipv4.ip_forward=1")
 
     def tree(self, tmp):
         root = pathlib.Path(tmp)
@@ -2518,17 +2572,15 @@ class TmpfilesDiffTest(unittest.TestCase):
         write(root, "usr/share/x/f.conf", "net.ipv4.ip_forward=1\n")
         write(root, "etc/sysctl.conf", "")
         link(root, "etc/sysctl.d/99-sysctl.conf", "../sysctl.conf")
+        # The ESP as the box mounts it (#1543 Security B2), with an entry to append to.
+        write(root, "efi/loader/entries/agentos_1+3.conf", "title AgentOS\noptions rw\n")
         return root
 
     # What the box reads that a tmpfiles.d line could change, listed here apart from the check's own
     # TMPFILES_TARGETS so that a target dropped there shows here.
-    GUARDED = ("proc", "sys", "etc/sysctl.conf", "etc/fstab", "usr/lib/firmware") + tuple(
-        "%s/%s" % (top, n) for top in ("etc", "usr/local/lib", "usr/lib", "lib", "run")
-        for n in ("sysctl.d", "modprobe.d", "tmpfiles.d", "systemd/network", "systemd/system",
-                  "systemd/system.control", "systemd/system.attached", "systemd/system.conf",
-                  "systemd/system.conf.d", "systemd/coredump.conf", "systemd/coredump.conf.d",
-                  "systemd/networkd.conf", "systemd/networkd.conf.d", "systemd/resolved.conf",
-                  "systemd/resolved.conf.d"))
+    GUARDED = ("proc", "sys", "etc/sysctl.conf", "etc/fstab", "usr/lib/firmware", "lib/firmware", "etc/agentos",
+               "efi", "boot") + tuple("%s/%s" % (top, n) for top in ("etc", "usr/local/lib", "usr/lib", "lib", "run")
+                                      for n in GUARDED_NAMES)
 
     def snapshot(self, root):
         out = {}
@@ -2568,6 +2620,189 @@ class TmpfilesDiffTest(unittest.TestCase):
                     self.assertEqual(check.violations(root), [])
         for ln in self.WRITES:
             self.assertIn(ln, changed, "systemd-tmpfiles did not write through %r; the oracle is vacuous" % ln)
+
+
+def clean_tree(root):
+    """A tree that passes the whole tree check: the image's own files from mkosi.extra."""
+    root = pathlib.Path(root)
+    write(root, "etc/machine-id", "uninitialized\n")
+    nodump(root)
+    radio(root)
+    uplink(root)
+    write(root, "usr/lib/tmpfiles.d/agentos.conf", AGENTOS_TMPFILES.read_text())
+    return root
+
+
+class TmpfilesAllowTest(unittest.TestCase):
+    """#1543: every tmpfiles.d line in the image must be on image/mkosi/tmpfiles.allow, exactly and
+    under the file it is in. The list was generated from the stock build, so a line a package update
+    or an edit adds fails the build until it is reviewed and listed. This replaced a list of refused
+    paths, which every review round found a way around (a chain of lines, the ESP, the credential
+    store); the guarded-path check (TmpfilesTest) still runs behind it."""
+    # REQ: DEV-2, CH-9
+    AGENTOS = "usr/lib/tmpfiles.d/agentos.conf"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = clean_tree(self.tmp.name)
+
+    def v(self):
+        return check.tmpfiles_allow_violations(self.root)
+
+    def test_allowlist_file(self):
+        text = (MK / check.TMPFILES_ALLOW).read_text()
+        self.assertTrue(text.startswith(check.TMPFILES_ALLOW_HEADER))
+        allowed = check.tmpfiles_allowed()
+        self.assertIsNotNone(allowed)
+        self.assertGreater(len(allowed), 5)
+        for ln in text.split("\n"):
+            if ln and not ln.startswith("#"):
+                rel, tab, line = ln.partition("\t")
+                self.assertTrue(tab and line and line == line.strip(" \t") and not line.startswith("#"), ln)
+                self.assertRegex(rel, r"^(etc|usr/local/lib|usr/lib)/tmpfiles\.d/[^/]+\.conf$")
+        # The image's own file is on it line for line, and nothing else is listed under its name, so
+        # an edit to agentos.conf fails here before it fails the build.
+        mine = {(self.AGENTOS, ln) for n, ln in check.tmpfiles_lines(AGENTOS_TMPFILES.read_bytes())}
+        self.assertEqual({e for e in allowed if e[0] == self.AGENTOS}, mine)
+
+    def test_listed_lines_pass_and_others_fail(self):
+        self.assertEqual(self.v(), [])
+        self.assertEqual(check.violations(self.root), [])
+        base = AGENTOS_TMPFILES.read_text()
+        first = next(ln for n, ln in check.tmpfiles_lines(base.encode()))
+        # Comments, blank lines and blanks around a line change nothing.
+        write(self.root, self.AGENTOS, "\n# x\n  \t" + base.replace("\n", " \t\n") + "\n\n")
+        self.assertEqual(self.v(), [])
+        for body, want in (
+                (base + "w /proc/sys/net/ipv4/ip_forward - - - - 1\n", "line %d" % (base.count("\n") + 1)),
+                (base.replace(first, first.replace(" ", "  ", 1)), "line 2"),
+                (base.replace(first, first.replace(" ", "\t", 1)), "line 2"),
+                (base + "d /var/lib/agentos 0700 root root\n", "not on"),
+                (base.rstrip("\n") + "\rf /etc/sysctl.d/x.conf\n", "f /etc/sysctl.d/x.conf"),
+                (base.rstrip("\n") + "\0f /etc/sysctl.d/x.conf\n", "f /etc/sysctl.d/x.conf"),
+                (base + "L /opt/q - - - - /var/run/../etc/sysctl.d\nf /opt/q/99-x.conf - - - - net.ipv4.ip_forward=1\n",
+                 "f /opt/q/99-x.conf")):
+            with self.subTest(body=body):
+                write(self.root, self.AGENTOS, body)
+                v = self.v()
+                self.assertTrue(v and all("not on the tmpfiles.d allowlist" in m for m in v), v)
+                self.assertIn(want, " | ".join(v))
+                self.assertIn("not on the tmpfiles.d allowlist", " | ".join(check.violations(self.root)))
+        write(self.root, self.AGENTOS, base)
+        # The entry that would allow a line is in the message, ready to review and copy.
+        write(self.root, "usr/lib/tmpfiles.d/x.conf", "d /run/y 0755\n")
+        self.assertEqual(self.v(), ["usr/lib/tmpfiles.d/x.conf line 1: not on the tmpfiles.d allowlist "
+                                    "(tmpfiles.allow, #1543); entry: usr/lib/tmpfiles.d/x.conf\td /run/y 0755"])
+
+    def test_lines_are_keyed_by_file(self):
+        # A listed line in another file, or the same file in another directory, is not listed.
+        for rel in ("usr/lib/tmpfiles.d/x.conf", "etc/tmpfiles.d/agentos.conf", "usr/local/lib/tmpfiles.d/agentos.conf",
+                    "etc/tmpfiles.d/x.conf"):
+            with self.subTest(rel=rel):
+                f = write(self.root, rel, AGENTOS_TMPFILES.read_text())
+                self.assertIn(rel + " line", " | ".join(self.v()))
+                f.unlink()
+        # A split-/usr /lib is read too (and stray_violations refuses it).
+        write(self.root, "lib/tmpfiles.d/x.conf", "d /run/y\n")
+        self.assertIn("lib/tmpfiles.d/x.conf line 1", " | ".join(self.v()))
+        (self.root / "lib/tmpfiles.d/x.conf").unlink()
+        # A link in /etc masks the listed file: systemd reads nothing for that name.
+        link(self.root, "etc/tmpfiles.d/agentos.conf", "/dev/null")
+        self.assertEqual(self.v(), [])
+        (self.root / "etc/tmpfiles.d/agentos.conf").unlink()
+        # Anything at all under /run/tmpfiles.d, and a file that cannot be read.
+        write(self.root, "run/tmpfiles.d/agentos.conf", AGENTOS_TMPFILES.read_text())
+        self.assertIn("run/tmpfiles.d: not on the tmpfiles.d allowlist", " | ".join(self.v()))
+        shutil.rmtree(self.root / "run/tmpfiles.d")
+        (self.root / "usr/lib/tmpfiles.d/y.conf").mkdir()
+        self.assertIn("usr/lib/tmpfiles.d/y.conf: unreadable", " | ".join(self.v()))
+
+    def test_found_under_mkosi_and_missing_fails(self):
+        # mkosi v24.3 runs the script from /work/finalize with the configuration directory at $SRCDIR.
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copy(MK / "mkosi.finalize", os.path.join(tmp, "finalize"))
+            moved = load("image_check_moved", os.path.join(tmp, "finalize"))
+            with unittest.mock.patch.dict(os.environ, {"SRCDIR": str(MK)}):
+                self.assertEqual(moved.tmpfiles_allow_path(), str(MK / check.TMPFILES_ALLOW))
+                self.assertEqual(moved.tmpfiles_allow_violations(self.root), [])
+            with unittest.mock.patch.dict(os.environ, {"SRCDIR": tmp}):
+                self.assertIsNone(moved.tmpfiles_allow_path())
+                self.assertEqual(moved.tmpfiles_allow_violations(self.root),
+                                 ["tmpfiles.allow: missing; every tmpfiles.d line must be on it (#1543)"])
+                self.assertIn("tmpfiles.allow: missing", " | ".join(moved.violations(self.root)))
+
+    def test_regenerate(self):
+        write(self.root, "etc/tmpfiles.d/x.conf", "  d /run/y 0755\t\n# c\nL+ /var/run - - - - ../run\n")
+        out = io.StringIO()
+        with unittest.mock.patch.object(sys, "argv", ["mkosi.finalize", "--tmpfiles-allowlist", str(self.root)]), \
+                contextlib.redirect_stdout(out):
+            check.main()
+        self.assertTrue(out.getvalue().startswith(check.TMPFILES_ALLOW_HEADER))
+        f = pathlib.Path(self.tmp.name) / "allow"
+        f.write_text(out.getvalue())
+        allowed = check.tmpfiles_allowed(str(f))
+        self.assertIn(("etc/tmpfiles.d/x.conf", "d /run/y 0755"), allowed)
+        self.assertIn(("etc/tmpfiles.d/x.conf", "L+ /var/run - - - - ../run"), allowed)
+        self.assertEqual(check.tmpfiles_allow_violations(self.root, allowed), [])
+        self.assertNotEqual(check.tmpfiles_allow_violations(self.root, allowed - {("etc/tmpfiles.d/x.conf", "d /run/y 0755")}), [])
+
+
+class CredstoreTest(unittest.TestCase):
+    """#1543 Security B3: systemd-sysctl and systemd-tmpfiles import sysctl.* and tmpfiles.*
+    credentials from the credential store, so a file shipped there could turn forwarding on while
+    sysctl.d and tmpfiles.d are clean. Nothing ships there; the image needs no exception."""
+    # REQ: DEV-2, CH-9, HW-1
+    STORES = tuple("%s/%s" % (top, n) for top in ("etc", "run", "usr/lib") for n in ("credstore", "credstore.encrypted"))
+
+    def test_nothing_in_a_credential_store(self):
+        self.assertEqual(check.CREDSTORE_ALLOWED, ())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = clean_tree(tmp)
+            for d in self.STORES + ("usr/local/lib/credstore",):
+                (root / d).mkdir(parents=True)
+            self.assertEqual(check.violations(root), [])
+            for d in self.STORES:
+                for rel, make in (("sysctl.extra", lambda p: p.write_text("net.ipv4.ip_forward=1\n")),
+                                  ("sub/tmpfiles.extra", lambda p: p.write_text("w /proc/sys/x - - - - 1\n")),
+                                  ("x", lambda p: os.symlink("/usr/share/x", p)),
+                                  ("dirlink", lambda p: os.symlink("/usr/share", p))):
+                    with self.subTest(store=d, rel=rel):
+                        p = root / d / rel
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        make(p)
+                        self.assertIn("%s/%s: in a credential store" % (d, rel), " | ".join(check.violations(root)))
+                        p.unlink()
+                        if p.parent != root / d:
+                            p.parent.rmdir()
+            # An allowlisted file passes; a store that is itself a link or a file does not.
+            write(root, "usr/lib/credstore/agentos.x", "x")
+            with unittest.mock.patch.object(check, "CREDSTORE_ALLOWED", ("usr/lib/credstore/agentos.x",)):
+                self.assertEqual(check.credstore_violations(root), [])
+            self.assertNotEqual(check.credstore_violations(root), [])
+            (root / "usr/lib/credstore/agentos.x").unlink()
+            (root / "etc/credstore").rmdir()
+            link(root, "etc/credstore", "/usr/share")
+            self.assertIn("etc/credstore: a link or file", " | ".join(check.violations(root)))
+
+
+class ReferenceDiffsRanTest(unittest.TestCase):
+    """#1543 P/UX R2: where CI requires the reference tools, the differential tests must have run,
+    every test of them. A skip in a test body or in reference_tool would otherwise pass quietly among
+    CI's other skips, so this runs them again and fails on any skip."""
+    # REQ: DEV-2, CH-9
+
+    def test_no_reference_diff_skips(self):
+        if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") != "1":
+            self.skipTest("only where AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI)")
+        loader = unittest.TestLoader()
+        suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest))
+        self.assertGreaterEqual(suite.countTestCases(), 3)
+        result = unittest.TestResult()
+        suite.run(result)
+        self.assertEqual(result.skipped, [])
+        self.assertEqual(result.testsRun, suite.countTestCases())
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
 
 
 class KmodDiffTest(unittest.TestCase):
