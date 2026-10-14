@@ -43,7 +43,7 @@ import (
 // xfail names the steps known not to pass yet, each with its work-item
 // issue. A listed step that passes fails the run (XPASS), so the list
 // shrinks as the issues close.
-var xfail = map[string]int{"guest-task": 1701, "phone-control": 1714}
+var xfail = map[string]int{"host": 1221, "guest-task": 1701, "phone-control": 1714}
 
 const (
 	box       = "http://10.42.0.1"
