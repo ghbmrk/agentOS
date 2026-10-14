@@ -15,7 +15,9 @@ import shutil
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 import unittest.mock
 
@@ -1193,6 +1195,156 @@ def arg(words, name):
     return words[i + 1]
 
 
+class UplinkTest(unittest.TestCase):
+    """#1416 (P2-1 uplink): plugging an Ethernet cable into the home router is all it takes to go
+    online. systemd-networkd gives any physical Ethernet port an address by DHCP and router
+    advertisement; the radio (access point, home Wi-Fi station) and every virtual link are not
+    matched, and the inbound drop holds whatever the link gets (I11; tests/test_inbound_netns.py)."""
+    # REQ: ONB-3, DEV-2, DEV-net-e
+
+    NET = MK / "mkosi.extra/usr/lib/systemd/network"
+    UPLINK = NET / "20-agentos-uplink.network"
+
+    def test_wired_uplink_is_physical_ethernet_with_dhcp(self):
+        u = ini(self.UPLINK)
+        m = u["Match"]
+        self.assertEqual(m["Type"], "ether")
+        # Not veth, bridge, macvlan, ...: the machines' and namespaces' links stay unconfigured here.
+        self.assertEqual(m["Kind"], "!*")
+        self.assertNotIn("Name", m)
+        self.assertEqual(u["Network"]["DHCP"], "yes")
+        # IPv6 comes from the home router's advertisements; the drop admits them (I11).
+        self.assertNotEqual(u["Network"].get("IPv6AcceptRA"), "no")
+
+    def test_no_network_file_matches_the_radio(self):
+        # The access point loader owns wlan0 (10-agentos-wlan.link); the home Wi-Fi station is #936's.
+        files = sorted(self.NET.glob("*.network"))
+        self.assertEqual([f.name for f in files], [self.UPLINK.name])
+        for f in files:
+            m = ini(f)["Match"]
+            self.assertNotIn("wlan", m.get("Type", "").split())
+            self.assertFalse(any(n.startswith(("wl", "ap")) for n in m.get("Name", "").split()), f.name)
+        self.assertEqual(ini(self.NET / "10-agentos-wlan.link")["Match"]["Type"], "wlan")
+
+    def test_networkd_is_enabled_and_behind_the_drop(self):
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().split("\n")
+        self.assertIn("enable systemd-networkd.service", preset)
+        d = ini(MK / "mkosi.extra/usr/lib/systemd/system/systemd-networkd.service.d/agentos-inbound.conf")["Unit"]
+        self.assertIn("agentos-inbound.service", d["Requires"].split())
+        self.assertIn("agentos-inbound.service", d["After"].split())
+
+    def report(self, links, addr="192.0.2.10/24", on_sleep=""):
+        # Runs boot-report on a stand-in /sys/class/net; ip answers addr for any link. A carrier of
+        # None leaves the file out, as the kernel's carrier read fails while a link is down; on_sleep
+        # runs (with $NET set) at each sleep, so a test can plug the cable in late.
+        with tempfile.TemporaryDirectory() as t:
+            t = pathlib.Path(t)
+            net, log = t / "net", t / "log"
+            for name, kind, carrier in links:
+                d = net / name
+                d.mkdir(parents=True)
+                (d / "type").write_text("1\n")
+                if carrier is not None:
+                    (d / "carrier").write_text("%d\n" % carrier)
+                if kind != "virtual":
+                    (d / "device").mkdir()
+                if kind == "wlan":
+                    (d / "wireless").mkdir()
+            stub(t, "ip", 'echo "$*" >>"%s"; [ -n "%s" ] && echo "2: $4    inet %s brd 192.0.2.255 scope global $4"'
+                 % (log, addr, addr))
+            stub(t, "sleep", 'echo "sleep $*" >>"%s"; NET="%s"; %s' % (log, net, on_sleep or ":"))
+            stub(t, "findmnt", "echo 1073741824")
+            stub(t, "systemd-bless-boot", "echo good")
+            script = (AGENTOS_LIB / "boot-report").read_text().replace(
+                "/usr/lib/systemd/systemd-bless-boot", str(t / "systemd-bless-boot"))
+            env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]), AGENTOS_SYS_NET=str(net))
+            out = subprocess.run(["sh", "-c", script], env=env, check=True, capture_output=True, text=True).stdout
+            calls = log.read_text() if log.exists() else ""
+            return out, calls
+
+    def test_boot_report_shows_the_wired_lease(self):
+        # CI's boot test plugs in a virtual NIC and reads this line (ci_boot.sh).
+        out, _ = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 1)])
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "agentos-uplink: enp1s0 192.0.2.10/24")
+        self.assertTrue(lines[1].startswith("agentos-boot: bless=good"), lines)
+
+    def test_boot_report_waits_briefly_without_a_cable(self):
+        # The radio and virtual links never count; an unplugged port gets about 5 s for carrier, no more.
+        out, calls = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 0)])
+        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertIn("sleep", calls)
+        self.assertLessEqual(calls.count("sleep"), 5)
+        self.assertNotIn("ip ", calls)
+
+    def test_boot_report_waits_for_carrier_on_a_cold_nic(self):
+        # Review P-2: on a cold boot the NIC can still be negotiating when the report runs. Carrier
+        # unreadable, then 0, then 1: the lease is still reported.
+        flip = ('n=$(grep -c sleep "$NET/../log"); [ "$n" = 2 ] && echo 0 >"$NET/enp1s0/carrier"; '
+                '[ "$n" = 3 ] && echo 1 >"$NET/enp1s0/carrier"; :')
+        out, calls = self.report([("enp1s0", "ether", None)], on_sleep=flip)
+        self.assertEqual(out.splitlines()[0], "agentos-uplink: enp1s0 192.0.2.10/24")
+        self.assertEqual(calls.count("sleep"), 3)
+
+    def test_boot_report_gives_up_on_a_lease_that_never_comes(self):
+        out, calls = self.report([("enp1s0", "ether", 1)], addr="")
+        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertLessEqual(calls.count("sleep"), 30)
+
+    def probe(self, mode):
+        # One probe through probe_inbound.py against a local stand-in for QEMU's forwarded port:
+        # "silent" completes the handshake and never answers (a guest that drops the SYN, as
+        # QEMU's user network accepts the host's connection itself), "closes" accepts and closes (a
+        # guest that answered, with a reset or from a listener), "none" listens nowhere.
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        if mode == "none":
+            srv.close()
+        else:
+            srv.listen(4)
+        stop = threading.Event()
+        def serve():
+            while mode == "closes" and not stop.is_set():
+                srv.settimeout(0.2)
+                try:
+                    c, _ = srv.accept()
+                    c.close()
+                except OSError:
+                    pass
+        t = threading.Thread(target=serve)
+        t.start()
+        try:
+            return subprocess.run([sys.executable, str(IMG / "probe_inbound.py"), "--wait", "1", "%d:22" % port],
+                                  check=True, capture_output=True, text=True, timeout=30).stdout
+        finally:
+            stop.set()
+            t.join()
+            srv.close()
+
+    def test_drop_probe_tells_a_silent_guest_from_an_answer(self):
+        # Review, Security release 1: the booted image's drop is probed through QEMU's hostfwd.
+        self.assertEqual(self.probe("silent"), "agentos-probe: 22 dropped\n")
+        self.assertEqual(self.probe("closes"), "agentos-probe: 22 answered\n")
+        self.assertEqual(self.probe("none"), "agentos-probe: 22 error\n")
+
+    def test_boot_test_probes_the_drop_on_the_booted_image(self):
+        s = (IMG / "ci_boot.sh").read_text()
+        for guest in (22, 80, 443, 18789):
+            fwd = "%d:%d" % (18000 + guest % 1000, guest)
+            self.assertTrue("hostfwd=tcp:127.0.0.1:%d-:%d" % (18000 + guest % 1000, guest) in s, fwd)
+            self.assertTrue(fwd in re.search(r'PROBE="([^"]*)" boot "\$W/console.log"', s).group(1), fwd)
+        self.assertTrue("for port in 22 80 443 18789; do\n\thas \"$W/console.log.probe\" \"agentos-probe: $port dropped\"" in s)
+
+    def test_boot_test_plugs_in_a_cable_once(self):
+        s = (IMG / "ci_boot.sh").read_text()
+        self.assertIn('NIC="user,model=virtio-net-pci,', s)
+        self.assertIn('-nic "${NIC:-none}"', s)
+        self.assertIn('has "$W/console.log" "agentos-uplink: "', s)
+        self.assertIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
+        self.assertIn('has "$W/console-reboot.log" "agentos-uplink: none"', s)
+
+
 class SetupServicesTest(unittest.TestCase):
     """#1249 (with P-3) and #1270: a fresh M6 Ultra image starts every setup service. The vault
     process (agentos-egress) has a unit and a default routing rule for the guest's model class; the
@@ -1220,8 +1372,12 @@ class SetupServicesTest(unittest.TestCase):
         # Only the vault process reaches providers: no IP filter, and the inbound drop is up first.
         self.assertNotIn("IPAddressDeny", s)
         self.assertIn("agentos-inbound.service", u["Unit"]["Requires"].split())
-        for after in ("agentos-inbound.service", "network-online.target"):
-            self.assertIn(after, u["Unit"]["After"].split())
+        self.assertIn("agentos-inbound.service", u["Unit"]["After"].split())
+        # #1416: no wait for an uplink. With a cable in but no lease, or none at all, wait-online
+        # holds network-online.target for its whole timeout, and the page (after this unit) with it;
+        # the policy learns the home network from netlink events and its poll, not at start.
+        for key in ("After", "Wants", "Requires"):
+            self.assertNotIn("network-online.target", u["Unit"].get(key, "").split())
         for before in ("agentosd.service", "agentos-localui.service"):
             self.assertIn(before, u["Unit"]["Before"].split())
         # The TPM (CRED-8) must stay visible: PrivateDevices would hide /dev/tpmrm0.
