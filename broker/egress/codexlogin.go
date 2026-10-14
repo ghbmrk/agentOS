@@ -192,10 +192,9 @@ func (s *workerSwapper) Swap(adapter string, creds map[string]string) (map[strin
 	if next["access_token"] == "" || next["refresh_token"] == "" {
 		return nil, nil, errors.New("plan login: incomplete token set")
 	}
+	// Every response must name its account in an id_token: tokens with no
+	// account could belong to anyone, so none is ever assumed (fail closed).
 	acct := accountOf(creds["id_token"])
-	if acct == "" {
-		acct = next["account_id"]
-	}
 	if acct == "" {
 		return nil, nil, errors.New("plan login: no account ID")
 	}

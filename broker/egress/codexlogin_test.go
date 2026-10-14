@@ -430,7 +430,8 @@ func TestRefreshKeepsTheWorkersPlaceholders(t *testing.T) {
 	held := authTokens(t, file)
 
 	fresh := newCanaryLogin(t)
-	phs, commit, err := r.logins.ForWorker("codex", "pw-a").Swap("codex", map[string]string{"access_token": fresh.access})
+	fresh.idToken = old.idToken // same account; no rotated refresh token
+	phs, commit, err := r.logins.ForWorker("codex", "pw-a").Swap("codex", map[string]string{"access_token": fresh.access, "id_token": fresh.idToken})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,5 +568,25 @@ func TestAWorkerCannotSetThePlanAccount(t *testing.T) {
 		if strings.Contains(fmt.Sprint(r.entry(t)), s) {
 			t.Fatal("the intruder's tokens reached the vault")
 		}
+	}
+}
+
+// Threat (L3, #1747): a worker's response that names no account (no
+// id_token) could carry any account's tokens, so it is refused rather than
+// filed under the stored account.
+func TestAWorkerRefreshMustNameTheAccount(t *testing.T) {
+	r := newLoginRig(t)
+	owner := newCanaryLogin(t)
+	held := r.store(t, "pw-owner", owner)
+	intruder := newCanaryLogin(t)
+	bare := map[string]string{"access_token": intruder.access, "refresh_token": intruder.refresh}
+	if _, _, err := r.logins.ForWorker("codex", "pw-evil").Swap("codex", bare); err == nil {
+		t.Fatal("a worker stored tokens that name no account")
+	}
+	if v := r.entry(t); v["access_token"] != owner.access || v["refresh_token"] != owner.refresh {
+		t.Fatal("tokens naming no account replaced the owner's login")
+	}
+	if v, ok := r.logins.Resolve("codex", "pw-owner", held["access_token"]); !ok || v != owner.access {
+		t.Fatal("the owner's worker no longer resolves to the owner's login")
 	}
 }
