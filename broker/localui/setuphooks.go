@@ -122,11 +122,17 @@ func (a AgentosdSetup) Finish(owner string) error {
 
 // JoinNetwork has agentosd's helper write the home Wi-Fi connection. It
 // waits up to localapi.JoinTimeout, longer than agentosd's own call to the
-// helper (Security L8.4); any error shows the page's one network error.
+// helper (Security L8.4). A box that cannot join Wi-Fi at all answers
+// ErrWiFiUnavailable (#1429); any other error shows the page's one network
+// error.
 func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), localapi.JoinTimeout)
 	defer cancel()
-	return a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
+	err := a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
+	if refused(err, localapi.ErrJoinUnavailable) {
+		return fmt.Errorf("%w (%w)", ErrWiFiUnavailable, err)
+	}
+	return err
 }
 
 func (AgentosdSetup) HostInfo() string     { return "" }

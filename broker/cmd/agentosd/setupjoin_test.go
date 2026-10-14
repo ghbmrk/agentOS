@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/netjoin"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
@@ -46,6 +48,11 @@ func TestSetupJoinGoesThroughTheHelper(t *testing.T) {
 		code = c
 		err := join(context.Background(), "home", joinCanary)
 		if ok := c == netjoin.Joined || c == netjoin.Saved; ok != (err == nil) {
+			t.Fatalf("%q gave %v", c, err)
+		}
+		// #1429: failed (no NetworkManager, polkit's refusal) is its own
+		// reason, so the page does not blame the password.
+		if errors.Is(err, localsrv.JoinUnavailable) != (c == netjoin.Failed) {
 			t.Fatalf("%q gave %v", c, err)
 		}
 		if err != nil && strings.Contains(err.Error(), joinCanary) {
