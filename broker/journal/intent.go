@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Intent is one requested effect, with every parameter that decides what the
@@ -166,6 +167,20 @@ type KeyHonouring interface {
 	HonoursKey(in Intent) bool
 }
 
+// DefaultKeyLifetime is how long after an attempt was first dispatched the
+// engine assumes its service still remembers the attempt's idempotency key,
+// for executors that do not say (KeyLifetimer). Past it a same-key retry
+// could apply the effect again, so the engine does not make one (OP-2,
+// D-116).
+const DefaultKeyLifetime = 24 * time.Hour
+
+// KeyLifetimer is implemented by key-honouring executors whose service
+// remembers an idempotency key for a known time. A lifetime of zero or less
+// means DefaultKeyLifetime.
+type KeyLifetimer interface {
+	KeyLifetime(in Intent) time.Duration
+}
+
 // Canceller is implemented by executors whose service supports cancelling an
 // effect in flight (OP-6). Acceptance is recorded, never treated as undo.
 type Canceller interface {
@@ -226,6 +241,9 @@ type Attempt struct {
 	// stopped trying to settle it: it is in the daily digest, and only
 	// the owner can ask for it to run again (OP-2, D-116).
 	Parked bool `json:"parked,omitempty"`
+	// Dispatched is when the attempt was first dispatched; a same-key
+	// retry does not move it, so the key's lifetime runs from here.
+	Dispatched time.Time `json:"dispatched,omitzero"`
 }
 
 // Sources of a RecDispatched record other than an ordinary dispatch.

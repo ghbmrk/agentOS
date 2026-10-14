@@ -455,6 +455,9 @@ type ReconcileReport struct {
 	Resolved   []string
 	Unresolved []string
 	Parked     []string
+	// Redispatched lists intents whose check proved the effect was not
+	// done and that were dispatched again under the dispatch recheck.
+	Redispatched []string
 }
 
 // parkAfter is how many checks in a row may leave an outcome unknown
@@ -492,6 +495,7 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 		if j.exec != nil {
 			out = safeCall(func() Outcome { return j.exec.Reconcile(ctx, j.in, j.n) })
 		}
+		checked := out.Result
 		if out.Result == ResultUnknown && !j.parked {
 			out = e.keyRetry(ctx, j.in.ID, j.n, j.exec)
 		}
@@ -505,6 +509,9 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 			}
 			e.forget(j.in.ID)
 			rep.Resolved = append(rep.Resolved, j.in.ID)
+			if checked == ResultNotApplied && e.redispatch(ctx, j.in.ID, j.n) {
+				rep.Redispatched = append(rep.Redispatched, j.in.ID)
+			}
 		case j.parked:
 			// Checked again; still unclear. It stays in the digest.
 		default:
@@ -583,10 +590,17 @@ func (e *Engine) keyRetry(ctx context.Context, id string, n int, exec Executor) 
 	if !safeBool(func() bool { return kh.HonoursKey(in) }) {
 		return unknown
 	}
+	life := keyLifetime(exec, in)
 	_, err = e.rechecked(ctx, id, func(en *entry) (Record, error) {
 		last := en.latest()
 		if en.state != OutcomeUnknown || last == nil || last.Parked || last.N != n {
 			return Record{}, ErrState
+		}
+		// The service forgets the key after its lifetime; a retry then
+		// could apply the effect again. An attempt with no dispatch
+		// time counts as expired.
+		if last.Dispatched.IsZero() || e.now().Sub(last.Dispatched) > life {
+			return Record{}, fmt.Errorf("%w: %s attempt %d is past its key's lifetime", ErrState, id, n)
 		}
 		return Record{Type: RecDispatched, ID: id, Attempt: n, Source: DispatchKey}, e.mayDispatch(en)
 	})
@@ -601,6 +615,34 @@ func (e *Engine) keyRetry(ctx context.Context, id string, n int, exec Executor) 
 		return unknown
 	}
 	return out
+}
+
+// redispatch dispatches id again after a check through the same tool
+// proved that attempt n did not take effect (OP-2 step 2). It is an
+// ordinary new attempt under the dispatch recheck (OP-3): a refused
+// recheck journals nothing and leaves the intent not_applied for its
+// caller, unlike Dispatch, which would deny it. It reports whether the
+// attempt ran.
+func (e *Engine) redispatch(ctx context.Context, id string, n int) bool {
+	var next int
+	in, err := e.rechecked(ctx, id, func(en *entry) (Record, error) {
+		if en.state != NotApplied || en.latest() == nil || en.latest().N != n {
+			return Record{}, ErrState
+		}
+		next = len(en.attempts) + 1
+		return Record{Type: RecDispatched, ID: id, Attempt: next}, e.mayDispatch(en)
+	})
+	if err != nil {
+		return false
+	}
+	e.mu.Lock()
+	exec := e.execs[in.Executor]
+	e.mu.Unlock()
+	out := safeCall(func() Outcome { return exec.Execute(ctx, in, next) })
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.commit(Record{Type: RecObserved, ID: id, Attempt: next, Result: out.Result,
+		Source: "executor", Evidence: out.Evidence}) == nil
 }
 
 // mayDispatch checks, with e.mu held, what every dispatch of en needs
@@ -705,11 +747,14 @@ func (e *Engine) Retry(ctx context.Context, id string, parked int) (Status, erro
 
 // ParkedIntent is an intent whose outcome stayed unknown and that the
 // engine no longer tries to settle: the daily digest lists it, and the
-// owner may ask to retry it (OP-2).
+// owner may ask to retry it (OP-2). Intent keeps its parameters so the
+// owner's request can be built from verified facts; they reach the owner
+// only through the gate's verifiers, never raw.
 type ParkedIntent struct {
-	Intent  Intent // parameters and preconditions left out
-	Attempt int    // the parked attempt
-	Seq     uint64 // of the RecParked record
+	Intent     Intent
+	Attempt    int       // the parked attempt
+	Seq        uint64    // of the RecParked record
+	Dispatched time.Time // when the parked attempt was first dispatched
 }
 
 // Parked lists the parked intents, oldest first.
@@ -721,9 +766,8 @@ func (e *Engine) Parked() []ParkedIntent {
 		if en.state != OutcomeUnknown || !en.parked() {
 			continue
 		}
-		in := en.intent
-		in.Params, in.Preconditions = nil, nil
-		out = append(out, ParkedIntent{Intent: in, Attempt: en.latest().N, Seq: en.parkedSeq})
+		last := en.latest()
+		out = append(out, ParkedIntent{Intent: en.intent, Attempt: last.N, Seq: en.parkedSeq, Dispatched: last.Dispatched})
 	}
 	return out
 }
@@ -1465,7 +1509,7 @@ func (en *entry) apply(r Record) {
 		if r.Source == DispatchKey {
 			en.attempt(r.Attempt).Result = ResultInFlight
 		} else {
-			en.attempts = append(en.attempts, Attempt{N: r.Attempt, Result: ResultInFlight})
+			en.attempts = append(en.attempts, Attempt{N: r.Attempt, Result: ResultInFlight, Dispatched: r.At})
 		}
 	case RecParked:
 		en.attempt(r.Attempt).Parked = true
@@ -1530,6 +1574,21 @@ func safeBool(f func() bool) (ok bool) {
 		}
 	}()
 	return f()
+}
+
+// keyLifetime is how long exec's service remembers an idempotency key for
+// in: what the executor says (KeyLifetimer), or DefaultKeyLifetime when it
+// does not say, says zero or less, or panics.
+func keyLifetime(exec Executor, in Intent) (life time.Duration) {
+	defer func() {
+		if recover() != nil || life <= 0 {
+			life = DefaultKeyLifetime
+		}
+	}()
+	if kl, ok := exec.(KeyLifetimer); ok {
+		return kl.KeyLifetime(in)
+	}
+	return DefaultKeyLifetime
 }
 
 // safeCall runs an executor method. A panic or a result that is not

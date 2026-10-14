@@ -91,7 +91,7 @@ func TestOP2KilledBetweenIntentAndOutcomeNeverSendsTwice(t *testing.T) {
 				t.Fatalf("still fenced after parking: %v", got)
 			}
 			p := e.Parked()
-			if len(p) != 1 || p[0].Intent.ID != "a" || p[0].Attempt != 1 || p[0].Intent.Params != nil {
+			if len(p) != 1 || p[0].Intent.ID != "a" || p[0].Attempt != 1 || p[0].Dispatched.IsZero() {
 				t.Fatalf("parked = %+v", p)
 			}
 
@@ -129,7 +129,8 @@ func TestOP2KilledBetweenIntentAndOutcomeNeverSendsTwice(t *testing.T) {
 }
 
 // When the check through the same tool proves the effect was not done,
-// the intent becomes not_applied and one new attempt gives one effect.
+// the intent becomes not_applied and the engine dispatches one new attempt
+// under the dispatch recheck (OP-2 step 2): one effect.
 func TestOP2CheckProvesNotDoneThenOneEffect(t *testing.T) {
 	for name, mk := range map[string]func(string) Intent{"mail send": mailSend, "payment stub": paymentStub} {
 		t.Run(name, func(t *testing.T) {
@@ -142,17 +143,14 @@ func TestOP2CheckProvesNotDoneThenOneEffect(t *testing.T) {
 			}
 			st := killedBetween(t, svc, mk("a"))
 			e := mustOpen(t, st, newPolicy(), svc)
-			if rep := settle(e); len(rep.Resolved) != 1 || len(rep.Parked) != 0 {
+			if rep := settle(e); len(rep.Resolved) != 1 || len(rep.Parked) != 0 || len(rep.Redispatched) != 1 {
 				t.Fatalf("report %+v", rep)
 			}
-			if s := must(e.Get("a")); s.State != NotApplied {
-				t.Fatalf("a is %s", s.State)
+			if s := must(e.Get("a")); s.State != Succeeded || len(s.Attempts) != 2 || s.Attempts[1].Source != "executor" {
+				t.Fatalf("a is %s, attempts %+v", s.State, s.Attempts)
 			}
-			if svc.executeCount() != 1 {
-				t.Fatalf("executes %d: settling dispatched by itself", svc.executeCount())
-			}
-			if s, err := e.Dispatch(ctx, "a"); err != nil || s.State != Succeeded {
-				t.Fatalf("dispatch after not_applied: %+v, %v", s, err)
+			if svc.executeCount() != 2 || !svc.wasApplied("a", 2) {
+				t.Fatalf("executes %d", svc.executeCount())
 			}
 			if svc.effectCount("a") != 1 {
 				t.Fatalf("effects %d", svc.effectCount("a"))

@@ -132,6 +132,12 @@ var counterexamples = map[string][]func(p []journal.Record) ([]journal.Record, O
 			t.dispBy("x", 2, journal.DispatchOwner).obs("x", 2, journal.ResultSucceeded)
 			return t.recs, Options{}
 		},
+		func(p []journal.Record) ([]journal.Record, Options) { // owner retry after not_applied, never parked (OP-2): only the parked check catches it
+			t := &trail{recs: p}
+			t.sub(effect("x")).rec(journal.RecAuthorized, "x").disp("x", 1).obs("x", 1, journal.ResultNotApplied)
+			t.dispBy("x", 2, journal.DispatchOwner).obs("x", 2, journal.ResultSucceeded)
+			return t.recs, Options{}
+		},
 		func(p []journal.Record) ([]journal.Record, Options) { // key retry after parking (OP-2)
 			t := unknownX(p)
 			t.park("x", 1).dispBy("x", 1, journal.DispatchKey).obs("x", 1, journal.ResultSucceeded)
