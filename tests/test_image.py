@@ -53,15 +53,18 @@ def write(root, rel, text="", mode=0o644):
 
 
 # The image's no-dump files (IMG-nodump): copied into a test tree from mkosi.extra, except the
-# page's unit, which image/build.sh installs from its command's directory.
+# page's and the access point loader's units, which image/build.sh installs from their commands'
+# directories.
 NODUMP = ("usr/lib/systemd/coredump.conf.d/50-agentos-nodump.conf",
           "usr/lib/systemd/system.conf.d/50-agentos-nodump.conf",
           "usr/lib/sysctl.d/99-agentos-nodump.conf",
           "usr/lib/systemd/system/agentosd.service",
           "usr/lib/systemd/system/agentos-egress.service",
-          "usr/lib/systemd/system/agentos-localui.service")
+          "usr/lib/systemd/system/agentos-localui.service",
+          "usr/lib/systemd/system/agentos-ap.service")
 NODUMP_SRC = {"usr/lib/systemd/system/agentos-localui.service":
-              ROOT / "broker/cmd/agentos-localui/agentos-localui.service"}
+              ROOT / "broker/cmd/agentos-localui/agentos-localui.service",
+              "usr/lib/systemd/system/agentos-ap.service": ROOT / "broker/cmd/agentos-ap/agentos-ap.service"}
 
 
 def nodump(root):
@@ -872,7 +875,7 @@ class NoDumpTest(unittest.TestCase):
 
     def test_removing_any_dump_setting_fails_the_build(self):
         for rel, needle in zip(NODUMP, ("Storage=none", "DefaultLimitCORE=0", "kernel.core_pattern",
-                                        "LimitCORE=0", "LimitCORE=0", "LimitCORE=0")):
+                                        "LimitCORE=0", "LimitCORE=0", "LimitCORE=0", "LimitCORE=0")):
             with self.subTest(rel=rel):
                 f = self.root / rel
                 text = f.read_text()
@@ -1025,6 +1028,10 @@ class NoDumpTest(unittest.TestCase):
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 AGENTOS_LIB = MK / "mkosi.extra/usr/lib/agentos"
 PAGE_UNIT = ROOT / "broker/cmd/agentos-localui/agentos-localui.service"
+# The units image/build.sh installs from their commands' directories.
+AP_UNIT = ROOT / "broker/cmd/agentos-ap/agentos-ap.service"
+MODEM_UNIT = ROOT / "broker/cmd/agentos-modem/agentos-modem.service"
+NETJOIN_UNIT = ROOT / "broker/cmd/agentos-netjoin/agentos-netjoin.service"
 
 
 def flags(cmd):
@@ -1081,7 +1088,8 @@ class SetupServicesTest(unittest.TestCase):
     def test_every_setup_service_is_enabled(self):
         preset = (UNITS.parent / "system-preset/50-agentos.preset").read_text().split("\n")
         for unit in ("agentosd.service", "agentos-egress.service", "agentos-localui.service",
-                     "agentos-egress-setup.path"):
+                     "agentos-egress-setup.path", "agentos-ap.service", "agentos-modem.service",
+                     "agentos-netjoin.service"):
             with self.subTest(unit):
                 self.assertIn("enable " + unit, preset)
 
@@ -1136,7 +1144,9 @@ class SetupServicesTest(unittest.TestCase):
     def test_the_vault_process_s_flags_exist(self):
         defined = flags("agentos-egress")
         for unit, cmd in ((UNITS / "agentos-egress.service", "agentos-egress"),
-                          (UNITS / "agentosd.service", "agentosd"), (PAGE_UNIT, "agentos-localui")):
+                          (UNITS / "agentosd.service", "agentosd"), (PAGE_UNIT, "agentos-localui"),
+                          (AP_UNIT, "agentos-ap"), (MODEM_UNIT, "agentos-modem"),
+                          (NETJOIN_UNIT, "agentos-netjoin")):
             with self.subTest(unit.name):
                 used = [w[1:] for w in exec_args(unit) if re.fullmatch(r"-[a-z][\w-]*", w)]
                 self.assertTrue(used)
@@ -1157,6 +1167,62 @@ class SetupServicesTest(unittest.TestCase):
         main = (ROOT / "broker/cmd/agentos-egress/main.go").read_text()
         self.assertIn('defaultKeys  = "%s/vault.keys"' % state, main)
         self.assertIn('defaultVault = "%s/vault"' % state, main)
+
+    def test_the_modem_and_netjoin_sockets_are_where_agentosd_looks(self):
+        # #1388: the bridge dials agentosd's owner socket, and agentosd dials the helper's.
+        self.assertEqual(arg(exec_args(MODEM_UNIT), "owner-sock"), flag_default("agentosd", "sockets") + "/owner.sock")
+        self.assertEqual(flag_default("agentos-modem", "owner-sock"), arg(exec_args(MODEM_UNIT), "owner-sock"))
+        nj = ini(NETJOIN_UNIT)["Service"]
+        run = "/run/" + nj["RuntimeDirectory"]
+        self.assertEqual(arg(exec_args(NETJOIN_UNIT), "dir"), run)
+        self.assertEqual(arg(exec_args(NETJOIN_UNIT), "agentosd-uid"), "0")  # agentosd runs as root
+        self.assertNotIn("User", ini(UNITS / "agentosd.service")["Service"])
+        sock = re.search(r'^const Socket = "([\w.-]+)"$', (ROOT / "broker/netjoin/netjoin.go").read_text(), re.M)
+        self.assertEqual(arg(exec_args(UNITS / "agentosd.service"), "netjoin-sock"), "%s/%s" % (run, sock.group(1)))
+
+    def test_the_access_point_serves_the_page_s_network(self):
+        # #825: the loader brings the access point up on the interface and address the page binds,
+        # and reads the latch the page writes.
+        ap, page = exec_args(AP_UNIT), exec_args(PAGE_UNIT)
+        self.assertEqual(ap[0], "/usr/lib/agentos/agentos-ap")
+        for name in ("iface", "addr", "card-latch"):
+            with self.subTest(name):
+                self.assertEqual(arg(ap, name), arg(page, name))
+                self.assertEqual(flag_default("agentos-ap", name), arg(page, name))
+        u = ini(AP_UNIT)
+        # Root (nft, the exempt unit, the radio's address), with no dumps of the setup password.
+        self.assertNotIn("User", u["Service"])
+        self.assertEqual(u["Service"]["LimitCORE"], "0")
+        # Never without the inbound drop, and up before the page that listens on it.
+        self.assertIn("agentos-inbound.service", u["Unit"]["Requires"].split())
+        self.assertIn("agentos-inbound.service", u["Unit"]["After"].split())
+        self.assertIn("agentos-localui.service", u["Unit"]["Before"].split())
+        self.assertEqual("/run/" + u["Service"]["RuntimeDirectory"], flag_default("agentos-ap", "dir"))
+
+    def test_the_access_point_s_programs_ship_and_stay_off_on_their_own(self):
+        # Debian's hostapd and dnsmasq do the access point's work (localui.Hostapd); the loader
+        # starts them, so neither's own service runs. dnsmasq-base ships no service at all.
+        pkgs = ini(MK / "mkosi.conf")["Content"]["Packages"].split()
+        for p in ("hostapd", "dnsmasq-base", "iproute2", "wireless-regdb"):
+            with self.subTest(p):
+                self.assertIn(p, pkgs)
+        self.assertNotIn("dnsmasq", pkgs)
+        preset = (UNITS.parent / "system-preset/50-agentos.preset").read_text().split("\n")
+        self.assertIn("disable hostapd.service", preset)
+        # The radio keeps its kernel name (wlan0), which the loader and the page are given.
+        link = ini(MK / "mkosi.extra/usr/lib/systemd/network/10-agentos-wlan.link")
+        self.assertEqual(link["Match"]["Type"], "wlan")
+        self.assertEqual(link["Link"]["NamePolicy"], "keep kernel")
+
+    def test_the_modem_bridge_has_its_country_code_and_no_number(self):
+        # #1292: the bridge exits without COUNTRY_CODE; the image is the same for every box, so it
+        # carries no number, and onboarding's /etc file may add the owner's (#1291).
+        s = settings(MODEM_UNIT)
+        self.assertEqual(s["EnvironmentFile"], ["/usr/lib/agentos/modem.env", "-/etc/agentos/modem.env"])
+        env = dict(l.split("=", 1) for l in (AGENTOS_LIB / "modem.env").read_text().splitlines()
+                   if l.strip() and not l.startswith("#"))
+        self.assertEqual(sorted(env), ["COUNTRY_CODE"])
+        self.assertRegex(env["COUNTRY_CODE"], r"^[1-9][0-9]{0,2}$")
 
     def test_the_default_rule_routes_the_guest_s_model_class_to_both_providers(self):
         rule_path = arg(exec_args(UNITS / "agentos-egress.service"), "rule")
@@ -1188,9 +1254,11 @@ class SetupServicesTest(unittest.TestCase):
     def test_the_image_creates_every_service_user(self):
         lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf").read_text().splitlines()
         users = sorted(l.split()[1] for l in lines if l.strip() and not l.startswith("#") and l.split()[0] == "u")
-        self.assertEqual(users, ["agentos-egress", "agentos-localui", "agentos-modem"])
-        page = ini(PAGE_UNIT)["Service"]
-        self.assertEqual((page["User"], page["Group"]), ("agentos-localui", "agentos-localui"))
+        self.assertEqual(users, ["agentos-egress", "agentos-localui", "agentos-modem", "agentos-netjoin"])
+        for unit, user in ((PAGE_UNIT, "agentos-localui"), (MODEM_UNIT, "agentos-modem"),
+                           (NETJOIN_UNIT, "agentos-netjoin")):
+            s = ini(unit)["Service"]
+            self.assertEqual((s["User"], s["Group"]), (user, user))
         for unit in (UNITS / "agentosd.service", UNITS / "agentos-egress.service"):
             for w in exec_args(unit):
                 if w.startswith("@uid:"):
@@ -1214,6 +1282,7 @@ class SetupServicesTest(unittest.TestCase):
         words = exec_args(UNITS / "agentosd.service")
         self.assertEqual(arg(words, "modem-uid"), "@uid:agentos-modem")
         self.assertEqual(arg(words, "localui-uid"), "@uid:agentos-localui")
+        self.assertIn("-netjoin-sock", words)
         self.assertIn("agentos-egress.service", u["Unit"]["Wants"].split())
         self.assertIn("agentos-egress.service", u["Unit"]["After"].split())
         page = ini(PAGE_UNIT)["Unit"]
@@ -1225,10 +1294,18 @@ class SetupServicesTest(unittest.TestCase):
         self.assertIn('SUBSYSTEM=="tpmrm", KERNEL=="tpmrm[0-9]*", GROUP="agentos-egress", MODE="0660"', rules)
 
     def test_the_build_ships_the_page(self):
+        # The page, the access point loader (#825), and the modem bridge and netjoin helper (#1388).
         build = (IMG / "build.sh").read_text()
-        self.assertRegex(build, r"for cmd in [^;]*\bagentos-localui\b")
-        self.assertRegex(build, r'install -D -m 0644 "\$REPO/broker/cmd/agentos-localui/agentos-localui.service" '
-                                r'"\$STAGE/usr/lib/systemd/system/agentos-localui.service"')
+        for cmd in ("agentos-localui", "agentos-ap", "agentos-modem", "agentos-netjoin"):
+            with self.subTest(cmd):
+                self.assertRegex(build, r"for cmd in [^;]*\b%s\b" % cmd)
+                self.assertRegex(build, r'install -D -m 0644 "\$REPO/broker/cmd/{0}/{0}.service" '
+                                        r'"\$STAGE/usr/lib/systemd/system/{0}.service"'.format(cmd))
+        # The helper's only privilege (netjoin L8.2), and the rule that gives the bridge its modems.
+        self.assertIn('install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/50-agentos-netjoin.rules" '
+                      '"$STAGE/usr/share/polkit-1/rules.d/50-agentos-netjoin.rules"', build)
+        self.assertIn('install -D -m 0644 "$REPO/broker/modem/at/udev/71-agentos-modem.rules" '
+                      '"$STAGE/usr/lib/udev/rules.d/71-agentos-modem.rules"', build)
 
     def test_the_setup_vault_is_made_when_the_page_records_the_claim(self):
         p = ini(UNITS / "agentos-egress-setup.path")
