@@ -1,0 +1,14 @@
+name: zz-r4-shadow
+# Throwaway (CTRL-lane-gate R4, #1344/#1348): a pull_request job named lane-gate that passes
+# after the real gate, to see whether a same-name run can shadow it. Never merge.
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  lane-gate:
+    name: lane-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: sleep 120
