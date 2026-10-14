@@ -200,15 +200,17 @@ func TestNoProvidersPageWithoutItsSocket(t *testing.T) {
 // #1266 (REV-6): the setup box says what leaving it unticked means, and
 // is unticked by default (CAP-9: the default is no).
 func TestTheSetupPrivateBoxSaysWhatUntickedMeans(t *testing.T) {
-	var b strings.Builder
-	if err := pagesFor("box.local").ExecuteTemplate(&b, "private", Provider{ID: "openai", Name: "OpenAI"}); err != nil {
-		t.Fatal(err)
-	}
-	p := html.UnescapeString(b.String())
-	if !strings.Contains(p, "Unticked, tasks that need your mail or files can't run until you allow a provider on the AI providers page.") {
-		t.Fatalf("box line:\n%s", p)
-	}
-	if strings.Contains(p, "checked") {
-		t.Fatalf("ticked by default:\n%s", p)
+	for _, checked := range []bool{false, true} {
+		var b strings.Builder
+		if err := pagesFor("box.local").ExecuteTemplate(&b, "private", privateBox{Name: "OpenAI", Checked: checked}); err != nil {
+			t.Fatal(err)
+		}
+		p := html.UnescapeString(b.String())
+		if !strings.Contains(p, "Unticked, tasks that need your mail or files can't run until you allow a provider on the AI providers page.") {
+			t.Fatalf("box line:\n%s", p)
+		}
+		if strings.Contains(p, "checked") != checked {
+			t.Fatalf("checked=%v not rendered as such:\n%s", checked, p)
+		}
 	}
 }

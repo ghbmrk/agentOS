@@ -87,7 +87,11 @@ TIER_A_PREFIXES = (
 )
 # guest/<name>/<file>: what the guest runs or installs.
 TIER_A_GUEST_FILES = {"build-rootfs.sh", "package.json", "package-lock.json", "launch.json"}
-TIER_A_GUEST_PATHS = {"guest/openclaw/openclaw.json5"}
+# guest/codex: the Codex worker's tool sandbox and managed config (S8-W1).
+TIER_A_GUEST_PATHS = {
+    "guest/openclaw/openclaw.json5",
+    "guest/codex/agentos-toolsh", "guest/codex/managed_config.toml",
+}
 UNIT_SUFFIXES = (".service", ".socket", ".timer")
 TIER_B_FILES = {"SPEC.md"}
 TIER_B_PREFIXES = ("broker/", "guest/")
