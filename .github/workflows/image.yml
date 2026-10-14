@@ -76,10 +76,13 @@ jobs:
   reproduce:
     # Two runners, one commit: the release must match: the /usr root hash, the boot entry and the
     # kernel. The initrd is compared but only reported until it is reproducible (BOARD IMG-2).
-    # The whole-disk hash is reported too.
+    # The whole-disk hash is reported too. Both package manifests must list packages.
     needs: build
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: rec
@@ -88,10 +91,10 @@ jobs:
           a=$(jq -r .usrhash rec/release-a/*.release.json); b=$(jq -r .usrhash rec/release-b/*.release.json)
           echo "usrhash a=$a"; echo "usrhash b=$b"
           diff rec/release-a/SHA256SUMS rec/release-b/SHA256SUMS && echo "every output identical" || true
-          diff <(jq -S . rec/release-a/*.manifest) <(jq -S . rec/release-b/*.manifest) >/dev/null \
-            && echo "same packages" || echo "package manifests differ"
           A=$(ls rec/release-a/*.release.json); B=$(ls rec/release-b/*.release.json)
           ok=1
+          # Fails on a missing, empty or truncated manifest (#1474); prints each side's package count.
+          python3 image/compare_manifests.py rec/release-a rec/release-b || ok=0
           [ -n "$a" ] && [ "$a" = "$b" ] || { echo "MISMATCH /usr root hash"; ok=0; }
           [ "$(jq -r .boot_entry.sha256 "$A")" = "$(jq -r .boot_entry.sha256 "$B")" ] \
             && echo "same boot entry" || { echo "MISMATCH boot entry"; ok=0; }

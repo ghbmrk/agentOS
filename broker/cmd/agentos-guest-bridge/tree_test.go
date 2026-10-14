@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/guest"
 )
 
 // fakeTree is a broker socket whose /mcp answers managed_tree.
@@ -122,7 +125,7 @@ func TestBridgeKeepsItsTreeWhenTheBrokerDoesNotSendOne(t *testing.T) {
 		"grants":    {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"grants/g.json": []byte("g")}}},
 		"dotdot":    {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"skills/../../x": []byte("x")}}},
 		"absolute":  {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"/skills/x.json": []byte("x")}}},
-		"oversize":  {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"skills/big.json": make([]byte, maxTreeAnswer)}}},
+		"oversize":  {ans: treeAnswer{Version: "v1", Files: map[string][]byte{"skills/big.json": make([]byte, guest.MaxTreeAnswer)}}},
 		"unchanged": {ans: treeAnswer{Version: "v9", Unchanged: true}},
 		"not ready": {err: "the managed tree is not ready; keep the one you have"},
 	} {
@@ -155,5 +158,39 @@ func TestBridgeMirrorStaysInsideTheTree(t *testing.T) {
 	}
 	if read(t, filepath.Join(outside, "a.json")) != "<none>" || read(t, filepath.Join(outside, "keep.json")) != "outside" {
 		t.Fatal("the mirror reached outside the tree")
+	}
+}
+
+// TREE-answer-bound (#1487): the guest plane sends a managed_tree answer
+// of up to guest.MaxTreeAnswer bytes on the wire, newline included, and
+// the bridge reads one of exactly that size whole.
+func TestBridgeReadsATreeAnswerOfTheBoundWhole(t *testing.T) {
+	answer := func(pad int) []byte {
+		tree, _ := json.Marshal(treeAnswer{Version: "v" + strings.Repeat("a", pad),
+			Files: map[string][]byte{"skills/a.json": []byte("a")}})
+		var b strings.Builder
+		json.NewEncoder(&b).Encode(map[string]any{"jsonrpc": "2.0", "id": 1,
+			"result": map[string]any{"content": []any{map[string]any{"type": "text", "text": string(tree)}}}})
+		return []byte(b.String())
+	}
+	body := answer(guest.MaxTreeAnswer - len(answer(0)))
+	if len(body) != guest.MaxTreeAnswer {
+		t.Fatalf("answer is %d bytes, not %d", len(body), guest.MaxTreeAnswer)
+	}
+	sock := filepath.Join(t.TempDir(), "b.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(body) })}
+	go srv.Serve(l)
+	t.Cleanup(func() { srv.Close() })
+	c := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+	}}}
+	dir := t.TempDir()
+	v, err := syncOnce(context.Background(), c, dir, "")
+	if err != nil || len(v) != guest.MaxTreeAnswer-len(answer(0))+1 || read(t, filepath.Join(dir, "skills/a.json")) != "a" {
+		t.Fatalf("an answer of exactly the bound: version of %d bytes, %v", len(v), err)
 	}
 }

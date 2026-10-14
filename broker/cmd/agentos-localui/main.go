@@ -76,7 +76,7 @@ func main() {
 // config is the page's configuration: setup through agentosd's socket
 // with an in-memory store (P2-2w c4), and no setup secret (Security L6).
 // The vault process's unlock socket serves both the unlock page and the
-// Owner Card rotation (REC-4); ARC-2 keeps the card's display here, not
+// Owner Card rotation (REC-4) and the AI providers page; ARC-2 keeps the card's display here, not
 // in agentosd.
 func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Config {
 	cfg := localui.Config{AP: ap, Port: port,
@@ -85,6 +85,9 @@ func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Confi
 		client := localui.NewUnlockClient(vaultSock)
 		cfg.Vault = client
 		cfg.Rotation = localui.NewRotation(client)
+		// The AI providers page: the owner's private-data answer after
+		// setup (#1266).
+		cfg.Providers = client
 	}
 	return cfg
 }
@@ -104,7 +107,7 @@ func station(netClass, iface string) func() bool {
 // claim screen (nil on the download route), the card step, and the
 // report of its confirm before agentosd's finish.
 func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.CodesVoid) (localui.Config, firstboot.Route, error) {
-	fb, err := firstboot.Begin(box)
+	fb, err := firstboot.Begin(withCardNet(cfg.Hooks, box))
 	if err != nil {
 		return cfg, "", err
 	}
@@ -116,6 +119,15 @@ func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.Co
 		cfg.Hooks = localui.CardFinish{AgentosdSetup: h, Card: fb.Card}
 	}
 	return cfg, fb.Route, nil
+}
+
+// withCardNet has the card step report the card's network to agentosd
+// before the confirm latches, for agentos-ap to serve at it (#1185).
+func withCardNet(hooks localui.Hooks, box firstboot.BoxConfig) firstboot.BoxConfig {
+	if h, ok := hooks.(localui.AgentosdSetup); ok && box.Card.Provision != nil {
+		box.Card.Provision = localui.ServeCardNet(box.Card.Provision, h)
+	}
+	return box
 }
 
 // agentosdWait bounds the wait for agentosd's socket; past it the page

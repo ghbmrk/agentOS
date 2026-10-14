@@ -28,6 +28,7 @@ const (
 	// OpSetupJoin has agentosd's netjoin helper write the home Wi-Fi
 	// connection (P2-2w c3; Security L8 on the P2-2w plan) and answers
 	// once the helper does: success when it joined or saved the network,
+	// ErrJoinUnavailable when the box cannot join Wi-Fi at all, and
 	// ErrNotJoined otherwise. It is answered within JoinTimeout.
 	OpSetupJoin = "page_setup_join"
 	// OpSetupProviders lists the AI providers the vault process serves,
@@ -61,6 +62,14 @@ const (
 	// confirmed and provisioned. agentosd's setup mode serves it beside
 	// SetupOps, and finish answers ErrCardPending until it is reported.
 	OpSetupCard = "page_setup_card"
+	// OpSetupAPNet reports the card's Wi-Fi name and password before the
+	// confirm latches (CTRL-claim-ap u1, #1185): agentosd writes them
+	// root-only (apnet.Path, ARC-1) and agentos-ap serves that network at
+	// the confirm and every later start, in place of the setup network.
+	// Only a network the card prints is taken (ErrBadArgs); a report
+	// replaces the last, as a reset card makes a new one. It is served
+	// beside OpSetupCard.
+	OpSetupAPNet = "page_setup_ap_net"
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
@@ -86,16 +95,26 @@ const (
 	// one.
 	ErrNotEnrolled = "not enrolled"
 	// ErrNotJoined: the helper did not join or save the network (wrong
-	// password, not in range, busy, refused, or an error), or no helper
-	// is configured. The page shows its one network error for all of
-	// them (Security L8.4).
+	// password, not in range, busy or refused), or no helper is
+	// configured. The page shows its one network error for all of them
+	// (Security L8.4).
 	ErrNotJoined = "not joined"
+	// ErrJoinUnavailable: the helper answered failed, a D-Bus or
+	// NetworkManager error such as NetworkManager being absent, so no
+	// password can help. The page points to Ethernet instead (#1429).
+	ErrJoinUnavailable = "join unavailable"
 	// ErrNotSent: the text did not go: no usable line, the bridge
 	// reported a failure, or no result came in time.
 	ErrNotSent = "not sent"
 	// ErrCardPending: finish before the page reported the Owner Card
 	// confirmed (OpSetupCard).
 	ErrCardPending = "card pending"
+	// ErrKeyRefused: the provider did not accept the API key when the
+	// vault process checked it (ONB-3); nothing was stored.
+	ErrKeyRefused = "key refused"
+	// ErrKeyUnchecked: the vault process could not check the API key with
+	// its provider; nothing was stored.
+	ErrKeyUnchecked = "key unchecked"
 )
 
 // Setup's text waits. agentosd's own wait for the bridge ends sooner
@@ -198,6 +217,17 @@ type SetupCard struct {
 	Confirmed bool `json:"confirmed"`
 }
 
+// SetupAPNet is the card's Wi-Fi network (OpSetupAPNet). The password is
+// the access point's (CRED-1): it goes only to agentos-ap's file.
+type SetupAPNet struct {
+	SSID     string `json:"ssid"`
+	Password string `json:"password"`
+}
+
+// String and GoString keep the password out of logs.
+func (SetupAPNet) String() string   { return "[card Wi-Fi network]" }
+func (SetupAPNet) GoString() string { return "[card Wi-Fi network]" }
+
 // Finish carries the owner's number, E.164.
 type Finish struct {
 	Owner string `json:"owner"`
@@ -206,6 +236,11 @@ type Finish struct {
 // MaxAPIKey bounds a provider API key in bytes; a key is printable ASCII
 // with no spaces, as the proxy sends it in a header.
 const MaxAPIKey = 512
+
+// APIKeyTimeout bounds one OpSetupAPIKey call from the page: the vault
+// process checks the key with its provider first (ONB-3), and agentosd's
+// own wait for the vault ends sooner (Security L8.4).
+const APIKeyTimeout = 15 * time.Second
 
 // APIKeysPerMinute limits OpSetupAPIKey; past it the op answers
 // ErrLimited.

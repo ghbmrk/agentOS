@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -29,6 +30,10 @@ type fakeRotVault struct {
 	beginErr  error
 	commitErr error
 	result    RotationResult
+	expires   time.Time
+	// commitIn, when set, is told each commit as it reaches the vault
+	// process; commitGo then holds its answer until a send (a late answer).
+	commitIn, commitGo chan struct{}
 }
 
 func (f *fakeRotVault) BeginRotation(_ context.Context, b RotationBegin) (RotationStarted, error) {
@@ -38,10 +43,14 @@ func (f *fakeRotVault) BeginRotation(_ context.Context, b RotationBegin) (Rotati
 	if f.beginErr != nil {
 		return RotationStarted{}, f.beginErr
 	}
-	return RotationStarted{Parts: b.Parts, WiFiName: "AgentOS-TEST"}, nil
+	return RotationStarted{Parts: b.Parts, WiFiName: "AgentOS-TEST", Expires: f.expires}, nil
 }
 
 func (f *fakeRotVault) CommitRotation(_ context.Context, id string, c card.Card) (RotationResult, error) {
+	if f.commitIn != nil {
+		f.commitIn <- struct{}{}
+		<-f.commitGo
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.committed = append(f.committed, c)
@@ -106,6 +115,7 @@ func newWireRig(t *testing.T) *wireRig {
 		}
 		return c, err
 	}
+	x.r.Now = x.clock
 	x.rot = x.r
 	x.srv = x.open(&MemStore{})
 	x.runSetup()
@@ -344,5 +354,108 @@ func TestRotationStartPageOffersTheUnconfirmedCodeGenerator(t *testing.T) {
 	x.post("/rotate/card", x.group())
 	if done := x.get("/rotate/done"); !strings.Contains(done, "Replace Owner Card parts on Home shows it again") {
 		t.Fatalf("done page: %s", done)
+	}
+}
+
+// REQ: REC-4
+
+// #1316: the committed result (notes and the new code generator's seed)
+// is the confirming session's. The confirming phone skips /rotate/done;
+// another signed-in session's GET of it gets no secret, and the
+// confirming phone still gets it once.
+func TestRotationResultIsTheConfirmingSessions(t *testing.T) {
+	x := newWireRig(t)
+	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+	x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/AgentOS?secret=CANARYSEEDCCCCCC"}
+	if w := x.post("/rotate/card", x.group()); w.Header().Get("Location") != "/rotate/done" {
+		t.Fatalf("confirm: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	x.asOther(func() {
+		x.signIn()
+		w := x.do("GET", "/rotate/done", nil)
+		if w.Code != http.StatusSeeOther || strings.Contains(w.Body.String(), "SYNTH-NOTE") || strings.Contains(w.Body.String(), "<svg") {
+			t.Fatalf("another session read the result: %d %s", w.Code, w.Body.String())
+		}
+	})
+	if done := x.get("/rotate/done"); !strings.Contains(done, "SYNTH-NOTE") || !strings.Contains(done, "<svg") {
+		t.Fatalf("the confirming phone lost its result: %s", done)
+	}
+}
+
+// #1316: the result expires with the rotation's confirm window, and with
+// no window from the vault process, resultTTL after the start.
+func TestRotationResultExpiresWithTheConfirmWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		expires time.Duration // from the start; 0: none from the vault process
+		after   time.Duration
+	}{{"vault window", 10 * time.Minute, 10*time.Minute + time.Second}, {"no window", 0, resultTTL + time.Second}} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newWireRig(t)
+			if tc.expires != 0 {
+				x.v.expires = x.clock().Add(tc.expires)
+			}
+			x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+			x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/AgentOS?secret=CANARYSEEDDDDDDD"}
+			x.post("/rotate/card", x.group())
+			x.advance(tc.after)
+			if w := x.do("GET", "/rotate/done", nil); w.Code != http.StatusSeeOther || strings.Contains(w.Body.String(), "SYNTH-NOTE") {
+				t.Fatalf("an expired result was shown: %d", w.Code)
+			}
+		})
+	}
+}
+
+// #1316: confirming the new code generator, or showing it again with the
+// recovery key, clears a result the confirming phone never fetched.
+func TestRotationResultClearedByEnrollOrShow(t *testing.T) {
+	for _, path := range []string{"/rotate/enroll", "/rotate/show"} {
+		t.Run(path, func(t *testing.T) {
+			x := newWireRig(t)
+			x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+			x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/AgentOS?secret=CANARYSEEDEEEEEE"}
+			x.post("/rotate/card", x.group())
+			x.post(path, url.Values{"code": {"123456"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+			if w := x.do("GET", "/rotate/done", nil); w.Code != http.StatusSeeOther || strings.Contains(w.Body.String(), "SYNTH-NOTE") {
+				t.Fatalf("the result outlived %s: %d", path, w.Code)
+			}
+		})
+	}
+}
+
+// #1316: a commit answered late, after the owner showed the code
+// generator again, stores no result.
+func TestRotationLateCommitAnswerStoresNoResult(t *testing.T) {
+	x := newWireRig(t)
+	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+	x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/AgentOS?secret=CANARYSEEDFFFFFF"}
+	x.v.commitIn, x.v.commitGo = make(chan struct{}), make(chan struct{})
+	form := x.group()
+	confirmed := make(chan struct{})
+	go func() {
+		defer close(confirmed)
+		x.post("/rotate/card", form)
+	}()
+	<-x.v.commitIn
+	x.post("/rotate/show", url.Values{"recovery": {"SYNTH-RECOVERY-CANARY"}})
+	close(x.v.commitGo)
+	<-confirmed
+	if w := x.do("GET", "/rotate/done", nil); w.Code != http.StatusSeeOther || strings.Contains(w.Body.String(), "SYNTH-NOTE") {
+		t.Fatalf("a late commit answer stored the result: %d", w.Code)
+	}
+}
+
+// #1316: a commit reached other than through a session's confirm (no
+// confirmer) is shown to no session.
+func TestRotationResultWithNoConfirmerIsShownToNone(t *testing.T) {
+	x := newWireRig(t)
+	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+	x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}}
+	_, g := x.r.Display().Asks()
+	if err := x.r.Display().ConfirmAnswers(card.Answers{Group: strings.Split(x.gen.RecoveryKey, "-")[g-1]}); err != nil {
+		t.Fatal(err)
+	}
+	if w := x.do("GET", "/rotate/done", nil); w.Code != http.StatusSeeOther {
+		t.Fatalf("a result with no confirmer was shown: %d", w.Code)
 	}
 }

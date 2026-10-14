@@ -15,13 +15,16 @@ import (
 // P2-2w c4 r1 (#1223): with no Wi-Fi device beside the access point, a
 // saved home Wi-Fi can never come online, so the never-online note names
 // Ethernet only, before pairing too, and the number step offers no rejoin
-// form. Setup still continues.
+// form. Setup still continues. Since #1429 the page refuses a Wi-Fi join
+// with no station device, so the Wi-Fi here was saved while one was
+// present (a USB adapter since unplugged).
 func TestNeverOnlineNoStationEthernetOnly(t *testing.T) {
 	r := newRig(t)
-	asked := 0
-	r.srv.cfg.Station = func() bool { asked++; return false }
+	asked, station := 0, true
+	r.srv.cfg.Station = func() bool { asked++; return station }
 	r.get("/setup")
 	r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"home-pass"}})
+	station = false
 	if n := joinNote.FindStringSubmatch(r.get("/setup")); n != nil {
 		t.Fatalf("a note before never online: %q", n[1])
 	}

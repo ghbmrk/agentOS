@@ -3,8 +3,10 @@ package localui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
@@ -120,11 +122,17 @@ func (a AgentosdSetup) Finish(owner string) error {
 
 // JoinNetwork has agentosd's helper write the home Wi-Fi connection. It
 // waits up to localapi.JoinTimeout, longer than agentosd's own call to the
-// helper (Security L8.4); any error shows the page's one network error.
+// helper (Security L8.4). A box that cannot join Wi-Fi at all answers
+// ErrWiFiUnavailable (#1429); any other error shows the page's one network
+// error.
 func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), localapi.JoinTimeout)
 	defer cancel()
-	return a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
+	err := a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
+	if refused(err, localapi.ErrJoinUnavailable) {
+		return fmt.Errorf("%w (%w)", ErrWiFiUnavailable, err)
+	}
+	return err
 }
 
 func (AgentosdSetup) HostInfo() string     { return "" }
@@ -145,9 +153,28 @@ func (a AgentosdSetup) Providers() []Provider {
 }
 
 // ConnectAPIKey passes the key to agentosd, which passes it to the vault
-// process; the page keeps nothing (CRED-1, CRED-5).
+// process; the page keeps nothing (CRED-1, CRED-5). The vault checks the
+// key with its provider first (ONB-3), so the call waits up to
+// localapi.APIKeyTimeout, longer than agentosd waits for the vault
+// (Security L8.4). Each refusal is named as the page's error, beside the
+// code agentosd answered.
 func (a AgentosdSetup) ConnectAPIKey(id, key string) error {
-	return a.call(localapi.OpSetupAPIKey, localapi.APIKey{Provider: id, Key: key}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), localapi.APIKeyTimeout)
+	defer cancel()
+	err := a.Owner.Call(ctx, localapi.OpSetupAPIKey, localapi.APIKey{Provider: id, Key: key}, nil)
+	for code, named := range map[string]error{
+		localapi.ErrKeyRefused:        ErrKeyRefused,
+		localapi.ErrKeyUnchecked:      ErrKeyUnchecked,
+		localapi.ErrLimited:           ErrKeysLimited,
+		localapi.ErrBadArgs:           ErrKeyNotTaken,
+		localapi.ErrSetupClosed:       ErrSetupClosed,
+		localapi.ErrEnrollUnavailable: ErrCodesUnavailable,
+	} {
+		if refused(err, code) {
+			return fmt.Errorf("%w (%w)", named, err)
+		}
+	}
+	return err
 }
 
 // SetPrivateOK records the owner's private-data answer in the vault, where
@@ -226,4 +253,30 @@ func (c CardFinish) Finish(owner string) error {
 		}
 	}
 	return c.AgentosdSetup.Finish(owner)
+}
+
+// APNet reports the card's Wi-Fi network to agentosd, which writes it for
+// agentos-ap to serve at the confirm (#1185). The password goes only
+// there (CRED-1).
+func (a AgentosdSetup) APNet(ssid, password string) error {
+	return a.call(localapi.OpSetupAPNet, localapi.SetupAPNet{SSID: ssid, Password: password}, nil)
+}
+
+// NetReporter takes the card's Wi-Fi network; AgentosdSetup is one.
+type NetReporter interface {
+	APNet(ssid, password string) error
+}
+
+// ServeCardNet is the card step's Provision with the card's network
+// reported first (#1185): the confirm latches only after both, so
+// agentos-ap has the network to switch to when it sees the latch. A
+// report that fails fails the provision, and the card stays shown for a
+// retry.
+func ServeCardNet(provision func(*card.Card) error, a NetReporter) func(*card.Card) error {
+	return func(c *card.Card) error {
+		if err := a.APNet(c.WiFiName, c.WiFiPassword); err != nil {
+			return fmt.Errorf("localui: reporting the card's Wi-Fi: %w", err)
+		}
+		return provision(c)
+	}
 }

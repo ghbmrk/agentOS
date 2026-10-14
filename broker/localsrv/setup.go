@@ -52,7 +52,8 @@ type SetupConfig struct {
 	Finished func(owner string)
 	// Join has the netjoin helper join the home Wi-Fi (P2-2w c3;
 	// Security L8): nil when it joined or saved the network, an error
-	// otherwise. Nil Join answers every join with ErrNotJoined. The
+	// otherwise. JoinUnavailable answers ErrJoinUnavailable, any other
+	// error, or nil Join, answers ErrNotJoined. The
 	// password goes nowhere else: not the record, not an error, not a log.
 	Join func(ctx context.Context, ssid, password string) error
 	// Providers is the vault process's provider setup (P2-2w c4e). Nil
@@ -162,7 +163,12 @@ var (
 	errUnavailable  = sockets.Code(localapi.ErrEnrollUnavailable)
 	errCardPending  = sockets.Code(localapi.ErrCardPending)
 	errNotJoined    = sockets.Code(localapi.ErrNotJoined)
+	errNoJoin       = sockets.Code(localapi.ErrJoinUnavailable)
 )
+
+// JoinUnavailable: the box cannot join Wi-Fi at all, so the page should
+// not ask for the password again (#1429).
+var JoinUnavailable = errors.New("home Wi-Fi join unavailable")
 
 // NewSetup reads the record; one that cannot be read closes setup.
 func NewSetup(cfg SetupConfig) *Setup {
@@ -286,7 +292,12 @@ func (s *Setup) join(ctx context.Context, _ sockets.Peer, args json.RawMessage) 
 		len(a.Password) < localapi.MinPassword || len(a.Password) > localapi.MaxPassword {
 		return nil, errBadArgs
 	}
-	if s.cfg.Join == nil || s.cfg.Join(ctx, a.SSID, a.Password) != nil {
+	if s.cfg.Join == nil {
+		return nil, errNotJoined
+	}
+	if err := s.cfg.Join(ctx, a.SSID, a.Password); errors.Is(err, JoinUnavailable) {
+		return nil, errNoJoin
+	} else if err != nil {
 		return nil, errNotJoined
 	}
 	return struct{}{}, nil

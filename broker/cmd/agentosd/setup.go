@@ -9,8 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/bridgeproto"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -52,6 +54,9 @@ type setupMode struct {
 	// net/http), so the step is built with the page and handed in here; a
 	// nil Card fails closed.
 	Card func() (cardHold, error)
+	// APNet is where the page's report of the card's network is written
+	// (OpSetupAPNet, #1185) for agentos-ap; empty, the op is not served.
+	APNet string
 }
 
 // cardHold is the Owner Card step as setup's finish sees it
@@ -92,6 +97,26 @@ func (c *pageCard) report(_ context.Context, _ sockets.Peer, args json.RawMessag
 	c.confirmed = true
 	c.mu.Unlock()
 	return nil, nil
+}
+
+// apNetOp is OpSetupAPNet: it writes the card's network to path, 0600,
+// replacing any earlier report, and logs nothing of it (ARC-1). Only a
+// network the card prints is taken.
+func apNetOp(path string) sockets.Handler {
+	return func(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+		var r localapi.SetupAPNet
+		if json.Unmarshal(args, &r) != nil {
+			return nil, sockets.Code(localapi.ErrBadArgs)
+		}
+		b, err := apnet.Network{SSID: r.SSID, Password: r.Password}.Marshal()
+		if err != nil {
+			return nil, sockets.Code(localapi.ErrBadArgs)
+		}
+		if durable.WriteFile(path, b, 0o600) != nil {
+			return nil, sockets.Code(localapi.ErrFailed)
+		}
+		return nil, nil
+	}
 }
 
 // errOwnedWithoutRecord: the owner channel has state but setup's record is
@@ -141,6 +166,9 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	}
 	if pc, ok := step.(*pageCard); ok {
 		ops[localapi.OpSetupCard] = pc.report
+		if m.APNet != "" {
+			ops[localapi.OpSetupAPNet] = apNetOp(m.APNet)
+		}
 	}
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()
@@ -268,6 +296,12 @@ func (e enroller) SetPrivateOK(provider string, ok bool) error {
 }
 
 func providerErr(err error) error {
+	switch {
+	case errors.Is(err, modelroute.ErrKeyRefused):
+		return localsrv.KeyRefused
+	case errors.Is(err, modelroute.ErrKeyUnchecked):
+		return localsrv.KeyUnchecked
+	}
 	if errors.Is(err, modelroute.ErrSetupRefused) {
 		return localsrv.ProviderRefused
 	}
@@ -288,7 +322,9 @@ func scanner(path string) func(context.Context) ([]string, error) {
 }
 
 // joiner is setup's join through the netjoin helper's socket: joined and
-// saved succeed, every other answer or no answer is errNotJoined. With no
+// saved succeed, failed (a D-Bus or NetworkManager error, such as no
+// NetworkManager) is localsrv.JoinUnavailable (#1429), and every other
+// answer or no answer is errNotJoined. With no
 // socket it is nil, and localsrv answers not joined. seen, if set, is
 // told each answer.
 func joiner(path string, seen func(netjoin.Code)) func(context.Context, string, string) error {
@@ -301,8 +337,13 @@ func joiner(path string, seen func(netjoin.Code)) func(context.Context, string, 
 		if err == nil && seen != nil {
 			seen(code)
 		}
-		if err == nil && (code == netjoin.Joined || code == netjoin.Saved) {
+		switch {
+		case err != nil:
+			return errNotJoined
+		case code == netjoin.Joined, code == netjoin.Saved:
 			return nil
+		case code == netjoin.Failed:
+			return localsrv.JoinUnavailable
 		}
 		return errNotJoined
 	}
