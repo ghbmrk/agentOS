@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # agentos-toolsh: the prefix the Codex worker runs every tool command under (S8-W1, CRED-5).
 #   agentos-toolsh <command> [args...]
 # The CLI reaches its provider only through the in-worker forwarder on loopback and the egress
@@ -8,15 +8,21 @@
 #   - its own network namespace (only its own lo: no forwarder port, no abstract sockets);
 #   - /run, /tmp, /var/tmp and CODEX_HOME replaced by empty tmpfs (path sockets are not scoped
 #     by the network namespace, so the socket directory must be hidden by a mount);
-#   - the rest of the filesystem read-only, the working directory (inside the task workspace)
-#     writable, bound before the hiding mounts so it can never re-expose them;
+#   - the rest of the filesystem read-only and the workspace root writable, bound before the
+#     hiding mounts so it can never re-expose them. The bind names the fixed root, never the
+#     working directory: bwrap resolves a bind path again after the check below, and a tool that
+#     swaps a workspace directory for a symlink in that window would get the root bound
+#     read-write. bwrap enters the checked directory with --chdir inside the sandbox instead;
 #   - its own pid, ipc, uts, cgroup and user namespaces, all capabilities dropped and no nested
 #     user namespaces, so it cannot undo the mounts; a fresh /proc and /dev; its own session,
 #     so it cannot push input into the CLI's terminal; killed when the CLI's bwrap dies;
 #   - no inherited file descriptor above 2, so nothing the CLI opened rides along;
 #   - an empty environment apart from PATH, HOME (the workspace) and LANG.
 # It refuses a working directory outside the workspace root. bash, not sh: dash cannot close
-# a descriptor above 9.
+# a descriptor above 9. bash -p: privileged mode reads no BASH_ENV or ENV file and imports no
+# exported functions or SHELLOPTS from the environment the CLI passes, so nothing runs here
+# unsandboxed before the check. The CLI must run the wrapper through this shebang, never as
+# `bash agentos-toolsh` or `sh agentos-toolsh`, which would drop -p (ASSUMPTIONS C8).
 set -eu
 
 BWRAP=/usr/bin/bwrap
@@ -40,6 +46,7 @@ if [ -d "$CODEX_HOME" ]; then
 	hide+=(--tmpfs "$CODEX_HOME")
 fi
 
+[ -d "/proc/$$/fd" ] || refuse "no /proc to find inherited descriptors"
 for fd in /proc/$$/fd/*; do
 	fd=${fd##*/}
 	if [ "$fd" -gt 2 ]; then
@@ -52,7 +59,7 @@ exec "$BWRAP" \
 	--cap-drop ALL \
 	--die-with-parent --new-session \
 	--ro-bind / / \
-	--bind "$cwd" "$cwd" \
+	--bind "$WORK" "$WORK" \
 	"${hide[@]}" \
 	--proc /proc --dev /dev \
 	--clearenv \

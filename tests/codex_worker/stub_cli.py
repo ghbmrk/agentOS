@@ -1,13 +1,15 @@
 # Stub Codex CLI for tests/test_codex_worker.py: plays the CLI inside a stub worker. It shows it
 # reaches the forwarder's loopback port, the egress socket, the placeholder auth.json and its own
 # environment, then runs the stub tool through agentos-toolsh as the real CLI runs a tool command,
-# handing it open descriptors to auth.json and the egress socket and leaving scratch files in
+# handing it open descriptors to auth.json and the egress socket (low ones and ones above 9, which
+# a wrapper closing only 3 to 9, as dash could, would leave open) and leaving scratch files in
 # /tmp and /var/tmp, and prints one JSON object. Last it starts a tool that keeps writing to the
 # workspace, kills the wrapper and reports whether the tool outlived it.
 # argv: forwarder port, synthetic canary.
 import json
 import os
 import pathlib
+import resource
 import socket
 import subprocess
 import sys
@@ -16,6 +18,7 @@ import time
 SOCK = "/run/agentos/egress.sock"
 AUTH = "/var/lib/agentos-codex/auth.json"
 TOOLSH = "/usr/local/bin/agentos-toolsh"
+HIGH_FDS = (200, 1000)  # auth.json at n, the socket at n+1; above 9, where dash cannot reach
 STUB_TOOL = "/var/lib/agentos-stub-tool.py"  # mounted there by the test
 
 
@@ -63,8 +66,18 @@ def main():
     held = os.open(AUTH if os.path.exists(AUTH) else "/etc/hostname", os.O_RDONLY)
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     conn.connect(SOCK)
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    top = max(HIGH_FDS) + 2
+    if soft < top:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (top, max(hard, top)))
+    passed = [held, conn.fileno()]
+    for high in HIGH_FDS:
+        passed.append(os.dup2(held, high))
+        passed.append(os.dup2(conn.fileno(), high + 1))
     r = subprocess.run([TOOLSH, sys.executable, "-I", STUB_TOOL, "probe", str(port)],
-                       capture_output=True, text=True, timeout=30, pass_fds=(held, conn.fileno()))
+                       capture_output=True, text=True, timeout=30, pass_fds=tuple(passed))
+    for fd in passed[2:]:
+        os.close(fd)
     os.close(held)
     conn.close()
     try:

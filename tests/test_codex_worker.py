@@ -163,7 +163,8 @@ class ToolshRefusalTest(unittest.TestCase):
     """agentos-toolsh refuses before it starts bwrap, so these run without root."""
 
     def run_toolsh(self, cwd, *argv):
-        return subprocess.run(["bash", str(TOOLSH), *argv], cwd=cwd, capture_output=True,
+        # Through its shebang, as the CLI must run it: `bash agentos-toolsh` would drop -p.
+        return subprocess.run([str(TOOLSH), *argv], cwd=cwd, capture_output=True,
                               text=True, timeout=30)
 
     # REQ: CRED-5, A14
@@ -172,8 +173,12 @@ class ToolshRefusalTest(unittest.TestCase):
         self.assertTrue(os.access(TOOLSH, os.X_OK), "agentos-toolsh must be executable")
         self.assertEqual(subprocess.run(["bash", "-n", str(TOOLSH)]).returncode, 0)
         text = TOOLSH.read_text()
-        self.assertTrue(text.startswith("#!/bin/bash\n"))
+        self.assertTrue(text.startswith("#!/bin/bash -p\n"))
         self.assertIn('BWRAP=/usr/bin/bwrap', text)
+        # The workspace root is bound before the hiding mounts, and the working directory is
+        # entered with --chdir, never bound (test_cwd_swapped_for_a_symlink_*).
+        self.assertLess(text.index('\t--bind "$WORK" "$WORK" \\\n'), text.index('\t"${hide[@]}"'))
+        self.assertNotIn('--bind "$cwd"', text)
 
     # REQ: CRED-5, A14
     def test_refuses_a_working_directory_outside_the_workspace(self):
@@ -286,6 +291,24 @@ class ToolSandboxTest(unittest.TestCase):
         ]
         return subprocess.run(argv, capture_output=True, text=True, timeout=60)
 
+    def script(self, body, toolsh=TOOLSH, extra=()):
+        """Run a shell script as the CLI inside the stub worker."""
+        s = self.tmp / "cli.sh"
+        s.write_text(body)
+        return self.worker("/bin/sh", "/var/lib/agentos-cli.sh", toolsh=toolsh,
+                           extra=("--ro-bind", str(s), "/var/lib/agentos-cli.sh", *extra))
+
+    def mutant(self, name, *edits):
+        """A copy of agentos-toolsh with each (old, new) edit applied once."""
+        text = TOOLSH.read_text()
+        for old, new in edits:
+            self.assertIn(old, text)
+            text = text.replace(old, new, 1)
+        bad = self.tmp / name
+        bad.write_text(text)
+        bad.chmod(0o755)
+        return bad
+
     def run_worker(self, toolsh=TOOLSH, codex_home=True):
         r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
                         toolsh=toolsh, codex_home=codex_home)
@@ -354,6 +377,9 @@ class ToolSandboxTest(unittest.TestCase):
             "/tmp shared": (("--tmpfs /tmp ", ""), "tmp"),
             "/var/tmp shared": (("--tmpfs /var/tmp)", ")"), "tmp"),
             "descriptors kept": (('eval "exec $fd>&-"', ":"), "fds"),
+            # What dash could do: the stub CLI also passes descriptors at 200 and 1000.
+            "descriptors above 9 kept": (('if [ "$fd" -gt 2 ]; then',
+                                          'if [ "$fd" -gt 2 ] && [ "$fd" -le 9 ]; then'), "fds"),
             "survives its parent": (("--die-with-parent ", ""), "outlives"),
         }
         text = TOOLSH.read_text()
@@ -371,26 +397,123 @@ class ToolSandboxTest(unittest.TestCase):
     # REQ: CRED-5, A14
     def test_allow_list_and_bind_order_each_keep_codex_home_hidden(self):
         # With the allow-list gone the hiding mounts still cover a working directory in
-        # CODEX_HOME, because the working directory is bound first; with both gone it leaks.
-        text = TOOLSH.read_text()
-        no_list = text.replace('*) refuse "working directory $cwd is outside $WORK" ;;', "*) ;;")
-        self.assertNotEqual(no_list, text)
-        bind = '\t--bind "$cwd" "$cwd" \\\n'
-        self.assertIn(bind, no_list)
-        late_bind = no_list.replace(bind, "").replace(
-            '\t"${hide[@]}" \\\n', '\t"${hide[@]}" \\\n' + bind)
-        self.assertNotEqual(late_bind, no_list)
+        # CODEX_HOME: the wrapper binds only the workspace root, and --chdir lands in the empty
+        # tmpfs. The old design, binding the working directory itself, held only while that
+        # bind came before the hiding mounts; with it after them the probe sees the leak.
+        no_list = ('*) refuse "working directory $cwd is outside $WORK" ;;', "*) ;;")
+        root_bind = '\t--bind "$WORK" "$WORK" \\\n'
+        cwd_bind = '\t--bind "$cwd" "$cwd" \\\n'
+        hide = '\t"${hide[@]}" \\\n'
         probe = ("/bin/cat", CODEX_HOME + "/auth.json")
-        for name, body, leaks in (("allow-list only gone", no_list, False),
-                                  ("allow-list gone, bind after hiding", late_bind, True)):
+        for name, edits, leaks in (
+                ("allow-list gone", (no_list,), False),
+                ("allow-list gone, cwd bound before hiding", (no_list, (root_bind, cwd_bind)),
+                 False),
+                ("allow-list gone, cwd bound after hiding",
+                 (no_list, (root_bind, ""), (hide, hide + cwd_bind)), True)):
             with self.subTest(mutant=name):
-                bad = self.tmp / "toolsh-order"
-                bad.write_text(body)
-                bad.chmod(0o755)
+                bad = self.mutant("toolsh-order", *edits)
                 r = self.worker("/usr/local/bin/agentos-toolsh", *probe, toolsh=bad,
                                 chdir=CODEX_HOME)
                 self.assertEqual(self.canary in r.stdout, leaks, r.stderr)
 
+    # REQ: CRED-5, A14
+    def test_cwd_swapped_for_a_symlink_after_the_check_cannot_bind_the_root(self):
+        # A second tool that can write the workspace swaps WORK/sub for a symlink to the root
+        # between the wrapper's check and bwrap's setup. The sleep mutant holds that window open
+        # so the race is deterministic. The probe file lands in the stub worker's /var/lib
+        # tmpfs, read-only to a contained tool. The target is relative, so bwrap resolves it
+        # to the root on both sides of its bind (an absolute one resolves the bind's target
+        # outside the new root, where the result depends on the host's mounts).
+        window = ('\nexec "$BWRAP"', '\nsleep 2\nexec "$BWRAP"')
+        cwd_bind = ('--bind "$WORK" "$WORK"', '--bind "$cwd" "$cwd"')
+        for target in ("../../..",):
+            for name, edits, writes in (("check-to-bwrap window", (window,), False),
+                                        ("window, cwd bound", (window, cwd_bind), True)):
+                with self.subTest(target=target, mutant=name):
+                    bad = self.mutant("toolsh-race", *edits)
+                    r = self.script(f"""cd {WORK}; rm -rf sub sub.real; mkdir sub
+( sleep 0.5; mv sub sub.real; ln -s {target} sub; echo SWAPPED ) &
+cd {WORK}/sub && /usr/local/bin/agentos-toolsh /bin/sh -c 'touch /var/lib/agentos-race-probe'
+echo "tool=$?"
+wait
+[ -e /var/lib/agentos-race-probe ] && echo ROOT_WRITTEN
+true
+""", toolsh=bad)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.assertIn("SWAPPED", r.stdout)
+                    self.assertNotIn("refusing", r.stderr, "the swap missed the window")
+                    self.assertEqual("ROOT_WRITTEN" in r.stdout, writes, r.stdout + r.stderr)
+
+    # REQ: CRED-5, A14
+    def test_symlinked_working_directory_is_refused_and_cannot_bind_the_root(self):
+        # A cwd reached through WORK/link -> / or WORK/rel -> ../../.. resolves outside the
+        # workspace and is refused. Even with the check weakened to the logical path (the
+        # allow-list then passes), the root stays read-only, since only WORK is bound; binding
+        # that path, as the old wrapper did, mounts the root read-write (shown for the relative
+        # link only: see the race test on absolute targets).
+        logical = ("cwd=$(pwd -P)", "cwd=$(pwd)")
+        cwd_bind = ('--bind "$WORK" "$WORK"', '--bind "$cwd" "$cwd"')
+        (self.work / "link").symlink_to("/")
+        (self.work / "rel").symlink_to("../../..")
+        for link in ("link", "rel"):
+            cases = [("as shipped", (), True, False), ("logical cwd", (logical,), False, False)]
+            if link == "rel":
+                cases.append(("logical cwd, cwd bound", (logical, cwd_bind), False, True))
+            for name, edits, refused, writes in cases:
+                with self.subTest(cwd=link, mutant=name):
+                    bad = self.mutant("toolsh-link", *edits)
+                    r = self.script(f"""cd {WORK}/{link} || exit 9
+/usr/local/bin/agentos-toolsh /bin/sh -c 'touch /var/lib/agentos-race-probe'
+echo "tool=$?"
+[ -e /var/lib/agentos-race-probe ] && echo ROOT_WRITTEN
+true
+""", toolsh=bad)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.assertEqual("tool=126" in r.stdout, refused, r.stdout + r.stderr)
+                    self.assertEqual("ROOT_WRITTEN" in r.stdout, writes, r.stdout + r.stderr)
+
+    # REQ: CRED-5, A14
+    def test_no_startup_code_from_the_environment(self):
+        # The CLI may pass the wrapper a BASH_ENV file or exported functions. bash -p ignores
+        # both; plain bash would run them outside bwrap, before the check: an exported pwd
+        # reads auth.json unsandboxed and answers WORK to pass the allow-list.
+        body = f"""cd {WORK}
+printf 'echo BASH_ENV_SOURCED >&2\n' > rc.sh
+BASH_ENV={WORK}/rc.sh /usr/local/bin/agentos-toolsh /bin/true
+echo "bash_env=$?"
+cd {CODEX_HOME}
+env 'BASH_FUNC_pwd%%=() {{ echo FUNC_IMPORTED >&2; cat auth.json >&2; echo {WORK}; }}' \
+    /usr/local/bin/agentos-toolsh /bin/true
+echo "func=$?"
+"""
+        for name, edits, imported in (("as shipped", (), False),
+                                      ("without -p", (("#!/bin/bash -p\n", "#!/bin/bash\n"),),
+                                       True)):
+            with self.subTest(mutant=name):
+                r = self.script(body, toolsh=self.mutant("toolsh-env", *edits))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                out = r.stdout + r.stderr
+                self.assertIn("bash_env=0", r.stdout, out)
+                self.assertEqual("BASH_ENV_SOURCED" in r.stderr, imported, out)
+                self.assertEqual("FUNC_IMPORTED" in r.stderr, imported, out)
+                self.assertEqual(self.canary in out, imported, "auth.json read unsandboxed")
+                self.assertEqual("func=126" in r.stdout, not imported, out)
+
+    # REQ: CRED-5, A14
+    def test_refuses_without_proc_to_close_descriptors(self):
+        # The descriptor loop reads /proc/$$/fd; without it the wrapper refuses outright
+        # rather than leaning on bwrap failing later.
+        no_check = ('[ -d "/proc/$$/fd" ] || refuse "no /proc to find inherited descriptors"\n',
+                    "")
+        for name, edits, refused in (("as shipped", (), True), ("check removed", (no_check,),
+                                                                  False)):
+            with self.subTest(mutant=name):
+                r = self.worker("/usr/local/bin/agentos-toolsh", "/bin/true",
+                                toolsh=self.mutant("toolsh-proc", *edits),
+                                extra=("--tmpfs", "/proc"))
+                self.assertEqual(r.returncode == 126 and "no /proc" in r.stderr, refused,
+                                 r.stderr)
 
 def userns_restricted():
     try:
