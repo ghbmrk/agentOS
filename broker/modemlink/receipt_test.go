@@ -2,6 +2,7 @@ package modemlink
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -168,13 +169,15 @@ func TestRecipientCodeOnlyBeforeModemSend(t *testing.T) {
 	if got := identUses(at, "ErrNumber"); len(got) != 1 || got["Dial"] == 0 {
 		t.Fatalf("at.ErrNumber returned outside Dial: %v", got)
 	}
-	if got := callsOf(at, "Dial"); len(got) != 0 {
-		t.Fatalf("at calls Dial, so ErrNumber may reach Send: %v", got)
+	// Dial's own name is its one use: no call, method value or method
+	// expression in at can route ErrNumber into Send.
+	if got := identUses(at, "Dial"); len(got) != 1 || got["Dial"] != 1 {
+		t.Fatalf("at refers to Dial, so ErrNumber may reach Send: %v", got)
 	}
 	if got := identUses(bridge, "CodeRecipient"); len(got) != 2 || got["outbox"] != 1 || got["codeOf"] != 1 {
 		t.Fatalf("bridge emits CodeRecipient elsewhere: %v", got)
 	}
-	outbox := bridge["outbox"]
+	outbox := bridge["outbox"].(*ast.FuncDecl)
 	var assign, send token.Pos
 	var sendGuarded bool
 	var walk func(n ast.Node, guarded bool)
@@ -186,7 +189,7 @@ func TestRecipientCodeOnlyBeforeModemSend(t *testing.T) {
 					walk(n.Init, guarded)
 				}
 				walk(n.Cond, guarded)
-				walk(n.Body, guarded || mentions(n.Cond, "LineOwner"))
+				walk(n.Body, guarded || isOwnerLine(n.Cond))
 				if n.Else != nil {
 					walk(n.Else, guarded)
 				}
@@ -215,16 +218,16 @@ func TestRecipientCodeOnlyBeforeModemSend(t *testing.T) {
 }
 
 // pkgFuncs parses every non-test Go file in dir and returns its functions by
-// name. Each file goes through parser.ParseFile: parser.ParseDir is deprecated
+// name, plus its package-level initialisers. Each file goes through parser.ParseFile: parser.ParseDir is deprecated
 // and would add nothing here.
-func pkgFuncs(t *testing.T, dir string) map[string]*ast.FuncDecl {
+func pkgFuncs(t *testing.T, dir string) map[string]ast.Node {
 	t.Helper()
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fset := token.NewFileSet()
-	fns := map[string]*ast.FuncDecl{}
+	fns := map[string]ast.Node{}
 	for _, e := range ents {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -235,12 +238,23 @@ func pkgFuncs(t *testing.T, dir string) map[string]*ast.FuncDecl {
 			t.Fatal(err)
 		}
 		for _, decl := range f.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok {
-				key := fn.Name.Name
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				key := d.Name.Name
 				if fns[key] != nil {
 					key = name + ":" + key // same name on two receivers
 				}
-				fns[key] = fn
+				fns[key] = d
+			case *ast.GenDecl:
+				// Package-level initialisers can alias Dial or ErrNumber too;
+				// the declared names themselves are not uses.
+				for _, spec := range d.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for i, v := range vs.Values {
+							fns[fmt.Sprintf("%s:var%d.%d", name, fset.Position(vs.Pos()).Line, i)] = v
+						}
+					}
+				}
 			}
 		}
 	}
@@ -250,8 +264,9 @@ func pkgFuncs(t *testing.T, dir string) map[string]*ast.FuncDecl {
 	return fns
 }
 
-// identUses counts ident in each function's body and signature.
-func identUses(fns map[string]*ast.FuncDecl, ident string) map[string]int {
+// identUses counts ident in each function (name, signature, body) and
+// package-level initialiser.
+func identUses(fns map[string]ast.Node, ident string) map[string]int {
 	in := map[string]int{}
 	for name, fn := range fns {
 		if n := countIdent(fn, ident); n > 0 {
@@ -261,30 +276,19 @@ func identUses(fns map[string]*ast.FuncDecl, ident string) map[string]int {
 	return in
 }
 
-// callsOf names the functions that call a method or function called callee.
-func callsOf(fns map[string]*ast.FuncDecl, callee string) []string {
-	var in []string
-	for name, fn := range fns {
-		ast.Inspect(fn, func(n ast.Node) bool {
-			if c, ok := n.(*ast.CallExpr); ok {
-				switch f := c.Fun.(type) {
-				case *ast.Ident:
-					if f.Name == callee {
-						in = append(in, name)
-					}
-				case *ast.SelectorExpr:
-					if f.Sel.Name == callee {
-						in = append(in, name)
-					}
-				}
-			}
-			return true
-		})
+// isOwnerLine reports whether cond is exactly `<x>.Line == <pkg>.LineOwner`,
+// so a flipped or widened guard does not pass as the owner-line check.
+func isOwnerLine(cond ast.Expr) bool {
+	b, ok := cond.(*ast.BinaryExpr)
+	if !ok || b.Op != token.EQL {
+		return false
 	}
-	return in
+	sel := func(e ast.Expr, name string) bool {
+		s, ok := e.(*ast.SelectorExpr)
+		return ok && s.Sel.Name == name
+	}
+	return (sel(b.X, "Line") && sel(b.Y, "LineOwner")) || (sel(b.X, "LineOwner") && sel(b.Y, "Line"))
 }
-
-func mentions(n ast.Node, ident string) bool { return countIdent(n, ident) > 0 }
 
 func countIdent(n ast.Node, ident string) int {
 	c := 0
