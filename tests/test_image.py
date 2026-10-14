@@ -587,7 +587,9 @@ class InitrdBluetoothTest(unittest.TestCase):
                 self.assertEqual(finish.bluetooth_violations(finish.cpio_names(newc(KMODS + [bad]))), [bad])
 
     def test_only_the_inert_target_is_allowed(self):
-        self.assertEqual(finish.BT_ALLOWED, ("usr/lib/systemd/system/bluetooth.target",))
+        self.assertEqual(finish.BT_ALLOWED, ("usr/lib/systemd/system/bluetooth.target",
+                                             "usr/lib/systemd/user/bluetooth.target"))
+        self.assertEqual(finish.bluetooth_violations(list(finish.BT_ALLOWED)), [])
         self.assertEqual(finish.bluetooth_violations(["etc/systemd/system/bluetooth.target"]),
                          ["etc/systemd/system/bluetooth.target"])
 

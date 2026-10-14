@@ -173,8 +173,9 @@ def cpio_names(data, decompress=None):
 # the firmware patterns the vendors' Bluetooth firmware (MediaTek, Intel, Realtek, Broadcom).
 BT_PATTERNS = (r"(?i)bluetooth", r"(^|/)bt(usb|mtk)(\.ko|$)", r"(^|/)BT_RAM_CODE", r"(^|/)rtl_bt/",
                r"(^|/)intel/ibt-", r"(^|/)brcm/[^/]*\.hcd(\.\w+)?$")
-# systemd ships bluetooth.target, a synchronisation point that starts nothing by itself.
-BT_ALLOWED = ("usr/lib/systemd/system/bluetooth.target",)
+# systemd ships bluetooth.target for the system and user managers (the default initrd carries the
+# user one, CI build of #1509): a synchronisation point that starts nothing by itself.
+BT_ALLOWED = ("usr/lib/systemd/system/bluetooth.target", "usr/lib/systemd/user/bluetooth.target")
 
 
 def bluetooth_violations(names):
