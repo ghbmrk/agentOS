@@ -173,12 +173,12 @@ class ListTest(unittest.TestCase):
     def test_frozen_paths_stay_out(self):  # G1-freeze-a
         for p in ("broker/voice/v.go", "broker/cmd/agentos-builder/main.go", "guest/builder/x",
                   "spikes/S10-pact/x", "broker/loops/x.go", "broker/newpkg/x.go", "newdir/x",
-                  # One model route (D-104): the Codex worker and the OpenAI adapter freeze.
-                  "guest/codex/x", "broker/route/openai.go", "broker/route/testdata/openai_stream.sse"):
+                  # One model route (D-104): the Codex worker and the Anthropic adapter freeze.
+                  "guest/codex/x", "broker/route/anthropic.go", "broker/route/testdata/anthropic_stream.sse"):
             self.assertFalse(g.check([p], LIST)[0], p)
         for p in ("broker/localui/x.go", "broker/cmd/agentosd/main.go", "image/build.sh",
                   "guest/openclaw/x", "spikes/CTRL-spike/x", "tools/g1_scope.txt", "SPEC.md",
-                  "broker/route/anthropic.go", "broker/route/route.go"):
+                  "broker/route/openai.go", "broker/route/route.go"):
             self.assertTrue(g.check([p], LIST)[0], p)
 
     def test_list_covers_the_g1_binaries_imports(self):  # G1-freeze-f
