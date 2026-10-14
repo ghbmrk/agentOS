@@ -2020,7 +2020,7 @@ class ConfFilesTest(unittest.TestCase):
         # trixie's /lib -> usr/lib is followed: /lib linked anywhere else is refused, and a linked
         # directory is refused even when it holds nothing yet.
         for rel, target in (("usr/local/lib/systemd", "/var/tmp/sd"), ("lib", "/var/tmp/lib"), ("lib", "usr/share"),
-                            ("usr/local/lib/sysctl.d", "/usr/lib/agentos/empty"),
+                            ("usr/local/lib/sysctl.d", "/usr/lib/agentos/empty"), ("usr/local/lib/sysctl.d", "/etc/passwd"),
                             ("etc/sysctl.d/99-x.conf", "/etc/passwd"),
                             ("etc/sysctl.d/99-x.conf", "/" + NODUMP[2]),
                             ("etc/sysctl.d/99-x.conf", "../../usr/lib/agentos/sd/90-x.conf"),
