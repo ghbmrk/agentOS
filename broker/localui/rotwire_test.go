@@ -494,6 +494,10 @@ func TestRotationLateConfirmKeepsTheResultForAGrace(t *testing.T) {
 		{"answer after the window ends", 10 * time.Minute, 9 * time.Minute, commitTimeout, 2 * time.Second, true},
 		{"grace over", 10 * time.Minute, 10*time.Minute - time.Second, 0, resultGrace + time.Second, false},
 		{"capped at the window plus the grace", 2 * time.Hour, 40 * time.Minute, 0, time.Second, false},
+		{"late confirm past a capped window, within the cap", 2 * time.Hour, 33 * time.Minute, 0, 2*time.Minute - time.Second, true},
+		{"late confirm past a capped window, past the cap", 2 * time.Hour, 33 * time.Minute, 0, 2*time.Minute + time.Second, false},
+		// #1597: an early confirm's result lasts until the window's end.
+		{"early confirm lasts to the window's end", 10 * time.Minute, time.Minute, 0, resultGrace, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			x := newWireRig(t)
