@@ -4,44 +4,53 @@ import (
 	"errors"
 	"net/http/cookiejar"
 	"net/url"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
 // REQ: CAP-9, REV-6, ONB-3
 
-// #1467 (#1436 Security S1): a key stored whose private-content answer
-// then fails to save holds setup open, shows the error and a box-only
-// retry, and the retry records the owner's answer. The path the review
-// probed: a plan sign-in records yes (D-115), the owner unticks the key
-// box, the save fails; setup must not finish with the provider keeping
-// yes.
+// failPrivate makes SetPrivateOK fail, or succeed again.
+func (r *rig) failPrivate(fail bool) {
+	r.hooks.mu.Lock()
+	r.hooks.privateErr = nil
+	if fail {
+		r.hooks.privateErr = errors.New("vault busy")
+	}
+	r.hooks.mu.Unlock()
+}
+
+// #1467 (#1436 Security S1): the path the review probed. A plan sign-in
+// records yes (D-115), then the owner unticks the box with an API key and
+// the save of that no fails. The no is saved before the key, so no key is
+// stored; the error shows once, then a box-only retry holds setup open.
 func TestAnUnsavedAnswerHoldsSetupOpen(t *testing.T) {
 	r := newRig(t)
-	st := &MemStore{}
-	r.srv = r.open(st)
 	r.runSetupToAI()
 	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}, "private": {"1"}})
 	if !r.hooks.private["anthropic"] {
 		t.Fatal("plan default not recorded as yes")
 	}
-	r.hooks.mu.Lock()
-	r.hooks.privateErr = errors.New("vault busy")
-	r.hooks.mu.Unlock()
+	r.failPrivate(true)
 	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}})
-	if r.hooks.keys["anthropic"] != apiCanary {
-		t.Fatal("key not stored")
+	if r.hooks.keys != nil || r.hooks.connected {
+		t.Fatal("a key was stored with the owner's no unsaved")
 	}
 	if r.srv.setup.done() || r.hooks.finishes != 0 {
 		t.Fatal("setup finished with the owner's answer unsaved")
 	}
-	page := r.get("/setup")
-	if !strings.Contains(page, "Could not save. Try again.") {
+	if page := r.get("/setup"); !strings.Contains(page, "Could not save. Try again.") {
 		t.Fatalf("error not shown:\n%s", page)
 	}
-	// Each later load holds too, and keeps the retry with the box as the
-	// owner left it (unticked).
-	f, ok := setupForms(t, r.get("/setup"))["ai-private anthropic"]
+	// Later loads show the note and the retry, with the box as the owner
+	// left it (unticked) and no key field; the error showed once.
+	page := r.get("/setup")
+	if strings.Contains(page, "Could not save. Try again.") || !strings.Contains(page, "was not saved yet") {
+		t.Fatalf("error shown again, or no note:\n%s", page)
+	}
+	f, ok := setupForms(t, page)["ai-private anthropic"]
 	if !ok || !strings.Contains(f, `name="private" value="1">`) || strings.Contains(f, "checked") {
 		t.Fatalf("no retry, or the owner's unticked box came back ticked:\n%s", f)
 	}
@@ -51,72 +60,186 @@ func TestAnUnsavedAnswerHoldsSetupOpen(t *testing.T) {
 	if r.srv.setup.done() || !r.hooks.private["anthropic"] {
 		t.Fatal("page load finished setup, or the old yes changed")
 	}
-	// A restart keeps the hold: it is part of the saved setup state.
-	r.srv = r.open(st)
-	if f, ok := setupForms(t, r.get("/setup"))["ai-private anthropic"]; !ok || strings.Contains(f, "checked") || r.srv.setup.done() {
-		t.Fatalf("restart dropped the hold:\n%s", f)
-	}
-	// A failed retry keeps holding.
-	r.post("/setup/ai-private", url.Values{"provider": {"anthropic"}})
+	// A failed retry keeps holding and keeps the retry's own answer, so a
+	// held yes renders ticked (#1534 M9, M11).
+	r.post("/setup/ai-private", url.Values{"provider": {"anthropic"}, "private": {"1"}})
 	if r.srv.setup.done() || !strings.Contains(r.setupErr(), "Could not save") {
 		t.Fatal("failed retry finished setup or showed no error")
 	}
-	r.hooks.mu.Lock()
-	r.hooks.privateErr = nil
-	r.hooks.mu.Unlock()
+	if f := setupForms(t, r.get("/setup"))["ai-private anthropic"]; !strings.Contains(f, "checked") {
+		t.Fatalf("the failed retry's yes came back unticked:\n%s", f)
+	}
+	// A saved retry releases the hold; nothing is connected, so setup
+	// stays open until a key is.
+	r.failPrivate(false)
 	r.post("/setup/ai-private", url.Values{"provider": {"anthropic"}})
 	if ok, set := r.hooks.private["anthropic"]; !set || ok {
 		t.Fatal("retry did not record the owner's no")
 	}
-	if !r.srv.setup.done() || r.hooks.finishes != 1 {
-		t.Fatal("setup did not finish once the answer was saved")
+	if _, held := setupForms(t, r.get("/setup"))["ai-private anthropic"]; held || r.srv.setup.done() {
+		t.Fatal("hold kept after a saved answer, or setup finished unconnected")
+	}
+	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}})
+	if !r.srv.setup.done() || r.hooks.finishes != 1 || r.hooks.private["anthropic"] {
+		t.Fatal("setup did not finish with the owner's no")
 	}
 }
 
-// The hold is set before the key is stored, so a page load racing the
-// save cannot finish setup between the two (#1467).
-func TestTheHoldCoversTheSaveInFlight(t *testing.T) {
+// #1534 Security S1: the hold lasts only as long as the SetupStore, and
+// agentos-localui's store is in memory. A restart that loses the hold,
+// even one keeping every other step, finds nothing connected after the
+// failed no above, so setup does not finish on the old yes.
+func TestARestartAfterAFailedNoFinishesNothing(t *testing.T) {
 	r := newRig(t)
-	h := &holdingHooks{fakeHooks: r.hooks, r: r}
-	r.via = h
-	r.srv = r.open(&MemStore{})
+	st := &MemStore{}
+	r.srv = r.open(st)
 	r.runSetupToAI()
-	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}})
-	if !h.ran {
-		t.Fatal("SetPrivateOK not called")
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}, "private": {"1"}})
+	r.failPrivate(true)
+	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}})
+	kept, _ := st.Load()
+	if len(kept.Unsaved) != 1 || !kept.Host {
+		t.Fatalf("no hold saved: %+v", kept.Unsaved)
 	}
-	if h.doneMid {
-		t.Fatal("a page load finished setup while the answer was being saved")
-	}
-	if !r.srv.setup.done() {
-		t.Fatal("setup did not finish after the save")
+	kept.Unsaved = nil
+	r.srv = r.open(&MemStore{s: kept})
+	r.get("/setup")
+	if r.srv.setup.done() || r.hooks.finishes != 0 || r.hooks.keys != nil {
+		t.Fatal("restart finished setup on the unsaved answer")
 	}
 }
 
-// holdingHooks loads the setup page while SetPrivateOK runs.
-type holdingHooks struct {
+// A yes is saved after the key: a yes that fails leaves the key stored
+// without the yes, so the vault is never wider than the owner's answer,
+// and holds setup open with the box ticked.
+func TestAnUnsavedYesHoldsWithTheKeyStored(t *testing.T) {
+	r := newRig(t)
+	r.runSetupToAI()
+	r.failPrivate(true)
+	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}, "private": {"1"}})
+	if r.hooks.keys["openai"] != apiCanary || r.hooks.private["openai"] {
+		t.Fatal("key not stored, or the yes recorded")
+	}
+	if f := setupForms(t, r.get("/setup"))["ai-private openai"]; !strings.Contains(f, "checked") || r.srv.setup.done() {
+		t.Fatalf("setup finished, or the retry lost the owner's yes:\n%s", f)
+	}
+}
+
+// orderHooks records the vault calls and loads setup inside each, so a
+// page load racing a save cannot finish setup (#1534 L-1).
+type orderHooks struct {
 	*fakeHooks
 	r       *rig
-	ran     bool
+	calls   []string
 	doneMid bool
 }
 
-func (h *holdingHooks) SetPrivateOK(id string, ok bool) error {
-	h.ran = true
+func (h *orderHooks) mid(call string) {
+	h.calls = append(h.calls, call)
 	h.r.srv.setup.maybeFinish()
-	h.doneMid = h.r.srv.setup.done()
+	h.doneMid = h.doneMid || h.r.srv.setup.done()
+}
+
+func (h *orderHooks) SetPrivateOK(id string, ok bool) error {
+	if ok {
+		h.mid("yes")
+	} else {
+		h.mid("no")
+	}
 	return h.fakeHooks.SetPrivateOK(id, ok)
 }
 
-// A key that the vault refuses releases the hold it set, so setup is not
-// held for an answer that was never owed (#1467).
+func (h *orderHooks) ConnectAPIKey(id, key string) error {
+	h.mid("key")
+	return h.fakeHooks.ConnectAPIKey(id, key)
+}
+
+// A no is saved before the key and a yes after it, and setup finishes
+// only after both, never from a load while either is in flight.
+func TestTheAnswerAndKeyOrder(t *testing.T) {
+	for _, c := range []struct {
+		private string
+		want    string
+	}{{"", "no key"}, {"1", "key yes"}} {
+		r := newRig(t)
+		h := &orderHooks{fakeHooks: r.hooks, r: r}
+		r.via = h
+		r.srv = r.open(&MemStore{})
+		r.runSetupToAI()
+		r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}, "private": {c.private}})
+		if got := strings.Join(h.calls, " "); got != c.want {
+			t.Fatalf("private=%q: calls %q, want %q", c.private, got, c.want)
+		}
+		if h.doneMid || !r.srv.setup.done() {
+			t.Fatalf("private=%q: finished mid-save, or not after", c.private)
+		}
+	}
+}
+
+// failStore fails every Save while fail is set.
+type failStore struct {
+	MemStore
+	mu   sync.Mutex
+	fail bool
+}
+
+func (f *failStore) Save(s SetupState) error {
+	f.mu.Lock()
+	fail := f.fail
+	f.mu.Unlock()
+	if fail {
+		return errors.New("disk full")
+	}
+	return f.MemStore.Save(s)
+}
+
+// #1534 M8/M13: a hold the setup store fails to save still holds in
+// memory, so setup does not finish with the answer unsaved.
+func TestAHoldTheStoreFailsStillHolds(t *testing.T) {
+	r := newRig(t)
+	st := &failStore{}
+	r.srv = r.open(st)
+	r.runSetupToAI()
+	st.mu.Lock()
+	st.fail = true
+	st.mu.Unlock()
+	r.failPrivate(true)
+	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}, "private": {"1"}})
+	if r.srv.setup.done() || r.hooks.finishes != 0 {
+		t.Fatal("setup finished with the answer unsaved")
+	}
+	if _, ok := setupForms(t, r.get("/setup"))["ai-private openai"]; !ok {
+		t.Fatal("no retry")
+	}
+}
+
+// #1534 M5: a key the vault refuses leaves an earlier hold as it was.
+func TestARefusedKeyKeepsAnEarlierHold(t *testing.T) {
+	r := newRig(t)
+	r.runSetupToAI()
+	r.failPrivate(true)
+	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}})
+	r.failPrivate(false)
+	r.hooks.mu.Lock()
+	r.hooks.keyErr = ErrKeyRefused
+	r.hooks.mu.Unlock()
+	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}, "private": {"1"}})
+	f, ok := setupForms(t, r.get("/setup"))["ai-private openai"]
+	if !ok || strings.Contains(f, "checked") {
+		t.Fatalf("refused key dropped or changed the earlier hold:\n%s", f)
+	}
+}
+
+// A key that the vault refuses sets no hold, so setup is not held for an
+// answer that was never owed (#1467). This passes on main too: it guards
+// the hold from being set before the key.
 func TestARefusedKeyLeavesNoHold(t *testing.T) {
 	r := newRig(t)
 	r.runSetupToAI()
 	r.hooks.mu.Lock()
 	r.hooks.keyErr = ErrKeyRefused
 	r.hooks.mu.Unlock()
-	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}})
+	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}, "private": {"1"}})
 	if _, ok := setupForms(t, r.get("/setup"))["ai-private openai"]; ok {
 		t.Fatal("refused key left a retry")
 	}
@@ -130,13 +253,16 @@ func TestARefusedKeyLeavesNoHold(t *testing.T) {
 }
 
 // #1467 test 2: SetPrivateOK failing in aiDevice shows no link, shows the
-// error, and keeps the box as the owner left it.
+// error, and keeps the box as the owner left it; a failed re-post drops
+// the link an earlier sign-in showed (#1534 M7).
 func TestAnUnsavedPlanAnswerShowsNoLink(t *testing.T) {
 	r := newRig(t)
 	r.runSetupToAI()
-	r.hooks.mu.Lock()
-	r.hooks.privateErr = errors.New("vault busy")
-	r.hooks.mu.Unlock()
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}, "private": {"1"}})
+	if !strings.Contains(r.get("/setup"), "WXYZ-1234") {
+		t.Fatal("no link after a saved sign-in")
+	}
+	r.failPrivate(true)
 	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}})
 	page := r.get("/setup")
 	if strings.Contains(page, "example.invalid/device") || strings.Contains(page, "WXYZ-1234") {
@@ -147,6 +273,68 @@ func TestAnUnsavedPlanAnswerShowsNoLink(t *testing.T) {
 	}
 	if f := setupForms(t, r.get("/setup"))["ai-device anthropic"]; !strings.Contains(f, `name="private" value="1">`) || strings.Contains(f, "checked") {
 		t.Fatalf("the owner's unticked box came back ticked:\n%s", f)
+	}
+}
+
+// postInside posts one AI form from inside a vault call, once.
+type postInside struct {
+	*fakeHooks
+	r      *rig
+	inKey  url.Values
+	inDone url.Values
+}
+
+func (h *postInside) ConnectAPIKey(id, key string) error {
+	if f := h.inKey; f != nil {
+		h.inKey = nil
+		h.r.post("/setup/ai-key", f)
+	}
+	return h.fakeHooks.ConnectAPIKey(id, key)
+}
+
+func (h *postInside) Finish(n string) error {
+	if f := h.inDone; f != nil {
+		h.inDone = nil
+		h.r.post("/setup/ai-key", f)
+	}
+	return h.fakeHooks.Finish(n)
+}
+
+// #1534 S3/P-1: one AI post per provider at a time, and none while Finish
+// runs, so a second post cannot record an answer the first one overrides.
+func TestAIPostsWaitTheirTurn(t *testing.T) {
+	r := newRig(t)
+	h := &postInside{fakeHooks: r.hooks, r: r,
+		inKey: url.Values{"provider": {"openai"}, "key": {"sk-second"}, "private": {"1"}}}
+	r.via = h
+	r.srv = r.open(&MemStore{})
+	r.runSetupToAI()
+	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}})
+	if r.hooks.keys["openai"] != apiCanary || r.hooks.private["openai"] || r.hooks.privates != 1 {
+		t.Fatalf("a post during another for the provider went through: %d answers", r.hooks.privates)
+	}
+
+	r = newRig(t)
+	h = &postInside{fakeHooks: r.hooks, r: r,
+		inDone: url.Values{"provider": {"openai"}, "key": {apiCanary}, "private": {"1"}}}
+	r.via = h
+	r.srv = r.open(&MemStore{})
+	r.runSetupToAI()
+	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}})
+	if !r.srv.setup.done() || r.hooks.keys["openai"] != "" || r.hooks.private["openai"] {
+		t.Fatal("a post while Finish ran stored a key or an answer")
+	}
+}
+
+// #1534 M16: the hold survives a FileStore round trip.
+func TestFileStoreKeepsTheHold(t *testing.T) {
+	st := FileStore{Path: filepath.Join(t.TempDir(), "setup.json")}
+	if err := st.Save(SetupState{Unsaved: map[string]bool{"openai": true, "anthropic": false}}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := st.Load()
+	if err != nil || len(s.Unsaved) != 2 || !s.Unsaved["openai"] || s.Unsaved["anthropic"] {
+		t.Fatalf("Unsaved %v, %v", s.Unsaved, err)
 	}
 }
 
