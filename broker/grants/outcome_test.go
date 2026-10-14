@@ -95,7 +95,7 @@ func TestOwnerOutcomesAreReportedOnceFinal(t *testing.T) {
 	r.ver.set("thr-1", thread)
 	reply := func(id string) {
 		r.submit(journal.Intent{ID: id, Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
-			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it (" + id + ")."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
 	}
 	reply("reply-1/r1")
 	r.advance(11 * time.Minute)
@@ -275,7 +275,7 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 		Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}},
 		Recipients: []string{"sam@example.com"}, Record: "thr-1", ThreadVerified: true})
 	r.submit(journal.Intent{ID: "reply-1/late", Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
-		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it (late)."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
 	r.own.mu.Lock()
 	r.own.due[len(r.own.due)-1].Late = true
 	r.own.mu.Unlock()
@@ -294,7 +294,7 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 	for _, at := range []string{"alert", "release"} {
 		id := "reply-1/quiet-" + at
 		r.submit(journal.Intent{ID: id, Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
-			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it (" + at + ")."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
 		r.own.mu.Lock()
 		alerted := r.now()
 		r.own.due[len(r.own.due)-1].Alerted = alerted
@@ -313,7 +313,7 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 	}
 	*quiet = func(time.Time) bool { return false }
 	r.submit(journal.Intent{ID: "reply-1/awake", Origin: "guest:reply-1", Machine: "reply-1", Account: "mail", Action: "message.send",
-		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+		Params: map[string]any{"record": "thr-1", "body": "Thanks, got it (awake)."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
 	r.own.mu.Lock()
 	r.own.due[len(r.own.due)-1].Alerted = r.now()
 	r.own.mu.Unlock()
