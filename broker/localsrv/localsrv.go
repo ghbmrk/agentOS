@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -84,9 +83,10 @@ type Config struct {
 	// op.
 	ForgetTasks func(unlocked bool) localapi.ForgetTasks
 	Forget      func(ctx context.Context, goal string, unlocked bool) string
-	// RotateAPNet writes a rotated card's Wi-Fi network for agentos-ap
-	// (#1191), given only a network a card prints. Nil refuses the op.
-	RotateAPNet func(apnet.Network) error
+	// RotateAPNet writes the network the vault process holds for a
+	// committed Wi-Fi rotation for agentos-ap (#1191, #1522); the page
+	// supplies nothing but its session. Nil refuses the op.
+	RotateAPNet func() error
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -549,23 +549,20 @@ func (s *Server) forget(ctx context.Context, _ sockets.Peer, args json.RawMessag
 	return localapi.Text{Text: s.cfg.Forget(ctx, in.ID, st.Unlocked)}, nil
 }
 
-// rotateAPNet hands a committed card rotation's Wi-Fi network to
-// agentos-ap's file (REC-4, #1191). The page holds the network only
-// because it showed the new card; agentosd takes only a card's shape
-// (apnet.Validate), and the hook keeps the name the box already serves.
-// The arguments carry the access point's password (CRED-1): nothing here
-// logs them.
+// rotateAPNet puts a committed card rotation's Wi-Fi network on the air
+// (REC-4, #1191). The page sends only its session: the hook takes the
+// network once from the vault process (#1522), so a session alone, with
+// no Wi-Fi commit behind it, changes nothing.
 func (s *Server) rotateAPNet(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
-	var in localapi.RotateAPNet
+	var in localapi.Auth
 	err := decode(args, &in)
 	if _, ok := s.live(in.Token); !ok {
 		return nil, errUnauthorized
 	}
-	n := apnet.Network{SSID: in.SSID, Password: in.Password}
-	if err != nil || n.Validate() != nil {
+	if err != nil {
 		return nil, errBadArgs
 	}
-	if s.cfg.RotateAPNet == nil || s.cfg.RotateAPNet(n) != nil {
+	if s.cfg.RotateAPNet == nil || s.cfg.RotateAPNet() != nil {
 		return nil, errFailed
 	}
 	return struct{}{}, nil

@@ -124,11 +124,12 @@ func TestOP2RetryOnlyAfterEvidenceOfNoEffect(t *testing.T) {
 	must(e.Submit(intent("a", "acct")))
 	must(e.Authorize(ctx, "a"))
 	must(e.Dispatch(ctx, "a"))
-	e.Reconcile(ctx) // service says attempt 1 never happened
-	if got := must(e.Get("a")).State; got != NotApplied {
-		t.Fatalf("state = %s, want not_applied", got)
+	// The service says attempt 1 never happened, so the engine dispatches
+	// attempt 2 under the dispatch recheck (OP-2 step 2).
+	if rep := e.Reconcile(ctx); !reflect.DeepEqual(rep.Redispatched, []string{"a"}) {
+		t.Fatalf("report %+v", rep)
 	}
-	st := must(e.Dispatch(ctx, "a"))
+	st := must(e.Get("a"))
 	if st.State != Succeeded || len(st.Attempts) != 2 {
 		t.Fatalf("after retry: %+v", st)
 	}

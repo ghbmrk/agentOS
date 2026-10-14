@@ -41,12 +41,13 @@ func syncTree(ctx context.Context, broker *http.Client, dir string, every time.D
 	version, last := "", ""
 	for {
 		v, err := syncOnce(ctx, broker, dir, version)
+		version = v
 		switch {
 		case err != nil && err.Error() != last:
 			last = err.Error()
 			log.Printf("managed tree: %v", err)
 		case err == nil:
-			version, last = v, ""
+			last = ""
 		}
 		t := time.NewTimer(every)
 		select {
@@ -59,7 +60,9 @@ func syncTree(ctx context.Context, broker *http.Client, dir string, every time.D
 }
 
 // syncOnce fetches the tree unless it is still version, and writes it.
-// It returns the version now held.
+// It returns the version now held, on error too: a failed mirror may have
+// written part of the new tree, so it holds no version, and the next
+// fetch, an UNDO to the old version included, is answered whole (CHG-6).
 func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
@@ -85,7 +88,7 @@ func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (st
 		return version, nil
 	}
 	if err := mirror(dir, ans.Files); err != nil {
-		return version, err
+		return "", err
 	}
 	return ans.Version, nil
 }
@@ -139,13 +142,20 @@ func callTool(ctx context.Context, broker *http.Client, name string, args any) (
 // New and changed files are written first, each written aside and
 // renamed, so the skill server never reads half of one; files gone from
 // the tree are removed last, so a failed write leaves the old tree's
-// files rather than fewer. Everything goes through an os.Root, so a
-// symlink in dir cannot send a write outside it.
+// files rather than fewer. Only what is in a new file's way goes first: a
+// file where it needs a directory, or a directory where it needs the
+// file, since the tree holds neither. Everything goes through an os.Root,
+// so a symlink in dir cannot send a write outside it.
 func mirror(dir string, files map[string][]byte) error {
 	for p := range files {
 		ns, _, _ := strings.Cut(p, "/")
 		if !filepath.IsLocal(p) || filepath.Clean(p) != p || !inTree(ns) || ns == p {
 			return fmt.Errorf("bad tree path %q", p)
+		}
+		for a := filepath.Dir(p); a != ns; a = filepath.Dir(a) {
+			if _, ok := files[a]; ok {
+				return fmt.Errorf("bad tree path %q: %q is a file", p, a)
+			}
 		}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -159,6 +169,9 @@ func mirror(dir string, files map[string][]byte) error {
 	for p, b := range files {
 		if old, err := root.ReadFile(p); err == nil && bytes.Equal(old, b) {
 			continue
+		}
+		if err := clearWay(root, p); err != nil {
+			return err
 		}
 		if err := root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return err
@@ -200,6 +213,30 @@ func mirror(dir string, files map[string][]byte) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// clearWay removes what an earlier tree left in the way of the file p: a
+// regular file where p needs a directory, or a directory at p itself. A
+// symlink is left, so the write fails rather than follow it.
+func clearWay(root *os.Root, p string) error {
+	ns, _, _ := strings.Cut(p, "/")
+	var up []string
+	for a := filepath.Dir(p); a != ns; a = filepath.Dir(a) {
+		up = append(up, a)
+	}
+	for i := len(up) - 1; i >= 0; i-- {
+		fi, err := root.Lstat(up[i])
+		if err != nil {
+			break
+		}
+		if fi.Mode().IsRegular() {
+			return root.Remove(up[i])
+		}
+	}
+	if fi, err := root.Lstat(p); err == nil && fi.IsDir() {
+		return root.RemoveAll(p)
 	}
 	return nil
 }
