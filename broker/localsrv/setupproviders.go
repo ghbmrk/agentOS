@@ -51,6 +51,14 @@ func (s *Setup) providers(_ context.Context, _ sockets.Peer, args json.RawMessag
 	if ps == nil {
 		ps = []localapi.SetupProvider{}
 	}
+	s.mu.Lock()
+	for i := range ps {
+		ps[i].Owed = nil // only the record says what is owed
+		if ok, owed := s.rec.Owed[ps[i].ID]; owed {
+			ps[i].Owed = &ok
+		}
+	}
+	s.mu.Unlock()
 	return localapi.SetupProviders{Providers: ps}, nil
 }
 
@@ -77,18 +85,116 @@ func (s *Setup) apiKey(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	return struct{}{}, nil
 }
 
+// privateOK records the owner's private-data answer for a provider the
+// vault lists (CAP-9). The answer is owed in the setup record before the
+// vault is asked anything, even its list, and cleared once the vault
+// records it (#1544), so a vault that is down or locked, a failure, or a
+// restart of the page or of agentosd at any point leaves finish waiting
+// for the answer: a record that cannot take the answer asks the vault
+// nothing, a list that fails keeps it owed, and a clear that cannot be
+// written answers failed with the answer still owed. A provider the vault
+// does not list is owed nothing, and finish counts only listed ones, so a
+// stray id cannot hold setup open for good.
 func (s *Setup) privateOK(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var a localapi.PrivateOK
 	if err := decode(args, &a); err != nil {
 		return nil, err
 	}
-	if a.Provider == "" || s.cfg.Providers == nil {
+	if !providerShaped(a.Provider) || s.cfg.Providers == nil {
+		return nil, errBadArgs
+	}
+	s.answer.Lock()
+	defer s.answer.Unlock()
+	s.mu.Lock()
+	before, wasOwed := s.rec.Owed[a.Provider]
+	if !wasOwed && len(s.rec.Owed) >= maxOwed {
+		s.mu.Unlock()
+		return nil, errLimited
+	}
+	err := s.setOwedLocked(a.Provider, &a.OK)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	// restore puts back what was owed before: the vault took nothing. A
+	// restore that cannot be written leaves this answer owed, which still
+	// holds finish.
+	restore := func() {
+		prev := &before
+		if !wasOwed {
+			prev = nil
+		}
+		s.mu.Lock()
+		s.setOwedLocked(a.Provider, prev)
+		s.mu.Unlock()
+	}
+	ps, err := s.cfg.Providers.Providers()
+	if err != nil {
+		return nil, s.providerErr(err)
+	}
+	if !listed(ps, a.Provider) {
+		restore()
 		return nil, errBadArgs
 	}
 	if err := s.cfg.Providers.SetPrivateOK(a.Provider, a.OK); err != nil {
+		if errors.Is(err, ProviderRefused) {
+			restore()
+		}
 		return nil, s.providerErr(err)
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.setOwedLocked(a.Provider, nil); err != nil {
+		return nil, err
+	}
 	return struct{}{}, nil
+}
+
+// owedListedLocked is whether the record owes an answer for a provider
+// the vault lists. A list that fails counts as owing: finish cannot tell.
+// Caller holds s.mu.
+func (s *Setup) owedListedLocked() bool {
+	if len(s.rec.Owed) == 0 || s.cfg.Providers == nil {
+		return false
+	}
+	ps, err := s.cfg.Providers.Providers()
+	if err != nil {
+		return true
+	}
+	for p := range s.rec.Owed {
+		if listed(ps, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func listed(ps []localapi.SetupProvider, id string) bool {
+	for _, p := range ps {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// maxOwed bounds the providers the record can owe an answer for, so ids
+// written while the vault cannot list them cannot grow it without end.
+const maxOwed = 16
+
+// providerShaped: 1 to 64 bytes of lower-case letters, digits, '-' and
+// '_', the shape of the vault's provider ids.
+func providerShaped(p string) bool {
+	if p == "" || len(p) > 64 {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // providerErr maps the vault's refusal to a fixed code: a refused
@@ -121,4 +227,31 @@ func keyShaped(k string) bool {
 		}
 	}
 	return true
+}
+
+// setOwedLocked writes provider p's owed answer as *ok, or clears it when
+// ok is nil, to the record, and keeps it in memory only once written. A
+// closed setup owes nothing more. Caller holds s.mu.
+func (s *Setup) setOwedLocked(p string, ok *bool) error {
+	if s.closed {
+		return errSetupClosed
+	}
+	next := s.rec
+	next.Owed = make(map[string]bool, len(s.rec.Owed)+1)
+	for k, v := range s.rec.Owed {
+		next.Owed[k] = v
+	}
+	if ok == nil {
+		delete(next.Owed, p)
+	} else {
+		next.Owed[p] = *ok
+	}
+	if len(next.Owed) == 0 {
+		next.Owed = nil
+	}
+	if s.cfg.Record.Save(next) != nil {
+		return errFailed
+	}
+	s.rec = next
+	return nil
 }

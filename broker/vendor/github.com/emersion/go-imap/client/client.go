@@ -130,6 +130,16 @@ func (c *Client) handle(resp imap.Resp) error {
 
 func (c *Client) reader() {
 	defer close(c.loggedOut)
+	// agentos: a panic while parsing or handling a server response (a
+	// hostile or broken server) closes the connection and ends the
+	// reader, so the in-flight command fails with errClosed instead of
+	// the panic ending the process.
+	defer func() {
+		if r := recover(); r != nil {
+			c.ErrorLog.Println("imap/client: panic handling a response; connection closed")
+			c.conn.Close()
+		}
+	}()
 	// Loop while connected.
 	for {
 		connected, err := c.readOnce()
