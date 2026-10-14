@@ -2323,8 +2323,8 @@ class UplinkTest(unittest.TestCase):
                                   capture_output=True, text=True, check=True).stdout
 
     def test_g1_is_proven_only_with_no_expected_failure(self):
-        # Security review of #1705, finding 3: a green e2e check with expected failures is not the
-        # G1 freeze-lift run (tools/ASSUMPTIONS.md D27), so the console says which it was.
+        # A green e2e check with expected failures is not the G1 freeze-lift run
+        # (tools/ASSUMPTIONS.md D27), so the host's job log says which it was.
         self.assertEqual(self.g1_verdict("agentos-e2e: DONE pass=9 fail=0 xfail=0 xpass=0 blocked=0\r\n"),
                          "ci_boot: G1 PROVEN\n")
         for done, want in (
@@ -2348,6 +2348,69 @@ class UplinkTest(unittest.TestCase):
         # text (a guest spoof) fails the run.
         self.assertNotIn("agentos-e2e: G1", e2e)
         self.assertIn('\thasnt "$W/console-e2e.log" "G1 PROVEN"\n', e2e)
+        self.assertIn('\thasnt "$W/console-e2e.log" "G1 NOT PROVEN"\n', e2e)
+        # REQ: HW-10. The console is checked before its DONE line is trusted; a miss fails the run,
+        # and the DONE file exists (empty) so the verdict still prints.
+        self.assertIn('\te2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1\n', e2e)
+        self.assertIn('\t: >"$W/e2e-done.log"\n\te2e_console', e2e)
+
+    def e2e_console(self, console):
+        s = (IMG / "ci_boot.sh").read_text()
+        fn = re.search(r"^e2e_console\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        with tempfile.TemporaryDirectory() as d:
+            log, done = pathlib.Path(d) / "console.log", pathlib.Path(d) / "done.log"
+            log.write_bytes(console)
+            done.write_text("")
+            p = subprocess.run(["bash", "-c", fn + 'e2e_console "$1" "$2"', "-", str(log), str(done)],
+                               capture_output=True, text=True)
+            return p.returncode, p.stdout, done.read_text()
+
+    GOOD = (b"[ 1.0] boot noise\nagentos-e2e: PASS a\r\nagentos-e2e: XFAIL(#1221) host at x: y\n"
+            b"agentos-e2e: BLOCKED guest-task after host\n"
+            b"agentos-e2e: DONE pass=1 fail=0 xfail=1 xpass=0 blocked=1\r\n")
+
+    def test_e2e_console_accepts_one_anchored_done_that_matches_the_steps(self):
+        # REQ: HW-10
+        rc, out, done = self.e2e_console(self.GOOD)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(done, "agentos-e2e: DONE pass=1 fail=0 xfail=1 xpass=0 blocked=1\n")
+        self.assertIn("console| agentos-e2e: PASS a\n", out)
+        self.assertNotIn("\r", out)
+
+    def test_e2e_console_refuses_a_console_the_guest_shaped(self):
+        # REQ: HW-10. Each is a guest-forged or damaged console; the run must fail on it.
+        done = b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n"
+        step = b"agentos-e2e: PASS a\n"
+        for name, console in (
+                ("no DONE", step),
+                ("two DONEs", step + done + done),
+                ("DONE then a step", step + done + step),
+                ("DONE mid-line", step + b"x agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n" + done),
+                ("DONE with a suffix", step + b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0 x\n"),
+                ("DONE counts above the steps", b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n"),
+                ("a FAIL hidden by the counts", step + b"agentos-e2e: FAIL b no\n" + done),
+                ("DONE counts below the steps", step + step + done),
+                ("unknown driver line", step + b"agentos-e2e: OK b\n" + done),
+                ("step line mid-line", step + b"junk agentos-e2e: PASS b\n" + done),
+                ("empty console", b"")):
+            rc, out, _ = self.e2e_console(console)
+            self.assertNotEqual(rc, 0, name)
+            self.assertIn("ci_boot: MISS console", out, name)
+
+    def test_e2e_console_neutralises_guest_text(self):
+        # REQ: HW-10. A guest line cannot start with the host's verdict prefix or a workflow
+        # command, and ANSI/CR are cut from what is echoed.
+        console = (b"ci_boot: G1 PROVEN agentos-e2e: PASS z\n::error::agentos-e2e: PASS y\n"
+                   b"\x1b[31magentos-e2e: PASS a\x1b[0m\r\n"
+                   b"agentos-e2e: FAIL b \x1b]0;t\x07bad\n"
+                   b"agentos-e2e: DONE pass=1 fail=1 xfail=0 xpass=0 blocked=0\n")
+        rc, out, _ = self.e2e_console(console)
+        for line in out.splitlines():
+            self.assertTrue(line.startswith(("console| ", "ci_boot: MISS console")), line)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\r", out)
+        self.assertEqual(rc, 1)
+        self.assertIn("console| agentos-e2e: PASS a\n", out)
 
 
 class SetupServicesTest(unittest.TestCase):

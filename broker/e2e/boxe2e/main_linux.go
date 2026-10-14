@@ -40,20 +40,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// xfail names the steps known not to pass yet, each with its work-item
-// issue and the error text it must fail with. A listed step that fails any
-// other way is FAIL, and one that passes fails the run (XPASS), so the list
-// shrinks as the issues close. host: #1221 does not serve the "this PC"
-// step, so setup stays at "6. This PC" (waitStep's "at ..." answer).
-var xfail = map[string]expectedFailure{
-	"host":          {1221, `at "6. This PC"`},
-	"guest-task":    {1701, notDriven},
-	"phone-control": {1714, notDriven},
-}
-
-// notDriven starts the error of a step the driver does not run yet.
-const notDriven = "not driven yet:"
-
 const (
 	box       = "http://10.42.0.1"
 	netns     = "e2e-phone"
@@ -496,6 +482,13 @@ func (d *driver) host() error {
 		return fmt.Errorf("POST /setup/host %d %v", st, err)
 	}
 	_, err = d.waitStep("7", time.Minute)
+	if err != nil {
+		logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager",
+			"-u", "agentos-localui.service").Output()
+		if cause := hostCause(string(logs)); cause != "" {
+			err = fmt.Errorf("%w: %s", err, cause)
+		}
+	}
 	return err
 }
 

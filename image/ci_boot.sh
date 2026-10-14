@@ -141,6 +141,55 @@ g1_verdict() {
 	}' "$1"
 }
 
+# Reads the guest console $1 and writes the one DONE line to $2. Every line carrying the driver's
+# prefix is echoed with ANSI, CR and other non-printable bytes cleaned out and "console| " in front,
+# so a guest line can neither start with "ci_boot:" (the host's verdict prefix) nor with "::" (a
+# workflow command). Exits non-zero, printing why, unless every such line starts with the prefix and
+# is a PASS, FAIL, XFAIL(#N), XPASS or BLOCKED line or the DONE line, there is exactly one DONE and
+# it is the last, and its counts equal the step lines before it. The counts are the in-guest
+# driver's own; this cross-check raises the cost of a forged console but a guest that forges the
+# whole of it still passes (tools/ASSUMPTIONS.md D27).
+e2e_console() {
+	LC_ALL=C awk -v esc="$(printf '\033')" -v donefile="$2" '
+	function miss(m) { print "ci_boot: MISS console: " m; bad = 1 }
+	{
+		l = $0
+		gsub(esc "\\[[0-9;?]*[ -/]*[@-~]", "", l)
+		gsub(/\r/, "", l)
+		gsub(/[^ -~]/, "?", l)
+	}
+	index(l, "agentos-e2e: ") == 0 { next }
+	{ print "console| " l }
+	index(l, "agentos-e2e: ") != 1 { miss("driver text not at the start of its line"); next }
+	{
+		r = substr(l, 14)
+		if (ndone > 0) miss("line after DONE")
+	}
+	r ~ /^PASS [A-Za-z0-9_-]+$/ { c["pass"]++; next }
+	r ~ /^FAIL [A-Za-z0-9_-]+ / { c["fail"]++; next }
+	r ~ /^XFAIL\(#[0-9]+\) [A-Za-z0-9_-]+ / { c["xfail"]++; next }
+	r ~ /^XPASS [A-Za-z0-9_-]+ expected to fail \(#[0-9]+\) but passed$/ { c["xpass"]++; next }
+	r ~ /^BLOCKED [A-Za-z0-9_-]+ after [A-Za-z0-9_-]+$/ { c["blocked"]++; next }
+	r ~ /^DONE pass=[0-9]+ fail=[0-9]+ xfail=[0-9]+ xpass=[0-9]+ blocked=[0-9]+$/ {
+		ndone++
+		done = l
+		n = split(r, kv, /[ =]/)
+		for (i = 2; i < n; i += 2) d[kv[i]] = kv[i + 1]
+		next
+	}
+	{ miss("unrecognised driver line") }
+	END {
+		if (ndone != 1) miss("expected exactly one DONE line, found " ndone + 0)
+		else {
+			split("pass fail xfail xpass blocked", k, " ")
+			for (i = 1; i <= 5; i++)
+				if (d[k[i]] + 0 != c[k[i]] + 0) miss("DONE " k[i] "=" d[k[i]] " but " c[k[i]] + 0 " step lines")
+			print done > donefile
+		}
+		exit bad
+	}' "$1"
+}
+
 # The end-to-end run on a fresh copy with a cable in. Each step prints one line: PASS, FAIL,
 # XFAIL(#issue) for a step on the expected-failure list, XPASS for one of those that passed (so the
 # list is pruned), or BLOCKED after an earlier failure; then a DONE line with the counts.
@@ -149,10 +198,12 @@ if [ -n "${E2E:-}" ]; then
 	copy "$W/e2e.raw"
 	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)" \
 		NIC="user,model=virtio-net-pci" UNTIL="agentos-e2e: DONE\|agentos-health: FAIL" boot "$W/console-e2e.log" "$W/e2e.raw"
-	grep -a "agentos-e2e: " "$W/console-e2e.log" || true
+	# The guest writes this console, so none of it is trusted as it stands: e2e_console echoes each
+	# driver line sanitised and prefixed, and accepts the log only with exactly one strictly
+	# anchored DONE, last, whose counts match the step lines before it.
+	: >"$W/e2e-done.log"
+	e2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1
 	has "$W/console-e2e.log" "agentos-e2e: DONE"
-	# The counts on the DONE line too, so a FAIL line split or lost on the console cannot pass.
-	grep -a "agentos-e2e: DONE" "$W/console-e2e.log" | tail -n1 >"$W/e2e-done.log" || true
 	has "$W/e2e-done.log" " fail=0 "
 	has "$W/e2e-done.log" " xpass=0 "
 	hasnt "$W/console-e2e.log" "agentos-e2e: FAIL"
