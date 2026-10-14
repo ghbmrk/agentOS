@@ -77,7 +77,7 @@ before=$(stat -c %s "$IMG")
 # Forwards from the host to box ports 22, 80, 443 and 18789: each must be dropped (I11, I19).
 NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789" \
 	PROBE="18022:22 18080:80 18443:443 18789:18789" boot "$W/console.log" "$D"
-for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
+for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
 	has "$W/console.log" "$want"
 done
 # The wired uplink took a lease on the first boot; the reboot, with no cable, did not wait for one.

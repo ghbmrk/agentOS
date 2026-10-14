@@ -9,6 +9,10 @@ It also refuses a tree that could write the broker's memory to disk (IMG-nodump)
 passphrase is a Go string that cannot be zeroed (card C13), so core dumps must be discarded and
 there must be no swap. And it refuses a tree without the controller radio's firmware (#1415), since
 the setup network cannot come up without it, or one that lets the same chip's Bluetooth half load.
+It refuses a tree whose networkd could forward or masquerade (#1478): the inbound drop has no
+forward hook, so the wired uplink file is the only live .network file and no networkd setting turns
+forwarding on. And it refuses a tree that tells the LAN about the box (#1479): the uplink sends no
+hostname and uses addresses without the MAC, and resolved answers no LLMNR or multicast DNS.
 Usage outside mkosi: mkosi.finalize ROOT"""
 import configparser
 import fnmatch
@@ -52,6 +56,20 @@ BLOCKED_MODULES = ("btusb", "btmtk")
 MODPROBE_DIRS = ("lib/modprobe.d", "usr/lib/modprobe.d", "usr/local/lib/modprobe.d", "run/modprobe.d",
                  "etc/modprobe.d")
 REFUSE = ("/bin/false", "/usr/bin/false")
+# networkd's .network directories, lowest precedence first (a file in a later one replaces the same
+# name; a link to /dev/null or an empty file masks it).
+NETWORK_DIRS = ("lib/systemd/network", "usr/lib/systemd/network", "usr/local/lib/systemd/network",
+                "run/systemd/network", "etc/systemd/network")
+# The only .network file the image may run (#1478); anything else (Debian's 80-* container, VM and
+# ad-hoc files) must be removed or masked.
+UPLINK = "20-agentos-uplink.network"
+# [Network] keys that must be unset or "no" in a live .network file: forwarding, and name answering
+# on the LAN.
+NETWORK_OFF = ("IPMasquerade", "IPForward", "IPv4Forwarding", "IPv6Forwarding", "MulticastDNS", "LLMNR")
+# What the uplink must say so the LAN learns nothing about the box (#1479): every box's hostname is
+# "agentos", and an EUI-64 address carries the MAC.
+UPLINK_PRIVACY = (("DHCPv4", "SendHostname", "no"), ("DHCPv6", "SendHostname", "no"),
+                  ("IPv6AcceptRA", "Token", "prefixstable"), ("Network", "IPv6PrivacyExtensions", "yes"))
 
 
 def violations(root):
@@ -91,7 +109,7 @@ def violations(root):
                   and rel.split(os.sep, 1)[0] in SCAN and has_key(p)):
                 out.append("%s: private key material" % rel)
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
-            + bluetooth_violations(root))
+            + bluetooth_violations(root) + network_violations(root) + resolved_violations(root))
 
 
 def dropins(root, dirs):
@@ -260,6 +278,57 @@ def bluetooth_violations(root):
                         first.setdefault(m, w[2].strip())
     return ["modprobe.d: %s is not blocked (install %s %s); the image ships no Bluetooth"
             % (m, m, REFUSE[0]) for m in BLOCKED_MODULES if first.get(m) not in REFUSE]
+
+
+def masked(path):
+    """networkd skips a file that is a link to /dev/null or is empty."""
+    if os.path.islink(path):
+        return os.readlink(path) == "/dev/null"
+    return path.is_file() and path.stat().st_size == 0
+
+
+def network_violations(root):
+    """#1478: the effective .network set is the uplink alone, nothing changes it, and neither it nor
+    networkd.conf turns on forwarding or LAN name answering; #1479: the uplink keeps the box private."""
+    out, by_name = [], {}
+    for d in NETWORK_DIRS:
+        p = root / d
+        if p.is_dir():
+            for f in p.glob("*.network"):
+                by_name[f.name] = f
+            for f in p.glob("*.network.d/*.conf"):
+                if not masked(f):
+                    out.append("%s: networkd drop-in; the image's .network files are not changed" % f.relative_to(root))
+    live = {n: f for n, f in by_name.items() if not masked(f)}
+    for n in sorted(set(live) - {UPLINK}):
+        out.append("%s: live .network file; only %s may run (mask or remove it)" % (live[n].relative_to(root), UPLINK))
+    up = live.get(UPLINK)
+    if up is None:
+        out.append("%s: missing or masked; the wired uplink needs it" % UPLINK)
+    elif os.path.islink(up):
+        out.append("%s: a link; the tree check reads only a regular file" % up.relative_to(root))
+    else:
+        for key in NETWORK_OFF:
+            v = ini_last([up], "Network", key)
+            if v not in (None, "no"):
+                out.append("%s: %s is %s; must be unset or no" % (UPLINK, key, v))
+        for section, key, want in UPLINK_PRIVACY:
+            v = ini_last([up], section, key)
+            if v != want:
+                out.append("%s: [%s] %s is %s; must be %s" % (UPLINK, section, key, v, want))
+    conf = main_conf(root, "networkd.conf")
+    for key in ("IPv4Forwarding", "IPv6Forwarding"):
+        v = ini_last(conf, "Network", key)
+        if v not in (None, "no"):
+            out.append("networkd.conf: %s is %s; must be unset or no" % (key, v))
+    return out
+
+
+def resolved_violations(root):
+    """#1479: resolved neither answers nor sends LLMNR or multicast DNS on the LAN."""
+    conf = main_conf(root, "resolved.conf")
+    return ["50-agentos-uplink.conf: resolved %s is %s; must be no" % (key, v)
+            for key in ("LLMNR", "MulticastDNS") for v in [ini_last(conf, "Resolve", key)] if v != "no"]
 
 
 def has_key(path):

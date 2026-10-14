@@ -84,6 +84,26 @@ def radio(root):
     write(root, BT_BLOCK, (MK / "mkosi.extra" / BT_BLOCK).read_text())
 
 
+UPLINK_REL = "usr/lib/systemd/network/20-agentos-uplink.network"
+RESOLVED_REL = "usr/lib/systemd/resolved.conf.d/50-agentos-uplink.conf"
+
+
+def uplink(root):
+    # The image's networkd and resolved files (#1478, #1479), copied from mkosi.extra.
+    for rel in (UPLINK_REL, RESOLVED_REL):
+        write(root, rel, (MK / "mkosi.extra" / rel).read_text())
+
+
+# Debian trixie systemd's own .network files that turn on forwarding or multicast DNS when a link
+# matches (#1478); the bodies are the keys that matter.
+DISTRO_NETWORKS = {
+    "80-container-ve.network": "[Match]\nKind=veth\nName=ve-*\n\n[Network]\nDHCPServer=yes\nIPMasquerade=both\n",
+    "80-container-vz.network": "[Match]\nKind=bridge\nName=vz-*\n\n[Network]\nDHCPServer=yes\nIPMasquerade=both\n",
+    "80-vm-vt.network": "[Match]\nKind=tun\nName=vt-*\n\n[Network]\nDHCPServer=yes\nIPMasquerade=both\n",
+    "80-wifi-adhoc.network": "[Match]\nType=wlan\nWLANInterfaceType=ad-hoc\n\n[Network]\nMulticastDNS=yes\n",
+}
+
+
 class TreeCheckTest(unittest.TestCase):
     """HW-1: the image holds no per-install secret; V15: no socket files."""
 
@@ -96,9 +116,90 @@ class TreeCheckTest(unittest.TestCase):
         (self.root / "var/lib/agentos").mkdir(parents=True)
         nodump(self.root)
         radio(self.root)
+        uplink(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    # REQ: DEV-2, CH-9
+    def test_distro_network_files_are_refused(self):
+        # #1478: agentos_inbound has only an input hook, so nothing may turn on forwarding. Debian's
+        # container and VM files set IPMasquerade=both (which turns it on) and the ad-hoc one turns
+        # on multicast DNS on a radio; the built tree must carry none of them live.
+        for name, body in DISTRO_NETWORKS.items():
+            for d in ("usr/lib/systemd/network", "lib/systemd/network", "etc/systemd/network", "run/systemd/network"):
+                with self.subTest(name=name, dir=d):
+                    f = write(self.root, "%s/%s" % (d, name), body)
+                    self.assertIn(name, " ".join(check.violations(self.root)))
+                    f.unlink()
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: DEV-2, CH-9
+    def test_any_other_network_file_is_refused(self):
+        # The image configures the wired uplink and nothing else: a file the distro adds later (a
+        # namespace or tunnel link, DHCP on host0) fails the build until it is masked or removed.
+        write(self.root, "usr/lib/systemd/network/80-container-host0.network",
+              "[Match]\nKind=veth\nName=host0\n\n[Network]\nDHCP=yes\n")
+        self.assertIn("80-container-host0.network", " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2, CH-9
+    def test_masked_network_files_pass(self):
+        # networkd skips a file shadowed by a link to /dev/null or an empty file of the same name in
+        # a higher-precedence directory.
+        for i, name in enumerate(DISTRO_NETWORKS):
+            write(self.root, "usr/lib/systemd/network/" + name, DISTRO_NETWORKS[name])
+            mask = self.root / "etc/systemd/network" / name
+            mask.parent.mkdir(parents=True, exist_ok=True)
+            if i % 2:
+                mask.symlink_to("/dev/null")
+            else:
+                mask.write_text("")
+        self.assertEqual(check.violations(self.root), [])
+        # A mask in a lower-precedence directory does not hide the live file.
+        name = next(iter(DISTRO_NETWORKS))
+        (self.root / "etc/systemd/network" / name).unlink()
+        write(self.root, "etc/systemd/network/" + name, DISTRO_NETWORKS[name])
+        (self.root / "usr/lib/systemd/network" / name).unlink()
+        (self.root / "usr/lib/systemd/network" / name).symlink_to("/dev/null")
+        self.assertIn(name, " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2, CH-9
+    def test_uplink_must_not_forward_or_be_overridden(self):
+        # The image's own file may not turn on forwarding or multicast DNS, a drop-in may not change
+        # it, and an /etc file of the same name replaces it.
+        base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        for key in ("IPMasquerade=ipv4", "IPForward=yes", "IPv4Forwarding=yes", "IPv6Forwarding=yes",
+                    "MulticastDNS=resolve", "LLMNR=yes"):
+            with self.subTest(key):
+                write(self.root, UPLINK_REL, base + "\n[Network]\n%s\n" % key)
+                self.assertIn(key.split("=")[0], " ".join(check.violations(self.root)))
+        write(self.root, UPLINK_REL, base)
+        d = write(self.root, "etc/systemd/network/20-agentos-uplink.network.d/50-x.conf", "[DHCPv4]\nSendHostname=yes\n")
+        self.assertIn("50-x.conf", " ".join(check.violations(self.root)))
+        d.unlink()
+        e = write(self.root, "etc/systemd/network/20-agentos-uplink.network", "[Match]\nType=ether\n[Network]\nDHCP=yes\n")
+        self.assertIn("SendHostname", " ".join(check.violations(self.root)))
+        e.unlink()
+        (self.root / UPLINK_REL).unlink()
+        self.assertIn("20-agentos-uplink.network", " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2, CH-9
+    def test_networkd_forwarding_globals_stay_off(self):
+        # systemd 256+ also takes forwarding from networkd.conf.
+        write(self.root, "etc/systemd/networkd.conf.d/50-x.conf", "[Network]\nIPv4Forwarding=yes\n")
+        self.assertIn("IPv4Forwarding", " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2
+    def test_resolved_answers_nothing_on_the_lan(self):
+        # #1479: resolved's LLMNR and multicast DNS send single-label lookups onto the LAN, where any
+        # host can answer. The image turns both off, and a later file may not turn them back on.
+        (self.root / RESOLVED_REL).unlink()
+        v = " ".join(check.violations(self.root))
+        self.assertIn("LLMNR", v)
+        self.assertIn("MulticastDNS", v)
+        write(self.root, RESOLVED_REL, (MK / "mkosi.extra" / RESOLVED_REL).read_text())
+        write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=resolve\n")
+        self.assertIn("LLMNR", " ".join(check.violations(self.root)))
 
     def test_clean_tree_passes(self):
         self.assertEqual(check.violations(self.root), [])
@@ -375,6 +476,8 @@ class HealthTest(unittest.TestCase):
         write(self.root, "proc/cmdline", "console=ttyS0 rw quiet usrhash=%s\n" % H)
         write(self.root, "proc/swaps", SWAPS_HEADER)
         write(self.root, "proc/sys/kernel/core_pattern", "|/usr/bin/false\n")
+        write(self.root, "proc/sys/net/ipv4/ip_forward", "0\n")
+        write(self.root, "proc/sys/net/ipv6/conf/all/forwarding", "0\n")
         ev = self.root / "sys/firmware/efi/efivars"
         ev.mkdir(parents=True)
         (ev / "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(b"\x06\x00\x00\x00\x01")
@@ -404,6 +507,7 @@ class HealthTest(unittest.TestCase):
         self.assertIn("secure_boot=on", r.stdout)
         self.assertIn("inbound=drop", r.stdout)
         self.assertIn("swap=off dumps=off", r.stdout)
+        self.assertIn("forward=off", r.stdout)
 
     def test_secure_boot_off_is_reported_not_failed(self):
         (self.root / "sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(
@@ -434,6 +538,10 @@ class HealthTest(unittest.TestCase):
             "core dumps to a file": lambda: write(self.root, "proc/sys/kernel/core_pattern", "core\n"),
             "core dumps to systemd-coredump": lambda: write(
                 self.root, "proc/sys/kernel/core_pattern", "|/usr/lib/systemd/systemd-coredump %P %u\n"),
+            # #1478 (DEV-2, CH-9): the box never routes between the uplink and anything else.
+            "ipv4 forwarding on": lambda: write(self.root, "proc/sys/net/ipv4/ip_forward", "1\n"),
+            "ipv6 forwarding on": lambda: write(self.root, "proc/sys/net/ipv6/conf/all/forwarding", "1\n"),
+            "forwarding unreadable": lambda: (self.root / "proc/sys/net/ipv4/ip_forward").unlink(),
         }
         for name, breakit in cases.items():
             with self.subTest(name):
@@ -974,6 +1082,7 @@ class NoDumpTest(unittest.TestCase):
         write(self.root, "etc/machine-id", "uninitialized\n")
         nodump(self.root)
         radio(self.root)
+        uplink(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1141,6 +1250,8 @@ class NoDumpTest(unittest.TestCase):
         # The booted image reports swap and core dumps off in the health line, so CI shows them on
         # a real boot, not only in this tree check.
         self.assertIn("swap=off dumps=off", (IMG / "ci_boot.sh").read_text())
+        # REQ: DEV-2, CH-9 (#1478): and forwarding off.
+        self.assertIn("swap=off dumps=off forward=off", (IMG / "ci_boot.sh").read_text())
 
 
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
@@ -1225,6 +1336,29 @@ class UplinkTest(unittest.TestCase):
             self.assertNotIn("wlan", m.get("Type", "").split())
             self.assertFalse(any(n.startswith(("wl", "ap")) for n in m.get("Name", "").split()), f.name)
         self.assertEqual(ini(self.NET / "10-agentos-wlan.link")["Match"]["Type"], "wlan")
+
+    def test_distro_network_files_are_removed_from_the_image(self):
+        # REQ: DEV-2, CH-9 (#1478): Debian's 80-*.network files (one masquerades) never reach the
+        # image; the tree check refuses any that would (TreeCheckTest).
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        self.assertIn("/usr/lib/systemd/network/80-*.network", removed)
+
+    def test_uplink_tells_the_lan_nothing_about_the_box(self):
+        # REQ: DEV-2 (#1479): no hostname in DHCP (every box is "agentos"), and IPv6 addresses that
+        # carry no MAC: a stable per-network address (RFC 7217) plus temporary ones for outgoing use.
+        u = ini(self.UPLINK)
+        self.assertEqual(u["DHCPv4"]["SendHostname"], "no")
+        self.assertEqual(u["DHCPv6"]["SendHostname"], "no")
+        self.assertEqual(u["IPv6AcceptRA"]["Token"], "prefixstable")
+        self.assertEqual(u["Network"]["IPv6PrivacyExtensions"], "yes")
+        for key in ("IPMasquerade", "IPForward", "IPv4Forwarding", "IPv6Forwarding"):
+            self.assertNotIn(key, u["Network"])
+
+    def test_resolved_answers_no_name_queries_on_the_lan(self):
+        # REQ: DEV-2 (#1479): LLMNR and mDNS off, so the box neither announces nor answers its name.
+        r = ini(MK / "mkosi.extra/usr/lib/systemd/resolved.conf.d/50-agentos-uplink.conf")["Resolve"]
+        self.assertEqual(r["LLMNR"], "no")
+        self.assertEqual(r["MulticastDNS"], "no")
 
     def test_networkd_is_enabled_and_behind_the_drop(self):
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().split("\n")
@@ -1831,6 +1965,7 @@ class FuzzConfineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             nodump(pathlib.Path(d))
             radio(pathlib.Path(d))
+            uplink(pathlib.Path(d))
             self.assertEqual(check.violations(d), [])
             os.makedirs(os.path.join(d, "var/lib/agentos-fuzz"))
             self.assertEqual(check.violations(d), ["var/lib/agentos-fuzz: fuzz state; created on the box, never shipped"])
