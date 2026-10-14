@@ -120,11 +120,20 @@ func (d *D) Raw() Starter { return d.c }
 func (d *D) Str() fmt.Stringer { return d.c }
 func (d *D) Unwrapper() interface{ Error() string; Unwrap() error } { return nil }
 func (d *D) Each(f func(any)) {}
-func (d *D) Out(f func() any) {}
+func (d *D) In(f func() any) {}
 func (d *D) W() io.Writer { return nil }
 func (d *D) Err() error { return nil }
 type K struct{ X fmt.Stringer }
 func Z() K { return K{} }
+type H struct{ Hook interface{ Put(any) } }
+func (d *D) Out(p *any) {}
+func (d *D) Ch(c chan<- fmt.Stringer) {}
+func (d *D) Fill(m map[string]any) {}
+func (d *D) Slots(s []any) {}
+func (d *D) Visit(v interface{ Put(any) }) {}
+func (d *D) Sink() interface{ Put(any) } { return nil }
+func (d *D) Feed() chan<- fmt.Stringer { return nil }
+func (d *D) Recv(c <-chan fmt.Stringer) {}
 `})
 	got := leaks(pkg)
 	for _, want := range []string{"A: embeds", "B.C", "D.Cmd", "D.Any", "D.V", "D.P", "D.M", "I.Get", "New", "F: embeds",
@@ -132,7 +141,12 @@ func Z() K { return K{} }
 		// an os/exec type satisfies, and any handed to a callback.
 		"D.Raw", "D.Str", "D.Unwrapper", "D.Each",
 		// A type walked first as a declaration, then as a result.
-		"Z.X"} {
+		"Z.X",
+		// An interface the caller supplies has its methods called by the
+		// package, so their arguments flow out; and what a parameter
+		// points to or carries, the package can write (#659 L3 2,
+		// Security 4a 2).
+		"H.Hook.Put", "D.Visit", "D.Out", "D.Ch", "D.Fill", "D.Slots"} {
 		if !slices.ContainsFunc(got, func(s string) bool { return strings.HasPrefix(s, want) }) {
 			t.Errorf("no leak reported for %s; got %q", want, got)
 		}
@@ -142,8 +156,11 @@ func Z() K { return K{} }
 			t.Errorf("an unexported method or field was reported: %s", s)
 		}
 		// error is exempt: TestErrorsCarryNoExecType holds it at run time.
-		// An any the caller's callback returns flows in, not out.
-		for _, ok := range []string{"D.W", "D.Err", "D.Out"} {
+		// An any the caller's callback returns flows in, not out; so do
+		// the arguments to a method of an interface the package returns,
+		// a value the caller sends on a channel the package returns, and
+		// a value the package receives.
+		for _, ok := range []string{"D.W", "D.Err", "D.In", "D.Sink", "D.Feed", "D.Recv"} {
 			if strings.HasPrefix(s, ok+":") {
 				t.Errorf("reported, but yields no os/exec value: %s", s)
 			}
@@ -168,7 +185,9 @@ func (C) Raw() fmt.Stringer { return nil }
 // type, an embedded one, or an accessor that could yield one (any or an
 // empty interface, an interface an os/exec type satisfies, reflect.Value,
 // unsafe.Pointer). result marks a value that flows out of the package: a
-// result, or an argument the package passes to a caller's callback.
+// result, an argument the package passes to a caller's callback or to a
+// method of an interface the caller supplies, or a value the package can
+// write through what a parameter points to or carries.
 func leaks(pkg *types.Package) []string {
 	var bad []string
 	// A type is walked once per direction: as a declaration its fields
@@ -207,17 +226,34 @@ func leaks(pkg *types.Package) []string {
 			if t.Kind() == types.UnsafePointer {
 				bad = append(bad, where+": unsafe.Pointer")
 			}
+		// What a pointer, slice or map reaches is shared: either side
+		// may write it for the other to read, so it flows both ways (an
+		// out-param such as *any; #659 L3 2, Security 4a 2).
 		case *types.Pointer:
-			walk(where, t.Elem(), result)
+			walk(where, t.Elem(), false)
+			walk(where, t.Elem(), true)
 		case *types.Slice:
-			walk(where, t.Elem(), result)
+			walk(where, t.Elem(), false)
+			walk(where, t.Elem(), true)
 		case *types.Array:
 			walk(where, t.Elem(), result)
 		case *types.Chan:
-			walk(where, t.Elem(), result)
+			// A value goes from whoever holds the send end to whoever
+			// holds the receive end.
+			switch t.Dir() {
+			case types.SendOnly:
+				walk(where, t.Elem(), !result)
+			case types.RecvOnly:
+				walk(where, t.Elem(), result)
+			default:
+				walk(where, t.Elem(), false)
+				walk(where, t.Elem(), true)
+			}
 		case *types.Map:
-			walk(where, t.Key(), result)
-			walk(where, t.Elem(), result)
+			for _, r := range []bool{false, true} {
+				walk(where, t.Key(), r)
+				walk(where, t.Elem(), r)
+			}
 		case *types.Signature:
 			// A parameter flows the other way from its signature: a
 			// callback's arguments flow out.
@@ -231,8 +267,12 @@ func leaks(pkg *types.Package) []string {
 			if t.Empty() && result {
 				bad = append(bad, where+": any")
 			}
+			// The side that implements an interface is the one the
+			// value flows to, so a method's arguments flow with the
+			// interface value: one the caller supplies has the package
+			// call it, passing values out (#659 L3 2, Security 4a 2).
 			for m := range t.Methods() {
-				walk(where+"."+m.Name(), m.Type(), true)
+				walk(where+"."+m.Name(), m.Type(), result)
 			}
 		case *types.Struct:
 			for f := range t.Fields() {
