@@ -330,27 +330,25 @@ class TreeCheckTest(unittest.TestCase):
         self.assertEqual(check.violations(self.root), [])
 
     # REQ: DEV-2, CH-9
-    def test_network_links_are_resolved_in_the_image(self):
-        # #1508: networkd follows a link on the box, inside the image: a link to a real .network file
-        # runs it, and one that reads as nothing there (an empty file, /dev/null) masks it. A link
-        # into what the box mounts at boot (/dev other than /dev/null, /run, /tmp), or one that
-        # only resolves on the build host, is refused.
+    def test_network_links_other_than_a_mask_are_refused(self):
+        # #1543 Security B1: networkd follows a link on the box, so a dangling one runs whatever later
+        # appears at its target (/var/tmp is world-writable). Only a mask, a link to exactly
+        # /dev/null, is read (as nothing); every other link is refused, whatever it points at.
         real = write(self.root, "usr/lib/agentos/80-x.network", DISTRO_NETWORKS["80-container-ve.network"])
         write(self.root, "usr/lib/agentos/empty", "")
         link = self.root / "etc/systemd/network/80-x.network"
         link.parent.mkdir(parents=True, exist_ok=True)
-        for target, live in (("/usr/lib/agentos/80-x.network", True), ("../../../usr/lib/agentos/80-x.network", True),
-                             (str(real), True), ("/dev/zero", True), ("/dev/null/../null", True),
-                             ("/usr/lib/agentos/empty", False), ("../../../dev/null", False), ("/dev/null", False),
-                             ("/usr/lib/agentos/missing", False)):
+        for target in ("/usr/lib/agentos/80-x.network", "../../../usr/lib/agentos/80-x.network", str(real),
+                       "/dev/zero", "/dev/null/../null", "/usr/lib/agentos/empty", "../../../dev/null",
+                       "/usr/lib/agentos/missing", "/var/tmp/80-x.network", "../../../var/tmp/80-x.network"):
             with self.subTest(target):
                 link.symlink_to(target)
-                v = " ".join(check.violations(self.root))
-                if live:
-                    self.assertIn("80-x.network: live", v)
-                else:
-                    self.assertEqual(check.violations(self.root), [])
+                self.assertIn("etc/systemd/network/80-x.network: unreadable (etc/systemd/network/80-x.network "
+                              "is a link to %s;" % target, " ".join(check.violations(self.root)))
                 link.unlink()
+        link.symlink_to("/dev/null")
+        self.assertEqual(check.violations(self.root), [])
+        link.unlink()
 
     # REQ: DEV-2, CH-9
     def test_sysctl_forwarding_stays_off(self):
@@ -1937,21 +1935,17 @@ class ConfFilesTest(unittest.TestCase):
         self.assertEqual(check.violations(self.root), [])
 
     def test_etc_sysctl_conf_is_read_only_through_sysctl_d(self):
-        # systemd-sysctl never lists /etc/sysctl.conf; Debian's 99-sysctl.conf link reads it in
-        # sysctl.d order, so a file sorting after the link wins.
+        # systemd-sysctl never lists /etc/sysctl.conf. Older Debian's 99-sysctl.conf link read it in
+        # sysctl.d order; trixie ships no such link, and the check refuses one (#1543 Security B1)
+        # though it still takes the link's name in the listing.
         write(self.root, "etc/sysctl.d/90-x.conf", "net.ipv4.ip_forward=1\n")
         write(self.root, "etc/sysctl.conf", "net.ipv4.ip_forward=0\n")
         self.assertIn("forwarding must stay 0", self.v())
-        (self.root / "etc/sysctl.d/90-x.conf").unlink()
         link(self.root, "etc/sysctl.d/99-sysctl.conf", "../sysctl.conf")
-        write(self.root, "etc/sysctl.d/99-zz.conf", "net.ipv4.ip_forward=1\n")
-        self.assertIn("forwarding must stay 0", self.v())
         self.assertEqual([f.rel for f in check.sysctl_files(self.root)][-2:],
-                         ["etc/sysctl.d/99-sysctl.conf", "etc/sysctl.d/99-zz.conf"])
-        # Read through the link, sysctl.conf does reset a key set before it.
-        (self.root / "etc/sysctl.d/99-zz.conf").unlink()
-        write(self.root, "etc/sysctl.d/90-x.conf", "net.ipv4.ip_forward=1\n")
-        self.assertEqual(check.violations(self.root), [])
+                         ["usr/lib/sysctl.d/99-agentos-nodump.conf", "etc/sysctl.d/99-sysctl.conf"])
+        self.assertIn("etc/sysctl.d/99-sysctl.conf: unreadable (etc/sysctl.d/99-sysctl.conf is a link to ../sysctl.conf;",
+                      self.v())
 
     def test_hidden_and_backup_names_are_skipped(self):
         # FOREACH_DIRENT skips hidden names, so ".b.conf" never resets "+a.conf".
@@ -1997,32 +1991,58 @@ class ConfFilesTest(unittest.TestCase):
         write_b(self.root, b"etc/systemd/resolved.conf.d/\xee\x80\x80.conf", b"[Resolve]\nLLMNR=no\n")
         self.assertIn("LLMNR", self.v())
 
-    def test_links_resolve_inside_the_image(self):
-        # R3: an absolute link is followed from the image's root, not the build host's. Host and
-        # tree both have /etc/passwd; the tree's says to forward.
-        write(self.root, "etc/passwd", "net.ipv4.ip_forward=1\n")
-        f = link(self.root, "etc/sysctl.d/99-x.conf", "/etc/passwd")
-        self.assertIn("forwarding must stay 0", self.v())
-        f.unlink()
-        # The review's case: the image's own file, through a link, under a mask of its name.
+    def test_dangling_sysctl_link_is_refused(self):
+        # #1543 Security B1b: a dangling link read as nothing at build, and on the box systemd-sysctl
+        # reads whatever any local user writes at its target in /var/tmp. Relative and absolute,
+        # in /etc and /usr/lib, before and after the target exists.
+        for rel in ("etc/sysctl.d/99-z.conf", "usr/lib/sysctl.d/99-z.conf"):
+            for target in ("/var/tmp/99.conf", "../" * rel.count("/") + "var/tmp/99.conf"):
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    want = "%s: unreadable (%s is a link to %s;" % (rel, rel, target)
+                    self.assertIn(want, self.v())
+                    write(self.root, "var/tmp/99.conf", "kernel.core_pattern=|/usr/bin/false\n")
+                    self.assertIn(want, self.v())
+                    (self.root / "var/tmp/99.conf").unlink()
+                    with self.assertRaises(check.LinkRefused):
+                        check.Conf(str(self.root), rel).read_bytes()
+                    f.unlink()
+
+    def test_links_other_than_a_mask_are_refused(self):
+        # #1543 Security B1: a link in a configuration directory, wherever it points (a file in the
+        # image, a host path, a directory), is refused rather than followed. Each of these once
+        # passed or was followed (R3 of #1508).
+        write(self.root, "etc/passwd", "kernel.core_pattern=|/usr/bin/false\n")
+        write(self.root, "usr/lib/agentos/sd/90-x.conf", "kernel.core_pattern=|/usr/bin/false\n")
+        write(self.root, "usr/lib/agentos/nd/50-x.conf", "[DHCPv4]\nSendHostname=no\n")
+        # A linked parent first: the later cases create usr/local/lib/systemd as a directory.
+        for rel, target in (("usr/local/lib/systemd", "/var/tmp/sd"), ("etc/sysctl.d/99-x.conf", "/etc/passwd"),
+                            ("etc/sysctl.d/99-x.conf", "/" + NODUMP[2]),
+                            ("etc/sysctl.d/99-x.conf", "../../usr/lib/agentos/sd/90-x.conf"),
+                            ("usr/local/lib/sysctl.d", "/usr/lib/agentos/sd"),
+                            ("usr/local/lib/sysctl.d", "/var/tmp/sd"),
+                            ("etc/systemd/resolved.conf.d/90-x.conf", "/etc/passwd"),
+                            ("usr/local/lib/systemd/resolved.conf.d", "/var/tmp/rd"),
+                            ("etc/systemd/network/20-agentos-uplink.network.d", "/usr/lib/agentos/nd"),
+                            ("etc/systemd/system/agentosd.service.d/90-x.conf", "/var/tmp/x.conf"),
+                            ("usr/local/lib/systemd/system/agentosd.service.d", "/var/tmp/ud"),
+                            ("etc/systemd/coredump.conf", "/var/tmp/c.conf"),
+                            ("etc/modprobe.d/90-x.conf", "/var/tmp/m.conf"),
+                            ("usr/local/lib/modprobe.d", "/var/tmp/md")):
+            with self.subTest(rel=rel, target=target):
+                f = link(self.root, rel, target)
+                self.assertIn("%s is a link to %s;" % (rel, target), self.v())
+                f.unlink()
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_a_mask_is_still_read_as_nothing(self):
+        # A mask (a link to exactly /dev/null) still hides a lower file of its name, in sysctl.d and
+        # for a main file.
         write(self.root, "usr/lib/sysctl.d/50-pid-max.conf", "net.ipv4.ip_forward=1\n")
+        self.assertIn("forwarding must stay 0", self.v())
         link(self.root, "etc/sysctl.d/50-pid-max.conf", "/dev/null")
         self.assertEqual(check.violations(self.root), [])
-        link(self.root, "etc/sysctl.d/99-x.conf", "/usr/lib/sysctl.d/50-pid-max.conf")
-        self.assertIn("forwarding must stay 0", self.v())
-        (self.root / "etc/sysctl.d/99-x.conf").unlink()
-        # A linked directory is resolved in the image too.
-        write(self.root, "usr/lib/agentos/sd/90-x.conf", "net.ipv4.ip_forward=1\n")
-        link(self.root, "usr/local/lib/sysctl.d", "/usr/lib/agentos/sd")
-        self.assertIn("forwarding must stay 0", self.v())
-        (self.root / "usr/local/lib/sysctl.d").unlink()
-        write(self.root, "etc/passwd", "[Resolve]\nLLMNR=yes\n")
-        link(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "/etc/passwd")
-        self.assertIn("LLMNR", self.v())
-        (self.root / "etc/systemd/resolved.conf.d/90-x.conf").unlink()
-        write(self.root, "usr/lib/agentos/nd/50-x.conf", "[DHCPv4]\nSendHostname=yes\n")
-        link(self.root, "etc/systemd/network/20-agentos-uplink.network.d", "/usr/lib/agentos/nd")
-        self.assertIn("networkd drop-in", self.v())
+        self.assertEqual(check.Conf(str(self.root), "etc/sysctl.d/50-pid-max.conf").read_bytes(), b"")
 
     def test_split_usr_lib_and_run_are_not_read(self):
         # systemd 257 does not search a split-/usr /lib, and /run is a tmpfs on the box: a reset
@@ -2049,13 +2069,15 @@ class ConfFilesTest(unittest.TestCase):
         self.assertEqual(check.violations(self.root), [])
         write(self.root, "etc/systemd/resolved.conf", "[Resolve]\n#LLMNR=yes\n")
         self.assertIn("LLMNR is None", self.v())
-        # A link to /dev/null is a main file that reads as nothing; a dangling link is not found.
+        # A link to /dev/null is a main file that reads as nothing; a dangling link is refused, not
+        # skipped (#1543 Security B1): systemd would read whatever later appears at its target.
         (self.root / "etc/systemd/resolved.conf").unlink()
         link(self.root, "etc/systemd/resolved.conf", "/dev/null")
         self.assertIn("LLMNR is None", self.v())
         (self.root / "etc/systemd/resolved.conf").unlink()
         link(self.root, "etc/systemd/resolved.conf", "/usr/lib/agentos/missing")
-        self.assertEqual(check.violations(self.root), [])
+        self.assertIn("unreadable resolved.conf (etc/systemd/resolved.conf is a link to /usr/lib/agentos/missing;",
+                      self.v())
 
     def test_unit_dropins_are_the_ones_systemd_applies(self):
         # dropin.c: NAME.d, each "-" prefix's .d, and service.d, in every unit directory, including
@@ -2150,7 +2172,7 @@ class ConfFilesTest(unittest.TestCase):
         self.assertIn("etc/sysctl.d/99-x.conf: unreadable (a directory)", self.v())
         d.rmdir()
         link(self.root, "etc/sysctl.d/99-x.conf", "/run/agentos/x.conf")
-        self.assertIn("etc/sysctl.d/99-x.conf: unreadable (it resolves to /run/agentos/x.conf", self.v())
+        self.assertIn("etc/sysctl.d/99-x.conf: unreadable (etc/sysctl.d/99-x.conf is a link to /run/agentos/x.conf", self.v())
         d.unlink()
         # Only a build without root's DAC override (CI's checks job) can see a mode-000 file fail.
         f = write(self.root, "etc/sysctl.d/99-x.conf", "net.ipv4.ip_forward=1\n", mode=0o000)
@@ -2203,7 +2225,7 @@ class ConfFilesTest(unittest.TestCase):
     def test_config_directory_linked_into_run_is_refused(self):
         # P6: the box mounts a tmpfs over /run, so the directory the tree check reads is not the box's.
         link(self.root, "etc/sysctl.d", "/run/sysctl.d")
-        self.assertIn("etc/sysctl.d: unreadable (etc/sysctl.d resolves to /run/sysctl.d", self.v())
+        self.assertIn("etc/sysctl.d: unreadable (etc/sysctl.d is a link to /run/sysctl.d", self.v())
 
     def test_unit_dropin_directories_go_by_lookup_path_first(self):
         # P7: unit_file_find_dropin_paths walks lookup paths, then names, so /etc's prefix drop-in
@@ -2254,6 +2276,19 @@ TMPFILES_PASS = ("d /run/user 0755 root root -", "L /var/run - - - - ../run", "L
                  "L$ /var/log/README - - - - ../../usr/share/doc/systemd/README.logs",
                  "L! /etc/resolv.conf - - - - ../run/systemd/resolve/stub-resolv.conf")
 AGENTOS_TMPFILES = MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf"
+
+
+def allow_groups():
+    """image/mkosi/tmpfiles.allow's entries grouped by file, each file's lines in their order
+    (#1543 P/UX P1): {path in the tree: [line, ...]}."""
+    out = {}
+    for ln in (MK / check.TMPFILES_ALLOW).read_text().split("\n"):
+        if ln.strip() and not ln.startswith("#"):
+            rel, _, line = ln.partition("\t")
+            out.setdefault(rel, []).append(line.strip(" \t"))
+    return out
+
+
 # What the box reads that a tmpfiles.d line could change, by name under each configuration
 # directory, listed here apart from the check's own TMPFILES_TARGETS so that a name dropped there
 # shows here (#1543 P/UX B2).
@@ -2548,8 +2583,9 @@ class SystemdDiffTest(unittest.TestCase):
 
 class TmpfilesDiffTest(unittest.TestCase):
     """#1530: the guarded-path check against systemd-tmpfiles itself. Each case (Debian's lines,
-    the image's, every review probe; a probe may be several lines, so a chain of lines is one case)
-    is one tmpfiles.d file run through the real `systemd-tmpfiles --root=TREE --create` on a scratch
+    the image's, every review probe; a probe may be several lines, so a chain of lines is one case;
+    and every file on tmpfiles.allow with all its listed lines, #1543 P/UX P1) is one tmpfiles.d
+    file run through the real `systemd-tmpfiles --root=TREE --create --remove --boot` on a scratch
     tree that passes the tree check, never the host. A file the check passes must leave every path
     the box reads configuration from (GUARDED) as it was, and the tree must still pass the whole
     check after it. The allowlist (TmpfilesAllowTest) is the main guard; this is its backstop."""
@@ -2578,7 +2614,7 @@ class TmpfilesDiffTest(unittest.TestCase):
         write(root, "usr/share/x/sysctl.d/99-x.conf", "net.ipv4.ip_forward=1\n")
         write(root, "usr/share/x/f.conf", "net.ipv4.ip_forward=1\n")
         write(root, "etc/sysctl.conf", "")
-        link(root, "etc/sysctl.d/99-sysctl.conf", "../sysctl.conf")
+        (root / "etc/sysctl.d").mkdir()
         # The empty credential stores the build's systemd-tmpfiles run leaves.
         (root / "etc/credstore").mkdir(mode=0o700)
         (root / "etc/credstore.encrypted").mkdir(mode=0o700)
@@ -2610,23 +2646,29 @@ class TmpfilesDiffTest(unittest.TestCase):
         tool = reference_tool(self, "systemd-tmpfiles")
         lines = TMPFILES_PASS + tuple(ln for ln in AGENTOS_TMPFILES.read_text().splitlines()
                                       if ln and not ln.startswith("#")) + TMPFILES_PROBES
+        # Every allowlisted file whole, under its own path, so that an entry added to tmpfiles.allow
+        # is run too (#1543 P/UX P1): the tree then passes the allowlist as well as the guard.
+        cases = [("usr/lib/tmpfiles.d/x.conf", ln) for ln in lines] + [
+            (rel, "\n".join(group)) for rel, group in sorted(allow_groups().items())]
         changed = set()
-        for ln in lines:
-            with self.subTest(line=ln), tempfile.TemporaryDirectory() as tmp:
+        for rel, ln in cases:
+            with self.subTest(file=rel, line=ln), tempfile.TemporaryDirectory() as tmp:
                 root = self.tree(tmp)
                 self.assertEqual(check.violations(root), [])
-                write(root, "usr/lib/tmpfiles.d/x.conf", ln + "\n")
+                f = write(root, rel, ln + "\n")
                 passed = not check.tmpfiles_violations(root)
                 before = self.snapshot(tmp)
                 # --root keeps every path inside the scratch tree; the exit code is the line's own
                 # business (a missing user or credential), what it did to the tree is the test.
-                subprocess.run([tool, "--root=" + tmp, "--create"], capture_output=True, timeout=60)
+                subprocess.run([tool, "--root=" + tmp, "--create", "--remove", "--boot"], capture_output=True, timeout=60)
                 if self.snapshot(tmp) != before:
                     changed.add(ln)
                 self.assertEqual(passed, ln not in TMPFILES_PROBES)
                 if passed:
                     self.assertNotIn(ln, changed)
-                    (root / "usr/lib/tmpfiles.d/x.conf").unlink()
+                    if rel != "usr/lib/tmpfiles.d/x.conf":
+                        self.assertEqual(check.violations(root), [])
+                    f.unlink()
                     self.assertEqual(check.violations(root), [])
         for ln in self.WRITES:
             self.assertIn(ln, changed, "systemd-tmpfiles did not write through %r; the oracle is vacuous" % ln)
@@ -2676,6 +2718,49 @@ class TmpfilesAllowTest(unittest.TestCase):
         mine = {(self.AGENTOS, ln) for n, ln in check.tmpfiles_lines(AGENTOS_TMPFILES.read_bytes())}
         self.assertEqual({e for e in allowed if e[0] == self.AGENTOS}, mine)
 
+    def test_every_entry_passes_the_guard_under_its_own_file(self):
+        # #1543 P/UX P1: every entry on the list, not only agentos.conf's, goes through the
+        # guarded-path check, each file with all its lines (TmpfilesDiffTest runs the same files
+        # through systemd-tmpfiles). An entry added to the list that writes configuration the tree
+        # check reads fails here, and not only in the build.
+        groups = allow_groups()
+        self.assertEqual({(rel, ln) for rel, g in groups.items() for ln in g}, check.tmpfiles_allowed())
+        for rel, group in sorted(groups.items()):
+            with self.subTest(file=rel):
+                write(self.root, rel, "\n".join(group) + "\n")
+                self.assertEqual(check.tmpfiles_violations(self.root), [])
+        self.assertEqual(check.tmpfiles_allow_violations(self.root), [])
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_links_in_tmpfiles_d_are_refused(self):
+        # #1543 Security B1: a dangling link read as nothing, so etc/tmpfiles.d/agentos.conf ->
+        # /var/tmp/agentos.conf masked the shipped file and passed both layers; at the next boot
+        # root's systemd-tmpfiles ran whatever a local user wrote there. Stock tmpfiles.d has no
+        # links, so every one is refused (a mask, and a link to a listed file, too), relative or
+        # absolute, before and after its target exists, and so is a linked directory.
+        for rel in ("etc/tmpfiles.d/agentos.conf", "usr/lib/tmpfiles.d/x.conf"):
+            for target in ("/var/tmp/agentos.conf", "../" * rel.count("/") + "var/tmp/agentos.conf", "/dev/null",
+                           "/" + self.AGENTOS):
+                if target == "/" + rel:
+                    continue
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    want = "%s: unreadable (a link to %s; tmpfiles.d ships no links" % (rel, target)
+                    for v in (self.v(), check.tmpfiles_violations(self.root), check.violations(self.root)):
+                        self.assertIn(want, " | ".join(v))
+                    write(self.root, "var/tmp/agentos.conf", "f /etc/sysctl.d/99-x.conf - - - - net.ipv4.ip_forward=1\n")
+                    self.assertIn(want, " | ".join(self.v()))
+                    (self.root / "var/tmp/agentos.conf").unlink()
+                    f.unlink()
+        self.assertEqual(check.violations(self.root), [])
+        (self.root / "etc/tmpfiles.d").rmdir()
+        for target in ("/var/tmp/td", "../var/tmp/td"):
+            with self.subTest(dir_target=target):
+                f = link(self.root, "etc/tmpfiles.d", target)
+                self.assertIn("etc/tmpfiles.d: unreadable (etc/tmpfiles.d is a link to %s;" % target,
+                              " | ".join(check.violations(self.root)))
+                f.unlink()
+
     def test_listed_lines_pass_and_others_fail(self):
         self.assertEqual(self.v(), [])
         self.assertEqual(check.violations(self.root), [])
@@ -2706,7 +2791,16 @@ class TmpfilesAllowTest(unittest.TestCase):
         # The entry that would allow a line is in the message, ready to review and copy.
         write(self.root, "usr/lib/tmpfiles.d/x.conf", "d /run/y 0755\n")
         self.assertEqual(self.v(), ["usr/lib/tmpfiles.d/x.conf line 1: not on the tmpfiles.d allowlist "
-                                    "(tmpfiles.allow, #1543); entry: usr/lib/tmpfiles.d/x.conf\td /run/y 0755"])
+                                    "(image/mkosi/tmpfiles.allow, #1543); review the line, then add the entry after "
+                                    "'entry:' there (or regenerate it from the built tree: mkosi.finalize "
+                                    "--tmpfiles-allowlist ROOT); entry: usr/lib/tmpfiles.d/x.conf\td /run/y 0755"])
+        # The build's last line names the file too, not per-install state (#1543 P/UX U1).
+        with unittest.mock.patch.object(sys, "argv", ["mkosi.finalize", str(self.root)]), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            check.main()
+        self.assertEqual(str(e.exception), "image check: 1 problem(s) in the image tree, each named above; a "
+                         "tmpfiles.d line missing from image/mkosi/tmpfiles.allow ends in the entry to review and "
+                         "add there")
 
     def test_lines_are_keyed_by_file(self):
         # A listed line in another file, or the same file in another directory, is not listed.
@@ -2720,9 +2814,11 @@ class TmpfilesAllowTest(unittest.TestCase):
         write(self.root, "lib/tmpfiles.d/x.conf", "d /run/y\n")
         self.assertIn("lib/tmpfiles.d/x.conf line 1", " | ".join(self.v()))
         (self.root / "lib/tmpfiles.d/x.conf").unlink()
-        # A link in /etc masks the listed file: systemd reads nothing for that name.
+        # tmpfiles.d takes no link at all (#1543 Security B1): stock has none, and a link in /etc
+        # would mask the listed file. A mask is refused too, not only a link to elsewhere.
         link(self.root, "etc/tmpfiles.d/agentos.conf", "/dev/null")
-        self.assertEqual(self.v(), [])
+        self.assertIn("etc/tmpfiles.d/agentos.conf: unreadable (a link to /dev/null; tmpfiles.d ships no links",
+                      " | ".join(self.v()))
         (self.root / "etc/tmpfiles.d/agentos.conf").unlink()
         # Anything at all under /run/tmpfiles.d, and a file that cannot be read.
         write(self.root, "run/tmpfiles.d/agentos.conf", AGENTOS_TMPFILES.read_text())
@@ -2822,14 +2918,57 @@ class ReferenceDiffsRanTest(unittest.TestCase):
     def test_no_reference_diff_skips(self):
         if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") != "1":
             self.skipTest("only where AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI)")
-        loader = unittest.TestLoader()
-        suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest))
-        self.assertGreaterEqual(suite.countTestCases(), 3)
-        result = unittest.TestResult()
-        suite.run(result)
-        self.assertEqual(result.skipped, [])
-        self.assertEqual(result.testsRun, suite.countTestCases())
-        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        assert_all_ran(self, (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest))
+
+
+def assert_all_ran(case, classes):
+    """Run every test of CLASSES; fail CASE on any skip, any test not run, or any failure."""
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in classes)
+    case.assertGreaterEqual(suite.countTestCases(), len(classes))
+    result = unittest.TestResult()
+    suite.run(result)
+    case.assertEqual(result.skipped, [])
+    case.assertEqual(result.testsRun, suite.countTestCases())
+    case.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+
+
+class DiffOracleTest(unittest.TestCase):
+    """#1543 P/UX P2: the differential tests' own oracles, each run against a stand-in that breaks
+    it, which must make it fail. TmpfilesDiffTest must fail when systemd-tmpfiles writes nothing
+    (its WRITES assertion: otherwise a run that compares nothing passes), and when a line the check
+    passes writes /proc/sys (its passed-line assertion: the whole-tree re-check never reads /proc, /sys
+    or the ESP back). And assert_all_ran (ReferenceDiffsRanTest) must fail on a skip. Needs no
+    reference tool: systemd-tmpfiles is replaced."""
+    # REQ: DEV-2, CH-9
+
+    def test_oracles_fail_when_their_subject_is_broken(self):
+        here = sys.modules[__name__]
+
+        def nothing(args, **kw):
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+
+        def proc_sys(args, **kw):
+            root = next(a[len("--root="):] for a in args if a.startswith("--root="))
+            pathlib.Path(root, "proc/sys/net/ipv4/ip_forward").write_text("1\n")
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+
+        for name, fake, needle in (("writes nothing", nothing, "the oracle is vacuous"),
+                                   ("writes /proc/sys for every line", proc_sys, "unexpectedly found")):
+            with self.subTest(name):
+                result = unittest.TestResult()
+                with unittest.mock.patch.object(here, "reference_tool", lambda case, tool: tool), \
+                        unittest.mock.patch.object(subprocess, "run", fake):
+                    unittest.TestLoader().loadTestsFromTestCase(TmpfilesDiffTest).run(result)
+                self.assertFalse(result.wasSuccessful())
+                self.assertIn(needle, str(result.failures))
+
+        class Skips(unittest.TestCase):
+            def test_skips(self):
+                self.skipTest("a differential test that did not run")
+
+        with self.assertRaises(AssertionError):
+            assert_all_ran(self, (Skips,))
 
 
 class KmodDiffTest(unittest.TestCase):

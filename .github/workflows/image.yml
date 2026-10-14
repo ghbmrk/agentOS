@@ -46,14 +46,26 @@ jobs:
         # The tree check's refusals as annotations, so a tmpfiles.d line missing from
         # image/mkosi/tmpfiles.allow can be reviewed (and its entry copied) without the full log (#1543).
         # An annotation holds 4096 characters and a step 10 of each level, so allowlist misses are
-        # shown as their bare entries, packed into chunks.
+        # shown as their bare entries under one heading, after the other refusals, packed into chunks.
+        # A line the guarded-path check also refuses is not offered as an entry: it must not be added.
         if: failure()
         run: |
           python3 - "$RUNNER_TEMP/build.log" <<'PY'
-          import sys
+          import re, sys
           lines = [l.split("image check: ", 1)[1].rstrip("\n") for l in open(sys.argv[1], errors="replace")
                    if "image check: " in l]
-          lines = [l.split("; entry: ", 1)[1] if "; entry: " in l else l for l in lines]
+          guarded = {m.group(1, 2) for m in (re.match(r"(.+?): line (\d+): ", l) for l in lines) if m}
+          others, entries = [], []
+          for l in lines:
+              m = re.match(r"(.+?) line (\d+): not on the tmpfiles.d allowlist .*?; entry: (.*)$", l)
+              if not m:
+                  others.append(l)
+              elif m.group(1, 2) not in guarded:
+                  entries.append(m.group(3))
+          if entries:
+              others.append("not on image/mkosi/tmpfiles.allow; review each line, then add it to "
+                            "image/mkosi/tmpfiles.allow:")
+          lines = others + entries
           chunks, cur = [], ""
           for l in lines:
               if cur and len(cur) + len(l) + 1 > 3500:
