@@ -2,7 +2,7 @@
 
 No requirement IDs: CI tooling that holds work to the G1 path (A1, D-104), not SPEC.md
 behaviour. The local cases are G1-freeze-a (paths outside the list fail, listed paths and
-G1 fixes pass), -b (exempt PRs and builders), -c (records-only and empty changes), -d (the
+G1 fixes pass), -b (PRs opened before the freeze and exempt-pr lines), -c (records-only and empty changes), -d (the
 switch), -e (fail closed) and -f (the list keeps up with the G1 binaries' imports).
 """
 import os
@@ -18,7 +18,6 @@ sys.path.insert(0, str(ROOT / "tools"))
 import g1_scope as g  # noqa: E402
 
 LIST = (ROOT / "tools" / "g1_scope.txt").read_text()
-EXEMPT = (ROOT / "tools" / "g1_scope_exempt.txt").read_text()
 
 # The binaries the G1 path ships or runs (see the header of tools/g1_scope.txt).
 G1_BINARIES = (
@@ -29,16 +28,20 @@ G1_BINARIES = (
 
 SMALL = """
 freeze on
+since 2026-10-14T19:55:00Z
+exempt-pr 1500
 allow broker/localui/
 allow image/
 allow SPEC.md
 frozen-import broker/loops/
 """
-EX = "pr 1500\nissue 1638 PACE-allowance-race\n"
+S = "since 2026-10-14T19:55:00Z\n"
+ON = "freeze on\n" + S
+BEFORE, AFTER = "2026-10-14T19:54:59Z", "2026-10-14T19:55:00Z"
 
 
-def run(paths, list_text=SMALL, exempt=EX, pr=None, branch="", title=""):
-    return g.check(paths, list_text, exempt, pr, branch, title)
+def run(paths, list_text=SMALL, pr=None, created=""):
+    return g.check(paths, list_text, pr, created)
 
 
 class CheckTest(unittest.TestCase):
@@ -58,39 +61,47 @@ class CheckTest(unittest.TestCase):
         self.assertFalse(run(["broker/localuix/a.go"])[0])
         self.assertFalse(run(["broker/localui/../voice/v.go"])[0])
 
-    def test_exempt_pr_number(self):  # G1-freeze-b
-        self.assertTrue(run(["broker/voice/v.go"], pr=1500)[0])
-        self.assertFalse(run(["broker/voice/v.go"], pr=1501)[0])
+    def test_pr_opened_before_the_freeze_passes(self):  # G1-freeze-b
+        # Every PR open when the freeze began finishes, whatever its row's state.
+        ok, msg = run(["broker/voice/v.go"], pr=1600, created=BEFORE)
+        self.assertTrue(ok)
+        self.assertIn("before the freeze began", msg[0])
+        self.assertFalse(run(["broker/voice/v.go"], pr=1600, created=AFTER)[0])
+        self.assertFalse(run(["broker/voice/v.go"], pr=1600)[0])
 
-    def test_exempt_builder_by_branch_or_title(self):  # G1-freeze-b
-        self.assertTrue(run(["broker/voice/v.go"], branch="pkg/1638-pace-x1")[0])
-        self.assertTrue(run(["broker/voice/v.go"], title="PACE-allowance-race: fix")[0])
-        self.assertTrue(run(["broker/voice/v.go"], title="PACE-allowance-race fix")[0])
-        # A longer ID or another issue's stem is not the row.
-        self.assertFalse(run(["broker/voice/v.go"], title="PACE-allowance-race-2: x")[0])
-        self.assertFalse(run(["broker/voice/v.go"], branch="pkg/16380-x")[0])
-        self.assertFalse(run(["broker/voice/v.go"], branch="claude/pkg/1638-x")[0])
+    def test_exempt_pr_line(self):  # G1-freeze-b
+        self.assertTrue(run(["broker/voice/v.go"], pr=1500, created=AFTER)[0])
+        self.assertFalse(run(["broker/voice/v.go"], pr=1501, created=AFTER)[0])
+
+    def test_failure_says_how_to_route_in_flight_work(self):  # G1-freeze-b
+        ok, msg = run(["broker/voice/v.go"], pr=1501, created=AFTER)
+        text = "\n".join(msg)
+        self.assertFalse(ok)
+        self.assertIn("`exempt-pr 1501`", text)
+        self.assertIn("a plain Re-run replays the old event", text)
+        self.assertIn("fail=0 xfail=0 blocked=0", text)
 
     def test_records_only_and_empty_changes_pass(self):  # G1-freeze-c
-        ok, msg = run(["reviews/l3/pr9.md", "BOARD.md", "decisions/D-200.md"], list_text="freeze on\n")
+        ok, msg = run(["reviews/l3/pr9.md", "BOARD.md", "decisions/D-200.md"], list_text=ON)
         self.assertTrue(ok, msg)
-        self.assertTrue(run([""], list_text="freeze on\n")[0])
+        self.assertTrue(run([""], list_text=ON)[0])
         # A record directory's non-Markdown file is not a record.
-        self.assertFalse(run(["reviews/x.py"], list_text="freeze on\n")[0])
+        self.assertFalse(run(["reviews/x.py"], list_text=ON)[0])
 
     def test_switch_off_passes_everything(self):  # G1-freeze-d
         self.assertTrue(run(["broker/voice/v.go"], list_text=SMALL.replace("freeze on", "freeze off"))[0])
 
     def test_unreadable_lists_fail_closed(self):  # G1-freeze-e
-        for bad in ("allow x/\n", "freeze on\nfreeze off\n", "freeze maybe\n",
-                    "freeze on\nallow ../x\n", "freeze on\nallow /etc/\n", "freeze on\nexempt 4\n",
-                    "freeze on\nallow broker/\nfrozen-import broker/loops/\n",
-                    "freeze on\nfrozen-import broker/loops\n"):
+        for bad in ("allow x/\n", ON + "freeze off\n", "freeze maybe\n" + S,
+                    ON + "allow ../x\n", ON + "allow /etc/\n", ON + "exempt 4\n",
+                    ON + "allow broker/\nfrozen-import broker/loops/\n",
+                    ON + "frozen-import broker/loops\n", "freeze on\n",
+                    ON + S, "freeze on\nsince 2026-10-14\n", "freeze on\nsince 2026-10-14T19:55:00+01:00\n",
+                    ON + "exempt-pr x\n", ON + "exempt-pr\n"):
             with self.assertRaises(g.ListError, msg=bad):
                 run(["x"], list_text=bad)
-        for bad in ("pr x\n", "issue 4\n", "issue 4 bad;id\n"):
-            with self.assertRaises(g.ListError, msg=bad):
-                run(["x"], exempt=bad)
+        with self.assertRaises(g.ListError):
+            run(["x"], created="yesterday")
 
     def test_cli_on_a_git_range(self):  # G1-freeze-a, -b, -e
         if not shutil.which("git"):
@@ -113,8 +124,8 @@ class CheckTest(unittest.TestCase):
             try:
                 with _quiet():
                     self.assertEqual(g.main(["--git", "HEAD~1", "HEAD"]), 1)
-                    self.assertEqual(g.main(["--git", "HEAD~1", "HEAD", "--pr-branch", "pkg/1638-x"]),
-                                     0 if "issue 1638 " in EXEMPT else 1)
+                    self.assertEqual(g.main(["--git", "HEAD~1", "HEAD", "--pr-created", "2000-01-01T00:00:00Z"]), 0)
+                    self.assertEqual(g.main(["--git", "HEAD~1", "HEAD", "--pr-created", "nonsense"]), 2)
                     self.assertEqual(g.main(["--git", "HEAD~1", "nosuchref"]), 2)
             finally:
                 os.chdir(cwd)
@@ -130,43 +141,14 @@ class _quiet:
         sys.stdout, sys.stderr = self.out, self.err
 
 
-class SnapshotTest(unittest.TestCase):
-    def test_snapshot_lists_open_prs_and_building_rows(self):  # G1-freeze-b
-        def fetch(endpoint):
-            if "/pulls?" in endpoint:
-                return [{"number": 12}, {"number": 3}]
-            return [
-                {"number": 40, "title": "CTX-slice: SPEC slicer"},
-                {"number": 41, "title": "PR as issue", "pull_request": {}},
-                {"number": 42, "title": "no id here"},
-            ]
-        text = g.snapshot(fetch)
-        prs, issues = g.parse_exempt(text)
-        self.assertEqual(prs, {3, 12})
-        self.assertEqual(issues, {40: "CTX-slice"})
-
-    def test_gh_pages_reads_every_page(self):
-        calls = []
-
-        def fake(argv, **kw):
-            calls.append(argv)
-            n = 100 if len(calls) == 1 else 7
-            return subprocess.CompletedProcess(argv, 0, stdout=str(list(range(n))))
-        self.assertEqual(len(g.gh_pages("repos/o/r/pulls?state=open", run=fake)), 107)
-        self.assertEqual(calls[1][-1], "repos/o/r/pulls?state=open&per_page=100&page=2")
-        self.assertNotIn("--paginate", sum(calls, []))
-
-
 class ListTest(unittest.TestCase):
-    def test_checked_in_lists_parse_and_freeze_is_on(self):  # G1-freeze-d, -e
-        freeze, allow, frozen = g.parse_list(LIST)
-        self.assertTrue(freeze)
-        g.parse_exempt(EXEMPT)
+    def test_checked_in_list_parses(self):  # G1-freeze-d, -e
+        g.parse_list(LIST)
         # The switch is one line, so lifting the freeze is a one-line diff.
-        self.assertEqual([l for l in LIST.splitlines() if l.startswith("freeze")], ["freeze on"])
+        self.assertEqual(len([l for l in LIST.splitlines() if l.startswith("freeze ")]), 1)
 
     def test_every_entry_exists(self):  # G1-freeze-f
-        _, allow, frozen = g.parse_list(LIST)
+        _, _, allow, frozen, _ = g.parse_list(LIST)
         # broker/provagent/ is listed ahead of #1314 (CAP-11-plan), which creates it.
         new = {"broker/provagent/"}
         for e in allow + frozen:
@@ -196,7 +178,7 @@ class ListTest(unittest.TestCase):
                              capture_output=True, text=True).stdout.strip()
         out = subprocess.run([go, "list", "-deps", *[f"./cmd/{b}" for b in G1_BINARIES]],
                              cwd=broker, check=True, capture_output=True, text=True).stdout
-        _, allow, frozen = g.parse_list(LIST)
+        _, _, allow, frozen, _ = g.parse_list(LIST)
         missing = []
         for pkg in out.split():
             if pkg.startswith(mod + "/"):

@@ -2,7 +2,14 @@
 # Read by tools/g1_scope.py; the g1-freeze workflow uses the base commit's copy.
 #
 #   freeze on|off       the single switch. Lift the freeze with a PR that changes it to
-#                       `off` and cites the passing #1688 QEMU run.
+#                       `off` and cites a #1688 QEMU run whose e2e DONE line reads
+#                       fail=0 xfail=0 blocked=0 (guest-task and phone control included).
+#   since TIME          when the freeze began (UTC, 2026-10-14T19:55:00Z form). A PR opened
+#                       earlier passes (Mark 2026-10-14: "let current PRs finish"); the
+#                       time comes from the pull_request event, which the author cannot set.
+#                       The push that merges #1687 sets it to that push's time.
+#   exempt-pr N         PR N passes: an amend for work already under way that the time rule
+#                       misses (a split or rebuild of a row in flight when the freeze began).
 #   allow PATH          a PR may touch PATH: a trailing "/" means everything below it,
 #                       otherwise the one file.
 #   frozen-import DIR/  a broker package G1 binaries import but the list freezes anyway
@@ -24,6 +31,7 @@
 # Grok, Muse and Claude plan routes (#1378-#1380) freeze with their rows.
 
 freeze on
+since 2026-10-14T19:55:00Z
 
 # Project machinery and records.
 allow .claude/

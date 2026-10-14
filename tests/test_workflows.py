@@ -109,12 +109,14 @@ class WorkflowTest(unittest.TestCase):
 
     def test_g1_freeze_runs_only_the_base_copy(self):
         # G1-freeze (#1687): the same shape as the lane gate, so a PR cannot widen the G1
-        # list, flip its switch or exempt itself; the base's lists decide.
+        # list, flip its switch or exempt itself; the base's list decides.
         self.assert_runs_only_the_base_copy(
             "g1-freeze.yml",
             'python3 -I tools/g1_scope.py --git "$BASE_SHA" "$HEAD_SHA" --pr "$PR_NUMBER" '
-            '--pr-branch "$PR_BRANCH" --pr-title "$PR_TITLE"')
+            '--pr-created "$PR_CREATED"')
         text = (WORKFLOWS / "g1-freeze.yml").read_text()
+        # The opening time comes from the event, which the PR author cannot set.
+        self.assertIn("PR_CREATED: ${{ github.event.pull_request.created_at }}", text)
         # The only fail-open is a base that predates the tool.
         self.assertIn('if [ ! -f tools/g1_scope.py ]; then echo "g1 freeze: not active on this base"; exit 0; fi', text)
         self.assertEqual(text.count("exit 0"), 1)
