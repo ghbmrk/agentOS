@@ -328,24 +328,27 @@ class TreeCheckTest(unittest.TestCase):
         self.assertEqual(check.violations(self.root), [])
 
     # REQ: DEV-2, CH-9
-    def test_network_links_are_live_unless_to_dev_null(self):
-        # A link to a real .network file runs it. The check takes only a link to /dev/null as a mask:
-        # networkd skips some other links too, and refusing those errs safe.
+    def test_network_links_are_resolved_in_the_image(self):
+        # #1508: networkd follows a link on the box, inside the image: a link to a real .network file
+        # runs it, and one that reads as nothing there (an empty file, /dev/null) masks it. A link
+        # into what the box mounts at boot (/dev other than /dev/null, /run, /tmp), or one that
+        # only resolves on the build host, is refused.
         real = write(self.root, "usr/lib/agentos/80-x.network", DISTRO_NETWORKS["80-container-ve.network"])
+        write(self.root, "usr/lib/agentos/empty", "")
         link = self.root / "etc/systemd/network/80-x.network"
         link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(real)
-        self.assertIn("80-x.network: live", " ".join(check.violations(self.root)))
-        link.unlink()
-        empty = write(self.root, "usr/lib/agentos/empty", "")
-        for target in (str(empty), "/dev/zero", "/dev/null/../null", "../../../dev/null"):
+        for target, live in (("/usr/lib/agentos/80-x.network", True), ("../../../usr/lib/agentos/80-x.network", True),
+                             (str(real), True), ("/dev/zero", True), ("/dev/null/../null", True),
+                             ("/usr/lib/agentos/empty", False), ("../../../dev/null", False), ("/dev/null", False),
+                             ("/usr/lib/agentos/missing", False)):
             with self.subTest(target):
                 link.symlink_to(target)
-                self.assertFalse(check.masked(link))
-                self.assertIn("80-x.network: live", " ".join(check.violations(self.root)))
+                v = " ".join(check.violations(self.root))
+                if live:
+                    self.assertIn("80-x.network: live", v)
+                else:
+                    self.assertEqual(check.violations(self.root), [])
                 link.unlink()
-        link.symlink_to("/dev/null")
-        self.assertTrue(check.masked(link))
 
     # REQ: DEV-2, CH-9
     def test_sysctl_forwarding_stays_off(self):
@@ -370,6 +373,8 @@ class TreeCheckTest(unittest.TestCase):
                      "-/net/ipv4/conf/all/forwarding=1", "- /net/ipv4/conf/all/forwarding=1",
                      "/net/ipv*/conf/*/forwarding=1", "net..ipv4..ip_forward=1", "net/./ipv4/ip_forward=1",
                      "/../net/ipv4/ip_forward=1",
+                     # A trailing "." component goes too (path_simplify), so this writes ip_forward.
+                     "net/ipv4/ip_forward/.=1",
                      # A glob key's glob() also takes \\ escapes and {a,b} alternatives.
                      "{net,zz}/ipv4/ip_forwar[d]=1", "net/ipv4/conf/al?/{forwarding,zz}=1",
                      "n\\et/ipv4/ip_forwar?=1", "ne?/ipv4/ip_forwar\\d=1"):
@@ -1545,6 +1550,357 @@ def settings(unit):
 def arg(words, name):
     i = words.index("-" + name)
     return words[i + 1]
+
+
+def write_b(root, rel, data):
+    # A file whose name may hold any bytes (os.fsencode and back).
+    p = os.path.join(os.fsencode(str(root)), rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "wb") as f:
+        f.write(data)
+    return p
+
+
+def link(root, rel, target):
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.symlink_to(target)
+    return p
+
+
+class ConfFilesTest(unittest.TestCase):
+    """#1508 (B2, R2, R3, R5): the tree check reads the files systemd 257.13 reads, in its order,
+    through the image: conf_files is conf_files_list_strv, main_conf is
+    config_parse_standard_file_with_dropins, and config_lines is config_parse. Each case here passed
+    the check before and is a tree whose box forwards, dumps or answers on the LAN."""
+    # REQ: DEV-2, CH-9, C13
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        nodump(self.root)
+        radio(self.root)
+        uplink(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def v(self):
+        return " | ".join(check.violations(self.root))
+
+    def test_clean_tree_passes(self):
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_etc_sysctl_conf_is_read_only_through_sysctl_d(self):
+        # systemd-sysctl never lists /etc/sysctl.conf; Debian's 99-sysctl.conf link reads it in
+        # sysctl.d order, so a file sorting after the link wins.
+        write(self.root, "etc/sysctl.d/90-x.conf", "net.ipv4.ip_forward=1\n")
+        write(self.root, "etc/sysctl.conf", "net.ipv4.ip_forward=0\n")
+        self.assertIn("forwarding must stay 0", self.v())
+        (self.root / "etc/sysctl.d/90-x.conf").unlink()
+        link(self.root, "etc/sysctl.d/99-sysctl.conf", "../sysctl.conf")
+        write(self.root, "etc/sysctl.d/99-zz.conf", "net.ipv4.ip_forward=1\n")
+        self.assertIn("forwarding must stay 0", self.v())
+        self.assertEqual([f.rel for f in check.sysctl_files(self.root)][-2:],
+                         ["etc/sysctl.d/99-sysctl.conf", "etc/sysctl.d/99-zz.conf"])
+        # Read through the link, sysctl.conf does reset a key set before it.
+        (self.root / "etc/sysctl.d/99-zz.conf").unlink()
+        write(self.root, "etc/sysctl.d/90-x.conf", "net.ipv4.ip_forward=1\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_hidden_and_backup_names_are_skipped(self):
+        # FOREACH_DIRENT skips hidden names, so ".b.conf" never resets "+a.conf".
+        write(self.root, "etc/sysctl.d/+a.conf", "net.ipv4.ip_forward=1\n")
+        write(self.root, "etc/sysctl.d/.b.conf", "net.ipv4.ip_forward=0\n")
+        self.assertIn("forwarding must stay 0", self.v())
+        # The same holds for every reader that lists files this way (with the image's own file
+        # out of the way, so the two files decide).
+        for rel, text, needle, base in (
+                ("etc/systemd/resolved.conf.d/.zz.conf", "[Resolve]\nLLMNR=no\nMulticastDNS=no\n", "LLMNR", RESOLVED_REL),
+                ("etc/systemd/coredump.conf.d/.zz.conf", "[Coredump]\nStorage=none\n", "Storage", NODUMP[0]),
+                ("etc/systemd/system/agentosd.service.d/.zz.conf", "[Service]\nLimitCORE=0\n", "LimitCORE", None)):
+            with self.subTest(rel):
+                bad = {"LLMNR": "[Resolve]\nLLMNR=yes\n", "Storage": "[Coredump]\nStorage=external\n",
+                       "LimitCORE": "[Service]\nLimitCORE=infinity\n"}[needle]
+                saved = base and (self.root / base).read_text()
+                if base:
+                    (self.root / base).unlink()
+                a = write(self.root, rel.rsplit("/", 1)[0] + "/+a.conf", bad)
+                b = write(self.root, rel, text)
+                self.assertIn(needle, self.v())
+                a.unlink()
+                b.unlink()
+                if base:
+                    write(self.root, base, saved)
+        # kmod skips hidden names too: a hidden file's install line is not the first one.
+        (self.root / BT_BLOCK).unlink()
+        write(self.root, "usr/lib/modprobe.d/.0.conf", "install btusb /bin/false\ninstall btmtk /bin/false\n")
+        write(self.root, "usr/lib/modprobe.d/z.conf", "install btusb /bin/true\ninstall btmtk /bin/true\n")
+        self.assertIn("btusb is not blocked", self.v())
+
+    def test_names_sort_as_bytes(self):
+        # path_compare_filename is strcmp: \xee\x80\x80 sorts before \xff, while Python sorts the
+        # surrogate-escaped \xff (U+DCFF) before U+E000.
+        write_b(self.root, b"etc/sysctl.d/\xff.conf", b"net.ipv4.ip_forward=1\n")
+        write_b(self.root, b"etc/sysctl.d/\xee\x80\x80.conf", b"net.ipv4.ip_forward=0\n")
+        self.assertIn("forwarding must stay 0", self.v())
+        self.assertEqual([os.fsencode(f.name) for f in check.sysctl_files(self.root)][-2:],
+                         [b"\xee\x80\x80.conf", b"\xff.conf"])
+        os.unlink(os.path.join(os.fsencode(str(self.root)), b"etc/sysctl.d/\xff.conf"))
+        os.unlink(os.path.join(os.fsencode(str(self.root)), b"etc/sysctl.d/\xee\x80\x80.conf"))
+        write_b(self.root, b"etc/systemd/resolved.conf.d/\xff.conf", b"[Resolve]\nLLMNR=yes\n")
+        write_b(self.root, b"etc/systemd/resolved.conf.d/\xee\x80\x80.conf", b"[Resolve]\nLLMNR=no\n")
+        self.assertIn("LLMNR", self.v())
+
+    def test_links_resolve_inside_the_image(self):
+        # R3: an absolute link is followed from the image's root, not the build host's. Host and
+        # tree both have /etc/passwd; the tree's says to forward.
+        write(self.root, "etc/passwd", "net.ipv4.ip_forward=1\n")
+        f = link(self.root, "etc/sysctl.d/99-x.conf", "/etc/passwd")
+        self.assertIn("forwarding must stay 0", self.v())
+        f.unlink()
+        # The review's case: the image's own file, through a link, under a mask of its name.
+        write(self.root, "usr/lib/sysctl.d/50-pid-max.conf", "net.ipv4.ip_forward=1\n")
+        link(self.root, "etc/sysctl.d/50-pid-max.conf", "/dev/null")
+        self.assertEqual(check.violations(self.root), [])
+        link(self.root, "etc/sysctl.d/99-x.conf", "/usr/lib/sysctl.d/50-pid-max.conf")
+        self.assertIn("forwarding must stay 0", self.v())
+        (self.root / "etc/sysctl.d/99-x.conf").unlink()
+        # A linked directory is resolved in the image too.
+        write(self.root, "usr/lib/agentos/sd/90-x.conf", "net.ipv4.ip_forward=1\n")
+        link(self.root, "usr/local/lib/sysctl.d", "/usr/lib/agentos/sd")
+        self.assertIn("forwarding must stay 0", self.v())
+        (self.root / "usr/local/lib/sysctl.d").unlink()
+        write(self.root, "etc/passwd", "[Resolve]\nLLMNR=yes\n")
+        link(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "/etc/passwd")
+        self.assertIn("LLMNR", self.v())
+        (self.root / "etc/systemd/resolved.conf.d/90-x.conf").unlink()
+        write(self.root, "usr/lib/agentos/nd/50-x.conf", "[DHCPv4]\nSendHostname=yes\n")
+        link(self.root, "etc/systemd/network/20-agentos-uplink.network.d", "/usr/lib/agentos/nd")
+        self.assertIn("networkd drop-in", self.v())
+
+    def test_split_usr_lib_and_run_are_not_read(self):
+        # systemd 257 does not search a split-/usr /lib, and /run is a tmpfs on the box: a reset
+        # there is never read, and the tree must not hold one.
+        write(self.root, "usr/lib/sysctl.d/90-x.conf", "net.ipv4.ip_forward=1\n")
+        for rel in ("lib/sysctl.d/99-reset.conf", "run/sysctl.d/99-reset.conf"):
+            with self.subTest(rel):
+                f = write(self.root, rel, "net.ipv4.ip_forward=0\n")
+                v = self.v()
+                self.assertIn("forwarding must stay 0", v)
+                self.assertIn(rel + ":", v)
+                f.unlink()
+        # A merged-/usr /lib (a link to usr/lib) is the same directory, not a stray one.
+        (self.root / "usr/lib/sysctl.d/90-x.conf").unlink()
+        shutil.rmtree(self.root / "lib")
+        link(self.root, "lib", "usr/lib")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_only_the_first_main_file_is_read(self):
+        # config_parse_many_files reads the first resolved.conf it finds (/etc before /usr/lib),
+        # not both.
+        (self.root / RESOLVED_REL).unlink()
+        write(self.root, "usr/lib/systemd/resolved.conf", "[Resolve]\nLLMNR=no\nMulticastDNS=no\n")
+        self.assertEqual(check.violations(self.root), [])
+        write(self.root, "etc/systemd/resolved.conf", "[Resolve]\n#LLMNR=yes\n")
+        self.assertIn("LLMNR is None", self.v())
+        # A link to /dev/null is a main file that reads as nothing; a dangling link is not found.
+        (self.root / "etc/systemd/resolved.conf").unlink()
+        link(self.root, "etc/systemd/resolved.conf", "/dev/null")
+        self.assertIn("LLMNR is None", self.v())
+        (self.root / "etc/systemd/resolved.conf").unlink()
+        link(self.root, "etc/systemd/resolved.conf", "/usr/lib/agentos/missing")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_unit_dropins_are_the_ones_systemd_applies(self):
+        # dropin.c: NAME.d, each "-" prefix's .d, and service.d, in every unit directory, including
+        # system.control and system.attached; a name in an earlier directory list entry wins.
+        for rel in ("etc/systemd/system/agentos-.service.d/zz.conf",
+                    "etc/systemd/system.control/agentosd.service.d/zz.conf",
+                    "etc/systemd/system.attached/agentosd.service.d/zz.conf",
+                    "usr/local/lib/systemd/system/service.d/zz.conf"):
+            with self.subTest(rel):
+                f = write(self.root, rel, "[Service]\nLimitCORE=infinity\n")
+                self.assertIn("LimitCORE is infinity", self.v())
+                f.unlink()
+        # Same name: /usr/lib's agentosd.service.d comes before /etc's service.d in the list.
+        write(self.root, "usr/lib/systemd/system/agentosd.service.d/10-x.conf", "[Service]\nLimitCORE=infinity\n")
+        write(self.root, "etc/systemd/system/service.d/10-x.conf", "[Service]\nLimitCORE=0\n")
+        self.assertIn("agentosd.service: LimitCORE is infinity", self.v())
+        (self.root / "usr/lib/systemd/system/agentosd.service.d/10-x.conf").unlink()
+        (self.root / "etc/systemd/system/service.d/10-x.conf").unlink()
+        # The first unit directory with the name holds the unit; an alias is refused.
+        write(self.root, "etc/systemd/system.control/agentosd.service", "[Service]\nExecStart=/x\n")
+        self.assertIn("agentosd.service: LimitCORE is None", self.v())
+        (self.root / "etc/systemd/system.control/agentosd.service").unlink()
+        link(self.root, "etc/systemd/system/x.service", "/usr/lib/systemd/system/agentosd.service")
+        self.assertIn("an alias of agentosd.service", self.v())
+        self.assertEqual(check.unit_dropin_names("agentos-egress.service"),
+                         ["agentos-egress.service", "agentos-.service"])
+        self.assertEqual(check.unit_dropin_names("a-b-c.service"), ["a-b-c.service", "a-b-.service", "a-.service"])
+        self.assertEqual(check.unit_dropin_names("agentosd.service"), ["agentosd.service"])
+
+    def test_config_parse_stops_where_systemd_stops(self):
+        # Where config_parse fails, systemd reads no further (for resolved, networkd, coredump and
+        # system.conf, no further file either), so a later "good" value must not count.
+        cases = (
+            ("etc/systemd/coredump.conf.d/90-a.conf", "[Coredump]\nStorage=external\n",
+             "etc/systemd/coredump.conf.d/91-b.conf", "[Coredump\n", "Storage"),
+            ("etc/systemd/coredump.conf.d/90-a.conf", "[Coredump]\nStorage=external\n",
+             "etc/systemd/coredump.conf.d/91-b.conf", "[Coredump]\n#" + "x" * ((1 << 20) - 1) + "\nStorage=none\n", "Storage"),
+            ("etc/systemd/coredump.conf.d/90-a.conf", "[Coredump]\nStorage=external\n",
+             "etc/systemd/coredump.conf.d/91-b.conf", "[Coredump]\nX=\xff\nStorage=none\n", "Storage"),
+            ("etc/systemd/resolved.conf.d/90-a.conf", "[Resolve]\nLLMNR=yes\n",
+             "etc/systemd/resolved.conf.d/91-b.conf", "[Res\"olve]\nLLMNR=no\n", "LLMNR"),
+        )
+        for rel_a, text_a, rel_b, text_b, needle in cases:
+            with self.subTest(rel_b, text=text_b[:20]):
+                a = write(self.root, rel_a, text_a)
+                b = self.root / rel_b
+                b.write_bytes(text_b.encode("latin-1") if "\xff" in text_b else text_b.encode())
+                self.assertIn(needle, self.v())
+                a.unlink()
+                b.unlink()
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_config_lines_split_as_systemd_splits_them(self):
+        # One BOM is dropped; a backslash continues a line only when it is the line's last byte
+        # and unescaped; a comment inside a continuation is skipped.
+        for rel, text in (("etc/systemd/system/agentosd.service.d/x.conf", "\ufeff[Service]\nLimitCORE=infinity\n"),
+                          ("etc/systemd/system/agentosd.service.d/x.conf", "[Service]\nX=a\\ \nLimitCORE=infinity\n")):
+            with self.subTest(text):
+                f = write(self.root, rel, text)
+                self.assertIn("LimitCORE is infinity", self.v())
+                f.unlink()
+        lines = check.config_lines
+        self.assertEqual(lines(b"\xef\xbb\xbf[Service]\nLimitCORE=infinity\n"), [("Service", "LimitCORE", "infinity")])
+        self.assertEqual(lines(b"[Service]\nX=a\\ \nLimitCORE=infinity\n"),
+                         [("Service", "X", "a\\"), ("Service", "LimitCORE", "infinity")])
+        self.assertEqual(lines(b"[Service]\nX=a\\\\\nLimitCORE=infinity"),
+                         [("Service", "X", "a\\\\"), ("Service", "LimitCORE", "infinity")])
+        self.assertEqual(lines(b"[Service]\nX=a\\\n# c\nb\nLimitCORE=0\n"),
+                         [("Service", "X", "a b"), ("Service", "LimitCORE", "0")])
+        self.assertEqual(lines(b"[Service]\n\x0bLimitCORE=0\n"), [("Service", "\x0bLimitCORE", "0")])
+
+    def test_long_sysctl_line_stops_the_file(self):
+        # R2: read_line fails on a line of LONG_LINE_MAX bytes or more, and systemd-sysctl applies
+        # nothing after it in that file (LONG_LINE_MAX is 1 MiB).
+        n = 1 << 20
+        f = write(self.root, "etc/sysctl.d/99-x.conf", "net.ipv4.ip_forward=1\n#" + "x" * (n - 1) + "\nnet.ipv4.ip_forward=0\n")
+        v = self.v()
+        self.assertIn("forwarding must stay 0", v)
+        self.assertIn("99-x.conf: line 2 is 1 MiB or longer", v)
+        f.write_text("net.ipv4.ip_forward=1\n#" + "x" * (n - 2) + "\nnet.ipv4.ip_forward=0\n")
+        self.assertEqual(check.violations(self.root), [])
+        # The uplink and networkd/resolved files are refused the same way.
+        f.unlink()
+        f = write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "#" + "x" * n + "\n")
+        self.assertIn("90-x.conf: line 1 is 1 MiB or longer", self.v())
+
+    def test_unreadable_sysctl_file_is_refused(self):
+        # R5: a sysctl.d entry systemd-sysctl cannot read (a directory, a link into what the box
+        # mounts at boot, or, for a non-root build, a file without read permission) never passes.
+        d = self.root / "etc/sysctl.d/99-x.conf"
+        d.mkdir(parents=True)
+        self.assertIn("etc/sysctl.d/99-x.conf: unreadable (a directory)", self.v())
+        d.rmdir()
+        link(self.root, "etc/sysctl.d/99-x.conf", "/run/agentos/x.conf")
+        self.assertIn("etc/sysctl.d/99-x.conf: unreadable (it resolves to /run/agentos/x.conf", self.v())
+        d.unlink()
+        if os.geteuid() != 0:
+            f = write(self.root, "etc/sysctl.d/99-x.conf", "net.ipv4.ip_forward=1\n", mode=0o000)
+            self.assertIn("etc/sysctl.d/99-x.conf: unreadable", self.v())
+            f.chmod(0o644)
+        # Unreadable through the same code path, whoever runs it.
+        with unittest.mock.patch.object(check.Conf, "read_bytes", side_effect=PermissionError(13, "Permission denied")):
+            self.assertIn("99-agentos-nodump.conf: unreadable (Permission denied)",
+                          " ".join(check.sysctl_byte_violations(self.root)))
+
+
+# systemd-analyze cat-config lists files with the same conf_files_list_strv (its --root chases
+# directories inside the tree, though it reads a listed file's absolute link on the host). It stops
+# at the first entry it cannot cat, so each tree has at most one such entry, sorted last.
+DIFF_TREES = (
+    {  # names: hidden, backups, suffixes, case and byte order, override by name across directories
+        b"usr/lib/sysctl.d/10-a.conf": b"a.b=1\n", b"usr/local/lib/sysctl.d/10-a.conf": b"a.b=2\n",
+        b"etc/sysctl.d/10-a.conf": "/dev/null", b"usr/lib/sysctl.d/20-b.conf": b"a.b=3\n",
+        b"etc/sysctl.d/20-b.conf": b"", b"etc/sysctl.d/.hidden.conf": b"a.b=4\n",
+        b"etc/sysctl.d/30.conf~": b"a.b=5\n", b"etc/sysctl.d/31.conf.dpkg-old": b"x\n",
+        b"etc/sysctl.d/32.CONF": b"x\n", b"etc/sysctl.d/33.conf.bak": b"x\n", b"etc/sysctl.d/A.conf": b"x\n",
+        b"etc/sysctl.d/a.conf": b"x\n", b"etc/sysctl.d/+a.conf": b"x\n", b"etc/sysctl.d/-a.conf": b"x\n",
+        b"etc/sysctl.d/\xff.conf": b"x\n", b"etc/sysctl.d/\xee\x80\x80.conf": b"x\n",
+        b"etc/sysctl.d/\xc3\xa9.conf": b"x\n", b"etc/sysctl.d/a b.conf": b"x\n", b"etc/sysctl.d/a.conf.conf": b"x\n",
+        b"etc/sysctl.d/1-a.conf": b"x\n", b"etc/sysctl.d/10.conf": b"x\n", b"usr/lib/sysctl.d/~x.conf": b"x\n",
+        b"lib/sysctl.d/05-lib.conf": b"x\n", b"etc/sysctl.conf": b"x\n",
+        b"etc/sysctl.d/99-sysctl.conf": "../sysctl.conf",
+        b"etc/systemd/resolved.conf": b"[Resolve]\n", b"usr/lib/systemd/resolved.conf": b"[Resolve]\n",
+        b"usr/lib/systemd/resolved.conf.d/50-a.conf": b"x\n", b"etc/systemd/resolved.conf.d/50-a.conf": b"x\n",
+        b"etc/systemd/resolved.conf.d/.h.conf": b"x\n", b"usr/local/lib/systemd/resolved.conf.d/\xff.conf": b"x\n",
+        b"usr/local/lib/systemd/resolved.conf.d/A.conf": b"x\n",
+        b"usr/lib/systemd/networkd.conf": b"[Network]\n", b"usr/lib/systemd/networkd.conf.d/z.conf": b"x\n",
+        b"usr/local/lib/systemd/coredump.conf": b"[Coredump]\n", b"usr/lib/systemd/coredump.conf": b"[Coredump]\n",
+        b"etc/systemd/system.conf.d/a.conf": b"x\n", b"etc/systemd/system.conf.d/a.conf~": b"x\n",
+    },
+    {  # linked directories, relative and absolute, resolved inside the tree; a dangling entry last
+        b"usr/share/sd/10-a.conf": b"x\n", b"usr/share/sd/.b.conf": b"x\n",
+        b"etc/sysctl.d": "../usr/share/sd", b"opt/x/10-a.conf": b"x\n", b"opt/x/20-c.conf": b"x\n",
+        b"usr/local/lib/sysctl.d": "/opt/x", b"usr/lib/sysctl.d/30-d.conf": "../../../opt/x/20-c.conf",
+        b"usr/lib/sysctl.d/zz-dangling.conf": "/nonexistent",
+        b"opt/r/50-r.conf": b"x\n", b"etc/systemd/resolved.conf.d": "/opt/r",
+        b"usr/lib/systemd/resolved.conf": b"x\n", b"usr/lib/systemd/resolved.conf.d/50-r.conf": b"y\n",
+        b"etc/systemd/coredump.conf": "/dev/null", b"usr/lib/systemd/coredump.conf": b"x\n",
+    },
+    {  # a directory entry sorts last and takes its name
+        b"usr/lib/sysctl.d/90-a.conf": b"x\n", b"usr/lib/sysctl.d/zz.conf": b"x\n",
+        b"etc/sysctl.d/zz.conf/": None, b"usr/lib/systemd/system.conf": b"x\n",
+    },
+)
+
+
+@unittest.skipUnless(shutil.which("systemd-analyze"), "systemd-analyze is not installed; this test is skipped without it")
+class SystemdDiffTest(unittest.TestCase):
+    """#1508: conf_files and main_conf against systemd's own listing, `systemd-analyze cat-config
+    --root=TREE`, over trees built to split them (hidden and backup names, byte order, override and
+    masking across directories, linked directories, a split-/usr /lib). Skipped only when
+    systemd-analyze is absent; GitHub's ubuntu-latest runners have it (systemd 255, whose
+    conf-files.c listing is the same as 257.13's)."""
+    # REQ: DEV-2, CH-9, C13
+
+    FAMILIES = (("sysctl.d", check.sysctl_files),
+                ("systemd/resolved.conf", lambda r: check.main_conf(r, "resolved.conf")),
+                ("systemd/networkd.conf", lambda r: check.main_conf(r, "networkd.conf")),
+                ("systemd/coredump.conf", lambda r: check.main_conf(r, "coredump.conf")),
+                ("systemd/system.conf", lambda r: check.main_conf(r, "system.conf")))
+
+    def systemd_list(self, root, name):
+        p = subprocess.run(["systemd-analyze", "cat-config", "--no-pager", "--root=" + str(root), name],
+                           capture_output=True, timeout=60)
+        prefix = os.fsencode(str(root)) + b"/"
+        out = [ln[2 + len(prefix):] for ln in p.stdout.split(b"\n") if ln.startswith(b"# " + prefix)]
+        m = re.search(rb"Failed to cat " + re.escape(prefix) + rb"(.*?): ", p.stderr)
+        if m and out[-1:] != [m.group(1)]:
+            out.append(m.group(1))
+        return out
+
+    def test_file_lists_match_systemd(self):
+        for i, tree in enumerate(DIFF_TREES):
+            with tempfile.TemporaryDirectory() as tmp:
+                broot = os.fsencode(tmp)
+                for rel, body in sorted(tree.items(), key=lambda kv: isinstance(kv[1], str)):
+                    p = os.path.join(broot, rel)
+                    os.makedirs(os.path.dirname(p.rstrip(b"/")), exist_ok=True)
+                    if body is None:
+                        os.mkdir(p)
+                    elif isinstance(body, str):
+                        os.symlink(body, p)
+                    else:
+                        with open(p, "wb") as f:
+                            f.write(body)
+                for name, ours in self.FAMILIES:
+                    with self.subTest(tree=i, family=name):
+                        mine = [os.fsencode(f.rel) for f in ours(pathlib.Path(tmp))]
+                        self.assertEqual(mine, self.systemd_list(tmp, name))
 
 
 class UplinkTest(unittest.TestCase):
