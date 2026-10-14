@@ -615,3 +615,41 @@ func TestUsage(t *testing.T) {
 		t.Fatal("prep without flags ran")
 	}
 }
+
+// The sticker's two codes share one format and one style, so each carries
+// its own label right above it: "Wi-Fi password" over the setup network's
+// password and "Claim code" over the claim code. An owner who types the
+// password into /claim spends one of the claim's shared tries (K9).
+// REQ: HW-10, CH-12, A1
+func TestStickerLabelsItsCodes(t *testing.T) {
+	out := t.TempDir()
+	net := claim.SetupNet{SSID: "agentos-setup-test", Password: "PWPW-PWPW-PWPW-PWPW"}
+	code := "CCCC-CCCC-CCCC-CCCC"
+	if err := writeSticker(out, code, net); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(out, "sticker.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	// Each code's nearest label above it is its own.
+	labelOver := func(value string) string {
+		i := strings.Index(html, value)
+		if i < 0 {
+			t.Fatalf("sticker.html lacks %q", value)
+		}
+		re := regexp.MustCompile(`<div class="label">([^<]*)</div>`)
+		last := ""
+		for _, m := range re.FindAllStringSubmatchIndex(html[:i], -1) {
+			last = html[m[2]:m[3]]
+		}
+		return last
+	}
+	if got := labelOver(">" + net.Password + "<"); got != "Wi-Fi password" {
+		t.Fatalf("label above the Wi-Fi password = %q, want %q", got, "Wi-Fi password")
+	}
+	if got := labelOver(">" + code + "<"); got != "Claim code" {
+		t.Fatalf("label above the claim code = %q, want %q", got, "Claim code")
+	}
+}
