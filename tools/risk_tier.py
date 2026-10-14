@@ -3,12 +3,13 @@
 
   A  the trusted core, its wiring and the packages allowed its write paths
      (broker/core/core.txt); broker packages that handle a credential, gate
-     an effect or approval, or parse owner-channel input; supply chain,
-     the image and its systemd units, the guest's build inputs, CI workflows
-     and agent permissions: L3 review on the session's model with an explicit
+     an effect or approval, or parse owner-channel input, and any broker path
+     no list names; supply chain, the image and its systemd units, the
+     guest's build inputs, CI workflows and agent permissions: L3 review on the session's model with an explicit
      threat check, plus the batched lens screen with Security; a later
      security-relevant delta needs a re-sign.
-  B  other broker and guest code, SPEC.md, and any path no rule names:
+  B  the broker packages in TIER_B_BROKER, other guest code, SPEC.md, and
+     any path no rule names:
      L3 review plus one combined lens pass in the batched screen.
   C  the explicit list in TIER_C_*: docs, briefs, reviews, decisions, spikes,
      tests, tooling outside the tier-A prefixes: L3 review and CI only.
@@ -63,23 +64,47 @@ def core_list(path=CORE_LIST):
     return core, wiring, allowed
 
 
-# broker/ packages beyond the core list that are tier A (Tier-A-narrow, #1698).
-# A package is here only if it (a) holds or handles a credential or secret,
-# (b) gates an effect or approval, or (c) parses owner-channel input; the
-# rest of broker/ is tier B. Every package core.txt names on a core, wiring
-# or allow line is A regardless and is not repeated here. Keep in step with
-# docs/OPERATING.md §3.
+# broker/ packages beyond the core and wiring lists that are tier A
+# (Tier-A-narrow, #1698). A package is here only if it (a) holds or handles a
+# credential or secret, (b) gates an effect or approval, or (c) parses
+# owner-channel input. A package that meets several criteria is filed under
+# the first, with the others noted. Every other package is in TIER_B_BROKER,
+# and a broker/ path in neither list is A, so a new package is A until it is
+# classed. Packages core.txt names on a core or wiring line are A regardless
+# and are not repeated here; a package on an allow line that meets a criterion
+# by itself is listed too, so it stays A if its allow line goes. Keep in step
+# with docs/OPERATING.md §3.
 TIER_A_BROKER = {
     # (a) a credential or secret
-    "apnet", "browser", "card", "netjoin", "pubid", "sipsign", "smsapi", "tpmseal",
+    "apnet",                      # the Owner Card's Wi-Fi password
+    "browser", "netjoin", "pubid", "tpmseal",
+    "loop7",                      # also (b): fuzz-child jail and netns; CRED-1 child env
+    "maintain",                   # also (b): attestor keys that gate security releases
+    "probecmd",                   # also (b): CRED-1 child env; findings that pause grants
+    "recovery",
     # (b) gates an effect or approval
-    "attest", "claim", "cleanroom", "clock", "digestqueue", "firstboot", "follow", "hint",
-    "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
+    "apply", "card", "claim", "cleanroom", "clock", "digestqueue", "firstboot",
+    "follow",                     # switches the update root of trust
+    "hint", "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
+    "attest",                     # bounds what public output may say (OSS-4)
+    "hostdisk",                   # HW-8a second confirmation; udev host-disk isolation
     # (c) parses owner-channel input
-    "bridgeclient", "bridgeproto", "localapi", "localsrv", "localui", "modem", "modemlink",
-    "owner",
+    "bridgeclient", "bridgeproto", "control", "localapi", "localsrv", "localui",
+    "modem", "modemlink", "owner",
+    "question",                   # the owner's texted answers
+    "sipsign", "smsapi",          # also (a)
     # wiring: every binary's main, and the core list itself
     "cmd", "core",
+}
+# broker/ packages that meet none of the three criteria: tier B.
+TIER_B_BROKER = {
+    "accel", "admission", "attention", "boxname", "budget",
+    # cgroup is B, but core vm kills machines and loop7 freezes its jail
+    # through it: a change to Kill or Freeze is reviewed with those callers.
+    "cgroup",
+    "compile", "corpus", "durable", "e2e", "events", "floor", "fold", "hostchange",
+    "loopbuild", "machprobe", "projection", "pubsend", "quota", "routerule", "skill",
+    "sockprobe", "test", "voice",
 }
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
 # Third-party source compiled into the broker: the code go.sum pins.
@@ -103,7 +128,7 @@ TIER_A_GUEST_PATHS = {
 }
 UNIT_SUFFIXES = (".service", ".socket", ".timer")
 TIER_B_FILES = {"SPEC.md"}
-TIER_B_PREFIXES = ("broker/", "guest/")
+TIER_B_PREFIXES = ("guest/",)
 # Explicit tier C. Top-level *.md other than SPEC.md and image/*.md are C by
 # rule in tier_of; everything here is checked after the tier-A rules.
 TIER_C_PREFIXES = ("docs/", "briefs/", "reviews/", "decisions/", "spikes/", "tests/", "tools/")
@@ -172,6 +197,9 @@ def tier_of(path):
         for pkg in sorted(core | wiring | allowed):
             if p.startswith("broker/" + pkg + "/"):
                 return "A", "core list: broker/" + pkg + "/"
+        # In no list: A until it is classed (Security #1700 f3).
+        if len(parts) < 3 or parts[1] not in TIER_B_BROKER:
+            return "A", "unlisted broker path"
     if parts[0] == "guest" and len(parts) == 3 and name in TIER_A_GUEST_FILES:
         return "A", "guest/*/" + name
     if p in TIER_A_GUEST_PATHS:
@@ -183,6 +211,8 @@ def tier_of(path):
             return "A", "systemd/*.conf"
     if p in TIER_B_FILES:
         return "B", p
+    if parts[0] == "broker":
+        return "B", "broker/" + parts[1] + "/"
     for pre in TIER_B_PREFIXES:
         if p.startswith(pre):
             return "B", pre

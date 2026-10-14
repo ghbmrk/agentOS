@@ -31,12 +31,13 @@ class RiskTierTest(unittest.TestCase):
             # loops is A through its core.txt allow lines.
             "broker/loops/probe.go": "A",
             "broker/loops/machine.go": "A",
-            # LOOP-7's probes meet no Tier-A-narrow criterion (#1698), so they
-            # are B; P3-4b-4b and Security #515 f4 had made them A.
-            "broker/probecmd/probecmd.go": "B",
+            # Tier-A-narrow (#1698): loop7 and probecmd build CRED-1 child
+            # environments and gate effects, so they stay A (Security #1700
+            # f1, f4); corpus and machprobe meet no criterion and are B.
+            "broker/probecmd/probecmd.go": "A",
             "broker/corpus/checks.go": "B",
             "broker/machprobe/machprobe.go": "B",
-            "broker/loop7/loop7.go": "B",
+            "broker/loop7/loop7.go": "A",
             # REQ: OP-2 (W5-Db DB-1: Begin is the single gate on digest sends).
             "broker/digestqueue/queue.go": "A",
             # REQ: OP-3 (SIM-sim L3 #727: the harness is what assures the journal).
@@ -47,7 +48,8 @@ class RiskTierTest(unittest.TestCase):
             # REQ: HW-10 (CTRL-claim-wire: first boot routes the claim and the card)
             "broker/firstboot/start.go": "A",
             "broker/attention/attention.go": "B",
-            "broker/newpkg/x.go": "B",
+            # A broker package in no list is A until it is classed.
+            "broker/newpkg/x.go": "A",
             "guest/openclaw/Dockerfile": "B",
             "guest/openclaw/src/x.ts": "B",
             "SPEC.md": "B",
@@ -205,7 +207,7 @@ class RiskTierTest(unittest.TestCase):
     def test_highest_tier_wins(self):
         tier, why = rt.tier_of_change(["docs/a.md", "broker/attention/x.go", "broker/vault/y.go"])
         self.assertEqual((tier, why), ("A", ["broker/vault/y.go"]))
-        self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/question/q.go"])[0], "B")
+        self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/budget/q.go"])[0], "B")
         self.assertEqual(rt.tier_of_change([]), ("C", []))
 
     def test_every_tier_a_package_exists(self):
@@ -223,27 +225,47 @@ class RiskTierTest(unittest.TestCase):
             "broker/tpmseal/seal.go": ("A", "broker/tpmseal/"),
             # (b) update verifies and applies signed releases.
             "broker/update/update.go": ("A", "broker/update/"),
-            # (c) smsapi serves the second line's texts to the modem bridge.
-            "broker/smsapi/smsapi.go": ("A", "broker/smsapi/"),
+            # (c) owner parses the owner's texted commands.
+            "broker/owner/owner.go": ("A", "broker/owner/"),
+            # (b) hostdisk's udev rules hide host disks from every service.
+            "broker/hostdisk/udev/59-agentos-host-disks.rules": ("A", "broker/hostdisk/"),
             # demoted: cgroup sets memory and CPU limits and gates nothing.
-            "broker/cgroup/cgroup.go": ("B", "broker/"),
+            "broker/cgroup/cgroup.go": ("B", "broker/cgroup/"),
             # core.txt packages stay A regardless, without a TIER_A_BROKER entry.
             "broker/vault/vault.go": ("A", "core list: broker/vault/"),
             # third-party source compiled into the broker stays A.
             "broker/vendor/modules.txt": ("A", "broker/vendor/"),
             "broker/third_party/go-imap/imap.go": ("A", "broker/third_party/"),
+            # a package in no list, or a file at the module root, is A.
+            "broker/newpkg/x.go": ("A", "unlisted broker path"),
+            "broker/x.go": ("A", "unlisted broker path"),
         }
         for path, want in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(rt.tier_of(path), want)
-        for pkg in ("cgroup", "corpus", "hostchange", "hostdisk", "loop7", "machprobe",
-                    "probecmd", "sockprobe"):
+        for pkg in ("cgroup", "corpus", "hostchange", "machprobe", "sockprobe"):
             with self.subTest(demoted=pkg):
-                self.assertNotIn(pkg, rt.TIER_A_BROKER)
+                self.assertIn(pkg, rt.TIER_B_BROKER)
                 self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "B")
-        # TIER_A_BROKER does not repeat what core.txt already makes A.
+        # The issue's criterion examples are listed by criterion, not only
+        # through a core.txt allow line that a refactor could remove.
+        for pkg in ("control", "apply", "recovery", "smsapi", "sipsign", "card"):
+            with self.subTest(listed=pkg):
+                self.assertIn(pkg, rt.TIER_A_BROKER)
+
+    def test_every_broker_package_is_classed_once(self):
+        # Each broker/ directory is tier A (listed or in core.txt) or in
+        # TIER_B_BROKER, never both; TIER_A_BROKER repeats no core or wiring
+        # package. A new directory fails here until it is classed.
         core, wiring, allowed = rt.core_list()
-        self.assertEqual(sorted(rt.TIER_A_BROKER & (core | wiring | allowed)), [])
+        in_core = {n.split("/")[0] for n in core | wiring | allowed}
+        a = rt.TIER_A_BROKER | in_core
+        dirs = {d.name for d in (ROOT / "broker").iterdir() if d.is_dir()}
+        dirs -= {pre.split("/")[1] for pre in rt.TIER_A_BROKER_PREFIXES}
+        self.assertEqual(sorted(dirs - a - rt.TIER_B_BROKER), [])
+        self.assertEqual(sorted(a & rt.TIER_B_BROKER), [])
+        self.assertEqual(sorted(rt.TIER_B_BROKER - dirs), [])
+        self.assertEqual(sorted(rt.TIER_A_BROKER & (core | wiring)), [])
 
     # REQ: ONB-3 (P2-2w c3: netjoin writes the home Wi-Fi PSK, so it is tier A)
     def test_netjoin_is_tier_a(self):
@@ -257,8 +279,13 @@ class RiskTierTest(unittest.TestCase):
         listed = row.split("(", 1)[1].split(")", 1)[0]
         listed = listed.split(", plus ", 1)[0]
         names = set()
-        for item in listed.split(", "):
+        for item in listed.replace("; ", ", ").split(", "):
+            item = item.split(": ", 1)[-1]  # drop the criterion label
             names.update(n.rstrip("*") for n in item.split("/"))
+        # Every name is a real package, so a label cannot pass as one.
+        missing = [n for n in sorted(names)
+                   if not (ROOT / "broker" / n).is_dir()]
+        self.assertEqual(missing, [])
         self.assertIn("claim", names)
         self.assertIn("claim", rt.TIER_A_BROKER)
         self.assertIn("firstboot", names)
@@ -359,10 +386,10 @@ class RiskTierTest(unittest.TestCase):
                      "--pr-branch", branch, "--pr-title", title],
                     cwd=d, capture_output=True, text=True)
 
-            change("pkg/codex-CX-b-x", "broker/notapkg/x.go")      # tier B
+            change("pkg/codex-CX-b-x", "broker/attention/x.go")    # tier B
             change("pkg/codex-CX-a-x", ".github/workflows/x.yml")  # tier A
             change("pkg/codex-CX-c-x", "docs/x.md")                # tier C
-            change("claude/b-x", "broker/notapkg/y.go")            # tier B, peer branch
+            change("claude/b-x", "broker/attention/y.go")          # tier B, peer branch
             cases = [
                 ("pkg/codex-CX-b-x", "CX-b: x", 1),
                 ("pkg/codex-CX-a-x", "CX-a: x", 1),
