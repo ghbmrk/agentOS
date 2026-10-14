@@ -105,6 +105,12 @@ type Network struct {
 	Prefixes []netip.Prefix
 	// Gateway is the learned default gateway.
 	Gateway netip.Addr
+	// GatewayDev is the default route's interface.
+	GatewayDev string
+	// GatewayMAC is the gateway's MAC from the neighbour table, empty when
+	// none is known. Together with Gateway and GatewayDev it tells routers
+	// behind one gateway address apart (#1536).
+	GatewayMAC string
 	// External is the router's external address, where NAT-PMP or PCP
 	// reports it.
 	External netip.Addr
@@ -222,7 +228,7 @@ func (p *Policy) learnLocked(out Network) {
 
 // normalise drops zones, unmaps, and caps IPv6 prefixes at /56.
 func normalise(n Network) Network {
-	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), External: n.External.WithZone("").Unmap(), Resolver: n.Resolver.WithZone("").Unmap()}
+	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), GatewayDev: n.GatewayDev, GatewayMAC: n.GatewayMAC, External: n.External.WithZone("").Unmap(), Resolver: n.Resolver.WithZone("").Unmap()}
 	if out.Resolver.IsLoopback() || out.Resolver.IsUnspecified() {
 		out.Resolver = netip.Addr{}
 	}
@@ -250,7 +256,9 @@ func normalise(n Network) Network {
 // what was learned before. A read that began before a later Learn (a quick
 // read on an event, or another refresh) is stale: it never replaces the
 // newer set, and only its external address is kept, while the gateway is the
-// one now learned.
+// one now learned. A read that returns ErrGatewayMoved asked no router on
+// the gateway it ended on: that gateway is learned as a quick read learns
+// it (a new one is held), and the error is returned.
 func (p *Policy) Refresh() error {
 	if p.source == nil {
 		return errors.New("netguard: no source")
@@ -259,7 +267,8 @@ func (p *Policy) Refresh() error {
 	gen := p.gen
 	p.mu.RUnlock()
 	n, err := p.source()
-	if err != nil {
+	moved := errors.Is(err, ErrGatewayMoved)
+	if err != nil && !moved {
 		return err
 	}
 	out := normalise(n)
@@ -272,8 +281,14 @@ func (p *Policy) Refresh() error {
 	// router answered: a silent router has no address to learn.
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if moved {
+		if p.gen == gen {
+			p.applyQuickLocked(out)
+		}
+		return err
+	}
 	if p.gen != gen {
-		if out.Gateway == p.net.Gateway {
+		if sameGateway(out, p.net) {
 			if out.External.IsValid() {
 				p.net.External = out.External
 			}
@@ -305,7 +320,14 @@ func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
 			case <-ctx.Done():
 				return
 			case <-kick:
-				_ = p.Refresh()
+				// A read the gateway moved under is followed at once by
+				// one on the gateway it ended on.
+				if errors.Is(p.Refresh(), ErrGatewayMoved) {
+					select {
+					case kick <- struct{}{}:
+					default:
+					}
+				}
 			}
 		}
 	}()
@@ -352,12 +374,17 @@ func (p *Policy) quickLearn() {
 	// so a full read can never store a newer external address between them.
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	old := p.net
 	if quickLockedHook != nil {
 		quickLockedHook()
 	}
-	out := normalise(n)
-	if out.Gateway.IsValid() && out.Gateway == old.Gateway {
+	p.applyQuickLocked(normalise(n))
+}
+
+// applyQuickLocked learns out, a read that asked no router, merged with what
+// is learned as quickLearn describes; p.mu is held for writing.
+func (p *Policy) applyQuickLocked(out Network) {
+	old := p.net
+	if out.Gateway.IsValid() && sameGateway(out, old) {
 		out.External = old.External
 		if !out.Resolver.IsValid() {
 			out.Resolver = old.Resolver
@@ -370,6 +397,13 @@ func (p *Policy) quickLearn() {
 		p.releaseLocked()
 	}
 	p.learnLocked(out)
+}
+
+// sameGateway reports whether a and b learned the same gateway: the same
+// address, interface and MAC. A MAC known on one side only is a different
+// gateway, since a link flap that brings another router flushes the entry.
+func sameGateway(a, b Network) bool {
+	return a.Gateway == b.Gateway && a.GatewayDev == b.GatewayDev && a.GatewayMAC == b.GatewayMAC
 }
 
 // quickGapHook, when set by a test, runs after a quick read returns and
