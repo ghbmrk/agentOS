@@ -44,24 +44,25 @@ func testAP() APConfig {
 // fakeHooks stands in for the uplink, modem, vault, host trust and provider
 // adapters.
 type fakeHooks struct {
-	mu        sync.Mutex
-	progress  Progress
-	joined    string
-	sent      []modem.SMS
-	now       func() time.Time
-	seed      []byte // the vault's sealed code-generator seed
-	pending   []byte // the newest seed waiting for a code
-	enrolls   int
-	trusted   *bool
-	keys      map[string]string
-	finished  string
-	connected bool
-	device    bool // the device-code sign-in completes on the provider's site
-	private   map[string]bool
-	setUp     bool
-	finishes  int
-	onConfirm func() // runs inside ConfirmCode, for races
-	finishErr error  // returned by Finish after the owner channel exists
+	mu          sync.Mutex
+	progress    Progress
+	joined      string
+	sent        []modem.SMS
+	now         func() time.Time
+	seed        []byte // the vault's sealed code-generator seed
+	pending     []byte // the newest seed waiting for a code
+	enrolls     int
+	trusted     *bool
+	keys        map[string]string
+	finished    string
+	connected   bool
+	device      bool // the device-code sign-in completes on the provider's site
+	private     map[string]bool
+	setUp       bool
+	finishes    int
+	finishCalls int    // Finish calls, refused ones too
+	onConfirm   func() // runs inside ConfirmCode, for races
+	finishErr   error  // returned by Finish after the owner channel exists
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
 	noTexts     bool   // the box cannot text: BoxNumber answers "", false
@@ -72,6 +73,10 @@ type fakeHooks struct {
 	deviceLink  string // StartDeviceCode's link when set
 	privateErr  error  // SetPrivateOK's answer when set; nothing is recorded
 	privates    int    // SetPrivateOK calls
+	// owed is agentosd's owed answers (#1544): each answer is owed before
+	// the vault hears it and cleared once it records it; Finish refuses
+	// while any is owed.
+	owed map[string]bool
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -154,13 +159,23 @@ func (f *fakeHooks) TrustHost(t bool) error {
 func (f *fakeHooks) Providers() []Provider {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return []Provider{{ID: "anthropic", Name: "Anthropic", APIKey: true, DeviceCode: true, Connected: f.connected, PrivateOK: f.private["anthropic"]},
+	ps := []Provider{{ID: "anthropic", Name: "Anthropic", APIKey: true, DeviceCode: true, Connected: f.connected, PrivateOK: f.private["anthropic"]},
 		{ID: "openai", Name: "OpenAI", APIKey: true}}
+	for i := range ps {
+		if ok, owed := f.owed[ps[i].ID]; owed {
+			ps[i].Owed = &ok
+		}
+	}
+	return ps
 }
 func (f *fakeHooks) SetPrivateOK(id string, ok bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.privates++
+	if f.owed == nil {
+		f.owed = map[string]bool{}
+	}
+	f.owed[id] = ok
 	if f.privateErr != nil {
 		return f.privateErr
 	}
@@ -168,6 +183,7 @@ func (f *fakeHooks) SetPrivateOK(id string, ok bool) error {
 		f.private = map[string]bool{}
 	}
 	f.private[id] = ok
+	delete(f.owed, id)
 	return nil
 }
 func (f *fakeHooks) AlreadySetUp() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.setUp }
@@ -201,6 +217,10 @@ func (f *fakeHooks) StartDeviceCode(id string) (string, string, error) {
 func (f *fakeHooks) Finish(n string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.finishCalls++
+	if len(f.owed) > 0 {
+		return errors.New("answer owed")
+	}
 	f.finished = n
 	f.finishes++
 	f.setUp = true
