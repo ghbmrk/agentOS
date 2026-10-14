@@ -30,6 +30,10 @@ type Engine struct {
 	// with history (CH-2). Records live only in the journal.
 	intents map[string]*entry
 	open    map[string]*entry
+	// byEffect indexes intents by effect fingerprint, so the same-effect
+	// checks every dispatch makes (sameEffect, duplicateOf) read only the
+	// intents with that effect, not every hot one (CH-2).
+	byEffect map[string][]*entry
 	// denied lists the denials in intents, oldest first. Past hotDenials
 	// the oldest leave memory (they stay in the journal): cold keeps a
 	// 16-byte key per evicted ID, so a resubmission is still recognised
@@ -110,7 +114,12 @@ type entry struct {
 	erased      bool      // RecErased: params and evidence removed
 	parkedSeq   uint64    // of the latest RecParked
 	notDoneSeq  uint64    // of the latest check that proved an attempt not done
-	dispatchSeq uint64    // of the latest RecDispatched
+	// firstDispatchSeq is the seq of its first RecDispatched, and
+	// provedSeq that of the first record that proved one of its attempts
+	// not applied, from any source (a check or the executor itself).
+	// They say which same-effect intents are its rivals (rivals).
+	firstDispatchSeq uint64
+	provedSeq        uint64
 }
 
 // Option configures Open.
@@ -142,6 +151,7 @@ func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor
 		checks:  map[string]int{},
 		pinned:  true,
 
+		byEffect:      map[string][]*entry{},
 		redispatching: map[string]bool{},
 	}
 	for _, o := range opts {
@@ -301,6 +311,16 @@ func (e *Engine) Dispatch(ctx context.Context, id string) (Status, error) {
 		e.mu.Lock()
 		var err error
 		if en, exec, err = e.dispatchable(id); err != nil {
+			var se *SupersededError
+			if errors.As(err, &se) && e.intents[se.By] != nil && e.intents[se.By].state == Succeeded {
+				// The effect went as se.By, which is final: the request
+				// is answered, not left authorized (holding a scope
+				// bound's place and the sleeper awake) for ever.
+				if cerr := e.commit(Record{Type: RecRecheckFailed, ID: id, Reason: err.Error(), Guest: supersededGuest}); cerr != nil {
+					e.mu.Unlock()
+					return Status{}, cerr
+				}
+			}
 			st := Status{}
 			if en != nil {
 				st = en.status()
@@ -372,28 +392,25 @@ func (e *Engine) dispatchable(id string) (*entry, Executor, error) {
 	if e.stopped && !exempt {
 		return en, nil, ErrStopped
 	}
+	// Unlike mayDispatch, the intent's own place in the fence counts too.
 	if len(e.fence[en.intent.Account]) > 0 && !exempt {
 		return en, nil, fmt.Errorf("%w: %s", ErrUnreconciled, en.intent.Account)
 	}
-	// The same effect under a new ID while an earlier one may have landed
-	// is not a retry the engine can tell apart from a duplicate (OP-2). It
-	// stays authorized, held behind the earlier intent (see Waiting).
-	if oid := e.duplicateOf(en); oid != "" {
-		return en, nil, &HeldError{ID: id, BlockedBy: oid}
+	// Everything else, the same-effect rules (OP-2) included, is what
+	// every path to execution checks (mayDispatch). A held intent stays
+	// authorized behind the earlier one (see Waiting).
+	if err := e.mayDispatch(en, true); err != nil {
+		return en, nil, err
 	}
-	exec, ok := e.execs[en.intent.Executor]
-	if !ok {
-		return en, nil, fmt.Errorf("%w: %q", ErrNoExecutor, en.intent.Executor)
-	}
-	return en, exec, nil
+	return en, e.execs[en.intent.Executor], nil
 }
 
 // duplicateOf returns an unresolved intent with the same effect as en
 // under another ID, or "". Called with e.mu held.
 func (e *Engine) duplicateOf(en *entry) string {
 	var first *entry
-	for _, o := range e.open {
-		if o != en && o.efp == en.efp && (o.state == OutcomeUnknown || o.state == InFlight) &&
+	for _, o := range e.byEffect[en.efp] {
+		if o != en && (o.state == OutcomeUnknown || o.state == InFlight) &&
 			(first == nil || o.seq < first.seq) {
 			first = o
 		}
@@ -404,42 +421,124 @@ func (e *Engine) duplicateOf(en *entry) string {
 	return first.intent.ID
 }
 
-// supersededBy returns, for an intent a check proved not done, another
-// intent with the same effect that was dispatched after that check and
-// that no check proved not done (it succeeded, or its outcome is unknown,
-// in flight or parked), or "". The effect then went, or may have gone,
-// under that ID, so resending en could apply it twice (OP-2): Resend
-// refuses it and NotResent leaves it out. It is computed, not stored,
-// because the other intent may later be proved not done itself, and en
-// is then offered again. Called with e.mu held.
-func (e *Engine) supersededBy(en *entry) string {
+// rivals reports whether a and b, two intents with the same effect, are
+// alternatives for one send of it rather than two sends. They are when
+// some intent z with that effect (a or b itself, or one submitted before
+// both) had an attempt proved not applied, by a check through the same
+// tool or by its executor, and was first dispatched before the later of
+// a and b was submitted: the later one is then a resubmission of an
+// effect that did not go, or of one whose outcome was still open, and
+// the two may not both go (OP-2, B7). Every intent submitted after z's
+// first dispatch is a rival of z and of each other. The fields are set
+// once, from the journal, so a restart sees the same rivals. Requests
+// made before any such z was dispatched, and repeats of a send nothing
+// proved not applied, stay separate sends, as before. bucket is the
+// intents with the effect (byEffect).
+func rivals(bucket []*entry, a, b *entry) bool {
+	lo, hi := a, b
+	if hi.seq < lo.seq {
+		lo, hi = hi, lo
+	}
+	for _, z := range bucket {
+		if z.provedSeq != 0 && z.seq <= lo.seq && z.firstDispatchSeq != 0 && z.firstDispatchSeq < hi.seq {
+			return true
+		}
+	}
+	return false
+}
+
+// blocks reports whether rival o holds back a new attempt of en. One
+// that has gone, may have gone, or is going (succeeded, outcome_unknown,
+// parked included, or in flight) holds back every rival. One pending or
+// authorized, waiting for approval or dispatch, holds back a rival that
+// has been dispatched before (a resend or an owner retry of it), not a
+// first dispatch, so of two resubmissions the first dispatched goes. One
+// whose latest attempt was proved not applied, from any source, or that
+// was denied, holds back nothing.
+func blocks(o, en *entry) bool {
+	switch o.state {
+	case InFlight, OutcomeUnknown, Succeeded:
+		return true
+	case Pending, Authorized:
+		return len(en.attempts) > 0
+	}
+	return false
+}
+
+// unresolved reports an attempt in flight or with an unknown outcome.
+func (en *entry) unresolved() bool { return en.state == InFlight || en.state == OutcomeUnknown }
+
+// sameEffect is the effect-level invariant (OP-2): an intent may start a
+// new attempt of its effect only while no rival (rivals) blocks it
+// (blocks): every rival is proved not done or denied, or, for a first
+// dispatch, waiting for its own. Whichever rival dispatches first goes,
+// under the lock, and the others are then refused; a rival proved not
+// done never holds another back, so a not-done effect is offered again
+// rather than dropped (NotResent). Erased intents keep their effect
+// fingerprint (RecErased) and count. It returns the first blocking
+// rival, or nil. Called with e.mu held.
+func (e *Engine) sameEffect(en *entry) *entry {
+	bucket := e.byEffect[en.efp]
 	var first *entry
-	for _, o := range e.intents {
-		if o != en && o.efp == en.efp && o.dispatchSeq > en.notDoneSeq && !o.notDone() &&
-			(first == nil || o.seq < first.seq) {
+	for _, o := range bucket {
+		if o != en && blocks(o, en) && rivals(bucket, en, o) && (first == nil || o.seq < first.seq) {
 			first = o
 		}
 	}
-	if first == nil {
-		return ""
-	}
-	return first.intent.ID
+	return first
 }
 
-// SupersededError says Resend refused an intent a check proved not done
-// because the same effect was dispatched since under another ID (see
-// supersededBy). It matches ErrState with errors.Is: the intent is no
-// longer waiting for a retry.
+// supersededBy returns the ID of sameEffect(en), or "". NotResent leaves
+// en out while it is set, and every dispatch path refuses en
+// (mayDispatch). It is computed, not stored, because the rival may later
+// be proved not done or be denied, and en is then offered again. Called
+// with e.mu held.
+func (e *Engine) supersededBy(en *entry) string {
+	if o := e.sameEffect(en); o != nil {
+		return o.intent.ID
+	}
+	return ""
+}
+
+// index adds en to byEffect under its current effect fingerprint, and
+// unindex removes it from under efp. Called with e.mu held.
+func (e *Engine) index(en *entry) { e.byEffect[en.efp] = append(e.byEffect[en.efp], en) }
+
+func (e *Engine) unindex(en *entry, efp string) {
+	b := e.byEffect[efp]
+	for i, o := range b {
+		if o == en {
+			b = append(b[:i:i], b[i+1:]...)
+			break
+		}
+	}
+	if len(b) == 0 {
+		delete(e.byEffect, efp)
+	} else {
+		e.byEffect[efp] = b
+	}
+}
+
+// SupersededError says an intent was not dispatched because a rival with
+// the same effect has gone, may have gone, or is waiting to go under
+// another ID (sameEffect): the effect would otherwise go twice. It
+// matches ErrState with errors.Is: the intent is no longer waiting for a
+// retry.
 type SupersededError struct {
 	ID string
 	By string
 }
 
 func (s *SupersededError) Error() string {
-	return fmt.Sprintf("journal: %s is not sent again: the same effect was dispatched since as %s", s.ID, s.By)
+	return fmt.Sprintf("journal: %s is not sent: the same effect went, may have gone, or waits to go as %s", s.ID, s.By)
 }
 
 func (s *SupersededError) Is(target error) bool { return target == ErrState }
+
+// supersededGuest is the guest's text for a request denied because the
+// same effect already went under another request: fixed words, no IDs.
+const supersededGuest = "the same effect already went under another request"
+
 
 // HeldError says an intent is held behind an unresolved intent with the
 // same effect. It matches ErrUnreconciled with errors.Is.
@@ -696,7 +795,7 @@ func (e *Engine) keyRetry(ctx context.Context, id string, n int, exec Executor) 
 		if last.Dispatched.IsZero() || now.Sub(last.Dispatched) > life {
 			return Record{}, fmt.Errorf("%w: %s attempt %d is past its key's lifetime", ErrState, id, n)
 		}
-		return Record{Type: RecDispatched, ID: id, Attempt: n, Source: DispatchKey}, e.mayDispatch(en)
+		return Record{Type: RecDispatched, ID: id, Attempt: n, Source: DispatchKey}, e.mayDispatch(en, false)
 	})
 	if err != nil {
 		return unknown, errors.Is(err, errClockBehind)
@@ -729,20 +828,17 @@ func (e *Engine) redispatch(ctx context.Context, id string, n int) bool {
 // restart fence on the account, no same-effect intent unresolved ahead
 // of it, and the policy's dispatch recheck). A refusal journals nothing
 // and leaves the intent not_applied. Since the check proved attempt n
-// did not go, the effect happens at most once; and since an intent whose
-// effect was dispatched since under another ID is refused
-// (SupersededError), it does not go twice that way either.
+// did not go, the effect happens at most once; and since an intent with
+// a live rival is refused (sameEffect, SupersededError), it does not go
+// twice under another ID either.
 func (e *Engine) Resend(ctx context.Context, id string, n int) (Status, error) {
 	var next int
 	in, err := e.rechecked(ctx, id, func(en *entry) (Record, error) {
 		if !en.notDone() || en.latest().N != n {
 			return Record{}, fmt.Errorf("%w: %s attempt %d is %s and not proved not done", ErrState, id, n, en.state)
 		}
-		if oid := e.supersededBy(en); oid != "" {
-			return Record{}, &SupersededError{ID: id, By: oid}
-		}
 		next = len(en.attempts) + 1
-		return Record{Type: RecDispatched, ID: id, Attempt: next}, e.mayDispatch(en)
+		return Record{Type: RecDispatched, ID: id, Attempt: next}, e.mayDispatch(en, true)
 	})
 	if err != nil {
 		return Status{}, err
@@ -766,9 +862,15 @@ func (e *Engine) Resend(ctx context.Context, id string, n int) (Status, error) {
 
 // mayDispatch checks, with e.mu held, what every dispatch of en needs
 // beyond its own state: no STOP and no restart fence on its account
-// (narrowing intents excepted), no same-effect intent unresolved ahead of
-// it (OP-2), and a registered executor.
-func (e *Engine) mayDispatch(en *entry) error {
+// (narrowing intents excepted), the effect-level invariant (sameEffect)
+// when the dispatch starts a new attempt (again; a key retry repeats an
+// attempt under its own key, which the service applies at most once), no
+// same-effect intent unresolved ahead of it (OP-2), and a registered
+// executor. It is the one place Dispatch, Resend (the engine's redispatch
+// and the owner's RETRY of a not-done effect), Retry and the key retry
+// all pass, under the lock and again after the policy recheck, so a
+// rival that dispatched meanwhile is seen.
+func (e *Engine) mayDispatch(en *entry, again bool) error {
 	exempt := narrowing(en.intent)
 	if e.stopped && !exempt {
 		return ErrStopped
@@ -777,6 +879,13 @@ func (e *Engine) mayDispatch(en *entry) error {
 		if fid != en.intent.ID && !exempt {
 			return fmt.Errorf("%w: %s", ErrUnreconciled, en.intent.Account)
 		}
+	}
+	// A rival that went, waits to go, or (for a resend of a not-done
+	// effect) may have gone supersedes en. One whose outcome is unknown
+	// holds a fresh intent instead (HeldError, below): it runs if that
+	// one is proved not done.
+	if o := e.sameEffect(en); again && o != nil && (en.notDone() || !o.unresolved()) {
+		return &SupersededError{ID: en.intent.ID, By: o.intent.ID}
 	}
 	if oid := e.duplicateOf(en); oid != "" {
 		return &HeldError{ID: en.intent.ID, BlockedBy: oid}
@@ -844,7 +953,7 @@ func (e *Engine) Retry(ctx context.Context, id string, parked int) (Status, erro
 			return Record{}, fmt.Errorf("%w: %s attempt %d is %s and not parked", ErrState, id, parked, en.state)
 		}
 		n = len(en.attempts) + 1
-		return Record{Type: RecDispatched, ID: id, Attempt: n, Source: DispatchOwner}, e.mayDispatch(en)
+		return Record{Type: RecDispatched, ID: id, Attempt: n, Source: DispatchOwner}, e.mayDispatch(en, true)
 	})
 	if err != nil {
 		return Status{}, err
@@ -903,9 +1012,10 @@ func (e *Engine) Parked() []ParkedIntent {
 // approvals live in memory), or the broker stopped before it. The digest
 // names them and RETRY offers them (Resend), so a proven not-done effect
 // is never dropped silently (OP-2). An erased intent is not listed: its
-// parameters are gone. Nor is one whose effect was dispatched since under
-// another ID that no check proved not done (supersededBy): offering it
-// would send the effect twice.
+// parameters are gone. Nor is one with a live rival (supersededBy): a
+// resubmission of the same effect that went, may have gone, or waits for
+// approval or dispatch; offering it would send the effect twice. It is
+// offered again once that rival is proved not done or denied.
 func (e *Engine) NotResent() []ParkedIntent {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1488,11 +1598,17 @@ func (e *Engine) apply(r Record) {
 	case RecSubmitted:
 		en := newEntry(r)
 		e.intents[r.ID], e.open[r.ID] = en, en
+		e.index(en)
 		return
 	}
 	en := e.intents[r.ID]
-	was := en.state
+	was, efp := en.state, en.efp
 	en.apply(r)
+	if en.efp != efp {
+		// An erase restores the fingerprint the params gave (RecErased).
+		e.unindex(en, efp)
+		e.index(en)
+	}
 	if ((r.Type == RecObserved && r.Result != ResultUnknown) || r.Type == RecParked) && !e.redispatching[r.ID] {
 		if f := e.fence[en.intent.Account]; f != nil {
 			delete(f, r.ID)
@@ -1521,6 +1637,7 @@ func (e *Engine) trim() {
 		// makes those, and coldVal does not carry them.
 		if en := e.intents[id]; en != nil && en.state == Denied && len(en.attempts) == 0 && en.quality == (Quality{}) {
 			delete(e.intents, id)
+			e.unindex(en, en.efp)
 			e.cold[coldKeyOf(id)] = e.coldValOf(en)
 		}
 	}
@@ -1585,6 +1702,7 @@ func (e *Engine) rehydrate(ids []string) error {
 	}
 	for _, en := range ens {
 		e.intents[en.intent.ID] = en
+		e.index(en)
 		e.denied = append(e.denied, en.intent.ID)
 	}
 	return nil
@@ -1657,7 +1775,9 @@ func (en *entry) apply(r Record) {
 	case RecDispatched:
 		en.state = InFlight
 		en.dispatched = r.At
-		en.dispatchSeq = r.Seq
+		if en.firstDispatchSeq == 0 {
+			en.firstDispatchSeq = r.Seq
+		}
 		if r.Source == DispatchKey {
 			en.attempt(r.Attempt).Result = ResultInFlight
 		} else {
@@ -1671,6 +1791,9 @@ func (en *entry) apply(r Record) {
 		a.Result, a.Source, a.Evidence = r.Result, r.Source, r.Evidence
 		if r.Source == SourceReconcile && r.Result == ResultNotApplied {
 			en.notDoneSeq = r.Seq
+		}
+		if r.Result == ResultNotApplied && en.provedSeq == 0 {
+			en.provedSeq = r.Seq
 		}
 		if a.N == len(en.attempts) {
 			en.state = map[Result]State{ResultSucceeded: Succeeded, ResultNotApplied: NotApplied, ResultUnknown: OutcomeUnknown}[r.Result]

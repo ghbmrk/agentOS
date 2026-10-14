@@ -3,6 +3,7 @@ package grants
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -32,7 +33,9 @@ type RetryLine struct {
 // For an effect a check proved was not done (p.NotDone) the line is the
 // effect's ordinary ask at the tier its facts give: it cannot go twice,
 // so it carries no "may go twice" warning and money is not raised to
-// MoneyRetry beyond what CH-10 gives it.
+// MoneyRetry beyond what CH-10 gives it. The exception is a near
+// resubmission the engine cannot match (sentSince): then the line warns
+// as a parked one does.
 func (g *Gate) RetryItem(ctx context.Context, p journal.ParkedIntent, object string) RetryLine {
 	in := p.Intent
 	var l RetryLine
@@ -50,7 +53,7 @@ func (g *Gate) RetryItem(ctx context.Context, p journal.ParkedIntent, object str
 		it := approvalItem(in, in.Action, verb.Irreversible, Verified{}, false)
 		l = RetryLine{Shown: it, Base: it}
 	}
-	if p.NotDone {
+	if p.NotDone && !g.sentSince(ctx, p) {
 		return l
 	}
 	l.Shown.Retried = p.Dispatched
@@ -134,4 +137,61 @@ func (g *Gate) approved(id string, l RetryLine, page bool, run func(*journal.Eng
 	g.mu.Unlock()
 	defer g.spend(id)
 	return run(eng)
+}
+
+// sentSince reports, for an effect a check proved was not done, another
+// send on its account and action that went or may have gone since its
+// not-done attempt was dispatched, of the same record to the same
+// recipients: a resubmission whose params or recipients differ from p's
+// in some byte, which the engine's exact effect fingerprint does not
+// match (journal A19), so resending p may send the effect twice. Records
+// and recipients are compared as the account's verifier reads them, or,
+// without one, as the intents name them with recipients' case folded.
+// An erased send names no record and counts. An effect that names no
+// record matches nothing.
+func (g *Gate) sentSince(ctx context.Context, p journal.ParkedIntent) bool {
+	g.mu.Lock()
+	eng := g.eng
+	g.mu.Unlock()
+	if eng == nil {
+		return false
+	}
+	in := p.Intent
+	rec, rcpt := g.sendKey(ctx, in)
+	if rec == "" {
+		return false
+	}
+	for _, u := range eng.InUse(in.Account, in.Action, p.Dispatched) {
+		if !u.Started || u.Intent.ID == in.ID {
+			continue
+		}
+		if u.Erased {
+			return true
+		}
+		if r2, c2 := g.sendKey(ctx, u.Intent); r2 == rec && sameSet(c2, rcpt) {
+			return true
+		}
+	}
+	return false
+}
+
+// sendKey is the record an intent acts on and its recipients, as the
+// account's verifier reads them, or as the intent names them (case
+// folded) when the verifier is missing or cannot read it.
+func (g *Gate) sendKey(ctx context.Context, in journal.Intent) (string, []string) {
+	if vf := g.cfg.Verifiers[in.Account]; vf != nil {
+		if v, err := vf.Verify(ctx, in); err == nil && v.Record != "" {
+			return v.Record, fold(v.Recipients)
+		}
+	}
+	rec, _ := in.Params[ParamRecord].(string)
+	return rec, fold(in.Recipients)
+}
+
+func fold(rs []string) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = strings.ToLower(strings.TrimSpace(r))
+	}
+	return out
 }

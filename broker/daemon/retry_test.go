@@ -381,3 +381,30 @@ func TestOP2RefusedResendIsOfferedByRetry(t *testing.T) {
 		t.Fatalf("ran %q, not resent %+v", f.ran, d.Engine().NotResent())
 	}
 }
+
+// A RETRY refused because the same effect went, or waits to go, as
+// another request (journal.SupersededError) says so in plain words: it
+// does not tell the owner to text RETRY later, and the effect is not
+// listed again.
+func TestOP2SupersededRetrySaysTheEffectWentAnotherWay(t *testing.T) {
+	var got string
+	relisted := 0
+	r := &retrier{
+		ctx:   context.Background(),
+		lines: map[string]retryAsk{},
+		send: func(context.Context, retryAsk, bool) (journal.Status, error) {
+			return journal.Status{}, &journal.SupersededError{ID: "agent/s1", By: "agent/s2"}
+		},
+		inform:    func(s string) error { got = s; return nil },
+		onRefused: func() { relisted++ },
+	}
+	r.run("B3", retryAsk{id: "agent/s1", attempt: 1, notDone: true,
+		line: grants.RetryLine{Shown: ownerch.Item{Object: "invoice 1042"}}}, false)
+	want := "Retry B3: nothing was sent. Invoice 1042 already went, or is waiting to go, as another request, so it was not sent again."
+	if got != want || relisted != 0 {
+		t.Fatalf("text %q, relisted %d", got, relisted)
+	}
+	if strings.Contains(got, "RETRY later") || strings.Contains(got, "agent/") {
+		t.Fatalf("text %q", got)
+	}
+}

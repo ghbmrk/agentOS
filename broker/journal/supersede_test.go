@@ -8,7 +8,7 @@ import (
 // REQ: OP-2
 
 // superseded checks that a, proved not done, is neither offered nor sent
-// again because the same effect was dispatched since as by: NotResent
+// again because its rival by went, may have gone, or waits to go: NotResent
 // leaves it out and Resend refuses it with a SupersededError that matches
 // ErrState, running nothing (OP-2).
 func superseded(t *testing.T, e *Engine, svc *fakeService, by string) {

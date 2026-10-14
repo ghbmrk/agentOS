@@ -100,7 +100,7 @@ func EffectWord(executor string) string {
 // would ask it now (grants.RetryItem), so its tier is the one its facts
 // give and a parked payment takes a code-generator code; the owner is
 // texted how the retry ended, and a refused one is listed again in the
-// next digest.
+// next digest, unless the same effect went another way.
 type retrier struct {
 	ctx  context.Context
 	eng  *journal.Engine
@@ -203,7 +203,13 @@ func (r *retrier) run(req string, a retryAsk, page bool) {
 	st, err := r.send(r.ctx, a, page)
 	what := a.line.Shown.Object
 	var text string
+	var superseded *journal.SupersededError
 	switch {
+	case errors.As(err, &superseded):
+		// The same effect went, or waits to go, as another request
+		// (journal sameEffect): nothing is left to retry, so it is not
+		// listed again and the owner is not told to try later.
+		text = fmt.Sprintf("Retry %s: nothing was sent. %s already went, or is waiting to go, as another request, so it was not sent again.", req, capital(what))
 	case err == nil && st.State == journal.Succeeded:
 		text = fmt.Sprintf("Retry %s: %s went through.", req, what)
 	case err == nil && (st.State == journal.NotApplied || st.State == journal.Denied):
@@ -218,7 +224,7 @@ func (r *retrier) run(req string, a retryAsk, page bool) {
 	r.mu.Lock()
 	inform, refused := r.inform, r.onRefused
 	r.mu.Unlock()
-	if err != nil && refused != nil {
+	if err != nil && superseded == nil && refused != nil {
 		refused()
 	}
 	if inform != nil {
