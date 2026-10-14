@@ -96,20 +96,21 @@ func coldKeyOf(id string) coldKey {
 }
 
 type entry struct {
-	seq        uint64 // of its RecSubmitted: submission order
-	intent     Intent
-	fp         string
-	efp        string // effectFingerprint
-	state      State
-	permission Permission
-	attempts   []Attempt
-	quality    Quality
-	authorized time.Time // when RecAuthorized was journaled
-	dispatched time.Time // when the latest RecDispatched was journaled
-	submitted  time.Time // when RecSubmitted was journaled
-	erased     bool      // RecErased: params and evidence removed
-	parkedSeq  uint64    // of the latest RecParked
-	notDoneSeq uint64    // of the latest check that proved an attempt not done
+	seq         uint64 // of its RecSubmitted: submission order
+	intent      Intent
+	fp          string
+	efp         string // effectFingerprint
+	state       State
+	permission  Permission
+	attempts    []Attempt
+	quality     Quality
+	authorized  time.Time // when RecAuthorized was journaled
+	dispatched  time.Time // when the latest RecDispatched was journaled
+	submitted   time.Time // when RecSubmitted was journaled
+	erased      bool      // RecErased: params and evidence removed
+	parkedSeq   uint64    // of the latest RecParked
+	notDoneSeq  uint64    // of the latest check that proved an attempt not done
+	dispatchSeq uint64    // of the latest RecDispatched
 }
 
 // Option configures Open.
@@ -403,6 +404,43 @@ func (e *Engine) duplicateOf(en *entry) string {
 	return first.intent.ID
 }
 
+// supersededBy returns, for an intent a check proved not done, another
+// intent with the same effect that was dispatched after that check and
+// that no check proved not done (it succeeded, or its outcome is unknown,
+// in flight or parked), or "". The effect then went, or may have gone,
+// under that ID, so resending en could apply it twice (OP-2): Resend
+// refuses it and NotResent leaves it out. It is computed, not stored,
+// because the other intent may later be proved not done itself, and en
+// is then offered again. Called with e.mu held.
+func (e *Engine) supersededBy(en *entry) string {
+	var first *entry
+	for _, o := range e.intents {
+		if o != en && o.efp == en.efp && o.dispatchSeq > en.notDoneSeq && !o.notDone() &&
+			(first == nil || o.seq < first.seq) {
+			first = o
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	return first.intent.ID
+}
+
+// SupersededError says Resend refused an intent a check proved not done
+// because the same effect was dispatched since under another ID (see
+// supersededBy). It matches ErrState with errors.Is: the intent is no
+// longer waiting for a retry.
+type SupersededError struct {
+	ID string
+	By string
+}
+
+func (s *SupersededError) Error() string {
+	return fmt.Sprintf("journal: %s is not sent again: the same effect was dispatched since as %s", s.ID, s.By)
+}
+
+func (s *SupersededError) Is(target error) bool { return target == ErrState }
+
 // HeldError says an intent is held behind an unresolved intent with the
 // same effect. It matches ErrUnreconciled with errors.Is.
 type HeldError struct {
@@ -691,12 +729,17 @@ func (e *Engine) redispatch(ctx context.Context, id string, n int) bool {
 // restart fence on the account, no same-effect intent unresolved ahead
 // of it, and the policy's dispatch recheck). A refusal journals nothing
 // and leaves the intent not_applied. Since the check proved attempt n
-// did not go, the effect happens at most once.
+// did not go, the effect happens at most once; and since an intent whose
+// effect was dispatched since under another ID is refused
+// (SupersededError), it does not go twice that way either.
 func (e *Engine) Resend(ctx context.Context, id string, n int) (Status, error) {
 	var next int
 	in, err := e.rechecked(ctx, id, func(en *entry) (Record, error) {
 		if !en.notDone() || en.latest().N != n {
 			return Record{}, fmt.Errorf("%w: %s attempt %d is %s and not proved not done", ErrState, id, n, en.state)
+		}
+		if oid := e.supersededBy(en); oid != "" {
+			return Record{}, &SupersededError{ID: id, By: oid}
 		}
 		next = len(en.attempts) + 1
 		return Record{Type: RecDispatched, ID: id, Attempt: next}, e.mayDispatch(en)
@@ -860,13 +903,15 @@ func (e *Engine) Parked() []ParkedIntent {
 // approvals live in memory), or the broker stopped before it. The digest
 // names them and RETRY offers them (Resend), so a proven not-done effect
 // is never dropped silently (OP-2). An erased intent is not listed: its
-// parameters are gone.
+// parameters are gone. Nor is one whose effect was dispatched since under
+// another ID that no check proved not done (supersededBy): offering it
+// would send the effect twice.
 func (e *Engine) NotResent() []ParkedIntent {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var out []ParkedIntent
 	for _, en := range bySeq(e.open) {
-		if !en.notDone() || en.erased || e.redispatching[en.intent.ID] {
+		if !en.notDone() || en.erased || e.redispatching[en.intent.ID] || e.supersededBy(en) != "" {
 			continue
 		}
 		last := en.latest()
@@ -1612,6 +1657,7 @@ func (en *entry) apply(r Record) {
 	case RecDispatched:
 		en.state = InFlight
 		en.dispatched = r.At
+		en.dispatchSeq = r.Seq
 		if r.Source == DispatchKey {
 			en.attempt(r.Attempt).Result = ResultInFlight
 		} else {
