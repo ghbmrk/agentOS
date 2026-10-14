@@ -48,6 +48,9 @@ func TestTheUnitIsBounded(t *testing.T) {
 		"RuntimeDirectoryMode":   {"0700"},
 		"LimitCORE":              {"0"},
 		"UMask":                  {"0077"},
+		// hostapd runs as its own user (#1426): the loader, still root,
+		// shares that user's group only to hand it hostapd.conf.
+		"SupplementaryGroups": {"agentos-hostapd"},
 	} {
 		if strings.Join(set[k], "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, set[k], want)
@@ -66,5 +69,16 @@ func TestTheUnitIsBounded(t *testing.T) {
 	}
 	if _, ok := set["User"]; ok {
 		t.Error("the loader needs root for nft, systemctl and ip")
+	}
+	// The image creates hostapd's user (#1426); newHostapd fails closed
+	// without it.
+	su, err := os.ReadFile("../../../image/mkosi/mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(strings.Split(string(su), "\n"), func(l string) bool {
+		return strings.HasPrefix(l, "u "+hostapdUser+" - ")
+	}) {
+		t.Errorf("sysusers.d declares no %s user", hostapdUser)
 	}
 }
