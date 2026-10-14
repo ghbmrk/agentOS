@@ -172,31 +172,61 @@ func Open(path string, key []byte) (*Vault, error) {
 		id: p.ID, counterAuth: p.CounterAuth, anchors: p.Anchors, bound: -1, keyID: env.KeyID, keysOK: p.Keys, nextKeys: p.Next}, nil
 }
 
+// Item is one secret for PutMany.
+type Item struct {
+	Name, Kind string
+	Value      []byte
+}
+
 // Put stores or replaces a secret and writes the vault before returning.
 func (v *Vault) Put(name, kind string, value []byte) error {
-	if name == "" || kind == "" {
-		return errors.New("vault: name and kind are required")
-	}
-	if len(value) < MinValueLen {
-		return fmt.Errorf("vault: value shorter than %d bytes", MinValueLen)
+	return v.PutMany([]Item{{Name: name, Kind: kind, Value: value}})
+}
+
+// PutMany stores or replaces several secrets in one write: the vault, in
+// memory and on the drive, holds all of them or none. Values that must be
+// redacted together, such as an Owner Card and its parts, go in one call,
+// so no failure or crash between writes leaves one of them unredacted
+// (CRED-7).
+func (v *Vault) PutMany(items []Item) error {
+	seen := map[string]bool{}
+	for _, it := range items {
+		if it.Name == "" || it.Kind == "" {
+			return errors.New("vault: name and kind are required")
+		}
+		if len(it.Value) < MinValueLen {
+			return fmt.Errorf("vault: value shorter than %d bytes", MinValueLen)
+		}
+		if seen[it.Name] {
+			return fmt.Errorf("vault: %q given twice", it.Name)
+		}
+		seen[it.Name] = true
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
 		return ErrClosed
 	}
-	old, had := v.entries[name]
-	v.entries[name] = record{Kind: kind, Value: append([]byte(nil), value...)}
+	old := map[string]record{}
+	for _, it := range items {
+		if r, had := v.entries[it.Name]; had {
+			old[it.Name] = r
+		}
+		v.entries[it.Name] = record{Kind: it.Kind, Value: append([]byte(nil), it.Value...)}
+	}
 	if err := v.save(); err != nil {
-		if had {
-			v.entries[name] = old
-		} else {
-			delete(v.entries, name)
+		for _, it := range items {
+			wipe(v.entries[it.Name].Value)
+			if r, had := old[it.Name]; had {
+				v.entries[it.Name] = r
+			} else {
+				delete(v.entries, it.Name)
+			}
 		}
 		return err
 	}
-	if had {
-		wipe(old.Value)
+	for _, r := range old {
+		wipe(r.Value)
 	}
 	return nil
 }
