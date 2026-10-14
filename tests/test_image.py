@@ -72,6 +72,12 @@ def nodump(root):
         write(root, rel, NODUMP_SRC.get(rel, MK / "mkosi.extra" / rel).read_text())
 
 
+def radio(root):
+    # Stand-ins for firmware-mediatek's MT7922 files (#1415).
+    for rel in check.RADIO_FIRMWARE:
+        write(root, rel, "fw")
+
+
 class TreeCheckTest(unittest.TestCase):
     """HW-1: the image holds no per-install secret; V15: no socket files."""
 
@@ -83,6 +89,7 @@ class TreeCheckTest(unittest.TestCase):
         write(self.root, "usr/lib/agentos/agentosd", "\x7fELF", 0o755)
         (self.root / "var/lib/agentos").mkdir(parents=True)
         nodump(self.root)
+        radio(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -142,6 +149,24 @@ class TreeCheckTest(unittest.TestCase):
             s.bind(str(p))
         self.assertTrue(stat.S_ISSOCK(os.lstat(p).st_mode))
         self.assertIn("broker.sock", " ".join(check.violations(self.root)))
+
+    # REQ: CH-7, HW-10
+    def test_tree_without_the_radio_firmware_is_refused(self):
+        # #1415: without firmware-mediatek's MT7922 files mt7921e brings up no wlan0, so the setup
+        # network (CH-7, HW-10) is never served on the M6 Ultra. Each file is required.
+        for rel in check.RADIO_FIRMWARE:
+            f = self.root / rel
+            f.unlink()
+            self.assertIn(rel, " ".join(check.violations(self.root)))
+            write(self.root, rel, "fw")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_compressed_radio_firmware_counts(self):
+        # The kernel loader also finds name.xz and name.zst, if Debian ever ships them compressed.
+        for i, rel in enumerate(check.RADIO_FIRMWARE):
+            (self.root / rel).unlink()
+            write(self.root, rel + (".xz", ".zst")[i % 2], "fw")
+        self.assertEqual(check.violations(self.root), [])
 
     def test_main_exits_nonzero_on_violation(self):
         write(self.root, "var/lib/systemd/random-seed", "x")
@@ -754,6 +779,25 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(s["Signed-By"], "/usr/share/keyrings/debian-archive-keyring.gpg")
             self.assertNotIn("Trusted", s)
 
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_comes_from_the_pinned_snapshot(self):
+        # #1415: firmware-mediatek is in Debian's non-free-firmware component. The image enables it,
+        # in mkosi.conf and in the build's apt sources, from the same snapshot as main, and installs
+        # the package.
+        c = ini(MK / "mkosi.conf")
+        self.assertEqual(c["Distribution"]["Repositories"].split(","), ["main", "non-free-firmware"])
+        self.assertIn("firmware-mediatek", c["Content"]["Packages"].split())
+        mirror = c["Distribution"]["Mirror"].rstrip("/")
+        text = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_text()
+        stanzas = [dict(l.split(": ", 1) for l in s.splitlines() if l and not l.startswith("#"))
+                   for s in text.split("\n\n")]
+        stanzas = [s for s in stanzas if s]
+        for s in stanzas:
+            self.assertEqual(s["Components"].split(), ["main", "non-free-firmware"], s["URIs"])
+        self.assertEqual([s["URIs"].rstrip("/") for s in stanzas if "trixie" in s["Suites"].split()], [mirror])
+        # Every packaged line in Packages= is a package name: an indented comment would become one.
+        self.assertFalse([p for p in c["Content"]["Packages"].split() if not re.fullmatch(r"[a-z0-9][a-z0-9.+-]+", p)])
+
     def test_ab_usr_slots(self):
         # UPD-1: two equal /usr slots plus verity, so an update writes the idle one.
         parts = [ini(f)["Partition"] for f in sorted((MK / "mkosi.repart").glob("*.conf"))]
@@ -856,6 +900,7 @@ class NoDumpTest(unittest.TestCase):
         self.root = pathlib.Path(self.tmp.name)
         write(self.root, "etc/machine-id", "uninitialized\n")
         nodump(self.root)
+        radio(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1558,6 +1603,7 @@ class FuzzConfineTest(unittest.TestCase):
     def test_the_image_does_not_ship_the_fuzz_state(self):
         with tempfile.TemporaryDirectory() as d:
             nodump(pathlib.Path(d))
+            radio(pathlib.Path(d))
             self.assertEqual(check.violations(d), [])
             os.makedirs(os.path.join(d, "var/lib/agentos-fuzz"))
             self.assertEqual(check.violations(d), ["var/lib/agentos-fuzz: fuzz state; created on the box, never shipped"])
