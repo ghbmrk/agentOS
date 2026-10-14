@@ -1,4 +1,4 @@
-# github.com/emersion/go-imap v1.2.1
+# github.com/emersion/go-imap v1.2.1 => ./third_party/go-imap
 ## explicit; go 1.13
 github.com/emersion/go-imap
 github.com/emersion/go-imap/backend
@@ -203,3 +203,4 @@ google.golang.org/protobuf/types/known/timestamppb
 rsc.io/qr
 rsc.io/qr/coding
 rsc.io/qr/gf256
+# github.com/emersion/go-imap => ./third_party/go-imap
