@@ -122,8 +122,11 @@ type Rotation struct {
 	// display's lock, then mu.
 	postMu    sync.Mutex
 	confirmer string // under postMu: the posting session's tokenKey
-	mu        sync.Mutex
-	d         *card.Display
+	// wifi, under postMu and mu, hands a committed Wi-Fi password to
+	// agentosd with the posting session's token (#1191).
+	wifi func(ssid, password string) error
+	mu   sync.Mutex
+	d    *card.Display
 	// until is the waiting rotation's confirm window.
 	until time.Time
 	// gen counts what voids a commit's result: a start, an enroll or a
@@ -216,9 +219,15 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
 	res, err := r.v.CommitRotation(ctx, id, *c)
+	r.mu.Lock()
+	wifi := r.wifi
+	r.mu.Unlock()
 	var ve *VaultError
 	switch {
 	case err == nil:
+		if c.WiFiPassword != "" {
+			res = withWiFiNote(res, handOffWiFi(wifi, c))
+		}
 		r.mu.Lock()
 		if r.gen == gen && r.confirmer != "" {
 			r.res, r.resOwner, r.resUntil = &res, r.confirmer, r.until
@@ -228,6 +237,11 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	case errors.As(err, &ve) && ve.Status == http.StatusGone:
 		return fmt.Errorf("%w: %s", card.ErrDiscard, ve.Msg)
 	case errors.As(err, &ve) && ve.Status == http.StatusConflict:
+		// The owner keeps this card (card.ErrInEffect): its Wi-Fi goes on
+		// the air, so a lost old card stops joining (#1191).
+		if c.WiFiPassword != "" {
+			handOffWiFi(wifi, c)
+		}
 		return fmt.Errorf("%w: %s", card.ErrInEffect, ve.Msg)
 	case errors.As(err, &ve) && ve.Status < http.StatusInternalServerError:
 		return err // refused before anything was written; kept for a retry
@@ -237,7 +251,28 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	// effect. The owner keeps both cards (card.ErrInEffect's text) and the
 	// vault's rotation, if still waiting, is dropped (#1090 R2).
 	r.cancel(id)
+	if c.WiFiPassword != "" {
+		handOffWiFi(wifi, c)
+	}
 	return fmt.Errorf("%w: %v", card.ErrInEffect, err)
+}
+
+// handOffWiFi has agentosd write the card's Wi-Fi network for the access
+// point (#1191), once the vault process committed the card or may have
+// (card.ErrInEffect: the owner keeps it); a card it refused leaves the old
+// password on the air. It reports whether the access point switches.
+func handOffWiFi(wifi func(ssid, password string) error, c *card.Card) bool {
+	return wifi != nil && wifi(c.WiFiName, c.WiFiPassword) == nil
+}
+
+// withWiFiNote adds to a committed rotation's notes what its Wi-Fi does.
+func withWiFiNote(res RotationResult, switched bool) RotationResult {
+	note := "My Wi-Fi still uses your old card's password: I could not switch it. Join it with your old card for now, and replace the Wi-Fi password again from Home."
+	if switched {
+		note = "My Wi-Fi now uses your new card's password. If your phone drops off, rejoin with the Wi-Fi QR code on your new card."
+	}
+	res.Notes = append(append([]string(nil), res.Notes...), note)
+	return res
 }
 
 // cancel drops the vault process's pending rotation id (#1090 R2, S-R1);
@@ -253,8 +288,9 @@ func (r *Rotation) cancel(id string) {
 
 // serveCard serves the display d to the session posting r, with the
 // display's own checks (signedIn is the session check); a post holds
-// postMu so that provision binds the result to its session.
-func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) bool, next string, w http.ResponseWriter, r *http.Request) {
+// postMu so that provision binds the result to its session. wifi hands a
+// committed Wi-Fi password to agentosd as that session (#1191).
+func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) bool, wifi func(r *http.Request, ssid, password string) error, next string, w http.ResponseWriter, r *http.Request) {
 	h := d.Handler(signedIn, next)
 	if r.Method != http.MethodPost {
 		h.ServeHTTP(w, r)
@@ -265,9 +301,16 @@ func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) boo
 	rot.confirmer = ""
 	if tok := cookieToken(r); tok != "" {
 		rot.confirmer = tokenKey(tok)
+		rot.setWiFi(func(ssid, password string) error { return wifi(r, ssid, password) })
 	}
-	defer func() { rot.confirmer = "" }()
+	defer func() { rot.confirmer = ""; rot.setWiFi(nil) }()
 	h.ServeHTTP(w, r)
+}
+
+func (rot *Rotation) setWiFi(f func(ssid, password string) error) {
+	rot.mu.Lock()
+	rot.wifi = f
+	rot.mu.Unlock()
 }
 
 // voidLocked drops the result and voids any commit still waiting for its
