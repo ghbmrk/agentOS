@@ -31,9 +31,12 @@ type Sources struct {
 	exts []gatewayExternal // most recently read first, at most maxGatewayExternals
 }
 
-// gatewayExternal is the router's external address last read on a gateway.
+// gatewayExternal is the router's external address last read on a gateway,
+// told apart by its address and MAC (#1536).
 type gatewayExternal struct {
-	gw, ext netip.Addr
+	gw  netip.Addr
+	mac string
+	ext netip.Addr
 }
 
 // maxGatewayExternals bounds how many gateways' external addresses Sources
@@ -44,22 +47,24 @@ const maxGatewayExternals = 8
 // in policy.go must stay past two of them.
 const externalReadTimeout = 3 * time.Second
 
-// externalLocked returns the external address last read on gw; s.mu is held.
-func (s *Sources) externalLocked(gw netip.Addr) netip.Addr {
+// externalLocked returns the external address last read on gw at mac; s.mu
+// is held.
+func (s *Sources) externalLocked(gw netip.Addr, mac string) netip.Addr {
 	for _, e := range s.exts {
-		if e.gw == gw {
+		if e.gw == gw && e.mac == mac {
 			return e.ext
 		}
 	}
 	return netip.Addr{}
 }
 
-// rememberLocked records ext as gw's and makes gw the most recent, dropping
-// the least recently read gateway past the bound; s.mu is held.
-func (s *Sources) rememberLocked(gw, ext netip.Addr) {
-	out := []gatewayExternal{{gw, ext}}
+// rememberLocked records ext as the gateway's (gw at mac) and makes it the
+// most recent, dropping the least recently read gateway past the bound; s.mu
+// is held.
+func (s *Sources) rememberLocked(gw netip.Addr, mac string, ext netip.Addr) {
+	out := []gatewayExternal{{gw, mac, ext}}
 	for _, e := range s.exts {
-		if e.gw != gw && len(out) < maxGatewayExternals {
+		if (e.gw != gw || e.mac != mac) && len(out) < maxGatewayExternals {
 			out = append(out, e)
 		}
 	}
@@ -77,6 +82,13 @@ var resolvConfs = []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf
 // NAT-PMP (when the gateway does not answer, the last address read on that
 // gateway, else none). A read that finds no non-loopback interface
 // prefix fails, so the last learned set stays.
+//
+// The host is read again once the router has answered, and the network
+// after the answer is the one returned. The answer is kept only if the
+// gateway is the one asked: the same address, and the same MAC where one was
+// known at the start (the request itself resolves an unknown one). After a
+// move during the wait, the answer may be another router's, so it is
+// dropped (#1536).
 func (s *Sources) Read() (Network, error) {
 	n, err := s.ReadLocal()
 	if err != nil || !n.Gateway.IsValid() {
@@ -89,22 +101,30 @@ func (s *Sources) Read() (Network, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), externalReadTimeout)
 	a, err := ext(ctx, n.Gateway)
 	cancel()
-	s.mu.Lock()
-	if err == nil && a.IsValid() {
-		s.rememberLocked(n.Gateway, a.Unmap())
-	} else if e := s.externalLocked(n.Gateway); e.IsValid() {
-		s.rememberLocked(n.Gateway, e)
+	m, merr := s.ReadLocal()
+	if merr != nil || !m.Gateway.IsValid() {
+		return m, merr
 	}
-	n.External = s.externalLocked(n.Gateway)
+	same := m.Gateway == n.Gateway && (n.GatewayMAC == "" || n.GatewayMAC == m.GatewayMAC)
+	s.mu.Lock()
+	if err == nil && a.IsValid() && same {
+		s.rememberLocked(m.Gateway, m.GatewayMAC, a.Unmap())
+	} else if e := s.externalLocked(m.Gateway, m.GatewayMAC); e.IsValid() {
+		s.rememberLocked(m.Gateway, m.GatewayMAC, e)
+	}
+	m.External = s.externalLocked(m.Gateway, m.GatewayMAC)
 	s.mu.Unlock()
-	return n, nil
+	return m, nil
 }
 
 // ReadLocal is Read without the router: interface prefixes, gateway and
-// resolver from the host alone, never blocking on the network. The external
-// address is the last one read on this gateway, else empty, so a return to a
-// known gateway refuses that router's address at once. A change event
-// applies it before the full Read completes.
+// resolver from the host alone, never blocking on the network. The gateway's
+// MAC is its complete entry in the neighbour table on the default route's
+// interface (IPv4 only: there is no IPv6 neighbour table file), else empty.
+// The external address is the last one read on this gateway (address and
+// MAC), else empty, so a return to a known gateway refuses that router's
+// address at once, and another router behind the same address gets none. A
+// change event applies it before the full Read completes.
 func (s *Sources) ReadLocal() (Network, error) {
 	addrs := s.Addrs
 	if addrs == nil {
@@ -124,7 +144,13 @@ func (s *Sources) ReadLocal() (Network, error) {
 		return Network{}, errors.New("netguard: no non-loopback interface address")
 	}
 	if b, err := read("/proc/net/route"); err == nil {
-		n.Gateway = Gateway4(string(b))
+		var dev string
+		n.Gateway, dev = gateway4(string(b))
+		if n.Gateway.IsValid() {
+			if b, err := read("/proc/net/arp"); err == nil {
+				n.GatewayMAC = NeighbourMAC(string(b), n.Gateway, dev)
+			}
+		}
 	}
 	if !n.Gateway.IsValid() {
 		if b, err := read("/proc/net/ipv6_route"); err == nil {
@@ -141,7 +167,7 @@ func (s *Sources) ReadLocal() (Network, error) {
 	}
 	s.mu.Lock()
 	if n.Gateway.IsValid() {
-		n.External = s.externalLocked(n.Gateway)
+		n.External = s.externalLocked(n.Gateway, n.GatewayMAC)
 	}
 	s.mu.Unlock()
 	return n, nil
@@ -179,7 +205,14 @@ func Prefixes(as []net.Addr) []netip.Prefix {
 // Gateway4 returns the default gateway in /proc/net/route text: the
 // lowest-metric row whose destination and mask are zero.
 func Gateway4(table string) netip.Addr {
+	gw, _ := gateway4(table)
+	return gw
+}
+
+// gateway4 is Gateway4 with the route's interface.
+func gateway4(table string) (netip.Addr, string) {
 	var best netip.Addr
+	var dev string
 	bestMetric := -1
 	sc := bufio.NewScanner(strings.NewReader(table))
 	for sc.Scan() {
@@ -203,10 +236,37 @@ func Gateway4(table string) netip.Addr {
 		if bestMetric < 0 || m < bestMetric {
 			var b [4]byte
 			binary.LittleEndian.PutUint32(b[:], uint32(gw))
-			best, bestMetric = netip.AddrFrom4(b), m
+			best, bestMetric, dev = netip.AddrFrom4(b), m, f[0]
 		}
 	}
-	return best
+	return best, dev
+}
+
+// NeighbourMAC returns ip's MAC in /proc/net/arp text: a complete entry
+// (ATF_COM) on interface dev, in canonical lower case, else empty.
+func NeighbourMAC(table string, ip netip.Addr, dev string) string {
+	sc := bufio.NewScanner(strings.NewReader(table))
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		// IP address, HW type, Flags, HW address, Mask, Device
+		if len(f) < 6 || f[5] != dev {
+			continue
+		}
+		a, err := netip.ParseAddr(f[0])
+		if err != nil || a != ip {
+			continue
+		}
+		flags, err := strconv.ParseUint(strings.TrimPrefix(f[2], "0x"), 16, 32)
+		if err != nil || flags&0x2 == 0 {
+			continue
+		}
+		hw, err := net.ParseMAC(f[3])
+		if err != nil || strings.Trim(string(hw), "\x00") == "" {
+			continue
+		}
+		return hw.String()
+	}
+	return ""
 }
 
 // Gateway6 returns the default gateway in /proc/net/ipv6_route text: the

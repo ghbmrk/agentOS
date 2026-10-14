@@ -243,3 +243,121 @@ func TestSourcesKeepExternalPerGateway(t *testing.T) {
 		t.Fatalf("an evicted gateway kept %v", n.External)
 	}
 }
+
+// The neighbour table gives the gateway's MAC: a complete entry on the
+// default route's interface, never an incomplete one or another interface's.
+func TestGatewayMAC(t *testing.T) {
+	arp := "IP address       HW type     Flags       HW address            Mask     Device\n" +
+		"192.168.1.1      0x1         0x2         02:00:00:00:00:AA     *        wlan0\n" +
+		"192.168.1.1      0x1         0x2         02:00:00:00:00:bb     *        eth0\n" +
+		"192.168.1.2      0x1         0x0         00:00:00:00:00:00     *        eth0\n"
+	gw := netip.MustParseAddr("192.168.1.1")
+	if m := NeighbourMAC(arp, gw, "eth0"); m != "02:00:00:00:00:bb" {
+		t.Fatalf("eth0 entry: %q", m)
+	}
+	if m := NeighbourMAC(arp, gw, "wlan0"); m != "02:00:00:00:00:aa" {
+		t.Fatalf("wlan0 entry, normalised: %q", m)
+	}
+	if m := NeighbourMAC(arp, netip.MustParseAddr("192.168.1.2"), "eth0"); m != "" {
+		t.Fatalf("an incomplete entry gave %q", m)
+	}
+	if m := NeighbourMAC(arp, gw, "eth1"); m != "" {
+		t.Fatalf("another interface's entry gave %q", m)
+	}
+	if gw, dev := gateway4("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\n"); gw != netip.MustParseAddr("192.168.1.1") || dev != "eth0" {
+		t.Fatalf("gateway4: %v %q", gw, dev)
+	}
+}
+
+// A different router behind the same gateway address does not get the
+// previous router's external address: not from the quick read, and not from
+// its own silent full read. Each router keeps its own (#1536).
+func TestSourcesTellRoutersApartBehindOneGatewayAddress(t *testing.T) {
+	g := &gwSources{}
+	var answer netip.Addr
+	g.ext = func(context.Context) (netip.Addr, error) {
+		if !answer.IsValid() {
+			return netip.Addr{}, errors.New("no answer")
+		}
+		return answer, nil
+	}
+	g.gw.Store("0101A8C0")
+	g.mac.Store("02:00:00:00:00:0a")
+	s := g.sources()
+	eA := netip.MustParseAddr("8.8.8.8")
+	answer = eA
+	if n, _ := s.Read(); n.External != eA {
+		t.Fatalf("router A read: %+v", n)
+	}
+	g.mac.Store("02:00:00:00:00:0b")
+	answer = netip.Addr{} // router B is silent
+	if n, _ := s.ReadLocal(); n.External.IsValid() {
+		t.Fatalf("router B's quick read got %v", n.External)
+	}
+	if n, _ := s.Read(); n.External.IsValid() {
+		t.Fatalf("router B's silent full read got %v", n.External)
+	}
+	g.mac.Store("") // a link flap flushed the neighbour entry
+	if n, _ := s.ReadLocal(); n.External.IsValid() {
+		t.Fatalf("a quick read with no neighbour entry got %v", n.External)
+	}
+	g.mac.Store("02:00:00:00:00:0a")
+	if n, _ := s.ReadLocal(); n.External != eA {
+		t.Fatalf("back on router A: %v, want %v", n.External, eA)
+	}
+	// The NAT-PMP request itself resolves the neighbour entry: an answer read
+	// with no entry at the start is filed under the MAC seen after it.
+	eC := netip.MustParseAddr("9.9.9.9")
+	g.gw.Store("0103A8C0")
+	g.mac.Store("")
+	g.ext = func(context.Context) (netip.Addr, error) {
+		g.mac.Store("02:00:00:00:00:0c")
+		return eC, nil
+	}
+	if n, _ := s.Read(); n.External != eC {
+		t.Fatalf("answer with the entry resolved during the read: %+v", n)
+	}
+	if n, _ := s.ReadLocal(); n.External != eC {
+		t.Fatalf("router C's answer not kept: %v", n.External)
+	}
+}
+
+// A NAT-PMP answer is the router's at the gateway the request went to. If
+// the gateway changes while the request is in flight (another address, or
+// the same address with another router's MAC), the answer is dropped: it is
+// neither returned nor filed under either gateway (#1536).
+func TestGatewayChangeDuringNATPMPDropsAnswer(t *testing.T) {
+	for _, tc := range []struct{ name, gw2, mac2 string }{
+		{"new address", "0102A8C0", "02:00:00:00:00:0b"},
+		{"same address, new router", "0101A8C0", "02:00:00:00:00:0b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := netip.MustParseAddr("8.8.8.8")
+			g := &gwSources{}
+			g.gw.Store("0101A8C0")
+			g.mac.Store("02:00:00:00:00:0a")
+			g.ext = func(context.Context) (netip.Addr, error) {
+				g.gw.Store(tc.gw2) // the move lands during the wait
+				g.mac.Store(tc.mac2)
+				return x, nil
+			}
+			s := g.sources()
+			n, err := s.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n.External == x {
+				t.Fatalf("the answer was returned across the move: %+v", n)
+			}
+			g.ext = func(context.Context) (netip.Addr, error) { return netip.Addr{}, errors.New("no answer") }
+			if n, _ := s.ReadLocal(); n.External.IsValid() {
+				t.Fatalf("the answer was filed under the new gateway: %v", n.External)
+			}
+			g.gw.Store("0101A8C0")
+			g.mac.Store("02:00:00:00:00:0a")
+			if n, _ := s.ReadLocal(); n.External.IsValid() {
+				t.Fatalf("the answer was filed under the read-start gateway: %v", n.External)
+			}
+		})
+	}
+}

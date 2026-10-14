@@ -105,6 +105,10 @@ type Network struct {
 	Prefixes []netip.Prefix
 	// Gateway is the learned default gateway.
 	Gateway netip.Addr
+	// GatewayMAC is the gateway's MAC from the neighbour table, empty when
+	// none is known. Together with Gateway it tells routers behind one
+	// gateway address apart (#1536).
+	GatewayMAC string
 	// External is the router's external address, where NAT-PMP or PCP
 	// reports it.
 	External netip.Addr
@@ -222,7 +226,7 @@ func (p *Policy) learnLocked(out Network) {
 
 // normalise drops zones, unmaps, and caps IPv6 prefixes at /56.
 func normalise(n Network) Network {
-	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), External: n.External.WithZone("").Unmap(), Resolver: n.Resolver.WithZone("").Unmap()}
+	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), GatewayMAC: n.GatewayMAC, External: n.External.WithZone("").Unmap(), Resolver: n.Resolver.WithZone("").Unmap()}
 	if out.Resolver.IsLoopback() || out.Resolver.IsUnspecified() {
 		out.Resolver = netip.Addr{}
 	}
@@ -273,7 +277,7 @@ func (p *Policy) Refresh() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.gen != gen {
-		if out.Gateway == p.net.Gateway {
+		if sameGateway(out, p.net) {
 			if out.External.IsValid() {
 				p.net.External = out.External
 			}
@@ -357,7 +361,7 @@ func (p *Policy) quickLearn() {
 		quickLockedHook()
 	}
 	out := normalise(n)
-	if out.Gateway.IsValid() && out.Gateway == old.Gateway {
+	if out.Gateway.IsValid() && sameGateway(out, old) {
 		out.External = old.External
 		if !out.Resolver.IsValid() {
 			out.Resolver = old.Resolver
@@ -370,6 +374,13 @@ func (p *Policy) quickLearn() {
 		p.releaseLocked()
 	}
 	p.learnLocked(out)
+}
+
+// sameGateway reports whether a and b learned the same gateway: the same
+// address and the same MAC. A MAC known on one side only is a different
+// gateway, since a link flap that brings another router flushes the entry.
+func sameGateway(a, b Network) bool {
+	return a.Gateway == b.Gateway && a.GatewayMAC == b.GatewayMAC
 }
 
 // quickGapHook, when set by a test, runs after a quick read returns and

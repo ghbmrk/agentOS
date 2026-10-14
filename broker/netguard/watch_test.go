@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -356,6 +357,7 @@ func TestQuickLearnGatewayChangeDropsOldExternal(t *testing.T) {
 // when ext is nil.
 type gwSources struct {
 	gw     atomic.Value // string, /proc/net/route hex
+	mac    atomic.Value // string, the gateway's MAC in /proc/net/arp; unset or "" is no entry
 	answer chan netip.Addr
 	ext    func(ctx context.Context) (netip.Addr, error)
 }
@@ -371,6 +373,10 @@ func (g *gwSources) sources() *Sources {
 				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t" + g.gw.Load().(string) + "\t0003\t0\t0\t100\t00000000\n"), nil
 			case "/etc/resolv.conf":
 				return []byte("nameserver 192.168.1.53\n"), nil
+			case "/proc/net/arp":
+				if m, _ := g.mac.Load().(string); m != "" {
+					return []byte(arpTable(g.gw.Load().(string), m)), nil
+				}
 			}
 			return nil, errors.New("absent")
 		},
@@ -654,4 +660,71 @@ func waitDenied(t *testing.T, p *Policy, a netip.Addr) {
 		}
 	}
 	t.Fatalf("%v never refused as the router's address", a)
+}
+
+// arpTable is /proc/net/arp text with one complete eth0 entry for the
+// gateway (route-table hex) at mac.
+func arpTable(gwHex, mac string) string {
+	v, _ := strconv.ParseUint(gwHex, 16, 32)
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], uint32(v))
+	return "IP address       HW type     Flags       HW address            Mask     Device\n" +
+		netip.AddrFrom4(b).String() + "      0x1         0x2         " + mac + "     *        eth0\n"
+}
+
+// A different router behind the same gateway address is a new gateway: the
+// quick read after the move (a new MAC in the neighbour table, or none yet
+// after a link flap flushed it) does not carry the previous router's
+// external address over, so public destinations wait for the new router's
+// full read, and the new router's address it learns is refused (#1536).
+func TestSameGatewayNewRouterHoldsPublicUntilFullRead(t *testing.T) {
+	for _, tc := range []struct{ name, macB string }{
+		{"new MAC", "02:00:00:00:00:0b"},
+		{"neighbour entry flushed", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eA, eB := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+			public := netip.MustParseAddr("1.1.1.1")
+			g := &gwSources{answer: make(chan netip.Addr, 1)}
+			g.gw.Store("0101A8C0")
+			g.mac.Store("02:00:00:00:00:0a")
+			s := g.sources()
+			p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+			g.answer <- eA
+			if err := p.Refresh(); err != nil {
+				t.Fatal(err)
+			}
+			g.mac.Store(tc.macB) // router B, same gateway address
+			p.quickLearn()
+			held := make(chan error, 2)
+			go func() { held <- p.Check(context.Background(), eB, 443, "tcp") }()
+			go func() { held <- p.Check(context.Background(), public, 443, "tcp") }()
+			select {
+			case err := <-held:
+				t.Fatalf("a public destination was decided before router B's full read: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			g.mac.Store("02:00:00:00:00:0b") // the NAT-PMP request resolves B
+			g.answer <- eB
+			if err := p.Refresh(); err != nil {
+				t.Fatal(err)
+			}
+			var denied, allowed int
+			for i := 0; i < 2; i++ {
+				select {
+				case err := <-held:
+					if errors.Is(err, ErrDenied) {
+						denied++
+					} else if err == nil {
+						allowed++
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("a held dial did not go ahead after the full read stored")
+				}
+			}
+			if denied != 1 || allowed != 1 {
+				t.Fatalf("after router B's full read: %d refused, %d allowed; want B's address refused and the public one allowed", denied, allowed)
+			}
+		})
+	}
 }
