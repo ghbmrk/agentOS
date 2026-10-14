@@ -307,7 +307,7 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	stopped := mc.State != Running
 	mc.mu.Unlock()
 	if stopped {
-		m.cfg.Admit.Release(id)
+		m.release(mc)
 	}
 	return s, err
 }
@@ -394,7 +394,7 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 		err = fmt.Errorf("%s: %w", id, overlay.ErrDeleteFailed)
 	}
 	if stopped {
-		m.cfg.Admit.Release(id)
+		m.release(mc)
 	}
 	// A preempted worker waits for its own resume, not a deletion's
 	// (security R2 on #166). Admission may have no room now, or STOP may

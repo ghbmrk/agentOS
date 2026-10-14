@@ -75,7 +75,7 @@ func (m *Manager) forgetMachine(ctx context.Context, mc *machine, since time.Tim
 		// As Rollback: a failed restart leaves the machine stopped, and its
 		// admission goes, outside the machine's lock.
 		if stopped {
-			m.cfg.Admit.Release(mc.ID)
+			m.release(mc)
 		}
 	}()
 	// Erasure never waits behind a worker's command (security F1 on #146).

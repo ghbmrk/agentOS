@@ -67,7 +67,7 @@ func (m *Manager) CheckpointAndStop(ctx context.Context, id string) (Snapshot, e
 		return Snapshot{}, err
 	}
 	mc.mu.Unlock()
-	m.cfg.Admit.Release(id)
+	m.release(mc)
 	return s, nil
 }
 
