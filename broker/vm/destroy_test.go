@@ -358,6 +358,60 @@ func TestRES2SuccessorCannotUseAPredecessorsSnapshots(t *testing.T) {
 			t.Errorf("who = %q, want the successor's", got)
 		}
 	})
+	t.Run("worker-recorded-before-instance", func(t *testing.T) {
+		// A snapshot and machine recorded before Instance (security S-N1
+		// on #1575): after the upgrade the snapshot is the machine's own,
+		// and no successor's.
+		e := newEnv(t, 4096)
+		a1 := e.create("a1", admission.Experiment, 500)
+		_, err := e.m.CreateWorker(bg, "wk-a", a1.Lineage, workerSpec(Public))
+		must(t, err)
+		e.guestWrite("wk-a", "who", "predecessor")
+		s, err := e.m.Checkpoint(bg, "wk-a")
+		must(t, err)
+		s.Instance = ""
+		must(t, writeJSON(filepath.Join(e.m.snapDir(s.ID), "meta.json"), s))
+		mc, err := e.m.get("wk-a")
+		must(t, err)
+		mc.mu.Lock()
+		mc.Instance = ""
+		must(t, writeJSON(filepath.Join(e.m.machineDir("wk-a"), "meta.json"), mc.Machine))
+		mc.mu.Unlock()
+		e.adm.Release("wk-a")
+		e.open() // the upgrade
+		e.guestWrite("wk-a", "who", "later")
+		must(t, e.m.Rollback(bg, "wk-a", s.ID))
+		if got := e.guestRead("wk-a", "who"); got != "predecessor" {
+			t.Errorf("rollback to its own snapshot after the upgrade: who = %q", got)
+		}
+		must(t, e.m.Destroy(bg, "wk-a"))
+		_, err = e.m.CreateWorker(bg, "wk-a", a1.Lineage, workerSpec(Public))
+		must(t, err)
+		e.guestWrite("wk-a", "who", "successor")
+		e.adm.Release("wk-a")
+		e.open() // stamped at the first load, on disk: not the successor's now
+		if err := e.m.Rollback(bg, "wk-a", s.ID); !errors.Is(err, ErrLineage) {
+			t.Errorf("successor's rollback to the predecessor's pre-upgrade snapshot: %v, want ErrLineage", err)
+		}
+		if got := e.guestRead("wk-a", "who"); got != "successor" {
+			t.Errorf("who = %q, want the successor's", got)
+		}
+	})
+	t.Run("recorded-before-instance-other-lineage", func(t *testing.T) {
+		// Recorded before Instance in another lineage than the machine of
+		// its ID at the upgrade: it is no machine's.
+		e := newEnv(t, 4096)
+		e.create("exp", admission.Experiment, 500)
+		s, err := e.m.Checkpoint(bg, "exp")
+		must(t, err)
+		s.Instance, s.Lineage = "", "elsewhere"
+		must(t, writeJSON(filepath.Join(e.m.snapDir(s.ID), "meta.json"), s))
+		e.adm.Release("exp")
+		e.open()
+		if err := e.m.Rollback(bg, "exp", s.ID); !errors.Is(err, ErrLineage) {
+			t.Errorf("rollback to another lineage's pre-upgrade snapshot: %v, want ErrLineage", err)
+		}
+	})
 	t.Run("merge", func(t *testing.T) {
 		e := newEnv(t, 4096)
 		e.create("a1", admission.Experiment, 500)
@@ -421,6 +475,86 @@ func TestRES2SuccessorCannotUseAPredecessorsSnapshots(t *testing.T) {
 			t.Errorf("merged into the successor: f = %q", got)
 		}
 	})
+}
+
+// Preempt has passed killLive's retired check and is killing when Destroy
+// retires the machine and a successor is created under its ID. killMu
+// holds the retire off until the kill is done, so no successor exists for
+// the ID-named kill to reach (security S1a, potency P-B2 on #1575).
+func TestRES2PreemptKillHoldsOffDestroy(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("exp", admission.Experiment, 500)
+	old, err := e.m.get("exp")
+	must(t, err)
+	old.mu.Lock() // Preempt cannot take it: the lock-free kill
+	fired := false
+	e.rt.onKill = func(id string) {
+		if fired || id != "exp" {
+			return
+		}
+		fired = true
+		made := make(chan struct{})
+		go func() {
+			must(t, e.m.Destroy(bg, "exp"))
+			e.create("exp", admission.Experiment, 500)
+			close(made)
+		}()
+		old.mu.Unlock()
+		select {
+		case <-made: // without killMu: the successor exists now
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	_ = e.m.Preempt("exp")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if w, err := e.m.Get("exp"); err == nil && w.State == Running && w.Instance != old.Instance {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no successor")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !fired {
+		t.Fatal("the kill never ran")
+	}
+	if _, ok := e.rt.memOf("exp"); !ok {
+		t.Error("Preempt's kill reached the successor")
+	}
+}
+
+// ForgetSince of one lineage resets a machine whose ID an earlier machine
+// of another lineage had, and deletes only that machine's own snapshots
+// taken since: the earlier machine's stay its lineage's, a surviving
+// fork's base among them (#1575).
+func TestRES2ForgetSinceLeavesAnEarlierMachinesSnapshotsOfAnotherLineage(t *testing.T) {
+	e := newEnv(t, 4096)
+	a1 := e.create("a1", admission.Experiment, 500)
+	a2 := e.create("a2", admission.Experiment, 500)
+	since := time.Now()
+	_, err := e.m.CreateWorker(bg, "wk-a", a1.Lineage, workerSpec(Public))
+	must(t, err)
+	_, err = e.m.Fork(bg, "wk-a", []string{"wk-b"})
+	must(t, err)
+	wb, err := e.m.Get("wk-b")
+	must(t, err)
+	prev, err := e.m.Checkpoint(bg, "wk-a")
+	must(t, err)
+	must(t, e.m.Destroy(bg, "wk-a"))
+	_, err = e.m.CreateWorker(bg, "wk-a", a2.Lineage, workerSpec(Public))
+	must(t, err)
+	own, err := e.m.Checkpoint(bg, "wk-a")
+	must(t, err)
+	must(t, e.m.ForgetSince(bg, a2.Lineage, since))
+	for _, id := range []string{prev.ID, wb.ForkBase} {
+		if _, err := e.m.Snapshot(id); err != nil {
+			t.Errorf("snapshot %s of the earlier wk-a, of lineage %s, was deleted: %v", id, a1.Lineage, err)
+		}
+	}
+	if _, err := e.m.Snapshot(own.ID); err == nil {
+		t.Errorf("the reset wk-a's own snapshot %s, taken since, was kept", own.ID)
+	}
 }
 
 // A wake that checked the old machine, which is then destroyed and

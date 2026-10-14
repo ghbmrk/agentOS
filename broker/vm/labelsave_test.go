@@ -135,10 +135,12 @@ func TestLabelDurableMergeSavesTheLabelFirst(t *testing.T) {
 // privateSnapOfDestroyed leaves a private snapshot of a destroyed machine
 // "a" holding file x, and a new public machine created under the same ID.
 // Destroy keeps snapshots. A snapshot of this release names its machine's
-// life (Instance), and no other machine may use it (#1561); one recorded
-// before lineages were has neither, and ownSnap still lets any machine of
-// its ID use it. So the snapshot is made one of those, the one way left
-// for a machine to reach a snapshot labelled above it.
+// life (Instance), and no other machine may use it (#1561). One recorded
+// before lineages and Instance were, of a machine replaced before the
+// upgrade, is stamped at load with the machine then of its ID, which may
+// use it from then on (stampLegacy). So the snapshot is made one of those,
+// and the broker reopened: the one way left for a machine to reach a
+// snapshot labelled above it.
 func (e *env) privateSnapOfDestroyed() Snapshot {
 	e.create("a", admission.Accepted, 500)
 	must(e.t, e.m.RaiseLabel("a", Private))
@@ -148,13 +150,14 @@ func (e *env) privateSnapOfDestroyed() Snapshot {
 	must(e.t, e.m.Destroy(bg, "a"))
 	s.Lineage, s.Instance = "", ""
 	must(e.t, writeJSON(filepath.Join(e.m.snapDir(s.ID), "meta.json"), s))
-	e.m.mu.Lock()
-	e.m.snaps[s.ID] = s
-	e.m.mu.Unlock()
 	e.create("a", admission.Accepted, 500)
+	e.adm.Release("a")
+	e.open() // the upgrade
 	if l := e.labelOf("a"); l != Public {
 		e.t.Fatalf("re-created machine is %s, want public", l)
 	}
+	s, err = e.m.Snapshot(s.ID)
+	must(e.t, err)
 	return s
 }
 

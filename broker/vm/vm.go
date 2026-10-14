@@ -174,8 +174,8 @@ type Snapshot struct {
 	// snapshots taken before it was recorded.
 	Lineage string `json:",omitempty"`
 	// Instance is the machine's Instance when taken: only that machine's
-	// life may roll back to it (inLineage). Empty on snapshots taken
-	// before it was recorded.
+	// life may roll back to it (inLineage). A snapshot recorded before it
+	// was is given one at load (stampLegacy).
 	Instance string `json:",omitempty"`
 	// Sleep marks CheckpointAndStop's checkpoint, the only kind
 	// ResumeFromCheckpoint restores (PE7). Starts is the machine's start
@@ -1362,16 +1362,10 @@ func inLineage(mc *machine, s Snapshot) bool {
 // ownSnap reports whether s was taken of mc in this life: same ID and same
 // Instance. A machine destroyed and replaced under its ID leaves snapshots
 // the new machine must not use, even in the same lineage (a worker
-// recreated for one agent, #1561). A snapshot older than Instance records
-// goes by Lineage, as far as it has one.
+// recreated for one agent, #1561). Every snapshot has an Instance: one
+// recorded before Instance gets its owner's at load (stampLegacy).
 func ownSnap(mc *machine, s Snapshot) bool {
-	if s.Machine != mc.ID {
-		return false
-	}
-	if s.Instance != "" {
-		return s.Instance == mc.Instance
-	}
-	return s.Lineage == "" || s.Lineage == mc.Lineage
+	return s.Machine == mc.ID && s.Instance == mc.Instance
 }
 
 // Rollback returns a machine to snapshot snapID (REV-4). A full checkpoint
@@ -2148,6 +2142,35 @@ func (m *Manager) load(ctx context.Context) error {
 		if err := m.saveMachine(mc); err != nil {
 			return err
 		}
+	}
+	return m.stampLegacy()
+}
+
+// stampLegacy gives each snapshot recorded before Instance one, once, at
+// load (security S-N1 on #1575). The machine of its ID gets it when the
+// snapshot is of its lineage (or recorded before lineages): it was that
+// machine's to use before the upgrade, and stays so. Any other gets an
+// Instance no machine has. So a machine destroyed and replaced under its
+// ID after the upgrade leaves its old snapshots behind, as one of this
+// release does.
+func (m *Manager) stampLegacy() error {
+	for id, s := range m.snaps {
+		if s.Instance != "" {
+			continue
+		}
+		if mc, ok := m.machines[s.Machine]; ok && (s.Lineage == "" || s.Lineage == mc.Lineage) {
+			s.Instance = mc.Instance
+		} else {
+			inst, err := newInstance()
+			if err != nil {
+				return err
+			}
+			s.Instance = inst
+		}
+		if err := writeJSON(filepath.Join(m.snapDir(id), "meta.json"), s); err != nil {
+			return err
+		}
+		m.snaps[id] = s
 	}
 	return nil
 }

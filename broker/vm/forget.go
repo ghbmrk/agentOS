@@ -119,7 +119,10 @@ func (m *Manager) forgetMachine(ctx context.Context, mc *machine, since time.Tim
 		errs = append(errs, err)
 	}
 	for _, s := range m.Snapshots(mc.ID) {
-		if !s.Taken.Before(since) {
+		// Only its own: an earlier machine of its ID, of another lineage
+		// maybe, keeps its snapshots (a surviving fork's base among them);
+		// those of this lineage go in ForgetSince's lineage sweep.
+		if ownSnap(mc, s) && !s.Taken.Before(since) {
 			if err := m.removeSnapshot(s.ID); err != nil {
 				errs = append(errs, err)
 			}

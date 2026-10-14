@@ -31,6 +31,9 @@ type fakeRuntime struct {
 	refuseKill error           // Kill's error, before it kills: the guest lives on
 	onPause    func(id string) // runs as the guest is paused
 	onCkpt     func(id string) // runs during a memory checkpoint
+	// onKill runs as Kill starts, before the runtime takes its own lock,
+	// so it may call back into the manager.
+	onKill func(id string)
 	// onStart runs as a machine starts or is restored, before the runtime
 	// takes its own lock, so it may call back into the manager.
 	onStart func(id string)
@@ -119,6 +122,9 @@ func (f *fakeRuntime) Checkpoint(_ context.Context, id, image string) error {
 }
 
 func (f *fakeRuntime) Kill(_ context.Context, l Launch) error {
+	if f.onKill != nil {
+		f.onKill(l.ID)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.refuseKill != nil {
