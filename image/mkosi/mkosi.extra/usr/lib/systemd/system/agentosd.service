@@ -27,6 +27,7 @@ ExecStartPre=/usr/lib/agentos/drive-id check
 # with-uids swaps each @uid:NAME for that user's uid (agentos-setup.conf).
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} \
         -modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui \
+        -netjoin-sock /run/agentos-netjoin/netjoin.sock \
         -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw
 Restart=on-failure
 

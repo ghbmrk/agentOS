@@ -15,7 +15,9 @@ import shutil
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 import unittest.mock
 
@@ -53,20 +55,33 @@ def write(root, rel, text="", mode=0o644):
 
 
 # The image's no-dump files (IMG-nodump): copied into a test tree from mkosi.extra, except the
-# page's unit, which image/build.sh installs from its command's directory.
+# page's and the access point loader's units, which image/build.sh installs from their commands'
+# directories.
 NODUMP = ("usr/lib/systemd/coredump.conf.d/50-agentos-nodump.conf",
           "usr/lib/systemd/system.conf.d/50-agentos-nodump.conf",
           "usr/lib/sysctl.d/99-agentos-nodump.conf",
           "usr/lib/systemd/system/agentosd.service",
           "usr/lib/systemd/system/agentos-egress.service",
-          "usr/lib/systemd/system/agentos-localui.service")
+          "usr/lib/systemd/system/agentos-localui.service",
+          "usr/lib/systemd/system/agentos-ap.service")
 NODUMP_SRC = {"usr/lib/systemd/system/agentos-localui.service":
-              ROOT / "broker/cmd/agentos-localui/agentos-localui.service"}
+              ROOT / "broker/cmd/agentos-localui/agentos-localui.service",
+              "usr/lib/systemd/system/agentos-ap.service": ROOT / "broker/cmd/agentos-ap/agentos-ap.service"}
 
 
 def nodump(root):
     for rel in NODUMP:
         write(root, rel, NODUMP_SRC.get(rel, MK / "mkosi.extra" / rel).read_text())
+
+
+BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
+
+
+def radio(root):
+    # Stand-ins for firmware-mediatek's MT7922 files (#1415), and the image's Bluetooth block.
+    for rel in check.RADIO_FIRMWARE:
+        write(root, rel, "fw")
+    write(root, BT_BLOCK, (MK / "mkosi.extra" / BT_BLOCK).read_text())
 
 
 class TreeCheckTest(unittest.TestCase):
@@ -80,6 +95,7 @@ class TreeCheckTest(unittest.TestCase):
         write(self.root, "usr/lib/agentos/agentosd", "\x7fELF", 0o755)
         (self.root / "var/lib/agentos").mkdir(parents=True)
         nodump(self.root)
+        radio(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -139,6 +155,91 @@ class TreeCheckTest(unittest.TestCase):
             s.bind(str(p))
         self.assertTrue(stat.S_ISSOCK(os.lstat(p).st_mode))
         self.assertIn("broker.sock", " ".join(check.violations(self.root)))
+
+    # REQ: CH-7, HW-10
+    def test_tree_without_the_radio_firmware_is_refused(self):
+        # #1415: without firmware-mediatek's MT7922 files mt7921e brings up no wlan0, so the setup
+        # network (CH-7, HW-10) is never served on the M6 Ultra. Each file is required.
+        for rel in check.RADIO_FIRMWARE:
+            f = self.root / rel
+            f.unlink()
+            self.assertIn(rel, " ".join(check.violations(self.root)))
+            write(self.root, rel, "fw")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_names_are_the_ones_mt7921e_requests(self):
+        # MT7922_FIRMWARE_WM and MT7922_ROM_PATCH in the kernel's mt792x.h. Pinned literally: the
+        # same package ships MT7961 files, so a wrong name here would still build.
+        self.assertEqual(check.RADIO_FIRMWARE, (
+            "usr/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+            "usr/lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin"))
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_must_be_a_nonempty_file_in_the_tree(self):
+        # An empty file, a directory, a dangling link, a loop, or a link whose absolute target exists
+        # only on the build host is no firmware on the booted box.
+        rel = check.RADIO_FIRMWARE[0]
+        f = self.root / rel
+        host = write(pathlib.Path(self.tmp.name + "-host"), "fw.bin", "fw")
+        self.addCleanup(shutil.rmtree, self.tmp.name + "-host")
+        cases = {
+            "empty": lambda: f.write_bytes(b""),
+            "directory": lambda: f.mkdir(),
+            "dangling": lambda: f.symlink_to("missing.bin"),
+            "loop": lambda: f.symlink_to(f.name),
+            "host target": lambda: f.symlink_to(host),
+            "escapes the tree": lambda: f.symlink_to("../" * 12 + str(host).lstrip("/")),
+        }
+        for name, make in cases.items():
+            with self.subTest(name):
+                if f.is_symlink() or f.is_file():
+                    f.unlink()
+                elif f.is_dir():
+                    f.rmdir()
+                make()
+                self.assertIn(rel, " ".join(check.violations(self.root)))
+        f.unlink()
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_links_resolve_inside_the_tree(self):
+        # Debian's firmware packages link some names to others; an absolute target means the image's.
+        rel = check.RADIO_FIRMWARE[0]
+        f = self.root / rel
+        write(self.root, "usr/lib/firmware/mediatek/real.bin", "fw")
+        for target in ("real.bin", "/usr/lib/firmware/mediatek/real.bin", "/lib/firmware/mediatek/real.bin"):
+            with self.subTest(target):
+                f.unlink()
+                f.symlink_to(target)
+                if target.startswith("/lib/"):
+                    (self.root / "lib").symlink_to("usr/lib")
+                self.assertEqual(check.violations(self.root), [])
+
+    # REQ: CH-7, HW-10
+    def test_bluetooth_must_stay_blocked(self):
+        # The MT7922's Bluetooth half (btusb, btmtk) would come up from the same package; nothing in
+        # the spec uses it, so the image blocks both modules (#1415 security R1).
+        (self.root / BT_BLOCK).unlink()
+        v = " ".join(check.violations(self.root))
+        self.assertIn("btusb", v)
+        self.assertIn("btmtk", v)
+        # An earlier install line for the module wins in kmod, so a drop-in sorted first undoes it.
+        write(self.root, BT_BLOCK, (MK / "mkosi.extra" / BT_BLOCK).read_text())
+        write(self.root, "etc/modprobe.d/00-bt.conf", "install btusb /sbin/modprobe --ignore-install btusb\n")
+        self.assertIn("btusb", " ".join(check.violations(self.root)))
+        # The same file name in /etc replaces the image's file.
+        (self.root / "etc/modprobe.d/00-bt.conf").unlink()
+        write(self.root, "etc/modprobe.d/" + BT_BLOCK.rsplit("/", 1)[1], "# emptied\n")
+        self.assertIn("btmtk", " ".join(check.violations(self.root)))
+        (self.root / "etc/modprobe.d" / BT_BLOCK.rsplit("/", 1)[1]).unlink()
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_compressed_radio_firmware_counts(self):
+        # The kernel loader also finds name.xz and name.zst, if Debian ever ships them compressed.
+        for i, rel in enumerate(check.RADIO_FIRMWARE):
+            (self.root / rel).unlink()
+            write(self.root, rel + (".xz", ".zst")[i % 2], "fw")
+        self.assertEqual(check.violations(self.root), [])
 
     def test_main_exits_nonzero_on_violation(self):
         write(self.root, "var/lib/systemd/random-seed", "x")
@@ -751,6 +852,25 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(s["Signed-By"], "/usr/share/keyrings/debian-archive-keyring.gpg")
             self.assertNotIn("Trusted", s)
 
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_comes_from_the_pinned_snapshot(self):
+        # #1415: firmware-mediatek is in Debian's non-free-firmware component. The image enables it,
+        # in mkosi.conf and in the build's apt sources, from the same snapshot as main, and installs
+        # the package.
+        c = ini(MK / "mkosi.conf")
+        self.assertEqual(c["Distribution"]["Repositories"].split(","), ["main", "non-free-firmware"])
+        self.assertIn("firmware-mediatek", c["Content"]["Packages"].split())
+        mirror = c["Distribution"]["Mirror"].rstrip("/")
+        text = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_text()
+        stanzas = [dict(l.split(": ", 1) for l in s.splitlines() if l and not l.startswith("#"))
+                   for s in text.split("\n\n")]
+        stanzas = [s for s in stanzas if s]
+        for s in stanzas:
+            self.assertEqual(s["Components"].split(), ["main", "non-free-firmware"], s["URIs"])
+        self.assertEqual([s["URIs"].rstrip("/") for s in stanzas if "trixie" in s["Suites"].split()], [mirror])
+        # Every packaged line in Packages= is a package name: an indented comment would become one.
+        self.assertFalse([p for p in c["Content"]["Packages"].split() if not re.fullmatch(r"[a-z0-9][a-z0-9.+-]+", p)])
+
     def test_ab_usr_slots(self):
         # UPD-1: two equal /usr slots plus verity, so an update writes the idle one.
         parts = [ini(f)["Partition"] for f in sorted((MK / "mkosi.repart").glob("*.conf"))]
@@ -853,6 +973,7 @@ class NoDumpTest(unittest.TestCase):
         self.root = pathlib.Path(self.tmp.name)
         write(self.root, "etc/machine-id", "uninitialized\n")
         nodump(self.root)
+        radio(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -872,7 +993,7 @@ class NoDumpTest(unittest.TestCase):
 
     def test_removing_any_dump_setting_fails_the_build(self):
         for rel, needle in zip(NODUMP, ("Storage=none", "DefaultLimitCORE=0", "kernel.core_pattern",
-                                        "LimitCORE=0", "LimitCORE=0", "LimitCORE=0")):
+                                        "LimitCORE=0", "LimitCORE=0", "LimitCORE=0", "LimitCORE=0")):
             with self.subTest(rel=rel):
                 f = self.root / rel
                 text = f.read_text()
@@ -1025,6 +1146,10 @@ class NoDumpTest(unittest.TestCase):
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 AGENTOS_LIB = MK / "mkosi.extra/usr/lib/agentos"
 PAGE_UNIT = ROOT / "broker/cmd/agentos-localui/agentos-localui.service"
+# The units image/build.sh installs from their commands' directories.
+AP_UNIT = ROOT / "broker/cmd/agentos-ap/agentos-ap.service"
+MODEM_UNIT = ROOT / "broker/cmd/agentos-modem/agentos-modem.service"
+NETJOIN_UNIT = ROOT / "broker/cmd/agentos-netjoin/agentos-netjoin.service"
 
 
 def flags(cmd):
@@ -1070,6 +1195,156 @@ def arg(words, name):
     return words[i + 1]
 
 
+class UplinkTest(unittest.TestCase):
+    """#1416 (P2-1 uplink): plugging an Ethernet cable into the home router is all it takes to go
+    online. systemd-networkd gives any physical Ethernet port an address by DHCP and router
+    advertisement; the radio (access point, home Wi-Fi station) and every virtual link are not
+    matched, and the inbound drop holds whatever the link gets (I11; tests/test_inbound_netns.py)."""
+    # REQ: ONB-3, DEV-2, DEV-net-e
+
+    NET = MK / "mkosi.extra/usr/lib/systemd/network"
+    UPLINK = NET / "20-agentos-uplink.network"
+
+    def test_wired_uplink_is_physical_ethernet_with_dhcp(self):
+        u = ini(self.UPLINK)
+        m = u["Match"]
+        self.assertEqual(m["Type"], "ether")
+        # Not veth, bridge, macvlan, ...: the machines' and namespaces' links stay unconfigured here.
+        self.assertEqual(m["Kind"], "!*")
+        self.assertNotIn("Name", m)
+        self.assertEqual(u["Network"]["DHCP"], "yes")
+        # IPv6 comes from the home router's advertisements; the drop admits them (I11).
+        self.assertNotEqual(u["Network"].get("IPv6AcceptRA"), "no")
+
+    def test_no_network_file_matches_the_radio(self):
+        # The access point loader owns wlan0 (10-agentos-wlan.link); the home Wi-Fi station is #936's.
+        files = sorted(self.NET.glob("*.network"))
+        self.assertEqual([f.name for f in files], [self.UPLINK.name])
+        for f in files:
+            m = ini(f)["Match"]
+            self.assertNotIn("wlan", m.get("Type", "").split())
+            self.assertFalse(any(n.startswith(("wl", "ap")) for n in m.get("Name", "").split()), f.name)
+        self.assertEqual(ini(self.NET / "10-agentos-wlan.link")["Match"]["Type"], "wlan")
+
+    def test_networkd_is_enabled_and_behind_the_drop(self):
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().split("\n")
+        self.assertIn("enable systemd-networkd.service", preset)
+        d = ini(MK / "mkosi.extra/usr/lib/systemd/system/systemd-networkd.service.d/agentos-inbound.conf")["Unit"]
+        self.assertIn("agentos-inbound.service", d["Requires"].split())
+        self.assertIn("agentos-inbound.service", d["After"].split())
+
+    def report(self, links, addr="192.0.2.10/24", on_sleep=""):
+        # Runs boot-report on a stand-in /sys/class/net; ip answers addr for any link. A carrier of
+        # None leaves the file out, as the kernel's carrier read fails while a link is down; on_sleep
+        # runs (with $NET set) at each sleep, so a test can plug the cable in late.
+        with tempfile.TemporaryDirectory() as t:
+            t = pathlib.Path(t)
+            net, log = t / "net", t / "log"
+            for name, kind, carrier in links:
+                d = net / name
+                d.mkdir(parents=True)
+                (d / "type").write_text("1\n")
+                if carrier is not None:
+                    (d / "carrier").write_text("%d\n" % carrier)
+                if kind != "virtual":
+                    (d / "device").mkdir()
+                if kind == "wlan":
+                    (d / "wireless").mkdir()
+            stub(t, "ip", 'echo "$*" >>"%s"; [ -n "%s" ] && echo "2: $4    inet %s brd 192.0.2.255 scope global $4"'
+                 % (log, addr, addr))
+            stub(t, "sleep", 'echo "sleep $*" >>"%s"; NET="%s"; %s' % (log, net, on_sleep or ":"))
+            stub(t, "findmnt", "echo 1073741824")
+            stub(t, "systemd-bless-boot", "echo good")
+            script = (AGENTOS_LIB / "boot-report").read_text().replace(
+                "/usr/lib/systemd/systemd-bless-boot", str(t / "systemd-bless-boot"))
+            env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]), AGENTOS_SYS_NET=str(net))
+            out = subprocess.run(["sh", "-c", script], env=env, check=True, capture_output=True, text=True).stdout
+            calls = log.read_text() if log.exists() else ""
+            return out, calls
+
+    def test_boot_report_shows_the_wired_lease(self):
+        # CI's boot test plugs in a virtual NIC and reads this line (ci_boot.sh).
+        out, _ = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 1)])
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "agentos-uplink: enp1s0 192.0.2.10/24")
+        self.assertTrue(lines[1].startswith("agentos-boot: bless=good"), lines)
+
+    def test_boot_report_waits_briefly_without_a_cable(self):
+        # The radio and virtual links never count; an unplugged port gets about 5 s for carrier, no more.
+        out, calls = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 0)])
+        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertIn("sleep", calls)
+        self.assertLessEqual(calls.count("sleep"), 5)
+        self.assertNotIn("ip ", calls)
+
+    def test_boot_report_waits_for_carrier_on_a_cold_nic(self):
+        # Review P-2: on a cold boot the NIC can still be negotiating when the report runs. Carrier
+        # unreadable, then 0, then 1: the lease is still reported.
+        flip = ('n=$(grep -c sleep "$NET/../log"); [ "$n" = 2 ] && echo 0 >"$NET/enp1s0/carrier"; '
+                '[ "$n" = 3 ] && echo 1 >"$NET/enp1s0/carrier"; :')
+        out, calls = self.report([("enp1s0", "ether", None)], on_sleep=flip)
+        self.assertEqual(out.splitlines()[0], "agentos-uplink: enp1s0 192.0.2.10/24")
+        self.assertEqual(calls.count("sleep"), 3)
+
+    def test_boot_report_gives_up_on_a_lease_that_never_comes(self):
+        out, calls = self.report([("enp1s0", "ether", 1)], addr="")
+        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertLessEqual(calls.count("sleep"), 30)
+
+    def probe(self, mode):
+        # One probe through probe_inbound.py against a local stand-in for QEMU's forwarded port:
+        # "silent" completes the handshake and never answers (a guest that drops the SYN, as
+        # QEMU's user network accepts the host's connection itself), "closes" accepts and closes (a
+        # guest that answered, with a reset or from a listener), "none" listens nowhere.
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        if mode == "none":
+            srv.close()
+        else:
+            srv.listen(4)
+        stop = threading.Event()
+        def serve():
+            while mode == "closes" and not stop.is_set():
+                srv.settimeout(0.2)
+                try:
+                    c, _ = srv.accept()
+                    c.close()
+                except OSError:
+                    pass
+        t = threading.Thread(target=serve)
+        t.start()
+        try:
+            return subprocess.run([sys.executable, str(IMG / "probe_inbound.py"), "--wait", "1", "%d:22" % port],
+                                  check=True, capture_output=True, text=True, timeout=30).stdout
+        finally:
+            stop.set()
+            t.join()
+            srv.close()
+
+    def test_drop_probe_tells_a_silent_guest_from_an_answer(self):
+        # Review, Security release 1: the booted image's drop is probed through QEMU's hostfwd.
+        self.assertEqual(self.probe("silent"), "agentos-probe: 22 dropped\n")
+        self.assertEqual(self.probe("closes"), "agentos-probe: 22 answered\n")
+        self.assertEqual(self.probe("none"), "agentos-probe: 22 error\n")
+
+    def test_boot_test_probes_the_drop_on_the_booted_image(self):
+        s = (IMG / "ci_boot.sh").read_text()
+        for guest in (22, 80, 443, 18789):
+            fwd = "%d:%d" % (18000 + guest % 1000, guest)
+            self.assertTrue("hostfwd=tcp:127.0.0.1:%d-:%d" % (18000 + guest % 1000, guest) in s, fwd)
+            self.assertTrue(fwd in re.search(r'PROBE="([^"]*)" boot "\$W/console.log"', s).group(1), fwd)
+        self.assertTrue("for port in 22 80 443 18789; do\n\thas \"$W/console.log.probe\" \"agentos-probe: $port dropped\"" in s)
+
+    def test_boot_test_plugs_in_a_cable_once(self):
+        s = (IMG / "ci_boot.sh").read_text()
+        self.assertIn('NIC="user,model=virtio-net-pci,', s)
+        self.assertIn('-nic "${NIC:-none}"', s)
+        self.assertIn('has "$W/console.log" "agentos-uplink: "', s)
+        self.assertIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
+        self.assertIn('has "$W/console-reboot.log" "agentos-uplink: none"', s)
+
+
 class SetupServicesTest(unittest.TestCase):
     """#1249 (with P-3) and #1270: a fresh M6 Ultra image starts every setup service. The vault
     process (agentos-egress) has a unit and a default routing rule for the guest's model class; the
@@ -1081,7 +1356,8 @@ class SetupServicesTest(unittest.TestCase):
     def test_every_setup_service_is_enabled(self):
         preset = (UNITS.parent / "system-preset/50-agentos.preset").read_text().split("\n")
         for unit in ("agentosd.service", "agentos-egress.service", "agentos-localui.service",
-                     "agentos-egress-setup.path"):
+                     "agentos-egress-setup.path", "agentos-ap.service", "agentos-modem.service",
+                     "agentos-netjoin.service"):
             with self.subTest(unit):
                 self.assertIn("enable " + unit, preset)
 
@@ -1096,8 +1372,12 @@ class SetupServicesTest(unittest.TestCase):
         # Only the vault process reaches providers: no IP filter, and the inbound drop is up first.
         self.assertNotIn("IPAddressDeny", s)
         self.assertIn("agentos-inbound.service", u["Unit"]["Requires"].split())
-        for after in ("agentos-inbound.service", "network-online.target"):
-            self.assertIn(after, u["Unit"]["After"].split())
+        self.assertIn("agentos-inbound.service", u["Unit"]["After"].split())
+        # #1416: no wait for an uplink. With a cable in but no lease, or none at all, wait-online
+        # holds network-online.target for its whole timeout, and the page (after this unit) with it;
+        # the policy learns the home network from netlink events and its poll, not at start.
+        for key in ("After", "Wants", "Requires"):
+            self.assertNotIn("network-online.target", u["Unit"].get(key, "").split())
         for before in ("agentosd.service", "agentos-localui.service"):
             self.assertIn(before, u["Unit"]["Before"].split())
         # The TPM (CRED-8) must stay visible: PrivateDevices would hide /dev/tpmrm0.
@@ -1136,7 +1416,9 @@ class SetupServicesTest(unittest.TestCase):
     def test_the_vault_process_s_flags_exist(self):
         defined = flags("agentos-egress")
         for unit, cmd in ((UNITS / "agentos-egress.service", "agentos-egress"),
-                          (UNITS / "agentosd.service", "agentosd"), (PAGE_UNIT, "agentos-localui")):
+                          (UNITS / "agentosd.service", "agentosd"), (PAGE_UNIT, "agentos-localui"),
+                          (AP_UNIT, "agentos-ap"), (MODEM_UNIT, "agentos-modem"),
+                          (NETJOIN_UNIT, "agentos-netjoin")):
             with self.subTest(unit.name):
                 used = [w[1:] for w in exec_args(unit) if re.fullmatch(r"-[a-z][\w-]*", w)]
                 self.assertTrue(used)
@@ -1157,6 +1439,62 @@ class SetupServicesTest(unittest.TestCase):
         main = (ROOT / "broker/cmd/agentos-egress/main.go").read_text()
         self.assertIn('defaultKeys  = "%s/vault.keys"' % state, main)
         self.assertIn('defaultVault = "%s/vault"' % state, main)
+
+    def test_the_modem_and_netjoin_sockets_are_where_agentosd_looks(self):
+        # #1388: the bridge dials agentosd's owner socket, and agentosd dials the helper's.
+        self.assertEqual(arg(exec_args(MODEM_UNIT), "owner-sock"), flag_default("agentosd", "sockets") + "/owner.sock")
+        self.assertEqual(flag_default("agentos-modem", "owner-sock"), arg(exec_args(MODEM_UNIT), "owner-sock"))
+        nj = ini(NETJOIN_UNIT)["Service"]
+        run = "/run/" + nj["RuntimeDirectory"]
+        self.assertEqual(arg(exec_args(NETJOIN_UNIT), "dir"), run)
+        self.assertEqual(arg(exec_args(NETJOIN_UNIT), "agentosd-uid"), "0")  # agentosd runs as root
+        self.assertNotIn("User", ini(UNITS / "agentosd.service")["Service"])
+        sock = re.search(r'^const Socket = "([\w.-]+)"$', (ROOT / "broker/netjoin/netjoin.go").read_text(), re.M)
+        self.assertEqual(arg(exec_args(UNITS / "agentosd.service"), "netjoin-sock"), "%s/%s" % (run, sock.group(1)))
+
+    def test_the_access_point_serves_the_page_s_network(self):
+        # #825: the loader brings the access point up on the interface and address the page binds,
+        # and reads the latch the page writes.
+        ap, page = exec_args(AP_UNIT), exec_args(PAGE_UNIT)
+        self.assertEqual(ap[0], "/usr/lib/agentos/agentos-ap")
+        for name in ("iface", "addr", "card-latch"):
+            with self.subTest(name):
+                self.assertEqual(arg(ap, name), arg(page, name))
+                self.assertEqual(flag_default("agentos-ap", name), arg(page, name))
+        u = ini(AP_UNIT)
+        # Root (nft, the exempt unit, the radio's address), with no dumps of the setup password.
+        self.assertNotIn("User", u["Service"])
+        self.assertEqual(u["Service"]["LimitCORE"], "0")
+        # Never without the inbound drop, and up before the page that listens on it.
+        self.assertIn("agentos-inbound.service", u["Unit"]["Requires"].split())
+        self.assertIn("agentos-inbound.service", u["Unit"]["After"].split())
+        self.assertIn("agentos-localui.service", u["Unit"]["Before"].split())
+        self.assertEqual("/run/" + u["Service"]["RuntimeDirectory"], flag_default("agentos-ap", "dir"))
+
+    def test_the_access_point_s_programs_ship_and_stay_off_on_their_own(self):
+        # Debian's hostapd and dnsmasq do the access point's work (localui.Hostapd); the loader
+        # starts them, so neither's own service runs. dnsmasq-base ships no service at all.
+        pkgs = ini(MK / "mkosi.conf")["Content"]["Packages"].split()
+        for p in ("hostapd", "dnsmasq-base", "iproute2", "wireless-regdb"):
+            with self.subTest(p):
+                self.assertIn(p, pkgs)
+        self.assertNotIn("dnsmasq", pkgs)
+        preset = (UNITS.parent / "system-preset/50-agentos.preset").read_text().split("\n")
+        self.assertIn("disable hostapd.service", preset)
+        # The radio keeps its kernel name (wlan0), which the loader and the page are given.
+        link = ini(MK / "mkosi.extra/usr/lib/systemd/network/10-agentos-wlan.link")
+        self.assertEqual(link["Match"]["Type"], "wlan")
+        self.assertEqual(link["Link"]["NamePolicy"], "keep kernel")
+
+    def test_the_modem_bridge_has_its_country_code_and_no_number(self):
+        # #1292: the bridge exits without COUNTRY_CODE; the image is the same for every box, so it
+        # carries no number, and onboarding's /etc file may add the owner's (#1291).
+        s = settings(MODEM_UNIT)
+        self.assertEqual(s["EnvironmentFile"], ["/usr/lib/agentos/modem.env", "-/etc/agentos/modem.env"])
+        env = dict(l.split("=", 1) for l in (AGENTOS_LIB / "modem.env").read_text().splitlines()
+                   if l.strip() and not l.startswith("#"))
+        self.assertEqual(sorted(env), ["COUNTRY_CODE"])
+        self.assertRegex(env["COUNTRY_CODE"], r"^[1-9][0-9]{0,2}$")
 
     def test_the_default_rule_routes_the_guest_s_model_class_to_both_providers(self):
         rule_path = arg(exec_args(UNITS / "agentos-egress.service"), "rule")
@@ -1188,9 +1526,11 @@ class SetupServicesTest(unittest.TestCase):
     def test_the_image_creates_every_service_user(self):
         lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf").read_text().splitlines()
         users = sorted(l.split()[1] for l in lines if l.strip() and not l.startswith("#") and l.split()[0] == "u")
-        self.assertEqual(users, ["agentos-egress", "agentos-localui", "agentos-modem"])
-        page = ini(PAGE_UNIT)["Service"]
-        self.assertEqual((page["User"], page["Group"]), ("agentos-localui", "agentos-localui"))
+        self.assertEqual(users, ["agentos-egress", "agentos-localui", "agentos-modem", "agentos-netjoin"])
+        for unit, user in ((PAGE_UNIT, "agentos-localui"), (MODEM_UNIT, "agentos-modem"),
+                           (NETJOIN_UNIT, "agentos-netjoin")):
+            s = ini(unit)["Service"]
+            self.assertEqual((s["User"], s["Group"]), (user, user))
         for unit in (UNITS / "agentosd.service", UNITS / "agentos-egress.service"):
             for w in exec_args(unit):
                 if w.startswith("@uid:"):
@@ -1214,6 +1554,7 @@ class SetupServicesTest(unittest.TestCase):
         words = exec_args(UNITS / "agentosd.service")
         self.assertEqual(arg(words, "modem-uid"), "@uid:agentos-modem")
         self.assertEqual(arg(words, "localui-uid"), "@uid:agentos-localui")
+        self.assertIn("-netjoin-sock", words)
         self.assertIn("agentos-egress.service", u["Unit"]["Wants"].split())
         self.assertIn("agentos-egress.service", u["Unit"]["After"].split())
         page = ini(PAGE_UNIT)["Unit"]
@@ -1225,10 +1566,18 @@ class SetupServicesTest(unittest.TestCase):
         self.assertIn('SUBSYSTEM=="tpmrm", KERNEL=="tpmrm[0-9]*", GROUP="agentos-egress", MODE="0660"', rules)
 
     def test_the_build_ships_the_page(self):
+        # The page, the access point loader (#825), and the modem bridge and netjoin helper (#1388).
         build = (IMG / "build.sh").read_text()
-        self.assertRegex(build, r"for cmd in [^;]*\bagentos-localui\b")
-        self.assertRegex(build, r'install -D -m 0644 "\$REPO/broker/cmd/agentos-localui/agentos-localui.service" '
-                                r'"\$STAGE/usr/lib/systemd/system/agentos-localui.service"')
+        for cmd in ("agentos-localui", "agentos-ap", "agentos-modem", "agentos-netjoin"):
+            with self.subTest(cmd):
+                self.assertRegex(build, r"for cmd in [^;]*\b%s\b" % cmd)
+                self.assertRegex(build, r'install -D -m 0644 "\$REPO/broker/cmd/{0}/{0}.service" '
+                                        r'"\$STAGE/usr/lib/systemd/system/{0}.service"'.format(cmd))
+        # The helper's only privilege (netjoin L8.2), and the rule that gives the bridge its modems.
+        self.assertIn('install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/50-agentos-netjoin.rules" '
+                      '"$STAGE/usr/share/polkit-1/rules.d/50-agentos-netjoin.rules"', build)
+        self.assertIn('install -D -m 0644 "$REPO/broker/modem/at/udev/71-agentos-modem.rules" '
+                      '"$STAGE/usr/lib/udev/rules.d/71-agentos-modem.rules"', build)
 
     def test_the_setup_vault_is_made_when_the_page_records_the_claim(self):
         p = ini(UNITS / "agentos-egress-setup.path")
@@ -1481,6 +1830,7 @@ class FuzzConfineTest(unittest.TestCase):
     def test_the_image_does_not_ship_the_fuzz_state(self):
         with tempfile.TemporaryDirectory() as d:
             nodump(pathlib.Path(d))
+            radio(pathlib.Path(d))
             self.assertEqual(check.violations(d), [])
             os.makedirs(os.path.join(d, "var/lib/agentos-fuzz"))
             self.assertEqual(check.violations(d), ["var/lib/agentos-fuzz: fuzz state; created on the box, never shipped"])

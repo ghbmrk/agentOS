@@ -53,9 +53,16 @@ type Provider struct {
 	APIKey     bool // an API key may be entered on this page
 	DeviceCode bool // an OAuth device-code sign-in on the phone
 	Connected  bool
-	// PrivateOK: the owner allows this provider to see private data
-	// (CAP-9). Asked once at connection, ticked by default.
+	// PrivateOK: the owner allows this provider to see private content
+	// (CAP-9, REV-6). Asked once at connection: ticked by default on a
+	// plan sign-in, unticked on an API key (D-115).
 	PrivateOK bool
+}
+
+// privateBox is one form's private-content question as the page shows it.
+type privateBox struct {
+	Name    string
+	Checked bool
 }
 
 // Hooks connect setup to the rest of the box. Each is implemented by the
@@ -280,12 +287,16 @@ type setup struct {
 	claimExpires time.Time
 	claimTries   int
 	device       map[string][2]string // provider -> link, code
-	err          map[string]string    // per phone
-	finishing    bool
+	// answer is the owner's private-content answer from a Connect AI form
+	// that did not go through, keyed by form ("ai-key openai"), so the
+	// box comes back as the owner left it (U-4).
+	answer    map[string]bool
+	err       map[string]string // per phone
+	finishing bool
 }
 
 func newSetup(s *Server, st SetupState) *setup {
-	return &setup{s: s, st: st, pair: map[string]string{}, device: map[string][2]string{}, err: map[string]string{}}
+	return &setup{s: s, st: st, pair: map[string]string{}, device: map[string][2]string{}, answer: map[string]bool{}, err: map[string]string{}}
 }
 
 func (u *setup) done() bool { u.mu.Lock(); defer u.mu.Unlock(); return u.st.Done }
@@ -454,6 +465,9 @@ type setupView struct {
 	Defaults    string
 	Providers   []Provider
 	Device      map[string][2]string
+	// Plan and Key are each provider's private-content box on its plan
+	// sign-in and API key forms.
+	Plan, Key map[string]privateBox
 	// Refresh reloads the page only while it waits on the box and has
 	// nothing to type into (ONB-4).
 	Refresh string
@@ -583,6 +597,13 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		}
 	case "ai":
 		v.Providers = u.s.cfg.Hooks.Providers()
+		v.Plan, v.Key = map[string]privateBox{}, map[string]privateBox{}
+		u.mu.Lock()
+		for _, pr := range v.Providers {
+			v.Plan[pr.ID] = u.boxLocked("ai-device", pr)
+			v.Key[pr.ID] = u.boxLocked("ai-key", pr)
+		}
+		u.mu.Unlock()
 		if !p.Updated {
 			v.Refresh = "10"
 		}
@@ -882,7 +903,7 @@ func (u *setup) restart(r *http.Request, key string) error {
 	u.gen++
 	u.pair, u.pairOrder = map[string]string{}, nil
 	u.claimCode, u.numCode, u.numTo, u.numDevice = "", "", "", ""
-	u.device = map[string][2]string{}
+	u.device, u.answer = map[string][2]string{}, map[string]bool{}
 	return u.save(func(s *SetupState) {
 		s.Owner, s.Device, s.Codes, s.Recovery, s.Host, s.HostTrusted = "", "", false, false, false, false
 	})
@@ -1009,9 +1030,33 @@ func (u *setup) aiReady() error {
 	return nil
 }
 
-// privateOK records the owner's CAP-9 answer for a provider: the box asks
-// once, ticked by default.
-func (u *setup) privateOK(r *http.Request, id string) error {
+// boxLocked is a form's private-content box: as the owner left it on a
+// form that did not go through, else yes on a plan sign-in and no on an
+// API key (D-115, §8.1 step 6). Caller holds u.mu.
+func (u *setup) boxLocked(form string, p Provider) privateBox {
+	checked, ok := u.answer[form+" "+p.ID]
+	if !ok {
+		// A yes already given for this provider holds on every route, so
+		// saving a key after a plan sign-in doesn't undo it (R1).
+		checked = form == "ai-device" || p.PrivateOK
+	}
+	return privateBox{Name: p.Name, Checked: checked}
+}
+
+// keepAnswer keeps the owner's private-content answer from a form that
+// did not go through, for the page only (U-4).
+func (u *setup) keepAnswer(r *http.Request, form, id string) {
+	u.mu.Lock()
+	u.answer[form+" "+id] = r.PostFormValue("private") != ""
+	u.mu.Unlock()
+}
+
+// privateOK records the owner's CAP-9 answer for a provider once its form
+// went through, never before (U-4).
+func (u *setup) privateOK(r *http.Request, form, id string) error {
+	u.mu.Lock()
+	delete(u.answer, form+" "+id)
+	u.mu.Unlock()
 	if err := u.s.cfg.Hooks.SetPrivateOK(id, r.PostFormValue("private") != ""); err != nil {
 		return errors.New("Could not save. Try again.")
 	}
@@ -1028,13 +1073,11 @@ func (u *setup) aiKey(r *http.Request, _ string) error {
 	if !u.providerHas(id, func(p Provider) bool { return p.APIKey }) || key == "" || len(key) > 512 || !printable(key) {
 		return errors.New("Paste the API key from your provider's page.")
 	}
-	if err := u.privateOK(r, id); err != nil {
-		return err
-	}
 	if err := u.s.cfg.Hooks.ConnectAPIKey(id, key); err != nil {
+		u.keepAnswer(r, "ai-key", id)
 		return errors.New(keyErrText(err))
 	}
-	return nil
+	return u.privateOK(r, "ai-key", id)
 }
 
 // keyErrText is the page's text for a key the vault did not store: only a
@@ -1065,15 +1108,18 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 	if !u.providerHas(id, func(p Provider) bool { return p.DeviceCode }) {
 		return errors.New("Choose a provider.")
 	}
-	if err := u.privateOK(r, id); err != nil {
-		return err
-	}
 	link, code, err := u.s.cfg.Hooks.StartDeviceCode(id)
+	if err == nil {
+		if pu, perr := url.Parse(link); perr != nil || pu.Scheme != "https" {
+			err = errors.New("not https")
+		}
+	}
 	if err != nil {
+		u.keepAnswer(r, "ai-device", id)
 		return errors.New("Could not start sign-in with that provider. Try again.")
 	}
-	if pu, perr := url.Parse(link); perr != nil || pu.Scheme != "https" {
-		return errors.New("Could not start sign-in with that provider. Try again.")
+	if err := u.privateOK(r, "ai-device", id); err != nil {
+		return err
 	}
 	u.mu.Lock()
 	u.device[id] = [2]string{link, code}

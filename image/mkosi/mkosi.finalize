@@ -7,9 +7,11 @@ seed, a host key, the snakeoil TLS key) would be shared by every box, and owner 
 on that owner's drive. A planted socket file could look like a broker socket inside a guest.
 It also refuses a tree that could write the broker's memory to disk (IMG-nodump): the Owner Card
 passphrase is a Go string that cannot be zeroed (card C13), so core dumps must be discarded and
-there must be no swap.
+there must be no swap. And it refuses a tree without the controller radio's firmware (#1415), since
+the setup network cannot come up without it, or one that lets the same chip's Bluetooth half load.
 Usage outside mkosi: mkosi.finalize ROOT"""
 import configparser
+import fnmatch
 import os
 import pathlib
 import stat
@@ -30,13 +32,26 @@ SCAN_MAX = 1 << 20
 # IMG-nodump: what each setting must end up as, after every file systemd reads.
 CORE_PATTERN = "|/usr/bin/false"
 NODUMP_SYSCTL = "usr/lib/sysctl.d/99-agentos-nodump.conf"
-# The services that hold the card's passphrase, the vault's keys or the claim's codes in memory.
-CARD_UNITS = ("agentosd.service", "agentos-egress.service", "agentos-localui.service")
+# The services that hold the card's passphrase, the vault's keys, the claim's codes or the setup
+# network's password in memory.
+CARD_UNITS = ("agentosd.service", "agentos-egress.service", "agentos-localui.service", "agentos-ap.service")
 # Precedence low to high: a file in a later directory replaces one of the same name in an earlier.
 CONF_DIRS = ("usr/lib", "lib", "usr/local/lib", "etc")
 UNIT_DIRS = ("usr/lib/systemd/system", "lib/systemd/system", "usr/local/lib/systemd/system",
              "etc/systemd/system")
 SWAP_GENERATORS = ("zram-generator", "systemd-zram-generator")
+# The M6 Ultra's RZ616 (MT7922) radio (#1415): the files mt7921e requests (MT7922_FIRMWARE_WM and
+# MT7922_ROM_PATCH in the kernel's mt792x.h), from firmware-mediatek (non-free-firmware).
+RADIO_FIRMWARE = ("usr/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+                  "usr/lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin")
+# The kernel's firmware loader also tries these suffixes (Debian's kernel enables both).
+FIRMWARE_SUFFIXES = ("", ".xz", ".zst")
+# The same chip's Bluetooth half, which nothing uses: these modules must never load (#1415).
+BLOCKED_MODULES = ("btusb", "btmtk")
+# kmod's modprobe.d directories, lowest precedence first (a file in a later one replaces the same name).
+MODPROBE_DIRS = ("lib/modprobe.d", "usr/lib/modprobe.d", "usr/local/lib/modprobe.d", "run/modprobe.d",
+                 "etc/modprobe.d")
+REFUSE = ("/bin/false", "/usr/bin/false")
 
 
 def violations(root):
@@ -75,7 +90,8 @@ def violations(root):
             elif (stat.S_ISREG(st.st_mode) and st.st_size <= SCAN_MAX
                   and rel.split(os.sep, 1)[0] in SCAN and has_key(p)):
                 out.append("%s: private key material" % rel)
-    return out + dump_violations(root) + swap_violations(root)
+    return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
+            + bluetooth_violations(root))
 
 
 def dropins(root, dirs):
@@ -185,6 +201,65 @@ def swap_violations(root):
         if os.path.lexists(root / n):
             out.append("%s: swap file" % n)
     return out
+
+
+def tree_stat(root, rel, hops=40):
+    """lstat REL as the booted image sees it: symlinks are followed inside ROOT, an absolute target
+    from ROOT and never from the build host, and '..' stops at ROOT. None if any step is missing,
+    loops or is not a directory."""
+    parts, cur, st = [x for x in rel.split("/") if x], [], None
+    while parts:
+        name = parts.pop(0)
+        if name in (".", ".."):
+            if name == ".." and cur:
+                cur.pop()
+            continue
+        p = root.joinpath(*cur, name)
+        try:
+            st = os.lstat(p)
+        except OSError:
+            return None
+        if stat.S_ISLNK(st.st_mode):
+            hops -= 1
+            if hops < 0:
+                return None
+            target = os.readlink(p)
+            if target.startswith("/"):
+                cur = []
+            parts = [x for x in target.split("/") if x] + parts
+            st = None
+            continue
+        if parts and not stat.S_ISDIR(st.st_mode):
+            return None
+        cur.append(name)
+    return st
+
+
+def radio_violations(root):
+    """#1415: without these files the controller has no wlan0 and agentos-ap serves no setup network.
+    Each must be a non-empty regular file in the tree (a link to one counts)."""
+    out = []
+    for rel in RADIO_FIRMWARE:
+        found = (tree_stat(root, rel + sfx) for sfx in FIRMWARE_SUFFIXES)
+        if not any(st and stat.S_ISREG(st.st_mode) and st.st_size > 0 for st in found):
+            out.append("%s: missing or empty; the controller's radio needs firmware-mediatek" % rel)
+    return out
+
+
+def bluetooth_violations(root):
+    """#1415: firmware-mediatek also lets the MT7922's Bluetooth half come up. kmod uses the first
+    install line for a module, reading files by name with a later directory's file replacing the same
+    name; that line must refuse the load."""
+    first = {}
+    for f in dropins(root, MODPROBE_DIRS):
+        for ln in f.read_text(errors="replace").splitlines():
+            w = ln.split(None, 2)
+            if len(w) == 3 and w[0] == "install":
+                for m in BLOCKED_MODULES:
+                    if fnmatch.fnmatchcase(m, w[1].replace("-", "_")):
+                        first.setdefault(m, w[2].strip())
+    return ["modprobe.d: %s is not blocked (install %s %s); the image ships no Bluetooth"
+            % (m, m, REFUSE[0]) for m in BLOCKED_MODULES if first.get(m) not in REFUSE]
 
 
 def has_key(path):
