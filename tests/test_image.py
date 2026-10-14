@@ -1220,6 +1220,7 @@ class DriveIdTest(unittest.TestCase):
         self.bin, self.root, self.log = t / "bin", t / "root", t / "sfdisk.log"
         ev = self.root / "sys/firmware/efi/efivars"
         ev.mkdir(parents=True)
+        (self.root / "run").mkdir()
         (ev / "LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f").write_bytes(
             b"\x06\x00\x00\x00" + (ESP_GUID.upper() + "\0").encode("utf-16le"))
         for name, n in (("vda1", 1), ("vda6", 6), ("vdb1", 1), ("vdb6", 6)):
@@ -1290,6 +1291,38 @@ class DriveIdTest(unittest.TestCase):
                                                "sync -f %s/var/lib/agentos/drive-id" % self.root])
         self.assertTrue((self.root / "var/lib/agentos/drive-id").exists())
 
+    def test_check_passes_later_in_the_boot_that_assigned(self):
+        # #1716: udev shows the new GUIDs at once while the boot loader still names the old ESP
+        # GUID; a broker or vault start later in that boot (the claim restarts the vault) passes.
+        self.assertEqual(self.run_id("assign").returncode, 0)
+        self.disks(("vda1 vda 11111111-0000-4000-8000-000000000001", "vda2 vda aaaaaaaa-0000-4000-8000-000000000002",
+                    "vda6 vda 66666666-0000-4000-8000-000000000006"))
+        r = self.run_id("check")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_assign_record_admits_no_other_drive(self):
+        self.assertEqual(self.run_id("assign").returncode, 0)
+        new = ("vda1 vda 11111111-0000-4000-8000-000000000001", "vda6 vda 66666666-0000-4000-8000-000000000006")
+        # A fresh copy attached afterwards carries the old GUID: two drives again, root on the first.
+        self.disks(new + ("vdb1 vdb " + ESP_GUID, "vdb6 vdb bbbbbbbb-0000-4000-8000-000000000006"))
+        r = self.run_id("check")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not on the boot drive", r.stdout)
+        # Root moved off the recorded disk.
+        self.disks(new + ("vdb6 vdb bbbbbbbb-0000-4000-8000-000000000006",))
+        self.root_on("/dev/vdb6")
+        self.assertEqual(self.run_id("check").returncode, 1)
+
+    def test_the_assign_record_counts_only_for_its_own_boot_guid(self):
+        write(self.root, "run/agentos-drive-id", "cccccccc-0000-4000-8000-00000000000c vda1 vda\n")
+        self.disks(("vda1 vda 11111111-0000-4000-8000-000000000001", "vda6 vda bbbbbbbb-0000-4000-8000-000000000006"))
+        r = self.run_id("check")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("FAIL 0 partitions", r.stdout)
+        # Nor for a partition that is no longer on the recorded disk.
+        write(self.root, "run/agentos-drive-id", "%s vda1 vdb\n" % ESP_GUID)
+        self.assertEqual(self.run_id("check").returncode, 1)
+
     def test_assign_writes_nothing_when_the_check_fails(self):
         self.disks(("vda1 vda " + ESP_GUID, "vda6 vda bbbbbbbb-0000-4000-8000-000000000006",
                     "vdb1 vdb " + ESP_GUID))
@@ -1297,6 +1330,7 @@ class DriveIdTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self.sfdisk_calls(), [])
         self.assertFalse((self.root / "var/lib/agentos/drive-id").exists())
+        self.assertFalse((self.root / "run/agentos-drive-id").exists())
 
 
 class ConfigTest(unittest.TestCase):
@@ -1342,6 +1376,19 @@ class ConfigTest(unittest.TestCase):
     def test_broker_runs_only_on_the_boot_drive(self):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Service"]["ExecStartPre"], "/usr/lib/agentos/drive-id check")
+
+    def test_the_modem_roles_directory_exists_before_the_bridge_starts(self):
+        # G1-e2e: agentosd records the SIM setup binds in agentos-modem's roles file, and the bridge
+        # sees it only through its bind of the roles directory, which it skips when the directory is
+        # missing. agentosd's unit makes the directory before the bridge's starts (After=).
+        u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]
+        self.assertEqual(u["StateDirectory"], "agentos/modem")
+        roles = re.search(r'"modem-roles", "([^"]+)"', (ROOT / "broker/cmd/agentosd/main.go").read_text()).group(1)
+        self.assertEqual(os.path.dirname(roles), "/var/lib/agentos/modem")
+        m = ini(ROOT / "broker/cmd/agentos-modem/agentos-modem.service")
+        self.assertIn("agentosd.service", m["Unit"]["After"].split())
+        self.assertEqual(m["Service"]["BindReadOnlyPaths"], "-/var/lib/agentos/modem")
+        self.assertIn("-roles " + roles, m["Service"]["ExecStart"])
 
     def test_nothing_writes_the_hardware_clock(self):
         # L3 SHOULD on #41 (HW-8, HOST-1b): timesyncd's sync turns on the kernel's 11-minute RTC
@@ -2266,6 +2313,37 @@ class UplinkTest(unittest.TestCase):
         self.assertIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
         self.assertIn('has "$W/console-reboot.log" "agentos-uplink: none"', s)
 
+    def g1_verdict(self, done):
+        s = (IMG / "ci_boot.sh").read_text()
+        fn = re.search(r"^g1_verdict\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        with tempfile.TemporaryDirectory() as d:
+            log = pathlib.Path(d) / "done.log"
+            log.write_text(done)
+            return subprocess.run(["bash", "-c", fn + 'g1_verdict "$1"', "-", str(log)],
+                                  capture_output=True, text=True, check=True).stdout
+
+    def test_g1_is_proven_only_with_no_expected_failure(self):
+        # Security review of #1705, finding 3: a green e2e check with expected failures is not the
+        # G1 freeze-lift run (tools/ASSUMPTIONS.md D27), so the console says which it was.
+        self.assertEqual(self.g1_verdict("agentos-e2e: DONE pass=9 fail=0 xfail=0 xpass=0 blocked=0\r\n"),
+                         "agentos-e2e: G1 PROVEN\n")
+        for done, want in (
+                ("agentos-e2e: DONE pass=6 fail=0 xfail=1 xpass=0 blocked=2\n", "xfail=1 blocked=2"),
+                ("agentos-e2e: DONE pass=8 fail=0 xfail=0 xpass=0 blocked=1\n", "xfail=0 blocked=1"),
+                ("agentos-e2e: DONE pass=8 fail=1 xfail=0 xpass=0 blocked=0\n", "xfail=0 blocked=0"),
+                ("agentos-e2e: DONE pass=8 fail=0 xfail=0 xpass=1 blocked=0\n", "xfail=0 blocked=0"),
+                ("agentos-e2e: DONE pass=0 fail=0 xfail=0 xpass=0 blocked=0\n", "xfail=0 blocked=0"),
+                ("", "xfail=? blocked=?")):
+            self.assertEqual(self.g1_verdict(done), "agentos-e2e: G1 NOT PROVEN %s\n" % want, done)
+
+    def test_the_e2e_run_prints_its_g1_verdict_without_changing_the_check(self):
+        s = (IMG / "ci_boot.sh").read_text()
+        e2e = s[s.index('if [ -n "${E2E:-}" ]; then'):]
+        self.assertIn('\tg1_verdict "$W/e2e-done.log"\n', e2e)
+        self.assertIn('has "$W/e2e-done.log" " fail=0 "', e2e)
+        self.assertIn('has "$W/e2e-done.log" " xpass=0 "', e2e)
+        self.assertNotIn('has "$W/e2e-done.log" " xfail=0 "', e2e)
+
 
 class SetupServicesTest(unittest.TestCase):
     """#1249 (with P-3) and #1270: a fresh M6 Ultra image starts every setup service. The vault
@@ -2632,6 +2710,17 @@ class LocaluiClaimTest(unittest.TestCase):
         self.assertEqual(log, "chown agentos-localui:agentos-localui %s/var/lib/agentos/claim.json\n" % self.root)
         self.assertFalse((self.root / "var/lib/agentos/claim.json").exists())
         self.assertEqual((self.root / "var/lib/agentos-localui/claim.json").read_text(), "sealed")
+
+    def test_the_page_s_directory_is_made_before_its_first_start(self):
+        # #1688: agentos-localui-claim.service runs before the page's StateDirectory= exists.
+        (self.root / "var/lib/agentos-localui").rmdir()
+        write(self.root, "var/lib/agentos/claim.json", "sealed", 0o600)
+        log = self.run_claim()
+        d = self.root / "var/lib/agentos-localui"
+        self.assertEqual(log, "chown agentos-localui:agentos-localui %s\nchown agentos-localui:agentos-localui %s\n"
+                         % (d, self.root / "var/lib/agentos/claim.json"))
+        self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
+        self.assertEqual((d / "claim.json").read_text(), "sealed")
 
     def test_the_page_s_own_state_is_kept(self):
         write(self.root, "var/lib/agentos/claim.json", "sealed")
