@@ -142,8 +142,10 @@ type Reader struct {
 	brackets   int
 	inRespCode bool
 
-	// agentos: depth counts the lists ReadList is inside (SR3-mail-k18b).
-	depth int
+	// agentos: depth counts the lists ReadList is inside, and fields the
+	// fields ReadFields has read in the current response (SR3-mail-k18b).
+	depth  int
+	fields int
 }
 
 // agentos: maxListDepth bounds list nesting. ReadList and ReadFields
@@ -157,6 +159,19 @@ const maxListDepth = 100
 // ErrListTooDeep is returned by ReadList for lists nested deeper than
 // maxListDepth.
 var ErrListTooDeep = errors.New("imap: list nested too deep")
+
+// agentos: maxRespFields bounds the fields, at every level, of one
+// response. Parsed, a field costs tens of bytes however short it is on
+// the wire, so a reply of many tiny fields ("a a a", "() ()", "NIL")
+// cost about 40 times its size in live memory until the response ended.
+// The largest real response is a UID SEARCH, one field per message, so
+// a million fields is a mailbox of a million messages. Like
+// ErrListTooDeep, exceeding it is not a parse error.
+const maxRespFields = 1 << 20
+
+// ErrTooManyFields is returned by ReadFields once a response has more
+// than maxRespFields fields.
+var ErrTooManyFields = errors.New("imap: response has too many fields")
 
 func (r *Reader) ReadSp() error {
 	char, _, err := r.ReadRune()
@@ -280,7 +295,20 @@ func (r *Reader) ReadLiteral() (Literal, error) {
 	// Read literal
 	// agentos: read what arrives rather than allocating the declared size
 	// up front, so a literal declared as 4 GB costs memory only for the
-	// bytes the server actually sends (SR3-mail-k18b).
+	// bytes the server actually sends (SR3-mail-k18b). A small literal is
+	// read into a buffer of its exact size: streaming it would cost the
+	// 512 bytes bytes.Buffer grows by, even for {0}, a 100x amplifier for
+	// a reply of many empty literals.
+	if n <= smallLiteral {
+		b := make([]byte, n)
+		if _, err := io.ReadFull(r, b); err != nil {
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, err
+		}
+		return bytes.NewBuffer(b), nil
+	}
 	b := new(bytes.Buffer)
 	if m, err := io.CopyN(b, r, int64(n)); err != nil {
 		if err == io.EOF && m < int64(n) {
@@ -290,6 +318,9 @@ func (r *Reader) ReadLiteral() (Literal, error) {
 	}
 	return b, nil
 }
+
+// agentos: literals up to smallLiteral bytes are allocated whole.
+const smallLiteral = 4096
 
 func (r *Reader) ReadQuotedString() (string, error) {
 	if char, _, err := r.ReadRune(); err != nil {
@@ -360,6 +391,11 @@ func (r *Reader) ReadFields() (fields []interface{}, err error) {
 			return
 		}
 		if ok {
+			// agentos: bound the fields of one response (SR3-mail-k18b).
+			if r.fields++; r.fields > maxRespFields {
+				err = ErrTooManyFields
+				return
+			}
 			fields = append(fields, field)
 		}
 
@@ -417,6 +453,7 @@ func (r *Reader) ReadList() (fields []interface{}, err error) {
 }
 
 func (r *Reader) ReadLine() (fields []interface{}, err error) {
+	r.fields = 0 // agentos: a line is one response or command (SR3-mail-k18b).
 	fields, err = r.ReadFields()
 	if err != nil {
 		return

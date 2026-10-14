@@ -12,6 +12,7 @@ type Resp interface {
 
 // ReadResp reads a single response from a Reader.
 func ReadResp(r *Reader) (Resp, error) {
+	r.fields = 0 // agentos: the field bound is per response (SR3-mail-k18b).
 	atom, err := r.ReadAtom()
 	if err != nil {
 		return nil, err

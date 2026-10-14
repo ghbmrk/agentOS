@@ -5,14 +5,18 @@ package imapsmtp
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
 	"runtime/debug"
+	"runtime/metrics"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/emersion/go-imap"
 )
 
 // flood is a raw IMAP server that logs in, selects any folder with UID
@@ -80,12 +84,20 @@ func flood(t testing.TB, prefix, chunk string) (string, <-chan int64) {
 func TestHostileReplyIsBounded(t *testing.T) {
 	big := strings.Repeat("x", 64<<10)
 	msg := "* 1 FETCH (UID 1 BODY[] {1024}\r\n" + strings.Repeat("y", 1024) + ")\r\n"
+	many := func(field string) string { return strings.Repeat(field, (64<<10)/len(field)) }
+	list := "* 1 FETCH (UID 1 X ("
 	for _, c := range []struct{ name, prefix, chunk string }{
 		{"declared 4 GB literal", "* 1 FETCH (UID 1 BODY[] {4000000000}\r\n", big},
 		{"endless atom", "* 1 FETCH (UID 1 FLAGS (", big},
 		{"endless quoted string", "* 1 FETCH (UID 1 BODY[] \"", big},
 		{"endless status text", "* OK ", big},
 		{"endless FETCH responses", "", strings.Repeat(msg, 32)},
+		// One response of many tiny fields keeps every field live until
+		// the response ends, so these are the worst cases per byte read.
+		{"many atoms", list, many("a ")},
+		{"many empty lists", list, many("() ")},
+		{"many NILs", list, many("NIL ")},
+		{"many empty literals", list, many("{0}\r\n ")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			addr, wrote := flood(t, c.prefix, c.chunk)
@@ -96,9 +108,11 @@ func TestHostileReplyIsBounded(t *testing.T) {
 			var before, after runtime.MemStats
 			runtime.GC()
 			runtime.ReadMemStats(&before)
+			peak := heapPeak()
 			start := time.Now()
 			_, err := s.Fetch(context.Background(), "INBOX", 7, []uint32{1})
 			d := time.Since(start)
+			grew := peak()
 			runtime.ReadMemStats(&after)
 			if err == nil {
 				t.Fatal("an endless reply was answered as success")
@@ -120,8 +134,50 @@ func TestHostileReplyIsBounded(t *testing.T) {
 			if a > uint64(4*budget+64<<20) {
 				t.Fatalf("the call allocated %d bytes; budget %d", a, budget)
 			}
-			t.Logf("server wrote %d bytes, the call allocated %d; budget %d", n, a, budget)
+			// M21: the heap in use peaks at about 40 times the bytes read,
+			// for a reply of nothing but two-byte atoms.
+			if grew > uint64(peakPerByte*budget+16<<20) {
+				t.Fatalf("the heap grew by %d bytes at its peak; budget %d", grew, budget)
+			}
+			t.Logf("server wrote %d bytes, the call allocated %d, peak heap growth %d (%.0fx); budget %d",
+				n, a, grew, float64(grew)/float64(budget), budget)
 		})
+	}
+}
+
+// peakPerByte is M21's bound on the heap a hostile reply can hold per
+// byte of its read budget.
+const peakPerByte = 48
+
+// heapPeak samples the heap's live and unswept objects until the
+// returned function is called, which reports the most they grew past
+// where they started. Sampling can miss a spike between samples, so it
+// understates the peak a little, never overstates it.
+func heapPeak() func() uint64 {
+	s := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	read := func() uint64 { metrics.Read(s); return s[0].Value.Uint64() }
+	base, top := read(), uint64(0)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if v := read(); v > top {
+				top = v
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(200 * time.Microsecond):
+			}
+		}
+	}()
+	return func() uint64 {
+		close(stop)
+		<-done
+		if top < base {
+			return 0
+		}
+		return top - base
 	}
 }
 
@@ -186,4 +242,30 @@ func TestDeepNestingChild(t *testing.T) {
 		t.Fatal("the connection was left open after the nested reply")
 	}
 	t.Logf("k18b: call failed: %v", err)
+}
+
+// TestResponseFieldsAreBounded (SR3-mail-k18b): one response of tiny
+// fields, the shape that holds the most memory per byte, stops at a
+// million fields, which bounds what any response holds whatever the
+// read budget. A UID SEARCH of a million messages still parses.
+func TestResponseFieldsAreBounded(t *testing.T) {
+	const max = 1 << 20
+	read := func(fields int) (uint64, error) {
+		reply := "* SEARCH " + strings.Repeat("a ", fields-1) + "a\r\n"
+		runtime.GC()
+		peak := heapPeak()
+		_, err := imap.ReadResp(imap.NewReader(bufio.NewReader(strings.NewReader(reply))))
+		return peak(), err
+	}
+	if _, err := read(max - 1); err != nil {
+		t.Fatalf("a SEARCH of %d UIDs failed: %v", max-1, err)
+	}
+	grew, err := read(max + 1)
+	if !errors.Is(err, imap.ErrTooManyFields) {
+		t.Fatalf("a response of %d fields: err %v, want ErrTooManyFields", max+1, err)
+	}
+	if grew > 96<<20 {
+		t.Fatalf("a response stopped at the field bound grew the heap by %d bytes at its peak", grew)
+	}
+	t.Logf("a response stopped at the field bound grew the heap by %d bytes at its peak", grew)
 }
