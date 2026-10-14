@@ -518,9 +518,12 @@ def stray_violations(root):
     box mounts a tmpfs over it) and a split-/usr /lib (systemd 257 reads only /usr/lib; trixie's /lib
     is a link to it). Checking such a file as if it were read would let it hide one that is."""
     out, root = [], str(root)
-    places = [("run", n, "/run is a tmpfs on the box") for n in ("sysctl.d", "modprobe.d", "systemd")]
+    conf = ["sysctl.d", "systemd/network", "systemd/system", "systemd/system.control", "systemd/system.attached"]
+    conf += ["systemd/%s%s" % (n, d) for n in ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
+             for d in ("", ".d")]
+    places = [("run", n, "/run is a tmpfs on the box") for n in conf + ["modprobe.d"]]
     if not os.path.islink(os.path.join(root, "lib")):
-        places += [("lib", n, "systemd 257 does not read a split-/usr /lib") for n in ("sysctl.d", "systemd")]
+        places += [("lib", n, "systemd 257 does not read a split-/usr /lib") for n in conf]
     for top, n, why in places:
         base = os.path.join(root, top, n)
         if os.path.islink(base) or os.path.isfile(base):
