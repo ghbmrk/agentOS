@@ -40,6 +40,10 @@ type gatewayExternal struct {
 // keeps. A forgotten gateway is read again like a new one.
 const maxGatewayExternals = 8
 
+// externalReadTimeout bounds one full read's NAT-PMP request; externalHold
+// in policy.go must stay past two of them.
+const externalReadTimeout = 3 * time.Second
+
 // externalLocked returns the external address last read on gw; s.mu is held.
 func (s *Sources) externalLocked(gw netip.Addr) netip.Addr {
 	for _, e := range s.exts {
@@ -82,7 +86,7 @@ func (s *Sources) Read() (Network, error) {
 	if ext == nil {
 		ext = ExternalAddr
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), externalReadTimeout)
 	a, err := ext(ctx, n.Gateway)
 	cancel()
 	s.mu.Lock()

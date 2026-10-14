@@ -366,8 +366,11 @@ func (g *gwSources) sources() *Sources {
 			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.77"), Mask: net.CIDRMask(16, 32)}}, nil
 		},
 		ReadFile: func(f string) ([]byte, error) {
-			if f == "/proc/net/route" {
+			switch f {
+			case "/proc/net/route":
 				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t" + g.gw.Load().(string) + "\t0003\t0\t0\t100\t00000000\n"), nil
+			case "/etc/resolv.conf":
+				return []byte("nameserver 192.168.1.53\n"), nil
 			}
 			return nil, errors.New("absent")
 		},
@@ -515,4 +518,140 @@ func TestStaleFullReadOnNewGatewayEndsHold(t *testing.T) {
 			}
 		}
 	}
+}
+
+// externalHold must outlast two full reads' router waits (the one in flight
+// and the one queued behind it), or the hold refuses on a healthy router.
+func TestExternalHoldOutlastsTwoRouterReads(t *testing.T) {
+	for _, d := range []time.Duration{externalReadTimeout, natpmpDeadline} {
+		if externalHold <= 2*d {
+			t.Fatalf("externalHold %v is not past two router reads of %v", externalHold, d)
+		}
+	}
+}
+
+// While a hold is on, names still resolve through the assigned resolver and
+// pinned endpoints still connect: only unpinned public destinations wait.
+func TestHoldSparesDNSAndPins(t *testing.T) {
+	g := &gwSources{answer: make(chan netip.Addr, 1)}
+	g.gw.Store("0101A8C0")
+	s := g.sources()
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	g.answer <- netip.MustParseAddr("8.8.8.8")
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	pinned := netip.MustParseAddrPort("203.0.113.20:8443")
+	if err := p.SetPins([]Pin{{Kind: PinCompute, Addr: pinned, Key: [32]byte{1}}}); err != nil {
+		t.Fatal(err)
+	}
+	g.gw.Store("0103A8C0")
+	p.quickLearn()
+	p.mu.RLock()
+	held := p.hold != nil
+	p.mu.RUnlock()
+	if !held {
+		t.Fatal("no hold on a never-seen gateway")
+	}
+	done := make(chan error, 2)
+	go func() {
+		done <- p.Check(WithPurpose(context.Background(), PurposeDNS), netip.MustParseAddr("192.168.1.53"), 53, "udp")
+	}()
+	go func() {
+		done <- p.Check(WithPurpose(context.Background(), PurposeModelCall), pinned.Addr(), pinned.Port(), "tcp")
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("held or refused: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("DNS or a pinned endpoint waits on the hold")
+		}
+	}
+}
+
+// A policy with a quick read but no full-read source has nothing that could
+// end a hold, so it never starts one.
+func TestNoHoldWithoutFullReadSource(t *testing.T) {
+	g := &gwSources{answer: make(chan netip.Addr, 1)}
+	g.gw.Store("0103A8C0")
+	s := g.sources()
+	p := New(Config{Quick: s.ReadLocal})
+	p.quickLearn()
+	p.mu.RLock()
+	held := p.hold != nil
+	p.mu.RUnlock()
+	if held {
+		t.Fatal("a hold started with no Config.Source to end it")
+	}
+	if err := p.Check(context.Background(), netip.MustParseAddr("1.1.1.1"), 443, "tcp"); err != nil {
+		t.Fatalf("public destination: %v", err)
+	}
+}
+
+// Through the egress process's own worker (WatchEventsEvery): an event on a
+// never-seen gateway holds public destinations, and that worker's full read
+// ends the hold and refuses the router's address it learned.
+func TestHoldEndsThroughTheWatchWorker(t *testing.T) {
+	g := &gwSources{answer: make(chan netip.Addr)}
+	g.gw.Store("0101A8C0")
+	s := g.sources()
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	ev := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.WatchEventsEvery(ctx, ev, time.Hour); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	e1, e3 := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+	ev <- struct{}{}
+	g.answer <- e1
+	waitDenied(t, p, e1)
+	g.gw.Store("0103A8C0")
+	ev <- struct{}{}
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		p.mu.RLock()
+		on := p.hold != nil
+		p.mu.RUnlock()
+		if on {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("the worker's quick read on G3 started no hold")
+		}
+	}
+	held := make(chan error, 1)
+	go func() { held <- p.Check(context.Background(), e3, 443, "tcp") }()
+	select {
+	case err := <-held:
+		t.Fatalf("G3's router address was decided before G3's full read: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	g.answer <- e3
+	select {
+	case err := <-held:
+		if !errors.Is(err, ErrDenied) {
+			t.Fatalf("G3's router address after the worker's full read: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker's full read did not end the hold")
+	}
+}
+
+// waitDenied waits for the worker to learn that a is refused.
+func waitDenied(t *testing.T, p *Policy, a netip.Addr) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		p.mu.RLock()
+		learned, held := p.net.External == a, p.hold != nil
+		p.mu.RUnlock()
+		if learned && !held {
+			if err := p.Check(context.Background(), a, 443, "tcp"); !errors.Is(err, ErrDenied) {
+				t.Fatalf("%v learned but not refused: %v", a, err)
+			}
+			return
+		}
+	}
+	t.Fatalf("%v never refused as the router's address", a)
 }
