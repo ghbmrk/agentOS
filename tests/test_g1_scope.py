@@ -172,10 +172,13 @@ class ListTest(unittest.TestCase):
 
     def test_frozen_paths_stay_out(self):  # G1-freeze-a
         for p in ("broker/voice/v.go", "broker/cmd/agentos-builder/main.go", "guest/builder/x",
-                  "spikes/S10-pact/x", "broker/loops/x.go", "broker/newpkg/x.go", "newdir/x"):
+                  "spikes/S10-pact/x", "broker/loops/x.go", "broker/newpkg/x.go", "newdir/x",
+                  # One model route (D-104): the Codex worker and the OpenAI adapter freeze.
+                  "guest/codex/x", "broker/route/openai.go", "broker/route/testdata/openai_stream.sse"):
             self.assertFalse(g.check([p], LIST)[0], p)
         for p in ("broker/localui/x.go", "broker/cmd/agentosd/main.go", "image/build.sh",
-                  "guest/openclaw/x", "spikes/CTRL-spike/x", "tools/g1_scope.txt", "SPEC.md"):
+                  "guest/openclaw/x", "spikes/CTRL-spike/x", "tools/g1_scope.txt", "SPEC.md",
+                  "broker/route/anthropic.go", "broker/route/route.go"):
             self.assertTrue(g.check([p], LIST)[0], p)
 
     def test_list_covers_the_g1_binaries_imports(self):  # G1-freeze-f
@@ -194,7 +197,9 @@ class ListTest(unittest.TestCase):
         for pkg in out.split():
             if pkg.startswith(mod + "/"):
                 path = "broker/" + pkg[len(mod) + 1:] + "/"
-                if not any(path.startswith(e) for e in allow + frozen if e.endswith("/")):
+                # A package listed file by file (broker/route/) counts when any entry is in it.
+                if not any(path.startswith(e) if e.endswith("/") else e.startswith(path)
+                           for e in allow + frozen):
                     missing.append(path)
         self.assertEqual(missing, [], "G1 binaries import packages tools/g1_scope.txt does not name")
 

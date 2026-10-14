@@ -13,6 +13,14 @@
 # G1_BINARIES in tests/test_g1_scope.py): the image's six binaries (image/build.sh), the
 # guest bridge, the seller tool (D-105), the checker (CH-4) and clock-boot and hostdisk
 # (HW-8). The drift test fails when a G1 binary starts importing a package not named here.
+#
+# One model route (D-104, Mark 2026-10-14 18:12Z): G1's model-backed task uses the
+# Anthropic API-key route through agentos-egress (broker/route/anthropic.go), the first
+# provider in the image's egress rule. Other routes freeze with their rows: the worker-held
+# Codex CLI (guest/codex/), the OpenAI adapter's own files (broker/route/openai*), and the
+# plan routes (#1377-#1380, no code yet). Code the adapters share (broker/egress,
+# broker/route/route.go, broker/meter, cmd/agentos-egress) stays listed, so a path list
+# cannot hold the OpenAI half of it; the frozen rows' labels do.
 
 freeze on
 
@@ -44,7 +52,6 @@ allow TRACE.md
 # The image, the guest it carries, and the controller spike D-104 keeps on the G1 path.
 allow image/
 allow guest/openclaw/
-allow guest/codex/
 allow spikes/CTRL-spike/
 
 # Broker module files, shared trees and the G1 end-to-end tests.
@@ -118,7 +125,27 @@ allow broker/quota/
 allow broker/recovery/
 allow broker/replay/
 allow broker/reversible/
-allow broker/route/
+# broker/route/ file by file: the OpenAI adapter's own files stay frozen (one model route).
+allow broker/route/ASSUMPTIONS.md
+allow broker/route/anthropic.go
+allow broker/route/anthropic_test.go
+allow broker/route/chat.go
+allow broker/route/cred5f_test.go
+allow broker/route/failed_test.go
+allow broker/route/guest.go
+allow broker/route/handlerfor_test.go
+allow broker/route/onechoice_test.go
+allow broker/route/privateallowed_test.go
+allow broker/route/route.go
+allow broker/route/route_test.go
+allow broker/route/testdata/README.md
+allow broker/route/testdata/anthropic_invalid.json
+allow broker/route/testdata/anthropic_message.json
+allow broker/route/testdata/anthropic_overloaded.json
+allow broker/route/testdata/anthropic_rate_limit.json
+allow broker/route/testdata/anthropic_request.golden.json
+allow broker/route/testdata/anthropic_stream.sse
+allow broker/route/testdata/chat_request.json
 allow broker/routerule/
 allow broker/sendrules/
 allow broker/sipsign/
