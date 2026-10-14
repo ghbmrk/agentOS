@@ -2,6 +2,7 @@
 # the counted boot entry, the boot health check, and the image's static configuration.
 # The image itself is built and booted under Secure Boot by .github/workflows/image.yml.
 # REQ: HW-1, HW-5, UPD-1, UPD-1a
+import ast
 import base64
 import contextlib
 import json
@@ -37,6 +38,9 @@ def load(name, path):
 
 
 check = load("image_check", MK / "mkosi.finalize")
+# The tree check takes configuration only through steps owned by root (TREE_OWNER, #1543 Security R1);
+# a test cannot make root-owned trees, so it takes its own uid in root's place.
+check.TREE_OWNER = os.geteuid()
 finish = load("image_finish", IMG / "finish_image.py")
 
 
@@ -2005,7 +2009,7 @@ class ConfFilesTest(unittest.TestCase):
                     self.assertIn(want, self.v())
                     (self.root / "var/tmp/99.conf").unlink()
                     with self.assertRaises(check.LinkRefused):
-                        check.Conf(str(self.root), rel).read_bytes()
+                        check.Conf(str(self.root), rel).content()
                     f.unlink()
 
     def test_links_other_than_a_mask_are_refused(self):
@@ -2047,6 +2051,128 @@ class ConfFilesTest(unittest.TestCase):
         f.unlink()
         self.assertEqual(check.violations(self.root), [])
 
+    def test_fstab_and_machine_id_links_are_refused(self):
+        # #1543 Security delta 4 B1: etc/fstab was read through pathlib, which follows a link on the
+        # build host, so a dangling etc/fstab -> ../var/tmp/fstab read as no fstab; on the box
+        # systemd-fstab-generator mounted whatever a local user wrote there (a bind mount over
+        # /etc/sysctl.d, or swap). It and etc/machine-id are now read through the chase: a link other
+        # than a mask is refused, relative or absolute, before and after its target exists.
+        (self.root / "etc/machine-id").unlink()
+        for rel, body in (("etc/fstab", "/var/tmp/sd /etc/sysctl.d none bind 0 0\n"),
+                          ("etc/machine-id", "0123456789abcdef0123456789abcdef\n")):
+            for target in ("../var/tmp/" + rel[4:], "/var/tmp/" + rel[4:]):
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    want = "%s: unreadable (%s is a link to %s;" % (rel, rel, target)
+                    self.assertIn(want, self.v())
+                    t = write(self.root, "var/tmp/" + rel[4:], body)
+                    self.assertIn(want, self.v())
+                    t.unlink()
+                    f.unlink()
+            # A mask still reads as nothing.
+            with self.subTest(rel=rel, target="/dev/null"):
+                f = link(self.root, rel, "/dev/null")
+                self.assertEqual(check.violations(self.root), [])
+                f.unlink()
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_steps_others_can_write_are_refused(self):
+        # #1543 Security R1: no link, but a file whose content a local user can change after the
+        # build. Every step on the way to a configuration file (the tree's root, each directory and
+        # the file) must be TREE_OWNER's (root's in the build) and writable by no one else.
+        uid = os.geteuid()
+
+        def want(rel, step, owner, mode):
+            return "%s: unreadable (%s is owned by uid %d with mode %s;" % (rel, step, owner, mode)
+
+        f = write(self.root, "etc/sysctl.d/90-x.conf", "", mode=0o666)
+        self.assertIn(want("etc/sysctl.d/90-x.conf", "etc/sysctl.d/90-x.conf", uid, "0666"), self.v())
+        f.unlink()
+        # A 1777 sysctl.d is refused while it is still empty: anyone could add a file at boot.
+        d = self.root / "etc/sysctl.d"
+        d.chmod(0o1777)
+        self.assertIn(want("etc/sysctl.d", "etc/sysctl.d", uid, "1777"), self.v())
+        d.chmod(0o755)
+        self.assertEqual(check.violations(self.root), [])
+        # A hard link to a 0666 file in /var/tmp has its mode.
+        t = write(self.root, "var/tmp/x.conf", "kernel.core_pattern=|/usr/bin/false\n", mode=0o666)
+        os.link(t, self.root / "etc/sysctl.d/90-x.conf")
+        self.assertIn(want("etc/sysctl.d/90-x.conf", "etc/sysctl.d/90-x.conf", uid, "0666"), self.v())
+        (self.root / "etc/sysctl.d/90-x.conf").unlink()
+        t.unlink()
+        # A file another user owns, even 0644 (chown where the test is root, else lstat says so).
+        other = 1000 if uid != 1000 else 1001
+        f = write(self.root, "etc/sysctl.d/90-x.conf", "")
+        real = check.tree_lstat
+
+        def lstat_as_other(root, rel):
+            st = real(root, rel)
+            if rel == "etc/sysctl.d/90-x.conf" and st is not None:
+                st = os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, other, st.st_gid, st.st_size,
+                                     st.st_atime, st.st_mtime, st.st_ctime))
+            return st
+
+        if uid == 0:
+            os.chown(f, other, other)
+            self.assertIn(want("etc/sysctl.d/90-x.conf", "etc/sysctl.d/90-x.conf", other, "0644"), self.v())
+        with unittest.mock.patch.object(check, "tree_lstat", lstat_as_other):
+            self.assertIn(want("etc/sysctl.d/90-x.conf", "etc/sysctl.d/90-x.conf", other, "0644"), self.v())
+        f.unlink()
+        # A group-writable directory, and a writable parent of a directory that is not there yet.
+        d = self.root / "usr/lib/sysctl.d"
+        d.chmod(0o775)
+        self.assertIn(want("usr/lib/sysctl.d/99-agentos-nodump.conf", "usr/lib/sysctl.d", uid, "0775"), self.v())
+        d.chmod(0o755)
+        (self.root / "usr/local").mkdir(parents=True, exist_ok=True)
+        (self.root / "usr/local").chmod(0o1777)
+        self.assertIn(want("usr/local/lib/sysctl.d", "usr/local", uid, "1777"), self.v())
+        (self.root / "usr/local").chmod(0o755)
+        # The tree's root itself.
+        self.root.chmod(0o777)
+        self.assertIn("is owned by uid %d with mode 0777; the tree check reads configuration only through steps"
+                      % uid, self.v())
+        self.assertIn("(the tree's root is owned by", self.v())
+        self.root.chmod(0o700)
+        # A mask and trixie's /lib -> usr/lib are links, not steps anyone writes: both still pass.
+        link(self.root, "etc/sysctl.d/50-x.conf", "/dev/null")
+        link(self.root, "lib", "usr/lib")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_links_into_world_writable_directories_are_refused(self):
+        # #1543 Security R2: a link outside the files the check reads, dangling at build, that a
+        # local user fills at its target on the box: a unit, enabled, is then root code at the next
+        # boot. Refused wherever the link is and whatever reads it, when its target is inside a
+        # directory anyone on the box can write, whether the tree holds that directory or not.
+        for rel in ("var/tmp", "var/lib/shared"):
+            (self.root / rel).mkdir(parents=True)
+            (self.root / rel).chmod(0o1777)
+        link(self.root, "var/lock", "../run/lock")
+        cases = (("etc/systemd/system/x.service", "/var/tmp/x.service", "var/tmp"),
+                 ("etc/systemd/system/x.service", "../../../var/tmp/x.service", "var/tmp"),
+                 ("usr/lib/x/y", "/tmp/y", "tmp"), ("usr/lib/x/y", "/dev/shm/y", "dev/shm"),
+                 ("usr/lib/x/y", "/run/lock/y", "run/lock"), ("usr/lib/x/y", "/var/lock/y", "run/lock"),
+                 ("usr/lib/x/y", "/var/lib/shared/y", "var/lib/shared"),
+                 ("usr/lib/x/y", "/var/tmp/no/such/dir/y", "var/tmp"), ("usr/lib/x/y", "/usr/../var/tmp/y", "var/tmp"))
+        for rel, target, under in cases:
+            with self.subTest(rel=rel, target=target):
+                f = link(self.root, rel, target)
+                want = "%s: a link to %s, inside /%s, which anyone on the box can write" % (rel, target, under)
+                self.assertIn(want, self.v())
+                f.unlink()
+        # The delta 4 repro: the unit, and the wants link that enables it, which reaches it too.
+        link(self.root, "etc/systemd/system/x.service", "/var/tmp/x.service")
+        w = link(self.root, "etc/systemd/system/multi-user.target.wants/x.service", "../x.service")
+        self.assertIn("etc/systemd/system/x.service: a link to /var/tmp/x.service, inside /var/tmp", self.v())
+        self.assertIn("etc/systemd/system/multi-user.target.wants/x.service: a link to ../x.service, inside /var/tmp",
+                      self.v())
+        w.unlink()
+        (self.root / "etc/systemd/system/x.service").unlink()
+        # A link to such a directory itself is not refused (trixie's /var/lock), nor one elsewhere.
+        link(self.root, "usr/lib/x/tmp", "/tmp")
+        link(self.root, "usr/lib/x/f", "../../share/f")
+        self.assertEqual(check.violations(self.root), [])
+
     def test_a_mask_is_still_read_as_nothing(self):
         # A mask (a link to exactly /dev/null) still hides a lower file of its name, in sysctl.d and
         # for a main file.
@@ -2054,7 +2180,7 @@ class ConfFilesTest(unittest.TestCase):
         self.assertIn("forwarding must stay 0", self.v())
         link(self.root, "etc/sysctl.d/50-pid-max.conf", "/dev/null")
         self.assertEqual(check.violations(self.root), [])
-        self.assertEqual(check.Conf(str(self.root), "etc/sysctl.d/50-pid-max.conf").read_bytes(), b"")
+        self.assertEqual(check.Conf(str(self.root), "etc/sysctl.d/50-pid-max.conf").content(), b"")
 
     def test_split_usr_lib_and_run_are_not_read(self):
         # systemd 257 does not search a split-/usr /lib, and /run is a tmpfs on the box: a reset
@@ -2195,7 +2321,7 @@ class ConfFilesTest(unittest.TestCase):
         f.chmod(0o644)
         f.unlink()
         # Unreadable through the same code path, whoever runs it.
-        with unittest.mock.patch.object(check.Conf, "read_bytes", side_effect=PermissionError(13, "Permission denied")):
+        with unittest.mock.patch.object(check.Conf, "content", side_effect=PermissionError(13, "Permission denied")):
             self.assertIn("99-agentos-nodump.conf: unreadable (Permission denied)",
                           " ".join(check.sysctl_byte_violations(self.root)))
 
@@ -2267,7 +2393,7 @@ class ConfFilesTest(unittest.TestCase):
         d.mkdir(parents=True)
         self.assertIn("etc/systemd/resolved.conf.d/90-x.conf: unreadable (a directory); the tree check", self.v())
         d.rmdir()
-        with unittest.mock.patch.object(check.Conf, "read_bytes", side_effect=PermissionError(13, "Permission denied")):
+        with unittest.mock.patch.object(check.Conf, "content", side_effect=PermissionError(13, "Permission denied")):
             self.assertEqual(check.byte_violations(check.Conf(str(self.root), RESOLVED_REL)),
                              ["%s: unreadable (Permission denied); the tree check never passes a file it cannot read"
                               % RESOLVED_REL])
@@ -2458,7 +2584,7 @@ class TmpfilesTest(unittest.TestCase):
         self.assertIn("usr/lib/tmpfiles.d/x.conf: unreadable (a directory)", " | ".join(check.violations(self.root)))
         d.rmdir()
         write(self.root, "usr/lib/tmpfiles.d/x.conf", "d /run/user\n")
-        with unittest.mock.patch.object(check.Conf, "read_bytes", side_effect=PermissionError(13, "Permission denied")):
+        with unittest.mock.patch.object(check.Conf, "content", side_effect=PermissionError(13, "Permission denied")):
             self.assertIn("x.conf: unreadable (Permission denied)", " ".join(check.tmpfiles_violations(self.root)))
         write(self.root, "run/tmpfiles.d/x.conf", "d /run/user\n")
         self.assertIn("run/tmpfiles.d", " | ".join(check.violations(self.root)))
@@ -2803,16 +2929,26 @@ class TmpfilesAllowTest(unittest.TestCase):
         # The entry that would allow a line is in the message, ready to review and copy.
         write(self.root, "usr/lib/tmpfiles.d/x.conf", "d /run/y 0755\n")
         self.assertEqual(self.v(), ["usr/lib/tmpfiles.d/x.conf line 1: not on the tmpfiles.d allowlist "
-                                    "(image/mkosi/tmpfiles.allow, #1543); review the line, then add the entry after "
-                                    "'entry:' there (or regenerate it from the built tree: mkosi.finalize "
-                                    "--tmpfiles-allowlist ROOT); entry: usr/lib/tmpfiles.d/x.conf\td /run/y 0755"])
+                                    "(image/mkosi/tmpfiles.allow, #1543); review this line, then add the entry after "
+                                    "'entry:' to that file (each line is reviewed on its own: mkosi.finalize "
+                                    "--tmpfiles-allowlist ROOT only lists what a tree holds, it reviews nothing); "
+                                    "entry: usr/lib/tmpfiles.d/x.conf\td /run/y 0755"])
+        # A line the guarded-path check refuses is offered no entry: it must not be listed (#1543 P/UX U4-1).
+        write(self.root, "usr/lib/tmpfiles.d/x.conf", "d /run/y 0755\nw /proc/sys/net/ipv4/ip_forward - - - - 1\n")
+        v = self.v()
+        self.assertEqual(v[1], "usr/lib/tmpfiles.d/x.conf line 2: w /proc/sys/net/ipv4/ip_forward - - - - 1: not on "
+                               "the tmpfiles.d allowlist (image/mkosi/tmpfiles.allow, #1543), and the guarded-path "
+                               "check refuses it too: remove the line; it must not be added")
+        self.assertNotIn("entry:", v[1])
+        self.assertIn("usr/lib/tmpfiles.d/x.conf: line 2: w /proc/sys/net/ipv4/ip_forward", " | ".join(check.violations(self.root)))
+        write(self.root, "usr/lib/tmpfiles.d/x.conf", "d /run/y 0755\n")
         # The build's last line names the file too, not per-install state (#1543 P/UX U1).
         with unittest.mock.patch.object(sys, "argv", ["mkosi.finalize", str(self.root)]), \
                 contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
             check.main()
         self.assertEqual(str(e.exception), "image check: 1 problem(s) in the image tree, each named above; a "
-                         "tmpfiles.d line missing from image/mkosi/tmpfiles.allow ends in the entry to review and "
-                         "add there")
+                         "tmpfiles.d line missing from image/mkosi/tmpfiles.allow that the guarded-path check passes "
+                         "ends in the entry to review and add there")
 
     def test_lines_are_keyed_by_file(self):
         # A listed line in another file, or the same file in another directory, is not listed.
@@ -2844,6 +2980,7 @@ class TmpfilesAllowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             shutil.copy(MK / "mkosi.finalize", os.path.join(tmp, "finalize"))
             moved = load("image_check_moved", os.path.join(tmp, "finalize"))
+            moved.TREE_OWNER = check.TREE_OWNER
             with unittest.mock.patch.dict(os.environ, {"SRCDIR": str(MK)}):
                 self.assertEqual(moved.tmpfiles_allow_path(), str(MK / check.TMPFILES_ALLOW))
                 self.assertEqual(moved.tmpfiles_allow_violations(self.root), [])
@@ -2981,6 +3118,164 @@ class DiffOracleTest(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             assert_all_ran(self, (Skips,))
+
+    def test_allowlist_coverage_fails_on_a_harmful_group(self):
+        # #1543 P/UX P4-1: the tests that run every group of tmpfiles.allow (TmpfilesDiffTest's
+        # cases and TmpfilesAllowTest's guard loop) must reach every group: with one harmful group
+        # added to the list, sorted last, both must fail on it. systemd-tmpfiles is replaced by a
+        # stand-in that writes /proc/sys for exactly TmpfilesDiffTest.WRITES, so that the same run
+        # passes without the harmful group.
+        here = sys.modules[__name__]
+        harm_rel, harm = "usr/lib/tmpfiles.d/zz-harm.conf", "f /etc/sysctl.d/zz-harm.conf - - - - net.ipv4.ip_forward=1"
+        groups = dict(allow_groups(), **{harm_rel: [harm]})
+        allowed = check.tmpfiles_allowed() | {(harm_rel, harm)}
+
+        def writes(args, **kw):
+            root = next(a[len("--root="):] for a in args if a.startswith("--root="))
+            text = "".join(p.read_text() for d in ("etc/tmpfiles.d", "usr/lib/tmpfiles.d")
+                           for p in sorted(pathlib.Path(root, d).glob("*.conf")))
+            if any(w in text for w in TmpfilesDiffTest.WRITES):
+                pathlib.Path(root, "proc/sys/net/ipv4/ip_forward").write_text("1\n")
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+
+        tests = ("test_passed_lines_change_nothing_guarded", "test_every_entry_passes_the_guard_under_its_own_file")
+        for harmful in (False, True):
+            with self.subTest(harmful=harmful), contextlib.ExitStack() as stack:
+                stack.enter_context(unittest.mock.patch.object(here, "reference_tool", lambda case, tool: tool))
+                stack.enter_context(unittest.mock.patch.object(subprocess, "run", writes))
+                if harmful:
+                    stack.enter_context(unittest.mock.patch.object(here, "allow_groups", lambda: groups))
+                    stack.enter_context(unittest.mock.patch.object(check, "tmpfiles_allowed", lambda path=None: allowed))
+                result = unittest.TestResult()
+                unittest.TestSuite([TmpfilesDiffTest(tests[0]), TmpfilesAllowTest(tests[1])]).run(result)
+                failed = [str(t) + tb for t, tb in result.failures + result.errors]
+                if not harmful:
+                    self.assertEqual(failed, [])
+                    continue
+                for name in tests:
+                    self.assertTrue(any(name in f and "zz-harm" in f for f in failed), (name, failed))
+
+
+# #1543 Security delta 4 B1: names of file-reading and stat calls, on any object (pathlib, os,
+# os.path, a file). mkosi.finalize may use them only in TreeAccessTest.ALLOWED.
+FS_CALLS = frozenset((
+    "open", "fdopen", "read", "readline", "readlines", "read_text", "read_bytes", "write_text", "write_bytes",
+    "is_file", "is_dir", "is_symlink", "is_socket", "is_fifo", "is_mount", "is_block_device", "is_char_device",
+    "exists", "lexists", "isfile", "isdir", "islink", "ismount", "stat", "lstat", "fstat", "statvfs", "listdir",
+    "scandir", "walk", "fwalk", "iterdir", "glob", "rglob", "readlink", "realpath", "resolve", "samefile",
+    "access", "getsize", "getmtime", "getctime", "getatime", "chdir", "opendir"))
+# Built-ins that open files or reach a call by a name the parse cannot see.
+FS_NAMES = frozenset(("open", "getattr", "__import__", "eval", "exec", "globals", "vars", "memoryview"))
+FS_MODULES = frozenset(("pathlib", "glob", "shutil", "io", "posix", "fileinput", "linecache", "mmap", "subprocess"))
+
+
+def fs_offences(source, allowed, readers):
+    """(function, line, what) for each file-reading or stat call in SOURCE outside the functions
+    ALLOWED names (Class.method for a method; nested functions count as their outermost), each
+    ImportFrom and each import of FS_MODULES anywhere, and each call of a function in READERS
+    from outside the callers it lists."""
+    out = []
+
+    def visit(node, scope, func):
+        for child in ast.iter_child_nodes(node):
+            s, f = scope, func
+            if isinstance(child, ast.ClassDef):
+                s = scope + [child.name]
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                name = ".".join(scope + [getattr(child, "name", "<lambda>")])
+                f = func or name
+                s = scope + [getattr(child, "name", "<lambda>")]
+            where = f or "<module>"
+            if isinstance(child, ast.Attribute) and child.attr in FS_CALLS and where not in allowed:
+                out.append((where, child.lineno, "." + child.attr))
+            elif isinstance(child, ast.Name) and child.id in FS_NAMES and where not in allowed:
+                out.append((where, child.lineno, child.id))
+            elif isinstance(child, ast.ImportFrom):
+                out.append((where, child.lineno, "from %s import" % child.module))
+            elif isinstance(child, ast.Import):
+                out.extend((where, child.lineno, "import " + a.name) for a in child.names
+                           if a.name.split(".")[0] in FS_MODULES)
+            elif isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and child.func.id in readers \
+                    and where not in readers[child.func.id]:
+                out.append((where, child.lineno, child.func.id))
+            visit(child, s, f)
+
+    visit(ast.parse(source), [], None)
+    return out
+
+
+class TreeAccessTest(unittest.TestCase):
+    """#1543 Security delta 4 B1, structurally: three review rounds each found a reader of the image
+    tree that skipped the link rule (a dangling link in sysctl.d, then tmpfiles.d, then etc/fstab
+    through pathlib). mkosi.finalize may touch the file system only in the four tree primitives
+    (tree_lstat, tree_listdir, tree_readlink, tree_read), none of which follows a link on the build
+    host, and in the two functions that read the repository's tmpfiles.allow, not the tree. Only
+    Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
+    calls a file-reading or stat API fails here, however it names it."""
+    # REQ: HW-1, DEV-2
+    ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read",
+                         "tmpfiles_allow_path", "tmpfiles_allowed"))
+    READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
+    SOURCE = (MK / "mkosi.finalize").read_text()
+
+    def offences(self, source):
+        return fs_offences(source, self.ALLOWED, self.READERS)
+
+    def test_only_the_primitives_touch_the_file_system(self):
+        self.assertEqual(self.offences(self.SOURCE), [])
+        for name in self.ALLOWED | set(self.READERS) | {"Conf"}:
+            self.assertTrue(callable(getattr(check, name)), name)
+        self.assertTrue(callable(check.Conf.content) and callable(check.has_key))
+
+    def test_a_reader_that_skips_the_chase_fails(self):
+        # Mutants of mkosi.finalize that each must fail the parse check: the delta 4 fstab read put
+        # back, with and without its import; machine-id through open(); an alias, getattr and a
+        # from-import of a stat call; a reader that calls tree_read itself, skipping conf_chase.
+        fstab = '        for ln in Conf(root, "etc/fstab").text().splitlines():'
+        mid = '        if Conf(root, "etc/machine-id").text().strip() not in ("", "uninitialized"):'
+        mutants = {
+            "pathlib fstab": [(fstab, '        for ln in (pathlib.Path(root) / "etc/fstab").read_text(errors="replace")'
+                                      '.splitlines():'), ("import os\n", "import os\nimport pathlib\n")],
+            "fstab read_text only": [(fstab, '        for ln in (root / "etc/fstab").read_text().splitlines():')],
+            "fstab is_file": [(fstab, '        for ln in (Conf(root, "etc/fstab").text() if (root / "etc/fstab").is_file()'
+                                      ' else "").splitlines():')],
+            "machine-id open": [(mid, '        if open(os.path.join(root, "etc/machine-id")).read().strip() not in '
+                                      '("", "uninitialized"):')],
+            "alias": [("\ndef violations(root):", "\nLS = os.listdir\n\n\ndef violations(root):")],
+            "getattr": [(mid, '        if getattr(os, "readlink")(root) not in ("", "uninitialized"):')],
+            "from import": [("import os\n", "import os\nfrom os import lstat as _l\n")],
+            "tree_read direct": [(fstab, '        for ln in tree_read(root, "etc/fstab").decode().splitlines():')],
+            "os.path in a reader": [("    out, root = [], str(root)\n    places =",
+                                     "    out, root = [], str(root)\n    assert os.path.exists(root)\n    places =")],
+        }
+        for name, edits in mutants.items():
+            with self.subTest(name):
+                src = self.SOURCE
+                for old, new in edits:
+                    self.assertEqual(src.count(old), 1, old)
+                    src = src.replace(old, new)
+                self.assertNotEqual(self.offences(src), [])
+
+    def test_primitives_never_follow_a_link_on_the_host(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            write(root, "usr/lib/sysctl.d/x.conf", "x\n")
+            link(root, "lib", "usr/lib")
+            link(root, "etc/l.conf", "/etc/hostname")
+            self.assertIsNotNone(check.tree_lstat(root, "usr/lib/sysctl.d/x.conf"))
+            self.assertIsNone(check.tree_lstat(root, "usr/lib/sysctl.d/y.conf"))
+            for rel in ("lib/sysctl.d/x.conf", "lib/sysctl.d"):
+                with self.assertRaises(OSError):
+                    check.tree_lstat(root, rel)
+                with self.assertRaises(OSError):
+                    check.tree_listdir(root, rel)
+            for rel in ("etc/l.conf", "lib/sysctl.d/x.conf", "usr/lib/sysctl.d"):
+                with self.assertRaises(OSError):
+                    check.tree_read(root, rel)
+            self.assertEqual(check.tree_read(root, "usr/lib/sysctl.d/x.conf"), b"x\n")
+            self.assertEqual(check.tree_readlink(root, "etc/l.conf"), "/etc/hostname")
+            self.assertEqual([r for r, st in check.tree_walk(root)],
+                             ["etc", "etc/l.conf", "lib", "usr", "usr/lib", "usr/lib/sysctl.d", "usr/lib/sysctl.d/x.conf"])
 
 
 class KmodDiffTest(unittest.TestCase):
