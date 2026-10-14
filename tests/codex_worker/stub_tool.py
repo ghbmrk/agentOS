@@ -2,12 +2,16 @@
 # It tries the paths a tool holding the placeholder could use to reach the provider (the
 # forwarder's loopback port, the egress socket, the CLI's auth.json and environment) and reports
 # what it reached as one JSON object, echoing what it could read so the caller can look for the
-# synthetic canary. argv: forwarder port.
+# synthetic canary. It also reports what would let it undo the sandbox: capabilities, a nested
+# user namespace, the CLI's session, the worker's /tmp, descriptors the CLI left open.
+# argv: "probe" and the forwarder port, or "beat" (append to ./beat until killed, at most 10s).
+import ctypes
 import json
 import os
 import pathlib
 import socket
 import sys
+import time
 
 SOCK = "/run/agentos/egress.sock"
 AUTH = "/var/lib/agentos-codex/auth.json"
@@ -45,8 +49,46 @@ def sees_cli():
     return False
 
 
+def has_caps():
+    for line in pathlib.Path("/proc/self/status").read_text().splitlines():
+        if line.startswith("CapEff:"):
+            return int(line.split()[1], 16) != 0
+    return True
+
+
+def nested_userns():
+    pid = os.fork()
+    if pid == 0:
+        libc = ctypes.CDLL(None, use_errno=True)
+        os._exit(0 if libc.unshare(0x10000000) == 0 else 1)  # CLONE_NEWUSER
+    return os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) == 0
+
+
+def inherited_fds():
+    fds = []
+    for name in os.listdir("/proc/self/fd"):
+        fd = int(name)
+        if fd > 2:
+            try:
+                os.fstat(fd)  # the listing's own descriptor is closed by now
+                fds.append(fd)
+            except OSError:
+                pass
+    return fds
+
+
+def beat():
+    end = time.monotonic() + 10
+    while time.monotonic() < end:
+        with open("beat", "a") as f:
+            f.write(".")
+        time.sleep(0.1)
+
+
 def main():
-    port = int(sys.argv[1])
+    if sys.argv[1] == "beat":
+        return beat()
+    port = int(sys.argv[2])
     try:
         auth_text = pathlib.Path(AUTH).read_text()
     except OSError:
@@ -61,6 +103,11 @@ def main():
         "root_write": can_write("/etc/agentos-toolsh-probe"),
         "work_write": can_write("toolsh-probe"),
         "ifaces": sorted(name for _, name in socket.if_nameindex()),
+        "caps": has_caps(),
+        "userns": nested_userns(),
+        "session": os.getsid(0) == 0,  # 0: the session leader is outside the pid namespace
+        "tmp": any(os.listdir(d) for d in ("/tmp", "/var/tmp")),
+        "fds": inherited_fds(),
     }))
 
 

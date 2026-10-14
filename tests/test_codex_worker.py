@@ -32,6 +32,7 @@ STUB_TOOL = ROOT / "tests/codex_worker/stub_tool.py"
 BWRAP = "/usr/bin/bwrap"
 FORWARDER = "http://127.0.0.1:18432"
 CODEX_HOME = "/var/lib/agentos-codex"
+WORK = "/var/lib/agentos-work"
 
 # Settings that must hold exactly. The hosted-tool rows are the off switches the pinned CLI is
 # assumed to read (guest/codex/ASSUMPTIONS.md C1); a missing key counts as on, since the CLI's
@@ -48,6 +49,7 @@ REQUIRED = {
     ("features", "image_generation"): False,
     ("check_for_update_on_startup",): False,
     ("analytics", "enabled"): False,
+    ("otel", "exporter"): "none",
     ("feedback", "enabled"): False,
     ("history", "persistence"): "none",
     ("approval_policy",): "never",
@@ -131,6 +133,7 @@ class ManagedConfigTest(unittest.TestCase):
             "other provider": put(("model_provider",), "openai"),
             "auto-update check on": put(("check_for_update_on_startup",), True),
             "analytics on": put(("analytics", "enabled"), True),
+            "telemetry exported": put(("otel", "exporter"), "otlp-http"),
             "history kept": put(("history", "persistence"), "save-all"),
             "tool network on": put(("sandbox_workspace_write", "network_access"), True),
             "env inherited": put(("shell_environment_policy", "inherit"), "all"),
@@ -147,7 +150,10 @@ class ManagedConfigTest(unittest.TestCase):
         env = dict(e.split("=", 1) for e in launch["env"])
         self.assertEqual(env["CODEX_REFRESH_TOKEN_URL_OVERRIDE"], FORWARDER + "/oauth/token")
         self.assertEqual(env["CODEX_HOME"], CODEX_HOME)
-        self.assertEqual(launch["argv"][:2], ["codex", "exec"])
+        self.assertEqual(env["HOME"], WORK)
+        self.assertEqual(launch["argv"],
+                         ["codex", "exec", "--json", "--skip-git-repo-check", "--cd", WORK, "-"])
+        self.assertEqual(launch["cwd"], WORK)
         # Nothing secret-shaped rides in the launch spec; the login stays with the broker (CRED-5).
         for entry in launch["env"]:
             self.assertNotRegex(entry.split("=", 1)[0], r"(?i)key|token$|secret|password")
@@ -157,23 +163,24 @@ class ToolshRefusalTest(unittest.TestCase):
     """agentos-toolsh refuses before it starts bwrap, so these run without root."""
 
     def run_toolsh(self, cwd, *argv):
-        return subprocess.run(["sh", str(TOOLSH), *argv], cwd=cwd, capture_output=True,
+        return subprocess.run(["bash", str(TOOLSH), *argv], cwd=cwd, capture_output=True,
                               text=True, timeout=30)
 
     # REQ: CRED-5, A14
-    def test_wrapper_is_plain_sh_and_calls_bwrap_by_absolute_path(self):
+    def test_wrapper_is_bash_and_calls_bwrap_by_absolute_path(self):
+        # What each flag does is checked by behaviour in ToolSandboxTest; this pins the shape.
         self.assertTrue(os.access(TOOLSH, os.X_OK), "agentos-toolsh must be executable")
-        self.assertEqual(subprocess.run(["sh", "-n", str(TOOLSH)]).returncode, 0)
+        self.assertEqual(subprocess.run(["bash", "-n", str(TOOLSH)]).returncode, 0)
         text = TOOLSH.read_text()
+        self.assertTrue(text.startswith("#!/bin/bash\n"))
         self.assertIn('BWRAP=/usr/bin/bwrap', text)
-        for flag in ("--unshare-all", "--cap-drop ALL", "--die-with-parent", "--new-session",
-                     "--clearenv", "--ro-bind / /", "--tmpfs /run", "--disable-userns"):
-            with self.subTest(flag=flag):
-                self.assertIn(flag, text)
 
     # REQ: CRED-5, A14
-    def test_refuses_a_working_directory_that_would_reexpose_a_hidden_path(self):
-        for cwd in ("/", "/run", "/tmp", "/proc", "/etc"):
+    def test_refuses_a_working_directory_outside_the_workspace(self):
+        # Writable system paths would let a tool reach CODEX_HOME (/var, /var/lib) or replace
+        # the wrapper itself (/usr, /usr/local/bin). CODEX_HOME is checked inside the stub worker.
+        for cwd in ("/", "/run", "/tmp", "/proc", "/etc", "/var", "/var/lib", "/usr",
+                    "/usr/local/bin", "/home"):
             with self.subTest(cwd=cwd):
                 if not os.path.isdir(cwd):
                     continue
@@ -214,13 +221,18 @@ class _Forwarder:
                 conn, _ = listener.accept()
             except OSError:
                 return
-            with conn:
-                conn.settimeout(5)
-                try:
-                    conn.recv(64)
-                    conn.sendall(b"ok\n")
-                except OSError:
-                    pass
+            # One thread per connection: the stub CLI holds one open while its tool connects.
+            threading.Thread(target=_Forwarder.answer, args=(conn,), daemon=True).start()
+
+    @staticmethod
+    def answer(conn):
+        with conn:
+            conn.settimeout(5)
+            try:
+                conn.recv(64)
+                conn.sendall(b"ok\n")
+            except OSError:
+                pass
 
     def close(self):
         self.tcp.close()
@@ -255,30 +267,32 @@ class ToolSandboxTest(unittest.TestCase):
         self.fwd = _Forwarder(str(self.run_dir / "egress.sock"))
         self.addCleanup(self.fwd.close)
 
-    def run_worker(self, toolsh=TOOLSH):
+    def worker(self, *command, toolsh=TOOLSH, codex_home=True, chdir=WORK, extra=()):
         argv = [
             BWRAP, "--dev-bind", "/", "/",
             "--tmpfs", "/run", "--bind", str(self.run_dir), "/run/agentos",
-            "--tmpfs", "/var/lib", "--bind", str(self.codex_home), CODEX_HOME,
-            "--bind", str(self.work), "/var/lib/agentos-work",
+            "--tmpfs", "/tmp", "--tmpfs", "/var/tmp",
+            "--tmpfs", "/var/lib",
+            *(("--bind", str(self.codex_home), CODEX_HOME) if codex_home else ()),
+            "--bind", str(self.work), WORK,
             "--ro-bind", str(toolsh), "/usr/local/bin/agentos-toolsh",
             # A system path: the tool runs without CAP_DAC_OVERRIDE, so it cannot
             # traverse a 0750 home such as the CI runner's checkout.
             "--ro-bind", str(STUB_TOOL), "/var/lib/agentos-stub-tool.py",
-            "--chdir", "/var/lib/agentos-work",
+            *extra,
+            "--chdir", chdir,
             "--setenv", "AGENTOS_SYNTHETIC_CANARY", self.canary,
-            "--", sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+            "--", *command,
         ]
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60)
+
+    def run_worker(self, toolsh=TOOLSH, codex_home=True):
+        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+                        toolsh=toolsh, codex_home=codex_home)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
-    # REQ: CRED-5, CRED-1, A14, CAP-11
-    def test_cli_reaches_forwarder_and_login_but_its_tools_do_not(self):
-        out = self.run_worker()
-        self.assertEqual(out["cli"], {"tcp": True, "unix": True, "auth": True, "env": True},
-                         "the control case must reach everything, or the tool result proves nothing")
-        tool = out["tool"]
+    def assert_contained(self, tool):
         self.assertEqual(tool["exit"], 0, tool)
         self.assertFalse(tool["tcp"], "tool reached the forwarder's loopback port")
         self.assertFalse(tool["unix"], "tool reached the egress socket")
@@ -287,8 +301,43 @@ class ToolSandboxTest(unittest.TestCase):
         self.assertFalse(tool["parent"], "tool saw the CLI's process")
         self.assertFalse(tool["root_write"], "tool wrote outside its workspace")
         self.assertFalse(tool["canary_anywhere"], "the canary reached the tool")
+        self.assertFalse(tool["caps"], "tool kept capabilities")
+        self.assertFalse(tool["userns"], "tool could create a nested user namespace")
+        self.assertFalse(tool["session"], "tool shares the CLI's session")
+        self.assertFalse(tool["tmp"], "tool saw the worker's /tmp or /var/tmp")
+        self.assertEqual(tool["fds"], [], "tool inherited the CLI's descriptors")
+        self.assertFalse(tool["outlives"], "tool outlived its wrapper")
         self.assertTrue(tool["work_write"], "tool must still write its workspace")
         self.assertEqual(tool["ifaces"], ["lo"], "tool must have no interface but its own lo")
+
+    # REQ: CRED-5, CRED-1, A14, CAP-11
+    def test_cli_reaches_forwarder_and_login_but_its_tools_do_not(self):
+        out = self.run_worker()
+        self.assertEqual(out["cli"], {"tcp": True, "unix": True, "auth": True, "env": True},
+                         "the control case must reach everything, or the tool result proves nothing")
+        self.assert_contained(out["tool"])
+
+    # REQ: CRED-5, A14
+    def test_tool_is_contained_in_a_worker_without_codex_home(self):
+        # The wrapper's other branch: no CODEX_HOME to hide, the rest unchanged.
+        out = self.run_worker(codex_home=False)
+        self.assertEqual(out["cli"]["auth"], False)
+        self.assertEqual(out["cli"]["tcp"], True)
+        self.assertEqual(out["cli"]["unix"], True)
+        self.assertEqual(out["tool"]["exit"], 0, out["tool"])
+        self.assert_contained(out["tool"])
+
+    # REQ: CRED-5, A14
+    def test_refuses_codex_home_and_a_workspace_lookalike_as_working_directory(self):
+        for cwd in (CODEX_HOME, "/var/lib/agentos-workx"):
+            with self.subTest(cwd=cwd):
+                r = self.worker("/usr/local/bin/agentos-toolsh", "true", chdir=cwd,
+                                extra=("--dir", "/var/lib/agentos-workx"))
+                self.assertEqual(r.returncode, 126, r.stderr)
+                self.assertIn("outside " + WORK, r.stderr)
+        r = self.worker("/usr/local/bin/agentos-toolsh", "true", chdir=WORK + "/sub",
+                        extra=("--dir", WORK + "/sub"))
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     # REQ: CRED-5, A14
     def test_each_removed_wrapper_defence_turns_the_test_red(self):
@@ -296,18 +345,59 @@ class ToolSandboxTest(unittest.TestCase):
         mutants = {
             "network shared": (("--unshare-all", "--unshare-user --unshare-pid --unshare-ipc "
                                 "--unshare-uts --unshare-cgroup"), "tcp"),
-            "socket dir visible": (("--tmpfs /run ", ""), "unix"),
-            "CODEX_HOME visible": (('--tmpfs "$CODEX_HOME" ', ""), "auth"),
+            "socket dir visible": (("hide=(--tmpfs /run ", "hide=("), "unix"),
+            "CODEX_HOME visible": (('hide+=(--tmpfs "$CODEX_HOME")', "hide+=()"), "auth"),
             "environment kept": (("--clearenv ", ""), "env"),
+            "capabilities kept": (("--cap-drop ALL ", ""), "caps"),
+            "nested userns allowed": (("--disable-userns ", ""), "userns"),
+            "session shared": (("--new-session ", ""), "session"),
+            "/tmp shared": (("--tmpfs /tmp ", ""), "tmp"),
+            "/var/tmp shared": (("--tmpfs /var/tmp)", ")"), "tmp"),
+            "descriptors kept": (('eval "exec $fd>&-"', ":"), "fds"),
+            "survives its parent": (("--die-with-parent ", ""), "outlives"),
         }
         text = TOOLSH.read_text()
         for name, ((old, new), leak) in mutants.items():
             with self.subTest(mutant=name):
                 self.assertIn(old, text)
-                bad = self.tmp / ("toolsh-" + leak)
+                bad = self.tmp / "toolsh-mutant"
                 bad.write_text(text.replace(old, new, 1))
                 bad.chmod(0o755)
-                self.assertTrue(self.run_worker(bad)["tool"][leak], f"{name} went unnoticed")
+                got = self.run_worker(bad)["tool"][leak]
+                if not got and leak == "userns" and userns_restricted():
+                    self.skipTest("the kernel refuses unprivileged user namespaces here anyway")
+                self.assertTrue(got, f"{name} went unnoticed")
+
+    # REQ: CRED-5, A14
+    def test_allow_list_and_bind_order_each_keep_codex_home_hidden(self):
+        # With the allow-list gone the hiding mounts still cover a working directory in
+        # CODEX_HOME, because the working directory is bound first; with both gone it leaks.
+        text = TOOLSH.read_text()
+        no_list = text.replace('*) refuse "working directory $cwd is outside $WORK" ;;', "*) ;;")
+        self.assertNotEqual(no_list, text)
+        bind = '\t--bind "$cwd" "$cwd" \\\n'
+        self.assertIn(bind, no_list)
+        late_bind = no_list.replace(bind, "").replace(
+            '\t"${hide[@]}" \\\n', '\t"${hide[@]}" \\\n' + bind)
+        self.assertNotEqual(late_bind, no_list)
+        probe = ("/bin/cat", CODEX_HOME + "/auth.json")
+        for name, body, leaks in (("allow-list only gone", no_list, False),
+                                  ("allow-list gone, bind after hiding", late_bind, True)):
+            with self.subTest(mutant=name):
+                bad = self.tmp / "toolsh-order"
+                bad.write_text(body)
+                bad.chmod(0o755)
+                r = self.worker("/usr/local/bin/agentos-toolsh", *probe, toolsh=bad,
+                                chdir=CODEX_HOME)
+                self.assertEqual(self.canary in r.stdout, leaks, r.stderr)
+
+
+def userns_restricted():
+    try:
+        return pathlib.Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+                            ).read_text().strip() == "1"
+    except OSError:
+        return False
 
 
 if __name__ == "__main__":
