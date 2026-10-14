@@ -2,8 +2,9 @@
 # It tries the paths a tool holding the placeholder could use to reach the provider (the
 # forwarder's loopback port, the egress socket, the CLI's auth.json and environment) and reports
 # what it reached as one JSON object, echoing what it could read so the caller can look for the
-# synthetic canary. It also reports what would let it undo the sandbox: capabilities, a nested
-# user namespace, the CLI's session, the worker's /tmp, descriptors the CLI left open.
+# synthetic canary, and which of HOME, TMPDIR, /tmp and CODEX_HOME it can write. It also reports
+# what would let it undo the sandbox: capabilities, a nested user namespace, the CLI's session,
+# the worker's /tmp, descriptors the CLI left open.
 # argv: "probe" and the forwarder port, or "beat" (append to ./beat until killed, at most 10s).
 import ctypes
 import json
@@ -36,6 +37,12 @@ def can_write(path):
         return True
     except OSError:
         return False
+
+
+def can_write_env(name):
+    """Whether the directory the named variable points at is set and writable."""
+    value = os.environ.get(name)
+    return bool(value) and can_write(os.path.join(value, ".agentos-probe"))
 
 
 def sees_cli():
@@ -109,6 +116,10 @@ def main():
         "parent": sees_cli(),
         "root_write": can_write("/etc/agentos-toolsh-probe"),
         "work_write": can_write("toolsh-probe"),
+        "home_write": can_write_env("HOME"),
+        "tmpdir_write": can_write_env("TMPDIR"),
+        "slash_tmp_write": can_write("/tmp/agentos-probe"),
+        "codex_home_write": can_write("/var/lib/agentos-codex/probe"),
         "ifaces": interfaces(),
         "caps": has_caps(),
         "userns": nested_userns(),

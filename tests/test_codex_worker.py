@@ -10,7 +10,16 @@
 #
 # The sandbox half needs root and /usr/bin/bwrap; it skips without them, and fails instead when
 # AGENTOS_REQUIRE_BWRAP=1 (CI runs it that way under sudo in the checks job).
-# CliSandboxTest also needs AGENTOS_CODEX_CLI, the path of a Codex CLI binary; CI has none.
+# CliSandboxTest also needs AGENTOS_CODEX_CLI, the path of a Codex CLI binary; CI has none. To run
+# it as root, with the checkout and the CLI outside /tmp (the stub worker replaces /tmp), port
+# 18432 free, and cc on PATH if the LD_PRELOAD mutant should also check the library runs:
+#   cd /root && npm pack @openai/codex@0.162.1-linux-x64
+#   tar xzf openai-codex-0.162.1-linux-x64.tgz
+#   mkdir -p /etc/codex   # an empty mount point; each turn binds its own copy of the guest files
+#   AGENTOS_REQUIRE_BWRAP=1 \
+#   AGENTOS_CODEX_CLI=/root/package/vendor/x86_64-unknown-linux-musl/bin/codex \
+#     python3 -m unittest tests.test_codex_worker.CliSandboxTest
+# The CLI starts codex-code-mode-host from beside its binary, so keep the vendor directory whole.
 import copy
 import json
 import os
@@ -63,11 +72,18 @@ REQUIRED = {
     ("approval_policy",): "never",
     ("sandbox_mode",): "workspace-write",
     ("sandbox_workspace_write", "network_access"): False,
+    # Tools write only the workspace: no extra roots, and neither $TMPDIR nor /tmp (CRED-5: a
+    # managed writable root of CODEX_HOME lets a tool replace auth.json, measured).
+    ("sandbox_workspace_write", "writable_roots"): [],
+    ("sandbox_workspace_write", "exclude_tmpdir_env_var"): True,
+    ("sandbox_workspace_write", "exclude_slash_tmp"): True,
     # "core", not "none": with "none" a tool gets no system PATH. include_only below is the
     # filter (C15).
     ("shell_environment_policy", "inherit"): "core",
-    # Only PATH reaches a tool: a lower layer's `set` (LD_PRELOAD, say) is filtered out (#1455).
-    ("shell_environment_policy", "include_only"): ["PATH"],
+    # Only PATH, HOME and TMPDIR reach a tool: a lower layer's `set` (LD_PRELOAD, say) is
+    # filtered out (#1455), and HOME and TMPDIR are the workspace, the one writable place (C15).
+    ("shell_environment_policy", "include_only"): ["PATH", "HOME", "TMPDIR"],
+    ("shell_environment_policy", "set"): {"HOME": WORK, "TMPDIR": WORK},
     # A lower layer cannot mark the workspace trusted, which would load its .codex config (#1451).
     ("projects", WORK, "trust_level"): "untrusted",
     # No program runs when a turn ends: an empty list replaces a lower layer's notify (C14).
@@ -202,7 +218,22 @@ class ManagedConfigTest(unittest.TestCase):
             "env inherited": put(("shell_environment_policy", "inherit"), "all"),
             "env allow-list missing": drop(("shell_environment_policy", "include_only")),
             "env allow-list widened": put(("shell_environment_policy", "include_only"),
-                                          ["PATH", "LD_*"]),
+                                          ["PATH", "HOME", "TMPDIR", "LD_*"]),
+            "HOME off the workspace": put(("shell_environment_policy", "set", "HOME"),
+                                          CODEX_HOME),
+            "TMPDIR off the workspace": put(("shell_environment_policy", "set", "TMPDIR"),
+                                            "/tmp"),
+            "env set gains LD_PRELOAD": put(("shell_environment_policy", "set", "LD_PRELOAD"),
+                                            WORK + "/x.so"),
+            "env set unpinned": drop(("shell_environment_policy", "set")),
+            "extra writable root": put(("sandbox_workspace_write", "writable_roots"),
+                                       [CODEX_HOME]),
+            "writable roots unpinned": drop(("sandbox_workspace_write", "writable_roots")),
+            "TMPDIR writable": put(("sandbox_workspace_write", "exclude_tmpdir_env_var"), False),
+            "TMPDIR exclusion unpinned": drop(("sandbox_workspace_write",
+                                               "exclude_tmpdir_env_var")),
+            "/tmp writable": put(("sandbox_workspace_write", "exclude_slash_tmp"), False),
+            "/tmp exclusion unpinned": drop(("sandbox_workspace_write", "exclude_slash_tmp")),
             "WebSocket transport unpinned": drop(("model_providers", "agentos",
                                                   "supports_websockets")),
             "WebSocket transport on": put(("model_providers", "agentos", "supports_websockets"),
@@ -534,8 +565,8 @@ class ToolSandboxTest(unittest.TestCase):
                 bad.chmod(0o755)
                 got = self.run_worker(bad)["tool"][leak]
                 # Where the kernel refuses unprivileged user namespaces anyway, the mutant cannot
-                # show. CI sets that sysctl to 0, so with AGENTOS_REQUIRE_BWRAP=1 this fails
-                # instead of passing on a skip (#1454).
+                # show. With AGENTOS_REQUIRE_BWRAP=1 (the checks job) this fails instead of
+                # passing on a skip, so a runner that restricts them shows up (#1454).
                 if not got and leak == "userns" and userns_restricted():
                     if os.environ.get("AGENTOS_REQUIRE_BWRAP") == "1":
                         self.fail("unprivileged user namespaces restricted; the userns mutant "
@@ -708,8 +739,9 @@ class CliSandboxTest(unittest.TestCase):
     worker, against a fake endpoint on the forwarder's port. CODEX_HOME/config.toml and the
     workspace's .codex/config.toml are hostile: they try to inject LD_PRELOAD and other variables
     into tools, trust the workspace, run a notify program and an MCP server, and switch to
-    WebSocket transport. The tool the fake endpoint asks for is the stub tool's probe. Each
-    shipped pin is then dropped in turn and the injection it stops must show (C9-C15)."""
+    WebSocket transport. The tool the fake endpoint asks for is the stub tool's probe. Eight
+    shipped pins are then dropped one at a time and the injection each stops must show
+    (C9-C15); the others are checked statically by ManagedConfigTest only."""
 
     PORT = 18432  # the forwarder's port, pinned in managed config
 
@@ -756,6 +788,7 @@ plugins = true
 [shell_environment_policy.set]
 LD_PRELOAD = "/var/lib/agentos-preload.so"
 HOME_CANARY = "home-canary"
+HOME = "{CODEX_HOME}"
 
 [projects."{WORK}"]
 trust_level = "trusted"
@@ -843,7 +876,14 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         self.assertFalse(tool["unix"], "tool reached the egress socket")
         self.assertFalse(tool["auth"], "tool read the placeholder auth.json")
         self.assertFalse(tool["root_write"], "tool wrote outside its workspace")
+        self.assertFalse(tool["codex_home_write"], "tool wrote CODEX_HOME")
+        self.assertFalse(tool["slash_tmp_write"], "tool wrote /tmp")
         self.assertTrue(tool["work_write"], "tool must still write its workspace")
+        # HOME and TMPDIR are the workspace, whatever a lower layer sets, so mktemp and
+        # `git config --global` work (C15).
+        self.assertEqual((tool["environ"].get("HOME"), tool["environ"].get("TMPDIR")),
+                         (WORK, WORK))
+        self.assertTrue(tool["home_write"] and tool["tmpdir_write"])
         self.assertNotIn(self.canary, json.dumps(tool), "the canary reached the tool")
         for name in ("LD_PRELOAD", "HOME_CANARY", "AGENTOS_SYNTHETIC_CANARY"):
             self.assertNotIn(name, tool["environ"])
@@ -855,7 +895,13 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
     def test_each_dropped_pin_lets_its_injection_through(self):
         def shows(got, what):
             return {
-                "env": "HOME_CANARY" in got["tool"].get("environ", {}),
+                # With the allow-list gone a lower layer's `set` reaches the tool, LD_PRELOAD
+                # included: the preload library, when cc could build it, runs (C8).
+                "env": "HOME_CANARY" in got["tool"].get("environ", {})
+                and (self.preload is None or "preload-ran" in got["marks"]),
+                "websocket": any(q["upgrade"] for q in got["requests"]),
+                "write CODEX_HOME": got["tool"].get("codex_home_write"),
+                "write /tmp": got["tool"].get("slash_tmp_write"),
                 "notify": "notify-ran" in got["marks"],
                 "mcp": "mcp-ran" in got["marks"],
                 "trust": "project-config-model" in [q["model"] for q in got["requests"]],
@@ -867,7 +913,12 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         deny_text = req[start:req.index("\n]", start) + 2]
         self.assertEqual(tomllib.loads(deny_text)["deny_read"], deny)
         mutants = {
-            "env allow-list": ((('include_only = ["PATH"]\n', ""),), (), "env"),
+            "env allow-list": ((('include_only = ["PATH", "HOME", "TMPDIR"]\n', ""),), (), "env"),
+            "WebSocket transport": ((("supports_websockets = false\n", ""),), (), "websocket"),
+            "writable roots": ((("writable_roots = []", f'writable_roots = ["{CODEX_HOME}"]'),),
+                               (), "write CODEX_HOME"),
+            "/tmp exclusion": ((("exclude_slash_tmp = true", "exclude_slash_tmp = false"),), (),
+                               "write /tmp"),
             "notify": ((('notify = []\n', ""),), (), "notify"),
             "workspace trust": ((('trust_level = "untrusted"\n', ""),), (), "trust"),
             "MCP allowlist": ((), (("[mcp_servers]\n", ""),), "mcp"),

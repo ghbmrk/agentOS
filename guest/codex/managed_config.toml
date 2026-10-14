@@ -73,19 +73,29 @@ exporter = "none"
 [history]
 persistence = "none"
 
+# Tools write the workspace only: no extra roots, and neither $TMPDIR nor /tmp is made writable.
+# A lower layer's writable_roots replaces nothing here, but a managed one would (measured: a
+# managed root of CODEX_HOME lets a tool write it), so each value is pinned in the test.
 [sandbox_workspace_write]
 network_access = false
 writable_roots = []
 exclude_tmpdir_env_var = true
 exclude_slash_tmp = true
 
-# Tools get PATH from the CLI's environment and nothing else; the CLI adds a few variables of its
-# own (CODEX_*, LANG, pagers). include_only also filters what a lower layer adds with `set`, so
-# LD_PRELOAD and the like cannot be injected (#1455). "core", not "none": with "none" tools get no
-# system PATH and cannot run basic commands (measured).
+# Tools get PATH from the CLI's environment, HOME and TMPDIR from `set` below, and nothing else;
+# the CLI adds a few variables of its own (CODEX_*, LANG, pagers). include_only also filters what a
+# lower layer adds with `set`, so LD_PRELOAD and the like cannot be injected (#1455). A lower
+# layer's HOME or TMPDIR loses to the managed value, key by key. "core", not "none": with "none"
+# tools get no system PATH and cannot run basic commands (measured).
 [shell_environment_policy]
 inherit = "core"
-include_only = ["PATH"]
+include_only = ["PATH", "HOME", "TMPDIR"]
+
+# HOME and TMPDIR point at the workspace, the only place a tool can write: without them mktemp and
+# `git config --global` fail, since /tmp is read-only in the CLI's sandbox (measured, C15).
+[shell_environment_policy.set]
+HOME = "/var/lib/agentos-work"
+TMPDIR = "/var/lib/agentos-work"
 
 # The workspace is never trusted: a lower layer cannot mark it trusted and so load project
 # config or instructions from files a tool wrote.

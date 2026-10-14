@@ -3,7 +3,8 @@
 #   agentos-toolsh <command> [args...]
 # The pinned CLI does not run it: its own sandbox plus requirements.toml is the tool boundary
 # (ASSUMPTIONS C3, C12). This is the reference for what that boundary must hide and the fallback
-# if a CLI update loses it; tests/test_codex_worker.py checks both against the same list.
+# if a CLI update loses it. tests/test_codex_worker.py checks this wrapper against the full list
+# below; its CliSandboxTest checks the CLI's sandbox against a narrower set (ASSUMPTIONS C3).
 # The CLI reaches its provider only through the in-worker forwarder on loopback and the egress
 # socket under /run/agentos, and holds a placeholder auth.json in CODEX_HOME; the egress proxy
 # swaps in the owner's login. A tool command (model-directed) must reach none of them, or it could
