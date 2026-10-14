@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	mrand "math/rand"
 	"net"
@@ -18,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/firstboot"
@@ -453,5 +456,31 @@ func TestCardHooksStillPairTexts(t *testing.T) {
 		PairTexts(context.Context, *localui.Server, time.Duration)
 	}); !ok {
 		t.Fatal("CardFinish hooks do not start the PAIR text loop")
+	}
+}
+
+// #1185: on agentosd's setup the card step reports the card's network
+// before it provisions, so agentos-ap has it at the confirm.
+func TestTheCardStepReportsTheCardsNetwork(t *testing.T) {
+	var calls []string
+	hooks := localui.AgentosdSetup{Owner: localui.InProcess{
+		localapi.OpSetupAPNet: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			calls = append(calls, "report")
+			return struct{}{}, nil
+		}}}
+	box := firstboot.BoxConfig{Card: card.DisplayConfig{Provision: func(*card.Card) error {
+		calls = append(calls, "provision")
+		return nil
+	}}}
+	c, err := card.Generate(crand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := withCardNet(hooks, box).Card.Provision(c); err != nil || fmt.Sprint(calls) != "[report provision]" {
+		t.Fatalf("%v, calls %v", err, calls)
+	}
+	calls = nil
+	if err := withCardNet(nil, box).Card.Provision(c); err != nil || fmt.Sprint(calls) != "[provision]" {
+		t.Fatalf("without agentosd: %v, calls %v", err, calls)
 	}
 }
