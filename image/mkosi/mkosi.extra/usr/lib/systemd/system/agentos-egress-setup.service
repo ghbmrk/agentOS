@@ -1,0 +1,7 @@
+# Started by agentos-egress-setup.path; see /usr/lib/agentos/egress-setup.
+[Unit]
+Description=agentOS setup vault
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/agentos/egress-setup --restart

@@ -95,7 +95,7 @@ func modelState(c *custody, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.modelGrantedNow(), Open: c.model() != nil})
+	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.modelGrantedNow(), Open: c.model() != nil, Private: c.privateGrantedNow()})
 }
 
 // evalRoute is the model access of replay machines (LOOP-5, replay K1).
@@ -569,6 +569,7 @@ func unlockHandler(c *custody) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	secondLineRoutes(mux, c, read, reply, fail)
+	providerRoutes(mux, c, read, reply, fail)
 	smsRoutes(mux, c, read, reply, fail)
 	mailRoutes(mux, c, read, reply, fail)
 	rotationRoutes(mux, c, read, reply, fail)
@@ -724,7 +725,7 @@ func enrollHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	case err == errLocked:
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
-	case err == errEnrolled, err == errNotOpen, err == errNoEnrollment, err == errNotConfirmed:
+	case err == errEnrolled, err == errNotOpen, err == errNoEnrollment, err == errNotConfirmed, err == errCardRequired:
 		http.Error(w, err.Error(), err.(*unlockErr).status)
 		return
 	case errors.As(err, &paused):

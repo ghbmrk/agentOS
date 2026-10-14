@@ -164,3 +164,78 @@ func TestEgressProcessGuardKeepsPollWithoutNetlink(t *testing.T) {
 	}
 	t.Fatal("the poll did not apply the new network")
 }
+
+// One worker learns the home network: a kernel event and the poll tick feed
+// the same Watch, so two full reads never run at once and a stale one can
+// never land after a newer one and put back an old external address
+// (DEV-2, #1439). The first router lookup after start is held open while
+// events and ticks keep arriving; no second lookup may start meanwhile.
+func TestEgressProcessGuardReadsWithOneWorker(t *testing.T) {
+	f := &fakeNet{}
+	f.set(gw1, "8.8.8.8")
+	src := f.sources()
+	var (
+		mu       sync.Mutex
+		armed    bool
+		inFlight int
+		most     int
+	)
+	release := make(chan struct{})
+	held := make(chan struct{}, 1)
+	ext := src.External
+	src.External = func(ctx context.Context, gw netip.Addr) (netip.Addr, error) {
+		mu.Lock()
+		inFlight++
+		if inFlight > most {
+			most = inFlight
+		}
+		hold := armed
+		armed = false
+		mu.Unlock()
+		if hold {
+			held <- struct{}{}
+			<-release
+		}
+		a, err := ext(ctx, gw)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return a, err
+	}
+	ev := make(chan struct{}, 1)
+	prev := netEvents
+	netEvents = func(context.Context) (<-chan struct{}, error) { return ev, nil }
+	defer func() { netEvents = prev }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-held
+		// While the held read is open, drive both feeds hard.
+		for i := 0; i < 40; i++ {
+			select {
+			case ev <- struct{}{}:
+			default:
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		close(release)
+	}()
+	if _, err := netGuard(ctx, src, 2*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	// netGuard's start read is synchronous; hold the first read a watcher
+	// makes.
+	mu.Lock()
+	armed = true
+	mu.Unlock()
+	select {
+	case <-release:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no watcher read the network")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if most > 1 {
+		t.Fatalf("%d full reads of the network ran at once; want one worker", most)
+	}
+}

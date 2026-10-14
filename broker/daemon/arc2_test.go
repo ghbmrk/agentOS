@@ -35,6 +35,10 @@ var controlPath = map[string][]string{
 	"owner":         {"boxname", "control", "journal", "modem"},
 	"modem":         {},
 	"boxname":       {}, // CH-21 name check, for NAME
+	// The card's Wi-Fi network file (#1185): agentosd writes what the page
+	// reports for agentos-ap to serve; standard library only, so agentosd
+	// still links neither card nor claim.
+	"apnet": {},
 	// The modem bridge's contract and agentosd's end of it (P2-3w): types
 	// and an in-process queue; the bridge's client is bridgeclient.
 	"bridgeproto": {},
@@ -43,7 +47,7 @@ var controlPath = map[string][]string{
 	// serves the page's ops on the owner channel; the local UI, which
 	// decodes untrusted photos, stays in its own process (L15).
 	"localapi": {"owner"},
-	"localsrv": {"localapi", "owner", "sockets"},
+	"localsrv": {"apnet", "localapi", "owner", "sockets"},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
 	// Verifier interface. Its refusals' guest text is guesterr's (SR2-3j),
@@ -53,7 +57,7 @@ var controlPath = map[string][]string{
 	// Reversible forms (REV-3) are declarations the gate validates: pure
 	// data, held to the control path's rules.
 	"reversible": {"journal", "verb"},
-	"daemon":     {"journal", "journal/check", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv"},
+	"daemon":     {"journal", "journal/check", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv", "apnet"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
@@ -100,7 +104,7 @@ var controlPath = map[string][]string{
 	// mail imports golang.org/x/text, so like clock it has no entry below
 	// and is held by TestAgentosdLinksNoInference, which holds mailsock to
 	// the unix dial modelroute makes.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control", "mail", "mail/mailsock", "verb", "netjoin"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

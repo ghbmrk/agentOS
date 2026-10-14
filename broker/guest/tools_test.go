@@ -122,7 +122,7 @@ func (bigTools) List() []map[string]any {
 }
 
 func (bigTools) Call(_ context.Context, _, _, name string, _ json.RawMessage) (string, bool, error) {
-	if name != "big" {
+	if name != "big" && name != TreeTool {
 		return "", false, nil
 	}
 	return strings.Repeat("x", fold.Max+32), true, nil
@@ -163,5 +163,30 @@ func TestAReusedMachineIDCannotReadTheOldMachinesResults(t *testing.T) {
 	got := r.rpc("m1", "tools/call", map[string]any{"name": "result_read", "arguments": map[string]any{"id": in.ID}})
 	if got["isError"] != true {
 		t.Fatal("a reused ID read the destroyed machine's result")
+	}
+}
+
+// TREE-fold-evict (#1461): the managed tree goes to the guest whole. The
+// bridge reads it on every poll, and a failing sync polls it again and
+// again; folding it would fill the machine's fold store and evict the
+// agent's own held results, which it cannot safely fetch again.
+func TestTheManagedTreeIsNeverFolded(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Tools = bigTools{} })
+	res := r.rpc("m1", "tools/call", map[string]any{"name": "big", "arguments": map[string]any{}})
+	text, _ := res["content"].([]any)[0].(map[string]any)["text"].(string)
+	var in fold.StandIn
+	if err := json.Unmarshal([]byte(text), &in); err != nil || !in.Folded {
+		t.Fatalf("stand-in: %.80s %v", text, err)
+	}
+	for i := range 40 {
+		got := r.rpc("m1", "tools/call", map[string]any{"name": TreeTool, "arguments": map[string]any{}})
+		tree, _ := got["content"].([]any)[0].(map[string]any)["text"].(string)
+		if tree != strings.Repeat("x", fold.Max+32) || got["isError"] == true {
+			t.Fatalf("tree call %d: %d bytes, err %v", i, len(tree), got["isError"])
+		}
+	}
+	got := r.rpc("m1", "tools/call", map[string]any{"name": "result_read", "arguments": map[string]any{"id": in.ID}})
+	if got["isError"] == true {
+		t.Fatal("the agent's held result was evicted by managed_tree answers")
 	}
 }

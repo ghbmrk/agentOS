@@ -246,9 +246,17 @@ type custody struct {
 	// agent is the agent machine a stored key grants its provider to
 	// (storedGrant, -agent-machine); "" grants by -grant only.
 	agent string
+	// flagGrants are the model providers a -grant flag grants on some
+	// machine, and privateFlags those -private-ok allows private data,
+	// for the model state's private (privateGrantedNow). Set before
+	// serving.
+	flagGrants, privateFlags map[string]bool
 	// modelTransport is the proxy's upstream transport; nil outside
 	// tests.
 	modelTransport http.RoundTripper
+	// keyCheck sends setup's key checks (setupKey); nil outside tests,
+	// where each check gets the proxy's default transport over guard.
+	keyCheck http.RoundTripper
 
 	mu sync.Mutex
 	// smsFailSince is when the texting account's polls started failing

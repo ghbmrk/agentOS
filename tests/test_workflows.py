@@ -74,6 +74,33 @@ class WorkflowTest(unittest.TestCase):
         for name in ("ci.yml", "soak.yml"):
             self.assertIn("tools/fuzzrun.py", (WORKFLOWS / name).read_text(), name)
 
+    def test_lane_gate_runs_only_the_base_copy(self):
+        # CTRL-lane-gate (#1300, security review B1/B2): the gate is its own workflow on
+        # pull_request_target, so GitHub runs the base commit's workflow file; it checks out
+        # only the base and runs the base's tools/risk_tier.py on the diff to the PR head,
+        # which it fetches as objects and never checks out. No step can run PR code first.
+        text = (WORKFLOWS / "lane-gate.yml").read_text()
+        on = re.search(r"^on:\n((?:[ \t]+.*\n)+)", text, re.M).group(1)
+        self.assertRegex(on, r"(?m)^\s+pull_request_target:\s*$", on)
+        self.assertNotRegex(on, r"(?m)^\s+(pull_request|push|workflow_dispatch|workflow_run)\s*:", on)
+        self.assertRegex(on, r"types:\s*\[opened, synchronize, reopened, edited\]")
+        self.assertRegex(text, r"(?m)^  lane-gate:\n    name: lane-gate$")
+        self.assertNotRegex(text, r":\s*write\b")
+        uses = list(steps(text))
+        self.assertEqual([a.split("@")[0] for a, _ in uses], ["actions/checkout"], uses)
+        step = uses[0][1]
+        self.assertRegex(step, r"ref:\s*\$\{\{ github\.event\.pull_request\.base\.sha \}\}")
+        self.assertRegex(step, r"persist-credentials:\s*false")
+        self.assertIn('python3 -I tools/risk_tier.py --git "$BASE_SHA" "$HEAD_SHA" '
+                      '--pr-branch "$PR_BRANCH" --pr-title "$PR_TITLE"', text)
+        for verb in (r"git (checkout|switch|worktree|merge|reset|restore)\b", r"pip install",
+                     r"\$\{\{ github\.(head_ref|event\.pull_request\.title)"):
+            for line in text.splitlines():
+                if line.lstrip().startswith(("run:", "git ", "python3 ")):
+                    self.assertNotRegex(line, verb, line)
+        # One gate: no fallback to the PR's copy inside the PR-controlled ci.yml.
+        self.assertNotIn("--pr-branch", (WORKFLOWS / "ci.yml").read_text())
+
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
         self.assertEqual(list(steps(sample)), [("actions/checkout@v4", "      - uses: actions/checkout@v4\n        with:\n          x: 1")])
