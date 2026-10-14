@@ -235,25 +235,16 @@ func TestTheListSaysWhenThisBoxsConfigurationAllowsPrivateData(t *testing.T) {
 // owner's saved answer only, never the -private-ok flag, since setup's
 // box defaults to it and saving the box records a lasting owner yes.
 func TestSetupsListIgnoresThePrivateFlag(t *testing.T) {
-	r := openRig(t)
+	r := providerRig(t)
 	r.c.privateFlags = map[string]bool{"anthropic": true}
-	setupList := func() map[string]modelroute.SetupProvider {
-		t.Helper()
-		r.c.mu.Lock()
-		defer r.c.mu.Unlock()
-		out := map[string]modelroute.SetupProvider{}
-		for _, p := range r.c.providersLocked(false) {
-			out[p.ID] = p
-		}
-		return out
-	}
-	if p := setupList()["anthropic"]; p.PrivateOK || p.PrivateByConfig {
+	r.c.confirm(r.unlock(t), r.code())
+	if p := listed(t, setupCall(t, r.c, "GET", "/setup/providers", ""))["anthropic"]; p.PrivateOK || p.PrivateByConfig {
 		t.Fatalf("setup's list with only the flag: %+v", p)
 	}
-	if err := r.c.putPrivate("anthropic", true, r.next()); err != nil {
-		t.Fatal(err)
+	if w := setupCall(t, r.c, "POST", "/setup/providers/private", `{"provider":"anthropic","ok":true}`); w.Code != http.StatusOK {
+		t.Fatalf("private: %d %s", w.Code, w.Body)
 	}
-	if p := setupList()["anthropic"]; !p.PrivateOK || p.PrivateByConfig {
+	if p := listed(t, setupCall(t, r.c, "GET", "/setup/providers", ""))["anthropic"]; !p.PrivateOK || p.PrivateByConfig {
 		t.Fatalf("setup's list with the owner's yes: %+v", p)
 	}
 }
