@@ -408,8 +408,9 @@ func (r *rig) runSetupToAI() {
 	r.hooks.mu.Lock()
 	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
 	r.hooks.mu.Unlock()
-	// CAP-9: the private-data question is asked, unticked (default no).
-	if p := r.get("/setup"); !strings.Contains(p, `name="private" value="1">`) || strings.Contains(p, `name="private" value="1" checked`) {
+	// CAP-9: the private-data question is asked, unticked on an API key
+	// (D-115: ticked only on a plan sign-in, privatedefault_test.go).
+	if p := setupForms(t, r.get("/setup"))["ai-key openai"]; !strings.Contains(p, `name="private" value="1">`) || strings.Contains(p, "checked") {
 		t.Fatalf("no private-data question, or ticked by default: %s", p)
 	}
 }
