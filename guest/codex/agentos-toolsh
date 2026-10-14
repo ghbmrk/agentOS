@@ -1,6 +1,10 @@
 #!/bin/bash -p
-# agentos-toolsh: the prefix the Codex worker runs every tool command under (S8-W1, CRED-5).
+# agentos-toolsh: a prefix a Codex worker can run each tool command under (S8-W1, CRED-5).
 #   agentos-toolsh <command> [args...]
+# The pinned CLI does not run it: its own sandbox plus requirements.toml is the tool boundary
+# (ASSUMPTIONS C3, C12). This is the reference for what that boundary must hide and the fallback
+# if a CLI update loses it. tests/test_codex_worker.py checks this wrapper against the full list
+# below; its CliSandboxTest checks the CLI's sandbox against a narrower set (ASSUMPTIONS C3).
 # The CLI reaches its provider only through the in-worker forwarder on loopback and the egress
 # socket under /run/agentos, and holds a placeholder auth.json in CODEX_HOME; the egress proxy
 # swaps in the owner's login. A tool command (model-directed) must reach none of them, or it could
@@ -21,7 +25,9 @@
 # It refuses a working directory outside the workspace root. bash, not sh: dash cannot close
 # a descriptor above 9. bash -p: privileged mode reads no BASH_ENV or ENV file and imports no
 # exported functions or SHELLOPTS from the environment the CLI passes, so nothing runs here
-# unsandboxed before the check. The CLI must run the wrapper through this shebang, never as
+# unsandboxed before the check. Loader variables (LD_PRELOAD and the like) act before bash
+# starts, so the CLI must not pass them: managed_config.toml keeps tool environments to PATH
+# (#1455). The CLI must run the wrapper through this shebang, never as
 # `bash agentos-toolsh` or `sh agentos-toolsh`, which would drop -p (ASSUMPTIONS C8).
 set -eu
 
@@ -46,9 +52,15 @@ if [ -d "$CODEX_HOME" ]; then
 	hide+=(--tmpfs "$CODEX_HOME")
 fi
 
-[ -d "/proc/$$/fd" ] || refuse "no /proc to find inherited descriptors"
-for fd in /proc/$$/fd/*; do
+# /proc/self, not /proc/$$: in a pid namespace with the host's /proc, $$ names another process.
+# A name that is not a number is refused: [ -gt ] would error on it, and under set -e the error
+# would end the loop before the descriptors after it are closed.
+[ -d /proc/self/fd ] || refuse "no /proc to find inherited descriptors"
+for fd in /proc/self/fd/*; do
 	fd=${fd##*/}
+	case $fd in
+	'' | *[!0-9]*) refuse "non-numeric descriptor entry $fd" ;;
+	esac
 	if [ "$fd" -gt 2 ]; then
 		eval "exec $fd>&-"
 	fi
