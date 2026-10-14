@@ -414,3 +414,111 @@ func TestOP2RaceAfterARefusedResubmissionGoesOnce(t *testing.T) {
 		}
 	}
 }
+
+// The guest's repeat of a refused request while its resubmission waits
+// for approval is refused, not denied: the resubmission may still be
+// denied, and the request is then free to go.
+func TestOP2RepeatWhileTheResubmissionWaitsIsRefusedNotDenied(t *testing.T) {
+	svc := newService()
+	svc.mode = func(key string) execMode {
+		if key == AttemptKey("a", 1) {
+			return modeRefuse
+		}
+		return modeOK
+	}
+	p := newPolicy()
+	e := mustOpen(t, &MemStore{}, p, svc)
+	if s, _ := sendNow(t, e, mailSend("a")); s.State != NotApplied {
+		t.Fatalf("a: %+v", s)
+	}
+	must(e.Submit(mailSend("b")))
+	s, err := e.Dispatch(ctx, "a")
+	refusedAs(t, err, "a", "b")
+	if s.State != NotApplied {
+		t.Fatalf("a denied while b waits: %+v", s)
+	}
+	p.revoke("b", true)
+	must(e.Authorize(ctx, "b"))
+	if s, err := e.Dispatch(ctx, "a"); err != nil || s.State != Succeeded {
+		t.Fatalf("a after b was denied: %+v %v", s, err)
+	}
+	once(t, svc, 1, 0)
+}
+
+// An owner retry whose own attempt a check proves not done, while the
+// parked attempt before it is still unknown, is not offered as not done
+// (only as parked), and the engine does not resend it.
+func TestOP2NotDoneRetryOfAParkedAttemptIsNotResent(t *testing.T) {
+	svc := newService()
+	svc.mode = func(key string) execMode {
+		switch key {
+		case AttemptKey("a", 1):
+			return modeDropAck
+		case AttemptKey("a", 2):
+			return modeTimeout
+		}
+		return modeOK
+	}
+	svc.knows = func(key string) bool { return key == AttemptKey("a", 2) }
+	e := mustOpen(t, &MemStore{}, newPolicy(), svc)
+	_, _ = sendNow(t, e, mailSend("a"))
+	if !e.park("a", 1, true) {
+		t.Fatal("a not parked")
+	}
+	if s, err := e.Retry(ctx, "a", 1); err != nil || s.State != OutcomeUnknown {
+		t.Fatalf("retry: %+v %v", s, err)
+	}
+	if rep := e.Reconcile(ctx); len(rep.Redispatched) != 0 {
+		t.Fatalf("report %+v", rep)
+	}
+	if s := must(e.Get("a")); s.State != NotApplied || len(s.Attempts) != 2 {
+		t.Fatalf("a: %+v", s)
+	}
+	if ns := e.NotResent(); len(ns) != 0 {
+		t.Fatalf("not resent %+v", ns)
+	}
+	if ps := e.Parked(); len(ps) != 1 || ps[0].Attempt != 2 {
+		t.Fatalf("parked %+v", ps)
+	}
+	if _, err := e.Resend(ctx, "a", 2); !errors.Is(err, ErrState) {
+		t.Fatalf("resend: %v", err)
+	}
+	if svc.effectCount("a") != 1 {
+		t.Fatalf("effects %v", svc.effects)
+	}
+}
+
+// The owner settles a parked attempt as done while their retry of it is
+// still unclear; a check then proves the retry not done. The effect went,
+// so it is not sent again.
+func TestOP2RetryProvedNotDoneAfterTheParkedAttemptWentIsNotResent(t *testing.T) {
+	svc := newService()
+	svc.mode = func(key string) execMode {
+		switch key {
+		case AttemptKey("a", 1):
+			return modeDropAck
+		case AttemptKey("a", 2):
+			return modeTimeout
+		}
+		return modeOK
+	}
+	svc.knows = func(key string) bool { return key == AttemptKey("a", 2) }
+	e := mustOpen(t, &MemStore{}, newPolicy(), svc)
+	_, _ = sendNow(t, e, mailSend("a"))
+	if !e.park("a", 1, true) {
+		t.Fatal("a not parked")
+	}
+	if _, err := e.Retry(ctx, "a", 1); err != nil {
+		t.Fatal(err)
+	}
+	must(e.Resolve("a", 1, Outcome{Result: ResultSucceeded, Evidence: "statement"}, "owner"))
+	if rep := e.Reconcile(ctx); len(rep.Redispatched) != 0 {
+		t.Fatalf("report %+v", rep)
+	}
+	if _, err := e.Resend(ctx, "a", 2); !errors.Is(err, ErrState) {
+		t.Fatalf("resend: %v", err)
+	}
+	if svc.effectCount("a") != 1 {
+		t.Fatalf("effects %v", svc.effects)
+	}
+}
