@@ -45,19 +45,35 @@ func (p *Policy) deny(ctx context.Context, a netip.Addr, port uint16, proto, why
 // WatchEvery refreshes the learned network every d until ctx ends: the
 // Watch interval. A changed network replaces the old set at the next tick.
 func (p *Policy) WatchEvery(ctx context.Context, d time.Duration) {
+	p.WatchEventsEvery(ctx, nil, d)
+}
+
+// WatchEventsEvery is the one worker that learns the network: each event
+// and each tick of d feed the same Watch, so two full reads never run at
+// once and a stale read cannot land after a newer one (DEV-2). A nil or
+// closed events channel leaves the poll alone. It returns once ctx ends and
+// the Watch has returned.
+func (p *Policy) WatchEventsEvery(ctx context.Context, events <-chan struct{}, d time.Duration) {
 	ev := make(chan struct{}, 1)
-	go p.Watch(ctx, ev)
+	done := make(chan struct{})
+	go func() { p.Watch(ctx, ev); close(done) }()
 	t := time.NewTicker(d)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			<-done
 			return
 		case <-t.C:
-			select {
-			case ev <- struct{}{}:
-			default:
+		case _, ok := <-events:
+			if !ok {
+				events = nil
+				continue
 			}
+		}
+		select {
+		case ev <- struct{}{}:
+		default:
 		}
 	}
 }

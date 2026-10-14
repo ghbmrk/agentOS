@@ -41,7 +41,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 RULES = ROOT / "image/mkosi/mkosi.extra/usr/lib/agentos/inbound.nft"
 BOX, HOME = "agentos-t-box", "agentos-t-home"
 PORT = 18789
-# Some sandboxes run a kernel without IPv6; the IPv6 half then skips. CI's runners have it.
+# Some sandboxes run a kernel without IPv6; the IPv6 half then skips. CI's runners have it, and CI
+# sets AGENTOS_REQUIRE_IPV6=1 so that a runner without it fails instead of skipping (#1479).
 IPV6 = os.path.isdir("/proc/sys/net/ipv6")
 PREFIX = "2001:db8:1::"
 ROUTER6 = PREFIX + "2"
@@ -91,6 +92,17 @@ def sh(*args, ns=None, check=True):
 
 def reaches(ns, addr, port=PORT):
     return sh("python3", "-c", CONNECT, addr, str(port), ns=ns, check=False).returncode == 0
+
+
+class IPv6Present(unittest.TestCase):
+    # REQ: DEV-2
+    def test_ipv6_is_here_when_required(self):
+        # The IPv6 inbound and privacy assertions only run with IPv6; where it is required, its
+        # absence is a failure, never a quiet skip.
+        if os.environ.get("AGENTOS_REQUIRE_IPV6") == "1":
+            self.assertTrue(IPV6, "AGENTOS_REQUIRE_IPV6=1 but the kernel has no IPv6")
+        elif not IPV6:
+            self.skipTest("kernel without IPv6")
 
 
 @unittest.skipUnless(os.geteuid() == 0 and shutil.which("ip") and shutil.which("nft"),
@@ -532,6 +544,21 @@ class UplinkByNetworkd(unittest.TestCase):
             # or a router (review, Security release 1).
             ll = sh("ip", "-6", "-o", "addr", "show", "dev", "eth0", "scope", "link", ns=BOX).stdout.split()
             targets.append(next(f for f in ll if f.startswith("fe80:")).split("/")[0] + "%h0")
+            # REQ: DEV-2 (#1479): no global address carries the MAC (EUI-64); the stable one is
+            # RFC 7217's and outgoing connections get a temporary one.
+            mac = sh("cat", "/sys/class/net/eth0/address", ns=BOX).stdout.strip().split(":")
+            eui = bytes([int(mac[0], 16) ^ 2] + [int(x, 16) for x in mac[1:3]] + [0xff, 0xfe]
+                        + [int(x, 16) for x in mac[3:]])
+            for _ in range(100):
+                glob = sh("ip", "-6", "-o", "addr", "show", "dev", "eth0", "scope", "global", ns=BOX).stdout
+                if "temporary" in glob:
+                    break
+                time.sleep(0.1)
+            self.assertIn("temporary", glob, "no temporary IPv6 address:\n" + glob)
+            for f in glob.split():
+                if f.startswith(PREFIX[:4]) and "/" in f:
+                    iid = ipaddress.ip_interface(f).ip.packed[8:]
+                    self.assertNotEqual(iid, eui, "an address carries the MAC: " + f)
         for addr in targets:
             with self.subTest(home_to=addr):
                 self.assertFalse(reaches(HOME, addr), "a home host reached box port %d at %s" % (PORT, addr))
