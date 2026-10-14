@@ -221,7 +221,7 @@ var (
 // ErrWiFiUnavailable: the box cannot join Wi-Fi at all (no
 // NetworkManager, or another error no password can fix), as JoinNetwork
 // reports it (#1429).
-var ErrWiFiUnavailable = errors.New("the box cannot join Wi-Fi yet")
+var ErrWiFiUnavailable = errors.New("Wi-Fi join unavailable")
 
 // noWiFiJoin is the network step's error when the box cannot join Wi-Fi:
 // no station device beside the access point, or ErrWiFiUnavailable. It
