@@ -31,7 +31,7 @@
 # Grok, Muse and Claude plan routes (#1378-#1380) freeze with their rows.
 
 freeze on
-since 2026-10-14T19:55:00Z
+since 2026-10-14T21:11:52Z
 
 # Project machinery and records.
 allow .claude/
