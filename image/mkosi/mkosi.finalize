@@ -769,11 +769,19 @@ TMPFILES_TARGETS = (("proc",), ("sys",), ("etc", "sysctl.conf"), ("etc", "fstab"
                     ("lib", "firmware"), ("etc", "agentos"), ("efi",), ("boot",)) + tuple(
     tuple(("%s/%s" % (top, n)).split("/")) for top in ("etc", "usr/local/lib", "usr/lib", "lib", "run")
     for n in READ_CONF + ("modprobe.d", "systemd/system-generators", "credstore", "credstore.encrypted"))
-# Debian's own lines that touch one (debian.conf, var.conf), as whole lines with runs of blanks
-# collapsed: /var/run is /run, and /etc/mtab names the mount table, a file. Nothing else is exempt.
+# Debian's own lines that touch one, as whole lines with runs of blanks collapsed: /var/run is
+# /run, and /etc/mtab names the mount table, a file (debian.conf, var.conf); trixie's credstore.conf
+# makes the empty stores (credstore_violations refuses anything in them); and four relative links
+# whose ".." is the link's own parent (debian.conf, legacy.conf, systemd-resolve.conf; CI build of
+# #1543 at 14cb555). Nothing else is exempt.
 TMPFILES_STOCK = ("L /var/run - - - - ../run", "L+ /var/run - - - - ../run", "L /var/run - - - - /run",
                   "L+ /var/run - - - - /run", "L /etc/mtab - - - - ../proc/self/mounts",
-                  "L+ /etc/mtab - - - - ../proc/self/mounts")
+                  "L+ /etc/mtab - - - - ../proc/self/mounts",
+                  "d /etc/credstore 0700 root root", "d /etc/credstore.encrypted 0700 root root",
+                  "z /run/credstore 0700 root root", "z /run/credstore.encrypted 0700 root root",
+                  "L+ /etc/default/locale - - - - ../locale.conf", "L /var/lock - - - - ../run/lock",
+                  "L$ /var/log/README - - - - ../../usr/share/doc/systemd/README.logs",
+                  "L! /etc/resolv.conf - - - - ../run/systemd/resolve/stub-resolv.conf")
 # systemd-tmpfiles 257.13's path specifiers for the system manager (src/tmpfiles/tmpfiles.c); the
 # others expand to names without a slash.
 TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",

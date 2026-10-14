@@ -2246,7 +2246,13 @@ TMPFILES_PASS = ("d /run/user 0755 root root -", "L /var/run - - - - ../run", "L
                  "L+ /etc/mtab   -    -    -    -  ../proc/self/mounts", "x /tmp/systemd-private-%b-*",
                  "d %t/agentos 0750", "d /run/systemd/netif 0755 - - -", "f^ /etc/hosts - - - - network.hosts",
                  "r /run/sysctlx.d", "L /etc/y - - - - /run/agentos", "C! /etc/pam.d - - - -",
-                 "L /etc/os-release - - - - /usr/lib/os-release")
+                 "L /etc/os-release - - - - /usr/lib/os-release",
+                 # trixie's credstore.conf, debian.conf, legacy.conf and systemd-resolve.conf (CI build of #1543).
+                 "d /etc/credstore 0700 root root", "d /etc/credstore.encrypted 0700 root root",
+                 "z /run/credstore 0700 root root", "z /run/credstore.encrypted 0700 root root",
+                 "L+ /etc/default/locale - - -  -  ../locale.conf", "L /var/lock - - - - ../run/lock",
+                 "L$ /var/log/README - - - - ../../usr/share/doc/systemd/README.logs",
+                 "L! /etc/resolv.conf - - - - ../run/systemd/resolve/stub-resolv.conf")
 AGENTOS_TMPFILES = MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf"
 # What the box reads that a tmpfiles.d line could change, by name under each configuration
 # directory, listed here apart from the check's own TMPFILES_TARGETS so that a name dropped there
@@ -2572,6 +2578,9 @@ class TmpfilesDiffTest(unittest.TestCase):
         write(root, "usr/share/x/f.conf", "net.ipv4.ip_forward=1\n")
         write(root, "etc/sysctl.conf", "")
         link(root, "etc/sysctl.d/99-sysctl.conf", "../sysctl.conf")
+        # The empty credential stores the build's systemd-tmpfiles run leaves.
+        (root / "etc/credstore").mkdir(mode=0o700)
+        (root / "etc/credstore.encrypted").mkdir(mode=0o700)
         # The ESP as the box mounts it (#1543 Security B2), with an entry to append to.
         write(root, "efi/loader/entries/agentos_1+3.conf", "title AgentOS\noptions rw\n")
         return root

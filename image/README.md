@@ -14,6 +14,7 @@ builds on two runners, boots one build under Secure Boot in QEMU, and compares t
 | `mkosi/mkosi.conf` | Packages, boot chain, pinned snapshot, seed |
 | `mkosi/mkosi.repart/` | Disk layout: ESP, `/usr` A and B with verity, root last |
 | `mkosi/mkosi.finalize` | Fails the build on per-install state or socket files (HW-1, V15) |
+| `mkosi/tmpfiles.allow` | Every tmpfiles.d line the image may ship; `mkosi.finalize` fails the build on any other (#1543) |
 | `mkosi/mkosi.extra/` | Health check gating boot-complete, boot report, broker unit, root growth |
 | `finish_image.py` | Counted boot entry, `/usr` verified against the entry's `usrhash=`, release manifest |
 | `ci_boot.sh` | QEMU boot with OVMF Secure Boot and swtpm; checks health, blessing, root growth, the wired lease and the inbound drop |

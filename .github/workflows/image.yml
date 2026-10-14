@@ -43,17 +43,28 @@ jobs:
         shell: bash  # with pipefail, so tee keeps the build's exit status
         run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"
       - name: Show the tree check's refusals
-        # One annotation with every "image check:" line, so a tmpfiles.d line missing from
+        # The tree check's refusals as annotations, so a tmpfiles.d line missing from
         # image/mkosi/tmpfiles.allow can be reviewed (and its entry copied) without the full log (#1543).
+        # An annotation holds 4096 characters and a step 10 of each level, so allowlist misses are
+        # shown as their bare entries, packed into chunks.
         if: failure()
         run: |
           python3 - "$RUNNER_TEMP/build.log" <<'PY'
           import sys
           lines = [l.split("image check: ", 1)[1].rstrip("\n") for l in open(sys.argv[1], errors="replace")
                    if "image check: " in l]
-          if lines:
-              msg = "\n".join(lines).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-              print("::error title=image check::" + msg)
+          lines = [l.split("; entry: ", 1)[1] if "; entry: " in l else l for l in lines]
+          chunks, cur = [], ""
+          for l in lines:
+              if cur and len(cur) + len(l) + 1 > 3500:
+                  chunks.append(cur)
+                  cur = ""
+              cur += l[:3500] + "\n"
+          chunks += [cur] if cur else []
+          for i, c in enumerate(chunks[:30]):
+              level = ("error", "warning", "notice")[i // 10]
+              msg = c.rstrip("\n").replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print("::%s title=image check %d/%d::%s" % (level, i + 1, len(chunks), msg))
           PY
       - name: Boot test (Secure Boot on)
         if: matrix.run == 'a'
