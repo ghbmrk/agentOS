@@ -17,13 +17,8 @@ import (
 // socket cannot be opened the error is returned and the caller keeps the
 // poll, which stays as the backstop either way.
 func WatchNetlink(ctx context.Context) (<-chan struct{}, error) {
-	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+	fd, err := openNetlink()
 	if err != nil {
-		return nil, err
-	}
-	groups := uint32(unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV6_IFADDR | unix.RTMGRP_IPV4_ROUTE | unix.RTMGRP_IPV6_ROUTE | unix.RTMGRP_NEIGH)
-	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Groups: groups}); err != nil {
-		unix.Close(fd)
 		return nil, err
 	}
 	// A receive timeout lets the loop notice ctx without another thread.
@@ -55,6 +50,21 @@ func WatchNetlink(ctx context.Context) (<-chan struct{}, error) {
 		}
 	}()
 	return out, nil
+}
+
+// openNetlink opens the rtnetlink socket WatchNetlink reads, bound to the
+// address, route, link and neighbour groups.
+func openNetlink() (int, error) {
+	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+	if err != nil {
+		return -1, err
+	}
+	groups := uint32(unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV6_IFADDR | unix.RTMGRP_IPV4_ROUTE | unix.RTMGRP_IPV6_ROUTE | unix.RTMGRP_NEIGH)
+	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Groups: groups}); err != nil {
+		unix.Close(fd)
+		return -1, err
+	}
+	return fd, nil
 }
 
 func notify(out chan<- struct{}) {

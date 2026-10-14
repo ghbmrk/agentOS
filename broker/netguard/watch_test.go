@@ -1000,3 +1000,120 @@ func TestStaleFullReadOfOldRouterKeepsNewRoutersHold(t *testing.T) {
 		t.Fatalf("router A's stale read applied to router B: %+v, hold %v", n, holdOpen(p))
 	}
 }
+
+// The policy keys the gateway on its interface too: after an answer read on
+// ppp0 with no neighbour entry, the same address on wlan0 with no entry is a
+// new gateway. The quick read does not carry ppp0's router address over;
+// public destinations are held until wlan0's full read, and the router
+// address that read learns is refused (#1536).
+func TestPolicyGatewayKeyedByInterface(t *testing.T) {
+	eA, eB := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+	g := &gwSources{}
+	g.gw.Store("0101A8C0")
+	g.dev.Store("ppp0")
+	g.ext = func(context.Context) (netip.Addr, error) { return eA, nil }
+	s := g.sources()
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	g.dev.Store("wlan0")
+	p.quickLearn()
+	p.mu.RLock()
+	n := p.net
+	p.mu.RUnlock()
+	if !holdOpen(p) || n.GatewayDev != "wlan0" || n.External.IsValid() {
+		t.Fatalf("wlan0 at ppp0's gateway address with no entry: %+v, hold %v; want ppp0's %v dropped and a hold", n, holdOpen(p), eA)
+	}
+	held := make(chan error, 2)
+	go func() { held <- p.Check(context.Background(), eA, 443, "tcp") }()
+	go func() { held <- p.Check(context.Background(), eB, 443, "tcp") }()
+	select {
+	case err := <-held:
+		t.Fatalf("a public destination was decided before wlan0's full read: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	g.ext = func(context.Context) (netip.Addr, error) { return eB, nil }
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-held:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a held dial did not go ahead after the full read stored")
+		}
+	}
+	if err := p.Check(context.Background(), eB, 443, "tcp"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("wlan0's router address is dialable: %v", err)
+	}
+	if err := p.Check(context.Background(), eA, 443, "tcp"); err != nil {
+		t.Fatalf("ppp0's router address on wlan0: %v, want an ordinary public destination", err)
+	}
+}
+
+// A full read that returns ErrGatewayMoved after a newer quick read learned
+// the network is stale: its end network does not replace the newer one.
+func TestMovedFullReadDoesNotOverwriteNewerLearn(t *testing.T) {
+	pfx := []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
+	g1 := Network{Prefixes: pfx, Gateway: netip.MustParseAddr("192.168.1.1"), External: netip.MustParseAddr("8.8.8.8")}
+	g3 := Network{Prefixes: pfx, Gateway: netip.MustParseAddr("192.168.3.1")}
+	p := New(Config{
+		Source: func() (Network, error) { return g3, ErrGatewayMoved },
+		Quick:  func() (Network, error) { return g1, nil },
+	})
+	p.Learn(g1)
+	refreshGapHook = func() { p.quickLearn() }
+	t.Cleanup(func() { refreshGapHook = nil })
+	if err := p.Refresh(); !errors.Is(err, ErrGatewayMoved) {
+		t.Fatalf("refresh: %v", err)
+	}
+	p.mu.RLock()
+	n := p.net
+	p.mu.RUnlock()
+	if n.Gateway != g1.Gateway || n.External != g1.External || holdOpen(p) {
+		t.Fatalf("a stale moved read replaced the newer learn: %+v, hold %v", n, holdOpen(p))
+	}
+}
+
+// On an IPv6-only uplink the router request to the link-local gateway fails
+// at once, so a gateway change holds public destinations only until that
+// failed full read, which ends the hold: they are then allowed, not refused.
+func TestIPv6OnlyGatewayChangeHoldEndsAtFailedRead(t *testing.T) {
+	z := "00000000000000000000000000000000"
+	var gw atomic.Value
+	gw.Store("fe800000000000000000000000000001")
+	s := &Sources{
+		Addrs: func() ([]net.Addr, error) {
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("2001:db8::77"), Mask: net.CIDRMask(64, 128)}}, nil
+		},
+		ReadFile: func(f string) ([]byte, error) {
+			switch f {
+			case "/proc/net/route":
+				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"), nil
+			case "/proc/net/ipv6_route":
+				return []byte(z + " 00 " + z + " 00 " + gw.Load().(string) + " 00000400 00000001 00000000 00000003 eth0\n"), nil
+			}
+			return nil, syscall.ENOENT
+		},
+		External: func(context.Context, netip.Addr) (netip.Addr, error) { return netip.Addr{}, syscall.EINVAL },
+	}
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	gw.Store("fe800000000000000000000000000002")
+	p.quickLearn()
+	if !holdOpen(p) {
+		t.Fatal("no hold on the new IPv6 gateway")
+	}
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if holdOpen(p) {
+		t.Fatal("the failed full read did not end the hold")
+	}
+	if err := p.Check(context.Background(), netip.MustParseAddr("2001:4860::8888"), 443, "tcp"); err != nil {
+		t.Fatalf("a public destination after the failed read: %v", err)
+	}
+}

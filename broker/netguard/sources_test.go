@@ -476,3 +476,43 @@ func TestGatewayKeyedByInterface(t *testing.T) {
 		t.Fatalf("eth0 at the same address got ppp0's %v", n.External)
 	}
 }
+
+// A read whose gateway moves to another interface at the same address (no
+// neighbour entry on either side) during the router request drops that
+// answer and asks the gateway it ended on; nothing is filed under the
+// interface it started on.
+func TestInterfaceMoveDuringNATPMPAsksTheEndGateway(t *testing.T) {
+	x, y := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+	g := &gwSources{}
+	g.gw.Store("0101A8C0")
+	g.dev.Store("ppp0")
+	calls := 0
+	g.ext = func(context.Context) (netip.Addr, error) {
+		calls++
+		if calls == 1 {
+			g.dev.Store("wlan0") // the move lands during the wait
+			return x, nil
+		}
+		return y, nil
+	}
+	s := g.sources()
+	n, err := s.Read()
+	if err != nil || calls != 2 || n.GatewayDev != "wlan0" || n.External != y {
+		t.Fatalf("read across the interface move: %+v, %v after %d requests; want wlan0's router %v", n, err, calls, y)
+	}
+	g.dev.Store("ppp0")
+	if n, _ := s.ReadLocal(); n.External.IsValid() {
+		t.Fatalf("ppp0 has %v filed from a request whose gateway moved", n.External)
+	}
+}
+
+// The default route's interface is the chosen row's, not the last default
+// row's.
+func TestGateway4InterfaceIsTheChosenRoutes(t *testing.T) {
+	tbl := "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n" +
+		"wlan0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\n" +
+		"eth0\t00000000\t0101A8C0\t0003\t0\t0\t200\t00000000\n"
+	if g, dev := gateway4(tbl); g != netip.MustParseAddr("192.168.0.1") || dev != "wlan0" {
+		t.Fatalf("gateway4: %v %q, want 192.168.0.1 on wlan0", g, dev)
+	}
+}
