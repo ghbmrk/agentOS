@@ -95,8 +95,12 @@ class PremergeTest(unittest.TestCase):
         self.write("a.txt", self.read("a.txt").replace("line 2\n", "line 2 main\n"))
         self.commit("main conflicts")
         git(self.r, "checkout", "-q", "pr")
-        subprocess.run(["git", "merge", "-q", "main"], cwd=self.r, capture_output=True)
-        self.write("a.txt", self.read("a.txt").split("<<<<<<<")[0] + "line 2 main\n" + self.read("a.txt").split(">>>>>>> main\n")[1])
+        pr_text = git(self.r, "show", "pr:a.txt") + "\n"
+        merge = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True, text=True)
+        self.assertNotEqual(merge.returncode, 0, "the merge was meant to conflict")
+        git(self.r, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+        self.write("a.txt", pr_text.replace("line two\n", "line 2 main\n"))
         self.commit("resolve to main's line")
         self.assertEqual(self.check(reviewed), ["a.txt"])
 
