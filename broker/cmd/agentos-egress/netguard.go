@@ -39,12 +39,13 @@ func netGuard(ctx context.Context, src *netguard.Sources, every time.Duration) (
 		log.Printf("netguard: first read of the home network failed: %v", err)
 	}
 	// The poll stays as the backstop; a kernel address or route event adds
-	// an immediate refresh (a new prefix is refused within the event).
-	if ev, err := netEvents(ctx); err != nil {
+	// an immediate refresh (a new prefix is refused within the event). Both
+	// feed one worker, so full reads never overlap (#1439).
+	ev, err := netEvents(ctx)
+	if err != nil {
 		log.Printf("netguard: netlink unavailable, polling only: %v", err)
-	} else {
-		go p.Watch(ctx, ev)
+		ev = nil
 	}
-	go p.WatchEvery(ctx, every)
+	go p.WatchEventsEvery(ctx, ev, every)
 	return p, nil
 }
