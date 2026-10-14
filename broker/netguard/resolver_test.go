@@ -138,3 +138,43 @@ func TestWatchEveryReplacesLearnedNetwork(t *testing.T) {
 	}
 	t.Fatal("the new external address was not learned within the interval")
 }
+
+// The poll and an event feed share one worker: an event learns the new
+// network with the tick an hour away, and a closed event feed leaves the
+// poll running (DEV-2, #1439).
+func TestWatchEventsEveryOneWorkerForBothFeeds(t *testing.T) {
+	var n atomic.Value
+	n.Store(Network{})
+	p := New(Config{Source: func() (Network, error) { return n.Load().(Network), nil }})
+	learned := func(a string) bool {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if errors.Is(p.Check(context.Background(), netip.MustParseAddr(a), 443, "tcp"), ErrDenied) {
+				return true
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		return false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ev := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() { p.WatchEventsEvery(ctx, ev, time.Hour); close(done) }()
+	n.Store(Network{External: netip.MustParseAddr("8.8.8.8")})
+	ev <- struct{}{}
+	if !learned("8.8.8.8") {
+		t.Fatal("the event did not refresh with the poll an hour away")
+	}
+	cancel()
+	<-done
+
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan struct{})
+	close(closed)
+	go p.WatchEventsEvery(ctx, closed, 10*time.Millisecond)
+	n.Store(Network{External: netip.MustParseAddr("9.9.9.9")})
+	if !learned("9.9.9.9") {
+		t.Fatal("a closed event feed stopped the poll")
+	}
+}
