@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"sync/atomic"
 
+	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -24,6 +27,13 @@ const (
 	KindPrivateOK = "private_ok"
 	// MaxAPIKey bounds a key in bytes.
 	MaxAPIKey = 512
+)
+
+// Setup's key-check refusals (#1265): the provider refused the key (403),
+// or the check got no answer about it (502). Neither stores anything.
+var (
+	errKeyRefused   = uerr(http.StatusForbidden, "the provider did not accept the key")
+	errKeyUnchecked = uerr(http.StatusBadGateway, "the key could not be checked with the provider")
 )
 
 // providerNames are the built-in adapters' names as the page shows them.
@@ -46,41 +56,89 @@ func (c *custody) setupProviders() ([]modelroute.SetupProvider, error) {
 	if err := c.setupOpen(); err != nil {
 		return nil, err
 	}
+	return c.providersLocked(), nil
+}
+
+// providersLocked lists the built-in providers. Caller holds mu with the
+// vault open.
+func (c *custody) providersLocked() []modelroute.SetupProvider {
 	var out []modelroute.SetupProvider
 	for _, a := range adapters() {
-		name := providerNames[a.Name]
-		if name == "" {
-			name = a.Name
-		}
 		out = append(out, modelroute.SetupProvider{
 			ID:        a.Name,
-			Name:      name,
+			Name:      providerName(a.Name),
 			Connected: hasKind(c.v, a.Credential, vault.KindAPIKey),
 			PrivateOK: hasKind(c.v, PrivateOKPrefix+a.Name, KindPrivateOK),
 		})
 	}
-	return out, nil
+	return out
+}
+
+// providerName is the provider's name for the owner.
+func providerName(id string) string {
+	if n := providerNames[id]; n != "" {
+		return n
+	}
+	return id
 }
 
 // setupKey stores key as provider's API key, with put's rules, and only a
 // key the proxy could send: printable ASCII with no spaces, at most
-// MaxAPIKey bytes.
+// MaxAPIKey bytes. The provider is asked first, with the adapter's key
+// check (#1265, ONB-3): a key it refuses is errKeyRefused, a check with
+// no answer about the key is errKeyUnchecked, and neither stores
+// anything. The check runs without mu, so a slow provider holds up no
+// code check or lock, and setup's guard is asked again before the store.
 func (c *custody) setupKey(provider string, key []byte) error {
+	a, err := c.setupKeyAdapter(provider, key)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), modelroute.SetupKeyCheckWait)
+	defer cancel()
+	rt := c.keyCheck
+	if rt == nil {
+		g := c.guard
+		if g == nil {
+			g = netguard.New(netguard.Config{})
+		}
+		tr := egress.DefaultTransport(g)
+		defer tr.CloseIdleConnections()
+		rt = tr
+	}
+	switch a.CheckKey(ctx, rt, key) {
+	case nil:
+	case egress.ErrKeyRefused:
+		return errKeyRefused
+	default:
+		return errKeyUnchecked
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.setupOpen(); err != nil {
 		return err
 	}
-	a, ok := adapterNamed(provider)
-	if !ok || len(key) > MaxAPIKey {
-		return errBadCredential
+	return c.putKeyLocked(a.Credential, key)
+}
+
+// setupKeyAdapter checks, under mu, that setup is open, provider is a
+// built-in adapter and key is one the vault would store.
+func (c *custody) setupKeyAdapter(provider string, key []byte) (egress.Adapter, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.setupOpen(); err != nil {
+		return egress.Adapter{}, err
+	}
+	a, ok := builtinAdapter(provider)
+	if !ok || len(key) == 0 || len(key) > MaxAPIKey || !adapterCredential(a.Credential) || hasOtherKind(c.v, a.Credential, vault.KindAPIKey) {
+		return egress.Adapter{}, errBadCredential
 	}
 	for _, b := range key {
 		if b <= ' ' || b > '~' {
-			return errBadCredential
+			return egress.Adapter{}, errBadCredential
 		}
 	}
-	return c.putKeyLocked(a, key)
+	return a, nil
 }
 
 // setupPrivate writes provider's private-data marker, or deletes it.
@@ -90,20 +148,10 @@ func (c *custody) setupPrivate(provider string, ok bool) error {
 	if err := c.setupOpen(); err != nil {
 		return err
 	}
-	if _, known := adapterNamed(provider); !known {
-		return errBadCredential
+	if err := c.privateMarkOK(provider); err != nil {
+		return err
 	}
-	name := PrivateOKPrefix + provider
-	if hasOtherKind(c.v, name, KindPrivateOK) {
-		return errBadCredential
-	}
-	if ok {
-		return c.putMark(name, KindPrivateOK)
-	}
-	if err := c.v.Delete(name); err != nil {
-		return c.putErr(err)
-	}
-	return nil
+	return c.setPrivateLocked(provider, ok)
 }
 
 // privateAllowed is the router's PrivateAllowed check (CAP-9): true only
@@ -121,12 +169,18 @@ func (c *custody) privateAllowed(provider string) bool {
 
 // adapterNamed returns the built-in adapter's credential name.
 func adapterNamed(name string) (string, bool) {
+	a, ok := builtinAdapter(name)
+	return a.Credential, ok
+}
+
+// builtinAdapter returns the built-in adapter called name.
+func builtinAdapter(name string) (egress.Adapter, bool) {
 	for _, a := range adapters() {
 		if name != "" && a.Name == name {
-			return a.Credential, true
+			return a, true
 		}
 	}
-	return "", false
+	return egress.Adapter{}, false
 }
 
 // privateHook binds the router, built before custody, to custody's
@@ -167,7 +221,7 @@ func setupProvidersHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	case err == errLocked:
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
-	case err == errEnrolled, err == errNotOpen, err == errBadCredential:
+	case err == errEnrolled, err == errNotOpen, err == errBadCredential, err == errKeyRefused, err == errKeyUnchecked:
 		http.Error(w, err.Error(), err.(*unlockErr).status)
 		return
 	default:

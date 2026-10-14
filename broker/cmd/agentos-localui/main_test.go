@@ -2,8 +2,13 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	mrand "math/rand"
 	"net"
@@ -18,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/firstboot"
@@ -26,7 +32,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: ARC-2, CH-9, REC-4, ONB-3, HW-1, HW-10
+// REQ: ARC-2, CH-9, REC-4, ONB-3, HW-1, HW-10, CAP-9
 
 // P2-2w c4: the page runs setup over agentosd's localui.sock, which
 // serves setup's ops only until finish (Security L6), and keeps its
@@ -40,7 +46,7 @@ func TestThePageRunsSetupThroughAgentosd(t *testing.T) {
 	if _, ok := cfg.Store.(*localui.MemStore); !ok {
 		t.Fatalf("store %#v", cfg.Store)
 	}
-	if cfg.SetupSecret != "" || cfg.Card != nil || cfg.SecondLine != nil || cfg.Vault != nil || cfg.Rotation != nil || cfg.AP.Password != "" {
+	if cfg.SetupSecret != "" || cfg.Card != nil || cfg.SecondLine != nil || cfg.Providers != nil || cfg.Vault != nil || cfg.Rotation != nil || cfg.AP.Password != "" {
 		t.Fatalf("config %+v", cfg)
 	}
 	if _, err := localui.New(cfg); err != nil {
@@ -81,6 +87,18 @@ func TestTheVaultSocketWiresTheCardRotation(t *testing.T) {
 	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock")
 	if _, ok := cfg.Rotation.(*localui.Rotation); !ok || cfg.Vault == nil {
 		t.Fatalf("config %+v", cfg)
+	}
+}
+
+// #1266 (CAP-9, CH-3): the same socket serves the AI providers page,
+// where the owner changes a provider's private-data answer after setup.
+func TestTheVaultSocketWiresTheProvidersPage(t *testing.T) {
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock")
+	if _, ok := cfg.Providers.(*localui.UnlockClient); !ok {
+		t.Fatalf("config %+v", cfg)
+	}
+	if _, err := localui.New(cfg); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -352,4 +370,154 @@ func TestRunGatesSetupOnTheClaim(t *testing.T) {
 			t.Fatalf("err %v, claim %v, card %v, vault calls %d", err, cfg.Claim, cfg.Card, calls.Load()-before)
 		}
 	})
+}
+
+// #1270 (CTRL-card-sock s1): on the image the page reaches the vault
+// process's unlock socket and keeps its claim state and the card step's
+// latch in its own state directory, which localui-claim fills from the
+// seller's sealed claim at the first start; it never dumps core, since
+// the claim verifiers and codes pass through it (IMG-nodump).
+// REQ: HW-10, HW-1, CRED-9
+func TestTheUnitWiresTheSetupFiles(t *testing.T) {
+	b, err := os.ReadFile("agentos-localui.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := map[string][]string{}
+	var exec []string
+	for _, l := range strings.Split(strings.ReplaceAll(string(b), "\\\n", " "), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "[") {
+			continue
+		}
+		k, v, _ := strings.Cut(l, "=")
+		set[k] = append(set[k], v)
+		if k == "ExecStart" {
+			exec = strings.Fields(v)
+		}
+	}
+	arg := func(name string) string {
+		for i, w := range exec {
+			if w == "-"+name && i+1 < len(exec) {
+				return exec[i+1]
+			}
+		}
+		return ""
+	}
+	for name, want := range map[string]string{
+		"vault-sock":  "/run/agentos-egress/unlock.sock",
+		"claim-state": "/var/lib/agentos-localui/claim.json",
+		"card-latch":  "/var/lib/agentos-localui/card-latch.json",
+	} {
+		if got := arg(name); got != want {
+			t.Errorf("-%s = %q, want %q", name, got, want)
+		}
+	}
+	for k, want := range map[string][]string{
+		"StateDirectory":     {"agentos-localui"},
+		"StateDirectoryMode": {"0700"},
+		"LimitCORE":          {"0"},
+		"ExecStartPre":       {"+/usr/lib/agentos/localui-claim"},
+	} {
+		if got := set[k]; strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	// B3 on #1302: other processes stay invisible, but not ProcSubset=pid, which hides
+	// /proc/sys/kernel/random/boot_id: claim.Open reads it, and the page would fail at every start.
+	if got := set["ProtectProc"]; strings.Join(got, "|") != "invisible" {
+		t.Errorf("ProtectProc = %q, want invisible", got)
+	}
+	if got := set["ProcSubset"]; len(got) != 0 {
+		t.Errorf("ProcSubset = %q: it hides the boot_id the claim reads", got)
+	}
+	// Security B2 on #1302: the broker's state stays hidden (L18), and nothing hides or freezes the
+	// page's own state or the vault's sockets, which the page must write and reach.
+	if got := set["TemporaryFileSystem"]; strings.Join(got, "|") != "/var/lib/agentos:ro" {
+		t.Errorf("TemporaryFileSystem = %q, want /var/lib/agentos:ro", got)
+	}
+	for _, k := range []string{"TemporaryFileSystem", "InaccessiblePaths", "ReadOnlyPaths"} {
+		for _, v := range set[k] {
+			for _, f := range strings.Fields(v) {
+				p := strings.TrimSuffix(strings.TrimLeft(f, "-+"), ":ro")
+				for _, need := range []string{"/var/lib/agentos-localui", "/run/agentos-egress", "/run/agentos"} {
+					if p == need || strings.HasPrefix(need, strings.TrimSuffix(p, "/")+"/") {
+						t.Errorf("%s=%s covers %s", k, v, need)
+					}
+				}
+			}
+		}
+	}
+}
+
+// The page still answers PAIR texts once its hooks carry the card step:
+// run starts PairTexts on any hooks that have it (P2-2w c4c with #1115).
+// REQ: CH-12, ONB-6
+func TestCardHooksStillPairTexts(t *testing.T) {
+	var h localui.Hooks = localui.CardFinish{AgentosdSetup: openSetup}
+	if _, ok := h.(interface {
+		PairTexts(context.Context, *localui.Server, time.Duration)
+	}); !ok {
+		t.Fatal("CardFinish hooks do not start the PAIR text loop")
+	}
+}
+
+// #1185: on agentosd's setup the card step reports the card's network
+// before it provisions, so agentos-ap has it at the confirm.
+func TestTheCardStepReportsTheCardsNetwork(t *testing.T) {
+	var calls []string
+	hooks := localui.AgentosdSetup{Owner: localui.InProcess{
+		localapi.OpSetupAPNet: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			calls = append(calls, "report")
+			return struct{}{}, nil
+		}}}
+	box := firstboot.BoxConfig{Card: card.DisplayConfig{Provision: func(*card.Card) error {
+		calls = append(calls, "provision")
+		return nil
+	}}}
+	c, err := card.Generate(crand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := withCardNet(hooks, box).Card.Provision(c); err != nil || fmt.Sprint(calls) != "[report provision]" {
+		t.Fatalf("%v, calls %v", err, calls)
+	}
+	calls = nil
+	if err := withCardNet(nil, box).Card.Provision(c); err != nil || fmt.Sprint(calls) != "[provision]" {
+		t.Fatalf("without agentosd: %v, calls %v", err, calls)
+	}
+}
+
+// Production wiring (#1185): withFirstBoot hands firstboot.Begin the box
+// wrapped by withCardNet, so the page's card step reports the network
+// before it provisions.
+func TestFirstBootWiresTheCardNetwork(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wired := false
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "withFirstBoot" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok || len(c.Args) != 1 {
+				return true
+			}
+			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Begin" {
+				if in, ok := c.Args[0].(*ast.CallExpr); ok {
+					if id, ok := in.Fun.(*ast.Ident); ok && id.Name == "withCardNet" {
+						wired = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	if !wired {
+		t.Fatal("withFirstBoot does not pass firstboot.Begin the box through withCardNet")
+	}
 }

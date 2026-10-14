@@ -76,7 +76,12 @@ jobs:
         if: env.RECORDS != 'true'
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q nftables iproute2
-          sudo python3 -m unittest tests.test_inbound_netns -v
+          sudo AGENTOS_REQUIRE_IPV6=1 python3 -m unittest tests.test_inbound_netns -v
+      - name: Codex worker tool sandbox on a stub worker (S8-W1, CRED-5)
+        if: env.RECORDS != 'true'
+        run: |
+          sudo apt-get install -y -q bubblewrap
+          sudo AGENTOS_REQUIRE_BWRAP=1 python3 -m unittest tests.test_codex_worker -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
@@ -123,6 +128,8 @@ jobs:
           echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main after merge. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
           exit 1
       - name: Risk tier (docs/OPERATING.md §3)
+        # Advisory summary only. The lane limit (docs/LANES.md) is enforced in lane-gate.yml,
+        # which runs the base copy on pull_request_target so a PR cannot edit it away.
         if: github.event_name == 'pull_request'
         run: python tools/risk_tier.py --markdown --git HEAD^1 HEAD^2 >> "$GITHUB_STEP_SUMMARY"
   broker:

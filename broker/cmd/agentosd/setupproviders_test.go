@@ -91,6 +91,8 @@ func TestTheEnrollerServesSetupsProvidersThroughTheVault(t *testing.T) {
 
 	for status, want := range map[int]error{
 		400: localsrv.ProviderRefused,
+		403: localsrv.KeyRefused, // REQ: ONB-3
+		502: localsrv.KeyUnchecked,
 		410: localsrv.EnrollClosed,
 		412: localsrv.EnrollNotOpen,
 	} {
@@ -106,5 +108,14 @@ func TestTheEnrollerServesSetupsProvidersThroughTheVault(t *testing.T) {
 		if err := e.PutAPIKey("openai", canary); err != nil && strings.Contains(err.Error(), canary) {
 			t.Fatalf("%d: the refusal carries the key: %v", status, err)
 		}
+	}
+}
+
+// The key check's waits nest (Security L8.4): the vault process gives the
+// provider the least time, agentosd waits longer for the vault, and the
+// page waits longest for agentosd. REQ: ONB-3
+func TestSetupKeyWaitsNest(t *testing.T) {
+	if !(modelroute.SetupKeyCheckWait < modelroute.SetupAPIKeyTimeout && modelroute.SetupAPIKeyTimeout < localapi.APIKeyTimeout) {
+		t.Fatalf("waits %v, %v, %v do not nest", modelroute.SetupKeyCheckWait, modelroute.SetupAPIKeyTimeout, localapi.APIKeyTimeout)
 	}
 }

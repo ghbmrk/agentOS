@@ -17,7 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
-// REQ: CRED-8, ONB-3, ONB-6, CH-6
+// REQ: CRED-8, ONB-3, ONB-6, CH-6, HW-1, A1
 
 // newSetupRig is a box whose vault was made in setup mode (`init -setup`):
 // the setup-open entry is in the vault, so enrollment is open until one
@@ -124,6 +124,7 @@ func TestOneCodeConfirmsTheEnrollmentAndSealsIt(t *testing.T) {
 	if _, ok := r.c.v.Secret(PendingSeedName); ok {
 		t.Fatal("pending seed kept after confirmation")
 	}
+	ensureCard(t, r.c)
 	if err := r.c.sealEnroll(); err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +212,7 @@ func TestARestartedSetupsSeedReplacesAnEarlierConfirmation(t *testing.T) {
 	if ok, err := r.c.confirmEnroll(totp(seedB, r.clk.now())); !ok || err != nil {
 		t.Fatalf("B confirms: %v %v", ok, err)
 	}
+	ensureCard(t, r.c)
 	if err := r.c.sealEnroll(); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -286,6 +288,7 @@ func TestEnrollOverTheVerifySocket(t *testing.T) {
 	if ok, err := v.ConfirmEnroll(totp(seed, r.clk.now())); !ok || err != nil {
 		t.Fatalf("right: %v %v", ok, err)
 	}
+	ensureCard(t, r.c)
 	if err := v.SealEnroll(); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -421,5 +424,54 @@ func TestNotOpenIsAnsweredApartFromSealed(t *testing.T) {
 	}
 	if err := v.SealEnroll(); err != modelroute.ErrEnrolled {
 		t.Fatalf("seal on a sealed vault: %v", err)
+	}
+}
+
+// HW-1, A1 (CTRL-card-sock s2; Security S-R2 on #1226): the vault process
+// seals only a vault that holds the Owner Card entry. A setup vault no card
+// made (remade after the card latch, or a page that reports the card
+// without making one) is refused with a fixed reason, seals nothing, and
+// seals once a card is provisioned.
+func TestSealIsRefusedWhileTheVaultHoldsNoCard(t *testing.T) {
+	r := newSetupRig(t)
+	r.c.confirm(r.unlock(t), r.code())
+	uri, err := r.c.enroll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.clk.add(30 * time.Second)
+	if ok, err := r.c.confirmEnroll(totp(enrolledSeed(t, uri), r.clk.now())); !ok || err != nil {
+		t.Fatalf("confirm: %v %v", ok, err)
+	}
+	if err := r.c.sealEnroll(); err != errCardRequired {
+		t.Fatalf("seal with no card: %v", err)
+	}
+	if hasKind(r.c.v, EnrolledName, KindEnrolled) || !hasKind(r.c.v, SetupOpenName, KindSetupOpen) || r.c.st.Sealed {
+		t.Fatal("a refused seal changed the vault")
+	}
+	ensureCard(t, r.c)
+	if err := r.c.sealEnroll(); err != nil {
+		t.Fatalf("seal with a card: %v", err)
+	}
+}
+
+// The refusal crosses the vault socket as its own status, which agentosd
+// reads as ErrCardRequired (and so "card pending"), apart from the others.
+func TestCardRefusalOverTheVerifySocketIsDistinct(t *testing.T) {
+	r := newSetupRig(t)
+	r.c.confirm(r.unlock(t), r.code())
+	w := httptest.NewRecorder()
+	r.c.enroll()
+	enrollHandler(r.c, w, httptest.NewRequest(http.MethodPost, "/enroll/seal", nil))
+	if w.Code == http.StatusPreconditionRequired {
+		t.Fatalf("an unconfirmed seed is not the card's refusal: %d", w.Code)
+	}
+	uri, _ := r.c.enroll()
+	r.clk.add(30 * time.Second)
+	r.c.confirmEnroll(totp(enrolledSeed(t, uri), r.clk.now()))
+	w = httptest.NewRecorder()
+	enrollHandler(r.c, w, httptest.NewRequest(http.MethodPost, "/enroll/seal", nil))
+	if w.Code != http.StatusPreconditionRequired {
+		t.Fatalf("seal with no card: %d", w.Code)
 	}
 }
