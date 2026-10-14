@@ -1,0 +1,18 @@
+# Hands the agentOS Wi-Fi page the seller's sealed claim state (localui-claim),
+# once, before the page's first start. Installed by the image (image/build.sh)
+# beside the page's unit. It is its own unit, not a `+` ExecStartPre of the
+# page: systemd applies the page's TemporaryFileSystem=/var/lib/agentos:ro
+# even to `+` commands (it gates ProtectSystem= and the like on sandboxing,
+# not TemporaryFileSystem=), so the step there never saw the sealed file
+# and the page never showed the claim screen (#1688). Root only moves the
+# file, never reads it.
+[Unit]
+Description=agentOS Wi-Fi page: take the seller's claim state
+Before=agentos-localui.service
+ConditionPathExists=/var/lib/agentos/claim.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/agentos/localui-claim
+PrivateNetwork=yes
+LimitCORE=0
