@@ -50,12 +50,12 @@ const (
 	// (TestModelNoGrantNamesAServedStep).
 	modelNoGrant = "Model: no AI plan or key connected, so no agent can think or learn; a later box version adds this."
 	// C2: the vault is not open, so the model route serves nothing.
-	modelLocked = "Model: the vault is locked, so your agent cannot think or learn; unlock it on the local page."
+	modelLocked = "Model: the vault is locked, so your agent cannot think or learn; unlock it on my Wi-Fi page."
 	// C2: the vault is open and a provider granted, but none may receive
 	// private data (CAP-9; #1266, P-2 on #1280): tasks that need the
-	// owner's mail or files wait. The local page's AI providers page
-	// allows one.
-	modelNoPrivate = "Model: no AI provider may see your private data, so your agent cannot do most tasks; allow one on the local page."
+	// owner's mail or files wait. The AI providers page, which owner
+	// lines call "my Wi-Fi page" (CH-21), allows one.
+	modelNoPrivate = "Model: no AI provider may see your private data, so most tasks wait; allow one on my Wi-Fi page."
 	// C7: no recall directory or vault verifier.
 	recallOffLine = "Memory across tasks: off here; " + fixUpdate + "."
 	// C9: the question book or the box clock did not open.
@@ -70,7 +70,7 @@ const (
 
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
-	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked,
+	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
 		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, routingHeldLine,
 		digestUnknownStatus, digestFailedStatus, digestHeldStatus, digestDownStatus, digestOwedStatus}
 }

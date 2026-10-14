@@ -639,10 +639,10 @@ func TestModelLinesFollowTheVaultProcess(t *testing.T) {
 
 // REQ: CAP-9, OP-9
 // #1266 (P-2 on #1280): with the vault open and a provider granted but
-// none allowed private data, STATUS says the agent cannot do most tasks
-// and names where the owner allows one: the local page's AI providers
-// page, served past setup.
-func TestModelNoPrivateNamesTheLocalPage(t *testing.T) {
+// none allowed private data, STATUS says most tasks wait
+// and names where the owner allows one: the AI providers page, served
+// past setup, which owner lines call "my Wi-Fi page" (CH-21).
+func TestModelNoPrivateNamesTheWiFiPage(t *testing.T) {
 	if got := modelLine(modelroute.ModelState{Reachable: true, Granted: true, Open: true}); got != modelNoPrivate {
 		t.Fatalf("got %q", got)
 	}
@@ -653,7 +653,7 @@ func TestModelNoPrivateNamesTheLocalPage(t *testing.T) {
 	if got := modelLine(modelroute.ModelState{Reachable: true, Granted: true}); got != modelLocked {
 		t.Fatalf("locked: %q", got)
 	}
-	if !strings.Contains(modelNoPrivate, "private data") || !strings.HasSuffix(modelNoPrivate, "allow one on the local page.") {
+	if !strings.Contains(modelNoPrivate, "private data") || !strings.HasSuffix(modelNoPrivate, "allow one on my Wi-Fi page.") {
 		t.Fatalf("line: %q", modelNoPrivate)
 	}
 }
@@ -674,5 +674,21 @@ func TestModelNoGrantNamesAServedStep(t *testing.T) {
 		t.Fatalf("adding a key is not served, but the fix reads %q", fix)
 	case served && !strings.Contains(fix, "page"):
 		t.Fatalf("adding a key is served now; name where in %q", fix)
+	}
+}
+
+// REQ: OP-9
+// One name for the box's page in owner lines (CH-21): the Wi-Fi page, never
+// the developer's "local page"; a line that sends the owner to a page names
+// "my Wi-Fi page".
+func TestOwnerLinesNameTheWiFiPage(t *testing.T) {
+	for _, l := range capLineTexts() {
+		low := strings.ToLower(l)
+		if strings.Contains(low, "local page") {
+			t.Errorf("%q calls the box's page \"the local page\"", l)
+		}
+		if strings.Contains(low, " page") && !strings.Contains(l, "my Wi-Fi page") {
+			t.Errorf("%q sends the owner to a page without naming \"my Wi-Fi page\"", l)
+		}
 	}
 }
