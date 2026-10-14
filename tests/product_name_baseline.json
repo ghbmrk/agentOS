@@ -17,6 +17,7 @@
     "ea9f7bb8f449c37ab876067b87f6c2504c2b72feaa778acfad6e7e4024910049": 1
   },
   "SPEC.md": {
+    "0d4d08c66c59c4280876d4a9f3bf196830486cebe3104a13e44672bb1de49d18": 1,
     "1c44bafd28e2cbfc82e6cebff7d9a8148f1d97364cf24ca3f0cf1cb3861a940c": 1,
     "21962f795db3b0ebbab20a28793e466bb6a048e53de11cafe29051c3eac0ae7a": 1,
     "2a1febd52bb34ac8831058a65f2c175d859afa9e476c8381a35146f22fb03570": 1,
@@ -29,6 +30,7 @@
     "7518cd5a049820c3f206ad43a744375d6ba5ba59a2f14c09cf65b7a685ead318": 1,
     "754e84aa969b81af02d8d8be69e52bf967dc9c10141ede46ec145afdfc9ccc37": 1,
     "7d2cf3633c2efc52efebf6999e381be7767515485449a744e1b8d2a47915bb5c": 1,
+    "7ed7e898eb2c186f474717b38b81ede5f0e738a1f549b70c1a3c798556481245": 1,
     "84e8334e803ac116821b7fdeaf4da2f8228333cbe5b8f3bad40c06d2c3108f50": 1,
     "897fa77e16df42625214aca7c624bc3bfcbbd9851e24220105d14e13cb81c74a": 1,
     "923e8fb645a6469a492a9e1bdcf550282e70925ee99c5eeb9a45cf3eeaa41779": 1,
@@ -84,6 +86,23 @@
   "briefs/P2-6m.md": {
     "ea73e50d722f2056b6ab0e0b27aabb5932a67a8a91b5ad774e531d8fc6c8ff95": 1
   },
+  "broker/apnet/ASSUMPTIONS.md": {
+    "1c668fa1fcf76df394a2a18299879ba528822d10b60e5bfd72f81a869360653c": 1
+  },
+  "broker/apnet/apnet.go": {
+    "7cb36ad2ab64089b523f8a21b8ed9b703149f5982ce75c464cabfd40f5334d1f": 1,
+    "ac24e29365671fd3d8c88f99b3b295a576365111ae69fc79d648d4482197ac85": 1
+  },
+  "broker/apnet/apnet_test.go": {
+    "0fbef8d2026715cd337de4338b6c918559b37f9fd40b458d54cd017d54a5241f": 1,
+    "1308545d23f5cd22ac59c286537473c76620304d8a96d6ac3b7ccd43eaa405d0": 1,
+    "78518a17b5b91811ce3ff6d9278b95e995e1eacc1c808cd5ef5f3d1818ef4290": 1,
+    "a0bf14b5015b7ceb2e7d0229fd1d67af6d821d4f403b4f316aa725ce09e29fe6": 1,
+    "a4247cd2ddca6cf3b0762c093be8d0bbbdf281dd45fbc0c665379c61d0dfac4d": 1,
+    "ce1067ec4deb377439edf63c06b214a413e22149fd97d602be205f3727a175f9": 1,
+    "df9147e1300bae4a8fb45395932e43cbd5316dbed67726e59ecd273324d3a804": 1,
+    "fa34d60263e9cbbd0f98fbfd58c5e35eff82205d804a7816bf242b6dbe8e800d": 1
+  },
   "broker/boxname/ASSUMPTIONS.md": {
     "c977535e2e402e0d2a9f0499bf4f4db3e4e153a8a9f69e78d8be075e32fd300a": 1
   },
@@ -107,6 +126,7 @@
     "e84006b61ecb1227d10207ceef507cebe12e3c7b9d1b7fb6f3dc3b078a8aacaa": 1
   },
   "broker/claim/ASSUMPTIONS.md": {
+    "56ca987efc666ff4fe1992947dc379ea450abc02f529f8dcd83e92092c2ba6cc": 1,
     "64a6461a37dee0f1d113e2fefd4cfc6ca9a0fb6ef7a13fa51dd566758666ef61": 1
   },
   "broker/claim/setupnet.go": {
@@ -120,6 +140,11 @@
   },
   "broker/clock/chrony/chrony.conf": {
     "c880e9173659faa4262ad9dd864d99eaaaa0330214b5959085daf3f99ff991d8": 1
+  },
+  "broker/cmd/agentos-ap/main_test.go": {
+    "99b1465ac45785bd9beda53733a0f606e51ff78a07ea2779e32fd849de2e70c7": 1,
+    "b4ed20ce2a466310a9a993f41c388641e8c46a437ea4b1bbbb64cf3346b3f370": 1,
+    "cf1ba0ac8b3658da974f4a0f374bbf96be9dd776a185ceaa32cbd584b835fd9a": 1
   },
   "broker/cmd/agentos-egress/enroll.go": {
     "5080ecb45322f9ad9ce93736c6e7b58cd018202e7538da28f7d0077a7efb7a20": 1,
@@ -162,6 +187,15 @@
     "9a84e41921fca1769ce59c467faaf299d9c4565a51330b6b55741cf908448b3f": 1,
     "bafb81a4b5b391a0d5e5c3933d593721d43b289ed2abf59250c75c611c9e5382": 1
   },
+  "broker/cmd/agentosd/apnetrot_test.go": {
+    "0de05981a769805d1541c73b1e451454d049eb32bba7e5358771e03a33cef412": 1,
+    "234074e97e697aa6483200e9fcff1994ed824dcaadbd7c668064c38718331cd4": 1,
+    "4e24ff7ca320fa8bf0f7b3470dee8f22a2057987ddd383cd236039b26ba31b92": 1,
+    "7e490604b5ac71dbba8238671f2c93141c3e39327af4f1f27ae0da3f377787a4": 1,
+    "a32a023aedd49b100866b3c3c512d7d66835984367a1f87c807149c55b96b19b": 1,
+    "c255640d1b120d56f7f58898f4d02cdf53e830fb5e3ed4206bfdbc673ad3ebf0": 1,
+    "c37fccc982b9a1249d279cf083710483846d9a862c260a32788bf802a6e6b8c2": 1
+  },
   "broker/cmd/agentosd/main.go": {
     "5ac3b5f51f8129b747f7c47a0a5ba2a84cc6eb03ca2d81974b6d7dfcf69f043d": 1
   },
@@ -170,6 +204,15 @@
   },
   "broker/cmd/agentosd/setupclaim_test.go": {
     "6a2a448934800fdc6a93ff4b7ec994896291841aa7a53fa36786a8dba1c7fe54": 1
+  },
+  "broker/cmd/agentosd/setupsock_test.go": {
+    "4157233d9e0b3a5082e66b15fd8ee02279097f6df435874f73445ec9aebddfb2": 1,
+    "6b93ea4d589101999c65f31dfb33c61c6a5becd5f0de9f488c312c5dfc15d900": 1,
+    "6fa28b6cc1dcf56c5a73184ff8f0bbbe2e48677381a8d444378d198fe3d3f361": 1,
+    "beb40b40e982ec2d514b1598e338f1b13aa2e38f49a2e5d5d0538b70ac8129f9": 1,
+    "c5000511072ac8a2ef59cb08a091799ec7946bc591a84c00a976d02703521dfc": 1,
+    "cc9d42d313b2eb5d7260492ad36c62986f0f85502fcc4b5c47bb614861e0b18e": 1,
+    "cdc4875600d2bc44d3cc24af4b756a6159ef0410bc14a5b0020065540c738ac2": 1
   },
   "broker/daemon/follow_test.go": {
     "d3e92f8cd26697c44ca9540f6aecc2fabe98624a44f0ffdc5c81a8ba7a71d107": 1
@@ -240,6 +283,12 @@
   "broker/hostdisk/udev_test.go": {
     "7ed62f603d9e2308cd15ca33b65cb5c9ddbc8fbdf7dee15541aec6b0463a1d3e": 1
   },
+  "broker/localapi/setup_test.go": {
+    "2c769e833f37f61bc208fe4ecc2b7004f2c313c30c3bd6bc91a0bbd212ba1bdc": 1
+  },
+  "broker/localsrv/rotateapnet_test.go": {
+    "388207c799290a25f8d4d50b464271599df8c10d74fad8717db0b0b00c2c8ef7": 1
+  },
   "broker/localsrv/setup_test.go": {
     "d1fef5ab05065dc46e0b933fdaffe2559209d2c11bc9271a703f7fd22031abf0": 1
   },
@@ -282,9 +331,18 @@
     "afd075098852732322ab593c4016e69b654cdb825e1232062c903487b76280c6": 3,
     "d13fe273b1d19b1c50a67084b32b8fc8fb6c60d220715af3110c191dc41007b2": 1
   },
+  "broker/localui/rotwifi_test.go": {
+    "8b565168e64eb2c3dcce93f0716951eb7d005e0e3bf62202931685691e7bdab0": 1,
+    "f26f717ca235777a2d119669bc543a43ac19d0552a4d9f44faf653809bf4a5c6": 1
+  },
   "broker/localui/rotwire_test.go": {
+    "1aa6e3e6c92cffafb4b450590fc53d5520024c8abe47e1a97242f9a94dd7b1ce": 1,
     "32964921c40a315ee611a15b493b6d4cf0aabfef845579870d21a68463e81ed2": 1,
     "5106ae3d73c8ee219331bf17091abac9f26f5ad9a5c3ddd189e69e691ee48e76": 1,
+    "838fd90d5b4b8e22dca1eb573df9ae2063c74e19a476bf2c42644dd49f79102a": 1,
+    "8b11e067574805561a6fb550254f263cbbf2401b55534efded137b0daef3d592": 1,
+    "9de83d9196b0ad07a339859c8f9bc478250aeea541f56d9e7da6dce13fc2401e": 1,
+    "9eb2116dea475200e93e473bf9f281489c86b3fc92aa57dea6a5bd1b65f6ac43": 1,
     "f49bb96c94336b8a4b2d7c3f6d8ae69ac7634dbde6fb3cec33b75f0cde3f644f": 1,
     "f8fa7c9b03431f6b286efd692c4df51a858df81394ed0bee03e398a216dcf7f5": 1
   },
@@ -300,6 +358,11 @@
   },
   "broker/localui/setuphooks_test.go": {
     "c54c01d641d8411049ff496a5d49b2cdaab9494173c37b3aeb29945803aae82c": 1
+  },
+  "broker/localui/setuptext_test.go": {
+    "56023439dceaea97fafabb46812f4ee35d2c8533a4204fafd66970e2eafc1628": 1,
+    "5bd49eca3d8506e06979ce1971a8bf95d5396479d78b0a08e03b738047f7ffd9": 1,
+    "ccd573364e3d663aeb39b1c5517938cc6eadb047306c197de423a7e3ab25b6e9": 1
   },
   "broker/localui/vault_test.go": {
     "223363810b05ef7141dcbdb3aadcb25373f6b1686519b19f5e8f588bd5cb80e8": 1
@@ -381,8 +444,12 @@
     "6a6b1b8c29e900c63e3243e66877977091ba0d1bce5e07b5a2a8117891144764": 1,
     "fe5b8e07cac8d4e32ec0d4a2ec041b5e421839f041b2171973442e24a2bba8b2": 1
   },
+  "decisions/D-114.md": {
+    "6badbfabb6d82334b54dec3dfc80393377451c15a182aae9411c5c3caeefd73d": 1
+  },
   "docs/LANES.md": {
     "306f23e7cbf2e13ba7f60b95c7242cb6ebd2851a33f1dbe1816301a714b49456": 1,
+    "4e30ebce30c04e17444c396509eaab0dd03878dad139433bb2641e6bcf4f7634": 1,
     "8784817fa7a898111f84f7ca4b431f3d8f33f8ebd7ff2709c75871e48ff4b5da": 1
   },
   "docs/LATER-HISTORY.md": {
@@ -434,6 +501,10 @@
   "image/mkosi/mkosi.extra/usr/lib/sysusers.d/agentos-fuzz.conf": {
     "8de690a7215558f9fa6ee0a987da4a531fbd54e4eab4aefcc8cdf520acf689de": 1
   },
+  "reviews/combined/2026-10-13-pr1381.md": {
+    "dbafc1633fd9f1c566008fe5fde293f2e852867c08558ce6a965be3b5d76bb80": 1,
+    "dd1739e2a5431edaa27232759ab1d2d012b82157928a00921661ebc1951fc6df": 1
+  },
   "reviews/potency/2026-10-05-organize-verb.md": {
     "8dcaeff13f3998318b5631521a14eba462e1e50d5c0ba9b73bd81f2ea14c2efd": 1,
     "b6b42fd3a6c011845d3775509518d951a48f12feed7ec2f8d4730df636642503": 1
@@ -448,6 +519,9 @@
   "reviews/security/2026-10-09-pr462.md": {
     "44079e791e490dfec5c1295832be2baee258bb4a9cce7306d5f0ce3a2dc69903": 1,
     "c3baf680726c4ee577bf8b8ac9af579a773c59bac7ae2d1d69d6f05c3f2c8d3e": 1
+  },
+  "reviews/security/2026-10-14-pr1459.md": {
+    "37e53c4017019a1b9233fa004bc00d043938b8e746ba8a49897b8e22b2299dfd": 1
   },
   "reviews/ux/2026-10-08-lens-bundle-a.md": {
     "5921d7bab3edb9bddf0bef1e1b5badb9062dcd2742706085e2dc2b526564319f": 1
@@ -469,6 +543,18 @@
   },
   "reviews/ux/2026-10-13-pr1226.md": {
     "b2f8380080389035c704b9c19d44426448f42c17519436e43fea54f228f0f631": 1
+  },
+  "reviews/ux/2026-10-13-pr1269.md": {
+    "51d985a31214e64f506c587781a5b57af433e9f5ddb77ff8f01d6e91899fc552": 1
+  },
+  "reviews/ux/2026-10-13-pr1303.md": {
+    "9b0237325688d0a3a0b682f0f7300023e851be87564aaf368afa725b1fccbd34": 1
+  },
+  "reviews/ux/2026-10-13-pr1407.md": {
+    "d7d5781df06dae3ea0442f979124c6bdb2d6f40234214665774fc24212e9c3ce": 1
+  },
+  "reviews/ux/2026-10-14-pr1534.md": {
+    "620bf41d35c6211e73e77012b99939f637bdfd31dcc8b5a3ad35bc8c231ca85f": 1
   },
   "reviews/ux/evidence/2026-10-08-onboarding/README.md": {
     "5d32a3c776d1ed5da840d048c89d3b9dac588064f2d2e11cccab5a38b7b23a2e": 1,
