@@ -506,3 +506,86 @@ func TestADeletionForgetsKeptReplies(t *testing.T) {
 		t.Fatalf("without learning: %v", err)
 	}
 }
+
+// fencedEvidenceGate is a real journal engine as the evidence setting
+// uses it, its destination fixed: the reply under a fence comes from the
+// engine's own error, not a fake's.
+type fencedEvidenceGate struct {
+	*journal.Engine
+	addr string
+}
+
+func (f fencedEvidenceGate) Evidence() (string, string) { return f.addr, "mail" }
+
+// unknownExec never learns what happened, so an intent it runs stays
+// outcome_unknown and, after a restart, fences its account.
+type unknownExec struct{}
+
+func (unknownExec) Execute(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultUnknown}
+}
+func (unknownExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultUnknown}
+}
+
+func openEvidenceEngine(t *testing.T, store journal.Store) *journal.Engine {
+	t.Helper()
+	e, err := journal.Open(store, allowAll{}, map[string]journal.Executor{grants.ExecutorName: unknownExec{}},
+		func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// runUnknown leaves in outcome_unknown on e.
+func runUnknown(t *testing.T, e *journal.Engine, in journal.Intent) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := e.Submit(in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Authorize(ctx, in.ID); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := e.Dispatch(ctx, in.ID); st.State != journal.OutcomeUnknown {
+		t.Fatalf("setup: %s is %s", in.ID, st.State)
+	}
+}
+
+// REQ: OP-4, CH-12
+// EMAIL REPLIES OFF while a restart fence holds the broker account answers
+// with the held wording that points at STATUS, not "Try again later",
+// which cannot work until the fence settles (UX U3 on #1382). A same-effect
+// hold, which no restart caused, gets the hold reply instead.
+func TestEvidenceOffUnderAFenceSaysWhatToWaitFor(t *testing.T) {
+	ctx := context.Background()
+	for _, msg := range []string{"EMAIL REPLIES OFF", "EVIDENCE OFF"} {
+		store := &journal.MemStore{}
+		runUnknown(t, openEvidenceEngine(t, store), grants.EvidenceIntent("owner/evidence/before", grants.OriginOwner, "other@example.test", "mail"))
+		e := openEvidenceEngine(t, store) // the restart
+		if len(e.Fenced(journal.BrokerAccount)) == 0 {
+			t.Fatal("setup: broker account not fenced")
+		}
+		r := newEvRig(t, destAddr)
+		r.ev.gate.Store(&evidenceGateBox{fencedEvidenceGate{Engine: e, addr: destAddr}})
+		got, ok := r.ev.settings(ctx, msg, true)
+		if !ok || got != evidenceFenced || got == evidenceFailed || !strings.Contains(got, "STATUS") {
+			t.Fatalf("%s under a fence: %q %v", msg, got, ok)
+		}
+	}
+
+	// The same change already under way, no restart: the hold reply,
+	// which names neither a restart nor STATUS.
+	e := openEvidenceEngine(t, &journal.MemStore{})
+	runUnknown(t, e, grants.EvidenceIntent("owner/evidence/earlier", grants.OriginOwner, "", ""))
+	if len(e.Fenced(journal.BrokerAccount)) != 0 {
+		t.Fatal("setup: fenced without a restart")
+	}
+	r := newEvRig(t, destAddr)
+	r.ev.gate.Store(&evidenceGateBox{fencedEvidenceGate{Engine: e, addr: destAddr}})
+	got, _ := r.ev.settings(ctx, "EMAIL REPLIES OFF", true)
+	if got != evidenceHeld || strings.Contains(got, "restart") || strings.Contains(got, "STATUS") {
+		t.Fatalf("held: %q", got)
+	}
+}

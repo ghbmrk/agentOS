@@ -111,7 +111,15 @@ const (
 	evidenceNone     = "Private replies already come by text."
 	evidenceStarting = "I'm still starting. Try again in a minute."
 	evidenceFailed   = "I couldn't save that setting. Try again later."
-	evidenceNoPage   = "Not changed: turning this on needs my Wi-Fi page, which I'm not serving. Private replies still come by text."
+	// evidenceFenced answers while a restart fence holds the broker
+	// account (OP-4): trying again works only once STATUS no longer lists
+	// the earlier change (UX U3 on #1382). loops' fencedReply, word for word.
+	evidenceFenced = "I'm holding settings until I can confirm a change from before the restart. Send this again once STATUS no longer lists it."
+	// evidenceHeld answers a change held behind the same change whose
+	// outcome is not known yet (journal.HeldError, OP-2): no restart, and
+	// STATUS does not list it. loops' heldReply, word for word.
+	evidenceHeld   = "I'm holding this setting: the same change is already under way and not confirmed yet. Try again later."
+	evidenceNoPage = "Not changed: turning this on needs my Wi-Fi page, which I'm not serving. Private replies still come by text."
 	// evidenceNoPageSet is the same refusal while replies already go to
 	// an address (%s, masked).
 	evidenceNoPageSet = "Not changed: this needs my Wi-Fi page, which I'm not serving. Private replies still go to %s."
@@ -477,7 +485,7 @@ func (e *evidence) settings(ctx context.Context, msg string, unlocked bool) (str
 	switch {
 	case err != nil:
 		e.logf("evidence setting: %v", err)
-		return evidenceFailed, true
+		return settingFailed(err), true
 	case st.State == journal.Denied:
 		// Gate reasons are not texted verbatim (L3 SHOULD 3 on #148).
 		e.logf("evidence setting refused: %s", st.Permission.Reason)
@@ -507,13 +515,27 @@ func (e *evidence) off(ctx context.Context, g evidenceGate) string {
 	}
 	if err != nil || st.State != journal.Succeeded {
 		e.logf("evidence off: %v (%s)", err, st.State)
-		return evidenceFailed
+		return settingFailed(err)
 	}
 	e.mu.Lock()
 	e.digest = append(e.digest, "Emailing private replies was turned off by text at "+at+".")
 	e.shown = ""
 	e.mu.Unlock()
 	return evidenceOff
+}
+
+// settingFailed words a destination change that did not run. A fence or a
+// same-effect hold says what to wait for; a HeldError also matches
+// ErrUnreconciled, so it is checked first.
+func settingFailed(err error) string {
+	var held *journal.HeldError
+	switch {
+	case errors.As(err, &held):
+		return evidenceHeld
+	case errors.Is(err, journal.ErrUnreconciled):
+		return evidenceFenced
+	}
+	return evidenceFailed
 }
 
 // wire adds the setting ahead of the loops' (cfg.Settings), STATUS's line,
