@@ -731,6 +731,18 @@ class CommentVerdictTest(unittest.TestCase):
         p, _ = self._collect(rev, com)
         self.assertEqual(p["verdicts"], ["accept"])
 
+    def test_same_verdict_comment_then_review_counts_once(self):
+        body = "Verdict: accept\nL3 review at abc123."
+        rev = [{"body": body, "submitted_at": "2026-10-05T00:31:00Z", "author_association": "OWNER"}]
+        com = [{"body": body, "created_at": "2026-10-05T00:30:00Z", "author_association": "OWNER"}]
+        p, _ = self._collect(rev, com)
+        self.assertEqual(p["verdicts"], ["accept"])
+
+    def test_quoted_verdict_in_a_reply_does_not_count(self):
+        com = [{"body": "> Verdict: accept\n> L3 review\nagreed", "created_at": "1", "author_association": "OWNER"}]
+        p, _ = self._collect([], com)
+        self.assertEqual(p["verdicts"], [])
+
     def test_comment_only_pr_is_not_no_verdict(self):
         com = [{"body": "Verdict: accept\nL3 review.", "created_at": "t", "author_association": "COLLABORATOR"}]
         p, _ = self._collect([], com)

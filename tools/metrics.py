@@ -38,7 +38,7 @@ REACHED_REVIEW = {"in review", "merged", "escalated"}
 VERDICTS = r"(accept|fix-list|reject)"
 VERDICT_LINE = re.compile(r"verdict\W{0,4}" + VERDICTS + r"\b", re.I)
 # A comment counts only with the OPERATING §4 form: a line that starts with `Verdict:`.
-COMMENT_VERDICT = re.compile(r"^[ \t>*_]*verdict:[ \t*_]*" + VERDICTS + r"\b", re.I | re.M)
+COMMENT_VERDICT = re.compile(r"^[ \t*_]*verdict:[ \t*_]*" + VERDICTS + r"\b", re.I | re.M)
 DEFECT = re.compile(r"^Defect:\s*([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*(?:\s*,\s*[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*)*)\s*$", re.M)
 COVERED = re.compile(r"^Covered: (\d+) / \d+", re.M)
 NONE = "—"
@@ -273,16 +273,19 @@ def collect_github(repo, token, since=None):
                      for c in _pages(repo, f"issues/{p['number']}/comments", token)
                      if COMMENT_VERDICT.search(c.get("body") or "")]
             reviews = sorted(reviews + notes, key=lambda r: r.get("submitted_at") or "")
-            l3, seen = [], set()
+            l3, seen, from_comments = [], set(), set()
             for r in reviews:
                 b = r.get("body")
                 if not (trusted_review(r) and is_l3(b)):
                     continue
-                # A verdict bears the head SHA, so separate rounds differ; a comment that
-                # repeats a review's (or an earlier comment's) body is the same round.
-                if r.get("comment") and b.strip() in seen:
+                # A verdict bears the head SHA, so separate rounds differ; a review and a
+                # comment with the same body (either order), or two comments, are one round.
+                key = b.strip()
+                if key in seen and (r.get("comment") or key in from_comments):
                     continue
-                seen.add(b.strip())
+                seen.add(key)
+                if r.get("comment"):
+                    from_comments.add(key)
                 l3.append(b)
             verdicts = [v for v in map(verdict, l3) if v]
             # A non-accept verdict without a Cause line counts as "none" so the gap shows.
