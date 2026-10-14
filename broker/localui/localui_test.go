@@ -43,24 +43,25 @@ func testAP() APConfig {
 // fakeHooks stands in for the uplink, modem, vault, host trust and provider
 // adapters.
 type fakeHooks struct {
-	mu        sync.Mutex
-	progress  Progress
-	joined    string
-	sent      []modem.SMS
-	now       func() time.Time
-	seed      []byte // the vault's sealed code-generator seed
-	pending   []byte // the newest seed waiting for a code
-	enrolls   int
-	trusted   *bool
-	keys      map[string]string
-	finished  string
-	connected bool
-	device    bool // the device-code sign-in completes on the provider's site
-	private   map[string]bool
-	setUp     bool
-	finishes  int
-	onConfirm func() // runs inside ConfirmCode, for races
-	finishErr error  // returned by Finish after the owner channel exists
+	mu          sync.Mutex
+	progress    Progress
+	joined      string
+	sent        []modem.SMS
+	now         func() time.Time
+	seed        []byte // the vault's sealed code-generator seed
+	pending     []byte // the newest seed waiting for a code
+	enrolls     int
+	trusted     *bool
+	keys        map[string]string
+	finished    string
+	connected   bool
+	device      bool // the device-code sign-in completes on the provider's site
+	private     map[string]bool
+	setUp       bool
+	finishes    int
+	finishCalls int    // Finish calls, refused ones too
+	onConfirm   func() // runs inside ConfirmCode, for races
+	finishErr   error  // returned by Finish after the owner channel exists
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
 	noTexts     bool   // the box cannot text: BoxNumber answers "", false
@@ -215,6 +216,7 @@ func (f *fakeHooks) StartDeviceCode(id string) (string, string, error) {
 func (f *fakeHooks) Finish(n string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.finishCalls++
 	if len(f.owed) > 0 {
 		return errors.New("answer owed")
 	}

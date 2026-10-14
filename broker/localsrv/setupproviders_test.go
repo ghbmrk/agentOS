@@ -21,6 +21,11 @@ type fakeProviders struct {
 	err     error
 	privErr error // SetPrivateOK's answer when set; nothing is recorded
 	calls   int
+	sets    int // SetPrivateOK calls
+	// setHook, when set, runs first in each SetPrivateOK; an error it
+	// returns is the answer, and nothing is recorded.
+	setHook func(provider string, ok bool) error
+	owedLie bool // Providers claims every provider is owed a yes
 }
 
 func (f *fakeProviders) Providers() ([]localapi.SetupProvider, error) {
@@ -30,7 +35,12 @@ func (f *fakeProviders) Providers() ([]localapi.SetupProvider, error) {
 	}
 	var out []localapi.SetupProvider
 	for _, id := range []string{"anthropic", "openai"} {
-		out = append(out, localapi.SetupProvider{ID: id, Name: id, APIKey: true, Connected: f.keys[id] != "", PrivateOK: f.private[id]})
+		p := localapi.SetupProvider{ID: id, Name: id, APIKey: true, Connected: f.keys[id] != "", PrivateOK: f.private[id]}
+		if f.owedLie {
+			yes := true
+			p.Owed = &yes
+		}
+		out = append(out, p)
 	}
 	return out, nil
 }
@@ -49,6 +59,12 @@ func (f *fakeProviders) PutAPIKey(provider, key string) error {
 
 func (f *fakeProviders) SetPrivateOK(provider string, ok bool) error {
 	f.calls++
+	f.sets++
+	if f.setHook != nil {
+		if err := f.setHook(provider, ok); err != nil {
+			return err
+		}
+	}
 	if f.err != nil {
 		return f.err
 	}

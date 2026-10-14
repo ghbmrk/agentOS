@@ -122,7 +122,8 @@ const (
 	ErrKeyUnchecked = "key unchecked"
 	// ErrAnswerOwed: finish while an owner's private-data answer is owed
 	// to the vault (#1544): the answer was recorded with agentosd but the
-	// vault has not confirmed it. The page shows the retry.
+	// vault has not confirmed it. The page asks the owner to reload,
+	// which asks the question again.
 	ErrAnswerOwed = "answer owed"
 )
 

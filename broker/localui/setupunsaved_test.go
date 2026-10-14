@@ -482,3 +482,28 @@ func TestARestartKeepsAnOwedNo(t *testing.T) {
 		t.Fatal("setup did not finish with the owner's no")
 	}
 }
+
+// #1554 Potency R4 (M13): an owed answer the page adopts holds setup
+// before Finish is called at all, not only by agentosd's refusal.
+func TestAnAdoptedOwedAnswerCallsNoFinish(t *testing.T) {
+	r := newRig(t)
+	r.srv = r.open(&MemStore{})
+	r.runSetupToAI()
+	r.hooks.mu.Lock()
+	r.hooks.owed = map[string]bool{"openai": false} // owed before this page ran
+	r.hooks.mu.Unlock()
+	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}, "private": {"1"}})
+	r.get("/setup")
+	r.hooks.mu.Lock()
+	calls := r.hooks.finishCalls
+	r.hooks.mu.Unlock()
+	if calls != 0 || r.srv.setup.done() {
+		t.Fatalf("Finish called %d times while an adopted answer was owed", calls)
+	}
+	r.srv.setup.mu.Lock()
+	_, held := r.srv.setup.st.Unsaved["openai"]
+	r.srv.setup.mu.Unlock()
+	if !held {
+		t.Fatal("the owed answer was not adopted")
+	}
+}

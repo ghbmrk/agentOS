@@ -111,11 +111,15 @@ func (a AgentosdSetup) AlreadySetUp() bool {
 
 // Finish records the owner's number with agentosd, which closes setup for
 // good and starts the owner channel. A vault that cannot finish setup's
-// enrollment answers ErrCodesUnavailable.
+// enrollment answers ErrCodesUnavailable, and a private-content answer
+// agentosd still owes the vault answers ErrAnswerOwed.
 func (a AgentosdSetup) Finish(owner string) error {
 	err := a.call(localapi.OpSetupFinish, localapi.Finish{Owner: owner}, nil)
 	if refused(err, localapi.ErrEnrollUnavailable) {
 		return ErrCodesUnavailable
+	}
+	if refused(err, localapi.ErrAnswerOwed) {
+		return ErrAnswerOwed
 	}
 	return err
 }

@@ -416,7 +416,7 @@ func (s *Setup) finish(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 		s.mu.Unlock()
 		return nil, errNotEnrolled
 	}
-	if len(s.rec.Owed) > 0 {
+	if s.owedListedLocked() {
 		s.mu.Unlock()
 		return nil, errAnswerOwed
 	}

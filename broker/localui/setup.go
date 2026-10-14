@@ -233,6 +233,11 @@ var (
 // reports it (#1429).
 var ErrWiFiUnavailable = errors.New("Wi-Fi join unavailable")
 
+// ErrAnswerOwed: agentosd holds an owner's private-content answer the
+// vault has not confirmed, so it will not finish setup (#1544), as Finish
+// reports it.
+var ErrAnswerOwed = errors.New("a private-content answer is not saved yet")
+
 // noWiFiJoin is the network step's error when the box cannot join Wi-Fi:
 // no station device beside the access point, or ErrWiFiUnavailable. It
 // names the network step's Ethernet button rather than the password
@@ -269,6 +274,10 @@ const cardRestartNote = "If I restart before you confirm, I make a new card: a c
 
 // cannotFinish is what the page says on ErrCodesUnavailable.
 const cannotFinish = "I cannot finish setup: I cannot add approval codes. Ask whoever installed my software to prepare me for setup again."
+
+// answerOwed is what the page says on ErrAnswerOwed (#1554 UX R5): a
+// reload adopts the owed answer as a hold and asks the question again.
+const answerOwed = "Your answer about private content was not saved yet. Reload this page to answer again."
 
 var errElsewhere = errors.New("Setup is continuing on the phone that texted me.")
 
@@ -1324,8 +1333,11 @@ func (u *setup) maybeFinish() {
 	}
 	if err := u.s.cfg.Hooks.Finish(who); err != nil && !u.s.cfg.Hooks.AlreadySetUp() {
 		msg := "Could not finish setup. Try again."
-		if errors.Is(err, ErrCodesUnavailable) {
+		switch {
+		case errors.Is(err, ErrCodesUnavailable):
 			msg = cannotFinish
+		case errors.Is(err, ErrAnswerOwed):
+			msg = answerOwed
 		}
 		u.mu.Lock()
 		u.err[u.st.Device] = msg
