@@ -77,6 +77,13 @@ def inherited_fds():
     return fds
 
 
+def interfaces():
+    try:
+        return sorted(name for _, name in socket.if_nameindex())
+    except OSError:  # the CLI's own sandbox filters netlink sockets
+        return None
+
+
 def beat():
     end = time.monotonic() + 10
     while time.monotonic() < end:
@@ -102,7 +109,7 @@ def main():
         "parent": sees_cli(),
         "root_write": can_write("/etc/agentos-toolsh-probe"),
         "work_write": can_write("toolsh-probe"),
-        "ifaces": sorted(name for _, name in socket.if_nameindex()),
+        "ifaces": interfaces(),
         "caps": has_caps(),
         "userns": nested_userns(),
         "session": os.getsid(0) == 0,  # 0: the session leader is outside the pid namespace
