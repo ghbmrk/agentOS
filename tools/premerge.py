@@ -3,44 +3,39 @@
 
   tools/premerge.py [--base origin/main] <reviewed-sha> [head]
 
-Compares each file's diff against the base (`base...sha`) for the reviewed commit and for `head` (default
-HEAD), by a SHA-256 of the exact diff bytes: whitespace, binary content and modes count. Only `index`
-lines and hunk line numbers are dropped, so main merged in elsewhere reads as same. Not `git patch-id`:
-it ignores whitespace, so an indentation-only change that flips a branch would read as same. Prints `same` and exits 0, or `changed <files>` and exits 1: those
-files need a delta review. Git only, no network; fetch first. Patch ids include context lines, so an
-unrelated base change next to a hunk reads as changed: conservative, never unsafe.
+Replays the reviewed commit onto the base content `head` carries (`git merge-tree` of the reviewed
+commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
+bytes, binary content and modes count. Main merged into the branch therefore reads as same, even next
+to a PR hunk, while any other change reads as changed: a later push, a moved hunk, a side branch merged
+in, or a merge resolution that edits a PR line. Not a diff fingerprint: diff context lines carry
+neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved elsewhere as same. Not
+`git patch-id`: it ignores whitespace. Prints `same` and exits 0, or `changed <files>` and exits 1:
+those files need a delta review. Git 2.38 or later, no network; fetch first.
 """
-import hashlib
-import re
 import subprocess
 import sys
 
-# Pinned so local config (renames, algorithm, external or textconv drivers, colour) cannot change the bytes.
-DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--binary", "--full-index",
-        "--diff-algorithm=myers", "--src-prefix=a/", "--dst-prefix=b/"]
-HUNK = re.compile(rb"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@.*$")
+# Pinned so local config (renames, external drivers, colour) cannot change the file list.
+DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z"]
 
 
-def _git(cwd, *args):
-    return subprocess.run(["git", "-c", "core.quotePath=true", *args], cwd=cwd, check=True, capture_output=True).stdout
+def _git(cwd, *args, ok=(0,)):
+    r = subprocess.run(["git", "-c", "core.quotePath=true", *args], cwd=cwd, capture_output=True)
+    if r.returncode not in ok:
+        raise subprocess.CalledProcessError(r.returncode, r.args, r.stdout, r.stderr)
+    return r.stdout
 
 
-def _fingerprint(patch):
-    lines = [b"@@" if HUNK.match(l) else l for l in patch.split(b"\n") if not l.startswith(b"index ")]
-    return hashlib.sha256(b"\n".join(lines)).hexdigest()
-
-
-def _ids(cwd, base, sha):
-    out = {}
-    for f in _git(cwd, *DIFF, "--name-only", "-z", f"{base}...{sha}").decode(errors="surrogateescape").split("\0"):
-        if f:
-            out[f] = _fingerprint(_git(cwd, *DIFF, f"{base}...{sha}", "--", f":(literal){f}"))
-    return out
+def _replayed(cwd, reviewed, onto):
+    """Tree of the reviewed commit merged with `onto`; conflicts keep their markers, so they read as changed."""
+    out = _git(cwd, "merge-tree", "--write-tree", "--no-messages", reviewed, onto, ok=(0, 1))
+    return out.split(b"\n", 1)[0].decode()
 
 
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):
-    a, b = _ids(cwd, base, reviewed), _ids(cwd, base, head)
-    return sorted(f for f in a.keys() | b.keys() if a.get(f) != b.get(f))
+    onto = _git(cwd, "merge-base", base, head).decode().strip()
+    out = _git(cwd, *DIFF, _replayed(cwd, reviewed, onto), head).decode(errors="surrogateescape")
+    return sorted(f for f in out.split("\0") if f)
 
 
 def main(argv):
