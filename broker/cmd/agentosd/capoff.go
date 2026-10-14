@@ -51,6 +51,11 @@ const (
 	modelNoGrant = "Model: no AI plan or key connected, so no agent can think or learn; a later box version adds this."
 	// C2: the vault is not open, so the model route serves nothing.
 	modelLocked = "Model: the vault is locked, so your agent cannot think or learn; unlock it on the local page."
+	// C2: the vault is open and a provider granted, but none may receive
+	// private data (CAP-9; #1266, P-2 on #1280): tasks that need the
+	// owner's mail or files wait. The local page's AI providers page
+	// allows one.
+	modelNoPrivate = "Model: no AI provider may see your private data, so your agent cannot do most tasks; allow one on the local page."
 	// C7: no recall directory or vault verifier.
 	recallOffLine = "Memory across tasks: off here; " + fixUpdate + "."
 	// C9: the question book or the box clock did not open.
@@ -318,6 +323,8 @@ func modelLine(st modelroute.ModelState) string {
 		return modelNoGrant
 	case !st.Open:
 		return modelLocked
+	case !st.Private:
+		return modelNoPrivate
 	}
 	return ""
 }

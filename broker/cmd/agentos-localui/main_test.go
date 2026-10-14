@@ -26,7 +26,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
-// REQ: ARC-2, CH-9, REC-4, ONB-3, HW-1, HW-10
+// REQ: ARC-2, CH-9, REC-4, ONB-3, HW-1, HW-10, CAP-9
 
 // P2-2w c4: the page runs setup over agentosd's localui.sock, which
 // serves setup's ops only until finish (Security L6), and keeps its
@@ -40,7 +40,7 @@ func TestThePageRunsSetupThroughAgentosd(t *testing.T) {
 	if _, ok := cfg.Store.(*localui.MemStore); !ok {
 		t.Fatalf("store %#v", cfg.Store)
 	}
-	if cfg.SetupSecret != "" || cfg.Card != nil || cfg.SecondLine != nil || cfg.Vault != nil || cfg.Rotation != nil || cfg.AP.Password != "" {
+	if cfg.SetupSecret != "" || cfg.Card != nil || cfg.SecondLine != nil || cfg.Providers != nil || cfg.Vault != nil || cfg.Rotation != nil || cfg.AP.Password != "" {
 		t.Fatalf("config %+v", cfg)
 	}
 	if _, err := localui.New(cfg); err != nil {
@@ -81,6 +81,18 @@ func TestTheVaultSocketWiresTheCardRotation(t *testing.T) {
 	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock")
 	if _, ok := cfg.Rotation.(*localui.Rotation); !ok || cfg.Vault == nil {
 		t.Fatalf("config %+v", cfg)
+	}
+}
+
+// #1266 (CAP-9, CH-3): the same socket serves the AI providers page,
+// where the owner changes a provider's private-data answer after setup.
+func TestTheVaultSocketWiresTheProvidersPage(t *testing.T) {
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock")
+	if _, ok := cfg.Providers.(*localui.UnlockClient); !ok {
+		t.Fatalf("config %+v", cfg)
+	}
+	if _, err := localui.New(cfg); err != nil {
+		t.Fatal(err)
 	}
 }
 
