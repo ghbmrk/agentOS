@@ -4,11 +4,16 @@ package localui
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 // probeUID is a uid and gid no image user holds; the probe runs hostapd
@@ -130,6 +135,118 @@ func TestHostapdRefusesARootUser(t *testing.T) {
 		}
 		if _, err := os.Stat(ipLog); err == nil {
 			t.Fatalf("user %+v: ran ip", u)
+		}
+	}
+}
+
+// capStatus reads the CapBnd and NoNewPrivs lines of a status file's text.
+func capStatus(status string) (capBnd, nnp string) {
+	for _, l := range strings.Split(status, "\n") {
+		if k, v, found := strings.Cut(l, ":"); found {
+			switch k {
+			case "CapBnd":
+				capBnd = strings.TrimSpace(v)
+			case "NoNewPrivs":
+				nnp = strings.TrimSpace(v)
+			}
+		}
+	}
+	return capBnd, nnp
+}
+
+// threadStatus is capStatus of a status file; ok is false once the
+// thread has gone.
+func threadStatus(path string) (capBnd, nnp string, ok bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", false
+	}
+	capBnd, nnp = capStatus(string(b))
+	return capBnd, nnp, true
+}
+
+// The confinement is per thread, and startConfined's thread is never
+// returned to the runtime (#1426): no thread that runs Go code afterwards
+// carries hostapd's bounding set or no_new_privs, and children the loader
+// starts afterwards from other goroutines (dnsmasq, ip) keep the loader's
+// own. The process's main thread is the one exception the runtime makes:
+// a locked goroutine that exits there wedges it for good (runtime.mexit)
+// and no goroutine runs on it again, so it is left out of the scan (as in
+// loop7's TestNoNewPrivsStaysOffTheDaemonsOtherThreads). Root only: the
+// bounding-set drop needs CAP_SETPCAP.
+func TestConfinementStaysOffTheLoadersOtherThreads(t *testing.T) {
+	if os.Geteuid() != 0 {
+		if os.Getenv("AGENTOS_REQUIRE_APUSER") == "1" {
+			t.Fatal("AGENTOS_REQUIRE_APUSER=1 but not root")
+		}
+		t.Skip("needs root to drop from the bounding set")
+	}
+	parent := fmt.Sprintf("/proc/%d/status", os.Getppid())
+	baseBnd, baseNNP, ok := threadStatus(parent)
+	if !ok || baseBnd == "" {
+		t.Fatalf("cannot read %s", parent)
+	}
+	if baseBnd == "0000000000003000" {
+		t.Skip("the test process already has hostapd's bounding set")
+	}
+	// Confined starts from fresh threads, with goroutines blocking in
+	// syscalls meanwhile so the runtime makes more threads.
+	for range 10 {
+		var wg sync.WaitGroup
+		for range 10 {
+			wg.Add(1)
+			go func() { defer wg.Done(); exec.Command("true").Run() }()
+		}
+		cmd := childproc.Command(context.Background(), hostEnv, childproc.Options{}, "true")
+		if err := startConfined(cmd); err != nil {
+			t.Fatal(err)
+		}
+		cmd.Wait()
+		wg.Wait()
+	}
+	confined := func(bnd, nnp string) bool {
+		return bnd != baseBnd || (baseNNP == "0" && nnp == "1")
+	}
+	main := fmt.Sprintf("/proc/self/task/%d/status", os.Getpid())
+	// A confined thread may still be exiting: wait for it to go.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tasks, err := filepath.Glob("/proc/self/task/*/status")
+		if err != nil || len(tasks) == 0 {
+			t.Fatalf("no threads listed: %v", err)
+		}
+		var flagged []string
+		for _, st := range tasks {
+			if bnd, nnp, ok := threadStatus(st); ok && st != main && confined(bnd, nnp) {
+				flagged = append(flagged, st+" CapBnd "+bnd+" NoNewPrivs "+nnp)
+			}
+		}
+		if len(flagged) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("loader threads still confined (base CapBnd %s NoNewPrivs %s): %v", baseBnd, baseNNP, flagged)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Children from many goroutines, so they start on many threads.
+	const n = 20
+	out := make(chan string, n)
+	for range n {
+		go func() {
+			b, err := exec.Command("cat", "/proc/self/status").Output()
+			if err != nil {
+				out <- "error: " + err.Error()
+				return
+			}
+			out <- string(b)
+		}()
+	}
+	for range n {
+		said := <-out
+		if bnd, nnp := capStatus(said); bnd == "" || confined(bnd, nnp) {
+			t.Fatalf("a child started outside startConfined has CapBnd %q NoNewPrivs %q, want the loader's %s and %s:\n%s",
+				bnd, nnp, baseBnd, baseNNP, said)
 		}
 	}
 }

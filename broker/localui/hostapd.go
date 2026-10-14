@@ -45,10 +45,12 @@ type Hostapd struct {
 	StopWait time.Duration
 	// User is the user hostapd runs as (#1426). As root, hostapd would
 	// pass egress's uid-0 broker check and could reach verify.sock, so
-	// Start refuses a nil User unless AsCaller is set.
+	// Start refuses a nil User unless asCaller is set.
 	User *APUser
-	// AsCaller runs hostapd as the caller, with no User: stub tests only.
-	AsCaller bool
+	// asCaller runs hostapd as the caller, with no User: this package's
+	// stub tests only. It is unexported so that no other package can opt
+	// in to running hostapd as root.
+	asCaller bool
 
 	mu  sync.Mutex
 	run *apRun
@@ -101,7 +103,7 @@ func (h *Hostapd) Start(ctx context.Context, cfg APConfig) error {
 	if u := h.User; u != nil && (u.UID == 0 || u.GID == 0) {
 		return errors.New("localui: hostapd must not run as root")
 	}
-	if h.User == nil && !h.AsCaller {
+	if h.User == nil && !h.asCaller {
 		return errors.New("localui: hostapd has no user of its own")
 	}
 	hc, err := HostapdConf(cfg)
@@ -227,8 +229,11 @@ var apCaps = []uintptr{unix.CAP_NET_ADMIN, unix.CAP_NET_RAW}
 // startConfined starts cmd from an OS thread of its own that first sets
 // no_new_privs and drops every capability but apCaps from its bounding
 // set; the child inherits both. Both are per thread, so the thread is
-// never returned to the runtime: it ends with its goroutine. (No
-// parent-death signal is set, which would fire when the thread ends.)
+// never returned to the runtime: when its goroutine ends, the runtime
+// ends the thread, or, if it is the process's main thread, wedges it for
+// good (runtime.mexit) with no goroutine ever running on it again. Either
+// way no later Go code or child runs confined.
+// (No parent-death signal is set, which would fire when the thread ends.)
 func startConfined(cmd *childproc.Cmd) error {
 	errc := make(chan error, 1)
 	go func() {

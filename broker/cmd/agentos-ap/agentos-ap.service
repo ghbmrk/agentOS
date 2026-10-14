@@ -17,9 +17,10 @@
 # serves the card's network at every later start.
 [Unit]
 Description=agentOS access point loader
-# The inbound drop is in place before any radio is brought up, and the
-# secrets it hides below exist when it starts: the masks cover only paths
-# that exist then (a restart covers later ones).
+# The inbound drop is in place before any radio is brought up. The masks
+# below cover only paths that exist at start: egress's state directory
+# does by then; agentosd's subtrees made after its fork (Type=simple) may
+# not, and a restart covers those.
 Requires=agentos-inbound.service
 After=agentos-inbound.service agentos-egress.service agentosd.service
 # The page listens on the access point's address.

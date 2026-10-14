@@ -7,7 +7,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os/user"
+	"strings"
 	"testing"
 )
 
@@ -44,54 +46,85 @@ func TestNewHostapdRunsHostapdAsItsUser(t *testing.T) {
 }
 
 // The loader builds its access point only through newHostapd, which
-// always sets User (#1426): main.go holds one localui.Hostapd literal, in
-// newHostapd, with User and without AsCaller, and main passes it the real
-// user lookup.
+// always sets User (#1426). Across every non-test file of the package,
+// the one localui.Hostapd literal is newHostapd's, with User, there is no
+// new(localui.Hostapd), and main passes newHostapd the real user lookup.
+// (Hostapd's asCaller, which runs hostapd as root, is unexported: no file
+// here can name it.)
 func TestMainBuildsHostapdOnlyThroughNewHostapd(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	pkgs, err := parser.ParseDir(token.NewFileSet(), ".", func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var lits []string
-	var calls []string
-	for _, d := range f.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok {
-			continue
-		}
-		ast.Inspect(fn, func(n ast.Node) bool {
+	pkg, ok := pkgs["main"]
+	if !ok || len(pkgs) != 1 {
+		t.Fatalf("packages %v, want main alone", pkgs)
+	}
+	isHostapd := func(e ast.Expr) bool {
+		sel, ok := e.(*ast.SelectorExpr)
+		return ok && sel.Sel.Name == "Hostapd"
+	}
+	var lits, news, calls []string
+	for name, f := range pkg.Files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if _, ok := n.(*ast.FuncDecl); ok {
+				return false // inspected below, with its name
+			}
 			switch n := n.(type) {
 			case *ast.CompositeLit:
-				if sel, ok := n.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "Hostapd" {
-					keys := map[string]bool{}
-					for _, e := range n.Elts {
-						if kv, ok := e.(*ast.KeyValueExpr); ok {
-							if id, ok := kv.Key.(*ast.Ident); ok {
-								keys[id.Name] = true
-							}
-						}
-					}
-					if !keys["User"] || keys["AsCaller"] {
-						t.Errorf("%s: a Hostapd literal with keys %v; want User and no AsCaller", fn.Name.Name, keys)
-					}
-					lits = append(lits, fn.Name.Name)
+				if isHostapd(n.Type) {
+					lits = append(lits, name+": outside any function")
 				}
 			case *ast.CallExpr:
-				if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "newHostapd" && len(n.Args) == 2 {
-					if sel, ok := n.Args[1].(*ast.SelectorExpr); ok && sel.Sel.Name == "Lookup" {
-						calls = append(calls, fn.Name.Name)
-					}
-				}
-			case *ast.Ident:
-				if n.Name == "AsCaller" {
-					t.Errorf("%s names AsCaller, which runs hostapd as root", fn.Name.Name)
+				if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "new" && len(n.Args) == 1 && isHostapd(n.Args[0]) {
+					news = append(news, name+": outside any function")
 				}
 			}
 			return true
 		})
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.CompositeLit:
+					if isHostapd(n.Type) {
+						keys := map[string]bool{}
+						for _, e := range n.Elts {
+							if kv, ok := e.(*ast.KeyValueExpr); ok {
+								if id, ok := kv.Key.(*ast.Ident); ok {
+									keys[id.Name] = true
+								}
+							}
+						}
+						if !keys["User"] {
+							t.Errorf("%s: %s: a Hostapd literal with keys %v; want User", name, fn.Name.Name, keys)
+						}
+						lits = append(lits, fn.Name.Name)
+					}
+				case *ast.CallExpr:
+					if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "new" && len(n.Args) == 1 && isHostapd(n.Args[0]) {
+						news = append(news, name+": "+fn.Name.Name)
+					}
+					if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "newHostapd" && len(n.Args) == 2 {
+						if sel, ok := n.Args[1].(*ast.SelectorExpr); ok && sel.Sel.Name == "Lookup" {
+							calls = append(calls, fn.Name.Name)
+						}
+					}
+				}
+				return true
+			})
+		}
 	}
 	if len(lits) != 1 || lits[0] != "newHostapd" {
 		t.Errorf("Hostapd literals in %v, want one, in newHostapd", lits)
+	}
+	if len(news) != 0 {
+		t.Errorf("new(localui.Hostapd) in %v; build it through newHostapd", news)
 	}
 	if len(calls) != 1 || calls[0] != "main" {
 		t.Errorf("newHostapd(dir, user.Lookup) called from %v, want main alone", calls)
