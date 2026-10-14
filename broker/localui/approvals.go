@@ -76,7 +76,11 @@ func (s *Server) approvals(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/unlock?next=/approvals/", http.StatusSeeOther)
 			return
 		}
-		v.Err = unreachableText
+		// An answer's own message stands: "Nothing was approved or
+		// denied" would contradict a line that says it was.
+		if v.Msg == "" && v.Err == "" {
+			v.Err = unreachableText
+		}
 	}
 	for _, q := range rq.Requests {
 		v.Requests = append(v.Requests, s.requestView(q, sess))

@@ -116,12 +116,22 @@ func (c *Channel) sendSignIns(text string, n, m int, now time.Time) {
 // its answer. A send takes up to the modem's 220 s, and the page gives up on
 // the call after 10 s, so a send before the reply made the page say nothing
 // was decided about a request that was (UX-2wb-1). The note behind the
-// sign-in text is saved before this runs, so a send that never completes is
-// retried by the next Tick; the alerts are best effort, as before. Batches
+// sign-in text is saved before this runs, so a send that fails is
+// retried by the next Tick; the alerts are best effort: they are lost if the
+// send fails or the channel stops first (drainSends). Batches
 // run one after another in call order. Called
 // without c.mu.
 func (c *Channel) textAfterReply(alerts []string, signIn string, n, m int, now time.Time) {
 	if len(alerts) == 0 && signIn == "" {
+		return
+	}
+	if c.inlineSends {
+		for _, a := range alerts {
+			_ = c.alert(a)
+		}
+		if signIn != "" {
+			c.sendSignIns(signIn, n, m, now)
+		}
 		return
 	}
 	done := make(chan struct{})
@@ -143,6 +153,26 @@ func (c *Channel) textAfterReply(alerts []string, signIn string, n, m int, now t
 			c.sendSignIns(signIn, n, m, now)
 		}
 	}()
+}
+
+// sendDrain bounds how long Run, on shutdown, waits for texts that
+// textAfterReply started; a modem send can take 220 s, so the wait is
+// shorter. What is not sent by then is retried after the restart only where
+// a note is saved (the sign-in text); alerts are lost, as a crash would lose
+// them.
+var sendDrain = 30 * time.Second
+
+// drainSends waits up to d for the texts in flight, so a stop does not drop
+// a sign-in or answer alert the modem was about to send.
+func (c *Channel) drainSends(d time.Duration) {
+	done := make(chan struct{})
+	go func() { c.sends.Wait(); close(done) }()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+	}
 }
 
 // WaitSends returns once every text started by textAfterReply has finished.

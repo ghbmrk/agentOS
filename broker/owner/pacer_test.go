@@ -162,6 +162,7 @@ func TestQuietHoursHoldUpdatesButNotSecurity(t *testing.T) {
 	if _, _, err := r.ch.LocalSignIn(r.totp()); err != nil {
 		t.Fatal(err)
 	}
+	r.ch.WaitSends()
 	r.ch.FlushLocal()
 	if got := r.sentTexts(); len(got) != 1 || !strings.Contains(got[0], "signed in") {
 		t.Fatalf("sign-in alert in quiet hours: %q", got)

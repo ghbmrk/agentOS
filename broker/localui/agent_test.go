@@ -6,6 +6,7 @@ import (
 	"html"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,5 +216,48 @@ func TestAnAnswerWithNoReplyDoesNotClaimNothingHappened(t *testing.T) {
 	})
 	if refusal != answerUnreachableText {
 		t.Fatalf("answer with no reply: %q", refusal)
+	}
+}
+
+// A failed listing after a POST keeps the answer's own message: the page
+// never says "Nothing was approved or denied" over (or beside) an answer.
+func TestAFailedListingAfterAnAnswerKeepsTheAnswersMessage(t *testing.T) {
+	tok := strings.Repeat("ab", localapi.TokenBytes)
+	for _, c := range []struct {
+		name   string
+		answer func(context.Context, sockets.Peer, json.RawMessage) (any, error)
+		want   string
+	}{
+		{"answer fails", func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return nil, sockets.ErrFailed }, answerUnreachableText},
+		{"answer lands", func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return localapi.Answered{Text: "Approved Q2. Your agent can go ahead."}, nil
+		}, "Approved Q2."},
+	} {
+		s, err := New(Config{AP: testAP()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.SetOwner(InProcess{
+			localapi.OpSession: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+				return localapi.Session{Token: tok, Until: time.Now().Add(time.Hour)}, nil
+			},
+			localapi.OpAnswer: c.answer,
+			localapi.OpRequests: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+				return nil, sockets.ErrFailed
+			},
+		})
+		sess := tokenKey(tok)
+		sum := strings.Repeat("0", 64)
+		form := url.Values{"id": {"Q2"}, "sum": {sum}, "tok": {s.formToken(sess, "Q2", sum)}, "answer": {"deny"}}
+		req := httptest.NewRequest("POST", "http://10.42.0.1/approvals/", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = "10.42.0.20:5000"
+		req.AddCookie(&http.Cookie{Name: cookieName, Value: tok})
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		body := w.Body.String()
+		if w.Code != 200 || !strings.Contains(body, html.EscapeString(c.want)) || strings.Contains(body, "Nothing was approved or denied") {
+			t.Fatalf("%s: %d %s", c.name, w.Code, body)
+		}
 	}
 }

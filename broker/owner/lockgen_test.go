@@ -35,6 +35,7 @@ func (m *heldModem) Send(to, text string) error {
 // generation is refused at its commit point.
 func TestLocalSignInReportsItsOwnLockGeneration(t *testing.T) {
 	r := newRig(t, nil)
+	r.async = true
 	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
 	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
 	r.ch = r.open()
@@ -84,6 +85,7 @@ func TestLocalSignInReportsItsOwnLockGeneration(t *testing.T) {
 // once the modem lets it.
 func TestLocalSignInRepliesBeforeItsTextIsSent(t *testing.T) {
 	r := newRig(t, nil)
+	r.async = true
 	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
 	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
 	r.ch = r.open()
@@ -106,4 +108,72 @@ func TestLocalSignInRepliesBeforeItsTextIsSent(t *testing.T) {
 	if m := <-r.phone.Inbox(); !strings.Contains(m.Text, "Wi-Fi") {
 		t.Fatalf("sign-in text %q", m.Text)
 	}
+}
+
+// UX-2wb-1: a page answer is replied to before its alert text leaves the
+// modem; the decision is already taken, and the text goes once the modem
+// lets it.
+func TestLocalAnswerRepliesBeforeItsTextIsSent(t *testing.T) {
+	r := newRig(t, nil)
+	r.async = true
+	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
+	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
+	r.ch = r.open()
+	// Let the request's own text through; the answer's texts are the ones held.
+	close(held.let)
+	id, _ := r.ch.RequestLocal(localItem("i1"), 0)
+	r.inbox()
+	held.let = make(chan struct{})
+	held.once = sync.Once{}
+	held.entered = make(chan struct{})
+	type res struct {
+		msg string
+		err error
+	}
+	done := make(chan res, 1)
+	go func() {
+		msg, err := r.ch.LocalAnswer(id, r.sum(id), true, r.totp())
+		done <- res{msg, err}
+	}()
+	var got res
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("answer waited for the modem")
+	}
+	if got.err != nil || !strings.HasPrefix(got.msg, "Approved "+id) {
+		t.Fatalf("answer: %q %v", got.msg, got.err)
+	}
+	if d := r.decisions(); len(d) != 1 || !d[0].Approved {
+		t.Fatalf("decisions %+v", d)
+	}
+	<-held.entered
+	close(held.let)
+	r.ch.WaitSends()
+}
+
+// Run drains texts in flight on shutdown (drainSends), up to its bound.
+func TestShutdownDrainWaitsForTextsInFlightUpToItsBound(t *testing.T) {
+	r := newRig(t, nil)
+	r.async = true
+	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
+	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
+	r.ch = r.open()
+	if _, _, err := r.ch.LocalSignIn(r.totp()); err != nil {
+		t.Fatal(err)
+	}
+	<-held.entered
+	start := time.Now()
+	r.ch.drainSends(50 * time.Millisecond)
+	if time.Since(start) < 40*time.Millisecond {
+		t.Fatal("drain returned with a text in the modem")
+	}
+	released := make(chan struct{})
+	go func() { time.Sleep(20 * time.Millisecond); close(held.let); close(released) }()
+	start = time.Now()
+	r.ch.drainSends(5 * time.Second)
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("drain waited past the send")
+	}
+	<-released
 }

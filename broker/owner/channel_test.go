@@ -90,6 +90,9 @@ type rig struct {
 	reissue func([]Carried)
 	// edit, if set, changes the next open channel's Config.
 	edit func(*Config)
+	// async leaves the channel's after-reply texts on their goroutines; by
+	// default they run inline, so a test reads channel state without a race.
+	async bool
 }
 
 func newRig(t *testing.T, store Store) *rig {
@@ -130,6 +133,7 @@ func (r *rig) open() *Channel {
 	if err != nil {
 		r.t.Fatal(err)
 	}
+	ch.inlineSends = !r.async
 	return ch
 }
 
@@ -167,6 +171,7 @@ func (r *rig) unlock() {
 // inbox returns the next text the box sent to the owner's phone.
 func (r *rig) inbox() string {
 	r.t.Helper()
+	r.ch.WaitSends()
 	select {
 	case m := <-r.phone.Inbox():
 		r.checkFormat(m.Text)
