@@ -118,8 +118,12 @@ type entry struct {
 	// provedSeq that of the first record that proved one of its attempts
 	// not applied, from any source (a check or the executor itself).
 	// They say which same-effect intents are its rivals (rivals).
+	// wentSeq is the seq of the first record that observed one of its
+	// attempts succeeded: it holds back only rivals submitted before it
+	// (blocks).
 	firstDispatchSeq uint64
 	provedSeq        uint64
+	wentSeq          uint64
 }
 
 // Option configures Open.
@@ -312,10 +316,11 @@ func (e *Engine) Dispatch(ctx context.Context, id string) (Status, error) {
 		var err error
 		if en, exec, err = e.dispatchable(id); err != nil {
 			var se *SupersededError
-			if errors.As(err, &se) && e.intents[se.By] != nil && e.intents[se.By].state == Succeeded {
-				// The effect went as se.By, which is final: the request
-				// is answered, not left authorized (holding a scope
-				// bound's place and the sleeper awake) for ever.
+			if errors.As(err, &se) && se.Rival == Succeeded {
+				// The effect went as se.By after this request was made,
+				// which is final: the request is answered, not left
+				// authorized (holding a scope bound's place and the
+				// sleeper awake) for ever.
 				if cerr := e.commit(Record{Type: RecRecheckFailed, ID: id, Reason: err.Error(), Guest: supersededGuest}); cerr != nil {
 					e.mu.Unlock()
 					return Status{}, cerr
@@ -388,6 +393,10 @@ func (e *Engine) dispatchable(id string) (*entry, Executor, error) {
 	if en.state != Authorized && en.state != NotApplied {
 		return en, nil, fmt.Errorf("%w: %s is %s", ErrState, id, en.state)
 	}
+	if n := en.unclear(); n != 0 {
+		// Only the owner's RETRY tries an effect that may have gone.
+		return en, nil, fmt.Errorf("%w: %s attempt %d is unknown and parked", ErrState, id, n)
+	}
 	exempt := narrowing(en.intent)
 	if e.stopped && !exempt {
 		return en, nil, ErrStopped
@@ -406,11 +415,13 @@ func (e *Engine) dispatchable(id string) (*entry, Executor, error) {
 }
 
 // duplicateOf returns an unresolved intent with the same effect as en
-// under another ID, or "". Called with e.mu held.
+// under another ID (unresolved, an earlier parked attempt included), or
+// "". Since every new attempt waits for it, two intents with one effect
+// are never unresolved together. Called with e.mu held.
 func (e *Engine) duplicateOf(en *entry) string {
 	var first *entry
 	for _, o := range e.byEffect[en.efp] {
-		if o != en && (o.state == OutcomeUnknown || o.state == InFlight) &&
+		if o != en && o.unresolved() &&
 			(first == nil || o.seq < first.seq) {
 			first = o
 		}
@@ -423,50 +434,61 @@ func (e *Engine) duplicateOf(en *entry) string {
 
 // rivals reports whether a and b, two intents with the same effect, are
 // alternatives for one send of it rather than two sends. They are when
-// some intent z with that effect (a or b itself, or one submitted before
-// both) had an attempt proved not applied, by a check through the same
-// tool or by its executor, and was first dispatched before the later of
-// a and b was submitted: the later one is then a resubmission of an
-// effect that did not go, or of one whose outcome was still open, and
-// the two may not both go (OP-2, B7). Every intent submitted after z's
-// first dispatch is a rival of z and of each other. The fields are set
-// once, from the journal, so a restart sees the same rivals. Requests
-// made before any such z was dispatched, and repeats of a send nothing
-// proved not applied, stay separate sends, as before. bucket is the
-// intents with the effect (byEffect).
+// some intent z with that effect had an attempt proved not applied, by a
+// check through the same tool or by its executor, and each of a and b is
+// z itself or was submitted after z's first dispatch: a resubmission of
+// an effect that did not go, or of one whose outcome was still open, and
+// the two may not both go (OP-2, B7). A request made before z was first
+// dispatched cannot be a resubmission of it, so it stays a separate
+// send, from z and from z's resubmissions alike. The fields are set once,
+// from the journal, so a restart sees the same rivals. Requests made
+// before any such z was dispatched, and repeats of a send nothing proved
+// not applied, stay separate sends, as before. bucket is the intents
+// with the effect (byEffect).
 func rivals(bucket []*entry, a, b *entry) bool {
-	lo, hi := a, b
-	if hi.seq < lo.seq {
-		lo, hi = hi, lo
-	}
 	for _, z := range bucket {
-		if z.provedSeq != 0 && z.seq <= lo.seq && z.firstDispatchSeq != 0 && z.firstDispatchSeq < hi.seq {
+		if z.provedSeq != 0 && z.firstDispatchSeq != 0 && resubmits(z, a) && resubmits(z, b) {
 			return true
 		}
 	}
 	return false
 }
 
-// blocks reports whether rival o holds back a new attempt of en. One
-// that has gone, may have gone, or is going (succeeded, outcome_unknown,
-// parked included, or in flight) holds back every rival. One pending or
-// authorized, waiting for approval or dispatch, holds back a rival that
-// has been dispatched before (a resend or an owner retry of it), not a
-// first dispatch, so of two resubmissions the first dispatched goes. One
-// whose latest attempt was proved not applied, from any source, or that
-// was denied, holds back nothing.
+// resubmits reports whether x is z or was submitted after z's first dispatch.
+func resubmits(z, x *entry) bool { return x == z || z.firstDispatchSeq < x.seq }
+
+// blocks reports whether rival o holds back a new attempt of en, a
+// strict precedence that never leaves two rivals waiting for each other:
+//   - one that went (wentSeq) holds back a rival submitted before it went,
+//     whatever it does later; a request made after the effect went is a
+//     new send, so a fixed owner setting that once failed can be set
+//     again and a recurring payment is never refused for good (B8, P6);
+//   - one that may have gone or is going (outcome_unknown, parked
+//     included, or in flight) holds back every rival until it settles;
+//   - one pending or authorized, waiting for approval or dispatch, holds
+//     back a rival whose latest attempt was proved not applied (a resend
+//     of a not-done effect, or a guest's repeat of a refused request), so
+//     of two resubmissions the first dispatched goes; not a first
+//     dispatch, and not the owner's retry of a parked rival, which the
+//     waiting one is itself held behind (duplicateOf, R11);
+//   - one whose latest attempt was proved not applied, from any source,
+//     or that was denied, holds back nothing.
 func blocks(o, en *entry) bool {
-	switch o.state {
-	case InFlight, OutcomeUnknown, Succeeded:
+	if (o.wentSeq != 0 && en.seq < o.wentSeq) || o.unresolved() {
 		return true
+	}
+	switch o.state {
 	case Pending, Authorized:
-		return len(en.attempts) > 0
+		return en.state == NotApplied && en.unclear() == 0
 	}
 	return false
 }
 
-// unresolved reports an attempt in flight or with an unknown outcome.
-func (en *entry) unresolved() bool { return en.state == InFlight || en.state == OutcomeUnknown }
+// unresolved reports an attempt in flight or with an unknown outcome,
+// the latest or an earlier one (unclear).
+func (en *entry) unresolved() bool {
+	return en.state == InFlight || en.state == OutcomeUnknown || en.unclear() != 0
+}
 
 // sameEffect is the effect-level invariant (OP-2): an intent may start a
 // new attempt of its effect only while no rival (rivals) blocks it
@@ -475,9 +497,15 @@ func (en *entry) unresolved() bool { return en.state == InFlight || en.state == 
 // under the lock, and the others are then refused; a rival proved not
 // done never holds another back, so a not-done effect is offered again
 // rather than dropped (NotResent). Erased intents keep their effect
-// fingerprint (RecErased) and count. It returns the first blocking
+// fingerprint (RecErased) and count. An intent that only takes
+// authority away (narrowing: a pause, a revoke, a lower budget, loops or
+// sharing off) is exempt, as it is from STOP and the fence: applying it
+// again cannot widen anything (ADP-9, B8). It returns the first blocking
 // rival, or nil. Called with e.mu held.
 func (e *Engine) sameEffect(en *entry) *entry {
+	if narrowing(en.intent) {
+		return nil
+	}
 	bucket := e.byEffect[en.efp]
 	var first *entry
 	for _, o := range bucket {
@@ -527,6 +555,11 @@ func (e *Engine) unindex(en *entry, efp string) {
 type SupersededError struct {
 	ID string
 	By string
+	// Rival says what By did: Succeeded when it went after ID was
+	// submitted (final), Pending or Authorized when it waits to go, and
+	// InFlight or OutcomeUnknown when it may have gone. Empty when not
+	// known.
+	Rival State
 }
 
 func (s *SupersededError) Error() string {
@@ -634,6 +667,10 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 	for _, en := range bySeq(e.open) {
 		if en.state == OutcomeUnknown {
 			jobs = append(jobs, job{en.intent, en.latest().N, e.execs[en.intent.Executor], en.parked()})
+		} else if n := en.unclear(); n != 0 {
+			// A parked attempt the owner's retry left behind is checked
+			// as any parked one is.
+			jobs = append(jobs, job{en.intent, n, e.execs[en.intent.Executor], true})
 		}
 	}
 	e.mu.Unlock()
@@ -833,7 +870,7 @@ func (e *Engine) redispatch(ctx context.Context, id string, n int) bool {
 func (e *Engine) Resend(ctx context.Context, id string, n int) (Status, error) {
 	var next int
 	in, err := e.rechecked(ctx, id, func(en *entry) (Record, error) {
-		if !en.notDone() || en.latest().N != n {
+		if !en.notDone() || en.latest().N != n || en.unclear() != 0 {
 			return Record{}, fmt.Errorf("%w: %s attempt %d is %s and not proved not done", ErrState, id, n, en.state)
 		}
 		next = len(en.attempts) + 1
@@ -879,12 +916,21 @@ func (e *Engine) mayDispatch(en *entry, again bool) error {
 			return fmt.Errorf("%w: %s", ErrUnreconciled, en.intent.Account)
 		}
 	}
+	// An intent that went, by an attempt a check settled after a later
+	// one, is not sent again.
+	if again && en.wentSeq != 0 {
+		return fmt.Errorf("%w: %s already went", ErrState, en.intent.ID)
+	}
 	// A rival that went, waits to go, or (for a resend of a not-done
 	// effect) may have gone supersedes en. One whose outcome is unknown
 	// holds a fresh intent instead (HeldError, below): it runs if that
 	// one is proved not done.
 	if o := e.sameEffect(en); again && o != nil && (en.notDone() || !o.unresolved()) {
-		return &SupersededError{ID: en.intent.ID, By: o.intent.ID}
+		rival := o.state
+		if o.wentSeq != 0 && en.seq < o.wentSeq {
+			rival = Succeeded
+		}
+		return &SupersededError{ID: en.intent.ID, By: o.intent.ID, Rival: rival}
 	}
 	if oid := e.duplicateOf(en); oid != "" {
 		return &HeldError{ID: en.intent.ID, BlockedBy: oid}
@@ -948,7 +994,7 @@ func (e *Engine) rechecked(ctx context.Context, id string, build func(*entry) (R
 func (e *Engine) Retry(ctx context.Context, id string, parked int) (Status, error) {
 	var n int
 	in, err := e.rechecked(ctx, id, func(en *entry) (Record, error) {
-		if en.state != OutcomeUnknown || !en.parked() || en.latest().N != parked {
+		if !en.retryable() || en.latest().N != parked {
 			return Record{}, fmt.Errorf("%w: %s attempt %d is %s and not parked", ErrState, id, parked, en.state)
 		}
 		n = len(en.attempts) + 1
@@ -988,13 +1034,15 @@ type ParkedIntent struct {
 	NotDone bool
 }
 
-// Parked lists the parked intents, oldest first.
+// Parked lists the parked intents, oldest first: those whose latest
+// attempt is parked, and those whose owner's retry did not go while an
+// earlier parked attempt is still unknown (unclear).
 func (e *Engine) Parked() []ParkedIntent {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var out []ParkedIntent
 	for _, en := range bySeq(e.open) {
-		if en.state != OutcomeUnknown || !en.parked() {
+		if !en.retryable() {
 			continue
 		}
 		last := en.latest()
@@ -1014,17 +1062,70 @@ func (e *Engine) Parked() []ParkedIntent {
 // parameters are gone. Nor is one with a live rival (supersededBy): a
 // resubmission of the same effect that went, may have gone, or waits for
 // approval or dispatch; offering it would send the effect twice. It is
-// offered again once that rival is proved not done or denied.
+// offered again once that rival is proved not done or denied, and an
+// authorized one the settle loop dispatches (Release). Nor is one with
+// an earlier parked attempt still unknown (unclear): Parked lists it, as
+// only the owner's retry may try it again.
 func (e *Engine) NotResent() []ParkedIntent {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var out []ParkedIntent
 	for _, en := range bySeq(e.open) {
-		if !en.notDone() || en.erased || e.redispatching[en.intent.ID] || e.supersededBy(en) != "" {
+		if !en.notDone() || en.erased || en.unclear() != 0 || e.redispatching[en.intent.ID] || e.supersededBy(en) != "" {
 			continue
 		}
 		last := en.latest()
 		out = append(out, ParkedIntent{Intent: en.intent, Attempt: last.N, Seq: en.notDoneSeq, Dispatched: last.Dispatched, NotDone: true})
+	}
+	return out
+}
+
+// Release dispatches, oldest first through dispatch, each authorized
+// intent that holds back a not-done effect (an intent NotResent leaves
+// out because this rival waits to go): a resubmission made while the
+// original's outcome was unknown, held then, which wins over the
+// original's resend (blocks). Nothing else dispatches it, and the guest
+// that asked was only told to ask again later, so without this the
+// effect would wait on the agent (R12). Each goes through the same
+// dispatch path as any other (the caller passes the gate's Dispatch,
+// which spends the owner's approval, or the engine's), so it is held or
+// refused as any dispatch is; one refused at the recheck is denied and
+// the original is offered again. It returns the intents dispatched.
+func (e *Engine) Release(ctx context.Context, dispatch func(context.Context, string) (Status, error)) []string {
+	e.mu.Lock()
+	var ids []string
+	seen := map[string]bool{}
+	for _, en := range bySeq(e.open) {
+		if !en.notDone() || en.erased || e.redispatching[en.intent.ID] {
+			continue
+		}
+		if o := e.sameEffect(en); o != nil && o.state == Authorized && !seen[o.intent.ID] {
+			seen[o.intent.ID] = true
+			ids = append(ids, o.intent.ID)
+		}
+	}
+	e.mu.Unlock()
+	var out []string
+	for _, id := range ids {
+		if _, err := dispatch(ctx, id); err == nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// Queued returns the intents on account with action that are pending or
+// authorized: requested, and waiting for approval or dispatch, oldest
+// first. The gate's RETRY line counts them as sends that may still go
+// (grants GR35).
+func (e *Engine) Queued(account, action string) []Intent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []Intent
+	for _, en := range bySeq(e.open) {
+		if en.intent.Account == account && en.intent.Action == action && (en.state == Pending || en.state == Authorized) {
+			out = append(out, en.intent)
+		}
 	}
 	return out
 }
@@ -1533,7 +1634,7 @@ func (e *Engine) validate(r Record) error {
 				return fmt.Errorf("%s: key retry of attempt %d from %s", r.ID, r.Attempt, en.state)
 			}
 		case DispatchOwner:
-			if en.state != OutcomeUnknown || last == nil || !last.Parked || r.Attempt != len(en.attempts)+1 {
+			if !en.retryable() || r.Attempt != len(en.attempts)+1 {
 				return fmt.Errorf("%s: owner retry as attempt %d from %s", r.ID, r.Attempt, en.state)
 			}
 		default:
@@ -1794,8 +1895,15 @@ func (en *entry) apply(r Record) {
 		if r.Result == ResultNotApplied && en.provedSeq == 0 {
 			en.provedSeq = r.Seq
 		}
+		if r.Result == ResultSucceeded && en.wentSeq == 0 {
+			en.wentSeq = r.Seq
+		}
 		if a.N == len(en.attempts) {
 			en.state = map[Result]State{ResultSucceeded: Succeeded, ResultNotApplied: NotApplied, ResultUnknown: OutcomeUnknown}[r.Result]
+		} else if r.Result == ResultSucceeded && en.state == NotApplied {
+			// A parked attempt (unclear) went after all: the effect is
+			// done, whatever the owner's later retry did.
+			en.state = Succeeded
 		}
 	case RecCancel:
 		a := en.attempt(r.Attempt)
@@ -1825,6 +1933,33 @@ func (en *entry) latest() *Attempt { return en.attempt(len(en.attempts)) }
 func (en *entry) notDone() bool {
 	a := en.latest()
 	return en.state == NotApplied && a != nil && a.Result == ResultNotApplied && a.Source == SourceReconcile
+}
+
+// unclear returns the number of an earlier attempt of a not_applied
+// intent whose outcome is still unknown, or 0. Only the owner's retry of
+// a parked attempt starts a new attempt while one is unknown (Retry), so
+// this is a parked attempt whose retry the service then refused or a
+// check proved not done. The effect may still have gone by it: the
+// intent is unresolved, holding back its rivals and any intent with its
+// effect (duplicateOf), and it is offered as parked (retryable), never
+// resent or redispatched without the owner.
+func (en *entry) unclear() int {
+	if en.state != NotApplied {
+		return 0
+	}
+	for _, a := range en.attempts[:len(en.attempts)-1] {
+		if a.Result == ResultUnknown {
+			return a.N
+		}
+	}
+	return 0
+}
+
+// retryable reports an intent the owner's RETRY may try again (Retry):
+// its latest attempt is parked, or an earlier one is still unknown
+// (unclear).
+func (en *entry) retryable() bool {
+	return (en.state == OutcomeUnknown && en.parked()) || en.unclear() != 0
 }
 
 // parked reports whether the intent's last attempt is parked (OP-2).

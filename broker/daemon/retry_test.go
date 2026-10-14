@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -406,5 +407,100 @@ func TestOP2SupersededRetrySaysTheEffectWentAnotherWay(t *testing.T) {
 	}
 	if strings.Contains(got, "RETRY later") || strings.Contains(got, "agent/") {
 		t.Fatalf("text %q", got)
+	}
+}
+
+// The superseded RETRY text names what the other request did, as the
+// engine reports it (journal SupersededError.Rival).
+func TestOP2SupersededRetrySaysWhatTheOtherRequestDid(t *testing.T) {
+	for rival, how := range map[journal.State]string{
+		journal.Succeeded:      "Invoice 1042 already went as another request",
+		journal.Authorized:     "Invoice 1042 is waiting to go as another request",
+		journal.Pending:        "Invoice 1042 is waiting to go as another request",
+		journal.OutcomeUnknown: "Invoice 1042 may have gone as another request",
+		journal.InFlight:       "Invoice 1042 may have gone as another request",
+	} {
+		var got string
+		r := &retrier{
+			ctx:   context.Background(),
+			lines: map[string]retryAsk{},
+			send: func(context.Context, retryAsk, bool) (journal.Status, error) {
+				return journal.Status{}, &journal.SupersededError{ID: "agent/s1", By: "agent/s2", Rival: rival}
+			},
+			inform: func(s string) error { got = s; return nil },
+		}
+		r.run("B3", retryAsk{id: "agent/s1", attempt: 1, notDone: true,
+			line: grants.RetryLine{Shown: ownerch.Item{Object: "invoice 1042"}}}, false)
+		want := "Retry B3: nothing was sent. " + how + ", so it was not sent again."
+		if got != want {
+			t.Fatalf("%s: text %q, want %q", rival, got, want)
+		}
+	}
+}
+
+// unclearThenGoes is an executor whose first attempt of "a" ends unclear
+// and that a check then finds was not done; everything else goes.
+type unclearThenGoes struct {
+	mu  sync.Mutex
+	ran map[string]int
+}
+
+func (u *unclearThenGoes) Execute(_ context.Context, in journal.Intent, n int) journal.Outcome {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if in.ID == "a" && n == 1 {
+		return journal.Outcome{Result: journal.ResultUnknown}
+	}
+	u.ran[in.ID]++
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "sent"}
+}
+
+func (u *unclearThenGoes) Reconcile(_ context.Context, in journal.Intent, _ int) journal.Outcome {
+	if in.ID == "a" {
+		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not sent"}
+	}
+	return journal.Outcome{Result: journal.ResultUnknown}
+}
+
+// R12: the settle loop dispatches, through the dispatch it is given (the
+// gate's), a resubmission held while the original was unclear, once a
+// check proves the original not done and the resubmission wins over its
+// resend.
+func TestOP2SettleLoopReleasesAHeldResubmission(t *testing.T) {
+	x := &unclearThenGoes{ran: map[string]int{}}
+	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{"x": x}, func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(id string) (journal.Status, error) {
+		in := journal.Intent{ID: id, Origin: "guest:agent", Account: "mail", Action: "send",
+			Params: map[string]any{"record": "inv-1042"}, Executor: "x"}
+		if _, err := eng.Submit(in); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := eng.Authorize(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+		return eng.Dispatch(context.Background(), id)
+	}
+	if st, _ := send("a"); st.State != journal.OutcomeUnknown {
+		t.Fatalf("a: %+v", st)
+	}
+	var held *journal.HeldError
+	if _, err := send("b"); !errors.As(err, &held) {
+		t.Fatalf("b: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var through []string
+	settleLoop(ctx, eng, time.Hour, func(ctx context.Context, id string) (journal.Status, error) {
+		through = append(through, id)
+		return eng.Dispatch(context.Background(), id)
+	})
+	if len(through) != 1 || through[0] != "b" {
+		t.Fatalf("dispatched %v", through)
+	}
+	if st, _ := eng.Get("b"); st.State != journal.Succeeded || x.ran["a"] != 0 || x.ran["b"] != 1 {
+		t.Fatalf("b: %+v; ran %v", st, x.ran)
 	}
 }

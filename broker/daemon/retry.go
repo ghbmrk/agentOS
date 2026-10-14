@@ -23,10 +23,13 @@ var settleEvery = time.Hour
 
 // settleLoop runs SettleUnknown at startup and then every settleEvery
 // until ctx ends. Nothing is retried that the engine's own rules do not
-// allow (OP-2b).
-func settleLoop(ctx context.Context, eng *journal.Engine, every time.Duration) {
+// allow (OP-2b). After each, it dispatches through dispatch (the gate's
+// Dispatch) the held resubmissions that a not-done effect waits for
+// (journal Release, R12), so that effect is not left to the agent.
+func settleLoop(ctx context.Context, eng *journal.Engine, every time.Duration, dispatch func(context.Context, string) (journal.Status, error)) {
 	for {
 		eng.SettleUnknown(ctx, settleWait, settleMaxWait)
+		eng.Release(ctx, dispatch)
 		t := time.NewTimer(every)
 		select {
 		case <-ctx.Done():
@@ -206,10 +209,12 @@ func (r *retrier) run(req string, a retryAsk, page bool) {
 	var superseded *journal.SupersededError
 	switch {
 	case errors.As(err, &superseded):
-		// The same effect went, or waits to go, as another request
-		// (journal sameEffect): nothing is left to retry, so it is not
-		// listed again and the owner is not told to try later.
-		text = fmt.Sprintf("Retry %s: nothing was sent. %s already went, or is waiting to go, as another request, so it was not sent again.", req, capital(what))
+		// The same effect went, waits to go, or may have gone as another
+		// request (journal sameEffect): nothing is left to retry now, so
+		// it is not listed again and the owner is not told to try later;
+		// the engine offers it again if that request is proved not done
+		// or denied.
+		text = fmt.Sprintf("Retry %s: nothing was sent. %s %s as another request, so it was not sent again.", req, capital(what), supersededHow(superseded.Rival))
 	case err == nil && st.State == journal.Succeeded:
 		text = fmt.Sprintf("Retry %s: %s went through.", req, what)
 	case err == nil && (st.State == journal.NotApplied || st.State == journal.Denied):
@@ -230,6 +235,20 @@ func (r *retrier) run(req string, a retryAsk, page bool) {
 	if inform != nil {
 		inform(text)
 	}
+}
+
+// supersededHow says, in fixed words, what the request that superseded a
+// retry did (journal SupersededError.Rival).
+func supersededHow(rival journal.State) string {
+	switch rival {
+	case journal.Succeeded:
+		return "already went"
+	case journal.Pending, journal.Authorized:
+		return "is waiting to go"
+	case journal.InFlight, journal.OutcomeUnknown:
+		return "may have gone"
+	}
+	return "already went, or is waiting to go,"
 }
 
 // refusal names why a retry was refused, in fixed words.

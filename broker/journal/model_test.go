@@ -1,0 +1,663 @@
+package journal
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// REQ: OP-2, OP-4, ADP-9
+
+// The same-effect model (B8): an exhaustive search, to a bounded depth,
+// of every interleaving of two or three intents with one effect across
+// submit, approve, deny, dispatch (the executor applying it or not, and
+// saying so or not), restart, checks through the same tool (proving the
+// attempt applied or not, with the engine's resend allowed, refused by
+// the recheck, or itself unclear), parking, the owner's RETRY of a parked
+// or a not-done intent, the settle loop's release of a held resubmission,
+// and erase, for an effect that widens authority and for one that only
+// narrows it. After every step it checks:
+//
+//   - I1: the effect never applies twice through two rivals unless the
+//     second was submitted after the first was known to have succeeded,
+//     and one intent applies twice only on the owner's RETRY of a parked
+//     attempt (which says "may go twice"); no attempt starts while another
+//     intent with the effect may still take effect (in flight, unknown or
+//     parked, duplicateOf);
+//   - I2: an effect a check proved not done is never lost: it is offered
+//     for RETRY (NotResent), or a rival that went, may have gone or waits
+//     for approval holds it back, or an authorized rival does that the
+//     settle loop's Release dispatches (or that waits behind an unclear
+//     intent or a restart fence);
+//   - I3: no permanent block: a request for the effect made now is never
+//     refused as superseded, and a narrowing intent never is at all;
+//   - I4: no deadlock: while something waits to go and no approval or
+//     check is outstanding, some dispatch, resend, retry or release still
+//     makes progress.
+//
+// Rivalry itself (rivals) is restated from the journal, not read from the
+// engine's fields.
+
+// mMode is how the model's service handles one Execute call.
+type mMode int
+
+const (
+	mOK      mMode = iota // apply, acknowledge
+	mRefuse               // do not apply, say so (not_applied)
+	mDropAck              // apply, outcome lost (unknown)
+	mTimeout              // do not apply, outcome lost (unknown)
+)
+
+var mModeName = [...]string{"ok", "refuse", "dropack", "timeout"}
+
+// mApply is one application of the effect: which attempt, by what path.
+type mApply struct {
+	id  string
+	n   int
+	via string
+}
+
+// mExec is the model's service. Its checks tell the truth for the one
+// intent a check step names, and are unclear for the rest.
+type mExec struct {
+	mu      sync.Mutex
+	next    mMode
+	via     string
+	check   string
+	applied map[string]bool
+	log     []mApply
+}
+
+func (x *mExec) Execute(_ context.Context, in Intent, n int) Outcome {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	switch x.next {
+	case mRefuse:
+		return Outcome{Result: ResultNotApplied, Evidence: "refused"}
+	case mTimeout:
+		return Outcome{Result: ResultUnknown}
+	}
+	if key := AttemptKey(in.ID, n); !x.applied[key] {
+		x.applied[key] = true
+		x.log = append(x.log, mApply{in.ID, n, x.via})
+	}
+	if x.next == mDropAck {
+		return Outcome{Result: ResultUnknown}
+	}
+	return Outcome{Result: ResultSucceeded, Evidence: "receipt"}
+}
+
+func (x *mExec) Reconcile(_ context.Context, in Intent, n int) Outcome {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if in.ID != x.check {
+		return Outcome{Result: ResultUnknown}
+	}
+	if x.applied[AttemptKey(in.ID, n)] {
+		return Outcome{Result: ResultSucceeded, Evidence: "found"}
+	}
+	return Outcome{Result: ResultNotApplied, Evidence: "not found"}
+}
+
+// mPolicy allows everything but the intents a step denies.
+type mPolicy struct {
+	mu   sync.Mutex
+	deny map[string]bool
+}
+
+func (p *mPolicy) Check(_ context.Context, _ Phase, in Intent) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.deny[in.ID] {
+		return errors.New("refused")
+	}
+	return nil
+}
+
+// mState is one node of the search: what survives between steps.
+type mState struct {
+	eng     *Engine // as the step left it; never changed after
+	facts   map[string]mFacts
+	journal []byte
+	fence   map[string][]string
+	applied map[string]bool
+	log     []mApply
+	path    []string
+}
+
+// key is the node's identity for the search: what the engine's decisions
+// and the oracle read, with sequence numbers replaced by their order, so
+// histories that differ only in what is not compared meet.
+func (s *mState) key(e *Engine) string {
+	var b strings.Builder
+	var seqs []uint64
+	ens := bySeq(e.intents)
+	for _, en := range ens {
+		for _, q := range []uint64{en.seq, en.firstDispatchSeq, en.provedSeq, en.wentSeq} {
+			if q != 0 {
+				seqs = append(seqs, q)
+			}
+		}
+	}
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+	rank := func(q uint64) int {
+		if q == 0 {
+			return -1
+		}
+		return sort.Search(len(seqs), func(i int) bool { return seqs[i] >= q })
+	}
+	for _, en := range ens {
+		fmt.Fprintf(&b, "%s:%s:%v:%d,%d,%d,%d[", en.intent.ID, en.state, en.erased,
+			rank(en.seq), rank(en.firstDispatchSeq), rank(en.provedSeq), rank(en.wentSeq))
+		for _, a := range en.attempts {
+			fmt.Fprintf(&b, "%s/%s/%v ", a.Result, a.Source, a.Parked)
+		}
+		b.WriteString("]")
+	}
+	accts := make([]string, 0, len(s.fence))
+	for a := range s.fence {
+		accts = append(accts, a)
+	}
+	sort.Strings(accts)
+	for _, a := range accts {
+		fmt.Fprintf(&b, "|f%s=%v", a, s.fence[a])
+	}
+	keys := make([]string, 0, len(s.applied))
+	for k := range s.applied {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Fprintf(&b, "|a%v|l%v", keys, s.log)
+	return b.String()
+}
+
+// mRun is a live engine restored from a node.
+type mRun struct {
+	e   *Engine
+	x   *mExec
+	pol *mPolicy
+	st  *MemStore
+}
+
+var mNow = time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
+
+// restore opens an engine on s. keepFence restores the node's restart
+// fence, which lives in memory; a restart step instead lets Open fence
+// what is unknown, as a real restart does.
+func restore(t *testing.T, s *mState, keepFence bool) *mRun {
+	t.Helper()
+	x := &mExec{applied: map[string]bool{}, log: append([]mApply(nil), s.log...)}
+	for k, v := range s.applied {
+		x.applied[k] = v
+	}
+	pol := &mPolicy{deny: map[string]bool{}}
+	execs := map[string]Executor{"svc": x}
+	if keepFence && s.eng != nil {
+		e, st := cloneEngine(t, s.eng, pol, execs)
+		return &mRun{e: e, x: x, pol: pol, st: st}
+	}
+	st := &MemStore{data: bytes.Clone(s.journal)}
+	e, err := Open(st, pol, execs, testRedact, WithClock(func() time.Time { return mNow }))
+	if err != nil {
+		t.Fatalf("%v: open: %v", s.path, err)
+	}
+	return &mRun{e: e, x: x, pol: pol, st: st}
+}
+
+// cloneEngine copies a live engine, memory state included (the restart
+// fence, which a replay would rebuild differently), so each step starts
+// from its node without replaying the journal. Only a restart step
+// replays it, through Open.
+func cloneEngine(t *testing.T, e *Engine, pol Policy, execs map[string]Executor) (*Engine, *MemStore) {
+	t.Helper()
+	if len(e.cold) > 0 || e.broken != nil || len(e.redispatching) > 0 {
+		t.Fatal("clone: evicted denials, a broken engine or a redispatch in progress")
+	}
+	st := &MemStore{data: bytes.Clone(e.store.(*MemStore).data)}
+	c := &Engine{store: st, policy: pol, redact: e.redact, execs: execs, now: e.now, seq: e.seq,
+		intents: map[string]*entry{}, open: map[string]*entry{}, byEffect: map[string][]*entry{},
+		denied: append([]string(nil), e.denied...), cold: map[coldKey]coldVal{}, shapeIx: map[coldShape]uint32{},
+		stopped: e.stopped, fence: map[string]map[string]bool{}, missed: e.missed, checks: map[string]int{},
+		redispatching: map[string]bool{}, newest: e.newest}
+	cp := map[*entry]*entry{}
+	for id, en := range e.intents {
+		n := *en
+		n.attempts = make([]Attempt, len(en.attempts))
+		for i, a := range en.attempts {
+			a.Cancels = append([]Cancel(nil), a.Cancels...)
+			n.attempts[i] = a
+		}
+		c.intents[id], cp[en] = &n, &n
+	}
+	for id, en := range e.open {
+		c.open[id] = cp[en]
+	}
+	for k, b := range e.byEffect {
+		for _, en := range b {
+			c.byEffect[k] = append(c.byEffect[k], cp[en])
+		}
+	}
+	for a, ids := range e.fence {
+		c.fence[a] = map[string]bool{}
+		for id, v := range ids {
+			c.fence[a][id] = v
+		}
+	}
+	return c, st
+}
+
+func (r *mRun) snapshot(path []string) *mState {
+	s := &mState{eng: r.e, journal: bytes.Clone(r.st.data), fence: map[string][]string{}, applied: map[string]bool{},
+		log: append([]mApply(nil), r.x.log...), path: path}
+	for a, ids := range r.e.fence {
+		for id := range ids {
+			s.fence[a] = append(s.fence[a], id)
+		}
+		sort.Strings(s.fence[a])
+		if len(s.fence[a]) == 0 {
+			delete(s.fence, a)
+		}
+	}
+	for k, v := range r.x.applied {
+		s.applied[k] = v
+	}
+	return s
+}
+
+// mStep is one transition: its name and what it does to a run.
+type mStep struct {
+	name string
+	do   func(*mRun) error
+	// restart: Open fences what is unknown, rather than keeping the
+	// node's fence.
+	restart bool
+}
+
+// mModel is one search configuration.
+type mModel struct {
+	ids    []string
+	narrow bool
+	depth  int
+}
+
+func (m *mModel) intent(id string) Intent {
+	in := intent(id, "mail")
+	if m.narrow {
+		in.Account, in.Action, in.Params, in.Recipients, in.Visibility = BrokerAccount, ActionGrantPause, nil, nil, ""
+	}
+	return in
+}
+
+// steps lists the transitions enabled at a node.
+func (m *mModel) steps(e *Engine) []mStep {
+	var out []mStep
+	add := func(name string, f func(*mRun) error) { out = append(out, mStep{name: name, do: f}) }
+	for i, id := range m.ids {
+		id := id
+		en := e.intents[id]
+		if en == nil {
+			if i == 0 || e.intents[m.ids[i-1]] != nil {
+				in := m.intent(id)
+				add("submit "+id, func(r *mRun) error { _, err := r.e.Submit(in); return err })
+			}
+			continue
+		}
+		modes := func(name string, ms []mMode, via string, f func(*mRun) error) {
+			for _, md := range ms {
+				md := md
+				add(name+" "+id+" "+mModeName[md], func(r *mRun) error { r.x.next, r.x.via = md, via; return f(r) })
+			}
+		}
+		all := []mMode{mOK, mRefuse, mDropAck, mTimeout}
+		switch en.state {
+		case Pending:
+			add("approve "+id, func(r *mRun) error { _, err := r.e.Authorize(ctx, id); return err })
+			add("deny "+id, func(r *mRun) error {
+				r.pol.deny[id] = true
+				_, err := r.e.Authorize(ctx, id)
+				return err
+			})
+		case Authorized, NotApplied:
+			modes("dispatch", all, "dispatch", func(r *mRun) error { _, err := r.e.Dispatch(ctx, id); return err })
+		}
+		if en.state == OutcomeUnknown || en.unclear() != 0 {
+			n := en.latest().N
+			// A check tells the truth; if the attempt did not apply, the
+			// engine's resend is allowed (and goes or is unclear) or
+			// refused by the recheck (as after a restart).
+			check := func(md mMode, refuse bool) func(*mRun) error {
+				return func(r *mRun) error {
+					r.x.check, r.x.next, r.x.via = id, md, "redispatch"
+					r.pol.deny[id] = refuse
+					r.e.Reconcile(ctx)
+					r.e.checks = map[string]int{}
+					return nil
+				}
+			}
+			add("check "+id+" resend-refused", check(mOK, true))
+			add("check "+id+" resend-ok", check(mOK, false))
+			add("check "+id+" resend-unclear", check(mTimeout, false))
+			if en.state == OutcomeUnknown && !en.parked() {
+				add("park "+id, func(r *mRun) error { r.e.park(id, n, true); return nil })
+			}
+			if en.retryable() {
+				modes("retry", all, "retry", func(r *mRun) error { _, err := r.e.Retry(ctx, id, n); return err })
+			}
+		}
+		if en.notDone() {
+			n := en.latest().N
+			modes("resend", []mMode{mOK, mRefuse, mTimeout}, "resend",
+				func(r *mRun) error { _, err := r.e.Resend(ctx, id, n); return err })
+		}
+		if !en.erased && en.state != InFlight && en.state != OutcomeUnknown {
+			add("erase "+id, func(r *mRun) error { _, _, err := r.e.Erase([]string{id}); return err })
+		}
+	}
+	for _, md := range []mMode{mOK, mTimeout} {
+		md := md
+		add("release "+mModeName[md], func(r *mRun) error {
+			r.x.next, r.x.via = md, "release"
+			r.e.Release(ctx, r.e.Dispatch)
+			return nil
+		})
+	}
+	out = append(out, mStep{name: "restart", do: func(*mRun) error { return nil }, restart: true})
+	return out
+}
+
+// run searches breadth first from the empty journal and returns how many
+// distinct states it reached.
+func (m *mModel) run(t *testing.T) int {
+	t.Helper()
+	start := &mState{fence: map[string][]string{}, applied: map[string]bool{}}
+	seen := map[string]bool{start.key(restore(t, start, true).e): true}
+	level := []*mState{start}
+	for d := 0; d < m.depth && len(level) > 0; d++ {
+		var next []*mState
+		for _, s := range level {
+			r := restore(t, s, true)
+			for _, st := range m.steps(r.e) {
+				path := append(append([]string(nil), s.path...), st.name)
+				var r2 *mRun
+				if st.restart {
+					r2 = restore(t, s, false)
+				} else {
+					r2 = restore(t, s, true)
+				}
+				err := st.do(r2)
+				var se *SupersededError
+				if m.narrow && errors.As(err, &se) {
+					t.Fatalf("I3: %v: a narrowing intent was refused as superseded: %v", path, err)
+				}
+				ns := r2.snapshot(path)
+				// I1's dispatch rule is a property of the step, so it is
+				// checked on every step, also one that meets a seen node.
+				m.follow(t, s, ns)
+				k := ns.key(r2.e)
+				if seen[k] {
+					continue
+				}
+				seen[k] = true
+				m.check(t, r2, ns)
+				next = append(next, ns)
+			}
+		}
+		level = next
+	}
+	return len(seen)
+}
+
+// mFacts is what the journal says of one intent, restated for the oracle.
+type mFacts struct {
+	seq, firstDispatch, went uint64
+	proved                   bool
+}
+
+// rivalsOracle: some intent z was proved not applied, and each of a and b
+// is z or was requested after z was first dispatched.
+func rivalsOracle(f map[string]mFacts, a, b string) bool {
+	for zid, z := range f {
+		if !z.proved || z.firstDispatch == 0 {
+			continue
+		}
+		ok := func(x string) bool { return x == zid || f[x].seq > z.firstDispatch }
+		if ok(a) && ok(b) {
+			return true
+		}
+	}
+	return false
+}
+
+// unclearOracle reports an intent with an attempt that may still take
+// effect: in flight or unknown, and the intent neither went nor was
+// dropped by the owner.
+func unclearOracle(en *entry) bool {
+	if en.state == Succeeded || en.state == Denied {
+		return false
+	}
+	for _, a := range en.attempts {
+		if a.Result == ResultUnknown || a.Result == ResultInFlight {
+			return true
+		}
+	}
+	return false
+}
+
+// follow reads the step's records into s.facts, what the journal says of
+// each intent for the oracle, and checks I1's dispatch rule on them: no
+// attempt starts while another intent with the effect may still take
+// effect.
+func (m *mModel) follow(t *testing.T, parent, s *mState) {
+	t.Helper()
+	// Only the step's own records are new; replay them on a copy of the
+	// node's intents. An erase rewrote the journal: replay it all.
+	shadow := map[string]*entry{}
+	s.facts = map[string]mFacts{}
+	data := s.journal
+	if parent.eng != nil && bytes.HasPrefix(s.journal, parent.journal) {
+		c, _ := cloneEngine(t, parent.eng, nil, nil)
+		shadow, data = c.intents, s.journal[len(parent.journal):]
+		for id, f := range parent.facts {
+			s.facts[id] = f
+		}
+	}
+	var recs []Record
+	for _, line := range bytes.Split(bytes.TrimSuffix(data, []byte("\n")), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		rec, err := decodeLine(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs = append(recs, rec)
+	}
+	for _, rec := range recs {
+		f := s.facts[rec.ID]
+		switch rec.Type {
+		case RecSubmitted:
+			f.seq = rec.Seq
+		case RecDispatched:
+			if f.firstDispatch == 0 {
+				f.firstDispatch = rec.Seq
+			}
+		case RecObserved:
+			f.proved = f.proved || rec.Result == ResultNotApplied
+			if rec.Result == ResultSucceeded && f.went == 0 {
+				f.went = rec.Seq
+			}
+		}
+		if rec.ID != "" {
+			s.facts[rec.ID] = f
+		}
+		if rec.Type == RecSubmitted {
+			shadow[rec.ID] = newEntry(rec)
+			continue
+		}
+		en := shadow[rec.ID]
+		if en == nil {
+			continue
+		}
+		if rec.Type == RecDispatched && rec.Source != DispatchKey {
+			for id, o := range shadow {
+				if id == rec.ID || !unclearOracle(o) {
+					continue
+				}
+				t.Fatalf("I1: %v: %s started attempt %d while %s was %s", s.path, rec.ID, rec.Attempt, id, o.state)
+			}
+		}
+		en.apply(rec)
+	}
+}
+
+func (m *mModel) check(t *testing.T, r *mRun, s *mState) {
+	t.Helper()
+	e := r.e
+	fail := func(inv, format string, args ...any) {
+		t.Helper()
+		t.Fatalf("%s: %v: %s", inv, s.path, fmt.Sprintf(format, args...))
+	}
+	f := s.facts
+
+	// I1, effect level.
+	if !m.narrow {
+		for i, p := range s.log {
+			for _, q := range s.log[i+1:] {
+				if p.id == q.id {
+					if q.via != "retry" {
+						fail("I1", "%s applied twice (attempts %d and %d, the second by %s)", p.id, p.n, q.n, q.via)
+					}
+					continue
+				}
+				known := f[p.id].went
+				if rivalsOracle(f, p.id, q.id) && (known == 0 || f[q.id].seq < known) {
+					fail("I1", "rivals %s and %s both applied; %s was requested before %s was known to have gone", p.id, q.id, q.id, p.id)
+				}
+			}
+		}
+	}
+	// I2.
+	listed := map[string]bool{}
+	for _, p := range append(e.NotResent(), e.Parked()...) {
+		listed[p.Intent.ID] = true
+	}
+	for _, id := range m.ids {
+		en := e.intents[id]
+		if en == nil || !en.notDone() || en.erased || listed[id] {
+			continue
+		}
+		o := e.sameEffect(en)
+		switch {
+		case o == nil:
+			fail("I2", "%s was proved not done and is neither offered nor held back", id)
+		case o.wentSeq != 0 && en.seq < o.wentSeq, o.state == Pending, o.state == InFlight, o.state == OutcomeUnknown:
+		case o.state == Authorized:
+			fr := restore(t, s, true)
+			fr.x.next, fr.x.via = mOK, "release"
+			fr.e.Release(ctx, fr.e.Dispatch)
+			o2 := fr.e.intents[o.intent.ID]
+			if o2.state == Authorized && fr.e.duplicateOf(o2) == "" && len(fr.e.fence[o2.intent.Account]) == 0 {
+				fail("I2", "%s was proved not done and is hidden behind %s, which nothing dispatches", id, o.intent.ID)
+			}
+		default:
+			fail("I2", "%s is hidden behind %s, which is %s", id, o.intent.ID, o.state)
+		}
+	}
+
+	// I3: a request made now is never refused as superseded; a narrowing
+	// intent never is.
+	if m.narrow {
+		for _, en := range e.intents {
+			if o := e.sameEffect(en); o != nil {
+				fail("I3", "narrowing %s is held back by %s", en.intent.ID, o.intent.ID)
+			}
+		}
+	}
+	if len(e.intents) > 0 {
+		fr := restore(t, s, true)
+		fr.x.next, fr.x.via = mOK, "probe"
+		in := m.intent("p")
+		must(fr.e.Submit(in))
+		must(fr.e.Authorize(ctx, "p"))
+		st, err := fr.e.Dispatch(ctx, "p")
+		var se *SupersededError
+		if errors.As(err, &se) || st.State == Denied {
+			fail("I3", "a request made now is refused: %+v %v", st.State, err)
+		}
+	}
+
+	// I4.
+	var waiting []*entry
+	for _, id := range m.ids {
+		en := e.intents[id]
+		if en == nil {
+			continue
+		}
+		if en.state == Pending || (en.state == OutcomeUnknown && !en.parked()) {
+			return // an approval or the parking of a check is still to come
+		}
+		if en.state != Authorized && en.state != NotApplied && !en.retryable() {
+			continue
+		}
+		if o := e.sameEffect(en); o != nil && o.wentSeq != 0 && en.seq < o.wentSeq {
+			continue // the effect went; this one is answered
+		}
+		waiting = append(waiting, en)
+	}
+	if len(waiting) == 0 {
+		return
+	}
+	try := func(f func(*mRun)) bool {
+		fr := restore(t, s, true)
+		fr.x.next, fr.x.via = mOK, "progress"
+		before := len(fr.st.data)
+		f(fr)
+		return len(fr.st.data) != before
+	}
+	if try(func(fr *mRun) { fr.e.Release(ctx, fr.e.Dispatch) }) {
+		return
+	}
+	for _, en := range waiting {
+		id, n := en.intent.ID, en.latest()
+		if (en.state == Authorized || en.state == NotApplied) && try(func(fr *mRun) { _, _ = fr.e.Dispatch(ctx, id) }) {
+			return
+		}
+		if en.notDone() && try(func(fr *mRun) { _, _ = fr.e.Resend(ctx, id, n.N) }) {
+			return
+		}
+		if en.retryable() && try(func(fr *mRun) { _, _ = fr.e.Retry(ctx, id, n.N) }) {
+			return
+		}
+	}
+	var ids []string
+	for _, en := range waiting {
+		ids = append(ids, en.intent.ID+"="+string(en.state))
+	}
+	fail("I4", "deadlock: %v wait and nothing can go", ids)
+}
+
+// TestOP2SameEffectModel runs the search for an effect that widens
+// authority, with two and with three intents, and for one that only
+// narrows it. The depths keep it to a few seconds.
+func TestOP2SameEffectModel(t *testing.T) {
+	for _, m := range []mModel{
+		{ids: []string{"a", "b"}, depth: 8},
+		{ids: []string{"a", "b", "c"}, depth: 7},
+		{ids: []string{"a", "b"}, narrow: true, depth: 8},
+	} {
+		m := m
+		name := fmt.Sprintf("%d intents, narrowing %v, depth %d", len(m.ids), m.narrow, m.depth)
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			start := time.Now()
+			n := m.run(t)
+			t.Logf("%d states in %v", n, time.Since(start))
+		})
+	}
+}

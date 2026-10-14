@@ -1,6 +1,7 @@
 package grants
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -121,9 +122,10 @@ func TestOP2NotDoneSendIsNotResentWhileAResubmissionWaits(t *testing.T) {
 }
 
 // The other order: the owner's RETRY of s1 goes before the agent
-// resubmits. The resubmission, approved by the owner, is refused at
-// dispatch and denied with fixed text for the agent.
-func TestOP2ResubmittedSendIsRefusedOnceTheOriginalWasResent(t *testing.T) {
+// resubmits. A request made after s1 went is a new send (journal A19, B8):
+// the owner is asked about it as any send and, approved, it goes. Only a
+// request made before s1 went is refused.
+func TestOP2SendRequestedAfterTheResendWentIsANewSend(t *testing.T) {
 	ctx := context.Background()
 	r := killedSend(t, true)
 	ns := r.eng.NotResent()
@@ -133,11 +135,8 @@ func TestOP2ResubmittedSendIsRefusedOnceTheOriginalWasResent(t *testing.T) {
 	}
 	req := resubmit(t, r, "agent/s2", invoice1042(), "sam@example.com")
 	r.g.Decide(owner.Decision{Request: req, Item: 1, Ref: "agent/s2", Approved: true, Why: "owner"})
-	waitFor(t, r, "agent/s2", journal.Denied)
-	if st := r.state("agent/s2"); st.Permission.GuestReason == "" || strings.Contains(st.Permission.GuestReason, "agent/") {
-		t.Fatalf("s2 guest text %q", st.Permission.GuestReason)
-	}
-	if r.exec.runs("agent/s1") != 1 || r.exec.runs("agent/s2") != 0 {
+	waitFor(t, r, "agent/s2", journal.Succeeded)
+	if r.exec.runs("agent/s1") != 1 || r.exec.runs("agent/s2") != 1 {
 		t.Fatalf("invoice 1042 sent: s1 %d, s2 %d", r.exec.runs("agent/s1"), r.exec.runs("agent/s2"))
 	}
 }
@@ -154,6 +153,9 @@ func TestOP2RepeatedRequestForANotDoneSendIsRefusedAfterItsResubmissionWent(t *t
 	var se *journal.SupersededError
 	if !errors.As(err, &se) || se.By != "agent/s2" || st.State != journal.Denied {
 		t.Fatalf("repeat of s1: %+v %v", st, err)
+	}
+	if g := st.Permission.GuestReason; g == "" || strings.Contains(g, "agent/") {
+		t.Fatalf("s1 guest text %q", g)
 	}
 	if r.exec.runs("agent/s1") != 0 || r.exec.runs("agent/s2") != 1 {
 		t.Fatalf("invoice 1042 sent: s1 %d, s2 %d", r.exec.runs("agent/s1"), r.exec.runs("agent/s2"))
@@ -279,5 +281,88 @@ func TestOP2NearResubmissionKeyWithoutAVerifier(t *testing.T) {
 	rec, to := r.g.sendKey(context.Background(), in)
 	if rec != "inv-1042" || len(to) != 1 || to[0] != "sam@example.com" {
 		t.Fatalf("key %q %q", rec, to)
+	}
+}
+
+// R9b: a near resubmission that is still waiting for approval, not only
+// one that went, makes the RETRY line warn "may go twice": the owner
+// could otherwise approve both. The verifier reads the same record from
+// a param spelled another way, which the comparison must follow.
+func TestOP2RetryLineWarnsOfAWaitingNearResubmission(t *testing.T) {
+	ctx := context.Background()
+	r := killedSend(t, true)
+	r.ver.set("INV-1042", sam())
+	ns := r.eng.NotResent()
+	if len(ns) != 1 {
+		t.Fatalf("not resent %+v", ns)
+	}
+	if l := r.g.RetryItem(ctx, ns[0], "an email"); !l.Shown.Retried.IsZero() {
+		t.Fatalf("warned with no other send: %+v", l.Shown)
+	}
+	resubmit(t, r, "agent/s2", map[string]any{"record": "INV-1042", "template": "invoice"}, "sam@example.com")
+	if st := r.state("agent/s2"); st.State != journal.Pending {
+		t.Fatalf("s2: %+v", st)
+	}
+	l := r.g.RetryItem(ctx, ns[0], "an email")
+	if !l.Shown.Retried.Equal(ns[0].Dispatched) || l.Shown.Facts.Kind != owner.MoneyRetry {
+		t.Fatalf("waiting near resubmission not warned: %+v", l.Shown)
+	}
+	// Another record is not a near resubmission.
+	r2 := killedSend(t, true)
+	r2.ver.set("inv-77", Verified{Record: "inv-77", Recipients: []string{"sam@example.com"}})
+	resubmit(t, r2, "agent/s3", map[string]any{"record": "inv-77", "template": "invoice"}, "sam@example.com")
+	ns = r2.eng.NotResent()
+	if l := r2.g.RetryItem(ctx, ns[0], "an email"); !l.Shown.Retried.IsZero() {
+		t.Fatalf("warned of another record: %+v", l.Shown)
+	}
+}
+
+// B8 at the gate: an owner PAUSE cut off by a restart is proved not done
+// by the check and sent again. Pauses and revokes only take authority
+// away (ADP-9), so later ones, of any grant, are never refused as the
+// same effect.
+func TestOP2PauseAfterARestartedPauseStillWorks(t *testing.T) {
+	r := newRig(t, nil)
+	r.grant(mailGrant())
+	var rules []string
+	for i := 0; i < 4; i++ {
+		rules = append(rules, r.grant(Spec{Account: "mail", Rule: &Rule{Action: "invoice.send", AmountCap: 15000, PerRecord: 5 + i, PerDay: 50}}))
+	}
+	if got := r.g.Narrow("PAUSE", rules[0]); !strings.HasPrefix(got, "Paused") {
+		t.Fatal(got)
+	}
+	// The kill: the journal as it was after the pause's dispatched record.
+	data, err := r.store.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	cut := -1
+	for i, l := range lines {
+		if bytes.Contains(l, []byte(`"dispatched"`)) && bytes.Contains(l, []byte("owner/pause/")) {
+			cut = i
+		}
+	}
+	if cut < 0 {
+		t.Fatalf("no dispatched pause in %s", data)
+	}
+	r.store = &journal.MemStore{}
+	if err := r.store.Rewrite(bytes.Join(lines[:cut+1], nil)); err != nil {
+		t.Fatal(err)
+	}
+	r.open()
+	r.eng.Reconcile(context.Background())
+	for _, g := range rules[1:] {
+		if got := r.g.Narrow("PAUSE", g); !strings.HasPrefix(got, "Paused") {
+			t.Fatalf("PAUSE %s: %q", g, got)
+		}
+	}
+	for _, g := range rules[1:3] {
+		if got := r.g.Narrow("REVOKE", g); !strings.HasPrefix(got, "Revoked") {
+			t.Fatalf("REVOKE %s: %q", g, got)
+		}
+	}
+	if got := r.g.Narrow("PAUSE", rules[3]); !strings.HasPrefix(got, "Paused") {
+		t.Fatalf("second PAUSE of %s: %q", rules[3], got)
 	}
 }

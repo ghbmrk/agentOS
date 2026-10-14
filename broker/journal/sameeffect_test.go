@@ -84,10 +84,12 @@ func TestOP2NotDoneIsOfferedAgainWhenTheResubmissionIsDenied(t *testing.T) {
 	once(t, svc, 1, 0)
 }
 
-// B7, the other order: the owner's RETRY of a goes first. A resubmission
-// made after that is refused at dispatch and denied, with fixed text for
-// the guest, also after a restart: the effect happens once.
-func TestOP2ResubmissionIsRefusedOnceTheOriginalWasResent(t *testing.T) {
+// B7, the other order: the owner's RETRY of a goes first. A request made
+// after that went is a new send (B8, P6): a succeeded rival holds back
+// only requests made before it went, so it goes, also after a restart.
+// One made before it went cannot go (the narrow window, below), and one
+// made while a waited is refused instead of a (the first order, above).
+func TestOP2RequestMadeAfterTheResendWentIsANewSend(t *testing.T) {
 	for _, reopen := range []bool{false, true} {
 		svc, st, p, e := notDoneOriginal(t)
 		if s, err := e.Resend(ctx, "a", 1); err != nil || s.State != Succeeded {
@@ -98,12 +100,10 @@ func TestOP2ResubmissionIsRefusedOnceTheOriginalWasResent(t *testing.T) {
 		if reopen {
 			e = mustOpen(t, st, p, svc)
 		}
-		s, err := e.Dispatch(ctx, "b")
-		refusedAs(t, err, "b", "a")
-		if s.State != Denied || s.Permission.GuestReason != supersededGuest {
-			t.Fatalf("b: %+v", s)
+		if s, err := e.Dispatch(ctx, "b"); err != nil || s.State != Succeeded {
+			t.Fatalf("b: %+v %v", s, err)
 		}
-		once(t, svc, 1, 0)
+		once(t, svc, 1, 1)
 	}
 }
 
@@ -304,9 +304,12 @@ func TestOP2OfTwoResubmissionsTheFirstDispatchedGoes(t *testing.T) {
 	}
 }
 
-// The owner's RETRY of a parked resubmission (Retry) passes the same
-// check: another resubmission waiting for approval holds it back.
-func TestOP2RetryOfAParkedResubmissionWaitsForAnother(t *testing.T) {
+// R11: the owner's RETRY of a parked resubmission b is not held back by
+// another resubmission c that waits for approval: c is itself held behind
+// b while b's outcome is unknown, so refusing the retry would leave both
+// waiting for each other. The retry goes; c, made before b went, is then
+// refused and denied, and the effect goes once.
+func TestOP2RetryOfAParkedResubmissionGoesBeforeAWaitingOne(t *testing.T) {
 	svc, _, _, e := notDoneOriginal(t)
 	svc.mu.Lock()
 	svc.mode = func(key string) execMode {
@@ -329,11 +332,21 @@ func TestOP2RetryOfAParkedResubmissionWaitsForAnother(t *testing.T) {
 		t.Fatalf("parked %+v", ps)
 	}
 	must(e.Submit(mailSend("c")))
-	before := svc.executeCount()
-	_, err := e.Retry(ctx, "b", 1)
-	refusedAs(t, err, "b", "c")
-	if svc.executeCount() != before {
-		t.Fatalf("retry ran: %v", svc.executes)
+	must(e.Authorize(ctx, "c"))
+	var held *HeldError
+	if _, err := e.Dispatch(ctx, "c"); !errors.As(err, &held) || held.BlockedBy != "b" {
+		t.Fatalf("c while b is parked: %v", err)
+	}
+	if s, err := e.Retry(ctx, "b", 1); err != nil || s.State != Succeeded {
+		t.Fatalf("retry of b: %+v %v", s, err)
+	}
+	s, err := e.Dispatch(ctx, "c")
+	refusedAs(t, err, "c", "b")
+	if s.State != Denied {
+		t.Fatalf("c: %+v", s)
+	}
+	if n := svc.effectCount("a") + svc.effectCount("b") + svc.effectCount("c"); n != 1 {
+		t.Fatalf("effect applied %d times", n)
 	}
 }
 

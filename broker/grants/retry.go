@@ -141,7 +141,8 @@ func (g *Gate) approved(id string, l RetryLine, page bool, run func(*journal.Eng
 
 // sentSince reports, for an effect a check proved was not done, another
 // send on its account and action that went or may have gone since its
-// not-done attempt was dispatched, of the same record to the same
+// not-done attempt was dispatched, or that is requested and waiting for
+// approval or dispatch (journal Queued, R9b), of the same record to the same
 // recipients: a resubmission whose params or recipients differ from p's
 // in some byte, which the engine's exact effect fingerprint does not
 // match (journal A19), so resending p may send the effect twice. Records
@@ -169,6 +170,14 @@ func (g *Gate) sentSince(ctx context.Context, p journal.ParkedIntent) bool {
 			return true
 		}
 		if r2, c2 := g.sendKey(ctx, u.Intent); r2 == rec && sameSet(c2, rcpt) {
+			return true
+		}
+	}
+	for _, q := range eng.Queued(in.Account, in.Action) {
+		if q.ID == in.ID {
+			continue
+		}
+		if r2, c2 := g.sendKey(ctx, q); r2 == rec && sameSet(c2, rcpt) {
 			return true
 		}
 	}
