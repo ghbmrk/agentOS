@@ -30,8 +30,9 @@ SCAN_MAX = 1 << 20
 # IMG-nodump: what each setting must end up as, after every file systemd reads.
 CORE_PATTERN = "|/usr/bin/false"
 NODUMP_SYSCTL = "usr/lib/sysctl.d/99-agentos-nodump.conf"
-# The services that hold the card's passphrase, the vault's keys or the claim's codes in memory.
-CARD_UNITS = ("agentosd.service", "agentos-egress.service", "agentos-localui.service")
+# The services that hold the card's passphrase, the vault's keys, the claim's codes or the setup
+# network's password in memory.
+CARD_UNITS = ("agentosd.service", "agentos-egress.service", "agentos-localui.service", "agentos-ap.service")
 # Precedence low to high: a file in a later directory replaces one of the same name in an earlier.
 CONF_DIRS = ("usr/lib", "lib", "usr/local/lib", "etc")
 UNIT_DIRS = ("usr/lib/systemd/system", "lib/systemd/system", "usr/local/lib/systemd/system",

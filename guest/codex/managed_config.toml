@@ -1,0 +1,59 @@
+# Managed config for the Codex provider worker (S8-W1, CRED-5 broker-held, CAP-11). The image
+# installs it as /etc/codex/managed_config.toml, read-only to the CLI's tools. Key names are
+# assumed, not yet measured against the pinned CLI: guest/codex/ASSUMPTIONS.md, and #809 checks
+# them. tests/test_codex_worker.py fails if any hosted tool is left on or the route is unpinned.
+# TOML puts every key after a [table] header into that table, so top-level keys come first.
+
+# The only route out: the in-worker forwarder (#1014), which relays to the egress socket, where
+# the proxy swaps the placeholder login for the owner's. The refresh URL override is in launch.json.
+model_provider = "agentos"
+
+# Hosted tools off: tools OpenAI runs on its side when the request asks for them ride inside the
+# one declared responses request, so the endpoint list cannot stop them. #1014's request-body
+# check is the enforcement; this keeps a correct CLI from tripping it. No MCP servers.
+web_search = "disabled"
+
+# No update checks (CAP-11: versions change only through image updates).
+check_for_update_on_startup = false
+
+# Headless; tools write only the workspace and have no network. agentos-toolsh is the boundary
+# that hides the forwarder's port, the socket directory and CODEX_HOME; these settings keep the
+# CLI's own sandbox consistent with it.
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[model_providers.agentos]
+name = "agentOS forwarder"
+base_url = "http://127.0.0.1:18432/backend-api/codex"
+wire_api = "responses"
+requires_openai_auth = true
+
+[tools]
+web_search = false
+
+[features]
+web_search_request = false
+web_search_cached = false
+image_generation = false
+
+# No telemetry, feedback upload or saved history.
+[analytics]
+enabled = false
+
+[feedback]
+enabled = false
+
+[otel]
+exporter = "none"
+
+[history]
+persistence = "none"
+
+[sandbox_workspace_write]
+network_access = false
+writable_roots = []
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
+
+[shell_environment_policy]
+inherit = "none"
