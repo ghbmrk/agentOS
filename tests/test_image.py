@@ -196,9 +196,9 @@ class TreeCheckTest(unittest.TestCase):
         base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
         write(self.root, UPLINK_REL, base.replace("DHCP=yes\n", "DHCP=yes\n    IPMasquerade=both\n"))
         self.assertIn("IPMasquerade is both", " ".join(check.violations(self.root)))
-        # A trailing backslash does continue a line, up to the end of the file.
+        # A trailing backslash continues a line in systemd; the check refuses any (#1496).
         write(self.root, UPLINK_REL, base + "\n[Network]\nIPForward=\\\nyes")
-        self.assertIn("IPForward is yes", " ".join(check.violations(self.root)))
+        self.assertIn("ends in a backslash", " ".join(check.violations(self.root)))
         # A comment is never an assignment.
         write(self.root, UPLINK_REL, base + "\n[Network]\n# IPForward=yes\n; IPMasquerade=both\n")
         self.assertEqual(check.violations(self.root), [])
@@ -219,8 +219,9 @@ class TreeCheckTest(unittest.TestCase):
             with self.subTest(line):
                 write(self.root, UPLINK_REL, base + "\n[%s]\n%s\n" % (section, line))
                 self.assertIn(line.split("=")[0], " ".join(check.violations(self.root)))
+        # #1496: the uplink holds the shipped keys only, so even a key set to no is refused.
         write(self.root, UPLINK_REL, base + "\n[Network]\nEmitLLDP=no\nIPv6SendRA=no\n")
-        self.assertEqual(check.violations(self.root), [])
+        self.assertIn("EmitLLDP is no; not a key the image ships", " ".join(check.violations(self.root)))
 
     # REQ: DEV-2, CH-9
     def test_each_privacy_setting_is_required(self):
@@ -237,6 +238,88 @@ class TreeCheckTest(unittest.TestCase):
                 with self.subTest(section=section, new=new):
                     write(self.root, UPLINK_REL, base.replace(old, new))
                     self.assertIn("%s %s is" % (section, key), " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2, CH-9
+    def test_uplink_holds_exactly_the_shipped_keys(self):
+        # #1496: a denylist misses old spellings, generic options and list keys, each of which
+        # networkd honours. The uplink must hold the shipped (section, key) set, each key once with
+        # its shipped value.
+        base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        token = "[IPv6AcceptRA]\nToken=prefixstable\n"
+        self.assertIn(token, base)
+        for name, text, want in (
+                ("ProxyARP alias", base + "\n[Network]\nProxyARP=yes\n", "[Network] ProxyARP is yes"),
+                ("IPv6PrefixDelegation alias", base + "\n[Network]\nIPv6PrefixDelegation=yes\n",
+                 "[Network] IPv6PrefixDelegation is yes"),
+                ("[DHCP] VendorClassIdentifier", base + "\n[DHCP]\nVendorClassIdentifier=agentos\n",
+                 "[DHCP] VendorClassIdentifier is agentos"),
+                ("[DHCP] UserClass", base + "\n[DHCP]\nUserClass=agentos\n", "[DHCP] UserClass is agentos"),
+                ("DHCPv4 SendOption", base + "\n[DHCPv4]\nSendOption=12:string:agentos\n", "[DHCPv4] SendOption is"),
+                ("DHCPv4 SendVendorOption", base + "\n[DHCPv4]\nSendVendorOption=60:string:agentos\n",
+                 "[DHCPv4] SendVendorOption is"),
+                ("DHCPv6 SendOption", base + "\n[DHCPv6]\nSendOption=16:string:agentos\n", "[DHCPv6] SendOption is"),
+                ("DHCPv6 SendVendorOption", base + "\n[DHCPv6]\nSendVendorOption=1:2:string:agentos\n",
+                 "[DHCPv6] SendVendorOption is"),
+                ("eui64 Token before prefixstable",
+                 base.replace(token, "[IPv6AcceptRA]\nToken=eui64\nToken=prefixstable\n"),
+                 "[IPv6AcceptRA] Token is set 2 times"),
+                ("IPv6Token", base + "\n[Network]\nIPv6Token=eui64\n", "[Network] IPv6Token is eui64"),
+                ("same key, same value, twice", base + "\n[DHCPv4]\nSendHostname=no\n",
+                 "[DHCPv4] SendHostname is set 2 times"),
+                ("unknown section", base + "\n[X-Agentos]\nNote=1\n", "[X-Agentos] Note is 1"),
+                ("changed match", base.replace("Kind=!*\n", "Kind=!veth\n"), "[Match] Kind is !veth; must be !*"),
+                ("line with no =", base + "\n[Network]\nIPMasquerade\n", "neither a section nor an assignment"),
+                ("assignment before any section", "IPMasquerade=both\n" + base, "neither a section nor an assignment"),
+                ("bad section header", base + "\n[Network\nIPMasquerade=both\n", "neither a section nor an assignment")):
+            with self.subTest(name):
+                write(self.root, UPLINK_REL, text)
+                self.assertIn(want, " ".join(check.violations(self.root)))
+        # The shipped file with its comments and blank lines changed still passes.
+        write(self.root, UPLINK_REL, "\n".join(ln for ln in base.splitlines() if not ln.startswith("#")) + "\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: DEV-2, CH-9
+    def test_bytes_systemd_reads_differently_are_refused(self):
+        # #1496: where this check's parser and networkd's or resolved's can split or join lines
+        # differently, a following line could hide from the check. Each case hides IPMasquerade=both.
+        hide = "IPMasquerade=both\n"
+        base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        cases = (("backslash then space", "[Network]\nDHCP=yes\\ \n" + hide, "ends in a backslash"),
+                 ("double backslash", "[Network]\nDHCP=yes\\\\\n" + hide, "ends in a backslash"),
+                 ("backslash on a comment", "[Network]\n# note \\\n" + hide, "ends in a backslash"),
+                 ("NUL", "[Network]\nDHCP=yes\x00" + hide, "control"),
+                 ("file separator", "[Network]\nDHCP=yes\x1c" + hide, "control"),
+                 ("vertical tab", "[Network]\nDHCP=yes\x0b" + hide, "control"),
+                 ("form feed", "[Network]\nDHCP=yes\x0c" + hide, "control"),
+                 ("carriage return", "[Network]\nDHCP=yes\r" + hide, "control"),
+                 ("tab", "[Network]\n\tDHCP=yes\n", "control"),
+                 ("DEL", "[Network]\n# \x7f\n", "control"),
+                 ("non-ASCII", "[Network]\n# caf\u00e9\n", "non-ASCII"),
+                 ("next line", "[Network]\nDHCP=yes\u0085" + hide, "non-ASCII"))
+        for name, tail, want in cases:
+            with self.subTest(name, file="uplink"):
+                write(self.root, UPLINK_REL, base + "\n" + tail)
+                self.assertIn("%s: line" % check.UPLINK, " ".join(check.violations(self.root)))
+                self.assertIn(want, " ".join(check.violations(self.root)))
+        with self.subTest("BOM", file="uplink"):
+            write(self.root, UPLINK_REL, "\ufeff" + base)
+            self.assertIn("line 1: control, NUL, BOM or non-ASCII byte", " ".join(check.violations(self.root)))
+        write(self.root, UPLINK_REL, base)
+        # resolved.conf and networkd.conf files too: their LLMNR, multicast DNS and forwarding keys
+        # are checked through the same parser.
+        rbase = (MK / "mkosi.extra" / RESOLVED_REL).read_text()
+        for rel, text in ((RESOLVED_REL, "\ufeff" + rbase), (RESOLVED_REL, rbase + "# x\\\nLLMNR=yes\n"),
+                          ("etc/systemd/resolved.conf", "[Resolve]\nDNS=192.0.2.1\x0b\n"),
+                          ("etc/systemd/networkd.conf", "[Network]\nSpeedMeter=no\x00\n"),
+                          ("etc/systemd/networkd.conf.d/50-x.conf", "[Network]\nSpeedMeter=no \\ \n")):
+            with self.subTest(rel=rel, text=text):
+                f = write(self.root, rel, text)
+                self.assertIn("%s: line" % f.name, " ".join(check.violations(self.root)))
+                if rel == RESOLVED_REL:
+                    write(self.root, rel, rbase)
+                else:
+                    f.unlink()
+        self.assertEqual(check.violations(self.root), [])
 
     # REQ: DEV-2, CH-9
     def test_network_links_are_live_unless_to_dev_null(self):
@@ -264,13 +347,25 @@ class TreeCheckTest(unittest.TestCase):
         for line in ("net.ipv4.ip_forward = 1", "net.ipv4.conf.eth0.forwarding=1", "net/ipv4/conf/all/forwarding=1",
                      "net.ipv4.conf.*.forwarding = 1", "-net.ipv6.conf.all.forwarding = 1",
                      "net.ipv6.conf.default.forwarding=1", "net.ipv6.conf.eth0.force_forwarding=1",
-                     "net.ipv4.conf.e*.forwarding=1"):
+                     "net.ipv4.conf.e*.forwarding=1",
+                     # #1497: systemd-sysctl expands every glob against /proc/sys, so any glob key
+                     # whose last component could be a forwarding key counts.
+                     "net.ipv*.conf.enp*.forwarding=1", "net.ipv4.conf.enp1s0.forw*=1",
+                     "net.ipv6.conf.enp1s0.force_forw?rding=1", "net.ipv4.ip_forwar[d]=1", "net.ipv4.*=1",
+                     "n?t.ipv4.ip_forward=1", "*.ipv6.conf.all.forwarding=1", "net/ipv4/conf/enp1s0.100/forw*=1",
+                     # glibc's glob negates [^x]; Python's fnmatch does not.
+                     "n[^x]t.ipv4.ip_forward=1", "net.ipv4.conf.all.forwardin[^x]=1",
+                     "net.ipv4.conf.all.forwarding = 2"):
             with self.subTest(line):
                 f = write(self.root, "etc/sysctl.d/90-x.conf", line + "\n")
                 self.assertIn("forwarding must stay 0", " ".join(check.violations(self.root)))
                 f.unlink()
         write(self.root, "usr/lib/sysctl.d/50-x.conf", "net.ipv4.ip_forward = 1\n")
         write(self.root, "etc/sysctl.d/90-x.conf", "net.ipv4.ip_forward = 0\nnet.ipv4.conf.all.forwarding=0\n")
+        self.assertEqual(check.violations(self.root), [])
+        # Globs that cannot reach a forwarding key pass, as does a forwarding glob set to 0.
+        write(self.root, "etc/sysctl.d/90-x.conf", "net.ipv4.ip_forward = 0\nnet.ipv4.conf.*.rp_filter = 2\n-net.ipv4.conf.*.promote_secondaries = 1\n"
+              "fs.protected_*=1\nkernel.*.forwarding=1\nnet.ipv*.conf.*.forw*=0\n")
         self.assertEqual(check.violations(self.root), [])
 
     # REQ: DEV-2
