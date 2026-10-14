@@ -56,6 +56,11 @@ def boot_files(entry):
             if re.match(r"(linux|initrd)\s", ln)]
 
 
+def initrd_files(entry):
+    """The ESP paths of the entry's initrd lines, without the leading slash."""
+    return [ln.split(None, 1)[1].strip().lstrip("/") for ln in entry.splitlines() if re.match(r"initrd\s", ln)]
+
+
 def esp_violations(paths, entry):
     """ESP files outside the allowlist (HW-1). paths: every file on the ESP, relative."""
     allowed = set(boot_files(entry))
@@ -105,6 +110,85 @@ def quota_violations(img, table, entry):
     if not flags or "prjquota" not in flags[-1].split(","):
         out.append("boot entry does not mount root with rootflags=prjquota")
     return out
+
+
+CPIO_MAGICS = (b"070701", b"070702")
+ZSTD, XZ, GZIP = b"\x28\xb5\x2f\xfd", b"\xfd7zXZ\x00", b"\x1f\x8b"
+
+
+def unzstd(data):
+    return subprocess.run(["zstd", "-dcq"], input=data, stdout=subprocess.PIPE, check=True).stdout
+
+
+def unxz(data):
+    import lzma
+    return lzma.decompress(data)
+
+
+def ungzip(data):
+    import gzip
+    return gzip.decompress(data)
+
+
+def cpio_names(data, decompress=None):
+    """Every path in an initrd: newc cpio archives, back to back with zero padding between them,
+    the last of which may be compressed (zstd, xz or gzip). Anything else raises ValueError, so an
+    initrd this cannot read fails the build rather than passing unchecked."""
+    decompress = decompress or {ZSTD: unzstd, XZ: unxz, GZIP: ungzip}
+    names, off = [], 0
+    while True:
+        while off < len(data) and data[off] == 0:
+            off += 1
+        if off >= len(data):
+            return names
+        for magic, fn in decompress.items():
+            if data.startswith(magic, off):
+                return names + cpio_names(fn(data[off:]), decompress)
+        if data[off:off + 6] not in CPIO_MAGICS:
+            raise ValueError("initrd: unknown data at offset %d" % off)
+        while True:
+            if off + 110 > len(data) or data[off:off + 6] not in CPIO_MAGICS:
+                raise ValueError("initrd: truncated cpio header at offset %d" % off)
+            try:
+                size, namesize = int(data[off + 54:off + 62], 16), int(data[off + 94:off + 102], 16)
+            except ValueError:
+                raise ValueError("initrd: bad cpio header at offset %d" % off)
+            end = off + 110 + namesize
+            if namesize < 1 or end > len(data):
+                raise ValueError("initrd: truncated cpio name at offset %d" % off)
+            name = data[off + 110:end - 1].decode("utf-8", "surrogateescape")
+            off = (end + 3) & ~3
+            if off + size > len(data):
+                raise ValueError("initrd: truncated cpio file %s" % name)
+            off = (off + size + 3) & ~3
+            if name == "TRAILER!!!":
+                break
+            names.append(name[2:] if name.startswith("./") else name)
+
+
+# Bluetooth must not come up in the initrd either (#1475): the image blocks btusb and btmtk with a
+# modprobe drop-in in mkosi.extra, which mkosi's default initrd does not get, and a module udev
+# loads there stays loaded after the switch to /usr. All Linux Bluetooth drivers and the stack sit
+# under drivers/bluetooth and net/bluetooth; the names also catch bluetoothd and its units, and
+# the firmware patterns the vendors' Bluetooth firmware (MediaTek, Intel, Realtek, Broadcom).
+BT_PATTERNS = (r"(?i)bluetooth", r"(^|/)bt(usb|mtk)(\.ko|$)", r"(^|/)BT_RAM_CODE", r"(^|/)rtl_bt/",
+               r"(^|/)intel/ibt-", r"(^|/)brcm/[^/]*\.hcd(\.\w+)?$")
+# systemd ships bluetooth.target, a synchronisation point that starts nothing by itself.
+BT_ALLOWED = ("usr/lib/systemd/system/bluetooth.target",)
+
+
+def bluetooth_violations(names):
+    """The initrd paths that could bring up Bluetooth: a module, firmware, daemon or unit."""
+    return sorted(n for n in names if n not in BT_ALLOWED and any(re.search(p, n) for p in BT_PATTERNS))
+
+
+def check_initrd(path, data):
+    """Exit unless the initrd at PATH lists files and none of them is Bluetooth (#1475)."""
+    names = cpio_names(data)
+    print("initrd %s: %d files, %d kernel modules" % (path, len(names), sum(".ko" in n for n in names)))
+    bad = bluetooth_violations(names) if names else ["no files"]
+    if bad:
+        sys.exit("initrd %s could bring up Bluetooth (#1475): %s" % (path, bad))
 
 
 def manifest(version, roothash, entry_name, entry_text, files, boot=None):
@@ -177,6 +261,8 @@ def main(out, version):
     for p in boot_files(text):
         data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
         boot[p] = hashlib.sha256(data_).hexdigest()
+        if p in initrd_files(text):
+            check_initrd(p, data_)
     roothash = usrhash(text)
     data, tree = out / ("agentos_%s.usr.raw" % version), out / ("agentos_%s.usr-verity.raw" % version)
     verify_usr(data, tree, roothash)
