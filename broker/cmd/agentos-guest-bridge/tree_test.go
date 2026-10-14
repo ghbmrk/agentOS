@@ -1,10 +1,11 @@
 package main
 
-// REQ: CAP-5, REV-5
+// REQ: CAP-5, REV-5, CHG-6
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -192,5 +193,50 @@ func TestBridgeReadsATreeAnswerOfTheBoundWhole(t *testing.T) {
 	v, err := syncOnce(context.Background(), c, dir, "")
 	if err != nil || len(v) != guest.MaxTreeAnswer-len(answer(0))+1 || read(t, filepath.Join(dir, "skills/a.json")) != "a" {
 		t.Fatalf("an answer of exactly the bound: version of %d bytes, %v", len(v), err)
+	}
+}
+
+// TREE-undo-invalidate (#1562, CHG-6): a mirror that fails part way has
+// already written some of B's files, so the bridge holds no version; an
+// UNDO to A is then fetched whole and removes them, not answered
+// Unchanged. B's bad path fails the write wherever map order puts it, so
+// the sequence repeats until a failure lands after a good file.
+func TestBridgeUndoAfterAPartialMirrorRestoresTheOldTree(t *testing.T) {
+	treeA := treeAnswer{Version: "vA", Files: map[string][]byte{"skills/x": []byte("a")}}
+	treeB := treeAnswer{Version: "vB", Files: map[string][]byte{"skills/x/y.json": []byte("y")}}
+	for i := 0; i < 20; i++ {
+		treeB.Files[fmt.Sprintf("skills/b%d.json", i)] = []byte("b")
+	}
+	for try := 0; ; try++ {
+		if try == 100 {
+			t.Fatal("no partial mirror in 100 tries")
+		}
+		dir := t.TempDir()
+		f := &fakeTree{ans: treeA}
+		c := f.serve(t)
+		v, err := syncOnce(context.Background(), c, dir, "")
+		if err != nil || v != "vA" {
+			t.Fatalf("A: %q %v", v, err)
+		}
+		f.mu.Lock()
+		f.ans = treeB
+		f.mu.Unlock()
+		if v, err = syncOnce(context.Background(), c, dir, v); err == nil {
+			t.Fatal("B's bad path was written")
+		}
+		ents, _ := os.ReadDir(filepath.Join(dir, "skills"))
+		if len(ents) < 2 {
+			continue // the bad path came first: nothing of B landed
+		}
+		f.mu.Lock()
+		f.ans = treeA // the owner's UNDO to A
+		f.mu.Unlock()
+		if v, err = syncOnce(context.Background(), c, dir, v); err != nil || v != "vA" {
+			t.Fatalf("UNDO: %q %v", v, err)
+		}
+		if ents, _ := os.ReadDir(filepath.Join(dir, "skills")); len(ents) != 1 || read(t, filepath.Join(dir, "skills/x")) != "a" {
+			t.Fatalf("UNDO left %d entries in skills, skills/x = %q", len(ents), read(t, filepath.Join(dir, "skills/x")))
+		}
+		return
 	}
 }

@@ -41,12 +41,13 @@ func syncTree(ctx context.Context, broker *http.Client, dir string, every time.D
 	version, last := "", ""
 	for {
 		v, err := syncOnce(ctx, broker, dir, version)
+		version = v
 		switch {
 		case err != nil && err.Error() != last:
 			last = err.Error()
 			log.Printf("managed tree: %v", err)
 		case err == nil:
-			version, last = v, ""
+			last = ""
 		}
 		t := time.NewTimer(every)
 		select {
@@ -59,7 +60,9 @@ func syncTree(ctx context.Context, broker *http.Client, dir string, every time.D
 }
 
 // syncOnce fetches the tree unless it is still version, and writes it.
-// It returns the version now held.
+// It returns the version now held, on error too: a failed mirror may have
+// written part of the new tree, so it holds no version, and the next
+// fetch, an UNDO to the old version included, is answered whole (CHG-6).
 func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
@@ -85,7 +88,7 @@ func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (st
 		return version, nil
 	}
 	if err := mirror(dir, ans.Files); err != nil {
-		return version, err
+		return "", err
 	}
 	return ans.Version, nil
 }
