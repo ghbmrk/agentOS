@@ -129,9 +129,15 @@ func TestInUseReleasesOnlyOnEvidenceOfNoEffect(t *testing.T) {
 	}
 	must(e.Resolve("u", 1, Outcome{Result: ResultNotApplied, Evidence: "no record"}, "owner"))
 	must(e.Resolve("s", 1, Outcome{Result: ResultSucceeded, Evidence: "found"}, "owner"))
-	// Resolved as an effect: charged to the window it started in, long gone.
-	if got := uses(e, c); len(got) != 0 {
+	// Resolved as an effect: charged to the window it started in, long
+	// gone, and to the one its success became known in (Use.Known,
+	// Security B11 on #1433), which ends a day after the proof.
+	if got := uses(e, c); len(got) != 1 || !got["s"] {
 		t.Fatalf("after resolving: %v", got)
+	}
+	c.advance(24*time.Hour + time.Second)
+	if got := uses(e, c); len(got) != 0 {
+		t.Fatalf("a day after resolving: %v", got)
 	}
 
 	// A retry of the not-applied attempt is charged once, as it starts.
