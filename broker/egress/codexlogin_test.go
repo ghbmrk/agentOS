@@ -404,3 +404,134 @@ func TestSwapNeedsAnAccountID(t *testing.T) {
 		}
 	}
 }
+
+func authTokens(t *testing.T, b []byte) map[string]string {
+	t.Helper()
+	var f struct{ Tokens map[string]string }
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	return f.Tokens
+}
+
+// CRED-5: a worker's placeholders stand for login fields, so they outlive a
+// refresh. The auth file the CLI already holds keeps working whether or not
+// it writes the swapped response back, and a refresh that omits the refresh
+// token leaves the old refresh placeholder resolving to the kept token.
+func TestRefreshKeepsTheWorkersPlaceholders(t *testing.T) {
+	r := newLoginRig(t)
+	old := newCanaryLogin(t)
+	r.store(t, "pw-a", old)
+	file, err := r.logins.AuthJSON("codex", "pw-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := authTokens(t, file)
+
+	fresh := newCanaryLogin(t)
+	phs, commit, err := r.logins.ForWorker("codex", "pw-a").Swap("codex", map[string]string{"access_token": fresh.access})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := commit(); err != nil {
+		t.Fatal(err)
+	}
+	if phs["access_token"] != held["access_token"] {
+		t.Fatal("the refresh handed the worker a placeholder its auth file does not hold")
+	}
+	if v, ok := r.logins.Resolve("codex", "pw-a", held["access_token"]); !ok || v != fresh.access {
+		t.Fatal("the held access placeholder does not resolve to the new access token")
+	}
+	if v, ok := r.logins.Resolve("codex", "pw-a", held["refresh_token"]); !ok || v != old.refresh {
+		t.Fatal("a refresh without a refresh token broke the held refresh placeholder")
+	}
+	if v := r.entry(t); v["refresh_token"] != old.refresh || v["access_token"] != fresh.access {
+		t.Fatal("the vault entry lost a field the refresh did not replace")
+	}
+}
+
+// A new account (a sign-in to another plan) mints a new id_token
+// placeholder: the old one names the old account.
+func TestANewAccountMintsNewPlaceholders(t *testing.T) {
+	r := newLoginRig(t)
+	r.store(t, "pw-a", newCanaryLogin(t))
+	before := authTokens(t, must(r.logins.AuthJSON("codex", "pw-a")))
+	other := newCanaryLogin(t)
+	r.store(t, "pw-a", other)
+	after := authTokens(t, must(r.logins.AuthJSON("codex", "pw-a")))
+	if after["id_token"] == before["id_token"] || after["account_id"] != other.account {
+		t.Fatal("the worker's auth file still names the old account")
+	}
+	if accountOf(after["id_token"]) != other.account {
+		t.Fatal("the id_token placeholder does not carry the new account")
+	}
+}
+
+func must(b []byte, err error) []byte {
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// Threat (power lost between the upstream answer and the vault write): a
+// swap whose commit never runs leaves the old login whole in the vault and
+// the worker's placeholders on it. The consumed refresh token then fails
+// upstream, which the route reports as a refused login (CRED-5b); nothing
+// here retries.
+func TestUncommittedRefreshLeavesTheOldLoginWhole(t *testing.T) {
+	r := newLoginRig(t)
+	old := newCanaryLogin(t)
+	held := r.store(t, "pw-a", old)
+	fresh := newCanaryLogin(t)
+	fresh.idToken, fresh.account = old.idToken, old.account
+	if _, _, err := r.logins.ForWorker("codex", "pw-a").Swap("codex", fresh.creds()); err != nil {
+		t.Fatal(err)
+	}
+	if v := r.entry(t); v["refresh_token"] != old.refresh || v["access_token"] != old.access {
+		t.Fatal("an uncommitted refresh changed the vault entry")
+	}
+	if v, ok := r.logins.Resolve("codex", "pw-a", held["refresh_token"]); !ok || v != old.refresh {
+		t.Fatal("an uncommitted refresh moved the worker's placeholder")
+	}
+	for _, s := range fresh.all() {
+		if hits := r.driveHolds(t, s); len(hits) > 0 {
+			t.Fatalf("an uncommitted refresh reached the drive: %v", hits)
+		}
+	}
+}
+
+// The seed lands where the Codex CLI reads its login: CODEX_HOME as
+// guest/codex/launch.json sets it.
+func TestSeedLandsInCodexHome(t *testing.T) {
+	r := newLoginRig(t)
+	c := newCanaryLogin(t)
+	r.store(t, "pw-a", c)
+	seed, err := r.logins.Seed("codex", "pw-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seed) != 1 || seed[CodexAuthFile] == nil {
+		t.Fatalf("seed paths = %v, want only %s", seed, CodexAuthFile)
+	}
+	for _, s := range c.all() {
+		if bytes.Contains(seed[CodexAuthFile], []byte(s)) {
+			t.Fatal("the seed holds a real value")
+		}
+	}
+	b, err := os.ReadFile("../../guest/codex/launch.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var l struct{ Env []string }
+	if err := json.Unmarshal(b, &l); err != nil {
+		t.Fatal(err)
+	}
+	want := "CODEX_HOME=/" + filepath.Dir(CodexAuthFile)
+	for _, e := range l.Env {
+		if e == want {
+			return
+		}
+	}
+	t.Fatalf("launch.json env %v lacks %s", l.Env, want)
+}

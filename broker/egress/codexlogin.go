@@ -50,8 +50,9 @@ type PlanLogins struct {
 }
 
 type workerPH struct {
-	field map[string]string // placeholder -> login field
-	byKey map[string]string // login field -> placeholder
+	account string            // the account ID the id_token placeholder carries
+	field   map[string]string // placeholder -> login field
+	byKey   map[string]string // login field -> placeholder
 }
 
 // NewPlanLogins returns the store. open yields the unlocked vault or
@@ -138,7 +139,7 @@ func placeholderIDToken(account string) string {
 }
 
 func (p *PlanLogins) mint(account string) (*workerPH, map[string]string) {
-	w := &workerPH{field: map[string]string{}, byKey: map[string]string{}}
+	w := &workerPH{account: account, field: map[string]string{}, byKey: map[string]string{}}
 	phs := map[string]string{
 		"access_token":  "agentos-ph-access-" + rnd(),
 		"refresh_token": "agentos-ph-refresh-" + rnd(),
@@ -153,7 +154,7 @@ func (p *PlanLogins) mint(account string) (*workerPH, map[string]string) {
 
 // Swap implements Swapper for one worker. It stores nothing: commit writes
 // the whole token set to the vault in one write, then installs the
-// worker's new placeholders, so the vault holds the new login before the
+// worker's placeholders, so the vault holds the new login before the
 // proxy releases the response (single-use refresh tokens, CRED-5b).
 func (s *workerSwapper) Swap(adapter string, creds map[string]string) (map[string]string, func() error, error) {
 	p := s.p
@@ -188,10 +189,20 @@ func (s *workerSwapper) Swap(adapter string, creds map[string]string) (map[strin
 	if err != nil {
 		return nil, nil, err
 	}
-	w, phs := p.mint(acct)
+	// A worker keeps its placeholders across refreshes: each one stands for
+	// a login field, not a value, so it resolves to whatever the vault
+	// holds now. A refresh that omits a field, or a CLI that fails to write
+	// the swapped response back, leaves the worker's auth file working.
+	// Only a new account mints new ones (its id_token carries the account).
+	p.mu.Lock()
+	w := p.byWorker[s.provider][s.worker]
+	p.mu.Unlock()
+	if w == nil || w.account != acct {
+		w, _ = p.mint(acct)
+	}
 	out := map[string]string{}
 	for k := range creds {
-		if ph, ok := phs[k]; ok {
+		if ph, ok := w.byKey[k]; ok {
 			out[k] = ph
 		}
 	}
@@ -223,7 +234,7 @@ func (p *PlanLogins) AuthJSON(provider, worker string) ([]byte, error) {
 		p.byWorker[provider] = map[string]*workerPH{}
 	}
 	w := p.byWorker[provider][worker]
-	if w == nil {
+	if w == nil || w.account != cur["account_id"] {
 		w, _ = p.mint(cur["account_id"])
 		p.byWorker[provider][worker] = w
 	}
@@ -237,6 +248,22 @@ func (p *PlanLogins) AuthJSON(provider, worker string) ([]byte, error) {
 		},
 		"last_refresh": time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// CodexAuthFile is where a Codex provider worker's CLI reads its login:
+// CODEX_HOME/auth.json, with CODEX_HOME /var/lib/agentos-codex
+// (guest/codex/launch.json). It is relative to the worker's root, as a vm
+// seed path is.
+const CodexAuthFile = "var/lib/agentos-codex/auth.json"
+
+// Seed returns the vm seed for a new Codex provider worker: its
+// placeholder auth file at CodexAuthFile, and nothing else.
+func (p *PlanLogins) Seed(provider, worker string) (map[string][]byte, error) {
+	b, err := p.AuthJSON(provider, worker)
+	if err != nil {
+		return nil, err
+	}
+	return map[string][]byte{CodexAuthFile: b}, nil
 }
 
 // Resolve maps a worker's own placeholder to the real value it stands for.

@@ -19,7 +19,7 @@ const placeholderAuth = `{"tokens":{"refresh_token":"agentos-ph-refresh-x"}}`
 func (e *env) providerWorker(id string) Machine {
 	e.t.Helper()
 	w, err := e.m.CreateProviderWorker(bg, id, workerSpec(Private),
-		map[string][]byte{"home/.codex/auth.json": []byte(placeholderAuth)})
+		map[string][]byte{"var/lib/agentos-codex/auth.json": []byte(placeholderAuth)})
 	must(e.t, err)
 	return w
 }
@@ -35,13 +35,13 @@ func TestProviderWorkerIsSeededWithThePlaceholderFile(t *testing.T) {
 	if w.Label != Private {
 		t.Fatalf("label = %v", w.Label)
 	}
-	if got := e.guestRead("pw-a1", "home/.codex/auth.json"); got != placeholderAuth {
+	if got := e.guestRead("pw-a1", "var/lib/agentos-codex/auth.json"); got != placeholderAuth {
 		t.Fatalf("auth.json = %q", got)
 	}
 	if svc.open["pw-a1"] {
 		t.Fatal("a provider worker got guest services")
 	}
-	r, err := e.m.Exec(bg, "pw-a1", Command{As: Private, Argv: []string{"cat", "home/.codex/auth.json"}}, time.Second)
+	r, err := e.m.Exec(bg, "pw-a1", Command{As: Private, Argv: []string{"cat", "var/lib/agentos-codex/auth.json"}}, time.Second)
 	must(t, err)
 	if !bytes.Equal(r.Stdout, []byte(placeholderAuth)) {
 		t.Fatalf("exec read %q", r.Stdout)
