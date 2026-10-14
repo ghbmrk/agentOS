@@ -101,8 +101,8 @@ var (
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
 	// errHostSlotDecided: the slot change was decided before it failed, so
 	// the PC is trusted (VAULT-slot-decided, #1557).
-	errHostSlotDecided    = uerr(http.StatusInternalServerError, "This PC is trusted, but I could not finish saving that. It finishes the next time I start; to finish it now, run trust again. Until then it may not show in the list.")
-	errHostSlotDecidedPIN = uerr(http.StatusInternalServerError, "This PC is trusted and its boot PIN is now needed at power-on, but I could not finish saving that. It finishes the next time I start; to finish it now, run trust again. Until then it may not show in the list.")
+	errHostSlotDecided    = uerr(http.StatusInternalServerError, "This PC is trusted, but I could not finish saving that. It finishes the next time I start; to finish it now, run trust again. Until then it may not show in hosts, the list of trusted PCs.")
+	errHostSlotDecidedPIN = uerr(http.StatusInternalServerError, "This PC is trusted and its boot PIN is now needed at power-on, but I could not finish saving that. It finishes the next time I start; to finish it now, run trust -pin again and enter the same PIN. Until then it may not show in hosts, the list of trusted PCs.")
 	errLockoutOwned       = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so I can't protect a boot PIN here. Trust this PC without a PIN instead.")
 
 	// Rollback (V6): the drive's vault is older than this PC's counter.
