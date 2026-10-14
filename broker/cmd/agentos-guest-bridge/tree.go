@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/guest"
 )
 
 // The managed tree's procedures, skills and context reach a live agent
@@ -27,10 +29,6 @@ import (
 
 // treeNamespaces are the only directories a sync writes or removes in.
 var treeNamespaces = []string{"procedures", "skills", "context"}
-
-// maxTreeAnswer bounds a managed_tree answer as read: the broker's own
-// limit (4 MiB of files) after JSON's base64.
-const maxTreeAnswer = 8 << 20
 
 type treeAnswer struct {
 	Version   string            `json:"version"`
@@ -74,26 +72,10 @@ func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (st
 		return version, fmt.Errorf("broker answer: %v", err)
 	}
 	if !ans.Unchanged && ans.Version == "" {
-		// The broker folds any tool result over 8 KiB into a stand-in
-		// (package fold), which unmarshals here as a tree with no files.
-		// Read the full answer back; anything else without a version is
-		// not a tree, and mirroring it would delete the whole tree.
-		var in struct {
-			Folded bool   `json:"folded"`
-			ID     string `json:"id"`
-		}
-		if json.Unmarshal([]byte(text), &in) == nil && in.Folded && in.ID != "" {
-			if text, err = callTool(ctx, broker, "result_read", map[string]string{"id": in.ID}); err != nil {
-				return version, fmt.Errorf("folded tree: %v", err)
-			}
-			ans = treeAnswer{}
-			if err := json.Unmarshal([]byte(text), &ans); err != nil {
-				return version, fmt.Errorf("folded tree: %v", err)
-			}
-		}
-		if ans.Unchanged || ans.Version == "" {
-			return version, errors.New("broker answer: no tree version; nothing changed")
-		}
+		// Not a tree: mirroring it would delete the whole tree. The broker
+		// never folds managed_tree (guest.TreeTool), so a fold stand-in is
+		// refused here too.
+		return version, errors.New("broker answer: no tree version; nothing changed")
 	}
 	if ans.Unchanged {
 		if ans.Version != version {
@@ -136,7 +118,9 @@ func callTool(ctx context.Context, broker *http.Client, name string, args any) (
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxTreeAnswer)).Decode(&out); err != nil {
+	// The guest plane refuses a managed_tree answer longer than
+	// guest.MaxTreeAnswer, so one read whole fits under this limit.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, guest.MaxTreeAnswer)).Decode(&out); err != nil {
 		return "", fmt.Errorf("broker answer: %v", err)
 	}
 	switch {
