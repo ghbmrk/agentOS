@@ -1,0 +1,145 @@
+package main
+
+import (
+	"net/http"
+
+	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/vault"
+)
+
+// The owner's private-data answer after setup (#1266; CAP-9, CH-3): the
+// local page lists the providers on the unlock socket and changes one's
+// answer there. Allowing is a tier-4 change approved with a code;
+// withdrawing narrows what leaves the box, as STOP, NO and revoke do, so
+// it needs none. The answer is setup's own marker (setupPrivate), which
+// the router asks per call (privateAllowed), so a change applies to the
+// next call without a restart.
+
+// providerList is the providers with whether a key is held and whether
+// private data is allowed, never a key (CRED-1). It needs an open vault.
+func (c *custody) providerList() ([]modelroute.SetupProvider, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return nil, errLocked
+	}
+	return c.providersLocked(), nil
+}
+
+// putPrivate records the owner's answer for provider: ok allows private
+// data with the code's approval, !ok withdraws it with none.
+func (c *custody) putPrivate(provider string, ok bool, code string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return errLocked
+	}
+	if err := c.privateMarkOK(provider); err != nil {
+		return err
+	}
+	if ok {
+		if err := c.approvedLocked(code, "allowing a provider private data"); err != nil {
+			return err
+		}
+	}
+	if err := c.setPrivateLocked(provider, ok); err != nil {
+		return err
+	}
+	if ok {
+		c.notify("private data allowed for " + providerName(provider))
+	} else {
+		c.notify("private data withdrawn for " + providerName(provider))
+	}
+	return nil
+}
+
+// privateMarkOK refuses a provider that is not built in, or whose marker
+// name holds a vault entry of another kind. Caller holds mu.
+func (c *custody) privateMarkOK(provider string) error {
+	if _, known := adapterNamed(provider); !known {
+		return errBadCredential
+	}
+	if hasOtherKind(c.v, PrivateOKPrefix+provider, KindPrivateOK) {
+		return errBadCredential
+	}
+	return nil
+}
+
+// setPrivateLocked writes or deletes provider's marker. Caller holds mu
+// and has checked privateMarkOK.
+func (c *custody) setPrivateLocked(provider string, ok bool) error {
+	name := PrivateOKPrefix + provider
+	if ok {
+		return c.putMark(name, KindPrivateOK)
+	}
+	if err := c.v.Delete(name); err != nil {
+		return c.putErr(err)
+	}
+	return nil
+}
+
+// privateGrantedNow is the model state's private (#1266, P-2 on #1280):
+// the vault is open and some model provider is both granted (a -grant
+// flag, or the agent machine's stored key) and allowed private data (a
+// -private-ok flag, or the owner's marker).
+func (c *custody) privateGrantedNow() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open {
+		return false
+	}
+	for _, p := range modelProviders() {
+		n := p.Name()
+		cred, known := adapterNamed(n)
+		granted := c.flagGrants[n] || c.agent != "" && known && hasKind(c.v, cred, vault.KindAPIKey)
+		allowed := c.privateFlags[n] || known && hasKind(c.v, PrivateOKPrefix+n, KindPrivateOK)
+		if granted && allowed {
+			return true
+		}
+	}
+	return false
+}
+
+// flagGrantsOf is the model providers g grants on any machine.
+func flagGrantsOf(g grants) map[string]bool {
+	out := map[string]bool{}
+	for _, as := range g {
+		for _, a := range as {
+			for _, p := range modelProviders() {
+				if a == p.Name() {
+					out[a] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// providerRoutes serves the owner's provider list and private-data
+// answer on the unlock socket.
+func providerRoutes(mux *http.ServeMux, c *custody, read func(http.ResponseWriter, *http.Request, any) bool,
+	reply func(http.ResponseWriter, int, any), fail func(http.ResponseWriter, error)) {
+	mux.HandleFunc("/providers", func(w http.ResponseWriter, r *http.Request) {
+		ps, err := c.providerList()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, http.StatusOK, modelroute.SetupProviderList{Providers: ps})
+	})
+	mux.HandleFunc("/providers/private", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Provider string `json:"provider"`
+			OK       bool   `json:"ok"`
+			Code     string `json:"code"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		if err := c.putPrivate(req.Provider, req.OK, req.Code); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
