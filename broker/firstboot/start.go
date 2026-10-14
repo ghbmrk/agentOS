@@ -46,6 +46,12 @@ type BoxConfig struct {
 	Reset func() error
 	// Card is the card step's display config.
 	Card card.DisplayConfig
+	// Download is set only on the download's image (agentos-localui
+	// -download-box), the one image that ships no claim state. Unset, a
+	// missing claim state routes to reinstall, so a preloaded box whose
+	// claim state is lost or hidden never serves setup without the claim
+	// gate (#1270).
+	Download bool
 }
 
 // ClaimScreen is what the claim screen needs (localui.BoxClaim).
@@ -175,8 +181,9 @@ func CardConfirmed(latch []byte) (bool, error) {
 // never to the download path's pairing (ASSUMPTIONS.md F15). A setup
 // network on a confirmed box is burned before anything else; a setup
 // network without a claim state marks a sealed box too, so it routes to
-// reinstall (F16). An owned box never reaches Begin (agentosd checks its
-// record first).
+// reinstall (F16), and so does any box without a claim state unless the
+// config says it is the download's (BoxConfig.Download). An owned box
+// never reaches Begin (agentosd checks its record first).
 func Begin(cfg BoxConfig) (*FirstBoot, error) {
 	fb, err := begin(cfg)
 	if err != nil {
@@ -212,7 +219,7 @@ func begin(cfg BoxConfig) (*FirstBoot, error) {
 	}
 	cl, err := claim.Open(cfg.Claim)
 	switch {
-	case errors.Is(err, claim.ErrNoCode) && (cs.Preloaded || net != nil):
+	case errors.Is(err, claim.ErrNoCode) && (cs.Preloaded || net != nil || !cfg.Download):
 		return &FirstBoot{Route: RouteReinstall, Claim: reinstall{}, Card: reinstall{}, net: net}, nil
 	case errors.Is(err, claim.ErrNoCode):
 		if err := ResetUnlatched(cfg.Latch, cfg.Reset); err != nil {

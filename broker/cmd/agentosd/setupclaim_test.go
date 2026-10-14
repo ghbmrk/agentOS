@@ -28,6 +28,7 @@ import (
 type claimBox struct {
 	claim, latch change.MemStore
 	code         string
+	download     bool // the download's image (firstboot.BoxConfig.Download)
 }
 
 func sealedClaimBox(t *testing.T) *claimBox {
@@ -61,9 +62,10 @@ func startClaimSetup(t *testing.T, b *claimBox) *claimSetup {
 		fb: make(chan *firstboot.FirstBoot, 1)}
 	cs.m.Card = func() (cardHold, error) {
 		fb, err := firstboot.Begin(firstboot.BoxConfig{
-			Claim: claim.Config{Store: &b.claim, BootID: func() (string, error) { return "boot-1", nil }},
-			Latch: &b.latch,
-			Reset: cs.f.vault.Reset,
+			Claim:    claim.Config{Store: &b.claim, BootID: func() (string, error) { return "boot-1", nil }},
+			Latch:    &b.latch,
+			Reset:    cs.f.vault.Reset,
+			Download: b.download,
 			Card: card.DisplayConfig{Provision: cs.f.vault.Provision,
 				Generate: func(r io.Reader) (*card.Card, error) {
 					c, err := card.Generate(r)
@@ -245,10 +247,10 @@ func reinstallOnly(t *testing.T, what, body string) {
 	}
 }
 
-// A bare flasher install (no claim state, no latch) takes the download
-// path: no claim screen, the card at once.
+// A bare flasher install of the download's image (no claim state, no
+// latch) takes the download path: no claim screen, the card at once.
 func TestABareInstallTakesTheDownloadPath(t *testing.T) {
-	cs := startClaimSetup(t, &claimBox{})
+	cs := startClaimSetup(t, &claimBox{download: true})
 	fb := cs.firstBoot()
 	if fb.Route != firstboot.RouteDownload || fb.Claim != nil {
 		t.Fatalf("route %q", fb.Route)
