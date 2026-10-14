@@ -72,6 +72,16 @@ def nodump(root):
         write(root, rel, NODUMP_SRC.get(rel, MK / "mkosi.extra" / rel).read_text())
 
 
+BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
+
+
+def radio(root):
+    # Stand-ins for firmware-mediatek's MT7922 files (#1415), and the image's Bluetooth block.
+    for rel in check.RADIO_FIRMWARE:
+        write(root, rel, "fw")
+    write(root, BT_BLOCK, (MK / "mkosi.extra" / BT_BLOCK).read_text())
+
+
 class TreeCheckTest(unittest.TestCase):
     """HW-1: the image holds no per-install secret; V15: no socket files."""
 
@@ -83,6 +93,7 @@ class TreeCheckTest(unittest.TestCase):
         write(self.root, "usr/lib/agentos/agentosd", "\x7fELF", 0o755)
         (self.root / "var/lib/agentos").mkdir(parents=True)
         nodump(self.root)
+        radio(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -142,6 +153,91 @@ class TreeCheckTest(unittest.TestCase):
             s.bind(str(p))
         self.assertTrue(stat.S_ISSOCK(os.lstat(p).st_mode))
         self.assertIn("broker.sock", " ".join(check.violations(self.root)))
+
+    # REQ: CH-7, HW-10
+    def test_tree_without_the_radio_firmware_is_refused(self):
+        # #1415: without firmware-mediatek's MT7922 files mt7921e brings up no wlan0, so the setup
+        # network (CH-7, HW-10) is never served on the M6 Ultra. Each file is required.
+        for rel in check.RADIO_FIRMWARE:
+            f = self.root / rel
+            f.unlink()
+            self.assertIn(rel, " ".join(check.violations(self.root)))
+            write(self.root, rel, "fw")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_names_are_the_ones_mt7921e_requests(self):
+        # MT7922_FIRMWARE_WM and MT7922_ROM_PATCH in the kernel's mt792x.h. Pinned literally: the
+        # same package ships MT7961 files, so a wrong name here would still build.
+        self.assertEqual(check.RADIO_FIRMWARE, (
+            "usr/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+            "usr/lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin"))
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_must_be_a_nonempty_file_in_the_tree(self):
+        # An empty file, a directory, a dangling link, a loop, or a link whose absolute target exists
+        # only on the build host is no firmware on the booted box.
+        rel = check.RADIO_FIRMWARE[0]
+        f = self.root / rel
+        host = write(pathlib.Path(self.tmp.name + "-host"), "fw.bin", "fw")
+        self.addCleanup(shutil.rmtree, self.tmp.name + "-host")
+        cases = {
+            "empty": lambda: f.write_bytes(b""),
+            "directory": lambda: f.mkdir(),
+            "dangling": lambda: f.symlink_to("missing.bin"),
+            "loop": lambda: f.symlink_to(f.name),
+            "host target": lambda: f.symlink_to(host),
+            "escapes the tree": lambda: f.symlink_to("../" * 12 + str(host).lstrip("/")),
+        }
+        for name, make in cases.items():
+            with self.subTest(name):
+                if f.is_symlink() or f.is_file():
+                    f.unlink()
+                elif f.is_dir():
+                    f.rmdir()
+                make()
+                self.assertIn(rel, " ".join(check.violations(self.root)))
+        f.unlink()
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_links_resolve_inside_the_tree(self):
+        # Debian's firmware packages link some names to others; an absolute target means the image's.
+        rel = check.RADIO_FIRMWARE[0]
+        f = self.root / rel
+        write(self.root, "usr/lib/firmware/mediatek/real.bin", "fw")
+        for target in ("real.bin", "/usr/lib/firmware/mediatek/real.bin", "/lib/firmware/mediatek/real.bin"):
+            with self.subTest(target):
+                f.unlink()
+                f.symlink_to(target)
+                if target.startswith("/lib/"):
+                    (self.root / "lib").symlink_to("usr/lib")
+                self.assertEqual(check.violations(self.root), [])
+
+    # REQ: CH-7, HW-10
+    def test_bluetooth_must_stay_blocked(self):
+        # The MT7922's Bluetooth half (btusb, btmtk) would come up from the same package; nothing in
+        # the spec uses it, so the image blocks both modules (#1415 security R1).
+        (self.root / BT_BLOCK).unlink()
+        v = " ".join(check.violations(self.root))
+        self.assertIn("btusb", v)
+        self.assertIn("btmtk", v)
+        # An earlier install line for the module wins in kmod, so a drop-in sorted first undoes it.
+        write(self.root, BT_BLOCK, (MK / "mkosi.extra" / BT_BLOCK).read_text())
+        write(self.root, "etc/modprobe.d/00-bt.conf", "install btusb /sbin/modprobe --ignore-install btusb\n")
+        self.assertIn("btusb", " ".join(check.violations(self.root)))
+        # The same file name in /etc replaces the image's file.
+        (self.root / "etc/modprobe.d/00-bt.conf").unlink()
+        write(self.root, "etc/modprobe.d/" + BT_BLOCK.rsplit("/", 1)[1], "# emptied\n")
+        self.assertIn("btmtk", " ".join(check.violations(self.root)))
+        (self.root / "etc/modprobe.d" / BT_BLOCK.rsplit("/", 1)[1]).unlink()
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_compressed_radio_firmware_counts(self):
+        # The kernel loader also finds name.xz and name.zst, if Debian ever ships them compressed.
+        for i, rel in enumerate(check.RADIO_FIRMWARE):
+            (self.root / rel).unlink()
+            write(self.root, rel + (".xz", ".zst")[i % 2], "fw")
+        self.assertEqual(check.violations(self.root), [])
 
     def test_main_exits_nonzero_on_violation(self):
         write(self.root, "var/lib/systemd/random-seed", "x")
@@ -754,6 +850,25 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(s["Signed-By"], "/usr/share/keyrings/debian-archive-keyring.gpg")
             self.assertNotIn("Trusted", s)
 
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_comes_from_the_pinned_snapshot(self):
+        # #1415: firmware-mediatek is in Debian's non-free-firmware component. The image enables it,
+        # in mkosi.conf and in the build's apt sources, from the same snapshot as main, and installs
+        # the package.
+        c = ini(MK / "mkosi.conf")
+        self.assertEqual(c["Distribution"]["Repositories"].split(","), ["main", "non-free-firmware"])
+        self.assertIn("firmware-mediatek", c["Content"]["Packages"].split())
+        mirror = c["Distribution"]["Mirror"].rstrip("/")
+        text = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_text()
+        stanzas = [dict(l.split(": ", 1) for l in s.splitlines() if l and not l.startswith("#"))
+                   for s in text.split("\n\n")]
+        stanzas = [s for s in stanzas if s]
+        for s in stanzas:
+            self.assertEqual(s["Components"].split(), ["main", "non-free-firmware"], s["URIs"])
+        self.assertEqual([s["URIs"].rstrip("/") for s in stanzas if "trixie" in s["Suites"].split()], [mirror])
+        # Every packaged line in Packages= is a package name: an indented comment would become one.
+        self.assertFalse([p for p in c["Content"]["Packages"].split() if not re.fullmatch(r"[a-z0-9][a-z0-9.+-]+", p)])
+
     def test_ab_usr_slots(self):
         # UPD-1: two equal /usr slots plus verity, so an update writes the idle one.
         parts = [ini(f)["Partition"] for f in sorted((MK / "mkosi.repart").glob("*.conf"))]
@@ -856,6 +971,7 @@ class NoDumpTest(unittest.TestCase):
         self.root = pathlib.Path(self.tmp.name)
         write(self.root, "etc/machine-id", "uninitialized\n")
         nodump(self.root)
+        radio(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1558,6 +1674,7 @@ class FuzzConfineTest(unittest.TestCase):
     def test_the_image_does_not_ship_the_fuzz_state(self):
         with tempfile.TemporaryDirectory() as d:
             nodump(pathlib.Path(d))
+            radio(pathlib.Path(d))
             self.assertEqual(check.violations(d), [])
             os.makedirs(os.path.join(d, "var/lib/agentos-fuzz"))
             self.assertEqual(check.violations(d), ["var/lib/agentos-fuzz: fuzz state; created on the box, never shipped"])
