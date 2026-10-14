@@ -197,3 +197,37 @@ func TestQuickLearnInRefreshGapIsNotOverwritten(t *testing.T) {
 		t.Fatalf("the stale poll read re-allowed the new prefix: %v", err)
 	}
 }
+
+// A full read that stores a newer external address after a quick read
+// returns, but before quickLearn merges and stores, is kept: the merge and
+// the store are one critical section (#1492).
+func TestRefreshInQuickGapKeepsNewerExternal(t *testing.T) {
+	gw := netip.MustParseAddr("192.168.1.1")
+	lan := []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
+	oldExt, newExt := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+	ext := oldExt
+	p := New(Config{
+		Source: func() (Network, error) { return Network{Prefixes: lan, Gateway: gw, External: ext}, nil },
+		Quick:  func() (Network, error) { return Network{Prefixes: lan, Gateway: gw}, nil },
+	})
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	quickGapHook = func() {
+		ext = newExt // the router's WAN address changes
+		if err := p.Refresh(); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { quickGapHook = nil })
+	p.quickLearn()
+	p.mu.RLock()
+	got := p.net.External
+	p.mu.RUnlock()
+	if got != newExt {
+		t.Fatalf("external after the quick learn = %v, want %v", got, newExt)
+	}
+	if err := p.Check(context.Background(), newExt, 443, "tcp"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("the router's new external address is dialable: %v", err)
+	}
+}

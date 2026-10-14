@@ -316,9 +316,14 @@ func (p *Policy) quickLearn() {
 	if err != nil {
 		return
 	}
-	p.mu.RLock()
+	if quickGapHook != nil {
+		quickGapHook()
+	}
+	// The merge with what is learned and the store are one critical section,
+	// so a full read can never store a newer external address between them.
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	old := p.net
-	p.mu.RUnlock()
 	if n.Gateway.IsValid() && n.Gateway.Unmap() == old.Gateway {
 		if !n.External.IsValid() {
 			n.External = old.External
@@ -327,8 +332,12 @@ func (p *Policy) quickLearn() {
 			n.Resolver = old.Resolver
 		}
 	}
-	p.Learn(n)
+	p.learnLocked(normalise(n))
 }
+
+// quickGapHook, when set by a test, runs after a quick read returns and
+// before quickLearn takes the lock to merge and store.
+var quickGapHook func()
 
 // SetPins replaces the pinned exceptions.
 func (p *Policy) SetPins(pins []Pin) error {
