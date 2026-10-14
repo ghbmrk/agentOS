@@ -10,4 +10,4 @@ CH-21 / CH-11 `NAME`: the name at setup (suggested made-up full name on the cont
 
 ## Scope
 
-`broker/boxname/boxname.go`, `broker/boxname/boxname_test.go`, `broker/owner/channel.go` (the `NAME <name>` command and its held confirmation), `broker/control/handler.go`, `broker/loops/plainname.go`. Tier A. Overlaps CH-21f and the CH-21 sweep.
+`broker/boxname/boxname.go`, `broker/boxname/boxname_test.go`, `broker/owner/channel.go` (the `NAME <name>` command and its held confirmation), `broker/control/handler.go`, `broker/loops/plainname.go`, `broker/localui/server.go` (contact-card suggestion). Tier A. Overlaps CH-21f and the CH-21 sweep.
