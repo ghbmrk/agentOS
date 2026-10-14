@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -243,6 +244,10 @@ type rig struct {
 	owned OwnerCard
 	// rot, when set, is the server's card rotation.
 	rot RotationCard
+	// wifiNets are the rotated Wi-Fi networks agentosd was handed, under
+	// mu; wifiErr fails the hand-off (#1191).
+	wifiNets []apnet.Network
+	wifiErr  error
 }
 
 func newRig(t *testing.T) *rig {

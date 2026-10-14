@@ -47,7 +47,7 @@ var controlPath = map[string][]string{
 	// serves the page's ops on the owner channel; the local UI, which
 	// decodes untrusted photos, stays in its own process (L15).
 	"localapi": {"owner"},
-	"localsrv": {"localapi", "owner", "sockets"},
+	"localsrv": {"apnet", "localapi", "owner", "sockets"},
 	// The approval policy (grants) runs inside the engine's checks, so it
 	// is on the control path too; adapters reach it only through its
 	// Verifier interface. Its refusals' guest text is guesterr's (SR2-3j),
@@ -57,7 +57,7 @@ var controlPath = map[string][]string{
 	// Reversible forms (REV-3) are declarations the gate validates: pure
 	// data, held to the control path's rules.
 	"reversible": {"journal", "verb"},
-	"daemon":     {"journal", "journal/check", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv"},
+	"daemon":     {"journal", "journal/check", "control", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv", "apnet"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
