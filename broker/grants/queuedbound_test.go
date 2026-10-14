@@ -173,12 +173,42 @@ func TestBoundAskNamesQueuedPerRecord(t *testing.T) {
 				if i >= c.started {
 					want = journal.Authorized
 				}
-				if st := send(id, "inv-r"); st.State != want {
+				st := send(id, "inv-r")
+				if i > 0 && c.started > 0 {
+					// The erased send that went before it is taken as
+					// the same send (D-116, Security R23 on #1433): the
+					// owner confirms it, and STOP then holds it.
+					if st.State != journal.Pending {
+						t.Fatalf("%s after an erased send: %s %q, want it asked", id, st.State, st.Permission.Reason)
+					}
+					r.g.Flush()
+					r.decide(true, "owner")
+					st = r.state(id)
+				}
+				if st.State != want {
 					t.Fatalf("%s: %s %q, want %s", id, st.State, st.Permission.Reason, want)
+				}
+				if want == journal.Succeeded {
+					// Erased, it names no record but still holds its
+					// place on every record (SR3-2-f3).
+					if er, _, err := r.eng.Erase([]string{id}); err != nil || len(er) != 1 {
+						t.Fatalf("erase %s: %v %v", id, er, err)
+					}
 				}
 			}
 			// Queued on another record: within the day, not this record.
-			if st := send("agent/o1", "inv-o"); st.State != journal.Authorized {
+			// An erased send may have been any record's, so after one
+			// it is confirmed too (Security R23 on #1433).
+			st := send("agent/o1", "inv-o")
+			if c.started > 0 {
+				if st.State != journal.Pending {
+					t.Fatalf("o1 after an erased send: %s %q, want it asked", st.State, st.Permission.Reason)
+				}
+				r.g.Flush()
+				r.decide(true, "owner")
+				st = r.state("agent/o1")
+			}
+			if st.State != journal.Authorized {
 				t.Fatalf("o1: %s %q", st.State, st.Permission.Reason)
 			}
 			if got := askedDetailOn(t, r, send, "agent/r3", "inv-r"); got != c.want {

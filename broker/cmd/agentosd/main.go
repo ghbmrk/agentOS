@@ -25,6 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/digestqueue"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localsrv"
@@ -472,7 +473,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
-		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid, RotateAPNet: rotateAPNet(apNetPath)}
+		cfg.PageSocket = pageSocket(localUIUID, gid, apNetPath, verifySocket)
 	}
 	// A restore the forget log's check held opens nothing on the restored
 	// tree: no recall, no agent machines (W3-forget-b1; security C3). The
@@ -767,6 +768,17 @@ func main() {
 	if dg != nil {
 		if o := d.Owner(); o != nil {
 			dg.cfg.Inform = o.Inform
+		}
+		// Effects left unclear and parked rather than retried, and
+		// effects proved not done whose resend was refused (OP-2).
+		if src, err := newUnclearSource(d.RetryWaiting, change.FileStore{Path: filepath.Join(digestDir, "unclear-digest.json")}); err != nil {
+			log.Printf("digest: no line for unclear effects: %v", err)
+		} else {
+			if dg.cfg.Sources == nil {
+				dg.cfg.Sources = map[string]digestqueue.Source{}
+			}
+			dg.cfg.Sources[unclearDigestSource] = src
+			d.OnRetryRefused(src.Relist)
 		}
 		go dg.run(ctx)
 	}

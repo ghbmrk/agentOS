@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -108,7 +107,7 @@ type rig struct {
 	asks    []string
 	forgets []string
 	adopted []string
-	rotated []apnet.Network
+	rotated int
 }
 
 func newRig(t *testing.T) *rig {
@@ -155,8 +154,8 @@ func newRig(t *testing.T) *rig {
 			r.forgets = append(r.forgets, goal)
 			return "Asked."
 		},
-		RotateAPNet: func(n apnet.Network) error {
-			r.rotated = append(r.rotated, n)
+		RotateAPNet: func() error {
+			r.rotated++
 			return nil
 		}})
 	r.ops = r.srv.Ops()
@@ -226,7 +225,7 @@ func tokenOps(tok string) map[string]any {
 		localapi.OpSIM:         localapi.AdoptSIM{Token: tok, SIM: simTag, Code: good},
 		localapi.OpForgetTasks: localapi.Auth{Token: tok},
 		localapi.OpForget:      localapi.Forget{Token: tok, ID: "owner:a"},
-		localapi.OpRotateAPNet: localapi.RotateAPNet{Token: tok, SSID: rotSSID, Password: rotPassword},
+		localapi.OpRotateAPNet: localapi.Auth{Token: tok},
 	}
 }
 
@@ -256,8 +255,8 @@ func TestEveryOpButTheOpenOnesNeedsAToken(t *testing.T) {
 			t.Errorf("%s with no args: %v", op, err)
 		}
 	}
-	if len(r.own.answers) != 0 || len(r.follows) != 0 || len(r.adopted) != 0 || len(r.forgets) != 0 || len(r.rotated) != 0 {
-		t.Fatalf("reached the channel: %v %v %v %v %d", r.own.answers, r.follows, r.adopted, r.forgets, len(r.rotated))
+	if len(r.own.answers) != 0 || len(r.follows) != 0 || len(r.adopted) != 0 || len(r.forgets) != 0 || r.rotated != 0 {
+		t.Fatalf("reached the channel: %v %v %v %v %d", r.own.answers, r.follows, r.adopted, r.forgets, r.rotated)
 	}
 	for op := range open {
 		var args any = struct{}{}
