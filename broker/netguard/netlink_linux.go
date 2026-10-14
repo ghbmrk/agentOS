@@ -11,7 +11,8 @@ import (
 
 // WatchNetlink sends on the returned channel each time the kernel reports an
 // address, route or link change (DEV-2: a new prefix is refused within the
-// event, not at the next poll). The channel holds one pending event; further
+// event, not at the next poll), or a change to the default gateway's
+// neighbour entry (a swapped router's new MAC is seen within the event). The channel holds one pending event; further
 // changes while it is full coalesce into it. It ends with ctx. Where the
 // socket cannot be opened the error is returned and the caller keeps the
 // poll, which stays as the backstop either way.
@@ -20,7 +21,7 @@ func WatchNetlink(ctx context.Context) (<-chan struct{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	groups := uint32(unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV6_IFADDR | unix.RTMGRP_IPV4_ROUTE | unix.RTMGRP_IPV6_ROUTE)
+	groups := uint32(unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV6_IFADDR | unix.RTMGRP_IPV4_ROUTE | unix.RTMGRP_IPV6_ROUTE | unix.RTMGRP_NEIGH)
 	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Groups: groups}); err != nil {
 		unix.Close(fd)
 		return nil, err
@@ -48,7 +49,7 @@ func WatchNetlink(ctx context.Context) (<-chan struct{}, error) {
 				}
 				return
 			}
-			if netlinkChange(buf[:n]) {
+			if netlinkChange(buf[:n], routeGateway) {
 				notify(out)
 			}
 		}
