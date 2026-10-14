@@ -252,6 +252,15 @@ class RiskTierTest(unittest.TestCase):
         for pkg in ("control", "apply", "recovery", "smsapi", "sipsign", "card"):
             with self.subTest(listed=pkg):
                 self.assertIn(pkg, rt.TIER_A_BROKER)
+        # Security #1700 delta f1/f2 and P/UX/L3 delta f1 (#1654): durable
+        # writes keys, the vault and root.json (a); boxname parses the owner's
+        # NAME text and runs the CH-21 check (c); events and recall hold
+        # CRED-1 custody (a). Each is listed by criterion and is never B.
+        for pkg in ("durable", "boxname", "events", "recall"):
+            with self.subTest(promoted=pkg):
+                self.assertIn(pkg, rt.TIER_A_BROKER)
+                self.assertNotIn(pkg, rt.TIER_B_BROKER)
+                self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go"), ("A", f"broker/{pkg}/"))
 
     def test_every_broker_package_is_classed_once(self):
         # Each broker/ directory is tier A (listed or in core.txt) or in
@@ -327,9 +336,11 @@ class RiskTierTest(unittest.TestCase):
         # recalltool holds journal.Engine.Erase and grants.Gate.Withdraw/Authorize.
         self.assertIn("recall", allowed)
         self.assertIn("recalltool", allowed)
-        for path in ("broker/recall/recall.go", "broker/recalltool/tool.go"):
-            with self.subTest(path=path):
-                self.assertEqual(rt.tier_of(path), ("A", "core list: " + path.rsplit("/", 1)[0] + "/"))
+        self.assertEqual(rt.tier_of("broker/recalltool/tool.go"),
+                         ("A", "core list: broker/recalltool/"))
+        # recall also meets criterion (a) (CRED-1 custody), so TIER_A_BROKER
+        # names it and its reason shows first.
+        self.assertEqual(rt.tier_of("broker/recall/recall.go"), ("A", "broker/recall/"))
         for pkg in sorted(allowed):
             with self.subTest(pkg=pkg):
                 self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")

@@ -68,7 +68,7 @@ def core_list(path=CORE_LIST):
 # (Tier-A-narrow, #1698). A package is here only if it (a) holds or handles a
 # credential or secret, (b) gates an effect or approval, or (c) parses
 # owner-channel input. A package that meets several criteria is filed under
-# the first, with the others noted. Every other package is in TIER_B_BROKER,
+# one, with the others noted. Every other package is in TIER_B_BROKER,
 # and a broker/ path in neither list is A, so a new package is A until it is
 # classed. Packages core.txt names on a core or wiring line are A regardless
 # and are not repeated here; a package on an allow line that meets a criterion
@@ -78,6 +78,10 @@ TIER_A_BROKER = {
     # (a) a credential or secret
     "apnet",                      # the Owner Card's Wi-Fi password
     "browser", "netjoin", "pubid", "tpmseal",
+    "durable",                    # writes keys, the vault file and root.json, and sets their mode
+    # CRED-1 custody (#1654): recall's scrubber and the event bus that runs it
+    # decide what authentication material reaches the recall index and event log.
+    "events", "recall",
     "loop7",                      # also (b): fuzz-child jail and netns; CRED-1 child env
     "maintain",                   # also (b): attestor keys that gate security releases
     "probecmd",                   # also (b): CRED-1 child env; findings that pause grants
@@ -90,6 +94,7 @@ TIER_A_BROKER = {
     "hostdisk",                   # HW-8a second confirmation; udev host-disk isolation
     # (c) parses owner-channel input
     "bridgeclient", "bridgeproto", "control", "localapi", "localsrv", "localui",
+    "boxname",                    # parses the owner's NAME text; the CH-21 check
     "modem", "modemlink", "owner",
     "question",                   # the owner's texted answers
     "sipsign", "smsapi",          # also (a)
@@ -98,11 +103,11 @@ TIER_A_BROKER = {
 }
 # broker/ packages that meet none of the three criteria: tier B.
 TIER_B_BROKER = {
-    "accel", "admission", "attention", "boxname", "budget",
+    "accel", "admission", "attention", "budget",
     # cgroup is B, but core vm kills machines and loop7 freezes its jail
     # through it: a change to Kill or Freeze is reviewed with those callers.
     "cgroup",
-    "compile", "corpus", "durable", "e2e", "events", "floor", "fold", "hostchange",
+    "compile", "corpus", "e2e", "floor", "fold", "hostchange",
     "loopbuild", "machprobe", "projection", "pubsend", "quota", "routerule", "skill",
     "sockprobe", "test", "voice",
 }
