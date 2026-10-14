@@ -229,8 +229,11 @@ func TestPropertyRandomWorkloadsWithCrashes(t *testing.T) {
 			w.check(i%5 == 4)
 		}
 		// Drain: with an honest service that always knows, every intent
-		// resolves and every fence lifts.
+		// resolves and every fence lifts. A check that proves an effect
+		// was not done dispatches it again (OP-2 step 2), so the drain's
+		// service also always acknowledges.
 		svc.knows = func(string) bool { return true }
+		svc.mode = func(string) execMode { return execMode(rng.Intn(int(modeDropAck))) }
 		w.restart()
 		w.store.budget = 1 << 30
 		w.eng.Reconcile(ctx)
