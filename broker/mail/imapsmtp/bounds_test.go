@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -268,4 +269,24 @@ func TestResponseFieldsAreBounded(t *testing.T) {
 		t.Fatalf("a response stopped at the field bound grew the heap by %d bytes at its peak", grew)
 	}
 	t.Logf("a response stopped at the field bound grew the heap by %d bytes at its peak", grew)
+}
+
+// TestFlagsUpdateKeepsTheBody (SR3-mail-k18b): a server may send an
+// unsolicited FLAGS-only FETCH for a message during the UID FETCH that
+// reads it (a flag changed meanwhile). That response must not take the
+// message's one slot, or the body that follows is dropped and the message
+// is answered blank.
+func TestFlagsUpdateKeepsTheBody(t *testing.T) {
+	body := "Subject: canary\r\n\r\nhello\r\n"
+	addr, _ := hostile(t, "* 1 FETCH (UID 1 FLAGS (\\Seen))\r\n"+
+		"* 1 FETCH (UID 1 FLAGS (\\Seen) BODY[] {"+strconv.Itoa(len(body))+"}\r\n"+body+")\r\n"+
+		"$TAG OK done\r\n", false)
+	s := hostileStore(t, addr, 10*time.Second)
+	got, err := s.Fetch(context.Background(), "INBOX", 7, []uint32{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Subject != "canary" {
+		t.Fatalf("got %+v, want the one message with its body", got)
+	}
 }

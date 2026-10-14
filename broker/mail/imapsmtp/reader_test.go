@@ -70,7 +70,7 @@ func converse(c net.Conn, fetch string, hangup bool) string {
 		case cmd == "SELECT" || cmd == "EXAMINE":
 			say("* 1 EXISTS\r\n* OK [UIDVALIDITY 7] v\r\n" + tag + " OK [READ-ONLY] done\r\n")
 		case cmd == "UID" && len(f) > 2 && strings.ToUpper(f[2]) == "FETCH":
-			say(fetch)
+			say(strings.ReplaceAll(fetch, "$TAG", tag))
 			if hangup {
 				return "hangup"
 			}

@@ -332,15 +332,16 @@ func (s *Store) fetch(c *client.Client, folder string, validity uint32, uids []u
 	ch := make(chan *imap.Message, 16)
 	done := make(chan error, 1)
 	go func() { done <- c.UidFetch(set, items, ch) }()
-	// Only the first response for each requested UID is kept, so a server
-	// that repeats or invents messages cannot grow out (SR3-mail-k18b).
+	// Only the first response with a body for each requested UID is kept,
+	// so a server that repeats or invents messages cannot grow out, and an
+	// unsolicited FLAGS-only response does not take the slot (SR3-mail-k18b).
 	want := make(map[uint32]bool, len(uids))
 	for _, u := range uids {
 		want[u] = true
 	}
 	var out []mail.Message
 	for m := range ch {
-		if !want[m.Uid] {
+		if !want[m.Uid] || len(m.Body) == 0 {
 			continue
 		}
 		delete(want, m.Uid)
