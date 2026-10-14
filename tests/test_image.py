@@ -308,6 +308,10 @@ class TreeCheckTest(unittest.TestCase):
         # resolved.conf and networkd.conf files too: their LLMNR, multicast DNS and forwarding keys
         # are checked through the same parser.
         rbase = (MK / "mkosi.extra" / RESOLVED_REL).read_text()
+        # Debian ships a main networkd.conf, so each drop-in is checked beside a clean one.
+        clean = {"etc/systemd/networkd.conf": "[Network]\n#SpeedMeter=no\n"}
+        for rel, text in clean.items():
+            write(self.root, rel, text)
         for rel, text in ((RESOLVED_REL, "\ufeff" + rbase), (RESOLVED_REL, rbase + "# x\\\nLLMNR=yes\n"),
                           ("etc/systemd/resolved.conf", "[Resolve]\nDNS=192.0.2.1\x0b\n"),
                           ("etc/systemd/networkd.conf", "[Network]\nSpeedMeter=no\x00\n"),
@@ -317,6 +321,8 @@ class TreeCheckTest(unittest.TestCase):
                 self.assertIn("%s: line" % f.name, " ".join(check.violations(self.root)))
                 if rel == RESOLVED_REL:
                     write(self.root, rel, rbase)
+                elif rel in clean:
+                    write(self.root, rel, clean[rel])
                 else:
                     f.unlink()
         self.assertEqual(check.violations(self.root), [])
@@ -355,7 +361,18 @@ class TreeCheckTest(unittest.TestCase):
                      "n?t.ipv4.ip_forward=1", "*.ipv6.conf.all.forwarding=1", "net/ipv4/conf/enp1s0.100/forw*=1",
                      # glibc's glob negates [^x]; Python's fnmatch does not.
                      "n[^x]t.ipv4.ip_forward=1", "net.ipv4.conf.all.forwardin[^x]=1",
-                     "net.ipv4.conf.all.forwarding = 2"):
+                     "net.ipv4.conf.all.forwarding = 2",
+                     # #1508: systemd-sysctl normalises a key before it writes it (sysctl_normalize:
+                     # empty and "." components go, as does ".." after a leading "/"), so the
+                     # components are taken after that, not from the raw key.
+                     "/net/ipv4/ip_forward=1", ".net.ipv4.ip_forward=1", "net/ipv4/ip_forward/=1",
+                     "net.ipv4.ip_forward.=1", "//net/ipv4/conf/all/forwarding=1",
+                     "-/net/ipv4/conf/all/forwarding=1", "- /net/ipv4/conf/all/forwarding=1",
+                     "/net/ipv*/conf/*/forwarding=1", "net..ipv4..ip_forward=1", "net/./ipv4/ip_forward=1",
+                     "/../net/ipv4/ip_forward=1",
+                     # A glob key's glob() also takes \\ escapes and {a,b} alternatives.
+                     "{net,zz}/ipv4/ip_forwar[d]=1", "net/ipv4/conf/al?/{forwarding,zz}=1",
+                     "n\\et/ipv4/ip_forwar?=1", "ne?/ipv4/ip_forwar\\d=1"):
             with self.subTest(line):
                 f = write(self.root, "etc/sysctl.d/90-x.conf", line + "\n")
                 self.assertIn("forwarding must stay 0", " ".join(check.violations(self.root)))
@@ -366,6 +383,28 @@ class TreeCheckTest(unittest.TestCase):
         # Globs that cannot reach a forwarding key pass, as does a forwarding glob set to 0.
         write(self.root, "etc/sysctl.d/90-x.conf", "net.ipv4.ip_forward = 0\nnet.ipv4.conf.*.rp_filter = 2\n-net.ipv4.conf.*.promote_secondaries = 1\n"
               "fs.protected_*=1\nkernel.*.forwarding=1\nnet.ipv*.conf.*.forw*=0\n")
+        self.assertEqual(check.violations(self.root), [])
+        # A later spelling of the same key, or a "-key" line (which unsets it), wins.
+        write(self.root, "etc/sysctl.d/90-x.conf", "net.ipv4.ip_forward=1\n/net/ipv4/ip_forward/ = 0\n"
+              "net.ipv4.conf.all.forwarding=1\n-net/ipv4/conf/all/forwarding\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: DEV-2, CH-9, C13
+    def test_sysctl_lines_split_as_systemd_splits_them(self):
+        # #1508: systemd-sysctl ends a line at LF, CR or NUL; Python's splitlines does not split at
+        # NUL or CR the same way and also splits at \x0b, \x1c and U+2028. The check refuses those
+        # bytes in every sysctl file, for the forwarding keys and for kernel.core_pattern alike.
+        for key, val in (("net.ipv4.ip_forward", "0"), ("kernel.core_pattern", "|/usr/bin/false")):
+            for name, text in (("NUL", "a.b=1\x00%s=9\n"), ("CR", "a.b=1\r%s=9\n"),
+                               ("x1c", "%%s=9\na.b=1\x1c%%s=%s\n" % val), ("x0b", "%%s=9\na.b=1\x0b%%s=%s\n" % val),
+                               ("U+2028", "%%s=9\na.b=1\u2028%%s=%s\n" % val), ("BOM", "\ufeff%s=9\n"),
+                               ("x0c", "%%s=9\na.b=1\x0c%%s=%s\n" % val), ("U+0085", "%%s=9\na.b=1\x85%%s=%s\n" % val)):
+                with self.subTest(key=key, byte=name):
+                    f = write(self.root, "etc/sysctl.d/99-x.conf", text.replace("%s", key))
+                    self.assertIn("etc/sysctl.d/99-x.conf: line", " ".join(check.violations(self.root)))
+                    f.unlink()
+        # A tab is space to both; a backslash continues no sysctl line.
+        write(self.root, "etc/sysctl.d/99-x.conf", "\tnet.ipv4.ip_forward\t=\t0\n# x \\\nnet.ipv4.conf.all.forwarding = 0\n")
         self.assertEqual(check.violations(self.root), [])
 
     # REQ: DEV-2
@@ -1317,6 +1356,11 @@ class NoDumpTest(unittest.TestCase):
             ("usr/lib/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=infinity\n", "DefaultLimitCORE"),
             ("etc/systemd/system/agentosd.service.d/zz.conf", "[Service]\nLimitCORE=infinity\n", "LimitCORE"),
             ("usr/lib/sysctl.d/99-zz.conf", "kernel.core_pattern = core\n", "core_pattern"),
+            # #1508: systemd-sysctl normalises keys, so these are kernel.core_pattern too; a "-key"
+            # line unsets it, leaving the kernel's default (dump to a file).
+            ("usr/lib/sysctl.d/99-zz.conf", "/kernel/core_pattern = core\n", "core_pattern"),
+            ("usr/lib/sysctl.d/99-zz.conf", "kernel.core_pattern. = core\n", "core_pattern"),
+            ("usr/lib/sysctl.d/99-zz.conf", "-kernel.core_pattern\n", "core_pattern"),
             # systemd-coredump's own file, if a package ever adds it, sorts before ours.
             ("etc/sysctl.d/99-agentos-nodump.conf", "fs.suid_dumpable=2\n", "core_pattern"),
         )

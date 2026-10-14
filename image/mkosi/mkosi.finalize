@@ -74,9 +74,16 @@ UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Network", 
 # sysctl leaves that turn routing on (#1478). systemd-sysctl expands a glob key per component against
 # /proc/sys, so a key counts when its first component is "net" or a glob and its last is one of these
 # or a glob (#1497). Any glob counts, not only one that matches: glibc's glob takes [^x] as a negated
-# class and Python's fnmatch does not.
+# class and Python's fnmatch does not. Components are taken after systemd's normalisation (#1508).
 FORWARD_LEAVES = ("ip_forward", "forwarding", "force_forwarding")
 GLOB = re.compile(r"[*?\[]")
+# In a glob key (one holding *, ? or [), systemd-sysctl's glob() also takes a backslash as an escape
+# and {a,b} as alternatives (GLOB_BRACE, which can span a "/"), so either makes the whole key count.
+GLOB_ESCAPE = re.compile(r"[\\{]")
+# systemd's read_line ends a sysctl.d line at LF, CR or NUL; Python's splitlines also splits at
+# \x0b, \x0c, \x1c-\x1e, U+0085, U+2028 and U+2029. The check refuses every such byte, any other
+# control byte and a BOM rather than model them (#1508).
+SYSCTL_BAD_BYTES = re.compile(rb"[\x00-\x08\x0a-\x1f\x7f]|\xc2\x85|\xe2\x80[\xa8\xa9]|\xef\xbb\xbf")
 
 
 def violations(root):
@@ -116,7 +123,8 @@ def violations(root):
                   and rel.split(os.sep, 1)[0] in SCAN and has_key(p)):
                 out.append("%s: private key material" % rel)
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
-            + bluetooth_violations(root) + network_violations(root) + resolved_violations(root))
+            + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
+            + resolved_violations(root))
 
 
 def dropins(root, dirs):
@@ -177,27 +185,73 @@ def main_conf(root, name):
     return files + dropins(root, ["%s/systemd/%s.d" % (d, name) for d in CONF_DIRS])
 
 
-def sysctl_all(root):
-    """What systemd-sysctl sets, key by key: sysctl.d files by name (/etc shadowing the same name
-    elsewhere), then /etc/sysctl.conf; the last assignment to a key wins. Keys keep any glob."""
-    root = pathlib.Path(root)
+def sysctl_files(root):
+    """The files systemd-sysctl reads, in its order: sysctl.d files by name (/etc shadowing the same
+    name elsewhere), then /etc/sysctl.conf."""
     files = dropins(root, ["%s/sysctl.d" % d for d in CONF_DIRS])
     if (root / "etc/sysctl.conf").is_file():
         files.append(root / "etc/sysctl.conf")
+    return files
+
+
+def sysctl_normalize(k):
+    """systemd 255's sysctl_normalize (src/basic/sysctl-util.c): if the key's first separator is a
+    dot, dots and slashes swap; then path_simplify drops empty and "." components (and ".." right
+    after a leading "/"), and the leading "/" goes. So "/net/ipv4/ip_forward/" and
+    ".net.ipv4.ip_forward" are both net/ipv4/ip_forward."""
+    seps = [i for i in (k.find("."), k.find("/")) if i >= 0]
+    if seps and k[min(seps)] == ".":
+        i = min(seps)
+        k = k[:i] + k[i:].translate(str.maketrans("./", "/."))
+    parts, absolute = [], k.startswith("/")
+    for c in k.split("/"):
+        if c in ("", ".") or (c == ".." and absolute and not parts):
+            continue
+        parts.append(c)
+    return "/".join(parts)
+
+
+def sysctl_all(root):
+    """What systemd-sysctl sets, key by key, as src/sysctl/sysctl.c reads it: lines end at LF, CR or
+    NUL and lose leading and trailing space and tab; # and ; start comments; in an assignment a
+    leading "-" only ignores errors; a "-key" line with no "=" unsets KEY (an earlier assignment to
+    it is dropped); keys are normalised (sysctl_normalize) and the last assignment to a key wins.
+    Keys keep any glob. A value of None means the key is unset."""
+    root = pathlib.Path(root)
     vals = {}
-    for f in files:
-        for ln in f.read_text(errors="replace").splitlines():
-            ln = ln.strip().lstrip("-")
-            if not ln or ln[0] in "#;" or "=" not in ln:
+    for f in sysctl_files(root):
+        for raw in re.split(rb"[\n\r\x00]", f.read_bytes()):
+            ln = raw.strip(b" \t\n\r").decode(errors="replace")
+            if not ln or ln[0] in "#;":
                 continue
-            k, v = (x.strip() for x in ln.split("=", 1))
-            vals[k.replace("/", ".")] = v
+            if "=" in ln:
+                k, v = (ln[1:] if ln[0] == "-" else ln).split("=", 1)
+                vals[sysctl_normalize(k.strip(" \t\n\r"))] = v.strip(" \t\n\r")
+            elif ln[0] == "-":
+                vals[sysctl_normalize(ln[1:].strip(" \t\n\r"))] = None
     return vals
 
 
 def sysctl(root, key):
     """The value systemd-sysctl sets for KEY. None if never set."""
-    return sysctl_all(root).get(key)
+    return sysctl_all(root).get(sysctl_normalize(key))
+
+
+def sysctl_byte_violations(root):
+    """#1508: sysctl.d lines this check and systemd-sysctl could split differently. They feed both
+    the forwarding check and kernel.core_pattern (IMG-nodump)."""
+    out = []
+    for f in sysctl_files(pathlib.Path(root)):
+        try:
+            data = f.read_bytes()
+        except OSError:
+            out.append("%s: unreadable; the tree check never passes a file it cannot read" % f.relative_to(root))
+            continue
+        for n, ln in enumerate(data.split(b"\n"), 1):
+            if SYSCTL_BAD_BYTES.search(ln):
+                out.append("%s: line %d: NUL, CR, control, BOM or Unicode line-break character"
+                           % (f.relative_to(root), n))
+    return out
 
 
 def dump_violations(root):
@@ -365,9 +419,14 @@ def uplink_violations(up):
 
 
 def forward_key(k):
-    """#1478, #1497: whether sysctl key K (dotted, globs kept) can set a forwarding key."""
-    first, last = k.split(".")[0], k.split(".")[-1]
-    return ((first == "net" or bool(GLOB.search(first)))
+    """#1478, #1497, #1508: whether sysctl key K (normalised by sysctl_normalize, globs kept) can set
+    a forwarding key. A ".." component never writes (systemd refuses the path) but counts anyway:
+    refusing it errs safe."""
+    if GLOB.search(k) and GLOB_ESCAPE.search(k):
+        return True
+    parts = k.split("/")
+    first, last = parts[0], parts[-1]
+    return ((first == "net" or bool(GLOB.search(first)) or ".." in parts)
             and (last in FORWARD_LEAVES or bool(GLOB.search(last))))
 
 
@@ -408,7 +467,7 @@ def network_violations(root):
         if v not in (None, "no"):
             out.append("networkd.conf: %s is %s; must be unset or no" % (key, v))
     for k, v in sorted(sysctl_all(root).items()):
-        if v != "0" and forward_key(k):
+        if v is not None and v != "0" and forward_key(k):
             out.append("sysctl.d: %s is %s; forwarding must stay 0" % (k, v))
     return out
 
