@@ -23,3 +23,13 @@ echo "agentos-uplink: $up"
 st=$(/usr/lib/systemd/systemd-bless-boot status 2>&1)
 root=$(findmnt -bno SIZE /)
 echo "agentos-boot: bless=$st root_bytes=$root"
+# The Wi-Fi page Requires= its claim hand-over (agentos-localui.service), so a failed hand-over
+# keeps the page down while the setup access point still comes up (#1743). Say so here, the line
+# the console and journal carry for support; agentos-health stays out of it, since a failed health
+# check rolls the release back and a box-local fault such as a full disk is not the release's.
+# A state systemctl cannot report reads claim=unknown, never ok.
+case $(systemctl is-failed agentos-localui-claim.service 2>/dev/null) in
+failed) echo "agentos-page: down claim=failed (power-cycle; if it persists, contact support)" ;;
+active | inactive) echo "agentos-page: claim=ok" ;;
+*) echo "agentos-page: claim=unknown" ;;
+esac

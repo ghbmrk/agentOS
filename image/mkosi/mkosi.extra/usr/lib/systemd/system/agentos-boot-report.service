@@ -1,6 +1,7 @@
 [Unit]
 Description=AgentOS boot report
-After=systemd-bless-boot.service boot-complete.target agentos-drive-id.service
+# After the Wi-Fi page's claim hand-over, so the report reads its final state (#1743).
+After=systemd-bless-boot.service boot-complete.target agentos-drive-id.service agentos-localui-claim.service
 
 [Service]
 Type=oneshot
