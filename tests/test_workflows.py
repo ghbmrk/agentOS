@@ -27,6 +27,95 @@ def steps(text):
         yield m.group(2), "\n".join(body)
 
 
+# CTRL-lane-gate r3 (#1347, Security R3 on #1303): lane-gate.yml must run only the base's
+# code and fail closed. Keys are whitelisted, so `if:`, `continue-on-error:`, `shell:`,
+# `container:` and the like fail; the env block and the run body must equal these lines, so
+# no edit can point HEAD_SHA at the base, swallow an exit code or run fetched code.
+LANE_GATE_KEYS = {
+    "name", "on", "pull_request_target", "types", "permissions", "contents", "jobs",
+    "lane-gate", "runs-on", "timeout-minutes", "steps", "uses", "with", "ref", "fetch-depth",
+    "persist-credentials", "env", "BASE_SHA", "HEAD_SHA", "PR_NUMBER", "PR_BRANCH", "PR_TITLE",
+    "run",
+}
+LANE_GATE_ENV = [
+    "BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+    "HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+    "PR_NUMBER: ${{ github.event.pull_request.number }}",
+    "PR_BRANCH: ${{ github.head_ref }}",
+    "PR_TITLE: ${{ github.event.pull_request.title }}",
+]
+LANE_GATE_RUN = [
+    'git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head"',
+    'git cat-file -e "$HEAD_SHA^{commit}"',
+    'python3 -I tools/risk_tier.py --git "$BASE_SHA" "$HEAD_SHA" --pr-branch "$PR_BRANCH" --pr-title "$PR_TITLE"',
+]
+
+
+def lane_gate_problems(text):
+    """Return why lane-gate.yml could fail open or run PR code; empty when it cannot."""
+    problems = []
+    if "||" in text:
+        problems.append("`||` can swallow the gate's exit code")
+    if re.search(r"\bsecrets\b", text):
+        problems.append("secrets are referenced")
+    lines = text.splitlines()
+    structure, run, env, runs = [], [], [], 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        indent = len(line) - len(line.lstrip())
+        if re.match(r"^\s*(-\s+)?run\s*:", line):
+            runs += 1
+            if not re.match(r"^\s*(-\s+)?run: \|$", line):
+                problems.append("run is not a `|` block: " + line.strip())
+            i += 1
+            while i < len(lines) and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent):
+                if lines[i].strip():
+                    run.append(lines[i].strip())
+                i += 1
+            continue
+        if re.match(r"^\s*env\s*:\s*$", line):
+            i += 1
+            while i < len(lines) and len(lines[i]) - len(lines[i].lstrip()) > indent:
+                env.append(lines[i].strip())
+                i += 1
+            structure.append(line)
+            continue
+        structure.append(line)
+        i += 1
+    if runs != 1:
+        problems.append("expected one run step, found %d" % runs)
+    if any("${{" in r for r in run):
+        problems.append("an expression is expanded inside the run body")
+    for r in run:
+        if "$HEAD_SHA" in r and not r.startswith(("git fetch ", "git cat-file ", "python3 -I tools/risk_tier.py ")):
+            problems.append("HEAD_SHA reaches a command other than git fetch, git cat-file or risk_tier.py: " + r)
+    if run != LANE_GATE_RUN:
+        problems.append("run body differs from the three gate commands: %r" % run)
+    if env != LANE_GATE_ENV:
+        problems.append("env differs from the five gate inputs: %r" % env)
+    seen = set()
+    for line in structure:
+        code = re.sub(r"\s#.*$", "", line) if not line.lstrip().startswith("#") else ""
+        if not code.strip():
+            continue
+        bare = re.sub(r"\$\{\{[^}]*\}\}", "", code)
+        if "{" in bare or "&" in bare or re.search(r"(^|\s)[*!]", bare):
+            problems.append("flow mapping, anchor, alias or tag: " + line.strip())
+        if "[" in bare and not re.match(r"^\s*types:\s*\[opened, synchronize, reopened, edited\]$", bare):
+            problems.append("flow sequence: " + line.strip())
+        m = re.match(r"""^\s*(?:-\s+)?["']?([^"':\s][^"':]*?)["']?\s*:(\s|$)""", bare)
+        if not m:
+            problems.append("not a key line: " + line.strip())
+        elif m.group(1) not in LANE_GATE_KEYS:
+            problems.append("unexpected key %r" % m.group(1))
+        elif m.group(1) in seen and m.group(1) not in ("name", "permissions", "contents"):
+            problems.append("repeated key %r" % m.group(1))
+        else:
+            seen.add(m.group(1))
+    return problems
+
+
 class WorkflowTest(unittest.TestCase):
     def files(self):
         files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
@@ -100,6 +189,43 @@ class WorkflowTest(unittest.TestCase):
                     self.assertNotRegex(line, verb, line)
         # One gate: no fallback to the PR's copy inside the PR-controlled ci.yml.
         self.assertNotIn("--pr-branch", (WORKFLOWS / "ci.yml").read_text())
+
+    def test_lane_gate_has_no_fail_open_or_fetched_code_path(self):
+        # CTRL-lane-gate r3 (#1347): the shipped workflow passes the strict check.
+        self.assertEqual(lane_gate_problems((WORKFLOWS / "lane-gate.yml").read_text()), [])
+
+    def test_lane_gate_check_catches_each_reported_edit(self):
+        # CTRL-lane-gate r3 (#1347): every edit Security R3 showed passing the old test fails now.
+        text = (WORKFLOWS / "lane-gate.yml").read_text()
+        gate = LANE_GATE_RUN[2]
+        step = "      - name: Lane gate (base copy of tools/risk_tier.py)\n"
+        job = "    runs-on: ubuntu-latest\n"
+        edits = {
+            "job continue-on-error": (job, job + "    continue-on-error: true\n"),
+            "step continue-on-error": (step, step + "        continue-on-error: true\n"),
+            "job if": (job, job + "    if: false\n"),
+            "step if": (step, step + "        if: ${{ false }}\n"),
+            "quoted if": (step, step + "        \"if\": false\n"),
+            "flow mapping if": (job, job + "    defaults: {run: {shell: sh}}\n"),
+            "or true": (gate, gate + " || true"),
+            "secret env": ("          PR_TITLE:", "          TOKEN: ${{ secrets.GITHUB_TOKEN }}\n          PR_TITLE:"),
+            "head as base": ("BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+                             "BASE_SHA: ${{ github.event.pull_request.head.sha }}"),
+            "checkout with -c": (gate, 'git -c x=y checkout "$HEAD_SHA"\n          ' + gate),
+            "archive": (gate, 'git archive "$HEAD_SHA" | tar x\n          ' + gate),
+            "show to file": (gate, 'git show "$HEAD_SHA":tools/risk_tier.py > f\n          ' + gate),
+            "title on echo": (gate, 'echo "${{ github.event.pull_request.title }}"\n          ' + gate),
+            "shell override": (step, step + "        shell: python {0}\n"),
+            "container": (job, job + "    container: python:3\n"),
+            "second run step": (gate, gate + "\n      - run: |\n          true"),
+            "inline run": ("        run: |\n", "        run: >\n"),
+            "repeated ref": ("          persist-credentials: false\n",
+                             "          persist-credentials: false\n          ref: ${{ github.event.pull_request.head.sha }}\n"),
+        }
+        for name, (old, new) in edits.items():
+            with self.subTest(name):
+                self.assertIn(old, text)
+                self.assertTrue(lane_gate_problems(text.replace(old, new, 1)), name)
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
