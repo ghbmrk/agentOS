@@ -10,8 +10,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem/at"
 )
 
-// REQ: CH-1, HW-2
-
 // The simulated modem behind a pseudo-terminal answers the bridge's own
 // serial opener and driver, as a USB serial port would.
 func TestSimulatedModemOverAPty(t *testing.T) {

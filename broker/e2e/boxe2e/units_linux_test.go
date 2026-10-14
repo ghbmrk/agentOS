@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// REQ: CH-1, HW-2
-
 // execStart returns the last non-empty ExecStart= line of a unit or drop-in.
 func execStart(t *testing.T, path string) string {
 	t.Helper()

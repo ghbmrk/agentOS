@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-// REQ: ONB-3
-
 // The console lines ci_boot.sh greps: a step that passes, an expected
 // failure with its issue, a step that unexpectedly passes, and the steps
 // after a failure, which are blocked rather than run.

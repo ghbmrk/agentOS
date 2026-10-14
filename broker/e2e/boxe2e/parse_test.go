@@ -13,8 +13,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// REQ: HW-1, CH-1, CH-10
-
 // The driver reads the Owner Card the way an owner does: the saved sheet
 // for the values, the display page for which word and group to type. A
 // real display accepts what it reads, and provisions.
@@ -92,8 +90,6 @@ func TestPromptAsks(t *testing.T) {
 		t.Fatal("a rotation prompt parsed as first boot")
 	}
 }
-
-// REQ: CH-12
 
 func TestSMSLinkAndOTPSeed(t *testing.T) {
 	page := []byte(`<a class="button" href="sms:&#43;15550000100?&amp;body=PAIR%20ABCD2345">Text</a>`)

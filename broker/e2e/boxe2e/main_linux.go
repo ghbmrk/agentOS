@@ -24,7 +24,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
-	"os/exec"
+	"os/user"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -34,6 +34,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -42,7 +43,7 @@ import (
 // xfail names the steps known not to pass yet, each with its work-item
 // issue. A listed step that passes fails the run (XPASS), so the list
 // shrinks as the issues close.
-var xfail = map[string]int{"guest-task": 1701}
+var xfail = map[string]int{"guest-task": 1701, "phone-control": 1714}
 
 const (
 	box       = "http://10.42.0.1"
@@ -53,6 +54,13 @@ const (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "seal" {
+		if err := seal(); err != nil {
+			fmt.Println("agentos-e2e: FAIL seal " + oneLine(err.Error()))
+			os.Exit(1)
+		}
+		return
+	}
 	r := newReport(os.Stdout, xfail)
 	d := &driver{carrier: modem.NewCarrier()}
 	r.step("harness", d.harness)
@@ -63,6 +71,7 @@ func main() {
 	r.step("recovery", d.recovery)
 	r.step("host", d.host)
 	r.step("guest-task", d.guestTask)
+	r.step("phone-control", d.phoneControl)
 	r.done()
 	if d.modem != nil {
 		d.modem.Close()
@@ -79,8 +88,16 @@ type driver struct {
 	seed    []byte
 }
 
+// childEnv is every child's whole environment: systemd's own PATH for
+// the system tools the driver runs (ip, systemctl, journalctl).
+var childEnv = childproc.NewEnv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+
+func command(name string, args ...string) *childproc.Cmd {
+	return childproc.Command(context.Background(), childEnv, childproc.Options{}, name, args...)
+}
+
 func run(name string, args ...string) error {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	out, err := command(name, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, oneLine(string(out)))
 	}
@@ -210,23 +227,35 @@ func until(limit time.Duration, f func() (bool, error)) error {
 	}
 }
 
-// claim seals a fresh claim code where a preloaded box keeps it, as the
-// seller does, restarts the page so localui-claim moves it in, and claims
-// the box with it from the phone.
-func (d *driver) claim() error {
+// codeFile carries the claim code from the seal run to the claim step:
+// root's only, on the boot's tmpfs, removed once read.
+const codeFile = "/run/agentos-e2e/claim-code"
+
+// seal runs before any agentOS service starts (agentos-e2e-seal.service):
+// it seals a fresh claim code where a preloaded box keeps it, as the
+// seller does before the box ships, so the page's first start moves it
+// in (localui-claim) and the box boots as a preloaded one.
+func seal() error {
 	code, err := claim.NewCode(rand.Reader)
 	if err != nil {
-		return err
-	}
-	if err := run("systemctl", "stop", "agentos-localui.service"); err != nil {
 		return err
 	}
 	if err := claim.Seal(change.FileStore{Path: claim.StatePath}, code, rand.Reader, func(string) {}); err != nil {
 		return fmt.Errorf("seal: %w", err)
 	}
-	if err := run("systemctl", "start", "agentos-localui.service"); err != nil {
+	return os.WriteFile(codeFile, []byte(code), 0o600)
+}
+
+// claim claims the box from the phone with the code sealed before boot.
+func (d *driver) claim() error {
+	b, err := os.ReadFile(codeFile)
+	if err != nil {
+		return fmt.Errorf("the seal run left no claim code: %w", err)
+	}
+	if err := os.Remove(codeFile); err != nil {
 		return err
 	}
+	code := string(b)
 	if err := until(2*time.Minute, func() (bool, error) {
 		st, loc, _, err := d.get("/")
 		if err != nil {
@@ -259,9 +288,9 @@ func claimDiag(code string) string {
 		}
 		return "present"
 	}
-	unit, _ := exec.Command("systemctl", "show", "agentos-localui.service",
+	unit, _ := command("systemctl", "show", "agentos-localui.service",
 		"-p", "ActiveState,SubState,NRestarts,Result", "--value").Output()
-	logs, _ := exec.Command("journalctl", "-b", "-o", "cat", "--no-pager", "-n", "20",
+	logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager", "-n", "20",
 		"-u", "agentos-localui.service", "-u", "agentosd.service", "-u", "agentos-egress.service").Output()
 	return fmt.Sprintf("diag: sealed=%s moved=%s unit=%s log: %s", where(claim.StatePath), where(claimDst),
 		oneLine(string(unit)), redactLog(string(logs), 12, code, claim.Normalize(code)))
@@ -307,11 +336,11 @@ func (d *driver) waitStep(n string, limit time.Duration) ([]byte, error) {
 // (taking the network step over Ethernet if the box asks), texts PAIR from
 // the phone's line, and waits for the box's reply and the next step.
 func (d *driver) smsPair() error {
-	uid, err := exec.Command("id", "-u", "agentos-modem").Output()
+	u, err := user.Lookup("agentos-modem")
 	if err != nil {
-		return fmt.Errorf("id -u agentos-modem: %w", err)
+		return err
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(uid)))
+	n, err := strconv.Atoi(u.Uid)
 	if err != nil {
 		return err
 	}
@@ -447,5 +476,11 @@ func (d *driver) host() error {
 // so it needs a model stub at the provider boundary, which is not built
 // yet.
 func (d *driver) guestTask() error {
-	return errors.New("not driven yet: needs a model stub at the provider boundary")
+	return errors.New("not driven yet: needs the plan sign-in and a stub behind the Codex worker")
+}
+
+// phoneControl will text a command from the paired number once setup has
+// finished and check the box's reply (#1714).
+func (d *driver) phoneControl() error {
+	return errors.New("not driven yet: needs an inbound text from the paired number and its reply")
 }

@@ -7,8 +7,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem/at"
 )
 
-// REQ: CH-1, HW-2
-
 // The bridge finds the simulated modem through its own discovery, under
 // -sys-root, exactly as it finds a SIM7600G-H's AT port on the box.
 func TestFakeSysrootIsDiscovered(t *testing.T) {

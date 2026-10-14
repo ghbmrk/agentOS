@@ -134,12 +134,16 @@ rm -f "$W/two-a.raw" "$W/two-b.raw"
 if [ -n "${E2E:-}" ]; then
 	cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(base64 -w0 "$HERE/e2e/$2")"; }
 	copy "$W/e2e.raw"
-	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)" \
+	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)" \
 		NIC="user,model=virtio-net-pci" UNTIL="agentos-e2e: DONE\|agentos-health: FAIL" boot "$W/console-e2e.log" "$W/e2e.raw"
 	grep -a "agentos-e2e: " "$W/console-e2e.log" || true
 	has "$W/console-e2e.log" "agentos-e2e: DONE"
+	# The counts on the DONE line too, so a FAIL line split or lost on the console cannot pass.
+	grep -a "agentos-e2e: DONE" "$W/console-e2e.log" | tail -n1 >"$W/e2e-done.log" || true
+	has "$W/e2e-done.log" " fail=0 "
+	has "$W/e2e-done.log" " xpass=0 "
 	hasnt "$W/console-e2e.log" "agentos-e2e: FAIL"
 	hasnt "$W/console-e2e.log" "agentos-e2e: XPASS"
-	rm -f "$W/e2e.raw"
+	rm -f "$W/e2e.raw" "$W/e2e-done.log"
 fi
 exit $fail
