@@ -100,20 +100,20 @@ func coldKeyOf(id string) coldKey {
 }
 
 type entry struct {
-	seq         uint64 // of its RecSubmitted: submission order
-	intent      Intent
-	fp          string
-	efp         string // effectFingerprint
-	state       State
-	permission  Permission
-	attempts    []Attempt
-	quality     Quality
-	authorized  time.Time // when RecAuthorized was journaled
-	dispatched  time.Time // when the latest RecDispatched was journaled
-	submitted   time.Time // when RecSubmitted was journaled
-	erased      bool      // RecErased: params and evidence removed
-	parkedSeq   uint64    // of the latest RecParked
-	notDoneSeq  uint64    // of the latest check that proved an attempt not done
+	seq        uint64 // of its RecSubmitted: submission order
+	intent     Intent
+	fp         string
+	efp        string // effectFingerprint
+	state      State
+	permission Permission
+	attempts   []Attempt
+	quality    Quality
+	authorized time.Time // when RecAuthorized was journaled
+	dispatched time.Time // when the latest RecDispatched was journaled
+	submitted  time.Time // when RecSubmitted was journaled
+	erased     bool      // RecErased: params and evidence removed
+	parkedSeq  uint64    // of the latest RecParked
+	notDoneSeq uint64    // of the latest check that proved an attempt not done
 	// firstDispatchSeq is the seq of its first RecDispatched, and
 	// provedSeq that of the first record that proved one of its attempts
 	// not applied, from any source (a check or the executor itself).
@@ -538,7 +538,6 @@ func (s *SupersededError) Is(target error) bool { return target == ErrState }
 // supersededGuest is the guest's text for a request denied because the
 // same effect already went under another request: fixed words, no IDs.
 const supersededGuest = "the same effect already went under another request"
-
 
 // HeldError says an intent is held behind an unresolved intent with the
 // same effect. It matches ErrUnreconciled with errors.Is.
