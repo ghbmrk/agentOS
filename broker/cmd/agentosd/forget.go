@@ -70,7 +70,7 @@ const (
 	// can be (W3-forget-b2c).
 	forgetAgentNoAgent  = "Not taken back yet: your agent is not running. I will do it when it runs again and text you. Send STATUS to see why."
 	forgetAgentNotTaken = "Not taken back yet: I couldn't save the request. I keep trying and will text you when it's done."
-	forgetAgentNotOpen  = "Not taken back yet: memory is off on this box, so your agent still holds that task. I will do it if memory comes on and text you."
+	forgetAgentNotOpen  = "Not taken back yet: my memory is off, so your agent still holds that task. I will do it if memory comes on and text you."
 	// forgetAgentWhenOpen: an approved item 2 waits for recall to open
 	// (#327 L3 B-3).
 	forgetAgentWhenOpen = "Not taken back yet: memory is not open. I will do it when it opens and text you."
@@ -205,6 +205,10 @@ type ownerForget struct {
 	// whenOpen, if set, runs resumeAgent once recall opens
 	// (LateExecutor.OnOpen); nil when recall is off.
 	whenOpen func()
+	// resume, if set, starts resumeAgent for an item 2 Reconcile found
+	// after the boot's resume may already have run (#1370). Set only by
+	// wireResume, before startup reconcile runs.
+	resume func()
 	// resuming serializes resumeAgent: recall's open runs every queued
 	// OnOpen together, and each run must see the take-backs the one
 	// before it did (Handled), so none is taken back or told twice.
@@ -1224,12 +1228,55 @@ func (f *ownerForget) Reconcile(_ context.Context, in journal.Intent, _ int) jou
 		f.mu.Lock()
 		f.interrupted = append(f.interrupted, in.ID)
 		f.mu.Unlock()
+		// Startup reconcile runs in the background, so recall may have
+		// opened, and its resume run, before this item was found (#1370).
+		if f.resume != nil {
+			f.resume()
+		}
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "approved; interrupted by a restart; resumed when recall opens"}
 	}
 	if goal := grants.ForgetGoal(in.ID); goal != "" && f.forgotten != nil && f.forgotten(goal) {
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "tombstoned; finished at start"}
 	}
 	return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "no tombstone"}
+}
+
+// wireResume sets how an interrupted item 2 is resumed and returns the
+// boot's own resume, which main calls once boot setup is done: the gate,
+// the owner channel and the agent machine attached. onOpen is recall's
+// LateExecutor.OnOpen when recall is configured, nil when it is off.
+//
+// Recall on: whenOpen, resume and the boot's resume each queue a run for
+// recall's open, which comes after boot setup (#1370). Recall off: a run
+// Reconcile starts waits for the boot's resume (Security S1 on #1382).
+// Startup reconcile starts inside daemon.Run, before boot setup, and a run
+// then would judge item 2 without the gate or the agent, tell the owner
+// something false, and drain the queue the boot's resume reads, so the
+// owner would never hear that it cannot be done (forgetAgentNotOpen).
+// resumeAgent's queue makes one of the two runs tell it, once.
+func (f *ownerForget) wireResume(ctx context.Context, onOpen func(func())) (boot func()) {
+	run := func() { go f.resumeAgent(ctx) }
+	if onOpen != nil {
+		f.whenOpen = func() { onOpen(run) }
+		f.resume = f.whenOpen
+		return f.whenOpen
+	}
+	f.whenOpen = nil
+	booted := make(chan struct{})
+	f.resume = func() {
+		go func() {
+			select {
+			case <-booted:
+				f.resumeAgent(ctx)
+			case <-ctx.Done():
+			}
+		}()
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(booted) })
+		run()
+	}
 }
 
 // owedForget is a forget whose done text is owed: when the task was from

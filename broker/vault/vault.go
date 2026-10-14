@@ -21,9 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // KeySize is the data key length: AES-256.
@@ -171,31 +172,62 @@ func Open(path string, key []byte) (*Vault, error) {
 		id: p.ID, counterAuth: p.CounterAuth, anchors: p.Anchors, bound: -1, keyID: env.KeyID, keysOK: p.Keys, nextKeys: p.Next}, nil
 }
 
+// Item is one secret for PutMany.
+type Item struct {
+	Name, Kind string
+	Value      []byte
+}
+
 // Put stores or replaces a secret and writes the vault before returning.
 func (v *Vault) Put(name, kind string, value []byte) error {
-	if name == "" || kind == "" {
-		return errors.New("vault: name and kind are required")
-	}
-	if len(value) < MinValueLen {
-		return fmt.Errorf("vault: value shorter than %d bytes", MinValueLen)
+	return v.PutMany([]Item{{Name: name, Kind: kind, Value: value}})
+}
+
+// PutMany stores or replaces several secrets in one write: the vault, in
+// memory and on the drive, holds all of them or none. A write that fails
+// only at the directory sync has landed, so it counts as stored (#1472). Values that must be
+// redacted together, such as an Owner Card and its parts, go in one call,
+// so no failure or crash between writes leaves one of them unredacted
+// (CRED-7).
+func (v *Vault) PutMany(items []Item) error {
+	seen := map[string]bool{}
+	for _, it := range items {
+		if it.Name == "" || it.Kind == "" {
+			return errors.New("vault: name and kind are required")
+		}
+		if len(it.Value) < MinValueLen {
+			return fmt.Errorf("vault: value shorter than %d bytes", MinValueLen)
+		}
+		if seen[it.Name] {
+			return fmt.Errorf("vault: %q given twice", it.Name)
+		}
+		seen[it.Name] = true
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
 		return ErrClosed
 	}
-	old, had := v.entries[name]
-	v.entries[name] = record{Kind: kind, Value: append([]byte(nil), value...)}
+	old := map[string]record{}
+	for _, it := range items {
+		if r, had := v.entries[it.Name]; had {
+			old[it.Name] = r
+		}
+		v.entries[it.Name] = record{Kind: it.Kind, Value: append([]byte(nil), it.Value...)}
+	}
 	if err := v.save(); err != nil {
-		if had {
-			v.entries[name] = old
-		} else {
-			delete(v.entries, name)
+		for _, it := range items {
+			wipe(v.entries[it.Name].Value)
+			if r, had := old[it.Name]; had {
+				v.entries[it.Name] = r
+			} else {
+				delete(v.entries, it.Name)
+			}
 		}
 		return err
 	}
-	if had {
-		wipe(old.Value)
+	for _, r := range old {
+		wipe(r.Value)
 	}
 	return nil
 }
@@ -275,15 +307,32 @@ func (v *Vault) Close() error {
 // save seals the whole vault and replaces the file atomically: a crash
 // leaves either the old file or the new one. With a counter bound, the
 // file carries the counter's next value and the counter advances after
-// the write (rollback.go). Caller holds mu.
+// the write (rollback.go). A failed directory sync after the rename
+// returns nil with a warning (landed). Caller holds mu.
 func (v *Vault) save() error {
 	if err := v.ensureID(); err != nil {
 		return err
 	}
 	if v.counter == nil {
-		return v.write(v.anchors)
+		return v.landed(v.write(v.anchors))
 	}
 	return v.advance()
+}
+
+// landed treats a write that failed only at the directory sync as done
+// (#1472): the new file is in place and is what the vault reads, so memory
+// must keep matching it. Rolling memory back would leave the old values
+// in memory, and the next save would write them back over the new ones.
+// The owner is warned that a power cut before the next change could still
+// undo this one. Any other error is returned as it is.
+func (v *Vault) landed(err error) error {
+	if !errors.Is(err, durable.ErrDirSync) {
+		return err
+	}
+	if v.warn != nil {
+		v.warn("this change is saved, but a power cut before the next change could undo it")
+	}
+	return nil
 }
 
 // write seals the entries with anchors and replaces the file. Caller holds
@@ -305,53 +354,13 @@ func (v *Vault) write(anchors []Anchor) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(v.path, raw)
+	return writeFile(v.path, raw, 0o600)
 }
 
-// afterRename lets tests fail writeAtomic after the new file is in place,
-// as a failed directory sync would.
-var afterRename = func(path string) error { return nil }
-
-// writeAtomic replaces path with raw, mode 0600: a crash leaves either the
-// old file or the new one.
-func writeAtomic(path string, raw []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".vault-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
-	if err := afterRename(path); err != nil {
-		return err
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	serr := d.Sync()
-	if err := d.Close(); serr == nil {
-		serr = err
-	}
-	return serr
-}
+// writeFile replaces a vault file, mode 0600: a crash leaves either the old
+// file or the new one. A variable so tests can fail it after the new file
+// is in place, as a failed directory sync would.
+var writeFile = durable.WriteFile
 
 func newAEAD(key []byte) (cipher.AEAD, error) {
 	if len(key) != KeySize {

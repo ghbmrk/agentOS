@@ -16,7 +16,7 @@ import (
 // box's cgroups or they lack a controller, so no machine may start (RES-2:
 // none runs unbudgeted). It names no controller (UX ruling on #155); the
 // log line lists the missing ones.
-const agentNoLimits = "Agent: off, the box can't yet keep the agent within its limits; it needs an update."
+const agentNoLimits = "Your agent is off: I can't yet keep it within its limits, so I need an update."
 
 // cgroupHost is where the broker reads its cgroup facts; tests point it at
 // a fake cgroupfs.

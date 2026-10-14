@@ -154,6 +154,10 @@ type guardRig struct {
 	urgent        []bool
 	deferFixtures bool
 	g             *Guard
+	// notifyTo and clearTo, if set, are the guard's Notify and
+	// NotifyClear.
+	notifyTo func(text string, urgent bool)
+	clearTo  func(text string, keys []string)
 }
 
 func newGuardRig(t *testing.T, b *box) *guardRig {
@@ -170,6 +174,10 @@ func (r *guardRig) reopen(t *testing.T) {
 	if r.fx != nil {
 		cfg.Fixer = r.fx
 	}
+	if r.notifyTo != nil {
+		cfg.Notify = r.notifyTo
+	}
+	cfg.NotifyClear = r.clearTo
 	g, err := NewGuard(cfg)
 	if err != nil {
 		t.Fatal(err)

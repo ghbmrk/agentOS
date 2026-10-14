@@ -3,8 +3,10 @@ package localui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
@@ -14,9 +16,14 @@ import (
 // enrollment it saw the vault confirm. The code seed is made in the vault
 // process (egress K17) and only passes through this page.
 //
-// Networks, BoxNumber, HostInfo, Send, TrustHost and the provider hooks
-// are not served by agentosd yet: they answer nothing or an error, so the
-// steps that need them wait.
+// JoinNetwork goes through agentosd to its netjoin helper (P2-2w c3;
+// Security L8), and Networks asks it for the networks in range (P2-2w
+// c4b). Providers, ConnectAPIKey and SetPrivateOK go through agentosd to
+// the vault process (P2-2w c4e; CRED-5, CAP-9). BoxNumber, Send and
+// PairTexts go through agentosd to the modem bridge (P2-2w c4c; §8.1,
+// CH-12): agentosd sends only setup's fixed texts and passes on only PAIR
+// texts. HostInfo, TrustHost and StartDeviceCode are not served by agentosd
+// yet: they answer nothing or an error, so the steps that need them wait.
 type AgentosdSetup struct{ Owner Owner }
 
 var errNotServed = errors.New("localui: not served by agentosd yet")
@@ -43,17 +50,27 @@ func (a AgentosdSetup) Wait(ctx context.Context, every time.Duration) error {
 	}
 }
 
+// Networks is the home networks agentosd's helper sees, or none: an
+// error or a list over the bound gives the typed-name step.
+func (a AgentosdSetup) Networks() []string {
+	var n localapi.Networks
+	if a.call(localapi.OpSetupNetworks, nil, &n) != nil || len(n.SSIDs) == 0 || len(n.SSIDs) > localapi.MaxNetworks {
+		return nil
+	}
+	return n.SSIDs
+}
+
 func (a AgentosdSetup) Progress() Progress {
 	var p localapi.SetupProgress
 	if a.call(localapi.OpSetupProgress, nil, &p) != nil {
 		return Progress{Phase: "booting"}
 	}
 	switch p.Phase {
-	case "booting", "updating", "ready":
+	case "booting", "updating", "offline", "ready":
 	default:
 		return Progress{Phase: "booting"}
 	}
-	return Progress{Phase: p.Phase, Updated: p.Updated, Online: p.Online}
+	return Progress{Phase: p.Phase, Updated: p.Updated, Online: p.Online, NeverOnline: p.NeverOnline}
 }
 
 func (a AgentosdSetup) EnrollCode() (string, error) {
@@ -103,15 +120,163 @@ func (a AgentosdSetup) Finish(owner string) error {
 	return err
 }
 
-func (AgentosdSetup) Networks() []string                 { return nil }
-func (AgentosdSetup) JoinNetwork(string, string) error   { return errNotServed }
-func (AgentosdSetup) BoxNumber() string                  { return "" }
-func (AgentosdSetup) HostInfo() string                   { return "" }
-func (AgentosdSetup) Send(string, string) error          { return errNotServed }
-func (AgentosdSetup) TrustHost(bool) error               { return errNotServed }
-func (AgentosdSetup) Providers() []Provider              { return nil }
-func (AgentosdSetup) ConnectAPIKey(string, string) error { return errNotServed }
-func (AgentosdSetup) SetPrivateOK(string, bool) error    { return errNotServed }
+// JoinNetwork has agentosd's helper write the home Wi-Fi connection. It
+// waits up to localapi.JoinTimeout, longer than agentosd's own call to the
+// helper (Security L8.4). A box that cannot join Wi-Fi at all answers
+// ErrWiFiUnavailable (#1429); any other error shows the page's one network
+// error.
+func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), localapi.JoinTimeout)
+	defer cancel()
+	err := a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
+	if refused(err, localapi.ErrJoinUnavailable) {
+		return fmt.Errorf("%w (%w)", ErrWiFiUnavailable, err)
+	}
+	return err
+}
+
+func (AgentosdSetup) HostInfo() string     { return "" }
+func (AgentosdSetup) TrustHost(bool) error { return errNotServed }
+
+// Providers lists the vault's providers. An error lists none, so the AI
+// step offers nothing and setup does not finish (ONB-3).
+func (a AgentosdSetup) Providers() []Provider {
+	var ps localapi.SetupProviders
+	if err := a.call(localapi.OpSetupProviders, nil, &ps); err != nil {
+		return nil
+	}
+	out := make([]Provider, 0, len(ps.Providers))
+	for _, p := range ps.Providers {
+		out = append(out, Provider{ID: p.ID, Name: p.Name, APIKey: p.APIKey, DeviceCode: p.DeviceCode, Connected: p.Connected, PrivateOK: p.PrivateOK})
+	}
+	return out
+}
+
+// ConnectAPIKey passes the key to agentosd, which passes it to the vault
+// process; the page keeps nothing (CRED-1, CRED-5). The vault checks the
+// key with its provider first (ONB-3), so the call waits up to
+// localapi.APIKeyTimeout, longer than agentosd waits for the vault
+// (Security L8.4). Each refusal is named as the page's error, beside the
+// code agentosd answered.
+func (a AgentosdSetup) ConnectAPIKey(id, key string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), localapi.APIKeyTimeout)
+	defer cancel()
+	err := a.Owner.Call(ctx, localapi.OpSetupAPIKey, localapi.APIKey{Provider: id, Key: key}, nil)
+	for code, named := range map[string]error{
+		localapi.ErrKeyRefused:        ErrKeyRefused,
+		localapi.ErrKeyUnchecked:      ErrKeyUnchecked,
+		localapi.ErrLimited:           ErrKeysLimited,
+		localapi.ErrBadArgs:           ErrKeyNotTaken,
+		localapi.ErrSetupClosed:       ErrSetupClosed,
+		localapi.ErrEnrollUnavailable: ErrCodesUnavailable,
+	} {
+		if refused(err, code) {
+			return fmt.Errorf("%w (%w)", named, err)
+		}
+	}
+	return err
+}
+
+// SetPrivateOK records the owner's private-data answer in the vault, where
+// the router reads it (CAP-9).
+func (a AgentosdSetup) SetPrivateOK(id string, ok bool) error {
+	return a.call(localapi.OpSetupPrivateOK, localapi.PrivateOK{Provider: id, OK: ok}, nil)
+}
+
 func (AgentosdSetup) StartDeviceCode(string) (string, string, error) {
 	return "", "", errNotServed
+}
+
+// BoxNumber answers whether agentosd's modem line can text, and the box's
+// own number when the line reports one; a SIM that texts without
+// reporting its number answers "", true.
+func (a AgentosdSetup) BoxNumber() (string, bool) {
+	var l localapi.SetupLine
+	if a.call(localapi.OpSetupLine, nil, &l) != nil || !l.Ready {
+		return "", false
+	}
+	if !phoneRe.MatchString(l.Number) {
+		return "", true
+	}
+	return l.Number, true
+}
+
+// Send has agentosd text one of setup's fixed texts. It waits up to
+// localapi.SetupSendTimeout, longer than agentosd's own wait for the
+// bridge (Security L8.4).
+func (a AgentosdSetup) Send(to, text string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), localapi.SetupSendTimeout)
+	defer cancel()
+	return a.Owner.Call(ctx, localapi.OpSetupSend, localapi.SetupSend{To: to, Text: text}, nil)
+}
+
+// PairTexts offers each PAIR text that reaches the box to s (OfferText)
+// and texts back its reply, until ctx ends or agentosd answers that setup
+// is closed (§8.1 pairing). A text that arrives while it is not running is
+// not offered again: the owner texts again.
+func (a AgentosdSetup) PairTexts(ctx context.Context, s *Server, retry time.Duration) {
+	for ctx.Err() == nil {
+		var in localapi.SetupInbound
+		cctx, cancel := context.WithTimeout(ctx, localapi.SetupInboundWait+callTimeout)
+		err := a.Owner.Call(cctx, localapi.OpSetupInbound, nil, &in)
+		cancel()
+		switch {
+		case refused(err, localapi.ErrSetupClosed):
+			return
+		case err != nil:
+			select {
+			case <-ctx.Done():
+			case <-time.After(retry):
+			}
+			continue
+		case in.From == "":
+			continue
+		}
+		if reply, _ := s.OfferText(in.From, in.Text); reply != "" {
+			a.Send(in.From, reply) // a reply that did not go: the page still shows the step
+		}
+	}
+}
+
+// CardFinish is AgentosdSetup with the page's Owner Card step (HW-1,
+// #1115): Finish reports a confirmed card to agentosd, whose finish holds
+// until it is (card pending); a held card is not reported.
+type CardFinish struct {
+	AgentosdSetup
+	Card interface{ Hold() error }
+}
+
+func (c CardFinish) Finish(owner string) error {
+	if c.Card != nil && c.Card.Hold() == nil {
+		if err := c.call(localapi.OpSetupCard, localapi.SetupCard{Confirmed: true}, nil); err != nil {
+			return err
+		}
+	}
+	return c.AgentosdSetup.Finish(owner)
+}
+
+// APNet reports the card's Wi-Fi network to agentosd, which writes it for
+// agentos-ap to serve at the confirm (#1185). The password goes only
+// there (CRED-1).
+func (a AgentosdSetup) APNet(ssid, password string) error {
+	return a.call(localapi.OpSetupAPNet, localapi.SetupAPNet{SSID: ssid, Password: password}, nil)
+}
+
+// NetReporter takes the card's Wi-Fi network; AgentosdSetup is one.
+type NetReporter interface {
+	APNet(ssid, password string) error
+}
+
+// ServeCardNet is the card step's Provision with the card's network
+// reported first (#1185): the confirm latches only after both, so
+// agentos-ap has the network to switch to when it sees the latch. A
+// report that fails fails the provision, and the card stays shown for a
+// retry.
+func ServeCardNet(provision func(*card.Card) error, a NetReporter) func(*card.Card) error {
+	return func(c *card.Card) error {
+		if err := a.APNet(c.WiFiName, c.WiFiPassword); err != nil {
+			return fmt.Errorf("localui: reporting the card's Wi-Fi: %w", err)
+		}
+		return provision(c)
+	}
 }

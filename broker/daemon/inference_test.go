@@ -84,9 +84,11 @@ var netOK = map[string]allowance{
 	"modelroute": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
 	// The owner's mail account's client (SR3-mail-w2), as modelroute.
 	"mail/mailsock": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer"}},
-	"loopbuild":     {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
-	"journal":       {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
-	"update":        {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
+	// The home Wi-Fi helper's client (P2-2w c3; Security L8), as modelroute.
+	"netjoin":   {"dials only the netjoin helper's unix socket", []string{"net.Dialer"}},
+	"loopbuild": {"builder machines' unix listeners, capped (W3-builder)", []string{"net.Listen", "net.Listener", "net.Conn", "net.ErrClosed"}},
+	"journal":   {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
+	"update":    {"flock on the update store", []string{"syscall.Flock", "syscall.LOCK_EX"}},
 	// Recall (CAP-3, #59): one broker per index, as for the journal.
 	"recall": {"flock on the recall store", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
 	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, the FICLONE ioctl for copies, and handle-relative deletion in a stopped worker's layer (CAP-8c), and directory handles to measure a layer past the path limit",
@@ -179,8 +181,9 @@ var socketPkgs = map[string]bool{
 // unixDialers are the packages whose client types may be built, as
 // composite literals that set their own non-nil transport or dialer
 // (clientTypes), each dial on "unix" to a configured address: modelroute
-// and the mail socket's client (SR3-mail-w2), both to the vault process.
-var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true}
+// and the mail socket's client (SR3-mail-w2), both to the vault process,
+// and the netjoin helper's client (P2-2w c3).
+var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true}
 
 // clients are the names that hold or open a connection, by package. In
 // unixDialers the types are allowed only as composite literals that set
@@ -649,11 +652,21 @@ func TestEscapeOKNamesTheLoopRunners(t *testing.T) {
 
 // envExempt are the functions in non-test broker code that start a child
 // without an explicit environment, so it inherits the process's, and why
-// each may. Only test fixtures outside the image remain (P3-4b-3r-env);
+// each may. None remain: the last two, the test fixtures swtpm and
+// quotatest, start through childproc since P3-4b-3r-env-r8b;
 // TestEnvExemptionsAreTestFixturesOnly pins that no binary links one.
-var envExempt = map[string]string{
-	"tpmseal/swtpm/swtpm.go:start":    "the software TPM, a test fixture outside the image",
-	"quota/quotatest/quotatest.go:On": "mkfs and mount in a test helper, outside the image",
+var envExempt = map[string]string{}
+
+// vendorEnvExempt are the same in vendored third-party code, each with the
+// decision that took it. TestVendorEnvExemptionsStayOutOfAgentosd pins
+// that agentosd links none of them, and the walk drops an exemption no
+// longer needed, as for envExempt.
+var vendorEnvExempt = map[string]string{
+	// godbus (D-108): dbus-launch for session-bus autolaunch, and
+	// launchctl on macOS. agentos-netjoin connects to the system bus only
+	// and its unit sets no environment (netjoin ASSUMPTIONS N8).
+	"vendor/github.com/godbus/dbus/v5/conn_other.go:var execCommand":               "D-108",
+	"vendor/github.com/godbus/dbus/v5/conn_darwin.go:getSessionBusPlatformAddress": "D-108",
 }
 
 // launcherPkgs are the packages whose calls start a child or read the
@@ -1559,7 +1572,7 @@ func TestEveryChildGetsAnExplicitEnvironment(t *testing.T) {
 		for _, fn := range noEnv {
 			key := filepath.ToSlash(rel) + ":" + fn
 			seen[key] = true
-			if envExempt[key] == "" {
+			if envExempt[key] == "" && vendorEnvExempt[key] == "" {
 				bad = append(bad, key)
 			}
 		}
@@ -1582,6 +1595,31 @@ func TestEveryChildGetsAnExplicitEnvironment(t *testing.T) {
 	for k := range envExempt {
 		if !seen[k] {
 			t.Errorf("envExempt names %s, which now sets Env or is gone: drop it", k)
+		}
+	}
+	for k := range vendorEnvExempt {
+		if !seen[k] {
+			t.Errorf("vendorEnvExempt names %s, which now sets Env or is gone: drop it", k)
+		}
+	}
+}
+
+// REQ: ARC-2
+//
+// P2-2w c3 (D-108): a vendored package with an exempt child is never in
+// agentosd's graph; only agentos-netjoin links godbus.
+func TestVendorEnvExemptionsStayOutOfAgentosd(t *testing.T) {
+	linked := map[string]bool{}
+	for _, p := range linkedDeps(t) {
+		linked[p.path] = true
+	}
+	if !linked[module+"daemon"] {
+		t.Fatalf("agentosd's graph lacks the daemon: %d packages", len(linked))
+	}
+	for k := range vendorEnvExempt {
+		file, _, _ := strings.Cut(k, ":")
+		if pkg := strings.TrimPrefix(filepath.ToSlash(filepath.Dir(file)), "vendor/"); linked[pkg] {
+			t.Errorf("vendorEnvExempt names %s, but agentosd links %s", k, pkg)
 		}
 	}
 }

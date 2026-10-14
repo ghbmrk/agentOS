@@ -30,12 +30,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -63,6 +63,14 @@ type Event struct {
 // denials (ADP-10), and a proxy that could drop them is refused.
 type Auditor interface{ Egress(Event) }
 
+// Redactor redacts vault values from agent-bound bytes: *vault.Redactor,
+// which holds the values, or *vault.HashRedactor, which holds only keyed
+// hashes of them (SIM-split).
+type Redactor interface {
+	Redact([]byte) []byte
+	Writer(io.Writer) *vault.Writer
+}
+
 // Secrets is the part of the vault the proxy uses.
 type Secrets interface {
 	Secret(name string) (vault.Secret, bool)
@@ -82,12 +90,31 @@ type Config struct {
 	Adapters []Adapter
 	// Grants maps an agent machine to the adapters it may use.
 	Grants map[string][]string
-	Vault  Secrets
-	Audit  Auditor
+	// Vault gives the proxy the credentials it injects. It is nil when
+	// every adapter has a holder (SIM-split): then the proxy reads no
+	// secret, and Redaction is required instead.
+	Vault Secrets
+	// Holders maps a credential name to the RoundTripper of the holder
+	// process that keeps it (SIM-split). The proxy sends the holder the
+	// checked request with no credential; the holder injects its own,
+	// opens TLS to the adapter's host, swaps any exchange response, and
+	// redacts its own secret. A holder answers a dropped exchange with
+	// 502 and HolderDropHeader. Holders are all or nothing: with Holders
+	// set, Vault must be nil and every adapter's credential needs one.
+	Holders map[string]http.RoundTripper
+	// Redaction returns the redactor for every vault value when Vault is
+	// nil; it holds no plaintext (vault.HashRedactor).
+	Redaction func() (Redactor, error)
+	Audit     Auditor
 	// Transport sends upstream requests; nil means a fresh http.Transport
-	// with no proxy from the environment and bounded connect, handshake,
-	// and response-header waits.
+	// with no proxy from the environment, bounded connect, handshake, and
+	// response-header waits, and every dial and handshake owned by Guard.
+	// A caller-supplied Transport must dial through a netguard policy too
+	// (DEV-2); tools/netguardcheck.py checks the repo's own dialers.
 	Transport http.RoundTripper
+	// Guard is the home-network address policy (DEV-2) the default
+	// Transport uses; nil means a policy with only the IANA registries.
+	Guard *netguard.Policy
 	// MaxBody caps request bodies; zero means DefaultMaxBody.
 	MaxBody int64
 	// MaxConcurrent caps one machine's requests in flight; zero means
@@ -99,6 +126,20 @@ type Config struct {
 	// than LabelPublic, is treated as private: provider-side tools denied.
 	Label func(machine string) string
 	Now   func() time.Time
+	// Swapper holds the credentials a credential exchange issues; required
+	// when any operation declares a Response.
+	Swapper Swapper
+	// RouteFailed tells the owner that an adapter's route stopped, and
+	// why (a Reason constant); required when any operation declares a
+	// Response or Refused statuses. It is called once per stop.
+	RouteFailed func(adapter, reason string)
+	// Granted, if set, grants per request what Grants does not: it is
+	// asked with the calling machine itself, never the grants entry a
+	// replay machine borrows, and the adapter, only when no static grant
+	// covers them, and its answer may change while the proxy serves (the
+	// vault process grants a key stored at setup, CRED-5f-mr-grant). Nil
+	// grants nothing beyond Grants.
+	Granted func(machine, adapter string) bool
 }
 
 // LabelPublic is the REV-5 label under which a machine may use
@@ -110,16 +151,22 @@ type Proxy struct {
 	labelOf  func(string) string
 	adapters map[string]Adapter
 	grants   map[string]map[string]bool
+	granted  func(machine, adapter string) bool
 	vault    Secrets
+	holders  map[string]http.RoundTripper
+	redact   func() (Redactor, error)
 	rt       http.RoundTripper
+	rtModel  http.RoundTripper // the default transport's second pool, for inference operations
 	audit    Auditor
 	maxBody  int64
 	maxConc  int
 	cap      Cap
 	now      func() time.Time
+	xch      exchangeHooks
 
 	mu    sync.Mutex
 	usage map[string]*machineUsage
+	stops map[string]string // adapter -> why its route stopped (CRED-5t)
 }
 
 type machineUsage struct {
@@ -130,8 +177,11 @@ type machineUsage struct {
 
 // New validates every declaration and grant and returns a proxy.
 func New(cfg Config) (*Proxy, error) {
-	if cfg.Vault == nil {
+	switch {
+	case cfg.Vault == nil && cfg.Redaction == nil:
 		return nil, errors.New("egress: vault required")
+	case cfg.Vault != nil && (cfg.Redaction != nil || len(cfg.Holders) > 0):
+		return nil, errors.New("egress: holders and the vault are exclusive")
 	}
 	if cfg.Audit == nil {
 		return nil, errors.New("egress: auditor required")
@@ -139,7 +189,10 @@ func New(cfg Config) (*Proxy, error) {
 	p := &Proxy{
 		adapters: map[string]Adapter{},
 		grants:   map[string]map[string]bool{},
+		granted:  cfg.Granted,
 		vault:    cfg.Vault,
+		holders:  cfg.Holders,
+		redact:   cfg.Redaction,
 		rt:       cfg.Transport,
 		audit:    cfg.Audit,
 		maxBody:  cfg.MaxBody,
@@ -148,10 +201,34 @@ func New(cfg Config) (*Proxy, error) {
 		now:      cfg.Now,
 		usage:    map[string]*machineUsage{},
 		labelOf:  cfg.Label,
+		xch:      exchangeHooks{swapper: cfg.Swapper, routeFailed: cfg.RouteFailed},
+		stops:    map[string]string{},
 	}
 	for _, a := range cfg.Adapters {
 		if err := a.validate(); err != nil {
 			return nil, fmt.Errorf("egress: %v", err)
+		}
+		_, held := p.holders[a.Credential]
+		if p.vault == nil && !held {
+			return nil, fmt.Errorf("egress: adapter %s: credential %s has no holder", a.Name, a.Credential)
+		}
+		// Compile response rules on copies, so the caller's declaration
+		// is never written.
+		a.Operations = append([]Operation(nil), a.Operations...)
+		for i, op := range a.Operations {
+			if op.Response != nil {
+				rule := ResponseRule{Fields: append([]Field(nil), op.Response.Fields...)}
+				if err := rule.compile(); err != nil {
+					return nil, fmt.Errorf("egress: adapter %s: operation %s: %v", a.Name, op.Name, err)
+				}
+				if p.xch.swapper == nil && !held {
+					return nil, fmt.Errorf("egress: adapter %s: operation %s exchanges credentials and no swapper is set", a.Name, op.Name)
+				}
+				a.Operations[i].Response = &rule
+			}
+			if (op.Response != nil || len(op.Refused) > 0) && p.xch.routeFailed == nil {
+				return nil, fmt.Errorf("egress: adapter %s: operation %s can stop its route and nobody would be told", a.Name, op.Name)
+			}
 		}
 		if _, dup := p.adapters[a.Name]; dup {
 			return nil, fmt.Errorf("egress: adapter %s declared twice", a.Name)
@@ -168,13 +245,15 @@ func New(cfg Config) (*Proxy, error) {
 		}
 	}
 	if p.rt == nil {
-		p.rt = &http.Transport{
-			DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
-			ForceAttemptHTTP2:     true,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Minute,
-			IdleConnTimeout:       90 * time.Second,
+		g := cfg.Guard
+		if g == nil {
+			g = netguard.New(netguard.Config{})
 		}
+		// Two pools, so a connection a model call made to a pinned host is
+		// never reused by a request that has no exception (DEV-2).
+		p.rt, p.rtModel = DefaultTransport(g), DefaultTransport(g)
+	} else {
+		p.rtModel = p.rt
 	}
 	if p.maxBody <= 0 {
 		p.maxBody = DefaultMaxBody
@@ -276,7 +355,14 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		w.Header().Set(DeniedHeader, "1")
 		http.Error(w, "egress denied: "+reason, status)
 	}
-	red, err := p.vault.Redactor()
+	// The proxy never tunnels: a CONNECT would be a dial to any address the
+	// guest names (DEV-2).
+	if r.Method == http.MethodConnect {
+		ev.Path = ""
+		deny(http.StatusForbidden, "CONNECT not supported")
+		return
+	}
+	red, err := p.redactor()
 	if err != nil {
 		deny(http.StatusServiceUnavailable, "vault unavailable")
 		return
@@ -296,7 +382,7 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		return
 	}
 	ev.Adapter = a.Name
-	if !p.grants[grantsOf][a.Name] {
+	if !p.grants[grantsOf][a.Name] && (p.granted == nil || !p.granted(machine, a.Name)) {
 		deny(http.StatusForbidden, "adapter not granted to this machine")
 		return
 	}
@@ -307,6 +393,12 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		return
 	}
 	ev.Operation = op.Name
+	// CRED-5t: a stopped route's requests never reach the provider, so a
+	// CLI's retries cannot worsen an account restriction.
+	if why, stopped := p.stopped(a.Name); stopped {
+		deny(http.StatusServiceUnavailable, "route stopped: "+why)
+		return
+	}
 	// ADP-10: apply the verb class before forwarding. Reads have no effect
 	// on the account. Every other verb needs an intent in the journal
 	// before it reaches the service, and the proxy has no intent path yet
@@ -337,13 +429,27 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 			return
 		}
 	}
-	sec, ok := p.vault.Secret(a.Credential)
-	if !ok {
-		deny(http.StatusServiceUnavailable, "credential not in vault")
-		return
+	holder := p.holders[a.Credential]
+	var sec vault.Secret
+	if holder == nil {
+		var ok bool
+		if sec, ok = p.vault.Secret(a.Credential); !ok {
+			deny(http.StatusServiceUnavailable, "credential not in vault")
+			return
+		}
+		// The redactor was built at request start; a rotation since then
+		// would inject a key it does not know. Redact the key actually sent.
+		red = red.(*vault.Redactor).With([]byte(sec.Reveal()))
 	}
 
-	up, err := http.NewRequestWithContext(r.Context(), op.Method, "https://"+a.Host+upPath, bytes.NewReader(body))
+	// Only a routed model call to a declared inference operation may reach
+	// a pinned compute host or hosted route; nothing else gets a network
+	// exception (DEV-2).
+	ctx := r.Context()
+	if op.Inference {
+		ctx = netguard.WithPurpose(ctx, netguard.PurposeModelCall)
+	}
+	up, err := http.NewRequestWithContext(ctx, op.Method, "https://"+a.Host+upPath, bytes.NewReader(body))
 	if err != nil {
 		deny(http.StatusBadRequest, "bad request")
 		return
@@ -359,10 +465,28 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		up.Header.Set("Content-Type", "application/json")
 	}
 	up.Header.Set("Accept-Encoding", "identity")
-	up.Header.Set(a.Inject.Header, a.Inject.Prefix+sec.Reveal())
+	rt := p.rt
+	if op.Inference {
+		rt = p.rtModel
+	}
+	if holder != nil {
+		rt = holder
+		up.Header.Del(LabelHeader)
+		if labelOf() == LabelPublic {
+			up.Header.Set(LabelHeader, LabelPublic)
+		}
+	} else {
+		up.Header.Set(a.Inject.Header, a.Inject.Prefix+sec.Reveal())
+	}
 
 	p.charge(machine, 1, int64(len(body)))
-	resp, err := p.rt.RoundTrip(up)
+	resp, err := rt.RoundTrip(up)
+	if errors.Is(err, netguard.ErrDenied) {
+		// The destination is a home-network address, or a pinned host
+		// whose key changed: refused, journaled, and no request sent.
+		deny(http.StatusForbidden, "destination refused by the home-network address policy")
+		return
+	}
 	if err != nil {
 		ev.Allowed, ev.Status, ev.Reason = true, http.StatusBadGateway, "upstream unreachable"
 		audit.Egress(ev)
@@ -377,6 +501,56 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 		ev.Allowed, ev.Status, ev.Reason = true, http.StatusBadGateway, "encoded response refused"
 		audit.Egress(ev)
 		http.Error(w, "egress: encoded response refused", http.StatusBadGateway)
+		return
+	}
+
+	// CRED-5t: neither a refusal of the login nor an exchange's response
+	// reaches the guest unless it is in its declared, swapped shape.
+	if op.refused(resp.StatusCode) {
+		p.stop(a.Name, ReasonLoginRefused)
+		ev.Status = resp.StatusCode
+		ev.Reason = ReasonLoginRefused
+		audit.Egress(ev)
+		w.Header().Set(DeniedHeader, "1")
+		http.Error(w, "egress denied: route stopped: "+ReasonLoginRefused, http.StatusServiceUnavailable)
+		return
+	}
+	if op.Response != nil {
+		var out []byte
+		var err error
+		if holder != nil {
+			out, err = heldExchange(resp)
+		} else {
+			var commit func() error
+			out, commit, err = op.Response.swap(resp, a.Name, p.xch.swapper)
+			if err == nil {
+				err = commit()
+			}
+		}
+		if err != nil {
+			ev.Status = resp.StatusCode
+			ev.Reason = ReasonUnswappable
+			// An error status is the provider failing, not answering in
+			// another shape; anything else may carry credentials the
+			// proxy cannot find.
+			if resp.StatusCode < 400 || resp.Header.Get(HolderDropHeader) == DropUnswappable {
+				p.stop(a.Name, ReasonUnswappable)
+			} else {
+				ev.Reason = "credential exchange answered with an error; dropped"
+			}
+			audit.Egress(ev)
+			w.Header().Set(DeniedHeader, "1")
+			http.Error(w, "egress denied: "+ev.Reason, http.StatusBadGateway)
+			return
+		}
+		p.charge(machine, 0, int64(len(out)))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		ev.Allowed, ev.Status = true, http.StatusOK
+		audit.Egress(ev)
+		rw := red.Writer(w)
+		rw.Write(out)
+		rw.Close()
 		return
 	}
 
@@ -413,6 +587,42 @@ func (p *Proxy) serve(machine, grantsOf string, labelOf func() string, audit Aud
 	if fl != nil {
 		fl.Flush()
 	}
+}
+
+// HolderDropHeader is set by a holder on the 502 with which it drops an
+// exchange response it could not swap; its value says why.
+const HolderDropHeader = "Agentos-Holder-Drop"
+
+// HolderDropHeader values.
+const (
+	// DropUnswappable: the exchange answered outside its declared shape,
+	// so the response may carry credentials nobody can find. The route
+	// stops (CRED-5t).
+	DropUnswappable = "unswappable"
+	// DropExchangeError: the exchange answered with an error status.
+	DropExchangeError = "exchange-error"
+)
+
+// redactor returns the redactor for this request: the vault's, or the
+// hashed one when holders keep the secrets.
+func (p *Proxy) redactor() (Redactor, error) {
+	if p.vault == nil {
+		return p.redact()
+	}
+	return p.vault.Redactor()
+}
+
+// heldExchange reads an exchange response a holder already swapped. Only
+// a 200 with no drop is forwarded.
+func heldExchange(resp *http.Response) ([]byte, error) {
+	if resp.StatusCode != http.StatusOK || resp.Header.Get(HolderDropHeader) != "" {
+		return nil, errors.New("holder dropped the exchange")
+	}
+	out, err := io.ReadAll(io.LimitReader(resp.Body, MaxExchangeResponse+1))
+	if err != nil || len(out) > MaxExchangeResponse {
+		return nil, errors.New("exchange response too large")
+	}
+	return out, nil
 }
 
 // apply checks a JSON object body against the rule and returns the body to

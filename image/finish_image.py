@@ -13,10 +13,17 @@ import hashlib
 import json
 import pathlib
 import re
+import struct
 import subprocess
 import sys
 
 ESP = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+# Linux swap (IMG-nodump): the broker's memory holds the Owner Card passphrase (card C13).
+SWAP_GUID = "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f"
+# The x86-64 root (30-root.conf, Type=root). agentosd caps each machine's disk with project quotas
+# (RES-4, broker/quota), which need the ext4 quota and project features and the prjquota mount.
+ROOT_GUID = "4f68bce3-e8cd-4db1-96e7-fbcaf984b709"
+EXT4_MAGIC, RO_COMPAT_QUOTA, RO_COMPAT_PROJECT = 0xEF53, 0x0100, 0x2000
 TRIES = 3
 # No menu: boot the default entry at once (a held key still shows it on a PC with a screen).
 # No editor: anyone at the keyboard could otherwise drop usrhash= or add init=/bin/sh (Type #1
@@ -49,11 +56,140 @@ def boot_files(entry):
             if re.match(r"(linux|initrd)\s", ln)]
 
 
+def initrd_files(entry):
+    """The ESP paths of the entry's initrd lines, without the leading slash."""
+    return [ln.split(None, 1)[1].strip().lstrip("/") for ln in entry.splitlines() if re.match(r"initrd\s", ln)]
+
+
 def esp_violations(paths, entry):
     """ESP files outside the allowlist (HW-1). paths: every file on the ESP, relative."""
     allowed = set(boot_files(entry))
     return sorted(p for p in paths
                   if p not in allowed and not any(re.fullmatch(a, p) for a in ESP_ALLOWED))
+
+
+def entry_args(entry, name):
+    """Every value of the entry's kernel argument NAME=, in order."""
+    return re.findall(r"(?:^|\s)%s=(\S*)" % re.escape(name), " ".join(
+        ln.split(None, 1)[1] for ln in entry.splitlines() if re.match(r"options\s", ln)))
+
+
+def swap_violations(partitions, entry):
+    """No swap on the built disk (IMG-nodump): no partition of the swap type, and the entry turns
+    off swap units (its last systemd.swap= is 0). partitions: sfdisk -J's list."""
+    out = ["swap partition %s" % p.get("node", "?") for p in partitions if p["type"].lower() == SWAP_GUID]
+    vals = entry_args(entry, "systemd.swap")
+    if not vals or vals[-1] not in ("0", "no", "false", "off"):
+        out.append("boot entry does not set systemd.swap=0")
+    return out
+
+
+def quota_violations(img, table, entry):
+    """Project quotas on the built root (RES-4): one ext4 root partition whose superblock has the
+    quota and project features and a project quota inode, and an entry whose last rootflags=
+    includes prjquota. table: sfdisk -J's partition table."""
+    out = []
+    roots = [p for p in table["partitions"] if p["type"].lower() == ROOT_GUID]
+    if len(roots) != 1:
+        out.append("expected one root partition, found %d" % len(roots))
+    else:
+        with open(img, "rb") as f:
+            f.seek(roots[0]["start"] * table.get("sectorsize", 512) + 1024)
+            sb = f.read(1024)
+        if len(sb) < 1024 or struct.unpack_from("<H", sb, 0x38)[0] != EXT4_MAGIC:
+            out.append("root is not ext4")
+        else:
+            ro = struct.unpack_from("<I", sb, 0x64)[0]
+            if not ro & RO_COMPAT_QUOTA:
+                out.append("root ext4 lacks the quota feature")
+            if not ro & RO_COMPAT_PROJECT:
+                out.append("root ext4 lacks the project feature")
+            if not struct.unpack_from("<I", sb, 0x26C)[0]:
+                out.append("root ext4 has no project quota inode")
+    flags = entry_args(entry, "rootflags")
+    if not flags or "prjquota" not in flags[-1].split(","):
+        out.append("boot entry does not mount root with rootflags=prjquota")
+    return out
+
+
+CPIO_MAGICS = (b"070701", b"070702")
+ZSTD, XZ, GZIP = b"\x28\xb5\x2f\xfd", b"\xfd7zXZ\x00", b"\x1f\x8b"
+
+
+def unzstd(data):
+    return subprocess.run(["zstd", "-dcq"], input=data, stdout=subprocess.PIPE, check=True).stdout
+
+
+def unxz(data):
+    import lzma
+    return lzma.decompress(data)
+
+
+def ungzip(data):
+    import gzip
+    return gzip.decompress(data)
+
+
+def cpio_names(data, decompress=None):
+    """Every path in an initrd: newc cpio archives, back to back with zero padding between them,
+    the last of which may be compressed (zstd, xz or gzip). Anything else raises ValueError, so an
+    initrd this cannot read fails the build rather than passing unchecked."""
+    decompress = decompress or {ZSTD: unzstd, XZ: unxz, GZIP: ungzip}
+    names, off = [], 0
+    while True:
+        while off < len(data) and data[off] == 0:
+            off += 1
+        if off >= len(data):
+            return names
+        for magic, fn in decompress.items():
+            if data.startswith(magic, off):
+                return names + cpio_names(fn(data[off:]), decompress)
+        if data[off:off + 6] not in CPIO_MAGICS:
+            raise ValueError("initrd: unknown data at offset %d" % off)
+        while True:
+            if off + 110 > len(data) or data[off:off + 6] not in CPIO_MAGICS:
+                raise ValueError("initrd: truncated cpio header at offset %d" % off)
+            try:
+                size, namesize = int(data[off + 54:off + 62], 16), int(data[off + 94:off + 102], 16)
+            except ValueError:
+                raise ValueError("initrd: bad cpio header at offset %d" % off)
+            end = off + 110 + namesize
+            if namesize < 1 or end > len(data):
+                raise ValueError("initrd: truncated cpio name at offset %d" % off)
+            name = data[off + 110:end - 1].decode("utf-8", "surrogateescape")
+            off = (end + 3) & ~3
+            if off + size > len(data):
+                raise ValueError("initrd: truncated cpio file %s" % name)
+            off = (off + size + 3) & ~3
+            if name == "TRAILER!!!":
+                break
+            names.append(name[2:] if name.startswith("./") else name)
+
+
+# Bluetooth must not come up in the initrd either (#1475): the image blocks btusb and btmtk with a
+# modprobe drop-in in mkosi.extra, which mkosi's default initrd does not get, and a module udev
+# loads there stays loaded after the switch to /usr. All Linux Bluetooth drivers and the stack sit
+# under drivers/bluetooth and net/bluetooth; the names also catch bluetoothd and its units, and
+# the firmware patterns the vendors' Bluetooth firmware (MediaTek, Intel, Realtek, Broadcom).
+BT_PATTERNS = (r"(?i)bluetooth", r"(^|/)bt(usb|mtk)(\.ko|$)", r"(^|/)BT_RAM_CODE", r"(^|/)rtl_bt/",
+               r"(^|/)intel/ibt-", r"(^|/)brcm/[^/]*\.hcd(\.\w+)?$")
+# systemd ships bluetooth.target for the system and user managers (the default initrd carries the
+# user one, CI build of #1509): a synchronisation point that starts nothing by itself.
+BT_ALLOWED = ("usr/lib/systemd/system/bluetooth.target", "usr/lib/systemd/user/bluetooth.target")
+
+
+def bluetooth_violations(names):
+    """The initrd paths that could bring up Bluetooth: a module, firmware, daemon or unit."""
+    return sorted(n for n in names if n not in BT_ALLOWED and any(re.search(p, n) for p in BT_PATTERNS))
+
+
+def check_initrd(path, data):
+    """Exit unless the initrd at PATH lists files and none of them is Bluetooth (#1475)."""
+    names = cpio_names(data)
+    print("initrd %s: %d files, %d kernel modules" % (path, len(names), sum(".ko" in n for n in names)))
+    bad = bluetooth_violations(names) if names else ["no files"]
+    if bad:
+        sys.exit("initrd %s could bring up Bluetooth (#1475): %s" % (path, bad))
 
 
 def manifest(version, roothash, entry_name, entry_text, files, boot=None):
@@ -78,8 +214,12 @@ def verify_usr(data, tree, roothash):
         raise ValueError("/usr does not verify against usrhash=%s" % roothash)
 
 
+def partition_table(img):
+    return json.loads(subprocess.check_output(["sfdisk", "-J", img]))["partitiontable"]
+
+
 def esp_offset(img):
-    t = json.loads(subprocess.check_output(["sfdisk", "-J", img]))["partitiontable"]
+    t = partition_table(img)
     p = next(p for p in t["partitions"] if p["type"].lower() == ESP)
     return p["start"] * t.get("sectorsize", 512)
 
@@ -112,10 +252,18 @@ def main(out, version):
     bad = esp_violations(paths, text)
     if bad:
         sys.exit("ESP holds files outside the allowlist (HW-1): %s" % bad)
+    bad = swap_violations(partition_table(str(img))["partitions"], text)
+    if bad:
+        sys.exit("image could swap or keep the broker's memory (IMG-nodump): %s" % bad)
+    bad = quota_violations(str(img), partition_table(str(img)), text)
+    if bad:
+        sys.exit("agent machines would have no disk quota (RES-4): %s" % bad)
     boot = {}
     for p in boot_files(text):
         data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
         boot[p] = hashlib.sha256(data_).hexdigest()
+        if p in initrd_files(text):
+            check_initrd(p, data_)
     roothash = usrhash(text)
     data, tree = out / ("agentos_%s.usr.raw" % version), out / ("agentos_%s.usr-verity.raw" % version)
     verify_usr(data, tree, roothash)

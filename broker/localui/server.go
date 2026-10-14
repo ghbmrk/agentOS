@@ -56,8 +56,36 @@ type Config struct {
 	// socket (egress K13); its page is served at /second-line/ behind
 	// sign-in (ADP-12, P2-3c). It needs Vault.
 	SecondLine SecondLine
-	Now        func() time.Time
-	Rand       io.Reader
+	// Providers, when set, is the provider routes on the same socket
+	// (#1266); the AI providers page is served at /providers/ behind
+	// sign-in, where the owner changes a provider's private-data answer
+	// after setup (CAP-9, CH-3). It needs Vault.
+	Providers Providers
+	// Claim, when set, is the box's claim (HW-10): setup waits for the
+	// claim code from the box's sticker at /claim, then continues only on
+	// the phone that typed it.
+	Claim BoxClaim
+	// Card, when set, is the first-boot Owner Card step (HW-1,
+	// firstboot.CardStep): after approval codes setup shows the card at
+	// /setup/card to the phone that paired, and neither the recovery
+	// step nor finish runs while Card.Hold() refuses. It needs Hooks.
+	Card OwnerCard
+	// CodesVoid, when set, is marked by the card step's vault answers
+	// that void the code generator entry (F10, CardBox): setup then sends
+	// the owner back to the codes step with a note to replace the entry.
+	CodesVoid *CodesVoid
+	// Rotation, when set, is the box's card rotation (REC-4): a waiting
+	// rotation's new parts are shown at /rotate/card to a signed-in phone
+	// until the owner confirms or cancels them.
+	Rotation RotationCard
+	// Station, when set, reports whether the box has a Wi-Fi device
+	// beside the access point that can join a home network
+	// (StationDevice). Without one a saved home Wi-Fi never comes
+	// online, so the never-online note names Ethernet only and offers no
+	// rejoin (CH-12; P2-2w c4 r1). Nil assumes one.
+	Station func() bool
+	Now     func() time.Time
+	Rand    io.Reader
 }
 
 // Server is the local UI.
@@ -90,6 +118,9 @@ type Server struct {
 	vaultOpener string
 	// scanning admits one photo upload at a time.
 	scanning chan struct{}
+	// claimWait holds a slot for each claim post running or waiting
+	// (claimQueue + 1); claimRun admits one at a time (claimTurn).
+	claimWait, claimRun chan struct{}
 	// vaultTries and vaultAll are the unlock attempts in the last hour,
 	// per phone address and in all (vaultTry).
 	vaultTries map[string][]time.Time
@@ -105,20 +136,24 @@ const MaxSessions = 16
 const cookieName = "agentos_session"
 
 // New returns a Server. It refuses an access point configuration that
-// could expose the UI beyond the box's Wi-Fi (CH-9).
+// could expose the UI beyond the box's Wi-Fi (CH-9). The page never
+// reads the access point's name or password, so only ValidateServe
+// applies, with or without setup (P2-2w c4).
 func New(cfg Config) (*Server, error) {
-	validate := cfg.AP.Validate
-	if cfg.Hooks == nil {
-		validate = cfg.AP.ValidateServe
-	}
-	if err := validate(); err != nil {
+	if err := cfg.AP.ValidateServe(); err != nil {
 		return nil, err
 	}
 	if (cfg.Hooks == nil) != (cfg.Store == nil) {
 		return nil, errors.New("localui: hooks and store go together")
 	}
+	if cfg.Card != nil && cfg.Hooks == nil {
+		return nil, errors.New("localui: the Owner Card step needs setup hooks")
+	}
 	if cfg.SecondLine != nil && cfg.Vault == nil {
 		return nil, errors.New("localui: the second line needs the vault socket")
+	}
+	if cfg.Providers != nil && cfg.Vault == nil {
+		return nil, errors.New("localui: the providers page needs the vault socket")
 	}
 	if cfg.Port == 0 {
 		cfg.Port = UIPort
@@ -133,7 +168,8 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Port != 80 {
 		host = net.JoinHostPort(host, strconv.Itoa(cfg.Port))
 	}
-	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), pages: pagesFor(host), scanning: make(chan struct{}, 1)}
+	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), pages: pagesFor(host), scanning: make(chan struct{}, 1),
+		claimWait: make(chan struct{}, claimQueue+1), claimRun: make(chan struct{}, 1)}
 	s.formKey = make([]byte, 32)
 	if _, err := io.ReadFull(cfg.Rand, s.formKey); err != nil {
 		return nil, err
@@ -187,12 +223,24 @@ func (s *Server) routes() {
 	if s.cfg.Vault != nil {
 		s.mux.HandleFunc("/unlock/vault", s.vaultUnlock)
 	}
+	if s.cfg.Claim != nil {
+		s.mux.HandleFunc("/claim", s.claimPage)
+	}
+	if s.cfg.Rotation != nil {
+		s.mux.Handle("/rotate/card", s.signedIn(http.HandlerFunc(s.rotationCard)))
+		if rot, ok := s.cfg.Rotation.(*Rotation); ok {
+			s.Mount("/rotate", "Replace Owner Card parts", s.rotatePages(rot))
+		}
+	}
 	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
 	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))
 	s.Mount("/paused", "Paused", http.HandlerFunc(s.paused))
 	s.Mount("/forget", "Forget a task", http.HandlerFunc(s.forgetPage))
 	if s.cfg.SecondLine != nil {
 		s.Mount("/second-line", "Second line", http.HandlerFunc(s.secondLine))
+	}
+	if s.cfg.Providers != nil {
+		s.Mount("/providers", "AI providers", http.HandlerFunc(s.providers))
 	}
 	if s.setup != nil {
 		s.setup.routes(s.mux)
@@ -267,6 +315,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost && !s.sameOrigin(r) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	if s.claimGate(w, r) {
 		return
 	}
 	s.mux.ServeHTTP(w, r)
@@ -652,7 +703,7 @@ const (
 func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
 	n := ""
 	if s.cfg.Hooks != nil {
-		n = s.cfg.Hooks.BoxNumber()
+		n, _ = s.cfg.Hooks.BoxNumber()
 	}
 	if !phoneRe.MatchString(n) {
 		http.NotFound(w, r)

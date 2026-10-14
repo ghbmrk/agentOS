@@ -1,5 +1,18 @@
+enable agentos-inbound.service
+# The wired uplink (20-agentos-uplink.network, #1416).
+enable systemd-networkd.service
 enable agentos-health.service
 enable agentos-boot-report.service
 enable agentosd.service
 enable agentosd.path
+enable agentos-egress.service
+enable agentos-egress-setup.path
+enable agentos-localui.service
+enable agentos-ap.service
+enable agentos-modem.service
+enable agentos-netjoin.service
 enable agentos-drive-id.service
+# Debian's nftables.service runs /etc/nftables.conf, which flushes the whole ruleset.
+disable nftables.service
+# Debian's hostapd.service would serve /etc/hostapd/hostapd.conf on the radio; agentos-ap runs hostapd.
+disable hostapd.service

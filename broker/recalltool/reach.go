@@ -19,8 +19,8 @@ import (
 // (journal.Engine).
 type Journal interface {
 	Between(origin string, from, until time.Time) []string
+	StatusBetween(origin string, from, until time.Time) []journal.Status
 	Erase(ids []string) (erased, held []string, err error)
-	Get(id string) (journal.Status, error)
 }
 
 // Machines is the part of the VM manager deletion reaches (vm.Manager,
@@ -316,6 +316,10 @@ const TakenBack = "Your agent is back to before that task and no longer holds it
 // failure leaves nothing to carry it.
 var ErrCarried = errors.New("recall: take-back owed; Retry carries it")
 
+// ErrWorked refuses a take-back not approved: the agent worked since,
+// so on the ask-first rule it is not taken back without asking (CAP-3).
+var ErrWorked = errors.New("recall: work done since; not taken back without asking")
+
 // errUnrecorded: the machines went back but the reset was not recorded.
 var errUnrecorded = errors.New("reset not recorded")
 
@@ -346,8 +350,28 @@ func (r *Reach) TakeBack(ctx context.Context, lineage string, since time.Time, a
 	r.run.Lock()
 	defer r.run.Unlock()
 	recorded, done := r.Prov.TakeBack(lineage, since)
-	if done || r.resetFrom(lineage, since) {
+	if done {
 		return nil
+	}
+	if r.resetFrom(lineage, since) {
+		// A reset from the same time is under way and Retry finishes it:
+		// it is not repeated, and an approved take-back is marked done,
+		// never owed (Retry would run an owed one again), so a later
+		// boot's Handled still sees it once the reset is gone (#327 L3 r5
+		// #3).
+		if approved && !recorded {
+			return r.Prov.MarkTakeBack(lineage, since, true)
+		}
+		return nil
+	}
+	// The caller's check that the agent did no work is re-made here, under
+	// run, so work since that check is not rolled back unasked (Security
+	// 327-1). The agent acts without run, so work landing between this and
+	// the machines going back is still possible (ASSUMPTIONS W13).
+	if !approved {
+		if worked, ok := r.Work(lineage, since); !ok || worked {
+			return ErrWorked
+		}
 	}
 	if approved && !recorded {
 		if err := r.Prov.MarkTakeBack(lineage, since, false); err != nil {
@@ -361,6 +385,22 @@ func (r *Reach) TakeBack(ctx context.Context, lineage string, since time.Time, a
 		return err
 	}
 	return nil
+}
+
+// Renew is the owner's control for a lineage whose reads reached the cap
+// (Provenance.ReadsFull): the owner approves taking it back to before its
+// first read still held, which forgets every read since (the machines went
+// back, so none of it is in them) and with them the chain, so the lineage
+// can make notes again. Notes already made stay, and still go when a
+// source they derive from is deleted (their DerivedFrom is in the index).
+// It costs the lineage's work since that read, so the owner decides: a
+// caller calls it only on the owner's approval. Nothing to renew is nil.
+func (r *Reach) Renew(ctx context.Context, lineage string) error {
+	first, ok := r.Prov.firstRead(lineage)
+	if !ok {
+		return nil
+	}
+	return r.TakeBack(ctx, lineage, first, true)
 }
 
 // takeBack runs the reset once; a reset recorded since means the machines
@@ -685,12 +725,7 @@ func (r *Reach) actions(lineage string, since, until time.Time) int {
 		return 0
 	}
 	n := 0
-	for _, id := range r.Journal.Between("guest:"+lineage, since, until) {
-		st, err := r.Journal.Get(id)
-		if err != nil {
-			n++ // unknown: count it, so the owner is asked
-			continue
-		}
+	for _, st := range r.Journal.StatusBetween("guest:"+lineage, since, until) {
 		switch st.State {
 		case journal.Succeeded, journal.InFlight, journal.OutcomeUnknown:
 			n++
@@ -707,6 +742,11 @@ func (r *Reach) Execute(ctx context.Context, in journal.Intent, _ int) journal.O
 	since, err := time.Parse(time.RFC3339Nano, s)
 	if in.Action != journal.ActionRecallRollback || in.Origin != Origin || in.Account != journal.BrokerAccount || lineage == "" || err != nil {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "malformed recall rollback"}
+	}
+	// The owner's renewal of a full lineage (renew.go) has its own
+	// staleness rule: no deleted item is involved.
+	if renew, _ := in.Params["renew"].(bool); renew {
+		return r.executeRenew(ctx, lineage, since)
 	}
 	if r.Machines == nil {
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + "machines not wired"}
@@ -743,9 +783,15 @@ func (r *Reach) Execute(ctx context.Context, in journal.Intent, _ int) journal.O
 	case err == nil:
 		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "rolled back"}
 	case len(r.Prov.Resets(lineage)) > 0:
-		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "machines reset; finishing: " + err.Error()}
+		if r.Logf != nil {
+			r.Logf("recall: rollback of %s still finishing: %v", lineage, err)
+		}
+		return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "machines reset; finishing"}
 	}
-	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + err.Error()}
+	if r.Logf != nil {
+		r.Logf("recall: rollback of %s did not reset: %v", lineage, err)
+	}
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: approvedOnly + "the reset did not finish"}
 }
 
 // tell sends the owner a text about lineage's rollback.
@@ -1014,4 +1060,4 @@ func (r *Reach) loc() *time.Location {
 // Needed reports a deleted item some lineage still holds: its tombstone
 // must outlive the prune policy (Index.KeepTombstones), so nothing derived
 // from it comes back and the reach is replayed at each start.
-func (r *Reach) Needed(id string) bool { return len(r.Prov.Holders(id)) > 0 }
+func (r *Reach) Needed(id string) bool { return len(r.Prov.Holders(id)) > 0 || r.Prov.Head(id) }

@@ -93,14 +93,15 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 		return err
 	}
 	cur, cerr := readKeys(v.keysPath)
-	if err := writeAtomic(v.keysPath+nextSuffix, raw); err != nil {
+	if err := writeFile(v.keysPath+nextSuffix, raw, 0o600); err != nil {
 		return err
 	}
 	v.nextKeys = raw
 	if err := v.save(); err != nil {
-		// The staged file stays: save can fail after the vault file
-		// landed (a failed directory sync), and then the drive needs it.
-		// A leftover copy is inert (stagedKeys, dropStaleStaged).
+		// save fails only before the vault file lands (a landed write
+		// whose directory sync failed counts as stored), so the drive
+		// does not need the staged file. It stays because a leftover
+		// copy is inert (stagedKeys, dropStaleStaged).
 		v.nextKeys = nil
 		return err
 	}
@@ -123,7 +124,7 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 func (v *Vault) finishKeys() error {
 	next := v.nextKeys
 	if cur, err := readFile(v.keysPath); err != nil || !bytes.Equal(cur, next) {
-		if err := writeAtomic(v.keysPath, next); err != nil {
+		if err := writeFile(v.keysPath, next, 0o600); err != nil {
 			return err
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -146,8 +147,14 @@ func TestRunStopsWhereAssumptionFails(t *testing.T) {
 	}
 	fx = &fakeFX{err: errors.New("down")}
 	res = Run(context.Background(), sk, "r4", args("to", `"ann@example.test"`, "week", `41`), fx)
-	if res.Stopped.Step != 1 || len(res.Remaining) != 3 {
+	if res.Stopped.Step != 1 || len(res.Remaining) != 3 || res.Stopped.Why != "the broker did not take the request: down" {
 		t.Fatalf("broker error: %+v", res)
+	}
+	canary := "/var/lib/agentos/journal/log"
+	fx = &fakeFX{err: errors.New("open " + canary + ": permission denied")}
+	res = Run(context.Background(), sk, "r5", args("to", `"ann@example.test"`, "week", `41`), fx)
+	if res.Stopped == nil || strings.Contains(res.Stopped.Why, canary) || strings.Contains(res.Stopped.Why, "/var/") || res.Stopped.Why != "the broker did not take the request" {
+		t.Fatalf("path in why: %+v", res.Stopped)
 	}
 }
 
@@ -246,7 +253,7 @@ func TestServerOffersAndRunsSkills(t *testing.T) {
 	b := &broker{}
 	bs := httptest.NewServer(b)
 	defer bs.Close()
-	srv := httptest.NewServer(&Server{Dir: dir, Effects: &MCPEffects{URL: bs.URL}})
+	srv := httptest.NewServer(&Server{Dir: dir, Effects: &MCPEffects{Client: bs.Client(), URL: bs.URL}})
 	defer srv.Close()
 
 	list := rpc(t, srv.URL, "tools/list", map[string]any{})
@@ -267,5 +274,21 @@ func TestServerOffersAndRunsSkills(t *testing.T) {
 	call = rpc(t, srv.URL, "tools/call", map[string]any{"name": "skill_k111111111111", "arguments": map[string]any{"run_id": "r1"}})
 	if call["result"].(map[string]any)["isError"] != true {
 		t.Fatal("an invalid skill must not run")
+	}
+}
+
+// REQ: DEV-2, REV-5
+// The webhook step has no default client: without one it refuses, and
+// nothing dials.
+func TestMCPEffectsWithoutAClientRefuses(t *testing.T) {
+	var hit atomic.Int32
+	bs := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit.Add(1) }))
+	defer bs.Close()
+	m := &MCPEffects{URL: bs.URL}
+	if _, err := m.Request(context.Background(), Effect{}); err == nil {
+		t.Fatal("a nil client must refuse")
+	}
+	if hit.Load() != 0 {
+		t.Fatal("a request was sent")
 	}
 }

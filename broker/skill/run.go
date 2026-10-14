@@ -3,6 +3,7 @@ package skill
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/skill/format"
 )
@@ -99,7 +100,7 @@ func Run(ctx context.Context, s *Skill, runID string, args map[string]json.RawMe
 	for i, e := range effects {
 		st, err := fx.Request(ctx, e)
 		if err != nil {
-			res.Stopped = &Stopped{Step: i + 1, RequestID: e.RequestID, Why: "the broker did not take the request: " + err.Error()}
+			res.Stopped = &Stopped{Step: i + 1, RequestID: e.RequestID, Why: brokerRefused(err)}
 			res.Remaining = effects[i:]
 			return res
 		}
@@ -115,6 +116,16 @@ func Run(ctx context.Context, s *Skill, runID string, args map[string]json.RawMe
 	}
 	res.Status = "done"
 	return res
+}
+
+// brokerRefused is what the model is told when effect_request fails. The
+// error can name a host path, so a path is dropped and the sentence stays.
+func brokerRefused(err error) string {
+	msg := err.Error()
+	if strings.Contains(msg, "/") || strings.Contains(msg, `\`) {
+		return "the broker did not take the request"
+	}
+	return "the broker did not take the request: " + msg
 }
 
 func why(st State) string {

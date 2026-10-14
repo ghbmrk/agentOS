@@ -87,12 +87,12 @@ func TestPE2NoRoomForReplayIsSaid(t *testing.T) {
 	if got := notes(); len(got) != 2 || got[0] != "clock note" || got[1] != noRoomNote {
 		t.Fatalf("notes without room: %q", got)
 	}
-	if noRoomNote != "Learning: paused, the box's memory is too small to test changes." {
+	if noRoomNote != "Learning: paused, my memory is too small to test changes." {
 		t.Fatalf("note %q", noRoomNote)
 	}
 	for msg, want := range map[string]string{
-		"LEARNING ON": "Learning is on, but the box's memory is too small to test changes, so nothing new will be adopted. Reply LEARNING OFF if this wasn't you.",
-		"LOOPS ON":    "Spare-time work is back on. Learning is on, but the box's memory is too small to test changes, so nothing new will be adopted. Reply LOOPS OFF if this wasn't you.",
+		"LEARNING ON": "Learning is on, but my memory is too small to test changes, so nothing new will be adopted. Reply LEARNING OFF if this wasn't you.",
+		"LOOPS ON":    "Spare-time work is back on. Learning is on, but my memory is too small to test changes, so nothing new will be adopted. Reply LOOPS OFF if this wasn't you.",
 	} {
 		if got, ok := cfg.Settings(ctx, msg, true); !ok || got != want {
 			t.Errorf("%s: %q", msg, got)
@@ -163,8 +163,8 @@ func TestPE6ABoxTooSmallForTheAgentSaysSo(t *testing.T) {
 	for _, c := range []struct {
 		name, meminfo, says string
 	}{
-		{"4 GB", "MemTotal: 4096000 kB\n", "Agent: off, this box has 3.9 GB of memory and running the agent needs about 5.6 GB."},
-		{"5 GB", "MemTotal: 5120000 kB\n", "Agent: off, this box has 4.9 GB of memory and running the agent needs about 5.6 GB."},
+		{"4 GB", "MemTotal: 4096000 kB\n", "Your agent is off: I have 3.9 GB of memory and running it needs about 5.6 GB."},
+		{"5 GB", "MemTotal: 5120000 kB\n", "Your agent is off: I have 4.9 GB of memory and running it needs about 5.6 GB."},
 	} {
 		p := planMemory(c.meminfo, 4, false, defaultCapacityMB, budget.Floor(), defaultAgentMemMB)
 		if p.AgentOff != c.says {

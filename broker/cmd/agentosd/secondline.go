@@ -12,12 +12,12 @@ import (
 // The second line's owner lines (potency R1 on #139): STATUS shows them
 // while they last (CH-12's exception lines), and the digest repeats them.
 const (
-	secondLineConfirmLine   = "Second line: confirm your provider on the box's Wi-Fi page. Texts and calls wait until you do."
-	secondLineUnreachedLine = "Second line: the box couldn't reach your provider. Check the server name and password on the box's Wi-Fi page, or remove it there."
+	secondLineConfirmLine   = "Second line: confirm your provider on my Wi-Fi page. Texts and calls wait until you do."
+	secondLineUnreachedLine = "Second line: I couldn't reach your provider. Check the server name and password on my Wi-Fi page, or remove it there."
 	// The texting account's lines (UX-159-1), once its polls have failed
 	// for modelroute.TextsQuiet.
-	textsSignInLine    = "Second line: texts aren't arriving because the box couldn't sign in to your texting account. Check the account ID and auth token on the box's Wi-Fi page, or remove it there."
-	textsUnreachedLine = "Second line: texts aren't arriving because the box couldn't reach your texting provider. Nothing to do unless it lasts; you can remove the texting account on the box's Wi-Fi page."
+	textsSignInLine    = "Second line: texts aren't arriving because I couldn't sign in to your texting account. Check the account ID and auth token on my Wi-Fi page, or remove it there."
+	textsUnreachedLine = "Second line: texts aren't arriving because I couldn't reach your texting provider. Nothing to do unless it lasts; you can remove the texting account on my Wi-Fi page."
 )
 
 // secondLineEvery is how often agentosd asks the vault process.

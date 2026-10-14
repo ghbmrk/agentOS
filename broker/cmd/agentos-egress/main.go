@@ -36,13 +36,19 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/claim"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/recovery"
 	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/smsapi"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -63,7 +69,7 @@ const (
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		log.Fatal("usage: agentos-egress init|serve|unlock|put|trust|untrust|hosts [flags]")
+		log.Fatal("usage: agentos-egress init|serve|unlock|put|trust|untrust|hosts|pin|unpin|pins [flags]")
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
@@ -82,6 +88,12 @@ func main() {
 		err = untrustCmd(args, os.Stdin)
 	case "hosts":
 		err = hostsCmd(args, os.Stdout)
+	case "pin":
+		err = pinCmd(args, os.Stdin, os.Stdout)
+	case "unpin":
+		err = unpinCmd(args, os.Stdin)
+	case "pins":
+		err = pinsCmd(args, os.Stdout)
 	default:
 		err = fmt.Errorf("unknown command %q", cmd)
 	}
@@ -104,11 +116,91 @@ func (g grants) Set(v string) error {
 }
 
 // withGrants sets c's fields that follow the grants: the proxy it builds
-// over an open vault, and whether a model provider is granted (OP-9 C2).
-func withGrants(c *custody, g grants) *custody {
-	c.build = func(v *vault.Vault) (*egress.Proxy, error) { return newProxy(v, g, nil) }
+// over an open vault, whether a model provider is granted by a flag
+// (OP-9 C2), and the agent machine a stored key grants its provider to
+// (storedGrant, CRED-5f-mr-grant); "" grants by flags only.
+func withGrants(c *custody, g grants, agent string) *custody {
+	c.agent = agent
+	c.build = func(v *vault.Vault) (*egress.Proxy, error) {
+		return newGrantedProxy(v, g, c.modelTransport, c.guard, c.storedGrant)
+	}
 	c.granted = modelGranted(g)
+	c.flagGrants = flagGrantsOf(g)
 	return c
+}
+
+// reservedPrefixes are the machine-name prefixes the broker gives its own
+// machines: builders (lb-), eval replays (eval-), workers (wk-) and clean
+// rooms (cr-). The test pins them to vm.WorkerPrefix and cleanroom.Prefix,
+// which this binary does not import.
+var reservedPrefixes = []string{modelroute.BuilderPrefix, modelroute.EvalPrefix, "wk-", "cr-"}
+
+// checkAgentMachine checks -agent-machine: a machine name, never one with
+// a broker-reserved prefix (reservedPrefixes); builders and replay
+// machines take their grants from -builder-from and -eval-from. Empty is
+// allowed and grants by flags only.
+func checkAgentMachine(m string) error {
+	if m == "" {
+		return nil
+	}
+	reserved := slices.ContainsFunc(reservedPrefixes, func(p string) bool { return strings.HasPrefix(m, p) })
+	if !machineRE.MatchString(m) || reserved {
+		return fmt.Errorf("-agent-machine %s: name the owner's agent machine", m)
+	}
+	return nil
+}
+
+// agentFlag declares -agent-machine. Its default names the agent machine
+// of a stock install, so a provider key stored at setup grants it with no
+// flag (CRED-5f-mr-grant).
+func agentFlag(fs *flag.FlagSet) *string {
+	return fs.String("agent-machine", "agent", "the owner's agent machine, to which a provider key stored at setup grants that provider (CRED-5f-mr-grant); empty grants by -grant only")
+}
+
+// modelWiring is serve's model path over the flags: the router asks the
+// hook whether a stored key grants a machine, and the hook answers from
+// the custody bound to the agent machine (CRED-5f-mr-grant). The router
+// is built before custody; the hook also answers setup's private-data
+// marks once custody exists (P2-2w c4e).
+type modelWiring struct {
+	g     grants
+	rt    *route.Router
+	agent string
+	hook  *privateHook
+	// pok is -private-ok, for the model state (privateGrantedNow).
+	pok map[string]bool
+}
+
+// wireModel checks the agent machine and builds the router over the
+// flags' grants, asking the hook for stored-key grants.
+func wireModel(rule route.Rule, g grants, pok map[string]bool, agent, builderFrom, evalFrom string) (*modelWiring, error) {
+	if err := checkAgentMachine(agent); err != nil {
+		return nil, err
+	}
+	hook := new(privateHook)
+	g, rt, err := modelRouting(rule, g, pok, hook.allowed, hook.granted, builderFrom, evalFrom)
+	if err != nil {
+		return nil, err
+	}
+	return &modelWiring{g: g, rt: rt, agent: agent, hook: hook, pok: pok}, nil
+}
+
+// bind makes serve's custody over the wiring's grants and agent machine
+// and binds the hook to it.
+func (w *modelWiring) bind(c *custody) (*custody, error) {
+	c.privateFlags = w.pok
+	return serveCustody(c, w.g, w.agent, w.hook)
+}
+
+// serveCustody makes serve's custody over the flags' grants and agent
+// machine, and binds the router's hook to it (privateHook).
+func serveCustody(c *custody, g grants, agent string, hook *privateHook) (*custody, error) {
+	c, err := newCustody(withGrants(c, g, agent))
+	if err != nil {
+		return nil, err
+	}
+	hook.c.Store(c)
+	return c, nil
 }
 
 // modelProviders are the providers the model router serves.
@@ -137,8 +229,17 @@ func adapters() []egress.Adapter {
 }
 
 // newProxy builds the proxy over an open vault. tr is nil outside tests.
-func newProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper) (*egress.Proxy, error) {
+// guard is the process's address policy (netGuard); nil only in tests.
+func newProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper, guard *netguard.Policy) (*egress.Proxy, error) {
+	return newGrantedProxy(v, g, tr, guard, nil)
+}
+
+// newGrantedProxy is newProxy with stored, the grants a stored key gives
+// (storedGrant), asked per request where g grants nothing; nil adds none.
+func newGrantedProxy(v *vault.Vault, g map[string][]string, tr http.RoundTripper, guard *netguard.Policy, stored func(machine, adapter string) bool) (*egress.Proxy, error) {
 	return egress.New(egress.Config{
+		Granted:   stored,
+		Guard:     guard,
 		Adapters:  adapters(),
 		Grants:    g,
 		Vault:     apiKeysOnly{v},
@@ -169,7 +270,7 @@ func builderGrants(g grants, from string) (grants, error) {
 		return out, nil
 	}
 	if strings.HasPrefix(from, modelroute.BuilderPrefix) || strings.HasPrefix(from, modelroute.EvalPrefix) {
-		return nil, fmt.Errorf("-builder-from %s: name the agent machine whose grants builders use", from)
+		return nil, fmt.Errorf("-builder-from %s: name the owner's agent machine, whose grants builders use", from)
 	}
 	if len(g[from]) == 0 {
 		return nil, fmt.Errorf("-builder-from %s: that machine has no -grant", from)
@@ -189,12 +290,15 @@ func grantsKey(machine string) string {
 
 // modelRouting checks the grants, adds the builders' (builderGrants), and
 // builds the router over the result, in that order, so the router sees
-// every grant it serves (L3 MUST 1 on #126).
-func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderFrom, evalFrom string) (grants, *route.Router, error) {
+// every grant it serves (L3 MUST 1 on #126). allowed is the vault's
+// private-data answer from setup (privateHook), checked when privateOK
+// is false; stored is the grant a key stored at setup gives (privateHook,
+// storedGrant), checked when g grants nothing; nil adds none of either.
+func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, allowed func(string) bool, stored func(machine, provider string) bool, builderFrom, evalFrom string) (grants, *route.Router, error) {
 	// -eval-from names an agent machine: never a builder's grants key or a
 	// replay machine (security R1 on #126).
 	if strings.HasPrefix(evalFrom, modelroute.BuilderPrefix) || strings.HasPrefix(evalFrom, modelroute.EvalPrefix) {
-		return nil, nil, fmt.Errorf("-eval-from %s: name the agent machine whose grants replay uses", evalFrom)
+		return nil, nil, fmt.Errorf("-eval-from %s: name the owner's agent machine, whose grants replay uses", evalFrom)
 	}
 	for m := range g {
 		if strings.HasPrefix(m, modelroute.EvalPrefix) {
@@ -205,7 +309,7 @@ func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderF
 	if err != nil {
 		return nil, nil, err
 	}
-	rt, err := newRouter(rule, g, privateOK)
+	rt, err := newPrivateRouter(rule, g, privateOK, allowed, stored)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -213,6 +317,10 @@ func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, builderF
 }
 
 func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool) (*route.Router, error) {
+	return newPrivateRouter(rule, g, privateOK, nil, nil)
+}
+
+func newPrivateRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool, allowed func(string) bool, stored func(machine, provider string) bool) (*route.Router, error) {
 	return route.New(route.Config{
 		Providers: modelProviders(),
 		Rule:      rule,
@@ -222,9 +330,10 @@ func newRouter(rule route.Rule, g map[string][]string, privateOK map[string]bool
 					return true
 				}
 			}
-			return false
+			return stored != nil && stored(machine, provider)
 		},
-		PrivateOK: privateOK,
+		PrivateOK:      privateOK,
+		PrivateAllowed: allowed,
 		Upstream: func(string) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				http.Error(w, "model egress unavailable", http.StatusServiceUnavailable)
@@ -303,8 +412,9 @@ func serveCmd(args []string) error {
 	rulePath := fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7); adoptions may only reorder its routes")
 	routingPath := fs.String("routing-state", "", "the adopted routing rule, kept across restarts (W3); default routing.json beside the keys")
 	pricesPath := fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
-	builderFrom := fs.String("builder-from", "", "the agent machine whose model grants Loop 1's builder machines (lb-) use, always as private data (W3-builder); empty (the default) gives builders no model access")
-	evalFrom := fs.String("eval-from", "", "the agent machine whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
+	builderFrom := fs.String("builder-from", "", "the owner's agent machine, whose model grants Loop 1's builder machines (lb-) use, always as private data (W3-builder); empty (the default) gives builders no model access")
+	evalFrom := fs.String("eval-from", "", "the owner's agent machine, whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
+	agent := agentFlag(fs)
 	privateOK := fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
 	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")
@@ -331,10 +441,11 @@ func serveCmd(args []string) error {
 	if rule, err = startRule(base, *routingPath); err != nil {
 		log.Printf("routing: starting from -rule: %v", err)
 	}
-	g, rt, err := modelRouting(rule, g, pok, *builderFrom, *evalFrom)
+	mw, err := wireModel(rule, g, pok, *agent, *builderFrom, *evalFrom)
 	if err != nil {
 		return err
 	}
+	g, rt := mw.g, mw.rt
 	var ev *evalRoute
 	if *evalFrom != "" {
 		ps, err := readPrices(*pricesPath)
@@ -362,8 +473,16 @@ func serveCmd(args []string) error {
 	if *polPath == "" {
 		*polPath = filepath.Join(filepath.Dir(*keysPath), "vault.pcrpolicy")
 	}
-	c, err := newCustody(withGrants(&custody{
-		keysPath: *keysPath,
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	guard, err := netGuard(ctx, &netguard.Sources{}, netWatchEvery)
+	if err != nil {
+		return err
+	}
+	c, err := mw.bind(&custody{
+		guard:     guard,
+		keysPath:  *keysPath,
+		vaultPath: *vaultPath,
 		open: func(p string) (*vault.Vault, error) {
 			return vault.OpenSealed(*vaultPath, *keysPath, vault.Passphrase(p))
 		},
@@ -373,7 +492,7 @@ func serveCmd(args []string) error {
 		statePath: *statePath,
 		host:      newTPMHost(*tpmPath, *vaultPath, *keysPath, *polPath, pcrs),
 		owner:     *ownerNumber,
-	}, g))
+	})
 	if err != nil {
 		return err
 	}
@@ -381,8 +500,6 @@ func serveCmd(args []string) error {
 	if _, err := egress.New(egress.Config{Adapters: adapters(), Grants: g, Vault: emptyVault{}, Audit: noAudit{}}); err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	ro := &routing{base: base, rt: rt, ev: ev, path: *routingPath}
 	srvs, err := serve(*run, c, rt, ev, ro, *brokerUID, *unlockUID)
 	if err != nil {
@@ -414,6 +531,7 @@ func serveCmd(args []string) error {
 		}
 		srvs = append(srvs, sms)
 	}
+	c.startSetup()
 	c.bootTrusted()
 	ph, _ := c.status()
 	log.Printf("vault process up, vault %s; sockets in %s", ph, *run)
@@ -472,15 +590,34 @@ func serve(dir string, c *custody, rt *route.Router, ev *evalRoute, ro *routing,
 // initCmd creates a sealed vault: a generated passphrase (100 bits) in the
 // passphrase slot and a fresh code-generator seed inside the vault. It
 // prints both once, as the Owner Card does (P2-2 prints the real card).
+// With -setup it prints nothing secret: the setup vault opens with the
+// setup key (startSetup) until the card's provision replaces it.
 func initCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	vaultPath := fs.String("vault", defaultVault, "sealed vault file to create")
 	keysPath := fs.String("keys", defaultKeys, "key slots file to create")
 	statePath := fs.String("state", "", "unlock state to create; default unlock.json beside the keys")
 	setup := fs.Bool("setup", false, "setup mode: open code-generator enrollment once and leave the seed hand-out to setup (image boxes)")
+	claimPath := fs.String("claim", claim.StatePath, "with -setup: the claim state; the setup vault is made only after the claim")
 	fs.Parse(args)
 	if *statePath == "" {
 		*statePath = statePathFor(*keysPath)
+	}
+	if *setup {
+		// No secret exists before the claim (HW-10, claim K5; R2 on
+		// #1203): the setup key and seed are made only on a claimed box,
+		// before anything is drawn or written. A box with no claim state
+		// (the download path, whose pairing gate is not built) is refused.
+		ok, err := claim.Claimed(change.FileStore{Path: *claimPath})
+		if errors.Is(err, claim.ErrNoCode) {
+			return fmt.Errorf("init -setup: %s holds no claim state; the setup vault is made only on a claimed box", *claimPath)
+		}
+		if err != nil {
+			return fmt.Errorf("init -setup: %w", err)
+		}
+		if !ok {
+			return errors.New("init -setup: not claimed yet; the setup vault is made only after the claim")
+		}
 	}
 	pass, err := newPassphrase()
 	if err != nil {
@@ -496,19 +633,34 @@ func initCmd(args []string, out io.Writer) error {
 	// The unlock state goes in place before the keys make the vault
 	// openable, so serve can require it (newCustody).
 	if _, err := os.Lstat(*keysPath); err == nil {
-		return fmt.Errorf("%s already exists; this box already has a vault", *keysPath)
+		return fmt.Errorf("%s already exists; a vault is already set up here", *keysPath)
 	}
-	if err := writeFileAtomic(*statePath, []byte("{}")); err != nil {
+	if *setup {
+		// Setup mode (CTRL-setup-open): no passphrase exists before the
+		// claim (HW-10). The setup vault opens with a setup key the vault
+		// process keeps root-only beside the keys; the card's provision
+		// replaces the vault and removes the key.
+		if err := durable.WriteFile(*statePath, []byte(`{"setup":true}`), 0o600); err != nil {
+			return err
+		}
+		rk, err := writeSetupKey(*keysPath)
+		if err != nil {
+			return err
+		}
+		defer rk.Wipe()
+		if err := sealNew(*vaultPath, *keysPath, recovery.Factor(rk), seed, true); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "Setup vault made. Setup shows the code generator; the Owner Card holds the passphrase.")
+		return nil
+	}
+	if err := durable.WriteFile(*statePath, []byte("{}"), 0o600); err != nil {
 		return err
 	}
-	if err := sealNew(*vaultPath, *keysPath, pass, seed, *setup); err != nil {
+	if err := sealNew(*vaultPath, *keysPath, vault.Passphrase(pass), seed, false); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Vault passphrase: %s\n", pass)
-	if *setup {
-		fmt.Fprintln(out, "Setup shows the code generator. Keep the passphrase offline. It is shown once.")
-		return nil
-	}
 	secret := b32().EncodeToString(seed)
 	fmt.Fprintf(out, "Code generator:   otpauth://totp/AgentOS?secret=%s&issuer=AgentOS\n", secret)
 	fmt.Fprintln(out, "Keep both offline. They are shown once.")
@@ -520,15 +672,35 @@ func statePathFor(keysPath string) string {
 	return filepath.Join(filepath.Dir(keysPath), "unlock.json")
 }
 
+// setupKeyFor is the setup key's file, beside the keys file. It exists
+// only in setup mode, before the card's provision or finish's seal.
+func setupKeyFor(keysPath string) string {
+	return filepath.Join(filepath.Dir(keysPath), "setup.key")
+}
+
+// writeSetupKey makes a fresh setup key and writes it, root-only, where
+// the vault process looks for it at start.
+func writeSetupKey(keysPath string) (recovery.RecoveryKey, error) {
+	rk, err := recovery.NewRecoveryKey(nil)
+	if err != nil {
+		return rk, err
+	}
+	if err := durable.WriteFile(setupKeyFor(keysPath), []byte(rk.Text()), 0o600); err != nil {
+		rk.Wipe()
+		return rk, err
+	}
+	return rk, nil
+}
+
 // sealNew builds the vault and keys under temporary names, stores the seed
 // (and, in setup mode, the entry that opens enrollment once, K17),
 // and only then renames them into place, keys last: the keys file is what
 // makes a vault openable, so a crash leaves either nothing usable or a
 // complete vault. A vault file without its keys file can never be opened,
 // so init reports it for removal rather than leaving the owner stuck.
-func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
+func sealNew(vaultPath, keysPath string, f vault.Factor, seed []byte, setup bool) error {
 	if _, err := os.Lstat(keysPath); err == nil {
-		return fmt.Errorf("%s already exists; this box already has a vault", keysPath)
+		return fmt.Errorf("%s already exists; a vault is already set up here", keysPath)
 	}
 	if _, err := os.Lstat(vaultPath); err == nil {
 		return fmt.Errorf("%s exists without its keys file (an earlier init did not finish); it cannot be opened: remove it and run init again", vaultPath)
@@ -536,7 +708,7 @@ func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
 	vt, kt := vaultPath+".init", keysPath+".init"
 	os.Remove(vt)
 	os.Remove(kt)
-	v, err := vault.CreateSealed(vt, kt, vault.Passphrase(pass))
+	v, err := vault.CreateSealed(vt, kt, f)
 	if err != nil {
 		return err
 	}
@@ -549,29 +721,17 @@ func sealNew(vaultPath, keysPath, pass string, seed []byte, setup bool) error {
 	}
 	v.Close()
 	if err == nil {
-		err = os.Rename(vt, vaultPath)
+		err = durable.Rename(vt, vaultPath)
 	}
 	if err == nil {
-		err = os.Rename(kt, keysPath)
+		err = durable.Rename(kt, keysPath)
 	}
 	if err != nil {
 		os.Remove(vt)
 		os.Remove(kt)
 		return err
 	}
-	return syncDir(filepath.Dir(keysPath))
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	serr := d.Sync()
-	if err := d.Close(); serr == nil {
-		serr = err
-	}
-	return serr
+	return nil
 }
 
 func b32() *base32.Encoding { return base32.StdEncoding.WithPadding(base32.NoPadding) }
@@ -637,7 +797,7 @@ func unlockCmd(args []string, in io.Reader, out io.Writer) error {
 		} else if st["updated"] == true {
 			fmt.Fprintln(out, "Box updated. Unlock once with your passphrase and a code; this PC stays trusted after that.")
 		} else {
-			fmt.Fprintln(out, "This PC started the box in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
+			fmt.Fprintln(out, "This PC started me in a way it hasn't before. If you didn't change anything, the drive may have been tampered with. Unlock only if you're sure.")
 		}
 		// Never ticked by default: updated and secure_boot come from
 		// files on the drive, not from a verified release's measured
@@ -726,8 +886,8 @@ func trustCmd(args []string, in io.Reader, out io.Writer) error {
 	code, _ := r.ReadString('\n')
 	var pin string
 	if *withPIN {
-		fmt.Fprintln(out, "With a PIN, the box won't restart by itself after a power cut until you enter the PIN.")
-		fmt.Fprintln(out, "This also locks this PC's TPM reset to the box until you turn the PIN off.")
+		fmt.Fprintln(out, "With a PIN, I won't restart by myself after a power cut until you enter the PIN.")
+		fmt.Fprintln(out, "This also locks this PC's TPM reset to me until you turn the PIN off.")
 		fmt.Fprint(out, "New boot PIN: ")
 		pin, _ = r.ReadString('\n')
 		pin = strings.TrimSpace(pin)
@@ -760,6 +920,88 @@ func untrustCmd(args []string, in io.Reader) error {
 	}
 	if status != http.StatusNoContent {
 		return fmt.Errorf("untrust: %v", res["error"])
+	}
+	return nil
+}
+
+// pinKinds is the owner's wording for each pin kind: what may reach it.
+var pinKinds = map[string]string{
+	"backup":  "backups",
+	"hosted":  "model calls to your hosted route",
+	"compute": "model calls to your compute host",
+}
+
+// pinCmd pins an endpoint the owner chose (DEV-2, BAK-1, CAP-13), reading
+// a code-generator code from in. The same -label again is the re-pin: when
+// the endpoint's key changed, its connections are refused until then.
+func pinCmd(args []string, in io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("pin", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	label := fs.String("label", "", "your name for this pin: lower-case letters, digits, '-'")
+	kind := fs.String("kind", "", "backup, hosted or compute")
+	name := fs.String("name", "", "the endpoint's host name, if it has one")
+	addr := fs.String("addr", "", "the endpoint's address as ip:port, if fixed")
+	key := fs.String("key", "", "SHA-256 of the endpoint's TLS public key, in hex")
+	fs.Parse(args)
+	fmt.Fprint(out, "Code-generator code: ")
+	code, _ := bufio.NewReader(io.LimitReader(in, maxUnlockBody)).ReadString('\n')
+	res, status, err := post(unixClient(filepath.Join(*run, UnlockSocket)), "/pin", map[string]string{
+		"code": strings.TrimSpace(code), "label": *label, "kind": *kind, "name": *name, "addr": *addr, "key": strings.ToLower(*key)})
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("pin: %v", res["error"])
+	}
+	where := strings.Trim(*name+" "+*addr, " ")
+	short := *key
+	if len(short) > 16 {
+		short = short[:16]
+	}
+	if res["replaced"] == true {
+		fmt.Fprintf(out, "Re-pinned %s: %s may reach %s with key %s…; the old key no longer works.\n", *label, pinKinds[*kind], where, short)
+	} else {
+		fmt.Fprintf(out, "Pinned %s: %s may reach %s with key %s….\n", *label, pinKinds[*kind], where, short)
+	}
+	return nil
+}
+
+// unpinCmd removes the pin -label, reading a code-generator code from in.
+func unpinCmd(args []string, in io.Reader) error {
+	fs := flag.NewFlagSet("unpin", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	label := fs.String("label", "", "the pin's label, as pins prints it")
+	fs.Parse(args)
+	code, _ := bufio.NewReader(io.LimitReader(in, maxUnlockBody)).ReadString('\n')
+	res, status, err := post(unixClient(filepath.Join(*run, UnlockSocket)), "/unpin", map[string]string{"code": strings.TrimSpace(code), "label": *label})
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return fmt.Errorf("unpin: %v", res["error"])
+	}
+	return nil
+}
+
+// pinsCmd lists the owner pins.
+func pinsCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("pins", flag.ExitOnError)
+	run := fs.String("run", defaultRun, "socket directory")
+	fs.Parse(args)
+	res, status, err := get(unixClient(filepath.Join(*run, UnlockSocket)), "/pins")
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("pins: %v", res["error"])
+	}
+	pins, _ := res["pins"].([]any)
+	if len(pins) == 0 {
+		fmt.Fprintln(out, "No pinned endpoints.")
+	}
+	for _, p := range pins {
+		m, _ := p.(map[string]any)
+		fmt.Fprintf(out, "%v\t%v\t%v %v\tkey %v\n", m["label"], m["kind"], m["name"], m["addr"], m["key"])
 	}
 	return nil
 }

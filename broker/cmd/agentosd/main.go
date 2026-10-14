@@ -20,6 +20,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/accel"
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/change"
@@ -219,9 +220,19 @@ type lateStatus struct {
 	// caps is the capability-off registry's state: when its line names
 	// the agent, this line says nothing, so STATUS has one (OP-9).
 	caps *capState
+	// replies is the guest plane once open: while its outbox refuses
+	// replies, STATUS says so (DEL-1e).
+	replies atomic.Pointer[replyWait]
+}
+
+type replyWait struct {
+	p interface{ RepliesWaiting() bool }
 }
 
 func (l *lateStatus) Status() string {
+	if w := l.replies.Load(); w != nil && w.p.RepliesWaiting() {
+		return repliesWaiting
+	}
 	if k := l.k.Load(); k != nil {
 		return k.Status()
 	}
@@ -349,7 +360,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
 	var diskQuota, sleepHoursFlag string
-	var builderImage, builderLaunch, keptPath, setupRecord string
+	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock, apNetPath string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var digestDir, mailSocket string
@@ -361,7 +372,7 @@ func main() {
 	flag.IntVar(&cfg.ModemUID, "modem-uid", -1, "uid of the modem bridge, the only peer allowed on the owner socket")
 	flag.IntVar(&localUIUID, "localui-uid", -1, "uid of the local UI (agentos-localui), the only peer allowed on localui.sock; unset, the socket is not served (P2-2w)")
 	var updateStore, shippedRoot string
-	flag.StringVar(&updateStore, "update-store", "", "the box's update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
+	flag.StringVar(&updateStore, "update-store", "", "the update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
 	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
 	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
 	modemRoles := flag.String("modem-roles", "/var/lib/agentos/modem/roles.json", "agentos-modem's roles file, where a SIM the owner adopts on the local page is recorded")
@@ -384,10 +395,12 @@ func main() {
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
+	flag.StringVar(&netjoinSock, "netjoin-sock", "", "the netjoin helper's socket (agentos-netjoin, P2-2w c3): setup's network step writes the home Wi-Fi through it; empty, that step answers not joined")
+	flag.StringVar(&apNetPath, "ap-net", apnet.Path, "the card's Wi-Fi network (#1185): setup writes the page's report of it here, root-only, for agentos-ap to serve at the confirm; empty, it is not taken")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
-	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the agent machine is created from on first start; empty keeps no agent machine")
-	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the agent machine starts: argv and env (guest/openclaw/launch.json)")
-	flag.Int64Var(&agentMemMB, "agent-mem-mb", defaultAgentMemMB, "the agent machine's memory budget, MB")
+	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
+	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
+	flag.Int64Var(&agentMemMB, "agent-mem-mb", defaultAgentMemMB, "the owner's agent machine's memory budget, MB")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
@@ -401,7 +414,7 @@ func main() {
 	flag.StringVar(&builderImage, "builder-image", defaultBuilderImage, "the minimal image Loop 1's builder machines run (W3-builder), registered with -image; empty, or the default not registered, runs no model-backed builder")
 	flag.StringVar(&builderLaunch, "builder-launch", defaultBuilderLaunch, "how a builder machine starts: argv and env (guest/builder/launch.json); empty uses the image's own")
 	flag.Int64Var(&builderMemMB, "builder-mem-mb", loopbuild.DefaultMemMB, "a builder machine's memory budget, MB")
-	flag.StringVar(&sleepHoursFlag, "sleep-hours", "", "on a box where the agent and a replay machine do not fit together, the hours the agent may sleep while the box tests changes, HH:MM-HH:MM box time (PE7); empty is 01:00-06:00")
+	flag.StringVar(&sleepHoursFlag, "sleep-hours", "", "where the owner's agent machine and a replay machine do not fit together, the hours it may sleep while changes are tested, HH:MM-HH:MM box time (PE7); empty is 01:00-06:00")
 	var workerImage, workerArgv string
 	var workerMaxMB, workerLayerMB int64
 	flag.StringVar(&workerImage, "worker-image", "", "the base image worker machines are built from (CAP-8), registered with -image; empty offers guests no worker tools")
@@ -412,7 +425,7 @@ func main() {
 	flag.StringVar(&keptPath, "kept-replies", "/var/lib/agentos/kept-replies.json", "private agent replies that could not be emailed, kept for the local page (CH-20)")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
-	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the box clock check's state (P2-9)")
+	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the clock check's state (P2-9)")
 	flag.Parse()
 	sleepHours, err := parseSleepHours(sleepHoursFlag)
 	if err != nil {
@@ -459,7 +472,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
-		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid}
+		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid, RotateAPNet: rotateAPNet(apNetPath)}
 	}
 	// A restore the forget log's check held opens nothing on the restored
 	// tree: no recall, no agent machines (W3-forget-b1; security C3). The
@@ -494,8 +507,16 @@ func main() {
 	// setup's ops are served until its finish is recorded, and the owner's
 	// number then comes from the record, on this start and every later one.
 	if cfg.OwnerNumber == "" {
+		up := newUplink()
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
-			OwnerState: cfg.OwnerState, Progress: setupProgress}
+			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock,
+			Card: pageCardStep, APNet: apNetPath}
+		if modemBridge {
+			// The box texts its setup and pairing texts on its own line
+			// (P2-2w c4c), and records the SIM it finds as that line's.
+			m.Line = modemlink.NewSetup(modemlink.SetupConfig{Record: recordOwnerSIM(*modemRoles)})
+			m.ModemUID, m.ModemGID = &cfg.ModemUID, cfg.ModemGID
+		}
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
 		}
@@ -679,6 +700,9 @@ func main() {
 		ev.mail = mw
 	}
 	ev.wire(&cfg)
+	// RENEW (CAP-3): the owner starts a full agent memory over, by name,
+	// only on the gate's approval.
+	(&ownerRenew{r: recallExec, now: time.Now}).wire(&cfg)
 	// Changing where updates come from (OSS-10): on the clock guard's
 	// Latest, which questions.open starts; until then nothing is followed.
 	fs, err := newFollowSetting(updateStore, shippedRoot, qs.g.Load)
@@ -701,12 +725,18 @@ func main() {
 		retries = spare.Retries
 	}
 	steps := newStepNotes(&cfg.Notes)
-	if lp != nil && recallDir != "" && verifier != nil {
-		// An approved item 2 that finds recall not open yet waits for it
-		// (#327 L3 B-3); set before the daemon serves the owner.
-		lp.forgetOwner.whenOpen = func() {
-			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+	// FORGET's item 2s a restart interrupted resume once recall opens
+	// (#327 L3 B-3), including one startup reconcile finds late (#1370);
+	// with recall off the owner is told they cannot, once boot setup is
+	// done (Security S1 on #1382). Wired before the daemon serves the
+	// owner and starts reconcile; resumeBoot runs at the end of setup.
+	var resumeBoot func()
+	if lp != nil {
+		var onOpen func(func())
+		if recallDir != "" && verifier != nil {
+			onOpen = recallExec.OnOpen
 		}
+		resumeBoot = lp.forgetOwner.wireResume(ctx, onOpen)
 	}
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
@@ -796,6 +826,8 @@ func main() {
 				caps.agentOff(agentNoMachines)
 			} else {
 				services.live.Store(&svc{plane})
+				ev.serve(plane)
+				agentStatus.replies.Store(&replyWait{plane})
 				var notice func(key, line string) error
 				if lp != nil {
 					notice = lp.pipe.Notice
@@ -854,17 +886,17 @@ func main() {
 	// The recall identity key is vault-held (recall K5): recall opens once
 	// the vault process can hand it over.
 	// FORGET's item 2s a restart interrupted resume once recall opens;
-	// with recall off they cannot, and the owner is told so.
+	// with recall off they cannot, and the owner is told so (wireResume).
 	if recallDir != "" && verifier != nil {
-		if lp != nil {
-			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+		if resumeBoot != nil {
+			resumeBoot()
 		}
 		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
 	} else {
 		recallExec.Off()
 		caps.recallWired(false)
-		if lp != nil {
-			go lp.forgetOwner.resumeAgent(ctx)
+		if resumeBoot != nil {
+			resumeBoot()
 		}
 	}
 	if line != nil {
@@ -947,9 +979,9 @@ func planMemory(meminfo string, cores int, explicit bool, flagMB int64, floor bu
 			need += floor.HostMB + floor.InferenceMB + floor.BrowserMB
 		}
 		if total > 0 && !explicit {
-			p.AgentOff = fmt.Sprintf("Agent: off, this box has %s of memory and running the agent needs about %s.", gb(total), gb(need))
+			p.AgentOff = fmt.Sprintf("Your agent is off: I have %s of memory and running it needs about %s.", gb(total), gb(need))
 		} else {
-			p.AgentOff = "Agent: off, the memory set aside for it is too small to run it."
+			p.AgentOff = "Your agent is off: the memory set aside for it is too small to run it."
 		}
 		p.CapacityMB = max(c, headroomMB+1)
 	}
@@ -978,7 +1010,7 @@ func replayFits(capacityMB, headroomMB, agentMB, replayMB int64) error {
 		return fmt.Errorf("-replay-mem-mb is %d", replayMB)
 	}
 	if pool := capacityMB - headroomMB; agentMB+replayMB > pool {
-		return fmt.Errorf("the agent machine (%d MB) and one replay machine (%d MB) do not fit in the %d MB pool (-capacity-mb less -headroom-mb)", agentMB, replayMB, pool)
+		return fmt.Errorf("the owner's agent machine (%d MB) and one replay machine (%d MB) do not fit in the %d MB pool (-capacity-mb less -headroom-mb)", agentMB, replayMB, pool)
 	}
 	return nil
 }
@@ -1150,11 +1182,11 @@ func openGuestPlane(m *vm.Manager, d *daemon.Daemon, ev *evidence, socketDir, me
 		Route:   d.Gate().Route,
 		Label:   label,
 		Meter:   mtr,
-		// A private machine's reply goes to the owner's evidence
-		// destination when one is set (CH-20).
-		OwnerReply: func(machine string, rep guest.Reply) {
-			ev.enqueue(machine, label(machine) != "public", rep.Text, rep.Summary)
-		},
+		// A guest's reply waits in the plane's outbox, on disk, until the
+		// evidence worker has routed it (DEL-1b); a private machine's
+		// goes to the owner's evidence destination when one is set
+		// (CH-20).
+		Replies: ev.poke,
 		// Further broker tools: the owner-question tools (W9) and the
 		// managed tree (W4).
 		Tools: tools,

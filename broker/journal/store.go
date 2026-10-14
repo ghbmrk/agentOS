@@ -3,6 +3,7 @@ package journal
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // Store is the durable medium under the journal. Append must not return nil
@@ -54,14 +57,7 @@ func OpenFile(path string) (*FileStore, error) {
 }
 
 // syncDir fsyncs a directory. A variable so tests can observe it.
-var syncDir = func(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
+var syncDir = durable.SyncDir
 
 func (s *FileStore) Append(line []byte) error {
 	s.mu.Lock()
@@ -113,12 +109,13 @@ func (s *FileStore) Rewrite(data []byte) error {
 	if err := t.Sync(); err != nil {
 		return fail(err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	err = durable.Rename(tmp, path)
+	if err != nil && !errors.Is(err, durable.ErrDirSync) {
 		return fail(err)
 	}
 	s.f.Close()
 	s.f = t
-	return syncDir(filepath.Dir(path))
+	return err
 }
 
 func (s *FileStore) Close() error { return s.f.Close() }
@@ -240,6 +237,14 @@ func decodeLine(line []byte) (Record, error) {
 		return r, fmt.Errorf("unsupported record version %d", r.V)
 	}
 	return r, nil
+}
+
+// Decode parses a journal's bytes into records, as Open reads them: a torn
+// final line is dropped and a corrupt complete line is an error. It does not
+// check transitions; journal/check judges a decoded journal.
+func Decode(data []byte) ([]Record, error) {
+	recs, _, err := decodeJournal(data)
+	return recs, err
 }
 
 // decodeJournal parses a journal and returns its records and the length of

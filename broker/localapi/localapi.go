@@ -58,10 +58,16 @@ const (
 	// approves it with a code like any forget (W3-forget-b3r, CAP-3).
 	OpForgetTasks = "page_forget_tasks"
 	OpForget      = "page_forget"
+	// OpRotateAPNet hands agentosd the Wi-Fi password of a card rotation
+	// the vault process has just committed (REC-4, #1191): agentosd
+	// rewrites the card's network root-only (apnet.Path, ARC-1), under
+	// the same name, and agentos-ap serves it (Down then Up). It needs a
+	// session; only a network a card prints is taken (ErrBadArgs).
+	OpRotateAPNet = "page_rotate_ap_net"
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -82,6 +88,9 @@ const (
 	// owner's name for it in bytes (40 characters of up to 4 bytes).
 	MaxRoot       = 64 << 10
 	MaxFollowName = 160
+	// MaxRootChain bounds the other root files brought with one, the
+	// rotation chain a switch back walks (update.MaxRootRotations).
+	MaxRootChain = 64
 	// DigestLen is a shown root's digest: SHA-256, lowercase hex.
 	DigestLen = 64
 	// MaxPause bounds a pause's intent ID (grants.Grant.Pause).
@@ -169,6 +178,19 @@ type AdoptSIM struct {
 	Code  string `json:"code,omitempty"`
 }
 
+// RotateAPNet is a rotated card's Wi-Fi network (OpRotateAPNet). The
+// password is the access point's (CRED-1): it goes only to agentos-ap's
+// file.
+type RotateAPNet struct {
+	Token    string `json:"token"`
+	SSID     string `json:"ssid"`
+	Password string `json:"password"`
+}
+
+// String and GoString keep the token and password out of logs.
+func (RotateAPNet) String() string   { return "[rotated Wi-Fi network]" }
+func (RotateAPNet) GoString() string { return "[rotated Wi-Fi network]" }
+
 // Outage is a stretch when the owner line could not be used: Missed
 // counts the texts to the owner that could not go, Requests the approval
 // requests among them (modemlink.Outage).
@@ -232,9 +254,13 @@ type Requests struct {
 }
 
 // FollowRoot is a root the owner brought to follow, exactly as published.
+// Chain is the other root files brought with it: the project's rotations
+// a switch back walks to Root (OSS-10w-r), each at most MaxRoot, at most
+// MaxRootChain of them.
 type FollowRoot struct {
-	Token string `json:"token"`
-	Root  []byte `json:"root"`
+	Token string   `json:"token"`
+	Root  []byte   `json:"root"`
+	Chain [][]byte `json:"chain,omitempty"`
 }
 
 // RootSummary is what following a root means, as the page shows it before
@@ -248,8 +274,9 @@ type RootSummary struct {
 	Digest     string              `json:"digest,omitempty"`
 	Refusal    string              `json:"refusal,omitempty"`
 	Reason     string              `json:"reason,omitempty"`
-	// Project: the root has the project's own root keys, as the image
-	// ships them, so the page may offer switching back (WF1).
+	// Project: the root is the project's own, admitted from the project
+	// root the box last trusted (or the shipped one) by itself or through
+	// a chain of root files, so the page may offer switching back (WF1).
 	Project bool `json:"project,omitempty"`
 }
 

@@ -1,0 +1,82 @@
+#!/bin/bash -p
+# agentos-toolsh: a prefix a Codex worker can run each tool command under (S8-W1, CRED-5).
+#   agentos-toolsh <command> [args...]
+# The pinned CLI does not run it: its own sandbox plus requirements.toml is the tool boundary
+# (ASSUMPTIONS C3, C12). This is the reference for what that boundary must hide and the fallback
+# if a CLI update loses it. tests/test_codex_worker.py checks this wrapper against the full list
+# below; its CliSandboxTest checks the CLI's sandbox against a narrower set (ASSUMPTIONS C3).
+# The CLI reaches its provider only through the in-worker forwarder on loopback and the egress
+# socket under /run/agentos, and holds a placeholder auth.json in CODEX_HOME; the egress proxy
+# swaps in the owner's login. A tool command (model-directed) must reach none of them, or it could
+# spend the owner's plan. So the command runs in a bwrap sandbox with:
+#   - its own network namespace (only its own lo: no forwarder port, no abstract sockets);
+#   - /run, /tmp, /var/tmp and CODEX_HOME replaced by empty tmpfs (path sockets are not scoped
+#     by the network namespace, so the socket directory must be hidden by a mount);
+#   - the rest of the filesystem read-only and the workspace root writable, bound before the
+#     hiding mounts so it can never re-expose them. The bind names the fixed root, never the
+#     working directory: bwrap resolves a bind path again after the check below, and a tool that
+#     swaps a workspace directory for a symlink in that window would get the root bound
+#     read-write. bwrap enters the checked directory with --chdir inside the sandbox instead;
+#   - its own pid, ipc, uts, cgroup and user namespaces, all capabilities dropped and no nested
+#     user namespaces, so it cannot undo the mounts; a fresh /proc and /dev; its own session,
+#     so it cannot push input into the CLI's terminal; killed when the CLI's bwrap dies;
+#   - no inherited file descriptor above 2, so nothing the CLI opened rides along;
+#   - an empty environment apart from PATH, HOME (the workspace) and LANG.
+# It refuses a working directory outside the workspace root. bash, not sh: dash cannot close
+# a descriptor above 9. bash -p: privileged mode reads no BASH_ENV or ENV file and imports no
+# exported functions or SHELLOPTS from the environment the CLI passes, so nothing runs here
+# unsandboxed before the check. Loader variables (LD_PRELOAD and the like) act before bash
+# starts, so the CLI must not pass them: managed_config.toml keeps tool environments to PATH
+# (#1455). The CLI must run the wrapper through this shebang, never as
+# `bash agentos-toolsh` or `sh agentos-toolsh`, which would drop -p (ASSUMPTIONS C8).
+set -eu
+
+BWRAP=/usr/bin/bwrap
+CODEX_HOME=/var/lib/agentos-codex
+WORK=/var/lib/agentos-work
+
+refuse() {
+	echo "agentos-toolsh: refusing: $*" >&2
+	exit 126
+}
+
+[ "$#" -gt 0 ] || refuse "no command"
+cwd=$(pwd -P) || refuse "no working directory"
+case "$cwd" in
+"$WORK" | "$WORK"/*) ;;
+*) refuse "working directory $cwd is outside $WORK" ;;
+esac
+
+hide=(--tmpfs /run --tmpfs /tmp --tmpfs /var/tmp)
+if [ -d "$CODEX_HOME" ]; then
+	hide+=(--tmpfs "$CODEX_HOME")
+fi
+
+# /proc/self, not /proc/$$: in a pid namespace with the host's /proc, $$ names another process.
+# A name that is not a number is refused: [ -gt ] would error on it, and under set -e the error
+# would end the loop before the descriptors after it are closed.
+[ -d /proc/self/fd ] || refuse "no /proc to find inherited descriptors"
+for fd in /proc/self/fd/*; do
+	fd=${fd##*/}
+	case $fd in
+	'' | *[!0-9]*) refuse "non-numeric descriptor entry $fd" ;;
+	esac
+	if [ "$fd" -gt 2 ]; then
+		eval "exec $fd>&-"
+	fi
+done
+
+exec "$BWRAP" \
+	--unshare-all --unshare-user --disable-userns \
+	--cap-drop ALL \
+	--die-with-parent --new-session \
+	--ro-bind / / \
+	--bind "$WORK" "$WORK" \
+	"${hide[@]}" \
+	--proc /proc --dev /dev \
+	--clearenv \
+	--setenv PATH /usr/local/bin:/usr/bin:/bin \
+	--setenv HOME "$cwd" \
+	--setenv LANG C.UTF-8 \
+	--chdir "$cwd" \
+	-- "$@"

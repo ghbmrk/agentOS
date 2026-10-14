@@ -34,6 +34,21 @@ func TestHostapdConf(t *testing.T) {
 	}
 }
 
+// hostapd's module logger names client MAC addresses, so it logs nothing
+// to syslog (the journal) or to its standard output; AP-ENABLED is not
+// from that logger.
+func TestHostapdConfLogsNoStations(t *testing.T) {
+	conf, err := HostapdConf(testAP())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"logger_syslog=0\n", "logger_stdout=0\n"} {
+		if !strings.Contains(conf, want) {
+			t.Fatalf("missing %q in:\n%s", want, conf)
+		}
+	}
+}
+
 // No value can inject a line into a generated configuration.
 func TestConfigInjectionRefused(t *testing.T) {
 	for _, f := range []func(*APConfig){

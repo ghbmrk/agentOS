@@ -1,0 +1,4 @@
+{"broker-default": [
+  {"provider": "anthropic", "model": "claude-sonnet-5-5"},
+  {"provider": "openai", "model": "gpt-5"}
+]}

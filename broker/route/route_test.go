@@ -137,8 +137,10 @@ type rigOpts struct {
 	grants    map[string][]string
 	labels    map[string]string
 	privateOK map[string]bool
-	cap       egress.Cap
-	maxOut    int
+	// privateAllowed is Config.PrivateAllowed (P2-2w c4e).
+	privateAllowed func(string) bool
+	cap            egress.Cap
+	maxOut         int
 }
 
 func newRig(t *testing.T, o rigOpts) *rig {
@@ -204,6 +206,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 			return false
 		},
 		PrivateOK:       o.privateOK,
+		PrivateAllowed:  o.privateAllowed,
 		MaxOutputTokens: o.maxOut,
 		Label:           label,
 		Upstream:        px.Handler,
@@ -785,6 +788,24 @@ func TestStreamErrorBeforeFirstByteFailsOver(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	if st := r.router.Stats()["anthropic/claude-fixture"]; st.Failovers != 1 {
+		t.Fatalf("stats %+v", st)
+	}
+}
+
+// An OpenAI error chunk before any output fails over like Anthropic's
+// early error event (ROUTE-openai-early-error).
+func TestOpenAIStreamErrorBeforeFirstByteFailsOver(t *testing.T) {
+	r := newRig(t, rigOpts{rule: Rule{"default": {
+		{Provider: "openai", Model: "gpt-fixture"}, {Provider: "anthropic", Model: "claude-fixture"},
+	}}})
+	early := "data: " + strings.TrimSpace(string(fixture(t, "openai_insufficient_quota.json"))) + "\n\n"
+	r.up.set(hostOpenAI, serveFixture(200, "text/event-stream", []byte(early)))
+	r.up.set(hostAnthropic, serveFixture(200, "text/event-stream", fixture(t, "anthropic_stream.sse")))
+	w := r.do(t, "m1", `{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if a := reassemble(t, w.Body.Bytes()); w.Code != 200 || !a.done || a.text != "Hello, world" || strings.Contains(w.Body.String(), "insufficient_quota") {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if st := r.router.Stats()["openai/gpt-fixture"]; st.Failovers != 1 {
 		t.Fatalf("stats %+v", st)
 	}
 }

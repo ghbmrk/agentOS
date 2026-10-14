@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/guest"
 )
 
 // The managed tree's procedures, skills and context reach a live agent
@@ -27,10 +29,6 @@ import (
 
 // treeNamespaces are the only directories a sync writes or removes in.
 var treeNamespaces = []string{"procedures", "skills", "context"}
-
-// maxTreeAnswer bounds a managed_tree answer as read: the broker's own
-// limit (4 MiB of files) after JSON's base64.
-const maxTreeAnswer = 8 << 20
 
 type treeAnswer struct {
 	Version   string            `json:"version"`
@@ -63,21 +61,50 @@ func syncTree(ctx context.Context, broker *http.Client, dir string, every time.D
 // syncOnce fetches the tree unless it is still version, and writes it.
 // It returns the version now held.
 func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (string, error) {
-	args, _ := json.Marshal(map[string]string{"version": version})
-	body, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-		"params": map[string]any{"name": "managed_tree", "arguments": json.RawMessage(args)},
-	})
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://broker.localhost/mcp", bytes.NewReader(body))
+	text, err := callTool(ctx, broker, "managed_tree", map[string]string{"version": version})
 	if err != nil {
 		return version, err
+	}
+	var ans treeAnswer
+	if err := json.Unmarshal([]byte(text), &ans); err != nil {
+		return version, fmt.Errorf("broker answer: %v", err)
+	}
+	if !ans.Unchanged && ans.Version == "" {
+		// Not a tree: mirroring it would delete the whole tree. The broker
+		// never folds managed_tree (guest.TreeTool), so a fold stand-in is
+		// refused here too.
+		return version, errors.New("broker answer: no tree version; nothing changed")
+	}
+	if ans.Unchanged {
+		if ans.Version != version {
+			// Not ours: an unchanged answer never wipes the tree.
+			return version, errors.New("broker answer: unchanged, but not the version held")
+		}
+		return version, nil
+	}
+	if err := mirror(dir, ans.Files); err != nil {
+		return version, err
+	}
+	return ans.Version, nil
+}
+
+// callTool calls the broker tool name and returns its result's text.
+func callTool(ctx context.Context, broker *http.Client, name string, args any) (string, error) {
+	a, _ := json.Marshal(args)
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": name, "arguments": json.RawMessage(a)},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://broker.localhost/mcp", bytes.NewReader(body))
+	if err != nil {
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := broker.Do(req)
 	if err != nil {
-		return version, err
+		return "", err
 	}
 	defer resp.Body.Close()
 	var out struct {
@@ -91,32 +118,20 @@ func syncOnce(ctx context.Context, broker *http.Client, dir, version string) (st
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxTreeAnswer)).Decode(&out); err != nil {
-		return version, fmt.Errorf("broker answer: %v", err)
+	// The guest plane refuses a managed_tree answer longer than
+	// guest.MaxTreeAnswer, so one read whole fits under this limit.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, guest.MaxTreeAnswer)).Decode(&out); err != nil {
+		return "", fmt.Errorf("broker answer: %v", err)
 	}
 	switch {
 	case out.Error != nil:
-		return version, errors.New(out.Error.Message)
+		return "", errors.New(out.Error.Message)
 	case out.Result == nil || len(out.Result.Content) == 0:
-		return version, errors.New("empty broker answer")
+		return "", errors.New("empty broker answer")
 	case out.Result.IsError:
-		return version, errors.New(out.Result.Content[0].Text)
+		return "", errors.New(out.Result.Content[0].Text)
 	}
-	var ans treeAnswer
-	if err := json.Unmarshal([]byte(out.Result.Content[0].Text), &ans); err != nil {
-		return version, fmt.Errorf("broker answer: %v", err)
-	}
-	if ans.Unchanged {
-		if ans.Version != version {
-			// Not ours: an unchanged answer never wipes the tree.
-			return version, errors.New("broker answer: unchanged, but not the version held")
-		}
-		return version, nil
-	}
-	if err := mirror(dir, ans.Files); err != nil {
-		return version, err
-	}
-	return ans.Version, nil
+	return out.Result.Content[0].Text, nil
 }
 
 // mirror makes dir's tree namespaces hold exactly files. Every path is

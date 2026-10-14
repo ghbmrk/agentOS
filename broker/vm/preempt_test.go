@@ -260,13 +260,11 @@ func TestRES1SnapshotFailingToSaveTheMachinePublishesNothing(t *testing.T) {
 	e.create("exp", admission.Experiment, 1500)
 	keep, err := e.m.Checkpoint(bg, "exp")
 	must(t, err)
-	// A directory where the record's temporary file goes makes the save fail.
-	block := filepath.Join(e.cfg.StateDir, "machines", "exp", "meta.json.tmp")
-	must(t, os.MkdirAll(filepath.Join(block, "x"), 0o700))
+	unblock := failSave(filepath.Join(e.cfg.StateDir, "machines", "exp", "meta.json"))
 	if _, err := e.m.Checkpoint(bg, "exp"); err == nil {
 		t.Fatal("snapshot whose machine record failed to save reported success")
 	}
-	must(t, os.RemoveAll(block))
+	unblock()
 	if got := e.m.Snapshots("exp"); len(got) != 1 || got[0].ID != keep.ID {
 		t.Fatalf("snapshots %v, want only %s", ids(got), keep.ID)
 	}
@@ -279,5 +277,125 @@ func TestRES1SnapshotFailingToSaveTheMachinePublishesNothing(t *testing.T) {
 	must(t, err)
 	if mc.Last != keep.ID {
 		t.Fatalf("Last = %s, want %s", mc.Last, keep.ID)
+	}
+}
+
+// A kill that fails leaves the guest's memory held, so a retry must not
+// read the machine as stopped and report it dead: admission would hand its
+// memory to someone else (RES-2 over-admission).
+func TestRES1FailedKillIsNotReportedDeadOnRetry(t *testing.T) {
+	e := newEnv(t, 2000)
+	e.create("exp", admission.Experiment, 1500)
+	e.rt.refuseKill = errors.New("fake: kill refused")
+	foreground := Spec{Image: "base", Class: admission.Foreground, MemMB: 1000}
+
+	if _, err := e.m.Create(bg, "call", foreground); err == nil {
+		t.Fatal("foreground admitted while the experiment's kill failed")
+	}
+	if err := e.m.Preempt("exp"); err == nil {
+		t.Fatal("retried preemption reported success; the guest was never killed")
+	}
+	if _, err := e.m.Create(bg, "call", foreground); err == nil {
+		t.Fatal("foreground admitted on a retry while the experiment still runs")
+	}
+	if _, ok := e.rt.memOf("exp"); !ok {
+		t.Fatal("fake: the experiment should still be running")
+	}
+
+	// Once the kill works, the retry kills it for real.
+	e.rt.mu.Lock()
+	e.rt.refuseKill = nil
+	e.rt.mu.Unlock()
+	e.create("call", admission.Foreground, 1000)
+	if _, ok := e.rt.memOf("exp"); ok {
+		t.Fatal("experiment still running after preemption returned")
+	}
+	waitState(t, e, "exp", Preempted)
+}
+
+// A rollback or rebuild whose kill fails leaves the guest running: its
+// admission is kept, so its memory is not handed to someone else.
+func TestRES1FailedKillOnRestartKeepsTheAdmission(t *testing.T) {
+	for _, op := range []string{"rollback", "rebuild"} {
+		t.Run(op, func(t *testing.T) {
+			e := newEnv(t, 2000)
+			e.create("exp", admission.Experiment, 1500)
+			s, err := e.m.Checkpoint(bg, "exp")
+			must(t, err)
+			e.rt.refuseKill = errors.New("fake: kill refused")
+			if op == "rollback" {
+				err = e.m.Rollback(bg, "exp", s.ID)
+			} else {
+				err = e.m.Rebuild(bg, "exp")
+			}
+			if err == nil {
+				t.Fatalf("%s reported success; the guest was never killed", op)
+			}
+			if _, err := e.m.Create(bg, "call", Spec{Image: "base", Class: admission.Foreground, MemMB: 1000}); err == nil {
+				t.Fatal("foreground admitted on the memory of a guest still running")
+			}
+		})
+	}
+}
+
+// A preemption that kills a held machine without its lock tells admission
+// the memory is free. If the runtime cleanup under the lock then fails, the
+// machine is still recorded preempted: left Running with no admission, a
+// rebuild would start a guest admission does not count (L3 B1 on #1043).
+func TestRES1LocklessKillThenFailedCleanupIsPreempted(t *testing.T) {
+	e := newEnv(t, 2000)
+	e.create("exp", admission.Experiment, 1500)
+	mc, err := e.m.get("exp")
+	must(t, err)
+	mc.mu.Lock() // an operation holds the machine
+	e.create("call", admission.Foreground, 1000)
+	if _, ok := e.rt.memOf("exp"); ok {
+		t.Fatal("experiment still running after preemption returned")
+	}
+	e.rt.mu.Lock()
+	e.rt.failKill = errors.New("fake: runtime cleanup failed")
+	e.rt.mu.Unlock()
+	mc.mu.Unlock()
+	waitState(t, e, "exp", Preempted)
+
+	if err := e.m.Rebuild(bg, "exp"); err == nil {
+		t.Fatal("rebuild started the experiment on memory the foreground holds")
+	}
+	if _, ok := e.rt.memOf("exp"); ok {
+		t.Fatal("a guest admission does not count is running")
+	}
+}
+
+// A resume whose start fails and whose cleanup kill fails leaves the guest
+// running: its admission is kept (L3 B2 on #1043).
+func TestRES1FailedKillOnResumeKeepsTheAdmission(t *testing.T) {
+	e := newEnv(t, 2000)
+	e.create("exp", admission.Experiment, 1500)
+	must(t, e.m.Preempt("exp"))
+	waitState(t, e, "exp", Preempted)
+	e.adm.Release("exp") // as admission does after a preemption
+
+	// The resumed guest starts, its save fails, and the cleanup kill fails.
+	meta := filepath.Join(e.cfg.StateDir, "machines", "exp", "meta.json")
+	real := writeFile
+	writeFile = func(p string, b []byte, perm os.FileMode) error {
+		if p == meta {
+			e.rt.mu.Lock()
+			e.rt.refuseKill = errors.New("fake: kill refused")
+			e.rt.mu.Unlock()
+			return errors.New("synthetic save failure")
+		}
+		return real(p, b, perm)
+	}
+	defer func() { writeFile = real }()
+
+	if err := e.m.Resume(bg, "exp"); err == nil {
+		t.Fatal("resume reported success; its save failed")
+	}
+	if _, ok := e.rt.memOf("exp"); !ok {
+		t.Fatal("fake: the resumed guest should still be running")
+	}
+	if _, err := e.m.Create(bg, "call", Spec{Image: "base", Class: admission.Foreground, MemMB: 1000}); err == nil {
+		t.Fatal("foreground admitted on the memory of a guest still running")
 	}
 }

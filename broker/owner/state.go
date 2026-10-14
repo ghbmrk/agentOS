@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // State is the owner channel's durable state. It survives restarts so that a
@@ -54,6 +55,8 @@ type State struct {
 	Queued  []QueuedRef  `json:"queued,omitempty"`
 	// Retired holds IDs closed in the last RetireFor, which are not reused.
 	Retired map[string]time.Time `json:"retired,omitempty"`
+	// Name is the box's name (CH-21), set by NAME; "" before one is set.
+	Name string `json:"name,omitempty"`
 	// Pacing is the owner's quiet hours and texts-an-hour setting; the
 	// zero value is the default (CH-15).
 	Pacing Pacing `json:"pacing"`
@@ -148,29 +151,5 @@ func (f FileStore) Save(s State) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(f.Path), ".owner-state-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), f.Path); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(f.Path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return durable.WriteFile(f.Path, b, 0o600)
 }
