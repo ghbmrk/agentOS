@@ -218,3 +218,31 @@ func TestOP2RedispatchNeedsTheRecheck(t *testing.T) {
 		t.Fatalf("executes %v", svc.executes)
 	}
 }
+
+// A redispatch after restart keeps the account's restart fence until it
+// ends, so newer work on the account cannot run ahead of it.
+func TestOP2RedispatchKeepsTheRestartFence(t *testing.T) {
+	svc := newService()
+	svc.mode = func(key string) execMode {
+		if key == AttemptKey("a", 1) {
+			return modeTimeout
+		}
+		return modeOK
+	}
+	st := killedBetween(t, svc, mailSend("a"))
+	e := mustOpen(t, st, newPolicy(), svc)
+	var during []string
+	svc.onExecute = func(in Intent, attempt int) { during = e.Fenced("mail") }
+	if rep := settle(e); len(rep.Redispatched) != 1 {
+		t.Fatalf("report %+v", rep)
+	}
+	if len(during) != 1 || during[0] != "a" {
+		t.Fatalf("fenced during the redispatch: %v", during)
+	}
+	if f := e.Fenced("mail"); len(f) != 0 {
+		t.Fatalf("fenced after: %v", f)
+	}
+	if s := must(e.Get("a")); s.State != Succeeded || len(s.Attempts) != 2 {
+		t.Fatalf("a: %+v", s)
+	}
+}

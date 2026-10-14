@@ -273,6 +273,10 @@ func (s *Server) requestView(rq owner.LocalRequest, sess string) requestView {
 		default:
 			iv.Undo = "Cannot be undone."
 		}
+		if !it.Retried.IsZero() {
+			// An owner retry of an effect that may have gone (OP-2).
+			iv.Undo = "Tried before and may have gone: this may make it happen twice. " + iv.Undo
+		}
 		v.Items = append(v.Items, iv)
 	}
 	if len(v.Items) == 1 {

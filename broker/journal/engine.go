@@ -50,7 +50,11 @@ type Engine struct {
 	// unknown outcome unknown; at parkAfter the intent is parked (OP-2).
 	// It is memory only: a restart starts the count again.
 	checks map[string]int
-	broken error
+	// redispatching holds the restart fence of an intent whose check
+	// proved it was not done until its redispatch ends, so newer work on
+	// the account cannot run ahead of it. Memory only.
+	redispatching map[string]bool
+	broken        error
 }
 
 // hotDenials is how many settled denials stay in memory. Refusals are
@@ -129,6 +133,8 @@ func Open(store Store, policy Policy, execs map[string]Executor, redact Redactor
 		fence:   map[string]map[string]bool{},
 		checks:  map[string]int{},
 		pinned:  true,
+
+		redispatching: map[string]bool{},
 	}
 	for _, o := range opts {
 		o(e)
@@ -501,7 +507,11 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 		}
 		switch {
 		case out.Result == ResultSucceeded || out.Result == ResultNotApplied:
+			if checked == ResultNotApplied {
+				e.holdFence(j.in.ID, true)
+			}
 			if _, err := e.Resolve(j.in.ID, j.n, out, "reconcile"); err != nil && !e.settled(j.in.ID, j.n) {
+				e.holdFence(j.in.ID, false)
 				if !j.parked {
 					rep.Unresolved = append(rep.Unresolved, j.in.ID)
 				}
@@ -512,6 +522,7 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 			if checked == ResultNotApplied && e.redispatch(ctx, j.in.ID, j.n) {
 				rep.Redispatched = append(rep.Redispatched, j.in.ID)
 			}
+			e.holdFence(j.in.ID, false)
 		case j.parked:
 			// Checked again; still unclear. It stays in the digest.
 		default:
@@ -523,6 +534,26 @@ func (e *Engine) Reconcile(ctx context.Context) ReconcileReport {
 		}
 	}
 	return rep
+}
+
+// holdFence keeps id in its account's restart fence while hold is set,
+// through the record that settles it, and lifts it when hold is cleared.
+func (e *Engine) holdFence(id string, hold bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if hold {
+		e.redispatching[id] = true
+		return
+	}
+	if !e.redispatching[id] {
+		return
+	}
+	delete(e.redispatching, id)
+	if en, ok := e.intents[id]; ok && en.state != OutcomeUnknown && en.state != InFlight {
+		if f := e.fence[en.intent.Account]; f != nil {
+			delete(f, id)
+		}
+	}
 }
 
 // settled reports whether attempt n of id already has evidence, as when a
@@ -1342,7 +1373,7 @@ func (e *Engine) apply(r Record) {
 	en := e.intents[r.ID]
 	was := en.state
 	en.apply(r)
-	if (r.Type == RecObserved && r.Result != ResultUnknown) || r.Type == RecParked {
+	if ((r.Type == RecObserved && r.Result != ResultUnknown) || r.Type == RecParked) && !e.redispatching[r.ID] {
 		if f := e.fence[en.intent.Account]; f != nil {
 			delete(f, r.ID)
 		}

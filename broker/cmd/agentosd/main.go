@@ -775,6 +775,7 @@ func main() {
 				dg.cfg.Sources = map[string]digestqueue.Source{}
 			}
 			dg.cfg.Sources[unclearDigestSource] = src
+			d.OnRetryRefused(src.Relist)
 		}
 		go dg.run(ctx)
 	}

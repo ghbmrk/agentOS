@@ -1026,9 +1026,10 @@ func (c *Channel) Run(ctx context.Context) error {
 	}
 }
 
-// askRetry opens one request for the unclear effects Config.Retry lists
-// (OP-2), texted like any other request, and returns the reply, "" once
-// the request text is on its way.
+// askRetry asks about the unclear effects Config.Retry lists (OP-2): one
+// request per effect, never one YES for all, each at the tier its own
+// verified facts give, and on the local page when its recipients cannot
+// be texted. It returns the reply, "" once every request is on its way.
 func (c *Channel) askRetry() string {
 	var items []Item
 	if c.cfg.Retry != nil {
@@ -1040,11 +1041,29 @@ func (c *Channel) askRetry() string {
 	if len(items) > 20 {
 		items = items[:20]
 	}
-	if _, err := c.Request(items, 0); err != nil {
-		if errors.Is(err, ErrFull) {
-			return "Too many open requests to ask about a retry now. Try RETRY again later."
+	var text, local []Item
+	for _, it := range items {
+		if SMSApprovable(it) {
+			text = append(text, it)
+		} else {
+			local = append(local, it)
 		}
-		return "Could not ask about a retry now. Try RETRY again later."
 	}
-	return ""
+	var errs []error
+	if len(text) > 0 {
+		_, err := c.RequestEach(text, make([]time.Duration, len(text)))
+		errs = append(errs, err)
+	}
+	if len(local) > 0 {
+		_, err := c.RequestLocalEach(local, make([]time.Duration, len(local)))
+		errs = append(errs, err)
+	}
+	switch err := errors.Join(errs...); {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrFull):
+		return "Too many open requests to ask about every retry now. Text RETRY again later for the rest."
+	default:
+		return "Could not ask about every retry now. Text RETRY again later for the rest."
+	}
 }
