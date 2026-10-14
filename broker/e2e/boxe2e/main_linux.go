@@ -48,7 +48,7 @@ var xfail = map[string]int{"guest-task": 1701, "phone-control": 1714}
 const (
 	box       = "http://10.42.0.1"
 	netns     = "e2e-phone"
-	sysroot   = "/run/agentos-e2e/sysroot"
+	sysroot   = "/run/agentos-e2e-sysroot"
 	claimDst  = "/var/lib/agentos-localui/claim.json"
 	cardLatch = "/var/lib/agentos-localui/card-latch.json"
 )

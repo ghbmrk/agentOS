@@ -31,3 +31,19 @@ func TestModemDropInKeepsTheShippedCommand(t *testing.T) {
 		t.Fatalf("drop-in ExecStart\n %s\nwant\n %s", drop, want)
 	}
 }
+
+// The bridge runs as agentos-modem, so its fake sysfs must not sit under the
+// seal unit's directory, which that unit makes root-only (UMask=0077) for the
+// claim code: the bridge could not reach the tree and found no modem.
+func TestSysrootIsOutsideTheRootOnlyDirectory(t *testing.T) {
+	b, err := os.ReadFile("../../../image/e2e/agentos-e2e-seal.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "\nUMask=0077\n") || !strings.Contains(string(b), "mkdir -p /run/agentos-e2e/") {
+		t.Fatal("seal unit no longer makes /run/agentos-e2e root-only; revisit this test")
+	}
+	if strings.HasPrefix(sysroot, "/run/agentos-e2e/") {
+		t.Fatalf("sysroot %s is under the root-only /run/agentos-e2e", sysroot)
+	}
+}
