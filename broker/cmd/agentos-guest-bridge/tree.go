@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/guest"
 )
 
 // The managed tree's procedures, skills and context reach a live agent
@@ -27,10 +29,6 @@ import (
 
 // treeNamespaces are the only directories a sync writes or removes in.
 var treeNamespaces = []string{"procedures", "skills", "context"}
-
-// maxTreeAnswer bounds a managed_tree answer as read: the broker's own
-// limit (4 MiB of files) after JSON's base64.
-const maxTreeAnswer = 8 << 20
 
 type treeAnswer struct {
 	Version   string            `json:"version"`
@@ -120,7 +118,9 @@ func callTool(ctx context.Context, broker *http.Client, name string, args any) (
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxTreeAnswer)).Decode(&out); err != nil {
+	// The guest plane refuses a managed_tree answer longer than
+	// guest.MaxTreeAnswer, so one read whole fits under this limit.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, guest.MaxTreeAnswer)).Decode(&out); err != nil {
 		return "", fmt.Errorf("broker answer: %v", err)
 	}
 	switch {
