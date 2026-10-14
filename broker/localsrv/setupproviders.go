@@ -94,7 +94,8 @@ func (s *Setup) apiKey(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 // nothing, a list that fails keeps it owed, and a clear that cannot be
 // written answers failed with the answer still owed. A provider the vault
 // does not list is owed nothing, and finish counts only listed ones, so a
-// stray id cannot hold setup open for good.
+// stray id cannot hold setup open for good. A sealed vault (EnrollClosed)
+// lists nothing and takes nothing, so the answer is not owed (#1623).
 func (s *Setup) privateOK(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var a localapi.PrivateOK
 	if err := decode(args, &a); err != nil {
@@ -129,6 +130,9 @@ func (s *Setup) privateOK(_ context.Context, _ sockets.Peer, args json.RawMessag
 		s.mu.Unlock()
 	}
 	ps, err := s.cfg.Providers.Providers()
+	if errors.Is(err, EnrollClosed) {
+		restore()
+	}
 	if err != nil {
 		return nil, s.providerErr(err)
 	}
@@ -152,12 +156,18 @@ func (s *Setup) privateOK(_ context.Context, _ sockets.Peer, args json.RawMessag
 
 // owedListedLocked is whether the record owes an answer for a provider
 // the vault lists. A list that fails counts as owing: finish cannot tell.
-// Caller holds s.mu.
+// A sealed vault (EnrollClosed) lists nothing, so nothing is owed: it
+// sealed only through a finish that found nothing owed, takes no answer
+// since, and would otherwise hold setup open for good after a seal whose
+// finished record failed to save (#1623). Caller holds s.mu.
 func (s *Setup) owedListedLocked() bool {
 	if len(s.rec.Owed) == 0 || s.cfg.Providers == nil {
 		return false
 	}
 	ps, err := s.cfg.Providers.Providers()
+	if errors.Is(err, EnrollClosed) {
+		return false
+	}
 	if err != nil {
 		return true
 	}
