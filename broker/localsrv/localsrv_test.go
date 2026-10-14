@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -64,7 +65,8 @@ func (f *fakeOwner) LocalStop(context.Context) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeOwner) LocalResume(locks uint64) (string, error) {
+func (f *fakeOwner) StopGen() int64 { return 0 }
+func (f *fakeOwner) LocalResume(locks uint64, _ int64) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if locks != f.locks {
@@ -106,6 +108,7 @@ type rig struct {
 	asks    []string
 	forgets []string
 	adopted []string
+	rotated []apnet.Network
 }
 
 func newRig(t *testing.T) *rig {
@@ -151,6 +154,10 @@ func newRig(t *testing.T) *rig {
 			}
 			r.forgets = append(r.forgets, goal)
 			return "Asked."
+		},
+		RotateAPNet: func(n apnet.Network) error {
+			r.rotated = append(r.rotated, n)
+			return nil
 		}})
 	r.ops = r.srv.Ops()
 	return r
@@ -219,6 +226,7 @@ func tokenOps(tok string) map[string]any {
 		localapi.OpSIM:         localapi.AdoptSIM{Token: tok, SIM: simTag, Code: good},
 		localapi.OpForgetTasks: localapi.Auth{Token: tok},
 		localapi.OpForget:      localapi.Forget{Token: tok, ID: "owner:a"},
+		localapi.OpRotateAPNet: localapi.RotateAPNet{Token: tok, SSID: rotSSID, Password: rotPassword},
 	}
 }
 
@@ -248,8 +256,8 @@ func TestEveryOpButTheOpenOnesNeedsAToken(t *testing.T) {
 			t.Errorf("%s with no args: %v", op, err)
 		}
 	}
-	if len(r.own.answers) != 0 || len(r.follows) != 0 || len(r.adopted) != 0 || len(r.forgets) != 0 {
-		t.Fatalf("reached the channel: %v %v %v %v", r.own.answers, r.follows, r.adopted, r.forgets)
+	if len(r.own.answers) != 0 || len(r.follows) != 0 || len(r.adopted) != 0 || len(r.forgets) != 0 || len(r.rotated) != 0 {
+		t.Fatalf("reached the channel: %v %v %v %v %d", r.own.answers, r.follows, r.adopted, r.forgets, len(r.rotated))
 	}
 	for op := range open {
 		var args any = struct{}{}
@@ -535,8 +543,10 @@ func TestChannelFailuresAreFixedCodes(t *testing.T) {
 
 type failing struct{ *fakeOwner }
 
-func (f *failing) LocalStop(context.Context) error    { return errors.New("journal: /var/lib/x") }
-func (f *failing) LocalResume(uint64) (string, error) { return "", errors.New("journal: /var/lib/x") }
+func (f *failing) LocalStop(context.Context) error { return errors.New("journal: /var/lib/x") }
+func (f *failing) LocalResume(uint64, int64) (string, error) {
+	return "", errors.New("journal: /var/lib/x")
+}
 func (f *failing) LocalSignIn(string) (time.Time, uint64, error) {
 	return time.Time{}, 0, errors.New("state: /var/lib/x")
 }

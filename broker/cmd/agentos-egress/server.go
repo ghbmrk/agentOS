@@ -95,7 +95,7 @@ func modelState(c *custody, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.granted, Open: c.model() != nil})
+	json.NewEncoder(w).Encode(modelroute.ModelState{Granted: c.modelGrantedNow(), Open: c.model() != nil, Private: c.privateGrantedNow()})
 }
 
 // evalRoute is the model access of replay machines (LOOP-5, replay K1).
@@ -376,7 +376,11 @@ func unlockHandler(c *custody) http.Handler {
 		if !errors.As(err, &ue) {
 			ue = errInternal
 		}
-		reply(w, ue.status, map[string]string{"error": ue.msg})
+		out := map[string]string{"error": ue.msg}
+		if ue.reason != "" {
+			out["reason"] = ue.reason
+		}
+		reply(w, ue.status, out)
 	}
 	read := func(w http.ResponseWriter, r *http.Request, v any) bool {
 		if r.Method != http.MethodPost {
@@ -499,6 +503,49 @@ func unlockHandler(c *custody) http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// Owner pins (DEV-2, BAK-1, CAP-13): tier 4, like /trust. /pin with
+	// an existing label is the re-pin.
+	mux.HandleFunc("/pin", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Code  string `json:"code"`
+			Label string `json:"label"`
+			pinRecord
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		replaced, err := c.pin(req.Code, req.Label, req.pinRecord)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, http.StatusOK, map[string]any{"label": req.Label, "replaced": replaced})
+	})
+	mux.HandleFunc("/unpin", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Code  string `json:"code"`
+			Label string `json:"label"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		if err := c.unpin(req.Code, req.Label); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/pins", func(w http.ResponseWriter, r *http.Request) {
+		p, err := c.pins()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if p == nil {
+			p = []pinInfo{}
+		}
+		reply(w, http.StatusOK, map[string]any{"pins": p})
+	})
 	mux.HandleFunc("/lock", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -522,8 +569,11 @@ func unlockHandler(c *custody) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	secondLineRoutes(mux, c, read, reply, fail)
+	providerRoutes(mux, c, read, reply, fail)
 	smsRoutes(mux, c, read, reply, fail)
 	mailRoutes(mux, c, read, reply, fail)
+	rotationRoutes(mux, c, read, reply, fail)
+	cardRoutes(mux, c, read, reply, fail)
 	return mux
 }
 
@@ -612,8 +662,12 @@ func verifyHandler(c *custody) http.Handler {
 			enrollHandler(c, w, r)
 			return
 		}
+		if (r.Method == http.MethodGet && r.URL.Path == "/setup/providers") || (r.Method == http.MethodPost && (r.URL.Path == "/setup/providers/key" || r.URL.Path == "/setup/providers/private")) {
+			setupProvidersHandler(c, w, r)
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal or /update-anchor/raise, or GET /second-line, /second-line/texts or /update-anchor, only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal, /setup/providers/key, /setup/providers/private or /update-anchor/raise, or GET /second-line, /second-line/texts, /setup/providers or /update-anchor, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest
@@ -671,7 +725,7 @@ func enrollHandler(c *custody, w http.ResponseWriter, r *http.Request) {
 	case err == errLocked:
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
-	case err == errEnrolled, err == errNotOpen, err == errNoEnrollment, err == errNotConfirmed:
+	case err == errEnrolled, err == errNotOpen, err == errNoEnrollment, err == errNotConfirmed, err == errCardRequired:
 		http.Error(w, err.Error(), err.(*unlockErr).status)
 		return
 	case errors.As(err, &paused):

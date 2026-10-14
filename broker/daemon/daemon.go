@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/journal/check"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -36,6 +38,11 @@ const OwnerSocket = "owner.sock"
 // long, so a stuck or hostile bridge cannot hold all 8 slots and lock the
 // owner out (CH-2). The bridge opens a connection per message (B11).
 var ownerIdle = 60 * time.Second
+
+// settleWait and settleMaxWait pace startup reconciliation (OP-4): asked
+// again after settleWait while evidence is unavailable, doubling to
+// settleMaxWait.
+var settleWait, settleMaxWait = 2 * time.Second, 5 * time.Minute
 
 // GuestSocket is the socket file handed to agent machine id.
 func GuestSocket(id string) string { return "guest-" + id + ".sock" }
@@ -181,6 +188,9 @@ type PageSocket struct {
 	// asks to forget one through FORGET's own ask (W3-forget-b3r); nil
 	// refuses both ops.
 	Forget PageForget
+	// RotateAPNet writes a rotated card's Wi-Fi network for agentos-ap
+	// (REC-4, #1191); nil refuses the op.
+	RotateAPNet func(apnet.Network) error
 }
 
 // PageForget is FORGET as the page serves it; unlocked is whether the
@@ -329,14 +339,18 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			return adm.Summary()
 		}
 	}
-	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notes: cfg.Notes,
+	// The journal check rides STATUS as a note: silent while the journal
+	// keeps the floor invariants, one line naming the rule when it does not.
+	// A restart fence startup reconcile has not lifted rides it too (#1373).
+	notes := append(append([]func() string{check.Note(eng)}, unconfirmedNotes(eng)...), cfg.Notes...)
+	h := &control.Handler{Engine: eng, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notes: notes,
 		Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Answer: cfg.Answer}
 	handle := h.Handle
 	var ch *ownerch.Channel
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: eng, Agent: cfg.Agent,
-			Machines: machines, Notes: cfg.Notes, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
+			Machines: machines, Notes: notes, Secrets: cfg.OwnerSecrets, Verifier: cfg.OwnerVerifier, Store: ownerch.FileStore{Path: cfg.OwnerState},
 			Decide: gate.Decide, Narrow: gate.Narrow, Reissue: gate.Reissue,
 			Settings: cfg.Settings, HelpExtra: cfg.HelpExtra, Narrows: cfg.Narrows, Answer: cfg.Answer,
 		}); err != nil {
@@ -409,6 +423,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			Paused: func() []localapi.PausedGrant { return pausedGrants(gate) }, AskResume: func(ctx context.Context, id, pause string) (string, error) {
 				return askResume(ctx, gate, id, pause)
 			}}
+		lcfg.RotateAPNet = cfg.PageSocket.RotateAPNet
 		if f := cfg.PageSocket.Forget; f != nil {
 			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget
 		}
@@ -437,6 +452,10 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		go serveOwner(ctx, ch, cfg.Modem != nil)
 	}
 	go gate.Run(ctx, 0)
+	// A restart fences each account an in-flight effect may have landed on
+	// (OP-4). Evidence from the executors lifts it: one crash mid-dispatch
+	// must not hold the broker account forever. Nothing is re-executed.
+	go eng.SettleUnknown(ctx, settleWait, settleMaxWait)
 	go func() {
 		srv.Wait()
 		store.Close()

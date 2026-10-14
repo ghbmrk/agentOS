@@ -1,6 +1,7 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -154,7 +155,7 @@ type Bus struct {
 	timers    map[string]Schedule
 	lastFired map[string]time.Time // timer source ID -> latest due fired
 	lines     int                  // records in the log
-	stale     int                  // settled events whose records are still in the log
+	stale     int                  // settled or forgotten events whose records are still in the log
 	wake      chan struct{}
 }
 
@@ -213,7 +214,14 @@ func Open(cfg Config, opts ...Option) (*Bus, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines, _ := recall.Lines(data)
+	lines, torn := recall.Lines(data)
+	// A seen line a crash tore is cut off, or the next ID would be appended
+	// onto it and lost.
+	if torn {
+		if err := b.seen.Rewrite(data[:bytes.LastIndexByte(data, '\n')+1]); err != nil {
+			return nil, err
+		}
+	}
 	for _, l := range lines {
 		var s struct {
 			ID string `json:"id"`
@@ -226,7 +234,7 @@ func Open(cfg Config, opts ...Option) (*Bus, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines, torn := recall.Lines(data)
+	lines, torn = recall.Lines(data)
 	skipped := 0
 	for _, l := range lines {
 		var r record
@@ -558,6 +566,9 @@ func (b *Bus) Forget(source string) error {
 	for id, e := range b.live {
 		if e.ev.Source == source {
 			delete(b.live, id)
+			// Counted until a compact succeeds, so a failed rewrite is
+			// retried rather than reported done.
+			b.stale++
 			hit = true
 		}
 	}
