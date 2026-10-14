@@ -27,14 +27,16 @@ class RiskTierTest(unittest.TestCase):
             "broker/mail/deliver.go": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",
-            "broker/sockprobe/probe.go": "A",
-            # LOOP-7's verdicts and in-guest scripts (P3-4b-4b; Security #515 f4).
+            "broker/sockprobe/probe.go": "B",
+            # loops is A through its core.txt allow lines.
             "broker/loops/probe.go": "A",
             "broker/loops/machine.go": "A",
-            "broker/probecmd/probecmd.go": "A",
-            "broker/corpus/checks.go": "A",
-            "broker/machprobe/machprobe.go": "A",
-            "broker/loop7/loop7.go": "A",
+            # LOOP-7's probes meet no Tier-A-narrow criterion (#1698), so they
+            # are B; P3-4b-4b and Security #515 f4 had made them A.
+            "broker/probecmd/probecmd.go": "B",
+            "broker/corpus/checks.go": "B",
+            "broker/machprobe/machprobe.go": "B",
+            "broker/loop7/loop7.go": "B",
             # REQ: OP-2 (W5-Db DB-1: Begin is the single gate on digest sends).
             "broker/digestqueue/queue.go": "A",
             # REQ: OP-3 (SIM-sim L3 #727: the harness is what assures the journal).
@@ -203,13 +205,45 @@ class RiskTierTest(unittest.TestCase):
     def test_highest_tier_wins(self):
         tier, why = rt.tier_of_change(["docs/a.md", "broker/attention/x.go", "broker/vault/y.go"])
         self.assertEqual((tier, why), ("A", ["broker/vault/y.go"]))
-        self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/route/r.go"])[0], "B")
+        self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/question/q.go"])[0], "B")
         self.assertEqual(rt.tier_of_change([]), ("C", []))
 
     def test_every_tier_a_package_exists(self):
         # A renamed package must not silently drop to tier B.
         missing = [p for p in sorted(rt.TIER_A_BROKER) if not (ROOT / "broker" / p).is_dir()]
         self.assertEqual(missing, [])
+
+    # Tier-A-narrow (#1698; a work item with no SPEC row, so no REQ marker): a
+    # broker package beyond core.txt is A only if it (a) handles a credential
+    # or secret, (b) gates an effect or approval, or (c) parses owner-channel
+    # input; the rest of broker/ is B.
+    def test_tier_a_narrow_criteria(self):
+        cases = {
+            # (a) tpmseal seals the vault key-encryption key to the TPM.
+            "broker/tpmseal/seal.go": ("A", "broker/tpmseal/"),
+            # (b) update verifies and applies signed releases.
+            "broker/update/update.go": ("A", "broker/update/"),
+            # (c) smsapi serves the second line's texts to the modem bridge.
+            "broker/smsapi/smsapi.go": ("A", "broker/smsapi/"),
+            # demoted: cgroup sets memory and CPU limits and gates nothing.
+            "broker/cgroup/cgroup.go": ("B", "broker/"),
+            # core.txt packages stay A regardless, without a TIER_A_BROKER entry.
+            "broker/vault/vault.go": ("A", "core list: broker/vault/"),
+            # third-party source compiled into the broker stays A.
+            "broker/vendor/modules.txt": ("A", "broker/vendor/"),
+            "broker/third_party/go-imap/imap.go": ("A", "broker/third_party/"),
+        }
+        for path, want in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(rt.tier_of(path), want)
+        for pkg in ("cgroup", "corpus", "hostchange", "hostdisk", "loop7", "machprobe",
+                    "probecmd", "sockprobe"):
+            with self.subTest(demoted=pkg):
+                self.assertNotIn(pkg, rt.TIER_A_BROKER)
+                self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "B")
+        # TIER_A_BROKER does not repeat what core.txt already makes A.
+        core, wiring, allowed = rt.core_list()
+        self.assertEqual(sorted(rt.TIER_A_BROKER & (core | wiring | allowed)), [])
 
     # REQ: ONB-3 (P2-2w c3: netjoin writes the home Wi-Fi PSK, so it is tier A)
     def test_netjoin_is_tier_a(self):

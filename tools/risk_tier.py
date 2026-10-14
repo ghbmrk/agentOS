@@ -2,8 +2,8 @@
 """Risk tier of a change, decided by the paths it touches (docs/OPERATING.md §3).
 
   A  the trusted core, its wiring and the packages allowed its write paths
-     (broker/core/core.txt), credentials,
-     isolation, irreversible effects, update and supply chain,
+     (broker/core/core.txt); broker packages that handle a credential, gate
+     an effect or approval, or parse owner-channel input; supply chain,
      the image and its systemd units, the guest's build inputs, CI workflows
      and agent permissions: L3 review on the session's model with an explicit
      threat check, plus the batched lens screen with Security; a later
@@ -63,19 +63,27 @@ def core_list(path=CORE_LIST):
     return core, wiring, allowed
 
 
-# broker/ packages that hold credentials, enforce isolation, gate effects,
-# or sign and apply updates, beyond the core list. Keep in step with
+# broker/ packages beyond the core list that are tier A (Tier-A-narrow, #1698).
+# A package is here only if it (a) holds or handles a credential or secret,
+# (b) gates an effect or approval, or (c) parses owner-channel input; the
+# rest of broker/ is tier B. Every package core.txt names on a core, wiring
+# or allow line is A regardless and is not repeated here. Keep in step with
 # docs/OPERATING.md §3.
 TIER_A_BROKER = {
-    "apply", "attest", "bridgeclient", "bridgeproto", "browser", "card", "cgroup", "change",
-    "claim", "cleanroom", "core", "clock", "cmd", "control", "corpus", "daemon", "digestqueue",
-    "egress", "firstboot", "grants", "guest", "hint", "hostchange", "hostdisk", "journal", "localapi",
-    "localsrv", "localui", "loop7", "loops", "machprobe", "mail", "modelroute", "modem",
-    "modemlink", "netjoin", "owner", "probecmd", "pubid", "recovery", "replay", "reversible", "sendrules",
-    "sim", "sipsign", "smsapi", "sockets", "sockprobe", "tpmseal", "update", "vault", "vendor",
-    "verb", "vm", "workers",
+    # (a) a credential or secret
+    "apnet", "browser", "card", "netjoin", "pubid", "sipsign", "smsapi", "tpmseal",
+    # (b) gates an effect or approval
+    "attest", "claim", "cleanroom", "clock", "digestqueue", "firstboot", "follow", "hint",
+    "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
+    # (c) parses owner-channel input
+    "bridgeclient", "bridgeproto", "localapi", "localsrv", "localui", "modem", "modemlink",
+    "owner",
+    # wiring: every binary's main, and the core list itself
+    "cmd", "core",
 }
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
+# Third-party source compiled into the broker: the code go.sum pins.
+TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # risk_tier itself is A: CI runs the PR's own copy, so an edit to it decides its own tier.
 # image/ builds what ships (image/fuzz-targets.json too: build.sh installs it as
 # the release's fuzz manifest, so it is not test-only); .github/ builds the image,
@@ -135,7 +143,7 @@ def lane_gate(branch, title, tier):
 
 
 REASONS = {
-    "A": "credentials, isolation, effects, update or supply chain",
+    "A": "credentials, effects and approvals, owner-channel input, the core, update or supply chain",
     "B": "broker or owner-facing behaviour",
     "C": "docs, tooling, spikes or tests",
 }
@@ -152,6 +160,9 @@ def tier_of(path):
     if p in TIER_A_FILES:
         return "A", p
     for pre in TIER_A_PREFIXES:
+        if p.startswith(pre):
+            return "A", pre
+    for pre in TIER_A_BROKER_PREFIXES:
         if p.startswith(pre):
             return "A", pre
     if parts[0] == "broker" and len(parts) > 2 and parts[1] in TIER_A_BROKER:
