@@ -560,6 +560,41 @@ class TreeCheckTest(unittest.TestCase):
         (self.root / "etc/modprobe.d" / BT_BLOCK.rsplit("/", 1)[1]).unlink()
         self.assertEqual(check.violations(self.root), [])
 
+    # REQ: CH-7, HW-10
+    def test_bluetooth_block_read_as_kmod_reads_lines(self):
+        # #1528: each tree passes main's Python reader while kmod's first install for btusb is not a
+        # refusal (the reviewer ran real kmod 31 on each; KmodDiffTest checks the reader against it).
+        block = (MK / "mkosi.extra" / BT_BLOCK).read_bytes()
+        over = "etc/modprobe.d/" + BT_BLOCK.rsplit("/", 1)[1]
+        k1 = lambda pre: (over, block.replace(b"install btusb", pre + b"install btusb"), "btusb is not blocked")
+        early = lambda line, why: ("etc/modprobe.d/00-bt.conf", line + b"\n", why)
+        cases = {
+            "K1": k1(b"# refuse both \\\n"),
+            "K1b": k1(b"blacklist btmtk \\\n"),
+            "K2": (over, block.replace(b"install btusb", b"#\x0cinstall btusb"), "btusb is not blocked"),
+            "K3": (over, block.replace(b"install btusb", b"install\xc2\xa0btusb"), "btusb is not blocked"),
+            "K4": early(b"install bt[^x]sb /sbin/modprobe --ignore-install btusb", "not modelled"),
+            "K5": early(b"install bt[t-v]sb /sbin/modprobe --ignore-install btusb", "not modelled"),
+            # kmod drops a backslash before any other byte, and splits words on space and tab only.
+            "escape": early(b"install bt\\usb /sbin/modprobe --ignore-install btusb", "btusb is not blocked"),
+            "vtab": early(b"install btusb /bin/false\x0b", "btusb is not blocked"),
+        }
+        for name, (rel, data, why) in cases.items():
+            with self.subTest(name):
+                write_b(self.root, rel.encode(), data)
+                self.assertIn(why, " ".join(check.violations(self.root)))
+                (self.root / rel).unlink()
+        # What kmod reads as the block still passes: a joined line, tabs, and extra spaces.
+        write_b(self.root, b"etc/modprobe.d/00-bt.conf", b"install\tbt-usb \\\n  /bin/false \t\ninstall btmtk  /usr/bin/false\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_kmod_reader(self):
+        # REQ: CH-7, HW-10
+        self.assertEqual(check.kmod_lines(b"a \\\nb\\c\\\\\nd\0e\nf\\"), [b"a bc\\", b"d", b"f\xff"])
+        self.assertEqual(check.kmod_installs(b"install x-y[a-b] cmd\n  install z c\ninstall q\ninstall q \n"
+                                             b"install ]x c\ninstall [x c\n#install c c\ninstall  w\t \tc d \n"),
+                         [(b"x_y[a-b]", b"cmd"), (b"z", b"c"), (b"w", b" \tc d ")])
+
     def test_compressed_radio_firmware_counts(self):
         # The kernel loader also finds name.xz and name.zst, if Debian ever ships them compressed.
         for i, rel in enumerate(check.RADIO_FIRMWARE):
@@ -763,10 +798,32 @@ class InitrdBluetoothTest(unittest.TestCase):
                 self.assertEqual(finish.bluetooth_violations(names), ["usr/lib/modules/k/kernel/drivers/bluetooth/btusb.ko"])
         # zstd goes through the zstd tool, which the build installs; the dispatch is the same.
         seen = []
-        fake = {finish.ZSTD: lambda d: seen.append(d) or main}
+        fake = {finish.ZSTD: lambda d: seen.append(d) or (main, b"")}
         self.assertIn("usr/lib/modules/k/kernel/drivers/bluetooth/btusb.ko",
                       finish.cpio_names(early + finish.ZSTD + b"frame", fake))
         self.assertEqual(seen, [finish.ZSTD + b"frame"])
+
+    def test_reads_past_a_compressed_segment(self):
+        # #1513: the kernel's unpack_to_rootfs keeps reading after a compressed segment, so an
+        # archive appended to an xz or gzip stream is unpacked at boot and must be checked too.
+        # REQ: CH-7, HW-10
+        import gzip
+        import lzma
+        bt = "usr/lib/modules/k/kernel/drivers/bluetooth/btusb.ko"
+        for comp in (gzip.compress, lzma.compress):
+            with self.subTest(comp.__module__):
+                names = finish.cpio_names(comp(newc(KMODS)) + newc([bt]))
+                self.assertEqual(names, KMODS + [bt])
+                self.assertEqual(finish.bluetooth_violations(names), [bt])
+                # Two compressed streams back to back, the second holding Bluetooth.
+                names = finish.cpio_names(comp(newc(KMODS)) + b"\0" * 4 + comp(newc([bt])))
+                self.assertEqual(finish.bluetooth_violations(names), [bt])
+                # Unreadable data after the stream fails closed.
+                with self.assertRaises(ValueError):
+                    finish.cpio_names(comp(newc(KMODS)) + b"junk")
+                # A truncated stream fails closed.
+                with self.assertRaises(ValueError):
+                    finish.cpio_names(comp(newc(KMODS))[:-8])
 
     def test_unreadable_initrd_fails_closed(self):
         good = newc(KMODS)
@@ -1601,6 +1658,49 @@ class NoDumpTest(unittest.TestCase):
         self.assertIn("systemd.swap=0", " ".join(finish.swap_violations(
             table, entry.replace("systemd.swap=0", "systemd.swap=0 systemd.swap=1"))))
 
+    def test_no_sysctl_on_the_command_line(self):
+        # REQ: DEV-2, CH-9 (#1530)
+        # The kernel writes sysctl.<key>= arguments at boot, and systemd-sysctl and systemd-tmpfiles
+        # read the sysctl.extra and tmpfiles.extra credentials PID 1 takes from the command line, so
+        # either could turn forwarding on while sysctl.d is clean. The shipped line passes.
+        args = ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"]
+        entry = (ENTRY % H).replace("rw quiet", " ".join(args.split()))
+        self.assertEqual(finish.cmdline_violations(entry), [])
+        self.assertEqual(len(re.findall("set_credential", entry)), 2)
+        cred = "systemd.set_credential%s=%s:bmV0LmlwdjQuaXBfZm9yd2FyZD0xCg=="
+        for bad in ("sysctl.net.ipv4.ip_forward=1", "sysctl/net/ipv4/ip_forward=1", "rd.sysctl.kernel.x=1",
+                    "SYSCTL.net.ipv4.ip_forward=1", '"sysctl.net.ipv4.ip_forward=1"', 'sysctl."net.ipv4 x"=1',
+                    cred % ("", "sysctl.extra"), cred % ("_binary", "sysctl.extra"),
+                    cred % ("_binary", "tmpfiles.extra"), cred % ("-binary", "sysctl.extra"),
+                    "rd." + cred % ("", "sysctl.extra"), cred % ("", "systemd.unit-dropin.emergency.service2"),
+                    cred % ("", '"sysctl.extra'), "systemd.set_credential=sysctl.extra"):
+            with self.subTest(bad=bad):
+                self.assertNotEqual(finish.cmdline_violations(entry.replace("quiet", "quiet " + bad)), [])
+        for ok in ("sysctlx=1", "kernel.sysctl=1", "systemd.setenv=sysctl.x=1"):
+            with self.subTest(ok=ok):
+                self.assertEqual(finish.cmdline_violations(entry.replace("quiet", "quiet " + ok)), [])
+        # systemd-boot joins every options line; a bare one adds nothing.
+        self.assertNotEqual(finish.cmdline_violations(entry + "options \noptions\tsysctl.kernel.x=1\n"), [])
+        # main() runs it on the entry it writes, and fails the build.
+
+        class Proc:
+            @staticmethod
+            def check_output(*a, **k):
+                return "::/loader/entries/a.conf\n"
+
+            @staticmethod
+            def run(*a, **k):
+                return None
+
+        bad = entry.replace("quiet", "quiet sysctl.net.ipv4.ip_forward=1")
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.multiple(finish, subprocess=Proc, esp_offset=lambda img: 0,
+                                             counted_entry=lambda src, v: ("a+3.conf", bad),
+                                             esp_violations=lambda paths, text: []):
+            with self.assertRaises(SystemExit) as e:
+                finish.main(d, "1.0")
+        self.assertIn("#1530", str(e.exception.code))
+
     def test_root_has_project_quotas(self):
         # REQ: RES-4
         # agentosd caps each machine's disk with project quotas (broker/quota); without them
@@ -2008,6 +2108,168 @@ class ConfFilesTest(unittest.TestCase):
             self.assertIn("99-agentos-nodump.conf: unreadable (Permission denied)",
                           " ".join(check.sysctl_byte_violations(self.root)))
 
+    # #1529: one case per rule of the port that no test held (P1-P10 of #1508's delta 3), each a
+    # tree that dumps, answers on the LAN or loads Bluetooth unless the rule holds.
+    def coredump(self, data):
+        write_b(self.root, b"etc/systemd/coredump.conf.d/90-x.conf", data)
+        return self.v()
+
+    def test_bom_is_dropped_once(self):
+        # P1: a second BOM line is not a section header, so Storage= stays in [Coredump].
+        bom = b"\xef\xbb\xbf"
+        self.assertIn("coredump Storage is external", self.coredump(bom + b"[Coredump]\n" + bom + b"[X]\nStorage=external\n"))
+
+    def test_noncharacters_stop_the_parse(self):
+        # P2: utf8_is_valid refuses noncharacters, so config_parse stops before Storage=none.
+        for c in ("﷐", "﷯", "￾", "\U0001ffff"):
+            with self.subTest(c=repr(c)):
+                self.assertIn("invalid UTF-8", self.coredump(("[Coredump]\nX=%s\nStorage=none\n" % c).encode()))
+
+    def test_bad_section_characters_stop_the_parse(self):
+        # P3: string_has_cc and the quote and backslash checks in parse_line.
+        for c in ('"', "'", "\\", "\x01", "\x1f", "\x7f"):
+            with self.subTest(c=repr(c)):
+                self.assertIn("bad characters in section header", self.coredump(("[Core%sdump]\n" % c).encode()))
+        self.assertNotIn("section header", self.coredump(b"[Core dump x]\n"))
+
+    def test_empty_assignment_resets(self):
+        # P4: LLMNR= after LLMNR=no gives resolved's default, which answers on the LAN.
+        write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=no\nLLMNR=\n")
+        self.assertIn("LLMNR", self.v())
+
+    def test_kmod_reads_a_file_in_place_of_modprobe_d(self):
+        # P5: kmod's conf_files_list reads a non-directory in its list as a file of its own (named
+        # modprobe.d, so it sorts after the block; a pattern the check cannot model is still refused).
+        write(self.root, "etc/modprobe.d", "install b[t]usb /sbin/modprobe --ignore-install btusb\n")
+        self.assertIn("etc/modprobe.d: install b[t]usb: a pattern with [", self.v())
+
+    def test_config_directory_linked_into_run_is_refused(self):
+        # P6: the box mounts a tmpfs over /run, so the directory the tree check reads is not the box's.
+        link(self.root, "etc/sysctl.d", "/run/sysctl.d")
+        self.assertIn("etc/sysctl.d: unreadable (etc/sysctl.d resolves to /run/sysctl.d", self.v())
+
+    def test_unit_dropin_directories_go_by_lookup_path_first(self):
+        # P7: unit_file_find_dropin_paths walks lookup paths, then names, so /etc's prefix drop-in
+        # takes the name 10.conf before /usr/lib's own one.
+        write(self.root, "etc/systemd/system/agentos-.service.d/10.conf", "[Service]\nLimitCORE=infinity\n")
+        write(self.root, "usr/lib/systemd/system/agentos-egress.service.d/10.conf", "[Service]\nLimitCORE=0\n")
+        self.assertIn("agentos-egress.service: LimitCORE is infinity", self.v())
+
+    def test_link_as_card_unit_is_refused(self):
+        # P8: a link as the unit could name a file systemd reads under another name's drop-ins.
+        link(self.root, "etc/systemd/system/agentosd.service", "/usr/lib/systemd/system/agentosd.service")
+        self.assertIn("etc/systemd/system/agentosd.service: a link", self.v())
+
+    def test_continued_line_over_1_mib_stops_the_parse(self):
+        # P9: each line is under LONG_LINE_MAX, the joined one is not.
+        half = b"a" * (check.LONG_LINE_MAX // 2 + 1)
+        self.assertIn("continued line too long", self.coredump(b"[Coredump]\nX=" + half + b"\\\n" + half + b"\nStorage=none\n"))
+
+    def test_continuation_at_end_of_file_is_parsed(self):
+        # P10: config_parse parses what a trailing backslash left pending.
+        self.assertIn("coredump Storage is external", self.coredump(b"[Coredump]\nStorage=external\\"))
+        self.assertIn("coredump Storage is external", self.coredump(b"[Coredump]\nStorage=\\\nexternal\n"))
+
+    def test_unreadable_network_file_is_refused(self):
+        # #1529 (L1 of #1508): byte_violations never passes a networkd or resolved file it cannot read.
+        d = self.root / "etc/systemd/resolved.conf.d/90-x.conf"
+        d.mkdir(parents=True)
+        self.assertIn("etc/systemd/resolved.conf.d/90-x.conf: unreadable (a directory); the tree check", self.v())
+        d.rmdir()
+        with unittest.mock.patch.object(check.Conf, "read_bytes", side_effect=PermissionError(13, "Permission denied")):
+            self.assertEqual(check.byte_violations(check.Conf(str(self.root), RESOLVED_REL)),
+                             ["%s: unreadable (Permission denied); the tree check never passes a file it cannot read"
+                              % RESOLVED_REL])
+
+
+class TmpfilesTest(unittest.TestCase):
+    """#1530: systemd-tmpfiles runs before systemd-sysctl and can write /proc/sys or create
+    /run/sysctl.d, which the sysctl check never reads. Each refused line here would set a sysctl
+    outside sysctl.d."""
+    # REQ: DEV-2, CH-9
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        nodump(self.root)
+        radio(self.root)
+        uplink(self.root)
+        (self.root / "run").mkdir()
+        (self.root / "proc").mkdir()
+        link(self.root, "var/run", "/run")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def refused(self, line, name="usr/lib/tmpfiles.d/x.conf"):
+        f = write(self.root, name, line)
+        try:
+            return "x.conf: line" in " | ".join(check.violations(self.root))
+        finally:
+            f.unlink()
+
+    def test_debian_lines_pass(self):
+        write(self.root, "usr/lib/tmpfiles.d/debian.conf",
+              "# comment\n\nd /run/user 0755 root root -\nL /var/run - - - - ../run\n"
+              "L+ /var/run - - - - /run\nx /tmp/systemd-private-%b-*\nd %t/agentos 0750\n"
+              "w /sys/kernel/mm/ksm/run - - - - 0\nf /etc/sysctl.d/x.conf\nr /run/sysctlx.d\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_proc_sys_writes_are_refused(self):
+        for ln in ("w /proc/sys/net/ipv4/ip_forward - - - - 1", "w+ /proc/sys/net/ipv4/ip_forward - - - - 1",
+                   'w "/proc/sys/net/ipv4/ip_forward" - - - - 1', "w /pro\\x63/sys/net/ipv4/ip_forward - - - - 1",
+                   "w /proc/sys/net/ipv4/conf/*/forwarding - - - - 1", "w /pro?/sys/x - - - - 1",
+                   "w /{proc,x}/sys/x - - - - 1", "w //proc/./sys/../sys/x - - - - 1", "w /run/../proc/sys/x - - - - 1",
+                   "  w\t/proc/sys/x", "w /proc/sys/x\r", "d /proc"):
+            self.assertTrue(self.refused(ln + "\n"), ln)
+        # NUL and CR end a line for systemd-tmpfiles, so a comment cannot hide the next one.
+        self.assertTrue(self.refused("# x\rw /proc/sys/x - - - - 1\n"))
+        self.assertTrue(self.refused("# x\0w /proc/sys/x - - - - 1\n"))
+        # Every tmpfiles.d directory systemd-tmpfiles reads.
+        for d in ("etc", "usr/local/lib", "usr/lib"):
+            self.assertTrue(self.refused("w /proc/sys/x - - - - 1\n", d + "/tmpfiles.d/x.conf"), d)
+
+    def test_run_sysctl_d_is_refused(self):
+        for ln in ("f /run/sysctl.d/x.conf - - - - net.ipv4.ip_forward=1", "f %t/sysctl.d/x.conf",
+                   "F /var/run/sysctl.d/x.conf", "C /run/sysctl.d/x.conf - - - - /etc/x", "d /run/sysctl.d",
+                   "f /run/sysctl?d/x.conf"):
+            self.assertTrue(self.refused(ln + "\n"), ln)
+        # Without /var/run in the tree, an allowed "L /var/run - - - - ../run" can make it at boot.
+        (self.root / "var/run").unlink()
+        self.assertTrue(self.refused("F /var/run/sysctl.d/x.conf\n"))
+
+    def test_links_in_the_tree_are_followed(self):
+        link(self.root, "etc/x", "/proc/sys/net")
+        self.assertTrue(self.refused("w /etc/x/ipv4/ip_forward - - - - 1\n"))
+        link(self.root, "etc/y", "../run")
+        self.assertTrue(self.refused("f /etc/y/sysctl.d/x.conf\n"))
+        self.assertTrue(self.refused("f /e*/y/sysctl.d/x.conf\n"))
+
+    def test_links_to_a_target_or_above_are_refused(self):
+        for ln in ("L /etc/y - - - - /run", "L /etc/y - - - - /proc/sys", "L /etc/y - - - - ../proc",
+                   "L+ /etc/y - - - - %t", "L /run/x - - - - sysctl.d", "L /etc/y - - - - /"):
+            self.assertTrue(self.refused(ln + "\n"), ln)
+        self.assertFalse(self.refused("L /etc/y - - - - /run/agentos\n"))
+
+    def test_unreadable_and_run_tmpfiles_are_refused(self):
+        d = self.root / "usr/lib/tmpfiles.d/x.conf"
+        d.mkdir(parents=True)
+        self.assertIn("usr/lib/tmpfiles.d/x.conf: unreadable (a directory)", " | ".join(check.violations(self.root)))
+        d.rmdir()
+        write(self.root, "usr/lib/tmpfiles.d/x.conf", "d /run/user\n")
+        with unittest.mock.patch.object(check.Conf, "read_bytes", side_effect=PermissionError(13, "Permission denied")):
+            self.assertIn("x.conf: unreadable (Permission denied)", " ".join(check.tmpfiles_violations(self.root)))
+        write(self.root, "run/tmpfiles.d/x.conf", "d /run/user\n")
+        self.assertIn("run/tmpfiles.d", " | ".join(check.violations(self.root)))
+
+    def test_words(self):
+        self.assertEqual(check.tmpfiles_words('w "/a b"\\x41 - - - - 1 2'), (["w", "/a bA", "-", "-", "-", "-"], "1 2"))
+        self.assertEqual(check.tmpfiles_words("f /a\\101\\u0042\\U00000043\\n'c d'"), (["f", "/aABC\nc d"], ""))
+        self.assertEqual(check.path_parts("//a/./b/../c/"), ["a", "c"])
+        self.assertTrue(check.glob_reaches(["run"], ("run", "sysctl.d"), ancestor=True))
+        self.assertFalse(check.glob_reaches(["run"], ("run", "sysctl.d")))
+
 
 # systemd-analyze cat-config lists files with the same conf_files_list_strv (its --root chases
 # directories inside the tree, though it reads a listed file's absolute link on the host). It stops
@@ -2049,7 +2311,40 @@ DIFF_TREES = (
 )
 
 
-@unittest.skipUnless(shutil.which("systemd-analyze"), "systemd-analyze is not installed; this test is skipped without it")
+def reference_tool(case, name):
+    """The path of a reference tool a differential test runs against. Where it is missing the test
+    skips, unless AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI's checks step sets it, #1531): then a runner
+    without it fails rather than skipping quietly."""
+    path = shutil.which(name, path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")
+    if not path:
+        if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
+            case.fail("AGENTOS_REQUIRE_REFERENCE_TOOLS=1 but %s is not installed" % name)
+        case.skipTest("%s is not installed; this test is skipped without it" % name)
+    return path
+
+
+class ReferenceToolTest(unittest.TestCase):
+    """#1531: the differential tests fail, not skip, where CI requires their reference tools."""
+    # REQ: DEV-2, CH-9
+
+    def test_required_tool_missing_fails(self):
+        with unittest.mock.patch.dict(os.environ, {"AGENTOS_REQUIRE_REFERENCE_TOOLS": "1", "PATH": ""}), \
+                unittest.mock.patch.object(shutil, "which", return_value=None):
+            with self.assertRaises(AssertionError):
+                reference_tool(self, "systemd-analyze")
+        with unittest.mock.patch.dict(os.environ, {"AGENTOS_REQUIRE_REFERENCE_TOOLS": ""}), \
+                unittest.mock.patch.object(shutil, "which", return_value=None):
+            with self.assertRaises(unittest.SkipTest):
+                reference_tool(self, "systemd-analyze")
+
+    def test_ci_checks_step_requires_them(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        step = ci[ci.index("- name: Unit tests"):]
+        step = step[:step.index("\n      - ")]
+        self.assertIn('AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"', step)
+        self.assertIn("unittest discover -s tests", step)
+
+
 class SystemdDiffTest(unittest.TestCase):
     """#1508: conf_files and main_conf against systemd's own listing, `systemd-analyze cat-config
     --root=TREE`, over trees built to split them (hidden and backup names, byte order, override and
@@ -2074,6 +2369,9 @@ class SystemdDiffTest(unittest.TestCase):
             out.append(m.group(1))
         return out
 
+    def setUp(self):
+        reference_tool(self, "systemd-analyze")
+
     def test_file_lists_match_systemd(self):
         for i, tree in enumerate(DIFF_TREES):
             with tempfile.TemporaryDirectory() as tmp:
@@ -2092,6 +2390,41 @@ class SystemdDiffTest(unittest.TestCase):
                     with self.subTest(tree=i, family=name):
                         mine = [os.fsencode(f.rel) for f in ours(pathlib.Path(tmp))]
                         self.assertEqual(mine, self.systemd_list(tmp, name))
+
+
+class KmodDiffTest(unittest.TestCase):
+    """#1528: kmod_installs against kmod's own reading, `modprobe -C DIR -c`, which prints every
+    install line kmod took, in order. GitHub's ubuntu-latest runners have kmod 31, whose config
+    reader (freadline_wrapped, kmod_config_parse, underscores) is the same as 34's."""
+    # REQ: CH-7, HW-10
+    WORDS = (b"install", b"install", b"btusb", b"bt-usb", b"bt[_-]sb", b"b]t", b"[x", b"/bin/false", b"#",
+             b"blacklist", b" ", b" ", b"\t", b"\\", b"\\\n", b"\n", b"\n", b"\x0c", b"\x0b", b"\xc2\xa0", b"\r",
+             b"\0", b"\xff", b"-")
+
+    def test_reader_matches_kmod(self):
+        modprobe = reference_tool(self, "modprobe")
+        import random
+        rng = random.Random(1528)
+        block = (MK / "mkosi.extra" / BT_BLOCK).read_bytes()
+        files = [block, block.replace(b"install btusb", b"# refuse both \\\ninstall btusb"),
+                 block.replace(b"install btusb", b"#\x0cinstall btusb"), b"install btusb /bin/false\\"]
+        files += [b"install bt-usb /bin/false\ninstall b]t x\ninstall [x y\ninstall a[-]-b z\ninstall a[b c\n"
+                  b"install x-y[a-b] cmd\n  install z c\ninstall q\ninstall q \n#install c c\ninstall  w\t \tc d \n"]
+        files += [b"".join(rng.choice(self.WORDS) for _ in range(rng.randrange(1, 60))) for _ in range(300)]
+        # Lines shaped like install lines, so most of them reach the pattern and command rules.
+        sep = (b" ", b"\t", b"  ", b"\x0c", b"\\\n", b"")
+        files += [b"\n".join(rng.choice(sep) + rng.choice((b"install", b"#install", b"inst\\all")) + rng.choice(sep)
+                              + b"".join(rng.choice(self.WORDS[2:7] + (b"-", b"]", b"[")) for _ in range(rng.randrange(1, 4)))
+                              + rng.choice(sep) + rng.choice((b"/bin/false", b"", b" x", b"\\")) for _ in range(8))
+                  for _ in range(100)]
+        for i, data in enumerate(files):
+            with self.subTest(i, data=data), tempfile.TemporaryDirectory() as tmp:
+                with open(os.path.join(tmp, "a.conf"), "wb") as f:
+                    f.write(data)
+                out = subprocess.run([modprobe, "-C", tmp, "-c"], capture_output=True, timeout=60).stdout
+                theirs = [tuple(ln[len(b"install "):].split(b" ", 1)) for ln in out.split(b"\n")
+                          if ln.startswith(b"install ")]
+                self.assertEqual(check.kmod_installs(data), theirs)
 
 
 class UplinkTest(unittest.TestCase):

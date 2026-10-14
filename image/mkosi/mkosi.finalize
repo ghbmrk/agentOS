@@ -138,7 +138,7 @@ def violations(root):
                 out.append("%s: private key material" % rel)
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
-            + resolved_violations(root) + stray_violations(root))
+            + resolved_violations(root) + tmpfiles_violations(root) + stray_violations(root))
 
 
 class Conf:
@@ -518,7 +518,7 @@ def stray_violations(root):
     box mounts a tmpfs over it) and a split-/usr /lib (systemd 257 reads only /usr/lib; trixie's /lib
     is a link to it). Checking such a file as if it were read would let it hide one that is."""
     out, root = [], str(root)
-    conf = ["sysctl.d", "systemd/network", "systemd/system", "systemd/system.control", "systemd/system.attached"]
+    conf = ["sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control", "systemd/system.attached"]
     conf += ["systemd/%s%s" % (n, d) for n in ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
              for d in ("", ".d")]
     places = [("run", n, "/run is a tmpfs on the box") for n in conf + ["modprobe.d"]]
@@ -614,25 +614,243 @@ def radio_violations(root):
     return out
 
 
+def kmod_lines(data):
+    """The lines kmod 34's freadline_wrapped (shared/util.c) reads from DATA. A backslash before a
+    newline joins the next line, even in a comment; any other backslash is dropped and the byte
+    after it kept (a backslash at the end of the file reads as byte 0xff, getc's EOF). kmod then
+    reads each line as a C string, so it ends at its first NUL."""
+    lines, buf, i = [], bytearray(), 0
+    while i < len(data):
+        c, i = data[i], i + 1
+        if c == 0x0A:
+            lines.append(bytes(buf))
+            buf = bytearray()
+        elif c != 0x5C:
+            buf.append(c)
+        elif i == len(data):
+            buf.append(0xFF)
+        elif data[i] == 0x0A:
+            i += 1
+        else:
+            buf.append(data[i])
+            i += 1
+    if buf:
+        lines.append(bytes(buf))
+    return [ln.split(b"\0", 1)[0] for ln in lines]
+
+
+def kmod_token(ln, pos):
+    """strtok_r(.., "\t ") from POS: (the next word or None, where the next call starts)."""
+    while pos < len(ln) and ln[pos] in b"\t ":
+        pos += 1
+    if pos >= len(ln):
+        return None, pos
+    end = pos
+    while end < len(ln) and ln[end] not in b"\t ":
+        end += 1
+    return ln[pos:end], end + 1
+
+
+def kmod_underscores(name):
+    """kmod 34's underscores() (libkmod-config.c): every - outside [...] becomes _; None (kmod's
+    syntax error) for an unmatched bracket."""
+    out, i = bytearray(name), 0
+    while i < len(out):
+        if out[i] == 0x2D:
+            out[i] = 0x5F
+        elif out[i] == 0x5D:
+            return None
+        elif out[i] == 0x5B:
+            i = out.find(b"]", i)
+            if i < 0:
+                return None
+        i += 1
+    return bytes(out)
+
+
+def kmod_installs(data):
+    """(module pattern, command) of each install line kmod 34's kmod_config_parse takes from DATA,
+    in order. Words split on space and tab only; a line whose first byte is # is a comment; the
+    command is the rest of the line after the one byte that ends the pattern."""
+    out = []
+    for ln in kmod_lines(data):
+        if ln[:1] in (b"", b"#"):
+            continue
+        cmd, pos = kmod_token(ln, 0)
+        if cmd != b"install":
+            continue
+        name, pos = kmod_token(ln, pos)
+        name = kmod_underscores(name) if name is not None else None
+        if name is not None and pos < len(ln):
+            out.append((name, ln[pos:]))
+    return out
+
+
 def bluetooth_violations(root):
     """#1415: firmware-mediatek also lets the MT7922's Bluetooth half come up. kmod uses the first
-    install line for a module, reading the files conf_files(kmod=True) lists; that line must refuse
-    the load."""
+    install line whose pattern fnmatch()es the module, reading the files conf_files(kmod=True) lists
+    as kmod_installs does (#1528); that line must refuse the load. glibc's fnmatch differs from
+    Python's for [...] and \\, so a pattern holding either is refused rather than modelled."""
     first, out = {}, []
     for f in conf_files(root, MODPROBE_DIRS, kmod=True):
         try:
-            text = f.read_text()
+            data = f.read_bytes()
         except OSError as e:
             out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror))
             continue
-        for ln in text.splitlines():
-            w = ln.split(None, 2)
-            if len(w) == 3 and w[0] == "install":
-                for m in BLOCKED_MODULES:
-                    if fnmatch.fnmatchcase(m, w[1].replace("-", "_")):
-                        first.setdefault(m, w[2].strip())
+        for name, command in kmod_installs(data):
+            if b"[" in name or b"\\" in name:
+                out.append("%s: install %s: a pattern with [ or \\ is not modelled; name the module"
+                           % (f.rel, name.decode(errors="backslashreplace")))
+                continue
+            for m in BLOCKED_MODULES:
+                if fnmatch.fnmatchcase(m.encode(), name):
+                    first.setdefault(m, command.strip(b"\t ").decode(errors="replace"))
     return out + ["modprobe.d: %s is not blocked (install %s %s); the image ships no Bluetooth"
                   % (m, m, REFUSE[0]) for m in BLOCKED_MODULES if first.get(m) not in REFUSE]
+
+
+# Where a tmpfiles.d line could set a sysctl (#1530): /proc/sys itself (all of /proc, which errs
+# safe), and /run/sysctl.d, which systemd-sysctl reads (its CONF_PATHS) and the tree check cannot.
+TMPFILES_TARGETS = (("proc",), ("run", "sysctl.d"), ("var", "run", "sysctl.d"))
+# systemd-tmpfiles 257.13's path specifiers for the system manager (src/tmpfiles/tmpfiles.c); the
+# others expand to names without a slash.
+TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",
+                       "V": "/var/tmp", "h": "/root", "%": "%"}
+C_ESCAPES = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "s": " "}
+
+
+def tmpfiles_words(ln, n=6):
+    """The first N words of LN as extract_first_word(EXTRACT_UNQUOTE|EXTRACT_CUNESCAPE) gives them,
+    and the rest of the line (the argument). Quotes may start anywhere in a word; \\xHH, octal,
+    \\u and C escapes are decoded and any other escaped character kept, which errs safe (systemd
+    refuses the line)."""
+    words, i = [], 0
+    while len(words) < n:
+        while i < len(ln) and ln[i] in " \t\n\r":
+            i += 1
+        if i >= len(ln):
+            break
+        w, quote = [], None
+        while i < len(ln) and (quote or ln[i] not in " \t\n\r"):
+            c = ln[i]
+            i += 1
+            if c == quote:
+                quote = None
+            elif quote is None and c in "'\"":
+                quote = c
+            elif c == "\\" and i < len(ln):
+                m = re.match(r"x([0-9a-fA-F]{2})|([0-7]{3})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})", ln[i:])
+                if m:
+                    w.append(chr(int(m.group(1) or m.group(3) or m.group(4) or "0", 16) if not m.group(2)
+                                 else int(m.group(2), 8)))
+                    i += m.end()
+                else:
+                    w.append(C_ESCAPES.get(ln[i], ln[i]))
+                    i += 1
+            else:
+                w.append(c)
+        words.append("".join(w))
+    return words, ln[i:].strip(" \t\n\r")
+
+
+def tmpfiles_expand(p):
+    """P with systemd-tmpfiles' specifiers expanded (TMPFILES_SPECIFIERS)."""
+    return re.sub(r"%(.)", lambda m: TMPFILES_SPECIFIERS.get(m.group(1), m.group(0)), p)
+
+
+def path_parts(p):
+    """P's components as the kernel walks them without links: empty and "." drop, ".." pops."""
+    out = []
+    for c in p.split("/"):
+        if c == "..":
+            out = out[:-1]
+        elif c not in ("", "."):
+            out.append(c)
+    return out
+
+
+def glob_reaches(parts, target, ancestor=False):
+    """Whether glob components PARTS can name TARGET or a path below it (or, with ANCESTOR, one
+    above it too). A brace in the compared components counts (GLOB_BRACE can span a comma)."""
+    k = min(len(parts), len(target))
+    if len(parts) < len(target) and not ancestor:
+        return False
+    return all("{" in c or fnmatch.fnmatchcase(t, c) for c, t in zip(parts[:k], target[:k]))
+
+
+def tree_resolve(root, parts):
+    """PARTS resolved inside the image as far as the tree goes (tree_chase); the missing rest is kept
+    as written. A path into what the box mounts keeps its mount's name."""
+    for k in range(len(parts), -1, -1):
+        try:
+            p, _ = tree_chase(root, "/".join(parts[:k]))
+        except OSError:
+            continue
+        return path_parts(p) + parts[k:]
+    return parts
+
+
+def tree_glob(root, parts):
+    """Every path glob components PARTS name in the image, links followed inside it; a component
+    under a box mount (or a missing directory) is kept as written."""
+    found = [[]]
+    for c in parts:
+        if not re.search(r"[*?\[]", c):
+            found = [f + [c] for f in found]
+            continue
+        nxt = []
+        for f in found:
+            try:
+                p, st = tree_chase(root, "/".join(f))
+            except OSError:
+                continue
+            if st is None:
+                nxt.append(f + [c])
+            elif stat.S_ISDIR(st.st_mode):
+                nxt += [f + [n] for n in sorted(os.listdir(os.path.join(root, p))) if fnmatch.fnmatchcase(n, c)]
+        found = nxt
+    return found
+
+
+def tmpfiles_hits(root, path, ancestor=False):
+    """Whether a tmpfiles.d PATH can reach a TMPFILES_TARGETS path: as written, or through the
+    image's links."""
+    parts = path_parts(path)
+    names = [parts] + [tree_resolve(root, g) for g in tree_glob(root, parts)]
+    return any(glob_reaches(n, t, ancestor) for n in names for t in TMPFILES_TARGETS)
+
+
+def tmpfiles_violations(root):
+    """#1530: systemd-tmpfiles runs before systemd-sysctl and can write /proc/sys (w, w+) or create
+    /run/sysctl.d/*.conf (f, F, w, C, L, ...), which the sysctl check never sees. Every line of
+    tmpfiles.d (conf_files, read as systemd-tmpfiles 257.13 reads lines: they end at LF, CR or NUL,
+    # starts a comment) whose path, specifiers expanded and links in the image followed, can be
+    one of those is refused, whatever its type; so is a link (L) whose target can be one of them or
+    above one, but for Debian's /var/run -> /run."""
+    out, root = [], str(root)
+    for f in conf_files(root, conf_paths("tmpfiles.d")):
+        try:
+            data = f.read_bytes()
+        except OSError as e:
+            out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror))
+            continue
+        for n, raw in enumerate(re.split(rb"[\n\r\x00]", data), 1):
+            ln = os.fsdecode(raw).strip(" \t")
+            if not ln or ln.startswith("#"):
+                continue
+            (typ, path, *_), arg = tmpfiles_words(ln) if len(tmpfiles_words(ln)[0]) >= 2 else ([ln, ""], "")
+            path = tmpfiles_expand(path)
+            bad = tmpfiles_hits(root, path)
+            if not bad and typ.startswith("L") and arg not in ("", "-"):
+                target = tmpfiles_expand(tmpfiles_words(arg, 1)[0][0] if tmpfiles_words(arg, 1)[0] else arg)
+                if not target.startswith("/"):
+                    target = path.rsplit("/", 1)[0] + "/" + target
+                bad = (path_parts(path) != ["var", "run"] or path_parts(target) != ["run"]) and \
+                    tmpfiles_hits(root, target, ancestor=True)
+            if bad:
+                out.append("%s: line %d: %s; it could set a sysctl outside sysctl.d (#1530)" % (f.rel, n, ln[:120]))
+    return out
 
 
 def byte_violations(f):

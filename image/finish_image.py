@@ -74,6 +74,41 @@ def entry_args(entry, name):
         ln.split(None, 1)[1] for ln in entry.splitlines() if re.match(r"options\s", ln)))
 
 
+# The command-line credentials the image ships (mkosi.conf): emergency and rescue mode run the
+# fallback (I4). Any other credential could carry sysctl.extra or tmpfiles.extra (#1530).
+SHIPPED_CREDENTIALS = ("systemd.unit-dropin.emergency.service", "systemd.unit-dropin.rescue.service")
+
+
+def cmdline_words(entry):
+    """The entry's kernel command line split as the kernel's next_arg splits it: on whitespace
+    outside double quotes. Quotes are dropped from each word, which errs safe: a word is checked
+    as the bare text either the kernel or systemd could take from it."""
+    line = " ".join(ln.split(None, 1)[1] for ln in entry.splitlines()
+                    if re.match(r"options\s", ln) and len(ln.split(None, 1)) > 1)
+    return [w.replace('"', "") for w in re.findall(r'(?:[^\s"]|"[^"]*"?)+', line)]
+
+
+def cmdline_violations(entry):
+    """#1530: nothing on the command line sets a sysctl. The kernel writes every sysctl.<key>= or
+    sysctl/<key>= argument at boot (Linux 5.8+); systemd-sysctl and systemd-tmpfiles read the
+    sysctl.extra and tmpfiles.extra credentials, which PID 1 takes from systemd.set_credential= and
+    systemd.set_credential_binary=. Names are compared as systemd compares them (- and _ alike, an
+    rd. prefix for the initrd) and case-blind, which errs safe; only the shipped credentials pass."""
+    out = []
+    for w in cmdline_words(entry):
+        key, _, val = w.partition("=")
+        k = key.lower().replace("-", "_")
+        if k.startswith("rd."):
+            k = k[3:]
+        if k.startswith(("sysctl.", "sysctl/")):
+            out.append("%s: the kernel sets sysctls from the command line" % key)
+        elif k in ("systemd.set_credential", "systemd.set_credential_binary"):
+            name = val.split(":", 1)[0]
+            if name not in SHIPPED_CREDENTIALS:
+                out.append("%s=%s: only the shipped credentials %s may be set" % (key, name, ", ".join(SHIPPED_CREDENTIALS)))
+    return out
+
+
 def swap_violations(partitions, entry):
     """No swap on the built disk (IMG-nodump): no partition of the swap type, and the entry turns
     off swap units (its last systemd.swap= is 0). partitions: sfdisk -J's list."""
@@ -117,23 +152,38 @@ ZSTD, XZ, GZIP = b"\x28\xb5\x2f\xfd", b"\xfd7zXZ\x00", b"\x1f\x8b"
 
 
 def unzstd(data):
-    return subprocess.run(["zstd", "-dcq"], input=data, stdout=subprocess.PIPE, check=True).stdout
+    """All of DATA as zstd frames: the zstd tool fails on anything after the last frame."""
+    return subprocess.run(["zstd", "-dcq"], input=data, stdout=subprocess.PIPE, check=True).stdout, b""
+
+
+def one_stream(d, data, what):
+    """Decompress the one stream at the start of DATA with decompressor D: (output, the bytes
+    after the stream). The kernel's unpack_to_rootfs reads on after a compressed segment, so the
+    rest is checked as well (#1513); lzma.decompress and gzip.decompress would drop it."""
+    try:
+        out = d.decompress(data)
+    except Exception as e:
+        raise ValueError("initrd: bad %s stream (%s)" % (what, e))
+    if not d.eof:
+        raise ValueError("initrd: truncated %s stream" % what)
+    return out, d.unused_data
 
 
 def unxz(data):
     import lzma
-    return lzma.decompress(data)
+    return one_stream(lzma.LZMADecompressor(lzma.FORMAT_XZ), data, "xz")
 
 
 def ungzip(data):
-    import gzip
-    return gzip.decompress(data)
+    import zlib
+    return one_stream(zlib.decompressobj(31), data, "gzip")
 
 
 def cpio_names(data, decompress=None):
-    """Every path in an initrd: newc cpio archives, back to back with zero padding between them,
-    the last of which may be compressed (zstd, xz or gzip). Anything else raises ValueError, so an
-    initrd this cannot read fails the build rather than passing unchecked."""
+    """Every path in an initrd: newc cpio archives and compressed (zstd, xz or gzip) streams of
+    them, back to back with zero padding between them, read on as the kernel does. Anything else
+    raises ValueError, so an initrd this cannot read fails the build rather than passing unchecked.
+    DECOMPRESS maps a magic to a function returning (output, the bytes after the stream)."""
     decompress = decompress or {ZSTD: unzstd, XZ: unxz, GZIP: ungzip}
     names, off = [], 0
     while True:
@@ -141,9 +191,12 @@ def cpio_names(data, decompress=None):
             off += 1
         if off >= len(data):
             return names
-        for magic, fn in decompress.items():
-            if data.startswith(magic, off):
-                return names + cpio_names(fn(data[off:]), decompress)
+        fn = next((fn for magic, fn in decompress.items() if data.startswith(magic, off)), None)
+        if fn:
+            out, rest = fn(data[off:])
+            names += cpio_names(out, decompress)
+            data, off = rest, 0
+            continue
         if data[off:off + 6] not in CPIO_MAGICS:
             raise ValueError("initrd: unknown data at offset %d" % off)
         while True:
@@ -252,6 +305,9 @@ def main(out, version):
     bad = esp_violations(paths, text)
     if bad:
         sys.exit("ESP holds files outside the allowlist (HW-1): %s" % bad)
+    bad = cmdline_violations(text)
+    if bad:
+        sys.exit("boot entry sets a sysctl outside sysctl.d (#1530): %s" % bad)
     bad = swap_violations(partition_table(str(img))["partitions"], text)
     if bad:
         sys.exit("image could swap or keep the broker's memory (IMG-nodump): %s" % bad)
