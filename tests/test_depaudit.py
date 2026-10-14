@@ -217,6 +217,29 @@ class StaticScanTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 depaudit.load_manifest({"forbidden_host_patterns": ["*agentos*"], "inert_literals": [bad]})
 
+    def test_claim_literal_exempts_only_its_file_and_host(self):
+        m = depaudit.load_manifest({"claim_literals": [
+            {"file": "broker/egress/c.go", "host": "claims.example.io", "why": "JWT claim key"}]})
+        src = 'var k = "https://claims.example.io/auth"\n'
+        other = 'var k = "https://claims.example.io/auth" + "https://api.example.io/v1"\n'
+        with tempfile.TemporaryDirectory() as d:
+            for rel, text in (("broker/egress/c.go", other), ("broker/egress/d.go", src)):
+                p = pathlib.Path(d, rel)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(text)
+            v = sorted((x["location"], x["target"]) for x in depaudit.static_scan(pathlib.Path(d), m))
+        # The declared pair passes; the same host elsewhere and another host in the file do not.
+        self.assertEqual(v, [("broker/egress/c.go:1", "api.example.io"), ("broker/egress/d.go:1", "claims.example.io")])
+        for bad in ({"file": "broker/egress/*.go", "host": "h.io", "why": "x"},
+                    {"file": "broker/egress/c.go", "host": "*.io", "why": "x"},
+                    {"file": "broker/egress/c.py", "host": "h.io", "why": "x"},
+                    {"file": "tools/c.go", "host": "h.io", "why": "x"},
+                    {"file": "broker/../c.go", "host": "h.io", "why": "x"},
+                    {"file": "broker/egress/c.go", "host": "h.io"},
+                    {"file": "broker/egress/c.go", "host": "ping.agentos.io", "why": "x"}):
+            with self.assertRaises(ValueError):
+                depaudit.load_manifest({"forbidden_host_patterns": ["*agentos*"], "claim_literals": [bad]})
+
 
 class ScratchDirTest(unittest.TestCase):
     # HK-1a (briefs/HK-1.md; a local ID with no SPEC row, so no REQ marker)

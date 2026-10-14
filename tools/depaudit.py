@@ -172,6 +172,20 @@ def load_manifest(data):
         if _match(e["host"], forbidden):
             raise ValueError("inert literal %s matches a forbidden pattern (DEP-2)" % e["host"])
         inert.append((e["file"], e["host"].lower()))
+    # Claim-key literals: a URL-shaped JSON key (e.g. a JWT claim name) in our
+    # own Go source that is never contacted. Same exact file + host + reason,
+    # one Go file in a shipping directory; no vendor tree, no wildcard.
+    for e in data.get("claim_literals", ()):
+        for k in ("file", "host", "why"):
+            if not e.get(k):
+                raise ValueError("claim literal missing %r: %r" % (k, e))
+        f = e["file"]
+        if not f.endswith(".go") or ".." in f.split("/") or "*" in f + e["host"] \
+                or not any(f.startswith(d + "/") for d in SHIPPING_DIRS):
+            raise ValueError("claim literal %s: must name one Go file in a shipping directory" % f)
+        if _match(e["host"], forbidden):
+            raise ValueError("claim literal %s matches a forbidden pattern (DEP-2)" % e["host"])
+        inert.append((f, e["host"].lower()))
     return Manifest(forbidden, tuple(endpoints), tuple(inert))
 
 
