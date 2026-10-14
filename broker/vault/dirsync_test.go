@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/durable"
@@ -60,6 +61,7 @@ func TestPutManyDirSyncFailureIsPublished(t *testing.T) {
 		t.Fatal(err)
 	}
 	warned := warnings(v)
+	replaced := [][]byte{v.entries["card"].Value, v.entries["card-wifi"].Value}
 	next, nextVals := items(t, "card", "card-wifi", "card-setup")
 	landed := dirSyncFails(t, path)
 	if err := v.PutMany(next); err != nil {
@@ -71,6 +73,11 @@ func TestPutManyDirSyncFailureIsPublished(t *testing.T) {
 	}
 	if len(*warned) != 1 {
 		t.Fatalf("warnings: %q, want one", *warned)
+	}
+	for _, b := range replaced {
+		if strings.Trim(string(b), "\x00") != "" {
+			t.Fatal("a replaced value was not wiped")
+		}
 	}
 	holds(t, v, nextVals)
 	holds(t, reopened(t, path, key), nextVals)
@@ -211,11 +218,15 @@ func TestDirSyncFailureWithCounter(t *testing.T) {
 func TestAnchorDirSyncFailureIsPublished(t *testing.T) {
 	d, pc := newDrive(t), newPC("alpha")
 	v := d.open()
-	dirSyncFails(t, d.path)
+	warned := warnings(v)
+	landed := dirSyncFails(t, d.path)
 	if err := v.Anchor(pc); err != nil {
 		t.Fatalf("Anchor: %v", err)
 	}
 	writeFile = durable.WriteFile
+	if len(*warned) != *landed || *landed != 2 {
+		t.Fatalf("%d landed writes, warnings %q: want two of each", *landed, *warned)
+	}
 	if a := v.Anchors(); len(a) != 1 || a[0].Pending {
 		t.Fatalf("anchors in memory: %+v", a)
 	}
@@ -236,11 +247,15 @@ func TestRebaseDirSyncFailureIsPublished(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldID := append([]byte(nil), v.id...)
-	dirSyncFails(t, vp)
+	warned := warnings(v)
+	landed := dirSyncFails(t, vp)
 	if _, err := v.Rebase(rec); err != nil {
 		t.Fatalf("Rebase: %v", err)
 	}
 	writeFile = durable.WriteFile
+	if *landed == 0 || len(*warned) != *landed {
+		t.Fatalf("%d landed writes, warnings %q: want one each", *landed, *warned)
+	}
 	if bytes.Equal(v.id, oldID) {
 		t.Fatal("old ID kept in memory")
 	}
@@ -254,5 +269,149 @@ func TestRebaseDirSyncFailureIsPublished(t *testing.T) {
 	defer w.Close()
 	if !bytes.Equal(w.id, newID) {
 		t.Fatal("drive holds another ID than memory had")
+	}
+}
+
+// Trusting a PC again after its counter went rewrites the anchor as
+// pending before making a new counter; that write landing with a failed
+// directory sync re-anchors all the same.
+func TestReanchorDirSyncFailureIsPublished(t *testing.T) {
+	d, pc := newDrive(t), newPC("alpha")
+	v := d.open()
+	if err := v.Anchor(pc); err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+	pc.counters = map[string]uint64{} // NV_UndefineSpace
+	v = d.open()
+	defer v.Close()
+	if err := v.Bind(pc); !errors.Is(err, ErrCounterMissing) {
+		t.Fatalf("anchored PC without its counter: %v", err)
+	}
+	warned := warnings(v)
+	landed := dirSyncFails(t, d.path)
+	if err := v.Anchor(pc); err != nil {
+		t.Fatalf("re-trust: %v", err)
+	}
+	writeFile = durable.WriteFile
+	if len(*warned) != *landed || *landed != 2 {
+		t.Fatalf("%d landed writes, warnings %q: want two of each", *landed, *warned)
+	}
+	if a := v.Anchors(); len(a) != 1 || a[0].Pending || len(pc.counters) != 1 {
+		t.Fatalf("anchors in memory: %+v, counters %v", a, pc.counters)
+	}
+	w := d.open()
+	defer w.Close()
+	if err := w.Bind(pc); err != nil {
+		t.Fatalf("Bind after an unsynced re-anchor: %v", err)
+	}
+}
+
+// When no counter can be made, Anchor takes its pending anchor back out;
+// that write landing with a failed directory sync takes it out of memory
+// too, so no later save writes the pending anchor back.
+func TestFailedAnchorDirSyncFailureIsPublished(t *testing.T) {
+	d, pc := newDrive(t), newPC("alpha")
+	v := d.open()
+	defer v.Close()
+	warned := warnings(v)
+	landed := dirSyncFails(t, d.path)
+	pc.broken = true
+	if err := v.Anchor(pc); err == nil {
+		t.Fatal("Anchor succeeded with a silent TPM")
+	}
+	pc.broken = false
+	writeFile = durable.WriteFile
+	if len(*warned) != *landed || *landed != 2 {
+		t.Fatalf("%d landed writes, warnings %q: want two of each", *landed, *warned)
+	}
+	if a := v.Anchors(); len(a) != 0 {
+		t.Fatalf("pending anchor kept in memory: %+v", a)
+	}
+	mustPut(t, v, "openai", "sk-canary-after-failed1")
+	w := d.open()
+	defer w.Close()
+	if a := w.Anchors(); len(a) != 0 {
+		t.Fatalf("a later save wrote the pending anchor back: %+v", a)
+	}
+}
+
+// syncFails makes the catch-up's directory sync fail, as if the last
+// write's name were still not durable.
+func syncFails(t *testing.T) {
+	t.Helper()
+	syncDir = func(string) error { return fmt.Errorf("%w: %w", durable.ErrDirSync, errors.New("input/output error")) }
+	t.Cleanup(func() { syncDir = durable.SyncDir })
+}
+
+// #1472 B1: after a write lands unsynced, the next write must not move the
+// counter past the file before it until the landed file's name is durable.
+// Before the fix, the next write's catch-up raised the counter (say 101 to
+// 102) and then failed or was cut off; a power cut that undid the unsynced
+// rename left the file at 101 behind a counter at 102: ErrRolledBack.
+func TestCatchUpWaitsForTheLandedFile(t *testing.T) {
+	d, pc := newDrive(t), newPC("alpha")
+	v := d.open()
+	defer v.Close()
+	if err := v.Anchor(pc); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, v, "openai", "sk-canary-before-sync1")
+	ref := hex.EncodeToString(v.id)
+	before, count := d.copy(), pc.counters[ref]
+	dirSyncFails(t, d.path)
+	if err := v.Put("openai", KindAPIKey, []byte("sk-canary-landed-syn2")); err != nil {
+		t.Fatalf("Put after the file landed: %v", err)
+	}
+	writeFile = durable.WriteFile
+
+	// The directory still has not synced: the next write refuses to
+	// catch up, and nothing changes.
+	syncFails(t)
+	if err := v.Put("anthropic", KindAPIKey, []byte("sk-canary-next-write3")); err == nil {
+		t.Fatal("next write caught up over an unsynced file")
+	}
+	if got := pc.counters[ref]; got != count {
+		t.Fatalf("counter at %d after a refused catch-up, want %d", got, count)
+	}
+	if _, ok := v.Secret("anthropic"); ok {
+		t.Fatal("refused write kept in memory")
+	}
+	landed := d.copy()
+
+	// A bind of the landed file binds without catching up.
+	w := d.open()
+	if err := w.Bind(pc); err != nil {
+		t.Fatalf("landed file with the sync still failing: %v", err)
+	}
+	w.Close()
+	if got := pc.counters[ref]; got != count {
+		t.Fatalf("bind caught up over an unsynced file: counter at %d", got)
+	}
+
+	// The power cut undid the rename: the file before still binds.
+	d.putBack(before)
+	w = d.open()
+	if err := w.Bind(pc); err != nil {
+		t.Fatalf("file before an unsynced write: %v", err)
+	}
+	w.Close()
+
+	// Once the directory syncs, the catch-up goes ahead.
+	syncDir = durable.SyncDir
+	d.putBack(landed)
+	w = d.open()
+	defer w.Close()
+	if err := w.Bind(pc); err != nil {
+		t.Fatal(err)
+	}
+	if got := pc.counters[ref]; got != count+1 {
+		t.Fatalf("counter at %d after a synced catch-up, want %d", got, count+1)
+	}
+	d.putBack(before)
+	x := d.open()
+	defer x.Close()
+	if err := x.Bind(pc); !errors.Is(err, ErrRolledBack) {
+		t.Fatalf("file before a synced catch-up: %v, want ErrRolledBack", err)
 	}
 }

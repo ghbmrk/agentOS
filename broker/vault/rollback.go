@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/ghbmrk/agentos/broker/durable"
 )
@@ -174,9 +175,15 @@ func (v *Vault) bind(c Counter) error {
 	switch {
 	case a.Count == n:
 	case a.Count == n+1:
-		// The last write landed but the counter did not advance.
-		if err := c.Increment(a.Ref, v.counterAuth); err != nil {
-			return fmt.Errorf("vault: rollback counter: %w", err)
+		// The last write landed but the counter did not advance. Advance
+		// it only once the file's name is durable (#1472 B1): a power cut
+		// that undid the rename would otherwise leave the file before
+		// behind a counter that refuses it. If the sync fails, the file
+		// stays one ahead and the next write retries the catch-up.
+		if v.syncDir() == nil {
+			if err := c.Increment(a.Ref, v.counterAuth); err != nil {
+				return fmt.Errorf("vault: rollback counter: %w", err)
+			}
 		}
 	default:
 		return ErrRolledBack
@@ -270,6 +277,11 @@ func (v *Vault) advance() error {
 		return fmt.Errorf("vault: rollback counter: %w", err)
 	}
 	if a.Count == n+1 {
+		// Catching up for the last write: its name must be durable
+		// before the counter moves past the file before it (#1472 B1).
+		if err := v.syncDir(); err != nil {
+			return err
+		}
 		if err := v.counter.Increment(a.Ref, v.counterAuth); err != nil {
 			return fmt.Errorf("vault: rollback counter: %w", err)
 		}
@@ -289,9 +301,10 @@ func (v *Vault) advance() error {
 	v.anchors = next
 	if err != nil {
 		// The file landed but its directory sync failed (#1472). The
-		// counter stays: the file is one ahead, which the next bind or
-		// write finishes, and if a power cut undoes the rename the file
-		// before still binds instead of reading as an old copy.
+		// counter stays: the file is one ahead, and the next bind or
+		// write advances the counter only after syncing the directory.
+		// Until then, a power cut that undoes the rename leaves the file
+		// before, which still binds instead of reading as an old copy.
 		return v.landed(err)
 	}
 	if err := v.counter.Increment(a.Ref, v.counterAuth); err != nil && v.warn != nil {
@@ -301,6 +314,12 @@ func (v *Vault) advance() error {
 	}
 	return nil
 }
+
+// syncDir makes the vault file's name durable before a catch-up moves the
+// counter past the file before it. Caller holds mu.
+func (v *Vault) syncDir() error { return syncDir(filepath.Dir(v.path)) }
+
+var syncDir = durable.SyncDir
 
 // OnWarn sets a function that tells the owner about a rollback check that
 // could not finish (V6), such as a counter increment that failed after a
