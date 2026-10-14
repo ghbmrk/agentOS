@@ -2015,8 +2015,13 @@ class ConfFilesTest(unittest.TestCase):
         write(self.root, "etc/passwd", "kernel.core_pattern=|/usr/bin/false\n")
         write(self.root, "usr/lib/agentos/sd/90-x.conf", "kernel.core_pattern=|/usr/bin/false\n")
         write(self.root, "usr/lib/agentos/nd/50-x.conf", "[DHCPv4]\nSendHostname=no\n")
-        # A linked parent first: the later cases create usr/local/lib/systemd as a directory.
-        for rel, target in (("usr/local/lib/systemd", "/var/tmp/sd"), ("etc/sysctl.d/99-x.conf", "/etc/passwd"),
+        (self.root / "usr/lib/agentos/empty").mkdir()
+        # A linked parent first: the later cases create usr/local/lib/systemd as a directory. Only
+        # trixie's /lib -> usr/lib is followed: /lib linked anywhere else is refused, and a linked
+        # directory is refused even when it holds nothing yet.
+        for rel, target in (("usr/local/lib/systemd", "/var/tmp/sd"), ("lib", "/var/tmp/lib"), ("lib", "usr/share"),
+                            ("usr/local/lib/sysctl.d", "/usr/lib/agentos/empty"),
+                            ("etc/sysctl.d/99-x.conf", "/etc/passwd"),
                             ("etc/sysctl.d/99-x.conf", "/" + NODUMP[2]),
                             ("etc/sysctl.d/99-x.conf", "../../usr/lib/agentos/sd/90-x.conf"),
                             ("usr/local/lib/sysctl.d", "/usr/lib/agentos/sd"),
