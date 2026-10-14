@@ -3,8 +3,10 @@
 # The image itself is built and booted under Secure Boot by .github/workflows/image.yml.
 # REQ: HW-1, HW-5, UPD-1, UPD-1a
 import base64
+import contextlib
 import json
 import configparser
+import io
 import importlib.machinery
 import importlib.util
 import os
@@ -539,6 +541,191 @@ SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
 
 def stub(d, name, body):
     write(d, name, "#!/bin/sh\n" + body + "\n", 0o755)
+
+
+def newc(names, trailer=True):
+    """A newc cpio archive holding NAMES, each a one-byte file, as cpio --format=newc writes it."""
+    out = b""
+    for i, n in enumerate(list(names) + (["TRAILER!!!"] if trailer else [])):
+        body = b"" if n == "TRAILER!!!" else b"x"
+        name = n.encode() + b"\0"
+        hdr = b"070701" + b"".join(b"%08X" % v for v in (i, 0o100644, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name), 0))
+        out += hdr + name
+        out += b"\0" * (-len(out) % 4) + body
+        out += b"\0" * (-len(out) % 4)
+    return out
+
+
+# The image's two initrds as mkosi builds them, Bluetooth aside: modules with their firmware, and
+# the default initrd's systemd (#1475).
+KMODS = ["usr", "usr/lib/modules/6.12.111+deb13-amd64/kernel/drivers/net/wireless/mediatek/mt76/mt7921/mt7921e.ko.xz",
+         "usr/lib/modules/6.12.111+deb13-amd64/kernel/fs/btrfs/btrfs.ko.xz",
+         "usr/lib/modules/6.12.111+deb13-amd64/kernel/drivers/media/pci/bt8xx/bt878.ko.xz",
+         "usr/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin", "usr/lib/modules/6.12.111+deb13-amd64/modules.alias",
+         "usr/lib/systemd/system/bluetooth.target", "usr/lib/systemd/systemd-udevd"]
+
+
+class InitrdBluetoothTest(unittest.TestCase):
+    """#1475: the initrd lacks the image's Bluetooth modprobe block, so it must not hold Bluetooth."""
+    # REQ: CH-7, HW-10
+
+    def test_clean_initrd_passes(self):
+        self.assertEqual(finish.bluetooth_violations(finish.cpio_names(newc(KMODS))), [])
+        self.assertEqual(finish.cpio_names(newc(KMODS)), KMODS)
+
+    def test_any_bluetooth_module_firmware_or_service_fails(self):
+        k = "usr/lib/modules/6.12.111+deb13-amd64/kernel/"
+        for bad in (k + "drivers/bluetooth/btusb.ko.xz", k + "drivers/bluetooth/btmtk.ko.xz",
+                    k + "drivers/bluetooth/btintel.ko.zst", k + "net/bluetooth/bluetooth.ko.xz",
+                    k + "net/bluetooth/rfcomm/rfcomm.ko", k + "updates/btusb.ko", k + "extra/btmtk.ko.xz",
+                    "usr/lib/firmware/mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin",
+                    "usr/lib/firmware/mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin.zst",
+                    "usr/lib/firmware/rtl_bt/rtl8852bu_fw.bin", "usr/lib/firmware/intel/ibt-0040-0041.sfi",
+                    "usr/lib/firmware/brcm/BCM4350C5.hcd", "usr/lib/systemd/system/bluetooth.service",
+                    "usr/libexec/bluetooth/bluetoothd", "usr/lib/udev/rules.d/90-Bluetooth.rules"):
+            with self.subTest(bad):
+                self.assertEqual(finish.bluetooth_violations(finish.cpio_names(newc(KMODS + [bad]))), [bad])
+
+    def test_kernel_modules_initrd_excludes_every_bluetooth_module(self):
+        # mkosi v24.3 (kmod.filter_kernel_modules) joins the regexes with | and re.search()es each
+        # module path below usr/. Paths from the kernel-modules initrd of CI's build of #1509.
+        rx = re.compile("|".join(ini(MK / "mkosi.conf")["Content"]["KernelModulesInitrdExclude"].split()))
+        k = "lib/modules/6.12.111+deb13-amd64/kernel/"
+        for m in ("drivers/bluetooth/btusb.ko.xz", "drivers/bluetooth/btmtk.ko.xz", "drivers/bluetooth/hci_uart.ko.xz",
+                  "drivers/platform/x86/toshiba_bluetooth.ko.xz", "net/bluetooth/bluetooth.ko.xz",
+                  "net/bluetooth/rfcomm/rfcomm.ko.xz", "updates/btusb.ko", "extra/btmtk.ko.zst",
+                  # rsi_91x depends on btrsi, and mkosi adds a kept module's dependencies back.
+                  "drivers/net/wireless/rsi/rsi_91x.ko.xz", "drivers/net/wireless/rsi/rsi_usb.ko.xz"):
+            with self.subTest(m):
+                self.assertTrue(rx.search(k + m))
+                if "/rsi/" not in m:
+                    self.assertTrue(finish.bluetooth_violations(["usr/" + k + m]))
+        for m in ("fs/btrfs/btrfs.ko.xz", "drivers/media/pci/bt8xx/bt878.ko.xz", "drivers/nvme/host/nvme.ko.xz",
+                  "drivers/net/wireless/mediatek/mt76/mt7921/mt7921e.ko.xz", "drivers/usb/host/xhci-pci.ko.xz",
+                  "drivers/md/dm-verity.ko.xz"):
+            with self.subTest(m):
+                self.assertFalse(rx.search(k + m))
+
+    def test_only_the_inert_target_is_allowed(self):
+        self.assertEqual(finish.BT_ALLOWED, ("usr/lib/systemd/system/bluetooth.target",
+                                             "usr/lib/systemd/user/bluetooth.target"))
+        self.assertEqual(finish.bluetooth_violations(list(finish.BT_ALLOWED)), [])
+        self.assertEqual(finish.bluetooth_violations(["etc/systemd/system/bluetooth.target"]),
+                         ["etc/systemd/system/bluetooth.target"])
+
+    def test_reads_concatenated_and_compressed_archives(self):
+        import gzip
+        import lzma
+        early, main = newc(["kernel/x86/microcode/AuthenticAMD.bin"]), newc(KMODS + ["usr/lib/modules/k/kernel/drivers/bluetooth/btusb.ko"])
+        for comp in (gzip.compress, lzma.compress):
+            with self.subTest(comp.__module__):
+                names = finish.cpio_names(early + b"\0" * 512 + comp(main))
+                self.assertEqual(names[0], "kernel/x86/microcode/AuthenticAMD.bin")
+                self.assertEqual(finish.bluetooth_violations(names), ["usr/lib/modules/k/kernel/drivers/bluetooth/btusb.ko"])
+        # zstd goes through the zstd tool, which the build installs; the dispatch is the same.
+        seen = []
+        fake = {finish.ZSTD: lambda d: seen.append(d) or main}
+        self.assertIn("usr/lib/modules/k/kernel/drivers/bluetooth/btusb.ko",
+                      finish.cpio_names(early + finish.ZSTD + b"frame", fake))
+        self.assertEqual(seen, [finish.ZSTD + b"frame"])
+
+    def test_unreadable_initrd_fails_closed(self):
+        good = newc(KMODS)
+        for bad in (b"BZh91AY&SY" + good, good + b"junk", good[:-200], newc(KMODS, trailer=False),
+                    good[:60], good.replace(b"070701", b"0707zz", 1)):
+            with self.subTest(bad[:12]):
+                with self.assertRaises(ValueError):
+                    finish.cpio_names(bad)
+
+    def test_finish_checks_every_initrd_line(self):
+        name, text = finish.counted_entry(ENTRY % H, "7", tries=3)
+        self.assertEqual(finish.initrd_files(text), ["debian/6.12.48+deb13-amd64/initrd"])
+        two = text + "initrd /agentos/6.12.48+deb13-amd64/kernel-modules.initrd\n"
+        self.assertEqual(finish.initrd_files(two), ["debian/6.12.48+deb13-amd64/initrd",
+                                                    "agentos/6.12.48+deb13-amd64/kernel-modules.initrd"])
+        src = (IMG / "finish_image.py").read_text()
+        self.assertIn("if p in initrd_files(text):\n            check_initrd(p, data_)", src)
+
+    def test_check_initrd_exits_on_bluetooth_or_no_files(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            finish.check_initrd("agentos/initrd", newc(KMODS))
+        self.assertIn("initrd agentos/initrd: 8 files, 3 kernel modules", out.getvalue())
+        for data in (newc(KMODS + ["usr/lib/firmware/mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin"]), newc([])):
+            with self.subTest(len(data)), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as e:
+                    finish.check_initrd("agentos/initrd", data)
+                self.assertIn("could bring up Bluetooth (#1475)", str(e.exception.code))
+
+
+def manifest_dir(root, side, text):
+    d = root / side
+    d.mkdir()
+    if text is not None:
+        (d / "agentos_7.manifest").write_text(text)
+    return d
+
+
+class ManifestCompareTest(unittest.TestCase):
+    """#1474: the reproduce job's package comparison must not pass on a missing or empty manifest."""
+    # REQ: UPD-1a
+
+    GOOD = json.dumps({"manifest_version": 1, "config": {}, "packages": [
+        {"type": "deb", "name": "systemd", "version": "257.13-1~deb13u1", "architecture": "amd64"},
+        {"type": "deb", "name": "kmod", "version": "34.2-2", "architecture": "amd64"}]})
+
+    def run_compare(self, a, b):
+        cm = load("compare_manifests", IMG / "compare_manifests.py")
+        with tempfile.TemporaryDirectory() as t:
+            t = pathlib.Path(t)
+            da, db = manifest_dir(t, "release-a", a), manifest_dir(t, "release-b", b)
+            with unittest.mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
+                rc = cm.main(str(da), str(db))
+            return rc, out.getvalue()
+
+    def test_same_manifests_print_counts(self):
+        rc, out = self.run_compare(self.GOOD, self.GOOD)
+        self.assertEqual(rc, 0)
+        self.assertIn("packages a=2 b=2", out)
+        self.assertIn("same packages", out)
+
+    def test_missing_empty_or_truncated_manifest_fails(self):
+        bad = {"missing": None, "empty file": "", "truncated": self.GOOD[:40], "not an object": "[]",
+               "no packages key": json.dumps({"manifest_version": 1}),
+               "zero packages": json.dumps({"manifest_version": 1, "packages": []}),
+               "nameless package": json.dumps({"packages": [{"version": "1"}]}),
+               "versionless package": json.dumps({"packages": [{"name": "systemd"}]})}
+        for what, text in bad.items():
+            for a, b in ((text, self.GOOD), (self.GOOD, text), (text, text)):
+                with self.subTest(what, a_bad=a is text):
+                    rc, out = self.run_compare(a, b)
+                    self.assertEqual(rc, 1)
+                    self.assertIn("MISMATCH package manifest", out)
+                    self.assertNotIn("same packages", out)
+
+    def test_two_manifests_on_one_side_fail(self):
+        cm = load("compare_manifests", IMG / "compare_manifests.py")
+        with tempfile.TemporaryDirectory() as t:
+            d = manifest_dir(pathlib.Path(t), "a", self.GOOD)
+            (d / "other.manifest").write_text(self.GOOD)
+            with self.assertRaises(ValueError):
+                cm.packages(str(d))
+
+    def test_differing_packages_are_reported(self):
+        other = self.GOOD.replace("34.2-2", "34.2-3")
+        rc, out = self.run_compare(self.GOOD, other)
+        self.assertEqual(rc, 0)
+        self.assertIn("package manifests differ", out)
+        self.assertNotIn("same packages", out)
+
+    def test_reproduce_job_fails_on_the_check(self):
+        wf = (ROOT / ".github/workflows/image.yml").read_text()
+        job = wf[wf.index("  reproduce:"):]
+        self.assertIn("python3 image/compare_manifests.py rec/release-a rec/release-b || ok=0", job)
+        self.assertIn("actions/checkout@", job)
+        self.assertNotIn("*.manifest", job)
+        # The check runs after ok=1 and before the job's verdict.
+        self.assertLess(job.index("ok=1"), job.index("compare_manifests.py"))
+        self.assertLess(job.index("compare_manifests.py"), job.index("[ $ok = 1 ]"))
 
 
 class HealthTest(unittest.TestCase):
