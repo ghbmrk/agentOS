@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -64,6 +65,14 @@ type fakeHooks struct {
 	finishErr error  // returned by Finish after the owner channel exists
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
+	noTexts     bool   // the box cannot text: BoxNumber answers "", false
+	keyErr      error  // ConnectAPIKey's answer when set; nothing is stored
+	joinErr     error  // JoinNetwork's answer when set; nothing is joined
+	joins       int    // JoinNetwork calls
+	deviceErr   error  // StartDeviceCode's answer when set
+	deviceLink  string // StartDeviceCode's link when set
+	privateErr  error  // SetPrivateOK's answer when set; nothing is recorded
+	privates    int    // SetPrivateOK calls
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -71,12 +80,23 @@ func (f *fakeHooks) Networks() []string { return []string{"Home", "Neighbor"} }
 func (f *fakeHooks) JoinNetwork(ssid, pw string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.joins++
+	if f.joinErr != nil {
+		return f.joinErr
+	}
 	f.joined = ssid
 	f.progress.Online = true
 	return nil
 }
-func (f *fakeHooks) BoxNumber() string { return boxNum }
-func (f *fakeHooks) HostInfo() string  { return "GEEKOM Air12, 8 GB" }
+func (f *fakeHooks) BoxNumber() (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.noTexts {
+		return "", false
+	}
+	return boxNum, true
+}
+func (f *fakeHooks) HostInfo() string { return "GEEKOM Air12, 8 GB" }
 func (f *fakeHooks) Send(to, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -144,6 +164,10 @@ func (f *fakeHooks) Providers() []Provider {
 func (f *fakeHooks) SetPrivateOK(id string, ok bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.privates++
+	if f.privateErr != nil {
+		return f.privateErr
+	}
 	if f.private == nil {
 		f.private = map[string]bool{}
 	}
@@ -154,6 +178,9 @@ func (f *fakeHooks) AlreadySetUp() bool { f.mu.Lock(); defer f.mu.Unlock(); retu
 func (f *fakeHooks) ConnectAPIKey(id, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.keyErr != nil {
+		return f.keyErr
+	}
 	if f.keys == nil {
 		f.keys = map[string]string{}
 	}
@@ -164,8 +191,14 @@ func (f *fakeHooks) ConnectAPIKey(id, key string) error {
 func (f *fakeHooks) StartDeviceCode(id string) (string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.deviceErr != nil {
+		return "", "", f.deviceErr
+	}
 	if f.device {
 		f.connected = true // the owner finishes on the provider's site
+	}
+	if f.deviceLink != "" {
+		return f.deviceLink, "WXYZ-1234", nil
 	}
 	return "https://example.invalid/device", "WXYZ-1234", nil
 }
@@ -215,6 +248,10 @@ type rig struct {
 	owned OwnerCard
 	// rot, when set, is the server's card rotation.
 	rot RotationCard
+	// wifiNets are the rotated Wi-Fi networks agentosd was handed, under
+	// mu; wifiErr fails the hand-off (#1191).
+	wifiNets []apnet.Network
+	wifiErr  error
 }
 
 func newRig(t *testing.T) *rig {
@@ -348,8 +385,10 @@ func (r *rig) runSetupToAI() {
 	r.hooks.mu.Lock()
 	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
 	r.hooks.mu.Unlock()
-	if p := r.get("/setup"); !strings.Contains(p, `name="private" value="1" checked`) {
-		t.Fatalf("no private-data question, ticked: %s", p)
+	// CAP-9: the private-data question is asked, unticked on an API key
+	// (D-115: ticked only on a plan sign-in, privatedefault_test.go).
+	if p := setupForms(t, r.get("/setup"))["ai-key openai"]; !strings.Contains(p, `name="private" value="1">`) || strings.Contains(p, "checked") {
+		t.Fatalf("no private-data question, or ticked by default: %s", p)
 	}
 }
 

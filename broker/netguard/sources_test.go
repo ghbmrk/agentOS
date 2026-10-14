@@ -5,6 +5,7 @@ package netguard
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -179,5 +180,66 @@ func TestReadLocalSkipsTheRouterAndKeepsTheLastExternal(t *testing.T) {
 	n, _ = s.ReadLocal()
 	if n.External != netip.MustParseAddr("8.8.8.8") || asked != 1 {
 		t.Fatalf("external not kept: %+v asked=%d", n, asked)
+	}
+}
+
+// The router's external address is kept per gateway: a return to a gateway
+// read before gets that gateway's own address from the quick read, and keeps
+// it when that router does not answer; a never-seen gateway gets none. The
+// table is bounded, the least recently read gateway going first (#1517).
+func TestSourcesKeepExternalPerGateway(t *testing.T) {
+	gw := "0101A8C0"
+	var answer netip.Addr
+	s := &Sources{
+		Addrs: func() ([]net.Addr, error) {
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.77"), Mask: net.CIDRMask(16, 32)}}, nil
+		},
+		ReadFile: func(p string) ([]byte, error) {
+			if p == "/proc/net/route" {
+				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t" + gw + "\t0003\t0\t0\t100\t00000000\n"), nil
+			}
+			return nil, errors.New("absent")
+		},
+		External: func(context.Context, netip.Addr) (netip.Addr, error) {
+			if !answer.IsValid() {
+				return netip.Addr{}, errors.New("no answer")
+			}
+			return answer, nil
+		},
+	}
+	e1, e2 := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
+	answer = e1
+	if n, _ := s.Read(); n.External != e1 {
+		t.Fatalf("G1 read: %v", n.External)
+	}
+	gw, answer = "0102A8C0", e2
+	if n, _ := s.Read(); n.External != e2 {
+		t.Fatalf("G2 read: %v", n.External)
+	}
+	gw, answer = "0101A8C0", netip.Addr{} // back to G1, whose router is silent
+	if n, _ := s.ReadLocal(); n.External != e1 {
+		t.Fatalf("quick read back on G1: %v, want G1's %v", n.External, e1)
+	}
+	if n, _ := s.Read(); n.External != e1 {
+		t.Fatalf("full read back on silent G1: %v, want G1's %v", n.External, e1)
+	}
+	gw = "0103A8C0"
+	if n, _ := s.ReadLocal(); n.External.IsValid() {
+		t.Fatalf("a never-seen gateway got %v", n.External)
+	}
+	// Fill the table past its bound with other gateways; G1 and G2 are the
+	// oldest and are forgotten.
+	for i := 0; i < maxGatewayExternals; i++ {
+		gw, answer = fmt.Sprintf("%02X01A8C0", 0x10+i), netip.AddrFrom4([4]byte{203, 0, 113, byte(i + 1)})
+		if _, err := s.Read(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(s.exts) > maxGatewayExternals {
+		t.Fatalf("table holds %d gateways, bound %d", len(s.exts), maxGatewayExternals)
+	}
+	gw = "0101A8C0"
+	if n, _ := s.ReadLocal(); n.External.IsValid() {
+		t.Fatalf("an evicted gateway kept %v", n.External)
 	}
 }

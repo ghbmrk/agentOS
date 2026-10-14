@@ -62,15 +62,17 @@ type pausedError struct{ until time.Time }
 func (e *pausedError) Error() string { return "too many wrong codes; checks are paused" }
 
 // unlockErr is an error safe to show on the unlock socket, with its HTTP
-// status.
+// status. reason, when set, is a stable word the page acts on, so it never
+// routes on a status that several refusals share.
 type unlockErr struct {
 	msg    string
 	status int
+	reason string
 }
 
 func (e *unlockErr) Error() string { return e.msg }
 
-func uerr(status int, msg string) *unlockErr { return &unlockErr{msg, status} }
+func uerr(status int, msg string) *unlockErr { return &unlockErr{msg: msg, status: status} }
 
 var (
 	errBusy            = uerr(http.StatusConflict, "an unlock is already in progress or the vault is open")
@@ -168,6 +170,10 @@ type unlockState struct {
 	// setup mode, so until Sealed the vault process opens or remakes the
 	// setup vault (setupopen.go).
 	Setup bool `json:"setup,omitempty"`
+	// Keyed is set while the vault last opened held a model provider's
+	// API key, never the key (syncKeyedLocked): the model state reads it
+	// while the vault is locked, and nothing routes on it.
+	Keyed bool `json:"keyed,omitempty"`
 }
 
 // loadState reads the state file. A missing file is a fresh start; an
@@ -237,6 +243,20 @@ type custody struct {
 	// granted: some machine has a model provider granted (modelGranted),
 	// for the broker's model state (OP-9 C2). Set before serving.
 	granted bool
+	// agent is the agent machine a stored key grants its provider to
+	// (storedGrant, -agent-machine); "" grants by -grant only.
+	agent string
+	// flagGrants are the model providers a -grant flag grants on some
+	// machine, and privateFlags those -private-ok allows private data,
+	// for the model state's private (privateGrantedNow). Set before
+	// serving.
+	flagGrants, privateFlags map[string]bool
+	// modelTransport is the proxy's upstream transport; nil outside
+	// tests.
+	modelTransport http.RoundTripper
+	// keyCheck sends setup's key checks (setupKey); nil outside tests,
+	// where each check gets the proxy's default transport over guard.
+	keyCheck http.RoundTripper
 
 	mu sync.Mutex
 	// smsFailSince is when the texting account's polls started failing
@@ -617,6 +637,7 @@ func (c *custody) serve(v *vault.Vault) error {
 	v.OnWarn(c.notify)
 	c.applyPins(v)
 	c.syncMarksLocked(v)
+	c.syncKeyedLocked(v)
 	c.ph, c.v, c.proxy, c.expires, c.ticket, c.needPIN = open, v, p, time.Time{}, "", false
 	c.bootChanged, c.bootUpdated, c.bootSecure = false, false, false
 	return nil
@@ -1105,6 +1126,12 @@ func (c *custody) put(name string, value []byte) error {
 	if c.ph != open {
 		return errLocked
 	}
+	return c.putKeyLocked(name, value)
+}
+
+// putKeyLocked is put's store, shared with setup's (setupKey). Caller
+// holds mu with the vault open.
+func (c *custody) putKeyLocked(name string, value []byte) error {
 	if !adapterCredential(name) || hasOtherKind(c.v, name, vault.KindAPIKey) {
 		return errBadCredential
 	}
@@ -1115,6 +1142,7 @@ func (c *custody) put(name string, value []byte) error {
 		}
 		return errBadCredential
 	}
+	c.syncKeyedLocked(c.v)
 	return nil
 }
 

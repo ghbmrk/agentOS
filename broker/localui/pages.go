@@ -261,10 +261,33 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/setup/restart"><label>Reset secret, from your card's recovery sheet<input type="text" name="secret" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Start over</button></form></details>
 {{else}}<form method="post" action="/setup/restart"><button class="plain">Start setup over</button></form>{{end}}{{end}}
 
-{{define "private"}}<label><input type="checkbox" name="private" value="1" checked> {{.Name}} may see your private data (mail, files) to do tasks. Recommended.</label><br>{{end}}
+{{define "private"}}<label><input type="checkbox" name="private" value="1"{{if .Checked}} checked{{end}}> Let {{.Name}} see your private content: mail, documents, chats, and anything made from them. Your passwords and keys are never shown to it.</label><br>
+<span class="muted">Unticked, tasks that need your mail or files can't run until you allow a provider on the AI providers page.</span><br>{{end}}
+
+{{define "providers"}}{{template "head" .Refresh}}
+<h1>AI providers</h1>
+{{if .Down}}<p>I am still starting. This page reloads by itself.</p>
+{{else if .Locked}}<p>I am locked, so I can't read or change the AI providers. <a href="/unlock/vault">Unlock me</a>, then come back here.</p>
+{{else}}
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{with .Withdrawing}}<p>Stop {{.Name}} seeing your private data? Tasks that need your mail or files can't run until you allow a provider again.</p>
+<form method="post" action="/providers/"><input type="hidden" name="step" value="withdraw"><input type="hidden" name="provider" value="{{.ID}}"><input type="hidden" name="confirm" value="1"><button class="stop">Stop</button></form>
+<p><a href="/providers/">Cancel</a></p>
+{{else}}
+{{if .NoneAllowed}}<p class="muted">Tasks that need your mail or files can't run until you allow a provider that is connected.</p>{{end}}
+{{range .Providers}}<h3>{{.Name}}: {{if .Connected}}connected{{else}}not connected{{end}}</h3>
+{{if .PrivateOK}}<p>{{.Name}} may see your private data (mail, files) to do tasks.</p>
+<form method="post" action="/providers/"><input type="hidden" name="step" value="withdraw"><input type="hidden" name="provider" value="{{.ID}}"><button class="stop">Stop {{.Name}} seeing it</button></form>
+{{else}}<p>{{.Name}} may not see your private data.</p>
+<form method="post" action="/providers/"><input type="hidden" name="step" value="allow"><input type="hidden" name="provider" value="{{.ID}}"><label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Allow {{.Name}}</button></form>
+{{end}}{{end}}
+<p class="muted">I text you when this changes.</p>
+{{end}}{{end}}
+{{template "foot"}}{{end}}
 
 {{define "wifi"}}<form method="post" action="/setup/network">
-<label>Your home Wi-Fi{{if .}}<select name="ssid">{{range .}}<option>{{.}}</option>{{end}}</select>{{else}}<input type="text" name="ssid" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false" required>{{end}}</label>
+<label>Your home Wi-Fi{{if .}}<select name="ssid">{{range .}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+<label>Not listed? Type its name<input type="text" name="other" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false">{{else}}<input type="text" name="ssid" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false" required>{{end}}</label>
 <label>Its password<input type="text" name="password" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
 <button>Join</button>
 </form>
@@ -283,15 +306,17 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "number"}}
 <h2>2. Text your box</h2>
-{{if .SMSLink}}<p><a class="button" href="{{.SMSLink}}">Text my box</a></p>
+{{if not .CanText}}<p>Pairing is not available yet: I cannot send texts right now. Reload this page to try again.</p>
+{{else}}{{if not .SMSLink}}<p>I do not know my own number yet, so you cannot text me first. Enter your number and I will text you a code.</p>
+{{else}}<p><a class="button" href="{{.SMSLink}}">Text my box</a></p>
 <p class="muted">Your messages app opens with my number and a code filled in. Press Send, then come back here.</p>
 <p class="muted">Or text <span class="mono">PAIR {{.PairCode}}</span> to <span class="mono">{{.BoxNumber}}</span>. The setup code on your card works too.</p>
 <p><a href="/box.vcf">Save my number as a contact</a></p>{{end}}
-<details><summary>Enter your number instead</summary>
+<details{{if not .SMSLink}} open{{end}}><summary>Enter your number{{if .SMSLink}} instead{{end}}</summary>
 <form method="post" action="/setup/number"><label>Your mobile number<input type="tel" name="number" placeholder="+1 555 010 0000" autocomplete="tel"></label><button>Text me a code</button></form>
 {{if .NumTo}}<form method="post" action="/setup/number-code"><label>Code texted to {{.NumTo}}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Confirm</button></form>{{end}}
 </details>
-<p><a href="/setup">I sent it</a></p>
+{{if .SMSLink}}<p><a href="/setup">I sent it</a></p>{{end}}{{end}}
 {{if .Rejoin}}<h2>Home Wi-Fi again</h2>
 {{template "wifi" .Networks}}{{end}}
 
@@ -309,6 +334,7 @@ form { margin: .6em 0 1.2em; }
 {{else if eq .Step "codes"}}
 <p class="muted">Paired with your number {{.Paired}}.</p>{{template "restart" false}}
 <h2>3. Add approval codes</h2>
+{{with .Replace}}<p class="err">{{.}}</p>{{end}}
 {{if .CodesUnavailable}}
 {{else if .CodesEnrolled}}<p>Approval codes are already set up. If you no longer have the code generator, replace it with your recovery key after setup.</p>
 <form method="post" action="/setup/codes"><input type="hidden" name="enrolled" value="1"><button>Continue</button></form>
@@ -323,6 +349,7 @@ form { margin: .6em 0 1.2em; }
 {{else if eq .Step "card"}}
 <h2>4. Owner Card</h2>
 <p>Your Owner Card holds your vault passphrase and recovery key. Print it or save it, then type the word and group I ask for. Once you confirm, I keep no copy of it.</p>
+<p class="muted">{{.CardRestart}}</p>
 <p><a class="button" href="/setup/card">Show my Owner Card</a></p>
 
 {{else if eq .Step "recovery"}}
@@ -342,9 +369,10 @@ form { margin: .6em 0 1.2em; }
 {{else}}<p>I am updating to the latest version first. This step opens when it finishes.</p>{{end}}
 {{else}}<p class="muted">One is enough. You can add more later.</p>
 {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>
+{{$id := .ID}}{{with index $.Unsaved .ID}}<p>Your answer about private content for {{.Name}} was not saved yet. Setup finishes once it is.</p><form method="post" action="/setup/ai-private"><input type="hidden" name="provider" value="{{$id}}">{{template "private" .}}<button>Save</button></form>{{end}}
 {{if not .Connected}}
-{{if .DeviceCode}}{{with index $.Device .ID}}<p>Open <a href="{{index . 0}}">{{index . 0}}</a> and enter <span class="mono">{{index . 1}}</span>.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" .}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
-{{if .APIKey}}<form method="post" action="/setup/ai-key"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" .}}<label>Or paste an API key<input type="password" name="key" autocomplete="off"></label><button class="plain">Save key</button></form>{{end}}
+{{if .DeviceCode}}{{$d := index $.Device .ID}}{{if index $d 0}}<p>Open <a href="{{index $d 0}}">{{index $d 0}}</a> and enter <span class="mono">{{index $d 1}}</span>.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Plan .ID)}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
+{{if .APIKey}}<form method="post" action="/setup/ai-key"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Key .ID)}}<label>Or paste an API key<input type="password" name="key" autocomplete="off"></label><button class="plain">Save key</button></form>{{end}}
 {{end}}{{end}}{{end}}
 {{end}}
 {{template "foot"}}{{end}}

@@ -141,6 +141,24 @@ type State struct {
 	// line's only once the owner confirms it on the local page with a code
 	// (P2-2w d2b, CH-19).
 	ICCID string `json:"iccid,omitempty"`
+	// Number is the box's own number on the owner line, E.164, while the
+	// line is ok and the modem knows it (BOX_NUMBER or the SIM's AT+CNUM);
+	// setup shows it to the owner as the address to text (P2-2w c4c; CH-1).
+	Number string `json:"number,omitempty"`
+}
+
+// ValidNumber says s is an E.164 number: + then 7 to 15 digits, the first
+// not 0.
+func ValidNumber(s string) bool {
+	if len(s) < 8 || len(s) > 16 || s[0] != '+' || s[1] == '0' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // MaxICCID bounds a SIM serial: ITU-T E.118 allows 19 to 22 characters.

@@ -44,7 +44,7 @@ class RiskTierTest(unittest.TestCase):
             "broker/claim/claim_test.go": "A",
             # REQ: HW-10 (CTRL-claim-wire: first boot routes the claim and the card)
             "broker/firstboot/start.go": "A",
-            "broker/recall/index.go": "B",
+            "broker/attention/attention.go": "B",
             "broker/newpkg/x.go": "B",
             "guest/openclaw/Dockerfile": "B",
             "guest/openclaw/src/x.ts": "B",
@@ -85,10 +85,14 @@ class RiskTierTest(unittest.TestCase):
             "guest/openclaw/launch.json",
             "guest/builder/launch.json",
             "guest/builder/build-rootfs.sh",
+            "guest/codex/agentos-toolsh",
+            "guest/codex/managed_config.toml",
+            "guest/codex/requirements.toml",
+            "guest/codex/launch.json",
             "broker/cmd/agentos-modem/agentos-modem.service",
-            "broker/recall/systemd/x.conf",
-            "broker/recall/x.socket",
-            "broker/recall/x.timer",
+            "broker/attention/systemd/x.conf",
+            "broker/attention/x.socket",
+            "broker/attention/x.timer",
         ]
         for path in paths:
             with self.subTest(path=path):
@@ -197,7 +201,7 @@ class RiskTierTest(unittest.TestCase):
             self.assertEqual(rt.tier_of(n)[0], "A", n)
 
     def test_highest_tier_wins(self):
-        tier, why = rt.tier_of_change(["docs/a.md", "broker/recall/x.go", "broker/vault/y.go"])
+        tier, why = rt.tier_of_change(["docs/a.md", "broker/attention/x.go", "broker/vault/y.go"])
         self.assertEqual((tier, why), ("A", ["broker/vault/y.go"]))
         self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/route/r.go"])[0], "B")
         self.assertEqual(rt.tier_of_change([]), ("C", []))
@@ -233,7 +237,7 @@ class RiskTierTest(unittest.TestCase):
 
     # REQ: ARC-1 (SIM-core: the trusted core is the list in broker/core/core.txt)
     def test_core_list_rates_core_and_wiring_a(self):
-        core, wiring = rt.core_list()
+        core, wiring, _ = rt.core_list()
         self.assertIn("journal", core)
         self.assertIn("cmd/agentosd", wiring)
         cases = {
@@ -255,6 +259,35 @@ class RiskTierTest(unittest.TestCase):
                 self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")
                 self.assertTrue((ROOT / "broker" / pkg).is_dir(), pkg)
 
+    # REQ: ARC-1 (SIM-core-allow-tier: a package an allow line lets call a
+    # core write path is itself a core write path, so it is tier A)
+    def test_allow_line_packages_are_a(self):
+        allowed = rt.core_list()[2]
+        # recalltool holds journal.Engine.Erase and grants.Gate.Withdraw/Authorize.
+        self.assertIn("recall", allowed)
+        self.assertIn("recalltool", allowed)
+        for path in ("broker/recall/recall.go", "broker/recalltool/tool.go"):
+            with self.subTest(path=path):
+                self.assertEqual(rt.tier_of(path), ("A", "core list: " + path.rsplit("/", 1)[0] + "/"))
+        for pkg in sorted(allowed):
+            with self.subTest(pkg=pkg):
+                self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")
+                self.assertTrue((ROOT / "broker" / pkg).is_dir(), pkg)
+
+    def test_allow_line_parsing_matches_core_test(self):
+        # Same grammar as broker/core/core_test.go: allow <pkg> <symbol> -- <reason>.
+        with tempfile.TemporaryDirectory() as d:
+            ok = pathlib.Path(d) / "ok.txt"
+            ok.write_text("core journal\nallow newpkg journal.Engine.Erase -- a reason\n")
+            self.assertEqual(rt.core_list(ok)[2], {"newpkg"})
+            for line in ("allow newpkg journal.Engine.Erase",
+                         "allow newpkg journal.Engine.Erase --",
+                         "allow newpkg journal.Engine.Erase because it must"):
+                bad = pathlib.Path(d) / "bad.txt"
+                bad.write_text("core journal\n" + line + "\n")
+                with self.subTest(line=line), self.assertRaises(SystemExit):
+                    rt.core_list(bad)
+
     def test_core_list_unreadable_fails(self):
         with tempfile.TemporaryDirectory() as d:
             bad = pathlib.Path(d) / "core.txt"
@@ -263,6 +296,63 @@ class RiskTierTest(unittest.TestCase):
                 rt.core_list(bad)
             with self.assertRaises(SystemExit):
                 rt.core_list(pathlib.Path(d) / "missing.txt")
+
+    # CTRL-lane-gate (#1300; a work item with no SPEC row, so no REQ marker): CI runs
+    # `risk_tier.py --git BASE HEAD --pr-branch B --pr-title T` on every PR.
+    def test_lane_gate_holds_codex_prs_to_tier_c(self):
+        script = ROOT / "tools" / "risk_tier.py"
+        with tempfile.TemporaryDirectory() as d:
+            def git(*args):
+                subprocess.run(["git", "-C", d, *args], check=True, capture_output=True)
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "t@example.invalid")
+            git("config", "user.name", "t")
+            pathlib.Path(d, "README.md").write_text("x\n")
+            git("add", ".")
+            git("commit", "-qm", "base")
+
+            def change(branch, path):
+                git("checkout", "-q", "-b", branch, "main")
+                f = pathlib.Path(d, path)
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("change\n")
+                git("add", ".")
+                git("commit", "-qm", branch)
+
+            def gate(branch, title):
+                return subprocess.run(
+                    [sys.executable, "-I", str(script), "--git", "main", branch,
+                     "--pr-branch", branch, "--pr-title", title],
+                    cwd=d, capture_output=True, text=True)
+
+            change("pkg/codex-CX-b-x", "broker/notapkg/x.go")      # tier B
+            change("pkg/codex-CX-a-x", ".github/workflows/x.yml")  # tier A
+            change("pkg/codex-CX-c-x", "docs/x.md")                # tier C
+            change("claude/b-x", "broker/notapkg/y.go")            # tier B, peer branch
+            cases = [
+                ("pkg/codex-CX-b-x", "CX-b: x", 1),
+                ("pkg/codex-CX-a-x", "CX-a: x", 1),
+                ("pkg/codex-CX-c-x", "CX-c: x", 0),
+                ("claude/b-x", "P-1: x", 0),
+                # A CX- title puts the PR in the lane whatever its branch.
+                ("claude/b-x", "CX-b: x", 1),
+            ]
+            for branch, title, want in cases:
+                with self.subTest(branch=branch, title=title):
+                    r = gate(branch, title)
+                    self.assertEqual(r.returncode, want, r.stdout + r.stderr)
+                    if want:
+                        self.assertIn("codex lane is limited to tier C", r.stderr)
+
+    def test_lane_of(self):
+        self.assertEqual(rt.lane_of("pkg/codex-CX-name-case-1", ""), "codex")
+        self.assertEqual(rt.lane_of("", " CX-name-case: x"), "codex")
+        self.assertIsNone(rt.lane_of("pkg/ctrl-lane-gate-w7vxj3", "CTRL-lane-gate: x"))
+        self.assertIsNone(rt.lane_of("claude/x", "X: codex"))
+        self.assertIsNone(rt.lane_of(None, None))
+        self.assertTrue(rt.lane_gate("pkg/codex-x", "", "C")[0])
+        self.assertFalse(rt.lane_gate("pkg/codex-x", "", "B")[0])
+        self.assertTrue(rt.lane_gate("claude/x", "", "A")[0])
 
     def test_markdown_output(self):
         buf = io.StringIO()

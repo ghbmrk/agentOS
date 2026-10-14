@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
 // REQ: CRED-9, CH-12, ONB-6
@@ -54,14 +56,22 @@ func TestHostInfoNamesThePCAndItsRAM(t *testing.T) {
 		{"", "", "", ""},
 		{"Very Long Vendor Name Incorporated Worldwide", "Model 9000 Ultra Max Pro", memTotal8, "Model 9000 Ultra Max Pro, 8 GB"},
 		{"", "An Exceedingly Long Product Name For A Mini PC", "MemTotal: 130000000 kB\n", "An Exceedingly Long Product Name, 124 GB"},
+		// Firmware text is not trusted: the reply keeps no link or domain.
+		{"", "http://evil.example/x", memTotal8, "http://evil.example/x, 8 GB"},
+		{"-", "(.)", "", "- (.)"},
 	} {
 		got := AgentosdSetup{Root: fakeRoot(t, c.vendor, c.product, c.mem)}.HostInfo()
 		if got != c.want {
 			t.Errorf("%q %q: %q, want %q", c.vendor, c.product, got, c.want)
 		}
 		// The whole name and RAM reach the pairing reply, uncut.
-		if got != "" && !strings.Contains(pairedText(got), got) {
+		if got != "" && !strings.ContainsAny(got, ".:/") && !strings.Contains(pairedText(got), got) {
 			t.Errorf("cut from the pairing reply: %q", pairedText(got))
+		}
+		// agentosd sends the reply (localapi.SetupText); a refused one
+		// would silently leave the owner unpaired.
+		if !localapi.SetupText(pairedText(got)) {
+			t.Errorf("agentosd refuses the pairing reply %q", pairedText(got))
 		}
 	}
 }

@@ -110,6 +110,7 @@ func (x *setupCardRig) enrollCodes(t *testing.T) {
 // seal is setup's finish: the confirmed seed is sealed.
 func (x *setupCardRig) seal(t *testing.T) {
 	t.Helper()
+	ensureCard(t, x.c)
 	if err := x.c.sealEnroll(); err != nil {
 		t.Fatal(err)
 	}
@@ -406,5 +407,41 @@ func TestResetKeepsTheSetupVaultNoCardMade(t *testing.T) {
 	}
 	if _, err := vault.OpenSealed(x.vp, x.kp, recovery.Factor(x.setup)); err != nil {
 		t.Fatalf("the setup vault was removed: %v", err)
+	}
+}
+
+// F10, #1115: the page routes the owner back to step 3 on the provision
+// refusal for an unconfirmed code generator, so that refusal carries a
+// stable reason. Other 412s (no setup-open entry, errNotOpen) carry none,
+// so the page never routes on the status alone.
+func TestTheCodesRefusalCarriesAReason(t *testing.T) {
+	x := newInitSetupRig(t)
+	code, out := x.call(http.MethodPost, "/card/provision", provisionBody(newCard(t)))
+	if code != http.StatusPreconditionFailed || out["reason"] != reasonCodesUnconfirmed {
+		t.Fatalf("provision before step 3: %d %v", code, out)
+	}
+	if out["error"] != errCodesUnconfirmed.Error() {
+		t.Fatalf("message: %v", out["error"])
+	}
+	y := newSetupCardRig(t, false)
+	y.open(t)
+	code, out = y.call(http.MethodPost, "/card/provision", provisionBody(newCard(t)))
+	if code != http.StatusPreconditionFailed {
+		t.Fatalf("not in setup mode: %d %v", code, out)
+	}
+	if _, ok := out["reason"]; ok {
+		t.Fatalf("errNotOpen carries a reason: %v", out)
+	}
+}
+
+// ensureCard stands in for the card step's provision where a test is not
+// about the card: the open vault holds a card entry, as finish needs.
+func ensureCard(t *testing.T, c *custody) {
+	t.Helper()
+	if _, ok := c.v.Secret(recovery.CardName); ok {
+		return
+	}
+	if err := c.v.Put(recovery.CardName, recovery.KindCard, []byte(synthetic(t, "card-"))); err != nil {
+		t.Fatal(err)
 	}
 }

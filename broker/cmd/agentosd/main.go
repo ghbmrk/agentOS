@@ -20,6 +20,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/accel"
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/change"
@@ -359,7 +360,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
 	var diskQuota, sleepHoursFlag string
-	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock string
+	var builderImage, builderLaunch, keptPath, setupRecord, netjoinSock, apNetPath string
 	var learn learnPaths
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var digestDir, mailSocket string
@@ -395,6 +396,7 @@ func main() {
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
 	flag.StringVar(&netjoinSock, "netjoin-sock", "", "the netjoin helper's socket (agentos-netjoin, P2-2w c3): setup's network step writes the home Wi-Fi through it; empty, that step answers not joined")
+	flag.StringVar(&apNetPath, "ap-net", apnet.Path, "the card's Wi-Fi network (#1185): setup writes the page's report of it here, root-only, for agentos-ap to serve at the confirm; empty, it is not taken")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
@@ -470,7 +472,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
-		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid}
+		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid, RotateAPNet: rotateAPNet(apNetPath)}
 	}
 	// A restore the forget log's check held opens nothing on the restored
 	// tree: no recall, no agent machines (W3-forget-b1; security C3). The
@@ -507,7 +509,14 @@ func main() {
 	if cfg.OwnerNumber == "" {
 		up := newUplink()
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
-			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock}
+			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock,
+			Card: pageCardStep, APNet: apNetPath}
+		if modemBridge {
+			// The box texts its setup and pairing texts on its own line
+			// (P2-2w c4c), and records the SIM it finds as that line's.
+			m.Line = modemlink.NewSetup(modemlink.SetupConfig{Record: recordOwnerSIM(*modemRoles)})
+			m.ModemUID, m.ModemGID = &cfg.ModemUID, cfg.ModemGID
+		}
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
 		}
@@ -716,12 +725,18 @@ func main() {
 		retries = spare.Retries
 	}
 	steps := newStepNotes(&cfg.Notes)
-	if lp != nil && recallDir != "" && verifier != nil {
-		// An approved item 2 that finds recall not open yet waits for it
-		// (#327 L3 B-3); set before the daemon serves the owner.
-		lp.forgetOwner.whenOpen = func() {
-			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+	// FORGET's item 2s a restart interrupted resume once recall opens
+	// (#327 L3 B-3), including one startup reconcile finds late (#1370);
+	// with recall off the owner is told they cannot, once boot setup is
+	// done (Security S1 on #1382). Wired before the daemon serves the
+	// owner and starts reconcile; resumeBoot runs at the end of setup.
+	var resumeBoot func()
+	if lp != nil {
+		var onOpen func(func())
+		if recallDir != "" && verifier != nil {
+			onOpen = recallExec.OnOpen
 		}
+		resumeBoot = lp.forgetOwner.wireResume(ctx, onOpen)
 	}
 	d, err := daemon.Run(ctx, cfg)
 	if err != nil {
@@ -871,17 +886,17 @@ func main() {
 	// The recall identity key is vault-held (recall K5): recall opens once
 	// the vault process can hand it over.
 	// FORGET's item 2s a restart interrupted resume once recall opens;
-	// with recall off they cannot, and the owner is told so.
+	// with recall off they cannot, and the owner is told so (wireResume).
 	if recallDir != "" && verifier != nil {
-		if lp != nil {
-			recallExec.OnOpen(func() { go lp.forgetOwner.resumeAgent(ctx) })
+		if resumeBoot != nil {
+			resumeBoot()
 		}
 		go openRecall(ctx, verifier, recallCfg, recallTools, recallExec)
 	} else {
 		recallExec.Off()
 		caps.recallWired(false)
-		if lp != nil {
-			go lp.forgetOwner.resumeAgent(ctx)
+		if resumeBoot != nil {
+			resumeBoot()
 		}
 	}
 	if line != nil {

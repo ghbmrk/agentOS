@@ -19,6 +19,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/ghbmrk/agentos/broker/card"
 )
 
 // Vault is the vault process's unlock socket (cmd/agentos-egress, egress
@@ -98,6 +100,10 @@ type wireStatus struct {
 
 	ChangeUnfinished bool `json:"change_unfinished"`
 
+	// Reason is a stable word on a refusal the page acts on (egress K21);
+	// Remade is /card/reset's answer that the setup vault was made anew.
+	Reason string `json:"reason"`
+	Remade bool   `json:"remade"`
 	// Host and NoTPM answer the setup host step (/setup/host).
 	Host  string `json:"host"`
 	NoTPM bool   `json:"no_tpm"`
@@ -145,7 +151,11 @@ func (u *UnlockClient) call(ctx context.Context, method, path string, body any) 
 		if derr != nil || msg == "" {
 			msg = "the vault process refused the request"
 		}
-		return out, &VaultError{resp.StatusCode, msg}
+		verr := &VaultError{resp.StatusCode, msg}
+		if out.Reason == ReasonCodesUnconfirmed {
+			return out, fmt.Errorf("%w: %w", ErrCodesUnconfirmed, verr)
+		}
+		return out, verr
 	}
 	if derr != nil {
 		return out, fmt.Errorf("vault: unreadable reply: %w", derr)
@@ -172,6 +182,37 @@ func (u *UnlockClient) Unlock(ctx context.Context, passphrase string) (VaultStat
 func (u *UnlockClient) Confirm(ctx context.Context, ticket, code string, keepTrusted bool) (VaultStatus, error) {
 	w, err := u.call(ctx, http.MethodPost, "/confirm", map[string]any{"ticket": ticket, "code": code, "keep_trusted": keepTrusted})
 	return w.status(), err
+}
+
+// ProvisionCard sends the confirmed Owner Card to the vault process, which
+// writes its vault slots and stored values (egress K21). A vault whose
+// code generator is unconfirmed answers an error wrapping
+// ErrCodesUnconfirmed.
+func (u *UnlockClient) ProvisionCard(ctx context.Context, c *card.Card) error {
+	_, err := u.call(ctx, http.MethodPost, "/card/provision", provisionRequest{
+		WiFiName: c.WiFiName, WiFiPassword: c.WiFiPassword, SetupSecret: c.SetupSecret,
+		SetupCode: c.SetupCode, VaultPassphrase: c.VaultPassphrase, GridSeed: c.GridSeed,
+		RecoveryKey: c.RecoveryKey})
+	return err
+}
+
+// provisionRequest is egress's /card/provision body.
+type provisionRequest struct {
+	WiFiName        string `json:"wifi_name"`
+	WiFiPassword    string `json:"wifi_password"`
+	SetupSecret     string `json:"setup_secret"`
+	SetupCode       string `json:"setup_code"`
+	VaultPassphrase string `json:"vault_passphrase"`
+	GridSeed        []byte `json:"grid_seed"`
+	RecoveryKey     string `json:"recovery_key"`
+}
+
+// ResetCard removes a vault made from a card nobody confirmed (egress
+// K22). remade is true when the vault process made the setup vault anew,
+// so the code generator must be set up again (F10).
+func (u *UnlockClient) ResetCard(ctx context.Context) (remade bool, err error) {
+	w, err := u.call(ctx, http.MethodPost, "/card/reset", struct{}{})
+	return w.Remade, err
 }
 
 // UnlockPIN implements Vault.

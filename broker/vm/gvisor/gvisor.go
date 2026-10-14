@@ -56,6 +56,12 @@ type Runtime struct {
 	Platform string // "systrap" (no KVM needed) or "kvm"
 
 	logMu sync.Mutex // the exec log's appends and rotation
+
+	// pending holds, per machine ID, the in-sandbox kills that cancelled
+	// Execs started and that may still run. Kill waits on them, so none
+	// outlives the incarnation it was meant for (GVISOR-stale-kill).
+	pendingMu sync.Mutex
+	pending   map[string]*sync.WaitGroup
 }
 
 var _ vm.Runtime = (*Runtime)(nil)
@@ -295,7 +301,11 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		OnCancel: func() {
 			// Read the pid now: the deferred Remove may run before the kill.
 			b, _ := os.ReadFile(pidFile)
-			go r.killExec(id, strings.TrimSpace(string(b)))
+			wg := r.addPendingKill(id)
+			go func() {
+				defer wg.Done()
+				r.killExec(id, strings.TrimSpace(string(b)))
+			}()
 		},
 	}, append([]string{"--log=" + logs[0], "--debug-log=" + logs[1], "exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, "--pass-fd", "3:2", cid(id)}, c.Argv...)...)
 	// The guest's stderr is read to its end, but no longer than
@@ -498,6 +508,37 @@ func (r *Runtime) killExec(id, pid string) {
 	}
 }
 
+// addPendingKill registers a killExec about to start for id; the caller
+// calls Done on the result when it ends.
+func (r *Runtime) addPendingKill(id string) *sync.WaitGroup {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	if r.pending == nil {
+		r.pending = map[string]*sync.WaitGroup{}
+	}
+	wg := r.pending[id]
+	if wg == nil {
+		wg = new(sync.WaitGroup)
+		r.pending[id] = wg
+	}
+	wg.Add(1)
+	return wg
+}
+
+// waitPendingKills waits for the killExecs registered for id. The group
+// leaves the map before the wait, so a later Exec's kill joins a fresh
+// group and no Add races this Wait. Each killExec is bounded by its own
+// timeout, so the wait is too.
+func (r *Runtime) waitPendingKills(id string) {
+	r.pendingMu.Lock()
+	wg := r.pending[id]
+	delete(r.pending, id)
+	r.pendingMu.Unlock()
+	if wg != nil {
+		wg.Wait()
+	}
+}
+
 // capped keeps the first max bytes written (all of them when max is 0).
 // It is safe for concurrent use: after ExecWaitDelay, Exec reads it while
 // the copy may still be finishing.
@@ -536,8 +577,12 @@ func (c *capped) Write(p []byte) (int, error) {
 var _ vm.Execer = (*Runtime)(nil)
 
 // Kill stops the sandbox, deletes runsc's record of it, and unmounts the
-// machine's root. It is idempotent.
+// machine's root. It is idempotent. It first waits for any cancelled
+// Exec's in-sandbox kill still running: runsc's container ID is the same
+// for every incarnation of a machine, so a kill let outlive Kill could
+// land in the sandbox a Rollback or Rebuild starts next (GVISOR-stale-kill).
 func (r *Runtime) Kill(ctx context.Context, l vm.Launch) error {
+	r.waitPendingKills(l.ID)
 	_ = r.run(ctx, "kill", cid(l.ID), "KILL")
 	err := r.run(ctx, "delete", "-force", cid(l.ID))
 	if err != nil && (strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "not found")) {

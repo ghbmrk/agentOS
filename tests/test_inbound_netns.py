@@ -17,6 +17,17 @@
 # the unit's ExecStop and localui.BringDown do. The access point's link uses the private range
 # agentos_ap requires (10.42.0.0/24); the home links stay on documentation ranges.
 # REQ: DEV-2, DEV-net-g
+#
+# UplinkByNetworkd reruns the drop against the image's wired uplink (P2-1, #1416): real
+# systemd-networkd runs on both sides, the home side as the router (DHCP server and router
+# advertisements), the box side on the [Network] section the image ships in
+# 20-agentos-uplink.network (its [Match] names eth0 here, since the shipped one leaves out veth
+# links on purpose). The box takes its lease and its IPv6 address with the drop loaded first, as
+# the image orders networkd after agentos-inbound; no home host opens a box port at either address
+# or at the box's IPv6 link-local address, and each address opens once the drop is gone (the
+# control). The box still reaches the router. Also needs unshare and systemd-networkd.
+# REQ: DEV-2, DEV-net-e, ONB-3
+import configparser
 import ipaddress
 import os
 import pathlib
@@ -30,7 +41,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 RULES = ROOT / "image/mkosi/mkosi.extra/usr/lib/agentos/inbound.nft"
 BOX, HOME = "agentos-t-box", "agentos-t-home"
 PORT = 18789
-# Some sandboxes run a kernel without IPv6; the IPv6 half then skips. CI's runners have it.
+# Some sandboxes run a kernel without IPv6; the IPv6 half then skips. CI's runners have it, and CI
+# sets AGENTOS_REQUIRE_IPV6=1 so that a runner without it fails instead of skipping (#1479).
 IPV6 = os.path.isdir("/proc/sys/net/ipv6")
 PREFIX = "2001:db8:1::"
 ROUTER6 = PREFIX + "2"
@@ -80,6 +92,17 @@ def sh(*args, ns=None, check=True):
 
 def reaches(ns, addr, port=PORT):
     return sh("python3", "-c", CONNECT, addr, str(port), ns=ns, check=False).returncode == 0
+
+
+class IPv6Present(unittest.TestCase):
+    # REQ: DEV-2
+    def test_ipv6_is_here_when_required(self):
+        # The IPv6 inbound and privacy assertions only run with IPv6; where it is required, its
+        # absence is a failure, never a quiet skip.
+        if os.environ.get("AGENTOS_REQUIRE_IPV6") == "1":
+            self.assertTrue(IPV6, "AGENTOS_REQUIRE_IPV6=1 but the kernel has no IPv6")
+        elif not IPV6:
+            self.skipTest("kernel without IPv6")
 
 
 @unittest.skipUnless(os.geteuid() == 0 and shutil.which("ip") and shutil.which("nft"),
@@ -390,6 +413,165 @@ class AccessPointThroughTheDrop(unittest.TestCase):
         # have reached the box.
         sh("nft", "add", "element", "inet", "agentos_inbound", "exempt", '{ "ap0" }', ns=BOX)
         self.assertTrue(reaches(HOME, "203.0.113.1", PORT), "control: the test cannot see the defect")
+
+
+UPLINK = ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/network/20-agentos-uplink.network"
+NETWORKD = "/usr/lib/systemd/systemd-networkd"
+ROUTER4 = "192.0.2.1"
+
+# The home router: a static address, a DHCP pool (192.0.2.100-109) and, with IPv6, advertisements
+# of PREFIX.
+ROUTER_NETWORK = """[Match]
+Name=h0
+
+[Network]
+Address=%s/24
+DHCPServer=yes
+%s
+[DHCPServer]
+PoolOffset=100
+PoolSize=10
+""" % (ROUTER4, "Address=%s/64\nIPv6SendRA=yes\n\n[IPv6Prefix]\nPrefix=%s/64\n" % (ROUTER6, PREFIX) if IPV6 else "")
+
+
+def box_network():
+    """The shipped uplink file with its [Match] on eth0 and everything else as shipped."""
+    text = UPLINK.read_text()
+    shipped = configparser.ConfigParser(strict=False, interpolation=None)
+    shipped.optionxform = str
+    shipped.read_string(text)
+    body = text[text.index("[Network]"):]
+    return "[Match]\nName=eth0\n\n" + body, shipped
+
+
+@unittest.skipUnless(os.geteuid() == 0 and all(shutil.which(t) for t in ("ip", "nft", "unshare"))
+                     and os.access(NETWORKD, os.X_OK) and os.path.isdir("/etc/systemd/network"),
+                     "needs root, ip, nft, unshare and systemd-networkd")
+class UplinkByNetworkd(unittest.TestCase):
+    def setUp(self):
+        self.procs = []
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(self.cleanup)
+        for ns in (BOX, HOME):
+            sh("ip", "netns", "add", ns)
+        sh("ip", "link", "add", "eth0", "netns", BOX, "type", "veth", "peer", "name", "h0", "netns", HOME)
+        if IPV6:
+            for ns, dev in ((BOX, "eth0"), (HOME, "h0")):
+                sh("sysctl", "-qw", "net.ipv6.conf.%s.accept_dad=0" % dev, ns=ns)
+            sh("sysctl", "-qw", "net.ipv6.conf.eth0.forwarding=0", ns=BOX)
+        self.listen(BOX)
+        self.listen(HOME)
+
+    def listen(self, ns):
+        p = subprocess.Popen(["ip", "netns", "exec", ns, "python3", "-c", LISTEN, "6" if IPV6 else "4"])
+        self.procs.append(p)
+        for _ in range(50):
+            if sh("ss", "-Htln", "sport = :%d" % PORT, ns=ns, check=False).stdout.strip():
+                return
+            time.sleep(0.1)
+        self.fail("listener in %s did not start" % ns)
+
+    def networkd(self, ns, network):
+        """systemd-networkd in ns, in its own mount namespace: only this .network file, its own
+        /run, with a udev database saying every link is ready."""
+        conf = pathlib.Path(self.tmp, ns)
+        conf.mkdir()
+        (conf / "10-test.network").write_text(network)
+        (conf / "10-test.network").chmod(0o644)
+        conf.chmod(0o755)
+        setup = ("mount -t tmpfs -o mode=0755 tmpfs /run && mkdir -p /run/systemd/netif /run/udev/data "
+                 "&& chown systemd-network:systemd-network /run/systemd/netif "
+                 # Each link marked initialized, as udev would: there is no udev in a namespace.
+                 "&& for l in /sys/class/net/*; do echo I:1 > /run/udev/data/n$(cat $l/ifindex); done "
+                 "&& mount --bind \"$1\" /etc/systemd/network && exec %s" % NETWORKD)
+        env = {k: v for k, v in os.environ.items() if k != "NOTIFY_SOCKET"}
+        env["SYSTEMD_LOG_LEVEL"] = "info"
+        log = open(os.path.join(self.tmp, ns + ".log"), "w")
+        p = subprocess.Popen(["ip", "netns", "exec", ns, "unshare", "-m", "--propagation", "private",
+                              "sh", "-c", setup, "networkd", str(conf)],
+                             env=env, stdout=log, stderr=subprocess.STDOUT)
+        log.close()
+        self.procs.append(p)
+
+    def cleanup(self):
+        for p in self.procs:
+            p.kill()
+            p.wait()
+        for ns in (BOX, HOME):
+            sh("ip", "netns", "del", ns, check=False)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def logs(self):
+        out = ""
+        for ns in (HOME, BOX):
+            path = os.path.join(self.tmp, ns + ".log")
+            if os.path.exists(path):
+                text = pathlib.Path(path).read_text()
+                out += "--- networkd in %s\n%s\n...\n%s" % (ns, text[:600], text[-3000:])
+        return out + sh("ip", "addr", ns=BOX, check=False).stdout + sh("nft", "list", "ruleset", ns=BOX).stdout
+
+    def address(self, family, network):
+        out = sh("ip", family, "-o", "addr", "show", "dev", "eth0", "scope", "global", ns=BOX).stdout
+        for f in out.split():
+            if "/" in f and ipaddress.ip_interface(f).network == ipaddress.ip_network(network):
+                return f.split("/")[0]
+        return None
+
+    def wait_for(self, family, network):
+        for _ in range(300):
+            a = self.address(family, network)
+            if a:
+                return a
+            time.sleep(0.1)
+        self.fail("the box got no %s address on %s from the home router:\n%s" % (family, network, self.logs()))
+
+    def test_the_shipped_uplink_takes_a_lease_behind_the_drop(self):
+        body, shipped = box_network()
+        # The file under test is the shipped one: physical Ethernet only, DHCP for both families.
+        self.assertEqual(shipped["Match"]["Type"], "ether")
+        self.assertEqual(shipped["Network"]["DHCP"], "yes")
+        r = sh("nft", "-f", str(RULES), ns=BOX, check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.networkd(HOME, ROUTER_NETWORK)
+        self.networkd(BOX, body)
+        addr4 = self.wait_for("-4", "192.0.2.0/24")
+        self.assertNotEqual(addr4, ROUTER4)
+        self.assertIn(int(addr4.split(".")[3]), range(100, 110), "not from the router's pool: " + addr4)
+        targets = [addr4]
+        if IPV6:
+            targets.append(self.wait_for("-6", PREFIX + "/64"))
+            # The box's link-local address: any host on the same link can aim at it without a lease
+            # or a router (review, Security release 1).
+            ll = sh("ip", "-6", "-o", "addr", "show", "dev", "eth0", "scope", "link", ns=BOX).stdout.split()
+            targets.append(next(f for f in ll if f.startswith("fe80:")).split("/")[0] + "%h0")
+            # REQ: DEV-2 (#1479): no global address carries the MAC (EUI-64); the stable one is
+            # RFC 7217's and outgoing connections get a temporary one.
+            mac = sh("cat", "/sys/class/net/eth0/address", ns=BOX).stdout.strip().split(":")
+            eui = bytes([int(mac[0], 16) ^ 2] + [int(x, 16) for x in mac[1:3]] + [0xff, 0xfe]
+                        + [int(x, 16) for x in mac[3:]])
+            for _ in range(100):
+                glob = sh("ip", "-6", "-o", "addr", "show", "dev", "eth0", "scope", "global", ns=BOX).stdout
+                if "temporary" in glob:
+                    break
+                time.sleep(0.1)
+            self.assertIn("temporary", glob, "no temporary IPv6 address:\n" + glob)
+            for f in glob.split():
+                if f.startswith(PREFIX[:4]) and "/" in f:
+                    iid = ipaddress.ip_interface(f).ip.packed[8:]
+                    self.assertNotEqual(iid, eui, "an address carries the MAC: " + f)
+        for addr in targets:
+            with self.subTest(home_to=addr):
+                self.assertFalse(reaches(HOME, addr), "a home host reached box port %d at %s" % (PORT, addr))
+        # The uplink is useful: the box reaches the router on each family.
+        self.assertTrue(reaches(BOX, ROUTER4), "box cannot reach the router over IPv4:\n" + self.logs())
+        if IPV6:
+            self.assertTrue(reaches(BOX, ROUTER6), "box cannot reach the router over IPv6:\n" + self.logs())
+        # Potency: with the drop gone, the same home host reaches the box at every address it was
+        # shut out of, IPv6 global and link-local included.
+        sh("nft", "delete", "table", "inet", "agentos_inbound", ns=BOX)
+        for addr in targets:
+            with self.subTest(control=addr):
+                self.assertTrue(reaches(HOME, addr), "control: the test cannot see the drop at " + addr)
 
 
 if __name__ == "__main__":

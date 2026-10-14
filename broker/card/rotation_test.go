@@ -419,3 +419,22 @@ func must(b []byte, err error) []byte {
 	}
 	return b
 }
+
+// #1191: a rotation of the Wi-Fi password warns before the confirm that
+// the box's Wi-Fi switches to it, and how to rejoin; a rotation without
+// it does not.
+func TestRotationDisplayWarnsOfTheWiFiSwitch(t *testing.T) {
+	const warn = "my Wi-Fi switches to the new password on this card"
+	for _, tc := range []struct {
+		p    Parts
+		want bool
+	}{{Parts{WiFi: true}, true}, {Parts{WiFi: true, Recovery: true}, true}, {Parts{Recovery: true}, false}} {
+		page, err := newRotRig(t, tc.p).d.Page()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(string(page), warn); got != tc.want {
+			t.Fatalf("%+v: warning shown %v", tc.p, got)
+		}
+	}
+}

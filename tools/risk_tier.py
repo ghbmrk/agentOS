@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Risk tier of a change, decided by the paths it touches (docs/OPERATING.md §3).
 
-  A  the trusted core and its wiring (broker/core/core.txt), credentials,
+  A  the trusted core, its wiring and the packages allowed its write paths
+     (broker/core/core.txt), credentials,
      isolation, irreversible effects, update and supply chain,
      the image and its systemd units, the guest's build inputs, CI workflows
      and agent permissions: L3 review on the session's model with an explicit
@@ -19,6 +20,8 @@ Usage:
   tools/risk_tier.py PATH...            tier of the listed paths
   tools/risk_tier.py --git BASE [HEAD]  tier of `git diff --name-only BASE...HEAD`
   --markdown                            print a short table (for a CI step summary)
+  --pr-branch BRANCH --pr-title TITLE   lane gate: exit 1 if the PR belongs to a lane
+                                        (docs/LANES.md) whose tier limit the change exceeds
 """
 import argparse
 import functools
@@ -26,31 +29,38 @@ import pathlib
 import subprocess
 import sys
 
-# The trusted core (ARC-1, D-095): `core <pkg>` and `wiring <pkg>` lines name
-# directories under broker/ that are tier A. broker/core/core_test.go keeps
-# write paths into the core inside it, so the list and the check are one file.
+# The trusted core (ARC-1, D-095): `core <pkg>`, `wiring <pkg>` and
+# `allow <pkg> ...` lines name directories under broker/ that are tier A; a
+# package an allow line lets call a core write path is itself a write path.
+# broker/core/core_test.go keeps write paths into the core inside it, so the
+# list and the check are one file.
 CORE_LIST = pathlib.Path(__file__).resolve().parent.parent / "broker" / "core" / "core.txt"
 
 
 @functools.lru_cache(maxsize=None)
 def core_list(path=CORE_LIST):
-    """Return (core, wiring) package sets from the core list; exit if unreadable."""
+    """Return (core, wiring, allowed) package sets from the core list; exit if unreadable."""
     try:
         text = path.read_text()
     except OSError as e:
         sys.exit(f"risk_tier: cannot read the core list: {e}")
-    core, wiring = set(), set()
+    core, wiring, allowed = set(), set(), set()
     for n, line in enumerate(text.splitlines(), 1):
         w = line.split()
-        if not w or w[0].startswith("#") or w[0] in ("open", "allow"):
+        if not w or w[0].startswith("#"):
             continue
         if w[0] in ("core", "wiring") and len(w) == 2:
             (core if w[0] == "core" else wiring).add(w[1])
+        elif w[0] == "open" and len(w) == 2:
+            pass
+        elif w[0] == "allow" and len(w) > 4 and w[3] == "--":
+            # The same grammar broker/core/core_test.go reads.
+            allowed.add(w[1])
         else:
             sys.exit(f"risk_tier: {path}:{n}: unreadable line {line.strip()!r}")
     if not core:
         sys.exit(f"risk_tier: {path} names no core package")
-    return core, wiring
+    return core, wiring, allowed
 
 
 # broker/ packages that hold credentials, enforce isolation, gate effects,
@@ -77,13 +87,52 @@ TIER_A_PREFIXES = (
 )
 # guest/<name>/<file>: what the guest runs or installs.
 TIER_A_GUEST_FILES = {"build-rootfs.sh", "package.json", "package-lock.json", "launch.json"}
-TIER_A_GUEST_PATHS = {"guest/openclaw/openclaw.json5"}
+# guest/codex: the Codex worker's tool sandbox and managed config (S8-W1).
+TIER_A_GUEST_PATHS = {
+    "guest/openclaw/openclaw.json5",
+    "guest/codex/agentos-toolsh", "guest/codex/managed_config.toml",
+    "guest/codex/requirements.toml",
+}
 UNIT_SUFFIXES = (".service", ".socket", ".timer")
 TIER_B_FILES = {"SPEC.md"}
 TIER_B_PREFIXES = ("broker/", "guest/")
 # Explicit tier C. Top-level *.md other than SPEC.md and image/*.md are C by
 # rule in tier_of; everything here is checked after the tier-A rules.
 TIER_C_PREFIXES = ("docs/", "briefs/", "reviews/", "decisions/", "spikes/", "tests/", "tools/")
+
+# Lane gate (CTRL-lane-gate, D-110): a lane that is not one of the peer Claude
+# subscriptions is held to a tier limit in docs/LANES.md. A PR is in the lane when
+# its head branch has the lane's stem or its title starts with the lane's row
+# prefix. CI runs the base commit's copy of this file, so a PR cannot loosen the
+# gate or the classifier it is judged by.
+LANES = {
+    # lane: (branch stem, title prefix, highest tier allowed)
+    "codex": ("pkg/codex-", "CX-", "C"),
+}
+
+
+def lane_of(branch, title):
+    """Return the lane a PR's head branch or title puts it in, or None."""
+    for lane, (stem, prefix, _) in sorted(LANES.items()):
+        if (branch or "").startswith(stem) or (title or "").lstrip().startswith(prefix):
+            return lane
+    return None
+
+
+def lane_gate(branch, title, tier):
+    """Return (ok, message) for a PR of the given tier."""
+    lane = lane_of(branch, title)
+    if lane is None:
+        return True, "lane gate: not a lane PR"
+    limit = LANES[lane][2]
+    if tier >= limit:  # "A" < "B" < "C"
+        return True, f"lane gate: {lane} PR at tier {tier}, within its limit {limit}"
+    return False, (
+        f"lane gate: the {lane} lane is limited to tier {limit} (docs/LANES.md), "
+        f"and this change is tier {tier}. Drop the files listed above and send them "
+        "to the peers as a lane:primary issue."
+    )
+
 
 REASONS = {
     "A": "credentials, isolation, effects, update or supply chain",
@@ -108,8 +157,8 @@ def tier_of(path):
     if parts[0] == "broker" and len(parts) > 2 and parts[1] in TIER_A_BROKER:
         return "A", "broker/" + parts[1] + "/"
     if parts[0] == "broker":
-        core, wiring = core_list()
-        for pkg in sorted(core | wiring):
+        core, wiring, allowed = core_list()
+        for pkg in sorted(core | wiring | allowed):
             if p.startswith("broker/" + pkg + "/"):
                 return "A", "core list: broker/" + pkg + "/"
     if parts[0] == "guest" and len(parts) == 3 and name in TIER_A_GUEST_FILES:
@@ -163,7 +212,10 @@ def main(argv=None):
     ap.add_argument("paths", nargs="*")
     ap.add_argument("--git", nargs="+", metavar="REF")
     ap.add_argument("--markdown", action="store_true")
+    ap.add_argument("--pr-branch")
+    ap.add_argument("--pr-title")
     a = ap.parse_args(argv)
+    gate = a.pr_branch is not None or a.pr_title is not None
     paths = changed_paths(a.git[0], a.git[1] if len(a.git) > 1 else "HEAD") if a.git else a.paths
     tier, why = tier_of_change(paths)
     if a.markdown:
@@ -177,6 +229,11 @@ def main(argv=None):
         print(tier)
         for p in why:
             print(f"  {p}")
+    if gate:
+        ok, msg = lane_gate(a.pr_branch, a.pr_title, tier)
+        print(msg, file=sys.stdout if ok else sys.stderr)
+        if not ok:
+            return 1
     return 0
 
 

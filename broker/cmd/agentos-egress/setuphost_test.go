@@ -76,6 +76,7 @@ func TestSetupHostTrustsThisPCOnlyAfterConfirmedEnrollment(t *testing.T) {
 		t.Fatalf("owner not told: %q", r.notes)
 	}
 
+	ensureCard(t, r.c)
 	if err := r.c.sealEnroll(); err != nil {
 		t.Fatal(err)
 	}

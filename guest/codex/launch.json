@@ -1,0 +1,19 @@
+{
+  "note": "How a Codex provider worker starts (S8-W1, CRED-5 broker-held, CAP-11). Inert until #809 qualifies the pinned CLI and agentosd registers the route. CODEX_HOME holds only the placeholder auth.json (#1015); the refresh override points at the in-worker forwarder (#1014). HOME is CODEX_HOME, not the workspace, and GIT_DIR is /dev/null, so no file a tool writes in the workspace is read as the CLI's own git or home config (ASSUMPTIONS C11). The brief arrives on stdin and the JSON event stream is the result.",
+  "argv": [
+    "codex",
+    "exec",
+    "--json",
+    "--skip-git-repo-check",
+    "--cd",
+    "/var/lib/agentos-work",
+    "-"
+  ],
+  "cwd": "/var/lib/agentos-work",
+  "env": [
+    "HOME=/var/lib/agentos-codex",
+    "CODEX_HOME=/var/lib/agentos-codex",
+    "GIT_DIR=/dev/null",
+    "CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://127.0.0.1:18432/oauth/token"
+  ]
+}

@@ -422,7 +422,7 @@ func serve(t *testing.T, j *Joiner, uid int) string {
 	dir := filepath.Join(t.TempDir(), "run")
 	s := &sockets.Server{Dir: dir}
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := s.Start(ctx, Endpoint(j, uid)); err != nil {
+	if err := s.Start(ctx, Endpoint(j, NewScanner(newScan()), uid)); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cancel(); s.Wait() })
