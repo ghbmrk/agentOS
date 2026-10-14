@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/journal"
@@ -187,6 +188,9 @@ type PageSocket struct {
 	// asks to forget one through FORGET's own ask (W3-forget-b3r); nil
 	// refuses both ops.
 	Forget PageForget
+	// RotateAPNet writes a rotated card's Wi-Fi network for agentos-ap
+	// (REC-4, #1191); nil refuses the op.
+	RotateAPNet func(apnet.Network) error
 }
 
 // PageForget is FORGET as the page serves it; unlocked is whether the
@@ -419,6 +423,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			Paused: func() []localapi.PausedGrant { return pausedGrants(gate) }, AskResume: func(ctx context.Context, id, pause string) (string, error) {
 				return askResume(ctx, gate, id, pause)
 			}}
+		lcfg.RotateAPNet = cfg.PageSocket.RotateAPNet
 		if f := cfg.PageSocket.Forget; f != nil {
 			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget
 		}
