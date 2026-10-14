@@ -1,10 +1,11 @@
 package main
 
-// REQ: DEV-net-h, CH-7, HW-10
+// REQ: DEV-net-h, CH-7, HW-10, HW-1, ARC-1
 
 import (
 	"context"
 	"errors"
+	"log"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/localui"
@@ -109,6 +111,7 @@ func newBox(t *testing.T, wireless ...string) *box {
 	}
 	return &box{cfg: config{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24"),
 		Latch: filepath.Join(d, "card-latch.json"), Setup: setup, OwnerState: filepath.Join(d, "owner.json"),
+		APNet:       filepath.Join(d, "ap-net.json"),
 		SysClassNet: sysNet(t, wireless, []string{"lo", "eth0"}), Poll: 10 * time.Millisecond}, host: &fakeHost{}, ap: &fakeAP{}, net: n}
 }
 
@@ -428,5 +431,207 @@ func TestReadLatchIsCareful(t *testing.T) {
 	}
 	if b, err := readLatch(target); err != nil || string(b) != `{"card_confirmed":false}` {
 		t.Errorf("regular latch: %q, %v", b, err)
+	}
+}
+
+// cardNet is a card's network as the page reports it (#1185).
+var cardNet = apnet.Network{SSID: "AgentOS-AB2C", Password: "ABCD-EFGH-JKLM-NP23"}
+
+func (b *box) reportCardNet(t *testing.T) {
+	t.Helper()
+	m, err := cardNet.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b.cfg.APNet, m, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (b *box) startedAt(i int) localui.APConfig {
+	b.ap.mu.Lock()
+	defer b.ap.mu.Unlock()
+	return b.ap.started[i]
+}
+
+// assertCardNet checks c is the card's network on -iface, WPA3-SAE only
+// with management frame protection required (CH-7).
+func assertCardNet(t *testing.T, b *box, c localui.APConfig) {
+	t.Helper()
+	if c.Iface != "wlan0" || c.Addr != b.cfg.Addr || c.SSID != cardNet.SSID || c.Password != cardNet.Password || c.WPA2 {
+		t.Fatalf("served %q on %s (WPA2 %v), want the card's network", c.SSID, c.Iface, c.WPA2)
+	}
+	conf, err := localui.HostapdConf(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"wpa_key_mgmt=SAE\n", "ieee80211w=2\n"} {
+		if !strings.Contains(conf, want) {
+			t.Fatalf("missing %q in:\n%s", want, conf)
+		}
+	}
+}
+
+// #1185: at the Owner Card confirm the access point switches from the
+// setup network to the card's, with Down then Up (never Rekey): the
+// setup network goes off the air, is burned, and only then does the
+// card's come up, so the phone rejoins with the card's Wi-Fi QR code.
+// Before the confirm the page's report changes nothing.
+func TestConfirmSwitchesToTheCardsNetwork(t *testing.T) {
+	b := newBox(t, "wlan0")
+	b.reportCardNet(t)
+	cancel, done := b.runAsync(t)
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { return b.startedCount() == 1 })
+	if got := b.startedAt(0); got.SSID != b.net.SSID {
+		t.Fatalf("served %q before the confirm, want the setup network", got.SSID)
+	}
+	setupSize := func() int64 {
+		fi, err := os.Stat(b.cfg.Setup)
+		if err != nil {
+			return -1
+		}
+		return fi.Size()
+	}
+	var mu sync.Mutex
+	var atStop []int64
+	b.ap.mu.Lock()
+	b.ap.onStop = func() { s := setupSize(); mu.Lock(); atStop = append(atStop, s); mu.Unlock() }
+	b.ap.mu.Unlock()
+	time.Sleep(5 * b.cfg.Poll)
+	if b.startedCount() != 1 {
+		t.Fatal("the report alone switched the network")
+	}
+	os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600)
+	waitFor(t, func() bool { return b.startedCount() == 2 })
+	if setupSize() != 0 {
+		t.Fatal("the card's network came up before the setup network was burned")
+	}
+	mu.Lock()
+	first := slices.Clone(atStop)
+	mu.Unlock()
+	if len(first) == 0 || first[0] == 0 {
+		t.Fatalf("the setup network was not brought down before the burn (sizes at Stop: %v)", first)
+	}
+	assertCardNet(t, b, b.startedAt(1))
+	time.Sleep(5 * b.cfg.Poll)
+	if b.startedCount() != 2 {
+		t.Fatalf("the card's network restarted: %d starts", b.startedCount())
+	}
+}
+
+// After the confirm, and on an owned box, every start serves the card's
+// network (#1185), and the setup network stays burned.
+func TestRestartServesTheCardsNetwork(t *testing.T) {
+	for name, act := range map[string]func(b *box){
+		"confirmed": func(b *box) { os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600) },
+		"owned":     func(b *box) { os.WriteFile(b.cfg.OwnerState, []byte(`{}`), 0o600) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := newBox(t, "wlan0")
+			b.reportCardNet(t)
+			act(b)
+			cancel, done := b.runAsync(t)
+			waitFor(t, func() bool { return b.startedCount() == 1 })
+			assertCardNet(t, b, b.startedAt(0))
+			if fi, err := os.Stat(b.cfg.Setup); err != nil || fi.Size() != 0 {
+				t.Fatalf("setup network not burned: %v", err)
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A new card reported after the confirm (a reset card is a new card)
+// replaces the network: the access point goes down before the new one
+// comes up, never a Rekey (#1185).
+func TestANewNetworkAfterTheConfirmGoesDownThenUp(t *testing.T) {
+	b := newBox(t, "wlan0")
+	b.reportCardNet(t)
+	os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600)
+	cancel, done := b.runAsync(t)
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { return b.startedCount() == 1 })
+	assertCardNet(t, b, b.startedAt(0))
+	var mu sync.Mutex
+	var startsAtStop []int
+	b.ap.mu.Lock()
+	b.ap.onStop = func() { n := b.startedCount(); mu.Lock(); startsAtStop = append(startsAtStop, n); mu.Unlock() }
+	b.ap.mu.Unlock()
+	next := apnet.Network{SSID: "AgentOS-ZZ99", Password: "ZZZZ-YYYY-XXXX-WWWW"}
+	m, err := next.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b.cfg.APNet, m, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.startedCount() == 2 })
+	if got := b.startedAt(1); got.SSID != next.SSID || got.Password != next.Password {
+		t.Fatalf("served %q, want the new card's network", got.SSID)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(startsAtStop) == 0 || startsAtStop[0] != 1 {
+		t.Fatalf("the old network was not brought down before the new came up (starts at each Stop: %v)", startsAtStop)
+	}
+}
+
+// A box with no setup network (one the owner set up from a download)
+// serves nothing until the card is confirmed, then the card's network.
+func TestABoxWithNoSetupNetworkServesTheCardsAtTheConfirm(t *testing.T) {
+	b := newBox(t, "wlan0")
+	if err := (change.FileStore{Path: b.cfg.Setup}).Save(nil); err != nil {
+		t.Fatal(err)
+	}
+	cancel, done := b.runAsync(t)
+	defer func() { cancel(); <-done }()
+	time.Sleep(5 * b.cfg.Poll)
+	if b.startedCount() != 0 {
+		t.Fatal("served a network before the card")
+	}
+	b.reportCardNet(t)
+	time.Sleep(5 * b.cfg.Poll)
+	if b.startedCount() != 0 {
+		t.Fatal("served the card's network before the confirm")
+	}
+	os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600)
+	waitFor(t, func() bool { return b.startedCount() == 1 })
+	assertCardNet(t, b, b.startedAt(0))
+}
+
+// A confirmed box whose card network file does not parse serves nothing
+// and fails, so the unit retries; an absent file serves nothing.
+func TestAMalformedCardNetworkFails(t *testing.T) {
+	b := newBox(t, "wlan0")
+	os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600)
+	os.WriteFile(b.cfg.APNet, []byte(`{"ssid":"AgentOS-AB2C","password":"short"}`), 0o600)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := b.run(ctx); err == nil || ctx.Err() != nil {
+		t.Fatalf("run took a malformed card network: %v", err)
+	}
+	if b.startedCount() != 0 {
+		t.Fatal("served a malformed card network")
+	}
+}
+
+// The card's password never reaches the loader's log (ARC-1).
+func TestTheCardsPasswordIsNotLogged(t *testing.T) {
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	b := newBox(t, "wlan0")
+	b.reportCardNet(t)
+	os.WriteFile(b.cfg.Latch, []byte(`{"card_confirmed":true}`), 0o600)
+	cancel, done := b.runAsync(t)
+	waitFor(t, func() bool { return b.startedCount() == 1 })
+	cancel()
+	<-done
+	if strings.Contains(buf.String(), cardNet.Password) || !strings.Contains(buf.String(), "card's network") {
+		t.Fatalf("log: %q", buf.String())
 	}
 }

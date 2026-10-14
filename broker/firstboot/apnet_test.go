@@ -115,3 +115,24 @@ func TestSetupNetworkBurnsOnAnOwnedBox(t *testing.T) {
 		t.Fatal("an owned box kept an unparsable setup file")
 	}
 }
+
+// CardConfirmed is the latch as agentos-ap reads it to serve the card's
+// network (#1185).
+func TestCardConfirmedReadsTheLatch(t *testing.T) {
+	for _, c := range []struct {
+		latch string
+		want  bool
+		err   bool
+	}{
+		{"", false, false},
+		{`{"preloaded":true}`, false, false},
+		{`{"card_confirmed":true}`, true, false},
+		{`{"card_confirmed":true,"preloaded":true}`, true, false},
+		{`not json`, false, true},
+	} {
+		got, err := CardConfirmed([]byte(c.latch))
+		if got != c.want || (err != nil) != c.err {
+			t.Errorf("%q: got %v, %v", c.latch, got, err)
+		}
+	}
+}

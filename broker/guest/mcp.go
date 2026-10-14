@@ -24,6 +24,13 @@ import (
 
 const maxMCPBody = 1 << 20
 
+// TreeTool is the broker tool through which a guest's bridge fetches the
+// managed tree (W4). Its answer goes to the guest whole, never folded: the
+// bridge reads up to 8 MiB and the broker sends at most 4 MiB of files, and
+// a fold record for each poll would share the machine's fold budget with
+// the agent's own held results and evict them (TREE-fold-evict, #1461).
+const TreeTool = "managed_tree"
+
 var protocolVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
 type rpcRequest struct {
@@ -157,11 +164,7 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// The full text, not folded again: this is how the guest reads what was held back.
-			res := toolResult(body, false)
-			if n := m.takeNote(); n != "" {
-				res["content"] = append(res["content"].([]map[string]string), map[string]string{"type": "text", "text": n})
-			}
-			writeRPC(w, req.ID, res, nil)
+			writeRPC(w, req.ID, m.whole(body, false), nil)
 			return
 		}
 		if call.Name != "effect_request" && call.Name != "effect_status" && p.cfg.Tools != nil {
@@ -172,9 +175,12 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 			}
 			text, handled, err := p.cfg.Tools.Call(r.Context(), m.id, lineage, call.Name, call.Arguments)
 			if handled {
-				if err != nil {
+				switch {
+				case err != nil:
 					writeRPC(w, req.ID, m.result(guesterr.Filter(m.id, call.Name, err).Error(), true), nil)
-				} else {
+				case call.Name == TreeTool:
+					writeRPC(w, req.ID, m.whole(text, false), nil)
+				default:
 					writeRPC(w, req.ID, m.result(text, false), nil)
 				}
 				return
@@ -206,6 +212,12 @@ func (m *machine) result(text string, isErr bool) map[string]any {
 			text = m.folds.Hand(m.id, text)
 		}
 	}
+	return m.whole(text, isErr)
+}
+
+// whole is a tool result for machine m carrying text as it is, neither
+// compacted nor folded, with any untold step note after it.
+func (m *machine) whole(text string, isErr bool) map[string]any {
 	res := toolResult(text, isErr)
 	if n := m.takeNote(); n != "" {
 		res["content"] = append(res["content"].([]map[string]string), map[string]string{"type": "text", "text": n})

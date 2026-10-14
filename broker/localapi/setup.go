@@ -61,6 +61,14 @@ const (
 	// confirmed and provisioned. agentosd's setup mode serves it beside
 	// SetupOps, and finish answers ErrCardPending until it is reported.
 	OpSetupCard = "page_setup_card"
+	// OpSetupAPNet reports the card's Wi-Fi name and password before the
+	// confirm latches (CTRL-claim-ap u1, #1185): agentosd writes them
+	// root-only (apnet.Path, ARC-1) and agentos-ap serves that network at
+	// the confirm and every later start, in place of the setup network.
+	// Only a network the card prints is taken (ErrBadArgs); a report
+	// replaces the last, as a reset card makes a new one. It is served
+	// beside OpSetupCard.
+	OpSetupAPNet = "page_setup_ap_net"
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
@@ -203,6 +211,17 @@ type Networks struct {
 type SetupCard struct {
 	Confirmed bool `json:"confirmed"`
 }
+
+// SetupAPNet is the card's Wi-Fi network (OpSetupAPNet). The password is
+// the access point's (CRED-1): it goes only to agentos-ap's file.
+type SetupAPNet struct {
+	SSID     string `json:"ssid"`
+	Password string `json:"password"`
+}
+
+// String and GoString keep the password out of logs.
+func (SetupAPNet) String() string   { return "[card Wi-Fi network]" }
+func (SetupAPNet) GoString() string { return "[card Wi-Fi network]" }
 
 // Finish carries the owner's number, E.164.
 type Finish struct {

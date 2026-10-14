@@ -15,7 +15,9 @@ import shutil
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 import unittest.mock
 
@@ -72,6 +74,36 @@ def nodump(root):
         write(root, rel, NODUMP_SRC.get(rel, MK / "mkosi.extra" / rel).read_text())
 
 
+BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
+
+
+def radio(root):
+    # Stand-ins for firmware-mediatek's MT7922 files (#1415), and the image's Bluetooth block.
+    for rel in check.RADIO_FIRMWARE:
+        write(root, rel, "fw")
+    write(root, BT_BLOCK, (MK / "mkosi.extra" / BT_BLOCK).read_text())
+
+
+UPLINK_REL = "usr/lib/systemd/network/20-agentos-uplink.network"
+RESOLVED_REL = "usr/lib/systemd/resolved.conf.d/50-agentos-uplink.conf"
+
+
+def uplink(root):
+    # The image's networkd and resolved files (#1478, #1479), copied from mkosi.extra.
+    for rel in (UPLINK_REL, RESOLVED_REL):
+        write(root, rel, (MK / "mkosi.extra" / rel).read_text())
+
+
+# Debian trixie systemd's own .network files that turn on forwarding or multicast DNS when a link
+# matches (#1478); the bodies are the keys that matter.
+DISTRO_NETWORKS = {
+    "80-container-ve.network": "[Match]\nKind=veth\nName=ve-*\n\n[Network]\nDHCPServer=yes\nIPMasquerade=both\n",
+    "80-container-vz.network": "[Match]\nKind=bridge\nName=vz-*\n\n[Network]\nDHCPServer=yes\nIPMasquerade=both\n",
+    "80-vm-vt.network": "[Match]\nKind=tun\nName=vt-*\n\n[Network]\nDHCPServer=yes\nIPMasquerade=both\n",
+    "80-wifi-adhoc.network": "[Match]\nType=wlan\nWLANInterfaceType=ad-hoc\n\n[Network]\nMulticastDNS=yes\n",
+}
+
+
 class TreeCheckTest(unittest.TestCase):
     """HW-1: the image holds no per-install secret; V15: no socket files."""
 
@@ -83,9 +115,175 @@ class TreeCheckTest(unittest.TestCase):
         write(self.root, "usr/lib/agentos/agentosd", "\x7fELF", 0o755)
         (self.root / "var/lib/agentos").mkdir(parents=True)
         nodump(self.root)
+        radio(self.root)
+        uplink(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    # REQ: DEV-2, CH-9
+    def test_distro_network_files_are_refused(self):
+        # #1478: agentos_inbound has only an input hook, so nothing may turn on forwarding. Debian's
+        # container and VM files set IPMasquerade=both (which turns it on) and the ad-hoc one turns
+        # on multicast DNS on a radio; the built tree must carry none of them live.
+        for name, body in DISTRO_NETWORKS.items():
+            for d in ("usr/lib/systemd/network", "lib/systemd/network", "etc/systemd/network", "run/systemd/network"):
+                with self.subTest(name=name, dir=d):
+                    f = write(self.root, "%s/%s" % (d, name), body)
+                    self.assertIn(name, " ".join(check.violations(self.root)))
+                    f.unlink()
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: DEV-2, CH-9
+    def test_any_other_network_file_is_refused(self):
+        # The image configures the wired uplink and nothing else: a file the distro adds later (a
+        # namespace or tunnel link, DHCP on host0) fails the build until it is masked or removed.
+        write(self.root, "usr/lib/systemd/network/80-container-host0.network",
+              "[Match]\nKind=veth\nName=host0\n\n[Network]\nDHCP=yes\n")
+        self.assertIn("80-container-host0.network", " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2, CH-9
+    def test_masked_network_files_pass(self):
+        # networkd skips a file shadowed by a link to /dev/null or an empty file of the same name in
+        # a higher-precedence directory.
+        for i, name in enumerate(DISTRO_NETWORKS):
+            write(self.root, "usr/lib/systemd/network/" + name, DISTRO_NETWORKS[name])
+            mask = self.root / "etc/systemd/network" / name
+            mask.parent.mkdir(parents=True, exist_ok=True)
+            if i % 2:
+                mask.symlink_to("/dev/null")
+            else:
+                mask.write_text("")
+        self.assertEqual(check.violations(self.root), [])
+        # A mask in a lower-precedence directory does not hide the live file.
+        name = next(iter(DISTRO_NETWORKS))
+        (self.root / "etc/systemd/network" / name).unlink()
+        write(self.root, "etc/systemd/network/" + name, DISTRO_NETWORKS[name])
+        (self.root / "usr/lib/systemd/network" / name).unlink()
+        (self.root / "usr/lib/systemd/network" / name).symlink_to("/dev/null")
+        self.assertIn(name, " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2, CH-9
+    def test_uplink_must_not_forward_or_be_overridden(self):
+        # The image's own file may not turn on forwarding or multicast DNS, a drop-in may not change
+        # it, and an /etc file of the same name replaces it.
+        base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        for key in ("IPMasquerade=ipv4", "IPForward=yes", "IPv4Forwarding=yes", "IPv6Forwarding=yes",
+                    "MulticastDNS=resolve", "LLMNR=yes"):
+            with self.subTest(key):
+                write(self.root, UPLINK_REL, base + "\n[Network]\n%s\n" % key)
+                self.assertIn(key.split("=")[0], " ".join(check.violations(self.root)))
+        write(self.root, UPLINK_REL, base)
+        d = write(self.root, "etc/systemd/network/20-agentos-uplink.network.d/50-x.conf", "[DHCPv4]\nSendHostname=yes\n")
+        self.assertIn("50-x.conf", " ".join(check.violations(self.root)))
+        d.unlink()
+        e = write(self.root, "etc/systemd/network/20-agentos-uplink.network", "[Match]\nType=ether\n[Network]\nDHCP=yes\n")
+        self.assertIn("SendHostname", " ".join(check.violations(self.root)))
+        e.unlink()
+        (self.root / UPLINK_REL).unlink()
+        self.assertIn("20-agentos-uplink.network", " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2, CH-9
+    def test_networkd_forwarding_globals_stay_off(self):
+        # systemd 256+ also takes forwarding from networkd.conf.
+        write(self.root, "etc/systemd/networkd.conf.d/50-x.conf", "[Network]\nIPv4Forwarding=yes\n")
+        self.assertIn("IPv4Forwarding", " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2, CH-9
+    def test_indented_key_is_still_read(self):
+        # systemd strips leading whitespace, so an indented line is an assignment of its own, not a
+        # continuation of the line above it.
+        base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        write(self.root, UPLINK_REL, base.replace("DHCP=yes\n", "DHCP=yes\n    IPMasquerade=both\n"))
+        self.assertIn("IPMasquerade is both", " ".join(check.violations(self.root)))
+        # A trailing backslash does continue a line, up to the end of the file.
+        write(self.root, UPLINK_REL, base + "\n[Network]\nIPForward=\\\nyes")
+        self.assertIn("IPForward is yes", " ".join(check.violations(self.root)))
+        # A comment is never an assignment.
+        write(self.root, UPLINK_REL, base + "\n[Network]\n# IPForward=yes\n; IPMasquerade=both\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: DEV-2, CH-9
+    def test_uplink_answers_and_advertises_nothing(self):
+        # Proxy ARP or NDP, router advertisements, a DHCP server or LLDP would make the box answer
+        # or advertise on the LAN; class and MUD identifiers tell the LAN what it is.
+        base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        for section, line in (("Network", "EmitLLDP=nearest-bridge"), ("Network", "IPv4ProxyARP=yes"),
+                              ("Network", "IPv6ProxyNDP=yes"), ("Network", "IPv6ProxyNDPAddress=2001:db8::1"),
+                              ("Network", "IPv6SendRA=yes"), ("Network", "DHCPServer=yes"),
+                              ("DHCPv4", "VendorClassIdentifier=agentos"), ("DHCPv4", "UserClass=agentos"),
+                              ("DHCPv4", "MUDURL=https://example.invalid/mud"),
+                              ("DHCPv6", "VendorClass=agentos"), ("DHCPv6", "UserClass=agentos"),
+                              ("DHCPv6", "MUDURL=https://example.invalid/mud"),
+                              ("LLDP", "MUDURL=https://example.invalid/mud")):
+            with self.subTest(line):
+                write(self.root, UPLINK_REL, base + "\n[%s]\n%s\n" % (section, line))
+                self.assertIn(line.split("=")[0], " ".join(check.violations(self.root)))
+        write(self.root, UPLINK_REL, base + "\n[Network]\nEmitLLDP=no\nIPv6SendRA=no\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: DEV-2, CH-9
+    def test_each_privacy_setting_is_required(self):
+        # #1479: removing or flipping any one privacy line fails the build.
+        base = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        for section, line, flipped in (("[IPv6AcceptRA]", "Token=prefixstable", "Token=eui64"),
+                                       ("[Network]", "IPv6PrivacyExtensions=yes", "IPv6PrivacyExtensions=no"),
+                                       ("[DHCPv4]", "SendHostname=no", "SendHostname=yes"),
+                                       ("[DHCPv6]", "SendHostname=no", "SendHostname=yes")):
+            old = "%s\n%s\n" % (section, line) if section.startswith("[DHCP") else line + "\n"
+            self.assertIn(old, base)
+            key = line.split("=")[0]
+            for new in (old.replace(line, flipped), old.replace(line + "\n", "")):
+                with self.subTest(section=section, new=new):
+                    write(self.root, UPLINK_REL, base.replace(old, new))
+                    self.assertIn("%s %s is" % (section, key), " ".join(check.violations(self.root)))
+
+    # REQ: DEV-2, CH-9
+    def test_network_links_are_live_unless_to_dev_null(self):
+        # A link to a real .network file runs it. The check takes only a link to /dev/null as a mask:
+        # networkd skips some other links too, and refusing those errs safe.
+        real = write(self.root, "usr/lib/agentos/80-x.network", DISTRO_NETWORKS["80-container-ve.network"])
+        link = self.root / "etc/systemd/network/80-x.network"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(real)
+        self.assertIn("80-x.network: live", " ".join(check.violations(self.root)))
+        link.unlink()
+        empty = write(self.root, "usr/lib/agentos/empty", "")
+        for target in (str(empty), "/dev/zero", "/dev/null/../null", "../../../dev/null"):
+            with self.subTest(target):
+                link.symlink_to(target)
+                self.assertFalse(check.masked(link))
+                self.assertIn("80-x.network: live", " ".join(check.violations(self.root)))
+                link.unlink()
+        link.symlink_to("/dev/null")
+        self.assertTrue(check.masked(link))
+
+    # REQ: DEV-2, CH-9
+    def test_sysctl_forwarding_stays_off(self):
+        # #1478: a sysctl.d file may not turn routing on, for one device, a glob, or all of them.
+        for line in ("net.ipv4.ip_forward = 1", "net.ipv4.conf.eth0.forwarding=1", "net/ipv4/conf/all/forwarding=1",
+                     "net.ipv4.conf.*.forwarding = 1", "-net.ipv6.conf.all.forwarding = 1",
+                     "net.ipv6.conf.default.forwarding=1", "net.ipv6.conf.eth0.force_forwarding=1",
+                     "net.ipv4.conf.e*.forwarding=1"):
+            with self.subTest(line):
+                f = write(self.root, "etc/sysctl.d/90-x.conf", line + "\n")
+                self.assertIn("forwarding must stay 0", " ".join(check.violations(self.root)))
+                f.unlink()
+        write(self.root, "usr/lib/sysctl.d/50-x.conf", "net.ipv4.ip_forward = 1\n")
+        write(self.root, "etc/sysctl.d/90-x.conf", "net.ipv4.ip_forward = 0\nnet.ipv4.conf.all.forwarding=0\n")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: DEV-2
+    def test_resolved_answers_nothing_on_the_lan(self):
+        # #1479: resolved's LLMNR and multicast DNS send single-label lookups onto the LAN, where any
+        # host can answer. The image turns both off, and a later file may not turn them back on.
+        (self.root / RESOLVED_REL).unlink()
+        v = " ".join(check.violations(self.root))
+        self.assertIn("LLMNR", v)
+        self.assertIn("MulticastDNS", v)
+        write(self.root, RESOLVED_REL, (MK / "mkosi.extra" / RESOLVED_REL).read_text())
+        write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=resolve\n")
+        self.assertIn("LLMNR", " ".join(check.violations(self.root)))
 
     def test_clean_tree_passes(self):
         self.assertEqual(check.violations(self.root), [])
@@ -142,6 +340,91 @@ class TreeCheckTest(unittest.TestCase):
             s.bind(str(p))
         self.assertTrue(stat.S_ISSOCK(os.lstat(p).st_mode))
         self.assertIn("broker.sock", " ".join(check.violations(self.root)))
+
+    # REQ: CH-7, HW-10
+    def test_tree_without_the_radio_firmware_is_refused(self):
+        # #1415: without firmware-mediatek's MT7922 files mt7921e brings up no wlan0, so the setup
+        # network (CH-7, HW-10) is never served on the M6 Ultra. Each file is required.
+        for rel in check.RADIO_FIRMWARE:
+            f = self.root / rel
+            f.unlink()
+            self.assertIn(rel, " ".join(check.violations(self.root)))
+            write(self.root, rel, "fw")
+        self.assertEqual(check.violations(self.root), [])
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_names_are_the_ones_mt7921e_requests(self):
+        # MT7922_FIRMWARE_WM and MT7922_ROM_PATCH in the kernel's mt792x.h. Pinned literally: the
+        # same package ships MT7961 files, so a wrong name here would still build.
+        self.assertEqual(check.RADIO_FIRMWARE, (
+            "usr/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+            "usr/lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin"))
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_must_be_a_nonempty_file_in_the_tree(self):
+        # An empty file, a directory, a dangling link, a loop, or a link whose absolute target exists
+        # only on the build host is no firmware on the booted box.
+        rel = check.RADIO_FIRMWARE[0]
+        f = self.root / rel
+        host = write(pathlib.Path(self.tmp.name + "-host"), "fw.bin", "fw")
+        self.addCleanup(shutil.rmtree, self.tmp.name + "-host")
+        cases = {
+            "empty": lambda: f.write_bytes(b""),
+            "directory": lambda: f.mkdir(),
+            "dangling": lambda: f.symlink_to("missing.bin"),
+            "loop": lambda: f.symlink_to(f.name),
+            "host target": lambda: f.symlink_to(host),
+            "escapes the tree": lambda: f.symlink_to("../" * 12 + str(host).lstrip("/")),
+        }
+        for name, make in cases.items():
+            with self.subTest(name):
+                if f.is_symlink() or f.is_file():
+                    f.unlink()
+                elif f.is_dir():
+                    f.rmdir()
+                make()
+                self.assertIn(rel, " ".join(check.violations(self.root)))
+        f.unlink()
+
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_links_resolve_inside_the_tree(self):
+        # Debian's firmware packages link some names to others; an absolute target means the image's.
+        rel = check.RADIO_FIRMWARE[0]
+        f = self.root / rel
+        write(self.root, "usr/lib/firmware/mediatek/real.bin", "fw")
+        for target in ("real.bin", "/usr/lib/firmware/mediatek/real.bin", "/lib/firmware/mediatek/real.bin"):
+            with self.subTest(target):
+                f.unlink()
+                f.symlink_to(target)
+                if target.startswith("/lib/"):
+                    (self.root / "lib").symlink_to("usr/lib")
+                self.assertEqual(check.violations(self.root), [])
+
+    # REQ: CH-7, HW-10
+    def test_bluetooth_must_stay_blocked(self):
+        # The MT7922's Bluetooth half (btusb, btmtk) would come up from the same package; nothing in
+        # the spec uses it, so the image blocks both modules (#1415 security R1).
+        (self.root / BT_BLOCK).unlink()
+        v = " ".join(check.violations(self.root))
+        self.assertIn("btusb", v)
+        self.assertIn("btmtk", v)
+        # An earlier install line for the module wins in kmod, so a drop-in sorted first undoes it.
+        write(self.root, BT_BLOCK, (MK / "mkosi.extra" / BT_BLOCK).read_text())
+        write(self.root, "etc/modprobe.d/00-bt.conf", "install btusb /sbin/modprobe --ignore-install btusb\n")
+        self.assertIn("btusb", " ".join(check.violations(self.root)))
+        # The same file name in /etc replaces the image's file.
+        (self.root / "etc/modprobe.d/00-bt.conf").unlink()
+        write(self.root, "etc/modprobe.d/" + BT_BLOCK.rsplit("/", 1)[1], "# emptied\n")
+        self.assertIn("btmtk", " ".join(check.violations(self.root)))
+        (self.root / "etc/modprobe.d" / BT_BLOCK.rsplit("/", 1)[1]).unlink()
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_compressed_radio_firmware_counts(self):
+        # The kernel loader also finds name.xz and name.zst, if Debian ever ships them compressed.
+        for i, rel in enumerate(check.RADIO_FIRMWARE):
+            (self.root / rel).unlink()
+            write(self.root, rel + (".xz", ".zst")[i % 2], "fw")
+        self.assertEqual(check.violations(self.root), [])
 
     def test_main_exits_nonzero_on_violation(self):
         write(self.root, "var/lib/systemd/random-seed", "x")
@@ -277,6 +560,11 @@ class HealthTest(unittest.TestCase):
         write(self.root, "proc/cmdline", "console=ttyS0 rw quiet usrhash=%s\n" % H)
         write(self.root, "proc/swaps", SWAPS_HEADER)
         write(self.root, "proc/sys/kernel/core_pattern", "|/usr/bin/false\n")
+        write(self.root, "proc/sys/net/ipv4/ip_forward", "0\n")
+        for v in ("ipv4", "ipv6"):
+            for dev in ("all", "default", "lo", "eth0"):
+                write(self.root, "proc/sys/net/%s/conf/%s/forwarding" % (v, dev), "0\n")
+        write(self.root, "proc/sys/net/ipv6/conf/eth0/force_forwarding", "0\n")
         ev = self.root / "sys/firmware/efi/efivars"
         ev.mkdir(parents=True)
         (ev / "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(b"\x06\x00\x00\x00\x01")
@@ -306,6 +594,13 @@ class HealthTest(unittest.TestCase):
         self.assertIn("secure_boot=on", r.stdout)
         self.assertIn("inbound=drop", r.stdout)
         self.assertIn("swap=off dumps=off", r.stdout)
+        self.assertIn("forward=off", r.stdout)
+
+    def test_kernel_without_forced_forwarding_passes(self):
+        # Kernels before 6.17 have no force_forwarding switch; its absence is not a failure.
+        (self.root / "proc/sys/net/ipv6/conf/eth0/force_forwarding").unlink()
+        r = self.run_health()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_secure_boot_off_is_reported_not_failed(self):
         (self.root / "sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c").write_bytes(
@@ -336,6 +631,19 @@ class HealthTest(unittest.TestCase):
             "core dumps to a file": lambda: write(self.root, "proc/sys/kernel/core_pattern", "core\n"),
             "core dumps to systemd-coredump": lambda: write(
                 self.root, "proc/sys/kernel/core_pattern", "|/usr/lib/systemd/systemd-coredump %P %u\n"),
+            # #1478 (DEV-2, CH-9): the box never routes between the uplink and anything else.
+            "ipv4 forwarding on": lambda: write(self.root, "proc/sys/net/ipv4/ip_forward", "1\n"),
+            "ipv6 forwarding on": lambda: write(self.root, "proc/sys/net/ipv6/conf/all/forwarding", "1\n"),
+            "forwarding unreadable": lambda: (self.root / "proc/sys/net/ipv4/ip_forward").unlink(),
+            # IPv4 forwards by input device: ip_forward=0 with one device's switch on still routes.
+            "ipv4 eth0 forwarding on": lambda: write(self.root, "proc/sys/net/ipv4/conf/eth0/forwarding", "1\n"),
+            "ipv4 default forwarding on": lambda: write(self.root, "proc/sys/net/ipv4/conf/default/forwarding", "1\n"),
+            "ipv4 all forwarding on": lambda: write(self.root, "proc/sys/net/ipv4/conf/all/forwarding", "1\n"),
+            "ipv6 default forwarding on": lambda: write(self.root, "proc/sys/net/ipv6/conf/default/forwarding", "1\n"),
+            "ipv6 eth0 forwarding on": lambda: write(self.root, "proc/sys/net/ipv6/conf/eth0/forwarding", "1\n"),
+            "ipv6 eth0 forced forwarding": lambda: write(self.root, "proc/sys/net/ipv6/conf/eth0/force_forwarding", "1\n"),
+            "ipv4 device switches unreadable": lambda: shutil.rmtree(self.root / "proc/sys/net/ipv4/conf"),
+            "ipv6 default unreadable": lambda: (self.root / "proc/sys/net/ipv6/conf/default/forwarding").unlink(),
         }
         for name, breakit in cases.items():
             with self.subTest(name):
@@ -754,6 +1062,25 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(s["Signed-By"], "/usr/share/keyrings/debian-archive-keyring.gpg")
             self.assertNotIn("Trusted", s)
 
+    # REQ: CH-7, HW-10
+    def test_radio_firmware_comes_from_the_pinned_snapshot(self):
+        # #1415: firmware-mediatek is in Debian's non-free-firmware component. The image enables it,
+        # in mkosi.conf and in the build's apt sources, from the same snapshot as main, and installs
+        # the package.
+        c = ini(MK / "mkosi.conf")
+        self.assertEqual(c["Distribution"]["Repositories"].split(","), ["main", "non-free-firmware"])
+        self.assertIn("firmware-mediatek", c["Content"]["Packages"].split())
+        mirror = c["Distribution"]["Mirror"].rstrip("/")
+        text = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_text()
+        stanzas = [dict(l.split(": ", 1) for l in s.splitlines() if l and not l.startswith("#"))
+                   for s in text.split("\n\n")]
+        stanzas = [s for s in stanzas if s]
+        for s in stanzas:
+            self.assertEqual(s["Components"].split(), ["main", "non-free-firmware"], s["URIs"])
+        self.assertEqual([s["URIs"].rstrip("/") for s in stanzas if "trixie" in s["Suites"].split()], [mirror])
+        # Every packaged line in Packages= is a package name: an indented comment would become one.
+        self.assertFalse([p for p in c["Content"]["Packages"].split() if not re.fullmatch(r"[a-z0-9][a-z0-9.+-]+", p)])
+
     def test_ab_usr_slots(self):
         # UPD-1: two equal /usr slots plus verity, so an update writes the idle one.
         parts = [ini(f)["Partition"] for f in sorted((MK / "mkosi.repart").glob("*.conf"))]
@@ -856,6 +1183,8 @@ class NoDumpTest(unittest.TestCase):
         self.root = pathlib.Path(self.tmp.name)
         write(self.root, "etc/machine-id", "uninitialized\n")
         nodump(self.root)
+        radio(self.root)
+        uplink(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1023,6 +1352,8 @@ class NoDumpTest(unittest.TestCase):
         # The booted image reports swap and core dumps off in the health line, so CI shows them on
         # a real boot, not only in this tree check.
         self.assertIn("swap=off dumps=off", (IMG / "ci_boot.sh").read_text())
+        # REQ: DEV-2, CH-9 (#1478): and forwarding off.
+        self.assertIn("swap=off dumps=off forward=off", (IMG / "ci_boot.sh").read_text())
 
 
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
@@ -1077,6 +1408,179 @@ def arg(words, name):
     return words[i + 1]
 
 
+class UplinkTest(unittest.TestCase):
+    """#1416 (P2-1 uplink): plugging an Ethernet cable into the home router is all it takes to go
+    online. systemd-networkd gives any physical Ethernet port an address by DHCP and router
+    advertisement; the radio (access point, home Wi-Fi station) and every virtual link are not
+    matched, and the inbound drop holds whatever the link gets (I11; tests/test_inbound_netns.py)."""
+    # REQ: ONB-3, DEV-2, DEV-net-e
+
+    NET = MK / "mkosi.extra/usr/lib/systemd/network"
+    UPLINK = NET / "20-agentos-uplink.network"
+
+    def test_wired_uplink_is_physical_ethernet_with_dhcp(self):
+        u = ini(self.UPLINK)
+        m = u["Match"]
+        self.assertEqual(m["Type"], "ether")
+        # Not veth, bridge, macvlan, ...: the machines' and namespaces' links stay unconfigured here.
+        self.assertEqual(m["Kind"], "!*")
+        self.assertNotIn("Name", m)
+        self.assertEqual(u["Network"]["DHCP"], "yes")
+        # IPv6 comes from the home router's advertisements; the drop admits them (I11).
+        self.assertNotEqual(u["Network"].get("IPv6AcceptRA"), "no")
+
+    def test_no_network_file_matches_the_radio(self):
+        # The access point loader owns wlan0 (10-agentos-wlan.link); the home Wi-Fi station is #936's.
+        files = sorted(self.NET.glob("*.network"))
+        self.assertEqual([f.name for f in files], [self.UPLINK.name])
+        for f in files:
+            m = ini(f)["Match"]
+            self.assertNotIn("wlan", m.get("Type", "").split())
+            self.assertFalse(any(n.startswith(("wl", "ap")) for n in m.get("Name", "").split()), f.name)
+        self.assertEqual(ini(self.NET / "10-agentos-wlan.link")["Match"]["Type"], "wlan")
+
+    def test_distro_network_files_are_removed_from_the_image(self):
+        # REQ: DEV-2, CH-9 (#1478): Debian's 80-*.network files (one masquerades) never reach the
+        # image; the tree check refuses any that would (TreeCheckTest).
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        self.assertIn("/usr/lib/systemd/network/80-*.network", removed)
+
+    def test_uplink_tells_the_lan_nothing_about_the_box(self):
+        # REQ: DEV-2 (#1479): no hostname in DHCP (every box is "agentos"), and IPv6 addresses that
+        # carry no MAC: a stable per-network address (RFC 7217) plus temporary ones for outgoing use.
+        u = ini(self.UPLINK)
+        self.assertEqual(u["DHCPv4"]["SendHostname"], "no")
+        self.assertEqual(u["DHCPv6"]["SendHostname"], "no")
+        self.assertEqual(u["IPv6AcceptRA"]["Token"], "prefixstable")
+        self.assertEqual(u["Network"]["IPv6PrivacyExtensions"], "yes")
+        for key in ("IPMasquerade", "IPForward", "IPv4Forwarding", "IPv6Forwarding"):
+            self.assertNotIn(key, u["Network"])
+
+    def test_resolved_answers_no_name_queries_on_the_lan(self):
+        # REQ: DEV-2 (#1479): LLMNR and mDNS off, so the box neither announces nor answers its name.
+        r = ini(MK / "mkosi.extra/usr/lib/systemd/resolved.conf.d/50-agentos-uplink.conf")["Resolve"]
+        self.assertEqual(r["LLMNR"], "no")
+        self.assertEqual(r["MulticastDNS"], "no")
+
+    def test_networkd_is_enabled_and_behind_the_drop(self):
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().split("\n")
+        self.assertIn("enable systemd-networkd.service", preset)
+        d = ini(MK / "mkosi.extra/usr/lib/systemd/system/systemd-networkd.service.d/agentos-inbound.conf")["Unit"]
+        self.assertIn("agentos-inbound.service", d["Requires"].split())
+        self.assertIn("agentos-inbound.service", d["After"].split())
+
+    def report(self, links, addr="192.0.2.10/24", on_sleep=""):
+        # Runs boot-report on a stand-in /sys/class/net; ip answers addr for any link. A carrier of
+        # None leaves the file out, as the kernel's carrier read fails while a link is down; on_sleep
+        # runs (with $NET set) at each sleep, so a test can plug the cable in late.
+        with tempfile.TemporaryDirectory() as t:
+            t = pathlib.Path(t)
+            net, log = t / "net", t / "log"
+            for name, kind, carrier in links:
+                d = net / name
+                d.mkdir(parents=True)
+                (d / "type").write_text("1\n")
+                if carrier is not None:
+                    (d / "carrier").write_text("%d\n" % carrier)
+                if kind != "virtual":
+                    (d / "device").mkdir()
+                if kind == "wlan":
+                    (d / "wireless").mkdir()
+            stub(t, "ip", 'echo "$*" >>"%s"; [ -n "%s" ] && echo "2: $4    inet %s brd 192.0.2.255 scope global $4"'
+                 % (log, addr, addr))
+            stub(t, "sleep", 'echo "sleep $*" >>"%s"; NET="%s"; %s' % (log, net, on_sleep or ":"))
+            stub(t, "findmnt", "echo 1073741824")
+            stub(t, "systemd-bless-boot", "echo good")
+            script = (AGENTOS_LIB / "boot-report").read_text().replace(
+                "/usr/lib/systemd/systemd-bless-boot", str(t / "systemd-bless-boot"))
+            env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]), AGENTOS_SYS_NET=str(net))
+            out = subprocess.run(["sh", "-c", script], env=env, check=True, capture_output=True, text=True).stdout
+            calls = log.read_text() if log.exists() else ""
+            return out, calls
+
+    def test_boot_report_shows_the_wired_lease(self):
+        # CI's boot test plugs in a virtual NIC and reads this line (ci_boot.sh).
+        out, _ = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 1)])
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "agentos-uplink: enp1s0 192.0.2.10/24")
+        self.assertTrue(lines[1].startswith("agentos-boot: bless=good"), lines)
+
+    def test_boot_report_waits_briefly_without_a_cable(self):
+        # The radio and virtual links never count; an unplugged port gets about 5 s for carrier, no more.
+        out, calls = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 0)])
+        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertIn("sleep", calls)
+        self.assertLessEqual(calls.count("sleep"), 5)
+        self.assertNotIn("ip ", calls)
+
+    def test_boot_report_waits_for_carrier_on_a_cold_nic(self):
+        # Review P-2: on a cold boot the NIC can still be negotiating when the report runs. Carrier
+        # unreadable, then 0, then 1: the lease is still reported.
+        flip = ('n=$(grep -c sleep "$NET/../log"); [ "$n" = 2 ] && echo 0 >"$NET/enp1s0/carrier"; '
+                '[ "$n" = 3 ] && echo 1 >"$NET/enp1s0/carrier"; :')
+        out, calls = self.report([("enp1s0", "ether", None)], on_sleep=flip)
+        self.assertEqual(out.splitlines()[0], "agentos-uplink: enp1s0 192.0.2.10/24")
+        self.assertEqual(calls.count("sleep"), 3)
+
+    def test_boot_report_gives_up_on_a_lease_that_never_comes(self):
+        out, calls = self.report([("enp1s0", "ether", 1)], addr="")
+        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertLessEqual(calls.count("sleep"), 30)
+
+    def probe(self, mode):
+        # One probe through probe_inbound.py against a local stand-in for QEMU's forwarded port:
+        # "silent" completes the handshake and never answers (a guest that drops the SYN, as
+        # QEMU's user network accepts the host's connection itself), "closes" accepts and closes (a
+        # guest that answered, with a reset or from a listener), "none" listens nowhere.
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        if mode == "none":
+            srv.close()
+        else:
+            srv.listen(4)
+        stop = threading.Event()
+        def serve():
+            while mode == "closes" and not stop.is_set():
+                srv.settimeout(0.2)
+                try:
+                    c, _ = srv.accept()
+                    c.close()
+                except OSError:
+                    pass
+        t = threading.Thread(target=serve)
+        t.start()
+        try:
+            return subprocess.run([sys.executable, str(IMG / "probe_inbound.py"), "--wait", "1", "%d:22" % port],
+                                  check=True, capture_output=True, text=True, timeout=30).stdout
+        finally:
+            stop.set()
+            t.join()
+            srv.close()
+
+    def test_drop_probe_tells_a_silent_guest_from_an_answer(self):
+        # Review, Security release 1: the booted image's drop is probed through QEMU's hostfwd.
+        self.assertEqual(self.probe("silent"), "agentos-probe: 22 dropped\n")
+        self.assertEqual(self.probe("closes"), "agentos-probe: 22 answered\n")
+        self.assertEqual(self.probe("none"), "agentos-probe: 22 error\n")
+
+    def test_boot_test_probes_the_drop_on_the_booted_image(self):
+        s = (IMG / "ci_boot.sh").read_text()
+        for guest in (22, 80, 443, 18789):
+            fwd = "%d:%d" % (18000 + guest % 1000, guest)
+            self.assertTrue("hostfwd=tcp:127.0.0.1:%d-:%d" % (18000 + guest % 1000, guest) in s, fwd)
+            self.assertTrue(fwd in re.search(r'PROBE="([^"]*)" boot "\$W/console.log"', s).group(1), fwd)
+        self.assertTrue("for port in 22 80 443 18789; do\n\thas \"$W/console.log.probe\" \"agentos-probe: $port dropped\"" in s)
+
+    def test_boot_test_plugs_in_a_cable_once(self):
+        s = (IMG / "ci_boot.sh").read_text()
+        self.assertIn('NIC="user,model=virtio-net-pci,', s)
+        self.assertIn('-nic "${NIC:-none}"', s)
+        self.assertIn('has "$W/console.log" "agentos-uplink: "', s)
+        self.assertIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
+        self.assertIn('has "$W/console-reboot.log" "agentos-uplink: none"', s)
+
+
 class SetupServicesTest(unittest.TestCase):
     """#1249 (with P-3) and #1270: a fresh M6 Ultra image starts every setup service. The vault
     process (agentos-egress) has a unit and a default routing rule for the guest's model class; the
@@ -1104,8 +1608,12 @@ class SetupServicesTest(unittest.TestCase):
         # Only the vault process reaches providers: no IP filter, and the inbound drop is up first.
         self.assertNotIn("IPAddressDeny", s)
         self.assertIn("agentos-inbound.service", u["Unit"]["Requires"].split())
-        for after in ("agentos-inbound.service", "network-online.target"):
-            self.assertIn(after, u["Unit"]["After"].split())
+        self.assertIn("agentos-inbound.service", u["Unit"]["After"].split())
+        # #1416: no wait for an uplink. With a cable in but no lease, or none at all, wait-online
+        # holds network-online.target for its whole timeout, and the page (after this unit) with it;
+        # the policy learns the home network from netlink events and its poll, not at start.
+        for key in ("After", "Wants", "Requires"):
+            self.assertNotIn("network-online.target", u["Unit"].get(key, "").split())
         for before in ("agentosd.service", "agentos-localui.service"):
             self.assertIn(before, u["Unit"]["Before"].split())
         # The TPM (CRED-8) must stay visible: PrivateDevices would hide /dev/tpmrm0.
@@ -1558,6 +2066,8 @@ class FuzzConfineTest(unittest.TestCase):
     def test_the_image_does_not_ship_the_fuzz_state(self):
         with tempfile.TemporaryDirectory() as d:
             nodump(pathlib.Path(d))
+            radio(pathlib.Path(d))
+            uplink(pathlib.Path(d))
             self.assertEqual(check.violations(d), [])
             os.makedirs(os.path.join(d, "var/lib/agentos-fuzz"))
             self.assertEqual(check.violations(d), ["var/lib/agentos-fuzz: fuzz state; created on the box, never shipped"])

@@ -76,7 +76,12 @@ jobs:
         if: env.RECORDS != 'true'
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q nftables iproute2
-          sudo python3 -m unittest tests.test_inbound_netns -v
+          sudo AGENTOS_REQUIRE_IPV6=1 python3 -m unittest tests.test_inbound_netns -v
+      - name: Codex worker tool sandbox on a stub worker (S8-W1, CRED-5)
+        if: env.RECORDS != 'true'
+        run: |
+          sudo apt-get install -y -q bubblewrap
+          sudo AGENTOS_REQUIRE_BWRAP=1 python3 -m unittest tests.test_codex_worker -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
