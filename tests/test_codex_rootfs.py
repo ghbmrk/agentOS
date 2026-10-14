@@ -21,6 +21,10 @@ SCRIPT = CODEX / "build-rootfs.sh"
 VERSION = "0.162.1"
 INTEGRITY = "sha512-cjK2mdHIfEepZ1lQ1MX3aTQC+8ncIsvnacl/6vI2dIIcfP8/MrhTQ2+qRlkXFNDzJSj1d36quIszP+3/4CUJWQ=="
 VENDOR = "opt/codex/vendor/x86_64-unknown-linux-musl"
+NEVER_ON = {
+    "daemon_auto_start", "workspace_dependencies", "system_proxy_fallback", "in_app_browser",
+    "browser_use_full_cdp_access", "tool_suggest", "guardian_approval",
+}
 INSTALLED = {
     "etc/codex/managed_config.toml": CODEX / "managed_config.toml",
     "etc/codex/requirements.toml": CODEX / "requirements.toml",
@@ -99,6 +103,8 @@ class RootfsBuildTest(unittest.TestCase):
             dst = self.out / rel
             self.assertEqual(dst.read_bytes(), src.read_bytes(), rel)
             self.assertEqual(dst.stat().st_mode & 0o7777, 0o755 if rel.endswith("toolsh") else 0o644, rel)
+            if os.geteuid() == 0:
+                self.assertEqual(dst.stat().st_uid, 0, rel)
         launch = json.loads((self.out / "usr/lib/agentos/codex/launch.json").read_text())
         self.assertEqual(launch["argv"][:3], ["codex", "exec", "--json"])
 
@@ -118,6 +124,40 @@ class RootfsBuildTest(unittest.TestCase):
         self.assertTrue(os.access(self.out / "usr/bin/bwrap", os.X_OK))
         self.assertFalse((self.out / VENDOR / "codex-resources/voice").exists())
         self.assertTrue((self.out / "bin/bash").is_file())
+
+    # REQ: CRED-5, A14, CAP-11
+    def test_cli_resolves_its_layout_and_loads_the_managed_layers(self):
+        # codex doctor run over the built tree (chroot in a user, pid and network namespace: no
+        # root needed, no network). --version does not exercise package discovery or the managed layers.
+        manifest = json.loads((self.out / VENDOR / "codex-package.json").read_text())
+        self.assertEqual(manifest["version"], VERSION)
+        home = "/tmp/codex-home"
+        r = subprocess.run(
+            ["unshare", *([] if os.geteuid() == 0 else ["-r"]), "-npf", f"--mount-proc={self.out}/proc", "chroot", str(self.out), "/bin/sh", "-c",
+             f"mkdir -p {home} && HOME={home} CODEX_HOME={home} /usr/local/bin/codex doctor --json"],
+            capture_output=True, text=True, timeout=120)
+        # Exit 1 is expected: no login and no network. The report is what is checked.
+        try:
+            checks = json.loads(r.stdout)["checks"]
+        except ValueError:
+            self.fail(f"codex doctor printed no report: {r.stderr[-500:]}")
+        self.assertEqual(checks["config.load"]["status"], "ok", checks["config.load"])
+        search = checks["runtime.search"]["details"]
+        self.assertEqual(search["search provider"], "bundled", search)
+        self.assertEqual(search["search command"], "/" + VENDOR + "/codex-path/rg")
+        sandbox = checks["sandbox.helpers"]["details"]
+        self.assertEqual(sandbox["approval policy"], "Never")
+        self.assertEqual(sandbox["filesystem sandbox"], "restricted")
+        self.assertEqual(sandbox["network sandbox"], "restricted")
+        self.assertEqual(sandbox["managed filesystem source"], "system")
+        self.assertEqual(checks["mcp.config"]["status"], "ok")
+        cfg = checks["config.load"]["details"]
+        self.assertEqual(cfg["model provider"], "agentos")
+        self.assertEqual(cfg["mcp servers"], "0")
+        # Every flag that is on by default in this pin and could start a process or reach a
+        # service outside the tool sandbox is pinned off (C14).
+        on = {f.strip() for f in cfg["enabled feature flags"].split(",")}
+        self.assertEqual(on & NEVER_ON, set(), "managed_config.toml must pin these off")
 
     # REQ: CRED-5, A14
     def test_cli_reports_the_pinned_version(self):

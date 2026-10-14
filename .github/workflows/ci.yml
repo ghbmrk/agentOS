@@ -85,8 +85,9 @@ jobs:
       - name: Codex worker rootfs from the pinned CLI (S8-W1, #807)
         if: env.RECORDS != 'true'
         # Downloads the pinned @openai/codex tarball, checks npm's integrity hash, builds the
-        # rootfs and checks its contents. Nothing runs under runsc here (#809 measures that).
-        run: AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
+        # rootfs and checks its contents, with codex doctor in a namespace (sudo: the runner may bar
+        # unprivileged user namespaces). Nothing runs under runsc here (#809 measures that).
+        run: sudo AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)

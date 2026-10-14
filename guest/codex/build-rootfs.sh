@@ -44,7 +44,7 @@ mkdir -p usr/local/bin usr/bin bin lib64 etc/codex opt/codex usr/lib/agentos/cod
 # Only what a headless turn needs: the CLI, the helper it starts from beside its binary, its
 # bundled bwrap and ripgrep. The voice libraries and zsh are left out.
 tar -xzf "$work/codex.tgz" -C opt/codex --strip-components=1 \
-	"$VENDOR/bin/codex" "$VENDOR/bin/codex-code-mode-host" \
+	"$VENDOR/codex-package.json" "$VENDOR/bin/codex" "$VENDOR/bin/codex-code-mode-host" \
 	"$VENDOR/codex-resources/bwrap" "$VENDOR/codex-path/rg"
 v=/opt/codex/vendor/x86_64-unknown-linux-musl
 ln -s "$v/bin/codex" usr/local/bin/codex
