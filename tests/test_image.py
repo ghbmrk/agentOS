@@ -2377,6 +2377,17 @@ class UplinkTest(unittest.TestCase):
         self.assertIn("console| agentos-e2e: PASS a\n", out)
         self.assertNotIn("\r", out)
 
+    def test_e2e_console_accepts_the_journald_lead_in_of_the_real_console(self):
+        # REQ: HW-10. CI run 38655868696: each line carries "[ time] unit[pid]: ", and the login
+        # prompt can land in front of one.
+        real = (b"[    7.094742] box-e2e[817]: agentos-e2e: PASS harness\n"
+                b"agentos login: [   21.547046] box-e2e[817]: agentos-e2e: PASS sms-pair\n"
+                b"[   83.365043] box-e2e[817]: agentos-e2e: XFAIL(#1221) host after 1m0s: at \"6. This PC\"\n"
+                b"[   83.367077] box-e2e[817]: agentos-e2e: DONE pass=2 fail=0 xfail=1 xpass=0 blocked=0\n")
+        rc, out, done = self.e2e_console(real)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(done, "agentos-e2e: DONE pass=2 fail=0 xfail=1 xpass=0 blocked=0\n")
+
     def test_e2e_console_refuses_a_console_the_guest_shaped(self):
         # REQ: HW-10. Each is a guest-forged or damaged console; the run must fail on it.
         done = b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n"

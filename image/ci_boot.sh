@@ -160,9 +160,15 @@ e2e_console() {
 	}
 	index(l, "agentos-e2e: ") == 0 { next }
 	{ print "console| " l }
-	index(l, "agentos-e2e: ") != 1 { miss("driver text not at the start of its line"); next }
 	{
-		r = substr(l, 14)
+		# The console carries each line as journald prints it: an optional login prompt, the kernel
+		# timestamp and the unit tag, then the driver text. Only that exact lead-in is accepted.
+		a = l
+		sub(/^(agentos login: )?(\[ *[0-9]+\.[0-9]+\] )?[A-Za-z0-9_-]+\[[0-9]+\]: /, "", a)
+	}
+	index(a, "agentos-e2e: ") != 1 { miss("driver text not at the start of its line"); next }
+	{
+		r = substr(a, 14)
 		if (ndone > 0) miss("line after DONE")
 	}
 	r ~ /^PASS [A-Za-z0-9_-]+$/ { c["pass"]++; next }
@@ -172,7 +178,7 @@ e2e_console() {
 	r ~ /^BLOCKED [A-Za-z0-9_-]+ after [A-Za-z0-9_-]+$/ { c["blocked"]++; next }
 	r ~ /^DONE pass=[0-9]+ fail=[0-9]+ xfail=[0-9]+ xpass=[0-9]+ blocked=[0-9]+$/ {
 		ndone++
-		done = l
+		done = "agentos-e2e: " r
 		n = split(r, kv, /[ =]/)
 		for (i = 2; i < n; i += 2) d[kv[i]] = kv[i + 1]
 		next
