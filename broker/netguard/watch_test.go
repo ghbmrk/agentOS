@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"net"
 	"net/netip"
 	"sync/atomic"
 	"syscall"
@@ -199,17 +200,26 @@ func TestQuickLearnInRefreshGapIsNotOverwritten(t *testing.T) {
 }
 
 // A full read that stores a newer external address after a quick read
-// returns, but before quickLearn merges and stores, is kept: the merge and
-// the store are one critical section (#1492).
+// returns, but before quickLearn merges and stores, is kept: the quick
+// read's copy of the external address never replaces the learned one while
+// the gateway is unchanged, and the merge and the store are one critical
+// section under the write lock (#1492).
 func TestRefreshInQuickGapKeepsNewerExternal(t *testing.T) {
-	gw := netip.MustParseAddr("192.168.1.1")
-	lan := []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
 	oldExt, newExt := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9")
 	ext := oldExt
-	p := New(Config{
-		Source: func() (Network, error) { return Network{Prefixes: lan, Gateway: gw, External: ext}, nil },
-		Quick:  func() (Network, error) { return Network{Prefixes: lan, Gateway: gw}, nil },
-	})
+	s := &Sources{
+		Addrs: func() ([]net.Addr, error) {
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.77"), Mask: net.CIDRMask(24, 32)}}, nil
+		},
+		ReadFile: func(f string) ([]byte, error) {
+			if f == "/proc/net/route" {
+				return []byte("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\n"), nil
+			}
+			return nil, errors.New("absent")
+		},
+		External: func(context.Context, netip.Addr) (netip.Addr, error) { return ext, nil },
+	}
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
 	if err := p.Refresh(); err != nil {
 		t.Fatal(err)
 	}
@@ -219,8 +229,19 @@ func TestRefreshInQuickGapKeepsNewerExternal(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	t.Cleanup(func() { quickGapHook = nil })
+	held := false
+	quickLockedHook = func() {
+		if p.mu.TryRLock() {
+			p.mu.RUnlock()
+			return
+		}
+		held = true
+	}
+	t.Cleanup(func() { quickGapHook, quickLockedHook = nil, nil })
 	p.quickLearn()
+	if !held {
+		t.Fatal("quickLearn read what is learned without holding the write lock")
+	}
 	p.mu.RLock()
 	got := p.net.External
 	p.mu.RUnlock()

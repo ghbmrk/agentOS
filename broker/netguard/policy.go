@@ -304,8 +304,10 @@ func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
 }
 
 // quickLearn applies the Quick read, if there is one. A failed read keeps
-// what was learned before, and the router's external address and the
-// resolver stay while the gateway is unchanged and the quick read has none.
+// what was learned before. While the gateway is unchanged the router's
+// external address is always the one learned, never the quick read's copy
+// (which may predate a newer full read), and the resolver stays when the
+// quick read has none.
 func (p *Policy) quickLearn() {
 	if p.quick == nil {
 		return
@@ -324,10 +326,11 @@ func (p *Policy) quickLearn() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	old := p.net
+	if quickLockedHook != nil {
+		quickLockedHook()
+	}
 	if n.Gateway.IsValid() && n.Gateway.Unmap() == old.Gateway {
-		if !n.External.IsValid() {
-			n.External = old.External
-		}
+		n.External = old.External
 		if !n.Resolver.IsValid() {
 			n.Resolver = old.Resolver
 		}
@@ -338,6 +341,10 @@ func (p *Policy) quickLearn() {
 // quickGapHook, when set by a test, runs after a quick read returns and
 // before quickLearn takes the lock to merge and store.
 var quickGapHook func()
+
+// quickLockedHook, when set by a test, runs inside quickLearn's critical
+// section, right after it reads what is learned.
+var quickLockedHook func()
 
 // SetPins replaces the pinned exceptions.
 func (p *Policy) SetPins(pins []Pin) error {
