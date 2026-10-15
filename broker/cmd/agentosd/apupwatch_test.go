@@ -26,7 +26,7 @@ func apUpBox(t *testing.T) string {
 
 func rotateWiFiFile(t *testing.T, p, password string) {
 	t.Helper()
-	m, err := apnet.Network{SSID: "AgentOS-AB2C", Password: password}.Marshal()
+	m, err := apnet.Network{SSID: apnet.Prefix + "AB2C", Password: password}.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
