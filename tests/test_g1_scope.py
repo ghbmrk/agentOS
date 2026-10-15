@@ -212,6 +212,10 @@ class ListTest(unittest.TestCase):
                   "guest/codex/x", "broker/provagent/x.go", "broker/route/route.go"):
             self.assertTrue(g.check([p], LIST)[0], p)
 
+
+class GoImportsTest(unittest.TestCase):
+    # Its own class so the records-only CI run, which sets up no Go, can name the other two:
+    # a records-only change cannot change what the G1 binaries import.
     def test_list_covers_the_g1_binaries_imports(self):  # G1-freeze-f
         go = shutil.which("go")
         if not go:
