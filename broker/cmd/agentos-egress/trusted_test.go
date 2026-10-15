@@ -1290,6 +1290,31 @@ func TestUntrustAfterTheSlotIsDecidedSaysThePCIsRemoved(t *testing.T) {
 	}
 }
 
+// REQ: HW-1, CRED-9
+// The owner's unlock gives the lockout hierarchy back only for a PC whose
+// slot is gone from the drive (#1741): a PIN-trusted PC keeps it, or a
+// thief could reset the guess limit and try PINs offline (Security D1 on
+// #1821).
+func TestOwnerUnlockKeepsTheLockoutOfAPINTrustedPC(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	r.unknownHostUnlock(t)
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 || !hosts[0].PIN {
+		t.Fatalf("hosts after the unlock: %v, %v", hosts, err)
+	}
+	if r.lockoutEntry() == "" {
+		t.Fatal("lockout given back on the owner's unlock while this PC's PIN slot is on the drive")
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("empty lockout password resets the PIN guess counter after the owner's unlock")
+	}
+}
+
 // REQ: HW-8
 
 // TRUST-lockout-sync (#1558): the lockout authorization is made durable in
