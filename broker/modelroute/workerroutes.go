@@ -159,3 +159,22 @@ func (c *RouteControl) Plan(provider string) (PlanState, error) {
 	}
 	return s, nil
 }
+
+// SignInStored reports whether sign-in worker id's own sign-in stored the
+// plan login in the vault process (egress PlanLogins.SignedInBy). It is the
+// sign-in's only success signal: a login stored earlier does not count, and
+// nothing the worker reports about itself does. Ask before Close, which
+// forgets it; an error or an unreadable reply is not stored.
+func (c *RouteControl) SignInStored(id string) (bool, error) {
+	body, err := c.call("signedin", id, 4<<10)
+	if err != nil {
+		return false, err
+	}
+	var s struct {
+		Stored bool `json:"stored"`
+	}
+	if err := json.Unmarshal(body, &s); err != nil {
+		return false, fmt.Errorf("sign-in state for %s: unreadable reply", id)
+	}
+	return s.Stored, nil
+}

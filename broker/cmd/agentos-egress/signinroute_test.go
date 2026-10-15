@@ -172,3 +172,44 @@ func TestCRED5PlanStateReadsTheVault(t *testing.T) {
 		t.Fatalf("marked: %+v %v", s, err)
 	}
 }
+
+// /signedin answers whether that worker's own sign-in stored the login
+// (security review 2): the runner's only success signal for a sign-in. It
+// answers per worker, with no login value, and false when nothing is wired.
+func TestCRED5SignedInVerbAnswersForThatWorkerOnly(t *testing.T) {
+	r := newWorkerRig(t)
+	stored := func(machine string) (bool, int) {
+		t.Helper()
+		w := r.call("signedin", machine)
+		if w.Code != http.StatusOK {
+			return false, w.Code
+		}
+		var got map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got) != 1 {
+			t.Fatalf("signedin %s: reply %q", machine, w.Body)
+		}
+		return got["stored"] == true, w.Code
+	}
+	if ok, code := stored("pw-s"); ok || code != http.StatusOK {
+		t.Fatalf("unwired: %v %d", ok, code)
+	}
+	var asked []string
+	r.p.signedIn = func(worker string) bool { asked = append(asked, worker); return worker == "pw-s" }
+	if ok, _ := stored("pw-s"); !ok {
+		t.Fatal("the sign-in worker's commit is not reported")
+	}
+	if ok, _ := stored("pw-r"); ok {
+		t.Fatal("another worker reads as signed in")
+	}
+	if _, code := stored("wk-1"); code != http.StatusBadRequest {
+		t.Fatalf("a non-provider machine: %d", code)
+	}
+	if len(asked) != 2 {
+		t.Fatalf("asked %v", asked)
+	}
+	gw := httptest.NewRecorder()
+	r.ctl.ServeHTTP(gw, httptest.NewRequest("GET", "/signedin?machine=pw-s", nil))
+	if gw.Code < 400 {
+		t.Fatalf("GET /signedin: %d", gw.Code)
+	}
+}

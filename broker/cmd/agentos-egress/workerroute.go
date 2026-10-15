@@ -40,9 +40,11 @@ import (
 // fresh worker whose route the broker opens with /signin instead: that
 // route serves the sign-in endpoints only (WorkerRouteConfig.SignIn), so
 // the login it stores is the one the owner approved on the provider's own
-// page, and no run worker can store one. /plan tells the broker whether a
-// plan is signed in and allowed private data (the runner's Granted and
-// PrivateOK); it carries no login value.
+// page, and no run worker can store one. /signedin tells the broker
+// whether that worker's own sign-in stored the login (the sign-in's only
+// success signal), and /plan whether a plan is signed in and allowed
+// private data (the runner's Granted and PrivateOK); neither carries a
+// login value.
 
 // Socket names for provider workers.
 const (
@@ -77,9 +79,12 @@ type workerRoutes struct {
 	forget func(worker string)
 	seed   func(worker string) (map[string][]byte, error)
 	// plan answers /plan for a plan provider; nil answers nothing.
-	plan  func(provider string) (planState, error)
-	conns int
-	calls chan struct{}
+	plan func(provider string) (planState, error)
+	// signedIn answers /signedin: whether worker's own sign-in committed
+	// the plan login (PlanLogins.SignedInBy); nil answers false.
+	signedIn func(worker string) bool
+	conns    int
+	calls    chan struct{}
 
 	mu   sync.Mutex
 	open map[string]*routeServer
@@ -113,8 +118,8 @@ type planState struct {
 // planProvider is the one plan provider the routes serve (egress.Codex).
 const planProvider = "codex"
 
-// handler serves POST /open, /signin, /close and /seed with ?machine=<id>,
-// and POST /plan with ?provider=<plan>.
+// handler serves POST /open, /signin, /signedin, /close and /seed with
+// ?machine=<id>, and POST /plan with ?provider=<plan>.
 func (p *workerRoutes) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -124,7 +129,7 @@ func (p *workerRoutes) handler() http.Handler {
 		case r.URL.Path == "/plan":
 			p.servePlan(w, r.URL.Query().Get("provider"))
 			return
-		case r.URL.Path != "/open" && r.URL.Path != "/signin" && r.URL.Path != "/close" && r.URL.Path != "/seed":
+		case r.URL.Path != "/open" && r.URL.Path != "/signin" && r.URL.Path != "/signedin" && r.URL.Path != "/close" && r.URL.Path != "/seed":
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -137,6 +142,10 @@ func (p *workerRoutes) handler() http.Handler {
 		case "/close":
 			p.close(id)
 			w.WriteHeader(http.StatusOK)
+		case "/signedin":
+			// From memory, not the vault: the record of this worker's
+			// commit, which /close forgets.
+			json.NewEncoder(w).Encode(map[string]bool{"stored": p.signedIn != nil && p.signedIn(id)})
 		case "/seed":
 			if p.seed == nil {
 				http.Error(w, "no seed", http.StatusNotFound)
@@ -409,6 +418,7 @@ func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error)
 		return logins.Seed("codex", worker)
 	})
 	p.plan = func(provider string) (planState, error) { return c.planState(logins, provider) }
+	p.signedIn = func(worker string) bool { return logins.SignedInBy(planProvider, worker) }
 	ln, err := listen(dir, ProviderSocket, brokerUID)
 	if err != nil {
 		return nil, err

@@ -858,7 +858,9 @@ func main() {
 			tree.setMachines(m)
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
-				wt.Provider = providerTool{providerRunner(m, planRoutes, planLine)}
+				pr := providerRunner(m, planRoutes, planLine)
+				pr.Background = ctx // a sign-in's wait ends at shutdown
+				wt.Provider = providerTool{pr}
 			}
 			caps.workers(wt != nil)
 			tools := registeredTools(qs, tree, recallTools, wt)
@@ -1100,7 +1102,7 @@ func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote) 
 	if rc != nil {
 		r.Granted = func(p string) bool { return planGranted(rc, p) }
 		r.PrivateOK = func(p string) bool { return planPrivateOK(rc, p) }
-		r.HasLogin = func(p string) bool { return planLogin(rc, p) }
+		r.SignInStored = func(id string) bool { return planSignInStored(rc, id) }
 		r.SignInFor = rc.SignInFor
 	}
 	if note != nil {
