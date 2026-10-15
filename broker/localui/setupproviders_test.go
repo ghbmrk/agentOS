@@ -61,7 +61,7 @@ func TestTheAIStepConnectsAProviderThroughAgentosd(t *testing.T) {
 	}
 	defer srv.Wait()
 	defer cancel()
-	a := AgentosdSetup{Socket{Path: filepath.Join(dir, localapi.Socket)}}
+	a := AgentosdSetup{Owner: Socket{Path: filepath.Join(dir, localapi.Socket)}}
 	r.via = viaProviders{viaAgentosd{r.hooks, a}}
 	r.srv = r.open(&MemStore{})
 

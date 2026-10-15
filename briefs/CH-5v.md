@@ -12,4 +12,6 @@ No BOARD row existed for CH-5 or CH-17 (found 2026-10-10 in the assistant-bounda
 
 **Failure path to test first:** a code spoken on a call, or present in the speech transcript, approves nothing and reaches no guest; only a DTMF digit string decoded by the broker does.
 
-**Scope:** to be set when the brief is expanded; start with a simulator-only slice (DTMF decode, withholding from speech, the text fallback) that needs no hardware, then the S2 qualification of voice quality and latency over USB modems (SPEC §risk 2).
+## Scope
+
+Startable now: the simulator-only slice (DTMF decode, withholding from speech, the text fallback) in `broker/modem/at/**` (DTMF decode), `broker/modem/atsim/**` (simulator), `broker/voice/**`, `broker/owner/channel.go`, and their tests. Tier A. Waits on hardware: the S2 qualification of voice quality and latency over USB modems (S2, Mark). `broker/modemlink/**` only for the real-modem step.

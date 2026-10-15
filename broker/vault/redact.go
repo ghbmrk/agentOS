@@ -7,10 +7,15 @@ import (
 	"encoding/json"
 	"io"
 	"net/url"
+	"strings"
 )
 
 // Placeholder replaces every redacted value.
 const Placeholder = "[REDACTED]"
+
+// KindPlanLogin is a plan login (CRED-5): a provider CLI's token set,
+// stored as one JSON object (egress.PlanLogins).
+const KindPlanLogin = "plan-login"
 
 // Redactor replaces vault values in agent-bound bytes (CRED-7). It matches
 // each value verbatim and in the encodings a provider or a hostile guest is
@@ -28,6 +33,53 @@ type pattern struct {
 	b []byte
 	// fold matches ASCII letters in any case (hex).
 	fold bool
+}
+
+// redactValues returns what a vault redactor matches for one entry: its
+// whole value and, for a plan login, each string inside its JSON token
+// set, so a single token echoed on its own is caught too (VAULT-REDACT).
+// Strings shorter than MinValueLen are left out: they could match innocent
+// text and are not credentials. So are identifiers (isIdentifierKey): an
+// account ID is not secret, and the placeholder login the broker hands a
+// worker carries it, so matching it would corrupt that login.
+func redactValues(kind string, value []byte) [][]byte {
+	out := [][]byte{value}
+	if kind != KindPlanLogin {
+		return out
+	}
+	var set any
+	if json.Unmarshal(value, &set) != nil {
+		return out
+	}
+	var walk func(string, any)
+	walk = func(key string, x any) {
+		if isIdentifierKey(key) {
+			return
+		}
+		switch x := x.(type) {
+		case string:
+			if len(x) >= MinValueLen {
+				out = append(out, []byte(x))
+			}
+		case map[string]any:
+			for k, e := range x {
+				walk(k, e)
+			}
+		case []any:
+			for _, e := range x {
+				walk(key, e)
+			}
+		}
+	}
+	walk("", set)
+	return out
+}
+
+// isIdentifierKey reports whether a token-set key names an identifier
+// ("id", or ending "_id", such as account_id) rather than a credential.
+// Every other string stays a pattern, so an unknown field is redacted.
+func isIdentifierKey(k string) bool {
+	return k == "id" || strings.HasSuffix(k, "_id")
 }
 
 // NewRedactor builds a redactor for values. Empty values are ignored.

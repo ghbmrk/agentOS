@@ -67,7 +67,10 @@ type Config struct {
 }
 
 // Store is a mail.Store over IMAP and SMTP.
-type Store struct{ cfg Config }
+type Store struct {
+	cfg       Config
+	replyBase int64 // see replyBudget; a field so tests can lower it
+}
 
 var _ mail.Store = (*Store)(nil)
 
@@ -102,7 +105,7 @@ func New(cfg Config) (*Store, error) {
 	if cfg.Guard == nil {
 		cfg.Guard = netguard.New(netguard.Config{})
 	}
-	return &Store{cfg: cfg}, nil
+	return &Store{cfg: cfg, replyBase: 16 << 20}, nil
 }
 
 // dial connects to addr. A Plain connection is a literal loopback address
@@ -142,6 +145,45 @@ func (s *Store) tlsConfig(addr string) *tls.Config {
 
 // session runs f on an authenticated IMAP connection.
 func (s *Store) session(ctx context.Context, f func(c *client.Client) error) error {
+	return s.sessionN(ctx, 0, f)
+}
+
+// A session may read 16 MiB from the server, plus MaxFetch and
+// fetchFrame for each message it fetches (SR3-mail-k18b). go-imap holds a
+// whole reply in memory, so without a bound a server that never ends one
+// (an endless atom, literal or stream of FETCH responses) grows the
+// vault's memory until the timeout. The 16 MiB covers a session's other
+// replies: a folder list, a search's UIDs, and a Find's fetch of the
+// few messages carrying one Message-ID.
+const fetchFrame = 8 << 10 // a FETCH response's envelope around its body
+
+// errReplyTooLarge ends a session whose replies passed their budget.
+var errReplyTooLarge = errors.New("imapsmtp: the server's reply exceeded its size bound")
+
+func (s *Store) replyBudget(fetches int) int64 {
+	return s.replyBase + int64(fetches)*int64(s.cfg.MaxFetch+fetchFrame)
+}
+
+// budgetConn fails reads once left bytes have been read.
+type budgetConn struct {
+	net.Conn
+	left int64
+}
+
+func (b *budgetConn) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		return 0, errReplyTooLarge
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.Conn.Read(p)
+	b.left -= int64(n)
+	return n, err
+}
+
+// sessionN is session for a call that fetches up to n messages.
+func (s *Store) sessionN(ctx context.Context, n int, f func(c *client.Client) error) error {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
 	defer cancel()
 	conn, err := s.dial(ctx, s.cfg.IMAP, s.cfg.IMAPSec)
@@ -159,9 +201,11 @@ func (s *Store) session(ctx context.Context, f func(c *client.Client) error) err
 		conn.Close()
 		return errors.New("imapsmtp: IMAP uses implicit TLS, or plain to loopback only")
 	}
-	c, err := client.New(conn)
+	// The connection is closed however the session ends: Logout does not
+	// close it once the client's reader has stopped on a bad reply.
+	defer conn.Close()
+	c, err := client.New(&budgetConn{conn, s.replyBudget(n)})
 	if err != nil {
-		conn.Close()
 		return err
 	}
 	c.ErrorLog = quiet{}
@@ -254,7 +298,7 @@ func (s *Store) Fetch(ctx context.Context, folder string, validity uint32, uids 
 		return nil, nil
 	}
 	var out []mail.Message
-	err := s.session(ctx, func(c *client.Client) error {
+	err := s.sessionN(ctx, len(uids), func(c *client.Client) error {
 		if err := selectAt(c, folder, true, validity); err != nil {
 			return err
 		}
@@ -288,8 +332,19 @@ func (s *Store) fetch(c *client.Client, folder string, validity uint32, uids []u
 	ch := make(chan *imap.Message, 16)
 	done := make(chan error, 1)
 	go func() { done <- c.UidFetch(set, items, ch) }()
+	// Only the first response with a body for each requested UID is kept,
+	// so a server that repeats or invents messages cannot grow out, and an
+	// unsolicited FLAGS-only response does not take the slot (SR3-mail-k18b).
+	want := make(map[uint32]bool, len(uids))
+	for _, u := range uids {
+		want[u] = true
+	}
 	var out []mail.Message
 	for m := range ch {
+		if !want[m.Uid] || len(m.Body) == 0 {
+			continue
+		}
+		delete(want, m.Uid)
 		var raw []byte
 		for _, l := range m.Body {
 			if l != nil {

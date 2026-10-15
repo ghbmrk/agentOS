@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/guest"
+	"golang.org/x/sys/unix"
 )
 
 // The managed tree's procedures, skills and context reach a live agent
@@ -27,9 +28,7 @@ import (
 // nothing: a replay machine, whose broker serves no such tool, keeps the
 // tree it was seeded with, and a public machine keeps none.
 
-// treeNamespaces are the only directories a sync writes or removes in, as
-// long as no process in the guest changes the tree directory while it runs
-// (#1732).
+// treeNamespaces are the only directories a sync writes or removes in.
 var treeNamespaces = []string{"procedures", "skills", "context"}
 
 type treeAnswer struct {
@@ -146,8 +145,15 @@ func callTool(ctx context.Context, broker *http.Client, name string, args any) (
 // the tree are removed last, so a failed write leaves the old tree's
 // files rather than fewer. Only what is in a new file's way goes first: a
 // file where it needs a directory, or a directory where it needs the
-// file, since the tree holds neither. Everything goes through an os.Root,
-// so a symlink in dir cannot send a write outside it.
+// file, since the tree holds neither.
+//
+// A symlink on a tree path, from its namespace down to the file itself,
+// is refused: without that, a link such as skills/l -> ../other would let
+// a write or a removal land in other, outside the namespaces. Guest root
+// (ARC-7) can swap a directory for a link while a sync runs, so no name
+// is checked and then used again: each directory is opened with
+// O_NOFOLLOW below one already held, and every create, rename, unlink
+// and enumeration acts on a held directory, never on a path (#1732).
 func mirror(dir string, files map[string][]byte) error {
 	for p := range files {
 		ns, _, _ := strings.Cut(p, "/")
@@ -163,121 +169,216 @@ func mirror(dir string, files map[string][]byte) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	root, err := os.OpenRoot(dir)
+	// dir itself is the bridge's own flag, so it may be reached through a
+	// link; nothing below it is.
+	root, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
+	abs, _ := filepath.Abs(dir)
+	t := &treeDir{dir: abs, root: root}
+	// The namespaces first, so a link at one is refused before anything
+	// is written, even when the tree holds no file in it.
 	for _, ns := range treeNamespaces {
-		if err := refuseLinks(root, ns); err != nil {
-			return err
+		if fi, err := t.lstat(root, ns); err == nil && fi.Mode&unix.S_IFMT == unix.S_IFLNK {
+			return t.linkErr(ns)
 		}
 	}
 	for p, b := range files {
-		if err := refuseLinks(root, p); err != nil {
-			return err
-		}
-		if old, err := root.ReadFile(p); err == nil && bytes.Equal(old, b) {
-			continue
-		}
-		if err := clearWay(root, p); err != nil {
-			return err
-		}
-		if err := root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return err
-		}
-		var n [8]byte
-		rand.Read(n[:])
-		tmp := filepath.Join(filepath.Dir(p), ".tree-"+hex.EncodeToString(n[:]))
-		f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if err != nil {
-			return err
-		}
-		_, err = f.Write(b)
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err == nil {
-			err = root.Chmod(tmp, 0o644)
-		}
-		if err == nil {
-			err = root.Rename(tmp, p)
-		}
-		if err != nil {
-			root.Remove(tmp)
+		if err := t.write(p, b); err != nil {
 			return err
 		}
 	}
 	for _, ns := range treeNamespaces {
-		var gone []string
-		fs.WalkDir(root.FS(), ns, func(path string, d fs.DirEntry, err error) error {
-			if err == nil && !d.IsDir() {
-				if _, keep := files[path]; !keep {
-					gone = append(gone, path)
-				}
+		d, err := t.openDir(root, ns, ns)
+		if errors.Is(err, unix.ENOENT) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		err = t.prune(d, ns, files)
+		d.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// treeDir is a mirror's open tree directory.
+type treeDir struct {
+	dir  string // absolute, for messages
+	root *os.File
+}
+
+// linkErr names the tree directory and the link, never the file being
+// written, so it is the same for every file and syncTree logs it once.
+func (t *treeDir) linkErr(rel string) error {
+	return fmt.Errorf("tree directory %s: %s is a symlink; the sync is refused until it is removed", t.dir, rel)
+}
+
+func (t *treeDir) lstat(d *os.File, name string) (unix.Stat_t, error) {
+	var st unix.Stat_t
+	err := unix.Fstatat(int(d.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW)
+	return st, err
+}
+
+// openDir opens the directory name in d without following a link; rel
+// is its path in the tree. A link there is refused, whatever an earlier
+// look found.
+func (t *treeDir) openDir(d *os.File, name, rel string) (*os.File, error) {
+	fd, err := unix.Openat(int(d.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if st, serr := t.lstat(d, name); errors.Is(err, unix.ELOOP) || serr == nil && st.Mode&unix.S_IFMT == unix.S_IFLNK {
+			return nil, t.linkErr(rel)
+		}
+		return nil, &fs.PathError{Op: "open", Path: filepath.Join(t.dir, rel), Err: err}
+	}
+	return os.NewFile(uintptr(fd), filepath.Join(t.dir, rel)), nil
+}
+
+// write makes the tree file p hold b, unless it already does.
+func (t *treeDir) write(p string, b []byte) error {
+	parts := strings.Split(p, "/")
+	d := t.root
+	for i, name := range parts[:len(parts)-1] {
+		rel := strings.Join(parts[:i+1], "/")
+		st, err := t.lstat(d, name)
+		switch {
+		case errors.Is(err, unix.ENOENT):
+		case err != nil:
+			return &fs.PathError{Op: "lstat", Path: filepath.Join(t.dir, rel), Err: err}
+		case st.Mode&unix.S_IFMT == unix.S_IFLNK:
+			return t.linkErr(rel)
+		case st.Mode&unix.S_IFMT == unix.S_IFREG && i > 0:
+			// An earlier tree's file where this one needs a directory.
+			if err := unix.Unlinkat(int(d.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+				return &fs.PathError{Op: "remove", Path: filepath.Join(t.dir, rel), Err: err}
 			}
-			return nil
-		})
-		for _, p := range gone {
-			if err := root.Remove(p); err != nil {
+		}
+		if err := unix.Mkdirat(int(d.Fd()), name, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
+			return &fs.PathError{Op: "mkdir", Path: filepath.Join(t.dir, rel), Err: err}
+		}
+		next, err := t.openDir(d, name, rel)
+		if d != t.root {
+			d.Close()
+		}
+		if err != nil {
+			return err
+		}
+		d = next
+	}
+	defer d.Close()
+	dfd, name := int(d.Fd()), parts[len(parts)-1]
+	st, err := t.lstat(d, name)
+	switch {
+	case errors.Is(err, unix.ENOENT):
+	case err != nil:
+		return &fs.PathError{Op: "lstat", Path: filepath.Join(t.dir, p), Err: err}
+	case st.Mode&unix.S_IFMT == unix.S_IFLNK:
+		return t.linkErr(p)
+	case st.Mode&unix.S_IFMT == unix.S_IFDIR:
+		// An earlier tree's directory where this one needs the file.
+		if err := t.removeAll(d, name, p); err != nil {
+			return err
+		}
+	case st.Mode&unix.S_IFMT == unix.S_IFREG:
+		// O_NONBLOCK: a FIFO swapped in since the lstat must not hang the
+		// sync; whatever is not this content is replaced by the rename.
+		if fd, err := unix.Openat(dfd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0); err == nil {
+			f := os.NewFile(uintptr(fd), name)
+			old, err := io.ReadAll(io.LimitReader(f, int64(len(b))+1))
+			f.Close()
+			if err == nil && bytes.Equal(old, b) {
+				return nil
+			}
+		}
+	}
+	var n [8]byte
+	rand.Read(n[:])
+	tmp := ".tree-" + hex.EncodeToString(n[:])
+	fd, err := unix.Openat(dfd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o644)
+	if err != nil {
+		return &fs.PathError{Op: "create", Path: filepath.Join(t.dir, filepath.Dir(p), tmp), Err: err}
+	}
+	f := os.NewFile(uintptr(fd), tmp)
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Chmod(0o644)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		if err = unix.Renameat(dfd, tmp, dfd, name); err != nil { // durable:exempt path-based durable.Rename would follow a swapped link (#1732); the mirror is rebuilt each sync
+			err = &fs.PathError{Op: "rename", Path: filepath.Join(t.dir, p), Err: err}
+		}
+	}
+	if err != nil {
+		unix.Unlinkat(dfd, tmp, 0)
+	}
+	return err
+}
+
+// removeAll removes name in d and everything below it, through held
+// directories: a link found anywhere is unlinked, never followed.
+func (t *treeDir) removeAll(d *os.File, name, rel string) error {
+	err := unix.Unlinkat(int(d.Fd()), name, 0)
+	if err == nil || errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	sub, oerr := t.openDir(d, name, rel)
+	if oerr != nil {
+		return &fs.PathError{Op: "remove", Path: filepath.Join(t.dir, rel), Err: err}
+	}
+	names, err := sub.Readdirnames(-1)
+	for _, n := range names {
+		if err == nil {
+			err = t.removeAll(sub, n, rel+"/"+n)
+		}
+	}
+	sub.Close()
+	if err != nil {
+		return err
+	}
+	if err := unix.Unlinkat(int(d.Fd()), name, unix.AT_REMOVEDIR); err != nil {
+		return &fs.PathError{Op: "remove", Path: filepath.Join(t.dir, rel), Err: err}
+	}
+	return nil
+}
+
+// prune removes every file below the held directory d (the tree path
+// rel) that files does not hold. Directories stay; a link is a file
+// here, unlinked and never followed.
+func (t *treeDir) prune(d *os.File, rel string, files map[string][]byte) error {
+	names, err := d.Readdirnames(-1)
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		p := rel + "/" + n
+		fd, err := unix.Openat(int(d.Fd()), n, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		switch {
+		case err == nil:
+			sub := os.NewFile(uintptr(fd), p)
+			err = t.prune(sub, p, files)
+			sub.Close()
+			if err != nil {
 				return err
 			}
+		case errors.Is(err, unix.ENOENT):
+		case errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP):
+			if _, keep := files[p]; keep {
+				continue
+			}
+			if err := unix.Unlinkat(int(d.Fd()), n, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+				return &fs.PathError{Op: "remove", Path: filepath.Join(t.dir, p), Err: err}
+			}
+		default:
+			return &fs.PathError{Op: "open", Path: filepath.Join(t.dir, p), Err: err}
 		}
-	}
-	return nil
-}
-
-// refuseLinks fails if any component of p, from its namespace down to p
-// itself, is a symlink. The os.Root follows one that stays inside the tree
-// directory, so without this check a link such as skills/l -> ../other
-// would let a write or a removal land in other, outside the namespaces.
-// mirror checks the three namespaces themselves first, so the removal walk
-// cannot follow one either. A component that does not exist yet is not a
-// link, and nothing below it exists either. The error names the tree
-// directory and the link, never p, so it is the same for every file and
-// syncTree logs it once. The check is not atomic: a process in the guest
-// that swaps a directory for a link between the check and the write or
-// removal is not stopped (#1732).
-func refuseLinks(root *os.Root, p string) error {
-	var path []string
-	for a := p; a != "."; a = filepath.Dir(a) {
-		path = append(path, a)
-	}
-	for i := len(path) - 1; i >= 0; i-- {
-		fi, err := root.Lstat(path[i])
-		if err != nil {
-			return nil
-		}
-		if fi.Mode()&fs.ModeSymlink != 0 {
-			dir, _ := filepath.Abs(root.Name())
-			return fmt.Errorf("tree directory %s: %s is a symlink; the sync is refused until it is removed", dir, path[i])
-		}
-	}
-	return nil
-}
-
-// clearWay removes what an earlier tree left in the way of the file p: a
-// regular file where p needs a directory, or a directory at p itself. The
-// caller has checked with refuseLinks that no symlink lay on p's path a
-// moment ago, so the Lstat and RemoveAll here act on the path they name
-// unless a guest process swaps one in between (#1732).
-func clearWay(root *os.Root, p string) error {
-	ns, _, _ := strings.Cut(p, "/")
-	var up []string
-	for a := filepath.Dir(p); a != ns; a = filepath.Dir(a) {
-		up = append(up, a)
-	}
-	for i := len(up) - 1; i >= 0; i-- {
-		fi, err := root.Lstat(up[i])
-		if err != nil {
-			break
-		}
-		if fi.Mode().IsRegular() {
-			return root.Remove(up[i])
-		}
-	}
-	if fi, err := root.Lstat(p); err == nil && fi.IsDir() {
-		return root.RemoveAll(p)
 	}
 	return nil
 }

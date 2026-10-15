@@ -9,3 +9,7 @@ Host side of SR2-4 (L3 and security on #155; budget R12, R14): the host image en
 **Gate:** skip (host config), security check
 
 **State on the board before the 2026-10-08 index split:** queued, blocked on the host image
+
+## Scope
+
+`image/mkosi/mkosi.extra/usr/lib/systemd/system/agentosd.service` (TasksMax), `image/mkosi/mkosi.extra/usr/lib/agentos/health` (iocost boot health item), `broker/cgroup/cgroup.go`, `broker/cgroup/weights_test.go`, `image/ci_boot.sh`. Tier A. Blocked on the host image (P2-1) and the N95 run.

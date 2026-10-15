@@ -489,6 +489,27 @@ func unlockHandler(c *custody) http.Handler {
 		}
 		reply(w, http.StatusOK, map[string]any{"host": name})
 	})
+	// /setup/host is setup's host step (§8.1): no code, only in setup's
+	// window (custody.setupHost). A PC without a TPM says so in no_tpm, so
+	// the page can offer "This is not my PC" (CH-12).
+	mux.HandleFunc("/setup/host", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Trusted bool `json:"trusted"`
+		}
+		if !read(w, r, &req) {
+			return
+		}
+		name, err := c.setupHost(req.Trusted)
+		if err == errNoTPM {
+			reply(w, errNoTPM.status, map[string]any{"error": errNoTPM.msg, "no_tpm": true})
+			return
+		}
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, http.StatusOK, map[string]any{"host": name})
+	})
 	mux.HandleFunc("/untrust", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Code string `json:"code"`

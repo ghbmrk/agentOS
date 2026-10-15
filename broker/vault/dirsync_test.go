@@ -337,10 +337,11 @@ func TestFailedAnchorDirSyncFailureIsPublished(t *testing.T) {
 }
 
 // syncFails makes the catch-up's directory sync fail, as if the last
-// write's name were still not durable.
+// write's name were still not durable. The error is a plain one, as
+// durable.SyncDir returns it, so callers' own wrapping is what gets tested.
 func syncFails(t *testing.T) {
 	t.Helper()
-	syncDir = func(string) error { return fmt.Errorf("%w: %w", durable.ErrDirSync, errors.New("input/output error")) }
+	syncDir = func(string) error { return errors.New("input/output error") }
 	t.Cleanup(func() { syncDir = durable.SyncDir })
 }
 
@@ -413,5 +414,26 @@ func TestCatchUpWaitsForTheLandedFile(t *testing.T) {
 	defer x.Close()
 	if err := x.Bind(pc); !errors.Is(err, ErrRolledBack) {
 		t.Fatalf("file before a synced catch-up: %v, want ErrRolledBack", err)
+	}
+}
+
+// REQ: HW-8
+// Sync reports a failed directory sync of the vault file's name (#1558); a
+// Sync that returned nil would let a caller change the TPM on a name a power
+// cut could undo.
+func TestSyncReportsAFailedDirectorySync(t *testing.T) {
+	d, pc := newDrive(t), newPC("alpha")
+	v := d.open()
+	defer v.Close()
+	if err := v.Anchor(pc); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, v, "openai", "sk-canary-before-sync1")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("Sync with a working directory sync: %v", err)
+	}
+	syncFails(t)
+	if err := v.Sync(); !errors.Is(err, durable.ErrDirSync) {
+		t.Fatalf("Sync with a failing directory sync: %v", err)
 	}
 }

@@ -50,16 +50,34 @@ class WorkflowTest(unittest.TestCase):
                     self.assertRegex(step, r"persist-credentials:\s*false", f"{f.name}: {step}")
 
     def test_no_workflow_pushes_to_main(self):
-        # main requires status checks, so a workflow push to it would be rejected; trace.yml
-        # and metrics.yml push a bot branch, open its PR and dispatch ci.yml there instead.
+        # main requires status checks, so a workflow push to it would be rejected; trace.yml,
+        # metrics.yml and records.yml push a bot branch, open its PR and dispatch ci.yml there instead.
         for f in self.files():
             self.assertNotRegex(f.read_text(), r"git push\b[^\n]*\bmain\b", f.name)
         self.assertIn("workflow_dispatch:", (WORKFLOWS / "ci.yml").read_text())
-        for name in ("trace.yml", "metrics.yml"):
+        for name in ("trace.yml", "metrics.yml", "records.yml"):
             text = (WORKFLOWS / name).read_text()
             self.assertIn("gh pr create --base main", text, name)
             self.assertIn('gh workflow run ci.yml --ref "$BRANCH"', text, name)
             self.assertIn('gh pr merge "$BRANCH" --auto --squash', text, name)
+
+    def test_bot_token_jobs_run_in_the_bot_environment(self):
+        # BOT_PR_TOKEN is a `bot` environment secret restricted to main (#1691, #1769), so every
+        # job that can write contents must name that environment, and nothing else names it.
+        for f in self.files():
+            jobs = re.split(r"(?m)^  (?=[a-z][\w-]*:\n)", f.read_text().split("\njobs:\n", 1)[-1])
+            for job in jobs:
+                writes, env = "contents: write" in job, bool(re.search(r"(?m)^    environment: bot$", job))
+                if f.name in ("trace.yml", "metrics.yml", "metrics-refresh.yml", "records.yml"):
+                    self.assertEqual(writes, env, f"{f.name}: {job.split(':', 1)[0]}")
+                else:
+                    self.assertFalse(env or "BOT_PR_TOKEN" in job, f.name)
+
+    def test_inline_python_is_isolated(self):
+        # A job holding a write token runs no repository module: `python3 -I -` ignores the
+        # repo root and cwd on sys.path, so a file on main cannot shadow the stdlib (#1691).
+        for f in self.files():
+            self.assertNotRegex(f.read_text(), r"python3? -(?:\s|$)", f.name)
 
     def test_fuzz_runs_go_through_fuzzrun_and_never_by_duration(self):
         # P1-4-flake-ci (REQ: LOOP-7): a duration -fuzztime can end in the fuzz coordinator's

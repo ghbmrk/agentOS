@@ -250,6 +250,7 @@ func TestLocalBoundExhaustionIsTexted(t *testing.T) {
 	for i := 0; i < LocalBound; i++ {
 		r.ch.LocalSignIn(wrongCode(i))
 	}
+	r.ch.WaitSends()
 	var last string
 	for {
 		select {
