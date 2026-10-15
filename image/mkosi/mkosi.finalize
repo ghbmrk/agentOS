@@ -106,6 +106,41 @@ BOX_MOUNTS = ("dev", "proc", "sys", "run", "tmp")
 # systemd mounts /tmp, /dev/shm and /dev/mqueue 1777, and tmpfiles' tmp.conf and legacy.conf make
 # /var/tmp and /run/lock 1777 at boot. Any directory the tree itself gives o+w counts too.
 WORLD_WRITABLE = ("tmp", "var/tmp", "dev/shm", "dev/mqueue", "run/lock")
+# #1702: directories a service user or a login user owns on the box. A unit's fuzz children run in
+# var/lib/agentos-fuzz (tmpfiles' ACLs deny that user /tmp, /var/tmp and /dev/shm, so it is the one
+# place it can write), agentos-localui serves the LAN-facing setup page from var/lib/agentos-localui,
+# the vault's user from var/lib/agentos-egress; DynamicUser services live under var/lib/private, and
+# people under home and run/user; the egress, netjoin and ap units' RuntimeDirectory= lives under run.
+# A link into one is refused like one into WORLD_WRITABLE.
+SERVICE_DIRS = ("var/lib/agentos-fuzz", "var/lib/agentos-localui", "var/lib/agentos-egress", "home",
+                "run/user", "var/lib/private",
+                "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap")
+# #1702 (delta 2): the only links the tree may hold into what the box mounts, by the link's path and
+# its exact target. Anything else that reaches a box mount is refused (world_writable_link): the box
+# makes what is there at boot (/proc/self/root, /proc/<pid>/cwd and /dev/fd are links to wherever the
+# reader is), so where such a link ends is not known at build time. CI's stock trixie build holds
+# exactly these four (listed from the build, 2acb5843) and four masks: var/lock -> /run/lock,
+# var/run -> /run, etc/mtab -> ../proc/self/mounts and etc/resolv.conf ->
+# ../run/systemd/resolve/stub-resolv.conf. The relative var/lock and var/run forms are trixie's own
+# tmpfiles lines (legacy.conf, debian.conf), so a tree they made passes too.
+# An entry, like a mask, skips every link rule (world-writable, SERVICE_DIRS, '..'), so this rule is
+# the only check on it. Add an entry only as "<rel>": ("<target>",), copied from the build's refusal,
+# with every form the tree may hold, and only if <target> names a fixed, root-owned file or directory:
+# not under /proc/self, /proc/thread-self, /proc/<pid>, /dev/fd or /dev/std*, and neither
+# world-writable nor service-owned unless named as an exception here. Then update the BOX_LINKS
+# assertion in tests/test_image.py (I23).
+# Exceptions: var/lock names /run/lock, which is 1777; the link is root's and names only that one
+# directory, which /var/lock has always been. etc/resolv.conf names a file in /run/systemd/resolve,
+# which is systemd-resolved's RuntimeDirectory=, owned by the service user systemd-resolve: readers
+# parse it as resolver configuration (nameservers, search domains, options), not code, and resolved
+# already answers every DNS query the box sends to 127.0.0.53, so owning it gains that user nothing.
+# Neither exception extends by analogy to another world-writable or service-owned target.
+# A mask (a link to exactly MASK) passes wherever it is but at a box mount point: /dev/null is the box's own
+# device.
+BOX_LINKS = {"var/lock": ("../run/lock", "/run/lock"),
+             "var/run": ("../run", "/run"),
+             "etc/mtab": ("../proc/self/mounts",),
+             "etc/resolv.conf": ("../run/systemd/resolve/stub-resolv.conf",)}
 # The systemd configuration this check reads, by its name under each configuration directory.
 # #1543 Security B1: the only links the check follows to a configuration file it reads. A file that is
 # a link to exactly /dev/null is a mask (it reads as nothing), and trixie's merged-/usr /lib is a link
@@ -154,6 +189,14 @@ def violations(root):
             out.append("%s: private key material" % rel)
         elif stat.S_ISLNK(st.st_mode):
             out += world_writable_link(root, rel)
+        if (not stat.S_ISLNK(st.st_mode) and st.st_mode & 0o002
+                and not any(rel == w or rel.startswith(w + "/") for w in WORLD_WRITABLE)):
+            # #1702: any entry anyone on the box can write, file or directory, sticky or not, wherever
+            # it is but in or below the directories the box makes world-writable (nothing reads
+            # configuration there, and a link into them is refused): a unit, a drop-in, a rules file
+            # or a generator elsewhere is then the user's. A group-write rule is deliberately absent
+            # (stock trixie has 2775 var/mail and var/local).
+            out.append("%s: mode %04o is writable by anyone on the box (#1702)" % (rel, st.st_mode & 0o7777))
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
@@ -166,25 +209,60 @@ def violations(root):
 # tests/test_image.py's TreeAccessTest parses this file and fails on a file-reading or stat call
 # anywhere else, so a new reader cannot skip the chase (three review rounds each found one that did).
 def world_writable_link(root, rel):
-    """#1543 Security R2: the refusal for link REL if its target resolves, or where the tree stops
-    would resolve, to something inside a directory anyone on the box can write (WORLD_WRITABLE, or
-    a directory the tree gives o+w): a local user then decides what the link reads, whatever reads
-    it (a unit, a generator, udev). A link to such a directory itself is not refused (trixie's
-    /var/lock is a link to /run/lock): the directory stays root's."""
+    """#1543 Security R2, #1702: the refusal for link REL if its target resolves, or where the tree
+    stops would resolve, to a directory anyone on the box can write (WORLD_WRITABLE, or a directory
+    the tree gives o+w), to a directory one of the box's service users owns (SERVICE_DIRS), or to
+    anything inside one: a local user, or a compromised service user, then decides what the link
+    reads, whatever reads it (a unit, a generator, udev). The directory itself counts, since every
+    name inside it is the user's. Any other link that reaches a box mount is refused too (default
+    deny). A link at a box mount point itself (BOX_MOUNTS) is refused before anything else: the box
+    moves its mount onto where the link leads. Then the stock links in BOX_LINKS (matched by path
+    and exact target) and a mask pass, and skip every other rule here, on purpose: var/lock's target
+    /run/lock is 1777, so the world-writable rule would refuse it. So BOX_LINKS' admission rule (its
+    comment, I23) is the only check on an entry; the '..', world-writable and SERVICE_DIRS rules
+    apply to every other link."""
     try:
         path = tree_chase(root, rel, missing_ok=True)[0]
     except OSError:
+        # Fail-open on purpose: a loop or a non-directory step fails the same lookup on the box, so
+        # the link reads nothing. Keep it so if tree_chase changes, or this becomes a quiet hole.
         return []
+    target = tree_readlink(root, rel)
+    if rel in BOX_MOUNTS:
+        # Security delta 3: the box mounts its own filesystem at /dev, /proc, /sys, /run and /tmp, and
+        # switch-root and PID 1 follow a link there (systemd 257's switch-root chases each mount
+        # point in the new root), so the mount lands where the link leads: dev -> var/tmp gives a /dev
+        # anyone can write, and a missing target fails the boot. Before the mask and BOX_LINKS rules.
+        return ["%s: a link to %s; /%s is where the box mounts its %s, and a link there would move the "
+                "mount (#1702)" % (rel, target, rel, {"dev": "devtmpfs", "proc": "proc", "sys": "sysfs"}
+                                   .get(rel, "tmpfs"))]
+    if target == MASK or target in BOX_LINKS.get(rel, ()):
+        return []
+    if ".." in path.split("/"):
+        # A '..' after a box mount, or after a step the tree lacks, cannot be cancelled lexically:
+        # /run/../var/lock is /var/lock on the box, which is /run/lock (1777). Box-made links such as
+        # /dev/fd make a lexical '..' unsound inside a mount too, so any such tail is refused.
+        return ["%s: a link to %s, which goes up with '..' past a directory the tree does not hold; "
+                "where it ends is not known at build time (#1702)" % (rel, target)]
     parts = path_parts(path)
-    for k in range(1, len(parts)):
+    for k in range(1, len(parts) + 1):
         d = "/".join(parts[:k])
         try:
-            st = None if d in WORLD_WRITABLE else tree_lstat(root, d)
+            st = None if d in WORLD_WRITABLE or d in SERVICE_DIRS else tree_lstat(root, d)
         except OSError:
             continue
-        if st is None and d in WORLD_WRITABLE or st is not None and stat.S_ISDIR(st.st_mode) and st.st_mode & 0o002:
-            return ["%s: a link to %s, inside /%s, which anyone on the box can write; a local user would decide what "
-                    "it reads (#1543)" % (rel, tree_readlink(root, rel), d)]
+        if st is None and (d in WORLD_WRITABLE or d in SERVICE_DIRS) \
+                or st is not None and stat.S_ISDIR(st.st_mode) and st.st_mode & 0o002:
+            return ["%s: a link to %s, inside /%s, which anyone on the box can write, or a service user owns; "
+                    "a local user would decide what it reads (#1543, #1702)" % (rel, target, d)]
+    if path.startswith("/") and rel.split("/", 1)[0] not in BOX_MOUNTS:
+        # Default deny (#1702 delta 2): the chase stopped at a box mount (tree_chase gives only such a
+        # path a leading '/'), and only BOX_LINKS' exact links may end there. A link the tree holds
+        # under a box mount is hidden by the mount on the box, so it is not one.
+        return ["%s: a link to %s%s, which ends in /%s, which the box fills at boot, so where it ends is not "
+                "known at build time; ship the file itself, or, if this link is stock and names a fixed "
+                "root-owned file, add it to BOX_LINKS per I23 (#1702)"
+                % (rel, target, "" if path == target else ", which reaches " + path, path.split("/")[1])]
     return []
 
 
@@ -827,7 +905,7 @@ def tree_chase(root, rel, hops=40, missing_ok=False):
     and '..' stops at ROOT. Returns (in-image path, lstat of it). A path that enters one of
     BOX_MOUNTS returns ("/" + that path, None) without looking at the tree. Raises
     FileNotFoundError if a step is missing (with MISSING_OK, returns (where the path would go, None):
-    the rest taken as written), and OSError if links loop or a step is not a directory."""
+    the rest taken as written, '..' and all), and OSError if links loop or a step is not a directory."""
     parts, cur = [x for x in rel.split("/") if x], []
     st = tree_lstat(root, "")
     while parts:
@@ -842,7 +920,7 @@ def tree_chase(root, rel, hops=40, missing_ok=False):
         st = tree_lstat(root, p)
         if st is None:
             if missing_ok:
-                return "/".join(path_parts("/".join(cur + [name] + parts))), None
+                return "/".join(cur + [name] + parts), None
             raise FileNotFoundError(errno.ENOENT, "No such file or directory", p)
         if stat.S_ISLNK(st.st_mode):
             hops -= 1

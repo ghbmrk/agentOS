@@ -2219,9 +2219,328 @@ class ConfFilesTest(unittest.TestCase):
                       self.v())
         w.unlink()
         (self.root / "etc/systemd/system/x.service").unlink()
-        # A link to such a directory itself is not refused (trixie's /var/lock), nor one elsewhere.
-        link(self.root, "usr/lib/x/tmp", "/tmp")
+        # Trixie's own var/lock -> ../run/lock passes, and so does a link elsewhere.
         link(self.root, "usr/lib/x/f", "../../share/f")
+        self.assertEqual(check.violations(self.root), ["var/lib/shared: mode 1777 is writable by anyone on the box (#1702)"])
+        (self.root / "var/lib/shared").chmod(0o755)
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_a_link_to_a_world_writable_directory_itself_is_refused(self):
+        # #1702 item 1: every name inside such a directory is the user's, so a link to the directory
+        # (a drop-in directory, a wants directory, udev's rules.d, a generator directory) is refused
+        # as one into it is. Only var/lock -> ../run/lock or -> /run/lock (CI's stock build has the
+        # absolute form), matched by path and target, passes.
+        for ok in ("../run/lock", "/run/lock"):
+            f = link(self.root, "var/lock", ok)
+            self.assertEqual(check.violations(self.root), [], ok)
+            f.unlink()
+        link(self.root, "var/lock", "../run/lock")
+        cases = (("etc/systemd/system/getty@.service.d", "/var/tmp", "var/tmp"),
+                 ("etc/systemd/system/getty@.service.d", "../../../var/tmp", "var/tmp"),
+                 ("etc/systemd/system/multi-user.target.wants", "/var/tmp", "var/tmp"),
+                 ("etc/udev/rules.d", "/var/tmp", "var/tmp"),
+                 ("etc/systemd/system-generators", "/tmp", "tmp"),
+                 ("etc/modules-load.d", "/dev/shm", "dev/shm"),
+                 ("usr/lib/x/q", "/dev/mqueue", "dev/mqueue"),
+                 ("usr/lib/x/q", "/run/lock", "run/lock"),
+                 ("var/lock", "../run/lock/", "run/lock"), ("var/lock", "/run/lock/", "run/lock"),
+                 ("var/lock", "/var/tmp", "var/tmp"),
+                 ("usr/lib/x/lock", "../../../run/lock", "run/lock"))
+        for rel, target, under in cases:
+            with self.subTest(rel=rel, target=target):
+                if rel == "var/lock":
+                    (self.root / rel).unlink()
+                f = link(self.root, rel, target)
+                try:
+                    self.assertIn("%s: a link to %s, inside /%s," % (rel, target, under), self.v())
+                finally:
+                    f.unlink()
+                    if rel == "var/lock":
+                        link(self.root, "var/lock", "../run/lock")
+        # With the user's 0666 file already in it, the reviewer's repro.
+        write(self.root, "var/tmp/zz-user.conf", "[Service]\nExecStartPre=/var/tmp/payload\n").chmod(0o666)
+        link(self.root, "etc/systemd/system/getty@.service.d", "/var/tmp")
+        self.assertIn("etc/systemd/system/getty@.service.d: a link to /var/tmp, inside /var/tmp,", self.v())
+
+    def test_a_link_into_a_service_users_directory_is_refused(self):
+        # #1702 item 3: a compromise of the fuzz user, the page's user or a login user then becomes
+        # root, since systemd and udev read the link's target as root.
+        for d in check.SERVICE_DIRS:
+            for rel, target in (("etc/systemd/system/ssh.service.d/x.conf", "/%s/x.conf" % d),
+                                ("etc/udev/rules.d/99-x.rules", "/%s/x.rules" % d),
+                                ("etc/modules-load.d", "/" + d), ("etc/systemd/system/x.d", "../../../" + d)):
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    try:
+                        self.assertIn("%s: a link to %s, inside /%s," % (rel, target, d), self.v())
+                    finally:
+                        f.unlink()
+        self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
+            "var/lib/agentos-fuzz", "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
+            "var/lib/private", "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap")))
+
+    def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
+        # #1702 (Security 1): /run/.. is / on the box, so /run/../var/lock is /var/lock, which is
+        # /run/lock (1777). The tail after a mount the tree does not hold, or after a step it lacks,
+        # is not cancelled lexically; a link that goes up past one is refused.
+        link(self.root, "var/lock", "../run/lock")
+        link(self.root, "var/run", "/run")
+        cases = [("/%s/../var/lock" % m) for m in check.BOX_MOUNTS] + [
+            "/run/../var/lock/x.conf", "../../run/../var/lock", "../../../../run/../var/lock",
+            "/run/../var/run/lock", "/run/../var/run/user/1000", "/opt/nope/../../var/lock"]
+        for rel in ("etc/udev/rules.d", "etc/systemd/system/ssh.service.d/x.conf"):
+            for target in cases:
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    try:
+                        self.assertIn("%s: a link to %s, which goes up with '..' past a directory" % (rel, target),
+                                      self.v())
+                    finally:
+                        f.unlink()
+        # The same links without the detour were refused already, and a '..' inside the tree is resolved.
+        for target in ("/var/lock", "/var/run/lock", "/var/run/user/1000"):
+            f = link(self.root, "etc/udev/rules.d", target)
+            self.assertNotEqual(self.v(), [], target)
+            f.unlink()
+        f = link(self.root, "etc/udev/rules.d", "../../usr/lib/../share/f")
+        self.assertEqual(check.violations(self.root), [])
+        f.unlink()
+
+    # #1702 (delta 2, Security 1, P/UX 1): links through what the box makes at boot, none with a '..'.
+    BOX_BYPASSES = ("/proc/self/root/var/lock", "/proc/self/root/var/tmp", "/proc/1/root/var/tmp",
+                    "/proc/1/root/tmp/x", "/proc/thread-self/root/home/u", "/proc/thread-self/root/home",
+                    "/proc/self/cwd/var/tmp", "/proc/self/root/run/lock/x.rules", "/proc/self/fd/3",
+                    "/proc/self/map_files/x", "/dev/fd/3", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr",
+                    "/dev/stdin/x", "/sys/x", "/run/x", "/var/run/systemd/x", "../../../../../proc/self/root/var/tmp")
+
+    def box_tree(self):
+        link(self.root, "var/lock", "/run/lock")
+        link(self.root, "var/run", "/run")
+
+    def test_a_link_through_what_the_box_mounts_is_refused(self):
+        # Default deny: a link that reaches a box mount ends where the box says at boot (/proc/self/root
+        # is the reader's /, /dev/fd/3 its fd 3), so only BOX_LINKS' exact stock links may end there.
+        self.box_tree()
+        for rel in ("etc/udev/rules.d", "etc/systemd/system/ssh.service.d/x.conf"):
+            for target in self.BOX_BYPASSES:
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    try:
+                        self.assertTrue(self.box_refused(rel, target), self.v())
+                    finally:
+                        f.unlink()
+        # A link the tree holds under a box mount is hidden by the mount on the box.
+        f = link(self.root, "run/x", "/proc/self/root/var/tmp")
+        self.assertEqual(check.violations(self.root), [])
+        f.unlink()
+
+    def box_refused(self, rel, target):
+        # The default deny's refusal of REL, naming the link, its target once (or where it reaches, if
+        # that differs) and the remedy.
+        path = check.tree_chase(str(self.root), rel, missing_ok=True)[0]
+        head = "%s: a link to %s%s, which ends in /%s," % (
+            rel, target, "" if path == target else ", which reaches " + path, path.split("/")[1])
+        return any(x.startswith(head) and x.count(target) == 1 and "add it to BOX_LINKS per I23" in x
+                   for x in check.violations(self.root))
+
+    def mutant(self, old, new):
+        # mkosi.finalize with OLD (which must be there exactly once) replaced by NEW, loaded as a module.
+        src = (MK / "mkosi.finalize").read_text()
+        self.assertEqual(src.count(old), 1, "the mutant's source line is gone from mkosi.finalize; "
+                         "update this test to the line as it now reads: %r" % old)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        mut = pathlib.Path(tmp.name) / "mutant.py"
+        mut.write_text(src.replace(old, new))
+        # Beside the mutant, where it looks for its allowlist, so its whole check can run.
+        (pathlib.Path(tmp.name) / check.TMPFILES_ALLOW).write_text((MK / check.TMPFILES_ALLOW).read_text())
+        m = load("image_check_mutant", mut)
+        m.TREE_OWNER = os.geteuid()
+        return m
+
+    def test_without_the_default_deny_the_box_links_pass(self):
+        # The mutant: drop the default deny, and every bypass passes the link rule (the '..', world-
+        # writable and SERVICE_DIRS rules do not see them).
+        m = self.mutant('    if path.startswith("/") and rel.split("/", 1)[0] not in BOX_MOUNTS:\n',
+                        "    if False:\n")
+        self.box_tree()
+        for target in self.BOX_BYPASSES:
+            with self.subTest(target=target):
+                f = link(self.root, "etc/udev/rules.d", target)
+                try:
+                    self.assertEqual(m.world_writable_link(str(self.root), "etc/udev/rules.d"), [])
+                    self.assertNotEqual(check.world_writable_link(str(self.root), "etc/udev/rules.d"), [])
+                finally:
+                    f.unlink()
+
+    # Security delta 3: a link at a box mount point; the box would move its mount onto the target.
+    MOUNT_POINT_LINKS = (("dev", "var/tmp"), ("proc", "var/tmp"), ("sys", "var/tmp"), ("dev", "/dev/null"),
+                         ("run", "var/tmp"), ("tmp", "var/tmp"), ("run", "/var/x"), ("sys", "../usr/lib"),
+                         ("proc", "/proc"))
+
+    def test_a_link_at_a_box_mount_point_is_refused(self):
+        self.box_tree()
+        for rel, target in self.MOUNT_POINT_LINKS:
+            with self.subTest(rel=rel, target=target):
+                f = link(self.root, rel, target)
+                try:
+                    self.assertIn("%s: a link to %s; /%s is where the box mounts its " % (rel, target, rel),
+                                  self.v())
+                    self.assertIn("a link there would move the mount (#1702)", self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_mount_point_rule_a_link_there_passes(self):
+        # The mutant: drop the mount-point line, and dev, proc and sys links pass the link rule (the
+        # carve-out exempts them, and a /dev/null target is a mask); run and tmp were refused only by
+        # accident (stray_violations' ELOOP, WORLD_WRITABLE's /tmp).
+        m = self.mutant("    if rel in BOX_MOUNTS:\n", "    if False:\n")
+        self.box_tree()
+        for rel, target in self.MOUNT_POINT_LINKS:
+            with self.subTest(rel=rel, target=target):
+                f = link(self.root, rel, target)
+                try:
+                    self.assertNotEqual(check.world_writable_link(str(self.root), rel), [])
+                    mv = m.world_writable_link(str(self.root), rel)
+                    self.assertFalse(any("would move the mount" in x for x in mv), mv)
+                    if rel in ("dev", "proc", "sys"):
+                        self.assertEqual(m.violations(self.root), [])
+                finally:
+                    f.unlink()
+
+    def test_box_links_is_exactly_the_stock_set(self):
+        # #1702 (P/UX 2): pinned, as SERVICE_DIRS is, so widening the table takes a second, reviewed edit.
+        self.assertEqual(check.BOX_LINKS, {"var/lock": ("../run/lock", "/run/lock"),
+                                           "var/run": ("../run", "/run"),
+                                           "etc/mtab": ("../proc/self/mounts",),
+                                           "etc/resolv.conf": ("../run/systemd/resolve/stub-resolv.conf",)})
+
+    def test_box_links_mutants_are_killed(self):
+        # M6, an extra entry to a reader-relative target, and M13, BOX_LINKS matched by path suffix:
+        # each lets a link through that the real check refuses.
+        old = '             "etc/resolv.conf": ("../run/systemd/resolve/stub-resolv.conf",)}\n'
+        m6 = self.mutant(old, old[:-2] + ',\n             "etc/foo": ("/dev/fd/3",)}\n')
+        with self.assertRaises(AssertionError):
+            self.assertEqual(m6.BOX_LINKS, check.BOX_LINKS)
+        f = link(self.root, "etc/foo", "/dev/fd/3")
+        self.assertEqual(m6.world_writable_link(str(self.root), "etc/foo"), [])
+        self.assertNotEqual(check.world_writable_link(str(self.root), "etc/foo"), [])
+        f.unlink()
+        m13 = self.mutant("    if target == MASK or target in BOX_LINKS.get(rel, ()):\n",
+                          "    if target == MASK or any(rel.endswith(k) and target in v "
+                          "for k, v in BOX_LINKS.items()):\n")
+        for rel, target in (("etc/x/var/run", "/run"), ("x/var/lock", "/run/lock")):
+            with self.subTest(rel=rel, target=target):
+                f = link(self.root, rel, target)
+                try:
+                    self.assertEqual(m13.world_writable_link(str(self.root), rel), [])
+                    self.assertNotEqual(check.world_writable_link(str(self.root), rel), [])
+                finally:
+                    f.unlink()
+
+    def test_each_stock_box_link_passes_and_only_exactly(self):
+        # Every BOX_LINKS entry passes as the stock tree holds it, and a mask anywhere; a link that
+        # differs from an entry by one component, in its path or its target, is refused.
+        for rel, targets in sorted(check.BOX_LINKS.items()):
+            for target in targets:
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    try:
+                        self.assertEqual(check.violations(self.root), [])
+                    finally:
+                        f.unlink()
+        f = link(self.root, "usr/lib/systemd/system/x.service", "/dev/null")
+        self.assertEqual(check.violations(self.root), [])
+        f.unlink()
+        near = [("etc/x/mtab", "../../proc/self/mounts"), ("etc/mtab", "../proc/self/mountinfo"),
+                ("etc/mtab", "../proc/1/mounts"), ("etc/mtab", "../proc/self/root/mounts"),
+                ("etc/mtab", "/proc/self/mounts"),
+                ("var/run", "/run/user"), ("var/run", "/sys"), ("etc/run", "/run"),
+                ("etc/x/var/run", "/run"), ("x/var/lock", "/run/lock"),
+                ("etc/resolv.conf", "../run/systemd/resolve/resolv.conf"),
+                ("etc/resolv.conf", "../run/systemd/resolve/stub-resolv.conf/x"),
+                ("etc/resolv.conf", "../run/systemd/x/stub-resolv.conf"), ("etc/resolv.conf", "/run/systemd/resolve/stub-resolv.conf"), ("etc/resolv2.conf", "/run/systemd/resolve/stub-resolv.conf"),
+                ("etc/udev/rules.d/x.rules", "/dev/null/x"), ("etc/udev/rules.d/x.rules", "/dev/zero"),
+                ("etc/udev/rules.d/x.rules", "../../../dev/null")]
+        for rel, target in near:
+            with self.subTest(rel=rel, target=target):
+                f = link(self.root, rel, target)
+                try:
+                    self.assertNotEqual(check.violations(self.root), [])
+                finally:
+                    f.unlink()
+
+    def test_a_link_into_a_runtime_dir_through_var_run_is_refused(self):
+        # SERVICE_DIRS' run/agentos-* entries, reached the way stock links go: through var/run.
+        self.box_tree()
+        for d in ("agentos-ap", "agentos-egress", "agentos-netjoin"):
+            f = link(self.root, "etc/udev/rules.d", "/var/run/%s/x" % d)
+            self.assertIn("etc/udev/rules.d: a link to /var/run/%s/x, inside /run/%s," % (d, d), self.v())
+            f.unlink()
+
+    def test_a_link_loop_fails_open(self):
+        # A loop, or a non-directory step, fails the same lookup on the box, so the link reads nothing:
+        # world_writable_link passes it on purpose (its OSError path), and nothing else here refuses it.
+        link(self.root, "usr/lib/x/a", "b")
+        link(self.root, "usr/lib/x/b", "a")
+        write(self.root, "usr/lib/x/f", "x\n")
+        link(self.root, "usr/lib/x/c", "f/y")
+        for rel in ("usr/lib/x/a", "usr/lib/x/b", "usr/lib/x/c"):
+            self.assertEqual(check.world_writable_link(str(self.root), rel), [], rel)
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_the_lock_and_world_writable_exemptions_are_exact(self):
+        # #1702 (Security, L3): the lock link is matched by path, not by suffix; a link through
+        # var/lock reaches run/lock; the o+w exemption is by directory name, not by prefix.
+        link(self.root, "var/lock", "../run/lock")
+        f = link(self.root, "etc/x/lock", "/run/lock")
+        self.assertIn("etc/x/lock: a link to /run/lock, inside /run/lock,", self.v())
+        f.unlink()
+        for target in ("/var/lock/x", "/var/lock"):
+            f = link(self.root, "etc/udev/rules.d", target)
+            self.assertIn("etc/udev/rules.d: a link to %s, inside /run/lock," % target, self.v(), target)
+            f.unlink()
+        for rel in ("var/tmpx", "run/lockx"):
+            (self.root / rel).mkdir(parents=True, exist_ok=True)
+            (self.root / rel).chmod(0o777)
+            self.assertIn("%s: mode 0777 is writable by anyone on the box" % rel, self.v())
+            (self.root / rel).rmdir()
+        (self.root / "var/tmp").mkdir(parents=True, exist_ok=True)
+        write(self.root, "var/tmp/f", "x\n").chmod(0o666)
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_an_entry_anyone_can_write_is_refused_wherever_it_is(self):
+        # #1702 item 2: a 1777 drop-in directory, a 0777 rules.d, a 0666 enabled unit, a 0777 generator.
+        # Group write is not a rule (stock trixie has 2775 var/mail and var/local).
+        write(self.root, "etc/systemd/system/x.service", "[Service]\n")
+        link(self.root, "etc/systemd/system/multi-user.target.wants/x.service", "../x.service")
+        cases = (("etc/systemd/system/getty@.service.d", 0o1777, True), ("etc/udev/rules.d", 0o777, True),
+                 ("etc/systemd/system/x.service", 0o666, False), ("usr/lib/systemd/system-generators/x", 0o777, False),
+                 ("etc/foo", 0o2, False), ("etc/foo", 0o1777, True))
+        for rel, mode, is_dir in cases:
+            with self.subTest(rel=rel, mode=oct(mode)):
+                if is_dir:
+                    (self.root / rel).mkdir(parents=True, exist_ok=True)
+                else:
+                    write(self.root, rel, "x\n")
+                (self.root / rel).chmod(mode)
+                try:
+                    self.assertIn("%s: mode %04o is writable by anyone on the box" % (rel, mode), self.v())
+                finally:
+                    if is_dir:
+                        (self.root / rel).rmdir()
+                    elif rel != "etc/systemd/system/x.service":
+                        (self.root / rel).unlink()
+        (self.root / "etc/systemd/system/x.service").chmod(0o644)
+        self.assertEqual(check.violations(self.root), [])
+        for rel, mode in (("var/mail", 0o2775), ("var/local", 0o2775), ("usr/lib/x", 0o775)):
+            (self.root / rel).mkdir(parents=True, exist_ok=True)
+            (self.root / rel).chmod(mode)
+        self.assertEqual(check.violations(self.root), [])
+        # The directories the box makes 1777 are the ones exempt, and only by their own names.
+        for rel in check.WORLD_WRITABLE:
+            (self.root / rel).mkdir(parents=True, exist_ok=True)
+            (self.root / rel).chmod(0o1777)
         self.assertEqual(check.violations(self.root), [])
 
     def test_a_mask_is_still_read_as_nothing(self):
@@ -2456,7 +2775,7 @@ TMPFILES_PASS = ("d /run/user 0755 root root -", "L /var/run - - - - ../run", "L
                  "L+ /var/run - - - - ../run", "L /var/run - - - - /run", "L /etc/mtab - - - - ../proc/self/mounts",
                  "L+ /etc/mtab   -    -    -    -  ../proc/self/mounts", "x /tmp/systemd-private-%b-*",
                  "d %t/agentos 0750", "d /run/systemd/netif 0755 - - -", "f^ /etc/hosts - - - - network.hosts",
-                 "r /run/sysctlx.d", "L /etc/y - - - - /run/agentos", "C! /etc/pam.d - - - -",
+                 "r /run/sysctlx.d", "C! /etc/pam.d - - - -",
                  "L /etc/os-release - - - - /usr/lib/os-release",
                  # trixie's credstore.conf, debian.conf, legacy.conf and systemd-resolve.conf (CI build of #1543).
                  "d /etc/credstore 0700 root root", "d /etc/credstore.encrypted 0700 root root",
@@ -3214,17 +3533,24 @@ FS_CALLS = frozenset((
     "is_file", "is_dir", "is_symlink", "is_socket", "is_fifo", "is_mount", "is_block_device", "is_char_device",
     "exists", "lexists", "isfile", "isdir", "islink", "ismount", "stat", "lstat", "fstat", "statvfs", "listdir",
     "scandir", "walk", "fwalk", "iterdir", "glob", "rglob", "readlink", "realpath", "resolve", "samefile",
-    "access", "getsize", "getmtime", "getctime", "getatime", "chdir", "opendir"))
+    "access", "getsize", "getmtime", "getctime", "getatime", "chdir", "opendir",
+    # #1702: a shell or a new process reads the host's files too, and so do the xattr and pathconf calls.
+    "popen", "system", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+    "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe", "posix_spawn", "posix_spawnp",
+    "getxattr", "listxattr", "pathconf",
+    # #1702: ways to reach any of the above by a name the parse cannot see.
+    "__getattribute__", "__dict__", "modules"))
 # Built-ins that open files or reach a call by a name the parse cannot see.
 FS_NAMES = frozenset(("open", "getattr", "__import__", "eval", "exec", "globals", "vars", "memoryview"))
-FS_MODULES = frozenset(("pathlib", "glob", "shutil", "io", "posix", "fileinput", "linecache", "mmap", "subprocess"))
+FS_MODULES = frozenset(("pathlib", "glob", "shutil", "io", "posix", "fileinput", "linecache", "mmap", "subprocess",
+                        "importlib", "filecmp", "operator", "ctypes"))
 
 
 def fs_offences(source, allowed, readers):
     """(function, line, what) for each file-reading or stat call in SOURCE outside the functions
     ALLOWED names (Class.method for a method; nested functions count as their outermost), each
-    ImportFrom and each import of FS_MODULES anywhere, and each call of a function in READERS
-    from outside the callers it lists."""
+    ImportFrom and each import of FS_MODULES anywhere, and each mention of a function in READERS
+    (a call, or `rd = tree_read`, #1702) from outside the callers it lists."""
     out = []
 
     def visit(node, scope, func):
@@ -3246,9 +3572,8 @@ def fs_offences(source, allowed, readers):
             elif isinstance(child, ast.Import):
                 out.extend((where, child.lineno, "import " + a.name) for a in child.names
                            if a.name.split(".")[0] in FS_MODULES)
-            elif isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and child.func.id in readers \
-                    and where not in readers[child.func.id]:
-                out.append((where, child.lineno, child.func.id))
+            elif isinstance(child, ast.Name) and child.id in readers and where not in readers[child.id]:
+                out.append((where, child.lineno, child.id))
             visit(child, s, f)
 
     visit(ast.parse(source), [], None)
@@ -3298,6 +3623,26 @@ class TreeAccessTest(unittest.TestCase):
             "tree_read direct": [(fstab, '        for ln in tree_read(root, "etc/fstab").decode().splitlines():')],
             "os.path in a reader": [("    out, root = [], str(root)\n    places =",
                                      "    out, root = [], str(root)\n    assert os.path.exists(root)\n    places =")],
+            # #1702 item 4: the forms the first nine missed.
+            "os.popen": [(mid, '        if os.popen("cat " + root).read().strip() not in ("", "uninitialized"):')],
+            "os.system": [("\ndef violations(root):", "\nrc = os.system('cat /etc/fstab')\n\n\ndef violations(root):")],
+            "os.spawnv": [("\ndef violations(root):", "\nrc = os.spawnv(0, '/bin/cat', ['cat'])\n\n\ndef violations(root):")],
+            "os.execv": [("\ndef violations(root):", "\nos.execv('/bin/cat', ['cat'])\n\n\ndef violations(root):")],
+            "os.posix_spawn": [("\ndef violations(root):", "\nos.posix_spawn('/bin/cat', ['cat'], {})\n\n\ndef violations(root):")],
+            "os.getxattr": [(mid, '        if os.getxattr(root, "user.x") not in ("", "uninitialized"):')],
+            "os.listxattr": [("\ndef violations(root):", "\nX = os.listxattr(\"/\")\n\n\ndef violations(root):")],
+            "os.pathconf": [("\ndef violations(root):", "\nX = os.pathconf(\"/\", 0)\n\n\ndef violations(root):")],
+            "filecmp": [(mid, '        if filecmp.cmp(root, root):'), ("import os\n", "import os\nimport filecmp\n")],
+            "importlib": [("import os\n", "import os\nimport importlib\n")],
+            "operator": [(mid, '        if operator.attrgetter("lstat")(os)(root):'), ("import os\n", "import os\nimport operator\n")],
+            "ctypes": [("import os\n", "import os\nimport ctypes\n")],
+            "os.__getattribute__": [(mid, '        if os.__getattribute__("lstat")(root):')],
+            "os.__dict__": [(mid, '        if os.__dict__["lstat"](root):')],
+            "sys.modules": [(mid, '        if sys.modules["os"].lstat(root):')],
+            # Caught by the "modules" rule alone: .lstat is not involved.
+            "sys.modules alias": [("\ndef violations(root):", "\nM = sys.modules['os']\n\n\ndef violations(root):")],
+            "tree_read alias": [(fstab, '        rd = tree_read\n        for ln in rd(root, "etc/fstab").decode().splitlines():')],
+            "tree_read passed": [(fstab, '        for ln in map(tree_read, [root], ["etc/fstab"]):')],
         }
         for name, edits in mutants.items():
             with self.subTest(name):
