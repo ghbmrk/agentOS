@@ -19,6 +19,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/durable"
+	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
 // Progress is the box's boot state for the status and setup pages (ONB-4).
@@ -790,8 +791,21 @@ func (s *Server) OfferText(from, text string) (reply string, handled bool) {
 	return reply, true
 }
 
+// hostMax is the most of the pairing reply the PC's name and RAM take;
+// agentosd sends no longer one (localapi.SetupText).
+const hostMax = localapi.SetupHostMax
+
+// pairedText names the PC in the pairing reply. The host keeps no '.',
+// '/' or ':' and starts with a letter or digit, as localapi.SetupText
+// allows, so no link or domain can ride in it.
 func pairedText(host string) string {
-	host = gsmSafe(host, 40)
+	host = strings.Map(func(r rune) rune {
+		if strings.ContainsRune(".:/", r) {
+			return -1
+		}
+		return r
+	}, host)
+	host = strings.TrimLeft(gsmSafe(host, hostMax), " ,()+'-")
 	if host == "" {
 		host = "this PC"
 	}
@@ -1045,6 +1059,9 @@ func (u *setup) recovery(r *http.Request, _ string) error {
 	return u.save(func(s *SetupState) { s.Recovery = true })
 }
 
+// errNoTrustChip is the host step's text for a PC without a TPM (CH-12).
+var errNoTrustChip = errors.New(`This PC has no security chip, so it cannot restart your box by itself. Tick "This is not my PC" to continue.`)
+
 // host makes this PC trusted by default; "not my PC" opts out. The default
 // is allowed only after code enrollment on this page (§8.1, CH-3).
 func (u *setup) host(r *http.Request, _ string) error {
@@ -1056,9 +1073,13 @@ func (u *setup) host(r *http.Request, _ string) error {
 		return errors.New("Finish the earlier steps first.")
 	}
 	if err := u.s.cfg.Hooks.TrustHost(trusted); err != nil {
-		// The page shows one text for every cause; the journal keeps the
-		// real one (it holds no secret) for the e2e driver and the owner.
+		// The page shows one text for every cause but a PC with no TPM;
+		// the journal keeps the real one (it holds no secret) for the e2e
+		// driver and the owner.
 		log.Printf("localui: setup host hook: %v", err)
+		if errors.Is(err, ErrNoTrustChip) {
+			return errNoTrustChip
+		}
 		return errors.New("Could not save. Try again.")
 	}
 	u.mu.Lock()

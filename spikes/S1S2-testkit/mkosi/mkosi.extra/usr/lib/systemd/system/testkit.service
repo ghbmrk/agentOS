@@ -1,5 +1,5 @@
 [Unit]
-Description=AgentOS S1/S2 test kit
+Description=agentOS S1/S2 test kit
 # After blessing, so the good entry's counter is already cleared when testkit re-arms it.
 After=basic.target ModemManager.service systemd-bless-boot.service boot-complete.target
 Wants=ModemManager.service

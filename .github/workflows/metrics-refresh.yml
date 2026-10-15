@@ -1,0 +1,68 @@
+name: metrics-refresh
+# Keeps the open bot/metrics PR current with main (#1691, Merge-overhead). main's strict
+# ruleset blocks a PR whose branch lacks main's tip, and metrics.yml rebuilds the branch only
+# at its daily run, so its PR fell behind after the next merge. On each push to main this
+# re-bases the collected METRICS.md onto the new main and re-dispatches ci.yml. It reuses
+# what metrics.yml collected and calls no API, so it is cheap; collection (10-35 minutes of
+# API paging) stays daily in metrics.yml, and per push it would never settle, since each
+# file it writes carries a new "Data as of" time. A separate file so metrics.yml keeps its
+# single writing job. It runs no repository code and changes only METRICS.md.
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  # Its own group: sharing metrics.yml's would let a queued refresh cancel a pending
+  # daily collection. The push below is leased instead, so it never overwrites a newer
+  # bot/metrics from metrics.yml's commit job.
+  group: metrics-refresh
+  cancel-in-progress: false
+jobs:
+  refresh:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # BOT_PR_TOKEN lives in this environment, whose deployment-branch policy admits main
+    # only, so branch workflows cannot read it (decision #1769).
+    environment: bot
+    permissions:
+      contents: write # push the bot/metrics branch (never main)
+      pull-requests: write # close an obsolete PR
+      actions: write # dispatch ci.yml on the branch
+    env:
+      GH_TOKEN: ${{ secrets.BOT_PR_TOKEN || github.token }}
+      BRANCH: bot/metrics
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: main
+          token: ${{ secrets.BOT_PR_TOKEN || github.token }}
+      - name: Rebuild the open METRICS.md PR on the new main
+        run: |
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            echo "no open $BRANCH PR"
+            exit 0
+          fi
+          # The branch is one commit on main, so its parent shows whether it is current.
+          git fetch -q --depth=2 origin "refs/heads/$BRANCH"
+          lease="$(git rev-parse FETCH_HEAD)"
+          if [ "$(git rev-parse FETCH_HEAD^)" = "$(git rev-parse HEAD)" ]; then
+            echo "$BRANCH already contains main"
+            exit 0
+          fi
+          git checkout FETCH_HEAD -- METRICS.md
+          if git diff --cached --quiet; then
+            echo "main already has this METRICS.md"
+            gh pr close "$BRANCH" --delete-branch 2>/dev/null || true
+            exit 0
+          fi
+          test -z "$(git status --porcelain | grep -v '^M  METRICS.md$')"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -qC "$BRANCH"
+          git commit -qm "metrics: daily METRICS.md (rebuilt on ${GITHUB_SHA::7})" -- METRICS.md
+          if ! git push -q --force-with-lease="refs/heads/$BRANCH:$lease" origin "HEAD:refs/heads/$BRANCH"; then
+            echo "::notice::$BRANCH moved since fetch (metrics.yml rebuilt it); left as is"
+            exit 0
+          fi
+          gh workflow run ci.yml --ref "$BRANCH"

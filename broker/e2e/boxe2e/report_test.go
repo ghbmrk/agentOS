@@ -67,11 +67,11 @@ func TestReportExpectedFailureMatchesItsText(t *testing.T) {
 		step, msg string
 		xfail     bool
 	}{
-		{"host", `after 1m0s: ` + hostErr, true},
 		{"guest-task", notDriven + " needs a stub", true},
 		{"phone-control", notDriven + " needs a text", true},
-		// Other ways to be stuck at "6. This PC": the page shows its error
-		// once, and every hook error reads the same there.
+		// host is no longer listed (#1221 serves it): the old not-served
+		// error, and every other way to be stuck at "6. This PC", is FAIL.
+		{"host", `after 1m0s: ` + hostErr, false},
 		{"host", `after 1m0s: at "6. This PC"`, false},
 		{"host", `after 1m0s: at "6. This PC" saying Could not save. Try again.`, false},
 		{"host", `after 1m0s: at "6. This PC" saying Finish the earlier steps first.`, false},
@@ -106,9 +106,6 @@ func TestXfailWantsAreSpecific(t *testing.T) {
 		if len(ef.want) < 10 || ef.issue == 0 {
 			t.Errorf("%s: want %q issue %d is too loose", name, ef.want, ef.issue)
 		}
-	}
-	if !strings.Contains(xfail["host"].want, "not served by agentosd yet") {
-		t.Fatalf("host want %q lost the not-served text", xfail["host"].want)
 	}
 	if xfail["guest-task"].want != notDriven || xfail["phone-control"].want != notDriven || notDriven != "not driven yet:" {
 		t.Fatal("not-driven wants changed")

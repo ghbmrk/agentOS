@@ -117,7 +117,7 @@ func TestAVaultThatCannotFinishSetupSaysSo(t *testing.T) {
 			Enroll:   vaultEnroller{r.hooks},
 			Progress: func() localapi.SetupProgress { p := r.hooks.Progress(); return localapi.SetupProgress(p) },
 			Finished: func(string) {}, Now: r.clock})
-		r.via = viaAgentosd{r.hooks, AgentosdSetup{InProcess(s.Ops())}}
+		r.via = viaAgentosd{r.hooks, AgentosdSetup{Owner: InProcess(s.Ops())}}
 		r.srv = r.open(&MemStore{})
 	}
 	r := newRig(t)
@@ -230,7 +230,7 @@ func TestSetupFinishesThroughAgentosdAndClosesForGood(t *testing.T) {
 			Finished: func(o string) { owners = append(owners, o) }, Now: r.clock})
 	}
 	sock := InProcess(open().Ops())
-	r.via = viaAgentosd{r.hooks, AgentosdSetup{sock}}
+	r.via = viaAgentosd{r.hooks, AgentosdSetup{Owner: sock}}
 	r.srv = r.open(&MemStore{})
 	r.runSetup()
 	if !r.srv.setup.done() || len(owners) != 1 || owners[0] != ownerNum {
@@ -241,7 +241,7 @@ func TestSetupFinishesThroughAgentosdAndClosesForGood(t *testing.T) {
 		t.Fatalf("record %v: %s", err, b)
 	}
 	for _, s := range []namedOwner{{"live", sock}, {"restarted", InProcess(open().Ops())}} {
-		a := AgentosdSetup{s.o}
+		a := AgentosdSetup{Owner: s.o}
 		if !a.AlreadySetUp() {
 			t.Errorf("%s: setup open", s.name)
 		}
@@ -317,7 +317,7 @@ func TestARestartedSetupSealsTheNewPairingsSeed(t *testing.T) {
 	vault := &k17Vault{now: r.clock}
 	sock := InProcess(localsrv.NewSetup(localsrv.SetupConfig{Record: localsrv.FileRecord{Path: filepath.Join(t.TempDir(), "setup.json")},
 		Enroll: vault, Now: r.clock}).Ops())
-	agentosd := AgentosdSetup{sock}
+	agentosd := AgentosdSetup{Owner: sock}
 	r.via = viaAgentosd{r.hooks, agentosd}
 	r.srv = r.open(&MemStore{})
 	pair := func(num string) []byte {
@@ -382,11 +382,11 @@ func secretOf(seed []byte) string { return b32.EncodeToString(seed) }
 func TestThePageWaitsForAgentosd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if err := (AgentosdSetup{Socket{Path: filepath.Join(t.TempDir(), "none.sock")}}).Wait(ctx, time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+	if err := (AgentosdSetup{Owner: Socket{Path: filepath.Join(t.TempDir(), "none.sock")}}).Wait(ctx, time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("wait %v", err)
 	}
 	closed := InProcess{localapi.OpSetupProgress: nil}
-	if err := (AgentosdSetup{closed}).Wait(context.Background(), time.Millisecond); err != nil {
+	if err := (AgentosdSetup{Owner: closed}).Wait(context.Background(), time.Millisecond); err != nil {
 		t.Fatalf("a refusal is an answer: %v", err)
 	}
 }
@@ -396,7 +396,7 @@ func TestThePageWaitsForAgentosd(t *testing.T) {
 // ErrAnswerOwed.
 func TestTheAdapterCarriesAnOwedAnswer(t *testing.T) {
 	no := false
-	a := AgentosdSetup{InProcess{
+	a := AgentosdSetup{Owner: InProcess{
 		localapi.OpSetupProviders: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 			return localapi.SetupProviders{Providers: []localapi.SetupProvider{{ID: "anthropic", APIKey: true, Owed: &no}, {ID: "openai", APIKey: true}}}, nil
 		},

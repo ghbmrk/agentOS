@@ -580,6 +580,9 @@
   "reviews/ux/2026-10-14-pr1534.md": {
     "620bf41d35c6211e73e77012b99939f637bdfd31dcc8b5a3ad35bc8c231ca85f": 1
   },
+  "reviews/ux/2026-10-14-pr1592.md": {
+    "a0499cb7cc1d4e6d2292e6afab932af16e1c81610be012fcaa5b1dd162d4882d": 1
+  },
   "reviews/ux/evidence/2026-10-08-onboarding/README.md": {
     "5d32a3c776d1ed5da840d048c89d3b9dac588064f2d2e11cccab5a38b7b23a2e": 1,
     "bdf475a50b5a5033d2d8ea2ba8dce9e0b1b409e07ba39edaef9dfd4f375433f0": 1
@@ -680,7 +683,8 @@
     "e5ad91a9427798542e6b63aa7b17af3b9812bb16de407f3eb1e5d5bba8a500d4": 1
   },
   "tests/test_image.py": {
-    "8574ea1ffd5fe2d6d76759f56c5d3212cfc88a94e22faf83bdb7b42d0c228d31": 1
+    "8574ea1ffd5fe2d6d76759f56c5d3212cfc88a94e22faf83bdb7b42d0c228d31": 1,
+    "91adad16bdcbb235fc97011236390d85864cd3f54abca4ef3f09055d8eeb5e86": 1
   },
   "tools/depaudit.py": {
     "2c137db16aeb5438ced4cc59c15dcb06bea589864bb86f87f63a429265180d92": 1

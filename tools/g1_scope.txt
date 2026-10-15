@@ -32,6 +32,9 @@
 
 freeze on
 since 2026-10-14T21:11:52Z
+# #1748: #809's plan-route measurement scripts (spikes/S8-live/), which are G1 work:
+# #809 enables the one model route (above). Mark 2026-10-14 23:32Z, "Amend PR".
+exempt-pr 1748
 
 # Project machinery and records.
 allow .claude/

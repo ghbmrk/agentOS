@@ -75,6 +75,8 @@ type trustedHost interface {
 	remove(v *vault.Vault, id string) (int, error)
 	// list describes the trusted PCs.
 	list() ([]hostInfo, error)
+	// self is this PC's host ID, or an error when its TPM cannot say.
+	self() (string, error)
 	// anchor binds the open vault to this PC's rollback counter, making
 	// the counter if needed (V6); trust calls it before enroll.
 	anchor(v *vault.Vault) error
@@ -1044,6 +1046,21 @@ const (
 func (h *tpmHost) sayErr(sentence string, err error) {
 	log.Printf("custody: %s: %v", sentence, err)
 	h.say(sentence)
+}
+
+func (h *tpmHost) self() (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	t, err := h.openTPM()
+	if err != nil {
+		return "", err
+	}
+	defer t.Close()
+	me, err := tpmseal.Identity(t)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(me), nil
 }
 
 func (h *tpmHost) list() ([]hostInfo, error) {

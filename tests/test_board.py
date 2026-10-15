@@ -194,6 +194,51 @@ class PullRequestTest(unittest.TestCase):
         ])
 
 
+class IntakeProblemsTest(unittest.TestCase):
+    """CX-BOARD-INTAKE: one run names every malformed work-item issue, and still writes nothing."""
+
+    def malformed(self):
+        a, b, c, d, e = (dict(i, author_association="OWNER") for i in issues()[:1] * 5)
+        for n, i in enumerate((a, b, c, d, e), start=200):
+            i["number"] = n
+        a["labels"] = [x for x in a["labels"] if not x.startswith("state:")]  # no state label
+        b["labels"] = [x for x in b["labels"] if not x.startswith("state:")] + ["state:review"]  # unknown
+        c["body"] = "no block"
+        d["title"] = "untitled"
+        e["body"] = e["body"].replace('"section": "Harness"', '"section": "Nowhere"')
+        return [a, b, c, d, e]
+
+    def test_render_collects_every_problem(self):
+        with self.assertRaises(board.Malformed) as ctx:
+            board.render(BOARD, self.malformed())
+        got = ctx.exception.problems
+        self.assertEqual(len(got), 5, got)
+        for n in range(200, 205):
+            self.assertEqual(sum(f"#{n}" in p for p in got), 1, got)
+
+    def test_duplicate_id_and_cell_count_are_reported_together(self):
+        planned = issues()
+        dup = dict(planned[0], number=999)
+        wide = dict(planned[1], number=998, body=planned[1]["body"].replace('"cells": [', '"cells": ["extra", '))
+        wide["title"] = "A-9: wide"
+        with self.assertRaises(board.Malformed) as ctx:
+            board.render(BOARD, [*planned, dup, wide])
+        text = str(ctx.exception)
+        self.assertIn("issue #999: a second issue for A-1", text)
+        self.assertIn("issue #998: ", text)
+
+    def test_render_and_check_print_all_and_write_nothing(self):
+        items = [dict(i, author_association="OWNER") for i in self.malformed()]
+        for command in ("render", "check"):
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = board.main([command, "--repo", "o/r"], read=lambda: BOARD + board.GENERATED + "\n",
+                                  fetch=github(items))
+            self.assertEqual((code, out.getvalue()), (1, ""), command)
+            lines = [x for x in err.getvalue().splitlines() if x.startswith("board: issue #")]
+            self.assertEqual(len(lines), 5, err.getvalue())
+
+
 class CliTest(unittest.TestCase):
     def run_tool(self, *args, text=BOARD):
         out, err = io.StringIO(), io.StringIO()

@@ -14,6 +14,9 @@ func TestSetupTextAllowsOnlySetupsFixedTexts(t *testing.T) {
 		"AgentOS page code: 000001. Type it on the setup page.",
 		"agentOS is running on this PC. This is your box's number; save it as agentOS.",
 		"agentOS is running on this PC. This is your box's number; save it as agentOS. Page code: 654321.",
+		// The PC's name and RAM (P2-2w c4d, §8.1).
+		"agentOS is running on Intel(R) Client Systems NUC13ANHi5, 8 GB. This is your box's number; save it as agentOS.",
+		"agentOS is running on a PC with 16 GB. This is your box's number; save it as agentOS.",
 		"That pairing code did not match. Check the setup page.",
 		"Could not save your number. Try again.",
 	} {
@@ -29,6 +32,12 @@ func TestSetupTextAllowsOnlySetupsFixedTexts(t *testing.T) {
 		"hello",
 		"Could not save your number. Try again.\nhttp://x.example",
 		"agentOS is running on evil.example. This is your box's number; save it as agentOS.",
+		"agentOS is running on http://x. This is your box's number; save it as agentOS.",
+		"agentOS is running on x/y. This is your box's number; save it as agentOS.",
+		// Each excluded host character on its own: no '.', '/' or ':'.
+		"agentOS is running on tel:5550100. This is your box's number; save it as agentOS.",
+		"agentOS is running on -x. This is your box's number; save it as agentOS.",
+		"agentOS is running on " + strings.Repeat("a", SetupHostMax+1) + ". This is your box's number; save it as agentOS.",
 	} {
 		if SetupText(s) {
 			t.Errorf("SetupText(%q) = true", s)
