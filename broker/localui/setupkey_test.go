@@ -87,7 +87,7 @@ func TestConnectAPIKeyNamesAgentosdsAnswer(t *testing.T) {
 		localapi.ErrSetupClosed:       ErrSetupClosed,
 		localapi.ErrEnrollUnavailable: ErrCodesUnavailable,
 	} {
-		err := AgentosdSetup{ownerAnswers{code, &wait}}.ConnectAPIKey("openai", apiCanary)
+		err := AgentosdSetup{Owner: ownerAnswers{code, &wait}}.ConnectAPIKey("openai", apiCanary)
 		if !errors.Is(err, want) || !refused(err, code) {
 			t.Fatalf("%s: %v, want %v", code, err, want)
 		}
@@ -95,10 +95,10 @@ func TestConnectAPIKeyNamesAgentosdsAnswer(t *testing.T) {
 			t.Fatalf("%s: the error carries the key", code)
 		}
 	}
-	if err := (AgentosdSetup{ownerAnswers{localapi.ErrFailed, &wait}}).ConnectAPIKey("openai", apiCanary); !refused(err, localapi.ErrFailed) || errors.Is(err, ErrKeyRefused) {
+	if err := (AgentosdSetup{Owner: ownerAnswers{localapi.ErrFailed, &wait}}).ConnectAPIKey("openai", apiCanary); !refused(err, localapi.ErrFailed) || errors.Is(err, ErrKeyRefused) {
 		t.Fatalf("failed: %v", err)
 	}
-	if err := (AgentosdSetup{ownerAnswers{"", &wait}}).ConnectAPIKey("openai", apiCanary); err != nil {
+	if err := (AgentosdSetup{Owner: ownerAnswers{"", &wait}}).ConnectAPIKey("openai", apiCanary); err != nil {
 		t.Fatal(err)
 	}
 	if wait <= callTimeout || wait > localapi.APIKeyTimeout {

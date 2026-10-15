@@ -81,7 +81,9 @@ func textRig(t *testing.T, noNumber ...bool) (*rig, *textLine, AgentosdSetup) {
 		Enroll:   vaultEnroller{r.hooks},
 		Progress: func() localapi.SetupProgress { p := r.hooks.Progress(); return localapi.SetupProgress(p) },
 		Finished: func(string) {}, Now: r.clock, Line: line})
-	a := AgentosdSetup{InProcess(s.Ops())}
+	// A named PC (P2-2w c4d): the pairing reply that names it must pass
+	// agentosd's text allow-list.
+	a := AgentosdSetup{Owner: InProcess(s.Ops()), Root: fakeRoot(t, "Intel(R) Client Systems", "NUC13ANHi5", memTotal8)}
 	r.via = viaLine{viaAgentosd{r.hooks, a}}
 	r.srv = r.open(&MemStore{})
 	r.get("/setup")
@@ -136,6 +138,7 @@ func TestTheNumberStepOffersNumberEntryWhenTheBoxDoesNotKnowItsNumber(t *testing
 // code and the paired reply are setup's fixed texts, sent by the box.
 func TestTheNumberFallbackTextsThroughAgentosd(t *testing.T) {
 	r, line, _ := textRig(t)
+	paired := pairedText("Intel(R) Client Systems NUC13ANHi5, 8 GB")
 	if page := html.UnescapeString(r.get("/setup")); !strings.Contains(page, "sms:"+boxNum) {
 		t.Fatalf("no box number through agentosd: %s", page)
 	}
@@ -149,7 +152,7 @@ func TestTheNumberFallbackTextsThroughAgentosd(t *testing.T) {
 	}
 	r.post("/setup/number-code", url.Values{"code": {m[1]}})
 	got = line.texts(t, 2)
-	if r.srv.setup.st.Owner != ownerNum || got[1] != [2]string{ownerNum, pairedText("")} {
+	if r.srv.setup.st.Owner != ownerNum || got[1] != [2]string{ownerNum, paired} {
 		t.Fatalf("paired %q: %q", r.srv.setup.st.Owner, got[1])
 	}
 }
@@ -170,7 +173,7 @@ func TestPairTextsReachThePageAndAreAnswered(t *testing.T) {
 	}
 	line.inbox <- [2]string{ownerNum, "PAIR " + r.card.SetupCode}
 	got := line.texts(t, 2)
-	if got[1][0] != ownerNum || !regexp.MustCompile(`^`+regexp.QuoteMeta(pairedText(""))+` Page code: [0-9]{6}\.$`).MatchString(got[1][1]) {
+	if got[1][0] != ownerNum || !regexp.MustCompile(`^`+regexp.QuoteMeta(pairedText(a.HostInfo()))+` Page code: [0-9]{6}\.$`).MatchString(got[1][1]) {
 		t.Fatalf("card reply %q", got[1])
 	}
 	r.asOther(func() {
@@ -191,7 +194,7 @@ func TestPairTextsReachThePageAndAreAnswered(t *testing.T) {
 // PairTexts stops once agentosd answers that setup is closed.
 func TestPairTextsStopWhenSetupCloses(t *testing.T) {
 	r := newRig(t)
-	a := AgentosdSetup{InProcess{localapi.OpSetupInbound: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+	a := AgentosdSetup{Owner: InProcess{localapi.OpSetupInbound: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 		return nil, sockets.Code(localapi.ErrSetupClosed)
 	}}}
 	done := make(chan struct{})
