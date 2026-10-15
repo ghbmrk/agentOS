@@ -1288,3 +1288,38 @@ func TestHeldLockoutAuthSurvivesAFailedSync(t *testing.T) {
 		t.Fatal("the TPM lost its lockout password")
 	}
 }
+
+// REQ: HW-8
+// A no-PIN trust whose staged keys file fails its directory sync also
+// reaches errHostNotDurable (B2 of 6182933510), so its text must not tell
+// an owner who set no PIN to run trust -pin: -pin appears only as the
+// conditional for an owner who set one. The TPM is left alone and trust
+// again finishes it.
+func TestStagedKeysSyncFailureWithoutAPINDoesNotAskForAPIN(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	lockout := r.lockoutEntry()
+	restore := vault.InjectStageFault(errors.New("input/output error"))
+	defer restore()
+	_, err := r.c.trust(r.code(), "")
+	if !errors.Is(err, errHostNotDurable) {
+		t.Fatalf("no-PIN trust with a failing staged-keys sync: %v", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "trust -pin") || !strings.Contains(msg, "run trust again (with -pin if you set a boot PIN)") {
+		t.Fatalf("no-PIN owner told to use -pin unconditionally: %q", msg)
+	}
+	if got := r.lockoutEntry(); got != lockout {
+		t.Fatalf("lockout entry %q, was %q", got, lockout)
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout password taken by a no-PIN trust: %v", err)
+	}
+	restore()
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatalf("trust again after the sync works: %v", err)
+	}
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 {
+		t.Fatalf("hosts after trust again: %v, %v", hosts, err)
+	}
+}
