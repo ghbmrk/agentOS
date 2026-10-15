@@ -40,11 +40,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// xfail names the steps known not to pass yet, each with its work-item
-// issue. A listed step that passes fails the run (XPASS), so the list
-// shrinks as the issues close.
-var xfail = map[string]int{"host": 1221, "guest-task": 1701, "phone-control": 1714}
-
 const (
 	box       = "http://10.42.0.1"
 	netns     = "e2e-phone"
@@ -487,6 +482,13 @@ func (d *driver) host() error {
 		return fmt.Errorf("POST /setup/host %d %v", st, err)
 	}
 	_, err = d.waitStep("7", time.Minute)
+	if err != nil {
+		logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager",
+			"-u", "agentos-localui.service").Output()
+		if cause := hostCause(string(logs)); cause != "" {
+			err = fmt.Errorf("%w: %s", err, cause)
+		}
+	}
 	return err
 }
 
@@ -494,11 +496,11 @@ func (d *driver) host() error {
 // so it needs a model stub at the provider boundary, which is not built
 // yet.
 func (d *driver) guestTask() error {
-	return errors.New("not driven yet: needs the plan sign-in and a stub behind the Codex worker")
+	return errors.New(notDriven + " needs the plan sign-in and a stub behind the Codex worker")
 }
 
 // phoneControl will text a command from the paired number once setup has
 // finished and check the box's reply (#1714).
 func (d *driver) phoneControl() error {
-	return errors.New("not driven yet: needs an inbound text from the paired number and its reply")
+	return errors.New(notDriven + " needs an inbound text from the paired number and its reply")
 }

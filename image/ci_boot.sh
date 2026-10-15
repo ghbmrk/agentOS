@@ -51,7 +51,20 @@ boot() {
 	[ -z "${PROBE:-}" ] || python3 "$HERE/probe_inbound.py" $PROBE >"$log.probe" 2>&1 || true
 	sleep 2; kill $QEMU 2>/dev/null || true; wait $QEMU 2>/dev/null || true
 	echo "--- $(basename "$log")"
-	grep -a "agentos-\|Secure Boot\|verity\|Failed" "$log" | tail -40 || true
+	grep -a "agentos-\|Secure Boot\|verity\|Failed" "$log" | tail -40 | guest_echo || true
+}
+
+# Echoes guest console lines from stdin with ANSI, CR and other non-printable bytes cleaned out and
+# "console| " in front, so no guest line reaches the job log looking like a ci_boot line ("ci_boot:")
+# or a workflow command ("::"). e2e_console cleans its lines the same way.
+guest_echo() {
+	LC_ALL=C awk -v esc="$(printf '\033')" '{
+		l = $0
+		gsub(esc "\\[[0-9;?]*[ -/]*[@-~]", "", l)
+		gsub(/\r/, "", l)
+		gsub(/[^ -~]/, "?", l)
+		print "console| " l
+	}'
 }
 
 fail=0
@@ -128,15 +141,76 @@ hasnt "$W/console-two-drives.log" "agentos-drive-id: assigned"
 has "$W/console-two-drives.log" "agentos-fallback: health check failed, 2 tries left on this boot entry; rebooting"
 rm -f "$W/two-a.raw" "$W/two-b.raw"
 
-# Prints "agentos-e2e: G1 PROVEN" only when the DONE line in $1 has pass>0 and fail, xfail, xpass
-# and blocked all 0; otherwise "agentos-e2e: G1 NOT PROVEN xfail=N blocked=M".
+# Prints "ci_boot: G1 PROVEN" (a prefix only the host script uses; the guest console is never given it,
+# and the run fails if the console shows the verdict text) only when $2, the run's $fail, is exactly 0
+# and the DONE line in $1 has pass>0 and fail, xfail, xpass and blocked all 0. A failed run prints
+# "ci_boot: G1 NOT PROVEN (run failed)" whatever $1 holds; otherwise
+# "ci_boot: G1 NOT PROVEN xfail=N blocked=M".
 g1_verdict() {
-	awk '{ gsub(/\r/, ""); for (i = 1; i <= NF; i++) if (split($i, kv, "=") == 2) n[kv[1]] = kv[2] }
+	awk -v runfail="${2-}" '{ gsub(/\r/, ""); for (i = 1; i <= NF; i++) if (split($i, kv, "=") == 2) n[kv[1]] = kv[2] }
 	END {
-		if (n["pass"] + 0 > 0 && n["fail"] == "0" && n["xfail"] == "0" && n["xpass"] == "0" && n["blocked"] == "0")
-			print "agentos-e2e: G1 PROVEN"
+		if (runfail != "0")
+			print "ci_boot: G1 NOT PROVEN (run failed)"
+		else if (n["pass"] + 0 > 0 && n["fail"] == "0" && n["xfail"] == "0" && n["xpass"] == "0" && n["blocked"] == "0")
+			print "ci_boot: G1 PROVEN"
 		else
-			printf "agentos-e2e: G1 NOT PROVEN xfail=%s blocked=%s\n", (n["xfail"] == "" ? "?" : n["xfail"]), (n["blocked"] == "" ? "?" : n["blocked"])
+			printf "ci_boot: G1 NOT PROVEN xfail=%s blocked=%s\n", (n["xfail"] == "" ? "?" : n["xfail"]), (n["blocked"] == "" ? "?" : n["blocked"])
+	}' "$1"
+}
+
+# Reads the guest console $1 and, only if every check below passes, writes the one DONE line to $2.
+# Every line carrying the driver's prefix is echoed with ANSI, CR and other non-printable bytes cleaned out and "console| " in front,
+# so a guest line can neither start with "ci_boot:" (the host's verdict prefix) nor with "::" (a
+# workflow command). Exits non-zero, printing why, unless every such line starts with the prefix and
+# is a PASS, FAIL, XFAIL(#N), XPASS or BLOCKED line or the DONE line, there is exactly one DONE and
+# it is the last, and its counts equal the step lines before it. The counts are the in-guest
+# driver's own; this cross-check raises the cost of a forged console but a guest that forges the
+# whole of it still passes (tools/ASSUMPTIONS.md D27).
+e2e_console() {
+	LC_ALL=C awk -v esc="$(printf '\033')" -v donefile="$2" '
+	function miss(m) { print "ci_boot: MISS console: " m; bad = 1 }
+	{
+		l = $0
+		gsub(esc "\\[[0-9;?]*[ -/]*[@-~]", "", l)
+		gsub(/\r/, "", l)
+		gsub(/[^ -~]/, "?", l)
+	}
+	index(l, "agentos-e2e: ") == 0 { next }
+	{ print "console| " l }
+	{
+		# The console carries each line as journald prints it: an optional login prompt, the kernel
+		# timestamp and the driver unit tag (box-e2e), then the driver text. Only that exact lead-in is accepted.
+		a = l
+		sub(/^(agentos login: )?(\[ *[0-9]+\.[0-9]+\] )?box-e2e\[[0-9]+\]: /, "", a)
+	}
+	index(a, "agentos-e2e: ") != 1 { miss("driver text not at the start of its line"); next }
+	{
+		r = substr(a, 14)
+		if (ndone > 0) miss("line after DONE")
+	}
+	r ~ /^PASS [A-Za-z0-9_-]+$/ { c["pass"]++; next }
+	r ~ /^FAIL [A-Za-z0-9_-]+ / { c["fail"]++; next }
+	r ~ /^XFAIL\(#[0-9]+\) [A-Za-z0-9_-]+ / { c["xfail"]++; next }
+	r ~ /^XPASS [A-Za-z0-9_-]+ expected to fail \(#[0-9]+\) but passed$/ { c["xpass"]++; next }
+	r ~ /^BLOCKED [A-Za-z0-9_-]+ after [A-Za-z0-9_-]+$/ { c["blocked"]++; next }
+	r ~ /^DONE pass=[0-9]+ fail=[0-9]+ xfail=[0-9]+ xpass=[0-9]+ blocked=[0-9]+$/ {
+		ndone++
+		done = "agentos-e2e: " r
+		n = split(r, kv, /[ =]/)
+		for (i = 2; i < n; i += 2) d[kv[i]] = kv[i + 1]
+		next
+	}
+	{ miss("unrecognised driver line") }
+	END {
+		if (ndone != 1) miss("expected exactly one DONE line, found " ndone + 0)
+		else {
+			split("pass fail xfail xpass blocked", k, " ")
+			for (i = 1; i <= 5; i++)
+				if (d[k[i]] + 0 != c[k[i]] + 0) miss("DONE " k[i] "=" d[k[i]] " but " c[k[i]] + 0 " step lines")
+		}
+		# A console that failed any check leaves no DONE line behind for the verdict to read.
+		if (!bad) print done > donefile
+		exit bad
 	}' "$1"
 }
 
@@ -148,18 +222,25 @@ if [ -n "${E2E:-}" ]; then
 	copy "$W/e2e.raw"
 	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)" \
 		NIC="user,model=virtio-net-pci" UNTIL="agentos-e2e: DONE\|agentos-health: FAIL" boot "$W/console-e2e.log" "$W/e2e.raw"
-	grep -a "agentos-e2e: " "$W/console-e2e.log" || true
+	# The guest writes this console, so none of it is trusted as it stands: e2e_console echoes each
+	# driver line sanitised and prefixed, and accepts the log only with exactly one strictly
+	# anchored DONE, last, whose counts match the step lines before it.
+	: >"$W/e2e-done.log"
+	e2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1
 	has "$W/console-e2e.log" "agentos-e2e: DONE"
-	# The counts on the DONE line too, so a FAIL line split or lost on the console cannot pass.
-	grep -a "agentos-e2e: DONE" "$W/console-e2e.log" | tail -n1 >"$W/e2e-done.log" || true
 	has "$W/e2e-done.log" " fail=0 "
 	has "$W/e2e-done.log" " xpass=0 "
 	hasnt "$W/console-e2e.log" "agentos-e2e: FAIL"
 	hasnt "$W/console-e2e.log" "agentos-e2e: XPASS"
+	# The verdict is the host's alone: a guest line that fakes it fails the run.
+	hasnt "$W/console-e2e.log" "G1 PROVEN"
+	hasnt "$W/console-e2e.log" "G1 NOT PROVEN"
 	# The G1 freeze lifts only on a run whose DONE line reads fail=0 xfail=0 blocked=0
 	# (tools/ASSUMPTIONS.md D27). A green check with expected failures is not that run, so the
-	# verdict gets its own line; it does not change whether the check passes.
-	g1_verdict "$W/e2e-done.log"
+	# verdict gets its own host-only line in this job's log (not the console artifact); it does not
+	# change whether the check passes. It is the run's last check: a run that failed anywhere (this
+	# block or any earlier one, so $fail is not 0) prints NOT PROVEN, whatever the DONE line says.
+	g1_verdict "$W/e2e-done.log" "$fail"
 	rm -f "$W/e2e.raw" "$W/e2e-done.log"
 fi
 exit $fail
