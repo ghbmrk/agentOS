@@ -85,6 +85,11 @@ type driver struct {
 	// codeStep is the last 30-second code window the driver used: the box
 	// takes each window's code once (CH-14).
 	codeStep int64
+	// now and sleep are the clock of the codes and of phone-control's
+	// waits; nil is the wall clock. The in-process test shares a fake one
+	// with the owner channel.
+	now   func() time.Time
+	sleep func(time.Duration)
 }
 
 // childEnv is every child's whole environment: systemd's own PATH for
@@ -503,57 +508,114 @@ func (d *driver) guestTask() error {
 	return errors.New(notDriven + " needs the plan sign-in and a stub behind the Codex worker")
 }
 
-// phoneControl is the owner texting the box after setup (CH-3, CH-14). A
-// number the box never paired texts STATUS; then the paired phone texts
-// STATUS with a fresh code, which unlocks the session and runs it. The
-// step reads the carrier's log: the paired phone must get the status reply
-// and the stranger nothing. agentosd answers texts only once setup has
-// finished and its daemon has taken the modem, so an unanswered attempt
-// repeats, each with a code window not used before.
+// phoneControl is the owner texting the box after setup (CH-1, CH-3,
+// CH-14; E9). It first checks that setup has finished, since agentosd
+// answers texts only then. The paired phone texts HELP, which needs no
+// code, until it is answered; then one STATUS with a code from a window
+// not used before, which must draw the unlock and then the status reply.
+// Only then does the unpaired number text STATUS with a fresh code, and
+// the paired phone texts HELP again as a barrier: texts are read in
+// arrival order, so once that HELP is answered the stranger's text has
+// been read, and anything it drew to either number is in the log.
+// Probing with HELP first means the code is sent only once texts are
+// read: a code left unread goes stale, and a stale code is a wrong one
+// that counts toward CH-11's lockout.
 func (d *driver) phoneControl() error {
 	if d.seed == nil {
 		return errors.New("no code generator seed")
 	}
-	start := len(d.carrier.Log())
-	if err := d.carrier.Line(strangerNum).Send(boxNum, "STATUS"); err != nil {
-		return fmt.Errorf("stranger send: %w", err)
+	st, loc, b, err := d.get("/setup")
+	if err != nil {
+		return fmt.Errorf("setup not finished: GET /setup: %w", err)
 	}
+	if st != http.StatusSeeOther || loc != "/status" {
+		return fmt.Errorf("setup not finished: GET /setup %d %q at %s", st, loc, heading(b))
+	}
+	start := len(d.carrier.Log())
 	phone := d.carrier.Line(phoneNum)
-	deadline := time.Now().Add(3 * time.Minute)
-	for answered := false; !answered; {
-		if time.Now().After(deadline) {
-			return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
-		}
-		if err := phone.Send(boxNum, "STATUS "+d.freshCode()); err != nil {
+	// agentosd takes the modem from setup's line only after setup
+	// finishes, and the hand-over can lose texts: after setup the bridge
+	// has no OWNER_NUMBER, so the owner's texts are offered once and one
+	// refused meanwhile is gone (BOARD P2-2w c4c r1; bridge B9). So HELP
+	// repeats until answered, and a timeout names the attempts.
+	deadline := d.clock().Add(3 * time.Minute)
+	for attempts := 1; ; attempts++ {
+		if err := phone.Send(boxNum, "HELP"); err != nil {
 			return fmt.Errorf("phone send: %w", err)
 		}
-		for wait := time.Now().Add(45 * time.Second); time.Now().Before(wait); time.Sleep(time.Second) {
-			status, others, _ := controlResult(d.carrier.Log(), start)
-			if status {
-				answered = true
-				break
-			}
-			for _, k := range others {
-				if k == "locked" || k == "wrong-code" {
-					// The box read the text and refused the code.
-					return controlErr(d.carrier.Log(), start)
-				}
-			}
+		r := d.await(start, 45*time.Second, func(r phoneRun) bool { return r.probed })
+		if err := r.failed(); err != nil {
+			return err
+		}
+		if r.probed {
+			break
+		}
+		if !d.clock().Before(deadline) {
+			return fmt.Errorf("no reply to the paired number after %d HELP attempts (BOARD P2-2w c4c r1, the bridge's hand-over from setup); %s",
+				attempts, modemDiag())
 		}
 	}
-	// Texts are read in arrival order, so the stranger's came first; a
-	// quiet spell after the owner's reply catches a late one.
-	time.Sleep(15 * time.Second)
+	if err := phone.Send(boxNum, "STATUS "+d.freshCode()); err != nil {
+		return fmt.Errorf("phone send: %w", err)
+	}
+	r := d.await(start, time.Minute, func(r phoneRun) bool { return r.status })
+	if err := r.failed(); err != nil {
+		return err
+	}
+	if !r.status {
+		return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
+	}
+	if err := d.carrier.Line(strangerNum).Send(boxNum, "STATUS "+d.freshCode()); err != nil {
+		return fmt.Errorf("stranger send: %w", err)
+	}
+	if err := phone.Send(boxNum, "HELP"); err != nil {
+		return fmt.Errorf("phone send: %w", err)
+	}
+	r = d.await(start, time.Minute, func(r phoneRun) bool { return r.barrier })
+	if err := r.failed(); err != nil {
+		return err
+	}
+	if !r.barrier {
+		return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
+	}
 	return controlErr(d.carrier.Log(), start)
+}
+
+// await reads the log from start each second, for up to limit, until done
+// holds or the run has failed, and returns what it read last.
+func (d *driver) await(start int, limit time.Duration, done func(phoneRun) bool) phoneRun {
+	end := d.clock().Add(limit)
+	for {
+		r := readPhoneRun(d.carrier.Log(), start)
+		if r.failed() != nil || done(r) || !d.clock().Before(end) {
+			return r
+		}
+		d.pause(time.Second)
+	}
 }
 
 // freshCode is the code the phone's app shows now, from a window the
 // driver has not used, waiting for the next window when it has.
 func (d *driver) freshCode() string {
-	for time.Now().Unix()/30 <= d.codeStep {
-		time.Sleep(time.Second)
+	for d.clock().Unix()/30 <= d.codeStep {
+		d.pause(time.Second)
 	}
-	now := time.Now()
+	now := d.clock()
 	d.codeStep = now.Unix() / 30
 	return owner.TOTP(d.seed, now)
+}
+
+func (d *driver) clock() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
+}
+
+func (d *driver) pause(t time.Duration) {
+	if d.sleep != nil {
+		d.sleep(t)
+		return
+	}
+	time.Sleep(t)
 }

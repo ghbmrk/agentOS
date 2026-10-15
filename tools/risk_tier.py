@@ -79,6 +79,9 @@ TIER_A_BROKER = {
     "apnet",                      # the Owner Card's Wi-Fi password
     "browser", "netjoin", "pubid", "tpmseal",
     "durable",                    # writes keys, the vault file and root.json, and sets their mode
+    # e2e/boxe2e, the G1 in-image run (#1714): holds the claim code, the Owner
+    # Card's values and the code-generator seed, and its verdict proves G1.
+    "e2e",
     # CRED-1 custody (#1654): recall's scrubber and the event bus that runs it
     # decide what authentication material reaches the recall index and event log.
     "events", "recall",
@@ -107,7 +110,7 @@ TIER_B_BROKER = {
     # cgroup is B, but core vm kills machines and loop7 freezes its jail
     # through it: a change to Kill or Freeze is reviewed with those callers.
     "cgroup",
-    "compile", "corpus", "e2e", "floor", "fold", "hostchange",
+    "compile", "corpus", "floor", "fold", "hostchange",
     "loopbuild", "machprobe", "projection", "pubsend", "quota", "routerule", "skill",
     "sockprobe", "test", "voice",
 }
