@@ -36,8 +36,8 @@ Read in this order and stop when you have what you need. Token counts are approx
 
 | Role | Read | About |
 |---|---|---|
-| Builder (L2) | CLAUDE.md; your `briefs/<ID>.md`; the SPEC.md sections for the IDs it cites; the touched package's `ASSUMPTIONS.md` | 3k + brief + cited sections |
-| Reviewer (L3) | CLAUDE.md; OPERATING §2–4; the diff; the cited SPEC.md IDs; the brief | 5k + diff |
+| Builder (L2) | CLAUDE.md; your `briefs/<ID>.md`; the SPEC.md sections for the IDs it cites (`python3 tools/specslice.py --ids A-1,B-2`); the touched package's `ASSUMPTIONS.md` | 3k + brief + cited sections |
+| Reviewer (L3) | CLAUDE.md; OPERATING §2–4; the diff, the cited SPEC IDs and the brief (an optional aid: `python3 tools/reviewpacket.py <PR>` bundles them with the tier, and its claims are checked against the source) | 5k + diff |
 | Lens screen | OPERATING §4 checklist; active DECISIONS rows; the lens READMEs; the bundle's diffs | 10k + diffs |
 | Coordinator (L1) | CLAUDE.md; OPERATING; BOARD.md; `class:release` (not `frozen`) and `decision` issues; recent DECISIONS rows | 15k |
 | Another team | AGENTS.md; CLAUDE.md; docs/LANES.md (your lane); OPERATING §7; then the builder row above | 6k + builder |
