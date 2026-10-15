@@ -177,6 +177,14 @@ def _names(labels):
     return [x if isinstance(x, str) else x["name"] for x in labels]
 
 
+class Malformed(ValueError):
+    """Every problem found in one pass over the issues, one line each (str() joins them)."""
+
+    def __init__(self, problems):
+        self.problems = list(problems)
+        super().__init__("\n".join(self.problems))
+
+
 def issue_id(item):
     m = re.match(rf"({ID}): ", item["title"])
     if not m:
@@ -214,18 +222,25 @@ def render(skeleton, items):
     """BOARD.md: the skeleton's text with its rows replaced by the live rows of items."""
     lines = skeleton.splitlines()
     widths = {s: len(_cells(lines[n])) - 2 for n, kind, s in _table_lines(skeleton) if kind == "header"}
-    by_section, seen = {}, set()
+    by_section, seen, problems = {}, {}, []
     for item in items:
-        row = row_of(item)
+        try:
+            row = row_of(item)
+        except ValueError as e:
+            problems.append(str(e))
+            continue
         if row["id"] in seen:
-            raise ValueError(f"issue #{row['number']}: a second issue for {row['id']}")
-        seen.add(row["id"])
+            problems.append(f"issue #{row['number']}: a second issue for {row['id']} (first is #{seen[row['id']]})")
+            continue
+        seen[row["id"]] = row["number"]
         if row["section"] not in widths:
-            raise ValueError(f"issue #{row['number']}: no section {row['section']!r} in BOARD.md")
-        if len(row["cells"]) != widths[row["section"]]:
-            raise ValueError(f"issue #{row['number']}: {len(row['cells'])} middle cells, its table has {widths[row['section']]}")
-        if row["state"] in OPEN_STATES:
+            problems.append(f"issue #{row['number']}: no section {row['section']!r} in BOARD.md")
+        elif len(row["cells"]) != widths[row["section"]]:
+            problems.append(f"issue #{row['number']}: {len(row['cells'])} middle cells, its table has {widths[row['section']]}")
+        elif row["state"] in OPEN_STATES:
             by_section.setdefault(row["section"], []).append(row)
+    if problems:
+        raise Malformed(problems)
     out = []
     for n, kind, section in _table_lines(skeleton):
         if kind == "row":
@@ -367,9 +382,9 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
     try:
         if args.repo and (args.command == "render" or GENERATED in text):
             items = work_items(fetch, args.repo)
+            generated = render(text, items)  # raises Malformed with every bad issue before notes
             for note in pr_notes(items, fetch(f"/repos/{args.repo}/pulls?state=all")):
                 print(f"board: {note}", file=sys.stderr)
-            generated = render(text, items)
             if args.command == "render":
                 sys.stdout.write(generated)
                 return 0
@@ -387,6 +402,9 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
             return 0
         items = [dict(i, number=n) for n, i in enumerate(plan(text), start=1)]
         generated = render(text, items)
+    except Malformed as e:
+        print(*(f"board: {p}" for p in e.problems), sep="\n", file=sys.stderr)
+        return 1
     except ValueError as e:
         print(f"board: {e}", file=sys.stderr)
         return 1
