@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,16 +165,48 @@ func TestShutdownDrainWaitsForTextsInFlightUpToItsBound(t *testing.T) {
 	}
 	<-held.entered
 	start := time.Now()
-	r.ch.DrainSends(50 * time.Millisecond)
+	r.ch.DrainSends(50*time.Millisecond, nil)
 	if time.Since(start) < 40*time.Millisecond {
 		t.Fatal("drain returned with a text in the modem")
 	}
 	released := make(chan struct{})
 	go func() { time.Sleep(20 * time.Millisecond); close(held.let); close(released) }()
 	start = time.Now()
-	r.ch.DrainSends(5 * time.Second)
+	r.ch.DrainSends(5*time.Second, nil)
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("drain waited past the send")
 	}
 	<-released
+}
+
+// A drain whose live hook says nothing is left to send the texts (no modem
+// bridge on owner.sock) ends at once, not at its bound (Security S5,
+// Potency P6 on #1746).
+func TestShutdownDrainEndsWhenNothingIsLeftToSend(t *testing.T) {
+	r := newRig(t, nil)
+	r.async = true
+	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
+	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
+	r.ch = r.open()
+	defer func() { close(held.let); r.ch.WaitSends() }()
+	if _, _, err := r.ch.LocalSignIn(r.totp()); err != nil {
+		t.Fatal(err)
+	}
+	<-held.entered
+	for name, live := range map[string]func() bool{
+		"gone at the start": func() bool { return false },
+		"gone during it":    goneAfter(3),
+	} {
+		start := time.Now()
+		r.ch.DrainSends(5*time.Second, live)
+		if took := time.Since(start); took > 2*time.Second {
+			t.Fatalf("%s: drain waited %v for a bridge that had gone", name, took)
+		}
+	}
+}
+
+// goneAfter says live n times, then gone.
+func goneAfter(n int) func() bool {
+	var calls atomic.Int32
+	return func() bool { return calls.Add(1) <= int32(n) }
 }

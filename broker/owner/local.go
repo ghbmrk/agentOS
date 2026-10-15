@@ -167,17 +167,40 @@ const SendDrain = 30 * time.Second
 // alert the modem was about to send. agentosd calls it on shutdown once the
 // page socket refuses new calls and those in flight have returned, so no
 // new text starts during it, while the owner socket still serves the modem
-// bridge's outbox, and before the process exits (O34).
-func (c *Channel) DrainSends(d time.Duration) {
+// bridge's outbox, and before the process exits (O34). live, if set, says
+// whether anything is still there to send them (modemlink.Link.Bridged):
+// once it says no, at the start or any drainTick after, the drain ends
+// rather than wait out d for a bridge that has gone.
+func (c *Channel) DrainSends(d time.Duration, live func() bool) {
 	done := make(chan struct{})
 	go func() { c.sends.Wait(); close(done) }()
 	t := time.NewTimer(d)
 	defer t.Stop()
-	select {
-	case <-done:
-	case <-t.C:
+	var tick <-chan time.Time
+	if live != nil {
+		if !live() {
+			return
+		}
+		tk := time.NewTicker(drainTick)
+		defer tk.Stop()
+		tick = tk.C
+	}
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			return
+		case <-tick:
+			if !live() {
+				return
+			}
+		}
 	}
 }
+
+// drainTick is how often DrainSends asks live.
+const drainTick = 50 * time.Millisecond
 
 // WaitSends returns once every text started by textAfterReply has finished.
 func (c *Channel) WaitSends() { c.sends.Wait() }

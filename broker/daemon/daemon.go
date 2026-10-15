@@ -120,6 +120,11 @@ type Config struct {
 	// the bridge and its result heard. Every other op on every socket is
 	// refused from the stop on (errStopping).
 	OwnerDrainOps []string
+	// OwnerDrainLive says a modem bridge is still there to take the
+	// drain's texts (modemlink.Link.Bridged); once it says no, the drain
+	// ends rather than wait out its bound. Nil: the drain waits for its
+	// texts up to the bound (a direct modem).
+	OwnerDrainLive func() bool
 	// SendDrain bounds the shutdown drain (0: ownerch.SendDrain; tests set
 	// it shorter).
 	SendDrain time.Duration
@@ -515,10 +520,11 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		// reply (lock, wrong code, sign-in) get up to the drain bound,
 		// while the owner socket still hands them to the modem bridge,
 		// before the sockets close, Wait returns and agentosd exits (owner
-		// O34).
+		// O34). With no bridge left on the owner socket (OwnerDrainLive),
+		// as when systemd stopped it first, the drain ends at once.
 		entry.shut()
 		if ch != nil {
-			ch.DrainSends(drain)
+			ch.DrainSends(drain, cfg.OwnerDrainLive)
 		}
 		endSockets()
 		srv.Wait()
@@ -540,12 +546,15 @@ type stage struct {
 	active sync.WaitGroup
 }
 
-// wrap serves h until shut, with a context that also ends at stop;
-// afterwards it refuses (errStopping).
+// wrap serves h until stop or shut, with a context that also ends at
+// stop; afterwards it refuses (errStopping). A call that arrives after the
+// stop but before shut is refused too: its handler would run with a
+// context already ended, and an inbound text it took would go to an inbox
+// nobody reads (Security S6 on #1746).
 func (s *stage) wrap(stop context.Context, h sockets.Handler) sockets.Handler {
 	return func(ctx context.Context, p sockets.Peer, args json.RawMessage) (any, error) {
 		s.mu.Lock()
-		if s.closed {
+		if s.closed || stop.Err() != nil {
 			s.mu.Unlock()
 			return nil, errStopping
 		}
