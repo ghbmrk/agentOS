@@ -3,7 +3,13 @@
   "forbidden_host_patterns": [
     "*agentos*"
   ],
-  "endpoints": [],
+  "endpoints": [
+    {
+      "host": "auth.openai.com",
+      "class": "optional",
+      "dependency": "Codex CLI provider worker (CAP-11, optional per DEP-3): OpenAI's device sign-in page. The worker's CLI reaches it only through the egress sign-in route, and the owner opens it on their phone to enter the code (ONB-3 step 6, #1264)."
+    }
+  ],
   "claim_literals": [
     {
       "file": "broker/egress/codexlogin.go",

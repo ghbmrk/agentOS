@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,7 +22,15 @@ import (
 // not a provider worker) is an error, so the worker does not start without
 // its route; a locked vault is ErrVaultLocked. Like the other clients here
 // it dials only the configured unix socket and holds no credential.
-type RouteControl struct{ c *http.Client }
+//
+// A worker marked SignInFor is the owner's sign-in worker (#1264 c4e2): its
+// route opens with /signin, on the sign-in endpoints only, until Close.
+type RouteControl struct {
+	c *http.Client
+
+	mu     sync.Mutex
+	signIn map[string]bool
+}
 
 // NewRouteControl returns a RouteControl for the provider control socket at
 // path.
@@ -34,8 +43,8 @@ func NewRouteControl(path string) *RouteControl {
 	}}}
 }
 
-func (c *RouteControl) do(verb, id string) (*http.Response, error) {
-	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: "/" + verb, RawQuery: url.Values{"machine": {id}}.Encode()} // over the Unix socket
+func (c *RouteControl) do(verb string, q url.Values) (*http.Response, error) {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: "/" + verb, RawQuery: q.Encode()} // over the Unix socket
 	return c.c.Post(u.String(), "text/plain", nil)
 }
 
@@ -43,7 +52,11 @@ func (c *RouteControl) do(verb, id string) (*http.Response, error) {
 // ErrVaultLocked (and one that is not the locked vault's to ErrRouteBusy
 // too: stalled or contended) and a missing plan login to ErrNoPlanLogin.
 func (c *RouteControl) call(verb, id string, max int64) ([]byte, error) {
-	resp, err := c.do(verb, id)
+	return c.callQ(verb, id, url.Values{"machine": {id}}, max)
+}
+
+func (c *RouteControl) callQ(verb, id string, q url.Values, max int64) ([]byte, error) {
+	resp, err := c.do(verb, q)
 	if err != nil {
 		return nil, fmt.Errorf("worker route for %s: %w", id, err)
 	}
@@ -67,7 +80,13 @@ func (c *RouteControl) call(verb, id string, max int64) ([]byte, error) {
 // Open opens id's route and returns its directory. The directory must be
 // absolute, clean and named for id, whatever the reply says (egress K28).
 func (c *RouteControl) Open(id string) (string, error) {
-	body, err := c.call("open", id, 4<<10)
+	verb := "open"
+	c.mu.Lock()
+	if c.signIn[id] {
+		verb = "signin"
+	}
+	c.mu.Unlock()
+	body, err := c.call(verb, id, 4<<10)
 	if err != nil {
 		return "", err
 	}
@@ -99,7 +118,63 @@ func (c *RouteControl) Seed(id string) (map[string][]byte, error) {
 // Close closes id's route; a failure leaves the route to the vault
 // process's own shutdown.
 func (c *RouteControl) Close(id string) {
-	if resp, err := c.do("close", id); err == nil {
+	c.mu.Lock()
+	delete(c.signIn, id)
+	c.mu.Unlock()
+	if resp, err := c.do("close", url.Values{"machine": {id}}); err == nil {
 		resp.Body.Close()
 	}
+}
+
+// SignInFor marks id as the owner's sign-in worker: its route opens on the
+// sign-in endpoints until Close(id). Only the owner-started sign-in marks a
+// worker (provagent StartSignIn).
+func (c *RouteControl) SignInFor(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.signIn == nil {
+		c.signIn = map[string]bool{}
+	}
+	c.signIn[id] = true
+}
+
+// PlanState is a plan's state in the vault process: Granted once the
+// owner's login is stored, PrivateOK with the owner's per-plan mark. It
+// carries no login value.
+type PlanState struct {
+	Granted   bool `json:"granted"`
+	PrivateOK bool `json:"private_ok"`
+}
+
+// Plan reads provider's plan state; ErrVaultLocked while the vault is
+// locked. An unreadable reply is an error and the zero state.
+func (c *RouteControl) Plan(provider string) (PlanState, error) {
+	body, err := c.callQ("plan", provider, url.Values{"provider": {provider}}, 4<<10)
+	if err != nil {
+		return PlanState{}, err
+	}
+	var s PlanState
+	if err := json.Unmarshal(body, &s); err != nil {
+		return PlanState{}, fmt.Errorf("plan state for %s: unreadable reply", provider)
+	}
+	return s, nil
+}
+
+// SignInStored reports whether sign-in worker id's own sign-in stored the
+// plan login in the vault process (egress PlanLogins.SignedInBy). It is the
+// sign-in's only success signal: a login stored earlier does not count, and
+// nothing the worker reports about itself does. Ask before Close, which
+// forgets it; an error or an unreadable reply is not stored.
+func (c *RouteControl) SignInStored(id string) (bool, error) {
+	body, err := c.call("signedin", id, 4<<10)
+	if err != nil {
+		return false, err
+	}
+	var s struct {
+		Stored bool `json:"stored"`
+	}
+	if err := json.Unmarshal(body, &s); err != nil {
+		return false, fmt.Errorf("sign-in state for %s: unreadable reply", id)
+	}
+	return s.Stored, nil
 }
