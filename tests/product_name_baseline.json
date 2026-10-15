@@ -4,7 +4,8 @@
   },
   "BOARD.md": {
     "06828cf82381cd4a098956f6bfb487a66712aff6dd0e8b27aeac1c7c9d032082": 1,
-    "8a9da9e77c9f58d3c7683dc8fc30d643acf15be7ad11a1d257bb15b803bd173b": 1
+    "8a9da9e77c9f58d3c7683dc8fc30d643acf15be7ad11a1d257bb15b803bd173b": 1,
+    "ca4024e528af5c42d038c565599f2d4c076457e3397357ea9cf0ec0ff5269215": 1
   },
   "DECISIONS.md": {
     "3e86765653c8c0146c5e02d552f5431773506c23592f49df31ae5bfc7b269f13": 1,
@@ -215,6 +216,11 @@
   "broker/daemon/follow_test.go": {
     "d3e92f8cd26697c44ca9540f6aecc2fabe98624a44f0ffdc5c81a8ba7a71d107": 1
   },
+  "broker/e2e/boxe2e/parse_test.go": {
+    "164058efa518723aca917a8db0a6261c0064a680d47cf18e73c05b535aa60001": 1,
+    "88c8b41cbdfd3d4f03ed17153aeeae29bab08027b55beb640b7b167b1ea48588": 1,
+    "ef2e3aafd8b3a38590b54e65166d6537485d1908bb7df716ef9e3aa80323543c": 1
+  },
   "broker/e2e/dep2_test.go": {
     "6b60790bf92e9ba5f8c2d6e1cf505b63982145a06e629bc18a9d28bb3aff7bc1": 1
   },
@@ -410,6 +416,13 @@
   "broker/modem/bridge/ASSUMPTIONS.md": {
     "0c552bec34bf380806895777a235943aa916a8b54d047352102bfea8a884b613": 1
   },
+  "broker/netjoin/ASSUMPTIONS.md": {
+    "0005d50e80cb2fa7bebcf734e5c34631cc96d4c84717a8fdd82c4f1d854db2b8": 1
+  },
+  "broker/netjoin/scan_test.go": {
+    "30bb723fd02a67b6a4bb97db8f21bb24d206ad26e4571e93b5f774db5179baa4": 1,
+    "90da56ab6ae15e18a18ecf76759e833999986e1bee0993c3d85a10194185bc71": 1
+  },
   "broker/owner/name_test.go": {
     "48a962f3fa6aa45852137345104e4d32432b35ceea407410afd72573b76a338f": 1,
     "72a65e1336ca80e2a7604b9b4a375824600f970028d738344abf864384b5b4cc": 1
@@ -474,6 +487,7 @@
   "image/ASSUMPTIONS.md": {
     "3875e54ae48ed851a0458fcb9ec0fc903d81f9f6b3e108ca90bcb9842bc196bf": 1,
     "d4c0d5fdcf82b330fe1b6cbd1148aad1bda1322105674b70c5162d1be1fee4ec": 1,
+    "e0d8c6bbb8fbbd4b2c9876b7d7f783952dea01f0249db13bc5698fdd5f12f779": 1,
     "f7a85ab39ef8d8ce57fdacc34b150596d8f5296655e9b493dac38c3aa508d2e4": 1
   },
   "image/build.sh": {
