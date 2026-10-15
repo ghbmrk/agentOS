@@ -1,4 +1,4 @@
-# AgentOS device image (P2-1)
+# agentOS device image (P2-1)
 
 The image that goes on the drive: Debian 13 packages, `/usr` read-only on dm-verity in A/B slots,
 booted by Microsoft-signed shim, Debian-signed systemd-boot and kernel (S7), with boot counting.
