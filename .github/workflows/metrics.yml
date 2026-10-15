@@ -41,6 +41,9 @@ jobs:
   commit:
     needs: collect
     runs-on: ubuntu-latest
+    # BOT_PR_TOKEN lives in this environment, whose deployment-branch policy admits main
+    # only, so branch workflows cannot read it (decision #1769).
+    environment: bot
     permissions:
       contents: write # push the bot/metrics branch (never main)
       pull-requests: write # open, auto-merge or close its PR

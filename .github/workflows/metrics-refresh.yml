@@ -13,12 +13,18 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: metrics # never alongside metrics.yml's commit job
+  # Its own group: sharing metrics.yml's would let a queued refresh cancel a pending
+  # daily collection. The push below is leased instead, so it never overwrites a newer
+  # bot/metrics from metrics.yml's commit job.
+  group: metrics-refresh
   cancel-in-progress: false
 jobs:
   refresh:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # BOT_PR_TOKEN lives in this environment, whose deployment-branch policy admits main
+    # only, so branch workflows cannot read it (decision #1769).
+    environment: bot
     permissions:
       contents: write # push the bot/metrics branch (never main)
       pull-requests: write # close an obsolete PR
@@ -39,6 +45,7 @@ jobs:
           fi
           # The branch is one commit on main, so its parent shows whether it is current.
           git fetch -q --depth=2 origin "refs/heads/$BRANCH"
+          lease="$(git rev-parse FETCH_HEAD)"
           if [ "$(git rev-parse FETCH_HEAD^)" = "$(git rev-parse HEAD)" ]; then
             echo "$BRANCH already contains main"
             exit 0
@@ -54,5 +61,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -qC "$BRANCH"
           git commit -qm "metrics: daily METRICS.md (rebuilt on ${GITHUB_SHA::7})" -- METRICS.md
-          git push -qf origin "HEAD:refs/heads/$BRANCH"
+          if ! git push -q --force-with-lease="refs/heads/$BRANCH:$lease" origin "HEAD:refs/heads/$BRANCH"; then
+            echo "::notice::$BRANCH moved since fetch (metrics.yml rebuilt it); left as is"
+            exit 0
+          fi
           gh workflow run ci.yml --ref "$BRANCH"

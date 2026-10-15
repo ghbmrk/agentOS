@@ -46,6 +46,16 @@ class RecordsTest(unittest.TestCase):
             (self.root / path).write_text(text)
         self.assertEqual(list(doclint.records(self.root)), [])
 
+    def test_l3_verdict_first_line_is_recorded_and_doclint_accepts(self):
+        body = ("<!-- record: l3 -->\nVerdict: fix-list\nCause: defect\n\n# L3: PR #12 (PKG-1)\n\n"
+                "Record: PR #12 · package PKG-1 · head abcdef1\n\n1. A point. (blocker)\n")
+        out, skipped = self.harvest([comment(body)])
+        self.assertEqual((list(out), skipped), (["reviews/l3/2026-10-15-pr12.md"], []))
+        self.assertTrue(out["reviews/l3/2026-10-15-pr12.md"].startswith("Verdict: fix-list\n"))
+        for path, text in out.items():
+            (self.root / path).write_text(text)
+        self.assertEqual(list(doclint.records(self.root)), [])
+
     def test_unmarked_comment_is_ignored(self):
         self.assertEqual(self.harvest([comment(GOOD.replace("<!-- record: security -->", ""))]), ({}, []))
 

@@ -60,9 +60,12 @@ def body_of(text):
 
 
 def well_formed(body):
+    """A `# ` title directly followed by a complete Record line, found as doclint finds them:
+    lines before the title (an L3 verdict's leading `Verdict:` and `Cause:`) are allowed."""
     lines = [l for l in body.splitlines() if l.strip()]
-    return (len(lines) >= 2 and lines[0].startswith("# ") and lines[1].startswith("Record:")
-            and all(f.search(lines[1]) for f in RECORD_FIELDS))
+    title = next((i for i, l in enumerate(lines) if l.startswith("# ")), None)
+    rec = lines[title + 1] if title is not None and title + 1 < len(lines) else ""
+    return rec.startswith("Record:") and all(f.search(rec) for f in RECORD_FIELDS)
 
 
 def harvest(comments, merged, root=ROOT):
