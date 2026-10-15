@@ -463,3 +463,113 @@ func compact(s string) string {
 		return r
 	}, strings.ToUpper(s))
 }
+
+// REQ: REC-4, HW-1
+
+// VAULT-slot-decided (#1557): a Rekey that errors after its slot is decided
+// has changed the factor, so the rotation reports what is in effect
+// (ErrCardNotStored, the keep-both path) and not that nothing changed.
+func TestRotationWhoseSlotIsDecidedReportsWhatIsInEffect(t *testing.T) {
+	x := newBox(t)
+	p, err := BeginRotate(x.b, []Part{PartRecovery}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0)
+	must(t, err)
+	defer vault.InjectSealFault(errors.New("input/output error"))()
+	next := newParts(p)
+	nc, err := p.Commit(x.b, next, t0)
+	if !errors.Is(err, ErrCardNotStored) || !errors.Is(err, vault.ErrSlotDecided) {
+		t.Fatalf("rotation with a decided slot: %v", err)
+	}
+	if nc.RecoveryKey != next.RecoveryKey {
+		t.Fatal("returned card does not carry the recovery key now in effect")
+	}
+}
+
+// A factor that stops opening its slot once off is set: the Rekey fails
+// before anything is sealed.
+type cutOff struct {
+	vault.Factor
+	off *bool
+}
+
+func (f cutOff) KEK(s vault.Slot) ([]byte, error) {
+	if *f.off {
+		return nil, vault.ErrNoSlotOpens
+	}
+	return f.Factor.KEK(s)
+}
+
+// REQ: REC-4, HW-1
+
+// VAULT-slot-decided (#1557), both slot parts: a Rekey that errors after
+// its seal reports the new factor in effect; one that errors before it
+// does not (the rotation was cancelled, nothing changed).
+func TestRotationSlotPartsDecidedAndUndecided(t *testing.T) {
+	for _, part := range []Part{PartPassphrase, PartRecovery} {
+		in := func(c Card) string {
+			if part == PartPassphrase {
+				return c.VaultPassphrase
+			}
+			return c.RecoveryKey
+		}
+		t.Run(fmt.Sprint(part, "/decided"), func(t *testing.T) {
+			x := newBox(t)
+			p, err := BeginRotate(x.b, []Part{part}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0)
+			must(t, err)
+			defer vault.InjectSealFault(errors.New("input/output error"))()
+			next := newParts(p)
+			nc, err := p.Commit(x.b, next, t0)
+			if !errors.Is(err, ErrCardNotStored) || !errors.Is(err, vault.ErrSlotDecided) {
+				t.Fatalf("decided %v rotation: %v", part, err)
+			}
+			if in(nc.Card) == "" || in(nc.Card) != in(next) {
+				t.Fatalf("returned card does not carry the new %v in effect", part)
+			}
+		})
+		if part != PartPassphrase {
+			// The recovery branch fails undecided after the passphrase
+			// slot is written, which TestAPartialRotationReturnsWhatIsInEffect
+			// covers (the recovery key must not be reported).
+			continue
+		}
+		t.Run(fmt.Sprint(part, "/undecided"), func(t *testing.T) {
+			x := newBox(t)
+			off := false
+			p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true},
+				Proof{Host: func() vault.Factor { return cutOff{Factor(x.rk), &off} }}, t0)
+			must(t, err)
+			off = true
+			nc, err := p.Commit(x.b, newParts(p), t0)
+			if err == nil || errors.Is(err, ErrCardNotStored) || errors.Is(err, vault.ErrSlotDecided) {
+				t.Fatalf("undecided %v rotation: %v", part, err)
+			}
+			if in(nc.Card) != "" {
+				t.Fatalf("an undecided rotation returned a %v as in effect", part)
+			}
+		})
+	}
+}
+
+// REQ: REC-4, HW-1
+
+// The passphrase half of the same fix: a passphrase Rekey that errors after
+// its slot is decided has changed the passphrase, so the card returned
+// carries the new one and the vault opens with it.
+func TestPassphraseRotationWhoseSlotIsDecidedReportsWhatIsInEffect(t *testing.T) {
+	x := newBox(t)
+	x.withPassphrase()
+	p, err := BeginRotate(x.b, []Part{PartPassphrase}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0)
+	must(t, err)
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	next := newParts(p)
+	nc, err := p.Commit(x.b, next, t0)
+	restore()
+	if !errors.Is(err, ErrCardNotStored) || !errors.Is(err, vault.ErrSlotDecided) {
+		t.Fatalf("passphrase rotation with a decided slot: %v", err)
+	}
+	if nc.VaultPassphrase != next.VaultPassphrase {
+		t.Fatal("returned card does not carry the passphrase now in effect")
+	}
+	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, vault.Passphrase(nc.VaultPassphrase)); err != nil {
+		t.Fatalf("vault does not open with the passphrase now in effect: %v", err)
+	}
+}

@@ -455,10 +455,17 @@ func (p *Pending) Commit(b *Box, next Card, now time.Time) (Done, error) {
 		}
 	}
 	if p.parts[PartPassphrase] {
-		if err := b.V.Rekey(proof.factor(), vault.Passphrase(next.VaultPassphrase)); err != nil {
+		err := b.V.Rekey(proof.factor(), vault.Passphrase(next.VaultPassphrase))
+		// A Rekey that errors once its slot is decided has changed the
+		// factor all the same (#1557).
+		decided := err == nil || errors.Is(err, vault.ErrSlotDecided)
+		wrote = wrote || decided
+		if err != nil {
+			if decided {
+				in.VaultPassphrase = next.VaultPassphrase
+			}
 			return fail(err)
 		}
-		wrote = true
 		in.VaultPassphrase = next.VaultPassphrase
 		if len(proof.Passphrase) > 0 {
 			proof.Passphrase = []byte(next.VaultPassphrase)
@@ -473,10 +480,15 @@ func (p *Pending) Commit(b *Box, next Card, now time.Time) (Done, error) {
 		if err != nil {
 			return fail(err)
 		}
-		if err := b.V.Rekey(proof.factor(), Factor(nk)); err != nil {
+		err = b.V.Rekey(proof.factor(), Factor(nk))
+		decided := err == nil || errors.Is(err, vault.ErrSlotDecided)
+		wrote = wrote || decided
+		if err != nil {
+			if decided {
+				in.RecoveryKey = next.RecoveryKey
+			}
 			return fail(err)
 		}
-		wrote = true
 		in.RecoveryKey = next.RecoveryKey
 		if err := storeBackupKey(b, nk); err != nil {
 			// The old backup key no longer matches the recovery slot, so
