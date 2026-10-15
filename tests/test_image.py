@@ -3909,12 +3909,12 @@ class UplinkTest(unittest.TestCase):
         # REQ: HW-10. #1764 (D27 follow-up): all four consoles, not only the e2e one, fail the run
         # when the guest wrote the verdict text. Potency/UX 4 and Security 2 at d9cfaff: the check
         # runs in the e2e block after the e2e boot and its console check (so console-e2e.log is this
-        # run's) and just before the verdict, once; Security 1: it reads the cleaned console.
+        # run's) and just before the verdict, once; Security 1: it reads the console raw and cleaned.
         s = (IMG / "ci_boot.sh").read_text()
         loop = ('\tfor c in console console-reboot console-two-drives console-e2e; do\n'
                 '\t\t[ -f "$W/$c.log" ] || continue\n'
                 '\t\tfor v in "G1 PROVEN" "G1 NOT PROVEN"; do\n'
-                '\t\t\tclean <"$W/$c.log" | grep -qF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; }'
+                '\t\t\t{ cat "$W/$c.log"; clean <"$W/$c.log"; } | grep -aqF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; }'
                 ' || echo "ok   no \\"$v\\" in $c.log"\n'
                 '\t\tdone\n\tdone\n')
         self.assertEqual(s.count(loop), 1)
@@ -3930,10 +3930,12 @@ class UplinkTest(unittest.TestCase):
 
     def test_verdict_text_split_by_escapes_fails_the_run(self):
         # REQ: HW-10. Security finding 1 at d9cfaff: "G1 PRO<ESC>[mVEN" renders as the verdict in
-        # a terminal, so the check reads the console cleaned and fails the run on it.
+        # a terminal, so the check reads the console cleaned and fails the run on it. Security
+        # finding 1 at 60766a9: cleaning deletes an OSC body, so the check reads it raw too.
         clean = (b"[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n"
                  b"[ 8.0] box-e2e[817]: agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
-        for spoof in (b"x G1 PRO\x1b[mVEN y\n", b"x G1 PRO\x1b]0;t\x07VEN y\n", b"x G1 NOT\x1b[0m PROVEN\r\n"):
+        for spoof in (b"x G1 PRO\x1b[mVEN y\n", b"x G1 PRO\x1b]0;t\x07VEN y\n", b"x G1 NOT\x1b[0m PROVEN\r\n",
+                      b"x \x1b]0;G1 PROVEN\x07 y\n", b"x \x1b]2;G1 NOT PROVEN\x1b\\ y\n"):
             out = self.e2e_block(clean + spoof)
             self.assertIn("UNEXPECTED G1 ", out, spoof)
             self.assertTrue(out.endswith("ci_boot: G1 NOT PROVEN (run failed)\nrc=1\n"), out)

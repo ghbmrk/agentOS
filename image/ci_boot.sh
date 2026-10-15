@@ -246,12 +246,13 @@ if [ -n "${E2E:-}" ]; then
 	hasnt "$W/console-e2e.log" "agentos-e2e: FAIL"
 	hasnt "$W/console-e2e.log" "agentos-e2e: XPASS"
 	# The verdict is the host's alone: no console, from any of the four boots, may carry its text,
-	# read cleaned so text split by escape sequences counts too, so a guest that writes it fails
-	# the run whichever boot it did it in (tools/ASSUMPTIONS.md D27).
+	# read both raw (text inside an OSC body, which cleaning deletes) and cleaned (text split by
+	# escape sequences), so a guest that writes it fails the run whichever boot it did it in
+	# (tools/ASSUMPTIONS.md D27).
 	for c in console console-reboot console-two-drives console-e2e; do
 		[ -f "$W/$c.log" ] || continue
 		for v in "G1 PROVEN" "G1 NOT PROVEN"; do
-			clean <"$W/$c.log" | grep -qF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; } || echo "ok   no \"$v\" in $c.log"
+			{ cat "$W/$c.log"; clean <"$W/$c.log"; } | grep -aqF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; } || echo "ok   no \"$v\" in $c.log"
 		done
 	done
 	# The G1 freeze lifts only on a run whose DONE line reads fail=0 xfail=0 blocked=0
