@@ -60,6 +60,11 @@ func (a *Adapter) Verify(ctx context.Context, in journal.Intent) (grants.Verifie
 		}
 		v.Recipients = rc
 		v.ThreadVerified = a.threadVerified(ctx, m, rc)
+		// The thread as the message's own headers name it, for the
+		// gate's repeat rule only (grants Verified.Thread): matching more
+		// there asks the owner more, never less, so the sender writing
+		// them widens nothing.
+		v.Thread = append(append([]string{m.MessageID}, m.References...), m.InReplyTo)
 		v.Item = owner.Item{Object: "reply to " + quote(m.Subject), Recipient: strings.Join(rc, ", "),
 			Facts: owner.Facts{RecipientChecked: true, RecipientExists: known}}
 	default:

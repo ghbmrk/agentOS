@@ -171,6 +171,11 @@ const (
 	RecResume        RecordType = "resume"
 	RecEgress        RecordType = "egress" // an egress decision, not an intent
 	RecErased        RecordType = "erased" // a deleted source's content removed (CAP-3)
+	// RecParked closes the engine's own handling of an attempt whose
+	// outcome stayed unknown: no check or idempotency key settled it, so
+	// it waits in the daily digest and is never retried by the engine
+	// (OP-2, D-116).
+	RecParked RecordType = "parked"
 )
 
 // recordVersion is the journal schema version. Replay refuses newer records

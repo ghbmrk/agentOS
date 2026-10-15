@@ -1152,3 +1152,83 @@ func TestLegacyPINOffLeavesTheDASettings(t *testing.T) {
 		t.Fatalf("lockout %q, notes %q", r.lockoutEntry(), r.notes)
 	}
 }
+
+// REQ: CRED-8, HW-1
+
+// VAULT-slot-decided (#1557): when the PIN slot is already decided and the
+// slot change then reports an error, the enrollment keeps the lockout
+// hierarchy it took; the PIN slot that landed depends on it.
+func TestPINEnrollAfterTheSlotIsDecidedKeepsTheLockout(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
+	_, err := r.c.trust(r.code(), "246810")
+	if !errors.Is(err, errHostSlotDecidedPIN) {
+		t.Fatalf("enroll after the seal: %v", err)
+	}
+	// A plain retry would drop the PIN, so the step names -pin and the
+	// same PIN (P/UX/L3 6180314824).
+	if !strings.Contains(err.Error(), "run trust -pin again and enter the same PIN") {
+		t.Fatalf("the step does not keep the PIN: %q", err)
+	}
+	restore()
+	// The PC is trusted, so the owner is told so (CRED-9).
+	if len(r.notes) == 0 || !strings.Contains(r.notes[len(r.notes)-1], "trusted host, with a boot PIN (saving not finished)") {
+		t.Fatalf("no owner notice for a decided enroll: %q", r.notes)
+	}
+	if r.lockoutEntry() == "" {
+		t.Fatal("lockout authorization dropped though the PIN slot was decided")
+	}
+	// The text's step: trust again finishes it, with one host listed.
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatalf("trust again after a decided enroll: %v", err)
+	}
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 {
+		t.Fatalf("hosts after trust again: %v, %v", hosts, err)
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("empty lockout password resets the PIN guess counter: the lockout was released")
+	}
+}
+
+// REQ: CRED-9, HW-1
+
+// VAULT-slot-decided (#1557), no PIN: when the slot is decided and the
+// slot change then reports an error, the owner is told the PC is trusted
+// (not that nothing changed), the lockout state is left as it was, and
+// trust again finishes it with one host listed (Security 6180325510).
+func TestEnrollAfterTheSlotIsDecidedWithoutAPINSaysTheHostIsTrusted(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	lockout, da := r.lockoutEntry(), r.readDA(t)
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
+	_, err := r.c.trust(r.code(), "")
+	if !errors.Is(err, errHostSlotDecided) || errors.Is(err, errHostSlotDecidedPIN) {
+		t.Fatalf("enroll after the seal: %v", err)
+	}
+	restore()
+	// The PC is trusted, so the owner is told so (CRED-9).
+	if len(r.notes) == 0 || !strings.Contains(r.notes[len(r.notes)-1], "trusted host (saving not finished)") {
+		t.Fatalf("no owner notice for a decided enroll: %q", r.notes)
+	}
+	// No PIN: the lockout state is unchanged (no password taken, the
+	// dictionary-attack settings as they were).
+	if got := r.lockoutEntry(); got != lockout {
+		t.Fatalf("lockout entry %q, was %q", got, lockout)
+	}
+	if got := r.readDA(t); got != da {
+		t.Fatalf("dictionary-attack settings %+v, were %+v", got, da)
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout password taken by a no-PIN enroll: %v", err)
+	}
+	// The text's step: trust again finishes it, with one host listed.
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatalf("trust again after a decided enroll: %v", err)
+	}
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 {
+		t.Fatalf("hosts after trust again: %v, %v", hosts, err)
+	}
+}
