@@ -509,7 +509,7 @@ def main(argv=None):
     q.add_argument("--work", required=True, help="new directory for state, logs and report.json")
     src = q.add_mutually_exclusive_group(required=True)
     src.add_argument("--kernel", help="stand-in guest kernel (with --initrd)")
-    src.add_argument("--image", help="a raw AgentOS drive image, attached as a USB disk (with --phases-file)")
+    src.add_argument("--image", help="a raw agentOS drive image, attached as a USB disk (with --phases-file)")
     q.add_argument("--initrd")
     q.add_argument("--phases-file", help="JSON: phase -> [[regex, action], ...]; "
                    "action os marks the OS's first output in each boot")
