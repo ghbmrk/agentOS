@@ -3803,13 +3803,14 @@ class UplinkTest(unittest.TestCase):
         # CI's boot test plugs in a virtual NIC and reads this line (ci_boot.sh).
         out, _ = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 1)])
         lines = out.splitlines()
-        self.assertEqual(lines[0], "agentos-uplink: enp1s0 192.0.2.10/24")
-        self.assertTrue(lines[1].startswith("agentos-boot: bless=good"), lines)
+        # One line, so the console's other writers cannot split it between the two (#1764).
+        self.assertEqual(lines[0], "agentos-uplink: enp1s0 192.0.2.10/24 agentos-boot: bless=good root_bytes=1073741824")
+        self.assertEqual(sum("agentos-boot:" in l for l in lines), 1, lines)
 
     def test_boot_report_waits_briefly_without_a_cable(self):
         # The radio and virtual links never count; an unplugged port gets about 5 s for carrier, no more.
         out, calls = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 0)])
-        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertTrue(out.splitlines()[0].startswith("agentos-uplink: none agentos-boot: bless=good"), out)
         self.assertIn("sleep", calls)
         self.assertLessEqual(calls.count("sleep"), 5)
         self.assertNotIn("ip ", calls)
@@ -3820,12 +3821,12 @@ class UplinkTest(unittest.TestCase):
         flip = ('n=$(grep -c sleep "$NET/../log"); [ "$n" = 2 ] && echo 0 >"$NET/enp1s0/carrier"; '
                 '[ "$n" = 3 ] && echo 1 >"$NET/enp1s0/carrier"; :')
         out, calls = self.report([("enp1s0", "ether", None)], on_sleep=flip)
-        self.assertEqual(out.splitlines()[0], "agentos-uplink: enp1s0 192.0.2.10/24")
+        self.assertTrue(out.splitlines()[0].startswith("agentos-uplink: enp1s0 192.0.2.10/24 agentos-boot: "), out)
         self.assertEqual(calls.count("sleep"), 3)
 
     def test_boot_report_gives_up_on_a_lease_that_never_comes(self):
         out, calls = self.report([("enp1s0", "ether", 1)], addr="")
-        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertTrue(out.splitlines()[0].startswith("agentos-uplink: none agentos-boot: bless=good"), out)
         self.assertLessEqual(calls.count("sleep"), 30)
 
     def probe(self, mode):
@@ -3877,9 +3878,91 @@ class UplinkTest(unittest.TestCase):
         s = (IMG / "ci_boot.sh").read_text()
         self.assertIn('NIC="user,model=virtio-net-pci,', s)
         self.assertIn('-nic "${NIC:-none}"', s)
-        self.assertIn('has "$W/console.log" "agentos-uplink: "', s)
-        self.assertIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
         self.assertIn('has "$W/console-reboot.log" "agentos-uplink: none"', s)
+
+    def test_first_boot_lease_check_is_positive(self):
+        # REQ: HW-10. Security finding 4 at d9cfaff: the first boot must show an interface and an
+        # address on the report's one line; a line damaged inside "none" is not read as a lease.
+        s = (IMG / "ci_boot.sh").read_text()
+        lease = re.search(r"^lease='([^']*)'\n", s, re.M).group(1)
+        self.assertIn('grep -aqE "$lease" "$W/console.log" && echo "ok   $lease" || { echo "MISS $lease"; fail=1; }', s)
+        self.assertNotIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
+        out, _ = self.report([("enp1s0", "ether", 1)])
+        line = "[    6.49] boot-report[799]: " + out.splitlines()[0]
+        def grep(text):
+            return subprocess.run(["grep", "-aqE", lease], input=text.encode()).returncode == 0
+        self.assertTrue(grep(line), line)
+        out, _ = self.report([("enp1s0", "ether", 0)])
+        self.assertFalse(grep(out.splitlines()[0]), out)
+        for bad in ("agentos-uplink: no agentos-boot: bless=good", "agentos-uplink: n?ne agentos-boot: bless=good",
+                    "agentos-uplink: enp0s2 10.0.2.15/24\n agentos-boot: bless=good"):
+            self.assertFalse(grep(bad), bad)
+
+    def test_a_lost_reboot_line_costs_minutes_not_half_an_hour(self):
+        # REQ: HW-10. #1764: the reboot of an already-blessed drive reaches its health line in
+        # about a minute, so a line that never comes ends the wait after TMO=600, not 1800.
+        s = (IMG / "ci_boot.sh").read_text()
+        self.assertIn('TMO=600 boot "$W/console-reboot.log" "$D"\n', s)
+        self.assertIn("${TMO:-1800}", s)
+
+    def test_no_console_may_carry_the_host_verdict(self):
+        # REQ: HW-10. #1764 (D27 follow-up): all four consoles, not only the e2e one, fail the run
+        # when the guest wrote the verdict text. Potency/UX 4 and Security 2 at d9cfaff: the check
+        # runs in the e2e block after the e2e boot and its console check (so console-e2e.log is this
+        # run's) and just before the verdict, once; Security 1: it reads the console raw and cleaned.
+        s = (IMG / "ci_boot.sh").read_text()
+        loop = ('\tfor c in console console-reboot console-two-drives console-e2e; do\n'
+                '\t\t[ -f "$W/$c.log" ] || continue\n'
+                '\t\tfor v in "G1 PROVEN" "G1 NOT PROVEN"; do\n'
+                '\t\t\t{ cat "$W/$c.log"; clean <"$W/$c.log"; } | grep -aqF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; }'
+                ' || echo "ok   no \\"$v\\" in $c.log"\n'
+                '\t\tdone\n\tdone\n')
+        self.assertEqual(s.count(loop), 1)
+        self.assertEqual(s.count("for c in console console-reboot"), 1)
+        e2e = s.index('if [ -n "${E2E:-}" ]; then')
+        call = s.index('\te2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1\n')
+        verdict = s.index('\tg1_verdict "$W/e2e-done.log" "$fail"\n')
+        self.assertLess(e2e, call)
+        self.assertLess(call, s.index(loop))
+        self.assertLess(s.index(loop), verdict)
+        self.assertNotIn('hasnt "$W/console-e2e.log" "G1 PROVEN"', s)
+        self.assertNotIn('hasnt "$W/console-e2e.log" "G1 NOT PROVEN"', s)
+
+    def test_verdict_text_split_by_escapes_fails_the_run(self):
+        # REQ: HW-10. Security finding 1 at d9cfaff: "G1 PRO<ESC>[mVEN" renders as the verdict in
+        # a terminal, so the check reads the console cleaned and fails the run on it. Security
+        # finding 1 at 60766a9: cleaning deletes an OSC body, so the check reads it raw too.
+        clean = (b"[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n"
+                 b"[ 8.0] box-e2e[817]: agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+        for spoof in (b"x G1 PRO\x1b[mVEN y\n", b"x G1 PRO\x1b]0;t\x07VEN y\n", b"x G1 NOT\x1b[0m PROVEN\r\n",
+                      b"x \x1b]0;G1 PROVEN\x07 y\n", b"x \x1b]2;G1 NOT PROVEN\x1b\\ y\n"):
+            out = self.e2e_block(clean + spoof)
+            self.assertIn("UNEXPECTED G1 ", out, spoof)
+            self.assertTrue(out.endswith("ci_boot: G1 NOT PROVEN (run failed)\nrc=1\n"), out)
+
+    def test_boot_report_and_e2e_run_come_before_the_serial_login(self):
+        # REQ: HW-10. Potency/UX 1 at d9cfaff (#1705, #1746, #1747): serial-getty@ttyS0's start
+        # resets and hangs up the console, discarding queued output, so in CI the boot report and
+        # the e2e run are ordered before it. Every boot() passes the report's drop-in as an SMBIOS
+        # credential; the e2e unit (CI only) carries the ordering itself.
+        s = (IMG / "ci_boot.sh").read_text()
+        m = re.search(r"^REPORT_FIRST=\" -smbios type=11,value=io\.systemd\.credential\.binary:"
+                      r"systemd\.unit-dropin\.agentos-boot-report\.service=\$\(printf '([^']*)' \| base64 -w0\)\"\n",
+                      s, re.M)
+        self.assertIsNotNone(m)
+        dropin = subprocess.run(["sh", "-c", "printf '%s'" % m.group(1)], capture_output=True, text=True,
+                                check=True).stdout
+        cp = configparser.ConfigParser()
+        cp.read_string(dropin)
+        self.assertEqual(cp["Unit"]["Before"], "serial-getty@ttyS0.service")
+        boot = re.search(r"^boot\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        self.assertIn(' -nic "${NIC:-none}" $REPORT_FIRST ${EXTRA:-} &\n', boot)
+        self.assertLess(s.index("REPORT_FIRST="), s.index("boot() {"))
+        e2e = ini(IMG / "e2e/agentos-e2e.service")
+        self.assertIn("serial-getty@ttyS0.service", e2e["Unit"]["Before"].split())
+        # The getty named is the one the kernel console makes: console=ttyS0 is the last console=.
+        cmdline = (MK / "mkosi.conf").read_text()
+        self.assertEqual(re.findall(r"console=(\S+)", cmdline)[-1], "ttyS0")
 
     def g1_verdict(self, done, runfail="0"):
         s = (IMG / "ci_boot.sh").read_text()
@@ -3922,8 +4005,6 @@ class UplinkTest(unittest.TestCase):
         # REQ: HW-10. The verdict prefix is the host's alone, and a console that carries the verdict
         # text (a guest spoof) fails the run.
         self.assertNotIn("agentos-e2e: G1", e2e)
-        self.assertIn('\thasnt "$W/console-e2e.log" "G1 PROVEN"\n', e2e)
-        self.assertIn('\thasnt "$W/console-e2e.log" "G1 NOT PROVEN"\n', e2e)
         # REQ: HW-10. The console is checked before its DONE line is trusted; a miss fails the run,
         # and the DONE file exists (empty) so the verdict still prints.
         self.assertIn('\te2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1\n', e2e)
@@ -3931,7 +4012,8 @@ class UplinkTest(unittest.TestCase):
 
     def e2e_console(self, console):
         s = (IMG / "ci_boot.sh").read_text()
-        fn = re.search(r"^e2e_console\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        fn = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
+                     for f in ("clean", "e2e_console"))
         with tempfile.TemporaryDirectory() as d:
             log, done = pathlib.Path(d) / "console.log", pathlib.Path(d) / "done.log"
             log.write_bytes(console)
@@ -3994,7 +4076,7 @@ class UplinkTest(unittest.TestCase):
         # boots before it.
         s = (IMG / "ci_boot.sh").read_text()
         fns = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
-                      for f in ("e2e_console", "g1_verdict"))
+                      for f in ("clean", "e2e_console", "g1_verdict"))
         fns += "".join(l + "\n" for l in s.splitlines() if l.startswith(("has() ", "hasnt() ")))
         block = s[s.index('\t: >"$W/e2e-done.log"\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
         with tempfile.TemporaryDirectory() as d:
@@ -4032,12 +4114,28 @@ class UplinkTest(unittest.TestCase):
         # non-printable bytes and puts "console| " in front of every line.
         s = (IMG / "ci_boot.sh").read_text()
         self.assertIn('\tgrep -a "agentos-\\|Secure Boot\\|verity\\|Failed" "$log" | tail -40 | guest_echo || true\n', s)
-        fn = re.search(r"^guest_echo\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        fn = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
+                     for f in ("clean", "guest_echo"))
         raw = ("ci_boot: G1 PROVEN\n::notice::agentos-e2e x\n\x1b[1;32magentos-boot: ok\x1b[0m\r\n"
                "ci_boot: G1 PR\u041eVEN agentos-\n").encode()
         out = subprocess.run(["sh", "-c", fn + "guest_echo"], input=raw, capture_output=True, check=True).stdout
-        self.assertEqual(out, b"console| ci_boot: G1 PROVEN\nconsole| ::notice::agentos-e2e x\n"
+        # The verdict text itself is defanged, so a grep of the job log for it finds the host's line only.
+        self.assertEqual(out, b"console| ci_boot: G1 [verdict-text]\nconsole| ::notice::agentos-e2e x\n"
                               b"console| agentos-boot: ok\nconsole| ci_boot: G1 PR??VEN agentos-\n")
+
+    def test_guest_echo_strips_what_the_console_interleaves(self):
+        # REQ: HW-10. #1764: colon parameters in a colour (?[0;1;38:5:185m) and OSC sequences
+        # (ESC ] 104 BEL, seen as ?]104? in #1747's log) are cut. Security 3 at d9cfaff: an
+        # unterminated OSC keeps the rest of its line, its ESC shown as "?".
+        s = (IMG / "ci_boot.sh").read_text()
+        fn = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
+                     for f in ("clean", "guest_echo"))
+        raw = (b"\x1b[0;1;38:5:185mDEPEND\x1b[0m agentos-uplink: none\n"
+               b"\x1b]104\x07\x1b]104\x07agentos-boot: x\n"
+               b"a\x1b]0;title\x1b\\b\n" b"c\x1b]104")
+        out = subprocess.run(["sh", "-c", fn + "guest_echo"], input=raw, capture_output=True, check=True).stdout
+        self.assertEqual(out, b"console| DEPEND agentos-uplink: none\nconsole| agentos-boot: x\n"
+                              b"console| ab\nconsole| c?]104\n")
 
     def test_e2e_console_neutralises_guest_text(self):
         # REQ: HW-10. A guest line cannot start with the host's verdict prefix or a workflow
@@ -4053,6 +4151,29 @@ class UplinkTest(unittest.TestCase):
         self.assertNotIn("\r", out)
         self.assertEqual(rc, 1)
         self.assertIn("console| agentos-e2e: PASS a\n", out)
+
+    def test_e2e_console_accepts_osc_and_colon_residue_before_the_lead_in(self):
+        # REQ: HW-10. #1747's job log: OSC 104 resets (ESC ] 104 BEL) and a colon-parameter colour
+        # landed ahead of the timestamp and failed "driver text not at the start of its line".
+        # Stripped, those lines parse; text that is not the exact lead-in still fails.
+        console = (b"\x1b]104\x07\x1b]104\x07[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n"
+                   b"\x1b[0;1;38:5:185m[ 8.0] box-e2e[817]: agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\x1b[0m\n")
+        rc, out, written = self.e2e_console(console)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("agentos-e2e: DONE pass=1", written)
+        rc, out, _ = self.e2e_console(b"junk[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n")
+        self.assertNotEqual(rc, 0)
+
+    def test_e2e_console_names_a_driver_line_behind_an_unterminated_osc(self):
+        # REQ: HW-10. Security finding 3 at d9cfaff: an OSC with no BEL or ST no longer swallows the
+        # rest of its line, so the driver line behind it is echoed and named, not silently skipped.
+        rc, out, written = self.e2e_console(
+            b"\x1b]104[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n"
+            b"[ 8.0] box-e2e[817]: agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+        self.assertEqual(rc, 1)
+        self.assertIn("console| ?]104[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n", out)
+        self.assertIn("ci_boot: MISS console: driver text not at the start of its line\n", out)
+        self.assertEqual(written, "")
 
 
 class SetupServicesTest(unittest.TestCase):

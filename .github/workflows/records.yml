@@ -1,13 +1,14 @@
 name: records
-# Review records, batched after merge (#1691, Merge-overhead): each push to main collects
-# the marked verdict comments of merged PRs (tools/records.py) and proposes the missing
-# reviews/<lens>/ files as one bot/records PR, instead of one records PR per review.
+# The only writer of review records (#1691, #1816, D-120); feature PRs carry none. Once a day
+# this collects the marked verdict comments of merged PRs (tools/records.py; the comment shape
+# is OPERATING §4 "Verdict comment shape") and proposes the missing reviews/<lens>/ files as one
+# bot/records PR, so records-only merges stay at one a day or fewer.
 # Same split as trace.yml: collection runs with a read-only token; only the commit job can
 # write, it runs no repository code, and it adds only new reviews/<lens>/*.md files.
 # The bot PR changes only record files, so ci.yml runs just the document checks there.
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: '41 5 * * *'
   workflow_dispatch:
 permissions:
   contents: read

@@ -20,7 +20,9 @@ KiB, MiB, GiB = 1 << 10, 1 << 20, 1 << 30
 RESPONSE_PEAK = 64 * MiB
 # A Fetch asks for at most 100 messages (agentosd's batches; Security l1 on #1658).
 FETCH_BATCH = 100
-# Model calls through the proxy at once; each holds at most one request body in memory.
+# Model calls through the proxy at once; each holds at most one request body in memory. Provider
+# worker routes (#1014 part c, egress K28) add their own process-wide cap, routeCalls in
+# cmd/agentos-egress/workerroute.go, read below and counted on top of this.
 PROXY_CALLS = 16
 # HW-4's floor has 8 GB; the vault may take at most a quarter of it.
 FLOOR_RAM = 8 * GiB
@@ -74,10 +76,11 @@ def gomem(v):
 def legitimate_peak():
     """What the bounded paths can hold live at once: every mail call at its worst (one response
     at the field bound, plus a full Fetch's read budget of kept bodies), one unlock's Argon2id,
-    and the proxy's request bodies."""
+    and the proxy's and the provider worker routes' request bodies."""
     fetch_budget = 16 * MiB + FETCH_BATCH * (go_int("mail/imapsmtp/imapsmtp.go", "cfg.MaxFetch") + 8 * KiB)
     mail = go_int("cmd/agentos-egress/mailaccount.go", "mailConns") * (RESPONSE_PEAK + fetch_budget)
-    proxy = PROXY_CALLS * go_int("egress/proxy.go", "DefaultMaxBody")
+    calls = PROXY_CALLS + go_int("cmd/agentos-egress/workerroute.go", "routeCalls")
+    proxy = calls * go_int("egress/proxy.go", "DefaultMaxBody")
     return mail + kdf_memory() + proxy
 
 
@@ -120,6 +123,7 @@ class VaultMemoryCeiling(unittest.TestCase):
         self.assertEqual(go_int("mail/imapsmtp/imapsmtp.go", "cfg.MaxFetch"), 256 * KiB)
         self.assertEqual(kdf_memory(), 256 * MiB)
         self.assertEqual(go_int("egress/proxy.go", "DefaultMaxBody"), 8 * MiB)
+        self.assertEqual(go_int("cmd/agentos-egress/workerroute.go", "routeCalls"), 8)
 
 
 if __name__ == "__main__":

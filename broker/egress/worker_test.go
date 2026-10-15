@@ -820,3 +820,36 @@ func TestSignInLink(t *testing.T) {
 		}
 	}
 }
+
+// countingBody counts what a handler reads of a request body.
+type countingBody struct {
+	n atomic.Int64
+	r io.Reader
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingBody) Close() error { return nil }
+
+// A request without this worker's placeholder is refused before any of its
+// body is read, so a caller holding no credential cannot make the vault
+// process buffer a body (CRED-8, egress K28).
+func TestWorkerRouteRefusesBeforeReadingTheBody(t *testing.T) {
+	r := newWorkerRig(t, false)
+	for _, auth := range []string{"", "Bearer ph-access-w2"} {
+		req := responses(codexBody(clientTools))
+		body := &countingBody{r: strings.NewReader(strings.Repeat("x", 1<<20))}
+		req.Body = body
+		req.Header.Set("Authorization", auth)
+		if w := r.do(req); w.Code != http.StatusForbidden {
+			t.Fatalf("authorization %q: %d", auth, w.Code)
+		}
+		if n := body.n.Load(); n != 0 {
+			t.Fatalf("authorization %q: %d body bytes read before the placeholder check", auth, n)
+		}
+	}
+}

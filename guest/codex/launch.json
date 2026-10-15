@@ -1,5 +1,13 @@
 {
-  "note": "How a Codex provider worker starts (S8-W1, CRED-5 broker-held, CAP-11). Inert until #809 qualifies the pinned CLI and agentosd registers the route. CODEX_HOME holds only the placeholder auth.json (#1015); the refresh override points at the in-worker forwarder (#1014). HOME is CODEX_HOME, not the workspace, and GIT_DIR is /dev/null, so no file a tool writes in the workspace is read as the CLI's own git or home config (ASSUMPTIONS C11). The brief arrives on stdin and the JSON event stream is the result.",
+  "note": "How a Codex provider worker starts (S8-W1, CRED-5 broker-held, CAP-11). Inert until #809 qualifies the pinned CLI and agentosd registers the route. CODEX_HOME holds only the placeholder auth.json (#1015); the model base_url points at the in-worker forwarder (#1014), which the launcher starts by running wrap + argv: #1314's runner must exec wrap followed by argv with exactly env (ASSUMPTIONS C18); env carries the PATH that finds the bare codex and the tools' helpers, never the refresh override. The forwarder starts argv with only PATH, HOME, CODEX_HOME and GIT_DIR from env, and sets CODEX_REFRESH_TOKEN_URL_OVERRIDE to its own port's /oauth/token, so env must not carry the override (childproc refuses a start that passes on a TOKEN-named variable's value). HOME is CODEX_HOME, not the workspace, and GIT_DIR is /dev/null, so no file a tool writes in the workspace is read as the CLI's own git or home config (ASSUMPTIONS C11). The brief arrives on stdin and the JSON event stream is the result.",
+  "wrap": [
+    "/usr/local/bin/agentos-codex-forwarder",
+    "-listen",
+    "127.0.0.1:18432",
+    "-socket",
+    "/run/agentos/route.sock",
+    "--"
+  ],
   "argv": [
     "codex",
     "exec",
@@ -11,9 +19,9 @@
   ],
   "cwd": "/var/lib/agentos-work",
   "env": [
+    "PATH=/usr/local/bin:/usr/bin:/bin",
     "HOME=/var/lib/agentos-codex",
     "CODEX_HOME=/var/lib/agentos-codex",
-    "GIT_DIR=/dev/null",
-    "CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://127.0.0.1:18432/oauth/token"
+    "GIT_DIR=/dev/null"
   ]
 }

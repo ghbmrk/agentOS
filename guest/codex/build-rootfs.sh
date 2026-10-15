@@ -5,7 +5,7 @@
 # (#1015 writes the placeholder into CODEX_HOME at machine create).
 #
 # Usage: build-rootfs.sh OUT_DIR
-# Needs: curl (unless CODEX_TARBALL is set), openssl, tar, sha256sum, and the host's /bin/sh,
+# Needs: Go (unless FORWARDER_BIN is set), curl (unless CODEX_TARBALL is set), openssl, tar, sha256sum, and the host's /bin/sh,
 # /bin/bash and coreutils, which are copied in with their libraries.
 # CODEX_TARBALL=<file> uses a local copy of the pinned tarball instead of downloading it; it is
 # still checked against the pinned hash.
@@ -57,6 +57,16 @@ install -m 0644 "$here/managed_config.toml" etc/codex/managed_config.toml
 install -m 0644 "$here/requirements.toml" etc/codex/requirements.toml
 install -m 0755 "$here/agentos-toolsh" usr/local/bin/agentos-toolsh
 install -m 0644 "$here/launch.json" usr/lib/agentos/codex/launch.json
+
+# The in-worker forwarder (#1014): loopback 18432 to /run/agentos/route.sock, the only route the
+# CLI is pointed at. FORWARDER_BIN=<file> installs a prebuilt static binary; otherwise it is built
+# from this repository with the host's Go.
+if [ -n "${FORWARDER_BIN:-}" ]; then
+	install -m 0755 "$FORWARDER_BIN" usr/local/bin/agentos-codex-forwarder
+else
+	(cd "$here/../../broker" && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' \
+		-o "$out/usr/local/bin/agentos-codex-forwarder" ./egress/cmd/agentos-codex-forwarder)
+fi
 
 # The host's shell and a few tools, with every library they load (the CLI itself is static).
 copy() {
