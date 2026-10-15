@@ -2,15 +2,62 @@ name: image
 # Builds the AgentOS device image (image/, PLAN P2-1) on two runners, boots one build under
 # Secure Boot in QEMU, and checks both builds give the same release (/usr verity root hash).
 # Runs here because GitHub's runners reach the Debian mirrors; the cloud agent sessions cannot.
-# Two builds and a boot cost about an hour of runner time, so only image changes trigger it;
-# run it by hand (workflow_dispatch) to rebuild after broker or guest changes.
+# Two builds and a boot cost about an hour of runner time, so only image changes and the broker
+# packages the in-image setup run (broker/e2e/boxe2e) goes through trigger it; run it by hand
+# (workflow_dispatch) to rebuild after other broker or guest changes.
 on:
   workflow_dispatch:
   pull_request:
-    paths: ["image/**", ".github/workflows/image.yml"]
+    paths:
+      - "image/**"
+      - ".github/workflows/image.yml"
+      # The setup path the in-image run drives (#1688): claim, SMS pairing, code generator,
+      # Owner Card, recovery and the services behind them.
+      - "broker/e2e/boxe2e/**"
+      - "broker/localui/**"
+      - "broker/claim/**"
+      - "broker/firstboot/**"
+      - "broker/card/**"
+      - "broker/owner/**"
+      - "broker/recovery/**"
+      - "broker/modem/**"
+      - "broker/modemlink/**"
+      - "broker/smsapi/**"
+      - "broker/change/**"
+      - "broker/apnet/**"
+      - "broker/egress/**"
+      - "broker/daemon/**"
+      - "broker/cmd/agentosd/**"
+      - "broker/cmd/agentos-localui/**"
+      - "broker/cmd/agentos-modem/**"
+      - "broker/cmd/agentos-egress/**"
+      - "broker/cmd/agentos-ap/**"
   push:
     branches: [main]
-    paths: ["image/**", ".github/workflows/image.yml"]
+    paths:
+      - "image/**"
+      - ".github/workflows/image.yml"
+      # The setup path the in-image run drives (#1688): claim, SMS pairing, code generator,
+      # Owner Card, recovery and the services behind them.
+      - "broker/e2e/boxe2e/**"
+      - "broker/localui/**"
+      - "broker/claim/**"
+      - "broker/firstboot/**"
+      - "broker/card/**"
+      - "broker/owner/**"
+      - "broker/recovery/**"
+      - "broker/modem/**"
+      - "broker/modemlink/**"
+      - "broker/smsapi/**"
+      - "broker/change/**"
+      - "broker/apnet/**"
+      - "broker/egress/**"
+      - "broker/daemon/**"
+      - "broker/cmd/agentosd/**"
+      - "broker/cmd/agentos-localui/**"
+      - "broker/cmd/agentos-modem/**"
+      - "broker/cmd/agentos-egress/**"
+      - "broker/cmd/agentos-ap/**"
 permissions:
   contents: read
 jobs:
@@ -40,14 +87,54 @@ jobs:
           sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
           sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
       - name: Build image
-        run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out"
-      - name: Boot test (Secure Boot on)
+        shell: bash  # with pipefail, so tee keeps the build's exit status
+        run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Show the tree check's refusals
+        # The tree check's refusals as annotations, so a tmpfiles.d line missing from
+        # image/mkosi/tmpfiles.allow can be reviewed (and its entry copied) without the full log (#1543).
+        # An annotation holds 4096 characters and a step 10 of each level, so allowlist misses are
+        # shown as their bare entries after the other refusals, packed into chunks that each start with
+        # the heading. A line the guarded-path check also refuses is not offered as an entry: it must
+        # not be added (mkosi.finalize gives it none either).
+        if: failure()
+        run: |
+          python3 - "$RUNNER_TEMP/build.log" <<'PY'
+          import re, sys
+          lines = [l.split("image check: ", 1)[1].rstrip("\n") for l in open(sys.argv[1], errors="replace")
+                   if "image check: " in l]
+          guarded = {m.group(1, 2) for m in (re.match(r"(.+?): line (\d+): ", l) for l in lines) if m}
+          others, entries = [], []
+          for l in lines:
+              m = re.match(r"(.+?) line (\d+): not on the tmpfiles.d allowlist .*?; entry: (.*)$", l)
+              if not m:
+                  others.append(l)
+              elif m.group(1, 2) not in guarded:
+                  entries.append(m.group(3))
+          def pack(lines, head=""):
+              # Chunks of at most about 3500 characters, each starting with HEAD.
+              chunks, cur = [], head
+              for l in lines:
+                  if cur != head and len(cur) + len(l) + 1 > 3500:
+                      chunks.append(cur)
+                      cur = head
+                  cur += l[:3500] + "\n"
+              return chunks + ([cur] if cur != head else [])
+          chunks = pack(others) + pack(entries, "review each line, then add it to image/mkosi/tmpfiles.allow:\n")
+          for i, c in enumerate(chunks[:30]):
+              level = ("error", "warning", "notice")[i // 10]
+              msg = c.rstrip("\n").replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print("::%s title=image check %d/%d::%s" % (level, i + 1, len(chunks), msg))
+          PY
+      - name: Build the end-to-end driver
         if: matrix.run == 'a'
-        run: sudo image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
+        run: cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/e2e/box-e2e" ./e2e/boxe2e
+      - name: Boot test (Secure Boot on) and end-to-end run
+        if: matrix.run == 'a'
+        run: sudo env E2E="$RUNNER_TEMP/e2e" image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
       - name: Keep the console logs
         if: always() && matrix.run == 'a'
         run: |
-          for l in console console-reboot console-two-drives; do
+          for l in console console-reboot console-two-drives console-e2e; do
             sudo cp "$RUNNER_TEMP/boot/$l.log" "$RUNNER_TEMP/out/qemu-$l.log" || true
           done
       - name: Release record

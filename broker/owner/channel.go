@@ -106,6 +106,11 @@ type Config struct {
 	// .Answer) in an unlocked session, with any code stripped, before it
 	// would reach the agent (control.Handler.Answer, W9). Nil: none.
 	Answer func(ctx context.Context, msg string) (reply string, ok bool)
+	// Retry lists the effects the digest named as unclear and not retried
+	// (OP-2), as items to ask about when the owner texts RETRY. Each
+	// item's Ref comes back in Decide; the caller retries only an
+	// approved one. Nil: nothing to retry.
+	Retry func() []Item
 	// OwnerName is the owner's own name, "" when unknown; the box's name
 	// may not be it (CH-21).
 	OwnerName string
@@ -150,13 +155,17 @@ type Channel struct {
 	cfg  Config
 	ctrl *control.Handler
 
-	mu       sync.Mutex
-	codes    codes
-	open     map[string]*request
-	reqN     uint64 // requests opened, for their order
-	queued   map[string]*Queued
-	released map[string]time.Time // queued IDs released, for UNDO's reply
-	lateUndo map[string]bool      // released IDs the owner texted UNDO for
+	mu          sync.Mutex
+	sends       sync.WaitGroup // texts started after a local reply (textAfterReply)
+	inlineSends bool           // tests: textAfterReply sends before returning
+	sendTail    chan struct{}  // closed when the latest textAfterReply batch finishes; keeps batches in order
+	sendMu      sync.Mutex     // guards sendTail
+	codes       codes
+	open        map[string]*request
+	reqN        uint64 // requests opened, for their order
+	queued      map[string]*Queued
+	released    map[string]time.Time // queued IDs released, for UNDO's reply
+	lateUndo    map[string]bool      // released IDs the owner texted UNDO for
 	// undo takes an UNDO whose ID the channel does not hold (SetUndo).
 	undo atomic.Pointer[UndoHook]
 	// current confirms a held text's subjects at send (SetCurrent).
@@ -295,6 +304,7 @@ type route struct {
 	delegate string // text for the control handler
 	run      bool   // delegate goes to the control handler
 	narrow   *reply // PAUSE or REVOKE, run outside the lock
+	retry    bool   // RETRY: ask about the digest's unclear effects, outside the lock
 	undo     string // an UNDO ID the channel does not hold, for the hook
 	// limited: the replies count against ReplyLimit (CH-15).
 	limited bool
@@ -399,6 +409,9 @@ func (c *Channel) finish(ctx context.Context, from string, rt route) []string {
 			replies = append(replies, c.cfg.Narrow(rt.narrow.word, rt.narrow.id))
 		}
 	}
+	if rt.retry {
+		replies = append(replies, c.askRetry())
+	}
 	var out []string
 	for _, r := range replies {
 		if r != "" {
@@ -465,6 +478,8 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 			return route{replies: []string{c.moreLocked(r.id)}, limited: !unlocked}
 		case "UNLOCK":
 			return route{replies: []string{"Codes are not locked. To unlock a session, send a code from your code generator."}, limited: !unlocked}
+		case "RETRY":
+			return route{retry: true, limited: !unlocked}
 		case "RUN":
 			if h := c.held; h != nil && h.ready && unlocked {
 				c.held = nil
@@ -1012,5 +1027,47 @@ func (c *Channel) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 		}
+	}
+}
+
+// askRetry asks about the unclear effects Config.Retry lists (OP-2): one
+// request per effect, never one YES for all, each at the tier its own
+// verified facts give, and on the local page when its recipients cannot
+// be texted. It returns the reply, "" once every request is on its way.
+func (c *Channel) askRetry() string {
+	var items []Item
+	if c.cfg.Retry != nil {
+		items = c.cfg.Retry()
+	}
+	if len(items) == 0 {
+		return "Nothing to retry."
+	}
+	if len(items) > 20 {
+		items = items[:20]
+	}
+	var text, local []Item
+	for _, it := range items {
+		if SMSApprovable(it) {
+			text = append(text, it)
+		} else {
+			local = append(local, it)
+		}
+	}
+	var errs []error
+	if len(text) > 0 {
+		_, err := c.RequestEach(text, make([]time.Duration, len(text)))
+		errs = append(errs, err)
+	}
+	if len(local) > 0 {
+		_, err := c.RequestLocalEach(local, make([]time.Duration, len(local)))
+		errs = append(errs, err)
+	}
+	switch err := errors.Join(errs...); {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrFull):
+		return "Too many open requests to ask about every retry now. Text RETRY again later for the rest."
+	default:
+		return "Could not ask about every retry now. Text RETRY again later for the rest."
 	}
 }

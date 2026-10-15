@@ -1253,19 +1253,26 @@ func (a *Applier) Status() string {
 			why = a.busy(now, a.talkUntil(a.st.Pending))
 		}
 		return fmt.Sprintf(waitLines[why], a.st.Pending.Version)
-	case a.st.Last == nil || a.st.Last.Kind == doneInstalled:
-		return ""
-	case a.st.Last.Kind == doneFellBack:
-		return fellBackLine(a.st.Last.Version)
-	case a.st.Last.Kind == doneUnrecorded:
-		return unrecordedText(a.st.Last.Version)
-	case a.st.Last.Kind == doneInstalledOtherRoot:
-		if a.onOtherRoot() {
-			return otherRootText(a.st.Last.Version)
+	}
+	n, prev := a.previousRootLocked()
+	switch l := a.st.Last; {
+	case l == nil || l.Kind == doneInstalled:
+		if prev {
+			return previousRootText(n)
 		}
 		return ""
+	case l.Kind == doneInstalledOtherRoot:
+		if prev {
+			return otherRootText(l.Version)
+		}
+		return ""
+	case l.Kind == doneFellBack:
+		return withPreviousRoot(fellBackLine(l.Version), n, prev)
+	case l.Kind == doneUnrecorded:
+		return withPreviousRoot(unrecordedText(l.Version), n, prev)
+	default:
+		return withPreviousRoot(fmt.Sprintf("Update %d was not installed; I will try again.", l.Version), n, prev)
 	}
-	return fmt.Sprintf("Update %d was not installed; I will try again.", a.st.Last.Version)
 }
 
 // Digest returns the lines the next digest carries once: an update that
@@ -1279,32 +1286,59 @@ func (a *Applier) Digest() []string {
 	}
 	l.Told = true
 	_ = a.saveLocked()
+	n, prev := a.previousRootLocked()
 	switch l.Kind {
 	case doneInstalled:
-		return []string{fmt.Sprintf("Update %d is installed.", l.Version)}
+		return []string{withPreviousRoot(fmt.Sprintf("Update %d is installed.", l.Version), n, prev)}
 	case doneUnrecorded:
-		return []string{unrecordedText(l.Version)}
+		return []string{withPreviousRoot(unrecordedText(l.Version), n, prev)}
 	case doneInstalledOtherRoot:
-		if a.onOtherRoot() {
+		if prev {
 			return []string{otherRootText(l.Version)}
 		}
 		return []string{fmt.Sprintf("Update %d is installed.", l.Version)}
 	}
-	return []string{fellBackLine(l.Version)}
+	return []string{withPreviousRoot(fellBackLine(l.Version), n, prev)}
 }
 
-// onOtherRoot reports that this boot runs another root than the update
-// store's installed release: the other-root line holds in every such
-// boot, not only the one it was settled in (SR3-4f-r1). A boot or store
-// that cannot be read is not taken for it, since the line says what the
-// box started (CH-12).
-func (a *Applier) onOtherRoot() bool {
+// previousRootLocked reports the update store's installed release when no
+// apply is in flight and this boot runs another root than it (SR3-4f-r1,
+// SR3-4f-r1-f2): an other-root boot, or a later release that fell back,
+// was withdrawn or failed after Execute's save before Stage, so the box
+// runs N-1 while the store holds N. A boot or store that cannot be read,
+// or a store that never recorded a root, is not taken for it, since the
+// line says what the box started (CH-12).
+func (a *Applier) previousRootLocked() (int64, bool) {
+	if a.st.Applying != nil || a.executing {
+		return 0, false
+	}
 	b, err := a.cfg.Activator.Booted(context.Background())
 	if err != nil {
-		return false
+		return 0, false
 	}
 	in, err := a.cfg.Store.Installed()
-	return err == nil && b.UsrRootHash != in.UsrRootHash
+	if err != nil || in.UsrRootHash == "" || b.UsrRootHash == in.UsrRootHash {
+		return 0, false
+	}
+	return in.Version, true
+}
+
+// previousRootLine says the box runs the root before installed release n,
+// with no restart promise: once a later Install may have written n's
+// slot, n may not start (SR3-4f-r1-f2).
+const previousRootLine = "I am running the previous version, not update %d."
+
+func previousRootText(n int64) string {
+	return fmt.Sprintf(previousRootLine, n) + " Nothing is needed from you; a later update will replace it."
+}
+
+// withPreviousRoot adds the previous-version line to an outcome line when
+// prev holds.
+func withPreviousRoot(line string, n int64, prev bool) string {
+	if !prev {
+		return line
+	}
+	return line + " " + fmt.Sprintf(previousRootLine, n)
 }
 
 // otherRootText: the release is installed, but this boot runs the

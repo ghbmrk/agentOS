@@ -28,7 +28,9 @@ func (m *Manager) CheckpointAndStop(ctx context.Context, id string) (Snapshot, e
 	if err != nil {
 		return Snapshot{}, err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return Snapshot{}, err
+	}
 	if mc.State != Running {
 		st := mc.State
 		mc.mu.Unlock()
@@ -67,7 +69,7 @@ func (m *Manager) CheckpointAndStop(ctx context.Context, id string) (Snapshot, e
 		return Snapshot{}, err
 	}
 	mc.mu.Unlock()
-	m.cfg.Admit.Release(id)
+	m.release(mc)
 	return s, nil
 }
 
@@ -106,14 +108,20 @@ func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (
 	if err != nil {
 		return Wake{}, err
 	}
-	mc.mu.Lock()
+	// The checks and every step after them go through this handle, never
+	// the ID again: a machine destroyed and replaced under the ID is
+	// neither woken nor restored from its predecessor's checkpoint
+	// (security S1 on #1575).
+	if err := mc.lockLive(); err != nil {
+		return Wake{}, err
+	}
 	st, last, starts := mc.State, mc.Last, mc.Starts
 	mc.mu.Unlock()
 	if st == Running {
 		return Wake{}, fmt.Errorf("%w: %s is running", ErrState, id)
 	}
 	s, serr := m.Snapshot(snapID)
-	own := serr == nil && s.Sleep && s.Machine == id
+	own := serr == nil && s.Sleep && ownSnap(mc, s)
 	if own {
 		defer m.dropSnapshot(mc, s.ID, "")
 	}
@@ -127,13 +135,17 @@ func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (
 		cold = ColdStarted
 	case !m.hashMatches(s):
 		cold = ColdChanged
-	default:
-		if err := m.Rollback(ctx, id, s.ID); err == nil {
+	}
+	if h := m.afterCheck; h != nil {
+		h(id)
+	}
+	if cold == "" {
+		if err := m.rollbackTo(ctx, mc, s); err == nil {
 			return Wake{Restored: true}, nil
 		}
 		// The restore failed: whatever it left, the machine starts cold.
 		cold = ColdFailed
-		mc.mu.Lock()
+		mc.mu.Lock() // a read: a retired machine reads Stopped, and resumeOf refuses it
 		running := mc.State == Running
 		mc.mu.Unlock()
 		if running {
@@ -145,7 +157,7 @@ func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (
 	// started, not wait for the keeper's next try (L3 on #149).
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ColdResumeFor)
 	defer cancel()
-	return Wake{Cold: cold}, m.Resume(cctx, id)
+	return Wake{Cold: cold}, m.resumeOf(cctx, mc)
 }
 
 // ColdResumeFor bounds the cold start that follows a refused or failed

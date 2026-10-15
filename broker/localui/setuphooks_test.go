@@ -1,12 +1,15 @@
 package localui
 
 import (
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"html"
+	"log"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -426,5 +429,32 @@ func TestARefusedFinishForAnOwedAnswerSaysSo(t *testing.T) {
 	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}, "private": {"1"}})
 	if r.srv.setup.done() || r.setupErr() != answerOwed {
 		t.Fatalf("done %v, said %q", r.srv.setup.done(), r.setupErr())
+	}
+}
+
+type failingHost struct {
+	Hooks
+	err error
+}
+
+func (f failingHost) TrustHost(bool) error { return f.err }
+
+// REQ: HW-10. The page says only "Could not save" whatever stopped the
+// "this PC" step; the real cause goes to the journal, where the e2e driver
+// reads it to tell an unserved step (#1221) from any other failure.
+func TestSetupHostJournalsTheHookError(t *testing.T) {
+	r := newRig(t)
+	r.srv.cfg.Hooks = failingHost{Hooks: r.srv.cfg.Hooks, err: errNotServed}
+	r.srv.setup.st.Codes, r.srv.setup.st.Recovery = true, true
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	err := r.srv.setup.host(httptest.NewRequest("POST", "/setup/host", nil), "")
+	if err == nil || err.Error() != "Could not save. Try again." {
+		t.Fatalf("page error %v", err)
+	}
+	// The e2e driver's xfail table (broker/e2e/boxe2e/xfail.go) matches this text.
+	if want := "setup host hook: localui: not served by agentosd yet"; errNotServed.Error() != "localui: not served by agentosd yet" || !strings.Contains(buf.String(), want) {
+		t.Fatalf("journal %q lacks %q", buf.String(), want)
 	}
 }

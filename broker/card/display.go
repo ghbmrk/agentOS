@@ -45,6 +45,18 @@ var ErrInEffect = errors.New("card: part of this card is already in effect")
 // rotation must replace every part this one rotated (#1090 review F3).
 const inEffectProblem = "Part of your new card is already in effect, but I could not finish. Keep the new card, and your current one if you still have it. Finish now: start a new card from my box page, using the passphrase or recovery key from whichever card works."
 
+// Noted wraps a Provision error with a fixed note that the page adds to
+// the owner's text once the card is in effect (CH-12): Err decides the
+// outcome, Note says what else the owner must know. Note is a fixed
+// string; no card text goes in it.
+type Noted struct {
+	Err  error
+	Note string
+}
+
+func (n *Noted) Error() string { return n.Err.Error() }
+func (n *Noted) Unwrap() error { return n.Err }
+
 // Parts are the card secrets a rotation replaces (REC-4).
 type Parts struct{ WiFi, Setup, Passphrase, Grid, Recovery bool }
 
@@ -119,6 +131,7 @@ type Display struct {
 	confirmed bool
 	discarded bool
 	inEffect  bool
+	note      string // a Noted in-effect error's note, shown after inEffectProblem
 }
 
 // Journal events. Fixed strings: no card text ever reaches the journal.
@@ -317,6 +330,9 @@ func (d *Display) ConfirmAnswers(a Answers) error {
 			// Confirmed from the owner's copy, which is now the card in
 			// effect; a retry cannot finish, so keep nothing.
 			d.inEffect = true
+			if n := (*Noted)(nil); errors.As(err, &n) {
+				d.note = n.Note
+			}
 			d.eraseLocked()
 			d.journal(EventInEffect)
 		case errors.Is(err, ErrDiscard):
@@ -501,10 +517,13 @@ func (d *Display) servePage(w http.ResponseWriter, code int, problem string) {
 
 func (d *Display) gone(w http.ResponseWriter) {
 	d.mu.Lock()
-	discarded, inEffect := d.discarded, d.inEffect
+	discarded, inEffect, note := d.discarded, d.inEffect, d.note
 	d.mu.Unlock()
 	if inEffect {
-		http.Error(w, inEffectProblem, http.StatusGone)
+		if note != "" {
+			note = " " + note
+		}
+		http.Error(w, inEffectProblem+note, http.StatusGone)
 		return
 	}
 	if discarded {

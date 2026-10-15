@@ -123,9 +123,12 @@ type Status struct {
 
 // Config configures a Book.
 type Config struct {
-	// Send texts the owner. The wiring passes owner.Channel.Notify: the
-	// question is agent-written, so it goes out behind the agent prefix,
-	// with secret-shaped text replaced (CH-19). Required.
+	// Send texts the owner at once. The wiring passes
+	// owner.Channel.NotifyNow: the question is agent-written, so it goes
+	// out behind the agent prefix, with secret-shaped text replaced
+	// (CH-19), and it is never held, since its deadline starts when Send
+	// returns nil (#989, #1563). The Book paces it itself: Quiet and
+	// Reserve. Required.
 	Send func(text string) error
 	// Now is the time for deadlines: clock.Guard.Now once P2-9 lands. An
 	// error (the guard's ErrRestricted) holds every question: nothing is
@@ -139,6 +142,10 @@ type Config struct {
 	// Quiet reports the owner's quiet hours: questions wait to be texted
 	// until they end (CH-15). Nil: never quiet.
 	Quiet func(time.Time) bool
+	// QuietHours reports whether the owner set quiet hours at all. While
+	// Now is restricted, questions wait only if so (PQ4). Nil, with Quiet
+	// set: assume set.
+	QuietHours func() bool
 	// Path keeps questions and pending digest lines across restarts
 	// (0600). Empty keeps nothing.
 	Path string
@@ -873,9 +880,18 @@ func (b *Book) sendDue(ctx context.Context) {
 	b.sendMu.Lock()
 	defer b.sendMu.Unlock()
 	for {
+		// A cancelled ctx is not a restricted clock: Now fails with
+		// ctx.Err, and texting then would give no deadline (#1564). The
+		// ctx can end during Now, so it is checked again after.
+		if ctx.Err() != nil {
+			return
+		}
 		now, err := b.cfg.Now(ctx)
+		if ctx.Err() != nil {
+			return
+		}
 		trusted := err == nil
-		if b.cfg.Quiet != nil && (!trusted || b.cfg.Quiet(now)) {
+		if b.waitsQuiet(now, trusted) {
 			return
 		}
 		m := b.cfg.Mono()
@@ -978,6 +994,19 @@ func (b *Book) sendDue(ctx context.Context) {
 		b.save("send")
 		b.mu.Unlock()
 	}
+}
+
+// waitsQuiet reports whether questions wait for quiet hours to end
+// (CH-15): at a trusted now, inside them; while restricted, whenever the
+// owner set any, since the time cannot tell (PQ4). Needs only sendMu.
+func (b *Book) waitsQuiet(now time.Time, trusted bool) bool {
+	if b.cfg.Quiet == nil {
+		return false
+	}
+	if trusted {
+		return b.cfg.Quiet(now)
+	}
+	return b.cfg.QuietHours == nil || b.cfg.QuietHours()
 }
 
 // withinHour reports whether t counts against this hour's texts: on
@@ -1147,12 +1176,27 @@ func (b *Book) tickRestricted() {
 	}
 }
 
+// dateLocked gives a question texted while Now was restricted, so with no
+// deadline, its Sent and Deadline from the monotonic clock, now that now
+// is trusted (PQ4). It reports whether it changed e.
+func (b *Book) dateLocked(e *entry, now time.Time, m time.Duration) bool {
+	if e.State != Waiting || !e.Deadline.IsZero() {
+		return false
+	}
+	e.Sent = now.Add(-(m - e.sentMono))
+	e.Deadline = e.Sent.Add(e.Wait)
+	return true
+}
+
 // Tick lapses questions past their deadline, drops old closed ones, and
 // texts held ones. With the clock restricted it lapses only texted
 // questions whose wait ran out on the monotonic clock, and texts held
 // ones with their wait instead of a time (PQ4).
 func (b *Book) Tick(ctx context.Context) {
 	now, err := b.cfg.Now(ctx)
+	if ctx.Err() != nil { // a cancelled ctx is not a restricted clock (#1564)
+		return
+	}
 	if err != nil {
 		b.tickRestricted()
 		b.sendDue(ctx)
@@ -1164,10 +1208,8 @@ func (b *Book) Tick(ctx context.Context) {
 	changed := false
 	keep := b.qs[:0]
 	for _, e := range b.qs {
-		if e.State == Waiting && e.Deadline.IsZero() {
-			// Texted while restricted: date it from the monotonic clock.
-			e.Sent = now.Add(-(m - e.sentMono))
-			e.Deadline, changed = e.Sent.Add(e.Wait), true
+		if b.dateLocked(e, now, m) {
+			changed = true
 		}
 		if e.State == Waiting && !now.Before(e.Deadline) && !now.Before(b.grace) {
 			b.lapseLocked(e, now)
@@ -1330,6 +1372,11 @@ func (b *Book) Answer(ctx context.Context, text string) (reply string, ok bool) 
 	}
 	if clockErr == nil {
 		b.startGraceLocked(now)
+		// A question texted while restricted has no deadline until the
+		// next trusted tick; a zero one never reads as passed (#1564).
+		if b.dateLocked(e, now, b.cfg.Mono()) {
+			b.save("answer")
+		}
 	}
 	if e.State == Waiting && clockErr == nil && !now.Before(e.Deadline) && !now.Before(b.grace) {
 		b.lapseLocked(e, now) // the deadline passed before the timer ran

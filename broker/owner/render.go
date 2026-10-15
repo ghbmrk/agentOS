@@ -168,6 +168,16 @@ type Item struct {
 	// ends "asked 14:02, re-sent after restart" with the time it was
 	// first asked. It is not part of ItemSum.
 	Asked time.Time
+	// Retried, when set, marks an owner retry of an effect whose outcome
+	// is unknown (OP-2): it is when the effect was first tried, and the
+	// line ends "may go twice, first tried 14:02 Oct 13". It is not part
+	// of ItemSum.
+	Retried time.Time
+	// Sent, when set, marks a repeat of a send known to have gone within
+	// the last 24 hours (confirm repeats, D-116): it is when that send
+	// went, and the line ends "already sent 14:02 Oct 13; send it
+	// again?". It is not part of ItemSum.
+	Sent time.Time
 }
 
 // Term is one field of a broker-rendered summary: a fixed label and the
@@ -203,7 +213,7 @@ func (l TermList) List() (ts []Term, ok bool) {
 }
 
 // ItemSum is a digest of everything an item shows the owner or is
-// classified on, without Ref or Asked. A restart keeps it, never the
+// classified on, without Ref, Asked, Retried or Sent. A restart keeps it, never the
 // item, so a re-issue can prove the item is unchanged (OP-3).
 func ItemSum(it Item) string {
 	f := it.Facts
@@ -234,6 +244,13 @@ func (c *Channel) itemLine(it Item) string {
 	s := it.line()
 	if !it.Asked.IsZero() {
 		s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", re-sent after restart"
+	}
+	switch {
+	case !it.Sent.IsZero():
+		// Confirm repeats (D-116): said plainly, as a question.
+		s += ", already sent " + it.Sent.In(c.cfg.Location).Format("15:04 Jan 2") + "; send it again?"
+	case !it.Retried.IsZero():
+		s += ", may go twice, first tried " + it.Retried.In(c.cfg.Location).Format("15:04 Jan 2")
 	}
 	return s
 }

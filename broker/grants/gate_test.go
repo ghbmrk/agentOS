@@ -349,7 +349,9 @@ func TestReissuedItemLapsesAtItsOriginalExpiry(t *testing.T) {
 // TestContextScopedReplies: a reply composed in an isolated machine under a
 // reply rule is queued with an undo window and released after it; UNDO
 // denies it; a reply that matches the commitment filter becomes a request;
-// a reply from the main agent is asked as usual.
+// a reply from the main agent is asked as usual. Each reply says
+// something new; an identical one is a repeat (confirm repeats, D-116,
+// TestConfirmRepeatsAPreAllowedIdenticalReply).
 func TestContextScopedReplies(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.Isolated = func(m string) bool { return m == "reply-1" } })
 	r.grant(mailGrant())
@@ -360,7 +362,7 @@ func TestContextScopedReplies(t *testing.T) {
 	r.ver.set("thr-1", thread)
 	reply := func(id, origin string) journal.Status {
 		return r.submit(journal.Intent{ID: id, Origin: origin, Machine: strings.TrimPrefix(origin, "guest:"), Account: "mail", Action: "message.send",
-			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
+			Params: map[string]any{"record": "thr-1", "body": "Thanks, got it (" + id + ")."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
 	}
 
 	st := reply("reply-1/r1", "guest:reply-1")

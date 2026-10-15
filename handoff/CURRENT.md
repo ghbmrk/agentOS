@@ -12,7 +12,7 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 
 ## 2. Standing decisions and rules
 - **D-095** Simplification: the journal is the only durable state, owner messages are intents, one revisable outcome, forget once, a named trusted core. Plan and packages: `briefs/SIM.md`.
-- **D-096** Includes SPEC one log (SIM-sd) and the scope freeze and PR cap (off-gate scope frozen until G2 passes; open PRs capped at about 10 per lane).
+- **D-096** Includes SPEC one log (SIM-sd) and the scope freeze and PR cap (off-gate scope frozen until G2 passes; open PRs capped at about 10 per lane; the cap was replaced by the scope-overlap conflict guard in D-111).
 - **D-097** Pull-first (STATUS is the primary owner view, only urgent classes pushed, daily digest removed) and key erasure.
 - **D-099** Both subscriptions are equal peers; no main one, no lane restriction between them.
 - Merge when every required review accepts the current head, CI is green and it merges cleanly; asks to Mark are cards, never typed phrases.
