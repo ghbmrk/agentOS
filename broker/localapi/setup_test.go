@@ -34,6 +34,8 @@ func TestSetupTextAllowsOnlySetupsFixedTexts(t *testing.T) {
 		"agentOS is running on evil.example. This is your box's number; save it as agentOS.",
 		"agentOS is running on http://x. This is your box's number; save it as agentOS.",
 		"agentOS is running on x/y. This is your box's number; save it as agentOS.",
+		// Each excluded host character on its own: no '.', '/' or ':'.
+		"agentOS is running on tel:5550100. This is your box's number; save it as agentOS.",
 		"agentOS is running on -x. This is your box's number; save it as agentOS.",
 		"agentOS is running on " + strings.Repeat("a", SetupHostMax+1) + ". This is your box's number; save it as agentOS.",
 	} {

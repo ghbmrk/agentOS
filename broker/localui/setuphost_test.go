@@ -76,6 +76,27 @@ func TestHostInfoNamesThePCAndItsRAM(t *testing.T) {
 	}
 }
 
+// Every character gsmSafe keeps, leading or inside the PC's name, still
+// gives a pairing reply agentosd sends (localapi.SetupText): pairedText
+// and SetupText's host class must agree, or the owner is silently left
+// unpaired.
+func TestPairedTextPassesSetupTextForEveryKeptCharacter(t *testing.T) {
+	names := []string{",Foo", "+Foo", "'Foo", "A+B's PC", "A,B", "Foo, 8 GB", "Mark's PC", "+'-,() Foo"}
+	for _, c := range " ,.-+()/:'" {
+		names = append(names, string(c)+"Foo", "A"+string(c)+"B", "Foo"+string(c))
+	}
+	for _, name := range names {
+		got := pairedText(name)
+		if !localapi.SetupText(got) {
+			t.Errorf("%q: agentosd refuses the pairing reply %q", name, got)
+		}
+		// A kept character inside the name reaches the reply.
+		if inner := strings.TrimLeft(name, " ,()+'-"); !strings.ContainsAny(inner, ".:/") && strings.TrimSpace(inner) != "" && !strings.Contains(got, strings.TrimSpace(inner)) {
+			t.Errorf("%q: cut from the pairing reply %q", name, got)
+		}
+	}
+}
+
 // fakeTrust is the vault process's setup host step.
 type fakeTrust struct {
 	got []bool
