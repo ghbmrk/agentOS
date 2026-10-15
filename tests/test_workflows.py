@@ -50,12 +50,12 @@ class WorkflowTest(unittest.TestCase):
                     self.assertRegex(step, r"persist-credentials:\s*false", f"{f.name}: {step}")
 
     def test_no_workflow_pushes_to_main(self):
-        # main requires status checks, so a workflow push to it would be rejected; trace.yml
-        # and metrics.yml push a bot branch, open its PR and dispatch ci.yml there instead.
+        # main requires status checks, so a workflow push to it would be rejected; trace.yml,
+        # metrics.yml and records.yml push a bot branch, open its PR and dispatch ci.yml there instead.
         for f in self.files():
             self.assertNotRegex(f.read_text(), r"git push\b[^\n]*\bmain\b", f.name)
         self.assertIn("workflow_dispatch:", (WORKFLOWS / "ci.yml").read_text())
-        for name in ("trace.yml", "metrics.yml"):
+        for name in ("trace.yml", "metrics.yml", "records.yml"):
             text = (WORKFLOWS / name).read_text()
             self.assertIn("gh pr create --base main", text, name)
             self.assertIn('gh workflow run ci.yml --ref "$BRANCH"', text, name)
