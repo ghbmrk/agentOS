@@ -427,3 +427,18 @@ LATER.md's Release rows that had no BOARD row when LATER.md was archived to [doc
 | S8-W1-tunnel | CONNECT-only tunnel with broker-resolved host and SNI binding; precondition of any worker-held route; no CONNECT handler in `broker/egress` at 256b7cc (from S8-W1a, #543) (release; A3, A14, CRED-5 W4) | S8-W1 scheduled | queued |
 | S8-W1-volume | Per-provider login volume (schema check, writable login file only) and its exclusion from snapshots, recall, journal and results; no code at 256b7cc (from S8-W1a, #543) (release; A14, CRED-5 W2) | S8-W1 scheduled | queued |
 | P3-4b-4 | Continuous canary rounds, published corpora, scripted tamper and exhaustion probes; same basis as P3-4b-3 (release; LOOP-7, D-067) | P3-4b-3 | queued |
+
+## Backlog refill (2026-10-13)
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+
+## External diligence review (2026-10-14)
+
+| ID | Package | Needs | State |
+|---|---|---|---|
+
+## Backlog refill (2026-10-15)
+
+| ID | Package | Needs | State |
+|---|---|---|---|
