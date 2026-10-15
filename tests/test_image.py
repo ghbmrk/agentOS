@@ -2592,7 +2592,7 @@ TMPFILES_PASS = ("d /run/user 0755 root root -", "L /var/run - - - - ../run", "L
                  "L+ /var/run - - - - ../run", "L /var/run - - - - /run", "L /etc/mtab - - - - ../proc/self/mounts",
                  "L+ /etc/mtab   -    -    -    -  ../proc/self/mounts", "x /tmp/systemd-private-%b-*",
                  "d %t/agentos 0750", "d /run/systemd/netif 0755 - - -", "f^ /etc/hosts - - - - network.hosts",
-                 "r /run/sysctlx.d", "L /etc/y - - - - /run/agentos", "C! /etc/pam.d - - - -",
+                 "r /run/sysctlx.d", "C! /etc/pam.d - - - -",
                  "L /etc/os-release - - - - /usr/lib/os-release",
                  # trixie's credstore.conf, debian.conf, legacy.conf and systemd-resolve.conf (CI build of #1543).
                  "d /etc/credstore 0700 root root", "d /etc/credstore.encrypted 0700 root root",
