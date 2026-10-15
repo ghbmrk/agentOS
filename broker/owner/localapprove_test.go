@@ -75,6 +75,7 @@ func TestThePageApprovesWithACode(t *testing.T) {
 	if err != nil || !strings.HasPrefix(msg, "Approved "+id+". Your agent can go ahead. It runs at") || !strings.Contains(msg, "UNDO") {
 		t.Fatalf("approve: %q %v", msg, err)
 	}
+	r.ch.WaitSends()
 	if d := r.decisions(); len(d) != 1 || !d[0].Approved || d[0].Hold == "" {
 		t.Fatalf("decisions %+v", d)
 	}
@@ -89,9 +90,11 @@ func TestThePageApprovesWithACode(t *testing.T) {
 			t.Fatalf("wrong code %d: %v", i, err)
 		}
 	}
+	r.ch.WaitSends()
 	if d := r.decisions(); len(d) != 1 || d[0].Approved || d[0].Why != "void" {
 		t.Fatalf("after wrong codes %+v", d)
 	}
+	r.ch.WaitSends()
 	if len(r.ch.codes.st.Wrong) != WrongPerRequest {
 		t.Fatalf("wrong count %d", len(r.ch.codes.st.Wrong))
 	}
@@ -117,6 +120,7 @@ func TestThePageDeniesAndListsEveryOpenRequest(t *testing.T) {
 	if d := r.decisions(); len(d) != 1 || d[0].Ref != "t2" || d[0].Approved {
 		t.Fatalf("decisions %+v", d)
 	}
+	r.ch.WaitSends()
 	if open := r.ch.LocalRequests(); len(open[0].Done) != 2 || !open[0].Done[1] || open[0].Done[0] {
 		t.Fatalf("done %+v", open[0].Done)
 	}
@@ -153,6 +157,7 @@ func TestPageAnswersAreToldToTheOwner(t *testing.T) {
 	if _, err := r.ch.LocalAnswer(id, r.sum(id), true, r.totp()); err != nil {
 		t.Fatal(err)
 	}
+	r.ch.WaitSends()
 	r.ch.FlushLocal()
 	if got := r.inbox(); got != "Approved "+id+" on my Wi-Fi page at "+r.clock().Format("15:04")+". Not you? Text STOP." {
 		t.Fatalf("alert %q", got)
@@ -258,6 +263,7 @@ func TestPageAnswersAreCoalesced(t *testing.T) {
 	default:
 	}
 	r.advance(SignInAlertEvery)
+	r.ch.WaitSends()
 	r.ch.FlushLocal()
 	got := r.inbox()
 	if !strings.HasPrefix(got, "On my Wi-Fi page: Approved "+b+" at ") || !strings.Contains(got, v+" void after wrong codes at ") ||
@@ -348,6 +354,7 @@ func TestThePageApprovesTextedRequestsWithAStrongCode(t *testing.T) {
 	// L3 S-a: the texted code is refused there with a hint, not counted
 	// as wrong; it spends a try of the day's bound like any code (L3 on
 	// #171).
+	r.ch.WaitSends()
 	used := r.ch.codes.st.LocalUsed
 	for i := 0; i < WrongPerRequest; i++ {
 		if _, err := r.ch.LocalAnswer(id, r.sum(id), true, texted); err == nil || err.Error() != "That's the code I texted. Here, use a code from your code generator." {
@@ -407,6 +414,7 @@ func TestWrongPageCodesThatLockAreTexted(t *testing.T) {
 	for i := 0; i < WrongToLock; i++ {
 		r.ch.LocalAnswer(ids[i/2], r.sum(ids[i/2]), true, fmt.Sprintf("%06d", i))
 	}
+	r.ch.WaitSends()
 	var all []string
 	for {
 		select {
@@ -463,6 +471,7 @@ func TestManyWrongPageCodesTellTheLockAndChallengeOnce(t *testing.T) {
 			t.Fatalf("wrong %d: %v", i, err)
 		}
 	}
+	r.ch.WaitSends()
 	var locks, challenges int
 	for {
 		select {
@@ -700,6 +709,7 @@ func TestPageDecisionsAreToldNamingThePage(t *testing.T) {
 	at2 := r.clock().Format("15:04")
 	r.ch.LocalAnswer(more[1], r.sum(more[1]), false, "")
 	r.advance(SignInAlertEvery)
+	r.ch.WaitSends()
 	r.ch.FlushLocal()
 	if got := r.inbox(); got != "On my Wi-Fi page: Denied "+more[0]+" at "+at1+", Denied "+more[1]+" at "+at2+". Not you? Text STOP." {
 		t.Fatalf("coalesced: %q", got)
