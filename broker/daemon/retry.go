@@ -23,12 +23,14 @@ var settleEvery = time.Hour
 
 // settleLoop runs SettleUnknown at startup and then every settleEvery
 // until ctx ends. Nothing is retried that the engine's own rules do not
-// allow (OP-2b). After each, it dispatches through dispatch (the gate's
+// allow (OP-2b). wait and maxWait are passed in, not read from the package
+// settings, so the goroutine never touches them after the caller returns.
+// After each, it dispatches through dispatch (the gate's
 // Dispatch) the held resubmissions that a not-done effect waits for
 // (journal Release, R12), so that effect is not left to the agent.
-func settleLoop(ctx context.Context, eng *journal.Engine, every time.Duration, dispatch func(context.Context, string) (journal.Status, error)) {
+func settleLoop(ctx context.Context, eng *journal.Engine, every, wait, maxWait time.Duration, dispatch func(context.Context, string) (journal.Status, error)) {
 	for {
-		eng.SettleUnknown(ctx, settleWait, settleMaxWait)
+		eng.SettleUnknown(ctx, wait, maxWait)
 		eng.Release(ctx, dispatch)
 		t := time.NewTimer(every)
 		select {
