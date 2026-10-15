@@ -147,7 +147,7 @@ class WiringTest(unittest.TestCase):
             self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'",
                           body[:body.index("uses: actions/cache/save@")].rsplit("- name:", 1)[1], job)
             self.assertIn("go-build", save)
-        self.assertIn("tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_g1_scope -v", ci)
+        self.assertIn("tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_g1_scope.CheckTest tests.test_g1_scope.ListTest -v", ci)
 
     def test_no_privileged_workflow_uses_a_cache(self):
         # REQ: CI-PATHS

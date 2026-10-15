@@ -38,6 +38,6 @@ Board section: Release rows carried from LATER.md (2026-10-10). Source: work ite
 
 **Out of scope.** CAP-12a resources tool, the page's "Use my plan" sign-in (#1264), the consent record (CRED-5c), failure and pause handling (CRED-5b), the Claude opt-in (#1380), Grok and Muse declarations (#1378, #1379), live qualification and A14's adversarial clause (S8-live, #809).
 
-**Scope:** `broker/provagent/*` (new), `broker/modelroute/*` (route kind and fallback only), `broker/workers/*` (provider run path and tool ID refusal), `broker/workers/*_test.go`, `broker/vm/worker.go` (spec only), `broker/cmd/agentosd/main.go` (wiring), `broker/guest/mcp.go` (tool registration only), `broker/guest/tools_test.go`, the ASSUMPTIONS.md of each touched package, this brief.
+**Scope:** `broker/provagent/*` (new), `broker/modelroute/*` (route kind and fallback only), `broker/workers/*` (provider run path and tool ID refusal), `broker/workers/*_test.go`, `broker/vm/worker.go` (spec only), `broker/cmd/agentosd/main.go` (wiring) and its tests, `broker/guest/mcp.go` (tool registration only), `broker/guest/tools_test.go`, `broker/daemon/arc2_test.go` (classing `provagent` only; amended 2026-10-15 on the #1864 reviews), `tools/risk_tier.py` (classing `provagent` tier A only; same amendment), the ASSUMPTIONS.md of each touched package, this brief.
 
 **Usage estimate:** 150k tokens. Split if past the checkpoint without green: (a) declaration, qualification gate and route kind, (b) run tool and result path. Builder model: Opus-class (tier A).
