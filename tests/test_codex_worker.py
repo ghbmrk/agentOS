@@ -288,6 +288,10 @@ class ManagedConfigTest(unittest.TestCase):
         # The CLI runs git in the workspace outside its tool sandbox; with GIT_DIR on /dev/null
         # no repository a tool wrote there (filters, hooks, fsmonitor) is ever read (C11).
         self.assertEqual(env["GIT_DIR"], "/dev/null")
+        # argv[0] is the bare `codex`: the forwarder finds it, and the CLI's tools their helpers,
+        # through env's own PATH, so a runner passing exactly env starts a working worker (C18).
+        self.assertEqual(env["PATH"], "/usr/local/bin:/usr/bin:/bin")
+        self.assertEqual(sorted(env), ["CODEX_HOME", "GIT_DIR", "HOME", "PATH"])
         self.assertEqual(launch["argv"],
                          ["codex", "exec", "--json", "--skip-git-repo-check", "--cd", WORK, "-"])
         self.assertEqual(launch["cwd"], WORK)
@@ -902,8 +906,9 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
                     break
             threading.Event().wait(0.05)
         env = dict(e.split("=", 1) for e in json.loads(LAUNCH.read_text())["env"])
-        # What the forwarder adds when it starts the CLI (C18).
-        env.update(PATH="/usr/local/bin:/usr/bin:/bin", AGENTOS_SYNTHETIC_CANARY=self.canary,
+        # PATH is launch.json's own; the override is what the forwarder adds when it starts the
+        # CLI (C18).
+        env.update(AGENTOS_SYNTHETIC_CANARY=self.canary,
                    CODEX_REFRESH_TOKEN_URL_OVERRIDE=FORWARDER + "/oauth/token")
         argv = [
             BWRAP, "--dev-bind", "/", "/",

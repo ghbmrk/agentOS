@@ -501,8 +501,8 @@ func TestCRED5SeedServesTheWorkersPlaceholders(t *testing.T) {
 	}
 }
 
-// A locked open answers with one line, which RouteControl maps to
-// egress.ErrVaultLocked (#1314 tells "unlock your box" from a fault).
+// A locked open answers with one line, which modelroute.RouteControl maps
+// to modelroute.ErrVaultLocked (#1314 tells "unlock your box" from a fault).
 func TestCRED5LockedOpenIsOneLine(t *testing.T) {
 	r := newWorkerRig(t)
 	r.locked = true

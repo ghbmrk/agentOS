@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -126,7 +127,8 @@ func (p *workerRoutes) handler() http.Handler {
 		default:
 			dir, err := p.openRoute(id)
 			if errors.Is(err, errRouteLocked) {
-				// One line: RouteControl maps the 503 to ErrVaultLocked.
+				// One line: modelroute.RouteControl maps the 503 to
+				// modelroute.ErrVaultLocked.
 				http.Error(w, errRouteLocked.Error(), http.StatusServiceUnavailable)
 				return
 			}
@@ -179,6 +181,17 @@ func (p *workerRoutes) openRoute(id string) (string, error) {
 		os.RemoveAll(dir)
 		return "", err
 	}
+	// Closing ln must not unlink path: a Serve that exits late on a
+	// replaced route would otherwise delete a reopen's new route.sock
+	// (K28). stopLocked, closeAll and the error paths remove the
+	// directory, socket included.
+	ul, ok := ln.(*net.UnixListener)
+	if !ok {
+		ln.Close()
+		os.RemoveAll(dir)
+		return "", fmt.Errorf("route %s: listener is %T, not a unix listener", id, ln)
+	}
+	ul.SetUnlinkOnClose(false)
 	if err := os.Chmod(path, 0o600); err != nil {
 		ln.Close()
 		os.RemoveAll(dir)
