@@ -23,13 +23,15 @@ import (
 // fakeLogins stands in for the vault's plan logins (#1015): one real token
 // set per provider, and the placeholders each worker holds instead.
 type fakeLogins struct {
-	mu       sync.Mutex
-	real     map[string]string // field -> real value
-	ph       map[string]string // placeholder -> field, for worker "w1"
-	commits  int
-	signIns  int
-	swapErr  error
-	lastSwap map[string]string
+	mu      sync.Mutex
+	real    map[string]string // field -> real value
+	ph      map[string]string // placeholder -> field, for worker "w1"
+	commits int
+	signIns int
+	swapErr error
+	// commitErr makes the vault write fail after a good swap.
+	commitErr error
+	lastSwap  map[string]string
 }
 
 func newFakeLogins(t *testing.T) *fakeLogins {
@@ -85,6 +87,9 @@ func (s fakeSwap) Swap(adapter string, creds map[string]string) (map[string]stri
 	return phs, func() error {
 		s.f.mu.Lock()
 		defer s.f.mu.Unlock()
+		if s.f.commitErr != nil {
+			return s.f.commitErr
+		}
 		s.f.commits++
 		if s.signIn {
 			s.f.signIns++
@@ -330,6 +335,24 @@ func TestWorkerRouteBodyCheck(t *testing.T) {
 		"unparseable":                `{"model":`,
 		"trailing data":              codexBody(clientTools) + `{}`,
 		"not an object":              `[1]`,
+		// E10's relay rule, and keys the pinned CLI does not send (#809).
+		"web_search_options":      withKey(`"web_search_options":{}`),
+		"background":              withKey(`"background":true`),
+		"stored prompt":           withKey(`"prompt":{"id":"pmpt_x"}`),
+		"store true":              withKey(`"store":true`),
+		"store not a bool":        withKey(`"store":"false"`),
+		"conversation":            withKey(`"conversation":"conv_x"`),
+		"previous_response_id":    withKey(`"previous_response_id":"resp_x"`),
+		"unknown top-level key":   withKey(`"zz_future":1`),
+		"key spelled differently": withKey(`"Tools":[]`),
+		"hosted in message content": `{"model":"m","input":[{"type":"message","role":"user",` +
+			`"content":[{"type":"input_text","text":"hi"},{"type":"web_search"}]}]}`,
+		"unknown input item":     `{"model":"m","input":[{"type":"web_search_call","action":{}}]}`,
+		"input item no type":     `{"model":"m","input":[{"role":"user","content":"hi"}]}`,
+		"input not a list":       `{"model":"m","input":{"type":"message"}}`,
+		"tools under reasoning":  withKey(`"reasoning":{"effort":"low","tools":[{"type":"web_search"}]}`),
+		"tools under text":       withKey(`"text":{"tools":[{"type":"web_search"}]}`),
+		"tools in function call": `{"model":"m","input":[{"type":"function_call","name":"x","arguments":"{}","tools":[{"type":"web_search"}]}]}`,
 	}
 	for name, body := range refused {
 		r := newWorkerRig(t, false)
@@ -361,6 +384,28 @@ func TestWorkerRouteBodyCheck(t *testing.T) {
 	if err := json.Unmarshal(r.up.body[0], &sent); err != nil || sent["model"] != "gpt-x" {
 		t.Fatalf("forwarded body %s", r.up.body[0])
 	}
+	// E10: store is forced off when the CLI leaves it out.
+	if sent["store"] != false {
+		t.Fatalf("store not set false: %s", r.up.body[0])
+	}
+
+	// The CLI's full request shape passes, with store:false kept.
+	r = newWorkerRig(t, false)
+	full := withKey(`"instructions":"be brief","parallel_tool_calls":false,"store":false,` +
+		`"reasoning":{"effort":"medium","summary":"auto"},"prompt_cache_key":"k","text":{"verbosity":"low"},` +
+		`"tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"tools":{"type":"string"}}}}]`)
+	full = strings.Replace(full, `"input":[`, `"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"s"}],"encrypted_content":"e"},`+
+		`{"type":"function_call","name":"f","arguments":"{}","call_id":"c1"},{"type":"function_call_output","call_id":"c1","output":"ok"},`+
+		`{"type":"custom_tool_call","name":"exec","input":"ls","call_id":"c2"},{"type":"custom_tool_call_output","call_id":"c2","output":"ok"},`+
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"x"}]},`, 1)
+	if w := r.do(responses(full)); w.Code != http.StatusOK {
+		t.Fatalf("CLI request shape: %d %s", w.Code, w.Body)
+	}
+}
+
+// withKey adds one top-level key to a CLI-shaped body.
+func withKey(kv string) string {
+	return "{" + kv + "," + codexBody(clientTools)[1:]
 }
 
 // A compressed request body is refused rather than forwarded unread.
@@ -511,6 +556,44 @@ func TestWorkerRouteRefreshDropped(t *testing.T) {
 	}
 }
 
+// CRED-5: when the vault write fails after a good swap, the worker gets
+// neither the real tokens nor placeholders for a login the vault does not
+// hold, on refresh and on the sign-in code exchange alike.
+func TestWorkerRouteVaultWriteFails(t *testing.T) {
+	cases := map[string]struct {
+		signIn bool
+		req    func() *http.Request
+	}{
+		"refresh":       {false, func() *http.Request { return refreshReq("ph-refresh-w1") }},
+		"code exchange": {true, func() *http.Request { return codeExchange("http://127.0.0.1:18432/deviceauth/callback") }},
+	}
+	for name, c := range cases {
+		r := newWorkerRig(t, c.signIn)
+		tok, reply := tokenReply(t)
+		r.up.reply = reply
+		r.logins.commitErr = errors.New("vault write failed")
+		w := r.do(c.req())
+		out := w.Body.String()
+		if w.Code != http.StatusBadGateway || !strings.Contains(out, ReasonUnswappable) {
+			t.Fatalf("%s: %d %q", name, w.Code, out)
+		}
+		if strings.Contains(out, "ph-new-") || strings.Contains(out, "canary") {
+			t.Fatalf("%s: released %q", name, out)
+		}
+		for _, v := range tok {
+			if strings.Contains(out, v) {
+				t.Fatalf("%s: a real credential reached the worker", name)
+			}
+		}
+		if r.logins.committed() != 0 || r.logins.lastSwap != nil {
+			t.Fatalf("%s: a login was stored", name)
+		}
+		if ev := r.audit.last(t); ev.Reason != ReasonUnswappable {
+			t.Fatalf("%s journaled %q", name, ev.Reason)
+		}
+	}
+}
+
 // Quota headers the broker reads on its own connection land as pool
 // readings; a credits or limit-reached signal reads as used up (#809).
 func TestWorkerRouteQuotaReadings(t *testing.T) {
@@ -586,11 +669,14 @@ func TestWorkerRouteRefusesPrivateAnswer(t *testing.T) {
 func TestWorkerRouteConfigRequired(t *testing.T) {
 	ok := WorkerRouteConfig{Route: Codex(), Worker: "w1", Logins: newFakeLogins(t), Transport: &planUpstream{}, Audit: &auditLog{}}
 	for name, mut := range map[string]func(*WorkerRouteConfig){
-		"no worker":   func(c *WorkerRouteConfig) { c.Worker = "" },
-		"no logins":   func(c *WorkerRouteConfig) { c.Logins = nil },
-		"no auditor":  func(c *WorkerRouteConfig) { c.Audit = nil },
-		"hosted tool": func(c *WorkerRouteConfig) { c.Route.ToolTypes = append(c.Route.ToolTypes, "web_search") },
-		"bad path":    func(c *WorkerRouteConfig) { c.Route.Endpoints[0].Path = "/a/../b" },
+		"no worker":         func(c *WorkerRouteConfig) { c.Worker = "" },
+		"no logins":         func(c *WorkerRouteConfig) { c.Logins = nil },
+		"no auditor":        func(c *WorkerRouteConfig) { c.Audit = nil },
+		"hosted tool":       func(c *WorkerRouteConfig) { c.Route.ToolTypes = append(c.Route.ToolTypes, "web_search") },
+		"background key":    func(c *WorkerRouteConfig) { c.Route.BodyKeys = append(c.Route.BodyKeys, "background") },
+		"stored prompt key": func(c *WorkerRouteConfig) { c.Route.BodyKeys = append(c.Route.BodyKeys, "prompt") },
+		"no body shape":     func(c *WorkerRouteConfig) { c.Route.InputTypes = nil },
+		"bad path":          func(c *WorkerRouteConfig) { c.Route.Endpoints[0].Path = "/a/../b" },
 	} {
 		c := ok
 		c.Route = Codex()

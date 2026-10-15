@@ -74,6 +74,12 @@ type PlanRoute struct {
 	// ToolTypes are the tool types a model call may declare: client-side
 	// ones only, so the provider never runs a tool for the worker.
 	ToolTypes []string
+	// BodyKeys, InputTypes and ContentTypes are the shape a model call may
+	// take: its top-level keys, its input items' types, and the types of a
+	// message's content parts. Anything else is refused, not forwarded.
+	BodyKeys     []string
+	InputTypes   []string
+	ContentTypes []string
 	// Token is the shape of a refresh's or code exchange's response.
 	Token ResponseRule
 	// RequestHeaders a run worker may send; SignInHeaders a sign-in
@@ -89,6 +95,14 @@ type PlanRoute struct {
 // clientToolTypes are the only tool types any plan route may allow: the
 // CLI runs these itself. A hosted type has the provider act for the worker.
 var clientToolTypes = map[string]bool{"namespace": true, "function": true, "custom": true}
+
+// relayDeniedKeys are body keys no plan route may allow, as on every relay
+// (E10): background runs, provider-held prompts and conversations, and
+// server-side tool sources.
+var relayDeniedKeys = map[string]bool{
+	"background": true, "prompt": true, "conversation": true, "previous_response_id": true,
+	"web_search_options": true, "mcp_servers": true, "container": true,
+}
 
 // Codex is the Codex CLI's plan route, as measured on CLI 0.162.1 (#809).
 func Codex() PlanRoute {
@@ -108,6 +122,17 @@ func Codex() PlanRoute {
 			{Name: "code", Host: auth, Method: "POST", Path: "/oauth/token", Kind: KindCode, SignIn: true},
 		},
 		ToolTypes: []string{"namespace", "function", "custom"},
+		// The CLI's request: #809 saw model, input, tool_choice, include
+		// and stream; the rest are the fields the CLI's request type sets.
+		BodyKeys: []string{
+			"model", "instructions", "input", "tools", "tool_choice", "parallel_tool_calls",
+			"reasoning", "store", "stream", "include", "prompt_cache_key", "text",
+		},
+		InputTypes: []string{
+			"message", "reasoning", "function_call", "function_call_output",
+			"custom_tool_call", "custom_tool_call_output", "additional_tools",
+		},
+		ContentTypes: []string{"input_text", "output_text", "input_image"},
 		Token: ResponseRule{Fields: []Field{
 			{Name: "access_token", Kind: FieldCredential},
 			{Name: "refresh_token", Kind: FieldCredential, Optional: true},
@@ -214,6 +239,14 @@ func (r PlanRoute) validate() error {
 			return fmt.Errorf("plan route %s: tool type %q is not client-side", r.Provider, t)
 		}
 	}
+	if len(r.BodyKeys) == 0 || len(r.InputTypes) == 0 || len(r.ContentTypes) == 0 {
+		return fmt.Errorf("plan route %s: no body shape", r.Provider)
+	}
+	for _, k := range r.BodyKeys {
+		if relayDeniedKeys[k] {
+			return fmt.Errorf("plan route %s: body key %q is denied on every relay (E10)", r.Provider, k)
+		}
+	}
 	seen := map[string]bool{}
 	for _, e := range r.Endpoints {
 		if e.Name == "" || seen[e.Name] {
@@ -307,6 +340,9 @@ type workerRoute struct {
 	endpoints []PlanEndpoint
 	headers   []string
 	tools     map[string]bool
+	keys      map[string]bool
+	inputs    map[string]bool
+	parts     map[string]bool
 }
 
 // NewWorkerRoute returns the handler a worker's forwarder reaches.
@@ -317,7 +353,7 @@ func NewWorkerRoute(c WorkerRouteConfig) (http.Handler, error) {
 	if c.Worker == "" || c.Logins == nil || c.Audit == nil {
 		return nil, errors.New("worker route: worker, logins and auditor are required")
 	}
-	w := &workerRoute{c: c, rt: c.Transport, tools: map[string]bool{}}
+	w := &workerRoute{c: c, rt: c.Transport}
 	if w.rt == nil {
 		if c.Guard == nil {
 			return nil, errors.New("worker route: a transport or a guard is required")
@@ -343,9 +379,8 @@ func NewWorkerRoute(c WorkerRouteConfig) (http.Handler, error) {
 	if c.SignIn {
 		w.headers = c.Route.SignInHeaders
 	}
-	for _, t := range c.Route.ToolTypes {
-		w.tools[t] = true
-	}
+	w.tools, w.keys = set(c.Route.ToolTypes), set(c.Route.BodyKeys)
+	w.inputs, w.parts = set(c.Route.InputTypes), set(c.Route.ContentTypes)
 	return w, nil
 }
 
@@ -611,37 +646,40 @@ func (w *workerRoute) bearer(h http.Header) (string, bool) {
 	return w.c.Logins.Resolve(w.c.Route.Provider, w.c.Worker, ph)
 }
 
-// checkResponses holds a model call's tools to the route's client-side
-// types wherever the CLI declares them: a top-level tools array, any input
-// item's tools (with managed config the CLI sends an additional_tools
-// item, #809), and a namespace's nested tools. Remote content sources are
-// refused as on every proxied model call. It returns the route's own
-// encoding of what it checked, or the reason it refused.
+// checkResponses holds a model call to the route's declared shape: only
+// its top-level keys, input item types and content part types, with tools
+// only where the CLI declares them (a top-level tools array, an
+// additional_tools input item (#809), a namespace's nested tools) and only
+// of client-side types. As on every relay (E10), store is forced off and
+// remote content sources are refused. It returns the route's own encoding
+// of what it checked, or the reason it refused.
 func (w *workerRoute) checkResponses(body []byte) ([]byte, string) {
 	obj, err := strictObject(body)
 	if err != nil {
 		return nil, "body is not a single JSON object"
 	}
+	for k, v := range obj {
+		if !w.keys[k] {
+			return nil, "body key " + sanitized(k) + " refused"
+		}
+		if k != "tools" && k != "input" {
+			if r := noTools(v, 0); r != "" {
+				return nil, r
+			}
+		}
+	}
+	if s, ok := obj["store"]; ok && s != false {
+		return nil, "store must be false"
+	}
+	obj["store"] = false
 	if t, ok := obj["tools"]; ok {
 		if r := w.checkTools(t, 0); r != "" {
 			return nil, r
 		}
 	}
-	if in, ok := obj["input"].([]any); ok {
-		for _, it := range in {
-			item, ok := it.(map[string]any)
-			if !ok {
-				continue
-			}
-			t, has := item["tools"]
-			if item["type"] == "additional_tools" && !has {
-				return nil, "additional_tools item without a tools list"
-			}
-			if has {
-				if r := w.checkTools(t, 0); r != "" {
-					return nil, r
-				}
-			}
+	if in, ok := obj["input"]; ok {
+		if r := w.checkInput(in); r != "" {
+			return nil, r
 		}
 	}
 	if tc, ok := obj["tool_choice"]; ok {
@@ -666,6 +704,98 @@ func (w *workerRoute) checkResponses(body []byte) ([]byte, string) {
 		return nil, "body could not be re-encoded"
 	}
 	return out, ""
+}
+
+// checkInput holds each input item to a declared type. Only an
+// additional_tools item carries tools, and a message's content parts (and
+// a tool output's, when it is a list) are of declared types.
+func (w *workerRoute) checkInput(v any) string {
+	in, ok := v.([]any)
+	if !ok {
+		return "input is not a list"
+	}
+	for _, it := range in {
+		item, ok := it.(map[string]any)
+		if !ok {
+			return "input item is not an object"
+		}
+		t, _ := item["type"].(string)
+		if !w.inputs[t] {
+			return "input item type " + sanitized(t) + " refused"
+		}
+		for k, f := range item {
+			switch {
+			case k == "tools" && t == "additional_tools":
+				if r := w.checkTools(f, 0); r != "" {
+					return r
+				}
+			case k == "tools":
+				return "tools outside a declared position"
+			case k == "content" || k == "output":
+				if r := w.checkParts(f); r != "" {
+					return r
+				}
+			default:
+				if r := noTools(f, 0); r != "" {
+					return r
+				}
+			}
+		}
+		if _, has := item["tools"]; t == "additional_tools" && !has {
+			return "additional_tools item without a tools list"
+		}
+	}
+	return ""
+}
+
+// checkParts allows text, or a list of parts of declared types.
+func (w *workerRoute) checkParts(v any) string {
+	list, ok := v.([]any)
+	if !ok {
+		if _, text := v.(string); text {
+			return ""
+		}
+		return "content out of shape"
+	}
+	for _, it := range list {
+		part, ok := it.(map[string]any)
+		if !ok {
+			return "content part is not an object"
+		}
+		if t, _ := part["type"].(string); !w.parts[t] {
+			return "content part type " + sanitized(t) + " refused"
+		}
+		if r := noTools(part, 0); r != "" {
+			return r
+		}
+	}
+	return ""
+}
+
+// noTools refuses a tools key anywhere in v: tools are checked only where
+// the CLI declares them.
+func noTools(v any, depth int) string {
+	if depth > 32 {
+		return "body nested too deep"
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		for k, f := range x {
+			if k == "tools" {
+				return "tools outside a declared position"
+			}
+			if r := noTools(f, depth+1); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for _, f := range x {
+			if r := noTools(f, depth+1); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
 }
 
 func (w *workerRoute) checkTools(v any, depth int) string {
@@ -870,4 +1000,12 @@ func (w *workerRoute) readQuota(h http.Header) {
 	if exhausted && !emitted {
 		w.c.Quota(QuotaReading{At: now, Provider: w.c.Route.Provider, Worker: w.c.Worker, Pool: "plan", Exhausted: true})
 	}
+}
+
+func set(list []string) map[string]bool {
+	m := make(map[string]bool, len(list))
+	for _, v := range list {
+		m[v] = true
+	}
+	return m
 }
