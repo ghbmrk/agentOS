@@ -472,6 +472,15 @@ func simEnds(iccid string) string {
 	return s[max(0, len(s)-4):]
 }
 
+// DrainOps are the bridge ops agentosd still serves while it drains the
+// owner channel's texts at shutdown (daemon Config.OwnerDrainOps): the
+// outbox hands out what is queued, sent and state hear how it went.
+// Inbound is not among them: nothing reads the inbox then, so the bridge
+// keeps the text for the next start.
+func DrainOps() []string {
+	return []string{bridgeproto.OpOutbox, bridgeproto.OpSent, bridgeproto.OpState}
+}
+
 // Ops are owner.sock's bridge ops.
 func (l *Link) Ops() map[string]sockets.Handler {
 	return map[string]sockets.Handler{

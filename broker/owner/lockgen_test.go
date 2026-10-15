@@ -164,14 +164,14 @@ func TestShutdownDrainWaitsForTextsInFlightUpToItsBound(t *testing.T) {
 	}
 	<-held.entered
 	start := time.Now()
-	r.ch.drainSends(50 * time.Millisecond)
+	r.ch.DrainSends(50 * time.Millisecond)
 	if time.Since(start) < 40*time.Millisecond {
 		t.Fatal("drain returned with a text in the modem")
 	}
 	released := make(chan struct{})
 	go func() { time.Sleep(20 * time.Millisecond); close(held.let); close(released) }()
 	start = time.Now()
-	r.ch.drainSends(5 * time.Second)
+	r.ch.DrainSends(5 * time.Second)
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("drain waited past the send")
 	}

@@ -118,7 +118,7 @@ func (c *Channel) sendSignIns(text string, n, m int, now time.Time) {
 // was decided about a request that was (UX-2wb-1). The note behind the
 // sign-in text is saved before this runs, so a send that fails is
 // retried by the next Tick; the alerts are best effort: they are lost if the
-// send fails or the channel stops first (drainSends). Batches
+// send fails or the channel stops first (DrainSends). Batches
 // run one after another in call order. Called
 // without c.mu.
 func (c *Channel) textAfterReply(alerts []string, signIn string, n, m int, now time.Time) {
@@ -155,16 +155,20 @@ func (c *Channel) textAfterReply(alerts []string, signIn string, n, m int, now t
 	}()
 }
 
-// sendDrain bounds how long agentosd, on shutdown, waits for texts that
-// textAfterReply started (DrainSends); a modem send can take 220 s, so the wait is
-// shorter. What is not sent by then is retried after the restart only where
-// a note is saved (the sign-in text); alerts are lost, as a crash would lose
-// them.
-var sendDrain = 30 * time.Second
+// SendDrain bounds how long agentosd, on shutdown, waits for texts that
+// textAfterReply started (DrainSends); a modem send can take 220 s, so the
+// wait is shorter. What is not sent by then is retried after the restart
+// only where a note is saved (the sign-in text); alerts are lost, as a
+// crash would lose them.
+const SendDrain = 30 * time.Second
 
-// drainSends waits up to d for the texts in flight, so a stop does not drop
-// a sign-in or answer alert the modem was about to send.
-func (c *Channel) drainSends(d time.Duration) {
+// DrainSends waits up to d for the texts textAfterReply started, returning
+// as soon as none is in flight, so a stop does not drop a sign-in or answer
+// alert the modem was about to send. agentosd calls it on shutdown once the
+// page socket refuses new calls and those in flight have returned, so no
+// new text starts during it, while the owner socket still serves the modem
+// bridge's outbox, and before the process exits (O34).
+func (c *Channel) DrainSends(d time.Duration) {
 	done := make(chan struct{})
 	go func() { c.sends.Wait(); close(done) }()
 	t := time.NewTimer(d)
@@ -174,11 +178,6 @@ func (c *Channel) drainSends(d time.Duration) {
 	case <-t.C:
 	}
 }
-
-// DrainSends waits up to sendDrain for the texts textAfterReply started.
-// agentosd calls it on shutdown once the page socket has closed, so no
-// new text starts during it, and before the process exits (O34).
-func (c *Channel) DrainSends() { c.drainSends(sendDrain) }
 
 // WaitSends returns once every text started by textAfterReply has finished.
 func (c *Channel) WaitSends() { c.sends.Wait() }
