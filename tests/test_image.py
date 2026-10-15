@@ -2228,9 +2228,13 @@ class ConfFilesTest(unittest.TestCase):
     def test_a_link_to_a_world_writable_directory_itself_is_refused(self):
         # #1702 item 1: every name inside such a directory is the user's, so a link to the directory
         # (a drop-in directory, a wants directory, udev's rules.d, a generator directory) is refused
-        # as one into it is. Only var/lock -> ../run/lock, matched by path and target, passes.
+        # as one into it is. Only var/lock -> ../run/lock or -> /run/lock (CI's stock build has the
+        # absolute form), matched by path and target, passes.
+        for ok in ("../run/lock", "/run/lock"):
+            f = link(self.root, "var/lock", ok)
+            self.assertEqual(check.violations(self.root), [], ok)
+            f.unlink()
         link(self.root, "var/lock", "../run/lock")
-        self.assertEqual(check.violations(self.root), [])
         cases = (("etc/systemd/system/getty@.service.d", "/var/tmp", "var/tmp"),
                  ("etc/systemd/system/getty@.service.d", "../../../var/tmp", "var/tmp"),
                  ("etc/systemd/system/multi-user.target.wants", "/var/tmp", "var/tmp"),
@@ -2239,7 +2243,8 @@ class ConfFilesTest(unittest.TestCase):
                  ("etc/modules-load.d", "/dev/shm", "dev/shm"),
                  ("usr/lib/x/q", "/dev/mqueue", "dev/mqueue"),
                  ("usr/lib/x/q", "/run/lock", "run/lock"),
-                 ("var/lock", "/run/lock", "run/lock"), ("var/lock", "../run/lock/", "run/lock"),
+                 ("var/lock", "../run/lock/", "run/lock"), ("var/lock", "/run/lock/", "run/lock"),
+                 ("var/lock", "/var/tmp", "var/tmp"),
                  ("usr/lib/x/lock", "../../../run/lock", "run/lock"))
         for rel, target, under in cases:
             with self.subTest(rel=rel, target=target):

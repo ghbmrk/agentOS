@@ -114,8 +114,9 @@ WORLD_WRITABLE = ("tmp", "var/tmp", "dev/shm", "dev/mqueue", "run/lock")
 SERVICE_DIRS = ("var/lib/agentos-fuzz", "var/lib/agentos-localui", "var/lib/agentos-egress", "home",
                 "run/user", "var/lib/private")
 # #1702: the one link to a world-writable directory the check allows: trixie's /var/lock, which the
-# tree holds as a link to /run/lock. Matched by path and exact target, nothing else like it.
-LOCK_LINK = ("var/lock", "../run/lock")
+# tree holds as a link to /run/lock (CI's build has the absolute form; a tmpfiles line gives the
+# relative one). Matched by path and exact target, nothing else like it.
+LOCK_LINK = ("var/lock", ("../run/lock", "/run/lock"))
 # The systemd configuration this check reads, by its name under each configuration directory.
 # #1543 Security B1: the only links the check follows to a configuration file it reads. A file that is
 # a link to exactly /dev/null is a mask (it reads as nothing), and trixie's merged-/usr /lib is a link
@@ -195,7 +196,7 @@ def world_writable_link(root, rel):
         path = tree_chase(root, rel, missing_ok=True)[0]
     except OSError:
         return []
-    if rel == LOCK_LINK[0] and tree_readlink(root, rel) == LOCK_LINK[1]:
+    if rel == LOCK_LINK[0] and tree_readlink(root, rel) in LOCK_LINK[1]:
         return []
     parts = path_parts(path)
     for k in range(1, len(parts) + 1):
