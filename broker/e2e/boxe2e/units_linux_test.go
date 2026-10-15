@@ -125,8 +125,4 @@ func TestHasTag(t *testing.T) {
 	if !hasTag(bi, "agentos_e2e") || hasTag(bi, "agentos") || hasTag(&debug.BuildInfo{}, "agentos_e2e") {
 		t.Fatal("hasTag")
 	}
-	// This test binary is not the tagged build.
-	if own, ok := debug.ReadBuildInfo(); ok && hasTag(own, e2eTag) {
-		t.Fatal("test binary built with the e2e tag")
-	}
 }

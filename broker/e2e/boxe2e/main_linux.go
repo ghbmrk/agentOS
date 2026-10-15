@@ -523,6 +523,9 @@ func (d *driver) guestTask() error {
 	if err := d.planSignIn(); err != nil {
 		return err
 	}
+	// When #1314 drives the task, require d.stub.Hits()["responses"] > 0
+	// and d.stub.Refused() == 0 as well as codexstub.Answer on the page
+	// (ASSUMPTIONS E11).
 	return errors.New(notDriven + " the task needs a worker on the plan route (#1314)")
 }
 

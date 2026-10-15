@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -109,7 +110,8 @@ func (s *Stub) Hits() map[string]int {
 }
 
 // Refused counts calls the stub turned away: an unknown path, a wrong
-// token (a placeholder that reached the provider), or a bad exchange.
+// token (a placeholder that reached the provider), a run call without its
+// account's Chatgpt-Account-Id, or a bad exchange.
 func (s *Stub) Refused() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -151,7 +153,7 @@ func (s *Stub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	form := strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
 	for _, ep := range s.route.Endpoints {
-		if ep.Host != r.Host || ep.Method != r.Method || ep.Path != r.URL.Path {
+		if ep.Host != hostname(r.Host) || ep.Method != r.Method || ep.Path != r.URL.Path {
 			continue
 		}
 		if ep.Kind == egress.KindCode && !form || ep.Kind == egress.KindRefresh && form {
@@ -167,6 +169,14 @@ func (s *Stub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.refuse(w, http.StatusNotFound)
+}
+
+// hostname is host without its port, as the provider ignores :443.
+func hostname(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.ToLower(host)
 }
 
 func (s *Stub) refuse(w http.ResponseWriter, code int) {
@@ -269,11 +279,14 @@ func (s *Stub) idToken() string {
 		"." + rnd()
 }
 
-// bearer reports whether r carries the access token the stub issued last.
+// bearer reports whether r carries the access token the stub issued last
+// and, as the CLI sends it from its auth file, the Chatgpt-Account-Id of
+// the account in that sign-in's id_token.
 func (s *Stub) bearer(r *http.Request) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.access != "" && r.Header.Get("Authorization") == "Bearer "+s.access
+	return s.access != "" && r.Header.Get("Authorization") == "Bearer "+s.access &&
+		r.Header.Get("Chatgpt-Account-Id") == s.account
 }
 
 func (s *Stub) models(w http.ResponseWriter, r *http.Request, _ []byte) bool {

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -35,5 +36,32 @@ func TestShippedBuildLinksNoE2EStub(t *testing.T) {
 		if linked != (tags != nil) {
 			t.Fatalf("tags %v: links e2e code = %v", tags, linked)
 		}
+	}
+}
+
+// image/build.sh builds the shipped vault process with no build tags and
+// no GOFLAGS, so the image never ships the agentos_e2e build; only
+// image.yml's driver-share step adds the tag (ASSUMPTIONS E10).
+func TestImageBuildShipsTheUntaggedBuild(t *testing.T) {
+	b, err := os.ReadFile("../../../image/build.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, bad := range []string{"-tags", "GOFLAGS", "agentos_e2e"} {
+		if strings.Contains(src, bad) {
+			t.Fatalf("image/build.sh mentions %s", bad)
+		}
+	}
+	const line = "CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \\\n\t\t-o \"$STAGE/usr/lib/agentos/$cmd\" \"./cmd/$cmd\")"
+	if !strings.Contains(src, line) || !strings.Contains(src, "for cmd in agentosd agentos-egress ") {
+		t.Fatal("image/build.sh no longer builds agentos-egress with the line this test pins")
+	}
+	wf, err := os.ReadFile("../../../.github/workflows/image.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wf), "GOFLAGS") {
+		t.Fatal("image.yml sets GOFLAGS, which would reach image/build.sh")
 	}
 }

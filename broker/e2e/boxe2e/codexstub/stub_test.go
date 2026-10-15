@@ -165,7 +165,7 @@ func TestRouteSignsInAndRunsAgainstTheStub(t *testing.T) {
 		}
 	}
 	h := r.route(t, "w1", false)
-	bearer := []string{"Authorization", "Bearer " + ph["access_token"]}
+	bearer := []string{"Authorization", "Bearer " + ph["access_token"], "Chatgpt-Account-Id", ph["account_id"]}
 	if w := call(h, "GET", "/backend-api/codex/models?client_version=0.1.0", "", "", bearer...); w.Code != 200 {
 		t.Fatalf("models: %d %s", w.Code, w.Body)
 	}
@@ -186,7 +186,7 @@ func TestRouteSignsInAndRunsAgainstTheStub(t *testing.T) {
 	}
 	b, _ = r.logins.AuthJSON("codex", "w1")
 	json.Unmarshal(b, &auth)
-	bearer = []string{"Authorization", "Bearer " + auth.Tokens["access_token"]}
+	bearer = []string{"Authorization", "Bearer " + auth.Tokens["access_token"], "Chatgpt-Account-Id", auth.Tokens["account_id"]}
 	if w := call(h, "POST", "/backend-api/codex/responses", "application/json", body, bearer...); w.Code != 200 {
 		t.Fatalf("responses after refresh: %d %s", w.Code, w.Body)
 	}
@@ -199,6 +199,21 @@ func TestRouteSignsInAndRunsAgainstTheStub(t *testing.T) {
 	}
 	if r.stub.Refused() != 0 || len(r.other.urls) != 0 {
 		t.Fatalf("refused %d, off-stub %v", r.stub.Refused(), r.other.urls)
+	}
+
+	// A run call without the account's Chatgpt-Account-Id, or with another
+	// account's, is refused, as a route that dropped the header would be.
+	for _, acct := range []string{"", "acct-other"} {
+		hdr := []string{"Authorization", "Bearer " + auth.Tokens["access_token"]}
+		if acct != "" {
+			hdr = append(hdr, "Chatgpt-Account-Id", acct)
+		}
+		if w := call(h, "POST", "/backend-api/codex/responses", "application/json", body, hdr...); w.Code != http.StatusUnauthorized {
+			t.Fatalf("responses with account %q: %d %s", acct, w.Code, w.Body)
+		}
+	}
+	if r.stub.Refused() != 2 {
+		t.Fatalf("refused %d", r.stub.Refused())
 	}
 }
 
@@ -250,23 +265,36 @@ func TestStubRefuses(t *testing.T) {
 	}
 }
 
-// Only https requests for the Codex hosts go to the stub; every other
-// request goes to the fallback, so the e2e build changes nothing else.
+// Only requests for the Codex hosts go to the stub, matched by host name
+// whatever the port; one on a scheme other than https fails rather than
+// reaching the fallback. Every other request goes to the fallback, so the
+// e2e build changes nothing else.
 func TestTransportSendsOnlyCodexHostsToTheStub(t *testing.T) {
 	r := newRig(t)
-	for _, u := range []string{"https://example.com/x", "http://chatgpt.com/backend-api/codex/models", "https://api.openai.com/v1/responses", "https://chatgpt.com.evil.example/"} {
+	for _, u := range []string{"https://example.com/x", "https://api.openai.com/v1/responses", "https://chatgpt.com.evil.example/", "https://example.com:443/chatgpt.com"} {
 		req := httptest.NewRequest("GET", u, nil)
 		resp, err := r.rt.RoundTrip(req)
 		if err != nil || resp.StatusCode != 599 {
 			t.Fatalf("%s: %v %v", u, resp, err)
 		}
 	}
+	for _, u := range []string{"http://chatgpt.com/backend-api/codex/models", "http://auth.openai.com:80/oauth/token", "ftp://chatgpt.com:443/x"} {
+		req := httptest.NewRequest("GET", u, nil)
+		if resp, err := r.rt.RoundTrip(req); err == nil {
+			t.Fatalf("%s: %v, want an error", u, resp.StatusCode)
+		}
+	}
 	if len(r.other.urls) != 4 || r.stub.Refused() != 0 {
 		t.Fatalf("fallback %v, stub refused %d", r.other.urls, r.stub.Refused())
 	}
-	req := httptest.NewRequest("GET", "https://chatgpt.com/nothing", nil)
-	resp, err := r.rt.RoundTrip(req)
-	if err != nil || resp.StatusCode != 404 {
-		t.Fatalf("stub path: %v %v", resp, err)
+	for i, u := range []string{"https://chatgpt.com/nothing", "https://chatgpt.com:443/nothing", "https://CHATGPT.com:8443/nothing", "https://auth.openai.com:443/nothing"} {
+		req := httptest.NewRequest("GET", u, nil)
+		resp, err := r.rt.RoundTrip(req)
+		if err != nil || resp.StatusCode != 404 || r.stub.Refused() != i+1 {
+			t.Fatalf("%s: %v %v, stub refused %d", u, resp, err, r.stub.Refused())
+		}
+	}
+	if len(r.other.urls) != 4 {
+		t.Fatalf("fallback %v", r.other.urls)
 	}
 }
