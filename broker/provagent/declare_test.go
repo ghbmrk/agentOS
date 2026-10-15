@@ -18,8 +18,9 @@ func good() Declaration {
 		Wrap: []string{"/usr/local/bin/fwd", "--"}, Argv: []string{"stubcli", "run", "-"},
 		Cwd: "/work", ResultPath: "/work/.result", Env: []string{"PATH=/usr/bin"},
 		Custody: BrokerHeld, Endpoints: []string{"api.example.test"}, Placeholder: "auth.json",
-		Pools:  []Pool{{Name: "5h", ReadFrom: "x-stub-primary-used-percent"}},
-		UsedUp: []string{"usage_limit_reached"}, LoginRefused: []string{"login_refused"},
+		Pools:       []Pool{{Name: "5h", ReadFrom: "x-stub-primary-used-percent"}},
+		ErrorEvents: []string{"error"},
+		UsedUp:      []string{"usage_limit_reached"}, LoginRefused: []string{"login_refused"},
 		TaskClasses: []string{"code"},
 	}
 }
@@ -34,6 +35,7 @@ func TestValidateRefusesMalformedDeclarations(t *testing.T) {
 		"relative result":     func(d *Declaration) { d.ResultPath = "result" },
 		"no task class":       func(d *Declaration) { d.TaskClasses = nil },
 		"no used-up signal":   func(d *Declaration) { d.UsedUp = nil },
+		"no error events":     func(d *Declaration) { d.ErrorEvents = nil },
 		"no pool":             func(d *Declaration) { d.Pools = nil },
 		"unknown custody":     func(d *Declaration) { d.Custody = "guest-held" },
 		"broker-held no host": func(d *Declaration) { d.Endpoints = nil },

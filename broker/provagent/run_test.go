@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
-	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -19,17 +19,18 @@ import (
 // stub is a fake host: Exec plays the CLI. The "drive" holds every file the
 // worker wrote and is emptied when the worker is destroyed.
 type stub struct {
-	mu        sync.Mutex
-	created   []string
-	specs     []vm.Spec
-	seeds     []map[string][]byte
-	destroyed []string
-	runs      []vm.Command
-	drive     map[string]string
-	live      map[string]bool
-	cli       func(c vm.Command, s *stub) vm.ExecResult // the CLI's behaviour
-	hang      bool
-	createErr error
+	mu         sync.Mutex
+	created    []string
+	specs      []vm.Spec
+	seeds      []map[string][]byte
+	destroyed  []string
+	runs       []vm.Command
+	drive      map[string]string
+	live       map[string]bool
+	cli        func(c vm.Command, s *stub) vm.ExecResult // the CLI's behaviour
+	hang       bool
+	createErr  error
+	destroyErr error
 }
 
 func newStub(cli func(c vm.Command, s *stub) vm.ExecResult) *stub {
@@ -53,7 +54,7 @@ func (s *stub) Destroy(_ context.Context, id string) error {
 	s.destroyed = append(s.destroyed, id)
 	delete(s.live, id)
 	s.drive = map[string]string{}
-	return nil
+	return s.destroyErr
 }
 
 func (s *stub) Exec(ctx context.Context, id string, c vm.Command, to time.Duration) (vm.ExecResult, error) {
@@ -95,12 +96,16 @@ func ok(text string) func(vm.Command, *stub) vm.ExecResult {
 }
 
 type seeder struct {
-	err   error
-	calls []string
+	err       error
+	calls     []string
+	providers []string
+	closed    []string
 }
 
-func (s *seeder) Seed(id string) (map[string][]byte, error) {
-	s.calls = append(s.calls, id)
+func (s *seeder) Close(id string) { s.closed = append(s.closed, id) }
+
+func (s *seeder) Seed(provider, id string) (map[string][]byte, error) {
+	s.calls, s.providers = append(s.calls, id), append(s.providers, provider)
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -117,10 +122,11 @@ type rig struct {
 	private bool
 	consent bool
 	pools   []Reading
+	logs    []string
 }
 
 func newRig(cli func(vm.Command, *stub) vm.ExecResult) *rig {
-	g := &rig{h: newStub(cli), sd: &seeder{}, granted: true, private: true}
+	g := &rig{h: newStub(cli), sd: &seeder{}, granted: true, private: true, pools: []Reading{{Pool: "5h", Left: 0.9}}}
 	d := good()
 	d.Q = qualified()
 	dd := good()
@@ -138,6 +144,7 @@ func newRig(cli func(vm.Command, *stub) vm.ExecResult) *rig {
 		Reserve:      func() float64 { return 0.1 },
 		Journal:      func(e Event) { g.events = append(g.events, e) },
 		SignIn:       func(p string) { g.signins = append(g.signins, p) },
+		Logf:         func(f string, a ...any) { g.logs = append(g.logs, fmt.Sprintf(f, a...)) },
 		Caps:         Caps{Wall: 2 * time.Second, Result: 1 << 10, Brief: 1 << 10},
 		NewID:        func() string { return fmt.Sprintf("pw-%04d", len(g.h.created)) },
 	}
@@ -165,8 +172,8 @@ func TestRunsAStubEndToEnd(t *testing.T) {
 	if len(g.h.created) != 1 || !strings.HasPrefix(g.h.created[0], "pw-") || len(g.h.destroyed) != 1 {
 		t.Errorf("worker lifecycle: %v %v", g.h.created, g.h.destroyed)
 	}
-	if len(g.sd.calls) != 1 || g.sd.calls[0] != g.h.created[0] {
-		t.Errorf("seed for %v: %v", g.h.created, g.sd.calls)
+	if len(g.sd.calls) != 1 || g.sd.calls[0] != g.h.created[0] || g.sd.providers[0] != "stub" {
+		t.Errorf("seed for %v: %v %v", g.h.created, g.sd.calls, g.sd.providers)
 	}
 }
 
@@ -196,7 +203,7 @@ func TestRefusalsAreClosedReasons(t *testing.T) {
 		want Reason
 	}{
 		{"ungranted", func(g *rig, _ *Request) { g.granted = false }, Ungranted},
-		{"unsigned", func(g *rig, _ *Request) { g.sd.err = fmt.Errorf("x: %w", modelroute.ErrNoPlanLogin) }, Unsigned},
+		{"unsigned", func(g *rig, _ *Request) { g.sd.err = fmt.Errorf("x: %w", ErrNoLogin) }, Unsigned},
 		{"private unmarked", func(g *rig, r *Request) { g.private, r.Label = false, vm.Private }, PrivateUnmarked},
 		{"unknown provider", func(_ *rig, r *Request) { r.Provider = "nope" }, Unqualified},
 		{"unknown class", func(_ *rig, r *Request) { r.TaskClass = "poetry" }, Unqualified},
@@ -331,7 +338,7 @@ func TestOversizeResultAndBriefFail(t *testing.T) {
 }
 
 func TestUsedUpFallsBack(t *testing.T) {
-	g := newRig(ok(`{"error":"usage_limit_reached"}`))
+	g := newRig(ok(`{"type":"error","message":"usage_limit_reached"}`))
 	_, err := g.r.Run(context.Background(), req("b"))
 	if reasonOf(err) != UsedUp || !FallsBack(err) {
 		t.Errorf("%v", err)
@@ -339,7 +346,7 @@ func TestUsedUpFallsBack(t *testing.T) {
 }
 
 func TestACreditDrawIsUsedUp(t *testing.T) {
-	g := newRig(ok(`{"note":"credits_drawn"}`))
+	g := newRig(ok(`{"type":"error","note":"credits_drawn"}`))
 	rq := req("b")
 	rq.Provider = "credit"
 	_, err := g.r.Run(context.Background(), rq)
@@ -347,35 +354,148 @@ func TestACreditDrawIsUsedUp(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 	// The same text from a declaration with no credit signal is a result.
-	g = newRig(ok(`{"note":"credits_drawn"}`))
+	g = newRig(ok(`{"type":"error","note":"credits_drawn"}`))
 	if out, err := g.r.Run(context.Background(), req("b")); err != nil || out == "" {
 		t.Errorf("plain declaration: %v", err)
 	}
 }
 
+const refused = `{"type":"error","message":"login_refused"}`
+
+// CRED-5: a refused login stops the route for later runs too. The second run
+// seeds nothing, starts no worker or CLI, and the owner is told once.
 func TestARefusedLoginStopsTheRouteOnceAndDoesNotRetry(t *testing.T) {
-	g := newRig(ok("login_refused"))
+	g := newRig(ok(refused))
 	_, err := g.r.Run(context.Background(), req("b"))
 	if reasonOf(err) != LoginRefused || !FallsBack(err) {
 		t.Fatalf("%v", err)
 	}
-	if len(g.h.runs) != 1 {
-		t.Errorf("CLI started %d times", len(g.h.runs))
+	_, err = g.r.Run(context.Background(), req("b"))
+	if reasonOf(err) != LoginRefused || !FallsBack(err) {
+		t.Fatalf("second run: %v", err)
+	}
+	if len(g.h.runs) != 1 || len(g.h.created) != 1 || len(g.sd.calls) != 1 {
+		t.Errorf("CLI started %d times, %d workers, %d seeds", len(g.h.runs), len(g.h.created), len(g.sd.calls))
 	}
 	if len(g.signins) != 1 || g.signins[0] != "stub" {
 		t.Errorf("sign-in line: %v", g.signins)
 	}
+	// Another provider's route is not stopped by it.
+	rq := req("b")
+	rq.Provider = "credit"
+	if _, err := g.r.Run(context.Background(), rq); reasonOf(err) != LoginRefused || len(g.h.runs) != 2 {
+		t.Errorf("credit route: %v, %d runs", err, len(g.h.runs))
+	}
 }
 
-func TestAVaultThatIsLockedOrBusyFallsBack(t *testing.T) {
+// The owner's sign-in (or resume) lifts the stop: the route runs again and
+// a later refusal tells the owner again.
+func TestSignedInLiftsTheStop(t *testing.T) {
+	g := newRig(ok(refused))
+	g.r.Run(context.Background(), req("b"))
+	g.r.SignedIn("stub")
+	g.h.cli = ok("fine")
+	if out, err := g.r.Run(context.Background(), req("b")); err != nil || out != "fine" {
+		t.Fatalf("after sign-in: %q %v", out, err)
+	}
+	g.h.cli = ok(refused)
+	g.r.Run(context.Background(), req("b"))
+	if len(g.signins) != 2 {
+		t.Errorf("sign-in line: %v", g.signins)
+	}
+}
+
+// #1858: a plan with no login tells the owner to sign in, once, and starts
+// no worker.
+func TestAMissingLoginAsksTheOwnerToSignInOnce(t *testing.T) {
 	g := newRig(ok("x"))
-	g.sd.err = fmt.Errorf("route: %w", modelroute.ErrVaultLocked)
-	_, err := g.r.Run(context.Background(), req("b"))
-	if reasonOf(err) != RouteBusy || !FallsBack(err) {
-		t.Errorf("%v", err)
+	g.sd.err = fmt.Errorf("x: %w", ErrNoLogin)
+	for i := 0; i < 2; i++ {
+		if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != Unsigned || FallsBack(err) {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	if len(g.signins) != 1 || g.signins[0] != "stub" {
+		t.Errorf("sign-in line: %v", g.signins)
 	}
 	if len(g.h.created) != 0 {
-		t.Error("worker made without a seed")
+		t.Error("worker made without a login")
+	}
+}
+
+// A signal the agent's own message carries is a result, not a refused login
+// or a used-up plan: only the CLI's error events are read (the guest steers
+// what the model writes).
+func TestSignalsInTheAgentsTextAreNotSignals(t *testing.T) {
+	for _, body := range []string{
+		`{"type":"item.completed","item":{"type":"agent_message","text":"login_refused usage_limit_reached credits_drawn"}}`,
+		"login_refused usage_limit_reached credits_drawn",
+		`{"type":"item.completed","item":{"text":"{\"type\":\"error\",\"message\":\"login_refused\"}"}}`,
+	} {
+		for _, p := range []string{"stub", "credit"} {
+			g := newRig(ok(body))
+			rq := req("b")
+			rq.Provider = p
+			if out, err := g.r.Run(context.Background(), rq); err != nil || out != body {
+				t.Errorf("%s %s: %v", p, body, err)
+			}
+			if len(g.signins) != 0 {
+				t.Errorf("%s: sign-in line set by model text", p)
+			}
+		}
+	}
+}
+
+func TestALockedVaultIsNotABusyRoute(t *testing.T) {
+	for want, serr := range map[Reason]error{VaultLocked: ErrVaultLocked, RouteBusy: ErrRouteBusy} {
+		g := newRig(ok("x"))
+		g.sd.err = fmt.Errorf("route: %w", serr)
+		_, err := g.r.Run(context.Background(), req("b"))
+		if reasonOf(err) != want || !FallsBack(err) {
+			t.Errorf("%v: %v", serr, err)
+		}
+		if len(g.h.created) != 0 {
+			t.Error("worker made without a seed")
+		}
+	}
+}
+
+// A seed that cannot become a worker is closed, so its placeholders do not
+// stay resolvable in the vault process.
+func TestAFailedCreateAfterTheSeedClosesTheRoute(t *testing.T) {
+	g := newRig(ok("x"))
+	g.h.createErr = errors.New("unknown image")
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != Failed {
+		t.Fatalf("%v", err)
+	}
+	if len(g.sd.calls) != 1 || len(g.sd.closed) != 1 || g.sd.closed[0] != g.sd.calls[0] {
+		t.Errorf("seeded %v, closed %v", g.sd.calls, g.sd.closed)
+	}
+}
+
+func TestADestroyErrorIsLogged(t *testing.T) {
+	g := newRig(ok("x"))
+	g.h.destroyErr = errors.New("runsc: stuck")
+	if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.logs) != 1 || !strings.Contains(g.logs[0], "runsc: stuck") || !strings.Contains(g.logs[0], g.h.created[0]) {
+		t.Errorf("logs: %q", g.logs)
+	}
+}
+
+// Seeding mints broker-held placeholders only: a worker-held declaration is
+// the opt-in's (#1380) and is never seeded here.
+func TestAWorkerHeldDeclarationIsNeverSeeded(t *testing.T) {
+	g := newRig(ok("x"))
+	d := g.r.Decls["stub"]
+	d.Custody = WorkerHeld
+	g.r.Decls["stub"] = d
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != Unqualified {
+		t.Fatalf("%v", err)
+	}
+	if len(g.sd.calls) != 0 || len(g.h.created) != 0 {
+		t.Error("worker-held declaration seeded")
 	}
 }
 
@@ -400,6 +520,26 @@ func TestPoolAtOrBelowTheReserveRefusesAdmission(t *testing.T) {
 	g.pools = []Reading{{Pool: "5h", Left: 0.5}}
 	if _, err := g.r.Run(context.Background(), req("b")); err != nil {
 		t.Errorf("headroom: %v", err)
+	}
+}
+
+// RES-5 fails closed: no readings, no reserve, an unread declared pool or an
+// unreadable reading each refuse admission, and none panics.
+func TestUnreadPoolsRefuseAdmission(t *testing.T) {
+	cases := map[string]func(g *rig){
+		"no readings source":   func(g *rig) { g.r.Readings = nil },
+		"no reserve":           func(g *rig) { g.r.Reserve = nil },
+		"no reading":           func(g *rig) { g.pools = nil },
+		"declared pool unread": func(g *rig) { g.pools = []Reading{{Pool: "other", Left: 0.9}} },
+		"NaN reading":          func(g *rig) { g.pools = []Reading{{Pool: "5h", Left: math.NaN()}} },
+	}
+	for name, set := range cases {
+		g := newRig(ok("x"))
+		set(g)
+		_, err := g.r.Run(context.Background(), req("b"))
+		if reasonOf(err) != PoolAtReserve || len(g.h.created) != 0 || len(g.sd.calls) != 0 {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 

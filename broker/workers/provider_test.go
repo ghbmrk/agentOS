@@ -10,18 +10,17 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/admission"
-	"github.com/ghbmrk/agentos/broker/provagent"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 // fakeProvider records the request provider_run hands the runner.
 type fakeProvider struct {
-	got  []provagent.Request
+	got  []ProviderRequest
 	text string
 	err  error
 }
 
-func (f *fakeProvider) Run(_ context.Context, q provagent.Request) (string, error) {
+func (f *fakeProvider) Run(_ context.Context, q ProviderRequest) (string, error) {
 	f.got = append(f.got, q)
 	return f.text, f.err
 }
@@ -197,20 +196,38 @@ func TestProviderRunPassesTheCallersLabelAndReturnsTheResult(t *testing.T) {
 	}
 }
 
-// CAP-11, CAP-9: a refusal reaches the guest as its closed reason and
-// nothing else; a fallback outcome the same, so the guest can route on it.
+// CAP-11, CAP-9: a refusal reaches the guest as its closed reason and one
+// fixed line on what to do, nothing else; a fallback outcome the same, so
+// the guest can route on it.
 func TestProviderRunAnswersAClosedReason(t *testing.T) {
-	for _, reason := range []provagent.Reason{provagent.Unqualified, provagent.OptInRequired, provagent.Ungranted, provagent.Unsigned,
-		provagent.PrivateUnmarked, provagent.PoolAtReserve, provagent.UsedUp, provagent.LoginRefused, provagent.RouteBusy,
-		provagent.Failed, provagent.TimedOut, provagent.Withheld} {
+	if len(providerReasons) != 13 {
+		t.Fatalf("%d reasons", len(providerReasons))
+	}
+	for reason, text := range providerReasons {
 		r := newRig(t, 4096)
 		r.agent("a1", vm.Public)
 		f := r.provider()
-		f.err = errors.Join(errors.New("/home/owner/secret path "+string(reason)), &provagent.Refusal{Reason: reason})
+		f.err = errors.Join(errors.New("/home/owner/secret path "+string(reason)), &ProviderRefusal{Reason: reason})
 		err := r.call("a1", "provider_run", m{"provider": "codex", "brief": "b", "task_class": "code"}, nil)
-		if err == nil || err.Error() != "provider_run: "+string(reason) {
+		if err == nil || err.Error() != text.Error() {
 			t.Fatalf("reason %s answered %v", reason, err)
 		}
+		msg := err.Error()
+		if !strings.HasPrefix(msg, "provider_run: "+string(reason)+": ") || strings.Contains(msg, "\n") || strings.Contains(msg, "secret") {
+			t.Fatalf("reason %s: not one closed line: %q", reason, msg)
+		}
+	}
+}
+
+// A locked vault and a busy route read differently: only the first asks
+// for the owner's unlock (ONB-9).
+func TestProviderRunTellsALockedVaultFromABusyRoute(t *testing.T) {
+	locked, busy := providerReasons["vault-locked"].Error(), providerReasons["route-busy"].Error()
+	if !strings.Contains(locked, "unlock") || strings.Contains(busy, "vault") || strings.Contains(busy, "unlock") {
+		t.Fatalf("locked %q, busy %q", locked, busy)
+	}
+	if !KnownProviderReason("vault-locked") || KnownProviderReason("nope") {
+		t.Fatal("KnownProviderReason")
 	}
 }
 

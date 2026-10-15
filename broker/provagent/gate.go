@@ -16,12 +16,20 @@ const (
 	// Fallback outcomes (CAP-9): the caller tries another granted route.
 	UsedUp       Reason = "used-up"
 	LoginRefused Reason = "login-refused"
-	RouteBusy    Reason = "route-busy"
+	VaultLocked  Reason = "vault-locked" // the owner's vault is locked: the owner can unlock it
+	RouteBusy    Reason = "route-busy"   // the route is stalled or contended (#1857)
 	Failed       Reason = "failed"
 	TimedOut     Reason = "timed-out"
 	// Withheld: the result carried a credential format (CRED-7).
 	Withheld Reason = "result-withheld"
 )
+
+// Reasons is every closed reason, for the wiring's mapping onto the guest's
+// texts.
+func Reasons() []Reason {
+	return []Reason{Unqualified, OptInRequired, Ungranted, Unsigned, PrivateUnmarked, PoolAtReserve,
+		UsedUp, LoginRefused, VaultLocked, RouteBusy, Failed, TimedOut, Withheld}
+}
 
 // Refusal is a run that did not return a result.
 type Refusal struct{ Reason Reason }
@@ -37,7 +45,7 @@ func refuse(r Reason) error { return &Refusal{r} }
 func FallsBack(err error) bool {
 	if r, ok := err.(*Refusal); ok {
 		switch r.Reason {
-		case UsedUp, LoginRefused, RouteBusy, Failed, TimedOut, PoolAtReserve:
+		case UsedUp, LoginRefused, VaultLocked, RouteBusy, Failed, TimedOut, PoolAtReserve:
 			return true
 		}
 	}

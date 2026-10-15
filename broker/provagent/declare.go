@@ -108,7 +108,11 @@ type Declaration struct {
 	Pools       []Pool
 	TaskClasses []string
 
-	// Signals are substrings matched in the result stream.
+	// ErrorEvents are the "type" values of the CLI's own JSON error events
+	// in the result stream. The signals below are substrings matched only
+	// in those events, never in the agent's messages, which a brief steers.
+	ErrorEvents []string
+	// Signals are substrings matched in the error events.
 	UsedUp       []string
 	CreditDraw   []string // a draw on purchased credits is treated as used-up (W8)
 	LoginRefused []string
@@ -152,8 +156,8 @@ func (d Declaration) Validate() error {
 	default:
 		return fmt.Errorf("declaration %s: custody %q", d.ID, d.Custody)
 	}
-	if len(d.TaskClasses) == 0 || len(d.UsedUp) == 0 || len(d.Pools) == 0 {
-		return fmt.Errorf("declaration %s: task classes, used-up signal and pools are needed", d.ID)
+	if len(d.TaskClasses) == 0 || len(d.UsedUp) == 0 || len(d.ErrorEvents) == 0 || len(d.Pools) == 0 {
+		return fmt.Errorf("declaration %s: task classes, used-up signal, error events and pools are needed", d.ID)
 	}
 	for _, p := range d.Pools {
 		if p.Name == "" || p.ReadFrom == "" {
@@ -202,6 +206,9 @@ func Builtins() map[string]Declaration {
 				{Name: "secondary", ReadFrom: "x-codex-secondary-used-percent"},
 			},
 			TaskClasses: []string{"code", "research"},
+			// codex exec --json reports failures as these events; the
+			// agent's messages are item events and are never matched.
+			ErrorEvents: []string{"error", "turn.failed"},
 			UsedUp:      []string{"usage_limit_reached"},
 			// LoginRefused and CreditDraw are measured by #809.
 			LoginRefused: []string{"refresh_token_invalidated", "token_expired"},
@@ -216,6 +223,7 @@ func Builtins() map[string]Declaration {
 			Custody:      WorkerHeld,
 			Pools:        []Pool{{Name: "5h", ReadFrom: "anthropic-ratelimit-unified-5h-utilization"}, {Name: "7d", ReadFrom: "anthropic-ratelimit-unified-7d-utilization"}},
 			TaskClasses:  []string{"code", "research"},
+			ErrorEvents:  []string{"error"},
 			UsedUp:       []string{"rate_limit"},
 			LoginRefused: []string{"authentication_error"},
 			Q:            Qualification{Verdict: Unclear}, // D-114: off until the owner opts in (#1380)

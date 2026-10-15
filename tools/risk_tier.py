@@ -90,6 +90,7 @@ TIER_A_BROKER = {
     "apply", "card", "claim", "cleanroom", "clock", "digestqueue", "firstboot",
     "follow",                     # switches the update root of trust
     "hint", "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
+    "provagent",                  # runs a provider agent on the owner's plan (CAP-11); also (a): seeds placeholders
     "attest",                     # bounds what public output may say (OSS-4)
     "hostdisk",                   # HW-8a second confirmation; udev host-disk isolation
     # (c) parses owner-channel input

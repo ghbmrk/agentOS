@@ -2,12 +2,13 @@ package provagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
-	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -19,11 +20,24 @@ type Host interface {
 }
 
 // Seeder fetches a provider worker's placeholder seed from the vault
-// process (modelroute.RouteControl). ErrNoPlanLogin means the owner has not
-// signed in; ErrVaultLocked means the route is locked, stalled or contended.
+// process and closes the worker's route. The wiring adapts the model
+// route's control client to it and maps that client's errors onto the
+// sentinels below, so this package links no network client (ARC-2).
 type Seeder interface {
-	Seed(id string) (map[string][]byte, error)
+	// Seed mints provider's placeholders for worker id. ErrNoLogin: the
+	// owner has not signed in to the plan; ErrVaultLocked: the vault is
+	// locked; ErrRouteBusy: the route is stalled or contended (a 503).
+	Seed(provider, id string) (map[string][]byte, error)
+	// Close closes id's route and forgets its placeholders.
+	Close(id string)
 }
+
+// The Seeder's sentinels.
+var (
+	ErrNoLogin     = errors.New("provagent: no plan login stored")
+	ErrVaultLocked = errors.New("provagent: the vault is locked")
+	ErrRouteBusy   = errors.New("provagent: the plan route is busy")
+)
 
 // Reading is one usage pool's remaining share, 0..1, read by the broker on
 // its own upstream connection (RES-5).
@@ -69,8 +83,60 @@ type Runner struct {
 	Scan         func(string) bool
 	Journal      func(Event)
 	SignIn       func(provider string) // sets the ONB-9 sign-in line
+	Logf         func(format string, args ...any)
 	Caps         Caps
 	NewID        func() string // a fresh "pw-" worker ID
+
+	// mu guards stopped and told. A refused login stops the provider's
+	// route for every later run (CRED-5: no retry, since retries can worsen
+	// a restriction), and the owner is told once, until SignedIn.
+	mu      sync.Mutex
+	stopped map[string]bool // provider: a refused login stopped its route
+	told    map[string]bool // provider: SignIn already called
+}
+
+// SignedIn is the owner's sign-in or resume for provider: its route runs
+// again, and a later refusal tells the owner again.
+func (r *Runner) SignedIn(provider string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.stopped, provider)
+	delete(r.told, provider)
+}
+
+func (r *Runner) isStopped(provider string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopped[provider]
+}
+
+// signIn sets provider's sign-in line once until SignedIn; stop also stops
+// its route.
+func (r *Runner) signIn(provider string, stop bool) {
+	r.mu.Lock()
+	if stop {
+		if r.stopped == nil {
+			r.stopped = map[string]bool{}
+		}
+		r.stopped[provider] = true
+	}
+	first := !r.told[provider]
+	if first {
+		if r.told == nil {
+			r.told = map[string]bool{}
+		}
+		r.told[provider] = true
+	}
+	r.mu.Unlock()
+	if first && r.SignIn != nil {
+		r.SignIn(provider)
+	}
+}
+
+func (r *Runner) logf(format string, args ...any) {
+	if r.Logf != nil {
+		r.Logf(format, args...)
+	}
 }
 
 const outputKeep = 4 << 10 // stdout/stderr are read to this bound and dropped
@@ -118,38 +184,52 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if q.Label == vm.Private && (r.PrivateOK == nil || !r.PrivateOK(d.ID)) {
 		return fail(PrivateUnmarked)
 	}
+	// Only a broker-held route is seeded here: a worker-held login is the
+	// Claude opt-in's (#1380), which this path does not build.
+	if d.Custody != BrokerHeld {
+		return fail(Unqualified)
+	}
+	if r.isStopped(d.ID) {
+		return fail(LoginRefused)
+	}
 	if len(q.Brief) > r.Caps.Brief {
 		return fail(Failed)
 	}
-	if r.Readings != nil {
-		for _, p := range r.Readings(d.ID) {
-			if p.Left <= r.Reserve() {
-				return fail(PoolAtReserve)
-			}
-		}
+	if !r.poolsAboveReserve(d) {
+		return fail(PoolAtReserve)
 	}
 
 	id := r.NewID()
-	seed, serr := r.Seeder.Seed(id)
+	seed, serr := r.Seeder.Seed(d.ID, id)
 	switch {
-	case errors.Is(serr, modelroute.ErrNoPlanLogin):
+	case serr == nil:
+	case errors.Is(serr, ErrNoLogin):
+		r.signIn(d.ID, false)
 		return fail(Unsigned)
-	case serr != nil && modelroute.FallsBack(serr):
+	case errors.Is(serr, ErrVaultLocked):
+		return fail(VaultLocked)
+	case errors.Is(serr, ErrRouteBusy):
 		return fail(RouteBusy)
-	case serr != nil:
+	default:
+		r.Seeder.Close(id)
 		return fail(Failed)
 	}
 	// The worker is always private (it is given owner data); its class and
 	// reservation are the caller's.
 	spec := vm.Spec{Image: d.Image, Class: q.Class, MemMB: q.MemMB, Label: vm.Private}
 	if _, err := r.Host.CreateProviderWorker(ctx, id, spec, seed); err != nil {
+		// No worker, so no Destroy closes the route: close it here, so the
+		// minted placeholders do not outlive the run in the vault process.
+		r.Seeder.Close(id)
 		return fail(Failed)
 	}
 	defer func() {
 		// Destroying the worker takes its route, logs and transcripts with it.
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		_ = r.Host.Destroy(dctx, id)
+		if err := r.Host.Destroy(dctx, id); err != nil {
+			r.logf("provagent: destroy provider worker %s: %v", id, err)
+		}
 	}()
 
 	wctx, wcancel := context.WithTimeout(ctx, r.Caps.Wall)
@@ -170,14 +250,13 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	body := string(rr.Stdout)
 
 	// Signals first: a refused login or a used-up plan is a fallback even
-	// when the CLI exited non-zero.
-	if hasAny(body, d.LoginRefused) {
-		if r.SignIn != nil {
-			r.SignIn(d.ID)
-		}
+	// when the CLI exited non-zero. They are read from the CLI's own error
+	// events only, never from text the model wrote, which the brief steers.
+	if signalled(body, d.ErrorEvents, d.LoginRefused) {
+		r.signIn(d.ID, true)
 		return fail(LoginRefused)
 	}
-	if hasAny(body, d.UsedUp) || hasAny(body, d.CreditDraw) {
+	if signalled(body, d.ErrorEvents, d.UsedUp) || signalled(body, d.ErrorEvents, d.CreditDraw) {
 		return fail(UsedUp)
 	}
 	if res.ExitCode != 0 {
@@ -202,10 +281,47 @@ func contains(l []string, s string) bool {
 	return false
 }
 
-func hasAny(body string, signals []string) bool {
-	for _, s := range signals {
-		if s != "" && strings.Contains(body, s) {
-			return true
+// poolsAboveReserve is RES-5's admission check, closed by default: every
+// declared pool must have a reading, and every reading must be above the
+// owner's reserve. No readings, no reserve, or an unread pool refuses.
+func (r *Runner) poolsAboveReserve(d Declaration) bool {
+	if r.Readings == nil || r.Reserve == nil {
+		return false
+	}
+	reserve := r.Reserve()
+	read := map[string]bool{}
+	for _, p := range r.Readings(d.ID) {
+		if !(p.Left > reserve) { // a NaN reading refuses too
+			return false
+		}
+		read[p.Pool] = true
+	}
+	for _, p := range d.Pools {
+		if !read[p.Name] {
+			return false
+		}
+	}
+	return true
+}
+
+// signalled reports whether a JSON event line of the result whose "type" is
+// one of events carries one of signals. Lines that are not such events (the
+// agent's own messages, plain text) are never matched.
+func signalled(body string, events, signals []string) bool {
+	if len(events) == 0 || len(signals) == 0 {
+		return false
+	}
+	for _, line := range strings.Split(body, "\n") {
+		var ev struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(line), &ev) != nil || !contains(events, ev.Type) {
+			continue
+		}
+		for _, s := range signals {
+			if s != "" && strings.Contains(line, s) {
+				return true
+			}
 		}
 	}
 	return false

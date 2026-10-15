@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,12 +50,20 @@ func TestSeedWithNoLoginIsTheNoLoginSentinel(t *testing.T) {
 }
 
 // CAP-9: any 503 from the route (locked, stalled or contended) is a
-// fallback condition, not a refusal (#1857).
+// fallback condition, not a refusal (#1857). Only the locked vault's own
+// text is a locked vault; any other 503 is a busy route.
 func TestA503FromTheRouteFallsBack(t *testing.T) {
-	for _, body := range []string{"vault-locked", "egress busy: too many provider calls"} {
+	for body, busy := range map[string]bool{
+		"the vault is locked; no provider route can open": false, // agentos-egress errRouteLocked
+		"egress busy: too many provider calls":            true,
+		"":                                                true,
+	} {
 		_, err := NewRouteControl(seedServer(t, http.StatusServiceUnavailable, body)).Seed("pw-a")
 		if !errors.Is(err, ErrVaultLocked) || !FallsBack(err) {
 			t.Fatalf("503 %q = %v, fallsBack=%v", body, err, FallsBack(err))
+		}
+		if errors.Is(err, ErrRouteBusy) != busy {
+			t.Fatalf("503 %q = %v, want busy %v", body, err, busy)
 		}
 	}
 	if FallsBack(ErrNoPlanLogin) || FallsBack(nil) {
@@ -66,4 +75,22 @@ func TestPlanIsARouteKind(t *testing.T) {
 	if KindPlan != "plan" {
 		t.Fatalf("KindPlan = %q", KindPlan)
 	}
+}
+
+// The locked vault's 503 text is agentos-egress's errRouteLocked; if that
+// text drifts, a locked vault would read as a busy route.
+func TestLockedTextIsTheVaultProcesssOwn(t *testing.T) {
+	src, err := os.ReadFile("../cmd/agentos-egress/workerroute.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(src), "\n") {
+		if strings.HasPrefix(line, "var errRouteLocked = ") {
+			if !strings.Contains(line, lockedText) {
+				t.Fatalf("errRouteLocked %q lacks %q", line, lockedText)
+			}
+			return
+		}
+	}
+	t.Fatal("agentos-egress has no errRouteLocked")
 }

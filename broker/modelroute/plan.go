@@ -23,7 +23,21 @@ const noLoginText = "no plan login stored"
 
 func isNoLogin(body string) bool { return strings.TrimSpace(body) == noLoginText }
 
+// ErrRouteBusy is a 503 from the route control that is not a locked vault:
+// the route is stalled or contended (#1857). It is also an ErrVaultLocked,
+// so a caller that only asks "can this route run now" reads it the same;
+// the plan route tells the two apart, since only a locked vault is the
+// owner's to fix.
+var ErrRouteBusy = errors.New("plan route busy")
+
+// lockedText is in agentos-egress's errRouteLocked, the one 503 body the
+// control socket writes for a locked vault (cmd/agentos-egress
+// workerroute.go).
+const lockedText = "vault is locked"
+
+func isLocked(body string) bool { return strings.Contains(body, lockedText) }
+
 // FallsBack reports whether err from the route control is a condition the
 // plan route falls back on: a 503 from a locked, stalled or contended route
-// (ErrVaultLocked, #1857). Nothing else is.
+// (ErrVaultLocked, which ErrRouteBusy also is, #1857). Nothing else is.
 func FallsBack(err error) bool { return errors.Is(err, ErrVaultLocked) }
