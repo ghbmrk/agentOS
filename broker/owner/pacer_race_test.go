@@ -401,3 +401,83 @@ func TestCountRunsFromTheSend(t *testing.T) {
 		})
 	}
 }
+
+// asyncRaceRig is raceRig with textAfterReply sending on its own goroutine,
+// as agentosd runs it (#1746).
+func asyncRaceRig(t *testing.T, perHour int) (*rig, *gatedModem, func()) {
+	t.Helper()
+	st := &MemStore{}
+	if err := st.Save(State{Pacing: Pacing{PerHour: perHour}}); err != nil {
+		t.Fatal(err)
+	}
+	r := newRig(t, st)
+	r.async = true
+	g := &gatedModem{entered: make(chan struct{}), open: make(chan struct{})}
+	r.edit = func(c *Config) { g.Modem = c.Modem; c.Modem = g }
+	r.ch = r.open()
+	var once sync.Once
+	return r, g, func() { once.Do(func() { close(g.open) }) }
+}
+
+// REQ: CH-15 (#1638, #1746)
+// The texts a local page call sends after its reply (textAfterReply: the
+// sign-in text and the wrong-code alert) are counted before they reach
+// the modem too: the page call has returned, the text is still inside the
+// modem, and the hour is already spent, so a concurrent NotifyNow is
+// refused and a Post is held. A text the modem proves unsent is uncounted.
+func TestInFlightTextAfterReplySpendsTheAllowance(t *testing.T) {
+	calls := map[string]func(r *rig){
+		"sign-in": func(r *rig) {
+			if _, _, err := r.ch.LocalSignIn(r.totp()); err != nil {
+				r.t.Fatal(err)
+			}
+		},
+		"wrong-code": func(r *rig) {
+			if _, _, err := r.ch.LocalSignIn("000000"); err == nil {
+				r.t.Fatal("wrong code accepted")
+			}
+		},
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			r, g, open := asyncRaceRig(t, 1)
+			defer func() { open(); r.ch.WaitSends() }()
+			// The reply comes first (#1746): the call returns while its
+			// text waits in the modem.
+			call(r)
+			select {
+			case <-g.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no text after the reply reached the modem")
+			}
+			if a := r.ch.Allowance(r.clock()); a != 0 {
+				t.Fatalf("allowance %d with a text after the reply in the modem, want 0", a)
+			}
+			if err := r.ch.NotifyNow("Q1 asks: which time?"); !errors.Is(err, ErrPaced) {
+				t.Fatalf("NotifyNow beside an in-flight text after the reply: %v, want ErrPaced", err)
+			}
+			if err := r.ch.Post(ClassUpdate, "An update."); err != nil {
+				t.Fatal(err)
+			}
+			open()
+			r.ch.WaitSends()
+			got := r.sentTexts()
+			if len(got) != 1 || got[0] == "An update." || strings.Contains(got[0], "Q1 asks") {
+				t.Fatalf("sent %q, want only the text after the reply", got)
+			}
+			if h := r.held(); len(h) != 1 || h[0].Text != "An update." {
+				t.Fatalf("held %+v, want the update", h)
+			}
+		})
+		t.Run(name+"/not-sent", func(t *testing.T) {
+			r, g, open := asyncRaceRig(t, 1)
+			open()
+			g.fail = modem.ErrNotSent
+			call(r)
+			r.ch.WaitSends()
+			if a := r.ch.Allowance(r.clock()); a != 1 {
+				t.Fatalf("allowance %d after an unsent text after the reply, want 1", a)
+			}
+		})
+	}
+}
