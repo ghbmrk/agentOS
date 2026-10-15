@@ -117,6 +117,15 @@ type Declaration struct {
 	// so the broker reads both on its own upstream connection (#1856).
 	UsedUp []string
 
+	// SignInArgv is the device-code sign-in command (ONB-3, #1264), run
+	// like Argv under Wrap and Env; empty is a route with no sign-in here.
+	// The CLI prints its verification link and code: only a link in
+	// SignInLinks is read, and SignInPage, the provider's own page, is what
+	// the owner is shown (egress PlanRoute.SignInLink checks the same).
+	SignInArgv  []string
+	SignInLinks []string
+	SignInPage  string
+
 	Q Qualification
 }
 
@@ -164,8 +173,14 @@ func (d Declaration) Validate() error {
 			return fmt.Errorf("declaration %s: pool %+v", d.ID, p)
 		}
 	}
+	if len(d.SignInArgv) > 0 {
+		if d.Custody != BrokerHeld || len(d.SignInLinks) == 0 || !strings.HasPrefix(d.SignInPage, "https://") || !contains(d.SignInLinks, d.SignInPage) {
+			return fmt.Errorf("declaration %s: a sign-in needs broker custody, its links and its https page", d.ID)
+		}
+	}
 	var all []string
 	all = append(append(append(all, d.Wrap...), d.Argv...), d.Env...)
+	all = append(append(all, d.SignInArgv...), d.SignInLinks...)
 	all = append(all, d.Endpoints...)
 	all = append(all, d.Placeholder, d.Cwd, d.ResultPath, d.Q.Evidence, d.Q.TermsURL)
 	for _, s := range all {
@@ -210,6 +225,11 @@ func Builtins() map[string]Declaration {
 			// agent's messages are item events and are never matched.
 			ErrorEvents: []string{"error", "turn.failed"},
 			UsedUp:      []string{"usage_limit_reached"},
+			// The image's Codex config points the issuer at the forwarder,
+			// so the CLI prints the forwarder's page (P11).
+			SignInArgv:  []string{"codex", "login", "--device-auth"},
+			SignInLinks: []string{"http://127.0.0.1:18432/codex/device", "https://auth.openai.com/codex/device"},
+			SignInPage:  "https://auth.openai.com/codex/device",
 			// Allowed by the terms read (#1377, D-117); #809 fills the rest.
 			Q: Qualification{Verdict: Allowed},
 		},

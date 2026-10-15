@@ -642,6 +642,9 @@ func main() {
 	if line != nil {
 		cfg.Notes = append(cfg.Notes, line.Note, line.TextsNote)
 	}
+	// ONB-9's plan sign-in line; the provider runner sets and clears it.
+	planLine := &planNote{}
+	cfg.Notes = append(cfg.Notes, planLine.Note)
 	// The modem bridge (agentos-modem, P2-3w) hands owner texts in and
 	// pulls the channel's own texts from the owner socket; until it
 	// reports the owner line, sends fail as down and are counted for the
@@ -835,7 +838,8 @@ func main() {
 			tree.setMachines(m)
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
-				pr := providerRunner(m, planSeeder{planRoutes})
+				pr := providerRunner(m, planRoutes, planLine)
+				pr.Background = ctx // a sign-in's wait ends at shutdown
 				// #1856: plan readings and the owner's reserve (RES-5).
 				wirePlanUsage(pr, planRoutes)
 				wt.Provider = providerTool{pr}
@@ -926,6 +930,11 @@ func main() {
 	}
 	if line != nil {
 		go line.run(ctx)
+	}
+	// The owner hears once when the access point keeps failing on the
+	// card's network (#1525).
+	if apNetPath != "" {
+		go watchAPUp(ctx, apNetPath, informOwner(d.Owner))
 	}
 	// What is off, in the box log too (OP-9); the digest's sender (DIG-1)
 	// takes this list once it lands.
@@ -1055,17 +1064,19 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 }
 
 // providerRunner serves provider_run (CAP-11) over the built-in
-// declarations. Every owner-side input the route waits on is closed until
-// its row lands: no plan is granted (CRED-5c's consent record, #1264's
-// sign-in), no private mark, no consent, and no image pins a CLI version,
-// so a run refuses with a closed reason and starts nothing. Codex's
-// qualification record is empty until S8-live (#809) fills it. Pool
-// readings and the reserve come from wirePlanUsage (#1856); without them
-// admission refuses (RES-5 fails closed). Journal (OP-8 meter and charge)
-// and SignIn (the ONB-9 line) are unwired; provagent P10 names their owners.
-func providerRunner(m *vm.Manager, routes provagent.Seeder) *provagent.Runner {
-	return &provagent.Runner{
-		Host: m, Seeder: routes, Decls: provagent.Builtins(),
+// declarations and the vault process's route control rc. The owner's grant
+// and private mark are rc's plan state (#1264), and note carries ONB-9's
+// sign-in line. Every other owner-side input is closed until its row lands:
+// no consent, and no image pins a CLI version, so a run refuses with a
+// closed reason and starts nothing. Codex's qualification record is empty
+// until S8-live (#809) fills it. Pool readings and the reserve come from
+// wirePlanUsage (#1856); without them admission refuses (RES-5 fails
+// closed). Journal (OP-8 meter and charge) is unwired; provagent P9 names
+// its owner. Nothing calls StartSignIn until the setup page does (#1264
+// c4e2b). A nil rc or note leaves those inputs closed.
+func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote) *provagent.Runner {
+	r := &provagent.Runner{
+		Host: m, Seeder: planSeeder{rc}, Decls: provagent.Builtins(),
 		ImageVersion: func(string) string { return "" },
 		Granted:      func(string) bool { return false },
 		PrivateOK:    func(string) bool { return false },
@@ -1074,6 +1085,16 @@ func providerRunner(m *vm.Manager, routes provagent.Seeder) *provagent.Runner {
 		Caps:         provagent.Caps{Wall: 30 * time.Minute, Result: 256 << 10, Brief: 256 << 10},
 		NewID:        func() string { return vm.ProviderPrefix + randHex(6) },
 	}
+	if rc != nil {
+		r.Granted = func(p string) bool { return planGranted(rc, p) }
+		r.PrivateOK = func(p string) bool { return planPrivateOK(rc, p) }
+		r.SignInStored = func(id string) bool { return planSignInStored(rc, id) }
+		r.SignInFor = rc.SignInFor
+	}
+	if note != nil {
+		r.SignIn, r.OnSignedIn = note.set, note.clear
+	}
+	return r
 }
 
 // providerTool adapts the runner to the worker tools' ProviderRunner, so
@@ -1325,6 +1346,17 @@ func ownerVerifyErr(err error) error {
 // recallNotify is recall's take-back notice to the owner. Each closes a
 // take-back the owner approved, so it is approval class; the texts name
 // the agent, so they keep the agent prefix (W5-Dc-r1b QH-9).
+// informOwner sends the broker's fixed-wording notices (owner.Inform)
+// once the owner channel is up.
+func informOwner(own func() *owner.Channel) func(string) error {
+	return func(text string) error {
+		if ch := own(); ch != nil {
+			return ch.Inform(text)
+		}
+		return errors.New("no owner channel")
+	}
+}
+
 func recallNotify(own func() *owner.Channel) func(string) error {
 	return func(text string) error {
 		if ch := own(); ch != nil {
