@@ -96,6 +96,12 @@ jobs:
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
         run: python tools/doclint.py
+      - name: Brief acceptance baseline only shrinks (FIRST-PASS)
+        if: github.event_name == 'pull_request'
+        # HEAD^1 is the base side of the PR's test merge.
+        run: |
+          git show HEAD^1:tools/brief_acceptance_baseline.txt > "$RUNNER_TEMP/base-baseline.txt" 2>/dev/null || : > "$RUNNER_TEMP/base-baseline.txt"
+          python tools/doclint.py --base-baseline "$RUNNER_TEMP/base-baseline.txt"
       - name: Every broker dialer is hooked into the home-network address guard (DEV-2)
         if: env.RECORDS != 'true'
         run: python tools/netguardcheck.py

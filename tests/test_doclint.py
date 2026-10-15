@@ -186,6 +186,59 @@ class LintTest(unittest.TestCase):
     def test_brief_in_the_baseline_may_lack_acceptance_tests(self):
         self.assertEqual(self.lint(**{"briefs/A-1.md": "# A-1\n", "tools/brief_acceptance_baseline.txt": "A-1.md\n"}), [])
 
+    # REQ: FIRST-PASS
+    def test_baselined_brief_that_has_its_line_must_leave_the_baseline(self):
+        got = self.lint(**{"tools/brief_acceptance_baseline.txt": "A-1.md\n"})
+        self.assertEqual(got, ["tools/brief_acceptance_baseline.txt: A-1.md now has its acceptance tests; delete the entry (the baseline only shrinks)"])
+
+    # REQ: FIRST-PASS
+    def test_baseline_entry_for_a_missing_brief_fails(self):
+        got = self.lint(**{"tools/brief_acceptance_baseline.txt": "A-1.md\nGone.md\n"})
+        self.assertEqual([g for g in got if "Gone.md" in g],
+                         ["tools/brief_acceptance_baseline.txt: Gone.md has no brief; delete the entry (the baseline only shrinks)"])
+
+    # REQ: FIRST-PASS
+    def test_empty_acceptance_line_fails(self):
+        for text in ("# A-1\n\n**Acceptance tests:**\n", "# A-1\n\n**Acceptance tests:**   \n",
+                     "# A-1\n\n**Acceptance tests:**\t\n", "# A-1\n\n**Acceptance tests:**\n\nGoal.\n",
+                     "# A-1\n\n- **Acceptance tests:**\n- **Goal:** x\n"):
+            self.assertEqual(self.lint(**{"briefs/A-1.md": text}),
+                             ["briefs/A-1.md: empty `**Acceptance tests:**` line; name each ID's test, or `none: <why>`"])
+
+    # REQ: FIRST-PASS
+    def test_acceptance_tests_as_a_list_pass(self):
+        for text in ("# A-1\n\n**Acceptance tests:**\n- `tests/x.py::a`: catches y\n",
+                     "# A-1\n\n**Acceptance tests:**\n\n* `tests/x.py::a`\n",
+                     "# A-1\n\n**Acceptance tests:**\n1. `tests/x.py::a`\n",
+                     "# A-1\n\n- **Acceptance tests:**\n  - `tests/x.py::a`\n"):
+            self.assertEqual(self.lint(**{"briefs/A-1.md": text}), [], text)
+
+    # REQ: FIRST-PASS
+    def test_baselined_brief_with_a_listed_acceptance_test_must_leave_the_baseline(self):
+        got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**Acceptance tests:**\n- `tests/x.py::a`\n",
+                           "tools/brief_acceptance_baseline.txt": "A-1.md\n"})
+        self.assertEqual(got, ["tools/brief_acceptance_baseline.txt: A-1.md now has its acceptance tests; delete the entry (the baseline only shrinks)"])
+
+    def test_base_baseline_without_a_value_is_a_usage_error(self):
+        r = subprocess.run([sys.executable, str(ROOT / "tools/doclint.py"), "--base-baseline"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("usage: doclint.py", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    # REQ: FIRST-PASS
+    def test_baseline_growth_against_the_base_copy(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "tools").mkdir()
+            (root / "tools/brief_acceptance_baseline.txt").write_text("A-1.md\nB-2.md\n")
+            base = root / "base.txt"
+            base.write_text("A-1.md\n")
+            self.assertEqual(list(doclint.baseline_growth(root, base)),
+                             ["tools/brief_acceptance_baseline.txt: B-2.md is new in the baseline; the baseline only shrinks, so name the brief's acceptance tests instead"])
+            base.write_text("A-1.md\nB-2.md\nC-3.md\n")
+            self.assertEqual(list(doclint.baseline_growth(root, base)), [])
+
     def test_main_files_pass(self):
         self.assertEqual(doclint.lint(ROOT), [])
 
