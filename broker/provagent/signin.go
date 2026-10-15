@@ -138,7 +138,7 @@ func (r *Runner) StartSignIn(ctx context.Context, provider string, class admissi
 // is open. The setup page offers the sign-in only then (ONB-3).
 func (r *Runner) CanSignIn(provider string) bool {
 	d, ok := r.Decls[provider]
-	if !ok || len(d.SignInArgv) == 0 || d.Custody != BrokerHeld || r.SignInFor == nil || r.HasLogin == nil || r.ImageVersion == nil {
+	if !ok || len(d.SignInArgv) == 0 || d.Custody != BrokerHeld || r.SignInFor == nil || r.SignInStored == nil || r.ImageVersion == nil {
 		return false
 	}
 	return Gate{ImageVersion: r.ImageVersion(d.Image), Consent: r.Consent != nil && r.Consent(d.ID)}.Check(d) == nil

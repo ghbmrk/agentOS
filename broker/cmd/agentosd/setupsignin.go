@@ -41,7 +41,7 @@ func newSetupSignIn(host provagent.Host, rc *modelroute.RouteControl) setupSignI
 		Host: host, Seeder: planSeeder{rc}, Decls: provagent.Builtins(),
 		ImageVersion: imageVersion,
 		Consent:      func(string) bool { return false },
-		HasLogin:     func(p string) bool { return planLogin(rc, p) },
+		SignInStored: func(id string) bool { return planSignInStored(rc, id) },
 		SignInFor:    rc.SignInFor,
 		Logf:         log.Printf,
 		NewID:        func() string { return vm.ProviderPrefix + randHex(6) },

@@ -370,7 +370,7 @@ func TestONB3CanSignInFollowsTheGate(t *testing.T) {
 		"unpinned image": func(r *Runner) { r.ImageVersion = func(string) string { return "" } },
 		"no version":     func(r *Runner) { r.ImageVersion = nil },
 		"no route mark":  func(r *Runner) { r.SignInFor = nil },
-		"no login check": func(r *Runner) { r.HasLogin = nil },
+		"no login check": func(r *Runner) { r.SignInStored = nil },
 		"incomplete": func(r *Runner) {
 			d := r.Decls["stub"]
 			d.Q = Qualification{Verdict: Allowed}
@@ -391,7 +391,7 @@ func TestONB3CanSignInFollowsTheGate(t *testing.T) {
 	// The shipped Codex route stays closed until #809 completes its record
 	// and #1877 pins its image: no offer, so the page fails closed.
 	r := &Runner{Decls: Builtins(), ImageVersion: func(string) string { return "" },
-		SignInFor: func(string) {}, HasLogin: func(string) bool { return false }}
+		SignInFor: func(string) {}, SignInStored: func(string) bool { return false }}
 	if r.CanSignIn("codex") {
 		t.Error("codex offered before its record is complete")
 	}
