@@ -3228,12 +3228,78 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         self.assertNotIn("etc/udev/rules.d:", self.v())
 
     def test_without_the_owner_and_acl_rule_those_links_pass(self):
-        m = self.mutant("            if st.st_uid != TREE_OWNER or acl:\n", "            if False:\n")
+        m = self.mutant("        if st.st_uid != TREE_OWNER or acl:\n", "        if False:\n")
         link(self.root, self.RULES, "/usr/lib/x/r")
         with unittest.mock.patch.object(m, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]):
             self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
         with unittest.mock.patch.object(check, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]):
             self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    # (e) The rules hold for each directory the chase walks through, not only the steps of where it
+    # ends: whoever can write a directory holding a link the chase follows decides where it leads.
+
+    def owned(self, rel):
+        # tree_lstat with REL owned by a uid other than the tree's.
+        real, owner = check.tree_lstat, check.TREE_OWNER
+
+        def lstat(root, r):
+            st = real(root, r)
+            if r != rel or st is None:
+                return st
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, owner + 1000) + tuple(st)[5:])
+        return unittest.mock.patch.object(check, "tree_lstat", lstat)
+
+    def test_a_link_through_a_directory_another_uid_owns_is_refused(self):
+        (self.root / "opt/d").mkdir(parents=True)
+        link(self.root, "opt/d/x", "/usr/lib/x")
+        link(self.root, self.RULES, "/opt/d/x")
+        with self.owned("opt/d"):
+            self.assertIn("etc/udev/rules.d: a link to /opt/d/x, through /opt/d, which uid %d owns"
+                          % (check.TREE_OWNER + 1000), self.v())
+        self.assertNotIn("etc/udev/rules.d:", self.v())
+
+    def test_a_tmpfiles_link_through_a_directory_another_uid_owns_is_refused(self):
+        (self.root / "opt/d").mkdir(parents=True)
+        link(self.root, "opt/d/x", "/usr/lib/x")
+        ln = "L /etc/udev/rules.d - - - - /opt/d/x"
+        self.tmpfiles(ln + "\n")
+        with self.owned("opt/d"):
+            self.assertIn("x.conf: line 1: %s; a link to /opt/d/x, through /opt/d, which uid %d owns"
+                          % (ln, check.TREE_OWNER + 1000), self.v())
+        self.assertNotIn("x.conf:", self.v())
+
+    def test_a_link_through_a_world_writable_directory_is_refused(self):
+        (self.root / "var/tmp").mkdir(parents=True)
+        (self.root / "var/tmp").chmod(0o1777)
+        (self.root / "opt/w").mkdir(parents=True)
+        (self.root / "opt/w").chmod(0o1777)
+        for d in ("var/tmp", "opt/w"):
+            with self.subTest(d=d):
+                link(self.root, d + "/x", "/usr/lib/x")
+                link(self.root, self.RULES, "/%s/x" % d)
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /%s/x, inside /%s, which anyone" % (d, d), self.v())
+                finally:
+                    (self.root / self.RULES).unlink()
+
+    def test_a_link_through_a_root_owned_directory_passes(self):
+        (self.root / "opt/d").mkdir(parents=True)
+        link(self.root, "opt/d/x", "/usr/lib/x")
+        link(self.root, self.RULES, "/opt/d/x")
+        self.tmpfiles("L /etc/udev/hwdb.d - - - - /opt/d/x\n")
+        self.assertNotIn("etc/udev/rules.d:", self.v())
+        self.assertNotIn("x.conf:", self.v())
+
+    def test_without_the_walked_rule_those_links_pass(self):
+        m = self.mutant("        why = step_refusal(root, d, target, True)\n", "        why = None\n")
+        (self.root / "opt/w").mkdir(parents=True)
+        (self.root / "opt/w").chmod(0o1777)
+        link(self.root, "opt/w/x", "/usr/lib/x")
+        link(self.root, self.RULES, "/opt/w/x")
+        self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+        self.assertIsNone(m.tmpfiles_link_refusal(str(self.root), self.RULES, "/opt/w/x"))
+        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+        self.assertIsNotNone(check.tmpfiles_link_refusal(str(self.root), self.RULES, "/opt/w/x"))
 
     # SERVICE_DIRS lists every directory a unit's service user owns.
 

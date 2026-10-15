@@ -211,18 +211,19 @@ def violations(root):
 def world_writable_link(root, rel):
     """#1543 Security R2, #1702: the refusal for link REL in the tree, by link_refusal's rules, with
     the link's target and where it resolves (tree_chase)."""
+    walked = []
     try:
-        path = tree_chase(root, rel, missing_ok=True)[0]
+        path = tree_chase(root, rel, missing_ok=True, walked=walked)[0]
     except OSError:
         # Fail-open on purpose: a loop or a non-directory step fails the same lookup on the box, so
         # the link reads nothing. Keep it so if tree_chase changes, or this becomes a quiet hole.
         return []
     target = tree_readlink(root, rel)
-    why = link_refusal(root, rel, target, path)
+    why = link_refusal(root, rel, target, path, walked=walked)
     return ["%s: %s" % (rel, why)] if why else []
 
 
-def link_refusal(root, rel, target, path, made=False):
+def link_refusal(root, rel, target, path, made=False, walked=()):
     """#1543 Security R2, #1702, #1803: why a link at REL to TARGET, which resolves to PATH (tree_chase
     with missing_ok), is refused, or None. A link is refused if its target resolves, or where the tree
     stops would resolve, to a directory anyone on the box can write (WORLD_WRITABLE, or a directory
@@ -239,7 +240,9 @@ def link_refusal(root, rel, target, path, made=False):
     every other rule here, on purpose: var/lock's target /run/lock is 1777, so the world-writable
     rule would refuse it. So BOX_LINKS' admission rule (its comment, I23) is the only check on an
     entry; the '..', world-writable and SERVICE_DIRS rules apply to every other link. MADE: the link
-    is one a tmpfiles.d line makes on the box, so one under a box mount is not hidden by the mount."""
+    is one a tmpfiles.d line makes on the box, so one under a box mount is not hidden by the mount.
+    WALKED: the tree directories the chase stepped into on the way (tree_chase), held to the same
+    step rules, since whoever can write one can swap the link in it that the chase followed."""
     if rel in BOX_MOUNTS:
         # Security delta 3: the box mounts its own filesystem at /dev, /proc, /sys, /run and /tmp, and
         # switch-root and PID 1 follow a link there (systemd 257's switch-root chases each mount
@@ -257,27 +260,20 @@ def link_refusal(root, rel, target, path, made=False):
         return ("a link to %s, which goes up with '..' past a directory the tree does not hold; "
                 "where it ends is not known at build time (#1702)" % target)
     parts = path_parts(path)
+    for d in walked:
+        # #1803 (Security R1): a directory holding a link the chase followed, off the final path.
+        why = step_refusal(root, d, target, True)
+        if why:
+            return why
     for k in range(1, len(parts) + 1):
         d = "/".join(parts[:k])
         try:
             st = None if d in WORLD_WRITABLE or d in SERVICE_DIRS else tree_lstat(root, d)
         except OSError:
             continue
-        if st is None and (d in WORLD_WRITABLE or d in SERVICE_DIRS) \
-                or st is not None and stat.S_ISDIR(st.st_mode) and st.st_mode & 0o002:
-            return ("a link to %s, inside /%s, which anyone on the box can write, or a service user owns; "
-                    "a local user would decide what it reads (#1543, #1702)" % (target, d))
-        if st is not None and not path.startswith("/"):
-            # #1803: who owns each step, and whether an ACL lets anyone else write it. A step the
-            # tree check cannot read the attributes of is refused, not passed.
-            try:
-                acl = [x for x in tree_xattrs(root, d) if x in ACL_XATTRS]
-            except OSError as e:
-                acl = ["unreadable (%s)" % e.strerror]
-            if st.st_uid != TREE_OWNER or acl:
-                return ("a link to %s, through /%s, which %s; that user would decide what it reads (#1803)"
-                        % (target, d, "uid %d owns" % st.st_uid if st.st_uid != TREE_OWNER
-                           else "carries a POSIX ACL (%s)" % ", ".join(acl)))
+        why = step_refusal(root, d, target, not path.startswith("/"), st)
+        if why:
+            return why
         if st is None and not path.startswith("/"):
             # #1803: the tree lacks this step, so a tmpfiles.d line may make it on the box: a link
             # (whose target the tree never chased here) or a directory someone else can write.
@@ -294,6 +290,33 @@ def link_refusal(root, rel, target, path, made=False):
                 "known at build time; ship the file itself, or, if this link is stock and names a fixed "
                 "root-owned file, add it to BOX_LINKS per I23 (#1702)"
                 % (target, "" if path == target else ", which reaches " + path, path.split("/")[1]))
+    return None
+
+
+def step_refusal(root, d, target, held, st=False):
+    """#1543, #1702, #1803: why a link to TARGET whose chase steps into tree directory D is refused,
+    or None. ST: D's tree_lstat (None if the tree lacks it), looked up when not given. HELD: D is a
+    step of the tree, not under a box mount, so its owner and ACL count too."""
+    if st is False:
+        try:
+            st = None if d in WORLD_WRITABLE or d in SERVICE_DIRS else tree_lstat(root, d)
+        except OSError:
+            return None
+    if st is None and (d in WORLD_WRITABLE or d in SERVICE_DIRS) \
+            or st is not None and stat.S_ISDIR(st.st_mode) and st.st_mode & 0o002:
+        return ("a link to %s, inside /%s, which anyone on the box can write, or a service user owns; "
+                "a local user would decide what it reads (#1543, #1702)" % (target, d))
+    if st is not None and held:
+        # #1803: who owns each step, and whether an ACL lets anyone else write it. A step the
+        # tree check cannot read the attributes of is refused, not passed.
+        try:
+            acl = [x for x in tree_xattrs(root, d) if x in ACL_XATTRS]
+        except OSError as e:
+            acl = ["unreadable (%s)" % e.strerror]
+        if st.st_uid != TREE_OWNER or acl:
+            return ("a link to %s, through /%s, which %s; that user would decide what it reads (#1803)"
+                    % (target, d, "uid %d owns" % st.st_uid if st.st_uid != TREE_OWNER
+                       else "carries a POSIX ACL (%s)" % ", ".join(acl)))
     return None
 
 
@@ -949,14 +972,18 @@ def swap_violations(root):
     return out
 
 
-def tree_chase(root, rel, hops=40, missing_ok=False):
+def tree_chase(root, rel, hops=40, missing_ok=False, walked=None):
     """REL resolved as the booted image resolves it (systemd's chase with the image as root):
     symlinks are followed inside ROOT, an absolute target from ROOT and never from the build host,
     and '..' stops at ROOT. Returns (in-image path, lstat of it). A path that enters one of
     BOX_MOUNTS returns ("/" + that path, None) without looking at the tree. Raises
     FileNotFoundError if a step is missing (with MISSING_OK, returns (where the path would go, None):
-    the rest taken as written, '..' and all), and OSError if links loop or a step is not a directory."""
+    the rest taken as written, '..' and all), and OSError if links loop or a step is not a directory.
+    WALKED, a list, gets each tree directory the chase steps into after following a link (#1803: who
+    can write those decides where the links in them lead); a list that is not empty counts as a link
+    already followed, so its every step is recorded."""
     parts, cur = [x for x in rel.split("/") if x], []
+    linked = bool(walked)
     st = tree_lstat(root, "")
     while parts:
         name = parts.pop(0)
@@ -980,10 +1007,13 @@ def tree_chase(root, rel, hops=40, missing_ok=False):
             if target.startswith("/"):
                 cur = []
             parts = [x for x in target.split("/") if x] + parts
+            linked = True
             continue
         if parts and not stat.S_ISDIR(st.st_mode):
             raise NotADirectoryError(errno.ENOTDIR, "not a directory", p)
         cur.append(name)
+        if linked and walked is not None and parts and p not in walked:
+            walked.append(p)
     return "/".join(cur), st
 
 
@@ -1382,11 +1412,12 @@ def tmpfiles_link_refusal(root, path, to):
     rel = "/".join(path_parts(path))
     if rel.split("/")[:2] == ["var", "run"]:
         rel = "/".join(["run"] + rel.split("/")[2:])
+    walked = [""]
     try:
-        chased = tree_chase(root, to, missing_ok=True)[0]
+        chased = tree_chase(root, to, missing_ok=True, walked=walked)[0]
     except OSError as e:
         return "a link to %s, which the tree check cannot follow (%s) (#1803)" % (to, e.strerror)
-    return link_refusal(root, rel, to, chased, made=True)
+    return link_refusal(root, rel, to, chased, made=True, walked=walked[1:])
 
 
 def tmpfiles_makers(root):
