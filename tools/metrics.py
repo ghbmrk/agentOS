@@ -37,6 +37,8 @@ STATES = ("queued", "building", "in review", "merged", "escalated", "dropped")
 REACHED_REVIEW = {"in review", "merged", "escalated"}
 VERDICTS = r"(accept|fix-list|reject)"
 VERDICT_LINE = re.compile(r"verdict\W{0,4}" + VERDICTS + r"\b", re.I)
+# A comment counts only with the OPERATING §4 form: a line that starts with `Verdict:`.
+COMMENT_VERDICT = re.compile(r"^[ \t*_]*verdict:[ \t*_]*" + VERDICTS + r"\b", re.I | re.M)
 DEFECT = re.compile(r"^Defect:\s*([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*(?:\s*,\s*[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*)*)\s*$", re.M)
 COVERED = re.compile(r"^Covered: (\d+) / \d+", re.M)
 NONE = "—"
@@ -264,8 +266,27 @@ def collect_github(repo, token, since=None):
         verdicts = causes = None
         if p.get("merged_at") and (since is None or p["merged_at"] >= since):
             reviews = list(_pages(repo, f"pulls/{p['number']}/reviews", token))
-            reviews.sort(key=lambda r: r.get("submitted_at") or "")
-            l3 = [r.get("body") for r in reviews if trusted_review(r) and is_l3(r.get("body"))]
+            # A verdict posted as a conversation comment counts too, but only with a
+            # `Verdict:` line, so an incidental "L3" mention is not read as one.
+            notes = [{"submitted_at": c.get("created_at"), "body": c.get("body"),
+                      "author_association": c.get("author_association"), "comment": True}
+                     for c in _pages(repo, f"issues/{p['number']}/comments", token)
+                     if COMMENT_VERDICT.search(c.get("body") or "")]
+            reviews = sorted(reviews + notes, key=lambda r: r.get("submitted_at") or "")
+            l3, seen, from_comments = [], set(), set()
+            for r in reviews:
+                b = r.get("body")
+                if not (trusted_review(r) and is_l3(b)):
+                    continue
+                # A verdict bears the head SHA, so separate rounds differ; a review and a
+                # comment with the same body (either order), or two comments, are one round.
+                key = b.strip()
+                if key in seen and (r.get("comment") or key in from_comments):
+                    continue
+                seen.add(key)
+                if r.get("comment"):
+                    from_comments.add(key)
+                l3.append(b)
             verdicts = [v for v in map(verdict, l3) if v]
             # A non-accept verdict without a Cause line counts as "none" so the gap shows.
             causes = [cause(b) or "none" for b in l3 if verdict(b) in ("fix-list", "reject")]

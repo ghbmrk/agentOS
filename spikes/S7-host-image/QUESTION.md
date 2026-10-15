@@ -1,6 +1,6 @@
 # S7: Host foundation
 
-**Question (BOARD S7, PLAN §3):** Which existing-distribution, image-based host can run AgentOS entirely from an external USB SSD, and does at least one of 2–3 candidates satisfy all of these?
+**Question (BOARD S7, PLAN §3):** Which existing-distribution, image-based host can run agentOS entirely from an external USB SSD, and does at least one of 2–3 candidates satisfy all of these?
 
 | Criterion | Spec |
 |---|---|

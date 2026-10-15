@@ -9,3 +9,7 @@ PE7 condition 4, bound to the package that wires the events bus to the agent: wh
 **Owner:** 
 
 **State on the board before the 2026-10-08 index split:** waits on the events-bus package
+
+## Scope
+
+`broker/loops/pe7_test.go`, `broker/loops/machine.go`, `broker/events/**`, `broker/cmd/agentosd/agent.go`, `broker/owner/channel.go`. Tier A. Blocked on the events-bus wiring package.

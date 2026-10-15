@@ -9,3 +9,7 @@ PE7 condition 5, bound to the package that answers inbound calls: while the agen
 **Owner:** 
 
 **State on the board before the 2026-10-08 index split:** waits on the inbound-call package
+
+## Scope
+
+`broker/modem/sipline/**` (inbound ringback beside the outbound SIP line), `broker/voice/**`, `broker/sipsign/**`, `broker/loops/machine.go`, `broker/cmd/agentosd/agent.go` and their tests. Tier A. Blocked on the inbound-call package.
