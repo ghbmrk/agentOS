@@ -98,7 +98,7 @@ jobs:
         # not be added (mkosi.finalize gives it none either).
         if: failure()
         run: |
-          python3 - "$RUNNER_TEMP/build.log" <<'PY'
+          python3 -I - "$RUNNER_TEMP/build.log" <<'PY'
           import re, sys
           lines = [l.split("image check: ", 1)[1].rstrip("\n") for l in open(sys.argv[1], errors="replace")
                    if "image check: " in l]
