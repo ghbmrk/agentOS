@@ -35,6 +35,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/provagent"
 	"github.com/ghbmrk/agentos/broker/recall"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 	"github.com/ghbmrk/agentos/broker/replay"
@@ -808,8 +809,10 @@ func main() {
 			// or merged until that is settled (recall W10).
 			Contained: recallExec.Contained,
 		}
+		var planRoutes *modelroute.RouteControl
 		if workerRoutes != "" {
-			vmc.ProviderRoutes = modelroute.NewRouteControl(workerRoutes)
+			planRoutes = modelroute.NewRouteControl(workerRoutes)
+			vmc.ProviderRoutes = planRoutes
 		}
 		md.set(&vmc)
 		m, err := vm.Open(ctx, vmc)
@@ -831,6 +834,9 @@ func main() {
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
+			if wt != nil && planRoutes != nil {
+				wt.Provider = providerTool{providerRunner(m, planSeeder{planRoutes})}
+			}
 			caps.workers(wt != nil)
 			tools := registeredTools(qs, tree, recallTools, wt)
 			if wt != nil {
@@ -1043,6 +1049,77 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 		return nil
 	}
 	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB, Stopped: g.stopped, Free: g.room, Avail: g.avail}
+}
+
+// providerRunner serves provider_run (CAP-11) over the built-in
+// declarations. Every owner-side input the route waits on is closed until
+// its row lands: no plan is granted (CRED-5c's consent record, #1264's
+// sign-in), no private mark, no consent, and no image pins a CLI version,
+// so a run refuses with a closed reason and starts nothing. Codex's
+// qualification record is empty until S8-live (#809) fills it. No pool
+// readings reach agentosd yet (#1856), so admission refuses even once the
+// record is filled (RES-5 fails closed). Journal (OP-8 meter and charge)
+// and SignIn (the ONB-9 line) are unwired; provagent P9 names their owners.
+func providerRunner(m *vm.Manager, routes provagent.Seeder) *provagent.Runner {
+	return &provagent.Runner{
+		Host: m, Seeder: routes, Decls: provagent.Builtins(),
+		ImageVersion: func(string) string { return "" },
+		Granted:      func(string) bool { return false },
+		PrivateOK:    func(string) bool { return false },
+		Consent:      func(string) bool { return false },
+		Reserve:      func() float64 { return 1 },
+		Logf:         log.Printf,
+		Caps:         provagent.Caps{Wall: 30 * time.Minute, Result: 256 << 10, Brief: 256 << 10},
+		NewID:        func() string { return vm.ProviderPrefix + randHex(6) },
+	}
+}
+
+// providerTool adapts the runner to the worker tools' ProviderRunner, so
+// workers links neither provagent nor the model route (ARC-2). A refusal
+// crosses as its closed reason only.
+type providerTool struct{ r *provagent.Runner }
+
+func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (string, error) {
+	out, err := p.r.Run(ctx, provagent.Request{Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
+		Label: q.Label, Class: q.Class, MemMB: q.MemMB})
+	var ref *provagent.Refusal
+	if errors.As(err, &ref) {
+		return "", &workers.ProviderRefusal{Reason: workers.ProviderReason(ref.Reason)}
+	}
+	return out, err
+}
+
+// planSeeder adapts the vault process's route control to provagent's
+// Seeder, mapping its errors onto provagent's sentinels. The control socket
+// mints Codex placeholders only (egress PlanLogins.Seed), so any other
+// provider is refused before it is asked (#1378, #1379, #1380 add theirs).
+type planSeeder struct{ rc *modelroute.RouteControl }
+
+func (s planSeeder) Seed(provider, id string) (map[string][]byte, error) {
+	if provider != "codex" {
+		return nil, fmt.Errorf("no plan seed for provider %q", provider)
+	}
+	if s.rc == nil {
+		return nil, errors.New("no plan route control")
+	}
+	seed, err := s.rc.Seed(id)
+	switch {
+	case err == nil:
+		return seed, nil
+	case errors.Is(err, modelroute.ErrNoPlanLogin):
+		return nil, fmt.Errorf("%w: %v", provagent.ErrNoLogin, err)
+	case errors.Is(err, modelroute.ErrRouteBusy):
+		return nil, fmt.Errorf("%w: %v", provagent.ErrRouteBusy, err)
+	case errors.Is(err, modelroute.ErrVaultLocked):
+		return nil, fmt.Errorf("%w: %v", provagent.ErrVaultLocked, err)
+	}
+	return nil, err
+}
+
+func (s planSeeder) Close(id string) {
+	if s.rc != nil {
+		s.rc.Close(id)
+	}
 }
 
 // workerGates are what the worker tools read of the box: the owner's
