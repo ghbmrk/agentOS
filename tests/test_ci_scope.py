@@ -116,9 +116,12 @@ class WiringTest(unittest.TestCase):
     def test_ci_skips_only_on_records_and_checks_always_runs(self):
         ci = (WORKFLOWS / "ci.yml").read_text()
         self.assertIn("uses: ./.github/workflows/scope.yml", ci)
-        for job in ("broker", "machines", "hostcheck"):
+        for job in ("broker-race", "broker-checks", "machines", "hostcheck"):
             self.assertIn(f"  {job}:\n    needs: scope\n"
                           "    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}\n", ci, job)
+        # The required `broker` check gathers the split jobs (CI-SHARD) and skips with them.
+        self.assertIn("    needs: [scope, broker-race, broker-checks]\n"
+                      "    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}\n", ci)
         self.assertIn("  checks:\n    needs: scope\n    if: ${{ !cancelled() }}\n", ci)
         # The document checks never depend on scope.
         for step in ("python tools/trace.py && python tools/trace.py --check", "python tools/doclint.py",
@@ -131,13 +134,14 @@ class WiringTest(unittest.TestCase):
     def test_go_jobs_restore_a_build_cache_and_the_records_run_checks_prose(self):
         # REQ: CI-PATHS
         ci = (WORKFLOWS / "ci.yml").read_text()
-        for job in ("broker", "machines"):
-            body = ci[ci.index(f"\n  {job}:\n"):]
-            body = body[:body.index("\n  hostcheck:\n")] if job == "machines" else body[:body.index("\n  machines:\n")]
+        for job, key in (("broker-race", "broker-race"), ("broker-checks", "broker"), ("machines", "machines")):
+            body = ci[ci.index(f"\n  {job}:\n") + 1:]
+            nxt = re.search(r"^  [a-z][a-z-]*:\n", body[1:], re.M)
+            body = body[:nxt.start() + 1] if nxt else body
             self.assertIn("uses: actions/cache/restore@", body, job)
             self.assertIn("uses: actions/cache/save@", body, job)
             self.assertNotIn("uses: actions/cache@", body, job)
-            self.assertIn(f"key: go-build-{job}-", body, job)
+            self.assertIn(f"key: go-build-{key}-", body, job)
             # Only a push to main writes the cache that PRs restore (D29).
             save = body[body.index("uses: actions/cache/save@"):]
             self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'",
