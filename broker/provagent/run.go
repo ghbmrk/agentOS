@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -40,11 +41,30 @@ var (
 )
 
 // Reading is one usage pool's remaining share, 0..1, read by the broker on
-// its own upstream connection (RES-5).
+// its own upstream connection (RES-5) at At. ResetAt, when set, is when the
+// provider resets the pool: its cooldown. Exhausted: the provider signalled
+// the pool used up or a draw on purchased credits (W8).
 type Reading struct {
-	Pool string
-	Left float64
+	Pool      string
+	Left      float64
+	At        time.Time
+	ResetAt   time.Time
+	Exhausted bool
 }
+
+// Usage is the broker's view of one provider's plan, aggregated across its
+// workers: the newest reading of each pool, and the last time the provider
+// refused the login's refresh on the broker's connection (CRED-5).
+type Usage struct {
+	Readings     []Reading
+	LoginRefused time.Time
+}
+
+// DefaultMaxAge is how long a reading counts as current (Runner.MaxAge).
+const DefaultMaxAge = 10 * time.Minute
+
+// DefaultPerPool is RES-5's default cap on one pool's concurrent workers.
+const DefaultPerPool = 2
 
 // Caps bound a run. Wall is the wall clock; Result and Brief are bytes.
 type Caps struct {
@@ -78,21 +98,27 @@ type Runner struct {
 	Granted      func(provider string) bool
 	PrivateOK    func(provider string) bool // the owner's per-plan private mark
 	Consent      func(provider string) bool // CRED-5c
-	Readings     func(provider string) []Reading
-	Reserve      func() float64 // the owner's reserve, 0..1
+	Usage        func(provider string) (Usage, error)
+	Reserve      func(provider, pool string) float64 // the owner's reserve, 0..1 (OP-5)
 	Scan         func(string) bool
 	Journal      func(Event)
 	SignIn       func(provider string) // sets the ONB-9 sign-in line
 	Logf         func(format string, args ...any)
 	Caps         Caps
 	NewID        func() string // a fresh "pw-" worker ID
+	Now          func() time.Time
+	MaxAge       time.Duration // how long a reading is current; zero is DefaultMaxAge
+	PerPool      int           // concurrent runs per provider; zero is DefaultPerPool
 
-	// mu guards stopped and told. A refused login stops the provider's
-	// route for every later run (CRED-5: no retry, since retries can worsen
-	// a restriction), and the owner is told once, until SignedIn.
+	// mu guards stopped, told, running and probed. A refused login stops
+	// the provider's route for every later run (CRED-5: no retry, since
+	// retries can worsen a restriction), and the owner is told once, until
+	// SignedIn.
 	mu      sync.Mutex
-	stopped map[string]bool // provider: a refused login stopped its route
-	told    map[string]bool // provider: SignIn already called
+	stopped map[string]bool      // provider: a refused login stopped its route
+	told    map[string]bool      // provider: SignIn already called
+	running map[string]int       // provider: runs admitted and not yet ended
+	probed  map[string]time.Time // provider: when its last probe run was admitted
 }
 
 // SignedIn is the owner's sign-in or resume for provider: its route runs
@@ -195,9 +221,15 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if len(q.Brief) > r.Caps.Brief {
 		return fail(Failed)
 	}
-	if !r.poolsAboveReserve(d) {
-		return fail(PoolAtReserve)
+	start := r.now()
+	probe, re := r.admit(d, start)
+	if re != "" {
+		return fail(re)
 	}
+	// A probe that never reached the CLI read nothing: forget it, so the
+	// next run (after a sign-in, say) may probe at once.
+	ran := false
+	defer func() { r.release(d.ID, probe && !ran) }()
 
 	id := r.NewID()
 	seed, serr := r.Seeder.Seed(d.ID, id)
@@ -234,6 +266,7 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 
 	wctx, wcancel := context.WithTimeout(ctx, r.Caps.Wall)
 	defer wcancel()
+	ran = true
 	res, err := r.Host.Exec(wctx, id, Command(d, q.Brief), r.Caps.Wall)
 	if res.TimedOut || wctx.Err() != nil {
 		return fail(TimedOut)
@@ -250,13 +283,19 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	body := string(rr.Stdout)
 
 	// Signals first: a refused login or a used-up plan is a fallback even
-	// when the CLI exited non-zero. They are read from the CLI's own error
-	// events only, never from text the model wrote, which the brief steers.
-	if signalled(body, d.ErrorEvents, d.LoginRefused) {
+	// when the CLI exited non-zero. A refused login and an exhausted pool
+	// are the broker's own readings of this run's upstream responses; the
+	// agent can write the result file, so it can only ever claim used-up
+	// (a fallback), read from the CLI's own error events, never from text
+	// the model wrote, which the brief steers.
+	switch r.after(d, start) {
+	case LoginRefused:
 		r.signIn(d.ID, true)
 		return fail(LoginRefused)
+	case UsedUp:
+		return fail(UsedUp)
 	}
-	if signalled(body, d.ErrorEvents, d.UsedUp) || signalled(body, d.ErrorEvents, d.CreditDraw) {
+	if signalled(body, d.ErrorEvents, d.UsedUp) {
 		return fail(UsedUp)
 	}
 	if res.ExitCode != 0 {
@@ -281,27 +320,117 @@ func contains(l []string, s string) bool {
 	return false
 }
 
-// poolsAboveReserve is RES-5's admission check, closed by default: every
-// declared pool must have a reading, and every reading must be above the
-// owner's reserve. No readings, no reserve, or an unread pool refuses.
-func (r *Runner) poolsAboveReserve(d Declaration) bool {
-	if r.Readings == nil || r.Reserve == nil {
-		return false
+func (r *Runner) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
 	}
-	reserve := r.Reserve()
+	return time.Now()
+}
+
+// admit is RES-5's admission check, closed by default. No usage source, no
+// reserve, or a reading that is not a number refuses; an unreachable usage
+// view is a busy route. A pool at or below the owner's reserve refuses
+// until its reset time (its cooldown), or while the reading is current when
+// the provider gave none. Readings come only from the provider's responses
+// on the broker's connection, so a pool with no current reading (never run
+// against, stale, or past its reset) is unread: the run is then a probe,
+// admitted only alone and once per MaxAge, and its responses are the
+// reading. A run takes one of the provider's PerPool slots until release.
+func (r *Runner) admit(d Declaration, now time.Time) (probe bool, re Reason) {
+	if r.Usage == nil || r.Reserve == nil {
+		return false, PoolAtReserve
+	}
+	u, err := r.Usage(d.ID)
+	if err != nil {
+		r.logf("provagent: usage for %s: %v", d.ID, err)
+		return false, RouteBusy
+	}
+	maxAge := r.MaxAge
+	if maxAge <= 0 {
+		maxAge = DefaultMaxAge
+	}
 	read := map[string]bool{}
-	for _, p := range r.Readings(d.ID) {
-		if !(p.Left > reserve) { // a NaN reading refuses too
-			return false
+	for _, p := range u.Readings {
+		reserve := r.Reserve(d.ID, p.Pool)
+		if math.IsNaN(p.Left) || math.IsNaN(reserve) {
+			return false, PoolAtReserve
 		}
-		read[p.Pool] = true
+		resetting := !p.ResetAt.IsZero() && now.Before(p.ResetAt)
+		current := now.Sub(p.At) < maxAge && (p.ResetAt.IsZero() || resetting)
+		if p.Left <= reserve {
+			if resetting || (p.ResetAt.IsZero() && current) {
+				return false, PoolAtReserve
+			}
+			continue // past its reset, or stale: unread
+		}
+		if current {
+			read[p.Pool] = true
+		}
 	}
 	for _, p := range d.Pools {
 		if !read[p.Name] {
-			return false
+			probe = true
 		}
 	}
-	return true
+
+	perPool := r.PerPool
+	if perPool <= 0 {
+		perPool = DefaultPerPool
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.running[d.ID]
+	if n >= perPool {
+		return false, RouteBusy
+	}
+	if probe {
+		last, ok := r.probed[d.ID]
+		if n > 0 || (ok && now.Sub(last) < maxAge) {
+			return false, PoolAtReserve
+		}
+		if r.probed == nil {
+			r.probed = map[string]time.Time{}
+		}
+		r.probed[d.ID] = now
+	}
+	if r.running == nil {
+		r.running = map[string]int{}
+	}
+	r.running[d.ID] = n + 1
+	return probe, ""
+}
+
+// release frees the slot admit took, and forgets the probe that read
+// nothing.
+func (r *Runner) release(provider string, forgetProbe bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if forgetProbe {
+		delete(r.probed, provider)
+	}
+	if r.running[provider]--; r.running[provider] <= 0 {
+		delete(r.running, provider)
+	}
+}
+
+// after reads what the broker saw on its own connection since the run
+// started: a refused login, or a pool exhausted. An unreachable usage view
+// is logged and read as neither.
+func (r *Runner) after(d Declaration, start time.Time) Reason {
+	u, err := r.Usage(d.ID)
+	if err != nil {
+		r.logf("provagent: usage for %s after a run: %v", d.ID, err)
+		return ""
+	}
+	if !u.LoginRefused.IsZero() && !u.LoginRefused.Before(start) {
+		return LoginRefused
+	}
+	for _, p := range u.Readings {
+		if p.Exhausted && !p.At.Before(start) {
+			return UsedUp
+		}
+	}
+	return ""
 }
 
 // signalled reports whether a JSON event line of the result whose "type" is

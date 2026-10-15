@@ -142,6 +142,7 @@ type rig1014 struct {
 	up     *planUpstream
 	audit  *auditLog
 	quota  []QuotaReading
+	signal []PlanSignal
 	use    []PlanUse
 	h      http.Handler
 }
@@ -152,8 +153,9 @@ func newWorkerRig(t *testing.T, signIn bool) *rig1014 {
 	h, err := NewWorkerRoute(WorkerRouteConfig{
 		Route: Codex(), Worker: "w1", SignIn: signIn, Logins: r.logins,
 		Transport: r.up, Audit: r.audit,
-		Quota: func(q QuotaReading) { r.quota = append(r.quota, q) },
-		Meter: func(u PlanUse) { r.use = append(r.use, u) },
+		Quota:  func(q QuotaReading) { r.quota = append(r.quota, q) },
+		Signal: func(s PlanSignal) { r.signal = append(r.signal, s) },
+		Meter:  func(u PlanUse) { r.use = append(r.use, u) },
 	})
 	if err != nil {
 		t.Fatal(err)

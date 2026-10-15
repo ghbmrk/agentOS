@@ -56,15 +56,20 @@ func (*planLogins) ForWorker(string, string) egress.Swapper { return nil }
 func (*planLogins) ForSignIn(string, string) egress.Swapper { return nil }
 
 type upstream struct {
-	mu   sync.Mutex
-	seen []*http.Request
+	mu    sync.Mutex
+	seen  []*http.Request
+	quota http.Header // headers the next replies carry
 }
 
 func (u *upstream) RoundTrip(r *http.Request) (*http.Response, error) {
 	u.mu.Lock()
 	u.seen = append(u.seen, r)
+	quota := u.quota.Clone()
 	u.mu.Unlock()
 	rec := httptest.NewRecorder()
+	for k, v := range quota {
+		rec.Header()[k] = v
+	}
 	rec.Header().Set("Content-Type", "text/event-stream")
 	io.WriteString(rec, "data: {\"type\":\"response.completed\"}\n\n")
 	return rec.Result(), nil
@@ -88,6 +93,7 @@ type workerRig struct {
 	audit   *nopAudit
 	real    map[string]string
 	forgot  []string
+	usage   egress.PlanUsage
 	locked  bool
 	dir     string
 	forgetM sync.Mutex
@@ -116,6 +122,7 @@ func newWorkerRig(t *testing.T) *workerRig {
 		return egress.WorkerRouteConfig{
 			Route: egress.Codex(), Worker: worker, Logins: logins,
 			Transport: r.up, Audit: r.audit,
+			Quota: r.usage.Quota, Signal: r.usage.Signal,
 		}, nil
 	}, func(worker string) {
 		r.forgetM.Lock()
@@ -128,6 +135,7 @@ func newWorkerRig(t *testing.T) *workerRig {
 		}
 		return map[string][]byte{egress.CodexAuthFile: []byte("ph-access-" + worker)}, nil
 	})
+	r.p.usage = r.usage.Snapshot
 	r.ctl = r.p.handler()
 	t.Cleanup(r.p.closeAll)
 	return r
@@ -349,6 +357,7 @@ func TestA14ControlTakesOnlyOpenCloseAndSeed(t *testing.T) {
 	for _, c := range []struct{ method, path string }{
 		{"GET", "/open?machine=pw-a"}, {"POST", "/other?machine=pw-a"}, {"DELETE", "/close?machine=pw-a"},
 		{"GET", "/seed?machine=pw-a"}, {"POST", "/seed?machine=wk-1"},
+		{"GET", "/usage?provider=codex"}, {"POST", "/usage?provider=Codex!"}, {"POST", "/usage"},
 	} {
 		w := httptest.NewRecorder()
 		r.ctl.ServeHTTP(w, httptest.NewRequest(c.method, c.path, nil))
@@ -690,4 +699,52 @@ func TestCRED8RouteConnectionsArePerWorkerBounded(t *testing.T) {
 		t.Fatal("the queued connection was never served")
 	}
 	held[1].Close()
+}
+
+// RES-5: the broker reads a provider's pools over the control socket
+// (/usage), aggregated across every worker's route: the newest reading of
+// each pool, whichever worker's call carried it.
+func TestRES5UsageAggregatesAcrossWorkers(t *testing.T) {
+	r := newWorkerRig(t)
+	call := func(machine, primary, secondary string) {
+		t.Helper()
+		r.up.mu.Lock()
+		r.up.quota = http.Header{}
+		r.up.quota.Set("X-Codex-Primary-Used-Percent", primary)
+		if secondary != "" {
+			r.up.quota.Set("X-Codex-Secondary-Used-Percent", secondary)
+		}
+		r.up.mu.Unlock()
+		resp, err := through(t, filepath.Join(r.open(t, machine), RouteSocket), "ph-access-"+machine, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	call("pw-a", "40", "5")
+	time.Sleep(time.Millisecond) // readings are ordered by their time
+	call("pw-b", "70", "")
+
+	w := httptest.NewRecorder()
+	r.ctl.ServeHTTP(w, httptest.NewRequest("POST", "/usage?provider=codex", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("usage: %d %s", w.Code, w.Body)
+	}
+	var got egress.UsageSnapshot
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Pools) != 2 || got.Pools[0].Pool != "primary" || got.Pools[0].UsedPercent != 70 || got.Pools[0].Worker != "pw-b" ||
+		got.Pools[1].Pool != "secondary" || got.Pools[1].UsedPercent != 5 {
+		t.Fatalf("usage %+v", got)
+	}
+	if strings.Contains(w.Body.String(), r.real["pw-a"]) || strings.Contains(w.Body.String(), r.real["pw-b"]) {
+		t.Fatal("the usage reply carries a login")
+	}
+	w = httptest.NewRecorder()
+	r.ctl.ServeHTTP(w, httptest.NewRequest("POST", "/usage?provider=unread", nil))
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "primary") {
+		t.Fatalf("an unread provider: %d %s", w.Code, w.Body)
+	}
 }

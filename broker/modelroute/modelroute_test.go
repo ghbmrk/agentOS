@@ -551,3 +551,37 @@ func TestLOOP5CeilingRefusalsReachTheEvaluator(t *testing.T) {
 		t.Fatalf("OverCeiling got %q", over)
 	}
 }
+
+// A call whose bound runs out before the broker obtains a connection to
+// the vault process never reached a provider, whatever error the transport
+// gives (a deadline, not a dial error): it is charged its input estimate
+// only, never its output reservation and retries (#1882).
+//
+// REQ: OP-8
+func TestNoConnectionChargesInputOnly(t *testing.T) {
+	const body = `{"model":"default","max_tokens":100}`
+	for _, c := range []struct {
+		name string
+		sock func(t *testing.T) string
+	}{
+		{"stale socket", staleUnix},
+		{"absent socket", func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent.sock") }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fwd := Forward(Config{Socket: c.sock(t), Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
+			m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), CallTimeout: time.Nanosecond,
+				MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			m.Wrap("m1", fwd("m1")).ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("got %d", w.Code)
+			}
+			if want, u := meter.Tokens(int64(len(body))), m.Usage("m1"); u.Tokens != want || u.Calls != 1 {
+				t.Fatalf("charged %d tokens and %d calls, want %d and 1", u.Tokens, u.Calls, want)
+			}
+		})
+	}
+}

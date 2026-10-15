@@ -49,6 +49,9 @@ const providerPrefix = "pw-"
 
 var providerRE = regexp.MustCompile(`^pw-[a-z0-9][a-z0-9-]{0,36}$`)
 
+// providerIDRE is a provider's name (provagent's declaration ID).
+var providerIDRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
 // Bounds on the route sockets (CRED-8, K28). Each worker's socket accepts
 // routeConns connections; more wait in the kernel's queue. Across every
 // worker at most routeCalls calls are in flight, each holding at most one
@@ -68,8 +71,11 @@ type workerRoutes struct {
 	config func(worker string) (egress.WorkerRouteConfig, error)
 	forget func(worker string)
 	seed   func(worker string) (map[string][]byte, error)
-	conns  int
-	calls  chan struct{}
+	// usage is the provider's plan usage across every worker route
+	// (egress.PlanUsage.Snapshot), served on /usage; nil serves none.
+	usage func(provider string) egress.UsageSnapshot
+	conns int
+	calls chan struct{}
 
 	mu   sync.Mutex
 	open map[string]*routeServer
@@ -93,9 +99,20 @@ func newWorkerRoutes(dir string, config func(string) (egress.WorkerRouteConfig, 
 	}
 }
 
-// handler serves POST /open, /close and /seed with ?machine=<id>.
+// handler serves POST /open, /close and /seed with ?machine=<id>, and
+// POST /usage with ?provider=<id> (RES-5: the pools as the broker's own
+// connections last read them).
 func (p *workerRoutes) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/usage" {
+			provider := r.URL.Query().Get("provider")
+			if p.usage == nil || !providerIDRE.MatchString(provider) {
+				http.Error(w, "no usage for that provider", http.StatusBadRequest)
+				return
+			}
+			json.NewEncoder(w).Encode(p.usage(provider))
+			return
+		}
 		if r.Method != http.MethodPost || (r.URL.Path != "/open" && r.URL.Path != "/close" && r.URL.Path != "/seed") {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -319,6 +336,7 @@ const workerRouteRoot = "workers"
 // address guard (DEV-2).
 func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error) {
 	logins := egress.NewPlanLogins(c.loginStore, map[string]string{})
+	usage := &egress.PlanUsage{}
 	if err := runDir(dir); err != nil {
 		return nil, err
 	}
@@ -344,6 +362,7 @@ func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error)
 	}, logins.Forget, func(worker string) (map[string][]byte, error) {
 		return logins.Seed("codex", worker)
 	})
+	p.usage = usage.Snapshot
 	ln, err := listen(dir, ProviderSocket, brokerUID)
 	if err != nil {
 		return nil, err

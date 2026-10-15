@@ -20,7 +20,7 @@ func good() Declaration {
 		Custody: BrokerHeld, Endpoints: []string{"api.example.test"}, Placeholder: "auth.json",
 		Pools:       []Pool{{Name: "5h", ReadFrom: "x-stub-primary-used-percent"}},
 		ErrorEvents: []string{"error"},
-		UsedUp:      []string{"usage_limit_reached"}, LoginRefused: []string{"login_refused"},
+		UsedUp:      []string{"usage_limit_reached"},
 		TaskClasses: []string{"code"},
 	}
 }

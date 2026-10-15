@@ -835,7 +835,10 @@ func main() {
 			tree.setMachines(m)
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
 			if wt != nil && planRoutes != nil {
-				wt.Provider = providerTool{providerRunner(m, planSeeder{planRoutes})}
+				pr := providerRunner(m, planSeeder{planRoutes})
+				// #1856: plan readings and the owner's reserve (RES-5).
+				wirePlanUsage(pr, planRoutes)
+				wt.Provider = providerTool{pr}
 			}
 			caps.workers(wt != nil)
 			tools := registeredTools(qs, tree, recallTools, wt)
@@ -1056,10 +1059,10 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 // its row lands: no plan is granted (CRED-5c's consent record, #1264's
 // sign-in), no private mark, no consent, and no image pins a CLI version,
 // so a run refuses with a closed reason and starts nothing. Codex's
-// qualification record is empty until S8-live (#809) fills it. No pool
-// readings reach agentosd yet (#1856), so admission refuses even once the
-// record is filled (RES-5 fails closed). Journal (OP-8 meter and charge)
-// and SignIn (the ONB-9 line) are unwired; provagent P9 names their owners.
+// qualification record is empty until S8-live (#809) fills it. Pool
+// readings and the reserve come from wirePlanUsage (#1856); without them
+// admission refuses (RES-5 fails closed). Journal (OP-8 meter and charge)
+// and SignIn (the ONB-9 line) are unwired; provagent P10 names their owners.
 func providerRunner(m *vm.Manager, routes provagent.Seeder) *provagent.Runner {
 	return &provagent.Runner{
 		Host: m, Seeder: routes, Decls: provagent.Builtins(),
@@ -1067,7 +1070,6 @@ func providerRunner(m *vm.Manager, routes provagent.Seeder) *provagent.Runner {
 		Granted:      func(string) bool { return false },
 		PrivateOK:    func(string) bool { return false },
 		Consent:      func(string) bool { return false },
-		Reserve:      func() float64 { return 1 },
 		Logf:         log.Printf,
 		Caps:         provagent.Caps{Wall: 30 * time.Minute, Result: 256 << 10, Brief: 256 << 10},
 		NewID:        func() string { return vm.ProviderPrefix + randHex(6) },

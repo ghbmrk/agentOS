@@ -112,10 +112,10 @@ type Declaration struct {
 	// in the result stream. The signals below are substrings matched only
 	// in those events, never in the agent's messages, which a brief steers.
 	ErrorEvents []string
-	// Signals are substrings matched in the error events.
-	UsedUp       []string
-	CreditDraw   []string // a draw on purchased credits is treated as used-up (W8)
-	LoginRefused []string
+	// UsedUp are substrings matched in the error events. A refused login
+	// and a credit draw are not read here: the agent can write the result,
+	// so the broker reads both on its own upstream connection (#1856).
+	UsedUp []string
 
 	Q Qualification
 }
@@ -210,8 +210,6 @@ func Builtins() map[string]Declaration {
 			// agent's messages are item events and are never matched.
 			ErrorEvents: []string{"error", "turn.failed"},
 			UsedUp:      []string{"usage_limit_reached"},
-			// LoginRefused and CreditDraw are measured by #809.
-			LoginRefused: []string{"refresh_token_invalidated", "token_expired"},
 			// Allowed by the terms read (#1377, D-117); #809 fills the rest.
 			Q: Qualification{Verdict: Allowed},
 		},
@@ -219,14 +217,13 @@ func Builtins() map[string]Declaration {
 			ID: "claude", CLI: "claude", Version: "0", Image: "claude",
 			Argv: []string{"claude", "-p", "--output-format", "json"},
 			Cwd:  "/var/lib/agentos-work", ResultPath: "/var/lib/agentos-work/.agentos-result",
-			Env:          []string{"PATH=/usr/local/bin:/usr/bin:/bin"},
-			Custody:      WorkerHeld,
-			Pools:        []Pool{{Name: "5h", ReadFrom: "anthropic-ratelimit-unified-5h-utilization"}, {Name: "7d", ReadFrom: "anthropic-ratelimit-unified-7d-utilization"}},
-			TaskClasses:  []string{"code", "research"},
-			ErrorEvents:  []string{"error"},
-			UsedUp:       []string{"rate_limit"},
-			LoginRefused: []string{"authentication_error"},
-			Q:            Qualification{Verdict: Unclear}, // D-114: off until the owner opts in (#1380)
+			Env:         []string{"PATH=/usr/local/bin:/usr/bin:/bin"},
+			Custody:     WorkerHeld,
+			Pools:       []Pool{{Name: "5h", ReadFrom: "anthropic-ratelimit-unified-5h-utilization"}, {Name: "7d", ReadFrom: "anthropic-ratelimit-unified-7d-utilization"}},
+			TaskClasses: []string{"code", "research"},
+			ErrorEvents: []string{"error"},
+			UsedUp:      []string{"rate_limit"},
+			Q:           Qualification{Verdict: Unclear}, // D-114: off until the owner opts in (#1380)
 		},
 	}
 }
