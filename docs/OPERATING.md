@@ -105,7 +105,29 @@ Never a standing reviewer session: the one long-lived reviewer cost 27% of the f
 - `defect`: the code breaks a cited requirement or an invariant.
 - `scope`: the review asks for something outside the cited IDs; such points are `release` or `later` (§2), not blockers, and the verdict should normally have been accept.
 
-The second line is `Record: PR #N · package <ID> · head <SHA>`, same format as lens records.
+**Verdict comment shape.** The daily records bot (`tools/records.py`) turns a verdict comment into a `reviews/` file only when the comment has this shape, so every L3 and lens verdict uses it:
+
+- `Verdict:` first, then `Cause:` unless the verdict is accept;
+- then a title line starting `# `;
+- directly under the title, with no other line between, `Record: PR #N · package <ID> · head <SHA>`, same format as lens records (step 3 below);
+- one marker `<!-- record: <lens> -->` per lens the comment records, on its own line under the `Record:` line, where `<lens>` is a directory under `reviews/`: `l3`, `security`, `potency`, `ux` or `combined` (a combined comment carries several markers). A comment without a marker is never recorded, and the bot only warns about it.
+
+For example (tests/test_records.py runs this example through the bot's parser):
+
+```text
+Verdict: fix-list
+Cause: defect
+
+# L3 review: PR #400 (DOC-4) at a74ee45
+Record: PR #400 · package DOC-4 · head a74ee45
+<!-- record: l3 -->
+
+1. blocker (defect, DOC-4.2): the index skips the last entry.
+
+Next: fix 1, then a delta L3 review; owed: none
+```
+
+A lens verdict has the same shape, with its own lens in the marker, for example `<!-- record: security -->`.
 
 Each fix-list point cites a requirement ID or a concrete defect and carries its class (§2). METRICS counts causes per week, so L4 can tell whether to fix the spec, the briefs, the builders or the reviewers.
 
@@ -115,11 +137,11 @@ The verdict comment's last line states the PR's next step and the reviews still 
 
 1. Read the bundle's diffs, the IDs they cite, the active DECISIONS rows and each lens README (`reviews/security/`, `reviews/potency/`, `reviews/ux/`). Not whole files, not transcripts. The run index for a lens is one command: `grep -H -e '^Record:' -e '^Verdict' reviews/<lens>/*.md`.
 2. For each PR, apply each lens's question and method. Tier B gets one combined pass; tier A gets UX and Potency here and Security in its own session (stage 4a). A tier-A diff confined to assurance tooling (`tools/depaudit*`, `tools/canary*`, `assurance/`, `tools/risk_tier*` and their tests) gets no UX pass: its messages are `later` under §2 (D-086).
-3. Write one verdict per lens per PR to `reviews/<lens>/YYYY-MM-DD-pr<N>.md` (for a tier-B combined pass, `reviews/combined/YYYY-MM-DD-pr<N>.md`), in the L3 format above, and link it from the PR. The comment is the verdict; the daily records workflow writes the file (see "Records are bot-only" below). Under the title put one line, `Record: PR #N · package <ID> · head <SHA>`, where `PR`, `package` and `head` are literal, e.g. `Record: PR #400 · package DOC-4 · head a74ee45` (a bundle lists several; `PR none` if there is no PR); `tools/doclint.py` requires it from 2026-10-09. The record files, in filename order, are the run index: no lens README keeps a run table, so no PR edits one.
+3. Post one verdict per lens per PR as a PR comment in the L3 format and the verdict comment shape above (`Verdict:` first, a `# ` title, the `Record:` line directly under it, then `<!-- record: <lens> -->`). The comment is the verdict; the daily records workflow files it as `reviews/<lens>/YYYY-MM-DD-pr<N>.md` (for a tier-B combined pass, marker `combined` and `reviews/combined/YYYY-MM-DD-pr<N>.md`; see "Records are bot-only" below), and a comment without the marker never becomes a record. Under the title put one line, `Record: PR #N · package <ID> · head <SHA>`, where `PR`, `package` and `head` are literal, e.g. `Record: PR #400 · package DOC-4 · head a74ee45` (a bundle lists several; `PR none` if there is no PR); `tools/doclint.py` requires it from 2026-10-09. The record files, in filename order, are the run index: no lens README keeps a run table, so no PR edits one.
 4. Settle tensions between lenses in the same session under `reviews/arbitration/README.md`; write any resolution to `reviews/arbitration/YYYY-MM-DD-pr<N>.md`. Only a real fork goes to Mark: one question answerable in one word, with a recommendation.
 5. Skip any finding kind a lens README lists under "Checks that replaced findings": CI already catches it.
 
-**Records are bot-only (RECORDS-INLINE, #1816, D-120).** Records-only PRs were 53 of 143 merges in 48 hours (37%), each costing a full CI run and a worker cold start. The verdict stays the PR's review comment, and `.github/workflows/records.yml` runs once a day (not on every push to main) and opens one `bot/records` PR for marked comments of merged PRs that have no file yet (`tools/records.py`). That bot is the only writer of `reviews/` files, so a feature PR gets no push after its accept: inline record commits were rejected because a record commit on a code PR reruns full CI and forces `tools/premerge.py` to exempt files, which would let a modified or deleted record pass as `same`. Measure: records-only merges one a day or fewer (§6). Mark approved the cost cut 2026-10-15 (project message cmsg_01R63S2yrPkq32thy8WQCuvDCVDGCf9kEBbZRpfxDeybYm).
+**Records are bot-only (RECORDS-INLINE, #1816, D-120).** Records-only PRs were 53 of 143 merges in 48 hours (37%), each costing a full CI run and a worker cold start. The verdict stays the PR's review comment, and `.github/workflows/records.yml` runs once a day (not on every push to main) and opens one `bot/records` PR for marked comments of merged PRs that have no file yet (`tools/records.py`). That bot is the only writer of `reviews/` files, so a feature PR never carries a record commit: inline record commits were rejected because a record commit on a code PR reruns full CI and forces `tools/premerge.py` to exempt files, which would let a modified or deleted record pass as `same`. Measure: records-only merges one a day or fewer (§6). Mark approved the cost cut 2026-10-15 (project message cmsg_01R63S2yrPkq32thy8WQCuvDCVDGCf9kEBbZRpfxDeybYm).
 
 **Recurring findings become checks.** When the same kind of finding appears on a second PR, the next package that touches the area adds a lint rule, test or CI check that catches it, and the lens README lists it under "Checks that replaced findings". Reviewers then stop looking for it by hand.
 
@@ -184,10 +206,11 @@ Extra capacity (a second subscription, a teammate's agent, or another vendor's c
 **Claims on BOARD.md.** A team claims a row by setting its `work-item` issue's label to `state:building` and naming the team in the issue, before any work; BOARD.md follows through board.yml, never a hand edit. A row with an owner belongs to that team until its state changes. Two claims on one row: the claim whose `state:building` label event comes first on the issue's timeline wins and the other stops. Branch stems carry the team only when more than one team is active: `pkg/<team>-<id>-<slug>`.
 
 **Every team merges its own PRs; GitHub enforces the gates.** A PR merges only when the required checks passed on its head (ruleset on main; it need not contain current main since 2026-10-15) and its diff equals the diff its L3 accept recorded (`tools/premerge.py`). Arming (ARM-AT-ACCEPT, #1819; approved by Mark 2026-10-15, D-120):
-- The session that posts the last required accept arms auto-merge itself (`gh api -X PUT repos/ghbmrk/agentOS/pulls/N/ccr/auto_merge -f merge_method=merge`), with the head SHA. There is no merge worker. A coordinator merges only a PR whose last accept left it unarmed.
+- The session that posts the last required accept arms auto-merge itself. There is no merge worker. A coordinator merges only a PR whose last accept left it unarmed.
 - Arm only when the head equals the accepted head, CI is green, and every review the tier requires (§3, §4) accepted that head. The arm note lists the tier and the verdict comment ids.
-- Any session pushing to an armed PR first disables auto-merge (`gh api -X DELETE repos/ghbmrk/agentOS/pulls/N/ccr/auto_merge`; the GitHub MCP `disable_pr_auto_merge` does the same; it answers 422 on an unarmed PR). GitHub checks the expected head only at enable time and every team pushes as Mark's login, so a push does not disarm by itself. A new head needs a delta review before it is re-armed.
-- A PR for which `python3 tools/premerge.py --needs-mark` prints `mark` (it touches CLAUDE.md, docs/OPERATING.md, docs/LANES.md, `.claude/`, `.github/`, tools/risk_tier.py, premerge.py, ci_scope*, g1_scope* or `reviews/*/README*`) loosens or can loosen how Claude is permitted or reviewed: nobody arms it and Mark presses Merge.
+- The arm call takes no head SHA, so a push can land between the check and the call. In order: read the PR head and confirm it equals the accepted head; arm (`gh api -X PUT repos/ghbmrk/agentOS/pulls/N/ccr/auto_merge -f merge_method=merge`, or the GitHub MCP `enable_pr_auto_merge` with mergeMethod `merge`); then read the head again. If it changed, disable auto-merge at once (`gh api -X DELETE repos/ghbmrk/agentOS/pulls/N/ccr/auto_merge`) and treat the new head as unreviewed. Feature PRs merge with merge_method `merge` (a merge commit); the records bot's own PRs use `gh pr merge --auto --squash`, which is expected.
+- Any session pushing to an armed PR first disables auto-merge (`gh api -X DELETE repos/ghbmrk/agentOS/pulls/N/ccr/auto_merge`; the GitHub MCP `disable_pr_auto_merge` does the same; it answers 422 on an unarmed PR). Every team pushes as Mark's login, so a push does not disarm by itself. A new head needs a delta review before it is re-armed.
+- A PR for which `python3 tools/premerge.py --needs-mark` prints `mark` (it touches any CLAUDE.md or CLAUDE.local.md, AGENTS.md, `.mcp.json`, docs/OPERATING.md, docs/LANES.md, `.claude/`, `.github/`, broker/core/core.txt, tools/risk_tier.py, premerge.py, ci_scope*, g1_scope* or `reviews/*/README*`) loosens or can loosen how Claude is permitted or reviewed: nobody arms it and Mark presses Merge.
 - Release follow-up: making `premerge` a required check would enforce the head and diff rules structurally; until then they are procedure.
 
 Mark's two subscriptions are one team of equal peers (D-099, D-120): either arms the merge of a PR its session just accepted. Any other team is its PRs' only pusher and merger; a PR into another lane is merged by that lane's owner, who requests changes rather than pushing. Nobody pushes to another team's branch. Branch stems carry the team: `pkg/<team>-<id>-<slug>`.

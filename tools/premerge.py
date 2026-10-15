@@ -2,7 +2,7 @@
 """Check that the diff about to merge equals the diff its L3 accept reviewed (OPERATING §7).
 
   tools/premerge.py [--base origin/main] <reviewed-sha> [head]
-  tools/premerge.py --needs-mark [--base origin/main] [head]
+  tools/premerge.py --needs-mark [--base origin/main] [head]   (--needs-mark in any position)
 
 Replays the reviewed commit onto the base content `head` carries (`git merge-tree` of the reviewed
 commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
@@ -25,8 +25,10 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 
 
 # A PR touching any of these goes to Mark, never to an agent's auto-merge (OPERATING §7).
-MARK_PATHS = re.compile(r"^(CLAUDE\.md|docs/OPERATING\.md|docs/LANES\.md|\.claude/.*|\.github/.*|"
-                        r"tools/(risk_tier|premerge)\.py|tools/(ci_scope|g1_scope)[^/]*|reviews/[^/]+/README[^/]*)$")
+# CLAUDE.md and CLAUDE.local.md count at any depth; broker/core/core.txt sets risk tiers (risk_tier.py).
+MARK_PATHS = re.compile(r"^((?:.*/)?CLAUDE(?:\.local)?\.md|AGENTS\.md|\.mcp\.json|docs/OPERATING\.md|docs/LANES\.md|"
+                        r"\.claude/.*|\.github/.*|broker/core/core\.txt|tools/(risk_tier|premerge)\.py|"
+                        r"tools/(ci_scope|g1_scope)[^/]*|reviews/[^/]+/README[^/]*)$")
 
 
 def mark_paths(files):
@@ -53,9 +55,9 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
 
 
 def main(argv):
-    args, base, needs_mark = argv[1:], "origin/main", False
-    if args[:1] == ["--needs-mark"]:
-        needs_mark, args = True, args[1:]
+    args, base = argv[1:], "origin/main"
+    needs_mark = "--needs-mark" in args  # in any position
+    args = [a for a in args if a != "--needs-mark"]
     if args[:1] == ["--base"]:
         base, args = args[1], args[2:]
     if needs_mark:

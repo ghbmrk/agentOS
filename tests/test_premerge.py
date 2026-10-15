@@ -170,6 +170,17 @@ class PremergeTest(unittest.TestCase):
         for f in ("tools/records.py", "reviews/l3/2026-10-15-pr1.md", "README.md", "docs/OTHER.md", "src/claude/x.go"):
             self.assertEqual(premerge.mark_paths([f]), [], f)
 
+    def test_mark_paths_cover_agent_config_and_tier_inputs(self):
+        # Security R3 on #1824: MCP config, other teams' rules, nested CLAUDE files, and the
+        # core list tools/risk_tier.py reads to set tiers.
+        self.assertTrue((ROOT / "broker/core/core.txt").is_file())
+        self.assertIn("core.txt", (ROOT / "tools/risk_tier.py").read_text())
+        for f in (".mcp.json", "AGENTS.md", "CLAUDE.local.md", "broker/CLAUDE.md", "a/b/CLAUDE.local.md",
+                  "broker/core/core.txt"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in ("broker/core/core.go", "docs/AGENTS.md.bak", "XCLAUDE.md", "a/CLAUDE.md/x.go", "x.mcp.json"):
+            self.assertEqual(premerge.mark_paths([f]), [], f)
+
     def test_cli_needs_mark(self):
         git(self.r, "checkout", "-q", "-b", "pr")
         run = lambda: subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main"],
@@ -182,6 +193,17 @@ class PremergeTest(unittest.TestCase):
         self.commit("rules")
         bad = run()
         self.assertEqual((bad.returncode, bad.stdout.split()), (1, ["mark", "CLAUDE.md"]))
+
+    def test_cli_needs_mark_in_any_position(self):
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "sub").mkdir()
+        self.write("sub/CLAUDE.md", "rules\n")
+        self.commit("nested rules")
+        for argv in (["--needs-mark", "--base", "main"], ["--base", "main", "--needs-mark"],
+                     ["--base", "main", "HEAD", "--needs-mark"]):
+            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), *argv],
+                               cwd=self.r, capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout.split()), (1, ["mark", "sub/CLAUDE.md"]), argv)
 
 
 if __name__ == "__main__":
