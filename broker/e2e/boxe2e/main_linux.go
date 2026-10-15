@@ -8,8 +8,9 @@
 // stands in for the access point's wlan0 with the phone in its own network
 // namespace, and agentos-modem is pointed (by a drop-in from ci_boot.sh) at
 // a sysfs tree whose AT port is a pseudo-terminal behind the AT simulator.
-// It prints no claim code, card value, recovery key, code-generator seed or
-// page body: details are status codes, locations and page headings.
+// It prints no claim code, card value, recovery key, code-generator seed,
+// text message or page body: details are status codes, locations, page
+// headings and reply kinds.
 package main
 
 import (
@@ -81,6 +82,9 @@ type driver struct {
 	phone   *http.Client
 	modem   *pluggedModem
 	seed    []byte
+	// codeStep is the last 30-second code window the driver used: the box
+	// takes each window's code once (CH-14).
+	codeStep int64
 }
 
 // childEnv is every child's whole environment: systemd's own PATH for
@@ -418,7 +422,7 @@ func (d *driver) codes() error {
 	if d.seed == nil {
 		return errors.New("no code generator link was shown")
 	}
-	st, _, err := d.post("/setup/codes", url.Values{"code": {owner.TOTP(d.seed, time.Now())}})
+	st, _, err := d.post("/setup/codes", url.Values{"code": {d.freshCode()}})
 	if err != nil || st != http.StatusSeeOther {
 		return fmt.Errorf("POST /setup/codes %d %v", st, err)
 	}
@@ -499,8 +503,57 @@ func (d *driver) guestTask() error {
 	return errors.New(notDriven + " needs the plan sign-in and a stub behind the Codex worker")
 }
 
-// phoneControl will text a command from the paired number once setup has
-// finished and check the box's reply (#1714).
+// phoneControl is the owner texting the box after setup (CH-3, CH-14). A
+// number the box never paired texts STATUS; then the paired phone texts
+// STATUS with a fresh code, which unlocks the session and runs it. The
+// step reads the carrier's log: the paired phone must get the status reply
+// and the stranger nothing. agentosd answers texts only once setup has
+// finished and its daemon has taken the modem, so an unanswered attempt
+// repeats, each with a code window not used before.
 func (d *driver) phoneControl() error {
-	return errors.New(notDriven + " needs an inbound text from the paired number and its reply")
+	if d.seed == nil {
+		return errors.New("no code generator seed")
+	}
+	start := len(d.carrier.Log())
+	if err := d.carrier.Line(strangerNum).Send(boxNum, "STATUS"); err != nil {
+		return fmt.Errorf("stranger send: %w", err)
+	}
+	phone := d.carrier.Line(phoneNum)
+	deadline := time.Now().Add(3 * time.Minute)
+	for answered := false; !answered; {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
+		}
+		if err := phone.Send(boxNum, "STATUS "+d.freshCode()); err != nil {
+			return fmt.Errorf("phone send: %w", err)
+		}
+		for wait := time.Now().Add(45 * time.Second); time.Now().Before(wait); time.Sleep(time.Second) {
+			status, others, _ := controlResult(d.carrier.Log(), start)
+			if status {
+				answered = true
+				break
+			}
+			for _, k := range others {
+				if k == "locked" || k == "wrong-code" {
+					// The box read the text and refused the code.
+					return controlErr(d.carrier.Log(), start)
+				}
+			}
+		}
+	}
+	// Texts are read in arrival order, so the stranger's came first; a
+	// quiet spell after the owner's reply catches a late one.
+	time.Sleep(15 * time.Second)
+	return controlErr(d.carrier.Log(), start)
+}
+
+// freshCode is the code the phone's app shows now, from a window the
+// driver has not used, waiting for the next window when it has.
+func (d *driver) freshCode() string {
+	for time.Now().Unix()/30 <= d.codeStep {
+		time.Sleep(time.Second)
+	}
+	now := time.Now()
+	d.codeStep = now.Unix() / 30
+	return owner.TOTP(d.seed, now)
 }
