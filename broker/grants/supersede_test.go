@@ -189,6 +189,8 @@ func TestOP2PreAllowedRepeatOfANotDoneSendIsRefused(t *testing.T) {
 	t.Cleanup(func() { close(hold) })
 	r.exec.mu.Lock()
 	r.exec.block = map[string]chan struct{}{"agent/s1": hold}
+	r.exec.entered = make(chan string, 4)
+	entered := r.exec.entered
 	r.exec.mu.Unlock()
 	s1 := journal.Intent{ID: "agent/s1", Origin: "guest:agent", Account: "mail", Action: "invoice.send",
 		Params: invoice1042(), Recipients: []string{"sam@example.com"}, Executor: "mail", Machine: "agent", Label: "private"}
@@ -205,6 +207,12 @@ func TestOP2PreAllowedRepeatOfANotDoneSendIsRefused(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// s1 must be parked on hold before block is cleared (see killedSend).
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("s1 never reached Execute")
+	}
 	data, err := r.store.ReadAll()
 	if err != nil {
 		t.Fatal(err)
@@ -215,6 +223,7 @@ func TestOP2PreAllowedRepeatOfANotDoneSendIsRefused(t *testing.T) {
 	}
 	r.exec.mu.Lock()
 	r.exec.block = nil
+	r.exec.entered = nil
 	r.exec.notDone = map[string]bool{"agent/s1": true}
 	r.exec.mu.Unlock()
 	r.open()
