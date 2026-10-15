@@ -68,10 +68,69 @@ def esp_violations(paths, entry):
                   if p not in allowed and not any(re.fullmatch(a, p) for a in ESP_ALLOWED))
 
 
+def options_line(entry):
+    """The entry's kernel command line: systemd-boot joins every options line, indented or not."""
+    return " ".join(ln.split(None, 1)[1] for ln in entry.splitlines()
+                    if re.match(r"\s*options\s", ln) and len(ln.split(None, 1)) > 1)
+
+
 def entry_args(entry, name):
     """Every value of the entry's kernel argument NAME=, in order."""
-    return re.findall(r"(?:^|\s)%s=(\S*)" % re.escape(name), " ".join(
-        ln.split(None, 1)[1] for ln in entry.splitlines() if re.match(r"options\s", ln)))
+    return re.findall(r"(?:^|\s)%s=(\S*)" % re.escape(name), options_line(entry))
+
+
+# The command-line credentials the image ships (mkosi.conf): emergency and rescue mode run the
+# fallback (I4). Any other credential could carry sysctl.extra or tmpfiles.extra (#1530).
+SHIPPED_CREDENTIALS = ("systemd.unit-dropin.emergency.service", "systemd.unit-dropin.rescue.service")
+MKOSI_CONF = pathlib.Path(__file__).resolve().parent / "mkosi" / "mkosi.conf"
+
+
+def config_cmdline(conf=MKOSI_CONF):
+    """The words of mkosi.conf's KernelCommandLine= and its indented continuation lines."""
+    words, on = [], False
+    for ln in pathlib.Path(conf).read_text().splitlines():
+        if ln.startswith("KernelCommandLine="):
+            on, ln = True, ln.split("=", 1)[1]
+        elif not (on and ln[:1].isspace() and ln.strip()):
+            on = False
+            continue
+        words += ln.split()
+    return words
+
+
+def cmdline_words(entry):
+    """The entry's kernel command line split as the kernel's next_arg splits it: on whitespace
+    outside double quotes. Quotes are dropped from each word, which errs safe: a word is checked
+    as the bare text either the kernel or systemd could take from it."""
+    return [w.replace('"', "") for w in re.findall(r'(?:[^\s"]|"[^"]*"?)+', options_line(entry))]
+
+
+def cmdline_violations(entry, conf=MKOSI_CONF):
+    """#1530: the command line is an allowlist. mkosi v24.3 writes exactly usrhash=<root hash> and
+    mkosi.conf's KernelCommandLine words (finalize_cmdline), so every other word is refused: an
+    unknown word reaches PID 1 as an argument or environment variable, and systemd.run=, init= or a
+    sysctl.<key>= could turn forwarding on while sysctl.d is clean. Some words are refused even when
+    mkosi.conf lists them: sysctl.<key>= and sysctl/<key>= (the kernel writes them at boot, Linux
+    5.8+), systemd.run and init (PID 1 runs them), and any credential but the shipped ones, which
+    could carry sysctl.extra or tmpfiles.extra. Names are compared as systemd compares them (- and _
+    alike, an rd. prefix for the initrd) and case-blind, which errs safe."""
+    allowed, out = set(config_cmdline(conf)), []
+    for w in cmdline_words(entry):
+        key, _, val = w.partition("=")
+        k = key.lower().replace("-", "_")
+        if k.startswith("rd."):
+            k = k[3:]
+        if k.startswith(("sysctl.", "sysctl/")):
+            out.append("%s: the kernel sets sysctls from the command line" % key)
+        elif k.startswith(("systemd.run", "init", "rdinit")):
+            out.append("%s: PID 1 would run it" % key)
+        elif k in ("systemd.set_credential", "systemd.set_credential_binary") and \
+                val.split(":", 1)[0] not in SHIPPED_CREDENTIALS:
+            out.append("%s=%s: only the shipped credentials %s may be set"
+                       % (key, val.split(":", 1)[0], ", ".join(SHIPPED_CREDENTIALS)))
+        elif w not in allowed and not re.fullmatch(r"usrhash=[0-9a-f]{64}", w):
+            out.append("%s: not in mkosi.conf's KernelCommandLine; add it there" % w[:80])
+    return out
 
 
 def swap_violations(partitions, entry):
@@ -117,23 +176,38 @@ ZSTD, XZ, GZIP = b"\x28\xb5\x2f\xfd", b"\xfd7zXZ\x00", b"\x1f\x8b"
 
 
 def unzstd(data):
-    return subprocess.run(["zstd", "-dcq"], input=data, stdout=subprocess.PIPE, check=True).stdout
+    """All of DATA as zstd frames: the zstd tool fails on anything after the last frame."""
+    return subprocess.run(["zstd", "-dcq"], input=data, stdout=subprocess.PIPE, check=True).stdout, b""
+
+
+def one_stream(d, data, what):
+    """Decompress the one stream at the start of DATA with decompressor D: (output, the bytes
+    after the stream). The kernel's unpack_to_rootfs reads on after a compressed segment, so the
+    rest is checked as well (#1513); lzma.decompress and gzip.decompress would drop it."""
+    try:
+        out = d.decompress(data)
+    except Exception as e:
+        raise ValueError("initrd: bad %s stream (%s)" % (what, e))
+    if not d.eof:
+        raise ValueError("initrd: truncated %s stream" % what)
+    return out, d.unused_data
 
 
 def unxz(data):
     import lzma
-    return lzma.decompress(data)
+    return one_stream(lzma.LZMADecompressor(lzma.FORMAT_XZ), data, "xz")
 
 
 def ungzip(data):
-    import gzip
-    return gzip.decompress(data)
+    import zlib
+    return one_stream(zlib.decompressobj(31), data, "gzip")
 
 
 def cpio_names(data, decompress=None):
-    """Every path in an initrd: newc cpio archives, back to back with zero padding between them,
-    the last of which may be compressed (zstd, xz or gzip). Anything else raises ValueError, so an
-    initrd this cannot read fails the build rather than passing unchecked."""
+    """Every path in an initrd: newc cpio archives and compressed (zstd, xz or gzip) streams of
+    them, back to back with zero padding between them, read on as the kernel does. Anything else
+    raises ValueError, so an initrd this cannot read fails the build rather than passing unchecked.
+    DECOMPRESS maps a magic to a function returning (output, the bytes after the stream)."""
     decompress = decompress or {ZSTD: unzstd, XZ: unxz, GZIP: ungzip}
     names, off = [], 0
     while True:
@@ -141,9 +215,12 @@ def cpio_names(data, decompress=None):
             off += 1
         if off >= len(data):
             return names
-        for magic, fn in decompress.items():
-            if data.startswith(magic, off):
-                return names + cpio_names(fn(data[off:]), decompress)
+        fn = next((fn for magic, fn in decompress.items() if data.startswith(magic, off)), None)
+        if fn:
+            out, rest = fn(data[off:])
+            names += cpio_names(out, decompress)
+            data, off = rest, 0
+            continue
         if data[off:off + 6] not in CPIO_MAGICS:
             raise ValueError("initrd: unknown data at offset %d" % off)
         while True:
@@ -252,6 +329,9 @@ def main(out, version):
     bad = esp_violations(paths, text)
     if bad:
         sys.exit("ESP holds files outside the allowlist (HW-1): %s" % bad)
+    bad = cmdline_violations(text)
+    if bad:
+        sys.exit("boot entry has a kernel argument outside the allowlist (#1530): %s" % bad)
     bad = swap_violations(partition_table(str(img))["partitions"], text)
     if bad:
         sys.exit("image could swap or keep the broker's memory (IMG-nodump): %s" % bad)
