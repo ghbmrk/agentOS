@@ -762,3 +762,110 @@ func TestRES5ShippedRouteConfigFeedsUsage(t *testing.T) {
 		t.Fatalf("usage after the shipped config's callbacks: %+v", got)
 	}
 }
+
+// ctlPost posts path on the control socket and returns the status and body.
+func ctlPost(t *testing.T, sock, path string) (int, []byte) {
+	t.Helper()
+	cl := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", sock)
+		},
+	}}
+	resp, err := cl.Post("http://localhost"+path, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return resp.StatusCode, body
+}
+
+// The vault process as it ships: serveWorkerRoutes over an open custody.
+// A reading on a worker's route reaches the /usage that same control socket
+// serves, so the routes it builds feed the usage it serves (RES-5, CRED-5;
+// #1856 security S1: a route config without Quota, or a usage other than
+// the served one, fails here).
+func TestRES5ServedRoutesFeedTheServedUsage(t *testing.T) {
+	run, err := os.MkdirTemp("", "ru")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(run) })
+	v, err := vault.Create(filepath.Join(run, "v"), []byte(strings.Repeat("k", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { v.Close() })
+	realAccess := synthetic(t, "canary-access-")
+	login, _ := json.Marshal(map[string]string{
+		"access_token": realAccess, "refresh_token": synthetic(t, "canary-refresh-"),
+		"id_token": "x.y.z", "account_id": "acct-synthetic",
+	})
+	if err := v.Put("plan-login-codex", egress.LoginKind, login); err != nil {
+		t.Fatal(err)
+	}
+	up := &upstream{quota: http.Header{}}
+	up.quota.Set("X-Codex-Primary-Used-Percent", "37")
+	c := &custody{notify: func(string) {}, modelTransport: up}
+	c.ph, c.v = open, v
+
+	cl, err := serveWorkerRoutes(filepath.Join(run, "r"), c, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	sock := filepath.Join(run, "r", ProviderSocket)
+
+	code, body := ctlPost(t, sock, "/usage?provider=codex")
+	if code != http.StatusOK || strings.Contains(string(body), "primary") {
+		t.Fatalf("usage before any call: %d %s", code, body)
+	}
+	code, body = ctlPost(t, sock, "/seed?machine=pw-a")
+	if code != http.StatusOK {
+		t.Fatalf("seed: %d %s", code, body)
+	}
+	var seed map[string][]byte
+	var auth struct{ Tokens map[string]string }
+	if err := json.Unmarshal(body, &seed); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(seed[egress.CodexAuthFile], &auth); err != nil || auth.Tokens["access_token"] == "" {
+		t.Fatalf("seeded auth.json %q (%v)", seed[egress.CodexAuthFile], err)
+	}
+	code, body = ctlPost(t, sock, "/open?machine=pw-a")
+	var out struct{ Dir string }
+	if err := json.Unmarshal(body, &out); code != http.StatusOK || err != nil || out.Dir == "" {
+		t.Fatalf("open: %d %s (%v)", code, body, err)
+	}
+	resp, err := through(t, filepath.Join(out.Dir, RouteSocket), auth.Tokens["access_token"], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("call through the served route: status %d", resp.StatusCode)
+	}
+	up.mu.Lock()
+	n := len(up.seen)
+	up.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("the provider saw %d calls, want 1", n)
+	}
+
+	code, body = ctlPost(t, sock, "/usage?provider=codex")
+	var got egress.UsageSnapshot
+	if err := json.Unmarshal(body, &got); code != http.StatusOK || err != nil {
+		t.Fatalf("usage: %d %s (%v)", code, body, err)
+	}
+	if len(got.Pools) != 1 || got.Pools[0].Pool != "primary" || got.Pools[0].UsedPercent != 37 || got.Pools[0].Worker != "pw-a" {
+		t.Fatalf("the served /usage after a reading on the served route: %+v", got)
+	}
+	if strings.Contains(string(body), realAccess) {
+		t.Fatal("the usage reply carries a login")
+	}
+}
