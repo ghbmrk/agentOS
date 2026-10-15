@@ -1,8 +1,9 @@
-"""tools/records.py: review records batched from verdict comments after merge (#1691).
+"""tools/records.py: review records written daily from verdict comments of merged PRs (#1691, #1816).
 
 No requirement IDs: CI tooling, not SPEC.md behaviour.
 """
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,16 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
 import records  # noqa: E402
 import doclint  # noqa: E402
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+def documented_example():
+    """The verdict comment example in docs/OPERATING.md §4 "Verdict comment shape", verbatim."""
+    text = (REPO / "docs/OPERATING.md").read_text()
+    section = text[text.index("**Verdict comment shape.**"):]
+    return re.search(r"```text\n(.*?)```", section, re.S).group(1)
+
 
 GOOD = ("<!-- record: security -->\n# Security: PR #12 (PKG-1)\n\n"
         "Record: PR #12 · package PKG-1 · head abcdef1\n\nVerdict: accept\n\n"
@@ -55,6 +66,39 @@ class RecordsTest(unittest.TestCase):
         for path, text in out.items():
             (self.root / path).write_text(text)
         self.assertEqual(list(doclint.records(self.root)), [])
+
+    def test_documented_verdict_example_becomes_a_record(self):
+        # Potency/UX/L3 finding 1 on #1824: the documented shape must be what the bot records.
+        example = documented_example()
+        self.assertIn("<!-- record: l3 -->", example)
+        out, skipped = self.harvest([comment(example, pr=400)], {400})
+        self.assertEqual((list(out), skipped), (["reviews/l3/2026-10-15-pr400.md"], []))
+        self.assertTrue(out["reviews/l3/2026-10-15-pr400.md"].startswith("Verdict: fix-list\n"))
+        for path, text in out.items():
+            (self.root / path).write_text(text)
+        self.assertEqual(list(doclint.records(self.root)), [])
+        lens = example.replace("<!-- record: l3 -->", "<!-- record: security -->\n<!-- record: potency -->")
+        out, skipped = self.harvest([comment(lens, pr=401)], {401})
+        self.assertEqual((sorted(out), skipped),
+                         (["reviews/potency/2026-10-15-pr401.md", "reviews/security/2026-10-15-pr401.md"], []))
+
+    def test_claude_md_states_the_recorded_shape(self):
+        text = (REPO / "CLAUDE.md").read_text()
+        for part in ("<!-- record: <lens> -->", "`# <title>`", "`Record: PR #N · package <ID> · head <SHA>`",
+                     "Verdict comment shape"):
+            self.assertIn(part, text)
+        self.assertIn("**Verdict comment shape.**", (REPO / "docs/OPERATING.md").read_text())
+
+    def test_unmarked_verdict_on_merged_pr_is_reported(self):
+        for first in ("Security review (tier A) at abcdef1: ACCEPT", "Verdict: accept"):
+            body = f"{first}\n\n# Security: PR #12 (PKG-1)\nRecord: PR #12 · package PKG-1 · head abcdef1\n"
+            out, skipped = self.harvest([comment(body)])
+            self.assertEqual(out, {})
+            self.assertEqual(len(skipped), 1, skipped)
+            self.assertIn("no `<!-- record: <lens> -->` marker", skipped[0])
+            self.assertEqual(self.harvest([comment(body)], set()), ({}, []))  # not merged: nothing lost yet
+            self.assertEqual(self.harvest([comment(body, assoc="NONE")]), ({}, []))
+        self.assertEqual(self.harvest([comment("Thanks, merging now.")]), ({}, []))
 
     def test_unmarked_comment_is_ignored(self):
         self.assertEqual(self.harvest([comment(GOOD.replace("<!-- record: security -->", ""))]), ({}, []))
