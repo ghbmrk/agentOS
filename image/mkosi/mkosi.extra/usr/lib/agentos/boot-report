@@ -1,8 +1,9 @@
 #!/bin/sh
 # One console line carrying the wired uplink and the bless state (after the boot is blessed, or
-# not): what CI's boot test reads. A physical Ethernet port with a cable in gets up to 30 s for its lease
-# (20-agentos-uplink.network, #1416). With no carrier on any port the report waits about 5 s, since a
-# cold NIC can still be negotiating; a carrier that cannot be read (link down) counts as not yet.
+# not): what CI's boot test reads. A physical Ethernet port with a cable in gets up to 30 s for
+# its lease (20-agentos-uplink.network, #1416). With no carrier on any port the report waits
+# about 5 s, since a cold NIC can still be negotiating; a carrier that cannot be read (link
+# down) counts as not yet.
 net=${AGENTOS_SYS_NET:-/sys/class/net}
 up=none
 for i in $(seq 30); do
@@ -21,8 +22,8 @@ for i in $(seq 30); do
 done
 st=$(/usr/lib/systemd/systemd-bless-boot status 2>&1)
 root=$(findmnt -bno SIZE /)
-# One line, one write: the console has other writers (journald, getty), and two lines let one of
-# them land between the uplink and the boot line, which CI reads as a missing uplink (#1764).
+# One line, one write: a reset or hangup of the console (getty starting) discards output still
+# queued, and two lines can lose one fact and keep the other (#1764, image/ASSUMPTIONS.md I24).
 echo "agentos-uplink: $up agentos-boot: bless=$st root_bytes=$root"
 # The Wi-Fi page Requires= its claim hand-over (agentos-localui.service), so a failed hand-over
 # keeps the page down while the setup access point still comes up (#1743). Say so here, the line
