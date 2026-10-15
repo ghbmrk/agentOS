@@ -2,15 +2,62 @@ name: image
 # Builds the AgentOS device image (image/, PLAN P2-1) on two runners, boots one build under
 # Secure Boot in QEMU, and checks both builds give the same release (/usr verity root hash).
 # Runs here because GitHub's runners reach the Debian mirrors; the cloud agent sessions cannot.
-# Two builds and a boot cost about an hour of runner time, so only image changes trigger it;
-# run it by hand (workflow_dispatch) to rebuild after broker or guest changes.
+# Two builds and a boot cost about an hour of runner time, so only image changes and the broker
+# packages the in-image setup run (broker/e2e/boxe2e) goes through trigger it; run it by hand
+# (workflow_dispatch) to rebuild after other broker or guest changes.
 on:
   workflow_dispatch:
   pull_request:
-    paths: ["image/**", ".github/workflows/image.yml"]
+    paths:
+      - "image/**"
+      - ".github/workflows/image.yml"
+      # The setup path the in-image run drives (#1688): claim, SMS pairing, code generator,
+      # Owner Card, recovery and the services behind them.
+      - "broker/e2e/boxe2e/**"
+      - "broker/localui/**"
+      - "broker/claim/**"
+      - "broker/firstboot/**"
+      - "broker/card/**"
+      - "broker/owner/**"
+      - "broker/recovery/**"
+      - "broker/modem/**"
+      - "broker/modemlink/**"
+      - "broker/smsapi/**"
+      - "broker/change/**"
+      - "broker/apnet/**"
+      - "broker/egress/**"
+      - "broker/daemon/**"
+      - "broker/cmd/agentosd/**"
+      - "broker/cmd/agentos-localui/**"
+      - "broker/cmd/agentos-modem/**"
+      - "broker/cmd/agentos-egress/**"
+      - "broker/cmd/agentos-ap/**"
   push:
     branches: [main]
-    paths: ["image/**", ".github/workflows/image.yml"]
+    paths:
+      - "image/**"
+      - ".github/workflows/image.yml"
+      # The setup path the in-image run drives (#1688): claim, SMS pairing, code generator,
+      # Owner Card, recovery and the services behind them.
+      - "broker/e2e/boxe2e/**"
+      - "broker/localui/**"
+      - "broker/claim/**"
+      - "broker/firstboot/**"
+      - "broker/card/**"
+      - "broker/owner/**"
+      - "broker/recovery/**"
+      - "broker/modem/**"
+      - "broker/modemlink/**"
+      - "broker/smsapi/**"
+      - "broker/change/**"
+      - "broker/apnet/**"
+      - "broker/egress/**"
+      - "broker/daemon/**"
+      - "broker/cmd/agentosd/**"
+      - "broker/cmd/agentos-localui/**"
+      - "broker/cmd/agentos-modem/**"
+      - "broker/cmd/agentos-egress/**"
+      - "broker/cmd/agentos-ap/**"
 permissions:
   contents: read
 jobs:
@@ -41,13 +88,16 @@ jobs:
           sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
       - name: Build image
         run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out"
-      - name: Boot test (Secure Boot on)
+      - name: Build the end-to-end driver
         if: matrix.run == 'a'
-        run: sudo image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
+        run: cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/e2e/box-e2e" ./e2e/boxe2e
+      - name: Boot test (Secure Boot on) and end-to-end run
+        if: matrix.run == 'a'
+        run: sudo env E2E="$RUNNER_TEMP/e2e" image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
       - name: Keep the console logs
         if: always() && matrix.run == 'a'
         run: |
-          for l in console console-reboot console-two-drives; do
+          for l in console console-reboot console-two-drives console-e2e; do
             sudo cp "$RUNNER_TEMP/boot/$l.log" "$RUNNER_TEMP/out/qemu-$l.log" || true
           done
       - name: Release record

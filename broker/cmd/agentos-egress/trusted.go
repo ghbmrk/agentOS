@@ -762,8 +762,10 @@ func (h *tpmHost) enroll(v *vault.Vault, pin string) (_ string, err error) {
 	}
 	defer func() {
 		// PIN off gives the lockout back; so does a PIN slot that was
-		// never saved, when this call took the lockout.
-		if (pin == "" && err == nil) || (tookNew && err != nil) {
+		// never saved, when this call took the lockout. A slot change that
+		// errored after it was decided (ErrSlotDecided) did save the PIN
+		// slot, which needs the lockout (#1557).
+		if (pin == "" && err == nil) || (tookNew && err != nil && !errors.Is(err, vault.ErrSlotDecided)) {
 			h.giveBack(v, t, id)
 		}
 	}()

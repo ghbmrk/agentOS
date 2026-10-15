@@ -7,7 +7,11 @@
 #           check and the broker run it on every boot.
 #   assign  check, then give this drive random disk, ESP and root GUIDs. Run once per drive, after its
 #           first blessed boot. Written to the partition table only (no re-read), so this boot keeps
-#           its devices and the next boot uses the new GUIDs.
+#           its devices and the next boot uses the new GUIDs. udev shows the new GUIDs at once, while
+#           the boot loader still names the old ESP GUID, so assign first records in /run (this boot
+#           only) which partition and disk carried it, and check takes that record when no partition
+#           carries the booted GUID any more; agentosd and the vault process, started or restarted
+#           later in this boot (the claim restarts the vault), then pass their check (#1716).
 # AGENTOS_HEALTH_ROOT exists for tests/test_image.py.
 set -eu
 R=${AGENTOS_HEALTH_ROOT:-}
@@ -24,6 +28,15 @@ printf '%s\n' "$esp" | grep -qxE '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' ||
 parts=$(lsblk -rno NAME,PKNAME,PARTUUID)
 hits=$(printf '%s\n' "$parts" | awk -v u="$esp" '$3 == u { print $1 " " $2 }' | sort -u)
 n=$(printf '%s' "$hits" | grep -c . || true)
+rec=$R/run/agentos-drive-id
+if [ "$n" -eq 0 ] && [ -f "$rec" ]; then
+	was='' wasesp='' wasdisk=''
+	read -r was wasesp wasdisk <"$rec" || true
+	# Only this boot's own record, and only while that partition is still on that disk.
+	if [ "$was" = "$esp" ] && printf '%s\n' "$parts" | awk -v p="$wasesp" -v d="$wasdisk" '$1 == p && $2 == d { f = 1 } END { exit !f }'; then
+		hits="$wasesp $wasdisk" n=1
+	fi
+fi
 [ "$n" -eq 1 ] || fail "$n partitions carry the boot partition's GUID $esp: detach the other AgentOS drive and restart"
 espdev=${hits% *} disk=${hits#* }
 rootdev=$(readlink -f "$(findmnt -no SOURCE /)") rootdev=${rootdev#/dev/}
@@ -34,6 +47,7 @@ rootdisk=$(printf '%s\n' "$parts" | awk -v d="$rootdev" '$1 == d { print $2; exi
 new() { cat "$R/proc/sys/kernel/random/uuid"; }
 espn=$(cat "$R/sys/class/block/$espdev/partition")
 rootn=$(cat "$R/sys/class/block/$rootdev/partition")
+printf '%s %s %s\n' "$esp" "$espdev" "$disk" >"$rec"
 sfdisk --no-reread --no-tell-kernel --disk-id "/dev/$disk" "$(new)"
 sfdisk --no-reread --no-tell-kernel --part-uuid "/dev/$disk" "$espn" "$(new)"
 sfdisk --no-reread --no-tell-kernel --part-uuid "/dev/$disk" "$rootn" "$(new)"

@@ -6,6 +6,7 @@ import (
 	"html"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 )
 
 // REQ: ARC-2, CH-7
+// Also serves the UX-2wb-1 finding (no SPEC ID).
 
 type stillOwner struct{}
 
@@ -185,6 +187,77 @@ func TestNoTriesLeftShowBeforeSignIn(t *testing.T) {
 			if body := do("GET", p, ""); strings.Contains(body, "tries left") || strings.Contains(body, "No more codes") || strings.Contains(body, "14:05") {
 				t.Fatalf("GET %s tells the tries:\n%s", p, body)
 			}
+		}
+	}
+}
+
+// An answer that gets no reply is not reported as undecided: it may have
+// taken effect, and the page says so (UX-2wb-1).
+func TestAnAnswerWithNoReplyDoesNotClaimNothingHappened(t *testing.T) {
+	if strings.Contains(answerUnreachableText, "Nothing was") || answerUnreachableText == unreachableText {
+		t.Fatalf("answer wording %q", answerUnreachableText)
+	}
+	s, err := New(Config{AP: testAP()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := strings.Repeat("ab", localapi.TokenBytes)
+	s.SetOwner(InProcess{
+		localapi.OpSession: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return localapi.Session{Token: tok, Until: time.Now().Add(time.Hour)}, nil
+		},
+		localapi.OpAnswer: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return nil, sockets.ErrFailed
+		},
+	})
+	sess, sum := "sess", strings.Repeat("0", 64)
+	_, refusal := s.answer(context.Background(), tok, sess, map[string][]string{
+		"id": {"Q2"}, "sum": {sum}, "tok": {s.formToken(sess, "Q2", sum)}, "answer": {"deny"},
+	})
+	if refusal != answerUnreachableText {
+		t.Fatalf("answer with no reply: %q", refusal)
+	}
+}
+
+// A failed listing after a POST keeps the answer's own message: the page
+// never says "Nothing was approved or denied" over (or beside) an answer.
+func TestAFailedListingAfterAnAnswerKeepsTheAnswersMessage(t *testing.T) {
+	tok := strings.Repeat("ab", localapi.TokenBytes)
+	for _, c := range []struct {
+		name   string
+		answer func(context.Context, sockets.Peer, json.RawMessage) (any, error)
+		want   string
+	}{
+		{"answer fails", func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return nil, sockets.ErrFailed }, answerUnreachableText},
+		{"answer lands", func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return localapi.Answered{Text: "Approved Q2. Your agent can go ahead."}, nil
+		}, "Approved Q2."},
+	} {
+		s, err := New(Config{AP: testAP()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.SetOwner(InProcess{
+			localapi.OpSession: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+				return localapi.Session{Token: tok, Until: time.Now().Add(time.Hour)}, nil
+			},
+			localapi.OpAnswer: c.answer,
+			localapi.OpRequests: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+				return nil, sockets.ErrFailed
+			},
+		})
+		sess := tokenKey(tok)
+		sum := strings.Repeat("0", 64)
+		form := url.Values{"id": {"Q2"}, "sum": {sum}, "tok": {s.formToken(sess, "Q2", sum)}, "answer": {"deny"}}
+		req := httptest.NewRequest("POST", "http://10.42.0.1/approvals/", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = "10.42.0.20:5000"
+		req.AddCookie(&http.Cookie{Name: cookieName, Value: tok})
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		body := w.Body.String()
+		if w.Code != 200 || !strings.Contains(body, html.EscapeString(c.want)) || strings.Contains(body, "Nothing was approved or denied") {
+			t.Fatalf("%s: %d %s", c.name, w.Code, body)
 		}
 	}
 }

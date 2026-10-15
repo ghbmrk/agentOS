@@ -27,7 +27,9 @@ import (
 // nothing: a replay machine, whose broker serves no such tool, keeps the
 // tree it was seeded with, and a public machine keeps none.
 
-// treeNamespaces are the only directories a sync writes or removes in.
+// treeNamespaces are the only directories a sync writes or removes in, as
+// long as no process in the guest changes the tree directory while it runs
+// (#1732).
 var treeNamespaces = []string{"procedures", "skills", "context"}
 
 type treeAnswer struct {
@@ -166,7 +168,15 @@ func mirror(dir string, files map[string][]byte) error {
 		return err
 	}
 	defer root.Close()
+	for _, ns := range treeNamespaces {
+		if err := refuseLinks(root, ns); err != nil {
+			return err
+		}
+	}
 	for p, b := range files {
+		if err := refuseLinks(root, p); err != nil {
+			return err
+		}
 		if old, err := root.ReadFile(p); err == nil && bytes.Equal(old, b) {
 			continue
 		}
@@ -217,9 +227,40 @@ func mirror(dir string, files map[string][]byte) error {
 	return nil
 }
 
+// refuseLinks fails if any component of p, from its namespace down to p
+// itself, is a symlink. The os.Root follows one that stays inside the tree
+// directory, so without this check a link such as skills/l -> ../other
+// would let a write or a removal land in other, outside the namespaces.
+// mirror checks the three namespaces themselves first, so the removal walk
+// cannot follow one either. A component that does not exist yet is not a
+// link, and nothing below it exists either. The error names the tree
+// directory and the link, never p, so it is the same for every file and
+// syncTree logs it once. The check is not atomic: a process in the guest
+// that swaps a directory for a link between the check and the write or
+// removal is not stopped (#1732).
+func refuseLinks(root *os.Root, p string) error {
+	var path []string
+	for a := p; a != "."; a = filepath.Dir(a) {
+		path = append(path, a)
+	}
+	for i := len(path) - 1; i >= 0; i-- {
+		fi, err := root.Lstat(path[i])
+		if err != nil {
+			return nil
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			dir, _ := filepath.Abs(root.Name())
+			return fmt.Errorf("tree directory %s: %s is a symlink; the sync is refused until it is removed", dir, path[i])
+		}
+	}
+	return nil
+}
+
 // clearWay removes what an earlier tree left in the way of the file p: a
-// regular file where p needs a directory, or a directory at p itself. A
-// symlink is left, so the write fails rather than follow it.
+// regular file where p needs a directory, or a directory at p itself. The
+// caller has checked with refuseLinks that no symlink lay on p's path a
+// moment ago, so the Lstat and RemoveAll here act on the path they name
+// unless a guest process swaps one in between (#1732).
 func clearWay(root *os.Root, p string) error {
 	ns, _, _ := strings.Cut(p, "/")
 	var up []string
