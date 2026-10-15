@@ -96,6 +96,8 @@ Checks run cheapest first; each stage sees only what passed the one before. A PR
 
 Never a standing reviewer session: the one long-lived reviewer cost 27% of the first week.
 
+**Review packet and SPEC slice.** `python3 tools/reviewpacket.py <PR-or-range>` writes one file with the risk tier, the brief, the cited SPEC blocks and the diff, stamped with the head SHA; `python3 tools/specslice.py --ids A-1,B-2` prints just those SPEC blocks (exit 2 on an unknown ID). The packet is an optional aid that bundles what a reviewer already reads (the diff, the cited SPEC IDs, the brief) and is a starting point: any claim a finding relies on is checked against the source, not the packet (CTX-slice, #1681).
+
 **L3 verdict format.** First line `Verdict: accept|fix-list|reject`. Every verdict except accept adds a line `Cause: spec-gap|brief-gap|defect|scope` naming the main cause of the rework:
 
 - `spec-gap`: SPEC.md is ambiguous or silent on what the PR had to decide.
