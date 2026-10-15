@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/route"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -86,8 +87,8 @@ func TestSetupProvidersOverTheVerifySocket(t *testing.T) {
 	r.c.confirm(r.unlock(t), r.code())
 
 	ps := listed(t, setupCall(t, r.c, "GET", "/setup/providers", ""))
-	if len(ps) != 2 || ps["openai"].Name != "OpenAI" || ps["anthropic"].Name != "Anthropic" ||
-		ps["openai"].Connected || ps["openai"].PrivateOK {
+	if len(ps) != 3 || ps["openai"].Name != "OpenAI" || ps["anthropic"].Name != "Anthropic" ||
+		ps["openai"].Connected || ps["openai"].PrivateOK || ps["openai"].Plan {
 		t.Fatalf("fresh list: %+v", ps)
 	}
 
@@ -230,13 +231,43 @@ func TestSetupProvidersThroughTheVerifier(t *testing.T) {
 		t.Fatal(err)
 	}
 	ps, err := v.SetupProviders()
-	if err != nil || len(ps) != 2 {
+	if err != nil || len(ps) != 3 {
 		t.Fatalf("list: %v %v", ps, err)
 	}
 	for _, p := range ps {
 		if (p.ID == "anthropic") != (p.Connected && p.PrivateOK) {
 			t.Fatalf("%+v", p)
 		}
+	}
+}
+
+// c4e2b: the plan route is listed after the adapters, as a plan: it takes
+// no API key, it is connected once its sign-in is stored in the vault, and
+// it takes the owner's private-data answer as the adapters do (D-115). The
+// list never carries the login (CRED-1).
+func TestSetupListsThePlanRoute(t *testing.T) {
+	r := providerRig(t)
+	r.c.confirm(r.unlock(t), r.code())
+	p := listed(t, setupCall(t, r.c, "GET", "/setup/providers", ""))[planProvider]
+	if !p.Plan || p.Name != "ChatGPT plan" || p.Connected || p.PrivateOK {
+		t.Fatalf("fresh plan entry: %+v", p)
+	}
+	if w := setupCall(t, r.c, "POST", "/setup/providers/key", keyBody(planProvider, synthetic(t, "sk-canary-"))); w.Code == http.StatusOK {
+		t.Fatal("the plan route took an API key")
+	}
+	login := synthetic(t, "plan-canary-")
+	if err := r.c.v.Put("plan-login-"+planProvider, egress.LoginKind, []byte(`{"access_token":"`+login+`"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if w := setupCall(t, r.c, "POST", "/setup/providers/private", `{"provider":"codex","ok":true}`); w.Code != http.StatusOK {
+		t.Fatalf("private: %d %s", w.Code, w.Body)
+	}
+	w := setupCall(t, r.c, "GET", "/setup/providers", "")
+	if strings.Contains(w.Body.String(), login) || strings.Contains(w.Body.String(), "canary") {
+		t.Fatalf("the list carries the login: %s", w.Body)
+	}
+	if p := listed(t, w)[planProvider]; !p.Connected || !p.PrivateOK {
+		t.Fatalf("signed-in plan entry: %+v", p)
 	}
 }
 

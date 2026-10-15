@@ -128,6 +128,17 @@ func (r *Runner) StartSignIn(ctx context.Context, provider string, class admissi
 	return link, code, nil
 }
 
+// CanSignIn reports whether StartSignIn would start provider's sign-in now,
+// short of a sign-in already running: the route declares one and its gate
+// is open. The setup page offers the sign-in only then (ONB-3).
+func (r *Runner) CanSignIn(provider string) bool {
+	d, ok := r.Decls[provider]
+	if !ok || len(d.SignInArgv) == 0 || d.Custody != BrokerHeld || r.SignInFor == nil || r.HasLogin == nil || r.ImageVersion == nil {
+		return false
+	}
+	return Gate{ImageVersion: r.ImageVersion(d.Image), Consent: r.Consent != nil && r.Consent(d.ID)}.Check(d) == nil
+}
+
 func (r *Runner) claimSignIn(provider string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -523,9 +523,29 @@ func main() {
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
 		}
+		// "Use my plan" signs in through the provider's CLI in one private
+		// worker (ONB-3, #1264 c4e2b), on machines opened only if it is used
+		// and closed before agentosd opens its own below.
+		var signInHost *setupHost
+		if runsc != "" && workerRoutes != "" {
+			signInHost = newSetupHost(setupMachines{
+				runsc: runsc, stateDir: stateDir, routes: workerRoutes, diskQuota: diskQuota,
+				images: imgs, admit: cfg.Admission,
+				cgroups: func() (*cgroup.Group, error) {
+					return openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
+				},
+				diskReserveMB: diskReserveMB, machineDiskMB: machineDiskMB, workerLayerMB: workerLayerMB,
+			}.open)
+			m.SignIn = newSetupSignIn(signInHost, modelroute.NewRouteControl(workerRoutes))
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		owner, err := m.run(ctx)
 		stop()
+		if signInHost != nil {
+			cctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			signInHost.Close(cctx)
+			cancel()
+		}
 		if errors.Is(err, context.Canceled) {
 			return
 		}

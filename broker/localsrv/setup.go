@@ -38,6 +38,7 @@ type Setup struct {
 	keys    []time.Time
 	scans   []time.Time
 	texts   []time.Time
+	signins []time.Time
 }
 
 // SetupConfig configures a Setup.
@@ -62,6 +63,10 @@ type SetupConfig struct {
 	// Providers is the vault process's provider setup (P2-2w c4e). Nil
 	// lists no provider and refuses every key.
 	Providers Providers
+	// SignIn starts a provider's plan sign-in (c4e2). Nil, or a provider
+	// it is not Ready for, lists that provider without device code and
+	// refuses its sign-in.
+	SignIn SignIn
 	// Networks lists the home networks the helper sees (P2-2w c4b).
 	// Nil Networks, or an error, answers an empty list.
 	Networks func(ctx context.Context) ([]string, error)
@@ -221,6 +226,8 @@ func (s *Setup) Ops() map[string]sockets.Handler {
 		localapi.OpSetupProviders: s.open(s.providers),
 		localapi.OpSetupAPIKey:    s.open(s.apiKey),
 		localapi.OpSetupPrivateOK: s.open(s.privateOK),
+
+		localapi.OpSetupDeviceCode: s.open(s.deviceCode),
 	}
 }
 

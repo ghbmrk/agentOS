@@ -105,8 +105,10 @@ type Hooks interface {
 	// ConnectAPIKey stores a provider API key in the vault (CRED-5).
 	ConnectAPIKey(id, key string) error
 	// StartDeviceCode begins an OAuth device-code sign-in and returns the
-	// provider's page and the code to enter there.
-	StartDeviceCode(id string) (link, code string, err error)
+	// provider's page, the code to enter there and who issued the code
+	// (§8.1 step 6). ErrSignInBusy while that provider's last sign-in
+	// still waits for the owner.
+	StartDeviceCode(id string) (link, code, from string, err error)
 	// SetPrivateOK records whether a provider may see private data
 	// (CAP-9), as the owner answered at connection.
 	SetPrivateOK(id string, ok bool) error
@@ -192,6 +194,57 @@ func (f FileStore) Save(s SetupState) error {
 	return durable.WriteFile(f.Path, b, 0o600)
 }
 
+// HeldStore keeps every field of SetupState in Inner but Unsaved, which it
+// also writes to its own file at Path (#1264 c4e2b, ONB-private-save-fail
+// s3). A private-content answer the vault did not record then outlives a
+// reboot of the box while the rest of setup's progress stays in memory
+// (L18): the file holds provider IDs and yes/no answers, never the
+// owner's number or phone. agentosd's owed record (#1544) cannot cover an
+// answer posted while its socket is down, since agentosd never heard it.
+type HeldStore struct {
+	Inner SetupStore
+	Path  string
+}
+
+// Load is Inner's state with Unsaved read from Path. An unreadable file
+// fails the load, so the page does not start and finish over a hold it
+// lost.
+func (h HeldStore) Load() (SetupState, error) {
+	s, err := h.Inner.Load()
+	if err != nil {
+		return s, err
+	}
+	b, err := os.ReadFile(h.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return s, nil
+	}
+	if err != nil {
+		return s, err
+	}
+	var held map[string]bool
+	if err := json.Unmarshal(b, &held); err != nil {
+		return s, fmt.Errorf("held answers %s: %w", h.Path, err)
+	}
+	if len(held) > 0 {
+		s.Unsaved = held
+	}
+	return s, nil
+}
+
+// Save writes Unsaved to Path, replaced durably, before Inner saves, so a
+// hold is on disk before the page shows it and a cleared hold stays
+// cleared.
+func (h HeldStore) Save(s SetupState) error {
+	b, err := json.Marshal(s.Unsaved)
+	if err != nil {
+		return err
+	}
+	if err := durable.WriteFile(h.Path, b, 0o600); err != nil {
+		return err
+	}
+	return h.Inner.Save(s)
+}
+
 // Pairing and enrollment limits.
 // Pairing and enrollment limits.
 const (
@@ -264,6 +317,9 @@ var (
 	ErrKeyNotTaken = errors.New("the vault does not take that provider or key")
 	// ErrSetupClosed: setup is closed, so no step can store a key.
 	ErrSetupClosed = errors.New("setup is closed")
+	// ErrSignInBusy: the provider's last device-code sign-in still waits
+	// for the owner, so no second one starts.
+	ErrSignInBusy = errors.New("a sign-in is still waiting")
 )
 
 // replaceCodesNote is the codes step's note after the vault voided the code
@@ -321,7 +377,7 @@ type setup struct {
 	claimCode    string
 	claimExpires time.Time
 	claimTries   int
-	device       map[string][2]string // provider -> link, code
+	device       map[string][3]string // provider -> link, code, issuer
 	// answer is the owner's private-content answer from a Connect AI form
 	// that did not go through, keyed by form ("ai-key openai"), so the
 	// box comes back as the owner left it (U-4).
@@ -334,7 +390,7 @@ type setup struct {
 }
 
 func newSetup(s *Server, st SetupState) *setup {
-	return &setup{s: s, st: st, pair: map[string]string{}, device: map[string][2]string{}, answer: map[string]bool{}, err: map[string]string{}, busy: map[string]bool{}}
+	return &setup{s: s, st: st, pair: map[string]string{}, device: map[string][3]string{}, answer: map[string]bool{}, err: map[string]string{}, busy: map[string]bool{}}
 }
 
 func (u *setup) done() bool { u.mu.Lock(); defer u.mu.Unlock(); return u.st.Done }
@@ -503,7 +559,7 @@ type setupView struct {
 	CardRestart string
 	Defaults    string
 	Providers   []Provider
-	Device      map[string][2]string
+	Device      map[string][3]string
 	// Plan and Key are each provider's private-content box on its plan
 	// sign-in and API key forms.
 	Plan, Key map[string]privateBox
@@ -537,7 +593,7 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	v := setupView{Progress: p, Defaults: u.s.cfg.Defaults, Device: map[string][2]string{}}
+	v := setupView{Progress: p, Defaults: u.s.cfg.Defaults, Device: map[string][3]string{}}
 	var err error
 	u.mu.Lock()
 	v.Step = u.stepLocked(p)
@@ -966,7 +1022,7 @@ func (u *setup) restart(r *http.Request, key string) error {
 	u.gen++
 	u.pair, u.pairOrder = map[string]string{}, nil
 	u.claimCode, u.numCode, u.numTo, u.numDevice = "", "", "", ""
-	u.device, u.answer = map[string][2]string{}, map[string]bool{}
+	u.device, u.answer = map[string][3]string{}, map[string]bool{}
 	return u.save(func(s *SetupState) {
 		s.Owner, s.Device, s.Codes, s.Recovery, s.Host, s.HostTrusted = "", "", false, false, false, false
 	})
@@ -1280,11 +1336,17 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 		return err
 	}
 	defer u.end(id)
-	link, code, err := u.s.cfg.Hooks.StartDeviceCode(id)
+	link, code, from, err := u.s.cfg.Hooks.StartDeviceCode(id)
 	if err == nil {
-		if pu, perr := url.Parse(link); perr != nil || pu.Scheme != "https" {
+		if pu, perr := url.Parse(link); perr != nil || pu.Scheme != "https" || pu.Host == "" {
 			err = errors.New("not https")
+		} else if from == "" {
+			err = errors.New("no issuer") // the page names who sent the code (§8.1 step 6)
 		}
+	}
+	if errors.Is(err, ErrSignInBusy) {
+		u.keepAnswer(r, "ai-device", id)
+		return errors.New("A sign-in with that provider is still waiting. Enter its code on the provider's page, or try again once the code expires.")
 	}
 	if err != nil {
 		u.keepAnswer(r, "ai-device", id)
@@ -1297,7 +1359,7 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 		return err
 	}
 	u.mu.Lock()
-	u.device[id] = [2]string{link, code}
+	u.device[id] = [3]string{link, code, from}
 	u.mu.Unlock()
 	return nil
 }

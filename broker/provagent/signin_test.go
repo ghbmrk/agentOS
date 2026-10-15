@@ -37,6 +37,7 @@ func signInDecl() Declaration {
 	d.SignInArgv = []string{"stubcli", "login", "--device-auth"}
 	d.SignInLinks = []string{fwdLink, ownLink}
 	d.SignInPage = ownLink
+	d.SignInFrom = "Stub"
 	return d
 }
 
@@ -248,6 +249,47 @@ func TestONB3SignInRefusals(t *testing.T) {
 	}
 }
 
+// CanSignIn is StartSignIn's checks short of the busy claim: the setup page
+// offers a sign-in only when one would start (ONB-3, c4e2b).
+func TestONB3CanSignInFollowsTheGate(t *testing.T) {
+	g := newSignRig(printed)
+	if !g.r.CanSignIn("stub") {
+		t.Error("an open gate offers no sign-in")
+	}
+	for name, f := range map[string]func(r *Runner){
+		"unpinned image": func(r *Runner) { r.ImageVersion = func(string) string { return "" } },
+		"no version":     func(r *Runner) { r.ImageVersion = nil },
+		"no route mark":  func(r *Runner) { r.SignInFor = nil },
+		"no login check": func(r *Runner) { r.HasLogin = nil },
+		"incomplete": func(r *Runner) {
+			d := r.Decls["stub"]
+			d.Q = Qualification{Verdict: Allowed}
+			r.Decls["stub"] = d
+		},
+	} {
+		g := newSignRig(printed)
+		f(g.r)
+		if g.r.CanSignIn("stub") {
+			t.Errorf("%s: offered", name)
+		}
+	}
+	for _, p := range []string{"plain", "missing"} {
+		if g.r.CanSignIn(p) {
+			t.Errorf("%s: offered", p)
+		}
+	}
+	// The shipped Codex route stays closed until #809 completes its record
+	// and #1877 pins its image: no offer, so the page fails closed.
+	r := &Runner{Decls: Builtins(), ImageVersion: func(string) string { return "" },
+		SignInFor: func(string) {}, HasLogin: func(string) bool { return false }}
+	if r.CanSignIn("codex") {
+		t.Error("codex offered before its record is complete")
+	}
+	if len(g.h.created) != 0 {
+		t.Error("CanSignIn created a worker")
+	}
+}
+
 func TestONB3SignInPromptReadsOnlyTheDeclaredLink(t *testing.T) {
 	d := signInDecl()
 	for in, want := range map[string]string{
@@ -291,6 +333,7 @@ func TestONB3SignInDeclarationIsChecked(t *testing.T) {
 		"no links":      func(d *Declaration) { d.SignInLinks = nil },
 		"http page":     func(d *Declaration) { d.SignInPage = fwdLink },
 		"page unlisted": func(d *Declaration) { d.SignInPage = "https://other.test/device" },
+		"no issuer":     func(d *Declaration) { d.SignInFrom = "" },
 		"credential":    func(d *Declaration) { d.SignInArgv = append(d.SignInArgv, "sk-"+strings.Repeat("a", 20)) },
 	} {
 		d := signInDecl()
