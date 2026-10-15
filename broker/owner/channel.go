@@ -155,13 +155,17 @@ type Channel struct {
 	cfg  Config
 	ctrl *control.Handler
 
-	mu       sync.Mutex
-	codes    codes
-	open     map[string]*request
-	reqN     uint64 // requests opened, for their order
-	queued   map[string]*Queued
-	released map[string]time.Time // queued IDs released, for UNDO's reply
-	lateUndo map[string]bool      // released IDs the owner texted UNDO for
+	mu          sync.Mutex
+	sends       sync.WaitGroup // texts started after a local reply (textAfterReply)
+	inlineSends bool           // tests: textAfterReply sends before returning
+	sendTail    chan struct{}  // closed when the latest textAfterReply batch finishes; keeps batches in order
+	sendMu      sync.Mutex     // guards sendTail
+	codes       codes
+	open        map[string]*request
+	reqN        uint64 // requests opened, for their order
+	queued      map[string]*Queued
+	released    map[string]time.Time // queued IDs released, for UNDO's reply
+	lateUndo    map[string]bool      // released IDs the owner texted UNDO for
 	// undo takes an UNDO whose ID the channel does not hold (SetUndo).
 	undo atomic.Pointer[UndoHook]
 	// current confirms a held text's subjects at send (SetCurrent).
