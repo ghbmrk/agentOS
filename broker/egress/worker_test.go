@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -818,5 +820,58 @@ func TestSignInLink(t *testing.T) {
 		if _, _, err := route.SignInLink("https://auth.openai.com/codex/device", code); err == nil {
 			t.Fatalf("code %q passed", code)
 		}
+	}
+}
+
+// The broker opens and closes a provider worker's route over the vault
+// process's control socket; a refusal is an error, so the machine does not
+// start without its route (A14, RES-5).
+func TestA14RouteControlOpensAndClosesOverTheSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "p.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var calls []string
+	refuse := false
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery)
+		if refuse {
+			http.Error(w, "locked", http.StatusServiceUnavailable)
+			return
+		}
+		if r.URL.Path == "/open" {
+			io.WriteString(w, `{"dir":"/run/x/pw-a"}`)
+		}
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	c := RouteControl{Socket: sock}
+	got, err := c.Open("pw-a")
+	if err != nil || got != "/run/x/pw-a" {
+		t.Fatalf("open: %q, %v", got, err)
+	}
+	c.Close("pw-a")
+	mu.Lock()
+	want := []string{"POST /open?machine=pw-a", "POST /close?machine=pw-a"}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls %v, want %v", calls, want)
+	}
+	refuse = true
+	mu.Unlock()
+	if _, err := c.Open("pw-a"); err == nil {
+		t.Fatal("a refused open returned no error")
+	}
+	if _, err := (RouteControl{Socket: filepath.Join(dir, "none.sock")}).Open("pw-a"); err == nil {
+		t.Fatal("an unreachable control socket returned no error")
 	}
 }

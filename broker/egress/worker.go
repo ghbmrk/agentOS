@@ -2,10 +2,12 @@ package egress
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -1008,4 +1010,49 @@ func set(list []string) map[string]bool {
 		m[v] = true
 	}
 	return m
+}
+
+// RouteControl is the broker's client of the vault process's provider
+// control socket (agentos-egress). It is a vm.Services: opening a provider
+// worker's services opens its route socket and returns the directory that
+// holds only that socket, which the machine mounts at /run/agentos; closing
+// removes it. An open that is refused (vault locked, not a provider worker)
+// is an error, so the worker does not start without its route.
+type RouteControl struct{ Socket string }
+
+func (c RouteControl) do(verb, id string) (*http.Response, error) {
+	cl := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", c.Socket)
+		}},
+	}
+	return cl.Post("http://egress/"+verb+"?machine="+url.QueryEscape(id), "text/plain", nil)
+}
+
+// Open opens id's route and returns its directory.
+func (c RouteControl) Open(id string) (string, error) {
+	resp, err := c.do("open", id)
+	if err != nil {
+		return "", fmt.Errorf("worker route for %s: %w", id, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("worker route for %s: %s", id, strings.TrimSpace(string(body)))
+	}
+	var out struct{ Dir string }
+	if err := json.Unmarshal(body, &out); err != nil || out.Dir == "" {
+		return "", fmt.Errorf("worker route for %s: unreadable reply", id)
+	}
+	return out.Dir, nil
+}
+
+// Close closes id's route; a failure leaves the route to the vault
+// process's own shutdown.
+func (c RouteControl) Close(id string) {
+	if resp, err := c.do("close", id); err == nil {
+		resp.Body.Close()
+	}
 }

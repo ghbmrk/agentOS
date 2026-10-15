@@ -255,6 +255,21 @@ class ManagedConfigTest(unittest.TestCase):
                 mutate(cfg)
                 self.assertNotEqual(hosted_tool_problems(cfg), [])
 
+    # REQ: CRED-5, A14, CAP-11
+    def test_launch_starts_the_forwarder_that_base_url_and_refresh_name(self):
+        launch = json.loads(LAUNCH.read_text())
+        wrap = launch["wrap"]
+        self.assertEqual(wrap[0], "/usr/local/bin/agentos-codex-forwarder")
+        self.assertEqual(wrap[-1], "--")
+        opts = dict(zip(wrap[1:-1:2], wrap[2:-1:2]))
+        self.assertEqual(opts, {"-listen": "127.0.0.1:18432", "-socket": "/run/agentos/route.sock"})
+        cfg = tomllib.loads((CODEX / "managed_config.toml").read_text())
+        self.assertEqual(cfg["model_provider"], "agentos")
+        base = cfg["model_providers"]["agentos"]["base_url"]
+        self.assertTrue(base.startswith("http://" + opts["-listen"] + "/"), base)
+        env = dict(e.split("=", 1) for e in launch["env"])
+        self.assertTrue(env["CODEX_REFRESH_TOKEN_URL_OVERRIDE"].startswith("http://" + opts["-listen"] + "/"))
+
     # REQ: CRED-5, CAP-11
     def test_launch_points_refresh_at_forwarder_and_runs_headless(self):
         launch = json.loads(LAUNCH.read_text())
