@@ -22,6 +22,8 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - First line `Verdict: accept|fix-list|reject`; any verdict but accept adds `Cause: spec-gap|brief-gap|defect|scope`. Each point cites a requirement ID or a concrete defect and carries its class (OPERATING §4). Last line: the PR's next step and the reviews still owed.
 - A point outside the cited IDs is `release` or `later`, never a blocker. The release findings from one PR's reviews make one follow-up brief.
 - Review depth follows the risk tier `python3 tools/risk_tier.py --git origin/main HEAD` prints; the stages each tier needs are in OPERATING §3–4. Tier A needs the strongest model and an explicit threat check.
+- **Records ride in the feature PR** (RECORDS-INLINE, #1816). The verdict stays the PR's review comment, and the review's `reviews/<lens>/YYYY-MM-DD-pr<N>.md` file is committed to the same PR before it merges (`tools/premerge.py` ignores record files). No separate records PR; the daily `records` batch is only the fallback for comments that missed their PR.
+- **The last accept arms the merge** (ARM-AT-ACCEPT, #1819). The session that posts the last required accept on a green head arms auto-merge itself; there is no merge worker. A PR that loosens Claude's permissions or review goes to Mark.
 - Each review runs in a new session. There are no standing reviewer or lens sessions; lens memory lives in DECISIONS.md and `reviews/<lens>/README.md`.
 - A kind of finding seen on a second PR becomes a lint rule, test or CI check in the next package that touches the area, listed in the lens README (OPERATING §4).
 

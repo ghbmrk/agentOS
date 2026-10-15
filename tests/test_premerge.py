@@ -59,6 +59,23 @@ class PremergeTest(unittest.TestCase):
         git(self.r, "merge", "-q", "--no-edit", "main")
         self.assertEqual(self.check(reviewed), [])
 
+    def test_a_review_record_committed_after_the_accept_is_same(self):
+        # RECORDS-INLINE (#1816): the lens records ride in the feature PR, so adding one after
+        # the accept is not a change to what was reviewed.
+        reviewed = self.pr()
+        (self.r / "reviews/l3").mkdir(parents=True)
+        self.write("reviews/l3/2026-10-15-pr12.md", "# L3\n\nRecord: PR #12\n")
+        self.commit("record")
+        self.assertEqual(self.check(reviewed), [])
+
+    def test_only_record_paths_are_exempt(self):
+        reviewed = self.pr()
+        (self.r / "reviews/l3").mkdir(parents=True)
+        self.write("reviews/l3/README.md", "changed\n")
+        self.write("reviews/l3/notes.md", "changed\n")
+        self.commit("not records")
+        self.assertEqual(self.check(reviewed), ["reviews/l3/README.md", "reviews/l3/notes.md"])
+
     def test_a_later_push_names_the_changed_file(self):
         reviewed = self.pr()
         self.write("b.txt", "b changed\n")

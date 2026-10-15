@@ -18,6 +18,9 @@ import sys
 # Pinned so local config (renames, algorithm, external or textconv drivers, colour) cannot change the bytes.
 DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--binary", "--full-index",
         "--diff-algorithm=myers", "--src-prefix=a/", "--dst-prefix=b/"]
+# Lens and L3 records (reviews/<lens>/YYYY-MM-DD-pr<N>.md) ride in the feature PR and are written
+# after the accept they record, so they are not part of the diff that accept reviewed (#1816).
+RECORD = re.compile(r"^reviews/[a-z0-9-]+/\d{4}-\d\d-\d\d-pr\d+\.md$")
 HUNK = re.compile(rb"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@.*$")
 
 
@@ -33,7 +36,7 @@ def _fingerprint(patch):
 def _ids(cwd, base, sha):
     out = {}
     for f in _git(cwd, *DIFF, "--name-only", "-z", f"{base}...{sha}").decode(errors="surrogateescape").split("\0"):
-        if f:
+        if f and not RECORD.match(f):
             out[f] = _fingerprint(_git(cwd, *DIFF, f"{base}...{sha}", "--", f":(literal){f}"))
     return out
 

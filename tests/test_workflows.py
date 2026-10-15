@@ -61,6 +61,16 @@ class WorkflowTest(unittest.TestCase):
             self.assertIn('gh workflow run ci.yml --ref "$BRANCH"', text, name)
             self.assertIn('gh pr merge "$BRANCH" --auto --squash', text, name)
 
+    def test_records_batch_runs_at_most_daily(self):
+        # RECORDS-INLINE (#1816): records ride in their feature PR; the bot batch is only the
+        # fallback, so it runs on a daily schedule or by hand, never on every push to main.
+        text = (WORKFLOWS / "records.yml").read_text()
+        on = re.search(r"^on:\n((?:[ \t]+.*\n)+)", text, re.M).group(1)
+        self.assertRegex(on, r"(?m)^\s+schedule:\s*$")
+        self.assertRegex(on, r"cron:\s*'\d+ \d+ \* \* \*'")
+        self.assertRegex(on, r"(?m)^\s+workflow_dispatch:")
+        self.assertNotRegex(on, r"(?m)^\s+push:")
+
     def test_bot_token_jobs_run_in_the_bot_environment(self):
         # BOT_PR_TOKEN is a `bot` environment secret restricted to main (#1691, #1769), so every
         # job that can write contents must name that environment, and nothing else names it.
