@@ -64,7 +64,7 @@ func controlErr(log []modem.SMS, from int) error {
 	status, others, toStranger := controlResult(log, from)
 	switch {
 	case toStranger > 0:
-		return fmt.Errorf("the box sent %d text(s) to an unpaired number", toStranger)
+		return fmt.Errorf("%d text(s) went to an unpaired number", toStranger)
 	case !status && len(others) > 0:
 		return fmt.Errorf("no status reply to the paired number; got %s", strings.Join(others, ","))
 	case !status:
