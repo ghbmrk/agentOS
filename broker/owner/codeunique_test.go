@@ -3,6 +3,7 @@ package owner
 import (
 	"crypto/rand"
 	"io"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -108,6 +109,13 @@ func TestIDLessYesApprovesNamedRequestOnly(t *testing.T) {
 		t.Fatalf("code of %s is %q, want 065793", b, cb)
 	}
 	r.decisions()
+	// A code that names neither request binds to none of them.
+	if got := r.say("YES 999999"); !strings.HasPrefix(got, "Wrong code.") {
+		t.Fatalf("YES 999999: %q, want a reply starting \"Wrong code.\"", got)
+	}
+	if ds := r.decisions(); len(ds) != 0 {
+		t.Fatalf("YES 999999 recorded decisions %+v, want none", ds)
+	}
 	if got := r.say("YES 065793"); got != "Approved "+b+"." {
 		t.Fatalf("YES 065793: %q, want approval of %s", got, b)
 	}
