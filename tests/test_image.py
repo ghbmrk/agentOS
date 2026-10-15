@@ -5,6 +5,7 @@
 import ast
 import base64
 import contextlib
+import errno
 import json
 import configparser
 import io
@@ -2361,7 +2362,7 @@ class ConfFilesTest(unittest.TestCase):
     def test_without_the_default_deny_the_box_links_pass(self):
         # The mutant: drop the default deny, and every bypass passes the link rule (the '..', world-
         # writable and SERVICE_DIRS rules do not see them).
-        m = self.mutant('    if path.startswith("/") and rel.split("/", 1)[0] not in BOX_MOUNTS:\n',
+        m = self.mutant('    if path.startswith("/") and (made or rel.split("/", 1)[0] not in BOX_MOUNTS):\n',
                         "    if False:\n")
         self.box_tree()
         for target in self.BOX_BYPASSES:
@@ -2939,7 +2940,10 @@ class TmpfilesTest(unittest.TestCase):
                    "L /etc/y - - - - /proc/self/mounts", "L /etc/mtab - - - - /proc/self/root",
                    "L /etc/mtab - - - - /proc/self"):
             self.assertTrue(self.refused(ln + "\n"), ln)
-        self.assertFalse(self.refused("L /etc/y - - - - /run/agentos\n"))
+        self.assertFalse(self.refused("L /etc/y - - - - /usr/lib/agentos\n"))
+        # #1803: a link tmpfiles.d makes is held to the tree's link rules, so one into /run, which the
+        # box fills at boot, is refused too (TreeLinkTmpfilesTest).
+        self.assertTrue(self.refused("L /etc/y - - - - /run/agentos\n"))
         # Any ".." in a link target or copy source is refused, even a harmless one (#1543 Security B1):
         # the check walks it without links, the box with them. Only TMPFILES_STOCK's lines are exempt.
         for ln in ("L /etc/os-release - - - - ../usr/lib/os-release", "C /opt/x - - - - /usr/share/../share/y",
@@ -3017,6 +3021,254 @@ def reference_tool(case, name):
             case.fail("AGENTOS_REQUIRE_REFERENCE_TOOLS=1 but %s is not installed" % name)
         case.skipTest("%s is not installed; this test is skipped without it" % name)
     return path
+
+
+class TreeLinkTmpfilesTest(unittest.TestCase):
+    """#1803: the link rules hold for links tmpfiles.d makes on the box, for tree links through steps
+    tmpfiles.d makes, for '..' past a box mount in tmpfiles' own resolution, and for steps of the tree
+    whose owner or ACL, not mode, lets someone else write them. Each refused case passed before."""
+    # REQ: HW-1, DEV-2
+
+    RULES = "etc/udev/rules.d"
+    mutant = ConfFilesTest.mutant
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        nodump(self.root)
+        radio(self.root)
+        uplink(self.root)
+        (self.root / "run").mkdir()
+        (self.root / "proc").mkdir()
+        (self.root / "usr/lib/x").mkdir(parents=True)
+        link(self.root, "var/run", "/run")
+        link(self.root, "var/lock", "/run/lock")
+        # The guarded-path and link checks are under test here; TmpfilesAllowTest is the allowlist's.
+        patch = unittest.mock.patch.object(check, "tmpfiles_allow_violations", return_value=[])
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def tmpfiles(self, text):
+        return write(self.root, "usr/lib/tmpfiles.d/x.conf", text)
+
+    def v(self, mod=check):
+        return " | ".join(mod.violations(self.root))
+
+    # (a) A tmpfiles.d L line makes a link on the box, so the tree's link rules apply to it.
+
+    def test_a_tmpfiles_link_into_a_world_writable_or_service_directory_is_refused(self):
+        for ln in ("L /etc/udev/rules.d - - - - /var/tmp", "L+ /etc/udev/rules.d - - - - /var/tmp/r",
+                   "L /etc/udev/rules.d - - - - /tmp", "L /etc/udev/rules.d - - - - /var/lib/agentos-egress",
+                   "L /etc/udev/rules.d - - - - /run/agentos-netjoin/r", "L /etc/x - - - - /home/u",
+                   "L /etc/x - - - - %V", "L /etc/x - - - - /dev/shm"):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("x.conf: line 1: %s; a link to " % ln, self.v())
+                finally:
+                    f.unlink()
+
+    def test_a_tmpfiles_link_into_what_the_box_fills_is_refused(self):
+        # Default deny: /dev/fd/3 is the reader's fd 3. A tmpfiles link under a box mount is made on
+        # the box, after the mount, so unlike a tree link there it is not hidden.
+        for ln in ("L /etc/udev/rules.d - - - - /dev/fd/3", "L /run/x - - - - /dev/fd/4",
+                   "L /etc/y - - - - /run/agentos", "L /var/run/x - - - - /dev/stdin"):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("x.conf: line 1: %s; a link to " % ln, self.v())
+                    self.assertIn("which the box fills at boot", self.v())
+                finally:
+                    f.unlink()
+
+    def test_a_tree_link_through_a_tmpfiles_link_is_refused_twice(self):
+        # The tree link reads a path the tree lacks; tmpfiles.d makes that path a link to fd 3.
+        link(self.root, self.RULES, "/var/lib/x")
+        self.tmpfiles("L /var/lib/x - - - - /dev/fd/3\n")
+        out = self.v()
+        self.assertIn("x.conf: line 1: L /var/lib/x - - - - /dev/fd/3; a link to /dev/fd/3", out)
+        self.assertIn("etc/udev/rules.d: a link to /var/lib/x, through /var/lib/x, which the tree lacks "
+                      "and usr/lib/tmpfiles.d/x.conf line 1 makes a link", out)
+
+    def test_stock_and_allowlisted_tmpfiles_links_pass(self):
+        # Every L line on the allowlist, and Debian's /run/shm alias of /dev/shm (TMPFILES_STOCK).
+        lines = [ln.partition("\t")[2] for ln in (MK / check.TMPFILES_ALLOW).read_text().split("\n")
+                 if re.match(r"[^#\t][^\t]*\tL", ln)]
+        self.assertIn("L /run/shm     -    -    -    -   /dev/shm", lines)
+        for ln in lines + ["L /etc/y - - - - /usr/lib/x", "L /etc/y - - - - /usr/lib/x/y"]:
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertNotIn("x.conf: line", self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_tmpfiles_link_rule_its_links_pass(self):
+        m = self.mutant('            elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):\n',
+                        "            elif False:\n")
+        self.tmpfiles("L /etc/udev/rules.d - - - - /var/tmp\n")
+        self.assertNotIn("x.conf: line", self.v(m))
+        self.assertIn("x.conf: line", self.v())
+
+    # (b) A tree link through a step the tree lacks: tmpfiles.d may make that step.
+
+    def test_a_tree_link_through_a_step_tmpfiles_makes_for_someone_else_is_refused(self):
+        link(self.root, self.RULES, "/opt/nope/x")
+        for ln, how in (("L /opt/nope - - - - /usr/lib", "makes a link"),
+                        ("L+ /opt/* - - - - /usr/lib", "makes a link"),
+                        ("d /opt/nope 1777 root root", "makes mode 1777 for root:root"),
+                        ("D /opt/nope 0755 agentos-egress -", "makes mode 0755 for agentos-egress:-"),
+                        ("d /opt/nope - agentos-egress -", "makes mode - for agentos-egress:-"),
+                        ("d /opt/nope 0775 root agentos", "makes mode 0775 for root:agentos"),
+                        ("d /opt/nope 07x9 root root", "makes with a mode it cannot parse (07x9)"),
+                        ("a+ /opt/nope - - - - u:agentos-egress:rwx", "makes with a POSIX ACL"),
+                        ("d /opt/nope/x 0700 agentos-egress -", "makes mode 0700 for agentos-egress:-")):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /opt/nope/x, through /opt/", self.v())
+                    self.assertIn("usr/lib/tmpfiles.d/x.conf line 1 %s" % how, self.v())
+                finally:
+                    f.unlink()
+
+    def test_a_tree_link_through_a_root_only_step_tmpfiles_makes_passes(self):
+        link(self.root, self.RULES, "/opt/nope/x")
+        for ln in ("d /opt/nope 0755 root root", "d /opt/nope - - -", "d /opt/nope 0775 root root",
+                   "d /opt/nope", "L /opt/other - - - - /var/tmp"):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
+    def test_a_link_into_a_service_users_cache_is_refused(self):
+        # Debian's man-db makes /var/cache/man for the man user at boot, and the tree may lack it.
+        (self.root / "var/cache").mkdir(parents=True)
+        link(self.root, self.RULES, "/var/cache/man/r")
+        self.tmpfiles("d /var/cache/man 0755 man man\n")
+        self.assertIn("etc/udev/rules.d: a link to /var/cache/man/r, through /var/cache/man, which the tree "
+                      "lacks and usr/lib/tmpfiles.d/x.conf line 1 makes mode 0755 for man:man", self.v())
+
+    def test_without_the_tmpfiles_step_rule_the_link_passes(self):
+        m = self.mutant("            for rel_, n, why in tmpfiles_makers(root):\n",
+                        "            for rel_, n, why in []:\n")
+        link(self.root, self.RULES, "/opt/nope/x")
+        self.tmpfiles("d /opt/nope 1777 root root\n")
+        self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    # (c) tmpfiles' own resolution: a '..' after a box mount is the box's to resolve.
+
+    def test_tree_resolve_refuses_a_dotdot_past_a_box_mount(self):
+        link(self.root, "a", "/run/q/../etc")
+        with self.assertRaises(OSError) as e:
+            check.tree_resolve(str(self.root), ["a", "sysctl.d", "x.conf"])
+        self.assertEqual(e.exception.errno, errno.EXDEV)
+        self.assertEqual(check.tree_resolve(str(self.root), ["var", "run", "q"]), ["run", "q"])
+        # tmpfiles_hits takes such a path as one that may reach a guarded one.
+        self.tmpfiles("f /a/sysctl.d/x.conf\n")
+        self.assertIn("x.conf: line 1: f /a/sysctl.d/x.conf; it reaches /proc, /sys", self.v())
+
+    def test_without_the_dotdot_refusal_tree_resolve_pops_it(self):
+        m = self.mutant('        if ".." in p.split("/") + parts[k:]:\n', "        if False:\n")
+        link(self.root, "a", "/run/q/../etc")
+        self.assertEqual(m.tree_resolve(str(self.root), ["a", "x"]), ["run", "etc", "x"])
+
+    # (d) Who can write a step is its owner and ACL as well as its mode.
+
+    def test_a_link_through_a_step_with_a_posix_acl_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        real = check.tree_xattrs
+        for acl in check.ACL_XATTRS:
+            with self.subTest(acl=acl), unittest.mock.patch.object(
+                    check, "tree_xattrs", lambda root, rel, acl=acl: [acl] if rel == "usr/lib/x" else real(root, rel)):
+                self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x, which carries a "
+                              "POSIX ACL (%s)" % acl, self.v())
+        with unittest.mock.patch.object(check, "tree_xattrs", lambda root, rel: ["user.x", "security.selinux"]):
+            self.assertNotIn("etc/udev/rules.d:", self.v())
+
+    def test_a_step_whose_attributes_cannot_be_read_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        def boom(root, rel):
+            raise OSError(errno.EIO, "Input/output error")
+        with unittest.mock.patch.object(check, "tree_xattrs", boom):
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr, which carries a POSIX ACL "
+                          "(unreadable (Input/output error))", self.v())
+
+    def test_tree_xattrs_reads_the_names_and_none_where_unsupported(self):
+        names = check.tree_xattrs(str(self.root), "usr/lib/x")
+        self.assertFalse(set(names) & set(check.ACL_XATTRS))
+        with unittest.mock.patch.object(check.os, "listxattr", side_effect=OSError(errno.ENOTSUP, "no")):
+            self.assertEqual(check.tree_xattrs(str(self.root), "usr/lib/x"), [])
+        with unittest.mock.patch.object(check.os, "listxattr", side_effect=OSError(errno.EIO, "io")):
+            with self.assertRaises(OSError):
+                check.tree_xattrs(str(self.root), "usr/lib/x")
+        with self.assertRaises(FileNotFoundError):
+            check.tree_xattrs(str(self.root), "usr/lib/nope")
+        link(self.root, "usr/lib/l", "/var/tmp")
+        with self.assertRaises(OSError):
+            check.tree_xattrs(str(self.root), "usr/lib/l/x")
+
+    def test_a_link_through_a_step_another_uid_owns_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        owner = check.TREE_OWNER
+        real = check.tree_lstat
+
+        def lstat(root, rel):
+            st = real(root, rel)
+            if rel != "usr/lib/x" or st is None:
+                return st
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, owner + 1000) + tuple(st)[5:])
+        with unittest.mock.patch.object(check, "tree_lstat", lstat):
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x, which uid %d owns"
+                          % (owner + 1000), self.v())
+        self.assertNotIn("etc/udev/rules.d:", self.v())
+
+    def test_without_the_owner_and_acl_rule_those_links_pass(self):
+        m = self.mutant("            if st.st_uid != TREE_OWNER or acl:\n", "            if False:\n")
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        with unittest.mock.patch.object(m, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]):
+            self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+        with unittest.mock.patch.object(check, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]):
+            self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    # SERVICE_DIRS lists every directory a unit's service user owns.
+
+    UNITS = sorted(list((MK / "mkosi.extra/usr/lib/systemd/system").glob("*.service"))
+                   + list((ROOT / "broker/cmd").glob("*/*.service")))
+    UNIT_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "CacheDirectory": "var/cache",
+                 "LogsDirectory": "var/log"}
+
+    def service_dirs_missing(self, service_dirs):
+        out = []
+        for u in self.UNITS:
+            keys = {}
+            for ln in u.read_text().split("\n"):
+                k, _, val = ln.strip().partition("=")
+                keys.setdefault(k.strip(), []).append(val.strip())
+            dyn = (keys.get("DynamicUser") or ["no"])[-1].lower() in ("yes", "true", "1", "on")
+            user = (keys.get("User") or ["root"])[-1]
+            if not dyn and user in ("", "root", "0"):
+                continue
+            for key, top in self.UNIT_DIRS.items():
+                for val in keys.get(key, []):
+                    for d in val.split():
+                        d = top + "/" + d.split(":")[0].strip("/")
+                        if not any(d == s or d.startswith(s + "/") for s in service_dirs):
+                            out.append("%s: %s" % (u.name, d))
+        return out
+
+    def test_every_service_users_directory_is_in_service_dirs(self):
+        self.assertIn("agentos-egress.service", [u.name for u in self.UNITS])
+        self.assertIn("agentos-localui.service", [u.name for u in self.UNITS])
+        self.assertEqual(self.service_dirs_missing(check.SERVICE_DIRS), [])
+        # The check sees a dropped entry.
+        for gone in ("var/lib/agentos-egress", "run/agentos-netjoin", "var/lib/agentos-localui"):
+            with self.subTest(gone=gone):
+                self.assertNotEqual(self.service_dirs_missing([s for s in check.SERVICE_DIRS if s != gone]), [])
 
 
 class ReferenceToolTest(unittest.TestCase):
@@ -3583,13 +3835,13 @@ def fs_offences(source, allowed, readers):
 class TreeAccessTest(unittest.TestCase):
     """#1543 Security delta 4 B1, structurally: three review rounds each found a reader of the image
     tree that skipped the link rule (a dangling link in sysctl.d, then tmpfiles.d, then etc/fstab
-    through pathlib). mkosi.finalize may touch the file system only in the four tree primitives
-    (tree_lstat, tree_listdir, tree_readlink, tree_read), none of which follows a link on the build
-    host, and in the two functions that read the repository's tmpfiles.allow, not the tree. Only
+    through pathlib). mkosi.finalize may touch the file system only in the five tree primitives
+    (tree_lstat, tree_listdir, tree_readlink, tree_read, and tree_xattrs, #1803), none of which follows
+    a link on the build host, and in the two functions that read the repository's tmpfiles.allow, not the tree. Only
     Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
-    ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read",
+    ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
                          "tmpfiles_allow_path", "tmpfiles_allowed"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
