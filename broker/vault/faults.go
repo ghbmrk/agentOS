@@ -29,3 +29,27 @@ func injectedSealFault() error {
 	}
 	return nil
 }
+
+// syncFault is the error InjectSyncFault asks Sync to return. Atomic, so a
+// test may set it while the vault runs.
+var syncFault atomic.Pointer[error]
+
+// InjectSyncFault makes every Sync fail with err, as if the vault file's
+// name were not durable. It is for tests of callers in other packages, and
+// panics outside a test binary. restore puts back the fault that was set
+// before.
+func InjectSyncFault(err error) (restore func()) {
+	if !testing.Testing() {
+		panic("vault: InjectSyncFault outside a test")
+	}
+	prev := syncFault.Swap(&err)
+	return func() { syncFault.Store(prev) }
+}
+
+// injectedSyncFault is the fault set by InjectSyncFault, or nil.
+func injectedSyncFault() error {
+	if p := syncFault.Load(); p != nil {
+		return *p
+	}
+	return nil
+}

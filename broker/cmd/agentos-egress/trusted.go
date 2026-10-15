@@ -823,6 +823,17 @@ func takeLockout(v *vault.Vault, t transport.TPM, id []byte) error {
 			return err
 		}
 	}
+	// The vault file's name must be durable too: a write that landed but
+	// failed its directory sync reports success, and a power cut could undo
+	// it after the TPM took the authorization (#1558). The TPM is still
+	// unchanged here, so a new entry is forgotten again.
+	if err := v.Sync(); err != nil {
+		clear(auth)
+		if !held {
+			v.Delete(name)
+		}
+		return err
+	}
 	err := tpmseal.TakeLockout(t, auth, held)
 	clear(auth)
 	// Forget a new entry only when the TPM certainly never took it: any

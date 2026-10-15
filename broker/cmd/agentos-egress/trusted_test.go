@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
@@ -1230,5 +1232,35 @@ func TestEnrollAfterTheSlotIsDecidedWithoutAPINSaysTheHostIsTrusted(t *testing.T
 	}
 	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 {
 		t.Fatalf("hosts after trust again: %v, %v", hosts, err)
+	}
+}
+
+// REQ: HW-8
+
+// TRUST-lockout-sync (#1558): the lockout authorization is made durable in
+// the vault before the TPM takes it. When the vault file's directory sync
+// fails, the TPM is left alone (the factory-empty lockout password still
+// works) and no entry is kept, so a power cut cannot leave a TPM locked by
+// an authorization nobody has.
+func TestLockoutAuthIsSyncedBeforeTheTPMTakesIt(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	restore := vault.InjectSyncFault(fmt.Errorf("%w: input/output error", durable.ErrDirSync))
+	defer restore()
+	if _, err := r.c.trust(r.code(), "246810"); err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("trust with a failing sync: %v", err)
+	}
+	if r.lockoutEntry() != "" {
+		t.Fatal("a lockout authorization is kept though the TPM never took it")
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("the TPM took the lockout before the vault was synced: %v", err)
+	}
+	restore()
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatalf("trust after the sync works again: %v", err)
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("empty lockout password still resets the PIN guess counter")
 	}
 }

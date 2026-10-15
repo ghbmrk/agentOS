@@ -321,6 +321,21 @@ func (v *Vault) syncDir() error { return syncDir(filepath.Dir(v.path)) }
 
 var syncDir = durable.SyncDir
 
+// Sync makes the vault file's current name durable. A write that lands but
+// fails its directory sync reports success with a warning (#1472), so a
+// caller about to change something outside the vault that depends on an
+// earlier write (the TPM lockout authorization, #1558) calls Sync first and
+// stops on an error: otherwise a power cut could undo the write and leave
+// the only copy of what the outside change needs gone.
+func (v *Vault) Sync() error {
+	if err := injectedSyncFault(); err != nil {
+		return err
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.syncDir()
+}
+
 // OnWarn sets a function that tells the owner about a rollback check that
 // could not finish (V6), such as a counter increment that failed after a
 // write.
