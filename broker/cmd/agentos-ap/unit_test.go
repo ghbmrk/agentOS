@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: DEV-net-h, CH-7
+// REQ: ARC-1, DEV-net-h, CH-7
 
 // The loader runs as root, so its unit bounds what root keeps: the
 // network, firewall and child capabilities only (no CAP_DAC_OVERRIDE), a
@@ -31,9 +31,10 @@ func TestTheUnitIsBounded(t *testing.T) {
 		set[k] = append(set[k], v)
 	}
 	for k, want := range map[string][]string{
-		"Requires":               {"agentos-inbound.service"},
-		"After":                  {"agentos-inbound.service"},
-		"CapabilityBoundingSet":  {"CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH"},
+		"Requires": {"agentos-inbound.service"},
+		// The secrets it hides exist before it starts (#1426).
+		"After":                  {"agentos-inbound.service agentos-egress.service agentosd.service"},
+		"CapabilityBoundingSet":  {"CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_READ_SEARCH CAP_SETPCAP"},
 		"NoNewPrivileges":        {"yes"},
 		"ProtectSystem":          {"strict"},
 		"ReadWritePaths":         {"/var/lib/agentos"},
@@ -48,6 +49,9 @@ func TestTheUnitIsBounded(t *testing.T) {
 		"RuntimeDirectoryMode":   {"0700"},
 		"LimitCORE":              {"0"},
 		"UMask":                  {"0077"},
+		// hostapd runs as its own user (#1426): the loader, still root,
+		// shares that user's group only to hand it hostapd.conf.
+		"SupplementaryGroups": {"agentos-hostapd"},
 	} {
 		if strings.Join(set[k], "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, set[k], want)
@@ -66,5 +70,16 @@ func TestTheUnitIsBounded(t *testing.T) {
 	}
 	if _, ok := set["User"]; ok {
 		t.Error("the loader needs root for nft, systemctl and ip")
+	}
+	// The image creates hostapd's user (#1426); newHostapd fails closed
+	// without it.
+	su, err := os.ReadFile("../../../image/mkosi/mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(strings.Split(string(su), "\n"), func(l string) bool {
+		return strings.HasPrefix(l, "u "+hostapdUser+" - ")
+	}) {
+		t.Errorf("sysusers.d declares no %s user", hostapdUser)
 	}
 }
