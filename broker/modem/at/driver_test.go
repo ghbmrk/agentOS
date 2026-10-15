@@ -3,6 +3,7 @@ package at_test
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"strings"
 	"sync"
@@ -223,6 +224,51 @@ func TestUnreadableAndIncompleteTextsAreDeletedNeverDelivered(t *testing.T) {
 	eventually(t, "both deleted", func() bool { return r.dev.Stored() == 0 })
 	r.advance(11 * time.Minute)
 	eventually(t, "both dropped", func() bool { return r.m.Dropped() == 2 })
+	select {
+	case got := <-r.m.Inbox():
+		t.Fatalf("delivered %q", got.Text)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// clockOnDelete advances the rig's clock as each AT+CMGD goes out: the
+// worst case for a part's expiry, where the clock moves between the
+// modem deleting a part and the driver starting its 10-minute wait.
+type clockOnDelete struct {
+	io.ReadWriteCloser
+	r *rig
+}
+
+func (c clockOnDelete) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "AT+CMGD=") {
+		c.r.advance(11 * time.Minute)
+	}
+	return c.ReadWriteCloser.Write(p)
+}
+
+// An incomplete text's expiry is timed from when its part was read, before
+// the delete: a clock that moves while the delete is in flight still drops
+// it (CH-1; the race behind the CI flake in #1779).
+func TestIncompleteTextExpiresWhenTheClockMovesDuringItsDelete(t *testing.T) {
+	v := vendors[1]
+	r := &rig{t: t, carrier: modem.NewCarrier(), now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)}
+	r.phone = r.carrier.Line(ownerNum)
+	r.dev = atsim.New(v.prof, v.model, r.carrier.Line(boxNum), time.Millisecond)
+	cfg := r.config(v, at.KeysInBand)
+	cfg.Port = clockOnDelete{cfg.Port, r}
+	m, err := at.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.m = m
+	t.Cleanup(func() { _ = m.Close() })
+	parts, err := at.EncodeDeliver(ownerNum, strings.Repeat("YES K3 ", 40), 9)
+	if err != nil || len(parts) != 2 {
+		t.Fatal(len(parts), err)
+	}
+	r.dev.StorePDU(parts[0]) // part 2 never comes
+	eventually(t, "deleted", func() bool { return r.dev.Stored() == 0 })
+	eventually(t, "dropped", func() bool { return r.m.Dropped() == 1 })
 	select {
 	case got := <-r.m.Inbox():
 		t.Fatalf("delivered %q", got.Text)

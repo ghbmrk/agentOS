@@ -648,7 +648,7 @@ func main() {
 		// A SIM the owner adopts on the page, with a code (P2-2w d2b), is
 		// recorded where the bridge reads it at its next open.
 		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles)})
-		cfg.Modem, cfg.OwnerOps = link, link.Ops()
+		cfg.Modem, cfg.OwnerOps, cfg.OwnerDrainOps, cfg.OwnerDrainLive = link, link.Ops(), modemlink.DrainOps(), link.Bridged
 		if cfg.PageSocket != nil {
 			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
 		}
