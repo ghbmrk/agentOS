@@ -972,7 +972,6 @@ func (c *Channel) Run(ctx context.Context) error {
 	}
 	c.Boot()
 	var wg sync.WaitGroup
-	defer c.drainSends(sendDrain)
 	defer wg.Wait()
 	send := func(to string, rs []string) {
 		for _, r := range rs {

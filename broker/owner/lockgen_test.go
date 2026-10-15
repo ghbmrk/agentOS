@@ -152,7 +152,7 @@ func TestLocalAnswerRepliesBeforeItsTextIsSent(t *testing.T) {
 	r.ch.WaitSends()
 }
 
-// Run drains texts in flight on shutdown (drainSends), up to its bound.
+// The shutdown drain (DrainSends) waits for texts in flight, up to its bound.
 func TestShutdownDrainWaitsForTextsInFlightUpToItsBound(t *testing.T) {
 	r := newRig(t, nil)
 	r.async = true

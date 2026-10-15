@@ -155,8 +155,8 @@ func (c *Channel) textAfterReply(alerts []string, signIn string, n, m int, now t
 	}()
 }
 
-// sendDrain bounds how long Run, on shutdown, waits for texts that
-// textAfterReply started; a modem send can take 220 s, so the wait is
+// sendDrain bounds how long agentosd, on shutdown, waits for texts that
+// textAfterReply started (DrainSends); a modem send can take 220 s, so the wait is
 // shorter. What is not sent by then is retried after the restart only where
 // a note is saved (the sign-in text); alerts are lost, as a crash would lose
 // them.
@@ -174,6 +174,11 @@ func (c *Channel) drainSends(d time.Duration) {
 	case <-t.C:
 	}
 }
+
+// DrainSends waits up to sendDrain for the texts textAfterReply started.
+// agentosd calls it on shutdown once the page socket has closed, so no
+// new text starts during it, and before the process exits (O34).
+func (c *Channel) DrainSends() { c.drainSends(sendDrain) }
 
 // WaitSends returns once every text started by textAfterReply has finished.
 func (c *Channel) WaitSends() { c.sends.Wait() }

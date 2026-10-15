@@ -49,6 +49,9 @@ func startWith(t *testing.T, dir string, mod func(*Config)) (context.CancelFunc,
 		cancel()
 		t.Fatal(err)
 	}
+	// Stop and wait before the test's directories go: a text a page call
+	// started after its reply may still write owner state (owner O34).
+	t.Cleanup(func() { cancel(); d.Wait() })
 	return cancel, d
 }
 

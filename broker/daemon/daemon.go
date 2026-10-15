@@ -480,6 +480,13 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	go settleLoop(ctx, eng, settleEvery, gate.Dispatch)
 	go func() {
 		srv.Wait()
+		// The sockets are closed, so no page call starts a text now; the
+		// texts a page call started after its reply (lock, wrong code,
+		// sign-in) get up to the owner's drain bound before Wait returns
+		// and agentosd exits (owner O34).
+		if ch != nil {
+			ch.DrainSends()
+		}
 		store.Close()
 		close(d.done)
 	}()
