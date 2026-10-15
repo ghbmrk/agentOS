@@ -514,9 +514,12 @@ func (d *driver) guestTask() error {
 // code, until it is answered; then one STATUS with a code from a window
 // not used before, which must draw the unlock and then the status reply.
 // Only then does the unpaired number text STATUS with a fresh code, and
-// the paired phone texts HELP again as a barrier: texts are read in
-// arrival order, so once that HELP is answered the stranger's text has
-// been read, and anything it drew to either number is in the log.
+// the paired phone texts HELP again as a barrier. Texts are handled in
+// arrival order, but replies are not sent in that order: STATUS and HELP
+// are run routes, each answered from its own goroutine, so a reply the
+// stranger's text drew can land after the barrier's. Once the barrier is
+// answered the stranger's text has been handled, and the step keeps
+// reading the log for settle; any reply to either number then fails it.
 // Probing with HELP first means the code is sent only once texts are
 // read: a code left unread goes stale, and a stale code is a wrong one
 // that counts toward CH-11's lockout.
@@ -578,8 +581,22 @@ func (d *driver) phoneControl() error {
 	if !r.barrier {
 		return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
 	}
+	// A reply drawn by the stranger's text may still be on its way: the
+	// box gives no point after which its run routes have all replied, so
+	// the log is read until settle has passed (await returns early on a
+	// failure).
+	d.await(start, settle, func(phoneRun) bool { return false })
 	return controlErr(d.carrier.Log(), start)
 }
+
+// settle is how long phoneControl keeps reading the log after the
+// barrier's reply. The stranger's text was handled before the barrier's,
+// and STATUS and HELP are answered from memory with no model or network
+// call, so their replies start within milliseconds of each other; the
+// rest is the modem's send and the carrier's delivery, which the step
+// already waits on for the barrier's reply. 15 seconds covers that many
+// times over while adding little to a step that allows minutes per stage.
+const settle = 15 * time.Second
 
 // await reads the log from start each second, for up to limit, until done
 // holds or the run has failed, and returns what it read last.

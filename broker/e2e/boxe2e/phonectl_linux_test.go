@@ -56,10 +56,70 @@ func (done setupPage) RoundTrip(r *http.Request) (*http.Response, error) {
 // channel does and returns the text to pass on.
 type boxLine struct {
 	*modem.Line
-	in chan modem.SMS
+	in   chan modem.SMS
+	hold func(to, text string) // when set, runs before each reply is sent
 }
 
 func (b *boxLine) Inbox() <-chan modem.SMS { return b.in }
+
+func (b *boxLine) Send(to, text string) error {
+	if b.hold != nil {
+		b.hold(to, text)
+	}
+	return b.Line.Send(to, text)
+}
+
+// holdLate holds the second status reply to the paired phone, which in a
+// case that takes the stranger's text as the owner's is the one that text
+// drew, until the barrier's HELP has been answered and the driver's clock
+// has moved 3 s on from then: the reply lands after the barrier's, while
+// the driver still reads the log, as a run route's reply from its own
+// goroutine can on the box.
+func holdLate(ctx context.Context, carrier *modem.Carrier, clk *fakeClock) func(to, text string) {
+	var mu sync.Mutex
+	statuses := 0
+	return func(to, text string) {
+		if to != phoneNum || replyKind(text) != "status" {
+			return
+		}
+		mu.Lock()
+		statuses++
+		n := statuses
+		mu.Unlock()
+		if n != 2 {
+			return
+		}
+		var since time.Time
+		for end := time.Now().Add(10 * time.Second); time.Now().Before(end); {
+			if since.IsZero() && barrierAnswered(carrier.Log()) {
+				since = clk.now()
+			}
+			if !since.IsZero() && !clk.now().Before(since.Add(3*time.Second)) {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+}
+
+// barrierAnswered reports whether the box has answered HELP to the paired
+// phone after the stranger's text.
+func barrierAnswered(log []modem.SMS) bool {
+	stranger := false
+	for _, m := range log {
+		switch {
+		case m.From == strangerNum:
+			stranger = true
+		case stranger && m.From == boxNum && m.To == phoneNum && replyKind(m.Text) == "help":
+			return true
+		}
+	}
+	return false
+}
 
 var codeRe = regexp.MustCompile(`^STATUS ([0-9]{6})$`)
 
@@ -79,6 +139,7 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 		enrolled bool
 		done     setupPage
 		mutate   func(l *modem.Line, c *modem.Carrier, m modem.SMS) modem.SMS
+		late     bool   // holdLate holds the reply the stranger's text drew
 		want     string // "" passes
 	}{
 		{name: "pass", st: owner.State{LastStep: step}, enrolled: true, done: true},
@@ -91,6 +152,13 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 				return m
 			}, want: "1 text(s) went to the unpaired number"},
 		{name: "stranger taken as the owner", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			mutate: func(_ *modem.Line, c *modem.Carrier, m modem.SMS) modem.SMS {
+				if m.From == strangerNum {
+					m.From = phoneNum
+				}
+				return m
+			}, want: "unpaired number's text drew status"},
+		{name: "stranger taken as the owner, reply after the barrier's", st: owner.State{LastStep: step}, enrolled: true, done: true, late: true,
 			mutate: func(_ *modem.Line, c *modem.Carrier, m modem.SMS) modem.SMS {
 				if m.From == strangerNum {
 					m.From = phoneNum
@@ -124,6 +192,9 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 			box := &boxLine{Line: line, in: make(chan modem.SMS, 64)}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			if c.late {
+				box.hold = holdLate(ctx, carrier, clk)
+			}
 			go func() {
 				for {
 					select {
@@ -134,6 +205,10 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 							n := len(carrier.Log())
 							m = c.mutate(line, carrier, m)
 							box.in <- m
+							if c.late {
+								// The held reply must not be waited for.
+								continue
+							}
 							// The channel reads in arrival order: let the
 							// mutant's text be answered before the next.
 							for end := time.Now().Add(2 * time.Second); time.Now().Before(end) && !answered(carrier.Log()[n:]); {
