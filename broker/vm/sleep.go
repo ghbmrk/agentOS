@@ -24,6 +24,9 @@ func (m *Manager) CheckpointAndStop(ctx context.Context, id string) (Snapshot, e
 	if strings.HasPrefix(id, EvalPrefix) {
 		return Snapshot{}, fmt.Errorf("vm: replay machine %s cannot sleep", id)
 	}
+	if err := refuseProvider(id); err != nil {
+		return Snapshot{}, err
+	}
 	mc, err := m.get(id)
 	if err != nil {
 		return Snapshot{}, err
