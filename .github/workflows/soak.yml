@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 345 # under GitHub's 6h job limit
     strategy:
       fail-fast: false
-      max-parallel: 6 # leaves runners for pull-request CI (18 targets: three waves)
+      max-parallel: 3 # leaves runners for pull-request CI (18 targets: six waves, about 18 h)
       matrix:
         include:
           - { pkg: owner, target: FuzzParseReply }
@@ -91,6 +91,7 @@ jobs:
     timeout-minutes: 345
     strategy:
       fail-fast: false
+      max-parallel: 1 # with fuzz's 3, at most 4 runners at once; two shards take about 9 h
       matrix:
         include:
           - { name: race, flags: "-race" }

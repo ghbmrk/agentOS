@@ -160,7 +160,10 @@ func (m *Manager) ForkSiblings(id string) (string, []string, error) {
 // is held by a command, snapshot or start), without waiting.
 func (m *Manager) TryGet(id string) (Machine, bool) {
 	mc, err := m.get(id)
-	if err != nil || !mc.mu.TryLock() {
+	if err != nil {
+		return Machine{}, false
+	}
+	if busy, err := mc.tryLockLive(); busy || err != nil {
 		return Machine{}, false
 	}
 	defer mc.mu.Unlock()
@@ -188,7 +191,9 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	if err != nil {
 		return ExecResult{}, err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return ExecResult{}, err
+	}
 	defer mc.mu.Unlock()
 	if mc.State == Preempted {
 		return ExecResult{}, fmt.Errorf("%w: %s", ErrPreempted, id)
@@ -278,8 +283,12 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	}
 	// A worker whose lock is held is in use (a command runs): parking
 	// would wait out the command, so it is refused instead.
-	if !mc.mu.TryLock() {
+	busy, err := mc.tryLockLive()
+	if busy {
 		return Snapshot{}, fmt.Errorf("%w: %s", ErrBusy, id)
+	}
+	if err != nil {
+		return Snapshot{}, err
 	}
 	if mc.State != Running {
 		mc.mu.Unlock()
@@ -307,7 +316,7 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	stopped := mc.State != Running
 	mc.mu.Unlock()
 	if stopped {
-		m.cfg.Admit.Release(id)
+		m.release(mc)
 	}
 	return s, err
 }
@@ -382,7 +391,9 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 	}
 	// A command in the worker ends: the deletion stops the worker anyway
 	// (L3 nit on #166).
-	mc.lockEndingExec()
+	if err := mc.lockEndingExecLive(); err != nil {
+		return DeleteReport{}, err
+	}
 	was := mc.State
 	rep, stopped, err := m.deleteLocked(ctx, mc, d)
 	mc.mu.Unlock()
@@ -394,14 +405,17 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 		err = fmt.Errorf("%s: %w", id, overlay.ErrDeleteFailed)
 	}
 	if stopped {
-		m.cfg.Admit.Release(id)
+		m.release(mc)
+	}
+	if h := m.afterCheck; h != nil {
+		h(id)
 	}
 	// A preempted worker waits for its own resume, not a deletion's
 	// (security R2 on #166). Admission may have no room now, or STOP may
 	// have come meanwhile; the worker then stays stopped and the deletion
 	// still stands (security F1 on #166).
 	if err == nil && !rep.Over && was == Stopped && !held(d) {
-		rep.Restarted = m.Resume(ctx, id) == nil
+		rep.Restarted = m.resumeOf(ctx, mc) == nil // the handle: never a same-ID successor (L3 B2 on #1575)
 	}
 	return rep, err
 }

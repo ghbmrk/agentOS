@@ -95,6 +95,11 @@ var tools = []map[string]any{
 	},
 }
 
+// heldReason is the guest's text for a request the broker holds back
+// for now. effect_status never runs a request, so the guest is told to
+// repeat it.
+const heldReason = "held by the broker for now (stopped, or another request on the account or with the same effect is unsettled or waiting to go); repeat effect_request with the same request_id later to try it again; effect_status only reports its state"
+
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // nameRE is an account or action name: lowercase ASCII only, so no
@@ -408,8 +413,12 @@ func (p *Plane) callTool(ctx context.Context, m *machine, name string, raw json.
 		}
 		out := state(m.id, name, a.RequestID, st)
 		if held != nil && out.Reason == "" {
+			// Held: STOP, an unsettled request on the account, or
+			// another request with the same effect that is unsettled or
+			// waiting to go. effect_status only reports; repeating the
+			// request is what tries it again (R16).
 			p.cfg.Logf("guest %s: dispatch %s: %v", m.id, id, held)
-			out.Reason = "held by the broker; ask again later with effect_status"
+			out.Reason = heldReason
 		}
 		return out, true, nil
 	case "effect_status":
