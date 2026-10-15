@@ -11,7 +11,9 @@
   DECISIONS.md  a Decision cell over 300 characters links decisions/D-NNN.md (D-056); links resolve
   ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md
   briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4, and
-                none keeps its own `**State:**` line (state lives on the work-item issue)
+                none keeps its own `**State:**` line (state lives on the work-item issue), and each
+                has an `**Acceptance tests:**` line unless listed in tools/brief_acceptance_baseline.txt
+                (FIRST-PASS, #1818)
 
 BOARD.md is generated from the work-item issues (tools/board.py), so its rows are checked there, not here.
 
@@ -68,8 +70,44 @@ def operating_refs(root, files):
                         yield f"{name}:{n}: OPERATING §{num} does not exist"
 
 
+ACCEPTANCE_LINE = re.compile(r"^\s*(?:[-*]\s*)?\*\*Acceptance tests?:?\*\*(.*)$", re.M)
+LIST_ITEM = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+\S")
+
+
+def acceptance_named(text, line):
+    """True when the marker line has text after it, or a list item follows it (OPERATING §5: a line or list)."""
+    if line.group(1).strip().strip(":").strip():
+        return True
+    rest = [l for l in text[line.end():].splitlines() if l.strip()]
+    item = LIST_ITEM.match(rest[0]) if rest else None
+    if not item:
+        return False
+    own = line.group(0).splitlines()[-1]  # the match can start on blank lines before the marker
+    marker = LIST_ITEM.match(own) or re.match(r"^(\s*)[-*]\s*\*\*", own)
+    # A marker that is itself a list item needs a nested (more indented) list, not the next sibling.
+    return not marker or len(item.group(1)) > len(marker.group(1))
+
+
+def brief_baseline(root):
+    f = root / "tools" / "brief_acceptance_baseline.txt"
+    return set(f.read_text().split()) if f.is_file() else set()
+
+
 def briefs(root):
+    legacy = brief_baseline(root)
+    for name in sorted(legacy):
+        if not (root / "briefs" / name).is_file():
+            yield f"tools/brief_acceptance_baseline.txt: {name} has no brief; delete the entry (the baseline only shrinks)"
     for path in sorted((root / "briefs").glob("*.md")):
+        text = path.read_text()
+        line = ACCEPTANCE_LINE.search(text)
+        named = bool(line) and acceptance_named(text, line)
+        if path.name in legacy and named:
+            yield f"tools/brief_acceptance_baseline.txt: {path.name} now has its acceptance tests; delete the entry (the baseline only shrinks)"
+        elif path.name not in legacy and not line:
+            yield f"briefs/{path.name}: no `**Acceptance tests:**` line; name each ID's test up front, or `none: <why>`"
+        elif line and not named:
+            yield f"briefs/{path.name}: empty `**Acceptance tests:**` line; name each ID's test, or `none: <why>`"
         for n, line in enumerate(path.read_text().splitlines(), 1):
             if STATE_LINE.match(line):
                 yield f"briefs/{path.name}:{n}: `**State:**` line; state lives on the work-item issue"
@@ -162,8 +200,25 @@ def lint(root):
             *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files)]
 
 
+def baseline_growth(root, base_file):
+    """Baseline entries the PR added to the list in base_file (the base branch's copy)."""
+    base = set(pathlib.Path(base_file).read_text().split()) if pathlib.Path(base_file).is_file() else set()
+    for name in sorted(brief_baseline(pathlib.Path(root)) - base):
+        yield f"tools/brief_acceptance_baseline.txt: {name} is new in the baseline; the baseline only shrinks, so name the brief's acceptance tests instead"
+
+
 def main(argv):
-    problems = lint(argv[1] if len(argv) > 1 else pathlib.Path(__file__).resolve().parent.parent)
+    args = argv[1:]
+    base = None
+    if "--base-baseline" in args:
+        i = args.index("--base-baseline")
+        if i + 1 >= len(args):
+            print("usage: doclint.py [ROOT] [--base-baseline FILE]", file=sys.stderr)
+            return 2
+        base = args[i + 1]
+        del args[i:i + 2]
+    root = args[0] if args else pathlib.Path(__file__).resolve().parent.parent
+    problems = [*lint(root), *(baseline_growth(root, base) if base else [])]
     for p in problems:
         print(p)
     return 1 if problems else 0

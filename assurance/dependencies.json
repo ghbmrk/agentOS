@@ -4,6 +4,13 @@
     "*agentos*"
   ],
   "endpoints": [],
+  "claim_literals": [
+    {
+      "file": "broker/egress/codexlogin.go",
+      "host": "api.openai.com",
+      "why": "JWT claim key (https://api.openai.com/auth) read and written in the placeholder id_token; never contacted (#1015, CRED-5)."
+    }
+  ],
   "inert_literals": [
     {
       "file": "broker/vendor/rsc.io/qr/png.go",
