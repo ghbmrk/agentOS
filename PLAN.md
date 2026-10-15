@@ -1,4 +1,4 @@
-# AgentOS — Build Plan
+# agentOS — Build Plan
 
 Builds the spec in `SPEC.md` (v0.12 at P0 exit; v0.11 started at `/mnt/project-files/spec/agentos-core-spec-v0.11.md`) with Claude models under a **finite usage budget**, using nested iterative loops.
 Labels: **[Fact]**, **[Inference]**, **[Rec]**, **[Mark]** = needs Mark's hands, money, or decision.
@@ -13,7 +13,7 @@ Labels: **[Fact]**, **[Inference]**, **[Rec]**, **[Mark]** = needs Mark's hands,
 4. **Write as little as possible.** Reuse mature components wherever they meet a requirement; the broker is the only large original component. Every line written is a line to review, test, and maintain within budget.
 5. **Loops need stop rules more than they need intelligence.** An unbounded loop converts budget into nothing. Every loop has a budget cap, a progress test, and an escalation target.
 6. **Independent verification.** The model that built something never approves it. A fresh context, ideally a different model tier, reviews against requirement IDs.
-7. **Dogfood the architecture.** The build harness *is* an early version of AgentOS loop 1 (§11A): journal, candidates, held-out tests, adoption. What's learned building it transfers directly.
+7. **Dogfood the architecture.** The build harness *is* an early version of agentOS loop 1 (§11A): journal, candidates, held-out tests, adoption. What's learned building it transfers directly.
 
 ---
 
@@ -133,7 +133,7 @@ Work packages, in dependency order:
 - Recall index, event bus, compiled skills, attention optimizer (CAP-3–6).
 - Leverage benchmark vs unmodified OpenClaw (A10). **[Mark]** supplies a real recurring workload.
 
-**Dogfood point:** once P3's pipeline works, the L2/L3/L4 harness migrates onto an AgentOS box. From then on, AgentOS helps build AgentOS. [Inference] This should cut later-phase cost; whether it actually does is measured in L4, not assumed.
+**Dogfood point:** once P3's pipeline works, the L2/L3/L4 harness migrates onto an agentOS box. From then on, agentOS helps build agentOS. [Inference] This should cut later-phase cost; whether it actually does is measured in L4, not assumed.
 
 ### P4 — Open source (Gate G5: A12) (≈5%)
 - Hint schema, clean-room builder, leakage audit (OSS-1–7).
