@@ -119,10 +119,11 @@ TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # the release's fuzz manifest, so it is not test-only); .github/ builds the image,
 # gates merges and pushes to main; .claude/ holds agent permissions; tools/ci_scope
 # decides which CI jobs a change skips (CI-docs); tools/g1_scope and its lists decide
-# which paths a PR may touch during the G1 freeze (G1-freeze).
+# which paths a PR may touch during the G1 freeze (G1-freeze); tools/ci_split decides
+# which broker packages each race shard runs and when the fuzz peaks step skips (CI-SHARD).
 TIER_A_PREFIXES = (
     "assurance/", "tools/canary", "tools/depaudit", "tools/risk_tier", "tools/ci_scope",
-    "tools/g1_scope",
+    "tools/g1_scope", "tools/ci_split",
     "image/", ".github/", ".claude/",
 )
 # guest/<name>/<file>: what the guest runs or installs.
