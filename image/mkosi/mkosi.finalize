@@ -116,16 +116,19 @@ SERVICE_DIRS = ("var/lib/agentos-fuzz", "var/lib/agentos-localui", "var/lib/agen
                 "run/user", "var/lib/private",
                 "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap")
 # #1702 (delta 2): the only links the tree may hold into what the box mounts, by the link's path and
-# its exact target, as CI's stock trixie build has them. Anything else that reaches a box mount is
-# refused (box_link): the box makes what is there at boot (/proc/self/root, /proc/<pid>/cwd and
-# /dev/fd are links to wherever the reader is), so where such a link ends is not known at build time.
-# var/lock is the one entry to a world-writable directory (CI's build has the absolute form; a
-# tmpfiles line gives the relative one): the link itself stays root's. A mask (a link to exactly
-# MASK) passes wherever it is.
+# its exact target. Anything else that reaches a box mount is refused (world_writable_link): the box
+# makes what is there at boot (/proc/self/root, /proc/<pid>/cwd and /dev/fd are links to wherever the
+# reader is), so where such a link ends is not known at build time. CI's stock trixie build holds
+# exactly these four (listed from the build, 2acb5843) and four masks: var/lock -> /run/lock,
+# var/run -> /run, etc/mtab -> ../proc/self/mounts and etc/resolv.conf ->
+# ../run/systemd/resolve/stub-resolv.conf. The relative var/lock and var/run forms are trixie's own
+# tmpfiles lines (legacy.conf, debian.conf), so a tree they made passes too. None ends anywhere a
+# user or service user can write: /run/lock is 1777, but the link stays root's and names only it.
+# A mask (a link to exactly MASK) passes wherever it is: /dev/null is the box's own device.
 BOX_LINKS = {"var/lock": ("../run/lock", "/run/lock"),
              "var/run": ("../run", "/run"),
              "etc/mtab": ("../proc/self/mounts",),
-             "etc/resolv.conf": ("../run/systemd/resolve/stub-resolv.conf", "/run/systemd/resolve/stub-resolv.conf")}
+             "etc/resolv.conf": ("../run/systemd/resolve/stub-resolv.conf",)}
 # The systemd configuration this check reads, by its name under each configuration directory.
 # #1543 Security B1: the only links the check follows to a configuration file it reads. A file that is
 # a link to exactly /dev/null is a mask (it reads as nothing), and trixie's merged-/usr /lib is a link
@@ -1541,17 +1544,6 @@ def main():
     root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BUILDROOT")
     if not root:
         sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")
-    # TEMPORARY (#1702 delta 2): list every link that reaches a box mount, to derive BOX_LINKS.
-    diag = []
-    for rel, st in tree_walk(root):
-        if stat.S_ISLNK(st.st_mode) and rel.split("/", 1)[0] not in BOX_MOUNTS:
-            try:
-                p = tree_chase(root, rel, missing_ok=True)[0]
-            except OSError:
-                continue
-            if p.startswith("/"):
-                diag.append("%s -> %s => %s" % (rel, tree_readlink(root, rel), p))
-    print("::notice title=image tree box links (%d)::%s" % (len(diag), "%0A".join(d.replace("%", "%25") for d in diag)))
     v = violations(root)
     for line in v:
         print("image check: " + line)

@@ -2374,7 +2374,7 @@ class ConfFilesTest(unittest.TestCase):
                 ("var/run", "/run/user"), ("var/run", "/sys"), ("etc/run", "/run"),
                 ("etc/resolv.conf", "../run/systemd/resolve/resolv.conf"),
                 ("etc/resolv.conf", "../run/systemd/resolve/stub-resolv.conf/x"),
-                ("etc/resolv.conf", "../run/systemd/x/stub-resolv.conf"), ("etc/resolv2.conf", "/run/systemd/resolve/stub-resolv.conf"),
+                ("etc/resolv.conf", "../run/systemd/x/stub-resolv.conf"), ("etc/resolv.conf", "/run/systemd/resolve/stub-resolv.conf"), ("etc/resolv2.conf", "/run/systemd/resolve/stub-resolv.conf"),
                 ("etc/udev/rules.d/x.rules", "/dev/null/x"), ("etc/udev/rules.d/x.rules", "/dev/zero"),
                 ("etc/udev/rules.d/x.rules", "../../../dev/null")]
         for rel, target in near:
