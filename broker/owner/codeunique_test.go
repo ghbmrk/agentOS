@@ -81,7 +81,45 @@ func TestLowCodeCollisionIsBounded(t *testing.T) {
 	if id, err := r.ch.Request([]Item{lowItem("b")}, 0); err == nil {
 		t.Fatalf("second request %s opened with a colliding code", id)
 	}
-	if n := len(r.ch.open); n != 1 {
-		t.Fatalf("%d requests open, want 1", n)
+	// The refusal leaves no state: no Pending entry a restart would re-issue.
+	r.ch.mu.Lock()
+	open, pending := len(r.ch.open), len(r.ch.codes.st.Pending)
+	r.ch.mu.Unlock()
+	if open != 1 || pending != 1 {
+		t.Fatalf("%d requests open and %d pending, want 1 and 1", open, pending)
+	}
+}
+
+// An ID-less YES <code> with two low-tier requests open approves exactly
+// the one whose code it names and leaves the other open.
+func TestIDLessYesApprovesNamedRequestOnly(t *testing.T) {
+	r := newRig(t, nil)
+	r.edit = func(c *Config) { c.Rand = &codeRand{script: []byte{0, 1}} }
+	r.ch = r.open()
+	a, err := r.ch.Request([]Item{lowItem("a")}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := r.ch.Request([]Item{lowItem("b")}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cb := lowCodeOf(t, r.ch, b); cb != "065793" {
+		t.Fatalf("code of %s is %q, want 065793", b, cb)
+	}
+	r.decisions()
+	if got := r.say("YES 065793"); got != "Approved "+b+"." {
+		t.Fatalf("YES 065793: %q, want approval of %s", got, b)
+	}
+	ds := r.decisions()
+	if len(ds) != 1 || ds[0].Request != b || ds[0].Ref != "b" || !ds[0].Approved {
+		t.Fatalf("decisions %+v, want one approval of %s", ds, b)
+	}
+	r.ch.mu.Lock()
+	_, aOpen := r.ch.open[a]
+	_, bOpen := r.ch.open[b]
+	r.ch.mu.Unlock()
+	if !aOpen || bOpen {
+		t.Fatalf("open after YES: %s=%v %s=%v, want only %s open", a, aOpen, b, bOpen, a)
 	}
 }
