@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -1055,6 +1056,9 @@ func (u *setup) host(r *http.Request, _ string) error {
 		return errors.New("Finish the earlier steps first.")
 	}
 	if err := u.s.cfg.Hooks.TrustHost(trusted); err != nil {
+		// The page shows one text for every cause; the journal keeps the
+		// real one (it holds no secret) for the e2e driver and the owner.
+		log.Printf("localui: setup host hook: %v", err)
 		return errors.New("Could not save. Try again.")
 	}
 	u.mu.Lock()

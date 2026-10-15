@@ -47,3 +47,15 @@ func TestSysrootIsOutsideTheRootOnlyDirectory(t *testing.T) {
 		t.Fatalf("sysroot %s is under the root-only /run/agentos-e2e", sysroot)
 	}
 }
+
+// REQ: HW-10. The steps not driven yet fail with the text the xfail table
+// expects, so they read XFAIL and not FAIL.
+func TestNotDrivenStepsFailWithTheExpectedText(t *testing.T) {
+	d := &driver{}
+	for name, run := range map[string]func() error{"guest-task": d.guestTask, "phone-control": d.phoneControl} {
+		err := run()
+		if err == nil || !strings.HasPrefix(err.Error(), xfail[name].want) {
+			t.Errorf("%s: %v does not start with %q", name, err, xfail[name].want)
+		}
+	}
+}
