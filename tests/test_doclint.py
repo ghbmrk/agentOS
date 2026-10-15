@@ -199,9 +199,32 @@ class LintTest(unittest.TestCase):
 
     # REQ: FIRST-PASS
     def test_empty_acceptance_line_fails(self):
-        for text in ("# A-1\n\n**Acceptance tests:**\n", "# A-1\n\n**Acceptance tests:**   \n"):
+        for text in ("# A-1\n\n**Acceptance tests:**\n", "# A-1\n\n**Acceptance tests:**   \n",
+                     "# A-1\n\n**Acceptance tests:**\t\n", "# A-1\n\n**Acceptance tests:**\n\nGoal.\n",
+                     "# A-1\n\n- **Acceptance tests:**\n- **Goal:** x\n"):
             self.assertEqual(self.lint(**{"briefs/A-1.md": text}),
                              ["briefs/A-1.md: empty `**Acceptance tests:**` line; name each ID's test, or `none: <why>`"])
+
+    # REQ: FIRST-PASS
+    def test_acceptance_tests_as_a_list_pass(self):
+        for text in ("# A-1\n\n**Acceptance tests:**\n- `tests/x.py::a`: catches y\n",
+                     "# A-1\n\n**Acceptance tests:**\n\n* `tests/x.py::a`\n",
+                     "# A-1\n\n**Acceptance tests:**\n1. `tests/x.py::a`\n",
+                     "# A-1\n\n- **Acceptance tests:**\n  - `tests/x.py::a`\n"):
+            self.assertEqual(self.lint(**{"briefs/A-1.md": text}), [], text)
+
+    # REQ: FIRST-PASS
+    def test_baselined_brief_with_a_listed_acceptance_test_must_leave_the_baseline(self):
+        got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**Acceptance tests:**\n- `tests/x.py::a`\n",
+                           "tools/brief_acceptance_baseline.txt": "A-1.md\n"})
+        self.assertEqual(got, ["tools/brief_acceptance_baseline.txt: A-1.md now has its acceptance tests; delete the entry (the baseline only shrinks)"])
+
+    def test_base_baseline_without_a_value_is_a_usage_error(self):
+        r = subprocess.run([sys.executable, str(ROOT / "tools/doclint.py"), "--base-baseline"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("usage: doclint.py", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
     # REQ: FIRST-PASS
     def test_baseline_growth_against_the_base_copy(self):

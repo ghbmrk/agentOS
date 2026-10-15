@@ -71,6 +71,21 @@ def operating_refs(root, files):
 
 
 ACCEPTANCE_LINE = re.compile(r"^\s*(?:[-*]\s*)?\*\*Acceptance tests?:?\*\*(.*)$", re.M)
+LIST_ITEM = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+\S")
+
+
+def acceptance_named(text, line):
+    """True when the marker line has text after it, or a list item follows it (OPERATING §5: a line or list)."""
+    if line.group(1).strip().strip(":").strip():
+        return True
+    rest = [l for l in text[line.end():].splitlines() if l.strip()]
+    item = LIST_ITEM.match(rest[0]) if rest else None
+    if not item:
+        return False
+    own = line.group(0).splitlines()[-1]  # the match can start on blank lines before the marker
+    marker = LIST_ITEM.match(own) or re.match(r"^(\s*)[-*]\s*\*\*", own)
+    # A marker that is itself a list item needs a nested (more indented) list, not the next sibling.
+    return not marker or len(item.group(1)) > len(marker.group(1))
 
 
 def brief_baseline(root):
@@ -84,12 +99,14 @@ def briefs(root):
         if not (root / "briefs" / name).is_file():
             yield f"tools/brief_acceptance_baseline.txt: {name} has no brief; delete the entry (the baseline only shrinks)"
     for path in sorted((root / "briefs").glob("*.md")):
-        line = ACCEPTANCE_LINE.search(path.read_text())
-        if path.name in legacy and line and line.group(1).strip(" :"):
+        text = path.read_text()
+        line = ACCEPTANCE_LINE.search(text)
+        named = bool(line) and acceptance_named(text, line)
+        if path.name in legacy and named:
             yield f"tools/brief_acceptance_baseline.txt: {path.name} now has its acceptance tests; delete the entry (the baseline only shrinks)"
         elif path.name not in legacy and not line:
             yield f"briefs/{path.name}: no `**Acceptance tests:**` line; name each ID's test up front, or `none: <why>`"
-        elif line and not line.group(1).strip(" :"):
+        elif line and not named:
             yield f"briefs/{path.name}: empty `**Acceptance tests:**` line; name each ID's test, or `none: <why>`"
         for n, line in enumerate(path.read_text().splitlines(), 1):
             if STATE_LINE.match(line):
@@ -192,9 +209,14 @@ def baseline_growth(root, base_file):
 
 def main(argv):
     args = argv[1:]
-    base = args[args.index("--base-baseline") + 1] if "--base-baseline" in args else None
-    if base:
-        del args[args.index("--base-baseline"):args.index("--base-baseline") + 2]
+    base = None
+    if "--base-baseline" in args:
+        i = args.index("--base-baseline")
+        if i + 1 >= len(args):
+            print("usage: doclint.py [ROOT] [--base-baseline FILE]", file=sys.stderr)
+            return 2
+        base = args[i + 1]
+        del args[i:i + 2]
     root = args[0] if args else pathlib.Path(__file__).resolve().parent.parent
     problems = [*lint(root), *(baseline_growth(root, base) if base else [])]
     for p in problems:
