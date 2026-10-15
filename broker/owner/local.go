@@ -55,8 +55,10 @@ const maxSignIns = 64
 // or another is being sent. The caller passes both to sendSignIns.
 func (c *Channel) signInTextLocked(now time.Time) (string, int, int) {
 	st := c.codes.st
-	if c.local.sending || len(st.LocalSignIns)+len(st.LocalAnswers) == 0 ||
-		(!st.LocalAlertAt.IsZero() && now.Sub(st.LocalAlertAt) < SignInAlertEvery) {
+	// A LocalAlertAt after now (a clock correction) counts as expired, so
+	// it cannot hold alerts back until real time catches up (#1442).
+	if since := now.Sub(st.LocalAlertAt); c.local.sending || len(st.LocalSignIns)+len(st.LocalAnswers) == 0 ||
+		(!st.LocalAlertAt.IsZero() && since >= 0 && since < SignInAlertEvery) {
 		return "", 0, 0
 	}
 	c.local.sending, c.local.evicted, c.local.evictedAns = true, 0, 0

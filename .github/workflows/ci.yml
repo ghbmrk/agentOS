@@ -66,6 +66,10 @@ jobs:
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Unit tests
         if: env.RECORDS != 'true'
+        # The differential tests (systemd-analyze, systemd-tmpfiles, modprobe) fail rather than skip
+        # without them (#1531), and fail on any skip among them (#1543).
+        env:
+          AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"
         run: python -m unittest discover -s tests -v
       - name: Document tool tests (records-only change; CI-docs)
         # The tests that read record files (test_board reads BOARD.md) and test the tools
