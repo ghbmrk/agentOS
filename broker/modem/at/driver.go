@@ -441,6 +441,9 @@ func (m *Modem) sweep(ctx context.Context) {
 // line that is not the PDU its header announced (a stray boot line, a
 // URC) is left stored for the next sweep.
 func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
+	// Read before the delete: once the modem has deleted the text, its
+	// parts' 10-minute wait has begun, whatever the clock does meanwhile.
+	now := m.cfg.Now()
 	hf := fields(header[strings.IndexByte(header, ':')+1:])
 	want, err := strconv.Atoi(hf[len(hf)-1])
 	if got, ok := TPDULen(pdu); err != nil || !ok || got != want {
@@ -469,7 +472,6 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 			return
 		}
 	}
-	now := m.cfg.Now()
 	m.mu.Lock()
 	for k, at := range m.seen {
 		if now.Sub(at) > dupTTL {
@@ -495,7 +497,7 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 		keptIdx = idx
 	}
 	m.mu.Unlock()
-	text, ok, conflict, idxs, ref := m.assemble(d, fromOwner, keptIdx, key)
+	text, ok, conflict, idxs, ref := m.assemble(d, fromOwner, keptIdx, key, now)
 	if conflict && fromOwner {
 		m.mu.Lock()
 		due := m.garbled.IsZero() || now.Sub(m.garbled) >= time.Hour
@@ -607,8 +609,9 @@ func segments(text string) int { n, _ := modem.Segments(text); return n }
 // assemble returns a whole text once every part is in, with its parts'
 // stored indices and its Ref; conflict reports a text dropped because two
 // parts disagreed. owner is whether d is from the owner's number, whose
-// texts use the owner's slots. idx and pdu are this part's.
-func (m *Modem) assemble(d Deliver, owner bool, idx int, pdu string) (text string, ok, conflict bool, idxs []int, ref string) {
+// texts use the owner's slots. idx, pdu and read (when it was read) are
+// this part's.
+func (m *Modem) assemble(d Deliver, owner bool, idx int, pdu string, read time.Time) (text string, ok, conflict bool, idxs []int, ref string) {
 	if d.Concat == nil || d.Concat.Total == 1 {
 		return d.Text, true, false, []int{idx}, textRef(pdu)
 	}
@@ -631,7 +634,7 @@ func (m *Modem) assemble(d Deliver, owner bool, idx int, pdu string) (text strin
 			m.dropOldestLocked(func(x *assembly) bool { return x.owner == owner })
 		}
 		m.nextSeq++
-		a = &assembly{from: d.Addr, owner: owner, seq: m.nextSeq, first: m.cfg.Now(), total: d.Concat.Total,
+		a = &assembly{from: d.Addr, owner: owner, seq: m.nextSeq, first: read, total: d.Concat.Total,
 			parts: map[int]string{}, idx: map[int]int{}, pdus: map[int]string{}}
 		m.parts[key] = a
 	}
