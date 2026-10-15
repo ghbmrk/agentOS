@@ -3,6 +3,7 @@
 
   tools/premerge.py [--base origin/main] <reviewed-sha> [head]
   tools/premerge.py --needs-mark [--base origin/main] [head]   (--needs-mark in any position)
+  tools/premerge.py --check <comments.json> <pr-number> [--base origin/main] [head]
 
 Replays the reviewed commit onto the base content `head` carries (`git merge-tree` of the reviewed
 commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
@@ -15,7 +16,14 @@ those files need a delta review. Git 2.38 or later, no network; fetch first.
 
 `--needs-mark` lists the files of base..head that make the PR one Mark presses Merge on (it changes how
 Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7).
+
+`--check` is the gate form: it reads a PR's issue comments (a JSON list as the GitHub API returns it), takes
+the newest L3 verdict comment from a repository owner, member or collaborator, and prints `same` (exit 0) only
+when that verdict is `accept` and the diff it reviewed (its `Record:` line head) equals `head`'s. Otherwise it
+prints `changed <files>`, `not-accepted` or `no-verdict` and exits 1, so a push after the accept, a later
+fix-list and a PR never reviewed all fail (PREMERGE-required, #1834).
 """
+import json
 import re
 import subprocess
 import sys
@@ -25,14 +33,35 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 
 
 # A PR touching any of these goes to Mark, never to an agent's auto-merge (OPERATING §7).
-# CLAUDE.md and CLAUDE.local.md count at any depth; broker/core/core.txt sets risk tiers (risk_tier.py).
-MARK_PATHS = re.compile(r"^((?:.*/)?CLAUDE(?:\.local)?\.md|AGENTS\.md|\.mcp\.json|docs/OPERATING\.md|docs/LANES\.md|"
-                        r"\.claude/.*|\.github/.*|broker/core/core\.txt|tools/(risk_tier|premerge)\.py|"
-                        r"tools/(ci_scope|g1_scope)[^/]*|reviews/[^/]+/README[^/]*)$")
+# CLAUDE*.md, AGENTS.md, .mcp.json and .claude/ count at any depth; broker/core/core.txt sets risk tiers
+# (risk_tier.py); the tests that pin the merge gates count too (PREMERGE-paths, #1835). Matched with
+# fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
+_CFG = r"(?:.*/)?"
+MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude/.*|"
+                        r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
+                        r"tools/(risk_tier|premerge)\.py|tools/(ci_scope|g1_scope)[^/]*|reviews/[^/]+/README[^/]*|"
+                        r"tests/test_(premerge|risk_tier|ci_scope|g1_scope|workflows|merge_queue|lane)[^/]*",
+                        re.DOTALL)
 
 
 def mark_paths(files):
-    return sorted(f for f in files if MARK_PATHS.match(f))
+    return sorted(f for f in files if MARK_PATHS.fullmatch(f))
+
+
+TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
+_L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
+
+
+def verdict(comments, pr):
+    """(verdict, reviewed-sha) of the newest trusted L3 verdict comment for PR `pr`, or None."""
+    found = None
+    for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
+        body = c.get("body") or ""
+        rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", body, re.M)
+        first = body.split("\n", 1)[0].strip()
+        if (c.get("author_association") in TRUSTED and first.startswith("Verdict:") and rec and _L3.search(body)):
+            found = (first.split(":", 1)[1].strip().lower(), rec.group(1))
+    return found
 
 
 def _git(cwd, *args, ok=(0,)):
@@ -58,6 +87,20 @@ def main(argv):
     args, base = argv[1:], "origin/main"
     needs_mark = "--needs-mark" in args  # in any position
     args = [a for a in args if a != "--needs-mark"]
+    if args[:1] == ["--check"]:
+        if len(args) < 3:
+            print(__doc__)
+            return 2
+        comments, pr, args = json.load(open(args[1])), args[2], args[3:]
+        if args[:1] == ["--base"]:
+            base, args = args[1], args[2:]
+        v = verdict(comments, pr)
+        if v is None or v[0] != "accept":
+            print("no-verdict" if v is None else "not-accepted")
+            return 1
+        changed = compare(".", v[1], args[0] if args else "HEAD", base)
+        print("changed " + " ".join(changed) if changed else "same")
+        return 1 if changed else 0
     if args[:1] == ["--base"]:
         base, args = args[1], args[2:]
     if needs_mark:
