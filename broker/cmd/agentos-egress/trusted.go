@@ -793,8 +793,9 @@ func (h *tpmHost) anchor(v *vault.Vault) error {
 
 // takeLockout makes the TPM's lockout hierarchy the vault's before a PIN
 // slot is sealed (tpmseal.TakeLockout). The authorization is stored in the
-// vault first, so it is never set on the TPM without being kept; if the
-// TPM refuses, a new entry is removed again.
+// vault first and synced to the drive (Vault.Sync, #1558), so it is never
+// set on the TPM without being kept; if the sync fails or the TPM refuses, a
+// new entry is removed again.
 func takeLockout(v *vault.Vault, t transport.TPM, id []byte) error {
 	name := lockoutAuthName(id)
 	var auth []byte

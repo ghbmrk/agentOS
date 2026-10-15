@@ -415,3 +415,24 @@ func TestCatchUpWaitsForTheLandedFile(t *testing.T) {
 		t.Fatalf("file before a synced catch-up: %v, want ErrRolledBack", err)
 	}
 }
+
+// REQ: HW-8
+// Sync reports a failed directory sync of the vault file's name (#1558); a
+// Sync that returned nil would let a caller change the TPM on a name a power
+// cut could undo.
+func TestSyncReportsAFailedDirectorySync(t *testing.T) {
+	d, pc := newDrive(t), newPC("alpha")
+	v := d.open()
+	defer v.Close()
+	if err := v.Anchor(pc); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, v, "openai", "sk-canary-before-sync1")
+	if err := v.Sync(); err != nil {
+		t.Fatalf("Sync with a working directory sync: %v", err)
+	}
+	syncFails(t)
+	if err := v.Sync(); !errors.Is(err, durable.ErrDirSync) {
+		t.Fatalf("Sync with a failing directory sync: %v", err)
+	}
+}

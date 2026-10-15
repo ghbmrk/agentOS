@@ -1247,7 +1247,7 @@ func TestLockoutAuthIsSyncedBeforeTheTPMTakesIt(t *testing.T) {
 	r.unknownHostUnlock(t)
 	restore := vault.InjectSyncFault(fmt.Errorf("%w: input/output error", durable.ErrDirSync))
 	defer restore()
-	if _, err := r.c.trust(r.code(), "246810"); err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+	if _, err := r.c.trust(r.code(), "246810"); err == nil || !errors.Is(err, errHostNotDurable) {
 		t.Fatalf("trust with a failing sync: %v", err)
 	}
 	if r.lockoutEntry() != "" {
@@ -1262,5 +1262,31 @@ func TestLockoutAuthIsSyncedBeforeTheTPMTakesIt(t *testing.T) {
 	}
 	if err := r.tpm.ThiefLockReset(); err == nil {
 		t.Fatal("empty lockout password still resets the PIN guess counter")
+	}
+}
+
+// REQ: HW-8
+// A sync failure with a lockout authorization already held (an earlier PIN
+// enroll) keeps that entry: it is the only copy of what the TPM holds.
+func TestHeldLockoutAuthSurvivesAFailedSync(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	name := r.lockoutEntry()
+	if name == "" {
+		t.Fatal("no lockout authorization after trust with a PIN")
+	}
+	restore := vault.InjectSyncFault(fmt.Errorf("%w: input/output error", durable.ErrDirSync))
+	defer restore()
+	if _, err := r.c.trust(r.code(), "246810"); !errors.Is(err, errHostNotDurable) {
+		t.Fatalf("trust with a failing sync: %v", err)
+	}
+	if r.lockoutEntry() != name {
+		t.Fatal("a held lockout authorization was forgotten after a failed sync")
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("the TPM lost its lockout password")
 	}
 }
