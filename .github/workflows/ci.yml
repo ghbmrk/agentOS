@@ -75,7 +75,7 @@ jobs:
         # The tests that read record files (test_board reads BOARD.md) and test the tools
         # the steps below run.
         if: env.RECORDS == 'true'
-        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier -v
+        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_g1_scope -v
       - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
         if: env.RECORDS != 'true'
         run: |
@@ -169,6 +169,15 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Go build cache (CI-PATHS)
+        # Keyed on the vendored module set; a restore-key hit from main seeds a PR run. Restore
+        # only here: the save step at the end of the job runs on a push to main alone (D29).
+        # Vendored modules need no module cache.
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/go-build
+          key: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          restore-keys: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Software TPM for the trusted-host slot (P2-4b)
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
       # loops' canary-round test runs tools/canary.py, whose targets run as the
@@ -207,6 +216,16 @@ jobs:
           for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP; do
             python3 ../tools/fuzzrun.py --pkg "./${t%%:*}" --target "${t#*:}" --budget 20s || exit 1
           done
+      - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: rm -rf "$(go env GOCACHE)/fuzz"
+      - name: Go build cache upload (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/go-build
+          key: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+
   machines:
     needs: scope
     if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
@@ -227,6 +246,13 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Go build cache (CI-PATHS)
+        # The root test runs below use GOCACHE=/tmp/gocache. Restore only; saved on main (D29).
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: /tmp/gocache
+          key: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          restore-keys: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Install gVisor release-20260928.0 (checksum pinned)
         run: |
           B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64
@@ -312,6 +338,16 @@ jobs:
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -v -timeout 20m ./floor
+      - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: sudo rm -rf /tmp/gocache/fuzz
+      - name: Go build cache upload (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: /tmp/gocache
+          key: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+
   hostcheck:
     needs: scope
     if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
