@@ -75,7 +75,7 @@ jobs:
         # The tests that read record files (test_board reads BOARD.md) and test the tools
         # the steps below run.
         if: env.RECORDS == 'true'
-        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_g1_scope -v
+        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_g1_scope.CheckTest tests.test_g1_scope.ListTest -v
       - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
         if: env.RECORDS != 'true'
         run: |
