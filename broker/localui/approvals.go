@@ -76,7 +76,11 @@ func (s *Server) approvals(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/unlock?next=/approvals/", http.StatusSeeOther)
 			return
 		}
-		v.Err = unreachableText
+		// An answer's own message stands: "Nothing was approved or
+		// denied" would contradict a line that says it was.
+		if v.Msg == "" && v.Err == "" {
+			v.Err = unreachableText
+		}
 	}
 	for _, q := range rq.Requests {
 		v.Requests = append(v.Requests, s.requestView(q, sess))
@@ -137,7 +141,7 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 	case refused(err, localapi.ErrLimited):
 		return "", "Too many wrong codes from this phone. Wait a minute, then try again."
 	case err != nil:
-		return "", unreachableText
+		return "", answerUnreachableText
 	}
 	switch a.Refusal {
 	case "":
@@ -167,6 +171,11 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 
 // unreachableText: agentosd did not answer, so nothing was decided (UX-2wb-1).
 const unreachableText = "I can't answer right now. Nothing was approved or denied. Reload to try again."
+
+// answerUnreachableText: the call to agentosd failed or timed out, but an
+// answer may already have taken effect, so the page claims nothing either way
+// (UX-2wb-1).
+const answerUnreachableText = "I didn't hear back. Your answer may or may not have gone through. Reload to see whether the request is still open."
 
 const stalePage = "This page is out of date. Check the request below and answer again."
 

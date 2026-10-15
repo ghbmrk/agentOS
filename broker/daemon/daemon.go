@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -112,6 +114,20 @@ type Config struct {
 	// checked "inbound" op (security F1 on #170). "message" stays for
 	// simulator and test builds.
 	BridgeOnly bool
+	// OwnerDrainOps are the owner socket's ops still served while the
+	// shutdown drain runs (modemlink.DrainOps: the bridge's outbox, sent
+	// and state), so a text the owner channel started is still handed to
+	// the bridge and its result heard. Every other op on every socket is
+	// refused from the stop on (errStopping).
+	OwnerDrainOps []string
+	// OwnerDrainLive says a modem bridge is still there to take the
+	// drain's texts (modemlink.Link.Bridged); once it says no, the drain
+	// ends rather than wait out its bound. Nil: the drain waits for its
+	// texts up to the bound (a direct modem).
+	OwnerDrainLive func() bool
+	// SendDrain bounds the shutdown drain (0: ownerch.SendDrain; tests set
+	// it shorter).
+	SendDrain time.Duration
 	// Agent receives the owner's task chat: the guest plane's owner inbox
 	// for the agent's machine (ARC-6 (c)). Nil: no agent running.
 	Agent control.Agent
@@ -461,10 +477,29 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			Ops:         ui.Ops(),
 		})
 	}
+	// Shutdown is staged (owner O34). At the stop every op refuses new
+	// calls and those in flight return; the sockets, and the owner
+	// socket's drain ops (the modem bridge's outbox), stay up while the
+	// owner channel drains its texts in flight, then close.
+	entry := &stage{}
+	for i := range eps {
+		for op, h := range eps[i].Ops {
+			if i == 0 && slices.Contains(cfg.OwnerDrainOps, op) {
+				continue
+			}
+			eps[i].Ops[op] = entry.wrap(ctx, h)
+		}
+	}
+	sockCtx, endSockets := context.WithCancel(context.WithoutCancel(ctx))
 	srv := &sockets.Server{Dir: cfg.SocketDir}
-	if err := srv.Start(ctx, eps...); err != nil {
+	if err := srv.Start(sockCtx, eps...); err != nil {
+		endSockets()
 		store.Close()
 		return nil, err
+	}
+	drain := cfg.SendDrain
+	if drain <= 0 {
+		drain = ownerch.SendDrain
 	}
 	d := &Daemon{engine: eng, gate: gate, store: store, srv: srv, adm: adm, owner: ch, retry: rt, done: make(chan struct{})}
 	if ch != nil {
@@ -479,11 +514,67 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	// (OP-2).
 	go settleLoop(ctx, eng, settleEvery, gate.Dispatch)
 	go func() {
+		<-ctx.Done()
+		// No page call, guest call or owner text starts now, and the ones
+		// in flight have returned; the texts a page call started after its
+		// reply (lock, wrong code, sign-in) get up to the drain bound,
+		// while the owner socket still hands them to the modem bridge,
+		// before the sockets close, Wait returns and agentosd exits (owner
+		// O34). With no bridge left on the owner socket (OwnerDrainLive),
+		// as when systemd stopped it first, the drain ends at once.
+		entry.shut()
+		if ch != nil {
+			ch.DrainSends(drain, cfg.OwnerDrainLive)
+		}
+		endSockets()
 		srv.Wait()
 		store.Close()
 		close(d.done)
 	}()
 	return d, nil
+}
+
+// errStopping refuses a call that arrives once agentosd is stopping. The
+// modem bridge sends a refused inbound text again (bridgeproto.Retryable),
+// so the next start takes it rather than an inbox nobody reads.
+const errStopping = sockets.Code("stopping")
+
+// stage holds the ops that end at the stop, before the sockets close.
+type stage struct {
+	mu     sync.Mutex
+	closed bool
+	active sync.WaitGroup
+}
+
+// wrap serves h until stop or shut, with a context that also ends at
+// stop; afterwards it refuses (errStopping). A call that arrives after the
+// stop but before shut is refused too: its handler would run with a
+// context already ended, and an inbound text it took would go to an inbox
+// nobody reads (Security S6 on #1746).
+func (s *stage) wrap(stop context.Context, h sockets.Handler) sockets.Handler {
+	return func(ctx context.Context, p sockets.Peer, args json.RawMessage) (any, error) {
+		s.mu.Lock()
+		if s.closed || stop.Err() != nil {
+			s.mu.Unlock()
+			return nil, errStopping
+		}
+		s.active.Add(1)
+		s.mu.Unlock()
+		defer s.active.Done()
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		defer context.AfterFunc(stop, cancel)()
+		return h(ctx, p, args)
+	}
+}
+
+// shut refuses new calls and returns once the calls in flight have
+// returned.
+func (s *stage) shut() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	s.active.Wait()
 }
 
 func validID(id string) bool {
