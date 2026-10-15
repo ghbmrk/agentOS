@@ -8,10 +8,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/childproc"
 )
@@ -39,9 +43,28 @@ type Hostapd struct {
 	// StopWait bounds each child's exit after SIGTERM before SIGKILL, and
 	// each ip run (default 10 s).
 	StopWait time.Duration
+	// User is the user hostapd runs as (#1426). As root, hostapd would
+	// pass egress's uid-0 broker check and could reach verify.sock, so
+	// Start refuses a nil User unless asCaller is set.
+	User *APUser
+	// asCaller runs hostapd as the caller, with no User: this package's
+	// stub tests only. It is unexported so that no other package can opt
+	// in to running hostapd as root.
+	asCaller bool
 
 	mu  sync.Mutex
 	run *apRun
+}
+
+// APUser is hostapd's own user. hostapd runs with that uid and gid, no
+// supplementary groups, no_new_privs, and NET_ADMIN and NET_RAW as its
+// only capabilities (ambient, so they survive the exec as a non-root
+// user) and the only ones left in its bounding set.
+// It reads hostapd.conf through the group: the loader, which shares the
+// group, gives Dir and hostapd.conf to it, so it needs no CAP_CHOWN.
+// dnsmasq.conf stays root's.
+type APUser struct {
+	UID, GID uint32
 }
 
 type apRun struct {
@@ -77,6 +100,12 @@ func (h *Hostapd) Start(ctx context.Context, cfg APConfig) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	if u := h.User; u != nil && (u.UID == 0 || u.GID == 0) {
+		return errors.New("localui: hostapd must not run as root")
+	}
+	if h.User == nil && !h.asCaller {
+		return errors.New("localui: hostapd has no user of its own")
+	}
 	hc, err := HostapdConf(cfg)
 	if err != nil {
 		return err
@@ -104,11 +133,26 @@ func (h *Hostapd) start(ctx context.Context, r *apRun, hc, dc string) error {
 		return err
 	}
 	hostapdConf, dnsmasqConf := filepath.Join(dir, "hostapd.conf"), filepath.Join(dir, "dnsmasq.conf")
-	// hostapd.conf holds the Wi-Fi password (CH-7).
-	if err := os.WriteFile(hostapdConf, []byte(hc), 0o600); err != nil {
+	// hostapd.conf holds the Wi-Fi password (CH-7): root's and hostapd's
+	// group's only.
+	if err := writeConf(hostapdConf, hc, h.User); err != nil {
 		return err
 	}
-	if err := os.WriteFile(dnsmasqConf, []byte(dc), 0o600); err != nil {
+	var hattr *syscall.SysProcAttr
+	if u := h.User; u != nil {
+		// hostapd's group may enter Dir and read, never create (0710).
+		if err := os.Chown(dir, -1, int(u.GID)); err != nil {
+			return err
+		}
+		if err := os.Chmod(dir, 0o710); err != nil {
+			return err
+		}
+		hattr = &syscall.SysProcAttr{
+			Credential:  &syscall.Credential{Uid: u.UID, Gid: u.GID, Groups: []uint32{}},
+			AmbientCaps: apCaps,
+		}
+	}
+	if err := writeConf(dnsmasqConf, dc, nil); err != nil {
 		return err
 	}
 	if err := h.ip(ctx, "addr", "replace", r.cfg.Addr.String(), "dev", r.cfg.Iface); err != nil {
@@ -120,13 +164,17 @@ func (h *Hostapd) start(ctx context.Context, r *apRun, hc, dc string) error {
 
 	// hostapd: wait for AP-ENABLED on its standard output. Its later lines
 	// name client MAC addresses, so they are drained unread, never logged.
-	hcmd := childproc.Command(context.Background(), hostEnv, childproc.Options{WaitDelay: time.Second},
+	hcmd := childproc.Command(context.Background(), hostEnv, childproc.Options{WaitDelay: time.Second, SysProcAttr: hattr},
 		or(h.HostapdPath, "hostapd"), hostapdConf)
 	out, err := hcmd.StdoutPipe()
 	if err != nil {
 		return err
 	}
-	if err := hcmd.Start(); err != nil {
+	start := hcmd.Start
+	if h.User != nil {
+		start = func() error { return startConfined(hcmd) }
+	}
+	if err := start(); err != nil {
 		return fmt.Errorf("localui: hostapd: %w", err)
 	}
 	enabled := make(chan bool, 1)
@@ -173,6 +221,71 @@ func (h *Hostapd) start(ctx context.Context, r *apRun, hc, dc string) error {
 		return ctx.Err()
 	}
 	return nil
+}
+
+// apCaps are the only capabilities hostapd keeps (#1426).
+var apCaps = []uintptr{unix.CAP_NET_ADMIN, unix.CAP_NET_RAW}
+
+// startConfined starts cmd from an OS thread of its own that first sets
+// no_new_privs and drops every capability but apCaps from its bounding
+// set; the child inherits both. Both are per thread, so the thread is
+// never returned to the runtime: when its goroutine ends, the runtime
+// ends the thread, or, if it is the process's main thread, wedges it for
+// good (runtime.mexit) with no goroutine ever running on it again. Either
+// way no later Go code or child runs confined.
+// (No parent-death signal is set, which would fire when the thread ends.)
+func startConfined(cmd *childproc.Cmd) error {
+	errc := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread() // never unlocked
+		if err := confineThread(); err != nil {
+			errc <- err
+			return
+		}
+		errc <- cmd.Start()
+	}()
+	return <-errc
+}
+
+func confineThread() error {
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return fmt.Errorf("no_new_privs: %w", err)
+	}
+	// The kernel may know more capabilities than this build: read until
+	// it refuses the number.
+	for c := uintptr(0); ; c++ {
+		if _, err := unix.PrctlRetInt(unix.PR_CAPBSET_READ, c, 0, 0, 0); err == unix.EINVAL {
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("capability bounding set: %w", err)
+		}
+		if slices.Contains(apCaps, c) {
+			continue
+		}
+		if err := unix.Prctl(unix.PR_CAPBSET_DROP, c, 0, 0, 0); err != nil {
+			return fmt.Errorf("capability bounding set: drop %d: %w", c, err)
+		}
+	}
+}
+
+// writeConf writes a configuration file afresh, never through a link, mode 0600;
+// with u, it then gives the file to u's group to read (0640).
+func writeConf(path, conf string, u *APUser) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(conf)
+	if err == nil && u != nil {
+		err = f.Chown(-1, int(u.GID))
+		if err == nil {
+			err = f.Chmod(0o640)
+		}
+	}
+	return errors.Join(err, f.Close())
 }
 
 // supervise records a started child and fires r.exited when it exits.
