@@ -35,6 +35,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -218,29 +219,64 @@ type listed struct {
 
 func linkedDeps(t *testing.T) []listed {
 	t.Helper()
-	args := []string{"list", "-deps", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .Imports \" \"}}\t{{join .GoFiles \" \"}}\t{{len .CgoFiles}}\t{{len .SFiles}}"}
+	var pkgs []string
 	for _, p := range linked {
-		args = append(args, module+p)
+		pkgs = append(pkgs, module+p)
 	}
-	cmd := exec.Command("go", args...)
-	cmd.Dir = ".."
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("go list: %v\n%s", err, stderr.String())
+	return listDeps(t, "..", pkgs)
+}
+
+// listDeps lists the non-test dependency graph of pkgs from the module in
+// dir, as the union over both cgo settings: the shipped binaries build
+// with CGO_ENABLED=0 (image/build.sh) and CI's race tests with 1, and a
+// file tagged for one is invisible to go list under the other (#659 L3 2,
+// Security 4a 2; the childproc gate does the same).
+func listDeps(t *testing.T, dir string, pkgs []string) []listed {
+	t.Helper()
+	byPath := map[string]*listed{}
+	var order []string
+	for _, cgoOn := range []string{"0", "1"} {
+		args := append([]string{"list", "-deps", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .Imports \" \"}}\t{{join .GoFiles \" \"}}\t{{len .CgoFiles}}\t{{len .SFiles}}"}, pkgs...)
+		cmd := exec.Command("go", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "CGO_ENABLED="+cgoOn)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("go list (CGO_ENABLED=%s): %v\n%s", cgoOn, err, stderr.String())
+		}
+		sc := bufio.NewScanner(bytes.NewReader(out))
+		sc.Buffer(nil, 1<<20)
+		for sc.Scan() {
+			f := strings.Split(sc.Text(), "\t")
+			if len(f) != 6 {
+				t.Fatalf("go list line: %q", sc.Text())
+			}
+			p := byPath[f[0]]
+			if p == nil {
+				p = &listed{path: f[0], dir: f[1]}
+				byPath[f[0]] = p
+				order = append(order, f[0])
+			}
+			for _, x := range strings.Fields(f[2]) {
+				if !slices.Contains(p.imports, x) {
+					p.imports = append(p.imports, x)
+				}
+			}
+			for _, x := range strings.Fields(f[3]) {
+				if !slices.Contains(p.files, x) {
+					p.files = append(p.files, x)
+				}
+			}
+			cgo, _ := strconv.Atoi(f[4])
+			asm, _ := strconv.Atoi(f[5])
+			p.cgo, p.asm = max(p.cgo, cgo), max(p.asm, asm)
+		}
 	}
 	var ps []listed
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	sc.Buffer(nil, 1<<20)
-	for sc.Scan() {
-		f := strings.Split(sc.Text(), "\t")
-		if len(f) != 6 {
-			t.Fatalf("go list line: %q", sc.Text())
-		}
-		cgo, _ := strconv.Atoi(f[4])
-		asm, _ := strconv.Atoi(f[5])
-		ps = append(ps, listed{path: f[0], dir: f[1], imports: strings.Fields(f[2]), files: strings.Fields(f[3]), cgo: cgo, asm: asm})
+	for _, path := range order {
+		ps = append(ps, *byPath[path])
 	}
 	return ps
 }
@@ -250,6 +286,47 @@ func TestAgentosdLinksNoInference(t *testing.T) {
 	if len(ps) == 0 {
 		t.Fatal("no packages listed")
 	}
+	if bad := inferenceUse(t, ps); len(bad) > 0 {
+		t.Fatalf("agentosd's import graph holds inference-capable code:\n%s", strings.Join(bad, "\n"))
+	}
+}
+
+// REQ: ARC-2
+//
+// The graph is the union over both cgo settings, as the childproc gate's
+// is: the shipped binaries build with CGO_ENABLED=0 and CI's race tests
+// with 1, and an import made only in a file tagged for one is invisible to
+// go list under the other (#659 L3 2, Security 4a 2).
+func TestTheInferenceWalkTakesBothCgoSettings(t *testing.T) {
+	dir := t.TempDir()
+	root := strings.TrimSuffix(module, "/")
+	for name, src := range map[string]string{
+		"go.mod":         "module " + root + "\n\ngo 1.25\n",
+		"daemon/d.go":    "package daemon\n",
+		"daemon/cgo.go":  "//go:build cgo\n\npackage daemon\n\nimport _ \"" + module + "route\"\n",
+		"daemon/pure.go": "//go:build !cgo\n\npackage daemon\n\nimport _ \"" + module + "egress\"\n",
+		"route/r.go":     "package route\n",
+		"egress/e.go":    "package egress\n",
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bad := inferenceUse(t, listDeps(t, dir, []string{module + "daemon"}))
+	for _, want := range []string{module + "route: forbidden in agentosd", module + "egress: forbidden in agentosd"} {
+		if !slices.Contains(bad, want) {
+			t.Errorf("not reported: %s; got %q", want, bad)
+		}
+	}
+}
+
+// inferenceUse reports each package in ps that breaks the rules above.
+func inferenceUse(t *testing.T, ps []listed) []string {
+	t.Helper()
 	reach := httpReach(ps)
 	var bad []string
 	for _, p := range ps {
@@ -291,9 +368,7 @@ func TestAgentosdLinksNoInference(t *testing.T) {
 		}
 	}
 	sort.Strings(bad)
-	if len(bad) > 0 {
-		t.Fatalf("agentosd's import graph holds inference-capable code:\n%s", strings.Join(bad, "\n"))
-	}
+	return bad
 }
 
 // httpReach marks every listed package that is or depends on net/http.
