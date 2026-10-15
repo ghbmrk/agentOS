@@ -2,6 +2,7 @@ package localapi
 
 import (
 	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -142,14 +143,21 @@ const SetupTextsPerHour = 20
 
 // setupTexts are the only texts setup sends (localui's number step,
 // claim and PAIR replies), so the page cannot have the box's SIM send
-// anything else. The product name's case is matched either way.
+// anything else. The product name's case is matched either way. The
+// pairing reply names the PC (§8.1, P2-2w c4d): at most SetupHostMax
+// letters, digits, spaces and ,()+'- with no '.', '/' or ':', so the page
+// cannot put a link or a domain in it.
 var setupTexts = regexp.MustCompile(`^(?:` +
 	`[Aa]gentOS setup code: [0-9]{6}\. Type it on the setup page\.` +
 	`|[Aa]gentOS page code: [0-9]{6}\. Type it on the setup page\.` +
-	`|[Aa]gentOS is running on this PC\. This is your box's number; save it as [Aa]gentOS\.(?: Page code: [0-9]{6}\.)?` +
+	`|[Aa]gentOS is running on (?:this PC|[A-Za-z0-9][A-Za-z0-9 ,()+'-]{0,` + strconv.Itoa(SetupHostMax-1) + `})\. This is your box's number; save it as [Aa]gentOS\.(?: Page code: [0-9]{6}\.)?` +
 	`|That pairing code did not match\. Check the setup page\.` +
 	`|Could not save your number\. Try again\.` +
 	`)$`)
+
+// SetupHostMax is the most of the pairing reply the PC's name and RAM
+// take.
+const SetupHostMax = 40
 
 // SetupText says text is one of setup's fixed texts.
 func SetupText(text string) bool { return setupTexts.MatchString(text) }

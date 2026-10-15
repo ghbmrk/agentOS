@@ -34,6 +34,12 @@ import (
 // keys file and before it wrote it (tests).
 const crashKeysSealed = 3
 
+// ErrSlotDecided marks an error from a slot change that came after the next
+// keys file was sealed into the vault: the change is decided, takes effect
+// at the next open if it has not already, and callers must not undo what
+// depended on it (#1557).
+var ErrSlotDecided = errors.New("vault: the slot change is decided")
+
 // nextSuffix names the staged copy of the next keys file, written beside
 // the keys file before the seal (defect fix in P2-4d). Without it, a
 // Rekey interrupted after the seal left only the file before on the
@@ -85,7 +91,8 @@ func (v *Vault) acceptsKeys(raw []byte) bool {
 
 // replaceKeys moves the vault to kf as its keys file. Once the first write
 // has landed the change is decided: a later failure returns an error, and
-// the change completes at the next slot change or OpenSealed. Caller
+// the change completes at the next slot change or OpenSealed, and the error
+// wraps ErrSlotDecided. Caller
 // holds mu.
 func (v *Vault) replaceKeys(kf *keyFile) error {
 	raw, err := json.Marshal(kf)
@@ -93,7 +100,11 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 		return err
 	}
 	cur, cerr := readKeys(v.keysPath)
-	if err := writeFile(v.keysPath+nextSuffix, raw, 0o600); err != nil {
+	err = writeFile(v.keysPath+nextSuffix, raw, 0o600)
+	if err == nil {
+		err = injectedStageFault()
+	}
+	if err != nil {
 		return err
 	}
 	v.nextKeys = raw
@@ -110,11 +121,15 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 	if cerr == nil && passphraseChanged(cur, kf) {
 		v.unfinished = false
 	}
-	if err := crashPoint(crashKeysSealed); err != nil {
-		return err
+	err = crashPoint(crashKeysSealed)
+	if err == nil {
+		err = injectedSealFault()
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrSlotDecided, err)
 	}
 	if err := v.finishKeys(); err != nil {
-		return fmt.Errorf("vault: slot change not finished; it completes when the vault next opens: %w", err)
+		return fmt.Errorf("%w: slot change not finished; it completes when the vault next opens: %w", ErrSlotDecided, err)
 	}
 	return nil
 }

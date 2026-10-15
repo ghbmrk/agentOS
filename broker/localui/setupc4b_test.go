@@ -48,7 +48,7 @@ func TestNetworkStepJoinsTheSelectedNameWhenNoneIsTyped(t *testing.T) {
 // over the bound, gives none.
 func TestAgentosdNetworksCarriesTheList(t *testing.T) {
 	answer := func(v any, err error) AgentosdSetup {
-		return AgentosdSetup{InProcess{localapi.OpSetupNetworks: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+		return AgentosdSetup{Owner: InProcess{localapi.OpSetupNetworks: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 			return v, err
 		}}}
 	}
@@ -58,7 +58,7 @@ func TestAgentosdNetworksCarriesTheList(t *testing.T) {
 	if got := answer(nil, errors.New("down")).Networks(); got != nil {
 		t.Fatalf("an error gave %q", got)
 	}
-	if got := (AgentosdSetup{InProcess{}}).Networks(); got != nil {
+	if got := (AgentosdSetup{Owner: InProcess{}}).Networks(); got != nil {
 		t.Fatalf("no op gave %q", got)
 	}
 	many := make([]string, localapi.MaxNetworks+1)

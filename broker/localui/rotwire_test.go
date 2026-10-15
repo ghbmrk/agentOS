@@ -34,6 +34,9 @@ type fakeRotVault struct {
 	// commitIn, when set, is told each commit as it reaches the vault
 	// process; commitGo then holds its answer until a send (a late answer).
 	commitIn, commitGo chan struct{}
+	// onCommit, when set, runs as each commit reaches the vault process
+	// (a phone hanging up mid-confirm).
+	onCommit func()
 }
 
 func (f *fakeRotVault) BeginRotation(_ context.Context, b RotationBegin) (RotationStarted, error) {
@@ -50,6 +53,9 @@ func (f *fakeRotVault) CommitRotation(_ context.Context, id string, c card.Card)
 	if f.commitIn != nil {
 		f.commitIn <- struct{}{}
 		<-f.commitGo
+	}
+	if f.onCommit != nil {
+		f.onCommit()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()

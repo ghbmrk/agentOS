@@ -2,8 +2,13 @@ package main
 
 import (
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/modem/bridge"
 )
 
 // REQ: CH-1
@@ -13,19 +18,7 @@ import (
 // no writable executable memory, the modems' device classes only, and no
 // IP networking.
 func TestTheUnitIsHardened(t *testing.T) {
-	b, err := os.ReadFile("agentos-modem.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-	set := map[string][]string{}
-	for _, l := range strings.Split(string(b), "\n") {
-		l = strings.TrimSpace(l)
-		if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "[") {
-			continue
-		}
-		k, v, _ := strings.Cut(l, "=")
-		set[k] = append(set[k], v)
-	}
+	set := unit(t)
 	for k, want := range map[string][]string{
 		"User":                    {"agentos-modem"},
 		"NoNewPrivileges":         {"yes"},
@@ -72,4 +65,55 @@ func TestRolesAreReadAtEachOpen(t *testing.T) {
 	if got := ownerICCID(p); got != "" {
 		t.Fatalf("bad file: %q", got)
 	}
+}
+
+// OWNER-ALERT-STOP-ORDER (#1772), owner O34: the bridge starts after
+// agentosd and, as systemd inverts After= for stop jobs, gets its SIGTERM
+// first, while agentosd still serves owner.sock; it then flushes its
+// outbox for at most bridge.FlushWait. Its stop timeout leaves room for
+// that bound and the modem's close, and SIGTERM stays the stop signal.
+func TestTheBridgeStopsFirstWithRoomToFlush(t *testing.T) {
+	// REQ: CH-15
+	set := unit(t)
+	for k, want := range map[string]string{"After": "agentosd.service", "Requires": "agentosd.service"} {
+		if !slices.Contains(strings.Fields(strings.Join(set[k], " ")), want) {
+			t.Errorf("%s = %q, want %s in it", k, set[k], want)
+		}
+	}
+	if v := set["Before"]; len(v) != 0 {
+		t.Errorf("Before = %q: nothing may order the bridge to stop after agentosd", v)
+	}
+	if v := set["KillSignal"]; len(v) != 0 && strings.Join(v, "") != "SIGTERM" {
+		t.Errorf("KillSignal = %q, want SIGTERM", v)
+	}
+	if v := set["ExecStop"]; len(v) != 0 {
+		t.Errorf("ExecStop = %q, the bridge flushes on SIGTERM", v)
+	}
+	v := strings.Join(set["TimeoutStopSec"], "")
+	sec, err := strconv.Atoi(v)
+	if err != nil {
+		t.Fatalf("TimeoutStopSec = %q, want whole seconds", v)
+	}
+	if got, want := time.Duration(sec)*time.Second, bridge.FlushWait+30*time.Second; got < want {
+		t.Errorf("TimeoutStopSec = %v, want at least %v", got, want)
+	}
+}
+
+// unit is the unit file's settings, each key's values in order.
+func unit(t *testing.T) map[string][]string {
+	t.Helper()
+	b, err := os.ReadFile("agentos-modem.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := map[string][]string{}
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "[") {
+			continue
+		}
+		k, v, _ := strings.Cut(l, "=")
+		set[k] = append(set[k], v)
+	}
+	return set
 }

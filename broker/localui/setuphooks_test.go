@@ -1,12 +1,15 @@
 package localui
 
 import (
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"html"
+	"log"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -114,7 +117,7 @@ func TestAVaultThatCannotFinishSetupSaysSo(t *testing.T) {
 			Enroll:   vaultEnroller{r.hooks},
 			Progress: func() localapi.SetupProgress { p := r.hooks.Progress(); return localapi.SetupProgress(p) },
 			Finished: func(string) {}, Now: r.clock})
-		r.via = viaAgentosd{r.hooks, AgentosdSetup{InProcess(s.Ops())}}
+		r.via = viaAgentosd{r.hooks, AgentosdSetup{Owner: InProcess(s.Ops())}}
 		r.srv = r.open(&MemStore{})
 	}
 	r := newRig(t)
@@ -227,7 +230,7 @@ func TestSetupFinishesThroughAgentosdAndClosesForGood(t *testing.T) {
 			Finished: func(o string) { owners = append(owners, o) }, Now: r.clock})
 	}
 	sock := InProcess(open().Ops())
-	r.via = viaAgentosd{r.hooks, AgentosdSetup{sock}}
+	r.via = viaAgentosd{r.hooks, AgentosdSetup{Owner: sock}}
 	r.srv = r.open(&MemStore{})
 	r.runSetup()
 	if !r.srv.setup.done() || len(owners) != 1 || owners[0] != ownerNum {
@@ -238,7 +241,7 @@ func TestSetupFinishesThroughAgentosdAndClosesForGood(t *testing.T) {
 		t.Fatalf("record %v: %s", err, b)
 	}
 	for _, s := range []namedOwner{{"live", sock}, {"restarted", InProcess(open().Ops())}} {
-		a := AgentosdSetup{s.o}
+		a := AgentosdSetup{Owner: s.o}
 		if !a.AlreadySetUp() {
 			t.Errorf("%s: setup open", s.name)
 		}
@@ -314,7 +317,7 @@ func TestARestartedSetupSealsTheNewPairingsSeed(t *testing.T) {
 	vault := &k17Vault{now: r.clock}
 	sock := InProcess(localsrv.NewSetup(localsrv.SetupConfig{Record: localsrv.FileRecord{Path: filepath.Join(t.TempDir(), "setup.json")},
 		Enroll: vault, Now: r.clock}).Ops())
-	agentosd := AgentosdSetup{sock}
+	agentosd := AgentosdSetup{Owner: sock}
 	r.via = viaAgentosd{r.hooks, agentosd}
 	r.srv = r.open(&MemStore{})
 	pair := func(num string) []byte {
@@ -379,11 +382,11 @@ func secretOf(seed []byte) string { return b32.EncodeToString(seed) }
 func TestThePageWaitsForAgentosd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if err := (AgentosdSetup{Socket{Path: filepath.Join(t.TempDir(), "none.sock")}}).Wait(ctx, time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+	if err := (AgentosdSetup{Owner: Socket{Path: filepath.Join(t.TempDir(), "none.sock")}}).Wait(ctx, time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("wait %v", err)
 	}
 	closed := InProcess{localapi.OpSetupProgress: nil}
-	if err := (AgentosdSetup{closed}).Wait(context.Background(), time.Millisecond); err != nil {
+	if err := (AgentosdSetup{Owner: closed}).Wait(context.Background(), time.Millisecond); err != nil {
 		t.Fatalf("a refusal is an answer: %v", err)
 	}
 }
@@ -393,7 +396,7 @@ func TestThePageWaitsForAgentosd(t *testing.T) {
 // ErrAnswerOwed.
 func TestTheAdapterCarriesAnOwedAnswer(t *testing.T) {
 	no := false
-	a := AgentosdSetup{InProcess{
+	a := AgentosdSetup{Owner: InProcess{
 		localapi.OpSetupProviders: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 			return localapi.SetupProviders{Providers: []localapi.SetupProvider{{ID: "anthropic", APIKey: true, Owed: &no}, {ID: "openai", APIKey: true}}}, nil
 		},
@@ -426,5 +429,32 @@ func TestARefusedFinishForAnOwedAnswerSaysSo(t *testing.T) {
 	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}, "private": {"1"}})
 	if r.srv.setup.done() || r.setupErr() != answerOwed {
 		t.Fatalf("done %v, said %q", r.srv.setup.done(), r.setupErr())
+	}
+}
+
+type failingHost struct {
+	Hooks
+	err error
+}
+
+func (f failingHost) TrustHost(bool) error { return f.err }
+
+// REQ: HW-10. The page says only "Could not save" whatever stopped the
+// "this PC" step; the real cause goes to the journal, where the e2e driver
+// reads it to tell an unserved step (#1221) from any other failure.
+func TestSetupHostJournalsTheHookError(t *testing.T) {
+	r := newRig(t)
+	r.srv.cfg.Hooks = failingHost{Hooks: r.srv.cfg.Hooks, err: errNotServed}
+	r.srv.setup.st.Codes, r.srv.setup.st.Recovery = true, true
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	err := r.srv.setup.host(httptest.NewRequest("POST", "/setup/host", nil), "")
+	if err == nil || err.Error() != "Could not save. Try again." {
+		t.Fatalf("page error %v", err)
+	}
+	// The e2e driver's xfail table (broker/e2e/boxe2e/xfail.go) matches this text.
+	if want := "setup host hook: localui: not served by agentosd yet"; errNotServed.Error() != "localui: not served by agentosd yet" || !strings.Contains(buf.String(), want) {
+		t.Fatalf("journal %q lacks %q", buf.String(), want)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 )
 
 // needTools skips where e2fsprogs is missing, except in CI, which must
@@ -613,5 +614,84 @@ func TestUsage(t *testing.T) {
 	}
 	if run([]string{"prep"}, &bytes.Buffer{}, &stderr) != 2 {
 		t.Fatal("prep without flags ran")
+	}
+}
+
+// #1270 (HW-10): the files the seller seals route the box to the claim on
+// the shipped image, which is not the download's (BoxConfig.Download
+// unset): the claim screen first and the sticker's setup network, never
+// the download path's pairing.
+func TestASealedBoxRoutesToTheClaim(t *testing.T) {
+	needTools(t)
+	img, sums := writeImage(t, standardDisk(t, rootTree))
+	out := filepath.Join(t.TempDir(), "box1")
+	if err := runPrep(img, sums, out); err != nil {
+		t.Fatal(err)
+	}
+	box := filepath.Join(out, "box.raw")
+	off, err := rootOffset(box)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state, setup, latch change.MemStore
+	if err := state.Save(dump(t, box, off, claim.StatePath)); err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.Save(dump(t, box, off, claim.SetupNetPath)); err != nil {
+		t.Fatal(err)
+	}
+	fb, err := firstboot.Begin(firstboot.BoxConfig{
+		Claim:    claim.Config{Store: &state, BootID: func() (string, error) { return "boot-1", nil }},
+		Latch:    &latch,
+		SetupNet: &setup,
+		Reset:    func() error { return nil },
+		Card:     card.DisplayConfig{Provision: func(*card.Card) error { return nil }},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fb.Route != firstboot.RouteClaim || fb.Claim == nil || fb.Claim.Status().Claimed {
+		t.Fatalf("route %q, claim %+v", fb.Route, fb.Claim)
+	}
+	if n, err := fb.Network(); err != nil || n == nil {
+		t.Fatalf("setup network %v, %v", n, err)
+	}
+}
+
+// The sticker's two codes share one format and one style, so each carries
+// its own label right above it: "Wi-Fi password" over the setup network's
+// password and "Claim code" over the claim code. An owner who types the
+// password into /claim spends one of the claim's shared tries (K9).
+// REQ: HW-10, CH-12, A1
+func TestStickerLabelsItsCodes(t *testing.T) {
+	out := t.TempDir()
+	net := claim.SetupNet{SSID: "agentos-setup-test", Password: "PWPW-PWPW-PWPW-PWPW"}
+	code := "CCCC-CCCC-CCCC-CCCC"
+	if err := writeSticker(out, code, net); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(out, "sticker.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	// Each code's nearest label above it is its own.
+	labelOver := func(value string) string {
+		i := strings.Index(html, value)
+		if i < 0 {
+			t.Fatalf("sticker.html lacks %q", value)
+		}
+		re := regexp.MustCompile(`<div class="label">([^<]*)</div>`)
+		last := ""
+		for _, m := range re.FindAllStringSubmatchIndex(html[:i], -1) {
+			last = html[m[2]:m[3]]
+		}
+		return last
+	}
+	if got := labelOver(">" + net.Password + "<"); got != "Wi-Fi password" {
+		t.Fatalf("label above the Wi-Fi password = %q, want %q", got, "Wi-Fi password")
+	}
+	if got := labelOver(">" + code + "<"); got != "Claim code" {
+		t.Fatalf("label above the claim code = %q, want %q", got, "Claim code")
 	}
 }

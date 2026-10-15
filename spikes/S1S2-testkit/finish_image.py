@@ -22,9 +22,9 @@ def entries_for(src):
     body = [ln for ln in src.splitlines() if not re.match(r"(title|version|sort-key)\b", ln)]
     out = {}
     for name, ver, tries, title, extra in (
-            ("rollback", 2, 2, "AgentOS test kit (rollback test)",
+            ("rollback", 2, 2, "agentOS test kit (rollback test)",
              " agentos.tk=rollback systemd.mask=systemd-bless-boot.service"),
-            ("good", 1, 3, "AgentOS test kit", " agentos.tk=good")):
+            ("good", 1, 3, "agentOS test kit", " agentos.tk=good")):
         lines = ["title %s" % title, "sort-key agentos-tk", "version %d" % ver]
         lines += [ln + extra if ln.startswith("options ") else ln for ln in body]
         out["agentos-tk-%s+%d.conf" % (name, tries)] = "\n".join(lines) + "\n"

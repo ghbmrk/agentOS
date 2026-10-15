@@ -24,16 +24,20 @@ class RiskTierTest(unittest.TestCase):
             "tools/canary.py": "A",
             "tools/risk_tier.py": "A",
             "tools/ci_scope.py": "A",
+            "tools/g1_scope.txt": "A",
             "broker/mail/deliver.go": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",
-            "broker/sockprobe/probe.go": "A",
-            # LOOP-7's verdicts and in-guest scripts (P3-4b-4b; Security #515 f4).
+            "broker/sockprobe/probe.go": "B",
+            # loops is A through its core.txt allow lines.
             "broker/loops/probe.go": "A",
             "broker/loops/machine.go": "A",
+            # Tier-A-narrow (#1698): loop7 and probecmd build CRED-1 child
+            # environments and gate effects, so they stay A (Security #1700
+            # f1, f4); corpus and machprobe meet no criterion and are B.
             "broker/probecmd/probecmd.go": "A",
-            "broker/corpus/checks.go": "A",
-            "broker/machprobe/machprobe.go": "A",
+            "broker/corpus/checks.go": "B",
+            "broker/machprobe/machprobe.go": "B",
             "broker/loop7/loop7.go": "A",
             # REQ: OP-2 (W5-Db DB-1: Begin is the single gate on digest sends).
             "broker/digestqueue/queue.go": "A",
@@ -45,7 +49,8 @@ class RiskTierTest(unittest.TestCase):
             # REQ: HW-10 (CTRL-claim-wire: first boot routes the claim and the card)
             "broker/firstboot/start.go": "A",
             "broker/attention/attention.go": "B",
-            "broker/newpkg/x.go": "B",
+            # A broker package in no list is A until it is classed.
+            "broker/newpkg/x.go": "A",
             "guest/openclaw/Dockerfile": "B",
             "guest/openclaw/src/x.ts": "B",
             "SPEC.md": "B",
@@ -173,6 +178,60 @@ class RiskTierTest(unittest.TestCase):
         self.assertIn("image/build.sh", paths)
         self.assertEqual(rt.tier_of_change(paths)[0], "A")
 
+    def _base_merge_repo(self, d, side_path=None):
+        """main gains a tier-A file after the PR branches; the PR (a docs edit) merges main in.
+
+        With side_path, the PR also merges a non-main branch that adds that path.
+        """
+        def git(*args):
+            return subprocess.run(["git", "-C", d, "-c", "user.email=t@example.invalid", "-c", "user.name=t", *args],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+
+        def add(path, text, msg):
+            os.makedirs(os.path.join(d, os.path.dirname(path)), exist_ok=True)
+            with open(os.path.join(d, path), "w") as f:
+                f.write(text)
+            git("add", ".")
+            git("commit", "-qm", msg)
+
+        git("init", "-q", "-b", "main")
+        add("docs/x.md", "x\n", "base")
+        git("checkout", "-q", "-b", "pr")
+        add("docs/x.md", "x pr\n", "pr")
+        git("checkout", "-q", "main")
+        add("image/build.sh", "echo main\n", "main moves")
+        if side_path:
+            git("checkout", "-q", "-b", "side", "pr")
+            add(side_path, "side\n", "side")
+        git("checkout", "-q", "pr")
+        git("merge", "-q", "--no-edit", "main")
+        if side_path:
+            git("merge", "-q", "--no-edit", "side")
+
+    def _paths(self, d, base, head):
+        cwd = os.getcwd()
+        os.chdir(d)
+        try:
+            return rt.changed_paths(base, head)
+        finally:
+            os.chdir(cwd)
+
+    def test_a_merge_of_main_does_not_raise_the_tier(self):
+        # #1636: lines that arrived with a base merge are not the PR's own.
+        with tempfile.TemporaryDirectory() as d:
+            self._base_merge_repo(d)
+            paths = self._paths(d, "main", "pr")
+        self.assertEqual(paths, ["docs/x.md"])
+        self.assertEqual(rt.tier_of_change(paths)[0], "C")
+
+    def test_a_side_branch_merged_in_still_counts(self):
+        # No false pass: only main's history is excluded, not any merged branch.
+        with tempfile.TemporaryDirectory() as d:
+            self._base_merge_repo(d, side_path=".github/workflows/x.yml")
+            paths = self._paths(d, "main", "pr")
+        self.assertEqual(sorted(paths), [".github/workflows/x.yml", "docs/x.md"])
+        self.assertEqual(rt.tier_of_change(paths)[0], "A")
+
     def test_paths_git_would_quote_keep_tier_a(self):
         # git diff quotes names with non-ASCII bytes, quotes, tabs, backslashes
         # or newlines; the quoted form would match no A prefix and fall to B.
@@ -203,13 +262,74 @@ class RiskTierTest(unittest.TestCase):
     def test_highest_tier_wins(self):
         tier, why = rt.tier_of_change(["docs/a.md", "broker/attention/x.go", "broker/vault/y.go"])
         self.assertEqual((tier, why), ("A", ["broker/vault/y.go"]))
-        self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/route/r.go"])[0], "B")
+        self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/budget/q.go"])[0], "B")
         self.assertEqual(rt.tier_of_change([]), ("C", []))
 
     def test_every_tier_a_package_exists(self):
         # A renamed package must not silently drop to tier B.
         missing = [p for p in sorted(rt.TIER_A_BROKER) if not (ROOT / "broker" / p).is_dir()]
         self.assertEqual(missing, [])
+
+    # Tier-A-narrow (#1698; a work item with no SPEC row, so no REQ marker): a
+    # broker package beyond core.txt is A only if it (a) handles a credential
+    # or secret, (b) gates an effect or approval, or (c) parses owner-channel
+    # input; the rest of broker/ is B.
+    def test_tier_a_narrow_criteria(self):
+        cases = {
+            # (a) tpmseal seals the vault key-encryption key to the TPM.
+            "broker/tpmseal/seal.go": ("A", "broker/tpmseal/"),
+            # (b) update verifies and applies signed releases.
+            "broker/update/update.go": ("A", "broker/update/"),
+            # (c) owner parses the owner's texted commands.
+            "broker/owner/owner.go": ("A", "broker/owner/"),
+            # (b) hostdisk's udev rules hide host disks from every service.
+            "broker/hostdisk/udev/59-agentos-host-disks.rules": ("A", "broker/hostdisk/"),
+            # demoted: cgroup sets memory and CPU limits and gates nothing.
+            "broker/cgroup/cgroup.go": ("B", "broker/cgroup/"),
+            # core.txt packages stay A regardless, without a TIER_A_BROKER entry.
+            "broker/vault/vault.go": ("A", "core list: broker/vault/"),
+            # third-party source compiled into the broker stays A.
+            "broker/vendor/modules.txt": ("A", "broker/vendor/"),
+            "broker/third_party/go-imap/imap.go": ("A", "broker/third_party/"),
+            # a package in no list, or a file at the module root, is A.
+            "broker/newpkg/x.go": ("A", "unlisted broker path"),
+            "broker/x.go": ("A", "unlisted broker path"),
+        }
+        for path, want in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(rt.tier_of(path), want)
+        for pkg in ("cgroup", "corpus", "hostchange", "machprobe", "sockprobe"):
+            with self.subTest(demoted=pkg):
+                self.assertIn(pkg, rt.TIER_B_BROKER)
+                self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "B")
+        # The issue's criterion examples are listed by criterion, not only
+        # through a core.txt allow line that a refactor could remove.
+        for pkg in ("control", "apply", "recovery", "smsapi", "sipsign", "card"):
+            with self.subTest(listed=pkg):
+                self.assertIn(pkg, rt.TIER_A_BROKER)
+        # Security #1700 delta f1/f2 and P/UX/L3 delta f1 (#1654): durable
+        # writes keys, the vault and root.json (a); boxname parses the owner's
+        # NAME text and runs the CH-21 check (c); events and recall hold
+        # CRED-1 custody (a). Each is listed by criterion and is never B.
+        for pkg in ("durable", "boxname", "events", "recall"):
+            with self.subTest(promoted=pkg):
+                self.assertIn(pkg, rt.TIER_A_BROKER)
+                self.assertNotIn(pkg, rt.TIER_B_BROKER)
+                self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go"), ("A", f"broker/{pkg}/"))
+
+    def test_every_broker_package_is_classed_once(self):
+        # Each broker/ directory is tier A (listed or in core.txt) or in
+        # TIER_B_BROKER, never both; TIER_A_BROKER repeats no core or wiring
+        # package. A new directory fails here until it is classed.
+        core, wiring, allowed = rt.core_list()
+        in_core = {n.split("/")[0] for n in core | wiring | allowed}
+        a = rt.TIER_A_BROKER | in_core
+        dirs = {d.name for d in (ROOT / "broker").iterdir() if d.is_dir()}
+        dirs -= {pre.split("/")[1] for pre in rt.TIER_A_BROKER_PREFIXES}
+        self.assertEqual(sorted(dirs - a - rt.TIER_B_BROKER), [])
+        self.assertEqual(sorted(a & rt.TIER_B_BROKER), [])
+        self.assertEqual(sorted(rt.TIER_B_BROKER - dirs), [])
+        self.assertEqual(sorted(rt.TIER_A_BROKER & (core | wiring)), [])
 
     # REQ: ONB-3 (P2-2w c3: netjoin writes the home Wi-Fi PSK, so it is tier A)
     def test_netjoin_is_tier_a(self):
@@ -223,8 +343,13 @@ class RiskTierTest(unittest.TestCase):
         listed = row.split("(", 1)[1].split(")", 1)[0]
         listed = listed.split(", plus ", 1)[0]
         names = set()
-        for item in listed.split(", "):
+        for item in listed.replace("; ", ", ").split(", "):
+            item = item.split(": ", 1)[-1]  # drop the criterion label
             names.update(n.rstrip("*") for n in item.split("/"))
+        # Every name is a real package, so a label cannot pass as one.
+        missing = [n for n in sorted(names)
+                   if not (ROOT / "broker" / n).is_dir()]
+        self.assertEqual(missing, [])
         self.assertIn("claim", names)
         self.assertIn("claim", rt.TIER_A_BROKER)
         self.assertIn("firstboot", names)
@@ -266,9 +391,11 @@ class RiskTierTest(unittest.TestCase):
         # recalltool holds journal.Engine.Erase and grants.Gate.Withdraw/Authorize.
         self.assertIn("recall", allowed)
         self.assertIn("recalltool", allowed)
-        for path in ("broker/recall/recall.go", "broker/recalltool/tool.go"):
-            with self.subTest(path=path):
-                self.assertEqual(rt.tier_of(path), ("A", "core list: " + path.rsplit("/", 1)[0] + "/"))
+        self.assertEqual(rt.tier_of("broker/recalltool/tool.go"),
+                         ("A", "core list: broker/recalltool/"))
+        # recall also meets criterion (a) (CRED-1 custody), so TIER_A_BROKER
+        # names it and its reason shows first.
+        self.assertEqual(rt.tier_of("broker/recall/recall.go"), ("A", "broker/recall/"))
         for pkg in sorted(allowed):
             with self.subTest(pkg=pkg):
                 self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")
@@ -325,10 +452,10 @@ class RiskTierTest(unittest.TestCase):
                      "--pr-branch", branch, "--pr-title", title],
                     cwd=d, capture_output=True, text=True)
 
-            change("pkg/codex-CX-b-x", "broker/notapkg/x.go")      # tier B
+            change("pkg/codex-CX-b-x", "broker/attention/x.go")    # tier B
             change("pkg/codex-CX-a-x", ".github/workflows/x.yml")  # tier A
             change("pkg/codex-CX-c-x", "docs/x.md")                # tier C
-            change("claude/b-x", "broker/notapkg/y.go")            # tier B, peer branch
+            change("claude/b-x", "broker/attention/y.go")          # tier B, peer branch
             cases = [
                 ("pkg/codex-CX-b-x", "CX-b: x", 1),
                 ("pkg/codex-CX-a-x", "CX-a: x", 1),
