@@ -119,11 +119,7 @@ func newWorkerRig(t *testing.T) *workerRig {
 		if r.locked {
 			return egress.WorkerRouteConfig{}, errors.New("vault locked")
 		}
-		return egress.WorkerRouteConfig{
-			Route: egress.Codex(), Worker: worker, Logins: logins,
-			Transport: r.up, Audit: r.audit,
-			Quota: r.usage.Quota, Signal: r.usage.Signal,
-		}, nil
+		return codexRouteConfig(worker, logins, r.up, nil, r.audit, &r.usage), nil
 	}, func(worker string) {
 		r.forgetM.Lock()
 		r.forgot = append(r.forgot, worker)
@@ -746,5 +742,23 @@ func TestRES5UsageAggregatesAcrossWorkers(t *testing.T) {
 	r.ctl.ServeHTTP(w, httptest.NewRequest("POST", "/usage?provider=unread", nil))
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "primary") {
 		t.Fatalf("an unread provider: %d %s", w.Code, w.Body)
+	}
+}
+
+// The config the vault process serves feeds every reading and every refused
+// login into the usage /usage serves, so admission sees them in the shipped
+// binary and not only in the rig (RES-5, CRED-5; #1856 review B1).
+func TestRES5ShippedRouteConfigFeedsUsage(t *testing.T) {
+	var usage egress.PlanUsage
+	cfg := codexRouteConfig("pw-a", &planLogins{forgot: map[string]bool{}}, &upstream{}, nil, &nopAudit{}, &usage)
+	if cfg.Quota == nil || cfg.Signal == nil {
+		t.Fatal("the shipped route config drops readings or signals")
+	}
+	at := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	cfg.Quota(egress.QuotaReading{At: at, Provider: "codex", Worker: "pw-a", Pool: "primary", UsedPercent: 30})
+	cfg.Signal(egress.PlanSignal{At: at, Provider: "codex", Worker: "pw-a", Kind: egress.SignalLoginRefused})
+	got := usage.Snapshot("codex")
+	if len(got.Pools) != 1 || got.Pools[0].UsedPercent != 30 || !got.LoginRefused.Equal(at) {
+		t.Fatalf("usage after the shipped config's callbacks: %+v", got)
 	}
 }

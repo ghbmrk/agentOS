@@ -294,6 +294,8 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 		return fail(LoginRefused)
 	case UsedUp:
 		return fail(UsedUp)
+	case RouteBusy:
+		return fail(RouteBusy)
 	}
 	if signalled(body, d.ErrorEvents, d.UsedUp) {
 		return fail(UsedUp)
@@ -415,12 +417,15 @@ func (r *Runner) release(provider string, forgetProbe bool) {
 
 // after reads what the broker saw on its own connection since the run
 // started: a refused login, or a pool exhausted. An unreachable usage view
-// is logged and read as neither.
+// is logged and fails the run as route-busy, since what the run drew is
+// then unknown.
 func (r *Runner) after(d Declaration, start time.Time) Reason {
 	u, err := r.Usage(d.ID)
 	if err != nil {
+		// Fail closed: a refused login or a credit draw during this run
+		// would otherwise go unseen (#1856 review F3).
 		r.logf("provagent: usage for %s after a run: %v", d.ID, err)
-		return ""
+		return RouteBusy
 	}
 	if !u.LoginRefused.IsZero() && !u.LoginRefused.Before(start) {
 		return LoginRefused

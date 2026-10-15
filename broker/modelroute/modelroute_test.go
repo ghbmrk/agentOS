@@ -145,6 +145,13 @@ func TestVaultProcessDownIs503(t *testing.T) {
 // dial failure) is charged its input estimate; one that reached it and
 // got no answer, its output reservation too, since a provider may have
 // billed output the broker never saw.
+//
+// Each case has its own call bound (#1882). The hang-up and abort cases end
+// on their own, so their bound only has to outlast a loaded machine. The
+// stall case needs its bound to run out; under load it can run out before
+// the call reaches the stand-in, and then input only is the right charge.
+// So the stall's charge is checked against whether the stand-in was
+// reached, not against the clock.
 func TestUnansweredCallCharges(t *testing.T) {
 	const small = `{"model":"default","max_tokens":100}`
 	const large = `{"model":"default","max_tokens":32000}`
@@ -155,35 +162,41 @@ func TestUnansweredCallCharges(t *testing.T) {
 		body  string
 		sock  func(t *testing.T) string // a socket nothing serves
 		h     http.HandlerFunc
+		bound time.Duration
 		extra int64 // output charged beyond the input estimate
 	}{
-		{"absent socket", small, func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent.sock") }, nil, 0},
-		{"stale socket", small, staleUnix, nil, 0},
+		{"absent socket", small, func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent.sock") }, nil, 30 * time.Second, 0},
+		{"stale socket", small, staleUnix, nil, 30 * time.Second, 0},
 		{"stalls past the call bound", large, nil, func(w http.ResponseWriter, r *http.Request) {
 			io.Copy(io.Discard, r.Body)
 			<-stalled
-		}, 32000},
+		}, time.Second, 32000},
 		{"hangs up after the request", small, nil, func(w http.ResponseWriter, r *http.Request) {
 			io.Copy(io.Discard, r.Body)
 			conn, _, err := w.(http.Hijacker).Hijack()
 			if err == nil {
 				conn.Close()
 			}
-		}, 100},
+		}, 30 * time.Second, 100},
 		{"aborts after the request", small, nil, func(w http.ResponseWriter, r *http.Request) {
 			io.Copy(io.Discard, r.Body)
 			panic(http.ErrAbortHandler)
-		}, 100},
+		}, 30 * time.Second, 100},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var sock string
+			var reached atomic.Bool
 			if c.h != nil {
-				sock = serveUnix(t, &fakeEgress{h: c.h})
+				h := c.h
+				sock = serveUnix(t, &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
+					reached.Store(true)
+					h(w, r)
+				}})
 			} else {
 				sock = c.sock(t)
 			}
 			fwd := Forward(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, Denial) {}})
-			m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), CallTimeout: 100 * time.Millisecond,
+			m, err := meter.Open(meter.Config{Path: filepath.Join(t.TempDir(), "meter.json"), CallTimeout: c.bound,
 				MachineCap: meter.Limits{Calls: 10, Tokens: 1 << 30}, OverallCap: meter.Limits{Calls: 10, Tokens: 1 << 30}})
 			if err != nil {
 				t.Fatal(err)
@@ -193,13 +206,27 @@ func TestUnansweredCallCharges(t *testing.T) {
 			if w.Code != http.StatusServiceUnavailable {
 				t.Fatalf("got %d", w.Code)
 			}
-			want := meter.Tokens(int64(len(c.body))) + c.extra
+			input := meter.Tokens(int64(len(c.body)))
+			want := input + c.extra
 			if c.extra > 0 {
 				// It may also have spent every further attempt it was
 				// allowed (SR3-7-f1c).
 				want *= MaxRetries + 1
 			}
-			if u := m.Usage("m1"); u.Tokens != want || u.Calls != 1 {
+			u := m.Usage("m1")
+			if u.Calls != 1 {
+				t.Fatalf("charged %d calls, want 1", u.Calls)
+			}
+			if c.h != nil && !reached.Load() {
+				// The bound ran out before the call reached the stand-in:
+				// input only, or in full if the connection was already up.
+				// Never less than the input.
+				if u.Tokens != input && u.Tokens != want {
+					t.Fatalf("unreached call charged %d tokens, want %d or %d", u.Tokens, input, want)
+				}
+				return
+			}
+			if u.Tokens != want {
 				t.Fatalf("charged %d tokens and %d calls, want %d and 1", u.Tokens, u.Calls, want)
 			}
 		})

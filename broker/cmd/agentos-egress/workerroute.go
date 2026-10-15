@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // Provider worker routes (#1014 part c, A14, CRED-5).
@@ -349,16 +350,7 @@ func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error)
 		if _, err := c.loginStore(); err != nil {
 			return egress.WorkerRouteConfig{}, err
 		}
-		return egress.WorkerRouteConfig{
-			Route: egress.Codex(), Worker: worker, Logins: logins,
-			Transport: c.modelTransport, Guard: c.guard, Audit: noAudit{},
-			Quota: func(q egress.QuotaReading) {
-				log.Printf("plan quota %s %s: %.1f%% used, exhausted=%v", q.Worker, q.Pool, q.UsedPercent, q.Exhausted)
-			},
-			Meter: func(u egress.PlanUse) {
-				log.Printf("plan use %s %s: HTTP %d, %d bytes out, %d bytes in", u.Worker, u.Endpoint, u.Status, u.RequestBytes, u.ResponseBytes)
-			},
-		}, nil
+		return codexRouteConfig(worker, logins, c.modelTransport, c.guard, noAudit{}, usage), nil
 	}, logins.Forget, func(worker string) (map[string][]byte, error) {
 		return logins.Seed("codex", worker)
 	})
@@ -374,6 +366,29 @@ func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error)
 		p.closeAll()
 		return err
 	}), nil
+}
+
+// codexRouteConfig is one worker's Codex route as the vault process serves
+// it: every reading the route sees on the broker's own connection, and every
+// refused login, is fed to usage, which /usage serves to admission (RES-5,
+// CRED-5). The tests build their routes through it, so they cannot drift
+// from what ships.
+func codexRouteConfig(worker string, logins egress.PlanLoginStore, tr http.RoundTripper, guard *netguard.Policy, audit egress.Auditor, usage *egress.PlanUsage) egress.WorkerRouteConfig {
+	return egress.WorkerRouteConfig{
+		Route: egress.Codex(), Worker: worker, Logins: logins,
+		Transport: tr, Guard: guard, Audit: audit,
+		Quota: func(q egress.QuotaReading) {
+			log.Printf("plan quota %s %s: %.1f%% used, exhausted=%v", q.Worker, q.Pool, q.UsedPercent, q.Exhausted)
+			usage.Quota(q)
+		},
+		Signal: func(s egress.PlanSignal) {
+			log.Printf("plan signal %s %s: %s", s.Provider, s.Worker, s.Kind)
+			usage.Signal(s)
+		},
+		Meter: func(u egress.PlanUse) {
+			log.Printf("plan use %s %s: HTTP %d, %d bytes out, %d bytes in", u.Worker, u.Endpoint, u.Status, u.RequestBytes, u.ResponseBytes)
+		},
+	}
 }
 
 type closerFunc func() error

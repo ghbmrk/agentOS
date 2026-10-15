@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/netguard"
@@ -354,6 +356,12 @@ type workerRoute struct {
 	keys      map[string]bool
 	inputs    map[string]bool
 	parts     map[string]bool
+
+	// balance is the last credits balance this route read; a lower one
+	// later is a credit draw (W8).
+	mu         sync.Mutex
+	balance    float64
+	hasBalance bool
 }
 
 // NewWorkerRoute returns the handler a worker's forwarder reaches.
@@ -987,17 +995,20 @@ func (w *workerRoute) responseHeaders(h http.Header) []string {
 }
 
 // readQuota turns the provider's quota headers into one reading per pool.
-// A credits or reached-limit signal is not yet measured (#809), so any
-// such header reads as used up.
+// A reached limit (X-Codex-Rate-Limit-Reached-Type, or a pool at 100%) reads
+// as used up. The X-Codex-Credits-* headers (has-credits, unlimited,
+// balance, as codex-rs reads them) describe the account's credits, not a
+// draw, so they alone do not; a balance lower than the last one this route
+// read is a draw during the run, and reads as used up (W8). Whether the
+// service also draws credits before a limit is reached is unmeasured until
+// #809.
 func (w *workerRoute) readQuota(h http.Header) {
 	if w.c.Quota == nil {
 		return
 	}
 	exhausted := h.Get("X-Codex-Rate-Limit-Reached-Type") != ""
-	for k := range h {
-		if strings.HasPrefix(k, "X-Codex-Credits-") {
-			exhausted = true
-		}
+	if w.creditDrawn(h.Get("X-Codex-Credits-Balance")) {
+		exhausted = true
 	}
 	now := w.c.Now()
 	emitted := false
@@ -1024,6 +1035,21 @@ func (w *workerRoute) readQuota(h http.Header) {
 	if exhausted && !emitted {
 		w.c.Quota(QuotaReading{At: now, Provider: w.c.Route.Provider, Worker: w.c.Worker, Pool: "plan", Exhausted: true})
 	}
+}
+
+// creditDrawn records a credits balance and reports whether it is lower
+// than the last one this route read. An absent or unreadable balance draws
+// nothing and keeps the last one.
+func (w *workerRoute) creditDrawn(balance string) bool {
+	b, err := strconv.ParseFloat(strings.TrimSpace(balance), 64)
+	if err != nil || math.IsNaN(b) || math.IsInf(b, 0) {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	drawn := w.hasBalance && b < w.balance
+	w.balance, w.hasBalance = b, true
+	return drawn
 }
 
 // readRefused signals a refused login when a refresh is answered 400 or 401

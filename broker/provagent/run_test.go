@@ -639,6 +639,23 @@ func TestUnreadableUsageRefusesAdmission(t *testing.T) {
 	}
 }
 
+// W8 / OP-8: usage that cannot be read after the run fails the run closed
+// (route-busy, a fallback): a refused login or a credit draw during it
+// would otherwise go unseen (#1856 review F3).
+func TestUnreadableUsageAfterTheRunFailsClosed(t *testing.T) {
+	var g *rig
+	g = newRig(func(c vm.Command, s *stub) vm.ExecResult {
+		g.mu.Lock()
+		g.usageErr = errors.New("control socket down")
+		g.mu.Unlock()
+		return ok("finished")(c, s)
+	})
+	out, err := g.r.Run(context.Background(), req("b"))
+	if reasonOf(err) != RouteBusy || !FallsBack(err) || out != "" {
+		t.Fatalf("got %q, %v; want a route-busy fallback", out, err)
+	}
+}
+
 // RES-5 before the first reading: readings come only from the provider's
 // responses on the broker's connection, so a pool nobody has run against
 // is unread. One probe run is admitted per provider while it is unread or
