@@ -1233,6 +1233,53 @@ func TestEnrollAfterTheSlotIsDecidedWithoutAPINSaysTheHostIsTrusted(t *testing.T
 	}
 }
 
+// REQ: CRED-9, HW-1
+
+// VAULT-slot-decided-2 (#1741): when the removal of a trusted PC is
+// decided and the slot change then reports an error, untrust says the PC
+// is no longer trusted (not "no such host"), the owner is told, and this
+// PC's lockout hierarchy is given back: a removed PC never opens
+// unattended again, so no later start would give it back.
+func TestUntrustAfterTheSlotIsDecidedSaysThePCIsRemoved(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	hosts, _ := r.c.hosts()
+	r.notes = nil
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
+	n, err := r.c.untrust(r.code(), hosts[0].ID)
+	if !errors.Is(err, errHostRemovedDecided) || n != 1 {
+		t.Fatalf("untrust after the seal: %d, %v", n, err)
+	}
+	if !strings.Contains(err.Error(), "no longer trusted") || !strings.Contains(err.Error(), "next time the vault is unlocked") {
+		t.Fatalf("the text does not say the PC is removed, or how it finishes: %q", err)
+	}
+	restore()
+	if !r.noted("a trusted host was removed (saving not finished)") {
+		t.Fatalf("owner not told: %q", r.notes)
+	}
+	if r.lockoutEntry() != "" {
+		t.Fatal("lockout authorization kept after a decided untrust")
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout not given back after a decided untrust: %v", err)
+	}
+	// The text's step: the removed PC no longer opens unattended, and the
+	// next unlock finishes it.
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatalf("the removed PC opened unattended: %v", r.phase())
+	}
+	r.unknownHostUnlock(t)
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 0 {
+		t.Fatalf("hosts after the next start: %v, %v", hosts, err)
+	}
+}
+
 // REQ: HW-8
 
 // TRUST-lockout-sync (#1558): the lockout authorization is made durable in
