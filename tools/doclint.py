@@ -11,7 +11,9 @@
   DECISIONS.md  a Decision cell over 300 characters links decisions/D-NNN.md (D-056); links resolve
   ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md
   briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4, and
-                none keeps its own `**State:**` line (state lives on the work-item issue)
+                none keeps its own `**State:**` line (state lives on the work-item issue), and each
+                has an `**Acceptance tests:**` line unless listed in tools/brief_acceptance_baseline.txt
+                (FIRST-PASS, #1818)
 
 BOARD.md is generated from the work-item issues (tools/board.py), so its rows are checked there, not here.
 
@@ -68,8 +70,19 @@ def operating_refs(root, files):
                         yield f"{name}:{n}: OPERATING §{num} does not exist"
 
 
+ACCEPTANCE_LINE = re.compile(r"^\s*(?:[-*]\s*)?\*\*Acceptance tests?:?\*\*", re.M)
+
+
+def brief_baseline(root):
+    f = root / "tools" / "brief_acceptance_baseline.txt"
+    return set(f.read_text().split()) if f.is_file() else set()
+
+
 def briefs(root):
+    legacy = brief_baseline(root)
     for path in sorted((root / "briefs").glob("*.md")):
+        if path.name not in legacy and not ACCEPTANCE_LINE.search(path.read_text()):
+            yield f"briefs/{path.name}: no `**Acceptance tests:**` line; name each ID's test up front, or `none: <why>`"
         for n, line in enumerate(path.read_text().splitlines(), 1):
             if STATE_LINE.match(line):
                 yield f"briefs/{path.name}:{n}: `**State:**` line; state lives on the work-item issue"

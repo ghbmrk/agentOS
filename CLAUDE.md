@@ -3,7 +3,7 @@
 Read SPEC.md for what to build and PLAN.md for how. This file is the working contract for builder (L2) and reviewer (L3) agents: rules only, one line each. docs/OPERATING.md gives the procedures and reasons behind them, and README.md maps every document and gives each role its reading order.
 
 ## Builder (L2)
-- Work only from a package brief (`briefs/<ID>.md`, linked from its BOARD.md row). Touch only files inside the brief's declared scope.
+- Work only from a package brief (`briefs/<ID>.md`, linked from its BOARD.md row). Touch only files inside the brief's declared scope. The brief names its acceptance tests; if it doesn't, stop and say so (OPERATING §5).
 - **Tests first.** For each requirement ID in the brief, write a failing test, then the smallest change that passes it.
 - Claim coverage with a marker comment in the test file: `REQ: CRED-1, CRED-4`. Run `python3 tools/trace.py` locally to see coverage, but never commit TRACE.md: CI fails a PR that changes it, and the `trace` workflow opens a PR with the regenerated file after each merge.
 - "Done" = CI green + every brief ID covered by a passing test. Never assert done without that evidence.
@@ -23,7 +23,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - A point outside the cited IDs is `release` or `later`, never a blocker. The release findings from one PR's reviews make one follow-up brief.
 - Review depth follows the risk tier `python3 tools/risk_tier.py --git origin/main HEAD` prints; the stages each tier needs are in OPERATING §3–4. Tier A needs the strongest model and an explicit threat check.
 - Each review runs in a new session. There are no standing reviewer or lens sessions; lens memory lives in DECISIONS.md and `reviews/<lens>/README.md`.
-- A kind of finding seen on a second PR becomes a lint rule, test or CI check in the next package that touches the area, listed in the lens README (OPERATING §4).
+- A kind of finding seen on a second PR becomes a lint rule, test or CI check in that same follow-up PR, named on its Findings line and listed in the lens README (OPERATING §4, FIRST-PASS).
 
 ## Budget (reasons: OPERATING §1, §5)
 - The only hard limit is the subscription (usage credits off). Target: ~100% of the weekly limit used by each reset (Mark, 2026-10-04). ~14% a day is not a ceiling: "14% a day shouldn't be a ceiling. No ceiling as long as not wasteful" (Mark, 2026-10-13 12:40Z). Spend where the next unit of work has clear value, don't idle, and don't spend just because budget remains.
