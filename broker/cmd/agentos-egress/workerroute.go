@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sync"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
 )
@@ -29,7 +30,10 @@ import (
 // directory holding only its route socket; the broker mounts that
 // directory, and only that one, into the worker. The directory is the
 // worker's identity: the route is built for that worker's name, and
-// nothing in a request can change it (egress K28).
+// nothing in a request can change it (egress K28). Before the machine
+// starts the broker also fetches the worker's placeholder auth.json over the
+// same socket (/seed), so the placeholders it seeds are the ones this
+// process resolves.
 
 // Socket names for provider workers.
 const (
@@ -44,11 +48,27 @@ const providerPrefix = "pw-"
 
 var providerRE = regexp.MustCompile(`^pw-[a-z0-9][a-z0-9-]{0,36}$`)
 
+// Bounds on the route sockets (CRED-8, K28). Each worker's socket accepts
+// routeConns connections; more wait in the kernel's queue. Across every
+// worker at most routeCalls calls are in flight, each holding at most one
+// request body (egress.DefaultMaxBody); past that a call is refused with 503
+// before its body is read. tests/test_egress_memory.py counts routeCalls
+// in the vault process's memory ceiling.
+const (
+	routeConns = 8
+	routeCalls = 8
+	// routeReadTimeout bounds reading one request, headers and body.
+	routeReadTimeout = time.Minute
+)
+
 // workerRoutes opens and closes provider workers' route sockets.
 type workerRoutes struct {
 	dir    string
 	config func(worker string) (egress.WorkerRouteConfig, error)
 	forget func(worker string)
+	seed   func(worker string) (map[string][]byte, error)
+	conns  int
+	calls  chan struct{}
 
 	mu   sync.Mutex
 	open map[string]*routeServer
@@ -61,15 +81,21 @@ type routeServer struct {
 
 // newWorkerRoutes returns the set. Route directories are made under dir.
 // config supplies a worker's route configuration and fails while the vault
-// is locked; forget drops the worker's placeholders when its route closes.
-func newWorkerRoutes(dir string, config func(string) (egress.WorkerRouteConfig, error), forget func(string)) *workerRoutes {
-	return &workerRoutes{dir: dir, config: config, forget: forget, open: map[string]*routeServer{}}
+// is locked; forget drops the worker's placeholders when its route closes
+// for good (/close, shutdown), never on a reopen; seed returns the worker's
+// placeholder files (PlanLogins.Seed).
+func newWorkerRoutes(dir string, config func(string) (egress.WorkerRouteConfig, error), forget func(string), seed func(string) (map[string][]byte, error)) *workerRoutes {
+	return &workerRoutes{
+		dir: dir, config: config, forget: forget, seed: seed,
+		conns: routeConns, calls: make(chan struct{}, routeCalls),
+		open: map[string]*routeServer{},
+	}
 }
 
-// handler serves POST /open and POST /close with ?machine=<id>.
+// handler serves POST /open, /close and /seed with ?machine=<id>.
 func (p *workerRoutes) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || (r.URL.Path != "/open" && r.URL.Path != "/close") {
+		if r.Method != http.MethodPost || (r.URL.Path != "/open" && r.URL.Path != "/close" && r.URL.Path != "/seed") {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -78,28 +104,45 @@ func (p *workerRoutes) handler() http.Handler {
 			http.Error(w, "not a provider worker", http.StatusBadRequest)
 			return
 		}
-		if r.URL.Path == "/close" {
+		switch r.URL.Path {
+		case "/close":
 			p.close(id)
 			w.WriteHeader(http.StatusOK)
-			return
-		}
-		dir, err := p.openRoute(id)
-		if err != nil {
-			status := http.StatusInternalServerError
-			if errors.Is(err, errRouteLocked) {
-				status = http.StatusServiceUnavailable
+		case "/seed":
+			if p.seed == nil {
+				http.Error(w, "no seed", http.StatusNotFound)
+				return
 			}
-			http.Error(w, err.Error(), status)
-			return
+			files, err := p.seed(id)
+			if errors.Is(err, egress.ErrVaultLocked) {
+				http.Error(w, errRouteLocked.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(files)
+		default:
+			dir, err := p.openRoute(id)
+			if errors.Is(err, errRouteLocked) {
+				// One line: RouteControl maps the 503 to ErrVaultLocked.
+				http.Error(w, errRouteLocked.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"dir": dir})
 		}
-		json.NewEncoder(w).Encode(map[string]string{"dir": dir})
 	})
 }
 
 var errRouteLocked = errors.New("the vault is locked; no provider route can open")
 
 // openRoute makes the worker's directory and serves its route in it. An
-// open worker's route is replaced (a restart).
+// open worker's route is replaced (a restart) and keeps its placeholders.
 func (p *workerRoutes) openRoute(id string) (string, error) {
 	cfg, err := p.config(id)
 	if err != nil {
@@ -111,14 +154,23 @@ func (p *workerRoutes) openRoute(id string) (string, error) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.closeLocked(id)
+	p.stopLocked(id)
 	if err := runDir(p.dir); err != nil {
 		return "", err
 	}
 	dir := filepath.Join(p.dir, id)
-	// 0755: the guest's uid reads the directory through the read-only
-	// mount; the socket in it is what carries the route.
-	if err := os.Mkdir(dir, 0o755); err != nil {
+	// A directory a crashed process left would make Mkdir fail; p.dir is
+	// ours (runDir), so nothing in it is another uid's.
+	if err := os.RemoveAll(dir); err != nil {
+		return "", err
+	}
+	// 0700 and 0600 whatever the umask: no other host uid may reach the
+	// route (K28). runsc reaches it through the worker's mount as root.
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		os.RemoveAll(dir)
 		return "", err
 	}
 	path := filepath.Join(dir, RouteSocket)
@@ -127,24 +179,43 @@ func (p *workerRoutes) openRoute(id string) (string, error) {
 		os.RemoveAll(dir)
 		return "", err
 	}
-	if err := os.Chmod(path, 0o666); err != nil {
+	if err := os.Chmod(path, 0o600); err != nil {
 		ln.Close()
 		os.RemoveAll(dir)
 		return "", err
 	}
-	srv := newServer(h)
-	go srv.Serve(ln)
+	srv := newServer(p.bounded(h))
+	srv.ReadTimeout = routeReadTimeout
+	go srv.Serve(newLimitListener(ln, p.conns))
 	p.open[id] = &routeServer{dir: dir, srv: srv}
 	return dir, nil
 }
 
+// bounded refuses a call with 503 while routeCalls calls are in flight
+// across every worker route, before the call's body is read.
+func (p *workerRoutes) bounded(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case p.calls <- struct{}{}:
+			defer func() { <-p.calls }()
+			h.ServeHTTP(w, r)
+		default:
+			http.Error(w, "egress busy: too many provider calls", http.StatusServiceUnavailable)
+		}
+	})
+}
+
+// close ends id's route for good and forgets its placeholders.
 func (p *workerRoutes) close(id string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.closeLocked(id)
+	p.stopLocked(id)
+	p.forgetLocked(id)
 }
 
-func (p *workerRoutes) closeLocked(id string) {
+// stopLocked stops serving id's route and removes its directory; the
+// worker's placeholders stay (a reopen is the same worker restarting).
+func (p *workerRoutes) stopLocked(id string) {
 	rs, ok := p.open[id]
 	if !ok {
 		return
@@ -152,18 +223,65 @@ func (p *workerRoutes) closeLocked(id string) {
 	rs.srv.Close()
 	os.RemoveAll(rs.dir)
 	delete(p.open, id)
+}
+
+func (p *workerRoutes) forgetLocked(id string) {
 	if p.forget != nil {
 		p.forget(id)
 	}
 }
 
-// closeAll closes every route (shutdown).
+// closeAll closes every route and forgets its worker (shutdown).
 func (p *workerRoutes) closeAll() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for id := range p.open {
-		p.closeLocked(id)
+		p.stopLocked(id)
+		p.forgetLocked(id)
 	}
+}
+
+// limitListener accepts at most n connections at once; more wait in the
+// kernel's queue and cost this process nothing (guest/plane.go's pattern).
+type limitListener struct {
+	net.Listener
+	sem  chan struct{}
+	done chan struct{}
+	once sync.Once
+}
+
+func newLimitListener(l net.Listener, n int) *limitListener {
+	return &limitListener{Listener: l, sem: make(chan struct{}, n), done: make(chan struct{})}
+}
+
+func (l *limitListener) Accept() (net.Conn, error) {
+	select {
+	case l.sem <- struct{}{}:
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+	c, err := l.Listener.Accept()
+	if err != nil {
+		<-l.sem
+		return nil, err
+	}
+	return &limitConn{Conn: c, release: sync.OnceFunc(func() { <-l.sem })}, nil
+}
+
+func (l *limitListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return l.Listener.Close()
+}
+
+type limitConn struct {
+	net.Conn
+	release func()
+}
+
+func (c *limitConn) Close() error {
+	err := c.Conn.Close()
+	c.release()
+	return err
 }
 
 // loginStore is the open vault as the plan logins use it, or
@@ -191,6 +309,11 @@ func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error)
 	if err := runDir(dir); err != nil {
 		return nil, err
 	}
+	// Route directories a crashed process left are cleared: their workers'
+	// mounts then point at nothing, which fails closed (K28).
+	if err := os.RemoveAll(filepath.Join(dir, workerRouteRoot)); err != nil {
+		return nil, err
+	}
 	p := newWorkerRoutes(filepath.Join(dir, workerRouteRoot), func(worker string) (egress.WorkerRouteConfig, error) {
 		if _, err := c.loginStore(); err != nil {
 			return egress.WorkerRouteConfig{}, err
@@ -205,7 +328,9 @@ func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error)
 				log.Printf("plan use %s %s: HTTP %d, %d bytes out, %d bytes in", u.Worker, u.Endpoint, u.Status, u.RequestBytes, u.ResponseBytes)
 			},
 		}, nil
-	}, logins.Forget)
+	}, logins.Forget, func(worker string) (map[string][]byte, error) {
+		return logins.Seed("codex", worker)
+	})
 	ln, err := listen(dir, ProviderSocket, brokerUID)
 	if err != nil {
 		return nil, err

@@ -109,3 +109,66 @@ func TestCRED5ForwarderStartsTheCLIAfterListening(t *testing.T) {
 		t.Fatalf("child saw address %q", b)
 	}
 }
+
+// TestA14ForwarderCapsConnections: past maxConns open relays the forwarder accepts and closes the
+// next connection at once, so a runaway CLI cannot exhaust the worker's fds or memory; when a relay
+// ends the slot frees.
+func TestA14ForwarderCapsConnections(t *testing.T) {
+	old := maxConns
+	maxConns = 1
+	defer func() { maxConns = old }()
+	hold := make(chan struct{})
+	sock := sockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-hold
+	}))
+	addr := start(t, sock)
+	first, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.WriteString(first, "GET /backend-api/codex/models HTTP/1.1\r\nHost: x\r\n\r\n")
+	time.Sleep(100 * time.Millisecond)
+	second, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	second.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := second.Read(make([]byte, 1)); err == nil || n != 0 {
+		t.Fatalf("a connection past the cap was relayed (%d, %v)", n, err)
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("a connection past the cap was held open, not closed")
+	}
+	close(hold)
+	first.Close()
+	time.Sleep(100 * time.Millisecond)
+	resp, err := http.Get("http://" + addr + "/backend-api/codex/models")
+	if err != nil {
+		t.Fatalf("after the slot freed: %v", err)
+	}
+	resp.Body.Close()
+}
+
+// TestA14ForwarderClosesIdleRelays: a relay with no traffic either way for idleTimeout is closed.
+func TestA14ForwarderClosesIdleRelays(t *testing.T) {
+	old := idleTimeout
+	idleTimeout = 200 * time.Millisecond
+	defer func() { idleTimeout = old }()
+	sock := sockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := start(t, sock)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	start := time.Now()
+	if _, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatal("an idle relay sent data")
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("an idle relay was never closed")
+	}
+	if time.Since(start) < idleTimeout {
+		t.Fatal("the relay closed before it was idle")
+	}
+}

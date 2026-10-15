@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -427,6 +428,17 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		deny(http.StatusForbidden, "encoded request body refused")
 		return
 	}
+	// A call that must carry this worker's placeholder is refused before
+	// its body is read, so a caller holding none cannot make this process
+	// buffer a body (CRED-8, K28). A refresh's placeholder is in its body,
+	// which maxExchangeRequest bounds.
+	var real string
+	if ep.Kind == KindResponses || ep.Kind == KindRead {
+		if real, ok = w.bearer(r.Header); !ok {
+			deny(http.StatusForbidden, "no login placeholder of this worker")
+			return
+		}
+	}
 	limit := w.c.MaxBody
 	if ep.Kind == KindRefresh || ep.Kind == KindCode || ep.Kind == KindDevice {
 		limit = maxExchangeRequest
@@ -455,11 +467,6 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	var injected [][]byte
 	switch ep.Kind {
 	case KindResponses, KindRead:
-		real, ok := w.bearer(r.Header)
-		if !ok {
-			deny(http.StatusForbidden, "no login placeholder of this worker")
-			return
-		}
 		injected = append(injected, []byte(real))
 		up.Header.Set("Authorization", "Bearer "+real)
 		if ep.Kind == KindRead {
@@ -1017,7 +1024,8 @@ func set(list []string) map[string]bool {
 // worker's services opens its route socket and returns the directory that
 // holds only that socket, which the machine mounts at /run/agentos; closing
 // removes it. An open that is refused (vault locked, not a provider worker)
-// is an error, so the worker does not start without its route.
+// is an error, so the worker does not start without its route; a locked
+// vault is ErrVaultLocked.
 type RouteControl struct{ Socket string }
 
 func (c RouteControl) do(verb, id string) (*http.Response, error) {
@@ -1028,25 +1036,58 @@ func (c RouteControl) do(verb, id string) (*http.Response, error) {
 			return d.DialContext(ctx, "unix", c.Socket)
 		}},
 	}
-	return cl.Post("http://egress/"+verb+"?machine="+url.QueryEscape(id), "text/plain", nil)
+	// The dialer ignores the host; localhost names no outside host.
+	return cl.Post("http://localhost/"+verb+"?machine="+url.QueryEscape(id), "text/plain", nil)
 }
 
-// Open opens id's route and returns its directory.
-func (c RouteControl) Open(id string) (string, error) {
-	resp, err := c.do("open", id)
+// call posts verb for id and returns the reply body, mapping a 503 to
+// ErrVaultLocked.
+func (c RouteControl) call(verb, id string, max int64) ([]byte, error) {
+	resp, err := c.do(verb, id)
 	if err != nil {
-		return "", fmt.Errorf("worker route for %s: %w", id, err)
+		return nil, fmt.Errorf("worker route for %s: %w", id, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("worker route for %s: %s", id, strings.TrimSpace(string(body)))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, max))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return body, nil
+	case http.StatusServiceUnavailable:
+		return nil, fmt.Errorf("worker route for %s: %w", id, ErrVaultLocked)
+	}
+	return nil, fmt.Errorf("worker route for %s: %s", id, strings.TrimSpace(string(body)))
+}
+
+// Open opens id's route and returns its directory. The directory must be
+// absolute, clean and named for id, whatever the reply says (K28).
+func (c RouteControl) Open(id string) (string, error) {
+	body, err := c.call("open", id, 4<<10)
+	if err != nil {
+		return "", err
 	}
 	var out struct{ Dir string }
 	if err := json.Unmarshal(body, &out); err != nil || out.Dir == "" {
 		return "", fmt.Errorf("worker route for %s: unreadable reply", id)
 	}
+	if !filepath.IsAbs(out.Dir) || filepath.Clean(out.Dir) != out.Dir || filepath.Base(out.Dir) != id {
+		return "", fmt.Errorf("worker route for %s: reply names %q, not this worker's directory", id, out.Dir)
+	}
 	return out.Dir, nil
+}
+
+// Seed returns the vm seed the vault process minted for provider worker
+// id (PlanLogins.Seed: its placeholder auth.json), for the broker to put in
+// the machine before it starts and opens its route (K28, #1015).
+func (c RouteControl) Seed(id string) (map[string][]byte, error) {
+	body, err := c.call("seed", id, 64<<10)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string][]byte
+	if err := json.Unmarshal(body, &out); err != nil || len(out) == 0 {
+		return nil, fmt.Errorf("worker route for %s: unreadable seed", id)
+	}
+	return out, nil
 }
 
 // Close closes id's route; a failure leaves the route to the vault

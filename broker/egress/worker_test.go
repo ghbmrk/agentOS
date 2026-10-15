@@ -868,10 +868,100 @@ func TestA14RouteControlOpensAndClosesOverTheSocket(t *testing.T) {
 	}
 	refuse = true
 	mu.Unlock()
-	if _, err := c.Open("pw-a"); err == nil {
-		t.Fatal("a refused open returned no error")
+	if _, err := c.Open("pw-a"); !errors.Is(err, ErrVaultLocked) {
+		t.Fatalf("a locked open returned %v, want ErrVaultLocked", err)
+	} else if strings.Contains(err.Error(), "\n") {
+		t.Fatalf("a locked open's error spans lines: %q", err)
+	}
+	if _, err := c.Seed("pw-a"); !errors.Is(err, ErrVaultLocked) {
+		t.Fatalf("a locked seed returned %v, want ErrVaultLocked", err)
 	}
 	if _, err := (RouteControl{Socket: filepath.Join(dir, "none.sock")}).Open("pw-a"); err == nil {
 		t.Fatal("an unreachable control socket returned no error")
+	}
+}
+
+// countingBody counts what a handler reads of a request body.
+type countingBody struct {
+	n atomic.Int64
+	r io.Reader
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingBody) Close() error { return nil }
+
+// A request without this worker's placeholder is refused before any of its
+// body is read, so a caller holding no credential cannot make the vault
+// process buffer a body (CRED-8, egress K28).
+func TestWorkerRouteRefusesBeforeReadingTheBody(t *testing.T) {
+	r := newWorkerRig(t, false)
+	for _, auth := range []string{"", "Bearer ph-access-w2"} {
+		req := responses(codexBody(clientTools))
+		body := &countingBody{r: strings.NewReader(strings.Repeat("x", 1<<20))}
+		req.Body = body
+		req.Header.Set("Authorization", auth)
+		if w := r.do(req); w.Code != http.StatusForbidden {
+			t.Fatalf("authorization %q: %d", auth, w.Code)
+		}
+		if n := body.n.Load(); n != 0 {
+			t.Fatalf("authorization %q: %d body bytes read before the placeholder check", auth, n)
+		}
+	}
+}
+
+// controlStub serves reply on a unix socket in place of agentos-egress.
+func controlStub(t *testing.T, h http.HandlerFunc) RouteControl {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "rc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "p.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: h}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return RouteControl{Socket: sock}
+}
+
+// Open hands the machine only an absolute, clean directory named for the
+// worker it asked for, whatever the vault process replies (A14).
+func TestA14RouteControlChecksTheDirectory(t *testing.T) {
+	for _, dir := range []string{"run/x/pw-a", "/run/x/pw-b", "/run/x/../y/pw-a", "/run/x/pw-a/", "/run/x//pw-a", "/"} {
+		c := controlStub(t, func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]string{"dir": dir})
+		})
+		if got, err := c.Open("pw-a"); err == nil {
+			t.Errorf("reply %q: opened %q", dir, got)
+		}
+	}
+}
+
+// Seed returns the placeholder files the vault process minted for the
+// worker, for agentosd to put in the machine before it starts (#1015).
+func TestCRED5RouteControlSeedsTheWorker(t *testing.T) {
+	var path string
+	c := controlStub(t, func(w http.ResponseWriter, r *http.Request) {
+		path = r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
+		json.NewEncoder(w).Encode(map[string][]byte{CodexAuthFile: []byte(`{"tokens":{}}`)})
+	})
+	got, err := c.Seed("pw-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "POST /seed?machine=pw-a" {
+		t.Fatalf("called %q", path)
+	}
+	if len(got) != 1 || string(got[CodexAuthFile]) != `{"tokens":{}}` {
+		t.Fatalf("seed %q", got)
 	}
 }
