@@ -13,11 +13,15 @@ It refuses a tree whose networkd could forward or masquerade (#1478): the inboun
 forward hook, so the wired uplink file is the only live .network file, it holds exactly the shipped
 keys, and no networkd setting turns forwarding on. And it refuses a tree that tells the LAN about the box (#1479): the uplink sends no
 hostname and uses addresses without the MAC, and resolved answers no LLMNR or multicast DNS.
-Usage outside mkosi: mkosi.finalize ROOT"""
+Every tmpfiles.d line must be on tmpfiles.allow, nothing but mkosi's credentials may ship in a credential
+store, and no configuration file it reads may be a link other than a mask to /dev/null, or be reached
+through a step that is not root's or that anyone else can write; no link anywhere in the tree may
+reach into a directory anyone on the box can write (#1543).
+Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT prints the
+allowlist for a tree."""
 import errno
 import fnmatch
 import os
-import pathlib
 import re
 import stat
 import sys
@@ -98,47 +102,202 @@ LONG_LINE_MAX = 1 << 20
 # Where the booted box mounts something of its own (devtmpfs, proc, sysfs, tmpfs): a link into one
 # reaches what the box makes, not the image, and nothing the tree puts there is read.
 BOX_MOUNTS = ("dev", "proc", "sys", "run", "tmp")
+# #1543 Security R2: directories anyone on the box can write, whether or not the tree holds them yet:
+# systemd mounts /tmp, /dev/shm and /dev/mqueue 1777, and tmpfiles' tmp.conf and legacy.conf make
+# /var/tmp and /run/lock 1777 at boot. Any directory the tree itself gives o+w counts too.
+WORLD_WRITABLE = ("tmp", "var/tmp", "dev/shm", "dev/mqueue", "run/lock")
+# The systemd configuration this check reads, by its name under each configuration directory.
+# #1543 Security B1: the only links the check follows to a configuration file it reads. A file that is
+# a link to exactly /dev/null is a mask (it reads as nothing), and trixie's merged-/usr /lib is a link
+# to usr/lib. Any other link is refused, wherever it points: a dangling link reads as nothing at build
+# and as whatever appears at its target on the box (/var/tmp is world-writable), and any link reaches
+# a file the build may not have read. tmpfiles.d takes no link at all, not even a mask (stock has none).
+MASK = "/dev/null"
+TOP_LINKS = {"lib": ("usr/lib", "/usr/lib")}
+READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control",
+             "systemd/system.attached") + tuple("systemd/%s%s" % (n, d) for n in
+                                                ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
+                                                for d in ("", ".d"))
 
 
 def violations(root):
-    root = pathlib.Path(root)
+    root = str(root)
     out = []
-    mid = root / "etc/machine-id"
-    if mid.is_file() and mid.read_text().strip() not in ("", "uninitialized"):
-        out.append("etc/machine-id: holds an ID; must be empty or 'uninitialized'")
+    try:
+        if Conf(root, "etc/machine-id").text().strip() not in ("", "uninitialized"):
+            out.append("etc/machine-id: holds an ID; must be empty or 'uninitialized'")
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        out.append("etc/machine-id: unreadable (%s); the tree check never passes a file it cannot read" % e.strerror)
     for pat in GENERATED:
-        for f in sorted(root.glob(pat)):
-            if f.is_file() and not f.is_symlink():
-                out.append("%s: generated per install; must not ship" % f.relative_to(root))
+        for parts in tree_glob(root, pat.split("/")):
+            if stat.S_ISREG(entry_mode(root, "/".join(parts))):
+                out.append("%s: generated per install; must not ship" % "/".join(parts))
     for d in OWNER_DIRS:
-        p = root / d
-        if d == "etc/agentos" and p.exists():
+        if d == "etc/agentos" and entry_mode(root, d):
             out.append("etc/agentos: owner configuration; written at onboarding only")
-        elif d == "var/lib/agentos" and p.is_dir() and any(p.iterdir()):
+        elif d == "var/lib/agentos" and tree_dir(root, d) and tree_listdir(root, tree_dir(root, d)):
             out.append("var/lib/agentos: broker state; must be empty")
     # LOOP-7's state: agentosd creates it on the box and gives it to the fuzz user (agentosd L7-6).
-    if os.path.lexists(root / "var/lib/agentos-fuzz"):
+    if entry_mode(root, "var/lib/agentos-fuzz"):
         out.append("var/lib/agentos-fuzz: fuzz state; created on the box, never shipped")
     # The vault and the page's claim state: their units create them on the box (#1249, #1270).
     for d, what in (("var/lib/agentos-egress", "vault state"), ("var/lib/agentos-localui", "claim state")):
-        if os.path.lexists(root / d):
+        if entry_mode(root, d):
             out.append("%s: %s; created on the box, never shipped" % (d, what))
-    for dirpath, dirnames, filenames in os.walk(root):
-        for n in dirnames + filenames:
-            p = os.path.join(dirpath, n)
-            try:
-                st = os.lstat(p)
-            except OSError:
-                continue
-            rel = os.path.relpath(p, root)
-            if stat.S_ISSOCK(st.st_mode):
-                out.append("%s: socket file (V15)" % rel)
-            elif (stat.S_ISREG(st.st_mode) and st.st_size <= SCAN_MAX
-                  and rel.split(os.sep, 1)[0] in SCAN and has_key(p)):
-                out.append("%s: private key material" % rel)
+    for rel, st in tree_walk(root):
+        if stat.S_ISSOCK(st.st_mode):
+            out.append("%s: socket file (V15)" % rel)
+        elif (stat.S_ISREG(st.st_mode) and st.st_size <= SCAN_MAX
+              and rel.split("/", 1)[0] in SCAN and has_key(root, rel)):
+            out.append("%s: private key material" % rel)
+        elif stat.S_ISLNK(st.st_mode):
+            out += world_writable_link(root, rel)
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
-            + resolved_violations(root) + stray_violations(root))
+            + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
+            + credstore_violations(root) + stray_violations(root))
+
+
+# #1543 (delta 4 B1): every look at the image tree goes through these four primitives, and none of
+# them follows a link on the build host: each step before the last must be a directory, never a link.
+# Configuration is read only through conf_chase and Conf, which apply the link and owner rules on top.
+# tests/test_image.py's TreeAccessTest parses this file and fails on a file-reading or stat call
+# anywhere else, so a new reader cannot skip the chase (three review rounds each found one that did).
+def world_writable_link(root, rel):
+    """#1543 Security R2: the refusal for link REL if its target resolves, or where the tree stops
+    would resolve, to something inside a directory anyone on the box can write (WORLD_WRITABLE, or
+    a directory the tree gives o+w): a local user then decides what the link reads, whatever reads
+    it (a unit, a generator, udev). A link to such a directory itself is not refused (trixie's
+    /var/lock is a link to /run/lock): the directory stays root's."""
+    try:
+        path = tree_chase(root, rel, missing_ok=True)[0]
+    except OSError:
+        return []
+    parts = path_parts(path)
+    for k in range(1, len(parts)):
+        d = "/".join(parts[:k])
+        try:
+            st = None if d in WORLD_WRITABLE else tree_lstat(root, d)
+        except OSError:
+            continue
+        if st is None and d in WORLD_WRITABLE or st is not None and stat.S_ISDIR(st.st_mode) and st.st_mode & 0o002:
+            return ["%s: a link to %s, inside /%s, which anyone on the box can write; a local user would decide what "
+                    "it reads (#1543)" % (rel, tree_readlink(root, rel), d)]
+    return []
+
+
+def tree_lstat(root, rel):
+    """lstat of ROOT/REL (ROOT itself for ""), never following a link on the build host: OSError if a
+    step before the last is a link, is not a directory, or is '.' or '..'; None if a step is missing."""
+    p, parts = str(root), [x for x in rel.split("/") if x]
+    st = os.lstat(p)
+    for i, name in enumerate(parts):
+        if name in (".", ".."):
+            raise OSError(errno.EINVAL, "a '.' or '..' component in %s" % rel)
+        if i and stat.S_ISLNK(st.st_mode):
+            raise OSError(errno.ELOOP, "%s is a link; the tree check never follows one on the build host"
+                          % "/".join(parts[:i]))
+        if i and not stat.S_ISDIR(st.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", "/".join(parts[:i]))
+        p = os.path.join(p, name)
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            return None
+    return st
+
+
+def tree_listdir(root, rel):
+    """The names in directory REL (tree_lstat's rules: no link on the way, REL itself not a link)."""
+    st = tree_lstat(root, rel)
+    if st is None:
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory", rel)
+    if not stat.S_ISDIR(st.st_mode):
+        raise NotADirectoryError(errno.ENOTDIR, "not a directory", rel)
+    return os.listdir(os.path.join(str(root), rel))
+
+
+def tree_readlink(root, rel):
+    """The target of link REL (tree_lstat's rules)."""
+    st = tree_lstat(root, rel)
+    if st is None or not stat.S_ISLNK(st.st_mode):
+        raise OSError(errno.EINVAL, "not a link", rel)
+    return os.readlink(os.path.join(str(root), rel))
+
+
+def tree_read(root, rel, limit=-1):
+    """The bytes of regular file REL (at most LIMIT), tree_lstat's rules: no link on the way, and REL
+    itself must be a regular file (IsADirectoryError for a directory, OSError for anything else).
+    Only Conf.content and has_key call it (TreeAccessTest), so configuration is read through the chase."""
+    st = tree_lstat(root, rel)
+    if st is None:
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory", rel)
+    if stat.S_ISDIR(st.st_mode):
+        raise IsADirectoryError(errno.EISDIR, "a directory")
+    if not stat.S_ISREG(st.st_mode):
+        raise OSError(errno.EINVAL, "not a regular file")
+    fd = os.open(os.path.join(str(root), rel), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
+    with os.fdopen(fd, "rb") as f:
+        now = os.fstat(fd)
+        if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+            raise OSError(errno.ESTALE, "changed while the tree check read it")
+        return f.read(limit)
+
+
+def tree_walk(root, rel=""):
+    """(path, lstat) of everything below directory REL, in name order, never entering a link."""
+    try:
+        names = sorted(tree_listdir(root, rel))
+    except OSError:
+        return
+    for n in names:
+        r = rel + "/" + n if rel else n
+        try:
+            st = tree_lstat(root, r)
+        except OSError:
+            continue
+        if st is None:
+            continue
+        yield r, st
+        if stat.S_ISDIR(st.st_mode):
+            yield from tree_walk(root, r)
+
+
+def entry_mode(root, rel):
+    """REL's st_mode as the booted image finds the entry itself (its parent resolved inside the image
+    by tree_chase, the entry not followed; a parent the box mounts is taken as the tree has it), or 0
+    where there is none (a step missing, a loop, a step that is not a directory)."""
+    try:
+        return tree_entry(root, rel)[1].st_mode
+    except (OSError, AttributeError):
+        return 0
+
+
+def tree_entry(root, rel):
+    """(in-image path, lstat) of REL's last component, its parent resolved as entry_mode says;
+    (None, None) if it is missing. Raises OSError if the parent loops or a step is not a directory."""
+    parent, _, name = rel.rstrip("/").rpartition("/")
+    try:
+        path, st = tree_chase(str(root), parent)
+    except FileNotFoundError:
+        return None, None
+    path = parent if st is None else path
+    rel = path + "/" + name if path else name
+    st = tree_lstat(root, rel)
+    return (rel, st) if st is not None else (None, None)
+
+
+def tree_dir(root, rel):
+    """The in-image path of directory REL (tree_chase; under a box mount, as the tree has it), or None."""
+    try:
+        path, st = tree_chase(str(root), rel)
+        if st is None:
+            path, st = rel, tree_lstat(root, rel)
+    except OSError:
+        return None
+    return path if st is not None and stat.S_ISDIR(st.st_mode) else None
 
 
 class Conf:
@@ -154,9 +313,13 @@ class Conf:
         return "Conf(%r)" % self.rel
 
     def is_link(self):
-        return os.path.islink(os.path.join(self.root, self.rel))
+        try:
+            st = tree_lstat(self.root, self.rel)
+        except OSError:
+            return False
+        return st is not None and stat.S_ISLNK(st.st_mode)
 
-    def resolve(self):
+    def chase(self):
         """(in-image path, lstat) as tree_chase gives them; raises OSError as it does."""
         if self.error:
             raise OSError(errno.EACCES, self.error)
@@ -164,30 +327,24 @@ class Conf:
 
     def identity(self):
         """What fstat would name: a device and inode, or a path the box mounts at boot."""
-        path, st = self.resolve()
+        path, st = self.chase()
         return path if st is None else (st.st_dev, st.st_ino)
 
-    def read_bytes(self):
-        """What systemd reads. A dangling link reads as nothing (every reader here skips a file that
-        is not there), and so does a link to /dev/null. OSError where systemd's read fails, or where
-        the link reaches what the box mounts at boot rather than the image."""
-        try:
-            path, st = self.resolve()
-        except FileNotFoundError:
+    def content(self):
+        """What systemd reads, as conf_chase allows it: a mask (a link to exactly /dev/null) reads as
+        nothing. OSError for any other link (LinkRefused), dangling or not, a step that is not root's
+        or that someone else can write (OwnerRefused), a path that is missing, and wherever systemd's
+        read fails: nothing unresolvable ever reads as empty (#1543). This is the only reader of
+        configuration in the tree (TreeAccessTest)."""
+        if self.error:
+            raise OSError(errno.EACCES, self.error)
+        path = conf_chase(self.root, self.rel)
+        if path is None:
             return b""
-        if st is None:
-            if path == "/dev/null":
-                return b""
-            raise OSError(errno.EXDEV, "it resolves to %s, which the box mounts at boot" % path)
-        if stat.S_ISDIR(st.st_mode):
-            raise IsADirectoryError(errno.EISDIR, "a directory")
-        if not stat.S_ISREG(st.st_mode):
-            raise OSError(errno.EINVAL, "not a regular file")
-        with open(os.path.join(self.root, path), "rb") as f:
-            return f.read()
+        return tree_read(self.root, path)
 
-    def read_text(self, errors="replace"):
-        return self.read_bytes().decode(errors=errors)
+    def text(self, errors="replace"):
+        return self.content().decode(errors=errors)
 
 
 def hidden_or_backup(name):
@@ -199,48 +356,134 @@ def hidden_or_backup(name):
         "dpkg-backup", "dpkg-remove", "ucf-new", "ucf-old", "ucf-dist", "swp", "bak", "old", "new")
 
 
+class StepRefused(OSError):
+    """A step on the way to a configuration file that conf_chase does not take (#1543)."""
+
+
+class LinkRefused(StepRefused):
+    """A link on the way to a configuration file that is not one MASK or TOP_LINKS allows (#1543)."""
+
+
+class OwnerRefused(StepRefused):
+    """A step on the way to a configuration file (the tree's root, a directory or the file) that is
+    not owned by TREE_OWNER or that its group or anyone can write (#1543 Security R1)."""
+
+
+# #1543 Security R1: who must own every step on the way to a configuration file. A step someone else
+# owns, or that its group or anyone can write, lets that user change what the box reads after the
+# build, with no link involved (a 0666 file, a 1777 sysctl.d, a hard link to a file in /var/tmp).
+# Stock packages and mkosi.extra give root-owned 0644 files and 0755 directories. The tests set it to
+# their own uid, since they cannot make root-owned trees.
+TREE_OWNER = 0
+
+
+def owned(here, st):
+    """Raise OwnerRefused unless lstat ST of step HERE is TREE_OWNER's and writable by no one else."""
+    if st.st_uid != TREE_OWNER or st.st_mode & 0o022:
+        raise OwnerRefused(errno.EPERM, "%s is owned by uid %d with mode %04o; the tree check reads configuration only "
+                           "through steps owned by uid %d that no one else can write (#1543)"
+                           % (here or "the tree's root", st.st_uid, stat.S_IMODE(st.st_mode), TREE_OWNER))
+
+
+def conf_chase(root, rel):
+    """REL resolved as the tree check lets the box read a configuration file (#1543 Security B1): a
+    link to exactly MASK as the last component is a mask (None), the image's own /lib link
+    (TOP_LINKS) is followed, and any other link on the way raises LinkRefused, whatever its target.
+    Every other step, the tree's root included, must pass owned() (OwnerRefused, #1543 Security R1);
+    a link MASK or TOP_LINKS allows is exempt as a link, and the steps it leads to are checked.
+    Returns the in-image path. FileNotFoundError if a step is missing; OSError for a '.' or '..'
+    component, a step the box mounts at boot, or a step that is not a directory."""
+    parts, cur = [x for x in rel.split("/") if x], []
+    owned("", tree_lstat(root, ""))
+    while parts:
+        name = parts.pop(0)
+        if name in (".", ".."):
+            raise OSError(errno.EINVAL, "a '.' or '..' component in %s" % rel)
+        if not cur and name in BOX_MOUNTS:
+            raise OSError(errno.EXDEV, "/%s is mounted by the box at boot" % name)
+        here = "/".join(cur + [name])
+        st = tree_lstat(root, here)
+        if st is None:
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", here)
+        if stat.S_ISLNK(st.st_mode):
+            to = tree_readlink(root, here)
+            if not parts and to == MASK:
+                return None
+            if not cur and to in TOP_LINKS.get(name, ()):
+                parts = TOP_LINKS[name][0].split("/") + parts
+                continue
+            raise LinkRefused(errno.EPERM, "%s is a link to %s; the tree check reads only a regular file or a "
+                              "mask (a link to exactly %s), never a link whose target can change (#1543)"
+                              % (here, to, MASK))
+        owned(here, st)
+        if parts and not stat.S_ISDIR(st.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", here)
+        cur.append(name)
+    return "/".join(cur)
+
+
 def conf_files(root, dirs, suffix=".conf", kmod=False):
     """The files systemd reads from DIRS (relative to ROOT, highest precedence first), in its order:
     systemd 257.13's conf_files_list_strv(suffix, root, flags=0, dirs) (src/shared/conf-files.c),
     which every reader checked here calls with flags 0. Each directory is resolved inside the image
     (chase_and_opendir; one that is missing or not a directory is skipped). In it, a hidden or
     backup name (hidden_or_backup) or one without SUFFIX is skipped, and so is a name an earlier
-    directory already gave. Nothing is stat'ed, so a link to /dev/null, an empty file, a dangling
-    link or a directory still takes its name: that is how a file is masked. The list is sorted by
-    name as bytes (path_compare_filename is strcmp), not as Python strings.
+    directory already gave. Nothing is stat'ed, so a link to /dev/null, an empty file or a directory
+    still takes its name (that is how a file is masked), and so does any other link, dangling or not,
+    which Conf.content then refuses (#1543). The listing follows links as systemd does, but every entry
+    reached through a directory link conf_chase refuses carries that refusal, and such a directory
+    that gives no entry is listed itself, so every reader refuses it whatever it holds; so is a
+    directory reached through a step owned() refuses (#1543 Security R1: a 1777 sysctl.d is refused
+    while it is still empty).
+    The list is sorted by name as bytes (path_compare_filename is strcmp), not as Python strings.
     KMOD: kmod 34's conf_files_list (libkmod/libkmod-config.c) instead, which skips only names
     starting with "." and drops (without taking the name) an entry it cannot stat or that is a
-    directory, and reads a non-directory in DIRS as a file of its own."""
+    directory, and reads a non-directory in DIRS as a file of its own. A link kmod would drop as
+    unstattable (a dangling one) is listed all the same, so that it is refused, not skipped (#1543)."""
     root = str(root)
     seen, out = set(), []
     for d in dirs:
         try:
+            conf_chase(root, d)
+            bad = None
+        except StepRefused as e:
+            bad = e.strerror
+        except OSError:
+            bad = None
+        try:
             path, st = tree_chase(root, d)
         except OSError:
+            if bad:
+                out.append(Conf(root, d, bad))
             continue
         if st is None:
-            out.append(Conf(root, d, "%s resolves to %s, which the box mounts at boot" % (d, path)))
+            out.append(Conf(root, d, bad or "%s resolves to %s, which the box mounts at boot" % (d, path)))
             continue
         if not stat.S_ISDIR(st.st_mode):
             if kmod and d.rsplit("/", 1)[-1] not in seen:
                 seen.add(d.rsplit("/", 1)[-1])
-                out.append(Conf(root, path))
+                out.append(Conf(root, path, bad))
+            elif bad:
+                out.append(Conf(root, d, bad))
             continue
-        for name in os.listdir(os.path.join(root, path)):
+        n = len(out)
+        for name in tree_listdir(root, path):
             if (name.startswith(".") if kmod else hidden_or_backup(name)) or not name.endswith(suffix):
                 continue
             if name in seen:
                 continue
-            f = Conf(root, path + "/" + name)
-            if kmod:
+            f = Conf(root, path + "/" + name, bad)
+            if kmod:  # lstat: a link, dangling or not, is kept and refused when read
                 try:
-                    p, fst = f.resolve()
+                    st = tree_lstat(root, f.rel)
                 except OSError:
                     continue
-                if fst is not None and stat.S_ISDIR(fst.st_mode):
+                if st is None or stat.S_ISDIR(st.st_mode):
                     continue
             seen.add(name)
             out.append(f)
+        if bad and len(out) == n:
+            out.append(Conf(root, d, bad))
     return sorted(out, key=lambda f: os.fsencode(f.name))
 
 
@@ -327,7 +570,7 @@ def ini_last(files, section, key):
     val = None
     for f in files:
         try:
-            lines = config_lines(f.read_bytes())
+            lines = config_lines(f.content())
         except (OSError, Unparsable) as e:
             # A file systemd may read only in part, or not at all: never pass on it.
             return "unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e)
@@ -352,10 +595,14 @@ def main_conf(root, name):
     for rel in conf_paths("systemd/" + name):
         main = Conf(str(root), rel)
         try:
+            conf_chase(str(root), rel)
+        except FileNotFoundError:
+            continue  # nothing there (a dangling link raises LinkRefused, never this)
+        except OSError:
+            return [main] + dropins  # read_bytes refuses it
+        try:
             if main.identity() in ids:
                 break
-        except FileNotFoundError:
-            continue
         except OSError:
             pass
         return [main] + dropins
@@ -364,7 +611,7 @@ def main_conf(root, name):
 
 def sysctl_files(root):
     """The files systemd-sysctl 257.13 reads, in its order: conf_files over sysctl.d. It never reads
-    /etc/sysctl.conf itself, only through a sysctl.d entry such as Debian's 99-sysctl.conf link."""
+    /etc/sysctl.conf itself; older Debian's 99-sysctl.conf link to it is refused like any link (#1543)."""
     return conf_files(root, conf_paths("sysctl.d"))
 
 
@@ -394,7 +641,7 @@ def sysctl_all(root):
     vals = {}
     for f in sysctl_files(root):
         try:
-            data = f.read_bytes()
+            data = f.content()
         except OSError:
             continue  # sysctl_byte_violations refuses it
         for raw in re.split(rb"[\n\r\x00]", data):
@@ -423,7 +670,7 @@ def sysctl_byte_violations(root):
     out = []
     for f in sysctl_files(root):
         try:
-            data = f.read_bytes()
+            data = f.content()
         except OSError as e:
             out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror))
             continue
@@ -482,14 +729,18 @@ def card_unit_violations(root):
     dirs = []
     for d in UNIT_PATHS:
         try:
-            path, st = tree_chase(root, d)
+            path = conf_chase(root, d)
+            st = None if path is None else tree_lstat(root, path)
+        except StepRefused as e:
+            out.append("%s: unreadable (%s); the tree check never passes a unit directory it cannot read" % (d, e.strerror))
+            continue
         except OSError:
             continue
         if st is not None and stat.S_ISDIR(st.st_mode):
             dirs.append(path)
     for d in dirs:
-        for n in sorted(os.listdir(os.path.join(root, d))):
-            if n in CARD_UNITS or not os.path.islink(os.path.join(root, d, n)):
+        for n in sorted(tree_listdir(root, d)):
+            if n in CARD_UNITS or not stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode):
                 continue
             try:
                 target = tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1]
@@ -498,7 +749,7 @@ def card_unit_violations(root):
             if target in CARD_UNITS:
                 out.append("%s/%s: an alias of %s; the tree check does not model unit aliases" % (d, n, target))
     for name in CARD_UNITS:
-        unit = next((Conf(root, d + "/" + name) for d in dirs if os.path.lexists(os.path.join(root, d, name))), None)
+        unit = next((Conf(root, d + "/" + name) for d in dirs if tree_lstat(root, d + "/" + name)), None)
         if unit is None:
             out.append("%s: missing; a secret-holding service must set LimitCORE=0" % name)
             continue
@@ -518,57 +769,67 @@ def stray_violations(root):
     box mounts a tmpfs over it) and a split-/usr /lib (systemd 257 reads only /usr/lib; trixie's /lib
     is a link to it). Checking such a file as if it were read would let it hide one that is."""
     out, root = [], str(root)
-    conf = ["sysctl.d", "systemd/network", "systemd/system", "systemd/system.control", "systemd/system.attached"]
-    conf += ["systemd/%s%s" % (n, d) for n in ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
-             for d in ("", ".d")]
-    places = [("run", n, "/run is a tmpfs on the box") for n in conf + ["modprobe.d"]]
-    if not os.path.islink(os.path.join(root, "lib")):
-        places += [("lib", n, "systemd 257 does not read a split-/usr /lib") for n in conf]
+    places = [("run", n, "/run is a tmpfs on the box") for n in READ_CONF + ("modprobe.d",)]
+    if not stat.S_ISLNK(entry_mode(root, "lib")):
+        places += [("lib", n, "systemd 257 does not read a split-/usr /lib") for n in READ_CONF]
     for top, n, why in places:
-        base = os.path.join(root, top, n)
-        if os.path.islink(base) or os.path.isfile(base):
-            out.append("%s/%s: %s; the image ships nothing there" % (top, n, why))
-        for dirpath, dirnames, filenames in os.walk(base):
-            for f in sorted(dirnames + filenames):
-                p = os.path.join(dirpath, f)
-                if not os.path.isdir(p) or os.path.islink(p):
-                    out.append("%s: %s; the image ships nothing there" % (os.path.relpath(p, root), why))
+        base = top + "/" + n
+        try:
+            st = tree_lstat(root, base)
+        except OSError as e:
+            out.append("%s: unreadable (%s); the tree check never passes a path it cannot read" % (base, e.strerror))
+            continue
+        if st is not None and not stat.S_ISDIR(st.st_mode):
+            out.append("%s: %s; the image ships nothing there" % (base, why))
+        for rel, st in tree_walk(root, base) if st is not None else ():
+            if not stat.S_ISDIR(st.st_mode):
+                out.append("%s: %s; the image ships nothing there" % (rel, why))
     return out
 
 
 def swap_violations(root):
     """IMG-nodump: nothing in the tree turns on swap (the partition table and systemd.swap=0 are
-    checked by finish_image.py)."""
-    out = []
-    fstab = root / "etc/fstab"
-    if fstab.is_file():
-        for ln in fstab.read_text(errors="replace").splitlines():
+    checked by finish_image.py). etc/fstab is read as configuration (Conf): a link other than a mask,
+    dangling or not, is refused (#1543 Security delta 4 B1: systemd-fstab-generator would mount
+    whatever a local user wrote at its target)."""
+    out, root = [], str(root)
+    try:
+        for ln in Conf(root, "etc/fstab").text().splitlines():
             f = ln.split()
             if f and not f[0].startswith("#") and len(f) >= 3 and f[2] == "swap":
                 out.append("etc/fstab: swap entry %s" % f[0])
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        out.append("etc/fstab: unreadable (%s); the tree check never passes a file it cannot read" % e.strerror)
+    seen = set()
     for d in UNIT_DIRS + ("run/systemd/system",):
-        p = root / d
-        if p.is_dir():
-            for f in sorted(p.rglob("*.swap")):
-                out.append("%s: swap unit" % f.relative_to(root))
+        path = tree_dir(root, d)
+        if path is None or path in seen:
+            continue
+        seen.add(path)
+        for rel, st in tree_walk(root, path):
+            if rel.endswith(".swap"):
+                out.append("%s: swap unit" % (d + rel[len(path):]))
     for d in ("usr/lib", "lib", "etc", "usr/local/lib"):
         for g in SWAP_GENERATORS:
-            if os.path.lexists(root / d / "systemd/system-generators" / g):
+            if entry_mode(root, d + "/systemd/system-generators/" + g):
                 out.append("%s/systemd/system-generators/%s: makes zram swap" % (d, g))
     for n in ("swapfile", "swap.img", "var/swapfile", "var/swap"):
-        if os.path.lexists(root / n):
+        if entry_mode(root, n):
             out.append("%s: swap file" % n)
     return out
 
 
-def tree_chase(root, rel, hops=40):
+def tree_chase(root, rel, hops=40, missing_ok=False):
     """REL resolved as the booted image resolves it (systemd's chase with the image as root):
     symlinks are followed inside ROOT, an absolute target from ROOT and never from the build host,
     and '..' stops at ROOT. Returns (in-image path, lstat of it). A path that enters one of
     BOX_MOUNTS returns ("/" + that path, None) without looking at the tree. Raises
-    FileNotFoundError if a step is missing, and OSError if links loop or a step is not a directory."""
+    FileNotFoundError if a step is missing (with MISSING_OK, returns (where the path would go, None):
+    the rest taken as written), and OSError if links loop or a step is not a directory."""
     parts, cur = [x for x in rel.split("/") if x], []
-    st = os.lstat(root)
+    st = tree_lstat(root, "")
     while parts:
         name = parts.pop(0)
         if name in (".", ".."):
@@ -577,13 +838,17 @@ def tree_chase(root, rel, hops=40):
             continue
         if not cur and name in BOX_MOUNTS:
             return "/" + "/".join([name] + parts), None
-        p = os.path.join(root, *cur, name)
-        st = os.lstat(p)
+        p = "/".join(cur + [name])
+        st = tree_lstat(root, p)
+        if st is None:
+            if missing_ok:
+                return "/".join(path_parts("/".join(cur + [name] + parts))), None
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", p)
         if stat.S_ISLNK(st.st_mode):
             hops -= 1
             if hops < 0:
                 raise OSError(errno.ELOOP, "too many levels of links", p)
-            target = os.readlink(p)
+            target = tree_readlink(root, p)
             if target.startswith("/"):
                 cur = []
             parts = [x for x in target.split("/") if x] + parts
@@ -614,25 +879,483 @@ def radio_violations(root):
     return out
 
 
+def kmod_lines(data):
+    """The lines kmod 34's freadline_wrapped (shared/util.c) reads from DATA. A backslash before a
+    newline joins the next line, even in a comment; any other backslash is dropped and the byte
+    after it kept (a backslash at the end of the file reads as byte 0xff, getc's EOF). kmod then
+    reads each line as a C string, so it ends at its first NUL."""
+    lines, buf, i = [], bytearray(), 0
+    while i < len(data):
+        c, i = data[i], i + 1
+        if c == 0x0A:
+            lines.append(bytes(buf))
+            buf = bytearray()
+        elif c != 0x5C:
+            buf.append(c)
+        elif i == len(data):
+            buf.append(0xFF)
+        elif data[i] == 0x0A:
+            i += 1
+        else:
+            buf.append(data[i])
+            i += 1
+    if buf:
+        lines.append(bytes(buf))
+    return [ln.split(b"\0", 1)[0] for ln in lines]
+
+
+def kmod_token(ln, pos):
+    """strtok_r(.., "\t ") from POS: (the next word or None, where the next call starts)."""
+    while pos < len(ln) and ln[pos] in b"\t ":
+        pos += 1
+    if pos >= len(ln):
+        return None, pos
+    end = pos
+    while end < len(ln) and ln[end] not in b"\t ":
+        end += 1
+    return ln[pos:end], end + 1
+
+
+def kmod_underscores(name):
+    """kmod 34's underscores() (libkmod-config.c): every - outside [...] becomes _; None (kmod's
+    syntax error) for an unmatched bracket."""
+    out, i = bytearray(name), 0
+    while i < len(out):
+        if out[i] == 0x2D:
+            out[i] = 0x5F
+        elif out[i] == 0x5D:
+            return None
+        elif out[i] == 0x5B:
+            i = out.find(b"]", i)
+            if i < 0:
+                return None
+        i += 1
+    return bytes(out)
+
+
+def kmod_installs(data, kinds=(b"install",)):
+    """(module pattern, command) of each install line kmod 34's kmod_config_parse takes from DATA,
+    in order. Words split on space and tab only; a line whose first byte is # is a comment; the
+    command is the rest of the line after the one byte that ends the pattern. KINDS widens it to
+    remove lines, whose command has the same form."""
+    out = []
+    for ln in kmod_lines(data):
+        if ln[:1] in (b"", b"#"):
+            continue
+        cmd, pos = kmod_token(ln, 0)
+        if cmd not in kinds:
+            continue
+        name, pos = kmod_token(ln, pos)
+        name = kmod_underscores(name) if name is not None else None
+        if name is not None and pos < len(ln):
+            out.append((name, ln[pos:]))
+    return out
+
+
+def bypass_reason(command):
+    """Why an install or remove COMMAND could load a blocked module past its own install line, or
+    None. Any line's command can: modprobe -i (--ignore-install) skips install lines, insmod never
+    reads them, and a command naming the module loads it some other way. Matched as plain text,
+    case-blind, with any short option cluster holding i counted as -i, which errs safe. A command
+    that builds the name at run time (shell quoting, variables) is not seen; the after-boot check
+    (I20) covers that."""
+    text = command.decode(errors="replace").lower()
+    for m in BLOCKED_MODULES:
+        if m in text:
+            return "something naming %s" % m
+    for w in re.split(r"[^a-z0-9_./=-]+", text):
+        opt = w.split("=", 1)[0]
+        # getopt_long takes any unambiguous prefix: --ignore-i, but not --ignore- (or --ignore-remove).
+        if len(opt) >= 10 and "--ignore-install".startswith(opt) or re.fullmatch(r"-[a-z0-9]*i[a-z0-9]*", w):
+            return "modprobe %s" % w
+        if w.rsplit("/", 1)[-1] == "insmod":
+            return "insmod"
+    return None
+
+
 def bluetooth_violations(root):
     """#1415: firmware-mediatek also lets the MT7922's Bluetooth half come up. kmod uses the first
-    install line for a module, reading the files conf_files(kmod=True) lists; that line must refuse
-    the load."""
+    install line whose pattern fnmatch()es the module, reading the files conf_files(kmod=True) lists
+    as kmod_installs does (#1528); that line must refuse the load. glibc's fnmatch differs from
+    Python's for [...] and \\, so a pattern holding either is refused rather than modelled."""
     first, out = {}, []
     for f in conf_files(root, MODPROBE_DIRS, kmod=True):
         try:
-            text = f.read_text()
+            data = f.content()
         except OSError as e:
             out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror))
             continue
-        for ln in text.splitlines():
-            w = ln.split(None, 2)
-            if len(w) == 3 and w[0] == "install":
-                for m in BLOCKED_MODULES:
-                    if fnmatch.fnmatchcase(m, w[1].replace("-", "_")):
-                        first.setdefault(m, w[2].strip())
+        for name, command in kmod_installs(data, (b"install", b"remove")):
+            why = bypass_reason(command)
+            if why:
+                out.append("%s: install/remove %s runs %s; it could load Bluetooth past its install line (#1528)"
+                           % (f.rel, name.decode(errors="backslashreplace"), why))
+        for name, command in kmod_installs(data):
+            if b"[" in name or b"\\" in name:
+                out.append("%s: install %s: a pattern with [ or \\ is not modelled; name the module"
+                           % (f.rel, name.decode(errors="backslashreplace")))
+                continue
+            for m in BLOCKED_MODULES:
+                if fnmatch.fnmatchcase(m.encode(), name):
+                    first.setdefault(m, command.strip(b"\t ").decode(errors="replace"))
     return out + ["modprobe.d: %s is not blocked (install %s %s); the image ships no Bluetooth"
                   % (m, m, REFUSE[0]) for m in BLOCKED_MODULES if first.get(m) not in REFUSE]
+
+
+# tmpfiles.d as systemd-tmpfiles 257.13 lists it (conf_files, highest precedence first), with a
+# split-/usr /lib as well, which stray_violations refuses anyway. /run/tmpfiles.d is read on the box
+# too, but /run is a tmpfs there, so tmpfiles_allow_violations refuses anything the tree puts in it.
+TMPFILES_DIRS = conf_paths("tmpfiles.d") + ("lib/tmpfiles.d",)
+# #1543: every tmpfiles.d line the image ships must be on this allowlist, keyed by the file it is in.
+# It is generated from the stock build (see the file's header for how), so a package update or an
+# edit that adds or changes a line fails the build until someone reviews the line and adds it.
+TMPFILES_ALLOW = "tmpfiles.allow"
+# Where it is in the repository, and how to regenerate it, as each refusal says (#1543 P/UX U1).
+TMPFILES_ALLOW_REPO = "image/mkosi/" + TMPFILES_ALLOW
+TMPFILES_REGENERATE = "mkosi.finalize --tmpfiles-allowlist ROOT"
+# The credential store directories systemd 257 reads (ImportCredential= in systemd-sysctl and
+# systemd-tmpfiles takes sysctl.* and tmpfiles.* from them), with /usr/local/lib and a split-/usr /lib
+# for safety. Nothing may ship in them unless named here (#1543 Security B3). The image needs the
+# four mkosi writes from mkosi.conf's Locale=, Keymap=, Timezone= and RootPassword= (CI build of #1543
+# at fc5981d): a credential's name is what PID 1 and ImportCredential= match on, so none of these
+# can be read as sysctl.* or tmpfiles.*.
+CREDSTORE_DIRS = tuple("%s/%s" % (top, n) for top in ("etc", "run", "usr/local/lib", "usr/lib", "lib")
+                       for n in ("credstore", "credstore.encrypted"))
+CREDSTORE_ALLOWED = ("usr/lib/credstore/firstboot.keymap", "usr/lib/credstore/firstboot.locale",
+                     "usr/lib/credstore/firstboot.timezone", "usr/lib/credstore/passwd.hashed-password.root")
+# What a tmpfiles.d line must not touch (#1530), as defence in depth behind the allowlist: /proc and
+# /sys; every file and directory this check reads, in each directory systemd or kmod reads it from
+# (/run included: the tree check cannot see what tmpfiles puts there at boot); the generator
+# directories (zram, #1543 Security R1), the credential stores (B3), owner configuration, and the
+# ESP mount points with their loader entries (B2: systemd-boot joins every options line).
+# systemd-tmpfiles runs before systemd-sysctl, and the root file system is writable, so a line that
+# writes, copies, links, removes or cleans any of these changes what the box runs without the build
+# seeing it. This is a list of refused paths, so it cannot see what a chain of lines builds; the
+# allowlist above is what holds the line set fixed.
+TMPFILES_TARGETS = (("proc",), ("sys",), ("etc", "sysctl.conf"), ("etc", "fstab"), ("usr", "lib", "firmware"),
+                    ("lib", "firmware"), ("etc", "agentos"), ("efi",), ("boot",)) + tuple(
+    tuple(("%s/%s" % (top, n)).split("/")) for top in ("etc", "usr/local/lib", "usr/lib", "lib", "run")
+    for n in READ_CONF + ("modprobe.d", "systemd/system-generators", "credstore", "credstore.encrypted"))
+# Debian's own lines that touch one, as whole lines with runs of blanks collapsed: /var/run is
+# /run, and /etc/mtab names the mount table, a file (debian.conf, var.conf); trixie's credstore.conf
+# makes the empty stores (credstore_violations refuses anything in them); and four relative links
+# whose ".." is the link's own parent (debian.conf, legacy.conf, systemd-resolve.conf; CI build of
+# #1543 at 14cb555). Nothing else is exempt.
+TMPFILES_STOCK = ("L /var/run - - - - ../run", "L+ /var/run - - - - ../run", "L /var/run - - - - /run",
+                  "L+ /var/run - - - - /run", "L /etc/mtab - - - - ../proc/self/mounts",
+                  "L+ /etc/mtab - - - - ../proc/self/mounts",
+                  "d /etc/credstore 0700 root root", "d /etc/credstore.encrypted 0700 root root",
+                  "z /run/credstore 0700 root root", "z /run/credstore.encrypted 0700 root root",
+                  "L+ /etc/default/locale - - - - ../locale.conf", "L /var/lock - - - - ../run/lock",
+                  "L$ /var/log/README - - - - ../../usr/share/doc/systemd/README.logs",
+                  "L! /etc/resolv.conf - - - - ../run/systemd/resolve/stub-resolv.conf")
+# systemd-tmpfiles 257.13's path specifiers for the system manager (src/tmpfiles/tmpfiles.c); the
+# others expand to names without a slash.
+TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",
+                       "V": "/var/tmp", "h": "/root", "%": "%"}
+C_ESCAPES = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "s": " "}
+
+
+def tmpfiles_words(ln, n=6):
+    """The first N words of LN as extract_first_word(EXTRACT_UNQUOTE|EXTRACT_CUNESCAPE) gives them,
+    and the rest of the line (the argument). Quotes may start anywhere in a word; \\xHH, octal,
+    \\u and C escapes are decoded and any other escaped character kept, which errs safe (systemd
+    refuses the line)."""
+    words, i = [], 0
+    while len(words) < n:
+        while i < len(ln) and ln[i] in " \t\n\r":
+            i += 1
+        if i >= len(ln):
+            break
+        w, quote = [], None
+        while i < len(ln) and (quote or ln[i] not in " \t\n\r"):
+            c = ln[i]
+            i += 1
+            if c == quote:
+                quote = None
+            elif quote is None and c in "'\"":
+                quote = c
+            elif c == "\\" and i < len(ln):
+                m = re.match(r"x([0-9a-fA-F]{2})|([0-7]{3})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})", ln[i:])
+                if m:
+                    w.append(chr(int(m.group(1) or m.group(3) or m.group(4) or "0", 16) if not m.group(2)
+                                 else int(m.group(2), 8)))
+                    i += m.end()
+                else:
+                    w.append(C_ESCAPES.get(ln[i], ln[i]))
+                    i += 1
+            else:
+                w.append(c)
+        words.append("".join(w))
+    return words, ln[i:].strip(" \t\n\r")
+
+
+def tmpfiles_expand(p):
+    """P with systemd-tmpfiles' specifiers expanded (TMPFILES_SPECIFIERS)."""
+    return re.sub(r"%(.)", lambda m: TMPFILES_SPECIFIERS.get(m.group(1), m.group(0)), p)
+
+
+def path_parts(p):
+    """P's components as the kernel walks them without links: empty and "." drop, ".." pops."""
+    out = []
+    for c in p.split("/"):
+        if c == "..":
+            out = out[:-1]
+        elif c not in ("", "."):
+            out.append(c)
+    return out
+
+
+def glob_reaches(parts, target, ancestor=False):
+    """Whether glob components PARTS can name TARGET or a path below it (or, with ANCESTOR, one
+    above it too). A brace in the compared components counts (GLOB_BRACE can span a comma)."""
+    k = min(len(parts), len(target))
+    if len(parts) < len(target) and not ancestor:
+        return False
+    return all("{" in c or fnmatch.fnmatchcase(t, c) for c, t in zip(parts[:k], target[:k]))
+
+
+def tree_resolve(root, parts):
+    """PARTS resolved inside the image as far as the tree goes (tree_chase); the missing rest is kept
+    as written. A path into what the box mounts keeps its mount's name."""
+    for k in range(len(parts), -1, -1):
+        try:
+            p, _ = tree_chase(root, "/".join(parts[:k]))
+        except OSError:
+            continue
+        return path_parts(p) + parts[k:]
+    return parts
+
+
+def tree_glob(root, parts):
+    """Every path glob components PARTS name in the image, links followed inside it; a component
+    under a box mount (or a missing directory) is kept as written."""
+    found = [[]]
+    for c in parts:
+        if not re.search(r"[*?\[]", c):
+            found = [f + [c] for f in found]
+            continue
+        nxt = []
+        for f in found:
+            try:
+                p, st = tree_chase(root, "/".join(f))
+            except OSError:
+                continue
+            if st is None:
+                nxt.append(f + [c])
+            elif stat.S_ISDIR(st.st_mode):
+                nxt += [f + [n] for n in sorted(tree_listdir(root, p)) if fnmatch.fnmatchcase(n, c)]
+        found = nxt
+    return found
+
+
+def tmpfiles_targets(root):
+    """TMPFILES_TARGETS, and every path a link in one of them names in the image (a unit
+    directory's links; a link in a directory the check reads files from is refused anyway, #1543)."""
+    out = list(TMPFILES_TARGETS)
+    for t in TMPFILES_TARGETS:
+        base = tree_dir(root, "/".join(t))
+        for rel, st in tree_walk(root, base) if base is not None else ():
+            if stat.S_ISLNK(st.st_mode):
+                to = tree_readlink(root, rel)
+                out.append(tuple(tree_resolve(root, path_parts(to if to.startswith("/") else rel.rpartition("/")[0] + "/" + to))))
+    return out
+
+
+def tmpfiles_hits(root, parts, targets):
+    """Whether tmpfiles.d path components PARTS can be one of TARGETS, or above or below one: as
+    written (with systemd-tmpfiles' /var/run to /run rewrite), or through the image's links."""
+    if parts[:2] == ["var", "run"]:
+        parts = ["run"] + parts[2:]
+    names = [parts] + [tree_resolve(root, g) for g in tree_glob(root, parts)]
+    return any(glob_reaches(n, t, ancestor=True) for n in names for t in targets)
+
+
+def tmpfiles_files(root):
+    """conf_files over TMPFILES_DIRS, with every link among them refused, a mask too (#1543 Security
+    B1): stock tmpfiles.d holds none, and a link there could replace a shipped file with one written
+    on the box."""
+    return [Conf(f.root, f.rel, "a link to %s; tmpfiles.d ships no links, not even a mask (#1543)"
+                 % tree_readlink(f.root, f.rel)) if f.is_link() and not f.error else f
+            for f in conf_files(str(root), TMPFILES_DIRS)]
+
+
+def tmpfiles_violations(root):
+    """#1530: systemd-tmpfiles runs before systemd-sysctl and kmod, and can write /proc/sys or create,
+    copy, link or remove the configuration this check reads (TMPFILES_TARGETS). Every line of
+    tmpfiles.d (conf_files, read as systemd-tmpfiles 257.13 reads lines: they end at LF, CR or NUL,
+    # starts a comment) whose path, specifiers expanded and links in the image followed, is one of
+    those, above one or below one is refused, whatever its type; so is a link (L) whose target and a
+    copy (C) whose source is, taken both as systemd takes it (the rest of the line, as written) and
+    unquoted. A path with a ".." component is refused (systemd refuses it too), and so is a link
+    target or copy source with one (#1543 Security B1: path_parts pops ".." before links resolve, so
+    "/var/run/../etc" would read as /etc while the box takes /run/../etc). Only Debian's own lines
+    (TMPFILES_STOCK) are exempt, matched whole."""
+    return [msg for rel, n, msg in tmpfiles_refusals(root)]
+
+
+def tmpfiles_refusals(root):
+    """tmpfiles_violations as (file, line number or None, refusal), so that the allowlist check can
+    tell which lines this one refuses (#1543 P/UX U4-1)."""
+    out, root = [], str(root)
+    targets = tmpfiles_targets(root)
+    for f in tmpfiles_files(root):
+        try:
+            data = f.content()
+        except OSError as e:
+            out.append((f.rel, None, "%s: unreadable (%s); the tree check never passes a file it cannot read"
+                        % (f.rel, e.strerror)))
+            continue
+        for n, raw in enumerate(re.split(rb"[\n\r\x00]", data), 1):
+            ln = os.fsdecode(raw).strip(" \t")
+            if not ln or ln.startswith("#") or re.sub(r"[ \t]+", " ", ln) in TMPFILES_STOCK:
+                continue
+            (typ, path, *_), arg = tmpfiles_words(ln) if len(tmpfiles_words(ln)[0]) >= 2 else ([ln, ""], "")
+            path = tmpfiles_expand(path)
+            names, sources = [path], []
+            if typ[:1] in ("L", "C"):
+                words = tmpfiles_words(arg, 1)[0]
+                for a in {arg, words[0] if words else arg}:
+                    a = tmpfiles_expand(a)
+                    sources.append(a)
+                    if a in ("", "-"):
+                        a = "/usr/share/factory/" + path
+                    names.append(a if a.startswith("/") else path.rsplit("/", 1)[0] + "/" + a)
+            if ".." in path.split("/"):
+                why = "a path with a '..' component (#1530)"
+            elif any(".." in a.split("/") for a in sources):
+                why = "a link target or copy source with a '..' component (#1543)"
+            elif any(tmpfiles_hits(root, path_parts(p), targets) for p in names):
+                why = "it reaches /proc, /sys or configuration the tree check reads (#1530)"
+            else:
+                continue
+            out.append((f.rel, n, "%s: line %d: %s; %s" % (f.rel, n, ln[:120], why)))
+    return out
+
+
+def tmpfiles_lines(data):
+    """(line number, line) of each line systemd-tmpfiles 257.13 acts on in DATA: lines end at LF, CR
+    or NUL, lose leading and trailing space and tab, and a blank line or one starting with # is
+    skipped. The line is otherwise exactly as written: the allowlist compares it whole."""
+    for n, raw in enumerate(re.split(rb"[\n\r\x00]", data), 1):
+        ln = os.fsdecode(raw).strip(" \t")
+        if ln and not ln.startswith("#"):
+            yield n, ln
+
+
+def tmpfiles_allow_path():
+    """Where tmpfiles.allow is: beside this script, or under $SRCDIR when mkosi runs it (mkosi v24.3
+    mounts the script alone at /work/finalize and the configuration directory at /work/src)."""
+    for d in (os.path.dirname(os.path.abspath(__file__)), os.environ.get("SRCDIR")):
+        if d and os.path.isfile(os.path.join(d, TMPFILES_ALLOW)):
+            return os.path.join(d, TMPFILES_ALLOW)
+    return None
+
+
+def tmpfiles_allowed(path=None):
+    """The allowlist as a set of (file, line): each entry line of tmpfiles.allow is the file's path
+    in the tree, a tab, and the line exactly as tmpfiles_lines gives it. None if the file is missing."""
+    path = path or tmpfiles_allow_path()
+    if path is None:
+        return None
+    out = set()
+    with open(path, encoding="utf-8", errors="surrogateescape") as f:
+        for ln in f.read().split("\n"):
+            if ln.strip() and not ln.startswith("#"):
+                rel, _, line = ln.partition("\t")
+                out.add((rel, line.strip(" \t")))
+    return out
+
+
+def tmpfiles_entries(root):
+    """(file, line number, line) of every tmpfiles.d line the box would act on, in conf_files order
+    over TMPFILES_DIRS (a name in a higher directory replaces the same name lower down), or
+    (file, None, error) for a file that cannot be read."""
+    for f in tmpfiles_files(root):
+        try:
+            data = f.content()
+        except OSError as e:
+            yield f.rel, None, e.strerror
+            continue
+        for n, ln in tmpfiles_lines(data):
+            yield f.rel, n, ln
+
+
+def tmpfiles_allow_violations(root, allowed=None):
+    """#1543: every tmpfiles.d line in the tree is on the allowlist (tmpfiles.allow), exactly and
+    under its own file. Anything under /run/tmpfiles.d is refused outright: /run is a tmpfs on the
+    box. Each refusal of a line the guarded-path check passes ends in the entry that would allow it,
+    for review; a line that check refuses is offered no entry, since it must not be listed (#1543 P/UX
+    U4-1)."""
+    allowed = tmpfiles_allowed() if allowed is None else allowed
+    if allowed is None:
+        return ["%s: missing; every tmpfiles.d line must be on it (#1543)" % TMPFILES_ALLOW]
+    out = []
+    try:
+        present = tree_lstat(root, "run/tmpfiles.d") is not None
+    except OSError:
+        present = True
+    if present:
+        out.append("run/tmpfiles.d: not on the tmpfiles.d allowlist; /run is a tmpfs on the box (#1543)")
+    guarded = {(rel, n) for rel, n, _ in tmpfiles_refusals(root)}
+    for rel, n, ln in tmpfiles_entries(root):
+        if n is None:
+            out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (rel, ln))
+        elif (rel, ln) in allowed:
+            continue
+        elif (rel, n) in guarded:
+            out.append("%s line %d: %s: not on the tmpfiles.d allowlist (%s, #1543), and the guarded-path check "
+                       "refuses it too: remove the line; it must not be added" % (rel, n, ln[:120], TMPFILES_ALLOW_REPO))
+        else:
+            out.append("%s line %d: not on the tmpfiles.d allowlist (%s, #1543); review this line, then add the entry "
+                       "after 'entry:' to that file (each line is reviewed on its own: %s only lists what a tree "
+                       "holds, it reviews nothing); entry: %s\t%s"
+                       % (rel, n, TMPFILES_ALLOW_REPO, TMPFILES_REGENERATE, rel, ln))
+    return out
+
+
+def tmpfiles_allowlist_text(root):
+    """tmpfiles.allow for the tree at ROOT: its header, then one entry per line the tree holds."""
+    return TMPFILES_ALLOW_HEADER + "".join("%s\t%s\n" % (rel, ln) for rel, n, ln in tmpfiles_entries(root)
+                                           if n is not None)
+
+
+TMPFILES_ALLOW_HEADER = """\
+# Every tmpfiles.d line the image may ship (#1530, #1543), one per line: the file's path in the image
+# tree, a tab, and the line exactly as systemd-tmpfiles reads it (leading and trailing blanks
+# dropped; blank lines and comments are not listed). mkosi.finalize fails the build on any line not
+# here, wherever it is; the guarded-path check in mkosi.finalize runs as well.
+# To regenerate after a reviewed package update or an edit to mkosi.extra's tmpfiles.d: the failed
+# build prints each new line as "entry: <file><TAB><line>" (the image workflow also shows them as an
+# annotation); check each one, then add it here. With the image tree at hand:
+#   python3 image/mkosi/mkosi.finalize --tmpfiles-allowlist ROOT > image/mkosi/tmpfiles.allow
+"""
+
+
+def credstore_violations(root):
+    """#1543 Security B3: systemd-sysctl and systemd-tmpfiles import sysctl.* and tmpfiles.*
+    credentials from the credential store, so nothing ships there but what CREDSTORE_ALLOWED names.
+    A store that is a link or a file is refused too. A store reached through a linked parent (trixie's
+    /lib is /usr/lib) is walked once, under the path it resolves to."""
+    out, root, seen = [], str(root), set()
+    for d in CREDSTORE_DIRS:
+        try:
+            path, st = tree_entry(root, d)
+        except OSError as e:
+            out.append("%s: unresolvable (%s); the tree check never passes a store it cannot read" % (d, e.strerror))
+            continue
+        if st is None:
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            out.append("%s: a link or file where the credential store is; nothing ships there" % d)
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        for rel, st in tree_walk(root, path):
+            if not stat.S_ISDIR(st.st_mode) and rel not in CREDSTORE_ALLOWED:
+                out.append("%s: in a credential store; it could carry sysctl.extra or tmpfiles.extra" % rel)
+    return out
 
 
 def byte_violations(f):
@@ -643,7 +1366,7 @@ def byte_violations(f):
     where config_parse stops reading."""
     out = []
     try:
-        data = f.read_bytes()
+        data = f.content()
     except OSError as e:
         return ["%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror)]
     for n, ln in enumerate(data.split(b"\n"), 1):
@@ -662,7 +1385,7 @@ def uplink_violations(up):
     differently from this split."""
     out, seen, section = byte_violations(up), {}, None
     try:
-        text = up.read_text()
+        text = up.text()
     except OSError:
         return out
     for n, ln in enumerate(text.split("\n"), 1):
@@ -704,15 +1427,15 @@ def network_violations(root):
     """#1478: the effective .network set is the uplink alone, nothing changes it, and neither it nor
     networkd.conf turns on forwarding or LAN name answering; #1479: the uplink keeps the box private.
     The set is conf_files over systemd/network, as networkd's network_load lists it; network_load_one
-    skips a file that reads as nothing (an empty file, a link to /dev/null, a dangling link), and
-    applies conf_files over NAME.d to the rest."""
+    skips a file that reads as nothing (an empty file, a mask), and applies conf_files over NAME.d to
+    the rest. A file the check cannot read (any other link, #1543) is refused and counts as live."""
     out, live = [], {}
     for f in conf_files(root, conf_paths("systemd/network"), ".network"):
         try:
-            if f.read_bytes() == b"":
+            if f.content() == b"":
                 continue
-        except OSError:
-            pass  # live as far as the check knows: refused below
+        except OSError as e:
+            out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror))
         live[f.name] = f
     for n in sorted(set(live) - {UPLINK}):
         out.append("%s: live .network file; only %s may run (mask or remove it)" % (live[n].rel, UPLINK))
@@ -726,10 +1449,10 @@ def network_violations(root):
     for n in sorted(live):
         for f in conf_files(root, conf_paths("systemd/network/%s.d" % n)):
             try:
-                if f.read_bytes() == b"":
+                if f.content() == b"":
                     continue
-            except OSError:
-                pass
+            except OSError as e:
+                out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror))
             out.append("%s: networkd drop-in; the image's .network files are not changed" % f.rel)
     conf = main_conf(root, "networkd.conf")
     for f in conf:
@@ -752,16 +1475,20 @@ def resolved_violations(root):
         for key in ("LLMNR", "MulticastDNS") for v in [ini_last(conf, "Resolve", key)] if v != "no"]
 
 
-def has_key(path):
+def has_key(root, rel):
+    """Whether regular file REL holds a private key marker (the content scan: any file, not only
+    configuration, so it reads through tree_read without the owner rule)."""
     try:
-        with open(path, "rb") as f:
-            data = f.read(SCAN_MAX)
+        data = tree_read(root, rel, SCAN_MAX)
     except OSError:
         return False
     return any(m in data for m in KEY_MARKERS)
 
 
 def main():
+    if sys.argv[1:2] == ["--tmpfiles-allowlist"] and len(sys.argv) == 3:
+        sys.stdout.write(tmpfiles_allowlist_text(sys.argv[2]))
+        return
     root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BUILDROOT")
     if not root:
         sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")
@@ -769,7 +1496,9 @@ def main():
     for line in v:
         print("image check: " + line)
     if v:
-        sys.exit("image check: %d problem(s); the image must hold no per-install secret or socket file" % len(v))
+        sys.exit("image check: %d problem(s) in the image tree, each named above; a tmpfiles.d line missing from %s "
+                 "that the guarded-path check passes ends in the entry to review and add there"
+                 % (len(v), TMPFILES_ALLOW_REPO))
     print("image check: clean")
 
 

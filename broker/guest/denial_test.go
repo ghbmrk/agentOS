@@ -3,7 +3,7 @@ package guest
 // SR2-3j: a denial's reason reaches the guest only as the policy's guest
 // text; any other reason is a ref, its detail on a broker-log line.
 //
-// REQ: RES-4, CAP-8
+// REQ: RES-4, CAP-8, OP-2
 
 import (
 	"bytes"
@@ -65,5 +65,26 @@ func TestDenialReasonsReachTheGuestOnlyAsFixedText(t *testing.T) {
 	}
 	if st, e := r.tool("m1", "effect_request", send("r-safe")); e != "" || st.State != "denied" || st.Reason != "needs the owner's approval" {
 		t.Fatalf("safe: %+v %q", st, e)
+	}
+}
+
+// R16 (OP-2): a request the broker holds back for now (here STOP) tells
+// the guest to repeat it, since effect_status only reports and never runs
+// it; the repeat is what goes once the hold lifts.
+func TestOP2HeldRequestTellsTheGuestToRepeatIt(t *testing.T) {
+	r := newRig(t, nil)
+	if _, err := r.eng.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st, e := r.tool("m1", "effect_request", send("r-held"))
+	if e != "" || st.State != "authorized" || st.Reason != heldReason ||
+		!strings.Contains(st.Reason, "repeat effect_request with the same request_id") {
+		t.Fatalf("held: %+v %q", st, e)
+	}
+	if err := r.eng.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if st, e := r.tool("m1", "effect_request", send("r-held")); e != "" || st.State != "succeeded" {
+		t.Fatalf("repeat: %+v %q", st, e)
 	}
 }

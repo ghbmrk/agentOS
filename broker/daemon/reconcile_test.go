@@ -32,6 +32,9 @@ type crashLoops struct {
 	down      int             // Reconcile answers unknown this many more times
 	uncertain bool            // Reconcile can never tell
 	asked     int
+	// stall, if set, holds every Reconcile after the third until it
+	// closes, so a test sees the fence before parking (OP-2) lifts it.
+	stall chan struct{}
 }
 
 func (c *crashLoops) Execute(ctx context.Context, in journal.Intent, n int) journal.Outcome {
@@ -45,6 +48,11 @@ func (c *crashLoops) Execute(ctx context.Context, in journal.Intent, n int) jour
 
 func (c *crashLoops) Reconcile(_ context.Context, in journal.Intent, _ int) journal.Outcome {
 	c.mu2.Lock()
+	if c.stall != nil && c.asked >= 3 {
+		c.mu2.Unlock()
+		<-c.stall
+		c.mu2.Lock()
+	}
 	defer c.mu2.Unlock()
 	c.asked++
 	if c.uncertain || c.down > 0 {
@@ -144,8 +152,8 @@ func loopsOn(t *testing.T, d *Daemon, id string) (journal.Status, error) {
 
 // A crash mid LOOPS OFF fences the broker account at restart (OP-4).
 // agentosd reconciles it from evidence at startup: LOOPS ON then
-// dispatches, and LOOPS OFF is not executed again, whichever way the
-// evidence says it went.
+// dispatches. LOOPS OFF runs again only when the evidence proves it was
+// not done (OP-2: dispatched again under the recheck), and then once.
 func TestOP4StartupReconcileReleasesTheBrokerAccount(t *testing.T) {
 	fastSettle(t)
 	for _, applied := range []bool{true, false} {
@@ -158,9 +166,6 @@ func TestOP4StartupReconcileReleasesTheBrokerAccount(t *testing.T) {
 			t.Fatalf("applied=%v: evidence asked %d times; the unavailable answers were not retried", applied, f.askedCount())
 		}
 		want := journal.Succeeded
-		if !applied {
-			want = journal.NotApplied
-		}
 		if st, err := d.Engine().Get("loops:off:1"); err != nil || st.State != want {
 			t.Fatalf("applied=%v: LOOPS OFF is %s %v, want %s", applied, st.State, err, want)
 		}
@@ -173,8 +178,12 @@ func TestOP4StartupReconcileReleasesTheBrokerAccount(t *testing.T) {
 		f.mu.Lock()
 		ran := append([]string(nil), f.ran...)
 		f.mu.Unlock()
-		if len(ran) != 1 || ran[0] != "loops:on:1" {
-			t.Fatalf("applied=%v: executed %q; LOOPS OFF must not run again", applied, ran)
+		wantRan := []string{"loops:on:1"}
+		if !applied {
+			wantRan = []string{"loops:off:1", "loops:on:1"}
+		}
+		if strings.Join(ran, ",") != strings.Join(wantRan, ",") {
+			t.Fatalf("applied=%v: executed %q, want %q", applied, ran, wantRan)
 		}
 		cancel()
 		d.Wait()
@@ -188,9 +197,9 @@ func TestOP4UncertainOutcomeStaysFencedAndStopAnswers(t *testing.T) {
 	fastSettle(t)
 	crashed := crashMidLoopsOff(t)
 	dir := t.TempDir()
-	f := &crashLoops{uncertain: true}
+	f := &crashLoops{uncertain: true, stall: make(chan struct{})}
 	cancel, d := startLoops(t, dir, crashed, f)
-	defer func() { cancel(); d.Wait() }()
+	defer func() { close(f.stall); cancel(); d.Wait() }()
 	deadline := time.Now().Add(5 * time.Second)
 	for f.askedCount() < 3 {
 		if time.Now().After(deadline) {

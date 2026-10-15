@@ -201,9 +201,11 @@ func TestRefreshOverlappingALockDoesNotResume(t *testing.T) {
 	// own sign-in is texted (the point the lock lands in).
 	g.advance(owner.SignInAlertEvery + localapi.FreshFor)
 	totp := g.code()
-	out, err := g.lockDuring(func() (any, error) {
-		return g.call(localapi.OpResume, localapi.Resume{Token: tok, Code: totp})
-	})
+	// The sign-in text goes out after the reply (UX-2wb-1), so the lock
+	// lands between the code's acceptance and the resume that uses it.
+	g.own = lockAfterSignIn{g.ch}
+	out, err := g.call(localapi.OpResume, localapi.Resume{Token: tok, Code: totp})
+	g.own = g.ch
 	if !g.eng.Stopped() {
 		t.Fatalf("resumed across the lock: %+v %v", out, err)
 	}
@@ -213,6 +215,15 @@ func TestRefreshOverlappingALockDoesNotResume(t *testing.T) {
 	if _, err := g.call(localapi.OpLines, localapi.Auth{Token: tok}); code(err) != localapi.ErrUnauthorized {
 		t.Fatalf("session after the lock: %v", err)
 	}
+}
+
+// lockAfterSignIn locks the session right after a code is accepted.
+type lockAfterSignIn struct{ *owner.Channel }
+
+func (l lockAfterSignIn) LocalSignIn(c string) (time.Time, uint64, error) {
+	at, locks, err := l.Channel.LocalSignIn(c)
+	_ = l.Channel.RequireUnlock()
+	return at, locks, err
 }
 
 // lockFirst locks the session just before RESUME commits: the lock lands

@@ -3,7 +3,10 @@ package netjoin
 import (
 	"context"
 	"sort"
+	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/apnet"
 )
 
 // ScanNM is the scan's whole reach into NetworkManager. Each method is one
@@ -36,7 +39,9 @@ type Scanner struct {
 func NewScanner(nm ScanNM) *Scanner { return &Scanner{nm: nm, wait: ScanWait} }
 
 // Scan returns at most MaxNetworks Showable names, each once at its best
-// strength, strongest first and then by name. A read that fails skips its
+// strength, strongest first and then by name. It leaves out the box's own
+// networks, every name starting apnet.Prefix (the setup network's and the
+// card's), so neither is offered as the home Wi-Fi (#1281). A read that fails skips its
 // device or access point; a failed device list, or the wait running out
 // first, gives fewer names or none.
 func (s *Scanner) Scan(ctx context.Context) []string {
@@ -57,7 +62,7 @@ func (s *Scanner) Scan(ctx context.Context) []string {
 		}
 		for _, ap := range aps {
 			ssid, err := s.nm.APSsid(ctx, ap)
-			if err != nil || !Showable(ssid) {
+			if err != nil || !Showable(ssid) || strings.HasPrefix(string(ssid), apnet.Prefix) {
 				continue
 			}
 			st, err := s.nm.APStrength(ctx, ap)
