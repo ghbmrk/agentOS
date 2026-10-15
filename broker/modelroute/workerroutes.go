@@ -39,8 +39,9 @@ func (c *RouteControl) do(verb, id string) (*http.Response, error) {
 	return c.c.Post(u.String(), "text/plain", nil)
 }
 
-// call posts verb for id and returns the reply body, mapping a 503 to
-// ErrVaultLocked.
+// call posts verb for id and returns the reply body, mapping any 503 (locked,
+// stalled or contended) to ErrVaultLocked and a missing plan login to
+// ErrNoPlanLogin.
 func (c *RouteControl) call(verb, id string, max int64) ([]byte, error) {
 	resp, err := c.do(verb, id)
 	if err != nil {
@@ -53,6 +54,9 @@ func (c *RouteControl) call(verb, id string, max int64) ([]byte, error) {
 		return body, nil
 	case http.StatusServiceUnavailable:
 		return nil, fmt.Errorf("worker route for %s: %w", id, ErrVaultLocked)
+	}
+	if isNoLogin(string(body)) {
+		return nil, fmt.Errorf("worker route for %s: %w", id, ErrNoPlanLogin)
 	}
 	return nil, fmt.Errorf("worker route for %s: %s", id, strings.TrimSpace(string(body)))
 }

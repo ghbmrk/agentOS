@@ -35,6 +35,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/provagent"
 	"github.com/ghbmrk/agentos/broker/recall"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 	"github.com/ghbmrk/agentos/broker/replay"
@@ -808,8 +809,10 @@ func main() {
 			// or merged until that is settled (recall W10).
 			Contained: recallExec.Contained,
 		}
+		var planRoutes *modelroute.RouteControl
 		if workerRoutes != "" {
-			vmc.ProviderRoutes = modelroute.NewRouteControl(workerRoutes)
+			planRoutes = modelroute.NewRouteControl(workerRoutes)
+			vmc.ProviderRoutes = planRoutes
 		}
 		md.set(&vmc)
 		m, err := vm.Open(ctx, vmc)
@@ -831,6 +834,9 @@ func main() {
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
+			if wt != nil && planRoutes != nil {
+				wt.Provider = providerRunner(m, planRoutes)
+			}
 			caps.workers(wt != nil)
 			tools := registeredTools(qs, tree, recallTools, wt)
 			if wt != nil {
@@ -1043,6 +1049,25 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 		return nil
 	}
 	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB, Stopped: g.stopped, Free: g.room, Avail: g.avail}
+}
+
+// providerRunner serves provider_run (CAP-11) over the built-in
+// declarations. Every owner-side input the route waits on is closed until
+// its row lands: no plan is granted (CRED-5c's consent record, #1264's
+// sign-in), no private mark, no consent, and no image pins a CLI version,
+// so a run refuses with a closed reason and starts nothing. Codex's
+// qualification record is empty until S8-live (#809) fills it.
+func providerRunner(m *vm.Manager, routes provagent.Seeder) *provagent.Runner {
+	return &provagent.Runner{
+		Host: m, Seeder: routes, Decls: provagent.Builtins(),
+		ImageVersion: func(string) string { return "" },
+		Granted:      func(string) bool { return false },
+		PrivateOK:    func(string) bool { return false },
+		Consent:      func(string) bool { return false },
+		Reserve:      func() float64 { return 1 },
+		Caps:         provagent.Caps{Wall: 30 * time.Minute, Result: 256 << 10, Brief: 256 << 10},
+		NewID:        func() string { return vm.ProviderPrefix + randHex(6) },
+	}
 }
 
 // workerGates are what the worker tools read of the box: the owner's
