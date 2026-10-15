@@ -312,7 +312,7 @@ func (t *treeDir) write(p string, b []byte) error {
 		err = cerr
 	}
 	if err == nil {
-		if err = unix.Renameat(dfd, tmp, dfd, name); err != nil {
+		if err = unix.Renameat(dfd, tmp, dfd, name); err != nil { // durable:exempt path-based durable.Rename would follow a swapped link (#1732); the mirror is rebuilt each sync
 			err = &fs.PathError{Op: "rename", Path: filepath.Join(t.dir, p), Err: err}
 		}
 	}
