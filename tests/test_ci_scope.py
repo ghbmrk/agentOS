@@ -23,6 +23,22 @@ class ScopeTest(unittest.TestCase):
                   "decisions/D-098.md", "briefs/DOC-6.md", "handoff/CURRENT.md"):
             self.assertEqual(ci_scope.scope_of([p]), ("records", None), p)
 
+    def test_prose_no_test_reads_is_a_record(self):
+        # REQ: CI-PATHS
+        for p in ("README.md", "PLAN.md", "docs/conv-3-triage.md", "docs/conv-5-uncovered.md",
+                  "docs/development/trial-measurements.md", "docs/learning/new.md",
+                  "docs/security/provider-worker-isolation.md", "docs/security/deep/x.md"):
+            self.assertEqual(ci_scope.scope_of([p]), ("records", None), p)
+
+    def test_prose_a_test_or_tool_reads_stays_full(self):
+        # REQ: CI-PATHS
+        # owners-guide.md: broker/hostchange's Go test reads it. SPEC.md: specslice tests.
+        # OPERATING.md: risk_tier tests. LANES.md: board.py and lane-gate. CLAUDE/AGENTS: doclint rules.
+        for p in ("docs/owners-guide.md", "SPEC.md", "docs/OPERATING.md", "docs/LANES.md", "CLAUDE.md",
+                  "AGENTS.md", "docs/security/provider-worker-surfaces.csv", "docs/development/x.sh",
+                  "docs/new-top-level.md", "docs/BOARD-HISTORY.md"):
+            self.assertEqual(ci_scope.scope_of([p]), ("full", p), p)
+
     def test_the_records_pr_that_cost_97_minutes_is_records_only(self):
         # #1083's files.
         paths = ["BOARD.md", "LATER.md", "reviews/potency/2026-10-12-pr1082.md",
@@ -30,7 +46,7 @@ class ScopeTest(unittest.TestCase):
         self.assertEqual(ci_scope.scope_of(paths)[0], "records")
 
     def test_anything_else_is_full(self):
-        for p in ("SPEC.md", "CLAUDE.md", "README.md", "PLAN.md", "AGENTS.md", "docs/OPERATING.md",
+        for p in ("SPEC.md", "CLAUDE.md", "AGENTS.md", "docs/OPERATING.md",
                   "docs/LANES.md", "broker/go.mod", "broker/vault/vault.go", "broker/vault/ASSUMPTIONS.md",
                   "tests/test_board.py", "tools/ci_scope.py", "tools/doclint.py",
                   ".github/workflows/ci.yml", ".github/workflows/scope.yml", ".claude/settings.json",
@@ -111,6 +127,16 @@ class WiringTest(unittest.TestCase):
             step_text = ci[ci.rindex("- name:", 0, i):i]
             self.assertNotIn("RECORDS", step_text, step)
         self.assertIn("if: env.RECORDS == 'true'\n        run: python -m unittest tests.test_ci_scope tests.test_board", ci)
+
+    def test_go_jobs_restore_a_build_cache_and_the_records_run_checks_prose(self):
+        # REQ: CI-PATHS
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        for job in ("broker", "machines"):
+            body = ci[ci.index(f"\n  {job}:\n"):]
+            body = body[:body.index("\n  hostcheck:\n")] if job == "machines" else body[:body.index("\n  machines:\n")]
+            self.assertIn("uses: actions/cache@", body, job)
+            self.assertIn(f"key: go-build-{job}-", body, job)
+        self.assertIn("tests.test_risk_tier tests.test_product_name -v", ci)
 
     def test_assurance_skips_only_on_records(self):
         wf = (WORKFLOWS / "assurance.yml").read_text()

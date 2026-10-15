@@ -75,7 +75,7 @@ jobs:
         # The tests that read record files (test_board reads BOARD.md) and test the tools
         # the steps below run.
         if: env.RECORDS == 'true'
-        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier -v
+        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name -v
       - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
         if: env.RECORDS != 'true'
         run: |
@@ -163,6 +163,14 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Go build cache (CI-PATHS)
+        # Keyed on the vendored module set; a restore-key hit from main seeds a PR run. A cache
+        # miss only costs time. Vendored modules need no module cache.
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/go-build
+          key: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          restore-keys: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Software TPM for the trusted-host slot (P2-4b)
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
       # loops' canary-round test runs tools/canary.py, whose targets run as the
@@ -221,6 +229,13 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Go build cache (CI-PATHS)
+        # The root test runs below use GOCACHE=/tmp/gocache.
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: /tmp/gocache
+          key: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          restore-keys: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Install gVisor release-20260928.0 (checksum pinned)
         run: |
           B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64

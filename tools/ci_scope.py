@@ -26,13 +26,19 @@ import subprocess
 import sys
 
 # Record files, by exact path.
-RECORD_FILES = frozenset({
+RECORD_FILES = set({
     "BOARD.md", "LATER.md", "LEDGER.md", "DECISIONS.md", "METRICS.md", "TRACE.md",
     "docs/MARK-QUEUE.md",
 })
 # Record directories: any `*.md` at any depth below them. Other files there
 # (scripts, JSON, HTML) are not records.
 RECORD_DIRS = ("reviews/", "decisions/", "briefs/", "handoff/")
+# Prose that no build, test or tool reads (CI-PATHS): the top-level guides the doc checks
+# (doclint, trace, product-name) already cover in the records run, and `*.md` below these
+# directories. Not here, because a test or tool reads them: SPEC.md, CLAUDE.md, AGENTS.md,
+# docs/OPERATING.md, docs/LANES.md, docs/owners-guide.md (a Go test), the *-HISTORY files.
+RECORD_FILES |= {"README.md", "PLAN.md", "docs/conv-3-triage.md", "docs/conv-5-uncovered.md"}
+RECORD_DIRS += ("docs/development/", "docs/learning/", "docs/security/")
 
 
 def is_record(path):
