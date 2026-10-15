@@ -476,7 +476,7 @@ func TestRotationResultWithNoConfirmerIsShownToNone(t *testing.T) {
 func TestRotationStartVoidsTheResult(t *testing.T) {
 	x := newWireRig(t)
 	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
-	x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/AgentOS?secret=CANARYSEEDGGGGGG"}
+	x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/agentOS?secret=CANARYSEEDGGGGGG"}
 	x.post("/rotate/card", x.group())
 	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
 	if w := x.do("GET", "/rotate/done", nil); w.Code != http.StatusSeeOther || strings.Contains(w.Body.String(), "SYNTH-NOTE") {
@@ -509,7 +509,7 @@ func TestRotationLateConfirmKeepsTheResultForAGrace(t *testing.T) {
 			x := newWireRig(t)
 			x.v.expires = x.clock().Add(tc.expires)
 			x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
-			x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/AgentOS?secret=CANARYSEEDHHHHHH"}
+			x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/agentOS?secret=CANARYSEEDHHHHHH"}
 			x.advance(tc.confirm)
 			x.v.commitIn, x.v.commitGo = make(chan struct{}), make(chan struct{})
 			form := x.group()
