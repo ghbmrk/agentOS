@@ -110,9 +110,11 @@ WORLD_WRITABLE = ("tmp", "var/tmp", "dev/shm", "dev/mqueue", "run/lock")
 # var/lib/agentos-fuzz (tmpfiles' ACLs deny that user /tmp, /var/tmp and /dev/shm, so it is the one
 # place it can write), agentos-localui serves the LAN-facing setup page from var/lib/agentos-localui,
 # the vault's user from var/lib/agentos-egress; DynamicUser services live under var/lib/private, and
-# people under home and run/user. A link into one is refused like one into WORLD_WRITABLE.
+# people under home and run/user; the egress, netjoin and ap units' RuntimeDirectory= lives under run.
+# A link into one is refused like one into WORLD_WRITABLE.
 SERVICE_DIRS = ("var/lib/agentos-fuzz", "var/lib/agentos-localui", "var/lib/agentos-egress", "home",
-                "run/user", "var/lib/private")
+                "run/user", "var/lib/private",
+                "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap")
 # #1702: the one link to a world-writable directory the check allows: trixie's /var/lock, which the
 # tree holds as a link to /run/lock (CI's build has the absolute form; a tmpfiles line gives the
 # relative one). Matched by path and exact target, nothing else like it.
@@ -195,9 +197,17 @@ def world_writable_link(root, rel):
     try:
         path = tree_chase(root, rel, missing_ok=True)[0]
     except OSError:
+        # Fail-open on purpose: a loop or a non-directory step fails the same lookup on the box, so
+        # the link reads nothing. Keep it so if tree_chase changes, or this becomes a quiet hole.
         return []
     if rel == LOCK_LINK[0] and tree_readlink(root, rel) in LOCK_LINK[1]:
         return []
+    if ".." in path.split("/"):
+        # A '..' after a box mount, or after a step the tree lacks, cannot be cancelled lexically:
+        # /run/../var/lock is /var/lock on the box, which is /run/lock (1777). Box-made links such as
+        # /dev/fd make a lexical '..' unsound inside a mount too, so any such tail is refused.
+        return ["%s: a link to %s, which goes up with '..' past a directory the tree does not hold; "
+                "where it ends is not known at build time (#1702)" % (rel, tree_readlink(root, rel))]
     parts = path_parts(path)
     for k in range(1, len(parts) + 1):
         d = "/".join(parts[:k])
@@ -851,7 +861,7 @@ def tree_chase(root, rel, hops=40, missing_ok=False):
     and '..' stops at ROOT. Returns (in-image path, lstat of it). A path that enters one of
     BOX_MOUNTS returns ("/" + that path, None) without looking at the tree. Raises
     FileNotFoundError if a step is missing (with MISSING_OK, returns (where the path would go, None):
-    the rest taken as written), and OSError if links loop or a step is not a directory."""
+    the rest taken as written, '..' and all), and OSError if links loop or a step is not a directory."""
     parts, cur = [x for x in rel.split("/") if x], []
     st = tree_lstat(root, "")
     while parts:
@@ -866,7 +876,7 @@ def tree_chase(root, rel, hops=40, missing_ok=False):
         st = tree_lstat(root, p)
         if st is None:
             if missing_ok:
-                return "/".join(path_parts("/".join(cur + [name] + parts))), None
+                return "/".join(cur + [name] + parts), None
             raise FileNotFoundError(errno.ENOENT, "No such file or directory", p)
         if stat.S_ISLNK(st.st_mode):
             hops -= 1

@@ -2277,7 +2277,54 @@ class ConfFilesTest(unittest.TestCase):
                         f.unlink()
         self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
             "var/lib/agentos-fuzz", "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
-            "var/lib/private")))
+            "var/lib/private", "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap")))
+
+    def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
+        # #1702 (Security 1): /run/.. is / on the box, so /run/../var/lock is /var/lock, which is
+        # /run/lock (1777). The tail after a mount the tree does not hold, or after a step it lacks,
+        # is not cancelled lexically; a link that goes up past one is refused.
+        link(self.root, "var/lock", "../run/lock")
+        link(self.root, "var/run", "/run")
+        cases = [("/%s/../var/lock" % m) for m in check.BOX_MOUNTS] + [
+            "/run/../var/lock/x.conf", "../../run/../var/lock", "../../../../run/../var/lock",
+            "/run/../var/run/lock", "/run/../var/run/user/1000", "/opt/nope/../../var/lock"]
+        for rel in ("etc/udev/rules.d", "etc/systemd/system/ssh.service.d/x.conf"):
+            for target in cases:
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    try:
+                        self.assertIn("%s: a link to %s, which goes up with '..' past a directory" % (rel, target),
+                                      self.v())
+                    finally:
+                        f.unlink()
+        # The same links without the detour were refused already, and a '..' inside the tree is resolved.
+        for target in ("/var/lock", "/var/run/lock", "/var/run/user/1000"):
+            f = link(self.root, "etc/udev/rules.d", target)
+            self.assertNotEqual(self.v(), [], target)
+            f.unlink()
+        f = link(self.root, "etc/udev/rules.d", "../../usr/lib/../share/f")
+        self.assertEqual(check.violations(self.root), [])
+        f.unlink()
+
+    def test_the_lock_and_world_writable_exemptions_are_exact(self):
+        # #1702 (Security, L3): the lock link is matched by path, not by suffix; a link through
+        # var/lock reaches run/lock; the o+w exemption is by directory name, not by prefix.
+        link(self.root, "var/lock", "../run/lock")
+        f = link(self.root, "etc/x/lock", "/run/lock")
+        self.assertIn("etc/x/lock: a link to /run/lock, inside /run/lock,", self.v())
+        f.unlink()
+        for target in ("/var/lock/x", "/var/lock"):
+            f = link(self.root, "etc/udev/rules.d", target)
+            self.assertIn("etc/udev/rules.d: a link to %s, inside /run/lock," % target, self.v(), target)
+            f.unlink()
+        for rel in ("var/tmpx", "run/lockx"):
+            (self.root / rel).mkdir(parents=True, exist_ok=True)
+            (self.root / rel).chmod(0o777)
+            self.assertIn("%s: mode 0777 is writable by anyone on the box" % rel, self.v())
+            (self.root / rel).rmdir()
+        (self.root / "var/tmp").mkdir(parents=True, exist_ok=True)
+        write(self.root, "var/tmp/f", "x\n").chmod(0o666)
+        self.assertEqual(check.violations(self.root), [])
 
     def test_an_entry_anyone_can_write_is_refused_wherever_it_is(self):
         # #1702 item 2: a 1777 drop-in directory, a 0777 rules.d, a 0666 enabled unit, a 0777 generator.
@@ -3409,6 +3456,8 @@ class TreeAccessTest(unittest.TestCase):
             "os.__getattribute__": [(mid, '        if os.__getattribute__("lstat")(root):')],
             "os.__dict__": [(mid, '        if os.__dict__["lstat"](root):')],
             "sys.modules": [(mid, '        if sys.modules["os"].lstat(root):')],
+            # Caught by the "modules" rule alone: .lstat is not involved.
+            "sys.modules alias": [("\ndef violations(root):", "\nM = sys.modules['os']\n\n\ndef violations(root):")],
             "tree_read alias": [(fstab, '        rd = tree_read\n        for ln in rd(root, "etc/fstab").decode().splitlines():')],
             "tree_read passed": [(fstab, '        for ln in map(tree_read, [root], ["etc/fstab"]):')],
         }
