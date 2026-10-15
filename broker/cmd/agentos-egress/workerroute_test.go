@@ -631,6 +631,15 @@ func TestCRED8RouteCallsAreCappedAcrossWorkers(t *testing.T) {
 	}
 	release()
 	<-held
+	// The client gives up as soon as its body errors, which can be before
+	// the server's handler has left bounded and freed the slot.
+	deadline = time.Now().Add(5 * time.Second)
+	for len(r.p.calls) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the held call never freed its slot")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	resp, err = through(t, filepath.Join(db, RouteSocket), "ph-access-pw-b", nil)
 	if err != nil {
 		t.Fatal(err)
