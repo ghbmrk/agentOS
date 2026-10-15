@@ -32,6 +32,8 @@ type fakeLogins struct {
 	// commitErr makes the vault write fail after a good swap.
 	commitErr error
 	lastSwap  map[string]string
+
+	refreshFlights
 }
 
 func newFakeLogins(t *testing.T) *fakeLogins {
