@@ -24,7 +24,7 @@ GOOD = {
                 "| A-1 | [a](briefs/A-1.md) | — | in review (#1) |\n",
     "CLAUDE.md": "Rules. See OPERATING §2–3 and docs/OPERATING.md §1.\n",
     "docs/OPERATING.md": "# OPERATING\n\n## 1. One\n\n## 2. Two\n\n## 3. Three\n",
-    "briefs/A-1.md": "# A-1\n",
+    "briefs/A-1.md": "# A-1\n\n**Acceptance tests:** A-1: tests/test_a.py::test_x\n",
 }
 
 WITH_DECISIONS = GOOD["README.md"].replace("| [CLAUDE.md](CLAUDE.md) |\n", "| [CLAUDE.md](CLAUDE.md) |\n| [DECISIONS.md](DECISIONS.md) |\n")
@@ -61,8 +61,8 @@ class LintTest(unittest.TestCase):
                          ["CLAUDE.md:1: OPERATING §4 does not exist", "CLAUDE.md:1: OPERATING §9 does not exist"])
 
     def test_brief_over_the_size_cap(self):
-        got = self.lint(**{"briefs/A-1.md": "x" * (4 * doclint.BRIEF_TOKENS + 4)})
-        self.assertEqual(got, ["briefs/A-1.md: ~20001 tokens, over the 20000 cap; split the package"])
+        got = self.lint(**{"briefs/A-1.md": "**Acceptance tests:** none: x\n" + "x" * (4 * doclint.BRIEF_TOKENS)})
+        self.assertEqual(got, ["briefs/A-1.md: ~20007 tokens, over the 20000 cap; split the package"])
 
     # DOC-4: per-file review records and unique assumption IDs
 
@@ -175,8 +175,16 @@ class LintTest(unittest.TestCase):
         self.assertEqual(self.lint(**{"DECISIONS.md": text, **self.LISTED}), [])
 
     def test_brief_with_its_own_state_line(self):
-        got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**State:** building\n"})
+        got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**State:** building\n**Acceptance tests:** none: docs\n"})
         self.assertEqual(got, ["briefs/A-1.md:3: `**State:**` line; state lives on the work-item issue"])
+
+    # REQ: FIRST-PASS
+    def test_brief_without_acceptance_tests_fails(self):
+        got = self.lint(**{"briefs/A-1.md": "# A-1\n\nGoal.\n"})
+        self.assertEqual(got, ["briefs/A-1.md: no `**Acceptance tests:**` line; name each ID's test up front, or `none: <why>`"])
+
+    def test_brief_in_the_baseline_may_lack_acceptance_tests(self):
+        self.assertEqual(self.lint(**{"briefs/A-1.md": "# A-1\n", "tools/brief_acceptance_baseline.txt": "A-1.md\n"}), [])
 
     def test_main_files_pass(self):
         self.assertEqual(doclint.lint(ROOT), [])
