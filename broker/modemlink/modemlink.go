@@ -231,7 +231,8 @@ func newID() string {
 
 // Send texts the owner through the bridge and waits for the result: nil,
 // or modem.ErrDown when the owner line is down, swapped or unbound, the
-// bridge is silent or full, or the text did not go. A text that could not
+// bridge is silent or full, or the text did not go; modem.ErrNotSent, an
+// ErrDown, when SendReceipt would answer NotSent. A text that could not
 // go while the line was unusable is counted for the recovery text.
 func (l *Link) Send(to, text string) error { return l.send(to, text, false) }
 
@@ -268,8 +269,11 @@ type Receipt struct {
 }
 
 func (r Receipt) err() error {
-	if r.Outcome == ReceiptAccepted {
+	switch r.Outcome {
+	case ReceiptAccepted:
 		return nil
+	case ReceiptNotSent:
+		return modem.ErrNotSent
 	}
 	return modem.ErrDown
 }
