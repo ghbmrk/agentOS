@@ -29,20 +29,26 @@ def git(*args):
     return subprocess.run(["git", *args], cwd=ROOT, capture_output=True)
 
 
+def read_text(name):
+    try:
+        return (ROOT / name).read_text()
+    except (OSError, UnicodeError):
+        return ""
+
+
 def whole_tree():
-    out = {}
-    for name in git("ls-files", "-z").stdout.decode().split("\0"):
-        try:
-            out[name] = (ROOT / name).read_text() if name else ""
-        except (OSError, UnicodeError):
-            continue
-    return out
+    return {n: read_text(n) for n in git("ls-files", "-z").stdout.decode().split("\0") if n}
 
 
 def added_lines():
-    """Added lines per file since the merge base with origin/main; None if unavailable."""
+    """Added lines per file since the merge base with origin/main.
+
+    None when there is no usable branch diff (no origin/main, HEAD is the merge
+    base as on main itself, or an empty diff): the caller then checks the whole tree.
+    """
     base = git("merge-base", "HEAD", "origin/main")
-    if base.returncode:
+    head = git("rev-parse", "HEAD")
+    if base.returncode or head.returncode or base.stdout == head.stdout:
         return None
     diff = git("diff", "-U0", "--no-color", base.stdout.decode().strip(), "HEAD")
     if diff.returncode:
@@ -53,7 +59,18 @@ def added_lines():
             name = line[6:] if line.startswith("+++ b/") else None
         elif name and line.startswith("+"):
             out[name] = out.get(name, "") + line[1:] + "\n"
-    return out
+    return out or None
+
+
+def violations(baseline, added, texts):
+    """Files over their baseline. A file the branch adds old-name text to is counted
+    whole, so a duplicate of an allowlisted line still fails; other files are ignored.
+    added None means no branch diff: every file is counted."""
+    names = texts if added is None else [n for n, t in added.items() if fingerprints(t)]
+    return [
+        n for n in names
+        if fingerprints(texts[n]) - collections.Counter(baseline.get(n, {}))
+    ]
 
 
 class ProductNameTest(unittest.TestCase):
@@ -71,20 +88,30 @@ class ProductNameTest(unittest.TestCase):
     def test_deleting_legacy_text_passes(self):
         self.assertFalse(fingerprints("agentOS") - fingerprints(OLD_NAME))
 
-    def test_changed_lines_have_no_new_capitalized_product_name(self):
-        """Only lines this branch adds count: drift arriving from main is not its fault.
+    def test_added_duplicate_of_baseline_line_fails(self):
+        line = "# " + OLD_NAME
+        baseline = {"a.md": dict(fingerprints(line))}
+        added = {"a.md": line + "\n"}
+        self.assertEqual(violations(baseline, added, {"a.md": line + "\n" + line}), ["a.md"])
+        self.assertEqual(violations(baseline, None, {"a.md": line}), [])
 
-        Baseline still absolves moved legacy lines. Without origin/main (shallow
-        checkout) the whole tree is checked against the baseline instead.
-        """
+    def test_drift_in_untouched_file_ignored_on_branch_only(self):
+        texts = {"drift.md": "# " + OLD_NAME, "b.md": "agentOS"}
+        self.assertEqual(violations({}, {"b.md": "agentOS\n"}, texts), [])
+        self.assertEqual(violations({}, None, texts), ["drift.md"])
+
+    def test_no_branch_diff_checks_whole_tree(self):
+        # On main the merge base is HEAD, so added_lines() must not report an empty diff.
+        if git("rev-parse", "HEAD").stdout == git("rev-parse", "origin/main").stdout:
+            self.assertIsNone(added_lines())
+
+    def test_tracked_text_has_no_new_capitalized_product_name(self):
+        """Only files this branch adds old-name text to are counted: drift arriving from
+        main is not its fault. Without a branch diff the whole tree is checked."""
         baseline = json.loads(BASELINE.read_text())
         added = added_lines()
-        if added is None:
-            added = whole_tree()
-        failures = [
-            name for name, text in added.items()
-            if fingerprints(text) - collections.Counter(baseline.get(name, {}))
-        ]
+        texts = whole_tree() if added is None else {n: read_text(n) for n in added}
+        failures = violations(baseline, added, texts)
         self.assertEqual(failures, [], "Use agentOS in new product text: " + ", ".join(failures))
 
 
