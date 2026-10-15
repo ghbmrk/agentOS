@@ -47,6 +47,13 @@ var allowedKeys = map[string]string{
 	"OPENCLAW_DISABLE_BONJOUR": "guest runtime: S4 defence in depth (ARC-7), no mDNS",
 	"OPENCLAW_CLAWHUB_URL":     "guest runtime: ClawHub pointed at a closed port (S4 finding 7)",
 	"DO_NOT_TRACK":             "guest runtime: no telemetry",
+	// The Codex CLI the in-worker forwarder starts (egress/cmd/
+	// agentos-codex-forwarder, guest/codex C18), in a provider worker,
+	// where no AGENTOS_* variable or credential exists; the values are
+	// guest/codex/launch.json's, the override the forwarder's own port.
+	"CODEX_HOME":                       "Codex CLI in a provider worker: the directory holding only its placeholder login (guest/codex C11)",
+	"GIT_DIR":                          "Codex CLI in a provider worker: /dev/null, so no repository a tool wrote is read (guest/codex C11)",
+	"CODEX_REFRESH_TOKEN_URL_OVERRIDE": "Codex CLI in a provider worker: its login refresh goes to the forwarder's loopback port, never the provider (guest/codex C18)",
 }
 
 // deniedPrefix names agentosd's own configuration, the owner's number

@@ -357,7 +357,7 @@ func openRecall(ctx context.Context, v *modelroute.Verifier, sc recalltool.Servi
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket, recallDir string
+	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, workerRoutes, verifySocket, recallDir string
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
 	var diskQuota, sleepHoursFlag string
@@ -403,6 +403,7 @@ func main() {
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
 	flag.Int64Var(&agentMemMB, "agent-mem-mb", defaultAgentMemMB, "the owner's agent machine's memory budget, MB")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
+	flag.StringVar(&workerRoutes, "worker-routes", "/run/agentos-egress/provider.sock", "the vault process's provider control socket, which opens each provider worker's route socket (#1014); empty gives provider workers no route")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
@@ -806,6 +807,9 @@ func main() {
 			// A lineage holding a record the owner deleted is not forked
 			// or merged until that is settled (recall W10).
 			Contained: recallExec.Contained,
+		}
+		if workerRoutes != "" {
+			vmc.ProviderRoutes = modelroute.NewRouteControl(workerRoutes)
 		}
 		md.set(&vmc)
 		m, err := vm.Open(ctx, vmc)

@@ -425,6 +425,17 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		deny(http.StatusForbidden, "encoded request body refused")
 		return
 	}
+	// A call that must carry this worker's placeholder is refused before
+	// its body is read, so a caller holding none cannot make this process
+	// buffer a body (CRED-8, K28). A refresh's placeholder is in its body,
+	// which maxExchangeRequest bounds.
+	var real string
+	if ep.Kind == KindResponses || ep.Kind == KindRead {
+		if real, ok = w.bearer(r.Header); !ok {
+			deny(http.StatusForbidden, "no login placeholder of this worker")
+			return
+		}
+	}
 	limit := w.c.MaxBody
 	if ep.Kind == KindRefresh || ep.Kind == KindCode || ep.Kind == KindDevice {
 		limit = maxExchangeRequest
@@ -453,11 +464,6 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	var injected [][]byte
 	switch ep.Kind {
 	case KindResponses, KindRead:
-		real, ok := w.bearer(r.Header)
-		if !ok {
-			deny(http.StatusForbidden, "no login placeholder of this worker")
-			return
-		}
 		injected = append(injected, []byte(real))
 		up.Header.Set("Authorization", "Bearer "+real)
 		if ep.Kind == KindRead {
