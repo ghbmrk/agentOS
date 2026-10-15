@@ -68,6 +68,7 @@ sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/opencla
 install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/guest/launch.json"
 # Each setup service's unit lives beside its command (localui ASSUMPTIONS L26).
 install -D -m 0644 "$REPO/broker/cmd/agentos-localui/agentos-localui.service" "$STAGE/usr/lib/systemd/system/agentos-localui.service"
+install -D -m 0644 "$REPO/broker/cmd/agentos-localui/agentos-localui-claim.service" "$STAGE/usr/lib/systemd/system/agentos-localui-claim.service"
 install -D -m 0644 "$REPO/broker/cmd/agentos-ap/agentos-ap.service" "$STAGE/usr/lib/systemd/system/agentos-ap.service"
 install -D -m 0644 "$REPO/broker/cmd/agentos-modem/agentos-modem.service" "$STAGE/usr/lib/systemd/system/agentos-modem.service"
 install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/agentos-netjoin.service" "$STAGE/usr/lib/systemd/system/agentos-netjoin.service"

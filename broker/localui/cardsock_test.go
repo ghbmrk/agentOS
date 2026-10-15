@@ -329,7 +329,7 @@ func TestCardFinishReportsTheConfirmedCard(t *testing.T) {
 		},
 	}
 	hold := &heldUntil{held: true}
-	f := CardFinish{AgentosdSetup: AgentosdSetup{ops}, Card: hold}
+	f := CardFinish{AgentosdSetup: AgentosdSetup{Owner: ops}, Card: hold}
 	if err := f.Finish(ownerNum); err == nil || fmt.Sprint(calls) != "["+localapi.OpSetupFinish+"]" {
 		t.Fatalf("held card: %v, calls %v", err, calls)
 	}

@@ -18,6 +18,12 @@
 // step, whose provision and reset go over the unlock socket and whose
 // confirm the page reports to agentosd before finish. Without that
 // socket an open setup fails closed: the page exits and serves no step.
+//
+// The page decides once whether setup is open: agentosd's answer, never
+// its silence, so a transient error neither skips the first boot nor
+// opens setup later without it (#1270). Only the download's image passes
+// -download-box; on any other a box without a claim state is told to
+// reinstall, never served setup without the claim gate.
 package main
 
 import (
@@ -38,6 +44,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/firstboot"
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localui"
 )
 
@@ -53,6 +60,7 @@ func main() {
 	flag.StringVar(&vaultSock, "vault-sock", "", "the vault process's unlock socket, for the unknown-host unlock page; empty: not served")
 	flag.StringVar(&fb.Claim, "claim-state", claim.StatePath, "a preloaded box's claim state, as its seller sealed it (HW-10)")
 	flag.StringVar(&fb.Latch, "card-latch", "/var/lib/agentos/card-latch.json", "the Owner Card step's latch (HW-1)")
+	flag.BoolVar(&fb.Download, "download-box", false, "the download's image, which ships no claim state; unset, a box without one is told to reinstall (#1270)")
 	flag.StringVar(&iface, "iface", "wlan0", "the access point's interface")
 	flag.StringVar(&addr, "addr", "10.42.0.1/24", "the Wi-Fi page's address on the access point, with the subnet's length")
 	flag.IntVar(&port, "port", localui.UIPort, "TCP port")
@@ -76,11 +84,11 @@ func main() {
 // config is the page's configuration: setup through agentosd's socket
 // with an in-memory store (P2-2w c4), and no setup secret (Security L6).
 // The vault process's unlock socket serves both the unlock page and the
-// Owner Card rotation (REC-4) and the AI providers page; ARC-2 keeps the card's display here, not
-// in agentosd.
+// Owner Card rotation (REC-4), the AI providers page and setup's host
+// step (P2-2w c4d); ARC-2 keeps the card's display here, not in agentosd.
 func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Config {
-	cfg := localui.Config{AP: ap, Port: port,
-		Hooks: localui.AgentosdSetup{Owner: localui.Socket{Path: sock}}, Store: &localui.MemStore{}}
+	hooks := localui.AgentosdSetup{Owner: localui.Socket{Path: sock}}
+	cfg := localui.Config{AP: ap, Port: port, Store: &localui.MemStore{}}
 	if vaultSock != "" {
 		client := localui.NewUnlockClient(vaultSock)
 		cfg.Vault = client
@@ -88,7 +96,10 @@ func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Confi
 		// The AI providers page: the owner's private-data answer after
 		// setup (#1266).
 		cfg.Providers = client
+		// Setup's host step (P2-2w c4d, §8.1).
+		hooks.Vault = client
 	}
+	cfg.Hooks = hooks
 	return cfg
 }
 
@@ -135,8 +146,12 @@ func withCardNet(hooks localui.Hooks, box firstboot.BoxConfig) firstboot.BoxConf
 const agentosdWait = 30 * time.Second
 
 // boxFiles is what the page's first boot reads: the vault process's
-// unlock socket, the claim state and the card step's latch.
-type boxFiles struct{ VaultSock, Claim, Latch string }
+// unlock socket, the claim state and the card step's latch, and whether
+// the image is the download's (firstboot.BoxConfig.Download).
+type boxFiles struct {
+	VaultSock, Claim, Latch string
+	Download                bool
+}
 
 func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) error {
 	cfg, err := prepare(ctx, cfg, sock, fb)
@@ -187,7 +202,14 @@ func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) 
 	if err := awaitSocket(ctx, sock, agentosdWait); err != nil {
 		return cfg, err
 	}
-	if cfg.Hooks == nil || cfg.Hooks.AlreadySetUp() {
+	open, err := setupOpen(ctx, cfg.Hooks, agentosdWait)
+	if err != nil {
+		return cfg, err
+	}
+	if !open {
+		if a, ok := cfg.Hooks.(localui.AgentosdSetup); ok {
+			cfg.Hooks = ownedSetup{a}
+		}
 		return cfg, nil
 	}
 	if fb.VaultSock == "" {
@@ -199,9 +221,46 @@ func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) 
 	void := &localui.CodesVoid{}
 	box := localui.CardBox(localui.NewUnlockClient(fb.VaultSock), change.FileStore{Path: fb.Claim},
 		change.FileStore{Path: fb.Latch}, void)
-	cfg, _, err := withFirstBoot(cfg, box, void)
+	box.Download = fb.Download
+	cfg, _, err = withFirstBoot(cfg, box, void)
 	return cfg, err
 }
+
+// setupOpen is the page's one decision whether setup is open: agentosd's
+// answer to OpSetupProgress, open on an answer and closed on a refusal.
+// No answer is no decision: it asks again until wait has passed, then
+// errors, so the unit restarts the page (#1270). Hooks other than
+// agentosd's answer through AlreadySetUp.
+func setupOpen(ctx context.Context, hooks localui.Hooks, wait time.Duration) (bool, error) {
+	a, ok := hooks.(localui.AgentosdSetup)
+	if !ok {
+		return hooks != nil && !hooks.AlreadySetUp(), nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	for {
+		var r localui.Refused
+		err := a.Owner.Call(ctx, localapi.OpSetupProgress, nil, nil)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.As(err, &r):
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, errors.New("agentosd does not answer whether setup is open")
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// ownedSetup is agentosd's setup on a box whose setup prepare found
+// closed: closed for good, whatever agentosd answers later, so a later
+// answer never opens setup without the first boot (#1270).
+type ownedSetup struct{ localui.AgentosdSetup }
+
+func (ownedSetup) AlreadySetUp() bool { return true }
 
 // awaitSocket returns once the Unix socket at path accepts a connection,
 // or an error after wait.

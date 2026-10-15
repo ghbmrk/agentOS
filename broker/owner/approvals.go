@@ -201,12 +201,16 @@ func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time, loc
 	if err != nil {
 		return nil, err
 	}
+	code := ""
+	if tier == Low {
+		if code, err = c.freshLowCodeLocked(); err != nil {
+			return nil, err
+		}
+	}
 	c.reqN++
 	r := &request{id: id, n: c.reqN, local: local, items: append([]Item(nil), items...), tier: tier,
 		expires: now.Add(ttl), done: make([]bool, len(items))}
-	if tier == Low {
-		r.code = c.codes.textedCode()
-	}
+	r.code = code
 	asked := now
 	if len(items) == 1 && !items[0].Asked.IsZero() {
 		// A re-issued item keeps the time it was first asked, through any
@@ -222,6 +226,30 @@ func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time, loc
 	}
 	c.open[id] = r
 	return r, nil
+}
+
+// codeDraws bounds the redraws for a low-tier code that collides with an
+// open one. A collision is a 1-in-10^6 event per open request, so the bound
+// is never reached in use; an exhausted bound refuses the request.
+const codeDraws = 16
+
+// freshLowCodeLocked draws a texted code that no open low-tier request
+// holds, so an ID-less YES names exactly one request (CH-18).
+func (c *Channel) freshLowCodeLocked() (string, error) {
+	for i := 0; i < codeDraws; i++ {
+		code := c.codes.textedCode()
+		clash := false
+		for _, o := range c.open {
+			if o.tier == Low && eq(code, o.code) {
+				clash = true
+				break
+			}
+		}
+		if !clash {
+			return code, nil
+		}
+	}
+	return "", errors.New("owner: no free approval code")
 }
 
 // dropOpen closes requests whose text was never sent.
@@ -248,6 +276,18 @@ func (c *Channel) renderLocked(r *request) string {
 		pre := ""
 		if it.Unverified {
 			pre = "UNVERIFIED: "
+		}
+		if !it.Sent.IsZero() {
+			// A repeat of a send known to have gone (confirm repeats,
+			// D-116): the notice says so and asks.
+			return fmt.Sprintf("%s: %s%s \"%s\" was already sent %s. Send it again? Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
+		}
+		if !it.Retried.IsZero() {
+			// An owner retry (OP-2): the notice warns of a duplicate and
+			// names no recipient, which the page shows.
+			return fmt.Sprintf("%s: %s%s \"%s\" again? It may go twice; first tried %s. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Retried.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
 		}
 		if SMSApprovable(it) {
 			// A change that needs the page's confirmation (CH-3,

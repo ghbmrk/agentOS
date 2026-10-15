@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -53,6 +52,7 @@ type fakeHooks struct {
 	pending     []byte // the newest seed waiting for a code
 	enrolls     int
 	trusted     *bool
+	trustErr    error // returned by TrustHost, which then saves nothing
 	keys        map[string]string
 	finished    string
 	connected   bool
@@ -153,6 +153,9 @@ func (f *fakeHooks) ConfirmCode(code string) (bool, error) {
 func (f *fakeHooks) TrustHost(t bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.trustErr != nil {
+		return f.trustErr
+	}
 	f.trusted = &t
 	return nil
 }
@@ -264,9 +267,9 @@ type rig struct {
 	owned OwnerCard
 	// rot, when set, is the server's card rotation.
 	rot RotationCard
-	// wifiNets are the rotated Wi-Fi networks agentosd was handed, under
-	// mu; wifiErr fails the hand-off (#1191).
-	wifiNets []apnet.Network
+	// handOffs counts the rotated Wi-Fi hand-offs agentosd took, under
+	// mu; wifiErr fails them (#1191).
+	handOffs int
 	wifiErr  error
 }
 
@@ -388,6 +391,30 @@ func (r *rig) runSetup() {
 func (r *rig) runSetupToAI() {
 	t := r.t
 	t.Helper()
+	r.runSetupToHost()
+	r.post("/setup/host", url.Values{})
+	if r.hooks.trusted == nil || !*r.hooks.trusted {
+		t.Fatal("PC not trusted by default")
+	}
+	// Connect AI waits for the first-boot update (ONB-4), nothing else.
+	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}})
+	if !strings.Contains(r.setupErr(), "still updating") || r.hooks.keys != nil {
+		t.Fatal("AI connected before the first-boot update finished")
+	}
+	r.hooks.mu.Lock()
+	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
+	r.hooks.mu.Unlock()
+	// CAP-9: the private-data question is asked, unticked on an API key
+	// (D-115: ticked only on a plan sign-in, privatedefault_test.go).
+	if p := setupForms(t, r.get("/setup"))["ai-key openai"]; !strings.Contains(p, `name="private" value="1">`) || strings.Contains(p, "checked") {
+		t.Fatalf("no private-data question, or ticked by default: %s", p)
+	}
+}
+
+// runSetupToHost walks setup up to its host step.
+func (r *rig) runSetupToHost() {
+	t := r.t
+	t.Helper()
 	if loc := r.do("GET", "/", nil).Header().Get("Location"); loc != "/setup" {
 		t.Fatalf("root before setup: %q", loc)
 	}
@@ -440,23 +467,6 @@ func (r *rig) runSetupToAI() {
 	page = r.get("/setup")
 	if !strings.Contains(page, "This is not my PC") || !strings.Contains(page, "Defaults: spend cap") {
 		t.Fatalf("host step: %s", page)
-	}
-	r.post("/setup/host", url.Values{})
-	if r.hooks.trusted == nil || !*r.hooks.trusted {
-		t.Fatal("PC not trusted by default")
-	}
-	// Connect AI waits for the first-boot update (ONB-4), nothing else.
-	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}})
-	if !strings.Contains(r.setupErr(), "still updating") || r.hooks.keys != nil {
-		t.Fatal("AI connected before the first-boot update finished")
-	}
-	r.hooks.mu.Lock()
-	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
-	r.hooks.mu.Unlock()
-	// CAP-9: the private-data question is asked, unticked on an API key
-	// (D-115: ticked only on a plan sign-in, privatedefault_test.go).
-	if p := setupForms(t, r.get("/setup"))["ai-key openai"]; !strings.Contains(p, `name="private" value="1">`) || strings.Contains(p, "checked") {
-		t.Fatalf("no private-data question, or ticked by default: %s", p)
 	}
 }
 

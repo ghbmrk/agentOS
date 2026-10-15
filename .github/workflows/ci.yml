@@ -66,6 +66,10 @@ jobs:
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Unit tests
         if: env.RECORDS != 'true'
+        # The differential tests (systemd-analyze, systemd-tmpfiles, modprobe) fail rather than skip
+        # without them (#1531), and fail on any skip among them (#1543).
+        env:
+          AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"
         run: python -m unittest discover -s tests -v
       - name: Document tool tests (records-only change; CI-docs)
         # The tests that read record files (test_board reads BOARD.md) and test the tools
@@ -82,6 +86,12 @@ jobs:
         run: |
           sudo apt-get install -y -q bubblewrap
           sudo AGENTOS_REQUIRE_BWRAP=1 python3 -m unittest tests.test_codex_worker -v
+      - name: Codex worker rootfs from the pinned CLI (S8-W1, #807)
+        if: env.RECORDS != 'true'
+        # Downloads the pinned @openai/codex tarball, checks npm's integrity hash, builds the
+        # rootfs and checks its contents, with codex doctor in a namespace (sudo: the runner may bar
+        # unprivileged user namespaces). Nothing runs under runsc here (#809 measures that).
+        run: sudo AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
@@ -175,6 +185,10 @@ jobs:
         env:
           AGENTOS_REQUIRE_SWTPM: "1"
         run: go test -race -count=1 ./...
+      - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
+        # The search is sequential, so the race detector finds nothing in it and
+        # the race step skips it; here it runs at the bounds A19 states.
+        run: go test -count=1 -timeout 20m -run '^TestOP2(SameEffectModel|Model.*)$' -v ./journal
       - name: Fuzz the socket and action-protocol decoders, 20s per target (LOOP-7, P3-4b-3)
         # Each target already ran its seeds and planted-decoder control above;
         # this fuzzes past the seeds. The long runs are in soak.yml. tools/fuzzrun.py
@@ -247,6 +261,17 @@ jobs:
           # Per-machine disk quotas on a prjquota file system (RES-4, SR2-3).
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd
+      - name: hostapd runs as its own user (#1426)
+        # As agentos-ap.service runs: root with its bounding set (no CAP_CHOWN, no
+        # CAP_DAC_OVERRIDE), no_new_privs, and hostapd's group as a supplementary
+        # group. The stub hostapd must report uid 61426 with NET_ADMIN and NET_RAW only.
+        working-directory: broker
+        run: |
+          go test -c -o /tmp/localui.test ./localui
+          sudo setpriv --no-new-privs --groups 61426 --inh-caps=-all \
+            --bounding-set=-all,+net_admin,+net_raw,+net_bind_service,+setuid,+setgid,+kill,+dac_read_search,+setpcap \
+            env AGENTOS_REQUIRE_APUSER=1 /tmp/localui.test -test.count=1 -test.v \
+            -test.run '^TestHostapdChildRunsAsItsOwnUser$'
       - name: Fuzz leaf memory peaks (P3-4b-3r-confine-r1)
         # Each target in the image's fuzz manifest, built as image/build.sh builds it, runs one
         # round as agentosd wires it in a fresh leaf; the table of memory.peak sets the leaf's

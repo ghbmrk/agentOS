@@ -254,6 +254,8 @@ class CollectTest(unittest.TestCase):
 
         def api(repo, path, token):
             calls.append(path)
+            if path.startswith("issues/") and path.split("/")[2].startswith("comments"):
+                return []
             if path.startswith("pulls?"):
                 return [{"number": 7, "merged_at": "2026-10-05T01:00:00Z", "body": ""},
                         {"number": 6, "merged_at": "2026-09-01T01:00:00Z", "body": ""}] if "page=1&" in path + "&" else []
@@ -333,6 +335,8 @@ class TrustTest(unittest.TestCase):
                  "conclusion": "failure", "run_attempt": 1, "head_repository": None}]
 
         def api(repo, path, token):
+            if path.startswith("issues/") and path.split("/")[2].startswith("comments"):
+                return []
             if path.startswith("pulls?"):
                 return [{"number": 7, "merged_at": "2026-10-05T01:00:00Z", "body": ""}] if "page=1&" in path + "&" else []
             if path.startswith("pulls/7/reviews"):
@@ -638,6 +642,8 @@ class CollectPullsTest(unittest.TestCase):
     # REQ CONV-0-1
     def test_collected_pulls_carry_state_draft_and_update_time(self):
         def api(repo, path, token):
+            if path.startswith("issues/") and path.split("/")[2].startswith("comments"):
+                return []
             if path.startswith("pulls?"):
                 return [{"number": 7, "state": "open", "draft": True, "updated_at": "2026-10-05T00:00:00Z",
                          "merged_at": None, "body": None, "labels": [{"name": "lane:codex"}]}] if "page=1&" in path + "&" else []
@@ -682,6 +688,86 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(text.count("contents: write"), 1)  # only the commit job writes
         self.assertIn("pull-requests: read", text)
         self.assertIn("actions: read", text)
+
+
+class CommentVerdictTest(unittest.TestCase):
+    """MET-1 amendment 2026-10-13: L3 verdicts posted as conversation comments count."""
+
+    def _collect(self, reviews, comments, since=None, merged="2026-10-05T01:00:00Z"):
+        calls = []
+
+        def api(repo, path, token):
+            calls.append(path)
+            if path.startswith("pulls?"):
+                return [{"number": 7, "merged_at": merged, "body": ""}] if "page=1&" in path + "&" else []
+            if path.startswith("pulls/7/reviews"):
+                return reviews if path.endswith("page=1") else []
+            if path.startswith("issues/7/comments"):
+                page = int(path.rsplit("page=", 1)[1])
+                return comments[(page - 1) * 100: page * 100]
+            if path.startswith("actions/runs?"):
+                return {"workflow_runs": []}
+            raise AssertionError(path)
+        orig = metrics._api
+        metrics._api = api
+        try:
+            pulls, _ = metrics.collect_github("o/r", None, since=since)
+        finally:
+            metrics._api = orig
+        return pulls[0], calls
+
+    def test_comment_verdict_merges_chronologically_with_reviews(self):
+        rev = [{"body": "L3. Verdict: accept.", "submitted_at": "2026-10-05T00:30:00Z", "author_association": "OWNER"}]
+        com = [{"body": "L3 review\nVerdict: fix-list\nCause: defect", "created_at": "2026-10-05T00:10:00Z",
+                "author_association": "OWNER"}]
+        p, _ = self._collect(rev, com)
+        self.assertEqual(p["verdicts"], ["fix-list", "accept"])
+        self.assertEqual(p["causes"], ["defect"])
+
+    def test_same_verdict_as_review_and_comment_counts_once(self):
+        body = "Verdict: accept\nL3 review at abc123."
+        rev = [{"body": body, "submitted_at": "2026-10-05T00:30:00Z", "author_association": "OWNER"}]
+        com = [{"body": body + "\n", "created_at": "2026-10-05T00:31:00Z", "author_association": "OWNER"}]
+        p, _ = self._collect(rev, com)
+        self.assertEqual(p["verdicts"], ["accept"])
+
+    def test_same_verdict_comment_then_review_counts_once(self):
+        body = "Verdict: accept\nL3 review at abc123."
+        rev = [{"body": body, "submitted_at": "2026-10-05T00:31:00Z", "author_association": "OWNER"}]
+        com = [{"body": body, "created_at": "2026-10-05T00:30:00Z", "author_association": "OWNER"}]
+        p, _ = self._collect(rev, com)
+        self.assertEqual(p["verdicts"], ["accept"])
+
+    def test_quoted_verdict_in_a_reply_does_not_count(self):
+        com = [{"body": "> Verdict: accept\n> L3 review\nagreed", "created_at": "1", "author_association": "OWNER"}]
+        p, _ = self._collect([], com)
+        self.assertEqual(p["verdicts"], [])
+
+    def test_comment_only_pr_is_not_no_verdict(self):
+        com = [{"body": "Verdict: accept\nL3 review.", "created_at": "t", "author_association": "COLLABORATOR"}]
+        p, _ = self._collect([], com)
+        self.assertEqual(p["verdicts"], ["accept"])
+
+    def test_untrusted_and_incidental_comments_do_not_count(self):
+        com = [{"body": "L3 review. Verdict: reject.", "created_at": "1", "author_association": "NONE"},
+               {"body": "L3 is owed; accept it once CI is green", "created_at": "2", "author_association": "OWNER"},
+               {"body": "L3 verdict: accept, merging", "created_at": "4", "author_association": "OWNER"},
+               {"body": "Verdict: accept (lens, no tier tag)", "created_at": "3", "author_association": "OWNER"}]
+        p, _ = self._collect([], com)
+        self.assertEqual(p["verdicts"], [])
+
+    def test_comments_are_paginated(self):
+        com = [{"body": "chatter", "created_at": "%03d" % i, "author_association": "OWNER"} for i in range(100)]
+        com.append({"body": "Verdict: accept\nL3.", "created_at": "999", "author_association": "OWNER"})
+        p, calls = self._collect([], com)
+        self.assertEqual(p["verdicts"], ["accept"])
+        self.assertIn("issues/7/comments?per_page=100&page=2", calls)
+
+    def test_comments_of_pulls_merged_before_the_cutoff_are_not_fetched(self):
+        com = [{"body": "Verdict: accept\nL3.", "created_at": "1", "author_association": "OWNER"}]
+        p, calls = self._collect([], com, since="2026-10-06T00:00:00Z")
+        self.assertIsNone(p["verdicts"])
+        self.assertFalse([c for c in calls if c.startswith("issues/")])
 
 
 if __name__ == "__main__":

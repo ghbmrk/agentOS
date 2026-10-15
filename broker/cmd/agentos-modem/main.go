@@ -45,6 +45,8 @@ func main() {
 		log.Fatal("the home country code is required (COUNTRY_CODE)")
 	}
 	log.SetFlags(0)
+	// On SIGTERM the bridge stops taking texts in but sends what agentosd
+	// still has queued, bounded by bridge.FlushWait (owner O34).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err := bridge.Run(ctx, bridge.Config{

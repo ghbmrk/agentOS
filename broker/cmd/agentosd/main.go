@@ -25,6 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/digestqueue"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localsrv"
@@ -472,7 +473,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
-		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid, RotateAPNet: rotateAPNet(apNetPath)}
+		cfg.PageSocket = pageSocket(localUIUID, gid, apNetPath, verifySocket)
 	}
 	// A restore the forget log's check held opens nothing on the restored
 	// tree: no recall, no agent machines (W3-forget-b1; security C3). The
@@ -647,7 +648,7 @@ func main() {
 		// A SIM the owner adopts on the page, with a code (P2-2w d2b), is
 		// recorded where the bridge reads it at its next open.
 		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles)})
-		cfg.Modem, cfg.OwnerOps = link, link.Ops()
+		cfg.Modem, cfg.OwnerOps, cfg.OwnerDrainOps, cfg.OwnerDrainLive = link, link.Ops(), modemlink.DrainOps(), link.Bridged
 		if cfg.PageSocket != nil {
 			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
 		}
@@ -767,6 +768,17 @@ func main() {
 	if dg != nil {
 		if o := d.Owner(); o != nil {
 			dg.cfg.Inform = o.Inform
+		}
+		// Effects left unclear and parked rather than retried, and
+		// effects proved not done whose resend was refused (OP-2).
+		if src, err := newUnclearSource(d.RetryWaiting, change.FileStore{Path: filepath.Join(digestDir, "unclear-digest.json")}); err != nil {
+			log.Printf("digest: no line for unclear effects: %v", err)
+		} else {
+			if dg.cfg.Sources == nil {
+				dg.cfg.Sources = map[string]digestqueue.Source{}
+			}
+			dg.cfg.Sources[unclearDigestSource] = src
+			d.OnRetryRefused(src.Relist)
 		}
 		go dg.run(ctx)
 	}

@@ -135,6 +135,49 @@ func (v *Verifier) RecallKey() ([]byte, error) {
 	return key, nil
 }
 
+// RotatedWiFi is the network the vault process's latest Wi-Fi rotation
+// put in effect, which agentosd takes once to rewrite ap-net.json
+// (#1522). It is never logged.
+type RotatedWiFi struct {
+	SSID     string `json:"ssid"`
+	Password string `json:"password"`
+}
+
+// String keeps the password out of logs.
+func (RotatedWiFi) String() string { return "[rotated Wi-Fi network]" }
+
+// GoString keeps the password out of %#v.
+func (w RotatedWiFi) GoString() string { return w.String() }
+
+// ErrNoRotatedWiFi means no committed Wi-Fi rotation is waiting: none was
+// committed, it was already taken, or it lapsed.
+var ErrNoRotatedWiFi = errors.New("no rotated Wi-Fi network is waiting")
+
+// TakeRotatedWiFi takes the network the latest Wi-Fi rotation committed,
+// once: the vault process forgets it on answering.
+func (v *Verifier) TakeRotatedWiFi() (RotatedWiFi, error) {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: "/rotate/wifi"} // over the Unix socket
+	resp, err := v.c.Post(u.String(), "application/json", nil)
+	if err != nil {
+		return RotatedWiFi{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusGone:
+		return RotatedWiFi{}, ErrNoRotatedWiFi
+	case http.StatusServiceUnavailable:
+		return RotatedWiFi{}, ErrVaultLocked
+	default:
+		return RotatedWiFi{}, fmt.Errorf("rotated Wi-Fi: vault process answered %s", resp.Status)
+	}
+	var w RotatedWiFi
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<10)).Decode(&w); err != nil {
+		return RotatedWiFi{}, errors.New("rotated Wi-Fi: malformed answer")
+	}
+	return w, nil
+}
+
 // EnrollResult is the vault process's answer to an enroll: the new
 // code-generator seed's otpauth:// link, handed out this once (Security L7
 // on the P2-2w plan). It is never logged.

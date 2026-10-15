@@ -6,7 +6,7 @@ The probe calls public `localui.New`, `Server.ServeHTTP`, `Server.OfferText` and
 
 ## Run
 
-From this directory, against an AgentOS checkout at the source base:
+From this directory, against an agentOS checkout at the source base:
 
 ```sh
 GO_BINARY=/absolute/path/to/go sh run.sh /absolute/path/to/agentos /tmp/onboarding-flow-output

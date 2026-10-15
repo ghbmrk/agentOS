@@ -378,7 +378,11 @@ func (ix *Index) rewriteSeg(n uint32) error {
 		}
 		err = ix.dir.Rewrite(n, out)
 	}
-	if err != nil {
+	// Once the bytes are replaced the old offsets point into the new file;
+	// a retry that filtered on them would drop every live line that moved
+	// (#1318). Follow the new layout and still report the error, so the
+	// segment stays marked for erase and the rewrite is retried.
+	if err != nil && !errors.Is(err, ErrReplaced) {
 		return err
 	}
 	for _, m := range keep {
@@ -403,7 +407,7 @@ func (ix *Index) rewriteSeg(n uint32) error {
 			ix.older[id] = ns
 		}
 	}
-	return nil
+	return err
 }
 
 // loadSegments rebuilds memory from the segments: only each ID's latest

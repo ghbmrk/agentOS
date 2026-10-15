@@ -104,6 +104,9 @@ type wireStatus struct {
 	// Remade is /card/reset's answer that the setup vault was made anew.
 	Reason string `json:"reason"`
 	Remade bool   `json:"remade"`
+	// Host and NoTPM answer the setup host step (/setup/host).
+	Host  string `json:"host"`
+	NoTPM bool   `json:"no_tpm"`
 }
 
 func (w wireStatus) status() VaultStatus {
@@ -645,4 +648,16 @@ func vaultText(err error) string {
 		m += "."
 	}
 	return m
+}
+
+// SetupTrust saves setup's host step in the vault process (HostTrust).
+func (u *UnlockClient) SetupTrust(ctx context.Context, trusted bool) (string, error) {
+	w, err := u.call(ctx, http.MethodPost, "/setup/host", map[string]bool{"trusted": trusted})
+	if err != nil {
+		if w.NoTPM {
+			return "", ErrNoTrustChip
+		}
+		return "", err
+	}
+	return w.Host, nil
 }

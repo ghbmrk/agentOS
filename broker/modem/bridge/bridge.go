@@ -57,9 +57,17 @@ type Config struct {
 	// bridgeproto.StateEvery); InboundRetry is the first wait before a
 	// refused inbound text is sent again, doubling each time (default 1 s).
 	Retry, StateEvery, InboundRetry time.Duration
+	// FlushWait bounds the outbox flush once ctx is done (default
+	// FlushWait).
+	FlushWait time.Duration
 	// Logf logs counts and states, never numbers, texts or serials.
 	Logf func(format string, args ...any)
 }
+
+// FlushWait is how long the bridge keeps sending agentosd's queued texts
+// once told to stop (owner O34). agentos-modem.service's TimeoutStopSec
+// leaves room for it and the modem's close.
+const FlushWait = 45 * time.Second
 
 // Run serves the owner line until ctx is done.
 func Run(ctx context.Context, cfg Config) error {
@@ -75,6 +83,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.InboundRetry == 0 {
 		cfg.InboundRetry = time.Second
 	}
+	if cfg.FlushWait == 0 {
+		cfg.FlushWait = FlushWait
+	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
@@ -84,8 +95,9 @@ func Run(ctx context.Context, cfg Config) error {
 		m, st, iccid := b.open(ctx)
 		b.set(st, iccid, number(m))
 		if m != nil {
-			b.serve(ctx, m)
+			done := b.serve(ctx, m)
 			m.Close()
+			<-done
 			b.set(bridgeproto.StateDown, "", "")
 		}
 		select {
@@ -213,33 +225,51 @@ func (b *runner) report(ctx context.Context) {
 	}
 }
 
-// serve carries texts while the modem answers.
+// serve carries texts while the modem answers, and returns a channel
+// closed once its outbox loop has ended, which may be only after the modem
+// is closed.
 //
 // The modem keeps each text stored until agentosd has taken it
 // (at.Config.KeepUntilAck), so a text is never lost to the bridge, the
 // modem or agentosd going away: it is read again at the next open, with
 // the same ID, and agentosd takes an ID once (L3 on #170).
-func (b *runner) serve(runCtx context.Context, m Owner) {
+//
+// Once runCtx is done (agentos-modem's SIGTERM) no new inbound text is
+// offered, but the outbox goes on, for at most FlushWait, until a poll
+// comes back empty: systemd stops the bridge before agentosd, so an owner
+// alert still queued then is sent now or not at all (owner O34, #1772).
+func (b *runner) serve(runCtx context.Context, m Owner) <-chan struct{} {
 	ctx, cancel := context.WithCancel(runCtx)
 	defer cancel()
+	line, cancelLine := context.WithCancel(context.Background())
 	go func() {
 		select {
 		case <-m.Done():
+			cancelLine()
 			cancel()
-		case <-ctx.Done():
+		case <-line.Done():
 		}
 	}()
-	var wg sync.WaitGroup
-	wg.Add(1)
+	flushed := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		b.outbox(ctx, m)
+		defer close(flushed)
+		defer cancelLine()
+		b.outbox(line, runCtx.Done(), m)
 	}()
 	for {
 		select {
 		case <-ctx.Done():
-			wg.Wait()
-			return
+			if runCtx.Err() == nil {
+				<-flushed // the modem went: its send has ended
+				return flushed
+			}
+			select {
+			case <-flushed:
+			case <-time.After(b.cfg.FlushWait):
+				b.cfg.Logf("bridge: stopped before the outbox was empty")
+				cancelLine() // a send in flight ends as the modem closes
+			}
+			return flushed
 		case sms := <-m.Inbox():
 			b.inbound(ctx, m, sms)
 		}
@@ -318,20 +348,38 @@ func (b *runner) inbound(ctx context.Context, m Owner, sms modem.SMS) {
 	}
 }
 
-// outbox pulls agentosd's texts and sends them on the owner line.
-func (b *runner) outbox(ctx context.Context, m Owner) {
+// outbox pulls agentosd's texts and sends them on the owner line until ctx
+// is done, or, once stop is closed, until a poll comes back empty or
+// fails. A poll in flight when stop closes is waited for, not hung up, so
+// a text agentosd hands it is never lost in the hand-over.
+func (b *runner) outbox(ctx context.Context, stop <-chan struct{}, m Owner) {
+	stopping := func() bool {
+		select {
+		case <-stop:
+			return true
+		default:
+			return false
+		}
+	}
 	for ctx.Err() == nil {
 		var out struct {
 			Item *bridgeproto.Item `json:"item"`
 		}
 		if err := b.cfg.Agentosd.Call(ctx, bridgeproto.OpOutbox, struct{}{}, &out); err != nil {
+			if stopping() {
+				return
+			}
 			select {
 			case <-ctx.Done():
+			case <-stop:
 			case <-time.After(time.Second):
 			}
 			continue
 		}
 		if out.Item == nil {
+			if stopping() {
+				return
+			}
 			continue
 		}
 		code := bridgeproto.CodeRecipient
