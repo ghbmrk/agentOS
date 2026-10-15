@@ -70,7 +70,7 @@ def operating_refs(root, files):
                         yield f"{name}:{n}: OPERATING §{num} does not exist"
 
 
-ACCEPTANCE_LINE = re.compile(r"^\s*(?:[-*]\s*)?\*\*Acceptance tests?:?\*\*", re.M)
+ACCEPTANCE_LINE = re.compile(r"^\s*(?:[-*]\s*)?\*\*Acceptance tests?:?\*\*(.*)$", re.M)
 
 
 def brief_baseline(root):
@@ -80,9 +80,17 @@ def brief_baseline(root):
 
 def briefs(root):
     legacy = brief_baseline(root)
+    for name in sorted(legacy):
+        if not (root / "briefs" / name).is_file():
+            yield f"tools/brief_acceptance_baseline.txt: {name} has no brief; delete the entry (the baseline only shrinks)"
     for path in sorted((root / "briefs").glob("*.md")):
-        if path.name not in legacy and not ACCEPTANCE_LINE.search(path.read_text()):
+        line = ACCEPTANCE_LINE.search(path.read_text())
+        if path.name in legacy and line and line.group(1).strip(" :"):
+            yield f"tools/brief_acceptance_baseline.txt: {path.name} now has its acceptance tests; delete the entry (the baseline only shrinks)"
+        elif path.name not in legacy and not line:
             yield f"briefs/{path.name}: no `**Acceptance tests:**` line; name each ID's test up front, or `none: <why>`"
+        elif line and not line.group(1).strip(" :"):
+            yield f"briefs/{path.name}: empty `**Acceptance tests:**` line; name each ID's test, or `none: <why>`"
         for n, line in enumerate(path.read_text().splitlines(), 1):
             if STATE_LINE.match(line):
                 yield f"briefs/{path.name}:{n}: `**State:**` line; state lives on the work-item issue"
@@ -175,8 +183,20 @@ def lint(root):
             *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files)]
 
 
+def baseline_growth(root, base_file):
+    """Baseline entries the PR added to the list in base_file (the base branch's copy)."""
+    base = set(pathlib.Path(base_file).read_text().split()) if pathlib.Path(base_file).is_file() else set()
+    for name in sorted(brief_baseline(pathlib.Path(root)) - base):
+        yield f"tools/brief_acceptance_baseline.txt: {name} is new in the baseline; the baseline only shrinks, so name the brief's acceptance tests instead"
+
+
 def main(argv):
-    problems = lint(argv[1] if len(argv) > 1 else pathlib.Path(__file__).resolve().parent.parent)
+    args = argv[1:]
+    base = args[args.index("--base-baseline") + 1] if "--base-baseline" in args else None
+    if base:
+        del args[args.index("--base-baseline"):args.index("--base-baseline") + 2]
+    root = args[0] if args else pathlib.Path(__file__).resolve().parent.parent
+    problems = [*lint(root), *(baseline_growth(root, base) if base else [])]
     for p in problems:
         print(p)
     return 1 if problems else 0

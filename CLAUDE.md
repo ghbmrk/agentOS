@@ -3,7 +3,7 @@
 Read SPEC.md for what to build and PLAN.md for how. This file is the working contract for builder (L2) and reviewer (L3) agents: rules only, one line each. docs/OPERATING.md gives the procedures and reasons behind them, and README.md maps every document and gives each role its reading order.
 
 ## Builder (L2)
-- Work only from a package brief (`briefs/<ID>.md`, linked from its BOARD.md row). Touch only files inside the brief's declared scope. The brief names its acceptance tests; if it doesn't, stop and say so (OPERATING §5).
+- Work only from a package brief (`briefs/<ID>.md`, linked from its BOARD.md row). Touch only files inside the brief's declared scope. The brief names its acceptance tests; a brief listed in `tools/brief_acceptance_baseline.txt` predates that rule, so name its tests in the PR body and carry on (OPERATING §5).
 - **Tests first.** For each requirement ID in the brief, write a failing test, then the smallest change that passes it.
 - Claim coverage with a marker comment in the test file: `REQ: CRED-1, CRED-4`. Run `python3 tools/trace.py` locally to see coverage, but never commit TRACE.md: CI fails a PR that changes it, and the `trace` workflow opens a PR with the regenerated file after each merge.
 - "Done" = CI green + every brief ID covered by a passing test. Never assert done without that evidence.
