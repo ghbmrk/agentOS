@@ -15,6 +15,7 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 - **D-096** Includes SPEC one log (SIM-sd) and the scope freeze and PR cap (off-gate scope frozen until G2 passes; open PRs capped at about 10 per lane; the cap was replaced by the scope-overlap conflict guard in D-111).
 - **D-097** Pull-first (STATUS is the primary owner view, only urgent classes pushed, daily digest removed) and key erasure.
 - **D-099** Both subscriptions are equal peers; no main one, no lane restriction between them.
+- **D-118** G1 freeze: no new builder starts on a non-G1 row; in-flight PRs and started builders finish; lifts when G1-e2e (#1688) passes in QEMU. G1 path is A1 (D-104) per row #1687; the package list awaits Mark's approval.
 - Merge when every required review accepts the current head, CI is green and it merges cleanly; asks to Mark are cards, never typed phrases.
 - Chat layout: standing threads Decisions, Questions, PR updates, Alerts; finished threads are resolved at once. Project memory may be off, so durable state lives in the repo.
 

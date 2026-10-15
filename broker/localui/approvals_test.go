@@ -172,6 +172,7 @@ func TestThePageApprovesOnlyWithACode(t *testing.T) {
 	// Told to the owner, coalesced with the sign-in an hour ago (UX A6).
 	a.advance(owner.SignInAlertEvery)
 	a.ch.FlushLocal()
+	a.ch.WaitSends()
 	var told []string
 	for _, m := range a.carrier.Log() {
 		if m.To == ownerNum {

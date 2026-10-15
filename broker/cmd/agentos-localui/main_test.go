@@ -389,8 +389,8 @@ func TestRunGatesSetupOnTheClaim(t *testing.T) {
 
 // #1270 (CTRL-card-sock s1): on the image the page reaches the vault
 // process's unlock socket and keeps its claim state and the card step's
-// latch in its own state directory, which localui-claim fills from the
-// seller's sealed claim at the first start; it never dumps core, since
+// latch in its own state directory, which agentos-localui-claim.service
+// fills from the seller's sealed claim before the first start; it never dumps core, since
 // the claim verifiers and codes pass through it (IMG-nodump).
 // REQ: HW-10, HW-1, CRED-9
 func TestTheUnitWiresTheSetupFiles(t *testing.T) {
@@ -432,7 +432,8 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 		"StateDirectory":     {"agentos-localui"},
 		"StateDirectoryMode": {"0700"},
 		"LimitCORE":          {"0"},
-		"ExecStartPre":       {"+/usr/lib/agentos/localui-claim"},
+		// #1688: the mask below binds `+` commands too, so the hand-over is a unit of its own.
+		"ExecStartPre": nil,
 	} {
 		if got := set[k]; strings.Join(got, "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, got, want)
@@ -462,6 +463,67 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// #1688: the seller's sealed claim reaches the page through a root unit
+// of its own, ordered before the page and pulled in by it. As a `+`
+// ExecStartPre of the page it ran under the page's
+// TemporaryFileSystem=/var/lib/agentos:ro, which systemd applies to `+`
+// commands too, never saw the sealed file, and the box never showed the
+// claim screen. The page Requires= the hand-over, not Wants=: with Wants=
+// a failed move still started the page with no claim state, and a
+// preloaded box served setup without the sticker code. Requires= keeps a
+// download box or an already-moved claim working, because systemd does not
+// fail a Requires= dependent when the hand-over's ConditionPathExists= is
+// false (systemd.unit(5), Requires=: "failing condition checks ... do not
+// cause the start job of a unit with a Requires= dependency on it to fail").
+// REQ: HW-10
+func TestTheClaimHandOverRunsOutsideThePagesMask(t *testing.T) {
+	keys := func(name string) map[string][]string {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		set := map[string][]string{}
+		for _, l := range strings.Split(string(b), "\n") {
+			l = strings.TrimSpace(l)
+			if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "[") {
+				continue
+			}
+			k, v, _ := strings.Cut(l, "=")
+			set[k] = append(set[k], strings.Fields(v)...)
+		}
+		return set
+	}
+	has := func(vs []string, want string) bool {
+		for _, v := range vs {
+			if v == want {
+				return true
+			}
+		}
+		return false
+	}
+	h := keys("agentos-localui-claim.service")
+	if strings.Join(h["ExecStart"], " ") != "/usr/lib/agentos/localui-claim" || strings.Join(h["Type"], "") != "oneshot" {
+		t.Errorf("hand-over runs %q as %q, want oneshot /usr/lib/agentos/localui-claim", h["ExecStart"], h["Type"])
+	}
+	for _, k := range []string{"User", "DynamicUser", "TemporaryFileSystem", "InaccessiblePaths", "ProtectSystem", "ReadOnlyPaths"} {
+		if len(h[k]) != 0 {
+			t.Errorf("hand-over sets %s=%q: it must move a file between two root-owned directories", k, h[k])
+		}
+	}
+	if !has(h["Before"], "agentos-localui.service") {
+		t.Errorf("hand-over Before = %q, want agentos-localui.service", h["Before"])
+	}
+	p := keys("agentos-localui.service")
+	for _, k := range []string{"Requires", "After"} {
+		if !has(p[k], "agentos-localui-claim.service") {
+			t.Errorf("page %s = %q, want agentos-localui-claim.service", k, p[k])
+		}
+	}
+	if has(p["Wants"], "agentos-localui-claim.service") {
+		t.Errorf("page Wants = %q: a failed hand-over must stop the page, so it belongs in Requires only", p["Wants"])
 	}
 }
 

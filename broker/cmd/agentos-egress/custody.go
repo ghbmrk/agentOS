@@ -99,7 +99,18 @@ var (
 	errBootChanged  = uerr(http.StatusConflict, "This PC started me in a way it hasn't before. Unlock with your passphrase and a code.")
 	errNoSuchHost   = uerr(http.StatusNotFound, "no trusted host with that id")
 	errHostNotSaved = uerr(http.StatusInternalServerError, "could not make this PC trusted; nothing was changed")
-	errLockoutOwned = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so I can't protect a boot PIN here. Trust this PC without a PIN instead.")
+	// errHostNotDurable: a directory sync failed before the slot change
+	// was decided, so the PC is not trusted (#1558). It comes from either
+	// the vault's sync before the TPM takes the lockout authorization (PIN
+	// trust only) or the staged keys file's sync in AddSlot (every trust;
+	// on a PIN trust that runs after the TPM took it, and giveBack hands it
+	// back). The text therefore names -pin only for an owner who set a PIN.
+	errHostNotDurable = uerr(http.StatusInternalServerError, "I could not make sure the vault is saved on the drive, so I did not finish making this PC trusted. Check the drive, then run trust again (with -pin if you set a boot PIN).")
+	// errHostSlotDecided: the slot change was decided before it failed, so
+	// the PC is trusted (VAULT-slot-decided, #1557).
+	errHostSlotDecided    = uerr(http.StatusInternalServerError, "This PC is trusted, but I could not finish saving that. It finishes the next time I start; to finish it now, run trust again. Until then it may not show in hosts, the list of trusted PCs.")
+	errHostSlotDecidedPIN = uerr(http.StatusInternalServerError, "This PC is trusted and its boot PIN is now needed at power-on, but I could not finish saving that. It finishes the next time I start; to finish it now, run trust -pin again and enter the same PIN. Until then it may not show in hosts, the list of trusted PCs.")
+	errLockoutOwned       = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so I can't protect a boot PIN here. Trust this PC without a PIN instead.")
 
 	// Rollback (V6): the drive's vault is older than this PC's counter.
 	errRolledBack = uerr(http.StatusConflict, "this drive's vault is older than this PC has seen, so it may be an old copy put back; nothing was unlocked. If you did not restore it, keep the drive and restore from your backup with the recovery key")
@@ -1076,6 +1087,7 @@ func (c *custody) lock() {
 	defer c.rot.mu.Unlock()
 	c.rot.drop()
 	c.rot.box = nil
+	c.rot.wifi = nil
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.gen++
@@ -1435,6 +1447,18 @@ func (c *custody) trustThis(v *vault.Vault, pin string) (string, error) {
 	name, err := c.host.enroll(v, pin)
 	if errors.Is(err, tpmseal.ErrLockoutOwned) {
 		return "", errLockoutOwned
+	}
+	if errors.Is(err, vault.ErrSlotDecided) {
+		// The PC is trusted all the same, so the owner hears of it (CRED-9).
+		if pin != "" {
+			c.notify("this PC is now a trusted host, with a boot PIN (saving not finished)")
+			return "", errHostSlotDecidedPIN
+		}
+		c.notify("this PC is now a trusted host (saving not finished)")
+		return "", errHostSlotDecided
+	}
+	if errors.Is(err, durable.ErrDirSync) {
+		return "", errHostNotDurable
 	}
 	if err != nil {
 		return "", errHostNotSaved
