@@ -537,7 +537,13 @@ func (d *driver) guestTask() error {
 // only the stub; no page the phone sees may show one (ASSUMPTIONS E11).
 func (d *driver) planSignIn() error {
 	route := egress.Codex()
-	var pages [][]byte
+	// pages is every page the phone saw after the post, by request, so a
+	// token on one names where it showed.
+	type seen struct {
+		req  string
+		body []byte
+	}
+	var pages []seen
 	var pg []byte
 	err := until(2*time.Minute, func() (bool, error) {
 		var err error
@@ -546,8 +552,11 @@ func (d *driver) planSignIn() error {
 		}
 		return bytes.Contains(pg, []byte(aiOpen)), errors.New(where(pg))
 	})
+	// aiOpen is on step 7 whenever the first-boot update has finished,
+	// whatever providers it lists, so a timeout here means step 7 never
+	// opened or the page kept failing: a product failure, not XFAIL.
 	if err != nil {
-		return fmt.Errorf("%s step 7 lists no providers: %w", notDriven, err)
+		return fmt.Errorf("step 7 did not open: %w", err)
 	}
 	if !deviceOffer(pg, route.Provider) {
 		return errors.New(notDriven + " step 7 offers no " + route.Provider + " sign-in (#1264) " + where(pg))
@@ -562,13 +571,18 @@ func (d *driver) planSignIn() error {
 	if pg, err = d.page(); err != nil {
 		return err
 	}
-	pages = append(pages, pg)
+	pages = append(pages, seen{"GET /setup after POST /setup/ai-device", pg})
 	link, code, ok := deviceLink(pg)
 	if !ok {
 		return errors.New("no sign-in link after sign in " + where(pg))
 	}
 	if want := "https://" + route.AuthHost + route.DevicePage; link != want {
-		return fmt.Errorf("the sign-in link is not %s", want)
+		// The host alone is safe to print; the rest may carry the code.
+		host := "an unparsable link"
+		if u, err := url.Parse(link); err == nil {
+			host = fmt.Sprintf("host %q", u.Host)
+		}
+		return fmt.Errorf("the sign-in link is not %s: the page showed %s", want, host)
 	}
 	if !bytes.Contains(pg, []byte("This code is from OpenAI")) {
 		return errors.New("the sign-in link does not name its provider " + where(pg))
@@ -576,12 +590,14 @@ func (d *driver) planSignIn() error {
 	if !d.stub.Approve(code) {
 		return errors.New("the code on the page is not the provider's")
 	}
+	reloads := 0
 	err = until(2*time.Minute, func() (bool, error) {
 		st, loc, b, err := d.get("/setup")
 		if err != nil {
 			return false, err
 		}
-		pages = append(pages, b)
+		reloads++
+		pages = append(pages, seen{fmt.Sprintf("GET /setup reload %d", reloads), b})
 		if st == http.StatusSeeOther && loc == "/status" {
 			return true, nil
 		}
@@ -594,13 +610,16 @@ func (d *driver) planSignIn() error {
 	if err != nil || st != http.StatusOK {
 		return fmt.Errorf("GET /status %d %v", st, err)
 	}
-	pages = append(pages, b)
-	if d.stub.Hits()["code"] == 0 || d.stub.Refused() != 0 {
-		return fmt.Errorf("sign-in skipped the provider: stub %v refused %d", d.stub.Hits(), d.stub.Refused())
+	pages = append(pages, seen{"GET /status", b})
+	if n := d.stub.Refused(); n != 0 {
+		return fmt.Errorf("the provider refused %d calls on the plan route: stub %v", n, d.stub.Hits())
 	}
-	for _, b := range pages {
-		if bytes.Contains(b, []byte(codexstub.Canary)) {
-			return errors.New("a page showed a provider token")
+	if d.stub.Hits()["code"] == 0 {
+		return fmt.Errorf("sign-in skipped the provider: stub %v", d.stub.Hits())
+	}
+	for _, p := range pages {
+		if bytes.Contains(p.body, []byte(codexstub.Canary)) {
+			return errors.New("a page showed a provider token: " + p.req)
 		}
 	}
 	return nil

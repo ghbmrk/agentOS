@@ -23,6 +23,7 @@ type fakeBox struct {
 	offer bool   // step 7 offers the codex sign-in
 	host  string // the link's host
 	leak  bool   // the status page shows an issued token
+	stray bool   // the box makes a call the provider refuses
 	mu    sync.Mutex
 	dev   map[string]string
 	done  bool
@@ -73,6 +74,9 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Write([]byte(page))
 	case r.URL.Path == "/status":
+		if f.stray {
+			f.provider("GET", "/backend-api/undeclared", "application/json", "")
+		}
 		page := `<h1>Status</h1>`
 		if f.leak {
 			page += f.stub.Tokens()[0]
@@ -121,12 +125,21 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 		t.Fatalf("sign-in did not reach the provider: done %v hits %v refused %d", f.done, f.stub.Hits(), f.stub.Refused())
 	}
 
-	for name, f := range map[string]*fakeBox{
-		"link off the auth host": {stub: codexstub.New(), offer: true, host: "auth.openai.com.evil.example"},
-		"token on a page":        {stub: codexstub.New(), offer: true, host: "auth.openai.com", leak: true},
+	// Each failure reads FAIL and names what went wrong: the host the page
+	// showed, the refused calls, the request whose page showed a token.
+	for name, c := range map[string]struct {
+		f    *fakeBox
+		says string
+	}{
+		"link off the auth host": {&fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com.evil.example"}, `host "auth.openai.com.evil.example"`},
+		"token on a page":        {&fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com", leak: true}, "provider token: GET /status"},
+		"a refused call":         {&fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com", stray: true}, "the provider refused 1 calls"},
 	} {
-		if err := ok(f); err == nil || strings.HasPrefix(err.Error(), notDriven) {
+		err := ok(c.f)
+		if err == nil || strings.HasPrefix(err.Error(), notDriven) {
 			t.Errorf("%s: %v reads XFAIL", name, err)
+		} else if !strings.Contains(err.Error(), c.says) {
+			t.Errorf("%s: %v does not say %q", name, err, c.says)
 		}
 	}
 }
