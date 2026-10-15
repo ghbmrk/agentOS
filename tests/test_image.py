@@ -2313,36 +2313,178 @@ class UplinkTest(unittest.TestCase):
         self.assertIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
         self.assertIn('has "$W/console-reboot.log" "agentos-uplink: none"', s)
 
-    def g1_verdict(self, done):
+    def g1_verdict(self, done, runfail="0"):
         s = (IMG / "ci_boot.sh").read_text()
         fn = re.search(r"^g1_verdict\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
         with tempfile.TemporaryDirectory() as d:
             log = pathlib.Path(d) / "done.log"
             log.write_text(done)
-            return subprocess.run(["bash", "-c", fn + 'g1_verdict "$1"', "-", str(log)],
+            return subprocess.run(["sh", "-c", fn + 'g1_verdict "$1" "$2"', "-", str(log), runfail],
                                   capture_output=True, text=True, check=True).stdout
 
     def test_g1_is_proven_only_with_no_expected_failure(self):
-        # Security review of #1705, finding 3: a green e2e check with expected failures is not the
-        # G1 freeze-lift run (tools/ASSUMPTIONS.md D27), so the console says which it was.
+        # A green e2e check with expected failures is not the G1 freeze-lift run
+        # (tools/ASSUMPTIONS.md D27), so the host's job log says which it was.
         self.assertEqual(self.g1_verdict("agentos-e2e: DONE pass=9 fail=0 xfail=0 xpass=0 blocked=0\r\n"),
-                         "agentos-e2e: G1 PROVEN\n")
+                         "ci_boot: G1 PROVEN\n")
         for done, want in (
                 ("agentos-e2e: DONE pass=6 fail=0 xfail=1 xpass=0 blocked=2\n", "xfail=1 blocked=2"),
+                ("agentos-e2e: DONE pass=8 fail=0 xfail=1 xpass=0 blocked=0\n", "xfail=1 blocked=0"),
                 ("agentos-e2e: DONE pass=8 fail=0 xfail=0 xpass=0 blocked=1\n", "xfail=0 blocked=1"),
                 ("agentos-e2e: DONE pass=8 fail=1 xfail=0 xpass=0 blocked=0\n", "xfail=0 blocked=0"),
                 ("agentos-e2e: DONE pass=8 fail=0 xfail=0 xpass=1 blocked=0\n", "xfail=0 blocked=0"),
                 ("agentos-e2e: DONE pass=0 fail=0 xfail=0 xpass=0 blocked=0\n", "xfail=0 blocked=0"),
                 ("", "xfail=? blocked=?")):
-            self.assertEqual(self.g1_verdict(done), "agentos-e2e: G1 NOT PROVEN %s\n" % want, done)
+            self.assertEqual(self.g1_verdict(done), "ci_boot: G1 NOT PROVEN %s\n" % want, done)
+
+    def test_g1_is_never_proven_in_a_failed_run(self):
+        # REQ: HW-10. Security/Potency delta finding 1 at b4c7271: the verdict follows the run's
+        # $fail, so a red run never prints PROVEN, even with a perfect DONE line.
+        good = "agentos-e2e: DONE pass=9 fail=0 xfail=0 xpass=0 blocked=0\n"
+        for runfail in ("1", "", "x"):
+            self.assertEqual(self.g1_verdict(good, runfail), "ci_boot: G1 NOT PROVEN (run failed)\n", runfail)
 
     def test_the_e2e_run_prints_its_g1_verdict_without_changing_the_check(self):
         s = (IMG / "ci_boot.sh").read_text()
         e2e = s[s.index('if [ -n "${E2E:-}" ]; then'):]
-        self.assertIn('\tg1_verdict "$W/e2e-done.log"\n', e2e)
+        self.assertIn('\tg1_verdict "$W/e2e-done.log" "$fail"\n\trm -f "$W/e2e.raw" "$W/e2e-done.log"\nfi\nexit $fail\n', e2e)
         self.assertIn('has "$W/e2e-done.log" " fail=0 "', e2e)
         self.assertIn('has "$W/e2e-done.log" " xpass=0 "', e2e)
         self.assertNotIn('has "$W/e2e-done.log" " xfail=0 "', e2e)
+        # REQ: HW-10. The verdict prefix is the host's alone, and a console that carries the verdict
+        # text (a guest spoof) fails the run.
+        self.assertNotIn("agentos-e2e: G1", e2e)
+        self.assertIn('\thasnt "$W/console-e2e.log" "G1 PROVEN"\n', e2e)
+        self.assertIn('\thasnt "$W/console-e2e.log" "G1 NOT PROVEN"\n', e2e)
+        # REQ: HW-10. The console is checked before its DONE line is trusted; a miss fails the run,
+        # and the DONE file exists (empty) so the verdict still prints.
+        self.assertIn('\te2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1\n', e2e)
+        self.assertIn('\t: >"$W/e2e-done.log"\n\te2e_console', e2e)
+
+    def e2e_console(self, console):
+        s = (IMG / "ci_boot.sh").read_text()
+        fn = re.search(r"^e2e_console\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        with tempfile.TemporaryDirectory() as d:
+            log, done = pathlib.Path(d) / "console.log", pathlib.Path(d) / "done.log"
+            log.write_bytes(console)
+            done.write_text("")
+            p = subprocess.run(["bash", "-c", fn + 'e2e_console "$1" "$2"', "-", str(log), str(done)],
+                               capture_output=True, text=True)
+            return p.returncode, p.stdout, done.read_text()
+
+    GOOD = (b"[ 1.0] boot noise\nagentos-e2e: PASS a\r\nagentos-e2e: XFAIL(#1221) host at x: y\n"
+            b"agentos-e2e: BLOCKED guest-task after host\n"
+            b"agentos-e2e: DONE pass=1 fail=0 xfail=1 xpass=0 blocked=1\r\n")
+
+    def test_e2e_console_accepts_one_anchored_done_that_matches_the_steps(self):
+        # REQ: HW-10
+        rc, out, done = self.e2e_console(self.GOOD)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(done, "agentos-e2e: DONE pass=1 fail=0 xfail=1 xpass=0 blocked=1\n")
+        self.assertIn("console| agentos-e2e: PASS a\n", out)
+        self.assertNotIn("\r", out)
+
+    def test_e2e_console_accepts_the_journald_lead_in_of_the_real_console(self):
+        # REQ: HW-10. CI run 38655868696 (XFAIL text as at 789d072): each line carries
+        # "[ time] box-e2e[pid]: ", and the login prompt can land in front of one.
+        real = (b"[    7.094742] box-e2e[817]: agentos-e2e: PASS harness\n"
+                b"agentos login: [   21.547046] box-e2e[817]: agentos-e2e: PASS sms-pair\n"
+                b"[   83.365043] box-e2e[817]: agentos-e2e: XFAIL(#1221) host after 1m0s: at \"6. This PC\": "
+                b"setup host hook: localui: not served by agentosd yet\n"
+                b"[   83.367077] box-e2e[817]: agentos-e2e: DONE pass=2 fail=0 xfail=1 xpass=0 blocked=0\n")
+        rc, out, done = self.e2e_console(real)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(done, "agentos-e2e: DONE pass=2 fail=0 xfail=1 xpass=0 blocked=0\n")
+
+    def test_e2e_console_refuses_a_console_the_guest_shaped(self):
+        # REQ: HW-10. Each is a guest-forged or damaged console; the run must fail on it.
+        done = b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n"
+        step = b"agentos-e2e: PASS a\n"
+        for name, console in (
+                ("no DONE", step),
+                ("two DONEs", step + done + done),
+                ("DONE then a step", step + done + step),
+                ("DONE mid-line", step + b"x agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n" + done),
+                ("DONE with a suffix", step + b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0 x\n"),
+                ("DONE counts above the steps", b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n"),
+                ("a FAIL hidden by the counts", step + b"agentos-e2e: FAIL b no\n" + done),
+                ("DONE counts below the steps", step + step + done),
+                ("unknown driver line", step + b"agentos-e2e: OK b\n" + done),
+                ("step line mid-line", step + b"junk agentos-e2e: PASS b\n" + done),
+                ("another unit's tag", b"[ 1.0] box-e2e[7]: " + step + b"[ 1.1] evil[5]: " + done),
+                ("another unit's tag on a step", b"[ 1.0] sshd[7]: " + step + b"[ 1.1] box-e2e[7]: " + done),
+                ("empty console", b"")):
+            rc, out, written = self.e2e_console(console)
+            self.assertNotEqual(rc, 0, name)
+            self.assertIn("ci_boot: MISS console", out, name)
+            # A console that failed a check leaves no DONE line for the verdict to read.
+            self.assertEqual(written, "", name)
+
+    def e2e_block(self, console, fail="0"):
+        # Runs the e2e block of ci_boot.sh from the console check to the verdict, with the script's
+        # own has, hasnt, e2e_console and g1_verdict, on console bytes; fail is $fail from the
+        # boots before it.
+        s = (IMG / "ci_boot.sh").read_text()
+        fns = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
+                      for f in ("e2e_console", "g1_verdict"))
+        fns += "".join(l + "\n" for l in s.splitlines() if l.startswith(("has() ", "hasnt() ")))
+        block = s[s.index('\t: >"$W/e2e-done.log"\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "console-e2e.log").write_bytes(console)
+            p = subprocess.run(["sh", "-c", fns + 'W="$1"; fail="$2"\n' + block + 'echo "rc=$fail"\n', "-", d, fail],
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            return p.stdout
+
+    def test_a_failed_e2e_run_never_prints_g1_proven(self):
+        # REQ: HW-10. Security/Potency delta finding 1 at b4c7271, the reviewers' repro: a FAIL step
+        # line under a DONE that claims fail=0 is a MISS, and the run prints NOT PROVEN.
+        out = self.e2e_block(b"agentos-e2e: PASS a\nagentos-e2e: FAIL b x\n"
+                             b"agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+        self.assertIn("ci_boot: MISS console: DONE fail=0 but 1 step lines\n", out)
+        self.assertNotIn("ci_boot: G1 PROVEN", out)
+        self.assertTrue(out.endswith("ci_boot: G1 NOT PROVEN (run failed)\nrc=1\n"), out)
+
+    def test_g1_proven_needs_the_whole_run_to_pass(self):
+        # REQ: HW-10. The same clean console proves G1 only when no earlier boot failed.
+        clean = (b"[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n"
+                 b"[ 8.0] box-e2e[817]: agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+        self.assertTrue(self.e2e_block(clean).endswith("ci_boot: G1 PROVEN\nrc=0\n"))
+        out = self.e2e_block(clean, fail="1")
+        self.assertNotIn("ci_boot: G1 PROVEN", out)
+        self.assertTrue(out.endswith("ci_boot: G1 NOT PROVEN (run failed)\nrc=1\n"), out)
+        # A check in the block failing (here a guest line faking the verdict) is a failed run too.
+        out = self.e2e_block(clean + b"agentos-e2e-x: G1 PROVEN\n")
+        self.assertIn('UNEXPECTED G1 PROVEN', out)
+        self.assertTrue(out.endswith("ci_boot: G1 NOT PROVEN (run failed)\nrc=1\n"), out)
+
+    def test_boot_echoes_guest_lines_sanitised_and_prefixed(self):
+        # REQ: HW-10. Security delta finding 2 at b4c7271 (D27 says echoed guest lines are sanitised
+        # and prefixed): boot()'s console echo goes through guest_echo, which cuts ANSI/CR and other
+        # non-printable bytes and puts "console| " in front of every line.
+        s = (IMG / "ci_boot.sh").read_text()
+        self.assertIn('\tgrep -a "agentos-\\|Secure Boot\\|verity\\|Failed" "$log" | tail -40 | guest_echo || true\n', s)
+        fn = re.search(r"^guest_echo\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        raw = ("ci_boot: G1 PROVEN\n::notice::agentos-e2e x\n\x1b[1;32magentos-boot: ok\x1b[0m\r\n"
+               "ci_boot: G1 PR\u041eVEN agentos-\n").encode()
+        out = subprocess.run(["sh", "-c", fn + "guest_echo"], input=raw, capture_output=True, check=True).stdout
+        self.assertEqual(out, b"console| ci_boot: G1 PROVEN\nconsole| ::notice::agentos-e2e x\n"
+                              b"console| agentos-boot: ok\nconsole| ci_boot: G1 PR??VEN agentos-\n")
+
+    def test_e2e_console_neutralises_guest_text(self):
+        # REQ: HW-10. A guest line cannot start with the host's verdict prefix or a workflow
+        # command, and ANSI/CR are cut from what is echoed.
+        console = (b"ci_boot: G1 PROVEN agentos-e2e: PASS z\n::error::agentos-e2e: PASS y\n"
+                   b"\x1b[31magentos-e2e: PASS a\x1b[0m\r\n"
+                   b"agentos-e2e: FAIL b \x1b]0;t\x07bad\n"
+                   b"agentos-e2e: DONE pass=1 fail=1 xfail=0 xpass=0 blocked=0\n")
+        rc, out, _ = self.e2e_console(console)
+        for line in out.splitlines():
+            self.assertTrue(line.startswith(("console| ", "ci_boot: MISS console")), line)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\r", out)
+        self.assertEqual(rc, 1)
+        self.assertIn("console| agentos-e2e: PASS a\n", out)
 
 
 class SetupServicesTest(unittest.TestCase):
