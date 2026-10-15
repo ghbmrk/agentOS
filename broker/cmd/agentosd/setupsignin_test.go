@@ -4,10 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/provagent"
@@ -159,5 +166,175 @@ func TestONB3SetupBusySignInIsThePagesBusy(t *testing.T) {
 	other := errors.New("gate")
 	if signInErr(other) != other {
 		t.Fatal("another refusal changed")
+	}
+}
+
+// signInMachine is a provider worker whose sign-in CLI has printed its
+// link and code and still waits for the owner.
+type signInMachine struct{ machineHost }
+
+func (h *signInMachine) Exec(_ context.Context, _ string, c vm.Command, _ time.Duration) (vm.ExecResult, error) {
+	if len(c.Argv) == 2 && c.Argv[0] == "cat" && strings.HasSuffix(c.Argv[1], "/.agentos-signin") {
+		return vm.ExecResult{Stdout: []byte("Open https://auth.openai.com/codex/device and enter ABCD-EF23\n")}, nil
+	}
+	return vm.ExecResult{}, nil // the CLI's status file: not written yet
+}
+
+// openSetupSignIn is setup's sign-in over a setupHost on h, with the
+// codex gate open (#809/#1877 stand-ins) and a fast poll, against a vault
+// process that holds an earlier plan login (/plan granted) and answers
+// /signedin with stored. asked counts the /signedin calls.
+func openSetupSignIn(t *testing.T, h *signInMachine, stored *atomic.Bool, asked *atomic.Int32) (setupSignIn, *setupHost) {
+	t.Helper()
+	host := newSetupHost(func(context.Context) (provagent.Host, error) { return h, nil })
+	rc := planServerStored(t, http.StatusOK, `{"granted":true}`, http.StatusOK, "{}", func(string) (int, string) {
+		asked.Add(1)
+		if stored.Load() {
+			return http.StatusOK, `{"stored":true}`
+		}
+		return http.StatusOK, `{"stored":false}`
+	})
+	s := newSetupSignIn(host, rc)
+	d := s.r.Decls["codex"]
+	d.Q = provagent.Qualification{CLIVersion: "1", Evidence: "e", TermsURL: "https://t.test", TermsRead: "2026-10-01", Verdict: provagent.Allowed}
+	s.r.Decls["codex"] = d
+	s.r.ImageVersion = func(string) string { return "1" }
+	s.r.SignInTimes = provagent.SignInTimes{Poll: 5 * time.Millisecond, Link: time.Second, Wall: time.Hour}
+	return s, host
+}
+
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !ok() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Security B1 (#1888): a plan login the vault already held when setup's
+// sign-in started does not sign this sign-in in; only the vault's record
+// that this worker's own sign-in stored the login does.
+func TestONB3SetupSignInIgnoresAnEarlierLogin(t *testing.T) {
+	var stored atomic.Bool
+	var asked atomic.Int32
+	h := &signInMachine{machineHost{live: map[string]bool{}}}
+	s, host := openSetupSignIn(t, h, &stored, &asked)
+	defer host.Close(context.Background())
+	var signed atomic.Int32
+	s.r.OnSignedIn = func(string) { signed.Add(1) }
+	if !s.Ready("codex") {
+		t.Fatal("the open gate offers no sign-in")
+	}
+	link, code, from, err := s.Start(context.Background(), "codex")
+	if err != nil || link != "https://auth.openai.com/codex/device" || code != "ABCD-EF23" || from != "OpenAI" {
+		t.Fatalf("start: %q %q %q %v", link, code, from, err)
+	}
+	waitFor(t, "the vault to be asked three times", func() bool { return asked.Load() >= 3 })
+	if signed.Load() != 0 {
+		t.Fatal("an earlier stored login signed this sign-in in")
+	}
+	if _, _, _, err := s.Start(context.Background(), "codex"); !errors.Is(err, localsrv.SignInBusy) {
+		t.Fatalf("a second sign-in while the first waits: %v", err)
+	}
+	stored.Store(true)
+	waitFor(t, "the sign-in to land", func() bool { return signed.Load() == 1 })
+	waitFor(t, "the worker to be destroyed", func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return len(h.destroyed) == 1 && len(h.live) == 0
+	})
+}
+
+// Security B1, PUX L2 (#1888): setup's end stops a sign-in still waiting
+// for the owner (Background), rather than leaving it polling the vault
+// process until its code expires.
+func TestONB3SetupEndStopsTheSignInWait(t *testing.T) {
+	var stored atomic.Bool
+	var asked atomic.Int32
+	h := &signInMachine{machineHost{live: map[string]bool{}}}
+	s, host := openSetupSignIn(t, h, &stored, &asked)
+	if _, _, _, err := s.Start(context.Background(), "codex"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the wait to poll", func() bool { return asked.Load() >= 1 })
+	host.Close(context.Background())
+	// The wait's end releases the busy claim: a later Start fails on the
+	// closed machines, not as busy.
+	waitFor(t, "the wait to end", func() bool {
+		_, _, _, err := s.Start(context.Background(), "codex")
+		return err != nil && !errors.Is(err, localsrv.SignInBusy)
+	})
+	n := asked.Load()
+	time.Sleep(50 * time.Millisecond)
+	if asked.Load() != n {
+		t.Fatal("the vault is still polled after setup ended")
+	}
+}
+
+// fixedSignIn is a setup sign-in ready for codex alone.
+type fixedSignIn struct{ starts atomic.Int32 }
+
+func (f *fixedSignIn) Ready(p string) bool { return p == "codex" }
+func (f *fixedSignIn) Start(context.Context, string) (string, string, string, error) {
+	f.starts.Add(1)
+	return "https://auth.openai.com/codex/device", "ABCD-EF23", "OpenAI", nil
+}
+
+// planVault serves the verify socket's provider list with an API-key
+// provider and the codex plan.
+func planVault(t *testing.T) enroller {
+	t.Helper()
+	path := filepath.Join(shortDir(t), "v.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/setup/providers" {
+			io.WriteString(w, `{"providers":[{"id":"openai","name":"OpenAI"},{"id":"codex","name":"ChatGPT plan","plan":true}]}`)
+			return
+		}
+		io.WriteString(w, `{}`)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return enroller{modelroute.NewVerifier(path)}
+}
+
+// PUX R2 (#1888): agentosd's setup mode wires the vault's plan route to
+// the page as a device-code sign-in and starts it through setup's SignIn:
+// the plan lists device_code and no key, an adapter the reverse, and the
+// op reaches SignIn.
+func TestONB3SetupModeWiresThePlanSignIn(t *testing.T) {
+	m := newSetupMode(t)
+	m.Enroll = planVault(t)
+	si := &fixedSignIn{}
+	m.SignIn = si
+	ctx, cancel := context.WithCancel(context.Background())
+	done := start(ctx, m)
+	defer func() { cancel(); <-done }()
+	call := setupCall(t, m)
+	var ps localapi.SetupProviders
+	if err := call(localapi.OpSetupProviders, nil, &ps); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]bool{"openai": {true, false}, "codex": {false, true}}
+	if len(ps.Providers) != 2 {
+		t.Fatalf("providers %+v", ps.Providers)
+	}
+	for _, p := range ps.Providers {
+		if w, ok := want[p.ID]; !ok || p.APIKey != w[0] || p.DeviceCode != w[1] {
+			t.Fatalf("%s: api_key %v, device_code %v", p.ID, p.APIKey, p.DeviceCode)
+		}
+	}
+	var d localapi.DeviceCode
+	if err := call(localapi.OpSetupDeviceCode, localapi.DeviceCodeStart{Provider: "codex"}, &d); err != nil {
+		t.Fatalf("plan sign-in: %v", err)
+	}
+	if d.Link != "https://auth.openai.com/codex/device" || d.Code != "ABCD-EF23" || d.From != "OpenAI" || si.starts.Load() != 1 {
+		t.Fatalf("plan sign-in answered %q %q %q after %d starts", d.Link, d.Code, d.From, si.starts.Load())
 	}
 }

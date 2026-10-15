@@ -10,7 +10,7 @@ import (
 // planSignInLine is ONB-9's sign-in line for the Codex plan: STATUS says it
 // once the runner finds no login or a refused one, until the owner signs in
 // again (CRED-5, #1264).
-const planSignInLine = "ChatGPT Codex plan: I can't sign in to it, so its work uses your other routes. Sign in again on my Wi-Fi page."
+const planSignInLine = "ChatGPT plan: I can't sign in to it, so its work uses your other routes. Sign in again on my Wi-Fi page."
 
 // planNote holds the sign-in line. The runner sets it (SignIn) and clears it
 // when a sign-in or resume lands (OnSignedIn), both under its own lock, so

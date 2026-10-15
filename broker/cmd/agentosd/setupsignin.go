@@ -34,11 +34,17 @@ type setupSignIn struct{ r *provagent.Runner }
 
 // newSetupSignIn builds the sign-in over host. rc is the vault process's
 // route control: it marks the worker's route a sign-in route and says
-// whether the login took. Consent (CRED-5c) stays closed: Codex's route is
-// Allowed and needs none, and Claude's opt-in is #1380's.
-func newSetupSignIn(host provagent.Host, rc *modelroute.RouteControl) setupSignIn {
+// whether this worker's own sign-in stored the login. Consent (CRED-5c)
+// stays closed: Codex's route is Allowed and needs none, and Claude's
+// opt-in is #1380's. A sign-in's wait for the owner ends when setup's
+// machines close (Background), not up to its code's life later. This
+// runner has no SignIn or OnSignedIn: its SignedIn changes only its own
+// state, never the daemon runner's stop or ONB-9's line, which do not
+// exist before setup ends.
+func newSetupSignIn(host *setupHost, rc *modelroute.RouteControl) setupSignIn {
 	return setupSignIn{&provagent.Runner{
 		Host: host, Seeder: planSeeder{rc}, Decls: provagent.Builtins(),
+		Background:   host.done,
 		ImageVersion: imageVersion,
 		Consent:      func(string) bool { return false },
 		SignInStored: func(id string) bool { return planSignInStored(rc, id) },
@@ -83,6 +89,10 @@ var errOneWorker = errors.New("setup: a sign-in worker is already running")
 // state directory.
 type setupHost struct {
 	open func(context.Context) (provagent.Host, error)
+	// done is cancelled by Close: a sign-in still waiting for the owner
+	// stops then.
+	done context.Context
+	end  context.CancelFunc
 
 	mu     sync.Mutex
 	h      provagent.Host
@@ -91,7 +101,8 @@ type setupHost struct {
 }
 
 func newSetupHost(open func(context.Context) (provagent.Host, error)) *setupHost {
-	return &setupHost{open: open, live: map[string]bool{}}
+	done, end := context.WithCancel(context.Background())
+	return &setupHost{open: open, done: done, end: end, live: map[string]bool{}}
 }
 
 // CreateProviderWorker starts the one worker. The lock is held across the
@@ -159,9 +170,10 @@ func (s *setupHost) Destroy(ctx context.Context, id string) error {
 }
 
 // Close ends setup's machines: every live worker is destroyed and every
-// later call refused. A sign-in still waiting then ends without a login
-// (one the owner already approved is in the vault).
+// later call refused. A sign-in still waiting then stops waiting and ends
+// without a login (one the owner already approved is in the vault).
 func (s *setupHost) Close(ctx context.Context) {
+	s.end()
 	s.mu.Lock()
 	s.closed = true
 	h := s.h

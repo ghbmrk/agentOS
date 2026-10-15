@@ -378,6 +378,11 @@ type setup struct {
 	claimExpires time.Time
 	claimTries   int
 	device       map[string][3]string // provider -> link, code, issuer
+	// parked is a started sign-in's link, code and issuer held back while
+	// its private answer is unsaved (#1467: no link then); the link comes
+	// back once the answer saves, since the sign-in still waits for the
+	// owner and a new one would only meet it busy (#1888 PUX L1).
+	parked map[string][3]string
 	// answer is the owner's private-content answer from a Connect AI form
 	// that did not go through, keyed by form ("ai-key openai"), so the
 	// box comes back as the owner left it (U-4).
@@ -390,7 +395,7 @@ type setup struct {
 }
 
 func newSetup(s *Server, st SetupState) *setup {
-	return &setup{s: s, st: st, pair: map[string]string{}, device: map[string][3]string{}, answer: map[string]bool{}, err: map[string]string{}, busy: map[string]bool{}}
+	return &setup{s: s, st: st, pair: map[string]string{}, device: map[string][3]string{}, parked: map[string][3]string{}, answer: map[string]bool{}, err: map[string]string{}, busy: map[string]bool{}}
 }
 
 func (u *setup) done() bool { u.mu.Lock(); defer u.mu.Unlock(); return u.st.Done }
@@ -1022,7 +1027,7 @@ func (u *setup) restart(r *http.Request, key string) error {
 	u.gen++
 	u.pair, u.pairOrder = map[string]string{}, nil
 	u.claimCode, u.numCode, u.numTo, u.numDevice = "", "", "", ""
-	u.device, u.answer = map[string][3]string{}, map[string]bool{}
+	u.device, u.parked, u.answer = map[string][3]string{}, map[string][3]string{}, map[string]bool{}
 	return u.save(func(s *SetupState) {
 		s.Owner, s.Device, s.Codes, s.Recovery, s.Host, s.HostTrusted = "", "", false, false, false, false
 	})
@@ -1184,6 +1189,12 @@ func (u *setup) keepAnswer(r *http.Request, form, id string) {
 // save.
 var errUnsaved = errors.New("Could not save. Try again.")
 
+// errUnkept is the page's text for a private-content answer the vault did
+// not save and the page could not hold on disk either (HeldStore, L55): the
+// answer holds only until the box restarts, so the owner hears that, not
+// the vault-failure text (#1888 Security R1).
+var errUnkept = errors.New("I could not save your answer, and I could not keep it through a restart either. Try again before you turn me off.")
+
 // privateOK records the owner's CAP-9 answer for a provider once its form
 // went through, never before (U-4), and releases the provider's hold. A
 // failed save keeps the box as the owner left it and holds setup open on
@@ -1193,8 +1204,11 @@ func (u *setup) privateOK(r *http.Request, form, id string) error {
 	if err := u.s.cfg.Hooks.SetPrivateOK(id, ok); err != nil {
 		u.keepAnswer(r, form, id)
 		u.mu.Lock()
-		u.holdLocked(id, &ok)
+		herr := u.holdLocked(id, &ok)
 		u.mu.Unlock()
+		if herr != nil {
+			return errUnkept
+		}
 		return errUnsaved
 	}
 	u.mu.Lock()
@@ -1301,6 +1315,12 @@ func (u *setup) aiPrivate(r *http.Request, _ string) error {
 		return err
 	}
 	defer u.end(id)
+	u.mu.Lock()
+	d, parked := u.parked[id]
+	u.mu.Unlock()
+	if parked {
+		return u.showDevice(r, "ai-private", id, d)
+	}
 	return u.privateOK(r, "ai-private", id)
 }
 
@@ -1345,6 +1365,12 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 		}
 	}
 	if errors.Is(err, ErrSignInBusy) {
+		u.mu.Lock()
+		d, parked := u.parked[id]
+		u.mu.Unlock()
+		if parked { // this page's own sign-in, waiting on the answer
+			return u.showDevice(r, "ai-device", id, d)
+		}
 		u.keepAnswer(r, "ai-device", id)
 		return errors.New("A sign-in with that provider is still waiting. Enter its code on the provider's page, or try again once the code expires.")
 	}
@@ -1352,15 +1378,23 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 		u.keepAnswer(r, "ai-device", id)
 		return errors.New("Could not start sign-in with that provider. Try again.")
 	}
-	if err := u.privateOK(r, "ai-device", id); err != nil {
-		u.mu.Lock()
-		delete(u.device, id) // no link while the answer is unsaved
-		u.mu.Unlock()
+	return u.showDevice(r, "ai-device", id, [3]string{link, code, from})
+}
+
+// showDevice saves the owner's private answer for a started sign-in and
+// then shows its link; while the answer is unsaved the link is parked,
+// not shown (#1467), and it comes back once the answer saves.
+func (u *setup) showDevice(r *http.Request, form, id string, d [3]string) error {
+	err := u.privateOK(r, form, id)
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if err != nil {
+		delete(u.device, id)
+		u.parked[id] = d
 		return err
 	}
-	u.mu.Lock()
-	u.device[id] = [3]string{link, code, from}
-	u.mu.Unlock()
+	delete(u.parked, id)
+	u.device[id] = d
 	return nil
 }
 
