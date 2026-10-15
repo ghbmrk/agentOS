@@ -534,6 +534,9 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 	if strings.HasPrefix(id, WorkerPrefix) {
 		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for workers", WorkerPrefix)
 	}
+	if strings.HasPrefix(id, ProviderPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for provider workers", ProviderPrefix)
+	}
 	return m.create(ctx, id, s, nil, "")
 }
 
@@ -558,6 +561,13 @@ const BuilderPrefix = "lb-"
 // seed again; the seed is not persisted, so after a broker restart the
 // machine has only its layer.
 func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+	if strings.HasPrefix(id, ProviderPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for provider workers", ProviderPrefix)
+	}
+	return m.createSeeded(ctx, id, s, seed)
+}
+
+func (m *Manager) createSeeded(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
 	if len(seed) > 0 && s.Label != Private {
 		return Machine{}, fmt.Errorf("%w: %s is %v", ErrSeedLabel, id, s.Label)
 	}
@@ -776,7 +786,7 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 	}
 	// Workers run no agent: no broker socket, so no tools, owner channel
 	// or model egress (CAP-8).
-	if m.cfg.Services != nil && !strings.HasPrefix(mc.ID, WorkerPrefix) {
+	if m.cfg.Services != nil && !strings.HasPrefix(mc.ID, WorkerPrefix) && !strings.HasPrefix(mc.ID, ProviderPrefix) {
 		dir, err := m.cfg.Services.Open(mc.ID)
 		if err != nil {
 			return err
@@ -1108,6 +1118,9 @@ func (m *Manager) Checkpoint(ctx context.Context, id string) (Snapshot, error) {
 }
 
 func (m *Manager) take(ctx context.Context, id string, t Tier) (Snapshot, error) {
+	if err := refuseProvider(id); err != nil {
+		return Snapshot{}, err
+	}
 	mc, err := m.get(id)
 	if err != nil {
 		return Snapshot{}, err
@@ -1183,6 +1196,9 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 // captureAs is capture; sleep marks a sleep checkpoint, with the
 // machine's start count and the hash of what was written.
 func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool) (Snapshot, error) {
+	if err := refuseProvider(mc.ID); err != nil {
+		return Snapshot{}, err
+	}
 	u, err := m.checkCaps(mc.ID, m.launch(mc).Upper)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
@@ -1373,6 +1389,9 @@ func ownSnap(mc *machine, s Snapshot) bool {
 // file system. The machine's label does not fall (REV-5). A preempted or
 // stopped machine is re-admitted first.
 func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
+	if err := refuseProvider(id); err != nil {
+		return err
+	}
 	if strings.HasPrefix(id, EvalPrefix) {
 		return fmt.Errorf("vm: replay machine %s cannot be rolled back", id)
 	}
@@ -1510,6 +1529,9 @@ func (m *Manager) resumeOf(ctx context.Context, mc *machine) error {
 // admitted on its own budget, because forks share no memory (S3). Either all
 // forks start or none do.
 func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, error) {
+	if err := refuseProvider(append([]string{id}, ids...)...); err != nil {
+		return Snapshot{}, err
+	}
 	src, err := m.get(id)
 	if err != nil {
 		return Snapshot{}, err
@@ -1696,6 +1718,9 @@ func (m *Manager) view(s Snapshot) overlay.View {
 // dst restarts on the merged file system (a file-system rollback), and its
 // label rises to the fork's (REV-5). Returns the merged snapshot.
 func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) {
+	if err := refuseProvider(dst, src); err != nil {
+		return Snapshot{}, err
+	}
 	if strings.HasPrefix(dst, EvalPrefix) || strings.HasPrefix(src, EvalPrefix) {
 		return Snapshot{}, errors.New("vm: replay machines are not merged")
 	}

@@ -566,6 +566,10 @@ func (h *tpmHost) reencrypt(v *vault.Vault, pin string, owner []vault.Factor) (_
 	if _, err := v.Reencrypt(owner...); err != nil {
 		return 0, err
 	}
+	// A PC whose new slot was decided before the slot change failed is
+	// sealed: the next slot change or unlock finishes saving it, so it is
+	// not named for trusting again, and the rest go on (#1741).
+	unfinished := false
 	// From here every trusted-host slot is gone; a failure leaves the
 	// PCs not yet sealed again for the owner to trust again by name.
 	pending := append([]*tpmseal.Sealed(nil), away...)
@@ -620,19 +624,25 @@ func (h *tpmHost) reencrypt(v *vault.Vault, pin string, owner []vault.Factor) (_
 			return err == nil && bytes.Equal(sealed.SRKName, id)
 		})
 		t.Close()
-		if err != nil {
+		if err != nil && !errors.Is(err, vault.ErrSlotDecided) {
 			return dropped + len(away), err
 		}
+		unfinished = unfinished || err != nil
 		pending = pending[1:]
 	}
 	for i, a := range away {
-		if err := v.AddSlot(&offlineFactor{srkPublic: a.SRKPublic, pub: &newKey.PublicKey, host: a.Host, trusted: a.Trusted}, func(s vault.Slot) bool {
+		err := v.AddSlot(&offlineFactor{srkPublic: a.SRKPublic, pub: &newKey.PublicKey, host: a.Host, trusted: a.Trusted}, func(s vault.Slot) bool {
 			sealed, err := sealedOf(s)
 			return err == nil && bytes.Equal(sealed.SRKName, a.SRKName)
-		}); err != nil {
+		})
+		if err != nil && !errors.Is(err, vault.ErrSlotDecided) {
 			return dropped + len(away) - i, err
 		}
+		unfinished = unfinished || err != nil
 		pending = pending[1:]
+	}
+	if unfinished {
+		h.say("The vault's new key is in place and the trusted PCs are sealed to it, but I could not finish saving that. It finishes the next time the vault is unlocked.")
 	}
 	return dropped, nil
 }
@@ -660,7 +670,45 @@ func (h *tpmHost) updateCounter() (vault.Counter, error) {
 func (h *tpmHost) bind(v *vault.Vault) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.bindLocked(v)
+	err := h.bindLocked(v)
+	if err == nil || errors.Is(err, vault.ErrCounterMissing) {
+		h.giveBackRemoved(v)
+	}
+	return err
+}
+
+// giveBackRemoved gives this PC's lockout hierarchy back on the owner's
+// unlock once the keys file on the drive holds no slot for this PC: a
+// removal that was decided but not saved keeps the hierarchy until the
+// change lands (#1741), and OpenSealed lands it before this runs. A PC
+// with any TPM slot left, or a slot that does not parse, keeps it.
+// Caller holds mu.
+func (h *tpmHost) giveBackRemoved(v *vault.Vault) {
+	t, err := h.openTPM()
+	if err != nil {
+		return
+	}
+	defer t.Close()
+	me, err := tpmseal.Identity(t)
+	if err != nil {
+		return
+	}
+	if !hasKind(v, lockoutAuthName(me), vault.KindTPMLockoutAuth) && !hasKind(v, daOriginalName(me), vault.KindTPMDAOriginal) {
+		return
+	}
+	slots, err := vault.ReadSlots(h.keysPath)
+	if err != nil {
+		return
+	}
+	for _, s := range slots {
+		if s.Kind != vault.SlotTPM {
+			continue
+		}
+		if sealed, err := sealedOf(s); err != nil || bytes.Equal(sealed.SRKName, me) {
+			return
+		}
+	}
+	h.giveBack(v, t, me)
 }
 
 // bindLocked binds v to this PC's counter. A TPM that cannot even name
@@ -936,7 +984,13 @@ func (h *tpmHost) remove(v *vault.Vault, id string) (int, error) {
 		sealed, err := sealedOf(s)
 		return err == nil && bytes.Equal(sealed.SRKName, want)
 	})
-	if err != nil || n == 0 {
+	// A removal decided before the slot change failed (#1741) keeps the
+	// lockout hierarchy: this PC's PIN slot is still in the keys file on
+	// the drive until the change lands, and with the hierarchy a thief
+	// could reset the TPM's guess limit and try PINs against it offline
+	// (Security S1 on #1821). The owner's next unlock lands the change and
+	// gives the hierarchy back (giveBackRemoved).
+	if n == 0 || err != nil {
 		return n, err
 	}
 	// This PC no longer trusted: give its lockout hierarchy back. Another

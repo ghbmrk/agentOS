@@ -142,6 +142,35 @@ func TestSetupHostNotMineFailsClosedWhenTheTPMIsSilent(t *testing.T) {
 	}
 }
 
+// REQ: CRED-9, HW-1
+
+// VAULT-slot-decided-2 (#1741): "not mine" whose removal is decided before
+// the slot change reports an error says the PC is no longer trusted, and
+// tells the owner, rather than failing as if nothing changed.
+func TestSetupHostNotMineAfterTheSlotIsDecided(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	r.inSetup(t, true)
+	if _, err := r.c.setupHost(true); err != nil {
+		t.Fatal(err)
+	}
+	r.notes = nil
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
+	if _, err := r.c.setupHost(false); !errors.Is(err, errHostRemovedDecided) {
+		t.Fatalf("not mine after the seal: %v", err)
+	}
+	restore()
+	if !r.noted("a trusted host was removed (saving not finished)") {
+		t.Fatalf("owner not told: %q", r.notes)
+	}
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatal("a PC the owner said is not theirs restarts unattended")
+	}
+}
+
 // Without a TPM the PC cannot be trusted, which setup is told as such;
 // "not my PC" has nothing to remove.
 func TestSetupHostWithoutTPM(t *testing.T) {
