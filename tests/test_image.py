@@ -3301,6 +3301,43 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
         self.assertIsNotNone(check.tmpfiles_link_refusal(str(self.root), self.RULES, "/opt/w/x"))
 
+    # (f) Potency R1: the rules no other test pins.
+
+    def test_a_tmpfiles_link_the_check_cannot_follow_is_refused(self):
+        link(self.root, "etc/loop", "/etc/loop")
+        ln = "L /etc/x - - - - /etc/loop/y"
+        self.tmpfiles(ln + "\n")
+        self.assertIn("x.conf: line 1: %s; a link to /etc/loop/y, which the tree check cannot follow" % ln, self.v())
+        m = self.mutant('        return "a link to %s, which the tree check cannot follow (%s) (#1803)" % (to, e.strerror)\n',
+                        "        return None\n")
+        self.assertIsNone(m.tmpfiles_link_refusal(str(self.root), "etc/x", "/etc/loop/y"))
+
+    def test_a_step_tmpfiles_makes_through_a_tree_link_is_refused(self):
+        (self.root / "opt").mkdir()
+        link(self.root, "usr/local", "/opt")
+        link(self.root, self.RULES, "/opt/nope/r")
+        self.tmpfiles("d /usr/local/nope 1777 root root\n")
+        self.assertIn("etc/udev/rules.d: a link to /opt/nope/r, through /opt/nope, which the tree lacks", self.v())
+        m = self.mutant("            paths.append(tree_resolve(root, parts))\n", "            pass\n")
+        self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+
+    def test_a_link_to_a_file_another_uid_owns_or_with_an_acl_is_refused(self):
+        write(self.root, "usr/lib/x/r", "r\n")
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        with self.owned("usr/lib/x/r"):
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x/r, which uid %d owns"
+                          % (check.TREE_OWNER + 1000), self.v())
+        real = check.tree_xattrs
+        with unittest.mock.patch.object(check, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
+                                        if rel == "usr/lib/x/r" else real(root, rel)):
+            self.assertIn("through /usr/lib/x/r, which carries a POSIX ACL", self.v())
+        self.assertNotIn("etc/udev/rules.d:", self.v())
+        m = self.mutant('        why = step_refusal(root, d, target, not path.startswith("/"), st)\n',
+                        '        why = step_refusal(root, d, target, not path.startswith("/") and k < len(parts), st)\n')
+        with unittest.mock.patch.object(m, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
+                                        if rel == "usr/lib/x/r" else []):
+            self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+
     # SERVICE_DIRS lists every directory a unit's service user owns.
 
     UNITS = sorted(list((MK / "mkosi.extra/usr/lib/systemd/system").glob("*.service"))
