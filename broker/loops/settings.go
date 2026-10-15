@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -801,10 +802,10 @@ func (s *Scheduler) Execute(_ context.Context, in journal.Intent, _ int) journal
 		}
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not saved"}
 	}
-	if s.done != nil && (next.Off || next.Paused[s.runningLoop]) {
-		s.preempted = true // offered again if the loop comes back on
-		// The owner's setting: not a cut a candidate caused (PE5).
-		s.cancelLocked(change.ErrOwnerStop)
+	if r := s.cur; r != nil && (next.Off || next.Paused[r.loop]) {
+		// Offered again if the loop comes back on. The owner's setting:
+		// not a cut a candidate caused (PE5).
+		r.stopLocked(change.ErrOwnerStop)
 	}
 	s.wakeLocked()
 	return journal.Outcome{Result: journal.ResultSucceeded}
@@ -838,7 +839,15 @@ func (s *Scheduler) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return s.cfg.Store.Save(b)
+	err = s.cfg.Store.Save(b)
+	if errors.Is(err, durable.ErrDirSync) {
+		// The new settings are published and a restart loads them, so
+		// they are applied; only a power cut before the next save could
+		// undo them (#1320).
+		s.cfg.Logf("loops: settings saved, but a power cut before the next save could undo them")
+		return nil
+	}
+	return err
 }
 
 // keepApplied is how many recent settings Reconcile can answer for; older

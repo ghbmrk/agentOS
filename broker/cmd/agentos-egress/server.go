@@ -628,6 +628,17 @@ func verifyHandler(c *custody) http.Handler {
 			}
 			return
 		}
+		if r.Method == http.MethodPost && r.URL.Path == "/rotate/wifi" {
+			// agentosd's one-shot permit to rewrite ap-net.json (#1522).
+			ssid, password, ok := c.takeRotatedWiFi()
+			if !ok {
+				http.Error(w, "no rotated Wi-Fi network is waiting", http.StatusGone)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(modelroute.RotatedWiFi{SSID: ssid, Password: password})
+			return
+		}
 		if r.Method == http.MethodGet && r.URL.Path == "/second-line" {
 			st, err := c.secondLineState()
 			switch {
@@ -667,7 +678,7 @@ func verifyHandler(c *custody) http.Handler {
 			return
 		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal, /setup/providers/key, /setup/providers/private or /update-anchor/raise, or GET /second-line, /second-line/texts, /setup/providers or /update-anchor, only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal, /setup/providers/key, /setup/providers/private, /update-anchor/raise or /rotate/wifi, or GET /second-line, /second-line/texts, /setup/providers or /update-anchor, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest

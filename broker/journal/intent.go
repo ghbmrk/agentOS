@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Intent is one requested effect, with every parameter that decides what the
@@ -147,13 +148,41 @@ type Outcome struct {
 	Evidence string
 }
 
-// Executor performs effects. Execute may be called at most once per
-// (intent, attempt); AttemptKey gives a stable idempotency key for it.
+// Executor performs effects. Execute is called at most once per
+// (intent, attempt), unless the executor reports that its service honours
+// the attempt's idempotency key (KeyHonouring); AttemptKey gives that key.
 // Reconcile asks the service what happened to an attempt, returning
-// ResultUnknown when the service cannot tell.
+// ResultUnknown when the service cannot tell. ResultNotApplied from
+// Reconcile must mean the attempt can never take effect later, not that
+// it is not found yet: the engine then sends the effect again as a new
+// attempt, under a new key, so a late landing would be a second effect
+// (OP-2).
 type Executor interface {
 	Execute(ctx context.Context, in Intent, attempt int) Outcome
 	Reconcile(ctx context.Context, in Intent, attempt int) Outcome
+}
+
+// KeyHonouring is implemented by executors that can say whether their
+// service honours the attempt's idempotency key (AttemptKey): executing the
+// same key twice applies the effect at most once. Only then may the engine
+// execute an attempt whose outcome is unknown again, with the same key
+// (OP-2). An executor without it never gets a second call for an attempt.
+type KeyHonouring interface {
+	HonoursKey(in Intent) bool
+}
+
+// DefaultKeyLifetime is how long after an attempt was first dispatched the
+// engine assumes its service still remembers the attempt's idempotency key,
+// for executors that do not say (KeyLifetimer). Past it a same-key retry
+// could apply the effect again, so the engine does not make one (OP-2,
+// D-116).
+const DefaultKeyLifetime = 24 * time.Hour
+
+// KeyLifetimer is implemented by key-honouring executors whose service
+// remembers an idempotency key for a known time. A lifetime of zero or less
+// means DefaultKeyLifetime.
+type KeyLifetimer interface {
+	KeyLifetime(in Intent) time.Duration
 }
 
 // Canceller is implemented by executors whose service supports cancelling an
@@ -212,7 +241,28 @@ type Attempt struct {
 	Source   string   `json:"source,omitempty"`
 	Evidence string   `json:"evidence,omitempty"`
 	Cancels  []Cancel `json:"cancels,omitempty"`
+	// Parked says the attempt's outcome stayed unknown and the engine
+	// stopped trying to settle it: it is in the daily digest, and only
+	// the owner can ask for it to run again (OP-2, D-116).
+	Parked bool `json:"parked,omitempty"`
+	// Dispatched is when the attempt was first dispatched; a same-key
+	// retry does not move it, so the key's lifetime runs from here.
+	Dispatched time.Time `json:"dispatched,omitzero"`
 }
+
+// Sources of a RecDispatched record other than an ordinary dispatch.
+const (
+	// DispatchKey re-executes an attempt whose outcome is unknown with the
+	// same idempotency key, because the executor's service honours it.
+	DispatchKey = "key"
+	// DispatchOwner starts a new attempt of a parked intent because the
+	// owner asked for it, knowing the effect may happen twice.
+	DispatchOwner = "owner"
+)
+
+// SourceReconcile is the evidence source of a check through the same tool
+// that settled an unknown outcome (Engine.Reconcile).
+const SourceReconcile = "reconcile"
 
 // Cancel records a cancellation request made by STOP.
 type Cancel struct {
@@ -235,6 +285,32 @@ type Status struct {
 	Permission Permission
 	Attempts   []Attempt
 	Quality    Quality
+}
+
+// Unclear returns the attempt an outcome_unknown intent waits on when its
+// latest attempt, the owner's retry of a parked one, did not go: the
+// parked attempt, which may still have gone. It is 0 otherwise. Such an
+// intent is outcome_unknown like any other whose effect may have gone, so
+// a reader that goes by State treats it as such; Unclear only tells the
+// owner which try is in doubt and that the retry itself did not go.
+func (s Status) Unclear() int {
+	if s.State != OutcomeUnknown {
+		return 0
+	}
+	return unclearOf(s.Attempts)
+}
+
+// Outstanding returns the number of the attempt an in_flight or
+// outcome_unknown intent waits on (the latest, or Unclear), or 0: the
+// attempt evidence such as Engine.Resolve settles.
+func (s Status) Outstanding() int {
+	if s.State != InFlight && s.State != OutcomeUnknown || len(s.Attempts) == 0 {
+		return 0
+	}
+	if n := s.Unclear(); n != 0 {
+		return n
+	}
+	return s.Attempts[len(s.Attempts)-1].N
 }
 
 var (
