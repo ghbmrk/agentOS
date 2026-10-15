@@ -53,7 +53,7 @@ jobs:
       pull-requests: write # open, auto-merge or close its PR
       actions: write # dispatch ci.yml on the branch
     env:
-      # BOT_PR_TOKEN (optional; decision issue on #1691): a token whose pushes start
+      # BOT_PR_TOKEN (optional; decision #1769): a token whose pushes start
       # pull_request workflows normally. Without it the job uses GITHUB_TOKEN as before.
       GH_TOKEN: ${{ secrets.BOT_PR_TOKEN || github.token }}
       BRANCH: bot/metrics
