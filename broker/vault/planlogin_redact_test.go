@@ -148,3 +148,42 @@ func TestPlanLoginFieldAbsentFromRecall(t *testing.T) {
 		}
 	}
 }
+
+// An identifier stored beside the tokens is not a pattern: #1747's Codex
+// entry keeps account_id, a UUID, and the placeholder id_token it hands the
+// CLI carries that ID in its base64url payload. Redacting the ID would splice
+// the placeholder on every refresh and let a guest confirm a guessed ID.
+func TestPlanLoginIdentifierIsNotRedacted(t *testing.T) {
+	v, err := Create(filepath.Join(t.TempDir(), "vault"), bytes.Repeat([]byte{7}, KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	account := "0f8d6c2e-4b1a-4c7e-9a3d-5e2f1b7c8a90"
+	tok := strings.Replace(string(canary(t)), "sk-canary-", "plcanary", 1)
+	val, _ := json.Marshal(map[string]string{"access_token": tok, "refresh_token": tok + "r", "id_token": tok + "i", "account_id": account})
+	if err := v.Put("plan-login-codex", KindPlanLogin, val); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := v.Redactor()
+	h, _ := v.HashRedactor()
+	// #1747's placeholderIDToken shape: header.payload.random, payload
+	// holding the account ID under the provider's auth claim.
+	enc := func(x any) string { b, _ := json.Marshal(x); return base64.RawURLEncoding.EncodeToString(b) }
+	for exp := int64(1790000000); exp < 1790000016; exp++ {
+		ph := enc(map[string]string{"alg": "none", "typ": "JWT"}) + "." +
+			enc(map[string]any{"exp": exp, "https://api.openai.com/auth": map[string]string{"chatgpt_account_id": account}}) +
+			".c2lnbmF0dXJlLXBsYWNlaG9sZGVy"
+		for _, line := range []string{`{"id_token":"` + ph + `"}`, "account " + account} {
+			for name, red := range map[string]func([]byte) []byte{"Redactor": r.Redact, "HashRedactor": h.Redact} {
+				if out := string(red([]byte(line))); out != line {
+					t.Fatalf("%s changed %q to %q", name, line, out)
+				}
+			}
+		}
+	}
+	// The tokens beside it are still patterns.
+	if out := string(r.Redact([]byte("x " + tok + "r"))); strings.Contains(out, tok) {
+		t.Fatalf("token survived: %q", out)
+	}
+}
