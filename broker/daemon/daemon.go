@@ -512,7 +512,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	// unless a check or the service's idempotency key makes it safe; what
 	// stays unclear is parked for the digest and rechecked each round
 	// (OP-2).
-	go settleLoop(ctx, eng, settleEvery, gate.Dispatch)
+	go settleLoop(ctx, eng, settleEvery, settleWait, settleMaxWait, gate.Dispatch)
 	go func() {
 		<-ctx.Done()
 		// No page call, guest call or owner text starts now, and the ones
