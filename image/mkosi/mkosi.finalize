@@ -1542,6 +1542,7 @@ def main():
     if not root:
         sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")
     # TEMPORARY (#1702 delta 2): list every link that reaches a box mount, to derive BOX_LINKS.
+    diag = []
     for rel, st in tree_walk(root):
         if stat.S_ISLNK(st.st_mode) and rel.split("/", 1)[0] not in BOX_MOUNTS:
             try:
@@ -1549,7 +1550,8 @@ def main():
             except OSError:
                 continue
             if p.startswith("/"):
-                print("image tree diag: %s -> %s => %s" % (rel, tree_readlink(root, rel), p))
+                diag.append("%s -> %s => %s" % (rel, tree_readlink(root, rel), p))
+    print("::notice title=image tree box links (%d)::%s" % (len(diag), "%0A".join(d.replace("%", "%25") for d in diag)))
     v = violations(root)
     for line in v:
         print("image check: " + line)

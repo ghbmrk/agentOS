@@ -2306,6 +2306,104 @@ class ConfFilesTest(unittest.TestCase):
         self.assertEqual(check.violations(self.root), [])
         f.unlink()
 
+    # #1702 (delta 2, Security 1, P/UX 1): links through what the box makes at boot, none with a '..'.
+    BOX_BYPASSES = ("/proc/self/root/var/lock", "/proc/self/root/var/tmp", "/proc/1/root/var/tmp",
+                    "/proc/1/root/tmp/x", "/proc/thread-self/root/home/u", "/proc/thread-self/root/home",
+                    "/proc/self/cwd/var/tmp", "/proc/self/root/run/lock/x.rules", "/proc/self/fd/3",
+                    "/proc/self/map_files/x", "/dev/fd/3", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr",
+                    "/dev/stdin/x", "/sys/x", "/run/x", "/var/run/systemd/x", "../../../../../proc/self/root/var/tmp")
+
+    def box_tree(self):
+        link(self.root, "var/lock", "/run/lock")
+        link(self.root, "var/run", "/run")
+
+    def test_a_link_through_what_the_box_mounts_is_refused(self):
+        # Default deny: a link that reaches a box mount ends where the box says at boot (/proc/self/root
+        # is the reader's /, /dev/fd/3 its fd 3), so only BOX_LINKS' exact stock links may end there.
+        self.box_tree()
+        for rel in ("etc/udev/rules.d", "etc/systemd/system/ssh.service.d/x.conf"):
+            for target in self.BOX_BYPASSES:
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    try:
+                        self.assertIn("%s: a link to %s, which reaches /" % (rel, target), self.v())
+                    finally:
+                        f.unlink()
+        # A link the tree holds under a box mount is hidden by the mount on the box.
+        f = link(self.root, "run/x", "/proc/self/root/var/tmp")
+        self.assertEqual(check.violations(self.root), [])
+        f.unlink()
+
+    def test_without_the_default_deny_the_box_links_pass(self):
+        # The mutant: drop the default deny, and every bypass passes the link rule (the '..', world-
+        # writable and SERVICE_DIRS rules do not see them).
+        old = '    if path.startswith("/") and rel.split("/", 1)[0] not in BOX_MOUNTS:\n'
+        src = (MK / "mkosi.finalize").read_text()
+        self.assertEqual(src.count(old), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            mut = pathlib.Path(tmp) / "mutant.py"
+            mut.write_text(src.replace(old, "    if False:\n"))
+            m = load("image_check_mutant", mut)
+            self.box_tree()
+            for target in self.BOX_BYPASSES:
+                with self.subTest(target=target):
+                    f = link(self.root, "etc/udev/rules.d", target)
+                    try:
+                        self.assertEqual(m.world_writable_link(str(self.root), "etc/udev/rules.d"), [])
+                        self.assertNotEqual(check.world_writable_link(str(self.root), "etc/udev/rules.d"), [])
+                    finally:
+                        f.unlink()
+
+    def test_each_stock_box_link_passes_and_only_exactly(self):
+        # Every BOX_LINKS entry passes as the stock tree holds it, and a mask anywhere; a link that
+        # differs from an entry by one component, in its path or its target, is refused.
+        for rel, targets in sorted(check.BOX_LINKS.items()):
+            for target in targets:
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    try:
+                        self.assertEqual(check.violations(self.root), [])
+                    finally:
+                        f.unlink()
+        f = link(self.root, "usr/lib/systemd/system/x.service", "/dev/null")
+        self.assertEqual(check.violations(self.root), [])
+        f.unlink()
+        near = [("etc/x/mtab", "../../proc/self/mounts"), ("etc/mtab", "../proc/self/mountinfo"),
+                ("etc/mtab", "../proc/1/mounts"), ("etc/mtab", "../proc/self/root/mounts"),
+                ("etc/mtab", "/proc/self/mounts"),
+                ("var/run", "/run/user"), ("var/run", "/sys"), ("etc/run", "/run"),
+                ("etc/resolv.conf", "../run/systemd/resolve/resolv.conf"),
+                ("etc/resolv.conf", "../run/systemd/resolve/stub-resolv.conf/x"),
+                ("etc/resolv.conf", "../run/systemd/x/stub-resolv.conf"), ("etc/resolv2.conf", "/run/systemd/resolve/stub-resolv.conf"),
+                ("etc/udev/rules.d/x.rules", "/dev/null/x"), ("etc/udev/rules.d/x.rules", "/dev/zero"),
+                ("etc/udev/rules.d/x.rules", "../../../dev/null")]
+        for rel, target in near:
+            with self.subTest(rel=rel, target=target):
+                f = link(self.root, rel, target)
+                try:
+                    self.assertNotEqual(check.violations(self.root), [])
+                finally:
+                    f.unlink()
+
+    def test_a_link_into_a_runtime_dir_through_var_run_is_refused(self):
+        # SERVICE_DIRS' run/agentos-* entries, reached the way stock links go: through var/run.
+        self.box_tree()
+        for d in ("agentos-ap", "agentos-egress", "agentos-netjoin"):
+            f = link(self.root, "etc/udev/rules.d", "/var/run/%s/x" % d)
+            self.assertIn("etc/udev/rules.d: a link to /var/run/%s/x, inside /run/%s," % (d, d), self.v())
+            f.unlink()
+
+    def test_a_link_loop_fails_open(self):
+        # A loop, or a non-directory step, fails the same lookup on the box, so the link reads nothing:
+        # world_writable_link passes it on purpose (its OSError path), and nothing else here refuses it.
+        link(self.root, "usr/lib/x/a", "b")
+        link(self.root, "usr/lib/x/b", "a")
+        write(self.root, "usr/lib/x/f", "x\n")
+        link(self.root, "usr/lib/x/c", "f/y")
+        for rel in ("usr/lib/x/a", "usr/lib/x/b", "usr/lib/x/c"):
+            self.assertEqual(check.world_writable_link(str(self.root), rel), [], rel)
+        self.assertEqual(check.violations(self.root), [])
+
     def test_the_lock_and_world_writable_exemptions_are_exact(self):
         # #1702 (Security, L3): the lock link is matched by path, not by suffix; a link through
         # var/lock reaches run/lock; the o+w exemption is by directory name, not by prefix.
