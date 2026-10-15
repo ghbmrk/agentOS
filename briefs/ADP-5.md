@@ -9,3 +9,7 @@ Desktop-app executor, Linux (ADP-5; A13): one app and one account per broker-own
 **Gate:** lenses (security: executor)
 
 **State on the board before the 2026-10-08 index split:** queued, blocked on CRED-4b; lane claude2
+
+## Scope
+
+New `broker/executor/desktop/**` (Linux kiosk executor over the CRED-4 action protocol) and `broker/vm/**` only for its launch profile. Lane claude2, tier A. Blocked on CRED-4b.

@@ -59,22 +59,68 @@ class PremergeTest(unittest.TestCase):
         git(self.r, "merge", "-q", "--no-edit", "main")
         self.assertEqual(self.check(reviewed), [])
 
-    def test_a_review_record_committed_after_the_accept_is_same(self):
-        # RECORDS-INLINE (#1816): the lens records ride in the feature PR, so adding one after
-        # the accept is not a change to what was reviewed.
+    def merge_main_after(self, edit):
+        git(self.r, "checkout", "-q", "main")
+        edit()
+        self.commit("main moves")
+        git(self.r, "checkout", "-q", "pr")
+        git(self.r, "merge", "-q", "--no-edit", "main")
+
+    def test_main_merged_in_next_to_a_hunk_is_same(self):
+        # #1580, #1592: a base change in the PR hunk's context lines read as `changed`.
         reviewed = self.pr()
-        (self.r / "reviews/l3").mkdir(parents=True)
-        self.write("reviews/l3/2026-10-15-pr12.md", "# L3\n\nRecord: PR #12\n")
-        self.commit("record")
+        self.merge_main_after(lambda: self.write("a.txt", self.read("a.txt").replace("line 4\n", "line 4 main\n")))
         self.assertEqual(self.check(reviewed), [])
 
-    def test_only_record_paths_are_exempt(self):
+    def test_main_merged_in_then_a_pr_line_changed_is_changed(self):
         reviewed = self.pr()
-        (self.r / "reviews/l3").mkdir(parents=True)
-        self.write("reviews/l3/README.md", "changed\n")
-        self.write("reviews/l3/notes.md", "changed\n")
-        self.commit("not records")
-        self.assertEqual(self.check(reviewed), ["reviews/l3/README.md", "reviews/l3/notes.md"])
+        self.merge_main_after(lambda: self.write("a.txt", self.read("a.txt").replace("line 4\n", "line 4 main\n")))
+        self.write("a.txt", self.read("a.txt").replace("line two\n", "line 2 again\n"))
+        self.commit("after the accept")
+        self.assertEqual(self.check(reviewed), ["a.txt"])
+
+    def test_main_merged_in_then_a_pr_hunk_moved_is_changed(self):
+        # Same added lines at another place: equal +/- lines, different merged file.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("a.txt", self.read("a.txt").replace("line 3\n", "line 3\ndeny()\n"))
+        reviewed = self.commit("pr")
+        self.merge_main_after(lambda: self.write("b.txt", "b main\n"))
+        self.write("a.txt", self.read("a.txt").replace("line 3\ndeny()\n", "line 3\n").replace("line 20\n", "line 20\ndeny()\n"))
+        self.commit("move the call")
+        self.assertEqual(self.check(reviewed), ["a.txt"])
+
+    def test_a_merge_resolution_that_edits_a_pr_line_is_changed(self):
+        reviewed = self.pr()
+        git(self.r, "checkout", "-q", "main")
+        self.write("a.txt", self.read("a.txt").replace("line 2\n", "line 2 main\n"))
+        self.commit("main conflicts")
+        git(self.r, "checkout", "-q", "pr")
+        pr_text = git(self.r, "show", "pr:a.txt") + "\n"
+        merge = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True, text=True)
+        self.assertNotEqual(merge.returncode, 0, "the merge was meant to conflict")
+        git(self.r, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+        self.write("a.txt", pr_text.replace("line two\n", "line 2 main\n"))
+        self.commit("resolve to main's line")
+        self.assertEqual(self.check(reviewed), ["a.txt"])
+
+    def test_a_side_branch_merged_in_is_changed(self):
+        reviewed = self.pr()
+        git(self.r, "checkout", "-q", "-b", "side", "main")
+        self.write("c.txt", "side\n")
+        self.commit("side")
+        git(self.r, "checkout", "-q", "pr")
+        git(self.r, "merge", "-q", "--no-edit", "side")
+        self.assertEqual(self.check(reviewed), ["c.txt"])
+
+    def test_main_moving_on_unmerged_is_same(self):
+        reviewed = self.pr()
+        self.merge_main_after(lambda: self.write("a.txt", self.read("a.txt").replace("line 4\n", "line 4 main\n")))
+        git(self.r, "checkout", "-q", "main")
+        self.write("a.txt", self.read("a.txt").replace("line 1\n", "line 1 later\n"))
+        self.commit("main moves again")
+        git(self.r, "checkout", "-q", "pr")
+        self.assertEqual(self.check(reviewed), [])
 
     def test_a_later_push_names_the_changed_file(self):
         reviewed = self.pr()
@@ -104,6 +150,21 @@ class PremergeTest(unittest.TestCase):
         (self.r / "blob.bin").write_bytes(b"\x00\x01allow")
         self.commit("later")
         self.assertEqual(self.check(reviewed), ["blob.bin"])
+
+    def test_a_review_record_committed_after_the_accept_is_same(self):
+        reviewed = self.pr()
+        (self.r / "reviews/l3").mkdir(parents=True)
+        self.write("reviews/l3/2026-10-15-pr7.md", "Verdict: accept\n")
+        self.commit("record")
+        self.assertEqual(self.check(reviewed), [])
+
+    def test_only_record_paths_are_exempt(self):
+        reviewed = self.pr()
+        (self.r / "reviews/l3").mkdir(parents=True)
+        self.write("reviews/l3/2026-10-15-pr7.md", "Verdict: accept\n")
+        self.write("reviews/l3/notes.md", "x\n")
+        self.commit("record and a stray")
+        self.assertEqual(self.check(reviewed), ["reviews/l3/notes.md"])
 
     def test_cli_exit_codes(self):
         reviewed = self.pr()
