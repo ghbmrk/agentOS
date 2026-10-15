@@ -151,21 +151,6 @@ class PremergeTest(unittest.TestCase):
         self.commit("later")
         self.assertEqual(self.check(reviewed), ["blob.bin"])
 
-    def test_a_review_record_committed_after_the_accept_is_same(self):
-        reviewed = self.pr()
-        (self.r / "reviews/l3").mkdir(parents=True)
-        self.write("reviews/l3/2026-10-15-pr7.md", "Verdict: accept\n")
-        self.commit("record")
-        self.assertEqual(self.check(reviewed), [])
-
-    def test_only_record_paths_are_exempt(self):
-        reviewed = self.pr()
-        (self.r / "reviews/l3").mkdir(parents=True)
-        self.write("reviews/l3/2026-10-15-pr7.md", "Verdict: accept\n")
-        self.write("reviews/l3/notes.md", "x\n")
-        self.commit("record and a stray")
-        self.assertEqual(self.check(reviewed), ["reviews/l3/notes.md"])
-
     def test_cli_exit_codes(self):
         reviewed = self.pr()
         run = lambda: subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--base", "main", reviewed],
@@ -176,6 +161,27 @@ class PremergeTest(unittest.TestCase):
         self.commit("later")
         bad = run()
         self.assertEqual((bad.returncode, bad.stdout.split()), (1, ["changed", "b.txt"]))
+
+    def test_mark_press_merge_paths(self):
+        for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
+                  "tools/risk_tier.py", "tools/premerge.py", "tools/ci_scope.py", "tools/ci_scope_x.py",
+                  "tools/g1_scope.py", "tools/g1_scope.txt", "reviews/l3/README.md", "docs/LANES.md"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in ("tools/records.py", "reviews/l3/2026-10-15-pr1.md", "README.md", "docs/OTHER.md", "src/claude/x.go"):
+            self.assertEqual(premerge.mark_paths([f]), [], f)
+
+    def test_cli_needs_mark(self):
+        git(self.r, "checkout", "-q", "-b", "pr")
+        run = lambda: subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main"],
+                                     cwd=self.r, capture_output=True, text=True)
+        self.write("b.txt", "x\n")
+        self.commit("code")
+        ok = run()
+        self.assertEqual((ok.returncode, ok.stdout.strip()), (0, "agent"))
+        (self.r / "CLAUDE.md").write_text("rules\n")
+        self.commit("rules")
+        bad = run()
+        self.assertEqual((bad.returncode, bad.stdout.split()), (1, ["mark", "CLAUDE.md"]))
 
 
 if __name__ == "__main__":

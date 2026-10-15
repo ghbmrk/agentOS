@@ -1,4 +1,4 @@
-"""tools/records.py: review records batched from verdict comments after merge (#1691).
+"""tools/records.py: review records written daily from verdict comments of merged PRs (#1691, #1816).
 
 No requirement IDs: CI tooling, not SPEC.md behaviour.
 """

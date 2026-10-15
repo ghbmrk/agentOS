@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Review records from verdict comments, batched after merge (#1691, Merge-overhead).
+"""Review records from verdict comments, batched daily after merge (#1691, RECORDS-INLINE #1816).
 
-Each lens verdict is posted as a PR comment and, today, landed again as a file
-`reviews/<lens>/YYYY-MM-DD-pr<N>.md` by its own records PR. This tool collects the
-records of merged PRs from their comments, so one bot PR (records.yml) lands them all.
+Each lens verdict is posted as a PR comment. This tool turns the marked comments of merged
+PRs into files `reviews/<lens>/YYYY-MM-DD-pr<N>.md`, so one daily bot PR (records.yml) lands
+them all; no feature PR carries a record.
 
 A comment is a record only when all of these hold:
   - it carries a marker `<!-- record: <lens> -->` per lens it records, where <lens> is an

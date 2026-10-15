@@ -62,8 +62,8 @@ class WorkflowTest(unittest.TestCase):
             self.assertIn('gh pr merge "$BRANCH" --auto --squash', text, name)
 
     def test_records_batch_runs_at_most_daily(self):
-        # RECORDS-INLINE (#1816): records ride in their feature PR; the bot batch is only the
-        # fallback, so it runs on a daily schedule or by hand, never on every push to main.
+        # RECORDS-INLINE (#1816, D-120): the bot batch is the only writer of records, so it runs on a
+        # daily schedule or by hand, never on every push to main.
         text = (WORKFLOWS / "records.yml").read_text()
         on = re.search(r"^on:\n((?:[ \t]+.*\n)+)", text, re.M).group(1)
         self.assertRegex(on, r"(?m)^\s+schedule:\s*$")
