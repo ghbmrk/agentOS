@@ -6,8 +6,9 @@ name: scope
 # The changed paths are the same diff CI's other PR steps use: the PR branch against its
 # merge base; for a push to main, the pushed range; for a dispatch (trace.yml, metrics.yml
 # and board.yml dispatch ci.yml on their bot branches), the branch against main, so a
-# dispatch on main itself is an empty change and runs full. Other events (schedule,
-# merge_group) run full.
+# dispatch on main itself is an empty change and runs full; for a merge-queue entry, the
+# queue commit against the base it was built on (merge_group.base_sha, whose copy of
+# tools/ci_scope.py decides). Other events (schedule) run full.
 on:
   workflow_call:
     outputs:
@@ -34,6 +35,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
           base=
           case "$EVENT" in
@@ -41,6 +43,7 @@ jobs:
             pull_request) base=HEAD^1 head=HEAD^2 ;;
             push) base=$BEFORE head=$GITHUB_SHA ;;
             workflow_dispatch) base=origin/main head=$GITHUB_SHA ;;
+            merge_group) base=$QUEUE_BASE head=$GITHUB_SHA ;;
           esac
           scope=full
           if [ -n "$base" ] && git show "$base:tools/ci_scope.py" > "$RUNNER_TEMP/ci_scope.py" 2>/dev/null; then

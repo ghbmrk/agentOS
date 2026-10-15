@@ -1,0 +1,75 @@
+name: g1-freeze-queue
+# The `g1-freeze` check for GitHub's merge queue. Main requires `g1-freeze`, and the queue
+# waits for every required check on its gh-readonly-queue/ commit; g1-freeze.yml runs only
+# on pull_request_target, so without this job a queued PR would never get the check and stall.
+# It applies the same rule as g1-freeze.yml, with the list as the queue's base commit has it
+# (tools/g1_scope.py and tools/g1_scope.txt at merge_group.base_sha, never the queued copy):
+#   1. the change the entry lands (base...queue head) passes with no exemption: pass;
+#   2. otherwise it passes only under the queued PR's own exemption (its number, its
+#      created_at from the API, which the author cannot set), and only if that PR itself
+#      changes every path the entry lands, so one PR's exemption never covers another's.
+# Anything it cannot decide (no PR number in the queue ref, an unreadable list, a failed
+# API call or fetch) fails closed. A base without tools/g1_scope.py passes, as in g1-freeze.yml.
+# GitHub runs this file as the queue commit has it, so a queued PR could edit it; that PR
+# already passed g1-freeze.yml (the base copy) before it could join the queue, and .github/
+# changes are on the G1 list. PR heads are fetched as git objects only, never checked out.
+# Delete it with g1-freeze.yml when the freeze lifts for good.
+on:
+  merge_group:
+    types: [checks_requested]
+permissions:
+  contents: read
+jobs:
+  g1-freeze:
+    name: g1-freeze
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read # the PR's timeline, once the base copy takes one (#1717)
+      pull-requests: read # the queued PR's head and created_at
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          fetch-depth: 0 # the merge bases with the queue head and the PR head
+          persist-credentials: false
+      - name: G1 freeze for the queued PR (base copy of tools/g1_scope.py)
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          GROUP_REF: ${{ github.event.merge_group.head_ref }}
+          GROUP_SHA: ${{ github.event.merge_group.head_sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f tools/g1_scope.py ]; then echo "g1 freeze: not active on this base"; exit 0; fi
+          # The queue names its ref refs/heads/gh-readonly-queue/<base branch>/pr-<N>-<sha>.
+          pr=$(printf '%s' "$GROUP_REF" | sed -nE 's#^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]{40}$#\1#p')
+          if [ -z "$pr" ]; then echo "g1 freeze: no PR number in $GROUP_REF; failing closed" >&2; exit 2; fi
+          git fetch --no-tags origin "+$GROUP_REF:refs/remotes/queue/head" "+refs/pull/$pr/head:refs/remotes/pr/head"
+          git cat-file -e "$GROUP_SHA^{commit}"
+          rc=0
+          python3 -I tools/g1_scope.py --git "$BASE_SHA" "$GROUP_SHA" || rc=$?
+          if [ "$rc" -ne 1 ]; then exit "$rc"; fi
+          echo "g1 freeze: checking PR #$pr's own exemption"
+          info=$(gh api "repos/$REPO/pulls/$pr" --jq '"\(.head.sha) \(.created_at)"')
+          pr_head=${info%% *} created=${info#* }
+          # A push to a queued PR takes it out of the queue, so its current head is the queued one.
+          git cat-file -e "$pr_head^{commit}"
+          git diff --name-only -z --no-renames "$BASE_SHA...$GROUP_SHA" | sort -z > "$RUNNER_TEMP/group-paths"
+          git diff --name-only -z --no-renames "$BASE_SHA...$pr_head" | sort -z > "$RUNNER_TEMP/pr-paths"
+          extra=$(comm -z -23 "$RUNNER_TEMP/group-paths" "$RUNNER_TEMP/pr-paths" | tr '\0' '\n')
+          if [ -n "$extra" ]; then
+            echo "g1 freeze: this queue entry also lands paths PR #$pr does not change, which its exemption cannot cover:" >&2
+            printf '%s\n' "$extra" | sed 's/^/  /' >&2
+            exit 1
+          fi
+          # The base copy decides: one older than #1717 takes no timeline and keeps its own rules.
+          timeline=()
+          if grep -q -- "--timeline" tools/g1_scope.py; then
+            gh api --paginate "repos/$REPO/issues/$pr/timeline" \
+              --jq '.[] | [(.event // ""), (.created_at // "")] | @tsv' > "$RUNNER_TEMP/timeline.tsv"
+            timeline=(--timeline "$RUNNER_TEMP/timeline.tsv")
+          fi
+          python3 -I tools/g1_scope.py --git "$BASE_SHA" "$pr_head" --pr "$pr" --pr-created "$created" \
+            "${timeline[@]}"
