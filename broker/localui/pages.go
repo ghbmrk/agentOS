@@ -131,7 +131,6 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">{{.St.Settings.User}} at {{.St.Settings.Server}}, number {{.St.Settings.Number}}.</p>
 <details{{if and (not .St.RealmRecorded) (not .St.WaitingForRegistration)}} open{{end}}><summary>Change the account</summary>{{template "lineform" .Form}}</details>
 <form method="post" action="/second-line/"><input type="hidden" name="step" value="remove"><button class="stop">Remove the second line</button></form>
-<p class="muted">I text you when the account is changed or removed.</p>
 {{else}}
 <p>A second line lets me text and call businesses for you from my own number, a calling (SIP) account you hold with a provider. Your own number stays private.</p>
 <p>First, in your provider's settings: turn on encrypted calls (SRTP), and turn off voicemail on this number, so callers hear my message asking them to text instead.</p>
@@ -281,12 +280,11 @@ form { margin: .6em 0 1.2em; }
 {{else}}<p>{{.Name}} may not see your private data.</p>
 <form method="post" action="/providers/"><input type="hidden" name="step" value="allow"><input type="hidden" name="provider" value="{{.ID}}"><label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Allow {{.Name}}</button></form>
 {{end}}{{end}}
-<p class="muted">I text you when this changes.</p>
 {{end}}{{end}}
 {{template "foot"}}{{end}}
 
 {{define "wifi"}}<form method="post" action="/setup/network">
-<label>Your home Wi-Fi{{if .}}<select name="ssid">{{range .}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+<label>Your home Wi-Fi{{if .}}<select name="ssid"><option value="" disabled selected>Choose your network</option>{{range .}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
 <label>Not listed? Type its name<input type="text" name="other" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false">{{else}}<input type="text" name="ssid" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false" required>{{end}}</label>
 <label>Its password<input type="text" name="password" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
 <button>Join</button>
@@ -306,7 +304,7 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "number"}}
 <h2>2. Text your box</h2>
-{{if not .CanText}}<p>Pairing is not available yet: I cannot send texts right now. Reload this page to try again.</p>
+{{if not .CanText}}<p>Pairing is not available yet: I cannot send texts right now. Check that the SIM is in the modem and the modem is plugged in, then reload this page.</p>
 {{else}}{{if not .SMSLink}}<p>I do not know my own number yet, so you cannot text me first. Enter your number and I will text you a code.</p>
 {{else}}<p><a class="button" href="{{.SMSLink}}">Text my box</a></p>
 <p class="muted">Your messages app opens with my number and a code filled in. Press Send, then come back here.</p>
