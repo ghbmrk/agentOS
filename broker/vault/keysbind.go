@@ -100,7 +100,11 @@ func (v *Vault) replaceKeys(kf *keyFile) error {
 		return err
 	}
 	cur, cerr := readKeys(v.keysPath)
-	if err := writeFile(v.keysPath+nextSuffix, raw, 0o600); err != nil {
+	err = writeFile(v.keysPath+nextSuffix, raw, 0o600)
+	if err == nil {
+		err = injectedStageFault()
+	}
+	if err != nil {
 		return err
 	}
 	v.nextKeys = raw
