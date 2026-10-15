@@ -60,9 +60,11 @@ boot() {
 guest_echo() {
 	LC_ALL=C awk -v esc="$(printf '\033')" '{
 		l = $0
-		gsub(esc "\\[[0-9;?]*[ -/]*[@-~]", "", l)
+		gsub(esc "\\[[0-9;:?]*[ -/]*[@-~]", "", l)
+		gsub(esc "\\][^\007" esc "]*(\007|" esc "\\\\|$)", "", l)
 		gsub(/\r/, "", l)
 		gsub(/[^ -~]/, "?", l)
+		gsub(/G1 (NOT )?PROVEN/, "G1 [verdict-text]", l)
 		print "console| " l
 	}'
 }
@@ -125,7 +127,7 @@ for k in 2 3 4 5; do
 done
 
 # The same drive boots again on its own GUIDs (the entry is already blessed) and keeps them.
-boot "$W/console-reboot.log" "$D"
+TMO=600 boot "$W/console-reboot.log" "$D"
 has "$W/console-reboot.log" "agentos-health: PASS secure_boot=on usr=verity"
 hasnt "$W/console-reboot.log" "agentos-drive-id: assigned"
 has "$W/console-reboot.log" "agentos-uplink: none"
@@ -171,9 +173,11 @@ e2e_console() {
 	function miss(m) { print "ci_boot: MISS console: " m; bad = 1 }
 	{
 		l = $0
-		gsub(esc "\\[[0-9;?]*[ -/]*[@-~]", "", l)
+		gsub(esc "\\[[0-9;:?]*[ -/]*[@-~]", "", l)
+		gsub(esc "\\][^\007" esc "]*(\007|" esc "\\\\|$)", "", l)
 		gsub(/\r/, "", l)
 		gsub(/[^ -~]/, "?", l)
+		gsub(/G1 (NOT )?PROVEN/, "G1 [verdict-text]", l)
 	}
 	index(l, "agentos-e2e: ") == 0 { next }
 	{ print "console| " l }
@@ -213,6 +217,14 @@ e2e_console() {
 		exit bad
 	}' "$1"
 }
+
+# The verdict is the host's alone: no console, from any of the boots, may carry its text, so a
+# guest that echoes it fails the run whichever boot it did it in (tools/ASSUMPTIONS.md D27).
+for c in console console-reboot console-two-drives console-e2e; do
+	[ -f "$W/$c.log" ] || continue
+	hasnt "$W/$c.log" "G1 PROVEN"
+	hasnt "$W/$c.log" "G1 NOT PROVEN"
+done
 
 # The end-to-end run on a fresh copy with a cable in. Each step prints one line: PASS, FAIL,
 # XFAIL(#issue) for a step on the expected-failure list, XPASS for one of those that passed (so the

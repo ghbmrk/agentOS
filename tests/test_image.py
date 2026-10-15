@@ -3803,13 +3803,14 @@ class UplinkTest(unittest.TestCase):
         # CI's boot test plugs in a virtual NIC and reads this line (ci_boot.sh).
         out, _ = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 1)])
         lines = out.splitlines()
-        self.assertEqual(lines[0], "agentos-uplink: enp1s0 192.0.2.10/24")
-        self.assertTrue(lines[1].startswith("agentos-boot: bless=good"), lines)
+        # One line, so the console's other writers cannot split it between the two (#1764).
+        self.assertEqual(lines[0], "agentos-uplink: enp1s0 192.0.2.10/24 agentos-boot: bless=good root_bytes=1073741824")
+        self.assertEqual(sum("agentos-boot:" in l for l in lines), 1, lines)
 
     def test_boot_report_waits_briefly_without_a_cable(self):
         # The radio and virtual links never count; an unplugged port gets about 5 s for carrier, no more.
         out, calls = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 0)])
-        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertTrue(out.splitlines()[0].startswith("agentos-uplink: none agentos-boot: bless=good"), out)
         self.assertIn("sleep", calls)
         self.assertLessEqual(calls.count("sleep"), 5)
         self.assertNotIn("ip ", calls)
@@ -3820,12 +3821,12 @@ class UplinkTest(unittest.TestCase):
         flip = ('n=$(grep -c sleep "$NET/../log"); [ "$n" = 2 ] && echo 0 >"$NET/enp1s0/carrier"; '
                 '[ "$n" = 3 ] && echo 1 >"$NET/enp1s0/carrier"; :')
         out, calls = self.report([("enp1s0", "ether", None)], on_sleep=flip)
-        self.assertEqual(out.splitlines()[0], "agentos-uplink: enp1s0 192.0.2.10/24")
+        self.assertTrue(out.splitlines()[0].startswith("agentos-uplink: enp1s0 192.0.2.10/24 agentos-boot: "), out)
         self.assertEqual(calls.count("sleep"), 3)
 
     def test_boot_report_gives_up_on_a_lease_that_never_comes(self):
         out, calls = self.report([("enp1s0", "ether", 1)], addr="")
-        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertTrue(out.splitlines()[0].startswith("agentos-uplink: none agentos-boot: bless=good"), out)
         self.assertLessEqual(calls.count("sleep"), 30)
 
     def probe(self, mode):
@@ -3880,6 +3881,21 @@ class UplinkTest(unittest.TestCase):
         self.assertIn('has "$W/console.log" "agentos-uplink: "', s)
         self.assertIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
         self.assertIn('has "$W/console-reboot.log" "agentos-uplink: none"', s)
+
+    def test_a_lost_reboot_line_costs_minutes_not_half_an_hour(self):
+        # REQ: HW-10. #1764: the reboot of an already-blessed drive reaches its health line in
+        # about a minute, so a line that never comes ends the wait after TMO=600, not 1800.
+        s = (IMG / "ci_boot.sh").read_text()
+        self.assertIn('TMO=600 boot "$W/console-reboot.log" "$D"\n', s)
+        self.assertIn("${TMO:-1800}", s)
+
+    def test_no_console_may_carry_the_host_verdict(self):
+        # REQ: HW-10. #1764 (D27 follow-up): all four consoles, not only the e2e one, fail the run
+        # when the guest wrote the verdict text.
+        s = (IMG / "ci_boot.sh").read_text()
+        self.assertRegex(s, r'for c in console console-reboot console-two-drives console-e2e; do\n'
+                            r'(.*\n)*?\s*\[ -f "\$W/\$c.log" \] \|\| continue\n'
+                            r'\s*hasnt "\$W/\$c.log" "G1 PROVEN"\n\s*hasnt "\$W/\$c.log" "G1 NOT PROVEN"\n')
 
     def g1_verdict(self, done, runfail="0"):
         s = (IMG / "ci_boot.sh").read_text()
@@ -4036,8 +4052,21 @@ class UplinkTest(unittest.TestCase):
         raw = ("ci_boot: G1 PROVEN\n::notice::agentos-e2e x\n\x1b[1;32magentos-boot: ok\x1b[0m\r\n"
                "ci_boot: G1 PR\u041eVEN agentos-\n").encode()
         out = subprocess.run(["sh", "-c", fn + "guest_echo"], input=raw, capture_output=True, check=True).stdout
-        self.assertEqual(out, b"console| ci_boot: G1 PROVEN\nconsole| ::notice::agentos-e2e x\n"
+        # The verdict text itself is defanged, so a grep of the job log for it finds the host's line only.
+        self.assertEqual(out, b"console| ci_boot: G1 [verdict-text]\nconsole| ::notice::agentos-e2e x\n"
                               b"console| agentos-boot: ok\nconsole| ci_boot: G1 PR??VEN agentos-\n")
+
+    def test_guest_echo_strips_what_the_console_interleaves(self):
+        # REQ: HW-10. #1764: colon parameters in a colour (?[0;1;38:5:185m) and OSC sequences
+        # (ESC ] 104 BEL, seen as ?]104? in #1747's log) are cut, terminated or not.
+        s = (IMG / "ci_boot.sh").read_text()
+        fn = re.search(r"^guest_echo\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        raw = (b"\x1b[0;1;38:5:185mDEPEND\x1b[0m agentos-uplink: none\n"
+               b"\x1b]104\x07\x1b]104\x07agentos-boot: x\n"
+               b"a\x1b]0;title\x1b\\b\n" b"c\x1b]104")
+        out = subprocess.run(["sh", "-c", fn + "guest_echo"], input=raw, capture_output=True, check=True).stdout
+        self.assertEqual(out, b"console| DEPEND agentos-uplink: none\nconsole| agentos-boot: x\n"
+                              b"console| ab\nconsole| c\n")
 
     def test_e2e_console_neutralises_guest_text(self):
         # REQ: HW-10. A guest line cannot start with the host's verdict prefix or a workflow
@@ -4053,6 +4082,18 @@ class UplinkTest(unittest.TestCase):
         self.assertNotIn("\r", out)
         self.assertEqual(rc, 1)
         self.assertIn("console| agentos-e2e: PASS a\n", out)
+
+    def test_e2e_console_accepts_osc_and_colon_residue_before_the_lead_in(self):
+        # REQ: HW-10. #1747's job log: OSC 104 resets (ESC ] 104 BEL) and a colon-parameter colour
+        # landed ahead of the timestamp and failed "driver text not at the start of its line".
+        # Stripped, those lines parse; text that is not the exact lead-in still fails.
+        console = (b"\x1b]104\x07\x1b]104\x07[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n"
+                   b"\x1b[0;1;38:5:185m[ 8.0] box-e2e[817]: agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\x1b[0m\n")
+        rc, out, written = self.e2e_console(console)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("agentos-e2e: DONE pass=1", written)
+        rc, out, _ = self.e2e_console(b"junk[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n")
+        self.assertNotEqual(rc, 0)
 
 
 class SetupServicesTest(unittest.TestCase):

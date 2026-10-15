@@ -85,8 +85,8 @@ class ClaimSignalTest(unittest.TestCase):
         # comes after both, so neither moves.
         lines = self.report("failed")
         self.assertTrue(lines[0].startswith("agentos-uplink: "), lines)
-        self.assertTrue(lines[1].startswith("agentos-boot: bless=good"), lines)
-        self.assertTrue(lines[2].startswith("agentos-page: "), lines)
+        self.assertIn(" agentos-boot: bless=good", lines[0])
+        self.assertTrue(lines[1].startswith("agentos-page: "), lines)
 
     def test_the_report_runs_after_the_hand_over(self):
         report = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-boot-report.service")
