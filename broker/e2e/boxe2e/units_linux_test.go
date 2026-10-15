@@ -56,7 +56,7 @@ func TestSysrootIsOutsideTheRootOnlyDirectory(t *testing.T) {
 // is off the list and an unpassed run reads FAIL.
 func TestNotDrivenStepsFailWithTheExpectedText(t *testing.T) {
 	d := &driver{}
-	if err := d.guestTask(); err == nil || !strings.HasPrefix(err.Error(), xfail["guest-task"].want) {
+	if err := fakeDriver(&fakeBox{}).guestTask(); err == nil || !strings.HasPrefix(err.Error(), xfail["guest-task"].want) {
 		t.Errorf("guest-task: %v does not start with %q", err, xfail["guest-task"].want)
 	}
 	if _, ok := xfail["phone-control"]; ok {

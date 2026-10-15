@@ -14,6 +14,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -38,6 +39,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/e2e/boxe2e/codexstub"
+	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
@@ -509,11 +511,91 @@ func (d *driver) host() error {
 	return err
 }
 
-// guestTask is the model-backed guest task. CI holds no model credential,
-// so it needs a model stub at the provider boundary, which is not built
-// yet.
+// guestTask is the model-backed guest task on the Codex plan route. It
+// first signs in to the plan at step 7, which finishes setup; the task
+// itself needs a worker on the plan route (#1314), so it is not driven yet.
 func (d *driver) guestTask() error {
-	return errors.New(notDriven + " needs the plan sign-in and a stub behind the Codex worker")
+	if err := d.planSignIn(); err != nil {
+		return err
+	}
+	return errors.New(notDriven + " the task needs a worker on the plan route (#1314)")
+}
+
+// planSignIn is the owner signing in to the Codex plan at step 7, as the
+// page offers it once agentosd serves the device-code sign-in (#1264): the
+// owner ticks private content, presses sign in, opens the link the page
+// shows on the provider's own host and enters its code there (the stub's
+// Approve), then reloads until setup finishes. The provider's tokens reach
+// only the stub; no page the phone sees may show one (ASSUMPTIONS E11).
+func (d *driver) planSignIn() error {
+	route := egress.Codex()
+	var pages [][]byte
+	var pg []byte
+	err := until(2*time.Minute, func() (bool, error) {
+		var err error
+		if pg, err = d.page(); err != nil {
+			return false, err
+		}
+		return bytes.Contains(pg, []byte(aiOpen)), errors.New(where(pg))
+	})
+	if err != nil {
+		return fmt.Errorf("%s step 7 lists no providers: %w", notDriven, err)
+	}
+	if !deviceOffer(pg, route.Provider) {
+		return errors.New(notDriven + " step 7 offers no " + route.Provider + " sign-in (#1264) " + where(pg))
+	}
+	if d.stub == nil {
+		return errors.New("no plan stub")
+	}
+	form := url.Values{"provider": {route.Provider}, "private": {"1"}}
+	if st, _, err := d.post("/setup/ai-device", form); err != nil || st != http.StatusSeeOther {
+		return fmt.Errorf("POST /setup/ai-device %d %v", st, err)
+	}
+	if pg, err = d.page(); err != nil {
+		return err
+	}
+	pages = append(pages, pg)
+	link, code, ok := deviceLink(pg)
+	if !ok {
+		return errors.New("no sign-in link after sign in " + where(pg))
+	}
+	if want := "https://" + route.AuthHost + route.DevicePage; link != want {
+		return fmt.Errorf("the sign-in link is not %s", want)
+	}
+	if !bytes.Contains(pg, []byte("This code is from OpenAI")) {
+		return errors.New("the sign-in link does not name its provider " + where(pg))
+	}
+	if !d.stub.Approve(code) {
+		return errors.New("the code on the page is not the provider's")
+	}
+	err = until(2*time.Minute, func() (bool, error) {
+		st, loc, b, err := d.get("/setup")
+		if err != nil {
+			return false, err
+		}
+		pages = append(pages, b)
+		if st == http.StatusSeeOther && loc == "/status" {
+			return true, nil
+		}
+		return false, fmt.Errorf("GET /setup %d %q %s", st, loc, where(b))
+	})
+	if err != nil {
+		return fmt.Errorf("sign-in did not finish setup: %w (stub %v refused %d)", err, d.stub.Hits(), d.stub.Refused())
+	}
+	st, _, b, err := d.get("/status")
+	if err != nil || st != http.StatusOK {
+		return fmt.Errorf("GET /status %d %v", st, err)
+	}
+	pages = append(pages, b)
+	if d.stub.Hits()["code"] == 0 || d.stub.Refused() != 0 {
+		return fmt.Errorf("sign-in skipped the provider: stub %v refused %d", d.stub.Hits(), d.stub.Refused())
+	}
+	for _, b := range pages {
+		if bytes.Contains(b, []byte(codexstub.Canary)) {
+			return errors.New("a page showed a provider token")
+		}
+	}
+	return nil
 }
 
 // phoneControl is the owner texting the box after setup (CH-3, CH-14). A
