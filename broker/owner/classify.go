@@ -56,6 +56,10 @@ const (
 	SecretReveal // CRED-6
 	Recovery
 	TierChange
+	// MoneyRetry is an owner retry of an effect that moves money and may
+	// have gone already (OP-2): always high risk, so it takes a code
+	// generator code, never a texted one.
+	MoneyRetry
 )
 
 // Limits are the owner-set tier boundaries. Changing them is itself a

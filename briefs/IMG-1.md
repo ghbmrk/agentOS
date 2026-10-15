@@ -9,3 +9,7 @@ Image checks for P2-1 (HW-1, ONB-2): CI scans the built image for per-owner secr
 **Gate:** skip (tooling), security check
 
 **State on the board before the 2026-10-08 index split:** queued, blocked on P2-1
+
+## Scope
+
+`image/mkosi/**`, `image/ci_boot.sh`, `image/finish_image.py`, `image/README.md`, `image/ASSUMPTIONS.md`, `.github/workflows/image.yml`, `tests/test_image_*.py` (new). Tier A (image/, .github/). Conflicts with any open PR touching `image/` or `image.yml`.

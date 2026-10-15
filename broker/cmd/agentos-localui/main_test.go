@@ -90,6 +90,21 @@ func TestTheVaultSocketWiresTheCardRotation(t *testing.T) {
 	}
 }
 
+// CRED-9, §8.1: setup's host step goes to the same socket, where the
+// vault process allows it only between the code generator's confirmation
+// and finish; without the socket the step is not served.
+func TestTheVaultSocketServesSetupsHostStep(t *testing.T) {
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock")
+	h, ok := cfg.Hooks.(localui.AgentosdSetup)
+	if c, isClient := h.Vault.(*localui.UnlockClient); !ok || !isClient || c != cfg.Vault {
+		t.Fatalf("hooks %#v", cfg.Hooks)
+	}
+	cfg = config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "")
+	if h := cfg.Hooks.(localui.AgentosdSetup); h.Vault != nil || h.TrustHost(true) == nil {
+		t.Fatalf("hooks %#v", cfg.Hooks)
+	}
+}
+
 // #1266 (CAP-9, CH-3): the same socket serves the AI providers page,
 // where the owner changes a provider's private-data answer after setup.
 func TestTheVaultSocketWiresTheProvidersPage(t *testing.T) {
@@ -180,8 +195,9 @@ var openSetup = localui.AgentosdSetup{Owner: localui.InProcess{
 	}}}
 
 // beginBox is the page's first boot over files in dir, with a reset the
-// test counts in place of the vault process's /card/reset.
-func beginBox(t *testing.T, dir string, resets *int) (localui.Config, firstboot.Route) {
+// test counts in place of the vault process's /card/reset; download is
+// -download-box.
+func beginBox(t *testing.T, dir string, resets *int, download bool) (localui.Config, firstboot.Route) {
 	t.Helper()
 	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "")
 	cfg.Hooks = openSetup
@@ -189,6 +205,7 @@ func beginBox(t *testing.T, dir string, resets *int) (localui.Config, firstboot.
 	box := localui.CardBox(localui.NewUnlockClient(filepath.Join(dir, "none.sock")),
 		change.FileStore{Path: filepath.Join(dir, "claim.json")}, change.FileStore{Path: filepath.Join(dir, "latch.json")}, void)
 	box.Reset = func() error { *resets++; return nil }
+	box.Download = download
 	cfg, route, err := withFirstBoot(cfg, box, void)
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +249,7 @@ func TestThePageRunsTheFirstBoot(t *testing.T) {
 			t.Fatal(err)
 		}
 		var resets int
-		cfg, route := beginBox(t, dir, &resets)
+		cfg, route := beginBox(t, dir, &resets, false)
 		if route != firstboot.RouteClaim || cfg.Claim == nil || resets != 1 {
 			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
 		}
@@ -246,7 +263,7 @@ func TestThePageRunsTheFirstBoot(t *testing.T) {
 			t.Fatal(err)
 		}
 		var resets int
-		cfg, route := beginBox(t, dir, &resets)
+		cfg, route := beginBox(t, dir, &resets, false)
 		if route != firstboot.RouteReinstall || cfg.Claim == nil || resets != 0 {
 			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
 		}
@@ -256,12 +273,24 @@ func TestThePageRunsTheFirstBoot(t *testing.T) {
 	})
 	t.Run("download", func(t *testing.T) {
 		var resets int
-		cfg, route := beginBox(t, t.TempDir(), &resets)
+		cfg, route := beginBox(t, t.TempDir(), &resets, true)
 		if route != firstboot.RouteDownload || cfg.Claim != nil || resets != 1 {
 			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
 		}
 		if w := get(t, cfg, "/setup"); w.Code != http.StatusOK {
 			t.Fatalf("/setup on a downloaded box: %d %q", w.Code, w.Header().Get("Location"))
+		}
+	})
+	// #1270: the same bare box on any image but the download's (no
+	// -download-box) is told to reinstall; /setup stays behind the gate.
+	t.Run("bare without -download-box", func(t *testing.T) {
+		var resets int
+		cfg, route := beginBox(t, t.TempDir(), &resets, false)
+		if route != firstboot.RouteReinstall || cfg.Claim == nil || resets != 0 {
+			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
+		}
+		if w := get(t, cfg, "/setup"); w.Code == http.StatusOK {
+			t.Fatalf("/setup served on a bare box without -download-box")
 		}
 	})
 }
@@ -374,8 +403,8 @@ func TestRunGatesSetupOnTheClaim(t *testing.T) {
 
 // #1270 (CTRL-card-sock s1): on the image the page reaches the vault
 // process's unlock socket and keeps its claim state and the card step's
-// latch in its own state directory, which localui-claim fills from the
-// seller's sealed claim at the first start; it never dumps core, since
+// latch in its own state directory, which agentos-localui-claim.service
+// fills from the seller's sealed claim before the first start; it never dumps core, since
 // the claim verifiers and codes pass through it (IMG-nodump).
 // REQ: HW-10, HW-1, CRED-9
 func TestTheUnitWiresTheSetupFiles(t *testing.T) {
@@ -413,11 +442,19 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 			t.Errorf("-%s = %q, want %q", name, got, want)
 		}
 	}
+	// #1270: the shipped image is not the download's, so a box without a
+	// claim state is told to reinstall.
+	for _, w := range exec {
+		if strings.HasPrefix(strings.TrimLeft(w, "-"), "download-box") {
+			t.Errorf("the unit passes %s", w)
+		}
+	}
 	for k, want := range map[string][]string{
 		"StateDirectory":     {"agentos-localui"},
 		"StateDirectoryMode": {"0700"},
 		"LimitCORE":          {"0"},
-		"ExecStartPre":       {"+/usr/lib/agentos/localui-claim"},
+		// #1688: the mask below binds `+` commands too, so the hand-over is a unit of its own.
+		"ExecStartPre": nil,
 	} {
 		if got := set[k]; strings.Join(got, "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, got, want)
@@ -447,6 +484,67 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// #1688: the seller's sealed claim reaches the page through a root unit
+// of its own, ordered before the page and pulled in by it. As a `+`
+// ExecStartPre of the page it ran under the page's
+// TemporaryFileSystem=/var/lib/agentos:ro, which systemd applies to `+`
+// commands too, never saw the sealed file, and the box never showed the
+// claim screen. The page Requires= the hand-over, not Wants=: with Wants=
+// a failed move still started the page with no claim state, and a
+// preloaded box served setup without the sticker code. Requires= keeps a
+// download box or an already-moved claim working, because systemd does not
+// fail a Requires= dependent when the hand-over's ConditionPathExists= is
+// false (systemd.unit(5), Requires=: "failing condition checks ... do not
+// cause the start job of a unit with a Requires= dependency on it to fail").
+// REQ: HW-10
+func TestTheClaimHandOverRunsOutsideThePagesMask(t *testing.T) {
+	keys := func(name string) map[string][]string {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		set := map[string][]string{}
+		for _, l := range strings.Split(string(b), "\n") {
+			l = strings.TrimSpace(l)
+			if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "[") {
+				continue
+			}
+			k, v, _ := strings.Cut(l, "=")
+			set[k] = append(set[k], strings.Fields(v)...)
+		}
+		return set
+	}
+	has := func(vs []string, want string) bool {
+		for _, v := range vs {
+			if v == want {
+				return true
+			}
+		}
+		return false
+	}
+	h := keys("agentos-localui-claim.service")
+	if strings.Join(h["ExecStart"], " ") != "/usr/lib/agentos/localui-claim" || strings.Join(h["Type"], "") != "oneshot" {
+		t.Errorf("hand-over runs %q as %q, want oneshot /usr/lib/agentos/localui-claim", h["ExecStart"], h["Type"])
+	}
+	for _, k := range []string{"User", "DynamicUser", "TemporaryFileSystem", "InaccessiblePaths", "ProtectSystem", "ReadOnlyPaths"} {
+		if len(h[k]) != 0 {
+			t.Errorf("hand-over sets %s=%q: it must move a file between two root-owned directories", k, h[k])
+		}
+	}
+	if !has(h["Before"], "agentos-localui.service") {
+		t.Errorf("hand-over Before = %q, want agentos-localui.service", h["Before"])
+	}
+	p := keys("agentos-localui.service")
+	for _, k := range []string{"Requires", "After"} {
+		if !has(p[k], "agentos-localui-claim.service") {
+			t.Errorf("page %s = %q, want agentos-localui-claim.service", k, p[k])
+		}
+	}
+	if has(p["Wants"], "agentos-localui-claim.service") {
+		t.Errorf("page Wants = %q: a failed hand-over must stop the page, so it belongs in Requires only", p["Wants"])
 	}
 }
 
@@ -520,4 +618,90 @@ func TestFirstBootWiresTheCardNetwork(t *testing.T) {
 	if !wired {
 		t.Fatal("withFirstBoot does not pass firstboot.Begin the box through withCardNet")
 	}
+}
+
+// flakyOwner is agentosd's localui.sock with a transport error on the
+// first fails calls, then setup's answer: open, or refused when closed.
+type flakyOwner struct {
+	fails  int32
+	closed bool
+	calls  atomic.Int32
+}
+
+func (o *flakyOwner) Call(ctx context.Context, op string, args, out any) error {
+	if o.calls.Add(1) <= o.fails {
+		return errors.New("localui.sock: connection reset")
+	}
+	if op != localapi.OpSetupProgress || o.closed {
+		return localui.Refused(sockets.ErrUnknownOp.Error())
+	}
+	return nil
+}
+
+// Security S-R3 on #1270 (HW-10): the page decides once whether setup is
+// open, from agentosd's answer. A transient error before the answer
+// neither skips the first boot nor opens setup without it; a refusal
+// keeps setup closed whatever agentosd answers later; no answer is an
+// error, and the unit restarts the page.
+// REQ: HW-10, HW-1
+func TestThePageDecidesSetupOnAgentosdsAnswer(t *testing.T) {
+	dir := shortDir(t)
+	sock, vsock := filepath.Join(dir, "a.sock"), filepath.Join(dir, "u.sock")
+	listenSock(t, sock)
+	var calls atomic.Int32
+	fakeVault(t, vsock, &calls)
+	st := &change.MemStore{}
+	if err := claim.Seal(st, "CANA-RYCL-AXMC-KDE2", mrand.New(mrand.NewSource(3)), nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := filepath.Join(dir, "claim.json")
+	if err := os.WriteFile(cs, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := func(o localui.Owner) localui.Config {
+		cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, sock, "")
+		cfg.Hooks = localui.AgentosdSetup{Owner: o}
+		return cfg
+	}
+
+	t.Run("transient error, then open", func(t *testing.T) {
+		o := &flakyOwner{fails: 2}
+		cfg, err := prepare(context.Background(), base(o), sock,
+			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch1.json")})
+		if err != nil || cfg.Claim == nil || cfg.Card == nil {
+			t.Fatalf("err %v, claim %v, card %v", err, cfg.Claim, cfg.Card)
+		}
+		if w := get(t, cfg, "/setup"); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/claim" {
+			t.Fatalf("/setup after a transient error: %d %q", w.Code, w.Header().Get("Location"))
+		}
+	})
+
+	t.Run("refused, then open", func(t *testing.T) {
+		before := calls.Load()
+		o := &flakyOwner{closed: true}
+		cfg, err := prepare(context.Background(), base(o), sock,
+			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch2.json")})
+		if err != nil || cfg.Claim != nil || cfg.Card != nil || calls.Load() != before {
+			t.Fatalf("err %v, claim %v, card %v, vault calls %d", err, cfg.Claim, cfg.Card, calls.Load()-before)
+		}
+		o.closed = false // agentosd answers open from now on
+		if !cfg.Hooks.AlreadySetUp() {
+			t.Fatal("a later open answer reopened a setup the page found closed")
+		}
+		if w := get(t, cfg, "/setup"); w.Code == http.StatusOK {
+			t.Fatal("/setup served without the first boot")
+		}
+	})
+
+	t.Run("no answer", func(t *testing.T) {
+		o := &flakyOwner{fails: 1 << 30}
+		open, err := setupOpen(context.Background(), localui.AgentosdSetup{Owner: o}, 500*time.Millisecond)
+		if err == nil || open {
+			t.Fatalf("open %v, err %v", open, err)
+		}
+	})
 }

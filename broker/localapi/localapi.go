@@ -58,11 +58,12 @@ const (
 	// approves it with a code like any forget (W3-forget-b3r, CAP-3).
 	OpForgetTasks = "page_forget_tasks"
 	OpForget      = "page_forget"
-	// OpRotateAPNet hands agentosd the Wi-Fi password of a card rotation
-	// the vault process has just committed (REC-4, #1191): agentosd
-	// rewrites the card's network root-only (apnet.Path, ARC-1), under
-	// the same name, and agentos-ap serves it (Down then Up). It needs a
-	// session; only a network a card prints is taken (ErrBadArgs).
+	// OpRotateAPNet asks agentosd to put a just-committed card rotation's
+	// Wi-Fi network on the air (REC-4, #1191): agentosd takes the network
+	// once from the vault process's hold (#1522), never from the page,
+	// rewrites the card's network root-only (apnet.Path, ARC-1) under the
+	// same name, and agentos-ap serves it (Down then Up). It needs a
+	// session (Auth) and nothing else.
 	OpRotateAPNet = "page_rotate_ap_net"
 )
 
@@ -177,19 +178,6 @@ type AdoptSIM struct {
 	SIM   string `json:"sim"`
 	Code  string `json:"code,omitempty"`
 }
-
-// RotateAPNet is a rotated card's Wi-Fi network (OpRotateAPNet). The
-// password is the access point's (CRED-1): it goes only to agentos-ap's
-// file.
-type RotateAPNet struct {
-	Token    string `json:"token"`
-	SSID     string `json:"ssid"`
-	Password string `json:"password"`
-}
-
-// String and GoString keep the token and password out of logs.
-func (RotateAPNet) String() string   { return "[rotated Wi-Fi network]" }
-func (RotateAPNet) GoString() string { return "[rotated Wi-Fi network]" }
 
 // Outage is a stretch when the owner line could not be used: Missed
 // counts the texts to the owner that could not go, Requests the approval
