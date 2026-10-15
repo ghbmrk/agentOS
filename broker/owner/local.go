@@ -55,8 +55,10 @@ const maxSignIns = 64
 // or another is being sent. The caller passes both to sendSignIns.
 func (c *Channel) signInTextLocked(now time.Time) (string, int, int) {
 	st := c.codes.st
-	if c.local.sending || len(st.LocalSignIns)+len(st.LocalAnswers) == 0 ||
-		(!st.LocalAlertAt.IsZero() && now.Sub(st.LocalAlertAt) < SignInAlertEvery) {
+	// A LocalAlertAt after now (a clock correction) counts as expired, so
+	// it cannot hold alerts back until real time catches up (#1442).
+	if since := now.Sub(st.LocalAlertAt); c.local.sending || len(st.LocalSignIns)+len(st.LocalAnswers) == 0 ||
+		(!st.LocalAlertAt.IsZero() && since >= 0 && since < SignInAlertEvery) {
 		return "", 0, 0
 	}
 	c.local.sending, c.local.evicted, c.local.evictedAns = true, 0, 0
@@ -111,6 +113,99 @@ func (c *Channel) sendSignIns(text string, n, m int, now time.Time) {
 		s.LocalAlertAt = now
 	})
 }
+
+// textAfterReply texts the alerts and the sign-in text after the caller has
+// its answer. A send takes up to the modem's 220 s, and the page gives up on
+// the call after 10 s, so a send before the reply made the page say nothing
+// was decided about a request that was (UX-2wb-1). The note behind the
+// sign-in text is saved before this runs, so a send that fails is
+// retried by the next Tick; the alerts are best effort: they are lost if the
+// send fails or the channel stops first (DrainSends). Batches
+// run one after another in call order. Called
+// without c.mu.
+func (c *Channel) textAfterReply(alerts []string, signIn string, n, m int, now time.Time) {
+	if len(alerts) == 0 && signIn == "" {
+		return
+	}
+	if c.inlineSends {
+		for _, a := range alerts {
+			_ = c.alert(a)
+		}
+		if signIn != "" {
+			c.sendSignIns(signIn, n, m, now)
+		}
+		return
+	}
+	done := make(chan struct{})
+	c.sendMu.Lock()
+	prev := c.sendTail
+	c.sendTail = done
+	c.sendMu.Unlock()
+	c.sends.Add(1)
+	go func() {
+		defer c.sends.Done()
+		defer close(done)
+		if prev != nil {
+			<-prev
+		}
+		for _, a := range alerts {
+			_ = c.alert(a)
+		}
+		if signIn != "" {
+			c.sendSignIns(signIn, n, m, now)
+		}
+	}()
+}
+
+// SendDrain bounds how long agentosd, on shutdown, waits for texts that
+// textAfterReply started (DrainSends); a modem send can take 220 s, so the
+// wait is shorter. What is not sent by then is retried after the restart
+// only where a note is saved (the sign-in text); alerts are lost, as a
+// crash would lose them.
+const SendDrain = 30 * time.Second
+
+// DrainSends waits up to d for the texts textAfterReply started, returning
+// as soon as none is in flight, so a stop does not drop a sign-in or answer
+// alert the modem was about to send. agentosd calls it on shutdown once the
+// page socket refuses new calls and those in flight have returned, so no
+// new text starts during it, while the owner socket still serves the modem
+// bridge's outbox, and before the process exits (O34). live, if set, says
+// whether anything is still there to send them (modemlink.Link.Bridged):
+// once it says no, at the start or any drainTick after, the drain ends
+// rather than wait out d for a bridge that has gone.
+func (c *Channel) DrainSends(d time.Duration, live func() bool) {
+	done := make(chan struct{})
+	go func() { c.sends.Wait(); close(done) }()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	var tick <-chan time.Time
+	if live != nil {
+		if !live() {
+			return
+		}
+		tk := time.NewTicker(drainTick)
+		defer tk.Stop()
+		tick = tk.C
+	}
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			return
+		case <-tick:
+			if !live() {
+				return
+			}
+		}
+	}
+}
+
+// drainTick is how often DrainSends asks live.
+const drainTick = 50 * time.Millisecond
+
+// WaitSends returns once every text started by textAfterReply has finished.
+func (c *Channel) WaitSends() { c.sends.Wait() }
 
 // wrongLocalLocked records a wrong local code for the digest and returns
 // the texts it calls for: one on the first wrong code of a bound window, and
@@ -297,12 +392,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, locks uint64, err e
 		alerts = append(alerts, c.wrongLocalLocked(now)...)
 	}
 	c.mu.Unlock()
-	for _, a := range alerts {
-		c.alert(a)
-	}
-	if signIn != "" {
-		c.sendSignIns(signIn, signIns, answers, now)
-	}
+	c.textAfterReply(alerts, signIn, signIns, answers, now)
 	switch {
 	case err != nil:
 		return time.Time{}, 0, err
@@ -610,12 +700,7 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 	}
 	c.mu.Unlock()
 	c.decide(decided)
-	for _, a := range alerts {
-		_ = c.alert(a)
-	}
-	if text != "" {
-		c.sendSignIns(text, ns, na, now)
-	}
+	c.textAfterReply(alerts, text, ns, na, now)
 	if err != nil {
 		return msg, err
 	}

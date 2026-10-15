@@ -43,6 +43,11 @@ func TestReplyIsVerifiedFromTheSource(t *testing.T) {
 		v.Item.Object != `reply to "Re: Lunch"` || !v.Item.Facts.RecipientChecked {
 		t.Fatalf("verified %+v", v)
 	}
+	// The thread, as the record's headers name it, for the gate's repeat
+	// rule (grants Verified.Thread, Security R21 on #1433).
+	if !slices.Contains(v.Thread, "<t2@example.com>") || !slices.Contains(v.Thread, "<t1@example.test>") {
+		t.Fatalf("thread %v", v.Thread)
+	}
 	// Sam copied Bob in: a reply goes to both, but the thread no longer
 	// counts as verified, since the owner never wrote to Bob.
 	v, err = x.a.Verify(ctx, x.intent(mail.OpReply, reply("<t3@example.com>", "Works for me."), "sam@example.com", "bob@example.com"))

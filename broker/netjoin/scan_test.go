@@ -294,3 +294,19 @@ func TestTheLongestListFitsTheClient(t *testing.T) {
 		t.Fatalf("Networks gave %d, %v", len(got), err)
 	}
 }
+
+// REQ: ONB-3
+// #1281: the box's own networks, the setup network and the card's (both
+// apnet.Prefix), are never offered as the home Wi-Fi, however strong.
+func TestTheScanLeavesOutTheBoxsOwnNetworks(t *testing.T) {
+	f := newScan()
+	f.wifi("/d/1",
+		"AgentOS-Setup-K7Q2", 99,
+		"AgentOS-ABCD", 95,
+		"Home Net", 40,
+	)
+	got := NewScanner(f).Scan(context.Background())
+	if want := []string{"Home Net"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Scan = %q, want %q", got, want)
+	}
+}

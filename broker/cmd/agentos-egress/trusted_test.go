@@ -1152,3 +1152,256 @@ func TestLegacyPINOffLeavesTheDASettings(t *testing.T) {
 		t.Fatalf("lockout %q, notes %q", r.lockoutEntry(), r.notes)
 	}
 }
+
+// REQ: CRED-8, HW-1
+
+// VAULT-slot-decided (#1557): when the PIN slot is already decided and the
+// slot change then reports an error, the enrollment keeps the lockout
+// hierarchy it took; the PIN slot that landed depends on it.
+func TestPINEnrollAfterTheSlotIsDecidedKeepsTheLockout(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
+	_, err := r.c.trust(r.code(), "246810")
+	if !errors.Is(err, errHostSlotDecidedPIN) {
+		t.Fatalf("enroll after the seal: %v", err)
+	}
+	// A plain retry would drop the PIN, so the step names -pin and the
+	// same PIN (P/UX/L3 6180314824).
+	if !strings.Contains(err.Error(), "run trust -pin again and enter the same PIN") {
+		t.Fatalf("the step does not keep the PIN: %q", err)
+	}
+	restore()
+	// The PC is trusted, so the owner is told so (CRED-9).
+	if len(r.notes) == 0 || !strings.Contains(r.notes[len(r.notes)-1], "trusted host, with a boot PIN (saving not finished)") {
+		t.Fatalf("no owner notice for a decided enroll: %q", r.notes)
+	}
+	if r.lockoutEntry() == "" {
+		t.Fatal("lockout authorization dropped though the PIN slot was decided")
+	}
+	// The text's step: trust again finishes it, with one host listed.
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatalf("trust again after a decided enroll: %v", err)
+	}
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 {
+		t.Fatalf("hosts after trust again: %v, %v", hosts, err)
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("empty lockout password resets the PIN guess counter: the lockout was released")
+	}
+}
+
+// REQ: CRED-9, HW-1
+
+// VAULT-slot-decided (#1557), no PIN: when the slot is decided and the
+// slot change then reports an error, the owner is told the PC is trusted
+// (not that nothing changed), the lockout state is left as it was, and
+// trust again finishes it with one host listed (Security 6180325510).
+func TestEnrollAfterTheSlotIsDecidedWithoutAPINSaysTheHostIsTrusted(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	lockout, da := r.lockoutEntry(), r.readDA(t)
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
+	_, err := r.c.trust(r.code(), "")
+	if !errors.Is(err, errHostSlotDecided) || errors.Is(err, errHostSlotDecidedPIN) {
+		t.Fatalf("enroll after the seal: %v", err)
+	}
+	restore()
+	// The PC is trusted, so the owner is told so (CRED-9).
+	if len(r.notes) == 0 || !strings.Contains(r.notes[len(r.notes)-1], "trusted host (saving not finished)") {
+		t.Fatalf("no owner notice for a decided enroll: %q", r.notes)
+	}
+	// No PIN: the lockout state is unchanged (no password taken, the
+	// dictionary-attack settings as they were).
+	if got := r.lockoutEntry(); got != lockout {
+		t.Fatalf("lockout entry %q, was %q", got, lockout)
+	}
+	if got := r.readDA(t); got != da {
+		t.Fatalf("dictionary-attack settings %+v, were %+v", got, da)
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout password taken by a no-PIN enroll: %v", err)
+	}
+	// The text's step: trust again finishes it, with one host listed.
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatalf("trust again after a decided enroll: %v", err)
+	}
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 {
+		t.Fatalf("hosts after trust again: %v, %v", hosts, err)
+	}
+}
+
+// REQ: CRED-9, HW-1
+
+// VAULT-slot-decided-2 (#1741): when the removal of a trusted PC is
+// decided and the slot change then reports an error, untrust says the PC
+// is no longer trusted (not "no such host"), the owner is told, and this
+// PC's lockout hierarchy is given back: a removed PC never opens
+// unattended again, so no later start would give it back.
+func TestUntrustAfterTheSlotIsDecidedSaysThePCIsRemoved(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	hosts, _ := r.c.hosts()
+	r.notes = nil
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
+	n, err := r.c.untrust(r.code(), hosts[0].ID)
+	if !errors.Is(err, errHostRemovedDecided) || n != 1 {
+		t.Fatalf("untrust after the seal: %d, %v", n, err)
+	}
+	if !strings.Contains(err.Error(), "no longer trusted") || !strings.Contains(err.Error(), "next time the vault is unlocked") {
+		t.Fatalf("the text does not say the PC is removed, or how it finishes: %q", err)
+	}
+	restore()
+	if !r.noted("a trusted host was removed (saving not finished)") {
+		t.Fatalf("owner not told: %q", r.notes)
+	}
+	// The PIN slot is still in the keys file on the drive, so the lockout
+	// hierarchy stays the vault's: with it a thief could reset the guess
+	// limit and try PINs offline (Security S1 on #1821). Not probed with
+	// ThiefLockReset here: a wrong lockout password locks the hierarchy.
+	if hosts, _ := r.c.hosts(); len(hosts) != 1 {
+		t.Fatalf("the slot is not on the drive any more, so this test checks nothing: %v", hosts)
+	}
+	if r.lockoutEntry() == "" {
+		t.Fatal("lockout given back while the PIN slot is still on the drive")
+	}
+	// The text's step: the removed PC no longer opens unattended, and the
+	// next unlock finishes it and gives the hierarchy back.
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatalf("the removed PC opened unattended: %v", r.phase())
+	}
+	r.unknownHostUnlock(t)
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 0 {
+		t.Fatalf("hosts after the next start: %v, %v", hosts, err)
+	}
+	if r.lockoutEntry() != "" {
+		t.Fatal("lockout authorization kept after the removal landed")
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout not given back after the removal landed: %v", err)
+	}
+}
+
+// REQ: HW-1, CRED-9
+// The owner's unlock gives the lockout hierarchy back only for a PC whose
+// slot is gone from the drive (#1741): a PIN-trusted PC keeps it, or a
+// thief could reset the guess limit and try PINs offline (Security D1 on
+// #1821).
+func TestOwnerUnlockKeepsTheLockoutOfAPINTrustedPC(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	r.unknownHostUnlock(t)
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 || !hosts[0].PIN {
+		t.Fatalf("hosts after the unlock: %v, %v", hosts, err)
+	}
+	if r.lockoutEntry() == "" {
+		t.Fatal("lockout given back on the owner's unlock while this PC's PIN slot is on the drive")
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("empty lockout password resets the PIN guess counter after the owner's unlock")
+	}
+}
+
+// REQ: HW-8
+
+// TRUST-lockout-sync (#1558): the lockout authorization is made durable in
+// the vault before the TPM takes it. When the vault file's directory sync
+// fails, the TPM is left alone (the factory-empty lockout password still
+// works) and no entry is kept, so a power cut cannot leave a TPM locked by
+// an authorization nobody has.
+func TestLockoutAuthIsSyncedBeforeTheTPMTakesIt(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	restore := vault.InjectSyncFault(errors.New("input/output error"))
+	defer restore()
+	if _, err := r.c.trust(r.code(), "246810"); err == nil || !errors.Is(err, errHostNotDurable) {
+		t.Fatalf("trust with a failing sync: %v", err)
+	}
+	if r.lockoutEntry() != "" {
+		t.Fatal("a lockout authorization is kept though the TPM never took it")
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("the TPM took the lockout before the vault was synced: %v", err)
+	}
+	restore()
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatalf("trust after the sync works again: %v", err)
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("empty lockout password still resets the PIN guess counter")
+	}
+}
+
+// REQ: HW-8
+// A sync failure with a lockout authorization already held (an earlier PIN
+// enroll) keeps that entry: it is the only copy of what the TPM holds.
+func TestHeldLockoutAuthSurvivesAFailedSync(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	name := r.lockoutEntry()
+	if name == "" {
+		t.Fatal("no lockout authorization after trust with a PIN")
+	}
+	restore := vault.InjectSyncFault(errors.New("input/output error"))
+	defer restore()
+	if _, err := r.c.trust(r.code(), "246810"); !errors.Is(err, errHostNotDurable) {
+		t.Fatalf("trust with a failing sync: %v", err)
+	}
+	if r.lockoutEntry() != name {
+		t.Fatal("a held lockout authorization was forgotten after a failed sync")
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("the TPM lost its lockout password")
+	}
+}
+
+// REQ: HW-8
+// A no-PIN trust whose staged keys file fails its directory sync also
+// reaches errHostNotDurable (B2 of 6182933510), so its text must not tell
+// an owner who set no PIN to run trust -pin: -pin appears only as the
+// conditional for an owner who set one. The TPM is left alone and trust
+// again finishes it.
+func TestStagedKeysSyncFailureWithoutAPINDoesNotAskForAPIN(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	lockout := r.lockoutEntry()
+	restore := vault.InjectStageFault(errors.New("input/output error"))
+	defer restore()
+	_, err := r.c.trust(r.code(), "")
+	if !errors.Is(err, errHostNotDurable) {
+		t.Fatalf("no-PIN trust with a failing staged-keys sync: %v", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "trust -pin") || !strings.Contains(msg, "run trust again (with -pin if you set a boot PIN)") {
+		t.Fatalf("no-PIN owner told to use -pin unconditionally: %q", msg)
+	}
+	if got := r.lockoutEntry(); got != lockout {
+		t.Fatalf("lockout entry %q, was %q", got, lockout)
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout password taken by a no-PIN trust: %v", err)
+	}
+	restore()
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatalf("trust again after the sync works: %v", err)
+	}
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 {
+		t.Fatalf("hosts after trust again: %v, %v", hosts, err)
+	}
+}

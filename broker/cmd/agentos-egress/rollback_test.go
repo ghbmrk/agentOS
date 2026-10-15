@@ -373,6 +373,59 @@ func TestReencryptReachesOtherPCs(t *testing.T) {
 	}
 }
 
+// REQ: CRED-8, CRED-9, REC-4, HW-1
+
+// VAULT-slot-decided-2 (#1741): when sealing a trusted PC again under the
+// new key is decided and the slot change then reports an error, the PC is
+// sealed: the owner is not told to trust it again, the other PCs are
+// still sealed, and the next start finishes saving it.
+func TestReencryptAfterASlotIsDecidedKeepsThePCsSealed(t *testing.T) {
+	r := newPCRig(t)
+	r.trusted(t) // PC A
+	a := r.tpm
+	b := swtpm.Start(t)
+	bootGood(b)
+	r.start(t, b)
+	r.trusted(t) // PC B, where the rotation runs
+	r.notes = nil
+	// The fault starts once the new policy key is stored, so it hits the
+	// slot changes that seal the PCs again, not the re-encryption itself.
+	before, _ := r.c.v.Secret(PolicyKeyName)
+	old := before.Reveal()
+	h := r.c.host.(*tpmHost)
+	openTPM := h.openTPM
+	h.openTPM = func() (transport.TPMCloser, error) {
+		if s, ok := r.c.v.Secret(PolicyKeyName); ok && s.Reveal() != old {
+			vault.InjectSealFault(errors.New("input/output error"))
+		}
+		return openTPM()
+	}
+	defer vault.InjectSealFault(nil)
+	if n, err := r.c.reencrypt("", cardFactor{}); err != nil || n != 0 {
+		t.Fatalf("reencrypt: dropped %d, %v", n, err)
+	}
+	vault.InjectSealFault(nil)
+	h.openTPM = openTPM
+	if r.noted("must be trusted again") {
+		t.Fatalf("a sealed PC is named for trusting again: %q", r.notes)
+	}
+	if !r.noted("sealed to it, but I could not finish saving that") {
+		t.Fatalf("owner not told saving is unfinished: %q", r.notes)
+	}
+
+	// The next start finishes it: both PCs open unattended.
+	bootGood(b)
+	r.start(t, b)
+	if r.phase() != open {
+		t.Fatalf("PC B after a decided re-wrap: phase %v, notes %q", r.phase(), r.notes)
+	}
+	bootGood(a)
+	r.start(t, a)
+	if r.phase() != open {
+		t.Fatalf("PC A after a decided re-wrap: phase %v, notes %q", r.phase(), r.notes)
+	}
+}
+
 // A wrong boot PIN for this PC's slot refuses the rotation with nothing
 // changed, rather than sealing the mistyped PIN into the new slot.
 func TestReencryptChecksThisPCsPIN(t *testing.T) {

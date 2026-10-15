@@ -139,7 +139,7 @@ func TestReinstallKeepsTheSetupNetwork(t *testing.T) {
 // A download box has no setup network: Network is nil (the flasher's
 // path is a later row).
 func TestADownloadBoxHasNoSetupNetwork(t *testing.T) {
-	b := &startBox{}
+	b := &startBox{download: true}
 	fb, err := b.begin(t)
 	if err != nil || fb.Route != RouteDownload {
 		t.Fatalf("%+v %v", fb, err)

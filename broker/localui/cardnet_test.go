@@ -28,7 +28,7 @@ func TestServeCardNetReportsBeforeProvision(t *testing.T) {
 	var calls []string
 	var got localapi.SetupAPNet
 	refuse := false
-	a := AgentosdSetup{InProcess{localapi.OpSetupAPNet: func(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	a := AgentosdSetup{Owner: InProcess{localapi.OpSetupAPNet: func(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 		calls = append(calls, "report")
 		if err := json.Unmarshal(args, &got); err != nil {
 			return nil, err

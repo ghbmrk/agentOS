@@ -79,7 +79,7 @@ func TestNotJoinedStillAsksForThePassword(t *testing.T) {
 // ErrWiFiUnavailable; not joined does not.
 func TestJoinNetworkUnavailableIsNamed(t *testing.T) {
 	answer := localapi.ErrJoinUnavailable
-	a := AgentosdSetup{InProcess{localapi.OpSetupJoin: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+	a := AgentosdSetup{Owner: InProcess{localapi.OpSetupJoin: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 		return nil, sockets.Code(answer)
 	}}}
 	err := a.JoinNetwork("home", joinCanary)

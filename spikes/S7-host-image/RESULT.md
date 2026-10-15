@@ -1,6 +1,6 @@
 # S7 result: host foundation
 
-**Answer: yes, with one structural caveat.** An image-based host built from an existing distribution meets the update, offline, TPM, modem and build-time criteria. No candidate gives *both* screenless setup and Secure Boot coverage of AgentOS's own boot files (initrd, kernel command line, verity root hash). That needs a spec decision (proposed diff below).
+**Answer: yes, with one structural caveat.** An image-based host built from an existing distribution meets the update, offline, TPM, modem and build-time criteria. No candidate gives *both* screenless setup and Secure Boot coverage of agentOS's own boot files (initrd, kernel command line, verity root hash). That needs a spec decision (proposed diff below).
 
 **Recommendation [Rec]:** candidate **A**, the systemd image-based stack (mkosi + systemd-repart + systemd-sysupdate, dm-verity `/usr`, A/B slots), on **Debian 13** rather than the Ubuntu 24.04 base measured here. The switch matters because Debian signs systemd-boot under its shim, which brings systemd's automatic boot assessment. Ubuntu does not sign systemd-boot, and its GRUB path has no automatic rollback (measured, below). **bootc on CentOS Stream 10** is the fallback if Debian's signed systemd-boot doesn't hold up on real hardware.
 
@@ -28,7 +28,7 @@ Setup: a 4-vCPU, 15 GB cloud VM without KVM. Images were built with mkosi 24.3 a
 
 1. **Secure Boot stops at the distribution's kernel. [M]** Under shim → GRUB, the kernel is verified but the initrd and `grub.cfg` (which carries `usrhash=`, the root of all `/usr` integrity) are not. Anyone who can write the drive's ESP can point it at a different `/usr`, and Secure Boot still reports "enabled". Covering these files needs one of three things:
    - a key enrolled into shim (MOK). The MOK list lives in each PC's firmware variables, so enrollment is **per PC, not per drive**: a confirmation at that PC's console, with a screen and keyboard, on every new host. That conflicts with "any PC, screenless" (HW-6);
-   - AgentOS's own shim, which needs Microsoft review. That is a one-time project dependency, not a runtime one;
+   - agentOS's own shim, which needs Microsoft review. That is a one-time project dependency, not a runtime one;
    - TPM measurement instead of verification, which protects only on a host where a TPM seal exists.
 
    On an unknown host (CRED-8's approval-code path), a tampered drive is undetectable by the box itself. This applies to all three candidates: bootc's sealed-UKI mode and MicroOS's systemd-boot path need the same key enrollment. [D]
@@ -50,7 +50,7 @@ Setup: a 4-vCPU, 15 GB cloud VM without KVM. Images were built with mkosi 24.3 a
 | Identical bits on every box (reproducible, hash-checkable) | Yes: one verity root hash per release [M] | Yes: OCI digest [D] | No [I] |
 | Base lifecycle | Debian 13: ~5 years | CentOS Stream 10: ~5 years; Fedora: ~13 months | Tumbleweed rolling: constant churn |
 | Build on modest hardware | 3–4 min on 4 vCPU [M] | Containerfile + bootc-image-builder; not measured here because quay.io is blocked by this box's network policy | Not measured |
-| Original code AgentOS has to own | Partition definitions, sysupdate transfers, a health-check unit | Containerfile, greenboot checks | Little, but the host isn't image-defined |
+| Original code agentOS has to own | Partition definitions, sysupdate transfers, a health-check unit | Containerfile, greenboot checks | Little, but the host isn't image-defined |
 | Fits spec §4 "immutable, signed image with A/B updates" | Literally | Yes (deployments rather than partitions) | Partly (snapshots, package-assembled) |
 
 **Why A over B [Rec]:**
@@ -68,9 +68,9 @@ Setup: a 4-vCPU, 15 GB cloud VM without KVM. Images were built with mkosi 24.3 a
 
 -- **HW-5** Secure Boot MUST be supported through a Microsoft-signed shim [Fact: standard for mainstream distributions].
 +- **HW-5** Secure Boot MUST be supported through a Microsoft-signed shim, booting only distribution-signed bootloader and kernel, so no per-PC key enrollment is needed.
-+- **HW-5a** Secure Boot does not cover AgentOS's initrd, kernel command line, or `/usr` root hash. Their integrity MUST rest on TPM measured boot: the vault unlock slot (CRED-8) is sealed to the PCRs that measure them, so a modified boot path cannot unlock on a trusted host.
++- **HW-5a** Secure Boot does not cover agentOS's initrd, kernel command line, or `/usr` root hash. Their integrity MUST rest on TPM measured boot: the vault unlock slot (CRED-8) is sealed to the PCRs that measure them, so a modified boot path cannot unlock on a trusted host.
 +  The seal MUST be to a **policy**, not to literal PCR values, so an A/B update does not lock the vault: either a signed PCR policy (systemd-stub PCR 11 + `systemd-cryptenroll --tpm2-public-key`, which needs UKIs) or `systemd-pcrlock`, whose prediction the updater extends with the new release before reboot (works with Type #1 entries). [D: systemd man pages] [I: not exercised here]
-+  [Risk] On an unknown host, offline tampering with the drive is not detectable by the box. Options for Mark: (a) accept for MVP and say so in the owner's guide; (b) optional MOK enrollment, per PC, for owners with a screen; (c) pursue an AgentOS shim through Microsoft review after MVP.
++  [Risk] On an unknown host, offline tampering with the drive is not detectable by the box. Options for Mark: (a) accept for MVP and say so in the owner's guide; (b) optional MOK enrollment, per PC, for owners with a screen; (c) pursue an agentOS shim through Microsoft review after MVP.
 
 -- **UPD-1** A/B image updates: stage → test → activate → health-check → commit or fall back. …
 +- **UPD-1** A/B image updates: stage → test → activate → health-check → commit or fall back. Fallback MUST be automatic, using boot-loader boot counting plus a health check, with no owner action. …

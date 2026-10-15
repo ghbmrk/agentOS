@@ -9,9 +9,24 @@
 // directory, which is never mounted into a guest: the guest sees only its
 // merged root, so it cannot read, change, or delete its snapshots (REV-1).
 //
-// Locking: the manager never calls admission while holding a machine's
-// lock, and Preempt takes only the victim's lock, so admission and the
-// manager cannot deadlock whichever side starts.
+// Locking: a machine's mu is taken before its admitMu, and admitMu before
+// admission's own lock (Destroy holds all three in that order). A
+// machine's killMu is a leaf: Destroy takes it under admitMu to retire the
+// machine, and Preempt holds it, and nothing else, across its kill. Admission's
+// lock is a leaf: Admit lets it go before it calls Preempt, and Preempt only
+// TryLocks the victim's mu, scheduling the rest for when the holder lets
+// go, so admission never waits on a machine's lock and the manager and
+// admission cannot deadlock whichever side starts. admit itself takes
+// admitMu only after the caller has let mu go.
+//
+// A handle is good for one machine's life: an operation that looks a
+// machine up and then acts on it refuses the handle once Destroy retired
+// it, since its ID may name a new machine by then. It takes the lock
+// through lockLive (or lockEndingExecLive, tryLockLive), passes the handle
+// rather than the ID to whatever it calls, and uses only snapshots of that
+// machine's life (ownSnap). The few plain locks left are listed, each with
+// why a retired handle is safe there, in lockcheck_test.go, which fails on
+// any other.
 package vm
 
 import (
@@ -140,6 +155,10 @@ type Machine struct {
 	Starts uint64 `json:",omitempty"`
 	// Project is the machine's disk quota project (RES-4); 0: none.
 	Project uint32 `json:",omitempty"`
+	// Instance names this machine's life: drawn when it is reserved (or
+	// first loaded), never reused, so a machine given a destroyed one's
+	// ID, even in the same lineage, is told apart from it (#1561).
+	Instance string `json:",omitempty"`
 }
 
 // Snapshot is a broker-held snapshot's record.
@@ -154,6 +173,10 @@ type Snapshot struct {
 	// its machine's destroy still traceable (ForgetSince). Empty on
 	// snapshots taken before it was recorded.
 	Lineage string `json:",omitempty"`
+	// Instance is the machine's Instance when taken: only that machine's
+	// life may roll back to it (inLineage). A snapshot recorded before it
+	// was is given one at load (stampLegacy).
+	Instance string `json:",omitempty"`
 	// Sleep marks CheckpointAndStop's checkpoint, the only kind
 	// ResumeFromCheckpoint restores (PE7). Starts is the machine's start
 	// count when it was taken, and Hash the SHA-256 over its files and
@@ -247,6 +270,12 @@ type Config struct {
 	// Services gives each machine its guest service socket (P1-7). Nil
 	// runs machines with no broker services at all.
 	Services Services
+	// ProviderRoutes gives each provider worker (ProviderPrefix) the
+	// directory holding its one route socket to the vault process (#1755,
+	// CRED-5 broker-held). It is the same mount as Services and the only
+	// one a provider worker gets; no other machine is given it. Nil runs
+	// provider workers with no path out.
+	ProviderRoutes Services
 	// DiskReserveBytes is the state disk's RES-4 reserve (a healthy
 	// release, the journal, the recall index). A snapshot is admitted only
 	// if copying the layer leaves the reserve free, as memory admission
@@ -328,6 +357,22 @@ type machine struct {
 	// revoked: admission preempted the machine after admitting it but
 	// before it started, so it must not start on that admission.
 	revoked bool
+	// gone: Destroy retired the machine. A handle taken before then
+	// cannot admit, start, release or unreserve it, so an operation that
+	// raced the destroy cannot bring it back, or touch a new machine
+	// given the same ID (#1561). Set with both mu and admitMu held.
+	gone bool
+	// retired mirrors gone for Preempt, which kills without mc.mu. Destroy
+	// sets it with gone, under killMu as well, and Preempt holds killMu
+	// from reading it through its kill, so a kill through a retired
+	// handle never lands on a new machine given the ID (security S1 on
+	// #1575). killMu is a leaf: nothing is locked under it.
+	retired atomic.Bool
+	killMu  sync.Mutex
+	// admitMu orders admitting the machine against Destroy: an admission
+	// asked for before Destroy retires the machine is granted before
+	// Destroy releases it, and none is granted after.
+	admitMu sync.Mutex
 	// seed is written into a fresh layer before the machine starts from its
 	// image (CreateSeeded). Kept in memory only.
 	seed map[string][]byte
@@ -354,6 +399,39 @@ func (mc *machine) lockEndingExec() {
 	}
 }
 
+// lockLive takes mc's lock and refuses, unlocked, a handle Destroy retired
+// meanwhile: its ID may name a new machine now, whose layer, files and
+// record the handle's paths reach (security B1 on #1575).
+func (mc *machine) lockLive() error {
+	mc.mu.Lock()
+	return mc.unlessGone()
+}
+
+// lockEndingExecLive is lockLive by way of lockEndingExec.
+func (mc *machine) lockEndingExecLive() error {
+	mc.lockEndingExec()
+	return mc.unlessGone()
+}
+
+// tryLockLive is lockLive without waiting: it reports busy when the lock
+// is held, and err (unlocked) when Destroy retired mc.
+func (mc *machine) tryLockLive() (busy bool, err error) {
+	if !mc.mu.TryLock() {
+		return true, nil
+	}
+	return false, mc.unlessGone()
+}
+
+// unlessGone, with mc's lock held, lets it go and returns ErrUnknown if
+// mc was destroyed; otherwise it keeps the lock and returns nil.
+func (mc *machine) unlessGone() error {
+	if mc.gone {
+		mc.mu.Unlock()
+		return fmt.Errorf("%w: machine %s", ErrUnknown, mc.ID)
+	}
+	return nil
+}
+
 // Manager is safe for concurrent use.
 type Manager struct {
 	cfg Config
@@ -362,6 +440,13 @@ type Manager struct {
 	machines map[string]*machine
 	snaps    map[string]Snapshot
 	seq      int
+
+	// afterGet, set only by tests, runs between a lookup and the caller
+	// locking what it found: where a destroy can retire the handle.
+	afterGet func(id string)
+	// afterCheck, set only by tests, runs where ResumeFromCheckpoint,
+	// Merge or DeleteFiles has checked a machine and not yet acted on it.
+	afterCheck func(id string)
 
 	diskMu   sync.Mutex // serializes disk reservations
 	diskHeld int64      // bytes reserved for copies in progress
@@ -455,6 +540,9 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 	if strings.HasPrefix(id, WorkerPrefix) {
 		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for workers", WorkerPrefix)
 	}
+	if strings.HasPrefix(id, ProviderPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for provider workers", ProviderPrefix)
+	}
 	return m.create(ctx, id, s, nil, "")
 }
 
@@ -479,6 +567,13 @@ const BuilderPrefix = "lb-"
 // seed again; the seed is not persisted, so after a broker restart the
 // machine has only its layer.
 func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+	if strings.HasPrefix(id, ProviderPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for provider workers", ProviderPrefix)
+	}
+	return m.createSeeded(ctx, id, s, seed)
+}
+
+func (m *Manager) createSeeded(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
 	if len(seed) > 0 && s.Label != Private {
 		return Machine{}, fmt.Errorf("%w: %s is %v", ErrSeedLabel, id, s.Label)
 	}
@@ -513,7 +608,7 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 	}
 	mc.seed = seed
 	if err := m.admit(mc); err != nil {
-		m.unreserve(id)
+		m.unreserve(mc)
 		return Machine{}, err
 	}
 	mc.mu.Lock()
@@ -532,27 +627,47 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 	out := mc.Machine
 	mc.mu.Unlock()
 	if err != nil {
-		m.unreserve(id)
-		m.cfg.Admit.Release(id)
+		m.release(mc)
+		m.unreserve(mc)
 		return Machine{}, err
 	}
 	return out, nil
 }
 
 // admit asks admission for mc's budget. It is called without mc's lock,
-// because admission holds its own lock while it calls Preempt.
+// because admission holds its own lock while it calls Preempt. A destroyed
+// machine is refused.
 func (m *Manager) admit(mc *machine) error {
 	mc.mu.Lock()
 	mc.revoked = false
 	r := admission.Request{ID: mc.ID, Class: mc.Spec.Class, MemMB: mc.Spec.MemMB}
 	mc.mu.Unlock()
+	mc.admitMu.Lock()
+	defer mc.admitMu.Unlock()
+	if mc.gone {
+		return fmt.Errorf("%w: machine %s", ErrUnknown, mc.ID)
+	}
 	_, err := m.cfg.Admit.Admit(r)
 	return err
 }
 
-// claimLocked fails if admission was withdrawn between admit and now.
-// Releasing a withdrawn admission is a no-op, so callers release as usual.
+// release returns mc's admission, unless Destroy already did: then the ID
+// may be admitted again for a new machine, which keeps its admission.
+func (m *Manager) release(mc *machine) {
+	mc.admitMu.Lock()
+	defer mc.admitMu.Unlock()
+	if !mc.gone {
+		m.cfg.Admit.Release(mc.ID)
+	}
+}
+
+// claimLocked fails if admission was withdrawn between admit and now, or
+// the machine was destroyed meanwhile. Releasing a withdrawn admission is
+// a no-op, and release skips a destroyed one, so callers release as usual.
 func claimLocked(mc *machine) error {
+	if mc.gone {
+		return fmt.Errorf("%w: machine %s", ErrUnknown, mc.ID)
+	}
 	if mc.revoked {
 		mc.revoked = false
 		return fmt.Errorf("%w: %s", ErrRevoked, mc.ID)
@@ -580,13 +695,26 @@ func (m *Manager) reserve(id string, s Spec, l Label, forkBase, lineage string) 
 		}
 		lineage = id + "." + hex.EncodeToString(b[:])
 	}
-	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage}}
+	inst, err := newInstance()
+	if err != nil {
+		return nil, err
+	}
+	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage, Instance: inst}}
 	mc.label.Store(uint32(l))
 	if m.cfg.Quota != nil {
 		mc.Project = m.nextProjectLocked()
 	}
 	m.machines[id] = mc
 	return mc, nil
+}
+
+// newInstance draws a machine's Instance.
+func newInstance() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // nextProjectLocked gives out a quota project no machine holds. Called
@@ -599,12 +727,32 @@ func (m *Manager) nextProjectLocked() uint32 {
 	return m.project
 }
 
-func (m *Manager) unreserve(id string) {
+// servicesFor is where machine id gets its Launch.Services directory, or
+// nil for none: provider workers from ProviderRoutes, other workers from
+// nothing, every other machine from Services.
+func (m *Manager) servicesFor(id string) Services {
+	switch {
+	case strings.HasPrefix(id, ProviderPrefix):
+		return m.cfg.ProviderRoutes
+	case strings.HasPrefix(id, WorkerPrefix):
+		return nil
+	}
+	return m.cfg.Services
+}
+
+// unreserve takes mc out of the table. A new machine that took the ID
+// since mc was destroyed stays.
+func (m *Manager) unreserve(mc *machine) {
 	m.mu.Lock()
-	delete(m.machines, id)
+	mine := m.machines[mc.ID] == mc
+	if mine {
+		delete(m.machines, mc.ID)
+	}
 	m.mu.Unlock()
-	if m.cfg.Services != nil {
-		m.cfg.Services.Close(id)
+	if mine {
+		if s := m.servicesFor(mc.ID); s != nil {
+			s.Close(mc.ID)
+		}
 	}
 }
 
@@ -614,7 +762,11 @@ var keepLayer = &Snapshot{}
 // startFrom (re)builds a machine's layer from snapshot s (or empty when s is
 // nil, or as it is when s is keepLayer) and runs it, restoring memory when s
 // is a full checkpoint. Called with mc.mu held and the machine admitted.
+// A destroyed machine never starts again.
 func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error {
+	if mc.gone {
+		return fmt.Errorf("%w: machine %s", ErrUnknown, mc.ID)
+	}
 	l := m.launch(mc)
 	if err := os.MkdirAll(l.Dir, 0o700); err != nil {
 		return err
@@ -654,9 +806,10 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		return err
 	}
 	// Workers run no agent: no broker socket, so no tools, owner channel
-	// or model egress (CAP-8).
-	if m.cfg.Services != nil && !strings.HasPrefix(mc.ID, WorkerPrefix) {
-		dir, err := m.cfg.Services.Open(mc.ID)
+	// or model egress (CAP-8). A provider worker gets its route socket
+	// instead, and no other service.
+	if s := m.servicesFor(mc.ID); s != nil {
+		dir, err := s.Open(mc.ID)
 		if err != nil {
 			return err
 		}
@@ -869,10 +1022,13 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 
 func (m *Manager) get(id string) (*machine, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	mc, ok := m.machines[id]
+	m.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("%w: machine %s", ErrUnknown, id)
+	}
+	if h := m.afterGet; h != nil {
+		h(id)
 	}
 	return mc, nil
 }
@@ -883,7 +1039,9 @@ func (m *Manager) Get(id string) (Machine, error) {
 	if err != nil {
 		return Machine{}, err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return Machine{}, err
+	}
 	defer mc.mu.Unlock()
 	return mc.Machine, nil
 }
@@ -919,7 +1077,9 @@ func (m *Manager) RaiseLabel(id string, l Label) error {
 	if err != nil {
 		return err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return err
+	}
 	defer mc.mu.Unlock()
 	if l < mc.Label {
 		return fmt.Errorf("vm: %s: a label only rises (REV-5)", id)
@@ -950,7 +1110,9 @@ func (m *Manager) Label(id string) (Label, error) {
 	if err != nil {
 		return 0, err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return 0, err
+	}
 	defer mc.mu.Unlock()
 	return mc.Label, nil
 }
@@ -978,14 +1140,25 @@ func (m *Manager) Checkpoint(ctx context.Context, id string) (Snapshot, error) {
 }
 
 func (m *Manager) take(ctx context.Context, id string, t Tier) (Snapshot, error) {
+	if err := refuseProvider(id); err != nil {
+		return Snapshot{}, err
+	}
 	mc, err := m.get(id)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	mc.mu.Lock()
+	return m.takeOf(ctx, mc, t)
+}
+
+// takeOf is take for a handle the caller holds already, so a check it made
+// on that machine still holds for the snapshot taken.
+func (m *Manager) takeOf(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
+	if err := mc.lockLive(); err != nil {
+		return Snapshot{}, err
+	}
 	defer mc.mu.Unlock()
 	if mc.State != Running {
-		return Snapshot{}, fmt.Errorf("%w: %s is %s", ErrState, id, mc.State)
+		return Snapshot{}, fmt.Errorf("%w: %s is %s", ErrState, mc.ID, mc.State)
 	}
 	return m.takeLocked(ctx, mc, t)
 }
@@ -1045,6 +1218,9 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 // captureAs is capture; sleep marks a sleep checkpoint, with the
 // machine's start count and the hash of what was written.
 func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool) (Snapshot, error) {
+	if err := refuseProvider(mc.ID); err != nil {
+		return Snapshot{}, err
+	}
 	u, err := m.checkCaps(mc.ID, m.launch(mc).Upper)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
@@ -1059,7 +1235,7 @@ func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
 	}
 	defer h.release()
-	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Lineage: mc.Lineage}
+	s := Snapshot{ID: m.nextSnapID(), Machine: mc.ID, Tier: t, Label: mc.Label, Image: mc.Spec.Image, Lineage: mc.Lineage, Instance: mc.Instance}
 	dir := m.snapDir(s.ID)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return Snapshot{}, err
@@ -1218,7 +1394,16 @@ func snapName(seq int) string { return fmt.Sprintf("s%010d", seq) }
 // inLineage reports whether machine mc may use snapshot s: its own, or the
 // one it was forked from.
 func inLineage(mc *machine, s Snapshot) bool {
-	return s.Machine == mc.ID || s.ID == mc.ForkBase
+	return ownSnap(mc, s) || s.ID == mc.ForkBase
+}
+
+// ownSnap reports whether s was taken of mc in this life: same ID and same
+// Instance. A machine destroyed and replaced under its ID leaves snapshots
+// the new machine must not use, even in the same lineage (a worker
+// recreated for one agent, #1561). Every snapshot has an Instance: one
+// recorded before Instance gets its owner's at load (stampLegacy).
+func ownSnap(mc *machine, s Snapshot) bool {
+	return s.Machine == mc.ID && s.Instance == mc.Instance
 }
 
 // Rollback returns a machine to snapshot snapID (REV-4). A full checkpoint
@@ -1226,6 +1411,9 @@ func inLineage(mc *machine, s Snapshot) bool {
 // file system. The machine's label does not fall (REV-5). A preempted or
 // stopped machine is re-admitted first.
 func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
+	if err := refuseProvider(id); err != nil {
+		return err
+	}
 	if strings.HasPrefix(id, EvalPrefix) {
 		return fmt.Errorf("vm: replay machine %s cannot be rolled back", id)
 	}
@@ -1237,10 +1425,18 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	if err != nil {
 		return err
 	}
-	mc.lockEndingExec()
+	return m.rollbackTo(ctx, mc, s)
+}
+
+// rollbackTo is Rollback for a handle the caller holds: a handle Destroy
+// retired is refused, never resolved again by its ID.
+func (m *Manager) rollbackTo(ctx context.Context, mc *machine, s Snapshot) error {
+	if err := mc.lockEndingExecLive(); err != nil {
+		return err
+	}
 	if !inLineage(mc, s) {
 		mc.mu.Unlock()
-		return fmt.Errorf("%w: %s, %s", ErrLineage, id, snapID)
+		return fmt.Errorf("%w: %s, %s", ErrLineage, mc.ID, s.ID)
 	}
 	running := mc.State == Running
 	mc.mu.Unlock()
@@ -1250,7 +1446,7 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 		}
 	}
 	mc.mu.Lock()
-	err = claimLocked(mc)
+	err := claimLocked(mc)
 	if err == nil && s.Label > mc.Label {
 		// Saved before the snapshot's content reaches the layer (LABEL-durable).
 		err = m.raiseLocked(mc, s.Label)
@@ -1261,7 +1457,7 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	live := mc.State == Running // a guest that could not be killed
 	mc.mu.Unlock()
 	if err != nil && !live {
-		m.cfg.Admit.Release(id)
+		m.release(mc)
 	}
 	return err
 }
@@ -1290,7 +1486,11 @@ func (m *Manager) restartLocked(ctx context.Context, mc *machine, s *Snapshot) e
 }
 
 // restartHeld is restartLocked for a caller that already reserved the disk.
+// A destroyed machine is left alone: its ID may name a new machine now.
 func (m *Manager) restartHeld(ctx context.Context, mc *machine, s *Snapshot) error {
+	if mc.gone {
+		return fmt.Errorf("%w: machine %s", ErrUnknown, mc.ID)
+	}
 	err := m.stopRuntime(ctx, mc)
 	if err == nil {
 		err = m.startFrom(ctx, mc, s)
@@ -1313,27 +1513,34 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	mc.mu.Lock()
+	return m.resumeOf(ctx, mc)
+}
+
+// resumeOf is Resume for a handle the caller holds: a handle Destroy
+// retired is refused (by admit, or by rebuildOf's), and so is its fallback
+// to a rebuild.
+func (m *Manager) resumeOf(ctx context.Context, mc *machine) error {
+	mc.mu.Lock() // a read: a retired machine reads Stopped, and admit refuses it
 	st := mc.State
 	mc.mu.Unlock()
 	if st == Running {
-		return fmt.Errorf("%w: %s is running", ErrState, id)
+		return fmt.Errorf("%w: %s is running", ErrState, mc.ID)
 	}
 	if _, err := os.Lstat(m.launch(mc).Upper); err != nil {
-		return m.Rebuild(ctx, id)
+		return m.rebuildOf(ctx, mc)
 	}
 	if err := m.admit(mc); err != nil {
 		return err
 	}
 	mc.mu.Lock()
-	err = claimLocked(mc)
+	err := claimLocked(mc)
 	if err == nil {
 		err = m.restartLocked(ctx, mc, keepLayer)
 	}
 	live := mc.State == Running // a guest that could not be killed
 	mc.mu.Unlock()
 	if err != nil && !live {
-		m.cfg.Admit.Release(id)
+		m.release(mc)
 	}
 	return err
 }
@@ -1344,6 +1551,9 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 // admitted on its own budget, because forks share no memory (S3). Either all
 // forks start or none do.
 func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, error) {
+	if err := refuseProvider(append([]string{id}, ids...)...); err != nil {
+		return Snapshot{}, err
+	}
 	src, err := m.get(id)
 	if err != nil {
 		return Snapshot{}, err
@@ -1378,7 +1588,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 			return Snapshot{}, fmt.Errorf("vm: bad machine id %q", f)
 		}
 	}
-	src.mu.Lock()
+	if err := src.lockLive(); err != nil {
+		return Snapshot{}, err
+	}
 	spec, label, lineage := src.Spec, src.Label, src.Lineage
 	src.mu.Unlock()
 	if lineage == "" {
@@ -1389,8 +1601,8 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	var reserved []*machine
 	undo := func() {
 		for _, f := range reserved {
-			m.unreserve(f.ID)
-			m.cfg.Admit.Release(f.ID)
+			m.release(f)
+			m.unreserve(f)
 		}
 	}
 	for _, f := range ids {
@@ -1400,7 +1612,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 			return Snapshot{}, err
 		}
 		if err := m.admit(mc); err != nil {
-			m.unreserve(f)
+			m.unreserve(mc)
 			undo()
 			return Snapshot{}, err
 		}
@@ -1425,7 +1637,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	src.mu.Lock()
 	prevLast := src.Last
 	src.mu.Unlock()
-	s, err := m.take(ctx, id, Full)
+	// Taken of src itself: a new machine given the ID meanwhile is not
+	// what the forks were labelled and lineaged from.
+	s, err := m.takeOf(ctx, src, Full)
 	if err != nil {
 		undo()
 		return Snapshot{}, err
@@ -1450,14 +1664,14 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		if err == nil {
 			err = m.startFrom(ctx, mc, &s)
 		}
-		if err != nil {
+		if err != nil && !mc.gone {
 			m.stopRuntime(ctx, mc)
 			os.RemoveAll(m.machineDir(mc.ID))
 		}
 		mc.mu.Unlock()
 		if err != nil {
 			for _, done := range reserved[:i] {
-				m.Destroy(ctx, done.ID)
+				m.destroy(ctx, done)
 			}
 			undo()
 			return Snapshot{}, err
@@ -1473,7 +1687,9 @@ func (m *Manager) dropSnapshot(mc *machine, id, prev string) {
 	delete(m.snaps, id)
 	m.mu.Unlock()
 	os.RemoveAll(m.snapDir(id))
-	mc.mu.Lock()
+	if mc.lockLive() != nil {
+		return
+	}
 	if mc.Last == id {
 		mc.Last = prev
 		m.saveMachine(mc)
@@ -1524,6 +1740,9 @@ func (m *Manager) view(s Snapshot) overlay.View {
 // dst restarts on the merged file system (a file-system rollback), and its
 // label rises to the fork's (REV-5). Returns the merged snapshot.
 func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) {
+	if err := refuseProvider(dst, src); err != nil {
+		return Snapshot{}, err
+	}
 	if strings.HasPrefix(dst, EvalPrefix) || strings.HasPrefix(src, EvalPrefix) {
 		return Snapshot{}, errors.New("vm: replay machines are not merged")
 	}
@@ -1540,14 +1759,20 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 	if m.contained(sm) {
 		return Snapshot{}, fmt.Errorf("%w (%s)", ErrContained, src)
 	}
-	sm.mu.Lock()
+	if err := sm.lockLive(); err != nil {
+		return Snapshot{}, err
+	}
 	baseID := sm.ForkBase
 	sm.mu.Unlock()
+	if h := m.afterCheck; h != nil {
+		h(src)
+	}
 	base, err := m.Snapshot(baseID)
 	if err != nil || base.Machine != dst {
 		return Snapshot{}, fmt.Errorf("%w: %s was not forked from %s", ErrLineage, src, dst)
 	}
-	ss, err := m.Step(ctx, src)
+	// Taken of sm itself, which the containment and fork-point checks read.
+	ss, err := m.takeOf(ctx, sm, FS)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -1555,11 +1780,18 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 	if err != nil {
 		return Snapshot{}, err
 	}
-	dm.mu.Lock()
+	if err := dm.lockLive(); err != nil {
+		return Snapshot{}, err
+	}
+	if !ownSnap(dm, base) {
+		// The fork point is a snapshot of an earlier machine given dst's ID.
+		dm.mu.Unlock()
+		return Snapshot{}, fmt.Errorf("%w: %s was not forked from %s", ErrLineage, src, dst)
+	}
 	out, restarted, err := m.mergeLocked(ctx, dm, base, ss)
 	dm.mu.Unlock()
 	if err != nil && restarted {
-		m.cfg.Admit.Release(dst)
+		m.release(dm)
 	}
 	return out, err
 }
@@ -1614,7 +1846,7 @@ func (m *Manager) mergeLocked(ctx context.Context, dm *machine, base, ss Snapsho
 	conflicts := subtreeConflicts(changes, mine)
 	conflicts = append(conflicts, subtreeConflicts(mine, changes)...)
 	// Build the merged layer beside the snapshots, then publish it as one.
-	out = Snapshot{ID: m.nextSnapID(), Machine: dst, Tier: FS, Label: maxLabel(dm.Label, ss.Label), Image: ds.Image, Taken: time.Now().UTC()}
+	out = Snapshot{ID: m.nextSnapID(), Machine: dst, Tier: FS, Label: maxLabel(dm.Label, ss.Label), Image: ds.Image, Taken: time.Now().UTC(), Lineage: dm.Lineage, Instance: dm.Instance}
 	dir := m.snapDir(out.ID)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return Snapshot{}, false, err
@@ -1705,7 +1937,13 @@ func (m *Manager) Rebuild(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	mc.mu.Lock()
+	return m.rebuildOf(ctx, mc)
+}
+
+// rebuildOf is Rebuild for a handle the caller holds; a handle Destroy
+// retired is refused by admit: Destroy leaves it Stopped.
+func (m *Manager) rebuildOf(ctx context.Context, mc *machine) error {
+	mc.mu.Lock() // a read: a retired machine reads Stopped, and admit refuses it
 	running := mc.State == Running
 	mc.mu.Unlock()
 	if !running {
@@ -1714,39 +1952,61 @@ func (m *Manager) Rebuild(ctx context.Context, id string) error {
 		}
 	}
 	mc.mu.Lock()
-	err = claimLocked(mc)
+	err := claimLocked(mc)
 	if err == nil {
 		err = m.restartLocked(ctx, mc, nil)
 	}
 	live := mc.State == Running // a guest that could not be killed
 	mc.mu.Unlock()
 	if err != nil && !live {
-		m.cfg.Admit.Release(id)
+		m.release(mc)
 	}
 	return err
 }
 
 // Destroy stops a machine, releases its admission, and deletes its layer.
-// Its snapshots stay broker-held until pruned (RES-4).
+// Its snapshots stay broker-held until pruned (RES-4). The machine is
+// retired: an operation already holding it fails rather than start it
+// again, and its admission is released only after any admission it asked
+// for meanwhile was granted, so nothing of it runs uncounted (#1561).
 func (m *Manager) Destroy(ctx context.Context, id string) error {
 	mc, err := m.get(id)
 	if err != nil {
 		return err
 	}
-	mc.lockEndingExec()
-	err = m.stopRuntime(ctx, mc)
+	return m.destroy(ctx, mc)
+}
+
+// destroy is Destroy for a handle the caller holds; a handle already
+// retired is refused, so a new machine given its ID is left alone.
+func (m *Manager) destroy(ctx context.Context, mc *machine) error {
+	id := mc.ID
+	if err := mc.lockEndingExecLive(); err != nil {
+		return err
+	}
+	err := m.stopRuntime(ctx, mc)
 	if err == nil {
 		err = os.RemoveAll(m.machineDir(id))
 	}
 	if err == nil && m.cfg.Quota != nil && mc.Project != 0 {
 		err = m.cfg.Quota.Clear(mc.Project)
 	}
-	mc.mu.Unlock()
 	if err != nil {
+		mc.mu.Unlock()
 		return err
 	}
-	m.unreserve(id)
+	mc.State = Stopped
+	// Released before the ID leaves the table, so a new machine given the
+	// ID is admitted afresh rather than released here.
+	mc.admitMu.Lock()
+	mc.killMu.Lock()
+	mc.gone = true
+	mc.retired.Store(true)
+	mc.killMu.Unlock()
 	m.cfg.Admit.Release(id)
+	mc.admitMu.Unlock()
+	mc.mu.Unlock()
+	m.unreserve(mc)
 	return nil
 }
 
@@ -1756,7 +2016,9 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 // path, so its time does not grow with what the guest wrote: the machine's
 // layer stays on disk and Resume restarts it there. Memory since the last
 // full checkpoint is lost. Preempting a machine that is not running is a
-// no-op.
+// no-op. A handle Destroy retired after the lookup is refused with
+// ErrUnknown, never reported preempted: admission would then drop the
+// entry of a new machine given the ID (security B1 on #1575).
 //
 // Preemption never waits for an operation already holding the machine (a
 // checkpoint or a fork takes seconds, longer than the frozen target): it
@@ -1771,6 +2033,13 @@ func (m *Manager) Preempt(id string) error {
 	mc.preempting.Store(true)
 	if mc.mu.TryLock() {
 		defer mc.mu.Unlock()
+		if mc.gone {
+			// Destroyed since the lookup: its admission is released, and
+			// the ID may be a new machine's now, which admission must not
+			// drop as if this one had yielded (security B1 on #1575).
+			mc.preempting.Store(false)
+			return fmt.Errorf("%w: machine %s", ErrUnknown, id)
+		}
 		return m.preemptLocked(mc, false)
 	}
 	// The completion is scheduled even if the kill fails: once the holding
@@ -1780,7 +2049,14 @@ func (m *Manager) Preempt(id string) error {
 	if c := mc.execCancel.Load(); c != nil {
 		(*c)()
 	}
-	kerr := m.kill(mc)
+	live, kerr := m.killLive(mc)
+	if !live {
+		// Destroyed since the lookup: Destroy stopped it and released its
+		// admission, and its ID may be a new machine's now, so this is no
+		// preemption admission may count (security B1 on #1575).
+		mc.preempting.Store(false)
+		return fmt.Errorf("%w: machine %s", ErrUnknown, id)
+	}
 	go func() {
 		mc.mu.Lock()
 		defer mc.mu.Unlock()
@@ -1816,6 +2092,18 @@ func (m *Manager) preemptLocked(mc *machine, killed bool) error {
 	return errors.Join(err, m.saveMachine(mc))
 }
 
+// killLive is kill for a handle Preempt holds without its lock. A handle
+// Destroy retired is left alone (false): the cgroup or sandbox kill
+// reaches is named by the ID, which may be a new machine's by then.
+func (m *Manager) killLive(mc *machine) (bool, error) {
+	mc.killMu.Lock()
+	defer mc.killMu.Unlock()
+	if mc.retired.Load() {
+		return false, nil
+	}
+	return true, m.kill(mc)
+}
+
 // kill releases a machine's memory without its lock: it empties the
 // machine's cgroup, or asks the runtime when there are no cgroups. Only
 // fields fixed at creation are read. The runtime's own state is cleaned up
@@ -1847,7 +2135,12 @@ func (m *Manager) Machines() []string {
 	return out
 }
 
+// saveMachine writes mc's record, with mc's lock held. A destroyed
+// machine's record is never written: its directory may be a new machine's.
 func (m *Manager) saveMachine(mc *machine) error {
+	if mc.gone {
+		return fmt.Errorf("%w: machine %s", ErrUnknown, mc.ID)
+	}
 	mc.label.Store(uint32(mc.Label))
 	return writeJSON(filepath.Join(m.machineDir(mc.ID), "meta.json"), mc.Machine)
 }
@@ -1891,6 +2184,12 @@ func (m *Manager) load(ctx context.Context) error {
 		if mc.Lineage == "" {
 			mc.Lineage = mc.ID
 		}
+		if mc.Instance == "" {
+			// Recorded before instances were: its life gets one now.
+			if mc.Instance, err = newInstance(); err != nil {
+				return err
+			}
+		}
 		m.project = max(m.project, mc.Project)
 		if err := m.stopRuntime(ctx, mc); err != nil && m.cfg.Quota != nil && mc.Project != 0 {
 			// Its guest may outlive the broker: it stays counted.
@@ -1900,6 +2199,35 @@ func (m *Manager) load(ctx context.Context) error {
 		if err := m.saveMachine(mc); err != nil {
 			return err
 		}
+	}
+	return m.stampLegacy()
+}
+
+// stampLegacy gives each snapshot recorded before Instance one, once, at
+// load (security S-N1 on #1575). The machine of its ID gets it when the
+// snapshot is of its lineage (or recorded before lineages): it was that
+// machine's to use before the upgrade, and stays so. Any other gets an
+// Instance no machine has. So a machine destroyed and replaced under its
+// ID after the upgrade leaves its old snapshots behind, as one of this
+// release does.
+func (m *Manager) stampLegacy() error {
+	for id, s := range m.snaps {
+		if s.Instance != "" {
+			continue
+		}
+		if mc, ok := m.machines[s.Machine]; ok && (s.Lineage == "" || s.Lineage == mc.Lineage) {
+			s.Instance = mc.Instance
+		} else {
+			inst, err := newInstance()
+			if err != nil {
+				return err
+			}
+			s.Instance = inst
+		}
+		if err := writeJSON(filepath.Join(m.snapDir(id), "meta.json"), s); err != nil {
+			return err
+		}
+		m.snaps[id] = s
 	}
 	return nil
 }

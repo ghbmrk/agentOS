@@ -3,7 +3,8 @@
 No requirement IDs: CI tooling that holds work to the G1 path (A1, D-104), not SPEC.md
 behaviour. The local cases are G1-freeze-a (paths outside the list fail, listed paths and
 G1 fixes pass), -b (PRs opened before the freeze and exempt-pr lines), -c (records-only and empty changes), -d (the
-switch), -e (fail closed) and -f (the list keeps up with the G1 binaries' imports).
+switch), -e (fail closed), -f (the list keeps up with the G1 binaries' imports) and -g (a PR
+reopened, force-pushed or retargeted after the freeze began loses the time exemption, #1717).
 """
 import os
 import pathlib
@@ -40,8 +41,8 @@ ON = "freeze on\n" + S
 BEFORE, AFTER = "2026-10-14T19:54:59Z", "2026-10-14T19:55:00Z"
 
 
-def run(paths, list_text=SMALL, pr=None, created=""):
-    return g.check(paths, list_text, pr, created)
+def run(paths, list_text=SMALL, pr=None, created="", history=""):
+    return g.check(paths, list_text, pr, created, history)
 
 
 class CheckTest(unittest.TestCase):
@@ -68,6 +69,43 @@ class CheckTest(unittest.TestCase):
         self.assertIn("before the freeze began", msg[0])
         self.assertFalse(run(["broker/voice/v.go"], pr=1600, created=AFTER)[0])
         self.assertFalse(run(["broker/voice/v.go"], pr=1600)[0])
+
+    def test_reuse_after_the_freeze_loses_the_time_exemption(self):  # G1-freeze-g
+        # #1717: created_at belongs to the PR, not its work. A reopen, force-push or
+        # retarget at or after `since` drops the time exemption; the path check decides.
+        for event in ("reopened", "head_ref_force_pushed", "base_ref_changed"):
+            ok, msg = run(["broker/voice/v.go"], pr=1600, created=BEFORE, history=f"{event}\t{AFTER}\n")
+            self.assertFalse(ok, event)
+            self.assertIn(f"{event} at {AFTER}", "\n".join(msg))
+            # A listed path still passes, and an exempt-pr line still exempts.
+            self.assertTrue(run(["image/x"], pr=1600, created=BEFORE, history=f"{event}\t{AFTER}\n")[0])
+            self.assertTrue(run(["broker/voice/v.go"], pr=1500, created=BEFORE, history=f"{event}\t{AFTER}\n")[0])
+            # Before the freeze began, the same event is part of the in-flight work.
+            self.assertTrue(run(["broker/voice/v.go"], pr=1600, created=BEFORE, history=f"{event}\t{BEFORE}\n")[0])
+            # An earlier event before the freeze does not hide a later one after it.
+            later = f"reopened\t{BEFORE}\n{event}\t{AFTER}\n"
+            self.assertFalse(run(["broker/voice/v.go"], pr=1600, created=BEFORE, history=later)[0], event)
+        # Plain pushes, reviews, comments and closes keep it: the work finishes.
+        quiet = f"committed\t\nreviewed\t\ncommented\t{AFTER}\nclosed\t{AFTER}\nlabeled\t{AFTER}\n"
+        self.assertTrue(run(["broker/voice/v.go"], pr=1600, created=BEFORE, history=quiet)[0])
+
+    def test_unreadable_history_fails_closed(self):  # G1-freeze-g, -e
+        # A PR opened before the freeze needs its history read; without it, no decision.
+        with self.assertRaises(g.ListError):
+            g.check(["broker/voice/v.go"], SMALL, 1600, BEFORE, None)
+        for bad in ("reopened\tyesterday\n", "reopened\n", "reopened\t\n", "base_ref_changed\tx\ty\n"):
+            with self.assertRaises(g.ListError, msg=bad):
+                run(["broker/voice/v.go"], pr=1600, created=BEFORE, history=bad)
+
+    def test_workflow_hands_over_the_timeline(self):  # G1-freeze-g
+        # The base copy gets the PR's timeline through a read-only token, as data.
+        text = (ROOT / ".github" / "workflows" / "g1-freeze.yml").read_text()
+        self.assertIn('gh api --paginate "repos/$REPO/issues/$PR_NUMBER/timeline"', text)
+        self.assertIn("'.[] | [(.event // \"\"), (.created_at // \"\")] | @tsv'", text)
+        self.assertIn('timeline=(--timeline "$RUNNER_TEMP/timeline.tsv")', text)
+        self.assertIn('--pr-created "$PR_CREATED" \\\n            "${timeline[@]}"', text)
+        self.assertIn("issues: read", text)
+        self.assertNotRegex(text, r":\s*write\b")
 
     def test_exempt_pr_line(self):  # G1-freeze-b
         self.assertTrue(run(["broker/voice/v.go"], pr=1500, created=AFTER)[0])
@@ -124,7 +162,14 @@ class CheckTest(unittest.TestCase):
             try:
                 with _quiet():
                     self.assertEqual(g.main(["--git", "HEAD~1", "HEAD"]), 1)
-                    self.assertEqual(g.main(["--git", "HEAD~1", "HEAD", "--pr-created", "2000-01-01T00:00:00Z"]), 0)
+                    old = ["--git", "HEAD~1", "HEAD", "--pr-created", "2000-01-01T00:00:00Z"]
+                    hist = pathlib.Path(d, "timeline.tsv")
+                    hist.write_text("committed\t\n")
+                    self.assertEqual(g.main(old + ["--timeline", str(hist)]), 0)
+                    hist.write_text("reopened\t2030-01-01T00:00:00Z\n")
+                    self.assertEqual(g.main(old + ["--timeline", str(hist)]), 1)
+                    self.assertEqual(g.main(old), 2)
+                    self.assertEqual(g.main(old + ["--timeline", str(pathlib.Path(d, "missing"))]), 2)
                     self.assertEqual(g.main(["--git", "HEAD~1", "HEAD", "--pr-created", "nonsense"]), 2)
                     self.assertEqual(g.main(["--git", "HEAD~1", "nosuchref"]), 2)
             finally:
@@ -167,6 +212,10 @@ class ListTest(unittest.TestCase):
                   "guest/codex/x", "broker/provagent/x.go", "broker/route/route.go"):
             self.assertTrue(g.check([p], LIST)[0], p)
 
+
+class GoImportsTest(unittest.TestCase):
+    # Its own class so the records-only CI run, which sets up no Go, can name the other two:
+    # a records-only change cannot change what the G1 binaries import.
     def test_list_covers_the_g1_binaries_imports(self):  # G1-freeze-f
         go = shutil.which("go")
         if not go:

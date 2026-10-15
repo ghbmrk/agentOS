@@ -27,7 +27,7 @@ func TestAgentosdProgressCarriesNeverOnline(t *testing.T) {
 		{localapi.SetupProgress{Phase: "offline"}, Progress{Phase: "offline"}},
 		{localapi.SetupProgress{Phase: "ready", Updated: true, Online: true}, Progress{Phase: "ready", Updated: true, Online: true}},
 	} {
-		a := AgentosdSetup{InProcess{localapi.OpSetupProgress: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+		a := AgentosdSetup{Owner: InProcess{localapi.OpSetupProgress: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 			return c.in, nil
 		}}}
 		if got := a.Progress(); got != c.want {

@@ -18,6 +18,40 @@ import (
 // worker forks into one. A worker gets no guest services.
 const WorkerPrefix = "wk-"
 
+// ProviderPrefix starts the IDs of provider workers (CAP-11-plan): a
+// provider's own agent CLI in a machine the broker owns. Only
+// CreateProviderWorker makes one. It is never in Workers(lineage), takes
+// no snapshot, fork, rollback or merge, and gets no guest services: its
+// scratch holds the brief and the run's data, and the broker alone drives it.
+const ProviderPrefix = "pw-"
+
+// ErrProviderWorker refuses a snapshot, fork, rollback or merge of a
+// provider worker.
+var ErrProviderWorker = errors.New("vm: provider workers are broker-owned and take no snapshot, fork, rollback or merge")
+
+// refuseProvider fails if any id is a provider worker's.
+func refuseProvider(ids ...string) error {
+	for _, id := range ids {
+		if strings.HasPrefix(id, ProviderPrefix) {
+			return fmt.Errorf("%w (%s)", ErrProviderWorker, id)
+		}
+	}
+	return nil
+}
+
+// CreateProviderWorker admits and starts a provider worker. seed lands in
+// its fresh layer (the placeholder auth file, never a real credential), so
+// the label must be Private. The worker has a lineage of its own.
+func (m *Manager) CreateProviderWorker(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+	if !strings.HasPrefix(id, ProviderPrefix) {
+		return Machine{}, fmt.Errorf("vm: provider worker ids start %q", ProviderPrefix)
+	}
+	if s.Label != Private {
+		return Machine{}, fmt.Errorf("%w: provider worker %s is %v", ErrSeedLabel, id, s.Label)
+	}
+	return m.createSeeded(ctx, id, s, seed)
+}
+
 // ErrNoExec means the runtime cannot run commands in a machine.
 var ErrNoExec = errors.New("vm: this runtime cannot run commands in a machine")
 
@@ -160,7 +194,10 @@ func (m *Manager) ForkSiblings(id string) (string, []string, error) {
 // is held by a command, snapshot or start), without waiting.
 func (m *Manager) TryGet(id string) (Machine, bool) {
 	mc, err := m.get(id)
-	if err != nil || !mc.mu.TryLock() {
+	if err != nil {
+		return Machine{}, false
+	}
+	if busy, err := mc.tryLockLive(); busy || err != nil {
 		return Machine{}, false
 	}
 	defer mc.mu.Unlock()
@@ -174,7 +211,7 @@ func (m *Manager) TryGet(id string) (Machine, bool) {
 // workers take commands: an agent machine is driven by its
 // own runtime, never by the broker on a guest's behalf.
 func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.Duration) (ExecResult, error) {
-	if !strings.HasPrefix(id, WorkerPrefix) {
+	if !strings.HasPrefix(id, WorkerPrefix) && !strings.HasPrefix(id, ProviderPrefix) {
 		return ExecResult{}, fmt.Errorf("vm: %s is not a worker", id)
 	}
 	ex, ok := m.cfg.Runtime.(Execer)
@@ -188,7 +225,9 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	if err != nil {
 		return ExecResult{}, err
 	}
-	mc.mu.Lock()
+	if err := mc.lockLive(); err != nil {
+		return ExecResult{}, err
+	}
 	defer mc.mu.Unlock()
 	if mc.State == Preempted {
 		return ExecResult{}, fmt.Errorf("%w: %s", ErrPreempted, id)
@@ -278,8 +317,12 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	}
 	// A worker whose lock is held is in use (a command runs): parking
 	// would wait out the command, so it is refused instead.
-	if !mc.mu.TryLock() {
+	busy, err := mc.tryLockLive()
+	if busy {
 		return Snapshot{}, fmt.Errorf("%w: %s", ErrBusy, id)
+	}
+	if err != nil {
+		return Snapshot{}, err
 	}
 	if mc.State != Running {
 		mc.mu.Unlock()
@@ -307,7 +350,7 @@ func (m *Manager) Park(ctx context.Context, id string) (Snapshot, error) {
 	stopped := mc.State != Running
 	mc.mu.Unlock()
 	if stopped {
-		m.cfg.Admit.Release(id)
+		m.release(mc)
 	}
 	return s, err
 }
@@ -382,7 +425,9 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 	}
 	// A command in the worker ends: the deletion stops the worker anyway
 	// (L3 nit on #166).
-	mc.lockEndingExec()
+	if err := mc.lockEndingExecLive(); err != nil {
+		return DeleteReport{}, err
+	}
 	was := mc.State
 	rep, stopped, err := m.deleteLocked(ctx, mc, d)
 	mc.mu.Unlock()
@@ -394,14 +439,17 @@ func (m *Manager) DeleteFiles(ctx context.Context, id string, d Deletion) (Delet
 		err = fmt.Errorf("%s: %w", id, overlay.ErrDeleteFailed)
 	}
 	if stopped {
-		m.cfg.Admit.Release(id)
+		m.release(mc)
+	}
+	if h := m.afterCheck; h != nil {
+		h(id)
 	}
 	// A preempted worker waits for its own resume, not a deletion's
 	// (security R2 on #166). Admission may have no room now, or STOP may
 	// have come meanwhile; the worker then stays stopped and the deletion
 	// still stands (security F1 on #166).
 	if err == nil && !rep.Over && was == Stopped && !held(d) {
-		rep.Restarted = m.Resume(ctx, id) == nil
+		rep.Restarted = m.resumeOf(ctx, mc) == nil // the handle: never a same-ID successor (L3 B2 on #1575)
 	}
 	return rep, err
 }

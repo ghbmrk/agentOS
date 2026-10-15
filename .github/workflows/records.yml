@@ -1,0 +1,100 @@
+name: records
+# The only writer of review records (#1691, #1816, D-120); feature PRs carry none. Once a day
+# this collects the marked verdict comments of merged PRs (tools/records.py; the comment shape
+# is OPERATING §4 "Verdict comment shape") and proposes the missing reviews/<lens>/ files as one
+# bot/records PR, so records-only merges stay at one a day or fewer.
+# Same split as trace.yml: collection runs with a read-only token; only the commit job can
+# write, it runs no repository code, and it adds only new reviews/<lens>/*.md files.
+# The bot PR changes only record files, so ci.yml runs just the document checks there.
+on:
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: records
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read # PR comments
+      pull-requests: read # merged state
+    outputs:
+      records: ${{ steps.gen.outputs.records }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Collect records of merged PRs
+        id: gen
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/records.py --out records.json
+          echo "records=$(base64 -w0 records.json)" >> "$GITHUB_OUTPUT"
+  commit:
+    needs: collect
+    runs-on: ubuntu-latest
+    # BOT_PR_TOKEN lives in this environment, whose deployment-branch policy admits main
+    # only, so branch workflows cannot read it (decision #1769).
+    environment: bot
+    permissions:
+      contents: write # push the bot/records branch (never main)
+      pull-requests: write # open, auto-merge or close its PR
+      actions: write # dispatch ci.yml on the branch
+    env:
+      # BOT_PR_TOKEN (optional; decision #1769): a token whose pushes start
+      # pull_request workflows normally. Without it the job uses GITHUB_TOKEN as before.
+      GH_TOKEN: ${{ secrets.BOT_PR_TOKEN || github.token }}
+      BRANCH: bot/records
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: main
+          token: ${{ secrets.BOT_PR_TOKEN || github.token }}
+      - name: Open or update the records PR if any are missing
+        env:
+          RECORDS_B64: ${{ needs.collect.outputs.records }}
+        run: |
+          test -n "$RECORDS_B64"
+          printf '%s' "$RECORDS_B64" | base64 -d > "$RUNNER_TEMP/records.json"
+          # Inline, not a repository script, and -I so no module on main shadows the stdlib:
+          # only new files at record paths are written.
+          python3 -I - "$RUNNER_TEMP/records.json" <<'EOF'
+          import json, pathlib, re, sys
+          ok = re.compile(r"^reviews/[a-z0-9-]+/\d{4}-\d\d-\d\d-pr\d+\.md$")
+          for path, text in json.loads(pathlib.Path(sys.argv[1]).read_text()).items():
+              p = pathlib.Path(path)
+              if not ok.match(path) or not p.parent.is_dir():
+                  sys.exit(f"refusing {path}")
+              if not p.exists():  # landed since collection: never overwritten
+                  p.write_text(text)
+          EOF
+          git add -A -- reviews
+          if git diff --cached --quiet; then
+            echo "no records missing"
+            # main already has them all: an open PR from an earlier run is obsolete.
+            gh pr close "$BRANCH" --delete-branch 2>/dev/null || true
+            exit 0
+          fi
+          test -z "$(git status --porcelain | grep -v '^A  reviews/[a-z0-9-]*/[0-9-]*-pr[0-9]*\.md$')"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -qC "$BRANCH"
+          git commit -qm "records: review records of merged PRs, as of ${GITHUB_SHA::7}"
+          # Rebuilt from main each run, so the PR stays up to date with main.
+          git push -qf origin "HEAD:refs/heads/$BRANCH"
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$BRANCH" --title "records: review records of merged PRs" \
+              --body "Collected by .github/workflows/records.yml (tools/records.py) from marked verdict comments of merged PRs; adds only new reviews/<lens>/ files. ci.yml is dispatched on this branch for the required checks."
+          fi
+          # Mark, 2026-10-10 (Decisions): bot PRs merge themselves once required checks pass.
+          gh pr merge "$BRANCH" --auto --squash \
+            || echo "::warning::auto-merge unavailable (repo setting 'Allow auto-merge'); merge the $BRANCH PR by hand"
+          # PR events from GITHUB_TOKEN start no workflows, but workflow_dispatch does, and
+          # its check runs land on the branch head, where required checks look for them.
+          gh workflow run ci.yml --ref "$BRANCH"

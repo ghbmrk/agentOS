@@ -1,9 +1,9 @@
-# Rules for agents building AgentOS
+# Rules for agents building agentOS
 
 Read SPEC.md for what to build and PLAN.md for how. This file is the working contract for builder (L2) and reviewer (L3) agents: rules only, one line each. docs/OPERATING.md gives the procedures and reasons behind them, and README.md maps every document and gives each role its reading order.
 
 ## Builder (L2)
-- Work only from a package brief (`briefs/<ID>.md`, linked from its BOARD.md row). Touch only files inside the brief's declared scope.
+- Work only from a package brief (`briefs/<ID>.md`, linked from its BOARD.md row). Touch only files inside the brief's declared scope. The brief names its acceptance tests; a brief listed in `tools/brief_acceptance_baseline.txt` predates that rule, so name its tests in the PR body and carry on (OPERATING §5).
 - **Tests first.** For each requirement ID in the brief, write a failing test, then the smallest change that passes it.
 - Claim coverage with a marker comment in the test file: `REQ: CRED-1, CRED-4`. Run `python3 tools/trace.py` locally to see coverage, but never commit TRACE.md: CI fails a PR that changes it, and the `trace` workflow opens a PR with the regenerated file after each merge.
 - "Done" = CI green + every brief ID covered by a passing test. Never assert done without that evidence.
@@ -22,8 +22,10 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - First line `Verdict: accept|fix-list|reject`; any verdict but accept adds `Cause: spec-gap|brief-gap|defect|scope`. Each point cites a requirement ID or a concrete defect and carries its class (OPERATING §4). Last line: the PR's next step and the reviews still owed.
 - A point outside the cited IDs is `release` or `later`, never a blocker. The release findings from one PR's reviews make one follow-up brief.
 - Review depth follows the risk tier `python3 tools/risk_tier.py --git origin/main HEAD` prints; the stages each tier needs are in OPERATING §3–4. Tier A needs the strongest model and an explicit threat check.
+- **Records are bot-only** (RECORDS-INLINE, #1816). The verdict stays the PR's review comment; the daily `records` workflow is the only writer of `reviews/` files (at most one records-only merge a day). It records only a comment in the shape OPERATING §4 "Verdict comment shape" shows: `Verdict:` (and `Cause:`) first, then a `# <title>` line, directly under it `Record: PR #N · package <ID> · head <SHA>`, then one `<!-- record: <lens> -->` per lens recorded (`l3`, `security`, `potency`, `ux`, `combined`). Never push a record file to a PR. After an accept, push to the PR only to fix another review's finding: disarm first if armed, push, get a delta review, then re-arm.
+- **The last accept arms the merge** (ARM-AT-ACCEPT, #1819). The session that posts the last required accept arms auto-merge itself, only when the head equals the accepted head, CI is green and every review the tier requires accepted that head (the arm note lists the verdict comment ids and the tier). Disable auto-merge before any push to an armed PR (OPERATING §7); a new head needs a delta review before re-arming. `python3 tools/premerge.py --needs-mark` prints `mark` for a PR that touches any CLAUDE.md or CLAUDE.local.md, AGENTS.md, `.mcp.json`, docs/OPERATING.md, docs/LANES.md, `.claude/`, `.github/`, broker/core/core.txt, tools/risk_tier.py, premerge.py, ci_scope*, g1_scope* or `reviews/*/README*`: Mark presses Merge on those, nobody arms them.
 - Each review runs in a new session. There are no standing reviewer or lens sessions; lens memory lives in DECISIONS.md and `reviews/<lens>/README.md`.
-- A kind of finding seen on a second PR becomes a lint rule, test or CI check in the next package that touches the area, listed in the lens README (OPERATING §4).
+- A kind of finding seen on a second PR becomes a lint rule, test or CI check in that same follow-up PR, named on its Findings line and listed in the lens README (OPERATING §4, FIRST-PASS).
 
 ## Budget (reasons: OPERATING §1, §5)
 - The only hard limit is the subscription (usage credits off). Target: ~100% of the weekly limit used by each reset (Mark, 2026-10-04). ~14% a day is not a ceiling: "14% a day shouldn't be a ceiling. No ceiling as long as not wasteful" (Mark, 2026-10-13 12:40Z). Spend where the next unit of work has clear value, don't idle, and don't spend just because budget remains.
@@ -31,7 +33,7 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - Keep contexts small: brief + touched files. Summarize CI logs instead of pasting them.
 - Cold starts cost most: on 5.5 models a cache write costs 40x a cache read. Per merged PR, minimise sessions started, wakes after >1h idle, model switches and compactions (OPERATING §1, §5).
 - Pick the model at spawn; never switch models mid-session. A second opinion is a fresh session.
-- A session past 150k that will idle over an hour writes a hand-off packet and stops watching. The coordinator routes, and merges in its own turn; investigation goes to a thread.
+- A session past 150k that will idle over an hour writes a hand-off packet and stops watching. The coordinator routes; investigation goes to a thread.
 - `.claude/settings.json` compacts at 200k tokens; don't raise it.
 - Size each package so its brief is 20k tokens or less and it finishes under 150k; split it before starting otherwise.
 - One package or one review per session. Start a fresh session with a hand-off packet of 20k tokens or less (OPERATING §5) rather than reviving a session over ~150k that sat idle more than an hour.
@@ -47,5 +49,5 @@ Read SPEC.md for what to build and PLAN.md for how. This file is the working con
 - Questions for Mark go to the coordinator, who asks them on a Decisions card, one-word answerable, with a recommendation; actions only Mark can take are issues labelled `decision`.
 - A PR that fixes a defect in already-merged code carries a `Defect: <package ID>` line in its body; METRICS.md counts them for L4.
 - SPEC.md changes only through an L1 spec-diff PR that Mark approves.
-- Mark's two Claude subscriptions are equal peers: either builds any row and merges under the same rule (D-099). Other teams (another vendor's agent, a teammate) work only in their own lane (docs/LANES.md), claim rows (their issue's `state:building` label) before building, run their own fresh L3 review before marking a PR ready, and merge only their own PRs through `tools/premerge.py` (D-100, OPERATING §7); the repository is the only shared state.
+- Mark's two Claude subscriptions are equal peers: either builds any row and arms the merge of any PR it just accepted under the same rule (D-099, D-120). Other teams (another vendor's agent, a teammate) work only in their own lane (docs/LANES.md), claim rows (their issue's `state:building` label) before building, run their own fresh L3 review before marking a PR ready, and merge only their own PRs through `tools/premerge.py` (D-100, OPERATING §7); the repository is the only shared state.
 - Number decisions and new BOARD rows in your team's namespace (the peers use the plain `D-NNN`).

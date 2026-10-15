@@ -55,7 +55,7 @@ func TestSendReceiptRefusedBeforeQueueIsNotSent(t *testing.T) {
 		t.Fatalf("wrong recipient: %+v %v", r, err)
 	}
 	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
-	if r, err := l.SendReceipt(ownerNum, "Digest."); !errors.Is(err, modem.ErrDown) || r.Outcome != ReceiptNotSent || r.Evidence == "" {
+	if r, err := l.SendReceipt(ownerNum, "Digest."); !errors.Is(err, modem.ErrNotSent) || r.Outcome != ReceiptNotSent || r.Evidence == "" {
 		t.Fatalf("line down: %+v %v", r, err)
 	}
 	l, _ = rig(t)
@@ -63,7 +63,7 @@ func TestSendReceiptRefusedBeforeQueueIsNotSent(t *testing.T) {
 		sendAsync(l, ownerNum, "hi")
 	}
 	time.Sleep(100 * time.Millisecond)
-	if r, err := l.SendReceipt(ownerNum, "Digest."); !errors.Is(err, modem.ErrDown) || r.Outcome != ReceiptNotSent {
+	if r, err := l.SendReceipt(ownerNum, "Digest."); !errors.Is(err, modem.ErrNotSent) || r.Outcome != ReceiptNotSent {
 		t.Fatalf("queue full: %+v %v", r, err)
 	}
 }
@@ -72,7 +72,7 @@ func TestSendReceiptRefusedBeforeQueueIsNotSent(t *testing.T) {
 func TestSendReceiptTimeoutBeforeHandIsNotSent(t *testing.T) {
 	l := quick(t)
 	r, err := l.SendReceipt(ownerNum, "Digest.")
-	if !errors.Is(err, modem.ErrDown) || r.Outcome != ReceiptNotSent || !strings.HasPrefix(r.Evidence, "not-handed:") {
+	if !errors.Is(err, modem.ErrNotSent) || r.Outcome != ReceiptNotSent || !strings.HasPrefix(r.Evidence, "not-handed:") {
 		t.Fatalf("%+v %v", r, err)
 	}
 	if l.TimedOut() != 1 {
@@ -92,7 +92,7 @@ func TestSendReceiptTimeoutAfterHandIsUnknown(t *testing.T) {
 	done := receiptAsync(l, "Digest.")
 	it := poll(t, l)
 	got := <-done
-	if !errors.Is(got.err, modem.ErrDown) || got.r.Outcome != ReceiptUnknown || got.r.Evidence != it.ID {
+	if !errors.Is(got.err, modem.ErrDown) || errors.Is(got.err, modem.ErrNotSent) || got.r.Outcome != ReceiptUnknown || got.r.Evidence != it.ID {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -133,7 +133,7 @@ func TestSendReceiptRecipientIsNotSent(t *testing.T) {
 	it := poll(t, l)
 	call(t, l, bridgeproto.OpSent, bridgeproto.Sent{ID: it.ID, Code: bridgeproto.CodeRecipient}, nil)
 	got := <-done
-	if !errors.Is(got.err, modem.ErrDown) || got.r.Outcome != ReceiptNotSent || got.r.Evidence != "recipient:"+it.ID {
+	if !errors.Is(got.err, modem.ErrNotSent) || got.r.Outcome != ReceiptNotSent || got.r.Evidence != "recipient:"+it.ID {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -147,7 +147,7 @@ func TestSendReceiptOtherCodesAreUnknown(t *testing.T) {
 		it := poll(t, l)
 		call(t, l, bridgeproto.OpSent, bridgeproto.Sent{ID: it.ID, Code: code}, nil)
 		got := <-done
-		if !errors.Is(got.err, modem.ErrDown) || got.r.Outcome != ReceiptUnknown || got.r.Evidence != it.ID || got.r.Code != code {
+		if !errors.Is(got.err, modem.ErrDown) || errors.Is(got.err, modem.ErrNotSent) || got.r.Outcome != ReceiptUnknown || got.r.Evidence != it.ID || got.r.Code != code {
 			t.Fatalf("%s: %+v", code, got)
 		}
 	}
