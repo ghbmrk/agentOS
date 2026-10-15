@@ -18,7 +18,7 @@ import (
 // come up on the card's network (#1525, CH-12): fixed wording, GSM-7 in
 // one segment, a step the owner can take. It points only at the newest
 // card: the previous password is never brought back.
-const apUpText = "My Wi-Fi is not coming back up on your card's network. Restart the box, then join my Wi-Fi with your newest Owner Card."
+const apUpText = "My Wi-Fi is not coming back up on your card's network. Restart me, then join my Wi-Fi with your newest Owner Card."
 
 // apUpEvery is how often agentosd looks at agentos-ap's failure count.
 const apUpEvery = 10 * time.Second

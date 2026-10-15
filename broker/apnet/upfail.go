@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/durable"
 )
@@ -39,19 +38,16 @@ func UpFailuresPath(apNet string) string {
 }
 
 // NetworkID names the version of the network file at apNet without
-// reading it: its inode and modification time. Every rewrite is a
-// rename of a new file (durable.WriteFile), so each rotation gets a new
-// one.
+// reading it: its modification time, to the nanosecond, and size.
+// Every rewrite is a rename of a newly written file (durable.WriteFile),
+// so each rotation gets a new one. No inode: the control path may not
+// import syscall (ARC-2).
 func NetworkID(apNet string) (string, error) {
 	fi, err := os.Stat(apNet)
 	if err != nil {
 		return "", err
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", errors.New("card network: no inode")
-	}
-	return fmt.Sprintf("%d-%d", st.Ino, fi.ModTime().UnixNano()), nil
+	return fmt.Sprintf("%d-%d", fi.ModTime().UnixNano(), fi.Size()), nil
 }
 
 // RecordUpFailure counts one more failure for the network file's current

@@ -169,7 +169,7 @@ func TestTheAPUpTextIsPlain(t *testing.T) {
 		t.Fatalf("%d segments, GSM-7 %v", n, gsm)
 	}
 	low := strings.ToLower(apUpText)
-	for _, w := range []string{"restart the box", "newest owner card"} {
+	for _, w := range []string{"restart me", "newest owner card"} {
 		if !strings.Contains(low, w) {
 			t.Fatalf("missing %q", w)
 		}
