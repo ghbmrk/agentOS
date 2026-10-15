@@ -225,6 +225,9 @@ jobs:
         env:
           AGENTOS_REQUIRE_SWTPM: "1"
         run: go test -race -count=1 $(cat "$RUNNER_TEMP/shard")
+      - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: rm -rf "$(go env GOCACHE)/fuzz"
       - name: Go build cache upload (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
@@ -375,10 +378,12 @@ jobs:
             -test.run '^TestHostapdChildRunsAsItsOwnUser$'
       - name: Does this change reach the fuzz leaf peaks? (CI-SHARD)
         # A pull request skips the measurement only when tools/ci_split.py, as the BASE commit
-        # has it (so a PR cannot change the rule for itself), finds no changed path among its
-        # inputs: the directories of every module package the targets and loop7's test build
-        # from, the fuzz manifest, the module files and the workflow. A push to main, any other
-        # event, and any error here measure.
+        # has it, finds no changed path among its inputs: the directories of every module
+        # package the targets and loop7's test build from, the fuzz manifest, the module files
+        # and the workflow. The base copy is defence in depth only: on pull_request this
+        # workflow comes from the PR head, so a PR can rewrite this step; ci.yml and ci_split.py
+        # are tier A (human review) and in PEAK_FILES, so changing either always measures. A
+        # push to main, any other event, any error here, and any path git quotes measure.
         id: peaks
         working-directory: broker
         env:
@@ -389,7 +394,7 @@ jobs:
           # HEAD is the PR's test merge (base^1, branch^2), as in the checks job.
           if [ "$EVENT" = pull_request ] \
             && git show HEAD^1:tools/ci_split.py > "$t/ci_split.py" 2>/dev/null \
-            && git diff --no-renames --name-only HEAD^1 HEAD > "$t/changed" \
+            && git -c core.quotePath=false diff -z --no-renames --name-only HEAD^1 HEAD > "$t/changed" \
             && pkgs=$(jq -r '.targets[].pkg | "./" + .' ../image/fuzz-targets.json | sort -u) \
             && { CGO_ENABLED=0 go list -deps -test ./loop7 $pkgs && go list -deps -test ./loop7 $pkgs; } > "$t/deps"; then
             run=$(python3 -I "$t/ci_split.py" peaks --event "$EVENT" --deps "$t/deps" --changed "$t/changed") || run=run
