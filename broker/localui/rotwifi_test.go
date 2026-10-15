@@ -86,7 +86,9 @@ func TestRotationHandsOffAWiFiPasswordThatMayBeInEffect(t *testing.T) {
 			if n := x.nets(); n != 1 {
 				t.Fatalf("handed off %d networks", n)
 			}
-			if b := w.Body.String(); w.Code != http.StatusGone || strings.Contains(b, wifiKeptInEffect) {
+			// #1614 U-2: the owner learns the Wi-Fi switched and how to
+			// rejoin, as after a commit that stood.
+			if b := w.Body.String(); w.Code != http.StatusGone || strings.Contains(b, wifiKeptInEffect) || !strings.Contains(b, wifiSwitched) {
 				t.Fatalf("in-effect page: %d %s", w.Code, b)
 			}
 		})
@@ -95,7 +97,9 @@ func TestRotationHandsOffAWiFiPasswordThatMayBeInEffect(t *testing.T) {
 
 // #1523: when a card that may be in effect (409, or no answer) cannot
 // switch the Wi-Fi, the owner's page says so after the in-effect text
-// (CH-12), and shows no password.
+// (REC-4), and shows no password. The note asks for the Wi-Fi part on the
+// next card: after no answer nothing may be owed, so a card started
+// without it would leave the old password on the air (#1614 U-1).
 func TestAnInEffectRotationThatCannotSwitchTheWiFiSaysSo(t *testing.T) {
 	for name, commitErr := range map[string]error{
 		"in effect": &VaultError{Status: http.StatusConflict, Msg: "in effect"},
@@ -110,6 +114,9 @@ func TestAnInEffectRotationThatCannotSwitchTheWiFiSaysSo(t *testing.T) {
 			b := w.Body.String()
 			if w.Code != http.StatusGone || !strings.Contains(b, "already in effect") || !strings.Contains(b, wifiKeptInEffect) {
 				t.Fatalf("in-effect page: %d %s", w.Code, b)
+			}
+			if !strings.Contains(wifiKeptInEffect, "include the Wi-Fi password") {
+				t.Fatalf("the note does not ask for the Wi-Fi part: %q", wifiKeptInEffect)
 			}
 			if strings.Contains(b, x.gen.WiFiPassword) {
 				t.Fatal("the page shows the password")

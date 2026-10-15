@@ -929,6 +929,11 @@ func main() {
 	if line != nil {
 		go line.run(ctx)
 	}
+	// The owner hears once when the access point keeps failing on the
+	// card's network (#1525).
+	if apNetPath != "" {
+		go watchAPUp(ctx, apNetPath, informOwner(d.Owner))
+	}
 	// What is off, in the box log too (OP-9); the digest's sender (DIG-1)
 	// takes this list once it lands.
 	logCapLines(capLines)
@@ -1340,6 +1345,17 @@ func ownerVerifyErr(err error) error {
 // recallNotify is recall's take-back notice to the owner. Each closes a
 // take-back the owner approved, so it is approval class; the texts name
 // the agent, so they keep the agent prefix (W5-Dc-r1b QH-9).
+// informOwner sends the broker's fixed-wording notices (owner.Inform)
+// once the owner channel is up.
+func informOwner(own func() *owner.Channel) func(string) error {
+	return func(text string) error {
+		if ch := own(); ch != nil {
+			return ch.Inform(text)
+		}
+		return errors.New("no owner channel")
+	}
+}
+
 func recallNotify(own func() *owner.Channel) func(string) error {
 	return func(text string) error {
 		if ch := own(); ch != nil {

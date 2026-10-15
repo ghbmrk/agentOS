@@ -11,8 +11,7 @@ import "strings"
 // page itself cannot tell the causes apart: every hook error reads "Could
 // not save" and setup stays at "6. This PC" whatever went wrong.
 var xfail = map[string]expectedFailure{
-	"guest-task":    {1701, notDriven},
-	"phone-control": {1714, notDriven},
+	"guest-task": {1701, notDriven},
 }
 
 // notDriven starts the error of a step the driver does not run yet.
