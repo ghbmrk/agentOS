@@ -82,17 +82,38 @@ type Runner struct {
 	Reserve      func() float64 // the owner's reserve, 0..1
 	Scan         func(string) bool
 	Journal      func(Event)
-	SignIn       func(provider string) // sets the ONB-9 sign-in line
-	Logf         func(format string, args ...any)
-	Caps         Caps
-	NewID        func() string // a fresh "pw-" worker ID
+	// SignIn sets the ONB-9 sign-in line and OnSignedIn clears it. Both are
+	// called with the runner's lock held, in the same hold that changes
+	// the route's stopped state, so the line always matches it; neither
+	// may call back into the Runner.
+	SignIn     func(provider string)
+	OnSignedIn func(provider string)
+	// SignInFor marks worker id's route, before the worker is created, as a
+	// sign-in route: the vault process opens only the sign-in endpoints for
+	// it and stores the login it brings back (StartSignIn).
+	SignInFor func(id string)
+	// SignInStored is whether sign-in worker id's own sign-in stored the
+	// plan login (the vault process's record of that worker's commit):
+	// false when the vault cannot say. It is the only signal that a
+	// sign-in took; a login stored earlier, or the CLI's exit status, is
+	// not one.
+	SignInStored func(id string) bool
+	// Background bounds a sign-in's wait for the owner, which outlives
+	// StartSignIn's caller; nil is never cancelled.
+	Background  context.Context
+	SignInTimes SignInTimes
+	Logf        func(format string, args ...any)
+	Caps        Caps
+	NewID       func() string // a fresh "pw-" worker ID
 
-	// mu guards stopped and told. A refused login stops the provider's
-	// route for every later run (CRED-5: no retry, since retries can worsen
-	// a restriction), and the owner is told once, until SignedIn.
+	// mu guards stopped, told and signing, and orders the sign-in line's
+	// changes. A refused login stops the provider's route for every later
+	// run (CRED-5: no retry, since retries can worsen a restriction), and
+	// the owner is told once, until SignedIn.
 	mu      sync.Mutex
 	stopped map[string]bool // provider: a refused login stopped its route
 	told    map[string]bool // provider: SignIn already called
+	signing map[string]bool // provider: a sign-in is running (StartSignIn)
 }
 
 // SignedIn is the owner's sign-in or resume for provider: its route runs
@@ -102,6 +123,9 @@ func (r *Runner) SignedIn(provider string) {
 	defer r.mu.Unlock()
 	delete(r.stopped, provider)
 	delete(r.told, provider)
+	if r.OnSignedIn != nil {
+		r.OnSignedIn(provider) // under mu: a refusal racing it cannot be undone
+	}
 }
 
 func (r *Runner) isStopped(provider string) bool {
@@ -126,11 +150,11 @@ func (r *Runner) signIn(provider string, stop bool) {
 			r.told = map[string]bool{}
 		}
 		r.told[provider] = true
+		if r.SignIn != nil {
+			r.SignIn(provider) // under mu, ordered with SignedIn's clear
+		}
 	}
 	r.mu.Unlock()
-	if first && r.SignIn != nil {
-		r.SignIn(provider)
-	}
 }
 
 func (r *Runner) logf(format string, args ...any) {

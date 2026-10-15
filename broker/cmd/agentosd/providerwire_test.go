@@ -22,7 +22,7 @@ import (
 // The wired runner starts nothing until the rows that fill its inputs land:
 // Codex's qualification record is empty (#809), Claude is an opt-in (#1380).
 func TestProviderRunnerIsClosedByDefault(t *testing.T) {
-	r := providerRunner(nil, nil)
+	r := providerRunner(nil, nil, nil)
 	for provider, want := range map[string]provagent.Reason{"codex": provagent.Unqualified, "claude": provagent.OptInRequired} {
 		_, err := r.Run(context.Background(), provagent.Request{Provider: provider, Brief: "b", TaskClass: "code",
 			Label: vm.Public, Class: admission.Experiment, MemMB: 256})
@@ -39,7 +39,7 @@ func TestProviderRunnerIsClosedByDefault(t *testing.T) {
 // RES-5: once #809 fills the record and the owner grants the plan, the
 // wired runner still refuses until pool readings reach agentosd (#1856).
 func TestProviderRunnerRefusesUnreadPoolsAfterTheRecordIsFilled(t *testing.T) {
-	r := providerRunner(nil, nil)
+	r := providerRunner(nil, nil, nil)
 	d := r.Decls["codex"]
 	d.Q = provagent.Qualification{CLIVersion: "1", Evidence: "e", TermsURL: "https://t.test", TermsRead: "2026-10-01", Verdict: provagent.Allowed}
 	r.Decls["codex"] = d
@@ -65,7 +65,7 @@ func TestEveryProviderReasonHasAGuestText(t *testing.T) {
 // The adapter hands the worker tools the closed reason only, never the
 // runner's error.
 func TestProviderToolPassesTheClosedReasonOnly(t *testing.T) {
-	_, err := providerTool{providerRunner(nil, nil)}.Run(context.Background(), workers.ProviderRequest{Provider: "claude", Brief: "b", TaskClass: "code", Label: vm.Public})
+	_, err := providerTool{providerRunner(nil, nil, nil)}.Run(context.Background(), workers.ProviderRequest{Provider: "claude", Brief: "b", TaskClass: "code", Label: vm.Public})
 	var ref *workers.ProviderRefusal
 	if !errors.As(err, &ref) || ref.Reason != "opt-in-required" {
 		t.Fatalf("= %v", err)
