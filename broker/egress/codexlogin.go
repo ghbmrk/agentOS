@@ -50,6 +50,10 @@ type PlanLogins struct {
 	mu sync.Mutex
 	// byWorker[provider][worker] is that worker's current placeholders.
 	byWorker map[string]map[string]*workerPH
+	// signedBy[provider][worker] is set when that worker's sign-in swap
+	// (ForSignIn) committed a login: the one record that this sign-in, and
+	// not an earlier one, stored the login (SignedInBy).
+	signedBy map[string]map[string]bool
 }
 
 type workerPH struct {
@@ -62,7 +66,7 @@ type workerPH struct {
 // ErrVaultLocked. revoke maps each provider to the place the owner revokes
 // the login (W9).
 func NewPlanLogins(open func() (LoginStore, error), revoke map[string]string) *PlanLogins {
-	return &PlanLogins{open: open, revoke: revoke, byWorker: map[string]map[string]*workerPH{}}
+	return &PlanLogins{open: open, revoke: revoke, byWorker: map[string]map[string]*workerPH{}, signedBy: map[string]map[string]bool{}}
 }
 
 func entryName(provider string) string { return "plan-login-" + provider }
@@ -96,6 +100,17 @@ func (p *PlanLogins) Signed(provider string) (bool, error) {
 	}
 	_, ok := st.Secret(entryName(provider))
 	return ok, nil
+}
+
+// SignedInBy reports whether worker's own sign-in (ForSignIn) committed
+// provider's login to the vault. It is the sign-in's only success signal:
+// a login stored before it (an earlier, perhaps refused, one) does not
+// count, and neither does anything the worker says about itself. Forget
+// and Remove clear it.
+func (p *PlanLogins) SignedInBy(provider, worker string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.signedBy[provider][worker]
 }
 
 // ForWorker returns the Swapper for one worker's refresh responses. Its
@@ -247,6 +262,12 @@ func (s *workerSwapper) Swap(adapter string, creds map[string]string) (map[strin
 			p.byWorker[s.provider] = map[string]*workerPH{}
 		}
 		p.byWorker[s.provider][s.worker] = w
+		if s.signIn {
+			if p.signedBy[s.provider] == nil {
+				p.signedBy[s.provider] = map[string]bool{}
+			}
+			p.signedBy[s.provider][s.worker] = true
+		}
 		return nil
 	}
 	return out, commit, nil
@@ -328,6 +349,9 @@ func (p *PlanLogins) Forget(worker string) {
 	for _, m := range p.byWorker {
 		delete(m, worker)
 	}
+	for _, m := range p.signedBy {
+		delete(m, worker)
+	}
 }
 
 // Remove deletes the plan's vault entry and every placeholder, and returns
@@ -346,6 +370,7 @@ func (p *PlanLogins) Remove(provider string) (string, error) {
 	}
 	p.mu.Lock()
 	delete(p.byWorker, provider)
+	delete(p.signedBy, provider)
 	p.mu.Unlock()
 	return where, nil
 }

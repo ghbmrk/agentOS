@@ -69,3 +69,31 @@ func TestCRED5RouteControlReadsThePlanState(t *testing.T) {
 		t.Fatalf("locked: %+v %v", s, err)
 	}
 }
+
+// SignInStored asks the vault process whether that sign-in worker stored
+// the login; an error or an unreadable reply is never stored.
+func TestCRED5RouteControlReadsTheSignInsOwnCommit(t *testing.T) {
+	var path string
+	reply := `{"stored":true}`
+	status := http.StatusOK
+	c := controlStub(t, func(w http.ResponseWriter, r *http.Request) {
+		path = r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
+		if status != http.StatusOK {
+			http.Error(w, reply, status)
+			return
+		}
+		io.WriteString(w, reply)
+	})
+	if ok, err := c.SignInStored("pw-s"); err != nil || !ok || path != "POST /signedin?machine=pw-s" {
+		t.Fatalf("stored %v %v via %q", ok, err, path)
+	}
+	for _, r := range []struct {
+		body   string
+		status int
+	}{{`{"stored":false}`, http.StatusOK}, {`{}`, http.StatusOK}, {`not json`, http.StatusOK}, {"boom", http.StatusInternalServerError}, {"the vault is locked; no provider route can open", http.StatusServiceUnavailable}} {
+		reply, status = r.body, r.status
+		if ok, _ := c.SignInStored("pw-s"); ok {
+			t.Errorf("%d %q reads as stored", r.status, r.body)
+		}
+	}
+}

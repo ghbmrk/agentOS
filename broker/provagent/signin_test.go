@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,12 +49,12 @@ type signRig struct {
 	mu     sync.Mutex
 	marked []string // SignInFor's ids, in order
 	logs   []string
-	login  bool
+	stored map[string]bool // worker: its own sign-in stored the login
 	signed chan string
 }
 
 func newSignRig(prompt string) *signRig {
-	g := &signRig{signed: make(chan string, 4)}
+	g := &signRig{signed: make(chan string, 4), stored: map[string]bool{}}
 	g.h = newStub(func(c vm.Command, s *stub) vm.ExecResult {
 		if len(c.Argv) > 5 && c.Argv[0] == "sh" {
 			s.write(c.Argv[5], prompt)
@@ -70,10 +71,10 @@ func newSignRig(prompt string) *signRig {
 			defer g.mu.Unlock()
 			g.marked = append(g.marked, id)
 		},
-		HasLogin: func(string) bool {
+		SignInStored: func(id string) bool {
 			g.mu.Lock()
 			defer g.mu.Unlock()
-			return g.login
+			return g.stored[id]
 		},
 		OnSignedIn: func(p string) { g.signed <- p },
 		Logf: func(f string, a ...any) {
@@ -148,7 +149,7 @@ func TestONB3SignInShowsTheProvidersPageAndCode(t *testing.T) {
 	}
 	g.r.signIn("stub", true) // a refused login had stopped the route
 	g.mu.Lock()
-	g.login = true
+	g.stored["pw-sign"] = true
 	g.mu.Unlock()
 	g.h.write("/work"+signInStatus, "0\n")
 	select {
@@ -166,16 +167,29 @@ func TestONB3SignInShowsTheProvidersPageAndCode(t *testing.T) {
 	g.noCanary(t)
 }
 
-// A sign-in that ends without a stored login, fails, or is never approved
-// signs nothing in and leaves no worker.
+// A sign-in whose worker stored no login signs nothing in and leaves no
+// worker, whatever the CLI's exit status says. The case the ONB-9 line
+// exists for (security review 2): a refused login is still stored and has
+// stopped the route, and a CLI that exits 0 without a code exchange (or
+// anything in the worker writing 0) must not lift the stop and retry the
+// refused login (CRED-5).
 func TestONB3UnfinishedSignInSignsNothingIn(t *testing.T) {
 	for name, finish := range map[string]func(g *signRig){
 		"exit 0, no login": func(g *signRig) { g.h.write("/work"+signInStatus, "0\n") },
-		"exit 1, a login":  func(g *signRig) { g.mu.Lock(); g.login = true; g.mu.Unlock(); g.h.write("/work"+signInStatus, "1\n") },
+		"exit 0, an earlier refused login": func(g *signRig) {
+			g.mu.Lock()
+			g.stored["pw-old"] = true
+			g.mu.Unlock()
+			g.h.write("/work"+signInStatus, "0\n")
+		},
+		"exit 1, no login": func(g *signRig) { g.h.write("/work"+signInStatus, "1\n") },
 		"never approved":   func(*signRig) {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newSignRig(printed)
+			var line int
+			g.r.SignIn = func(string) { line++ }
+			g.r.signIn("stub", true) // the stored login was refused
 			g.r.SignInTimes.Wall = 50 * time.Millisecond
 			if _, _, err := g.start(t); err != nil {
 				t.Fatal(err)
@@ -187,8 +201,104 @@ func TestONB3UnfinishedSignInSignsNothingIn(t *testing.T) {
 				t.Errorf("signed %q in", p)
 			default:
 			}
+			g.r.mu.Lock()
+			told := g.r.told["stub"]
+			g.r.mu.Unlock()
+			if !g.r.isStopped("stub") || !told || line != 1 {
+				t.Errorf("the refused login's stop was lifted: stopped %v, told %v, line set %d times", g.r.isStopped("stub"), told, line)
+			}
 			g.noCanary(t)
 		})
+	}
+}
+
+// The reverse (security review 2): the vault stored this sign-in's login
+// but the CLI could not write its own auth file (CODEX_HOME root-owned,
+// K27) and exits non-zero. The owner did sign in, so the provider is
+// signed in; a login stored before the CLI exits is taken at once.
+func TestONB3StoredSignInCountsWhateverTheCLIExits(t *testing.T) {
+	for name, status := range map[string]string{"exit 1": "1\n", "still running": ""} {
+		t.Run(name, func(t *testing.T) {
+			g := newSignRig(printed)
+			g.r.signIn("stub", true)
+			if _, _, err := g.start(t); err != nil {
+				t.Fatal(err)
+			}
+			g.mu.Lock()
+			g.stored["pw-sign"] = true
+			g.mu.Unlock()
+			if status != "" {
+				g.h.write("/work"+signInStatus, status)
+			}
+			select {
+			case p := <-g.signed:
+				if p != "stub" {
+					t.Errorf("signed %q in", p)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("a stored sign-in was not taken")
+			}
+			g.gone(t)
+			if g.r.isStopped("stub") {
+				t.Error("the stored sign-in did not lift the stop")
+			}
+			g.noCanary(t)
+		})
+	}
+}
+
+// L4: the wait for the owner ends with the runner's Background context
+// (shutdown), signs nothing in, and destroys the worker.
+func TestONB3SignInWaitEndsWithTheBackgroundContext(t *testing.T) {
+	g := newSignRig(printed)
+	bg, cancel := context.WithCancel(context.Background())
+	g.r.Background = bg
+	g.r.SignInTimes.Wall = time.Hour
+	if _, _, err := g.start(t); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	g.gone(t)
+	select {
+	case p := <-g.signed:
+		t.Errorf("signed %q in", p)
+	default:
+	}
+}
+
+// Security review 3: a run refused by the old login while a sign-in lands
+// must leave the line on whenever the route is stopped. SignedIn clears the
+// line in the same lock hold that lifts the stop, so a refusal racing it
+// either lands before (and is lifted with the line) or after (and sets the
+// line again); it can never set the line just before SignedIn's clear.
+// OnSignedIn here starts that refusal and gives it time to run, which the
+// old order (clear after unlock) lost.
+func TestONB9SignInLineMatchesTheStopUnderARacingRefusal(t *testing.T) {
+	var line atomic.Bool
+	r := &Runner{SignIn: func(string) { line.Store(true) }}
+	var refused sync.WaitGroup
+	r.OnSignedIn = func(string) {
+		refused.Add(1)
+		done := make(chan struct{})
+		go func() {
+			defer refused.Done()
+			r.signIn("stub", true) // the old login's refusal
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Millisecond):
+		}
+		line.Store(false)
+	}
+	r.signIn("stub", true)
+	r.SignedIn("stub")
+	refused.Wait()
+	r.mu.Lock()
+	stopped, told := r.stopped["stub"], r.told["stub"]
+	r.mu.Unlock()
+	if !stopped || !told || !line.Load() {
+		t.Fatalf("stopped %v, told %v, line %v: the owner is not told the route stopped", stopped, told, line.Load())
 	}
 }
 
@@ -258,6 +368,13 @@ func TestONB3SignInPromptReadsOnlyTheDeclaredLink(t *testing.T) {
 		fwdLink + "/x ABCD-1234":             "",
 		"see " + fwdLink + "?x ABCD-1234":    "",
 		fwdLink + " 15 minutes) " + userCode: userCode,
+		// #1436 S2 (L2): userinfo, opaque and empty-host links are not
+		// the declared link, so they are never read.
+		"https://openai.com@evil.example/codex/device " + userCode:      "",
+		"https://auth.openai.com@evil.example/codex/device " + userCode: "",
+		"https://evil.example@auth.openai.com/codex/device " + userCode: "",
+		"https:auth.openai.com/codex/device " + userCode:                "",
+		"https:///codex/device " + userCode:                             "",
 	} {
 		link, code, ok := d.SignInPrompt(in)
 		if code != want || ok != (want != "") || (ok && link != ownLink) {
@@ -274,7 +391,8 @@ func TestONB3CodexSignInMatchesTheEgressCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	route := egress.Codex()
-	for _, l := range append(append([]string(nil), d.SignInLinks...), "https://auth.openai.com.evil.test/codex/device", "http://127.0.0.1:18432/x") {
+	for _, l := range append(append([]string(nil), d.SignInLinks...), "https://auth.openai.com.evil.test/codex/device", "http://127.0.0.1:18432/x",
+		"https://openai.com@evil.example/codex/device", "https://evil.example@auth.openai.com/codex/device", "https:auth.openai.com/codex/device", "https:///codex/device") {
 		for _, c := range []string{userCode, "abcd", "AB", "ABCD-EFGH-1234-56789"} {
 			_, gotCode, ok := d.SignInPrompt(l + " " + c)
 			link, eCode, err := route.SignInLink(l, c)

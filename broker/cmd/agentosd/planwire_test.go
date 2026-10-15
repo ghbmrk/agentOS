@@ -17,9 +17,14 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// planServer answers /plan with planStatus and planBody, and /seed with
-// seedStatus and seedBody, in place of agentos-egress.
+// planServer answers /plan with planStatus and planBody, /seed with
+// seedStatus and seedBody, and /signedin as stored says for the machine, in
+// place of agentos-egress.
 func planServer(t *testing.T, planStatus int, planBody string, seedStatus int, seedBody string) *modelroute.RouteControl {
+	return planServerStored(t, planStatus, planBody, seedStatus, seedBody, func(string) (int, string) { return http.StatusOK, `{"stored":false}` })
+}
+
+func planServerStored(t *testing.T, planStatus int, planBody string, seedStatus int, seedBody string, stored func(machine string) (int, string)) *modelroute.RouteControl {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "pp")
 	if err != nil {
@@ -44,6 +49,9 @@ func planServer(t *testing.T, planStatus int, planBody string, seedStatus int, s
 			reply(w, planStatus, planBody)
 		case "/seed":
 			reply(w, seedStatus, seedBody)
+		case "/signedin":
+			st, body := stored(r.URL.Query().Get("machine"))
+			reply(w, st, body)
 		}
 	})}
 	go srv.Serve(ln)
@@ -59,18 +67,18 @@ const lockedBody = "the vault is locked; no provider route can open"
 // cannot say (CRED-5).
 func TestPlanStateWiresGrantAndPrivateMark(t *testing.T) {
 	for _, c := range []struct {
-		name                      string
-		status                    int
-		body                      string
-		granted, privateOK, login bool
+		name               string
+		status             int
+		body               string
+		granted, privateOK bool
 	}{
-		{"granted and private", http.StatusOK, `{"granted":true,"private_ok":true}`, true, true, true},
-		{"granted only", http.StatusOK, `{"granted":true}`, true, false, true},
-		{"not signed in", http.StatusOK, `{}`, false, false, false},
-		{"vault locked", http.StatusServiceUnavailable, lockedBody, true, false, false},
-		{"route busy", http.StatusServiceUnavailable, "egress busy: too many provider calls", true, false, false},
-		{"unreadable", http.StatusOK, `not json`, false, false, false},
-		{"refused", http.StatusInternalServerError, "boom", false, false, false},
+		{"granted and private", http.StatusOK, `{"granted":true,"private_ok":true}`, true, true},
+		{"granted only", http.StatusOK, `{"granted":true}`, true, false},
+		{"not signed in", http.StatusOK, `{}`, false, false},
+		{"vault locked", http.StatusServiceUnavailable, lockedBody, true, false},
+		{"route busy", http.StatusServiceUnavailable, "egress busy: too many provider calls", true, false},
+		{"unreadable", http.StatusOK, `not json`, false, false},
+		{"refused", http.StatusInternalServerError, "boom", false, false},
 	} {
 		r := providerRunner(nil, planServer(t, c.status, c.body, http.StatusOK, "{}"), &planNote{})
 		if got := r.Granted("codex"); got != c.granted {
@@ -79,14 +87,15 @@ func TestPlanStateWiresGrantAndPrivateMark(t *testing.T) {
 		if got := r.PrivateOK("codex"); got != c.privateOK {
 			t.Errorf("%s: PrivateOK = %v", c.name, got)
 		}
-		if got := r.HasLogin("codex"); got != c.login {
-			t.Errorf("%s: HasLogin = %v", c.name, got)
+		// A stored login is not this sign-in's (security review 2).
+		if r.SignInStored("pw-sign") {
+			t.Errorf("%s: SignInStored read the plan state", c.name)
 		}
 		if r.SignInFor == nil {
 			t.Errorf("%s: SignInFor is unwired", c.name)
 		}
 	}
-	if r := providerRunner(nil, nil, nil); r.Granted("codex") || r.PrivateOK("codex") || r.HasLogin != nil || r.SignInFor != nil || r.SignIn != nil {
+	if r := providerRunner(nil, nil, nil); r.Granted("codex") || r.PrivateOK("codex") || r.SignInStored != nil || r.SignInFor != nil || r.SignIn != nil {
 		t.Fatal("a runner without route control opened an owner-side input")
 	}
 }
@@ -121,5 +130,34 @@ func TestPlanSignInLineFollowsTheRunner(t *testing.T) {
 	r.SignedIn("codex")
 	if note.Note() != "" {
 		t.Fatalf("the line outlived the sign-in: %q", note.Note())
+	}
+}
+
+// The runner's sign-in signal is the vault process's record for that
+// sign-in worker alone, and false whenever the vault process cannot say
+// (security review 2).
+func TestPlanSignInStoredIsThatWorkersCommit(t *testing.T) {
+	answers := map[string]struct {
+		status int
+		body   string
+	}{
+		"pw-new":    {http.StatusOK, `{"stored":true}`},
+		"pw-old":    {http.StatusOK, `{"stored":false}`},
+		"pw-locked": {http.StatusServiceUnavailable, lockedBody},
+		"pw-junk":   {http.StatusOK, `not json`},
+		"pw-err":    {http.StatusInternalServerError, "boom"},
+	}
+	rc := planServerStored(t, http.StatusOK, `{"granted":true}`, http.StatusOK, "{}", func(m string) (int, string) {
+		a := answers[m]
+		return a.status, a.body
+	})
+	r := providerRunner(nil, rc, &planNote{})
+	for id := range answers {
+		if got := r.SignInStored(id); got != (id == "pw-new") {
+			t.Errorf("%s: SignInStored = %v", id, got)
+		}
+	}
+	if planSignInStored(nil, "pw-new") {
+		t.Error("no route control reads as stored")
 	}
 }

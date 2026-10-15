@@ -82,14 +82,15 @@ func (d Declaration) SignInPrompt(printed string) (link, code string, ok bool) {
 
 // StartSignIn starts provider's device-code sign-in (ONB-3, #1264) in a
 // fresh private provider worker whose route is a sign-in route, and returns
-// the link and code for the owner's page. The worker then waits, past ctx,
-// for the owner to approve the code: once the CLI exits 0 and the vault
-// holds the login, the provider is SignedIn. The worker is destroyed on
-// every path. Nothing the CLI printed is logged or returned but the link
-// and code.
+// the link and code for the owner's page. The worker then waits, past ctx
+// but within r.Background, for the owner to approve the code: once the
+// vault process reports that this worker's own sign-in stored the login
+// (SignInStored), the provider is SignedIn, whatever the CLI's exit status.
+// The worker is destroyed on every path. Nothing the CLI printed is logged
+// or returned but the link and code.
 func (r *Runner) StartSignIn(ctx context.Context, provider string, class admission.Class, memMB int64) (link, code string, err error) {
 	d, ok := r.Decls[provider]
-	if !ok || len(d.SignInArgv) == 0 || d.Custody != BrokerHeld || r.SignInFor == nil || r.HasLogin == nil {
+	if !ok || len(d.SignInArgv) == 0 || d.Custody != BrokerHeld || r.SignInFor == nil || r.SignInStored == nil {
 		return "", "", refuse(Unqualified)
 	}
 	g := Gate{ImageVersion: r.ImageVersion(d.Image), Consent: r.Consent != nil && r.Consent(d.ID)}
@@ -124,7 +125,11 @@ func (r *Runner) StartSignIn(ctx context.Context, provider string, class admissi
 		return "", "", err
 	}
 	held = false
-	go r.awaitSignIn(context.WithoutCancel(ctx), id, d, t)
+	bg := r.Background
+	if bg == nil {
+		bg = context.WithoutCancel(ctx)
+	}
+	go r.awaitSignIn(bg, id, d, t)
 	return link, code, nil
 }
 
@@ -186,23 +191,38 @@ func (r *Runner) awaitPrompt(ctx context.Context, id string, d Declaration, t Si
 	}
 }
 
-// awaitSignIn waits up to t.Wall for the sign-in CLI to exit. An exit 0
-// with the login now in the vault is the owner's sign-in; anything else
-// leaves the provider as it was. Either way the worker is destroyed.
+// awaitSignIn waits up to t.Wall, or until ctx ends, for the owner's
+// sign-in. The vault process's record that this worker's sign-in stored
+// the login is the only success signal (CRED-5): an earlier login, perhaps
+// the refused one this sign-in replaces, is not, and neither is anything
+// the worker writes, its exit status included. A CLI that cannot write its
+// own auth file after the login was stored still signs the owner in. The
+// CLI's exit ends the wait: its status is read before the last check, and
+// the vault commits a login before the CLI sees it, so that check is
+// final. Either way the worker is destroyed.
 func (r *Runner) awaitSignIn(ctx context.Context, id string, d Declaration, t SignInTimes) {
 	defer r.releaseSignIn(d.ID)
 	defer r.destroy(ctx, id)
 	deadline := time.Now().Add(t.Wall)
-	for time.Now().Before(deadline) {
-		if st := strings.TrimSpace(r.read(ctx, id, d.Cwd+signInStatus, t.Link)); st != "" {
-			if st == "0" && r.HasLogin(d.ID) {
-				r.SignedIn(d.ID)
-			} else {
-				r.logf("provagent: %s sign-in ended without a login", d.ID)
-			}
+	for {
+		exited := strings.TrimSpace(r.read(ctx, id, d.Cwd+signInStatus, t.Link)) != ""
+		if r.SignInStored(id) {
+			r.SignedIn(d.ID)
 			return
 		}
-		time.Sleep(t.Poll)
+		switch {
+		case exited:
+			r.logf("provagent: %s sign-in ended without storing a login", d.ID)
+			return
+		case !time.Now().Before(deadline):
+			r.logf("provagent: %s sign-in was not approved in time", d.ID)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			r.logf("provagent: %s sign-in stopped before it was approved", d.ID)
+			return
+		case <-time.After(t.Poll):
+		}
 	}
-	r.logf("provagent: %s sign-in was not approved in time", d.ID)
 }

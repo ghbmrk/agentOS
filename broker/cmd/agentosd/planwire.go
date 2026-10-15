@@ -13,7 +13,8 @@ import (
 const planSignInLine = "ChatGPT Codex plan: I can't sign in to it, so its work uses your other routes. Sign in again on my Wi-Fi page."
 
 // planNote holds the sign-in line. The runner sets it (SignIn) and clears it
-// when a sign-in or resume lands (OnSignedIn).
+// when a sign-in or resume lands (OnSignedIn), both under its own lock, so
+// set and clear are plain stores.
 type planNote struct{ on atomic.Bool }
 
 func (n *planNote) set(string)   { n.on.Store(true) }
@@ -48,14 +49,21 @@ func planGranted(p planState, provider string) bool {
 	return s.Granted
 }
 
-// planLogin is the runner's HasLogin: strictly whether a login is stored,
-// false whenever the vault process cannot say.
-func planLogin(p planState, provider string) bool {
+// signInState asks the vault process whether a sign-in worker's own
+// sign-in stored the plan login.
+type signInState interface {
+	SignInStored(id string) (bool, error)
+}
+
+// planSignInStored is the runner's SignInStored: strictly whether sign-in
+// worker id stored the login (not whether some login is stored), false
+// whenever the vault process cannot say.
+func planSignInStored(p signInState, id string) bool {
 	if p == nil {
 		return false
 	}
-	s, err := p.Plan(provider)
-	return err == nil && s.Granted
+	ok, err := p.SignInStored(id)
+	return err == nil && ok
 }
 
 // planPrivateOK is the owner's per-plan private mark (CAP-9), false whenever
