@@ -326,14 +326,21 @@ var syncDir = durable.SyncDir
 // caller about to change something outside the vault that depends on an
 // earlier write (the TPM lockout authorization, #1558) calls Sync first and
 // stops on an error: otherwise a power cut could undo the write and leave
-// the only copy of what the outside change needs gone.
+// the only copy of what the outside change needs gone. The error wraps
+// durable.ErrDirSync.
 func (v *Vault) Sync() error {
-	if err := injectedSyncFault(); err != nil {
-		return err
+	err := injectedSyncFault()
+	if err == nil {
+		v.mu.RLock()
+		err = v.syncDir()
+		v.mu.RUnlock()
 	}
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	return v.syncDir()
+	if err != nil {
+		// durable.SyncDir returns the OS error as is; the wrap is what lets
+		// trust tell the owner the drive is at fault (errHostNotDurable).
+		return fmt.Errorf("%w: %w", durable.ErrDirSync, err)
+	}
+	return nil
 }
 
 // OnWarn sets a function that tells the owner about a rollback check that

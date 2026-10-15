@@ -337,10 +337,11 @@ func TestFailedAnchorDirSyncFailureIsPublished(t *testing.T) {
 }
 
 // syncFails makes the catch-up's directory sync fail, as if the last
-// write's name were still not durable.
+// write's name were still not durable. The error is a plain one, as
+// durable.SyncDir returns it, so callers' own wrapping is what gets tested.
 func syncFails(t *testing.T) {
 	t.Helper()
-	syncDir = func(string) error { return fmt.Errorf("%w: %w", durable.ErrDirSync, errors.New("input/output error")) }
+	syncDir = func(string) error { return errors.New("input/output error") }
 	t.Cleanup(func() { syncDir = durable.SyncDir })
 }
 

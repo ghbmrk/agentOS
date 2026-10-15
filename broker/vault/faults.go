@@ -34,8 +34,9 @@ func injectedSealFault() error {
 // test may set it while the vault runs.
 var syncFault atomic.Pointer[error]
 
-// InjectSyncFault makes every Sync fail with err, as if the vault file's
-// name were not durable. It is for tests of callers in other packages, and
+// InjectSyncFault makes every Sync fail with err, wrapped in
+// durable.ErrDirSync as a real failure is, as if the vault file's name were
+// not durable. It is for tests of callers in other packages, and
 // panics outside a test binary. restore puts back the fault that was set
 // before.
 func InjectSyncFault(err error) (restore func()) {

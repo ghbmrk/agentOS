@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -16,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
@@ -1245,7 +1243,7 @@ func TestEnrollAfterTheSlotIsDecidedWithoutAPINSaysTheHostIsTrusted(t *testing.T
 func TestLockoutAuthIsSyncedBeforeTheTPMTakesIt(t *testing.T) {
 	r := newPCRig(t)
 	r.unknownHostUnlock(t)
-	restore := vault.InjectSyncFault(fmt.Errorf("%w: input/output error", durable.ErrDirSync))
+	restore := vault.InjectSyncFault(errors.New("input/output error"))
 	defer restore()
 	if _, err := r.c.trust(r.code(), "246810"); err == nil || !errors.Is(err, errHostNotDurable) {
 		t.Fatalf("trust with a failing sync: %v", err)
@@ -1278,7 +1276,7 @@ func TestHeldLockoutAuthSurvivesAFailedSync(t *testing.T) {
 	if name == "" {
 		t.Fatal("no lockout authorization after trust with a PIN")
 	}
-	restore := vault.InjectSyncFault(fmt.Errorf("%w: input/output error", durable.ErrDirSync))
+	restore := vault.InjectSyncFault(errors.New("input/output error"))
 	defer restore()
 	if _, err := r.c.trust(r.code(), "246810"); !errors.Is(err, errHostNotDurable) {
 		t.Fatalf("trust with a failing sync: %v", err)
