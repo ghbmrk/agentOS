@@ -122,9 +122,21 @@ SERVICE_DIRS = ("var/lib/agentos-fuzz", "var/lib/agentos-localui", "var/lib/agen
 # exactly these four (listed from the build, 2acb5843) and four masks: var/lock -> /run/lock,
 # var/run -> /run, etc/mtab -> ../proc/self/mounts and etc/resolv.conf ->
 # ../run/systemd/resolve/stub-resolv.conf. The relative var/lock and var/run forms are trixie's own
-# tmpfiles lines (legacy.conf, debian.conf), so a tree they made passes too. None ends anywhere a
-# user or service user can write: /run/lock is 1777, but the link stays root's and names only it.
-# A mask (a link to exactly MASK) passes wherever it is: /dev/null is the box's own device.
+# tmpfiles lines (legacy.conf, debian.conf), so a tree they made passes too.
+# An entry, like a mask, skips every link rule (world-writable, SERVICE_DIRS, '..'), so this rule is
+# the only check on it. Add an entry only as "<rel>": ("<target>",), copied from the build's refusal,
+# with every form the tree may hold, and only if <target> names a fixed, root-owned file or directory:
+# not under /proc/self, /proc/thread-self, /proc/<pid>, /dev/fd or /dev/std*, and neither
+# world-writable nor service-owned unless named as an exception here. Then update the BOX_LINKS
+# assertion in tests/test_image.py (I23).
+# Exceptions: var/lock names /run/lock, which is 1777; the link is root's and names only that one
+# directory, which /var/lock has always been. etc/resolv.conf names a file in /run/systemd/resolve,
+# which is systemd-resolved's RuntimeDirectory=, owned by the service user systemd-resolve: readers
+# parse it as resolver configuration (nameservers, search domains, options), not code, and resolved
+# already answers every DNS query the box sends to 127.0.0.53, so owning it gains that user nothing.
+# Neither exception extends by analogy to another world-writable or service-owned target.
+# A mask (a link to exactly MASK) passes wherever it is but at a box mount point: /dev/null is the box's own
+# device.
 BOX_LINKS = {"var/lock": ("../run/lock", "/run/lock"),
              "var/run": ("../run", "/run"),
              "etc/mtab": ("../proc/self/mounts",),
@@ -203,8 +215,12 @@ def world_writable_link(root, rel):
     anything inside one: a local user, or a compromised service user, then decides what the link
     reads, whatever reads it (a unit, a generator, udev). The directory itself counts, since every
     name inside it is the user's. Any other link that reaches a box mount is refused too (default
-    deny): the only exceptions are the stock links in BOX_LINKS, matched by path and exact target,
-    and a mask."""
+    deny). A link at a box mount point itself (BOX_MOUNTS) is refused before anything else: the box
+    moves its mount onto where the link leads. Then the stock links in BOX_LINKS (matched by path
+    and exact target) and a mask pass, and skip every other rule here, on purpose: var/lock's target
+    /run/lock is 1777, so the world-writable rule would refuse it. So BOX_LINKS' admission rule (its
+    comment, I23) is the only check on an entry; the '..', world-writable and SERVICE_DIRS rules
+    apply to every other link."""
     try:
         path = tree_chase(root, rel, missing_ok=True)[0]
     except OSError:
@@ -212,6 +228,14 @@ def world_writable_link(root, rel):
         # the link reads nothing. Keep it so if tree_chase changes, or this becomes a quiet hole.
         return []
     target = tree_readlink(root, rel)
+    if rel in BOX_MOUNTS:
+        # Security delta 3: the box mounts its own filesystem at /dev, /proc, /sys, /run and /tmp, and
+        # switch-root and PID 1 follow a link there (systemd 257's switch-root chases each mount
+        # point in the new root), so the mount lands where the link leads: dev -> var/tmp gives a /dev
+        # anyone can write, and a missing target fails the boot. Before the mask and BOX_LINKS rules.
+        return ["%s: a link to %s; /%s is where the box mounts its %s, and a link there would move the "
+                "mount (#1702)" % (rel, target, rel, {"dev": "devtmpfs", "proc": "proc", "sys": "sysfs"}
+                                   .get(rel, "tmpfs"))]
     if target == MASK or target in BOX_LINKS.get(rel, ()):
         return []
     if ".." in path.split("/"):
@@ -219,7 +243,7 @@ def world_writable_link(root, rel):
         # /run/../var/lock is /var/lock on the box, which is /run/lock (1777). Box-made links such as
         # /dev/fd make a lexical '..' unsound inside a mount too, so any such tail is refused.
         return ["%s: a link to %s, which goes up with '..' past a directory the tree does not hold; "
-                "where it ends is not known at build time (#1702)" % (rel, tree_readlink(root, rel))]
+                "where it ends is not known at build time (#1702)" % (rel, target)]
     parts = path_parts(path)
     for k in range(1, len(parts) + 1):
         d = "/".join(parts[:k])
@@ -230,13 +254,15 @@ def world_writable_link(root, rel):
         if st is None and (d in WORLD_WRITABLE or d in SERVICE_DIRS) \
                 or st is not None and stat.S_ISDIR(st.st_mode) and st.st_mode & 0o002:
             return ["%s: a link to %s, inside /%s, which anyone on the box can write, or a service user owns; "
-                    "a local user would decide what it reads (#1543, #1702)" % (rel, tree_readlink(root, rel), d)]
+                    "a local user would decide what it reads (#1543, #1702)" % (rel, target, d)]
     if path.startswith("/") and rel.split("/", 1)[0] not in BOX_MOUNTS:
         # Default deny (#1702 delta 2): the chase stopped at a box mount (tree_chase gives only such a
         # path a leading '/'), and only BOX_LINKS' exact links may end there. A link the tree holds
         # under a box mount is hidden by the mount on the box, so it is not one.
-        return ["%s: a link to %s, which reaches %s, made by the box at boot; where it ends is not known "
-                "at build time, and only the stock links in BOX_LINKS may end there (#1702)" % (rel, target, path)]
+        return ["%s: a link to %s%s, which ends in /%s, which the box fills at boot, so where it ends is not "
+                "known at build time; ship the file itself, or, if this link is stock and names a fixed "
+                "root-owned file, add it to BOX_LINKS per I23 (#1702)"
+                % (rel, target, "" if path == target else ", which reaches " + path, path.split("/")[1])]
     return []
 
 

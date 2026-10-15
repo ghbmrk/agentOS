@@ -2326,7 +2326,7 @@ class ConfFilesTest(unittest.TestCase):
                 with self.subTest(rel=rel, target=target):
                     f = link(self.root, rel, target)
                     try:
-                        self.assertIn("%s: a link to %s, which reaches /" % (rel, target), self.v())
+                        self.assertTrue(self.box_refused(rel, target), self.v())
                     finally:
                         f.unlink()
         # A link the tree holds under a box mount is hidden by the mount on the box.
@@ -2334,25 +2334,109 @@ class ConfFilesTest(unittest.TestCase):
         self.assertEqual(check.violations(self.root), [])
         f.unlink()
 
+    def box_refused(self, rel, target):
+        # The default deny's refusal of REL, naming the link, its target once (or where it reaches, if
+        # that differs) and the remedy.
+        path = check.tree_chase(str(self.root), rel, missing_ok=True)[0]
+        head = "%s: a link to %s%s, which ends in /%s," % (
+            rel, target, "" if path == target else ", which reaches " + path, path.split("/")[1])
+        return any(x.startswith(head) and x.count(target) == 1 and "add it to BOX_LINKS per I23" in x
+                   for x in check.violations(self.root))
+
+    def mutant(self, old, new):
+        # mkosi.finalize with OLD (which must be there exactly once) replaced by NEW, loaded as a module.
+        src = (MK / "mkosi.finalize").read_text()
+        self.assertEqual(src.count(old), 1, "the mutant's source line is gone from mkosi.finalize; "
+                         "update this test to the line as it now reads: %r" % old)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        mut = pathlib.Path(tmp.name) / "mutant.py"
+        mut.write_text(src.replace(old, new))
+        # Beside the mutant, where it looks for its allowlist, so its whole check can run.
+        (pathlib.Path(tmp.name) / check.TMPFILES_ALLOW).write_text((MK / check.TMPFILES_ALLOW).read_text())
+        m = load("image_check_mutant", mut)
+        m.TREE_OWNER = os.geteuid()
+        return m
+
     def test_without_the_default_deny_the_box_links_pass(self):
         # The mutant: drop the default deny, and every bypass passes the link rule (the '..', world-
         # writable and SERVICE_DIRS rules do not see them).
-        old = '    if path.startswith("/") and rel.split("/", 1)[0] not in BOX_MOUNTS:\n'
-        src = (MK / "mkosi.finalize").read_text()
-        self.assertEqual(src.count(old), 1)
-        with tempfile.TemporaryDirectory() as tmp:
-            mut = pathlib.Path(tmp) / "mutant.py"
-            mut.write_text(src.replace(old, "    if False:\n"))
-            m = load("image_check_mutant", mut)
-            self.box_tree()
-            for target in self.BOX_BYPASSES:
-                with self.subTest(target=target):
-                    f = link(self.root, "etc/udev/rules.d", target)
-                    try:
-                        self.assertEqual(m.world_writable_link(str(self.root), "etc/udev/rules.d"), [])
-                        self.assertNotEqual(check.world_writable_link(str(self.root), "etc/udev/rules.d"), [])
-                    finally:
-                        f.unlink()
+        m = self.mutant('    if path.startswith("/") and rel.split("/", 1)[0] not in BOX_MOUNTS:\n',
+                        "    if False:\n")
+        self.box_tree()
+        for target in self.BOX_BYPASSES:
+            with self.subTest(target=target):
+                f = link(self.root, "etc/udev/rules.d", target)
+                try:
+                    self.assertEqual(m.world_writable_link(str(self.root), "etc/udev/rules.d"), [])
+                    self.assertNotEqual(check.world_writable_link(str(self.root), "etc/udev/rules.d"), [])
+                finally:
+                    f.unlink()
+
+    # Security delta 3: a link at a box mount point; the box would move its mount onto the target.
+    MOUNT_POINT_LINKS = (("dev", "var/tmp"), ("proc", "var/tmp"), ("sys", "var/tmp"), ("dev", "/dev/null"),
+                         ("run", "var/tmp"), ("tmp", "var/tmp"), ("run", "/var/x"), ("sys", "../usr/lib"),
+                         ("proc", "/proc"))
+
+    def test_a_link_at_a_box_mount_point_is_refused(self):
+        self.box_tree()
+        for rel, target in self.MOUNT_POINT_LINKS:
+            with self.subTest(rel=rel, target=target):
+                f = link(self.root, rel, target)
+                try:
+                    self.assertIn("%s: a link to %s; /%s is where the box mounts its " % (rel, target, rel),
+                                  self.v())
+                    self.assertIn("a link there would move the mount (#1702)", self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_mount_point_rule_a_link_there_passes(self):
+        # The mutant: drop the mount-point line, and dev, proc and sys links pass the link rule (the
+        # carve-out exempts them, and a /dev/null target is a mask); run and tmp were refused only by
+        # accident (stray_violations' ELOOP, WORLD_WRITABLE's /tmp).
+        m = self.mutant("    if rel in BOX_MOUNTS:\n", "    if False:\n")
+        self.box_tree()
+        for rel, target in self.MOUNT_POINT_LINKS:
+            with self.subTest(rel=rel, target=target):
+                f = link(self.root, rel, target)
+                try:
+                    self.assertNotEqual(check.world_writable_link(str(self.root), rel), [])
+                    mv = m.world_writable_link(str(self.root), rel)
+                    self.assertFalse(any("would move the mount" in x for x in mv), mv)
+                    if rel in ("dev", "proc", "sys"):
+                        self.assertEqual(m.violations(self.root), [])
+                finally:
+                    f.unlink()
+
+    def test_box_links_is_exactly_the_stock_set(self):
+        # #1702 (P/UX 2): pinned, as SERVICE_DIRS is, so widening the table takes a second, reviewed edit.
+        self.assertEqual(check.BOX_LINKS, {"var/lock": ("../run/lock", "/run/lock"),
+                                           "var/run": ("../run", "/run"),
+                                           "etc/mtab": ("../proc/self/mounts",),
+                                           "etc/resolv.conf": ("../run/systemd/resolve/stub-resolv.conf",)})
+
+    def test_box_links_mutants_are_killed(self):
+        # M6, an extra entry to a reader-relative target, and M13, BOX_LINKS matched by path suffix:
+        # each lets a link through that the real check refuses.
+        old = '             "etc/resolv.conf": ("../run/systemd/resolve/stub-resolv.conf",)}\n'
+        m6 = self.mutant(old, old[:-2] + ',\n             "etc/foo": ("/dev/fd/3",)}\n')
+        with self.assertRaises(AssertionError):
+            self.assertEqual(m6.BOX_LINKS, check.BOX_LINKS)
+        f = link(self.root, "etc/foo", "/dev/fd/3")
+        self.assertEqual(m6.world_writable_link(str(self.root), "etc/foo"), [])
+        self.assertNotEqual(check.world_writable_link(str(self.root), "etc/foo"), [])
+        f.unlink()
+        m13 = self.mutant("    if target == MASK or target in BOX_LINKS.get(rel, ()):\n",
+                          "    if target == MASK or any(rel.endswith(k) and target in v "
+                          "for k, v in BOX_LINKS.items()):\n")
+        for rel, target in (("etc/x/var/run", "/run"), ("x/var/lock", "/run/lock")):
+            with self.subTest(rel=rel, target=target):
+                f = link(self.root, rel, target)
+                try:
+                    self.assertEqual(m13.world_writable_link(str(self.root), rel), [])
+                    self.assertNotEqual(check.world_writable_link(str(self.root), rel), [])
+                finally:
+                    f.unlink()
 
     def test_each_stock_box_link_passes_and_only_exactly(self):
         # Every BOX_LINKS entry passes as the stock tree holds it, and a mask anywhere; a link that
@@ -2372,6 +2456,7 @@ class ConfFilesTest(unittest.TestCase):
                 ("etc/mtab", "../proc/1/mounts"), ("etc/mtab", "../proc/self/root/mounts"),
                 ("etc/mtab", "/proc/self/mounts"),
                 ("var/run", "/run/user"), ("var/run", "/sys"), ("etc/run", "/run"),
+                ("etc/x/var/run", "/run"), ("x/var/lock", "/run/lock"),
                 ("etc/resolv.conf", "../run/systemd/resolve/resolv.conf"),
                 ("etc/resolv.conf", "../run/systemd/resolve/stub-resolv.conf/x"),
                 ("etc/resolv.conf", "../run/systemd/x/stub-resolv.conf"), ("etc/resolv.conf", "/run/systemd/resolve/stub-resolv.conf"), ("etc/resolv2.conf", "/run/systemd/resolve/stub-resolv.conf"),
