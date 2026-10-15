@@ -37,6 +37,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/claim"
+	"github.com/ghbmrk/agentos/broker/e2e/boxe2e/codexstub"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
@@ -85,6 +86,9 @@ type driver struct {
 	// codeStep is the last 30-second code window the driver used: the box
 	// takes each window's code once (CH-14).
 	codeStep int64
+	// stub is the Codex plan provider the agentos_e2e vault process
+	// reaches (#1701, ASSUMPTIONS E10).
+	stub *codexstub.Stub
 }
 
 // childEnv is every child's whole environment: systemd's own PATH for
@@ -106,8 +110,17 @@ func run(name string, args ...string) error {
 // harness puts the phone on the box's Wi-Fi: a veth pair whose box end is
 // wlan0 at the access point's address, its other end in the phone's
 // namespace, and wlan0 in the inbound exempt set as ap-exempt would add it.
-// QEMU has no radio, so agentos-ap is stopped first.
+// QEMU has no radio, so agentos-ap is stopped first. It also serves the
+// Codex plan stub and checks the vault process is the build that reaches it.
 func (d *driver) harness() error {
+	if err := checkVaultBuild(); err != nil {
+		return err
+	}
+	stub, err := serveStub()
+	if err != nil {
+		return fmt.Errorf("plan stub: %v", err)
+	}
+	d.stub = stub
 	for _, c := range [][]string{
 		{"systemctl", "stop", "agentos-ap.service"},
 		{"ip", "netns", "add", netns},

@@ -9,6 +9,11 @@
       "file": "broker/egress/codexlogin.go",
       "host": "api.openai.com",
       "why": "JWT claim key (https://api.openai.com/auth) read and written in the placeholder id_token; never contacted (#1015, CRED-5)."
+    },
+    {
+      "file": "broker/e2e/boxe2e/codexstub/stub.go",
+      "host": "api.openai.com",
+      "why": "JWT claim key (https://api.openai.com/auth) in the e2e stub's synthetic id_token; test-only, never contacted (#1701)."
     }
   ],
   "inert_literals": [

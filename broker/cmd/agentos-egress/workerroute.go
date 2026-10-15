@@ -319,6 +319,11 @@ const workerRouteRoot = "workers"
 // address guard (DEV-2).
 func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error) {
 	logins := egress.NewPlanLogins(c.loginStore, map[string]string{})
+	// up stays nil in the shipped build: the route dials through the guard.
+	up := c.modelTransport
+	if up == nil {
+		up = planUpstream(c.guard)
+	}
 	if err := runDir(dir); err != nil {
 		return nil, err
 	}
@@ -333,7 +338,7 @@ func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error)
 		}
 		return egress.WorkerRouteConfig{
 			Route: egress.Codex(), Worker: worker, Logins: logins,
-			Transport: c.modelTransport, Guard: c.guard, Audit: noAudit{},
+			Transport: up, Guard: c.guard, Audit: noAudit{},
 			Quota: func(q egress.QuotaReading) {
 				log.Printf("plan quota %s %s: %.1f%% used, exhausted=%v", q.Worker, q.Pool, q.UsedPercent, q.Exhausted)
 			},
