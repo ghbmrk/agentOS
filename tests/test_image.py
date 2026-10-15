@@ -3891,7 +3891,7 @@ class SetupServicesTest(unittest.TestCase):
     def test_the_image_creates_every_service_user(self):
         lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf").read_text().splitlines()
         users = sorted(l.split()[1] for l in lines if l.strip() and not l.startswith("#") and l.split()[0] == "u")
-        self.assertEqual(users, ["agentos-egress", "agentos-localui", "agentos-modem", "agentos-netjoin"])
+        self.assertEqual(users, ["agentos-egress", "agentos-hostapd", "agentos-localui", "agentos-modem", "agentos-netjoin"])
         for unit, user in ((PAGE_UNIT, "agentos-localui"), (MODEM_UNIT, "agentos-modem"),
                            (NETJOIN_UNIT, "agentos-netjoin")):
             s = ini(unit)["Service"]
