@@ -26,7 +26,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/digestqueue"
-	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
 	"github.com/ghbmrk/agentos/broker/localsrv"
@@ -810,7 +809,7 @@ func main() {
 			Contained: recallExec.Contained,
 		}
 		if workerRoutes != "" {
-			vmc.ProviderRoutes = egress.RouteControl{Socket: workerRoutes}
+			vmc.ProviderRoutes = modelroute.NewRouteControl(workerRoutes)
 		}
 		md.set(&vmc)
 		m, err := vm.Open(ctx, vmc)

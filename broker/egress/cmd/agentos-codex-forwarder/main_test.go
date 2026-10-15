@@ -32,13 +32,20 @@ func sockServer(t *testing.T, h http.Handler) string {
 
 func start(t *testing.T, socket string) string {
 	t.Helper()
+	return startWith(t, newRelayer(socket))
+}
+
+// startWith serves r on a fresh loopback port. Each test builds its own relayer, so bounds a
+// test narrows reach no other test's relays.
+func startWith(t *testing.T, r relayer) string {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go relay(ctx, ln, socket)
+	go r.serve(ctx, ln)
 	return ln.Addr().String()
 }
 
@@ -96,17 +103,44 @@ func TestA3ForwarderListensOnLoopbackOnly(t *testing.T) {
 }
 
 // TestCRED5ForwarderStartsTheCLIAfterListening: the command after -- runs once the port is bound,
-// and its exit status is the forwarder's.
+// with exactly the named variables and a refresh override naming that port, and its exit status
+// is the forwarder's.
 func TestCRED5ForwarderStartsTheCLIAfterListening(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "out")
+	t.Setenv("CODEX_HOME", "/var/lib/agentos-codex")
+	t.Setenv("GIT_DIR", "/dev/null")
+	t.Setenv("AGENTOS_FORWARDER_STRAY", "stray-value")
+	t.Setenv("STRAY", "stray-value")
 	code := run([]string{"-listen", "127.0.0.1:0", "-socket", filepath.Join(dir, "s.sock"), "--",
-		"/bin/sh", "-c", `echo "$AGENTOS_FORWARDER_ADDR" > ` + out + `; exit 7`})
+		"/bin/sh", "-c", `/usr/bin/env > ` + out + `; exit 7`})
 	if code != 7 {
 		t.Fatalf("exit %d, want the child's 7", code)
 	}
-	if b, _ := os.ReadFile(out); !strings.HasPrefix(string(b), "127.0.0.1:") {
-		t.Fatalf("child saw address %q", b)
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		k, v, _ := strings.Cut(l, "=")
+		env[k] = v
+	}
+	if !strings.HasPrefix(env["CODEX_REFRESH_TOKEN_URL_OVERRIDE"], "http://127.0.0.1:") ||
+		!strings.HasSuffix(env["CODEX_REFRESH_TOKEN_URL_OVERRIDE"], "/oauth/token") {
+		t.Fatalf("child's refresh override %q does not name the bound port", env["CODEX_REFRESH_TOKEN_URL_OVERRIDE"])
+	}
+	if env["CODEX_HOME"] != "/var/lib/agentos-codex" || env["GIT_DIR"] != "/dev/null" {
+		t.Fatalf("child's named variables %v", env)
+	}
+	for k := range env {
+		switch k {
+		case "PATH", "HOME", "CODEX_HOME", "GIT_DIR", "CODEX_REFRESH_TOKEN_URL_OVERRIDE":
+		case "PWD", "SHLVL", "_":
+			// set by the shell itself
+		default:
+			t.Errorf("child inherited %s", k)
+		}
 	}
 }
 
@@ -114,14 +148,16 @@ func TestCRED5ForwarderStartsTheCLIAfterListening(t *testing.T) {
 // next connection at once, so a runaway CLI cannot exhaust the worker's fds or memory; when a relay
 // ends the slot frees.
 func TestA14ForwarderCapsConnections(t *testing.T) {
-	old := maxConns
-	maxConns = 1
-	defer func() { maxConns = old }()
+	if r := newRelayer("x"); r.maxConns != 8 || r.idle != 10*time.Minute {
+		t.Fatalf("default bounds %d, %v; egress K28 and guest/codex C18 say 8 and 10 minutes", r.maxConns, r.idle)
+	}
 	hold := make(chan struct{})
 	sock := sockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-hold
 	}))
-	addr := start(t, sock)
+	r := newRelayer(sock)
+	r.maxConns = 1
+	addr := startWith(t, r)
 	first, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -149,13 +185,13 @@ func TestA14ForwarderCapsConnections(t *testing.T) {
 	resp.Body.Close()
 }
 
-// TestA14ForwarderClosesIdleRelays: a relay with no traffic either way for idleTimeout is closed.
+// TestA14ForwarderClosesIdleRelays: a relay with no traffic either way for its idle bound is
+// closed.
 func TestA14ForwarderClosesIdleRelays(t *testing.T) {
-	old := idleTimeout
-	idleTimeout = 200 * time.Millisecond
-	defer func() { idleTimeout = old }()
 	sock := sockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	addr := start(t, sock)
+	r := newRelayer(sock)
+	r.idle = 200 * time.Millisecond
+	addr := startWith(t, r)
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +204,7 @@ func TestA14ForwarderClosesIdleRelays(t *testing.T) {
 	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		t.Fatal("an idle relay was never closed")
 	}
-	if time.Since(start) < idleTimeout {
+	if time.Since(start) < r.idle {
 		t.Fatal("the relay closed before it was idle")
 	}
 }

@@ -65,7 +65,7 @@ if [ -n "${FORWARDER_BIN:-}" ]; then
 	install -m 0755 "$FORWARDER_BIN" usr/local/bin/agentos-codex-forwarder
 else
 	(cd "$here/../../broker" && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' \
-		-o "$out/usr/local/bin/agentos-codex-forwarder" ./cmd/agentos-codex-forwarder)
+		-o "$out/usr/local/bin/agentos-codex-forwarder" ./egress/cmd/agentos-codex-forwarder)
 fi
 
 # The host's shell and a few tools, with every library they load (the CLI itself is static).

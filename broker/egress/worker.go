@@ -2,15 +2,12 @@ package egress
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1017,83 +1014,4 @@ func set(list []string) map[string]bool {
 		m[v] = true
 	}
 	return m
-}
-
-// RouteControl is the broker's client of the vault process's provider
-// control socket (agentos-egress). It is a vm.Services: opening a provider
-// worker's services opens its route socket and returns the directory that
-// holds only that socket, which the machine mounts at /run/agentos; closing
-// removes it. An open that is refused (vault locked, not a provider worker)
-// is an error, so the worker does not start without its route; a locked
-// vault is ErrVaultLocked.
-type RouteControl struct{ Socket string }
-
-func (c RouteControl) do(verb, id string) (*http.Response, error) {
-	cl := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", c.Socket)
-		}},
-	}
-	// The dialer ignores the host; localhost names no outside host.
-	return cl.Post("http://localhost/"+verb+"?machine="+url.QueryEscape(id), "text/plain", nil)
-}
-
-// call posts verb for id and returns the reply body, mapping a 503 to
-// ErrVaultLocked.
-func (c RouteControl) call(verb, id string, max int64) ([]byte, error) {
-	resp, err := c.do(verb, id)
-	if err != nil {
-		return nil, fmt.Errorf("worker route for %s: %w", id, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, max))
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return body, nil
-	case http.StatusServiceUnavailable:
-		return nil, fmt.Errorf("worker route for %s: %w", id, ErrVaultLocked)
-	}
-	return nil, fmt.Errorf("worker route for %s: %s", id, strings.TrimSpace(string(body)))
-}
-
-// Open opens id's route and returns its directory. The directory must be
-// absolute, clean and named for id, whatever the reply says (K28).
-func (c RouteControl) Open(id string) (string, error) {
-	body, err := c.call("open", id, 4<<10)
-	if err != nil {
-		return "", err
-	}
-	var out struct{ Dir string }
-	if err := json.Unmarshal(body, &out); err != nil || out.Dir == "" {
-		return "", fmt.Errorf("worker route for %s: unreadable reply", id)
-	}
-	if !filepath.IsAbs(out.Dir) || filepath.Clean(out.Dir) != out.Dir || filepath.Base(out.Dir) != id {
-		return "", fmt.Errorf("worker route for %s: reply names %q, not this worker's directory", id, out.Dir)
-	}
-	return out.Dir, nil
-}
-
-// Seed returns the vm seed the vault process minted for provider worker
-// id (PlanLogins.Seed: its placeholder auth.json), for the broker to put in
-// the machine before it starts and opens its route (K28, #1015).
-func (c RouteControl) Seed(id string) (map[string][]byte, error) {
-	body, err := c.call("seed", id, 64<<10)
-	if err != nil {
-		return nil, err
-	}
-	var out map[string][]byte
-	if err := json.Unmarshal(body, &out); err != nil || len(out) == 0 {
-		return nil, fmt.Errorf("worker route for %s: unreadable seed", id)
-	}
-	return out, nil
-}
-
-// Close closes id's route; a failure leaves the route to the vault
-// process's own shutdown.
-func (c RouteControl) Close(id string) {
-	if resp, err := c.do("close", id); err == nil {
-		resp.Body.Close()
-	}
 }

@@ -47,6 +47,7 @@ STUB_TOOL = ROOT / "tests/codex_worker/stub_tool.py"
 FAKE_ENDPOINT = ROOT / "tests/codex_worker/fake_endpoint.py"
 BWRAP = "/usr/bin/bwrap"
 FORWARDER = "http://127.0.0.1:18432"
+FORWARDER_SRC = ROOT / "broker/egress/cmd/agentos-codex-forwarder/main.go"
 CODEX_HOME = "/var/lib/agentos-codex"
 WORK = "/var/lib/agentos-work"
 
@@ -267,14 +268,19 @@ class ManagedConfigTest(unittest.TestCase):
         self.assertEqual(cfg["model_provider"], "agentos")
         base = cfg["model_providers"]["agentos"]["base_url"]
         self.assertTrue(base.startswith("http://" + opts["-listen"] + "/"), base)
+        # The forwarder sets the refresh override from the port it bound, so it names that port by
+        # construction; launch env carrying one would be refused by childproc at the start (C18).
         env = dict(e.split("=", 1) for e in launch["env"])
-        self.assertTrue(env["CODEX_REFRESH_TOKEN_URL_OVERRIDE"].startswith("http://" + opts["-listen"] + "/"))
+        self.assertNotIn("CODEX_REFRESH_TOKEN_URL_OVERRIDE", env)
+        self.assertIn('"CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://"+addr+"/oauth/token"',
+                      FORWARDER_SRC.read_text())
 
     # REQ: CRED-5, CAP-11
     def test_launch_points_refresh_at_forwarder_and_runs_headless(self):
         launch = json.loads(LAUNCH.read_text())
         env = dict(e.split("=", 1) for e in launch["env"])
-        self.assertEqual(env["CODEX_REFRESH_TOKEN_URL_OVERRIDE"], FORWARDER + "/oauth/token")
+        # The refresh override is the forwarder's to set (C18), not the launch spec's.
+        self.assertNotIn("CODEX_REFRESH_TOKEN_URL_OVERRIDE", env)
         self.assertEqual(env["CODEX_HOME"], CODEX_HOME)
         # HOME is CODEX_HOME, not the workspace: git and other tools would read a workspace
         # .gitconfig or dotfile as the CLI's own configuration (#1451, C11).
@@ -896,7 +902,9 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
                     break
             threading.Event().wait(0.05)
         env = dict(e.split("=", 1) for e in json.loads(LAUNCH.read_text())["env"])
-        env.update(PATH="/usr/local/bin:/usr/bin:/bin", AGENTOS_SYNTHETIC_CANARY=self.canary)
+        # What the forwarder adds when it starts the CLI (C18).
+        env.update(PATH="/usr/local/bin:/usr/bin:/bin", AGENTOS_SYNTHETIC_CANARY=self.canary,
+                   CODEX_REFRESH_TOKEN_URL_OVERRIDE=FORWARDER + "/oauth/token")
         argv = [
             BWRAP, "--dev-bind", "/", "/",
             "--tmpfs", "/run", "--bind", str(self.fwd_dir), "/run/agentos",

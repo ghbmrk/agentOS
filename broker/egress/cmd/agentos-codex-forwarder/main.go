@@ -8,8 +8,10 @@
 // /run/agentos/route.sock; agentos-toolsh is the fallback (C18).
 //
 // Usage: agentos-codex-forwarder [-listen 127.0.0.1:18432] [-socket /run/agentos/route.sock] [-- argv...]
-// With argv, the command starts once the port is bound, AGENTOS_FORWARDER_ADDR names it, and the
-// forwarder exits with the command's status.
+// With argv, the command starts once the port is bound, through childproc, with only the
+// variables childVars names (copied from the forwarder's own environment, launch.json's env) and
+// CODEX_REFRESH_TOKEN_URL_OVERRIDE set to the bound port's /oauth/token, so the refresh override
+// names this forwarder by construction; the forwarder exits with the command's status.
 package main
 
 import (
@@ -21,10 +23,11 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 const (
@@ -32,13 +35,43 @@ const (
 	defaultSocket = "/run/agentos/route.sock"
 )
 
-// Bounds on the relay (egress K28): at most maxConns relays at once, the size of the route
-// socket's own per-worker limit; a connection past it is accepted and closed at once. A relay
-// with no traffic either way for idleTimeout is closed. Variables for tests.
-var (
-	maxConns    = 8
-	idleTimeout = 10 * time.Minute
+// Bounds on the relay (egress K28): at most defaultMaxConns relays at once, the size of the
+// route socket's own per-worker limit; a connection past it is accepted and closed at once. A
+// relay with no traffic either way for defaultIdle is closed.
+const (
+	defaultMaxConns = 8
+	defaultIdle     = 10 * time.Minute
 )
+
+// relayer is one forwarder's relay: the route socket it dials and its bounds. It is fixed before
+// serve starts and never written after, so relay goroutines read it without locks.
+type relayer struct {
+	socket   string
+	maxConns int
+	idle     time.Duration
+}
+
+func newRelayer(socket string) relayer {
+	return relayer{socket: socket, maxConns: defaultMaxConns, idle: defaultIdle}
+}
+
+// childVars are the variables the CLI is given from the forwarder's own environment (the
+// launcher's launch.json env), each by name and only when set; nothing else the forwarder's
+// environment holds reaches the CLI (childproc, cmd/agentosd L7-2).
+var childVars = []string{"PATH", "HOME", "CODEX_HOME", "GIT_DIR"}
+
+// childEnv is the CLI's whole environment: childVars, and the refresh override naming addr, the
+// port this forwarder bound (guest/codex C18).
+func childEnv(addr string) childproc.Env {
+	var kv []string
+	for _, k := range childVars {
+		if v, ok := os.LookupEnv(k); ok {
+			kv = append(kv, k+"="+v)
+		}
+	}
+	kv = append(kv, "CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://"+addr+"/oauth/token")
+	return childproc.NewEnv(kv...)
+}
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -73,17 +106,16 @@ func run(args []string) int {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go relay(ctx, ln, *socket)
+	go newRelayer(*socket).serve(ctx, ln)
 	argv := fs.Args()
 	if len(argv) == 0 {
 		<-ctx.Done()
 		return 0
 	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = append(os.Environ(), "AGENTOS_FORWARDER_ADDR="+ln.Addr().String())
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd := childproc.Command(ctx, childEnv(ln.Addr().String()),
+		childproc.Options{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, argv[0], argv[1:]...)
 	err = cmd.Run()
-	var ee *exec.ExitError
+	var ee *childproc.ExitError
 	switch {
 	case err == nil:
 		return 0
@@ -95,11 +127,12 @@ func run(args []string) int {
 	}
 }
 
-// relay serves ln until ctx ends, dialing socket for each connection. No socket, no connection:
-// the client's side is closed. Past maxConns open relays a connection is closed at once.
-func relay(ctx context.Context, ln net.Listener, socket string) {
+// serve serves ln until ctx ends, dialing the socket for each connection. No socket, no
+// connection: the client's side is closed. Past maxConns open relays a connection is closed at
+// once.
+func (r relayer) serve(ctx context.Context, ln net.Listener) {
 	go func() { <-ctx.Done(); ln.Close() }()
-	slots := make(chan struct{}, maxConns)
+	slots := make(chan struct{}, r.maxConns)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -109,7 +142,7 @@ func relay(ctx context.Context, ln net.Listener, socket string) {
 		case slots <- struct{}{}:
 			go func() {
 				defer func() { <-slots }()
-				pipe(c, socket)
+				r.pipe(c)
 			}()
 		default:
 			c.Close()
@@ -131,9 +164,9 @@ func (a activeConn) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func pipe(c net.Conn, socket string) {
+func (r relayer) pipe(c net.Conn) {
 	defer c.Close()
-	u, err := net.Dial("unix", socket)
+	u, err := net.Dial("unix", r.socket)
 	if err != nil {
 		return
 	}
@@ -143,14 +176,14 @@ func pipe(c net.Conn, socket string) {
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
-		t := time.NewTicker(idleTimeout / 4)
+		t := time.NewTicker(r.idle / 4)
 		defer t.Stop()
 		for {
 			select {
 			case <-done:
 				return
 			case now := <-t.C:
-				if now.Sub(time.Unix(0, last.Load())) >= idleTimeout {
+				if now.Sub(time.Unix(0, last.Load())) >= r.idle {
 					c.Close()
 					u.Close()
 					return

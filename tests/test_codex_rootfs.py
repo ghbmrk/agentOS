@@ -59,7 +59,7 @@ class RootfsScriptTest(unittest.TestCase):
         text = SCRIPT.read_text()
         launch = json.loads((CODEX / "launch.json").read_text())
         self.assertIn("usr" + launch["wrap"][0][4:], text)
-        self.assertIn("./cmd/agentos-codex-forwarder", text)
+        self.assertIn("./egress/cmd/agentos-codex-forwarder", text)
 
     # REQ: CRED-5, A14
     def test_wrong_tarball_is_refused_before_anything_is_installed(self):
