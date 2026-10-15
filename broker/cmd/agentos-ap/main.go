@@ -19,7 +19,9 @@
 // it brings the access point down; the unit restarts it after a death.
 //
 // It runs as root: it loads nftables, starts the exempt unit and gives the
-// radio its address. It reads the page's latch, which the page can write,
+// radio its address. hostapd runs as its own user, agentos-hostapd, with
+// NET_ADMIN and NET_RAW only (#1426): as root it would pass egress's uid-0
+// broker check. It reads the page's latch, which the page can write,
 // without following a link and only so far (readLatch).
 package main
 
@@ -33,8 +35,10 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -89,11 +93,40 @@ func main() {
 	c.Addr = p
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	ap := &localui.Hostapd{Dir: dir}
+	ap, err := newHostapd(dir, user.Lookup)
+	if err != nil {
+		log.Fatalf("agentos-ap: %v", err)
+	}
 	l := &localui.APLoader{AP: ap, Host: localui.ExecHost{}}
 	if err := run(ctx, c, l, ap.Exited); err != nil {
 		log.Fatalf("agentos-ap: %v", err)
 	}
+}
+
+// hostapdUser is the user hostapd runs as; the image's sysusers.d creates
+// it.
+const hostapdUser = "agentos-hostapd"
+
+// newHostapd is the access point with hostapd run as hostapdUser, looked
+// up at each start (no fixed uid). It fails closed: without the user, or
+// with a root uid or gid, nothing serves.
+func newHostapd(dir string, lookup func(string) (*user.User, error)) (*localui.Hostapd, error) {
+	u, err := lookup(hostapdUser)
+	if err != nil {
+		return nil, fmt.Errorf("hostapd's user: %w", err)
+	}
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("hostapd's user: uid %q: %w", u.Uid, err)
+	}
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("hostapd's user: gid %q: %w", u.Gid, err)
+	}
+	if uid == 0 || gid == 0 {
+		return nil, fmt.Errorf("hostapd's user %s is root", hostapdUser)
+	}
+	return &localui.Hostapd{Dir: dir, User: &localui.APUser{UID: uint32(uid), GID: uint32(gid)}}, nil
 }
 
 // run brings every radio down, waits for c.Iface if it has not appeared,
