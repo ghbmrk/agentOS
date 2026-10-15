@@ -138,7 +138,7 @@ func TestTheNumberStepOffersNumberEntryWhenTheBoxDoesNotKnowItsNumber(t *testing
 // code and the paired reply are setup's fixed texts, sent by the box.
 func TestTheNumberFallbackTextsThroughAgentosd(t *testing.T) {
 	r, line, _ := textRig(t)
-	const paired = "AgentOS is running on Intel(R) Client Systems NUC13ANHi5, 8 GB. This is your box's number; save it as AgentOS."
+	paired := pairedText("Intel(R) Client Systems NUC13ANHi5, 8 GB")
 	if page := html.UnescapeString(r.get("/setup")); !strings.Contains(page, "sms:"+boxNum) {
 		t.Fatalf("no box number through agentosd: %s", page)
 	}

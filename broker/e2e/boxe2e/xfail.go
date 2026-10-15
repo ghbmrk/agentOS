@@ -5,13 +5,12 @@ import "strings"
 // xfail names the steps known not to pass yet, each with its work-item
 // issue and the error text it must fail with. A listed step that fails any
 // other way is FAIL, and one that passes fails the run (XPASS), so the list
-// shrinks as the issues close. host: #1221 does not serve the "this PC"
-// step, so agentosd's hook answers errNotServed; localui journals that
-// error (hostHookLog) and the driver's host step quotes it (hostCause). The
+// shrinks as the issues close. host left the list when #1221 served the
+// "this PC" step; if its hook fails, localui journals the error
+// (hostHookLog) and the driver's host step quotes it (hostCause), since the
 // page itself cannot tell the causes apart: every hook error reads "Could
 // not save" and setup stays at "6. This PC" whatever went wrong.
 var xfail = map[string]expectedFailure{
-	"host":          {1221, hostHookLog + "localui: not served by agentosd yet"},
 	"guest-task":    {1701, notDriven},
 	"phone-control": {1714, notDriven},
 }

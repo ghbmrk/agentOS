@@ -15,8 +15,8 @@ func TestSetupTextAllowsOnlySetupsFixedTexts(t *testing.T) {
 		"agentOS is running on this PC. This is your box's number; save it as agentOS.",
 		"agentOS is running on this PC. This is your box's number; save it as agentOS. Page code: 654321.",
 		// The PC's name and RAM (P2-2w c4d, §8.1).
-		"AgentOS is running on Intel(R) Client Systems NUC13ANHi5, 8 GB. This is your box's number; save it as AgentOS.",
-		"AgentOS is running on a PC with 16 GB. This is your box's number; save it as AgentOS.",
+		"agentOS is running on Intel(R) Client Systems NUC13ANHi5, 8 GB. This is your box's number; save it as agentOS.",
+		"agentOS is running on a PC with 16 GB. This is your box's number; save it as agentOS.",
 		"That pairing code did not match. Check the setup page.",
 		"Could not save your number. Try again.",
 	} {
