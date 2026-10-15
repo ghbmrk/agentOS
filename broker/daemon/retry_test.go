@@ -493,7 +493,7 @@ func TestOP2SettleLoopReleasesAHeldResubmission(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var through []string
-	settleLoop(ctx, eng, time.Hour, func(ctx context.Context, id string) (journal.Status, error) {
+	settleLoop(ctx, eng, time.Hour, settleWait, settleMaxWait, func(ctx context.Context, id string) (journal.Status, error) {
 		through = append(through, id)
 		return eng.Dispatch(context.Background(), id)
 	})
