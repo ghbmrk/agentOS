@@ -1,4 +1,4 @@
-# AgentOS hardware test checklist (S1 boot, S2 modem)
+# agentOS hardware test checklist (S1 boot, S2 modem)
 
 Print this. Tick boxes and write on it; send a photo of it with the results folder when done.
 

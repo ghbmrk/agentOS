@@ -20,6 +20,7 @@ type startBox struct {
 	claim, latch change.MemStore
 	setup        change.MemStore // the seller's setup network; empty on a download box
 	setupStore   Store           // replaces setup when set
+	download     bool            // the image is the download's (BoxConfig.Download)
 	vault        bool
 	resets       int
 	shown        card.Card
@@ -35,6 +36,7 @@ func (b *startBox) begin(t *testing.T) (*FirstBoot, error) {
 		Claim:    claim.Config{Store: &b.claim, BootID: func() (string, error) { return "boot-1", nil }},
 		Latch:    &b.latch,
 		SetupNet: setup,
+		Download: b.download,
 		Reset:    func() error { b.resets++; b.vault = false; return nil },
 		Card: card.DisplayConfig{
 			Generate: func(r io.Reader) (*card.Card, error) {
@@ -103,10 +105,10 @@ func TestBeginRoutesASealedBoxToTheClaim(t *testing.T) {
 	}
 }
 
-// A bare install (no claim state) takes the download route: the card at
-// once, no claim screen.
+// A bare install (no claim state) of the download's image takes the
+// download route: the card at once, no claim screen.
 func TestBeginRoutesABareInstallToTheDownloadPath(t *testing.T) {
-	b := &startBox{}
+	b := &startBox{download: true}
 	fb, err := b.begin(t)
 	if err != nil {
 		t.Fatal(err)
@@ -122,6 +124,27 @@ func TestBeginRoutesABareInstallToTheDownloadPath(t *testing.T) {
 	fb, err = b.begin(t)
 	if err != nil || fb.Route != RouteDownload || fb.Card.Hold() != nil {
 		t.Fatalf("restart: %+v %v", fb, err)
+	}
+}
+
+// #1270 (CTRL-card-sock s1): only an image configured as the download's
+// takes the download route. On a preloaded image a claim state that is
+// missing, or hidden from the page, routes to reinstall: no card, no
+// reset, no setup step without the claim gate.
+func TestBeginTakesTheDownloadRouteOnlyWhenConfigured(t *testing.T) {
+	b := &startBox{}
+	fb, err := b.begin(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fb.Route != RouteReinstall || fb.Claim == nil || fb.Card.Hold() != ErrReinstall || fb.Card.Display() != nil {
+		t.Fatalf("route %q", fb.Route)
+	}
+	if _, err := fb.Claim.Claim("CANA-RYCL-AXMC-KDE2"); !errors.Is(err, claim.ErrAlreadyClaimed) {
+		t.Fatalf("claim on a box with no claim state: %v", err)
+	}
+	if l, _ := b.latch.Load(); b.resets != 0 || b.shown.WiFiName != "" || len(l) != 0 {
+		t.Fatalf("resets %d, card %q, latch %q", b.resets, b.shown.WiFiName, l)
 	}
 }
 

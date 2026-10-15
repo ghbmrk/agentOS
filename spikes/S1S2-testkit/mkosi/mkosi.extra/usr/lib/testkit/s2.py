@@ -239,7 +239,7 @@ def run(conf, private):
 
     # SMS out and in
     t0 = time.monotonic()
-    res.append(("sms_out", "PASS" if m.sms(owner, "AgentOS S2 test: reply PING to this text within 5 minutes.")
+    res.append(("sms_out", "PASS" if m.sms(owner, "agentOS S2 test: reply PING to this text within 5 minutes.")
                 else "FAIL"))
     seen = {json.dumps(c, sort_keys=True) for c in m.inbox()}
     ping = wait(lambda: next((c for c in m.inbox() if json.dumps(c, sort_keys=True) not in seen

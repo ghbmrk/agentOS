@@ -178,6 +178,60 @@ class RiskTierTest(unittest.TestCase):
         self.assertIn("image/build.sh", paths)
         self.assertEqual(rt.tier_of_change(paths)[0], "A")
 
+    def _base_merge_repo(self, d, side_path=None):
+        """main gains a tier-A file after the PR branches; the PR (a docs edit) merges main in.
+
+        With side_path, the PR also merges a non-main branch that adds that path.
+        """
+        def git(*args):
+            return subprocess.run(["git", "-C", d, "-c", "user.email=t@example.invalid", "-c", "user.name=t", *args],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+
+        def add(path, text, msg):
+            os.makedirs(os.path.join(d, os.path.dirname(path)), exist_ok=True)
+            with open(os.path.join(d, path), "w") as f:
+                f.write(text)
+            git("add", ".")
+            git("commit", "-qm", msg)
+
+        git("init", "-q", "-b", "main")
+        add("docs/x.md", "x\n", "base")
+        git("checkout", "-q", "-b", "pr")
+        add("docs/x.md", "x pr\n", "pr")
+        git("checkout", "-q", "main")
+        add("image/build.sh", "echo main\n", "main moves")
+        if side_path:
+            git("checkout", "-q", "-b", "side", "pr")
+            add(side_path, "side\n", "side")
+        git("checkout", "-q", "pr")
+        git("merge", "-q", "--no-edit", "main")
+        if side_path:
+            git("merge", "-q", "--no-edit", "side")
+
+    def _paths(self, d, base, head):
+        cwd = os.getcwd()
+        os.chdir(d)
+        try:
+            return rt.changed_paths(base, head)
+        finally:
+            os.chdir(cwd)
+
+    def test_a_merge_of_main_does_not_raise_the_tier(self):
+        # #1636: lines that arrived with a base merge are not the PR's own.
+        with tempfile.TemporaryDirectory() as d:
+            self._base_merge_repo(d)
+            paths = self._paths(d, "main", "pr")
+        self.assertEqual(paths, ["docs/x.md"])
+        self.assertEqual(rt.tier_of_change(paths)[0], "C")
+
+    def test_a_side_branch_merged_in_still_counts(self):
+        # No false pass: only main's history is excluded, not any merged branch.
+        with tempfile.TemporaryDirectory() as d:
+            self._base_merge_repo(d, side_path=".github/workflows/x.yml")
+            paths = self._paths(d, "main", "pr")
+        self.assertEqual(sorted(paths), [".github/workflows/x.yml", "docs/x.md"])
+        self.assertEqual(rt.tier_of_change(paths)[0], "A")
+
     def test_paths_git_would_quote_keep_tier_a(self):
         # git diff quotes names with non-ASCII bytes, quotes, tabs, backslashes
         # or newlines; the quoted form would match no A prefix and fall to B.

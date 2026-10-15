@@ -18,6 +18,40 @@ import (
 // worker forks into one. A worker gets no guest services.
 const WorkerPrefix = "wk-"
 
+// ProviderPrefix starts the IDs of provider workers (CAP-11-plan): a
+// provider's own agent CLI in a machine the broker owns. Only
+// CreateProviderWorker makes one. It is never in Workers(lineage), takes
+// no snapshot, fork, rollback or merge, and gets no guest services: its
+// scratch holds the brief and the run's data, and the broker alone drives it.
+const ProviderPrefix = "pw-"
+
+// ErrProviderWorker refuses a snapshot, fork, rollback or merge of a
+// provider worker.
+var ErrProviderWorker = errors.New("vm: provider workers are broker-owned and take no snapshot, fork, rollback or merge")
+
+// refuseProvider fails if any id is a provider worker's.
+func refuseProvider(ids ...string) error {
+	for _, id := range ids {
+		if strings.HasPrefix(id, ProviderPrefix) {
+			return fmt.Errorf("%w (%s)", ErrProviderWorker, id)
+		}
+	}
+	return nil
+}
+
+// CreateProviderWorker admits and starts a provider worker. seed lands in
+// its fresh layer (the placeholder auth file, never a real credential), so
+// the label must be Private. The worker has a lineage of its own.
+func (m *Manager) CreateProviderWorker(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+	if !strings.HasPrefix(id, ProviderPrefix) {
+		return Machine{}, fmt.Errorf("vm: provider worker ids start %q", ProviderPrefix)
+	}
+	if s.Label != Private {
+		return Machine{}, fmt.Errorf("%w: provider worker %s is %v", ErrSeedLabel, id, s.Label)
+	}
+	return m.createSeeded(ctx, id, s, seed)
+}
+
 // ErrNoExec means the runtime cannot run commands in a machine.
 var ErrNoExec = errors.New("vm: this runtime cannot run commands in a machine")
 
@@ -177,7 +211,7 @@ func (m *Manager) TryGet(id string) (Machine, bool) {
 // workers take commands: an agent machine is driven by its
 // own runtime, never by the broker on a guest's behalf.
 func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.Duration) (ExecResult, error) {
-	if !strings.HasPrefix(id, WorkerPrefix) {
+	if !strings.HasPrefix(id, WorkerPrefix) && !strings.HasPrefix(id, ProviderPrefix) {
 		return ExecResult{}, fmt.Errorf("vm: %s is not a worker", id)
 	}
 	ex, ok := m.cfg.Runtime.(Execer)
