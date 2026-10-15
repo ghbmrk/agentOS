@@ -155,13 +155,17 @@ type Channel struct {
 	cfg  Config
 	ctrl *control.Handler
 
-	mu       sync.Mutex
-	codes    codes
-	open     map[string]*request
-	reqN     uint64 // requests opened, for their order
-	queued   map[string]*Queued
-	released map[string]time.Time // queued IDs released, for UNDO's reply
-	lateUndo map[string]bool      // released IDs the owner texted UNDO for
+	mu          holdMutex
+	sends       sync.WaitGroup // texts started after a local reply (textAfterReply)
+	inlineSends bool           // tests: textAfterReply sends before returning
+	sendTail    chan struct{}  // closed when the latest textAfterReply batch finishes; keeps batches in order
+	sendMu      sync.Mutex     // guards sendTail
+	codes       codes
+	open        map[string]*request
+	reqN        uint64 // requests opened, for their order
+	queued      map[string]*Queued
+	released    map[string]time.Time // queued IDs released, for UNDO's reply
+	lateUndo    map[string]bool      // released IDs the owner texted UNDO for
 	// undo takes an UNDO whose ID the channel does not hold (SetUndo).
 	undo atomic.Pointer[UndoHook]
 	// current confirms a held text's subjects at send (SetCurrent).
@@ -200,7 +204,19 @@ type Channel struct {
 	// pmu orders the pacer's non-urgent Post and Release (pacer.go), so
 	// held texts leave the hold once and in order. It is taken before mu.
 	pmu sync.Mutex
+	// checkedIn and countedIn are the holds of mu in which the hour's
+	// allowance was last checked and a text last counted, so a test can
+	// pin a paced check and its count to one hold (#1638).
+	checkedIn, countedIn uint64
 }
+
+// holdMutex is a sync.Mutex that numbers its holds.
+type holdMutex struct {
+	sync.Mutex
+	holds uint64
+}
+
+func (m *holdMutex) Lock() { m.Mutex.Lock(); m.holds++ }
 
 var _ control.Auth = (*Channel)(nil)
 

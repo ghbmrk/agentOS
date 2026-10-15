@@ -75,6 +75,8 @@ type trustedHost interface {
 	remove(v *vault.Vault, id string) (int, error)
 	// list describes the trusted PCs.
 	list() ([]hostInfo, error)
+	// self is this PC's host ID, or an error when its TPM cannot say.
+	self() (string, error)
 	// anchor binds the open vault to this PC's rollback counter, making
 	// the counter if needed (V6); trust calls it before enroll.
 	anchor(v *vault.Vault) error
@@ -762,8 +764,10 @@ func (h *tpmHost) enroll(v *vault.Vault, pin string) (_ string, err error) {
 	}
 	defer func() {
 		// PIN off gives the lockout back; so does a PIN slot that was
-		// never saved, when this call took the lockout.
-		if (pin == "" && err == nil) || (tookNew && err != nil) {
+		// never saved, when this call took the lockout. A slot change that
+		// errored after it was decided (ErrSlotDecided) did save the PIN
+		// slot, which needs the lockout (#1557).
+		if (pin == "" && err == nil) || (tookNew && err != nil && !errors.Is(err, vault.ErrSlotDecided)) {
 			h.giveBack(v, t, id)
 		}
 	}()
@@ -791,8 +795,9 @@ func (h *tpmHost) anchor(v *vault.Vault) error {
 
 // takeLockout makes the TPM's lockout hierarchy the vault's before a PIN
 // slot is sealed (tpmseal.TakeLockout). The authorization is stored in the
-// vault first, so it is never set on the TPM without being kept; if the
-// TPM refuses, a new entry is removed again.
+// vault first and synced to the drive (Vault.Sync, #1558), so it is never
+// set on the TPM without being kept; if the sync fails or the TPM refuses, a
+// new entry is removed again.
 func takeLockout(v *vault.Vault, t transport.TPM, id []byte) error {
 	name := lockoutAuthName(id)
 	var auth []byte
@@ -820,6 +825,17 @@ func takeLockout(v *vault.Vault, t transport.TPM, id []byte) error {
 		if err := v.Put(name, vault.KindTPMLockoutAuth, auth); err != nil {
 			return err
 		}
+	}
+	// The vault file's name must be durable too: a write that landed but
+	// failed its directory sync reports success, and a power cut could undo
+	// it after the TPM took the authorization (#1558). The TPM is still
+	// unchanged here, so a new entry is forgotten again.
+	if err := v.Sync(); err != nil {
+		clear(auth)
+		if !held {
+			v.Delete(name)
+		}
+		return err
 	}
 	err := tpmseal.TakeLockout(t, auth, held)
 	clear(auth)
@@ -1030,6 +1046,21 @@ const (
 func (h *tpmHost) sayErr(sentence string, err error) {
 	log.Printf("custody: %s: %v", sentence, err)
 	h.say(sentence)
+}
+
+func (h *tpmHost) self() (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	t, err := h.openTPM()
+	if err != nil {
+		return "", err
+	}
+	defer t.Close()
+	me, err := tpmseal.Identity(t)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(me), nil
 }
 
 func (h *tpmHost) list() ([]hostInfo, error) {

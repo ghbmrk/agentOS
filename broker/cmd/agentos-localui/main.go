@@ -76,11 +76,11 @@ func main() {
 // config is the page's configuration: setup through agentosd's socket
 // with an in-memory store (P2-2w c4), and no setup secret (Security L6).
 // The vault process's unlock socket serves both the unlock page and the
-// Owner Card rotation (REC-4) and the AI providers page; ARC-2 keeps the card's display here, not
-// in agentosd.
+// Owner Card rotation (REC-4), the AI providers page and setup's host
+// step (P2-2w c4d); ARC-2 keeps the card's display here, not in agentosd.
 func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Config {
-	cfg := localui.Config{AP: ap, Port: port,
-		Hooks: localui.AgentosdSetup{Owner: localui.Socket{Path: sock}}, Store: &localui.MemStore{}}
+	hooks := localui.AgentosdSetup{Owner: localui.Socket{Path: sock}}
+	cfg := localui.Config{AP: ap, Port: port, Store: &localui.MemStore{}}
 	if vaultSock != "" {
 		client := localui.NewUnlockClient(vaultSock)
 		cfg.Vault = client
@@ -88,7 +88,10 @@ func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Confi
 		// The AI providers page: the owner's private-data answer after
 		// setup (#1266).
 		cfg.Providers = client
+		// Setup's host step (P2-2w c4d, §8.1).
+		hooks.Vault = client
 	}
+	cfg.Hooks = hooks
 	return cfg
 }
 
