@@ -33,6 +33,15 @@ Restart=on-failure
 RestartSec=5
 # The API keys and the vault passphrase live in this process's memory (IMG-nodump).
 LimitCORE=0
+# Memory ceiling (SR3-mail-k18e): a reply the parser bounds miss ends this process, inside its own
+# cgroup, not the host or another unit; it restarts locked (fail closed). The bounded paths peak
+# near 1.2 GiB at once: eight mail calls each at mail M21's worst (a response at the field bound
+# plus a full Fetch budget), one unlock's Argon2id and the proxy's request bodies
+# (tests/test_egress_memory.py derives it). The Go heap's soft limit sits under MemoryHigh, which
+# sits under the cap, a quarter of the HW-4 floor's 8 GB.
+Environment=GOMEMLIMIT=1536MiB
+MemoryHigh=1792M
+MemoryMax=2G
 # At least the page's and the modem bridge's sandbox (Security B1 on #1302). The + steps above run
 # outside it, as root (egress-setup drops to the page's and the vault's users itself), except the
 # device policy, which binds the whole unit: drive-id reads partitions from sysfs and udev, not /dev.
