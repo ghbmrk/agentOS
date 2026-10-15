@@ -590,3 +590,31 @@ func TestAWorkerRefreshMustNameTheAccount(t *testing.T) {
 		t.Fatal("the owner's worker no longer resolves to the owner's login")
 	}
 }
+
+// #1264 c4e2: Signed reports a stored plan login (the provider is granted
+// once the owner signed in), and refuses with the vault locked.
+// REQ: CRED-5, ONB-3
+func TestSignedReportsAStoredLogin(t *testing.T) {
+	r := newLoginRig(t)
+	if ok, err := r.logins.Signed("codex"); err != nil || ok {
+		t.Fatalf("before sign-in: Signed = %v, %v", ok, err)
+	}
+	r.store(t, "pw-a", newCanaryLogin(t))
+	if ok, err := r.logins.Signed("codex"); err != nil || !ok {
+		t.Fatalf("after sign-in: Signed = %v, %v", ok, err)
+	}
+	if ok, err := r.logins.Signed("other"); err != nil || ok {
+		t.Fatalf("another provider: Signed = %v, %v", ok, err)
+	}
+	r.locked = true
+	if _, err := r.logins.Signed("codex"); !errors.Is(err, ErrVaultLocked) {
+		t.Fatalf("locked: Signed err = %v", err)
+	}
+	r.locked = false
+	if _, err := r.logins.Remove("codex"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := r.logins.Signed("codex"); ok {
+		t.Fatal("Signed after Remove")
+	}
+}

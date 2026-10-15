@@ -86,6 +86,18 @@ func (p *PlanLogins) load(provider string) (map[string]string, LoginStore, error
 	return m, st, nil
 }
 
+// Signed reports whether provider's plan login is stored: the owner has
+// signed in. It never reads the login's values. ErrVaultLocked while the
+// vault is not open.
+func (p *PlanLogins) Signed(provider string) (bool, error) {
+	st, err := p.open()
+	if err != nil {
+		return false, err
+	}
+	_, ok := st.Secret(entryName(provider))
+	return ok, nil
+}
+
 // ForWorker returns the Swapper for one worker's refresh responses. Its
 // placeholders belong to that worker alone. It only refreshes the stored
 // login: a response with no login stored, or naming another account, is

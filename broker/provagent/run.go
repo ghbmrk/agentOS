@@ -83,9 +83,18 @@ type Runner struct {
 	Scan         func(string) bool
 	Journal      func(Event)
 	SignIn       func(provider string) // sets the ONB-9 sign-in line
-	Logf         func(format string, args ...any)
-	Caps         Caps
-	NewID        func() string // a fresh "pw-" worker ID
+	OnSignedIn   func(provider string) // clears it (SignedIn calls it)
+	// SignInFor marks worker id's route, before the worker is created, as a
+	// sign-in route: the vault process opens only the sign-in endpoints for
+	// it and stores the login it brings back (StartSignIn).
+	SignInFor func(id string)
+	// HasLogin is whether provider's plan login is stored: false when the
+	// vault cannot say (StartSignIn's check that the sign-in took).
+	HasLogin    func(provider string) bool
+	SignInTimes SignInTimes
+	Logf        func(format string, args ...any)
+	Caps        Caps
+	NewID       func() string // a fresh "pw-" worker ID
 
 	// mu guards stopped and told. A refused login stops the provider's
 	// route for every later run (CRED-5: no retry, since retries can worsen
@@ -93,15 +102,19 @@ type Runner struct {
 	mu      sync.Mutex
 	stopped map[string]bool // provider: a refused login stopped its route
 	told    map[string]bool // provider: SignIn already called
+	signing map[string]bool // provider: a sign-in is running (StartSignIn)
 }
 
 // SignedIn is the owner's sign-in or resume for provider: its route runs
 // again, and a later refusal tells the owner again.
 func (r *Runner) SignedIn(provider string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	delete(r.stopped, provider)
 	delete(r.told, provider)
+	r.mu.Unlock()
+	if r.OnSignedIn != nil {
+		r.OnSignedIn(provider)
+	}
 }
 
 func (r *Runner) isStopped(provider string) bool {

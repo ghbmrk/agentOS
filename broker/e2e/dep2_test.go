@@ -29,7 +29,10 @@ var localHosts = map[string]bool{
 // is run by the AgentOS project.
 var thirdPartyHosts = map[string]bool{
 	"api.openai.com": true, "api.anthropic.com": true,
-	"nodejs.org": true, "registry.npmjs.org": true,
+	// OpenAI's device sign-in page, which the owner opens on their phone
+	// (ONB-3 step 6, provagent P11).
+	"auth.openai.com": true,
+	"nodejs.org":      true, "registry.npmjs.org": true,
 }
 
 // projectHost names a domain the project could run: anything carrying
