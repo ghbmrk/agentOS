@@ -2219,9 +2219,93 @@ class ConfFilesTest(unittest.TestCase):
                       self.v())
         w.unlink()
         (self.root / "etc/systemd/system/x.service").unlink()
-        # A link to such a directory itself is not refused (trixie's /var/lock), nor one elsewhere.
-        link(self.root, "usr/lib/x/tmp", "/tmp")
+        # Trixie's own var/lock -> ../run/lock passes, and so does a link elsewhere.
         link(self.root, "usr/lib/x/f", "../../share/f")
+        self.assertEqual(check.violations(self.root), ["var/lib/shared: mode 1777 is writable by anyone on the box (#1702)"])
+        (self.root / "var/lib/shared").chmod(0o755)
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_a_link_to_a_world_writable_directory_itself_is_refused(self):
+        # #1702 item 1: every name inside such a directory is the user's, so a link to the directory
+        # (a drop-in directory, a wants directory, udev's rules.d, a generator directory) is refused
+        # as one into it is. Only var/lock -> ../run/lock, matched by path and target, passes.
+        link(self.root, "var/lock", "../run/lock")
+        self.assertEqual(check.violations(self.root), [])
+        cases = (("etc/systemd/system/getty@.service.d", "/var/tmp", "var/tmp"),
+                 ("etc/systemd/system/getty@.service.d", "../../../var/tmp", "var/tmp"),
+                 ("etc/systemd/system/multi-user.target.wants", "/var/tmp", "var/tmp"),
+                 ("etc/udev/rules.d", "/var/tmp", "var/tmp"),
+                 ("etc/systemd/system-generators", "/tmp", "tmp"),
+                 ("etc/modules-load.d", "/dev/shm", "dev/shm"),
+                 ("usr/lib/x/q", "/dev/mqueue", "dev/mqueue"),
+                 ("usr/lib/x/q", "/run/lock", "run/lock"),
+                 ("var/lock", "/run/lock", "run/lock"), ("var/lock", "../run/lock/", "run/lock"),
+                 ("usr/lib/x/lock", "../../../run/lock", "run/lock"))
+        for rel, target, under in cases:
+            with self.subTest(rel=rel, target=target):
+                if rel == "var/lock":
+                    (self.root / rel).unlink()
+                f = link(self.root, rel, target)
+                try:
+                    self.assertIn("%s: a link to %s, inside /%s," % (rel, target, under), self.v())
+                finally:
+                    f.unlink()
+                    if rel == "var/lock":
+                        link(self.root, "var/lock", "../run/lock")
+        # With the user's 0666 file already in it, the reviewer's repro.
+        write(self.root, "var/tmp/zz-user.conf", "[Service]\nExecStartPre=/var/tmp/payload\n").chmod(0o666)
+        link(self.root, "etc/systemd/system/getty@.service.d", "/var/tmp")
+        self.assertIn("etc/systemd/system/getty@.service.d: a link to /var/tmp, inside /var/tmp,", self.v())
+
+    def test_a_link_into_a_service_users_directory_is_refused(self):
+        # #1702 item 3: a compromise of the fuzz user, the page's user or a login user then becomes
+        # root, since systemd and udev read the link's target as root.
+        for d in check.SERVICE_DIRS:
+            for rel, target in (("etc/systemd/system/ssh.service.d/x.conf", "/%s/x.conf" % d),
+                                ("etc/udev/rules.d/99-x.rules", "/%s/x.rules" % d),
+                                ("etc/modules-load.d", "/" + d), ("etc/systemd/system/x.d", "../../../" + d)):
+                with self.subTest(rel=rel, target=target):
+                    f = link(self.root, rel, target)
+                    try:
+                        self.assertIn("%s: a link to %s, inside /%s," % (rel, target, d), self.v())
+                    finally:
+                        f.unlink()
+        self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
+            "var/lib/agentos-fuzz", "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
+            "var/lib/private")))
+
+    def test_an_entry_anyone_can_write_is_refused_wherever_it_is(self):
+        # #1702 item 2: a 1777 drop-in directory, a 0777 rules.d, a 0666 enabled unit, a 0777 generator.
+        # Group write is not a rule (stock trixie has 2775 var/mail and var/local).
+        write(self.root, "etc/systemd/system/x.service", "[Service]\n")
+        link(self.root, "etc/systemd/system/multi-user.target.wants/x.service", "../x.service")
+        cases = (("etc/systemd/system/getty@.service.d", 0o1777, True), ("etc/udev/rules.d", 0o777, True),
+                 ("etc/systemd/system/x.service", 0o666, False), ("usr/lib/systemd/system-generators/x", 0o777, False),
+                 ("etc/foo", 0o2, False), ("etc/foo", 0o1777, True))
+        for rel, mode, is_dir in cases:
+            with self.subTest(rel=rel, mode=oct(mode)):
+                if is_dir:
+                    (self.root / rel).mkdir(parents=True, exist_ok=True)
+                else:
+                    write(self.root, rel, "x\n")
+                (self.root / rel).chmod(mode)
+                try:
+                    self.assertIn("%s: mode %04o is writable by anyone on the box" % (rel, mode), self.v())
+                finally:
+                    if is_dir:
+                        (self.root / rel).rmdir()
+                    elif rel != "etc/systemd/system/x.service":
+                        (self.root / rel).unlink()
+        (self.root / "etc/systemd/system/x.service").chmod(0o644)
+        self.assertEqual(check.violations(self.root), [])
+        for rel, mode in (("var/mail", 0o2775), ("var/local", 0o2775), ("usr/lib/x", 0o775)):
+            (self.root / rel).mkdir(parents=True, exist_ok=True)
+            (self.root / rel).chmod(mode)
+        self.assertEqual(check.violations(self.root), [])
+        # The directories the box makes 1777 are the ones exempt, and only by their own names.
+        for rel in check.WORLD_WRITABLE:
+            (self.root / rel).mkdir(parents=True, exist_ok=True)
+            (self.root / rel).chmod(0o1777)
         self.assertEqual(check.violations(self.root), [])
 
     def test_a_mask_is_still_read_as_nothing(self):
@@ -3214,17 +3298,24 @@ FS_CALLS = frozenset((
     "is_file", "is_dir", "is_symlink", "is_socket", "is_fifo", "is_mount", "is_block_device", "is_char_device",
     "exists", "lexists", "isfile", "isdir", "islink", "ismount", "stat", "lstat", "fstat", "statvfs", "listdir",
     "scandir", "walk", "fwalk", "iterdir", "glob", "rglob", "readlink", "realpath", "resolve", "samefile",
-    "access", "getsize", "getmtime", "getctime", "getatime", "chdir", "opendir"))
+    "access", "getsize", "getmtime", "getctime", "getatime", "chdir", "opendir",
+    # #1702: a shell or a new process reads the host's files too, and so do the xattr and pathconf calls.
+    "popen", "system", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+    "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe", "posix_spawn", "posix_spawnp",
+    "getxattr", "listxattr", "pathconf",
+    # #1702: ways to reach any of the above by a name the parse cannot see.
+    "__getattribute__", "__dict__", "modules"))
 # Built-ins that open files or reach a call by a name the parse cannot see.
 FS_NAMES = frozenset(("open", "getattr", "__import__", "eval", "exec", "globals", "vars", "memoryview"))
-FS_MODULES = frozenset(("pathlib", "glob", "shutil", "io", "posix", "fileinput", "linecache", "mmap", "subprocess"))
+FS_MODULES = frozenset(("pathlib", "glob", "shutil", "io", "posix", "fileinput", "linecache", "mmap", "subprocess",
+                        "importlib", "filecmp", "operator", "ctypes"))
 
 
 def fs_offences(source, allowed, readers):
     """(function, line, what) for each file-reading or stat call in SOURCE outside the functions
     ALLOWED names (Class.method for a method; nested functions count as their outermost), each
-    ImportFrom and each import of FS_MODULES anywhere, and each call of a function in READERS
-    from outside the callers it lists."""
+    ImportFrom and each import of FS_MODULES anywhere, and each mention of a function in READERS
+    (a call, or `rd = tree_read`, #1702) from outside the callers it lists."""
     out = []
 
     def visit(node, scope, func):
@@ -3246,9 +3337,8 @@ def fs_offences(source, allowed, readers):
             elif isinstance(child, ast.Import):
                 out.extend((where, child.lineno, "import " + a.name) for a in child.names
                            if a.name.split(".")[0] in FS_MODULES)
-            elif isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and child.func.id in readers \
-                    and where not in readers[child.func.id]:
-                out.append((where, child.lineno, child.func.id))
+            elif isinstance(child, ast.Name) and child.id in readers and where not in readers[child.id]:
+                out.append((where, child.lineno, child.id))
             visit(child, s, f)
 
     visit(ast.parse(source), [], None)
@@ -3298,6 +3388,24 @@ class TreeAccessTest(unittest.TestCase):
             "tree_read direct": [(fstab, '        for ln in tree_read(root, "etc/fstab").decode().splitlines():')],
             "os.path in a reader": [("    out, root = [], str(root)\n    places =",
                                      "    out, root = [], str(root)\n    assert os.path.exists(root)\n    places =")],
+            # #1702 item 4: the forms the first nine missed.
+            "os.popen": [(mid, '        if os.popen("cat " + root).read().strip() not in ("", "uninitialized"):')],
+            "os.system": [("\ndef violations(root):", "\nrc = os.system('cat /etc/fstab')\n\n\ndef violations(root):")],
+            "os.spawnv": [("\ndef violations(root):", "\nrc = os.spawnv(0, '/bin/cat', ['cat'])\n\n\ndef violations(root):")],
+            "os.execv": [("\ndef violations(root):", "\nos.execv('/bin/cat', ['cat'])\n\n\ndef violations(root):")],
+            "os.posix_spawn": [("\ndef violations(root):", "\nos.posix_spawn('/bin/cat', ['cat'], {})\n\n\ndef violations(root):")],
+            "os.getxattr": [(mid, '        if os.getxattr(root, "user.x") not in ("", "uninitialized"):')],
+            "os.listxattr": [("\ndef violations(root):", "\nX = os.listxattr(\"/\")\n\n\ndef violations(root):")],
+            "os.pathconf": [("\ndef violations(root):", "\nX = os.pathconf(\"/\", 0)\n\n\ndef violations(root):")],
+            "filecmp": [(mid, '        if filecmp.cmp(root, root):'), ("import os\n", "import os\nimport filecmp\n")],
+            "importlib": [("import os\n", "import os\nimport importlib\n")],
+            "operator": [(mid, '        if operator.attrgetter("lstat")(os)(root):'), ("import os\n", "import os\nimport operator\n")],
+            "ctypes": [("import os\n", "import os\nimport ctypes\n")],
+            "os.__getattribute__": [(mid, '        if os.__getattribute__("lstat")(root):')],
+            "os.__dict__": [(mid, '        if os.__dict__["lstat"](root):')],
+            "sys.modules": [(mid, '        if sys.modules["os"].lstat(root):')],
+            "tree_read alias": [(fstab, '        rd = tree_read\n        for ln in rd(root, "etc/fstab").decode().splitlines():')],
+            "tree_read passed": [(fstab, '        for ln in map(tree_read, [root], ["etc/fstab"]):')],
         }
         for name, edits in mutants.items():
             with self.subTest(name):
