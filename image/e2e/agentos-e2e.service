@@ -1,11 +1,15 @@
 # The in-image end-to-end run (#1688). Never part of the image: ci_boot.sh's e2e boot passes this
 # unit to systemd as an SMBIOS credential (systemd.extra-unit.*), which systemd honours only in a
 # VM, and the driver arrives on a read-only 9p share that agentos-e2e-seal.service mounts (it also
-# seals the claim code before the setup page starts). Results go to the serial console.
+# seals the claim code before the setup page starts). Results go to the serial console, so the
+# serial login starts only after the run: getty's start resets and hangs up ttyS0, which can
+# discard console output still queued, and in #1747 it landed among the driver's lines
+# (image/ASSUMPTIONS.md I24).
 [Unit]
 Description=agentOS end-to-end run (CI only)
 Requires=agentos-e2e-seal.service
 After=agentos-e2e-seal.service agentosd.service agentos-egress.service agentos-localui.service agentos-modem.service
+Before=serial-getty@ttyS0.service
 
 [Service]
 Type=oneshot
