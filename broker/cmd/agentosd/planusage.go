@@ -20,7 +20,7 @@ func wirePlanUsage(r *provagent.Runner, rc *modelroute.RouteControl) {
 // ownerReserve is the share of each pool kept for the owner's own use. RES-5
 // and ONB-9 default it to 0% ("Kept for your own use: 0%"); the owner's
 // per-pool setting (an OP-5 budget) is not built, and the row that builds it
-// wires it here (provagent P10).
+// wires it here (provagent P15).
 func ownerReserve(provider, pool string) float64 { return 0 }
 
 // planUsage adapts the route control's usage verb to provagent's Usage, so
