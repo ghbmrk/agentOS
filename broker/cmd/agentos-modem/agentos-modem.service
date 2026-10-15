@@ -4,6 +4,10 @@
 # the P2-3w design read).
 [Unit]
 Description=AgentOS modem bridge
+# Started after agentosd and, as systemd inverts After= for stop jobs,
+# stopped before it: on its SIGTERM the bridge sends what agentosd still
+# has queued for the owner, for at most bridge.FlushWait (45 s), while
+# agentosd still serves owner.sock (owner O34, #1772).
 After=agentosd.service
 Requires=agentosd.service
 
@@ -18,6 +22,8 @@ EnvironmentFile=/usr/lib/agentos/modem.env
 EnvironmentFile=-/etc/agentos/modem.env
 Restart=always
 RestartSec=5
+# Room for the outbox flush on SIGTERM and the modem's close.
+TimeoutStopSec=90
 
 NoNewPrivileges=yes
 CapabilityBoundingSet=
