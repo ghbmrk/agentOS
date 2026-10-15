@@ -12,7 +12,7 @@ This is an advisory proposal to the primary lane. The project remains pre-alpha;
 
 Source review covered the actual templates, state machine, card renderer, custody/enrollment assumptions, tests and queued integration. Synthetic public-interface probes rendered the current HTML and exercised failure/return paths. The browser independently inspected the fallback code page and host/privacy retry forms at 390 CSS pixels. [Portable evidence](evidence/2026-10-08-onboarding/README.md) distinguishes fake hooks from real rendering. Darwin's panic-only socket shims are never called. We did not test a real modem, phone OS, captive portal, authenticator, TPM, provider, printed QR or novice participant.
 
-The guidance below informs design, not a claim of conformance or a reason to replace AgentOS's security contract:
+The guidance below informs design, not a claim of conformance or a reason to replace agentOS's security contract:
 
 | Primary source | Relevant principle | Application and boundary |
 |---|---|---|
@@ -90,7 +90,7 @@ Each step should answer: **what am I doing, why, what did the box save, and what
 | Kit and boot | “Start from the drive; then join the Wi-Fi named on your card.” Help branches by what the owner sees. | Qualified hardware result; no blind repeated power cycling or Secure Boot downgrade. |
 | Home network | “Connect the box to the internet.” Label home Wi-Fi separately from the box's Wi-Fi. | Broker confirms connection; keep selected network after failure, never echo its password from stored state. |
 | Phone | “Text this pairing message, then return here.” Fallback becomes “Enter the code sent to …1234.” | Pairing confirmed in the authoritative state; stale code gives an actionable retry, not assumed success from opening Messages. |
-| Authenticator | “Add AgentOS, return here, then enter its current 6-digit approval code.” | Real newest-seed confirmation; ordinary typo does not create a new key. Manual/paste route stays available on one phone. |
+| Authenticator | “Add agentOS, return here, then enter its current 6-digit approval code.” | Real newest-seed confirmation; ordinary typo does not create a new key. Manual/paste route stays available on one phone. |
 | Recovery | “Keep the sheet marked Recovery key. It restores the box or replaces a lost phone.” | One actual-storage acknowledgment; key remains off the box and apart from drive/grid. |
 | This PC | Identify the actual PC and explain unattended unlock versus passphrase-plus-code next time. | Preserve the adopted trusted default, explicit opt-out and its retry state; show applied result accurately. |
 | Intelligence | Qualified plan/API/hosted/local choices; explain capability, private-data permission and cost consequences. | A connected label is not qualification. Preserve route-specific defaults, custody and plan-only exhaustion behavior. |

@@ -1,4 +1,4 @@
-AgentOS test kit drive (spikes S1 and S2)
+agentOS test kit drive (spikes S1 and S2)
 
 results/   one text file per PC tested, plus SUMMARY.csv. Safe to share: no serial
            numbers, network addresses, modem IDs, or phone numbers are written there.
