@@ -670,7 +670,45 @@ func (h *tpmHost) updateCounter() (vault.Counter, error) {
 func (h *tpmHost) bind(v *vault.Vault) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.bindLocked(v)
+	err := h.bindLocked(v)
+	if err == nil || errors.Is(err, vault.ErrCounterMissing) {
+		h.giveBackRemoved(v)
+	}
+	return err
+}
+
+// giveBackRemoved gives this PC's lockout hierarchy back on the owner's
+// unlock once the keys file on the drive holds no slot for this PC: a
+// removal that was decided but not saved keeps the hierarchy until the
+// change lands (#1741), and OpenSealed lands it before this runs. A PC
+// with any TPM slot left, or a slot that does not parse, keeps it.
+// Caller holds mu.
+func (h *tpmHost) giveBackRemoved(v *vault.Vault) {
+	t, err := h.openTPM()
+	if err != nil {
+		return
+	}
+	defer t.Close()
+	me, err := tpmseal.Identity(t)
+	if err != nil {
+		return
+	}
+	if !hasKind(v, lockoutAuthName(me), vault.KindTPMLockoutAuth) && !hasKind(v, daOriginalName(me), vault.KindTPMDAOriginal) {
+		return
+	}
+	slots, err := vault.ReadSlots(h.keysPath)
+	if err != nil {
+		return
+	}
+	for _, s := range slots {
+		if s.Kind != vault.SlotTPM {
+			continue
+		}
+		if sealed, err := sealedOf(s); err != nil || bytes.Equal(sealed.SRKName, me) {
+			return
+		}
+	}
+	h.giveBack(v, t, me)
 }
 
 // bindLocked binds v to this PC's counter. A TPM that cannot even name
@@ -946,10 +984,13 @@ func (h *tpmHost) remove(v *vault.Vault, id string) (int, error) {
 		sealed, err := sealedOf(s)
 		return err == nil && bytes.Equal(sealed.SRKName, want)
 	})
-	// A removal decided before the slot change failed has taken effect
-	// (#1741): the hierarchy goes back as for one that finished, since the
-	// PC no longer opens unattended to retry it, and err is kept.
-	if n == 0 || (err != nil && !errors.Is(err, vault.ErrSlotDecided)) {
+	// A removal decided before the slot change failed (#1741) keeps the
+	// lockout hierarchy: this PC's PIN slot is still in the keys file on
+	// the drive until the change lands, and with the hierarchy a thief
+	// could reset the TPM's guess limit and try PINs against it offline
+	// (Security S1 on #1821). The owner's next unlock lands the change and
+	// gives the hierarchy back (giveBackRemoved).
+	if n == 0 || err != nil {
 		return n, err
 	}
 	// This PC no longer trusted: give its lockout hierarchy back. Another
@@ -963,7 +1004,7 @@ func (h *tpmHost) remove(v *vault.Vault, id string) (int, error) {
 		}
 		t.Close()
 	}
-	return n, err
+	return n, nil
 }
 
 // giveBack returns the TPM's lockout hierarchy (tpmseal.ReleaseLockout)

@@ -1261,14 +1261,18 @@ func TestUntrustAfterTheSlotIsDecidedSaysThePCIsRemoved(t *testing.T) {
 	if !r.noted("a trusted host was removed (saving not finished)") {
 		t.Fatalf("owner not told: %q", r.notes)
 	}
-	if r.lockoutEntry() != "" {
-		t.Fatal("lockout authorization kept after a decided untrust")
+	// The PIN slot is still in the keys file on the drive, so the lockout
+	// hierarchy stays the vault's: with it a thief could reset the guess
+	// limit and try PINs offline (Security S1 on #1821). Not probed with
+	// ThiefLockReset here: a wrong lockout password locks the hierarchy.
+	if hosts, _ := r.c.hosts(); len(hosts) != 1 {
+		t.Fatalf("the slot is not on the drive any more, so this test checks nothing: %v", hosts)
 	}
-	if err := r.tpm.ThiefLockReset(); err != nil {
-		t.Fatalf("lockout not given back after a decided untrust: %v", err)
+	if r.lockoutEntry() == "" {
+		t.Fatal("lockout given back while the PIN slot is still on the drive")
 	}
 	// The text's step: the removed PC no longer opens unattended, and the
-	// next unlock finishes it.
+	// next unlock finishes it and gives the hierarchy back.
 	bootGood(r.tpm)
 	r.start(t, r.tpm)
 	if r.phase() != locked {
@@ -1277,6 +1281,12 @@ func TestUntrustAfterTheSlotIsDecidedSaysThePCIsRemoved(t *testing.T) {
 	r.unknownHostUnlock(t)
 	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 0 {
 		t.Fatalf("hosts after the next start: %v, %v", hosts, err)
+	}
+	if r.lockoutEntry() != "" {
+		t.Fatal("lockout authorization kept after the removal landed")
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout not given back after the removal landed: %v", err)
 	}
 }
 
