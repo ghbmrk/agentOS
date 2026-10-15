@@ -41,7 +41,7 @@ def _replayed(cwd, reviewed, onto):
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     out = _git(cwd, *DIFF, _replayed(cwd, reviewed, onto), head).decode(errors="surrogateescape")
-    return sorted(f for f in out.split("\0") if f)
+    return sorted(f for f in out.split("\0") if f and not RECORD.match(f))
 
 
 def main(argv):
