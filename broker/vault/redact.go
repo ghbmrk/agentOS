@@ -12,6 +12,10 @@ import (
 // Placeholder replaces every redacted value.
 const Placeholder = "[REDACTED]"
 
+// KindPlanLogin is a plan login (CRED-5): a provider CLI's token set,
+// stored as one JSON object (egress.PlanLogins).
+const KindPlanLogin = "plan-login"
+
 // Redactor replaces vault values in agent-bound bytes (CRED-7). It matches
 // each value verbatim and in the encodings a provider or a hostile guest is
 // most likely to echo it in: base64 (standard and URL-safe) at all three
@@ -28,6 +32,41 @@ type pattern struct {
 	b []byte
 	// fold matches ASCII letters in any case (hex).
 	fold bool
+}
+
+// redactValues returns what a vault redactor matches for one entry: its
+// whole value and, for a plan login, each string inside its JSON token
+// set, so a single token echoed on its own is caught too (VAULT-REDACT).
+// Strings shorter than MinValueLen, such as an account label, are left
+// out: they could match innocent text and are not credentials.
+func redactValues(kind string, value []byte) [][]byte {
+	out := [][]byte{value}
+	if kind != KindPlanLogin {
+		return out
+	}
+	var set any
+	if json.Unmarshal(value, &set) != nil {
+		return out
+	}
+	var walk func(any)
+	walk = func(x any) {
+		switch x := x.(type) {
+		case string:
+			if len(x) >= MinValueLen {
+				out = append(out, []byte(x))
+			}
+		case map[string]any:
+			for _, e := range x {
+				walk(e)
+			}
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		}
+	}
+	walk(set)
+	return out
 }
 
 // NewRedactor builds a redactor for values. Empty values are ignored.

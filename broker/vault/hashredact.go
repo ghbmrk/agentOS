@@ -267,7 +267,7 @@ func (v *Vault) HashRedactor() (*HashRedactor, error) {
 	}
 	vals := make([][]byte, 0, len(v.entries))
 	for _, r := range v.entries {
-		vals = append(vals, r.Value)
+		vals = append(vals, redactValues(r.Kind, r.Value)...)
 	}
 	return NewHashRedactor(vals)
 }
