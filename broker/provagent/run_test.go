@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -220,6 +221,11 @@ func TestRunInheritsLabelAndReservationAndIsGoneAfter(t *testing.T) {
 	sp := g.h.specs[0]
 	if sp.Class != admission.Experiment || sp.MemMB != 300 || sp.Image != "stub-image" {
 		t.Errorf("spec %+v", sp)
+	}
+	// runsc refuses a container with no process args, so the worker starts
+	// on the declaration's idle command and the CLI runs by Exec (#1721).
+	if !reflect.DeepEqual(sp.Argv, good().Idle) {
+		t.Errorf("provider worker starts on %q, not the idle argv", sp.Argv)
 	}
 	if sp.Label != vm.Private {
 		t.Errorf("a provider worker is always private: %v", sp.Label)
