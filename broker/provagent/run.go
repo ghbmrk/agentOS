@@ -271,7 +271,7 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	}
 	// The worker is always private (it is given owner data); its class and
 	// reservation are the caller's.
-	spec := vm.Spec{Image: d.Image, Class: q.Class, MemMB: q.MemMB, Label: vm.Private}
+	spec := vm.Spec{Image: d.Image, Class: q.Class, MemMB: q.MemMB, Label: vm.Private, Argv: d.Idle}
 	if _, err := r.Host.CreateProviderWorker(ctx, id, spec, seed); err != nil {
 		// No worker, so no Destroy closes the route: close it here, so the
 		// minted placeholders do not outlive the run in the vault process.
