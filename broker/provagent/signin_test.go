@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -143,6 +144,9 @@ func TestONB3SignInShowsTheProvidersPageAndCode(t *testing.T) {
 	}
 	if spec.Label != vm.Private || spec.Image != "stub-image" || seed != nil {
 		t.Errorf("sign-in worker %+v seeded %v", spec, seed)
+	}
+	if !reflect.DeepEqual(spec.Argv, good().Idle) {
+		t.Errorf("sign-in worker starts on %q, not the idle argv", spec.Argv)
 	}
 	if _, _, err := g.start(t); !errors.Is(err, ErrSignInBusy) {
 		t.Errorf("a second sign-in while one runs: %v", err)

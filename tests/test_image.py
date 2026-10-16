@@ -1618,6 +1618,32 @@ class ConfigTest(unittest.TestCase):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Service"]["NoNewPrivileges"], "yes")
 
+    # REQ: CAP-11, CAP-8
+    def test_broker_registers_the_codex_image_and_offers_worker_tools(self):
+        # #1721: provider_run is offered only when worker tools are on (-worker-image names a
+        # registered image), and a Codex run starts from the image the declaration names, which
+        # -image must register at the path build.sh writes it to.
+        exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
+        images = dict(v.split("=", 1) for v in re.findall(r"(?:^|\s)-image\s+(\S+)", exe))
+        decl = re.search(r'"codex": \{\s*ID: "codex",.*?Image: "(\w+)"', (ROOT / "broker/provagent/declare.go").read_text(), re.S)
+        self.assertEqual(images.get(decl.group(1)), "/usr/lib/agentos/images/codex")
+        worker = re.search(r"(?:^|\s)-worker-image\s+(\S+)", exe)
+        self.assertIsNotNone(worker)
+        self.assertIn(worker.group(1), images)
+        b = (IMG / "build.sh").read_text()
+        self.assertIn('sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE' + images["codex"] + '"', b)
+
+    # REQ: CAP-8
+    def test_worker_images_ship_the_worker_argv(self):
+        # A worker machine runs -worker-argv (default "sleep infinity") while the guest drives it.
+        argv = re.search(r'"worker-argv", "([^"]+)"', (ROOT / "broker/cmd/agentosd/main.go").read_text()).group(1)
+        exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
+        self.assertNotIn("-worker-argv", exe)
+        worker = re.search(r"(?:^|\s)-worker-image\s+(\S+)", exe).group(1)
+        loop = next(l for l in (ROOT / "guest" / worker / "build-rootfs.sh").read_text().splitlines()
+                    if l.startswith("for b in /bin/sh "))
+        self.assertIn("/bin/" + argv.split()[0], loop.removesuffix("; do").split()[3:])
+
     def test_broker_reads_onboarding_s_settings(self):
         # It no longer waits for them (SetupServicesTest): a preloaded box starts it in setup mode.
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")

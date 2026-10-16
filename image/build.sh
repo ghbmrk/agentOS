@@ -64,6 +64,9 @@ rm -rf "$OUT/gvisor.tar.bz2" "$OUT/gvisor"
 
 # The OpenClaw guest's root file system (P1-7), as an agent-machine image.
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"
+# The Codex provider worker's (S8-W1, #1721): provagent's codex declaration names this image, and
+# agentosd registers it (-image codex=); the CLI is pinned by npm's integrity hash.
+sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"
 # How agentosd starts the agent machine (W1): its -agent-launch default.
 install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/guest/launch.json"
 # Each setup service's unit lives beside its command (localui ASSUMPTIONS L26).
