@@ -24,7 +24,7 @@ An optional `vm.Resetter` interface (`Reset(id)`) beside `Services`, called from
 
 ## Scope
 
-`broker/vm/vm.go`, `broker/vm/forget.go`, `broker/vm/forget_test.go`, `broker/vm/services_test.go`, `broker/guest/plane.go`, `broker/guest/tools_test.go`, `broker/cmd/agentosd/main.go`, `broker/cmd/agentosd/forgetreset_test.go`, `briefs/FORGET-FOLDS.md`. **Guard files:** none.
+`broker/vm/vm.go`, `broker/vm/forget.go`, `broker/vm/forget_test.go`, `broker/vm/services_test.go`, `broker/guest/plane.go`, `broker/guest/tools_test.go`, `broker/cmd/agentosd/main.go`, `broker/cmd/agentosd/forgetreset_test.go`, `briefs/FORGET-FOLDS.md`. **Guard files:** `broker/core/core.txt` (one `allow vm guest.Plane.Reset` line: the core gate counts the reset as a write path, as it does Open and Close).
 
 ## Out of scope
 
