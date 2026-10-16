@@ -686,3 +686,24 @@ func TestBridgedWhileTheBridgePollsOrHoldsAText(t *testing.T) {
 		t.Fatal("bridged BridgeGap after the last result")
 	}
 }
+
+// Queued counts what waits for the bridge, not what it holds (#1810: a
+// drain test needs to know a text is queued before it changes the line).
+func TestQueuedCountsTextsWaitingForTheBridge(t *testing.T) {
+	l, _ := rig(t)
+	if n := l.Queued(); n != 0 {
+		t.Fatalf("Queued before any text: %d", n)
+	}
+	go l.Send(ownerNum, "one")
+	deadline := time.Now().Add(5 * time.Second)
+	for l.Queued() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("Queued with a text waiting: %d", l.Queued())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	it := poll(t, l)
+	if n := l.Queued(); n != 0 {
+		t.Fatalf("Queued once the bridge took %q: %d", it.Text, n)
+	}
+}

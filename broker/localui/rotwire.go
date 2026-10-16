@@ -258,14 +258,22 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 }
 
 // wifiKeptInEffect is the note an in-effect card's page adds when its
-// Wi-Fi password could not go on the air (#1523, CH-12).
-const wifiKeptInEffect = "My Wi-Fi may still use your old card's password: I could not switch it. Join it with your old card for now; the new card you start replaces the Wi-Fi password too."
+// Wi-Fi password could not go on the air (#1523, REC-4). It asks for the
+// Wi-Fi part on the next card: after no answer the vault may owe nothing,
+// so a next card without it would leave the old password on the air
+// (#1614 U-1).
+const wifiKeptInEffect = "My Wi-Fi may still use your old card's password: I could not switch it. Join it with your old card for now, and include the Wi-Fi password when you start your next card."
 
 // inEffect hands off the Wi-Fi of a card the owner keeps (err wraps
-// card.ErrInEffect) and, when that fails, adds the note that says so.
+// card.ErrInEffect) and adds the note that says whether it switched
+// (#1614 U-2): a hand-off that took the vault's network proves the card's
+// Wi-Fi was committed.
 func inEffect(err error, wifi func() error, c *card.Card) error {
-	if c.WiFiPassword == "" || handOffWiFi(wifi, c) {
+	if c.WiFiPassword == "" {
 		return err
+	}
+	if handOffWiFi(wifi, c) {
+		return &card.Noted{Err: err, Note: wifiSwitchedNote}
 	}
 	return &card.Noted{Err: err, Note: wifiKeptInEffect}
 }
@@ -278,11 +286,14 @@ func handOffWiFi(wifi func() error, c *card.Card) bool {
 	return c.WiFiPassword != "" && wifi != nil && wifi() == nil
 }
 
+// wifiSwitchedNote tells the owner the Wi-Fi switched and how to rejoin.
+const wifiSwitchedNote = "My Wi-Fi now uses your new card's password. If your phone drops off, rejoin with the Wi-Fi QR code on your new card."
+
 // withWiFiNote adds to a committed rotation's notes what its Wi-Fi does.
 func withWiFiNote(res RotationResult, switched bool) RotationResult {
 	note := "My Wi-Fi still uses your old card's password: I could not switch it. Join it with your old card for now, and replace the Wi-Fi password again from Home."
 	if switched {
-		note = "My Wi-Fi now uses your new card's password. If your phone drops off, rejoin with the Wi-Fi QR code on your new card."
+		note = wifiSwitchedNote
 	}
 	res.Notes = append(append([]string(nil), res.Notes...), note)
 	return res

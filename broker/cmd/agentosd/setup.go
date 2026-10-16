@@ -57,6 +57,9 @@ type setupMode struct {
 	// APNet is where the page's report of the card's network is written
 	// (OpSetupAPNet, #1185) for agentos-ap; empty, the op is not served.
 	APNet string
+	// SignIn starts a plan route's device-code sign-in at setup (c4e2b,
+	// ONB-3); nil offers no plan sign-in.
+	SignIn localsrv.SignIn
 }
 
 // cardHold is the Owner Card step as setup's finish sees it
@@ -151,6 +154,7 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 		Join:      joiner(m.NetJoin, m.Seen),
 		Networks:  scanner(m.NetJoin),
 		Providers: providersOf(m.Enroll),
+		SignIn:    m.SignIn,
 		Finished:  func(owner string) { finished <- owner }}
 	if m.Line != nil {
 		cfg.Line = m.Line // a nil *SetupLine would be a non-nil interface
@@ -272,8 +276,9 @@ func providersOf(e localsrv.Enroller) localsrv.Providers {
 	return p
 }
 
-// Providers lists the vault's built-in providers. Each takes an API key
-// at setup; plan sign-in at setup (device code) is not served yet.
+// Providers lists the vault's built-in providers. An adapter takes an API
+// key at setup; a plan route takes a device-code sign-in instead (c4e2b),
+// which the page offers only while setup's SignIn is ready for it.
 func (e enroller) Providers() ([]localapi.SetupProvider, error) {
 	ps, err := e.v.SetupProviders()
 	if err != nil {
@@ -281,7 +286,7 @@ func (e enroller) Providers() ([]localapi.SetupProvider, error) {
 	}
 	out := make([]localapi.SetupProvider, 0, len(ps))
 	for _, p := range ps {
-		out = append(out, localapi.SetupProvider{ID: p.ID, Name: p.Name, APIKey: true, Connected: p.Connected, PrivateOK: p.PrivateOK})
+		out = append(out, localapi.SetupProvider{ID: p.ID, Name: p.Name, APIKey: !p.Plan, DeviceCode: p.Plan, Connected: p.Connected, PrivateOK: p.PrivateOK})
 	}
 	return out, nil
 }

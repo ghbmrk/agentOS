@@ -8,11 +8,13 @@
 // stands in for the access point's wlan0 with the phone in its own network
 // namespace, and agentos-modem is pointed (by a drop-in from ci_boot.sh) at
 // a sysfs tree whose AT port is a pseudo-terminal behind the AT simulator.
-// It prints no claim code, card value, recovery key, code-generator seed or
-// page body: details are status codes, locations and page headings.
+// It prints no claim code, card value, recovery key, code-generator seed,
+// text message or page body: details are status codes, locations, page
+// headings and reply kinds.
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -36,8 +38,11 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/claim"
+	"github.com/ghbmrk/agentos/broker/e2e/boxe2e/codexstub"
+	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/provagent"
 )
 
 const (
@@ -81,6 +86,22 @@ type driver struct {
 	phone   *http.Client
 	modem   *pluggedModem
 	seed    []byte
+	// codeStep is the last 30-second code window the driver used: the box
+	// takes each window's code once (CH-14).
+	codeStep int64
+	// stub is the Codex plan provider the agentos_e2e vault process
+	// reaches (#1701, ASSUMPTIONS E10).
+	stub *codexstub.Stub
+	// guestSock is the agent machine's guest-plane socket; "" is the
+	// box's (agentSock).
+	guestSock string
+	// agentosdArgv is agentosd's command line; nil reads the unit's.
+	agentosdArgv func() ([]string, error)
+	// now and sleep are the clock of the codes and of phone-control's
+	// waits; nil is the wall clock. The in-process test shares a fake one
+	// with the owner channel.
+	now   func() time.Time
+	sleep func(time.Duration)
 }
 
 // childEnv is every child's whole environment: systemd's own PATH for
@@ -102,8 +123,17 @@ func run(name string, args ...string) error {
 // harness puts the phone on the box's Wi-Fi: a veth pair whose box end is
 // wlan0 at the access point's address, its other end in the phone's
 // namespace, and wlan0 in the inbound exempt set as ap-exempt would add it.
-// QEMU has no radio, so agentos-ap is stopped first.
+// QEMU has no radio, so agentos-ap is stopped first. It also serves the
+// Codex plan stub and checks the vault process is the build that reaches it.
 func (d *driver) harness() error {
+	if err := checkVaultBuild(); err != nil {
+		return err
+	}
+	stub, err := serveStub()
+	if err != nil {
+		return fmt.Errorf("plan stub: %v", err)
+	}
+	d.stub = stub
 	for _, c := range [][]string{
 		{"systemctl", "stop", "agentos-ap.service"},
 		{"ip", "netns", "add", netns},
@@ -418,7 +448,7 @@ func (d *driver) codes() error {
 	if d.seed == nil {
 		return errors.New("no code generator link was shown")
 	}
-	st, _, err := d.post("/setup/codes", url.Values{"code": {owner.TOTP(d.seed, time.Now())}})
+	st, _, err := d.post("/setup/codes", url.Values{"code": {d.freshCode()}})
 	if err != nil || st != http.StatusSeeOther {
 		return fmt.Errorf("POST /setup/codes %d %v", st, err)
 	}
@@ -492,15 +522,245 @@ func (d *driver) host() error {
 	return err
 }
 
-// guestTask is the model-backed guest task. CI holds no model credential,
-// so it needs a model stub at the provider boundary, which is not built
-// yet.
+// guestTask is the model-backed guest task on the Codex plan route. It
+// first signs in to the plan at step 7, which finishes setup, then runs
+// one task through provider_run as the agent machine's guest
+// (providerTask, ASSUMPTIONS E12).
 func (d *driver) guestTask() error {
-	return errors.New(notDriven + " needs the plan sign-in and a stub behind the Codex worker")
+	if err := d.planSignIn(); err != nil {
+		return err
+	}
+	return d.providerTask()
 }
 
-// phoneControl will text a command from the paired number once setup has
-// finished and check the box's reply (#1714).
+// planSignIn is the owner signing in to the Codex plan at step 7, as the
+// page offers it once agentosd serves the device-code sign-in (#1264): the
+// owner ticks private content, presses sign in, opens the link the page
+// shows on the provider's own host and enters its code there (the stub's
+// Approve), then reloads until setup finishes. The provider's tokens reach
+// only the stub; no page the phone sees may show one (ASSUMPTIONS E11).
+func (d *driver) planSignIn() error {
+	route := egress.Codex()
+	// pages is every page the phone saw after the post, by request, so a
+	// token on one names where it showed.
+	type seen struct {
+		req  string
+		body []byte
+	}
+	var pages []seen
+	var pg []byte
+	err := until(2*time.Minute, func() (bool, error) {
+		var err error
+		if pg, err = d.page(); err != nil {
+			return false, err
+		}
+		return bytes.Contains(pg, []byte(aiOpen)), errors.New(where(pg))
+	})
+	// aiOpen is on step 7 whenever the first-boot update has finished,
+	// whatever providers it lists, so a timeout here means step 7 never
+	// opened or the page kept failing: a product failure, not XFAIL.
+	if err != nil {
+		return fmt.Errorf("step 7 did not open: %w", err)
+	}
+	if !deviceOffer(pg, route.Provider) {
+		return errors.New(notDriven + " step 7 offers no " + route.Provider + " sign-in (#1264; gate: #809, #1877; image: #1721) " + where(pg))
+	}
+	if d.stub == nil {
+		return errors.New("no plan stub")
+	}
+	form := url.Values{"provider": {route.Provider}, "private": {"1"}}
+	if st, _, err := d.post("/setup/ai-device", form); err != nil || st != http.StatusSeeOther {
+		return fmt.Errorf("POST /setup/ai-device %d %v", st, err)
+	}
+	if pg, err = d.page(); err != nil {
+		return err
+	}
+	pages = append(pages, seen{"GET /setup after POST /setup/ai-device", pg})
+	link, code, ok := deviceLink(pg)
+	if !ok {
+		// The sign-in runs the CLI in a worker built from the provider's
+		// image; a box that registers none cannot start it (#1721), the
+		// case where #809 and #1877 land first (ASSUMPTIONS E11).
+		image := provagent.Builtins()[route.Provider].Image
+		if has, err := d.hasImage(image); err == nil && !has {
+			return errors.New(notDriven + " step 7's " + route.Provider + " sign-in cannot start: agentosd registers no " + image + " image (#1721) " + where(pg))
+		}
+		return errors.New("no sign-in link after sign in " + where(pg))
+	}
+	if want := "https://" + route.AuthHost + route.DevicePage; link != want {
+		// The host alone is safe to print; the rest may carry the code.
+		host := "an unparsable link"
+		if u, err := url.Parse(link); err == nil {
+			host = fmt.Sprintf("host %q", u.Host)
+		}
+		return fmt.Errorf("the sign-in link is not %s: the page showed %s", want, host)
+	}
+	if !bytes.Contains(pg, []byte("This code is from OpenAI")) {
+		return errors.New("the sign-in link does not name its provider " + where(pg))
+	}
+	if !d.stub.Approve(code) {
+		return errors.New("the code on the page is not the provider's")
+	}
+	reloads := 0
+	err = until(2*time.Minute, func() (bool, error) {
+		st, loc, b, err := d.get("/setup")
+		if err != nil {
+			return false, err
+		}
+		reloads++
+		pages = append(pages, seen{fmt.Sprintf("GET /setup reload %d", reloads), b})
+		if st == http.StatusSeeOther && loc == "/status" {
+			return true, nil
+		}
+		return false, fmt.Errorf("GET /setup %d %q %s", st, loc, where(b))
+	})
+	if err != nil {
+		return fmt.Errorf("sign-in did not finish setup: %w (stub %v refused %d)", err, d.stub.Hits(), d.stub.Refused())
+	}
+	st, _, b, err := d.get("/status")
+	if err != nil || st != http.StatusOK {
+		return fmt.Errorf("GET /status %d %v", st, err)
+	}
+	pages = append(pages, seen{"GET /status", b})
+	if n := d.stub.Refused(); n != 0 {
+		return fmt.Errorf("the provider refused %d calls on the plan route: stub %v", n, d.stub.Hits())
+	}
+	if d.stub.Hits()["code"] == 0 {
+		return fmt.Errorf("sign-in skipped the provider: stub %v", d.stub.Hits())
+	}
+	for _, p := range pages {
+		if bytes.Contains(p.body, []byte(codexstub.Canary)) {
+			return errors.New("a page showed a provider token: " + p.req)
+		}
+	}
+	return nil
+}
+
+// phoneControl is the owner texting the box after setup (CH-1, CH-3,
+// CH-14; E9). It first checks that setup has finished, since agentosd
+// answers texts only then. The paired phone texts HELP, which needs no
+// code, until it is answered; then one STATUS with a code from a window
+// not used before, which must draw the unlock and then the status reply.
+// Only then does the unpaired number text STATUS with a fresh code, and
+// the paired phone texts HELP again as a barrier. Texts are handled in
+// arrival order, but replies are not sent in that order: STATUS and HELP
+// are run routes, each answered from its own goroutine, so a reply the
+// stranger's text drew can land after the barrier's. Once the barrier is
+// answered the stranger's text has been handled, and the step keeps
+// reading the log for settle; any reply to either number then fails it.
+// Probing with HELP first means the code is sent only once texts are
+// read: a code left unread goes stale, and a stale code is a wrong one
+// that counts toward CH-11's lockout.
 func (d *driver) phoneControl() error {
-	return errors.New(notDriven + " needs an inbound text from the paired number and its reply")
+	if d.seed == nil {
+		return errors.New("no code generator seed")
+	}
+	st, loc, b, err := d.get("/setup")
+	if err != nil {
+		return fmt.Errorf("setup not finished: GET /setup: %w", err)
+	}
+	if st != http.StatusSeeOther || loc != "/status" {
+		return fmt.Errorf("setup not finished: GET /setup %d %q at %s", st, loc, heading(b))
+	}
+	start := len(d.carrier.Log())
+	phone := d.carrier.Line(phoneNum)
+	// agentosd takes the modem from setup's line only after setup
+	// finishes, and the hand-over can lose texts: after setup the bridge
+	// has no OWNER_NUMBER, so the owner's texts are offered once and one
+	// refused meanwhile is gone (BOARD P2-2w c4c r1; bridge B9). So HELP
+	// repeats until answered, and a timeout names the attempts.
+	deadline := d.clock().Add(3 * time.Minute)
+	for attempts := 1; ; attempts++ {
+		if err := phone.Send(boxNum, "HELP"); err != nil {
+			return fmt.Errorf("phone send: %w", err)
+		}
+		r := d.await(start, 45*time.Second, func(r phoneRun) bool { return r.probed })
+		if err := r.failed(); err != nil {
+			return err
+		}
+		if r.probed {
+			break
+		}
+		if !d.clock().Before(deadline) {
+			return fmt.Errorf("no reply to the paired number after %d HELP attempts (BOARD P2-2w c4c r1, the bridge's hand-over from setup); %s",
+				attempts, modemDiag())
+		}
+	}
+	if err := phone.Send(boxNum, "STATUS "+d.freshCode()); err != nil {
+		return fmt.Errorf("phone send: %w", err)
+	}
+	r := d.await(start, time.Minute, func(r phoneRun) bool { return r.status })
+	if err := r.failed(); err != nil {
+		return err
+	}
+	if !r.status {
+		return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
+	}
+	if err := d.carrier.Line(strangerNum).Send(boxNum, "STATUS "+d.freshCode()); err != nil {
+		return fmt.Errorf("stranger send: %w", err)
+	}
+	if err := phone.Send(boxNum, "HELP"); err != nil {
+		return fmt.Errorf("phone send: %w", err)
+	}
+	r = d.await(start, time.Minute, func(r phoneRun) bool { return r.barrier })
+	if err := r.failed(); err != nil {
+		return err
+	}
+	if !r.barrier {
+		return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
+	}
+	// A reply drawn by the stranger's text may still be on its way: the
+	// box gives no point after which its run routes have all replied, so
+	// the log is read until settle has passed (await returns early on a
+	// failure).
+	d.await(start, settle, func(phoneRun) bool { return false })
+	return controlErr(d.carrier.Log(), start)
+}
+
+// settle is how long phoneControl keeps reading the log after the
+// barrier's reply. The stranger's text was handled before the barrier's,
+// and STATUS and HELP are answered from memory with no model or network
+// call, so their replies start within milliseconds of each other; the
+// rest is the modem's send and the carrier's delivery, which the step
+// already waits on for the barrier's reply. 15 seconds covers that many
+// times over while adding little to a step that allows minutes per stage.
+const settle = 15 * time.Second
+
+// await reads the log from start each second, for up to limit, until done
+// holds or the run has failed, and returns what it read last.
+func (d *driver) await(start int, limit time.Duration, done func(phoneRun) bool) phoneRun {
+	end := d.clock().Add(limit)
+	for {
+		r := readPhoneRun(d.carrier.Log(), start)
+		if r.failed() != nil || done(r) || !d.clock().Before(end) {
+			return r
+		}
+		d.pause(time.Second)
+	}
+}
+
+// freshCode is the code the phone's app shows now, from a window the
+// driver has not used, waiting for the next window when it has.
+func (d *driver) freshCode() string {
+	for d.clock().Unix()/30 <= d.codeStep {
+		d.pause(time.Second)
+	}
+	now := d.clock()
+	d.codeStep = now.Unix() / 30
+	return owner.TOTP(d.seed, now)
+}
+
+func (d *driver) clock() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
+}
+
+func (d *driver) pause(t time.Duration) {
+	if d.sleep != nil {
+		d.sleep(t)
+		return
+	}
+	time.Sleep(t)
 }

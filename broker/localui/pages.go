@@ -275,7 +275,8 @@ form { margin: .6em 0 1.2em; }
 {{else}}
 {{if .NoneAllowed}}<p class="muted">Tasks that need your mail or files can't run until you allow a provider that is connected.</p>{{end}}
 {{range .Providers}}<h3>{{.Name}}: {{if .Connected}}connected{{else}}not connected{{end}}</h3>
-{{if .PrivateOK}}<p>{{.Name}} may see your private data (mail, files) to do tasks.</p>
+{{if .PrivateByConfig}}<p>{{.Name}} may see your private data (mail, files) to do tasks. My configuration allows it, so it can't be withdrawn here.</p>
+{{else if .PrivateOK}}<p>{{.Name}} may see your private data (mail, files) to do tasks.</p>
 <form method="post" action="/providers/"><input type="hidden" name="step" value="withdraw"><input type="hidden" name="provider" value="{{.ID}}"><button class="stop">Stop {{.Name}} seeing it</button></form>
 {{else}}<p>{{.Name}} may not see your private data.</p>
 <form method="post" action="/providers/"><input type="hidden" name="step" value="allow"><input type="hidden" name="provider" value="{{.ID}}"><label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Allow {{.Name}}</button></form>
@@ -369,7 +370,8 @@ form { margin: .6em 0 1.2em; }
 {{range .Providers}}<h3>{{.Name}}{{if .Connected}}: connected{{end}}</h3>
 {{$id := .ID}}{{with index $.Unsaved .ID}}<p>Your answer about private content for {{.Name}} was not saved yet. Setup finishes once it is.</p><form method="post" action="/setup/ai-private"><input type="hidden" name="provider" value="{{$id}}">{{template "private" .}}<button>Save</button></form>{{end}}
 {{if not .Connected}}
-{{if .DeviceCode}}{{$d := index $.Device .ID}}{{if index $d 0}}<p>Open <a href="{{index $d 0}}">{{index $d 0}}</a> and enter <span class="mono">{{index $d 1}}</span>.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Plan .ID)}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
+{{if .DeviceCode}}{{$d := index $.Device .ID}}{{if index $d 0}}<p>Open <a href="{{index $d 0}}">{{index $d 0}}</a> and enter <span class="mono">{{index $d 1}}</span>.</p><p>This code is from {{index $d 2}}, not from your code generator.</p><p><a href="/setup">I signed in</a></p>{{else}}<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Plan .ID)}}<button>Sign in with {{.Name}}</button></form>{{end}}{{end}}
+{{if not (or .DeviceCode .APIKey)}}<p>I can't sign in to your {{.Name}} yet. Use another provider for now.</p>{{end}}
 {{if .APIKey}}<form method="post" action="/setup/ai-key"><input type="hidden" name="provider" value="{{.ID}}">{{template "private" (index $.Key .ID)}}<label>Or paste an API key<input type="password" name="key" autocomplete="off"></label><button class="plain">Save key</button></form>{{end}}
 {{end}}{{end}}{{end}}
 {{end}}

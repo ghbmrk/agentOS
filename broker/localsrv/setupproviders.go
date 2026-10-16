@@ -54,6 +54,8 @@ func (s *Setup) providers(_ context.Context, _ sockets.Peer, args json.RawMessag
 	s.mu.Lock()
 	for i := range ps {
 		ps[i].Owed = nil // only the record says what is owed
+		// Device code only where setup can start the sign-in now.
+		ps[i].DeviceCode = ps[i].DeviceCode && s.cfg.SignIn != nil && s.cfg.SignIn.Ready(ps[i].ID)
 		if ok, owed := s.rec.Owed[ps[i].ID]; owed {
 			ps[i].Owed = &ok
 		}

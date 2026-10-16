@@ -24,7 +24,7 @@ GOOD = {
                 "| A-1 | [a](briefs/A-1.md) | — | in review (#1) |\n",
     "CLAUDE.md": "Rules. See OPERATING §2–3 and docs/OPERATING.md §1.\n",
     "docs/OPERATING.md": "# OPERATING\n\n## 1. One\n\n## 2. Two\n\n## 3. Three\n",
-    "briefs/A-1.md": "# A-1\n",
+    "briefs/A-1.md": "# A-1\n\n**Acceptance tests:** A-1: tests/test_a.py::test_x\n",
 }
 
 WITH_DECISIONS = GOOD["README.md"].replace("| [CLAUDE.md](CLAUDE.md) |\n", "| [CLAUDE.md](CLAUDE.md) |\n| [DECISIONS.md](DECISIONS.md) |\n")
@@ -61,8 +61,8 @@ class LintTest(unittest.TestCase):
                          ["CLAUDE.md:1: OPERATING §4 does not exist", "CLAUDE.md:1: OPERATING §9 does not exist"])
 
     def test_brief_over_the_size_cap(self):
-        got = self.lint(**{"briefs/A-1.md": "x" * (4 * doclint.BRIEF_TOKENS + 4)})
-        self.assertEqual(got, ["briefs/A-1.md: ~20001 tokens, over the 20000 cap; split the package"])
+        got = self.lint(**{"briefs/A-1.md": "**Acceptance tests:** none: x\n" + "x" * (4 * doclint.BRIEF_TOKENS)})
+        self.assertEqual(got, ["briefs/A-1.md: ~20007 tokens, over the 20000 cap; split the package"])
 
     # DOC-4: per-file review records and unique assumption IDs
 
@@ -175,11 +175,101 @@ class LintTest(unittest.TestCase):
         self.assertEqual(self.lint(**{"DECISIONS.md": text, **self.LISTED}), [])
 
     def test_brief_with_its_own_state_line(self):
-        got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**State:** building\n"})
+        got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**State:** building\n**Acceptance tests:** none: docs\n"})
         self.assertEqual(got, ["briefs/A-1.md:3: `**State:**` line; state lives on the work-item issue"])
+
+    # REQ: FIRST-PASS
+    def test_brief_without_acceptance_tests_fails(self):
+        got = self.lint(**{"briefs/A-1.md": "# A-1\n\nGoal.\n"})
+        self.assertEqual(got, ["briefs/A-1.md: no `**Acceptance tests:**` line; name each ID's test up front, or `none: <why>`"])
+
+    def test_brief_in_the_baseline_may_lack_acceptance_tests(self):
+        self.assertEqual(self.lint(**{"briefs/A-1.md": "# A-1\n", "tools/brief_acceptance_baseline.txt": "A-1.md\n"}), [])
+
+    # REQ: FIRST-PASS
+    def test_baselined_brief_that_has_its_line_must_leave_the_baseline(self):
+        got = self.lint(**{"tools/brief_acceptance_baseline.txt": "A-1.md\n"})
+        self.assertEqual(got, ["tools/brief_acceptance_baseline.txt: A-1.md now has its acceptance tests; delete the entry (the baseline only shrinks)"])
+
+    # REQ: FIRST-PASS
+    def test_baseline_entry_for_a_missing_brief_fails(self):
+        got = self.lint(**{"tools/brief_acceptance_baseline.txt": "A-1.md\nGone.md\n"})
+        self.assertEqual([g for g in got if "Gone.md" in g],
+                         ["tools/brief_acceptance_baseline.txt: Gone.md has no brief; delete the entry (the baseline only shrinks)"])
+
+    # REQ: FIRST-PASS
+    def test_empty_acceptance_line_fails(self):
+        for text in ("# A-1\n\n**Acceptance tests:**\n", "# A-1\n\n**Acceptance tests:**   \n",
+                     "# A-1\n\n**Acceptance tests:**\t\n", "# A-1\n\n**Acceptance tests:**\n\nGoal.\n",
+                     "# A-1\n\n- **Acceptance tests:**\n- **Goal:** x\n"):
+            self.assertEqual(self.lint(**{"briefs/A-1.md": text}),
+                             ["briefs/A-1.md: empty `**Acceptance tests:**` line; name each ID's test, or `none: <why>`"])
+
+    # REQ: FIRST-PASS
+    def test_acceptance_tests_as_a_list_pass(self):
+        for text in ("# A-1\n\n**Acceptance tests:**\n- `tests/x.py::a`: catches y\n",
+                     "# A-1\n\n**Acceptance tests:**\n\n* `tests/x.py::a`\n",
+                     "# A-1\n\n**Acceptance tests:**\n1. `tests/x.py::a`\n",
+                     "# A-1\n\n- **Acceptance tests:**\n  - `tests/x.py::a`\n"):
+            self.assertEqual(self.lint(**{"briefs/A-1.md": text}), [], text)
+
+    # REQ: FIRST-PASS
+    def test_baselined_brief_with_a_listed_acceptance_test_must_leave_the_baseline(self):
+        got = self.lint(**{"briefs/A-1.md": "# A-1\n\n**Acceptance tests:**\n- `tests/x.py::a`\n",
+                           "tools/brief_acceptance_baseline.txt": "A-1.md\n"})
+        self.assertEqual(got, ["tools/brief_acceptance_baseline.txt: A-1.md now has its acceptance tests; delete the entry (the baseline only shrinks)"])
+
+    def test_base_baseline_without_a_value_is_a_usage_error(self):
+        r = subprocess.run([sys.executable, str(ROOT / "tools/doclint.py"), "--base-baseline"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("usage: doclint.py", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    # REQ: FIRST-PASS
+    def test_baseline_growth_against_the_base_copy(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "tools").mkdir()
+            (root / "tools/brief_acceptance_baseline.txt").write_text("A-1.md\nB-2.md\n")
+            base = root / "base.txt"
+            base.write_text("A-1.md\n")
+            self.assertEqual(list(doclint.baseline_growth(root, base)),
+                             ["tools/brief_acceptance_baseline.txt: B-2.md is new in the baseline; the baseline only shrinks, so name the brief's acceptance tests instead"])
+            base.write_text("A-1.md\nB-2.md\nC-3.md\n")
+            self.assertEqual(list(doclint.baseline_growth(root, base)), [])
 
     def test_main_files_pass(self):
         self.assertEqual(doclint.lint(ROOT), [])
+
+
+class AssumptionsUnionMerge(unittest.TestCase):
+    """ASSUMPTIONS-MERGE: two PRs appending a row to one table merge locally; doclint flags a clash."""
+
+    def git(self, cwd, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                       cwd=cwd, check=True, capture_output=True)
+
+    def test_appended_rows_merge_and_duplicate_id_is_flagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / ".gitattributes").write_text((ROOT / ".gitattributes").read_text())
+            f = root / "ASSUMPTIONS.md"
+            f.write_text("| # | Assumption |\n|---|---|\n| U1 | a |\n")
+            self.git(d, "init", "-q", "-b", "main")
+            self.git(d, "add", "-A")
+            self.git(d, "commit", "-qm", "base")
+            self.git(d, "checkout", "-qb", "pr")
+            f.write_text(f.read_text() + "| U2 | from pr |\n")
+            self.git(d, "commit", "-qam", "pr")
+            self.git(d, "checkout", "-q", "main")
+            f.write_text(f.read_text() + "| U2 | from main |\n")
+            self.git(d, "commit", "-qam", "main")
+            self.git(d, "checkout", "-q", "pr")
+            self.git(d, "merge", "-q", "--no-edit", "main")
+            self.assertEqual(f.read_text().count("| U2 |"), 2)
+            self.assertEqual(list(doclint.assumption_ids(root, ["ASSUMPTIONS.md"])),
+                             ["ASSUMPTIONS.md:5: duplicate ID U2 (first on line 4)"])
 
 
 if __name__ == "__main__":

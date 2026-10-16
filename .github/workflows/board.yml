@@ -7,6 +7,8 @@ name: board
 # --repo compares the file with the live issues. The PR asks for auto-merge; that waits for
 # green checks only once main's ruleset requires them (stage 2), and without the repo's
 # 'Allow auto-merge' setting the PR is merged by hand.
+# The rendered board goes from render to commit as an artifact, never as a job output or env var:
+# an env string over 128 KiB (MAX_ARG_STRLEN) keeps bash from starting (CX-BOARD-ARGV, #1787).
 on:
   issues:
     types: [opened, edited, deleted, transferred, closed, reopened, labeled, unlabeled]
@@ -34,7 +36,7 @@ jobs:
       issues: read
       pull-requests: read # board.py's PR cross-check notes (D21)
     outputs:
-      board: ${{ steps.gen.outputs.board }}
+      rendered: ${{ steps.gen.outputs.rendered }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -59,28 +61,44 @@ jobs:
           fi
           python3 tools/board.py render --repo "$GITHUB_REPOSITORY" > rendered.md
           mv rendered.md BOARD.md
-          echo "board=$(base64 -w0 BOARD.md)" >> "$GITHUB_OUTPUT"
+          echo "rendered=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: steps.gen.outputs.rendered == 'true'
+        with:
+          name: board
+          path: BOARD.md
+          retention-days: 1
+          if-no-files-found: error
   commit:
     needs: render
-    if: needs.render.outputs.board != ''
+    if: needs.render.outputs.rendered == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # BOT_PR_TOKEN lives in this environment, whose deployment-branch policy admits main
+    # only, so branch workflows cannot read it (decision #1769).
+    environment: bot
     permissions:
       contents: write # push the bot/board branch (never main)
       pull-requests: write # open, auto-merge or close its PR
       actions: write # dispatch ci.yml on the branch
     env:
-      GH_TOKEN: ${{ github.token }}
+      # BOT_PR_TOKEN (optional; decision #1769): a token whose pushes start
+      # pull_request workflows normally. Without it the job uses GITHUB_TOKEN as before.
+      GH_TOKEN: ${{ secrets.BOT_PR_TOKEN || github.token }}
       BRANCH: bot/board
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           ref: main
+          token: ${{ secrets.BOT_PR_TOKEN || github.token }}
+      # Outside the checkout, so the artifact can place nothing but the copied BOARD.md in it.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: board
+          path: ${{ runner.temp }}/board
       - name: Open or update the BOARD.md PR if changed
-        env:
-          BOARD_B64: ${{ needs.render.outputs.board }}
         run: |
-          printf '%s' "$BOARD_B64" | base64 -d > BOARD.md
+          cp "$RUNNER_TEMP/board/BOARD.md" BOARD.md
           if git diff --quiet -- BOARD.md; then
             echo "BOARD.md unchanged"
             # main already matches: an open PR from an earlier run is obsolete.
