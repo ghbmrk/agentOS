@@ -18,8 +18,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
 )
@@ -36,6 +38,17 @@ const Answer = "agentos-e2e-canary-answer"
 // that shows one can be found by grep.
 const Canary = "agentos-e2e-canary-"
 
+// The quota the stub reports on every model call, in the X-Codex-* headers
+// codex-rs reads and egress.PlanUsage aggregates (#1856): a part-used
+// five-hour pool and a part-used weekly pool, each resetting one window
+// from the call.
+const (
+	PrimaryUsedPercent   = 12.5
+	PrimaryWindowMinutes = 300
+	WeeklyUsedPercent    = 4
+	WeeklyWindowMinutes  = 10080
+)
+
 // Stub is one in-memory provider: one pending device code at a time, one
 // signed-in token set.
 type Stub struct {
@@ -49,7 +62,9 @@ type Stub struct {
 	verify   string // code_verifier
 	access   string
 	refresh  string
+	id       string // the id_token; only its signature carries the canary
 	account  string
+	issued   []string // every token above the stub ever issued, oldest first
 	hits     map[string]int
 	refused  int
 }
@@ -118,14 +133,18 @@ func (s *Stub) Refused() int {
 	return s.refused
 }
 
-// Tokens returns the token set the stub issued, so a test can look for it
-// where it must not be.
+// Tokens returns every token the stub ever issued, so a test can look for
+// them where they must not be: the current set first, its access token at
+// [0], then each one a refresh or exchange replaced. It includes every
+// id_token, whose header and payload carry no Canary prefix.
 func (s *Stub) Tokens() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	seen := map[string]bool{}
 	var out []string
-	for _, v := range []string{s.access, s.refresh, s.code, s.verify} {
-		if v != "" {
+	for _, v := range append([]string{s.access, s.refresh, s.id, s.code, s.verify}, s.issued...) {
+		if v != "" && !seen[v] {
+			seen[v] = true
 			out = append(out, v)
 		}
 	}
@@ -224,6 +243,7 @@ func (s *Stub) devicetoken(w http.ResponseWriter, _ *http.Request, body []byte) 
 		return true
 	}
 	s.code, s.verify = Canary+"code-"+rnd(), Canary+"verifier-"+rnd()
+	s.issued = append(s.issued, s.code, s.verify)
 	s.device, s.user, s.ok = "", "", false
 	return writeJSON(w, map[string]string{
 		"authorization_code": s.code, "code_challenge": "challenge-" + rnd(), "code_verifier": s.verify,
@@ -260,15 +280,18 @@ func (s *Stub) refreshToken(w http.ResponseWriter, _ *http.Request, body []byte)
 
 // mint issues a new token set and returns it; s.mu is held.
 func (s *Stub) mint() map[string]any {
-	s.access, s.refresh = Canary+"access-"+rnd(), Canary+"refresh-"+rnd()
+	s.access, s.refresh, s.id = Canary+"access-"+rnd(), Canary+"refresh-"+rnd(), s.idToken()
+	s.issued = append(s.issued, s.access, s.refresh, s.id)
 	return map[string]any{
-		"access_token": s.access, "refresh_token": s.refresh, "id_token": s.idToken(),
+		"access_token": s.access, "refresh_token": s.refresh, "id_token": s.id,
 		"expires_in": 3600, "token_type": "Bearer",
 	}
 }
 
 // idToken carries the account claim the route reads, unsigned like the
-// placeholder the worker holds.
+// placeholder the worker holds. Its signature segment carries the Canary
+// prefix, so every id_token the stub issued is found by a canary scan and
+// cut by redaction; nothing reads the signature.
 func (s *Stub) idToken() string {
 	enc := func(v any) string {
 		b, _ := json.Marshal(v)
@@ -276,7 +299,7 @@ func (s *Stub) idToken() string {
 	}
 	return enc(map[string]string{"alg": "none", "typ": "JWT"}) + "." +
 		enc(map[string]any{"https://api.openai.com/auth": map[string]string{"chatgpt_account_id": s.account}}) +
-		"." + rnd()
+		"." + Canary + rnd()
 }
 
 // bearer reports whether r carries the access token the stub issued last
@@ -293,7 +316,24 @@ func (s *Stub) models(w http.ResponseWriter, r *http.Request, _ []byte) bool {
 	if !s.bearer(r) {
 		return false
 	}
+	quota(w.Header())
 	return writeJSON(w, map[string]any{"models": []any{}})
+}
+
+// quota sets the plan's quota headers, as the provider sends them on its
+// model endpoints, before the body is written.
+func quota(h http.Header) {
+	now := time.Now()
+	for _, p := range []struct {
+		pool   string
+		used   float64
+		window int
+	}{{"Primary", PrimaryUsedPercent, PrimaryWindowMinutes}, {"Secondary", WeeklyUsedPercent, WeeklyWindowMinutes}} {
+		pre := "X-Codex-" + p.pool + "-"
+		h.Set(pre+"Used-Percent", strconv.FormatFloat(p.used, 'f', -1, 64))
+		h.Set(pre+"Window-Minutes", strconv.Itoa(p.window))
+		h.Set(pre+"Reset-At", strconv.FormatInt(now.Add(time.Duration(p.window)*time.Minute).Unix(), 10))
+	}
 }
 
 // responses streams one assistant message whose text is Answer.
@@ -305,6 +345,7 @@ func (s *Stub) responses(w http.ResponseWriter, r *http.Request, body []byte) bo
 		return false
 	}
 	id := "resp_" + rnd()
+	quota(w.Header())
 	w.Header().Set("Content-Type", "text/event-stream")
 	for _, ev := range []map[string]any{
 		{"type": "response.created", "response": map[string]any{"id": id}},

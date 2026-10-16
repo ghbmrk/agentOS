@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -60,6 +61,7 @@ type rig struct {
 	logins *egress.PlanLogins
 	rt     http.RoundTripper
 	other  *recordRT
+	usage  egress.PlanUsage
 }
 
 func newRig(t *testing.T) *rig {
@@ -81,6 +83,7 @@ func (r *rig) route(t *testing.T, worker string, signIn bool) http.Handler {
 	t.Helper()
 	h, err := egress.NewWorkerRoute(egress.WorkerRouteConfig{
 		Route: egress.Codex(), Worker: worker, SignIn: signIn, Logins: r.logins, Transport: r.rt, Audit: noAudit{},
+		Quota: r.usage.Quota,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -176,13 +179,33 @@ func TestRouteSignsInAndRunsAgainstTheStub(t *testing.T) {
 	}
 
 	// A refresh rotates the token set; the old access token stops working.
-	old := r.stub.Tokens()[0]
+	// Tokens keeps listing every token issued before it, the first
+	// sign-in's id_token included, and every id_token carries the canary.
+	old, before := r.stub.Tokens()[0], r.stub.Tokens()
 	rb, _ := json.Marshal(map[string]string{"client_id": "app_synthetic", "grant_type": "refresh_token", "refresh_token": ph["refresh_token"], "scope": "openid profile email"})
 	if w := call(h, "POST", "/oauth/token", "application/json", string(rb)); w.Code != 200 || strings.Contains(w.Body.String(), Canary) {
 		t.Fatalf("refresh: %d %s", w.Code, w.Body)
 	}
 	if r.stub.Tokens()[0] == old {
 		t.Fatal("refresh did not rotate")
+	}
+	after := strings.Join(r.stub.Tokens(), "\n")
+	for _, v := range before {
+		if !strings.Contains(after, v) {
+			t.Fatal("Tokens forgot a token issued before the refresh")
+		}
+	}
+	ids := 0
+	for _, v := range r.stub.Tokens() {
+		if strings.Count(v, ".") == 2 && !strings.HasPrefix(v, Canary) {
+			ids++
+			if !strings.Contains(v, Canary) {
+				t.Fatal("an id_token carries no canary")
+			}
+		}
+	}
+	if ids != 2 {
+		t.Fatalf("Tokens lists %d id_tokens after a sign-in and a refresh, not 2", ids)
 	}
 	b, _ = r.logins.AuthJSON("codex", "w1")
 	json.Unmarshal(b, &auth)
@@ -213,6 +236,47 @@ func TestRouteSignsInAndRunsAgainstTheStub(t *testing.T) {
 		}
 	}
 	if r.stub.Refused() != 2 {
+		t.Fatalf("refused %d", r.stub.Refused())
+	}
+}
+
+// REQ: RES-5
+// A run call through the shipped worker route carries the stub's quota
+// headers, and the route reads both pools into the plan's usage, as the
+// owner's quota reading before a first run does (#1856). Sign-in calls
+// carry none and read nothing.
+func TestRunCallsReportThePlanQuota(t *testing.T) {
+	r := newRig(t)
+	r.signIn(t)
+	if s := r.usage.Snapshot("codex"); len(s.Pools) != 0 {
+		t.Fatalf("sign-in read quota: %+v", s.Pools)
+	}
+	b, _ := r.logins.AuthJSON("codex", "w1")
+	var auth struct{ Tokens map[string]string }
+	json.Unmarshal(b, &auth)
+	bearer := []string{"Authorization", "Bearer " + auth.Tokens["access_token"], "Chatgpt-Account-Id", auth.Tokens["account_id"]}
+	body := `{"model":"gpt-x","stream":true,"input":[]}`
+	before := time.Now().Unix()
+	w := call(r.route(t, "w1", false), "POST", "/backend-api/codex/responses", "application/json", body, bearer...)
+	if w.Code != 200 || w.Header().Get("X-Codex-Primary-Used-Percent") != "12.5" {
+		t.Fatalf("responses: %d %v", w.Code, w.Header())
+	}
+	want := map[string]struct {
+		used   float64
+		window int
+	}{"primary": {PrimaryUsedPercent, PrimaryWindowMinutes}, "secondary": {WeeklyUsedPercent, WeeklyWindowMinutes}}
+	pools := r.usage.Snapshot("codex").Pools
+	if len(pools) != len(want) {
+		t.Fatalf("pools %+v", pools)
+	}
+	for _, q := range pools {
+		wq, ok := want[q.Pool]
+		if !ok || q.UsedPercent != wq.used || q.WindowMinutes != wq.window || q.Exhausted || q.Worker != "w1" ||
+			q.ResetAt < before+int64(wq.window)*60 || q.ResetAt > time.Now().Unix()+int64(wq.window)*60 {
+			t.Errorf("pool %+v, want %+v", q, wq)
+		}
+	}
+	if r.stub.Refused() != 0 {
 		t.Fatalf("refused %d", r.stub.Refused())
 	}
 }
