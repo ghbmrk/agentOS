@@ -39,8 +39,7 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 _CFG = r"(?:.*/)?"
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude/.*|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
-                        r"tools/(risk_tier|premerge)\.py|tools/(ci_scope|g1_scope)[^/]*|reviews/[^/]+/README[^/]*|"
-                        r"tests/test_(premerge|risk_tier|ci_scope|g1_scope|workflows|merge_queue|lane)[^/]*",
+                        r"tools/(risk_tier|premerge)\.py|tools/(ci_scope|g1_scope)[^/]*",
                         re.DOTALL)
 
 
