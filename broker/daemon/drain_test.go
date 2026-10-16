@@ -147,6 +147,14 @@ func startBridged(t *testing.T, drain time.Duration, before func(*bridged)) *bri
 	case <-time.After(5 * time.Second):
 		t.Fatal("the wrong code was not texted")
 	}
+	// The text is told of before the link queues it. A test that stopped or
+	// changed the line first could have the link refuse the alert as not
+	// queued, so the drain had nothing to wait for (#1810).
+	for deadline := time.Now().Add(5 * time.Second); b.link.Queued() == 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the wrong code's alert was never queued for the bridge")
+		}
+	}
 	return b
 }
 
@@ -194,10 +202,12 @@ func poll(bridge bridgeclient.Client, got chan<- string) {
 		if r.Item == nil {
 			continue
 		}
+		// Told before the result is reported: reporting the last text
+		// ends the drain, and Wait may return before the test reads got.
+		got <- r.Item.Text
 		if bridge.Call(context.Background(), bridgeproto.OpSent, bridgeproto.Sent{ID: r.Item.ID, Code: bridgeproto.CodeOK}, nil) != nil {
 			return
 		}
-		got <- r.Item.Text
 	}
 }
 
@@ -225,6 +235,7 @@ func TestShutdownDrainHandsAQueuedAlertToTheBridge(t *testing.T) {
 	got := make(chan string, 8)
 	go poll(b.bridge, got)
 	var delivered time.Time
+	var returned bool
 	for delivered.IsZero() {
 		select {
 		case txt := <-got:
@@ -232,15 +243,33 @@ func TestShutdownDrainHandsAQueuedAlertToTheBridge(t *testing.T) {
 				delivered = time.Now()
 			}
 		case <-waited:
-			t.Fatal("Wait returned before the bridge took the alert")
+			// Wait may return as soon as the alert is reported sent, with
+			// the alert's text still unread in got (poll tells it first).
+			for {
+				select {
+				case txt := <-got:
+					if txt == b.alert {
+						delivered = time.Now()
+					}
+					continue
+				default:
+				}
+				break
+			}
+			if delivered.IsZero() {
+				t.Fatal("Wait returned before the bridge took the alert")
+			}
+			returned = true
 		case <-time.After(bound):
 			t.Fatal("the bridge was never handed the alert during the drain")
 		}
 	}
-	select {
-	case <-waited:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Wait did not return once the alert was sent")
+	if !returned {
+		select {
+		case <-waited:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Wait did not return once the alert was sent")
+		}
 	}
 	if took := time.Since(stopped); took >= bound {
 		t.Fatalf("Wait took %v, the whole bound", took)
