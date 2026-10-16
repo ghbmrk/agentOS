@@ -115,6 +115,49 @@ func (c *RouteControl) Seed(id string) (map[string][]byte, error) {
 	return out, nil
 }
 
+// PoolReading is one plan pool as the vault process last read it from the
+// provider's response headers on the broker's own connection (egress
+// QuotaReading): ResetAt is unix seconds, zero when the provider gave none.
+type PoolReading struct {
+	At          time.Time
+	Pool        string
+	UsedPercent float64
+	ResetAt     int64
+	Exhausted   bool
+}
+
+// PlanUsage is a provider's plan usage across every worker route (egress
+// UsageSnapshot): its pools, and the last refused login (zero when none).
+type PlanUsage struct {
+	Pools        []PoolReading
+	LoginRefused time.Time
+}
+
+// Usage reads provider's plan usage (RES-5). An unreadable reply is an
+// error, never an empty pool list.
+func (c *RouteControl) Usage(provider string) (PlanUsage, error) {
+	u := url.URL{Scheme: "http", Host: "agentos-egress", Path: "/usage", RawQuery: url.Values{"provider": {provider}}.Encode()}
+	resp, err := c.c.Post(u.String(), "text/plain", nil)
+	if err != nil {
+		return PlanUsage{}, fmt.Errorf("plan usage for %s: %w", provider, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode != http.StatusOK {
+		return PlanUsage{}, fmt.Errorf("plan usage for %s: %s", provider, strings.TrimSpace(string(body)))
+	}
+	var out PlanUsage
+	if err := json.Unmarshal(body, &out); err != nil {
+		return PlanUsage{}, fmt.Errorf("plan usage for %s: unreadable reply", provider)
+	}
+	for _, p := range out.Pools {
+		if p.Pool == "" || p.At.IsZero() {
+			return PlanUsage{}, fmt.Errorf("plan usage for %s: unreadable reply", provider)
+		}
+	}
+	return out, nil
+}
+
 // Close closes id's route; a failure leaves the route to the vault
 // process's own shutdown.
 func (c *RouteControl) Close(id string) {

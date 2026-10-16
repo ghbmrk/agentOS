@@ -128,3 +128,47 @@ func TestCRED5RouteControlSeedsTheWorker(t *testing.T) {
 		t.Fatalf("seed %q", got)
 	}
 }
+
+// RES-5: the broker reads a provider's pools over the control socket; the
+// reply is decoded into this package's own types, and a refusal or an
+// unreadable reply is an error, never an empty pool list that reads as
+// "nothing used".
+func TestRES5RouteControlReadsUsage(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "p.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := `{"Pools":[{"At":"2026-10-15T10:00:00Z","Provider":"codex","Worker":"pw-a","Pool":"primary","UsedPercent":42.5,"WindowMinutes":300,"ResetAt":1792000000,"Exhausted":false}],"LoginRefused":"2026-10-15T09:00:00Z"}`
+	var path string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
+		io.WriteString(w, reply)
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	c := NewRouteControl(sock)
+	u, err := c.Usage("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "POST /usage?provider=codex" {
+		t.Fatalf("called %q", path)
+	}
+	if len(u.Pools) != 1 || u.Pools[0].Pool != "primary" || u.Pools[0].UsedPercent != 42.5 || u.Pools[0].ResetAt != 1792000000 ||
+		u.Pools[0].At.IsZero() || u.LoginRefused.IsZero() {
+		t.Fatalf("usage %+v", u)
+	}
+	for _, bad := range []string{`not json`, `{"Pools":[{"Pool":""}]}`} {
+		reply = bad
+		if _, err := c.Usage("codex"); err == nil {
+			t.Fatalf("reply %q read as usage", bad)
+		}
+	}
+}
