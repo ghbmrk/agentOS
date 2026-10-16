@@ -1409,14 +1409,17 @@ func recallNotify(own func() *owner.Channel) func(string) error {
 // paced goes.
 type ownerPacer struct {
 	ch atomic.Pointer[owner.Channel]
+
+	retireLogged string // the unsaved-retire cause last logged; tick only
 }
 
 // newOwnerPacer is the pacer's part of the daemon config, set before the
-// daemon runs: the grants hooks (QH-8) and STATUS's held line (QH-10).
+// daemon runs: the grants hooks (QH-8), STATUS's held line (QH-10) and
+// its line while an answered approval is unsaved (SM-AJ-4).
 func newOwnerPacer(cfg *daemon.Config) *ownerPacer {
 	p := &ownerPacer{}
 	p.wire(&cfg.Grants)
-	cfg.Notes = append(cfg.Notes, p.note)
+	cfg.Notes = append(cfg.Notes, p.note, p.retireNote)
 	return p
 }
 
@@ -1464,12 +1467,30 @@ func (p *ownerPacer) note() string {
 	return ""
 }
 
-// tick releases held texts that may go now (QH-10).
+// retireNote is STATUS's line while an answered approval is unsaved, so
+// new requests fail (SM-AJ-4).
+func (p *ownerPacer) retireNote() string {
+	if ch := p.ch.Load(); ch != nil {
+		return ch.RetireNote()
+	}
+	return ""
+}
+
+// tick releases held texts that may go now (QH-10) and logs the cause of
+// an unsaved retirement once per distinct cause (SM-AJ-4).
 func (p *ownerPacer) tick() {
 	if ch := p.ch.Load(); ch != nil {
 		if err := ch.Release(); err != nil {
 			log.Printf("owner: held texts not sent: %v", err)
 		}
+		cause := ""
+		if err := ch.RetireErr(); err != nil {
+			cause = err.Error()
+		}
+		if cause != "" && cause != p.retireLogged {
+			log.Printf("%s; new approval requests fail until a save works", cause)
+		}
+		p.retireLogged = cause
 	}
 }
 
