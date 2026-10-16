@@ -35,8 +35,8 @@ type setupSignIn struct{ r *provagent.Runner }
 // machines close (Background), not up to its code's life later. This
 // runner has no SignIn or OnSignedIn: its SignedIn changes only its own
 // state, never the daemon runner's stop or ONB-9's line, which do not
-// exist before setup ends. pins are the images' pinned CLI versions, the
-// same agentosd's runner reads (#1877): an image that pins none keeps its
+// exist before setup ends. pins read the images' pinned CLI versions at
+// each check, as agentosd's runner does (#1877): an image that pins none keeps its
 // gate closed and the page offers no sign-in.
 func newSetupSignIn(host *setupHost, rc *modelroute.RouteControl, pins imagePins) setupSignIn {
 	return setupSignIn{&provagent.Runner{

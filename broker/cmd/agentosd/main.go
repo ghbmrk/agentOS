@@ -438,8 +438,8 @@ func main() {
 		log.Fatal(err)
 	}
 	learn.DiskQuota = diskQuota
-	// The CLI versions the provider images pin, read once for both
-	// provider runners (#1877).
+	// The provider images whose pinned CLI versions both provider runners
+	// read at each gate check (#1877).
 	pins := readImagePins(imgs, provagent.Builtins())
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
@@ -1090,9 +1090,9 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 // declarations and the vault process's route control rc. The owner's grant
 // and private mark are rc's plan state (#1264), and note carries ONB-9's
 // sign-in line. Every other owner-side input is closed until its row lands:
-// no consent. The image's pinned CLI version is pins' (#1877), the same
-// pins setup's sign-in reads; an image that pins none keeps the gate
-// closed. Codex's qualification record is empty until S8-live (#809)
+// no consent. The image's pinned CLI version is read from the image by
+// pins at each check (#1877), as setup's sign-in reads it; an image that
+// pins none keeps the gate closed. Codex's qualification record is empty until S8-live (#809)
 // fills it, so a run refuses with a closed reason and starts nothing. Pool readings and the reserve come from
 // wirePlanUsage (#1856); without them admission refuses (RES-5 fails
 // closed). Journal (OP-8 meter and charge) is unwired; provagent P9 names

@@ -3,10 +3,14 @@ package main
 // REQ: CAP-11, CRED-5, ONB-3
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/provagent"
@@ -101,6 +105,47 @@ func TestImagePinStaysInsideTheImage(t *testing.T) {
 	}
 }
 
+// A FIFO at the pin path neither hangs the read nor pins what is written
+// to it: the open does not block and only a regular file is read.
+func TestImagePinRefusesAFIFO(t *testing.T) {
+	for _, written := range []string{"", "0.162.1\n"} {
+		dir := t.TempDir()
+		p := filepath.Join(dir, cliPinPath)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(p, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if written != "" {
+			// O_RDWR opens a FIFO without a reader; the writer stays open,
+			// so a read past the data would wait for more.
+			w, err := os.OpenFile(p, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+			if _, err := w.WriteString(written); err != nil {
+				t.Fatal(err)
+			}
+		}
+		type res struct {
+			v   string
+			err error
+		}
+		done := make(chan res, 1)
+		go func() { v, err := readCLIPin(dir); done <- res{v, err} }()
+		select {
+		case r := <-done:
+			if r.err == nil || r.v != "" {
+				t.Errorf("FIFO holding %q read %q, %v", written, r.v, r.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("FIFO holding %q hung the read", written)
+		}
+	}
+}
+
 // Only images a declaration runs on are read; an unregistered image pins
 // nothing, and an image that pins nothing reads as "".
 func TestImagePinsReadDeclaredImagesOnly(t *testing.T) {
@@ -118,6 +163,31 @@ func TestImagePinsReadDeclaredImagesOnly(t *testing.T) {
 	var none imagePins
 	if none.version("codex") != "" {
 		t.Fatal("nil pins pinned a version")
+	}
+}
+
+// At start, a provider image that pins nothing or pins another version
+// than its record is logged by name with both versions, and nothing else
+// the file holds.
+func TestImagePinsLogAMismatchAtStart(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+	decls := provagent.Builtins()
+	qualifiedOn(decls, "0.162.1")
+	readImagePins(images{"codex": pinnedImage(t, "0.162.1\n")}, decls)
+	if buf.Len() != 0 {
+		t.Fatalf("a matching pin logged %q", buf.String())
+	}
+	readImagePins(images{"codex": pinnedImage(t, "0.163.0\n")}, decls)
+	if got := buf.String(); !strings.Contains(got, `image "codex" pins CLI 0.163.0`) || !strings.Contains(got, `record is for "0.162.1"`) {
+		t.Fatalf("mismatch logged %q", got)
+	}
+	buf.Reset()
+	readImagePins(images{"codex": pinnedImage(t, "canary-not-a-version\n")}, decls)
+	if got := buf.String(); !strings.Contains(got, `image "codex" pins no CLI version`) || strings.Contains(got, "canary") {
+		t.Fatalf("bad pin logged %q", got)
 	}
 }
 
@@ -161,4 +231,41 @@ func TestAChangedImagePinMakesTheRunUnqualified(t *testing.T) {
 	// No registered codex image (#1721 not landed) leaves the gate closed.
 	imgs = images{}
 	check(false)
+}
+
+// The pin is re-read from the registered image directory at every check,
+// the directory vm creates the machine from: an image swapped after start
+// closes the gate without a restart, and the image swapped back reopens it.
+func TestASwappedImageClosesTheGate(t *testing.T) {
+	dir := pinnedImage(t, "0.162.1\n")
+	pins := readImagePins(images{"codex": dir}, provagent.Builtins())
+	r := providerRunner(nil, nil, nil, pins)
+	qualifiedOn(r.Decls, "0.162.1")
+	r.Granted = func(string) bool { return true }
+	s := newSetupSignIn(newSetupRig(0).s, modelroute.NewRouteControl(t.TempDir()+"/none.sock"), pins)
+	qualifiedOn(s.r.Decls, "0.162.1")
+	open := func() bool { return runCodex(r) != provagent.Unqualified && s.Ready("codex") }
+	if !open() {
+		t.Fatal("gate closed on the qualified image")
+	}
+	kept := dir + ".kept"
+	if err := os.Rename(dir, kept); err != nil {
+		t.Fatal(err)
+	}
+	other := pinnedImage(t, "0.163.0\n")
+	if err := os.Rename(other, dir); err != nil {
+		t.Fatal(err)
+	}
+	if runCodex(r) != provagent.Unqualified || s.Ready("codex") {
+		t.Fatal("the gate stayed open on a swapped image")
+	}
+	if err := os.Rename(dir, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(kept, dir); err != nil {
+		t.Fatal(err)
+	}
+	if !open() {
+		t.Fatal("gate stayed closed on the image swapped back")
+	}
 }
