@@ -488,3 +488,56 @@ func TestKeeperDoesNotRehandARevokedLogin(t *testing.T) {
 		t.Fatalf("new login to a revoked holder: %v %v", handed, err)
 	}
 }
+
+// A keeper that has handed nothing since it started learns the refused
+// login from the hand's 409 and keeps it through a later failed round, so a
+// holder that then restarts empty is not handed it (L3 review of #2001).
+func TestFreshKeeperKeepsTheRefusedLogin(t *testing.T) {
+	dir := socketDir(t)
+	var mu sync.Mutex
+	key := canary(t, "sk-canary-")
+	var fail bool
+	secret := func() ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if fail {
+			return nil, errors.New("unlock step busy")
+		}
+		return []byte(key), nil
+	}
+	ctx := context.Background()
+
+	up := &upstream{reply: answer(http.StatusForbidden, nil, "")}
+	h := newHolder(t, up, &swapper{})
+	stop := serve(t, h, dir, os.Getuid())
+	first := &Keeper{Socket: filepath.Join(dir, HandSocket), Secret: secret}
+	if handed, err := first.Check(ctx); !handed || err != nil {
+		t.Fatalf("first hand: %v %v", handed, err)
+	}
+	h.ServeHTTP(httptest.NewRecorder(), req("POST", "/v1/messages", "{}"))
+	if !h.Revoked() {
+		t.Fatal("the refusal did not revoke the login")
+	}
+
+	// The keeper restarts: the fresh one learns the refusal from the 409.
+	k := &Keeper{Socket: filepath.Join(dir, HandSocket), Secret: secret}
+	if _, err := k.Check(ctx); !errors.Is(err, ErrRevokedLogin) {
+		t.Fatalf("fresh keeper's hand: %v", err)
+	}
+	mu.Lock()
+	fail = true
+	mu.Unlock()
+	if handed, _ := k.Check(ctx); handed {
+		t.Fatal("handed with no secret")
+	}
+	mu.Lock()
+	fail = false
+	mu.Unlock()
+	stop()
+
+	h = newHolder(t, up, &swapper{})
+	serve(t, h, dir, os.Getuid())
+	if handed, _ := k.Check(ctx); handed || h.Held() {
+		t.Fatal("a fresh keeper re-handed the refused login after a failed round")
+	}
+}

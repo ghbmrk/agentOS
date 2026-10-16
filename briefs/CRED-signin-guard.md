@@ -21,6 +21,7 @@ Out of scope: persisting route stops across a broker restart (#1926, next row on
 - CRED-5: `broker/provagent/signin_test.go::TestSignedInNeedsAStoredSignIn` — `SignedIn` with no `SignInStored`, or one that says no, leaves a refused route stopped and the owner not told again; with a stored sign-in it reopens. Catches the unconditional clear.
 - CRED-5: `broker/holder/holder_test.go::TestRefusedLoginIsNotHandedAgain` — after a refused-login status the holder refuses to spend the login and refuses the same login on hand; a new login is accepted. Catches `Hand` overwriting with a revoked login.
 - CRED-5: `broker/holder/holder_test.go::TestKeeperDoesNotRehandARevokedLogin` — after revocation and a holder restart the keeper does not hand the same login; once `Secret()` returns a new login it hands that. Catches the keeper's re-hand.
+- CRED-5: `broker/holder/holder_test.go::TestFreshKeeperKeepsTheRefusedLogin` — a keeper that has handed nothing learns the refusal from the 409 and keeps it through a failed round, so a holder restarting empty is not handed it. Catches a fresh keeper erasing the refused fingerprint (L3 review).
 
 **Scope:** `broker/provagent/run.go`, `broker/provagent/signin.go`, `broker/provagent/*_test.go`, `broker/provagent/ASSUMPTIONS.md`, `broker/holder/`, `broker/cmd/agentosd/planwire_test.go` (one call site of the changed signature), this brief.
 

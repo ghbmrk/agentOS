@@ -529,6 +529,7 @@ type Keeper struct {
 
 	mu      sync.Mutex
 	last    [sha256.Size]byte // fingerprint of the login last handed
+	handed  bool              // last is set
 	revoked [sha256.Size]byte // fingerprint of the login the provider refused
 	refused bool              // revoked is set
 }
@@ -560,7 +561,10 @@ func (k *Keeper) Check(ctx context.Context) (handed bool, err error) {
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("holder: state: status %d: %v", resp.StatusCode, err)
 	}
-	if st.Revoked {
+	if st.Revoked && k.handed {
+		// A keeper that has handed nothing does not know which login was
+		// refused; it learns it from the hand's 409 and must not overwrite
+		// what it learned with an empty fingerprint.
 		k.revoked, k.refused = k.last, true
 	}
 	if st.Held && !st.Revoked {
@@ -592,7 +596,7 @@ func (k *Keeper) Check(ctx context.Context) (handed bool, err error) {
 	if resp.StatusCode != http.StatusNoContent {
 		return false, fmt.Errorf("holder: hand: status %d", resp.StatusCode)
 	}
-	k.last = fp
+	k.last, k.handed = fp, true
 	return true, nil
 }
 
