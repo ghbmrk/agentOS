@@ -54,6 +54,10 @@ func (p *planLogins) Forget(worker string) {
 
 func (*planLogins) ForWorker(string, string) egress.Swapper { return nil }
 func (*planLogins) ForSignIn(string, string) egress.Swapper { return nil }
+func (*planLogins) ShareRefresh(_ context.Context, _ string, x func() (*egress.Exchanged, error)) (*egress.Exchanged, func(), error) {
+	res, err := x()
+	return res, func() {}, err
+}
 
 type upstream struct {
 	mu    sync.Mutex
