@@ -48,14 +48,18 @@ func TestSysrootIsOutsideTheRootOnlyDirectory(t *testing.T) {
 	}
 }
 
-// REQ: HW-10. The steps not driven yet fail with the text the xfail table
-// expects, so they read XFAIL and not FAIL.
+// REQ: HW-10. The step not driven yet fails with the text the xfail table
+// expects, so it reads XFAIL and not FAIL; phone-control is driven, so it
+// is off the list and an unpassed run reads FAIL.
 func TestNotDrivenStepsFailWithTheExpectedText(t *testing.T) {
 	d := &driver{}
-	for name, run := range map[string]func() error{"guest-task": d.guestTask, "phone-control": d.phoneControl} {
-		err := run()
-		if err == nil || !strings.HasPrefix(err.Error(), xfail[name].want) {
-			t.Errorf("%s: %v does not start with %q", name, err, xfail[name].want)
-		}
+	if err := d.guestTask(); err == nil || !strings.HasPrefix(err.Error(), xfail["guest-task"].want) {
+		t.Errorf("guest-task: %v does not start with %q", err, xfail["guest-task"].want)
+	}
+	if _, ok := xfail["phone-control"]; ok {
+		t.Error("phone-control is driven (#1714) but still on the expected-failure list")
+	}
+	if err := d.phoneControl(); err == nil || strings.HasPrefix(err.Error(), notDriven) {
+		t.Errorf("phone-control without a paired phone: %v", err)
 	}
 }

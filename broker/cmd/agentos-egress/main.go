@@ -513,6 +513,14 @@ func serveCmd(args []string) error {
 		return err
 	}
 	defer mailLn.Close()
+	routesLn, err := serveWorkerRoutes(*run, c, *brokerUID)
+	if err != nil {
+		for _, s := range srvs {
+			s.Close()
+		}
+		return err
+	}
+	defer routesLn.Close()
 	if *modemUID >= 0 {
 		sign, err := serveSign(*run, c, *modemUID)
 		if err != nil {

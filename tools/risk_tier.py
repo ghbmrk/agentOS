@@ -79,6 +79,9 @@ TIER_A_BROKER = {
     "apnet",                      # the Owner Card's Wi-Fi password
     "browser", "netjoin", "pubid", "tpmseal",
     "durable",                    # writes keys, the vault file and root.json, and sets their mode
+    # e2e/boxe2e, the G1 in-image run (#1714): holds the claim code, the Owner
+    # Card's values and the code-generator seed, and its verdict proves G1.
+    "e2e",
     # CRED-1 custody (#1654): recall's scrubber and the event bus that runs it
     # decide what authentication material reaches the recall index and event log.
     "events", "recall",
@@ -90,6 +93,7 @@ TIER_A_BROKER = {
     "apply", "card", "claim", "cleanroom", "clock", "digestqueue", "firstboot",
     "follow",                     # switches the update root of trust
     "hint", "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
+    "provagent",                  # runs a provider agent on the owner's plan (CAP-11); also (a): seeds placeholders
     "attest",                     # bounds what public output may say (OSS-4)
     "hostdisk",                   # HW-8a second confirmation; udev host-disk isolation
     # (c) parses owner-channel input
@@ -107,7 +111,7 @@ TIER_B_BROKER = {
     # cgroup is B, but core vm kills machines and loop7 freezes its jail
     # through it: a change to Kill or Freeze is reviewed with those callers.
     "cgroup",
-    "compile", "corpus", "e2e", "floor", "fold", "hostchange",
+    "compile", "corpus", "floor", "fold", "hostchange",
     "loopbuild", "machprobe", "projection", "pubsend", "quota", "routerule", "skill",
     "sockprobe", "test", "voice",
 }
@@ -119,10 +123,11 @@ TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # the release's fuzz manifest, so it is not test-only); .github/ builds the image,
 # gates merges and pushes to main; .claude/ holds agent permissions; tools/ci_scope
 # decides which CI jobs a change skips (CI-docs); tools/g1_scope and its lists decide
-# which paths a PR may touch during the G1 freeze (G1-freeze).
+# which paths a PR may touch during the G1 freeze (G1-freeze); tools/ci_split decides
+# which broker packages each race shard runs and when the fuzz peaks step skips (CI-SHARD).
 TIER_A_PREFIXES = (
     "assurance/", "tools/canary", "tools/depaudit", "tools/risk_tier", "tools/ci_scope",
-    "tools/g1_scope",
+    "tools/g1_scope", "tools/ci_split",
     "image/", ".github/", ".claude/",
 )
 # guest/<name>/<file>: what the guest runs or installs.
