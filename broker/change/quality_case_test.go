@@ -1,6 +1,7 @@
 package change
 
-// REQ: OP-7, QCR-1, QCR-2, QCR-3, QCR-5
+// REQ: OP-7
+// Brief IDs: QCR-1, QCR-2, QCR-3, QCR-5
 
 import (
 	"errors"
