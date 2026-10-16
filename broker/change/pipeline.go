@@ -404,6 +404,9 @@ type Pipeline struct {
 	// flushMu serialises flushOwed, which runs intents without mu.
 	flushMu sync.Mutex
 	props   map[string]*proposal
+	// stray holds proposals whose Content delete failed; the next forget
+	// retries them (AJS-1). Memory only: replay deletes them again.
+	stray map[string]bool
 	// lapsed holds release proposals dropped because the owner's request
 	// closed unanswered, until Loop 3 asks (Lapsed). Memory only, like
 	// props: a restart drops both, and Loop 3 re-asks after one anyway.
