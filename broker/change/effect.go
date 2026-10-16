@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +60,9 @@ func (p *Pipeline) Check(_ context.Context, _ journal.Phase, in journal.Intent) 
 		}
 		if pr.base != p.st.Active.Hash() {
 			return errors.New("change: the active state changed since evaluation; propose again")
+		}
+		if !hashParam(in.Params["from"], pr.base) || !hashParam(in.Params["to"], pr.next.Hash()) {
+			return errors.New("change: the intent names another candidate")
 		}
 		switch in.GrantRef {
 		case BasisStanding:
@@ -1000,4 +1004,18 @@ func touchesNS(edits []Edit, ns string) bool {
 		}
 	}
 	return false
+}
+
+var treeHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// hashParam: an adopt intent's from or to param agrees with want. A
+// redacted value carries nothing to compare, and the saved proposal's MAC
+// binds the candidate instead; a missing one or another hash refuses
+// (CHG-2, AJS-3).
+func hashParam(v any, want string) bool {
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return false
+	}
+	return !treeHash.MatchString(s) || s == want
 }

@@ -3,6 +3,9 @@ package change
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -198,9 +201,33 @@ func (p *Pipeline) migrateLocked() error {
 	return p.saveLocked()
 }
 
+// sealedProposal is a proposal blob as Content holds it: the body and a
+// MAC over the proposal's ID and the body under a key Content never holds,
+// so a rewritten or misfiled blob is not used (CHG-2, AJS-2).
+type sealedProposal struct {
+	Body json.RawMessage `json:"body"`
+	MAC  string          `json:"mac"`
+}
+
+// proposalMAC binds body to proposal id under a key derived from the
+// pipeline's secret key.
+func (p *Pipeline) proposalMAC(id string, body []byte) []byte {
+	k := hmac.New(sha256.New, p.key)
+	k.Write([]byte("change/proposal-mac"))
+	m := hmac.New(sha256.New, k.Sum(nil))
+	m.Write([]byte(id))
+	m.Write([]byte{0})
+	m.Write(body)
+	return m.Sum(nil)
+}
+
 func (p *Pipeline) putProposalLocked(id string, pr *proposal) error {
-	b, err := json.Marshal(savedProposal{Cand: pr.cand, Base: pr.base, Next: pr.next, Edits: pr.edits,
+	body, err := json.Marshal(savedProposal{Cand: pr.cand, Base: pr.base, Next: pr.next, Edits: pr.edits,
 		Report: pr.report, Example: pr.report.example, Classes: pr.classes, Security: pr.security})
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(sealedProposal{Body: body, MAC: hex.EncodeToString(p.proposalMAC(id, body))})
 	if err != nil {
 		return err
 	}
@@ -208,12 +235,37 @@ func (p *Pipeline) putProposalLocked(id string, pr *proposal) error {
 }
 
 // dropLocked forgets proposal id, in memory and in Content. A failed
-// delete is logged: the proposal is gone from memory, and replay drops a
-// proposal whose intent is no longer waiting.
+// delete is logged and kept in stray, which the next forget retries;
+// replay deletes again the proposal of every intent no longer waiting
+// (C23, AJS-1).
 func (p *Pipeline) dropLocked(id string) {
 	delete(p.props, id)
-	if err := p.content.Delete(proposalKey(id)); err != nil && p.cfg.Logf != nil {
-		p.cfg.Logf("change: proposal not deleted (%s)", errClass(err))
+	p.deleteProposalLocked(id)
+}
+
+func (p *Pipeline) deleteProposalLocked(id string) {
+	if err := p.content.Delete(proposalKey(id)); err != nil {
+		if p.stray == nil {
+			p.stray = map[string]bool{}
+		}
+		p.stray[id] = true
+		if p.cfg.Logf != nil {
+			p.cfg.Logf("change: proposal not deleted (%s)", errClass(err))
+		}
+		return
+	}
+	delete(p.stray, id)
+}
+
+// retryStrayLocked deletes again each proposal whose delete failed.
+func (p *Pipeline) retryStrayLocked() {
+	ids := make([]string, 0, len(p.stray))
+	for id := range p.stray {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		p.deleteProposalLocked(id)
 	}
 }
 
@@ -292,6 +344,12 @@ func (p *Pipeline) replayLocked(j Journal) {
 			if pr := p.loadProposalLocked(c.parts[1]); pr != nil {
 				props[c.parts[1]] = pr
 			}
+			continue
+		}
+		if c.in.Action == ActionAdopt && id == adoptID(c.parts[1]) {
+			// No longer waiting: its candidate bytes go, even when the
+			// settle's delete failed or never ran (AJS-1).
+			p.deleteProposalLocked(c.parts[1])
 		}
 	}
 	sort.SliceStable(done, func(a, b int) bool { return done[a].seq < done[b].seq })
@@ -453,16 +511,24 @@ func (p *Pipeline) loadBodyLocked(id string) (*Adoption, *lifecycle, error) {
 	return &a, b.Legacy, nil
 }
 
-// loadProposalLocked reads a waiting proposal; nil when it is absent or
-// unreadable, which leaves its intent with nothing to adopt (Check
-// refuses it).
+// loadProposalLocked reads a waiting proposal; nil when it is absent,
+// unreadable, or its MAC does not bind it to id, which leaves its intent
+// with nothing to adopt (Check refuses it; AJS-2).
 func (p *Pipeline) loadProposalLocked(id string) *proposal {
 	raw, err := p.content.Get(proposalKey(id))
 	if err != nil || raw == nil {
 		return nil
 	}
+	var sealed sealedProposal
+	if err := json.Unmarshal(raw, &sealed); err != nil {
+		return nil
+	}
+	mac, err := hex.DecodeString(sealed.MAC)
+	if err != nil || !hmac.Equal(mac, p.proposalMAC(id, sealed.Body)) {
+		return nil
+	}
 	var sp savedProposal
-	if err := json.Unmarshal(raw, &sp); err != nil {
+	if err := json.Unmarshal(sealed.Body, &sp); err != nil {
 		return nil
 	}
 	rep := sp.Report

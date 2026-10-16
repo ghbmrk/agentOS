@@ -278,6 +278,7 @@ func (p *Pipeline) forgetGoal(goal string) ([]string, error) {
 		p.gone = map[string]bool{}
 	}
 	p.gone[goal] = true
+	p.retryStrayLocked() // candidate bytes a failed delete left (AJS-1)
 	var ids []string
 	for id, c := range p.st.Cases {
 		if !c.Security && c.Goal == goal {
