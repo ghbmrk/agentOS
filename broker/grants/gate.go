@@ -389,6 +389,49 @@ type decision struct {
 	// The approval covers the next one only: the journal's dispatch
 	// record uses it up (GR8, Security on #76).
 	tries int
+	// sum is owner.ItemSum of the item the owner answered, for a decision
+	// rebuilt from the journal, which keeps no item (Invariant C); the
+	// recheck then matches the item by it. Empty for a live decision.
+	sum string
+}
+
+// sameAs reports whether it is the item d answered.
+func (d decision) sameAs(it owner.Item) bool {
+	if d.sum != "" {
+		return owner.ItemSum(it) == d.sum
+	}
+	return sameItem(d.item, it)
+}
+
+// note is d as the journal keeps it (journal.RecAnswer): no code, no
+// item text, the item as its digest only.
+func (d decision) note(confirmed bool) journal.AnswerNote {
+	n := journal.AnswerNote{Approved: d.approved, Why: d.why, Request: d.req, Local: d.local,
+		Confirmed: d.local && confirmed, Asked: d.asked, Implicit: d.implicit, Late: d.late,
+		Hold: d.hold != "", Tries: max(d.tries, 0), Went: d.rep.went, Unclear: d.rep.unclear}
+	if d.asked {
+		n.Sum = owner.ItemSum(d.item)
+	}
+	return n
+}
+
+// denialGuest is the fixed reason the guest sees for a denial the owner
+// did not give (release item 1, lens on #396); "owner" and "not chosen"
+// keep the default.
+func denialGuest(why string) guesterr.Literal {
+	switch why {
+	case "expired":
+		return "the owner did not answer in time"
+	case "void":
+		return "a wrong code was given too many times"
+	case "restart":
+		return "the broker restarted before the owner answered"
+	case "it changed since the page showed it":
+		return "it changed since the page showed it"
+	case "its staged copy could not be made":
+		return "its staged copy could not be made"
+	}
+	return ""
 }
 
 // New returns a gate that denies everything until Attach.
@@ -461,9 +504,55 @@ func (g *Gate) Attach(eng *journal.Engine, own Owner) {
 	if own == nil {
 		return
 	}
+	g.rebuildLocked(eng)
 	for _, st := range eng.List() {
-		if st.State == journal.Pending {
+		if _, answered := g.decided[st.Intent.ID]; st.State == journal.Pending && !answered {
 			g.carried[st.Intent.ID] = true
+		}
+	}
+}
+
+// rebuildLocked restores the owner's answers a restart would otherwise
+// lose (OP-11, SM-AJ-2, SM-AJ-3): each pending or held (authorized)
+// intent's latest journaled answer becomes its decision again, timed from
+// when it was journaled, so Fresh is not restarted, and its local
+// confirmation is kept. An answer an attempt has since used, or one on a
+// held effect (REV-3), whose hold the owner channel's boot settles, is
+// not rebuilt. Reissue settles the pending ones. g.mu is held.
+func (g *Gate) rebuildLocked(eng *journal.Engine) {
+	last := map[string]journal.Record{}
+	confirmed := map[string]bool{}
+	trail := eng.Trail()
+	// A clock behind the journal cannot age an answer (SM-AJ-2, OP-3):
+	// nothing is rebuilt and what is open is asked again.
+	now := g.cfg.Now()
+	for _, r := range trail {
+		if now.Before(r.At) {
+			return
+		}
+	}
+	for _, r := range trail {
+		if r.Type != journal.RecAnswer || r.Answer == nil {
+			continue
+		}
+		if r.Answer.Confirm {
+			confirmed[r.ID] = true
+			continue
+		}
+		last[r.ID] = r
+	}
+	for id, r := range last {
+		n := r.Answer
+		st, err := eng.Get(id)
+		if err != nil || (st.State != journal.Pending && st.State != journal.Authorized) ||
+			n.Hold || n.Tries != len(st.Attempts) {
+			continue
+		}
+		g.decided[id] = decision{approved: n.Approved, why: n.Why, guest: denialGuest(n.Why), asked: n.Asked,
+			implicit: n.Implicit, late: n.Late, req: n.Request, at: r.At, sum: n.Sum,
+			rep: repeat{went: n.Went, unclear: n.Unclear}, local: n.Local, tries: n.Tries}
+		if n.Confirmed || confirmed[id] {
+			g.confirmed[id] = true
 		}
 	}
 }
@@ -491,7 +580,24 @@ func (g *Gate) Reissue(cs []owner.Carried) {
 		g.reissue = append(g.reissue, owner.Carried{Ref: id})
 	}
 	g.carried = map[string]bool{}
+	var answered []string
+	if g.eng != nil {
+		for id, d := range g.decided {
+			if d.approved && d.local && !g.confirmed[id] {
+				continue // waits for the local page
+			}
+			if st, err := g.eng.Get(id); err == nil && st.State == journal.Pending {
+				answered = append(answered, id)
+			}
+		}
+	}
 	g.mu.Unlock()
+	sort.Strings(answered)
+	// The answers a restart rebuilt (Attach) are acted on as they would
+	// have been: none is asked again (SM-AJ-3).
+	for _, id := range answered {
+		g.settle(id)
+	}
 	g.reissueDue()
 }
 
@@ -1639,7 +1745,7 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 	if v.local && !g.isConfirmed(in.ID) {
 		return refuse("needs confirmation on the local Wi-Fi page")
 	}
-	if !sameItem(d.item, v.item) {
+	if !d.sameAs(v.item) {
 		return refuse("the details changed after the owner approved; ask again")
 	}
 	if !d.covers(v.rep) {
@@ -1648,8 +1754,16 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 		// was an auto-reply's silence (Security B10 on #1433).
 		return refusal{RepeatSinceApproval, "the same send went or may have gone since the owner approved; ask again"}
 	}
-	if phase == journal.PhaseDispatch && g.cfg.Now().Sub(d.at) > g.cfg.Fresh {
-		return refusal{fmt.Sprintf("the approval is older than %s; ask again", g.cfg.Fresh), "the approval is too old; ask again"}
+	if phase == journal.PhaseDispatch {
+		// A negative age means the clock went back past the answer: it
+		// cannot say the approval is fresh (SM-AJ-2, OP-3).
+		age := g.cfg.Now().Sub(d.at)
+		if age < 0 {
+			return refusal{"the clock is behind the owner's approval; ask again", "the approval could not be checked; ask again"}
+		}
+		if age > g.cfg.Fresh {
+			return refusal{fmt.Sprintf("the approval is older than %s; ask again", g.cfg.Fresh), "the approval is too old; ask again"}
+		}
 	}
 	// The engine commits the dispatch only if nothing was journaled since
 	// this check, so an attempt started by a concurrent Dispatch, before
@@ -2309,16 +2423,7 @@ func (g *Gate) Decide(d owner.Decision) {
 	changed := false
 	var guest guesterr.Literal
 	if !d.Approved {
-		// Denials the owner did not give name their own cause (release
-		// item 1, lens on #396); "owner" and "not chosen" keep the default.
-		switch d.Why {
-		case "expired":
-			guest = "the owner did not answer in time"
-		case "void":
-			guest = "a wrong code was given too many times"
-		case "restart":
-			guest = "the broker restarted before the owner answered"
-		}
+		guest = denialGuest(d.Why)
 	}
 	if d.Approved && local && d.Page {
 		// Approved on the page with a fresh code: that answer confirms
@@ -2327,7 +2432,7 @@ func (g *Gate) Decide(d owner.Decision) {
 			g.confirmed[d.Ref] = true
 		} else {
 			d.Approved, why, changed = false, "it changed since the page showed it", true
-			guest = "it changed since the page showed it"
+			guest = denialGuest(why)
 		}
 	}
 	hold, attempt := "", 0
@@ -2343,16 +2448,37 @@ func (g *Gate) Decide(d owner.Decision) {
 			// Released without its staged copy: the owner approved it as
 			// staged, so it is not sent (arbitrator on #76).
 			d.Approved, why = false, "its staged copy could not be made"
-			guest = "its staged copy could not be made"
+			guest = denialGuest(why)
 		}
 	}
 	unheld := d.Approved && (w == nil || !w.held)
 	implicit := unheld && d.Why == whyReleased
 	late := unheld && d.Why == whyReleasedLate
-	g.decided[d.Ref] = decision{approved: d.Approved, why: why, guest: guest, asked: w != nil, implicit: implicit, late: late,
+	dec := decision{approved: d.Approved, why: why, guest: guest, asked: w != nil, implicit: implicit, late: late,
 		req: d.Request, at: g.cfg.Now(), item: item, rep: rp, local: local, hold: hold, attempt: attempt, tries: tries}
-	wait := d.Approved && local && !g.confirmed[d.Ref]
+	confirmed := g.confirmed[d.Ref]
 	own, eng := g.own, g.eng
+	g.mu.Unlock()
+	// The answer is journaled before the gate acts on it (OP-12, SM-AJ-1),
+	// outside g.mu: the engine's policy calls take it. An approval the
+	// journal cannot take is not acted on; the intent stays pending and
+	// the agent's retry asks again. A denial goes ahead: it can only
+	// refuse.
+	if eng == nil {
+		return
+	}
+	if err := eng.RecordAnswer(d.Ref, dec.note(confirmed)); err != nil {
+		g.cfg.Logf("grants: journaling the owner's answer on %s: %v", d.Ref, err)
+		if dec.approved {
+			g.mu.Lock()
+			delete(g.confirmed, d.Ref)
+			g.mu.Unlock()
+			return
+		}
+	}
+	g.mu.Lock()
+	g.decided[d.Ref] = dec
+	wait := d.Approved && local && !g.confirmed[d.Ref]
 	g.mu.Unlock()
 	if unstaged && hold != "" && own != nil {
 		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", clip(hold)))
@@ -2674,6 +2800,10 @@ func (g *Gate) ConfirmLocal(id string) error {
 			g.evaluate(context.Background(), journal.PhaseAuthorize, st.Intent).local)) {
 		return errors.New("grants: nothing to confirm for " + clip(id))
 	}
+	// Journaled first, so a restart keeps it (OP-12, SM-AJ-2).
+	if err := g.eng.RecordAnswer(id, journal.AnswerNote{Confirm: true}); err != nil {
+		return fmt.Errorf("grants: journaling the confirmation of %s: %w", clip(id), err)
+	}
 	g.mu.Lock()
 	g.confirmed[id] = true
 	d, ok := g.decided[id]
@@ -2789,7 +2919,7 @@ func (g *Gate) reask(ctx context.Context, id string, d decision) bool {
 		return false
 	}
 	v := g.evaluate(ctx, journal.PhaseAuthorize, st.Intent)
-	if v.kind != ask || !sameItem(d.item, v.item) || d.covers(v.rep) {
+	if v.kind != ask || !d.sameAs(v.item) || d.covers(v.rep) {
 		return false
 	}
 	g.mu.Lock()

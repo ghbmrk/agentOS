@@ -170,7 +170,7 @@ func trailComplete(recs []journal.Record, _ Options) []Violation {
 			}
 			seen[r.ID] = true
 		case journal.RecAuthorized, journal.RecDenied, journal.RecRecheckFailed, journal.RecDispatched,
-			journal.RecParked, journal.RecObserved, journal.RecCancel, journal.RecQuality, journal.RecErased:
+			journal.RecParked, journal.RecObserved, journal.RecCancel, journal.RecQuality, journal.RecErased, journal.RecAnswer:
 			if !seen[r.ID] {
 				bad("%s for an intent never submitted", r.Type)
 			}
@@ -404,6 +404,10 @@ func erasedUnreadable(recs []journal.Record, o Options) []Violation {
 		case journal.RecObserved, journal.RecCancel:
 			if r.Evidence != "" {
 				bad("erased intent's evidence still in the journal")
+			}
+		case journal.RecAnswer:
+			if r.Answer != nil && r.Answer.Sum != "" {
+				bad("erased intent's item digest still in the journal")
 			}
 		case journal.RecDispatched:
 			if r.Seq > at {

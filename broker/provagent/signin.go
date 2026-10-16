@@ -3,7 +3,9 @@ package provagent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,11 +113,18 @@ func (r *Runner) StartSignIn(ctx context.Context, provider string, class admissi
 	r.SignInFor(id)
 	spec := vm.Spec{Image: d.Image, Class: class, MemMB: memMB, Label: vm.Private, Argv: d.Idle}
 	if _, err := r.Host.CreateProviderWorker(ctx, id, spec, nil); err != nil {
+		r.logf("provagent: %s sign-in: create provider worker %s: %v", d.ID, id, err)
 		r.Seeder.Close(id) // forgets the mark; no route was left open
 		return "", "", refuse(Failed)
 	}
 	t := r.SignInTimes.orDefault()
 	if res, err := r.Host.Exec(ctx, id, SignInCommand(d), t.Link); err != nil || res.ExitCode != 0 || res.TimedOut {
+		// The result's exit status and timeout only: its output is the
+		// worker's, never logged.
+		if err == nil {
+			err = fmt.Errorf("exit status %d, timed out %t", res.ExitCode, res.TimedOut)
+		}
+		r.logf("provagent: %s sign-in: start the CLI in %s: %v", d.ID, id, err)
 		r.destroy(ctx, id)
 		return "", "", refuse(Failed)
 	}
@@ -188,18 +197,30 @@ func (r *Runner) awaitPrompt(ctx context.Context, id string, d Declaration, t Si
 		if link, code, ok := d.SignInPrompt(r.read(ctx, id, d.Cwd+signInOut, t.Link)); ok {
 			return link, code, nil
 		}
-		if r.read(ctx, id, d.Cwd+signInStatus, t.Link) != "" {
-			return "", "", refuse(Failed) // the CLI exited without a code
+		if st := r.read(ctx, id, d.Cwd+signInStatus, t.Link); st != "" {
+			r.logf("provagent: %s sign-in: the CLI exited without a code, %s", d.ID, exitStatus(st))
+			return "", "", refuse(Failed)
 		}
 		if !time.Now().Before(deadline) {
+			r.logf("provagent: %s sign-in: no link and code within %v", d.ID, t.Link)
 			return "", "", refuse(TimedOut)
 		}
 		select {
 		case <-ctx.Done():
+			r.logf("provagent: %s sign-in: no link and code before it was stopped", d.ID)
 			return "", "", refuse(TimedOut)
 		case <-time.After(t.Poll):
 		}
 	}
+}
+
+// exitStatus is the status file's text as a log may carry it: the CLI can
+// write that file too, so only a number is quoted.
+func exitStatus(st string) string {
+	if n, err := strconv.Atoi(strings.TrimSpace(st)); err == nil {
+		return fmt.Sprintf("exit status %d", n)
+	}
+	return "a status that is not a number"
 }
 
 // awaitSignIn waits up to t.Wall, or until ctx ends, for the owner's

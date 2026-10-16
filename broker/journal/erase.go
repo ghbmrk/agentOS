@@ -126,6 +126,8 @@ func carries(r Record) bool {
 		return r.Intent != nil && (r.Intent.Params != nil || r.Intent.Preconditions != nil)
 	case RecObserved, RecCancel:
 		return r.Evidence != ""
+	case RecAnswer:
+		return r.Answer != nil && r.Answer.Sum != ""
 	}
 	return false
 }
@@ -153,6 +155,11 @@ func (e *Engine) rewriteErased() error {
 			}
 			if r.Type == RecObserved || r.Type == RecCancel {
 				r.Evidence = ""
+			}
+			if r.Answer != nil {
+				n := *r.Answer
+				n.Sum = ""
+				r.Answer = &n
 			}
 		}
 		line, err := encodeRecord(r)

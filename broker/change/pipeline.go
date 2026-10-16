@@ -57,6 +57,11 @@ type Candidate struct {
 	// them in broker code; the builder never asserts them. Forgetting one
 	// undoes the adoption (ForgetGoal, C23).
 	Goals []string
+	// GoalVerdicts is each goal's latest verdict when the candidate was
+	// proposed. The pipeline sets it from the journal; a caller's is
+	// replaced. The adoption keeps it, and a later verdict that differs
+	// re-evaluates the adoption (OP-7, RecheckQuality).
+	GoalVerdicts []GoalVerdict
 	// Finding is the finding this candidate is proposed to fix, set by
 	// Loop 2 in broker code, never by its fixer. It qualifies only if
 	// every security case linked to that finding passes on it; for those
@@ -316,6 +321,10 @@ type Adoption struct {
 	RevertSeen    bool `json:"revert_seen,omitempty"`
 	// Goals are the candidate's Goals, IDs only (C23).
 	Goals []string `json:"goals,omitempty"`
+	// GoalVerdicts are the verdicts its goals carried when it was last
+	// evaluated: at proposal, then at each re-evaluation the quality
+	// trigger ran (OP-7). Replaced whole, never changed in place.
+	GoalVerdicts []GoalVerdict `json:"goal_verdicts,omitempty"`
 }
 
 // state is everything the pipeline persists.
@@ -393,7 +402,15 @@ type Pipeline struct {
 	// closed unanswered, until Loop 3 asks (Lapsed). Memory only, like
 	// props: a restart drops both, and Loop 3 re-asks after one anyway.
 	lapsed map[string]bool
-	broken error // set when state could neither be saved nor reloaded
+	// qualityRetry: RecheckQuality left an adoption due (an evaluator
+	// outage or a failed revert); the trigger waits until then. Memory
+	// only: a restart retries at once.
+	qualityRetry time.Time
+	// qualityHeld: when RecheckQuality first held an adoption for a goal's
+	// case that still carried the verdict before its revision (QCR-3).
+	// Memory only: a restart holds it one retry wait again.
+	qualityHeld map[string]time.Time
+	broken      error // set when state could neither be saved nor reloaded
 	// probes of running evaluations: use count and task intent.
 	probes    map[string]int
 	probeTask map[string]string
@@ -682,6 +699,9 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 	if err := p.healthy(); err != nil {
 		return Report{}, err
 	}
+	// Before the evaluation: a verdict that changes during it differs from
+	// this snapshot, and the adoption is re-evaluated (OP-7).
+	c.GoalVerdicts = p.goalVerdicts(c.Goals)
 	for path := range c.Files {
 		if err := cleanPath(path); err != nil {
 			return Report{}, err
