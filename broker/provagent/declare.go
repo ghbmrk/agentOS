@@ -101,6 +101,10 @@ type Declaration struct {
 	Wrap, Argv, Env []string
 	Cwd             string
 	ResultPath      string // the declared result file; the CLI's stdout is written to it
+	// Idle is what the worker runs from start until it is destroyed: runsc
+	// refuses a container with no process args, and the CLI runs by Exec,
+	// so the worker needs a process that waits and does nothing (#1721).
+	Idle []string
 
 	Custody     Custody
 	Endpoints   []string // hosts the vault process injects at (feeds #1014)
@@ -156,6 +160,9 @@ func (d Declaration) Validate() error {
 	if len(d.Argv) == 0 {
 		return fmt.Errorf("declaration %s: no headless argv", d.ID)
 	}
+	if len(d.Idle) == 0 {
+		return fmt.Errorf("declaration %s: no idle argv for the worker to start on", d.ID)
+	}
 	if !strings.HasPrefix(d.Cwd, "/") || !strings.HasPrefix(d.ResultPath, "/") {
 		return fmt.Errorf("declaration %s: cwd and result path are absolute", d.ID)
 	}
@@ -183,6 +190,7 @@ func (d Declaration) Validate() error {
 	}
 	var all []string
 	all = append(append(append(all, d.Wrap...), d.Argv...), d.Env...)
+	all = append(all, d.Idle...)
 	all = append(append(all, d.SignInArgv...), d.SignInLinks...)
 	all = append(all, d.Endpoints...)
 	all = append(all, d.Placeholder, d.Cwd, d.ResultPath, d.Q.Evidence, d.Q.TermsURL)
@@ -215,6 +223,7 @@ func Builtins() map[string]Declaration {
 			Argv:        []string{"codex", "exec", "--json", "--skip-git-repo-check", "--cd", "/var/lib/agentos-work", "-"},
 			Cwd:         "/var/lib/agentos-work",
 			Env:         []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/var/lib/agentos-codex", "CODEX_HOME=/var/lib/agentos-codex", "GIT_DIR=/dev/null"},
+			Idle:        []string{"/bin/sleep", "infinity"},
 			ResultPath:  "/var/lib/agentos-work/.agentos-result",
 			Custody:     BrokerHeld,
 			Endpoints:   []string{"chatgpt.com", "auth.openai.com"},
@@ -242,6 +251,7 @@ func Builtins() map[string]Declaration {
 			Argv: []string{"claude", "-p", "--output-format", "json"},
 			Cwd:  "/var/lib/agentos-work", ResultPath: "/var/lib/agentos-work/.agentos-result",
 			Env:         []string{"PATH=/usr/local/bin:/usr/bin:/bin"},
+			Idle:        []string{"/bin/sleep", "infinity"},
 			Custody:     WorkerHeld,
 			Pools:       []Pool{{Name: "5h", ReadFrom: "anthropic-ratelimit-unified-5h-utilization"}, {Name: "7d", ReadFrom: "anthropic-ratelimit-unified-7d-utilization"}},
 			TaskClasses: []string{"code", "research"},

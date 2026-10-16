@@ -39,8 +39,10 @@ boot() {
 		i=$((i + 1)); idx=; [ $i -eq 1 ] && idx=,bootindex=1
 		drives="$drives -drive if=none,id=d$i,format=raw,file=$d -device virtio-blk-pci,drive=d$i$idx"
 	done
+	# 8 GiB, not 4: agentosd's pool on the guest must hold the agent and one provider worker
+	# (#1896, image/ASSUMPTIONS.md I26); the hosted runner has 16 GB.
 	# shellcheck disable=SC2086 # $drives, $REPORT_FIRST and $EXTRA are lists of QEMU arguments without spaces.
-	qemu-system-x86_64 -machine q35,smm=on -accel $ACCEL -cpu max -smp 4 -m 4096 \
+	qemu-system-x86_64 -machine q35,smm=on -accel $ACCEL -cpu max -smp 4 -m 8192 \
 		-global driver=cfi.pflash01,property=secure,value=on \
 		-drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
 		-drive if=pflash,format=raw,unit=1,file="$t/vars.fd" \
@@ -233,7 +235,7 @@ e2e_console() {
 if [ -n "${E2E:-}" ]; then
 	cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(base64 -w0 "$HERE/e2e/$2")"; }
 	copy "$W/e2e.raw"
-	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)" \
+	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)$(cred systemd.unit-dropin.agentos-egress.service agentos-egress.conf)" \
 		NIC="user,model=virtio-net-pci" UNTIL="agentos-e2e: DONE\|agentos-health: FAIL" boot "$W/console-e2e.log" "$W/e2e.raw"
 	# The guest writes this console, so none of it is trusted as it stands: e2e_console echoes each
 	# driver line sanitised and prefixed, and accepts the log only with exactly one strictly

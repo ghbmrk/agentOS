@@ -109,7 +109,7 @@ func (r *Runner) StartSignIn(ctx context.Context, provider string, class admissi
 
 	id := r.NewID()
 	r.SignInFor(id)
-	spec := vm.Spec{Image: d.Image, Class: class, MemMB: memMB, Label: vm.Private}
+	spec := vm.Spec{Image: d.Image, Class: class, MemMB: memMB, Label: vm.Private, Argv: d.Idle}
 	if _, err := r.Host.CreateProviderWorker(ctx, id, spec, nil); err != nil {
 		r.Seeder.Close(id) // forgets the mark; no route was left open
 		return "", "", refuse(Failed)
