@@ -1,0 +1,43 @@
+# Every broker package that persists, and the OP-11 kind of what it keeps.
+# One line per package directory, relative to broker/:
+#
+#   <dir> <kind> [debt:<ref>]
+#
+# kind is one of:
+#   journal           the journal itself (OP-11's one log)
+#   projection        a pure function of the journal, or a named cache of one
+#   content           bytes the journal names: vault, snapshots, recall, logs
+#   external-session  state an outside program changes itself (CRED-4, CRED-5)
+#   config            owner or setup settings, not a lifecycle
+#   debt              keeps a lifecycle beside the journal; <ref> names the
+#                     audit section or issue that moves it off
+#
+# lifecycle_guard_test.go fails if a package that calls durable.WriteFile or
+# durable.Rename, or renames under durable:exempt, is not listed here, and if
+# a listed package no longer does. A new domain lifecycle is a journal intent
+# kind (journal.Lifecycle), not a new line here.
+apnet config
+change debt debt:audit-2.5
+checker debt debt:#1947
+cleanroom debt debt:#1947
+clock debt debt:#1947
+cmd/agentos-egress debt debt:#1947
+cmd/agentos-guest-bridge content
+cmd/agentosd debt debt:audit-2.7
+follow debt debt:#1947
+guest debt debt:#1947
+journal journal
+localsrv config
+localui config
+meter debt debt:#1947
+owner debt debt:audit-2.2
+projection projection
+pubid debt debt:#1947
+pubsend debt debt:#1947
+question debt debt:#1947
+recall content
+recovery debt debt:#1947
+update debt debt:audit-2.4
+vault content
+vm content
+vm/gvisor content
