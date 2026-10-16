@@ -179,13 +179,33 @@ func TestRouteSignsInAndRunsAgainstTheStub(t *testing.T) {
 	}
 
 	// A refresh rotates the token set; the old access token stops working.
-	old := r.stub.Tokens()[0]
+	// Tokens keeps listing every token issued before it, the first
+	// sign-in's id_token included, and every id_token carries the canary.
+	old, before := r.stub.Tokens()[0], r.stub.Tokens()
 	rb, _ := json.Marshal(map[string]string{"client_id": "app_synthetic", "grant_type": "refresh_token", "refresh_token": ph["refresh_token"], "scope": "openid profile email"})
 	if w := call(h, "POST", "/oauth/token", "application/json", string(rb)); w.Code != 200 || strings.Contains(w.Body.String(), Canary) {
 		t.Fatalf("refresh: %d %s", w.Code, w.Body)
 	}
 	if r.stub.Tokens()[0] == old {
 		t.Fatal("refresh did not rotate")
+	}
+	after := strings.Join(r.stub.Tokens(), "\n")
+	for _, v := range before {
+		if !strings.Contains(after, v) {
+			t.Fatal("Tokens forgot a token issued before the refresh")
+		}
+	}
+	ids := 0
+	for _, v := range r.stub.Tokens() {
+		if strings.Count(v, ".") == 2 && !strings.HasPrefix(v, Canary) {
+			ids++
+			if !strings.Contains(v, Canary) {
+				t.Fatal("an id_token carries no canary")
+			}
+		}
+	}
+	if ids != 2 {
+		t.Fatalf("Tokens lists %d id_tokens after a sign-in and a refresh, not 2", ids)
 	}
 	b, _ = r.logins.AuthJSON("codex", "w1")
 	json.Unmarshal(b, &auth)

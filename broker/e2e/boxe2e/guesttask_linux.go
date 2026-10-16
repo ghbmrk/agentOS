@@ -136,7 +136,8 @@ func (d *driver) providerRun(c *mcpClient, run int) error {
 // leaks reports whether raw, a whole tools/call result, carries an issued
 // token, or a canary other than the model's answer, anywhere: in its raw
 // bytes or in any key or string it decodes to, every content item and
-// field included. The id_token carries no canary, so tokens must list it.
+// field included. An id_token's header and payload carry no canary, so
+// tokens must list every id_token issued.
 func leaks(raw []byte, tokens []string) bool {
 	texts := []string{string(raw)}
 	var v any

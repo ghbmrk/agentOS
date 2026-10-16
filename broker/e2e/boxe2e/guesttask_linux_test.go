@@ -23,7 +23,8 @@ import (
 // the machine's socket, with provider_run played by mode: "absent" offers
 // no provider_run (#1721), "unqualified" refuses the route (#809), "answer"
 // makes the worker's model call at the stub with the signed-in tokens and
-// returns its text; the rest are the failures the driver must not pass.
+// returns its text; the rest are the failures the driver must not pass,
+// "leakOld" among them: it refreshes, then leaks the id_token it replaced.
 // It admits a run after the first only once a model call's response
 // carried the plan's quota headers, as provagent admits only one probe
 // while the plan has no usage reading; "noQuota" never reads them.
@@ -106,6 +107,18 @@ func (g *fakeGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		b, _ := json.Marshal(map[string]string{"result": g.modelCall()})
 		reply(map[string]any{"content": []any{map[string]string{"type": "text", "text": string(b)},
 			map[string]string{"type": "text", "text": g.f.tok["refresh_token"]}}, "isError": false})
+	case "leakOld":
+		// The CLI refreshes on its own, then the result carries the
+		// id_token from before the refresh.
+		g.f.mu.Lock()
+		old := g.f.tok["id_token"]
+		rb, _ := json.Marshal(map[string]string{"client_id": "app_synthetic", "grant_type": "refresh_token", "refresh_token": g.f.tok["refresh_token"]})
+		if st, tok := g.f.provider("POST", "/oauth/token", "application/json", string(rb)); st == 200 {
+			g.f.tok = tok
+		}
+		g.f.mu.Unlock()
+		b, _ := json.Marshal(map[string]string{"result": g.modelCall() + " " + old})
+		text(string(b), false)
 	case "leakField":
 		b, _ := json.Marshal(map[string]string{"result": g.modelCall()})
 		reply(map[string]any{"content": []any{map[string]string{"type": "text", "text": string(b)}},
@@ -217,6 +230,7 @@ func TestGuestTaskRunsOnTheCodexPlan(t *testing.T) {
 		"leakID":       "carried a provider token",
 		"leakSecond":   "carried a provider token",
 		"leakField":    "carried a provider token",
+		"leakOld":      "carried a provider token",
 		"noQuota":      "usage reading never landed",
 		"unqualified2": "provider_run 2 refused: provider_run: unqualified",
 		"usedup":       "provider_run 1 refused: provider_run: used up",

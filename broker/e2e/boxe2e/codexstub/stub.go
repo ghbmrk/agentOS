@@ -62,8 +62,9 @@ type Stub struct {
 	verify   string // code_verifier
 	access   string
 	refresh  string
-	id       string // the id_token, whose header and payload carry no canary
+	id       string // the id_token; only its signature carries the canary
 	account  string
+	issued   []string // every token above the stub ever issued, oldest first
 	hits     map[string]int
 	refused  int
 }
@@ -132,15 +133,18 @@ func (s *Stub) Refused() int {
 	return s.refused
 }
 
-// Tokens returns the token set the stub issued, so a test can look for it
-// where it must not be. It includes the id_token, which carries no Canary
-// prefix and so would pass a check for the canary alone.
+// Tokens returns every token the stub ever issued, so a test can look for
+// them where they must not be: the current set first, its access token at
+// [0], then each one a refresh or exchange replaced. It includes every
+// id_token, whose header and payload carry no Canary prefix.
 func (s *Stub) Tokens() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	seen := map[string]bool{}
 	var out []string
-	for _, v := range []string{s.access, s.refresh, s.id, s.code, s.verify} {
-		if v != "" {
+	for _, v := range append([]string{s.access, s.refresh, s.id, s.code, s.verify}, s.issued...) {
+		if v != "" && !seen[v] {
+			seen[v] = true
 			out = append(out, v)
 		}
 	}
@@ -239,6 +243,7 @@ func (s *Stub) devicetoken(w http.ResponseWriter, _ *http.Request, body []byte) 
 		return true
 	}
 	s.code, s.verify = Canary+"code-"+rnd(), Canary+"verifier-"+rnd()
+	s.issued = append(s.issued, s.code, s.verify)
 	s.device, s.user, s.ok = "", "", false
 	return writeJSON(w, map[string]string{
 		"authorization_code": s.code, "code_challenge": "challenge-" + rnd(), "code_verifier": s.verify,
@@ -276,6 +281,7 @@ func (s *Stub) refreshToken(w http.ResponseWriter, _ *http.Request, body []byte)
 // mint issues a new token set and returns it; s.mu is held.
 func (s *Stub) mint() map[string]any {
 	s.access, s.refresh, s.id = Canary+"access-"+rnd(), Canary+"refresh-"+rnd(), s.idToken()
+	s.issued = append(s.issued, s.access, s.refresh, s.id)
 	return map[string]any{
 		"access_token": s.access, "refresh_token": s.refresh, "id_token": s.id,
 		"expires_in": 3600, "token_type": "Bearer",
@@ -283,7 +289,9 @@ func (s *Stub) mint() map[string]any {
 }
 
 // idToken carries the account claim the route reads, unsigned like the
-// placeholder the worker holds.
+// placeholder the worker holds. Its signature segment carries the Canary
+// prefix, so every id_token the stub issued is found by a canary scan and
+// cut by redaction; nothing reads the signature.
 func (s *Stub) idToken() string {
 	enc := func(v any) string {
 		b, _ := json.Marshal(v)
@@ -291,7 +299,7 @@ func (s *Stub) idToken() string {
 	}
 	return enc(map[string]string{"alg": "none", "typ": "JWT"}) + "." +
 		enc(map[string]any{"https://api.openai.com/auth": map[string]string{"chatgpt_account_id": s.account}}) +
-		"." + rnd()
+		"." + Canary + rnd()
 }
 
 // bearer reports whether r carries the access token the stub issued last
