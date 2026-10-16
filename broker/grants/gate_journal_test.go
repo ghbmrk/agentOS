@@ -296,3 +296,64 @@ func TestWaitingRebuiltAfterRestart(t *testing.T) {
 		t.Fatalf("re-asked %+v, want agent/b", got)
 	}
 }
+
+// TestClockBehindAnswerRefused (SM-AJ-2, OP-3; Security on #1970): a clock
+// behind the owner's answer cannot make the answer look fresh. A restart
+// with the clock behind the journal rebuilds no answer, and an answer
+// whose age is negative is refused at dispatch.
+func TestClockBehindAnswerRefused(t *testing.T) {
+	ctx := context.Background()
+	t.Run("held by STOP", func(t *testing.T) {
+		r := newRig(t, nil)
+		r.grant(mailGrant())
+		if _, err := r.eng.Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+		r.invoice("agent/a", "inv-a")
+		r.decide(true, "owner")
+		r.advance(-time.Hour)
+		r.open()
+		if err := r.eng.Resume(); err != nil {
+			t.Fatal(err)
+		}
+		st, _ := r.g.Dispatch(ctx, "agent/a")
+		if st.State == journal.Succeeded || r.exec.runs("agent/a") != 0 {
+			t.Fatalf("clock behind the answer: %s %q, runs %d", st.State, st.Permission.Reason, r.exec.runs("agent/a"))
+		}
+	})
+	t.Run("crash before authorize", func(t *testing.T) {
+		r := newRig(t, nil)
+		r.grant(mailGrant())
+		r.approveThenCrash("agent/a", "inv-a")
+		r.advance(-time.Hour)
+		r.open()
+		r.g.Wait()
+		r.g.Flush()
+		if r.exec.runs("agent/a") != 0 {
+			t.Fatalf("clock behind the answer: agent/a ran %d times", r.exec.runs("agent/a"))
+		}
+		if st := r.state("agent/a"); st.State != journal.Pending {
+			t.Fatalf("agent/a: %s %q, want pending and asked again", st.State, st.Permission.Reason)
+		}
+		if n := r.own.count(); n != 1 {
+			t.Fatalf("owner asked %d times, want 1", n)
+		}
+	})
+	t.Run("live clock stepped back", func(t *testing.T) {
+		r := newRig(t, nil)
+		r.grant(mailGrant())
+		if _, err := r.eng.Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+		r.invoice("agent/a", "inv-a")
+		r.decide(true, "owner")
+		r.advance(-time.Hour)
+		if err := r.eng.Resume(); err != nil {
+			t.Fatal(err)
+		}
+		st, _ := r.g.Dispatch(ctx, "agent/a")
+		if st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "clock") || r.exec.runs("agent/a") != 0 {
+			t.Fatalf("negative age: %s %q, runs %d", st.State, st.Permission.Reason, r.exec.runs("agent/a"))
+		}
+	})
+}

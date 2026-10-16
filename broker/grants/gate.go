@@ -522,7 +522,16 @@ func (g *Gate) Attach(eng *journal.Engine, own Owner) {
 func (g *Gate) rebuildLocked(eng *journal.Engine) {
 	last := map[string]journal.Record{}
 	confirmed := map[string]bool{}
-	for _, r := range eng.Trail() {
+	trail := eng.Trail()
+	// A clock behind the journal cannot age an answer (SM-AJ-2, OP-3):
+	// nothing is rebuilt and what is open is asked again.
+	now := g.cfg.Now()
+	for _, r := range trail {
+		if now.Before(r.At) {
+			return
+		}
+	}
+	for _, r := range trail {
 		if r.Type != journal.RecAnswer || r.Answer == nil {
 			continue
 		}
@@ -1745,8 +1754,16 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 		// was an auto-reply's silence (Security B10 on #1433).
 		return refusal{RepeatSinceApproval, "the same send went or may have gone since the owner approved; ask again"}
 	}
-	if phase == journal.PhaseDispatch && g.cfg.Now().Sub(d.at) > g.cfg.Fresh {
-		return refusal{fmt.Sprintf("the approval is older than %s; ask again", g.cfg.Fresh), "the approval is too old; ask again"}
+	if phase == journal.PhaseDispatch {
+		// A negative age means the clock went back past the answer: it
+		// cannot say the approval is fresh (SM-AJ-2, OP-3).
+		age := g.cfg.Now().Sub(d.at)
+		if age < 0 {
+			return refusal{"the clock is behind the owner's approval; ask again", "the approval could not be checked; ask again"}
+		}
+		if age > g.cfg.Fresh {
+			return refusal{fmt.Sprintf("the approval is older than %s; ask again", g.cfg.Fresh), "the approval is too old; ask again"}
+		}
 	}
 	// The engine commits the dispatch only if nothing was journaled since
 	// this check, so an attempt started by a concurrent Dispatch, before
