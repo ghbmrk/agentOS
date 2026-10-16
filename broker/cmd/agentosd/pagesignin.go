@@ -32,6 +32,13 @@ func (p *pageSignIn) Ready() bool {
 	return r != nil && p.note.on.Load() && r.CanSignIn(pagePlan)
 }
 
+// Waiting is whether a sign-in of the plan still waits for the owner,
+// whoever started it: the page keeps its link and code only while it does.
+func (p *pageSignIn) Waiting() bool {
+	r := p.r.Load()
+	return r != nil && r.SigningIn(pagePlan)
+}
+
 // Start starts the plan's sign-in and returns its page, code and issuer.
 // Nothing the CLI printed but those crosses.
 func (p *pageSignIn) Start(ctx context.Context) (link, code, from string, err error) {

@@ -117,6 +117,9 @@ type Server struct {
 	wrong    []time.Time
 	inFlight int
 	signins  []time.Time // plan sign-ins started in the last minute
+	plan     planKept    // the waiting plan sign-in the page started
+
+	planMu sync.Mutex // one plan sign-in start at a time
 }
 
 // New returns a Server.
@@ -159,7 +162,7 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpRotateAPNet: s.rotateAPNet,
 		// Signing the plan in again needs a session, then always a code
 		// (#1264, CRED-5).
-		localapi.OpPlanSignInReady: s.authed(s.planSignInReady),
+		localapi.OpPlanSignInReady: s.planSignInReady,
 		localapi.OpPlanSignIn:      s.planSignIn,
 	}
 }

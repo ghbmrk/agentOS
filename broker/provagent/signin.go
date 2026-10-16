@@ -153,6 +153,15 @@ func (r *Runner) CanSignIn(provider string) bool {
 	return Gate{ImageVersion: r.ImageVersion(d.Image), Consent: r.Consent != nil && r.Consent(d.ID)}.Check(d) == nil
 }
 
+// SigningIn reports whether provider's sign-in still waits for the owner:
+// from StartSignIn's claim until its wait ends, approved or not. The Wi-Fi
+// page keeps the link and code it showed only while this holds (#1945).
+func (r *Runner) SigningIn(provider string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.signing[provider]
+}
+
 func (r *Runner) claimSignIn(provider string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
