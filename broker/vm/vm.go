@@ -237,6 +237,13 @@ type Services interface {
 	Close(id string)
 }
 
+// Resetter is a Services that also holds state derived from a machine's
+// memory. ForgetSince calls Reset on a machine it rolls back (CAP-3), so
+// that state is dropped with the memory, not kept past the forget.
+type Resetter interface {
+	Reset(id string)
+}
+
 // Runtime runs machines. Checkpoint is called on a paused machine and leaves
 // it paused. Kill stops a machine, releases what Start set up, and is
 // idempotent.
