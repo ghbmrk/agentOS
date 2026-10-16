@@ -134,6 +134,13 @@ func newHostapd(dir string, lookup func(string) (*user.User, error)) (*localui.H
 // ends or exited fires. It looks again every c.Poll: a change of network
 // brings the access point down before the next comes up (#1185), so the
 // setup network is off the air, and burned, before the card's appears.
+//
+// A card's network whose Up fails, or whose child dies before it has
+// served settlePolls looks, is counted against that version of the file
+// (apnet.RecordUpFailure), across the restarts that follow, for agentosd
+// to tell the owner past the bound (#1525); one that settles clears the
+// count. A failure never brings any other network up: the next run
+// serves what the file holds, or nothing.
 func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-chan struct{}) error {
 	if err := waitForIface(ctx, c, l); err != nil {
 		return err
@@ -149,6 +156,15 @@ func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-cha
 	tick := time.NewTicker(c.Poll)
 	defer tick.Stop()
 	logged := false
+	settled := 0 // looks the card's network has served since it came up
+	failed := func(w *served) {
+		if w == nil || w.name != cardNetwork {
+			return
+		}
+		if _, err := apnet.RecordUpFailure(c.APNet); err != nil {
+			log.Printf("agentos-ap: counting the card's network failure: %v", err)
+		}
+	}
 	for {
 		w, err := want(c, l, &up)
 		if err != nil {
@@ -165,9 +181,11 @@ func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-cha
 			}
 			if w != nil {
 				if err := l.Up(ctx, localui.APConfig{Iface: c.Iface, Addr: c.Addr, SSID: w.SSID, Password: w.Password}); err != nil {
+					failed(w)
 					return errors.Join(err, l.Down(context.Background()))
 				}
 				up = w
+				settled = 0
 				log.Printf("agentos-ap: serving the %s on %s", w.name, c.Iface)
 			}
 			logged = false
@@ -187,11 +205,28 @@ func run(ctx context.Context, c config, l *localui.APLoader, exited func() <-cha
 			}
 			return down()
 		case <-gone:
+			if settled < settlePolls {
+				failed(up)
+			}
 			return errors.Join(errors.New("an access point child exited"), down())
 		case <-tick.C:
+			if up != nil && up.name == cardNetwork && settled < settlePolls {
+				if settled++; settled == settlePolls {
+					if err := apnet.ClearUpFailures(c.APNet); err != nil {
+						log.Printf("agentos-ap: clearing the card's network failures: %v", err)
+					}
+				}
+			}
 		}
 	}
 }
+
+// cardNetwork names the card's network in served; settlePolls is how
+// many looks it serves before its failures are cleared (#1525).
+const (
+	cardNetwork = "card's network"
+	settlePolls = 15
+)
 
 // served is a network the access point serves; name says which, for the
 // log, which never holds the password (ARC-1).
@@ -230,7 +265,7 @@ func want(c config, l *localui.APLoader, up **served) (*served, error) {
 	if err != nil {
 		return nil, fmt.Errorf("card network: %w", err)
 	}
-	return &served{name: "card's network", SSID: cn.SSID, Password: cn.Password}, nil
+	return &served{name: cardNetwork, SSID: cn.SSID, Password: cn.Password}, nil
 }
 
 // ownedOrConfirmed says whether the box is owned or its card confirmed,

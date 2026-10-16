@@ -103,8 +103,11 @@ var controlPath = map[string][]string{
 	// credential and the IMAP and SMTP clients stay in agentos-egress (M1);
 	// mail imports golang.org/x/text, so like clock it has no entry below
 	// and is held by TestAgentosdLinksNoInference, which holds mailsock to
-	// the unix dial modelroute makes.
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet"},
+	// the unix dial modelroute makes. It wires the provider-agent runner
+	// (provagent, CAP-11) to the worker tools through an adapter, and its
+	// seeder to modelroute's route control, so neither workers nor
+	// provagent links the model route's client.
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "replay", "question", "clock", "routerule", "grants", "compile", "loopbuild", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "loop7", "corpus", "digestqueue", "control", "mail", "mail/mailsock", "verb", "netjoin", "apnet", "provagent"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -166,6 +169,13 @@ var guestPlane = map[string]struct {
 	// manager; no journal, no executors, no network clients, no processes
 	// (commands run through vm/gvisor's runsc exec).
 	"workers": {[]string{"admission", "vm", "vm/overlay", "guesterr"}, forbiddenStd},
+	// The provider-agent runner (CAP-11): declarations, the qualification
+	// gate and the run path over the machine manager's provider workers.
+	// The guest reaches it only through workers' provider_run, which names
+	// it through an interface agentosd adapts; its seed comes from the
+	// model route through a Seeder agentosd adapts, so it links no network
+	// client, no process and no model route.
+	"provagent": {[]string{"admission", "vm"}, forbiddenStd},
 	// Agents' questions to the owner (P3-8, W9): served to guests and
 	// answered from the owner channel, through hooks the wiring passes.
 	"question": {[]string{"guesterr"}, forbiddenStd},

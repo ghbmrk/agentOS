@@ -56,15 +56,20 @@ func (*planLogins) ForWorker(string, string) egress.Swapper { return nil }
 func (*planLogins) ForSignIn(string, string) egress.Swapper { return nil }
 
 type upstream struct {
-	mu   sync.Mutex
-	seen []*http.Request
+	mu    sync.Mutex
+	seen  []*http.Request
+	quota http.Header // headers the next replies carry
 }
 
 func (u *upstream) RoundTrip(r *http.Request) (*http.Response, error) {
 	u.mu.Lock()
 	u.seen = append(u.seen, r)
+	quota := u.quota.Clone()
 	u.mu.Unlock()
 	rec := httptest.NewRecorder()
+	for k, v := range quota {
+		rec.Header()[k] = v
+	}
 	rec.Header().Set("Content-Type", "text/event-stream")
 	io.WriteString(rec, "data: {\"type\":\"response.completed\"}\n\n")
 	return rec.Result(), nil
@@ -88,6 +93,7 @@ type workerRig struct {
 	audit   *nopAudit
 	real    map[string]string
 	forgot  []string
+	usage   egress.PlanUsage
 	locked  bool
 	dir     string
 	forgetM sync.Mutex
@@ -113,10 +119,7 @@ func newWorkerRig(t *testing.T) *workerRig {
 		if r.locked {
 			return egress.WorkerRouteConfig{}, errors.New("vault locked")
 		}
-		return egress.WorkerRouteConfig{
-			Route: egress.Codex(), Worker: worker, Logins: logins,
-			Transport: r.up, Audit: r.audit,
-		}, nil
+		return codexRouteConfig(worker, logins, r.up, nil, r.audit, &r.usage), nil
 	}, func(worker string) {
 		r.forgetM.Lock()
 		r.forgot = append(r.forgot, worker)
@@ -128,6 +131,7 @@ func newWorkerRig(t *testing.T) *workerRig {
 		}
 		return map[string][]byte{egress.CodexAuthFile: []byte("ph-access-" + worker)}, nil
 	})
+	r.p.usage = r.usage.Snapshot
 	r.ctl = r.p.handler()
 	t.Cleanup(r.p.closeAll)
 	return r
@@ -349,6 +353,7 @@ func TestA14ControlTakesOnlyOpenCloseAndSeed(t *testing.T) {
 	for _, c := range []struct{ method, path string }{
 		{"GET", "/open?machine=pw-a"}, {"POST", "/other?machine=pw-a"}, {"DELETE", "/close?machine=pw-a"},
 		{"GET", "/seed?machine=pw-a"}, {"POST", "/seed?machine=wk-1"},
+		{"GET", "/usage?provider=codex"}, {"POST", "/usage?provider=Codex!"}, {"POST", "/usage"},
 	} {
 		w := httptest.NewRecorder()
 		r.ctl.ServeHTTP(w, httptest.NewRequest(c.method, c.path, nil))
@@ -690,4 +695,177 @@ func TestCRED8RouteConnectionsArePerWorkerBounded(t *testing.T) {
 		t.Fatal("the queued connection was never served")
 	}
 	held[1].Close()
+}
+
+// RES-5: the broker reads a provider's pools over the control socket
+// (/usage), aggregated across every worker's route: the newest reading of
+// each pool, whichever worker's call carried it.
+func TestRES5UsageAggregatesAcrossWorkers(t *testing.T) {
+	r := newWorkerRig(t)
+	call := func(machine, primary, secondary string) {
+		t.Helper()
+		r.up.mu.Lock()
+		r.up.quota = http.Header{}
+		r.up.quota.Set("X-Codex-Primary-Used-Percent", primary)
+		if secondary != "" {
+			r.up.quota.Set("X-Codex-Secondary-Used-Percent", secondary)
+		}
+		r.up.mu.Unlock()
+		resp, err := through(t, filepath.Join(r.open(t, machine), RouteSocket), "ph-access-"+machine, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	call("pw-a", "40", "5")
+	time.Sleep(time.Millisecond) // readings are ordered by their time
+	call("pw-b", "70", "")
+
+	w := httptest.NewRecorder()
+	r.ctl.ServeHTTP(w, httptest.NewRequest("POST", "/usage?provider=codex", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("usage: %d %s", w.Code, w.Body)
+	}
+	var got egress.UsageSnapshot
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Pools) != 2 || got.Pools[0].Pool != "primary" || got.Pools[0].UsedPercent != 70 || got.Pools[0].Worker != "pw-b" ||
+		got.Pools[1].Pool != "secondary" || got.Pools[1].UsedPercent != 5 {
+		t.Fatalf("usage %+v", got)
+	}
+	if strings.Contains(w.Body.String(), r.real["pw-a"]) || strings.Contains(w.Body.String(), r.real["pw-b"]) {
+		t.Fatal("the usage reply carries a login")
+	}
+	w = httptest.NewRecorder()
+	r.ctl.ServeHTTP(w, httptest.NewRequest("POST", "/usage?provider=unread", nil))
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "primary") {
+		t.Fatalf("an unread provider: %d %s", w.Code, w.Body)
+	}
+}
+
+// The config the vault process serves feeds every reading and every refused
+// login into the usage /usage serves, so admission sees them in the shipped
+// binary and not only in the rig (RES-5, CRED-5; #1856 review B1).
+func TestRES5ShippedRouteConfigFeedsUsage(t *testing.T) {
+	var usage egress.PlanUsage
+	cfg := codexRouteConfig("pw-a", &planLogins{forgot: map[string]bool{}}, &upstream{}, nil, &nopAudit{}, &usage)
+	if cfg.Quota == nil || cfg.Signal == nil {
+		t.Fatal("the shipped route config drops readings or signals")
+	}
+	at := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	cfg.Quota(egress.QuotaReading{At: at, Provider: "codex", Worker: "pw-a", Pool: "primary", UsedPercent: 30})
+	cfg.Signal(egress.PlanSignal{At: at, Provider: "codex", Worker: "pw-a", Kind: egress.SignalLoginRefused})
+	got := usage.Snapshot("codex")
+	if len(got.Pools) != 1 || got.Pools[0].UsedPercent != 30 || !got.LoginRefused.Equal(at) {
+		t.Fatalf("usage after the shipped config's callbacks: %+v", got)
+	}
+}
+
+// ctlPost posts path on the control socket and returns the status and body.
+func ctlPost(t *testing.T, sock, path string) (int, []byte) {
+	t.Helper()
+	cl := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", sock)
+		},
+	}}
+	resp, err := cl.Post("http://localhost"+path, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return resp.StatusCode, body
+}
+
+// The vault process as it ships: serveWorkerRoutes over an open custody.
+// A reading on a worker's route reaches the /usage that same control socket
+// serves, so the routes it builds feed the usage it serves (RES-5, CRED-5;
+// #1856 security S1: a route config without Quota, or a usage other than
+// the served one, fails here).
+func TestRES5ServedRoutesFeedTheServedUsage(t *testing.T) {
+	run, err := os.MkdirTemp("", "ru")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(run) })
+	v, err := vault.Create(filepath.Join(run, "v"), []byte(strings.Repeat("k", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { v.Close() })
+	realAccess := synthetic(t, "canary-access-")
+	login, _ := json.Marshal(map[string]string{
+		"access_token": realAccess, "refresh_token": synthetic(t, "canary-refresh-"),
+		"id_token": "x.y.z", "account_id": "acct-synthetic",
+	})
+	if err := v.Put("plan-login-codex", egress.LoginKind, login); err != nil {
+		t.Fatal(err)
+	}
+	up := &upstream{quota: http.Header{}}
+	up.quota.Set("X-Codex-Primary-Used-Percent", "37")
+	c := &custody{notify: func(string) {}, modelTransport: up}
+	c.ph, c.v = open, v
+
+	cl, err := serveWorkerRoutes(filepath.Join(run, "r"), c, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	sock := filepath.Join(run, "r", ProviderSocket)
+
+	code, body := ctlPost(t, sock, "/usage?provider=codex")
+	if code != http.StatusOK || strings.Contains(string(body), "primary") {
+		t.Fatalf("usage before any call: %d %s", code, body)
+	}
+	code, body = ctlPost(t, sock, "/seed?machine=pw-a")
+	if code != http.StatusOK {
+		t.Fatalf("seed: %d %s", code, body)
+	}
+	var seed map[string][]byte
+	var auth struct{ Tokens map[string]string }
+	if err := json.Unmarshal(body, &seed); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(seed[egress.CodexAuthFile], &auth); err != nil || auth.Tokens["access_token"] == "" {
+		t.Fatalf("seeded auth.json %q (%v)", seed[egress.CodexAuthFile], err)
+	}
+	code, body = ctlPost(t, sock, "/open?machine=pw-a")
+	var out struct{ Dir string }
+	if err := json.Unmarshal(body, &out); code != http.StatusOK || err != nil || out.Dir == "" {
+		t.Fatalf("open: %d %s (%v)", code, body, err)
+	}
+	resp, err := through(t, filepath.Join(out.Dir, RouteSocket), auth.Tokens["access_token"], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("call through the served route: status %d", resp.StatusCode)
+	}
+	up.mu.Lock()
+	n := len(up.seen)
+	up.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("the provider saw %d calls, want 1", n)
+	}
+
+	code, body = ctlPost(t, sock, "/usage?provider=codex")
+	var got egress.UsageSnapshot
+	if err := json.Unmarshal(body, &got); code != http.StatusOK || err != nil {
+		t.Fatalf("usage: %d %s (%v)", code, body, err)
+	}
+	if len(got.Pools) != 1 || got.Pools[0].Pool != "primary" || got.Pools[0].UsedPercent != 37 || got.Pools[0].Worker != "pw-a" {
+		t.Fatalf("the served /usage after a reading on the served route: %+v", got)
+	}
+	if strings.Contains(string(body), realAccess) {
+		t.Fatal("the usage reply carries a login")
+	}
 }

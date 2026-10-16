@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // Provider worker routes (#1014 part c, A14, CRED-5).
@@ -35,6 +36,16 @@ import (
 // starts the broker also fetches the worker's placeholder auth.json over the
 // same socket (/seed), so the placeholders it seeds are the ones this
 // process resolves.
+//
+// The owner's sign-in (#1264 c4e2, ONB step 6) runs the provider's CLI in a
+// fresh worker whose route the broker opens with /signin instead: that
+// route serves the sign-in endpoints only (WorkerRouteConfig.SignIn), so
+// the login it stores is the one the owner approved on the provider's own
+// page, and no run worker can store one. /signedin tells the broker
+// whether that worker's own sign-in stored the login (the sign-in's only
+// success signal), and /plan whether a plan is signed in and allowed
+// private data (the runner's Granted and PrivateOK); neither carries a
+// login value.
 
 // Socket names for provider workers.
 const (
@@ -48,6 +59,9 @@ const (
 const providerPrefix = "pw-"
 
 var providerRE = regexp.MustCompile(`^pw-[a-z0-9][a-z0-9-]{0,36}$`)
+
+// providerIDRE is a provider's name (provagent's declaration ID).
+var providerIDRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // Bounds on the route sockets (CRED-8, K28). Each worker's socket accepts
 // routeConns connections; more wait in the kernel's queue. Across every
@@ -68,8 +82,16 @@ type workerRoutes struct {
 	config func(worker string) (egress.WorkerRouteConfig, error)
 	forget func(worker string)
 	seed   func(worker string) (map[string][]byte, error)
-	conns  int
-	calls  chan struct{}
+	// usage is the provider's plan usage across every worker route
+	// (egress.PlanUsage.Snapshot), served on /usage; nil serves none.
+	usage func(provider string) egress.UsageSnapshot
+	// plan answers /plan for a plan provider; nil answers nothing.
+	plan func(provider string) (planState, error)
+	// signedIn answers /signedin: whether worker's own sign-in committed
+	// the plan login (PlanLogins.SignedInBy); nil answers false.
+	signedIn func(worker string) bool
+	conns    int
+	calls    chan struct{}
 
 	mu   sync.Mutex
 	open map[string]*routeServer
@@ -93,10 +115,38 @@ func newWorkerRoutes(dir string, config func(string) (egress.WorkerRouteConfig, 
 	}
 }
 
-// handler serves POST /open, /close and /seed with ?machine=<id>.
+// planState is a plan's state as /plan answers it: whether the owner's
+// login is stored, and whether the owner allowed it private data.
+type planState struct {
+	Granted   bool `json:"granted"`
+	PrivateOK bool `json:"private_ok"`
+}
+
+// planProvider is the one plan provider the routes serve (egress.Codex).
+const planProvider = "codex"
+
+// handler serves POST /open, /signin, /signedin, /close and /seed with
+// ?machine=<id>, POST /plan with ?provider=<plan>, and POST /usage with
+// ?provider=<id> (RES-5: the pools as the broker's own connections last
+// read them).
 func (p *workerRoutes) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || (r.URL.Path != "/open" && r.URL.Path != "/close" && r.URL.Path != "/seed") {
+		switch {
+		case r.Method != http.MethodPost:
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		case r.URL.Path == "/plan":
+			p.servePlan(w, r.URL.Query().Get("provider"))
+			return
+		case r.URL.Path == "/usage":
+			provider := r.URL.Query().Get("provider")
+			if p.usage == nil || !providerIDRE.MatchString(provider) {
+				http.Error(w, "no usage for that provider", http.StatusBadRequest)
+				return
+			}
+			json.NewEncoder(w).Encode(p.usage(provider))
+			return
+		case r.URL.Path != "/open" && r.URL.Path != "/signin" && r.URL.Path != "/signedin" && r.URL.Path != "/close" && r.URL.Path != "/seed":
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -109,6 +159,10 @@ func (p *workerRoutes) handler() http.Handler {
 		case "/close":
 			p.close(id)
 			w.WriteHeader(http.StatusOK)
+		case "/signedin":
+			// From memory, not the vault: the record of this worker's
+			// commit, which /close forgets.
+			json.NewEncoder(w).Encode(map[string]bool{"stored": p.signedIn != nil && p.signedIn(id)})
 		case "/seed":
 			if p.seed == nil {
 				http.Error(w, "no seed", http.StatusNotFound)
@@ -125,7 +179,7 @@ func (p *workerRoutes) handler() http.Handler {
 			}
 			json.NewEncoder(w).Encode(files)
 		default:
-			dir, err := p.openRoute(id)
+			dir, err := p.openRoute(id, r.URL.Path == "/signin")
 			if errors.Is(err, errRouteLocked) {
 				// One line: modelroute.RouteControl maps the 503 to
 				// modelroute.ErrVaultLocked.
@@ -143,13 +197,33 @@ func (p *workerRoutes) handler() http.Handler {
 
 var errRouteLocked = errors.New("the vault is locked; no provider route can open")
 
+// servePlan answers provider's plan state as JSON.
+func (p *workerRoutes) servePlan(w http.ResponseWriter, provider string) {
+	if provider != planProvider || p.plan == nil {
+		http.Error(w, "not a plan provider", http.StatusBadRequest)
+		return
+	}
+	s, err := p.plan(provider)
+	if errors.Is(err, egress.ErrVaultLocked) {
+		http.Error(w, errRouteLocked.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if err != nil {
+		http.Error(w, "plan state unreadable", http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(s)
+}
+
 // openRoute makes the worker's directory and serves its route in it. An
 // open worker's route is replaced (a restart) and keeps its placeholders.
-func (p *workerRoutes) openRoute(id string) (string, error) {
+// signIn opens the sign-in endpoints instead of the run endpoints.
+func (p *workerRoutes) openRoute(id string, signIn bool) (string, error) {
 	cfg, err := p.config(id)
 	if err != nil {
 		return "", errors.Join(errRouteLocked, err)
 	}
+	cfg.SignIn = signIn
 	h, err := egress.NewWorkerRoute(cfg)
 	if err != nil {
 		return "", err
@@ -308,6 +382,22 @@ func (c *custody) loginStore() (egress.LoginStore, error) {
 	return c.v, nil
 }
 
+// planState reads provider's plan state: granted once its login is stored
+// (as a stored API key grants its provider), private_ok with the owner's
+// per-plan mark. egress.ErrVaultLocked while the vault is not open.
+func (c *custody) planState(logins *egress.PlanLogins, provider string) (planState, error) {
+	granted, err := logins.Signed(provider)
+	if err != nil {
+		return planState{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ph != open || c.v == nil {
+		return planState{}, egress.ErrVaultLocked
+	}
+	return planState{Granted: granted, PrivateOK: hasKind(c.v, PrivateOKPrefix+provider, KindPrivateOK)}, nil
+}
+
 // workerRouteRoot is the directory under the run directory that holds the
 // per-worker route directories.
 const workerRouteRoot = "workers"
@@ -319,6 +409,12 @@ const workerRouteRoot = "workers"
 // address guard (DEV-2).
 func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error) {
 	logins := egress.NewPlanLogins(c.loginStore, map[string]string{})
+	// up stays nil in the shipped build: the route dials through the guard.
+	up := c.modelTransport
+	if up == nil {
+		up = planUpstream(c.guard)
+	}
+	usage := &egress.PlanUsage{}
 	if err := runDir(dir); err != nil {
 		return nil, err
 	}
@@ -331,19 +427,13 @@ func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error)
 		if _, err := c.loginStore(); err != nil {
 			return egress.WorkerRouteConfig{}, err
 		}
-		return egress.WorkerRouteConfig{
-			Route: egress.Codex(), Worker: worker, Logins: logins,
-			Transport: c.modelTransport, Guard: c.guard, Audit: noAudit{},
-			Quota: func(q egress.QuotaReading) {
-				log.Printf("plan quota %s %s: %.1f%% used, exhausted=%v", q.Worker, q.Pool, q.UsedPercent, q.Exhausted)
-			},
-			Meter: func(u egress.PlanUse) {
-				log.Printf("plan use %s %s: HTTP %d, %d bytes out, %d bytes in", u.Worker, u.Endpoint, u.Status, u.RequestBytes, u.ResponseBytes)
-			},
-		}, nil
+		return codexRouteConfig(worker, logins, up, c.guard, noAudit{}, usage), nil
 	}, logins.Forget, func(worker string) (map[string][]byte, error) {
 		return logins.Seed("codex", worker)
 	})
+	p.usage = usage.Snapshot
+	p.plan = func(provider string) (planState, error) { return c.planState(logins, provider) }
+	p.signedIn = func(worker string) bool { return logins.SignedInBy(planProvider, worker) }
 	ln, err := listen(dir, ProviderSocket, brokerUID)
 	if err != nil {
 		return nil, err
@@ -355,6 +445,29 @@ func serveWorkerRoutes(dir string, c *custody, brokerUID int) (io.Closer, error)
 		p.closeAll()
 		return err
 	}), nil
+}
+
+// codexRouteConfig is one worker's Codex route as the vault process serves
+// it: every reading the route sees on the broker's own connection, and every
+// refused login, is fed to usage, which /usage serves to admission (RES-5,
+// CRED-5). The tests build their routes through it, so they cannot drift
+// from what ships.
+func codexRouteConfig(worker string, logins egress.PlanLoginStore, tr http.RoundTripper, guard *netguard.Policy, audit egress.Auditor, usage *egress.PlanUsage) egress.WorkerRouteConfig {
+	return egress.WorkerRouteConfig{
+		Route: egress.Codex(), Worker: worker, Logins: logins,
+		Transport: tr, Guard: guard, Audit: audit,
+		Quota: func(q egress.QuotaReading) {
+			log.Printf("plan quota %s %s: %.1f%% used, exhausted=%v", q.Worker, q.Pool, q.UsedPercent, q.Exhausted)
+			usage.Quota(q)
+		},
+		Signal: func(s egress.PlanSignal) {
+			log.Printf("plan signal %s %s: %s", s.Provider, s.Worker, s.Kind)
+			usage.Signal(s)
+		},
+		Meter: func(u egress.PlanUse) {
+			log.Printf("plan use %s %s: HTTP %d, %d bytes out, %d bytes in", u.Worker, u.Endpoint, u.Status, u.RequestBytes, u.ResponseBytes)
+		},
+	}
 }
 
 type closerFunc func() error

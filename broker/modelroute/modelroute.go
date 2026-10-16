@@ -22,9 +22,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/meter"
@@ -240,9 +242,12 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 				// reached the guest, so the meter charges the call's full
 				// output reservation, and so each further attempt the
 				// call was allowed (SR3-7-f1c). r is the request as sent,
-				// so its allowance is the broker's.
+				// so its allowance is the broker's. Whether it connected is
+				// read from the transport's trace, not from err: a bound
+				// that runs out while dialing is a deadline, not a dial
+				// error, and that call never left the broker either (#1882).
 				var op *net.OpError
-				if errors.As(err, &op) && op.Op == "dial" {
+				if !connected(r.Context()) || errors.As(err, &op) && op.Op == "dial" {
 					meter.Report(r.Context(), meter.Usage{NoResponse: true})
 				} else {
 					allowed, _ := strconv.Atoi(r.Header.Get(HeaderAttempts))
@@ -264,9 +269,31 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 			// no-op there; that path is safe already because Wrap reads
 			// the body in full and hands the proxy an in-memory copy.
 			_ = http.NewResponseController(w).EnableFullDuplex()
-			rp.ServeHTTP(w, r)
+			rp.ServeHTTP(w, r.WithContext(traceConn(r.Context())))
 		})
 	}
+}
+
+// connKey holds a call's flag that the transport obtained a connection to
+// the vault process for it.
+type connKey struct{}
+
+// traceConn returns ctx with a flag the transport sets once it has a
+// connection to the vault process for the call.
+func traceConn(ctx context.Context) context.Context {
+	got := new(atomic.Bool)
+	ctx = context.WithValue(ctx, connKey{}, got)
+	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { got.Store(true) },
+	})
+}
+
+// connected reports whether the call on ctx ever had a connection to the
+// vault process. A context traceConn did not mark counts as connected, the
+// charge that may be too high rather than too low.
+func connected(ctx context.Context) bool {
+	got, ok := ctx.Value(connKey{}).(*atomic.Bool)
+	return !ok || got.Load()
 }
 
 // scrubTrailers drops our headers from the response trailers once the body
