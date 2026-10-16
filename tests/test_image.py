@@ -4713,5 +4713,75 @@ class FuzzConfineTest(unittest.TestCase):
             self.assertEqual([l for l in lines if l[1] == d], [["a+", d, "-", "-", "-", "-", "u:agentos-fuzz:---"]])
 
 
+class CodexPinTest(unittest.TestCase):
+    # REQ: CAP-11
+    # The box's Codex image must carry usr/lib/agentos/cli-version equal to the CODEX_VERSION its
+    # build script pins, or agentosd's pin gate (#1877, #1895) refuses every provider run with one
+    # journal line as the only cause (PUX finding 1 on #1895). image/check_codex_pin.sh checks the
+    # staged tree, which becomes the box's verity-checked /usr, so the booted image carries what passed.
+    SCRIPT = "CODEX_VERSION=0.162.1\n"
+    WRITES = "printf '%s' \"$CODEX_VERSION\" >\"$OUT/usr/lib/agentos/cli-version\"\n"
+
+    def run_check(self, script, cli=None, link=False):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "build-rootfs.sh").write_text(script)
+            pin = d / "tree/usr/lib/agentos/cli-version"
+            pin.parent.mkdir(parents=True)
+            if cli is not None:
+                if link:
+                    (d / "elsewhere").write_text(cli)
+                    pin.symlink_to(d / "elsewhere")
+                else:
+                    pin.write_text(cli)
+            return subprocess.run(["sh", str(IMG / "check_codex_pin.sh"), str(d / "build-rootfs.sh"), str(d / "tree")],
+                                  capture_output=True, text=True)
+
+    def test_matching_version_passes(self):
+        self.assertEqual(self.run_check(self.SCRIPT + self.WRITES, "0.162.1").returncode, 0)
+
+    def test_missing_file_fails(self):
+        r = self.run_check(self.SCRIPT + self.WRITES)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cli-version", r.stderr)
+
+    def test_other_version_fails(self):
+        self.assertNotEqual(self.run_check(self.SCRIPT + self.WRITES, "0.162.2").returncode, 0)
+        self.assertNotEqual(self.run_check(self.SCRIPT + self.WRITES, "0.162.1\n").returncode, 0)
+
+    def test_symlink_fails(self):
+        # agentosd reads only a regular file through os.OpenRoot, so a link would read as unpinned.
+        self.assertNotEqual(self.run_check(self.SCRIPT + self.WRITES, "0.162.1", link=True).returncode, 0)
+
+    def test_script_without_a_pin_line_fails(self):
+        self.assertNotEqual(self.run_check("echo no version\n" + self.WRITES, "0.162.1").returncode, 0)
+
+    def test_check_waits_only_for_the_script_to_write_the_file(self):
+        # Until #1895 lands, build-rootfs.sh writes no cli-version, so the check has nothing to hold
+        # it to; it says so. Once the script writes the file, a tree without it fails (above).
+        r = self.run_check(self.SCRIPT)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("writes no cli-version", r.stderr)
+
+    def test_images_are_registered_from_the_verity_usr(self):
+        # The pin is read at every gate check, so a tree a process could swap after the check would
+        # reopen the window #1895 closes; under /usr (dm-verity, read-only) nothing can (#1895 delta
+        # review). Every -image agentosd registers, the Codex one included, lives there.
+        exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
+        images = dict(v.split("=", 1) for v in re.findall(r"(?:^|\s)-image\s+(\S+)", exe))
+        self.assertEqual(images["codex"], "/usr/lib/agentos/images/codex")
+        for name, path in images.items():
+            self.assertTrue(path.startswith("/usr/lib/agentos/images/"), (name, path))
+            self.assertNotIn("..", path)
+        self.assertIn('sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"',
+                      (IMG / "build.sh").read_text())
+
+    def test_build_checks_the_codex_tree_it_stages(self):
+        lines = (IMG / "build.sh").read_text().splitlines()
+        build = lines.index('sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"')
+        self.assertEqual(lines[build + 1],
+                         'sh "$HERE/check_codex_pin.sh" "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"')
+
+
 if __name__ == "__main__":
     unittest.main()

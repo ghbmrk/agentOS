@@ -67,6 +67,7 @@ sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/opencla
 # The Codex provider worker's (S8-W1, #1721): provagent's codex declaration names this image, and
 # agentosd registers it (-image codex=); the CLI is pinned by npm's integrity hash.
 sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"
+sh "$HERE/check_codex_pin.sh" "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"
 # How agentosd starts the agent machine (W1): its -agent-launch default.
 install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/guest/launch.json"
 # Each setup service's unit lives beside its command (localui ASSUMPTIONS L26).
