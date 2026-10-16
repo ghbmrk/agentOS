@@ -137,12 +137,12 @@ func TestONB3SetupEndDestroysTheSignInWorker(t *testing.T) {
 	}
 }
 
-// The shipped Codex route's gate is closed until its image pins a CLI
-// version (#1877): setup neither offers nor starts its sign-in, and opens
-// no machine trying (ONB-3 fails closed).
+// With no image pin (#1877) and no qualification record (#809), the
+// shipped Codex route's gate is closed: setup neither offers nor starts its
+// sign-in, and opens no machine trying (ONB-3 fails closed).
 func TestONB3SetupOffersNoSignInWhileTheGateIsClosed(t *testing.T) {
 	g := newSetupRig(0)
-	s := newSetupSignIn(g.s, modelroute.NewRouteControl(t.TempDir()+"/none.sock"))
+	s := newSetupSignIn(g.s, modelroute.NewRouteControl(t.TempDir()+"/none.sock"), nil)
 	if s.Ready("codex") || s.Ready("nosuch") {
 		t.Fatal("a sign-in is offered behind a closed gate")
 	}
@@ -194,7 +194,7 @@ func openSetupSignIn(t *testing.T, h *signInMachine, stored *atomic.Bool, asked 
 		}
 		return http.StatusOK, `{"stored":false}`
 	})
-	s := newSetupSignIn(host, rc)
+	s := newSetupSignIn(host, rc, nil)
 	d := s.r.Decls["codex"]
 	d.Q = provagent.Qualification{CLIVersion: "1", Evidence: "e", TermsURL: "https://t.test", TermsRead: "2026-10-01", Verdict: provagent.Allowed}
 	s.r.Decls["codex"] = d

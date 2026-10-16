@@ -14,7 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem"
 )
 
-// REQ: CAP-9, CH-3, CH-7, CRED-1
+// REQ: CAP-9, CH-3, CH-7, CRED-1, OWN-7
 
 // fakeProviders stands in for the vault process's provider routes
 // (#1266): allowing needs the right code, which works once; withdrawing
@@ -212,5 +212,30 @@ func TestTheSetupPrivateBoxSaysWhatUntickedMeans(t *testing.T) {
 		if strings.Contains(p, "checked") != checked {
 			t.Fatalf("checked=%v not rendered as such:\n%s", checked, p)
 		}
+	}
+}
+
+// #1420 (Security S-1 on #1367; CAP-9, OWN-7): a provider this box's
+// configuration allows private data shows as allowed, says why, and
+// offers no withdraw, since the page cannot stop it.
+func TestTheProvidersPageShowsAProviderTheBoxsConfigurationAllows(t *testing.T) {
+	r, _, fp := providerRig(t)
+	fp.mu.Lock()
+	fp.ps[0].PrivateOK, fp.ps[0].PrivateByConfig = true, true
+	fp.mu.Unlock()
+	r.signIn()
+	p := html.UnescapeString(r.get("/providers/"))
+	if !strings.Contains(p, "OpenAI may see your private data (mail, files) to do tasks. My configuration allows it, so it can't be withdrawn here.") {
+		t.Fatalf("page lacks the configuration line:\n%s", p)
+	}
+	if strings.Contains(p, "Stop OpenAI seeing it") || strings.Contains(p, "OpenAI may not see") || strings.Contains(p, "Allow OpenAI") {
+		t.Fatalf("page offers a change the flag overrides:\n%s", p)
+	}
+	if strings.Contains(p, "can't run until you allow a provider that is connected") {
+		t.Fatalf("page says no connected provider is allowed:\n%s", p)
+	}
+	w := r.post("/providers/", url.Values{"step": {"withdraw"}, "provider": {"openai"}})
+	if strings.Contains(html.UnescapeString(w.Body.String()), "Stop OpenAI seeing your private data?") {
+		t.Fatalf("withdraw confirmation for a flag-allowed provider:\n%s", w.Body.String())
 	}
 }
