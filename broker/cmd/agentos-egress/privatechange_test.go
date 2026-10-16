@@ -14,7 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
-// REQ: CAP-9, CH-3, REV-6, OP-9, CRED-1
+// REQ: CAP-9, CH-3, REV-6, OP-9, CRED-1, OWN-7
 
 func privateBody(provider string, ok bool, code string) map[string]any {
 	return map[string]any{"provider": provider, "ok": ok, "code": code}
@@ -188,5 +188,75 @@ func TestBindCarriesThePrivateFlags(t *testing.T) {
 	}
 	if !c.privateFlags["openai"] || !c.flagGrants["openai"] {
 		t.Fatalf("flags %v, grants %v", c.privateFlags, c.flagGrants)
+	}
+}
+
+// #1420 (Security S-1 on #1367; CAP-9, OWN-7): a provider that this
+// box's -private-ok flag allows does get private data (route.go asks the
+// flag before the marker), so the list says it is allowed and that the
+// box's configuration allows it. Withdrawing there removes any marker
+// but cannot stop the flag, so it is refused and the owner is not told
+// it was withdrawn.
+func TestTheListSaysWhenThisBoxsConfigurationAllowsPrivateData(t *testing.T) {
+	r := openRig(t)
+	r.c.privateFlags = map[string]bool{"anthropic": true}
+	call := handlerCall(t, r.c)
+	list := func() map[string]modelroute.SetupProvider {
+		t.Helper()
+		w := httptest.NewRecorder()
+		unlockHandler(r.c).ServeHTTP(w, httptest.NewRequest("GET", "/providers", nil))
+		return listed(t, w)
+	}
+	if p := list()["anthropic"]; !p.PrivateOK || !p.PrivateByConfig {
+		t.Fatalf("flag-allowed: %+v", p)
+	}
+	if p := list()["openai"]; p.PrivateOK || p.PrivateByConfig {
+		t.Fatalf("not allowed: %+v", p)
+	}
+	if err := r.c.putPrivate("anthropic", true, r.next()); err != nil {
+		t.Fatal(err)
+	}
+	st, out := call("POST", "/providers/private", privateBody("anthropic", false, ""))
+	if st != http.StatusConflict || !strings.Contains(out["error"].(string), "configuration") {
+		t.Fatalf("withdraw of a flag-allowed provider: %d %v", st, out)
+	}
+	if hasKind(r.c.v, PrivateOKPrefix+"anthropic", KindPrivateOK) {
+		t.Fatal("the marker was kept")
+	}
+	if hasNote(r.notes, "private data withdrawn for Anthropic") {
+		t.Fatalf("the owner was told it was withdrawn: %v", r.notes)
+	}
+	if p := list()["anthropic"]; !p.PrivateOK || !p.PrivateByConfig {
+		t.Fatalf("after the refused withdraw: %+v", p)
+	}
+}
+
+// Security S1 on #1588 (CAP-9, REV-6; D-115): setup's list reports the
+// owner's saved answer only, never the -private-ok flag, since setup's
+// box defaults to it and saving the box records a lasting owner yes.
+func TestSetupsListIgnoresThePrivateFlag(t *testing.T) {
+	r := providerRig(t)
+	r.c.privateFlags = map[string]bool{"anthropic": true}
+	r.c.confirm(r.unlock(t), r.code())
+	if p := listed(t, setupCall(t, r.c, "GET", "/setup/providers", ""))["anthropic"]; p.PrivateOK || p.PrivateByConfig {
+		t.Fatalf("setup's list with only the flag: %+v", p)
+	}
+	if w := setupCall(t, r.c, "POST", "/setup/providers/private", `{"provider":"anthropic","ok":true}`); w.Code != http.StatusOK {
+		t.Fatalf("private: %d %s", w.Code, w.Body)
+	}
+	if p := listed(t, setupCall(t, r.c, "GET", "/setup/providers", ""))["anthropic"]; !p.PrivateOK || p.PrivateByConfig {
+		t.Fatalf("setup's list with the owner's yes: %+v", p)
+	}
+}
+
+// The flag's mark is dropped from the JSON when false, so a reader that
+// predates it sees what it saw before.
+func TestThePrivateByConfigField(t *testing.T) {
+	b, err := json.Marshal(modelroute.SetupProvider{ID: "openai", PrivateOK: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "config") {
+		t.Fatalf("%s", b)
 	}
 }
