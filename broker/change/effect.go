@@ -72,7 +72,18 @@ func (p *Pipeline) Check(_ context.Context, _ journal.Phase, in journal.Intent) 
 			return nil
 		}
 		return ErrNeedsOwner
+	case ActionConfirm:
+		if len(parts) != 4 || parts[2] != "confirm" || in.Origin != OriginPipeline {
+			return errors.New("change: malformed confirm")
+		}
+		if a := p.adoptionByIDLocked(parts[1]); a == nil || a.Reverted != "" || !(a.Staged || a.Confirmed) {
+			return errors.New("change: no staged adoption " + parts[1])
+		}
+		return nil
 	case ActionRevert, ActionRevertAuto:
+		if len(parts) == 5 && parts[2] == "withdraw" {
+			return p.checkWithdrawLocked(in, parts)
+		}
 		if len(parts) != 5 || parts[2] != "revert" {
 			return errors.New("change: malformed revert")
 		}
@@ -113,6 +124,26 @@ func (p *Pipeline) Check(_ context.Context, _ journal.Phase, in journal.Intent) 
 	return errors.New("change: unknown change action")
 }
 
+// checkWithdrawLocked: a withdraw mark is set by the revert it belongs
+// to, so it pairs action and origin as that revert does; "none" clears it.
+func (p *Pipeline) checkWithdrawLocked(in journal.Intent, parts []string) error {
+	switch {
+	case in.Action == ActionRevert && in.Origin == OriginOwner:
+	case in.Action == ActionRevertAuto && in.Origin == OriginPipeline:
+	default:
+		return errors.New("change: only the owner or the pipeline reverts")
+	}
+	switch parts[4] {
+	case WhyOwner, WhyRegression, WhySecurity, whyNone:
+	default:
+		return errors.New("change: unknown withdraw reason")
+	}
+	if a := p.adoptionByIDLocked(parts[1]); a == nil || a.Reverted != "" {
+		return errors.New("change: no active adoption " + parts[1])
+	}
+	return nil
+}
+
 func (p *Pipeline) adoptionLocked(ref string) *Adoption {
 	for _, a := range p.st.Adoptions {
 		if a.ID == ref {
@@ -149,8 +180,14 @@ func (p *Pipeline) Execute(_ context.Context, in journal.Intent, _ int) journal.
 	switch in.Action {
 	case ActionAdopt:
 		err = p.adoptLocked(parts[1], in.GrantRef)
+	case ActionConfirm:
+		err = p.confirmLocked(parts[1])
 	case ActionRevert, ActionRevertAuto:
-		err = p.revertLocked(parts[1], parts[4])
+		if parts[2] == "withdraw" {
+			err = p.withdrawLocked(parts[1], parts[4])
+		} else {
+			err = p.revertLocked(parts[1], parts[4])
+		}
 	case ActionPolicy, ActionPolicyOff:
 		on := in.Action == ActionPolicy
 		if parts[3] == "auto_adopt" {
@@ -219,6 +256,7 @@ func (p *Pipeline) reloadLocked() error {
 	if st.Applied == nil {
 		st.Applied = map[string]bool{}
 	}
+	st.Adoptions = cloneAdoptions(p.savedAds) // not in the saved state (OP-11)
 	p.st = st
 	p.dropOldBasesLocked(p.st.Active.Hash())
 	for ns, tg := range p.cfg.Targets {
@@ -402,18 +440,19 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 		}
 	}
 	prev := a.WithdrawnFor // what a refused withdrawal restores
-	if err == nil && withdraw && a.WithdrawnFor != why {
-		// Saved before the applier is asked: if this revert is cut short
-		// after the withdrawal, the drop that settles it keeps its why.
-		a.WithdrawnFor = why
-		if err = p.saveLocked(); err != nil {
-			a.WithdrawnFor = prev
-		}
-	}
+	mark := err == nil && withdraw && a.WithdrawnFor != why
 	v := safe(strings.TrimPrefix(a.Origin, "update:"))
 	p.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	if mark {
+		// Journaled before the applier is asked: if this revert is cut
+		// short after the withdrawal, the drop that settles it keeps its
+		// why (SM-AD-1).
+		if err := p.markWithdrawn(ctx, id, origin, why); err != nil {
+			return err
+		}
 	}
 	if withdraw {
 		// Never under p.mu: the applier holds its lock while it calls
@@ -427,7 +466,7 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 				// image itself once it can (SR3-4f-3 B2): with no first
 				// revert, its drop stays the security revert.
 				if why != WhySecurity || prev != "" {
-					p.unwithdraw(id, prev)
+					p.unwithdraw(id, origin, prev)
 				}
 				return installingErr{v: v, starts: startsFirst(err)}
 			}
@@ -447,10 +486,7 @@ func (p *Pipeline) revert(ctx context.Context, ref, origin, why string) error {
 	if err != nil {
 		return err
 	}
-	action := ActionRevert
-	if origin == OriginPipeline {
-		action = ActionRevertAuto // not narrowing: held by STOP like other automation
-	}
+	action := revertAction(origin)
 	err = p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:%s:revert:%s:%s", id, n, why), Origin: origin,
 		Account: journal.BrokerAccount, Action: action, Executor: Executor,
 		Params: map[string]any{"adoption": id, "why": why}})
@@ -483,22 +519,69 @@ func startsFirst(err error) bool {
 	return !errors.As(err, &s) || s.Starts()
 }
 
-// unwithdraw restores the why saved before a withdrawal the applier
+// unwithdraw restores the why journaled before a withdrawal the applier
 // refused in its handover window to prev, its value before that revert:
 // a first revert's why stays, and with none a later drop is a drop. If
-// the save fails the newer why stays: the release is then not offered
+// the intent fails the newer why stays: the release is then not offered
 // again after a drop, which errs toward the revert the owner or Recheck
 // asked.
-func (p *Pipeline) unwithdraw(id, prev string) {
+func (p *Pipeline) unwithdraw(id, origin, prev string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if a := p.adoptionByIDLocked(id); a != nil && a.Reverted == "" && a.WithdrawnFor != prev {
-		cur := a.WithdrawnFor
-		a.WithdrawnFor = prev
-		if p.saveLocked() != nil {
-			a.WithdrawnFor = cur
+	a := p.adoptionByIDLocked(id)
+	again := a != nil && a.Reverted == "" && a.WithdrawnFor != prev
+	p.mu.Unlock()
+	if again {
+		if prev == "" {
+			prev = whyNone
 		}
+		_ = p.markWithdrawn(context.Background(), id, origin, prev)
 	}
+}
+
+// revertAction is the revert action for origin: the pipeline's own is
+// not narrowing, so STOP holds it like other automation.
+func revertAction(origin string) string {
+	if origin == OriginPipeline {
+		return ActionRevertAuto
+	}
+	return ActionRevert
+}
+
+// markWithdrawn journals adoption id's withdraw mark (SM-AD-1): why, or
+// whyNone to clear it. It runs as the revert it belongs to.
+func (p *Pipeline) markWithdrawn(ctx context.Context, id, origin, why string) error {
+	n, err := p.nonce()
+	if err != nil {
+		return err
+	}
+	return p.run(ctx, journal.Intent{ID: fmt.Sprintf("chg:%s:withdraw:%s:%s", id, n, why), Origin: origin,
+		Account: journal.BrokerAccount, Action: revertAction(origin), Executor: Executor,
+		Params: map[string]any{"adoption": id, "why": why}})
+}
+
+func (p *Pipeline) withdrawLocked(id, why string) error {
+	a := p.adoptionByIDLocked(id)
+	if a == nil || a.Reverted != "" {
+		return errors.New("no active adoption " + id)
+	}
+	if why == whyNone {
+		why = ""
+	}
+	a.WithdrawnFor = why
+	return nil
+}
+
+func (p *Pipeline) confirmLocked(id string) error {
+	a := p.adoptionByIDLocked(id)
+	switch {
+	case a != nil && a.Confirmed && a.Reverted == "":
+		return nil
+	case a == nil || !a.Staged || a.Reverted != "":
+		return errors.New("not a staged adoption")
+	}
+	a.Staged, a.Confirmed = false, true
+	a.Listed = false // the digest says it is now installed
+	return nil
 }
 
 // revertedByID: adoption id exists and is reverted.
@@ -566,22 +649,27 @@ func unsettledErr(a *Adoption) error {
 // has recorded the answer (SR3-4). A failed save changes nothing either.
 func (p *Pipeline) ConfirmStaged(id string) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	a := p.adoptionByIDLocked(id)
+	var err error
 	switch {
 	case a != nil && a.Confirmed:
+		p.mu.Unlock()
 		return nil
 	case a == nil || !a.Staged || a.Reverted != "":
-		return fmt.Errorf("change: %s is not a staged adoption", id)
+		err = fmt.Errorf("change: %s is not a staged adoption", id)
 	}
-	listed := a.Listed
-	a.Staged, a.Confirmed = false, true
-	a.Listed = false // the digest says it is now installed
-	if err := p.saveLocked(); err != nil {
-		a.Staged, a.Confirmed, a.Listed = true, false, listed
+	p.mu.Unlock()
+	if err != nil {
 		return err
 	}
-	return nil
+	// A journaled intent (SM-AD-1); a failed one changes nothing.
+	n, err := p.nonce()
+	if err != nil {
+		return err
+	}
+	return p.run(context.Background(), journal.Intent{ID: fmt.Sprintf("chg:%s:confirm:%s", id, n), Origin: OriginPipeline,
+		Account: journal.BrokerAccount, Action: ActionConfirm, Executor: Executor,
+		Params: map[string]any{"adoption": id}})
 }
 
 // StageFailed reverts a staged image that fell back by boot counting, by

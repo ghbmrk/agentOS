@@ -168,6 +168,10 @@ type Config struct {
 	Logf func(string, ...any)
 	Now  func() time.Time
 	Rand io.Reader
+	// Content holds each adoption's and each waiting proposal's body by
+	// name (OP-11): the journal holds their lifecycle. Nil: the Store's
+	// own, if it has one (FileStore, MemStore), else memory only.
+	Content Content
 }
 
 // Bases: why an adoption may run.
@@ -194,6 +198,9 @@ const (
 	// ActionRevertAuto is the pipeline's own revert (regression, security,
 	// fallback). It is not narrowing, so STOP holds it.
 	ActionRevertAuto = "meta.change.revert.auto"
+	// ActionConfirm records that a staged image booted (UPD-1). It is not
+	// narrowing, so STOP holds it.
+	ActionConfirm = "meta.change.confirm"
 )
 
 // ErrNeedsOwner is returned by Check for a change only the owner may
@@ -313,10 +320,13 @@ type Adoption struct {
 
 // state is everything the pipeline persists.
 type state struct {
-	Seq       int         `json:"seq"`
-	SplitKey  []byte      `json:"split_key"`
-	Active    Tree        `json:"active"`
-	Adoptions []*Adoption `json:"adoptions"`
+	Seq      int    `json:"seq"`
+	SplitKey []byte `json:"split_key"`
+	Active   Tree   `json:"active"`
+	// Adoptions are rebuilt from the journal and Content at Attach
+	// (OP-11, adoption_journal.go); only a state saved before that keeps
+	// them here, and New moves them out.
+	Adoptions []*Adoption `json:"adoptions,omitempty"`
 	AutoAdopt bool        `json:"auto_adopt"`
 	Sharing   bool        `json:"sharing"`
 	// Declined lists security releases the owner declined; the digest
@@ -408,6 +418,16 @@ type Pipeline struct {
 	// again, and Withdraw answers the same.
 	withdrawer Withdrawer
 	withdrawn  map[string]bool
+	// content holds adoption and proposal bodies (Config.Content);
+	// lastBody each adoption body as last put, so a save puts only what
+	// changed; savedAds the adoptions as of the last save, for
+	// reloadLocked; legacy the lifecycle of adoptions saved before the
+	// journal held it. replayed: Attach rebuilt the adoptions once.
+	content  Content
+	lastBody map[string][]byte
+	savedAds []*Adoption
+	legacy   map[string]*lifecycle
+	replayed bool
 }
 
 // New loads the persisted state, or seeds it on first start, and applies
@@ -434,7 +454,15 @@ func New(cfg Config) (*Pipeline, error) {
 	if cfg.Rand == nil {
 		cfg.Rand = rand.Reader
 	}
-	p := &Pipeline{cfg: cfg, props: map[string]*proposal{}, probes: map[string]int{}, probeTask: map[string]string{}, kept: map[string]pairResult{}}
+	p := &Pipeline{cfg: cfg, props: map[string]*proposal{}, probes: map[string]int{}, probeTask: map[string]string{}, kept: map[string]pairResult{},
+		content: cfg.Content, lastBody: map[string][]byte{}, legacy: map[string]*lifecycle{}}
+	if p.content == nil {
+		if b, ok := cfg.Store.(interface{ Bodies() Content }); ok {
+			p.content = b.Bodies()
+		} else {
+			p.content = &MemContent{}
+		}
+	}
 	raw, err := cfg.Store.Load()
 	if err != nil {
 		return nil, err
@@ -454,6 +482,11 @@ func New(cfg Config) (*Pipeline, error) {
 		for ns, t := range cfg.Targets {
 			if err := t.Apply(p.st.Active.under(ns)); err != nil {
 				return nil, fmt.Errorf("change: restoring %s: %w", ns, err)
+			}
+		}
+		if len(p.st.Adoptions) > 0 {
+			if err := p.migrateLocked(); err != nil {
+				return nil, err
 			}
 		}
 	} else {
@@ -505,7 +538,17 @@ func (p *Pipeline) healthy() error {
 // Attach connects the journal. The pipeline must also be registered as the
 // journal's executor named Executor, and the broker's policy must delegate
 // meta.change intents to Check.
-func (p *Pipeline) Attach(j Journal) { p.j = j }
+// The first Attach rebuilds the adoptions and waiting proposals from the
+// journal (OP-11, replayLocked).
+func (p *Pipeline) Attach(j Journal) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.j = j
+	if !p.replayed {
+		p.replayed = true
+		p.replayLocked(j)
+	}
+}
 
 // errStateBroken is what callers see once a save and its reload both
 // failed. It names no path. The errors' classes are logged.
@@ -539,7 +582,15 @@ func (p *Pipeline) saveLocked() error {
 	if p.broken != nil {
 		return p.broken
 	}
-	b, err := json.Marshal(p.st)
+	// The adoptions are not part of the saved state: their lifecycle is
+	// in the journal and their bodies in content (OP-11).
+	// Bodies first: a failed put fails the save.
+	if err := p.saveBodiesLocked(); err != nil {
+		return err
+	}
+	st := p.st
+	st.Adoptions = nil
+	b, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}
@@ -551,9 +602,13 @@ func (p *Pipeline) saveLocked() error {
 		if p.cfg.Logf != nil {
 			p.cfg.Logf("change: state saved, but a power cut before the next save could undo it")
 		}
-		return nil
+		err = nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	p.savedAds = cloneAdoptions(p.st.Adoptions)
+	return nil
 }
 
 // Files returns the active files in a namespace.
@@ -743,9 +798,17 @@ func (p *Pipeline) proposeInner(ctx context.Context, c Candidate, security bool)
 		return Report{}, ErrForgotten
 	}
 	c.Goals = slices.Clone(c.Goals)
-	p.props[id] = &proposal{cand: c, base: base.Hash(), next: next, edits: edits, report: rep, classes: cl.classes,
+	pr := &proposal{cand: c, base: base.Hash(), next: next, edits: edits, report: rep, classes: cl.classes,
 		security: security && cl.imagesOnly()}
+	p.props[id] = pr
+	// Kept before the intent exists, so a restart finds the proposal of
+	// every adoption intent still waiting (SM-AD-3).
+	perr := p.putProposalLocked(id, pr)
 	p.mu.Unlock()
+	if perr != nil {
+		p.drop(id)
+		return rep, perr
+	}
 
 	in := journal.Intent{
 		ID: adoptID(id), Origin: OriginPipeline, Account: journal.BrokerAccount,
@@ -912,12 +975,12 @@ func (p *Pipeline) lapse(id string) {
 		}
 		p.lapsed[id] = true
 	}
-	delete(p.props, id)
+	p.dropLocked(id)
 }
 
 func (p *Pipeline) drop(id string) {
 	p.mu.Lock()
-	delete(p.props, id)
+	p.dropLocked(id)
 	p.mu.Unlock()
 }
 
