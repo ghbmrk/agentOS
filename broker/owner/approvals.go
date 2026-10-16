@@ -224,6 +224,7 @@ func (c *Channel) openLocked(items []Item, ttl time.Duration, now time.Time, loc
 	if err := c.codes.commit(func(s *State) { s.Pending = append(s.Pending, ref) }); err != nil {
 		return nil, err
 	}
+	c.retireErr = nil // the whole state was saved, any retirement with it
 	c.open[id] = r
 	return r, nil
 }
@@ -592,10 +593,14 @@ func (c *Channel) closeLocked(r *request, pick func(int) (settle, approve bool),
 }
 
 // retireLocked drops an ID from the restart record and keeps it from reuse
-// for RetireFor. The save is best effort: if it fails, a restart reports
-// the request as dropped, and Decide ignores what is already settled.
+// for RetireFor. It fails closed (SM-AJ-4): if the save fails, the ID is
+// retired in memory anyway, so it is not pending and cannot be reused in
+// this run, and RetireErr reports the failure. openLocked refuses a new
+// request while the record cannot be saved, and the first save that
+// works writes the retirement with it. A restart before then carries the
+// request to Reissue; the gate skips an intent whose answer it journaled.
 func (c *Channel) retireLocked(id string, now time.Time) {
-	_ = c.codes.commit(func(s *State) {
+	retire := func(s *State) {
 		var p []PendingRef
 		for _, x := range s.Pending {
 			if x.ID != id {
@@ -616,7 +621,25 @@ func (c *Channel) retireLocked(id string, now time.Time) {
 			}
 		}
 		s.Retired[id] = now
-	})
+	}
+	if err := c.codes.commit(retire); err != nil {
+		next := copyState(c.codes.st)
+		retire(&next)
+		c.codes.st = next
+		c.retireErr = fmt.Errorf("owner: retiring request %s was not saved: %w", id, err)
+		return
+	}
+	c.retireErr = nil
+}
+
+// RetireErr reports a retirement whose save failed, or nil once a later
+// retirement or new request saved the whole record. A save by another
+// path may already have carried it; the report errs on the side of
+// showing the failure.
+func (c *Channel) RetireErr() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.retireErr
 }
 
 // expireLocked denies requests past their expiry and drops stale held

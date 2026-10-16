@@ -1772,6 +1772,13 @@ func (e *Engine) validate(r Record) error {
 		if en.state != Succeeded && en.state != Denied {
 			return fmt.Errorf("%s: erased from %s", r.ID, en.state)
 		}
+	case RecAnswer:
+		if r.Answer == nil || !r.Answer.valid() {
+			return fmt.Errorf("%s: answer record without a valid note", r.ID)
+		}
+		if en.state != Pending {
+			return fmt.Errorf("%s: owner answer from %s", r.ID, en.state)
+		}
 	default:
 		return fmt.Errorf("unknown record type %q", r.Type)
 	}

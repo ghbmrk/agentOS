@@ -163,6 +163,7 @@ type Channel struct {
 	codes       codes
 	open        map[string]*request
 	reqN        uint64 // requests opened, for their order
+	retireErr   error  // a retirement not yet saved (retireLocked)
 	queued      map[string]*Queued
 	released    map[string]time.Time // queued IDs released, for UNDO's reply
 	lateUndo    map[string]bool      // released IDs the owner texted UNDO for
