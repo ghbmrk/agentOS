@@ -33,6 +33,9 @@ the GENERATED line and its rows come from the live issues, never from hand edits
                                  and this one does not, so a PR cannot switch the check off
   board.py render [--repo o/r]   print BOARD.md from the planned issues, or from GitHub's
                                  issues and PRs (GITHUB_TOKEN); PR disagreements go to stderr
+  board.py stale --repo o/r      print each open work item whose PR merged while its state label is still
+           [--comment]           queued, building, in review or escalated (STALE-1); with --comment, say so
+                                 once per item and PR on the issue. Flags only: never relabels or closes.
   board.py archive --base FILE --changed PATH...
                                  once the base's BOARD.md carries the GENERATED line: fail if a
                                  changed path is an archive (ARCHIVED) or a retired file (RETIRED)
@@ -300,6 +303,46 @@ def pr_notes(items, prs):
     return notes
 
 
+STALE_MARK = "<!-- board-stale: #{} -->"
+
+
+def stale(items, prs):
+    """(issue, merged PR) for each open row whose ID-named PR merged while no open PR names it:
+    the label says the work is still to do, so the next session pays to find it done (STALE-1)."""
+    out = []
+    for item in items:
+        if "pull_request" in item:
+            continue
+        row = row_of(item)
+        if row["state"] not in OPEN_STATES:
+            continue
+        mine = [p for p in prs if re.match(rf"{re.escape(row['id'])}(?![A-Za-z0-9-])", p["title"])]
+        merged = [p for p in mine if p.get("merged_at")]
+        if merged and not any(p["state"] == "open" for p in mine):
+            out.append((item, merged[-1]))
+    return out
+
+
+def stale_comment(row_id, state, pr):
+    return (f"{STALE_MARK.format(pr['number'])}\n{row_id} still reads `state:{state}`, but PR #{pr['number']} "
+            "merged. If the work is done, set the issue's state label to `state:merged`; "
+            "if more is owed, keep the label and name the follow-up here.")
+
+
+def report_stale(fetch, repo, comment):
+    items = work_items(fetch, repo)
+    found = stale(items, fetch(f"/repos/{repo}/pulls?state=closed"))
+    for item, pr in found:
+        row = row_of(item)
+        print(f"board: {row['id']} (#{item['number']}): state {row['state']} but PR #{pr['number']} merged")
+        if comment:
+            seen = fetch(f"/repos/{repo}/issues/{item['number']}/comments")
+            if not any(STALE_MARK.format(pr["number"]) in (c.get("body") or "") for c in seen):
+                fetch(f"/repos/{repo}/issues/{item['number']}/comments", "POST",
+                      {"body": stale_comment(row["id"], row["state"], pr)})
+    return len(found)
+
+
 def rate_limit_wait(code, headers, now):
     """Seconds to wait before retrying a refused call, or None if it was not rate limited.
     GitHub answers a primary or secondary rate limit with 403 or 429 and either retry-after or
@@ -363,11 +406,21 @@ def work_items(fetch, repo):
 
 def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, root=ROOT):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("command", choices=("check", "render", "archive"))
+    ap.add_argument("command", choices=("check", "render", "archive", "stale"))
     ap.add_argument("--repo", help="owner/name: render from its issues and PRs instead of the plan")
     ap.add_argument("--base", metavar="FILE", help="the base branch's BOARD.md: once it carries the GENERATED line, so must this one")
     ap.add_argument("--changed", nargs="*", default=[], metavar="PATH", help="archive: the paths the PR changes")
+    ap.add_argument("--comment", action="store_true", help="stale: comment once on each flagged issue")
     args = ap.parse_args(argv)
+    if args.command == "stale":
+        if not args.repo:
+            ap.error("stale needs --repo")
+        try:
+            report_stale(fetch, args.repo, args.comment)
+        except ValueError as e:
+            print(f"board: {e}", file=sys.stderr)
+            return 1
+        return 0
     if args.command == "archive":
         if not args.base:
             ap.error("archive needs --base")
