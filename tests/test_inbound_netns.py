@@ -28,12 +28,19 @@
 # control). The box still reaches the router. Also needs unshare and systemd-networkd.
 # REQ: DEV-2, DEV-net-e, ONB-3
 import configparser
+import errno
+import fcntl
 import ipaddress
 import os
 import pathlib
+import select
 import shutil
+import socket
+import struct
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -572,6 +579,97 @@ class UplinkByNetworkd(unittest.TestCase):
         for addr in targets:
             with self.subTest(control=addr):
                 self.assertTrue(reaches(HOME, addr), "control: the test cannot see the drop at " + addr)
+
+
+# BootProbeOverIPv6 checks the boot test's IPv6 probe (image/probe_lan6.py, #1457 u1c) against a
+# real kernel: a tap device in a namespace stands in for the box's second NIC, and the test relays
+# its frames over TCP with QEMU's socket-netdev framing. With the image's drop loaded, the probe
+# reaches the box at its link-local and SLAAC addresses (neighbour discovery answers) and every
+# port reads dropped; without it, the same probe reads every port answered (a closed port's
+# reset), so a probe whose frames the kernel would discard can never read "dropped".
+# REQ: DEV-2, DEV-net-e
+PROBE6 = ROOT / "image/probe_lan6.py"
+LAN6 = "agentos-t-lan6"
+
+
+@unittest.skipUnless(os.geteuid() == 0 and shutil.which("ip") and shutil.which("nft") and IPV6
+                     and os.path.exists("/dev/net/tun"), "needs root, ip, nft, IPv6 and /dev/net/tun")
+class BootProbeOverIPv6(unittest.TestCase):
+    def setUp(self):
+        self.stop = threading.Event()
+        self.addCleanup(self.cleanup)
+        sh("ip", "netns", "add", LAN6)
+        sh("ip", "link", "set", "lo", "up", ns=LAN6)
+        # IFF_TAP | IFF_NO_PI: whole Ethernet frames, as QEMU hands its socket peer.
+        self.tap = os.open("/dev/net/tun", os.O_RDWR)
+        fcntl.ioctl(self.tap, 0x400454CA, struct.pack("16sH", b"lan6", 0x0002 | 0x1000))
+        sh("ip", "link", "set", "lan6", "netns", LAN6)
+        for k, v in (("forwarding", 0), ("accept_ra", 2), ("autoconf", 1)):
+            sh("sysctl", "-qw", "net.ipv6.conf.lan6.%s=%d" % (k, v), ns=LAN6)
+
+    def cleanup(self):
+        self.stop.set()
+        os.close(self.tap)
+        sh("ip", "netns", "del", LAN6, check=False)
+
+    def relay(self, conn):
+        while not self.stop.is_set():
+            r = select.select([self.tap, conn], [], [], 0.2)[0]
+            if self.tap in r:
+                f = os.read(self.tap, 65536)
+                conn.sendall(struct.pack("!I", len(f)) + f)
+            if conn in r:
+                data = conn.recv(65536)
+                if not data:
+                    return
+                self.buf += data
+                while len(self.buf) >= 4 and len(self.buf) >= 4 + struct.unpack("!I", self.buf[:4])[0]:
+                    n = struct.unpack("!I", self.buf[:4])[0]
+                    try:
+                        os.write(self.tap, self.buf[4:4 + n])
+                    except OSError as e:  # EIO while the link is down: the frame is lost, as on a wire
+                        if e.errno != errno.EIO:
+                            raise
+                    self.buf = self.buf[4 + n:]
+
+    def probe(self):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        srv.settimeout(20)
+        with tempfile.TemporaryDirectory() as t:
+            go = os.path.join(t, "go")
+            open(go, "w").close()
+            p = subprocess.Popen([sys.executable, str(PROBE6), "127.0.0.1:%d" % srv.getsockname()[1], go,
+                                  "22", str(PORT)], stdout=subprocess.PIPE, text=True)
+            conn, _ = srv.accept()
+            srv.close()
+            self.buf = b""
+            t = threading.Thread(target=self.relay, args=(conn,))
+            t.start()
+            # The link comes up with the probe attached, so it sees the box claim its link-local address.
+            sh("ip", "link", "set", "lan6", "up", ns=LAN6)
+            try:
+                out = p.communicate(timeout=180)[0]
+            finally:
+                self.stop.set()
+                t.join()
+                conn.close()
+            return out.splitlines(), sh("ip", "-6", "-o", "addr", "show", "dev", "lan6", ns=LAN6).stdout
+
+    def test_the_drop_holds_at_every_ipv6_address(self):
+        r = sh("nft", "-f", str(RULES), ns=LAN6, check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out, addrs = self.probe()
+        for line in ("fe80 reachable", "global reachable", "fe80 22 dropped", "fe80 %d dropped" % PORT,
+                     "global 22 dropped", "global %d dropped" % PORT):
+            self.assertIn("agentos-probe6: " + line, out, addrs)
+
+    def test_control_without_the_drop_every_port_answers(self):
+        out, addrs = self.probe()
+        for line in ("fe80 reachable", "global reachable", "fe80 22 answered", "fe80 %d answered" % PORT,
+                     "global 22 answered", "global %d answered" % PORT):
+            self.assertIn("agentos-probe6: " + line, out, addrs)
 
 
 if __name__ == "__main__":
