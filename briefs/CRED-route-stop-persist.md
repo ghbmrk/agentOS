@@ -18,7 +18,7 @@ Package IDs:
 - **CRED-RS-3** `egress.Proxy` keeps its stops in the same store shape (`Config.Stops`), so on one journal the two are one projection. `Resume` still refuses an unswappable stop (`ErrRequalify`); `Requalify`, for the release, lifts it; a failed write keeps the route stopped.
 
 **Acceptance tests:**
-- CRED-RS-1: `broker/journal/routestop_test.go::TestRouteStopSurvivesReopen`, `TestRouteStopRefusesBadNotes`.
+- CRED-RS-1: `broker/journal/routestop_test.go::TestRouteStopSurvivesReopen`, `TestRouteStopRefusesBadNotes`; `broker/journal/check/routestop_test.go::TestRouteStopRecordsAreClean`.
 - CRED-RS-2: `broker/provagent/routestop_test.go::TestStoppedRouteSurvivesARestart`, `TestSignedInLeavesAnUnswappableStop`, `TestRouteStopWriteFailureFailsClosed`.
 - CRED-RS-3: `broker/egress/routestop_test.go::TestProxyStopSurvivesARestart`, `TestProxyStopWriteFailureFailsClosed`.
 
@@ -28,7 +28,7 @@ A note record like `sleep` and `egress` (`RecRouteStop`, `RouteStopNote{Route, E
 
 ## Scope
 
-`broker/journal/routestop.go` (new), `broker/journal/store.go`, `broker/journal/engine.go`, `broker/journal/routestop_test.go` (new), `broker/journal/ASSUMPTIONS.md`, `broker/provagent/run.go`, `broker/provagent/routestop_test.go` (new), `broker/provagent/signin_test.go` (two checks read the stop through `Stops`), `broker/egress/exchange.go`, `broker/egress/proxy.go`, `broker/egress/routestop_test.go` (new), `broker/egress/ASSUMPTIONS.md`, `broker/cmd/agentosd/main.go` (one wiring line), this brief.
+`broker/journal/routestop.go` (new), `broker/journal/store.go`, `broker/journal/engine.go`, `broker/journal/routestop_test.go` (new), `broker/journal/ASSUMPTIONS.md`, `broker/journal/check/check.go` and `broker/journal/check/routestop_test.go` (new; the journal check must know the new note record), `broker/provagent/run.go`, `broker/provagent/routestop_test.go` (new), `broker/provagent/signin_test.go` (two checks read the stop through `Stops`), `broker/egress/exchange.go`, `broker/egress/proxy.go`, `broker/egress/routestop_test.go` (new), `broker/egress/ASSUMPTIONS.md`, `broker/cmd/agentosd/main.go` (one wiring line), this brief.
 
 The scope is wider than the row's three files because OP-11 allows no durable store beside the journal, so the stop has to be a journal record. `broker/provagent/ASSUMPTIONS.md` stays out (#1951 touches it, D-111); the Runner's assumption is recorded in the journal's row.
 
