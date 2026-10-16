@@ -137,6 +137,12 @@ func (p *Pipeline) RecheckQuality(ctx context.Context) ([]string, error) {
 		}
 	}()
 	for _, d := range p.qualityStale() {
+		if p.awaitsCase(d) {
+			// Nothing is remembered: the case's revision makes it due
+			// again at once, the retry wait otherwise.
+			retry = true
+			continue
+		}
 		switch res, err := p.recheckOne(ctx, d.id); res {
 		case recheckInterrupted, recheckStopped:
 			// Nothing is remembered: the next pass re-evaluates it.
@@ -153,6 +159,56 @@ func (p *Pipeline) RecheckQuality(ctx context.Context) ([]string, error) {
 		}
 	}
 	return out, errors.Join(errs...)
+}
+
+// awaitsCase reports whether due adoption d is held because the case of
+// one of its goals, a task case whose Task is the goal, still carries the
+// outcome of the verdict before the revision: Harvest records the verdict
+// first and revises the case after, and scoring on the case in between
+// would settle the adoption on the stale outcome (OP-7, QCR-3). It is held
+// one retry wait at most, so a revision whose case never comes (a crash
+// between the two) is scored on the suite as it stands rather than never.
+func (p *Pipeline) awaitsCase(d qualityDue) bool {
+	want := map[string]journal.Verdict{}
+	for _, gv := range d.now {
+		if gv.Verdict != "" {
+			want[gv.Goal] = gv.Verdict
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	stale := false
+	for _, c := range p.st.Cases {
+		if v, ok := want[c.Task]; ok && !c.Security && !backs(v, c.Outcome) {
+			stale = true
+			break
+		}
+	}
+	now := p.cfg.Now()
+	since, held := p.qualityHeld[d.id]
+	if !stale || held && !now.Before(since.Add(QualityRetry)) {
+		delete(p.qualityHeld, d.id)
+		return false
+	}
+	if !held {
+		if p.qualityHeld == nil {
+			p.qualityHeld = map[string]time.Time{}
+		}
+		p.qualityHeld[d.id] = now
+	}
+	return true
+}
+
+// backs reports whether verdict v is the one outcome o records, as
+// AddTaskCase requires of a case.
+func backs(v journal.Verdict, o Outcome) bool {
+	switch v {
+	case journal.VerdictGood:
+		return o == Accepted
+	case journal.VerdictWrong:
+		return o == Corrected || o == Rejected
+	}
+	return true
 }
 
 // rememberVerdicts replaces the verdicts active adoption id was evaluated

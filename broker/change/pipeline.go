@@ -406,7 +406,11 @@ type Pipeline struct {
 	// outage or a failed revert); the trigger waits until then. Memory
 	// only: a restart retries at once.
 	qualityRetry time.Time
-	broken       error // set when state could neither be saved nor reloaded
+	// qualityHeld: when RecheckQuality first held an adoption for a goal's
+	// case that still carried the verdict before its revision (QCR-3).
+	// Memory only: a restart holds it one retry wait again.
+	qualityHeld map[string]time.Time
+	broken      error // set when state could neither be saved nor reloaded
 	// probes of running evaluations: use count and task intent.
 	probes    map[string]int
 	probeTask map[string]string
