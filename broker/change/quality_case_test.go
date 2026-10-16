@@ -183,8 +183,8 @@ func TestTriggerWaitsForTheCaseRefresh(t *testing.T) {
 
 // QCR-5: a revision cannot overwrite another case: a security case or
 // another task's case under the ID, or one with another input or class,
-// is a conflict, and an outcome the journal's verdict does not back is
-// refused.
+// is a conflict, an outcome the journal's verdict does not back is
+// refused, and an implicit acceptance never supersedes an owner's case.
 func TestRevisionCannotOverwriteAnotherCase(t *testing.T) {
 	e := newEnv(t, nil)
 	g, c := e.heldOutGoal()
@@ -218,5 +218,18 @@ func TestRevisionCannotOverwriteAnotherCase(t *testing.T) {
 	}
 	if got := e.stored(sec.ID); !got.Security {
 		t.Fatalf("security case changed: %+v", got)
+	}
+
+	e.verdict(g, journal.VerdictGood)
+	if _, err := e.eng.RecordQuality(g, journal.Quality{Verdict: journal.VerdictGood, Source: "owner" + ImplicitSuffix}); err != nil {
+		t.Fatal(err)
+	}
+	imp := c
+	imp.Expect = []byte("hello again")
+	if err := e.p.AddTaskCase(imp); !errors.Is(err, ErrDuplicate) || errors.Is(err, ErrConflict) {
+		t.Fatalf("implicit over an owner's case: %v", err)
+	}
+	if got := e.stored(c.ID); got.Implicit || string(got.Expect) != "hello" {
+		t.Fatalf("silence superseded the owner's case: %+v", got)
 	}
 }

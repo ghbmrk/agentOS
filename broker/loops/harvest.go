@@ -164,11 +164,6 @@ func (h *Harvester) Harvest(o Outcome) error {
 	var lineage, day string
 	reserved, kept := false, false
 	if c.Implicit {
-		// Silence never revises a verdict: an intent already harvested
-		// from the owner, or whose case is in, keeps it (QCR-5).
-		if h.settled(c.ID) {
-			return nil
-		}
 		st, err := h.J.Get(o.Intent)
 		if err != nil {
 			return err
@@ -201,6 +196,11 @@ func (h *Harvester) Harvest(o Outcome) error {
 	if h.st.Forgotten[c.ID] {
 		return ErrForgotten
 	}
+	if h.st.Added[c.ID] {
+		// A later action on the same item (UNDO after YES) is recorded in
+		// the journal; the suite keeps the first.
+		return nil
+	}
 	if _, ok := h.st.Tasks[c.ID]; !ok {
 		h.st.Tasks[c.ID] = taskKey
 		h.st.Origins[c.ID] = originKey(st.Intent)
@@ -216,49 +216,19 @@ func (h *Harvester) Harvest(o Outcome) error {
 		kept = true
 	}
 	// A failure from here on is retryable: calling Harvest again records
-	// the verdict again (the same verdict) and adds the case. A later
-	// action on the same item (UNDO after YES) supersedes the case, so
-	// the suite reads the latest verdict, not the first (OP-7, QCR-4).
-	err = h.Pipeline.AddTaskCase(c)
-	if err != nil && !errors.Is(err, change.ErrDuplicate) {
+	// the verdict again (the same verdict) and adds the case.
+	if err := h.Pipeline.AddTaskCase(c); err != nil && !errors.Is(err, change.ErrDuplicate) {
 		return err
 	}
-	changed := err == nil
-	if h.st.Added[c.ID] && !changed {
-		return nil // restated: the suite already has it
-	}
-	wasImplicit := h.st.Implicit[c.ID]
-	if changed && !c.Implicit {
-		// The owner's case replaced a silent acceptance: it counts in full.
-		delete(h.st.Implicit, c.ID)
-	}
-	wasAdded := h.st.Added[c.ID]
 	h.st.Added[c.ID] = true
 	if err := h.saveLocked(); err != nil {
-		if !wasAdded {
-			delete(h.st.Added, c.ID)
-		}
-		if wasImplicit {
-			h.st.Implicit[c.ID] = true
-		}
+		delete(h.st.Added, c.ID)
 		return err
 	}
 	if h.Wake != nil {
 		h.Wake()
 	}
 	return nil
-}
-
-// settled reports whether intent id was harvested from an owner action, or
-// its case is in the suite: an implicit acceptance then changes nothing.
-func (h *Harvester) settled(id string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if err := h.loadLocked(); err != nil {
-		return false
-	}
-	_, ok := h.st.Tasks[id]
-	return h.st.Added[id] || ok && !h.st.Implicit[id]
 }
 
 func (h *Harvester) refuseForgotten(id string) error {
