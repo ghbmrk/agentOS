@@ -191,6 +191,20 @@ func TestImagePinsLogAMismatchAtStart(t *testing.T) {
 	}
 }
 
+// Before #809 the record is empty: a pinned image logs that there is no
+// record yet, not a mismatch against "".
+func TestImagePinsLogNoRecordYetAtStart(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+	readImagePins(images{"codex": pinnedImage(t, "0.162.1\n")}, provagent.Builtins())
+	got := buf.String()
+	if !strings.Contains(got, `image "codex" pins CLI 0.162.1; codex has no qualification record yet (provider gate closed)`) || strings.Contains(got, `record is for`) {
+		t.Fatalf("no-record pin logged %q", got)
+	}
+}
+
 // qualifiedOn fills codex's record as #809 would, taken on version.
 func qualifiedOn(decls map[string]provagent.Declaration, version string) {
 	d := decls["codex"]
