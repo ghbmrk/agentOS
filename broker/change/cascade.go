@@ -39,7 +39,7 @@ func (p *Pipeline) goneLocked(goals []string) bool {
 func (p *Pipeline) forgetAdoptionsLocked(goal string) (Tree, []*Adoption, []Edit, bool) {
 	for id, pr := range p.props {
 		if slices.Contains(pr.cand.Goals, goal) {
-			delete(p.props, id)
+			p.dropLocked(id) // its candidate bytes too (C23)
 		}
 	}
 	if !slices.ContainsFunc(p.st.Adoptions, func(a *Adoption) bool { return slices.Contains(a.Goals, goal) }) {

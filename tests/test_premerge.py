@@ -180,9 +180,13 @@ class PremergeTest(unittest.TestCase):
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
                   "tools/risk_tier.py", "tools/premerge.py", "tools/ci_scope.py", "tools/ci_scope_x.py",
-                  "tools/g1_scope.py", "tools/g1_scope.txt", "reviews/l3/README.md", "docs/LANES.md"):
+                  "tools/g1_scope.py", "tools/g1_scope.txt", "docs/LANES.md"):
             self.assertEqual(premerge.mark_paths([f]), [f], f)
-        for f in ("tools/records.py", "reviews/l3/2026-10-15-pr1.md", "README.md", "docs/OTHER.md", "src/claude/x.go"):
+        # Narrowed on Mark's "Narrow only" (2026-10-16): lens READMEs and the gate tests are agent-mergeable.
+        for f in ("tools/records.py", "reviews/l3/2026-10-15-pr1.md", "README.md", "docs/OTHER.md", "src/claude/x.go",
+                  "reviews/l3/README.md", "reviews/security/README.md", "tests/test_premerge.py", "tests/test_risk_tier.py",
+                  "tests/test_ci_scope.py", "tests/test_g1_scope.py", "tests/test_workflows.py", "tests/test_merge_queue.py",
+                  "tests/test_lane.py"):
             self.assertEqual(premerge.mark_paths([f]), [], f)
 
     def test_mark_paths_cover_agent_config_and_tier_inputs(self):
@@ -193,10 +197,9 @@ class PremergeTest(unittest.TestCase):
         for f in (".mcp.json", "AGENTS.md", "CLAUDE.local.md", "broker/CLAUDE.md", "a/b/CLAUDE.local.md",
                   "broker/core/core.txt"):
             self.assertEqual(premerge.mark_paths([f]), [f], f)
-        # PREMERGE-paths (#1835): nested config, the tests that pin merge gates, and newline-bearing paths.
-        for f in ("sub/AGENTS.md", "sub/.mcp.json", "sub/.claude/settings.json", "a/b/.claude/x", "tests/test_premerge.py",
-                  "tests/test_risk_tier.py", "tests/test_risk_tier_custody.py", "tests/test_workflows.py",
-                  "tests/test_ci_scope.py", "tests/test_g1_scope.py", "x\n/.claude/y", ".github/a\nb", "tools/premerge.py"):
+        # PREMERGE-paths (#1835): nested config and newline-bearing paths.
+        for f in ("sub/AGENTS.md", "sub/.mcp.json", "sub/.claude/settings.json", "a/b/.claude/x",
+                  "x\n/.claude/y", ".github/a\nb", "tools/premerge.py"):
             self.assertEqual(premerge.mark_paths([f]), [f], repr(f))
         for f in ("CLAUDE.md\n", "tools/premerge.py\n", "tests/test_records.py", "x/.claudex/y"):
             self.assertEqual(premerge.mark_paths([f]), [], repr(f))
