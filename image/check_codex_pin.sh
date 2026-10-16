@@ -8,16 +8,8 @@
 set -eu
 repo=$1 tree=$2
 script=$repo/guest/codex/build-rootfs.sh
-reader=$repo/broker/cmd/agentosd/imagepin.go
 want=$(sed -n 's/^CODEX_VERSION=\([0-9][0-9.]*\)$/\1/p' "$script")
 [ -n "$want" ] || { echo "check_codex_pin: $script pins no CODEX_VERSION" >&2; exit 1; }
-# Until #1895 agentosd has no pin reader, so nothing reads the file yet. The key is the consumer, not
-# build-rootfs.sh's text: once the reader is in the tree, a missing file fails however the script
-# writes it (#1897 delta review, finding 2).
-if [ ! -e "$reader" ] && ! grep -rqs 'usr/lib/agentos/cli-version' "$repo/broker/cmd/agentosd"; then
-	echo "check_codex_pin: agentosd reads no cli-version yet (#1895); not checked" >&2
-	exit 0
-fi
 pin=$tree/usr/lib/agentos/cli-version
 # agentosd reads only a regular file (os.OpenRoot), so a link or anything else reads as unpinned.
 if [ -L "$pin" ] || [ ! -f "$pin" ]; then

@@ -51,8 +51,9 @@ func (p imagePins) version(image string) string {
 
 // readImagePins keeps the directory of every registered image a
 // declaration in decls runs on, and logs at start each such image that
-// pins nothing (by name and why) or pins another version than its
-// declaration's record, naming both versions, never the file's content.
+// pins nothing (by name and why), pins a version while its declaration
+// has no complete record yet (#809), or pins another version than its
+// record, naming the versions, never the file's content.
 // An unregistered image is already the worker tools' to report.
 func readImagePins(imgs images, decls map[string]provagent.Declaration) imagePins {
 	p := imagePins{}
@@ -66,6 +67,8 @@ func readImagePins(imgs images, decls map[string]provagent.Declaration) imagePin
 		switch {
 		case err != nil:
 			log.Printf("image %q pins no CLI version (provider gate closed): %v", d.Image, err)
+		case !d.Q.Complete():
+			log.Printf("image %q pins CLI %s; %s has no qualification record yet (provider gate closed)", d.Image, v, d.ID)
 		case v != d.Q.CLIVersion:
 			log.Printf("image %q pins CLI %s but the %s qualification record is for %q (provider gate closed)", d.Image, v, d.ID, d.Q.CLIVersion)
 		}

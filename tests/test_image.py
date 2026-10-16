@@ -5077,17 +5077,10 @@ class CodexPinTest(unittest.TestCase):
     SCRIPT = "CODEX_VERSION=0.162.1\n"
     # #1895's writer, verbatim (guest/codex/build-rootfs.sh at 2e6c54d), run in the image's root.
     WRITES = "printf '%s\\n' \"$CODEX_VERSION\" >usr/lib/agentos/cli-version\n"
-    # agentosd's reader once #1895 lands: the check is inert only while no such consumer exists.
-    READER = 'const cliPinPath = "usr/lib/agentos/cli-version"\n'
-
-    def run_check(self, cli=None, link=False, script=SCRIPT + WRITES, reader=READER, run_writer=False):
+    def run_check(self, cli=None, link=False, script=SCRIPT + WRITES, run_writer=False):
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             write(d / "repo", "guest/codex/build-rootfs.sh", script)
-            if reader is not None:
-                write(d / "repo", "broker/cmd/agentosd/imagepin.go", reader)
-            else:
-                write(d / "repo", "broker/cmd/agentosd/main.go", "package main\n")
             pin = d / "tree/usr/lib/agentos/cli-version"
             pin.parent.mkdir(parents=True)
             if run_writer:
@@ -5105,10 +5098,9 @@ class CodexPinTest(unittest.TestCase):
     def test_the_file_the_build_script_writes_passes(self):
         r = self.run_check(run_writer=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("not checked", r.stderr)
 
     def test_writer_is_the_build_script_s(self):
-        # Once #1895 lands, WRITES must be the real script's line, so the test above runs it.
+        # WRITES must be the real script's line, so the test above runs it.
         code = [l for l in (ROOT / "guest/codex/build-rootfs.sh").read_text().splitlines()
                 if "cli-version" in l and not l.lstrip().startswith("#") and ">" in l]
         if code:
@@ -5135,37 +5127,19 @@ class CodexPinTest(unittest.TestCase):
     def test_script_without_a_pin_line_fails(self):
         self.assertNotEqual(self.run_check("0.162.1", script="echo no version\n" + self.WRITES).returncode, 0)
 
-    def test_check_keys_on_agentosd_s_reader_not_the_writer_s_text(self):
-        # Before #1895 agentosd reads no cli-version, so there is nothing to hold the tree to; the
-        # check says so and passes.
-        r = self.run_check(reader=None)
-        self.assertEqual(r.returncode, 0)
-        self.assertIn("reads no cli-version", r.stderr)
-        # Once the reader is in the tree, a missing file fails, however the script writes it: a
-        # writer refactored to a variable no longer names the path, and must not turn the check off.
+    def test_a_missing_file_fails_however_the_script_writes_it(self):
+        # The check keys on the tree, not on build-rootfs.sh's text: a writer refactored to a variable
+        # no longer names the path, and must not turn the check off (#1897 delta review, finding 2).
         refactored = self.SCRIPT + 'pinf=usr/lib/agentos/cli-version\nprintf \'%s\\n\' "$CODEX_VERSION" >"$pinf"\n'
         self.assertNotEqual(self.run_check(script=refactored).returncode, 0)
         self.assertNotEqual(self.run_check(script=self.SCRIPT).returncode, 0)
-        # The reader renamed, or the path spelled out in another agentosd file, still turns it on.
-        self.assertNotEqual(self.run_check(reader="package main\n").returncode, 0)
-        with tempfile.TemporaryDirectory() as d:
-            d = pathlib.Path(d)
-            write(d / "repo", "guest/codex/build-rootfs.sh", self.SCRIPT)
-            write(d / "repo", "broker/cmd/agentosd/pin.go", self.READER)
-            (d / "tree").mkdir()
-            r = subprocess.run(["sh", str(IMG / "check_codex_pin.sh"), str(d / "repo"), str(d / "tree")],
-                               capture_output=True, text=True)
-            self.assertNotEqual(r.returncode, 0)
 
-    def test_inert_state_matches_this_tree(self):
-        # The real repo: inert exactly while agentosd has no pin reader.
+    def test_this_tree_s_check_fails_an_unpinned_image(self):
+        # The real repo: agentosd reads the pin (imagepin.go), so an image without it fails the build.
         with tempfile.TemporaryDirectory() as d:
             r = subprocess.run(["sh", str(IMG / "check_codex_pin.sh"), str(ROOT), d], capture_output=True, text=True)
-        if (ROOT / "broker/cmd/agentosd/imagepin.go").exists():
-            self.assertNotEqual(r.returncode, 0)
-        else:
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn("not checked", r.stderr)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cli-version", r.stderr)
 
     @staticmethod
     def registered(exe):

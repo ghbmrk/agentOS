@@ -165,8 +165,6 @@ class RootfsBuildTest(unittest.TestCase):
         r = subprocess.run(["sh", str(ROOT / "image/check_codex_pin.sh"), str(ROOT), str(self.out)],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        if (ROOT / "broker/cmd/agentosd/imagepin.go").exists():
-            self.assertNotIn("not checked", r.stderr)
 
     # REQ: A14, A3
     def test_forwarder_is_installed_and_the_socket_directory_is_empty(self):

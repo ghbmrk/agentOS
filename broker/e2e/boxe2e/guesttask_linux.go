@@ -115,7 +115,7 @@ func (d *driver) providerRun(c *mcpClient, run int) error {
 	if res.IsError {
 		switch {
 		case run == 1 && strings.HasPrefix(text, "provider_run: unqualified:"):
-			return errors.New(notDriven + " provider_run refuses the Codex route as unqualified until its qualification record (#809) and the image's pinned version (#1877) land")
+			return errors.New(notDriven + " provider_run refuses the Codex route as unqualified until its qualification record (#809) lands")
 		case run > 1 && strings.HasPrefix(text, "provider_run: pool-at-reserve:"):
 			return errors.New("the plan's usage reading never landed: provider_run 2 was refused as pool-at-reserve")
 		}
