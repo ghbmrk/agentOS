@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/netguard"
@@ -392,7 +393,15 @@ type workerRoute struct {
 	mu         sync.Mutex
 	balance    float64
 	hasBalance bool
+	// usedUp is set at the first used-up reading on this route; its later
+	// model calls are refused (W8, #1954).
+	usedUp atomic.Bool
 }
+
+// ReasonPlanUsedUp journals a model call refused because a reading on
+// this route was used up. Whether a call past a reached limit draws
+// purchased credits is unmeasured (#809), so the route stops there.
+const ReasonPlanUsedUp = "plan used up on this route; further model calls refused"
 
 // NewWorkerRoute returns the handler a worker's forwarder reaches.
 func NewWorkerRoute(c WorkerRouteConfig) (http.Handler, error) {
@@ -484,6 +493,10 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			deny(http.StatusForbidden, "no login placeholder of this worker")
 			return
 		}
+	}
+	if ep.Kind == KindResponses && w.usedUp.Load() {
+		deny(http.StatusTooManyRequests, ReasonPlanUsedUp)
+		return
 	}
 	limit := w.c.MaxBody
 	if ep.Kind == KindRefresh || ep.Kind == KindCode || ep.Kind == KindDevice {
@@ -1121,10 +1134,16 @@ func (w *workerRoute) responseHeaders(h http.Header) []string {
 // draw, so they alone do not; a balance lower than the last one this route
 // read is a draw during the run, and reads as used up (W8). Whether the
 // service also draws credits before a limit is reached is unmeasured until
-// #809.
+// #809, so a used-up reading also stops this route's model calls (W8),
+// with or without a usage sink.
 func (w *workerRoute) readQuota(h http.Header) {
-	if w.c.Quota == nil {
-		return
+	emit := func(q QuotaReading) {
+		if q.Exhausted {
+			w.usedUp.Store(true)
+		}
+		if w.c.Quota != nil {
+			w.c.Quota(q)
+		}
 	}
 	exhausted := h.Get("X-Codex-Rate-Limit-Reached-Type") != ""
 	if w.creditDrawn(h.Get("X-Codex-Credits-Balance")) {
@@ -1149,11 +1168,11 @@ func (w *workerRoute) readQuota(h http.Header) {
 		if q.UsedPercent >= 100 {
 			q.Exhausted = true
 		}
-		w.c.Quota(q)
+		emit(q)
 		emitted = true
 	}
 	if exhausted && !emitted {
-		w.c.Quota(QuotaReading{At: now, Provider: w.c.Route.Provider, Worker: w.c.Worker, Pool: "plan", Exhausted: true})
+		emit(QuotaReading{At: now, Provider: w.c.Route.Provider, Worker: w.c.Worker, Pool: "plan", Exhausted: true})
 	}
 }
 
