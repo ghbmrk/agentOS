@@ -125,9 +125,14 @@ TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # decides which CI jobs a change skips (CI-docs); tools/g1_scope and its lists decide
 # which paths a PR may touch during the G1 freeze (G1-freeze); tools/ci_split decides
 # which broker packages each race shard runs and when the fuzz peaks step skips (CI-SHARD).
+# tools/premerge decides which PRs need Mark and when an accepted head still holds; the
+# tests that pin the merge gates and the lens READMEs (review rules) left its Mark-only
+# list on Mark's "Narrow only" (2026-10-16), so they keep the full review instead.
 TIER_A_PREFIXES = (
     "assurance/", "tools/canary", "tools/depaudit", "tools/risk_tier", "tools/ci_scope",
-    "tools/g1_scope", "tools/ci_split",
+    "tools/g1_scope", "tools/ci_split", "tools/premerge",
+    "tests/test_premerge", "tests/test_risk_tier", "tests/test_ci_scope", "tests/test_g1_scope",
+    "tests/test_workflows", "tests/test_merge_queue", "tests/test_lane",
     "image/", ".github/", ".claude/",
 )
 # guest/<name>/<file>: what the guest runs or installs.
@@ -202,6 +207,8 @@ def tier_of(path):
     for pre in TIER_A_BROKER_PREFIXES:
         if p.startswith(pre):
             return "A", pre
+    if len(parts) == 3 and parts[0] == "reviews" and name.startswith("README"):
+        return "A", "reviews/*/README*"
     if parts[0] == "broker" and len(parts) > 2 and parts[1] in TIER_A_BROKER:
         return "A", "broker/" + parts[1] + "/"
     if parts[0] == "broker":
