@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,8 +28,9 @@ import (
 // file's hash, clears it, and removes the staged copy. A crash anywhere leaves the vault either
 // before the change or holding the next file; OpenSealed then writes the
 // next file over whichever keys file is on the drive, and opens only if
-// the slot that opened is one the next file keeps, so a slot the change
-// removed, put back with the file before, opens nothing.
+// the slot that opened is one the next file keeps, or a trusted-host slot
+// whose factor also opens one the next file adds (a re-trust, #1847), so a
+// slot the change removed, put back with the file before, opens nothing.
 
 // crashKeysSealed is the crashPoint after a slot change sealed the next
 // keys file and before it wrote it (tests).
@@ -191,7 +193,7 @@ func (v *Vault) stagedKeys(raw []byte) bool {
 // whose slot opened the vault under key ID want. A vault that records no
 // keys file (made by Create, not CreateSealed) accepts none. Caller does
 // not hold mu.
-func (v *Vault) checkKeys(raw []byte, kf *keyFile, want []byte, opened Slot) error {
+func (v *Vault) checkKeys(raw []byte, kf *keyFile, want []byte, opened Slot, f Factor) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.nextKeys != nil {
@@ -205,7 +207,7 @@ func (v *Vault) checkKeys(raw []byte, kf *keyFile, want []byte, opened Slot) err
 		if err != nil {
 			return err
 		}
-		if !nkf.has(opened) {
+		if !nkf.has(opened) && !v.replacementOpens(kf, nkf, want, opened, f) {
 			if opened.Kind == SlotPassphrase && passphraseChanged(kf, nkf) {
 				// The change replaced this passphrase (P2-4g).
 				return ErrChangeInterrupted
@@ -225,6 +227,38 @@ func (v *Vault) checkKeys(raw []byte, kf *keyFile, want []byte, opened Slot) err
 		return v.replaceKeys(&keyFile{Magic: kf.Magic, Version: kf.Version, Slots: slotsFor(kf, want)})
 	}
 	return nil
+}
+
+// replacementOpens reports whether f, having opened the trusted-host slot
+// opened from the file before, also opens a trusted-host slot the next file
+// adds: the same PC enrolled again (VAULT-RETRUST, #1847). A re-trust
+// replaces the PC's slot, so without this a crash after the seal left the
+// PC's old slot opening the vault and the change refusing it. The factor
+// must open the new slot to the vault's key, so a slot the change removed
+// with no replacement this factor opens still opens nothing. Only TPM
+// slots are tried: a passphrase change keeps ErrChangeInterrupted
+// (P2-4g). unwrapSlot stops at the first factor error, so a TPM refusing
+// the PIN for the new slot is asked once; a wrong PIN never gets here,
+// because it opened no slot in the file before. Caller holds mu.
+func (v *Vault) replacementOpens(kf, nkf *keyFile, want []byte, opened Slot, f Factor) bool {
+	if opened.Kind != SlotTPM || f == nil || f.Kind() != SlotTPM {
+		return false
+	}
+	added := &keyFile{Magic: nkf.Magic, Version: nkf.Version}
+	for _, s := range nkf.Slots {
+		if s.Kind == SlotTPM && !kf.has(s) {
+			added.Slots = append(added.Slots, s)
+		}
+	}
+	if len(added.Slots) == 0 {
+		return false
+	}
+	key, _, err := added.unwrapSlot(f, want)
+	if err != nil {
+		return false
+	}
+	defer wipe(key)
+	return subtle.ConstantTimeCompare(key, v.key) == 1
 }
 
 // passphraseChanged reports whether the slot change from cur to next is a
