@@ -168,10 +168,11 @@ func TestStageFailedIsIdempotentByExactID(t *testing.T) {
 		t.Fatal("fallback did not restore the previous image")
 	}
 	e.reopen()
+	before := e.reverts() // the journal outlives the restart
 	if err := e.p.StageFailed(bg, r.ID); err != nil {
 		t.Fatal("replay after a restart:", err)
 	}
-	if a := e.adoption(r.ID); a.Reverted != WhyFallback || e.reverts() != 0 {
+	if a := e.adoption(r.ID); a.Reverted != WhyFallback || e.reverts() != before {
 		t.Fatalf("replay: adoption %+v, new reverts %d", a, e.reverts())
 	}
 	if err := e.p.ConfirmStaged(r.ID); err == nil {
@@ -381,8 +382,12 @@ func TestUndoAndSettleDoNotDeadlock(t *testing.T) {
 // again (SR3-4f-2-r1b).
 func TestWithdrawnThenRevertFailsIsSettledByTheDrop(t *testing.T) {
 	e, r, w := pendingStaged(t)
-	if _, err := e.eng.Stop(bg); err != nil {
-		t.Fatal(err)
+	// STOP holds the withdraw intent too (SM-AD-1), so it arrives after
+	// the applier has withdrawn and before the revert runs.
+	w.then = func(string) {
+		if _, err := e.eng.Stop(bg); err != nil {
+			t.Error(err)
+		}
 	}
 	if err := e.p.revert(bg, r.ID, OriginPipeline, WhySecurity); err == nil {
 		t.Fatal("auto revert ran during STOP")
@@ -453,8 +458,9 @@ func TestStageDroppedIsIdempotentByExactID(t *testing.T) {
 		t.Fatalf("a dropped release was reported: %q", d)
 	}
 	e.reopen()
-	if err := e.p.StageDropped(bg, r.ID); err != nil || e.reverts() != 0 {
-		t.Fatalf("replay after a restart: %v, new reverts %d", err, e.reverts())
+	before := e.reverts() // the journal outlives the restart
+	if err := e.p.StageDropped(bg, r.ID); err != nil || e.reverts() != before {
+		t.Fatalf("replay after a restart: %v, new reverts %d", err, e.reverts()-before)
 	}
 	if err := e.p.ConfirmStaged(r.ID); err == nil {
 		t.Fatal("a dropped image confirmed")
