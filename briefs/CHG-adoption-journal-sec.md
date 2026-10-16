@@ -20,7 +20,9 @@ Package IDs:
 
 ## Acceptance tests
 
-New `broker/change/adoption_journal_sec_test.go`. Each test carries `REQ: CAP-3, C23, CHG-2` and its ID.
+**Acceptance tests:** AJS-1: `TestForgetRemovesStrayProposal`, `TestForgetAfterRestartRemovesStrayProposal`, `TestReplayRemovesSettledProposal`, `TestForgetRemovesUnsealedWaitingProposal`; AJS-2: `TestRewrittenProposalIsRefused`, `TestUnauthenticatedProposalIsRefused`, `TestMisfiledProposalIsRefused`, `TestAuthenticProposalLoads`; AJS-3: `TestAdoptParamsBindCandidate`.
+
+All are in the new `broker/change/adoption_journal_sec_test.go`. Each test carries `REQ: CAP-3, C23, CHG-2` and its ID.
 
 - **AJS-1.** Content's Delete fails, and a goal-learned proposal waiting for the owner is denied. Three cases follow:
   - Heal the delete and forget the goal: no Content key holds the goal's bytes.
