@@ -42,6 +42,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/provagent"
 )
 
 const (
@@ -94,6 +95,8 @@ type driver struct {
 	// guestSock is the agent machine's guest-plane socket; "" is the
 	// box's (agentSock).
 	guestSock string
+	// agentosdArgv is agentosd's command line; nil reads the unit's.
+	agentosdArgv func() ([]string, error)
 	// now and sleep are the clock of the codes and of phone-control's
 	// waits; nil is the wall clock. The in-process test shares a fake one
 	// with the owner channel.
@@ -560,7 +563,7 @@ func (d *driver) planSignIn() error {
 		return fmt.Errorf("step 7 did not open: %w", err)
 	}
 	if !deviceOffer(pg, route.Provider) {
-		return errors.New(notDriven + " step 7 offers no " + route.Provider + " sign-in (#1264) " + where(pg))
+		return errors.New(notDriven + " step 7 offers no " + route.Provider + " sign-in (#1264; gate: #809, #1877; image: #1721) " + where(pg))
 	}
 	if d.stub == nil {
 		return errors.New("no plan stub")
@@ -575,6 +578,13 @@ func (d *driver) planSignIn() error {
 	pages = append(pages, seen{"GET /setup after POST /setup/ai-device", pg})
 	link, code, ok := deviceLink(pg)
 	if !ok {
+		// The sign-in runs the CLI in a worker built from the provider's
+		// image; a box that registers none cannot start it (#1721), the
+		// case where #809 and #1877 land first (ASSUMPTIONS E11).
+		image := provagent.Builtins()[route.Provider].Image
+		if has, err := d.hasImage(image); err == nil && !has {
+			return errors.New(notDriven + " step 7's " + route.Provider + " sign-in cannot start: agentosd registers no " + image + " image (#1721) " + where(pg))
+		}
 		return errors.New("no sign-in link after sign in " + where(pg))
 	}
 	if want := "https://" + route.AuthHost + route.DevicePage; link != want {

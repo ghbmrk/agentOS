@@ -24,6 +24,7 @@ type fakeBox struct {
 	host  string // the link's host
 	leak  bool   // the status page shows an issued token
 	stray bool   // the box makes a call the provider refuses
+	noRun bool   // the sign-in cannot start: the page shows localui's error
 	mu    sync.Mutex
 	dev   map[string]string
 	tok   map[string]string // the exchange's tokens, for a fake worker's model call
@@ -49,6 +50,10 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad form", 400)
 			return
 		}
+		if f.noRun {
+			http.Redirect(w, r, "/setup?err=start", http.StatusSeeOther)
+			return
+		}
 		_, f.dev = f.provider("POST", "/api/accounts/deviceauth/usercode", "application/json", `{"client_id":"app_synthetic"}`)
 		http.Redirect(w, r, "/setup", http.StatusSeeOther)
 	case r.URL.Path == "/setup" && f.done:
@@ -70,6 +75,9 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			`<p>This code is from OpenAI.</p><p><a href="/setup">I signed in</a></p>`))
 	case r.URL.Path == "/setup":
 		page := `<h2>7. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>`
+		if f.noRun {
+			page += `<p class="err">Could not start sign-in with that provider. Try again.</p>`
+		}
 		if f.offer {
 			page += `<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="codex"><button>Sign in with ChatGPT</button></form>`
 		}
@@ -127,6 +135,29 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 	}
 	if !f.done || f.stub.Hits()["code"] != 1 || f.stub.Refused() != 0 {
 		t.Fatalf("sign-in did not reach the provider: done %v hits %v refused %d", f.done, f.stub.Hits(), f.stub.Refused())
+	}
+
+	// A sign-in that cannot start reads XFAIL #1721 only while agentosd
+	// registers no codex image; with the image it is a product failure.
+	for _, c := range []struct {
+		argv  []string
+		xfail bool
+	}{
+		{[]string{"/usr/lib/agentos/agentosd", "-image", "openclaw=/usr/lib/agentos/images/openclaw"}, true},
+		{[]string{"/usr/lib/agentos/agentosd", "-image", "codex=/usr/lib/agentos/images/codex"}, false},
+	} {
+		d := fakeDriver(&fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com", noRun: true})
+		argv := c.argv
+		d.agentosdArgv = func() ([]string, error) { return argv, nil }
+		err := d.guestTask()
+		switch {
+		case err == nil:
+			t.Errorf("no start %v: passed", argv)
+		case c.xfail && (!strings.HasPrefix(err.Error(), want) || !strings.Contains(err.Error(), "#1721")):
+			t.Errorf("no start, no codex image: %v does not read XFAIL #1721", err)
+		case !c.xfail && (strings.HasPrefix(err.Error(), notDriven) || !strings.Contains(err.Error(), "no sign-in link")):
+			t.Errorf("no start, codex image: %v does not read FAIL", err)
+		}
 	}
 
 	// Each failure reads FAIL and names what went wrong: the host the page

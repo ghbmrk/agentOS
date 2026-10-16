@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,16 +17,22 @@ import (
 	"github.com/ghbmrk/agentos/broker/egress"
 )
 
-// REQ: HW-10, CRED-5, RES-5
+// REQ: HW-10, CRED-5
 
 // fakeGuest is the agent machine's guest plane as agentosd serves it on
 // the machine's socket, with provider_run played by mode: "absent" offers
 // no provider_run (#1721), "unqualified" refuses the route (#809), "answer"
 // makes the worker's model call at the stub with the signed-in tokens and
 // returns its text; the rest are the failures the driver must not pass.
+// It admits a run after the first only once a model call's response
+// carried the plan's quota headers, as provagent admits only one probe
+// while the plan has no usage reading; "noQuota" never reads them.
 type fakeGuest struct {
-	f    *fakeBox
-	mode string
+	f     *fakeBox
+	mode  string
+	mu    sync.Mutex
+	runs  int
+	quota bool // a model call's response carried the plan's quota reading
 }
 
 func (g *fakeGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -68,6 +75,21 @@ func (g *fakeGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		text("provider_run: bad arguments", true)
 		return
 	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.runs++
+	if g.runs > 1 && !g.quota {
+		text("provider_run: pool-at-reserve: the plan is at the owner's reserve, or its usage is unread; use another route", true)
+		return
+	}
+	if g.runs > 1 && g.mode == "unqualified2" {
+		text("provider_run: unqualified: this provider's route is not qualified yet; use another route", true)
+		return
+	}
+	answer := func() {
+		b, _ := json.Marshal(map[string]string{"result": g.modelCall()})
+		text(string(b), false)
+	}
 	switch g.mode {
 	case "unqualified":
 		text("provider_run: unqualified: this provider's route is not qualified yet; use another route", true)
@@ -77,6 +99,19 @@ func (g *fakeGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		text(`{"result":"`+codexstub.Answer+`"}`, false)
 	case "leak":
 		text(`{"result":"`+g.f.stub.Tokens()[0]+`"}`, false)
+	case "leakID":
+		g.modelCall()
+		text(`{"result":"`+codexstub.Answer+` `+g.f.tok["id_token"]+`"}`, false)
+	case "leakSecond":
+		b, _ := json.Marshal(map[string]string{"result": g.modelCall()})
+		reply(map[string]any{"content": []any{map[string]string{"type": "text", "text": string(b)},
+			map[string]string{"type": "text", "text": g.f.tok["refresh_token"]}}, "isError": false})
+	case "leakField":
+		b, _ := json.Marshal(map[string]string{"result": g.modelCall()})
+		reply(map[string]any{"content": []any{map[string]string{"type": "text", "text": string(b)}},
+			"_meta": map[string]string{"auth": g.f.tok["id_token"]}, "isError": false})
+	case "noQuota", "unqualified2":
+		answer()
 	case "rpcError":
 		json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": in.ID, "error": map[string]any{"code": -32603, "message": "internal error"}})
 	case "garbage":
@@ -96,7 +131,7 @@ func (g *fakeGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // modelCall is the worker's one call at the plan's responses endpoint, as
 // the CLI makes it from the signed-in auth file; it returns the answer's
-// text, or "" when the provider refused.
+// text, or "" when the provider refused. g.mu is held.
 func (g *fakeGuest) modelCall() string {
 	var ep egress.PlanEndpoint
 	for _, e := range egress.Codex().Endpoints {
@@ -116,6 +151,9 @@ func (g *fakeGuest) modelCall() string {
 	r.Header.Set("Chatgpt-Account-Id", claims["https://api.openai.com/auth"]["chatgpt_account_id"])
 	w := httptest.NewRecorder()
 	g.f.stub.ServeHTTP(w, r)
+	if g.mode != "noQuota" && w.Header().Get("X-Codex-Primary-Used-Percent") != "" {
+		g.quota = true
+	}
 	if w.Code != 200 || !strings.Contains(w.Body.String(), codexstub.Answer) {
 		return ""
 	}
@@ -149,18 +187,20 @@ func signedIn(t *testing.T, mode string) (*driver, *fakeBox) {
 	return d, f
 }
 
-// The guest task runs one provider_run on the Codex route as the agent
+// The guest task runs provider_run twice on the Codex route as the agent
 // machine's guest: it passes only on the model's answer from a real call at
-// the provider, with no token in the reply and no refused call. A box that
-// offers no provider_run (#1721) or refuses the route as unqualified (#809,
-// #1877) reads XFAIL; every other outcome reads FAIL.
+// the provider each time, with no token anywhere in the result and no
+// refused call, and the second run admitted only because the first run's
+// quota reading landed. A box that offers no provider_run (#1721) or
+// refuses the first run as unqualified (#809, #1877) reads XFAIL; every
+// other outcome reads FAIL.
 func TestGuestTaskRunsOnTheCodexPlan(t *testing.T) {
 	d, f := signedIn(t, "answer")
 	if err := d.guestTask(); err != nil {
 		t.Fatalf("answered: %v", err)
 	}
-	if f.stub.Hits()["responses"] != 1 || f.stub.Refused() != 0 {
-		t.Fatalf("the task's model call: hits %v refused %d", f.stub.Hits(), f.stub.Refused())
+	if f.stub.Hits()["responses"] != 2 || f.stub.Refused() != 0 {
+		t.Fatalf("the task's model calls: hits %v refused %d", f.stub.Hits(), f.stub.Refused())
 	}
 
 	for mode, says := range map[string]string{"absent": "#1721", "unqualified": "#809"} {
@@ -172,25 +212,85 @@ func TestGuestTaskRunsOnTheCodexPlan(t *testing.T) {
 	}
 
 	for mode, says := range map[string]string{
-		"noCall":    "without a model call",
-		"leak":      "carried a provider token",
-		"usedup":    "provider_run refused: provider_run: used up",
-		"rpcError":  "tools/call: error -32603",
-		"garbage":   "tools/call: unreadable answer",
-		"stray":     "the provider refused 1 calls",
-		"wrongText": "not the model's",
+		"noCall":       "without a model call",
+		"leak":         "carried a provider token",
+		"leakID":       "carried a provider token",
+		"leakSecond":   "carried a provider token",
+		"leakField":    "carried a provider token",
+		"noQuota":      "usage reading never landed",
+		"unqualified2": "provider_run 2 refused: provider_run: unqualified",
+		"usedup":       "provider_run 1 refused: provider_run: used up",
+		"rpcError":     "tools/call: error -32603",
+		"garbage":      "tools/call: unreadable answer",
+		"stray":        "the provider refused 1 calls",
+		"wrongText":    "not the model's",
 	} {
 		d, f := signedIn(t, mode)
 		err := d.guestTask()
-		if err == nil || strings.HasPrefix(err.Error(), notDriven) {
+		switch {
+		case err == nil:
+			t.Errorf("%s: passed", mode)
+		case strings.HasPrefix(err.Error(), notDriven):
 			t.Errorf("%s: %v reads XFAIL", mode, err)
-		} else if !strings.Contains(err.Error(), says) {
+		case !strings.Contains(err.Error(), says):
 			t.Errorf("%s: %v does not say %q", mode, err, says)
 		}
 		for _, tok := range f.stub.Tokens() {
 			if err != nil && strings.Contains(err.Error(), tok) {
 				t.Errorf("%s: the failure quotes an issued token", mode)
 			}
+		}
+	}
+}
+
+// The whole-result check finds a token in any content item or field, the
+// id_token included, and passes the model's answer alone.
+func TestLeaksScansTheWholeResult(t *testing.T) {
+	toks := []string{"tok-access", "hdr.payload.sig"}
+	for _, c := range []struct {
+		raw  string
+		leak bool
+	}{
+		{`{"content":[{"type":"text","text":"` + codexstub.Answer + `"}]}`, false},
+		{`{"content":[{"type":"text","text":"ok"},{"type":"text","text":"tok-access"}]}`, true},
+		{`{"content":[{"type":"text","text":"ok"}],"_meta":{"x":"hdr.payload.sig"}}`, true},
+		{`{"content":[{"type":"text","text":"ok"}],"` + codexstub.Canary + `acct":1}`, true},
+		{`{"content":[{"type":"text","text":"\u0074ok-access"}]}`, true},
+	} {
+		if got := leaks([]byte(c.raw), toks); got != c.leak {
+			t.Errorf("%s: leaks %v", c.raw, got)
+		}
+	}
+}
+
+// An MCP error that quotes a token or canary is cut before it is printed.
+func TestMCPErrorsAreRedacted(t *testing.T) {
+	c := &mcpClient{tokens: func() []string { return []string{"tok-access"} }}
+	got := c.redact("bad tok-access and " + codexstub.Canary + "acct-1")
+	if strings.Contains(got, "tok-access") || strings.Contains(got, codexstub.Canary) {
+		t.Fatalf("redact: %q", got)
+	}
+}
+
+// agentosd's command line says whether the provider's image is registered.
+func TestHasImageReadsAgentosdsCommandLine(t *testing.T) {
+	show := "{ path=/usr/lib/agentos/with-uids ; argv[]=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner x -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw ; ignore_errors=no ; start_time=[n/a] }"
+	argv, err := execArgv(show)
+	if err != nil || argv[len(argv)-1] != "openclaw=/usr/lib/agentos/images/openclaw" {
+		t.Fatalf("execArgv: %q %v", argv, err)
+	}
+	for _, c := range []struct {
+		argv []string
+		has  bool
+	}{
+		{argv, false},
+		{append(argv, "-image", "codex=/usr/lib/agentos/images/codex"), true},
+		{append(argv, "--image=codex=/x"), true},
+		{append(argv, "-image", "codexx=/x"), false},
+	} {
+		d := &driver{agentosdArgv: func() ([]string, error) { return c.argv, nil }}
+		if has, err := d.hasImage("codex"); err != nil || has != c.has {
+			t.Errorf("%q: %v %v", c.argv, has, err)
 		}
 	}
 }

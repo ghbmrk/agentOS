@@ -62,6 +62,7 @@ type Stub struct {
 	verify   string // code_verifier
 	access   string
 	refresh  string
+	id       string // the id_token, whose header and payload carry no canary
 	account  string
 	hits     map[string]int
 	refused  int
@@ -132,12 +133,13 @@ func (s *Stub) Refused() int {
 }
 
 // Tokens returns the token set the stub issued, so a test can look for it
-// where it must not be.
+// where it must not be. It includes the id_token, which carries no Canary
+// prefix and so would pass a check for the canary alone.
 func (s *Stub) Tokens() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []string
-	for _, v := range []string{s.access, s.refresh, s.code, s.verify} {
+	for _, v := range []string{s.access, s.refresh, s.id, s.code, s.verify} {
 		if v != "" {
 			out = append(out, v)
 		}
@@ -273,9 +275,9 @@ func (s *Stub) refreshToken(w http.ResponseWriter, _ *http.Request, body []byte)
 
 // mint issues a new token set and returns it; s.mu is held.
 func (s *Stub) mint() map[string]any {
-	s.access, s.refresh = Canary+"access-"+rnd(), Canary+"refresh-"+rnd()
+	s.access, s.refresh, s.id = Canary+"access-"+rnd(), Canary+"refresh-"+rnd(), s.idToken()
 	return map[string]any{
-		"access_token": s.access, "refresh_token": s.refresh, "id_token": s.idToken(),
+		"access_token": s.access, "refresh_token": s.refresh, "id_token": s.id,
 		"expires_in": 3600, "token_type": "Bearer",
 	}
 }
