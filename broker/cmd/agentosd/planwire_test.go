@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -111,10 +112,10 @@ func TestPlanSignInLineFollowsTheRunner(t *testing.T) {
 	r.ImageVersion = func(string) string { return "1" }
 	var read []provagent.Reading
 	for _, p := range d.Pools {
-		read = append(read, provagent.Reading{Pool: p.Name, Left: 1})
+		read = append(read, provagent.Reading{Pool: p.Name, Left: 1, At: time.Now()})
 	}
-	r.Readings = func(string) []provagent.Reading { return read }
-	r.Reserve = func() float64 { return 0 }
+	r.Usage = func(string) (provagent.Usage, error) { return provagent.Usage{Readings: read}, nil }
+	r.Reserve = func(string, string) float64 { return 0 }
 	if note.Note() != "" {
 		t.Fatal("the line is set before any run")
 	}

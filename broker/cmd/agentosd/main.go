@@ -840,6 +840,8 @@ func main() {
 			if wt != nil && planRoutes != nil {
 				pr := providerRunner(m, planRoutes, planLine)
 				pr.Background = ctx // a sign-in's wait ends at shutdown
+				// #1856: plan readings and the owner's reserve (RES-5).
+				wirePlanUsage(pr, planRoutes)
 				wt.Provider = providerTool{pr}
 			}
 			caps.workers(wt != nil)
@@ -1067,8 +1069,8 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 // sign-in line. Every other owner-side input is closed until its row lands:
 // no consent, and no image pins a CLI version, so a run refuses with a
 // closed reason and starts nothing. Codex's qualification record is empty
-// until S8-live (#809) fills it. No pool readings reach agentosd yet
-// (#1856), so admission refuses even once the record is filled (RES-5 fails
+// until S8-live (#809) fills it. Pool readings and the reserve come from
+// wirePlanUsage (#1856); without them admission refuses (RES-5 fails
 // closed). Journal (OP-8 meter and charge) is unwired; provagent P9 names
 // its owner. Nothing calls StartSignIn until the setup page does (#1264
 // c4e2b). A nil rc or note leaves those inputs closed.
@@ -1079,7 +1081,6 @@ func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote) 
 		Granted:      func(string) bool { return false },
 		PrivateOK:    func(string) bool { return false },
 		Consent:      func(string) bool { return false },
-		Reserve:      func() float64 { return 1 },
 		Logf:         log.Printf,
 		Caps:         provagent.Caps{Wall: 30 * time.Minute, Result: 256 << 10, Brief: 256 << 10},
 		NewID:        func() string { return vm.ProviderPrefix + randHex(6) },
