@@ -241,15 +241,17 @@ func (e *effect) succeeded() bool {
 // function of records, so replay after a restart gives the same count. An
 // effect counts once it is dispatched, unless every attempt is known not to
 // have applied; an outcome still unknown counts, since it may have landed.
-// Inverse intents do not count: an undo only restores.
+// An undo does not count, since it only restores; any other intent of the
+// inverse action does, so a forged "restore" cannot actuate past the cap.
 func (l Lifecycle) DailyCount(records []Record, account string, day time.Time) int {
 	y, mo, d := day.Date()
 	from := time.Date(y, mo, d, 0, 0, 0, 0, day.Location())
 	to := from.AddDate(0, 0, 1)
+	all := effects(records)
 	n := 0
-	for _, e := range effects(records) {
+	for _, e := range all {
 		in := e.intent
-		if in == nil || in.Account != account || !strings.HasPrefix(in.Action, l.Kind) || in.Action == l.Inverse {
+		if in == nil || in.Account != account || !strings.HasPrefix(in.Action, l.Kind) || l.isUndo(all, in) {
 			continue
 		}
 		if e.firstSent.IsZero() || e.firstSent.Before(from) || !e.firstSent.Before(to) {
@@ -260,6 +262,23 @@ func (l Lifecycle) DailyCount(records []Record, account string, day time.Time) i
 		}
 	}
 	return n
+}
+
+// isUndo reports whether in is the plan UndoPlan builds: the inverse, with
+// the undo's ID, of a succeeded effect of this lifecycle on the same account,
+// setting the target back to that effect's prior value.
+func (l Lifecycle) isUndo(all map[string]*effect, in *Intent) bool {
+	if l.Inverse == Irreversible || in.Action != l.Inverse {
+		return false
+	}
+	id, _ := in.Params[ParamUndoes].(string)
+	orig := all[id]
+	if id == "" || in.ID != UndoID(id) || orig == nil || orig.intent == nil || !orig.succeeded() {
+		return false
+	}
+	o := orig.intent
+	return o.Account == in.Account && strings.HasPrefix(o.Action, l.Kind) && o.Action != l.Inverse &&
+		sameValue(in.Params[l.Target], o.Params[l.Prior])
 }
 
 // UndoID is the intent ID of the undo of an effect, so that repeating UNDO

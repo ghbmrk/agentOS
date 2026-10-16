@@ -44,6 +44,9 @@ func TestUnlistedPersistingPackageFails(t *testing.T) {
 	writeGo(t, root, "listed/a.go", "package listed\n\nimport \"github.com/ghbmrk/agentos/broker/durable\"\n\nfunc f() error { return durable.WriteFile(\"x\", nil, 0o600) }\n")
 	// An aliased import, and the writer taken as a value, still count.
 	writeGo(t, root, "devices/a.go", "package devices\n\nimport d \"github.com/ghbmrk/agentos/broker/durable\"\n\nvar save = d.WriteFile\n")
+	// So does a dot-import; another package's Rename field does not.
+	writeGo(t, root, "dotted/a.go", "package dotted\n\nimport (\n\t\"os\"\n\t. \"github.com/ghbmrk/agentos/broker/durable\"\n)\n\nvar _ = os.Rename\n\nfunc f() error { return WriteFile(\"x\", nil, 0o600) }\n")
+	writeGo(t, root, "fielded/a.go", "package fielded\n\nimport (\n\t\"os\"\n\t. \"github.com/ghbmrk/agentos/broker/durable\"\n)\n\nvar _ = os.Rename\nvar _ = SyncDir\n")
 	// A rename the rename check exempts still persists.
 	writeGo(t, root, "handoff/a.go", "package handoff\n\nimport \"os\"\n\nfunc f() error { return os.Rename(\"a\", \"b\") // durable:exempt test\n}\n")
 	// Test files, testdata and vendor are not broker code.
@@ -56,11 +59,11 @@ func TestUnlistedPersistingPackageFails(t *testing.T) {
 	writeGo(t, root, "cache/a.go", "package cache\n\nimport \"github.com/ghbmrk/agentos/broker/durable\"\n\nfunc f() error {\n\treturn durable.WriteFile(\"x\", nil, 0o600) // lifecycle:exempt scratch, removed at boot\n}\n")
 
 	got := storeProblems(t, root, "listed content\n")
-	want := []string{"devices: persists", "handoff: persists"}
+	want := []string{"devices: persists", "dotted: persists", "handoff: persists"}
 	if !matchProblems(got, want) {
 		t.Fatalf("problems = %q, want one each starting %q", got, want)
 	}
-	if got := storeProblems(t, root, "listed content\ndevices debt debt:#1\nhandoff external-session\n"); len(got) != 0 {
+	if got := storeProblems(t, root, "listed content\ndevices debt debt:#1\ndotted config\nhandoff external-session\n"); len(got) != 0 {
 		t.Fatalf("all listed: problems = %q", got)
 	}
 }
@@ -148,9 +151,9 @@ func storeProblems(t *testing.T, root, manifest string) []string {
 // persisting maps each package directory under root (slash-separated,
 // relative to root) whose non-test code writes durably to its first site.
 // A site is a use of durable.WriteFile or durable.Rename, called or taken as
-// a value, or a rename marked durable:exempt (TestNoBareRename sends every
-// other rename through this package). A line marked
-// `lifecycle:exempt <reason>` is not a site.
+// a value, also through a dot-import, or a rename marked durable:exempt
+// (TestNoBareRename sends every other rename through this package). A line
+// marked `lifecycle:exempt <reason>` is not a site.
 func persisting(t *testing.T, root string) map[string]string {
 	t.Helper()
 	self, err := filepath.Abs(".")
@@ -208,13 +211,19 @@ func persisting(t *testing.T, root string) map[string]string {
 			if imp.Name != nil {
 				name = imp.Name.Name
 			}
+			writer := func(s string) bool { return s == "WriteFile" || s == "Rename" }
+			field := map[*ast.Ident]bool{} // x.Sel names, never a dot-imported writer
 			ast.Inspect(f, func(n ast.Node) bool {
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				if x, ok := sel.X.(*ast.Ident); ok && x.Name == name && (sel.Sel.Name == "WriteFile" || sel.Sel.Name == "Rename") {
-					site(fset.Position(sel.Pos()).Line)
+				switch n := n.(type) {
+				case *ast.SelectorExpr:
+					field[n.Sel] = true
+					if x, ok := n.X.(*ast.Ident); ok && x.Name == name && writer(n.Sel.Name) {
+						site(fset.Position(n.Pos()).Line)
+					}
+				case *ast.Ident:
+					if name == "." && !field[n] && writer(n.Name) {
+						site(fset.Position(n.Pos()).Line)
+					}
 				}
 				return true
 			})

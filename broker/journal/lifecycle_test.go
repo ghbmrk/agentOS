@@ -201,6 +201,21 @@ func TestDailyCountFromRecords(t *testing.T) {
 	undo := must(UndoPlan(e.Trail(), "d2-a", map[string]any{"level": 40}))
 	undo.Origin = "owner-sms"
 	run(e, undo)
+	// A "restore" that is not that undo actuates like any effect, so it
+	// counts: one naming no effect, one with another ID, and one with the
+	// undo's ID that sets a value other than the prior.
+	forge := func(id, undoes string, level int) Intent {
+		in := lampIntent(id, kind, 0, level)
+		in.Action = l.Inverse
+		in.Params[ParamUndoes] = undoes
+		if err := l.Check(in); err != nil {
+			t.Fatal(err)
+		}
+		return in
+	}
+	run(e, forge("forged-1", "nonexistent", 80))
+	run(e, forge("forged-2", "d1-b", 10))
+	run(e, forge(UndoID("d1-a"), "d1-a", 77))
 
 	live := e.Trail()
 	read := must(open().ReadTrail())
@@ -208,8 +223,8 @@ func TestDailyCountFromRecords(t *testing.T) {
 		if n := l.DailyCount(recs, "lamp-1", day1.Add(5*time.Hour)); n != 3 {
 			t.Errorf("%s: day 1 count = %d, want 3 (two applied, one unknown)", name, n)
 		}
-		if n := l.DailyCount(recs, "lamp-1", day2.Add(20*time.Hour)); n != 1 {
-			t.Errorf("%s: day 2 count = %d, want 1", name, n)
+		if n := l.DailyCount(recs, "lamp-1", day2.Add(20*time.Hour)); n != 4 {
+			t.Errorf("%s: day 2 count = %d, want 4 (one effect, three forged restores; the undo is free)", name, n)
 		}
 		if n := l.DailyCount(recs, "lamp-2", day1); n != 1 {
 			t.Errorf("%s: other device count = %d, want 1", name, n)
