@@ -57,6 +57,10 @@ install -m 0644 "$here/managed_config.toml" etc/codex/managed_config.toml
 install -m 0644 "$here/requirements.toml" etc/codex/requirements.toml
 install -m 0755 "$here/agentos-toolsh" usr/local/bin/agentos-toolsh
 install -m 0644 "$here/launch.json" usr/lib/agentos/codex/launch.json
+# The pinned CLI version, which agentosd reads as the image's ImageVersion (#1877): the provider
+# gate opens only when it equals the version the qualification record (#809) was taken on.
+printf '%s\n' "$CODEX_VERSION" >usr/lib/agentos/cli-version
+chmod 0644 usr/lib/agentos/cli-version
 
 # The in-worker forwarder (#1014): loopback 18432 to /run/agentos/route.sock, the only route the
 # CLI is pointed at. FORWARDER_BIN=<file> installs a prebuilt static binary; otherwise it is built

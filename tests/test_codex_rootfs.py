@@ -47,6 +47,14 @@ class RootfsScriptTest(unittest.TestCase):
         # The pin must be the version the C rows were measured on (ASSUMPTIONS C1).
         self.assertIn(f"Codex CLI {VERSION}", (CODEX / "ASSUMPTIONS.md").read_text())
 
+    # REQ: CAP-11, CRED-5
+    def test_script_records_the_pin_where_agentosd_reads_it(self):
+        # agentosd reads usr/lib/agentos/cli-version as the image's ImageVersion (#1877).
+        text = SCRIPT.read_text()
+        self.assertIn("printf '%s\\n' \"$CODEX_VERSION\" >usr/lib/agentos/cli-version\n", text)
+        pin = (ROOT / "broker/cmd/agentosd/imagepin.go").read_text()
+        self.assertIn('const cliPinPath = "usr/lib/agentos/cli-version"', pin)
+
     # REQ: CRED-5, CRED-1
     def test_script_writes_no_login(self):
         text = SCRIPT.read_text()
@@ -170,6 +178,14 @@ class RootfsBuildTest(unittest.TestCase):
         # service outside the tool sandbox is pinned off (C14).
         on = {f.strip() for f in cfg["enabled feature flags"].split(",")}
         self.assertEqual(on & NEVER_ON, set(), "managed_config.toml must pin these off")
+
+    # REQ: CAP-11, CRED-5
+    def test_image_pins_the_version_its_cli_reports(self):
+        pin = self.out / "usr/lib/agentos/cli-version"
+        self.assertEqual(pin.read_text(), VERSION + "\n")
+        self.assertEqual(pin.stat().st_mode & 0o7777, 0o644)
+        manifest = json.loads((self.out / VENDOR / "codex-package.json").read_text())
+        self.assertEqual(manifest["version"], VERSION)
 
     # REQ: CRED-5, A14
     def test_cli_reports_the_pinned_version(self):
