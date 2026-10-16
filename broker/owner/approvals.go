@@ -642,6 +642,18 @@ func (c *Channel) RetireErr() error {
 	return c.retireErr
 }
 
+// retireNote is STATUS's line while a retirement is unsaved (SM-AJ-4):
+// fixed words, since the cause can name a path; the daemon log has it.
+const retireNote = "Approvals: an answer could not be saved; new approval requests fail until a save works."
+
+// RetireNote is STATUS's line while RetireErr is set, else empty.
+func (c *Channel) RetireNote() string {
+	if c.RetireErr() != nil {
+		return retireNote
+	}
+	return ""
+}
+
 // expireLocked denies requests past their expiry and drops stale held
 // messages and RESUME codes. Expired items are kept for the digest (CH-13).
 func (c *Channel) expireLocked(now time.Time) []Decision {

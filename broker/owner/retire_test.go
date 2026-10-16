@@ -2,6 +2,7 @@ package owner
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -114,5 +115,41 @@ func TestRetiredCodeStaysRetiredAfterRestart(t *testing.T) {
 	}
 	if _, ok := r.ch.codes.st.Retired[id]; !ok {
 		t.Fatalf("%s not retired after restart", id)
+	}
+}
+
+// REQ: SM-AJ-4
+//
+// STATUS's line for an unsaved retirement follows RetireErr: empty while
+// saves work, a fixed line (no raw error) once one fails, and empty again
+// once a save carries the retirement.
+func TestRetireNoteFollowsRetireErr(t *testing.T) {
+	fs := &flakyStore{}
+	r := newRig(t, fs)
+	id, code := approveLow(t, r, "a")
+	if l := r.ch.RetireNote(); l != "" {
+		t.Fatalf("STATUS line with nothing unsaved: %q", l)
+	}
+	fs.setFail(true)
+	r.say("YES " + id + " " + code)
+	l := r.ch.RetireNote()
+	if l == "" {
+		t.Fatal("no STATUS line for a retirement whose save failed")
+	}
+	if len(l) > 100 || strings.Contains(l, "disk full") {
+		t.Fatalf("STATUS line too long or carries the raw error: %q", l)
+	}
+	for _, c := range l {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune(" .,;:()-", c)) {
+			t.Fatalf("STATUS would drop %q from %q", c, l)
+		}
+	}
+	fs.setFail(false)
+	if _, err := r.ch.Request([]Item{lowItem("b")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	if l := r.ch.RetireNote(); l != "" {
+		t.Fatalf("STATUS line after a save worked: %q", l)
 	}
 }
