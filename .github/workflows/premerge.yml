@@ -1,0 +1,70 @@
+name: premerge
+# PREMERGE-wire (#1860, #1834): posts the `premerge` commit status on a PR's head. It is
+# `success` only when `tools/premerge.py --check` prints `same`: the newest trusted L3 verdict
+# comment is an accept and the diff it reviewed (its `Record:` head) equals the head's, so a
+# push after the accept, a later fix-list, a deleted accept or a PR never reviewed all fail.
+# The generated-file bot PRs (bot/trace, bot/metrics, bot/board, bot/records from this
+# repository, not a fork) carry no verdict and pass through `--bot` when they change only
+# their own output. Main must require the `premerge` status (a ruleset change Mark makes).
+# It reruns on every PR push and on every PR comment created, edited or deleted. Both events
+# run the BASE branch's workflow file and tools/premerge.py: the PR head is fetched as git
+# objects for `git merge-tree` and `git diff`; it is never checked out, imported or executed.
+# Fail closed: anything but a clean `same` or `bot` posts `failure`.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+permissions:
+  contents: read
+concurrency:
+  group: premerge-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  premerge-gate:
+    name: premerge-gate
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write # the `premerge` status on the PR head, nothing else
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0 # the merge base with the PR head
+          persist-credentials: false
+      - name: Premerge (base copy of tools/premerge.py)
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The head, branch and base come from the API, not the event: a comment event has no PR payload.
+          gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
+          HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
+          HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/pr.json")
+          HEAD_REPO=$(jq -r '.head.repo.full_name // ""' "$RUNNER_TEMP/pr.json")
+          BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")
+          echo "$HEAD_SHA" | grep -Eqx '[0-9a-f]{40}'
+          state=failure
+          # errexit does not apply inside a substitution that is part of `&&`, so each step exits on its own failure.
+          out=$(
+            git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head" \
+              "+refs/heads/$BASE_REF:refs/remotes/pr/base" || exit 1
+            git cat-file -e "$HEAD_SHA^{commit}" || exit 1
+            if [ "$HEAD_REPO" = "$REPO" ] && [ "${HEAD_REF#bot/}" != "$HEAD_REF" ]; then
+              exec python3 -I tools/premerge.py --bot "$HEAD_REF" --base refs/remotes/pr/base "$HEAD_SHA"
+            fi
+            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+              --jq '.[] | {author_association, created_at, body}' > "$RUNNER_TEMP/comments.jsonl" || exit 1
+            jq -s . "$RUNNER_TEMP/comments.jsonl" > "$RUNNER_TEMP/comments.json" || exit 1
+            exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --base refs/remotes/pr/base "$HEAD_SHA"
+          ) && state=success
+          out=$(printf '%s' "${out:-error}" | tail -n 1 | tr -cd '\40-\176' | cut -c 1-120)
+          echo "premerge $HEAD_SHA: $state ($out)"
+          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$state" -f context=premerge \
+            -f description="$out" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null
+          [ "$state" = success ]

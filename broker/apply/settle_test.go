@@ -72,8 +72,10 @@ func (r *rig) settledInstalled() {
 	}
 }
 
-// settledFellBack checks the converged state after a fallback, and that
-// a later update is taken.
+// settledFellBack checks the converged state after a fallback, that the
+// fallen-back release is not taken again, and that the applier is not
+// stuck (the same release, its fallback record cleared, stands in for a
+// later one, which the rig's store cannot check).
 func (r *rig) settledFellBack(rel *update.Verified) {
 	r.t.Helper()
 	if in, _ := r.store.Installed(); in.Version != 0 {
@@ -91,7 +93,24 @@ func (r *rig) settledFellBack(rel *update.Verified) {
 	if r.saved().Applying != nil {
 		r.t.Fatal("apply still in flight on disk")
 	}
-	r.admitsNext(rel)
+	r.act.failBoot = false
+	r.restart()
+	if err := r.a.Schedule(rel, "a1b"); !errors.Is(err, ErrFellBack) {
+		r.t.Fatalf("fallen-back release scheduled again: %v", err)
+	}
+	r.st().FellBack = nil
+	r.must(r.a.Schedule(rel, "a2"))
+	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+		r.t.Fatalf("next update: %v %v", ok, err)
+	}
+}
+
+// st is the running applier's state, for a test that sets up what the
+// rig's store cannot (a later release).
+func (r *rig) st() *state {
+	r.a.mu.Lock()
+	defer r.a.mu.Unlock()
+	return &r.a.st
 }
 
 // admitsNext: Tick takes the next update (a new adoption; the same
@@ -739,6 +758,15 @@ func TestRecordedHandoverResetsTheUnrecordedCount(t *testing.T) {
 	if !r.a.FellBack(1) {
 		t.Fatal("recorded handover not judged")
 	}
+	if n := r.saved().Unrecorded[refKey(rel.Ref())]; n != 0 {
+		t.Fatalf("unrecorded count after a recorded handover: %d", n)
+	}
+	// The release itself is never tried again (UPD-1); with its fallback
+	// record cleared it stands in for a later one sharing the count.
+	if err := r.a.Schedule(rel, "a1b"); !errors.Is(err, ErrFellBack) {
+		t.Fatalf("schedule: %v", err)
+	}
+	r.st().FellBack = nil
 	r.must(r.a.Schedule(rel, "a2"))
 	r.unrecordedAttempt()
 	r.restart()
