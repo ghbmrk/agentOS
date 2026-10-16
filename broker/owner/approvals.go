@@ -356,6 +356,17 @@ func (c *Channel) moreLocked(id string) string {
 // be approved.
 func (c *Channel) answerLocked(rp reply, now time.Time, decided *[]Decision, page bool) (out []string, accepted, wrong bool) {
 	r, msg := c.findLocked(rp)
+	for r != nil && !now.Before(r.expires) {
+		// Expiry guard (CH-10, #1923): a request past its expiry is
+		// expired here, not answered, even if the caller did not run
+		// expireLocked first; the reply is then the one for a request
+		// that is no longer open.
+		var exp []Decision
+		c.closeLocked(r, func(int) (bool, bool) { return true, false }, "expired", now, &exp)
+		c.addExpiredLocked(exp)
+		*decided = append(*decided, exp...)
+		r, msg = c.findLocked(rp)
+	}
 	if r == nil {
 		if rp.word == "YES" && rp.code != "" && rp.id == "" {
 			// A code that names no request is a wrong code, or texted
