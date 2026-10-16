@@ -91,6 +91,9 @@ type driver struct {
 	// stub is the Codex plan provider the agentos_e2e vault process
 	// reaches (#1701, ASSUMPTIONS E10).
 	stub *codexstub.Stub
+	// guestSock is the agent machine's guest-plane socket; "" is the
+	// box's (agentSock).
+	guestSock string
 	// now and sleep are the clock of the codes and of phone-control's
 	// waits; nil is the wall clock. The in-process test shares a fake one
 	// with the owner channel.
@@ -517,16 +520,14 @@ func (d *driver) host() error {
 }
 
 // guestTask is the model-backed guest task on the Codex plan route. It
-// first signs in to the plan at step 7, which finishes setup; the task
-// itself needs a worker on the plan route (#1314), so it is not driven yet.
+// first signs in to the plan at step 7, which finishes setup, then runs
+// one task through provider_run as the agent machine's guest
+// (providerTask, ASSUMPTIONS E12).
 func (d *driver) guestTask() error {
 	if err := d.planSignIn(); err != nil {
 		return err
 	}
-	// When #1314 drives the task, require d.stub.Hits()["responses"] > 0
-	// and d.stub.Refused() == 0 as well as codexstub.Answer on the page
-	// (ASSUMPTIONS E11).
-	return errors.New(notDriven + " the task needs a worker on the plan route (#1314)")
+	return d.providerTask()
 }
 
 // planSignIn is the owner signing in to the Codex plan at step 7, as the

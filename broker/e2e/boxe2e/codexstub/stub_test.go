@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/vault"
@@ -60,6 +61,7 @@ type rig struct {
 	logins *egress.PlanLogins
 	rt     http.RoundTripper
 	other  *recordRT
+	usage  egress.PlanUsage
 }
 
 func newRig(t *testing.T) *rig {
@@ -81,6 +83,7 @@ func (r *rig) route(t *testing.T, worker string, signIn bool) http.Handler {
 	t.Helper()
 	h, err := egress.NewWorkerRoute(egress.WorkerRouteConfig{
 		Route: egress.Codex(), Worker: worker, SignIn: signIn, Logins: r.logins, Transport: r.rt, Audit: noAudit{},
+		Quota: r.usage.Quota,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -213,6 +216,47 @@ func TestRouteSignsInAndRunsAgainstTheStub(t *testing.T) {
 		}
 	}
 	if r.stub.Refused() != 2 {
+		t.Fatalf("refused %d", r.stub.Refused())
+	}
+}
+
+// REQ: RES-5
+// A run call through the shipped worker route carries the stub's quota
+// headers, and the route reads both pools into the plan's usage, as the
+// owner's quota reading before a first run does (#1856). Sign-in calls
+// carry none and read nothing.
+func TestRunCallsReportThePlanQuota(t *testing.T) {
+	r := newRig(t)
+	r.signIn(t)
+	if s := r.usage.Snapshot("codex"); len(s.Pools) != 0 {
+		t.Fatalf("sign-in read quota: %+v", s.Pools)
+	}
+	b, _ := r.logins.AuthJSON("codex", "w1")
+	var auth struct{ Tokens map[string]string }
+	json.Unmarshal(b, &auth)
+	bearer := []string{"Authorization", "Bearer " + auth.Tokens["access_token"], "Chatgpt-Account-Id", auth.Tokens["account_id"]}
+	body := `{"model":"gpt-x","stream":true,"input":[]}`
+	before := time.Now().Unix()
+	w := call(r.route(t, "w1", false), "POST", "/backend-api/codex/responses", "application/json", body, bearer...)
+	if w.Code != 200 || w.Header().Get("X-Codex-Primary-Used-Percent") != "12.5" {
+		t.Fatalf("responses: %d %v", w.Code, w.Header())
+	}
+	want := map[string]struct {
+		used   float64
+		window int
+	}{"primary": {PrimaryUsedPercent, PrimaryWindowMinutes}, "secondary": {WeeklyUsedPercent, WeeklyWindowMinutes}}
+	pools := r.usage.Snapshot("codex").Pools
+	if len(pools) != len(want) {
+		t.Fatalf("pools %+v", pools)
+	}
+	for _, q := range pools {
+		wq, ok := want[q.Pool]
+		if !ok || q.UsedPercent != wq.used || q.WindowMinutes != wq.window || q.Exhausted || q.Worker != "w1" ||
+			q.ResetAt < before+int64(wq.window)*60 || q.ResetAt > time.Now().Unix()+int64(wq.window)*60 {
+			t.Errorf("pool %+v, want %+v", q, wq)
+		}
+	}
+	if r.stub.Refused() != 0 {
 		t.Fatalf("refused %d", r.stub.Refused())
 	}
 }

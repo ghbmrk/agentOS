@@ -18,8 +18,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/egress"
 )
@@ -35,6 +37,17 @@ const Answer = "agentos-e2e-canary-answer"
 // Canary is the prefix of every token the stub mints, so a log or page
 // that shows one can be found by grep.
 const Canary = "agentos-e2e-canary-"
+
+// The quota the stub reports on every model call, in the X-Codex-* headers
+// codex-rs reads and egress.PlanUsage aggregates (#1856): a part-used
+// five-hour pool and a part-used weekly pool, each resetting one window
+// from the call.
+const (
+	PrimaryUsedPercent   = 12.5
+	PrimaryWindowMinutes = 300
+	WeeklyUsedPercent    = 4
+	WeeklyWindowMinutes  = 10080
+)
 
 // Stub is one in-memory provider: one pending device code at a time, one
 // signed-in token set.
@@ -293,7 +306,24 @@ func (s *Stub) models(w http.ResponseWriter, r *http.Request, _ []byte) bool {
 	if !s.bearer(r) {
 		return false
 	}
+	quota(w.Header())
 	return writeJSON(w, map[string]any{"models": []any{}})
+}
+
+// quota sets the plan's quota headers, as the provider sends them on its
+// model endpoints, before the body is written.
+func quota(h http.Header) {
+	now := time.Now()
+	for _, p := range []struct {
+		pool   string
+		used   float64
+		window int
+	}{{"Primary", PrimaryUsedPercent, PrimaryWindowMinutes}, {"Secondary", WeeklyUsedPercent, WeeklyWindowMinutes}} {
+		pre := "X-Codex-" + p.pool + "-"
+		h.Set(pre+"Used-Percent", strconv.FormatFloat(p.used, 'f', -1, 64))
+		h.Set(pre+"Window-Minutes", strconv.Itoa(p.window))
+		h.Set(pre+"Reset-At", strconv.FormatInt(now.Add(time.Duration(p.window)*time.Minute).Unix(), 10))
+	}
 }
 
 // responses streams one assistant message whose text is Answer.
@@ -305,6 +335,7 @@ func (s *Stub) responses(w http.ResponseWriter, r *http.Request, body []byte) bo
 		return false
 	}
 	id := "resp_" + rnd()
+	quota(w.Header())
 	w.Header().Set("Content-Type", "text/event-stream")
 	for _, ev := range []map[string]any{
 		{"type": "response.created", "response": map[string]any{"id": id}},

@@ -26,6 +26,7 @@ type fakeBox struct {
 	stray bool   // the box makes a call the provider refuses
 	mu    sync.Mutex
 	dev   map[string]string
+	tok   map[string]string // the exchange's tokens, for a fake worker's model call
 	done  bool
 }
 
@@ -57,8 +58,8 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if st, ct := f.provider("POST", "/api/accounts/deviceauth/token", "application/json", string(b)); st == 200 {
 			form := url.Values{"grant_type": {"authorization_code"}, "code": {ct["authorization_code"]},
 				"code_verifier": {ct["code_verifier"]}, "redirect_uri": {"https://auth.openai.com/deviceauth/callback"}}
-			if st, _ := f.provider("POST", "/oauth/token", "application/x-www-form-urlencoded", form.Encode()); st == 200 {
-				f.done = true
+			if st, tok := f.provider("POST", "/oauth/token", "application/x-www-form-urlencoded", form.Encode()); st == 200 {
+				f.done, f.tok = true, tok
 				http.Redirect(w, r, "/status", http.StatusSeeOther)
 				return
 			}
@@ -105,8 +106,9 @@ func fakeDriver(f *fakeBox) *driver {
 // The step-7 driver signs in as #1264's page is expected to offer it: the
 // link on the provider's own host, the code approved at the stub, setup
 // finished, and no issued token on any page. Until the page offers the
-// sign-in, and until a worker runs the task (#1314), guest-task fails with
-// the not-driven text, so it reads XFAIL; any other failure reads FAIL.
+// sign-in, and until the agent machine is offered provider_run (#1721),
+// guest-task fails with the not-driven text, so it reads XFAIL; any other
+// failure reads FAIL.
 func TestGuestTaskSignsInToThePlan(t *testing.T) {
 	ok := func(f *fakeBox) error { return fakeDriver(f).guestTask() }
 	want := xfail["guest-task"].want
@@ -117,8 +119,10 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 	}
 
 	f = &fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com"}
-	err := ok(f)
-	if err == nil || !strings.HasPrefix(err.Error(), want) || !strings.Contains(err.Error(), "#1314") {
+	d := fakeDriver(f)
+	d.guestSock = guestSock(t, &fakeGuest{f: f, mode: "absent"})
+	err := d.guestTask()
+	if err == nil || !strings.HasPrefix(err.Error(), want) || !strings.Contains(err.Error(), "#1721") {
 		t.Fatalf("signed in: %v", err)
 	}
 	if !f.done || f.stub.Hits()["code"] != 1 || f.stub.Refused() != 0 {
