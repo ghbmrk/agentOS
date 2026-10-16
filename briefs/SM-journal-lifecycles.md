@@ -25,6 +25,8 @@ Rule, guard, and registration hook only. The actuation build (adapters, `actuate
 
 ## Acceptance tests
 
+**Acceptance tests:** `broker/journal/lifecycle_test.go` (SM-JL-1 to SM-JL-3) and `broker/durable/lifecycle_guard_test.go` (SM-JL-4, SM-JL-5), as listed below.
+
 - SM-JL-1: `broker/journal/lifecycle_test.go::TestRegisterRejectsIncompleteLifecycle` and `TestCheckRejectsIntentMissingPriorState` (catch: an actuation intent journaled without its prior state, which makes UNDO impossible).
 - SM-JL-2: `TestDailyCountFromRecords` (replay across a midnight and a restart gives the same count; catch: a counter held in memory).
 - SM-JL-3: `TestUndoPlanOnlyWhileStateMatches` (catch: restoring a device someone else has since changed).
