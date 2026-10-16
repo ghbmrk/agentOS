@@ -301,7 +301,8 @@ func (p *Pipeline) adoptLocked(id, basis string) error {
 	}
 	p.st.Adoptions = append(p.st.Adoptions, &Adoption{ID: id, Short: short, Source: pr.cand.Source,
 		Classes: pr.classes, Basis: basis, Edits: pr.edits, Score: pr.report.Score, Public: pr.cand.Public,
-		Staged: staged, Origin: pr.cand.Origin, Goals: pr.cand.Goals, At: p.cfg.Now()})
+		Staged: staged, Origin: pr.cand.Origin, Goals: pr.cand.Goals,
+		GoalVerdicts: pr.cand.GoalVerdicts, At: p.cfg.Now()})
 	return nil
 }
 
@@ -840,76 +841,108 @@ func (p *Pipeline) Recheck(ctx context.Context) ([]string, error) {
 		p.mu.Unlock()
 	}()
 	for _, id := range ids {
-		// Read the tree per adoption, so earlier reverts in this pass
-		// are seen.
-		p.mu.Lock()
-		a := p.adoptionLocked(id)
-		if a == nil || a.Reverted != "" {
-			p.mu.Unlock()
-			continue
-		}
-		prev, _, err := undoTree(p.st.Active, a)
-		if err != nil {
-			p.mu.Unlock()
-			continue
-		}
-		cur, set := p.st.Active.clone(), p.freezeLocked(a.Classes)
-		p.mu.Unlock()
-
-		s, err := p.evaluate(ctx, prev, cur, set, strictFor(a.Source, a.Classes), "")
-		if err != nil {
+		switch res, err := p.recheckOne(ctx, id); res {
+		case recheckInterrupted:
 			// Preempted: blame nothing, and leave the outage count as it
 			// was. The next pass resumes from the kept pairs.
 			interrupted = true
 			return out, errors.Join(append(errs, err)...)
-		}
-		why := ""
-		switch {
-		case s.outage():
+		case recheckStopped:
+			return out, err
+		case recheckOutage:
 			outage = true
-			continue
-		case s.SecurityRegressions > 0:
-			why = WhySecurity
-		case s.Regressions > 0 || s.Passed < s.BaselinePassed:
-			why = WhyRegression
-		default:
-			continue
+		case recheckFailed:
+			errs = append(errs, err)
+		case recheckReverted:
+			out = append(out, id)
 		}
-		p.mu.Lock()
-		// a was read before the evaluation; a forget meanwhile replaces
-		// the history with copies (C23), so read it again.
-		if a = p.adoptionLocked(id); a == nil || a.Reverted != "" {
-			p.mu.Unlock()
-			continue
-		}
-		protected := a.protected()
-		if protected && a.Concern == "" {
-			a.Concern, a.ConcernScore = why, s
-			_ = p.saveLocked()
-		}
-		p.mu.Unlock()
-		if protected {
-			continue
-		}
-		// A failed revert is reported and the pass goes on to older
-		// adoptions; only STOP ends it.
-		if err := p.revert(ctx, id, OriginPipeline, why); err != nil {
-			if errors.Is(err, journal.ErrStopped) {
-				return out, err
-			}
-			if why == WhySecurity && handover(err) {
-				// The applier is installing it and withdraws it once it
-				// can; the next pass reverts it. Until then the digest
-				// says so (SR3-4f-3b).
-				p.concern(id, why, s, startsFirst(err))
-				continue
-			}
-			errs = append(errs, fmt.Errorf("%s: %w", id, err))
-			continue
-		}
-		out = append(out, id)
 	}
 	return out, errors.Join(errs...)
+}
+
+// recheckOutcome is what recheckOne did with one adoption.
+type recheckOutcome int
+
+const (
+	recheckSkipped     recheckOutcome = iota // undone meanwhile, or no state without it
+	recheckKept                              // it still qualifies
+	recheckOutage                            // nothing passed on either side: nothing blamed
+	recheckConcern                           // protected: its regression is put to the owner
+	recheckHandover                          // a security revert the applier finishes later
+	recheckReverted                          // reverted, why regression or security
+	recheckFailed                            // the revert failed; the error says why
+	recheckStopped                           // STOP: the pass ends
+	recheckInterrupted                       // the evaluation was preempted: the pass ends
+)
+
+// recheckOne re-evaluates active adoption id on the current suites and
+// reverts it if it no longer qualifies, or raises Concern if it is
+// protected. It is Recheck's per-adoption path, which the quality trigger
+// shares (SM-AQ-2): there is one revert path.
+func (p *Pipeline) recheckOne(ctx context.Context, id string) (recheckOutcome, error) {
+	// Read the tree per adoption, so earlier reverts in this pass are
+	// seen.
+	p.mu.Lock()
+	a := p.adoptionLocked(id)
+	if a == nil || a.Reverted != "" {
+		p.mu.Unlock()
+		return recheckSkipped, nil
+	}
+	prev, _, err := undoTree(p.st.Active, a)
+	if err != nil {
+		p.mu.Unlock()
+		return recheckSkipped, nil
+	}
+	cur, set := p.st.Active.clone(), p.freezeLocked(a.Classes)
+	p.mu.Unlock()
+
+	s, err := p.evaluate(ctx, prev, cur, set, strictFor(a.Source, a.Classes), "")
+	if err != nil {
+		return recheckInterrupted, err
+	}
+	why := ""
+	switch {
+	case s.outage():
+		return recheckOutage, nil
+	case s.SecurityRegressions > 0:
+		why = WhySecurity
+	case s.Regressions > 0 || s.Passed < s.BaselinePassed:
+		why = WhyRegression
+	default:
+		return recheckKept, nil
+	}
+	p.mu.Lock()
+	// a was read before the evaluation; a forget meanwhile replaces the
+	// history with copies (C23), so read it again.
+	if a = p.adoptionLocked(id); a == nil || a.Reverted != "" {
+		p.mu.Unlock()
+		return recheckSkipped, nil
+	}
+	protected := a.protected()
+	if protected && a.Concern == "" {
+		a.Concern, a.ConcernScore = why, s
+		_ = p.saveLocked()
+	}
+	p.mu.Unlock()
+	if protected {
+		return recheckConcern, nil
+	}
+	// A failed revert is reported and the pass goes on to older
+	// adoptions; only STOP ends it.
+	if err := p.revert(ctx, id, OriginPipeline, why); err != nil {
+		if errors.Is(err, journal.ErrStopped) {
+			return recheckStopped, err
+		}
+		if why == WhySecurity && handover(err) {
+			// The applier is installing it and withdraws it once it can;
+			// the next pass reverts it. Until then the digest says so
+			// (SR3-4f-3b).
+			p.concern(id, why, s, startsFirst(err))
+			return recheckHandover, nil
+		}
+		return recheckFailed, fmt.Errorf("%s: %w", id, err)
+	}
+	return recheckReverted, nil
 }
 
 // concern records why, s and starts on adoption id once, and saves.
