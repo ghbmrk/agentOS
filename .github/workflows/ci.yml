@@ -129,8 +129,17 @@ jobs:
         if: github.event_name == 'pull_request'
         # HEAD is the PR's test merge (base^1, branch^2). Three dots compare the branch with
         # its merge base, so TRACE.md updates it pulled in from main don't count.
+        # The one exception is trace.yml's own PR: head branch bot/trace in this repository
+        # (not a fork) that changes nothing but TRACE.md (D-123). Human PRs still fail.
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           git diff --quiet HEAD^1...HEAD^2 -- TRACE.md && exit 0
+          if [ "$HEAD_REF" = bot/trace ] && [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ] \
+            && [ "$(git diff --name-only HEAD^1...HEAD^2)" = TRACE.md ]; then
+            echo "bot/trace PR changes only TRACE.md: allowed"; exit 0
+          fi
           echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main after merge. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
           exit 1
       - name: Risk tier (docs/OPERATING.md §3)
