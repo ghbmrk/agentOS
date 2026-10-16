@@ -17,7 +17,6 @@ package holder
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -57,12 +56,7 @@ const (
 	ErrDenied      = "denied"      // the address policy refused the destination
 	ErrUnreachable = "unreachable" // the provider could not be reached
 	ErrUnapproved  = "unapproved"  // a high-risk act the checker has not approved; nothing sent
-	ErrRevoked     = "revoked"     // the provider refused the held login; nothing sent until a new one (CRED-5)
 )
-
-// ErrRevokedLogin is Hand's refusal of the login the provider refused:
-// it is not spent again (CRED-5, #1925).
-var ErrRevokedLogin = errors.New("holder: the provider refused this login")
 
 // maxSecret caps a handed secret, in bytes.
 const maxSecret = 64 << 10
@@ -107,9 +101,6 @@ type Holder struct {
 
 	mu     sync.RWMutex
 	secret []byte
-	// revoked: the provider refused secret (a declared refused-login
-	// status). It is not spent or handed again; a new secret clears it.
-	revoked bool
 }
 
 // New checks the declaration and returns a holder with no secret.
@@ -155,38 +146,14 @@ func New(cfg Config) (*Holder, error) {
 }
 
 // Hand gives the holder its secret, replacing any it held. b is copied.
-// It refuses the login the provider refused (ErrRevokedLogin) and keeps
-// the holder as it was.
-func (h *Holder) Hand(b []byte) error {
-	h.mu.Lock()
-	if h.revoked && subtle.ConstantTimeCompare(h.secret, b) == 1 {
-		h.mu.Unlock()
-		return ErrRevokedLogin
-	}
+func (h *Holder) Hand(b []byte) {
 	s := append([]byte(nil), b...)
+	h.mu.Lock()
 	old := h.secret
-	h.secret, h.revoked = s, false
+	h.secret = s
 	h.mu.Unlock()
 	for i := range old {
 		old[i] = 0
-	}
-	return nil
-}
-
-// Revoked reports whether the provider refused the held login.
-func (h *Holder) Revoked() bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.revoked
-}
-
-// revoke marks secret revoked if it is still the one held: a refusal of a
-// login already replaced does not revoke the new one.
-func (h *Holder) revoke(secret []byte) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(h.secret) > 0 && len(secret) > 0 && &h.secret[0] == &secret[0] {
-		h.revoked = true
 	}
 }
 
@@ -204,11 +171,10 @@ func (h *Holder) holds(b []byte) bool {
 	return len(h.secret) > 0 && subtle.ConstantTimeCompare(h.secret, b) == 1
 }
 
-// current is the secret to spend and whether the provider refused it.
-func (h *Holder) current() ([]byte, bool) {
+func (h *Holder) current() []byte {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.secret, h.revoked
+	return h.secret
 }
 
 func refuse(w http.ResponseWriter, status int, why string) {
@@ -237,13 +203,9 @@ func (h *Holder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusForbidden, ErrRefused)
 		return
 	}
-	secret, revoked := h.current()
+	secret := h.current()
 	if len(secret) == 0 {
 		refuse(w, http.StatusServiceUnavailable, ErrNoSecret)
-		return
-	}
-	if revoked {
-		refuse(w, http.StatusServiceUnavailable, ErrRevoked)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBody+1))
@@ -314,10 +276,8 @@ func (h *Holder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
-	// A refused login: the status alone stops the route in egress, and the
-	// holder spends the login no more (CRED-5, #1925).
+	// A refused login: the status alone stops the route in egress.
 	if op.RefusesLogin(resp.StatusCode) {
-		h.revoke(secret)
 		w.WriteHeader(resp.StatusCode)
 		return
 	}
@@ -405,17 +365,13 @@ func (h *Holder) headersDeclared(a egress.Adapter, hdr http.Header) bool {
 	return true
 }
 
-// hand serves the hand socket: GET /state says whether a secret is held
-// and whether the provider refused it, PUT /secret hands one (409 for the
-// refused one). Neither reads the secret back.
+// hand serves the hand socket: GET /state says whether a secret is held,
+// PUT /secret hands one. Neither reads the secret back.
 func (h *Holder) hand() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		h.mu.RLock()
-		st := state{Held: len(h.secret) > 0, Revoked: h.revoked}
-		h.mu.RUnlock()
-		json.NewEncoder(w).Encode(st)
+		json.NewEncoder(w).Encode(state{Held: h.Held()})
 	})
 	mux.HandleFunc("PUT /secret", func(w http.ResponseWriter, r *http.Request) {
 		b, err := io.ReadAll(io.LimitReader(r.Body, maxSecret+1))
@@ -423,13 +379,9 @@ func (h *Holder) hand() http.Handler {
 			http.Error(w, "holder: bad secret", http.StatusBadRequest)
 			return
 		}
-		err = h.Hand(b)
+		h.Hand(b)
 		for i := range b {
 			b[i] = 0
-		}
-		if err != nil {
-			http.Error(w, "holder: "+ErrRevoked, http.StatusConflict)
-			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -437,8 +389,7 @@ func (h *Holder) hand() http.Handler {
 }
 
 type state struct {
-	Held    bool `json:"held"`
-	Revoked bool `json:"revoked,omitempty"`
+	Held bool `json:"held"`
 }
 
 // Serve serves the request socket on reqs and the hand socket on hand
@@ -510,11 +461,7 @@ func (c *client) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // Keeper runs in the unlock step: it hands a holder its secret, and hands
-// it again whenever the holder says it holds none (a restart). It never
-// hands again a login the holder said the provider refused, also after the
-// holder restarts empty; a different login from Secret (the owner signed
-// in again) is handed, also to a holder holding the refused one (CRED-5,
-// #1925).
+// it again whenever the holder says it holds none (a restart).
 type Keeper struct {
 	// Socket is the holder's hand socket.
 	Socket string
@@ -526,12 +473,6 @@ type Keeper struct {
 
 	once sync.Once
 	c    *http.Client
-
-	mu      sync.Mutex
-	last    [sha256.Size]byte // fingerprint of the login last handed
-	handed  bool              // last is set
-	revoked [sha256.Size]byte // fingerprint of the login the provider refused
-	refused bool              // revoked is set
 }
 
 func (k *Keeper) client() *http.Client {
@@ -545,11 +486,8 @@ func (k *Keeper) client() *http.Client {
 }
 
 // Check runs one round: it asks the holder whether it holds a secret and
-// hands one if not, or if it holds a refused one and Secret has a new one.
-// handed reports whether it did.
+// hands one if not. handed reports whether it did.
 func (k *Keeper) Check(ctx context.Context) (handed bool, err error) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
 	req, _ := http.NewRequestWithContext(ctx, "GET", "http://localhost/state", nil)
 	resp, err := k.client().Do(req)
 	if err != nil {
@@ -561,13 +499,7 @@ func (k *Keeper) Check(ctx context.Context) (handed bool, err error) {
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("holder: state: status %d: %v", resp.StatusCode, err)
 	}
-	if st.Revoked && k.handed {
-		// A keeper that has handed nothing does not know which login was
-		// refused; it learns it from the hand's 409 and must not overwrite
-		// what it learned with an empty fingerprint.
-		k.revoked, k.refused = k.last, true
-	}
-	if st.Held && !st.Revoked {
+	if st.Held {
 		return false, nil
 	}
 	s, err := k.Secret()
@@ -579,24 +511,15 @@ func (k *Keeper) Check(ctx context.Context) (handed bool, err error) {
 			s[i] = 0
 		}
 	}()
-	fp := sha256.Sum256(s)
-	if k.refused && subtle.ConstantTimeCompare(fp[:], k.revoked[:]) == 1 {
-		return false, nil // the refused login: wait for a new one
-	}
 	req, _ = http.NewRequestWithContext(ctx, "PUT", "http://localhost/secret", bytes.NewReader(s))
 	resp, err = k.client().Do(req)
 	if err != nil {
 		return false, err
 	}
 	resp.Body.Close()
-	if resp.StatusCode == http.StatusConflict {
-		k.revoked, k.refused = fp, true
-		return false, ErrRevokedLogin
-	}
 	if resp.StatusCode != http.StatusNoContent {
 		return false, fmt.Errorf("holder: hand: status %d", resp.StatusCode)
 	}
-	k.last, k.handed = fp, true
 	return true, nil
 }
 
