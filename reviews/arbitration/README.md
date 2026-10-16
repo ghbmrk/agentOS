@@ -45,4 +45,4 @@ Per PR with a conflict, `YYYY-MM-DD-pr<N>.md`: the conflict, its resolution and 
 
 ## Records
 
-Per-PR resolutions are the files `YYYY-MM-DD-pr<N>.md` in this directory, in filename order, with no run number. Each opens with a `Record:` line giving PR, package and head SHA; `tools/doclint.py` checks it on files dated 2026-10-09 or later. No resolution rows are appended to this README (DOC-4).
+Per-PR resolutions are the files `YYYY-MM-DD-pr<N>.md` in this directory, in filename order, with no run number. Each has a `Record:` line giving PR, package and head SHA directly under the title (bot records open with a `Verdict:` line, then the title, then `Record:`); `tools/doclint.py` checks it on files dated 2026-10-09 or later. No resolution rows are appended to this README (DOC-4).
