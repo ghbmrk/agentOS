@@ -6,7 +6,7 @@
 
 Replays the reviewed commit onto the base content `head` carries (`git merge-tree` of the reviewed
 commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
-bytes, binary content and modes count. Main merged into the branch therefore reads as same, even next
+bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same. Main merged into the branch therefore reads as same, even next
 to a PR hunk, while any other change reads as changed: a later push, a moved hunk, a side branch merged
 in, or a merge resolution that edits a PR line. Not a diff fingerprint: diff context lines carry
 neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved elsewhere as same. Not
@@ -48,10 +48,22 @@ def _replayed(cwd, reviewed, onto):
     return out.split(b"\n", 1)[0].decode()
 
 
+ROW_ID = re.compile(rb"^\| *[A-Za-z]+-?\d+[a-z]? *\|", re.M)
+
+
+def _renumbered_only(cwd, tree, head, path):
+    """True when an ASSUMPTIONS.md differs between `tree` and `head` only in the first-cell row ids."""
+    if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
+        return False
+    a, b = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (tree, head))
+    return bool(a) and bool(b) and ROW_ID.sub(b"| # |", a) == ROW_ID.sub(b"| # |", b)
+
+
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     onto = _git(cwd, "merge-base", base, head).decode().strip()
-    out = _git(cwd, *DIFF, _replayed(cwd, reviewed, onto), head).decode(errors="surrogateescape")
-    return sorted(f for f in out.split("\0") if f)
+    tree = _replayed(cwd, reviewed, onto)
+    out = _git(cwd, *DIFF, tree, head).decode(errors="surrogateescape")
+    return sorted(f for f in out.split("\0") if f and not _renumbered_only(cwd, tree, head, f))
 
 
 def main(argv):
