@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -138,5 +139,34 @@ func TestLineState(t *testing.T) {
 		if got := lineState([]byte(page)); got != want {
 			t.Errorf("lineState(%q) = %q, want %q", page, got, want)
 		}
+	}
+}
+
+// The step-7 parsers match localui's own template, so a wording change
+// there fails here rather than in the image run.
+func TestDeviceOfferAndLinkMatchThePage(t *testing.T) {
+	src, err := os.ReadFile("../../localui/pages.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, frag := range []string{
+		aiOpen,
+		`<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="{{.ID}}">`,
+		`<p>Open <a href="{{index $d 0}}">{{index $d 0}}</a> and enter <span class="mono">{{index $d 1}}</span>.</p>`,
+	} {
+		if !bytes.Contains(src, []byte(frag)) {
+			t.Errorf("localui's step 7 no longer has %q", frag)
+		}
+	}
+	page := []byte(`<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="codex"><button>`)
+	if !deviceOffer(page, "codex") || deviceOffer(page, "cod") || deviceOffer([]byte(`<h2>7. Connect AI</h2>`), "codex") {
+		t.Fatal("deviceOffer")
+	}
+	link, code, ok := deviceLink([]byte(`<p>Open <a href="https://auth.openai.com/codex/device?a=1&amp;b=2">x</a> and enter <span class="mono">ABCD-EF23</span>.</p>`))
+	if !ok || link != "https://auth.openai.com/codex/device?a=1&b=2" || code != "ABCD-EF23" {
+		t.Fatalf("%q %q %v", link, code, ok)
+	}
+	if _, _, ok := deviceLink(page); ok {
+		t.Fatal("link parsed from the offer")
 	}
 }

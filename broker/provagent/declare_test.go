@@ -17,10 +17,11 @@ func good() Declaration {
 		ID: "stub", CLI: "stubcli", Version: "1.0.0", Image: "stub-image",
 		Wrap: []string{"/usr/local/bin/fwd", "--"}, Argv: []string{"stubcli", "run", "-"},
 		Cwd: "/work", ResultPath: "/work/.result", Env: []string{"PATH=/usr/bin"},
+		Idle:    []string{"sleep", "infinity"},
 		Custody: BrokerHeld, Endpoints: []string{"api.example.test"}, Placeholder: "auth.json",
 		Pools:       []Pool{{Name: "5h", ReadFrom: "x-stub-primary-used-percent"}},
 		ErrorEvents: []string{"error"},
-		UsedUp:      []string{"usage_limit_reached"}, LoginRefused: []string{"login_refused"},
+		UsedUp:      []string{"usage_limit_reached"},
 		TaskClasses: []string{"code"},
 	}
 }
@@ -31,6 +32,7 @@ func TestValidateRefusesMalformedDeclarations(t *testing.T) {
 		"missing cli":         func(d *Declaration) { d.CLI = "" },
 		"missing version":     func(d *Declaration) { d.Version = "" },
 		"missing argv":        func(d *Declaration) { d.Argv = nil },
+		"no idle argv":        func(d *Declaration) { d.Idle = nil },
 		"relative cwd":        func(d *Declaration) { d.Cwd = "work" },
 		"relative result":     func(d *Declaration) { d.ResultPath = "result" },
 		"no task class":       func(d *Declaration) { d.TaskClasses = nil },
@@ -93,14 +95,14 @@ func TestCodexBuiltinMatchesLaunchJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	var l struct {
-		Wrap, Argv, Env []string
-		Cwd             string
+		Wrap, Argv, Env, Idle []string
+		Cwd                   string
 	}
 	if err := json.Unmarshal(raw, &l); err != nil {
 		t.Fatal(err)
 	}
 	c := Builtins()["codex"]
-	if !reflect.DeepEqual(c.Wrap, l.Wrap) || !reflect.DeepEqual(c.Argv, l.Argv) || !reflect.DeepEqual(c.Env, l.Env) || c.Cwd != l.Cwd {
+	if !reflect.DeepEqual(c.Wrap, l.Wrap) || !reflect.DeepEqual(c.Argv, l.Argv) || !reflect.DeepEqual(c.Env, l.Env) || !reflect.DeepEqual(c.Idle, l.Idle) || c.Cwd != l.Cwd {
 		t.Errorf("builtin codex differs from guest/codex/launch.json:\n%+v\n%+v", c, l)
 	}
 	for _, e := range c.Env {

@@ -47,12 +47,17 @@ type fakeAP struct {
 	exited  chan struct{}
 	// onStop, if set, runs at each Stop.
 	onStop func()
+	// startErr, if set, fails each Start after it is recorded.
+	startErr error
 }
 
 func (a *fakeAP) Start(_ context.Context, c localui.APConfig) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.started = append(a.started, c)
+	if a.startErr != nil {
+		return a.startErr
+	}
 	a.exited = make(chan struct{})
 	return nil
 }

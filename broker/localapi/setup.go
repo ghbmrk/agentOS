@@ -46,6 +46,14 @@ const (
 	// clears it once the vault confirms (#1544), so a page restart
 	// cannot finish setup past an answer the vault did not take.
 	OpSetupPrivateOK = "page_setup_private_ok"
+	// OpSetupDeviceCode starts one provider's device-code sign-in in a
+	// setup-mode provider worker (ONB-3, CRED-5; c4e2) and answers the
+	// provider's own sign-in page, the code the owner enters there, and
+	// who issued it. The login itself lands in the vault, never here; the
+	// provider reads Connected once the owner has approved the code. It is
+	// answered within DeviceCodeTimeout; ErrSignInBusy while that
+	// provider's last sign-in still waits for the owner.
+	OpSetupDeviceCode = "page_setup_device_code"
 	// OpSetupNetworks lists the home networks in range from agentosd's
 	// netjoin helper (P2-2w c4b): no args, Networks out. It answers an
 	// empty list when the helper has none or cannot be asked.
@@ -81,7 +89,7 @@ const (
 // SetupOps lists setup's ops, for the disjointness test.
 var SetupOps = []string{OpSetupProgress, OpSetupEnroll, OpSetupConfirm, OpSetupFinish, OpSetupJoin,
 	OpSetupProviders, OpSetupAPIKey, OpSetupPrivateOK, OpSetupNetworks,
-	OpSetupLine, OpSetupSend, OpSetupInbound}
+	OpSetupLine, OpSetupSend, OpSetupInbound, OpSetupDeviceCode}
 
 // Setup's fixed refusals, beside ErrBadArgs, ErrLimited and ErrFailed.
 const (
@@ -126,6 +134,10 @@ const (
 	// vault has not confirmed it. The page asks the owner to reload,
 	// which asks the question again.
 	ErrAnswerOwed = "answer owed"
+	// ErrSignInBusy: the provider's last device-code sign-in still waits
+	// for the owner (OpSetupDeviceCode); a new one can start once that one
+	// is approved or its code expires.
+	ErrSignInBusy = "sign-in busy"
 )
 
 // Setup's text waits. agentosd's own wait for the bridge ends sooner
@@ -264,8 +276,18 @@ const APIKeyTimeout = 15 * time.Second
 // ErrLimited.
 const APIKeysPerMinute = 10
 
-// SetupProvider is one AI provider as setup shows it. DeviceCode is false
-// until plan sign-in at setup is served (c4e2).
+// DeviceCodeTimeout bounds one OpSetupDeviceCode call from the page: it
+// starts a provider worker and waits for the sign-in CLI to print its link
+// and code, and agentosd's own wait for the CLI (a minute) ends sooner
+// (Security L8.4).
+const DeviceCodeTimeout = 90 * time.Second
+
+// DeviceCodesPerMinute limits OpSetupDeviceCode; past it the op answers
+// ErrLimited. Each call may start a worker.
+const DeviceCodesPerMinute = 4
+
+// SetupProvider is one AI provider as setup shows it. DeviceCode is true
+// only while setup can start that provider's plan sign-in (c4e2).
 type SetupProvider struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
@@ -300,6 +322,26 @@ type PrivateOK struct {
 	Provider string `json:"provider"`
 	OK       bool   `json:"ok"`
 }
+
+// DeviceCodeStart names the provider whose sign-in OpSetupDeviceCode
+// starts.
+type DeviceCodeStart struct {
+	Provider string `json:"provider"`
+}
+
+// DeviceCode is OpSetupDeviceCode's answer: Link is the provider's own
+// device page (never one the CLI printed), Code the one-time code the
+// owner enters there, From the provider that issued it, as the page names
+// it ("This code is from OpenAI").
+type DeviceCode struct {
+	Link string `json:"link"`
+	Code string `json:"code"`
+	From string `json:"from"`
+}
+
+// String and GoString keep the code out of logs.
+func (DeviceCode) String() string   { return "[device-code sign-in]" }
+func (DeviceCode) GoString() string { return "[device-code sign-in]" }
 
 // SetupLine is whether setup can text, and the box's own number, E.164
 // ("" when the bridge does not know it).

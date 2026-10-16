@@ -76,7 +76,7 @@ copy() {
 		cp -L "$f" ".$f"
 	done
 }
-for b in /bin/sh /bin/bash /usr/bin/env /usr/bin/uname /usr/bin/id /bin/ls /bin/cat /bin/mkdir /bin/rm; do
+for b in /bin/sh /bin/bash /usr/bin/env /usr/bin/uname /usr/bin/id /bin/ls /bin/cat /bin/mkdir /bin/rm /bin/sleep; do
 	[ -e "$b" ] || continue
 	copy "$b"
 	copy $(ldd "$b" | awk '/=>/ {print $3} /^\t\// {print $1}')
