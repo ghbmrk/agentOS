@@ -63,9 +63,13 @@
 # started; noconn before the call; nope* (a bare name) and /nope* and
 # /denied (paths) when the program is not found or cannot be loaded
 # (SR2-3p). The executing-command messages quote the argv as %q does.
+#
+# run fails as runsc run does at a util.Fatalf (#1701): its message on
+# stderr, which a machine's start shares with the console, and exit 128.
 log= dlog= pid= cmd= ctr= gfd=2
 while [ $# -gt 0 ]; do
 	case "$1" in
+	run) echo "starting container: $FAKE_RUNSC_CANARY: operation not permitted" >&2; exit 128 ;;
 	--log=*) log=${1#--log=} ;;
 	--debug-log=*) dlog=${1#--debug-log=} ;;
 	--internal-pid-file) shift; pid=$1 ;;

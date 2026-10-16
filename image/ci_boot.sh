@@ -20,7 +20,9 @@ HERE=$(dirname "$(realpath "$0")")
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/agentos-boot}"); mkdir -p "$W"
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
 
-copy() { cp --sparse=always "$IMG" "$1"; truncate -s +2G "$1"; }
+# copy FILE [SIZE]: a sparse copy of the image, grown by SIZE (default 2G) for the root to fill.
+# The e2e copy is grown by 24G so vm's disk check admits its machines (image/ASSUMPTIONS.md I27).
+copy() { cp --sparse=always "$IMG" "$1"; truncate -s "+${2:-2G}" "$1"; }
 
 # Every boot orders the boot report before the serial login: getty's start resets and hangs up
 # ttyS0, which discards console output still queued, and it cut or ate the report in #1705, #1746
@@ -262,7 +264,7 @@ e2e_console() {
 # list is pruned), or BLOCKED after an earlier failure; then a DONE line with the counts.
 if [ -n "${E2E:-}" ]; then
 	cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(base64 -w0 "$HERE/e2e/$2")"; }
-	copy "$W/e2e.raw"
+	copy "$W/e2e.raw" 24G
 	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)$(cred systemd.unit-dropin.agentos-egress.service agentos-egress.conf)" \
 		NIC="user,model=virtio-net-pci" UNTIL="agentos-e2e: DONE\|agentos-health: FAIL" boot "$W/console-e2e.log" "$W/e2e.raw"
 	# The guest writes this console, so none of it is trusted as it stands: e2e_console echoes each

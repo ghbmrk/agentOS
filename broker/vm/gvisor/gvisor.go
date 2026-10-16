@@ -151,17 +151,7 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 		syscall.Unmount(l.Root, syscall.MNT_DETACH)
 		return fmt.Errorf("mount %s private: %w", l.Root, err)
 	}
-	// The guest's console reaches the log through the broker, which caps
-	// it: given the file itself, a guest printing without end would fill
-	// the disk (RES-4).
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		syscall.Unmount(l.Root, syscall.MNT_DETACH)
-		return err
-	}
-	go keepConsole(pr, filepath.Join(l.Dir, "console.log"), maxConsoleLog)
-	defer pw.Close() // the sandbox holds its own copy
-	o := childproc.Options{Stdout: pw, Stderr: pw}
+	var o childproc.Options
 	if l.Cgroup != "" {
 		fd, err := syscall.Open(l.Cgroup, syscall.O_DIRECTORY|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		if err != nil {
@@ -173,11 +163,42 @@ func (r *Runtime) launch(ctx context.Context, l vm.Launch, args ...string) error
 		// the machine's group from its first instruction.
 		o.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: fd}
 	}
-	if err := r.cmd(ctx, o, args...).Run(); err != nil {
-		r.Kill(context.WithoutCancel(ctx), l)
-		return fmt.Errorf("runsc %s %s: %w (see %s)", args[0], l.ID, err, filepath.Join(l.Dir, "console.log"))
+	return r.startConsole(ctx, l, o, args...)
+}
+
+// startConsole runs runsc's run or restore with the machine's console as
+// its stdout and stderr. The guest's console reaches the log through the
+// broker, which caps it: given the file itself, a guest printing without
+// end would fill the disk (RES-4). When runsc fails, the console's last
+// runscMsgMax bytes, runsc's own message among them, go to the exec log,
+// since vm removes the machine's directory and its console.log with it
+// (#1701).
+func (r *Runtime) startConsole(ctx context.Context, l vm.Launch, o childproc.Options, args ...string) error {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		syscall.Unmount(l.Root, syscall.MNT_DETACH)
+		return err
 	}
-	return nil
+	console := filepath.Join(l.Dir, "console.log")
+	copied := make(chan struct{})
+	go func() {
+		defer close(copied)
+		keepConsole(pr, console, maxConsoleLog)
+	}()
+	o.Stdout, o.Stderr = pw, pw
+	err = r.cmd(ctx, o, args...).Run()
+	if err == nil {
+		pw.Close() // the sandbox holds its own copy
+		return nil
+	}
+	r.Kill(context.WithoutCancel(ctx), l)
+	pw.Close()
+	select {
+	case <-copied:
+	case <-time.After(ExecWaitDelay):
+	}
+	r.logStart(l.ID, args[0], err, fileTail(console))
+	return fmt.Errorf("runsc %s %s: %w (see %s)", args[0], l.ID, err, r.execLog())
 }
 
 // keepConsole copies a machine's console from r to the log at path until
@@ -472,6 +493,29 @@ func (r *Runtime) logExec(id string, err error, logs [2]string, stderr []byte) {
 	r.logMu.Lock()
 	defer r.logMu.Unlock()
 	keepConsole(io.NopCloser(&b), r.execLog(), execLogMax)
+}
+
+// logStart appends a failed run or restore's console to the exec log.
+func (r *Runtime) logStart(id, verb string, err error, console []byte) {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "%s %s: runsc %s failed (%v)\n-- console\n%s\n", time.Now().UTC().Format(time.RFC3339), id, verb, err, bytes.TrimSpace(console))
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
+	keepConsole(io.NopCloser(&b), r.execLog(), execLogMax)
+}
+
+// fileTail is the last runscMsgMax bytes of the file at path.
+func fileTail(path string) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err == nil && fi.Size() > runscMsgMax {
+		f.Seek(fi.Size()-runscMsgMax, io.SeekStart)
+	}
+	b, _ := io.ReadAll(io.LimitReader(f, runscMsgMax))
+	return b
 }
 
 // clipped is the first runscMsgMax bytes of the file at path.

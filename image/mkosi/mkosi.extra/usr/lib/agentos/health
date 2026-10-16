@@ -35,6 +35,8 @@ esac
 [ -x "$L/agentosd" ] || fail "broker missing"
 "$L/agentosd" -h >/dev/null 2>&1 || fail "broker does not start"
 "$L/runsc" --version >/dev/null 2>&1 || fail "gVisor runsc does not start"
+# runsc refuses every sandbox without its sentry beside it (#1701), so such a release is never blessed.
+[ -x "$L/gvisor-bin/gvisor_sentry" ] || fail "gVisor sentry missing"
 [ -d "$L/images/openclaw/opt/openclaw" ] && [ -r "$L/guest/launch.json" ] || fail "OpenClaw guest image or launch.json missing"
 # The inbound drop (DEV-2 In, DEV-net-e 2a) is loaded and its input chain ends in drop: a release
 # whose rules cannot load is never blessed, so the previous one boots instead.

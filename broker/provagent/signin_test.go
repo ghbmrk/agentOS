@@ -549,3 +549,73 @@ func TestONB3SignInCommandUnderARealShellRunsInTheBackground(t *testing.T) {
 		t.Errorf("status %q", st)
 	}
 }
+
+// A refused sign-in logs which step refused it and why, so a box whose page
+// says only "could not start" says why in agentosd's journal; the CLI's
+// output stays out of the log, its exit status alone is logged (ONB-3,
+// #1701).
+func TestONB3RefusedSignInLogsItsCause(t *testing.T) {
+	logged := func(g *signRig, want ...string) error {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		for _, l := range g.logs {
+			ok := true
+			for _, w := range want {
+				ok = ok && strings.Contains(l, w)
+			}
+			if ok {
+				return nil
+			}
+		}
+		return fmt.Errorf("no log line carries %q: %q", want, g.logs)
+	}
+	t.Run("create fails", func(t *testing.T) {
+		g := newSignRig(printed)
+		g.h.createErr = errors.New("no room")
+		g.start(t)
+		if err := logged(g, "provagent: stub sign-in", "worker", "no room"); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Run("start fails", func(t *testing.T) {
+		g := newSignRig(printed)
+		g.h.cli = func(c vm.Command, s *stub) vm.ExecResult {
+			return vm.ExecResult{ExitCode: 125, Stderr: []byte(canaryToken)}
+		}
+		g.start(t)
+		if err := logged(g, "provagent: stub sign-in", "start", "125"); err != nil {
+			t.Error(err)
+		}
+		g.gone(t)
+		g.noCanary(t)
+	})
+	t.Run("CLI exits", func(t *testing.T) {
+		g := newSignRig("error: " + canaryToken)
+		g.h.write("/work"+signInStatus, "1\n")
+		g.start(t)
+		if err := logged(g, "provagent: stub sign-in", "exited", "1"); err != nil {
+			t.Error(err)
+		}
+		g.gone(t)
+		g.noCanary(t)
+	})
+	t.Run("CLI writes its own status", func(t *testing.T) {
+		g := newSignRig("error")
+		g.h.write("/work"+signInStatus, canaryToken)
+		g.start(t)
+		if err := logged(g, "provagent: stub sign-in", "not a number"); err != nil {
+			t.Error(err)
+		}
+		g.gone(t)
+		g.noCanary(t)
+	})
+	t.Run("no prompt in time", func(t *testing.T) {
+		g := newSignRig(fwdLink + "\n")
+		g.start(t)
+		if err := logged(g, "provagent: stub sign-in", "no link"); err != nil {
+			t.Error(err)
+		}
+		g.gone(t)
+		g.noCanary(t)
+	})
+}

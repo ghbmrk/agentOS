@@ -961,6 +961,7 @@ class HealthTest(unittest.TestCase):
         stub(self.lib, "agentosd", "exit 0")
         stub(self.lib, "drive-id", "exit 0")
         stub(self.lib, "runsc", 'echo "runsc version release-20260928.0"')
+        stub(self.lib, "gvisor-bin/gvisor_sentry", "exit 0")
         self.nft("drop")
         (self.lib / "images/openclaw/opt/openclaw").mkdir(parents=True)
         write(self.lib, "guest/launch.json", "{}")
@@ -1028,6 +1029,8 @@ class HealthTest(unittest.TestCase):
             "broker missing": lambda: (self.lib / "agentosd").unlink(),
             "broker broken": lambda: stub(self.lib, "agentosd", "exit 2"),
             "runsc broken": lambda: stub(self.lib, "runsc", "exit 1"),
+            # #1701: runsc's STRICT sidecar policy refuses every machine start without it.
+            "gVisor sentry missing": lambda: (self.lib / "gvisor-bin/gvisor_sentry").unlink(),
             "guest image missing": lambda: (self.lib / "images/openclaw/opt/openclaw").rmdir(),
             "inbound rules not loaded": lambda: stub(self.bin, "nft", "echo 'No such file or directory' >&2; exit 1"),
             "inbound chain ends in accept": lambda: self.nft("accept"),
@@ -1496,6 +1499,16 @@ class ConfigTest(unittest.TestCase):
         b = (IMG / "build.sh").read_text()
         self.assertIn("SOURCE_DATE_EPOCH", b)
         self.assertIn("-trimpath", b)
+
+    def test_build_ships_gvisors_sidecars_beside_runsc(self):
+        # REQ: RES-4
+        # #1701: runsc of this release starts no sandbox without its sidecars in gvisor-bin/ beside
+        # it (STRICT), so the build installs that directory as CI's machine tests do.
+        b = (IMG / "build.sh").read_text()
+        self.assertIn('install -m 0755 "$OUT/gvisor/runsc" "$STAGE/usr/lib/agentos/runsc"', b)
+        self.assertIn('install -m 0755 "$OUT"/gvisor/gvisor-bin/* "$STAGE/usr/lib/agentos/gvisor-bin/"', b)
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("install -m 0755 /tmp/gv/gvisor-bin/* /usr/local/bin/gvisor-bin/", ci)
 
     def test_snapshot_sources_outlive_their_valid_until(self):
         # The pinned snapshot's Release files expire a week after the timestamp; apt must still read

@@ -160,6 +160,49 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 		}
 	}
 
+	// A FAIL with the image quotes agentosd's setup and provagent lines,
+	// the refusal's cause, and the end of runsc's exec log, a long message
+	// whole, with the stub's canary cut out (#1701).
+	d = fakeDriver(&fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com", noRun: true})
+	d.agentosdArgv = func() ([]string, error) {
+		return []string{"/usr/lib/agentos/agentosd", "-image", "codex=/usr/lib/agentos/images/codex"}, nil
+	}
+	d.agentosdLog = func() string {
+		return "agentosd: listening\n" +
+			"setup: sign-in machines: cgroup: no room\n" +
+			"provagent: codex sign-in: create provider worker pw-1: vm: " + codexstub.Canary + strings.Repeat("y", logLineMax) + " (see the exec log)\n" +
+			"localsrv: unrelated\n"
+	}
+	long := strings.Repeat("x", 2*logLineMax)
+	d.runscLog = func() string {
+		return "2026-10-16T00:00:00Z pw-1: runsc run failed (exit status 128)\n-- console\n" +
+			"starting container: " + long + codexstub.Canary + ": operation not permitted\n"
+	}
+	err = d.guestTask()
+	switch {
+	case err == nil:
+		t.Fatal("no start: passed")
+	case !strings.Contains(err.Error(), "setup: sign-in machines: cgroup: no room") || !strings.Contains(err.Error(), "provagent: codex sign-in: create provider worker"):
+		t.Errorf("no start: %v quotes no setup or provagent line", err)
+	case strings.Contains(err.Error(), codexstub.Canary) || strings.Contains(err.Error(), "unrelated") || strings.Contains(err.Error(), "listening"):
+		t.Errorf("no start: %v quotes the canary or an unrelated line", err)
+	case !strings.Contains(err.Error(), " (see the exec log)"):
+		t.Errorf("no start: %v cuts the provagent line short", err)
+	case !strings.Contains(err.Error(), "runsc run failed (exit status 128)") || !strings.Contains(err.Error(), "[redacted]: operation not permitted"):
+		t.Errorf("no start: %v does not quote runsc's message whole", err)
+	}
+
+	// The exec log is read under agentosd's -machines directory.
+	for want, args := range map[string][]string{
+		"/var/lib/agentos/machines/runsc/exec.log": {"/usr/lib/agentos/agentosd", "-image", "codex=/x"},
+		"/srv/m/runsc/exec.log":                    {"/usr/lib/agentos/agentosd", "-machines", "/srv/m"},
+		"/srv/n/runsc/exec.log":                    {"/usr/lib/agentos/agentosd", "--machines=/srv/n"},
+	} {
+		if got := execLogPath(args); got != want {
+			t.Errorf("execLogPath(%v) = %q, want %q", args, got, want)
+		}
+	}
+
 	// Each failure reads FAIL and names what went wrong: the host the page
 	// showed, the refused calls, the request whose page showed a token.
 	for name, c := range map[string]struct {

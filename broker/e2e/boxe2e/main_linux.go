@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -97,6 +98,11 @@ type driver struct {
 	guestSock string
 	// agentosdArgv is agentosd's command line; nil reads the unit's.
 	agentosdArgv func() ([]string, error)
+	// agentosdLog is agentosd's journal this boot; nil reads the unit's.
+	agentosdLog func() string
+	// runscLog is agentosd's runsc exec log, where a machine's failed
+	// start leaves runsc's message; nil reads the box's.
+	runscLog func() string
 	// now and sleep are the clock of the codes and of phone-control's
 	// waits; nil is the wall clock. The in-process test shares a fake one
 	// with the owner channel.
@@ -533,6 +539,81 @@ func (d *driver) guestTask() error {
 	return d.providerTask()
 }
 
+// signInDiag says why the sign-in did not start: agentosd's setup and
+// provagent journal lines, where StartSignIn logs the step that refused it
+// (#1701), and the end of runsc's exec log, where a worker's failed start
+// leaves runsc's message, cut short with the stub's tokens cut out
+// (ASSUMPTIONS E8).
+func (d *driver) signInDiag() string {
+	read := d.agentosdLog
+	if read == nil {
+		read = func() string {
+			out, _ := command("journalctl", "-b", "-o", "cat", "--no-pager", "-u", "agentosd.service").Output()
+			return string(out)
+		}
+	}
+	var keep []string
+	for _, l := range strings.Split(read(), "\n") {
+		if strings.Contains(l, "setup: ") || strings.Contains(l, "provagent: ") {
+			keep = append(keep, l)
+		}
+	}
+	var tokens []string
+	if d.stub != nil {
+		tokens = d.stub.Tokens()
+	}
+	secrets := append(tokens, codexstub.Canary)
+	runsc := d.runscLog
+	if runsc == nil {
+		runsc = func() string {
+			argv := d.agentosdArgv
+			if argv == nil {
+				argv = unitArgv
+			}
+			args, _ := argv()
+			b, _ := os.ReadFile(execLogPath(args))
+			return string(b)
+		}
+	}
+	return "diag: agentosd: " + redactLog(chunked(strings.Join(keep, "\n"), secrets), 8, secrets...) +
+		"; runsc: " + redactLog(chunked(runsc(), secrets), 8, secrets...)
+}
+
+// execLogPath is runsc's exec log under agentosd's -machines directory
+// (gvisor.Runtime's StateDir is its runsc subdirectory), the flag's
+// default when args set none.
+func execLogPath(args []string) string {
+	dir := "/var/lib/agentos/machines"
+	for i, a := range args {
+		v, ok := strings.CutPrefix(strings.TrimLeft(a, "-"), "machines=")
+		if !ok && strings.TrimLeft(a, "-") == "machines" && i+1 < len(args) {
+			v, ok = args[i+1], true
+		}
+		if ok {
+			dir = v
+		}
+	}
+	return filepath.Join(dir, "runsc", "exec.log")
+}
+
+// chunked is log with secrets cut out and each line split into
+// logLineMax pieces, so redactLog's cut keeps a long runsc message whole.
+func chunked(log string, secrets []string) string {
+	for _, s := range secrets {
+		if s != "" {
+			log = strings.ReplaceAll(log, s, "[redacted]")
+		}
+	}
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(log), "\n") {
+		for len(l) > logLineMax {
+			out, l = append(out, l[:logLineMax]), l[logLineMax:]
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
+}
+
 // planSignIn is the owner signing in to the Codex plan at step 7, as the
 // page offers it once agentosd serves the device-code sign-in (#1264): the
 // owner ticks private content, presses sign in, opens the link the page
@@ -585,7 +666,7 @@ func (d *driver) planSignIn() error {
 		if has, err := d.hasImage(image); err == nil && !has {
 			return errors.New(notDriven + " step 7's " + route.Provider + " sign-in cannot start: agentosd registers no " + image + " image (#1721) " + where(pg))
 		}
-		return errors.New("no sign-in link after sign in " + where(pg))
+		return errors.New("no sign-in link after sign in " + where(pg) + "; " + d.signInDiag())
 	}
 	if want := "https://" + route.AuthHost + route.DevicePage; link != want {
 		// The host alone is safe to print; the rest may carry the code.
