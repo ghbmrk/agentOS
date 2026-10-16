@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -565,12 +566,34 @@ func (d *driver) signInDiag() string {
 	runsc := d.runscLog
 	if runsc == nil {
 		runsc = func() string {
-			b, _ := os.ReadFile("/var/lib/agentos/runsc/exec.log")
+			argv := d.agentosdArgv
+			if argv == nil {
+				argv = unitArgv
+			}
+			args, _ := argv()
+			b, _ := os.ReadFile(execLogPath(args))
 			return string(b)
 		}
 	}
-	return "diag: agentosd: " + redactLog(strings.Join(keep, "\n"), 6, secrets...) +
+	return "diag: agentosd: " + redactLog(chunked(strings.Join(keep, "\n"), secrets), 8, secrets...) +
 		"; runsc: " + redactLog(chunked(runsc(), secrets), 8, secrets...)
+}
+
+// execLogPath is runsc's exec log under agentosd's -machines directory
+// (gvisor.Runtime's StateDir is its runsc subdirectory), the flag's
+// default when args set none.
+func execLogPath(args []string) string {
+	dir := "/var/lib/agentos/machines"
+	for i, a := range args {
+		v, ok := strings.CutPrefix(strings.TrimLeft(a, "-"), "machines=")
+		if !ok && strings.TrimLeft(a, "-") == "machines" && i+1 < len(args) {
+			v, ok = args[i+1], true
+		}
+		if ok {
+			dir = v
+		}
+	}
+	return filepath.Join(dir, "runsc", "exec.log")
 }
 
 // chunked is log with secrets cut out and each line split into

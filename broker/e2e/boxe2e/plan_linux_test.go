@@ -170,7 +170,7 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 	d.agentosdLog = func() string {
 		return "agentosd: listening\n" +
 			"setup: sign-in machines: cgroup: no room\n" +
-			"provagent: codex sign-in: create provider worker pw-1: vm: " + codexstub.Canary + "\n" +
+			"provagent: codex sign-in: create provider worker pw-1: vm: " + codexstub.Canary + strings.Repeat("y", logLineMax) + " (see the exec log)\n" +
 			"localsrv: unrelated\n"
 	}
 	long := strings.Repeat("x", 2*logLineMax)
@@ -186,8 +186,21 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 		t.Errorf("no start: %v quotes no setup or provagent line", err)
 	case strings.Contains(err.Error(), codexstub.Canary) || strings.Contains(err.Error(), "unrelated") || strings.Contains(err.Error(), "listening"):
 		t.Errorf("no start: %v quotes the canary or an unrelated line", err)
+	case !strings.Contains(err.Error(), " (see the exec log)"):
+		t.Errorf("no start: %v cuts the provagent line short", err)
 	case !strings.Contains(err.Error(), "runsc run failed (exit status 128)") || !strings.Contains(err.Error(), "[redacted]: operation not permitted"):
 		t.Errorf("no start: %v does not quote runsc's message whole", err)
+	}
+
+	// The exec log is read under agentosd's -machines directory.
+	for want, args := range map[string][]string{
+		"/var/lib/agentos/machines/runsc/exec.log": {"/usr/lib/agentos/agentosd", "-image", "codex=/x"},
+		"/srv/m/runsc/exec.log":                    {"/usr/lib/agentos/agentosd", "-machines", "/srv/m"},
+		"/srv/n/runsc/exec.log":                    {"/usr/lib/agentos/agentosd", "--machines=/srv/n"},
+	} {
+		if got := execLogPath(args); got != want {
+			t.Errorf("execLogPath(%v) = %q, want %q", args, got, want)
+		}
 	}
 
 	// Each failure reads FAIL and names what went wrong: the host the page
