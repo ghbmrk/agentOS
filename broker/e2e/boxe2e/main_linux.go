@@ -42,6 +42,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/provagent"
 )
 
 const (
@@ -91,6 +92,11 @@ type driver struct {
 	// stub is the Codex plan provider the agentos_e2e vault process
 	// reaches (#1701, ASSUMPTIONS E10).
 	stub *codexstub.Stub
+	// guestSock is the agent machine's guest-plane socket; "" is the
+	// box's (agentSock).
+	guestSock string
+	// agentosdArgv is agentosd's command line; nil reads the unit's.
+	agentosdArgv func() ([]string, error)
 	// now and sleep are the clock of the codes and of phone-control's
 	// waits; nil is the wall clock. The in-process test shares a fake one
 	// with the owner channel.
@@ -517,16 +523,14 @@ func (d *driver) host() error {
 }
 
 // guestTask is the model-backed guest task on the Codex plan route. It
-// first signs in to the plan at step 7, which finishes setup; the task
-// itself needs a worker on the plan route (#1314), so it is not driven yet.
+// first signs in to the plan at step 7, which finishes setup, then runs
+// one task through provider_run as the agent machine's guest
+// (providerTask, ASSUMPTIONS E12).
 func (d *driver) guestTask() error {
 	if err := d.planSignIn(); err != nil {
 		return err
 	}
-	// When #1314 drives the task, require d.stub.Hits()["responses"] > 0
-	// and d.stub.Refused() == 0 as well as codexstub.Answer on the page
-	// (ASSUMPTIONS E11).
-	return errors.New(notDriven + " the task needs a worker on the plan route (#1314)")
+	return d.providerTask()
 }
 
 // planSignIn is the owner signing in to the Codex plan at step 7, as the
@@ -559,7 +563,7 @@ func (d *driver) planSignIn() error {
 		return fmt.Errorf("step 7 did not open: %w", err)
 	}
 	if !deviceOffer(pg, route.Provider) {
-		return errors.New(notDriven + " step 7 offers no " + route.Provider + " sign-in (#1264) " + where(pg))
+		return errors.New(notDriven + " step 7 offers no " + route.Provider + " sign-in (#1264; gate: #809, #1877; image: #1721) " + where(pg))
 	}
 	if d.stub == nil {
 		return errors.New("no plan stub")
@@ -574,6 +578,13 @@ func (d *driver) planSignIn() error {
 	pages = append(pages, seen{"GET /setup after POST /setup/ai-device", pg})
 	link, code, ok := deviceLink(pg)
 	if !ok {
+		// The sign-in runs the CLI in a worker built from the provider's
+		// image; a box that registers none cannot start it (#1721), the
+		// case where #809 and #1877 land first (ASSUMPTIONS E11).
+		image := provagent.Builtins()[route.Provider].Image
+		if has, err := d.hasImage(image); err == nil && !has {
+			return errors.New(notDriven + " step 7's " + route.Provider + " sign-in cannot start: agentosd registers no " + image + " image (#1721) " + where(pg))
+		}
 		return errors.New("no sign-in link after sign in " + where(pg))
 	}
 	if want := "https://" + route.AuthHost + route.DevicePage; link != want {
