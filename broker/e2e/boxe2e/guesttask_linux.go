@@ -52,7 +52,7 @@ func (d *driver) providerTask() error {
 		return err == nil, err
 	})
 	if err != nil {
-		return fmt.Errorf("the agent machine's guest socket never appeared: %w; %s", err, agentDiag(d.stub.Tokens()))
+		return fmt.Errorf("agent machine's guest socket never appeared: %w; %s", err, agentDiag(d.stub.Tokens()))
 	}
 	c := &mcpClient{sock: sock}
 	if _, err := c.call("initialize", map[string]any{"protocolVersion": "2025-06-18",
@@ -76,7 +76,7 @@ func (d *driver) providerTask() error {
 		offered = offered || t.Name == "provider_run"
 	}
 	if !offered {
-		return errors.New(notDriven + " the agent machine is offered no provider_run: the box has no Codex worker image and agentosd no -worker-image (#1721)")
+		return errors.New(notDriven + " no provider_run offered to agent machine: no Codex worker image and agentosd has no -worker-image (#1721)")
 	}
 	route := egress.Codex()
 	before, refused := d.stub.Hits()["responses"], d.stub.Refused()
