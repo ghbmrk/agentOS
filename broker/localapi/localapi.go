@@ -65,10 +65,21 @@ const (
 	// same name, and agentos-ap serves it (Down then Up). It needs a
 	// session (Auth) and nothing else.
 	OpRotateAPNet = "page_rotate_ap_net"
+	// OpPlanSignInReady (Auth) answers a PlanSignIn: whether the owner's
+	// plan is signed out and its sign-in may start (ONB-3, ONB-9, #1264).
+	// OpPlanSignIn (PlanSignInStart) starts that sign-in after setup and
+	// answers a PlanSignInStarted, within DeviceCodeTimeout. Whoever
+	// approves its code becomes the plan's login (CRED-5), so it always
+	// takes a code-generator code, as OpSIM does; ErrBadArgs when the
+	// sign-in is not offered, ErrSignInBusy while the last one waits,
+	// ErrLimited past DeviceCodesPerMinute starts or the socket's
+	// wrong-code limit.
+	OpPlanSignInReady = "page_plan_sign_in_ready"
+	OpPlanSignIn      = "page_plan_sign_in"
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet, OpPlanSignInReady, OpPlanSignIn}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -167,6 +178,25 @@ type Line struct {
 
 // SIMLen is a SIM tag's length.
 const SIMLen = 16
+
+// PlanSignIn says whether the page offers the plan's sign-in.
+type PlanSignIn struct {
+	Ready bool `json:"ready"`
+}
+
+// PlanSignInStart starts the plan's sign-in with a code-generator code.
+type PlanSignInStart struct {
+	Token string `json:"token"`
+	Code  string `json:"code,omitempty"`
+}
+
+// PlanSignInStarted is a started sign-in's link and code, or a Refusal
+// (RefusedCodeNeeded, RefusedWrongCode, RefusedTooMany) with its Text.
+type PlanSignInStarted struct {
+	Refusal string `json:"refusal,omitempty"`
+	Text    string `json:"text,omitempty"`
+	DeviceCode
+}
 
 // AdoptSIM adopts the SIM the page showed under SIM as the owner line's,
 // with a code-generator code or the asked grid cell. Its reply is an

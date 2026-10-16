@@ -88,6 +88,16 @@ func (s *Server) call(ctx context.Context, op string, args, out any) error {
 	return o.Call(ctx, op, args, out)
 }
 
+// callFor is call bounded by ctx alone, for an op that may outlast
+// callTimeout.
+func (s *Server) callFor(ctx context.Context, op string, args, out any) error {
+	o := s.getOwner()
+	if o == nil {
+		return errNoOwner
+	}
+	return o.Call(ctx, op, args, out)
+}
+
 var errNoOwner = errors.New("localui: no owner channel")
 
 // ownerStatus is the box's state before sign-in, ok false when agentosd
