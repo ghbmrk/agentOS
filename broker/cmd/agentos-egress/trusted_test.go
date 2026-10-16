@@ -1233,6 +1233,88 @@ func TestEnrollAfterTheSlotIsDecidedWithoutAPINSaysTheHostIsTrusted(t *testing.T
 	}
 }
 
+// REQ: CRED-9, HW-1
+
+// VAULT-slot-decided-2 (#1741): when the removal of a trusted PC is
+// decided and the slot change then reports an error, untrust says the PC
+// is no longer trusted (not "no such host"), the owner is told, and this
+// PC's lockout hierarchy is given back: a removed PC never opens
+// unattended again, so no later start would give it back.
+func TestUntrustAfterTheSlotIsDecidedSaysThePCIsRemoved(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	hosts, _ := r.c.hosts()
+	r.notes = nil
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
+	n, err := r.c.untrust(r.code(), hosts[0].ID)
+	if !errors.Is(err, errHostRemovedDecided) || n != 1 {
+		t.Fatalf("untrust after the seal: %d, %v", n, err)
+	}
+	if !strings.Contains(err.Error(), "no longer trusted") || !strings.Contains(err.Error(), "next time the vault is unlocked") {
+		t.Fatalf("the text does not say the PC is removed, or how it finishes: %q", err)
+	}
+	restore()
+	if !r.noted("a trusted host was removed (saving not finished)") {
+		t.Fatalf("owner not told: %q", r.notes)
+	}
+	// The PIN slot is still in the keys file on the drive, so the lockout
+	// hierarchy stays the vault's: with it a thief could reset the guess
+	// limit and try PINs offline (Security S1 on #1821). Not probed with
+	// ThiefLockReset here: a wrong lockout password locks the hierarchy.
+	if hosts, _ := r.c.hosts(); len(hosts) != 1 {
+		t.Fatalf("the slot is not on the drive any more, so this test checks nothing: %v", hosts)
+	}
+	if r.lockoutEntry() == "" {
+		t.Fatal("lockout given back while the PIN slot is still on the drive")
+	}
+	// The text's step: the removed PC no longer opens unattended, and the
+	// next unlock finishes it and gives the hierarchy back.
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatalf("the removed PC opened unattended: %v", r.phase())
+	}
+	r.unknownHostUnlock(t)
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 0 {
+		t.Fatalf("hosts after the next start: %v, %v", hosts, err)
+	}
+	if r.lockoutEntry() != "" {
+		t.Fatal("lockout authorization kept after the removal landed")
+	}
+	if err := r.tpm.ThiefLockReset(); err != nil {
+		t.Fatalf("lockout not given back after the removal landed: %v", err)
+	}
+}
+
+// REQ: HW-1, CRED-9
+// The owner's unlock gives the lockout hierarchy back only for a PC whose
+// slot is gone from the drive (#1741): a PIN-trusted PC keeps it, or a
+// thief could reset the guess limit and try PINs offline (Security D1 on
+// #1821).
+func TestOwnerUnlockKeepsTheLockoutOfAPINTrustedPC(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), "246810"); err != nil {
+		t.Fatal(err)
+	}
+	bootGood(r.tpm)
+	r.start(t, r.tpm)
+	r.unknownHostUnlock(t)
+	if hosts, err := r.c.hosts(); err != nil || len(hosts) != 1 || !hosts[0].PIN {
+		t.Fatalf("hosts after the unlock: %v, %v", hosts, err)
+	}
+	if r.lockoutEntry() == "" {
+		t.Fatal("lockout given back on the owner's unlock while this PC's PIN slot is on the drive")
+	}
+	if err := r.tpm.ThiefLockReset(); err == nil {
+		t.Fatal("empty lockout password resets the PIN guess counter after the owner's unlock")
+	}
+}
+
 // REQ: HW-8
 
 // TRUST-lockout-sync (#1558): the lockout authorization is made durable in
