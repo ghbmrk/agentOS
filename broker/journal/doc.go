@@ -18,6 +18,13 @@
 // (DEP-1). Policy (grants, budgets, approvals) and executors are supplied by
 // the caller; the engine owns ordering, durability, and recovery only.
 //
+// A domain lifecycle (device actuation, DEV-5; credential hand-off, CRED-11)
+// is a set of intent kinds declared with Lifecycle and Register, never a store
+// of its own (OP-11). Callers run Lifecycle.Check before Submit, check the
+// daily cap against Lifecycle.DailyCount, and build UNDO with UndoPlan; the
+// guard in broker/durable fails CI for a package that persists outside the
+// journal without being listed with its OP-11 kind.
+//
 // Assumptions that a later spec version could change are listed in
 // ASSUMPTIONS.md next to this file.
 package journal
