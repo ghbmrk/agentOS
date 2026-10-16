@@ -318,7 +318,7 @@ func UndoPlan(records []Record, effectID string, current map[string]any) (Intent
 	}
 	now, ok := current[l.Target]
 	if !ok || !sameValue(now, in.Params[l.Target]) {
-		return no("the device's state is no longer what the agent set")
+		return no("the device's state is no longer what I set")
 	}
 	params := make(map[string]any, len(in.Params)+1)
 	for k, v := range in.Params {
