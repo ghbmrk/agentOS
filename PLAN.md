@@ -188,7 +188,7 @@ Usage credits are off.
 **Rules (flexible by design):**
 Rigid caps breed waste: work abandoned at 95% done, padding to "use the budget", or allowance that resets unused. So the only **hard** limit is the subscription itself (B-4). Everything else is a **target with a checkpoint**: on reaching it, the loop decides on evidence whether continuing is worth it, and records why.
 
-- **B-1 Weekly envelope (adaptive):** *superseded 2026-10-04 by §4B's pacing rule (~100% used at each reset, ~14% a day).* The original default target was ~70% of the week for the build, ~30% left for Mark. The weekly allowance resets, so **unspent allowance at week's end is pure waste.**
+- **B-1 Weekly envelope (adaptive):** *superseded 2026-10-04 by §4B's pacing rule (~100% used at each reset); the ~14%/day figure is itself superseded by D-109.* The original default target was ~70% of the week for the build, ~30% left for Mark. The weekly allowance resets, so **unspent allowance at week's end is pure waste.**
   - The protected share for Mark shrinks as the week goes on: from ~30% early in the week to ~10% in the final day, adjusted to his actual recent usage.
   - Late in the week the build may use what Mark predictably won't.
   - If Mark's own usage spikes, the build backs off first.
@@ -220,6 +220,8 @@ This totals roughly **3–5 months** of calendar time at this plan level. That f
 |---|---|---|---|
 | 10:58 | 14% | 11% | spec design (mostly Mark's own thread) |
 | 19:50 | 23% | 11% | +9 points: three spikes' review fixes, three lens reviews, arbitration, the spec PRs, PR reviews, this package, and P1-1, P1-2, P1-5 building in parallel |
+
+*Superseded by D-109 (2026-10-13; Mark, 2026-10-16: "The 14% was dropped some time ago"): the ~14%/day figure below is history, not a daily ceiling. Current rule: CLAUDE.md §Budget (~100% of the weekly limit by each reset, no daily ceiling while spend is not wasteful).*
 
 **Pace: tokens are the binding constraint, and the whole allowance is used.** The week reset at 06:00 Sunday, so 23% is one day's spend, about 160% of the week if sustained. **Pacing rule (Mark, 2026-10-04 23:55: "faster and sooner, should be 100% at reset"):** aim to have used ~100% of the weekly limit at each reset, spread evenly so it never runs out early: ~14% a day, with as many parallel threads as that pace allows. This replaces the 70% default envelope (B-1) and the short-lived 8%/day rule. Usage credits stay off (B-4), so the limit itself is the only hard stop. Mark's own use counts inside the 100%, and the build backs off when it spikes. Day one's 23% is ahead of pace, so the following days run lighter until the cumulative line meets ~14% × days.
 
