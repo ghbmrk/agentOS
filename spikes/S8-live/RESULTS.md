@@ -11,10 +11,12 @@ deleted after the run.
 
 ## Credits (GET /backend-api/wham/usage, 200)
 
-- plan_type `prolite`; weekly window (604800 s) at used_percent 100,
-  `limit_reached: true`, `allowed: false`; no secondary window.
+- weekly window (604800 s) at used_percent 100, `limit_reached: true`,
+  `allowed: false`; no secondary window.
 - credits: `has_credits: true`, `unlimited: false`,
-  `overage_limit_reached: false`, balance ~80; spend_control not reached.
+  `overage_limit_reached: false`; spend_control not reached. The plan type and
+  credit balance are left out on purpose: they describe the account, not the
+  CLI's behaviour.
 - So this is the credits-after-limit state: the weekly limit is reached and
   credits are available to continue. Other keys present: `model_usage`,
   `rate_limit_reached_type`, `rate_limit_reset_credits`.
