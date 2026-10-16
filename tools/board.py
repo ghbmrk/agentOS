@@ -319,7 +319,7 @@ def stale(items, prs):
         mine = [p for p in prs if re.match(rf"{re.escape(row['id'])}(?![A-Za-z0-9-])", p["title"])]
         merged = [p for p in mine if p.get("merged_at")]
         if merged and not any(p["state"] == "open" for p in mine):
-            out.append((item, merged[-1]))
+            out.append((item, max(merged, key=lambda p: p["merged_at"])))
     return out
 
 
@@ -331,7 +331,7 @@ def stale_comment(row_id, state, pr):
 
 def report_stale(fetch, repo, comment):
     items = work_items(fetch, repo)
-    found = stale(items, fetch(f"/repos/{repo}/pulls?state=closed"))
+    found = stale(items, fetch(f"/repos/{repo}/pulls?state=all"))
     for item, pr in found:
         row = row_of(item)
         print(f"board: {row['id']} (#{item['number']}): state {row['state']} but PR #{pr['number']} merged")

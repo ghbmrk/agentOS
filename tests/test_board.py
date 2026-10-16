@@ -214,7 +214,9 @@ class StaleLabelTest(unittest.TestCase):
             if path.startswith("/repos/o/r/issues"):
                 return opened(issues())
             if path.startswith("/repos/o/r/pulls"):
-                return list(self.PRS if prs is None else prs)
+                want = path.partition("state=")[2]
+                every = list(self.PRS if prs is None else prs)
+                return [p for p in every if want == "all" or p["state"] == want]
             raise AssertionError(path)
         out = io.StringIO()
         with redirect_stdout(out):
@@ -225,6 +227,11 @@ class StaleLabelTest(unittest.TestCase):
         found = board.stale(issues(), self.PRS)
         # W-3 (escalated) is flagged; A-3 is not, because another A-3 PR is still open; A-1's PR never merged.
         self.assertEqual([(i["title"][:3], p["number"]) for i, p in found], [("W-3", 22)])
+
+    def test_newest_merged_pr_is_named(self):
+        prs = [{"number": 31, "title": "W-3: new", "state": "closed", "merged_at": "2026-10-12T00:00:00Z"},
+               {"number": 22, "title": "W-3: old", "state": "closed", "merged_at": "2026-10-10T00:00:00Z"}]
+        self.assertEqual([p["number"] for _, p in board.stale(issues(), prs)], [31])
 
     def test_flagging_changes_nothing_and_exits_zero(self):
         code, out, posted = self.run_stale()
