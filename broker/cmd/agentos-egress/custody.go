@@ -110,6 +110,12 @@ var (
 	// the PC is trusted (VAULT-slot-decided, #1557).
 	errHostSlotDecided    = uerr(http.StatusInternalServerError, "This PC is trusted, but I could not finish saving that. It finishes the next time I start; to finish it now, run trust again. Until then it may not show in hosts, the list of trusted PCs.")
 	errHostSlotDecidedPIN = uerr(http.StatusInternalServerError, "This PC is trusted and its boot PIN is now needed at power-on, but I could not finish saving that. It finishes the next time I start; to finish it now, run trust -pin again and enter the same PIN. Until then it may not show in hosts, the list of trusted PCs.")
+	// errHostRemovedDecided: a trusted PC's removal was decided before
+	// the slot change failed, so the PC is no longer trusted
+	// (VAULT-slot-decided-2, #1741). Untrust again would find no such
+	// host once the change finishes, so the step is the next unlock, which
+	// is unattended on a PC still trusted.
+	errHostRemovedDecided = uerr(http.StatusInternalServerError, "That PC is no longer trusted, but I could not finish saving that. It finishes the next time the vault is unlocked; until then it may still show in hosts, the list of trusted PCs.")
 	errLockoutOwned       = uerr(http.StatusConflict, "Another system on this PC controls the TPM, so I can't protect a boot PIN here. Trust this PC without a PIN instead.")
 
 	// Rollback (V6): the drive's vault is older than this PC's counter.
@@ -1514,6 +1520,10 @@ func (c *custody) setupHost(trusted bool) (string, error) {
 		return "", nil
 	}
 	n, err := c.host.remove(v, me)
+	if errors.Is(err, vault.ErrSlotDecided) {
+		c.notify("a trusted host was removed (saving not finished)")
+		return "", errHostRemovedDecided
+	}
 	if err != nil {
 		return "", errInternal
 	}
@@ -1530,6 +1540,11 @@ func (c *custody) untrust(code, id string) (int, error) {
 		return 0, err
 	}
 	n, err := c.host.remove(v, id)
+	if errors.Is(err, vault.ErrSlotDecided) {
+		// The removal took effect; only saving it is unfinished (#1741).
+		c.notify("a trusted host was removed (saving not finished)")
+		return n, errHostRemovedDecided
+	}
 	if err != nil {
 		return 0, errNoSuchHost
 	}

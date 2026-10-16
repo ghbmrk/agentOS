@@ -24,6 +24,7 @@ class RiskTierTest(unittest.TestCase):
             "tools/canary.py": "A",
             "tools/risk_tier.py": "A",
             "tools/ci_scope.py": "A",
+            "tools/ci_split.py": "A",
             "tools/g1_scope.txt": "A",
             "broker/mail/deliver.go": "A",
             "broker/daemon/daemon.go": "A",

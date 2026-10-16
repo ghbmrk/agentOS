@@ -270,6 +270,12 @@ type Config struct {
 	// Services gives each machine its guest service socket (P1-7). Nil
 	// runs machines with no broker services at all.
 	Services Services
+	// ProviderRoutes gives each provider worker (ProviderPrefix) the
+	// directory holding its one route socket to the vault process (#1755,
+	// CRED-5 broker-held). It is the same mount as Services and the only
+	// one a provider worker gets; no other machine is given it. Nil runs
+	// provider workers with no path out.
+	ProviderRoutes Services
 	// DiskReserveBytes is the state disk's RES-4 reserve (a healthy
 	// release, the journal, the recall index). A snapshot is admitted only
 	// if copying the layer leaves the reserve free, as memory admission
@@ -534,6 +540,9 @@ func (m *Manager) Create(ctx context.Context, id string, s Spec) (Machine, error
 	if strings.HasPrefix(id, WorkerPrefix) {
 		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for workers", WorkerPrefix)
 	}
+	if strings.HasPrefix(id, ProviderPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for provider workers", ProviderPrefix)
+	}
 	return m.create(ctx, id, s, nil, "")
 }
 
@@ -558,6 +567,13 @@ const BuilderPrefix = "lb-"
 // seed again; the seed is not persisted, so after a broker restart the
 // machine has only its layer.
 func (m *Manager) CreateSeeded(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
+	if strings.HasPrefix(id, ProviderPrefix) {
+		return Machine{}, fmt.Errorf("vm: machine ids starting %q are kept for provider workers", ProviderPrefix)
+	}
+	return m.createSeeded(ctx, id, s, seed)
+}
+
+func (m *Manager) createSeeded(ctx context.Context, id string, s Spec, seed map[string][]byte) (Machine, error) {
 	if len(seed) > 0 && s.Label != Private {
 		return Machine{}, fmt.Errorf("%w: %s is %v", ErrSeedLabel, id, s.Label)
 	}
@@ -711,6 +727,19 @@ func (m *Manager) nextProjectLocked() uint32 {
 	return m.project
 }
 
+// servicesFor is where machine id gets its Launch.Services directory, or
+// nil for none: provider workers from ProviderRoutes, other workers from
+// nothing, every other machine from Services.
+func (m *Manager) servicesFor(id string) Services {
+	switch {
+	case strings.HasPrefix(id, ProviderPrefix):
+		return m.cfg.ProviderRoutes
+	case strings.HasPrefix(id, WorkerPrefix):
+		return nil
+	}
+	return m.cfg.Services
+}
+
 // unreserve takes mc out of the table. A new machine that took the ID
 // since mc was destroyed stays.
 func (m *Manager) unreserve(mc *machine) {
@@ -720,8 +749,10 @@ func (m *Manager) unreserve(mc *machine) {
 		delete(m.machines, mc.ID)
 	}
 	m.mu.Unlock()
-	if mine && m.cfg.Services != nil {
-		m.cfg.Services.Close(mc.ID)
+	if mine {
+		if s := m.servicesFor(mc.ID); s != nil {
+			s.Close(mc.ID)
+		}
 	}
 }
 
@@ -775,9 +806,10 @@ func (m *Manager) startFrom(ctx context.Context, mc *machine, s *Snapshot) error
 		return err
 	}
 	// Workers run no agent: no broker socket, so no tools, owner channel
-	// or model egress (CAP-8).
-	if m.cfg.Services != nil && !strings.HasPrefix(mc.ID, WorkerPrefix) {
-		dir, err := m.cfg.Services.Open(mc.ID)
+	// or model egress (CAP-8). A provider worker gets its route socket
+	// instead, and no other service.
+	if s := m.servicesFor(mc.ID); s != nil {
+		dir, err := s.Open(mc.ID)
 		if err != nil {
 			return err
 		}
@@ -1108,6 +1140,9 @@ func (m *Manager) Checkpoint(ctx context.Context, id string) (Snapshot, error) {
 }
 
 func (m *Manager) take(ctx context.Context, id string, t Tier) (Snapshot, error) {
+	if err := refuseProvider(id); err != nil {
+		return Snapshot{}, err
+	}
 	mc, err := m.get(id)
 	if err != nil {
 		return Snapshot{}, err
@@ -1183,6 +1218,9 @@ func (m *Manager) capture(ctx context.Context, mc *machine, t Tier) (Snapshot, e
 // captureAs is capture; sleep marks a sleep checkpoint, with the
 // machine's start count and the hash of what was written.
 func (m *Manager) captureAs(ctx context.Context, mc *machine, t Tier, sleep bool) (Snapshot, error) {
+	if err := refuseProvider(mc.ID); err != nil {
+		return Snapshot{}, err
+	}
 	u, err := m.checkCaps(mc.ID, m.launch(mc).Upper)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("%s: %w", mc.ID, err)
@@ -1373,6 +1411,9 @@ func ownSnap(mc *machine, s Snapshot) bool {
 // file system. The machine's label does not fall (REV-5). A preempted or
 // stopped machine is re-admitted first.
 func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
+	if err := refuseProvider(id); err != nil {
+		return err
+	}
 	if strings.HasPrefix(id, EvalPrefix) {
 		return fmt.Errorf("vm: replay machine %s cannot be rolled back", id)
 	}
@@ -1510,6 +1551,9 @@ func (m *Manager) resumeOf(ctx context.Context, mc *machine) error {
 // admitted on its own budget, because forks share no memory (S3). Either all
 // forks start or none do.
 func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, error) {
+	if err := refuseProvider(append([]string{id}, ids...)...); err != nil {
+		return Snapshot{}, err
+	}
 	src, err := m.get(id)
 	if err != nil {
 		return Snapshot{}, err
@@ -1696,6 +1740,9 @@ func (m *Manager) view(s Snapshot) overlay.View {
 // dst restarts on the merged file system (a file-system rollback), and its
 // label rises to the fork's (REV-5). Returns the merged snapshot.
 func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) {
+	if err := refuseProvider(dst, src); err != nil {
+		return Snapshot{}, err
+	}
 	if strings.HasPrefix(dst, EvalPrefix) || strings.HasPrefix(src, EvalPrefix) {
 		return Snapshot{}, errors.New("vm: replay machines are not merged")
 	}
