@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -211,5 +215,114 @@ func TestCRED5SignedInVerbAnswersForThatWorkerOnly(t *testing.T) {
 	r.ctl.ServeHTTP(gw, httptest.NewRequest("GET", "/signedin?machine=pw-s", nil))
 	if gw.Code < 400 {
 		t.Fatalf("GET /signedin: %d", gw.Code)
+	}
+}
+
+// tokenUpstream answers the sign-in's code exchange with a fresh login
+// for a synthetic account, as the provider does once the owner approved
+// the code.
+type tokenUpstream struct{ login []byte }
+
+func (u tokenUpstream) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Type", "application/json")
+	rec.Write(u.login)
+	return rec.Result(), nil
+}
+
+func signInLogin(t *testing.T) []byte {
+	t.Helper()
+	enc := func(v any) string {
+		b, _ := json.Marshal(v)
+		return base64.RawURLEncoding.EncodeToString(b)
+	}
+	id := enc(map[string]string{"alg": "none", "typ": "JWT"}) + "." + enc(map[string]any{
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-synthetic"},
+	}) + "." + synthetic(t, "sig")
+	b, _ := json.Marshal(map[string]string{
+		"access_token": synthetic(t, "eyJcanaryaccess."), "refresh_token": synthetic(t, "rt_canary_"), "id_token": id,
+	})
+	return b
+}
+
+// providerPost posts verb for machine on the control socket and returns
+// the status and body.
+func providerPost(t *testing.T, sock, verb, machine string) (int, []byte) {
+	t.Helper()
+	cl := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", sock)
+		},
+	}}
+	resp, err := cl.Post("http://localhost/"+verb+"?machine="+machine, "text/plain", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b
+}
+
+// #1887 PUX L-P1: the vault process's /signedin, as serveWorkerRoutes
+// wires it, reports a real sign-in commit made over that worker's sign-in
+// route, for that worker only. Without the wiring every owner sign-in
+// would read as not done and the plan route's stop would never lift.
+func TestCRED5ServedSignedInReportsTheRoutesOwnCommit(t *testing.T) {
+	r := newFastRig(t, true)
+	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+		t.Fatal(err)
+	}
+	r.c.modelTransport = tokenUpstream{signInLogin(t)}
+	run, err := os.MkdirTemp("", "sv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(run) })
+	cl, err := serveWorkerRoutes(run, r.c, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	ctl := filepath.Join(run, ProviderSocket)
+	stored := func(machine string) bool {
+		t.Helper()
+		code, b := providerPost(t, ctl, "signedin", machine)
+		var got struct{ Stored bool }
+		if code != http.StatusOK || json.Unmarshal(b, &got) != nil {
+			t.Fatalf("signedin %s: %d %q", machine, code, b)
+		}
+		return got.Stored
+	}
+	code, b := providerPost(t, ctl, "signin", "pw-s")
+	var out struct{ Dir string }
+	if code != http.StatusOK || json.Unmarshal(b, &out) != nil || out.Dir == "" {
+		t.Fatalf("signin: %d %q", code, b)
+	}
+	if stored("pw-s") {
+		t.Fatal("signed in before any exchange")
+	}
+	route := egress.Codex()
+	form := url.Values{"client_id": {"app_synthetic"}, "code": {"code-synthetic"}, "code_verifier": {"verifier-synthetic"},
+		"grant_type": {"authorization_code"}, "redirect_uri": {route.Origin + route.RedirectPath}}
+	cli := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", filepath.Join(out.Dir, RouteSocket))
+		},
+	}}
+	resp, err := cli.Post(route.Origin+"/oauth/token", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("code exchange: %d", resp.StatusCode)
+	}
+	if !stored("pw-s") {
+		t.Fatal("the sign-in route's commit is not reported as that worker's sign-in")
+	}
+	if stored("pw-other") {
+		t.Fatal("another worker reads as signed in")
 	}
 }

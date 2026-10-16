@@ -39,8 +39,10 @@ boot() {
 		i=$((i + 1)); idx=; [ $i -eq 1 ] && idx=,bootindex=1
 		drives="$drives -drive if=none,id=d$i,format=raw,file=$d -device virtio-blk-pci,drive=d$i$idx"
 	done
+	# 8 GiB, not 4: agentosd's pool on the guest must hold the agent and one provider worker
+	# (#1896, image/ASSUMPTIONS.md I26); the hosted runner has 16 GB.
 	# shellcheck disable=SC2086 # $drives, $REPORT_FIRST and $EXTRA are lists of QEMU arguments without spaces.
-	qemu-system-x86_64 -machine q35,smm=on -accel $ACCEL -cpu max -smp 4 -m 4096 \
+	qemu-system-x86_64 -machine q35,smm=on -accel $ACCEL -cpu max -smp 4 -m 8192 \
 		-global driver=cfi.pflash01,property=secure,value=on \
 		-drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
 		-drive if=pflash,format=raw,unit=1,file="$t/vars.fd" \

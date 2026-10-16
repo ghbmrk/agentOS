@@ -13,12 +13,15 @@ import (
 
 // SetupProvider is one built-in provider as setup's AI step sees it
 // (P2-2w c4e; CRED-5, CAP-9): whether the vault holds its API key and the
-// owner's private-data answer. It never carries the key.
+// owner's private-data answer. It never carries the key. Plan marks a plan
+// route (CRED-5): Connected then means its sign-in is stored, and it takes
+// no API key.
 type SetupProvider struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Connected bool   `json:"connected"`
 	PrivateOK bool   `json:"private_ok"`
+	Plan      bool   `json:"plan,omitempty"`
 }
 
 // SetupProviderList is the vault process's answer to GET /setup/providers.

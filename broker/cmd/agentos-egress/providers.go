@@ -37,7 +37,7 @@ var (
 )
 
 // providerNames are the built-in adapters' names as the page shows them.
-var providerNames = map[string]string{"openai": "OpenAI", "anthropic": "Anthropic"}
+var providerNames = map[string]string{"openai": "OpenAI", "anthropic": "Anthropic", planProvider: "ChatGPT plan"}
 
 // setupOpen is the guard every setup provider op runs under: the vault
 // open and setup's enrollment open. Caller holds mu.
@@ -59,8 +59,9 @@ func (c *custody) setupProviders() ([]modelroute.SetupProvider, error) {
 	return c.providersLocked(), nil
 }
 
-// providersLocked lists the built-in providers. Caller holds mu with the
-// vault open.
+// providersLocked lists the built-in providers, then the plan route, which
+// is connected once its sign-in is stored. Caller holds mu with the vault
+// open.
 func (c *custody) providersLocked() []modelroute.SetupProvider {
 	var out []modelroute.SetupProvider
 	for _, a := range adapters() {
@@ -71,6 +72,13 @@ func (c *custody) providersLocked() []modelroute.SetupProvider {
 			PrivateOK: hasKind(c.v, PrivateOKPrefix+a.Name, KindPrivateOK),
 		})
 	}
+	out = append(out, modelroute.SetupProvider{
+		ID:        planProvider,
+		Name:      providerName(planProvider),
+		Connected: hasKind(c.v, "plan-login-"+planProvider, egress.LoginKind),
+		PrivateOK: hasKind(c.v, PrivateOKPrefix+planProvider, KindPrivateOK),
+		Plan:      true,
+	})
 	return out
 }
 
