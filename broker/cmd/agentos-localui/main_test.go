@@ -36,14 +36,18 @@ import (
 
 // P2-2w c4: the page runs setup over agentosd's localui.sock, which
 // serves setup's ops only until finish (Security L6), and keeps its
-// state in memory only (L18). It holds no setup secret and no Wi-Fi
-// password.
+// state in memory only (L18) but for an unsaved private-content answer's
+// hold, which the -held file keeps across a reboot (ONB-private-save-fail
+// s3). It holds no setup secret and no Wi-Fi password.
 func TestThePageRunsSetupThroughAgentosd(t *testing.T) {
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "")
+	held := heldFile(t)
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "", held)
 	if h, ok := cfg.Hooks.(localui.AgentosdSetup); !ok || h.Owner != (localui.Socket{Path: "/run/agentos/localui.sock"}) {
 		t.Fatalf("hooks %#v", cfg.Hooks)
 	}
-	if _, ok := cfg.Store.(*localui.MemStore); !ok {
+	if st, ok := cfg.Store.(localui.HeldStore); !ok || st.Path != held {
+		t.Fatalf("store %#v", cfg.Store)
+	} else if _, ok := st.Inner.(*localui.MemStore); !ok {
 		t.Fatalf("store %#v", cfg.Store)
 	}
 	if cfg.SetupSecret != "" || cfg.Card != nil || cfg.SecondLine != nil || cfg.Providers != nil || cfg.Vault != nil || cfg.Rotation != nil || cfg.AP.Password != "" {
@@ -53,6 +57,9 @@ func TestThePageRunsSetupThroughAgentosd(t *testing.T) {
 		t.Fatalf("no Wi-Fi password is needed to serve the page: %v", err)
 	}
 }
+
+// heldFile is a test's file for the page's held answers (-held).
+func heldFile(t *testing.T) string { return filepath.Join(t.TempDir(), "unsaved.json") }
 
 // The page waits for agentosd's socket before it asks whether setup is
 // open, so a page that starts first does not close setup for its life.
@@ -84,7 +91,7 @@ func TestThePageWaitsForAgentosd(t *testing.T) {
 // REC-4: with the vault process's socket the page serves the Owner Card
 // rotation over that same socket (ARC-2: the display lives here).
 func TestTheVaultSocketWiresTheCardRotation(t *testing.T) {
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock")
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock", heldFile(t))
 	if _, ok := cfg.Rotation.(*localui.Rotation); !ok || cfg.Vault == nil {
 		t.Fatalf("config %+v", cfg)
 	}
@@ -94,12 +101,12 @@ func TestTheVaultSocketWiresTheCardRotation(t *testing.T) {
 // vault process allows it only between the code generator's confirmation
 // and finish; without the socket the step is not served.
 func TestTheVaultSocketServesSetupsHostStep(t *testing.T) {
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock")
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock", heldFile(t))
 	h, ok := cfg.Hooks.(localui.AgentosdSetup)
 	if c, isClient := h.Vault.(*localui.UnlockClient); !ok || !isClient || c != cfg.Vault {
 		t.Fatalf("hooks %#v", cfg.Hooks)
 	}
-	cfg = config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "")
+	cfg = config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "", heldFile(t))
 	if h := cfg.Hooks.(localui.AgentosdSetup); h.Vault != nil || h.TrustHost(true) == nil {
 		t.Fatalf("hooks %#v", cfg.Hooks)
 	}
@@ -108,7 +115,7 @@ func TestTheVaultSocketServesSetupsHostStep(t *testing.T) {
 // #1266 (CAP-9, CH-3): the same socket serves the AI providers page,
 // where the owner changes a provider's private-data answer after setup.
 func TestTheVaultSocketWiresTheProvidersPage(t *testing.T) {
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock")
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "/run/agentos/unlock.sock", heldFile(t))
 	if _, ok := cfg.Providers.(*localui.UnlockClient); !ok {
 		t.Fatalf("config %+v", cfg)
 	}
@@ -195,15 +202,17 @@ var openSetup = localui.AgentosdSetup{Owner: localui.InProcess{
 	}}}
 
 // beginBox is the page's first boot over files in dir, with a reset the
-// test counts in place of the vault process's /card/reset.
-func beginBox(t *testing.T, dir string, resets *int) (localui.Config, firstboot.Route) {
+// test counts in place of the vault process's /card/reset; download is
+// -download-box.
+func beginBox(t *testing.T, dir string, resets *int, download bool) (localui.Config, firstboot.Route) {
 	t.Helper()
-	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "")
+	cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, "/run/agentos/localui.sock", "", heldFile(t))
 	cfg.Hooks = openSetup
 	void := &localui.CodesVoid{}
 	box := localui.CardBox(localui.NewUnlockClient(filepath.Join(dir, "none.sock")),
 		change.FileStore{Path: filepath.Join(dir, "claim.json")}, change.FileStore{Path: filepath.Join(dir, "latch.json")}, void)
 	box.Reset = func() error { *resets++; return nil }
+	box.Download = download
 	cfg, route, err := withFirstBoot(cfg, box, void)
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +256,7 @@ func TestThePageRunsTheFirstBoot(t *testing.T) {
 			t.Fatal(err)
 		}
 		var resets int
-		cfg, route := beginBox(t, dir, &resets)
+		cfg, route := beginBox(t, dir, &resets, false)
 		if route != firstboot.RouteClaim || cfg.Claim == nil || resets != 1 {
 			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
 		}
@@ -261,7 +270,7 @@ func TestThePageRunsTheFirstBoot(t *testing.T) {
 			t.Fatal(err)
 		}
 		var resets int
-		cfg, route := beginBox(t, dir, &resets)
+		cfg, route := beginBox(t, dir, &resets, false)
 		if route != firstboot.RouteReinstall || cfg.Claim == nil || resets != 0 {
 			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
 		}
@@ -271,12 +280,24 @@ func TestThePageRunsTheFirstBoot(t *testing.T) {
 	})
 	t.Run("download", func(t *testing.T) {
 		var resets int
-		cfg, route := beginBox(t, t.TempDir(), &resets)
+		cfg, route := beginBox(t, t.TempDir(), &resets, true)
 		if route != firstboot.RouteDownload || cfg.Claim != nil || resets != 1 {
 			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
 		}
 		if w := get(t, cfg, "/setup"); w.Code != http.StatusOK {
 			t.Fatalf("/setup on a downloaded box: %d %q", w.Code, w.Header().Get("Location"))
+		}
+	})
+	// #1270: the same bare box on any image but the download's (no
+	// -download-box) is told to reinstall; /setup stays behind the gate.
+	t.Run("bare without -download-box", func(t *testing.T) {
+		var resets int
+		cfg, route := beginBox(t, t.TempDir(), &resets, false)
+		if route != firstboot.RouteReinstall || cfg.Claim == nil || resets != 0 {
+			t.Fatalf("route %q, claim %v, resets %d", route, cfg.Claim, resets)
+		}
+		if w := get(t, cfg, "/setup"); w.Code == http.StatusOK {
+			t.Fatalf("/setup served on a bare box without -download-box")
 		}
 	})
 }
@@ -339,7 +360,7 @@ func TestRunGatesSetupOnTheClaim(t *testing.T) {
 	var calls atomic.Int32
 	fakeVault(t, vsock, &calls)
 	base := func(h localui.Hooks) localui.Config {
-		cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, sock, "")
+		cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, sock, "", heldFile(t))
 		cfg.Hooks = h
 		return cfg
 	}
@@ -426,6 +447,13 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 	} {
 		if got := arg(name); got != want {
 			t.Errorf("-%s = %q, want %q", name, got, want)
+		}
+	}
+	// #1270: the shipped image is not the download's, so a box without a
+	// claim state is told to reinstall.
+	for _, w := range exec {
+		if strings.HasPrefix(strings.TrimLeft(w, "-"), "download-box") {
+			t.Errorf("the unit passes %s", w)
 		}
 	}
 	for k, want := range map[string][]string{
@@ -597,4 +625,90 @@ func TestFirstBootWiresTheCardNetwork(t *testing.T) {
 	if !wired {
 		t.Fatal("withFirstBoot does not pass firstboot.Begin the box through withCardNet")
 	}
+}
+
+// flakyOwner is agentosd's localui.sock with a transport error on the
+// first fails calls, then setup's answer: open, or refused when closed.
+type flakyOwner struct {
+	fails  int32
+	closed bool
+	calls  atomic.Int32
+}
+
+func (o *flakyOwner) Call(ctx context.Context, op string, args, out any) error {
+	if o.calls.Add(1) <= o.fails {
+		return errors.New("localui.sock: connection reset")
+	}
+	if op != localapi.OpSetupProgress || o.closed {
+		return localui.Refused(sockets.ErrUnknownOp.Error())
+	}
+	return nil
+}
+
+// Security S-R3 on #1270 (HW-10): the page decides once whether setup is
+// open, from agentosd's answer. A transient error before the answer
+// neither skips the first boot nor opens setup without it; a refusal
+// keeps setup closed whatever agentosd answers later; no answer is an
+// error, and the unit restarts the page.
+// REQ: HW-10, HW-1
+func TestThePageDecidesSetupOnAgentosdsAnswer(t *testing.T) {
+	dir := shortDir(t)
+	sock, vsock := filepath.Join(dir, "a.sock"), filepath.Join(dir, "u.sock")
+	listenSock(t, sock)
+	var calls atomic.Int32
+	fakeVault(t, vsock, &calls)
+	st := &change.MemStore{}
+	if err := claim.Seal(st, "CANA-RYCL-AXMC-KDE2", mrand.New(mrand.NewSource(3)), nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := filepath.Join(dir, "claim.json")
+	if err := os.WriteFile(cs, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := func(o localui.Owner) localui.Config {
+		cfg := config(localui.APConfig{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/24")}, 80, sock, "", heldFile(t))
+		cfg.Hooks = localui.AgentosdSetup{Owner: o}
+		return cfg
+	}
+
+	t.Run("transient error, then open", func(t *testing.T) {
+		o := &flakyOwner{fails: 2}
+		cfg, err := prepare(context.Background(), base(o), sock,
+			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch1.json")})
+		if err != nil || cfg.Claim == nil || cfg.Card == nil {
+			t.Fatalf("err %v, claim %v, card %v", err, cfg.Claim, cfg.Card)
+		}
+		if w := get(t, cfg, "/setup"); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/claim" {
+			t.Fatalf("/setup after a transient error: %d %q", w.Code, w.Header().Get("Location"))
+		}
+	})
+
+	t.Run("refused, then open", func(t *testing.T) {
+		before := calls.Load()
+		o := &flakyOwner{closed: true}
+		cfg, err := prepare(context.Background(), base(o), sock,
+			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch2.json")})
+		if err != nil || cfg.Claim != nil || cfg.Card != nil || calls.Load() != before {
+			t.Fatalf("err %v, claim %v, card %v, vault calls %d", err, cfg.Claim, cfg.Card, calls.Load()-before)
+		}
+		o.closed = false // agentosd answers open from now on
+		if !cfg.Hooks.AlreadySetUp() {
+			t.Fatal("a later open answer reopened a setup the page found closed")
+		}
+		if w := get(t, cfg, "/setup"); w.Code == http.StatusOK {
+			t.Fatal("/setup served without the first boot")
+		}
+	})
+
+	t.Run("no answer", func(t *testing.T) {
+		o := &flakyOwner{fails: 1 << 30}
+		open, err := setupOpen(context.Background(), localui.AgentosdSetup{Owner: o}, 500*time.Millisecond)
+		if err == nil || open {
+			t.Fatalf("open %v, err %v", open, err)
+		}
+	})
 }

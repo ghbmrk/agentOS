@@ -35,6 +35,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/provagent"
 	"github.com/ghbmrk/agentos/broker/recall"
 	"github.com/ghbmrk/agentos/broker/recalltool"
 	"github.com/ghbmrk/agentos/broker/replay"
@@ -357,7 +358,7 @@ func openRecall(ctx context.Context, v *modelroute.Verifier, sc recalltool.Servi
 func main() {
 	var cfg daemon.Config
 	imgs := images{}
-	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, verifySocket, recallDir string
+	var stateDir, runsc, cgroupRoot, accelMode, meterPath, agentMachine, inboxPath, egressSocket, workerRoutes, verifySocket, recallDir string
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB, replayMemMB, builderMemMB int64
 	var diskQuota, sleepHoursFlag string
@@ -403,6 +404,7 @@ func main() {
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
 	flag.Int64Var(&agentMemMB, "agent-mem-mb", defaultAgentMemMB, "the owner's agent machine's memory budget, MB")
 	flag.StringVar(&inboxPath, "guest-inbox", "/var/lib/agentos/guest-inbox.json", "unanswered owner messages to guests, kept across restarts")
+	flag.StringVar(&workerRoutes, "worker-routes", "/run/agentos-egress/provider.sock", "the vault process's provider control socket, which opens each provider worker's route socket (#1014); empty gives provider workers no route")
 	flag.StringVar(&egressSocket, "egress", "/run/agentos-egress/model.sock", "the vault process's model socket (agentos-egress); empty serves no model route")
 	flag.StringVar(&recallDir, "recall", "/var/lib/agentos/recall", "recall index, event bus and provenance (created 0700); empty runs no recall")
 	flag.StringVar(&verifySocket, "owner-verify", "/run/agentos-egress/verify.sock", "the vault process's verify socket, which checks the owner's code-generator codes; empty refuses high-tier codes")
@@ -436,6 +438,9 @@ func main() {
 		log.Fatal(err)
 	}
 	learn.DiskQuota = diskQuota
+	// The provider images whose pinned CLI versions both provider runners
+	// read at each gate check (#1877).
+	pins := readImagePins(imgs, provagent.Builtins())
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
@@ -521,9 +526,29 @@ func main() {
 		if verifySocket != "" {
 			m.Enroll = enroller{modelroute.NewVerifier(verifySocket)}
 		}
+		// "Use my plan" signs in through the provider's CLI in one private
+		// worker (ONB-3, #1264 c4e2b), on machines opened only if it is used
+		// and closed before agentosd opens its own below.
+		var signInHost *setupHost
+		if runsc != "" && workerRoutes != "" {
+			signInHost = newSetupHost(setupMachines{
+				runsc: runsc, stateDir: stateDir, routes: workerRoutes, diskQuota: diskQuota,
+				images: imgs, admit: cfg.Admission,
+				cgroups: func() (*cgroup.Group, error) {
+					return openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
+				},
+				diskReserveMB: diskReserveMB, machineDiskMB: machineDiskMB, workerLayerMB: workerLayerMB,
+			}.open)
+			m.SignIn = newSetupSignIn(signInHost, modelroute.NewRouteControl(workerRoutes), pins)
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		owner, err := m.run(ctx)
 		stop()
+		if signInHost != nil {
+			cctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			signInHost.Close(cctx)
+			cancel()
+		}
 		if errors.Is(err, context.Canceled) {
 			return
 		}
@@ -640,6 +665,9 @@ func main() {
 	if line != nil {
 		cfg.Notes = append(cfg.Notes, line.Note, line.TextsNote)
 	}
+	// ONB-9's plan sign-in line; the provider runner sets and clears it.
+	planLine := &planNote{}
+	cfg.Notes = append(cfg.Notes, planLine.Note)
 	// The modem bridge (agentos-modem, P2-3w) hands owner texts in and
 	// pulls the channel's own texts from the owner socket; until it
 	// reports the owner line, sends fail as down and are counted for the
@@ -807,6 +835,11 @@ func main() {
 			// or merged until that is settled (recall W10).
 			Contained: recallExec.Contained,
 		}
+		var planRoutes *modelroute.RouteControl
+		if workerRoutes != "" {
+			planRoutes = modelroute.NewRouteControl(workerRoutes)
+			vmc.ProviderRoutes = planRoutes
+		}
 		md.set(&vmc)
 		m, err := vm.Open(ctx, vmc)
 		if err != nil {
@@ -827,6 +860,13 @@ func main() {
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			tree.setMachines(m)
 			wt := workerTools(m, imgs, workerImage, workerArgv, workerMaxMB, boxGates(d, "/proc/meminfo", cfg.Admission.HeadroomMB))
+			if wt != nil && planRoutes != nil {
+				pr := providerRunner(m, planRoutes, planLine, pins)
+				pr.Background = ctx // a sign-in's wait ends at shutdown
+				// #1856: plan readings and the owner's reserve (RES-5).
+				wirePlanUsage(pr, planRoutes)
+				wt.Provider = providerTool{pr}
+			}
 			caps.workers(wt != nil)
 			tools := registeredTools(qs, tree, recallTools, wt)
 			if wt != nil {
@@ -913,6 +953,11 @@ func main() {
 	}
 	if line != nil {
 		go line.run(ctx)
+	}
+	// The owner hears once when the access point keeps failing on the
+	// card's network (#1525).
+	if apNetPath != "" {
+		go watchAPUp(ctx, apNetPath, informOwner(d.Owner))
 	}
 	// What is off, in the box log too (OP-9); the digest's sender (DIG-1)
 	// takes this list once it lands.
@@ -1039,6 +1084,90 @@ func workerTools(m *vm.Manager, imgs images, image, argv string, maxMB int64, g 
 		return nil
 	}
 	return &workers.Tools{M: m, Image: image, Argv: strings.Fields(argv), MaxMemMB: maxMB, Stopped: g.stopped, Free: g.room, Avail: g.avail}
+}
+
+// providerRunner serves provider_run (CAP-11) over the built-in
+// declarations and the vault process's route control rc. The owner's grant
+// and private mark are rc's plan state (#1264), and note carries ONB-9's
+// sign-in line. Every other owner-side input is closed until its row lands:
+// no consent. The image's pinned CLI version is read from the image by
+// pins at each check (#1877), as setup's sign-in reads it; an image that
+// pins none keeps the gate closed. Codex's qualification record is empty until S8-live (#809)
+// fills it, so a run refuses with a closed reason and starts nothing. Pool readings and the reserve come from
+// wirePlanUsage (#1856); without them admission refuses (RES-5 fails
+// closed). Journal (OP-8 meter and charge) is unwired; provagent P9 names
+// its owner. Nothing calls StartSignIn until the setup page does (#1264
+// c4e2b). A nil rc or note leaves those inputs closed, as nil pins
+// leave the gate.
+func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, pins imagePins) *provagent.Runner {
+	r := &provagent.Runner{
+		Host: m, Seeder: planSeeder{rc}, Decls: provagent.Builtins(),
+		ImageVersion: pins.version,
+		Granted:      func(string) bool { return false },
+		PrivateOK:    func(string) bool { return false },
+		Consent:      func(string) bool { return false },
+		Logf:         log.Printf,
+		Caps:         provagent.Caps{Wall: 30 * time.Minute, Result: 256 << 10, Brief: 256 << 10},
+		NewID:        func() string { return vm.ProviderPrefix + randHex(6) },
+	}
+	if rc != nil {
+		r.Granted = func(p string) bool { return planGranted(rc, p) }
+		r.PrivateOK = func(p string) bool { return planPrivateOK(rc, p) }
+		r.SignInStored = func(id string) bool { return planSignInStored(rc, id) }
+		r.SignInFor = rc.SignInFor
+	}
+	if note != nil {
+		r.SignIn, r.OnSignedIn = note.set, note.clear
+	}
+	return r
+}
+
+// providerTool adapts the runner to the worker tools' ProviderRunner, so
+// workers links neither provagent nor the model route (ARC-2). A refusal
+// crosses as its closed reason only.
+type providerTool struct{ r *provagent.Runner }
+
+func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (string, error) {
+	out, err := p.r.Run(ctx, provagent.Request{Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
+		Label: q.Label, Class: q.Class, MemMB: q.MemMB})
+	var ref *provagent.Refusal
+	if errors.As(err, &ref) {
+		return "", &workers.ProviderRefusal{Reason: workers.ProviderReason(ref.Reason)}
+	}
+	return out, err
+}
+
+// planSeeder adapts the vault process's route control to provagent's
+// Seeder, mapping its errors onto provagent's sentinels. The control socket
+// mints Codex placeholders only (egress PlanLogins.Seed), so any other
+// provider is refused before it is asked (#1378, #1379, #1380 add theirs).
+type planSeeder struct{ rc *modelroute.RouteControl }
+
+func (s planSeeder) Seed(provider, id string) (map[string][]byte, error) {
+	if provider != "codex" {
+		return nil, fmt.Errorf("no plan seed for provider %q", provider)
+	}
+	if s.rc == nil {
+		return nil, errors.New("no plan route control")
+	}
+	seed, err := s.rc.Seed(id)
+	switch {
+	case err == nil:
+		return seed, nil
+	case errors.Is(err, modelroute.ErrNoPlanLogin):
+		return nil, fmt.Errorf("%w: %v", provagent.ErrNoLogin, err)
+	case errors.Is(err, modelroute.ErrRouteBusy):
+		return nil, fmt.Errorf("%w: %v", provagent.ErrRouteBusy, err)
+	case errors.Is(err, modelroute.ErrVaultLocked):
+		return nil, fmt.Errorf("%w: %v", provagent.ErrVaultLocked, err)
+	}
+	return nil, err
+}
+
+func (s planSeeder) Close(id string) {
+	if s.rc != nil {
+		s.rc.Close(id)
+	}
 }
 
 // workerGates are what the worker tools read of the box: the owner's
@@ -1242,6 +1371,17 @@ func ownerVerifyErr(err error) error {
 // recallNotify is recall's take-back notice to the owner. Each closes a
 // take-back the owner approved, so it is approval class; the texts name
 // the agent, so they keep the agent prefix (W5-Dc-r1b QH-9).
+// informOwner sends the broker's fixed-wording notices (owner.Inform)
+// once the owner channel is up.
+func informOwner(own func() *owner.Channel) func(string) error {
+	return func(text string) error {
+		if ch := own(); ch != nil {
+			return ch.Inform(text)
+		}
+		return errors.New("no owner channel")
+	}
+}
+
 func recallNotify(own func() *owner.Channel) func(string) error {
 	return func(text string) error {
 		if ch := own(); ch != nil {

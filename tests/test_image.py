@@ -5,6 +5,7 @@
 import ast
 import base64
 import contextlib
+import errno
 import json
 import configparser
 import io
@@ -1618,6 +1619,32 @@ class ConfigTest(unittest.TestCase):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Service"]["NoNewPrivileges"], "yes")
 
+    # REQ: CAP-11, CAP-8
+    def test_broker_registers_the_codex_image_and_offers_worker_tools(self):
+        # #1721: provider_run is offered only when worker tools are on (-worker-image names a
+        # registered image), and a Codex run starts from the image the declaration names, which
+        # -image must register at the path build.sh writes it to.
+        exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
+        images = dict(v.split("=", 1) for v in re.findall(r"(?:^|\s)-image\s+(\S+)", exe))
+        decl = re.search(r'"codex": \{\s*ID: "codex",.*?Image: "(\w+)"', (ROOT / "broker/provagent/declare.go").read_text(), re.S)
+        self.assertEqual(images.get(decl.group(1)), "/usr/lib/agentos/images/codex")
+        worker = re.search(r"(?:^|\s)-worker-image\s+(\S+)", exe)
+        self.assertIsNotNone(worker)
+        self.assertIn(worker.group(1), images)
+        b = (IMG / "build.sh").read_text()
+        self.assertIn('sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE' + images["codex"] + '"', b)
+
+    # REQ: CAP-8
+    def test_worker_images_ship_the_worker_argv(self):
+        # A worker machine runs -worker-argv (default "sleep infinity") while the guest drives it.
+        argv = re.search(r'"worker-argv", "([^"]+)"', (ROOT / "broker/cmd/agentosd/main.go").read_text()).group(1)
+        exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
+        self.assertNotIn("-worker-argv", exe)
+        worker = re.search(r"(?:^|\s)-worker-image\s+(\S+)", exe).group(1)
+        loop = next(l for l in (ROOT / "guest" / worker / "build-rootfs.sh").read_text().splitlines()
+                    if l.startswith("for b in /bin/sh "))
+        self.assertIn("/bin/" + argv.split()[0], loop.removesuffix("; do").split()[3:])
+
     def test_broker_reads_onboarding_s_settings(self):
         # It no longer waits for them (SetupServicesTest): a preloaded box starts it in setup mode.
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
@@ -2361,7 +2388,7 @@ class ConfFilesTest(unittest.TestCase):
     def test_without_the_default_deny_the_box_links_pass(self):
         # The mutant: drop the default deny, and every bypass passes the link rule (the '..', world-
         # writable and SERVICE_DIRS rules do not see them).
-        m = self.mutant('    if path.startswith("/") and rel.split("/", 1)[0] not in BOX_MOUNTS:\n',
+        m = self.mutant('    if path.startswith("/") and (made or rel.split("/", 1)[0] not in BOX_MOUNTS):\n',
                         "    if False:\n")
         self.box_tree()
         for target in self.BOX_BYPASSES:
@@ -2939,7 +2966,10 @@ class TmpfilesTest(unittest.TestCase):
                    "L /etc/y - - - - /proc/self/mounts", "L /etc/mtab - - - - /proc/self/root",
                    "L /etc/mtab - - - - /proc/self"):
             self.assertTrue(self.refused(ln + "\n"), ln)
-        self.assertFalse(self.refused("L /etc/y - - - - /run/agentos\n"))
+        self.assertFalse(self.refused("L /etc/y - - - - /usr/lib/agentos\n"))
+        # #1803: a link tmpfiles.d makes is held to the tree's link rules, so one into /run, which the
+        # box fills at boot, is refused too (TreeLinkTmpfilesTest).
+        self.assertTrue(self.refused("L /etc/y - - - - /run/agentos\n"))
         # Any ".." in a link target or copy source is refused, even a harmless one (#1543 Security B1):
         # the check walks it without links, the box with them. Only TMPFILES_STOCK's lines are exempt.
         for ln in ("L /etc/os-release - - - - ../usr/lib/os-release", "C /opt/x - - - - /usr/share/../share/y",
@@ -3017,6 +3047,357 @@ def reference_tool(case, name):
             case.fail("AGENTOS_REQUIRE_REFERENCE_TOOLS=1 but %s is not installed" % name)
         case.skipTest("%s is not installed; this test is skipped without it" % name)
     return path
+
+
+class TreeLinkTmpfilesTest(unittest.TestCase):
+    """#1803: the link rules hold for links tmpfiles.d makes on the box, for tree links through steps
+    tmpfiles.d makes, for '..' past a box mount in tmpfiles' own resolution, and for steps of the tree
+    whose owner or ACL, not mode, lets someone else write them. Each refused case passed before."""
+    # REQ: HW-1, DEV-2
+
+    RULES = "etc/udev/rules.d"
+    mutant = ConfFilesTest.mutant
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        nodump(self.root)
+        radio(self.root)
+        uplink(self.root)
+        (self.root / "run").mkdir()
+        (self.root / "proc").mkdir()
+        (self.root / "usr/lib/x").mkdir(parents=True)
+        link(self.root, "var/run", "/run")
+        link(self.root, "var/lock", "/run/lock")
+        # The guarded-path and link checks are under test here; TmpfilesAllowTest is the allowlist's.
+        patch = unittest.mock.patch.object(check, "tmpfiles_allow_violations", return_value=[])
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def tmpfiles(self, text):
+        return write(self.root, "usr/lib/tmpfiles.d/x.conf", text)
+
+    def v(self, mod=check):
+        return " | ".join(mod.violations(self.root))
+
+    # (a) A tmpfiles.d L line makes a link on the box, so the tree's link rules apply to it.
+
+    def test_a_tmpfiles_link_into_a_world_writable_or_service_directory_is_refused(self):
+        for ln in ("L /etc/udev/rules.d - - - - /var/tmp", "L+ /etc/udev/rules.d - - - - /var/tmp/r",
+                   "L /etc/udev/rules.d - - - - /tmp", "L /etc/udev/rules.d - - - - /var/lib/agentos-egress",
+                   "L /etc/udev/rules.d - - - - /run/agentos-netjoin/r", "L /etc/x - - - - /home/u",
+                   "L /etc/x - - - - %V", "L /etc/x - - - - /dev/shm"):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("x.conf: line 1: %s; a link to " % ln, self.v())
+                finally:
+                    f.unlink()
+
+    def test_a_tmpfiles_link_into_what_the_box_fills_is_refused(self):
+        # Default deny: /dev/fd/3 is the reader's fd 3. A tmpfiles link under a box mount is made on
+        # the box, after the mount, so unlike a tree link there it is not hidden.
+        for ln in ("L /etc/udev/rules.d - - - - /dev/fd/3", "L /run/x - - - - /dev/fd/4",
+                   "L /etc/y - - - - /run/agentos", "L /var/run/x - - - - /dev/stdin"):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("x.conf: line 1: %s; a link to " % ln, self.v())
+                    self.assertIn("which the box fills at boot", self.v())
+                finally:
+                    f.unlink()
+
+    def test_a_tree_link_through_a_tmpfiles_link_is_refused_twice(self):
+        # The tree link reads a path the tree lacks; tmpfiles.d makes that path a link to fd 3.
+        link(self.root, self.RULES, "/var/lib/x")
+        self.tmpfiles("L /var/lib/x - - - - /dev/fd/3\n")
+        out = self.v()
+        self.assertIn("x.conf: line 1: L /var/lib/x - - - - /dev/fd/3; a link to /dev/fd/3", out)
+        self.assertIn("etc/udev/rules.d: a link to /var/lib/x, through /var/lib/x, which the tree lacks "
+                      "and usr/lib/tmpfiles.d/x.conf line 1 makes a link", out)
+
+    def test_stock_and_allowlisted_tmpfiles_links_pass(self):
+        # Every L line on the allowlist, and Debian's /run/shm alias of /dev/shm (TMPFILES_STOCK).
+        lines = [ln.partition("\t")[2] for ln in (MK / check.TMPFILES_ALLOW).read_text().split("\n")
+                 if re.match(r"[^#\t][^\t]*\tL", ln)]
+        self.assertIn("L /run/shm     -    -    -    -   /dev/shm", lines)
+        for ln in lines + ["L /etc/y - - - - /usr/lib/x", "L /etc/y - - - - /usr/lib/x/y"]:
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertNotIn("x.conf: line", self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_tmpfiles_link_rule_its_links_pass(self):
+        m = self.mutant('            elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):\n',
+                        "            elif False:\n")
+        self.tmpfiles("L /etc/udev/rules.d - - - - /var/tmp\n")
+        self.assertNotIn("x.conf: line", self.v(m))
+        self.assertIn("x.conf: line", self.v())
+
+    # (b) A tree link through a step the tree lacks: tmpfiles.d may make that step.
+
+    def test_a_tree_link_through_a_step_tmpfiles_makes_for_someone_else_is_refused(self):
+        link(self.root, self.RULES, "/opt/nope/x")
+        for ln, how in (("L /opt/nope - - - - /usr/lib", "makes a link"),
+                        ("L+ /opt/* - - - - /usr/lib", "makes a link"),
+                        ("d /opt/nope 1777 root root", "makes mode 1777 for root:root"),
+                        ("D /opt/nope 0755 agentos-egress -", "makes mode 0755 for agentos-egress:-"),
+                        ("d /opt/nope - agentos-egress -", "makes mode - for agentos-egress:-"),
+                        ("d /opt/nope 0775 root agentos", "makes mode 0775 for root:agentos"),
+                        ("d /opt/nope 07x9 root root", "makes with a mode it cannot parse (07x9)"),
+                        ("a+ /opt/nope - - - - u:agentos-egress:rwx", "makes with a POSIX ACL"),
+                        ("d /opt/nope/x 0700 agentos-egress -", "makes mode 0700 for agentos-egress:-")):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /opt/nope/x, through /opt/", self.v())
+                    self.assertIn("usr/lib/tmpfiles.d/x.conf line 1 %s" % how, self.v())
+                finally:
+                    f.unlink()
+
+    def test_a_tree_link_through_a_root_only_step_tmpfiles_makes_passes(self):
+        link(self.root, self.RULES, "/opt/nope/x")
+        for ln in ("d /opt/nope 0755 root root", "d /opt/nope - - -", "d /opt/nope 0775 root root",
+                   "d /opt/nope", "L /opt/other - - - - /var/tmp"):
+            with self.subTest(ln=ln):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
+    def test_a_link_into_a_service_users_cache_is_refused(self):
+        # Debian's man-db makes /var/cache/man for the man user at boot, and the tree may lack it.
+        (self.root / "var/cache").mkdir(parents=True)
+        link(self.root, self.RULES, "/var/cache/man/r")
+        self.tmpfiles("d /var/cache/man 0755 man man\n")
+        self.assertIn("etc/udev/rules.d: a link to /var/cache/man/r, through /var/cache/man, which the tree "
+                      "lacks and usr/lib/tmpfiles.d/x.conf line 1 makes mode 0755 for man:man", self.v())
+
+    def test_without_the_tmpfiles_step_rule_the_link_passes(self):
+        m = self.mutant("            for rel_, n, why in tmpfiles_makers(root):\n",
+                        "            for rel_, n, why in []:\n")
+        link(self.root, self.RULES, "/opt/nope/x")
+        self.tmpfiles("d /opt/nope 1777 root root\n")
+        self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    # (c) tmpfiles' own resolution: a '..' after a box mount is the box's to resolve.
+
+    def test_tree_resolve_refuses_a_dotdot_past_a_box_mount(self):
+        link(self.root, "a", "/run/q/../etc")
+        with self.assertRaises(OSError) as e:
+            check.tree_resolve(str(self.root), ["a", "sysctl.d", "x.conf"])
+        self.assertEqual(e.exception.errno, errno.EXDEV)
+        self.assertEqual(check.tree_resolve(str(self.root), ["var", "run", "q"]), ["run", "q"])
+        # tmpfiles_hits takes such a path as one that may reach a guarded one.
+        self.tmpfiles("f /a/sysctl.d/x.conf\n")
+        self.assertIn("x.conf: line 1: f /a/sysctl.d/x.conf; it reaches /proc, /sys", self.v())
+
+    def test_without_the_dotdot_refusal_tree_resolve_pops_it(self):
+        m = self.mutant('        if ".." in p.split("/") + parts[k:]:\n', "        if False:\n")
+        link(self.root, "a", "/run/q/../etc")
+        self.assertEqual(m.tree_resolve(str(self.root), ["a", "x"]), ["run", "etc", "x"])
+
+    # (d) Who can write a step is its owner and ACL as well as its mode.
+
+    def test_a_link_through_a_step_with_a_posix_acl_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        real = check.tree_xattrs
+        for acl in check.ACL_XATTRS:
+            with self.subTest(acl=acl), unittest.mock.patch.object(
+                    check, "tree_xattrs", lambda root, rel, acl=acl: [acl] if rel == "usr/lib/x" else real(root, rel)):
+                self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x, which carries a "
+                              "POSIX ACL (%s)" % acl, self.v())
+        with unittest.mock.patch.object(check, "tree_xattrs", lambda root, rel: ["user.x", "security.selinux"]):
+            self.assertNotIn("etc/udev/rules.d:", self.v())
+
+    def test_a_step_whose_attributes_cannot_be_read_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        def boom(root, rel):
+            raise OSError(errno.EIO, "Input/output error")
+        with unittest.mock.patch.object(check, "tree_xattrs", boom):
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr, which carries a POSIX ACL "
+                          "(unreadable (Input/output error))", self.v())
+
+    def test_tree_xattrs_reads_the_names_and_none_where_unsupported(self):
+        names = check.tree_xattrs(str(self.root), "usr/lib/x")
+        self.assertFalse(set(names) & set(check.ACL_XATTRS))
+        with unittest.mock.patch.object(check.os, "listxattr", side_effect=OSError(errno.ENOTSUP, "no")):
+            self.assertEqual(check.tree_xattrs(str(self.root), "usr/lib/x"), [])
+        with unittest.mock.patch.object(check.os, "listxattr", side_effect=OSError(errno.EIO, "io")):
+            with self.assertRaises(OSError):
+                check.tree_xattrs(str(self.root), "usr/lib/x")
+        with self.assertRaises(FileNotFoundError):
+            check.tree_xattrs(str(self.root), "usr/lib/nope")
+        link(self.root, "usr/lib/l", "/var/tmp")
+        with self.assertRaises(OSError):
+            check.tree_xattrs(str(self.root), "usr/lib/l/x")
+
+    def test_a_link_through_a_step_another_uid_owns_is_refused(self):
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        owner = check.TREE_OWNER
+        real = check.tree_lstat
+
+        def lstat(root, rel):
+            st = real(root, rel)
+            if rel != "usr/lib/x" or st is None:
+                return st
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, owner + 1000) + tuple(st)[5:])
+        with unittest.mock.patch.object(check, "tree_lstat", lstat):
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x, which uid %d owns"
+                          % (owner + 1000), self.v())
+        self.assertNotIn("etc/udev/rules.d:", self.v())
+
+    def test_without_the_owner_and_acl_rule_those_links_pass(self):
+        m = self.mutant("        if st.st_uid != TREE_OWNER or acl:\n", "        if False:\n")
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        with unittest.mock.patch.object(m, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]):
+            self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+        with unittest.mock.patch.object(check, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]):
+            self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+
+    # (e) The rules hold for each directory the chase walks through, not only the steps of where it
+    # ends: whoever can write a directory holding a link the chase follows decides where it leads.
+
+    def owned(self, rel):
+        # tree_lstat with REL owned by a uid other than the tree's.
+        real, owner = check.tree_lstat, check.TREE_OWNER
+
+        def lstat(root, r):
+            st = real(root, r)
+            if r != rel or st is None:
+                return st
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, owner + 1000) + tuple(st)[5:])
+        return unittest.mock.patch.object(check, "tree_lstat", lstat)
+
+    def test_a_link_through_a_directory_another_uid_owns_is_refused(self):
+        (self.root / "opt/d").mkdir(parents=True)
+        link(self.root, "opt/d/x", "/usr/lib/x")
+        link(self.root, self.RULES, "/opt/d/x")
+        with self.owned("opt/d"):
+            self.assertIn("etc/udev/rules.d: a link to /opt/d/x, through /opt/d, which uid %d owns"
+                          % (check.TREE_OWNER + 1000), self.v())
+        self.assertNotIn("etc/udev/rules.d:", self.v())
+
+    def test_a_tmpfiles_link_through_a_directory_another_uid_owns_is_refused(self):
+        (self.root / "opt/d").mkdir(parents=True)
+        link(self.root, "opt/d/x", "/usr/lib/x")
+        ln = "L /etc/udev/rules.d - - - - /opt/d/x"
+        self.tmpfiles(ln + "\n")
+        with self.owned("opt/d"):
+            self.assertIn("x.conf: line 1: %s; a link to /opt/d/x, through /opt/d, which uid %d owns"
+                          % (ln, check.TREE_OWNER + 1000), self.v())
+        self.assertNotIn("x.conf:", self.v())
+
+    def test_a_link_through_a_world_writable_directory_is_refused(self):
+        (self.root / "var/tmp").mkdir(parents=True)
+        (self.root / "var/tmp").chmod(0o1777)
+        (self.root / "opt/w").mkdir(parents=True)
+        (self.root / "opt/w").chmod(0o1777)
+        for d in ("var/tmp", "opt/w"):
+            with self.subTest(d=d):
+                link(self.root, d + "/x", "/usr/lib/x")
+                link(self.root, self.RULES, "/%s/x" % d)
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /%s/x, inside /%s, which anyone" % (d, d), self.v())
+                finally:
+                    (self.root / self.RULES).unlink()
+
+    def test_a_link_through_a_root_owned_directory_passes(self):
+        (self.root / "opt/d").mkdir(parents=True)
+        link(self.root, "opt/d/x", "/usr/lib/x")
+        link(self.root, self.RULES, "/opt/d/x")
+        self.tmpfiles("L /etc/udev/hwdb.d - - - - /opt/d/x\n")
+        self.assertNotIn("etc/udev/rules.d:", self.v())
+        self.assertNotIn("x.conf:", self.v())
+
+    def test_without_the_walked_rule_those_links_pass(self):
+        m = self.mutant("        why = step_refusal(root, d, target, True)\n", "        why = None\n")
+        (self.root / "opt/w").mkdir(parents=True)
+        (self.root / "opt/w").chmod(0o1777)
+        link(self.root, "opt/w/x", "/usr/lib/x")
+        link(self.root, self.RULES, "/opt/w/x")
+        self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+        self.assertIsNone(m.tmpfiles_link_refusal(str(self.root), self.RULES, "/opt/w/x"))
+        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
+        self.assertIsNotNone(check.tmpfiles_link_refusal(str(self.root), self.RULES, "/opt/w/x"))
+
+    # (f) Potency R1: the rules no other test pins.
+
+    def test_a_tmpfiles_link_the_check_cannot_follow_is_refused(self):
+        link(self.root, "etc/loop", "/etc/loop")
+        ln = "L /etc/x - - - - /etc/loop/y"
+        self.tmpfiles(ln + "\n")
+        self.assertIn("x.conf: line 1: %s; a link to /etc/loop/y, which the tree check cannot follow" % ln, self.v())
+        m = self.mutant('        return "a link to %s, which the tree check cannot follow (%s) (#1803)" % (to, e.strerror)\n',
+                        "        return None\n")
+        self.assertIsNone(m.tmpfiles_link_refusal(str(self.root), "etc/x", "/etc/loop/y"))
+
+    def test_a_step_tmpfiles_makes_through_a_tree_link_is_refused(self):
+        (self.root / "opt").mkdir()
+        link(self.root, "usr/local", "/opt")
+        link(self.root, self.RULES, "/opt/nope/r")
+        self.tmpfiles("d /usr/local/nope 1777 root root\n")
+        self.assertIn("etc/udev/rules.d: a link to /opt/nope/r, through /opt/nope, which the tree lacks", self.v())
+        m = self.mutant("            paths.append(tree_resolve(root, parts))\n", "            pass\n")
+        self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+
+    def test_a_link_to_a_file_another_uid_owns_or_with_an_acl_is_refused(self):
+        write(self.root, "usr/lib/x/r", "r\n")
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        with self.owned("usr/lib/x/r"):
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x/r, which uid %d owns"
+                          % (check.TREE_OWNER + 1000), self.v())
+        real = check.tree_xattrs
+        with unittest.mock.patch.object(check, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
+                                        if rel == "usr/lib/x/r" else real(root, rel)):
+            self.assertIn("through /usr/lib/x/r, which carries a POSIX ACL", self.v())
+        self.assertNotIn("etc/udev/rules.d:", self.v())
+        m = self.mutant('        why = step_refusal(root, d, target, not path.startswith("/"), st)\n',
+                        '        why = step_refusal(root, d, target, not path.startswith("/") and k < len(parts), st)\n')
+        with unittest.mock.patch.object(m, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
+                                        if rel == "usr/lib/x/r" else []):
+            self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+
+    # SERVICE_DIRS lists every directory a unit's service user owns.
+
+    UNITS = sorted(list((MK / "mkosi.extra/usr/lib/systemd/system").glob("*.service"))
+                   + list((ROOT / "broker/cmd").glob("*/*.service")))
+    UNIT_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "CacheDirectory": "var/cache",
+                 "LogsDirectory": "var/log"}
+
+    def service_dirs_missing(self, service_dirs):
+        out = []
+        for u in self.UNITS:
+            keys = {}
+            for ln in u.read_text().split("\n"):
+                k, _, val = ln.strip().partition("=")
+                keys.setdefault(k.strip(), []).append(val.strip())
+            dyn = (keys.get("DynamicUser") or ["no"])[-1].lower() in ("yes", "true", "1", "on")
+            user = (keys.get("User") or ["root"])[-1]
+            if not dyn and user in ("", "root", "0"):
+                continue
+            for key, top in self.UNIT_DIRS.items():
+                for val in keys.get(key, []):
+                    for d in val.split():
+                        d = top + "/" + d.split(":")[0].strip("/")
+                        if not any(d == s or d.startswith(s + "/") for s in service_dirs):
+                            out.append("%s: %s" % (u.name, d))
+        return out
+
+    def test_every_service_users_directory_is_in_service_dirs(self):
+        self.assertIn("agentos-egress.service", [u.name for u in self.UNITS])
+        self.assertIn("agentos-localui.service", [u.name for u in self.UNITS])
+        self.assertEqual(self.service_dirs_missing(check.SERVICE_DIRS), [])
+        # The check sees a dropped entry.
+        for gone in ("var/lib/agentos-egress", "run/agentos-netjoin", "var/lib/agentos-localui"):
+            with self.subTest(gone=gone):
+                self.assertNotEqual(self.service_dirs_missing([s for s in check.SERVICE_DIRS if s != gone]), [])
 
 
 class ReferenceToolTest(unittest.TestCase):
@@ -3583,13 +3964,13 @@ def fs_offences(source, allowed, readers):
 class TreeAccessTest(unittest.TestCase):
     """#1543 Security delta 4 B1, structurally: three review rounds each found a reader of the image
     tree that skipped the link rule (a dangling link in sysctl.d, then tmpfiles.d, then etc/fstab
-    through pathlib). mkosi.finalize may touch the file system only in the four tree primitives
-    (tree_lstat, tree_listdir, tree_readlink, tree_read), none of which follows a link on the build
-    host, and in the two functions that read the repository's tmpfiles.allow, not the tree. Only
+    through pathlib). mkosi.finalize may touch the file system only in the five tree primitives
+    (tree_lstat, tree_listdir, tree_readlink, tree_read, and tree_xattrs, #1803), none of which follows
+    a link on the build host, and in the two functions that read the repository's tmpfiles.allow, not the tree. Only
     Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
-    ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read",
+    ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
                          "tmpfiles_allow_path", "tmpfiles_allowed"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
@@ -3803,13 +4184,14 @@ class UplinkTest(unittest.TestCase):
         # CI's boot test plugs in a virtual NIC and reads this line (ci_boot.sh).
         out, _ = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 1)])
         lines = out.splitlines()
-        self.assertEqual(lines[0], "agentos-uplink: enp1s0 192.0.2.10/24")
-        self.assertTrue(lines[1].startswith("agentos-boot: bless=good"), lines)
+        # One line, so the console's other writers cannot split it between the two (#1764).
+        self.assertEqual(lines[0], "agentos-uplink: enp1s0 192.0.2.10/24 agentos-boot: bless=good root_bytes=1073741824")
+        self.assertEqual(sum("agentos-boot:" in l for l in lines), 1, lines)
 
     def test_boot_report_waits_briefly_without_a_cable(self):
         # The radio and virtual links never count; an unplugged port gets about 5 s for carrier, no more.
         out, calls = self.report([("wlan0", "wlan", 1), ("veth0", "virtual", 1), ("enp1s0", "ether", 0)])
-        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertTrue(out.splitlines()[0].startswith("agentos-uplink: none agentos-boot: bless=good"), out)
         self.assertIn("sleep", calls)
         self.assertLessEqual(calls.count("sleep"), 5)
         self.assertNotIn("ip ", calls)
@@ -3820,12 +4202,12 @@ class UplinkTest(unittest.TestCase):
         flip = ('n=$(grep -c sleep "$NET/../log"); [ "$n" = 2 ] && echo 0 >"$NET/enp1s0/carrier"; '
                 '[ "$n" = 3 ] && echo 1 >"$NET/enp1s0/carrier"; :')
         out, calls = self.report([("enp1s0", "ether", None)], on_sleep=flip)
-        self.assertEqual(out.splitlines()[0], "agentos-uplink: enp1s0 192.0.2.10/24")
+        self.assertTrue(out.splitlines()[0].startswith("agentos-uplink: enp1s0 192.0.2.10/24 agentos-boot: "), out)
         self.assertEqual(calls.count("sleep"), 3)
 
     def test_boot_report_gives_up_on_a_lease_that_never_comes(self):
         out, calls = self.report([("enp1s0", "ether", 1)], addr="")
-        self.assertEqual(out.splitlines()[0], "agentos-uplink: none")
+        self.assertTrue(out.splitlines()[0].startswith("agentos-uplink: none agentos-boot: bless=good"), out)
         self.assertLessEqual(calls.count("sleep"), 30)
 
     def probe(self, mode):
@@ -3877,9 +4259,91 @@ class UplinkTest(unittest.TestCase):
         s = (IMG / "ci_boot.sh").read_text()
         self.assertIn('NIC="user,model=virtio-net-pci,', s)
         self.assertIn('-nic "${NIC:-none}"', s)
-        self.assertIn('has "$W/console.log" "agentos-uplink: "', s)
-        self.assertIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
         self.assertIn('has "$W/console-reboot.log" "agentos-uplink: none"', s)
+
+    def test_first_boot_lease_check_is_positive(self):
+        # REQ: HW-10. Security finding 4 at d9cfaff: the first boot must show an interface and an
+        # address on the report's one line; a line damaged inside "none" is not read as a lease.
+        s = (IMG / "ci_boot.sh").read_text()
+        lease = re.search(r"^lease='([^']*)'\n", s, re.M).group(1)
+        self.assertIn('grep -aqE "$lease" "$W/console.log" && echo "ok   $lease" || { echo "MISS $lease"; fail=1; }', s)
+        self.assertNotIn('hasnt "$W/console.log" "agentos-uplink: none"', s)
+        out, _ = self.report([("enp1s0", "ether", 1)])
+        line = "[    6.49] boot-report[799]: " + out.splitlines()[0]
+        def grep(text):
+            return subprocess.run(["grep", "-aqE", lease], input=text.encode()).returncode == 0
+        self.assertTrue(grep(line), line)
+        out, _ = self.report([("enp1s0", "ether", 0)])
+        self.assertFalse(grep(out.splitlines()[0]), out)
+        for bad in ("agentos-uplink: no agentos-boot: bless=good", "agentos-uplink: n?ne agentos-boot: bless=good",
+                    "agentos-uplink: enp0s2 10.0.2.15/24\n agentos-boot: bless=good"):
+            self.assertFalse(grep(bad), bad)
+
+    def test_a_lost_reboot_line_costs_minutes_not_half_an_hour(self):
+        # REQ: HW-10. #1764: the reboot of an already-blessed drive reaches its health line in
+        # about a minute, so a line that never comes ends the wait after TMO=600, not 1800.
+        s = (IMG / "ci_boot.sh").read_text()
+        self.assertIn('TMO=600 boot "$W/console-reboot.log" "$D"\n', s)
+        self.assertIn("${TMO:-1800}", s)
+
+    def test_no_console_may_carry_the_host_verdict(self):
+        # REQ: HW-10. #1764 (D27 follow-up): all four consoles, not only the e2e one, fail the run
+        # when the guest wrote the verdict text. Potency/UX 4 and Security 2 at d9cfaff: the check
+        # runs in the e2e block after the e2e boot and its console check (so console-e2e.log is this
+        # run's) and just before the verdict, once; Security 1: it reads the console raw and cleaned.
+        s = (IMG / "ci_boot.sh").read_text()
+        loop = ('\tfor c in console console-reboot console-two-drives console-e2e; do\n'
+                '\t\t[ -f "$W/$c.log" ] || continue\n'
+                '\t\tfor v in "G1 PROVEN" "G1 NOT PROVEN"; do\n'
+                '\t\t\t{ cat "$W/$c.log"; clean <"$W/$c.log"; } | grep -aqF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; }'
+                ' || echo "ok   no \\"$v\\" in $c.log"\n'
+                '\t\tdone\n\tdone\n')
+        self.assertEqual(s.count(loop), 1)
+        self.assertEqual(s.count("for c in console console-reboot"), 1)
+        e2e = s.index('if [ -n "${E2E:-}" ]; then')
+        call = s.index('\te2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1\n')
+        verdict = s.index('\tg1_verdict "$W/e2e-done.log" "$fail"\n')
+        self.assertLess(e2e, call)
+        self.assertLess(call, s.index(loop))
+        self.assertLess(s.index(loop), verdict)
+        self.assertNotIn('hasnt "$W/console-e2e.log" "G1 PROVEN"', s)
+        self.assertNotIn('hasnt "$W/console-e2e.log" "G1 NOT PROVEN"', s)
+
+    def test_verdict_text_split_by_escapes_fails_the_run(self):
+        # REQ: HW-10. Security finding 1 at d9cfaff: "G1 PRO<ESC>[mVEN" renders as the verdict in
+        # a terminal, so the check reads the console cleaned and fails the run on it. Security
+        # finding 1 at 60766a9: cleaning deletes an OSC body, so the check reads it raw too.
+        clean = (b"[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n"
+                 b"[ 8.0] box-e2e[817]: agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+        for spoof in (b"x G1 PRO\x1b[mVEN y\n", b"x G1 PRO\x1b]0;t\x07VEN y\n", b"x G1 NOT\x1b[0m PROVEN\r\n",
+                      b"x \x1b]0;G1 PROVEN\x07 y\n", b"x \x1b]2;G1 NOT PROVEN\x1b\\ y\n"):
+            out = self.e2e_block(clean + spoof)
+            self.assertIn("UNEXPECTED G1 ", out, spoof)
+            self.assertTrue(out.endswith("ci_boot: G1 NOT PROVEN (run failed)\nrc=1\n"), out)
+
+    def test_boot_report_and_e2e_run_come_before_the_serial_login(self):
+        # REQ: HW-10. Potency/UX 1 at d9cfaff (#1705, #1746, #1747): serial-getty@ttyS0's start
+        # resets and hangs up the console, discarding queued output, so in CI the boot report and
+        # the e2e run are ordered before it. Every boot() passes the report's drop-in as an SMBIOS
+        # credential; the e2e unit (CI only) carries the ordering itself.
+        s = (IMG / "ci_boot.sh").read_text()
+        m = re.search(r"^REPORT_FIRST=\" -smbios type=11,value=io\.systemd\.credential\.binary:"
+                      r"systemd\.unit-dropin\.agentos-boot-report\.service=\$\(printf '([^']*)' \| base64 -w0\)\"\n",
+                      s, re.M)
+        self.assertIsNotNone(m)
+        dropin = subprocess.run(["sh", "-c", "printf '%s'" % m.group(1)], capture_output=True, text=True,
+                                check=True).stdout
+        cp = configparser.ConfigParser()
+        cp.read_string(dropin)
+        self.assertEqual(cp["Unit"]["Before"], "serial-getty@ttyS0.service")
+        boot = re.search(r"^boot\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        self.assertIn(' -nic "${NIC:-none}" ${LAN:+-nic "$LAN"} $REPORT_FIRST ${EXTRA:-} &\n', boot)
+        self.assertLess(s.index("REPORT_FIRST="), s.index("boot() {"))
+        e2e = ini(IMG / "e2e/agentos-e2e.service")
+        self.assertIn("serial-getty@ttyS0.service", e2e["Unit"]["Before"].split())
+        # The getty named is the one the kernel console makes: console=ttyS0 is the last console=.
+        cmdline = (MK / "mkosi.conf").read_text()
+        self.assertEqual(re.findall(r"console=(\S+)", cmdline)[-1], "ttyS0")
 
     def g1_verdict(self, done, runfail="0"):
         s = (IMG / "ci_boot.sh").read_text()
@@ -3922,8 +4386,6 @@ class UplinkTest(unittest.TestCase):
         # REQ: HW-10. The verdict prefix is the host's alone, and a console that carries the verdict
         # text (a guest spoof) fails the run.
         self.assertNotIn("agentos-e2e: G1", e2e)
-        self.assertIn('\thasnt "$W/console-e2e.log" "G1 PROVEN"\n', e2e)
-        self.assertIn('\thasnt "$W/console-e2e.log" "G1 NOT PROVEN"\n', e2e)
         # REQ: HW-10. The console is checked before its DONE line is trusted; a miss fails the run,
         # and the DONE file exists (empty) so the verdict still prints.
         self.assertIn('\te2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1\n', e2e)
@@ -3931,7 +4393,8 @@ class UplinkTest(unittest.TestCase):
 
     def e2e_console(self, console):
         s = (IMG / "ci_boot.sh").read_text()
-        fn = re.search(r"^e2e_console\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        fn = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
+                     for f in ("clean", "e2e_console"))
         with tempfile.TemporaryDirectory() as d:
             log, done = pathlib.Path(d) / "console.log", pathlib.Path(d) / "done.log"
             log.write_bytes(console)
@@ -3994,7 +4457,7 @@ class UplinkTest(unittest.TestCase):
         # boots before it.
         s = (IMG / "ci_boot.sh").read_text()
         fns = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
-                      for f in ("e2e_console", "g1_verdict"))
+                      for f in ("clean", "e2e_console", "g1_verdict"))
         fns += "".join(l + "\n" for l in s.splitlines() if l.startswith(("has() ", "hasnt() ")))
         block = s[s.index('\t: >"$W/e2e-done.log"\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
         with tempfile.TemporaryDirectory() as d:
@@ -4032,12 +4495,28 @@ class UplinkTest(unittest.TestCase):
         # non-printable bytes and puts "console| " in front of every line.
         s = (IMG / "ci_boot.sh").read_text()
         self.assertIn('\tgrep -a "agentos-\\|Secure Boot\\|verity\\|Failed" "$log" | tail -40 | guest_echo || true\n', s)
-        fn = re.search(r"^guest_echo\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
+        fn = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
+                     for f in ("clean", "guest_echo"))
         raw = ("ci_boot: G1 PROVEN\n::notice::agentos-e2e x\n\x1b[1;32magentos-boot: ok\x1b[0m\r\n"
                "ci_boot: G1 PR\u041eVEN agentos-\n").encode()
         out = subprocess.run(["sh", "-c", fn + "guest_echo"], input=raw, capture_output=True, check=True).stdout
-        self.assertEqual(out, b"console| ci_boot: G1 PROVEN\nconsole| ::notice::agentos-e2e x\n"
+        # The verdict text itself is defanged, so a grep of the job log for it finds the host's line only.
+        self.assertEqual(out, b"console| ci_boot: G1 [verdict-text]\nconsole| ::notice::agentos-e2e x\n"
                               b"console| agentos-boot: ok\nconsole| ci_boot: G1 PR??VEN agentos-\n")
+
+    def test_guest_echo_strips_what_the_console_interleaves(self):
+        # REQ: HW-10. #1764: colon parameters in a colour (?[0;1;38:5:185m) and OSC sequences
+        # (ESC ] 104 BEL, seen as ?]104? in #1747's log) are cut. Security 3 at d9cfaff: an
+        # unterminated OSC keeps the rest of its line, its ESC shown as "?".
+        s = (IMG / "ci_boot.sh").read_text()
+        fn = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
+                     for f in ("clean", "guest_echo"))
+        raw = (b"\x1b[0;1;38:5:185mDEPEND\x1b[0m agentos-uplink: none\n"
+               b"\x1b]104\x07\x1b]104\x07agentos-boot: x\n"
+               b"a\x1b]0;title\x1b\\b\n" b"c\x1b]104")
+        out = subprocess.run(["sh", "-c", fn + "guest_echo"], input=raw, capture_output=True, check=True).stdout
+        self.assertEqual(out, b"console| DEPEND agentos-uplink: none\nconsole| agentos-boot: x\n"
+                              b"console| ab\nconsole| c?]104\n")
 
     def test_e2e_console_neutralises_guest_text(self):
         # REQ: HW-10. A guest line cannot start with the host's verdict prefix or a workflow
@@ -4053,6 +4532,29 @@ class UplinkTest(unittest.TestCase):
         self.assertNotIn("\r", out)
         self.assertEqual(rc, 1)
         self.assertIn("console| agentos-e2e: PASS a\n", out)
+
+    def test_e2e_console_accepts_osc_and_colon_residue_before_the_lead_in(self):
+        # REQ: HW-10. #1747's job log: OSC 104 resets (ESC ] 104 BEL) and a colon-parameter colour
+        # landed ahead of the timestamp and failed "driver text not at the start of its line".
+        # Stripped, those lines parse; text that is not the exact lead-in still fails.
+        console = (b"\x1b]104\x07\x1b]104\x07[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n"
+                   b"\x1b[0;1;38:5:185m[ 8.0] box-e2e[817]: agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\x1b[0m\n")
+        rc, out, written = self.e2e_console(console)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("agentos-e2e: DONE pass=1", written)
+        rc, out, _ = self.e2e_console(b"junk[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n")
+        self.assertNotEqual(rc, 0)
+
+    def test_e2e_console_names_a_driver_line_behind_an_unterminated_osc(self):
+        # REQ: HW-10. Security finding 3 at d9cfaff: an OSC with no BEL or ST no longer swallows the
+        # rest of its line, so the driver line behind it is echoed and named, not silently skipped.
+        rc, out, written = self.e2e_console(
+            b"\x1b]104[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n"
+            b"[ 8.0] box-e2e[817]: agentos-e2e: DONE pass=1 fail=0 xfail=0 xpass=0 blocked=0\n")
+        self.assertEqual(rc, 1)
+        self.assertIn("console| ?]104[ 7.0] box-e2e[817]: agentos-e2e: PASS a\n", out)
+        self.assertIn("ci_boot: MISS console: driver text not at the start of its line\n", out)
+        self.assertEqual(written, "")
 
 
 class SetupServicesTest(unittest.TestCase):
@@ -4564,6 +5066,138 @@ class FuzzConfineTest(unittest.TestCase):
         lines = self.tmpfiles()
         for d in ("/tmp", "/var/tmp", "/dev/shm"):
             self.assertEqual([l for l in lines if l[1] == d], [["a+", d, "-", "-", "-", "-", "u:agentos-fuzz:---"]])
+
+
+class CodexPinTest(unittest.TestCase):
+    # REQ: CAP-11
+    # The box's Codex image must carry usr/lib/agentos/cli-version holding the CODEX_VERSION its
+    # build script pins, or agentosd's pin gate (#1877, #1895) refuses every provider run with one
+    # journal line as the only cause (PUX finding 1 on #1895). image/check_codex_pin.sh checks the
+    # staged tree, which becomes the box's verity-checked /usr, so the booted image carries what passed.
+    SCRIPT = "CODEX_VERSION=0.162.1\n"
+    # #1895's writer, verbatim (guest/codex/build-rootfs.sh at 2e6c54d), run in the image's root.
+    WRITES = "printf '%s\\n' \"$CODEX_VERSION\" >usr/lib/agentos/cli-version\n"
+    # agentosd's reader once #1895 lands: the check is inert only while no such consumer exists.
+    READER = 'const cliPinPath = "usr/lib/agentos/cli-version"\n'
+
+    def run_check(self, cli=None, link=False, script=SCRIPT + WRITES, reader=READER, run_writer=False):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            write(d / "repo", "guest/codex/build-rootfs.sh", script)
+            if reader is not None:
+                write(d / "repo", "broker/cmd/agentosd/imagepin.go", reader)
+            else:
+                write(d / "repo", "broker/cmd/agentosd/main.go", "package main\n")
+            pin = d / "tree/usr/lib/agentos/cli-version"
+            pin.parent.mkdir(parents=True)
+            if run_writer:
+                # The real writer line, as build-rootfs.sh runs it (cd "$OUT", set -eu).
+                subprocess.run(["sh", "-euc", self.SCRIPT + self.WRITES], cwd=d / "tree", check=True)
+            elif cli is not None:
+                if link:
+                    (d / "elsewhere").write_text(cli)
+                    pin.symlink_to(d / "elsewhere")
+                else:
+                    pin.write_bytes(cli.encode())
+            return subprocess.run(["sh", str(IMG / "check_codex_pin.sh"), str(d / "repo"), str(d / "tree")],
+                                  capture_output=True, text=True)
+
+    def test_the_file_the_build_script_writes_passes(self):
+        r = self.run_check(run_writer=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("not checked", r.stderr)
+
+    def test_writer_is_the_build_script_s(self):
+        # Once #1895 lands, WRITES must be the real script's line, so the test above runs it.
+        code = [l for l in (ROOT / "guest/codex/build-rootfs.sh").read_text().splitlines()
+                if "cli-version" in l and not l.lstrip().startswith("#") and ">" in l]
+        if code:
+            self.assertEqual(code, [self.WRITES.rstrip("\n")])
+
+    def test_agentosd_s_rule_is_the_check_s(self):
+        # readCLIPin (imagepin.go, #1895): strings.TrimSuffix(b, "\n"), then the version must match.
+        for cli in ("0.162.1", "0.162.1\n"):
+            self.assertEqual(self.run_check(cli).returncode, 0, repr(cli))
+        for cli in ("0.162.1\n\n", " 0.162.1", "0.162.1 ", "\n0.162.1", "0.162.1\r\n", "0.162.2", "0.162.2\n", ""):
+            r = self.run_check(cli)
+            self.assertNotEqual(r.returncode, 0, repr(cli))
+            self.assertIn("cli-version", r.stderr)
+
+    def test_missing_file_fails(self):
+        r = self.run_check()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cli-version", r.stderr)
+
+    def test_symlink_fails(self):
+        # agentosd reads only a regular file through os.OpenRoot, so a link would read as unpinned.
+        self.assertNotEqual(self.run_check("0.162.1", link=True).returncode, 0)
+
+    def test_script_without_a_pin_line_fails(self):
+        self.assertNotEqual(self.run_check("0.162.1", script="echo no version\n" + self.WRITES).returncode, 0)
+
+    def test_check_keys_on_agentosd_s_reader_not_the_writer_s_text(self):
+        # Before #1895 agentosd reads no cli-version, so there is nothing to hold the tree to; the
+        # check says so and passes.
+        r = self.run_check(reader=None)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("reads no cli-version", r.stderr)
+        # Once the reader is in the tree, a missing file fails, however the script writes it: a
+        # writer refactored to a variable no longer names the path, and must not turn the check off.
+        refactored = self.SCRIPT + 'pinf=usr/lib/agentos/cli-version\nprintf \'%s\\n\' "$CODEX_VERSION" >"$pinf"\n'
+        self.assertNotEqual(self.run_check(script=refactored).returncode, 0)
+        self.assertNotEqual(self.run_check(script=self.SCRIPT).returncode, 0)
+        # The reader renamed, or the path spelled out in another agentosd file, still turns it on.
+        self.assertNotEqual(self.run_check(reader="package main\n").returncode, 0)
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            write(d / "repo", "guest/codex/build-rootfs.sh", self.SCRIPT)
+            write(d / "repo", "broker/cmd/agentosd/pin.go", self.READER)
+            (d / "tree").mkdir()
+            r = subprocess.run(["sh", str(IMG / "check_codex_pin.sh"), str(d / "repo"), str(d / "tree")],
+                               capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+
+    def test_inert_state_matches_this_tree(self):
+        # The real repo: inert exactly while agentosd has no pin reader.
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run(["sh", str(IMG / "check_codex_pin.sh"), str(ROOT), d], capture_output=True, text=True)
+        if (ROOT / "broker/cmd/agentosd/imagepin.go").exists():
+            self.assertNotEqual(r.returncode, 0)
+        else:
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("not checked", r.stderr)
+
+    @staticmethod
+    def registered(exe):
+        # Go's flag package takes -image V, -image=V, --image V and --image=V, and images.Set is
+        # last-wins (broker/cmd/agentosd/main.go), so the last value per name is the one registered.
+        return dict(v.split("=", 1) for v in re.findall(r"(?:^|\s)--?image(?:=|\s+)(\S+)", exe))
+
+    def assert_from_verity_usr(self, exe):
+        images = self.registered(exe)
+        self.assertEqual(images["codex"], "/usr/lib/agentos/images/codex")
+        for name, path in images.items():
+            self.assertTrue(path.startswith("/usr/lib/agentos/images/"), (name, path))
+            self.assertNotIn("..", path)
+
+    def test_images_are_registered_from_the_verity_usr(self):
+        # The pin is read at every gate check, so a tree a process could swap after the check would
+        # reopen the window #1895 closes; under /usr (dm-verity, read-only) nothing can (#1895 delta
+        # review). Every -image agentosd registers, the Codex one included, lives there.
+        exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
+        self.assert_from_verity_usr(exe)
+        self.assertIn('sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"',
+                      (IMG / "build.sh").read_text())
+        # Every spelling Go accepts, appended last, overrides the reviewed value and must be caught.
+        for extra in (" --image=codex=/var/lib/agentos/codex", " -image=codex=/var/lib/agentos/codex",
+                      " --image codex=/var/lib/agentos/codex", " -image openclaw=/var/lib/agentos/openclaw"):
+            with self.assertRaises(AssertionError, msg=extra):
+                self.assert_from_verity_usr(exe + extra)
+
+    def test_build_checks_the_codex_tree_it_stages(self):
+        lines = (IMG / "build.sh").read_text().splitlines()
+        build = lines.index('sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"')
+        self.assertEqual(lines[build + 1], 'sh "$HERE/check_codex_pin.sh" "$REPO" "$STAGE/usr/lib/agentos/images/codex"')
 
 
 if __name__ == "__main__":

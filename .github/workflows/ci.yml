@@ -75,7 +75,7 @@ jobs:
         # The tests that read record files (test_board reads BOARD.md) and test the tools
         # the steps below run.
         if: env.RECORDS == 'true'
-        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier -v
+        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_g1_scope.CheckTest tests.test_g1_scope.ListTest -v
       - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
         if: env.RECORDS != 'true'
         run: |
@@ -96,6 +96,12 @@ jobs:
         run: python tools/trace.py && python tools/trace.py --check
       - name: Operating documents agree (BOARD states, README table, OPERATING refs, brief size)
         run: python tools/doclint.py
+      - name: Brief acceptance baseline only shrinks (FIRST-PASS)
+        if: github.event_name == 'pull_request'
+        # HEAD^1 is the base side of the PR's test merge.
+        run: |
+          git show HEAD^1:tools/brief_acceptance_baseline.txt > "$RUNNER_TEMP/base-baseline.txt" 2>/dev/null || : > "$RUNNER_TEMP/base-baseline.txt"
+          python tools/doclint.py --base-baseline "$RUNNER_TEMP/base-baseline.txt"
       - name: Every broker dialer is hooked into the home-network address guard (DEV-2)
         if: env.RECORDS != 'true'
         run: python tools/netguardcheck.py
@@ -133,8 +139,17 @@ jobs:
         if: github.event_name == 'pull_request'
         # HEAD is the PR's test merge (base^1, branch^2). Three dots compare the branch with
         # its merge base, so TRACE.md updates it pulled in from main don't count.
+        # The one exception is trace.yml's own PR: head branch bot/trace in this repository
+        # (not a fork) that changes nothing but TRACE.md (D-123). Human PRs still fail.
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           git diff --quiet HEAD^1...HEAD^2 -- TRACE.md && exit 0
+          if [ "$HEAD_REF" = bot/trace ] && [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ] \
+            && [ "$(git diff --name-only HEAD^1...HEAD^2)" = TRACE.md ]; then
+            echo "bot/trace PR changes only TRACE.md: allowed"; exit 0
+          fi
           echo '::error file=TRACE.md::PRs must not change TRACE.md; trace.yml regenerates it on main after merge. Restore it with: git checkout $(git merge-base origin/main HEAD) -- TRACE.md'
           exit 1
       - name: Risk tier (docs/OPERATING.md §3)
@@ -143,8 +158,96 @@ jobs:
         if: github.event_name == 'pull_request'
         run: python tools/risk_tier.py --markdown --git HEAD^1 HEAD^2 >> "$GITHUB_STEP_SUMMARY"
   broker:
+    # The required check (CI-SHARD, #1868): passes only when every race shard and the checks
+    # job passed. Skipped with them on a records-only change, as before the split.
+    needs: [scope, broker-race, broker-checks]
+    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every race shard and the broker checks passed
+        env:
+          RACE: ${{ needs.broker-race.result }}
+          CHECKS: ${{ needs.broker-checks.result }}
+        run: |
+          echo "broker-race: $RACE; broker-checks: $CHECKS"
+          [ "$RACE" = success ] && [ "$CHECKS" = success ]
+  broker-race:
     needs: scope
     if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
+    # The broker's race tests, split by package across the shards (tools/ci_split.py). Each
+    # shard first checks the split covers `go list ./...` with no gap and no duplicate.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2] # = range of ci_split.py's --shards below
+    defaults:
+      run:
+        working-directory: broker
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.8" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Go build cache (CI-PATHS)
+        # One cache per shard; until a shard's own exists, the pre-split broker cache seeds it.
+        # Restore only here: the save step at the end of the job runs on a push to main alone (D29).
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/go-build
+          key: go-build-broker-race-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-build-broker-race-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+            go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+      - name: Software TPM for the trusted-host slot (P2-4b)
+        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      # loops' canary-round test runs tools/canary.py, whose targets run as the
+      # runner's first subordinate id in a user namespace (tools/ASSUMPTIONS.md D13).
+      - name: Subordinate ids for the canary sandbox
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
+      - name: This shard's packages (CI-SHARD)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          go list ./... > "$RUNNER_TEMP/packages"
+          python3 -I ../tools/ci_split.py check --shards 3 < "$RUNNER_TEMP/packages"
+          python3 -I ../tools/ci_split.py shard --shards 3 --index "$SHARD" < "$RUNNER_TEMP/packages" > "$RUNNER_TEMP/shard"
+          cat "$RUNNER_TEMP/shard"
+      - name: Tests (race detector)
+        # The TPM tests fail rather than skip if swtpm is missing.
+        env:
+          AGENTOS_REQUIRE_SWTPM: "1"
+        run: go test -race -count=1 $(cat "$RUNNER_TEMP/shard")
+      - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: rm -rf "$(go env GOCACHE)/fuzz"
+      - name: Go build cache upload (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/go-build
+          key: go-build-broker-race-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+  broker-checks:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
+    # Format, vet, the OP-2 model at its full bounds and the decoder fuzz rounds, beside the
+    # race shards.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -163,34 +266,26 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
-      - name: Software TPM for the trusted-host slot (P2-4b)
-        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
-      # loops' canary-round test runs tools/canary.py, whose targets run as the
-      # runner's first subordinate id in a user namespace (tools/ASSUMPTIONS.md D13).
-      - name: Subordinate ids for the canary sandbox
-        run: |
-          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
-          grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
-          grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
+      - name: Go build cache (CI-PATHS)
+        # Keyed on the vendored module set; a restore-key hit from main seeds a PR run. Restore
+        # only here: the save step at the end of the job runs on a push to main alone (D29).
+        # Vendored modules need no module cache.
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/go-build
+          key: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          restore-keys: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Format
         # Vendored third-party code keeps its upstream formatting.
         run: f=$(find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l); test -z "$f" || { echo "$f"; exit 1; }
       - name: Vet
         run: go vet ./...
-      - name: Tests (race detector)
-        # The TPM tests fail rather than skip if swtpm is missing.
-        env:
-          AGENTOS_REQUIRE_SWTPM: "1"
-        run: go test -race -count=1 ./...
       - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
         # The search is sequential, so the race detector finds nothing in it and
         # the race step skips it; here it runs at the bounds A19 states.
         run: go test -count=1 -timeout 20m -run '^TestOP2(SameEffectModel|Model.*)$' -v ./journal
       - name: Fuzz the socket and action-protocol decoders, 20s per target (LOOP-7, P3-4b-3)
-        # Each target already ran its seeds and planted-decoder control above;
+        # Each target already ran its seeds and planted-decoder control in the race shards;
         # this fuzzes past the seeds. The long runs are in soak.yml. tools/fuzzrun.py
         # runs each target for the time budget as count-bound chunks sized from the
         # exec/s it measures (logged per chunk below). It never passes a duration to
@@ -201,6 +296,16 @@ jobs:
           for t in sockets:FuzzRequest sockets:FuzzFrames browser:FuzzParse modemlink:FuzzInbound guest:FuzzMCP; do
             python3 ../tools/fuzzrun.py --pkg "./${t%%:*}" --target "${t#*:}" --budget 20s || exit 1
           done
+      - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: rm -rf "$(go env GOCACHE)/fuzz"
+      - name: Go build cache upload (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/go-build
+          key: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+
   machines:
     needs: scope
     if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}
@@ -211,6 +316,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
+          fetch-depth: 2 # a PR's test merge and its base, for the fuzz peaks decision
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
@@ -221,6 +327,13 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Go build cache (CI-PATHS)
+        # The root test runs below use GOCACHE=/tmp/gocache. Restore only; saved on main (D29).
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: /tmp/gocache
+          key: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          restore-keys: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Install gVisor release-20260928.0 (checksum pinned)
         run: |
           B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64
@@ -272,7 +385,37 @@ jobs:
             --bounding-set=-all,+net_admin,+net_raw,+net_bind_service,+setuid,+setgid,+kill,+dac_read_search,+setpcap \
             env AGENTOS_REQUIRE_APUSER=1 /tmp/localui.test -test.count=1 -test.v \
             -test.run '^TestHostapdChildRunsAsItsOwnUser$'
+      - name: Does this change reach the fuzz leaf peaks? (CI-SHARD)
+        # A pull request skips the measurement only when tools/ci_split.py, as the BASE commit
+        # has it, finds no changed path among its inputs: the directories of every module
+        # package the targets and loop7's test build from, the fuzz manifest, the module files
+        # and the workflow. The base copy is defence in depth only: on pull_request this
+        # workflow comes from the PR head, so a PR can rewrite this step; ci.yml and ci_split.py
+        # are tier A (human review) and in PEAK_FILES, so changing either always measures. A
+        # push to main, any other event, any error here, and any path git quotes measure.
+        id: peaks
+        working-directory: broker
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          run=run
+          t=$RUNNER_TEMP
+          # HEAD is the PR's test merge (base^1, branch^2), as in the checks job.
+          if [ "$EVENT" = pull_request ] \
+            && git show HEAD^1:tools/ci_split.py > "$t/ci_split.py" 2>/dev/null \
+            && git -c core.quotePath=false diff -z --no-renames --name-only HEAD^1 HEAD > "$t/changed" \
+            && pkgs=$(jq -r '.targets[].pkg | "./" + .' ../image/fuzz-targets.json | sort -u) \
+            && { CGO_ENABLED=0 go list -deps -test ./loop7 $pkgs && go list -deps -test ./loop7 $pkgs; } > "$t/deps"; then
+            run=$(python3 -I "$t/ci_split.py" peaks --event "$EVENT" --deps "$t/deps" --changed "$t/changed") || run=run
+          fi
+          [ "$run" = skip ] || run=run
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "Fuzz leaf memory peaks: $run"
+          if [ "$run" = skip ]; then
+            echo "### Fuzz leaf memory peaks: skipped, no input changed" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Fuzz leaf memory peaks (P3-4b-3r-confine-r1)
+        if: steps.peaks.outputs.run != 'skip'
         # Each target in the image's fuzz manifest, built as image/build.sh builds it, runs one
         # round as agentosd wires it in a fresh leaf; the table of memory.peak sets the leaf's
         # cap (agentosd L7-6) and goes to the step summary.
@@ -306,6 +449,16 @@ jobs:
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -v -timeout 20m ./floor
+      - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: sudo rm -rf /tmp/gocache/fuzz
+      - name: Go build cache upload (main only; CI-PATHS)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: /tmp/gocache
+          key: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+
   hostcheck:
     needs: scope
     if: ${{ !cancelled() && needs.scope.outputs.records != 'true' }}

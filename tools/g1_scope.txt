@@ -7,6 +7,8 @@
 #   since TIME          when the freeze began (UTC, 2026-10-14T19:55:00Z form). A PR opened
 #                       earlier passes (Mark 2026-10-14: "let current PRs finish"); the
 #                       time comes from the pull_request event, which the author cannot set.
+#                       A PR reopened, force-pushed or retargeted at or after it loses that
+#                       pass (#1717); an `exempt-pr` line restores it.
 #                       The push that merges #1687 sets it to that push's time.
 #   exempt-pr N         PR N passes: an amend for work already under way that the time rule
 #                       misses (a split or rebuild of a row in flight when the freeze began).
@@ -174,3 +176,7 @@ frozen-import broker/loops/
 frozen-import broker/recall/
 frozen-import broker/recalltool/
 frozen-import broker/skill/
+
+exempt-pr 1845
+exempt-pr 1911
+

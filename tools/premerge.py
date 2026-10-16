@@ -2,51 +2,83 @@
 """Check that the diff about to merge equals the diff its L3 accept reviewed (OPERATING §7).
 
   tools/premerge.py [--base origin/main] <reviewed-sha> [head]
+  tools/premerge.py --needs-mark [--base origin/main] [head]   (--needs-mark in any position)
 
-Compares each file's diff against the base (`base...sha`) for the reviewed commit and for `head` (default
-HEAD), by a SHA-256 of the exact diff bytes: whitespace, binary content and modes count. Only `index`
-lines and hunk line numbers are dropped, so main merged in elsewhere reads as same. Not `git patch-id`:
-it ignores whitespace, so an indentation-only change that flips a branch would read as same. Prints `same` and exits 0, or `changed <files>` and exits 1: those
-files need a delta review. Git only, no network; fetch first. Patch ids include context lines, so an
-unrelated base change next to a hunk reads as changed: conservative, never unsafe.
+Replays the reviewed commit onto the base content `head` carries (`git merge-tree` of the reviewed
+commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
+bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same. Main merged into the branch therefore reads as same, even next
+to a PR hunk, while any other change reads as changed: a later push, a moved hunk, a side branch merged
+in, or a merge resolution that edits a PR line. Not a diff fingerprint: diff context lines carry
+neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved elsewhere as same. Not
+`git patch-id`: it ignores whitespace. Prints `same` and exits 0, or `changed <files>` and exits 1:
+those files need a delta review. Git 2.38 or later, no network; fetch first.
+
+`--needs-mark` lists the files of base..head that make the PR one Mark presses Merge on (it changes how
+Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7).
 """
-import hashlib
 import re
 import subprocess
 import sys
 
-# Pinned so local config (renames, algorithm, external or textconv drivers, colour) cannot change the bytes.
-DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--binary", "--full-index",
-        "--diff-algorithm=myers", "--src-prefix=a/", "--dst-prefix=b/"]
-HUNK = re.compile(rb"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@.*$")
+# Pinned so local config (renames, external drivers, colour) cannot change the file list.
+DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z"]
 
 
-def _git(cwd, *args):
-    return subprocess.run(["git", "-c", "core.quotePath=true", *args], cwd=cwd, check=True, capture_output=True).stdout
+# A PR touching any of these goes to Mark, never to an agent's auto-merge (OPERATING §7).
+# CLAUDE.md and CLAUDE.local.md count at any depth; broker/core/core.txt sets risk tiers (risk_tier.py).
+MARK_PATHS = re.compile(r"^((?:.*/)?CLAUDE(?:\.local)?\.md|AGENTS\.md|\.mcp\.json|docs/OPERATING\.md|docs/LANES\.md|"
+                        r"\.claude/.*|\.github/.*|broker/core/core\.txt|tools/(risk_tier|premerge)\.py|"
+                        r"tools/(ci_scope|g1_scope)[^/]*|reviews/[^/]+/README[^/]*)$")
 
 
-def _fingerprint(patch):
-    lines = [b"@@" if HUNK.match(l) else l for l in patch.split(b"\n") if not l.startswith(b"index ")]
-    return hashlib.sha256(b"\n".join(lines)).hexdigest()
+def mark_paths(files):
+    return sorted(f for f in files if MARK_PATHS.match(f))
 
 
-def _ids(cwd, base, sha):
-    out = {}
-    for f in _git(cwd, *DIFF, "--name-only", "-z", f"{base}...{sha}").decode(errors="surrogateescape").split("\0"):
-        if f:
-            out[f] = _fingerprint(_git(cwd, *DIFF, f"{base}...{sha}", "--", f":(literal){f}"))
-    return out
+def _git(cwd, *args, ok=(0,)):
+    r = subprocess.run(["git", "-c", "core.quotePath=true", *args], cwd=cwd, capture_output=True)
+    if r.returncode not in ok:
+        raise subprocess.CalledProcessError(r.returncode, r.args, r.stdout, r.stderr)
+    return r.stdout
+
+
+def _replayed(cwd, reviewed, onto):
+    """Tree of the reviewed commit merged with `onto`; conflicts keep their markers, so they read as changed."""
+    out = _git(cwd, "merge-tree", "--write-tree", "--no-messages", reviewed, onto, ok=(0, 1))
+    return out.split(b"\n", 1)[0].decode()
+
+
+ROW_ID = re.compile(rb"^\| *[A-Za-z]+-?\d+[a-z]? *\|", re.M)
+
+
+def _renumbered_only(cwd, tree, head, path):
+    """True when an ASSUMPTIONS.md differs between `tree` and `head` only in the first-cell row ids."""
+    if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
+        return False
+    a, b = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (tree, head))
+    return bool(a) and bool(b) and ROW_ID.sub(b"| # |", a) == ROW_ID.sub(b"| # |", b)
 
 
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):
-    a, b = _ids(cwd, base, reviewed), _ids(cwd, base, head)
-    return sorted(f for f in a.keys() | b.keys() if a.get(f) != b.get(f))
+    onto = _git(cwd, "merge-base", base, head).decode().strip()
+    tree = _replayed(cwd, reviewed, onto)
+    out = _git(cwd, *DIFF, tree, head).decode(errors="surrogateescape")
+    return sorted(f for f in out.split("\0") if f and not _renumbered_only(cwd, tree, head, f))
 
 
 def main(argv):
     args, base = argv[1:], "origin/main"
+    needs_mark = "--needs-mark" in args  # in any position
+    args = [a for a in args if a != "--needs-mark"]
     if args[:1] == ["--base"]:
         base, args = args[1], args[2:]
+    if needs_mark:
+        head = args[0] if args else "HEAD"
+        onto = _git(".", "merge-base", base, head).decode().strip()
+        out = _git(".", *DIFF, onto, head).decode(errors="surrogateescape")
+        hit = mark_paths(f for f in out.split("\0") if f)
+        print("mark " + " ".join(hit) if hit else "agent")
+        return 1 if hit else 0
     if not 1 <= len(args) <= 2:
         print(__doc__)
         return 2

@@ -453,7 +453,9 @@ func TestRetryAndDevicePostsWaitTheirTurn(t *testing.T) {
 // the owner's no fails to save, then the page restarts and loses its
 // hold. agentosd still owes the no, so the restarted page holds setup
 // open with the owner's unticked box, and finishes only once a retry
-// saves the no.
+// saves the no. The restarted page keeps the walked SetupState minus
+// Unsaved, not a fresh MemStore and a re-walk as in #1544; the localsrv
+// restart test and adoption on the host step cover that path (#1623).
 func TestARestartKeepsAnOwedNo(t *testing.T) {
 	r := newRig(t)
 	st := &MemStore{}

@@ -16,18 +16,25 @@ import (
 // next call without a restart.
 
 // providerList is the providers with whether a key is held and whether
-// private data is allowed, never a key (CRED-1). It needs an open vault.
+// private data is allowed, by the flag or the marker as the router asks,
+// never a key (CRED-1). It needs an open vault.
 func (c *custody) providerList() ([]modelroute.SetupProvider, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ph != open {
 		return nil, errLocked
 	}
-	return c.providersLocked(), nil
+	return c.providersLocked(true), nil
 }
 
+// errPrivateByConfig: a withdraw removed the owner's marker, but this
+// box's -private-ok flag still allows the provider private data (#1420).
+var errPrivateByConfig = uerr(http.StatusConflict, "my configuration allows this provider private data, so it can't be withdrawn here")
+
 // putPrivate records the owner's answer for provider: ok allows private
-// data with the code's approval, !ok withdraws it with none.
+// data with the code's approval, !ok withdraws it with none. A withdraw
+// the -private-ok flag overrides still removes the marker, so it narrows
+// once the flag goes, but is errPrivateByConfig and tells no one.
 func (c *custody) putPrivate(provider string, ok bool, code string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -45,6 +52,9 @@ func (c *custody) putPrivate(provider string, ok bool, code string) error {
 	if err := c.setPrivateLocked(provider, ok); err != nil {
 		return err
 	}
+	if !ok && c.privateFlags[provider] {
+		return errPrivateByConfig
+	}
 	if ok {
 		c.notify("private data allowed for " + providerName(provider))
 	} else {
@@ -53,10 +63,11 @@ func (c *custody) putPrivate(provider string, ok bool, code string) error {
 	return nil
 }
 
-// privateMarkOK refuses a provider that is not built in, or whose marker
-// name holds a vault entry of another kind. Caller holds mu.
+// privateMarkOK refuses a provider that is neither built in nor the plan
+// route, or whose marker name holds a vault entry of another kind. Caller
+// holds mu.
 func (c *custody) privateMarkOK(provider string) error {
-	if _, known := adapterNamed(provider); !known {
+	if _, known := adapterNamed(provider); !known && provider != planProvider {
 		return errBadCredential
 	}
 	if hasOtherKind(c.v, PrivateOKPrefix+provider, KindPrivateOK) {

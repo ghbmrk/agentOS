@@ -33,7 +33,8 @@ ExecStartPre=/usr/lib/agentos/drive-id check
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} \
         -modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui \
         -netjoin-sock /run/agentos-netjoin/netjoin.sock \
-        -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw
+        -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw \
+        -image codex=/usr/lib/agentos/images/codex -worker-image openclaw
 Restart=on-failure
 
 [Install]
