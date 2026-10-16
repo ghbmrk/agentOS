@@ -71,17 +71,81 @@ LANE_GATE_LINES = [
 ] + ["          " + r for r in LANE_GATE_RUN]
 
 
-def lane_gate_problems(text):
-    """Return why lane-gate.yml differs from the pinned gate; empty when it matches."""
+# PREMERGE-wire (#1860): premerge.yml is pinned the same way. It needs `statuses: write`, so
+# the exact pin, not the read-only base-copy check, is what keeps it base-only and fail-closed:
+# triggers, permissions, the base checkout, the fetch-only head and the one status it posts.
+PREMERGE_LINES = [
+    'name: premerge',
+    'on:',
+    '  pull_request_target:',
+    '    types: [opened, synchronize, reopened, edited]',
+    '  issue_comment:',
+    '    types: [created, edited, deleted]',
+    'permissions:',
+    '  contents: read',
+    'concurrency:',
+    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number }}',
+    '  cancel-in-progress: false',
+    'jobs:',
+    '  premerge-gate:',
+    '    name: premerge-gate',
+    "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request",
+    '    runs-on: ubuntu-latest',
+    '    timeout-minutes: 5',
+    '    permissions:',
+    '      contents: read',
+    '      issues: read',
+    '      pull-requests: read',
+    '      statuses: write # the `premerge` status on the PR head, nothing else',
+    '    steps:',
+    '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2',
+    '        with:',
+    '          fetch-depth: 0 # the merge base with the PR head',
+    '          persist-credentials: false',
+    '      - name: Premerge (base copy of tools/premerge.py)',
+    '        env:',
+    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}',
+    '          REPO: ${{ github.repository }}',
+    '          GH_TOKEN: ${{ github.token }}',
+    '        run: |',
+    '          gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"',
+    '          HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")',
+    '          HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/pr.json")',
+    '          HEAD_REPO=$(jq -r \'.head.repo.full_name // ""\' "$RUNNER_TEMP/pr.json")',
+    '          BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")',
+    '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
+    '          state=failure',
+    '          out=$(',
+    '            git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head" \\',
+    '              "+refs/heads/$BASE_REF:refs/remotes/pr/base" || exit 1',
+    '            git cat-file -e "$HEAD_SHA^{commit}" || exit 1',
+    '            if [ "$HEAD_REPO" = "$REPO" ] && [ "${HEAD_REF#bot/}" != "$HEAD_REF" ]; then',
+    '              exec python3 -I tools/premerge.py --bot "$HEAD_REF" --base refs/remotes/pr/base "$HEAD_SHA"',
+    '            fi',
+    '            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \\',
+    '              --jq \'.[] | {author_association, created_at, body}\' > "$RUNNER_TEMP/comments.jsonl" || exit 1',
+    '            jq -s . "$RUNNER_TEMP/comments.jsonl" > "$RUNNER_TEMP/comments.json" || exit 1',
+    '            exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --base refs/remotes/pr/base "$HEAD_SHA"',
+    '          ) && state=success',
+    '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | tr -cd \'\\40-\\176\' | cut -c 1-120)',
+    '          echo "premerge $HEAD_SHA: $state ($out)"',
+    '          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$state" -f context=premerge \\',
+    '            -f description="$out" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null',
+    '          [ "$state" = success ]',
+]
+
+
+def lane_gate_problems(text, pinned=LANE_GATE_LINES):
+    """Return why lane-gate.yml (or another `pinned` gate) differs from its pin; empty when it matches."""
     problems = []
     # Only printable ASCII and \n: YAML also breaks lines at \r, which could hide a line
     # inside what this check reads as a comment.
     if re.search(r"[^\x20-\x7e\n]", text):
         problems.append("a character other than printable ASCII or a newline")
     code = [l for l in text.split("\n") if l.strip() and not l.lstrip().startswith("#")]
-    for i in range(max(len(code), len(LANE_GATE_LINES))):
+    for i in range(max(len(code), len(pinned))):
         got = code[i] if i < len(code) else "<missing>"
-        want = LANE_GATE_LINES[i] if i < len(LANE_GATE_LINES) else "<none>"
+        want = pinned[i] if i < len(pinned) else "<none>"
         if got != want:
             problems.append("line %d is %r, pinned %r" % (i + 1, got, want))
             break
@@ -277,6 +341,32 @@ class WorkflowTest(unittest.TestCase):
         # The only fail-open is a base that predates the tool.
         self.assertIn('if [ ! -f tools/g1_scope.py ]; then echo "g1 freeze: not active on this base"; exit 0; fi', text)
         self.assertEqual(text.count("exit 0"), 1)
+
+    def test_premerge_status_is_pinned(self):
+        # PREMERGE-wire (#1860): triggers (PR pushes and PR comments), the `premerge` context, the
+        # base-only checkout and the fail-closed status post are pinned line by line.
+        text = (WORKFLOWS / "premerge.yml").read_text()
+        self.assertEqual(lane_gate_problems(text, PREMERGE_LINES), [])
+        for edit in (("statuses: write", "statuses: write\n      contents: write"),
+                     ("    types: [created, edited, deleted]", "    types: [created]"),
+                     ("context=premerge", "context=premerge-x"),
+                     ("          [ \"$state\" = success ]", "          true"),
+                     (") && state=success", ") || true; state=success"),
+                     ("git cat-file -e \"$HEAD_SHA^{commit}\" || exit 1", "git cat-file -e \"$HEAD_SHA^{commit}\""),
+                     ("          persist-credentials: false", "          persist-credentials: false\n          ref: refs/pull/1/head"),
+                     ):
+            with self.subTest(edit[0]):
+                self.assertIn(edit[0], text)
+                self.assertTrue(lane_gate_problems(text.replace(*edit, 1), PREMERGE_LINES), edit)
+        # Only this workflow may post commit statuses, so no other job can fake `premerge`.
+        for f in self.files():
+            if f.name != "premerge.yml":
+                self.assertNotRegex(f.read_text(), r"statuses:\s*write|/statuses/", f.name)
+
+    def test_premerge_ruleset_context_is_documented(self):
+        # PREMERGE-wire (#1860): the context the ruleset must require is the one the workflow posts.
+        ops = (WORKFLOWS.parent.parent / "docs" / "OPERATING.md").read_text()
+        self.assertIn("requires the `premerge` status", ops)
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"

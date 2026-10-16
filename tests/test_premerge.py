@@ -255,6 +255,53 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run([c("accept", sha, "1")]), (1, ["changed", "b.txt"]))
         self.assertEqual(run([c("accept", sha, "1"), c("accept", new, "2")]), (0, ["same"]))
 
+    def test_bot_gate(self):
+        # PREMERGE-wire (#1860): the generated-file bot PRs carry no L3 verdict, so `--bot` passes
+        # them only when the branch is a known bot branch and the diff is that bot's file alone.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        def run(ref):
+            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", ref, "--base", "main"],
+                               cwd=self.r, capture_output=True, text=True)
+            return r.returncode, r.stdout.split()
+        self.assertEqual(run("bot/trace"), (1, ["not-bot"]))  # empty change
+        self.write("TRACE.md", "t\n")
+        self.commit("trace")
+        self.assertEqual(run("bot/trace"), (0, ["bot"]))
+        for ref in ("bot/metrics", "bot/board", "bot/records"):  # another bot's file
+            self.assertEqual(run(ref), (1, ["not-bot", "TRACE.md"]), ref)
+        for ref in ("pkg/x", "bot/trace2", "xbot/trace", "bot/trace/x"):  # not a bot branch
+            self.assertEqual(run(ref), (1, ["not-bot"]), ref)
+        self.write("b.txt", "x\n")
+        self.commit("smuggled code")
+        self.assertEqual(run("bot/trace"), (1, ["not-bot", "b.txt"]))
+
+    def test_bot_gate_records_adds_only_new_record_files(self):
+        git(self.r, "checkout", "-q", "main")
+        (self.r / "reviews/l3").mkdir(parents=True)
+        self.write("reviews/l3/README.md", "lens\n")
+        self.write("reviews/l3/2026-10-01-pr1.md", "old\n")
+        self.commit("lens")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        run = lambda: subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", "bot/records", "--base", "main"],
+                                     cwd=self.r, capture_output=True, text=True)
+        (self.r / "reviews/security").mkdir()
+        self.write("reviews/l3/2026-10-15-pr2.md", "new\n")
+        self.write("reviews/security/2026-10-15-pr2.md", "new\n")
+        self.commit("records")
+        r = run()
+        self.assertEqual((r.returncode, r.stdout.split()), (0, ["bot"]))
+        for path, text in (("reviews/l3/2026-10-01-pr1.md", "edited\n"), ("reviews/l3/README.md", "loosened\n"),
+                           ("reviews/x.md", "top\n")):
+            self.write(path, text)
+            self.commit("bad")
+            r = run()
+            self.assertEqual((r.returncode, r.stdout.split()), (1, ["not-bot", path]), path)
+            git(self.r, "reset", "-q", "--hard", "HEAD~1")
+        (self.r / "reviews/l3/2026-10-01-pr1.md").unlink()
+        self.commit("delete a record")
+        r = run()
+        self.assertEqual((r.returncode, r.stdout.split()), (1, ["not-bot", "reviews/l3/2026-10-01-pr1.md"]))
+
 
 if __name__ == "__main__":
     unittest.main()
