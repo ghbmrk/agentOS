@@ -395,7 +395,13 @@ func TestRotationResultExpiresWithTheConfirmWindow(t *testing.T) {
 		name    string
 		expires time.Duration // from the start; 0: none from the vault process
 		after   time.Duration
-	}{{"vault window", 10 * time.Minute, 10*time.Minute + time.Second}, {"no window", 0, resultTTL + time.Second}} {
+	}{
+		{"vault window", 10 * time.Minute, 10*time.Minute + time.Second},
+		{"no window", 0, resultTTL + time.Second},
+		// #1339: a vault window past resultTTL is capped at resultTTL.
+		{"vault window 45m", 45 * time.Minute, resultTTL + time.Second},
+		{"vault window 2h", 2 * time.Hour, resultTTL + time.Second},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			x := newWireRig(t)
 			if tc.expires != 0 {
@@ -463,5 +469,64 @@ func TestRotationResultWithNoConfirmerIsShownToNone(t *testing.T) {
 	}
 	if w := x.do("GET", "/rotate/done", nil); w.Code != http.StatusSeeOther {
 		t.Fatalf("a result with no confirmer was shown: %d", w.Code)
+	}
+}
+
+// #1339: a new start clears the result the confirming phone never fetched.
+func TestRotationStartVoidsTheResult(t *testing.T) {
+	x := newWireRig(t)
+	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+	x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/agentOS?secret=CANARYSEEDGGGGGG"}
+	x.post("/rotate/card", x.group())
+	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+	if w := x.do("GET", "/rotate/done", nil); w.Code != http.StatusSeeOther || strings.Contains(w.Body.String(), "SYNTH-NOTE") {
+		t.Fatalf("the result outlived a new start: %d", w.Code)
+	}
+}
+
+// #1340: a confirm near the end of the confirm window, or a commit
+// answered after it, keeps the result for the confirmer for resultGrace
+// after the commit's answer, never past the window plus resultGrace.
+func TestRotationLateConfirmKeepsTheResultForAGrace(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		expires time.Duration // the vault window, from the start
+		confirm time.Duration // when the owner confirms, from the start
+		answer  time.Duration // how long the commit takes to answer
+		after   time.Duration // the GET of /rotate/done, after the answer
+		shown   bool
+	}{
+		{"confirm 1s before the window ends", 10 * time.Minute, 10*time.Minute - time.Second, 0, 2 * time.Second, true},
+		{"answer after the window ends", 10 * time.Minute, 9 * time.Minute, commitTimeout, 2 * time.Second, true},
+		{"grace over", 10 * time.Minute, 10*time.Minute - time.Second, 0, resultGrace + time.Second, false},
+		{"capped at the window plus the grace", 2 * time.Hour, 40 * time.Minute, 0, time.Second, false},
+		{"late confirm past a capped window, within the cap", 2 * time.Hour, 33 * time.Minute, 0, 2*time.Minute - time.Second, true},
+		{"late confirm past a capped window, past the cap", 2 * time.Hour, 33 * time.Minute, 0, 2*time.Minute + time.Second, false},
+		// #1597: an early confirm's result lasts until the window's end.
+		{"early confirm lasts to the window's end", 10 * time.Minute, time.Minute, 0, resultGrace, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newWireRig(t)
+			x.v.expires = x.clock().Add(tc.expires)
+			x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+			x.v.result = RotationResult{Notes: []string{"SYNTH-NOTE"}, Enrollment: "otpauth://totp/agentOS?secret=CANARYSEEDHHHHHH"}
+			x.advance(tc.confirm)
+			x.v.commitIn, x.v.commitGo = make(chan struct{}), make(chan struct{})
+			form := x.group()
+			confirmed := make(chan struct{})
+			go func() {
+				defer close(confirmed)
+				x.post("/rotate/card", form)
+			}()
+			<-x.v.commitIn
+			x.advance(tc.answer)
+			close(x.v.commitGo)
+			<-confirmed
+			x.advance(tc.after)
+			w := x.do("GET", "/rotate/done", nil)
+			if got := w.Code == http.StatusOK && strings.Contains(w.Body.String(), "SYNTH-NOTE"); got != tc.shown {
+				t.Fatalf("shown = %v, want %v: %d", got, tc.shown, w.Code)
+			}
+		})
 	}
 }
