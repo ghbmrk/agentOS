@@ -96,4 +96,12 @@ func TestLegacyOtherRevertStaysInTheBody(t *testing.T) {
 	if got := e.revertsJournaled(rep.ID); len(got) != 0 {
 		t.Fatalf("revert intents: %q", got)
 	}
+	// The body keeps the revert, so a later start still sees it.
+	if !bytes.Contains(e.body(rep.ID), []byte(`"reverted":"`+WhyDropped+`"`)) {
+		t.Fatalf("body lost the revert: %s", e.body(rep.ID))
+	}
+	e.reopen()
+	if got := e.reverted(rep.ID); got != WhyDropped {
+		t.Fatalf("after a second start: %q", got)
+	}
 }
