@@ -3982,7 +3982,7 @@ class UplinkTest(unittest.TestCase):
         cp.read_string(dropin)
         self.assertEqual(cp["Unit"]["Before"], "serial-getty@ttyS0.service")
         boot = re.search(r"^boot\(\) \{\n.*?^\}\n", s, re.S | re.M).group(0)
-        self.assertIn(' -nic "${NIC:-none}" $REPORT_FIRST ${EXTRA:-} &\n', boot)
+        self.assertIn(' -nic "${NIC:-none}" ${LAN:+-nic "$LAN"} $REPORT_FIRST ${EXTRA:-} &\n', boot)
         self.assertLess(s.index("REPORT_FIRST="), s.index("boot() {"))
         e2e = ini(IMG / "e2e/agentos-e2e.service")
         self.assertIn("serial-getty@ttyS0.service", e2e["Unit"]["Before"].split())

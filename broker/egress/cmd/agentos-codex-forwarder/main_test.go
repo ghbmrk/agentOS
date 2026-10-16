@@ -192,13 +192,15 @@ func TestA14ForwarderClosesIdleRelays(t *testing.T) {
 	r := newRelayer(sock)
 	r.idle = 200 * time.Millisecond
 	addr := startWith(t, r)
+	// The relay's idle clock starts when it accepts, which can be before Dial returns here, so
+	// the bound is measured from before the dial.
+	start := time.Now()
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
 	c.SetReadDeadline(time.Now().Add(5 * time.Second))
-	start := time.Now()
 	if _, err := c.Read(make([]byte, 1)); err == nil {
 		t.Fatal("an idle relay sent data")
 	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
