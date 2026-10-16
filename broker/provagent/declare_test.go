@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -45,15 +46,19 @@ func TestValidateRefusesMalformedDeclarations(t *testing.T) {
 		"credential in argv":  func(d *Declaration) { d.Argv = append(d.Argv, canaryToken) },
 		"token-named env":     func(d *Declaration) { d.Env = append(d.Env, "CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://x") },
 		"bad verdict": func(d *Declaration) {
-			d.Q = Qualification{CLIVersion: "1", Evidence: "e", TermsURL: "https://t.test", TermsRead: "2026-10-01", Verdict: "maybe"}
+			d.Q = Qualification{CLIVersion: "1.0.0", Evidence: "e", TermsURL: "https://t.test", TermsRead: "2026-10-01", Verdict: "maybe"}
 		},
 		"bad date": func(d *Declaration) {
-			d.Q = Qualification{CLIVersion: "1", Evidence: "e", TermsURL: "https://t.test", TermsRead: "yesterday", Verdict: Allowed}
+			d.Q = Qualification{CLIVersion: "1.0.0", Evidence: "e", TermsURL: "https://t.test", TermsRead: "yesterday", Verdict: Allowed}
 		},
 		"insecure terms url": func(d *Declaration) {
-			d.Q = Qualification{CLIVersion: "1", Evidence: "e", TermsURL: "http://t.test", TermsRead: "2026-10-01", Verdict: Allowed}
+			d.Q = Qualification{CLIVersion: "1.0.0", Evidence: "e", TermsURL: "http://t.test", TermsRead: "2026-10-01", Verdict: Allowed}
 		},
-		"version without rest": func(d *Declaration) { d.Q = Qualification{CLIVersion: "1", Verdict: Allowed} },
+		"version without rest": func(d *Declaration) { d.Q = Qualification{CLIVersion: "1.0.0", Verdict: Allowed} },
+		"record for another version": func(d *Declaration) {
+			d.Q = qualified()
+			d.Q.CLIVersion = "1.0.1"
+		},
 	}
 	if err := good().Validate(); err != nil {
 		t.Fatalf("good declaration refused: %v", err)
@@ -116,10 +121,117 @@ func qualified() Qualification {
 	return Qualification{CLIVersion: "1.0.0", Evidence: "spikes/x", TermsURL: "https://t.test", TermsRead: "2026-10-01", Verdict: Allowed}
 }
 
-func TestGateCodexIsUnqualifiedWhileItsRecordIsEmpty(t *testing.T) {
-	g := Gate{ImageVersion: "0.162.1"}
-	if r := reasonOf(g.Check(Builtins()["codex"])); r != Unqualified {
-		t.Errorf("empty record: %q", r)
+// pinnedCodex is CODEX_VERSION in guest/codex/build-rootfs.sh, the version
+// the image pins (and agentosd reads back as the gate's ImageVersion, #1877).
+func pinnedCodex(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("../../guest/codex/build-rootfs.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^CODEX_VERSION=([0-9][0-9A-Za-z.+-]*)$`).FindAllSubmatch(raw, -1)
+	if len(m) != 1 {
+		t.Fatalf("build-rootfs.sh: %d CODEX_VERSION lines", len(m))
+	}
+	return string(m[0][1])
+}
+
+// filledCodex is the Codex builtin with a synthetic complete record at the
+// pinned version, the shape #809's finish gives it.
+func filledCodex(t *testing.T) Declaration {
+	d := Builtins()["codex"]
+	d.Q.CLIVersion = pinnedCodex(t)
+	d.Q.Evidence = "spikes/x"
+	d.Q.TermsURL = "https://t.test"
+	d.Q.TermsRead = "2026-10-01"
+	return d
+}
+
+// The shipped Codex record keeps the gate closed until it is complete; once
+// complete at the pinned version it opens. #809's finish is then only data.
+func TestGateCodexOpensOnlyOnACompleteRecord(t *testing.T) {
+	g := Gate{ImageVersion: pinnedCodex(t)}
+	c := Builtins()["codex"]
+	if c.Q.Complete() {
+		if err := g.Check(c); err != nil {
+			t.Errorf("complete record at the pinned version refused: %v", err)
+		}
+	} else if r := reasonOf(g.Check(c)); r != Unqualified {
+		t.Errorf("incomplete record: %q", r)
+	}
+	d := filledCodex(t)
+	if err := d.Validate(); err != nil {
+		t.Fatalf("filled record refused: %v", err)
+	}
+	if err := g.Check(d); err != nil {
+		t.Errorf("filled record at the pinned version refused: %v", err)
+	}
+}
+
+// Any one field missing keeps the gate closed, and a record pinned but not
+// complete does not load (CAP-11).
+func TestGateCodexIncompleteRecordStaysUnqualified(t *testing.T) {
+	g := Gate{ImageVersion: pinnedCodex(t)}
+	cases := map[string]func(q *Qualification){
+		"cli version": func(q *Qualification) { q.CLIVersion = "" },
+		"evidence":    func(q *Qualification) { q.Evidence = "" },
+		"terms url":   func(q *Qualification) { q.TermsURL = "" },
+		"terms read":  func(q *Qualification) { q.TermsRead = "" },
+		"verdict":     func(q *Qualification) { q.Verdict = "" },
+	}
+	for name, clear := range cases {
+		d := filledCodex(t)
+		clear(&d.Q)
+		if d.Q.Complete() {
+			t.Errorf("no %s: complete", name)
+		}
+		if r := reasonOf(g.Check(d)); r != Unqualified {
+			t.Errorf("no %s: gate %q", name, r)
+		}
+		if err := d.Validate(); err == nil {
+			t.Errorf("no %s: a partly filled record loaded", name)
+		}
+	}
+}
+
+// A record whose CLI version is not the pinned one stays unqualified: at the
+// gate when the image pins another version, and at load when the record
+// names a version the declaration was not written for (CAP-11).
+func TestGateCodexOnAnotherCLIVersionStaysUnqualified(t *testing.T) {
+	pin := pinnedCodex(t)
+	d := filledCodex(t)
+	for _, img := range []string{"", "0.162.0", pin + ".1"} {
+		if r := reasonOf((Gate{ImageVersion: img}).Check(d)); r != Unqualified {
+			t.Errorf("image pins %q: gate %q", img, r)
+		}
+	}
+	d.Q.CLIVersion = "0.162.0"
+	if r := reasonOf((Gate{ImageVersion: pin}).Check(d)); r != Unqualified {
+		t.Errorf("record for 0.162.0, image %s: gate %q", pin, r)
+	}
+	if err := d.Validate(); err == nil {
+		t.Error("record for another CLI version loaded")
+	}
+}
+
+// The Codex builtin is written for the version the image pins, and its
+// record, once filled, names that version and evidence that exists.
+func TestCodexBuiltinMatchesThePinnedImageVersion(t *testing.T) {
+	pin := pinnedCodex(t)
+	c := Builtins()["codex"]
+	if c.Version != pin {
+		t.Errorf("codex declaration is for %s, the image pins %s", c.Version, pin)
+	}
+	if c.Q.CLIVersion != "" && c.Q.CLIVersion != pin {
+		t.Errorf("codex record is for %s, the image pins %s", c.Q.CLIVersion, pin)
+	}
+	if c.Q.Evidence != "" {
+		if _, err := os.Stat("../../" + c.Q.Evidence); err != nil || strings.Contains(c.Q.Evidence, "..") || strings.HasPrefix(c.Q.Evidence, "/") {
+			t.Errorf("codex evidence %q is not a file in the repo: %v", c.Q.Evidence, err)
+		}
+	}
+	if c.Q.Verdict != Allowed { // D-117's terms read (#1377)
+		t.Errorf("codex verdict: %q", c.Q.Verdict)
 	}
 }
 

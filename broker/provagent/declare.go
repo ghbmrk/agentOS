@@ -209,6 +209,11 @@ func (d Declaration) Validate() error {
 			return fmt.Errorf("declaration %s: env %s carries a token-named variable", d.ID, k)
 		}
 	}
+	// A record qualifies the CLI version the declaration was written for;
+	// one measured on another version is a different declaration (CAP-11).
+	if d.Q.CLIVersion != "" && d.Q.CLIVersion != d.Version {
+		return fmt.Errorf("declaration %s: qualification is for CLI %q, the declaration for %q", d.ID, d.Q.CLIVersion, d.Version)
+	}
 	return d.Q.validate()
 }
 
@@ -243,7 +248,18 @@ func Builtins() map[string]Declaration {
 			SignInLinks: []string{"http://127.0.0.1:18432/codex/device", "https://auth.openai.com/codex/device"},
 			SignInPage:  "https://auth.openai.com/codex/device",
 			SignInFrom:  "OpenAI",
-			// Allowed by the terms read (#1377, D-117); #809 fills the rest.
+			// Verdict is D-117's terms read (#1377). #809 fills the rest, and
+			// the gate stays closed until every field is set:
+			//   CLIVersion: the version measured, equal to Version and to
+			//     guest/codex/build-rootfs.sh CODEX_VERSION (test-checked).
+			//   Evidence: the repo path of the W1-W5 record from a live run on
+			//     a real ChatGPT plan (hosted tools, credits after the limit,
+			//     sign-in through the forwarder) under the owner's permission
+			//     rule; the file must exist (test-checked).
+			//   TermsURL, TermsRead: the terms page and date read; D-117 cites
+			//     openai.com/policies/terms-of-use, retrieved 2026-10-13.
+			//     Filling the URL also adds its host to e2e dep2_test.go.
+			// None is guessed here: the live run needs Mark's plan (#809).
 			Q: Qualification{Verdict: Allowed},
 		},
 		"claude": {
