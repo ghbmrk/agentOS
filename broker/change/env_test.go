@@ -24,9 +24,12 @@ type env struct {
 	p     *Pipeline
 	eng   *journal.Engine
 	store *MemStore
-	ev    *evaluator
-	owner *ownerPolicy
-	tasks int
+	// jstore is the journal's store, kept across open so a restart
+	// replays the same journal (OP-11).
+	jstore journal.Store
+	ev     *evaluator
+	owner  *ownerPolicy
+	tasks  int
 }
 
 type ownerPolicy struct {
@@ -130,7 +133,13 @@ func (noop) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
 
 func newEnv(t *testing.T, mod func(*Config)) *env {
 	t.Helper()
-	e := &env{t: t, store: &MemStore{}, ev: &evaluator{ran: map[string]bool{}, tasks: map[string]bool{}}}
+	return newEnvOn(t, nil, mod)
+}
+
+// newEnvOn is newEnv over journal store js (nil: a fresh one).
+func newEnvOn(t *testing.T, js journal.Store, mod func(*Config)) *env {
+	t.Helper()
+	e := &env{t: t, store: &MemStore{}, jstore: js, ev: &evaluator{ran: map[string]bool{}, tasks: map[string]bool{}}}
 	cfg := Config{
 		Store:       e.store,
 		Evaluator:   e.ev,
@@ -168,7 +177,10 @@ func (e *env) open(p *Pipeline) {
 		e.owner = &ownerPolicy{}
 	}
 	e.owner.p = p
-	eng, err := journal.Open(&journal.MemStore{}, e.owner, map[string]journal.Executor{Executor: p, "task": noop{}},
+	if e.jstore == nil {
+		e.jstore = &journal.MemStore{}
+	}
+	eng, err := journal.Open(e.jstore, e.owner, map[string]journal.Executor{Executor: p, "task": noop{}},
 		func(s string) string { return s })
 	if err != nil {
 		e.t.Fatal(err)
