@@ -53,10 +53,11 @@ func (c *custody) putPrivate(provider string, ok bool, code string) error {
 	return nil
 }
 
-// privateMarkOK refuses a provider that is not built in, or whose marker
-// name holds a vault entry of another kind. Caller holds mu.
+// privateMarkOK refuses a provider that is neither built in nor the plan
+// route, or whose marker name holds a vault entry of another kind. Caller
+// holds mu.
 func (c *custody) privateMarkOK(provider string) error {
-	if _, known := adapterNamed(provider); !known {
+	if _, known := adapterNamed(provider); !known && provider != planProvider {
 		return errBadCredential
 	}
 	if hasOtherKind(c.v, PrivateOKPrefix+provider, KindPrivateOK) {
