@@ -17,11 +17,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
 
-// imageVersion is the CLI version a provider image pins. No image records
-// one yet (#1877 fills it), so every plan route's gate stays closed and
-// no sign-in is offered: the page fails closed.
-func imageVersion(string) string { return "" }
-
 // setupSignInMB is the memory a setup sign-in worker asks for: the CLI's
 // login and nothing else.
 const setupSignInMB = 1024
@@ -40,12 +35,14 @@ type setupSignIn struct{ r *provagent.Runner }
 // machines close (Background), not up to its code's life later. This
 // runner has no SignIn or OnSignedIn: its SignedIn changes only its own
 // state, never the daemon runner's stop or ONB-9's line, which do not
-// exist before setup ends.
-func newSetupSignIn(host *setupHost, rc *modelroute.RouteControl) setupSignIn {
+// exist before setup ends. pins read the images' pinned CLI versions at
+// each check, as agentosd's runner does (#1877): an image that pins none keeps its
+// gate closed and the page offers no sign-in.
+func newSetupSignIn(host *setupHost, rc *modelroute.RouteControl, pins imagePins) setupSignIn {
 	return setupSignIn{&provagent.Runner{
 		Host: host, Seeder: planSeeder{rc}, Decls: provagent.Builtins(),
 		Background:   host.done,
-		ImageVersion: imageVersion,
+		ImageVersion: pins.version,
 		Consent:      func(string) bool { return false },
 		SignInStored: func(id string) bool { return planSignInStored(rc, id) },
 		SignInFor:    rc.SignInFor,
