@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// REQ: CRED-5, CRED-5t, OP-11, RSP-1
+// REQ: CRED-5, OP-11, CRED-RS-1
 
-// RSP-1: a route stop is a journal record, so an engine reopened from the
+// CRED-RS-1: a route stop is a journal record, so an engine reopened from the
 // same store still holds it, and a reopen record clears it.
 func TestRouteStopSurvivesReopen(t *testing.T) {
 	st := &MemStore{}
@@ -56,7 +56,7 @@ func TestRouteStopSurvivesReopen(t *testing.T) {
 	}
 }
 
-// RSP-1: the note carries codes only, never free text.
+// CRED-RS-1: the note carries codes only, never free text.
 func TestRouteStopRefusesBadNotes(t *testing.T) {
 	e := mustOpen(t, &MemStore{}, newPolicy(), newService())
 	for _, c := range []struct{ route, cause string }{

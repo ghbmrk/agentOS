@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: CRED-5, CRED-5t, OP-11, RSP-2
+// REQ: CRED-5, OP-11, CRED-RS-2
 
 // stops is a RouteStops whose map outlives the Runner, as the journal does
 // across a restart.
@@ -48,7 +48,7 @@ func (s *stops) RouteStopped(route string) (string, bool) {
 	return c, ok
 }
 
-// RSP-2: a refused login's stop is in the store, so a new Runner over it
+// CRED-RS-2: a refused login's stop is in the store, so a new Runner over it
 // (the broker restarted, and egress's in-memory refusal is gone) refuses
 // the route, starts nothing and tells the owner once more. Only the owner's
 // sign-in reopens it.
@@ -91,7 +91,7 @@ func TestStoppedRouteSurvivesARestart(t *testing.T) {
 	}
 }
 
-// RSP-2, CRED-5t: on the store egress shares, a route stopped by an
+// CRED-RS-2, CRED-5t: on the store egress shares, a route stopped by an
 // unswappable exchange stays stopped through a sign-in (only a release
 // requalifies it), falls back, and shows no sign-in line, since signing in
 // would not help.
@@ -115,7 +115,7 @@ func TestSignedInLeavesAnUnswappableStop(t *testing.T) {
 	}
 }
 
-// RSP-2: a stop the store cannot record still stops the route in this
+// CRED-RS-2: a stop the store cannot record still stops the route in this
 // process, and a reopening it cannot record leaves the route stopped.
 func TestRouteStopWriteFailureFailsClosed(t *testing.T) {
 	st := &stops{m: map[string]string{}, fail: true}

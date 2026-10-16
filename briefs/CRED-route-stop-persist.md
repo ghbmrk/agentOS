@@ -13,14 +13,14 @@ Board row: #1926 (state-machine audit 2026-10-16). Tier A (credentialed sessions
 - **OP-11**: the journal is the one durable store; no component keeps its own durable lifecycle beside it, and replay rebuilds any state such as "stopped".
 
 Package IDs:
-- **RSP-1** A route stop and its reopening are journal records (`route_stop`); replay rebuilds which routes are stopped and why, so an engine reopened from the same store still holds the stop. Stopping a stopped route or reopening an open one writes nothing.
-- **RSP-2** `provagent.Runner` keeps its stops in that store (`Runner.Stops`; agentosd wires the journal). A new Runner over the same store refuses the stopped provider's runs and tells the owner once more; `SignedIn` reopens only a refused-login stop, and a failed write keeps the route stopped.
-- **RSP-3** `egress.Proxy` keeps its stops in the same store shape (`Config.Stops`), so on one journal the two are one projection. `Resume` still refuses an unswappable stop (`ErrRequalify`); `Requalify`, for the release, lifts it; a failed write keeps the route stopped.
+- **CRED-RS-1** A route stop and its reopening are journal records (`route_stop`); replay rebuilds which routes are stopped and why, so an engine reopened from the same store still holds the stop. Stopping a stopped route or reopening an open one writes nothing.
+- **CRED-RS-2** `provagent.Runner` keeps its stops in that store (`Runner.Stops`; agentosd wires the journal). A new Runner over the same store refuses the stopped provider's runs and tells the owner once more; `SignedIn` reopens only a refused-login stop, and a failed write keeps the route stopped.
+- **CRED-RS-3** `egress.Proxy` keeps its stops in the same store shape (`Config.Stops`), so on one journal the two are one projection. `Resume` still refuses an unswappable stop (`ErrRequalify`); `Requalify`, for the release, lifts it; a failed write keeps the route stopped.
 
 **Acceptance tests:**
-- RSP-1: `broker/journal/routestop_test.go::TestRouteStopSurvivesReopen`, `TestRouteStopRefusesBadNotes`.
-- RSP-2: `broker/provagent/routestop_test.go::TestStoppedRouteSurvivesARestart`, `TestSignedInLeavesAnUnswappableStop`, `TestRouteStopWriteFailureFailsClosed`.
-- RSP-3: `broker/egress/routestop_test.go::TestProxyStopSurvivesARestart`, `TestProxyStopWriteFailureFailsClosed`.
+- CRED-RS-1: `broker/journal/routestop_test.go::TestRouteStopSurvivesReopen`, `TestRouteStopRefusesBadNotes`.
+- CRED-RS-2: `broker/provagent/routestop_test.go::TestStoppedRouteSurvivesARestart`, `TestSignedInLeavesAnUnswappableStop`, `TestRouteStopWriteFailureFailsClosed`.
+- CRED-RS-3: `broker/egress/routestop_test.go::TestProxyStopSurvivesARestart`, `TestProxyStopWriteFailureFailsClosed`.
 
 ## Design
 
@@ -38,4 +38,4 @@ The scope is wider than the row's three files because OP-11 allows no durable st
 
 ## Done
 
-CI green; RSP-1..3 covered by passing tests carrying `REQ: CRED-5, CRED-5t, OP-11` and their ID.
+CI green; CRED-RS-1..3 covered by passing tests carrying `REQ: CRED-5, OP-11` and their ID (CRED-5t is the code base's name for CRED-5's unswappable-exchange clause, not a SPEC ID).

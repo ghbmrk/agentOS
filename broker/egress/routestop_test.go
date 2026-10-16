@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: CRED-5, CRED-5t, OP-11, RSP-3
+// REQ: CRED-5, OP-11, CRED-RS-3
 
 // routeStops is a RouteStops whose map outlives the Proxy, as the journal
 // does across a restart.
@@ -62,7 +62,7 @@ func (r *planRig) rebuild(t *testing.T, st RouteStops) {
 	r.proxy = p
 }
 
-// RSP-3: a stop is in the store, so a proxy built again over it (a
+// CRED-RS-3: a stop is in the store, so a proxy built again over it (a
 // restart) still refuses the route without reaching the provider. A
 // refused login's stop is lifted by Resume; an unswappable one is not,
 // only by Requalify (the release).
@@ -119,7 +119,7 @@ func TestProxyStopSurvivesARestart(t *testing.T) {
 	}
 }
 
-// RSP-3: a stop the store cannot record still stops the route in this
+// CRED-RS-3: a stop the store cannot record still stops the route in this
 // proxy and tells the owner once; a reopening it cannot record is refused
 // and leaves the route stopped.
 func TestProxyStopWriteFailureFailsClosed(t *testing.T) {
