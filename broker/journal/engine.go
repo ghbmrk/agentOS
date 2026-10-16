@@ -49,6 +49,12 @@ type Engine struct {
 	shapeIx map[coldShape]uint32
 	pinned  bool
 	stopped bool
+	// stoppedAt holds every attempt that was in flight or unknown when a
+	// STOP was recorded: the only attempts a cancel_requested record may
+	// name. It is set by the stop record's apply, so replay rebuilds it,
+	// and never cleared, so Stop's cancel stays legal after the attempt
+	// settles or RESUME lifts STOP while the canceller runs.
+	stoppedAt map[attemptRef]bool
 	// fence maps an account to the intents left unresolved by the last
 	// restart. Dispatch on the account waits until it is empty (OP-4).
 	fence map[string]map[string]bool
@@ -135,6 +141,12 @@ type entry struct {
 	// owner settles may be days later (Security B11 on #1433).
 	wentAt  time.Time
 	knownAt time.Time
+}
+
+// attemptRef names one attempt of one intent.
+type attemptRef struct {
+	id string
+	n  int
 }
 
 // Option configures Open.
@@ -1683,6 +1695,9 @@ func (e *Engine) validate(r Record) error {
 			return fmt.Errorf("%s: %s from %s", r.ID, r.Type, en.state)
 		}
 	case RecRecheckFailed:
+		// From not_applied too, on purpose: a recheck before a resend
+		// of a not-done attempt can fail (OP-3), and Erase denies a
+		// not-done intent this way before it erases it (CAP-3).
 		if en.state != Authorized && en.state != NotApplied {
 			return fmt.Errorf("%s: recheck from %s", r.ID, en.state)
 		}
@@ -1739,10 +1754,20 @@ func (e *Engine) validate(r Record) error {
 		if en.attempt(r.Attempt) == nil {
 			return fmt.Errorf("%s: no attempt %d", r.ID, r.Attempt)
 		}
+		// Only Stop writes these, for an attempt outstanding at a STOP.
+		if !e.stoppedAt[attemptRef{r.ID, r.Attempt}] {
+			return fmt.Errorf("%s: cancel of attempt %d, not outstanding at a stop", r.ID, r.Attempt)
+		}
 	case RecQuality:
 		if r.Verdict != VerdictGood && r.Verdict != VerdictWrong {
 			return fmt.Errorf("%s: verdict %q", r.ID, r.Verdict)
 		}
+		// Legal from every state, on purpose: goal quality is
+		// recorded apart from permission and execution (OP-7) and
+		// apply never changes the state or the attempts for it, so
+		// no state makes it inconsistent. Owners rate a task before
+		// it is dispatched, and journals already hold such records;
+		// a state guard here would fail their Open (ErrCorrupt).
 	case RecErased:
 		if en.state != Succeeded && en.state != Denied {
 			return fmt.Errorf("%s: erased from %s", r.ID, en.state)
@@ -1762,6 +1787,20 @@ func (e *Engine) apply(r Record) {
 	switch r.Type {
 	case RecStop:
 		e.stopped = true
+		// What Stop cancels: the open and lingering intents' attempts
+		// still in flight or unknown.
+		for _, m := range []map[string]*entry{e.open, e.lingering} {
+			for id, en := range m {
+				for _, a := range en.attempts {
+					if a.Result == ResultUnknown || a.Result == ResultInFlight {
+						if e.stoppedAt == nil {
+							e.stoppedAt = map[attemptRef]bool{}
+						}
+						e.stoppedAt[attemptRef{id, a.N}] = true
+					}
+				}
+			}
+		}
 		return
 	case RecResume:
 		e.stopped = false
