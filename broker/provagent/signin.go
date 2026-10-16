@@ -238,8 +238,7 @@ func (r *Runner) awaitSignIn(ctx context.Context, id string, d Declaration, t Si
 	deadline := time.Now().Add(t.Wall)
 	for {
 		exited := strings.TrimSpace(r.read(ctx, id, d.Cwd+signInStatus, t.Link)) != ""
-		if r.SignInStored(id) {
-			r.SignedIn(d.ID)
+		if r.SignedIn(d.ID, id) {
 			return
 		}
 		switch {

@@ -280,7 +280,7 @@ func TestONB3SignInWaitEndsWithTheBackgroundContext(t *testing.T) {
 // old order (clear after unlock) lost.
 func TestONB9SignInLineMatchesTheStopUnderARacingRefusal(t *testing.T) {
 	var line atomic.Bool
-	r := &Runner{SignIn: func(string) { line.Store(true) }}
+	r := &Runner{SignIn: func(string) { line.Store(true) }, SignInStored: func(string) bool { return true }}
 	var refused sync.WaitGroup
 	r.OnSignedIn = func(string) {
 		refused.Add(1)
@@ -297,7 +297,7 @@ func TestONB9SignInLineMatchesTheStopUnderARacingRefusal(t *testing.T) {
 		line.Store(false)
 	}
 	r.signIn("stub", true)
-	r.SignedIn("stub")
+	r.SignedIn("stub", "pw-0001")
 	refused.Wait()
 	r.mu.Lock()
 	stopped, told := r.stopped["stub"], r.told["stub"]
@@ -618,4 +618,30 @@ func TestONB3RefusedSignInLogsItsCause(t *testing.T) {
 		g.gone(t)
 		g.noCanary(t)
 	})
+}
+
+// #1925: SignedIn lifts a stopped route only when the vault says the
+// sign-in worker's own sign-in stored the login; without that record (or
+// with no way to ask) the stop and the sign-in line stay in place.
+func TestSignedInNeedsAStoredSignIn(t *testing.T) {
+	stored := map[string]bool{"pw-ok": true}
+	var lifted []string
+	r := &Runner{SignIn: func(string) {}, OnSignedIn: func(p string) { lifted = append(lifted, p) }}
+	r.signIn("stub", true)
+	if r.SignedIn("stub", "pw-ok") {
+		t.Fatal("lifted with no SignInStored")
+	}
+	r.SignInStored = func(id string) bool { return stored[id] }
+	if r.SignedIn("stub", "pw-none") {
+		t.Fatal("lifted without a stored sign-in")
+	}
+	r.mu.Lock()
+	stopped, told := r.stopped["stub"], r.told["stub"]
+	r.mu.Unlock()
+	if !stopped || !told || len(lifted) != 0 {
+		t.Fatalf("stopped %v, told %v, lifted %v: the stop did not stay", stopped, told, lifted)
+	}
+	if !r.SignedIn("stub", "pw-ok") || r.isStopped("stub") || len(lifted) != 1 {
+		t.Fatalf("stored sign-in: stopped %v, lifted %v", r.isStopped("stub"), lifted)
+	}
 }

@@ -381,3 +381,110 @@ func TestNewChecksTheDeclaration(t *testing.T) {
 		t.Fatal("no adapter accepted")
 	}
 }
+
+// REQ: CRED-5
+// A login the provider refused (a declared refused-login status) is
+// revoked in the holder: it is spent no more, and handing the same login
+// again is refused, so nothing retries it (#1925). A new login (the owner
+// signed in again) replaces it.
+func TestRefusedLoginIsNotHandedAgain(t *testing.T) {
+	key := canary(t, "sk-canary-")
+	up := &upstream{reply: answer(http.StatusForbidden, nil, "")}
+	h := newHolder(t, up, &swapper{})
+	if err := h.Hand([]byte(key)); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req("POST", "/v1/messages", "{}"))
+	if w.Code != http.StatusForbidden || up.calls() != 1 {
+		t.Fatalf("refusal: status %d calls %d", w.Code, up.calls())
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req("POST", "/v1/messages", "{}"))
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get(ErrorHeader) != ErrRevoked || up.calls() != 1 {
+		t.Fatalf("revoked login spent again: status %d %q calls %d", w.Code, w.Header().Get(ErrorHeader), up.calls())
+	}
+	if err := h.Hand([]byte(key)); !errors.Is(err, ErrRevokedLogin) {
+		t.Fatalf("hand of the revoked login: %v", err)
+	}
+	if !h.Revoked() || !h.holds([]byte(key)) {
+		t.Fatal("a refused hand changed the holder")
+	}
+	// Over the hand socket too.
+	dir := socketDir(t)
+	serve(t, h, dir, os.Getuid())
+	k := &Keeper{Socket: filepath.Join(dir, HandSocket), Secret: func() ([]byte, error) { return []byte(key), nil }}
+	if handed, err := k.Check(context.Background()); handed || !errors.Is(err, ErrRevokedLogin) {
+		t.Fatalf("keeper re-handed the revoked login: %v %v", handed, err)
+	}
+
+	fresh := canary(t, "sk-canary-")
+	if err := h.Hand([]byte(fresh)); err != nil || h.Revoked() {
+		t.Fatalf("new login: %v, revoked %v", err, h.Revoked())
+	}
+	up.reply = answer(200, nil, "{}")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req("POST", "/v1/messages", "{}"))
+	if w.Code != 200 || up.calls() != 2 {
+		t.Fatalf("new login: status %d calls %d", w.Code, up.calls())
+	}
+}
+
+// REQ: CRED-5
+// A holder that restarts empty after its login was refused is not handed
+// that login again: the keeper remembers it. Once the vault has a new
+// login (the owner signed in again), the keeper hands that one, also to a
+// holder still holding the revoked login (#1925).
+func TestKeeperDoesNotRehandARevokedLogin(t *testing.T) {
+	dir := socketDir(t)
+	var mu sync.Mutex
+	key := canary(t, "sk-canary-")
+	secret := func() ([]byte, error) { mu.Lock(); defer mu.Unlock(); return []byte(key), nil }
+	k := &Keeper{Socket: filepath.Join(dir, HandSocket), Secret: secret}
+	ctx := context.Background()
+
+	up := &upstream{reply: answer(http.StatusForbidden, nil, "")}
+	h := newHolder(t, up, &swapper{})
+	stop := serve(t, h, dir, os.Getuid())
+	if handed, err := k.Check(ctx); !handed || err != nil {
+		t.Fatalf("first hand: %v %v", handed, err)
+	}
+	h.ServeHTTP(httptest.NewRecorder(), req("POST", "/v1/messages", "{}"))
+	if !h.Revoked() {
+		t.Fatal("the refusal did not revoke the login")
+	}
+	if handed, _ := k.Check(ctx); handed {
+		t.Fatal("keeper handed the revoked login to the revoked holder")
+	}
+	stop()
+
+	// The holder restarts empty.
+	h = newHolder(t, up, &swapper{})
+	stop = serve(t, h, dir, os.Getuid())
+	for i := 0; i < 3; i++ {
+		if handed, _ := k.Check(ctx); handed || h.Held() {
+			t.Fatalf("round %d: keeper re-handed the revoked login after a restart", i)
+		}
+	}
+	mu.Lock()
+	key = canary(t, "sk-canary-")
+	mu.Unlock()
+	if handed, err := k.Check(ctx); !handed || err != nil || !h.holds([]byte(key)) {
+		t.Fatalf("new login after a restart: %v %v", handed, err)
+	}
+	stop()
+
+	// A holder holding a revoked login takes the new one without a restart.
+	h = newHolder(t, up, &swapper{})
+	serve(t, h, dir, os.Getuid())
+	if handed, err := k.Check(ctx); !handed || err != nil {
+		t.Fatalf("hand: %v %v", handed, err)
+	}
+	h.ServeHTTP(httptest.NewRecorder(), req("POST", "/v1/messages", "{}"))
+	mu.Lock()
+	key = canary(t, "sk-canary-")
+	mu.Unlock()
+	if handed, err := k.Check(ctx); !handed || err != nil || !h.holds([]byte(key)) || h.Revoked() {
+		t.Fatalf("new login to a revoked holder: %v %v", handed, err)
+	}
+}

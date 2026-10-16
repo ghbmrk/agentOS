@@ -443,7 +443,8 @@ func TestSignedInLiftsTheStop(t *testing.T) {
 	g := newRig(nil)
 	g.h.cli = g.refuseLogin
 	g.r.Run(context.Background(), req("b"))
-	g.r.SignedIn("stub")
+	g.r.SignInStored = func(string) bool { return true }
+	g.r.SignedIn("stub", "pw-0001")
 	g.advance(time.Second) // the refusal is older than the next run
 	g.h.cli = ok("fine")
 	if out, err := g.r.Run(context.Background(), req("b")); err != nil || out != "fine" {
