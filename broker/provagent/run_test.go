@@ -96,15 +96,18 @@ func ok(text string) func(vm.Command, *stub) vm.ExecResult {
 }
 
 type seeder struct {
+	mu        sync.Mutex
 	err       error
 	calls     []string
 	providers []string
 	closed    []string
 }
 
-func (s *seeder) Close(id string) { s.closed = append(s.closed, id) }
+func (s *seeder) Close(id string) { s.mu.Lock(); s.closed = append(s.closed, id); s.mu.Unlock() }
 
 func (s *seeder) Seed(provider, id string) (map[string][]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.calls, s.providers = append(s.calls, id), append(s.providers, provider)
 	if s.err != nil {
 		return nil, s.err
@@ -121,18 +124,41 @@ type rig struct {
 	granted bool
 	private bool
 	consent bool
-	pools   []Reading
 	logs    []string
+
+	// mu guards what concurrent runs touch: the broker's usage view, the
+	// clock, the journal and the IDs.
+	mu       sync.Mutex
+	usage    Usage
+	usageErr error
+	now      time.Time
+	ids      int
+}
+
+// t0 is the rig's clock at the start of every test.
+var t0 = time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+
+// fresh is a reading of pool taken now, with left of it remaining.
+func fresh(pool string, left float64) Reading { return Reading{Pool: pool, Left: left, At: t0} }
+
+func (g *rig) setUsage(u Usage)        { g.mu.Lock(); g.usage = u; g.mu.Unlock() }
+func (g *rig) advance(d time.Duration) { g.mu.Lock(); g.now = g.now.Add(d); g.mu.Unlock() }
+func (g *rig) clock() time.Time        { g.mu.Lock(); defer g.mu.Unlock(); return g.now }
+func (g *rig) refuseLogin(c vm.Command, s *stub) vm.ExecResult {
+	// The broker saw the provider refuse the login's refresh during the run.
+	g.mu.Lock()
+	g.usage.LoginRefused = g.now
+	g.mu.Unlock()
+	return ok("partial")(c, s)
 }
 
 func newRig(cli func(vm.Command, *stub) vm.ExecResult) *rig {
-	g := &rig{h: newStub(cli), sd: &seeder{}, granted: true, private: true, pools: []Reading{{Pool: "5h", Left: 0.9}}}
+	g := &rig{h: newStub(cli), sd: &seeder{}, granted: true, private: true, now: t0, usage: Usage{Readings: []Reading{fresh("5h", 0.9)}}}
 	d := good()
 	d.Q = qualified()
 	dd := good()
 	dd.ID, dd.TaskClasses = "credit", []string{"code"}
 	dd.Q = qualified()
-	dd.CreditDraw = []string{"credits_drawn"}
 	g.r = &Runner{
 		Host: g.h, Seeder: g.sd,
 		Decls:        map[string]Declaration{"stub": d, "credit": dd, "codex": Builtins()["codex"], "claude": Builtins()["claude"]},
@@ -140,13 +166,20 @@ func newRig(cli func(vm.Command, *stub) vm.ExecResult) *rig {
 		Granted:      func(string) bool { return g.granted },
 		PrivateOK:    func(string) bool { return g.private },
 		Consent:      func(string) bool { return g.consent },
-		Readings:     func(string) []Reading { return g.pools },
-		Reserve:      func() float64 { return 0.1 },
-		Journal:      func(e Event) { g.events = append(g.events, e) },
-		SignIn:       func(p string) { g.signins = append(g.signins, p) },
-		Logf:         func(f string, a ...any) { g.logs = append(g.logs, fmt.Sprintf(f, a...)) },
-		Caps:         Caps{Wall: 2 * time.Second, Result: 1 << 10, Brief: 1 << 10},
-		NewID:        func() string { return fmt.Sprintf("pw-%04d", len(g.h.created)) },
+		Usage: func(string) (Usage, error) {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			u := g.usage
+			u.Readings = append([]Reading(nil), u.Readings...)
+			return u, g.usageErr
+		},
+		Reserve: func(string, string) float64 { return 0.1 },
+		Now:     g.clock,
+		Journal: func(e Event) { g.mu.Lock(); g.events = append(g.events, e); g.mu.Unlock() },
+		SignIn:  func(p string) { g.mu.Lock(); g.signins = append(g.signins, p); g.mu.Unlock() },
+		Logf:    func(f string, a ...any) { g.mu.Lock(); g.logs = append(g.logs, fmt.Sprintf(f, a...)); g.mu.Unlock() },
+		Caps:    Caps{Wall: 2 * time.Second, Result: 1 << 10, Brief: 1 << 10},
+		NewID:   func() string { g.mu.Lock(); defer g.mu.Unlock(); g.ids++; return fmt.Sprintf("pw-%04d", g.ids) },
 	}
 	return g
 }
@@ -345,27 +378,35 @@ func TestUsedUpFallsBack(t *testing.T) {
 	}
 }
 
-func TestACreditDrawIsUsedUp(t *testing.T) {
-	g := newRig(ok(`{"type":"error","note":"credits_drawn"}`))
-	rq := req("b")
-	rq.Provider = "credit"
-	_, err := g.r.Run(context.Background(), rq)
+// RES-5, W8: a pool the broker saw exhausted during the run (a credit
+// draw or a reached limit on its own connection) is used-up, whatever the
+// result says. An exhausted reading from before the run is not this run's.
+func TestAPoolExhaustedDuringTheRunIsUsedUp(t *testing.T) {
+	g := newRig(nil)
+	g.h.cli = func(c vm.Command, s *stub) vm.ExecResult {
+		g.setUsage(Usage{Readings: []Reading{fresh("5h", 0.9), {Pool: "5h", Left: 0, At: g.clock(), Exhausted: true}}})
+		return ok("fine")(c, s)
+	}
+	_, err := g.r.Run(context.Background(), req("b"))
 	if reasonOf(err) != UsedUp || !FallsBack(err) {
 		t.Errorf("%v", err)
 	}
-	// The same text from a declaration with no credit signal is a result.
-	g = newRig(ok(`{"type":"error","note":"credits_drawn"}`))
-	if out, err := g.r.Run(context.Background(), req("b")); err != nil || out == "" {
-		t.Errorf("plain declaration: %v", err)
+	g = newRig(nil)
+	g.setUsage(Usage{Readings: []Reading{fresh("5h", 0.9), {Pool: "7d", Left: 0, At: t0.Add(-DefaultMaxAge), Exhausted: true}}})
+	g.advance(time.Second)
+	g.h.cli = ok("fine")
+	if out, err := g.r.Run(context.Background(), req("b")); err != nil || out != "fine" {
+		t.Errorf("an exhaustion before the run: %q %v", out, err)
 	}
 }
 
-const refused = `{"type":"error","message":"login_refused"}`
-
-// CRED-5: a refused login stops the route for later runs too. The second run
-// seeds nothing, starts no worker or CLI, and the owner is told once.
+// CRED-5: a refused login stops the route for later runs too. The refusal
+// is the broker's own reading of the refresh on its upstream connection,
+// never the result file. The second run seeds nothing, starts no worker or
+// CLI, and the owner is told once.
 func TestARefusedLoginStopsTheRouteOnceAndDoesNotRetry(t *testing.T) {
-	g := newRig(ok(refused))
+	g := newRig(nil)
+	g.h.cli = g.refuseLogin
 	_, err := g.r.Run(context.Background(), req("b"))
 	if reasonOf(err) != LoginRefused || !FallsBack(err) {
 		t.Fatalf("%v", err)
@@ -380,7 +421,9 @@ func TestARefusedLoginStopsTheRouteOnceAndDoesNotRetry(t *testing.T) {
 	if len(g.signins) != 1 || g.signins[0] != "stub" {
 		t.Errorf("sign-in line: %v", g.signins)
 	}
-	// Another provider's route is not stopped by it.
+	// Another provider's route is not stopped by it. (The rig's usage view
+	// is shared, so this run sees the refusal again: it is its own.)
+	g.advance(time.Second)
 	rq := req("b")
 	rq.Provider = "credit"
 	if _, err := g.r.Run(context.Background(), rq); reasonOf(err) != LoginRefused || len(g.h.runs) != 2 {
@@ -391,14 +434,16 @@ func TestARefusedLoginStopsTheRouteOnceAndDoesNotRetry(t *testing.T) {
 // The owner's sign-in (or resume) lifts the stop: the route runs again and
 // a later refusal tells the owner again.
 func TestSignedInLiftsTheStop(t *testing.T) {
-	g := newRig(ok(refused))
+	g := newRig(nil)
+	g.h.cli = g.refuseLogin
 	g.r.Run(context.Background(), req("b"))
 	g.r.SignedIn("stub")
+	g.advance(time.Second) // the refusal is older than the next run
 	g.h.cli = ok("fine")
 	if out, err := g.r.Run(context.Background(), req("b")); err != nil || out != "fine" {
 		t.Fatalf("after sign-in: %q %v", out, err)
 	}
-	g.h.cli = ok(refused)
+	g.h.cli = g.refuseLogin
 	g.r.Run(context.Background(), req("b"))
 	if len(g.signins) != 2 {
 		t.Errorf("sign-in line: %v", g.signins)
@@ -423,14 +468,17 @@ func TestAMissingLoginAsksTheOwnerToSignInOnce(t *testing.T) {
 	}
 }
 
-// A signal the agent's own message carries is a result, not a refused login
-// or a used-up plan: only the CLI's error events are read (the guest steers
-// what the model writes).
+// A signal the agent's own message carries is a result, not a used-up
+// plan: only the CLI's error events are read (the guest steers what the
+// model writes). A refused login is never read from the result at all, even
+// from an error event: the agent can write that file (#809, #1856).
 func TestSignalsInTheAgentsTextAreNotSignals(t *testing.T) {
 	for _, body := range []string{
-		`{"type":"item.completed","item":{"type":"agent_message","text":"login_refused usage_limit_reached credits_drawn"}}`,
-		"login_refused usage_limit_reached credits_drawn",
-		`{"type":"item.completed","item":{"text":"{\"type\":\"error\",\"message\":\"login_refused\"}"}}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"usage_limit_reached"}}`,
+		"usage_limit_reached",
+		`{"type":"item.completed","item":{"text":"{\"type\":\"error\",\"message\":\"usage_limit_reached\"}"}}`,
+		`{"type":"error","message":"refresh_token_invalidated"}`,
+		`{"type":"turn.failed","error":{"message":"token_expired authentication_error"}}`,
 	} {
 		for _, p := range []string{"stub", "credit"} {
 			g := newRig(ok(body))
@@ -439,8 +487,8 @@ func TestSignalsInTheAgentsTextAreNotSignals(t *testing.T) {
 			if out, err := g.r.Run(context.Background(), rq); err != nil || out != body {
 				t.Errorf("%s %s: %v", p, body, err)
 			}
-			if len(g.signins) != 0 {
-				t.Errorf("%s: sign-in line set by model text", p)
+			if len(g.signins) != 0 || g.r.isStopped(p) {
+				t.Errorf("%s: sign-in line set by the result", p)
 			}
 		}
 	}
@@ -510,36 +558,213 @@ func TestAFailedRunFallsBack(t *testing.T) {
 func TestPoolAtOrBelowTheReserveRefusesAdmission(t *testing.T) {
 	for _, left := range []float64{0.1, 0.05, 0} {
 		g := newRig(ok("x"))
-		g.pools = []Reading{{Pool: "5h", Left: 0.9}, {Pool: "7d", Left: left}}
+		g.setUsage(Usage{Readings: []Reading{fresh("5h", 0.9), fresh("7d", left)}})
 		_, err := g.r.Run(context.Background(), req("b"))
 		if reasonOf(err) != PoolAtReserve || len(g.h.created) != 0 {
 			t.Errorf("left %v: %v", left, err)
 		}
 	}
 	g := newRig(ok("x"))
-	g.pools = []Reading{{Pool: "5h", Left: 0.5}}
+	g.setUsage(Usage{Readings: []Reading{fresh("5h", 0.5)}})
 	if _, err := g.r.Run(context.Background(), req("b")); err != nil {
 		t.Errorf("headroom: %v", err)
 	}
 }
 
-// RES-5 fails closed: no readings, no reserve, an unread declared pool or an
-// unreadable reading each refuse admission, and none panics.
-func TestUnreadPoolsRefuseAdmission(t *testing.T) {
-	cases := map[string]func(g *rig){
-		"no readings source":   func(g *rig) { g.r.Readings = nil },
-		"no reserve":           func(g *rig) { g.r.Reserve = nil },
-		"no reading":           func(g *rig) { g.pools = nil },
-		"declared pool unread": func(g *rig) { g.pools = []Reading{{Pool: "other", Left: 0.9}} },
-		"NaN reading":          func(g *rig) { g.pools = []Reading{{Pool: "5h", Left: math.NaN()}} },
+// The reserve is the owner's, per provider and pool (RES-5, OP-5).
+func TestTheReserveIsAskedPerProviderAndPool(t *testing.T) {
+	g := newRig(ok("x"))
+	g.setUsage(Usage{Readings: []Reading{fresh("5h", 0.5), fresh("7d", 0.3)}})
+	var asked []string
+	g.r.Reserve = func(provider, pool string) float64 {
+		asked = append(asked, provider+"/"+pool)
+		if pool == "7d" {
+			return 0.4
+		}
+		return 0
 	}
-	for name, set := range cases {
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != PoolAtReserve {
+		t.Errorf("7d under its own reserve: %v", err)
+	}
+	if strings.Join(asked, " ") != "stub/5h stub/7d" {
+		t.Errorf("asked %v", asked)
+	}
+}
+
+// A pool at its reserve stays refused until its reset time, however old
+// the reading: the reset time is the pool's cooldown (RES-5). After the
+// reset, or once a reading with no reset time is stale, the pool is unread.
+func TestAPoolAtReserveIsRefusedUntilItsReset(t *testing.T) {
+	g := newRig(ok("x"))
+	g.setUsage(Usage{Readings: []Reading{{Pool: "5h", Left: 0, At: t0, ResetAt: t0.Add(time.Hour)}}})
+	g.advance(59 * time.Minute)
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != PoolAtReserve {
+		t.Fatalf("before the reset: %v", err)
+	}
+	g.advance(time.Minute)
+	if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+		t.Errorf("after the reset (a probe): %v", err)
+	}
+	g = newRig(ok("x"))
+	g.setUsage(Usage{Readings: []Reading{fresh("5h", 0)}})
+	g.advance(DefaultMaxAge)
+	if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+		t.Errorf("a stale reading with no reset time (a probe): %v", err)
+	}
+}
+
+// RES-5 fails closed where nothing can be read: no usage source, no
+// reserve, an unreadable reading. An unreachable usage view is a busy
+// route, a fallback. None starts a worker or panics.
+func TestUnreadableUsageRefusesAdmission(t *testing.T) {
+	cases := map[string]struct {
+		set  func(g *rig)
+		want Reason
+	}{
+		"no usage source": {func(g *rig) { g.r.Usage = nil }, PoolAtReserve},
+		"no reserve":      {func(g *rig) { g.r.Reserve = nil }, PoolAtReserve},
+		"NaN reading":     {func(g *rig) { g.setUsage(Usage{Readings: []Reading{fresh("5h", math.NaN())}}) }, PoolAtReserve},
+		"NaN reserve": {func(g *rig) {
+			g.r.Reserve = func(string, string) float64 { return math.NaN() }
+		}, PoolAtReserve},
+		"usage unreachable": {func(g *rig) { g.usageErr = errors.New("control socket down") }, RouteBusy},
+	}
+	for name, c := range cases {
 		g := newRig(ok("x"))
-		set(g)
+		c.set(g)
 		_, err := g.r.Run(context.Background(), req("b"))
-		if reasonOf(err) != PoolAtReserve || len(g.h.created) != 0 || len(g.sd.calls) != 0 {
+		if reasonOf(err) != c.want || !FallsBack(err) || len(g.h.created) != 0 || len(g.sd.calls) != 0 {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// W8 / OP-8: usage that cannot be read after the run fails the run closed
+// (route-busy, a fallback): a refused login or a credit draw during it
+// would otherwise go unseen (#1856 review F3).
+func TestUnreadableUsageAfterTheRunFailsClosed(t *testing.T) {
+	var g *rig
+	g = newRig(func(c vm.Command, s *stub) vm.ExecResult {
+		g.mu.Lock()
+		g.usageErr = errors.New("control socket down")
+		g.mu.Unlock()
+		return ok("finished")(c, s)
+	})
+	out, err := g.r.Run(context.Background(), req("b"))
+	if reasonOf(err) != RouteBusy || !FallsBack(err) || out != "" {
+		t.Fatalf("got %q, %v; want a route-busy fallback", out, err)
+	}
+}
+
+// RES-5 before the first reading: readings come only from the provider's
+// responses on the broker's connection, so a pool nobody has run against
+// is unread. One probe run is admitted per provider while it is unread or
+// stale, alone, and at most once per MaxAge; its own responses are the
+// reading the next admission uses.
+func TestAnUnreadPoolAdmitsOneProbeRun(t *testing.T) {
+	for name, u := range map[string]Usage{
+		"no reading":           {},
+		"declared pool unread": {Readings: []Reading{fresh("other", 0.9)}},
+		"stale reading":        {Readings: []Reading{{Pool: "5h", Left: 0.9, At: t0.Add(-DefaultMaxAge)}}},
+	} {
+		g := newRig(nil)
+		g.setUsage(u)
+		var during error
+		g.h.cli = func(c vm.Command, s *stub) vm.ExecResult {
+			// A second run while the probe is out is refused.
+			_, during = g.r.Run(context.Background(), req("b"))
+			return ok("probe")(c, s)
+		}
+		if out, err := g.r.Run(context.Background(), req("b")); err != nil || out != "probe" {
+			t.Fatalf("%s: probe: %q %v", name, out, err)
+		}
+		if reasonOf(during) != PoolAtReserve {
+			t.Errorf("%s: run during the probe: %v", name, during)
+		}
+		// The probe brought no reading: no second probe until MaxAge.
+		g.h.cli = ok("x")
+		g.advance(DefaultMaxAge - time.Second)
+		if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != PoolAtReserve {
+			t.Errorf("%s: second probe within MaxAge: %v", name, err)
+		}
+		g.advance(time.Second)
+		if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+			t.Errorf("%s: probe after MaxAge: %v", name, err)
+		}
+		if len(g.h.created) != 2 {
+			t.Errorf("%s: %d workers", name, len(g.h.created))
+		}
+	}
+	// A probe that brings a reading opens the route at once.
+	g := newRig(nil)
+	g.setUsage(Usage{})
+	g.h.cli = func(c vm.Command, s *stub) vm.ExecResult {
+		g.setUsage(Usage{Readings: []Reading{{Pool: "5h", Left: 0.8, At: g.clock()}}})
+		return ok("x")(c, s)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+}
+
+// A probe that never reached the CLI (no login yet, a failed seed) read
+// nothing, so it does not hold the next probe back.
+func TestAProbeThatNeverRanIsForgotten(t *testing.T) {
+	g := newRig(ok("x"))
+	g.setUsage(Usage{})
+	g.sd.err = fmt.Errorf("x: %w", ErrNoLogin)
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != Unsigned {
+		t.Fatalf("%v", err)
+	}
+	g.sd.err = nil
+	if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+		t.Errorf("probe after sign-in: %v", err)
+	}
+}
+
+// RES-5: at most PerPool runs of one provider at once (2 by default); a
+// third is a busy route, and another provider is not counted with it.
+func TestConcurrentRunsAreCappedPerProvider(t *testing.T) {
+	g := newRig(nil)
+	g.setUsage(Usage{Readings: []Reading{fresh("5h", 0.9)}})
+	in, release := make(chan struct{}, 2), make(chan struct{})
+	g.h.cli = func(c vm.Command, s *stub) vm.ExecResult {
+		in <- struct{}{}
+		<-release
+		return ok("x")(c, s)
+	}
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() { _, err := g.r.Run(context.Background(), req("b")); errs <- err }()
+	}
+	<-in
+	<-in
+	if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != RouteBusy || !FallsBack(err) {
+		t.Errorf("third run: %v", err)
+	}
+	other := make(chan error, 1)
+	go func() {
+		rq := req("b")
+		rq.Provider = "credit"
+		_, err := g.r.Run(context.Background(), rq)
+		other <- err
+	}()
+	<-in
+	close(release)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("capped run: %v", err)
+		}
+	}
+	if err := <-other; err != nil {
+		t.Errorf("other provider: %v", err)
+	}
+	// The slots are released on exit.
+	g.h.cli = ok("x")
+	if _, err := g.r.Run(context.Background(), req("b")); err != nil {
+		t.Errorf("after: %v", err)
 	}
 }
 

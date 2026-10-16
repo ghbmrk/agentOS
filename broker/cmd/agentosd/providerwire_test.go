@@ -5,12 +5,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -36,20 +38,86 @@ func TestProviderRunnerIsClosedByDefault(t *testing.T) {
 	}
 }
 
-// RES-5: once #809 fills the record and the owner grants the plan, the
-// wired runner still refuses until pool readings reach agentosd (#1856).
-func TestProviderRunnerRefusesUnreadPoolsAfterTheRecordIsFilled(t *testing.T) {
+// filledRunner is the wired runner once #809 fills the record and the
+// owner grants the plan.
+func filledRunner() *provagent.Runner {
 	r := providerRunner(nil, nil, nil)
 	d := r.Decls["codex"]
 	d.Q = provagent.Qualification{CLIVersion: "1", Evidence: "e", TermsURL: "https://t.test", TermsRead: "2026-10-01", Verdict: provagent.Allowed}
 	r.Decls["codex"] = d
 	r.ImageVersion = func(string) string { return "1" }
 	r.Granted = func(string) bool { return true }
+	return r
+}
+
+func runCodex(r *provagent.Runner) provagent.Reason {
 	_, err := r.Run(context.Background(), provagent.Request{Provider: "codex", Brief: "b", TaskClass: "code",
 		Label: vm.Public, Class: admission.Experiment, MemMB: 256})
 	var ref *provagent.Refusal
-	if !errors.As(err, &ref) || ref.Reason != provagent.PoolAtReserve {
-		t.Fatalf("= %v, want pool-at-reserve", err)
+	if !errors.As(err, &ref) {
+		return ""
+	}
+	return ref.Reason
+}
+
+// RES-5 fails closed: a runner without plan usage wired refuses admission
+// even once the record is filled; wirePlanUsage gives it the vault
+// process's readings, and an unreachable control socket is a busy route.
+func TestProviderRunnerRefusesWithoutPlanUsage(t *testing.T) {
+	if got := runCodex(filledRunner()); got != provagent.PoolAtReserve {
+		t.Fatalf("unwired = %s, want pool-at-reserve", got)
+	}
+	r := filledRunner()
+	wirePlanUsage(r, modelroute.NewRouteControl(filepath.Join(t.TempDir(), "none.sock")))
+	if got := runCodex(r); got != provagent.RouteBusy {
+		t.Fatalf("unreachable = %s, want route-busy", got)
+	}
+	// A pool the provider reported exhausted, until its reset, refuses
+	// before anything is seeded.
+	var closed []string
+	reset := time.Now().Add(time.Hour).Unix()
+	body := fmt.Sprintf(`{"Pools":[{"At":%q,"Pool":"primary","UsedPercent":100,"ResetAt":%d}]}`, time.Now().Format(time.RFC3339Nano), reset)
+	r = filledRunner()
+	wirePlanUsage(r, controlServer(t, http.StatusOK, body, &closed))
+	if got := runCodex(r); got != provagent.PoolAtReserve {
+		t.Fatalf("used up = %s, want pool-at-reserve", got)
+	}
+}
+
+// The usage adapter turns the vault process's percentages into shares
+// left, an exhaustion into none, and unix reset times into times.
+func TestPlanUsageAdapterMapsReadings(t *testing.T) {
+	at := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	refused := at.Add(time.Minute)
+	body := fmt.Sprintf(`{"Pools":[
+		{"At":%[1]q,"Pool":"primary","UsedPercent":25,"ResetAt":1760536800},
+		{"At":%[1]q,"Pool":"secondary","UsedPercent":140},
+		{"At":%[1]q,"Pool":"credits","UsedPercent":3,"Exhausted":true}],
+		"LoginRefused":%[2]q}`, at.Format(time.RFC3339), refused.Format(time.RFC3339))
+	var closed []string
+	u, err := planUsage{controlServer(t, http.StatusOK, body, &closed)}.Usage("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []provagent.Reading{
+		{Pool: "primary", Left: 0.75, At: at, ResetAt: time.Unix(1760536800, 0)},
+		{Pool: "secondary", Left: 0, At: at},
+		{Pool: "credits", Left: 0, At: at, Exhausted: true},
+	}
+	if len(u.Readings) != len(want) || !u.LoginRefused.Equal(refused) {
+		t.Fatalf("%+v", u)
+	}
+	for i, w := range want {
+		g := u.Readings[i]
+		if g.Pool != w.Pool || g.Left != w.Left || !g.At.Equal(w.At) || !g.ResetAt.Equal(w.ResetAt) || g.Exhausted != w.Exhausted {
+			t.Errorf("reading %d = %+v, want %+v", i, g, w)
+		}
+	}
+	if _, err := (planUsage{}).Usage("codex"); err == nil {
+		t.Error("no route control read as usage")
+	}
+	if ownerReserve("codex", "primary") != 0 {
+		t.Error("the default reserve is not 0% (ONB-9)")
 	}
 }
 
