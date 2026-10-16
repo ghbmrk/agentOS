@@ -311,7 +311,8 @@ func TestONB9SignInLineMatchesTheStopUnderARacingRefusal(t *testing.T) {
 	r.SignedIn("stub", "pw-0001")
 	refused.Wait()
 	r.mu.Lock()
-	stopped, told := r.stopped["stub"], r.told["stub"]
+	_, stopped := r.stops().RouteStopped("stub")
+	told := r.told["stub"]
 	r.mu.Unlock()
 	if !stopped || !told || !line.Load() {
 		t.Fatalf("stopped %v, told %v, line %v: the owner is not told the route stopped", stopped, told, line.Load())
@@ -647,7 +648,8 @@ func TestSignedInNeedsAStoredSignIn(t *testing.T) {
 		t.Fatal("lifted without a stored sign-in")
 	}
 	r.mu.Lock()
-	stopped, told := r.stopped["stub"], r.told["stub"]
+	_, stopped := r.stops().RouteStopped("stub")
+	told := r.told["stub"]
 	r.mu.Unlock()
 	if !stopped || !told || len(lifted) != 0 {
 		t.Fatalf("stopped %v, told %v, lifted %v: the stop did not stay", stopped, told, lifted)
