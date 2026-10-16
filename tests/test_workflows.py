@@ -78,7 +78,7 @@ class WorkflowTest(unittest.TestCase):
             jobs = re.split(r"(?m)^  (?=[a-z][\w-]*:\n)", f.read_text().split("\njobs:\n", 1)[-1])
             for job in jobs:
                 writes, env = "contents: write" in job, bool(re.search(r"(?m)^    environment: bot$", job))
-                if f.name in ("trace.yml", "metrics.yml", "metrics-refresh.yml", "records.yml"):
+                if f.name in ("board.yml", "trace.yml", "metrics.yml", "metrics-refresh.yml", "records.yml"):
                     self.assertEqual(writes, env, f"{f.name}: {job.split(':', 1)[0]}")
                 else:
                     self.assertFalse(env or "BOT_PR_TOKEN" in job, f.name)
