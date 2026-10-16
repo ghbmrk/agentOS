@@ -161,7 +161,8 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 	}
 
 	// A FAIL with the image quotes agentosd's setup and provagent lines,
-	// the refusal's cause, with the stub's canary cut out (#1701).
+	// the refusal's cause, and the end of runsc's exec log, a long message
+	// whole, with the stub's canary cut out (#1701).
 	d = fakeDriver(&fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com", noRun: true})
 	d.agentosdArgv = func() ([]string, error) {
 		return []string{"/usr/lib/agentos/agentosd", "-image", "codex=/usr/lib/agentos/images/codex"}, nil
@@ -172,6 +173,11 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 			"provagent: codex sign-in: create provider worker pw-1: vm: " + codexstub.Canary + "\n" +
 			"localsrv: unrelated\n"
 	}
+	long := strings.Repeat("x", 2*logLineMax)
+	d.runscLog = func() string {
+		return "2026-10-16T00:00:00Z pw-1: runsc run failed (exit status 128)\n-- console\n" +
+			"starting container: " + long + codexstub.Canary + ": operation not permitted\n"
+	}
 	err = d.guestTask()
 	switch {
 	case err == nil:
@@ -180,6 +186,8 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 		t.Errorf("no start: %v quotes no setup or provagent line", err)
 	case strings.Contains(err.Error(), codexstub.Canary) || strings.Contains(err.Error(), "unrelated") || strings.Contains(err.Error(), "listening"):
 		t.Errorf("no start: %v quotes the canary or an unrelated line", err)
+	case !strings.Contains(err.Error(), "runsc run failed (exit status 128)") || !strings.Contains(err.Error(), "[redacted]: operation not permitted"):
+		t.Errorf("no start: %v does not quote runsc's message whole", err)
 	}
 
 	// Each failure reads FAIL and names what went wrong: the host the page

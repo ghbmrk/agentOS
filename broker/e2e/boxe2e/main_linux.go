@@ -99,6 +99,9 @@ type driver struct {
 	agentosdArgv func() ([]string, error)
 	// agentosdLog is agentosd's journal this boot; nil reads the unit's.
 	agentosdLog func() string
+	// runscLog is agentosd's runsc exec log, where a machine's failed
+	// start leaves runsc's message; nil reads the box's.
+	runscLog func() string
 	// now and sleep are the clock of the codes and of phone-control's
 	// waits; nil is the wall clock. The in-process test shares a fake one
 	// with the owner channel.
@@ -537,7 +540,9 @@ func (d *driver) guestTask() error {
 
 // signInDiag says why the sign-in did not start: agentosd's setup and
 // provagent journal lines, where StartSignIn logs the step that refused it
-// (#1701), cut short with the stub's tokens cut out (ASSUMPTIONS E8).
+// (#1701), and the end of runsc's exec log, where a worker's failed start
+// leaves runsc's message, cut short with the stub's tokens cut out
+// (ASSUMPTIONS E8).
 func (d *driver) signInDiag() string {
 	read := d.agentosdLog
 	if read == nil {
@@ -556,7 +561,34 @@ func (d *driver) signInDiag() string {
 	if d.stub != nil {
 		tokens = d.stub.Tokens()
 	}
-	return "diag: agentosd: " + redactLog(strings.Join(keep, "\n"), 6, append(tokens, codexstub.Canary)...)
+	secrets := append(tokens, codexstub.Canary)
+	runsc := d.runscLog
+	if runsc == nil {
+		runsc = func() string {
+			b, _ := os.ReadFile("/var/lib/agentos/runsc/exec.log")
+			return string(b)
+		}
+	}
+	return "diag: agentosd: " + redactLog(strings.Join(keep, "\n"), 6, secrets...) +
+		"; runsc: " + redactLog(chunked(runsc(), secrets), 8, secrets...)
+}
+
+// chunked is log with secrets cut out and each line split into
+// logLineMax pieces, so redactLog's cut keeps a long runsc message whole.
+func chunked(log string, secrets []string) string {
+	for _, s := range secrets {
+		if s != "" {
+			log = strings.ReplaceAll(log, s, "[redacted]")
+		}
+	}
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(log), "\n") {
+		for len(l) > logLineMax {
+			out, l = append(out, l[:logLineMax]), l[logLineMax:]
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
 }
 
 // planSignIn is the owner signing in to the Codex plan at step 7, as the
