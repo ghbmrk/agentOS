@@ -2,8 +2,11 @@ package main
 
 import (
 	"os"
+	"runtime/debug"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/e2e/boxe2e/codexstub"
 )
 
 // execStart returns the last non-empty ExecStart= line of a unit or drop-in.
@@ -48,14 +51,78 @@ func TestSysrootIsOutsideTheRootOnlyDirectory(t *testing.T) {
 	}
 }
 
-// REQ: HW-10. The steps not driven yet fail with the text the xfail table
-// expects, so they read XFAIL and not FAIL.
+// REQ: HW-10. The step not driven yet fails with the text the xfail table
+// expects, so it reads XFAIL and not FAIL; phone-control is driven, so it
+// is off the list and an unpassed run reads FAIL.
 func TestNotDrivenStepsFailWithTheExpectedText(t *testing.T) {
 	d := &driver{}
-	for name, run := range map[string]func() error{"guest-task": d.guestTask, "phone-control": d.phoneControl} {
-		err := run()
-		if err == nil || !strings.HasPrefix(err.Error(), xfail[name].want) {
-			t.Errorf("%s: %v does not start with %q", name, err, xfail[name].want)
+	if err := fakeDriver(&fakeBox{}).guestTask(); err == nil || !strings.HasPrefix(err.Error(), xfail["guest-task"].want) {
+		t.Errorf("guest-task: %v does not start with %q", err, xfail["guest-task"].want)
+	}
+	if _, ok := xfail["phone-control"]; ok {
+		t.Error("phone-control is driven (#1714) but still on the expected-failure list")
+	}
+	if err := d.phoneControl(); err == nil || strings.HasPrefix(err.Error(), notDriven) {
+		t.Errorf("phone-control without a paired phone: %v", err)
+	}
+}
+
+// REQ: HW-10. The e2e boot's vault drop-in changes only which binary runs:
+// it binds the driver share's agentos_e2e build over the shipped path the
+// unit's own command line runs, orders after the unit that mounts the
+// share, and keeps the shipped command and sandbox (ASSUMPTIONS E10).
+func TestVaultDropInSwapsOnlyTheBinary(t *testing.T) {
+	const shipped = "/usr/lib/agentos/agentos-egress"
+	unit := execStart(t, "../../../image/mkosi/mkosi.extra/usr/lib/systemd/system/agentos-egress.service")
+	if !strings.Contains(unit, " "+shipped+" serve ") {
+		t.Fatalf("shipped ExecStart %q no longer runs %s", unit, shipped)
+	}
+	b, err := os.ReadFile("../../../image/e2e/agentos-egress.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if l != "" && !strings.HasPrefix(l, "#") {
+			got = append(got, l)
 		}
+	}
+	want := []string{
+		"[Unit]", "Requires=agentos-e2e-seal.service", "After=agentos-e2e-seal.service",
+		"[Service]", "BindReadOnlyPaths=/run/agentos-e2e/share/agentos-egress:" + shipped,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("drop-in:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// The workflow builds the tagged binary where the share's bind reads it,
+	// and ci_boot.sh passes the drop-in.
+	wf, err := os.ReadFile("../../../.github/workflows/image.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wf), `go build -tags agentos_e2e -trimpath -ldflags=-buildid= -o "$RUNNER_TEMP/e2e/agentos-egress" ./cmd/agentos-egress`) {
+		t.Fatal("image.yml does not build the agentos_e2e vault process into the driver share")
+	}
+	boot, err := os.ReadFile("../../../image/ci_boot.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(boot), "$(cred systemd.unit-dropin.agentos-egress.service agentos-egress.conf)") {
+		t.Fatal("ci_boot.sh does not pass the vault drop-in")
+	}
+}
+
+// The stub's socket is outside the seal unit's root-only directory, which
+// the vault's user cannot traverse.
+func TestStubSocketIsOutsideTheRootOnlyDirectory(t *testing.T) {
+	if strings.HasPrefix(codexstub.Socket, "/run/agentos-e2e/") {
+		t.Fatalf("stub socket %s is under the root-only /run/agentos-e2e", codexstub.Socket)
+	}
+}
+
+func TestHasTag(t *testing.T) {
+	bi := &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "-tags", Value: "netgo,agentos_e2e"}}}
+	if !hasTag(bi, "agentos_e2e") || hasTag(bi, "agentos") || hasTag(&debug.BuildInfo{}, "agentos_e2e") {
+		t.Fatal("hasTag")
 	}
 }

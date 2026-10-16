@@ -29,8 +29,9 @@ import (
 // PairTexts go through agentosd to the modem bridge (P2-2w c4c; §8.1,
 // CH-12): agentosd sends only setup's fixed texts and passes on only PAIR
 // texts. TrustHost goes to the vault process (P2-2w c4d), and HostInfo
-// reads the PC's own names. StartDeviceCode is not served by agentosd yet:
-// it answers an error, so the step that needs it waits.
+// reads the PC's own names. StartDeviceCode goes to agentosd, which runs
+// the provider's own CLI sign-in in a provider worker (#1264 c4e2b); the
+// login lands in the vault and only the page, code and issuer come back.
 type AgentosdSetup struct {
 	Owner Owner
 	// Vault saves the host step in the vault process; nil: not served.
@@ -210,8 +211,22 @@ func (a AgentosdSetup) SetPrivateOK(id string, ok bool) error {
 	return a.call(localapi.OpSetupPrivateOK, localapi.PrivateOK{Provider: id, OK: ok}, nil)
 }
 
-func (AgentosdSetup) StartDeviceCode(string) (string, string, error) {
-	return "", "", errNotServed
+// StartDeviceCode starts provider id's plan sign-in through agentosd and
+// answers the provider's page, the code and who issued it. It waits up to
+// localapi.DeviceCodeTimeout, longer than agentosd waits for the CLI
+// (Security L8.4).
+func (a AgentosdSetup) StartDeviceCode(id string) (string, string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), localapi.DeviceCodeTimeout)
+	defer cancel()
+	var d localapi.DeviceCode
+	err := a.Owner.Call(ctx, localapi.OpSetupDeviceCode, localapi.DeviceCodeStart{Provider: id}, &d)
+	if refused(err, localapi.ErrSignInBusy) {
+		return "", "", "", fmt.Errorf("%w (%w)", ErrSignInBusy, err)
+	}
+	if err != nil {
+		return "", "", "", err
+	}
+	return d.Link, d.Code, d.From, nil
 }
 
 // TrustHost saves setup's host step in the vault process, which allows it

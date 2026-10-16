@@ -21,6 +21,12 @@ ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
 
 copy() { cp --sparse=always "$IMG" "$1"; truncate -s +2G "$1"; }
 
+# Every boot orders the boot report before the serial login: getty's start resets and hangs up
+# ttyS0, which discards console output still queued, and it cut or ate the report in #1705, #1746
+# and #1747 (image/ASSUMPTIONS.md I24). A drop-in passed as an SMBIOS credential, like e2e/'s
+# units, so the image itself is unchanged.
+REPORT_FIRST=" -smbios type=11,value=io.systemd.credential.binary:systemd.unit-dropin.agentos-boot-report.service=$(printf '[Unit]\nBefore=serial-getty@ttyS0.service\n' | base64 -w0)"
+
 # boot LOG DISK...: boot from the first disk, the others attached, until the boot report or a
 # failed health check (or, with UNTIL set, that pattern) reaches the console.
 boot() {
@@ -33,13 +39,15 @@ boot() {
 		i=$((i + 1)); idx=; [ $i -eq 1 ] && idx=,bootindex=1
 		drives="$drives -drive if=none,id=d$i,format=raw,file=$d -device virtio-blk-pci,drive=d$i$idx"
 	done
-	# shellcheck disable=SC2086 # $drives and $EXTRA are lists of QEMU arguments without spaces.
-	qemu-system-x86_64 -machine q35,smm=on -accel $ACCEL -cpu max -smp 4 -m 4096 \
+	# 8 GiB, not 4: agentosd's pool on the guest must hold the agent and one provider worker
+	# (#1896, image/ASSUMPTIONS.md I26); the hosted runner has 16 GB.
+	# shellcheck disable=SC2086 # $drives, $REPORT_FIRST and $EXTRA are lists of QEMU arguments without spaces.
+	qemu-system-x86_64 -machine q35,smm=on -accel $ACCEL -cpu max -smp 4 -m 8192 \
 		-global driver=cfi.pflash01,property=secure,value=on \
 		-drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
 		-drive if=pflash,format=raw,unit=1,file="$t/vars.fd" \
 		-chardev socket,id=chrtpm,path="$t/sock" -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 \
-		$drives -display none -serial file:"$log" -nic "${NIC:-none}" ${EXTRA:-} &
+		$drives -display none -serial file:"$log" -nic "${NIC:-none}" $REPORT_FIRST ${EXTRA:-} &
 	QEMU=$!
 	end=$(( $(date +%s) + ${TMO:-1800} ))
 	while kill -0 $QEMU 2>/dev/null && [ "$(date +%s)" -lt "$end" ]; do
@@ -54,17 +62,25 @@ boot() {
 	grep -a "agentos-\|Secure Boot\|verity\|Failed" "$log" | tail -40 | guest_echo || true
 }
 
-# Echoes guest console lines from stdin with ANSI, CR and other non-printable bytes cleaned out and
-# "console| " in front, so no guest line reaches the job log looking like a ci_boot line ("ci_boot:")
-# or a workflow command ("::"). e2e_console cleans its lines the same way.
-guest_echo() {
+# Prints the guest console on stdin with what the console carries inside lines cut out: CSI
+# sequences (":" parameters too), OSC sequences ended by BEL or ST, and CR. Any other
+# non-printable byte shows as "?", the ESC of an unterminated OSC among them, so the rest of
+# that line stays visible. guest_echo, e2e_console and the verdict-text check all read this.
+clean() {
 	LC_ALL=C awk -v esc="$(printf '\033')" '{
-		l = $0
-		gsub(esc "\\[[0-9;?]*[ -/]*[@-~]", "", l)
-		gsub(/\r/, "", l)
-		gsub(/[^ -~]/, "?", l)
-		print "console| " l
+		gsub(esc "\\[[0-9;:?]*[ -/]*[@-~]", "")
+		gsub(esc "\\][^\007" esc "]*(\007|" esc "\\\\)", "")
+		gsub(/\r/, "")
+		gsub(/[^ -~]/, "?")
+		print
 	}'
+}
+
+# Echoes guest console lines from stdin cleaned and with "console| " in front, so no guest line
+# reaches the job log looking like a ci_boot line ("ci_boot:") or a workflow command ("::"); the
+# verdict text itself is shown as "G1 [verdict-text]". e2e_console echoes its lines the same way.
+guest_echo() {
+	clean | LC_ALL=C awk '{ gsub(/G1 (NOT )?PROVEN/, "G1 [verdict-text]"); print "console| " $0 }'
 }
 
 fail=0
@@ -97,8 +113,9 @@ for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=of
 	has "$W/console.log" "$want"
 done
 # The wired uplink took a lease on the first boot; the reboot, with no cable, did not wait for one.
-has "$W/console.log" "agentos-uplink: "
-hasnt "$W/console.log" "agentos-uplink: none"
+# Positive: an interface and an address on the report's one line, so a damaged line is no lease.
+lease='agentos-uplink: [a-z0-9]+ [0-9.]+/[0-9]+ agentos-boot: bless=good'
+grep -aqE "$lease" "$W/console.log" && echo "ok   $lease" || { echo "MISS $lease"; fail=1; }
 # The host's connections through the forwards reach the box's leased address and get no answer.
 cat "$W/console.log.probe" 2>/dev/null || true
 for port in 22 80 443 18789; do
@@ -125,7 +142,7 @@ for k in 2 3 4 5; do
 done
 
 # The same drive boots again on its own GUIDs (the entry is already blessed) and keeps them.
-boot "$W/console-reboot.log" "$D"
+TMO=600 boot "$W/console-reboot.log" "$D"
 has "$W/console-reboot.log" "agentos-health: PASS secure_boot=on usr=verity"
 hasnt "$W/console-reboot.log" "agentos-drive-id: assigned"
 has "$W/console-reboot.log" "agentos-uplink: none"
@@ -167,13 +184,11 @@ g1_verdict() {
 # driver's own; this cross-check raises the cost of a forged console but a guest that forges the
 # whole of it still passes (tools/ASSUMPTIONS.md D27).
 e2e_console() {
-	LC_ALL=C awk -v esc="$(printf '\033')" -v donefile="$2" '
+	clean <"$1" | LC_ALL=C awk -v donefile="$2" '
 	function miss(m) { print "ci_boot: MISS console: " m; bad = 1 }
 	{
 		l = $0
-		gsub(esc "\\[[0-9;?]*[ -/]*[@-~]", "", l)
-		gsub(/\r/, "", l)
-		gsub(/[^ -~]/, "?", l)
+		gsub(/G1 (NOT )?PROVEN/, "G1 [verdict-text]", l)
 	}
 	index(l, "agentos-e2e: ") == 0 { next }
 	{ print "console| " l }
@@ -211,7 +226,7 @@ e2e_console() {
 		# A console that failed any check leaves no DONE line behind for the verdict to read.
 		if (!bad) print done > donefile
 		exit bad
-	}' "$1"
+	}'
 }
 
 # The end-to-end run on a fresh copy with a cable in. Each step prints one line: PASS, FAIL,
@@ -220,7 +235,7 @@ e2e_console() {
 if [ -n "${E2E:-}" ]; then
 	cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(base64 -w0 "$HERE/e2e/$2")"; }
 	copy "$W/e2e.raw"
-	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)" \
+	EXTRA="-virtfs local,path=$(realpath "$E2E"),mount_tag=e2e,security_model=none,readonly=on$(cred systemd.extra-unit.agentos-e2e-seal.service agentos-e2e-seal.service)$(cred systemd.extra-unit.agentos-e2e.service agentos-e2e.service)$(cred systemd.unit-dropin.multi-user.target multi-user.conf)$(cred systemd.unit-dropin.agentos-modem.service agentos-modem.conf)$(cred systemd.unit-dropin.agentos-egress.service agentos-egress.conf)" \
 		NIC="user,model=virtio-net-pci" UNTIL="agentos-e2e: DONE\|agentos-health: FAIL" boot "$W/console-e2e.log" "$W/e2e.raw"
 	# The guest writes this console, so none of it is trusted as it stands: e2e_console echoes each
 	# driver line sanitised and prefixed, and accepts the log only with exactly one strictly
@@ -232,9 +247,16 @@ if [ -n "${E2E:-}" ]; then
 	has "$W/e2e-done.log" " xpass=0 "
 	hasnt "$W/console-e2e.log" "agentos-e2e: FAIL"
 	hasnt "$W/console-e2e.log" "agentos-e2e: XPASS"
-	# The verdict is the host's alone: a guest line that fakes it fails the run.
-	hasnt "$W/console-e2e.log" "G1 PROVEN"
-	hasnt "$W/console-e2e.log" "G1 NOT PROVEN"
+	# The verdict is the host's alone: no console, from any of the four boots, may carry its text,
+	# read both raw (text inside an OSC body, which cleaning deletes) and cleaned (text split by
+	# escape sequences), so a guest that writes it fails the run whichever boot it did it in
+	# (tools/ASSUMPTIONS.md D27).
+	for c in console console-reboot console-two-drives console-e2e; do
+		[ -f "$W/$c.log" ] || continue
+		for v in "G1 PROVEN" "G1 NOT PROVEN"; do
+			{ cat "$W/$c.log"; clean <"$W/$c.log"; } | grep -aqF "$v" && { echo "UNEXPECTED $v in $c.log"; fail=1; } || echo "ok   no \"$v\" in $c.log"
+		done
+	done
 	# The G1 freeze lifts only on a run whose DONE line reads fail=0 xfail=0 blocked=0
 	# (tools/ASSUMPTIONS.md D27). A green check with expected failures is not that run, so the
 	# verdict gets its own host-only line in this job's log (not the console artifact); it does not

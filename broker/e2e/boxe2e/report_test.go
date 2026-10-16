@@ -68,7 +68,7 @@ func TestReportExpectedFailureMatchesItsText(t *testing.T) {
 		xfail     bool
 	}{
 		{"guest-task", notDriven + " needs a stub", true},
-		{"phone-control", notDriven + " needs a text", true},
+		{"phone-control", notDriven + " needs a text", false}, // off the list since #1714
 		// host is no longer listed (#1221 serves it): the old not-served
 		// error, and every other way to be stuck at "6. This PC", is FAIL.
 		{"host", `after 1m0s: ` + hostErr, false},
@@ -107,7 +107,7 @@ func TestXfailWantsAreSpecific(t *testing.T) {
 			t.Errorf("%s: want %q issue %d is too loose", name, ef.want, ef.issue)
 		}
 	}
-	if xfail["guest-task"].want != notDriven || xfail["phone-control"].want != notDriven || notDriven != "not driven yet:" {
+	if xfail["guest-task"].want != notDriven || len(xfail) != 1 || notDriven != "not driven yet:" {
 		t.Fatal("not-driven wants changed")
 	}
 }

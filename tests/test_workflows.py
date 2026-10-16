@@ -61,6 +61,16 @@ class WorkflowTest(unittest.TestCase):
             self.assertIn('gh workflow run ci.yml --ref "$BRANCH"', text, name)
             self.assertIn('gh pr merge "$BRANCH" --auto --squash', text, name)
 
+    def test_records_batch_runs_at_most_daily(self):
+        # RECORDS-INLINE (#1816, D-120): the bot batch is the only writer of records, so it runs on a
+        # daily schedule or by hand, never on every push to main.
+        text = (WORKFLOWS / "records.yml").read_text()
+        on = re.search(r"^on:\n((?:[ \t]+.*\n)+)", text, re.M).group(1)
+        self.assertRegex(on, r"(?m)^\s+schedule:\s*$")
+        self.assertRegex(on, r"cron:\s*'\d+ \d+ \* \* \*'")
+        self.assertRegex(on, r"(?m)^\s+workflow_dispatch:")
+        self.assertNotRegex(on, r"(?m)^\s+push:")
+
     def test_bot_token_jobs_run_in_the_bot_environment(self):
         # BOT_PR_TOKEN is a `bot` environment secret restricted to main (#1691, #1769), so every
         # job that can write contents must name that environment, and nothing else names it.
@@ -78,6 +88,28 @@ class WorkflowTest(unittest.TestCase):
         # repo root and cwd on sys.path, so a file on main cannot shadow the stdlib (#1691).
         for f in self.files():
             self.assertNotRegex(f.read_text(), r"python3? -(?:\s|$)", f.name)
+
+    def test_board_crosses_jobs_as_an_artifact(self):
+        # CX-BOARD-ARGV (#1787): a job output or env var holding the rendered board passes 128 KiB
+        # (MAX_ARG_STRLEN) once BOARD.md grows, and bash in the commit job never starts. The board
+        # goes from render to commit as an artifact; the only job output is a small flag.
+        text = (WORKFLOWS / "board.yml").read_text()
+        render, commit = text.split("\n  commit:\n", 1)
+        self.assertNotIn("base64", text)
+        self.assertNotIn("BOARD_B64", text)
+        self.assertEqual(re.findall(r"(?m)^    outputs:\n((?:      .*\n)+)", render),
+                         ["      rendered: ${{ steps.gen.outputs.rendered }}\n"])
+        self.assertIn('echo "rendered=true" >> "$GITHUB_OUTPUT"', render)
+        self.assertIn("if: needs.render.outputs.rendered == 'true'", commit)
+        uploads = [s for a, s in steps(render) if a.startswith("actions/upload-artifact@")]
+        downloads = [s for a, s in steps(commit) if a.startswith("actions/download-artifact@")]
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(len(downloads), 1)
+        self.assertRegex(uploads[0], r"name: board\b")
+        self.assertRegex(downloads[0], r"name: board\b")
+        # The artifact lands outside the checkout, and only BOARD.md is copied into it.
+        self.assertRegex(downloads[0], r"path: \$\{\{ runner\.temp \}\}/board\b")
+        self.assertIn('cp "$RUNNER_TEMP/board/BOARD.md" BOARD.md', commit)
 
     def test_fuzz_runs_go_through_fuzzrun_and_never_by_duration(self):
         # P1-4-flake-ci (REQ: LOOP-7): a duration -fuzztime can end in the fuzz coordinator's

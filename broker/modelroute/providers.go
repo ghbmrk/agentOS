@@ -17,13 +17,16 @@ import (
 // socket's list PrivateOK is whether private data may go to it: the
 // owner's marker or the vault process's -private-ok flag, as the router
 // asks (#1420), and PrivateByConfig says the flag allows it, which no
-// page can withdraw. Setup's list reports the owner's marker only.
+// page can withdraw. Setup's list reports the owner's marker only. Plan
+// marks a plan route (CRED-5): Connected then means its sign-in is
+// stored, and it takes no API key.
 type SetupProvider struct {
 	ID              string `json:"id"`
 	Name            string `json:"name"`
 	Connected       bool   `json:"connected"`
 	PrivateOK       bool   `json:"private_ok"`
 	PrivateByConfig bool   `json:"private_by_config,omitempty"`
+	Plan            bool   `json:"plan,omitempty"`
 }
 
 // SetupProviderList is the vault process's answer to GET /setup/providers.

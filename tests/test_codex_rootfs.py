@@ -54,6 +54,22 @@ class RootfsScriptTest(unittest.TestCase):
         self.assertNotRegex(code, r"auth\.json")
         self.assertNotRegex(code, r"OPENAI_API_KEY|access_token|refresh_token")
 
+    # REQ: A14, CRED-5
+    def test_script_installs_the_forwarder_launch_names(self):
+        text = SCRIPT.read_text()
+        launch = json.loads((CODEX / "launch.json").read_text())
+        self.assertIn("usr" + launch["wrap"][0][4:], text)
+        self.assertIn("./egress/cmd/agentos-codex-forwarder", text)
+
+    # REQ: CAP-11, A14
+    def test_script_copies_the_idle_command(self):
+        # runsc refuses a container with no args, so a provider worker starts on launch.json's
+        # idle command and the CLI runs beside it by exec (#1721): the image must ship it.
+        idle = json.loads((CODEX / "launch.json").read_text())["idle"]
+        self.assertEqual(idle, ["/bin/sleep", "infinity"])
+        loop = next(l for l in SCRIPT.read_text().splitlines() if l.startswith("for b in /bin/sh "))
+        self.assertIn(idle[0], loop.removesuffix("; do").split()[3:])
+
     # REQ: CRED-5, A14
     def test_wrong_tarball_is_refused_before_anything_is_installed(self):
         with tempfile.TemporaryDirectory(prefix="agentos-codex-rootfs-") as d:
@@ -124,6 +140,30 @@ class RootfsBuildTest(unittest.TestCase):
         self.assertTrue(os.access(self.out / "usr/bin/bwrap", os.X_OK))
         self.assertFalse((self.out / VENDOR / "codex-resources/voice").exists())
         self.assertTrue((self.out / "bin/bash").is_file())
+
+    # REQ: CAP-11, A14
+    def test_idle_command_runs_in_the_built_tree(self):
+        idle = json.loads((CODEX / "launch.json").read_text())["idle"]
+        self.assertTrue(os.access(self.out / idle[0].lstrip("/"), os.X_OK), idle[0])
+        r = subprocess.run(
+            ["unshare", *([] if os.geteuid() == 0 else ["-r"]), "-npf", f"--mount-proc={self.out}/proc", "chroot", str(self.out), idle[0], "0"],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+
+    # REQ: CAP-11, A14
+    def test_box_build_s_pin_check_passes_on_the_built_tree(self):
+        # image/build.sh runs check_codex_pin.sh on exactly this tree; run it here, so a writer and a
+        # check that disagree (#1897 delta review, finding 1) fail CI rather than the box build.
+        r = subprocess.run(["sh", str(ROOT / "image/check_codex_pin.sh"), str(ROOT), str(self.out)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if (ROOT / "broker/cmd/agentosd/imagepin.go").exists():
+            self.assertNotIn("not checked", r.stderr)
+
+    # REQ: A14, A3
+    def test_forwarder_is_installed_and_the_socket_directory_is_empty(self):
+        self.assertTrue(os.access(self.out / "usr/local/bin/agentos-codex-forwarder", os.X_OK))
+        self.assertEqual(os.listdir(self.out / "run/agentos"), [])
 
     # REQ: CRED-5, A14, CAP-11
     def test_cli_resolves_its_layout_and_loads_the_managed_layers(self):

@@ -46,7 +46,7 @@ var ErrInEffect = errors.New("card: part of this card is already in effect")
 const inEffectProblem = "Part of your new card is already in effect, but I could not finish. Keep the new card, and your current one if you still have it. Finish now: start a new card from my box page, using the passphrase or recovery key from whichever card works."
 
 // Noted wraps a Provision error with a fixed note that the page adds to
-// the owner's text once the card is in effect (CH-12): Err decides the
+// the owner's text once the card is in effect (REC-4): Err decides the
 // outcome, Note says what else the owner must know. Note is a fixed
 // string; no card text goes in it.
 type Noted struct {

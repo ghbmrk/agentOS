@@ -37,7 +37,7 @@ var (
 )
 
 // providerNames are the built-in adapters' names as the page shows them.
-var providerNames = map[string]string{"openai": "OpenAI", "anthropic": "Anthropic"}
+var providerNames = map[string]string{"openai": "OpenAI", "anthropic": "Anthropic", planProvider: "ChatGPT plan"}
 
 // setupOpen is the guard every setup provider op runs under: the vault
 // open and setup's enrollment open. Caller holds mu.
@@ -62,8 +62,9 @@ func (c *custody) setupProviders() ([]modelroute.SetupProvider, error) {
 	return c.providersLocked(false), nil
 }
 
-// providersLocked lists the built-in providers. With withFlag, a
-// provider's private answer is the router's (route.go privateOK): its
+// providersLocked lists the built-in providers, then the plan route, which
+// is connected once its sign-in is stored. With withFlag, a provider's
+// private answer is the router's (route.go privateOK): its
 // -private-ok flag or the owner's marker (#1420); without, the marker
 // only. Caller holds mu with the vault open.
 func (c *custody) providersLocked(withFlag bool) []modelroute.SetupProvider {
@@ -78,6 +79,15 @@ func (c *custody) providersLocked(withFlag bool) []modelroute.SetupProvider {
 			PrivateByConfig: flag,
 		})
 	}
+	flag := withFlag && c.privateFlags[planProvider]
+	out = append(out, modelroute.SetupProvider{
+		ID:              planProvider,
+		Name:            providerName(planProvider),
+		Connected:       hasKind(c.v, "plan-login-"+planProvider, egress.LoginKind),
+		PrivateOK:       flag || hasKind(c.v, PrivateOKPrefix+planProvider, KindPrivateOK),
+		PrivateByConfig: flag,
+		Plan:            true,
+	})
 	return out
 }
 
