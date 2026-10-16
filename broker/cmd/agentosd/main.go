@@ -668,6 +668,12 @@ func main() {
 	// ONB-9's plan sign-in line; the provider runner sets and clears it.
 	planLine := &planNote{}
 	cfg.Notes = append(cfg.Notes, planLine.Note)
+	// #1264: the Wi-Fi page offers that sign-in again after setup, through
+	// the provider runner once it exists (ONB-3, ONB-9).
+	pageSI := &pageSignIn{note: planLine}
+	if cfg.PageSocket != nil {
+		cfg.PageSocket.PlanSignIn = pageSI
+	}
 	// The modem bridge (agentos-modem, P2-3w) hands owner texts in and
 	// pulls the channel's own texts from the owner socket; until it
 	// reports the owner line, sends fail as down and are counted for the
@@ -752,6 +758,10 @@ func main() {
 		spare := &modelroute.Spare{}
 		go spare.Run(ctx, modelroute.NewRouting(learn.Routing).State, 30*time.Second)
 		retries = spare.Retries
+		// The line names other routes only when some class of the owner's
+		// rule has a route past its first (#1264 item 3): a plan-only rule
+		// has one route per class. Unknown reads as plan-only.
+		planLine.others = func() bool { return spare.Retries() >= 1 }
 	}
 	steps := newStepNotes(&cfg.Notes)
 	// FORGET's item 2s a restart interrupted resume once recall opens
@@ -863,6 +873,7 @@ func main() {
 			if wt != nil && planRoutes != nil {
 				pr := providerRunner(m, planRoutes, planLine, pins)
 				pr.Background = ctx // a sign-in's wait ends at shutdown
+				pageSI.r.Store(pr)
 				// #1856: plan readings and the owner's reserve (RES-5).
 				wirePlanUsage(pr, planRoutes)
 				wt.Provider = providerTool{pr}

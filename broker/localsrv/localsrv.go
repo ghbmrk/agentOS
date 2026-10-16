@@ -87,6 +87,9 @@ type Config struct {
 	// committed Wi-Fi rotation for agentos-ap (#1191, #1522); the page
 	// supplies nothing but its session. Nil refuses the op.
 	RotateAPNet func() error
+	// PlanSignIn signs a signed-out plan in again after setup (#1264);
+	// nil offers nothing.
+	PlanSignIn PlanSignIn
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -113,6 +116,7 @@ type Server struct {
 	minted   uint64
 	wrong    []time.Time
 	inFlight int
+	signins  []time.Time // plan sign-ins started in the last minute
 }
 
 // New returns a Server.
@@ -153,6 +157,10 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		localapi.OpForget:      s.forget,
 		// A rotated Wi-Fi password needs a session (#1191).
 		localapi.OpRotateAPNet: s.rotateAPNet,
+		// Signing the plan in again needs a session, then always a code
+		// (#1264, CRED-5).
+		localapi.OpPlanSignInReady: s.authed(s.planSignInReady),
+		localapi.OpPlanSignIn:      s.planSignIn,
 	}
 }
 

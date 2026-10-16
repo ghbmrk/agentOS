@@ -4,6 +4,7 @@
   tools/premerge.py [--base origin/main] <reviewed-sha> [head]
   tools/premerge.py --needs-mark [--base origin/main] [head]   (--needs-mark in any position)
   tools/premerge.py --check <comments.json> <pr-number> [--base origin/main] [head]
+  tools/premerge.py --bot <head-ref> [--base origin/main] [head]
 
 Replays the reviewed commit onto the base content `head` carries (`git merge-tree` of the reviewed
 commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
@@ -22,6 +23,11 @@ the newest L3 verdict comment from a repository owner, member or collaborator, a
 when that verdict is `accept` and the diff it reviewed (its `Record:` line head) equals `head`'s. Otherwise it
 prints `changed <files>`, `not-accepted` or `no-verdict` and exits 1, so a push after the accept, a later
 fix-list and a PR never reviewed all fail (PREMERGE-required, #1834).
+
+`--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
+prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..head changes nothing but that
+bot's output (records: new reviews/<lens>/ files only, never a README or an existing record). Otherwise it
+prints `not-bot <files>` and exits 1. The caller checks that the branch is this repository's, not a fork's.
 """
 import json
 import re
@@ -76,6 +82,29 @@ def _replayed(cwd, reviewed, onto):
     return out.split(b"\n", 1)[0].decode()
 
 
+# Bot branch -> (pattern every changed path must fullmatch, git statuses allowed). Writers: trace.yml,
+# metrics.yml (and metrics-refresh.yml), board.yml, records.yml.
+BOT = {
+    "bot/trace": (re.compile(r"TRACE\.md"), "AM"),
+    "bot/metrics": (re.compile(r"METRICS\.md"), "AM"),
+    "bot/board": (re.compile(r"BOARD\.md"), "AM"),
+    "bot/records": (re.compile(r"reviews/[^/\n]+/(?!README)[^/\n]+\.md", re.DOTALL), "A"),
+}
+
+
+def bot_outside(cwd, ref, head="HEAD", base="origin/main"):
+    """Paths of base..head outside bot branch `ref`'s output; None when `ref` is not a bot branch or the diff is empty."""
+    if ref not in BOT:
+        return None
+    pattern, statuses = BOT[ref]
+    onto = _git(cwd, "merge-base", base, head).decode().strip()
+    out = _git(cwd, *DIFF[:-2], "--name-status", "-z", onto, head).decode(errors="surrogateescape").split("\0")
+    pairs = list(zip(out[0::2], out[1::2]))
+    if not pairs:
+        return None
+    return [f for st, f in pairs if st not in statuses or not pattern.fullmatch(f)]
+
+
 ROW_ID = re.compile(rb"^\| *[A-Za-z]+-?\d+[a-z]? *\|", re.M)
 
 
@@ -112,6 +141,16 @@ def main(argv):
         changed = compare(".", v[1], args[0] if args else "HEAD", base)
         print("changed " + " ".join(changed) if changed else "same")
         return 1 if changed else 0
+    if args[:1] == ["--bot"]:
+        if len(args) < 2:
+            print(__doc__)
+            return 2
+        ref, args = args[1], args[2:]
+        if args[:1] == ["--base"]:
+            base, args = args[1], args[2:]
+        outside = bot_outside(".", ref, args[0] if args else "HEAD", base)
+        print("bot" if outside == [] else " ".join(["not-bot", *(outside or [])]))
+        return 0 if outside == [] else 1
     if args[:1] == ["--base"]:
         base, args = args[1], args[2:]
     if needs_mark:
