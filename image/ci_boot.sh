@@ -4,7 +4,8 @@
 # until the boot report appears, then check it: health passed under Secure Boot, the entry was
 # blessed, and root grew; the first boot has a cable in (QEMU user networking) and reports its
 # DHCP lease (P2-1, #1416), and the host probes the inbound drop through QEMU's port forwards
-# (probe_inbound.py); the later boots have no network. virtio disk, not emulated USB: S7
+# (probe_inbound.py) and, over IPv6 at the box's link-local and SLAAC addresses, through a second
+# NIC whose other end is probe_lan6.py (#1457); the later boots have no network. virtio disk, not emulated USB: S7
 # saw QEMU's usb-storage corrupt reads.
 # Then the per-drive GUIDs (drive-id, L3 MUST on #41): the first boot gave the drive its own disk,
 # ESP and root GUIDs; the drive boots again on them; and a PC with two fresh copies attached (every
@@ -47,8 +48,14 @@ boot() {
 		-drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
 		-drive if=pflash,format=raw,unit=1,file="$t/vars.fd" \
 		-chardev socket,id=chrtpm,path="$t/sock" -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 \
-		$drives -display none -serial file:"$log" -nic "${NIC:-none}" $REPORT_FIRST ${EXTRA:-} &
+		$drives -display none -serial file:"$log" -nic "${NIC:-none}" ${LAN:+-nic "$LAN"} $REPORT_FIRST ${EXTRA:-} &
 	QEMU=$!
+	# With PROBE6 ("HOST:PORT GUESTPORT..."), probe_lan6.py plays the router on the LAN NIC from the
+	# start, so it sees the box claim its addresses; it probes once $log.go exists.
+	P6=
+	rm -f "$log.go"
+	# shellcheck disable=SC2086 # the ports are a list of words.
+	[ -z "${PROBE6:-}" ] || { python3 "$HERE/probe_lan6.py" "${PROBE6%% *}" "$log.go" ${PROBE6#* } >"$log.probe6" 2>&1 & P6=$!; }
 	end=$(( $(date +%s) + ${TMO:-1800} ))
 	while kill -0 $QEMU 2>/dev/null && [ "$(date +%s)" -lt "$end" ]; do
 		grep -aq "${UNTIL:-agentos-boot:\|agentos-health: FAIL}" "$log" 2>/dev/null && break
@@ -57,6 +64,8 @@ boot() {
 	# With PROBE set, the booted box's ports are probed through QEMU's forwards while it runs.
 	# shellcheck disable=SC2086 # $PROBE is a list of HOSTPORT:GUESTPORT words.
 	[ -z "${PROBE:-}" ] || python3 "$HERE/probe_inbound.py" $PROBE >"$log.probe" 2>&1 || true
+	touch "$log.go"
+	[ -z "$P6" ] || wait $P6 || true
 	sleep 2; kill $QEMU 2>/dev/null || true; wait $QEMU 2>/dev/null || true
 	echo "--- $(basename "$log")"
 	grep -a "agentos-\|Secure Boot\|verity\|Failed" "$log" | tail -40 | guest_echo || true
@@ -106,9 +115,11 @@ EOF
 D=$W/disk.raw
 copy "$D"
 before=$(stat -c %s "$IMG")
-# Forwards from the host to box ports 22, 80, 443 and 18789: each must be dropped (I11, I19).
-NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789" \
-	PROBE="18022:22 18080:80 18443:443 18789:18789" boot "$W/console.log" "$D"
+# Forwards from the host to box ports 22, 80, 443, 18789 and 5355 (resolved's LLMNR): each must be
+# dropped (I11, I19). The LAN NIC carries the same probe over IPv6 (#1457).
+NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
+	LAN="socket,model=virtio-net-pci,listen=127.0.0.1:18600" PROBE6="127.0.0.1:18600 22 80 443 18789 5355" \
+	PROBE="18022:22 18080:80 18443:443 18789:18789 15355:5355" boot "$W/console.log" "$D"
 for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
 	has "$W/console.log" "$want"
 done
@@ -116,10 +127,27 @@ done
 # Positive: an interface and an address on the report's one line, so a damaged line is no lease.
 lease='agentos-uplink: [a-z0-9]+ [0-9.]+/[0-9]+ agentos-boot: bless=good'
 grep -aqE "$lease" "$W/console.log" && echo "ok   $lease" || { echo "MISS $lease"; fail=1; }
+# The lease is 10.0.2.15, the forwards' target: a probe that never reached the box would also read
+# "dropped" (#1457).
+if grep -a "agentos-uplink: " "$W/console.log" | grep -qF " 10.0.2.15/"; then
+	echo "ok   lease at the forwards' target 10.0.2.15"
+else
+	echo "MISS agentos-uplink: <if> 10.0.2.15/ (the forwards' target)"; fail=1
+fi
 # The host's connections through the forwards reach the box's leased address and get no answer.
 cat "$W/console.log.probe" 2>/dev/null || true
 for port in 22 80 443 18789; do
 	has "$W/console.log.probe" "agentos-probe: $port dropped"
+done
+has "$W/console.log.probe" "agentos-probe: 5355 dropped"
+# Over IPv6 on the LAN NIC: the box answers neighbour discovery at its link-local and SLAAC
+# addresses (the probe reaches it there), and no port answers at either.
+cat "$W/console.log.probe6" 2>/dev/null || true
+for scope in fe80 global; do
+	has "$W/console.log.probe6" "agentos-probe6: $scope reachable"
+	for port in 22 80 443 18789 5355; do
+		has "$W/console.log.probe6" "agentos-probe6: $scope $port dropped"
+	done
 done
 # Root started at its 1G minimum inside an image of $before bytes; the drive gained 2G.
 root=$(grep -ao "agentos-boot: .*root_bytes=[0-9]*" "$W/console.log" | sed 's/.*root_bytes=//' | tail -1)
