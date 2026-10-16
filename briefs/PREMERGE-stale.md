@@ -10,7 +10,7 @@ Board row: issue #1946 (release finding from the Security review of PR #1944, PR
 
 ## Acceptance tests
 
-`tests/test_workflows.py`: `PremergeRunTest` (runs the workflow's own script with `gh`, `git`, `python3` and `jq` stubbed) and `WorkflowTest.test_premerge_status_is_pinned` (the line pin and its mutation edits).
+**Acceptance tests:** PREMERGE-stale-a `tests/test_workflows.py::PremergeRunTest::test_failure_verdict_posts_failure_but_job_passes`, `test_same_posts_success`; PREMERGE-stale-b `test_error_after_head_known_posts_failure`, `test_error_before_head_known_fails_the_job`; both `WorkflowTest::test_premerge_status_is_pinned` (the line pin and its mutation edits). `PremergeRunTest` runs the workflow's own script with `gh`, `git`, `python3` and `jq` stubbed.
 
 ## Scope
 
