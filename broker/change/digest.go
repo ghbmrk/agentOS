@@ -1,6 +1,7 @@
 package change
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -329,7 +330,15 @@ func (p *Pipeline) Notice(key, line string) error {
 // routing alone (security R3 on #110). This records what
 // runs rather than changing it, so it is no intent (CHG-2): later
 // evaluations then compare against what the owner actually has.
+// Each adoption it undoes owes a revert intent, journaled once the lock
+// is free (oweLocked, flushOwed).
 func (p *Pipeline) Superseded(ns string, was Tree) (bool, error) {
+	ok, err := p.superseded(ns, was)
+	p.flushOwed(context.Background())
+	return ok, err
+}
+
+func (p *Pipeline) superseded(ns string, was Tree) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	cur := p.st.Active.under(ns)
@@ -358,9 +367,11 @@ func (p *Pipeline) Superseded(ns string, was Tree) (bool, error) {
 			}
 		}
 	}
+	owed := p.oweRevertsLocked(prevAdoptions, adoptions)
 	p.st.Active, p.st.Adoptions = next, adoptions
 	if err := p.saveLocked(); err != nil {
 		p.st.Active, p.st.Adoptions = prevActive, prevAdoptions
+		p.unoweLocked(owed)
 		return false, err
 	}
 	return true, nil

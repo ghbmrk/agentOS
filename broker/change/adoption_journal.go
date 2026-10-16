@@ -2,6 +2,7 @@ package change
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,9 +24,13 @@ import (
 // the journal's change intents in dispatch order, reading the bodies they
 // name; the saved state no longer holds adoptions.
 //
-// Two undo paths are no intent by design and stay in the body: a forget
-// (C23, WhyForgotten) and the owner's own settings replacing the adopted
-// state (Superseded, WhySettings). Replay applies them last.
+// The two undos that happen under the pipeline's own lock, a forget (C23,
+// WhyForgotten) and the owner's own settings replacing the adopted state
+// (Superseded, WhySettings), are revert intents too. They take effect in
+// the same save that owes their intent (oweLocked), and flushOwed
+// journals it once the lock is free: the journal calls Check and Execute
+// under that lock. Replay reads no lifecycle from a body
+// (CHG-forget-revert-journal, SM-AD-2).
 
 // lifecycle is an adoption's lifecycle as a state saved before the
 // journal held it recorded it; replay starts such an adoption from it.
@@ -57,18 +62,94 @@ type savedProposal struct {
 func adoptionKey(id string) string { return "adoption/" + id }
 func proposalKey(id string) string { return "proposal/" + id }
 
-// tailRevert: an undo that is no intent, so the body keeps it.
-func tailRevert(why string) bool { return why == WhyForgotten || why == WhySettings }
+// owedRevert: an undo the pipeline applies under its own lock and then
+// journals (oweLocked). An earlier build kept it in the body.
+func owedRevert(why string) bool { return why == WhyForgotten || why == WhySettings }
 
 // encodeBodyLocked is a's body as Content holds it: the lifecycle fields
-// are the journal's, except an undo that is no intent.
+// are the journal's.
 func (p *Pipeline) encodeBodyLocked(a *Adoption) ([]byte, error) {
 	b := adoptionBody{Adoption: *a, Legacy: p.legacy[a.ID]}
-	b.Staged, b.Confirmed, b.WithdrawnFor = false, false, ""
-	if !tailRevert(b.Reverted) {
-		b.Reverted = ""
-	}
+	b.Staged, b.Confirmed, b.Reverted, b.WithdrawnFor = false, false, "", ""
 	return json.Marshal(b)
+}
+
+// oweRevertsLocked owes a revert intent for each adoption that next
+// undoes by a forget or the owner's settings and prev left active. The
+// caller saves the effect and the debt together; flushOwed journals it.
+func (p *Pipeline) oweRevertsLocked(prev, next []*Adoption) []string {
+	active := map[string]bool{}
+	for _, a := range prev {
+		active[a.ID] = a.Reverted == ""
+	}
+	var owed []string
+	for _, a := range next {
+		if active[a.ID] && owedRevert(a.Reverted) {
+			owed = append(owed, p.oweLocked(a.ID, a.Reverted))
+		}
+	}
+	return owed
+}
+
+// oweLocked records that adoption id was reverted for why and that the
+// journal does not hold it yet: Applied answers the intent's Execute and
+// Reconcile, Unjournaled keeps it for replay and flushOwed.
+func (p *Pipeline) oweLocked(id, why string) string {
+	p.st.Seq++
+	in := fmt.Sprintf("chg:%s:revert:n%d:%s", id, p.st.Seq, why)
+	p.st.Applied[in] = true
+	p.st.Unjournaled = append(p.st.Unjournaled, in)
+	return in
+}
+
+// unoweLocked takes back what oweLocked added, for an effect whose save
+// failed and was undone in memory.
+func (p *Pipeline) unoweLocked(owed []string) {
+	for _, in := range owed {
+		delete(p.st.Applied, in)
+		p.st.Unjournaled = slices.DeleteFunc(p.st.Unjournaled, func(s string) bool { return s == in })
+	}
+}
+
+// owedIntent is the journal record of an owed revert. It is built from
+// the ID alone, so a retry after a crash has the same fingerprint.
+func owedIntent(id string, parts []string) journal.Intent {
+	return journal.Intent{ID: id, Origin: OriginOwner, Account: journal.BrokerAccount,
+		Action: ActionRevert, Executor: Executor,
+		Params: map[string]any{"adoption": parts[1], "why": parts[4]}}
+}
+
+// flushOwed journals each owed revert. Execute answers it from Applied.
+// One that fails stays owed and is logged by class; the next forget,
+// settings revert or Attach retries it.
+func (p *Pipeline) flushOwed(ctx context.Context) {
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+	p.mu.Lock()
+	j, owed := p.j, slices.Clone(p.st.Unjournaled)
+	p.mu.Unlock()
+	if j == nil {
+		return
+	}
+	for _, id := range owed {
+		parts := parseID(id)
+		if len(parts) != 5 {
+			continue
+		}
+		if err := p.run(ctx, owedIntent(id, parts)); err != nil {
+			if p.cfg.Logf != nil {
+				p.cfg.Logf("change: a %s revert is not journaled yet (%s)", parts[4], errClass(err))
+			}
+			continue
+		}
+		p.mu.Lock()
+		p.st.Unjournaled = slices.DeleteFunc(p.st.Unjournaled, func(s string) bool { return s == id })
+		if err := p.saveLocked(); err != nil && p.cfg.Logf != nil {
+			// Still owed on disk: the next flush finds it journaled.
+			p.cfg.Logf("change: a journaled revert is not saved as such (%s)", errClass(err))
+		}
+		p.mu.Unlock()
+	}
 }
 
 // saveBodiesLocked puts every adoption body that changed since it was
@@ -230,8 +311,8 @@ func (p *Pipeline) replayLocked(j Journal) {
 				p.brokenLocked("adoption body missing", err)
 				return
 			}
-			if tailRevert(a.Reverted) {
-				tail[id] = a.Reverted
+			if owedRevert(a.Reverted) {
+				tail[id] = a.Reverted // an earlier build's body revert
 			}
 			a.Reverted, a.Staged, a.Confirmed, a.WithdrawnFor = "", false, false, ""
 			if legacy != nil {
@@ -264,9 +345,32 @@ func (p *Pipeline) replayLocked(j Journal) {
 			a.Reverted = why
 		}
 	}
+	// Owed reverts: applied and saved with their effect, not yet in the
+	// journal (oweLocked). One the journal now holds was applied above.
+	var owed []string
+	for _, in := range p.st.Unjournaled {
+		parts := parseID(in)
+		if len(parts) != 5 || parts[2] != "revert" || !owedRevert(parts[4]) || byAd[parts[1]] == nil {
+			continue
+		}
+		if st, err := j.Get(in); err == nil && st.State == journal.Succeeded {
+			continue
+		}
+		owed = append(owed, in)
+		if a := byAd[parts[1]]; a.Reverted == "" {
+			a.Reverted = parts[4]
+		}
+	}
+	resave := len(owed) != len(p.st.Unjournaled)
+	p.st.Unjournaled = owed
+	// A body an earlier build saved with a forget or settings revert in
+	// it, on an adoption the journal leaves active: owe it once.
+	var migrated []string
 	for _, a := range ads {
 		if why := tail[a.ID]; why != "" && a.Reverted == "" {
 			a.Reverted = why
+			p.oweLocked(a.ID, why)
+			migrated = append(migrated, a.ID)
 		}
 	}
 	p.st.Adoptions = ads
@@ -277,9 +381,18 @@ func (p *Pipeline) replayLocked(j Journal) {
 			p.lastBody[a.ID] = b
 		}
 	}
+	for _, id := range migrated {
+		delete(p.lastBody, id) // put again, without the revert
+	}
 	for id, pr := range props {
 		if p.props[id] == nil {
 			p.props[id] = pr
+		}
+	}
+	if resave || len(migrated) > 0 {
+		if err := p.saveLocked(); err != nil {
+			p.brokenLocked("owed reverts not saved", err)
+			return
 		}
 	}
 	p.reforgetLocked()
@@ -303,6 +416,7 @@ func (p *Pipeline) reforgetLocked() {
 			p.brokenLocked("forget not replayed", err)
 			return
 		}
+		p.oweRevertsLocked(p.st.Adoptions, ads)
 		p.st.Adoptions, p.st.Active = ads, tree
 		p.dropOldBasesLocked(tree.Hash())
 		if err := p.saveLocked(); err != nil {

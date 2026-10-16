@@ -351,6 +351,10 @@ type state struct {
 	Forgotten int `json:"forgotten,omitempty"`
 	// Applied lists intents whose effect took place, for Reconcile.
 	Applied map[string]bool `json:"applied"`
+	// Unjournaled lists revert intents a forget or Superseded applied
+	// and saved that the journal has not yet recorded (CHG-forget-revert-
+	// journal): replay applies them and flushOwed journals them.
+	Unjournaled []string `json:"unjournaled,omitempty"`
 	// Notices are broker notices for the digest, kept once per key
 	// (Notice).
 	Notices []notice `json:"notices,omitempty"`
@@ -395,9 +399,11 @@ type Pipeline struct {
 	j   Journal
 	key []byte // split and probe key, fixed after New
 
-	mu    sync.Mutex
-	st    state
-	props map[string]*proposal
+	mu sync.Mutex
+	st state
+	// flushMu serialises flushOwed, which runs intents without mu.
+	flushMu sync.Mutex
+	props   map[string]*proposal
 	// lapsed holds release proposals dropped because the owner's request
 	// closed unanswered, until Loop 3 asks (Lapsed). Memory only, like
 	// props: a restart drops both, and Loop 3 re-asks after one anyway.
@@ -559,12 +565,13 @@ func (p *Pipeline) healthy() error {
 // journal (OP-11, replayLocked).
 func (p *Pipeline) Attach(j Journal) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.j = j
 	if !p.replayed {
 		p.replayed = true
 		p.replayLocked(j)
 	}
+	p.mu.Unlock()
+	p.flushOwed(context.Background())
 }
 
 // errStateBroken is what callers see once a save and its reload both
