@@ -215,6 +215,17 @@ func (l *lateServices) Close(id string) {
 	}
 }
 
+// Reset passes ForgetSince's reset notice on to the machine's services
+// when they hold state derived from its memory (vm.Resetter, CAP-3): the
+// live guest plane drops the tool results it held for the machine.
+func (l *lateServices) Reset(id string) {
+	if s := l.pick(id); s != nil {
+		if r, ok := s.Services.(vm.Resetter); ok {
+			r.Reset(id)
+		}
+	}
+}
+
 // lateStatus is STATUS's agent line: the keeper's once it runs, and "not
 // set up" before that or when no keeper could start.
 type lateStatus struct {

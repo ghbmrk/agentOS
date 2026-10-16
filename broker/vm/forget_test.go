@@ -259,4 +259,12 @@ func TestForgetSinceResetsTheMachinesServices(t *testing.T) {
 	if len(svc.resets) != 1 || svc.resets[0] != "m" {
 		t.Fatalf("services reset %v, want only m", svc.resets)
 	}
+	// A reset that fails still drops what the guest was handed.
+	e.m.cfg.FreeBytes = func(string) (int64, error) { return 0, nil }
+	if err := e.m.ForgetSince(bg, mc.Lineage, since); err == nil {
+		t.Fatal("reset refused but ForgetSince succeeded")
+	}
+	if len(svc.resets) != 2 || svc.resets[1] != "m" {
+		t.Fatalf("services reset %v after a failed reset, want m twice", svc.resets)
+	}
 }

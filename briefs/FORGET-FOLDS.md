@@ -11,10 +11,12 @@ Board row: issue #1848. Source: external static review, filed 2026-10-15. Class:
 Package IDs:
 - **FORGET-FOLDS-1** `ForgetSince` tells the services of each machine it rolls back that the machine was reset, even when the reset itself fails; machines of other lineages are not told.
 - **FORGET-FOLDS-2** The guest plane drops the machine's held results on that notice and keeps its socket and inbox: `result_read` fails afterward for the dropped ID, other machines' results stay, and the machine keeps serving.
+- **FORGET-FOLDS-3** The daemon's manager services (`lateServices`) pass the reset on to the live guest plane, so the notice reaches the plane in production, not only in the `vm` and `guest` tests.
 
 **Acceptance tests:**
 - FORGET-FOLDS-1: `TestForgetSinceResetsTheMachinesServices` (`broker/vm/forget_test.go`).
 - FORGET-FOLDS-2: `TestResultReadFailsAfterAForgetReset` (`broker/guest/tools_test.go`).
+- FORGET-FOLDS-3: `TestForgetResetReachesTheLivePlane` (`broker/cmd/agentosd/forgetreset_test.go`).
 
 ## Design (recommendation)
 
@@ -22,7 +24,7 @@ An optional `vm.Resetter` interface (`Reset(id)`) beside `Services`, called from
 
 ## Scope
 
-`broker/vm/vm.go`, `broker/vm/forget.go`, `broker/vm/forget_test.go`, `broker/vm/services_test.go`, `broker/guest/plane.go`, `broker/guest/tools_test.go`, `briefs/FORGET-FOLDS.md`. **Guard files:** none.
+`broker/vm/vm.go`, `broker/vm/forget.go`, `broker/vm/forget_test.go`, `broker/vm/services_test.go`, `broker/guest/plane.go`, `broker/guest/tools_test.go`, `broker/cmd/agentosd/main.go`, `broker/cmd/agentosd/forgetreset_test.go`, `briefs/FORGET-FOLDS.md`. **Guard files:** none.
 
 ## Out of scope
 
@@ -30,4 +32,4 @@ A late in-flight `Hand` that lands after the reset (the issue's "not shown" case
 
 ## Done
 
-CI green; FORGET-FOLDS-1 and -2 covered by tests carrying `REQ:` with their IDs.
+CI green; FORGET-FOLDS-1, -2 and -3 covered by tests carrying `REQ:` with their IDs.
