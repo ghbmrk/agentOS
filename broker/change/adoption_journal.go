@@ -381,17 +381,25 @@ func (p *Pipeline) replayLocked(j Journal) {
 			p.lastBody[a.ID] = b
 		}
 	}
-	for _, id := range migrated {
-		delete(p.lastBody, id) // put again, without the revert
-	}
 	for id, pr := range props {
 		if p.props[id] == nil {
 			p.props[id] = pr
 		}
 	}
+	// The debt is saved before a migrated body loses its revert, so a
+	// crash or failed save between the two keeps the revert somewhere.
 	if resave || len(migrated) > 0 {
 		if err := p.saveLocked(); err != nil {
 			p.brokenLocked("owed reverts not saved", err)
+			return
+		}
+	}
+	if len(migrated) > 0 {
+		for _, id := range migrated {
+			delete(p.lastBody, id) // put again, without the revert
+		}
+		if err := p.saveLocked(); err != nil {
+			p.brokenLocked("migrated bodies not saved", err)
 			return
 		}
 	}

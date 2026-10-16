@@ -2,6 +2,7 @@ package change
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 
@@ -229,5 +230,60 @@ func TestForgedForgetRevertIsDenied(t *testing.T) {
 	}
 	if got := e.reverted(rep.ID); got != "" {
 		t.Fatalf("a forged record reverted the adoption: %q", got)
+	}
+}
+
+// FRJ-3: the migration saves the debt before it strips the body, so a
+// failed save keeps the earlier build's revert in the body, and the next
+// start migrates it.
+func TestBodyRevertMigrationSurvivesAFailedSave(t *testing.T) {
+	e, rep, _ := settingsEnv(t)
+	old := bytes.Replace(e.body(rep.ID), []byte(`{`), []byte(`{"reverted":"settings",`), 1)
+	e.putBody(rep.ID, old)
+	e.p.cfg.Store = &flakyStore{MemStore: e.store, failSave: true}
+	e.reopen()
+	if !bytes.Contains(e.body(rep.ID), []byte(`"reverted":"settings"`)) {
+		t.Fatal("the body lost its revert before the debt was saved")
+	}
+	e.p.cfg.Store = e.store
+	e.reopen()
+	if got := e.reverted(rep.ID); got != WhySettings {
+		t.Fatalf("earlier build's revert lost: %q", got)
+	}
+	if got := e.revertsJournaled(rep.ID); len(got) != 1 || got[0] != WhySettings {
+		t.Fatalf("revert intents: %q", got)
+	}
+	e.noRevertOnDisk(rep.ID)
+}
+
+// FRJ-4: an owed record (Applied holds its ID) is admitted only from the
+// owner origin with meta.change.revert.
+func TestOwedRevertWrongOriginIsDenied(t *testing.T) {
+	for _, c := range []struct{ origin, action string }{
+		{OriginPipeline, ActionRevertAuto},
+		{OriginPipeline, ActionRevert},
+		{OriginOwner, ActionRevertAuto},
+	} {
+		e, rep := forgetEnv(t)
+		e.p.mu.Lock()
+		j := e.p.j
+		e.p.j = nil // keep the record owed
+		e.p.mu.Unlock()
+		if _, err := e.p.ForgetGoal("owner:g1"); err != nil {
+			t.Fatal(err)
+		}
+		e.p.mu.Lock()
+		e.p.j = j
+		owed := slices.Clone(e.p.st.Unjournaled)
+		e.p.mu.Unlock()
+		if len(owed) != 1 || !e.p.st.Applied[owed[0]] {
+			t.Fatalf("owed: %q", owed)
+		}
+		in := journal.Intent{ID: owed[0], Origin: c.origin, Account: journal.BrokerAccount,
+			Action: c.action, Executor: Executor,
+			Params: map[string]any{"adoption": rep.ID, "why": WhyForgotten}}
+		if err := e.p.run(bg, in); err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Fatalf("%s/%s: %v", c.origin, c.action, err)
+		}
 	}
 }

@@ -18,8 +18,8 @@ Package IDs:
 **Acceptance tests** (`broker/change/forget_revert_journal_test.go`):
 - FRJ-1: `TestForgetRevertIsJournaled`.
 - FRJ-2: `TestSettingsRevertIsJournaled`.
-- FRJ-3: `TestForgetRevertSurvivesARestoredBody`, `TestSettingsRevertSurvivesARestoredBody`, `TestOwedRevertJournaledAfterACrash`, `TestBodyRevertFromAnEarlierBuildIsJournaled`.
-- FRJ-4: `TestForgedForgetRevertIsDenied`.
+- FRJ-3: `TestForgetRevertSurvivesARestoredBody`, `TestSettingsRevertSurvivesARestoredBody`, `TestOwedRevertJournaledAfterACrash`, `TestBodyRevertFromAnEarlierBuildIsJournaled`, `TestBodyRevertMigrationSurvivesAFailedSave`.
+- FRJ-4: `TestForgedForgetRevertIsDenied`, `TestOwedRevertWrongOriginIsDenied`.
 
 ## Design (recommendation)
 
