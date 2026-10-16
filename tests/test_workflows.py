@@ -4,8 +4,13 @@ No requirement IDs: CI tooling, not SPEC.md behaviour. Every action is pinned by
 SHA, and every checkout in a workflow that runs pull-request code drops the job's token from
 the working tree (persist-credentials: false), so PR code never reads it from .git/config.
 """
+import json
+import os
 import pathlib
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 WORKFLOWS = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows"
@@ -110,10 +115,17 @@ PREMERGE_LINES = [
     '        run: |',
     '          gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"',
     '          HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")',
+    '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
+    '          posted=no',
+    '          post() {',
+    '            gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$1" -f context=premerge \\',
+    '              -f description="$2" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null',
+    '            posted=yes',
+    '          }',
+    '          trap \'[ "$posted" = yes ] || post failure error\' EXIT',
     '          HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/pr.json")',
     '          HEAD_REPO=$(jq -r \'.head.repo.full_name // ""\' "$RUNNER_TEMP/pr.json")',
     '          BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")',
-    '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
     '          state=failure',
     '          out=$(',
     '            git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head" \\',
@@ -129,9 +141,7 @@ PREMERGE_LINES = [
     '          ) && state=success',
     '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | tr -cd \'\\40-\\176\' | cut -c 1-120)',
     '          echo "premerge $HEAD_SHA: $state ($out)"',
-    '          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$state" -f context=premerge \\',
-    '            -f description="$out" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null',
-    '          [ "$state" = success ]',
+    '          post "$state" "$out"',
 ]
 
 
@@ -350,7 +360,8 @@ class WorkflowTest(unittest.TestCase):
         for edit in (("statuses: write", "statuses: write\n      contents: write"),
                      ("    types: [created, edited, deleted]", "    types: [created]"),
                      ("context=premerge", "context=premerge-x"),
-                     ("          [ \"$state\" = success ]", "          true"),
+                     ("          trap ", "          # trap "),
+                     ("          post \"$state\" \"$out\"", "          post success \"$out\""),
                      (") && state=success", ") || true; state=success"),
                      ("git cat-file -e \"$HEAD_SHA^{commit}\" || exit 1", "git cat-file -e \"$HEAD_SHA^{commit}\""),
                      ("          persist-credentials: false", "          persist-credentials: false\n          ref: refs/pull/1/head"),
@@ -371,6 +382,80 @@ class WorkflowTest(unittest.TestCase):
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
         self.assertEqual(list(steps(sample)), [("actions/checkout@v4", "      - uses: actions/checkout@v4\n        with:\n          x: 1")])
+
+
+# PREMERGE-stale (#1946): run premerge.yml's own script under the runner's shell with `gh`, `git`,
+# `python3` and `jq` stubbed, so the job result and the posted status are checked, not just pinned.
+STUB_GH = r"""#!/bin/sh
+case "$*" in
+  "api -X POST "*) [ "$FAIL_AT" = post ] && [ ! -e "$STUBS/post-failed" ] && { : > "$STUBS/post-failed"; exit 1; }
+                   echo "$*" >> "$STUBS/posts"; exit 0 ;;
+  "api --paginate "*) [ "$FAIL_AT" = comments ] && exit 1; echo '{"author_association":"OWNER","created_at":"t","body":"b"}' ;;
+  "api repos/"*) [ "$FAIL_AT" = pulls ] && exit 1
+                 echo '{"head":{"sha":"'"$SHA"'","ref":"'"$REF"'","repo":{"full_name":"o/r"}},"base":{"ref":"main"}}' ;;
+  *) exit 2 ;;
+esac
+"""
+STUB_JQ = r"""#!/bin/sh
+[ "$FAIL_AT" = jq ] && [ "$2" = .head.ref ] && exit 1
+exec "$REAL_JQ" "$@"
+"""
+STUB_PY = r"""#!/bin/sh
+echo "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ]
+"""
+
+
+def premerge_script():
+    lines = (WORKFLOWS / "premerge.yml").read_text().split("\n")
+    start = lines.index("        run: |") + 1
+    return "\n".join(l[10:] for l in lines[start:] if l.startswith("          ") or not l.strip()) + "\n"
+
+
+class PremergeRunTest(unittest.TestCase):
+    SHA = "a" * 40
+
+    def run_gate(self, verdict="no-verdict", fail_at="", ref="feature"):
+        real_jq = shutil.which("jq")
+        self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
+        with tempfile.TemporaryDirectory() as d:
+            stubs = pathlib.Path(d)
+            for name, body in (("gh", STUB_GH), ("jq", STUB_JQ), ("python3", STUB_PY), ("git", "#!/bin/sh\nexit 0\n")):
+                (stubs / name).write_text(body)
+                (stubs / name).chmod(0o755)
+            (stubs / "run.sh").write_text(premerge_script())
+            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
+                   "REF": ref, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": "7",
+                   "REPO": "o/r", "GH_TOKEN": "synthetic", "GITHUB_SERVER_URL": "https://example.invalid",
+                   "GITHUB_RUN_ID": "1"}
+            # The runner's default `run` shell.
+            proc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(stubs / "run.sh")],
+                                  env=env, cwd=d, capture_output=True, text=True, timeout=30)
+            posts = (stubs / "posts").read_text().splitlines() if (stubs / "posts").exists() else []
+        return proc.returncode, [re.search(r"state=(\w+)", p).group(1) for p in posts]
+
+    def test_failure_verdict_posts_failure_but_job_passes(self):
+        # A red push-time `premerge-gate` job outlives the accept and blocks auto-merge, so a
+        # failing verdict must ride only on the `premerge` status.
+        self.assertEqual(self.run_gate("no-verdict"), (0, ["failure"]))
+        self.assertEqual(self.run_gate("fix-list"), (0, ["failure"]))
+
+    def test_same_posts_success(self):
+        self.assertEqual(self.run_gate("same"), (0, ["success"]))
+        self.assertEqual(self.run_gate("bot", ref="bot/trace"), (0, ["success"]))
+
+    def test_error_after_head_known_posts_failure(self):
+        # The #1946 path: a rerun that dies outside the guarded block must not leave the head's
+        # earlier `success` standing. The job stays red so the error is visible.
+        code, states = self.run_gate("same", fail_at="jq")
+        self.assertEqual((code != 0, states), (True, ["failure"]))
+        self.assertEqual(self.run_gate("same", fail_at="comments"), (0, ["failure"]))
+        code, states = self.run_gate("same", fail_at="post")
+        self.assertEqual((code != 0, states), (True, ["failure"]))
+
+    def test_error_before_head_known_fails_the_job(self):
+        # Residual named in #1946: with the pulls API down there is no head to post to.
+        code, states = self.run_gate("same", fail_at="pulls")
+        self.assertEqual((code != 0, states), (True, []))
 
 
 if __name__ == "__main__":
