@@ -153,7 +153,7 @@ func (c *mcpClient) call(method string, params any) (json.RawMessage, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", c.sock)
 		},
 	}}
-	resp, err := hc.Post("http://guest/mcp", "application/json", bytes.NewReader(body))
+	resp, err := hc.Post("http://localhost/mcp", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %v", method, err)
 	}
