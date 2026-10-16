@@ -133,7 +133,7 @@ class RiskTierTest(unittest.TestCase):
             ".gitignore": "B",
             "docs/x.md": "C",
             "briefs/x.md": "C",
-            "reviews/l3/README.md": "C",
+            "reviews/l3/2026-10-15-pr1.md": "C",
             "decisions/D-001.md": "C",
             "tests/test_x.py": "C",
             "tools/trace.py": "C",
@@ -338,6 +338,16 @@ class RiskTierTest(unittest.TestCase):
         self.assertEqual(rt.tier_of("broker/netjoin/join.go")[0], "A")
 
     # REQ: HW-10 (CTRL-claim-tier, CTRL-claim-wire: OPERATING §3 and TIER_A_BROKER agree on claim and firstboot)
+    def test_merge_gate_tools_tests_and_lens_rules_are_a(self):
+        # Security on #1953: paths that left premerge's Mark-only list keep the full review.
+        for f in ("tools/premerge.py", "tests/test_premerge.py", "tests/test_risk_tier_custody.py",
+                  "tests/test_ci_scope.py", "tests/test_g1_scope.py", "tests/test_workflows.py",
+                  "tests/test_merge_queue.py", "tests/test_lane.py", "reviews/l3/README.md",
+                  "reviews/security/README.md"):
+            self.assertEqual(rt.tier_of(f)[0], "A", f)
+        for f in ("reviews/l3/2026-10-15-pr1.md", "reviews/README.md", "tests/test_records.py"):
+            self.assertNotEqual(rt.tier_of(f)[0], "A", f)
+
     def test_operating_tier_a_list_agrees_with_tier_a_broker(self):
         text = (ROOT / "docs" / "OPERATING.md").read_text()
         row = next(l for l in text.splitlines() if l.startswith("| **A** |"))
