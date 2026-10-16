@@ -207,6 +207,8 @@ type PageSocket struct {
 	// (REC-4, #1191), taking it from the vault process's hold of the
 	// latest Wi-Fi commit (#1522); nil refuses the op.
 	RotateAPNet func() error
+	// PlanSignIn signs a signed-out plan in again from the page (#1264).
+	PlanSignIn localsrv.PlanSignIn
 }
 
 // PageForget is FORGET as the page serves it; unlocked is whether the
@@ -459,6 +461,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 				return askResume(ctx, gate, id, pause)
 			}}
 		lcfg.RotateAPNet = cfg.PageSocket.RotateAPNet
+		lcfg.PlanSignIn = cfg.PageSocket.PlanSignIn
 		if f := cfg.PageSocket.Forget; f != nil {
 			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget
 		}

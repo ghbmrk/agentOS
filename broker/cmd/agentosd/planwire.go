@@ -9,23 +9,35 @@ import (
 
 // planSignInLine is ONB-9's sign-in line for the Codex plan: STATUS says it
 // once the runner finds no login or a refused one, until the owner signs in
-// again (CRED-5, #1264).
-const planSignInLine = "ChatGPT plan: I can't sign in to it, so its work uses your other routes. Sign in again on my Wi-Fi page."
+// again (CRED-5, #1264). planOnlyLine is the line for an owner whose rule
+// has no other route, whose plan work then waits rather than moves.
+const (
+	planSignInLine = "ChatGPT plan: I can't sign in to it, so its work uses your other routes. Sign in again on my Wi-Fi page."
+	planOnlyLine   = "ChatGPT plan: I can't sign in to it, so its work waits until you sign in again. Sign in again on my Wi-Fi page."
+)
 
 // planNote holds the sign-in line. The runner sets it (SignIn) and clears it
 // when a sign-in or resume lands (OnSignedIn), both under its own lock, so
-// set and clear are plain stores.
-type planNote struct{ on atomic.Bool }
+// set and clear are plain stores. others reports whether the owner's rule
+// holds a route besides the plan; nil or false reads as plan-only, so the
+// line never promises a route that may not be there (#1264 item 3).
+type planNote struct {
+	on     atomic.Bool
+	others func() bool
+}
 
 func (n *planNote) set(string)   { n.on.Store(true) }
 func (n *planNote) clear(string) { n.on.Store(false) }
 
 // Note is STATUS's plan sign-in line, or "".
 func (n *planNote) Note() string {
-	if n.on.Load() {
+	switch {
+	case !n.on.Load():
+		return ""
+	case n.others != nil && n.others():
 		return planSignInLine
 	}
-	return ""
+	return planOnlyLine
 }
 
 // planState asks the vault process for provider's plan state. It is the one

@@ -348,7 +348,8 @@ func New(cfg Config) (*Applier, error) {
 // schedule replaces an older one. An adoption the applier refuses, other
 // than one it holds or retired, and one a newer schedule replaces, is
 // retired and settled with StageDropped by the next Tick; a retired
-// adoption is refused with ErrRetired (SR3-4f-2b).
+// adoption is refused with ErrRetired (SR3-4f-2b), and a release that
+// fell back on this box with ErrFellBack.
 func (a *Applier) Schedule(v *update.Verified, adoption string) error {
 	if adoption == "" {
 		return errors.New("apply: no adoption")
@@ -377,11 +378,6 @@ var ErrRefused = errors.New("apply: this release could not be recorded as instal
 // only. The free-moment rules still hold. A release that fell back before
 // is refused, so the box never boots into it again.
 func (a *Applier) ScheduleFirstBoot(v *update.Verified) error {
-	if v.OK() {
-		if m, err := v.Manifest(); err == nil && a.FellBack(m.Version) {
-			return fmt.Errorf("%w: release %d", ErrFellBack, m.Version)
-		}
-	}
 	return a.schedule(v, "", true)
 }
 
@@ -419,6 +415,11 @@ func (a *Applier) scheduleLocked(v *update.Verified, adoption string, now bool) 
 	m, err := v.Manifest()
 	if err != nil {
 		return err
+	}
+	// Never again, through either entry point: the box would boot into
+	// the same bad release (UPD-1); a later release replaces it.
+	if a.st.FellBack[strconv.FormatInt(m.Version, 10)] {
+		return fmt.Errorf("%w: release %d", ErrFellBack, m.Version)
 	}
 	in, err := a.cfg.Store.Installed()
 	if err != nil {

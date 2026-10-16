@@ -104,6 +104,11 @@ const commitTimeout = 2 * time.Minute
 // confirm window; it is recovery.PendingTTL.
 const resultTTL = 30 * time.Minute
 
+// resultGrace keeps a committed result for its confirmer after the
+// commit's answer when that comes near or after the confirm window's end
+// (#1340); the result never outlives the window by more than this.
+const resultGrace = 5 * time.Minute
+
 // Rotation is the box's card rotation (RotationCard) over the vault
 // process. Lock order: a display's lock before mu; mu is never held while
 // calling into a display.
@@ -231,7 +236,7 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 		}
 		r.mu.Lock()
 		if r.gen == gen && r.confirmer != "" {
-			r.res, r.resOwner, r.resUntil = &res, r.confirmer, r.until
+			r.res, r.resOwner, r.resUntil = &res, r.confirmer, r.resultUntilLocked()
 		}
 		r.mu.Unlock()
 		return nil
@@ -337,6 +342,20 @@ func (rot *Rotation) setWiFi(f func() error) {
 func (r *Rotation) voidLocked() {
 	r.gen++
 	r.res, r.resOwner, r.resUntil = nil, "", time.Time{}
+}
+
+// resultUntilLocked is when a result committed now expires: the confirm
+// window's end, or resultGrace after now when that is later, but no later
+// than resultGrace past the window (#1340). It runs with mu held.
+func (r *Rotation) resultUntilLocked() time.Time {
+	until := r.now().Add(resultGrace)
+	if until.Before(r.until) {
+		until = r.until
+	}
+	if max := r.until.Add(resultGrace); until.After(max) {
+		until = max
+	}
+	return until
 }
 
 // void is voidLocked under mu.
