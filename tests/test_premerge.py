@@ -72,6 +72,21 @@ class PremergeTest(unittest.TestCase):
         self.merge_main_after(lambda: self.write("a.txt", self.read("a.txt").replace("line 4\n", "line 4 main\n")))
         self.assertEqual(self.check(reviewed), [])
 
+    def test_assumptions_renumbering_only_is_same_but_text_edit_is_changed(self):
+        rows = "| N1 | first | basis |\n| N2 | second | basis |\n"
+        git(self.r, "checkout", "-q", "main")
+        self.write("ASSUMPTIONS.md", "| # | A |\n|---|---|\n" + rows)
+        self.commit("assumptions")
+        reviewed = self.pr()
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md") + "| N3 | mine | basis |\n")
+        reviewed = self.commit("pr row")
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("| N3 |", "| N4 |"))
+        self.commit("renumbered")
+        self.assertEqual(self.check(reviewed), [])
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("mine", "changed"))
+        self.commit("text edit")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
     def test_main_merged_in_then_a_pr_line_changed_is_changed(self):
         reviewed = self.pr()
         self.merge_main_after(lambda: self.write("a.txt", self.read("a.txt").replace("line 4\n", "line 4 main\n")))
