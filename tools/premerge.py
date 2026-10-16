@@ -14,8 +14,8 @@ neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved else
 `git patch-id`: it ignores whitespace. Prints `same` and exits 0, or `changed <files>` and exits 1:
 those files need a delta review. Git 2.38 or later, no network; fetch first.
 
-`--needs-mark` lists the files of base..head that make the PR one Mark presses Merge on (it changes how
-Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7).
+`--needs-mark` lists the files of base..head that make the PR one that merges only on Mark's own approval of
+it (it changes how Claude is permitted or reviewed): prints `mark <files>` and exits 1, or `agent` and exits 0 (OPERATING §7).
 
 `--check` is the gate form: it reads a PR's issue comments (a JSON list as the GitHub API returns it), takes
 the newest L3 verdict comment from a repository owner, member or collaborator, and prints `same` (exit 0) only
