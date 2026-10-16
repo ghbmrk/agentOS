@@ -150,6 +150,16 @@ class RootfsBuildTest(unittest.TestCase):
             capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr[-500:])
 
+    # REQ: CAP-11, A14
+    def test_box_build_s_pin_check_passes_on_the_built_tree(self):
+        # image/build.sh runs check_codex_pin.sh on exactly this tree; run it here, so a writer and a
+        # check that disagree (#1897 delta review, finding 1) fail CI rather than the box build.
+        r = subprocess.run(["sh", str(ROOT / "image/check_codex_pin.sh"), str(ROOT), str(self.out)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if (ROOT / "broker/cmd/agentosd/imagepin.go").exists():
+            self.assertNotIn("not checked", r.stderr)
+
     # REQ: A14, A3
     def test_forwarder_is_installed_and_the_socket_directory_is_empty(self):
         self.assertTrue(os.access(self.out / "usr/local/bin/agentos-codex-forwarder", os.X_OK))
