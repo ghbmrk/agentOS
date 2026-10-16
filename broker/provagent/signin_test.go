@@ -128,6 +128,7 @@ func (g *signRig) noCanary(t *testing.T) {
 // own link (never the forwarder's) and the code, and once the owner
 // approves and the vault holds the login the provider is signed in and the
 // worker is gone (ONB-3, CRED-5).
+// REQ: G1-1264-busy-1 (SigningIn holds while the sign-in waits)
 func TestONB3SignInShowsTheProvidersPageAndCode(t *testing.T) {
 	g := newSignRig(printed)
 	link, code, err := g.start(t)
@@ -152,6 +153,9 @@ func TestONB3SignInShowsTheProvidersPageAndCode(t *testing.T) {
 	if _, _, err := g.start(t); !errors.Is(err, ErrSignInBusy) {
 		t.Errorf("a second sign-in while one runs: %v", err)
 	}
+	if !g.r.SigningIn("stub") {
+		t.Error("a sign-in that waits for the owner is not reported as waiting")
+	}
 	g.r.signIn("stub", true) // a refused login had stopped the route
 	g.mu.Lock()
 	g.stored["pw-sign"] = true
@@ -168,6 +172,13 @@ func TestONB3SignInShowsTheProvidersPageAndCode(t *testing.T) {
 	g.gone(t)
 	if g.r.isStopped("stub") {
 		t.Error("the sign-in did not lift the stopped route")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for g.r.SigningIn("stub") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if g.r.SigningIn("stub") {
+		t.Error("a finished sign-in is still reported as waiting")
 	}
 	g.noCanary(t)
 }

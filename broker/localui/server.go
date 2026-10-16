@@ -667,9 +667,14 @@ func (s *Server) homeView(w http.ResponseWriter, r *http.Request, msg, errText, 
 		v.LineNote, v.LineTexts = line.Note, lineTexts(line, time.Local)
 		v.SIM, v.SIMEnds = line.SIM, line.SIMEnds
 	}
+	// A sign-in this session started that still waits comes back in place
+	// of the form (#1945).
 	var ps localapi.PlanSignIn
 	if plan.Link == "" && s.call(r.Context(), localapi.OpPlanSignInReady, auth, &ps) == nil {
 		v.PlanReady = ps.Ready
+		if ps.Ready && ps.Link != "" {
+			v.Plan = ps.DeviceCode
+		}
 	}
 	if v.SIM != "" || v.PlanReady {
 		var cell localapi.Text

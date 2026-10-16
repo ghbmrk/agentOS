@@ -28,6 +28,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/digestqueue"
 	"github.com/ghbmrk/agentos/broker/grants"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/loopbuild"
 	"github.com/ghbmrk/agentos/broker/mail/mailsock"
@@ -1119,7 +1120,9 @@ func providerRunner(m *vm.Manager, rc *modelroute.RouteControl, note *planNote, 
 		Consent:      func(string) bool { return false },
 		Logf:         log.Printf,
 		Caps:         provagent.Caps{Wall: 30 * time.Minute, Result: 256 << 10, Brief: 256 << 10},
-		NewID:        func() string { return vm.ProviderPrefix + randHex(6) },
+		// The page's busy text names this wait (CH-12, #1945).
+		SignInTimes: provagent.SignInTimes{Wall: localapi.PlanSignInWait},
+		NewID:       func() string { return vm.ProviderPrefix + randHex(6) },
 	}
 	if rc != nil {
 		r.Granted = func(p string) bool { return planGranted(rc, p) }
