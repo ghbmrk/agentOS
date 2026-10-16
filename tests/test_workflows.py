@@ -27,6 +27,67 @@ def steps(text):
         yield m.group(2), "\n".join(body)
 
 
+# CTRL-lane-gate r3 (#1347, Security R3 and L3 on #1583): lane-gate.yml must run only the
+# base's code and fail closed. Every line that is not blank or a whole-line comment must equal
+# this pin, in order, so no edit can add `if:` or `continue-on-error:`, swap the action, point
+# the checkout or HEAD_SHA at the PR head, widen permissions, change the runner, swallow an
+# exit code or run fetched code without changing this test in the same PR.
+LANE_GATE_ENV = [
+    "BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+    "HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+    "PR_NUMBER: ${{ github.event.pull_request.number }}",
+    "PR_BRANCH: ${{ github.head_ref }}",
+    "PR_TITLE: ${{ github.event.pull_request.title }}",
+]
+LANE_GATE_RUN = [
+    'git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head"',
+    'git cat-file -e "$HEAD_SHA^{commit}"',
+    'python3 -I tools/risk_tier.py --git "$BASE_SHA" "$HEAD_SHA" --pr-branch "$PR_BRANCH" --pr-title "$PR_TITLE"',
+]
+LANE_GATE_LINES = [
+    "name: lane-gate",
+    "on:",
+    "  pull_request_target:",
+    "    types: [opened, synchronize, reopened, edited]",
+    "permissions:",
+    "  contents: read",
+    "jobs:",
+    "  lane-gate:",
+    "    name: lane-gate",
+    "    runs-on: ubuntu-latest",
+    "    timeout-minutes: 5",
+    "    permissions:",
+    "      contents: read",
+    "    steps:",
+    "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",
+    "        with:",
+    "          ref: ${{ github.event.pull_request.base.sha }}",
+    "          fetch-depth: 0 # the merge base with the PR head",
+    "          persist-credentials: false",
+    "      - name: Lane gate (base copy of tools/risk_tier.py)",
+    "        env:",
+] + ["          " + e for e in LANE_GATE_ENV] + [
+    "        run: |",
+] + ["          " + r for r in LANE_GATE_RUN]
+
+
+def lane_gate_problems(text):
+    """Return why lane-gate.yml differs from the pinned gate; empty when it matches."""
+    problems = []
+    # Only printable ASCII and \n: YAML also breaks lines at \r, which could hide a line
+    # inside what this check reads as a comment.
+    if re.search(r"[^\x20-\x7e\n]", text):
+        problems.append("a character other than printable ASCII or a newline")
+    code = [l for l in text.split("\n") if l.strip() and not l.lstrip().startswith("#")]
+    for i in range(max(len(code), len(LANE_GATE_LINES))):
+        got = code[i] if i < len(code) else "<missing>"
+        want = LANE_GATE_LINES[i] if i < len(LANE_GATE_LINES) else "<none>"
+        if got != want:
+            problems.append("line %d is %r, pinned %r" % (i + 1, got, want))
+            break
+    return problems
+
+
 class WorkflowTest(unittest.TestCase):
     def files(self):
         files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
@@ -146,6 +207,52 @@ class WorkflowTest(unittest.TestCase):
                     self.assertNotRegex(line, verb, line)
         # One gate: no fallback to the PR's copy inside the PR-controlled ci.yml.
         self.assertNotIn("--pr-branch", (WORKFLOWS / "ci.yml").read_text())
+
+    def test_lane_gate_has_no_fail_open_or_fetched_code_path(self):
+        # CTRL-lane-gate r3 (#1347): the shipped workflow passes the strict check.
+        self.assertEqual(lane_gate_problems((WORKFLOWS / "lane-gate.yml").read_text()), [])
+
+    def test_lane_gate_check_catches_each_reported_edit(self):
+        # CTRL-lane-gate r3 (#1347): every edit Security R3 and L3 showed passing an older check fails.
+        text = (WORKFLOWS / "lane-gate.yml").read_text()
+        gate = LANE_GATE_RUN[2]
+        step = "      - name: Lane gate (base copy of tools/risk_tier.py)\n"
+        job = "    runs-on: ubuntu-latest\n"
+        edits = {
+            "job continue-on-error": (job, job + "    continue-on-error: true\n"),
+            "step continue-on-error": (step, step + "        continue-on-error: true\n"),
+            "job if": (job, job + "    if: false\n"),
+            "step if": (step, step + "        if: ${{ false }}\n"),
+            "quoted if": (step, step + "        \"if\": false\n"),
+            "flow mapping if": (job, job + "    defaults: {run: {shell: sh}}\n"),
+            "or true": (gate, gate + " || true"),
+            "secret env": ("          PR_TITLE:", "          TOKEN: ${{ secrets.GITHUB_TOKEN }}\n          PR_TITLE:"),
+            "head as base": ("BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+                             "BASE_SHA: ${{ github.event.pull_request.head.sha }}"),
+            "checkout with -c": (gate, 'git -c x=y checkout "$HEAD_SHA"\n          ' + gate),
+            "archive": (gate, 'git archive "$HEAD_SHA" | tar x\n          ' + gate),
+            "show to file": (gate, 'git show "$HEAD_SHA":tools/risk_tier.py > f\n          ' + gate),
+            "title on echo": (gate, 'echo "${{ github.event.pull_request.title }}"\n          ' + gate),
+            "shell override": (step, step + "        shell: python {0}\n"),
+            "container": (job, job + "    container: python:3\n"),
+            "second run step": (gate, gate + "\n      - run: |\n          true"),
+            "inline run": ("        run: |\n", "        run: >\n"),
+            "repeated ref": ("          persist-credentials: false\n",
+                             "          persist-credentials: false\n          ref: ${{ github.event.pull_request.head.sha }}\n"),
+            "ref to head": ("ref: ${{ github.event.pull_request.base.sha }}",
+                            "ref: ${{ github.event.pull_request.head.sha }}"),
+            "swapped uses": ("actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", "evil/x@main"),
+            "persist credentials": ("persist-credentials: false", "persist-credentials: true"),
+            "contents write": ("  contents: read\njobs:", "  contents: write\njobs:"),
+            "write-all": ("permissions:\n  contents: read\njobs:", "permissions: write-all\njobs:"),
+            "self-hosted": ("runs-on: ubuntu-latest", "runs-on: self-hosted"),
+            "carriage return in comment": ("# CTRL-lane-gate (docs/LANES.md)",
+                                           "# CTRL-lane-gate\r    if: false\r# (docs/LANES.md)"),
+        }
+        for name, (old, new) in edits.items():
+            with self.subTest(name):
+                self.assertIn(old, text)
+                self.assertTrue(lane_gate_problems(text.replace(old, new, 1)), name)
 
     def test_lane_gate_runs_only_the_base_copy(self):
         # CTRL-lane-gate (#1300, security review B1/B2): the gate is its own workflow on
