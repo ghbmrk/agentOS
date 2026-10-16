@@ -343,7 +343,15 @@ func (p *Pipeline) replayLocked(j Journal) {
 		case (st.State == journal.Pending || st.State == journal.Authorized) && c.in.Action == ActionAdopt && id == adoptID(c.parts[1]):
 			if pr := p.loadProposalLocked(c.parts[1]); pr != nil {
 				props[c.parts[1]] = pr
+				continue
 			}
+			// Waiting, but its blob is absent, unsealed or forged: nothing
+			// can adopt it, so its bytes go now rather than outliving a
+			// forget of the goal they came from (AJS-1, AJS-2).
+			if p.cfg.Logf != nil {
+				p.cfg.Logf("change: a waiting proposal did not load or failed its seal; dropped, propose again")
+			}
+			p.deleteProposalLocked(c.parts[1])
 			continue
 		}
 		if c.in.Action == ActionAdopt && id == adoptID(c.parts[1]) {

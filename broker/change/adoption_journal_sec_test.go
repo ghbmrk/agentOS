@@ -129,11 +129,24 @@ func TestReplayRemovesSettledProposal(t *testing.T) {
 	}
 }
 
-// waitingProposal: a config change waits for the owner.
+// waitingProposal: a config change waits for the owner. The journal
+// redacts every param, as the daemon's does, so only the saved
+// proposal's MAC binds the candidate.
 func waitingProposal(t *testing.T) (*env, Report) {
 	t.Helper()
 	e := newEnv(t, nil)
 	e.cases(12, ClassSkill, "skills/greet", "hello")
+	eng, err := journal.Open(e.jstore, e.owner, map[string]journal.Executor{Executor: e.p, "task": noop{}},
+		func(s string) string {
+			if s == "" {
+				return ""
+			}
+			return redacted
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.eng = eng
 	e.p.Attach(holdJournal{e.eng})
 	a := e.propose(Candidate{Source: Local, Files: Tree{"config/a": []byte("1")}})
 	if a.State != StateAwaitingOwner {
@@ -249,6 +262,9 @@ func TestAdoptParamsBindCandidate(t *testing.T) {
 		"from differs": {"from": other, "to": to},
 		"to missing":   {"from": from},
 		"from missing": {"to": to},
+		"to uppercase": {"from": from, "to": strings.ToUpper(other)},
+		"to prefixed":  {"from": from, "to": "sha256:" + other},
+		"to not text":  {"from": from, "to": 7},
 	} {
 		err := e.p.Check(bg, journal.PhaseAuthorize, mk(params))
 		if err == nil || errors.Is(err, ErrNeedsOwner) {
@@ -262,5 +278,38 @@ func TestAdoptParamsBindCandidate(t *testing.T) {
 		if err := e.p.Check(bg, journal.PhaseAuthorize, mk(params)); !errors.Is(err, ErrNeedsOwner) {
 			t.Fatalf("%s: %v", name, err)
 		}
+	}
+}
+
+// AJS-1: a goal-learned proposal still waits, but its blob lost its seal
+// (an earlier build's, or rewritten); after a restart and a forget of the
+// goal, no Content key holds the goal's bytes.
+func TestForgetRemovesUnsealedWaitingProposal(t *testing.T) {
+	fc := &delFailContent{MemContent: &MemContent{}}
+	e := newEnv(t, func(c *Config) { c.Content = fc })
+	e.cases(12, ClassSkill, "skills/greet", "hello")
+	if err := e.p.SetAutoAdopt(bg, false); err != nil {
+		t.Fatal(err)
+	}
+	e.p.Attach(holdJournal{e.eng})
+	a := e.propose(Candidate{Source: Local, Goals: []string{"owner:g1"},
+		Files: Tree{"skills/greet": []byte("hello"), "skills/note": learned}})
+	if a.State != StateAwaitingOwner {
+		t.Fatalf("setup: %+v", a)
+	}
+	e.p.mu.Lock()
+	pr := e.p.props[a.ID]
+	plain, _ := json.Marshal(savedProposal{Cand: pr.cand, Base: pr.base, Next: pr.next, Edits: pr.edits,
+		Report: pr.report, Classes: pr.classes})
+	e.p.mu.Unlock()
+	if err := fc.Put(proposalKey(a.ID), plain); err != nil {
+		t.Fatal(err)
+	}
+	e.reopen()
+	if _, err := e.p.ForgetGoal("owner:g1"); err != nil {
+		t.Fatal(err)
+	}
+	if keys := fc.holding(learned); len(keys) != 0 {
+		t.Fatalf("goal bytes left after restart and forget: %q", keys)
 	}
 }

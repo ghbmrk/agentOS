@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1006,16 +1005,15 @@ func touchesNS(edits []Edit, ns string) bool {
 	return false
 }
 
-var treeHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
 // hashParam: an adopt intent's from or to param agrees with want. A
 // redacted value carries nothing to compare, and the saved proposal's MAC
 // binds the candidate instead; a missing one or another hash refuses
 // (CHG-2, AJS-3).
 func hashParam(v any, want string) bool {
 	s, ok := v.(string)
-	if !ok || s == "" {
-		return false
-	}
-	return !treeHash.MatchString(s) || s == want
+	return ok && (s == redacted || s != "" && s == want)
 }
+
+// redacted is the daemon's marker for a param the journal did not keep
+// (daemon.Redacted); only that exact marker skips the comparison.
+const redacted = "[redacted]"
