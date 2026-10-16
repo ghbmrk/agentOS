@@ -12,7 +12,7 @@ Classes: **buildable now** (cloud-buildable; dependencies are in Needs), **stand
 | HW-4 | hardware-blocked | The N95 floor box (GEEKOM Air12 Lite); the 4-core, 8 GB measurements need it. | MARK-QUEUE A7 |
 | HW-6 | hardware-blocked | Screenless USB boot and per-model boot-key recipes need S1's three PCs, USB4 SSD and hands. `broker/hostchange` cites HW-6 but nothing tests it. | MARK-QUEUE A2 |
 | HW-7 | buildable now | Negative requirement: Macs are not boot targets. A docs test, same row as HW-3. | HW-3t |
-| CRED-2 | spec-blocked | The stated trusted base is rewritten by D-082 (guarantee claims); a test now would target text CONV-4 changes. | CONV-4 (D-082) |
+| CRED-2 | buildable now | SPEC L267 already carries the D-082 wording ("the spec claims no such containment (D-082)"; changelog 2026-10-09), so nothing remains for CONV-4 to rewrite in CRED-2. The H9/K1 hint-channel wording of D-082 sits in other IDs and does not change CRED-2's trusted-base sentence, which is all the test pins. | CRED-2t |
 | CRED-11 | stand-in | Broker verbs `copy`, `paste`, `hand-off` against the S5 fixture executors. Needs CRED-4b part 2. | CRED-11a |
 | ONB-2 | stand-in | Host disk never written: hostcheck stand-in disk plus HOST-1e's harness. Part 2 waits on P2-1's image. | HOST-1a, HOST-1e (existing) |
 | ONB-9 | buildable now | One plan line per usage pool from stub-CLI pool state; needs RES-5a and the Wi-Fi page. | ONB-9a |
@@ -33,7 +33,7 @@ Classes: **buildable now** (cloud-buildable; dependencies are in Needs), **stand
 | UPD-7 | buildable now | Soak plus attestations, no project-run rollout. Likely already exercised by M6's tests in `broker/maintain`; first step is to add the `REQ: UPD-7` marker, then fill any gap. | UPD-7t |
 | UPD-9 | buildable now | Held security fix put to the owner. Wiring (`maintain.Loop3`) is W5b's; the D3 and O2 registrations are OP9-status-b's, or W5b's if -b has not (briefs/OP9-status.md, line "Update checks (C11)", IDs OP-9, UPD-9). | W5b (existing) |
 
-Counts: buildable now 10, stand-in 7, environment-blocked 4, hardware-blocked 2, spec-blocked 1 (24).
+Counts: buildable now 11, stand-in 7, environment-blocked 4, hardware-blocked 2, spec-blocked 0 (24).
 
 ## Queued rows
 
@@ -52,6 +52,7 @@ Each row's acceptance test and failure path, for its brief. A row does not start
 | ADP-15a | ADP-15 | One composited screenshot over two fixture executors; each action reaches exactly one executor; per-window withholding applied. | A window id outside the agent's set is refused; cross-account data moves only through CRED-11. | A | CRED-11a, ADP-5 (lane claude2) |
 | ADP-16a | ADP-16 | Suite of fixture apps of one account shares an executor; an app of another account is refused; turning it on is a new-grant intent. | An app without a saved-login condition is excluded, not started. | A | ADP-5 (lane claude2) |
 | UPD-7t | UPD-7 | Stable proposes a release only after soak and at least `MinPasses` early-channel attestations; no code path reads a project-run rollout setting. | Too few attestations: the release stays unproposed and the digest says why. | C | none (broker/maintain M6) |
+| CRED-2t | CRED-2 | `tests/test_cred2_trusted_base.py`: SPEC.md's CRED-2 text names the trusted base (host kernel, hypervisor, firmware, broker, credentialed-executor sandboxes, credential-reading processes) and states that scanning is a tripwire and no containment of a compromised credential reader is claimed (D-082). | The sentence is dropped or weakened to a containment claim: the test fails and names the line. | C | none |
 
 ## Findings
 

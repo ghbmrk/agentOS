@@ -19,6 +19,7 @@ Finding kinds CI now catches; the screen no longer looks for them by hand (OPERA
 | Finding kind | Check | Since |
 |---|---|---|
 | A "Cleared" or return text disagrees with the finding's state: Cleared while a same-name finding is open, a return texted "back" though Cleared was suppressed, a silent return after Cleared (#585, #586) | `loops` flap helper (`flap_test.go`: alert, cleared, back, cleared, untexted return; a move between details and back that then clears, ending on one owed "Cleared"; a restart after every step) run by `Pass`, `Resolve`, `runProbe` and `CloseTarget`, all through one close routine (`closeTextLocked`, S39) | P3-4b-3r-told |
+| `lane-gate.yml` can fail open or run PR-head code: `continue-on-error`, `if:`, `\|\| true`, an env from `secrets.*`, an expression in a `run:` body, `git checkout`/`archive`/`show` of `$HEAD_SHA`, HEAD_SHA pointed at the base, the checkout `ref:` pointed at the head, a swapped `uses:`, `persist-credentials: true`, `contents: write`, `write-all`, a self-hosted runner (#1347, Security R3 on #1303, L3 and Security on #1583) | `tests/test_workflows.py` `lane_gate_problems`: every line that is not blank or a whole-line comment equals the pinned file, in order, and the file is printable ASCII (no `\r` hidden in a comment); each reported edit in a mutation subtest | CTRL-lane-gate r3 |
 
 ## Spec-wide runs
 

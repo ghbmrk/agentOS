@@ -2,15 +2,18 @@ package egress
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/netguard"
@@ -82,6 +85,11 @@ type PlanRoute struct {
 	ContentTypes []string
 	// Token is the shape of a refresh's or code exchange's response.
 	Token ResponseRule
+	// RefusedLogin are the error codes with which the provider refuses a
+	// refresh because the stored login no longer works. Only these, on a
+	// 400 or 401 to the refresh, are a refused login (CRED-5): a worker can
+	// provoke other errors (it chooses client_id), and they are not.
+	RefusedLogin []string
 	// RequestHeaders a run worker may send; SignInHeaders a sign-in
 	// worker. Authorization is never on either: the route writes it.
 	RequestHeaders []string
@@ -141,6 +149,10 @@ func Codex() PlanRoute {
 			{Name: "token_type", Kind: FieldText, Pattern: `[Bb]earer`, Optional: true},
 			{Name: "scope", Kind: FieldText, Pattern: `[a-z_.: ]{1,200}`, Optional: true},
 		}},
+		// The refresh-failure codes the CLI itself treats as a dead login
+		// (codex-rs auth: expired, reused, invalidated). invalid_grant is not
+		// here: a worker can provoke it with another client_id.
+		RefusedLogin: []string{"refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated"},
 		RequestHeaders: []string{
 			"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
 			"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
@@ -159,7 +171,36 @@ type PlanLoginStore interface {
 	ForWorker(provider, worker string) Swapper
 	ForSignIn(provider, worker string) Swapper
 	Resolve(provider, worker, placeholder string) (string, bool)
+	// ShareRefresh runs one refresh exchange per provider at a time: a
+	// refresh that arrives while one is in flight joins it and gets its
+	// answer (#1749). done is called once the caller has committed or
+	// dropped that answer.
+	ShareRefresh(ctx context.Context, provider string, exchange func() (*Exchanged, error)) (res *Exchanged, done func(), err error)
 }
+
+// Exchanged is a refresh exchange's upstream answer, shared by every
+// refresh that joined it. Body is read up to MaxExchangeResponse+1 bytes,
+// so the swap still refuses an oversized answer.
+type Exchanged struct {
+	Status int
+	Header http.Header
+	Body   []byte
+}
+
+// refreshRefusal is a refresh exchange that got no answer to swap; every
+// refresh that joined it answers its worker the same way.
+type refreshRefusal struct {
+	status  int
+	reason  string
+	allowed bool // the request left the box (not a policy refusal)
+}
+
+func (e *refreshRefusal) Error() string { return e.reason }
+
+// refreshTimeout bounds a refresh exchange. The exchange outlives the
+// request that started it, since a single-use token it spends serves every
+// refresh that joined it.
+const refreshTimeout = time.Minute
 
 // QuotaReading is one quota pool's state, read from the provider's
 // response headers on the broker's own connection (#809).
@@ -200,8 +241,10 @@ type WorkerRouteConfig struct {
 	Guard     *netguard.Policy
 	Audit     Auditor
 	Quota     func(QuotaReading)
-	Meter     func(PlanUse)
-	Now       func() time.Time
+	// Signal receives a refused login read on this connection.
+	Signal func(PlanSignal)
+	Meter  func(PlanUse)
+	Now    func() time.Time
 	// MaxBody caps a request body; zero means DefaultMaxBody.
 	MaxBody int64
 }
@@ -343,6 +386,12 @@ type workerRoute struct {
 	keys      map[string]bool
 	inputs    map[string]bool
 	parts     map[string]bool
+
+	// balance is the last credits balance this route read; a lower one
+	// later is a credit draw (W8).
+	mu         sync.Mutex
+	balance    float64
+	hasBalance bool
 }
 
 // NewWorkerRoute returns the handler a worker's forwarder reaches.
@@ -425,6 +474,17 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		deny(http.StatusForbidden, "encoded request body refused")
 		return
 	}
+	// A call that must carry this worker's placeholder is refused before
+	// its body is read, so a caller holding none cannot make this process
+	// buffer a body (CRED-8, K28). A refresh's placeholder is in its body,
+	// which maxExchangeRequest bounds.
+	var real string
+	if ep.Kind == KindResponses || ep.Kind == KindRead {
+		if real, ok = w.bearer(r.Header); !ok {
+			deny(http.StatusForbidden, "no login placeholder of this worker")
+			return
+		}
+	}
 	limit := w.c.MaxBody
 	if ep.Kind == KindRefresh || ep.Kind == KindCode || ep.Kind == KindDevice {
 		limit = maxExchangeRequest
@@ -435,29 +495,22 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	up, err := http.NewRequestWithContext(r.Context(), ep.Method, "https://"+ep.Host+ep.Path, nil)
+	if ep.Kind == KindRefresh {
+		w.serveRefresh(rw, r, ep, query, body, ev, start)
+		return
+	}
+
+	up, err := w.upstream(r.Context(), r.Header, ep, query)
 	if err != nil {
 		deny(http.StatusForbidden, "undeclared request shape")
 		return
 	}
-	up.URL.RawQuery = query
-	for _, h := range w.headers {
-		for _, v := range r.Header.Values(h) {
-			up.Header.Add(h, v)
-		}
-	}
-	up.Header.Set("Accept-Encoding", "identity")
 
 	// injected holds the real values this request carries; the response
 	// is redacted of them.
 	var injected [][]byte
 	switch ep.Kind {
 	case KindResponses, KindRead:
-		real, ok := w.bearer(r.Header)
-		if !ok {
-			deny(http.StatusForbidden, "no login placeholder of this worker")
-			return
-		}
 		injected = append(injected, []byte(real))
 		up.Header.Set("Authorization", "Bearer "+real)
 		if ep.Kind == KindRead {
@@ -473,15 +526,6 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body = out
-	case KindRefresh:
-		out, real, reason := w.checkRefresh(body)
-		if reason != "" {
-			deny(http.StatusForbidden, reason)
-			return
-		}
-		injected = append(injected, []byte(real))
-		body = out
-		up.Header.Set("Content-Type", "application/json")
 	case KindCode:
 		out, reason := w.checkCode(r.Header, body)
 		if reason != "" {
@@ -499,11 +543,7 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		body = out
 		up.Header.Set("Content-Type", "application/json")
 	}
-	if len(body) > 0 {
-		up.Body = io.NopCloser(bytes.NewReader(body))
-		up.ContentLength = int64(len(body))
-		up.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
-	}
+	setBody(up, body)
 
 	use := PlanUse{At: start, Provider: w.c.Route.Provider, Worker: w.c.Worker, Endpoint: ep.Name, RequestBytes: int64(len(body))}
 	resp, err := w.rt.RoundTrip(up)
@@ -534,34 +574,8 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CRED-5: a token response reaches the worker only swapped, and only
-	// after the vault holds the login it replaces.
-	if ep.Kind == KindRefresh || ep.Kind == KindCode {
-		sw := w.c.Logins.ForWorker(w.c.Route.Provider, w.c.Worker)
-		if ep.Kind == KindCode {
-			sw = w.c.Logins.ForSignIn(w.c.Route.Provider, w.c.Worker)
-		}
-		out, commit, err := w.token.swap(resp, w.c.Route.Provider, sw)
-		if err == nil {
-			err = commit()
-		}
-		if err != nil {
-			ev.Status = resp.StatusCode
-			ev.Reason = ReasonUnswappable
-			if resp.StatusCode >= 400 {
-				ev.Reason = "credential exchange answered with an error; dropped"
-			}
-			w.c.Audit.Egress(ev)
-			rw.Header().Set(DeniedHeader, "1")
-			http.Error(rw, "egress denied: "+ev.Reason, http.StatusBadGateway)
-			return
-		}
-		use.ResponseBytes = int64(len(out))
-		rw.Header().Set("Content-Type", "application/json")
-		rw.WriteHeader(http.StatusOK)
-		ev.Allowed, ev.Status = true, http.StatusOK
-		w.c.Audit.Egress(ev)
-		rw.Write(out)
+	if ep.Kind == KindCode {
+		use.ResponseBytes = w.swapToken(rw, resp, w.c.Logins.ForSignIn(w.c.Route.Provider, w.c.Worker), ev)
 		return
 	}
 
@@ -597,6 +611,140 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	if fl != nil {
 		fl.Flush()
 	}
+}
+
+// upstream is the provider request for ep, carrying the declared headers.
+func (w *workerRoute) upstream(ctx context.Context, h http.Header, ep PlanEndpoint, query string) (*http.Request, error) {
+	up, err := http.NewRequestWithContext(ctx, ep.Method, "https://"+ep.Host+ep.Path, nil)
+	if err != nil {
+		return nil, err
+	}
+	up.URL.RawQuery = query
+	for _, k := range w.headers {
+		for _, v := range h.Values(k) {
+			up.Header.Add(k, v)
+		}
+	}
+	up.Header.Set("Accept-Encoding", "identity")
+	return up, nil
+}
+
+func setBody(up *http.Request, body []byte) {
+	if len(body) > 0 {
+		up.Body = io.NopCloser(bytes.NewReader(body))
+		up.ContentLength = int64(len(body))
+		up.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+	}
+}
+
+// swapToken answers a token response (CRED-5): it reaches the worker only
+// swapped, and only after the vault holds the login it replaces. It
+// returns the bytes written.
+func (w *workerRoute) swapToken(rw http.ResponseWriter, resp *http.Response, sw Swapper, ev Event) int64 {
+	out, commit, err := w.token.swap(resp, w.c.Route.Provider, sw)
+	if err == nil {
+		err = commit()
+	}
+	if err != nil {
+		ev.Status = resp.StatusCode
+		ev.Reason = ReasonUnswappable
+		if resp.StatusCode >= 400 {
+			ev.Reason = "credential exchange answered with an error; dropped"
+		}
+		w.c.Audit.Egress(ev)
+		rw.Header().Set(DeniedHeader, "1")
+		http.Error(rw, "egress denied: "+ev.Reason, http.StatusBadGateway)
+		return 0
+	}
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(http.StatusOK)
+	ev.Allowed, ev.Status = true, http.StatusOK
+	w.c.Audit.Egress(ev)
+	rw.Write(out)
+	return int64(len(out))
+}
+
+// serveRefresh forwards a token refresh (#1749). The plan login's refresh
+// token is single-use and shared by every worker, so refreshes run one
+// exchange per provider at a time: one that arrives while another is in
+// flight joins it, and each worker swaps the one answer for its own
+// placeholders.
+func (w *workerRoute) serveRefresh(rw http.ResponseWriter, r *http.Request, ep PlanEndpoint, query string, body []byte, ev Event, start time.Time) {
+	deny := func(status int, reason string) {
+		ev.Reason, ev.Status = reason, status
+		w.c.Audit.Egress(ev)
+		rw.Header().Set(DeniedHeader, "1")
+		http.Error(rw, "egress denied: "+reason, status)
+	}
+	// A refresh must carry this worker's own placeholder to start or join
+	// an exchange.
+	if _, _, reason := w.checkRefresh(body); reason != "" {
+		deny(http.StatusForbidden, reason)
+		return
+	}
+	exchange := func() (*Exchanged, error) {
+		// Resolved again inside the flight: a flight that ended since the
+		// check above may have committed a newer token.
+		out, _, reason := w.checkRefresh(body)
+		if reason != "" {
+			return nil, &refreshRefusal{status: http.StatusForbidden, reason: reason}
+		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), refreshTimeout)
+		defer cancel()
+		up, err := w.upstream(ctx, r.Header, ep, query)
+		if err != nil {
+			return nil, &refreshRefusal{status: http.StatusForbidden, reason: "undeclared request shape"}
+		}
+		up.Header.Set("Content-Type", "application/json")
+		setBody(up, out)
+		use := PlanUse{At: start, Provider: w.c.Route.Provider, Worker: w.c.Worker, Endpoint: ep.Name, RequestBytes: int64(len(out))}
+		resp, err := w.rt.RoundTrip(up)
+		if errors.Is(err, netguard.ErrDenied) {
+			return nil, &refreshRefusal{status: http.StatusForbidden, reason: "destination refused by the home-network address policy"}
+		}
+		if err != nil {
+			return nil, &refreshRefusal{status: http.StatusBadGateway, reason: "upstream unreachable", allowed: true}
+		}
+		defer resp.Body.Close()
+		defer func() {
+			use.Duration = w.c.Now().Sub(start)
+			if w.c.Meter != nil {
+				w.c.Meter(use)
+			}
+		}()
+		use.Status = resp.StatusCode
+		w.readQuota(resp.Header)
+		if encoded(resp.Header) {
+			return nil, &refreshRefusal{status: http.StatusBadGateway, reason: "encoded response refused", allowed: true}
+		}
+		b, err := io.ReadAll(io.LimitReader(resp.Body, MaxExchangeResponse+1))
+		if err != nil {
+			return nil, &refreshRefusal{status: http.StatusBadGateway, reason: "upstream unreachable", allowed: true}
+		}
+		use.ResponseBytes = int64(len(b))
+		// Once per exchange, not per worker that joined it: a refused
+		// login is the provider's answer to the one token spent.
+		w.readRefused(&http.Response{StatusCode: resp.StatusCode, Body: io.NopCloser(bytes.NewReader(b))})
+		return &Exchanged{Status: resp.StatusCode, Header: resp.Header.Clone(), Body: b}, nil
+	}
+	res, done, err := w.c.Logins.ShareRefresh(r.Context(), w.c.Route.Provider, exchange)
+	defer done()
+	if err != nil {
+		var ref *refreshRefusal
+		switch {
+		case errors.As(err, &ref) && ref.allowed:
+			ev.Allowed, ev.Status, ev.Reason = true, ref.status, ref.reason
+			w.c.Audit.Egress(ev)
+			http.Error(rw, "egress: "+ref.reason, ref.status)
+		case errors.As(err, &ref):
+			deny(ref.status, ref.reason)
+		default:
+			deny(http.StatusBadGateway, "refresh exchange abandoned")
+		}
+		return
+	}
+	resp := &http.Response{StatusCode: res.Status, Header: res.Header, Body: io.NopCloser(bytes.NewReader(res.Body))}
+	w.swapToken(rw, resp, w.c.Logins.ForWorker(w.c.Route.Provider, w.c.Worker), ev)
 }
 
 func (w *workerRoute) match(method, path string) (PlanEndpoint, bool) {
@@ -967,17 +1115,20 @@ func (w *workerRoute) responseHeaders(h http.Header) []string {
 }
 
 // readQuota turns the provider's quota headers into one reading per pool.
-// A credits or reached-limit signal is not yet measured (#809), so any
-// such header reads as used up.
+// A reached limit (X-Codex-Rate-Limit-Reached-Type, or a pool at 100%) reads
+// as used up. The X-Codex-Credits-* headers (has-credits, unlimited,
+// balance, as codex-rs reads them) describe the account's credits, not a
+// draw, so they alone do not; a balance lower than the last one this route
+// read is a draw during the run, and reads as used up (W8). Whether the
+// service also draws credits before a limit is reached is unmeasured until
+// #809.
 func (w *workerRoute) readQuota(h http.Header) {
 	if w.c.Quota == nil {
 		return
 	}
 	exhausted := h.Get("X-Codex-Rate-Limit-Reached-Type") != ""
-	for k := range h {
-		if strings.HasPrefix(k, "X-Codex-Credits-") {
-			exhausted = true
-		}
+	if w.creditDrawn(h.Get("X-Codex-Credits-Balance")) {
+		exhausted = true
 	}
 	now := w.c.Now()
 	emitted := false
@@ -988,7 +1139,11 @@ func (w *workerRoute) readQuota(h http.Header) {
 			continue
 		}
 		q := QuotaReading{At: now, Provider: w.c.Route.Provider, Worker: w.c.Worker, Pool: pool, Exhausted: exhausted}
-		q.UsedPercent, _ = strconv.ParseFloat(used, 64)
+		var err error
+		if q.UsedPercent, err = strconv.ParseFloat(used, 64); err != nil && !exhausted {
+			// No stated use is no reading: 0% would read as a full pool.
+			continue
+		}
 		q.WindowMinutes, _ = strconv.Atoi(window)
 		q.ResetAt, _ = strconv.ParseInt(reset, 10, 64)
 		if q.UsedPercent >= 100 {
@@ -1000,6 +1155,56 @@ func (w *workerRoute) readQuota(h http.Header) {
 	if exhausted && !emitted {
 		w.c.Quota(QuotaReading{At: now, Provider: w.c.Route.Provider, Worker: w.c.Worker, Pool: "plan", Exhausted: true})
 	}
+}
+
+// creditDrawn records a credits balance and reports whether it is lower
+// than the last one this route read. An absent or unreadable balance draws
+// nothing and keeps the last one.
+func (w *workerRoute) creditDrawn(balance string) bool {
+	b, err := strconv.ParseFloat(strings.TrimSpace(balance), 64)
+	if err != nil || math.IsNaN(b) || math.IsInf(b, 0) {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	drawn := w.hasBalance && b < w.balance
+	w.balance, w.hasBalance = b, true
+	return drawn
+}
+
+// readRefused signals a refused login when a refresh is answered 400 or 401
+// with one of the route's RefusedLogin codes, as {"error":"<code>"} or
+// {"error":{"code":"<code>"}}. An error response is never forwarded, so the
+// body is read here, bounded, and dropped.
+func (w *workerRoute) readRefused(resp *http.Response) {
+	if w.c.Signal == nil || len(w.c.Route.RefusedLogin) == 0 ||
+		(resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnauthorized) {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxExchangeResponse+1))
+	if err != nil || len(body) > MaxExchangeResponse {
+		return
+	}
+	var obj struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(body, &obj) != nil {
+		return
+	}
+	var code string
+	if json.Unmarshal(obj.Error, &code) != nil {
+		var nested struct {
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(obj.Error, &nested) != nil {
+			return
+		}
+		code = nested.Code
+	}
+	if code == "" || !set(w.c.Route.RefusedLogin)[code] {
+		return
+	}
+	w.c.Signal(PlanSignal{At: w.c.Now(), Provider: w.c.Route.Provider, Worker: w.c.Worker, Kind: SignalLoginRefused})
 }
 
 func set(list []string) map[string]bool {

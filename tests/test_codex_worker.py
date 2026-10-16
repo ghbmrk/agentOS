@@ -47,6 +47,7 @@ STUB_TOOL = ROOT / "tests/codex_worker/stub_tool.py"
 FAKE_ENDPOINT = ROOT / "tests/codex_worker/fake_endpoint.py"
 BWRAP = "/usr/bin/bwrap"
 FORWARDER = "http://127.0.0.1:18432"
+FORWARDER_SRC = ROOT / "broker/egress/cmd/agentos-codex-forwarder/main.go"
 CODEX_HOME = "/var/lib/agentos-codex"
 WORK = "/var/lib/agentos-work"
 
@@ -255,11 +256,31 @@ class ManagedConfigTest(unittest.TestCase):
                 mutate(cfg)
                 self.assertNotEqual(hosted_tool_problems(cfg), [])
 
+    # REQ: CRED-5, A14, CAP-11
+    def test_launch_starts_the_forwarder_that_base_url_and_refresh_name(self):
+        launch = json.loads(LAUNCH.read_text())
+        wrap = launch["wrap"]
+        self.assertEqual(wrap[0], "/usr/local/bin/agentos-codex-forwarder")
+        self.assertEqual(wrap[-1], "--")
+        opts = dict(zip(wrap[1:-1:2], wrap[2:-1:2]))
+        self.assertEqual(opts, {"-listen": "127.0.0.1:18432", "-socket": "/run/agentos/route.sock"})
+        cfg = tomllib.loads((CODEX / "managed_config.toml").read_text())
+        self.assertEqual(cfg["model_provider"], "agentos")
+        base = cfg["model_providers"]["agentos"]["base_url"]
+        self.assertTrue(base.startswith("http://" + opts["-listen"] + "/"), base)
+        # The forwarder sets the refresh override from the port it bound, so it names that port by
+        # construction; launch env carrying one would be refused by childproc at the start (C18).
+        env = dict(e.split("=", 1) for e in launch["env"])
+        self.assertNotIn("CODEX_REFRESH_TOKEN_URL_OVERRIDE", env)
+        self.assertIn('"CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://"+addr+"/oauth/token"',
+                      FORWARDER_SRC.read_text())
+
     # REQ: CRED-5, CAP-11
     def test_launch_points_refresh_at_forwarder_and_runs_headless(self):
         launch = json.loads(LAUNCH.read_text())
         env = dict(e.split("=", 1) for e in launch["env"])
-        self.assertEqual(env["CODEX_REFRESH_TOKEN_URL_OVERRIDE"], FORWARDER + "/oauth/token")
+        # The refresh override is the forwarder's to set (C18), not the launch spec's.
+        self.assertNotIn("CODEX_REFRESH_TOKEN_URL_OVERRIDE", env)
         self.assertEqual(env["CODEX_HOME"], CODEX_HOME)
         # HOME is CODEX_HOME, not the workspace: git and other tools would read a workspace
         # .gitconfig or dotfile as the CLI's own configuration (#1451, C11).
@@ -267,6 +288,10 @@ class ManagedConfigTest(unittest.TestCase):
         # The CLI runs git in the workspace outside its tool sandbox; with GIT_DIR on /dev/null
         # no repository a tool wrote there (filters, hooks, fsmonitor) is ever read (C11).
         self.assertEqual(env["GIT_DIR"], "/dev/null")
+        # argv[0] is the bare `codex`: the forwarder finds it, and the CLI's tools their helpers,
+        # through env's own PATH, so a runner passing exactly env starts a working worker (C18).
+        self.assertEqual(env["PATH"], "/usr/local/bin:/usr/bin:/bin")
+        self.assertEqual(sorted(env), ["CODEX_HOME", "GIT_DIR", "HOME", "PATH"])
         self.assertEqual(launch["argv"],
                          ["codex", "exec", "--json", "--skip-git-repo-check", "--cd", WORK, "-"])
         self.assertEqual(launch["cwd"], WORK)
@@ -881,7 +906,10 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
                     break
             threading.Event().wait(0.05)
         env = dict(e.split("=", 1) for e in json.loads(LAUNCH.read_text())["env"])
-        env.update(PATH="/usr/local/bin:/usr/bin:/bin", AGENTOS_SYNTHETIC_CANARY=self.canary)
+        # PATH is launch.json's own; the override is what the forwarder adds when it starts the
+        # CLI (C18).
+        env.update(AGENTOS_SYNTHETIC_CANARY=self.canary,
+                   CODEX_REFRESH_TOKEN_URL_OVERRIDE=FORWARDER + "/oauth/token")
         argv = [
             BWRAP, "--dev-bind", "/", "/",
             "--tmpfs", "/run", "--bind", str(self.fwd_dir), "/run/agentos",

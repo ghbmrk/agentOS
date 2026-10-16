@@ -243,5 +243,34 @@ class LintTest(unittest.TestCase):
         self.assertEqual(doclint.lint(ROOT), [])
 
 
+class AssumptionsUnionMerge(unittest.TestCase):
+    """ASSUMPTIONS-MERGE: two PRs appending a row to one table merge locally; doclint flags a clash."""
+
+    def git(self, cwd, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                       cwd=cwd, check=True, capture_output=True)
+
+    def test_appended_rows_merge_and_duplicate_id_is_flagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / ".gitattributes").write_text((ROOT / ".gitattributes").read_text())
+            f = root / "ASSUMPTIONS.md"
+            f.write_text("| # | Assumption |\n|---|---|\n| U1 | a |\n")
+            self.git(d, "init", "-q", "-b", "main")
+            self.git(d, "add", "-A")
+            self.git(d, "commit", "-qm", "base")
+            self.git(d, "checkout", "-qb", "pr")
+            f.write_text(f.read_text() + "| U2 | from pr |\n")
+            self.git(d, "commit", "-qam", "pr")
+            self.git(d, "checkout", "-q", "main")
+            f.write_text(f.read_text() + "| U2 | from main |\n")
+            self.git(d, "commit", "-qam", "main")
+            self.git(d, "checkout", "-q", "pr")
+            self.git(d, "merge", "-q", "--no-edit", "main")
+            self.assertEqual(f.read_text().count("| U2 |"), 2)
+            self.assertEqual(list(doclint.assumption_ids(root, ["ASSUMPTIONS.md"])),
+                             ["ASSUMPTIONS.md:5: duplicate ID U2 (first on line 4)"])
+
+
 if __name__ == "__main__":
     unittest.main()

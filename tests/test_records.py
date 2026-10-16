@@ -100,6 +100,32 @@ class RecordsTest(unittest.TestCase):
             self.assertEqual(self.harvest([comment(body, assoc="NONE")]), ({}, []))
         self.assertEqual(self.harvest([comment("Thanks, merging now.")]), ({}, []))
 
+    def test_unmarked_comments_make_one_counted_line_not_one_per_hit(self):
+        # RECORDS-warn-noise (#1836)
+        body = "Verdict: accept\n\n# Security: PR #12 (PKG-1)\n"
+        out, skipped = self.harvest([comment(body, pr=12, cid=1), comment(body, pr=12, cid=2),
+                                     comment(body, pr=13, cid=3)], {12, 13})
+        self.assertEqual(out, {})
+        self.assertEqual(len(skipped), 1, skipped)
+        self.assertIn("2 merged PR(s)", skipped[0])
+        self.assertIn("#12, #13", skipped[0])
+
+    def test_unmarked_verdict_is_quiet_when_the_pr_has_a_marked_comment_or_a_record(self):
+        # RECORDS-warn-noise (#1836)
+        bare = comment("Verdict: accept\n", pr=12, cid=1)
+        self.assertEqual(self.harvest([bare, comment(cid=2)])[1], [])  # marked comment on the PR
+        (self.root / "reviews/potency/2026-10-14-pr13.md").write_text("x\n")
+        self.assertEqual(self.harvest([comment("Verdict: accept\n", pr=13)], {13}), ({}, []))  # a record
+
+    def test_verdict_line_matches_verdicts_not_ordinary_lines(self):
+        # RECORDS-warn-noise (#1836)
+        for yes in ("Verdict: accept", "# Verdict: reject", "Security review (tier A) at abcdef1: ACCEPT",
+                    "L3 Review of PR #5: CHANGES REQUESTED."):
+            self.assertTrue(records.verdict_like(yes), yes)
+        for no in ("Thanks, merging now.", "I will review this and ACCEPT it later if CI passes",
+                   "Please review the REJECT path in the parser", "Verdict pending", "Review: accepted"):
+            self.assertFalse(records.verdict_like(no), no)
+
     def test_unmarked_comment_is_ignored(self):
         self.assertEqual(self.harvest([comment(GOOD.replace("<!-- record: security -->", ""))]), ({}, []))
 
@@ -128,6 +154,37 @@ class RecordsTest(unittest.TestCase):
         out, _ = self.harvest([old, new])
         self.assertEqual(sorted(out), ["reviews/l3/2026-10-15-pr12.md", "reviews/potency/2026-10-15-pr12.md"])
         self.assertTrue(all("Verdict: accept" in t for t in out.values()))
+
+    def test_fetch_keeps_a_verdict_older_than_the_window_when_the_pr_merged_inside_it(self):
+        # RECORDS-lookback (#1838): the window bounds the merge, not the comment.
+        old = comment(at="2026-09-01T00:00:00Z", pr=12)
+        pulls = [{"number": 12, "updated_at": "2026-10-14T00:00:00Z", "merged_at": "2026-10-14T00:00:00Z"},
+                 {"number": 14, "updated_at": "2026-10-13T00:00:00Z", "merged_at": None},  # closed unmerged
+                 {"number": 15, "updated_at": "2026-10-01T00:00:00Z", "merged_at": "2026-10-01T00:00:00Z"}]
+
+        def api(repo, path, token):
+            if path.startswith("pulls?"):
+                return pulls
+            if path.startswith("issues/12/comments"):
+                return [old, comment("Thanks.", pr=12, cid=9)]
+            if path.startswith("pulls/12/files"):
+                return [{"filename": ".github/workflows/x.yml"}]
+            raise AssertionError(path)  # nothing else is fetched: 14 unmerged, 15 outside the window
+
+        saved, records._api = records._api, api
+        try:
+            comments, merged, routed = records.fetch("o/r", "2026-10-08T00:00:00Z", None)
+        finally:
+            records._api = saved
+        self.assertEqual((merged, [c["id"] for c in comments], routed), ({12}, [1], {"2026-10-14": 1}))
+        out, _ = self.harvest(comments, merged)
+        self.assertEqual(list(out), ["reviews/security/2026-09-01-pr12.md"])
+
+    def test_routed_line_reports_count_per_merge_day(self):
+        # RECORDS-lookback (#1838)
+        self.assertEqual(records.routed_line({"2026-10-14": 2, "2026-10-13": 1}, 9),
+                         "routed to Mark (of 9 merged): 3; per merge day: 2026-10-13 1, 2026-10-14 2")
+        self.assertIn("none", records.routed_line({}, 0))
 
 
 if __name__ == "__main__":

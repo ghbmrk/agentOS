@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -50,6 +51,109 @@ type PlanLogins struct {
 	mu sync.Mutex
 	// byWorker[provider][worker] is that worker's current placeholders.
 	byWorker map[string]map[string]*workerPH
+	// signedBy[provider][worker] is set when that worker's sign-in swap
+	// (ForSignIn) committed a login: the one record that this sign-in, and
+	// not an earlier one, stored the login (SignedInBy).
+	signedBy map[string]map[string]bool
+
+	// commitMu[provider] is held by a commit from its load to its Put
+	// (#1749), so no commit writes back a token set another one replaced.
+	commitMu map[string]*sync.Mutex
+
+	refreshFlights
+}
+
+// commitLock returns the provider's commit lock.
+func (p *PlanLogins) commitLock(provider string) *sync.Mutex {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.commitMu == nil {
+		p.commitMu = map[string]*sync.Mutex{}
+	}
+	m := p.commitMu[provider]
+	if m == nil {
+		m = &sync.Mutex{}
+		p.commitMu[provider] = m
+	}
+	return m
+}
+
+// refreshFlights runs at most one refresh exchange per provider at a time
+// (#1749). One plan login serves every worker of the box and its refresh
+// token is single-use, so a second exchange of the same token is refused
+// and stops the route for all of them. A refresh that arrives while one is
+// in flight joins it and gets the same answer; each worker then swaps that
+// answer for its own placeholders. The flight ends when the last worker
+// that joined it is done, so the next flight resolves the token they
+// committed and no commit of an older answer lands after a newer one.
+type refreshFlights struct {
+	fmu     sync.Mutex
+	flights map[string]*refreshFlight
+}
+
+type refreshFlight struct {
+	ready   chan struct{}
+	res     *Exchanged
+	err     error
+	joined  int // refreshes that joined the leader's exchange
+	members int // refreshes not yet done with this flight
+}
+
+// errFlightAbandoned answers a flight whose exchange ended without a result.
+var errFlightAbandoned = errors.New("refresh abandoned")
+
+// ShareRefresh runs exchange for provider, or joins the exchange already in
+// flight and waits for its answer. done must be called once the caller has
+// committed (or dropped) the answer; until every member is done, a new
+// refresh joins this flight rather than starting another.
+func (f *refreshFlights) ShareRefresh(ctx context.Context, provider string, exchange func() (*Exchanged, error)) (*Exchanged, func(), error) {
+	f.fmu.Lock()
+	if f.flights == nil {
+		f.flights = map[string]*refreshFlight{}
+	}
+	fl := f.flights[provider]
+	leader := fl == nil
+	if leader {
+		fl = &refreshFlight{ready: make(chan struct{}), err: errFlightAbandoned}
+		f.flights[provider] = fl
+	} else {
+		fl.joined++
+	}
+	fl.members++
+	f.fmu.Unlock()
+	var once sync.Once
+	done := func() {
+		once.Do(func() {
+			f.fmu.Lock()
+			defer f.fmu.Unlock()
+			if fl.members--; fl.members == 0 && f.flights[provider] == fl {
+				delete(f.flights, provider)
+			}
+		})
+	}
+	if leader {
+		func() {
+			defer close(fl.ready)
+			fl.res, fl.err = exchange()
+		}()
+		return fl.res, done, fl.err
+	}
+	select {
+	case <-fl.ready:
+		return fl.res, done, fl.err
+	case <-ctx.Done():
+		return nil, done, ctx.Err()
+	}
+}
+
+// joined reports how many refreshes joined provider's flight in progress.
+func (f *refreshFlights) joined(provider string) int {
+	f.fmu.Lock()
+	defer f.fmu.Unlock()
+	if fl := f.flights[provider]; fl != nil {
+		return fl.joined
+	}
+	return 0
 }
 
 type workerPH struct {
@@ -62,7 +166,7 @@ type workerPH struct {
 // ErrVaultLocked. revoke maps each provider to the place the owner revokes
 // the login (W9).
 func NewPlanLogins(open func() (LoginStore, error), revoke map[string]string) *PlanLogins {
-	return &PlanLogins{open: open, revoke: revoke, byWorker: map[string]map[string]*workerPH{}}
+	return &PlanLogins{open: open, revoke: revoke, byWorker: map[string]map[string]*workerPH{}, signedBy: map[string]map[string]bool{}}
 }
 
 func entryName(provider string) string { return "plan-login-" + provider }
@@ -84,6 +188,29 @@ func (p *PlanLogins) load(provider string) (map[string]string, LoginStore, error
 		return nil, st, errors.New("plan login unreadable")
 	}
 	return m, st, nil
+}
+
+// Signed reports whether provider's plan login is stored: the owner has
+// signed in. It never reads the login's values. ErrVaultLocked while the
+// vault is not open.
+func (p *PlanLogins) Signed(provider string) (bool, error) {
+	st, err := p.open()
+	if err != nil {
+		return false, err
+	}
+	_, ok := st.Secret(entryName(provider))
+	return ok, nil
+}
+
+// SignedInBy reports whether worker's own sign-in (ForSignIn) committed
+// provider's login to the vault. It is the sign-in's only success signal:
+// a login stored before it (an earlier, perhaps refused, one) does not
+// count, and neither does anything the worker says about itself. Forget
+// and Remove clear it.
+func (p *PlanLogins) SignedInBy(provider, worker string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.signedBy[provider][worker]
 }
 
 // ForWorker returns the Swapper for one worker's refresh responses. Its
@@ -176,21 +303,13 @@ func (s *workerSwapper) Swap(adapter string, creds map[string]string) (map[strin
 	if adapter != s.provider {
 		return nil, nil, errors.New("plan login: wrong adapter")
 	}
-	cur, st, err := p.load(s.provider)
+	cur, _, err := p.load(s.provider)
 	if err != nil && !errors.Is(err, ErrNoLogin) {
 		return nil, nil, err
 	}
-	next := map[string]string{}
-	for k, v := range cur {
-		next[k] = v
-	}
-	for _, k := range loginFields {
-		if v, ok := creds[k]; ok && v != "" {
-			next[k] = v
-		}
-	}
-	if next["access_token"] == "" || next["refresh_token"] == "" {
-		return nil, nil, errors.New("plan login: incomplete token set")
+	next, err := mergeLogin(cur, creds)
+	if err != nil {
+		return nil, nil, err
 	}
 	// Every response must name its account in an id_token: tokens with no
 	// account could belong to anyone, so none is ever assumed (fail closed).
@@ -204,8 +323,7 @@ func (s *workerSwapper) Swap(adapter string, creds map[string]string) (map[strin
 		return nil, nil, ErrNotRefresh
 	}
 	next["account_id"] = acct
-	val, err := json.Marshal(next)
-	if err != nil {
+	if _, err := json.Marshal(next); err != nil {
 		return nil, nil, err
 	}
 	// A worker keeps its placeholders across refreshes: each one stands for
@@ -225,7 +343,30 @@ func (s *workerSwapper) Swap(adapter string, creds map[string]string) (map[strin
 			out[k] = ph
 		}
 	}
+	// commit merges the answer into the login as it stands at commit time,
+	// under the provider's lock from that load to the Put (#1749): an
+	// answer that omits a field keeps the value another commit stored since
+	// this swap loaded, not the older one.
 	commit := func() error {
+		mu := p.commitLock(s.provider)
+		mu.Lock()
+		defer mu.Unlock()
+		cur, st, err := p.load(s.provider)
+		if err != nil && !errors.Is(err, ErrNoLogin) {
+			return err
+		}
+		if !s.signIn && acct != cur["account_id"] {
+			return ErrNotRefresh
+		}
+		next, err := mergeLogin(cur, creds)
+		if err != nil {
+			return err
+		}
+		next["account_id"] = acct
+		val, err := json.Marshal(next)
+		if err != nil {
+			return err
+		}
 		if err := st.Put(entryName(s.provider), LoginKind, val); err != nil {
 			return fmt.Errorf("plan login: vault write failed")
 		}
@@ -235,9 +376,33 @@ func (s *workerSwapper) Swap(adapter string, creds map[string]string) (map[strin
 			p.byWorker[s.provider] = map[string]*workerPH{}
 		}
 		p.byWorker[s.provider][s.worker] = w
+		if s.signIn {
+			if p.signedBy[s.provider] == nil {
+				p.signedBy[s.provider] = map[string]bool{}
+			}
+			p.signedBy[s.provider][s.worker] = true
+		}
 		return nil
 	}
 	return out, commit, nil
+}
+
+// mergeLogin lays an answer's credential fields over the stored login. The
+// result must hold an access and a refresh token.
+func mergeLogin(cur, creds map[string]string) (map[string]string, error) {
+	next := map[string]string{}
+	for k, v := range cur {
+		next[k] = v
+	}
+	for _, k := range loginFields {
+		if v, ok := creds[k]; ok && v != "" {
+			next[k] = v
+		}
+	}
+	if next["access_token"] == "" || next["refresh_token"] == "" {
+		return nil, errors.New("plan login: incomplete token set")
+	}
+	return next, nil
 }
 
 // AuthJSON returns the placeholder auth file for a worker, minting that
@@ -316,6 +481,9 @@ func (p *PlanLogins) Forget(worker string) {
 	for _, m := range p.byWorker {
 		delete(m, worker)
 	}
+	for _, m := range p.signedBy {
+		delete(m, worker)
+	}
 }
 
 // Remove deletes the plan's vault entry and every placeholder, and returns
@@ -334,6 +502,7 @@ func (p *PlanLogins) Remove(provider string) (string, error) {
 	}
 	p.mu.Lock()
 	delete(p.byWorker, provider)
+	delete(p.signedBy, provider)
 	p.mu.Unlock()
 	return where, nil
 }

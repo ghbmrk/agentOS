@@ -72,6 +72,21 @@ class PremergeTest(unittest.TestCase):
         self.merge_main_after(lambda: self.write("a.txt", self.read("a.txt").replace("line 4\n", "line 4 main\n")))
         self.assertEqual(self.check(reviewed), [])
 
+    def test_assumptions_renumbering_only_is_same_but_text_edit_is_changed(self):
+        rows = "| N1 | first | basis |\n| N2 | second | basis |\n"
+        git(self.r, "checkout", "-q", "main")
+        self.write("ASSUMPTIONS.md", "| # | A |\n|---|---|\n" + rows)
+        self.commit("assumptions")
+        reviewed = self.pr()
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md") + "| N3 | mine | basis |\n")
+        reviewed = self.commit("pr row")
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("| N3 |", "| N4 |"))
+        self.commit("renumbered")
+        self.assertEqual(self.check(reviewed), [])
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("mine", "changed"))
+        self.commit("text edit")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
     def test_main_merged_in_then_a_pr_line_changed_is_changed(self):
         reviewed = self.pr()
         self.merge_main_after(lambda: self.write("a.txt", self.read("a.txt").replace("line 4\n", "line 4 main\n")))
@@ -178,6 +193,13 @@ class PremergeTest(unittest.TestCase):
         for f in (".mcp.json", "AGENTS.md", "CLAUDE.local.md", "broker/CLAUDE.md", "a/b/CLAUDE.local.md",
                   "broker/core/core.txt"):
             self.assertEqual(premerge.mark_paths([f]), [f], f)
+        # PREMERGE-paths (#1835): nested config, the tests that pin merge gates, and newline-bearing paths.
+        for f in ("sub/AGENTS.md", "sub/.mcp.json", "sub/.claude/settings.json", "a/b/.claude/x", "tests/test_premerge.py",
+                  "tests/test_risk_tier.py", "tests/test_risk_tier_custody.py", "tests/test_workflows.py",
+                  "tests/test_ci_scope.py", "tests/test_g1_scope.py", "x\n/.claude/y", ".github/a\nb", "tools/premerge.py"):
+            self.assertEqual(premerge.mark_paths([f]), [f], repr(f))
+        for f in ("CLAUDE.md\n", "tools/premerge.py\n", "tests/test_records.py", "x/.claudex/y"):
+            self.assertEqual(premerge.mark_paths([f]), [], repr(f))
         for f in ("broker/core/core.go", "docs/AGENTS.md.bak", "XCLAUDE.md", "a/CLAUDE.md/x.go", "x.mcp.json"):
             self.assertEqual(premerge.mark_paths([f]), [], f)
 
@@ -204,6 +226,34 @@ class PremergeTest(unittest.TestCase):
             r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), *argv],
                                cwd=self.r, capture_output=True, text=True)
             self.assertEqual((r.returncode, r.stdout.split()), (1, ["mark", "sub/CLAUDE.md"]), argv)
+
+    def test_check_gate(self):
+        import json
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("b.txt", "x\n")
+        sha = self.commit("code")
+        c = lambda verdict, sha, at, who="OWNER", pr=7, mark="<!-- record: l3 -->": {
+            "author_association": who, "created_at": at,
+            "body": f"Verdict: {verdict}\n# t\nRecord: PR #{pr} · package X-1 · head {sha[:7]}\n{mark}\n"}
+        def run(comments, head="HEAD"):
+            f = pathlib.Path(self._d.name + ".comments.json")
+            self.addCleanup(lambda: f.unlink(missing_ok=True))
+            f.write_text(json.dumps(comments))
+            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--base", "main", head],
+                               cwd=self.r, capture_output=True, text=True)
+            return r.returncode, r.stdout.split()
+        self.assertEqual(run([c("accept", sha, "1")]), (0, ["same"]))
+        self.assertEqual(run([]), (1, ["no-verdict"]))
+        # untrusted author, other PR, no L3 marker: none counts
+        for bad in (c("accept", sha, "1", who="NONE"), c("accept", sha, "1", pr=8), c("accept", sha, "1", mark="")):
+            self.assertEqual(run([bad]), (1, ["no-verdict"]))
+        # a later fix-list supersedes the accept
+        self.assertEqual(run([c("accept", sha, "1"), c("fix-list", sha, "2")]), (1, ["not-accepted"]))
+        # a push after the accept reads as changed; a delta accept at the new head clears it
+        self.write("b.txt", "y\n")
+        new = self.commit("later")
+        self.assertEqual(run([c("accept", sha, "1")]), (1, ["changed", "b.txt"]))
+        self.assertEqual(run([c("accept", sha, "1"), c("accept", new, "2")]), (0, ["same"]))
 
 
 if __name__ == "__main__":

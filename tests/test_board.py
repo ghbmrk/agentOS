@@ -194,6 +194,72 @@ class PullRequestTest(unittest.TestCase):
         ])
 
 
+class StaleLabelTest(unittest.TestCase):
+    """REQ: STALE-1-1, STALE-1-2, STALE-1-3"""
+
+    PRS = [{"number": 22, "title": "W-3: fix", "state": "closed", "merged_at": "2026-10-10T00:00:00Z"},
+           {"number": 23, "title": "A-3: spec", "state": "closed", "merged_at": "2026-10-11T00:00:00Z"},
+           {"number": 24, "title": "A-3: follow-up", "state": "open", "merged_at": None},
+           {"number": 25, "title": "A-1: abandoned", "state": "closed", "merged_at": None}]
+
+    def run_stale(self, *args, comments=(), prs=None):
+        posted = []
+
+        def fetch(path, method="GET", payload=None):
+            if method == "POST":
+                posted.append((path, payload["body"]))
+                return {}
+            if path.endswith("/comments"):
+                return list(comments)
+            if path.startswith("/repos/o/r/issues"):
+                return opened(issues())
+            if path.startswith("/repos/o/r/pulls"):
+                want = path.partition("state=")[2]
+                every = list(self.PRS if prs is None else prs)
+                return [p for p in every if want == "all" or p["state"] == want]
+            raise AssertionError(path)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["stale", "--repo", "o/r", *args], read=lambda: BOARD, fetch=fetch)
+        return code, out.getvalue(), posted
+
+    def test_a_merged_pr_on_an_open_row_is_flagged(self):
+        found = board.stale(issues(), self.PRS)
+        # W-3 (escalated) is flagged; A-3 is not, because another A-3 PR is still open; A-1's PR never merged.
+        self.assertEqual([(i["title"][:3], p["number"]) for i, p in found], [("W-3", 22)])
+
+    def test_newest_merged_pr_is_named(self):
+        prs = [{"number": 31, "title": "W-3: new", "state": "closed", "merged_at": "2026-10-12T00:00:00Z"},
+               {"number": 22, "title": "W-3: old", "state": "closed", "merged_at": "2026-10-10T00:00:00Z"}]
+        self.assertEqual([p["number"] for _, p in board.stale(issues(), prs)], [31])
+
+    def test_flagging_changes_nothing_and_exits_zero(self):
+        code, out, posted = self.run_stale()
+        self.assertEqual((code, posted), (0, []))
+        self.assertIn("W-3 (#", out)
+        self.assertIn("state escalated but PR #22 merged", out)
+
+    def test_comment_is_posted_once_per_issue_and_pr(self):
+        code, _, posted = self.run_stale("--comment")
+        self.assertEqual((code, len(posted)), (0, 1))
+        path, body = posted[0]
+        self.assertTrue(path.endswith("/comments"))
+        self.assertIn(board.STALE_MARK.format(22), body)
+        self.assertIn("state:merged", body)
+        again = self.run_stale("--comment", comments=[{"body": body}])
+        self.assertEqual(again[2], [])
+        # A later merged PR on the same row is a new fact and is flagged again.
+        later = self.PRS + [{"number": 30, "title": "W-3: more", "state": "closed", "merged_at": "2026-10-12T00:00:00Z"}]
+        self.assertEqual(len(self.run_stale("--comment", comments=[{"body": body}], prs=later)[2]), 1)
+
+    def test_workflow_comments_with_the_issue_token_only(self):
+        wf = (ROOT / ".github" / "workflows" / "stale-labels.yml").read_text()
+        self.assertIn("board.py stale --repo", wf)
+        self.assertIn("issues: write", wf)
+        self.assertNotIn("contents: write", wf)
+        self.assertNotIn("pull_request_target", wf)
+
+
 class IntakeProblemsTest(unittest.TestCase):
     """CX-BOARD-INTAKE: one run names every malformed work-item issue, and still writes nothing."""
 

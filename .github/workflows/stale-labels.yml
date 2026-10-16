@@ -1,0 +1,32 @@
+name: stale-labels
+# STALE-1: a work item whose PR merged while its state label still says queued, building,
+# in review or escalated gets one comment naming the merged PR. It flags only: nothing is
+# relabelled or closed. Runs main's code with the issue-scoped token and no write to contents.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: stale-labels
+  cancel-in-progress: false
+jobs:
+  flag:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # comment on a flagged work item
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Comment on work items whose PR merged
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/board.py stale --repo "$GITHUB_REPOSITORY" --comment

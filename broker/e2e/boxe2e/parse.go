@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base32"
 	"errors"
 	"fmt"
@@ -110,4 +111,27 @@ func heading(page []byte) string {
 		s = s[:60]
 	}
 	return strconv.Quote(s)
+}
+
+// aiOpen is the line the Connect AI step shows once it lists providers;
+// before the box has updated it shows only a wait message.
+const aiOpen = "One is enough. You can add more later."
+
+// deviceOffer reports whether the Connect AI step offers a device-code
+// sign-in for provider.
+func deviceOffer(page []byte, provider string) bool {
+	return bytes.Contains(page, []byte(`<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="`+
+		html.EscapeString(provider)+`">`))
+}
+
+var deviceRe = regexp.MustCompile(`<p>Open <a href="([^"]*)">[^<]*</a> and enter <span class="mono">([^<]*)</span>\.</p>`)
+
+// deviceLink reads the provider's sign-in link and the code to enter there
+// from the Connect AI step, after the owner chose to sign in.
+func deviceLink(page []byte) (link, code string, ok bool) {
+	m := deviceRe.FindSubmatch(page)
+	if m == nil {
+		return "", "", false
+	}
+	return html.UnescapeString(string(m[1])), html.UnescapeString(string(m[2])), true
 }

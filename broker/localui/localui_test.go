@@ -77,6 +77,9 @@ type fakeHooks struct {
 	// the vault hears it and cleared once it records it; Finish refuses
 	// while any is owed.
 	owed map[string]bool
+	// down is agentosd's socket down: SetPrivateOK fails before agentosd
+	// hears the answer, so nothing is owed either (ONB-private-save-fail s3).
+	down bool
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
@@ -175,6 +178,9 @@ func (f *fakeHooks) SetPrivateOK(id string, ok bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.privates++
+	if f.down {
+		return errors.New("localui.sock: connection refused")
+	}
 	if f.owed == nil {
 		f.owed = map[string]bool{}
 	}
@@ -203,19 +209,19 @@ func (f *fakeHooks) ConnectAPIKey(id, key string) error {
 	f.connected = true
 	return nil
 }
-func (f *fakeHooks) StartDeviceCode(id string) (string, string, error) {
+func (f *fakeHooks) StartDeviceCode(id string) (string, string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.deviceErr != nil {
-		return "", "", f.deviceErr
+		return "", "", "", f.deviceErr
 	}
 	if f.device {
 		f.connected = true // the owner finishes on the provider's site
 	}
 	if f.deviceLink != "" {
-		return f.deviceLink, "WXYZ-1234", nil
+		return f.deviceLink, "WXYZ-1234", "Example", nil
 	}
-	return "https://example.invalid/device", "WXYZ-1234", nil
+	return "https://example.invalid/device", "WXYZ-1234", "Example", nil
 }
 func (f *fakeHooks) Finish(n string) error {
 	f.mu.Lock()
