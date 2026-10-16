@@ -74,17 +74,23 @@ jobs:
     if: needs.render.outputs.rendered == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # BOT_PR_TOKEN lives in this environment, whose deployment-branch policy admits main
+    # only, so branch workflows cannot read it (decision #1769).
+    environment: bot
     permissions:
       contents: write # push the bot/board branch (never main)
       pull-requests: write # open, auto-merge or close its PR
       actions: write # dispatch ci.yml on the branch
     env:
-      GH_TOKEN: ${{ github.token }}
+      # BOT_PR_TOKEN (optional; decision #1769): a token whose pushes start
+      # pull_request workflows normally. Without it the job uses GITHUB_TOKEN as before.
+      GH_TOKEN: ${{ secrets.BOT_PR_TOKEN || github.token }}
       BRANCH: bot/board
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           ref: main
+          token: ${{ secrets.BOT_PR_TOKEN || github.token }}
       # Outside the checkout, so the artifact can place nothing but the copied BOARD.md in it.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
