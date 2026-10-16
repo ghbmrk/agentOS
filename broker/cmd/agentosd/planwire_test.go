@@ -125,7 +125,7 @@ func TestPlanSignInLineFollowsTheRunner(t *testing.T) {
 	if !errors.As(err, &ref) || ref.Reason != provagent.Unsigned {
 		t.Fatalf("= %v, want unsigned", err)
 	}
-	if note.Note() != planSignInLine {
+	if note.Note() != planOnlyLine {
 		t.Fatalf("line %q", note.Note())
 	}
 	r.SignedIn("codex")
