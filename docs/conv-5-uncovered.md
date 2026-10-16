@@ -31,7 +31,6 @@ Classes: **buildable now** (cloud-buildable; dependencies are in Needs), **stand
 | OSS-12 | environment-blocked | Mark chose Apache-2.0 on 2026-10-12 (D-041); LICENSE and NOTICE landed with it. Upstream-notice preservation is checkable now. | D-041 |
 | RES-5 | buildable now | Pool tracker and reserve admission against S8 stub CLIs. | RES-5a |
 | UPD-7 | buildable now | Soak plus attestations, no project-run rollout. Likely already exercised by M6's tests in `broker/maintain`; first step is to add the `REQ: UPD-7` marker, then fill any gap. | UPD-7t |
-| CRED-2t | CRED-2 | `tests/test_cred2_trusted_base.py`: SPEC.md's CRED-2 text names the trusted base (host kernel, hypervisor, firmware, broker, credentialed-executor sandboxes, credential-reading processes) and states that scanning is a tripwire and no containment of a compromised credential reader is claimed (D-082). | The sentence is dropped or weakened to a containment claim: the test fails and names the line. | C | none |
 | UPD-9 | buildable now | Held security fix put to the owner. Wiring (`maintain.Loop3`) is W5b's; the D3 and O2 registrations are OP9-status-b's, or W5b's if -b has not (briefs/OP9-status.md, line "Update checks (C11)", IDs OP-9, UPD-9). | W5b (existing) |
 
 Counts: buildable now 11, stand-in 7, environment-blocked 4, hardware-blocked 2, spec-blocked 0 (24).
@@ -53,6 +52,7 @@ Each row's acceptance test and failure path, for its brief. A row does not start
 | ADP-15a | ADP-15 | One composited screenshot over two fixture executors; each action reaches exactly one executor; per-window withholding applied. | A window id outside the agent's set is refused; cross-account data moves only through CRED-11. | A | CRED-11a, ADP-5 (lane claude2) |
 | ADP-16a | ADP-16 | Suite of fixture apps of one account shares an executor; an app of another account is refused; turning it on is a new-grant intent. | An app without a saved-login condition is excluded, not started. | A | ADP-5 (lane claude2) |
 | UPD-7t | UPD-7 | Stable proposes a release only after soak and at least `MinPasses` early-channel attestations; no code path reads a project-run rollout setting. | Too few attestations: the release stays unproposed and the digest says why. | C | none (broker/maintain M6) |
+| CRED-2t | CRED-2 | `tests/test_cred2_trusted_base.py`: SPEC.md's CRED-2 text names the trusted base (host kernel, hypervisor, firmware, broker, credentialed-executor sandboxes, credential-reading processes) and states that scanning is a tripwire and no containment of a compromised credential reader is claimed (D-082). | The sentence is dropped or weakened to a containment claim: the test fails and names the line. | C | none |
 
 ## Findings
 
