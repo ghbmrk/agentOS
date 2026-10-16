@@ -666,6 +666,73 @@ func TestWorkerRouteQuotaReadings(t *testing.T) {
 	}
 }
 
+// REQ: OP-8, CAP-11, RES-5
+// W8's safe branch (#1954): whether a call past a reached limit draws
+// purchased credits is unmeasured (#809), so once a reading on this route
+// is used up, its later model calls are refused at the broker, marked as
+// its refusal, and never reach the provider. The run then ends used up on
+// the reading (provagent after).
+func TestWorkerRouteStopsAtFirstExhaustedReading(t *testing.T) {
+	for name, set := range map[string]func(h http.Header, call int){
+		"reached limit": func(h http.Header, _ int) { h.Set("X-Codex-Rate-Limit-Reached-Type", "primary") },
+		"pool at 100%":  func(h http.Header, _ int) { h.Set("X-Codex-Secondary-Used-Percent", "100") },
+		"balance drop": func(h http.Header, call int) {
+			h.Set("X-Codex-Primary-Used-Percent", "10")
+			h.Set("X-Codex-Credits-Balance", []string{"80", "79.5"}[min(call, 1)])
+		},
+	} {
+		for _, quota := range []bool{true, false} {
+			r := newWorkerRig(t, false)
+			if !quota {
+				// No usage sink is no reason to keep spending.
+				h, err := NewWorkerRoute(WorkerRouteConfig{Route: Codex(), Worker: "w1", Logins: r.logins, Transport: r.up, Audit: r.audit})
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.h = h
+			}
+			r.up.reply = func(w http.ResponseWriter, _ *http.Request) {
+				set(w.Header(), r.up.count()-1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				io.WriteString(w, "data: {}\n\n")
+			}
+			calls := 1
+			if name == "balance drop" {
+				calls = 2 // the first reading only records the balance
+			}
+			for i := 0; i < calls; i++ {
+				if w := r.do(responses(codexBody(clientTools))); w.Code != http.StatusOK {
+					t.Fatalf("%s: call %d answered %d", name, i, w.Code)
+				}
+			}
+			w := r.do(responses(codexBody(clientTools)))
+			if w.Code != http.StatusTooManyRequests || w.Header().Get(DeniedHeader) != "1" {
+				t.Fatalf("%s (quota sink %v): a call after a used-up reading answered %d, denied %q", name, quota, w.Code, w.Header().Get(DeniedHeader))
+			}
+			if n := r.up.count(); n != calls {
+				t.Fatalf("%s (quota sink %v): %d calls reached the provider, want %d", name, quota, n, calls)
+			}
+			if ev := r.audit.last(t); ev.Allowed || ev.Reason != ReasonPlanUsedUp {
+				t.Fatalf("%s: journaled %+v", name, ev)
+			}
+		}
+	}
+
+	// A reading with room left stops nothing.
+	r := newWorkerRig(t, false)
+	r.up.reply = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Codex-Primary-Used-Percent", "99")
+		w.Header().Set("X-Codex-Credits-Has-Credits", "true")
+		w.Header().Set("X-Codex-Credits-Balance", "80")
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
+	for i := 0; i < 3; i++ {
+		if w := r.do(responses(codexBody(clientTools))); w.Code != http.StatusOK {
+			t.Fatalf("call %d with room left answered %d", i, w.Code)
+		}
+	}
+}
+
 func exhausted(qs []QuotaReading) bool {
 	for _, q := range qs {
 		if q.Exhausted {
