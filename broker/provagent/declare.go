@@ -248,19 +248,19 @@ func Builtins() map[string]Declaration {
 			SignInLinks: []string{"http://127.0.0.1:18432/codex/device", "https://auth.openai.com/codex/device"},
 			SignInPage:  "https://auth.openai.com/codex/device",
 			SignInFrom:  "OpenAI",
-			// Verdict is D-117's terms read (#1377). #809 fills the rest, and
-			// the gate stays closed until every field is set:
-			//   CLIVersion: the version measured, equal to Version and to
-			//     guest/codex/build-rootfs.sh CODEX_VERSION (test-checked).
-			//   Evidence: the repo path of the W1-W5 record from a live run on
-			//     a real ChatGPT plan (hosted tools, credits after the limit,
-			//     sign-in through the forwarder) under the owner's permission
-			//     rule; the file must exist (test-checked).
-			//   TermsURL, TermsRead: the terms page and date read; D-117 cites
-			//     openai.com/policies/terms-of-use, retrieved 2026-10-13.
-			//     Filling the URL also adds its host to e2e dep2_test.go.
-			// None is guessed here: the live run needs Mark's plan (#809).
-			Q: Qualification{Verdict: Allowed},
+			// The record is #809's: CLIVersion equals Version and
+			// guest/codex/build-rootfs.sh CODEX_VERSION, and Evidence must
+			// exist (both test-checked). The evidence is a supervised live run
+			// on the owner's ChatGPT plan; it shows the limit-reached state
+			// with credits available, not a credit draw, so none is claimed.
+			// Verdict and the terms read are D-117's (#1377).
+			Q: Qualification{
+				CLIVersion: "0.162.1",
+				Evidence:   "spikes/S8-live/RESULTS.md",
+				TermsURL:   "https://openai.com/policies/terms-of-use",
+				TermsRead:  "2026-10-13",
+				Verdict:    Allowed,
+			},
 		},
 		"claude": {
 			ID: "claude", CLI: "claude", Version: "0", Image: "claude",
