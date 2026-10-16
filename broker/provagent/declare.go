@@ -126,9 +126,12 @@ type Declaration struct {
 	// The CLI prints its verification link and code: only a link in
 	// SignInLinks is read, and SignInPage, the provider's own page, is what
 	// the owner is shown (egress PlanRoute.SignInLink checks the same).
+	// SignInFrom names who issues the code, for the page's "This code is
+	// from <provider>" line (SPEC §8.1 step 6).
 	SignInArgv  []string
 	SignInLinks []string
 	SignInPage  string
+	SignInFrom  string
 
 	Q Qualification
 }
@@ -181,8 +184,8 @@ func (d Declaration) Validate() error {
 		}
 	}
 	if len(d.SignInArgv) > 0 {
-		if d.Custody != BrokerHeld || len(d.SignInLinks) == 0 || !strings.HasPrefix(d.SignInPage, "https://") || !contains(d.SignInLinks, d.SignInPage) {
-			return fmt.Errorf("declaration %s: a sign-in needs broker custody, its links and its https page", d.ID)
+		if d.Custody != BrokerHeld || len(d.SignInLinks) == 0 || !strings.HasPrefix(d.SignInPage, "https://") || !contains(d.SignInLinks, d.SignInPage) || d.SignInFrom == "" {
+			return fmt.Errorf("declaration %s: a sign-in needs broker custody, its links, its https page and its issuer", d.ID)
 		}
 	}
 	var all []string
@@ -239,6 +242,7 @@ func Builtins() map[string]Declaration {
 			SignInArgv:  []string{"codex", "login", "--device-auth"},
 			SignInLinks: []string{"http://127.0.0.1:18432/codex/device", "https://auth.openai.com/codex/device"},
 			SignInPage:  "https://auth.openai.com/codex/device",
+			SignInFrom:  "OpenAI",
 			// Allowed by the terms read (#1377, D-117); #809 fills the rest.
 			Q: Qualification{Verdict: Allowed},
 		},

@@ -10,7 +10,9 @@
 // Setup runs through agentosd (P2-2w c4; Security L6): the page asks
 // localui.sock's setup ops, which agentosd serves only until setup's
 // finish, and keeps setup's state in memory only (L18), so a restart of
-// the page starts the steps over.
+// the page starts the steps over. The one exception is a private-content
+// answer agentosd did not record: its hold is kept on disk (-held), so a
+// reboot cannot finish setup on an earlier answer.
 //
 // With the vault process's unlock socket, a box whose setup is open runs
 // firstboot.Begin here (#1115): the claim gate of a preloaded box, the
@@ -53,11 +55,12 @@ import (
 const memoryLimit = 384 << 20
 
 func main() {
-	var sock, vaultSock, iface, addr string
+	var sock, vaultSock, held, iface, addr string
 	var fb boxFiles
 	var port int
 	flag.StringVar(&sock, "sock", "/run/agentos/localui.sock", "agentosd's localui.sock (agentosd -localui-uid)")
 	flag.StringVar(&vaultSock, "vault-sock", "", "the vault process's unlock socket, for the unknown-host unlock page; empty: not served")
+	flag.StringVar(&held, "held", "/var/lib/agentos-localui/unsaved.json", "setup's private-content answers agentosd has not recorded, kept across a reboot (localui.HeldStore)")
 	flag.StringVar(&fb.Claim, "claim-state", claim.StatePath, "a preloaded box's claim state, as its seller sealed it (HW-10)")
 	flag.StringVar(&fb.Latch, "card-latch", "/var/lib/agentos/card-latch.json", "the Owner Card step's latch (HW-1)")
 	flag.BoolVar(&fb.Download, "download-box", false, "the download's image, which ships no claim state; unset, a box without one is told to reinstall (#1270)")
@@ -74,7 +77,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	fb.VaultSock = vaultSock
-	cfg := config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock)
+	cfg := config(localui.APConfig{Iface: iface, Addr: ap}, port, sock, vaultSock, held)
 	cfg.Station = station(sysClassNet, iface)
 	if err := run(ctx, cfg, sock, fb); err != nil {
 		log.Fatal(err)
@@ -82,13 +85,15 @@ func main() {
 }
 
 // config is the page's configuration: setup through agentosd's socket
-// with an in-memory store (P2-2w c4), and no setup secret (Security L6).
+// with an in-memory store (P2-2w c4) but for its unsaved private-content
+// answers, which the file at held keeps across a reboot
+// (ONB-private-save-fail s3), and no setup secret (Security L6).
 // The vault process's unlock socket serves both the unlock page and the
 // Owner Card rotation (REC-4), the AI providers page and setup's host
 // step (P2-2w c4d); ARC-2 keeps the card's display here, not in agentosd.
-func config(ap localui.APConfig, port int, sock, vaultSock string) localui.Config {
+func config(ap localui.APConfig, port int, sock, vaultSock, held string) localui.Config {
 	hooks := localui.AgentosdSetup{Owner: localui.Socket{Path: sock}}
-	cfg := localui.Config{AP: ap, Port: port, Store: &localui.MemStore{}}
+	cfg := localui.Config{AP: ap, Port: port, Store: localui.HeldStore{Inner: &localui.MemStore{}, Path: held}}
 	if vaultSock != "" {
 		client := localui.NewUnlockClient(vaultSock)
 		cfg.Vault = client
