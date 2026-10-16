@@ -379,6 +379,14 @@ func (l *Link) TimedOut() int {
 	return l.timedOut
 }
 
+// Queued counts texts waiting for the bridge to take them from the
+// outbox; one it took and has no result for is not among them.
+func (l *Link) Queued() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.queue)
+}
+
 // Others counts texts on the owner line from anyone but the owner, set
 // aside unread: the owner channel acts only on the owner's.
 func (l *Link) Others() int {

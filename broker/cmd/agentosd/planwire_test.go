@@ -81,7 +81,7 @@ func TestPlanStateWiresGrantAndPrivateMark(t *testing.T) {
 		{"unreadable", http.StatusOK, `not json`, false, false},
 		{"refused", http.StatusInternalServerError, "boom", false, false},
 	} {
-		r := providerRunner(nil, planServer(t, c.status, c.body, http.StatusOK, "{}"), &planNote{})
+		r := providerRunner(nil, planServer(t, c.status, c.body, http.StatusOK, "{}"), &planNote{}, nil)
 		if got := r.Granted("codex"); got != c.granted {
 			t.Errorf("%s: Granted = %v", c.name, got)
 		}
@@ -96,7 +96,7 @@ func TestPlanStateWiresGrantAndPrivateMark(t *testing.T) {
 			t.Errorf("%s: SignInFor is unwired", c.name)
 		}
 	}
-	if r := providerRunner(nil, nil, nil); r.Granted("codex") || r.PrivateOK("codex") || r.SignInStored != nil || r.SignInFor != nil || r.SignIn != nil {
+	if r := providerRunner(nil, nil, nil, nil); r.Granted("codex") || r.PrivateOK("codex") || r.SignInStored != nil || r.SignInFor != nil || r.SignIn != nil {
 		t.Fatal("a runner without route control opened an owner-side input")
 	}
 }
@@ -105,7 +105,7 @@ func TestPlanStateWiresGrantAndPrivateMark(t *testing.T) {
 // the owner's sign-in clears it.
 func TestPlanSignInLineFollowsTheRunner(t *testing.T) {
 	note := &planNote{}
-	r := providerRunner(nil, planServer(t, http.StatusOK, `{"granted":true}`, http.StatusInternalServerError, "no plan login stored"), note)
+	r := providerRunner(nil, planServer(t, http.StatusOK, `{"granted":true}`, http.StatusInternalServerError, "no plan login stored"), note, nil)
 	d := r.Decls["codex"]
 	d.Q = provagent.Qualification{CLIVersion: "1", Evidence: "e", TermsURL: "https://t.test", TermsRead: "2026-10-01", Verdict: provagent.Allowed}
 	r.Decls["codex"] = d
@@ -152,7 +152,7 @@ func TestPlanSignInStoredIsThatWorkersCommit(t *testing.T) {
 		a := answers[m]
 		return a.status, a.body
 	})
-	r := providerRunner(nil, rc, &planNote{})
+	r := providerRunner(nil, rc, &planNote{}, nil)
 	for id := range answers {
 		if got := r.SignInStored(id); got != (id == "pw-new") {
 			t.Errorf("%s: SignInStored = %v", id, got)
