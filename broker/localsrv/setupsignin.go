@@ -69,11 +69,18 @@ func (s *Setup) deviceCode(ctx context.Context, _ sockets.Peer, args json.RawMes
 	if err != nil {
 		return nil, errFailed
 	}
-	if u, perr := url.Parse(link); perr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
-		len(link) > 256 || u.String() != link || !deviceCodeShaped.MatchString(code) || !fromShaped.MatchString(from) {
+	if !issued(link, code, from) {
 		return nil, errFailed
 	}
 	return localapi.DeviceCode{Link: link, Code: code, From: from}, nil
+}
+
+// issued reports whether link, code and from are shaped as a provider
+// issues them: the page shows nothing else.
+func issued(link, code, from string) bool {
+	u, err := url.Parse(link)
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil &&
+		len(link) <= 256 && u.String() == link && deviceCodeShaped.MatchString(code) && fromShaped.MatchString(from)
 }
 
 func signsIn(ps []localapi.SetupProvider, id string) bool {

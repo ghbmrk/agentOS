@@ -251,6 +251,14 @@ form { margin: .6em 0 1.2em; }
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 <button>Use the SIM ending in {{.SIMEnds}} for my number</button></form></section>
 {{else}}{{with .Err}}<p class="err">{{.}}</p>{{end}}{{end}}
+{{if .Plan.Link}}<section class="card"><p>Open <a href="{{.Plan.Link}}">{{.Plan.Link}}</a> and enter <span class="mono">{{.Plan.Code}}</span>.</p><p>This code is from {{.Plan.From}}, not from your code generator.</p><p><a href="/home">I signed in</a></p></section>
+{{else if .PlanReady}}<section class="card"><form method="post" action="/plan/signin">
+<p>Sign in to your ChatGPT plan again. Whoever approves the next step becomes the plan's sign-in, so do it on your own phone.</p>
+<label>Code from your code generator{{with .Cell}}, or grid cell <b>{{.}}</b> from your card{{end}}
+<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+{{with .PlanErr}}<p class="err">{{.}}</p>{{end}}
+<button>Sign in to ChatGPT</button></form></section>
+{{else}}{{with .PlanErr}}<p class="err">{{.}}</p>{{end}}{{end}}
 {{with .LineTexts}}<h2>Texts with you</h2><ul>{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
 <ul>{{range .Mounts}}<li><a href="{{.Path}}">{{.Title}}</a></li>{{else}}<li class="muted">Nothing else to show here yet.</li>{{end}}</ul>
 <p><a href="/status">Status, STOP and RESUME</a></p>
