@@ -26,6 +26,7 @@ type fakeProviders struct {
 	// returns is the answer, and nothing is recorded.
 	setHook func(provider string, ok bool) error
 	owedLie bool // Providers claims every provider is owed a yes
+	plan    bool // Providers also lists "codex", signed in by device code
 }
 
 func (f *fakeProviders) Providers() ([]localapi.SetupProvider, error) {
@@ -41,6 +42,9 @@ func (f *fakeProviders) Providers() ([]localapi.SetupProvider, error) {
 			p.Owed = &yes
 		}
 		out = append(out, p)
+	}
+	if f.plan {
+		out = append(out, localapi.SetupProvider{ID: "codex", Name: "ChatGPT plan", DeviceCode: true, Connected: f.keys["codex"] != "", PrivateOK: f.private["codex"]})
 	}
 	return out, nil
 }

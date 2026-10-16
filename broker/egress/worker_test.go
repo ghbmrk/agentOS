@@ -144,6 +144,7 @@ type rig1014 struct {
 	up     *planUpstream
 	audit  *auditLog
 	quota  []QuotaReading
+	signal []PlanSignal
 	use    []PlanUse
 	h      http.Handler
 }
@@ -154,8 +155,9 @@ func newWorkerRig(t *testing.T, signIn bool) *rig1014 {
 	h, err := NewWorkerRoute(WorkerRouteConfig{
 		Route: Codex(), Worker: "w1", SignIn: signIn, Logins: r.logins,
 		Transport: r.up, Audit: r.audit,
-		Quota: func(q QuotaReading) { r.quota = append(r.quota, q) },
-		Meter: func(u PlanUse) { r.use = append(r.use, u) },
+		Quota:  func(q QuotaReading) { r.quota = append(r.quota, q) },
+		Signal: func(s PlanSignal) { r.signal = append(r.signal, s) },
+		Meter:  func(u PlanUse) { r.use = append(r.use, u) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -625,21 +627,52 @@ func TestWorkerRouteQuotaReadings(t *testing.T) {
 		t.Fatalf("secondary %+v", s)
 	}
 
-	for _, sig := range []string{"X-Codex-Credits-Has-Credits", "X-Codex-Rate-Limit-Reached-Type"} {
+	// A reached limit reads as used up.
+	{
 		r := newWorkerRig(t, false)
 		r.up.reply = func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set(sig, "false")
+			w.Header().Set("X-Codex-Rate-Limit-Reached-Type", "primary")
 			w.Header().Set("Content-Type", "text/event-stream")
 		}
 		r.do(responses(codexBody(clientTools)))
-		used := false
-		for _, q := range r.quota {
-			used = used || q.Exhausted
-		}
-		if !used {
-			t.Fatalf("%s did not read as used up: %+v", sig, r.quota)
+		if !exhausted(r.quota) {
+			t.Fatalf("a reached limit did not read as used up: %+v", r.quota)
 		}
 	}
+	// Credits headers describe the account, not a draw: a plan with
+	// credits and room left is not used up (#1856 review R1). A balance
+	// lower than the route last read is a draw, and is.
+	{
+		r := newWorkerRig(t, false)
+		var balance atomic.Value
+		balance.Store("50")
+		r.up.reply = func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-Codex-Primary-Used-Percent", "10")
+			w.Header().Set("X-Codex-Credits-Has-Credits", "true")
+			w.Header().Set("X-Codex-Credits-Unlimited", "false")
+			w.Header().Set("X-Codex-Credits-Balance", balance.Load().(string))
+			w.Header().Set("Content-Type", "text/event-stream")
+		}
+		r.do(responses(codexBody(clientTools)))
+		r.do(responses(codexBody(clientTools)))
+		if len(r.quota) != 2 || exhausted(r.quota) {
+			t.Fatalf("credits with room left read as used up: %+v", r.quota)
+		}
+		balance.Store("49.5")
+		r.do(responses(codexBody(clientTools)))
+		if !exhausted(r.quota[2:]) {
+			t.Fatalf("a lower credits balance did not read as a draw: %+v", r.quota)
+		}
+	}
+}
+
+func exhausted(qs []QuotaReading) bool {
+	for _, q := range qs {
+		if q.Exhausted {
+			return true
+		}
+	}
+	return false
 }
 
 // DEV-2, E12: an upstream name that resolves into the home network is

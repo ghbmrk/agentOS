@@ -1618,6 +1618,32 @@ class ConfigTest(unittest.TestCase):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Service"]["NoNewPrivileges"], "yes")
 
+    # REQ: CAP-11, CAP-8
+    def test_broker_registers_the_codex_image_and_offers_worker_tools(self):
+        # #1721: provider_run is offered only when worker tools are on (-worker-image names a
+        # registered image), and a Codex run starts from the image the declaration names, which
+        # -image must register at the path build.sh writes it to.
+        exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
+        images = dict(v.split("=", 1) for v in re.findall(r"(?:^|\s)-image\s+(\S+)", exe))
+        decl = re.search(r'"codex": \{\s*ID: "codex",.*?Image: "(\w+)"', (ROOT / "broker/provagent/declare.go").read_text(), re.S)
+        self.assertEqual(images.get(decl.group(1)), "/usr/lib/agentos/images/codex")
+        worker = re.search(r"(?:^|\s)-worker-image\s+(\S+)", exe)
+        self.assertIsNotNone(worker)
+        self.assertIn(worker.group(1), images)
+        b = (IMG / "build.sh").read_text()
+        self.assertIn('sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE' + images["codex"] + '"', b)
+
+    # REQ: CAP-8
+    def test_worker_images_ship_the_worker_argv(self):
+        # A worker machine runs -worker-argv (default "sleep infinity") while the guest drives it.
+        argv = re.search(r'"worker-argv", "([^"]+)"', (ROOT / "broker/cmd/agentosd/main.go").read_text()).group(1)
+        exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
+        self.assertNotIn("-worker-argv", exe)
+        worker = re.search(r"(?:^|\s)-worker-image\s+(\S+)", exe).group(1)
+        loop = next(l for l in (ROOT / "guest" / worker / "build-rootfs.sh").read_text().splitlines()
+                    if l.startswith("for b in /bin/sh "))
+        self.assertIn("/bin/" + argv.split()[0], loop.removesuffix("; do").split()[3:])
+
     def test_broker_reads_onboarding_s_settings(self):
         # It no longer waits for them (SetupServicesTest): a preloaded box starts it in setup mode.
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
@@ -4685,6 +4711,138 @@ class FuzzConfineTest(unittest.TestCase):
         lines = self.tmpfiles()
         for d in ("/tmp", "/var/tmp", "/dev/shm"):
             self.assertEqual([l for l in lines if l[1] == d], [["a+", d, "-", "-", "-", "-", "u:agentos-fuzz:---"]])
+
+
+class CodexPinTest(unittest.TestCase):
+    # REQ: CAP-11
+    # The box's Codex image must carry usr/lib/agentos/cli-version holding the CODEX_VERSION its
+    # build script pins, or agentosd's pin gate (#1877, #1895) refuses every provider run with one
+    # journal line as the only cause (PUX finding 1 on #1895). image/check_codex_pin.sh checks the
+    # staged tree, which becomes the box's verity-checked /usr, so the booted image carries what passed.
+    SCRIPT = "CODEX_VERSION=0.162.1\n"
+    # #1895's writer, verbatim (guest/codex/build-rootfs.sh at 2e6c54d), run in the image's root.
+    WRITES = "printf '%s\\n' \"$CODEX_VERSION\" >usr/lib/agentos/cli-version\n"
+    # agentosd's reader once #1895 lands: the check is inert only while no such consumer exists.
+    READER = 'const cliPinPath = "usr/lib/agentos/cli-version"\n'
+
+    def run_check(self, cli=None, link=False, script=SCRIPT + WRITES, reader=READER, run_writer=False):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            write(d / "repo", "guest/codex/build-rootfs.sh", script)
+            if reader is not None:
+                write(d / "repo", "broker/cmd/agentosd/imagepin.go", reader)
+            else:
+                write(d / "repo", "broker/cmd/agentosd/main.go", "package main\n")
+            pin = d / "tree/usr/lib/agentos/cli-version"
+            pin.parent.mkdir(parents=True)
+            if run_writer:
+                # The real writer line, as build-rootfs.sh runs it (cd "$OUT", set -eu).
+                subprocess.run(["sh", "-euc", self.SCRIPT + self.WRITES], cwd=d / "tree", check=True)
+            elif cli is not None:
+                if link:
+                    (d / "elsewhere").write_text(cli)
+                    pin.symlink_to(d / "elsewhere")
+                else:
+                    pin.write_bytes(cli.encode())
+            return subprocess.run(["sh", str(IMG / "check_codex_pin.sh"), str(d / "repo"), str(d / "tree")],
+                                  capture_output=True, text=True)
+
+    def test_the_file_the_build_script_writes_passes(self):
+        r = self.run_check(run_writer=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("not checked", r.stderr)
+
+    def test_writer_is_the_build_script_s(self):
+        # Once #1895 lands, WRITES must be the real script's line, so the test above runs it.
+        code = [l for l in (ROOT / "guest/codex/build-rootfs.sh").read_text().splitlines()
+                if "cli-version" in l and not l.lstrip().startswith("#") and ">" in l]
+        if code:
+            self.assertEqual(code, [self.WRITES.rstrip("\n")])
+
+    def test_agentosd_s_rule_is_the_check_s(self):
+        # readCLIPin (imagepin.go, #1895): strings.TrimSuffix(b, "\n"), then the version must match.
+        for cli in ("0.162.1", "0.162.1\n"):
+            self.assertEqual(self.run_check(cli).returncode, 0, repr(cli))
+        for cli in ("0.162.1\n\n", " 0.162.1", "0.162.1 ", "\n0.162.1", "0.162.1\r\n", "0.162.2", "0.162.2\n", ""):
+            r = self.run_check(cli)
+            self.assertNotEqual(r.returncode, 0, repr(cli))
+            self.assertIn("cli-version", r.stderr)
+
+    def test_missing_file_fails(self):
+        r = self.run_check()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cli-version", r.stderr)
+
+    def test_symlink_fails(self):
+        # agentosd reads only a regular file through os.OpenRoot, so a link would read as unpinned.
+        self.assertNotEqual(self.run_check("0.162.1", link=True).returncode, 0)
+
+    def test_script_without_a_pin_line_fails(self):
+        self.assertNotEqual(self.run_check("0.162.1", script="echo no version\n" + self.WRITES).returncode, 0)
+
+    def test_check_keys_on_agentosd_s_reader_not_the_writer_s_text(self):
+        # Before #1895 agentosd reads no cli-version, so there is nothing to hold the tree to; the
+        # check says so and passes.
+        r = self.run_check(reader=None)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("reads no cli-version", r.stderr)
+        # Once the reader is in the tree, a missing file fails, however the script writes it: a
+        # writer refactored to a variable no longer names the path, and must not turn the check off.
+        refactored = self.SCRIPT + 'pinf=usr/lib/agentos/cli-version\nprintf \'%s\\n\' "$CODEX_VERSION" >"$pinf"\n'
+        self.assertNotEqual(self.run_check(script=refactored).returncode, 0)
+        self.assertNotEqual(self.run_check(script=self.SCRIPT).returncode, 0)
+        # The reader renamed, or the path spelled out in another agentosd file, still turns it on.
+        self.assertNotEqual(self.run_check(reader="package main\n").returncode, 0)
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            write(d / "repo", "guest/codex/build-rootfs.sh", self.SCRIPT)
+            write(d / "repo", "broker/cmd/agentosd/pin.go", self.READER)
+            (d / "tree").mkdir()
+            r = subprocess.run(["sh", str(IMG / "check_codex_pin.sh"), str(d / "repo"), str(d / "tree")],
+                               capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+
+    def test_inert_state_matches_this_tree(self):
+        # The real repo: inert exactly while agentosd has no pin reader.
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run(["sh", str(IMG / "check_codex_pin.sh"), str(ROOT), d], capture_output=True, text=True)
+        if (ROOT / "broker/cmd/agentosd/imagepin.go").exists():
+            self.assertNotEqual(r.returncode, 0)
+        else:
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("not checked", r.stderr)
+
+    @staticmethod
+    def registered(exe):
+        # Go's flag package takes -image V, -image=V, --image V and --image=V, and images.Set is
+        # last-wins (broker/cmd/agentosd/main.go), so the last value per name is the one registered.
+        return dict(v.split("=", 1) for v in re.findall(r"(?:^|\s)--?image(?:=|\s+)(\S+)", exe))
+
+    def assert_from_verity_usr(self, exe):
+        images = self.registered(exe)
+        self.assertEqual(images["codex"], "/usr/lib/agentos/images/codex")
+        for name, path in images.items():
+            self.assertTrue(path.startswith("/usr/lib/agentos/images/"), (name, path))
+            self.assertNotIn("..", path)
+
+    def test_images_are_registered_from_the_verity_usr(self):
+        # The pin is read at every gate check, so a tree a process could swap after the check would
+        # reopen the window #1895 closes; under /usr (dm-verity, read-only) nothing can (#1895 delta
+        # review). Every -image agentosd registers, the Codex one included, lives there.
+        exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
+        self.assert_from_verity_usr(exe)
+        self.assertIn('sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"',
+                      (IMG / "build.sh").read_text())
+        # Every spelling Go accepts, appended last, overrides the reviewed value and must be caught.
+        for extra in (" --image=codex=/var/lib/agentos/codex", " -image=codex=/var/lib/agentos/codex",
+                      " --image codex=/var/lib/agentos/codex", " -image openclaw=/var/lib/agentos/openclaw"):
+            with self.assertRaises(AssertionError, msg=extra):
+                self.assert_from_verity_usr(exe + extra)
+
+    def test_build_checks_the_codex_tree_it_stages(self):
+        lines = (IMG / "build.sh").read_text().splitlines()
+        build = lines.index('sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"')
+        self.assertEqual(lines[build + 1], 'sh "$HERE/check_codex_pin.sh" "$REPO" "$STAGE/usr/lib/agentos/images/codex"')
 
 
 if __name__ == "__main__":

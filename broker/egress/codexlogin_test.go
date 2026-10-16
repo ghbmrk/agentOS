@@ -590,3 +590,81 @@ func TestAWorkerRefreshMustNameTheAccount(t *testing.T) {
 		t.Fatal("the owner's worker no longer resolves to the owner's login")
 	}
 }
+
+// #1264 c4e2: Signed reports a stored plan login (the provider is granted
+// once the owner signed in), and refuses with the vault locked.
+// REQ: CRED-5, ONB-3
+func TestSignedReportsAStoredLogin(t *testing.T) {
+	r := newLoginRig(t)
+	if ok, err := r.logins.Signed("codex"); err != nil || ok {
+		t.Fatalf("before sign-in: Signed = %v, %v", ok, err)
+	}
+	r.store(t, "pw-a", newCanaryLogin(t))
+	if ok, err := r.logins.Signed("codex"); err != nil || !ok {
+		t.Fatalf("after sign-in: Signed = %v, %v", ok, err)
+	}
+	if ok, err := r.logins.Signed("other"); err != nil || ok {
+		t.Fatalf("another provider: Signed = %v, %v", ok, err)
+	}
+	r.locked = true
+	if _, err := r.logins.Signed("codex"); !errors.Is(err, ErrVaultLocked) {
+		t.Fatalf("locked: Signed err = %v", err)
+	}
+	r.locked = false
+	if _, err := r.logins.Remove("codex"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := r.logins.Signed("codex"); ok {
+		t.Fatal("Signed after Remove")
+	}
+}
+
+// #1264 c4e2 (security review 2): SignedInBy is set only by that worker's
+// own sign-in commit. A login stored before it (an earlier, perhaps
+// refused, sign-in), a run worker's refresh, or a sign-in swap that never
+// committed does not set it; Forget and Remove clear it.
+// REQ: CRED-5, ONB-3
+func TestSignedInByIsOnlyThisSignInsCommit(t *testing.T) {
+	r := newLoginRig(t)
+	old := newCanaryLogin(t)
+	r.store(t, "pw-old", old)
+	if ok, _ := r.logins.Signed("codex"); !ok || r.logins.SignedInBy("codex", "pw-new") {
+		t.Fatalf("an earlier login counts as this sign-in's: Signed %v", ok)
+	}
+	fresh := newCanaryLogin(t)
+	fresh.idToken, fresh.account = old.idToken, old.account
+	_, commit, err := r.logins.ForWorker("codex", "pw-run").Swap("codex", fresh.creds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := commit(); err != nil {
+		t.Fatal(err)
+	}
+	if r.logins.SignedInBy("codex", "pw-run") {
+		t.Fatal("a run worker's refresh counts as a sign-in")
+	}
+	_, commit, err = r.logins.ForSignIn("codex", "pw-new").Swap("codex", newCanaryLogin(t).creds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.logins.SignedInBy("codex", "pw-new") {
+		t.Fatal("a sign-in swap counts before its commit")
+	}
+	if err := commit(); err != nil {
+		t.Fatal(err)
+	}
+	if !r.logins.SignedInBy("codex", "pw-new") || r.logins.SignedInBy("other", "pw-new") || r.logins.SignedInBy("codex", "pw-other") {
+		t.Fatal("the sign-in's commit is not reported for it alone")
+	}
+	r.logins.Forget("pw-new")
+	if r.logins.SignedInBy("codex", "pw-new") {
+		t.Fatal("SignedInBy outlived the worker")
+	}
+	r.store(t, "pw-again", newCanaryLogin(t))
+	if _, err := r.logins.Remove("codex"); err != nil {
+		t.Fatal(err)
+	}
+	if r.logins.SignedInBy("codex", "pw-again") {
+		t.Fatal("SignedInBy outlived Remove")
+	}
+}

@@ -1,8 +1,10 @@
 # The in-image end-to-end run's first half (#1688), passed like agentos-e2e.service as an SMBIOS
 # credential on the e2e boot only. It seals a fresh claim code where a preloaded box keeps it before
 # the setup page's first start, as the seller does before the box ships, so the box boots as a
-# preloaded one. It is not ordered before agentosd or egress, which need nothing from it; before
-# #1716 was fixed, delaying them past the first boot's drive-id assign failed them for that boot.
+# preloaded one. Since #1701 the vault process's e2e drop-in (agentos-egress.conf) Requires= and
+# orders After= this unit, whose 9p mount holds its binary, so egress (and agentosd after it) wait
+# for the seal; that delays them past the first boot's drive-id assign, which is safe only because
+# drive-id accepts this boot's own assign record (#1716; ASSUMPTIONS E3, E10).
 # The code goes to root's tmpfs for agentos-e2e.service, never to the console.
 [Unit]
 Description=agentOS end-to-end run: seal the claim code (CI only)

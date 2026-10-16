@@ -89,6 +89,28 @@ class WorkflowTest(unittest.TestCase):
         for f in self.files():
             self.assertNotRegex(f.read_text(), r"python3? -(?:\s|$)", f.name)
 
+    def test_board_crosses_jobs_as_an_artifact(self):
+        # CX-BOARD-ARGV (#1787): a job output or env var holding the rendered board passes 128 KiB
+        # (MAX_ARG_STRLEN) once BOARD.md grows, and bash in the commit job never starts. The board
+        # goes from render to commit as an artifact; the only job output is a small flag.
+        text = (WORKFLOWS / "board.yml").read_text()
+        render, commit = text.split("\n  commit:\n", 1)
+        self.assertNotIn("base64", text)
+        self.assertNotIn("BOARD_B64", text)
+        self.assertEqual(re.findall(r"(?m)^    outputs:\n((?:      .*\n)+)", render),
+                         ["      rendered: ${{ steps.gen.outputs.rendered }}\n"])
+        self.assertIn('echo "rendered=true" >> "$GITHUB_OUTPUT"', render)
+        self.assertIn("if: needs.render.outputs.rendered == 'true'", commit)
+        uploads = [s for a, s in steps(render) if a.startswith("actions/upload-artifact@")]
+        downloads = [s for a, s in steps(commit) if a.startswith("actions/download-artifact@")]
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(len(downloads), 1)
+        self.assertRegex(uploads[0], r"name: board\b")
+        self.assertRegex(downloads[0], r"name: board\b")
+        # The artifact lands outside the checkout, and only BOARD.md is copied into it.
+        self.assertRegex(downloads[0], r"path: \$\{\{ runner\.temp \}\}/board\b")
+        self.assertIn('cp "$RUNNER_TEMP/board/BOARD.md" BOARD.md', commit)
+
     def test_fuzz_runs_go_through_fuzzrun_and_never_by_duration(self):
         # P1-4-flake-ci (REQ: LOOP-7): a duration -fuzztime can end in the fuzz coordinator's
         # deadline race ("context deadline exceeded", no input), so no workflow passes one,
