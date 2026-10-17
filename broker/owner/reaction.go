@@ -71,7 +71,9 @@ const (
 type sentText struct {
 	text    string
 	at      time.Time
-	request bool // an approval request (SendRequest)
+	request bool     // an approval request (sendRequest)
+	ids     []string // the requests it asks, from the broker's record
+	local   bool     // approvable on the local page only
 }
 
 // recentWindow is the window of texts to the owner.
@@ -129,11 +131,6 @@ func normQuote(s string) string {
 // to the agent.
 var carriesCode = regexp.MustCompile(`[0-9]{4,}|\b(?:UNLOCK|RESUME) [A-HJ-NP-Z2-9]{4}\b`)
 
-var (
-	replyYes = regexp.MustCompile(`Reply YES ([A-Z][0-9A-Z]{0,2})\b`)
-	replyQ   = regexp.MustCompile(`Reply (Q[0-9]+) and your answer`)
-)
-
 // reactionEvent is the broker-worded text the agent gets for rx, and the
 // pointer the owner gets when the marked text expects a reply.
 func (c *Channel) reactionEvent(rx reaction) (event, pointer string) {
@@ -170,19 +167,27 @@ func (c *Channel) recordReplies(from string, out []string) {
 }
 
 // replyPointer is one line naming the valid replies to a text that
-// expects one (an approval request, a question, a RUN offer), sent to the
-// owner as conversation. It is for the box's own texts only.
+// expects one (an approval request, a RUN offer, any "Reply …"), sent to
+// the owner as conversation. It is for the box's own texts only. A
+// request's IDs come from the broker's record, never from the text: a
+// request carries agent words (an item's object), which could name
+// another request.
 func replyPointer(t sentText) string {
-	if m := replyYes.FindStringSubmatch(t.text); m != nil {
-		return fmt.Sprintf("A reaction does not approve anything. Reply YES %s with the code that text asks for, or NO %s.", m[1], m[1])
+	if t.request {
+		switch {
+		case len(t.ids) == 1 && t.local:
+			return fmt.Sprintf("A reaction does not approve anything. Approve or deny %s on my Wi-Fi page, or reply NO %s.", t.ids[0], t.ids[0])
+		case len(t.ids) == 1:
+			return fmt.Sprintf("A reaction does not approve anything. Reply YES %s with the code that text asks for, or NO %s.", t.ids[0], t.ids[0])
+		case len(t.ids) > 1:
+			return fmt.Sprintf("A reaction does not approve anything. That text asks %s: reply YES or NO with an ID, as it says.", strings.Join(t.ids, ", "))
+		}
+		return "A reaction is not a reply. Reply in words, as that text says."
 	}
 	if strings.Contains(t.text, "Reply RUN") {
 		return "A reaction does not send it. Reply RUN to send the held message."
 	}
-	if m := replyQ.FindStringSubmatch(t.text); m != nil {
-		return fmt.Sprintf("A reaction is not an answer. Reply %s and your answer.", m[1])
-	}
-	if t.request || strings.Contains(t.text, "Reply ") {
+	if strings.Contains(t.text, "Reply ") || strings.Contains(t.text, "reply ") {
 		return "A reaction is not a reply. Reply in words, as that text says."
 	}
 	return ""

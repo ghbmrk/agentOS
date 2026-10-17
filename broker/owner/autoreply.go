@@ -54,16 +54,17 @@ type watchedLine struct {
 }
 
 func (w watchedLine) Send(to, text string) error {
-	return w.sent(to, text, false, w.Modem.Send(to, text))
+	err := w.failed(w.Modem.Send(to, text))
+	if err == nil && to == w.c.cfg.Owner {
+		w.c.recent.add(sentText{text: text, at: w.c.cfg.Now()})
+	}
+	return err
 }
 
-// sent records a failed send, and a text that reached the owner in the
-// window a reaction is matched against (CH-11).
-func (w watchedLine) sent(to, text string, request bool, err error) error {
+// failed records a failed send.
+func (w watchedLine) failed(err error) error {
 	if err != nil {
 		w.c.lineFailed.Store(w.c.cfg.Now().UnixNano())
-	} else if to == w.c.cfg.Owner {
-		w.c.recent.add(sentText{text: text, at: w.c.cfg.Now(), request: request})
 	}
 	return err
 }
@@ -79,19 +80,24 @@ type RequestSender interface {
 	SendRequest(to, text string) error
 }
 
+// SendRequest sends an approval request. sendRequest, which knows the
+// request IDs, records it in the recent texts (CH-11).
 func (w watchedLine) SendRequest(to, text string) error {
 	rs, ok := w.Modem.(RequestSender)
 	if !ok {
-		return w.sent(to, text, true, w.Modem.Send(to, text))
+		return w.failed(w.Modem.Send(to, text))
 	}
-	return w.sent(to, text, true, rs.SendRequest(to, text))
+	return w.failed(rs.SendRequest(to, text))
 }
 
 // sendRequest texts the owner an approval request. Grants paces these,
 // so the owner never holds one, but each counts toward the hour (CH-15)
 // before it is sent, and is settled as a sent text is (#1638). A request
-// grants already counted with Spend goes on that count (#1685).
-func (c *Channel) sendRequest(text string) error {
+// grants already counted with Spend goes on that count (#1685). A sent
+// request goes in the recent texts with ids, the requests it asks, so a
+// reaction's pointer names them from the broker's record, never from the
+// text, which carries agent words (CH-11).
+func (c *Channel) sendRequest(text string, ids []string, local bool) error {
 	c.mu.Lock()
 	var at time.Time
 	if len(c.spent) > 0 {
@@ -107,6 +113,9 @@ func (c *Channel) sendRequest(text string) error {
 		err = c.cfg.Modem.Send(c.cfg.Owner, text)
 	}
 	c.settle(at, err)
+	if err == nil {
+		c.recent.add(sentText{text: text, at: c.cfg.Now(), request: true, ids: ids, local: local})
+	}
 	return err
 }
 
