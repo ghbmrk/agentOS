@@ -122,6 +122,23 @@ func TestSleepWorkChecks(t *testing.T) {
 	no := func() bool { return false }
 	var q questions
 	w := sleepWork{intent: no, undo: no, gate: no, handed: no, qs: &q}
+	// No guard open restricts (#1246); an agreeing one does not.
+	if !w.checks()["clock"]() {
+		t.Fatal("an unopened clock guard did not keep the agent awake")
+	}
+	now := time.Date(2026, 10, 6, 2, 0, 0, 0, time.UTC)
+	agreed, err := clock.New(clock.Config{
+		Synced:  func() (bool, error) { return true, nil },
+		Carrier: func(context.Context) (time.Time, error) { return now, nil },
+		Now:     func() time.Time { return now },
+		Elapsed: func() time.Duration { return time.Hour },
+		BootID:  func() string { return "boot" },
+	})
+	must(t, err)
+	if agreed.Check(context.Background()).Restricted() {
+		t.Fatal("agreeing clocks restricted")
+	}
+	q.g.Store(agreed)
 	checks := w.checks()
 	for n, f := range checks {
 		if f() {
@@ -132,7 +149,6 @@ func TestSleepWorkChecks(t *testing.T) {
 		t.Fatal("a worker check with no worker tools")
 	}
 
-	now := time.Date(2026, 10, 6, 2, 0, 0, 0, time.UTC)
 	g, err := clock.New(clock.Config{
 		Synced:  func() (bool, error) { return true, nil },
 		Carrier: func(context.Context) (time.Time, error) { return now.Add(time.Hour), nil },
