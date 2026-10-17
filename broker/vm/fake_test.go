@@ -161,19 +161,29 @@ type env struct {
 	img  string
 	cfg  Config
 	cgrp string
+	// beforePreempt, set by tests, runs where admission has picked a
+	// victim and dropped its lock, just before preempting it.
+	beforePreempt func(id string)
 }
 
 // preempter forwards to the manager once it exists (admission is built first).
-type preempter struct{ m **Manager }
+type preempter struct{ e *env }
 
-func (p preempter) Preempt(id string) error { return (*p.m).Preempt(id) }
+func (p preempter) Preempt(id string) error { return p.e.m.Preempt(id) }
+
+func (p preempter) PreemptInstance(id, inst string) error {
+	if h := p.e.beforePreempt; h != nil {
+		h(id)
+	}
+	return p.e.m.PreemptInstance(id, inst)
+}
 
 func newEnv(t *testing.T, capacityMB int64) *env {
 	t.Helper()
 	e := &env{t: t, rt: newFake(), img: t.TempDir()}
 	write(t, e.img, "etc/os-release", "image v1")
 	write(t, e.img, "app/main", "main v1")
-	adm, err := admission.New(admission.Config{CapacityMB: capacityMB, HeadroomMB: 0}, preempter{&e.m})
+	adm, err := admission.New(admission.Config{CapacityMB: capacityMB, HeadroomMB: 0}, preempter{e})
 	must(t, err)
 	e.adm = adm
 	e.cfg = Config{
