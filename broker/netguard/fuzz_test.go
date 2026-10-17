@@ -32,6 +32,71 @@ func (f *fuzzBytes) next() byte {
 // fuzzMaxOps bounds the operations one input drives.
 const fuzzMaxOps = 64
 
+// fuzzT is the part of testing.T the oracles report through, so a test can
+// hand them a recorder and show that a planted defect is reported.
+type fuzzT interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
+// stopRun is what a recorder panics with, so Fatalf ends the run as it does
+// on a testing.T.
+type stopRun struct{}
+
+// recorder collects the failures an oracle reports.
+type recorder struct{ msgs []string }
+
+func (r *recorder) Helper() {}
+
+func (r *recorder) Fatalf(format string, args ...any) {
+	r.msgs = append(r.msgs, fmt.Sprintf(format, args...))
+	panic(stopRun{})
+}
+
+// run runs f and returns what it reported.
+func (r *recorder) run(f func(fuzzT)) (msgs []string) {
+	defer func() {
+		if p := recover(); p != nil {
+			if _, ok := p.(stopRun); !ok {
+				panic(p)
+			}
+		}
+		msgs = r.msgs
+	}()
+	f(r)
+	return r.msgs
+}
+
+// fuzzPlant switches a defect on in what an oracle drives: nil fields run
+// the real code, and lie makes the router's answers go unrecorded.
+type fuzzPlant struct {
+	lie     bool
+	read    func(*Sources) (Network, error)
+	refresh func(*Policy) error
+	check   func(*Policy, context.Context, netip.Addr, uint16, string) error
+}
+
+func (pl fuzzPlant) doRead(s *Sources) (Network, error) {
+	if pl.read != nil {
+		return pl.read(s)
+	}
+	return s.Read()
+}
+
+func (pl fuzzPlant) doRefresh(p *Policy) error {
+	if pl.refresh != nil {
+		return pl.refresh(p)
+	}
+	return p.Refresh()
+}
+
+func (pl fuzzPlant) doCheck(p *Policy, ctx context.Context, a netip.Addr, port uint16, proto string) error {
+	if pl.check != nil {
+		return pl.check(p, ctx, a, port, proto)
+	}
+	return p.Check(ctx, a, port, proto)
+}
+
 // fuzzRouter is one router the host may be attached to.
 type fuzzRouter struct {
 	gwHex string // the default route's gateway in /proc/net/route
@@ -58,6 +123,8 @@ type fuzzHost struct {
 	pool     []fuzzRouter
 	at       int // index into pool, or -1 when no default route
 	answered map[gatewayKey]map[netip.Addr]bool
+	lie      bool  // answers go unrecorded: a planted defect
+	calls    []int // per router request since the last reset: 0 same gateway key, 1 another gateway, 2 none
 }
 
 // newFuzzHost decodes a pool of routers with distinct gateway keys: more
@@ -91,6 +158,14 @@ func newFuzzHost(in *fuzzBytes) *fuzzHost {
 // attach moves the host to the router b names, or off every router.
 func (h *fuzzHost) attach(b byte) {
 	h.at = int(b)%(len(h.pool)+1) - 1
+}
+
+// gatewayKey is the key of the router attached now, zero when none is.
+func (h *fuzzHost) gatewayKey() gatewayKey {
+	if r, ok := h.router(); ok {
+		return r.key()
+	}
+	return gatewayKey{}
 }
 
 func (h *fuzzHost) router() (fuzzRouter, bool) {
@@ -132,6 +207,17 @@ func (h *fuzzHost) addrs() ([]net.Addr, error) {
 // answers only if it is at the address asked), the host moves after it, or
 // nothing answers.
 func (h *fuzzHost) external(_ context.Context, gw netip.Addr) (netip.Addr, error) {
+	start := h.gatewayKey()
+	defer func() {
+		switch end := h.gatewayKey(); {
+		case end == start:
+			h.calls = append(h.calls, 0)
+		case !end.gw.IsValid():
+			h.calls = append(h.calls, 2)
+		default:
+			h.calls = append(h.calls, 1)
+		}
+	}()
 	plan := h.in.next()
 	if plan%4 == 1 {
 		h.attach(h.in.next())
@@ -143,7 +229,9 @@ func (h *fuzzHost) external(_ context.Context, gw netip.Addr) (netip.Addr, error
 		if h.answered[r.key()] == nil {
 			h.answered[r.key()] = map[netip.Addr]bool{}
 		}
-		h.answered[r.key()][a] = true
+		if !h.lie {
+			h.answered[r.key()][a] = true
+		}
 	}
 	if plan%4 == 2 {
 		h.attach(h.in.next())
@@ -158,9 +246,18 @@ func (h *fuzzHost) sources() *Sources {
 	return &Sources{Addrs: h.addrs, ReadFile: h.readFile, External: h.external}
 }
 
+// movedTwice says the gateway moved to another router during each of the
+// last read's two router requests, the one case Read returns ErrGatewayMoved.
+func (h *fuzzHost) movedTwice() bool {
+	return len(h.calls) == 2 && h.calls[0] == 1 && h.calls[1] == 1
+}
+
 // checkRead checks one Read or ReadLocal result and the cache after it.
-func (h *fuzzHost) checkRead(t *testing.T, s *Sources, op string, m Network, err error) {
+func (h *fuzzHost) checkRead(t fuzzT, s *Sources, op string, m Network, err error) {
 	t.Helper()
+	if op == "Read" && errors.Is(err, ErrGatewayMoved) != h.movedTwice() {
+		t.Fatalf("Read: error %v after router requests %v, ErrGatewayMoved only when the gateway moved during both", err, h.calls)
+	}
 	if err == nil && len(m.Prefixes) == 0 {
 		t.Fatalf("%s: no error and no prefixes: %+v", op, m)
 	}
@@ -191,7 +288,19 @@ var fuzzSeeds = [][]byte{
 	{2, 0x00, 0x08, 0, 1, 1, 1, 2, 1, 1, 0, 2},
 	{4, 0x00, 0x01, 0x04, 0x30, 0, 1, 1, 1, 2, 0, 3, 1, 2, 2, 0, 4, 1, 0, 1, 1},
 	{12, 0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 0, 1, 1, 0, 0, 2, 1, 0, 0, 3, 1, 0, 0, 4, 1, 0, 0, 5, 1, 0, 0, 6, 1, 0, 0, 7, 1, 0, 0, 8, 1, 0, 0, 9, 1, 0, 0, 10, 1, 0, 0, 11, 1, 0, 0, 1, 2},
+	// the gateway moves during both router requests of one read
+	{2, 0, 1, 2, 0, 1, 1, 1, 2, 1, 3},
+	// a read, then a refresh, of one answering router
+	{2, 0, 1, 2, 0, 1, 1, 0, 2, 0},
 }
+
+// Seeds the controls drive: a router answers once; the gateway moves during
+// both requests of a refresh; a refresh is answered.
+var (
+	seedAnswered   = []byte{2, 0, 1, 2, 0, 1, 1, 0}
+	seedMovedTwice = []byte{2, 0, 1, 2, 0, 1, 2, 1, 2, 1, 3}
+	seedRefreshed  = []byte{2, 0, 1, 2, 0, 1, 2, 0}
+)
 
 // FuzzSourcesRead (FUZZ-1): over any sequence of router moves, before or
 // after a router's answer, Read and ReadLocal return only an external
@@ -202,23 +311,27 @@ func FuzzSourcesRead(f *testing.F) {
 	for _, b := range fuzzSeeds {
 		f.Add(b)
 	}
-	f.Fuzz(func(t *testing.T, b []byte) {
-		in := &fuzzBytes{b: b}
-		h := newFuzzHost(in)
-		s := h.sources()
-		for n := 0; n < fuzzMaxOps && in.more(); n++ {
-			switch in.next() % 3 {
-			case 0:
-				h.attach(in.next())
-			case 1:
-				m, err := s.Read()
-				h.checkRead(t, s, "Read", m, err)
-			case 2:
-				m, err := s.ReadLocal()
-				h.checkRead(t, s, "ReadLocal", m, err)
-			}
+	f.Fuzz(func(t *testing.T, b []byte) { fuzzSourcesRead(t, b, fuzzPlant{}) })
+}
+
+func fuzzSourcesRead(t fuzzT, b []byte, pl fuzzPlant) {
+	in := &fuzzBytes{b: b}
+	h := newFuzzHost(in)
+	h.lie = pl.lie
+	s := h.sources()
+	for n := 0; n < fuzzMaxOps && in.more(); n++ {
+		switch in.next() % 3 {
+		case 0:
+			h.attach(in.next())
+		case 1:
+			h.calls = nil
+			m, err := pl.doRead(s)
+			h.checkRead(t, s, "Read", m, err)
+		case 2:
+			m, err := s.ReadLocal()
+			h.checkRead(t, s, "ReadLocal", m, err)
 		}
-	})
+	}
 }
 
 // FuzzGatewayPolicy (FUZZ-1): over any sequence of router moves, quick
@@ -228,46 +341,52 @@ func FuzzGatewayPolicy(f *testing.F) {
 	for _, b := range fuzzSeeds {
 		f.Add(b)
 	}
-	f.Fuzz(func(t *testing.T, b []byte) {
-		in := &fuzzBytes{b: b}
-		h := newFuzzHost(in)
-		s := h.sources()
-		filed := map[gatewayKey]netip.Addr{}
-		read := func() (Network, error) {
-			m, err := s.Read()
-			if m.External.IsValid() {
-				filed[keyOf(m)] = m.External
-			}
-			return m, err
+	f.Fuzz(func(t *testing.T, b []byte) { fuzzGatewayPolicy(t, b, fuzzPlant{}) })
+}
+
+func fuzzGatewayPolicy(t fuzzT, b []byte, pl fuzzPlant) {
+	in := &fuzzBytes{b: b}
+	h := newFuzzHost(in)
+	s := h.sources()
+	filed := map[gatewayKey]netip.Addr{}
+	read := func() (Network, error) {
+		m, err := s.Read()
+		if m.External.IsValid() {
+			filed[keyOf(m)] = m.External
 		}
-		p := New(Config{Source: read, Quick: s.ReadLocal})
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // a held destination is refused at once
-		for n := 0; n < fuzzMaxOps && in.more(); n++ {
-			op := ""
-			switch in.next() % 3 {
-			case 0:
-				h.attach(in.next())
-				continue
-			case 1:
-				op = "quick read"
-				p.quickLearn()
-			case 2:
-				op = "refresh"
-				p.Refresh()
-			}
-			p.mu.RLock()
-			k := keyOf(p.net)
-			p.mu.RUnlock()
-			ext, ok := filed[k]
-			if !k.gw.IsValid() || !ok {
-				continue
-			}
-			if err := p.Check(ctx, ext, 443, "tcp"); !errors.Is(err, ErrDenied) {
-				t.Fatalf("after a %s on gateway %+v, its router's external %v: %v", op, k, ext, err)
+		return m, err
+	}
+	p := New(Config{Source: read, Quick: s.ReadLocal})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // a held destination is refused at once
+	for n := 0; n < fuzzMaxOps && in.more(); n++ {
+		op := ""
+		switch in.next() % 3 {
+		case 0:
+			h.attach(in.next())
+			continue
+		case 1:
+			op = "quick read"
+			p.quickLearn()
+		case 2:
+			op = "refresh"
+			h.calls = nil
+			err := pl.doRefresh(p)
+			if errors.Is(err, ErrGatewayMoved) != h.movedTwice() {
+				t.Fatalf("refresh: error %v after router requests %v, ErrGatewayMoved only when the gateway moved during both", err, h.calls)
 			}
 		}
-	})
+		p.mu.RLock()
+		k := keyOf(p.net)
+		p.mu.RUnlock()
+		ext, ok := filed[k]
+		if !k.gw.IsValid() || !ok {
+			continue
+		}
+		if err := pl.doCheck(p, ctx, ext, 443, "tcp"); !errors.Is(err, ErrDenied) {
+			t.Fatalf("after a %s on gateway %+v, its router's external %v: %v", op, k, ext, err)
+		}
+	}
 }
 
 // fuzzAddrs are candidate addresses: private, public, loopback, mapped,
@@ -392,6 +511,13 @@ func homeOrSpecial(f netip.Addr, raw Network) string {
 	return ""
 }
 
+var fuzzCheckSeeds = [][]byte{
+	{0, 3, 1, 1, 24, 0, 2, 1, 3, 4, 1, 53, 0},
+	{0, 1, 3, 1, 1, 24, 2, 3, 10, 2, 4, 1, 12, 0, 2, 3, 2, 3, 1, 1, 2},
+	{0, 2, 18, 96, 2, 1, 1, 3, 17, 1, 0, 1, 0, 2, 11, 0, 0, 2, 13, 0, 0, 2, 15, 0, 0, 2, 16, 0, 0},
+	{1, 3, 2, 2, 3, 3, 1, 2, 4, 1, 0, 2, 9, 0, 0, 2, 3, 4, 1, 0, 2, 3, 1, 2},
+}
+
 // FuzzCheck (extra, not in the brief): for any learned network, pins, destination, port,
 // protocol, purpose and name, an allow is sound (DNS only to the resolver
 // on port 53 over tcp or udp; a pin only for its purpose; anything else
@@ -399,64 +525,65 @@ func homeOrSpecial(f netip.Addr, raw Network) string {
 // the resolver and a matching pin are allowed, and OnDeny runs once for a
 // denial and never for an allow.
 func FuzzCheck(f *testing.F) {
-	f.Add([]byte{0, 3, 1, 1, 24, 0, 2, 1, 3, 4, 1, 53, 0})
-	f.Add([]byte{0, 1, 3, 1, 1, 24, 2, 3, 10, 2, 4, 1, 12, 0, 2, 3, 2, 3, 1, 1, 2})
-	f.Add([]byte{0, 2, 18, 96, 2, 1, 1, 3, 17, 1, 0, 1, 0, 2, 11, 0, 0, 2, 13, 0, 0, 2, 15, 0, 0, 2, 16, 0, 0})
-	f.Add([]byte{1, 3, 2, 2, 3, 3, 1, 2, 4, 1, 0, 2, 9, 0, 0, 2, 3, 4, 1, 0, 2, 3, 1, 2})
-	f.Fuzz(func(t *testing.T, b []byte) {
-		in := &fuzzBytes{b: b}
-		denies := 0
-		p := New(Config{OnDeny: func(DenyEvent) { denies++ }})
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		var raw Network
-		var pins []Pin
-		for n := 0; n < fuzzMaxOps && in.more(); n++ {
-			switch in.next() % 3 {
-			case 0: // learn a network
-				raw = Network{}
-				for i := int(in.next() % 4); i > 0; i-- {
-					if pf := in.prefix(); pf.IsValid() {
-						raw.Prefixes = append(raw.Prefixes, pf)
-					}
-				}
-				raw.Gateway, raw.External, raw.Resolver = in.addr(), in.addr(), in.addr()
-				p.Learn(raw)
-			case 1: // set pins
-				var next []Pin
-				for i := int(in.next() % 3); i > 0; i-- {
-					pin := Pin{Kind: PinKind(in.next() % 6), Name: fuzzNames[int(in.next())%len(fuzzNames)]}
-					if a := in.addr(); a.IsValid() {
-						pin.Addr = netip.AddrPortFrom(a.WithZone(""), uint16(in.next()))
-					}
-					pin.Key[0] = in.next() % 2
-					next = append(next, pin)
-				}
-				if err := p.SetPins(next); err == nil {
-					pins = next
-				}
-			case 2: // check a destination
-				pu := Purpose(in.next() % 6)
-				name := fuzzNames[int(in.next())%len(fuzzNames)]
-				a := in.addr()
-				port := []uint16{53, 443, 80, uint16(in.next())}[in.next()%4]
-				proto := []string{"tcp", "udp", "icmp", ""}[in.next()%4]
-				denies = 0
-				err := p.Check(withName(WithPurpose(ctx, pu), name), a, port, proto)
-				what := fmt.Sprintf("%v port %d/%s purpose %d name %q on %+v pins %+v", a, port, proto, pu, name, raw, pins)
-				if err != nil && !errors.Is(err, ErrDenied) {
-					t.Fatalf("%s: error %v is not ErrDenied", what, err)
-				}
-				if want := 0; err != nil && denies != 1 || err == nil && denies != want {
-					t.Fatalf("%s: err %v, OnDeny ran %d times", what, err, denies)
-				}
-				checkVerdict(t, what, err == nil, raw, pins, pu, name, a, port, proto)
-			}
-		}
-	})
+	for _, b := range fuzzCheckSeeds {
+		f.Add(b)
+	}
+	f.Fuzz(func(t *testing.T, b []byte) { fuzzCheck(t, b, fuzzPlant{}) })
 }
 
-func checkVerdict(t *testing.T, what string, allowed bool, raw Network, pins []Pin, pu Purpose, name string, a netip.Addr, port uint16, proto string) {
+func fuzzCheck(t fuzzT, b []byte, pl fuzzPlant) {
+	in := &fuzzBytes{b: b}
+	denies := 0
+	p := New(Config{OnDeny: func(DenyEvent) { denies++ }})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var raw Network
+	var pins []Pin
+	for n := 0; n < fuzzMaxOps && in.more(); n++ {
+		switch in.next() % 3 {
+		case 0: // learn a network
+			raw = Network{}
+			for i := int(in.next() % 4); i > 0; i-- {
+				if pf := in.prefix(); pf.IsValid() {
+					raw.Prefixes = append(raw.Prefixes, pf)
+				}
+			}
+			raw.Gateway, raw.External, raw.Resolver = in.addr(), in.addr(), in.addr()
+			p.Learn(raw)
+		case 1: // set pins
+			var next []Pin
+			for i := int(in.next() % 3); i > 0; i-- {
+				pin := Pin{Kind: PinKind(in.next() % 6), Name: fuzzNames[int(in.next())%len(fuzzNames)]}
+				if a := in.addr(); a.IsValid() {
+					pin.Addr = netip.AddrPortFrom(a.WithZone(""), uint16(in.next()))
+				}
+				pin.Key[0] = in.next() % 2
+				next = append(next, pin)
+			}
+			if err := p.SetPins(next); err == nil {
+				pins = next
+			}
+		case 2: // check a destination
+			pu := Purpose(in.next() % 6)
+			name := fuzzNames[int(in.next())%len(fuzzNames)]
+			a := in.addr()
+			port := []uint16{53, 443, 80, uint16(in.next())}[in.next()%4]
+			proto := []string{"tcp", "udp", "icmp", ""}[in.next()%4]
+			denies = 0
+			err := pl.doCheck(p, withName(WithPurpose(ctx, pu), name), a, port, proto)
+			what := fmt.Sprintf("%v port %d/%s purpose %d name %q on %+v pins %+v", a, port, proto, pu, name, raw, pins)
+			if err != nil && !errors.Is(err, ErrDenied) {
+				t.Fatalf("%s: error %v is not ErrDenied", what, err)
+			}
+			if want := 0; err != nil && denies != 1 || err == nil && denies != want {
+				t.Fatalf("%s: err %v, OnDeny ran %d times", what, err, denies)
+			}
+			checkVerdict(t, what, err == nil, raw, pins, pu, name, a, port, proto)
+		}
+	}
+}
+
+func checkVerdict(t fuzzT, what string, allowed bool, raw Network, pins []Pin, pu Purpose, name string, a netip.Addr, port uint16, proto string) {
 	t.Helper()
 	a = a.WithZone("").Unmap()
 	if pu == PurposeDNS {
@@ -497,6 +624,91 @@ func checkVerdict(t *testing.T, what string, allowed bool, raw Network, pins []P
 	for _, f := range embedded(a) {
 		if why := homeOrSpecial(f, raw); why != "" {
 			t.Fatalf("%s: allowed, but form %v is %s", what, f, why)
+		}
+	}
+}
+
+// Each control plants a defect in what the target drives and shows its
+// oracle reports it, then shows the real code passes the same input.
+func TestFuzzSourcesReadReportsAPlantedDefect(t *testing.T) {
+	swallow := func(s *Sources) (Network, error) {
+		m, err := s.Read()
+		if errors.Is(err, ErrGatewayMoved) {
+			err = nil
+		}
+		return m, err
+	}
+	for name, c := range map[string]struct {
+		in []byte
+		pl fuzzPlant
+	}{
+		"unrecorded answer":     {[]byte{2, 0, 1, 2, 0, 1, 1, 0}, fuzzPlant{lie: true}},
+		"swallowed second move": {[]byte{2, 0, 1, 2, 0, 1, 1, 1, 2, 1, 3}, fuzzPlant{read: swallow}},
+	} {
+		var rec recorder
+		if len(rec.run(func(ft fuzzT) { fuzzSourcesRead(ft, c.in, c.pl) })) == 0 {
+			t.Errorf("%s: the oracle did not report the planted defect", name)
+		}
+		rec = recorder{}
+		if msgs := rec.run(func(ft fuzzT) { fuzzSourcesRead(ft, c.in, fuzzPlant{}) }); len(msgs) != 0 {
+			t.Errorf("%s: the real code reported: %v", name, msgs)
+		}
+	}
+}
+
+func TestFuzzGatewayPolicyReportsAPlantedDefect(t *testing.T) {
+	swallow := func(p *Policy) error {
+		if err := p.Refresh(); !errors.Is(err, ErrGatewayMoved) {
+			return err
+		}
+		return nil
+	}
+	allowAll := func(*Policy, context.Context, netip.Addr, uint16, string) error { return nil }
+	for name, c := range map[string]struct {
+		in []byte
+		pl fuzzPlant
+	}{
+		"swallowed second move": {seedMovedTwice, fuzzPlant{refresh: swallow}},
+		"allowed external":      {seedRefreshed, fuzzPlant{check: allowAll}},
+	} {
+		var rec recorder
+		if len(rec.run(func(ft fuzzT) { fuzzGatewayPolicy(ft, c.in, c.pl) })) == 0 {
+			t.Errorf("%s: the oracle did not report the planted defect", name)
+		}
+		rec = recorder{}
+		if msgs := rec.run(func(ft fuzzT) { fuzzGatewayPolicy(ft, c.in, fuzzPlant{}) }); len(msgs) != 0 {
+			t.Errorf("%s: the real code reported: %v", name, msgs)
+		}
+	}
+}
+
+func TestFuzzCheckReportsAPlantedDefect(t *testing.T) {
+	allowAll := func(*Policy, context.Context, netip.Addr, uint16, string) error { return nil }
+	wrongError := func(p *Policy, ctx context.Context, a netip.Addr, port uint16, proto string) error {
+		if err := p.Check(ctx, a, port, proto); err != nil {
+			return errors.New("denied")
+		}
+		return nil
+	}
+	for name, pl := range map[string]fuzzPlant{
+		"allows every destination": {check: allowAll},
+		"denies without ErrDenied": {check: wrongError},
+	} {
+		reported := false
+		for _, in := range fuzzCheckSeeds {
+			var rec recorder
+			if len(rec.run(func(ft fuzzT) { fuzzCheck(ft, in, pl) })) != 0 {
+				reported = true
+			}
+		}
+		if !reported {
+			t.Errorf("%s: the oracle did not report the planted defect on any seed", name)
+		}
+	}
+	for _, in := range fuzzCheckSeeds {
+		var rec recorder
+		if msgs := rec.run(func(ft fuzzT) { fuzzCheck(ft, in, fuzzPlant{}) }); len(msgs) != 0 {
+			t.Errorf("the real policy reported: %v", msgs)
 		}
 	}
 }
