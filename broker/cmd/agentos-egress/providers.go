@@ -99,6 +99,10 @@ func providerName(id string) string {
 	return id
 }
 
+// setupKeyCheckWait bounds setupKey's check with the provider. Only
+// tests change it (#1362).
+var setupKeyCheckWait = modelroute.SetupKeyCheckWait
+
 // setupKey stores key as provider's API key, with put's rules, and only a
 // key the proxy could send: printable ASCII with no spaces, at most
 // MaxAPIKey bytes. The provider is asked first, with the adapter's key
@@ -111,7 +115,7 @@ func (c *custody) setupKey(provider string, key []byte) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), modelroute.SetupKeyCheckWait)
+	ctx, cancel := context.WithTimeout(context.Background(), setupKeyCheckWait)
 	defer cancel()
 	rt := c.keyCheck
 	if rt == nil {

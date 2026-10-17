@@ -385,6 +385,33 @@ func TestSetupKeyIsCheckedWithItsProvider(t *testing.T) {
 	}
 }
 
+// A provider that never answers holds the key check only until its
+// deadline: the check then ends as unchecked, 502, and nothing is stored.
+func TestSetupKeyCheckTimesOut(t *testing.T) {
+	r := providerRig(t)
+	r.c.confirm(r.unlock(t), r.code())
+	old := setupKeyCheckWait
+	setupKeyCheckWait = 50 * time.Millisecond
+	t.Cleanup(func() { setupKeyCheckWait = old })
+	r.c.keyCheck = keyCheckRT(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+
+	key := synthetic(t, "sk-canary-")
+	start := time.Now()
+	w := setupCall(t, r.c, "POST", "/setup/providers/key", keyBody("openai", key))
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("key check outlived its 50ms wait: %v", took)
+	}
+	if w.Code != http.StatusBadGateway || hasKind(r.c.v, "openai", vault.KindAPIKey) {
+		t.Fatalf("want 502, nothing stored: got %d %s, stored %v", w.Code, w.Body, hasKind(r.c.v, "openai", vault.KindAPIKey))
+	}
+	if strings.Contains(w.Body.String(), key) {
+		t.Fatalf("answer carries the key: %s", w.Body)
+	}
+}
+
 // The check runs without custody's lock, so the owner channel's code
 // checks and a lock are not held up by a slow provider, and the vault is
 // asked again before the key is stored: a vault locked during the check
