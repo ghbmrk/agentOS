@@ -18,33 +18,39 @@ name: premerge
 # rerun's `success` releases it. The job goes red only when the
 # script errors; once the head is known, an error exit still posts `failure` (the EXIT trap),
 # so a rerun that dies cannot leave an earlier `success` standing on the head.
+# MQ-wire (merge queue, 2026-10-17): a merge-queue commit is not reviewed again. The queue
+# step posts the queued PR's own result: `success` only when the head the queue ref names is
+# still the PR's and this workflow's `premerge` status there is `success`; else `failure`.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
   issue_comment:
     types: [created, edited, deleted]
+  merge_group:
 permissions:
   contents: read
 concurrency:
-  group: premerge-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.merge_group.head_sha }}
   cancel-in-progress: false
 jobs:
   premerge-gate:
     name: premerge-gate
-    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
       issues: read
       pull-requests: read
-      statuses: write # the `premerge` status on the PR head, nothing else
+      statuses: write # the `premerge` status on the PR head (or queue commit), nothing else
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        if: github.event_name != 'merge_group'
         with:
           fetch-depth: 0 # the merge base with the PR head
           persist-credentials: false
       - name: Premerge (base copy of tools/premerge.py)
+        if: github.event_name != 'merge_group'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO: ${{ github.repository }}
@@ -80,4 +86,36 @@ jobs:
           ) && state=success
           out=$(printf '%s' "${out:-error}" | tail -n 1 | tr -cd '\40-\176' | cut -c 1-120)
           echo "premerge $HEAD_SHA: $state ($out)"
+          post "$state" "$out"
+      - name: Merge queue (the queued PR's own premerge status)
+        if: github.event_name == 'merge_group'
+        env:
+          QUEUE_REF: ${{ github.event.merge_group.head_ref }}
+          QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$QUEUE_SHA" | grep -Eqx '[0-9a-f]{40}'
+          posted=no
+          post() {
+            gh api -X POST "repos/$REPO/statuses/$QUEUE_SHA" -f state="$1" -f context=premerge \
+              -f description="$2" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null
+            posted=yes
+          }
+          trap '[ "$posted" = yes ] || post failure error' EXIT
+          state=failure
+          out=bad-queue-ref
+          # gh-readonly-queue/<base>/pr-<number>-<the PR head the queue merged>
+          if [[ "$QUEUE_REF" =~ ^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-([0-9a-f]{40})$ ]]; then
+            n=${BASH_REMATCH[1]}
+            sha=${BASH_REMATCH[2]}
+            head=$(gh api "repos/$REPO/pulls/$n" --jq .head.sha)
+            # Newest first; only this workflow's own status counts.
+            got=$(gh api "repos/$REPO/commits/$sha/statuses?per_page=100" \
+              --jq '[.[] | select(.context == "premerge" and .creator.login == "github-actions[bot]")][0].state // "missing"')
+            out="PR #$n head $sha premerge $got"
+            [ "$head" = "$sha" ] || out="PR #$n head moved"
+            if [ "$head" = "$sha" ] && [ "$got" = success ]; then state=success; fi
+          fi
+          echo "premerge queue $QUEUE_SHA: $state ($out)"
           post "$state" "$out"
