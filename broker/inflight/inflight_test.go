@@ -177,7 +177,7 @@ func TestListenChargesConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ll := g.Listen(l)
+	ll := g.Limit(l)
 	accepted := make(chan net.Conn, 4)
 	go func() {
 		for {
@@ -240,7 +240,7 @@ func TestAWaitingAcceptDoesNotBlockRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ll := g.Listen(l)
+	ll := g.Limit(l)
 	defer ll.Close()
 	accepted := make(chan net.Conn, 4)
 	go func() {

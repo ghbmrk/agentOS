@@ -245,13 +245,13 @@ func (g *Gate) Route(max int64, c Cost, read time.Duration, next http.Handler) h
 	})
 }
 
-// Listen reserves ConnCost for each connection l accepts, until it
+// Limit reserves ConnCost for each connection l accepts, until it
 // closes. Past the guest's share, Accept waits, so further connections
 // wait in the kernel's queue and cost the broker no file descriptor.
 // Accept never queues ahead of a request: it takes room only when no
 // request waits, so a guest's open connections cannot hold back the
 // requests that would let them close.
-func (g *Gate) Listen(l net.Listener) net.Listener {
+func (g *Gate) Limit(l net.Listener) net.Listener {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &listener{Listener: l, g: g, ctx: ctx, cancel: cancel}
 }

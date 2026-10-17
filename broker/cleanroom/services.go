@@ -135,7 +135,7 @@ func (b *Builder) open(id string) (string, error) {
 		MaxHeaderBytes:    inflight.MaxHeaderBytes,
 		BaseContext:       func(net.Listener) context.Context { return context.Background() },
 	}
-	go s.srv.Serve(s.gate.Listen(l))
+	go s.srv.Serve(s.gate.Limit(l))
 	return dir, nil
 }
 

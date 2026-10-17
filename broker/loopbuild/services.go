@@ -254,7 +254,7 @@ func (b *Builder) open(id string) (string, error) {
 	// Each connection holds its share of the in-flight budget while
 	// open, so past it further connections wait in the kernel's queue and
 	// cost agentosd no file descriptor (L3 MUST 2 on #126).
-	go s.srv.Serve(s.gate.Listen(l))
+	go s.srv.Serve(s.gate.Limit(l))
 	return dir, nil
 }
 
