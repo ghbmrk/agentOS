@@ -635,11 +635,17 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 	mc.mu.Unlock()
 	if err != nil {
 		m.release(mc)
+		createTailGap(mc.ID)
 		m.unreserve(mc)
 		return Machine{}, err
 	}
 	return out, nil
 }
+
+// createTailGap runs between a failed create's release and unreserve. It
+// is a test seam: the order is pinned by running a destroy and a same-ID
+// create there (#1712).
+var createTailGap = func(id string) {}
 
 // admit asks admission for mc's budget. It is called without mc's lock,
 // because admission holds its own lock while it calls Preempt. A destroyed
