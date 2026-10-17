@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: ARC-1, DEV-net-h, CH-7
+// REQ: ARC-1, DEV-net-h, CH-7, CRED-1
 
 // The loader runs as root, so its unit bounds what root keeps: the
 // network, firewall and child capabilities only (no CAP_DAC_OVERRIDE), a
@@ -58,7 +58,9 @@ func TestTheUnitIsBounded(t *testing.T) {
 		}
 	}
 	hidden := strings.Fields(strings.Join(set["InaccessiblePaths"], " "))
-	for _, p := range []string{"-/var/lib/agentos-egress", "-/var/lib/agentos/vault"} {
+	// The vault's sockets check only uid == broker uid, which is root in
+	// the shipped unit, so the loader must not reach them (#1628).
+	for _, p := range []string{"-/var/lib/agentos-egress", "-/var/lib/agentos/vault", "-/run/agentos-egress"} {
 		if !slices.Contains(hidden, p) {
 			t.Errorf("InaccessiblePaths %q lacks %s", hidden, p)
 		}
