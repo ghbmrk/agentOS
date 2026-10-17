@@ -963,7 +963,9 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         id_token = (jwt_part({"alg": "none", "typ": "JWT"}) + "." + jwt_part(
             {"exp": 4102444800, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-syn"}})
             + ".unsigned")
-        login = {"OPENAI_API_KEY": None, "last_refresh": "2026-10-17T00:00:00Z",
+        # last_refresh is now: a login about 8 days old is refreshed at startup, before any tool runs.
+        login = {"OPENAI_API_KEY": None,
+                 "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                  "tokens": {"id_token": id_token, "access_token": "agentos-ph-access-old",
                             "refresh_token": "agentos-ph-refresh-old", "account_id": "acct-syn"}}
         if isinstance(body, dict):
