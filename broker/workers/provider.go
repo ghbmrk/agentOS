@@ -16,12 +16,14 @@ import (
 const toolProviderRun = "provider_run"
 
 // ProviderRequest is one provider_run call: the guest's provider, brief and
-// task class, and the caller's label, class and reservation.
+// task class, and the caller's label, class, reservation and lineage (RES-5
+// caps a lineage's concurrent runs).
 type ProviderRequest struct {
 	Provider, Brief, TaskClass string
 	Label                      vm.Label
 	Class                      admission.Class
 	MemMB                      int64
+	Lineage                    string
 }
 
 // ProviderReason is a closed reason a run was refused or failed. The wiring
@@ -71,7 +73,7 @@ func (t *Tools) providerRun(ctx context.Context, c caller, raw json.RawMessage) 
 	}
 	res, err := t.Provider.Run(ctx, ProviderRequest{
 		Provider: a.Provider, Brief: a.Brief, TaskClass: a.TaskClass,
-		Label: c.label, Class: workerClass(c), MemMB: c.spec.MemMB,
+		Label: c.label, Class: workerClass(c), MemMB: c.spec.MemMB, Lineage: c.lineage,
 	})
 	if err != nil {
 		var ref *ProviderRefusal

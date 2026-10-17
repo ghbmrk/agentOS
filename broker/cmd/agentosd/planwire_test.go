@@ -120,7 +120,7 @@ func TestPlanSignInLineFollowsTheRunner(t *testing.T) {
 		t.Fatal("the line is set before any run")
 	}
 	_, err := r.Run(context.Background(), provagent.Request{Provider: "codex", Brief: "b", TaskClass: "code",
-		Label: vm.Public, Class: admission.Experiment, MemMB: 256})
+		Label: vm.Public, Class: admission.Experiment, MemMB: 256, Lineage: "ln-test"})
 	var ref *provagent.Refusal
 	if !errors.As(err, &ref) || ref.Reason != provagent.Unsigned {
 		t.Fatalf("= %v, want unsigned", err)

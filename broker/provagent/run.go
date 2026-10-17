@@ -66,6 +66,11 @@ const DefaultMaxAge = 10 * time.Minute
 // DefaultPerPool is RES-5's default cap on one pool's concurrent workers.
 const DefaultPerPool = 2
 
+// DefaultPerLineage is RES-5's default cap on one agent lineage's
+// concurrent provider runs, on any provider, so one lineage cannot hold
+// every slot of a provider and starve the others.
+const DefaultPerLineage = 2
+
 // Caps bound a run. Wall is the wall clock; Result and Brief are bytes.
 type Caps struct {
 	Wall          time.Duration
@@ -85,7 +90,8 @@ type Request struct {
 	Provider, Brief, TaskClass string
 	Label                      vm.Label // the caller's data label
 	Class                      admission.Class
-	MemMB                      int64 // the caller's reservation
+	MemMB                      int64  // the caller's reservation
+	Lineage                    string // the caller's agent lineage; a run without one is refused
 }
 
 // Runner runs provider agents.
@@ -132,18 +138,21 @@ type Runner struct {
 	Now         func() time.Time
 	MaxAge      time.Duration // how long a reading is current; zero is DefaultMaxAge
 	PerPool     int           // concurrent runs per provider; zero is DefaultPerPool
+	PerLineage  int           // concurrent runs per lineage, on any provider; zero is DefaultPerLineage
 
-	// mu guards Stops, stopped, told, signing, running and probed, and
+	// mu guards Stops, stopped, told, signing, running, lineages and
+	// probed, and
 	// orders the sign-in line's changes. A refused login stops the
 	// provider's route for every later run (CRED-5: no retry, since
 	// retries can worsen a restriction), and the owner is told once per
 	// process, until SignedIn.
-	mu      sync.Mutex
-	stopped map[string]bool      // provider: a stop Stops failed to record, held here (fail closed)
-	told    map[string]bool      // provider: SignIn already called
-	signing map[string]bool      // provider: a sign-in is running (StartSignIn)
-	running map[string]int       // provider: runs admitted and not yet ended
-	probed  map[string]time.Time // provider: when its last probe run was admitted
+	mu       sync.Mutex
+	stopped  map[string]bool      // provider: a stop Stops failed to record, held here (fail closed)
+	told     map[string]bool      // provider: SignIn already called
+	signing  map[string]bool      // provider: a sign-in is running (StartSignIn)
+	running  map[string]int       // provider: runs admitted and not yet ended
+	lineages map[string]int       // lineage: runs admitted and not yet ended, changed with running
+	probed   map[string]time.Time // provider: when its last probe run was admitted
 }
 
 // SignedIn is the owner's sign-in for provider through sign-in worker
@@ -326,15 +335,20 @@ func (r *Runner) run(ctx context.Context, q Request) (text string, n int, outcom
 	if len(q.Brief) > r.Caps.Brief {
 		return fail(Failed)
 	}
+	// Every run counts against its lineage's cap: one without a lineage
+	// is refused before it takes a slot, so none runs uncapped.
+	if q.Lineage == "" {
+		return fail(Failed)
+	}
 	start := r.now()
-	probe, re := r.admit(d, start)
+	probe, re := r.admit(d, q.Lineage, start)
 	if re != "" {
 		return fail(re)
 	}
 	// A probe that never reached the CLI read nothing: forget it, so the
 	// next run (after a sign-in, say) may probe at once.
 	ran := false
-	defer func() { r.release(d.ID, probe && !ran) }()
+	defer func() { r.release(d.ID, q.Lineage, probe && !ran) }()
 
 	id := r.NewID()
 	seed, serr := r.Seeder.Seed(d.ID, id)
@@ -442,8 +456,10 @@ func (r *Runner) now() time.Time {
 // on the broker's connection, so a pool with no current reading (never run
 // against, stale, or past its reset) is unread: the run is then a probe,
 // admitted only alone and once per MaxAge, and its responses are the
-// reading. A run takes one of the provider's PerPool slots until release.
-func (r *Runner) admit(d Declaration, now time.Time) (probe bool, re Reason) {
+// reading. A run takes one of the provider's PerPool slots and one of its
+// lineage's PerLineage slots until release; either cap full is a busy
+// route.
+func (r *Runner) admit(d Declaration, lineage string, now time.Time) (probe bool, re Reason) {
 	if r.Usage == nil || r.Reserve == nil {
 		return false, PoolAtReserve
 	}
@@ -484,10 +500,14 @@ func (r *Runner) admit(d Declaration, now time.Time) (probe bool, re Reason) {
 	if perPool <= 0 {
 		perPool = DefaultPerPool
 	}
+	perLineage := r.PerLineage
+	if perLineage <= 0 {
+		perLineage = DefaultPerLineage
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	n := r.running[d.ID]
-	if n >= perPool {
+	if n >= perPool || r.lineages[lineage] >= perLineage {
 		return false, RouteBusy
 	}
 	if probe {
@@ -504,12 +524,16 @@ func (r *Runner) admit(d Declaration, now time.Time) (probe bool, re Reason) {
 		r.running = map[string]int{}
 	}
 	r.running[d.ID] = n + 1
+	if r.lineages == nil {
+		r.lineages = map[string]int{}
+	}
+	r.lineages[lineage]++
 	return probe, ""
 }
 
-// release frees the slot admit took, and forgets the probe that read
+// release frees the slots admit took, and forgets the probe that read
 // nothing.
-func (r *Runner) release(provider string, forgetProbe bool) {
+func (r *Runner) release(provider, lineage string, forgetProbe bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if forgetProbe {
@@ -517,6 +541,9 @@ func (r *Runner) release(provider string, forgetProbe bool) {
 	}
 	if r.running[provider]--; r.running[provider] <= 0 {
 		delete(r.running, provider)
+	}
+	if r.lineages[lineage]--; r.lineages[lineage] <= 0 {
+		delete(r.lineages, lineage)
 	}
 }
 

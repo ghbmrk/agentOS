@@ -186,7 +186,37 @@ func newRig(cli func(vm.Command, *stub) vm.ExecResult) *rig {
 }
 
 func req(brief string) Request {
-	return Request{Provider: "stub", Brief: brief, TaskClass: "code", Label: vm.Public, Class: admission.Accepted, MemMB: 512}
+	return Request{Provider: "stub", Brief: brief, TaskClass: "code", Label: vm.Public, Class: admission.Accepted, MemMB: 512, Lineage: "ln-a"}
+}
+
+// reqFor is req from lineage, against provider.
+func reqFor(provider, lineage string) Request {
+	q := req("b")
+	q.Provider, q.Lineage = provider, lineage
+	return q
+}
+
+// hangUntil makes every CLI run report on in and wait for release.
+func (g *rig) hangUntil(in, release chan struct{}) {
+	g.h.cli = func(c vm.Command, s *stub) vm.ExecResult {
+		in <- struct{}{}
+		<-release
+		return ok("x")(c, s)
+	}
+}
+
+// refusal runs q against a rig that hangUntil(in, ...): it returns q's
+// refusal, or "admitted" once q reaches the CLI (it then holds a slot until
+// release), so a run the caps should refuse fails the test, never hangs it.
+func (g *rig) refusal(q Request, in chan struct{}) Reason {
+	done := make(chan error, 1)
+	go func() { _, err := g.r.Run(context.Background(), q); done <- err }()
+	select {
+	case err := <-done:
+		return reasonOf(err)
+	case <-in:
+		return "admitted"
+	}
 }
 
 func reasonOf(err error) Reason {
@@ -753,9 +783,7 @@ func TestConcurrentRunsAreCappedPerProvider(t *testing.T) {
 	}
 	other := make(chan error, 1)
 	go func() {
-		rq := req("b")
-		rq.Provider = "credit"
-		_, err := g.r.Run(context.Background(), rq)
+		_, err := g.r.Run(context.Background(), reqFor("credit", "ln-b"))
 		other <- err
 	}()
 	<-in
@@ -772,6 +800,116 @@ func TestConcurrentRunsAreCappedPerProvider(t *testing.T) {
 	g.h.cli = ok("x")
 	if _, err := g.r.Run(context.Background(), req("b")); err != nil {
 		t.Errorf("after: %v", err)
+	}
+}
+
+// RES-5 LIN-1: a run without a lineage is refused before it takes a slot,
+// so no run is outside the lineage cap.
+func TestRunWithoutLineageIsRefusedBeforeASlot(t *testing.T) {
+	g := newRig(ok("x"))
+	if _, err := g.r.Run(context.Background(), reqFor("stub", "")); reasonOf(err) != Failed {
+		t.Fatalf("no lineage: %v", err)
+	}
+	if len(g.h.created) != 0 || len(g.sd.calls) != 0 {
+		t.Error("a run without a lineage reached a worker or a seed")
+	}
+	g.r.mu.Lock()
+	n, l := len(g.r.running), len(g.r.lineages)
+	g.r.mu.Unlock()
+	if n != 0 || l != 0 {
+		t.Errorf("slots held after the refusal: running %d, lineages %d", n, l)
+	}
+}
+
+// RES-5 LIN-2: one lineage holds at most PerLineage runs at once, on any
+// provider; its next run is a busy route while another lineage is admitted.
+func TestConcurrentRunsAreCappedPerLineage(t *testing.T) {
+	g := newRig(nil)
+	in, release := make(chan struct{}, 5), make(chan struct{})
+	g.hangUntil(in, release)
+	errs := make(chan error, 2)
+	for _, p := range []string{"stub", "credit"} {
+		p := p
+		go func() { _, err := g.r.Run(context.Background(), reqFor(p, "ln-a")); errs <- err }()
+	}
+	<-in
+	<-in
+	// Neither provider is at its cap of 2: only the lineage's cap refuses.
+	for _, p := range []string{"stub", "credit"} {
+		if got := g.refusal(reqFor(p, "ln-a"), in); got != RouteBusy {
+			t.Errorf("ln-a's third run on %s: %s, want route-busy", p, got)
+		}
+	}
+	if got := g.refusal(reqFor("stub", "ln-b"), in); got != "admitted" {
+		t.Errorf("ln-b's run: %s, want admitted", got)
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("admitted run: %v", err)
+		}
+	}
+}
+
+// RES-5 LIN-3: a run that ends, however it ends after admission, frees its
+// lineage slot along with its provider slot.
+func TestFinishedRunFreesItsLineageSlot(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		set  func(g *rig)
+		want Reason
+	}{
+		{"ok", func(g *rig) {}, ""},
+		{"timed-out", func(g *rig) { g.h.hang = true; g.r.Caps.Wall = 20 * time.Millisecond }, TimedOut},
+		{"failed", func(g *rig) {
+			g.h.cli = func(vm.Command, *stub) vm.ExecResult { return vm.ExecResult{ExitCode: 2} }
+		}, Failed},
+		{"refused-after-admit", func(g *rig) { g.sd.err = ErrVaultLocked }, VaultLocked},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := newRig(ok("x"))
+			g.r.PerLineage, g.r.PerPool = 1, 1
+			c.set(g)
+			if _, err := g.r.Run(context.Background(), req("b")); reasonOf(err) != c.want {
+				t.Fatalf("run = %v, want %q", err, c.want)
+			}
+			g.r.mu.Lock()
+			n, l := len(g.r.running), len(g.r.lineages)
+			g.r.mu.Unlock()
+			if n != 0 || l != 0 {
+				t.Errorf("slots held after the run: running %d, lineages %d", n, l)
+			}
+			// The lineage's only slot is free again, on another provider too.
+			g.h.hang, g.sd.err, g.h.cli, g.r.Caps.Wall = false, nil, ok("x"), 2*time.Second
+			if _, err := g.r.Run(context.Background(), reqFor("credit", "ln-a")); err != nil {
+				t.Errorf("next run of the lineage: %v", err)
+			}
+		})
+	}
+}
+
+// RES-5 LIN-4: the provider cap still holds across lineages: three lineages
+// each starting one run against one provider are admitted twice and
+// refused once.
+func TestProviderCapHoldsAcrossLineages(t *testing.T) {
+	g := newRig(nil)
+	in, release := make(chan struct{}, 3), make(chan struct{})
+	g.hangUntil(in, release)
+	errs := make(chan error, 2)
+	for _, l := range []string{"ln-a", "ln-b"} {
+		l := l
+		go func() { _, err := g.r.Run(context.Background(), reqFor("stub", l)); errs <- err }()
+	}
+	<-in
+	<-in
+	if got := g.refusal(reqFor("stub", "ln-c"), in); got != RouteBusy {
+		t.Errorf("third lineage: %s, want route-busy", got)
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("admitted run: %v", err)
+		}
 	}
 }
 

@@ -1174,7 +1174,7 @@ type providerTool struct{ r *provagent.Runner }
 
 func (p providerTool) Run(ctx context.Context, q workers.ProviderRequest) (string, error) {
 	out, err := p.r.Run(ctx, provagent.Request{Provider: q.Provider, Brief: q.Brief, TaskClass: q.TaskClass,
-		Label: q.Label, Class: q.Class, MemMB: q.MemMB})
+		Label: q.Label, Class: q.Class, MemMB: q.MemMB, Lineage: q.Lineage})
 	var ref *provagent.Refusal
 	if errors.As(err, &ref) {
 		return "", &workers.ProviderRefusal{Reason: workers.ProviderReason(ref.Reason)}

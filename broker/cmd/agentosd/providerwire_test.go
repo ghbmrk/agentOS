@@ -52,7 +52,7 @@ func filledRunner() *provagent.Runner {
 
 func runCodex(r *provagent.Runner) provagent.Reason {
 	_, err := r.Run(context.Background(), provagent.Request{Provider: "codex", Brief: "b", TaskClass: "code",
-		Label: vm.Public, Class: admission.Experiment, MemMB: 256})
+		Label: vm.Public, Class: admission.Experiment, MemMB: 256, Lineage: "ln-test"})
 	var ref *provagent.Refusal
 	if !errors.As(err, &ref) {
 		return ""

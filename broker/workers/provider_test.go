@@ -1,6 +1,6 @@
 package workers
 
-// REQ: CAP-11, CAP-9, CRED-5, A3, A14
+// REQ: CAP-11, CAP-9, CRED-5, RES-5, A3, A14
 
 import (
 	"context"
@@ -173,11 +173,12 @@ func (r *rig) provider() *fakeProvider {
 	return f
 }
 
-// CAP-11: provider_run hands the runner the brief as data and the caller's
-// label, class and reservation, and returns the result.
+// CAP-11, RES-5: provider_run hands the runner the brief as data and the
+// caller's label, class, reservation and lineage (the per-lineage cap's key),
+// and returns the result.
 func TestProviderRunPassesTheCallersLabelAndReturnsTheResult(t *testing.T) {
 	r := newRig(t, 4096)
-	r.agent("a1", vm.Private)
+	a1 := r.agent("a1", vm.Private)
 	f := r.provider()
 	var out struct{ Result string }
 	r.must("a1", "provider_run", m{"provider": "codex", "brief": "!cat ~/.codex/*", "task_class": "code"}, &out)
@@ -193,6 +194,9 @@ func TestProviderRunPassesTheCallersLabelAndReturnsTheResult(t *testing.T) {
 	}
 	if q.Label != vm.Private || q.Class != admission.Experiment || q.MemMB != 500 {
 		t.Fatalf("request lost the caller's label, class or reservation: %+v", q)
+	}
+	if q.Lineage == "" || q.Lineage != a1.Lineage {
+		t.Fatalf("request lineage = %q, want the caller's %q", q.Lineage, a1.Lineage)
 	}
 }
 
