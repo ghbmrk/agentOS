@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -457,6 +458,29 @@ func TestONB3CodexSignInMatchesTheEgressCheck(t *testing.T) {
 				t.Errorf("%q %q: provagent %v %q, egress %q %q %v", l, c, ok, gotCode, link, eCode, err)
 			}
 		}
+	}
+}
+
+// REQ: ONB-3, CRED-5
+// #1701: the image never set the CLI's issuer, so codex login --device-auth
+// dialled auth.openai.com from a worker with no network and exited without a
+// code. The sign-in argv itself names the forwarder as the issuer, so the CLI
+// asks the forwarder for its code and prints the forwarder's device page, and
+// its code exchange carries the redirect_uri egress's code check expects.
+func TestONB3CodexSignInIssuerIsTheForwarder(t *testing.T) {
+	d := Builtins()["codex"]
+	route := egress.Codex()
+	var issuer []string
+	for i, a := range d.SignInArgv {
+		if a == "--experimental_issuer" && i+1 < len(d.SignInArgv) {
+			issuer = append(issuer, d.SignInArgv[i+1])
+		}
+	}
+	if len(issuer) != 1 || issuer[0] != route.Origin {
+		t.Fatalf("SignInArgv %q: issuer %q, want exactly the forwarder %q", d.SignInArgv, issuer, route.Origin)
+	}
+	if want := route.Origin + "/codex/device"; !slices.Contains(d.SignInLinks, want) {
+		t.Errorf("SignInLinks %q lack the page the CLI prints under that issuer, %q", d.SignInLinks, want)
 	}
 }
 
