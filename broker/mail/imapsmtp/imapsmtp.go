@@ -471,8 +471,8 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 // net/smtp reads each reply through textproto, which bounds neither a
 // line nor the continuation lines of one reply, so without a budget a
 // server that never ends a reply grows the vault's memory until the
-// timeout. A submission's replies, and a STARTTLS handshake read through
-// the same budget, take a few kilobytes.
+// timeout. A submission's replies and its TLS handshake, implicit or
+// STARTTLS, are read through the same budget and take a few kilobytes.
 const smtpReplyBudget = 1 << 20
 
 // Submit sends raw over SMTP submission from the configured address.
@@ -488,6 +488,10 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 	}
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
+	// The budget sits under TLS, so in implicit-TLS mode net/smtp still
+	// sees a *tls.Conn and lets PLAIN and XOAUTH2 authenticate; it then
+	// counts ciphertext, which is just as bounded.
+	conn = &budgetConn{conn, smtpReplyBudget}
 	switch s.cfg.SMTPSec {
 	case TLS:
 		conn = tls.Client(conn, s.tlsConfig(s.cfg.SMTP))
@@ -497,7 +501,7 @@ func (s *Store) Submit(ctx context.Context, rcpt []string, raw []byte) error {
 		return errors.New("imapsmtp: unknown connection security")
 	}
 	host, _, _ := net.SplitHostPort(s.cfg.SMTP)
-	c, err := smtp.NewClient(&budgetConn{conn, smtpReplyBudget}, host)
+	c, err := smtp.NewClient(conn, host)
 	if err != nil {
 		conn.Close()
 		return err

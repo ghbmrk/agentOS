@@ -5,7 +5,14 @@ package imapsmtp
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -18,6 +25,8 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap"
+
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // flood is a raw IMAP server that logs in, selects any folder with UID
@@ -300,11 +309,77 @@ func TestFlagsUpdateKeepsTheBody(t *testing.T) {
 // is sent on the returned channel when the connection ends.
 func smtpFlood(t testing.TB, on, prefix, chunk string) (string, <-chan int64) {
 	t.Helper()
+	return smtpServe(t, listenLoopback(t), on, prefix, chunk)
+}
+
+// smtpFloodTLS is smtpFlood over implicit TLS (port 465 submission),
+// with a certificate for mail.example.com. It returns the listener's
+// address and the pool that trusts the certificate.
+func smtpFloodTLS(t testing.TB, on, prefix, chunk string) (string, <-chan int64, *x509.CertPool) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "mail.example.com"},
+		DNSNames: []string{"mail.example.com"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IsCA: true, BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	l := tls.NewListener(listenLoopback(t), &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+	})
+	addr, wrote := smtpServe(t, l, on, prefix, chunk)
+	return addr, wrote, pool
+}
+
+func listenLoopback(t testing.TB) net.Listener {
+	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
+	return l
+}
+
+// tlsStore submits over implicit TLS to mail.example.com:465, which the
+// address policy resolves to a public synthetic answer and connects to
+// addr, so net/smtp authenticates to a non-loopback name.
+func tlsStore(t testing.TB, addr string, pool *x509.CertPool, timeout time.Duration) *Store {
+	t.Helper()
+	s, err := New(Config{
+		IMAP: "mail.example.com:993", SMTP: "mail.example.com:465", IMAPSec: TLS, SMTPSec: TLS,
+		From: "owner@example.test", Timeout: timeout,
+		TLS: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		Credential: func(context.Context) (Login, error) {
+			return Login{User: "canary-user", Secret: "canary-secret"}, nil
+		},
+		Guard: netguard.New(netguard.Config{
+			Resolver: answers{"8.8.8.8"},
+			Connect: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func smtpServe(t testing.TB, l net.Listener, on, prefix, chunk string) (string, <-chan int64) {
 	wrote := make(chan int64, 1)
 	go func() {
 		c, err := l.Accept()
@@ -368,16 +443,32 @@ func smtpFlood(t testing.TB, on, prefix, chunk string) (string, <-chan int64) {
 func TestHostileSMTPReplyIsBounded(t *testing.T) {
 	big := strings.Repeat("x", 64<<10)
 	more := strings.Repeat("250-"+strings.Repeat("x", 60)+"\r\n", 1<<10)
-	for _, c := range []struct{ name, on, prefix, chunk string }{
-		{"endless greeting line", "", "220 ", big},
-		{"endless greeting continuation", "", "", strings.ReplaceAll(more, "250-", "220-")},
-		{"endless EHLO line", "EHLO", "250 ", big},
-		{"endless EHLO continuation", "EHLO", "", more},
-		{"endless MAIL reply", "MAIL", "250 ", big},
+	for _, c := range []struct {
+		name, on, prefix, chunk string
+		tls                     bool
+	}{
+		{"endless greeting line", "", "220 ", big, false},
+		{"endless greeting continuation", "", "", strings.ReplaceAll(more, "250-", "220-"), false},
+		{"endless EHLO line", "EHLO", "250 ", big, false},
+		{"endless EHLO continuation", "EHLO", "", more, false},
+		{"endless MAIL reply", "MAIL", "250 ", big, false},
+		{"implicit TLS: endless greeting line", "", "220 ", big, true},
+		{"implicit TLS: endless EHLO continuation", "EHLO", "", more, true},
+		{"implicit TLS: endless MAIL reply", "MAIL", "250 ", big, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			addr, wrote := smtpFlood(t, c.on, c.prefix, c.chunk)
-			s := hostileStore(t, addr, 8*time.Second)
+			var s *Store
+			var wrote <-chan int64
+			if c.tls {
+				var addr string
+				var pool *x509.CertPool
+				addr, wrote, pool = smtpFloodTLS(t, c.on, c.prefix, c.chunk)
+				s = tlsStore(t, addr, pool, 8*time.Second)
+			} else {
+				var addr string
+				addr, wrote = smtpFlood(t, c.on, c.prefix, c.chunk)
+				s = hostileStore(t, addr, 8*time.Second)
+			}
 			var before, after runtime.MemStats
 			runtime.GC()
 			runtime.ReadMemStats(&before)
@@ -418,12 +509,21 @@ func TestHostileSMTPReplyIsBounded(t *testing.T) {
 
 // TestSMTPSubmitWithinBudget: an ordinary submission, greeting to QUIT,
 // reads far less than the SMTP budget, so the bound refuses no real
-// server.
+// server. Over implicit TLS to a non-loopback name it must still
+// authenticate: net/smtp sends PLAIN only when it sees a *tls.Conn, so
+// the budget has to sit under TLS, not over it.
 func TestSMTPSubmitWithinBudget(t *testing.T) {
-	addr, _ := smtpFlood(t, "NEVER", "", "")
-	s := hostileStore(t, addr, 8*time.Second)
-	if err := s.Submit(context.Background(), []string{"friend@example.test"},
-		[]byte("From: owner@example.test\r\nTo: friend@example.test\r\n\r\nhi\r\n")); err != nil {
-		t.Fatalf("an ordinary submission failed: %v", err)
-	}
+	msg := []byte("From: owner@example.test\r\nTo: friend@example.test\r\n\r\nhi\r\n")
+	t.Run("plain loopback", func(t *testing.T) {
+		addr, _ := smtpFlood(t, "NEVER", "", "")
+		if err := hostileStore(t, addr, 8*time.Second).Submit(context.Background(), []string{"friend@example.test"}, msg); err != nil {
+			t.Fatalf("an ordinary submission failed: %v", err)
+		}
+	})
+	t.Run("implicit TLS 465 with PLAIN", func(t *testing.T) {
+		addr, _, pool := smtpFloodTLS(t, "NEVER", "", "")
+		if err := tlsStore(t, addr, pool, 8*time.Second).Submit(context.Background(), []string{"friend@example.test"}, msg); err != nil {
+			t.Fatalf("an ordinary implicit-TLS submission failed: %v", err)
+		}
+	})
 }
