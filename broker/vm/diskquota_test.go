@@ -244,8 +244,9 @@ func TestEveryResumeOnALayerTagsItAgain(t *testing.T) {
 	}
 }
 
-// A creation whose kill failed leaves its guest counted, even when its ID
-// is taken again (L3 on #152).
+// A creation whose kill failed leaves its guest counted (L3 on #152). Its
+// record stays too, so its ID is not taken again until a Destroy kills it
+// (P1-4-killfail-create).
 func TestAFailedCreationWhoseKillFailedStaysCounted(t *testing.T) {
 	const budget, reserve = int64(1 << 30), int64(2 << 30)
 	e := newEnv(t, 8192)
@@ -258,7 +259,10 @@ func TestAFailedCreationWhoseKillFailedStaysCounted(t *testing.T) {
 		t.Fatal("creation succeeded")
 	}
 	e.rt.failKill = nil
-	e.create("m", admission.Accepted, 100)
+	if _, err := e.m.Create(bg, "m", Spec{Image: "base", Class: admission.Accepted, MemMB: 100}); !errors.Is(err, ErrExists) {
+		t.Fatalf("the unkilled guest's ID was taken again: %v", err)
+	}
+	e.create("m1", admission.Accepted, 100)
 	if _, err := e.m.Create(bg, "m2", Spec{Image: "base", Class: admission.Accepted, MemMB: 100}); !errors.Is(err, ErrDiskFull) {
 		t.Fatalf("the unkilled guest's room was handed out: %v", err)
 	}
