@@ -11,6 +11,11 @@
 #   python3 image/mkosi/mkosi.finalize --exec-allowlist ROOT > image/mkosi/exec.allow
 etc/modules-load.d/modules.conf	sha256:c0d37c5c430cb5c978a4ea00e42ddc4551b04f76352d149d6be5d5b65346df65
 usr/lib/modprobe.d/agentos-no-bluetooth.conf	sha256:8e276ae184649030b6c135c7634444d955b4c10818050973d8e24cbfa67b3413
+usr/lib/modprobe.d/aliases.conf	sha256:0ffc97a5b69113438c1b7e162ef6871e197e24973f359bfbeef448b089bd67e5
+usr/lib/modprobe.d/fbdev-blacklist.conf	sha256:e99b6166cf309aa1cbbd296d9fbf93af567148c7316c8d5d7a057cf3e85113ea
+usr/lib/modprobe.d/systemd.conf	sha256:e5a3958cbd3684b63f3cada6604469cc56f727b106d5524daf5aefa6935a48ce
+usr/lib/sysctl.d/10-coredump-debian.conf	sha256:3d5c444546b233789f329861de2561afa8cd58340ef70aa81ca0ccbbd5a55068
+usr/lib/sysctl.d/50-pid-max.conf	sha256:a8917a1218bf2809643c2f3931f794ac6d4edfd6da28b250526f9bf11f34f1fd
 usr/lib/sysctl.d/99-agentos-nodump.conf	sha256:c10f9a86da9cb018ff13d753e95fc5220fba8450ec9f3e6b2bde0112f766e7fc
 usr/lib/systemd/system-generators/systemd-bless-boot-generator	sha256:7fa0690753b215a64306e0f45bd78823e500c345005e0564d272bcffeb9a89b5
 usr/lib/systemd/system-generators/systemd-debug-generator	sha256:0ed5110c491db1663a505b27658464d18516be2436310ab3e7074872a6b78d57
