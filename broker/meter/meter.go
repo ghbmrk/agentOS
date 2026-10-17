@@ -92,7 +92,9 @@ var (
 )
 
 // Defaults until the numeric targets are frozen before A4. They are
-// deliberately small: a guest that hits them waits for the owner.
+// deliberately small: a guest that hits them waits for the owner. They
+// are money caps on pay-per-token API routes only (OP-8): a plan route's
+// runs are metered by StartRun and have no fixed call cap.
 var (
 	DefaultMachineCap     = Limits{Calls: 300, Tokens: 3_000_000}
 	DefaultOverallCap     = Limits{Calls: 1500, Tokens: 15_000_000}
@@ -144,14 +146,15 @@ type task struct {
 }
 
 type state struct {
-	Machines map[string][]bucket `json:"machines"`
-	Overall  []bucket            `json:"overall"`
-	Tasks    map[string]*task    `json:"tasks"`
-	Bound    map[string]string   `json:"bound"`    // machine -> task
-	Ext      map[string]Limits   `json:"ext"`      // UTC day -> extensions granted
-	Notified map[string]bool     `json:"notified"` // scope:subject already told
-	Shares   map[string][]bucket `json:"shares"`   // share prefix -> use
-	Goals    map[string]*goalUse `json:"goals"`    // goal -> use, for accounting only
+	Machines map[string][]bucket    `json:"machines"`
+	Overall  []bucket               `json:"overall"`
+	Tasks    map[string]*task       `json:"tasks"`
+	Bound    map[string]string      `json:"bound"`    // machine -> task
+	Ext      map[string]Limits      `json:"ext"`      // UTC day -> extensions granted
+	Notified map[string]bool        `json:"notified"` // scope:subject already told
+	Shares   map[string][]bucket    `json:"shares"`   // share prefix -> use
+	Goals    map[string]*goalUse    `json:"goals"`    // goal -> use, for accounting only
+	Runs     map[string][]runBucket `json:"runs"`     // machine -> plan-route runs, for accounting only
 }
 
 // goalUse is one goal's model use. It limits nothing: caps stay per
@@ -242,6 +245,9 @@ func Open(cfg Config) (*Meter, error) {
 	}
 	if m.st.Goals == nil {
 		m.st.Goals = map[string]*goalUse{}
+	}
+	if m.st.Runs == nil {
+		m.st.Runs = map[string][]runBucket{}
 	}
 	return m, nil
 }
@@ -917,4 +923,107 @@ func WithGoal(ctx context.Context, goal string) context.Context {
 func GoalFrom(ctx context.Context) string {
 	g, _ := ctx.Value(goalKey{}).(string)
 	return g
+}
+
+// RunUse is one machine's provider-agent runs on plan routes (CAP-11) in
+// the current window: how many started and the wall time of those that
+// ended. It limits nothing.
+type RunUse struct {
+	Runs int64         `json:"runs"`
+	Wall time.Duration `json:"wall"`
+}
+
+type runBucket struct {
+	Start int64  `json:"start"` // unix seconds
+	Use   RunUse `json:"use"`
+}
+
+// Run is one provider-agent run on a plan route. Done records its wall
+// time.
+type Run struct {
+	m       *Meter
+	machine string
+	start   time.Time
+	once    sync.Once
+}
+
+// StartRun meters one provider-agent run on a plan route from machine
+// (OP-8). A subscription or plan route has no fixed per-machine, per-task
+// or box-wide call cap: its runs are admitted against the pool's quota and
+// the owner reserve (RES-5) by the runner, so StartRun refuses no run for
+// spend and charges no money cap, task or share. It is metered as runs
+// and wall time; an error is only a run with no machine or one that could
+// not be saved.
+func (m *Meter) StartRun(machine string) (*Run, error) {
+	if machine == "" {
+		return nil, errors.New("meter: a run needs its machine")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.cfg.Now()
+	m.chargeRun(machine, now.Unix(), RunUse{Runs: 1})
+	if err := m.save(); err != nil {
+		return nil, err
+	}
+	return &Run{m: m, machine: machine, start: now}, nil
+}
+
+// Done records the run's wall time; later calls do nothing.
+func (r *Run) Done() {
+	r.once.Do(func() {
+		m := r.m
+		m.mu.Lock()
+		now := m.cfg.Now()
+		m.chargeRun(r.machine, now.Unix(), RunUse{Wall: max(0, now.Sub(r.start))})
+		err := m.save()
+		m.mu.Unlock()
+		if err != nil {
+			m.cfg.SaveError(fmt.Errorf("meter: saving %s's run: %w", r.machine, err))
+		}
+	})
+}
+
+// RunUsage is machine's plan-route runs in the current window.
+func (m *Meter) RunUsage(machine string) RunUse {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var u RunUse
+	for _, b := range m.st.Runs[machine] {
+		if m.inWindow(b.Start, m.cfg.Now().Unix()) {
+			u.Runs += b.Use.Runs
+			u.Wall += b.Use.Wall
+		}
+	}
+	return u
+}
+
+func (m *Meter) inWindow(start, now int64) bool {
+	return start > now-int64(m.cfg.Window/time.Second)
+}
+
+// chargeRun adds use to machine's current run bucket, drops buckets
+// outside the window, and forgets machines with none left. Called with mu
+// held.
+func (m *Meter) chargeRun(machine string, now int64, use RunUse) {
+	start := now - now%m.slot
+	for id, bs := range m.st.Runs {
+		keep := bs[:0]
+		for _, b := range bs {
+			if m.inWindow(b.Start, now) {
+				keep = append(keep, b)
+			}
+		}
+		if len(keep) == 0 {
+			delete(m.st.Runs, id)
+		} else {
+			m.st.Runs[id] = keep
+		}
+	}
+	bs := m.st.Runs[machine]
+	if n := len(bs); n > 0 && bs[n-1].Start == start {
+		bs[n-1].Use.Runs += use.Runs
+		bs[n-1].Use.Wall += use.Wall
+		return
+	}
+	m.st.Runs[machine] = append(bs, runBucket{Start: start, Use: use})
 }
