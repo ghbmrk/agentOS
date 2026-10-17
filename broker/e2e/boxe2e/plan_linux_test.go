@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/e2e/boxe2e/codexstub"
 )
@@ -178,6 +181,11 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 		return "2026-10-16T00:00:00Z pw-1: runsc run failed (exit status 128)\n-- console\n" +
 			"starting container: " + long + codexstub.Canary + ": operation not permitted\n"
 	}
+	d.signInOut = func() string {
+		return "\x1b[1mWelcome to Codex\x1b[0m\n" + strings.Repeat("noise\n", 10) +
+			"forwarder: route socket: dial unix /run/agentos/route.sock: connect: no such file or directory\n" +
+			"Error: device code request failed with status 403 Forbidden " + codexstub.Canary + "\n"
+	}
 	err = d.guestTask()
 	switch {
 	case err == nil:
@@ -190,6 +198,9 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 		t.Errorf("no start: %v cuts the provagent line short", err)
 	case !strings.Contains(err.Error(), "runsc run failed (exit status 128)") || !strings.Contains(err.Error(), "[redacted]: operation not permitted"):
 		t.Errorf("no start: %v does not quote runsc's message whole", err)
+	case !strings.Contains(err.Error(), "sign-in output: ") || !strings.Contains(err.Error(), "route socket: dial unix") ||
+		!strings.Contains(err.Error(), "status 403 Forbidden [redacted]") || strings.Contains(err.Error(), "Welcome") || strings.Contains(err.Error(), "\x1b"):
+		t.Errorf("no start: %v does not quote the end of the sign-in output, escapes cut", err)
 	}
 
 	// The exec log is read under agentosd's -machines directory.
@@ -219,5 +230,38 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 		} else if !strings.Contains(err.Error(), c.says) {
 			t.Errorf("%s: %v does not say %q", name, err, c.says)
 		}
+	}
+}
+
+// The sign-in output is read from the newest provider worker's upper
+// layer under agentosd's -machines directory, its end only; another
+// machine's files are not read (#1701, ASSUMPTIONS E13).
+func TestHW10SignInOutputIsReadFromTheWorkersLayer(t *testing.T) {
+	dir := t.TempDir()
+	if got := signInOutFile(dir); got != "" {
+		t.Fatalf("no worker: read %q", got)
+	}
+	write := func(id, body string, at time.Time) {
+		p := filepath.Join(dir, "machines", id, "disk", "upper", "var/lib/agentos-work", ".agentos-signin")
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	write("pw-old", "old worker", now.Add(-time.Minute))
+	write("wk-agent", "agent machine", now.Add(time.Minute))
+	write("pw-new", strings.Repeat("x", signInOutMax)+"the end", now)
+	got := signInOutFile(dir)
+	if !strings.HasSuffix(got, "the end") || len(got) != signInOutMax {
+		t.Fatalf("read %d bytes ending %q, want the newest provider worker's last %d", len(got), got[max(0, len(got)-10):], signInOutMax)
+	}
+	if want := filepath.Join("/srv/m", "runsc", "exec.log"); execLogPath([]string{"-machines", "/srv/m"}) != want || machinesDir(nil) != "/var/lib/agentos/machines" {
+		t.Fatal("machinesDir does not follow -machines")
 	}
 }
