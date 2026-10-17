@@ -3436,6 +3436,7 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                 ("z /usr/lib/x 0775 - -", "usr/lib/x", "mode 0775 for -:-", "usr/lib/x", other, 0o755),
                 ("d /usr/lib/x 0775", "usr/lib/x", "mode 0775 for -:-", "usr/lib/x", other, 0o755),
                 ("e /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000", "usr/lib/x", None, 0o775),
+                ("d /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000", "usr/lib/x", None, 0o775),
                 ("Z /usr - - 1000", "usr/lib/x", "mode - for -:1000", "usr/lib/x", None, 0o775)):
             with self.subTest(ln=ln, at=at), self.attrs(at, gid=gid, mode=mode):
                 st = check.tree_lstat(self.root, at)
@@ -4342,6 +4343,12 @@ class UplinkTest(unittest.TestCase):
         # image; the tree check refuses any that would (TreeCheckTest).
         removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
         self.assertIn("/usr/lib/systemd/network/80-*.network", removed)
+
+    def test_the_mail_spool_link_is_removed_from_the_image(self):
+        # REQ: HW-1, DEV-2 (#1829): Debian's var/spool/mail links to 2775 root:mail var/mail, a step
+        # gid 8 can write, so the tree check refuses it; the box runs no mail, so the link goes.
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        self.assertIn("/var/spool/mail", removed)
 
     def test_uplink_tells_the_lan_nothing_about_the_box(self):
         # REQ: DEV-2 (#1479): no hostname in DHCP (every box is "agentos"), and IPv6 addresses that

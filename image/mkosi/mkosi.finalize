@@ -377,7 +377,8 @@ def step_refusal(root, d, target, held, st=False, via="through"):
                     % (target, via, d, "uid %d owns" % st.st_uid if st.st_uid != TREE_OWNER
                        else "carries a POSIX ACL (%s)" % ", ".join(acl)))
         if st.st_mode & 0o020 and st.st_gid != TREE_GROUP:
-            # #1829 (gap 3): no named exceptions; no stock link goes through 2775 var/mail or var/local.
+            # #1829 (gap 3): no named exceptions. Debian's var/spool/mail link into 2775 var/mail is
+            # removed by mkosi.conf's RemoveFiles; no other stock link goes through var/mail or var/local.
             return ("a link to %s, %s /%s, which gid %d can write; that group would decide what it "
                     "reads (#1829)" % (target, via, d, st.st_gid))
         # #1829 (gap 2): the box runs tmpfiles.d after the build, so a line naming a held step decides
