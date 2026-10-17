@@ -84,7 +84,7 @@ func join(h any, parts ...[]byte) []byte {
 
 func decode(t *testing.T, raw []byte, f *fakeRunner) (Photo, error) {
 	t.Helper()
-	d := &Decoder{Runner: f, Root: "/img/photo"}
+	d := &Decoder{Runner: f, Root: "/img/photo", Cgroup: "/cg/broker"}
 	return d.Decode(context.Background(), raw)
 }
 
@@ -104,7 +104,7 @@ func TestDecodeAcceptsRealFrame(t *testing.T) {
 		}
 		o := f.calls[0]
 		if o.Root != "/img/photo" || len(o.Argv) != 1 || o.Argv[0] != "/agentos-photo" || !bytes.Equal(o.Stdin, raw) ||
-			o.MemBytes != MemBytes || o.Timeout != Timeout || o.MaxOutput != MaxOutput {
+			o.MemBytes != MemBytes || o.Timeout != Timeout || o.MaxOutput != MaxOutput || o.Cgroup != "/cg/broker" {
 			t.Errorf("run %+v", o)
 		}
 	}
@@ -182,12 +182,25 @@ func TestDecodeRefusals(t *testing.T) {
 	if _, err := decode(t, raw, &fakeRunner{err: context.DeadlineExceeded}); err != RefuseDecode {
 		t.Errorf("deadline: %v", err)
 	}
+	if _, err := decode(t, raw, &fakeRunner{err: gvisor.ErrOneShotMemory}); err != RefuseDecode {
+		t.Errorf("memory cap: %v", err)
+	}
 	if _, err := decode(t, raw, &fakeRunner{err: gvisor.ErrOneShotFailed}); !errors.Is(err, gvisor.ErrOneShotFailed) {
 		t.Errorf("runsc failure: %v", err)
 	}
 	var r Refusal
 	if _, err := decode(t, raw, &fakeRunner{err: gvisor.ErrOneShotFailed}); errors.As(err, &r) {
 		t.Errorf("runsc failure answered refusal %q", r)
+	}
+}
+
+// TestDecodeNeedsCgroup: with no cgroup to hold it to MemBytes, the
+// sandbox does not run (ARC-5).
+func TestDecodeNeedsCgroup(t *testing.T) {
+	f := &fakeRunner{}
+	d := &Decoder{Runner: f, Root: "/img/photo"}
+	if _, err := d.Decode(context.Background(), pngFile(t, 4, 4)); err == nil || len(f.calls) != 0 {
+		t.Errorf("Decode without a cgroup: %v, %d runs", err, len(f.calls))
 	}
 }
 

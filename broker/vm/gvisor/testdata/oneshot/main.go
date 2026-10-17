@@ -28,7 +28,7 @@ func main() {
 		}
 		fmt.Println("dial failed")
 	case "write": // a file anywhere it might land
-		for _, p := range []string{"/x", "/tmp/x", "/proc/x", os.Args[0]} {
+		for _, p := range []string{"/x", "/tmp/x", "/dev/x", "/dev/shm/x", "/sys/x", "/proc/x", os.Args[0]} {
 			if err := os.WriteFile(p, []byte("x"), 0o644); err == nil {
 				fmt.Println("wrote", p)
 			}

@@ -125,7 +125,7 @@ var machinePlane = map[string]struct {
 }{
 	"vm":         {[]string{"admission", "cgroup", "vm/overlay", "quota"}, forbiddenStd},
 	"vm/overlay": {nil, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
-	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota", "childproc"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
+	"vm/gvisor":  {[]string{"vm", "vm/overlay", "quota", "childproc", "cgroup"}, []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 	// photo re-encodes owner photos through agentos-photo in a one-shot
 	// sandbox (CH-23): no image decoder links into the broker, and the
 	// decoder package (photo/decoder) only into agentos-photo.

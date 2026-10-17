@@ -64,7 +64,9 @@ type Runner interface {
 type Decoder struct {
 	Runner Runner
 	Root   string // the read-only root holding /agentos-photo
-	Cgroup string // optional cgroup v2 directory for the sandbox
+	// Cgroup is the cgroup v2 group the sandbox's own group is made under,
+	// which holds it to MemBytes; it is required (gvisor.OneShot.Cgroup).
+	Cgroup string
 }
 
 // Photo is a re-encoded photo and its thumbnail, each a JPEG or a PNG
@@ -93,6 +95,10 @@ var (
 	pngMagic  = []byte("\x89PNG\r\n\x1a\n")
 )
 
+// errNoCgroup refuses a run with no memory cap: gVisor enforces none of
+// its own (gvisor.OneShot.MemBytes).
+var errNoCgroup = errors.New("photo: no cgroup for the sandbox")
+
 // Decode re-encodes raw. The error is a Refusal for a file that was not
 // taken, and anything else for a failure to run the sandbox.
 func (d *Decoder) Decode(ctx context.Context, raw []byte) (Photo, error) {
@@ -102,12 +108,18 @@ func (d *Decoder) Decode(ctx context.Context, raw []byte) (Photo, error) {
 	if !bytes.HasPrefix(raw, jpegMagic) && !bytes.HasPrefix(raw, pngMagic) {
 		return Photo{}, RefuseType
 	}
+	if d.Cgroup == "" {
+		return Photo{}, errNoCgroup
+	}
 	res, err := d.Runner.RunOnce(ctx, gvisor.OneShot{
 		Name: "photo", Root: d.Root, Argv: []string{"/agentos-photo"},
 		Stdin: raw, MaxOutput: MaxOutput, MemBytes: MemBytes, Timeout: Timeout, Cgroup: d.Cgroup,
 	})
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 		return Photo{}, RefuseDecode // the run's own deadline: too costly
+	}
+	if errors.Is(err, gvisor.ErrOneShotMemory) {
+		return Photo{}, RefuseDecode // the memory cap: too costly
 	}
 	if err != nil {
 		return Photo{}, err
