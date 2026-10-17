@@ -11,6 +11,12 @@
 # the proxy swaps the placeholder login for the owner's. The refresh URL override is in launch.json.
 model_provider = "agentos"
 
+# The model is pinned, not left to the CLI: unset, 0.162.1 takes the default of its model catalog,
+# which it refreshes from the provider at every start, so the provider could change the model
+# between the qualification run and G1. This is the bundled catalog's default for 0.162.1, the
+# model G1's provider_run sends (ASSUMPTIONS C19, #1396). A pin bump re-reads it there.
+model = "gpt-6.1-sol"
+
 # Hosted tools off: tools OpenAI runs on its side when the request asks for them ride inside the
 # one declared responses request, so the endpoint list cannot stop them. #1014's request-body
 # check is the enforcement; this keeps a correct CLI from tripping it. MCP servers are blocked by
