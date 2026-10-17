@@ -184,8 +184,10 @@ func TestSR36CurrentReleasesStillProceed(t *testing.T) {
 	f.must(f.store.DropStaged())
 
 	// The owner's path: no attestation authority, so a policy change does
-	// not touch it.
-	owner := res.Release
+	// not touch it. The owner approves the copy Loop 3 proposed, judged
+	// with no pass; the raw result of a check that listed an attestor is
+	// bound (SR3-6-f6).
+	owner := res.Release.WithAttestations(nil, nil)
 	f.must(f.store.NoteAttestors(nil, nil))
 	f.must(f.store.Stage(owner))
 	f.must(f.store.DropStaged())
