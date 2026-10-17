@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/notice"
+	"github.com/ghbmrk/agentos/broker/owner/notice"
 )
 
 // The vault process's owner notices reach the owner through agentosd,

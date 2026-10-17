@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/notice"
+	"github.com/ghbmrk/agentos/broker/owner/notice"
 )
 
 // REQ: OP-9, CH-3, CAP-9
