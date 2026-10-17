@@ -82,18 +82,17 @@ func hasWord(ws []string, set map[string]bool) bool {
 	return false
 }
 
-// hasAction reports whether ws name a state change: an action word, or a
-// word or adjacent pair containing an action stem.
+// hasAction reports whether ws name a state change: an action word, a
+// word containing an action stem, or two adjacent words that start with
+// one ("un subscribed"). A stem that only spans the joint ("explo|re mov|ies")
+// does not count.
 func hasAction(ws []string) bool {
 	if hasWord(ws, actionWords) {
 		return true
 	}
 	for i, w := range ws {
-		if i+1 < len(ws) {
-			w += ws[i+1]
-		}
 		for _, s := range actionStems {
-			if strings.Contains(w, s) {
+			if strings.Contains(w, s) || i+1 < len(ws) && strings.HasPrefix(w+ws[i+1], s) {
 				return true
 			}
 		}
@@ -165,82 +164,142 @@ func pathQueryMatch(path, rawQuery string) bool {
 	return false
 }
 
-// link is what the last snapshot showed for one ref. Only a link, or an
-// element inside one, has a target; any other element is recorded with its
-// role and name so its ref is known and a held click on it can be bound.
+// link is what the last snapshot showed for one ref: its role, the name a
+// click on it acts under and the URL it follows, if any. A click on any
+// part of a clickable element (a link, a button, an element with a pointer
+// cursor) activates the outermost one, so name is the text of that
+// element's whole subtree: its accessible name, nested names and text
+// lines ("[icon] Unsubscribe"). target is the ref's own `/url:` or, inside
+// a link, the nearest enclosing link's, resolved against the page.
 type link struct {
-	isLink bool
 	role   string
 	name   string
 	target string
+	// clickable is set inside a clickable element. A form field or
+	// container outside one ("Confirm password") is not judged by name.
+	clickable bool
+	// dismiss is set for a dialog's "Cancel" or "Close" with no target.
+	dismiss bool
 }
 
-// parseRefs maps each element ref in a raw snapshot to its role, name and,
-// for a link, the target from its `/url:` child resolved against page.
-// The first ref after the quoted name is the element's own (a ref inside
-// the name is page text); refs on a line that cannot be parsed are left
-// out, so a click on them is refused. A click on an element inside a link
-// follows the link, so a nested element takes the nearest enclosing link's
-// target and adds its own name to that link's.
+// held reports whether a click on l may change state at the site.
+func (l link) held(s stateLinks) bool {
+	if l.target != "" && s.match(l.target) {
+		return true
+	}
+	return l.clickable && !l.dismiss && hasAction(words(l.name))
+}
+
+// clickRoles are the roles whose activation is the click itself.
+var clickRoles = wordSet(`link button menuitem menuitemcheckbox menuitemradio tab option checkbox
+	radio switch treeitem`)
+
+// dismissNames close a dialog without acting on it.
+var dismissNames = wordSet(`cancel close dismiss no notnow nothanks`)
+
+// node is one line of a snapshot in its tree.
+type node struct {
+	depth     int
+	role      string
+	ref       string
+	text      []string // the line's own name and text, then its children's
+	url       string
+	pointer   bool
+	parent    *node
+	childText *[]string
+}
+
+// parseRefs maps each element ref in a raw snapshot to a link. A ref is
+// read only from the attributes after the element's name, never from a
+// name or text value (page text), and a ref seen twice is left out; a
+// left-out ref is refused at click (CRED-4). A line that cannot be parsed
+// keeps its place in the tree and its raw text counts toward the
+// enclosing element's name, which can only add holds.
 func parseRefs(snapshot, page string) map[string]link {
 	base, _ := url.Parse(page)
-	refs := map[string]link{}
-	type open struct {
-		depth int
-		l     link
-	}
-	var links []open
-	lines := strings.Split(snapshot, "\n")
-	for i, line := range lines {
-		end, ok := nameEnd(line)
-		if !ok {
+	root := &node{depth: -1}
+	var all []*node
+	stack := []*node{root}
+	for _, line := range strings.Split(snapshot, "\n") {
+		body := strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(body, "- ") {
 			continue
-		}
-		m := refToken.FindStringSubmatch(line[end:])
-		if m == nil {
-			continue
-		}
-		head := strings.TrimLeft(unquoteKey(line[:end]), " \t")
-		role, quoted, _ := strings.Cut(strings.TrimPrefix(head, "- "), " ")
-		name, err := strconv.Unquote(quoted)
-		if err != nil {
-			name = ""
 		}
 		depth := len(indent(line))
-		for len(links) > 0 && links[len(links)-1].depth >= depth {
-			links = links[:len(links)-1]
+		for stack[len(stack)-1].depth >= depth {
+			stack = stack[:len(stack)-1]
 		}
-		l := link{isLink: role == "link", role: role, name: name}
-		if l.isLink {
-			// Only a direct child names the target, not a nested element's.
-			child := -1
-			for j := i + 1; j < len(lines) && len(indent(lines[j])) > depth; j++ {
-				if child < 0 {
-					child = len(indent(lines[j]))
-				}
-				if len(indent(lines[j])) != child {
-					continue
-				}
-				c := childRE.FindStringSubmatch(lines[j])
-				if c != nil && strings.TrimSpace(c[1]) == "- /url" {
-					if href, err := url.Parse(yamlValue(c[2])); err == nil && base != nil {
-						l.target = base.ResolveReference(href).String()
-					}
-					break
+		parent := stack[len(stack)-1]
+		n := &node{depth: depth, parent: parent}
+		if c := childRE.FindStringSubmatch(line); c != nil && strings.HasPrefix(strings.TrimSpace(c[1]), "- /") {
+			// A property line. Only a direct `/url:` child names a target.
+			if strings.TrimSpace(c[1]) == "- /url" && parent.url == "" {
+				if href, err := url.Parse(yamlValue(c[2])); err == nil && base != nil {
+					parent.url = base.ResolveReference(href).String()
+				} else {
+					parent.url = page + "#unparsed"
 				}
 			}
+			continue
 		}
-		if len(links) > 0 {
-			outer := links[len(links)-1].l
-			if !l.isLink || l.target == "" {
-				l.target = outer.target
+		if end, ok := nameEnd(line); ok {
+			head := strings.TrimLeft(unquoteKey(line[:end]), " \t")
+			role, quoted, _ := strings.Cut(strings.TrimPrefix(head, "- "), " ")
+			n.role = role
+			if name, err := strconv.Unquote(quoted); err == nil {
+				n.text = append(n.text, name)
 			}
-			l.isLink, l.name = true, strings.TrimSpace(outer.name+" "+l.name)
+			rest := line[end:]
+			attrs := attrsRE.FindString(rest)
+			if m := refToken.FindStringSubmatch(attrs); m != nil {
+				n.ref = m[1]
+			}
+			n.pointer = strings.Contains(attrs, "[cursor=pointer]")
+			if v, ok := strings.CutPrefix(rest[len(attrs):], ":"); ok {
+				if v = yamlValue(v); v != "" {
+					n.text = append(n.text, v)
+				}
+			}
+		} else {
+			n.text = append(n.text, body[2:])
 		}
-		if role == "link" {
-			links = append(links, open{depth, l})
+		all = append(all, n)
+		stack = append(stack, n)
+	}
+	// Each node's subtree text, children after the node's own.
+	sub := map[*node][]string{}
+	for i := len(all) - 1; i >= 0; i-- {
+		n := all[i]
+		sub[n] = append(append([]string{}, n.text...), sub[n]...)
+		if p := n.parent; p != root {
+			sub[p] = append(append([]string{}, sub[n]...), sub[p]...)
 		}
-		refs[m[1]] = l
+	}
+	refs := map[string]link{}
+	seen := map[string]bool{}
+	for _, n := range all {
+		if n.ref == "" {
+			continue
+		}
+		if seen[n.ref] {
+			delete(refs, n.ref)
+			continue
+		}
+		seen[n.ref] = true
+		l := link{role: n.role}
+		outer, dialog := n, false
+		for a := n; a != root; a = a.parent {
+			if clickRoles[a.role] || a.pointer {
+				outer, l.clickable = a, true
+			}
+			if l.target == "" && a.role == "link" {
+				l.target = a.url
+			}
+			dialog = dialog || a.role == "dialog" || a.role == "alertdialog"
+		}
+		l.name = strings.Join(strings.Fields(strings.Join(sub[outer], " ")), " ")
+		l.dismiss = dialog && l.target == "" && dismissNames[strings.Join(words(l.name), "")]
+		refs[n.ref] = l
 	}
 	return refs
 }

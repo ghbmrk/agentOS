@@ -4,6 +4,7 @@ package browser
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -213,6 +214,59 @@ func TestOrdinaryLinksStillPass(t *testing.T) {
 	}
 }
 
+// Acceptance 3 and 5 on a snapshot Chromium gave for testdata/clicks.html
+// (testdata/snapshot.py): a target is judged by the text of its whole
+// clickable subtree, so an icon-plus-text button or link is held, while
+// ordinary links, dialog dismissals and form fields pass.
+func TestClicksOnARealChromiumSnapshot(t *testing.T) {
+	raw, err := os.ReadFile("testdata/clicks.snapshot.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := strings.TrimSpace(string(raw))
+	h := newHarness(t, map[string]any{"snapshot": pageReply(snap)}, "", 0)
+	if r := h.do(t, `{"v":0,"verb":"snapshot"}`); !r.OK {
+		t.Fatalf("snapshot %+v", r)
+	}
+	x := "https://shop.example.test/x"
+	for ref, want := range map[string]Hold{
+		"e3":  {Role: "button", Name: "mail icon Unsubscribe"}, // role="button" anchor, icon and text child
+		"e4":  {Role: "img", Name: "mail icon Unsubscribe"},    // the icon inside it
+		"e6":  {Role: "button", Name: "trash Delete"},          // a GET form's icon button
+		"e7":  {Role: "img", Name: "trash Delete"},
+		"e8":  {Role: "link", Name: "logo Unsubscribe", URL: x}, // the link's text is a child line
+		"e9":  {Role: "img", Name: "logo Unsubscribe", URL: x},
+		"e10": {Role: "button", Name: "Cancel subscription"},
+		"e11": {Role: "generic", Name: "Unsubscribe"}, // a div with cursor:pointer
+		"e14": {Role: "button", Name: "Remove"},       // a dialog's action is not a dismissal
+		"e19": {Role: "checkbox", Name: "Unsubscribe from news"},
+	} {
+		r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`)
+		if r.Error != "held" {
+			t.Fatalf("click %s: %+v", ref, r)
+		}
+		held, _ := h.g.Held(r.Hold)
+		if held.Role != want.Role || held.Name != want.Name || held.URL != want.URL {
+			t.Fatalf("click %s held %+v, want %+v", ref, held, want)
+		}
+	}
+	if got := forwarded(t, h, "click"); len(got) != 0 {
+		t.Fatalf("driver got %q", got)
+	}
+	// Dialog "Cancel" and "Not now", "Confirm password", "Explore movies",
+	// "Falcon firmware", "Encode letters", the containers, and the text box
+	// after a "[ref=e14]" text decoy.
+	pass := strings.Fields("e1 e2 e13 e15 e16 e17 e18 e20 e21 e22 e23 e24 e26 e27 e28 e29 e30 e31")
+	for _, ref := range pass {
+		if r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`); !r.OK {
+			t.Fatalf("click %s: %+v", ref, r)
+		}
+	}
+	if got := forwarded(t, h, "click"); len(got) != len(pass) {
+		t.Fatalf("driver got %q", got)
+	}
+}
+
 // Acceptance 6: the pattern table.
 func TestStateLinkPatterns(t *testing.T) {
 	p, err := newStateLinks([]string{"https://shop.example.test/account/close"}, Origins{"https://shop.example.test:443": true})
@@ -252,6 +306,11 @@ func TestStateLinkPatterns(t *testing.T) {
 		"https://shop.example.test/signature-dishes":                    false,
 		"https://shop.example.test/products/kettle#reviews":             false,
 		"https://shop.example.test/app#/orders?page=2":                  false,
+		"https://shop.example.test/un-subscribed":                       true,
+		"https://shop.example.test/store/movies":                        false,
+		"https://shop.example.test/code/letters":                        false,
+		"https://shop.example.test/fun/subjects":                        false,
+		"https://shop.example.test/products/falcon-firmware":            false,
 	} {
 		if got := p.match(u); got != want {
 			t.Errorf("%s: got %v, want %v", u, got, want)

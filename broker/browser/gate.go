@@ -210,14 +210,14 @@ func (g *Gate) Do(ctx context.Context, raw []byte) Result {
 			return g.hold(req, link{target: req.URL})
 		}
 	case "click", "download":
-		// The gate must know what a link points at before it is followed. An
-		// action-named element of any role is held too: an anchor with
+		// The gate must know what a link points at before it is followed. A
+		// clickable element named as an action is held too: an anchor with
 		// role="button" or a GET form's button shows no target.
 		l, ok := g.refs[req.Ref]
 		if !ok {
 			return Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}
 		}
-		if l.isLink && g.links.match(l.target) || hasAction(words(l.name)) {
+		if l.held(g.links) {
 			return g.hold(req, l)
 		}
 	}
