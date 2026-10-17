@@ -62,6 +62,8 @@ type Owner interface {
 	// released auto-reply after its release (owner O18).
 	UndoneAfterRelease(id string) bool
 	Inform(text string) error
+	// Post sends text under a pacing class (W5-Dc-r23).
+	Post(class owner.Class, text string) error
 }
 
 // Changes is the change pipeline (change.Pipeline) as the gate uses it:
@@ -1969,7 +1971,9 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
 			// Arbitrator Q1 on #48: one fixed line, no code.
-			_ = own.Inform("Waiting for your confirmation on my Wi-Fi page, or your recovery key.")
+			// Approval class, like the request it announces, so quiet
+			// hours never hold it past that request (W5-Dc-r23, CH-15).
+			_ = own.Post(owner.ClassApproval, "Waiting for your confirmation on my Wi-Fi page, or your recovery key.")
 		}
 	case autoReply:
 		g.queueReply(id, v)
