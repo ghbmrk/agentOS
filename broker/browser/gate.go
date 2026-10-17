@@ -282,7 +282,7 @@ func (g *Gate) send(ctx context.Context, req Request) Result {
 		// CRED-4: pixels cannot be omitted, so a page with a field value the
 		// agent did not type is not shot at all (#2245).
 		if snap.PasswordFields > 0 {
-			return Result{Error: "withheld", Detail: "page shows a field value the agent did not type (CRED-4)",
+			return Result{Error: "withheld", Detail: "page shows a field value you did not type (CRED-4)",
 				RefusedNavigations: snap.RefusedNavigations}
 		}
 	}
@@ -305,7 +305,7 @@ func (g *Gate) send(ctx context.Context, req Request) Result {
 				return snap
 			}
 			if snap.OK && snap.Redactions == 0 {
-				return Result{Error: "withheld", Detail: "page showed a field value the agent did not type during the screenshot (CRED-4)",
+				return Result{Error: "withheld", Detail: "page showed a field value you did not type during the screenshot (CRED-4)",
 					RefusedNavigations: append(res.RefusedNavigations, snap.RefusedNavigations...)}
 			}
 			return Result{Error: "withheld", Detail: "page showed a value the detector matched during the screenshot (CRED-10)",
