@@ -36,8 +36,6 @@ var (
 	emailRe    = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
 	// Identifier shapes that are public by design: UPS tracking numbers.
 	nonSecretID = regexp.MustCompile(`^1Z[0-9A-Z]{16}$`)
-	// Grouped codes such as XXXXX-XXXXX-XXXXX (recovery and backup codes).
-	groupedCode = regexp.MustCompile(`\b[A-Za-z0-9]{4,8}(?:-[A-Za-z0-9]{4,8}){2,}\b`)
 	// Shapes a page or a tool result can carry that are credentials even
 	// when they are not high-entropy (CRED-10; the S5 spike's token list).
 	knownTokens = regexp.MustCompile(`` +
@@ -57,7 +55,7 @@ var (
 // object is removed whole, since it may look harmless on its own (CRED-1).
 func (sc *Scrubber) ScrubFact(f Fact) Fact {
 	obj := Removed
-	if !credPredicate.MatchString(credWords(f.Predicate)) {
+	if !credPredicate.MatchString(credWords(fold(f.Predicate))) {
 		obj = sc.Scrub(f.Object)
 	}
 	return Fact{sc.Scrub(f.Subject), sc.Scrub(f.Predicate), obj}
@@ -114,7 +112,11 @@ func tokenParam(k string) bool {
 	return false
 }
 
-// Scrub returns s with credential material replaced by Removed.
+// Scrub returns s with credential material replaced by Removed. It scrubs
+// the word-anchored shapes as written, then everything as fold spells it,
+// keeping the folded spelling only when that pass removes more: folding a
+// look-alike next to a token or key joins the two and hides the word boundary
+// the written text had.
 func (sc *Scrubber) Scrub(s string) string {
 	if s == "" {
 		return s
@@ -122,20 +124,51 @@ func (sc *Scrubber) Scrub(s string) string {
 	if sc != nil && sc.vault != nil {
 		s = sc.vault(s)
 	}
+	s = scrubAnchored(s)
+	f := fold(s)
+	if out := scrubText(f); out != f {
+		return out
+	}
+	return s
+}
+
+func scrubText(s string) string {
+	s = scrubAnchored(s)
+	s = scrubKeyedCodes(s)
+	s = scrubGroupedCodes(s)
+	return scrubRandom(s)
+}
+
+// scrubAnchored removes the shapes found by a key, scheme or prefix. Each
+// leaves Removed as it is, so running it again changes nothing.
+func scrubAnchored(s string) string {
 	s = pemBlock.ReplaceAllString(s, Removed)
 	s = otpauthURI.ReplaceAllString(s, Removed)
 	s = authHeader.ReplaceAllString(s, "${1} "+Removed)
 	s = authScheme.ReplaceAllString(s, "${1} "+Removed)
-	s = secretKV.ReplaceAllString(s, "${1}"+Removed)
+	s = scrubSecretKV(s)
 	s = scrubKnownTokens(s)
-	s = urlRe.ReplaceAllStringFunc(s, scrubURL)
-	s = groupedCode.ReplaceAllStringFunc(s, func(m string) string {
-		if (hasDigit(m) && hasLetter(m)) || evenGroups(m) {
-			return Removed
+	return urlRe.ReplaceAllStringFunc(s, scrubURL)
+}
+
+// scrubSecretKV replaces each keyed value with Removed, leaving a value that
+// is already Removed as it is, so a second pass does not mangle the marker.
+func scrubSecretKV(s string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range secretKV.FindAllStringSubmatchIndex(s, -1) {
+		if strings.HasPrefix(s[m[4]:], Removed) {
+			continue
 		}
-		return m
-	})
-	return scrubRandom(s)
+		b.WriteString(s[last:m[4]])
+		b.WriteString(Removed)
+		last = m[1]
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 // scrubKnownTokens replaces each known token shape together with the
@@ -246,20 +279,6 @@ func scrubRandom(s string) string {
 		i = j
 	}
 	return b.String()
-}
-
-// evenGroups reports whether every dash-separated group of m has the same
-// length. Generated codes are cut evenly (XXXXX-XXXXX-...) whatever their
-// alphabet, so a code of letters only or digits only is still removed, at
-// any entropy; hyphenated words and dates have parts of differing length.
-func evenGroups(m string) bool {
-	gs := strings.Split(m, "-")
-	for _, g := range gs[1:] {
-		if len(g) != len(gs[0]) {
-			return false
-		}
-	}
-	return true
 }
 
 func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
