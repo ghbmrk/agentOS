@@ -275,7 +275,12 @@ def changed_paths(base, head):
         mb = subprocess.run(["git", "merge-base", base, head], check=True,
                             capture_output=True, text=True).stdout.strip()
         paths += _git_paths("diff", "--name-only", "-z", "--no-renames", mb)
-        paths += _git_paths("ls-files", "-z", "--others", "--exclude-standard")
+        # The index too: a staged file since removed from the worktree still
+        # goes into the next commit.
+        paths += _git_paths("diff", "--cached", "--name-only", "-z", "--no-renames", mb)
+        # --full-name :/ lists the whole repo root-relative, as diff does,
+        # whatever the cwd.
+        paths += _git_paths("ls-files", "-z", "--others", "--exclude-standard", "--full-name", ":/")
     return list(dict.fromkeys(paths))
 
 

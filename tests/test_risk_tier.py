@@ -519,6 +519,11 @@ class RiskTierTest(unittest.TestCase):
             "staged": lambda d, git: (open(os.path.join(d, "image", "build.sh"), "a").write("y\n"),
                                       git("add", "image/build.sh")),
             "untracked": lambda d, git: open(os.path.join(d, "image", "new.sh"), "w").write("y\n"),
+            # The commit takes the index, not the worktree.
+            "staged then removed": lambda d, git: (open(os.path.join(d, "image", "new.sh"), "w").write("y\n"),
+                                                   git("add", "image/new.sh"),
+                                                   os.remove(os.path.join(d, "image", "new.sh")),
+                                                   open(os.path.join(d, "docs", "y.md"), "w").write("z\n")),
         }
         for name, change in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
@@ -529,6 +534,11 @@ class RiskTierTest(unittest.TestCase):
                 self.assertEqual(r.stdout.split()[0], "A", r.stdout)
                 r = self._run(d, "--git", "main")  # HEAD by default
                 self.assertEqual(r.stdout.split()[0], "A", r.stdout)
+                # From a subdirectory, changes outside it still count.
+                for sub in ("docs", "image"):
+                    r = self._run(os.path.join(d, sub), "--git", "main", "HEAD")
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.assertEqual(r.stdout.split()[0], "A", r.stdout)
 
     # RT-3b
     def test_empty_diff_prints_no_tier(self):
