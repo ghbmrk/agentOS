@@ -947,6 +947,15 @@ class ManifestCompareTest(unittest.TestCase):
         self.assertLess(job.index("ok=1"), job.index("compare_manifests.py"))
         self.assertLess(job.index("compare_manifests.py"), job.index("[ $ok = 1 ]"))
 
+    def test_an_e2e_fail_does_not_skip_compress_or_reproduce(self):
+        # #1984: a red e2e step must leave the image upload and the reproducibility check running.
+        wf = (ROOT / ".github/workflows/image.yml").read_text()
+        job = wf[wf.index("  reproduce:"):]
+        self.assertIn("if: ${{ !cancelled() }}", job[:job.index("steps:")])
+        build = wf[:wf.index("  reproduce:")]
+        step = build[build.index("- name: Compress the image"):]
+        self.assertIn("if: ${{ !cancelled() && matrix.run == 'a' }}", step.splitlines()[1])
+
 
 class HealthTest(unittest.TestCase):
     """UPD-1: boot-complete (and so blessing the entry) waits on this check."""
