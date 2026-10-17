@@ -123,9 +123,11 @@ func normQuote(s string) string {
 	return s
 }
 
-// manyDigits are runs a reaction event never passes to the agent: codes
-// and the like in the box's own texts.
-var manyDigits = regexp.MustCompile(`[0-9]{4,}`)
+// carriesCode matches a box text that holds a code or a challenge token: a
+// run of digits (texted codes, RESUME codes) or the token after UNLOCK or
+// RESUME (4 letters and digits). A reaction event never shows such a text
+// to the agent.
+var carriesCode = regexp.MustCompile(`[0-9]{4,}|\b(?:UNLOCK|RESUME) [A-HJ-NP-Z2-9]{4}\b`)
 
 var (
 	replyYes = regexp.MustCompile(`Reply YES ([A-Z][0-9A-Z]{0,2})\b`)
@@ -143,16 +145,33 @@ func (c *Channel) reactionEvent(rx reaction) (event, pointer string) {
 	case t.request:
 		event = fmt.Sprintf("Owner reaction: %s an approval request (not shown). A reaction does not answer it.", rx.kind)
 	case strings.HasPrefix(t.text, AgentPrefix):
-		event = fmt.Sprintf("Owner reaction: %s your text %q", rx.kind, strings.TrimPrefix(t.text, AgentPrefix))
+		// The agent's own text: no pointer, so the broker never vouches
+		// for replies the agent's words name.
+		return fmt.Sprintf("Owner reaction: %s your text %q", rx.kind, strings.TrimPrefix(t.text, AgentPrefix)), ""
+	case carriesCode.MatchString(t.text):
+		event = fmt.Sprintf("Owner reaction: %s a text from the box with a code in it (not shown).", rx.kind)
 	default:
-		event = fmt.Sprintf("Owner reaction: %s the box's text %q", rx.kind, manyDigits.ReplaceAllString(t.text, "[digits]"))
+		event = fmt.Sprintf("Owner reaction: %s the box's text %q", rx.kind, t.text)
 	}
 	return event, replyPointer(t)
 }
 
+// recordReplies adds the texts Handle returns for the owner to the recent
+// texts: the daemon sends them over the owner socket, not this channel's
+// line, so watchedLine never sees them.
+func (c *Channel) recordReplies(from string, out []string) {
+	if from != c.cfg.Owner {
+		return
+	}
+	now := c.cfg.Now()
+	for _, t := range out {
+		c.recent.add(sentText{text: t, at: now})
+	}
+}
+
 // replyPointer is one line naming the valid replies to a text that
 // expects one (an approval request, a question, a RUN offer), sent to the
-// owner as conversation.
+// owner as conversation. It is for the box's own texts only.
 func replyPointer(t sentText) string {
 	if m := replyYes.FindStringSubmatch(t.text); m != nil {
 		return fmt.Sprintf("A reaction does not approve anything. Reply YES %s with the code that text asks for, or NO %s.", m[1], m[1])

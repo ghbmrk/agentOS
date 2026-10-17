@@ -338,13 +338,16 @@ type route struct {
 // back to it.
 func (c *Channel) Handle(ctx context.Context, from, text string) []string {
 	if out, ok := c.stopNow(ctx, from, text); ok {
+		c.recordReplies(from, out)
 		return out
 	}
 	rt, ok := c.route(from, text)
 	if !ok {
 		return nil
 	}
-	return c.finish(ctx, from, rt)
+	out := c.finish(ctx, from, rt)
+	c.recordReplies(from, out)
+	return out
 }
 
 // stopNow applies STOP from the owner at once, without mu, so it never
@@ -1001,8 +1004,8 @@ func (c *Channel) Inform(text string) error {
 // queued (stopNow). The channel's other decisions run in arrival order on
 // one worker, which may wait on a code check; the control handler's part
 // (task chat waits on the agent for up to control.DeliverTimeout) runs on
-// its own goroutine, so a slow agent never delays a STOP behind it (CH-2,
-// B11).
+// its own goroutine, as does a reaction event, so a slow agent never delays
+// a STOP or the next text behind it (CH-2, B11, CH-11).
 func (c *Channel) Run(ctx context.Context) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
@@ -1034,7 +1037,7 @@ func (c *Channel) Run(ctx context.Context) error {
 				if !ok {
 					continue
 				}
-				if !rt.run {
+				if !rt.run && rt.react == "" {
 					send(m.From, c.finish(ctx, m.From, rt))
 					continue
 				}

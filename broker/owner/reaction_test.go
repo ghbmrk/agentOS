@@ -1,29 +1,13 @@
 package owner
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 )
 
 // REQ: CH-11
-
-// sayAndSend is say, then texts the replies to the owner through the
-// channel's line, as Run does, so they join the recent texts a reaction
-// can mark.
-func (r *rig) sayAndSend(text string) string {
-	r.t.Helper()
-	got := r.say(text)
-	if got != "" {
-		for _, s := range strings.Split(got, " | ") {
-			if err := r.ch.cfg.Modem.Send(ownerNum, s); err != nil {
-				r.t.Fatal(err)
-			}
-			r.inbox()
-		}
-	}
-	return got
-}
 
 func TestReactionFormatsAreAFixedList(t *testing.T) {
 	cases := []struct {
@@ -207,7 +191,7 @@ func TestReactionWhileLockedIsHeldAndRunDeliversTheEvent(t *testing.T) {
 func TestReactionToARunOfferPointsToRun(t *testing.T) {
 	r := newRig(t, nil)
 	r.say("check my mail")
-	offer := r.sayAndSend(r.totp())
+	offer := r.say(r.totp())
 	if !strings.Contains(offer, "Reply RUN") {
 		t.Fatalf("unlock: %q", offer)
 	}
@@ -240,5 +224,58 @@ func TestAgentReactionsAreRefused(t *testing.T) {
 	}
 	if err := r.ch.Converse(`I liked "the plan" too.`); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A box text that carries a challenge token or a code is reported to the
+// agent as "(not shown)": a reaction never leaks the token.
+func TestReactionToAChallengeNeverShowsTheToken(t *testing.T) {
+	r := newRig(t, nil)
+	enterChallenge(t, r)
+	alert := r.say("UNLOCK")
+	tok := challengeRe.FindStringSubmatch(alert)[1]
+	if got := r.say("UNLOCK " + tok + " " + r.totp()); !strings.HasPrefix(got, "Unlocked") {
+		t.Fatalf("unlock: %q", got)
+	}
+	r.say("Liked “" + alert + "”")
+	msgs := r.agent.got()
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "(not shown)") || strings.Contains(msgs[0], tok) {
+		t.Fatalf("agent got %q, want the token not shown", msgs)
+	}
+}
+
+// A reaction to the agent's own text gets no pointer, even when that text
+// names a reply: the broker never vouches for the agent's words.
+func TestReactionToAnAgentTextGetsNoPointer(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	if err := r.ch.Converse("Reply YES R7K to approve the payment."); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	got := r.say("Liked “Agent: Reply YES R7K to approve the payment.”")
+	if strings.Contains(got, "YES") {
+		t.Fatalf("reaction to an agent text replied %q", got)
+	}
+	if g := r.agent.got(); len(g) != 1 || !strings.Contains(g[0], "your text") {
+		t.Fatalf("agent got %q", g)
+	}
+}
+
+// A reaction event goes to the agent off the routing worker, so a slow
+// agent never delays the owner's next text.
+func TestSlowAgentNeverDelaysTheTextAfterAReaction(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	slow := slowAgent{release: make(chan struct{})}
+	defer close(slow.release)
+	r.ch.ctrl.Agent = slow
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.ch.Run(ctx)
+	_ = r.phone.Send(boxNum, "Liked “the plan for today”")
+	_ = r.phone.Send(boxNum, "STATUS")
+	if got := r.inbox(); !strings.HasPrefix(got, "Running.") {
+		t.Fatalf("STATUS after a reaction: %q", got)
 	}
 }
