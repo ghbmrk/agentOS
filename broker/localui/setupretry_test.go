@@ -166,6 +166,13 @@ func TestANewCodeThatFailsDropsTheOldCode(t *testing.T) {
 			if _, ok := forms["ai-device openai"]; ok {
 				t.Fatal("sign-in offered for a provider without device codes")
 			}
+			if err == nil { // the refused start ended the old sign-in
+				s.set(fmt.Errorf("%w (sign-in busy)", ErrSignInBusy))
+				submit(r, r.get("/setup"), "ai-device anthropic")
+				if page := r.get("/setup"); shownCode(page) != "" || strings.Contains(page, "CODE-0001") {
+					t.Fatalf("an ended code shown again after a refused new code:\n%s", page)
+				}
+			}
 		})
 	}
 	t.Run("busy brings it back", func(t *testing.T) {
@@ -182,6 +189,25 @@ func TestANewCodeThatFailsDropsTheOldCode(t *testing.T) {
 		submit(r, r.get("/setup"), "ai-retry anthropic")
 		if page := r.get("/setup"); shownCode(page) != "CODE-0002" {
 			t.Fatalf("new code not shown:\n%s", page)
+		}
+	})
+	t.Run("a refused sign-in clears it", func(t *testing.T) {
+		r, s := newSeqRig(t)
+		submit(r, r.get("/setup"), "ai-device anthropic")
+		s.set(errors.New("failed"))
+		submit(r, r.get("/setup"), "ai-retry anthropic")
+		s.set(nil)
+		s.mu.Lock()
+		s.link = "http://example.invalid/device"
+		s.mu.Unlock()
+		submit(r, r.get("/setup"), "ai-device anthropic")
+		s.mu.Lock()
+		s.link = ""
+		s.mu.Unlock()
+		s.set(fmt.Errorf("%w (sign-in busy)", ErrSignInBusy))
+		submit(r, r.get("/setup"), "ai-device anthropic")
+		if page := r.get("/setup"); shownCode(page) != "" || strings.Contains(page, "CODE-0001") {
+			t.Fatalf("an ended code came back after a refused sign-in:\n%s", page)
 		}
 	})
 	t.Run("a new sign-in clears it", func(t *testing.T) {

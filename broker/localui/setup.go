@@ -1409,22 +1409,33 @@ func (u *setup) aiDevice(r *http.Request, _ string) error {
 		return errors.New("A sign-in with that provider is still waiting. Enter its code on the provider's page, or try again once the code expires.")
 	}
 	if err != nil {
+		if errors.Is(err, errRefused) { // a new sign-in started, so no older one waits
+			u.mu.Lock()
+			delete(u.parked, id)
+			delete(u.lapsed, id)
+			u.mu.Unlock()
+		}
 		u.keepAnswer(r, "ai-device", id)
 		return errors.New("Could not start sign-in with that provider. Try again.")
 	}
 	return u.showDevice(r, "ai-device", id, d)
 }
 
+// errRefused: the provider started a new sign-in but the page will not
+// show it. The provider's older sign-in has then ended, since a start
+// while one waits answers busy.
+var errRefused = errors.New("sign-in refused")
+
 // startDevice starts provider id's device-code sign-in and answers its
-// link, code and issuer, refusing a link that is not https or a code
-// with no issuer.
+// link, code and issuer, refusing (errRefused) a link that is not https
+// or a code with no issuer.
 func (u *setup) startDevice(id string) ([3]string, error) {
 	link, code, from, err := u.s.cfg.Hooks.StartDeviceCode(id)
 	if err == nil {
 		if pu, perr := url.Parse(link); perr != nil || pu.Scheme != "https" || pu.Host == "" {
-			err = errors.New("not https")
+			err = fmt.Errorf("%w: not https", errRefused)
 		} else if from == "" {
-			err = errors.New("no issuer") // the page names who sent the code (§8.1 step 6)
+			err = fmt.Errorf("%w: no issuer", errRefused) // the page names who sent the code (§8.1 step 6)
 		}
 	}
 	return [3]string{link, code, from}, err
@@ -1435,7 +1446,8 @@ func (u *setup) startDevice(id string) ([3]string, error) {
 // provider's page. While the provider's sign-in still waits it keeps the
 // shown code, which still works; a new one replaces it; any other answer
 // takes the shown code off the page (lapsed), since nothing then shows
-// it still waits, and offers Sign in again. The private answer was saved
+// it still waits, and offers Sign in again. A new code the page refuses
+// drops the shown one outright: its sign-in has ended. The private answer was saved
 // when the shown sign-in started, so it is not asked or saved again.
 func (u *setup) aiRetry(r *http.Request, _ string) error {
 	if err := u.aiReady(); err != nil {
@@ -1462,6 +1474,11 @@ func (u *setup) aiRetry(r *http.Request, _ string) error {
 	switch {
 	case errors.Is(err, ErrSignInBusy):
 		return errors.New("Your code is still waiting. Enter it on the provider's page, or get a new code once it expires.")
+	case errors.Is(err, errRefused): // the shown code's sign-in ended
+		delete(u.device, id)
+		delete(u.parked, id)
+		delete(u.lapsed, id)
+		return errors.New("Could not get a new code. Sign in again, or try again in a minute.")
 	case err != nil:
 		delete(u.device, id)
 		u.lapsed[id] = old
