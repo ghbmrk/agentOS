@@ -16,11 +16,13 @@ hostname and uses addresses without the MAC, and resolved answers no LLMNR or mu
 Every tmpfiles.d line must be on tmpfiles.allow, nothing but mkosi's credentials may ship in a credential
 store, and no configuration file it reads may be a link other than a mask to /dev/null, or be reached
 through a step that is not root's or that anyone else can write; no link anywhere in the tree may
-reach into a directory anyone on the box can write (#1543).
-Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT prints the
-allowlist for a tree."""
+reach into a directory anyone on the box can write (#1543). Every udev rules file, generator and
+modules-load.d file must be on exec.allow by its hash (#1556).
+Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
+mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import errno
 import fnmatch
+import hashlib
 import os
 import re
 import stat
@@ -251,7 +253,7 @@ def _violations(root):
     return (out + dump_violations(root) + swap_violations(root) + radio_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
-            + credstore_violations(root) + stray_violations(root))
+            + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root))
 
 
 # #1543 (delta 4 B1): every look at the image tree goes through these four primitives, and none of
@@ -1621,28 +1623,40 @@ def tmpfiles_lines(data):
             yield n, ln
 
 
-def tmpfiles_allow_path():
-    """Where tmpfiles.allow is: beside this script, or under $SRCDIR when mkosi runs it (mkosi v24.3
-    mounts the script alone at /work/finalize and the configuration directory at /work/src)."""
+def allow_path(name):
+    """Where the allowlist NAME (tmpfiles.allow, exec.allow) is: beside this script, or under $SRCDIR
+    when mkosi runs it (mkosi v24.3 mounts the script alone at /work/finalize and the configuration
+    directory at /work/src)."""
     for d in (os.path.dirname(os.path.abspath(__file__)), os.environ.get("SRCDIR")):
-        if d and os.path.isfile(os.path.join(d, TMPFILES_ALLOW)):
-            return os.path.join(d, TMPFILES_ALLOW)
+        if d and os.path.isfile(os.path.join(d, name)):
+            return os.path.join(d, name)
     return None
 
 
-def tmpfiles_allowed(path=None):
-    """The allowlist as a set of (file, line): each entry line of tmpfiles.allow is the file's path
-    in the tree, a tab, and the line exactly as tmpfiles_lines gives it. None if the file is missing."""
-    path = path or tmpfiles_allow_path()
+def allow_entries(name, path=None):
+    """The allowlist NAME (at PATH, else allow_path's) as a set of (file, value): each entry line is
+    the file's path in the tree, a tab, and the value, blanks around it dropped. None if the file is
+    missing."""
+    path = path or allow_path(name)
     if path is None:
         return None
     out = set()
     with open(path, encoding="utf-8", errors="surrogateescape") as f:
         for ln in f.read().split("\n"):
             if ln.strip() and not ln.startswith("#"):
-                rel, _, line = ln.partition("\t")
-                out.add((rel, line.strip(" \t")))
+                rel, _, value = ln.partition("\t")
+                out.add((rel, value.strip(" \t")))
     return out
+
+
+def tmpfiles_allow_path():
+    return allow_path(TMPFILES_ALLOW)
+
+
+def tmpfiles_allowed(path=None):
+    """The allowlist as a set of (file, line): each entry line of tmpfiles.allow is the file's path
+    in the tree, a tab, and the line exactly as tmpfiles_lines gives it. None if the file is missing."""
+    return allow_entries(TMPFILES_ALLOW, path)
 
 
 def tmpfiles_entries(root):
@@ -1707,6 +1721,102 @@ TMPFILES_ALLOW_HEADER = """\
 # build prints each new line as "entry: <file><TAB><line>" (the image workflow also shows them as an
 # annotation); check each one, then add it here. With the image tree at hand:
 #   python3 image/mkosi/mkosi.finalize --tmpfiles-allowlist ROOT > image/mkosi/tmpfiles.allow
+"""
+
+
+# #1556: the code root runs at boot outside unit Exec lines. A udev rule runs programs (RUN+=,
+# PROGRAM=, IMPORT{program}=) and writes sysctls (SYSCTL{}=), a generator runs before any unit, and
+# modules-load.d loads modules by name; any of them can turn forwarding on behind a configuration
+# the other checks pass (I21). Each file is held to exec.allow by the SHA-256 of what the box reads:
+# a hash parses nothing, so there is no rules parser here that could disagree with udevd.
+EXEC_ALLOW = "exec.allow"
+EXEC_ALLOW_REPO = "image/mkosi/" + EXEC_ALLOW
+EXEC_REGENERATE = "mkosi.finalize --exec-allowlist ROOT"
+# (directory below each of etc, usr/local/lib, usr/lib and lib, the suffix udevd, systemd or kmod reads)
+EXEC_CHANNELS = (("udev/rules.d", ".rules"), ("systemd/system-generators", ""),
+                 ("systemd/system-environment-generators", ""), ("modules-load.d", ".conf"))
+EXEC_TOPS = ("etc", "usr/local/lib", "usr/lib", "lib")
+# Links the stock tree ships that are read through: the link's path, its exact target, and the
+# in-image file whose content is hashed in its place. Any other link is refused (Conf.content).
+EXEC_LINKS = {"etc/modules-load.d/modules.conf": ("../modules", "etc/modules")}
+
+
+def exec_value(f):
+    """F's entry value: "mask" for a mask or an empty file, else "sha256:" and the hash of what the box
+    reads. OSError (Conf.content's) for anything else, so nothing unreadable passes."""
+    if f.rel in EXEC_LINKS and not f.error and f.is_link() and tree_readlink(f.root, f.rel) == EXEC_LINKS[f.rel][0]:
+        data = Conf(f.root, EXEC_LINKS[f.rel][1]).content()
+    else:
+        data = f.content()
+    return "sha256:" + hashlib.sha256(data).hexdigest() if data else "mask"
+
+
+def exec_entries(root):
+    """(file, value or None, error) of every file in every exec channel directory, not only the one
+    that wins its name: a generator that is not executable is skipped without taking the name, so a
+    winner-only list could miss the one that runs. A directory is resolved inside the image (lib is
+    usr/lib's link), and each file is listed once under its in-image path."""
+    root, seen = str(root), set()
+    for d, suffix in EXEC_CHANNELS:
+        for top in EXEC_TOPS:
+            for f in conf_files(root, ("%s/%s" % (top, d),), suffix):
+                if f.rel in seen:
+                    continue
+                seen.add(f.rel)
+                try:
+                    yield f.rel, exec_value(f), None
+                except OSError as e:
+                    yield f.rel, None, e.strerror
+
+
+def exec_allowed(path=None):
+    """exec.allow as a set of (file, value); None if it is missing."""
+    return allow_entries(EXEC_ALLOW, path)
+
+
+def exec_allow_violations(root, allowed=None):
+    """#1556: every file in the exec channels is on exec.allow with the value it has. Anything under
+    the same directories in /run is refused outright: /run is a tmpfs on the box. Each refusal of an
+    unlisted file ends in the entry that would allow it, for review."""
+    allowed = exec_allowed() if allowed is None else allowed
+    if allowed is None:
+        return ["%s: missing; every udev rules file, generator and modules-load.d file must be on it (#1556)"
+                % EXEC_ALLOW]
+    out = []
+    for d, _ in EXEC_CHANNELS:
+        try:
+            present = tree_lstat(root, "run/" + d) is not None
+        except OSError:
+            present = True
+        if present:
+            out.append("run/%s: not on the boot-code allowlist; /run is a tmpfs on the box (#1556)" % d)
+    for rel, value, err in exec_entries(root):
+        if value is None:
+            out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (rel, err))
+        elif (rel, value) not in allowed:
+            out.append("%s: not on the boot-code allowlist (%s, #1556); review the file, then add the entry after "
+                       "'entry:' to that file (%s only lists what a tree holds, it reviews nothing); entry: %s\t%s"
+                       % (rel, EXEC_ALLOW_REPO, EXEC_REGENERATE, rel, value))
+    return out
+
+
+def exec_allowlist_text(root):
+    """exec.allow for the tree at ROOT: its header, then one entry per file the tree holds."""
+    return EXEC_ALLOW_HEADER + "".join("%s\t%s\n" % (rel, value) for rel, value, _ in exec_entries(root)
+                                       if value is not None)
+
+
+EXEC_ALLOW_HEADER = """\
+# Every file the image may ship in the channels that run code as root at boot outside unit Exec lines
+# (#1556): udev rules, system and environment generators, and modules-load.d, in etc, usr/local/lib,
+# usr/lib and lib. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
+# listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
+# with that value, and on anything under the same directories in /run.
+# To update after a reviewed package update or an edit to mkosi.extra: the failed build prints each
+# new or changed file as "entry: <file><TAB><value>"; review the file, then add it here (and drop the
+# old entry). With the image tree at hand:
+#   python3 image/mkosi/mkosi.finalize --exec-allowlist ROOT > image/mkosi/exec.allow
 """
 
 
@@ -1866,6 +1976,9 @@ def has_key(root, rel):
 def main():
     if sys.argv[1:2] == ["--tmpfiles-allowlist"] and len(sys.argv) == 3:
         sys.stdout.write(tmpfiles_allowlist_text(sys.argv[2]))
+        return
+    if sys.argv[1:2] == ["--exec-allowlist"] and len(sys.argv) == 3:
+        sys.stdout.write(exec_allowlist_text(sys.argv[2]))
         return
     root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BUILDROOT")
     if not root:

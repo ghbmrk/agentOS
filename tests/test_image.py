@@ -6,6 +6,7 @@ import ast
 import base64
 import contextlib
 import errno
+import hashlib
 import json
 import configparser
 import io
@@ -2353,7 +2354,9 @@ class ConfFilesTest(unittest.TestCase):
             self.assertNotEqual(self.v(), [], target)
             f.unlink()
         f = link(self.root, "etc/udev/rules.d", "../../usr/lib/../share/f")
-        self.assertEqual(check.violations(self.root), [])
+        # The boot-code allowlist refuses any linked rules.d (ExecAllowTest); the link check is under test.
+        with unittest.mock.patch.object(check, "exec_allow_violations", return_value=[]):
+            self.assertEqual(check.violations(self.root), [])
         f.unlink()
 
     # #1702 (delta 2, Security 1, P/UX 1): links through what the box makes at boot, none with a '..'.
@@ -2403,7 +2406,8 @@ class ConfFilesTest(unittest.TestCase):
         mut = pathlib.Path(tmp.name) / "mutant.py"
         mut.write_text(src.replace(old, new))
         # Beside the mutant, where it looks for its allowlist, so its whole check can run.
-        (pathlib.Path(tmp.name) / check.TMPFILES_ALLOW).write_text((MK / check.TMPFILES_ALLOW).read_text())
+        for name in (check.TMPFILES_ALLOW, check.EXEC_ALLOW):
+            (pathlib.Path(tmp.name) / name).write_text((MK / name).read_text())
         m = load("image_check_mutant", mut)
         m.TREE_OWNER = os.geteuid()
         m.TREE_GROUP = os.getegid()
@@ -3095,10 +3099,12 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         (self.root / "usr/lib/x").mkdir(parents=True)
         link(self.root, "var/run", "/run")
         link(self.root, "var/lock", "/run/lock")
-        # The guarded-path and link checks are under test here; TmpfilesAllowTest is the allowlist's.
-        patch = unittest.mock.patch.object(check, "tmpfiles_allow_violations", return_value=[])
-        patch.start()
-        self.addCleanup(patch.stop)
+        # The guarded-path and link checks are under test here; TmpfilesAllowTest and ExecAllowTest
+        # are the allowlists' (the latter refuses any linked rules.d).
+        for name in ("tmpfiles_allow_violations", "exec_allow_violations"):
+            patch = unittest.mock.patch.object(check, name, return_value=[])
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def tmpfiles(self, text):
         return write(self.root, "usr/lib/tmpfiles.d/x.conf", text)
@@ -3992,6 +3998,8 @@ def clean_tree(root):
     radio(root)
     uplink(root)
     write(root, "usr/lib/tmpfiles.d/agentos.conf", AGENTOS_TMPFILES.read_text())
+    tpm = "usr/lib/udev/rules.d/60-agentos-tpm.rules"
+    write(root, tpm, (MK / "mkosi.extra" / tpm).read_text())
     return root
 
 
@@ -4176,6 +4184,168 @@ class TmpfilesAllowTest(unittest.TestCase):
         self.assertIn(("etc/tmpfiles.d/x.conf", "L+ /var/run - - - - ../run"), allowed)
         self.assertEqual(check.tmpfiles_allow_violations(self.root, allowed), [])
         self.assertNotEqual(check.tmpfiles_allow_violations(self.root, allowed - {("etc/tmpfiles.d/x.conf", "d /run/y 0755")}), [])
+
+
+class ExecAllowTest(unittest.TestCase):
+    """#1556: the code root runs at boot outside unit Exec lines (udev rules, system and environment
+    generators, modules-load.d) is held to image/mkosi/exec.allow: every file in every directory
+    systemd 257 reads them from, by its path and the SHA-256 of what the box reads. A rule that runs
+    sysctl, or a changed stock generator, fails the build until it is reviewed and listed."""
+    # REQ: DEV-2, CH-9
+    TPM = "usr/lib/udev/rules.d/60-agentos-tpm.rules"
+    HARM = 'ACTION=="add", SUBSYSTEM=="net", RUN+="/usr/sbin/sysctl -w net.ipv4.ip_forward=1"\n'
+    CHANNELS = ("etc/udev/rules.d/99-x.rules", "usr/local/lib/udev/rules.d/99-x.rules",
+                "usr/lib/udev/rules.d/99-x.rules", "etc/systemd/system-generators/x",
+                "usr/local/lib/systemd/system-generators/x", "usr/lib/systemd/system-generators/x",
+                "etc/systemd/system-environment-generators/x", "usr/lib/systemd/system-environment-generators/x",
+                "etc/modules-load.d/x.conf", "usr/local/lib/modules-load.d/x.conf", "usr/lib/modules-load.d/x.conf")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = clean_tree(self.tmp.name)
+
+    def v(self, allowed=None):
+        return check.exec_allow_violations(self.root, allowed)
+
+    @staticmethod
+    def entry(data):
+        return "sha256:" + hashlib.sha256(data.encode()).hexdigest()
+
+    def test_allowlist_file(self):
+        text = (MK / check.EXEC_ALLOW).read_text()
+        self.assertTrue(text.startswith(check.EXEC_ALLOW_HEADER))
+        self.assertIn(check.EXEC_REGENERATE.replace("ROOT", ""), check.EXEC_ALLOW_HEADER)
+        allowed = check.exec_allowed()
+        self.assertIsNotNone(allowed)
+        for ln in text.split("\n"):
+            if ln and not ln.startswith("#"):
+                rel, tab, value = ln.partition("\t")
+                self.assertTrue(tab, ln)
+                self.assertRegex(rel, r"^(etc|usr/local/lib|usr/lib|lib)/(udev/rules\.d/[^/]+\.rules|systemd/system-"
+                                      r"(environment-)?generators/[^/]+|modules-load\.d/[^/]+\.conf)$")
+                self.assertRegex(value, r"^(sha256:[0-9a-f]{64}|mask)$")
+        # The image's own rules file is on it by its hash, so an edit to it fails here first.
+        tpm = (MK / "mkosi.extra" / self.TPM).read_text()
+        self.assertIn((self.TPM, self.entry(tpm)), allowed)
+        self.assertEqual(self.v(), [])
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_listed_files_pass_and_others_fail(self):
+        self.assertEqual(self.v(), [])
+        for rel in self.CHANNELS:
+            with self.subTest(rel=rel):
+                p = write(self.root, rel, self.HARM, 0o755)
+                want = "%s: not on the boot-code allowlist (%s, #1556)" % (rel, check.EXEC_ALLOW_REPO)
+                v = self.v()
+                self.assertEqual(len(v), 1, v)
+                self.assertTrue(v[0].startswith(want), v)
+                self.assertTrue(v[0].endswith("entry: %s\t%s" % (rel, self.entry(self.HARM))), v)
+                self.assertIn(want, " | ".join(check.violations(self.root)))
+                allowed = check.exec_allowed() | {(rel, self.entry(self.HARM))}
+                self.assertEqual(self.v(allowed), [])
+                # One byte changed, and the listed file fails again.
+                write(self.root, rel, self.HARM.replace("=1", "=0"), 0o755)
+                self.assertTrue(self.v(allowed) and self.v(allowed)[0].startswith(want))
+                p.unlink()
+        # The image's own file, changed.
+        write(self.root, self.TPM, (MK / "mkosi.extra" / self.TPM).read_text() + self.HARM)
+        self.assertIn("%s: not on the boot-code allowlist" % self.TPM, " | ".join(check.violations(self.root)))
+
+    def test_every_file_is_listed_not_only_the_winner(self):
+        # systemd runs a generator only if it is executable, and a non-executable file of the same name
+        # in /etc does not take the name, so the /usr/lib one still runs: every file is listed.
+        rel = "usr/lib/systemd/system-generators/x"
+        write(self.root, rel, "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n", 0o755)
+        write(self.root, "etc/systemd/system-generators/x", "", 0o644)
+        allowed = check.exec_allowed() | {("etc/systemd/system-generators/x", "mask")}
+        self.assertIn("%s: not on the boot-code allowlist" % rel, " | ".join(self.v(allowed)))
+        # Hidden and backup names are skipped as systemd skips them; other suffixes in udev and
+        # modules-load.d too, since neither reads them.
+        (self.root / rel).unlink()
+        for rel in ("usr/lib/udev/rules.d/.x.rules", "usr/lib/udev/rules.d/x.rules~", "usr/lib/udev/rules.d/x.txt",
+                    "usr/lib/modules-load.d/x.conf.dpkg-old", "usr/lib/systemd/system-generators/x.bak"):
+            write(self.root, rel, self.HARM, 0o755)
+        self.assertEqual(self.v(allowed), [])
+
+    def test_links_and_masks(self):
+        rel = "etc/udev/rules.d/60-agentos-tpm.rules"
+        write(self.root, "var/tmp/x.rules", self.HARM)
+        for target in ("/var/tmp/x.rules", "../../../var/tmp/x.rules", "/" + self.TPM):
+            with self.subTest(target=target):
+                f = link(self.root, rel, target)
+                self.assertIn("%s: unreadable (%s is a link to %s;" % (rel, rel, target), " | ".join(self.v()))
+                f.unlink()
+        # A mask (a link to exactly /dev/null, or an empty file) is listed as one.
+        for make in (lambda: link(self.root, rel, "/dev/null"), lambda: write(self.root, rel, "")):
+            f = make()
+            self.assertIn("entry: %s\tmask" % rel, " | ".join(self.v()))
+            self.assertEqual(self.v(check.exec_allowed() | {(rel, "mask")}), [])
+            f.unlink()
+        # A linked directory is refused, whatever it holds.
+        (self.root / "var/tmp/r").mkdir()
+        (self.root / "etc/udev/rules.d").rmdir()
+        f = link(self.root, "etc/udev/rules.d", "/var/tmp/r")
+        self.assertIn("etc/udev/rules.d: unreadable (etc/udev/rules.d is a link to /var/tmp/r;", " | ".join(self.v()))
+        f.unlink()
+        # Debian kmod's modules.conf -> ../modules is read through, as kmod's /etc/modules; any other
+        # target of that link is refused.
+        write(self.root, "etc/modules", "tun\n")
+        f = link(self.root, "etc/modules-load.d/modules.conf", "../modules")
+        self.assertIn("entry: etc/modules-load.d/modules.conf\t%s" % self.entry("tun\n"), " | ".join(self.v()))
+        self.assertEqual(self.v(check.exec_allowed() | {("etc/modules-load.d/modules.conf", self.entry("tun\n"))}), [])
+        write(self.root, "etc/modules", "tun\nbr_netfilter\n")
+        self.assertNotEqual(self.v(check.exec_allowed() | {("etc/modules-load.d/modules.conf", self.entry("tun\n"))}),
+                            [])
+        f.unlink()
+        link(self.root, "etc/modules-load.d/modules.conf", "/etc/modules")
+        self.assertIn("etc/modules-load.d/modules.conf: unreadable", " | ".join(self.v()))
+
+    def test_run_and_unreadable_are_refused(self):
+        for d in ("run/udev/rules.d", "run/systemd/system-generators", "run/systemd/system-environment-generators",
+                  "run/modules-load.d"):
+            with self.subTest(d=d):
+                write(self.root, d + "/x", self.HARM)
+                self.assertIn("%s: not on the boot-code allowlist; /run is a tmpfs on the box (#1556)" % d,
+                              " | ".join(self.v()))
+                shutil.rmtree(self.root / d)
+        (self.root / "usr/lib/udev/rules.d/y.rules").mkdir()
+        self.assertIn("usr/lib/udev/rules.d/y.rules: unreadable", " | ".join(self.v()))
+        (self.root / "usr/lib/udev/rules.d/y.rules").rmdir()
+        p = write(self.root, "usr/lib/modules-load.d/x.conf", "tun\n")
+        p.chmod(0o666)
+        self.assertIn("usr/lib/modules-load.d/x.conf: unreadable", " | ".join(self.v()))
+
+    def test_found_under_mkosi_and_missing_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copy(MK / "mkosi.finalize", os.path.join(tmp, "finalize"))
+            moved = load("image_check_moved_exec", os.path.join(tmp, "finalize"))
+            moved.TREE_OWNER = check.TREE_OWNER
+            with unittest.mock.patch.dict(os.environ, {"SRCDIR": str(MK)}):
+                self.assertEqual(moved.allow_path(moved.EXEC_ALLOW), str(MK / check.EXEC_ALLOW))
+                self.assertEqual(moved.exec_allow_violations(self.root), [])
+            with unittest.mock.patch.dict(os.environ, {"SRCDIR": tmp}):
+                want = ["exec.allow: missing; every udev rules file, generator and modules-load.d file must be on it "
+                        "(#1556)"]
+                self.assertEqual(moved.exec_allow_violations(self.root), want)
+                self.assertIn(want[0], moved.violations(self.root))
+
+    def test_regenerate(self):
+        write(self.root, "etc/udev/rules.d/99-x.rules", self.HARM)
+        link(self.root, "usr/lib/systemd/system-generators/y", "/dev/null")
+        out = io.StringIO()
+        with unittest.mock.patch.object(sys, "argv", ["mkosi.finalize", "--exec-allowlist", str(self.root)]), \
+                contextlib.redirect_stdout(out):
+            check.main()
+        self.assertTrue(out.getvalue().startswith(check.EXEC_ALLOW_HEADER))
+        f = pathlib.Path(self.tmp.name) / "allow"
+        f.write_text(out.getvalue())
+        allowed = check.exec_allowed(str(f))
+        self.assertEqual(allowed, {("etc/udev/rules.d/99-x.rules", self.entry(self.HARM)),
+                                   ("usr/lib/systemd/system-generators/y", "mask"),
+                                   (self.TPM, self.entry((MK / "mkosi.extra" / self.TPM).read_text()))})
+        self.assertEqual(self.v(allowed), [])
+        self.assertNotEqual(self.v(allowed - {("usr/lib/systemd/system-generators/y", "mask")}), [])
 
 
 class CredstoreTest(unittest.TestCase):
@@ -4387,12 +4557,13 @@ class TreeAccessTest(unittest.TestCase):
     tree that skipped the link rule (a dangling link in sysctl.d, then tmpfiles.d, then etc/fstab
     through pathlib). mkosi.finalize may touch the file system only in the five tree primitives
     (tree_lstat, tree_listdir, tree_readlink, tree_read, and tree_xattrs, #1803), none of which follows
-    a link on the build host, and in the two functions that read the repository's tmpfiles.allow, not the tree. Only
+    a link on the build host, and in the two functions that read the repository's allowlists (tmpfiles.allow,
+    exec.allow), not the tree. Only
     Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
     ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
-                         "tmpfiles_allow_path", "tmpfiles_allowed"))
+                         "allow_path", "allow_entries"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
 
