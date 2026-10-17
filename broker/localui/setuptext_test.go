@@ -3,6 +3,7 @@ package localui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"html"
 	"net/url"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 type textLine struct {
 	mu       sync.Mutex
 	noNumber bool // the SIM texts but does not report its number
+	fails    int  // the next fails sends fail and are not sent
 	sent     [][2]string
 	inbox    chan [2]string
 }
@@ -38,6 +40,10 @@ func (l *textLine) Number() string {
 func (l *textLine) Send(_ context.Context, to, text string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.fails > 0 {
+		l.fails--
+		return errors.New("modem busy")
+	}
 	l.sent = append(l.sent, [2]string{to, text})
 	return nil
 }
@@ -129,7 +135,7 @@ func TestTheNumberStepOffersNumberEntryWhenTheBoxDoesNotKnowItsNumber(t *testing
 	if w := r.post("/setup/number", url.Values{"number": {ownerNum}}); w.Code >= 400 || r.setupErr() != "" {
 		t.Fatalf("number: %d %q", w.Code, r.setupErr())
 	}
-	if got := line.texts(t, 1); got[0][0] != ownerNum || !strings.HasPrefix(got[0][1], "AgentOS setup code: ") {
+	if got := line.texts(t, 1); got[0][0] != ownerNum || !strings.HasPrefix(got[0][1], "agentOS setup code: ") {
 		t.Fatalf("setup code text %q", got[0])
 	}
 }
@@ -146,7 +152,7 @@ func TestTheNumberFallbackTextsThroughAgentosd(t *testing.T) {
 		t.Fatalf("number: %d %q", w.Code, r.setupErr())
 	}
 	got := line.texts(t, 1)
-	m := regexp.MustCompile(`^AgentOS setup code: ([0-9]{6})\.`).FindStringSubmatch(got[0][1])
+	m := regexp.MustCompile(`^agentOS setup code: ([0-9]{6})\.`).FindStringSubmatch(got[0][1])
 	if got[0][0] != ownerNum || m == nil {
 		t.Fatalf("setup code text %q", got[0])
 	}
@@ -183,7 +189,7 @@ func TestPairTextsReachThePageAndAreAnswered(t *testing.T) {
 		}
 	})
 	got = line.texts(t, 3)
-	if got[2][0] != ownerNum || !regexp.MustCompile(`^AgentOS page code: [0-9]{6}\.`).MatchString(got[2][1]) {
+	if got[2][0] != ownerNum || !regexp.MustCompile(`^agentOS page code: [0-9]{6}\.`).MatchString(got[2][1]) {
 		t.Fatalf("new page code %q", got[2])
 	}
 	if r.srv.setup.st.Owner != ownerNum {
