@@ -1,6 +1,6 @@
 package guest
 
-// REQ: ARC-6, CAP-3
+// REQ: ARC-6, CAP-3, FORGET-FOLDS-1, FORGET-FOLDS-2
 
 import (
 	"context"
@@ -188,5 +188,38 @@ func TestTheManagedTreeIsNeverFolded(t *testing.T) {
 	got := r.rpc("m1", "tools/call", map[string]any{"name": "result_read", "arguments": map[string]any{"id": in.ID}})
 	if got["isError"] == true {
 		t.Fatal("the agent's held result was evicted by managed_tree answers")
+	}
+}
+
+// FORGET-FOLDS-2 (CAP-3): a reset machine keeps its socket but not the
+// results it held, so result_read fails after a forget. Another machine's
+// held results stay.
+func TestResultReadFailsAfterAForgetReset(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.Tools = bigTools{} })
+	held := func(id string) fold.StandIn {
+		res := r.rpc(id, "tools/call", map[string]any{"name": "big", "arguments": map[string]any{}})
+		text, _ := res["content"].([]any)[0].(map[string]any)["text"].(string)
+		var in fold.StandIn
+		if err := json.Unmarshal([]byte(text), &in); err != nil || !in.Folded {
+			t.Fatalf("stand-in: %.80s %v", text, err)
+		}
+		return in
+	}
+	read := func(id string, in fold.StandIn) map[string]any {
+		return r.rpc(id, "tools/call", map[string]any{"name": "result_read", "arguments": map[string]any{"id": in.ID}})
+	}
+	a, b := held("m1"), held("m2")
+	if read("m1", a)["isError"] == true {
+		t.Fatal("held result unreadable before the reset")
+	}
+	r.p.Reset("m1")
+	if read("m1", a)["isError"] != true {
+		t.Fatal("result_read still returns a held result after the reset")
+	}
+	if read("m2", b)["isError"] == true {
+		t.Fatal("resetting m1 dropped m2's held result")
+	}
+	if again := held("m1"); read("m1", again)["isError"] == true {
+		t.Fatal("m1's socket stopped serving after the reset")
 	}
 }

@@ -154,8 +154,11 @@ jobs:
           name: release-${{ matrix.run }}
           path: ${{ runner.temp }}/rec
           if-no-files-found: warn
+      # Compress, upload and the reproduce job still run after a failed boot or e2e step: an
+      # end-to-end FAIL turns this job red, and must not also hide the image and the
+      # reproducibility result (#1984). Only a cancelled run skips them.
       - name: Compress the image
-        if: matrix.run == 'a'
+        if: ${{ !cancelled() && matrix.run == 'a' }}
         run: sudo zstd -q -T0 -10 "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" -o "$RUNNER_TEMP/out/agentos.raw.zst"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always() && matrix.run == 'a'
@@ -171,6 +174,7 @@ jobs:
     # kernel. The initrd is compared but only reported until it is reproducible (BOARD IMG-2).
     # The whole-disk hash is reported too. Both package manifests must list packages.
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2

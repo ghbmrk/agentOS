@@ -36,6 +36,9 @@ type SMS struct {
 	// Owner marks a text from the owner's number (at.Config.Owner), never
 	// a named sender: its reader retries it whether or not it was kept.
 	Owner bool
+	// Picture marks an MMS notice: a picture or file texted to this
+	// number, waiting at the carrier unfetched. It has no Text.
+	Picture bool
 }
 
 // Modem is one SIM: it sends texts from its own number and delivers what

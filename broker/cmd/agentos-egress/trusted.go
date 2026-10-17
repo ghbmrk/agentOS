@@ -795,6 +795,21 @@ func (h *tpmHost) enroll(v *vault.Vault, pin string) (_ string, err error) {
 	if err != nil {
 		return "", err
 	}
+	// A trust that fails leaves the approved boot paths as they were: the
+	// owner hears the PC is not trusted, and a path kept anyway would let
+	// this PC's earlier slot unseal on it (#1781). A slot change that was
+	// decided (ErrSlotDecided) did trust the PC, which needs the path.
+	before, err := h.readFile()
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil && !errors.Is(err, vault.ErrSlotDecided) {
+			if werr := h.writeFile(before); werr != nil {
+				err = errors.Join(err, werr)
+			}
+		}
+	}()
 	if err := h.addPolicy(p, vals); err != nil {
 		return "", err
 	}

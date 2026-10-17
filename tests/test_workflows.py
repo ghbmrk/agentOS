@@ -186,14 +186,16 @@ class WorkflowTest(unittest.TestCase):
 
     def test_no_workflow_pushes_to_main(self):
         # main requires status checks, so a workflow push to it would be rejected; trace.yml,
-        # metrics.yml and records.yml push a bot branch, open its PR and dispatch ci.yml there instead.
+        # metrics.yml and records.yml push a bot branch and open its PR instead; ci.yml is dispatched
+        # there only when BOT_PR_TOKEN is unset, since a BOT_PR_TOKEN push already starts its run.
         for f in self.files():
             self.assertNotRegex(f.read_text(), r"git push\b[^\n]*\bmain\b", f.name)
         self.assertIn("workflow_dispatch:", (WORKFLOWS / "ci.yml").read_text())
         for name in ("trace.yml", "metrics.yml", "records.yml"):
             text = (WORKFLOWS / name).read_text()
             self.assertIn("gh pr create --base main", text, name)
-            self.assertIn('gh workflow run ci.yml --ref "$BRANCH"', text, name)
+            self.assertIn('if [ "$BOT_TOKEN_SET" != true ]; then gh workflow run ci.yml --ref "$BRANCH"; fi', text, name)
+            self.assertIn("BOT_TOKEN_SET: ${{ secrets.BOT_PR_TOKEN != '' }}", text, name)
             self.assertIn('gh pr merge "$BRANCH" --auto --squash', text, name)
 
     def test_records_batch_runs_at_most_daily(self):
@@ -206,6 +208,19 @@ class WorkflowTest(unittest.TestCase):
         self.assertRegex(on, r"(?m)^\s+workflow_dispatch:")
         self.assertNotRegex(on, r"(?m)^\s+push:")
 
+    def test_trace_batch_runs_at_most_daily(self):
+        # One TRACE.md PR a day instead of one per merge (GitHub process audit, 2026-10-17):
+        # ci.yml's `trace.py --check` still guards every PR's markers.
+        text = (WORKFLOWS / "trace.yml").read_text()
+        on = re.search(r"^on:\n((?:[ \t]+.*\n)+)", text, re.M).group(1)
+        self.assertRegex(on, r"cron:\s*'\d+ \d+ \* \* \*'")
+        self.assertRegex(on, r"(?m)^\s+workflow_dispatch:")
+        self.assertNotRegex(on, r"(?m)^\s+push:")
+
+    def test_no_per_push_metrics_refresh(self):
+        # The strict up-to-date rule it served was dropped on 2026-10-15; the daily PR merges as is.
+        self.assertFalse((WORKFLOWS / "metrics-refresh.yml").exists())
+
     def test_bot_token_jobs_run_in_the_bot_environment(self):
         # BOT_PR_TOKEN is a `bot` environment secret restricted to main (#1691, #1769), so every
         # job that can write contents must name that environment, and nothing else names it.
@@ -213,7 +228,7 @@ class WorkflowTest(unittest.TestCase):
             jobs = re.split(r"(?m)^  (?=[a-z][\w-]*:\n)", f.read_text().split("\njobs:\n", 1)[-1])
             for job in jobs:
                 writes, env = "contents: write" in job, bool(re.search(r"(?m)^    environment: bot$", job))
-                if f.name in ("board.yml", "trace.yml", "metrics.yml", "metrics-refresh.yml", "records.yml"):
+                if f.name in ("board.yml", "trace.yml", "metrics.yml", "records.yml"):
                     self.assertEqual(writes, env, f"{f.name}: {job.split(':', 1)[0]}")
                 else:
                     self.assertFalse(env or "BOT_PR_TOKEN" in job, f.name)

@@ -2,6 +2,10 @@ package change
 
 import (
 	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,12 +27,20 @@ import (
 // the journal's change intents in dispatch order, reading the bodies they
 // name; the saved state no longer holds adoptions.
 //
-// Two undo paths are no intent by design and stay in the body: a forget
-// (C23, WhyForgotten) and the owner's own settings replacing the adopted
-// state (Superseded, WhySettings). Replay applies them last.
+// The two undos that happen under the pipeline's own lock, a forget (C23,
+// WhyForgotten) and the owner's own settings replacing the adopted state
+// (Superseded, WhySettings), are revert intents too. They take effect in
+// the same save that owes their intent (oweLocked), and flushOwed
+// journals it once the lock is free: the journal calls Check and Execute
+// under that lock. Replay reads no lifecycle from a body
+// (CHG-forget-revert-journal, SM-AD-2): Content is writable by those who
+// cannot write the state, so once the state is marked LegacyInState a
+// body's lifecycle is ignored and the legacy one comes from the state
+// (CHG-adoption-body-trust).
 
 // lifecycle is an adoption's lifecycle as a state saved before the
-// journal held it recorded it; replay starts such an adoption from it.
+// journal held it recorded it; replay starts such an adoption from it
+// (state.Legacy).
 type lifecycle struct {
 	Staged       bool   `json:"staged,omitempty"`
 	Confirmed    bool   `json:"confirmed,omitempty"`
@@ -36,7 +48,8 @@ type lifecycle struct {
 	WithdrawnFor string `json:"withdrawn_for,omitempty"`
 }
 
-// adoptionBody is what Content holds for an adoption.
+// adoptionBody is what Content holds for an adoption. Legacy is read
+// only from a body an earlier build saved, at the start that migrates it.
 type adoptionBody struct {
 	Adoption
 	Legacy *lifecycle `json:"legacy,omitempty"`
@@ -57,18 +70,94 @@ type savedProposal struct {
 func adoptionKey(id string) string { return "adoption/" + id }
 func proposalKey(id string) string { return "proposal/" + id }
 
-// tailRevert: an undo that is no intent, so the body keeps it.
-func tailRevert(why string) bool { return why == WhyForgotten || why == WhySettings }
+// owedRevert: an undo the pipeline applies under its own lock and then
+// journals (oweLocked). An earlier build kept it in the body.
+func owedRevert(why string) bool { return why == WhyForgotten || why == WhySettings }
 
 // encodeBodyLocked is a's body as Content holds it: the lifecycle fields
-// are the journal's, except an undo that is no intent.
+// are the journal's, and the legacy lifecycle the state's.
 func (p *Pipeline) encodeBodyLocked(a *Adoption) ([]byte, error) {
-	b := adoptionBody{Adoption: *a, Legacy: p.legacy[a.ID]}
-	b.Staged, b.Confirmed, b.WithdrawnFor = false, false, ""
-	if !tailRevert(b.Reverted) {
-		b.Reverted = ""
-	}
+	b := adoptionBody{Adoption: *a}
+	b.Staged, b.Confirmed, b.Reverted, b.WithdrawnFor = false, false, "", ""
 	return json.Marshal(b)
+}
+
+// oweRevertsLocked owes a revert intent for each adoption that next
+// undoes by a forget or the owner's settings and prev left active. The
+// caller saves the effect and the debt together; flushOwed journals it.
+func (p *Pipeline) oweRevertsLocked(prev, next []*Adoption) []string {
+	active := map[string]bool{}
+	for _, a := range prev {
+		active[a.ID] = a.Reverted == ""
+	}
+	var owed []string
+	for _, a := range next {
+		if active[a.ID] && owedRevert(a.Reverted) {
+			owed = append(owed, p.oweLocked(a.ID, a.Reverted))
+		}
+	}
+	return owed
+}
+
+// oweLocked records that adoption id was reverted for why and that the
+// journal does not hold it yet: Applied answers the intent's Execute and
+// Reconcile, Unjournaled keeps it for replay and flushOwed.
+func (p *Pipeline) oweLocked(id, why string) string {
+	p.st.Seq++
+	in := fmt.Sprintf("chg:%s:revert:n%d:%s", id, p.st.Seq, why)
+	p.st.Applied[in] = true
+	p.st.Unjournaled = append(p.st.Unjournaled, in)
+	return in
+}
+
+// unoweLocked takes back what oweLocked added, for an effect whose save
+// failed and was undone in memory.
+func (p *Pipeline) unoweLocked(owed []string) {
+	for _, in := range owed {
+		delete(p.st.Applied, in)
+		p.st.Unjournaled = slices.DeleteFunc(p.st.Unjournaled, func(s string) bool { return s == in })
+	}
+}
+
+// owedIntent is the journal record of an owed revert. It is built from
+// the ID alone, so a retry after a crash has the same fingerprint.
+func owedIntent(id string, parts []string) journal.Intent {
+	return journal.Intent{ID: id, Origin: OriginOwner, Account: journal.BrokerAccount,
+		Action: ActionRevert, Executor: Executor,
+		Params: map[string]any{"adoption": parts[1], "why": parts[4]}}
+}
+
+// flushOwed journals each owed revert. Execute answers it from Applied.
+// One that fails stays owed and is logged by class; the next forget,
+// settings revert or Attach retries it.
+func (p *Pipeline) flushOwed(ctx context.Context) {
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+	p.mu.Lock()
+	j, owed := p.j, slices.Clone(p.st.Unjournaled)
+	p.mu.Unlock()
+	if j == nil {
+		return
+	}
+	for _, id := range owed {
+		parts := parseID(id)
+		if len(parts) != 5 {
+			continue
+		}
+		if err := p.run(ctx, owedIntent(id, parts)); err != nil {
+			if p.cfg.Logf != nil {
+				p.cfg.Logf("change: a %s revert is not journaled yet (%s)", parts[4], errClass(err))
+			}
+			continue
+		}
+		p.mu.Lock()
+		p.st.Unjournaled = slices.DeleteFunc(p.st.Unjournaled, func(s string) bool { return s == id })
+		if err := p.saveLocked(); err != nil && p.cfg.Logf != nil {
+			// Still owed on disk: the next flush finds it journaled.
+			p.cfg.Logf("change: a journaled revert is not saved as such (%s)", errClass(err))
+		}
+		p.mu.Unlock()
+	}
 }
 
 // saveBodiesLocked puts every adoption body that changed since it was
@@ -107,19 +196,48 @@ func cloneAdoptions(ads []*Adoption) []*Adoption {
 }
 
 // migrateLocked moves the adoptions of a state saved before the journal
-// held their lifecycle into Content, each with its saved lifecycle, and
-// saves the state without them. Their adopt intents are in the journal,
-// so replay finds them; later transitions apply on top.
+// held their lifecycle into Content, keeps each saved lifecycle in the
+// state's Legacy, and saves the state without them. Their adopt intents
+// are in the journal, so replay finds them; later transitions apply on
+// top.
 func (p *Pipeline) migrateLocked() error {
-	for _, a := range p.st.Adoptions {
-		p.legacy[a.ID] = &lifecycle{Staged: a.Staged, Confirmed: a.Confirmed, Reverted: a.Reverted, WithdrawnFor: a.WithdrawnFor}
+	if p.st.Legacy == nil {
+		p.st.Legacy = map[string]*lifecycle{}
 	}
+	for _, a := range p.st.Adoptions {
+		p.st.Legacy[a.ID] = &lifecycle{Staged: a.Staged, Confirmed: a.Confirmed, Reverted: a.Reverted, WithdrawnFor: a.WithdrawnFor}
+	}
+	p.st.LegacyInState = true
 	return p.saveLocked()
 }
 
+// sealedProposal is a proposal blob as Content holds it: the body and a
+// MAC over the proposal's ID and the body under a key Content never holds,
+// so a rewritten or misfiled blob is not used (CHG-2, AJS-2).
+type sealedProposal struct {
+	Body json.RawMessage `json:"body"`
+	MAC  string          `json:"mac"`
+}
+
+// proposalMAC binds body to proposal id under a key derived from the
+// pipeline's secret key.
+func (p *Pipeline) proposalMAC(id string, body []byte) []byte {
+	k := hmac.New(sha256.New, p.key)
+	k.Write([]byte("change/proposal-mac"))
+	m := hmac.New(sha256.New, k.Sum(nil))
+	m.Write([]byte(id))
+	m.Write([]byte{0})
+	m.Write(body)
+	return m.Sum(nil)
+}
+
 func (p *Pipeline) putProposalLocked(id string, pr *proposal) error {
-	b, err := json.Marshal(savedProposal{Cand: pr.cand, Base: pr.base, Next: pr.next, Edits: pr.edits,
+	body, err := json.Marshal(savedProposal{Cand: pr.cand, Base: pr.base, Next: pr.next, Edits: pr.edits,
 		Report: pr.report, Example: pr.report.example, Classes: pr.classes, Security: pr.security})
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(sealedProposal{Body: body, MAC: hex.EncodeToString(p.proposalMAC(id, body))})
 	if err != nil {
 		return err
 	}
@@ -127,12 +245,37 @@ func (p *Pipeline) putProposalLocked(id string, pr *proposal) error {
 }
 
 // dropLocked forgets proposal id, in memory and in Content. A failed
-// delete is logged: the proposal is gone from memory, and replay drops a
-// proposal whose intent is no longer waiting.
+// delete is logged and kept in stray, which the next forget retries;
+// replay deletes again the proposal of every intent no longer waiting
+// (C23, AJS-1).
 func (p *Pipeline) dropLocked(id string) {
 	delete(p.props, id)
-	if err := p.content.Delete(proposalKey(id)); err != nil && p.cfg.Logf != nil {
-		p.cfg.Logf("change: proposal not deleted (%s)", errClass(err))
+	p.deleteProposalLocked(id)
+}
+
+func (p *Pipeline) deleteProposalLocked(id string) {
+	if err := p.content.Delete(proposalKey(id)); err != nil {
+		if p.stray == nil {
+			p.stray = map[string]bool{}
+		}
+		p.stray[id] = true
+		if p.cfg.Logf != nil {
+			p.cfg.Logf("change: proposal not deleted (%s)", errClass(err))
+		}
+		return
+	}
+	delete(p.stray, id)
+}
+
+// retryStrayLocked deletes again each proposal whose delete failed.
+func (p *Pipeline) retryStrayLocked() {
+	ids := make([]string, 0, len(p.stray))
+	for id := range p.stray {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		p.deleteProposalLocked(id)
 	}
 }
 
@@ -210,7 +353,21 @@ func (p *Pipeline) replayLocked(j Journal) {
 		case (st.State == journal.Pending || st.State == journal.Authorized) && c.in.Action == ActionAdopt && id == adoptID(c.parts[1]):
 			if pr := p.loadProposalLocked(c.parts[1]); pr != nil {
 				props[c.parts[1]] = pr
+				continue
 			}
+			// Waiting, but its blob is absent, unsealed or forged: nothing
+			// can adopt it, so its bytes go now rather than outliving a
+			// forget of the goal they came from (AJS-1, AJS-2).
+			if p.cfg.Logf != nil {
+				p.cfg.Logf("change: a waiting proposal did not load or failed its seal; dropped, propose again")
+			}
+			p.deleteProposalLocked(c.parts[1])
+			continue
+		}
+		if c.in.Action == ActionAdopt && id == adoptID(c.parts[1]) {
+			// No longer waiting: its candidate bytes go, even when the
+			// settle's delete failed or never ran (AJS-1).
+			p.deleteProposalLocked(c.parts[1])
 		}
 	}
 	sort.SliceStable(done, func(a, b int) bool { return done[a].seq < done[b].seq })
@@ -218,6 +375,12 @@ func (p *Pipeline) replayLocked(j Journal) {
 	var ads []*Adoption
 	byAd := map[string]*Adoption{}
 	tail := map[string]string{}
+	// trusted: the bodies are an earlier build's, which kept the lifecycle
+	// in them; this start reads it once and moves it to the state. strip:
+	// the bodies holding a lifecycle, put again without it.
+	trusted := !p.st.LegacyInState
+	var strip []string
+	legacyMoved := false
 	for _, c := range done {
 		id := c.parts[1]
 		switch {
@@ -230,12 +393,43 @@ func (p *Pipeline) replayLocked(j Journal) {
 				p.brokenLocked("adoption body missing", err)
 				return
 			}
-			if tailRevert(a.Reverted) {
-				tail[id] = a.Reverted
+			if legacy != nil || a.Reverted != "" || a.Staged || a.Confirmed || a.WithdrawnFor != "" {
+				strip = append(strip, id)
+			}
+			switch {
+			case !trusted:
+				// The state holds the legacy lifecycle; the body's is ignored (ABT-1).
+				legacy = nil
+				if l := p.st.Legacy[id]; l != nil {
+					if owedRevert(l.Reverted) {
+						// A pre-journal state's forget or settings revert
+						// (migrateLocked): owed once below, and cleared from
+						// the state so a later start does not owe it again.
+						tail[id] = l.Reverted
+						l.Reverted = ""
+						legacyMoved = true
+					}
+					c := *l
+					legacy = &c
+				}
+			case owedRevert(a.Reverted):
+				tail[id] = a.Reverted // an earlier build's body revert
 			}
 			a.Reverted, a.Staged, a.Confirmed, a.WithdrawnFor = "", false, false, ""
 			if legacy != nil {
-				p.legacy[id] = legacy
+				if trusted {
+					if owedRevert(legacy.Reverted) {
+						// A pre-journal state's forget or settings revert:
+						// the journal holds it, or it is owed below (#1995).
+						tail[id] = legacy.Reverted
+						legacy.Reverted = ""
+					}
+					if p.st.Legacy == nil {
+						p.st.Legacy = map[string]*lifecycle{}
+					}
+					c := *legacy
+					p.st.Legacy[id] = &c
+				}
 				a.Staged, a.Confirmed, a.Reverted, a.WithdrawnFor = legacy.Staged, legacy.Confirmed, legacy.Reverted, legacy.WithdrawnFor
 			} else {
 				for _, cl := range a.Classes {
@@ -264,10 +458,42 @@ func (p *Pipeline) replayLocked(j Journal) {
 			a.Reverted = why
 		}
 	}
-	for _, a := range ads {
-		if why := tail[a.ID]; why != "" && a.Reverted == "" {
-			a.Reverted = why
+	// Owed reverts: applied and saved with their effect, not yet in the
+	// journal (oweLocked). One the journal now holds was applied above.
+	var owed []string
+	for _, in := range p.st.Unjournaled {
+		parts := parseID(in)
+		if len(parts) != 5 || parts[2] != "revert" || !owedRevert(parts[4]) || byAd[parts[1]] == nil {
+			continue
 		}
+		if st, err := j.Get(in); err == nil && st.State == journal.Succeeded {
+			continue
+		}
+		owed = append(owed, in)
+		if a := byAd[parts[1]]; a.Reverted == "" {
+			a.Reverted = parts[4]
+		}
+	}
+	resave := len(owed) != len(p.st.Unjournaled)
+	p.st.Unjournaled = owed
+	// A body an earlier build saved with a forget or settings revert in
+	// it, top-level or in its legacy lifecycle, on an adoption the journal
+	// leaves active: owe it once. Every such body is put again without it.
+	owes := false
+	for _, a := range ads {
+		why := tail[a.ID]
+		if why == "" {
+			continue
+		}
+		if a.Reverted == "" {
+			a.Reverted = why
+			p.oweLocked(a.ID, why)
+			owes = true
+		}
+	}
+	if trusted || legacyMoved {
+		p.st.LegacyInState = true
+		resave = true
 	}
 	p.st.Adoptions = ads
 	p.savedAds = cloneAdoptions(ads)
@@ -282,7 +508,61 @@ func (p *Pipeline) replayLocked(j Journal) {
 			p.props[id] = pr
 		}
 	}
+	// The debt, the legacy lifecycles and the mark are saved before a
+	// migrated body loses its lifecycle, so a crash or failed save between
+	// the two keeps it somewhere (ABT-3). This save puts no body: each
+	// matches lastBody.
+	if resave || owes {
+		if err := p.saveLocked(); err != nil {
+			p.brokenLocked("owed reverts not saved", err)
+			return
+		}
+	}
+	if len(strip) > 0 {
+		for _, id := range strip {
+			delete(p.lastBody, id) // put again, without the lifecycle
+		}
+		if err := p.saveLocked(); err != nil {
+			p.brokenLocked("migrated bodies not saved", err)
+			return
+		}
+	}
+	p.sweepOrphansLocked()
 	p.reforgetLocked()
+}
+
+// sweepOrphansLocked deletes the proposal blob of each ID minted since the
+// last sweep that no intent waits on. A stop between putProposalLocked
+// and the submit of its adopt intent leaves such a blob; no intent names
+// it, so replay and a forget would never reach its bytes (CAP-3, C23,
+// OPS-1). IDs are minted in order and their sequence saved before the
+// put, so c<Swept+1>..c<Seq> covers every one. A failed delete goes to
+// stray and holds the mark below it, so the next forget and the next
+// start both retry it (OPS-2); the mark is saved, so each ID is swept
+// once (OPS-3).
+func (p *Pipeline) sweepOrphansLocked() {
+	if p.st.Swept >= p.st.Seq {
+		return
+	}
+	mark := p.st.Seq
+	for n := p.st.Swept + 1; n <= p.st.Seq; n++ {
+		id := "c" + strconv.Itoa(n)
+		if p.props[id] != nil {
+			continue
+		}
+		p.deleteProposalLocked(id)
+		if p.stray[id] && mark == p.st.Seq {
+			mark = n - 1
+		}
+	}
+	if mark == p.st.Swept {
+		return
+	}
+	p.st.Swept = mark
+	if err := p.saveLocked(); err != nil && p.cfg.Logf != nil {
+		// The next start sweeps the same IDs again; deletes are idempotent.
+		p.cfg.Logf("change: proposal sweep mark not saved (%s)", errClass(err))
+	}
 }
 
 // reforgetLocked forgets again each goal forgotten before Attach: the
@@ -303,6 +583,7 @@ func (p *Pipeline) reforgetLocked() {
 			p.brokenLocked("forget not replayed", err)
 			return
 		}
+		p.oweRevertsLocked(p.st.Adoptions, ads)
 		p.st.Adoptions, p.st.Active = ads, tree
 		p.dropOldBasesLocked(tree.Hash())
 		if err := p.saveLocked(); err != nil {
@@ -331,16 +612,24 @@ func (p *Pipeline) loadBodyLocked(id string) (*Adoption, *lifecycle, error) {
 	return &a, b.Legacy, nil
 }
 
-// loadProposalLocked reads a waiting proposal; nil when it is absent or
-// unreadable, which leaves its intent with nothing to adopt (Check
-// refuses it).
+// loadProposalLocked reads a waiting proposal; nil when it is absent,
+// unreadable, or its MAC does not bind it to id, which leaves its intent
+// with nothing to adopt (Check refuses it; AJS-2).
 func (p *Pipeline) loadProposalLocked(id string) *proposal {
 	raw, err := p.content.Get(proposalKey(id))
 	if err != nil || raw == nil {
 		return nil
 	}
+	var sealed sealedProposal
+	if err := json.Unmarshal(raw, &sealed); err != nil {
+		return nil
+	}
+	mac, err := hex.DecodeString(sealed.MAC)
+	if err != nil || !hmac.Equal(mac, p.proposalMAC(id, sealed.Body)) {
+		return nil
+	}
 	var sp savedProposal
-	if err := json.Unmarshal(raw, &sp); err != nil {
+	if err := json.Unmarshal(sealed.Body, &sp); err != nil {
 		return nil
 	}
 	rep := sp.Report

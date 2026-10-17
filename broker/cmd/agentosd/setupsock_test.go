@@ -12,15 +12,17 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
 // REQ: HW-1, ARC-2, ARC-1, CH-7
 
-// HW-1, #1115: in production the card step runs in agentos-localui, so
-// setup mode's card is the page's hold over localui.sock: finish answers
-// "card pending" until the page reports the card confirmed, and finishes
-// after. A report of an unconfirmed card is refused and holds nothing.
-func TestThePageReportsTheCardOverTheSocket(t *testing.T) {
+// HW-1, #1115, #1330: in production the card step runs in
+// agentos-localui, so setup mode's card is the page's hold over
+// localui.sock: finish answers "card pending" until a finish carries the
+// page's report that the card is confirmed, and finishes with it, in one
+// call. page_setup_card is not served.
+func TestFinishTakesThePageCard(t *testing.T) {
 	m := newBareSetupMode(t)
 	m.Card = pageCardStep
 	done := start(context.Background(), m)
@@ -33,22 +35,19 @@ func TestThePageReportsTheCardOverTheSocket(t *testing.T) {
 	if err := call(localapi.OpSetupConfirm, localapi.Confirm{Code: "123456"}, &ok); err != nil || !ok.OK {
 		t.Fatalf("confirm %v %v", err, ok)
 	}
-	finish := func() error {
-		return call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil)
+	finish := func(card bool) error {
+		return call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100", Card: card}, nil)
 	}
-	if err := finish(); err == nil || !strings.Contains(err.Error(), localapi.ErrCardPending) {
-		t.Fatalf("finish before the report: %v", err)
+	if err := finish(false); err == nil || !strings.Contains(err.Error(), localapi.ErrCardPending) {
+		t.Fatalf("finish without the card: %v", err)
 	}
-	if err := call(localapi.OpSetupCard, localapi.SetupCard{}, nil); err == nil {
-		t.Fatal("an unconfirmed report was taken")
+	if err := call("page_setup_card", map[string]bool{"confirmed": true}, nil); err == nil || !strings.Contains(err.Error(), string(sockets.ErrUnknownOp)) {
+		t.Fatalf("page_setup_card served: %v", err)
 	}
-	if err := finish(); err == nil || !strings.Contains(err.Error(), localapi.ErrCardPending) {
-		t.Fatalf("finish after an unconfirmed report: %v", err)
+	if err := finish(false); err == nil || !strings.Contains(err.Error(), localapi.ErrCardPending) {
+		t.Fatalf("finish after the old report op: %v", err)
 	}
-	if err := call(localapi.OpSetupCard, localapi.SetupCard{Confirmed: true}, nil); err != nil {
-		t.Fatal(err)
-	}
-	finish()
+	finish(true)
 	select {
 	case r := <-done:
 		if r.err != nil || r.owner != "+15550100100" {
@@ -59,15 +58,24 @@ func TestThePageReportsTheCardOverTheSocket(t *testing.T) {
 	}
 }
 
-// A card step handed in by a test or another builder serves no report op:
-// only the page's hold takes reports.
+// A card step handed in by a test or another builder takes no report:
+// finish's card is ignored and its own hold decides.
 func TestOnlyThePagesHoldTakesReports(t *testing.T) {
 	m, f := newCardSetup(t)
 	done := start(context.Background(), m)
 	f.step(t)
 	call := setupCall(t, m)
-	if err := call(localapi.OpSetupCard, localapi.SetupCard{Confirmed: true}, nil); err == nil {
-		t.Fatal("a report was taken for a step the page does not hold")
+	var l localapi.EnrollLink
+	if err := call(localapi.OpSetupEnroll, nil, &l); err != nil {
+		t.Fatal(err)
+	}
+	var ok localapi.Confirmed
+	if err := call(localapi.OpSetupConfirm, localapi.Confirm{Code: "123456"}, &ok); err != nil || !ok.OK {
+		t.Fatalf("confirm %v %v", err, ok)
+	}
+	err := call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100", Card: true}, nil)
+	if err == nil || !strings.Contains(err.Error(), localapi.ErrCardPending) {
+		t.Fatalf("a report was taken for a step the page does not hold: %v", err)
 	}
 	_ = done
 }

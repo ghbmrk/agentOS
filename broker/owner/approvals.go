@@ -278,6 +278,12 @@ func (c *Channel) renderLocked(r *request) string {
 		if it.Unverified {
 			pre = "UNVERIFIED: "
 		}
+		if !it.Sent.IsZero() && it.SentErased {
+			// Only an erased send matched (OP2-ER-2): the notice says it
+			// may repeat one, never that this one was sent.
+			return fmt.Sprintf("%s: %syour agent wants to %s \"%s\". It may repeat a send whose record was erased (%s). Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
+		}
 		if !it.Sent.IsZero() {
 			// A repeat of a send known to have gone (confirm repeats,
 			// D-116): the notice says so and asks.
@@ -640,6 +646,18 @@ func (c *Channel) RetireErr() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.retireErr
+}
+
+// retireNote is STATUS's line while a retirement is unsaved (SM-AJ-4):
+// fixed words, since the cause can name a path; the daemon log has it.
+const retireNote = "Approvals: an answer could not be saved; new approval requests fail until a save works."
+
+// RetireNote is STATUS's line while RetireErr is set, else empty.
+func (c *Channel) RetireNote() string {
+	if c.RetireErr() != nil {
+		return retireNote
+	}
+	return ""
 }
 
 // expireLocked denies requests past their expiry and drops stale held

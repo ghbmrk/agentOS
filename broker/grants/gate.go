@@ -62,6 +62,8 @@ type Owner interface {
 	// released auto-reply after its release (owner O18).
 	UndoneAfterRelease(id string) bool
 	Inform(text string) error
+	// Post sends text under a pacing class (W5-Dc-r23).
+	Post(class owner.Class, text string) error
 }
 
 // Changes is the change pipeline (change.Pipeline) as the gate uses it:
@@ -252,13 +254,20 @@ type Config struct {
 	// now (W5-Dc-r1b QH-8): it replaces grants' own count and
 	// RequestsPerHour, so approval requests and questions spend the
 	// owner's one budget, once. It takes the owner's lock, so the gate
-	// calls it without g.mu.
+	// calls it without g.mu. Spend and Refund, when set, are the owner's
+	// check-and-count (owner Channel.Spend, Refund): the gate spends each
+	// request text through Spend when it grants it, before it checks the
+	// next, in place of reading Allowance, and refunds each spend once its
+	// request call returned; the owner keeps a spend its request used
+	// (#1685). They take the owner's lock too.
 	Coalesce        time.Duration
 	CoalesceIdle    time.Duration
 	RequestsPerHour int
 	Urgent          func(owner.Item) bool
 	Quiet           func(time.Time) bool
 	Allowance       func(time.Time) int
+	Spend           func(paced bool) (at time.Time, ok bool)
+	Refund          func(at time.Time)
 	Fresh           time.Duration
 	Now             func() time.Time
 	Logf            func(format string, args ...any)
@@ -780,6 +789,10 @@ type repeat struct {
 	// went and unclear are those requests' IDs: what an approval of a
 	// line with these marks covers (decision.covers).
 	went, unclear []string
+	// erasedOnly is true when every request in went was erased (CAP-3)
+	// after it went, so the ask cannot say this send was already sent
+	// (OP2-ER-2).
+	erasedOnly bool
 }
 
 func (r repeat) zero() bool { return r.sent.IsZero() && r.tried.IsZero() }
@@ -827,6 +840,7 @@ func (v verdict) shown() owner.Item { return v.marked(withNote(v.item, v.note)) 
 func (v verdict) marked(it owner.Item) owner.Item {
 	if !v.rep.sent.IsZero() {
 		it.Sent = v.rep.sent
+		it.SentErased = v.rep.erasedOnly
 	}
 	if !v.rep.tried.IsZero() {
 		it.Retried = v.rep.tried
@@ -1025,22 +1039,26 @@ const repeatWindow = 24 * time.Hour
 //   - sent: when the first of them known to have gone within repeatWindow
 //     went, counting the window from when its success became known
 //     (journal Use.Known: a success a check proves late counts from the
-//     proof, Security B11 on #1433), of those with the same body
-//     (sameBody: ParamBody with whitespace normalised, empty when the
-//     action has none) that act on the same record, or on another record
-//     of the same thread (Verified.Thread, Security R21): a reply that
-//     says something new in a thread is a new send, while an identical
-//     one is a repeat even in reply to another message of the thread;
+//     proof, Security B11 on #1433);
 //   - tried: when the first of them that may still take effect was first
 //     tried (in flight or unknown, at any age; for an unclear one, its
-//     parked try, journal Use.Tried), of those on the same record whatever
-//     their body, or of the same thread with the same body: a send that
-//     may have gone, resubmitted reworded, may still go twice (Potency P12
-//     on #1433).
+//     parked try, journal Use.Tried): a send that may have gone,
+//     resubmitted reworded, may still go twice (Potency P12 on #1433).
+//
+// Both count those on the same record whatever their body, as SPEC OP-2
+// defines an identical repeat (the same record to the same recipients by
+// the same action; #1677), and those on another record of the same
+// thread (Verified.Thread, Security R21) only with the same body
+// (sameBody: ParamBody with whitespace normalised, empty when the action
+// has none): a reply that says something new elsewhere in a thread is a
+// new send, while an identical one is a repeat even in reply to another
+// message of the thread.
 //
 // An erased send (CAP-3, a recall reset) no longer names its record or
-// body, so it cannot be compared: it is taken as the same send, on both
-// sides (Security R23 on #1433).
+// body, so they cannot be compared, but it keeps its recipients: one to
+// the same recipients is taken as the same send, on both sides (Security
+// R23 on #1433), and one to others is not a repeat (OP2-ER-1, #1678). A
+// mark that rests only on erased sends says so (erasedOnly, OP2-ER-2).
 //
 // Confirm repeats (Mark, D-116, 2026-10-14): under journal rule (b) a
 // request made after the effect went is a new send, so the owner may
@@ -1071,21 +1089,32 @@ func (g *Gate) recentRepeat(ctx context.Context, in journal.Intent) repeat {
 		if !u.Started || u.Intent.ID == in.ID {
 			continue
 		}
-		record, content := u.Erased, u.Erased
-		if !u.Erased {
+		if u.Erased {
+			// As distinct addresses on both sides: k.rcpt may be the
+			// verifier's participants, one per person, while the erased
+			// intent kept its own list, duplicates and all (#2178).
+			if !sameSet(distinct(fold(u.Intent.Recipients)), distinct(k.rcpt)) {
+				continue
+			}
+		} else {
 			k2 := g.sendID(ctx, u.Intent)
 			if !sameSet(k2.rcpt, k.rcpt) {
 				continue
 			}
-			content = sameBody(u.Intent) == body
-			record = k2.rec == k.rec || (content && sharesThread(k.thread, k2.thread))
-			content = content && record
+			if k2.rec != k.rec && (sameBody(u.Intent) != body || !sharesThread(k.thread, k2.thread)) {
+				continue
+			}
 		}
-		if content && !u.Went.IsZero() && !u.Known.Before(since) {
+		if !u.Went.IsZero() && !u.Known.Before(since) {
 			first(&r.sent, u.Went)
+			if len(r.went) == 0 {
+				r.erasedOnly = u.Erased
+			} else if !u.Erased {
+				r.erasedOnly = false
+			}
 			r.went = append(r.went, u.Intent.ID)
 		}
-		if record && !u.Tried.IsZero() {
+		if !u.Tried.IsZero() {
 			first(&r.tried, u.Tried)
 			r.unclear = append(r.unclear, u.Intent.ID)
 		}
@@ -1651,7 +1680,7 @@ func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journ
 	if l.Facts.Kind == owner.Ordinary && !local {
 		kind = owner.Ordinary // a tested, undoable learned change: low tier
 	}
-	return verdict{kind: ask, local: local, hold: hold, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
+	return verdict{kind: ask, local: local, hold: hold, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy, Terms: l.Terms,
 		Facts: owner.Facts{Kind: kind, Verb: l.Facts.Verb, NoRecipient: true}}}
 }
 
@@ -1675,7 +1704,7 @@ func (g *Gate) evaluateLoops(ctx context.Context, phase journal.Phase, in journa
 	if err != nil {
 		return verdict{kind: deny, why: "the loop scheduler refused it", cause: err}
 	}
-	return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy,
+	return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy, Terms: l.Terms,
 		Facts: owner.Facts{Kind: l.Facts.Kind, Verb: l.Facts.Verb, NoRecipient: true}}}
 }
 
@@ -1969,7 +1998,9 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 		g.mu.Unlock()
 		if fresh && v.hold && own != nil {
 			// Arbitrator Q1 on #48: one fixed line, no code.
-			_ = own.Inform("Waiting for your confirmation on my Wi-Fi page, or your recovery key.")
+			// Approval class, like the request it announces, so quiet
+			// hours never hold it past that request (W5-Dc-r23, CH-15).
+			_ = own.Post(owner.ClassApproval, "Waiting for your confirmation on my Wi-Fi page, or your recovery key.")
 		}
 	case autoReply:
 		g.queueReply(id, v)
@@ -2180,19 +2211,44 @@ func (g *Gate) Reserve(aged bool) bool {
 // take counts n request texts about to be sent and returns how many may
 // go. Paced, it grants only what the budget has left; unpaced (an urgent
 // item, an owner active in chat) it grants all. Counted before sending,
-// so no question is reserved in between.
-func (g *Gate) take(paced bool, n int) int {
+// so no question is reserved in between. With Config.Spend, each text is
+// spent on the owner's hour before the next is checked, and the spends
+// are appended to spent for refund once the request call returned.
+func (g *Gate) take(paced bool, n int, spent *[]time.Time) int {
 	now := g.cfg.Now()
-	allowance := g.allowance(now)
+	if g.cfg.Spend != nil {
+		k := 0
+		for ; k < n; k++ {
+			at, ok := g.cfg.Spend(paced)
+			if !ok {
+				break
+			}
+			*spent = append(*spent, at)
+		}
+		n = k
+	} else if paced {
+		allowance := g.allowance(now)
+		g.mu.Lock()
+		n = max(0, min(n, g.roomLocked(now, allowance)))
+		g.mu.Unlock()
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if paced {
-		n = max(0, min(n, g.roomLocked(now, allowance)))
-	}
 	for range n {
 		g.sent = append(g.sent, now)
 	}
 	return n
+}
+
+// refund returns the spends take made that the owner's request calls did
+// not use, and empties spent.
+func (g *Gate) refund(spent *[]time.Time) {
+	if g.cfg.Refund != nil {
+		for _, at := range *spent {
+			g.cfg.Refund(at)
+		}
+	}
+	*spent = nil
 }
 
 // requeue puts items the budget did not cover back in the batch.
@@ -2269,13 +2325,15 @@ func (g *Gate) flush(paced bool) {
 	}
 	// Each re-issued intent is its own request text: counted, but never
 	// paced, so none lapses unseen behind a spent budget (security R3).
-	g.take(false, len(again))
+	var spent []time.Time
+	g.take(false, len(again), &spent)
 	if len(again) > 0 {
 		reqs := make([]string, len(again))
 		err := errors.New("no owner channel")
 		if own != nil {
 			reqs, err = own.RequestEach(again, ttls)
 		}
+		g.refund(&spent)
 		g.mu.Lock()
 		for i, it := range again {
 			w := g.waiting[it.Ref]
@@ -2298,12 +2356,12 @@ func (g *Gate) flush(paced bool) {
 	for i, it := range page {
 		// Each counts like a request; re-issued ones always go, as above.
 		// Their notices share texts (Potency R2).
-		if pageTTLs[i] == 0 && g.take(paced, 1) == 0 {
+		if pageTTLs[i] == 0 && g.take(paced, 1, &spent) == 0 {
 			g.requeue([]owner.Item{it})
 			continue
 		}
 		if pageTTLs[i] != 0 {
-			g.take(false, 1)
+			g.take(false, 1, &spent)
 		}
 		ask, askTTLs = append(ask, it), append(askTTLs, pageTTLs[i])
 	}
@@ -2313,6 +2371,7 @@ func (g *Gate) flush(paced bool) {
 		if own != nil {
 			reqs, err = own.RequestLocalEach(ask, askTTLs)
 		}
+		g.refund(&spent)
 		g.mu.Lock()
 		for i, it := range ask {
 			if w := g.waiting[it.Ref]; w != nil {
@@ -2344,7 +2403,7 @@ func (g *Gate) flush(paced bool) {
 		}
 		items = textable
 		for len(items) > 0 {
-			if g.take(paced, 1) == 0 {
+			if g.take(paced, 1, &spent) == 0 {
 				g.requeue(items)
 				break
 			}
@@ -2356,6 +2415,7 @@ func (g *Gate) flush(paced bool) {
 			if own != nil {
 				req, err = own.Request(chunk, 0)
 			}
+			g.refund(&spent)
 			g.mu.Lock()
 			for _, it := range chunk {
 				w := g.waiting[it.Ref]
@@ -3357,6 +3417,19 @@ func stricter(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// distinct returns rs without repeats, in first-seen order.
+func distinct(rs []string) []string {
+	seen := make(map[string]bool, len(rs))
+	var out []string
+	for _, r := range rs {
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func sameSet(a, b []string) bool {

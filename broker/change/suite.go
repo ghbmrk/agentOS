@@ -2,6 +2,7 @@ package change
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -256,7 +257,15 @@ func (p *Pipeline) LinkedHold(finding string) (linked int, hold bool) {
 // a candidate from goal still being evaluated is never adopted (security
 // C1 on #120, C23). On a failed save the saved state is reloaded and
 // re-applied, so a retry does it all again.
+// Each adoption it undoes owes a revert intent, journaled once the lock
+// is free (oweLocked, flushOwed).
 func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
+	ids, err := p.forgetGoal(goal)
+	p.flushOwed(context.Background())
+	return ids, err
+}
+
+func (p *Pipeline) forgetGoal(goal string) ([]string, error) {
 	if goal == "" {
 		return nil, errors.New("change: forget needs a goal")
 	}
@@ -269,6 +278,7 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 		p.gone = map[string]bool{}
 	}
 	p.gone[goal] = true
+	p.retryStrayLocked() // candidate bytes a failed delete left (AJS-1)
 	var ids []string
 	for id, c := range p.st.Cases {
 		if !c.Security && c.Goal == goal {
@@ -287,6 +297,7 @@ func (p *Pipeline) ForgetGoal(goal string) ([]string, error) {
 	if err := p.activateLocked(p.st.Active, tree, touched); err != nil {
 		return nil, err
 	}
+	p.oweRevertsLocked(p.st.Adoptions, ads)
 	p.st.Cases, p.st.Adoptions, p.st.Active = next, ads, tree
 	p.dropOldBasesLocked(tree.Hash())
 	if err := p.saveLocked(); err != nil {

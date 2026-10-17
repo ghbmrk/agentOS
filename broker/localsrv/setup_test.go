@@ -178,7 +178,7 @@ func TestSetupOpsAreRefusedForGoodOnceFinishIsRecorded(t *testing.T) {
 		localapi.OpSetupConfirm:  localapi.Confirm{Code: good},
 		localapi.OpSetupFinish:   localapi.Finish{Owner: "+15550100199"},
 		localapi.OpSetupJoin:     localapi.Join{SSID: "home", Password: canaryPSK},
-		localapi.OpSetupSend:     localapi.SetupSend{To: "+15550100199", Text: "That pairing code did not match. Check the setup page."},
+		localapi.OpSetupSend:     localapi.SetupSend{To: "+15550100199", Text: "Could not save your number. Try again."},
 	}
 	check := func(when string) {
 		for _, op := range localapi.SetupOps {

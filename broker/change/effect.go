@@ -23,10 +23,11 @@ const (
 	// was installed (SR3-4f-2b).
 	WhyDropped = "dropped"
 	// WhySettings: the owner's own configuration replaced the adopted
-	// state outside the pipeline (Superseded); never an intent ID.
+	// state outside the pipeline (Superseded). Its intent records an
+	// effect already applied (oweLocked).
 	WhySettings = "settings"
 	// WhyForgotten: the owner forgot a task it was learned from
-	// (ForgetGoal, C23); never an intent ID.
+	// (ForgetGoal, C23). Its intent records an effect already applied.
 	WhyForgotten = "forgotten"
 )
 
@@ -59,6 +60,9 @@ func (p *Pipeline) Check(_ context.Context, _ journal.Phase, in journal.Intent) 
 		if pr.base != p.st.Active.Hash() {
 			return errors.New("change: the active state changed since evaluation; propose again")
 		}
+		if !hashParam(in.Params["from"], pr.base) || !hashParam(in.Params["to"], pr.next.Hash()) {
+			return errors.New("change: the intent names another candidate")
+		}
 		switch in.GrantRef {
 		case BasisStanding:
 			if !p.st.AutoAdopt {
@@ -86,6 +90,14 @@ func (p *Pipeline) Check(_ context.Context, _ journal.Phase, in journal.Intent) 
 		}
 		if len(parts) != 5 || parts[2] != "revert" {
 			return errors.New("change: malformed revert")
+		}
+		if owedRevert(parts[4]) {
+			// Only the record of a revert the pipeline applied and owes
+			// (oweLocked); the adoption is already undone.
+			if in.Action != ActionRevert || in.Origin != OriginOwner || !p.st.Applied[in.ID] {
+				return errors.New("change: a " + parts[4] + " revert only records one the pipeline applied")
+			}
+			return nil
 		}
 		switch {
 		case in.Action == ActionRevert && in.Origin == OriginOwner && parts[4] == WhyOwner:
@@ -992,3 +1004,16 @@ func touchesNS(edits []Edit, ns string) bool {
 	}
 	return false
 }
+
+// hashParam: an adopt intent's from or to param agrees with want. A
+// redacted value carries nothing to compare, and the saved proposal's MAC
+// binds the candidate instead; a missing one or another hash refuses
+// (CHG-2, AJS-3).
+func hashParam(v any, want string) bool {
+	s, ok := v.(string)
+	return ok && (s == redacted || s != "" && s == want)
+}
+
+// redacted is the daemon's marker for a param the journal did not keep
+// (daemon.Redacted); only that exact marker skips the comparison.
+const redacted = "[redacted]"

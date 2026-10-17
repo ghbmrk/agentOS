@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -128,6 +129,7 @@ func (g *signRig) noCanary(t *testing.T) {
 // own link (never the forwarder's) and the code, and once the owner
 // approves and the vault holds the login the provider is signed in and the
 // worker is gone (ONB-3, CRED-5).
+// REQ: G1-1264-busy-1 (SigningIn holds while the sign-in waits)
 func TestONB3SignInShowsTheProvidersPageAndCode(t *testing.T) {
 	g := newSignRig(printed)
 	link, code, err := g.start(t)
@@ -152,6 +154,9 @@ func TestONB3SignInShowsTheProvidersPageAndCode(t *testing.T) {
 	if _, _, err := g.start(t); !errors.Is(err, ErrSignInBusy) {
 		t.Errorf("a second sign-in while one runs: %v", err)
 	}
+	if !g.r.SigningIn("stub") {
+		t.Error("a sign-in that waits for the owner is not reported as waiting")
+	}
 	g.r.signIn("stub", true) // a refused login had stopped the route
 	g.mu.Lock()
 	g.stored["pw-sign"] = true
@@ -168,6 +173,13 @@ func TestONB3SignInShowsTheProvidersPageAndCode(t *testing.T) {
 	g.gone(t)
 	if g.r.isStopped("stub") {
 		t.Error("the sign-in did not lift the stopped route")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for g.r.SigningIn("stub") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if g.r.SigningIn("stub") {
+		t.Error("a finished sign-in is still reported as waiting")
 	}
 	g.noCanary(t)
 }
@@ -280,7 +292,7 @@ func TestONB3SignInWaitEndsWithTheBackgroundContext(t *testing.T) {
 // old order (clear after unlock) lost.
 func TestONB9SignInLineMatchesTheStopUnderARacingRefusal(t *testing.T) {
 	var line atomic.Bool
-	r := &Runner{SignIn: func(string) { line.Store(true) }}
+	r := &Runner{SignIn: func(string) { line.Store(true) }, SignInStored: func(string) bool { return true }}
 	var refused sync.WaitGroup
 	r.OnSignedIn = func(string) {
 		refused.Add(1)
@@ -297,7 +309,7 @@ func TestONB9SignInLineMatchesTheStopUnderARacingRefusal(t *testing.T) {
 		line.Store(false)
 	}
 	r.signIn("stub", true)
-	r.SignedIn("stub")
+	r.SignedIn("stub", "pw-0001")
 	refused.Wait()
 	r.mu.Lock()
 	stopped, told := r.stopped["stub"], r.told["stub"]
@@ -446,6 +458,29 @@ func TestONB3CodexSignInMatchesTheEgressCheck(t *testing.T) {
 				t.Errorf("%q %q: provagent %v %q, egress %q %q %v", l, c, ok, gotCode, link, eCode, err)
 			}
 		}
+	}
+}
+
+// REQ: ONB-3, CRED-5
+// #1701: the image never set the CLI's issuer, so codex login --device-auth
+// dialled auth.openai.com from a worker with no network and exited without a
+// code. The sign-in argv itself names the forwarder as the issuer, so the CLI
+// asks the forwarder for its code and prints the forwarder's device page, and
+// its code exchange carries the redirect_uri egress's code check expects.
+func TestONB3CodexSignInIssuerIsTheForwarder(t *testing.T) {
+	d := Builtins()["codex"]
+	route := egress.Codex()
+	var issuer []string
+	for i, a := range d.SignInArgv {
+		if a == "--experimental_issuer" && i+1 < len(d.SignInArgv) {
+			issuer = append(issuer, d.SignInArgv[i+1])
+		}
+	}
+	if len(issuer) != 1 || issuer[0] != route.Origin {
+		t.Fatalf("SignInArgv %q: issuer %q, want exactly the forwarder %q", d.SignInArgv, issuer, route.Origin)
+	}
+	if want := route.Origin + "/codex/device"; !slices.Contains(d.SignInLinks, want) {
+		t.Errorf("SignInLinks %q lack the page the CLI prints under that issuer, %q", d.SignInLinks, want)
 	}
 }
 
@@ -618,4 +653,30 @@ func TestONB3RefusedSignInLogsItsCause(t *testing.T) {
 		g.gone(t)
 		g.noCanary(t)
 	})
+}
+
+// #1925: SignedIn lifts a stopped route only when the vault says the
+// sign-in worker's own sign-in stored the login; without that record (or
+// with no way to ask) the stop and the sign-in line stay in place.
+func TestSignedInNeedsAStoredSignIn(t *testing.T) {
+	stored := map[string]bool{"pw-ok": true}
+	var lifted []string
+	r := &Runner{SignIn: func(string) {}, OnSignedIn: func(p string) { lifted = append(lifted, p) }}
+	r.signIn("stub", true)
+	if r.SignedIn("stub", "pw-ok") {
+		t.Fatal("lifted with no SignInStored")
+	}
+	r.SignInStored = func(id string) bool { return stored[id] }
+	if r.SignedIn("stub", "pw-none") {
+		t.Fatal("lifted without a stored sign-in")
+	}
+	r.mu.Lock()
+	stopped, told := r.stopped["stub"], r.told["stub"]
+	r.mu.Unlock()
+	if !stopped || !told || len(lifted) != 0 {
+		t.Fatalf("stopped %v, told %v, lifted %v: the stop did not stay", stopped, told, lifted)
+	}
+	if !r.SignedIn("stub", "pw-ok") || r.isStopped("stub") || len(lifted) != 1 {
+		t.Fatalf("stored sign-in: stopped %v, lifted %v", r.isStopped("stub"), lifted)
+	}
 }

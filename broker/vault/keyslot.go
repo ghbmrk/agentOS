@@ -509,7 +509,7 @@ func OpenSealed(vaultPath, keysPath string, f Factor) (*Vault, error) {
 		return nil, ErrNoSlotOpens
 	}
 	v.sealedBy(keysPath, key)
-	if err := v.checkKeys(raw, kf, want, slot); err != nil {
+	if err := v.checkKeys(raw, kf, want, slot, f); err != nil {
 		v.Close()
 		return nil, err
 	}

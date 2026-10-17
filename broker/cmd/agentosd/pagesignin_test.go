@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/provagent"
 )
@@ -68,13 +69,28 @@ func TestThePageSignsThePlanInThroughTheDaemonsRunner(t *testing.T) {
 	if _, _, _, err := p.Start(context.Background()); err != localsrv.SignInBusy {
 		t.Fatalf("second start: %v", err)
 	}
+	if !p.Waiting() {
+		t.Fatal("a started sign-in is not waiting")
+	}
 	if note.Note() == "" {
 		t.Fatal("the line cleared before the login was stored")
 	}
 	stored.Store(true)
 	waitFor(t, "the line to clear", func() bool { return note.Note() == "" })
+	waitFor(t, "the sign-in to stop waiting", func() bool { return !p.Waiting() })
 	if p.Ready() {
 		t.Fatal("still offered once signed in")
+	}
+}
+
+// REQ: G1-1264-busy-3
+//
+// #1945 (CH-12): the page's busy text names localapi.PlanSignInWait as
+// when to try again; that holds only while the daemon's runner waits
+// exactly that long for the owner.
+func TestThePlanSignInWaitIsTheBusyTextsTime(t *testing.T) {
+	if w := providerRunner(nil, nil, nil, nil).SignInTimes.Wall; w != localapi.PlanSignInWait {
+		t.Fatalf("the runner waits %v for a sign-in, the page says %v", w, localapi.PlanSignInWait)
 	}
 }
 

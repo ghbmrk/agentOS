@@ -128,7 +128,8 @@ func TestPlanSignInLineFollowsTheRunner(t *testing.T) {
 	if note.Note() != planOnlyLine {
 		t.Fatalf("line %q", note.Note())
 	}
-	r.SignedIn("codex")
+	r.SignInStored = func(string) bool { return true } // the vault recorded the sign-in worker's commit
+	r.SignedIn("codex", "pw-0001")
 	if note.Note() != "" {
 		t.Fatalf("the line outlived the sign-in: %q", note.Note())
 	}

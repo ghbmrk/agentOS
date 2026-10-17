@@ -141,9 +141,15 @@ type Runner struct {
 	probed  map[string]time.Time // provider: when its last probe run was admitted
 }
 
-// SignedIn is the owner's sign-in or resume for provider: its route runs
-// again, and a later refusal tells the owner again.
-func (r *Runner) SignedIn(provider string) {
+// SignedIn is the owner's sign-in for provider through sign-in worker
+// worker: when SignInStored says that worker's own sign-in stored the
+// login, its route runs again, a later refusal tells the owner again, and
+// it reports true. Otherwise (no record, or no SignInStored) the stop and
+// the sign-in line stay (CRED-5, #1925).
+func (r *Runner) SignedIn(provider, worker string) bool {
+	if r.SignInStored == nil || !r.SignInStored(worker) { // asked outside mu: it is a vault round trip
+		return false
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.stopped, provider)
@@ -151,6 +157,7 @@ func (r *Runner) SignedIn(provider string) {
 	if r.OnSignedIn != nil {
 		r.OnSignedIn(provider) // under mu: a refusal racing it cannot be undone
 	}
+	return true
 }
 
 func (r *Runner) isStopped(provider string) bool {

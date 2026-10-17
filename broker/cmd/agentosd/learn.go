@@ -370,21 +370,34 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	// its forgets.
 	owedPath := filepath.Join(p.Dir, "forget-owed.json")
 	owed := openOwedFile(change.FileStore{Path: owedPath}, owedPath)
+	told := toldDone(restored)
 	for _, e := range restored {
-		if !l.forgotten.has(e.Goal) {
+		if e.Done || l.forgotten.has(e.Goal) {
+			continue // a done marker is not a forget
+		}
+		o, isOwed := owed.get(e.Goal)
+		switch {
+		case told[e.Goal]:
+			// Its done text was sent after the backup was taken: owed no
+			// second one, whether the restore would owe it or the restored
+			// learn dir does (W3-forget-b2c-f1-r2 R2B).
+			if isOwed && !o.Agent {
+				if err := owed.drop(e.Goal); err != nil {
+					log.Printf("forget: restored forget's told done text not cleared: %v", err)
+				}
+			}
+		case !isOwed && !e.Agent && e.Since.IsZero():
 			// An item 1 forget logged while it still retried (no agent, no
 			// since) may hold the owner's forgetNotSaved, a promise the
 			// restored learn dir does not keep: it is owed again before its
 			// tombstone, as Execute owes it (W3-forget-b2c-f1-r1 R1A;
 			// ASSUMPTIONS R5).
-			if _, ok := owed.get(e.Goal); !ok && !e.Agent && e.Since.IsZero() {
-				if err := owed.owe(e.Goal, owedForget{Logged: true}); err != nil {
-					log.Printf("forget: restored forget's done text not kept: %v", err)
-				}
+			if err := owed.owe(e.Goal, owedForget{Logged: true}); err != nil {
+				log.Printf("forget: restored forget's done text not kept: %v", err)
 			}
-			if err := l.forgotten.add(e.Goal); err != nil {
-				return nil, err
-			}
+		}
+		if err := l.forgotten.add(e.Goal); err != nil {
+			return nil, err
 		}
 	}
 	l.mining = lateReader{&l.eng, l.forgotten}
@@ -492,6 +505,9 @@ func openLearning(p learnPaths, modelWired bool, cfg *daemon.Config) (*learning,
 	l.forgetOwner.owed = owed
 	l.forgetOwner.owedAtStart = owed.goals()
 	for _, e := range restored {
+		if e.Done {
+			continue
+		}
 		l.forgetOwner.restoredGoals = append(l.forgetOwner.restoredGoals, e.Goal)
 		if e.Agent {
 			l.forgetOwner.restored = append(l.forgetOwner.restored, e.Since)
@@ -692,6 +708,17 @@ type restoredForget struct {
 	Goal  string    `json:"goal"`
 	Since time.Time `json:"since"`
 	Agent bool      `json:"agent"`
+	Done  bool      `json:"done"`
+}
+
+// toldDone is the goals whose last forget in the restored log is followed
+// by a done marker: their done text was sent (R2B).
+func toldDone(restored []restoredForget) map[string]bool {
+	told := map[string]bool{}
+	for _, e := range restored {
+		told[e.Goal] = e.Done
+	}
+	return told
 }
 
 // restoreHold refuses agentosd's start while dir holds the marker of a

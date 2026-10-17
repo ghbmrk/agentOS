@@ -20,6 +20,11 @@
       "file": "broker/e2e/boxe2e/codexstub/stub.go",
       "host": "api.openai.com",
       "why": "JWT claim key (https://api.openai.com/auth) in the e2e stub's synthetic id_token; test-only, never contacted (#1701)."
+    },
+    {
+      "file": "broker/provagent/declare.go",
+      "host": "openai.com",
+      "why": "TermsURL of the codex qualification record: the terms page the owner read, recorded as data and never contacted (#809, D-117)."
     }
   ],
   "inert_literals": [
