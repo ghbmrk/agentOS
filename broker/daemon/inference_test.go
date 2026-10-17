@@ -64,6 +64,7 @@ var httpOK = map[string]string{
 	"modelroute": "the one client: forwards model calls to the vault process's unix socket",
 	"replay":     "serves replay machines' plane like guest; never dials",
 	"loopbuild":  "serves Loop 1's builder machines their own socket (W3-builder); never dials",
+	"inflight":   "admits loopbuild's model calls under its memory budget (RES-5); serves, never dials",
 }
 
 // allowance is what one package may use of a socket-capable import: the
@@ -133,6 +134,8 @@ var netOK = map[string]allowance{
 		[]string{"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
+	// RES-5: wraps loopbuild's listener so each open connection holds budget; never listens or dials.
+	"inflight": {"wraps a caller's listener, budgeting its open connections", []string{"net.Conn", "net.ErrClosed", "net.Listener"}},
 }
 
 // escapeOK are the broker packages in the graph allowed an escape hatch

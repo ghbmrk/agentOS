@@ -28,6 +28,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/inflight"
 	"github.com/ghbmrk/agentos/broker/loops"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -79,6 +80,10 @@ type Config struct {
 	Timeout   time.Duration
 	Poll      time.Duration // machine state checks; 0 means 5 s
 	Logf      func(format string, args ...any)
+	// InFlightBytes is the memory a builder socket's requests and
+	// connections may hold (RES-5); 0 means the process's shared budget,
+	// inflight.Default.
+	InFlightBytes int64
 }
 
 // Defaults (C-3c-5; the N95 lens note on memory).
@@ -90,8 +95,9 @@ const (
 
 // Builder runs Loop 1's builder machines, one job at a time (C-3c-1).
 type Builder struct {
-	cfg  Config
-	slot chan struct{}
+	cfg    Config
+	slot   chan struct{}
+	budget *inflight.Budget
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -139,7 +145,11 @@ func New(cfg Config) (*Builder, error) {
 	if err := os.Chmod(cfg.Dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Builder{cfg: cfg, slot: make(chan struct{}, 1), sessions: map[string]*session{}}, nil
+	budget := inflight.Default()
+	if cfg.InFlightBytes > 0 {
+		budget = inflight.New(cfg.InFlightBytes)
+	}
+	return &Builder{cfg: cfg, slot: make(chan struct{}, 1), budget: budget, sessions: map[string]*session{}}, nil
 }
 
 // Private: a builder's candidate is never public, whatever its inputs'
