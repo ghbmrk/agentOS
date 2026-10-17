@@ -108,6 +108,9 @@ type driver struct {
 	// signInOut is the sign-in CLI's output file in a live provider
 	// worker's layer, "" for none; nil reads the box's (signInOutFile).
 	signInOut func() string
+	// runOut is a provider run's result file in a live provider worker's
+	// layer, "" for none; nil reads the box's (runOutFile).
+	runOut func() string
 	// now and sleep are the clock of the codes and of phone-control's
 	// waits; nil is the wall clock. The in-process test shares a fake one
 	// with the owner channel.
@@ -551,6 +554,12 @@ func (d *driver) guestTask() error {
 // its forwarder printed (watchSignIn), each cut short with the stub's
 // tokens cut out (ASSUMPTIONS E8, E13).
 func (d *driver) signInDiag(out string) string {
+	return d.workerDiag("sign-in output", out)
+}
+
+// workerDiag is signInDiag with out, a provider worker's output, quoted
+// under the name what.
+func (d *driver) workerDiag(what, out string) string {
 	read := d.agentosdLog
 	if read == nil {
 		read = func() string {
@@ -583,7 +592,7 @@ func (d *driver) signInDiag(out string) string {
 	}
 	return "diag: agentosd: " + redactLog(chunked(strings.Join(keep, "\n"), secrets), 8, secrets...) +
 		"; runsc: " + redactLog(chunked(runsc(), secrets), 8, secrets...) +
-		"; sign-in output: " + redactLog(chunked(ansiSeq.ReplaceAllString(out, ""), secrets), 6, secrets...)
+		"; " + what + ": " + redactLog(chunked(ansiSeq.ReplaceAllString(out, ""), secrets), 6, secrets...)
 }
 
 // ansiSeq is a terminal escape sequence, cut from the CLI's output.
@@ -603,7 +612,19 @@ type signInWatch struct {
 
 // watchSignIn reads the sign-in output every 50ms until stop.
 func (d *driver) watchSignIn() *signInWatch {
-	read := d.signInOut
+	return d.watchWorker(d.signInOut, ".agentos-signin")
+}
+
+// watchRun reads a provider run's result file every 50ms until stop: the
+// CLI's JSON events, which say why a run failed, and which agentosd
+// destroys with the worker (ASSUMPTIONS E14).
+func (d *driver) watchRun() *signInWatch {
+	return d.watchWorker(d.runOut, filepath.Base(provagent.Builtins()[egress.Codex().Provider].ResultPath))
+}
+
+// watchWorker reads read, or else the file name in the newest provider
+// worker's workspace, every 50ms until stop.
+func (d *driver) watchWorker(read func() string, name string) *signInWatch {
 	if read == nil {
 		argv := d.agentosdArgv
 		if argv == nil {
@@ -611,7 +632,7 @@ func (d *driver) watchSignIn() *signInWatch {
 		}
 		args, _ := argv()
 		dir := machinesDir(args)
-		read = func() string { return signInOutFile(dir) }
+		read = func() string { return workerOutFile(dir, name) }
 	}
 	w := &signInWatch{end: make(chan struct{}), done: make(chan struct{})}
 	poll := func() {
@@ -653,8 +674,14 @@ const signInOutMax = 64 << 10
 // under the machines directory, at its end, "" for none: the worker's
 // guest writes land in its overlay's upper layer (vm Manager.diskDir).
 func signInOutFile(machines string) string {
+	return workerOutFile(machines, ".agentos-signin")
+}
+
+// workerOutFile is file name in the workspace of the newest provider
+// worker under the machines directory, at its end, "" for none.
+func workerOutFile(machines, name string) string {
 	cwd := provagent.Builtins()[egress.Codex().Provider].Cwd
-	paths, _ := filepath.Glob(filepath.Join(machines, "machines", vm.ProviderPrefix+"*", "disk", "upper", cwd, ".agentos-signin"))
+	paths, _ := filepath.Glob(filepath.Join(machines, "machines", vm.ProviderPrefix+"*", "disk", "upper", cwd, name))
 	var best string
 	var at time.Time
 	for _, p := range paths {
