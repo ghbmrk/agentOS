@@ -1288,3 +1288,8 @@ tools/ASSUMPTIONS.md D36
 tools/ASSUMPTIONS.md D33
 tools/ASSUMPTIONS.md D34
 tools/ASSUMPTIONS.md D35
+# In flight on open PR heads when the rule landed (#2015, #2195, #2228); drop each line once its PR merges and renames nothing.
+broker/egress/ASSUMPTIONS.md K36
+broker/journal/ASSUMPTIONS.md A24
+broker/owner/ASSUMPTIONS.md O41
+broker/recall/ASSUMPTIONS.md R12

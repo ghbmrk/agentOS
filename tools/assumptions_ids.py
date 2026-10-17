@@ -8,7 +8,7 @@ and a merge needs no renumbering.
 
 Rows that existed when this rule landed keep their bare IDs (`A21`, `D35`, `7`), listed in
 tools/assumptions_legacy_ids.txt as `<file> <ID>`. Any other row whose ID is not package-scoped
-fails doclint. The list only shrinks: never add a line to it; use a package-scoped ID instead.
+fails doclint. The list only shrinks after the snapshot: never add a line to it; use a package-scoped ID instead.
 
 Usage: python3 tools/assumptions_ids.py [repo root]    prints the legacy list for that tree
 """
