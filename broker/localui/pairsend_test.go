@@ -17,7 +17,7 @@ import (
 func TestNumberCodeSaysWhenThePairedTextDidNotGo(t *testing.T) {
 	r := newRig(t)
 	r.hooks.progress.Online = true
-	r.hooks.sendFails = func(text string) bool { return strings.HasPrefix(text, "AgentOS is running on") }
+	r.hooks.sendFails = func(text string) bool { return strings.HasPrefix(text, "agentOS is running on") }
 	r.get("/setup")
 	r.post("/setup/number", url.Values{"number": {"+1 555 000 0001"}})
 	code := regexp.MustCompile(`[0-9]{6}`).FindString(r.hooks.sent[0].Text)

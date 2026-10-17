@@ -552,7 +552,7 @@ func TestPairingFallbacks(t *testing.T) {
 		t.Fatal("non-pairing text handled")
 	}
 	reply, ok := r.srv.OfferText(ownerNum, "PAIR "+strings.ToLower(r.card.SetupCode))
-	if !ok || !strings.HasPrefix(reply, "AgentOS is running on") {
+	if !ok || !strings.HasPrefix(reply, "agentOS is running on") {
 		t.Fatalf("card setup code: %q", reply)
 	}
 	// Once paired, nobody else can pair.
@@ -572,7 +572,7 @@ func TestPairingFallbacks(t *testing.T) {
 	if r.srv.setup.st.Owner != ownerNum {
 		t.Fatal("typed number not paired")
 	}
-	if last := r.hooks.sent[len(r.hooks.sent)-1]; !strings.HasPrefix(last.Text, "AgentOS is running on") {
+	if last := r.hooks.sent[len(r.hooks.sent)-1]; !strings.HasPrefix(last.Text, "agentOS is running on") {
 		t.Fatalf("no reply from the box's number: %q", last.Text)
 	}
 }
@@ -929,7 +929,7 @@ func TestCardCodePairingIsClaimedWithThePageCode(t *testing.T) {
 			r.post("/setup/claim", url.Values{"code": {"000000"}})
 		}
 	})
-	if len(r.hooks.sent) != 1 || !strings.HasPrefix(r.hooks.sent[0].Text, "AgentOS page code:") || r.hooks.sent[0].To != ownerNum {
+	if len(r.hooks.sent) != 1 || !strings.HasPrefix(r.hooks.sent[0].Text, "agentOS page code:") || r.hooks.sent[0].To != ownerNum {
 		t.Fatalf("no fresh page code texted to the owner: %+v", r.hooks.sent)
 	}
 	r.post("/setup/claim", url.Values{"code": {pc[1]}})

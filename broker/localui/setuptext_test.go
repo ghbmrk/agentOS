@@ -135,7 +135,7 @@ func TestTheNumberStepOffersNumberEntryWhenTheBoxDoesNotKnowItsNumber(t *testing
 	if w := r.post("/setup/number", url.Values{"number": {ownerNum}}); w.Code >= 400 || r.setupErr() != "" {
 		t.Fatalf("number: %d %q", w.Code, r.setupErr())
 	}
-	if got := line.texts(t, 1); got[0][0] != ownerNum || !strings.HasPrefix(got[0][1], "AgentOS setup code: ") {
+	if got := line.texts(t, 1); got[0][0] != ownerNum || !strings.HasPrefix(got[0][1], "agentOS setup code: ") {
 		t.Fatalf("setup code text %q", got[0])
 	}
 }
@@ -152,7 +152,7 @@ func TestTheNumberFallbackTextsThroughAgentosd(t *testing.T) {
 		t.Fatalf("number: %d %q", w.Code, r.setupErr())
 	}
 	got := line.texts(t, 1)
-	m := regexp.MustCompile(`^AgentOS setup code: ([0-9]{6})\.`).FindStringSubmatch(got[0][1])
+	m := regexp.MustCompile(`^agentOS setup code: ([0-9]{6})\.`).FindStringSubmatch(got[0][1])
 	if got[0][0] != ownerNum || m == nil {
 		t.Fatalf("setup code text %q", got[0])
 	}
@@ -189,7 +189,7 @@ func TestPairTextsReachThePageAndAreAnswered(t *testing.T) {
 		}
 	})
 	got = line.texts(t, 3)
-	if got[2][0] != ownerNum || !regexp.MustCompile(`^AgentOS page code: [0-9]{6}\.`).MatchString(got[2][1]) {
+	if got[2][0] != ownerNum || !regexp.MustCompile(`^agentOS page code: [0-9]{6}\.`).MatchString(got[2][1]) {
 		t.Fatalf("new page code %q", got[2])
 	}
 	if r.srv.setup.st.Owner != ownerNum {

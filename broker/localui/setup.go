@@ -324,7 +324,7 @@ var (
 
 // replaceCodesNote is the codes step's note after the vault voided the code
 // generator entry (F10, #1210 R1). It is GSM-7, like the page's texts.
-const replaceCodesNote = "I had to make your approval codes again. In your phone's code generator, delete the old AgentOS entry, then add the new one below."
+const replaceCodesNote = "I had to make your approval codes again. In your phone's code generator, delete the old agentOS entry, then add the new one below."
 
 // cardRestartNote is the card step's note (LATER CTRL-card l2): a box that
 // restarts before the confirm makes a new card.
@@ -874,7 +874,7 @@ func pairedText(host string) string {
 	if host == "" {
 		host = "this PC"
 	}
-	return "AgentOS is running on " + host + ". This is your box's number; save it as AgentOS."
+	return "agentOS is running on " + host + ". This is your box's number; save it as agentOS."
 }
 
 // number is the typing fallback for pairing (ONB-6): the owner types their
@@ -909,7 +909,7 @@ func (u *setup) number(r *http.Request, key string) error {
 	u.texts = append(u.texts, now)
 	u.numTo, u.numDevice, u.numCode, u.numExpires, u.numTries = n, key, code, now.Add(numberCodeTTL), 0
 	u.mu.Unlock()
-	if err := u.s.cfg.Hooks.Send(n, "AgentOS setup code: "+code+". Type it on the setup page."); err != nil {
+	if err := u.s.cfg.Hooks.Send(n, "agentOS setup code: "+code+". Type it on the setup page."); err != nil {
 		return errors.New("I could not send a text. Check the SIM, or use Text my box.")
 	}
 	return nil
@@ -956,7 +956,7 @@ func (u *setup) numberCode(r *http.Request, key string) error {
 
 // errPairedUnsent is the number step's note when the paired text did not
 // go (#1293). The pairing stands, so the page moves on and shows it once.
-var errPairedUnsent = errors.New("You are paired, but my text from this box did not go. Save the number my code came from as AgentOS.")
+var errPairedUnsent = errors.New("You are paired, but my text from this box did not go. Save the number my code came from as agentOS.")
 
 // claim lets the phone that types the texted page code continue setup,
 // after a pairing by the card's setup code. Three wrong codes or an expired
@@ -998,7 +998,7 @@ func (u *setup) claim(r *http.Request, key string) error {
 	u.claimCode, u.claimExpires, u.claimTries = code, now.Add(numberCodeTTL), 0
 	to := u.st.Owner
 	u.mu.Unlock()
-	if err := u.s.cfg.Hooks.Send(to, "AgentOS page code: "+code+". Type it on the setup page."); err != nil {
+	if err := u.s.cfg.Hooks.Send(to, "agentOS page code: "+code+". Type it on the setup page."); err != nil {
 		return errors.New("I could not send a text. Check the SIM.")
 	}
 	return errors.New("That code did not match. I texted you a new page code.")
