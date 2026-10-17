@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -472,6 +473,97 @@ func TestLearnUnmapsGatewayExternalResolver(t *testing.T) {
 		p.Learn(tc.n)
 		if err := p.Check(context.Background(), netip.MustParseAddr(tc.addr), 443, "tcp"); !errors.Is(err, ErrDenied) {
 			t.Errorf("%s: %s must be refused, got %v", tc.name, tc.addr, err)
+		}
+	}
+}
+
+// heldPolicy is a policy whose gateway has just changed to one with no known
+// external address, so a public destination is held, and whose refusals are
+// journalled into the returned list.
+func heldPolicy(t *testing.T) (*Policy, func() []DenyEvent) {
+	t.Helper()
+	var mu sync.Mutex
+	var journal []DenyEvent
+	g := &gwSources{answer: make(chan netip.Addr, 1)}
+	g.gw.Store("0101A8C0")
+	s := g.sources()
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal, OnDeny: func(e DenyEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		journal = append(journal, e)
+	}})
+	g.answer <- netip.MustParseAddr("8.8.8.8")
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	g.gw.Store("0103A8C0")
+	p.quickLearn()
+	return p, func() []DenyEvent {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]DenyEvent(nil), journal...)
+	}
+}
+
+// A held dial whose own context ends first (cancelled, or its deadline
+// passed) is the caller's ending, not a netguard refusal: it fails with the
+// context's error, still matches ErrDenied (nothing is dialled), and is not
+// journalled. The hold bound's own expiry is still journalled (#1540).
+func TestHeldDialEndedByCallerIsNotJournalled(t *testing.T) {
+	old := externalHold
+	t.Cleanup(func() { externalHold = old })
+	externalHold = time.Hour
+	public := netip.MustParseAddr("1.1.1.1")
+
+	p, journal := heldPolicy(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := p.Check(ctx, public, 443, "tcp")
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrDenied) {
+		t.Fatalf("cancelled held dial: %v, want context.Canceled and ErrDenied", err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err = p.Check(ctx, public, 443, "tcp")
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrDenied) {
+		t.Fatalf("held dial past its deadline: %v, want context.DeadlineExceeded and ErrDenied", err)
+	}
+	if j := journal(); len(j) != 0 {
+		t.Fatalf("the caller's own ending was journalled as a refusal: %+v", j)
+	}
+
+	externalHold = 30 * time.Millisecond
+	err = p.Check(context.Background(), public, 443, "tcp")
+	if !errors.Is(err, ErrDenied) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("hold bound expiry: %v, want a netguard refusal", err)
+	}
+	if j := journal(); len(j) != 1 || j[0].Addr != public {
+		t.Fatalf("hold bound expiry journal: %+v, want one refusal of %v", j, public)
+	}
+}
+
+// The hold refusal names this network's router, not "this gateway": since a
+// gateway is its address, interface and router MAC, the hold also fires when
+// the address is unchanged and only the router behind it is new (#1555).
+func TestHoldRefusalNamesTheNetworksRouter(t *testing.T) {
+	old := externalHold
+	t.Cleanup(func() { externalHold = old })
+	public := netip.MustParseAddr("1.1.1.1")
+	p, journal := heldPolicy(t)
+
+	externalHold = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancelled := p.Check(ctx, public, 443, "tcp")
+	externalHold = 30 * time.Millisecond
+	expired := p.Check(context.Background(), public, 443, "tcp")
+	j := journal()
+	if len(j) != 1 {
+		t.Fatalf("journal: %+v, want the expiry alone", j)
+	}
+	for name, msg := range map[string]string{"cancelled": cancelled.Error(), "expired": expired.Error(), "journal": j[0].Reason} {
+		if !strings.Contains(msg, "this network's router") || strings.Contains(msg, "on this gateway") {
+			t.Errorf("%s hold refusal reads %q, want it to name this network's router", name, msg)
 		}
 	}
 }
