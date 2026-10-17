@@ -307,7 +307,7 @@ func (c *Channel) renderLocked(r *request) string {
 		if !it.Sent.IsZero() && it.SentErased {
 			// Only an erased send matched (OP2-ER-2): the notice says it
 			// may repeat one, never that this one was sent.
-			return fmt.Sprintf("%s: %syour agent wants to %s \"%s\". It may repeat a send whose record was erased (%s). Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+			return fmt.Sprintf("%s: %sCan I %s \"%s\"? It may repeat a send whose record was erased (%s). Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
 				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
 		}
 		if !it.Sent.IsZero() {
@@ -325,10 +325,10 @@ func (c *Channel) renderLocked(r *request) string {
 		if SMSApprovable(it) {
 			// A change that needs the page's confirmation (CH-3,
 			// Security Q1 on P2-2a part 2): only NO by text.
-			return fmt.Sprintf("%s: %syour agent wants to %s \"%s\". Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+			return fmt.Sprintf("%s: %sCan I %s \"%s\"? Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
 				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), exp, r.id)
 		}
-		return fmt.Sprintf("%s: %syour agent wants to %s \"%s\" to %d recipient%s I can't show in a text. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+		return fmt.Sprintf("%s: %sCan I %s \"%s\" to %d recipient%s? I can't show them in a text. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
 			r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), n, map[bool]string{true: "s"}[n != 1], exp, r.id)
 	}
 	switch {
