@@ -39,13 +39,22 @@ esac
 # project quotas (rootflags=prjquota, image/ASSUMPTIONS.md I15); agentosd keeps machines off
 # otherwise. Say which, from the mount itself; CI's boot test needs the on line on every boot.
 # flag=on: the command systemd loaded for agentosd, after every unit path and drop-in, is one command
-# whose last argument is -disk-quota on and which names disk-quota nowhere else (Security #2110).
+# that starts with the shipped -owner ${AGENTOS_OWNER}, then holds plain words only (systemctl shows
+# variables unexpanded, and a quoted word could hold " ; "), ends -disk-quota on and names
+# disk-quota nowhere else (Security #2110). Anything else reads overridden.
 x=$(systemctl show -P ExecStart agentosd.service 2>/dev/null) || x=
 a=${x#*argv\[\]=}
-a=${a%% ; *}
+a=${a%% ; ignore_errors=*}
+p='/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} '
+r=${a#"$p"}
 case $x in
 *"argv[]="*"argv[]="*) f=overridden ;;
-*"argv[]="*) case $a in *disk-quota*disk-quota*) f=overridden ;; *" -disk-quota on") f=on ;; *) f=overridden ;; esac ;;
+*"argv[]="*" ; ignore_errors="*)
+	case $r in
+	"$a" | *[!A-Za-z0-9/_.,=:@+\ -]* | *disk-quota*disk-quota*) f=overridden ;;
+	*" -disk-quota on") f=on ;;
+	*) f=overridden ;;
+	esac ;;
 *) f=unknown ;;
 esac
 fs=$(findmnt -no FSTYPE / 2>/dev/null) || fs=unknown

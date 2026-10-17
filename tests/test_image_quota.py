@@ -221,6 +221,14 @@ class BootReportQuotaTest(unittest.TestCase):
                                  (EXEC % (on + " -image x=/y"), "overridden"),
                                  (EXEC % "", "overridden"),
                                  (EXEC % on + " " + EXEC % on, "overridden"),
+                                 # Delta L3 at f26d4c9: a quoted word holding " ; ", variables
+                                 # systemctl shows unexpanded, and a command not the shipped one.
+                                 (EXEC % (on + " ; x -disk-quota=off"), "overridden"),
+                                 (EXEC % "-disk-quota on ; x", "overridden"),
+                                 (EXEC % ("$A $B " + on), "overridden"),
+                                 (EXEC % ("-image ${B} " + on), "overridden"),
+                                 (EXEC.replace(" -owner ${AGENTOS_OWNER}", "") % on, "overridden"),
+                                 (EXEC.replace("with-uids /usr", "other /usr") % on, "overridden"),
                                  ("", "unknown")):
             with self.subTest(exec_start=exec_start):
                 q = self.quota_line(self.report("ext4", "rw,prjquota", exec_start=exec_start))
