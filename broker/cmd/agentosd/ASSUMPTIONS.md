@@ -281,3 +281,9 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|
 | CG1 | **No open guard means restricted.** `questions.openClock` opens the guard before the owner channel and question book, so neither failing leaves the sleeper or STATUS without it. While no guard is open (before `qs.start`, or after `clock.New` fails) `restricted()` holds and STATUS says the time check is not running. The sleeper is wired after `qs.start`, so in a healthy start it never sees the nil window. | TIM-1 | If something time-sensitive must run before `qs.start`, open the guard earlier in `main.go`. |
+
+## Agent replies are conversation (CH15-converse)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| CV1 | **Every outbox reply answers one owner message.** `evidence.attach` sends outbox replies through `owner.Channel.Converse`, unheld and uncounted, because guest `POST /owner/reply` binds each to one pending owner message ID (first answer only, 404 unknown, 409 different hash). The owner's own texts therefore bound how many go. | CH-15, CH-19 | If the outbox ever carries agent text the owner did not ask for, that text must go through `Notify` (paced) instead. |

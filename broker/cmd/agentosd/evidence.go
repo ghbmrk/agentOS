@@ -572,17 +572,24 @@ func (e *evidence) wire(cfg *daemon.Config) {
 // attach starts routing through the running daemon's gate and owner
 // channel.
 func (e *evidence) attach(ctx context.Context, d *daemon.Daemon) {
-	e.notify = func(text string) error {
-		ch := d.Owner()
-		if ch == nil {
-			return errors.New("no owner channel")
-		}
-		return ch.Notify(text)
-	}
+	e.notify = converse(d.Owner)
 	e.gate.Store(&evidenceGateBox{d.Gate()})
 	e.shown, _ = d.Gate().Evidence()
 	go e.run(ctx)
 	e.poke()
+}
+
+// converse sends an agent reply to the owner as conversation (CH-15):
+// every reply in the outbox answers one owner message (guest
+// POST /owner/reply), so it is never held or paced.
+func converse(channel func() *owner.Channel) func(string) error {
+	return func(text string) error {
+		ch := channel()
+		if ch == nil {
+			return errors.New("no owner channel")
+		}
+		return ch.Converse(text)
+	}
 }
 
 // Kept replies: a reply that could not be emailed, or was too long for a
