@@ -18,11 +18,9 @@ import (
 // day it was already waiting on and asks nothing of the owner: no owner
 // step settles a stuck withdrawal (ASSUMPTIONS C45).
 
-// The follow-up lines for update 41, raised on concernDay.
-const (
-	wontStartFollowUp = "Update 41 failed a security check and is still waiting to be undone, as it was on Mon 12 Oct; I will not start it. Nothing is needed from you."
-	mayStartFollowUp  = "Update 41 failed a security check and is still waiting to be undone, as it was on Mon 12 Oct; it may start before I can undo it. Nothing is needed from you."
-)
+// The follow-up line for update 41, raised on concernDay, whichever first
+// line it had: a day on, no state shows a boot has not happened since.
+const followUpLine = "Update 41 failed a security check and is still waiting to be undone, as it was on Mon 12 Oct; it may start before I can undo it. Nothing is needed from you."
 
 var concernDay = time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
 
@@ -68,10 +66,7 @@ func followUps(d []string) []string {
 func TestOpenSecurityConcernFollowsUpAfterADay(t *testing.T) {
 	for name, starts := range map[string]bool{"will not start": false, "may start": true} {
 		t.Run(name, func(t *testing.T) {
-			want := wontStartFollowUp
-			if starts {
-				want = mayStartFollowUp
-			}
+			want := followUpLine
 			e, _, now := refusedConcern(t, starts)
 			*now = concernDay.Add(ConcernFollowUpAfter - time.Minute)
 			if d := followUps(e.p.Digest()); len(d) != 0 {
@@ -86,7 +81,7 @@ func TestOpenSecurityConcernFollowsUpAfterADay(t *testing.T) {
 				t.Fatalf("follow-up is %d characters, over one text", len(d[0]))
 			}
 			for _, l := range d {
-				if strings.Contains(l, "UNDO") || strings.Contains(l, "restart") || strings.Contains(l, "Reply") {
+				if strings.Contains(l, "UNDO") || strings.Contains(l, "restart") || strings.Contains(l, "Reply") || strings.Contains(l, "will not start") {
 					t.Fatalf("follow-up offers a step that does not settle it: %q", l)
 				}
 			}
@@ -94,6 +89,29 @@ func TestOpenSecurityConcernFollowsUpAfterADay(t *testing.T) {
 			e.reopen()
 			if d := followUps(e.p.Digest()); len(d) != 0 {
 				t.Fatalf("second follow-up: %q", d)
+			}
+		})
+	}
+}
+
+// Security review of #2301: a boot confirms the image before the
+// withdrawal finishes (#2300's path). Its Installed line says UNDO; a
+// "still waiting" line beside it would claim state the pipeline no longer
+// holds. Mutant: drop the Staged guard, and the follow-up is said.
+func TestFollowUpSilentOnceConfirmed(t *testing.T) {
+	for name, starts := range map[string]bool{"will not start": false, "may start": true} {
+		t.Run(name, func(t *testing.T) {
+			e, r, now := refusedConcern(t, starts)
+			if err := e.p.ConfirmStaged(r.ID); err != nil {
+				t.Fatal(err)
+			}
+			*now = concernDay.Add(ConcernFollowUpAfter)
+			d := e.p.Digest()
+			if f := followUps(d); len(f) != 0 {
+				t.Fatalf("follow-up for a confirmed image: %q", d)
+			}
+			if a := e.adoption(r.ID); a.ConcernFollowedUp || a.Staged || !a.Confirmed {
+				t.Fatalf("adoption %+v", a)
 			}
 		})
 	}
