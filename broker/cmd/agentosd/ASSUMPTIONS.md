@@ -267,3 +267,10 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|
 | RS1 | **An unsaved approval answer shows in STATUS (OWNER-retire-surface, #1971).** `newOwnerPacer` adds the owner's `RetireNote` to `cfg.Notes` after its held line; the pacer's minute tick logs `RetireErr` once per distinct cause, and again only after it has cleared and recurs. No owner text is sent: the failure is a full or broken state disk, which an owner text would not fix and which STATUS already reports on ask. | SM-AJ-4, OP-11 | If the owner should be texted unprompted, add it to the digest's problem lines, not a new text. |
+
+## ap-net.json reconciled with the vault (#1696)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| AR1 | **agentosd puts the vault's committed Wi-Fi network back in `ap-net.json` (CTRL-card-rot-ap-2-s8).** `watchCommittedWiFi` asks the verify socket's `GET /committed-wifi` at start and every `apUpEvery`; after a reconcile it only asks, so it writes again only after the vault was seen locked and then open again. It writes only over a file that parses and holds the same SSID, a network that passes `apnet.Validate`, by `durable.WriteFile` at 0600 (a failed directory sync counts as written), and not at all when the file already matches. A missing or invalid file, another name or an invalid network is refused once per open and logged without either network (CH-7). No card, a Wi-Fi part still owed, or no answer is asked again on the next tick. | REC-4, CH-7 | A lock-and-unlock missed between two ticks is not seen; the next unlock is. A rotation that changes the SSID would need the name rule changed here and in `rotateAPNet`. |
+| AR2 | `apNetMu` is held across the vault read and the write in both `reconcileAPNet` and `rotateAPNet`'s page rotation, so a reconcile that read the vault before a commit cannot overwrite that rotation's newer network. | REC-4 | A third writer of `ap-net.json` in this process must take it too. |
