@@ -239,7 +239,6 @@ func TestBodyCostBoundsApply(t *testing.T) {
 		"invalid utf8": array(`"` + strings.Repeat("\xff", 4096) + `"`),
 		"u2028":        array(`"` + strings.Repeat("\u2028", 1365) + `"`),
 	}
-	shapes["invalid utf8"] = array(`"` + strings.Repeat("\xff", 4096) + `"`)
 	for _, e := range []string{`0`, `{}`, `[]`, `""`, `null`, `[0]`, `[{}]`, `{"":0}`, `{"":{}}`, `{"":[]}`,
 		`{"a":0,"b":0}`, `{"a":0,"b":0,"c":0,"d":0,"e":0,"f":0,"g":0,"h":0,"i":0}`, `"\u0000"`, `1e9`} {
 		shapes[e] = array(e)
