@@ -67,7 +67,7 @@ func (c *Channel) Request(items []Item, ttl time.Duration) (string, error) {
 	}
 	text := c.renderLocked(r)
 	c.mu.Unlock()
-	if err := c.sendRequest(text); err != nil {
+	if err := c.sendRequest(text, []string{r.id}, r.local); err != nil {
 		c.dropOpen([]string{r.id}, now)
 		return "", err
 	}
@@ -127,7 +127,11 @@ func (c *Channel) requestEach(items []Item, deadlines []time.Time, local bool) (
 	}
 	c.mu.Unlock()
 	for _, p := range parts {
-		if e := c.sendRequest(p.text); e != nil {
+		var pids []string
+		for _, i := range p.idx {
+			pids = append(pids, ids[i])
+		}
+		if e := c.sendRequest(p.text, pids, local); e != nil {
 			var drop []string
 			for _, i := range p.idx {
 				drop = append(drop, ids[i])
@@ -161,7 +165,7 @@ func (c *Channel) RequestLocal(it Item, ttl time.Duration) (string, error) {
 	}
 	text := c.renderLocked(r)
 	c.mu.Unlock()
-	if err := c.sendRequest(text); err != nil {
+	if err := c.sendRequest(text, []string{r.id}, r.local); err != nil {
 		c.dropOpen([]string{r.id}, now)
 		return "", err
 	}

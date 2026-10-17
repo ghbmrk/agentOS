@@ -124,6 +124,10 @@ func newHarness(t *testing.T, replies map[string]any, file string, timeout time.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { g.Close() })
+	// Tests of other rules click e1 and download e2 without a snapshot;
+	// the gate refuses a ref it has not seen (ADP-14-get), so they start
+	// as seen non-link elements. A snapshot reply replaces them.
+	g.refs = map[string]link{"e1": {}, "e2": {}}
 	return &harness{g: g, log: log, ws: ws}
 }
 
@@ -498,5 +502,188 @@ func TestOversizedSnapshotIsCapped(t *testing.T) {
 	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
 	if !r.OK || !r.Truncated || len(r.Snapshot) > MaxSnapshot+64 {
 		t.Fatalf("ok=%v truncated=%v len=%d", r.OK, r.Truncated, len(r.Snapshot))
+	}
+}
+
+// Synthetic canaries only (CLAUDE.md).
+const pwCanary = "hunter2Canary"
+
+func snapReply(snapshot string, pw int) map[string]any {
+	return map[string]any{"ok": true, "url": "https://shop.example.test/login",
+		"snapshot": snapshot, "password_fields": pw}
+}
+
+// K14: the gate derives the fields to omit from the snapshot itself, so a
+// password field the driver did not report (a mislabelled field, or no
+// refs at all) still has its value omitted.
+func TestGateOmitsEntryValuesTheDriverDidNotReport(t *testing.T) {
+	snap := "- textbox \"Code\" [ref=e5]: " + pwCanary + "\n- button \"Go\" [ref=e6]"
+	h := newHarness(t, map[string]any{"snapshot": snapReply(snap, 0)}, "", 0)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if strings.Contains(r.Snapshot, pwCanary) {
+		t.Fatalf("value reached the agent: %q", r.Snapshot)
+	}
+	if !strings.Contains(r.Snapshot, `- textbox "Code" [ref=e5]: `+omittedMark) {
+		t.Fatalf("field line lost: %q", r.Snapshot)
+	}
+	if r.PasswordFields != 1 {
+		t.Fatalf("PasswordFields = %d, want the gate's count 1", r.PasswordFields)
+	}
+	if got := h.do(t, `{"v":0,"verb":"click","ref":"e6"}`); !got.OK {
+		t.Fatalf("click after omission refused: %+v", got)
+	}
+}
+
+// A field with a placeholder shows its value as a `- text:` child; every
+// copy of the value elsewhere on the page goes too.
+func TestGateOmitsChildValuesAndCopies(t *testing.T) {
+	snap := "- searchbox \"Find\" [ref=e3]:\n  - /placeholder: Search\n  - text: " + pwCanary +
+		"\n- row \"Find " + pwCanary + "\" [ref=e4]"
+	h := newHarness(t, map[string]any{"snapshot": snapReply(snap, 0)}, "", 0)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if strings.Contains(r.Snapshot, pwCanary) {
+		t.Fatalf("value reached the agent: %q", r.Snapshot)
+	}
+	for _, want := range []string{"/placeholder: Search", "[ref=e3]", "[ref=e4]"} {
+		if !strings.Contains(r.Snapshot, want) {
+			t.Fatalf("%q lost: %q", want, r.Snapshot)
+		}
+	}
+}
+
+// A field's value the agent itself typed into that field on that page
+// stays visible: nothing leaks, and the agent can check its own input.
+func TestGateKeepsTextTheAgentTyped(t *testing.T) {
+	snap := "- textbox \"Search\" [ref=e3]: kettle\n- textbox \"Code\" [ref=e5]: " + pwCanary
+	h := newHarness(t, map[string]any{
+		"type":     snapReply("", 0),
+		"snapshot": snapReply(snap, 0),
+	}, "", 0)
+	h.g.refs["e3"] = link{}
+	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"kettle"}`)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if !strings.Contains(r.Snapshot, `[ref=e3]: kettle`) {
+		t.Fatalf("typed text hidden: %q", r.Snapshot)
+	}
+	if strings.Contains(r.Snapshot, pwCanary) || r.PasswordFields != 1 {
+		t.Fatalf("untyped value kept or miscounted (%d): %q", r.PasswordFields, r.Snapshot)
+	}
+}
+
+// Text typed into one field exempts only that field: otherwise typing a
+// guess elsewhere would tell the agent whether it matches a password.
+func TestGateTypedTextIsNoOracle(t *testing.T) {
+	snap := "- textbox \"Note\" [ref=e3]: " + pwCanary + "\n- textbox \"Code\" [ref=e5]: " + pwCanary
+	h := newHarness(t, map[string]any{
+		"type":     snapReply("", 0),
+		"snapshot": snapReply(snap, 0),
+	}, "", 0)
+	h.g.refs["e3"] = link{}
+	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"`+pwCanary+`"}`)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if !strings.Contains(r.Snapshot, `[ref=e5]: `+omittedMark) {
+		t.Fatalf("a guess typed into e3 unmasked e5: %q", r.Snapshot)
+	}
+}
+
+// The field the agent typed into shows its text whether or not the text
+// matches a password elsewhere on the page, so it answers no guess.
+func TestGateTypedFieldShowsAGuessEitherWay(t *testing.T) {
+	for _, guess := range []string{"wrongGuess1", pwCanary} {
+		snap := "- textbox \"Note\" [ref=e3]:\n  - text: " + guess + "\n- textbox \"Code\" [ref=e5]: " + pwCanary
+		h := newHarness(t, map[string]any{"type": snapReply("", 0), "snapshot": snapReply(snap, 0)}, "", 0)
+		h.g.refs["e3"] = link{}
+		h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"`+guess+`"}`)
+		r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+		want := "- textbox \"Note\" [ref=e3]:\n  - text: " + guess + "\n- textbox \"Code\" [ref=e5]: " + omittedMark
+		if r.Snapshot != want {
+			t.Fatalf("guess %q: got %q", guess, r.Snapshot)
+		}
+	}
+}
+
+// A short value is omitted from its own field but not scrubbed from the
+// rest of the page, and refs are never rewritten.
+func TestGateShortValueKeepsPageAndRefs(t *testing.T) {
+	snap := "- textbox \"Qty\" [ref=e1]: \"1\"\n- text: Total 1 item, 12.10\n- textbox \"Ref\" [ref=e7]: ref=e1\n- button \"Pay\" [ref=e12]"
+	h := newHarness(t, map[string]any{"snapshot": snapReply(snap, 0)}, "", 0)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	for _, want := range []string{"Total 1 item, 12.10", "[ref=e12]", "[ref=e1]: " + omittedMark, "[ref=e7]: " + omittedMark} {
+		if !strings.Contains(r.Snapshot, want) {
+			t.Fatalf("%q lost: %q", want, r.Snapshot)
+		}
+	}
+}
+
+// The exemption follows the page the type reply names, so a search
+// submitted from one page keeps its text on the results page; on any
+// other page the field is omitted and its copies are scrubbed.
+func TestGateTypedTextFollowsTheTypeReply(t *testing.T) {
+	results := func(url string) map[string]any {
+		return map[string]any{"ok": true, "url": url,
+			"snapshot": "- searchbox \"Search\" [ref=e3]: kettle\n- link \"Steel kettle\" [ref=e9]"}
+	}
+	typed := map[string]any{"ok": true, "url": "https://shop.example.test/results"}
+	for url, visible := range map[string]bool{
+		"https://shop.example.test/results": true,
+		"https://shop.example.test/other":   false,
+	} {
+		h := newHarness(t, map[string]any{"type": typed, "snapshot": results(url)}, "", 0)
+		h.g.refs["e3"] = link{}
+		h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"kettle","submit":true}`)
+		r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+		if strings.Contains(r.Snapshot, "kettle") != visible {
+			t.Fatalf("%s: got %q", url, r.Snapshot)
+		}
+	}
+}
+
+// Review 6239557715 point 1: text typed anywhere never spares a copy of
+// another field's value, so a right and a wrong guess look the same.
+func TestGateTypedGuessIsNoOracleThroughCopies(t *testing.T) {
+	snap := map[string]any{"ok": true, "url": "https://shop.example.test/account",
+		"snapshot": "- row \"Password " + pwCanary + "\" [ref=e4]:\n  - textbox \"Password\" [ref=e5]: " + pwCanary}
+	typed := map[string]any{"ok": true, "url": "https://shop.example.test/search"}
+	var seen []string
+	for _, guess := range []string{"wrongGuess1", pwCanary} {
+		h := newHarness(t, map[string]any{"type": typed, "snapshot": snap}, "", 0)
+		h.g.refs["e3"] = link{}
+		h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"`+guess+`"}`)
+		r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+		if strings.Contains(r.Snapshot, pwCanary) {
+			t.Fatalf("guess %q: value shown: %q", guess, r.Snapshot)
+		}
+		seen = append(seen, r.Snapshot)
+	}
+	if seen[0] != seen[1] {
+		t.Fatalf("right and wrong guesses differ:\n%q\n%q", seen[0], seen[1])
+	}
+}
+
+// Security review 6239610403 point 2: a field the page made inert has no
+// ref, and its value is omitted all the same, with its copies.
+func TestGateOmitsValuesOfFieldsWithoutRefs(t *testing.T) {
+	snap := "- row \"Password " + pwCanary + "\":\n  - textbox \"Password\" [disabled]: " + pwCanary + "\n- textbox \"Old\":\n  - text: " + pwCanary + "x\n- button \"Save\" [ref=e9]"
+	h := newHarness(t, map[string]any{"snapshot": snapReply(snap, 0)}, "", 0)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if strings.Contains(r.Snapshot, pwCanary) || !strings.Contains(r.Snapshot, "[ref=e9]") {
+		t.Fatalf("got %q", r.Snapshot)
+	}
+	if r.PasswordFields == 0 {
+		t.Fatalf("no field counted: %q", r.Snapshot)
+	}
+}
+
+// Security delta 6239752326: typing into a node that is not an entry
+// field (an editable group) exempts nothing under it, so a password copy
+// nested there is still scrubbed.
+func TestGateTypedNonEntryKeepsNothing(t *testing.T) {
+	snap := "- group \"Editor\" [ref=e3]:\n  - text: Note " + pwCanary + "\n- textbox \"Code\" [ref=e5]: " + pwCanary
+	h := newHarness(t, map[string]any{"type": snapReply("", 0), "snapshot": snapReply(snap, 0)}, "", 0)
+	h.g.refs["e3"] = link{}
+	h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"Note"}`)
+	r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if strings.Contains(r.Snapshot, pwCanary) {
+		t.Fatalf("copy under a typed group shown: %q", r.Snapshot)
 	}
 }

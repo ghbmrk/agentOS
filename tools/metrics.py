@@ -79,6 +79,46 @@ def cause(body):
     return m.group(1).lower() if m else None
 
 
+RECORD_HEAD = re.compile(r"^[ \t>*_-]*Record:.*?\bhead\W{0,3}([0-9a-f]{7,40})\b", re.I | re.M)
+HEAD_SHA = re.compile(r"\bhead\W{0,3}([0-9a-f]{7,40})\b", re.I)
+
+
+def review_head(body):
+    """The head SHA a verdict's `Record: ... head <SHA>` line names (OPERATING §4); a verdict with no
+    Record line falls back to the first `head <SHA>` in its text, else None."""
+    m = RECORD_HEAD.search(body or "") or HEAD_SHA.search(body or "")
+    return m.group(1).lower() if m else None
+
+
+def count_rounds(bodies):
+    """OPERATING §4 round = one reviewed head. Verdicts naming the same head (a Security, lens or
+    repeat accept) are one round; short SHAs match by prefix; a verdict naming no head counts alone."""
+    heads, n = [], 0
+    for b in bodies:
+        h = review_head(b)
+        if h is None:
+            n += 1
+        elif not any(x.startswith(h) or h.startswith(x) for x in heads):
+            heads.append(h)
+    return n + len(heads)
+
+
+NOISE_CLASSES = ("fixed", "wrong", "intentional", "didn't-matter")
+FINDING_CLASSES = ("blocker", "release", "later")
+# One line per finding in a builder reply or verdict: `Finding blocker: fixed`, any text after.
+NOISE_LINE = re.compile(r"^[ \t*_>-]*finding[ \t]+(" + "|".join(FINDING_CLASSES) + r")[ \t]*:[ \t*_]*(fixed|wrong|intentional|didn['\u2019]?t[- ]matter)\b",
+                        re.I | re.M)
+
+
+def noise(bodies):
+    """(finding class, resolution) for each `Finding <class>: <resolution>` line."""
+    out = []
+    for b in bodies:
+        for m in NOISE_LINE.finditer(b or ""):
+            out.append((m.group(1).lower(), "didn't-matter" if m.group(2).lower().startswith("didn") else m.group(2).lower()))
+    return out
+
+
 def is_l3(body):
     """Only L3 reviews carry the verdict; lens, correction or bot reviews do not count."""
     return bool(body) and re.search(r"\bL3\b", body) is not None
@@ -263,7 +303,7 @@ def collect_github(repo, token, since=None):
     the call count inside GITHUB_TOKEN's hourly limit as history grows."""
     pulls = []
     for p in _pages(repo, "pulls?state=all", token):
-        verdicts = causes = None
+        verdicts = causes = rounds = notes_noise = None
         if p.get("merged_at") and (since is None or p["merged_at"] >= since):
             reviews = list(_pages(repo, f"pulls/{p['number']}/reviews", token))
             # A verdict posted as a conversation comment counts too, but only with a
@@ -271,12 +311,13 @@ def collect_github(repo, token, since=None):
             notes = [{"submitted_at": c.get("created_at"), "body": c.get("body"),
                       "author_association": c.get("author_association"), "comment": True}
                      for c in _pages(repo, f"issues/{p['number']}/comments", token)
-                     if COMMENT_VERDICT.search(c.get("body") or "")]
+                     if COMMENT_VERDICT.search(c.get("body") or "") or NOISE_LINE.search(c.get("body") or "")]
             reviews = sorted(reviews + notes, key=lambda r: r.get("submitted_at") or "")
             l3, seen, from_comments = [], set(), set()
             for r in reviews:
                 b = r.get("body")
-                if not (trusted_review(r) and is_l3(b)):
+                # A builder reply that only carries `Finding` lines is no verdict.
+                if not (trusted_review(r) and is_l3(b)) or (r.get("comment") and not COMMENT_VERDICT.search(b)):
                     continue
                 # A verdict bears the head SHA, so separate rounds differ; a review and a
                 # comment with the same body (either order), or two comments, are one round.
@@ -288,13 +329,15 @@ def collect_github(repo, token, since=None):
                     from_comments.add(key)
                 l3.append(b)
             verdicts = [v for v in map(verdict, l3) if v]
+            rounds = count_rounds([b for b in l3 if verdict(b)])
+            notes_noise = noise([r.get("body") for r in reviews if trusted_review(r)])
             # A non-accept verdict without a Cause line counts as "none" so the gap shows.
             causes = [cause(b) or "none" for b in l3 if verdict(b) in ("fix-list", "reject")]
         pulls.append({"number": p["number"], "merged_at": p.get("merged_at"),
                       "state": p.get("state"), "draft": bool(p.get("draft")), "updated_at": p.get("updated_at"),
                       "body": p.get("body") or "", "verdicts": verdicts,
                       "labels": [l["name"] for l in p.get("labels") or []],
-                      "causes": causes})
+                      "causes": causes, "rounds": rounds, "noise": notes_noise})
     runs = []
     # No query filter: GitHub caps any filtered runs listing (status, created, ...) at 1,000
     # results, which this repo passes in days. The listing is newest first, so paging stops
@@ -464,7 +507,9 @@ def compute(raw):
             "age_hours": None,
             "first_pass_ok": sum(p["verdicts"][0] == "accept" for p in judged),
             "first_pass_n": len(judged),
-            "rounds": sum(len(p["verdicts"]) for p in judged),
+            "rounds": sum(p["rounds"] if p.get("rounds") is not None else len(p["verdicts"]) for p in judged),
+            # Pulls collected before noise was parsed have no "noise" key.
+            "noise": [x for p in merged for x in (p.get("noise") or [])],
             # Pulls collected before causes were parsed have no "causes" key.
             "causes": sorted(c for p in judged for c in (p.get("causes") or [])),
             "no_verdict": [p["number"] for p in merged if p["verdicts"] == []],
@@ -603,6 +648,12 @@ def render(weeks, raw, previous_md=None):
                for a, b in zip(weeks, weeks[1:])):
             lines += ["", "D-085 guard tripped: revert the release-class rule (decisions/D-085.md)",
                       f"(two weeks in a row above baseline: {name})"]
+    noise_all = [x for w in weeks for x in w["noise"]]
+    blockers = [r for c, r in noise_all if c == "blocker"]
+    lines += ["", "Blockers not fixed (review noise, `wrong`, `intentional` or `didn't-matter`): "
+              + (_ratio(sum(r != "fixed" for r in blockers), len(blockers)) if blockers else NONE)
+              + ", from `Finding <blocker|release|later>: <fixed|wrong|intentional|didn't-matter>` lines "
+              "in reviews and builder replies."]
     unjudged = sorted(n for w in weeks for n in w["no_verdict"])
     lines += [
         "",
@@ -627,8 +678,8 @@ def render(weeks, raw, previous_md=None):
         "(a fix to code already merged; see the PR template).",
         "- **CI flake rate**: commits that, within one workflow, had both a failed and a passed run or "
         "attempt, over commits with any finished run; counted in the week of the first run.",
-        "- **L3 rounds per merged PR**: L3 reviews with a verdict, averaged over the PRs merged that week "
-        "that had one. 1.0 means every PR was accepted on its first review (COST-1: rework is the main cost).",
+        "- **L3 rounds per merged PR**: distinct reviewed heads with an L3 verdict (OPERATING §4; a verdict "
+        "naming no head counts alone), averaged over the PRs merged that week that had one. 1.0 means every PR was accepted on its first review (COST-1: rework is the main cost).",
         "- **Usage per merged PR**: weekly-limit points per PR merged that week; the cost-per-package "
         "figure the operating model steers by (docs/OPERATING.md §6).",
         "- **L3 causes**: the `Cause:` lines of fix-list and reject L3 reviews on PRs merged that week, "

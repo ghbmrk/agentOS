@@ -45,6 +45,10 @@ type Config struct {
 	// broker's own environment is never inherited. Each key must be on
 	// childproc's allowlist, or Start refuses the configuration.
 	Env []string
+	// StateLinks are the recipe's own state-changing link patterns: URL
+	// path prefixes on the declared origins. They add to the defaults
+	// (ADP-14-get).
+	StateLinks []string
 }
 
 // Result is everything an agent can see from one request. Fields the driver
@@ -62,6 +66,8 @@ type Result struct {
 	Path               string   `json:"path,omitempty"`
 	Bytes              int64    `json:"bytes,omitempty"`
 	RefusedNavigations []string `json:"refused_navigations,omitempty"`
+	// Hold names a request held for the owner's approval (error "held").
+	Hold string `json:"hold,omitempty"`
 }
 
 // Gate is one running executor behind the protocol gate.
@@ -70,17 +76,29 @@ type Gate struct {
 	origins Origins
 	filter  filter
 	ws      string
+	links   stateLinks
 
 	mu      sync.Mutex
 	cmd     *childproc.Cmd
 	stdin   io.WriteCloser
 	lines   chan []byte
 	stopped bool
+	// refs is what the last snapshot the driver returned showed, per ref.
+	refs map[string]link
+	// typed is what the agent typed, per ref, on the page the driver
+	// named in its reply (G10).
+	typed     map[string]typedField
+	holds     map[string]Hold
+	holdOrder []string
 }
 
 // Start launches the driver for one account.
 func Start(ctx context.Context, cfg Config) (*Gate, error) {
 	origins, err := NewOrigins(cfg.Origins)
+	if err != nil {
+		return nil, err
+	}
+	links, err := newStateLinks(cfg.StateLinks, origins)
 	if err != nil {
 		return nil, err
 	}
@@ -113,8 +131,8 @@ func Start(ctx context.Context, cfg Config) (*Gate, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	g := &Gate{cfg: cfg, origins: origins, filter: filter{scrub: cfg.Scrub}, ws: ws,
-		cmd: cmd, stdin: stdin, lines: make(chan []byte)}
+	g := &Gate{cfg: cfg, origins: origins, filter: filter{scrub: cfg.Scrub}, ws: ws, links: links,
+		holds: map[string]Hold{}, cmd: cmd, stdin: stdin, lines: make(chan []byte)}
 	go g.read(stdout)
 	return g, nil
 }
@@ -189,6 +207,62 @@ func (g *Gate) Do(ctx context.Context, raw []byte) Result {
 	if req.Verb == "navigate" && !g.origins.Declared(req.URL) {
 		return Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}
 	}
+	switch req.Verb {
+	case "navigate":
+		if g.links.match(req.URL) {
+			return g.hold(req, link{target: req.URL})
+		}
+	case "click", "download":
+		// The gate must know what a link points at before it is followed. A
+		// clickable element named as an action is held too: an anchor with
+		// role="button" or a GET form's button shows no target.
+		l, ok := g.refs[req.Ref]
+		if !ok {
+			return Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}
+		}
+		if l.held(g.links) {
+			return g.hold(req, l)
+		}
+	}
+	res := g.send(ctx, req)
+	if req.Verb == "type" && res.OK {
+		g.remember(req, res.URL)
+	}
+	return res
+}
+
+type typedField struct{ text, url string }
+
+// maxTyped bounds what the gate remembers of the agent's typing.
+const maxTyped = 64
+
+func (g *Gate) remember(req Request, url string) {
+	if g.typed == nil || len(g.typed) >= maxTyped {
+		g.typed = map[string]typedField{}
+	}
+	g.typed[req.Ref] = typedField{text: req.Text, url: url}
+}
+
+// omit derives the password refs from the snapshot itself, not from the
+// driver (K14, G10), and omits their values (CRED-4). It returns the
+// snapshot and the number of fields omitted.
+func (g *Gate) omit(snapshot, url string) (string, int) {
+	typed := map[string]string{}
+	for ref, f := range g.typed {
+		if f.url == url {
+			typed[ref] = f.text
+		}
+	}
+	refs := entryRefs(snapshot, typed)
+	keep := map[string]bool{}
+	for ref := range typed {
+		keep[ref] = !refs[ref]
+	}
+	return omitValues(snapshot, refs, keep), len(refs)
+}
+
+// send forwards a request the gate has allowed.
+func (g *Gate) send(ctx context.Context, req Request) Result {
 	if req.Verb == "screenshot" {
 		// CRED-10: a screenshot of a page with a match is withheld. The gate
 		// looks at the page itself first, with the vault's values too.
@@ -255,6 +329,12 @@ func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
 		g.stop()
 		return Result{Error: "driver", Detail: "malformed executor reply; executor stopped"}, false
 	}
+	if res.Snapshot != "" {
+		// Read before filtering: a redaction must not hide a link's target.
+		g.refs = parseRefs(res.Snapshot, res.URL)
+	}
+	// The driver's count is not trusted: the gate reports its own.
+	res.Snapshot, res.PasswordFields = g.omit(res.Snapshot, res.URL)
 	return g.post(req.Verb, res)
 }
 

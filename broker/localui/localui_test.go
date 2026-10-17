@@ -67,14 +67,15 @@ type fakeHooks struct {
 	sendFails    func(text string) bool // a send whose text it matches fails (after being recorded)
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
-	noTexts     bool   // the box cannot text: BoxNumber answers "", false
-	keyErr      error  // ConnectAPIKey's answer when set; nothing is stored
-	joinErr     error  // JoinNetwork's answer when set; nothing is joined
-	joins       int    // JoinNetwork calls
-	deviceErr   error  // StartDeviceCode's answer when set
-	deviceLink  string // StartDeviceCode's link when set
-	privateErr  error  // SetPrivateOK's answer when set; nothing is recorded
-	privates    int    // SetPrivateOK calls
+	noTexts     bool            // the box cannot text: BoxNumber answers "", false
+	keyErr      error           // ConnectAPIKey's answer when set; nothing is stored
+	joinErr     error           // JoinNetwork's answer when set; nothing is joined
+	joins       int             // JoinNetwork calls
+	deviceErr   error           // StartDeviceCode's answer when set
+	deviceLink  string          // StartDeviceCode's link when set
+	privateErr  error           // SetPrivateOK's answer when set; nothing is recorded
+	privates    int             // SetPrivateOK calls
+	byConfig    map[string]bool // PrivateByConfig per provider
 	// owed is agentosd's owed answers (#1544): each answer is owed before
 	// the vault hears it and cleared once it records it; Finish refuses
 	// while any is owed.
@@ -173,6 +174,7 @@ func (f *fakeHooks) Providers() []Provider {
 	ps := []Provider{{ID: "anthropic", Name: "Anthropic", APIKey: true, DeviceCode: true, Connected: f.connected, PrivateOK: f.private["anthropic"]},
 		{ID: "openai", Name: "OpenAI", APIKey: true}}
 	for i := range ps {
+		ps[i].PrivateByConfig = f.byConfig[ps[i].ID]
 		if ok, owed := f.owed[ps[i].ID]; owed {
 			ps[i].Owed = &ok
 		}

@@ -147,3 +147,29 @@ func TestCRED4PasswordValueScrubbedFromOtherNames(t *testing.T) {
 		t.Fatalf("unrelated name changed: %q", got)
 	}
 }
+
+// entryRefs is the gate's own password-ref set (K14): every entry field
+// showing a value its ref was not given by the agent.
+func TestEntryRefs(t *testing.T) {
+	snap := strings.Join([]string{
+		`- textbox "Email" [ref=e1]: a@example.test`,
+		`- textbox "Empty" [ref=e2]`,
+		`- searchbox "Find" [ref=e3]:`,
+		`  - /placeholder: Search`,
+		`  - text: lamp`,
+		`- textbox "Typed" [active] [ref=e4]: kettle`,
+		`- button "Go" [ref=e5]`,
+		`- textbox Bad name [ref=e6] [ref=e7]: x`,
+		`- spinbutton "Qty" [ref=e8]: "2"`,
+	}, "\n")
+	got := entryRefs(snap, map[string]string{"e4": "kettle"})
+	want := map[string]bool{"e1": true, "e3": true, "e6": true, "e7": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for r := range want {
+		if !got[r] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
