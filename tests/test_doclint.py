@@ -5,7 +5,7 @@ No SPEC requirement IDs: PLAN.md tooling, not SPEC.md behaviour. DOC-7 requireme
 the generated board (SIM-repo-2b): BOARD.md is rendered from work-item issues by tools/board.py.
 All data is synthetic.
 
-REQ: DOC7-1, DOC7-2, DOC7-3, DOC7-4, DOC7-5
+REQ: DOC7-1, DOC7-2, DOC7-3, DOC7-4, DOC7-5, ASSUMPTIONS-ID-1, ASSUMPTIONS-ID-2, ASSUMPTIONS-ID-3
 """
 import pathlib
 import subprocess
@@ -89,18 +89,40 @@ class LintTest(unittest.TestCase):
         self.assertEqual(self.lint(**files), [])
 
     def test_duplicate_assumption_id(self):
-        text = "# A\n\n| ID | Assumption |\n|---|---|\n| U1 | a |\n| U2 | b |\n| U1 | c |\n"
+        text = "# A\n\n| ID | Assumption |\n|---|---|\n| X-U1 | a |\n| X-U2 | b |\n| X-U1 | c |\n"
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
-                         ["broker/x/ASSUMPTIONS.md:7: duplicate ID U1 (first on line 5)"])
+                         ["broker/x/ASSUMPTIONS.md:7: duplicate ID X-U1 (first on line 5)"])
 
     def test_distinct_assumption_ids_pass(self):
-        text = "| ID | Assumption |\n|---|---|\n| U1 | a |\n| U2 | b |\n"
+        text = "| ID | Assumption |\n|---|---|\n| X-U1 | a |\n| X-U2 | b |\n"
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}), [])
 
     def test_hash_header_tables_and_other_tables_are_checked_only_by_id(self):
-        text = "| # | A |\n|---|---|\n| 1 | a |\n| 1 | b |\n\n| Item | Size |\n|---|---|\n| x | 1 |\n| x | 2 |\n"
+        text = "| # | A |\n|---|---|\n| P-1 | a |\n| P-1 | b |\n\n| Item | Size |\n|---|---|\n| x-y | 1 |\n| x-y | 2 |\n"
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
-                         ["broker/x/ASSUMPTIONS.md:4: duplicate ID 1 (first on line 3)"])
+                         ["broker/x/ASSUMPTIONS.md:4: duplicate ID P-1 (first on line 3)"])
+
+    # ASSUMPTIONS-ID: package-scoped row IDs
+
+    def test_bare_new_assumption_id_is_rejected(self):
+        text = "| # | A |\n|---|---|\n| D35 | a |\n| 7 | b |\n| PKG-1 | c |\n| PKG-x-a | d |\n"
+        got = self.lint(**{"tools/ASSUMPTIONS.md": text})
+        self.assertEqual([g.split(" row ID ")[1].split(" ")[0] for g in got], ["D35", "7"])
+
+    def test_legacy_bare_ids_are_allowed(self):
+        text = "| # | A |\n|---|---|\n| D35 | a |\n"
+        self.assertEqual(self.lint(**{"tools/ASSUMPTIONS.md": text,
+                                      "tools/assumptions_legacy_ids.txt": "tools/ASSUMPTIONS.md D35\n"}), [])
+
+    def test_legacy_list_covers_every_bare_id_on_main(self):
+        import assumptions_ids
+        self.assertEqual(list(assumptions_ids.check(ROOT, assumptions_ids.assumption_files(ROOT))), [])
+
+    def test_parallel_packages_never_share_an_id(self):
+        a, b = "| # | A |\n|---|---|\n| PKG-A-1 | a |\n", "| # | A |\n|---|---|\n| PKG-B-1 | b |\n"
+        self.assertNotEqual(a.splitlines()[-1].split("|")[1], b.splitlines()[-1].split("|")[1])
+        merged = a + b.splitlines()[-1] + "\n"
+        self.assertEqual(self.lint(**{"tools/ASSUMPTIONS.md": merged}), [])
 
     def test_duplicate_decision_id(self):
         text = "# D\n\n| ID | Date | Status | Decision | Source |\n|---|---|---|---|---|\n" \
@@ -255,21 +277,21 @@ class AssumptionsUnionMerge(unittest.TestCase):
             root = pathlib.Path(d)
             (root / ".gitattributes").write_text((ROOT / ".gitattributes").read_text())
             f = root / "ASSUMPTIONS.md"
-            f.write_text("| # | Assumption |\n|---|---|\n| U1 | a |\n")
+            f.write_text("| # | Assumption |\n|---|---|\n| X-U1 | a |\n")
             self.git(d, "init", "-q", "-b", "main")
             self.git(d, "add", "-A")
             self.git(d, "commit", "-qm", "base")
             self.git(d, "checkout", "-qb", "pr")
-            f.write_text(f.read_text() + "| U2 | from pr |\n")
+            f.write_text(f.read_text() + "| X-U2 | from pr |\n")
             self.git(d, "commit", "-qam", "pr")
             self.git(d, "checkout", "-q", "main")
-            f.write_text(f.read_text() + "| U2 | from main |\n")
+            f.write_text(f.read_text() + "| X-U2 | from main |\n")
             self.git(d, "commit", "-qam", "main")
             self.git(d, "checkout", "-q", "pr")
             self.git(d, "merge", "-q", "--no-edit", "main")
-            self.assertEqual(f.read_text().count("| U2 |"), 2)
+            self.assertEqual(f.read_text().count("| X-U2 |"), 2)
             self.assertEqual(list(doclint.assumption_ids(root, ["ASSUMPTIONS.md"])),
-                             ["ASSUMPTIONS.md:5: duplicate ID U2 (first on line 4)"])
+                             ["ASSUMPTIONS.md:5: duplicate ID X-U2 (first on line 4)"])
 
 
 if __name__ == "__main__":
