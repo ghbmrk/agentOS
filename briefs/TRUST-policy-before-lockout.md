@@ -13,7 +13,7 @@ Board section: issue #1781. Class: release (HW-5a: a modified boot path cannot u
 
 ## Acceptance tests
 
-**Acceptance tests:** `broker/cmd/agentos-egress/trusted_test.go::TestFailedPINTrustLeavesTheBootPathsAsTheyWere` (TRUST-PBL-1) and `TestFailedTrustDoesNotApproveANewBootPath` (TRUST-PBL-2), run with `AGENTOS_REQUIRE_SWTPM=1`.
+**Acceptance tests:** `broker/cmd/agentos-egress/trusted_test.go::TestFailedPINTrustLeavesTheBootPathsAsTheyWere` (TRUST-PBL-1) and `TestFailedTrustDoesNotApproveANewBootPath` and `TestDecidedTrustKeepsTheNewBootPath` (TRUST-PBL-2), run with `AGENTOS_REQUIRE_SWTPM=1`.
 
 ## Scope (files)
 

@@ -1520,3 +1520,31 @@ func TestFailedTrustDoesNotApproveANewBootPath(t *testing.T) {
 		t.Fatalf("the earlier trust was lost: phase %v, notes %q", r.phase(), r.notes)
 	}
 }
+
+// REQ: TRUST-PBL-2, CRED-9, HW-5a
+// A trust whose slot change errors after the slot is decided
+// (vault.ErrSlotDecided) did trust this boot path, so the owner is told
+// "trusted" and the path's policy stays: the PC opens on it after a restart.
+func TestDecidedTrustKeepsTheNewBootPath(t *testing.T) {
+	r := newPCRig(t)
+	r.unknownHostUnlock(t)
+	if _, err := r.c.trust(r.code(), ""); err != nil {
+		t.Fatal(err)
+	}
+	bootPC(r.tpm, "initrd-B", "usrhash=bbbb quiet")
+	r.start(t, r.tpm)
+	if r.phase() != locked {
+		t.Fatal("changed boot path unlocked")
+	}
+	r.unknownHostUnlock(t)
+	restore := vault.InjectSealFault(errors.New("input/output error"))
+	defer restore()
+	if _, err := r.c.trust(r.code(), ""); !errors.Is(err, errHostSlotDecided) {
+		t.Fatalf("trust after the seal: %v", err)
+	}
+	restore()
+	r.start(t, r.tpm)
+	if r.phase() != open {
+		t.Fatalf("a decided trust lost the new boot path: phase %v, notes %q", r.phase(), r.notes)
+	}
+}
