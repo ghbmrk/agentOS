@@ -987,6 +987,7 @@ func main() {
 	// card's network (#1525).
 	if apNetPath != "" {
 		go watchAPUp(ctx, apNetPath, informOwner(d.Owner))
+		go watchCommittedWiFi(ctx, apNetPath, verifySocket) // #1696
 	}
 	// What is off, in the box log too (OP-9); the digest's sender (DIG-1)
 	// takes this list once it lands.
