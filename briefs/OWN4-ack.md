@@ -16,6 +16,6 @@ Work item: #2191. Board section: Human-native texting (spec #2157, D-127). Tier 
 
 **Scope:** `broker/cmd/agentosd/sleeper.go`, `broker/cmd/agentosd/sleeper_test.go`, `broker/cmd/agentosd/evidence.go`, `broker/cmd/agentosd/evidence_test.go`, `broker/owner/converse.go`, `broker/owner/pacer.go`, `broker/owner/settings_test.go`, `broker/owner/ASSUMPTIONS.md`, this brief. Not main.go or setup.go; if `Hold` is wired in main.go or setup.go, stop and hand the one-line wiring change to the coordinator (#2241 and #2015 touch them).
 
-**Dependencies:** after CH15-chat-window (evidence.go, converse.go). Confirm G1 scope as in CH12-ucs2.
+**Dependencies:** after #2250 merges, and after CH15-chat-window (evidence.go, converse.go). G1 is off (D-128); G2 allows these packages.
 
 **Usage estimate:** medium (about 100k).

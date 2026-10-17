@@ -6,7 +6,7 @@ Work item: #2189. Board section: Human-native texting (spec #2157, D-127). Tier 
 
 **Requirement IDs:** CH-21, CH-12.
 
-**BLOCKED (do not start):** needs #2181 (CH12-fold-wire: the checks run on both CH-12 folds), which waits on a G1 list change for `broker/voice`. Start only when #2181 is merged and `broker/voice` is writable under `tools/g1_scope.txt` (or the freeze is off).
+**BLOCKED (do not start):** needs #2181 (CH12-fold-wire: the checks run on both CH-12 folds), Start only when #2181 is merged. G1 is off (D-128) and the live G2 list already allows `broker/voice`, so #2181 is the only gate.
 
 **Change.**
 1. `broker/voice/voice.go` `WouldHold` gains the three shapes: reply-options footer, control word plus request ID, a leading request-ID token followed by ":". Matched against the folded text per #2181.
@@ -17,6 +17,6 @@ Work item: #2189. Board section: Human-native texting (spec #2157, D-127). Tier 
 
 **Scope:** `broker/voice/`, `broker/owner/channel.go`, `broker/owner/pacer.go`, `broker/owner/reaction.go` and tests, `broker/corpus/plane.go`, `broker/question/question.go`, `broker/cmd/agentosd/evidence.go` and test, ASSUMPTIONS.md of each touched package, this brief. Not main.go or setup.go.
 
-**Dependencies:** #2181; after CH12-ucs2, CH15-chat-window and OWN4-ack (evidence.go). D-111 against #2180 (merged), #2181.
+**Dependencies:** after #2250 merges; #2181; after CH12-ucs2, CH15-chat-window and OWN4-ack (evidence.go). D-111 against #2180 (merged), #2181.
 
 **Usage estimate:** medium (about 100k); split corpus/question callers off if over.

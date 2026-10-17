@@ -16,6 +16,6 @@ Work item: #2193. Board section: Human-native texting (spec #2157, D-127). Tier 
 
 **Scope:** `broker/owner/converse.go`, `broker/owner/pacer.go`, `broker/owner/converse_test.go`, `broker/owner/settings_test.go`, `broker/owner/ASSUMPTIONS.md`, `broker/cmd/agentosd/evidence.go`, `broker/cmd/agentosd/converse_test.go`, this brief. Not main.go or setup.go. #2251 (spec text for quiet hours in CH-15) is spec only; read it first.
 
-**Dependencies:** after CH12-ucs2 merges (same files). D-111 against #2184. Confirm G1 scope as in CH12-ucs2.
+**Dependencies:** after #2250 merges, and after CH12-ucs2 merges (same files). D-111 against #2184. G1 is off (D-128); G2 allows these packages.
 
 **Usage estimate:** medium (about 100k).

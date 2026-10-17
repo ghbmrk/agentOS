@@ -15,6 +15,6 @@ Work item: #2188. Board section: Human-native texting (spec #2157, D-127). Tier 
 
 **Scope:** `broker/control/text.go`, `broker/control/text_test.go`, `broker/owner/pacer.go`, `broker/owner/converse_test.go`, `broker/cmd/agentosd/evidence.go`, `broker/cmd/agentosd/evidence_test.go`, `broker/cmd/agentosd/fit_test.go`, `broker/owner/ASSUMPTIONS.md`, this brief. Not main.go or setup.go (#2241, #2015 open).
 
-**Dependencies:** none. Build first of the group: #2184 (split by encoding) is gated on it, and the three other packages edit `evidence.go`/`converse.go` (D-111: one at a time, order CH12-ucs2, CH15-chat-window, OWN4-ack). Check no open PR touches the scope when starting. G1 freeze: control, owner and agentosd must be on `tools/g1_scope.txt`; the builder confirms with `tools/g1_scope.py` before starting.
+**Dependencies:** after #2250 merges (W5-Dc-r15 edits `broker/owner/pacer.go`; D-111). Build first of the group: #2184 (split by encoding) is gated on it, and the three other packages edit `evidence.go`/`converse.go` (D-111: one at a time, order CH12-ucs2, CH15-chat-window, OWN4-ack). Check no open PR touches the scope when starting. G1 is off (D-128); the live G2 list already allows control, owner, agentosd and voice.
 
 **Usage estimate:** medium (about 100k).
