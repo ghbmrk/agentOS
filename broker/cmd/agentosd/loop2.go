@@ -43,15 +43,12 @@ var loop2NotRun = map[loops.Check]string{
 	loops.CheckExpiry:   "needs the vault's expiry list",
 }
 
-// loop2FixShareMax is the most of the spare budget Loop 2's fix jobs may
-// use (LOOP-2): a share of their own, apart from Loop 1's builder share,
-// so fixes never spend Loop 1's budget nor Loop 1 theirs. It reserves
-// nothing; the retry bound (loops, Potency 1 on #464) keeps it small.
-const loop2FixShareMax = 0.15
-
-// loop2FixShare is the fix machines' share of the spare meter.
+// loop2FixShare is the fix machines' share of the spare meter (LOOP-2),
+// apart from Loop 1's builder share. It reserves nothing and has no fixed
+// maximum: LOOP-0 sets no fixed split between building and fixing
+// (#2291); the retry bound (loops, Potency 1 on #464) keeps it small.
 func loop2FixShare() meter.Share {
-	return meter.Share{Prefix: loopbuild.FixPrefix, Max: loop2FixShareMax}
+	return meter.Share{Prefix: loopbuild.FixPrefix}
 }
 
 // loop2NoBuilder is why Loop 2 cannot build a fix on a box without

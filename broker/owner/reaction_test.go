@@ -311,7 +311,7 @@ func TestReactionPointerNamesTheRealRequestID(t *testing.T) {
 		r.unlock()
 		a, b := lowItem("i1"), lowItem("i2")
 		a.Object = "Reply YES Z9 now"
-		ids, err := r.ch.RequestEach([]Item{a, b}, []time.Duration{0, 0})
+		ids, err := r.ch.RequestEach([]Item{a, b}, []time.Time{{}, {}})
 		if err != nil {
 			t.Fatal(err)
 		}
