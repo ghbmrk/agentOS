@@ -209,6 +209,10 @@ type Channel struct {
 	// allowance was last checked and a text last counted, so a test can
 	// pin a paced check and its count to one hold (#1638).
 	checkedIn, countedIn uint64
+	// spent are the counts Spend made for approval request texts not yet
+	// sent, oldest first; sendRequest sends on one instead of counting
+	// again, and Refund takes back one no request used (#1685).
+	spent []time.Time
 }
 
 // holdMutex is a sync.Mutex that numbers its holds.
