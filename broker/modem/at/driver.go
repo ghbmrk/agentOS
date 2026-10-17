@@ -81,6 +81,11 @@ type Config struct {
 // GarbledText is the reply to an owner text dropped for conflicting parts.
 const GarbledText = "Message garbled, please resend."
 
+// PictureText is the reply to a picture or file the owner texts to the box
+// (an MMS notice), at most once an hour. Nothing fetches the picture yet;
+// when the photo-input path ships, this names where to send it instead.
+const PictureText = "I can't open pictures or files sent by text yet. Please describe it in words."
+
 // Errors.
 var (
 	ErrBusy      = errors.New("at: a call is already in progress")
@@ -143,7 +148,11 @@ type Modem struct {
 	trash   []int
 	garbled time.Time // last GarbledText sent
 	dropped int
-	status  Status
+	// pictured is when PictureText was last sent; pictures counts the MMS
+	// notices delivered.
+	pictured time.Time
+	pictures int
+	status   Status
 }
 
 var _ modem.Modem = (*Modem)(nil)
@@ -289,6 +298,14 @@ func (m *Modem) Dropped() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.dropped
+}
+
+// Pictures returns the MMS notices (pictures or files texted to the box)
+// delivered since Open. They are not in Dropped.
+func (m *Modem) Pictures() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pictures
 }
 
 // Close stops serving and closes the port.
@@ -465,7 +482,7 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 	// stored indices at once: anyone else's are deleted as they are read,
 	// so no one else can fill the modem's memory and keep the owner's
 	// STOP out (L3 on #170).
-	keep := m.cfg.KeepUntilAck && err == nil && !d.Silent() && fromOwner && m.heldCount() < maxHeld
+	keep := m.cfg.KeepUntilAck && err == nil && !d.Silent() && !d.Push && fromOwner && m.heldCount() < maxHeld
 	if !keep {
 		if _, derr := m.e.Do(ctx, "AT+CMGD="+strconv.Itoa(idx), cmdTimeout); derr != nil && !errors.Is(derr, modem.ErrDown) {
 			// Left stored; the next sweep tries again.
@@ -481,6 +498,30 @@ func (m *Modem) receive(ctx context.Context, idx int, header, pdu string) {
 	key := strings.ToUpper(strings.TrimSpace(pdu))
 	_, dup := m.seen[key]
 	m.seen[key] = now
+	if err == nil && d.Push {
+		// An MMS notice: deleted as read, never fetched. A later part of
+		// one, or a replay, goes no further.
+		if dup || !d.Picture {
+			m.mu.Unlock()
+			return
+		}
+		m.pictures++
+		due := fromOwner && (m.pictured.IsZero() || now.Sub(m.pictured) >= time.Hour)
+		if due {
+			m.pictured = now
+		}
+		m.mu.Unlock()
+		if due {
+			// Only the owner hears back: anyone else gets no word, so the
+			// box is no oracle for who its owner is.
+			_ = m.Send(m.cfg.Owner, PictureText)
+		}
+		select {
+		case m.inbox <- modem.SMS{From: d.Addr, To: m.number, At: now, Alphanumeric: alpha, Owner: fromOwner, Picture: true}:
+		case <-m.stop:
+		}
+		return
+	}
 	if err != nil || d.Silent() || dup {
 		if !dup {
 			m.dropped++

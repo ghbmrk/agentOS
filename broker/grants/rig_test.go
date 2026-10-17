@@ -33,6 +33,15 @@ type fakeOwner struct {
 	local      []string      // requests opened by RequestLocalEach
 	localCalls int
 	lateUndo   map[string]bool // UndoneAfterRelease
+	deadlines  []time.Time     // the deadline of each item asked by RequestEach or RequestLocalEach
+	slow       func()          // runs at the end of RequestEach: a slow text send
+}
+
+// expired refuses a re-issued item whose deadline has passed, as the
+// channel does (GR-reissue-deadline).
+func (f *fakeOwner) expired(deadline time.Time) bool {
+	f.deadlines = append(f.deadlines, deadline)
+	return !deadline.IsZero() && !f.now().Before(deadline)
 }
 
 func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error) {
@@ -57,7 +66,7 @@ func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 
 // RequestLocalEach records requests asked on the local page (P2-2a),
 // one call per flush (Potency R2).
-func (f *fakeOwner) RequestLocalEach(items []owner.Item, _ []time.Duration) ([]string, error) {
+func (f *fakeOwner) RequestLocalEach(items []owner.Item, deadlines []time.Time) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.localCalls++
@@ -68,20 +77,34 @@ func (f *fakeOwner) RequestLocalEach(items []owner.Item, _ []time.Duration) ([]s
 	if f.lineDown {
 		return ids, modem.ErrDown
 	}
+	var err error
 	for i, it := range items {
+		if f.expired(deadlines[i]) {
+			err = owner.ErrExpired
+			continue
+		}
 		ids[i] = fmt.Sprintf("R%d", len(f.order)+1)
 		f.reqs[ids[i]] = []owner.Item{it}
 		f.order = append(f.order, ids[i])
 		f.local = append(f.local, ids[i])
 	}
-	return ids, nil
+	return ids, err
 }
 
 // RequestEach records one request per item, as the channel opens them.
-func (f *fakeOwner) RequestEach(items []owner.Item, ttls []time.Duration) ([]string, error) {
+func (f *fakeOwner) RequestEach(items []owner.Item, deadlines []time.Time) ([]string, error) {
 	ids := make([]string, len(items))
+	if f.slow != nil {
+		defer f.slow()
+	}
 	for i, it := range items {
-		id, err := f.Request([]owner.Item{it}, ttls[i])
+		f.mu.Lock()
+		late := f.expired(deadlines[i])
+		f.mu.Unlock()
+		if late {
+			return ids, owner.ErrExpired
+		}
+		id, err := f.Request([]owner.Item{it}, 0)
 		if err != nil {
 			return ids, err
 		}

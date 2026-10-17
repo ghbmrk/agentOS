@@ -674,6 +674,11 @@ func verifyHandler(c *custody) http.Handler {
 			json.NewEncoder(w).Encode(modelroute.RotatedWiFi{SSID: ssid, Password: password})
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/committed-wifi" {
+			// agentosd's read of the card's network, to repair ap-net.json (#1696).
+			committedWiFiHandler(c, w)
+			return
+		}
 		if r.Method == http.MethodGet && r.URL.Path == "/second-line" {
 			st, err := c.secondLineState()
 			switch {
@@ -713,7 +718,7 @@ func verifyHandler(c *custody) http.Handler {
 			return
 		}
 		if r.Method != http.MethodPost || r.URL.Path != "/verify" {
-			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal, /setup/providers/key, /setup/providers/private, /update-anchor/raise or /rotate/wifi, or GET /second-line, /second-line/texts, /setup/providers or /update-anchor, only", http.StatusMethodNotAllowed)
+			http.Error(w, "POST /verify, /recall-key, /enroll, /enroll/confirm, /enroll/seal, /setup/providers/key, /setup/providers/private, /update-anchor/raise or /rotate/wifi, or GET /committed-wifi, /second-line, /second-line/texts, /setup/providers or /update-anchor, only", http.StatusMethodNotAllowed)
 			return
 		}
 		var req modelroute.VerifyRequest

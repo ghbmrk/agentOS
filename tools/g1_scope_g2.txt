@@ -1,0 +1,167 @@
+# G2 list (D-128): the paths a PR may touch until gate G2 passes: A4, A5, A9 and A14 on a VM
+# (SPEC.md, "Gates"; PLAN.md P1). Read by tools/g1_scope.py, which checks every gate list
+# that says `freeze on`; the g1-freeze workflow uses the base commit's copies. The syntax is
+# the G1 list's (tools/g1_scope.txt). Lift this freeze with a PR that sets `freeze off` and
+# cites the VM runs in which A4, A5, A9 and A14 pass.
+#
+# Derived from G2's acceptance tests and their code paths, minus D-098's frozen groups:
+# - every package the G2 binaries import (`go list -deps`, G2_BINARIES in
+#   tests/test_g1_scope.py): G1's binaries plus agentos-holder and agentos-release;
+# - what A4, A5 and A14 exercise directly beyond those: the credentialed browser (A5,
+#   CRED-12), the journal projections (A4), the CH-21 voice check (A14), the recall index
+#   (A14 CAP-3, so it leaves the G1 list's frozen imports), the simulators and scenario
+#   scripts, and the whole of broker/route/ (A14 CAP-9, CAP-11, CRED-5: every route the
+#   box can call is in scope, not only G1's one);
+# - the plan-route spikes (S8) that A14's provider-agent cases rest on.
+# Frozen by D-098 until G2 passes: the open-source bridge (cleanroom, hint, pubid, pubsend),
+# the second line (sipsign, smsapi, sendrules; agentosd imports them, so they are
+# frozen-import lines), fuzz in the loop (loop7, machprobe, sockprobe) and learning sources
+# beyond one candidate (compile, corpus, loopbuild, loops, skill). Also off the list because
+# no G2 test needs them: attention (CAP-6, G4), floor (A2, G3), the A8 scanner (G3), the
+# builder guest and binary (A11), probecmd (LOOP-7), photo (CH-22-27), evals/, and the
+# other spikes.
+
+freeze on
+since 2026-10-17T17:06:19Z
+# #2198: in flight before the freeze began (opened 16:16:15Z); a base swap to refresh its
+# stale g1-freeze base logged base_ref_changed at 17:52:57Z, voiding the time exemption.
+exempt-pr 2198
+
+# Project machinery and records.
+allow .claude/
+allow .github/
+allow assurance/
+allow briefs/
+allow decisions/
+allow docs/
+allow handoff/
+allow reviews/
+allow tests/
+allow tools/
+allow .gitignore
+allow AGENTS.md
+allow BOARD.md
+allow CLAUDE.md
+allow DECISIONS.md
+allow LEDGER.md
+allow LICENSE
+allow METRICS.md
+allow NOTICE
+allow PLAN.md
+allow README.md
+allow SPEC.md
+allow TRACE.md
+
+# The image, the guests it carries, the controller spike, and the plan-route spikes (CAP-11,
+# CRED-5: A14's provider-agent cases).
+allow image/
+allow guest/codex/
+allow guest/openclaw/
+allow spikes/CTRL-spike/
+allow spikes/S8-live/
+allow spikes/S8-provider-workers/
+
+# Broker module files, shared trees, the end-to-end tests, the simulators and the
+# A8/A9 scenario scripts.
+allow broker/go.mod
+allow broker/go.sum
+allow broker/core/
+allow broker/e2e/
+allow broker/hostchange/
+allow broker/sim/
+allow broker/test/
+allow broker/third_party/
+allow broker/vendor/
+
+# G2 binaries: G1's plus the key holder (SIM-split, CRED) and the release signer (UPD-8, A14).
+allow broker/cmd/agentos-ap/
+allow broker/cmd/agentos-checker/
+allow broker/cmd/agentos-clock-boot/
+allow broker/cmd/agentos-egress/
+allow broker/cmd/agentos-guest-bridge/
+allow broker/cmd/agentos-holder/
+allow broker/cmd/agentos-hostdisk/
+allow broker/cmd/agentos-localui/
+allow broker/cmd/agentos-modem/
+allow broker/cmd/agentos-netjoin/
+allow broker/cmd/agentos-release/
+allow broker/cmd/agentos-seller/
+allow broker/cmd/agentosd/
+
+# Packages the G2 binaries import, plus the packages A4, A5 and A14 test directly:
+# browser (A5 canary sessions, CRED-12), projection (A4 rebuild), voice (CH-19, CH-21).
+allow broker/accel/
+allow broker/admission/
+allow broker/apnet/
+allow broker/apply/
+allow broker/attest/
+allow broker/boxname/
+allow broker/browser/
+allow broker/bridgeclient/
+allow broker/bridgeproto/
+allow broker/budget/
+allow broker/card/
+allow broker/cgroup/
+allow broker/change/
+allow broker/checker/
+allow broker/childproc/
+allow broker/claim/
+allow broker/clock/
+allow broker/control/
+allow broker/daemon/
+allow broker/digestqueue/
+allow broker/durable/
+allow broker/egress/
+allow broker/events/
+allow broker/firstboot/
+allow broker/fold/
+allow broker/follow/
+allow broker/grants/
+allow broker/guest/
+allow broker/guesterr/
+allow broker/holder/
+allow broker/hostdisk/
+allow broker/journal/
+allow broker/localapi/
+allow broker/localsrv/
+allow broker/localui/
+allow broker/mail/
+allow broker/maintain/
+allow broker/meter/
+allow broker/modelroute/
+allow broker/modem/
+allow broker/modemlink/
+allow broker/netguard/
+allow broker/netjoin/
+allow broker/owner/
+allow broker/procguard/
+allow broker/projection/
+allow broker/provagent/
+allow broker/question/
+allow broker/quota/
+allow broker/recall/
+allow broker/recalltool/
+allow broker/recovery/
+allow broker/replay/
+allow broker/reversible/
+allow broker/route/
+allow broker/routerule/
+allow broker/sockets/
+allow broker/tpmseal/
+allow broker/update/
+allow broker/vault/
+allow broker/verb/
+allow broker/voice/
+allow broker/vm/
+allow broker/workers/
+
+# Imported by the G2 binaries but frozen (D-098).
+frozen-import broker/compile/
+frozen-import broker/corpus/
+frozen-import broker/loop7/
+frozen-import broker/loopbuild/
+frozen-import broker/loops/
+frozen-import broker/sendrules/
+frozen-import broker/sipsign/
+frozen-import broker/skill/
+frozen-import broker/smsapi/
