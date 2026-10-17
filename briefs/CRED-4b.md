@@ -23,3 +23,13 @@ Credentialed browser executor in the broker (plan P2 item 6; CRED-4, CRED-6): S5
 **Change:** the gate derives the password refs from the snapshot (every entry field showing a value the agent did not type into it on that page) and calls `OmitValues` on every snapshot before the CRED-10 filter; `password_fields` becomes the gate's count ([assumptions](../broker/browser/ASSUMPTIONS.md) G10, K14).
 
 **Acceptance tests:** `TestGateOmitsEntryValuesTheDriverDidNotReport`, `TestGateOmitsChildValuesAndCopies`, `TestGateKeepsTextTheAgentTyped`, `TestGateTypedTextIsNoOracle`, `TestGateShortValueKeepsPageAndRefs`, `TestGateTypedTextFollowsTheTypeReply`, `TestGateTypedGuessIsNoOracleThroughCopies`, `TestGateTypedFieldShowsAGuessEitherWay`, `TestGateOmitsValuesOfFieldsWithoutRefs`, `TestGateTypedNonEntryKeepsNothing` (`broker/browser/gate_test.go`), `TestEntryRefs` (`broker/browser/omit_test.go`), and every existing `OmitValues` test.
+
+## CRED-4b-r2 (#2245): password-field follow-ups
+
+**Requirements:** CRED-4. **Class:** release. **Finding:** #2245 (#2246 reviews 6239557715, 6239610403, comments 6239722241, 6239829840): a page can echo a typed guess beside an equal password value, borrow the typed field's ref through a `[ref=…]` token in a value, give a password input `role="spinbutton"`, show a value in a screenshot's pixels, or refill a field with the text the agent once typed.
+
+**Scope:** `broker/browser/gate.go`, `broker/browser/omit.go`, `broker/browser/gate_test.go`, `broker/browser/omit_test.go`, `broker/browser/ASSUMPTIONS.md`, this brief.
+
+**Change:** a line's ref is taken only from its attribute run; `spinbutton` is an entry role; a rich-text child (paragraph, generic) is structure, not a value; a value of a field also showing on any line outside the field and its ancestors withholds the whole snapshot (the verb's outcome stays), and inside its ancestors it is scrubbed at any length; a typed record is forgotten once a snapshot shows that field with other text or empty; a screenshot is not taken, or is discarded, when the page shows a field value the agent did not type ([assumptions](../broker/browser/ASSUMPTIONS.md) G8, G10, K14).
+
+**Acceptance tests:** `TestGateOmitsSpinbuttonValue`, `TestGateScreenshotWithheldForUntypedFieldValue`, `TestGateForgetsStaleTypedText`, `TestGateEchoOutsideFieldWithholdsSnapshot`, `TestGateRefInValueCannotBorrowTypedRef`, `TestGateOmitsChildValuesAndCopies` (`broker/browser/gate_test.go`), `TestCRED4PasswordValueScrubbedFromOtherNames`, `TestCRED4RefOnlyInAttributePosition`, `TestCRED4RichTextChildrenAreNotValues`, `TestCRED4ShortValueScrubbedFromAncestors`, `TestEntryRefsStaleTyped`, `TestEntryRefs` (`broker/browser/omit_test.go`), and every existing gate and `OmitValues` test.

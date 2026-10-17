@@ -244,8 +244,9 @@ func (g *Gate) remember(req Request, url string) {
 }
 
 // omit derives the password refs from the snapshot itself, not from the
-// driver (K14, G10), and omits their values (CRED-4). It returns the
-// snapshot and the number of fields omitted.
+// driver (K14, G10), and omits their values (CRED-4). A typed ref whose
+// field shows other text is forgotten (#2245). It returns the snapshot and
+// the number of fields omitted.
 func (g *Gate) omit(snapshot, url string) (string, int) {
 	typed := map[string]string{}
 	for ref, f := range g.typed {
@@ -253,7 +254,11 @@ func (g *Gate) omit(snapshot, url string) (string, int) {
 			typed[ref] = f.text
 		}
 	}
-	refs := entryRefs(snapshot, typed)
+	refs, stale := entryRefs(snapshot, typed)
+	for ref := range stale {
+		delete(g.typed, ref)
+		delete(typed, ref)
+	}
 	keep := map[string]bool{}
 	for ref := range typed {
 		keep[ref] = !refs[ref]
@@ -274,6 +279,12 @@ func (g *Gate) send(ctx context.Context, req Request) Result {
 			return Result{Error: "withheld", Detail: "page shows a value the detector matched (CRED-10)",
 				RefusedNavigations: snap.RefusedNavigations}
 		}
+		// CRED-4: pixels cannot be omitted, so a page with a field value the
+		// agent did not type is not shot at all (#2245).
+		if snap.PasswordFields > 0 {
+			return Result{Error: "withheld", Detail: "page shows a field value the agent did not type (CRED-4)",
+				RefusedNavigations: snap.RefusedNavigations}
+		}
 	}
 	res, ok := g.roundtrip(ctx, req)
 	if !ok || !res.OK {
@@ -288,10 +299,14 @@ func (g *Gate) send(ctx context.Context, req Request) Result {
 		}
 		// The page may have changed between the first look and the shot.
 		snap, ok := g.roundtrip(ctx, Request{Verb: "snapshot"})
-		if !ok || !snap.OK || snap.Redactions > 0 {
+		if !ok || !snap.OK || snap.Redactions > 0 || snap.PasswordFields > 0 {
 			_ = os.Remove(filepath.Join(g.ws, res.Path))
 			if !ok {
 				return snap
+			}
+			if snap.OK && snap.Redactions == 0 {
+				return Result{Error: "withheld", Detail: "page showed a field value the agent did not type during the screenshot (CRED-4)",
+					RefusedNavigations: append(res.RefusedNavigations, snap.RefusedNavigations...)}
 			}
 			return Result{Error: "withheld", Detail: "page showed a value the detector matched during the screenshot (CRED-10)",
 				RefusedNavigations: append(res.RefusedNavigations, snap.RefusedNavigations...)}
