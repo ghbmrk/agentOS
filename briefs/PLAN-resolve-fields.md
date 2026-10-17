@@ -14,7 +14,7 @@ Board row: work item #1756 (release findings from the #1014 build, ASSUMPTIONS W
 
 **Threats Security must check.** A placeholder issued for one field resolving in another; placeholders from another worker or provider; the interface change leaving a caller on the old signature (compile error, not silent).
 
-**Scope:** `broker/egress/worker.go`, the vault's `PlanLoginStore` implementation and its tests (name the file in the PR), `broker/egress/resolvefield_test.go` (new), `broker/egress/ASSUMPTIONS.md`, `briefs/PLAN-resolve-fields.md`. **Guard files:** `broker/egress/worker.go` is `TIER_A_BROKER`; `broker/cmd/agentos-egress/workerroute.go` calls the interface and so needs a one-line change that waits for #1857.
+**Scope:** `broker/egress/worker.go`, `broker/egress/codexlogin.go` (`PlanLogins.Resolve`), `broker/egress/worker_test.go` (`fakeLogins`), `broker/cmd/agentos-egress/workerroute_test.go` (`planLogins`), `broker/egress/resolvefield_test.go` (new), `broker/egress/ASSUMPTIONS.md`, `briefs/PLAN-resolve-fields.md`. **Guard files:** `broker/egress/` is tier A through the core list (`broker/core/core.txt`); `workerroute.go` only passes the `PlanLoginStore` type and needs no change, but `workerroute_test.go` does, so the #1857 wait still holds.
 
 **Conflict (D-111) at 2026-10-17 00:14Z.** #2015 holds `broker/egress/{exchange,proxy}.go`; #1857 holds `workerroute.go`; #1783 holds `broker/egress/codexlogin.go`. Part A starts after those merge.
 

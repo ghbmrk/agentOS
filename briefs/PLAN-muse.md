@@ -8,7 +8,7 @@ Board row: work item #1379. Tier A (`broker/provagent/declare.go`, egress route 
 - **4(p) automated nature disclosed.** Outgoing actions made through Muse must say they are automated. The declaration carries the disclosure, and a run whose brief would send an outgoing action refuses unless the disclosure is attached.
 - **4(f) only the owner's own login.** The route resolves only the owner's placeholder for the signed-in plan; a guest-supplied or another account's login never resolves.
 
-**Change.** Same shape as PLAN-grok: `Builtins()` gains `muse` (broker-held, `allowed`, terms URL muse.ai/terms, read 2026-10-13, empty CLI version and evidence), an egress `WorkerRouteConfig` for Meta's endpoints from the CLI source (marked unmeasured), declared pools if the endpoints return quota headers. A first-run payment-method refusal from Meta (the CLI refuses until one is attached) maps to the closed reason for a refused plan (no retry).
+**Change.** Same shape as PLAN-grok: `Builtins()` gains `muse` (broker-held, `allowed`, terms URL muse.ai/terms, read 2026-10-13, empty CLI version and evidence), an egress `PlanRoute` for Meta's endpoints from the CLI source (marked unmeasured), declared pools if the endpoints return quota headers. A first-run payment-method refusal from Meta (the CLI refuses until one is attached) maps to the closed reason for a refused plan (no retry).
 
 **Acceptance tests** (`broker/provagent/muse_test.go`, `broker/egress/museroute_test.go`, new): CAP-11: `TestMuseDeclarationValidates`; `TestMuseRefusesUnqualifiedUntilRecordFilled`; `TestMuseQualifiedStubRuns`. CRED-5/4(f): `TestMuseResolvesOnlyOwnersPlaceholder` (another worker's or provider's placeholder is refused); `TestMuseRouteInjectsOnlyAtDeclaredEndpoints`. 4(p): `TestMuseOutgoingActionCarriesAutomationDisclosure` (an outgoing-action brief without the disclosure refuses; fails if the check is removed). CRED-1: `TestMuseTokenResponseSwapsAllCredentialFields`. CRED-7: `TestMuseResultWithCanaryCredentialWithheld`. CAP-9: `TestMuseUsedUpAndRefusedPlanFallBack`.
 
@@ -16,7 +16,7 @@ Board row: work item #1379. Tier A (`broker/provagent/declare.go`, egress route 
 
 **Threats Security must check.** Cross-account or cross-worker placeholder resolution; the disclosure being strippable by the brief; an outgoing action sent without disclosure through a path the check does not see; unmeasured lists failing open.
 
-**Scope:** `broker/provagent/declare.go`, `broker/provagent/muse_test.go` (new), `broker/provagent/ASSUMPTIONS.md`, `broker/egress/museroute.go` (new), `broker/egress/museroute_test.go` (new), `broker/egress/ASSUMPTIONS.md`, `briefs/PLAN-muse.md`. Not in scope: `workerroute.go` wiring (after #1857, #2015). **Guard files:** as PLAN-grok; flag allowlist additions (`broker/daemon/arc2_test.go`, `tools/g1_scope.txt`) in the PR.
+**Scope:** `broker/provagent/declare.go`, `broker/provagent/declare_test.go` (`TestBuiltinsLoad` asserts two builtins; update the count), `broker/provagent/muse_test.go` (new), `broker/provagent/ASSUMPTIONS.md`, `broker/egress/museroute.go` (new), `broker/egress/museroute_test.go` (new), `broker/egress/ASSUMPTIONS.md`, `briefs/PLAN-muse.md`. Not in scope: `workerroute.go` wiring (after #1857, #2015). **Guard files:** as PLAN-grok; flag allowlist additions (`broker/daemon/arc2_test.go`, `tools/g1_scope.txt`) in the PR.
 
 **Conflict (D-111) at 2026-10-17 00:14Z.** #2015 holds `broker/provagent`. Build after PLAN-grok merges (same files in `declare.go`), and after #2015.
 
