@@ -20,6 +20,7 @@
 #   AGENTOS_CODEX_CLI=/root/package/vendor/x86_64-unknown-linux-musl/bin/codex \
 #     python3 -m unittest tests.test_codex_worker.CliSandboxTest
 # The CLI starts codex-code-mode-host from beside its binary, so keep the vendor directory whole.
+import base64
 import copy
 import json
 import os
@@ -877,7 +878,7 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         (work / ".codex").mkdir()
         (work / ".codex/config.toml").write_text('model = "project-config-model"\n')
 
-    def turn(self, config_edits=(), requirements_edits=()):
+    def turn(self, config_edits=(), requirements_edits=(), auth=None, cmd=None, endpoint_env=()):
         """One CLI turn in a fresh stub worker; config files carry each (old, new) edit."""
         run = self.tmp / secrets.token_hex(4)
         home, work, etc = run / "codex-home", run / "work", run / "etc-codex"
@@ -885,7 +886,7 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
             d.mkdir(parents=True)
         # The placeholder login (#1015) carries the canary where a key would sit.
         (home / "auth.json").write_text(
-            json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": self.canary}))
+            auth or json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": self.canary}))
         self.hostile(home, work)
         for src, edits in ((CONFIG, config_edits), (REQUIREMENTS, requirements_edits)):
             text = src.read_text()
@@ -894,10 +895,11 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
                 text = text.replace(old, new, 1)
             (etc / src.name).write_text(text)
         log = run / "endpoint.log"
-        cmd = f"python3 -I /var/lib/agentos-stub-tool.py probe {self.fwd.port}"
+        cmd = cmd or f"python3 -I /var/lib/agentos-stub-tool.py probe {self.fwd.port}"
         fake = subprocess.Popen(
             [sys.executable, "-I", str(FAKE_ENDPOINT), str(self.PORT), str(log)],
-            env={"PATH": os.environ["PATH"], "FAKE_CMD": cmd, "FAKE_CANARY": self.canary})
+            env={"PATH": os.environ["PATH"], "FAKE_CMD": cmd, "FAKE_CANARY": self.canary,
+                 **dict(endpoint_env)})
         self.addCleanup(fake.wait)
         self.addCleanup(fake.kill)
         for _ in range(100):
@@ -939,11 +941,77 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
                 continue
             if item.get("type") == "command_execution" and item.get("aggregated_output"):
                 for out in item["aggregated_output"].splitlines():
-                    if out.startswith('{"tcp"'):
+                    if out.startswith(('{"tcp"', '{"reread"')):
                         tool = json.loads(out)
-        return {"tool": tool or {}, "requests": requests, "stdout": r.stdout,
+        return {"tool": tool or {}, "requests": requests, "stdout": r.stdout, "home": home,
+                "work": work,
                 "marks": {m for m in ("notify-ran", "mcp-ran", "preload-ran")
                           if (work / m).exists()}}
+
+    def refresh_turn(self, status, body):
+        """A turn on a plan login whose token the CLI refreshes while the tool watches auth.json.
+
+        The login is a placeholder shaped like the broker's (codexlogin.go AuthJSON). The fake
+        answers the refresh as the egress route would (#1749): placeholders only, the id_token
+        added to a dict body, or a 502 whose body is dropped. The managed config does not set
+        chatgpt_base_url, so a plan-login CLI calls chatgpt.com directly and the turn fails
+        before any tool runs; the edit points it at the fake (finding in the PR for #1504).
+        Returns the login, the tool's last attempt (stub_tool.py reread) and the auth.json left
+        on the host."""
+        def jwt_part(o):
+            return base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
+        id_token = (jwt_part({"alg": "none", "typ": "JWT"}) + "." + jwt_part(
+            {"exp": 4102444800, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-syn"}})
+            + ".unsigned")
+        login = {"OPENAI_API_KEY": None, "last_refresh": "2026-10-17T00:00:00Z",
+                 "tokens": {"id_token": id_token, "access_token": "agentos-ph-access-old",
+                            "refresh_token": "agentos-ph-refresh-old", "account_id": "acct-syn"}}
+        if isinstance(body, dict):
+            body = dict(body, id_token=id_token)
+        answer = self.tmp / "refresh.json"
+        answer.write_text(json.dumps({"status": status, "body": body}))
+        got = self.turn(
+            config_edits=(('model_provider = "agentos"\n', 'model_provider = "agentos"\n'
+                           f'chatgpt_base_url = "{FORWARDER}/backend-api/"\n'),),
+            auth=json.dumps(login), cmd="python3 -I /var/lib/agentos-stub-tool.py reread",
+            endpoint_env={"FAKE_REFRESH": str(answer), "FAKE_YIELD_MS": "1000"})
+        refreshes = [q for q in got["requests"] if q.get("path", "").endswith("/oauth/token")]
+        self.assertEqual([q["refresh_token"] for q in refreshes], ["agentos-ph-refresh-old"],
+                         "control: the CLI must refresh once, sending the placeholder: "
+                         + got["stdout"][-2000:])
+        state = got["work"] / "reread.json"
+        self.assertTrue(state.exists(), "the tool never ran: " + got["stdout"][-2000:])
+        tool = json.loads(state.read_text())
+        self.assertFalse(tool["readable_at_start"], "control: deny_read must hide auth.json")
+        return login, tool, json.loads((got["home"] / "auth.json").read_text())
+
+    # REQ: CRED-5, A14
+    def test_a_tool_cannot_read_auth_json_after_the_cli_rewrites_it(self):
+        """#1504: the CLI rewrites auth.json in place (measured on 0.162.1: modify and
+        close-write events, no create or rename), so the deny_read mask set when the tool started
+        still covers the new contents, and those contents are only the route's placeholders."""
+        new = {"access_token": "agentos-ph-access-new", "refresh_token": "agentos-ph-refresh-new"}
+        login, tool, written = self.refresh_turn(200, new)
+        auth_events = [mask for name, mask in tool["events"] if name == "auth.json"]
+        self.assertIn(0x8, auth_events,  # IN_CLOSE_WRITE
+                      "control: the CLI must rewrite auth.json while the tool watches: "
+                      + json.dumps(tool))
+        self.assertIsNone(tool["reread"], "a running tool read auth.json after the CLI rewrote it")
+        self.assertFalse({0x100, 0x80} & set(auth_events),  # IN_CREATE, IN_MOVED_TO
+                         "the CLI now replaces auth.json by rename, past the mask (C12)")
+        self.assertEqual(written["tokens"], dict(login["tokens"], **new),
+                         "the CLI wrote something to CODEX_HOME beyond the route's placeholders")
+        self.assertEqual(set(written), set(login))
+
+    # REQ: CRED-5, A14
+    def test_a_dropped_refresh_leaves_auth_json_as_it_was(self):
+        """#1504: when the route drops a refresh answer (502), the CLI keeps the placeholder login
+        and writes nothing to auth.json, so nothing new reaches CODEX_HOME."""
+        login, tool, written = self.refresh_turn(
+            502, "egress denied: credential exchange answered with an error; dropped")
+        self.assertEqual(written, login)
+        self.assertNotIn("auth.json", [name for name, _ in tool["events"]])
+        self.assertIsNone(tool["reread"])
 
     # REQ: CRED-5, CRED-1, A14, CAP-11
     def test_hostile_lower_layers_do_not_reach_the_tool(self):
