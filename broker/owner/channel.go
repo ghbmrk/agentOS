@@ -1072,11 +1072,11 @@ func (c *Channel) askRetry() string {
 	}
 	var errs []error
 	if len(text) > 0 {
-		_, err := c.RequestEach(text, make([]time.Duration, len(text)))
+		_, err := c.RequestEach(text, make([]time.Time, len(text)))
 		errs = append(errs, err)
 	}
 	if len(local) > 0 {
-		_, err := c.RequestLocalEach(local, make([]time.Duration, len(local)))
+		_, err := c.RequestLocalEach(local, make([]time.Time, len(local)))
 		errs = append(errs, err)
 	}
 	switch err := errors.Join(errs...); {

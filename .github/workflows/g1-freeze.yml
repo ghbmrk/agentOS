@@ -1,16 +1,17 @@
 name: g1-freeze
-# G1-freeze (#1687): until G1-e2e (#1688) passes in QEMU, a PR that touches paths outside
-# the G1 list (tools/g1_scope.txt) fails, unless it was opened before the list's `since`
+# Gate freeze (G1-freeze #1687, D-128): a PR that touches paths outside a gate list whose
+# freeze is on fails (G1: tools/g1_scope.txt, off since G1 passed; G2: tools/g1_scope_g2.txt,
+# until A4, A5, A9 and A14 pass on a VM), unless it was opened before that list's `since`
 # time (and its timeline shows no reopen, force-push or retarget since then, #1717), is an
 # `exempt-pr` line, or changes only records. It runs on pull_request_target, so
-# the workflow file, tools/g1_scope.py and the list are the BASE commit's: a PR cannot widen
-# the list, flip the switch, move `since` or exempt itself, and no PR code runs in this job.
+# the workflow file, tools/g1_scope.py and the lists are the BASE commit's: a PR cannot widen
+# a list, flip the switch, move `since` or exempt itself, and no PR code runs in this job.
 # A plain Re-run replays the old event (old base); a push or title/body edit re-reads it. The PR head is only fetched
 # as git objects for `git diff --name-only`; it is never checked out, imported or executed.
 # The PR's timeline is read with a read-only token and handed to the script as event/time data.
 # A base without tools/g1_scope.py (before #1687 merges) passes: there is no freeze yet.
 # Main must require the `g1-freeze` check for a failure to block a merge (a ruleset change).
-# The freeze lifts through `freeze off` in tools/g1_scope.txt, not by editing this file.
+# A freeze lifts through `freeze off` in its list, not by editing this file.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
