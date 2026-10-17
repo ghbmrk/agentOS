@@ -270,6 +270,11 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 |---|---|---|---|
 | RS1 | **An unsaved approval answer shows in STATUS (OWNER-retire-surface, #1971).** `newOwnerPacer` adds the owner's `RetireNote` to `cfg.Notes` after its held line; the pacer's minute tick logs `RetireErr` once per distinct cause, and again only after it has cleared and recurs. No owner text is sent: the failure is a full or broken state disk, which an owner text would not fix and which STATUS already reports on ask. | SM-AJ-4, OP-11 | If the owner should be texted unprompted, add it to the digest's problem lines, not a new text. |
 
+## FORGET item 2 with recall off and no agent machine (JRN-startup-reconcile s5, #1412)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| RO1 | **Recall off is known only from the wiring.** `wireResume` with no `onOpen` (recall not configured) sets `noRecall`; `agentBack` with no agent machine then tells `forgetAgentNotOpen`, not `forgetAgentNoAgent`'s "when it runs again", since with recall off no later run can take the agent back. Recall on with no agent machine keeps the `forgetAgentNoAgent` promise. Before `wireResume` runs (tests that build `ownerForget` by hand) `noRecall` is false, the earlier behavior. It is set only in `wireResume`, before startup reconcile, like `whenOpen` (`TestForgetResumeIsWiredOnlyThroughWireResume`). | CH-12, RCH-4 | If recall can be turned on or off while agentosd runs, `noRecall` must follow it (an atomic read of recall's state), or the text can name the wrong step. |
 ## The box clock guard on its own (#1246)
 
 | # | Assumption | Spec basis | If it changes |
