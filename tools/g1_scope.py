@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""G1 freeze (G1-freeze, #1687): fail a new PR that touches paths outside the G1 list.
+"""Gate freeze (G1-freeze #1687, D-128): fail a new PR that touches paths outside a gate's list.
 
-Until G1-e2e (#1688) passes in QEMU, work goes to the G1 path (A1, SPEC.md:653, D-104):
-controller boot, phone control and one model-backed task. `tools/g1_scope.txt` lists the
-paths a PR may touch; a PR whose diff leaves the list fails, naming the paths outside it.
+Until a gate passes, work goes to that gate's path. Each gate in GATES has its own list:
+G1 (`tools/g1_scope.txt`: controller boot, phone control and one model-backed task; A1,
+SPEC.md:653, D-104; off since G1-e2e #1688 passed in QEMU) and G2 (`tools/g1_scope_g2.txt`:
+A4, A5, A9 and A14 on a VM; D-128). A PR must pass every gate's list; a list whose diff
+check fails names the paths outside it.
 
-A PR passes when any of these holds, checked in order:
-  1. the freeze is off (`freeze off` in g1_scope.txt: the single switch, flipped by a PR
-     that cites a #1688 QEMU run whose DONE line reads fail=0 xfail=0 blocked=0);
+Against one list, a PR passes when any of these holds, checked in order:
+  1. the freeze is off (`freeze off` in that list: the single switch, flipped by a PR that
+     cites the gate's passing run);
   2. it was opened before the freeze began: its `created_at` (from the pull_request
      event, which the author cannot set) is earlier than the list's `since` time, so work
      in flight when the freeze merged finishes (Mark 2026-10-14: "let current PRs finish"),
@@ -19,11 +21,11 @@ A PR passes when any of these holds, checked in order:
      (a re-opened split or rebuild of a row that was already under way);
   4. its diff is empty, or every path is a record document (tools/ci_scope.is_record);
   5. every path is inside the list.
-A G1 fix touches only listed paths, so it passes. A G1 fix that needs a frozen path first
+A gate fix touches only listed paths, so it passes. A fix that needs a frozen path first
 amends the list in its own reviewed PR: the check reads the base copy of the list.
 
-The g1-freeze workflow runs the BASE commit's copy of this file and its list, so a PR
-cannot widen the list, flip the switch, move `since` or exempt itself in the same change.
+The g1-freeze workflow runs the BASE commit's copy of this file and its lists, so a PR
+cannot widen a list, flip a switch, move `since` or exempt itself in the same change.
 An unreadable list or time fails closed. Standard library only, so the base copy runs on
 its own.
 
@@ -31,7 +33,7 @@ Usage:
   tools/g1_scope.py --git BASE HEAD [--pr N] [--pr-created ISO-TIME --timeline FILE]
   tools/g1_scope.py PATH...           check the listed paths (no exemptions apply)
 FILE holds the PR's issue timeline, one `EVENT<TAB>CREATED_AT` line per item (the
-g1-freeze workflow writes it with `gh api`). Exit 0 on pass, 1 on a path outside the list, 2 on an unreadable list or diff.
+g1-freeze workflow writes it with `gh api`). Exit 0 on pass, 1 on a path outside a list, 2 on an unreadable list or diff.
 """
 import argparse
 import datetime
@@ -41,7 +43,13 @@ import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
-LIST = HERE / "g1_scope.txt"
+
+# (name, list file, what lifts the freeze, where the freeze was set). G1 first: it is the
+# default for parse_list and check.
+GATES = (
+    ("G1", "g1_scope.txt", "G1-e2e (#1688) passes in QEMU (fail=0 xfail=0 blocked=0)", "#1687"),
+    ("G2", "g1_scope_g2.txt", "A4, A5, A9 and A14 pass on a VM (SPEC.md, Gates)", "D-128"),
+)
 
 
 # Timeline events that reuse a PR for work other than what was in flight when it opened.
@@ -77,8 +85,9 @@ def when(text):
         raise ListError(f"bad time {text!r}") from None
 
 
-def parse_list(text):
-    """Return (freeze_on, since, allow, frozen_imports, exempt_prs). Raises ListError on any doubt."""
+def parse_list(text, name="g1_scope.txt"):
+    """Return (freeze_on, since, allow, frozen_imports, exempt_prs). Raises ListError on any doubt.
+    name is the list's file name, for messages."""
     freeze, since, allow, frozen, prs = None, None, [], [], set()
     for n, line in enumerate(text.splitlines(), 1):
         w = line.split("#", 1)[0].split()
@@ -102,14 +111,14 @@ def parse_list(text):
             else:
                 raise ListError(f"unreadable line {line.strip()!r}")
         except ListError as e:
-            raise ListError(f"g1_scope.txt:{n}: {e}") from None
+            raise ListError(f"{name}:{n}: {e}") from None
     if freeze is None:
-        raise ListError("g1_scope.txt: no freeze line")
+        raise ListError(f"{name}: no freeze line")
     if since is None:
-        raise ListError("g1_scope.txt: no since line")
+        raise ListError(f"{name}: no since line")
     for f in frozen:
         if any(covers(a, f) for a in allow):
-            raise ListError(f"g1_scope.txt: {f} is both allowed and frozen")
+            raise ListError(f"{name}: {f} is both allowed and frozen")
     return freeze, since, allow, frozen, prs
 
 
@@ -135,42 +144,44 @@ def reuse(history, since):
     return None
 
 
-def check(paths, list_text, pr=None, created="", history=None):
-    """Return (ok, message lines). created is the PR's created_at, empty outside a PR;
-    history its timeline text, needed when created is before the freeze."""
-    freeze, since, allow, _, prs = parse_list(list_text)
+def check(paths, list_text, pr=None, created="", history=None, gate=GATES[0]):
+    """Return (ok, message lines) for one gate's list. created is the PR's created_at, empty
+    outside a PR; history its timeline text, needed when created is before the freeze."""
+    gname, file, lift, origin = gate
+    tag = f"{gname.lower()} freeze:"
+    freeze, since, allow, _, prs = parse_list(list_text, file)
     if not freeze:
-        return True, ["g1 freeze: off (g1_scope.txt)"]
+        return True, [f"{tag} off ({file})"]
     reused = None
     if created and when(created) < since:
         if history is None:
             raise ListError("no PR timeline to confirm the time exemption")
         reused = reuse(history, since)
         if reused is None:
-            return True, [f"g1 freeze: exempt: opened {created}, before the freeze began ({since:%Y-%m-%dT%H:%M:%SZ})"]
+            return True, [f"{tag} exempt: opened {created}, before the freeze began ({since:%Y-%m-%dT%H:%M:%SZ})"]
     if pr is not None and pr in prs:
-        return True, [f"g1 freeze: exempt: PR #{pr} is an exempt-pr line"]
+        return True, [f"{tag} exempt: PR #{pr} is an exempt-pr line"]
     paths = [p for p in paths if p]
     is_record = _ci_scope().is_record
     if all(is_record(p) for p in paths):
-        return True, ["g1 freeze: records only" if paths else "g1 freeze: empty change"]
+        return True, [f"{tag} records only" if paths else f"{tag} empty change"]
     outside = []
     for p in paths:
         bad = p.startswith("/") or any(x in ("", ".", "..") for x in p.split("/"))
         if bad or not (is_record(p) or any(covers(a, p) for a in allow)):
             outside.append(p)
     if not outside:
-        return True, ["g1 freeze: every path is on the G1 list"]
-    return False, ["g1 freeze: these paths are outside the G1 list (tools/g1_scope.txt):"] + [
+        return True, [f"{tag} every path is on the {gname} list"]
+    return False, [f"{tag} these paths are outside the {gname} list (tools/{file}):"] + [
         f"  {p}" for p in sorted(outside)
     ] + ([
         f"It was opened before the freeze began ({since:%Y-%m-%dT%H:%M:%SZ}), but its timeline shows {reused}:",
         "the time exemption covers only the work in flight when the freeze began (#1717).",
     ] if reused else []) + [
-        "Until G1-e2e (#1688) passes in QEMU (fail=0 xfail=0 blocked=0), PRs touch only the G1",
-        "path (#1687). If this is a G1 fix, amend tools/g1_scope.txt in its own PR first.",
+        f"Until {lift}, PRs touch only the {gname}",
+        f"path ({origin}). If this is a {gname} fix, amend tools/{file} in its own PR first.",
         "If this PR carries work that was already under way when the freeze began (a split or",
-        f"rebuild of a row in flight), add `exempt-pr {pr if pr is not None else 'N'}` to tools/g1_scope.txt in its own PR.",
+        f"rebuild of a row in flight), add `exempt-pr {pr if pr is not None else 'N'}` to tools/{file} in its own PR.",
         "Otherwise park the row until the freeze lifts. Once the amend merges, push a commit or",
         "edit this PR's title or body to re-run the check: a plain Re-run replays the old event",
         "and reads the old base's list.",
@@ -195,14 +206,18 @@ def main(argv=None):
     ap.add_argument("--timeline", help="the PR's timeline, EVENT<TAB>CREATED_AT per line")
     a = ap.parse_args(argv)
     try:
-        list_text = LIST.read_text()
         history = pathlib.Path(a.timeline).read_text() if a.timeline else None
         paths = changed_paths(*a.git) if a.git else a.paths
-        ok, msg = check(paths, list_text, a.pr, a.pr_created, history)
+        results = [
+            check(paths, (HERE / gate[1]).read_text(), a.pr, a.pr_created, history, gate)
+            for gate in GATES
+        ]
     except (OSError, ValueError, subprocess.CalledProcessError, ListError) as e:
-        print(f"g1 freeze: cannot decide ({e}); failing closed", file=sys.stderr)
+        print(f"freeze: cannot decide ({e}); failing closed", file=sys.stderr)
         return 2
-    print("\n".join(msg), file=sys.stdout if ok else sys.stderr)
+    ok = all(r[0] for r in results)
+    for r_ok, msg in results:
+        print("\n".join(msg), file=sys.stdout if r_ok else sys.stderr)
     return 0 if ok else 1
 
 
