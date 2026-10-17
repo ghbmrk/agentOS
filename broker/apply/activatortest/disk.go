@@ -332,9 +332,10 @@ func Check(t *testing.T, newActivator func(*Disk) apply.Activator) {
 // partway checks a cut Install: the booted slot is intact, and every view
 // boots a whole image: the default is N-1's entry, or an entry whose slot
 // holds all of its image (N before any byte of its slot is written, N+1
-// once it is written and synced); and no blessed entry points at a slot
-// that does not hold its image. Once a byte of N's slot is written, only
-// N-1 is left to be the default until N+1 is whole.
+// once it is written and synced, and only counted, so a bad N+1 falls
+// back); no blessed entry points at a slot that does not hold its image;
+// and no N+1 entry is without a try counter. Once a byte of N's slot is
+// written, only N-1 is left to be the default until N+1 is whole.
 func partway(d *Disk, want, at string) []string {
 	out := intact(d, at)
 	for _, v := range d.views() {
@@ -344,13 +345,17 @@ func partway(d *Disk, want, at string) []string {
 		case !ok:
 			out = append(out, fmt.Sprintf("%s: default %q is not in the boot menu", w, v.esp.Default))
 		case def.Slot == "a" && def.UsrHash == updatetest.UsrHash(prev):
-		case v.slots[def.Slot] == def.UsrHash && (def.UsrHash == want || def.UsrHash == updatetest.UsrHash(inst)):
+		case v.slots[def.Slot] == def.UsrHash && def.UsrHash == want && def.Tries > 0:
+		case v.slots[def.Slot] == def.UsrHash && def.UsrHash == updatetest.UsrHash(inst):
 		default:
-			out = append(out, fmt.Sprintf("%s: default %q is %+v, not N-1 on the booted slot (slot holds %q)", w, v.esp.Default, def, v.slots[def.Slot]))
+			out = append(out, fmt.Sprintf("%s: default %q is %+v, not N-1 on the booted slot nor a whole, counted N+1 (slot holds %q)", w, v.esp.Default, def, v.slots[def.Slot]))
 		}
 		for id, e := range v.esp.Entries {
 			if e.Tries == Blessed && v.slots[e.Slot] != e.UsrHash {
 				out = append(out, fmt.Sprintf("%s: blessed entry %q points at slot %s, which holds %q, not %q", w, id, e.Slot, v.slots[e.Slot], e.UsrHash))
+			}
+			if e.UsrHash == want && e.Tries <= 0 {
+				out = append(out, fmt.Sprintf("%s: N+1's entry %q has no try counter", w, id))
 			}
 		}
 	}

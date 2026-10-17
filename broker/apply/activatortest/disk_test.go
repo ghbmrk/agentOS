@@ -21,6 +21,8 @@ type ref struct {
 	writeFirst bool // writes the slot before retiring its entries
 	noSync     bool // retires the entries without SyncESP before the slot writes
 	byDefault  bool // takes the slot not holding the default as inactive
+	blessFirst bool // makes N+1 the default blessed, then counts it
+	blessEntry bool // writes N+1's entry blessed, then counts it
 }
 
 func (r *ref) slots() (booted, inactive string, err error) {
@@ -127,6 +129,25 @@ func (r *ref) Install(_ context.Context, v *update.Verified) error {
 		return fmt.Errorf("ref: slot %s does not verify", s)
 	}
 	id := fmt.Sprintf("agentos-%d", m.Version)
+	if r.blessEntry {
+		if err := r.d.WriteEntry(id, Entry{Slot: s, UsrHash: m.UsrRootHash, Tries: Blessed}); err != nil {
+			return err
+		}
+		if err := r.d.SyncESP(); err != nil {
+			return err
+		}
+	}
+	if r.blessFirst {
+		for _, step := range []func() error{
+			func() error { return r.d.WriteEntry(id, Entry{Slot: s, UsrHash: m.UsrRootHash, Tries: Blessed}) },
+			func() error { return r.d.SetDefault(id) },
+			r.d.SyncESP,
+		} {
+			if err := step(); err != nil {
+				return err
+			}
+		}
+	}
 	for _, step := range []func() error{
 		func() error { return r.d.WriteEntry(id, Entry{Slot: s, UsrHash: m.UsrRootHash, Tries: 3}) },
 		r.d.SyncESP,
@@ -209,6 +230,12 @@ func TestCheckCatchesA12Defects(t *testing.T) {
 		{"entry retired without SyncESP", func(r *ref) { r.noSync = true }, "synced ESP"},
 		// A12(3): the slot not holding the default is the booted one.
 		{"inactive slot taken from the default", func(r *ref) { r.byDefault = true }, "booted slot a was written"},
+		// A12(4): a whole N+1 is the default with no try counter, so a
+		// bad N+1 boots with no fallback.
+		{"N+1 made the default blessed", func(r *ref) { r.blessFirst = true }, "nor a whole, counted N+1"},
+		// The same for an N+1 entry that is not the default: a manual
+		// pick from the menu boots it with no fallback.
+		{"N+1 entry written blessed", func(r *ref) { r.blessEntry = true }, "N+1's entry \"agentos-3\" has no try counter"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			v := Violations(t, func(d *Disk) apply.Activator {
