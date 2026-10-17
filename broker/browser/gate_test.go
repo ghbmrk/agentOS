@@ -124,6 +124,10 @@ func newHarness(t *testing.T, replies map[string]any, file string, timeout time.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { g.Close() })
+	// Tests of other rules click e1 and download e2 without a snapshot;
+	// the gate refuses a ref it has not seen (ADP-14-get), so they start
+	// as seen non-link elements. A snapshot reply replaces them.
+	g.refs = map[string]link{"e1": {}, "e2": {}}
 	return &harness{g: g, log: log, ws: ws}
 }
 
