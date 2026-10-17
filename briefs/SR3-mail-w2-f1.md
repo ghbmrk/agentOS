@@ -10,12 +10,12 @@ Board section: Security and architecture review (2026-10-08). Source: #655 revie
 - Redactor: none set; MW4 describes the effect.
 - (a) `gate.go:963` still returns the ADP-2 wording; no state-specific words.
 - (b) `mail.UndoReport` has `Restored` and `Skipped` only (`undo.go:28`), so an unreachable vault reads as "changed since".
-- (c) the forced-ask `Reason` at `gate.go:981` is "no guard for this account".
+- (c) the forced-ask `Reason` at `gate.go:981` is "no guard for this account". agentosd registers the mail loop as an Escalator (`agentosd/mail.go:91`), so the forced ask an owner sees today is `mail.go:221` ("no UNDO yet ..."), and PR 1 turns that path off in production. The builder confirms which site the words belong to; `agentosd/mail.go` is in PR 2's scope.
 - (d) `MORE` is handled in `broker/owner/channel.go:494`; no route for a mail UNDO ID.
 - (e) `mailDays.undo` (`agentosd/mail.go:402`) takes the first day whose `undoID` matches; two days colliding inside `undoLookback` (8) restore the wrong one.
 - (f) `mailDays.changes()` (`mail.go:352`) filters by account; no test has two accounts in one trail.
 
-**PR 1: redactor, (e), (f).** Privacy decision first: the redactor keeps only `mail.Change` fields (record ID, folders, sender domain at most; SR3-mail-w2 l5), removes vault values and CH-19 patterns from them, and `[redacted]`s everything else. State the kept field list in MW4 and flag it for the Security lens; a field not on the list is not kept.
+**PR 1: redactor, (e), (f).** Privacy decision first: the redactor keeps only `mail.Change` fields (record ID, folders, sender domain at most; SR3-mail-w2 l5), removes vault values and CH-19 patterns from them, and `[redacted]`s everything else. State the kept field list in MW4 and flag it for the Security lens; a field not on the list is not kept. The redactor is for `daemon.Run` only: do not set `valueStore.redact` from it (`values.go:331` treats any value the journal redactor changes as a secret, so every non-Change value would become the placeholder). Reuse `owner.SecretShaped` / `credentialShaped` for the CH-19 patterns, not new ones.
 - T1 `TestRedactorKeepsOnlyMailChangeFields` (`broker/cmd/agentosd/`): a journaled `mail.Change` round-trips through `ParseChange` after redaction; a canary vault value and a CH-19 pattern placed in each kept field are gone; a non-Change free text is `[redacted]`.
 - T2 `TestOrganizeRunsUnaskedWithRedactor`: with the redactor wired, `evidenceReadable` is true and an in-bounds organize is allowed without an ask; without it (control), asked.
 - T3 (e) `TestUndoIDCollisionDetected`: a fixed key and two days with equal `undoID` within the look-back; `undo` answers that the ID is ambiguous and restores nothing. Find a colliding pair by search over days with a fixed key.
