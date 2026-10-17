@@ -359,6 +359,13 @@ type state struct {
 	// no blob in Content (sweepOrphansLocked). A state saved before it
 	// reads 0 and is swept from c1.
 	Swept int `json:"swept,omitempty"`
+	// Legacy is the lifecycle of each adoption a state saved before the
+	// journal held it; replay starts such an adoption from it.
+	// LegacyInState: the bodies were migrated, so replay reads no
+	// lifecycle from a body, which Content's writers could forge
+	// (CHG-adoption-body-trust). A state saved before it reads false.
+	Legacy        map[string]*lifecycle `json:"legacy,omitempty"`
+	LegacyInState bool                  `json:"legacy_in_state,omitempty"`
 	// Notices are broker notices for the digest, kept once per key
 	// (Notice).
 	Notices []notice `json:"notices,omitempty"`
@@ -452,12 +459,10 @@ type Pipeline struct {
 	// content holds adoption and proposal bodies (Config.Content);
 	// lastBody each adoption body as last put, so a save puts only what
 	// changed; savedAds the adoptions as of the last save, for
-	// reloadLocked; legacy the lifecycle of adoptions saved before the
-	// journal held it. replayed: Attach rebuilt the adoptions once.
+	// reloadLocked. replayed: Attach rebuilt the adoptions once.
 	content  Content
 	lastBody map[string][]byte
 	savedAds []*Adoption
-	legacy   map[string]*lifecycle
 	replayed bool
 }
 
@@ -486,7 +491,7 @@ func New(cfg Config) (*Pipeline, error) {
 		cfg.Rand = rand.Reader
 	}
 	p := &Pipeline{cfg: cfg, props: map[string]*proposal{}, probes: map[string]int{}, probeTask: map[string]string{}, kept: map[string]pairResult{},
-		content: cfg.Content, lastBody: map[string][]byte{}, legacy: map[string]*lifecycle{}}
+		content: cfg.Content, lastBody: map[string][]byte{}}
 	if p.content == nil {
 		if b, ok := cfg.Store.(interface{ Bodies() Content }); ok {
 			p.content = b.Bodies()

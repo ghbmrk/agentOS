@@ -1456,6 +1456,7 @@ func (p *ownerPacer) wire(g *grants.Config) {
 	g.Quiet = p.quiet
 	g.Urgent = func(owner.Item) bool { return p.urgent(owner.ClassApproval) }
 	g.Allowance = p.allowance
+	g.Spend, g.Refund = p.spend, p.refund
 }
 
 func (p *ownerPacer) quiet(t time.Time) bool {
@@ -1473,6 +1474,21 @@ func (p *ownerPacer) allowance(t time.Time) int {
 		return ch.Allowance(t)
 	}
 	return 0
+}
+
+// spend counts a request text on the owner's hour as grants grants it
+// (#1685); until the channel is attached, nothing paced goes.
+func (p *ownerPacer) spend(paced bool) (time.Time, bool) {
+	if ch := p.ch.Load(); ch != nil {
+		return ch.Spend(paced)
+	}
+	return time.Time{}, !paced
+}
+
+func (p *ownerPacer) refund(at time.Time) {
+	if ch := p.ch.Load(); ch != nil {
+		ch.Refund(at)
+	}
 }
 
 // note is STATUS's held line (QH-10).
