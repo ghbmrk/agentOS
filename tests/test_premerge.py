@@ -251,6 +251,58 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertNotIn("agent", r.stdout.split())
 
+    def needs_mark(self, head="pr"):
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main", head],
+                           cwd=self.r, capture_output=True, text=True)
+        return r.returncode, r.stdout.split()
+
+    def test_cli_needs_mark_sees_a_revert_made_by_a_criss_cross_merge(self):
+        # #2138: with two merge bases, `git merge-base` picked the one where the head's CLAUDE.md was
+        # unchanged, so a PR whose merge reverts main's CLAUDE.md printed `agent`.
+        self.write("CLAUDE.md", "v0\n")
+        m0 = self.commit("m0")
+        git(self.r, "checkout", "-q", "-b", "side")
+        self.write("CLAUDE.md", "v1\n")
+        m2 = self.commit("m2")
+        git(self.r, "checkout", "-q", "main")
+        self.write("b.txt", "m1\n")
+        m1 = self.commit("m1")
+        git(self.r, "checkout", "-q", "-b", "pr", m1)
+        git(self.r, "merge", "-q", "--no-edit", m2)
+        self.write("CLAUDE.md", "v0\n")
+        self.write("a.txt", "pr\n")
+        git(self.r, "add", "."), git(self.r, "commit", "-q", "--amend", "--no-edit")
+        git(self.r, "checkout", "-q", "main")
+        git(self.r, "merge", "-q", "--no-edit", m2)
+        self.assertEqual(len(git(self.r, "merge-base", "--all", "main", "pr").split()), 2, m0)
+        merged = git(self.r, "merge-tree", "--write-tree", "main", "pr")
+        self.assertEqual(git(self.r, "show", f"{merged}:CLAUDE.md"), "v0")  # the merge reverts main's v1
+        self.assertEqual(self.needs_mark(), (1, ["mark", "CLAUDE.md"]))
+
+    def test_cli_needs_mark_sees_a_mark_file_the_merge_resolves_in_conflict(self):
+        # #2138: a conflicted merge-tree keeps its markers, so the conflicted file still reads as changed.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("CLAUDE.md", "pr\n")
+        self.commit("pr rules")
+        git(self.r, "checkout", "-q", "main")
+        self.write("CLAUDE.md", "main\n")
+        self.commit("main rules")
+        self.assertEqual(self.needs_mark(), (1, ["mark", "CLAUDE.md"]))
+
+    def test_cli_needs_mark_sees_a_claude_symlink(self):
+        # #2138: `.claude/` needed a slash, so `broker/.claude -> ../cfg` plus cfg/settings.json printed `agent`.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "cfg").mkdir()
+        (self.r / "broker").mkdir()
+        self.write("cfg/settings.json", "{}\n")
+        (self.r / "broker/.claude").symlink_to("../cfg")
+        self.commit("linked settings")
+        self.assertEqual(self.needs_mark(), (1, ["mark", "broker/.claude"]))
+        for f in (".claude", "a/.claude", "a/.claude/x"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in (".claudex", "a/.claude.bak", "a/x.claude", ".claude\n"):
+            self.assertEqual(premerge.mark_paths([f]), [], repr(f))
+
     def test_check_gate(self):
         import json
         git(self.r, "checkout", "-q", "-b", "pr")
