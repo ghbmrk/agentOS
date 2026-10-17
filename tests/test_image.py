@@ -3427,6 +3427,25 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                                   "usr/lib/tmpfiles.d/x.conf line 1 remakes %s on the box" % (step, how), self.v())
                 finally:
                     f.unlink()
+        # Combined R1: a line that leaves the mode or the group as the tree has it, when the tree
+        # supplies the other half of group write for a non-root gid. A Z line counts on the steps below
+        # it too (a g+w usr is refused before this: the tree check cannot read its tmpfiles.d there).
+        other = check.TREE_GROUP + 1000
+        for ln, step, how, at, gid, mode in (
+                ("z /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000", "usr/lib/x", None, 0o775),
+                ("z /usr/lib/x 0775 - -", "usr/lib/x", "mode 0775 for -:-", "usr/lib/x", other, 0o755),
+                ("d /usr/lib/x 0775", "usr/lib/x", "mode 0775 for -:-", "usr/lib/x", other, 0o755),
+                ("e /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000", "usr/lib/x", None, 0o775),
+                ("Z /usr - - 1000", "usr/lib/x", "mode - for -:1000", "usr/lib/x", None, 0o775)):
+            with self.subTest(ln=ln, at=at), self.attrs(at, gid=gid, mode=mode):
+                st = check.tree_lstat(self.root, at)
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /%s, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes %s over the tree's mode %04o and "
+                                  "gid %d on the box" % (step, how, mode, st.st_gid), self.v())
+                finally:
+                    f.unlink()
         # L3 point 2: a directory the chase walks through, off the final path.
         (self.root / self.RULES).unlink()
         (self.root / "opt/d").mkdir(parents=True)
@@ -3447,9 +3466,19 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                     self.assertNotIn("etc/udev/rules.d:", self.v())
                 finally:
                     f.unlink()
+        # Combined R1: an explicit root group, or a tree mode without group write, keeps it root's.
+        other = check.TREE_GROUP + 1000
+        for ln, gid, mode in (("z /usr/lib/x 0775 - root", other, 0o755), ("z /usr/lib/x - - 1000", None, 0o755),
+                              ("Z /usr - - 1000", None, 0o755), ("z /usr/lib/x 0775 - 0", other, 0o755)):
+            with self.subTest(ln=ln), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                f = self.tmpfiles(ln + "\n")
+                try:
+                    self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
 
     def test_without_the_held_step_tmpfiles_rule_those_links_pass(self):
-        m = self.mutant("        made = tmpfiles_maker(root, path_parts(d))\n", "        made = None\n")
+        m = self.mutant("        made = tmpfiles_maker(root, path_parts(d), st)\n", "        made = None\n")
         link(self.root, self.RULES, "/usr/lib/x/r")
         self.tmpfiles("z /usr/lib/x 0777 - - -\n")
         self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
