@@ -6,6 +6,10 @@ Board section: Security and architecture review (2026-10-08). Source: #655 revie
 
 **Requirements:** CRED-7 (redact by default; nothing secret in the journal), CH-12 (words the owner can act on), CH-19, ADP-2, OWN-8. Anchor: agentosd MW4, SR3-mail-w2 l5 (`docs/LATER-HISTORY.md`).
 
+**Acceptance tests:** (REQ: CRED-7, CH-12, CH-19, ADP-2, OWN-8)
+- PR 1: T1 `TestRedactorKeepsOnlyMailChangeFields`, T2 `TestOrganizeRunsUnaskedWithRedactor`, T3 `TestUndoIDCollisionDetected`, T4 `TestMailDaysTwoAccountTrail` (each described under PR 1 below).
+- PR 2: the gate ask/deny text test for (a), the unreachable-adapter `UndoReport` test for (b), the forced-ask `Reason` reaching the ask text for (c), and the `MORE <id>` test through `owner/channel.go` for (d).
+
 **Status of each part on main (all six open; re-check at start).**
 - Redactor: none set; MW4 describes the effect.
 - (a) `gate.go:963` still returns the ADP-2 wording; no state-specific words.
