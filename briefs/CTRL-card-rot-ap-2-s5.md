@@ -4,6 +4,7 @@
 **Priority:** release. **Class:** release. **Implementation risk:** tier A.
 **Board section:** Controller and helper system (D-102).
 **Requirements:** ARC-1, CRED-1, REC-4
+**Acceptance tests:** ARC-1, CRED-1 `broker/cmd/agentos-ap/unit_test.go::TestTheUnitIsBounded`; REC-4 review of `broker/apnet/ASSUMPTIONS.md` N5 (prose, no test).
 **Dependencies:** PR #1590 (#1426, P2-1 s2), merged.
 **Source:** Security R2 of PR #1614 (head b8323e16), issue #1628.
 
