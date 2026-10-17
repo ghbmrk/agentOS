@@ -145,10 +145,17 @@ type link struct {
 // for a link, the target from its `/url:` child resolved against page.
 // The first ref after the quoted name is the element's own (a ref inside
 // the name is page text); refs on a line that cannot be parsed are left
-// out, so a click on them is refused.
+// out, so a click on them is refused. A click on an element inside a link
+// follows the link, so a nested element takes the nearest enclosing link's
+// target and adds its own name to that link's.
 func parseRefs(snapshot, page string) map[string]link {
 	base, _ := url.Parse(page)
 	refs := map[string]link{}
+	type open struct {
+		depth int
+		l     link
+	}
+	var links []open
 	lines := strings.Split(snapshot, "\n")
 	for i, line := range lines {
 		end, ok := nameEnd(line)
@@ -165,10 +172,14 @@ func parseRefs(snapshot, page string) map[string]link {
 		if err != nil {
 			name = ""
 		}
+		depth := len(indent(line))
+		for len(links) > 0 && links[len(links)-1].depth >= depth {
+			links = links[:len(links)-1]
+		}
 		l := link{isLink: role == "link", name: name}
 		if l.isLink {
 			// Only a direct child names the target, not a nested element's.
-			depth, child := len(indent(line)), -1
+			child := -1
 			for j := i + 1; j < len(lines) && len(indent(lines[j])) > depth; j++ {
 				if child < 0 {
 					child = len(indent(lines[j]))
@@ -186,6 +197,16 @@ func parseRefs(snapshot, page string) map[string]link {
 					break
 				}
 			}
+		}
+		if len(links) > 0 {
+			outer := links[len(links)-1].l
+			if !l.isLink || l.target == "" {
+				l.target = outer.target
+			}
+			l.isLink, l.name = true, strings.TrimSpace(outer.name+" "+l.name)
+		}
+		if role == "link" {
+			links = append(links, open{depth, l})
 		}
 		refs[m[1]] = l
 	}

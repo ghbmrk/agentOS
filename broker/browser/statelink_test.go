@@ -11,7 +11,9 @@ import (
 const unsubURL = "https://shop.example.test/unsubscribe?token=synthCanaryTok123"
 
 // A page with a mail-style action link, a relative confirm link, a link
-// named like an action, an ordinary link and a button.
+// named like an action, an ordinary link, a button, and elements nested in
+// links: an image in an unsubscribe link and an action-named child of an
+// ordinary link.
 const actionPage = `- generic [ref=e1]:
   - link "Stop these emails" [ref=e2] [cursor=pointer]:
     - /url: /unsubscribe?token=synthCanaryTok123
@@ -27,7 +29,13 @@ const actionPage = `- generic [ref=e1]:
   - link "Gift ideas" [ref=e8]:
     - generic [ref=e9]:
       - /url: /unsubscribe
-    - /url: /gifts`
+    - /url: /gifts
+  - link [ref=e10]:
+    - /url: /unsubscribe?token=synthCanaryTok123
+    - img "logo" [ref=e11]
+  - link "Kettles" [ref=e12]:
+    - /url: /products/kettles
+    - generic "Unsubscribe" [ref=e13]`
 
 func pageReply(snapshot string) map[string]any {
 	return map[string]any{"ok": true, "url": "https://shop.example.test/mail/", "snapshot": snapshot}
@@ -97,10 +105,13 @@ func TestClickOnAStateChangingLinkIsHeld(t *testing.T) {
 		t.Fatalf("snapshot %+v", r)
 	}
 	for ref, target := range map[string]string{
-		"e2": unsubURL,
-		"e3": "https://shop.example.test/mail/email/confirm?t=synthCanaryT2",
-		"e4": "https://shop.example.test/mail/",
-		"e7": "https://shop.example.test/account/delete",
+		"e2":  unsubURL,
+		"e3":  "https://shop.example.test/mail/email/confirm?t=synthCanaryT2",
+		"e4":  "https://shop.example.test/mail/",
+		"e7":  "https://shop.example.test/account/delete",
+		"e10": unsubURL,
+		"e11": unsubURL,
+		"e13": "https://shop.example.test/products/kettles",
 	} {
 		for _, verb := range []string{"click", "download"} {
 			r := h.do(t, `{"v":0,"verb":"`+verb+`","ref":"`+ref+`"}`)
@@ -153,7 +164,7 @@ func TestClickOnAnUnseenRefIsRefused(t *testing.T) {
 		}
 	}
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
-	for _, ref := range []string{"e10", "f1e2"} {
+	for _, ref := range []string{"e99", "f1e2"} {
 		if r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`); r.OK || r.Error != "unknown_ref" {
 			t.Fatalf("click %s: %+v", ref, r)
 		}
@@ -172,13 +183,14 @@ func TestOrdinaryLinksStillPass(t *testing.T) {
 		}
 	}
 	h.do(t, `{"v":0,"verb":"snapshot"}`)
-	// e8's own target is /gifts; the /url under its child is not its own.
-	for _, ref := range []string{"e5", "e6", "e1", "e8"} {
+	// e8's own target is /gifts; the /url under its child is not its own,
+	// and that child e9 follows /gifts too.
+	for _, ref := range []string{"e5", "e6", "e1", "e8", "e9"} {
 		if r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`); !r.OK {
 			t.Fatalf("click %s: %+v", ref, r)
 		}
 	}
-	if got := forwarded(t, h, "click"); len(got) != 4 {
+	if got := forwarded(t, h, "click"); len(got) != 5 {
 		t.Fatalf("driver got %q", got)
 	}
 	// Over-matching fails closed (AS2): a search for an action word is held.
