@@ -71,7 +71,7 @@ func TestTheBusPolicyAllowsOnlyTheHelpersCalls(t *testing.T) {
 	sort.Strings(allowed)
 
 	fb := &fakeBus{}
-	j := netjoin.NewJoiner(nmBus{obj: fb.obj})
+	j := netjoin.NewJoiner(nmBus{obj: fb.obj}, "wlan1", []string{"wlan0"})
 	for i := range 2 {
 		if r := j.Join(context.Background(), "home", canary); r != netjoin.Joined {
 			t.Fatalf("join %d: %s", i, r)
