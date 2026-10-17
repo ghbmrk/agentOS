@@ -10,6 +10,6 @@ Board row: W3-forget-reach-r4. Source: Security 4a R3 on #569; also L3 L1. Class
 - W3-forget-reach-r4-1: `broker/recalltool/takeback_test.go::TestRetryWithoutAHookTellsOnlyApprovedTakeBacks`: one approved and one unasked take-back both finish in `Retry`; exactly one `TakenBack` is told. Mutant: tell for all.
 
 **Scope:** `broker/recalltool/reach.go`, `broker/recalltool/takeback_test.go`, `broker/recalltool/ASSUMPTIONS.md`, this brief.
-**Dependencies:** none. Build before r5 only if r5's test file would conflict (separate files today).
+**Dependencies:** shares `reach.go`, `takeback_test.go` and ASSUMPTIONS.md with r2, so r2 and r4 are built in sequence by one session or the second waits (D-111). Build before r5 only if r5's test file would conflict (separate files today).
 **Out of scope:** text wording (CH-12 lint), the hook path.
 **Done:** CI green; test passes; mutant fails.

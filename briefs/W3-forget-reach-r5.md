@@ -8,7 +8,7 @@ Board row: W3-forget-reach-r5. Source: Lens R4 on #569. Class: release. Tier: A.
 
 **Acceptance tests:**
 - W3-forget-reach-r5-1: `broker/recalltool/service_test.go::TestServiceRetryReportsATakeBackToOnTakenBack` (new or existing file): build with `NewService`, owe a take-back, run `Retry`, assert the hook fires once and `TakenBack` is not sent. Mutant W1: drop the `OnTakenBack: cfg.OnTakenBack` copy.
-- W3-forget-reach-r5-2: `broker/cmd/agentosd/forget_owed_test.go::TestAgentosdRecallConfigWiresOnTakenBack`: the helper agentosd's `main.go` uses to set `OnTakenBack` is called by the test; fails if main.go stops using it (W2).
+- W3-forget-reach-r5-2: `broker/cmd/agentosd/forget_owed_test.go::TestAgentosdRecallConfigWiresOnTakenBack`: the helper agentosd's `main.go` uses to set `OnTakenBack` is called by the test; fails if main.go stops using it (W2): the test also reads `main.go` source and asserts no `recallCfg.OnTakenBack =` assignment sits outside the helper, since calling the helper alone does not prove main.go calls it.
 
 **Scope:** `broker/recalltool/service.go` (helper only if needed), `broker/recalltool/service_test.go`, `broker/cmd/agentosd/main.go` (extract the one-line assignment into a helper), `broker/cmd/agentosd/forget_owed_test.go`, this brief.
 **Dependencies:** none; order after r1 and r3 in the same session (shared test file).
