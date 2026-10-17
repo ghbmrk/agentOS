@@ -6,9 +6,12 @@ name: lane-gate
 # objects for `git diff --name-only`; it is never checked out, imported or executed. A base
 # without the gate's flags fails the job (fail closed). Main must require the `lane-gate`
 # check for a failure to block a merge (a ruleset change, Mark's or a coordinator worker's).
+# MQ-wire (merge queue, 2026-10-17): on a merge-queue commit the gate is not rerun; the queue
+# step passes only when the queued PR's head is unchanged and its own `lane-gate` run there passed.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
+  merge_group:
 permissions:
   contents: read
 jobs:
@@ -18,13 +21,17 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      checks: read # merge queue: the queued PR's own lane-gate run
+      pull-requests: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        if: github.event_name == 'pull_request_target'
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0 # the merge base with the PR head
           persist-credentials: false
       - name: Lane gate (base copy of tools/risk_tier.py)
+        if: github.event_name == 'pull_request_target'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -35,3 +42,19 @@ jobs:
           git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head"
           git cat-file -e "$HEAD_SHA^{commit}"
           python3 -I tools/risk_tier.py --git "$BASE_SHA" "$HEAD_SHA" --pr-branch "$PR_BRANCH" --pr-title "$PR_TITLE"
+      - name: Merge queue (the queued PR's own lane-gate run)
+        if: github.event_name == 'merge_group'
+        env:
+          QUEUE_REF: ${{ github.event.merge_group.head_ref }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # gh-readonly-queue/<base>/pr-<number>-<the PR head the queue merged>
+          [[ "$QUEUE_REF" =~ ^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-([0-9a-f]{40})$ ]]
+          n=${BASH_REMATCH[1]}
+          sha=${BASH_REMATCH[2]}
+          head=$(gh api "repos/$REPO/pulls/$n" --jq .head.sha)
+          got=$(gh api "repos/$REPO/commits/$sha/check-runs?check_name=lane-gate&per_page=100" \
+            --jq '[.check_runs[] | select(.app.slug == "github-actions")] | sort_by(.started_at) | last | .conclusion // "missing"')
+          echo "lane-gate queue: PR #$n head $sha (now $head) lane-gate $got"
+          [ "$head" = "$sha" ] && [ "$got" = success ]

@@ -49,11 +49,38 @@ LANE_GATE_RUN = [
     'git cat-file -e "$HEAD_SHA^{commit}"',
     'python3 -I tools/risk_tier.py --git "$BASE_SHA" "$HEAD_SHA" --pr-branch "$PR_BRANCH" --pr-title "$PR_TITLE"',
 ]
+# MQ-wire: on a merge-queue commit each gate only reads its queued PR's own result at the head
+# the queue ref names; it fails unless that head is still the PR's and the result there passed.
+QUEUE_REF_MATCH = ("[[ \"$QUEUE_REF\" =~ ^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-([0-9a-f]{40})$ ]]")
+
+
+def queue_check_lines(check):
+    """The merge_group step of lane-gate.yml or g1-freeze.yml, pinned: the PR's own `check` run."""
+    return [
+        "      - name: Merge queue (the queued PR's own %s run)" % check,
+        "        if: github.event_name == 'merge_group'",
+        "        env:",
+        "          QUEUE_REF: ${{ github.event.merge_group.head_ref }}",
+        "          REPO: ${{ github.repository }}",
+        "          GH_TOKEN: ${{ github.token }}",
+        "        run: |",
+        "          " + QUEUE_REF_MATCH,
+        "          n=${BASH_REMATCH[1]}",
+        "          sha=${BASH_REMATCH[2]}",
+        '          head=$(gh api "repos/$REPO/pulls/$n" --jq .head.sha)',
+        '          got=$(gh api "repos/$REPO/commits/$sha/check-runs?check_name=%s&per_page=100" \\' % check,
+        "            --jq '[.check_runs[] | select(.app.slug == \"github-actions\")] | sort_by(.started_at) | last | .conclusion // \"missing\"')",
+        '          echo "%s queue: PR #$n head $sha (now $head) %s $got"' % (check, check),
+        '          [ "$head" = "$sha" ] && [ "$got" = success ]',
+    ]
+
+
 LANE_GATE_LINES = [
     "name: lane-gate",
     "on:",
     "  pull_request_target:",
     "    types: [opened, synchronize, reopened, edited]",
+    "  merge_group:",
     "permissions:",
     "  contents: read",
     "jobs:",
@@ -63,17 +90,21 @@ LANE_GATE_LINES = [
     "    timeout-minutes: 5",
     "    permissions:",
     "      contents: read",
+    "      checks: read # merge queue: the queued PR's own lane-gate run",
+    "      pull-requests: read",
     "    steps:",
     "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",
+    "        if: github.event_name == 'pull_request_target'",
     "        with:",
     "          ref: ${{ github.event.pull_request.base.sha }}",
     "          fetch-depth: 0 # the merge base with the PR head",
     "          persist-credentials: false",
     "      - name: Lane gate (base copy of tools/risk_tier.py)",
+    "        if: github.event_name == 'pull_request_target'",
     "        env:",
 ] + ["          " + e for e in LANE_GATE_ENV] + [
     "        run: |",
-] + ["          " + r for r in LANE_GATE_RUN]
+] + ["          " + r for r in LANE_GATE_RUN] + queue_check_lines("lane-gate")
 
 
 # PREMERGE-wire (#1860): premerge.yml is pinned the same way. It needs `statuses: write`, so
@@ -86,28 +117,31 @@ PREMERGE_LINES = [
     '    types: [opened, synchronize, reopened, edited]',
     '  issue_comment:',
     '    types: [created, edited, deleted]',
+    '  merge_group:',
     'permissions:',
     '  contents: read',
     'concurrency:',
-    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number }}',
+    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.merge_group.head_sha }}',
     '  cancel-in-progress: false',
     'jobs:',
     '  premerge-gate:',
     '    name: premerge-gate',
-    "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request",
+    "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event_name == 'merge_group'",
     '    runs-on: ubuntu-latest',
     '    timeout-minutes: 5',
     '    permissions:',
     '      contents: read',
     '      issues: read',
     '      pull-requests: read',
-    '      statuses: write # the `premerge` status on the PR head, nothing else',
+    '      statuses: write # the `premerge` status on the PR head (or queue commit), nothing else',
     '    steps:',
     '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2',
+    "        if: github.event_name != 'merge_group'",
     '        with:',
     '          fetch-depth: 0 # the merge base with the PR head',
     '          persist-credentials: false',
     '      - name: Premerge (base copy of tools/premerge.py)',
+    "        if: github.event_name != 'merge_group'",
     '        env:',
     '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}',
     '          REPO: ${{ github.repository }}',
@@ -141,6 +175,36 @@ PREMERGE_LINES = [
     '          ) && state=success',
     '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | tr -cd \'\\40-\\176\' | cut -c 1-120)',
     '          echo "premerge $HEAD_SHA: $state ($out)"',
+    '          post "$state" "$out"',
+    "      - name: Merge queue (the queued PR's own premerge status)",
+    "        if: github.event_name == 'merge_group'",
+    '        env:',
+    '          QUEUE_REF: ${{ github.event.merge_group.head_ref }}',
+    '          QUEUE_SHA: ${{ github.event.merge_group.head_sha }}',
+    '          REPO: ${{ github.repository }}',
+    '          GH_TOKEN: ${{ github.token }}',
+    '        run: |',
+    '          echo "$QUEUE_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
+    '          posted=no',
+    '          post() {',
+    '            gh api -X POST "repos/$REPO/statuses/$QUEUE_SHA" -f state="$1" -f context=premerge \\',
+    '              -f description="$2" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null',
+    '            posted=yes',
+    '          }',
+    '          trap \'[ "$posted" = yes ] || post failure error\' EXIT',
+    '          state=failure',
+    '          out=bad-queue-ref',
+    '          if ' + QUEUE_REF_MATCH + '; then',
+    '            n=${BASH_REMATCH[1]}',
+    '            sha=${BASH_REMATCH[2]}',
+    '            head=$(gh api "repos/$REPO/pulls/$n" --jq .head.sha)',
+    '            got=$(gh api "repos/$REPO/commits/$sha/statuses?per_page=100" \\',
+    '              --jq \'[.[] | select(.context == "premerge" and .creator.login == "github-actions[bot]")][0].state // "missing"\')',
+    '            out="PR #$n head $sha premerge $got"',
+    '            [ "$head" = "$sha" ] || out="PR #$n head moved"',
+    '            if [ "$head" = "$sha" ] && [ "$got" = success ]; then state=success; fi',
+    '          fi',
+    '          echo "premerge queue $QUEUE_SHA: $state ($out)"',
     '          post "$state" "$out"',
 ]
 
@@ -420,10 +484,20 @@ echo "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ]
 """
 
 
+def run_script(name, step):
+    """The `run: |` body of the step named `step` in workflow `name`, as the runner's shell sees it."""
+    lines = (WORKFLOWS / name).read_text().split("\n")
+    start = lines.index("        run: |", lines.index("      - name: " + step)) + 1
+    body = []
+    for l in lines[start:]:
+        if l.strip() and not l.startswith("          "):
+            break
+        body.append(l[10:])
+    return "\n".join(body) + "\n"
+
+
 def premerge_script():
-    lines = (WORKFLOWS / "premerge.yml").read_text().split("\n")
-    start = lines.index("        run: |") + 1
-    return "\n".join(l[10:] for l in lines[start:] if l.startswith("          ") or not l.strip()) + "\n"
+    return run_script("premerge.yml", "Premerge (base copy of tools/premerge.py)")
 
 
 class PremergeRunTest(unittest.TestCase):
@@ -471,6 +545,79 @@ class PremergeRunTest(unittest.TestCase):
         # Residual named in #1946: with the pulls API down there is no head to post to.
         code, states = self.run_gate("same", fail_at="pulls")
         self.assertEqual((code != 0, states), (True, []))
+
+
+# MQ-wire: run each gate's merge_group step with `gh` stubbed. The queue ref names the PR and the
+# head the queue merged; the stub answers the PR's current head and its own result at that head.
+STUB_GH_QUEUE = r"""#!/bin/sh
+case "$*" in
+  "api -X POST "*) echo "$*" >> "$STUBS/posts"; exit 0 ;;
+  "api repos/o/r/pulls/7 "*) [ "$FAIL_AT" = pulls ] && exit 1; echo "$PR_HEAD" ;;
+  "api repos/o/r/commits/$QUEUED/"*) [ "$FAIL_AT" = result ] && exit 1; echo "$RESULT" ;;
+  *) echo "unexpected gh $*" >&2; exit 2 ;;
+esac
+"""
+
+
+class QueueRunTest(unittest.TestCase):
+    QUEUED = "b" * 40
+    REF = "refs/heads/gh-readonly-queue/main/pr-7-" + "b" * 40
+
+    def run_queue(self, name, step, result, ref=REF, pr_head=QUEUED, fail_at=""):
+        with tempfile.TemporaryDirectory() as d:
+            stubs = pathlib.Path(d)
+            (stubs / "gh").write_text(STUB_GH_QUEUE)
+            (stubs / "gh").chmod(0o755)
+            (stubs / "run.sh").write_text(run_script(name, step))
+            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "QUEUE_REF": ref, "QUEUE_SHA": "c" * 40,
+                   "QUEUED": self.QUEUED, "PR_HEAD": pr_head, "RESULT": result, "FAIL_AT": fail_at,
+                   "REPO": "o/r", "GH_TOKEN": "synthetic", "GITHUB_SERVER_URL": "https://example.invalid",
+                   "GITHUB_RUN_ID": "1"}
+            proc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(stubs / "run.sh")],
+                                  env=env, cwd=d, capture_output=True, text=True, timeout=30)
+            posts = (stubs / "posts").read_text().splitlines() if (stubs / "posts").exists() else []
+        for p in posts:
+            self.assertIn("repos/o/r/statuses/" + "c" * 40 + " ", p)
+            self.assertIn("context=premerge", p)
+        return proc.returncode, [re.search(r"state=(\w+)", p).group(1) for p in posts]
+
+    def test_premerge_queue_posts_the_prs_own_status(self):
+        step = "Merge queue (the queued PR's own premerge status)"
+        run = lambda *a, **k: self.run_queue("premerge.yml", step, *a, **k)
+        self.assertEqual(run("success"), (0, ["success"]))
+        for result in ("failure", "pending", "missing", ""):
+            with self.subTest(result):
+                self.assertEqual(run(result), (0, ["failure"]))
+        # A push after the PR was queued: the queued head is no longer the reviewed one.
+        self.assertEqual(run("success", pr_head="d" * 40), (0, ["failure"]))
+        for ref in ("refs/heads/main", "refs/heads/gh-readonly-queue/main/pr-7-" + "b" * 39,
+                    "refs/heads/gh-readonly-queue/main/pr-x-" + "b" * 40, ""):
+            with self.subTest(ref):
+                self.assertEqual(run("success", ref=ref), (0, ["failure"]))
+        # An API error still leaves `failure` on the queue commit, and the job red.
+        for fail_at in ("pulls", "result"):
+            with self.subTest(fail_at):
+                code, states = run("success", fail_at=fail_at)
+                self.assertEqual((code != 0, states), (True, ["failure"]))
+
+    def test_check_queue_steps_pass_only_on_the_prs_own_success(self):
+        for name, check in (("lane-gate.yml", "lane-gate"), ("g1-freeze.yml", "g1-freeze")):
+            step = "Merge queue (the queued PR's own %s run)" % check
+            run = lambda *a, **k: self.run_queue(name, step, *a, **k)
+            with self.subTest(name):
+                self.assertEqual(run("success"), (0, []))
+                for result in ("failure", "neutral", "skipped", "cancelled", "missing", ""):
+                    self.assertNotEqual(run(result)[0], 0, result)
+                self.assertNotEqual(run("success", pr_head="d" * 40)[0], 0)
+                self.assertNotEqual(run("success", ref="refs/heads/main")[0], 0)
+                for fail_at in ("pulls", "result"):
+                    self.assertNotEqual(run("success", fail_at=fail_at)[0], 0, fail_at)
+
+    def test_every_required_gate_runs_on_the_queue(self):
+        # A required check that never reports on the queue commit would hold every queued PR.
+        for name in ("ci.yml", "premerge.yml", "lane-gate.yml", "g1-freeze.yml"):
+            on = re.search(r"^on:\n((?:[ \t]+.*\n)+)", (WORKFLOWS / name).read_text(), re.M).group(1)
+            self.assertRegex(on, r"(?m)^  merge_group:", name)
 
 
 if __name__ == "__main__":
