@@ -6,7 +6,7 @@ Board row: issue #1891. Source: PR #1886 reviews (security 6203616648, 620431461
 
 ## Requirements
 
-- **CRED-5** (SPEC.md:272) a refused login stops the route for every later run, with no retry.
+- **CRED-5** (SPEC.md:281) a refused login stops the route for every later run, with no retry.
 - **FU9-1** On the timeout, Exec-error and result-read-error paths, `Run` still checks for a refused login recorded since the run's start and, if there is one, stops the route and sets the sign-in line (`signIn(d.ID, true)`). The run's own outcome stays `TimedOut` or `Failed` with no output; only the route state changes.
 - **FU9-2** A run that fails for a reason with no refused login leaves the route running (no false stop), and a `Usage` error on that check is logged and does not change the outcome.
 - **FU9-3** Provagent `ASSUMPTIONS.md` P5 and egress `ASSUMPTIONS.md` W7 are reworded to say what the credit rule covers today (a draw between two calls of one route, seen only with a reached-limit type or a pool at 100%), not "no run draws credits unmetered".

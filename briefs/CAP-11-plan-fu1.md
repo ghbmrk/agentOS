@@ -7,18 +7,18 @@ Board row: issue #1876. Source: PR #1864 delta review R4 (Security #9, L3 #9). C
 ## Requirements
 
 - **OP-8** (SPEC.md:396) model spend is metered by originating agent machine and charged to that machine's task reservation or rolling cap. The `Event` (`Provider, TaskClass, Outcome, ResultBytes, Elapsed`) carries metadata only, never the brief or result.
-- **PJ-1** agentosd's provider runner always has a non-nil `Journal`. Each finished run (any outcome, refusals after admission included) writes one journal entry through the engine's journal, with the fields of `Event` and no brief, result or CLI output.
-- **PJ-2** Each run is charged to the originating machine's meter through the OP-8 path that `modelroute` uses for calls (`broker/meter`), as one call with the run's wall time as its unit if the meter has no token count for a plan run. In broker-held plan mode the charge is the run, not tokens (RES-5: plan quota is a pool, not OP-8 token spend); the builder records which unit the meter takes in the package's ASSUMPTIONS.
+- **PJ-1** agentosd's provider runner always has a non-nil `Journal`. Each finished run (any outcome, refusals after admission included; a refusal before admission is not journaled or charged) writes one journal entry through the engine's journal, with the fields of `Event` and no brief, result or CLI output.
+- **PJ-2** Each run is charged to the originating machine's meter through the OP-8 path that `modelroute` uses for calls (`broker/meter`), as one call and zero tokens: `meter.Start(machine, 0, 0)` before the run, `Call.Done(0)` after it (`meter.Limits` holds only `Calls` and `Tokens`, so there is no wall-time unit). In broker-held plan mode the charge is the run, not tokens (RES-5: plan quota is a pool, not OP-8 token spend). A machine at its call cap is refused before the run starts: `Start` returns `ErrExhausted` (OP-8, SPEC.md:396, "egress refuses further calls"), the runner returns `Refused` and never reaches admission or the VM. A refusal made before `Start` (bad request, unknown provider) is not charged. The builder adds a `Runner.Admit func(machine string) (done func(), err error)` hook called first in `Run`, set by the adapter to wrap `Start`/`Done`, and records the choice in ASSUMPTIONS.
 - **PJ-3** A runner built with a nil `Journal` is visible: `Run` logs once through `Logf` that provider runs are unmetered. It is not silent.
 
 **Acceptance tests:**
 - PJ-1: `TestProviderRunnerHasJournal` and `TestProviderRunWritesOneEntryWithNoBrief` (`broker/cmd/agentosd/providerjournal_test.go`; canary brief and result text must not appear in the entry).
-- PJ-2: `TestProviderRunChargesTheCallerMachine` (same file).
+- PJ-2: `TestProviderRunChargesTheCallerMachine` and `TestProviderRunRefusedAtMachineCap` (same file; the second asserts the VM is never started).
 - PJ-3: `TestNilJournalRunLogsUnmetered` (`broker/provagent/run_test.go`).
 
 ## Design (recommendation)
 
-A small `providerJournal` adapter in `broker/cmd/agentosd/providerjournal.go` taking the engine journal and the meter, set as `r.Journal` in `providerRunner`. Request carries no machine ID today: add `Machine string` to `provagent.Request` and `workers.ProviderRequest` (filled from the calling tool's lineage) so the charge has an owner; the adapter refuses to charge an empty machine and journals it as `unattributed`.
+A small `providerJournal` adapter in `broker/cmd/agentosd/providerjournal.go` taking the engine journal and the meter, set as `r.Journal` in `providerRunner`. Request carries no machine ID today: add `Machine string` to `provagent.Request` and `workers.ProviderRequest` (filled from `caller.machine`, `broker/workers/workers.go:232`; lineage is #1878's field) so the charge has an owner; the adapter refuses to charge an empty machine and journals it as `unattributed`.
 
 ## Assumptions
 
@@ -26,7 +26,7 @@ The meter's charge call and unit are as in `broker/meter/meter.go`; if no per-ca
 
 ## Out of scope
 
-Pool quota readings (#1856, done), the reserve setting (#1891 item 6), per-lineage cap (#1878), credential redaction (#1879).
+Build order: #1878 (`Lineage`) first, then this brief adds `Machine` beside it in the same request types. Pool quota readings (#1856, done), the reserve setting (#1891 item 6), per-lineage cap (#1878), credential redaction (#1879).
 
 ## Scope
 

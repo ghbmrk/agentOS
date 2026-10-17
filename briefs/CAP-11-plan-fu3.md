@@ -30,7 +30,7 @@ The tool layer knows the caller's lineage (`broker/workers` tools take it today:
 
 ## Out of scope
 
-Journal wiring (#1876), changing the provider cap, an owner setting for either cap.
+Build order: this brief first; #1876 then adds `Machine` beside `Lineage` in the same request types. Journal wiring (#1876), changing the provider cap, an owner setting for either cap.
 
 ## Scope
 
