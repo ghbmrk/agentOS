@@ -212,7 +212,7 @@ func TestForgetResumeIsWiredOnlyThroughWireResume(t *testing.T) {
 	}
 }
 
-// REQ: RCH-4, CAP-3
+// REQ: CAP-3
 // JRN-startup-reconcile s4 (Security R2 on #1382): with recall on and
 // startup reconcile queueing nothing, the boot resume wireResume returns
 // is the only run on recall's open. It takes back an item 2 an earlier
