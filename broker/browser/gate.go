@@ -86,9 +86,8 @@ type Gate struct {
 	// refs is what the last snapshot the driver returned showed, per ref.
 	refs map[string]link
 	// typed is what the agent typed, per ref, on the page the driver
-	// named in its reply; typedText is the same text on any page (G10).
+	// named in its reply (G10).
 	typed     map[string]typedField
-	typedText map[string]bool
 	holds     map[string]Hold
 	holdOrder []string
 }
@@ -238,11 +237,10 @@ type typedField struct{ text, url string }
 const maxTyped = 64
 
 func (g *Gate) remember(req Request, url string) {
-	if g.typed == nil || len(g.typed) >= maxTyped || len(g.typedText) >= maxTyped {
-		g.typed, g.typedText = map[string]typedField{}, map[string]bool{}
+	if g.typed == nil || len(g.typed) >= maxTyped {
+		g.typed = map[string]typedField{}
 	}
 	g.typed[req.Ref] = typedField{text: req.Text, url: url}
-	g.typedText[req.Text] = true
 }
 
 // omit derives the password refs from the snapshot itself, not from the
@@ -256,7 +254,11 @@ func (g *Gate) omit(snapshot, url string) (string, int) {
 		}
 	}
 	refs := entryRefs(snapshot, typed)
-	return omitValues(snapshot, refs, g.typedText), len(refs)
+	keep := map[string]bool{}
+	for ref := range typed {
+		keep[ref] = !refs[ref]
+	}
+	return omitValues(snapshot, refs, keep), len(refs)
 }
 
 // send forwards a request the gate has allowed.

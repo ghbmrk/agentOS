@@ -111,10 +111,15 @@ func omitLine(line string, refs map[string]bool) (string, string, bool) {
 		return omitUnparsed(line, refs)
 	}
 	m := refToken.FindStringSubmatchIndex(line[start:])
-	if m == nil || !refs[line[start+m[2]:start+m[3]]] {
+	var end int
+	switch {
+	case m != nil && refs[line[start+m[2]:start+m[3]]]:
+		end = start + m[1]
+	case m == nil && refs[noRef] && isEntry(line):
+		end = start
+	default:
 		return line, "", false
 	}
-	end := start + m[1]
 	rest := line[end:]
 	attr := attrsRE.FindString(rest)
 	head := unquoteKey(line[:end] + attr)
@@ -147,19 +152,29 @@ func omitChild(line string) (string, string) {
 	return in + "- " + omittedMark, strings.TrimPrefix(line[len(in):], "- ")
 }
 
+// noRef stands in refs for every entry field the snapshot gives no ref,
+// such as one the page made non-interactive: its value is omitted all
+// the same (G10).
+const noRef = ""
+
+// isEntry reports whether line is a node with one of entryRoles.
+func isEntry(line string) bool {
+	r := roleRE.FindString(line)
+	return r != "" && entryRoles[strings.TrimLeft(strings.TrimSpace(r)[2:], "'")]
+}
+
 // entryRefs derives the password refs the gate passes to OmitValues
 // from the snapshot alone, without the driver's word for which fields are
 // passwords (K14, CRED-4): every entry field that shows a value, on its
 // own line or in a child other than its placeholder, unless the value is
 // the text typed[ref] the agent itself typed into that field. A line
 // with an entry role that cannot be parsed gives every ref on it (fail
-// closed).
+// closed); a field with no ref gives noRef.
 func entryRefs(snapshot string, typed map[string]string) map[string]bool {
 	refs := map[string]bool{}
 	lines := strings.Split(snapshot, "\n")
 	for i, line := range lines {
-		r := roleRE.FindString(line)
-		if r == "" || !entryRoles[strings.TrimLeft(strings.TrimSpace(r)[2:], "'")] {
+		if !isEntry(line) {
 			continue
 		}
 		start, ok := nameEnd(line)
@@ -169,12 +184,11 @@ func entryRefs(snapshot string, typed map[string]string) map[string]bool {
 			}
 			continue
 		}
-		m := refToken.FindStringSubmatchIndex(line[start:])
-		if m == nil {
-			continue
+		ref, at := noRef, start
+		if m := refToken.FindStringSubmatchIndex(line[start:]); m != nil {
+			ref, at = line[start+m[2]:start+m[3]], start+m[1]
 		}
-		ref := line[start+m[2] : start+m[3]]
-		rest := line[start+m[1]:]
+		rest := line[at:]
 		rest = strings.TrimLeft(rest[len(attrsRE.FindString(rest)):], "'")
 		var values []string
 		if strings.HasPrefix(rest, ":") {
@@ -260,11 +274,13 @@ func OmitValues(snapshot string, refs map[string]bool) string {
 	return omitValues(snapshot, refs, nil)
 }
 
-// omitValues is OmitValues, except that a removed value in keep is not
-// scrubbed from the rest of the page: the agent typed it, so a copy
-// tells it nothing (G10).
+// omitValues is OmitValues, except that the value of a field whose ref is
+// in keep, on its line and in its children, is never scrubbed: it is the
+// text the agent typed there, and blanking it when it matches a password
+// would answer a guess (G10).
 func omitValues(snapshot string, refs, keep map[string]bool) string {
 	lines := strings.Split(snapshot, "\n")
+	own := keptValues(lines, keep)
 	var values []string
 	for i := 0; i < len(lines); i++ {
 		line, v, ok := omitLine(lines[i], refs)
@@ -272,17 +288,12 @@ func omitValues(snapshot string, refs, keep map[string]bool) string {
 			continue
 		}
 		lines[i] = line
-		add := func(v string) {
-			if !keep[yamlValue(v)] {
-				values = append(values, v)
-			}
-		}
-		add(v)
+		values = append(values, v)
 		depth := len(indent(line))
 		for i+1 < len(lines) && strings.TrimSpace(lines[i+1]) != "" && len(indent(lines[i+1])) > depth {
 			i++
 			lines[i], v = omitChild(lines[i])
-			add(v)
+			values = append(values, v)
 		}
 	}
 	forms := valueForms(values)
@@ -291,7 +302,39 @@ func omitValues(snapshot string, refs, keep map[string]bool) string {
 	}
 	for i, line := range lines {
 		kept := strings.TrimSuffix(line, ": "+omittedMark)
+		if at, ok := own[i]; ok {
+			kept = line[:at]
+		}
 		lines[i] = scrubForms(kept, forms) + line[len(kept):]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// keptValues maps the index of each line that holds the value of a field
+// in keep to where that value starts: after the ref and attributes on the
+// field's own line, and the whole of a child other than /placeholder.
+func keptValues(lines []string, keep map[string]bool) map[int]int {
+	own := map[int]int{}
+	if len(keep) == 0 {
+		return own
+	}
+	for i, line := range lines {
+		start, ok := nameEnd(line)
+		if !ok {
+			continue
+		}
+		m := refToken.FindStringSubmatchIndex(line[start:])
+		if m == nil || !keep[line[start+m[2]:start+m[3]]] {
+			continue
+		}
+		at := start + m[1]
+		own[i] = at + len(attrsRE.FindString(line[at:]))
+		depth := len(indent(line))
+		for j := i + 1; j < len(lines) && strings.TrimSpace(lines[j]) != "" && len(indent(lines[j])) > depth; j++ {
+			if cm := childRE.FindStringSubmatch(lines[j]); cm == nil || !strings.HasSuffix(cm[1], "- /placeholder") {
+				own[j] = 0
+			}
+		}
+	}
+	return own
 }
