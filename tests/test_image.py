@@ -3203,27 +3203,94 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                       "lacks and usr/lib/tmpfiles.d/x.conf line 1 makes mode 0755 for man:man", self.v())
 
     def test_lines_that_make_a_missing_step_group_writable_are_refused(self):
-        # REQ: HW-1, DEV-2 (#1829, security delta 2): a step the tree lacks takes its group from a
-        # setgid parent, and two lines may each give half; a d line with only g+w passes elsewhere.
+        # REQ: HW-1, DEV-2 (#1829, security and combined delta 2): a step the tree lacks takes its
+        # parent's group (the tree or a line may set the setgid bit), and a line naming a non-root
+        # group is refused outright; a d line with only g+w passes under a root-group parent.
         (self.root / "usr/lib/x").mkdir(parents=True, exist_ok=True)
         link(self.root, self.RULES, "/usr/lib/x/c/r")
         other = check.TREE_GROUP + 1000
-        for text, gid, mode, how in (
-                ("d /usr/lib/x/c 0775\n", other, 0o2755, "mode 0775 for -:- under a setgid parent of gid %d" % other),
-                ("d /usr/lib/x/c 0775\nz /usr/lib/x/c - - 1000\n", None, 0o755,
-                 "mode 0775 for -:- and line 2's mode - for -:1000")):
-            with self.subTest(text=text), self.attrs("usr/lib/x", gid=gid, mode=mode):
+        for text, gid, mode, n, how in (
+                ("d /usr/lib/x/c 0775\n", other, 0o2755, 1, "mode 0775 for -:- under a parent of gid %d" % other),
+                ("d /usr/lib/x/c 0775\n", other, 0o755, 1, "mode 0775 for -:- under a parent of gid %d" % other),
+                # G1b: the parent's mode is the tree's or a line's; the gid is what the child takes.
+                ("z /usr/lib/x 2755\nd /usr/lib/x/c 0775\n", other, 0o755, 2,
+                 "mode 0775 for -:- under a parent of gid %d" % other),
+                ("d /usr/lib/x/c 0775\nz /usr/lib/x/c - - 1000\n", None, 0o755, 2, "mode - for -:1000")):
+            with self.subTest(text=text, gid=gid, mode=mode), self.attrs("usr/lib/x", gid=gid, mode=mode):
                 f = self.tmpfiles(text)
                 try:
                     self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/c/r, through /usr/lib/x/c, which the tree "
-                                  "lacks and usr/lib/tmpfiles.d/x.conf line 1 makes %s; ship the step" % how, self.v())
+                                  "lacks and usr/lib/tmpfiles.d/x.conf line %d makes %s; ship the step" % (n, how),
+                                  self.v())
                 finally:
                     f.unlink()
-        for gid, mode in ((other, 0o755), (check.TREE_GROUP, 0o2755)):
+        # G1: a line that gives the parent a non-root group and the setgid bit is refused at the parent.
+        f = self.tmpfiles("z /usr/lib/x 2755 - 1000\nd /usr/lib/x/c 0775\n")
+        try:
+            self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/c/r, through /usr/lib/x, which "
+                          "usr/lib/tmpfiles.d/x.conf line 1 remakes mode 2755 for -:1000 on the box", self.v())
+        finally:
+            f.unlink()
+        for gid, mode in ((check.TREE_GROUP, 0o755), (check.TREE_GROUP, 0o2755)):
             with self.subTest(gid=gid, mode=mode), self.attrs("usr/lib/x", gid=gid, mode=mode):
                 f = self.tmpfiles("d /usr/lib/x/c 0775\n")
                 try:
                     self.assertNotIn("etc/udev/rules.d:", self.v())
+                finally:
+                    f.unlink()
+
+    def test_security_delta_2_cases_are_refused(self):
+        # REQ: HW-1, DEV-2 (#1829, security delta 2): a setgid line on a missing parent (P3, and a
+        # gid carried down two missing steps), and lines systemd drops (a relative path, P4; a
+        # duplicate d line, P8) trusted to reset the tree's mode.
+        other = check.TREE_GROUP + 1000
+        (self.root / "usr/lib/x").mkdir(parents=True, exist_ok=True)
+        link(self.root, self.RULES, "/usr/lib/x/b/c/r")
+        for text, gid, mode, step, n, how in (
+                ("d /usr/lib/x/b 2755 - 1000\nd /usr/lib/x/b/c 0775\n", None, None, "b", 1, "mode 2755 for -:1000"),
+                ("d /usr/lib/x/b 2755\nd /usr/lib/x/b/c 0775\n", other, 0o755, "b/c", 2,
+                 "mode 0775 for -:- under a parent of gid %d" % other)):
+            with self.subTest(text=text), self.attrs("usr/lib/x", gid=gid, mode=mode):
+                f = self.tmpfiles(text)
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/b/c/r, through /usr/lib/x/%s, which the tree "
+                                  "lacks and usr/lib/tmpfiles.d/x.conf line %d makes %s; ship the step" % (step, n, how),
+                                  self.v())
+                finally:
+                    f.unlink()
+        (self.root / self.RULES).unlink()
+        link(self.root, self.RULES, "/usr/lib/x/r")
+        for text, n in (("z usr/lib/x 0755 - -\nz /usr/lib/x - - 1000\n", 2),
+                        ("d /usr/lib/x - - -\nd /usr/lib/x 0755 - -\nz /usr/lib/x - - 1000\n", 3)):
+            with self.subTest(text=text), self.attrs("usr/lib/x", mode=0o775):
+                f = self.tmpfiles(text)
+                try:
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x, which "
+                                  "usr/lib/tmpfiles.d/x.conf line %d remakes mode - for -:1000 on the box" % n, self.v())
+                finally:
+                    f.unlink()
+
+    def test_without_the_parent_gid_or_group_rules_those_links_pass(self):
+        # A missing step that took root's group, a non-root group line weighed by its mode, or a g+w
+        # line that ignored the step's gid would each let a case above through.
+        (self.root / "usr/lib/x").mkdir(parents=True, exist_ok=True)
+        link(self.root, self.RULES, "/usr/lib/x/c/r")
+        other = check.TREE_GROUP + 1000
+        for old, new, text, at in (
+                ("            gid = st.st_gid\n", "            gid = TREE_GROUP\n", "d /usr/lib/x/c 0775\n", "usr/lib/x"),
+                ('        elif user.lstrip(":") not in ("-", "", "root", "0") or group.lstrip(":") not in '
+                 '("-", "", "root", "0") \\\n', '        elif user.lstrip(":") not in ("-", "", "root", "0") \\\n',
+                 "z /usr/lib/x 0755 - 1000\n", None),
+                ("        elif st is not None and st.st_gid != TREE_GROUP and any(\n",
+                 "        elif st is not None and False and any(\n", "z /usr/lib/x 0775 - -\n", "usr/lib/x")):
+            with self.subTest(text=text):
+                m = self.mutant(old, new)
+                f = self.tmpfiles(text)
+                try:
+                    with self.attrs("usr/lib/x", gid=other, mode=0o755) if at else contextlib.nullcontext():
+                        with unittest.mock.patch.object(m, "tree_lstat", check.tree_lstat):
+                            self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
+                        self.assertNotEqual(check.world_writable_link(str(self.root), self.RULES), [])
                 finally:
                     f.unlink()
 
@@ -3453,63 +3520,56 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                                   "usr/lib/tmpfiles.d/x.conf line 1 remakes %s on the box" % (step, how), self.v())
                 finally:
                     f.unlink()
-        # Combined R1: a line that leaves the mode or the group as the tree has it, when the tree
-        # supplies the other half of group write for a non-root gid. A Z line counts on the steps below
-        # it too (a g+w usr is refused before this: the tree check cannot read its tmpfiles.d there).
+        # Combined delta 2: a line naming a non-root group is refused whatever the mode, as the step's
+        # mode, another line or a setgid bit may give that group write.
         other = check.TREE_GROUP + 1000
-        for ln, step, how, at, gid, mode in (
-                ("z /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000", "usr/lib/x", None, 0o775),
-                ("z /usr/lib/x 0775 - -", "usr/lib/x", "mode 0775 for -:-", "usr/lib/x", other, 0o755),
-                ("d /usr/lib/x 0775", "usr/lib/x", "mode 0775 for -:-", "usr/lib/x", other, 0o755),
-                ("e /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000", "usr/lib/x", None, 0o775),
-                ("d /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000", "usr/lib/x", None, 0o775),
-                ("Z /usr - - 1000", "usr/lib/x", "mode - for -:1000", "usr/lib/x", None, 0o775)):
-            with self.subTest(ln=ln, at=at), self.attrs(at, gid=gid, mode=mode):
-                st = check.tree_lstat(self.root, at)
+        for ln, step, how in (("z /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000"),
+                              ("e /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000"),
+                              ("d /usr/lib/x - - 1000", "usr/lib/x", "mode - for -:1000"),
+                              ("z /usr/lib/x 0755 - 1000", "usr/lib/x", "mode 0755 for -:1000"),
+                              ("z /usr/lib/x :0755 - 1000", "usr/lib/x", "mode :0755 for -:1000"),
+                              ("z /usr/lib/* - - 1000", "usr/lib/x", "mode - for -:1000"),
+                              ("Z /usr - - 1000", "usr", "mode - for -:1000"),
+                              ("z /usr/lib/x 2755 - 1000\nz /usr/lib/x 0775 - -", "usr/lib/x", "mode 2755 for -:1000")):
+            with self.subTest(ln=ln):
                 f = self.tmpfiles(ln + "\n")
                 try:
                     self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /%s, which "
-                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes %s over the tree's mode %04o and "
-                                  "gid %d on the box" % (step, how, mode, st.st_gid), self.v())
+                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes %s on the box; the line, not the tree, "
+                                  "decides who can write it" % (step, how), self.v())
                 finally:
                     f.unlink()
-        # Combined delta: two lines that each supply half are weighed together, in either order, in
-        # one file or two, and a ':' (create-only) mode leaves the tree's group write a candidate.
-        for lines, gid, mode, how in (
-                (("z /usr/lib/x 0775 - -", "z /usr/lib/x - - 1000"), None, 0o755,
-                 "mode 0775 for -:- and line 2's mode - for -:1000"),
-                (("z /usr/lib/x - - 1000", "z /usr/lib/x 0775 - -"), None, 0o755,
-                 "mode - for -:1000 and line 2's mode 0775 for -:-"),
-                (("z /usr/lib/x 0775 - root", "z /usr/lib/x - - 1000"), None, 0o755,
-                 "mode 0775 for -:root and line 2's mode - for -:1000"),
-                (("d /usr/lib/x 0775", "z /usr/lib/x - - 1000"), None, 0o755,
-                 "mode 0775 for -:- and line 2's mode - for -:1000"),
-                (("e /usr/lib/x 0775", "z /usr/lib/x - - 1000"), None, 0o755,
-                 "mode 0775 for -:- and line 2's mode - for -:1000"),
-                (("Z /usr - - 1000", "z /usr/lib/x 0775 - -"), None, 0o755,
-                 "mode - for -:1000 and line 2's mode 0775 for -:-"),
-                (("z /usr/lib/* - - 1000", "z /usr/lib/x 0775"), None, 0o755,
-                 "mode - for -:1000 and line 2's mode 0775 for -:-"),
-                (("z /usr/lib/x 0755 - 1000", "Z /usr 0775 - -"), None, 0o755,
-                 "mode 0755 for -:1000 and line 2's mode 0775 for -:-"),
-                (("z /usr/lib/x :0755 - 1000",), None, 0o775, "mode :0755 for -:1000")):
-            with self.subTest(lines=lines), self.attrs("usr/lib/x", gid=gid, mode=mode):
-                st = check.tree_lstat(self.root, "usr/lib/x")
+        # A g+w line that names no group but root counts where the step's tree gid is not root: no line
+        # is trusted to replace that group, since systemd skips a duplicate line for a path (G2), and
+        # Z does not follow a link (G3). A Z line counts on the steps below it too.
+        link(self.root, "opt/l", "/usr/lib")
+        for lines, step in ((("z /usr/lib/x 0775 - -",), "usr/lib/x"),
+                            (("d /usr/lib/x 0775",), "usr/lib/x"),
+                            (("z /usr/lib/x 0775 - root",), "usr/lib/x"),
+                            (("z /usr/lib/x 0775 - 0",), "usr/lib/x"),
+                            (("Z /usr 0775 - -",), "usr/lib/x"),
+                            (("d /usr/lib/x 0775 - -", "d /usr/lib/x - - root"), "usr/lib/x"),
+                            (("z /usr/lib/x 0775 - -", "Z /opt/l - - root"), "usr/lib/x")):
+            with self.subTest(lines=lines), self.attrs("usr/lib/x", gid=other, mode=0o755):
                 f = self.tmpfiles("\n".join(lines) + "\n")
                 try:
-                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /usr/lib/x, which "
-                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes %s over the tree's mode %04o and "
-                                  "gid %d on the box" % (how, mode, st.st_gid), self.v())
+                    self.assertIn("etc/udev/rules.d: a link to /usr/lib/x/r, through /%s, which "
+                                  "usr/lib/tmpfiles.d/x.conf line 1 remakes mode %s for -:%s over the tree's gid %d "
+                                  "on the box" % (step, lines[0].split()[2], lines[0].split()[4] if len(
+                                      lines[0].split()) > 4 else "-", other), self.v())
                 finally:
                     f.unlink()
-        f = self.tmpfiles("z /usr/lib/x 0775 - -\n")
-        g = write(self.root, "etc/tmpfiles.d/y.conf", "z /usr/lib/x - - 1000\n")
+        # G2 across two files: the reset in another file is skipped just the same.
+        f = self.tmpfiles("d /usr/lib/x 0775 - -\n")
+        g = write(self.root, "etc/tmpfiles.d/a.conf", "d /usr/lib/x - - root\n")
         try:
-            self.assertIn("usr/lib/tmpfiles.d/x.conf line 1 remakes mode 0775 for -:- and etc/tmpfiles.d/y.conf "
-                          "line 1's mode - for -:1000 over the tree's mode 0755", self.v())
+            with self.attrs("usr/lib/x", gid=other, mode=0o755):
+                self.assertIn("usr/lib/tmpfiles.d/x.conf line 1 remakes mode 0775 for -:- over the tree's gid %d"
+                              % other, self.v())
         finally:
             f.unlink()
             g.unlink()
+        (self.root / "opt/l").unlink()
         # L3 point 2: a directory the chase walks through, off the final path.
         (self.root / self.RULES).unlink()
         (self.root / "opt/d").mkdir(parents=True)
@@ -3530,13 +3590,13 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                     self.assertNotIn("etc/udev/rules.d:", self.v())
                 finally:
                     f.unlink()
-        # Combined R1: an explicit root group, or a tree mode without group write, keeps it root's.
+        # A g+w line over a root-group step, or a line without group write over a non-root one.
         other = check.TREE_GROUP + 1000
-        for ln, gid, mode in (("z /usr/lib/x 0775 - root", other, 0o755), ("z /usr/lib/x - - 1000", None, 0o755),
-                              ("Z /usr - - 1000", None, 0o755), ("z /usr/lib/x 0775 - 0", other, 0o755),
-                              ("z /usr/lib/x 0755 - 1000", None, 0o775),
+        for ln, gid, mode in (("z /usr/lib/x 0775 - -", None, 0o755), ("z /usr/lib/x 0775 - root", None, 0o755),
+                              ("d /usr/lib/x 0775", None, 0o755), ("Z /usr 0775 root root", None, 0o755),
+                              ("z /usr/lib/x 0755 - -", other, 0o755), ("z /usr/lib/x 2755 - root", other, 0o755),
                               ("z /usr/lib/x 0775 - root\nz /usr/lib/x 0755 - -", None, 0o755)):
-            with self.subTest(ln=ln), self.attrs("usr/lib/x", gid=gid, mode=mode):
+            with self.subTest(ln=ln, gid=gid), self.attrs("usr/lib/x", gid=gid, mode=mode):
                 f = self.tmpfiles(ln + "\n")
                 try:
                     self.assertNotIn("etc/udev/rules.d:", self.v())
