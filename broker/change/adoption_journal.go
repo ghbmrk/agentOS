@@ -33,10 +33,14 @@ import (
 // the same save that owes their intent (oweLocked), and flushOwed
 // journals it once the lock is free: the journal calls Check and Execute
 // under that lock. Replay reads no lifecycle from a body
-// (CHG-forget-revert-journal, SM-AD-2).
+// (CHG-forget-revert-journal, SM-AD-2): Content is writable by those who
+// cannot write the state, so once the state is marked LegacyInState a
+// body's lifecycle is ignored and the legacy one comes from the state
+// (CHG-adoption-body-trust).
 
 // lifecycle is an adoption's lifecycle as a state saved before the
-// journal held it recorded it; replay starts such an adoption from it.
+// journal held it recorded it; replay starts such an adoption from it
+// (state.Legacy).
 type lifecycle struct {
 	Staged       bool   `json:"staged,omitempty"`
 	Confirmed    bool   `json:"confirmed,omitempty"`
@@ -44,7 +48,8 @@ type lifecycle struct {
 	WithdrawnFor string `json:"withdrawn_for,omitempty"`
 }
 
-// adoptionBody is what Content holds for an adoption.
+// adoptionBody is what Content holds for an adoption. Legacy is read
+// only from a body an earlier build saved, at the start that migrates it.
 type adoptionBody struct {
 	Adoption
 	Legacy *lifecycle `json:"legacy,omitempty"`
@@ -70,9 +75,9 @@ func proposalKey(id string) string { return "proposal/" + id }
 func owedRevert(why string) bool { return why == WhyForgotten || why == WhySettings }
 
 // encodeBodyLocked is a's body as Content holds it: the lifecycle fields
-// are the journal's.
+// are the journal's, and the legacy lifecycle the state's.
 func (p *Pipeline) encodeBodyLocked(a *Adoption) ([]byte, error) {
-	b := adoptionBody{Adoption: *a, Legacy: p.legacy[a.ID]}
+	b := adoptionBody{Adoption: *a}
 	b.Staged, b.Confirmed, b.Reverted, b.WithdrawnFor = false, false, "", ""
 	return json.Marshal(b)
 }
@@ -191,13 +196,18 @@ func cloneAdoptions(ads []*Adoption) []*Adoption {
 }
 
 // migrateLocked moves the adoptions of a state saved before the journal
-// held their lifecycle into Content, each with its saved lifecycle, and
-// saves the state without them. Their adopt intents are in the journal,
-// so replay finds them; later transitions apply on top.
+// held their lifecycle into Content, keeps each saved lifecycle in the
+// state's Legacy, and saves the state without them. Their adopt intents
+// are in the journal, so replay finds them; later transitions apply on
+// top.
 func (p *Pipeline) migrateLocked() error {
-	for _, a := range p.st.Adoptions {
-		p.legacy[a.ID] = &lifecycle{Staged: a.Staged, Confirmed: a.Confirmed, Reverted: a.Reverted, WithdrawnFor: a.WithdrawnFor}
+	if p.st.Legacy == nil {
+		p.st.Legacy = map[string]*lifecycle{}
 	}
+	for _, a := range p.st.Adoptions {
+		p.st.Legacy[a.ID] = &lifecycle{Staged: a.Staged, Confirmed: a.Confirmed, Reverted: a.Reverted, WithdrawnFor: a.WithdrawnFor}
+	}
+	p.st.LegacyInState = true
 	return p.saveLocked()
 }
 
@@ -365,6 +375,11 @@ func (p *Pipeline) replayLocked(j Journal) {
 	var ads []*Adoption
 	byAd := map[string]*Adoption{}
 	tail := map[string]string{}
+	// trusted: the bodies are an earlier build's, which kept the lifecycle
+	// in them; this start reads it once and moves it to the state. strip:
+	// the bodies holding a lifecycle, put again without it.
+	trusted := !p.st.LegacyInState
+	var strip []string
 	for _, c := range done {
 		id := c.parts[1]
 		switch {
@@ -377,18 +392,35 @@ func (p *Pipeline) replayLocked(j Journal) {
 				p.brokenLocked("adoption body missing", err)
 				return
 			}
-			if owedRevert(a.Reverted) {
+			if legacy != nil || a.Reverted != "" || a.Staged || a.Confirmed || a.WithdrawnFor != "" {
+				strip = append(strip, id)
+			}
+			switch {
+			case !trusted:
+				// The state holds the legacy lifecycle; the body's is ignored (ABT-1).
+				legacy = nil
+				if l := p.st.Legacy[id]; l != nil {
+					c := *l
+					legacy = &c
+				}
+			case owedRevert(a.Reverted):
 				tail[id] = a.Reverted // an earlier build's body revert
 			}
 			a.Reverted, a.Staged, a.Confirmed, a.WithdrawnFor = "", false, false, ""
 			if legacy != nil {
-				if owedRevert(legacy.Reverted) {
-					// A pre-journal state's forget or settings revert:
-					// the journal holds it, or it is owed below (#1995).
-					tail[id] = legacy.Reverted
-					legacy.Reverted = ""
+				if trusted {
+					if owedRevert(legacy.Reverted) {
+						// A pre-journal state's forget or settings revert:
+						// the journal holds it, or it is owed below (#1995).
+						tail[id] = legacy.Reverted
+						legacy.Reverted = ""
+					}
+					if p.st.Legacy == nil {
+						p.st.Legacy = map[string]*lifecycle{}
+					}
+					c := *legacy
+					p.st.Legacy[id] = &c
 				}
-				p.legacy[id] = legacy
 				a.Staged, a.Confirmed, a.Reverted, a.WithdrawnFor = legacy.Staged, legacy.Confirmed, legacy.Reverted, legacy.WithdrawnFor
 			} else {
 				for _, cl := range a.Classes {
@@ -438,7 +470,6 @@ func (p *Pipeline) replayLocked(j Journal) {
 	// A body an earlier build saved with a forget or settings revert in
 	// it, top-level or in its legacy lifecycle, on an adoption the journal
 	// leaves active: owe it once. Every such body is put again without it.
-	var migrated []string
 	owes := false
 	for _, a := range ads {
 		why := tail[a.ID]
@@ -450,7 +481,10 @@ func (p *Pipeline) replayLocked(j Journal) {
 			p.oweLocked(a.ID, why)
 			owes = true
 		}
-		migrated = append(migrated, a.ID)
+	}
+	if trusted {
+		p.st.LegacyInState = true
+		resave = true
 	}
 	p.st.Adoptions = ads
 	p.savedAds = cloneAdoptions(ads)
@@ -465,17 +499,19 @@ func (p *Pipeline) replayLocked(j Journal) {
 			p.props[id] = pr
 		}
 	}
-	// The debt is saved before a migrated body loses its revert, so a
-	// crash or failed save between the two keeps the revert somewhere.
+	// The debt, the legacy lifecycles and the mark are saved before a
+	// migrated body loses its lifecycle, so a crash or failed save between
+	// the two keeps it somewhere (ABT-3). This save puts no body: each
+	// matches lastBody.
 	if resave || owes {
 		if err := p.saveLocked(); err != nil {
 			p.brokenLocked("owed reverts not saved", err)
 			return
 		}
 	}
-	if len(migrated) > 0 {
-		for _, id := range migrated {
-			delete(p.lastBody, id) // put again, without the revert
+	if len(strip) > 0 {
+		for _, id := range strip {
+			delete(p.lastBody, id) // put again, without the lifecycle
 		}
 		if err := p.saveLocked(); err != nil {
 			p.brokenLocked("migrated bodies not saved", err)
