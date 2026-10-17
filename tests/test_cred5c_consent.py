@@ -69,6 +69,9 @@ class Consent(unittest.TestCase):
                             r"with that route's command \(\"Not stopped\. To turn your ChatGPT plan back on, "
                             r"reply PLAN ChatGPT ON\.\"\)",
                          f"SPEC.md:{n} CH-11 bare RESUME no longer names the route command")
+        self.assertIn("when the owner paused that route, withdrew its consent or had its login refused; "
+                      "for a route a security notice paused it replies with that route's STATUS line instead (CRED-5)", t,
+                      f"SPEC.md:{n} CH-11 bare RESUME names PLAN ON for a notice-paused route")
 
     def check_step6(self, t, n):
         self.assertRegex(t, DEFAULTS_NEVER,
@@ -84,6 +87,9 @@ class Consent(unittest.TestCase):
         self.assertIn('"ChatGPT plan paused until you say yes; using your other routes meanwhile. '
                       'Reply PLAN ChatGPT ON to agree."', t,
                       f"SPEC.md:{n} ONB-9 lost the paused-until-yes line")
+        self.assertIn('A plan a security notice paused (CRED-5) offers no reply command; its line says only an update '
+                      'brings it back ("ChatGPT plan stopped by a security notice; only an update brings it back.")', t,
+                      f"SPEC.md:{n} ONB-9 offers PLAN ON for a notice-paused plan")
 
     def test_use_the_defaults_never_records_consent(self):
         n, t = step6()
@@ -112,12 +118,19 @@ class Consent(unittest.TestCase):
                 ("the low-tier code never stands in for it", "the low-tier code stands in for it"),
                 ("`PLAN <plan> ON` refuses it", "`PLAN <plan> ON` resumes it"),
             ]),
-            (ch11, self.check_ch11, [("reply PLAN ChatGPT ON", "reply RESUME")]),
+            (ch11, self.check_ch11, [
+                ("reply PLAN ChatGPT ON", "reply RESUME"),
+                ("replies with that route's STATUS line instead", "replies with that route's command too"),
+            ]),
             (step6, self.check_step6, [
                 ("which never records consent", "which also records consent"),
                 ("except ChatGPT until you agree below, ", ""),
             ]),
-            (onb9, self.check_onb9, [("paused until you say yes", "in use")]),
+            (onb9, self.check_onb9, [
+                ("paused until you say yes", "in use"),
+                ("offers no reply command; its line says only an update brings it back",
+                 "says reply PLAN ChatGPT ON"),
+            ]),
         ]
         for get, check, muts in cases:
             n, t = get()
