@@ -461,3 +461,15 @@ func TestBridgeSymlinkRefusalIsTheSameForEveryFile(t *testing.T) {
 		}
 	}
 }
+
+// #1462: the console line for a refused answer says what was refused and
+// that the tree held stays; "nothing changed" read as "the tree did not
+// change upstream".
+func TestBridgeNoVersionRefusalSaysTheTreeWasKept(t *testing.T) {
+	f := &fakeTree{ans: treeAnswer{Files: map[string][]byte{"skills/a.json": []byte("a")}}}
+	_, err := syncOnce(context.Background(), f.serve(t), t.TempDir(), "v0")
+	const want = "refused a managed_tree answer with no version; kept the current tree"
+	if err == nil || err.Error() != want {
+		t.Fatalf("sync error %v, want %q", err, want)
+	}
+}
