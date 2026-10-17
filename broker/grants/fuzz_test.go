@@ -19,7 +19,7 @@ type fuzzAnswer struct {
 	recipient string
 }
 
-// FuzzApprovals (FUZZ-5): over any sequence of effects, flushes, approvals,
+// FuzzApprovals (FUZZ-3): over any sequence of effects, flushes, approvals,
 // denials, record changes, clock moves, stops, resumes, dispatches and a
 // revoke, each intent runs at most once, and only after an approval and no
 // denial of it, while its record still names the recipient the approval

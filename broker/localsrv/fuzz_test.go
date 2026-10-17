@@ -20,7 +20,7 @@ type fuzzSession struct {
 	n     int
 }
 
-// FuzzSessions (FUZZ-4): over any sequence of sign-ins with the right or a
+// FuzzSessions (FUZZ-2): over any sequence of sign-ins with the right or a
 // wrong code, sign-outs, session checks, owner locks and clock moves, a
 // token is accepted exactly when it is one of the MaxSessions newest,
 // before its time and minted under the current lock count; a signed-out,

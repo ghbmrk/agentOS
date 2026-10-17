@@ -10,7 +10,7 @@ import (
 
 // REQ: CRED-8
 
-// FuzzSlots (FUZZ-6): over any sequence of host-slot adds and removals,
+// FuzzSlots (FUZZ-4): over any sequence of host-slot adds and removals,
 // rekeys with an enrolled or unenrolled factor, and reopenings, the vault
 // opens with a factor exactly when the model says it is enrolled, its
 // canary reads back, and a refused rekey leaves the keys file as it was.

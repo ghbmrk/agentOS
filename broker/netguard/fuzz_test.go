@@ -221,7 +221,7 @@ func FuzzSourcesRead(f *testing.F) {
 	})
 }
 
-// FuzzGatewayPolicy (FUZZ-2): over any sequence of router moves, quick
+// FuzzGatewayPolicy (FUZZ-1): over any sequence of router moves, quick
 // reads and full refreshes, while the policy's learned gateway is one whose
 // router's external address was filed, that address is denied.
 func FuzzGatewayPolicy(f *testing.F) {
@@ -392,7 +392,7 @@ func homeOrSpecial(f netip.Addr, raw Network) string {
 	return ""
 }
 
-// FuzzCheck (FUZZ-3): for any learned network, pins, destination, port,
+// FuzzCheck (extra, not in the brief): for any learned network, pins, destination, port,
 // protocol, purpose and name, an allow is sound (DNS only to the resolver
 // on port 53 over tcp or udp; a pin only for its purpose; anything else
 // only outside every special range, learned prefix and router address),
