@@ -37,3 +37,19 @@
   - generic [ref=e30]:
     - text: "[ref=e14]"
     - textbox "Note" [ref=e31]
+  - list [ref=e32]:
+    - listitem [ref=e33] [cursor=pointer]:
+      - link "Kettle" [ref=e34]:
+        - /url: /products/kettle
+      - button "Remove from wishlist" [ref=e35]
+  - table [ref=e36]:
+    - rowgroup [ref=e37]:
+      - row [ref=e38] [cursor=pointer]:
+        - cell [ref=e39]:
+          - link "Order 42" [ref=e40]:
+            - /url: /orders/42
+        - cell [ref=e41]:
+          - button "Cancel order" [ref=e42]
+  - link "Manage" [ref=e43] [cursor=pointer]:
+    - /url: /unsubscribe%zz?token=synthCanaryT6
+  - button "Unsubscribe\ud800" [ref=e44]: x

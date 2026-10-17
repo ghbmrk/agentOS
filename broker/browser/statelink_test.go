@@ -240,6 +240,13 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 		"e11": {Role: "generic", Name: "Unsubscribe"}, // a div with cursor:pointer
 		"e14": {Role: "button", Name: "Remove"},       // a dialog's action is not a dismissal
 		"e19": {Role: "checkbox", Name: "Unsubscribe from news"},
+		"e33": {Role: "listitem", Name: "Kettle Remove from wishlist"}, // a pointer card is judged by its text
+		"e35": {Role: "button", Name: "Remove from wishlist"},
+		"e38": {Role: "row", Name: "Order 42 Cancel order"},
+		"e39": {Role: "cell", Name: "Order 42 Cancel order"}, // no click role between it and the row
+		"e42": {Role: "button", Name: "Cancel order"},
+		"e43": {Role: "link", Name: "Manage", URL: "/unsubscribe%zz?token=synthCanaryT6"}, // an href Go cannot parse
+		"e44": {Role: "button", Name: `Unsubscribe\ud800 x`},                              // a name Go cannot unquote
 	} {
 		r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`)
 		if r.Error != "held" {
@@ -254,9 +261,10 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 		t.Fatalf("driver got %q", got)
 	}
 	// Dialog "Cancel" and "Not now", "Confirm password", "Explore movies",
-	// "Falcon firmware", "Encode letters", the containers, and the text box
-	// after a "[ref=e14]" text decoy.
-	pass := strings.Fields("e1 e2 e13 e15 e16 e17 e18 e20 e21 e22 e23 e24 e26 e27 e28 e29 e30 e31")
+	// "Falcon firmware", "Encode letters", the containers, the text box
+	// after a "[ref=e14]" text decoy, and the ordinary links inside a
+	// pointer card and row that also hold an action button.
+	pass := strings.Fields("e1 e2 e13 e15 e16 e17 e18 e20 e21 e22 e23 e24 e26 e27 e28 e29 e30 e31 e32 e34 e36 e37 e40")
 	for _, ref := range pass {
 		if r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`); !r.OK {
 			t.Fatalf("click %s: %+v", ref, r)
@@ -264,6 +272,23 @@ func TestClicksOnARealChromiumSnapshot(t *testing.T) {
 	}
 	if got := forwarded(t, h, "click"); len(got) != len(pass) {
 		t.Fatalf("driver got %q", got)
+	}
+
+	// body{cursor:pointer} (click delegation): only "Log out" and the body
+	// itself are held; the other link and the search box pass.
+	raw, err = os.ReadFile("testdata/pointer.snapshot.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h = newHarness(t, map[string]any{"snapshot": pageReply(strings.TrimSpace(string(raw)))}, "", 0)
+	if r := h.do(t, `{"v":0,"verb":"snapshot"}`); !r.OK {
+		t.Fatalf("snapshot %+v", r)
+	}
+	for ref, want := range map[string]string{"e1": "", "e2": "ok", "e3": "ok", "e4": ""} {
+		r := h.do(t, `{"v":0,"verb":"click","ref":"`+ref+`"}`)
+		if (want == "ok") != r.OK || (want == "" && r.Error != "held") {
+			t.Fatalf("body-pointer click %s: %+v", ref, r)
+		}
 	}
 }
 

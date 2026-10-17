@@ -194,6 +194,9 @@ func (l link) held(s stateLinks) bool {
 var clickRoles = wordSet(`link button menuitem menuitemcheckbox menuitemradio tab option checkbox
 	radio switch treeitem`)
 
+// fieldRoles are text fields: a click focuses them, so their name is not judged.
+var fieldRoles = wordSet(`textbox searchbox combobox spinbutton`)
+
 // dismissNames close a dialog without acting on it.
 var dismissNames = wordSet(`cancel close dismiss no notnow nothanks`)
 
@@ -234,10 +237,12 @@ func parseRefs(snapshot, page string) map[string]link {
 		if c := childRE.FindStringSubmatch(line); c != nil && strings.HasPrefix(strings.TrimSpace(c[1]), "- /") {
 			// A property line. Only a direct `/url:` child names a target.
 			if strings.TrimSpace(c[1]) == "- /url" && parent.url == "" {
-				if href, err := url.Parse(yamlValue(c[2])); err == nil && base != nil {
+				raw := yamlValue(c[2])
+				if href, err := url.Parse(raw); err == nil && base != nil {
 					parent.url = base.ResolveReference(href).String()
 				} else {
-					parent.url = page + "#unparsed"
+					// Kept raw: match holds a URL it cannot parse.
+					parent.url = raw
 				}
 			}
 			continue
@@ -248,6 +253,9 @@ func parseRefs(snapshot, page string) map[string]link {
 			n.role = role
 			if name, err := strconv.Unquote(quoted); err == nil {
 				n.text = append(n.text, name)
+			} else if quoted != "" {
+				// A name Go cannot unquote (a lone surrogate) counts as written.
+				n.text = append(n.text, strings.Trim(quoted, `"`))
 			}
 			rest := line[end:]
 			attrs := attrsRE.FindString(rest)
@@ -287,9 +295,16 @@ func parseRefs(snapshot, page string) map[string]link {
 		}
 		seen[n.ref] = true
 		l := link{role: n.role}
-		outer, dialog := n, false
+		// The name comes from the nearest click-role element, or an enclosing
+		// link (a click inside a link follows it); a pointer-cursor ancestor
+		// counts only with no click-role element in between, so a link in a
+		// clickable card or row is judged by its own text, not the card's.
+		outer, dialog, roled := n, false, false
 		for a := n; a != root; a = a.parent {
-			if clickRoles[a.role] || a.pointer {
+			switch {
+			case a.role == "link" || clickRoles[a.role] && !roled:
+				outer, l.clickable, roled = a, true, true
+			case a.pointer && !roled:
 				outer, l.clickable = a, true
 			}
 			if l.target == "" && a.role == "link" {
@@ -298,6 +313,8 @@ func parseRefs(snapshot, page string) map[string]link {
 			dialog = dialog || a.role == "dialog" || a.role == "alertdialog"
 		}
 		l.name = strings.Join(strings.Fields(strings.Join(sub[outer], " ")), " ")
+		// A form field is focused, not activated, by a click.
+		l.clickable = l.clickable && !fieldRoles[n.role]
 		l.dismiss = dialog && l.target == "" && dismissNames[strings.Join(words(l.name), "")]
 		refs[n.ref] = l
 	}

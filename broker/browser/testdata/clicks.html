@@ -1,5 +1,5 @@
 <!-- Click targets for statelink_test.go. Regenerate clicks.snapshot.txt
-     with: python3 -I testdata/snapshot.py testdata/clicks.html
+     with: python3 -I testdata/snapshot.py testdata/clicks.html (and pointer.html)
      Synthetic canaries only. -->
 <p>Your mail</p>
 <a id="icon-unsub" role="button" href="/unsubscribe?token=synthCanaryT5"><svg role="img" aria-label="mail icon"></svg> Unsubscribe</a>
@@ -18,3 +18,8 @@
 <ul><li><button id="kettle">Kettle</button></li></ul>
 <input id="search" type="search" aria-label="Search">
 <div><span>[ref=e14]</span> <input id="decoy" aria-label="Note"></div>
+<ul><li id="card" style="cursor:pointer" onclick="void 0"><a id="kettle-link" href="/products/kettle">Kettle</a> <button id="wish-remove">Remove from wishlist</button></li></ul>
+<table><tr id="row" style="cursor:pointer" onclick="void 0"><td><a id="order-link" href="/orders/42">Order 42</a></td><td><button id="order-cancel">Cancel order</button></td></tr></table>
+<a id="bad-href" href="/unsubscribe%zz?token=synthCanaryT6">Manage</a>
+<button id="surrogate">x</button>
+<script>document.getElementById("surrogate").setAttribute("aria-label", "Unsubscribe\ud800")</script>
