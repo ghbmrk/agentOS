@@ -91,7 +91,11 @@ type Gate struct {
 	typed map[string]typedField
 	// said is the text the agent put on pages, by type or in a URL it
 	// navigated to, kept on every page (G10, #2245).
-	said      []string
+	said []string
+	// lost is set once typed or said overflows maxTyped. From then on
+	// every snapshot with an omitted field is withheld: forgetting agent
+	// text would let its echo answer a guess (PR #2273 security delta).
+	lost      bool
 	holds     map[string]Hold
 	holdOrder []string
 }
@@ -243,15 +247,20 @@ func (g *Gate) Do(ctx context.Context, raw []byte) Result {
 
 type typedField struct{ text, url string }
 
-// maxTyped bounds what the gate remembers of the agent's typing.
-const maxTyped = 64
+// maxTyped bounds what the gate remembers of the agent's typing: typed
+// refs, and texts it put on pages.
+const maxTyped = 1024
 
 // say records text the agent put on pages, before the reply that can
 // echo it is filtered.
 func (g *Gate) say(texts ...string) {
 	for _, t := range texts {
+		if t == "" {
+			continue
+		}
 		if len(g.said) >= maxTyped {
-			g.said = nil
+			g.lost = true
+			return
 		}
 		g.said = append(g.said, t)
 	}
@@ -274,8 +283,12 @@ func urlWords(raw string) []string {
 }
 
 func (g *Gate) remember(req Request, url string) {
-	if g.typed == nil || len(g.typed) >= maxTyped {
+	if g.typed == nil {
 		g.typed = map[string]typedField{}
+	}
+	if _, ok := g.typed[req.Ref]; !ok && len(g.typed) >= maxTyped {
+		g.lost = true
+		return
 	}
 	g.typed[req.Ref] = typedField{text: req.Text, url: url}
 }
@@ -299,6 +312,9 @@ func (g *Gate) omit(snapshot, url string) (string, int) {
 	keep := map[string]bool{}
 	for ref := range typed {
 		keep[ref] = !refs[ref]
+	}
+	if g.lost && len(refs) > 0 {
+		return withheldMark, len(refs)
 	}
 	return omitValues(snapshot, refs, keep, g.said), len(refs)
 }

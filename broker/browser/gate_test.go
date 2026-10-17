@@ -813,3 +813,39 @@ func TestGateGuessEchoIsNoOracle(t *testing.T) {
 		}
 	}
 }
+
+// Security delta 6240743036: once the gate cannot remember more agent
+// text or typed refs, it withholds every page with an omitted field
+// rather than forgetting, so an echo of forgotten text answers no guess.
+func TestGateGuessEchoAfterOverflowIsNoOracle(t *testing.T) {
+	const search = "https://shop.example.test/search"
+	for _, route := range []string{"query values", "typed refs"} {
+		var seen []string
+		for _, guess := range []string{"wrongGuess1", pwCanary} {
+			snap := "- heading \"Results for " + guess + "\" [level=1]\n- textbox \"Code\" [ref=e5]: " + pwCanary
+			reply := map[string]any{"ok": true, "url": search, "snapshot": snap}
+			h := newHarness(t, map[string]any{"navigate": reply, "type": reply, "snapshot": reply}, "", 0)
+			h.g.refs["e3"] = link{}
+			if route == "query values" {
+				h.do(t, `{"v":0,"verb":"navigate","url":"`+search+`?q=`+guess+`"}`)
+				for range 2 {
+					h.do(t, `{"v":0,"verb":"navigate","url":"`+search+`?q=x`+strings.Repeat("&q=x", maxTyped/2-1)+`"}`)
+				}
+			} else {
+				h.g.typed = map[string]typedField{}
+				for i := range maxTyped {
+					h.g.typed[fmt.Sprintf("f%d", i)] = typedField{text: "x", url: search}
+				}
+				h.do(t, `{"v":0,"verb":"type","ref":"e3","text":"`+guess+`"}`)
+			}
+			r := h.do(t, `{"v":0,"verb":"snapshot"}`)
+			if r.Snapshot != withheldMark || r.PasswordFields != 1 {
+				t.Fatalf("%s, guess %q: got %+v", route, guess, r)
+			}
+			seen = append(seen, r.Snapshot)
+		}
+		if seen[0] != seen[1] {
+			t.Fatalf("%s: right and wrong guesses differ", route)
+		}
+	}
+}
