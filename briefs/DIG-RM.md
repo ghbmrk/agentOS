@@ -105,6 +105,7 @@ Rows to change on their work-item issues once this brief merges (the coordinator
 | DIG-1 (digest sender) | Close: contradicts D-097; its "no `Digest()` unwired" check lives on as DRA-1. |
 | W5-Dc-r2 (digest time, withdrawn) | Close: rests on the removed feature. Its items re-home: the send hour has no successor; quiet-hours and pacing items go to CH-15's push path (UX-INV covers counting them). |
 | W3-forget-b2c-f1-r4 (brief merged in #2233) | Mark chose "Skip it" on #974 (2026-10-17 19:44Z): no digest runs while learning is down. DIG-RM-b carries this by deleting the digest; DRB-1's tests run once with the learn dir unopenable. Build r4 on its own only if DIG-RM-b is not started first; otherwise close it as done by DIG-RM-b. |
+| W5-Dc-r3 (outage line when the digest can't be built) | Close: moot under D-097, which removes the digest (Decisions 6 withdrew its card). "Is the box alive?" is answered by CH-15's weekly "Still running." line, the release finding below. |
 | W5-Dc-r5 (source-side forget, built in SIM-erase) | Keep; its STATUS half is DRA-4. |
 | P3-6d "Change digest" | Re-word to a change's STATUS line. |
 | UX-41-2 "Health result in STATUS and the digest" | Re-word to STATUS only. |
