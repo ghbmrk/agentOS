@@ -287,3 +287,11 @@ Built for W5-Dc-r1b against CH-15 (QH-7 to QH-10). Covers `ownerPacer` and `reca
 | # | Assumption | Spec basis | If it changes |
 |---|---|---|---|
 | CV1 | **Every outbox reply answers one owner message.** `evidence.attach` sends outbox replies through `owner.Channel.Converse`, unheld and uncounted, because guest `POST /owner/reply` binds each to one pending owner message ID (first answer only, 404 unknown, 409 different hash). The owner's own texts therefore bound how many go. | CH-15, CH-19 | If the outbox ever carries agent text the owner did not ask for, that text must go through `Notify` (paced) instead. |
+
+## Long agent replies go as up to three texts (CH12-reply-split)
+
+| # | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| SP1 | **The modem keeps send order.** `sendSplit` sends a reply's texts one after another and stops at the first that does not go, so the owner never gets a later part without an earlier one; the phone's display order is the carrier's. | CH-12 | If sends become concurrent or queued out of order, number the parts. |
+| SP2 | **A cut is never a stub.** Each cut takes the strongest boundary (paragraph, line, sentence end, word) in the second half of the text, so an early line break does not cost a fourth text. | CH-12 | If the spec ranks boundaries strictly, drop the second-half window. |
+| SP3 | **No page pointer yet.** Past three texts the third ends with `keptLong`, not CH-12's local-UI pointer, because the local page shows kept replies only once CH-20p lands (UX U2). | CH-12, CH-19, CH-20 | When CH-20p ships, `keptLong` becomes the pointer to the kept reply. |
