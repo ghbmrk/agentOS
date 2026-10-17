@@ -456,6 +456,11 @@ func main() {
 	meminfo, _ := os.ReadFile("/proc/meminfo")
 	mem := planMemory(string(meminfo), runtime.NumCPU(), flagSet(flag.CommandLine, "capacity-mb"), cfg.Admission.CapacityMB, floor, agentMemMB)
 	cfg.Admission = mem.Budget.Admission()
+	// One opening serves setup's sign-in worker and the owner's plane:
+	// the first moves the broker below the delegate mark (#1701).
+	boxMachines := onceMachines(func() (*cgroup.Group, error) {
+		return openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
+	})
 	log.Printf("admission capacity: %d MB (%s); budget MB: host %d, inference %d, browser %d, headroom %d, machines %d",
 		mem.CapacityMB, mem.Why, mem.Budget.HostMB, mem.Budget.InferenceMB, mem.Budget.BrowserMB, mem.Budget.HeadroomMB, mem.Budget.PoolMB)
 	namedAgentImage := agentImage // the builder never runs it, agent or not
@@ -546,9 +551,7 @@ func main() {
 			signInHost, m.SignIn = newSetupPlane(setupMachines{
 				runsc: runsc, stateDir: stateDir, rc: modelroute.NewRouteControl(workerRoutes), diskQuota: diskQuota,
 				images: imgs, admit: cfg.Admission,
-				cgroups: func() (*cgroup.Group, error) {
-					return openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
-				},
+				cgroups:       boxMachines,
 				diskReserveMB: diskReserveMB, machineDiskMB: machineDiskMB, workerLayerMB: workerLayerMB,
 			}, pins)
 		}
@@ -589,7 +592,7 @@ func main() {
 	psiPath := "/proc/pressure/memory"
 	agentOff := mem.AgentOff
 	if runsc != "" {
-		g, err := openMachines(liveCgroups, cgroupRoot, cgroupVouched, mem.Budget)
+		g, err := boxMachines()
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
 			runsc = ""
