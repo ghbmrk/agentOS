@@ -8,10 +8,12 @@ Board section: Harness and operating model.
 
 **Scope:** `.github/workflows/ci.yml` (that one step) and `tests/test_ci_split.py`. No change to `broker/journal/**`. Open #2234 touches `tests/test_workflows.py` and `records.yml`, not these files.
 
+**Acceptance tests:** `test_the_op2_model_step_caps_its_parallel_subtests` and `test_the_broker_checks_keep_their_steps` (both in `tests/test_ci_split.py`).
+
 **Acceptance:** a new `test_ci_split.py` test fails first (the step has no `-parallel 2`), then passes once the step carries `-parallel 2`; the other tests in `tests/test_ci_split.py` pass. The step's `-run` pattern, `-timeout 20m` and `./journal` stay as they are. Reproducing the exit-143 kill needs the runner; the PR's own CI run of the step is the evidence, with the step's duration noted against the 20m timeout.
 
-**Tier / gate:** C by path, but `.github/` makes `tools/premerge.py --needs-mark` print `mark` (D-125): reviews first, then a Merge card for Mark.
+**Tier / gate:** A by `tools/risk_tier.py` (`.github/` is a tier-A path); `.github/` also makes `tools/premerge.py --needs-mark` print `mark` (D-125): reviews first, then a Merge card for Mark.
 
 ## Delivery
 
-Builder model: Sonnet 5.5 (tier C pilot). Estimate/checkpoint: 6k tokens, not a ceiling (OPERATING §5). Run `python3 tools/risk_tier.py --git origin/main HEAD` before opening the PR.
+Builder model: Sonnet 5.5 for the first head; tier A, so the strongest model took over (OPERATING §5). Estimate/checkpoint: 6k tokens, not a ceiling (OPERATING §5). Run `python3 tools/risk_tier.py --git origin/main HEAD` before opening the PR.
